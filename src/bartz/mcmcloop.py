@@ -30,7 +30,6 @@ The entry points are `run_mcmc` and `make_default_callback`.
 from collections.abc import Callable
 from dataclasses import fields
 from functools import partial, wraps
-from types import EllipsisType
 from typing import Any, Protocol
 
 import jax
@@ -435,35 +434,43 @@ def _save_state_to_trace(
 
     # prepare array index
     num_chains = get_num_chains(bart)
-    if num_chains is None:
-        make_index = lambda i: (i, ...)
-    else:
-        make_index = lambda i: (slice(None), i, ...)
-
-    burnin_trace = _pytree_at_set(
-        burnin_trace, make_index(burnin_idx), burnin_extractor(bart)
-    )
-    main_trace = _pytree_at_set(main_trace, make_index(main_idx), main_extractor(bart))
+    burnin_trace = _set(burnin_trace, burnin_idx, burnin_extractor(bart), num_chains)
+    main_trace = _set(main_trace, main_idx, main_extractor(bart), num_chains)
 
     return burnin_trace, main_trace
 
 
-def _pytree_at_set(
-    dest: PyTree[Array, ' T'],
-    index: tuple[Int32[Array, ''] | slice | EllipsisType, ...],
+def _set(
+    trace: PyTree[Array, ' T'],
+    index: Int32[Array, ''],
     val: PyTree[Array, ' T'],
+    num_chains: int | None,
 ) -> PyTree[Array, ' T']:
-    """Map ``dest.at[index].set(val)`` over pytrees."""
+    """Do ``trace[index] = val`` but fancier."""
+    chain_axis = chain_vmap_axes(val)
 
-    def at_set(dest, val):
-        if dest.size:
-            return dest.at[index].set(val, mode='drop')
-        else:
+    def at_set(
+        trace: Shaped[Array, 'chains samples *shape']
+        | Shaped[Array, ' samples *shape']
+        | None,
+        val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'] | None,
+        chain_axis: int | None,
+    ):
+        if trace is None or trace.size == 0:
             # this handles the case where an array is empty because jax refuses
-            # to index into an axis of length 0, even if just in the abstract
-            return dest
+            # to index into an axis of length 0, even if just in the abstract,
+            # and optional elements that are considered leaves due to `is_leaf`
+            # below needed to traverse `chain_axis`.
+            return trace
 
-    return tree.map(at_set, dest, val)
+        if num_chains is None or chain_axis is None:
+            ndindex = (index, ...)
+        else:
+            ndindex = (slice(None), index, ...)
+
+        return trace.at[ndindex].set(val, mode='drop')
+
+    return tree.map(at_set, trace, val, chain_axis, is_leaf=lambda x: x is None)
 
 
 def make_default_callback(

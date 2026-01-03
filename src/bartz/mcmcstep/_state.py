@@ -54,7 +54,7 @@ def field(*, chains: bool = False, **kwargs):
     return eqx_field(metadata=metadata, **kwargs)
 
 
-def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
+def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     """Determine vmapping axes for chains.
 
     This function determines the argument to the `in_axes` or `out_axes`
@@ -69,7 +69,7 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']
 
     Returns
     -------
-    A pytree prefix of `x` with 0 or None in the leaves.
+    A pytree with the same structure as `x` with 0 or None in the leaves.
     """
     if isinstance(x, Module):
         args = []
@@ -78,7 +78,8 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']
             if f.metadata.get('static', False):
                 args.append(v)
             elif f.metadata.get('chains', False):
-                args.append(0)
+                axes = tree.map(lambda _: 0, v)
+                args.append(axes)
             else:
                 args.append(chain_vmap_axes(v))
         return x.__class__(*args)
@@ -90,7 +91,7 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']
         if isinstance(x, Module):
             return chain_vmap_axes(x)
         else:
-            return None
+            return tree.map(lambda _: None, x)
 
     return tree.map(get_axes, x, is_leaf=is_leaf)
 

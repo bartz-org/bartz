@@ -208,7 +208,7 @@ class PreLk(Module):
         The factor to multiply the likelihood ratio by, shared by all trees.
     """
 
-    exp_factor: Float32[Array, '']
+    exp_factor: Float32[Array, '*chains'] = field(chains=True)
 
 
 class PreLf(Module):

@@ -39,6 +39,7 @@ from pytest import FixtureRequest  # noqa: PT013
 from bartz.jaxext import split
 from bartz.mcmcloop import run_mcmc
 from bartz.mcmcstep import State, init
+from bartz.mcmcstep._state import chain_vmap_axes
 
 
 def gen_data(
@@ -103,10 +104,21 @@ class TestRunMcmc:
                 keys.pop(), initial_state, 10, inner_loop_length=9
             )
 
-        assert_array_equal(final_state.forest.leaf_tree, main_trace.leaf_tree[-1])
-        assert_array_equal(final_state.forest.var_tree, main_trace.var_tree[-1])
-        assert_array_equal(final_state.forest.split_tree, main_trace.split_tree[-1])
-        assert_array_equal(final_state.error_cov_inv, main_trace.error_cov_inv[-1])
+        if initial_state.forest.num_chains() is None:
+            last_index = -1
+        else:
+            last_index = (slice(None), -1)
+
+        assert_array_equal(
+            final_state.forest.leaf_tree, main_trace.leaf_tree[last_index]
+        )
+        assert_array_equal(final_state.forest.var_tree, main_trace.var_tree[last_index])
+        assert_array_equal(
+            final_state.forest.split_tree, main_trace.split_tree[last_index]
+        )
+        assert_array_equal(
+            final_state.error_cov_inv, main_trace.error_cov_inv[last_index]
+        )
 
     def test_zero_iterations(self, keys: split, initial_state: State):
         """Check 0 iterations produces a noop."""
@@ -117,8 +129,21 @@ class TestRunMcmc:
 
         tree_map(partial(assert_array_equal, strict=True), initial_state, final_state)
 
-        def assert_empty_trace(_path, x):
-            assert x.shape[0] == 0
+        def assert_empty_trace(_path, x, chain_axis):
+            if initial_state.forest.num_chains() is None or chain_axis is None:
+                sample_axis = 0
+            else:
+                sample_axis = 1
+            if x is not None:
+                assert x.shape[sample_axis] == 0
 
-        map_with_path(assert_empty_trace, burnin_trace)
-        map_with_path(assert_empty_trace, main_trace)
+        def check_trace(trace):
+            map_with_path(
+                assert_empty_trace,
+                trace,
+                chain_vmap_axes(trace),
+                is_leaf=lambda x: x is None,
+            )
+
+        check_trace(burnin_trace)
+        check_trace(main_trace)

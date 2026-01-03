@@ -1,6 +1,6 @@
 # bartz/src/bartz/mcmcloop.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -677,7 +677,7 @@ def evaluate_trace(
     def loop(_, item):
         offset, trees = item
         values = evaluate_trees(X, trees)
-        return None, offset + jnp.sum(values, axis=0, dtype=jnp.float32)
+        return None, offset[..., None] + jnp.sum(values, axis=0, dtype=jnp.float32)
 
     _, y = lax.scan(loop, None, (trace.offset, trees))
     return y

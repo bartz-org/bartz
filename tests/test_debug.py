@@ -35,32 +35,7 @@ from scipy.stats import ks_1samp
 
 from bartz.debug import check_trace, format_tree, sample_prior
 from bartz.jaxext import minimal_unsigned_dtype
-from bartz.mcmcloop import TreesTrace
-
-
-def manual_tree(
-    leaf: list[list[float]], var: list[list[int]], split: list[list[int]]
-) -> TreesTrace:
-    """Facilitate the hardcoded definition of tree heaps."""
-    assert len(leaf) == len(var) + 1 == len(split) + 1
-
-    def check_powers_of_2(seq: list[list]):
-        """Check if the lengths of the lists in `seq` are powers of 2."""
-        return all(len(x) == 2**i for i, x in enumerate(seq))
-
-    check_powers_of_2(leaf)
-    check_powers_of_2(var)
-    check_powers_of_2(split)
-
-    tree = TreesTrace(
-        jnp.concatenate([jnp.zeros(1), *map(jnp.array, leaf)]),
-        jnp.concatenate([jnp.zeros(1, int), *map(jnp.array, var)]),
-        jnp.concatenate([jnp.zeros(1, int), *map(jnp.array, split)]),
-    )
-    assert tree.leaf_tree.dtype == jnp.float32
-    assert tree.var_tree.dtype == jnp.int32
-    assert tree.split_tree.dtype == jnp.int32
-    return tree
+from tests.util import manual_tree
 
 
 def test_format_tree():

@@ -69,7 +69,9 @@ class TreeHeaps(Protocol):
     split_tree: UInt[Array, '* 2**(d-1)']
 
 
-def make_tree(depth: int, dtype: DTypeLike) -> Shaped[Array, ' 2**{depth}']:
+def make_tree(
+    depth: int, dtype: DTypeLike, batch_shape: tuple[int, ...] = ()
+) -> Shaped[Array, '*batch_shape 2**{depth}']:
     """
     Make an array to represent a binary tree.
 
@@ -80,15 +82,19 @@ def make_tree(depth: int, dtype: DTypeLike) -> Shaped[Array, ' 2**{depth}']:
         node.
     dtype
         The dtype of the array.
+    batch_shape
+        The leading shape of the array, to represent multiple trees and/or
+        multivariate trees.
 
     Returns
     -------
     An array of zeroes with the appropriate shape.
     """
-    return jnp.zeros(2**depth, dtype)
+    shape = (*batch_shape, 2**depth)
+    return jnp.zeros(shape, dtype)
 
 
-def tree_depth(tree: Shaped[Array, '* 2**d']) -> int:
+def tree_depth(tree: Shaped[Array, '*batch_shape 2**d']) -> int:
     """
     Return the maximum depth of a tree.
 

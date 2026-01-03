@@ -24,12 +24,62 @@
 
 """Functions intended to be shared across the test suite."""
 
+from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import tomli
+from jax import numpy as jnp
 from jaxtyping import ArrayLike
 from scipy import linalg
+
+from bartz.debug import check_tree, describe_error
+from bartz.jaxext import minimal_unsigned_dtype
+from bartz.mcmcloop import TreesTrace
+
+
+def manual_tree(
+    leaf: list[list[float]],
+    var: list[list[int]],
+    split: list[list[int]],
+    /,
+    *,
+    ignore_errors: Sequence[str] = (),
+) -> TreesTrace:
+    """Facilitate the hardcoded definition of tree heaps."""
+    assert len(leaf) == len(var) + 1 == len(split) + 1
+
+    def check_powers_of_2(seq: list[list]):
+        """Check if the lengths of the lists in `seq` are powers of 2."""
+        return all(len(x) == 2**i for i, x in enumerate(seq))
+
+    check_powers_of_2(leaf)
+    check_powers_of_2(var)
+    check_powers_of_2(split)
+
+    tree = TreesTrace(
+        jnp.concatenate([jnp.zeros(1), *map(jnp.array, leaf)]),
+        jnp.concatenate([jnp.zeros(1, int), *map(jnp.array, var)]),
+        jnp.concatenate([jnp.zeros(1, int), *map(jnp.array, split)]),
+    )
+
+    p = jnp.max(tree.var_tree) + 1
+    var_type = minimal_unsigned_dtype(p - 1)
+    split_type = minimal_unsigned_dtype(jnp.max(tree.split_tree))
+    max_split = jnp.full(p, jnp.max(tree.split_tree), split_type)
+    tree = replace(
+        tree,
+        var_tree=tree.var_tree.astype(var_type),
+        split_tree=tree.split_tree.astype(split_type),
+    )
+
+    error = check_tree(tree, max_split)
+    descr = describe_error(error)
+    bad = any(d not in ignore_errors for d in descr)
+    assert not bad, descr
+
+    return tree
 
 
 def assert_close_matrices(

@@ -1,6 +1,6 @@
 # bartz/src/bartz/mcmcstep/_state.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -25,38 +25,74 @@
 """Module defining the BART MCMC state and initialization."""
 
 import math
-from enum import Enum
-from functools import cache, partial
-from typing import Any, Literal
+from collections.abc import Callable
+from dataclasses import fields
+from functools import partial
+from typing import Any, Literal, TypeVar
 
-import jax
-from equinox import Module, field
-from jax import lax
+from equinox import Module
+from equinox import field as eqx_field
+from jax import eval_shape, random, tree, vmap
 from jax import numpy as jnp
+from jax.errors import ConcretizationTypeError
 from jax.scipy.linalg import solve_triangular
-from jaxtyping import Array, Bool, Float32, Int32, Integer, UInt
+from jax.tree import flatten
+from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree, Shaped, UInt
 
-from bartz import grove
-from bartz.jaxext import get_default_device, minimal_unsigned_dtype
+from bartz.grove import make_tree, tree_depths
+from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 
-class Kind(str, Enum):
-    """
-    Indicator of regression type.
+def field(*, chains: bool = False, **kwargs):
+    """Extend `equinox.field` to add `chains` to mark multichain attributes."""
+    metadata = dict(kwargs.pop('metadata', {}))
+    if 'chains' in metadata:
+        msg = 'Cannot use metadata with `chains` already set.'
+        raise ValueError(msg)
+    if chains:
+        metadata['chains'] = True
+    return eqx_field(metadata=metadata, **kwargs)
 
-    Attributes
+
+def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
+    """Determine vmapping axes for chains.
+
+    This function determines the argument to the `in_axes` or `out_axes`
+    parameter of `jax.vmap` to vmap over all and only the chain axes found in the
+    pytree `x`.
+
+    Parameters
     ----------
-    binary
-        Binary regression with probit link.
-    uv
-        Univariate continuous regression.
-    mv
-        Multivariate continuous regression.
-    """
+    x
+        A pytree. Subpytrees that are Module attributes marked with
+        ``field(..., chains=True)`` are considered to have a leading chain axis.
 
-    binary = 'binary'
-    uv = 'uv'
-    mv = 'mv'
+    Returns
+    -------
+    A pytree prefix of `x` with 0 or None in the leaves.
+    """
+    if isinstance(x, Module):
+        args = []
+        for f in fields(x):
+            v = getattr(x, f.name)
+            if f.metadata.get('static', False):
+                args.append(v)
+            elif f.metadata.get('chains', False):
+                args.append(0)
+            else:
+                args.append(chain_vmap_axes(v))
+        return x.__class__(*args)
+
+    def is_leaf(x) -> bool:
+        return isinstance(x, Module)
+
+    def get_axes(x: Module | Any) -> PyTree[int | None]:
+        if isinstance(x, Module):
+            return chain_vmap_axes(x)
+        else:
+            return None
+
+    return tree.map(get_axes, x, is_leaf=is_leaf)
 
 
 class Forest(Module):
@@ -91,10 +127,6 @@ class Forest(Module):
         The minimum number of data points in a decision node.
     min_points_per_leaf
         The minimum number of data points in a leaf node.
-    resid_batch_size
-    count_batch_size
-        The data batch sizes for computing the sufficient statistics. If `None`,
-        they are computed with no batching.
     log_trans_prior
         The log transition and prior Metropolis-Hastings ratio for the
         proposed move on each tree.
@@ -125,31 +157,54 @@ class Forest(Module):
         See `step_theta`.
     """
 
-    leaf_tree: Float32[Array, 'num_trees 2**d'] | Float32[Array, 'num_trees k 2**d']
-    var_tree: UInt[Array, 'num_trees 2**(d-1)']
-    split_tree: UInt[Array, 'num_trees 2**(d-1)']
-    affluence_tree: Bool[Array, 'num_trees 2**(d-1)']
+    leaf_tree: (
+        Float32[Array, '*chains num_trees 2**d']
+        | Float32[Array, '*chains num_trees k 2**d']
+    ) = field(chains=True)
+    var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    split_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
     max_split: UInt[Array, ' p']
     blocked_vars: UInt[Array, ' k'] | None
     p_nonterminal: Float32[Array, ' 2**d']
     p_propose_grow: Float32[Array, ' 2**(d-1)']
-    leaf_indices: UInt[Array, 'num_trees n']
+    leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=True)
     min_points_per_decision_node: Int32[Array, ''] | None
     min_points_per_leaf: Int32[Array, ''] | None
-    resid_batch_size: int | None = field(static=True)
-    count_batch_size: int | None = field(static=True)
-    log_trans_prior: Float32[Array, ' num_trees'] | None
-    log_likelihood: Float32[Array, ' num_trees'] | None
-    grow_prop_count: Int32[Array, '']
-    prune_prop_count: Int32[Array, '']
-    grow_acc_count: Int32[Array, '']
-    prune_acc_count: Int32[Array, '']
+    log_trans_prior: Float32[Array, '*chains num_trees'] | None = field(chains=True)
+    log_likelihood: Float32[Array, '*chains num_trees'] | None = field(chains=True)
+    grow_prop_count: Int32[Array, '*chains'] = field(chains=True)
+    prune_prop_count: Int32[Array, '*chains'] = field(chains=True)
+    grow_acc_count: Int32[Array, '*chains'] = field(chains=True)
+    prune_acc_count: Int32[Array, '*chains'] = field(chains=True)
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'] | None
-    log_s: Float32[Array, ' p'] | None
-    theta: Float32[Array, ''] | None
+    log_s: Float32[Array, '*chains p'] | None = field(chains=True)
+    theta: Float32[Array, '*chains'] | None = field(chains=True)
     a: Float32[Array, ''] | None
     b: Float32[Array, ''] | None
     rho: Float32[Array, ''] | None
+
+    def num_chains(self) -> int | None:
+        """Return the number of chains, or `None` if not multichain."""
+        if self.var_tree.ndim == 2:
+            return None
+        else:
+            return self.var_tree.shape[0]
+
+
+class StepConfig(Module):
+    """Options for the MCMC step.
+
+    Parameters
+    ----------
+    resid_batch_size
+    count_batch_size
+        The data batch sizes for computing the sufficient statistics. If `None`,
+        they are computed with no batching.
+    """
+
+    resid_batch_size: int | None = field(static=True)
+    count_batch_size: int | None = field(static=True)
 
 
 class State(Module):
@@ -181,49 +236,49 @@ class State(Module):
         covariance. For the univariate case, the relationship to the inverse
         gamma prior parameters is ``alpha = df / 2``, ``beta = scale / 2``.
         `None` in binary regression.
-    kind
-        Inidicator of regression type.
     forest
         The sum of trees model.
     """
 
     X: UInt[Array, 'p n']
     y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n']
-    z: None | Float32[Array, ' n']
+    z: None | Float32[Array, '*chains n'] = field(chains=True)
     offset: Float32[Array, ''] | Float32[Array, ' k']
-    resid: Float32[Array, ' n'] | Float32[Array, ' k n']
-    error_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'] | None
+    resid: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
+        chains=True
+    )
+    error_cov_inv: Float32[Array, '*chains'] | Float32[Array, '*chains k k'] | None = (
+        field(chains=True)
+    )
     prec_scale: Float32[Array, ' n'] | None
     error_cov_df: Float32[Array, ''] | None
     error_cov_scale: Float32[Array, ''] | Float32[Array, 'k k'] | None
-    kind: Kind = field(static=True)
     forest: Forest
+    config: StepConfig
 
 
-def _init_kind_parameters(
-    kind: Kind | str | None,
-    y: Float32[Any, ' n'] | Float32[Any, 'k n'] | Bool[Any, ' n'],
+def _init_shape_shifting_parameters(
+    y: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
     error_scale: Float32[Any, ' n'] | None,
     error_cov_df: float | Float32[Any, ''] | None,
     error_cov_scale: float | Float32[Any, ''] | Float32[Any, 'k k'] | None,
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
 ) -> tuple[
-    Kind | str,
-    None | int,
+    bool,
+    tuple[()] | tuple[int],
     None | Float32[Array, ''],
     None | Float32[Array, ''],
     None | Float32[Array, ''],
 ]:
     """
-    Determine 'kind' and initialize/validate kind-specific params.
+    Check and initialize parameters that change array type/shape based on outcome kind.
 
     Parameters
     ----------
-    kind
-        The regression kind, or None to infer from `y`.
     y
-        The response variable.
+        The response variable; the outcome type is deduced from `y` and then
+        all other parameters are checked against it.
     offset
         The offset to add to the predictions.
     error_scale
@@ -237,10 +292,10 @@ def _init_kind_parameters(
 
     Returns
     -------
-    kind
-        The regression kind.
-    k
-        The number of output dimensions (None for uv).
+    is_binary
+        Whether the outcome is binary.
+    kshape
+        The outcome shape, empty for univariate, (k,) for multivariate.
     error_cov_inv
         The initialized error covariance inverse.
     error_cov_df
@@ -251,66 +306,47 @@ def _init_kind_parameters(
     Raises
     ------
     ValueError
-        If `kind` is 'binary' and `y` is multivariate.
+        If `y` is binary and multivariate.
     """
-    is_binary_y = y.dtype == bool
-    k = None if y.ndim == 1 else y.shape[0]
-
-    # Infer kind if not specified
-    if kind is None:
-        if is_binary_y:
-            kind = 'binary'
-        elif k is None:
-            kind = 'uv'
-        else:
-            kind = 'mv'
-
-    assert kind in ('binary', 'uv', 'mv')
+    # determine outcome kind, binary/continuous x univariate/multivariate
+    is_binary = y.dtype == bool
+    kshape = y.shape[:-1]
 
     # Binary vs continuous
-    if kind == 'binary':
-        if k is not None:
+    if is_binary:
+        if kshape:
             msg = 'Binary multivariate regression not supported, open an issue at https://github.com/bartz-org/bartz/issues if you need it.'
             raise ValueError(msg)
-        assert is_binary_y
         assert error_scale is None
         assert error_cov_df is None
         assert error_cov_scale is None
         error_cov_inv = None
     else:
-        assert not is_binary_y
         error_cov_df = jnp.asarray(error_cov_df)
         error_cov_scale = jnp.asarray(error_cov_scale)
+        assert error_cov_scale.shape == 2 * kshape
 
-    # Multivariate vs univariate
-    if kind == 'mv':
-        assert y.ndim == 2
-        assert y.shape[0] == k
-        assert leaf_prior_cov_inv.shape == (k, k)
-        assert offset.shape == (k,)
-        if kind != 'binary':
-            assert error_cov_scale.shape == (k, k)
+        # Multivariate vs univariate
+        if kshape:
             error_cov_inv = error_cov_df * _inv_via_chol_with_gersh(error_cov_scale)
-    else:
-        assert y.ndim == 1
-        assert leaf_prior_cov_inv.ndim == 0
-        assert offset.ndim == 0
-        if kind != 'binary':
-            assert error_cov_scale.ndim == 0
+        else:
             # inverse gamma prior: alpha = df / 2, beta = scale / 2
             error_cov_inv = error_cov_df / error_cov_scale
 
-    return kind, k, error_cov_inv, error_cov_df, error_cov_scale
+    assert leaf_prior_cov_inv.shape == 2 * kshape
+    assert offset.shape == kshape
+
+    return is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale
 
 
 def init(
     *,
     X: UInt[Any, 'p n'],
-    y: Float32[Any, ' n'] | Float32[Array, ' k n'] | Bool[Any, ' n'],
+    y: Float32[Any, ' n'] | Float32[Any, ' k n'] | Bool[Any, ' n'],
     offset: float | Float32[Any, ''] | Float32[Any, ' k'],
     max_split: UInt[Any, ' p'],
     num_trees: int,
-    p_nonterminal: Float32[Any, ' d-1'],
+    p_nonterminal: Float32[Any, ' d_minus_1'],
     leaf_prior_cov_inv: float | Float32[Any, ''] | Float32[Array, 'k k'],
     error_cov_df: float | Float32[Any, ''] | None = None,
     error_cov_scale: float | Float32[Any, ''] | Float32[Array, 'k k'] | None = None,
@@ -326,7 +362,7 @@ def init(
     a: float | Float32[Any, ''] | None = None,
     b: float | Float32[Any, ''] | None = None,
     rho: float | Float32[Any, ''] | None = None,
-    kind: Kind | str | None = None,
+    num_chains: int | None = None,
 ) -> State:
     """
     Make a BART posterior sampling MCMC initial state.
@@ -403,8 +439,9 @@ def init(
     b
     rho
         Parameters of the prior on `theta`. Required only to sample `theta`.
-    kind
-        Inidicator of regression type. If not specified, it's inferred from `y`.
+    num_chains
+        The number of independent MCMC chains to represent in the state. Single
+        chain with scalar values if not specified.
 
     Returns
     -------
@@ -426,28 +463,22 @@ def init(
     p_nonterminal = jnp.pad(p_nonterminal, (0, 1))
     max_depth = p_nonterminal.size
 
-    @partial(jax.vmap, in_axes=None, out_axes=0, axis_size=num_trees)
-    def make_forest(max_depth, dtype):
-        return grove.make_tree(max_depth, dtype)
-
     y = jnp.asarray(y)
     offset = jnp.asarray(offset)
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
 
-    resid_batch_size, count_batch_size = _choose_suffstat_batch_size(
-        resid_batch_size, count_batch_size, y, 2**max_depth * num_trees
+    is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale = (
+        _init_shape_shifting_parameters(
+            y, offset, error_scale, error_cov_df, error_cov_scale, leaf_prior_cov_inv
+        )
     )
-
-    kind, k, error_cov_inv, error_cov_df, error_cov_scale = _init_kind_parameters(
-        kind, y, offset, error_scale, error_cov_df, error_cov_scale, leaf_prior_cov_inv
-    )
-    is_binary = kind == 'binary'
 
     max_split = jnp.asarray(max_split)
+    p, n = X.shape
 
     if filter_splitless_vars:
         (blocked_vars,) = jnp.nonzero(max_split == 0)
-        blocked_vars = blocked_vars.astype(minimal_unsigned_dtype(max_split.size))
+        blocked_vars = blocked_vars.astype(minimal_unsigned_dtype(p))
         # see `fully_used_variables` for the type cast
     else:
         blocked_vars = None
@@ -461,62 +492,79 @@ def init(
     if log_s is None and theta is not None:
         log_s = jnp.zeros(max_split.size)
 
-    if kind == 'mv':
-        leaf_tree = jax.vmap(
-            make_forest, in_axes=(None, None), out_axes=1, axis_size=k
-        )(max_depth, jnp.float32)
-    else:
-        leaf_tree = make_forest(max_depth, jnp.float32)
+    chain_shape = () if num_chains is None else (num_chains,)
+    resid_shape = chain_shape + y.shape
+    tree_shape = (*chain_shape, num_trees)
+
+    def add_chains(
+        x: Shaped[Array, '*shape'] | None,
+    ) -> Shaped[Array, '*shape'] | Shaped[Array, ' num_chains *shape'] | None:
+        if x is None:
+            return None
+        else:
+            return jnp.broadcast_to(x, chain_shape + x.shape)
+
+    resid_batch_size, count_batch_size = _choose_suffstat_batch_size(
+        resid_batch_size, count_batch_size, y, max_depth, num_trees, num_chains
+    )
 
     return State(
         X=jnp.asarray(X),
         y=y,
-        z=jnp.full(y.shape, offset) if is_binary else None,
+        z=jnp.full(resid_shape, offset) if is_binary else None,
         offset=offset,
-        resid=jnp.zeros(y.shape) if is_binary else y - offset[..., None],
-        error_cov_inv=error_cov_inv,
+        resid=jnp.zeros(resid_shape)
+        if is_binary
+        else jnp.broadcast_to(y - offset[..., None], resid_shape),
+        error_cov_inv=add_chains(error_cov_inv),
         prec_scale=(
-            None if error_scale is None else lax.reciprocal(jnp.square(error_scale))
+            None if error_scale is None else jnp.reciprocal(jnp.square(error_scale))
         ),
         error_cov_df=error_cov_df,
         error_cov_scale=error_cov_scale,
-        kind=kind,
         forest=Forest(
-            leaf_tree=leaf_tree,
-            var_tree=make_forest(max_depth - 1, minimal_unsigned_dtype(X.shape[0] - 1)),
-            split_tree=make_forest(max_depth - 1, max_split.dtype),
+            leaf_tree=make_tree(max_depth, jnp.float32, tree_shape + kshape),
+            var_tree=make_tree(
+                max_depth - 1, minimal_unsigned_dtype(p - 1), tree_shape
+            ),
+            split_tree=make_tree(max_depth - 1, max_split.dtype, tree_shape),
             affluence_tree=(
-                make_forest(max_depth - 1, bool)
-                .at[:, 1]
+                make_tree(max_depth - 1, bool, tree_shape)
+                .at[..., 1]
                 .set(
                     True
                     if min_points_per_decision_node is None
-                    else y.size >= min_points_per_decision_node
+                    else n >= min_points_per_decision_node
                 )
             ),
             blocked_vars=blocked_vars,
             max_split=max_split,
-            grow_prop_count=jnp.zeros((), int),
-            grow_acc_count=jnp.zeros((), int),
-            prune_prop_count=jnp.zeros((), int),
-            prune_acc_count=jnp.zeros((), int),
-            p_nonterminal=p_nonterminal[grove.tree_depths(2**max_depth)],
-            p_propose_grow=p_nonterminal[grove.tree_depths(2 ** (max_depth - 1))],
+            grow_prop_count=jnp.zeros(chain_shape, int),
+            grow_acc_count=jnp.zeros(chain_shape, int),
+            prune_prop_count=jnp.zeros(chain_shape, int),
+            prune_acc_count=jnp.zeros(chain_shape, int),
+            p_nonterminal=p_nonterminal[tree_depths(2**max_depth)],
+            p_propose_grow=p_nonterminal[tree_depths(2 ** (max_depth - 1))],
             leaf_indices=jnp.ones(
-                (num_trees, y.shape[-1]), minimal_unsigned_dtype(2**max_depth - 1)
+                (*tree_shape, n), minimal_unsigned_dtype(2**max_depth - 1)
             ),
             min_points_per_decision_node=_asarray_or_none(min_points_per_decision_node),
             min_points_per_leaf=_asarray_or_none(min_points_per_leaf),
-            resid_batch_size=resid_batch_size,
-            count_batch_size=count_batch_size,
-            log_trans_prior=jnp.zeros(num_trees) if save_ratios else None,
-            log_likelihood=jnp.zeros(num_trees) if save_ratios else None,
+            log_trans_prior=jnp.zeros((*chain_shape, num_trees))
+            if save_ratios
+            else None,
+            log_likelihood=jnp.zeros((*chain_shape, num_trees))
+            if save_ratios
+            else None,
             leaf_prior_cov_inv=leaf_prior_cov_inv,
-            log_s=_asarray_or_none(log_s),
-            theta=_asarray_or_none(theta),
+            log_s=add_chains(_asarray_or_none(log_s)),
+            theta=add_chains(_asarray_or_none(theta)),
             rho=_asarray_or_none(rho),
             a=_asarray_or_none(a),
             b=_asarray_or_none(b),
+        ),
+        config=StepConfig(
+            resid_batch_size=resid_batch_size, count_batch_size=count_batch_size
         ),
     )
 
@@ -536,7 +584,7 @@ def _get_platform(x: Array):
     """Get the platform of the device where `x` is located, or the default device if that's not possible."""
     try:
         device = x.devices().pop()
-    except jax.errors.ConcretizationTypeError:
+    except ConcretizationTypeError:
         device = get_default_device()
     platform = device.platform
     if platform not in ('cpu', 'gpu'):
@@ -548,9 +596,12 @@ def _get_platform(x: Array):
 def _choose_suffstat_batch_size(
     resid_batch_size: int | None | Literal['auto'],
     count_batch_size: int | None | Literal['auto'],
-    y: Float32[Array, 'k n'] | Float32[Array, ' n'],
-    forest_size: int,
+    y: Float32[Any, ' n'] | Float32[Array, ' k n'] | Bool[Any, ' n'],
+    max_depth: int,
+    num_trees: int,
+    num_chains: int | None,
 ) -> tuple[int | None, int | None]:
+    # get number of outcomes and of datapoints, set to 1 if none
     if y.ndim == 2:
         k, n = y.shape
     else:
@@ -558,34 +609,40 @@ def _choose_suffstat_batch_size(
         (n,) = y.shape
     n = max(1, n)
 
-    @cache
-    def get_platform():
-        return _get_platform(y)
+    if num_chains is None:
+        num_chains = 1
+    batch_size = k * num_chains
+    unbatched_accum_bytes_times_batch_size = num_trees * 2**max_depth * 4 * n
+
+    platform = _get_platform(y)
 
     if resid_batch_size == 'auto':
-        platform = get_platform()
         if platform == 'cpu':
-            resid_batch_size = 2 ** round(math.log2(n / 6))  # n/6
+            rbs = 2 ** round(math.log2(n / 6))  # n/6
         elif platform == 'gpu':
-            resid_batch_size = 2 ** round((1 + math.log2(n)) / 3)  # n^1/3
-        resid_batch_size *= k
-        resid_batch_size = max(1, resid_batch_size)
+            rbs = 2 ** round((1 + math.log2(n)) / 3)  # n^1/3
+        rbs *= batch_size
+        rbs = max(1, rbs)
+    else:
+        rbs = resid_batch_size
 
-    if count_batch_size == 'auto':
-        platform = get_platform()
-        if platform == 'cpu':
-            count_batch_size = None
-        elif platform == 'gpu':
-            count_batch_size = 2 ** round(math.log2(n) / 2 - 2)  # n^1/2
-            # /4 is good on V100, /2 on L4/T4, still haven't tried A100
-            count_batch_size *= k
-            max_memory = 2**29
-            itemsize = 4
-            min_batch_size = math.ceil(forest_size * itemsize * n / max_memory)
-            count_batch_size = max(count_batch_size, min_batch_size)
-            count_batch_size = max(1, count_batch_size)
+    if count_batch_size != 'auto':
+        cbs = count_batch_size
+    elif platform == 'cpu':
+        cbs = None
+    elif platform == 'gpu':
+        cbs = 2 ** round(math.log2(n) / 2 - 2)  # n^1/2
+        # /4 is good on V100, /2 on L4/T4, still haven't tried A100
 
-    return resid_batch_size, count_batch_size
+        # ensure we don't exceed ~512MB of memory usage
+        max_memory = 2**29
+        min_batch_size = math.ceil(unbatched_accum_bytes_times_batch_size / max_memory)
+        cbs = max(cbs, min_batch_size)
+
+        cbs *= batch_size
+        cbs = max(1, cbs)
+
+    return rbs, cbs
 
 
 def chol_with_gersh(
@@ -617,3 +674,73 @@ def _inv_via_chol_with_gersh(mat: Float32[Array, 'k k']) -> Float32[Array, 'k k'
     I = jnp.eye(mat.shape[0], dtype=mat.dtype)
     L_inv = solve_triangular(L, I, lower=True)
     return L_inv.T @ L_inv
+
+
+def _get_num_chains(args: tuple) -> int | None:
+    """Get the number of chains from the positional arguments."""
+
+    def is_leaf(x) -> bool:
+        return hasattr(x, 'num_chains') or x is None
+
+    notdefined = 'notdefined'
+
+    def get_num_chains(x) -> int | None | str:
+        if hasattr(x, 'num_chains'):
+            return x.num_chains()
+        else:
+            return notdefined
+
+    args_num_chains = tree.map(get_num_chains, args, is_leaf=is_leaf)
+    num_chains, _ = flatten(args_num_chains, is_leaf=lambda x: x is None)
+    num_chains = [c for c in num_chains if c is not notdefined]
+    assert all(c == num_chains[0] for c in num_chains)
+    return num_chains[0]
+
+
+def _get_mc_in_axes(args: tuple) -> tuple[PyTree[int | None], ...]:
+    """Decide chain vmap axes for inputs."""
+    axes = chain_vmap_axes(args)
+    if is_key(args[0]):
+        axes = (0, *axes[1:])
+    return axes
+
+
+def _get_mc_out_axes(
+    fun: Callable, args: tuple, in_axes: PyTree[int | None]
+) -> PyTree[int | None]:
+    """Decide chain vmap axes for outputs."""
+    vmapped_fun = vmap(fun, in_axes=in_axes)
+    out = eval_shape(vmapped_fun, *args)
+    return chain_vmap_axes(out)
+
+
+def _split_keys_in_args(args: tuple, num_chains: int) -> tuple:
+    """If the first argument is a random key, split it into `num_chains` keys."""
+    a = args[0]
+    if is_key(a):
+        a = random.split(a, num_chains)
+    return (a, *args[1:])
+
+
+T = TypeVar('T')
+
+
+def vmap_chains(fun: Callable[..., T]) -> Callable[..., T]:
+    """Apply vmap on chain axes automatically if the inputs are multichain.
+
+    Makes restrictive simplifying assumptions on `fun`.
+    """
+
+    def auto_vmapped_fun(*args, **kwargs) -> T:
+        num_chains = _get_num_chains(args)
+        if num_chains is not None:
+            partial_fun = partial(fun, **kwargs)
+            args = _split_keys_in_args(args, num_chains)
+            mc_in_axes = _get_mc_in_axes(args)
+            mc_out_axes = _get_mc_out_axes(partial_fun, args, mc_in_axes)
+            vmapped_fun = vmap(partial_fun, in_axes=mc_in_axes, out_axes=mc_out_axes)
+            return vmapped_fun(*args)
+        else:
+            return fun(*args, **kwargs)
+
+    return auto_vmapped_fun

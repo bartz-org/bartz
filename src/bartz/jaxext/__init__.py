@@ -1,6 +1,6 @@
 # bartz/src/bartz/jaxext/__init__.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -31,6 +31,7 @@ from functools import partial
 import jax
 from jax import Device, ensure_compile_time_eval, jit, random
 from jax import numpy as jnp
+from jax.dtypes import prng_key
 from jax.lax import scan
 from jax.scipy.special import ndtr
 from jaxtyping import Array, Bool, Float32, Key, Scalar, Shaped
@@ -240,3 +241,8 @@ def get_default_device() -> Device:
     """Get the current default JAX device."""
     with ensure_compile_time_eval():
         return jnp.zeros(()).device
+
+
+def is_key(x: object) -> bool:
+    """Determine if `x` is a jax random key."""
+    return isinstance(x, Array) and jnp.issubdtype(x.dtype, prng_key)

@@ -50,6 +50,7 @@ from jaxtyping import (
 from numpy import ndarray
 
 from bartz import mcmcloop, mcmcstep, prepcovars
+from bartz.jaxext import is_key
 from bartz.jaxext.scipy.special import ndtri
 from bartz.jaxext.scipy.stats import invgamma
 
@@ -818,9 +819,7 @@ class Bart(Module):
         sparse: bool,
     ) -> tuple[mcmcstep.State, mcmcloop.BurninTrace, mcmcloop.MainTrace]:
         # prepare random generator seed
-        if isinstance(seed, jax.Array) and jnp.issubdtype(
-            seed.dtype, jax.dtypes.prng_key
-        ):
+        if is_key(seed):
             key = jnp.copy(seed)
         else:
             key = jax.random.key(seed)

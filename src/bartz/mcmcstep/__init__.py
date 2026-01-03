@@ -1,6 +1,6 @@
 # bartz/src/bartz/mcmcstep/__init__.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -38,5 +38,5 @@ The entry points are:
 
 # ruff: noqa: F401
 
-from bartz.mcmcstep._state import Forest, Kind, State, init
+from bartz.mcmcstep._state import Forest, State, init
 from bartz.mcmcstep._step import step, step_sparse

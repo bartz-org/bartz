@@ -1,6 +1,6 @@
 # bartz/src/bartz/mcmcstep/_moves.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -28,14 +28,14 @@ from functools import partial
 
 import jax
 from equinox import Module
-from jax import lax, random
 from jax import numpy as jnp
+from jax import random
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
 from bartz import grove
 from bartz._profiler import jit_and_block_if_profiling
 from bartz.jaxext import minimal_unsigned_dtype, split, vmap_nodoc
-from bartz.mcmcstep._state import Forest
+from bartz.mcmcstep._state import Forest, field, vmap_chains
 
 
 class Moves(Module):
@@ -80,7 +80,7 @@ class Moves(Module):
         become leaves if the move was accepted. This mark initially (out of
         `propose_moves`) takes into account if there would be available decision
         rules to grow the leaf, and whether there are enough datapoints in the
-        node is marked in `accept_moves_parallel_stage`.
+        node is instead checked later in `accept_moves_parallel_stage`.
     logu
         The logarithm of a uniform (0, 1] random variable to be used to
         accept the move. It's in (-oo, 0].
@@ -92,24 +92,27 @@ class Moves(Module):
         computed.
     """
 
-    allowed: Bool[Array, ' num_trees']
-    grow: Bool[Array, ' num_trees']
-    num_growable: UInt[Array, ' num_trees']
-    node: UInt[Array, ' num_trees']
-    left: UInt[Array, ' num_trees']
-    right: UInt[Array, ' num_trees']
-    partial_ratio: Float32[Array, ' num_trees'] | None
-    log_trans_prior_ratio: None | Float32[Array, ' num_trees']
-    grow_var: UInt[Array, ' num_trees']
-    grow_split: UInt[Array, ' num_trees']
-    var_tree: UInt[Array, 'num_trees 2**(d-1)']
-    affluence_tree: Bool[Array, 'num_trees 2**(d-1)']
-    logu: Float32[Array, ' num_trees']
-    acc: None | Bool[Array, ' num_trees']
-    to_prune: None | Bool[Array, ' num_trees']
+    allowed: Bool[Array, '*chains num_trees'] = field(chains=True)
+    grow: Bool[Array, '*chains num_trees'] = field(chains=True)
+    num_growable: UInt[Array, '*chains num_trees'] = field(chains=True)
+    node: UInt[Array, '*chains num_trees'] = field(chains=True)
+    left: UInt[Array, '*chains num_trees'] = field(chains=True)
+    right: UInt[Array, '*chains num_trees'] = field(chains=True)
+    partial_ratio: Float32[Array, '*chains num_trees'] | None = field(chains=True)
+    log_trans_prior_ratio: None | Float32[Array, '*chains num_trees'] = field(
+        chains=True
+    )
+    grow_var: UInt[Array, '*chains num_trees'] = field(chains=True)
+    grow_split: UInt[Array, '*chains num_trees'] = field(chains=True)
+    var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    logu: Float32[Array, '*chains num_trees'] = field(chains=True)
+    acc: None | Bool[Array, '*chains num_trees'] = field(chains=True)
+    to_prune: None | Bool[Array, '*chains num_trees'] = field(chains=True)
 
 
-@jit_and_block_if_profiling
+@partial(jit_and_block_if_profiling, donate_argnums=(1,))
+@vmap_chains
 def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
     """
     Propose moves for all the trees.
@@ -130,11 +133,12 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
     The proposed move for each tree.
     """
     num_trees = forest.leaf_tree.shape[0]
-    keys = split(key, 3)
+    keys = split(key, 2)
+    grow_keys, prune_keys = keys.pop((2, num_trees))
 
     # compute moves
     grow_moves = propose_grow_moves(
-        keys.pop(num_trees),
+        grow_keys,
         forest.var_tree,
         forest.split_tree,
         forest.affluence_tree,
@@ -145,7 +149,7 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
         forest.log_s,
     )
     prune_moves = propose_prune_moves(
-        keys.pop(num_trees),
+        prune_keys,
         forest.split_tree,
         grow_moves.affluence_tree,
         forest.p_nonterminal,
@@ -162,8 +166,7 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
 
     # compute children indices
     node = jnp.where(grow, grow_moves.node, prune_moves.node)
-    left = node << 1
-    right = left + 1
+    left, right = (node << 1) | jnp.arange(2)[:, None]
 
     return Moves(
         allowed=grow_moves.allowed | prune_moves.allowed,
@@ -293,13 +296,11 @@ def propose_grow_moves(
 
     # determine if the new leaves would have available decision rules; if the
     # move is blocked, these values may not make sense
-    left_growable = right_growable = num_available_var > 1
-    left_growable |= l < split_idx
-    right_growable |= split_idx + 1 < r
-    left = leaf_to_grow << 1
-    right = left + 1
-    affluence_tree = affluence_tree.at[left].set(left_growable)
-    affluence_tree = affluence_tree.at[right].set(right_growable)
+    leftright_growable = (num_available_var > 1) | jnp.stack(
+        [l < split_idx, split_idx + 1 < r]
+    )
+    leftright = (leaf_to_grow << 1) | jnp.arange(2)
+    affluence_tree = affluence_tree.at[leftright].set(leftright_growable)
 
     ratio = compute_partial_ratio(
         prob_choose, num_prunable, p_nonterminal, leaf_to_grow
@@ -334,7 +335,7 @@ def choose_leaf(
         The splitting points of the tree.
     affluence_tree
         Whether a leaf has enough points that it could be split into two leaves
-        satisfying the `min_points_per_leaf` requirement.
+        satisfying the `min_points_per_decision_node` requirement.
     p_propose_grow
         The unnormalized probability of choosing a leaf to grow.
 
@@ -345,7 +346,7 @@ def choose_leaf(
         ``2 ** d``.
     num_growable : Int32[Array, '']
         The number of leaf nodes that can be grown, i.e., are nonterminal
-        and have at least twice `min_points_per_leaf`.
+        and have at least twice `min_points_per_decision_node`.
     prob_choose : Float32[Array, '']
         The (normalized) probability that this function had to choose that
         specific leaf, given the arguments.
@@ -421,7 +422,7 @@ def categorical(
     """
     ecdf = jnp.cumsum(distr)
     u = random.uniform(key, (), ecdf.dtype, 0, ecdf[-1])
-    return jnp.searchsorted(ecdf, u, 'right'), ecdf[-1]
+    return jnp.searchsorted(ecdf, u, 'right', method='compare_all'), ecdf[-1]
 
 
 def choose_variable(
@@ -540,19 +541,11 @@ def ancestor_variables(
     output array are filled with `p`.
     """
     max_num_ancestors = grove.tree_depth(var_tree) - 1
-    ancestor_vars = jnp.zeros(max_num_ancestors, minimal_unsigned_dtype(max_split.size))
-    carry = ancestor_vars.size - 1, node_index, ancestor_vars
-
-    def loop(carry, _):
-        i, index, ancestor_vars = carry
-        index >>= 1
-        var = var_tree[index]
-        var = jnp.where(index, var, max_split.size)
-        ancestor_vars = ancestor_vars.at[i].set(var)
-        return (i - 1, index, ancestor_vars), None
-
-    (_, _, ancestor_vars), _ = lax.scan(loop, carry, None, ancestor_vars.size)
-    return ancestor_vars
+    index = node_index >> jnp.arange(max_num_ancestors, 0, -1)
+    var = var_tree[index]
+    var_type = minimal_unsigned_dtype(max_split.size)
+    p = jnp.array(max_split.size, var_type)
+    return jnp.where(index, var, p)
 
 
 def split_range(
@@ -583,22 +576,17 @@ def split_range(
     The range of allowed splits as [l, r). If `ref_var` is out of bounds, l=r=1.
     """
     max_num_ancestors = grove.tree_depth(var_tree) - 1
+    index = node_index >> jnp.arange(max_num_ancestors)
+    right_child = (index & 1).astype(bool)
+    index >>= 1
+    split = split_tree[index].astype(jnp.int32)
+    cond = (var_tree[index] == ref_var) & index.astype(bool)
+    l = jnp.max(split, initial=0, where=cond & right_child)
     initial_r = 1 + max_split.at[ref_var].get(mode='fill', fill_value=0).astype(
         jnp.int32
     )
-    carry = jnp.int32(0), initial_r, node_index
+    r = jnp.min(split, initial=initial_r, where=cond & ~right_child)
 
-    def loop(carry, _):
-        l, r, index = carry
-        right_child = (index & 1).astype(bool)
-        index >>= 1
-        split = split_tree[index]
-        cond = (var_tree[index] == ref_var) & index.astype(bool)
-        l = jnp.where(cond & right_child, jnp.maximum(l, split), l)
-        r = jnp.where(cond & ~right_child, jnp.minimum(r, split), r)
-        return (l, r, index), None
-
-    (l, r, _), _ = lax.scan(loop, carry, None, max_num_ancestors)
     return l + 1, r
 
 
@@ -613,7 +601,7 @@ def randint_exclude(
     key
         A jax random key.
     sup
-        The exclusive upper bound of the range.
+        The exclusive upper bound of the range, must be >= 1.
     exclude
         The values to exclude from the range. Values greater than or equal to
         `sup` are ignored. Values can appear more than once.
@@ -632,17 +620,15 @@ def randint_exclude(
     """
     exclude, num_allowed = _process_exclude(sup, exclude)
     u = random.randint(key, (), 0, num_allowed)
-
-    def loop(u, i_excluded):
-        return jnp.where(i_excluded <= u, u + 1, u), None
-
-    u, _ = lax.scan(loop, u, exclude)
+    u_shifted = u + jnp.arange(exclude.size)
+    u_shifted = jnp.minimum(u_shifted, sup - 1)
+    u += jnp.sum(u_shifted >= exclude)
     return u, num_allowed
 
 
 def _process_exclude(sup, exclude):
     exclude = jnp.unique(exclude, size=exclude.size, fill_value=sup)
-    num_allowed = sup - jnp.count_nonzero(exclude < sup)
+    num_allowed = sup - jnp.sum(exclude < sup)
     return exclude, num_allowed
 
 
@@ -796,6 +782,9 @@ class PruneMoves(Module):
         prior probability that the children of the node to prune are leaves.
         This ratio is inverted, and is meant to be inverted back in
         `accept_move_and_sample_leaves`.
+    affluence_tree
+        A partially updated `affluence_tree`, marking the node to prune as
+        growable.
     """
 
     allowed: Bool[Array, ' num_trees']
@@ -923,8 +912,9 @@ def randint_masked(key: Key[Array, ''], mask: Bool[Array, ' n']) -> Int32[Array,
 
     Notes
     -----
-    If all values in the mask are `False`, return `n`.
+    If all values in the mask are `False`, return `n`. This function is
+    optimized for small `n`.
     """
     ecdf = jnp.cumsum(mask)
     u = random.randint(key, (), 0, ecdf[-1])
-    return jnp.searchsorted(ecdf, u, 'right')
+    return jnp.searchsorted(ecdf, u, 'right', method='compare_all')

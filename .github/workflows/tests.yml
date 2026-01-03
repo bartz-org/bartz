@@ -90,7 +90,7 @@ jobs:
           BENCHMARKS_BASE_MATRIX='[
             {"os":"ubuntu-latest","runs-on":"ubuntu-latest","target-suffix":""}
           ]'
-          GPU_ENTRY='{"os":"machine-T4","runs-on":["machine","gpu=T4","tenancy=spot"],"target-suffix":"-gpu"}'
+          GPU_ENTRY='{"os":"machine-T4","runs-on":["machine","gpu=T4G","tenancy=spot"],"target-suffix":"-gpu"}'
 
           if [[ "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             MATRIX=$(echo "$BASE_MATRIX" | jq -c ". + [$GPU_ENTRY]")

@@ -47,21 +47,9 @@ from bartz.mcmcloop import run_mcmc
 try:
     from bartz.BART import mc_gbart as gbart
 except ImportError:
-    try:
-        from bartz.BART import gbart
-    except ImportError:
-        from bartz import BART as gbart
+    from bartz.BART import gbart
 
-try:
-    from bartz.mcmcstep import step
-except ImportError:
-    from bartz.mcmcstep import mcmc_step as step
-
-try:
-    from bartz.mcmcstep import init
-except ImportError:
-    from bartz.mcmcstep import make_bart as init
-
+from bartz.mcmcstep import init, step
 
 # asv config
 timeout = 30.0
@@ -143,7 +131,8 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
             kw['error_scale'] = jnp.ones(n)
 
         case 'binary':
-            if not hasattr(mcmcstep, 'step_z'):
+            sig = signature(gbart)
+            if 'type' not in sig.parameters:
                 msg = 'binary not supported'
                 raise NotImplementedError(msg)
             kw['y'] = y > 0
@@ -231,11 +220,6 @@ class TimeRunMcmc:
             n_skip=1,
             callback=lambda **_: None,
         )
-
-        # adapt arguments for old versions
-        sig = signature(run_mcmc)
-        if 'callback' not in sig.parameters:
-            self.kw.pop('callback')
 
         # catch bug and skip if found
         try:

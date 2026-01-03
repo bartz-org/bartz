@@ -1,6 +1,6 @@
 # bartz/tests/test_jaxext.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -328,3 +328,29 @@ class TestTruncatedNormalOneSided:
         for key in keys:
             vals = loop_body(key)
             assert jnp.all(jnp.isfinite(vals))
+
+
+def test_is_key(keys):
+    """Test jaxext.is_key."""
+    # JAX keys should be recognized
+    key = keys.pop()
+    assert jaxext.is_key(key)
+
+    # Array of keys should be recognized
+    assert jaxext.is_key(keys.pop((2, 5)))
+
+    # Non-JAX objects should not be recognized
+    assert not jaxext.is_key(42)
+    assert not jaxext.is_key(3.14)
+    assert not jaxext.is_key('not a key')
+    assert not jaxext.is_key(None)
+    assert not jaxext.is_key([1, 2, 3])
+    assert not jaxext.is_key({'a': 1})
+
+    # JAX arrays that are not keys should not be recognized
+    assert not jaxext.is_key(jnp.array([1, 2, 3]))
+    assert not jaxext.is_key(jnp.zeros((2,), dtype=jnp.uint32))
+    assert not jaxext.is_key(jnp.ones(()))
+
+    # NumPy arrays should not be recognized
+    assert not jaxext.is_key(numpy.array([1, 2, 3]))

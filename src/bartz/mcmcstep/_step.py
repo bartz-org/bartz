@@ -1,6 +1,6 @@
 # bartz/src/bartz/mcmcstep/_step.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -28,7 +28,7 @@ from dataclasses import replace
 from functools import partial
 
 import jax
-from equinox import Module, field, tree_at
+from equinox import Module, tree_at
 from jax import lax, random
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
@@ -39,7 +39,7 @@ from bartz import grove
 from bartz._profiler import jit_and_block_if_profiling, jit_if_not_profiling
 from bartz.jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz.mcmcstep._moves import Moves, propose_moves
-from bartz.mcmcstep._state import State, chol_with_gersh
+from bartz.mcmcstep._state import State, chol_with_gersh, field, vmap_chains
 
 
 @jit_if_not_profiling
@@ -60,7 +60,7 @@ def step(key: Key[Array, ''], bart: State) -> State:
     """
     keys = split(key)
 
-    if bart.kind == 'binary':
+    if bart.y.dtype == bool:
         bart = replace(bart, error_cov_inv=jnp.float32(1))
         bart = step_trees(keys.pop(), bart)
         bart = replace(bart, error_cov_inv=None)
@@ -133,9 +133,9 @@ class Counts(Module):
         Number of datapoints in the parent (``= left + right``).
     """
 
-    left: UInt[Array, ' num_trees']
-    right: UInt[Array, ' num_trees']
-    total: UInt[Array, ' num_trees']
+    left: UInt[Array, '*chains num_trees'] = field(chains=True)
+    right: UInt[Array, '*chains num_trees'] = field(chains=True)
+    total: UInt[Array, '*chains num_trees'] = field(chains=True)
 
 
 class Precs(Module):
@@ -155,9 +155,9 @@ class Precs(Module):
         Likelihood precision scale in the parent (``= left + right``).
     """
 
-    left: Float32[Array, ' num_trees']
-    right: Float32[Array, ' num_trees']
-    total: Float32[Array, ' num_trees']
+    left: Float32[Array, '*chains num_trees'] = field(chains=True)
+    right: Float32[Array, '*chains num_trees'] = field(chains=True)
+    total: Float32[Array, '*chains num_trees'] = field(chains=True)
 
 
 class PreLkV(Module):
@@ -186,10 +186,16 @@ class PreLkV(Module):
         The logarithm of the square root term of the likelihood ratio.
     """
 
-    left: Float32[Array, ' num_trees'] | Float32[Array, 'num_trees k k']
-    right: Float32[Array, ' num_trees'] | Float32[Array, 'num_trees k k']
-    total: Float32[Array, ' num_trees'] | Float32[Array, 'num_trees k k']
-    log_sqrt_term: Float32[Array, ' num_trees']
+    left: (
+        Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
+    ) = field(chains=True)
+    right: (
+        Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
+    ) = field(chains=True)
+    total: (
+        Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
+    ) = field(chains=True)
+    log_sqrt_term: Float32[Array, '*chains num_trees'] = field(chains=True)
 
 
 class PreLk(Module):
@@ -224,10 +230,14 @@ class PreLf(Module):
         obtain the posterior leaf samples.
     """
 
-    mean_factor: Float32[Array, 'num_trees 2**d'] | Float32[Array, 'num_trees k k 2**d']
+    mean_factor: (
+        Float32[Array, '*chains num_trees 2**d']
+        | Float32[Array, '*chains num_trees k k 2**d']
+    ) = field(chains=True)
     centered_leaves: (
-        Float32[Array, 'num_trees 2**d'] | Float32[Array, 'num_trees k 2**d']
-    )
+        Float32[Array, '*chains num_trees 2**d']
+        | Float32[Array, '*chains num_trees k 2**d']
+    ) = field(chains=True)
 
 
 class ParallelStageOut(Module):
@@ -260,7 +270,10 @@ class ParallelStageOut(Module):
 
     bart: State
     moves: Moves
-    prec_trees: Float32[Array, 'num_trees 2**d'] | Int32[Array, 'num_trees 2**d']
+    prec_trees: (
+        Float32[Array, '*chains num_trees 2**d']
+        | Int32[Array, '*chains num_trees 2**d']
+    ) = field(chains=True)
     move_precs: Precs | Counts
     prelkv: PreLkV
     prelk: PreLk | None
@@ -268,6 +281,7 @@ class ParallelStageOut(Module):
 
 
 @partial(jit_and_block_if_profiling, donate_argnums=(1, 2))
+@vmap_chains
 def accept_moves_parallel_stage(
     key: Key[Array, ''], bart: State, moves: Moves
 ) -> ParallelStageOut:
@@ -305,7 +319,7 @@ def accept_moves_parallel_stage(
         or bart.prec_scale is None
     ):
         count_trees, move_counts = compute_count_trees(
-            bart.forest.leaf_indices, moves, bart.forest.count_batch_size
+            bart.forest.leaf_indices, moves, bart.config.count_batch_size
         )
 
     # mark which leaves & potential leaves have enough points to be grown
@@ -338,7 +352,7 @@ def accept_moves_parallel_stage(
             bart.prec_scale,
             bart.forest.leaf_indices,
             moves,
-            bart.forest.count_batch_size,
+            bart.config.count_batch_size,
         )
     assert move_precs is not None
 
@@ -446,7 +460,7 @@ def compute_count_trees(
 
 def count_datapoints_per_leaf(
     leaf_indices: UInt[Array, 'num_trees n'], tree_size: int, batch_size: int | None
-) -> Int32[Array, 'num_trees 2**(d-1)']:
+) -> Int32[Array, 'num_trees {tree_size}']:
     """
     Count the number of datapoints in each leaf.
 
@@ -490,9 +504,9 @@ def _aggregate_scatter(
 
 def _count_vec(
     leaf_indices: UInt[Array, 'num_trees n'], tree_size: int, batch_size: int
-) -> Int32[Array, 'num_trees 2**(d-1)']:
+) -> Int32[Array, 'num_trees {tree_size}']:
     return _aggregate_batched_alltrees(
-        1, leaf_indices, tree_size, jnp.uint32, batch_size
+        jnp.uint32(1), leaf_indices, tree_size, jnp.uint32, batch_size
     )
     # uint16 is super-slow on gpu, don't use it even if n < 2^16
 
@@ -638,7 +652,7 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' 2**d']) -> Move
     -------
     The updated moves, with `partial_ratio=None` and `log_trans_prior_ratio` set.
     """
-    # can the leaves can be grown?
+    # can the leaves be grown?
     num_trees, _ = moves.affluence_tree.shape
     tree_indices = jnp.arange(num_trees)
     left_growable = moves.affluence_tree.at[tree_indices, moves.left].get(
@@ -664,6 +678,7 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' 2**d']) -> Move
     pt_right = 1 - p_nonterminal[moves.right] * right_growable
     pt_children = pt_left * pt_right
 
+    assert moves.partial_ratio is not None
     return replace(
         moves,
         log_trans_prior_ratio=jnp.log(moves.partial_ratio * pt_children * p_prune),
@@ -932,6 +947,7 @@ def precompute_leaf_terms(
 
 
 @partial(jit_and_block_if_profiling, donate_argnums=(0,))
+@vmap_chains
 def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
     """
     Accept/reject the moves one tree at a time.
@@ -957,7 +973,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
             resid,
             SeqStageInAllTrees(
                 pso.bart.X,
-                pso.bart.forest.resid_batch_size,
+                pso.bart.config.resid_batch_size,
                 pso.bart.prec_scale,
                 pso.bart.forest.log_likelihood is not None,
                 pso.prelk,
@@ -1269,6 +1285,7 @@ def compute_likelihood_ratio(
 
 
 @partial(jit_and_block_if_profiling, donate_argnums=(0, 1))
+@vmap_chains
 def accept_moves_final_stage(bart: State, moves: Moves) -> State:
     """
     Post-process the mcmc state after accepting/rejecting the moves.
@@ -1322,6 +1339,7 @@ def apply_moves_to_leaf_indices(
     """
     mask = ~jnp.array(1, leaf_indices.dtype)  # ...1111111110
     is_child = (leaf_indices & mask) == moves.left
+    assert moves.to_prune is not None
     return jnp.where(
         is_child & moves.to_prune, moves.node.astype(leaf_indices.dtype), leaf_indices
     )
@@ -1419,6 +1437,7 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], bart: State) -> State:
 
 
 @partial(jit_and_block_if_profiling, donate_argnums=(1,))
+@vmap_chains
 def step_error_cov_inv(key: Key[Array, ''], bart: State) -> State:
     """
     MCMC-update the inverse error covariance.
@@ -1437,13 +1456,15 @@ def step_error_cov_inv(key: Key[Array, ''], bart: State) -> State:
     -------
     The new BART mcmc state, with an updated `error_cov_inv`.
     """
-    if bart.kind == 'mv':
+    assert bart.error_cov_inv is not None
+    if bart.error_cov_inv.ndim == 2:
         return _step_error_cov_inv_mv(key, bart)
     else:
         return _step_error_cov_inv_uv(key, bart)
 
 
 @partial(jit_and_block_if_profiling, donate_argnums=(1,))
+@vmap_chains
 def step_z(key: Key[Array, ''], bart: State) -> State:
     """
     MCMC-update the latent variable for binary regression.
@@ -1467,6 +1488,7 @@ def step_z(key: Key[Array, ''], bart: State) -> State:
 
 
 @partial(jit_and_block_if_profiling, donate_argnums=(1,))
+@vmap_chains
 def step_s(key: Key[Array, ''], bart: State) -> State:
     """
     Update `log_s` using Dirichlet sampling.
@@ -1507,6 +1529,7 @@ def step_s(key: Key[Array, ''], bart: State) -> State:
 
 
 @partial(jit_and_block_if_profiling, donate_argnums=(1,), static_argnames=('num_grid',))
+@vmap_chains
 def step_theta(key: Key[Array, ''], bart: State, *, num_grid: int = 1000) -> State:
     """
     Update `theta`.

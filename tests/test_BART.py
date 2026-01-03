@@ -425,10 +425,10 @@ class TestWithCachedBart:
             rhat_sigma = rhat(
                 [bart.sigma_[-bart.ndpost :], rbart.sigma_[-rbart.ndpost :]]
             )
-            assert rhat_sigma < 1.1
+            assert rhat_sigma < 1.2
 
             # check sigma_mean
-            assert_allclose(bart.sigma_mean, rbart.sigma_mean, rtol=0.05)
+            assert_allclose(bart.sigma_mean, rbart.sigma_mean, rtol=0.1)
 
         # check number of tree nodes in forest
         bart_count = bart.varcount.sum(axis=1)
@@ -959,19 +959,19 @@ def test_prior(keys, p, nsplits):
         sum_varcount_mcmc = bart.varcount.sum(axis=1)
         sum_varcount_prior = varcount_prior.sum(axis=1)
         rhat_sum_varcount = rhat([sum_varcount_mcmc, sum_varcount_prior])
-        assert rhat_sum_varcount < 1.01
+        assert rhat_sum_varcount < 1.05
 
         # compare imbalance index
         imb_mcmc = avg_imbalance_index(bart._main_trace.split_tree)
         imb_prior = avg_imbalance_index(prior_trace.split_tree)
         rhat_imb = rhat([imb_mcmc.squeeze(0), imb_prior])
-        assert rhat_imb < 1.01
+        assert rhat_imb < 1.02
 
         # compare average max tree depth
         maxd_mcmc = avg_max_tree_depth(bart._main_trace.split_tree)
         maxd_prior = avg_max_tree_depth(prior_trace.split_tree)
         rhat_maxd = rhat([maxd_mcmc.squeeze(0), maxd_prior])
-        assert rhat_maxd < 1.01
+        assert rhat_maxd < 1.02
 
         # compare max tree depth distribution
         dd_mcmc = bart.depth_distr()

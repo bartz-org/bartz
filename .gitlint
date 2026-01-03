@@ -1,5 +1,6 @@
 [general]
 ignore = body-is-missing
+regex-style-search = true
 
 [title-max-length]
 line-length = 50

@@ -1,6 +1,6 @@
 # bartz/tests/test_mvbart.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -32,6 +32,7 @@ from jax import random, vmap
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
+from bartz._interface import mvBart
 from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._step import (
     Counts,
@@ -479,3 +480,24 @@ class TestMVBartSteps:
 
             assert mv_state.error_cov_inv.shape == (k, k)
             assert mv_state.resid.shape == (k, y.shape[1])
+
+
+class TestMVBartInterface:
+    """Tests for mvBart Interface."""
+
+    def test_initialization_and_shapes(self, keys):
+        """Test that mvBart predicts with correct shapes."""
+        n, n_test, p, k_dim = 60, 40, 5, 3
+        nskip, ndpost = 10, 50
+
+        X = random.normal(keys.pop(), (p, n))
+        B = random.normal(keys.pop(), (p, k_dim))
+        Y = B.T @ X + 0.1 * random.normal(keys.pop(), (k_dim, n))
+
+        model = mvBart(
+            x_train=X, y_train=Y, ntree=10, ndpost=ndpost, nskip=nskip, mc_cores=2
+        )
+
+        X_test = random.normal(random.key(1), (p, n_test))
+        y_pred = model._predict(X_test)
+        assert y_pred.shape == (ndpost, k_dim, n_test)

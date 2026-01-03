@@ -1,6 +1,6 @@
 # bartz/src/bartz/grove.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -192,17 +192,36 @@ def evaluate_forest(
     Returns
     -------
     The (sum of) the values of the trees at the points in `X`.
+
+    Raises
+    ------
+    ValueError
+        If `trees.leaf_tree.ndim` is not 2 (univariate) or 3 (multivariate).
     """
     indices = traverse_forest(X, trees.var_tree, trees.split_tree)
-    num_trees, _ = trees.leaf_tree.shape
-    tree_index = jnp.arange(num_trees, dtype=minimal_unsigned_dtype(num_trees - 1))
-    leaves = trees.leaf_tree[tree_index[:, None], indices]
-    if sum_trees:
-        return jnp.sum(leaves, axis=0, dtype=jnp.float32)
+    num_trees = trees.leaf_tree[0]
+
+    if trees.leaf_tree.ndim == 2:
+        tree_index = jnp.arange(num_trees, dtype=minimal_unsigned_dtype(num_trees - 1))
+        leaves = trees.leaf_tree[tree_index[:, None], indices]
+        if sum_trees:
+            return jnp.sum(leaves, axis=0, dtype=jnp.float32)
+        else:
+            return leaves
         # this sum suggests to swap the vmaps, but I think it's better for X
         # copying to keep it that way
+
+    elif trees.leaf_tree.ndim == 3:
+        leaves = jnp.take_along_axis(
+            trees.leaf_tree, indices[:, None, :], axis=-1
+        )  # (num_trees, k, n)
+        if sum_trees:
+            return jnp.sum(leaves, axis=0, dtype=jnp.float32)
+        else:
+            return leaves
     else:
-        return leaves
+        msg = f'Expected trees.leaf_tree.ndim to be 2 or 3, got {trees.leaf_tree.ndim}'
+        raise ValueError(msg)
 
 
 def is_actual_leaf(

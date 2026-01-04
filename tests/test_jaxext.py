@@ -116,13 +116,15 @@ class TestAutoBatch:
         for o1, o2 in zip(out1, out2, strict=True):
             numpy.testing.assert_array_max_ulp(o1, o2)
 
-    def test_unbatched_arg(self):
+    @pytest.mark.parametrize('max_memory', [32, 1024])
+    # test with large max memory to trigger noop code path
+    def test_unbatched_arg(self, max_memory: int):
         """Check the function with batching disabled on a scalar argument."""
 
         def func(a, b):
             return a + b
 
-        batched_func = jaxext.autobatch(func, 32, (0, None))
+        batched_func = jaxext.autobatch(func, max_memory, (0, None))
 
         a = jnp.arange(100)
         b = 2

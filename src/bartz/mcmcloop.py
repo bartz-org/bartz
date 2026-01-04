@@ -1,6 +1,6 @@
 # bartz/src/bartz/mcmcloop.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -35,34 +35,39 @@ from typing import Any, Protocol
 import jax
 import numpy
 from equinox import Module
-from jax import debug, jit, lax, tree
+from jax import debug, eval_shape, jit, tree
 from jax import numpy as jnp
 from jax.nn import softmax
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, PyTree, Shaped, UInt
 
-from bartz import grove, jaxext, mcmcstep
+from bartz import jaxext, mcmcstep
 from bartz._profiler import (
     callback_if_not_profiling,
     cond_if_not_profiling,
     jit_if_not_profiling,
     scan_if_not_profiling,
 )
+from bartz.grove import TreeHeaps, evaluate_forest, forest_fill, var_histogram
+from bartz.jaxext import autobatch
 from bartz.mcmcstep import State
+from bartz.mcmcstep._state import chain_vmap_axes, field, get_num_chains
 
 
 class BurninTrace(Module):
     """MCMC trace with only diagnostic values."""
 
     error_cov_inv: (
-        Float32[Array, '*trace_length'] | Float32[Array, '*trace_length k k'] | None
-    )
-    theta: Float32[Array, '*trace_length'] | None
-    grow_prop_count: Int32[Array, '*trace_length']
-    grow_acc_count: Int32[Array, '*trace_length']
-    prune_prop_count: Int32[Array, '*trace_length']
-    prune_acc_count: Int32[Array, '*trace_length']
-    log_likelihood: Float32[Array, '*trace_length'] | None
-    log_trans_prior: Float32[Array, '*trace_length'] | None
+        Float32[Array, '*chains_and_samples']
+        | Float32[Array, '*chains_and_samples k k']
+        | None
+    ) = field(chains=True)
+    theta: Float32[Array, '*chains_and_samples'] | None = field(chains=True)
+    grow_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
+    grow_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
+    prune_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
+    prune_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
+    log_likelihood: Float32[Array, '*chains_and_samples'] | None = field(chains=True)
+    log_trans_prior: Float32[Array, '*chains_and_samples'] | None = field(chains=True)
 
     @classmethod
     def from_state(cls, state: State) -> 'BurninTrace':
@@ -82,11 +87,14 @@ class BurninTrace(Module):
 class MainTrace(BurninTrace):
     """MCMC trace with trees and diagnostic values."""
 
-    leaf_tree: Float32[Array, '*trace_length 2**d']
-    var_tree: UInt[Array, '*trace_length 2**(d-1)']
-    split_tree: UInt[Array, '*trace_length 2**(d-1)']
-    offset: Float32[Array, '*trace_length']
-    varprob: Float32[Array, '*trace_length p'] | None
+    leaf_tree: (
+        Float32[Array, '*chains_and_samples 2**d']
+        | Float32[Array, '*chains_and_samples k 2**d']
+    ) = field(chains=True)
+    var_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=True)
+    split_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=True)
+    offset: Float32[Array, '*samples'] | Float32[Array, '*samples k']
+    varprob: Float32[Array, '*chains_and_samples p'] | None = field(chains=True)
 
     @classmethod
     def from_state(cls, state: State) -> 'MainTrace':
@@ -179,8 +187,12 @@ class _Carry(Module):
     bart: State
     i_total: Int32[Array, '']
     key: Key[Array, '']
-    burnin_trace: PyTree[Shaped[Array, 'n_burn *']]
-    main_trace: PyTree[Shaped[Array, 'n_save *']]
+    burnin_trace: PyTree[
+        Shaped[Array, 'n_burn ...'] | Shaped[Array, 'num_chains n_burn ...']
+    ]
+    main_trace: PyTree[
+        Shaped[Array, 'n_save ...'] | Shaped[Array, 'num_chains n_save ...']
+    ]
     callback_state: CallbackState
 
 
@@ -196,7 +208,11 @@ def run_mcmc(
     callback_state: CallbackState = None,
     burnin_extractor: Callable[[State], PyTree] = BurninTrace.from_state,
     main_extractor: Callable[[State], PyTree] = MainTrace.from_state,
-) -> tuple[State, PyTree[Shaped[Array, 'n_burn *']], PyTree[Shaped[Array, 'n_save *']]]:
+) -> tuple[
+    State,
+    PyTree[Shaped[Array, 'n_burn ...'] | Shaped[Array, 'num_chains n_burn ...']],
+    PyTree[Shaped[Array, 'n_save ...'] | Shaped[Array, 'num_chains n_save ...']],
+]:
     """
     Run the MCMC for the BART posterior.
 
@@ -234,9 +250,9 @@ def run_mcmc(
         The initial custom state for the callback.
     burnin_extractor
     main_extractor
-        Functions that extract the variables to be saved respectively only in
-        the main trace and in both traces, given the MCMC state as argument.
-        Must return a pytree, and must be vmappable.
+        Functions that extract the variables to be saved respectively in the
+        burnin trace and main traces, given the MCMC state as argument. Must
+        return a pytree, and must be vmappable.
 
     Returns
     -------
@@ -288,7 +304,16 @@ def run_mcmc(
 def _empty_trace(
     length: int, bart: State, extractor: Callable[[State], PyTree]
 ) -> PyTree:
-    return jax.vmap(extractor, in_axes=None, out_axes=0, axis_size=length)(bart)
+    num_chains = get_num_chains(bart)
+    if num_chains is None:
+        out_axes = 0
+    else:
+        example_output = eval_shape(extractor, bart)
+        chain_axes = chain_vmap_axes(example_output)
+        out_axes = tree.map(
+            lambda a: 0 if a is None else 1, chain_axes, is_leaf=lambda a: a is None
+        )
+    return jax.vmap(extractor, in_axes=None, out_axes=out_axes, axis_size=length)(bart)
 
 
 @jit
@@ -396,32 +421,56 @@ def _save_state_to_trace(
     n_burn: Int32[Array, ''],
     n_skip: Int32[Array, ''],
 ) -> tuple[PyTree, PyTree]:
+    # trace index where to save during burnin; out-of-bounds => noop after
+    # burnin
     burnin_idx = i_total
+
+    # trace index where to save during main phase; force it out-of-bounds
+    # during burnin
     main_idx = (i_total - n_burn) // n_skip
     noop_idx = jnp.iinfo(jnp.int32).max
     noop_cond = i_total < n_burn
     main_idx = jnp.where(noop_cond, noop_idx, main_idx)
 
-    burnin_trace = _pytree_at_set(burnin_trace, burnin_idx, burnin_extractor(bart))
-    main_trace = _pytree_at_set(main_trace, main_idx, main_extractor(bart))
+    # prepare array index
+    num_chains = get_num_chains(bart)
+    burnin_trace = _set(burnin_trace, burnin_idx, burnin_extractor(bart), num_chains)
+    main_trace = _set(main_trace, main_idx, main_extractor(bart), num_chains)
 
     return burnin_trace, main_trace
 
 
-def _pytree_at_set(
-    dest: PyTree[Array, ' T'], index: Int32[Array, ''], val: PyTree[Array]
+def _set(
+    trace: PyTree[Array, ' T'],
+    index: Int32[Array, ''],
+    val: PyTree[Array, ' T'],
+    num_chains: int | None,
 ) -> PyTree[Array, ' T']:
-    """Map ``dest.at[index].set(val)`` over pytrees."""
+    """Do ``trace[index] = val`` but fancier."""
+    chain_axis = chain_vmap_axes(val)
 
-    def at_set(dest, val):
-        if dest.size:
-            return dest.at[index, ...].set(val, mode='drop')
-        else:
+    def at_set(
+        trace: Shaped[Array, 'chains samples *shape']
+        | Shaped[Array, ' samples *shape']
+        | None,
+        val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'] | None,
+        chain_axis: int | None,
+    ):
+        if trace is None or trace.size == 0:
             # this handles the case where an array is empty because jax refuses
-            # to index into an array of length 0, even if just in the abstract
-            return dest
+            # to index into an axis of length 0, even if just in the abstract,
+            # and optional elements that are considered leaves due to `is_leaf`
+            # below needed to traverse `chain_axis`.
+            return trace
 
-    return tree.map(at_set, dest, val)
+        if num_chains is None or chain_axis is None:
+            ndindex = (index, ...)
+        else:
+            ndindex = (slice(None), index, ...)
+
+        return trace.at[ndindex].set(val, mode='drop')
+
+    return tree.map(at_set, trace, val, chain_axis, is_leaf=lambda x: x is None)
 
 
 def make_default_callback(
@@ -521,16 +570,18 @@ def print_callback(
     if callback_state.report_every is not None:
 
         def print_report():
+            num_chains = bart.forest.num_chains()
             debug.callback(
                 _print_report,
                 burnin=burnin,
                 i_total=i_total,
                 n_iters=n_burn + n_save * n_skip,
-                grow_prop_count=bart.forest.grow_prop_count,
-                grow_acc_count=bart.forest.grow_acc_count,
-                prune_acc_count=bart.forest.prune_acc_count,
-                prop_total=len(bart.forest.leaf_tree),
-                fill=grove.forest_fill(bart.forest.split_tree),
+                num_chains=num_chains,
+                grow_prop_count=bart.forest.grow_prop_count.mean(),
+                grow_acc_count=bart.forest.grow_acc_count.mean(),
+                prune_acc_count=bart.forest.prune_acc_count.mean(),
+                prop_total=bart.forest.split_tree.shape[-2],
+                fill=forest_fill(bart.forest.split_tree),
                 ordered=True,
             )
 
@@ -582,9 +633,10 @@ def _print_report(
     burnin: bool,
     i_total: int,
     n_iters: int,
-    grow_prop_count: int,
-    grow_acc_count: int,
-    prune_acc_count: int,
+    num_chains: int | None,
+    grow_prop_count: float,
+    grow_acc_count: float,
+    prune_acc_count: float,
     prop_total: int,
     fill: float,
 ):
@@ -592,7 +644,12 @@ def _print_report(
     grow_prop = grow_prop_count / prop_total
     move_acc = (grow_acc_count + prune_acc_count) / prop_total
 
-    suffix = ' (burnin)' if burnin else ''
+    msgs = []
+    if num_chains is not None:
+        msgs.append(f'avg. {num_chains} chains')
+    if burnin:
+        msgs.append('burnin')
+    suffix = f' ({", ".join(msgs)})' if msgs else ''
 
     print(  # noqa: T201, see print_callback for why not logging
         f'Iteration {i_total + 1}/{n_iters}, '
@@ -633,60 +690,65 @@ def sparse_callback(
     return bart, callback_state
 
 
-class Trace(grove.TreeHeaps, Protocol):
+class Trace(TreeHeaps, Protocol):
     """Protocol for a MCMC trace."""
 
-    offset: Float32[Array, ' trace_length']
+    offset: Float32[Array, '*trace_shape']
 
 
 class TreesTrace(Module):
     """Implementation of `bartz.grove.TreeHeaps` for an MCMC trace."""
 
-    leaf_tree: Float32[Array, 'trace_length num_trees 2**d']
-    var_tree: UInt[Array, 'trace_length num_trees 2**(d-1)']
-    split_tree: UInt[Array, 'trace_length num_trees 2**(d-1)']
+    leaf_tree: Float32[Array, '*trace_shape num_trees 2**d']
+    var_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
+    split_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
 
     @classmethod
-    def from_dataclass(cls, obj: grove.TreeHeaps):
+    def from_dataclass(cls, obj: TreeHeaps):
         """Create a `TreesTrace` from any `bartz.grove.TreeHeaps`."""
         return cls(**{f.name: getattr(obj, f.name) for f in fields(cls)})
 
 
-@jax.jit
+@jit
 def evaluate_trace(
     trace: Trace, X: UInt[Array, 'p n']
-) -> Float32[Array, 'trace_length n']:
+) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape n k']:
     """
     Compute predictions for all iterations of the BART MCMC.
 
     Parameters
     ----------
     trace
-        A trace of the BART MCMC, as returned by `run_mcmc`.
+        A main trace of the BART MCMC, as returned by `run_mcmc`.
     X
         The predictors matrix, with `p` predictors and `n` observations.
 
     Returns
     -------
-    The predictions for each iteration of the MCMC.
+    The predictions for each chain and iteration of the MCMC.
     """
-    evaluate_trees = partial(grove.evaluate_forest, sum_trees=False)
-    evaluate_trees = jaxext.autobatch(evaluate_trees, 2**29, (None, 0))
+    # batch evaluate_forest over chains and samples to limit memory usage
+    has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
+    max_memory = 2**27  # 128 MiB
+    batched_eval = partial(evaluate_forest, sum_batch_axis=-1)  # sum over trees
+    if has_chains:
+        batched_eval = autobatch(batched_eval, max_memory, (None, 1))
+    batched_eval = autobatch(batched_eval, max_memory, (None, 0))
+
+    # extract only the trees from the trace
     trees = TreesTrace.from_dataclass(trace)
 
-    def loop(_, item):
-        offset, trees = item
-        values = evaluate_trees(X, trees)
-        return None, offset + jnp.sum(values, axis=0, dtype=jnp.float32)
+    # evaluate trees
+    y_centered: Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape n k']
+    y_centered = batched_eval(X, trees)
 
-    _, y = lax.scan(loop, None, (trace.offset, trees))
-    return y
+    # add offset, trace.offset has shape (samples k?)
+    offset = jnp.expand_dims(trace.offset, 1)
+    return y_centered + offset
 
 
-@partial(jax.jit, static_argnums=(0,))
-def compute_varcount(
-    p: int, trace: grove.TreeHeaps
-) -> Int32[Array, 'trace_length {p}']:
+@partial(jit, static_argnums=(0,))
+def compute_varcount(p: int, trace: TreeHeaps) -> Int32[Array, '*trace_shape {p}']:
     """
     Count how many times each predictor is used in each MCMC state.
 
@@ -695,11 +757,11 @@ def compute_varcount(
     p
         The number of predictors.
     trace
-        A trace of the BART MCMC, as returned by `run_mcmc`.
+        A main trace of the BART MCMC, as returned by `run_mcmc`.
 
     Returns
     -------
     Histogram of predictor usage in each MCMC state.
     """
-    vmapped_var_histogram = jax.vmap(grove.var_histogram, in_axes=(None, 0, 0))
-    return vmapped_var_histogram(p, trace.var_tree, trace.split_tree)
+    # var_tree has shape (chains? samples trees nodes)
+    return var_histogram(p, trace.var_tree, trace.split_tree, sum_batch_axis=-1)

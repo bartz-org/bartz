@@ -28,10 +28,14 @@ import math
 from functools import partial
 from typing import Protocol
 
-import jax
-from jax import jit, lax
+from jax import jit, lax, vmap
 from jax import numpy as jnp
-from jaxtyping import Array, Bool, DTypeLike, Float32, Int32, Real, Shaped, UInt
+from jaxtyping import Array, Bool, DTypeLike, Float32, Int32, Shaped, UInt
+
+try:
+    from numpy.lib.array_utils import normalize_axis_tuple  # numpy 2
+except ImportError:
+    from numpy.core.numeric import normalize_axis_tuple  # numpy 1
 
 from bartz.jaxext import minimal_unsigned_dtype, vmap_nodoc
 
@@ -44,11 +48,14 @@ class TreeHeaps(Protocol):
     (left child) and :math:`2i + 1` (right child). The array element at index 0
     is unused.
 
+    Arrays may have additional initial axes to represent multple trees.
+
     Parameters
     ----------
     leaf_tree
         The values in the leaves of the trees. This array can be dirty, i.e.,
-        unused nodes can have whatever value.
+        unused nodes can have whatever value. It may have an additional axis
+        for multivariate leaves.
     var_tree
         The axes along which the decision nodes operate. This array can be
         dirty but for the always unused node at index 0 which must be set to 0.
@@ -64,9 +71,11 @@ class TreeHeaps(Protocol):
     `var_tree` and `split_tree` are half as long as `leaf_tree`.
     """
 
-    leaf_tree: Float32[Array, '* 2**d']
-    var_tree: UInt[Array, '* 2**(d-1)']
-    split_tree: UInt[Array, '* 2**(d-1)']
+    leaf_tree: (
+        Float32[Array, '*batch_shape 2**d'] | Float32[Array, '*batch_shape k 2**d']
+    )
+    var_tree: UInt[Array, '*batch_shape 2**(d-1)']
+    split_tree: UInt[Array, '*batch_shape 2**(d-1)']
 
 
 def make_tree(
@@ -112,10 +121,10 @@ def tree_depth(tree: Shaped[Array, '*batch_shape 2**d']) -> int:
 
 
 def traverse_tree(
-    x: Real[Array, ' p'],
+    x: UInt[Array, ' p'],
     var_tree: UInt[Array, ' 2**(d-1)'],
     split_tree: UInt[Array, ' 2**(d-1)'],
-) -> Int32[Array, '']:
+) -> UInt[Array, '']:
     """
     Find the leaf where a point falls into.
 
@@ -154,15 +163,16 @@ def traverse_tree(
     return index
 
 
-@partial(vmap_nodoc, in_axes=(None, 0, 0))
+@jit
+@partial(jnp.vectorize, excluded=(0,), signature='(hts),(hts)->(n)')
 @partial(vmap_nodoc, in_axes=(1, None, None))
 def traverse_forest(
-    X: Real[Array, 'p n'],
-    var_trees: UInt[Array, 'm 2**(d-1)'],
-    split_trees: UInt[Array, 'm 2**(d-1)'],
-) -> Int32[Array, 'm n']:
+    X: UInt[Array, 'p n'],
+    var_trees: UInt[Array, '*forest_shape 2**(d-1)'],
+    split_trees: UInt[Array, '*forest_shape 2**(d-1)'],
+) -> UInt[Array, '*forest_shape n']:
     """
-    Find the leaves where points fall into.
+    Find the leaves where points falls into for each tree in a set.
 
     Parameters
     ----------
@@ -180,35 +190,59 @@ def traverse_forest(
     return traverse_tree(X, var_trees, split_trees)
 
 
+@partial(jit, static_argnames=('sum_batch_axis',))
 def evaluate_forest(
-    X: UInt[Array, 'p n'], trees: TreeHeaps, *, sum_trees: bool = True
-) -> Float32[Array, ' n'] | Float32[Array, 'num_trees n']:
+    X: UInt[Array, 'p n'],
+    trees: TreeHeaps,
+    *,
+    sum_batch_axis: int | tuple[int, ...] = (),
+) -> (
+    Float32[Array, '*reduced_batch_size n'] | Float32[Array, '*reduced_batch_size n k']
+):
     """
-    Evaluate a ensemble of trees at an array of points.
+    Evaluate an ensemble of trees at an array of points.
 
     Parameters
     ----------
     X
         The coordinates to evaluate the trees at.
     trees
-        The tree heaps, with batch shape (num_trees,).
-    sum_trees
-        Whether to sum the values across trees.
+        The trees.
+    sum_batch_axis
+        The batch axes to sum over. By default, no summation is performed.
+        Note that negative indices count from the end of the batch dimensions,
+        the core dimensions n and k can't be summed over by this function.
 
     Returns
     -------
     The (sum of) the values of the trees at the points in `X`.
     """
+    indices: UInt[Array, '*forest_shape n']
     indices = traverse_forest(X, trees.var_tree, trees.split_tree)
-    num_trees, _ = trees.leaf_tree.shape
-    tree_index = jnp.arange(num_trees, dtype=minimal_unsigned_dtype(num_trees - 1))
-    leaves = trees.leaf_tree[tree_index[:, None], indices]
-    if sum_trees:
-        return jnp.sum(leaves, axis=0, dtype=jnp.float32)
-        # this sum suggests to swap the vmaps, but I think it's better for X
-        # copying to keep it that way
-    else:
-        return leaves
+
+    is_mv = trees.leaf_tree.ndim != trees.var_tree.ndim
+
+    bc_indices: UInt[Array, '*forest_shape n 1'] | UInt[Array, '*forest_shape n 1 1']
+    bc_indices = indices[..., None, None] if is_mv else indices[..., None]
+
+    bc_leaf_tree: (
+        Float32[Array, '*forest_shape 1 tree_size']
+        | Float32[Array, '*forest_shape 1 k tree_size']
+    )
+    bc_leaf_tree = (
+        trees.leaf_tree[..., None, :, :] if is_mv else trees.leaf_tree[..., None, :]
+    )
+
+    bc_leaves: (
+        Float32[Array, '*forest_shape n 1'] | Float32[Array, '*forest_shape n k 1']
+    )
+    bc_leaves = jnp.take_along_axis(bc_leaf_tree, bc_indices, -1)
+
+    leaves: Float32[Array, '*forest_shape n'] | Float32[Array, '*forest_shape n k']
+    leaves = jnp.squeeze(bc_leaves, -1)
+
+    axis = normalize_axis_tuple(sum_batch_axis, trees.var_tree.ndim - 1)
+    return jnp.sum(leaves, axis=axis)
 
 
 def is_actual_leaf(
@@ -294,7 +328,10 @@ def tree_depths(tree_length: int) -> Int32[Array, ' {tree_length}']:
     return jnp.array(depths, minimal_unsigned_dtype(max(depths)))
 
 
-def is_used(split_tree: UInt[Array, ' 2**(d-1)']) -> Bool[Array, ' 2**d']:
+@partial(jnp.vectorize, signature='(half_tree_size)->(tree_size)')
+def is_used(
+    split_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+) -> Bool[Array, '*batch_shape 2**d']:
     """
     Return a mask indicating the used nodes in a tree.
 
@@ -314,7 +351,7 @@ def is_used(split_tree: UInt[Array, ' 2**(d-1)']) -> Bool[Array, ' 2**d']:
 
 
 @jit
-def forest_fill(split_tree: UInt[Array, 'num_trees 2**(d-1)']) -> Float32[Array, '']:
+def forest_fill(split_tree: UInt[Array, '*batch_shape 2**(d-1)']) -> Float32[Array, '']:
     """
     Return the fraction of used nodes in a set of trees.
 
@@ -327,15 +364,20 @@ def forest_fill(split_tree: UInt[Array, 'num_trees 2**(d-1)']) -> Float32[Array,
     -------
     Number of tree nodes over the maximum number that could be stored.
     """
-    num_trees, _ = split_tree.shape
-    used = jax.vmap(is_used)(split_tree)
+    used = is_used(split_tree)
     count = jnp.count_nonzero(used)
-    return count / (used.size - num_trees)
+    batch_size = split_tree.size // split_tree.shape[-1]
+    return count / (used.size - batch_size)
 
 
+@partial(jit, static_argnames=('p', 'sum_batch_axis'))
 def var_histogram(
-    p: int, var_tree: UInt[Array, '* 2**(d-1)'], split_tree: UInt[Array, '* 2**(d-1)']
-) -> Int32[Array, ' {p}']:
+    p: int,
+    var_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+    split_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+    *,
+    sum_batch_axis: int | tuple[int, ...] = (),
+) -> Int32[Array, '*reduced_batch_shape {p}']:
     """
     Count how many times each variable appears in a tree.
 
@@ -348,15 +390,29 @@ def var_histogram(
         The decision axes of the tree.
     split_tree
         The decision boundaries of the tree.
+    sum_batch_axis
+        The batch axes to sum over. By default, no summation is performed.
+        Note that negative indices count from the end of the batch dimensions,
+        the core dimension p can't be summed over by this function.
 
     Returns
     -------
-    The histogram of the variables used in the tree.
-
-    Notes
-    -----
-    If there are leading axes in the tree arrays (i.e., multiple trees), the
-    returned counts are cumulative over trees.
+    The histogram(s) of the variables used in the tree.
     """
     is_internal = split_tree.astype(bool)
-    return jnp.zeros(p, int).at[var_tree].add(is_internal)
+
+    def scatter_add(
+        var_tree: UInt[Array, '*summed_batch_axes half_tree_size'],
+        is_internal: Bool[Array, '*summed_batch_axes half_tree_size'],
+    ) -> Int32[Array, ' p']:
+        return jnp.zeros(p, int).at[var_tree].add(is_internal)
+
+    # vmap scatter_add over non-batched dims
+    batch_ndim = var_tree.ndim - 1
+    axes = normalize_axis_tuple(sum_batch_axis, batch_ndim)
+    for i in reversed(range(batch_ndim)):
+        neg_i = i - var_tree.ndim
+        if i not in axes:
+            scatter_add = vmap(scatter_add, in_axes=(neg_i, neg_i))
+
+    return scatter_add(var_tree, is_internal)

@@ -35,8 +35,8 @@ from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, Shaped, UInt
 
-from bartz import grove
 from bartz._profiler import jit_and_block_if_profiling, jit_if_not_profiling
+from bartz.grove import var_histogram
 from bartz.jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz.mcmcstep._moves import Moves, propose_moves
 from bartz.mcmcstep._state import State, chol_with_gersh, field, vmap_chains
@@ -208,7 +208,7 @@ class PreLk(Module):
         The factor to multiply the likelihood ratio by, shared by all trees.
     """
 
-    exp_factor: Float32[Array, '']
+    exp_factor: Float32[Array, '*chains'] = field(chains=True)
 
 
 class PreLf(Module):
@@ -707,11 +707,11 @@ def adapt_leaf_trees_to_grow_indices(
     -------
     The modified leaf values.
     """
-    values_at_node = leaf_trees[moves.node]
+    values_at_node = leaf_trees[..., moves.node]
     return (
-        leaf_trees.at[jnp.where(moves.grow, moves.left, leaf_trees.size)]
+        leaf_trees.at[..., jnp.where(moves.grow, moves.left, leaf_trees.size)]
         .set(values_at_node)
-        .at[jnp.where(moves.grow, moves.right, leaf_trees.size)]
+        .at[..., jnp.where(moves.grow, moves.right, leaf_trees.size)]
         .set(values_at_node)
     )
 
@@ -1518,7 +1518,9 @@ def step_s(key: Key[Array, ''], bart: State) -> State:
 
     # histogram current variable usage
     p = bart.forest.max_split.size
-    varcount = grove.var_histogram(p, bart.forest.var_tree, bart.forest.split_tree)
+    varcount = var_histogram(
+        p, bart.forest.var_tree, bart.forest.split_tree, sum_batch_axis=-1
+    )
 
     # sample from Dirichlet posterior
     alpha = bart.forest.theta / p + varcount

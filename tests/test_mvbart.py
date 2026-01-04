@@ -32,7 +32,7 @@ from jax import random, vmap
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
-from bartz._interface import mvBart
+from bartz._interface import Bart
 from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._step import (
     Counts,
@@ -489,10 +489,10 @@ class TestMVBartInterface:
         B = random.normal(keys.pop(), (p, k_dim))
         Y = B.T @ X + 0.1 * random.normal(keys.pop(), (k_dim, n))
 
-        model = mvBart(
+        model = Bart(
             x_train=X, y_train=Y, ntree=10, ndpost=ndpost, nskip=nskip, mc_cores=2
         )
 
         X_test = random.normal(random.key(1), (p, n_test))
         y_pred = model._predict(X_test)
-        assert y_pred.shape == (ndpost, k_dim, n_test)
+        assert y_pred.shape == (ndpost, n_test, k_dim)

@@ -24,23 +24,28 @@
 
 """Test `bartz.mcmcstep`."""
 
+from typing import Literal
+
 import pytest
 from beartype import beartype
 from jax import debug_key_reuse, random, vmap
 from jax import numpy as jnp
 from jax.random import bernoulli, clone, permutation, randint
+from jax.tree import map_with_path
+from jax.tree_util import KeyPath
 from jaxtyping import Array, Bool, Int32, Key, jaxtyped
 from numpy.testing import assert_array_equal
 from scipy import stats
 
 from bartz.jaxext import minimal_unsigned_dtype, split
-from bartz.mcmcstep import init, step
+from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._moves import (
     ancestor_variables,
     randint_exclude,
     randint_masked,
     split_range,
 )
+from bartz.mcmcstep._state import chain_vmap_axes
 from tests.util import manual_tree
 
 
@@ -547,3 +552,44 @@ class TestMultichain:
             # key reuse checks trigger with empty key array apparently
             new_state = typechecking_step(keys.pop(), state)
         assert new_state.forest.num_chains() == num_chains
+
+    def vmap_axes_for_state(self, state: State) -> State:
+        """Old manual version of `chain_vmap_axes(_: State)`."""
+
+        def choose_vmap_index(path, _) -> Literal[0, None]:
+            no_vmap_attrs = (
+                '.X',
+                '.y',
+                '.offset',
+                '.prec_scale',
+                '.error_cov_df',
+                '.error_cov_scale',
+                '.forest.max_split',
+                '.forest.blocked_vars',
+                '.forest.p_nonterminal',
+                '.forest.p_propose_grow',
+                '.forest.min_points_per_decision_node',
+                '.forest.min_points_per_leaf',
+                '.forest.leaf_prior_cov_inv',
+                '.forest.a',
+                '.forest.b',
+                '.forest.rho',
+            )
+            str_path = ''.join(map(str, path))
+            if str_path in no_vmap_attrs:
+                return None
+            else:
+                return 0
+
+        return map_with_path(choose_vmap_index, state)
+
+    def test_chain_vmap_axes(self, init_kwargs: dict):
+        """Check `chain_vmap_axes` on a `State`."""
+        state = init(**init_kwargs)
+        axes = chain_vmap_axes(state)
+        ref_axes = self.vmap_axes_for_state(state)
+
+        def assert_equal(_path: KeyPath, axis: int | None, ref_axis: int | None):
+            assert axis == ref_axis
+
+        map_with_path(assert_equal, axes, ref_axes)

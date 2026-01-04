@@ -299,13 +299,13 @@ def is_leaves_parent(split_tree: UInt[Array, ' 2**(d-1)']) -> Bool[Array, ' 2**(
     # the 0-th item has split == 0, so it's not counted
 
 
-def tree_depths(tree_length: int) -> Int32[Array, ' {tree_length}']:
+def tree_depths(tree_size: int) -> Int32[Array, ' {tree_size}']:
     """
     Return the depth of each node in a binary tree.
 
     Parameters
     ----------
-    tree_length
+    tree_size
         The length of the tree array, i.e., 2 ** d.
 
     Returns
@@ -320,7 +320,7 @@ def tree_depths(tree_length: int) -> Int32[Array, ' {tree_length}']:
     """
     depths = []
     depth = 0
-    for i in range(tree_length):
+    for i in range(tree_size):
         if i == 2**depth:
             depth += 1
         depths.append(depth - 1)
@@ -384,16 +384,16 @@ def var_histogram(
     Parameters
     ----------
     p
-        The number of variables (the maximum value that can occur in
-        `var_tree` is ``p - 1``).
+        The number of variables (the maximum value that can occur in `var_tree`
+        is ``p - 1``).
     var_tree
         The decision axes of the tree.
     split_tree
         The decision boundaries of the tree.
     sum_batch_axis
-        The batch axes to sum over. By default, no summation is performed.
-        Note that negative indices count from the end of the batch dimensions,
-        the core dimension p can't be summed over by this function.
+        The batch axes to sum over. By default, no summation is performed. Note
+        that negative indices count from the end of the batch dimensions, the
+        core dimension p can't be summed over by this function.
 
     Returns
     -------
@@ -413,6 +413,6 @@ def var_histogram(
     for i in reversed(range(batch_ndim)):
         neg_i = i - var_tree.ndim
         if i not in axes:
-            scatter_add = vmap(scatter_add, in_axes=(neg_i, neg_i))
+            scatter_add = vmap(scatter_add, in_axes=neg_i)
 
     return scatter_add(var_tree, is_internal)

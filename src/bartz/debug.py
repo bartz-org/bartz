@@ -29,6 +29,7 @@ from dataclasses import replace
 from functools import partial
 from math import ceil, log2
 from re import fullmatch
+from typing import Literal
 
 import numpy
 from equinox import Module, field
@@ -43,11 +44,12 @@ from bartz.grove import (
     evaluate_forest,
     is_actual_leaf,
     is_leaves_parent,
-    traverse_tree,
+    normalize_axis_tuple,
+    traverse_forest,
     tree_depth,
     tree_depths,
 )
-from bartz.jaxext import minimal_unsigned_dtype, vmap_nodoc
+from bartz.jaxext import autobatch, minimal_unsigned_dtype, vmap_nodoc
 from bartz.jaxext import split as split_key
 from bartz.mcmcloop import TreesTrace
 from bartz.mcmcstep._moves import randint_masked
@@ -154,9 +156,11 @@ def tree_actual_depth(split_tree: UInt[Array, ' 2**(d-1)']) -> Int32[Array, '']:
     return jnp.max(depth)
 
 
+@jit
+@partial(jnp.vectorize, signature='(nt,hts)->(d)')
 def forest_depth_distr(
-    split_tree: UInt[Array, 'num_trees 2**(d-1)'],
-) -> Int32[Array, ' d']:
+    split_tree: UInt[Array, '*batch_shape num_trees 2**(d-1)'],
+) -> Int32[Array, '*batch_shape d']:
     """Histogram the depths of a set of trees.
 
     Parameters
@@ -173,215 +177,102 @@ def forest_depth_distr(
     return jnp.bincount(depths, length=depth)
 
 
-@jit
-def trace_depth_distr(
-    split_tree: UInt[Array, 'trace_length num_trees 2**(d-1)'],
-) -> Int32[Array, 'trace_length d']:
-    """Histogram the depths of a sequence of sets of trees.
-
-    Parameters
-    ----------
-    split_tree
-        The cutpoints of the decision rules of the trees.
-
-    Returns
-    -------
-    A matrix where element (t,i) counts how many trees have depth i in set t.
-    """
-    return vmap(forest_depth_distr)(split_tree)
-
-
-@vmap_nodoc
-def chains_depth_distr(
-    split_tree: UInt[Array, 'nchains trace_length num_trees 2**(d-1)'],
-) -> Int32[Array, 'nchains trace_length d']:
-    """Histogram the depths of chains of forests of trees.
-
-    Parameters
-    ----------
-    split_tree
-        The cutpoints of the decision rules of the trees.
-
-    Returns
-    -------
-    A tensor where element (c,t,i) counts how many trees have depth i in forest t in chain c.
-    """
-    return trace_depth_distr(split_tree)
-
-
-def points_per_decision_node_distr(
-    var_tree: UInt[Array, ' 2**(d-1)'],
-    split_tree: UInt[Array, ' 2**(d-1)'],
+@partial(jit, static_argnames=('node_type', 'sum_batch_axis'))
+def points_per_node_distr(
     X: UInt[Array, 'p n'],
-) -> Int32[Array, ' n+1']:
-    """Histogram points-per-node counts.
+    var_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+    split_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+    node_type: Literal['leaf', 'leaf-parent'],
+    *,
+    sum_batch_axis: int | tuple[int, ...] = (),
+) -> Int32[Array, '*reduced_batch_shape n+1']:
+    """Histogram points-per-node counts in a set of trees.
 
-    Count how many parent-of-leaf nodes in a tree select each possible amount
-    of points.
+    Count how many nodes in a tree select each possible amount of points,
+    over a certain subset of nodes.
 
     Parameters
     ----------
+    X
+        The set of points to count.
     var_tree
         The variables of the decision rules.
     split_tree
         The cutpoints of the decision rules.
-    X
-        The set of points to count.
+    node_type
+        The type of nodes to consider. Can be:
+
+        'leaf'
+            Count only leaf nodes.
+        'leaf-parent'
+            Count only parent-of-leaf nodes.
+    sum_batch_axis
+        Aggregate the histogram over these batch axes, counting how many nodes
+        have each possible amount of points over subsets of trees instead of
+        in each tree separately.
 
     Returns
     -------
-    A vector where the i-th element counts how many next-to-leaf nodes have i points.
+    A vector where the i-th element counts how many nodes have i points.
     """
-    traverse_tree_X = vmap(traverse_tree, in_axes=(1, None, None))
-    indices = traverse_tree_X(X, var_tree, split_tree)
-    indices >>= 1
-    count_tree = jnp.zeros(split_tree.size, int).at[indices].add(1).at[0].set(0)
-    is_parent = is_leaves_parent(split_tree)
-    return jnp.zeros(X.shape[1] + 1, int).at[count_tree].add(is_parent)
+    batch_ndim = var_tree.ndim - 1
+    axes = normalize_axis_tuple(sum_batch_axis, batch_ndim)
 
+    def func(
+        var_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+        split_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+    ) -> Int32[Array, '*reduced_batch_shape n+1']:
+        indices: UInt[Array, '*batch_shape n']
+        indices = traverse_forest(X, var_tree, split_tree)
 
-def forest_points_per_decision_node_distr(
-    trees: TreeHeaps, X: UInt[Array, 'p n']
-) -> Int32[Array, ' n+1']:
-    """Histogram points-per-node counts for a set of trees.
+        @partial(jnp.vectorize, signature='(hts),(n)->(ts_or_hts),(ts_or_hts)')
+        def count_points(
+            split_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+            indices: UInt[Array, '*batch_shape n'],
+        ) -> (
+            tuple[UInt[Array, '*batch_shape 2**d'], Bool[Array, '*batch_shape 2**d']]
+            | tuple[
+                UInt[Array, '*batch_shape 2**(d-1)'],
+                Bool[Array, '*batch_shape 2**(d-1)'],
+            ]
+        ):
+            if node_type == 'leaf-parent':
+                indices >>= 1
+                predicate = is_leaves_parent(split_tree)
+            elif node_type == 'leaf':
+                predicate = is_actual_leaf(split_tree, add_bottom_level=True)
+            else:
+                raise ValueError(node_type)
+            count_tree = jnp.zeros(predicate.size, int).at[indices].add(1).at[0].set(0)
+            return count_tree, predicate
 
-    Count how many parent-of-leaf nodes in a set of trees select each possible
-    amount of points.
+        count_tree, predicate = count_points(split_tree, indices)
 
-    Parameters
-    ----------
-    trees
-        The set of trees. The variables must have broadcast shape (num_trees,).
-    X
-        The set of points to count.
+        def count_nodes(
+            count_tree: UInt[Array, '*summed_batch_axes half_tree_size'],
+            predicate: Bool[Array, '*summed_batch_axes half_tree_size'],
+        ) -> Int32[Array, ' n+1']:
+            return jnp.zeros(X.shape[1] + 1, int).at[count_tree].add(predicate)
 
-    Returns
-    -------
-    A vector where the i-th element counts how many next-to-leaf nodes have i points.
-    """
-    distr = jnp.zeros(X.shape[1] + 1, int)
+        # vmap count_nodes over non-batched dims
+        for i in reversed(range(batch_ndim)):
+            neg_i = i - var_tree.ndim
+            if i not in axes:
+                count_nodes = vmap(count_nodes, in_axes=neg_i)
 
-    def loop(distr, heaps: tuple[Array, Array]):
-        return distr + points_per_decision_node_distr(*heaps, X), None
+        return count_nodes(count_tree, predicate)
 
-    distr, _ = lax.scan(loop, distr, (trees.var_tree, trees.split_tree))
-    return distr
+    # automatically batch over all batch dimensions
+    max_io_nbytes = 2**27  # 128 MiB
+    out_dim_shift = len(axes)
+    for i in reversed(range(batch_ndim)):
+        if i in axes:
+            out_dim_shift -= 1
+        else:
+            func = autobatch(func, max_io_nbytes, i, i - out_dim_shift)
+    assert out_dim_shift == 0
 
-
-@jit
-@partial(vmap_nodoc, in_axes=(0, None))
-def chains_points_per_decision_node_distr(
-    chains: TreeHeaps, X: UInt[Array, 'p n']
-) -> Int32[Array, 'nchains trace_length n+1']:
-    """Separately histogram points-per-node counts over chains of forests of trees.
-
-    For each set of trees, count how many parent-of-leaf nodes select each
-    possible amount of points.
-
-    Parameters
-    ----------
-    chains
-        The chains of forests of trees. The variables must have broadcast shape
-        (nchains, trace_length, num_trees).
-    X
-        The set of points to count.
-
-    Returns
-    -------
-    A tensor where element (c,t,i) counts how many next-to-leaf nodes have i points in forest t in chain c.
-    """
-
-    def loop(_, forests):
-        return None, forest_points_per_decision_node_distr(forests, X)
-
-    _, distr = lax.scan(loop, None, chains)
-    return distr
-
-
-def points_per_leaf_distr(
-    var_tree: UInt[Array, ' 2**(d-1)'],
-    split_tree: UInt[Array, ' 2**(d-1)'],
-    X: UInt[Array, 'p n'],
-) -> Int32[Array, ' n+1']:
-    """Histogram points-per-leaf counts in a tree.
-
-    Count how many leaves in a tree select each possible amount of points.
-
-    Parameters
-    ----------
-    var_tree
-        The variables of the decision rules.
-    split_tree
-        The cutpoints of the decision rules.
-    X
-        The set of points to count.
-
-    Returns
-    -------
-    A vector where the i-th element counts how many leaves have i points.
-    """
-    traverse_tree_X = vmap(traverse_tree, in_axes=(1, None, None))
-    indices = traverse_tree_X(X, var_tree, split_tree)
-    count_tree = jnp.zeros(2 * split_tree.size, int).at[indices].add(1)
-    is_leaf = is_actual_leaf(split_tree, add_bottom_level=True)
-    return jnp.zeros(X.shape[1] + 1, int).at[count_tree].add(is_leaf)
-
-
-def forest_points_per_leaf_distr(
-    trees: TreeHeaps, X: UInt[Array, 'p n']
-) -> Int32[Array, ' n+1']:
-    """Histogram points-per-leaf counts over a set of trees.
-
-    Count how many leaves in a set of trees select each possible amount of points.
-
-    Parameters
-    ----------
-    trees
-        The set of trees. The variables must have broadcast shape (num_trees,).
-    X
-        The set of points to count.
-
-    Returns
-    -------
-    A vector where the i-th element counts how many leaves have i points.
-    """
-    distr = jnp.zeros(X.shape[1] + 1, int)
-
-    def loop(distr, heaps: tuple[Array, Array]):
-        return distr + points_per_leaf_distr(*heaps, X), None
-
-    distr, _ = lax.scan(loop, distr, (trees.var_tree, trees.split_tree))
-    return distr
-
-
-@jit
-@partial(vmap_nodoc, in_axes=(0, None))
-def chains_points_per_leaf_distr(
-    chains: TreeHeaps, X: UInt[Array, 'p n']
-) -> Int32[Array, 'nchains trace_length n+1']:
-    """Separately histogram points-per-leaf counts over chains of forests of trees.
-
-    For each set of trees, count how many leaves select each possible amount of
-    points.
-
-    Parameters
-    ----------
-    chains
-        The chains of forests of trees. The variables must have broadcast shape
-        (nchains, trace_length, num_trees).
-    X
-        The set of points to count.
-
-    Returns
-    -------
-    A matrix where element (t,i) counts how many leaves have i points in set t.
-    """
-
-    def loop(_, forests):
-        return None, forest_points_per_leaf_distr(forests, X)
-
-    _, distr = lax.scan(loop, None, chains)
-    return distr
+    return func(var_tree, split_tree)
 
 
 check_functions = []
@@ -571,45 +462,18 @@ def describe_error(error: int | Integer[Array, '']) -> list[str]:
 
 
 @jit
-@partial(vmap_nodoc, in_axes=(0, None))
 def check_trace(
     trace: TreeHeaps, max_split: UInt[Array, ' p']
-) -> UInt[Array, 'trace_length num_trees']:
-    """Check the validity of a sequence of sets of trees.
+) -> UInt[Array, '*batch_shape']:
+    """Check the validity of a set of trees.
 
     Use `describe_error` to parse the error codes returned by this function.
 
     Parameters
     ----------
     trace
-        The sequence of sets of trees to check. The tree arrays must have
-        broadcast shape (trace_length, num_trees). This object can have
-        additional attributes beyond the tree arrays, they are ignored.
-    max_split
-        The maximum split value for each variable.
-
-    Returns
-    -------
-    A matrix of error codes for each tree.
-    """
-    trees = TreesTrace.from_dataclass(trace)
-    return lax.map(partial(check_tree, max_split=max_split), trees)
-
-
-@partial(vmap_nodoc, in_axes=(0, None))
-def check_chains(
-    chains: TreeHeaps, max_split: UInt[Array, ' p']
-) -> UInt[Array, 'nchains trace_length num_trees']:
-    """Check the validity of sequences of sets of trees.
-
-    Use `describe_error` to parse the error codes returned by this function.
-
-    Parameters
-    ----------
-    chains
-        The sequences of sets of trees to check. The tree arrays must have
-        broadcast shape (nchains, trace_length, num_trees). This object can have
-        additional attributes beyond the tree arrays, they are ignored.
+        The set of trees to check. This object can have additional attributes
+        beyond the tree arrays, they are ignored.
     max_split
         The maximum split value for each variable.
 
@@ -617,7 +481,20 @@ def check_chains(
     -------
     A tensor of error codes for each tree.
     """
-    return check_trace(chains, max_split)
+    # vectorize check_tree over all batch dimensions
+    unpack_check_tree = lambda l, v, s: check_tree(TreesTrace(l, v, s), max_split)
+    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+    signature = '(k,ts),(hts),(hts)->()' if is_mv else '(ts),(hts),(hts)->()'
+    vec_check_tree = jnp.vectorize(unpack_check_tree, signature=signature)
+
+    # automatically batch over all batch dimensions
+    max_io_nbytes = 2**27  # 128 MiB
+    batch_ndim = trace.split_tree.ndim - 1
+    batched_check_tree = vec_check_tree
+    for i in reversed(range(batch_ndim)):
+        batched_check_tree = autobatch(batched_check_tree, max_io_nbytes, i, i)
+
+    return batched_check_tree(trace.leaf_tree, trace.var_tree, trace.split_tree)
 
 
 def _get_next_line(s: str, i: int) -> tuple[str, int]:
@@ -1369,40 +1246,61 @@ class debug_mc_gbart(mc_gbart):
         pgrow, pprune = self.avg_prop()
         return agrow * pgrow, aprune * pprune
 
-    def depth_distr(self) -> Float32[Array, 'mc_cores ndpost/mc_cores d']:
+    def depth_distr(self) -> Int32[Array, 'mc_cores ndpost/mc_cores d']:
         """Histogram of tree depths for each state of the trees.
 
         Returns
         -------
         A matrix where each row contains a histogram of tree depths.
         """
-        return chains_depth_distr(self._main_trace.split_tree)
+        out: Int32[Array, '*chains samples d']
+        out = forest_depth_distr(self._main_trace.split_tree)
+        if out.ndim < 3:
+            out = out[None, :, :]
+        return out
+
+    def _points_per_node_distr(
+        self, node_type: str
+    ) -> Int32[Array, 'mc_cores ndpost/mc_cores n+1']:
+        out: Int32[Array, '*chains samples n+1']
+        out = points_per_node_distr(
+            self._mcmc_state.X,
+            self._main_trace.var_tree,
+            self._main_trace.split_tree,
+            node_type,
+            sum_batch_axis=-1,
+        )
+        if out.ndim < 3:
+            out = out[None, :, :]
+        return out
 
     def points_per_decision_node_distr(
         self,
-    ) -> Float32[Array, 'mc_cores ndpost/mc_cores n+1']:
+    ) -> Int32[Array, 'mc_cores ndpost/mc_cores n+1']:
         """Histogram of number of points belonging to parent-of-leaf nodes.
 
         Returns
         -------
-        A matrix where each row contains a histogram of number of points.
+        For each chain, a matrix where each row contains a histogram of number of points.
         """
-        return chains_points_per_decision_node_distr(
-            self._main_trace, self._mcmc_state.X
-        )
+        return self._points_per_node_distr('leaf-parent')
 
-    def points_per_leaf_distr(self) -> Float32[Array, 'mc_cores ndpost/mc_cores n+1']:
+    def points_per_leaf_distr(self) -> Int32[Array, 'mc_cores ndpost/mc_cores n+1']:
         """Histogram of number of points belonging to leaves.
 
         Returns
         -------
         A matrix where each row contains a histogram of number of points.
         """
-        return chains_points_per_leaf_distr(self._main_trace, self._mcmc_state.X)
+        return self._points_per_node_distr('leaf')
 
     def check_trees(self) -> UInt[Array, 'mc_cores ndpost/mc_cores ntree']:
         """Apply `check_trace` to all the tree draws."""
-        return check_chains(self._main_trace, self._mcmc_state.forest.max_split)
+        out: UInt[Array, '*chains samples num_trees']
+        out = check_trace(self._main_trace, self._mcmc_state.forest.max_split)
+        if out.ndim < 3:
+            out = out[None, :, :]
+        return out
 
     def tree_goes_bad(self) -> Bool[Array, 'mc_cores ndpost/mc_cores ntree']:
         """Find iterations where a tree becomes invalid.

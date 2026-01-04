@@ -658,7 +658,7 @@ def chol_with_gersh(
 def _chol_with_gersh_impl(
     mat: Float32[Array, '*batch_shape k k'], absolute_eps: bool
 ) -> Float32[Array, '*batch_shape k k']:
-    rho = jnp.max(jnp.sum(jnp.abs(mat), axis=1))
+    rho = jnp.max(jnp.sum(jnp.abs(mat), axis=1), initial=0.0)
     eps = jnp.finfo(mat.dtype).eps
     u = mat.shape[0] * rho * eps
     if absolute_eps:

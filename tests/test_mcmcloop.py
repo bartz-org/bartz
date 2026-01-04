@@ -43,13 +43,21 @@ from bartz.mcmcstep._state import chain_vmap_axes
 
 
 def gen_data(
-    p: int, n: int
-) -> tuple[UInt8[Array, '{p} {n}'], Float32[Array, ' {n}'], UInt8[Array, ' {p}']]:
+    p: int, n: int, k: int | None
+) -> tuple[
+    UInt8[Array, '{p} {n}'],
+    Float32[Array, ' {n}'] | Float32[Array, '{k} {n}'],
+    UInt8[Array, ' {p}'],
+]:
     """Generate pretty nonsensical data."""
     X = jnp.arange(p * n, dtype=jnp.uint8).reshape(p, n)
     X = vmap(jnp.roll)(X, jnp.arange(p))
     max_split = jnp.full(p, 255, jnp.uint8)
-    y = jnp.cos(jnp.linspace(0, 2 * jnp.pi / 32 * n, n))
+    if k is None:
+        shift = 0
+    else:
+        shift = jnp.linspace(0, 2 * jnp.pi, k, endpoint=False)[:, None]
+    y = jnp.cos(jnp.linspace(0, 2 * jnp.pi / 32 * n, n) + shift)
     return X, y, max_split
 
 
@@ -62,19 +70,20 @@ def make_p_nonterminal(maxdepth: int) -> Float32[Array, ' {maxdepth}-1']:
 
 
 @filter_jit
-def simple_init(p: int, n: int, ntree: int, **kwargs) -> State:
+def simple_init(p: int, n: int, ntree: int, k: int | None, **kwargs) -> State:
     """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
-    X, y, max_split = gen_data(p, n)
+    X, y, max_split = gen_data(p, n, k)
+    eye = 1.0 if k is None else jnp.eye(k)
     return init(
         X=X,
         y=y,
-        offset=0.0,
+        offset=0.0 if k is None else jnp.zeros(k),
         max_split=max_split,
         num_trees=ntree,
         p_nonterminal=make_p_nonterminal(6),
-        leaf_prior_cov_inv=1.0,
+        leaf_prior_cov_inv=eye,
         error_cov_df=2,
-        error_cov_scale=2,
+        error_cov_scale=2 * eye,
         min_points_per_decision_node=10,
         filter_splitless_vars=False,
         **kwargs,
@@ -84,18 +93,20 @@ def simple_init(p: int, n: int, ntree: int, **kwargs) -> State:
 class TestRunMcmc:
     """Test `mcmcloop.run_mcmc`."""
 
-    @pytest.fixture(
-        params=[
-            dict(num_chains=None),
-            dict(num_chains=0),
-            dict(num_chains=1),
-            dict(num_chains=4),
-        ],
-        scope='class',
-    )
-    def initial_state(self, request: FixtureRequest) -> State:
+    @pytest.fixture(params=[None, 0, 1, 4], scope='class')
+    def num_chains(self, request: FixtureRequest) -> int | None:
+        """Return number of chains."""
+        return request.param
+
+    @pytest.fixture(params=[None, 0, 1, 4], scope='class')
+    def k(self, request: FixtureRequest) -> int | None:
+        """Return number of outcomes."""
+        return request.param
+
+    @pytest.fixture(scope='class')
+    def initial_state(self, num_chains: int | None, k: int | None) -> State:
         """Prepare state for tests."""
-        return simple_init(10, 100, 20, **request.param)
+        return simple_init(10, 100, 20, k, num_chains=num_chains)
 
     def test_final_state_overflow(self, keys: split, initial_state: State):
         """Check that the final state is the one in the trace even if there's overflow."""

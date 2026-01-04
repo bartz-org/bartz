@@ -707,11 +707,11 @@ def adapt_leaf_trees_to_grow_indices(
     -------
     The modified leaf values.
     """
-    values_at_node = leaf_trees[moves.node]
+    values_at_node = leaf_trees[..., moves.node]
     return (
-        leaf_trees.at[jnp.where(moves.grow, moves.left, leaf_trees.size)]
+        leaf_trees.at[..., jnp.where(moves.grow, moves.left, leaf_trees.size)]
         .set(values_at_node)
-        .at[jnp.where(moves.grow, moves.right, leaf_trees.size)]
+        .at[..., jnp.where(moves.grow, moves.right, leaf_trees.size)]
         .set(values_at_node)
     )
 

@@ -742,10 +742,8 @@ def evaluate_trace(
     y_centered: Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape n k']
     y_centered = batched_eval(X, trees)
 
-    # add offset, trace.offset has shape (chains? samples)
-    offset = trace.offset[..., None]
-    if has_chains:
-        offset = offset[..., None]
+    # add offset, trace.offset has shape (samples k?)
+    offset = jnp.expand_dims(trace.offset, 1)
     return y_centered + offset
 
 

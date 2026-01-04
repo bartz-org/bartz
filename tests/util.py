@@ -1,6 +1,6 @@
 # bartz/tests/util.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -26,6 +26,7 @@
 
 from collections.abc import Sequence
 from dataclasses import replace
+from operator import ge, le
 from pathlib import Path
 
 import numpy as np
@@ -89,6 +90,7 @@ def assert_close_matrices(
     rtol: float = 0.0,
     atol: float = 0.0,
     tozero: bool = False,
+    negate: bool = False,
 ):
     """
     Check if two matrices are similar.
@@ -116,6 +118,9 @@ def assert_close_matrices(
 
         So `actual` is compared to zero, and `desired` is only used as a
         reference to set the threshold.
+    negate
+        If True, invert the inequality, replacing <= with >=. This makes the
+        function check the two matrices are different instead of similar.
 
     Raises
     ------
@@ -138,18 +143,32 @@ def assert_close_matrices(
             expr = 'actual - desired'
             ref = 'desired'
 
+        if negate:
+            cond = 'different'
+            op = ge
+        else:
+            cond = 'close'
+            op = le
+
         dnorm = linalg.norm(desired, 2)
         adnorm = linalg.norm(eval(expr), 2)  # noqa: S307, expr is a literal
         ratio = adnorm / dnorm if dnorm else np.nan
 
         msg = f"""\
-matrices actual and {ref} are not close in 2-norm
+matrices actual and {ref} are not {cond} enough in 2-norm
 matrix shape: {desired.shape}
 norm(desired) = {dnorm:.2g}
 norm({expr}) = {adnorm:.2g}  (atol = {atol:.2g})
 ratio = {ratio:.2g}  (rtol = {rtol:.2g})"""
 
-        assert adnorm <= atol + rtol * dnorm, msg
+        assert op(adnorm, atol + rtol * dnorm), msg
+
+
+def assert_different_matrices(*args, **kwargs):
+    """Invoke `assert_close_matrices` with negate=True and default inf tolerance."""
+    default_kwargs: dict = dict(rtol=np.inf, atol=np.inf)
+    default_kwargs.update(kwargs)
+    assert_close_matrices(*args, negate=True, **default_kwargs)
 
 
 def get_old_python_str() -> str:

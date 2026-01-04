@@ -1,6 +1,6 @@
 # bartz/tests/test_BART.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -44,9 +44,11 @@ import polars as pl
 import pytest
 from jax import debug_nans, lax, random, vmap
 from jax import numpy as jnp
+from jax.lax import collapse
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
-from jax.tree_util import tree_map, tree_map_with_path
+from jax.tree import map_with_path
+from jax.tree_util import KeyPath, tree_map, tree_map_with_path
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, UInt
 from numpy.testing import assert_allclose, assert_array_equal
 
@@ -55,8 +57,8 @@ from bartz._interface import Bart
 from bartz.debug import (
     TraceWithOffset,
     check_trace,
+    forest_depth_distr,
     sample_prior,
-    trace_depth_distr,
     tree_actual_depth,
     trees_BART_to_bartz,
 )
@@ -71,8 +73,13 @@ from bartz.mcmcloop import (
     evaluate_trace,
 )
 from bartz.mcmcstep import State
+from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
-from tests.util import assert_close_matrices, get_old_python_tuple
+from tests.util import (
+    assert_close_matrices,
+    assert_different_matrices,
+    get_old_python_tuple,
+)
 
 
 def gen_X(
@@ -359,12 +366,12 @@ class TestWithCachedBart:
         assert jnp.all(varcount == rbart.varcount)
 
         # check yhat_train
-        yhat_train = evaluate_trace(trace, bart._mcmc_state.X)
+        yhat_train = evaluate_trace(bart._mcmc_state.X, trace)
         assert_close_matrices(yhat_train, rbart.yhat_train, rtol=1e-6)
 
         # check yhat_test
         Xt = bart._bart._bin_predictors(kw['x_test'], bart._splits)
-        yhat_test = evaluate_trace(trace, Xt)
+        yhat_test = evaluate_trace(Xt, trace)
         assert_close_matrices(yhat_test, rbart.yhat_test, rtol=1e-6)
 
         if kw['y_train'].dtype == bool:
@@ -461,6 +468,30 @@ class TestWithCachedBart:
                 assert_allclose(
                     bart.varprob_mean, rbart.varprob_mean, atol=0.15, rtol=0.4
                 )
+
+    def test_different_chains(self, cachedbart: CachedBart):
+        """Check that different chains give different results."""
+        bart = cachedbart.bart
+
+        step_theta = bart._mcmc_state.forest.rho is not None
+
+        def assert_different(x, **kwargs):
+            def assert_different(path: KeyPath, x, chain_axis: int | None):
+                str_path = ''.join(map(str, path))
+                if str_path.endswith('.theta') and not step_theta:
+                    return
+                if x is not None and chain_axis is not None:
+                    ref = jnp.broadcast_to(x.mean(chain_axis, keepdims=True), x.shape)
+                    x = collapse(x, 0, -1)
+                    ref = collapse(ref, 0, -1)
+                    assert_different_matrices(x, ref, **kwargs)
+
+            axes = chain_vmap_axes(x)
+            map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)
+
+        assert_different(bart._mcmc_state, atol=0, rtol=0.05)
+        assert_different(bart._main_trace, atol=0, rtol=0.03)
+        assert_different(bart._burnin_trace, atol=0, rtol=0.03)
 
 
 def test_sequential_guarantee(kw):
@@ -931,7 +962,7 @@ def test_prior(keys, p, nsplits):
     # compare number of stub trees
     nstub_mcmc = count_stub_trees(bart._main_trace.split_tree)
     nstub_prior = count_stub_trees(prior_trace.split_tree)
-    rhat_nstub = rhat([nstub_mcmc.squeeze(0), nstub_prior])
+    rhat_nstub = rhat([nstub_mcmc, nstub_prior])
     assert rhat_nstub < 1.01
 
     if (p, nsplits) != (1, 1):
@@ -940,7 +971,7 @@ def test_prior(keys, p, nsplits):
         # compare number of "simple" trees
         nsimple_mcmc = count_simple_trees(bart._main_trace.split_tree)
         nsimple_prior = count_simple_trees(prior_trace.split_tree)
-        rhat_nsimple = rhat([nsimple_mcmc.squeeze(0), nsimple_prior])
+        rhat_nsimple = rhat([nsimple_mcmc, nsimple_prior])
         assert rhat_nsimple < 1.01
 
         # compare varcount
@@ -964,25 +995,25 @@ def test_prior(keys, p, nsplits):
         # compare imbalance index
         imb_mcmc = avg_imbalance_index(bart._main_trace.split_tree)
         imb_prior = avg_imbalance_index(prior_trace.split_tree)
-        rhat_imb = rhat([imb_mcmc.squeeze(0), imb_prior])
+        rhat_imb = rhat([imb_mcmc, imb_prior])
         assert rhat_imb < 1.02
 
         # compare average max tree depth
         maxd_mcmc = avg_max_tree_depth(bart._main_trace.split_tree)
         maxd_prior = avg_max_tree_depth(prior_trace.split_tree)
-        rhat_maxd = rhat([maxd_mcmc.squeeze(0), maxd_prior])
+        rhat_maxd = rhat([maxd_mcmc, maxd_prior])
         assert rhat_maxd < 1.02
 
         # compare max tree depth distribution
         dd_mcmc = bart.depth_distr()
-        dd_prior = trace_depth_distr(prior_trace.split_tree)
+        dd_prior = forest_depth_distr(prior_trace.split_tree)
         rhat_dd = multivariate_rhat([dd_mcmc.squeeze(0), dd_prior])
         assert rhat_dd < 1.05
 
     # compare y
     X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1)
     yhat_mcmc = bart._bart._predict(X)
-    yhat_prior = evaluate_trace(prior_trace, X)
+    yhat_prior = evaluate_trace(X, prior_trace)
     rhat_yhat = multivariate_rhat([yhat_mcmc, yhat_prior])
     assert rhat_yhat < 1.1
 
@@ -1313,37 +1344,6 @@ def test_gbart_multichain_error(keys):
         gbart(X, y, mc_cores=2)
     with pytest.raises(TypeError, match=r'mc_cores'):
         gbart(X, y, mc_cores='gatto')
-
-
-def test_split_key_multichain_equivalence(kw):
-    """Check that `mc_gbart` is equivalent to multiple `gbart` invocations."""
-    # config
-    nchains = 4
-    ndpost_per_chain = kw['ndpost']
-
-    # a single multi-chain bart
-    kw.update(mc_cores=nchains, ndpost=ndpost_per_chain * nchains)
-    bart1 = mc_gbart(**kw)
-
-    # multiple single-chain barts
-    key = random.clone(kw.pop('seed'))
-    keys = random.split(key, nchains)
-    kw.pop('mc_cores')
-    kw.update(ndpost=ndpost_per_chain)
-    barts = [gbart(**kw, seed=key) for key in keys]
-    bart2 = merge_barts(barts)
-
-    # compare
-    assert_close_matrices(bart1.yhat_train, bart2.yhat_train, rtol=1e-5)
-    assert_close_matrices(bart1.yhat_test, bart2.yhat_test, rtol=1e-5)
-    if kw['y_train'].dtype == bool:  # binary regression
-        assert_close_matrices(bart1.prob_train, bart2.prob_train, rtol=1e-6)
-        assert_close_matrices(bart1.prob_test, bart2.prob_test, rtol=1e-6)
-    else:  # continuous regression
-        assert_close_matrices(bart1.yhat_train_mean, bart2.yhat_train_mean, rtol=1e-5)
-        assert_close_matrices(bart1.yhat_test_mean, bart2.yhat_test_mean, rtol=1e-5)
-        assert_close_matrices(bart1.sigma, bart2.sigma, rtol=1e-5)
-        assert_allclose(bart1.sigma_mean, bart2.sigma_mean, rtol=1e-6)
 
 
 def merge_barts(barts: Sequence[gbart]) -> mc_gbart:

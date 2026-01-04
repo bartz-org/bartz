@@ -1,6 +1,6 @@
 # bartz/src/bartz/jaxext/_autobatch.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -198,6 +198,7 @@ def autobatch(
 
         size = extract_size((in_axes, out_axes), (args, example_result))
 
+        original_args = args
         args, nonbatched_args = pull_nonbatched(in_axes, args)
 
         total_nbytes = sum_nbytes((args, example_result))
@@ -223,11 +224,14 @@ def autobatch(
             result = move_axes_out(out_axes, result)
             return None, result
 
-        args = move_axes_out(in_axes, args)
-        args = batch(args, nbatches)
-        _, result = scan(loop, None, args)
-        result = unbatch(result)
-        result = move_axes_in(out_axes, result)
+        if nbatches > 1:
+            args = move_axes_out(in_axes, args)
+            args = batch(args, nbatches)
+            _, result = scan(loop, None, args)
+            result = unbatch(result)
+            result = move_axes_in(out_axes, result)
+        else:
+            result = func(*original_args)
 
         check_same(example_result, result)
 

@@ -1,6 +1,6 @@
 # bartz/src/bartz/debug.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -1210,34 +1210,6 @@ def sample_prior(
     return tree_map(lambda x: x.reshape(trace_length, num_trees, -1), trees)
 
 
-@partial(jit, static_argnames=('sum_trees',))
-def evaluate_forests(
-    X: UInt[Array, 'p n'], trees: TreeHeaps, *, sum_trees: bool = True
-) -> Float32[Array, 'nforests n'] | Float32[Array, 'nforests num_trees n']:
-    """
-    Evaluate ensembles of trees at an array of points.
-
-    Parameters
-    ----------
-    X
-        The coordinates to evaluate the trees at.
-    trees
-        The tree heaps, with batch shape (nforests, num_trees).
-    sum_trees
-        Whether to sum the values in each forest.
-
-    Returns
-    -------
-    The (sum of) the values of the trees at the points in `X`.
-    """
-
-    @partial(vmap, in_axes=(None, 0))
-    def _evaluate_forests(X, trees):
-        return evaluate_forest(X, trees, sum_trees=sum_trees)
-
-    return _evaluate_forests(X, trees)
-
-
 class debug_mc_gbart(mc_gbart):
     """A subclass of `mc_gbart` that adds debugging functionality.
 
@@ -1323,7 +1295,7 @@ class debug_mc_gbart(mc_gbart):
         resid1 = bart.resid
 
         forests = TreesTrace.from_dataclass(bart.forest)
-        trees = evaluate_forests(bart.X, forests)
+        trees = evaluate_forest(bart.X, forests, sum_batch_axis=-1)
 
         if bart.z is not None:
             ref = bart.z

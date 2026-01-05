@@ -699,7 +699,10 @@ class Trace(TreeHeaps, Protocol):
 class TreesTrace(Module):
     """Implementation of `bartz.grove.TreeHeaps` for an MCMC trace."""
 
-    leaf_tree: Float32[Array, '*trace_shape num_trees 2**d']
+    leaf_tree: (
+        Float32[Array, '*trace_shape num_trees 2**d']
+        | Float32[Array, '*trace_shape num_trees k 2**d']
+    )
     var_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
     split_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
 
@@ -711,17 +714,17 @@ class TreesTrace(Module):
 
 @jit
 def evaluate_trace(
-    trace: Trace, X: UInt[Array, 'p n']
+    X: UInt[Array, 'p n'], trace: Trace
 ) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape n k']:
     """
     Compute predictions for all iterations of the BART MCMC.
 
     Parameters
     ----------
-    trace
-        A main trace of the BART MCMC, as returned by `run_mcmc`.
     X
         The predictors matrix, with `p` predictors and `n` observations.
+    trace
+        A main trace of the BART MCMC, as returned by `run_mcmc`.
 
     Returns
     -------
@@ -732,7 +735,7 @@ def evaluate_trace(
     max_memory = 2**27  # 128 MiB
     batched_eval = partial(evaluate_forest, sum_batch_axis=-1)  # sum over trees
     if has_chains:
-        batched_eval = autobatch(batched_eval, max_memory, (None, 1))
+        batched_eval = autobatch(batched_eval, max_memory, (None, 1), 1)
     batched_eval = autobatch(batched_eval, max_memory, (None, 0))
 
     # extract only the trees from the trace

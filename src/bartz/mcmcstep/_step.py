@@ -61,7 +61,11 @@ def step(key: Key[Array, ''], bart: State) -> State:
     keys = split(key)
 
     if bart.y.dtype == bool:
-        bart = replace(bart, error_cov_inv=jnp.float32(1))
+        if (num_chains := bart.forest.num_chains()) is None:
+            error_cov_inv = jnp.float32(1)
+        else:
+            error_cov_inv = jnp.ones(num_chains)
+        bart = replace(bart, error_cov_inv=error_cov_inv)
         bart = step_trees(keys.pop(), bart)
         bart = replace(bart, error_cov_inv=None)
         return step_z(keys.pop(), bart)

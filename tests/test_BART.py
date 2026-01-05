@@ -1368,6 +1368,7 @@ class TestProfile:
         """Check that the result is the same in profiling mode."""
         bart = mc_gbart(**kw)
         with profile_mode(True):
+            kw.update(seed=random.clone(kw['seed']))
             bartp = mc_gbart(**kw)
 
         def check_same(_path, x, xp):

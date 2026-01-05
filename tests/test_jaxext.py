@@ -233,7 +233,7 @@ def test_split(keys):
 
     ks = keys.pop(4)
     k1 = jnp.stack([jaxext.split(k).pop() for k in ks])
-    k2 = jaxext.split(ks).pop()
+    k2 = jaxext.split(random.clone(ks)).pop()
     assert not different_keys(k1, k2)
 
 

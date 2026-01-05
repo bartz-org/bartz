@@ -1,6 +1,6 @@
 # bartz/src/bartz/_profiler.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -33,6 +33,8 @@ from jax import block_until_ready, debug, jit
 from jax.lax import cond, scan
 from jax.profiler import TraceAnnotation
 from jaxtyping import Array, Bool
+
+from bartz.mcmcstep._state import vmap_chains
 
 PROFILE_MODE: bool = False
 
@@ -151,6 +153,33 @@ def jit_and_block_if_profiling(
     return jab_outer_wrapper
 
 
+def jit_if_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T]:
+    """Apply JIT compilation only when profiling.
+
+    Parameters
+    ----------
+    func
+        Function to wrap.
+    *args
+    **kwargs
+        Additional arguments to pass to `jax.jit`.
+
+    Returns
+    -------
+    Wrapped function.
+    """
+    jitted_func = jit(func, *args, **kwargs)
+
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> T:
+        if get_profile_mode():
+            return jitted_func(*args, **kwargs)
+        else:
+            return func(*args, **kwargs)
+
+    return wrapper
+
+
 def jit_if_not_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T]:
     """Apply JIT compilation only when not profiling.
 
@@ -257,3 +286,31 @@ def callback_if_not_profiling(
         callback(*args, **kwargs)
     else:
         debug.callback(callback, *args, ordered=ordered, **kwargs)
+
+
+def vmap_chains_if_profiling(fun: Callable[..., T], **kwargs) -> Callable[..., T]:
+    """Apply `vmap_chains` only when profile mode is enabled."""
+    new_fun = vmap_chains(fun, **kwargs)
+
+    @wraps(fun)
+    def wrapper(*args, **kwargs):
+        if get_profile_mode():
+            return new_fun(*args, **kwargs)
+        else:
+            return fun(*args, **kwargs)
+
+    return wrapper
+
+
+def vmap_chains_if_not_profiling(fun: Callable[..., T], **kwargs) -> Callable[..., T]:
+    """Apply `vmap_chains` only when profile mode is disabled."""
+    new_fun = vmap_chains(fun, **kwargs)
+
+    @wraps(fun)
+    def wrapper(*args, **kwargs):
+        if get_profile_mode():
+            return fun(*args, **kwargs)
+        else:
+            return new_fun(*args, **kwargs)
+
+    return wrapper

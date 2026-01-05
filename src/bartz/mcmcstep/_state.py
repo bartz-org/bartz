@@ -27,7 +27,7 @@
 import math
 from collections.abc import Callable
 from dataclasses import fields
-from functools import partial
+from functools import partial, wraps
 from typing import Any, Literal, TypeVar
 
 from equinox import Module
@@ -199,12 +199,18 @@ class StepConfig(Module):
 
     Parameters
     ----------
+    steps_done
+        The number of MCMC steps completed so far.
+    sparse_on_at
+        After how many steps to turn on variable selection.
     resid_batch_size
     count_batch_size
         The data batch sizes for computing the sufficient statistics. If `None`,
         they are computed with no batching.
     """
 
+    steps_done: Int32[Array, '']
+    sparse_on_at: Int32[Array, ''] | None
     resid_batch_size: int | None = field(static=True)
     count_batch_size: int | None = field(static=True)
 
@@ -364,6 +370,7 @@ def init(
     a: float | Float32[Any, ''] | None = None,
     b: float | Float32[Any, ''] | None = None,
     rho: float | Float32[Any, ''] | None = None,
+    sparse_on_at: int | Integer[Any, ''] | None = None,
     num_chains: int | None = None,
 ) -> State:
     """
@@ -441,6 +448,8 @@ def init(
     b
     rho
         Parameters of the prior on `theta`. Required only to sample `theta`.
+    sparse_on_at
+        After how many MCMC steps to turn on variable selection.
     num_chains
         The number of independent MCMC chains to represent in the state. Single
         chain with scalar values if not specified.
@@ -493,6 +502,9 @@ def init(
         theta = rho
     if log_s is None and theta is not None:
         log_s = jnp.zeros(max_split.size)
+    if not _all_none_or_not_none(theta, sparse_on_at):
+        msg = 'sparsity params (either theta or rho,a,b) and sparse_on_at must be either all None or all set'
+        raise ValueError(msg)
 
     chain_shape = () if num_chains is None else (num_chains,)
     resid_shape = chain_shape + y.shape
@@ -566,7 +578,10 @@ def init(
             b=_asarray_or_none(b),
         ),
         config=StepConfig(
-            resid_batch_size=resid_batch_size, count_batch_size=count_batch_size
+            steps_done=jnp.int32(0),
+            sparse_on_at=_asarray_or_none(sparse_on_at),
+            resid_batch_size=resid_batch_size,
+            count_batch_size=count_batch_size,
         ),
     )
 
@@ -692,16 +707,21 @@ def get_num_chains(x: PyTree) -> int | None:
     return ref
 
 
-def _get_mc_in_axes(args: tuple) -> tuple[PyTree[int | None], ...]:
-    """Decide chain vmap axes for inputs."""
-    axes = chain_vmap_axes(args)
-    if is_key(args[0]):
-        axes = (0, *axes[1:])
-    return axes
+def _chain_axes_with_keys(x: PyTree) -> PyTree[int | None]:
+    """Return `chain_vmap_axes(x)` but also set to 0 for random keys."""
+    axes = chain_vmap_axes(x)
+
+    def axis_if_key(x, axis):
+        if is_key(x):
+            return 0
+        else:
+            return axis
+
+    return tree.map(axis_if_key, x, axes)
 
 
 def _get_mc_out_axes(
-    fun: Callable, args: tuple, in_axes: PyTree[int | None]
+    fun: Callable[[tuple, dict], PyTree], args: PyTree, in_axes: PyTree[int | None]
 ) -> PyTree[int | None]:
     """Decide chain vmap axes for outputs."""
     vmapped_fun = vmap(fun, in_axes=in_axes)
@@ -709,32 +729,42 @@ def _get_mc_out_axes(
     return chain_vmap_axes(out)
 
 
-def _split_keys_in_args(args: tuple, num_chains: int) -> tuple:
-    """If the first argument is a random key, split it into `num_chains` keys."""
-    a = args[0]
-    if is_key(a):
-        a = random.split(a, num_chains)
-    return (a, *args[1:])
+def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
+    """Split all random keys in `num_chains` keys."""
+
+    def split_key(x):
+        if is_key(x):
+            return random.split(x, num_chains)
+        else:
+            return x
+
+    return tree.map(split_key, x)
 
 
 T = TypeVar('T')
 
 
-def vmap_chains(fun: Callable[..., T]) -> Callable[..., T]:
-    """Apply vmap on chain axes automatically if the inputs are multichain.
+def vmap_chains(
+    fun: Callable[..., T], *, auto_split_keys: bool = False
+) -> Callable[..., T]:
+    """Apply vmap on chain axes automatically if the inputs are multichain."""
 
-    Makes restrictive simplifying assumptions on `fun`.
-    """
-
+    @wraps(fun)
     def auto_vmapped_fun(*args, **kwargs) -> T:
-        num_chains = get_num_chains(args)
+        all_args = args, kwargs
+        num_chains = get_num_chains(all_args)
         if num_chains is not None:
-            partial_fun = partial(fun, **kwargs)
-            args = _split_keys_in_args(args, num_chains)
-            mc_in_axes = _get_mc_in_axes(args)
-            mc_out_axes = _get_mc_out_axes(partial_fun, args, mc_in_axes)
-            vmapped_fun = vmap(partial_fun, in_axes=mc_in_axes, out_axes=mc_out_axes)
-            return vmapped_fun(*args)
+            if auto_split_keys:
+                all_args = _split_all_keys(all_args, num_chains)
+
+            def wrapped_fun(args, kwargs):
+                return fun(*args, **kwargs)
+
+            mc_in_axes = _chain_axes_with_keys(all_args)
+            mc_out_axes = _get_mc_out_axes(wrapped_fun, all_args, mc_in_axes)
+            vmapped_fun = vmap(wrapped_fun, in_axes=mc_in_axes, out_axes=mc_out_axes)
+            return vmapped_fun(*all_args)
+
         else:
             return fun(*args, **kwargs)
 

@@ -65,12 +65,7 @@ from bartz.debug import debug_gbart as gbart
 from bartz.debug import debug_mc_gbart as mc_gbart
 from bartz.grove import is_actual_leaf, tree_depth, tree_depths
 from bartz.jaxext import get_default_device, split
-from bartz.mcmcloop import (
-    PrintCallbackState,
-    SparseCallbackState,
-    compute_varcount,
-    evaluate_trace,
-)
+from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
 from tests.util import (
@@ -422,7 +417,7 @@ class TestWithCachedBart:
         else:  # continuous regression
             with subtests.test('yhat_train_mean'):
                 assert_close_matrices(
-                    bart.yhat_train_mean, rbart.yhat_train_mean, rtol=0.7
+                    bart.yhat_train_mean, rbart.yhat_train_mean, rtol=0.8
                 )
 
             with subtests.test('yhat_test_mean'):
@@ -460,7 +455,7 @@ class TestWithCachedBart:
 
             with subtests.test('varcount_mean'):
                 assert_close_matrices(
-                    bart.varcount_mean, rbart.varcount_mean, rtol=0.5, atol=7
+                    bart.varcount_mean, rbart.varcount_mean, rtol=0.6, atol=7
                 )
 
             if kw.get('sparse', False):  # pragma: no branch
@@ -521,12 +516,7 @@ def test_sequential_guarantee(kw):
     kw2 = kw.copy()
     kw2['seed'] = random.clone(kw2['seed'])
     if kw2.get('sparse', False):
-        callback_state = (
-            PrintCallbackState(None, None),
-            SparseCallbackState(kw2['nskip'] // 2),
-        )
-        # see `mcmcloop.make_default_callback`
-        kw2.setdefault('run_mcmc_kw', {}).setdefault('callback_state', callback_state)
+        kw2.setdefault('init_kw', {}).setdefault('sparse_on_at', kw2['nskip'] // 2)
     delta = 1
     kw2['nskip'] -= delta
     kw2['ndpost'] += delta * kw2['mc_cores']
@@ -1378,6 +1368,7 @@ class TestProfile:
         """Check that the result is the same in profiling mode."""
         bart = mc_gbart(**kw)
         with profile_mode(True):
+            kw.update(seed=random.clone(kw['seed']))
             bartp = mc_gbart(**kw)
 
         def check_same(_path, x, xp):

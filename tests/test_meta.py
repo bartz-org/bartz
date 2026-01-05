@@ -1,6 +1,6 @@
 # bartz/tests/test_meta.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -26,9 +26,8 @@
 
 from functools import partial
 
-import jax
 import pytest
-from jax import jit, random
+from jax import debug_nans, jit, random
 from jax import numpy as jnp
 from jax.errors import KeyReuseError
 
@@ -98,8 +97,8 @@ class TestJaxNoCopyBehavior:
 
     def test_unconditional_buffer_donation(self):
         """Test jax donates buffers even if they are small."""
-        # nan-debug mode makes jax create some copies apparently
-        with jax.debug_nans(False):
+        # donation disabled under debug_nans, see jax/issues/#33949
+        with debug_nans(False):
             # check buffer donation works unconditionally
             x = jnp.arange(100)
             xp = x.unsafe_buffer_pointer()
@@ -127,8 +126,8 @@ class TestJaxNoCopyBehavior:
 
     def test_jnp_array_no_copy_jit(self):
         """Check jnp.array does not make copies within jit."""
-        # nan-debug mode makes jax create some copies apparently
-        with jax.debug_nans(False):
+        # donation disabled under debug_nans, see jax/issues/#33949
+        with debug_nans(False):
             y = jnp.arange(100)
             yp = y.unsafe_buffer_pointer()
 

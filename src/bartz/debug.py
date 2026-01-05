@@ -311,29 +311,36 @@ def check_types(tree: TreeHeaps, max_split: UInt[Array, ' p']) -> bool:
     return (
         tree.var_tree.dtype == expected_var_dtype
         and tree.split_tree.dtype == expected_split_dtype
+        and jnp.issubdtype(max_split.dtype, jnp.unsignedinteger)
     )
 
 
 @check
-def check_sizes(tree: TreeHeaps, max_split: UInt[Array, ' p']) -> bool:  # noqa: ARG001
+def check_sizes(tree: TreeHeaps, _max_split: UInt[Array, ' p']) -> bool:
     """Check that array sizes are coherent."""
     return tree.leaf_tree.size == 2 * tree.var_tree.size == 2 * tree.split_tree.size
 
 
 @check
-def check_unused_node(tree: TreeHeaps, max_split: UInt[Array, ' p']) -> Bool[Array, '']:  # noqa: ARG001
+def check_unused_node(
+    tree: TreeHeaps, _max_split: UInt[Array, ' p']
+) -> Bool[Array, '']:
     """Check that the unused node slot at index 0 is not dirty."""
     return (tree.var_tree[0] == 0) & (tree.split_tree[0] == 0)
 
 
 @check
-def check_leaf_values(tree: TreeHeaps, max_split: UInt[Array, ' p']) -> Bool[Array, '']:  # noqa: ARG001
+def check_leaf_values(
+    tree: TreeHeaps, _max_split: UInt[Array, ' p']
+) -> Bool[Array, '']:
     """Check that all leaf values are not inf of nan."""
     return jnp.all(jnp.isfinite(tree.leaf_tree))
 
 
 @check
-def check_stray_nodes(tree: TreeHeaps, max_split: UInt[Array, ' p']) -> Bool[Array, '']:  # noqa: ARG001
+def check_stray_nodes(
+    tree: TreeHeaps, _max_split: UInt[Array, ' p']
+) -> Bool[Array, '']:
     """Check if there is any marked-non-leaf node with a marked-leaf parent."""
     index = jnp.arange(
         2 * tree.split_tree.size,
@@ -357,12 +364,12 @@ def check_rule_consistency(
 
     # initial boundaries of decision rules. use extreme integers instead of 0,
     # max_split to avoid checking if there is something out of bounds.
-    small = jnp.iinfo(jnp.int32).min
-    large = jnp.iinfo(jnp.int32).max
-    lower = jnp.full(max_split.size, small, jnp.int32)
-    upper = jnp.full(max_split.size, large, jnp.int32)
-    # specify the type explicitly, otherwise they are weakly types and get
-    # implicitly converted to split.dtype (typically uint8) in the expressions
+    dtype = tree.split_tree.dtype
+    small = jnp.iinfo(dtype).min
+    large = jnp.iinfo(dtype).max
+    lower = jnp.full(max_split.size, small, dtype)
+    upper = jnp.full(max_split.size, large, dtype)
+    # the split must be in (lower[var], upper[var]]
 
     def _check_recursive(node, lower, upper):
         # read decision rule
@@ -375,12 +382,12 @@ def check_rule_consistency(
         upper_var = upper.at[var].get(mode='fill', fill_value=large)
 
         # check rule is in bounds
-        bad = jnp.where(split, (split <= lower_var) | (split >= upper_var), False)
+        bad = jnp.where(split, (split <= lower_var) | (split > upper_var), False)
 
         # recurse
         if node < tree.var_tree.size // 2:
             idx = jnp.where(split, var, max_split.size)
-            bad |= _check_recursive(2 * node, lower, upper.at[idx].set(split))
+            bad |= _check_recursive(2 * node, lower, upper.at[idx].set(split - 1))
             bad |= _check_recursive(2 * node + 1, lower.at[idx].set(split), upper)
 
         return bad
@@ -488,7 +495,7 @@ def check_trace(
     vec_check_tree = jnp.vectorize(unpack_check_tree, signature=signature)
 
     # automatically batch over all batch dimensions
-    max_io_nbytes = 2**27  # 128 MiB
+    max_io_nbytes = 2**24  # 16 MiB
     batch_ndim = trace.split_tree.ndim - 1
     batched_check_tree = vec_check_tree
     for i in reversed(range(batch_ndim)):

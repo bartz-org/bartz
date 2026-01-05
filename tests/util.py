@@ -159,7 +159,7 @@ def assert_close_matrices(
         ratio = adnorm / dnorm if dnorm else np.nan
 
         msg = f"""\
-matrices actual and {ref} are not {cond} enough in 2-norm
+matrices actual and {ref} are not {cond} enough in {ord}-norm
 matrix shape: {desired.shape}
 norm(desired) = {dnorm:.2g}
 norm({expr}) = {adnorm:.2g}  (atol = {atol:.2g})

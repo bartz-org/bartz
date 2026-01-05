@@ -45,7 +45,7 @@ from jax import debug_nans, lax, random, vmap
 from jax import numpy as jnp
 from jax.lax import collapse
 from jax.scipy.linalg import solve_triangular
-from jax.scipy.special import ndtr
+from jax.scipy.special import logit, ndtr
 from jax.tree import map_with_path
 from jax.tree_util import KeyPath, tree_map_with_path
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, UInt
@@ -457,6 +457,8 @@ class TestWithCachedBart:
                 # having deeper trees, this 6 is not just "not good to sampling
                 # accuracy but close in practice."
                 assert rhat_varcount < 6
+
+            with subtests.test('varcount_mean'):
                 assert_close_matrices(
                     bart.varcount_mean, rbart.varcount_mean, rtol=0.5, atol=7
                 )
@@ -464,12 +466,18 @@ class TestWithCachedBart:
             if kw.get('sparse', False):  # pragma: no branch
                 with subtests.test('varprob'):
                     rhat_varprob = multivariate_rhat(
-                        [bart.varprob[:, 1:], rbart.varprob[:, 1:]]
+                        clipped_logit(
+                            jnp.stack([bart.varprob, rbart.varprob])[:, :, 1:], 1e-5
+                        )
                     )
                     # drop one component because varprob sums to 1
                     assert rhat_varprob < 3
-                    assert_allclose(
-                        bart.varprob_mean, rbart.varprob_mean, atol=0.15, rtol=0.4
+
+                with subtests.test('varprob_mean'):
+                    assert_close_matrices(
+                        logit(bart.varprob_mean[1:]),
+                        logit(rbart.varprob_mean[1:]),
+                        atol=0.6 * (p - 1) ** 0.5,
                     )
 
     def test_different_chains(self, cachedbart: CachedBart):
@@ -496,6 +504,11 @@ class TestWithCachedBart:
         assert_different(bart._mcmc_state, atol=0, rtol=0.05)
         assert_different(bart._main_trace, atol=0, rtol=0.03)
         assert_different(bart._burnin_trace, atol=0, rtol=0.03)
+
+
+def clipped_logit(x: Array, eps: float) -> Array:
+    """Compute the logit of x, clipping x to [eps, 1-eps] to avoid infinities."""
+    return logit(jnp.clip(x, eps, 1 - eps))
 
 
 def test_sequential_guarantee(kw):

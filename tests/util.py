@@ -91,6 +91,7 @@ def assert_close_matrices(
     atol: float = 0.0,
     tozero: bool = False,
     negate: bool = False,
+    ord: int | float | str | None = 2,  # noqa: A002
 ):
     """
     Check if two matrices are similar.
@@ -121,6 +122,9 @@ def assert_close_matrices(
     negate
         If True, invert the inequality, replacing <= with >=. This makes the
         function check the two matrices are different instead of similar.
+    ord
+        Passed to `numpy.linalg.norm` to specify the matrix norm to use, the
+        default is 2 which differs from numpy.
 
     Raises
     ------
@@ -150,8 +154,8 @@ def assert_close_matrices(
             cond = 'close'
             op = le
 
-        dnorm = linalg.norm(desired, 2)
-        adnorm = linalg.norm(eval(expr), 2)  # noqa: S307, expr is a literal
+        dnorm = linalg.norm(desired, ord)
+        adnorm = linalg.norm(eval(expr), ord)  # noqa: S307, expr is a literal
         ratio = adnorm / dnorm if dnorm else np.nan
 
         msg = f"""\

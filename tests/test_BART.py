@@ -487,7 +487,8 @@ class TestWithCachedBart:
                     ref = jnp.broadcast_to(x.mean(chain_axis, keepdims=True), x.shape)
                     x = collapse(x, 0, -1)
                     ref = collapse(ref, 0, -1)
-                    assert_different_matrices(x, ref, **kwargs)
+                    norm = 'fro' if x.ndim == 2 else 2
+                    assert_different_matrices(x, ref, ord=norm, **kwargs)
 
             axes = chain_vmap_axes(x)
             map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)

@@ -707,16 +707,21 @@ def get_num_chains(x: PyTree) -> int | None:
     return ref
 
 
-def _get_mc_in_axes(args: tuple) -> tuple[PyTree[int | None], ...]:
-    """Decide chain vmap axes for inputs."""
-    axes = chain_vmap_axes(args)
-    if is_key(args[0]):
-        axes = (0, *axes[1:])
-    return axes
+def _chain_axes_with_keys(x: PyTree) -> PyTree[int | None]:
+    """Return `chain_vmap_axes(x)` but also set to 0 for random keys."""
+    axes = chain_vmap_axes(x)
+
+    def axis_if_key(x, axis):
+        if is_key(x):
+            return 0
+        else:
+            return axis
+
+    return tree.map(axis_if_key, x, axes)
 
 
 def _get_mc_out_axes(
-    fun: Callable, args: tuple, in_axes: PyTree[int | None]
+    fun: Callable[[tuple, dict], PyTree], args: PyTree, in_axes: PyTree[int | None]
 ) -> PyTree[int | None]:
     """Decide chain vmap axes for outputs."""
     vmapped_fun = vmap(fun, in_axes=in_axes)
@@ -724,35 +729,41 @@ def _get_mc_out_axes(
     return chain_vmap_axes(out)
 
 
-def _split_keys_in_args(args: tuple, num_chains: int) -> tuple:
-    """If the first argument is a random key, split it into `num_chains` keys."""
-    a = args[0]
-    if is_key(a):
-        a = random.split(a, num_chains)
-    return (a, *args[1:])
+def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
+    """Split all random keys in `num_chains` keys."""
+
+    def split_key(x):
+        if is_key(x):
+            return random.split(x, num_chains)
+        else:
+            return x
+
+    return tree.map(split_key, x)
 
 
 T = TypeVar('T')
 
 
 def vmap_chains(
-    fun: Callable[..., T], *, auto_split_key: bool = False
+    fun: Callable[..., T], *, auto_split_keys: bool = False
 ) -> Callable[..., T]:
-    """Apply vmap on chain axes automatically if the inputs are multichain.
-
-    Makes restrictive simplifying assumptions on `fun`.
-    """
+    """Apply vmap on chain axes automatically if the inputs are multichain."""
 
     def auto_vmapped_fun(*args, **kwargs) -> T:
-        num_chains = get_num_chains(args)
+        all_args = args, kwargs
+        num_chains = get_num_chains(all_args)
         if num_chains is not None:
-            partial_fun = partial(fun, **kwargs)
-            if auto_split_key:
-                args = _split_keys_in_args(args, num_chains)
-            mc_in_axes = _get_mc_in_axes(args)
-            mc_out_axes = _get_mc_out_axes(partial_fun, args, mc_in_axes)
-            vmapped_fun = vmap(partial_fun, in_axes=mc_in_axes, out_axes=mc_out_axes)
-            return vmapped_fun(*args)
+            if auto_split_keys:
+                all_args = _split_all_keys(all_args, num_chains)
+
+            def wrapped_fun(args, kwargs):
+                return fun(*args, **kwargs)
+
+            mc_in_axes = _chain_axes_with_keys(all_args)
+            mc_out_axes = _get_mc_out_axes(wrapped_fun, all_args, mc_in_axes)
+            vmapped_fun = vmap(wrapped_fun, in_axes=mc_in_axes, out_axes=mc_out_axes)
+            return vmapped_fun(*all_args)
+
         else:
             return fun(*args, **kwargs)
 

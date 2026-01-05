@@ -51,7 +51,7 @@ from bartz.mcmcstep._state import State, chol_with_gersh, field
 
 
 @jit_if_not_profiling
-@partial(vmap_chains_if_not_profiling, auto_split_key=True)
+@partial(vmap_chains_if_not_profiling, auto_split_keys=True)
 def step(key: Key[Array, ''], bart: State) -> State:
     """
     Do one MCMC step.

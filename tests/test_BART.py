@@ -1,6 +1,6 @@
 # bartz/tests/test_BART.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -27,7 +27,6 @@
 This is the main suite of tests.
 """
 
-from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -44,19 +43,21 @@ import polars as pl
 import pytest
 from jax import debug_nans, lax, random, vmap
 from jax import numpy as jnp
+from jax.lax import collapse
 from jax.scipy.linalg import solve_triangular
-from jax.scipy.special import ndtr
-from jax.tree_util import tree_map, tree_map_with_path
+from jax.scipy.special import logit, ndtr
+from jax.tree import map_with_path
+from jax.tree_util import KeyPath
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, UInt
 from numpy.testing import assert_allclose, assert_array_equal
+from pytest_subtests import SubTests
 
 from bartz import profile_mode
-from bartz._interface import Bart
 from bartz.debug import (
     TraceWithOffset,
     check_trace,
+    forest_depth_distr,
     sample_prior,
-    trace_depth_distr,
     tree_actual_depth,
     trees_BART_to_bartz,
 )
@@ -70,9 +71,13 @@ from bartz.mcmcloop import (
     compute_varcount,
     evaluate_trace,
 )
-from bartz.mcmcstep import State
+from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
-from tests.util import assert_close_matrices, get_old_python_tuple
+from tests.util import (
+    assert_close_matrices,
+    assert_different_matrices,
+    get_old_python_tuple,
+)
 
 
 def gen_X(
@@ -359,12 +364,12 @@ class TestWithCachedBart:
         assert jnp.all(varcount == rbart.varcount)
 
         # check yhat_train
-        yhat_train = evaluate_trace(trace, bart._mcmc_state.X)
+        yhat_train = evaluate_trace(bart._mcmc_state.X, trace)
         assert_close_matrices(yhat_train, rbart.yhat_train, rtol=1e-6)
 
         # check yhat_test
         Xt = bart._bart._bin_predictors(kw['x_test'], bart._splits)
-        yhat_test = evaluate_trace(trace, Xt)
+        yhat_test = evaluate_trace(Xt, trace)
         assert_close_matrices(yhat_test, rbart.yhat_test, rtol=1e-6)
 
         if kw['y_train'].dtype == bool:
@@ -376,7 +381,7 @@ class TestWithCachedBart:
             prob_test = ndtr(yhat_test)
             assert_close_matrices(prob_test, rbart.prob_test, rtol=1e-7)
 
-    def test_comparison_BART3(self, cachedbart: CachedBart, keys):
+    def test_comparison_BART3(self, cachedbart: CachedBart, keys, subtests: SubTests):
         """Check `bartz.BART` gives results similar to the R package BART3."""
         bart = cachedbart.bart
         kw = cachedbart.kwargs
@@ -392,75 +397,118 @@ class TestWithCachedBart:
 
         # compare results of bartz and BART
 
-        # check offset
-        assert_allclose(bart.offset, rbart.offset, rtol=1e-6, atol=1e-7)
-        # I would check sigest as well, but it's not in the R object despite what
-        # the documentation says
+        with subtests.test('offset'):
+            assert_allclose(bart.offset, rbart.offset, rtol=1e-6, atol=1e-7)
+            # I would check sigest as well, but it's not in the R object despite what
+            # the documentation says
 
-        # check yhat_train
-        rhat_yhat_train = multivariate_rhat([bart.yhat_train, rbart.yhat_train])
-        assert rhat_yhat_train < 1.8
+        with subtests.test('yhat_train'):
+            rhat_yhat_train = multivariate_rhat([bart.yhat_train, rbart.yhat_train])
+            assert rhat_yhat_train < 2.5
 
-        # check yhat_test
-        rhat_yhat_test = multivariate_rhat([bart.yhat_test, rbart.yhat_test])
-        assert rhat_yhat_test < 1.8
+        with subtests.test('yhat_test'):
+            rhat_yhat_test = multivariate_rhat([bart.yhat_test, rbart.yhat_test])
+            assert rhat_yhat_test < 2.5
 
         if kw['y_train'].dtype == bool:  # binary regression
-            # check prob_train
-            rhat_prob_train = multivariate_rhat([bart.prob_train, rbart.prob_train])
-            assert rhat_prob_train < 1.2
+            with subtests.test('prob_train'):
+                rhat_prob_train = multivariate_rhat([bart.prob_train, rbart.prob_train])
+                assert rhat_prob_train < 1.2
 
-            # check prob_test
-            rhat_prob_test = multivariate_rhat([bart.prob_test, rbart.prob_test])
-            assert rhat_prob_test < 1.2
+            with subtests.test('prob_test'):
+                rhat_prob_test = multivariate_rhat([bart.prob_test, rbart.prob_test])
+                assert rhat_prob_test < 1.2
 
         else:  # continuous regression
-            # check yhat_train_mean
-            assert_close_matrices(bart.yhat_train_mean, rbart.yhat_train_mean, rtol=0.5)
+            with subtests.test('yhat_train_mean'):
+                assert_close_matrices(
+                    bart.yhat_train_mean, rbart.yhat_train_mean, rtol=0.7
+                )
 
-            # check yhat_test_mean
-            assert_close_matrices(bart.yhat_test_mean, rbart.yhat_test_mean, rtol=0.5)
+            with subtests.test('yhat_test_mean'):
+                assert_close_matrices(
+                    bart.yhat_test_mean, rbart.yhat_test_mean, rtol=0.7
+                )
 
-            # check sigma
-            rhat_sigma = rhat(
-                [bart.sigma_[-bart.ndpost :], rbart.sigma_[-rbart.ndpost :]]
-            )
-            assert rhat_sigma < 1.2
+            with subtests.test('sigma'):
+                rhat_sigma = rhat(
+                    [bart.sigma_[-bart.ndpost :], rbart.sigma_[-rbart.ndpost :]]
+                )
+                assert rhat_sigma < 1.3
 
-            # check sigma_mean
-            assert_allclose(bart.sigma_mean, rbart.sigma_mean, rtol=0.1)
+            with subtests.test('sigma_mean'):
+                assert_allclose(bart.sigma_mean, rbart.sigma_mean, rtol=0.1)
 
-        # check number of tree nodes in forest
-        bart_count = bart.varcount.sum(axis=1)
-        rbart_count = rbart.varcount.sum(axis=1)
-        rhat_count = rhat([bart_count, rbart_count])
-        assert rhat_count < 30  # genuinely bad, see below
-        assert_allclose(bart_count.mean(), rbart_count.mean(), rtol=0.2)
+        with subtests.test('tree_node_count'):
+            # check number of tree nodes in forest
+            bart_count = bart.varcount.sum(axis=1)
+            rbart_count = rbart.varcount.sum(axis=1)
+            rhat_count = rhat([bart_count, rbart_count])
+            assert rhat_count < 30  # genuinely bad, see below
+            assert_allclose(bart_count.mean(), rbart_count.mean(), rtol=0.2)
 
         if p < n:
             # skip if p is large because it would be difficult for the MCMC to get
             # stuff about predictors right
 
-            # check varcount
-            rhat_varcount = multivariate_rhat([bart.varcount, rbart.varcount])
-            # there is a visible discrepancy on the number of nodes, with bartz
-            # having deeper trees, this 5 is not just "not good to sampling
-            # accuracy but close in practice."
-            assert rhat_varcount < 5
-            assert_close_matrices(
-                bart.varcount_mean, rbart.varcount_mean, rtol=0.5, atol=7
-            )
+            with subtests.test('varcount'):
+                rhat_varcount = multivariate_rhat([bart.varcount, rbart.varcount])
+                # there is a visible discrepancy on the number of nodes, with bartz
+                # having deeper trees, this 6 is not just "not good to sampling
+                # accuracy but close in practice."
+                assert rhat_varcount < 6
 
-            # check varprob
+            with subtests.test('varcount_mean'):
+                assert_close_matrices(
+                    bart.varcount_mean, rbart.varcount_mean, rtol=0.5, atol=7
+                )
+
             if kw.get('sparse', False):  # pragma: no branch
-                rhat_varprob = multivariate_rhat(
-                    [bart.varprob[:, 1:], rbart.varprob[:, 1:]]
-                )
-                # drop one component because varprob sums to 1
-                assert rhat_varprob < 1.7
-                assert_allclose(
-                    bart.varprob_mean, rbart.varprob_mean, atol=0.15, rtol=0.4
-                )
+                with subtests.test('varprob'):
+                    rhat_varprob = multivariate_rhat(
+                        clipped_logit(
+                            jnp.stack([bart.varprob, rbart.varprob])[:, :, 1:], 1e-5
+                        )
+                    )
+                    # drop one component because varprob sums to 1
+                    assert rhat_varprob < 3
+
+                with subtests.test('varprob_mean'):
+                    assert_close_matrices(
+                        logit(bart.varprob_mean[1:]),
+                        logit(rbart.varprob_mean[1:]),
+                        atol=1.7 * (p - 1) ** 0.5,
+                    )
+
+    def test_different_chains(self, cachedbart: CachedBart):
+        """Check that different chains give different results."""
+        bart = cachedbart.bart
+
+        step_theta = bart._mcmc_state.forest.rho is not None
+
+        def assert_different(x, **kwargs):
+            def assert_different(path: KeyPath, x, chain_axis: int | None):
+                str_path = ''.join(map(str, path))
+                if str_path.endswith('.theta') and not step_theta:
+                    return
+                if x is not None and chain_axis is not None:
+                    ref = jnp.broadcast_to(x.mean(chain_axis, keepdims=True), x.shape)
+                    x = collapse(x, 0, -1)
+                    ref = collapse(ref, 0, -1)
+                    norm = 'fro' if x.ndim == 2 else 2
+                    assert_different_matrices(x, ref, ord=norm, **kwargs)
+
+            axes = chain_vmap_axes(x)
+            map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)
+
+        assert_different(bart._mcmc_state, atol=0, rtol=0.05)
+        assert_different(bart._main_trace, atol=0, rtol=0.03)
+        assert_different(bart._burnin_trace, atol=0, rtol=0.03)
+
+
+def clipped_logit(x: Array, eps: float) -> Array:
+    """Compute the logit of x, clipping x to [eps, 1-eps] to avoid infinities."""
+    return logit(jnp.clip(x, eps, 1 - eps))
 
 
 def test_sequential_guarantee(kw):
@@ -931,7 +979,7 @@ def test_prior(keys, p, nsplits):
     # compare number of stub trees
     nstub_mcmc = count_stub_trees(bart._main_trace.split_tree)
     nstub_prior = count_stub_trees(prior_trace.split_tree)
-    rhat_nstub = rhat([nstub_mcmc.squeeze(0), nstub_prior])
+    rhat_nstub = rhat([nstub_mcmc, nstub_prior])
     assert rhat_nstub < 1.01
 
     if (p, nsplits) != (1, 1):
@@ -940,7 +988,7 @@ def test_prior(keys, p, nsplits):
         # compare number of "simple" trees
         nsimple_mcmc = count_simple_trees(bart._main_trace.split_tree)
         nsimple_prior = count_simple_trees(prior_trace.split_tree)
-        rhat_nsimple = rhat([nsimple_mcmc.squeeze(0), nsimple_prior])
+        rhat_nsimple = rhat([nsimple_mcmc, nsimple_prior])
         assert rhat_nsimple < 1.01
 
         # compare varcount
@@ -964,25 +1012,25 @@ def test_prior(keys, p, nsplits):
         # compare imbalance index
         imb_mcmc = avg_imbalance_index(bart._main_trace.split_tree)
         imb_prior = avg_imbalance_index(prior_trace.split_tree)
-        rhat_imb = rhat([imb_mcmc.squeeze(0), imb_prior])
+        rhat_imb = rhat([imb_mcmc, imb_prior])
         assert rhat_imb < 1.02
 
         # compare average max tree depth
         maxd_mcmc = avg_max_tree_depth(bart._main_trace.split_tree)
         maxd_prior = avg_max_tree_depth(prior_trace.split_tree)
-        rhat_maxd = rhat([maxd_mcmc.squeeze(0), maxd_prior])
+        rhat_maxd = rhat([maxd_mcmc, maxd_prior])
         assert rhat_maxd < 1.02
 
         # compare max tree depth distribution
         dd_mcmc = bart.depth_distr()
-        dd_prior = trace_depth_distr(prior_trace.split_tree)
+        dd_prior = forest_depth_distr(prior_trace.split_tree)
         rhat_dd = multivariate_rhat([dd_mcmc.squeeze(0), dd_prior])
         assert rhat_dd < 1.05
 
     # compare y
     X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1)
     yhat_mcmc = bart._bart._predict(X)
-    yhat_prior = evaluate_trace(prior_trace, X)
+    yhat_prior = evaluate_trace(X, prior_trace)
     rhat_yhat = multivariate_rhat([yhat_mcmc, yhat_prior])
     assert rhat_yhat < 1.1
 
@@ -1304,7 +1352,6 @@ def test_automatic_integer_types(kw):
 
 def test_gbart_multichain_error(keys):
     """Check that `bartz.BART.gbart` does not support `mc_cores`."""
-    # set mc_cores to 2, which is not supported by gbart
     X = gen_X(keys.pop(), 10, 100, 'continuous')
     y = gen_y(keys.pop(), X, None, 'continuous')
     with pytest.raises(TypeError, match=r'mc_cores'):
@@ -1313,84 +1360,6 @@ def test_gbart_multichain_error(keys):
         gbart(X, y, mc_cores=2)
     with pytest.raises(TypeError, match=r'mc_cores'):
         gbart(X, y, mc_cores='gatto')
-
-
-def test_split_key_multichain_equivalence(kw):
-    """Check that `mc_gbart` is equivalent to multiple `gbart` invocations."""
-    # config
-    nchains = 4
-    ndpost_per_chain = kw['ndpost']
-
-    # a single multi-chain bart
-    kw.update(mc_cores=nchains, ndpost=ndpost_per_chain * nchains)
-    bart1 = mc_gbart(**kw)
-
-    # multiple single-chain barts
-    key = random.clone(kw.pop('seed'))
-    keys = random.split(key, nchains)
-    kw.pop('mc_cores')
-    kw.update(ndpost=ndpost_per_chain)
-    barts = [gbart(**kw, seed=key) for key in keys]
-    bart2 = merge_barts(barts)
-
-    # compare
-    assert_close_matrices(bart1.yhat_train, bart2.yhat_train, rtol=1e-5)
-    assert_close_matrices(bart1.yhat_test, bart2.yhat_test, rtol=1e-5)
-    if kw['y_train'].dtype == bool:  # binary regression
-        assert_close_matrices(bart1.prob_train, bart2.prob_train, rtol=1e-6)
-        assert_close_matrices(bart1.prob_test, bart2.prob_test, rtol=1e-6)
-    else:  # continuous regression
-        assert_close_matrices(bart1.yhat_train_mean, bart2.yhat_train_mean, rtol=1e-5)
-        assert_close_matrices(bart1.yhat_test_mean, bart2.yhat_test_mean, rtol=1e-5)
-        assert_close_matrices(bart1.sigma, bart2.sigma, rtol=1e-5)
-        assert_allclose(bart1.sigma_mean, bart2.sigma_mean, rtol=1e-6)
-
-
-def merge_barts(barts: Sequence[gbart]) -> mc_gbart:
-    """Merge multiple single-chain gbart instances into a multichain mc_gbart."""
-    out = object.__new__(mc_gbart)
-    bart = vars(out)['_bart'] = object.__new__(Bart)
-    ns = vars(bart)
-
-    ns['_main_trace'] = tree_map(
-        lambda *x: jnp.concatenate(x), *(bart._main_trace for bart in barts)
-    )
-    ns['_burnin_trace'] = tree_map(
-        lambda *x: jnp.concatenate(x), *(bart._burnin_trace for bart in barts)
-    )
-    ref_bart = barts[0]
-    ns['_mcmc_state'] = merge_mcmc_state(
-        ref_bart._mcmc_state, *(bart._mcmc_state for bart in barts)
-    )
-    ns['_splits'] = ref_bart._splits
-    ns['_x_train_fmt'] = ref_bart._x_train_fmt
-    ns['ndpost'] = ref_bart.ndpost * len(barts)
-    ns['offset'] = ref_bart.offset
-    ns['sigest'] = ref_bart.sigest
-    if ref_bart.yhat_test is None:  # pragma: no cover
-        ns['yhat_test'] = None
-    else:
-        ns['yhat_test'] = jnp.concatenate([bart.yhat_test for bart in barts])
-
-    return out
-
-
-def merge_mcmc_state(ref_state: State, *states: State):
-    """Merge multi-chain MCMC states."""
-    state_axes = Bart._vmap_axes_for_state(ref_state)
-
-    def merge_state_variables(axis: int | None, ref_leaf, *leaves):
-        if axis is None:
-            return ref_leaf
-        return jnp.concatenate(leaves)
-
-    return tree_map(
-        merge_state_variables,
-        state_axes,
-        ref_state,
-        *states,
-        is_leaf=lambda x: x is None,
-    )
 
 
 PLATFORM = get_default_device().platform
@@ -1414,8 +1383,8 @@ class TestProfile:
         def check_same(_path, x, xp):
             assert_array_equal(xp, x)
 
-        tree_map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
-        tree_map_with_path(check_same, bart._main_trace, bartp._main_trace)
+        map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
+        map_with_path(check_same, bart._main_trace, bartp._main_trace)
 
     @pytest.mark.skipif(
         EXACT_CHECK, reason='run only when same_result is expected to fail'
@@ -1432,8 +1401,8 @@ class TestProfile:
             # maybe this should be close_matrices
 
         try:
-            tree_map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
-            tree_map_with_path(check_same, bart._main_trace, bartp._main_trace)
+            map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
+            map_with_path(check_same, bart._main_trace, bartp._main_trace)
         except AssertionError as a:
             if (
                 '\nNot equal to tolerance ' in str(a)

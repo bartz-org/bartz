@@ -166,7 +166,7 @@ class Forest(Module):
     split_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
     affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
     max_split: UInt[Array, ' p']
-    blocked_vars: UInt[Array, ' k'] | None
+    blocked_vars: UInt[Array, ' q'] | None
     p_nonterminal: Float32[Array, ' 2**d']
     p_propose_grow: Float32[Array, ' 2**(d-1)']
     leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=True)

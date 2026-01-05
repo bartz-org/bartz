@@ -26,15 +26,14 @@
 
 import math
 from collections.abc import Sequence
-from functools import cached_property, partial
+from functools import cached_property
 from typing import Any, Literal, Protocol
 
 import jax
 import jax.numpy as jnp
 from equinox import Module, field
-from jax import lax
+from jax.lax import collapse
 from jax.scipy.special import ndtr
-from jax.tree import map_with_path
 from jaxtyping import (
     Array,
     Bool,
@@ -53,6 +52,8 @@ from bartz import mcmcloop, mcmcstep, prepcovars
 from bartz.jaxext import is_key
 from bartz.jaxext.scipy.special import ndtri
 from bartz.jaxext.scipy.stats import invgamma
+from bartz.mcmcloop import compute_varcount, evaluate_trace, run_mcmc
+from bartz.mcmcstep._state import get_num_chains
 
 FloatLike = float | Float[Any, '']
 
@@ -297,7 +298,7 @@ class Bart(Module):
         lamda: FloatLike | None = None,
         tau_num: FloatLike | None = None,
         offset: FloatLike | None = None,
-        w: Float[Array, ' n'] | None = None,
+        w: Float[Array, ' n'] | Series | None = None,
         ntree: int | None = None,
         numcut: int = 100,
         ndpost: int = 1000,
@@ -364,10 +365,10 @@ class Bart(Module):
             a,
             b,
             rho,
+            mc_cores,
         )
         final_state, burnin_trace, main_trace = self._run_mcmc(
             initial_state,
-            mc_cores,
             ndpost,
             nskip,
             keepevery,
@@ -437,57 +438,42 @@ class Bart(Module):
         if self._burnin_trace.error_cov_inv is None:
             return None
         assert self._main_trace.error_cov_inv is not None
-        sigma = jnp.sqrt(
+        return jnp.sqrt(
             jnp.reciprocal(
                 jnp.concatenate(
-                    [self._burnin_trace.error_cov_inv, self._main_trace.error_cov_inv],
-                    axis=1,
+                    [
+                        self._burnin_trace.error_cov_inv.T,
+                        self._main_trace.error_cov_inv.T,
+                    ],
+                    axis=0,
+                    # error_cov_inv has shape (chains? samples) in the trace
                 )
             )
         )
-        sigma = sigma.T
-        _, mc_cores = sigma.shape
-        if mc_cores == 1:
-            sigma = sigma.squeeze(1)
-        return sigma
 
     @cached_property
     def sigma_(self) -> Float32[Array, 'ndpost'] | None:
         """The standard deviation of the error, only over the post-burnin samples and flattened."""
         if self.sigma is None:
             return None
-        _, nskip = self._burnin_trace.grow_prop_count.shape
+        nskip = self._burnin_trace.grow_prop_count.shape[-1]
         sigma = self.sigma[nskip:, ...]
         return sigma.reshape(-1)
 
     @cached_property
     def sigma_mean(self) -> Float32[Array, ''] | None:
         """The mean of `sigma`, only over the post-burnin samples."""
-        if self.sigma is None:
+        if self.sigma_ is None:
             return None
-        _, nskip = self._burnin_trace.grow_prop_count.shape
-        return self.sigma[nskip:, ...].mean()
+        return self.sigma_.mean()
 
     @cached_property
     def varcount(self) -> Int32[Array, 'ndpost p']:
         """Histogram of predictor usage for decision rules in the trees."""
-        return self._compute_varcount_multichain_flattened(
-            self._mcmc_state.forest.max_split.size, self._main_trace
-        )
-
-    @staticmethod
-    @partial(jax.vmap, in_axes=(None, 0))
-    def _compute_varcount_multichain(
-        p: int, main_trace: mcmcloop.MainTrace
-    ) -> Int32[Array, 'mc_cores ndpost/mc_cores p']:
-        return mcmcloop.compute_varcount(p, main_trace)
-
-    @classmethod
-    @partial(jax.jit, static_argnums=(0, 1))
-    def _compute_varcount_multichain_flattened(
-        cls, p: int, main_trace: mcmcloop.MainTrace
-    ) -> Int32[Array, 'ndpost p']:
-        return cls._compute_varcount_multichain(p, main_trace).reshape(-1, p)
+        p = self._mcmc_state.forest.max_split.size
+        varcount: Int32[Array, '*chains samples p']
+        varcount = compute_varcount(p, self._main_trace)
+        return collapse(varcount, 0, -1)
 
     @cached_property
     def varcount_mean(self) -> Float32[Array, ' p']:
@@ -598,6 +584,7 @@ class Bart(Module):
     def _process_error_variance_settings(
         x_train, y_train, sigest, sigdf, sigquant, lamda
     ) -> tuple[Float32[Array, ''] | None, ...]:
+        """Return (lamda, sigest)."""
         if y_train.dtype == bool:
             if sigest is not None:
                 msg = 'Let `sigest=None` for binary regression'
@@ -668,6 +655,7 @@ class Bart(Module):
         | tuple[FloatLike, None, None, None]
         | tuple[None, FloatLike, FloatLike, FloatLike]
     ):
+        """Return (theta, a, b, rho)."""
         if not sparse:
             return None, None, None, None
         elif theta is not None:
@@ -683,6 +671,7 @@ class Bart(Module):
         y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
         offset: float | Float32[Any, ''] | None,
     ) -> Float32[Array, '']:
+        """Return offset."""
         if offset is not None:
             return jnp.asarray(offset)
         elif y_train.size < 1:
@@ -704,6 +693,7 @@ class Bart(Module):
         ntree: int,
         tau_num: FloatLike | None,
     ):
+        """Return sigma_mu."""
         if tau_num is None:
             if y_train.dtype == bool:
                 tau_num = 3.0
@@ -757,6 +747,7 @@ class Bart(Module):
         a: FloatLike | None,
         b: FloatLike | None,
         rho: FloatLike | None,
+        mc_cores: int,
     ):
         depth = jnp.arange(maxdepth - 1)
         p_nonterminal = base / (1 + depth).astype(float) ** power
@@ -765,11 +756,12 @@ class Bart(Module):
             error_cov_df = None
             error_cov_scale = None
         else:
+            assert lamda is not None
             # inverse gamma prior: alpha = df / 2, beta = scale / 2
             error_cov_df = sigdf
             error_cov_scale = lamda * sigdf
 
-        kw = dict(
+        kw: dict = dict(
             X=x_train,
             # copy y_train because it's going to be donated in the mcmc loop
             y=jnp.array(y_train),
@@ -778,7 +770,7 @@ class Bart(Module):
             max_split=max_split,
             num_trees=ntree,
             p_nonterminal=p_nonterminal,
-            leaf_prior_cov_inv=lax.reciprocal(jnp.square(sigma_mu)),
+            leaf_prior_cov_inv=jnp.reciprocal(jnp.square(sigma_mu)),
             error_cov_df=error_cov_df,
             error_cov_scale=error_cov_scale,
             min_points_per_decision_node=10,
@@ -787,6 +779,7 @@ class Bart(Module):
             a=a,
             b=b,
             rho=rho,
+            num_chains=None if mc_cores == 1 else mc_cores,
         )
 
         if rm_const is None:
@@ -809,7 +802,6 @@ class Bart(Module):
     def _run_mcmc(
         cls,
         mcmc_state: mcmcstep.State,
-        mc_cores: int,
         ndpost: int,
         nskip: int,
         keepevery: int,
@@ -825,10 +817,13 @@ class Bart(Module):
             key = jax.random.key(seed)
 
         # round up ndpost
-        ndpost = mc_cores * (ndpost // mc_cores + bool(ndpost % mc_cores))
+        num_chains = get_num_chains(mcmc_state)
+        if num_chains is None:
+            num_chains = 1
+        n_save = ndpost // num_chains + bool(ndpost % num_chains)
 
         # prepare arguments
-        kw = dict(n_burn=nskip, n_skip=keepevery, inner_loop_length=printevery)
+        kw: dict = dict(n_burn=nskip, n_skip=keepevery, inner_loop_length=printevery)
         kw.update(
             mcmcloop.make_default_callback(
                 dot_every=None if printevery is None or printevery == 1 else 1,
@@ -839,93 +834,9 @@ class Bart(Module):
         if run_mcmc_kw is not None:
             kw.update(run_mcmc_kw)
 
-        if mc_cores == 1:
-            return cls._single_run_mcmc(key, mcmc_state, ndpost, **kw)
-        else:
-            keys = jax.random.split(key, mc_cores)
-            return cls._vmapped_run_mcmc(keys, mcmc_state, ndpost // mc_cores, **kw)
-
-    @classmethod
-    def _single_run_mcmc(
-        cls, key: Key[Array, ''], bart: mcmcstep.State, *args, **kwargs
-    ) -> tuple[mcmcstep.State, mcmcloop.BurninTrace, mcmcloop.MainTrace]:
-        out = mcmcloop.run_mcmc(key, bart, *args, **kwargs)
-        return cls._add_multichain_index(out)
-
-    @classmethod
-    @partial(jax.jit, static_argnums=(0,), donate_argnums=(1,))
-    def _add_multichain_index(
-        cls,
-        run_mcmc_output: tuple[
-            mcmcstep.State, mcmcloop.BurninTrace, mcmcloop.MainTrace
-        ],
-    ) -> tuple[mcmcstep.State, mcmcloop.BurninTrace, mcmcloop.MainTrace]:
-        bart, _, _ = run_mcmc_output
-        axes = cls._vmap_axes_for_state(bart)
-        return jax.vmap(lambda x: x, in_axes=None, out_axes=(axes, 0, 0), axis_size=1)(
-            run_mcmc_output
-        )
-
-    @classmethod
-    def _vmapped_run_mcmc(
-        cls, keys: Key[Array, ' mc_cores'], bart: mcmcstep.State, *args, **kwargs
-    ) -> tuple[mcmcstep.State, mcmcloop.BurninTrace, mcmcloop.MainTrace]:
-        bart_axes = cls._vmap_axes_for_state(bart)
-
-        barts = jax.vmap(
-            lambda x: x, in_axes=None, out_axes=bart_axes, axis_size=keys.size
-        )(bart)
-
-        @partial(jax.vmap, in_axes=(0, bart_axes), out_axes=(bart_axes, 0, 0))
-        def _partial_vmapped_run_mcmc(key, bart):
-            return mcmcloop.run_mcmc(key, bart, *args, **kwargs)
-
-        return _partial_vmapped_run_mcmc(keys, barts)
-
-    @staticmethod
-    def _vmap_axes_for_state(state: mcmcstep.State) -> mcmcstep.State:
-        def choose_vmap_index(path, _) -> Literal[0, None]:
-            no_vmap_attrs = (
-                '.X',
-                '.y',
-                '.offset',
-                '.prec_scale',
-                '.error_cov_df',
-                '.error_cov_scale',
-                '.forest.max_split',
-                '.forest.blocked_vars',
-                '.forest.p_nonterminal',
-                '.forest.p_propose_grow',
-                '.forest.min_points_per_decision_node',
-                '.forest.min_points_per_leaf',
-                '.forest.leaf_prior_cov_inv',
-                '.forest.a',
-                '.forest.b',
-                '.forest.rho',
-            )
-            str_path = ''.join(map(str, path))
-            if str_path in no_vmap_attrs:
-                return None
-            else:
-                return 0
-
-        return map_with_path(choose_vmap_index, state)
+        return run_mcmc(key, mcmc_state, n_save, **kw)
 
     def _predict(self, x: UInt[Array, 'p m']) -> Float32[Array, 'ndpost m']:
-        return self._evaluate_chains_flattened(self._main_trace, x)
-
-    @classmethod
-    @partial(jax.jit, static_argnums=(0,))
-    def _evaluate_chains_flattened(
-        cls, trace: mcmcloop.MainTrace, x: UInt[Array, 'p m']
-    ) -> Float32[Array, 'ndpost m']:
-        out = cls._evaluate_chains(trace, x)
-        mc_cores, ndpost_per_chain, m = out.shape
-        return out.reshape(mc_cores * ndpost_per_chain, m)
-
-    @staticmethod
-    @partial(jax.vmap, in_axes=(0, None))
-    def _evaluate_chains(
-        trace: mcmcloop.MainTrace, x: UInt[Array, 'p m']
-    ) -> Float32[Array, 'mc_cores ndpost/mc_cores m']:
-        return mcmcloop.evaluate_trace(trace, x)
+        """Evaluate trees on already quantized `x`."""
+        out = evaluate_trace(x, self._main_trace)
+        return collapse(out, 0, -1)

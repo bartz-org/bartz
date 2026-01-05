@@ -473,7 +473,7 @@ class Bart(Module):
         p = self._mcmc_state.forest.max_split.size
         varcount: Int32[Array, '*chains samples p']
         varcount = compute_varcount(p, self._main_trace)
-        return varcount.reshape(-1, p)
+        return collapse(varcount, 0, -1)
 
     @cached_property
     def varcount_mean(self) -> Float32[Array, ' p']:

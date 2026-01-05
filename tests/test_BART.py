@@ -47,7 +47,7 @@ from jax.lax import collapse
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logit, ndtr
 from jax.tree import map_with_path
-from jax.tree_util import KeyPath, tree_map_with_path
+from jax.tree_util import KeyPath
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, UInt
 from numpy.testing import assert_allclose, assert_array_equal
 from pytest_subtests import SubTests
@@ -1383,8 +1383,8 @@ class TestProfile:
         def check_same(_path, x, xp):
             assert_array_equal(xp, x)
 
-        tree_map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
-        tree_map_with_path(check_same, bart._main_trace, bartp._main_trace)
+        map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
+        map_with_path(check_same, bart._main_trace, bartp._main_trace)
 
     @pytest.mark.skipif(
         EXACT_CHECK, reason='run only when same_result is expected to fail'
@@ -1401,8 +1401,8 @@ class TestProfile:
             # maybe this should be close_matrices
 
         try:
-            tree_map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
-            tree_map_with_path(check_same, bart._main_trace, bartp._main_trace)
+            map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
+            map_with_path(check_same, bart._main_trace, bartp._main_trace)
         except AssertionError as a:
             if (
                 '\nNot equal to tolerance ' in str(a)

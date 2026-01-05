@@ -197,7 +197,7 @@ def evaluate_forest(
     *,
     sum_batch_axis: int | tuple[int, ...] = (),
 ) -> (
-    Float32[Array, '*reduced_batch_size n'] | Float32[Array, '*reduced_batch_size n k']
+    Float32[Array, '*reduced_batch_size n'] | Float32[Array, '*reduced_batch_size k n']
 ):
     """
     Evaluate an ensemble of trees at an array of points.
@@ -222,23 +222,23 @@ def evaluate_forest(
 
     is_mv = trees.leaf_tree.ndim != trees.var_tree.ndim
 
-    bc_indices: UInt[Array, '*forest_shape n 1'] | UInt[Array, '*forest_shape n 1 1']
-    bc_indices = indices[..., None, None] if is_mv else indices[..., None]
+    bc_indices: UInt[Array, '*forest_shape n 1'] | UInt[Array, '*forest_shape 1 n 1']
+    bc_indices = indices[..., None, :, None] if is_mv else indices[..., None]
 
     bc_leaf_tree: (
         Float32[Array, '*forest_shape 1 tree_size']
-        | Float32[Array, '*forest_shape 1 k tree_size']
+        | Float32[Array, '*forest_shape k 1 tree_size']
     )
     bc_leaf_tree = (
-        trees.leaf_tree[..., None, :, :] if is_mv else trees.leaf_tree[..., None, :]
+        trees.leaf_tree[..., :, None, :] if is_mv else trees.leaf_tree[..., None, :]
     )
 
     bc_leaves: (
-        Float32[Array, '*forest_shape n 1'] | Float32[Array, '*forest_shape n k 1']
+        Float32[Array, '*forest_shape n 1'] | Float32[Array, '*forest_shape k n 1']
     )
     bc_leaves = jnp.take_along_axis(bc_leaf_tree, bc_indices, -1)
 
-    leaves: Float32[Array, '*forest_shape n'] | Float32[Array, '*forest_shape n k']
+    leaves: Float32[Array, '*forest_shape n'] | Float32[Array, '*forest_shape k n']
     leaves = jnp.squeeze(bc_leaves, -1)
 
     axis = normalize_axis_tuple(sum_batch_axis, trees.var_tree.ndim - 1)

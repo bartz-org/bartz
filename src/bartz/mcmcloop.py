@@ -715,7 +715,7 @@ class TreesTrace(Module):
 @jit
 def evaluate_trace(
     X: UInt[Array, 'p n'], trace: Trace
-) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape n k']:
+) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']:
     """
     Compute predictions for all iterations of the BART MCMC.
 
@@ -732,22 +732,19 @@ def evaluate_trace(
     """
     # batch evaluate_forest over chains and samples to limit memory usage
     has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
-    max_memory = 2**27  # 128 MiB
+    max_io_nbytes = 2**27  # 128 MiB
     batched_eval = partial(evaluate_forest, sum_batch_axis=-1)  # sum over trees
     if has_chains:
-        batched_eval = autobatch(batched_eval, max_memory, (None, 1), 1)
-    batched_eval = autobatch(batched_eval, max_memory, (None, 0))
+        batched_eval = autobatch(batched_eval, max_io_nbytes, (None, 1), 1)
+    batched_eval = autobatch(batched_eval, max_io_nbytes, (None, 0))
 
     # extract only the trees from the trace
     trees = TreesTrace.from_dataclass(trace)
 
     # evaluate trees
-    y_centered: Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape n k']
+    y_centered: Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']
     y_centered = batched_eval(X, trees)
-
-    # add offset, trace.offset has shape (samples k?)
-    offset = jnp.expand_dims(trace.offset, 1)
-    return y_centered + offset
+    return y_centered + trace.offset[..., None]
 
 
 @partial(jit, static_argnums=(0,))

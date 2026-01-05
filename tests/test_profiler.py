@@ -1,6 +1,6 @@
 # bartz/tests/test_profiler.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -245,7 +245,7 @@ class TestJitAndBlockIfProfiling:
                     n = 2000
                 case 'gpu':
                     n = 10_000
-                case _:
+                case _:  # pragma: no cover
                     msg = f'Unsupported platform for timing test: {platform}'
                     raise RuntimeError(msg)
 

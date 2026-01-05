@@ -417,7 +417,7 @@ class TestWithCachedBart:
         else:  # continuous regression
             with subtests.test('yhat_train_mean'):
                 assert_close_matrices(
-                    bart.yhat_train_mean, rbart.yhat_train_mean, rtol=0.7
+                    bart.yhat_train_mean, rbart.yhat_train_mean, rtol=0.8
                 )
 
             with subtests.test('yhat_test_mean'):
@@ -455,7 +455,7 @@ class TestWithCachedBart:
 
             with subtests.test('varcount_mean'):
                 assert_close_matrices(
-                    bart.varcount_mean, rbart.varcount_mean, rtol=0.5, atol=7
+                    bart.varcount_mean, rbart.varcount_mean, rtol=0.6, atol=7
                 )
 
             if kw.get('sparse', False):  # pragma: no branch

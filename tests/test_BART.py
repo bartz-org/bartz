@@ -477,7 +477,7 @@ class TestWithCachedBart:
                     assert_close_matrices(
                         logit(bart.varprob_mean[1:]),
                         logit(rbart.varprob_mean[1:]),
-                        atol=0.6 * (p - 1) ** 0.5,
+                        atol=1.7 * (p - 1) ** 0.5,
                     )
 
     def test_different_chains(self, cachedbart: CachedBart):

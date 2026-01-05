@@ -292,6 +292,7 @@ def vmap_chains_if_profiling(fun: Callable[..., T], **kwargs) -> Callable[..., T
     """Apply `vmap_chains` only when profile mode is enabled."""
     new_fun = vmap_chains(fun, **kwargs)
 
+    @wraps(fun)
     def wrapper(*args, **kwargs):
         if get_profile_mode():
             return new_fun(*args, **kwargs)
@@ -305,6 +306,7 @@ def vmap_chains_if_not_profiling(fun: Callable[..., T], **kwargs) -> Callable[..
     """Apply `vmap_chains` only when profile mode is disabled."""
     new_fun = vmap_chains(fun, **kwargs)
 
+    @wraps(fun)
     def wrapper(*args, **kwargs):
         if get_profile_mode():
             return fun(*args, **kwargs)

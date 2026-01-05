@@ -30,13 +30,11 @@ outputting a new state. The inputs are not modified.
 
 The entry points are:
 
-  - `State`: The dataclass that represents a BART MCMC state.
   - `init`: Creates an initial `State` from data and configurations.
   - `step`: Performs one full MCMC step on a `State`, returning a new `State`.
-  - `step_sparse`: Performs the MCMC update for variable selection, which is skipped in `step`.
 """
 
 # ruff: noqa: F401
 
 from bartz.mcmcstep._state import Forest, State, init
-from bartz.mcmcstep._step import step, step_sparse
+from bartz.mcmcstep._step import step

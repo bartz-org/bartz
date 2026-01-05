@@ -27,7 +27,7 @@
 import math
 from collections.abc import Callable
 from dataclasses import fields
-from functools import partial
+from functools import partial, wraps
 from typing import Any, Literal, TypeVar
 
 from equinox import Module
@@ -749,6 +749,7 @@ def vmap_chains(
 ) -> Callable[..., T]:
     """Apply vmap on chain axes automatically if the inputs are multichain."""
 
+    @wraps(fun)
     def auto_vmapped_fun(*args, **kwargs) -> T:
         all_args = args, kwargs
         num_chains = get_num_chains(all_args)

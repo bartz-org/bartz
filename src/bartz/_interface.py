@@ -366,16 +366,11 @@ class Bart(Module):
             b,
             rho,
             mc_cores,
+            sparse,
+            nskip,
         )
         final_state, burnin_trace, main_trace = self._run_mcmc(
-            initial_state,
-            ndpost,
-            nskip,
-            keepevery,
-            printevery,
-            seed,
-            run_mcmc_kw,
-            sparse,
+            initial_state, ndpost, nskip, keepevery, printevery, seed, run_mcmc_kw
         )
 
         # set public attributes
@@ -748,6 +743,8 @@ class Bart(Module):
         b: FloatLike | None,
         rho: FloatLike | None,
         mc_cores: int,
+        sparse: bool,
+        nskip: int,
     ):
         depth = jnp.arange(maxdepth - 1)
         p_nonterminal = base / (1 + depth).astype(float) ** power
@@ -779,6 +776,7 @@ class Bart(Module):
             a=a,
             b=b,
             rho=rho,
+            sparse_on_at=nskip // 2 if sparse else None,
             num_chains=None if mc_cores == 1 else mc_cores,
         )
 
@@ -808,7 +806,6 @@ class Bart(Module):
         printevery: int | None,
         seed: int | Integer[Array, ''] | Key[Array, ''],
         run_mcmc_kw: dict | None,
-        sparse: bool,
     ) -> tuple[mcmcstep.State, mcmcloop.BurninTrace, mcmcloop.MainTrace]:
         # prepare random generator seed
         if is_key(seed):
@@ -828,7 +825,6 @@ class Bart(Module):
             mcmcloop.make_default_callback(
                 dot_every=None if printevery is None or printevery == 1 else 1,
                 report_every=printevery,
-                sparse_on_at=nskip // 2 if sparse else None,
             )
         )
         if run_mcmc_kw is not None:

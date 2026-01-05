@@ -477,7 +477,6 @@ def make_default_callback(
     *,
     dot_every: int | Integer[Array, ''] | None = 1,
     report_every: int | Integer[Array, ''] | None = 100,
-    sparse_on_at: int | Integer[Array, ''] | None = None,
 ) -> dict[str, Any]:
     """
     Prepare a default callback for `run_mcmc`.
@@ -492,9 +491,6 @@ def make_default_callback(
     report_every
         A one line report is printed every `report_every` MCMC iterations,
         `None` to disable.
-    sparse_on_at
-        If specified, variable selection is activated starting from this
-        iteration. If `None`, variable selection is not used.
 
     Returns
     -------
@@ -509,22 +505,11 @@ def make_default_callback(
         return None if val is None else jnp.asarray(val)
 
     return dict(
-        callback=_default_callback,
-        callback_state=(
-            PrintCallbackState(
-                asarray_or_none(dot_every), asarray_or_none(report_every)
-            ),
-            SparseCallbackState(asarray_or_none(sparse_on_at)),
+        callback=print_callback,
+        callback_state=PrintCallbackState(
+            asarray_or_none(dot_every), asarray_or_none(report_every)
         ),
     )
-
-
-def _default_callback(*, bart, callback_state, **kwargs):
-    print_state, sparse_state = callback_state
-    bart, _ = sparse_callback(callback_state=sparse_state, bart=bart, **kwargs)
-    print_callback(callback_state=print_state, bart=bart, **kwargs)
-    return bart, callback_state
-    # here I assume that the callbacks don't update their states
 
 
 class PrintCallbackState(Module):
@@ -657,37 +642,6 @@ def _print_report(
         f'move acc: {move_acc:.0%}, '
         f'fill: {fill:.0%}{suffix}'
     )
-
-
-class SparseCallbackState(Module):
-    """State for `sparse_callback`.
-
-    Parameters
-    ----------
-    sparse_on_at
-        If specified, variable selection is activated starting from this
-        iteration. If `None`, variable selection is not used.
-    """
-
-    sparse_on_at: Int32[Array, ''] | None
-
-
-def sparse_callback(
-    *,
-    key: Key[Array, ''],
-    bart: State,
-    i_total: Int32[Array, ''],
-    callback_state: SparseCallbackState,
-    **_,
-):
-    """Perform variable selection, see `mcmcstep.step_sparse`."""
-    if callback_state.sparse_on_at is not None:
-        bart = cond_if_not_profiling(
-            i_total < callback_state.sparse_on_at,
-            lambda: bart,
-            lambda: mcmcstep.step_sparse(key, bart),
-        )
-    return bart, callback_state
 
 
 class Trace(TreeHeaps, Protocol):

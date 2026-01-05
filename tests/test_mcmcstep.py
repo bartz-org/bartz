@@ -574,6 +574,8 @@ class TestMultichain:
                 '.forest.a',
                 '.forest.b',
                 '.forest.rho',
+                '.config.sparse_on_at',
+                '.config.steps_done',
             )
             str_path = ''.join(map(str, path))
             if str_path in no_vmap_attrs:

@@ -1,6 +1,6 @@
 # bartz/benchmarks/speed.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -183,6 +183,8 @@ def vmap_axes_for_state(state):
             'a',
             'b',
             'rho',
+            'sparse_on_at',
+            'steps_done',
         )
         str_path = ''.join(map(str, path))
         if any(match(rf'\b{escape(attr)}\b', str_path) for attr in no_vmap_attrs):

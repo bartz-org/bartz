@@ -199,12 +199,18 @@ class StepConfig(Module):
 
     Parameters
     ----------
+    steps_done
+        The number of MCMC steps completed so far.
+    sparse_on_at
+        After how many steps to turn on variable selection.
     resid_batch_size
     count_batch_size
         The data batch sizes for computing the sufficient statistics. If `None`,
         they are computed with no batching.
     """
 
+    steps_done: Int32[Array, '']
+    sparse_on_at: Int32[Array, ''] | None
     resid_batch_size: int | None = field(static=True)
     count_batch_size: int | None = field(static=True)
 
@@ -364,6 +370,7 @@ def init(
     a: float | Float32[Any, ''] | None = None,
     b: float | Float32[Any, ''] | None = None,
     rho: float | Float32[Any, ''] | None = None,
+    sparse_on_at: int | Integer[Any, ''] | None = None,
     num_chains: int | None = None,
 ) -> State:
     """
@@ -441,6 +448,8 @@ def init(
     b
     rho
         Parameters of the prior on `theta`. Required only to sample `theta`.
+    sparse_on_at
+        After how many MCMC steps to turn on variable selection.
     num_chains
         The number of independent MCMC chains to represent in the state. Single
         chain with scalar values if not specified.
@@ -493,6 +502,9 @@ def init(
         theta = rho
     if log_s is None and theta is not None:
         log_s = jnp.zeros(max_split.size)
+    if not _all_none_or_not_none(theta, sparse_on_at):
+        msg = 'sparsity params (either theta or rho,a,b) and sparse_on_at must be either all None or all set'
+        raise ValueError(msg)
 
     chain_shape = () if num_chains is None else (num_chains,)
     resid_shape = chain_shape + y.shape
@@ -566,7 +578,10 @@ def init(
             b=_asarray_or_none(b),
         ),
         config=StepConfig(
-            resid_batch_size=resid_batch_size, count_batch_size=count_batch_size
+            steps_done=jnp.int32(0),
+            sparse_on_at=_asarray_or_none(sparse_on_at),
+            resid_batch_size=resid_batch_size,
+            count_batch_size=count_batch_size,
         ),
     )
 
@@ -720,7 +735,9 @@ def _split_keys_in_args(args: tuple, num_chains: int) -> tuple:
 T = TypeVar('T')
 
 
-def vmap_chains(fun: Callable[..., T]) -> Callable[..., T]:
+def vmap_chains(
+    fun: Callable[..., T], *, auto_split_key: bool = False
+) -> Callable[..., T]:
     """Apply vmap on chain axes automatically if the inputs are multichain.
 
     Makes restrictive simplifying assumptions on `fun`.
@@ -730,7 +747,8 @@ def vmap_chains(fun: Callable[..., T]) -> Callable[..., T]:
         num_chains = get_num_chains(args)
         if num_chains is not None:
             partial_fun = partial(fun, **kwargs)
-            args = _split_keys_in_args(args, num_chains)
+            if auto_split_key:
+                args = _split_keys_in_args(args, num_chains)
             mc_in_axes = _get_mc_in_axes(args)
             mc_out_axes = _get_mc_out_axes(partial_fun, args, mc_in_axes)
             vmapped_fun = vmap(partial_fun, in_axes=mc_in_axes, out_axes=mc_out_axes)

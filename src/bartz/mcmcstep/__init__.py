@@ -25,11 +25,6 @@
 """
 Functions that implement the BART posterior MCMC initialization and update step.
 
-Functions that do MCMC steps operate by taking as input a bart state, and
-outputting a new state. The inputs are not modified.
-
-The entry points are:
-
   - `init`: Creates an initial `State` from data and configurations.
   - `step`: Performs one full MCMC step on a `State`, returning a new `State`.
 """

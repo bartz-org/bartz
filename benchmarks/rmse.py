@@ -1,6 +1,6 @@
 # bartz/benchmarks/rmse.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -32,10 +32,7 @@ from io import StringIO
 from jax import jit, random, vmap
 from jax import numpy as jnp
 
-try:
-    from bartz.BART import gbart
-except ImportError:
-    from bartz import BART as gbart
+from bartz.BART import gbart
 
 
 @partial(jit, static_argnums=(1, 2))
@@ -111,7 +108,8 @@ def make_data(key, n_train: int, n_test: int, p: int) -> Data:
 class EvalGbart:
     """Out-of-sample evaluation of gbart."""
 
-    timeout = 30.0
+    # asv config
+    timeout = 120.0
     unit = 'latent_sdev'
 
     def track_rmse(self) -> float:

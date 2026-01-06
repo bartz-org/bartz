@@ -47,7 +47,7 @@ from bartz.mcmcstep._moves import (
     split_range,
 )
 from bartz.mcmcstep._state import chain_vmap_axes
-from tests.util import manual_tree
+from tests.util import assert_close_matrices, manual_tree
 
 
 def vmap_randint_masked(
@@ -606,7 +606,10 @@ class TestMultichain:
         # check the mc state is equal to the stacked state
         def check_equal(path: KeyPath, mc: Array, stacked: Array):
             str_path = ''.join(map(str, path))
-            assert_array_equal(mc, stacked, strict=True, err_msg=str_path)
+            if mc.platform() == 'cpu' or jnp.issubdtype(mc.dtype, jnp.integer):
+                assert_array_equal(mc, stacked, strict=True, err_msg=str_path)
+            else:
+                assert_close_matrices(mc, stacked, err_msg=f'{str_path}: ', rtol=1e-7)
 
         map_with_path(check_equal, mc_state, stacked_state)
 

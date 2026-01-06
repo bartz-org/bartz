@@ -37,6 +37,7 @@ from jaxtyping import Array, Bool, Int32, Key, jaxtyped
 from numpy.testing import assert_array_equal
 from scipy import stats
 
+from bartz import profile_mode
 from bartz.jaxext import minimal_unsigned_dtype, split
 from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._moves import (
@@ -532,7 +533,7 @@ class TestMultichain:
             offset=random.normal(keys.pop(), (k,)),
             max_split=jnp.full(p, numcut + 1, jnp.uint32),
             num_trees=num_trees,
-            p_nonterminal=jnp.ones(d - 1),
+            p_nonterminal=jnp.full(d - 1, 0.9),
             leaf_prior_cov_inv=jnp.eye(k) * num_trees,
             error_cov_df=2.0,
             error_cov_scale=2 * jnp.eye(k),
@@ -553,7 +554,10 @@ class TestMultichain:
             new_state = typechecking_step(keys.pop(), state)
         assert new_state.forest.num_chains() == num_chains
 
-    def test_multichain_equiv_stack(self, init_kwargs: dict, keys: split):
+    @pytest.mark.parametrize('profile', [False, True])
+    def test_multichain_equiv_stack(
+        self, init_kwargs: dict, keys: split, profile: bool
+    ):
         """Check that stacking multiple chains is equivalent to a multichain trace."""
         num_chains = 4
         num_iters = 10
@@ -571,14 +575,16 @@ class TestMultichain:
         ]
 
         # run a few mcmc steps with the same random keys
-        for _ in range(num_iters):
-            mc_key = keys.pop()
-            sc_keys = random.split(random.clone(mc_key), num_chains)
+        with profile_mode(profile):
+            for _ in range(num_iters):
+                mc_key = keys.pop()
+                sc_keys = random.split(random.clone(mc_key), num_chains)
 
-            mc_state = step(mc_key, mc_state)
-            sc_states = [
-                step(key, state) for key, state in zip(sc_keys, sc_states, strict=True)
-            ]
+                mc_state = step(mc_key, mc_state)
+                sc_states = [
+                    step(key, state)
+                    for key, state in zip(sc_keys, sc_states, strict=True)
+                ]
 
         # stack single-chain states
         def stack_leaf(

@@ -30,7 +30,7 @@ from dataclasses import fields
 from functools import partial, wraps
 from typing import Any, Literal, TypeVar
 
-from equinox import Module
+from equinox import Module, error_if
 from equinox import field as eqx_field
 from jax import eval_shape, random, tree, vmap
 from jax import numpy as jnp
@@ -347,6 +347,15 @@ def _init_shape_shifting_parameters(
     return is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale
 
 
+def _parse_p_nonterminal(
+    p_nonterminal: Float32[Any, ' d_minus_1'],
+) -> Float32[Array, ' d_minus_1+1']:
+    p_nonterminal = jnp.asarray(p_nonterminal)
+    ok = (p_nonterminal > 0) & (p_nonterminal < 1)
+    p_nonterminal = error_if(p_nonterminal, ~ok, 'p_nonterminal must be in (0, 1)')
+    return jnp.pad(p_nonterminal, (0, 1))
+
+
 def init(
     *,
     X: UInt[Any, 'p n'],
@@ -470,8 +479,7 @@ def init(
     child iff ``X[i, j] < cutpoint``. Thus it makes sense for ``X[i, :]`` to be
     integers in the range ``[0, 1, ..., max_split[i]]``.
     """
-    p_nonterminal = jnp.asarray(p_nonterminal)
-    p_nonterminal = jnp.pad(p_nonterminal, (0, 1))
+    p_nonterminal = _parse_p_nonterminal(p_nonterminal)
     max_depth = p_nonterminal.size
 
     y = jnp.asarray(y)

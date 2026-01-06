@@ -24,23 +24,28 @@
 
 """Test `bartz.mcmcstep`."""
 
+from typing import Literal
+
 import pytest
 from beartype import beartype
 from jax import debug_key_reuse, random, vmap
 from jax import numpy as jnp
 from jax.random import bernoulli, clone, permutation, randint
+from jax.tree import map_with_path
+from jax.tree_util import KeyPath
 from jaxtyping import Array, Bool, Int32, Key, jaxtyped
 from numpy.testing import assert_array_equal
 from scipy import stats
 
 from bartz.jaxext import minimal_unsigned_dtype, split
-from bartz.mcmcstep import init, step
+from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._moves import (
     ancestor_variables,
     randint_exclude,
     randint_masked,
     split_range,
 )
+from bartz.mcmcstep._state import chain_vmap_axes
 from tests.util import manual_tree
 
 
@@ -547,3 +552,97 @@ class TestMultichain:
             # key reuse checks trigger with empty key array apparently
             new_state = typechecking_step(keys.pop(), state)
         assert new_state.forest.num_chains() == num_chains
+
+    def test_multichain_equiv_stack(self, init_kwargs: dict, keys: split):
+        """Check that stacking multiple chains is equivalent to a multichain trace."""
+        num_chains = 4
+        num_iters = 10
+
+        # create initial states
+        mc_state = init(**init_kwargs, num_chains=num_chains)
+        sc_states = [
+            init(
+                **init_kwargs,
+                num_chains=None,
+                resid_batch_size=mc_state.config.resid_batch_size,
+                count_batch_size=mc_state.config.count_batch_size,
+            )
+            for _ in range(num_chains)
+        ]
+
+        # run a few mcmc steps with the same random keys
+        for _ in range(num_iters):
+            mc_key = keys.pop()
+            sc_keys = random.split(random.clone(mc_key), num_chains)
+
+            mc_state = step(mc_key, mc_state)
+            sc_states = [
+                step(key, state) for key, state in zip(sc_keys, sc_states, strict=True)
+            ]
+
+        # stack single-chain states
+        def stack_leaf(
+            _path: KeyPath,
+            chain_axis: int | None,
+            mc_x: Array | None,
+            *sc_xs: Array | None,
+        ) -> Array | None:
+            if chain_axis is None or mc_x is None:
+                return mc_x
+            else:
+                return jnp.stack(sc_xs, axis=chain_axis)
+
+        chain_axes = chain_vmap_axes(mc_state)
+        stacked_state = map_with_path(
+            stack_leaf, chain_axes, mc_state, *sc_states, is_leaf=lambda x: x is None
+        )
+
+        # check the mc state is equal to the stacked state
+        def check_equal(path: KeyPath, mc: Array, stacked: Array):
+            str_path = ''.join(map(str, path))
+            assert_array_equal(mc, stacked, strict=True, err_msg=str_path)
+
+        map_with_path(check_equal, mc_state, stacked_state)
+
+    def vmap_axes_for_state(self, state: State) -> State:
+        """Old manual version of `chain_vmap_axes(_: State)`."""
+
+        def choose_vmap_index(path, _) -> Literal[0, None]:
+            no_vmap_attrs = (
+                '.X',
+                '.y',
+                '.offset',
+                '.prec_scale',
+                '.error_cov_df',
+                '.error_cov_scale',
+                '.forest.max_split',
+                '.forest.blocked_vars',
+                '.forest.p_nonterminal',
+                '.forest.p_propose_grow',
+                '.forest.min_points_per_decision_node',
+                '.forest.min_points_per_leaf',
+                '.forest.leaf_prior_cov_inv',
+                '.forest.a',
+                '.forest.b',
+                '.forest.rho',
+                '.config.sparse_on_at',
+                '.config.steps_done',
+            )
+            str_path = ''.join(map(str, path))
+            if str_path in no_vmap_attrs:
+                return None
+            else:
+                return 0
+
+        return map_with_path(choose_vmap_index, state)
+
+    def test_chain_vmap_axes(self, init_kwargs: dict):
+        """Check `chain_vmap_axes` on a `State`."""
+        state = init(**init_kwargs)
+        axes = chain_vmap_axes(state)
+        ref_axes = self.vmap_axes_for_state(state)
+
+        def assert_equal(_path: KeyPath, axis: int | None, ref_axis: int | None):
+            assert axis == ref_axis
+
+        map_with_path(assert_equal, axes, ref_axes)

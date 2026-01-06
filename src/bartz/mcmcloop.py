@@ -477,7 +477,6 @@ def make_default_callback(
     *,
     dot_every: int | Integer[Array, ''] | None = 1,
     report_every: int | Integer[Array, ''] | None = 100,
-    sparse_on_at: int | Integer[Array, ''] | None = None,
 ) -> dict[str, Any]:
     """
     Prepare a default callback for `run_mcmc`.
@@ -492,9 +491,6 @@ def make_default_callback(
     report_every
         A one line report is printed every `report_every` MCMC iterations,
         `None` to disable.
-    sparse_on_at
-        If specified, variable selection is activated starting from this
-        iteration. If `None`, variable selection is not used.
 
     Returns
     -------
@@ -509,22 +505,11 @@ def make_default_callback(
         return None if val is None else jnp.asarray(val)
 
     return dict(
-        callback=_default_callback,
-        callback_state=(
-            PrintCallbackState(
-                asarray_or_none(dot_every), asarray_or_none(report_every)
-            ),
-            SparseCallbackState(asarray_or_none(sparse_on_at)),
+        callback=print_callback,
+        callback_state=PrintCallbackState(
+            asarray_or_none(dot_every), asarray_or_none(report_every)
         ),
     )
-
-
-def _default_callback(*, bart, callback_state, **kwargs):
-    print_state, sparse_state = callback_state
-    bart, _ = sparse_callback(callback_state=sparse_state, bart=bart, **kwargs)
-    print_callback(callback_state=print_state, bart=bart, **kwargs)
-    return bart, callback_state
-    # here I assume that the callbacks don't update their states
 
 
 class PrintCallbackState(Module):
@@ -659,37 +644,6 @@ def _print_report(
     )
 
 
-class SparseCallbackState(Module):
-    """State for `sparse_callback`.
-
-    Parameters
-    ----------
-    sparse_on_at
-        If specified, variable selection is activated starting from this
-        iteration. If `None`, variable selection is not used.
-    """
-
-    sparse_on_at: Int32[Array, ''] | None
-
-
-def sparse_callback(
-    *,
-    key: Key[Array, ''],
-    bart: State,
-    i_total: Int32[Array, ''],
-    callback_state: SparseCallbackState,
-    **_,
-):
-    """Perform variable selection, see `mcmcstep.step_sparse`."""
-    if callback_state.sparse_on_at is not None:
-        bart = cond_if_not_profiling(
-            i_total < callback_state.sparse_on_at,
-            lambda: bart,
-            lambda: mcmcstep.step_sparse(key, bart),
-        )
-    return bart, callback_state
-
-
 class Trace(TreeHeaps, Protocol):
     """Protocol for a MCMC trace."""
 
@@ -699,7 +653,10 @@ class Trace(TreeHeaps, Protocol):
 class TreesTrace(Module):
     """Implementation of `bartz.grove.TreeHeaps` for an MCMC trace."""
 
-    leaf_tree: Float32[Array, '*trace_shape num_trees 2**d']
+    leaf_tree: (
+        Float32[Array, '*trace_shape num_trees 2**d']
+        | Float32[Array, '*trace_shape num_trees k 2**d']
+    )
     var_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
     split_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
 
@@ -711,17 +668,17 @@ class TreesTrace(Module):
 
 @jit
 def evaluate_trace(
-    trace: Trace, X: UInt[Array, 'p n']
-) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape n k']:
+    X: UInt[Array, 'p n'], trace: Trace
+) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']:
     """
     Compute predictions for all iterations of the BART MCMC.
 
     Parameters
     ----------
-    trace
-        A main trace of the BART MCMC, as returned by `run_mcmc`.
     X
         The predictors matrix, with `p` predictors and `n` observations.
+    trace
+        A main trace of the BART MCMC, as returned by `run_mcmc`.
 
     Returns
     -------
@@ -729,22 +686,19 @@ def evaluate_trace(
     """
     # batch evaluate_forest over chains and samples to limit memory usage
     has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
-    max_memory = 2**27  # 128 MiB
+    max_io_nbytes = 2**27  # 128 MiB
     batched_eval = partial(evaluate_forest, sum_batch_axis=-1)  # sum over trees
     if has_chains:
-        batched_eval = autobatch(batched_eval, max_memory, (None, 1))
-    batched_eval = autobatch(batched_eval, max_memory, (None, 0))
+        batched_eval = autobatch(batched_eval, max_io_nbytes, (None, 1), 1)
+    batched_eval = autobatch(batched_eval, max_io_nbytes, (None, 0))
 
     # extract only the trees from the trace
     trees = TreesTrace.from_dataclass(trace)
 
     # evaluate trees
-    y_centered: Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape n k']
+    y_centered: Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']
     y_centered = batched_eval(X, trees)
-
-    # add offset, trace.offset has shape (samples k?)
-    offset = jnp.expand_dims(trace.offset, 1)
-    return y_centered + offset
+    return y_centered + trace.offset[..., None]
 
 
 @partial(jit, static_argnums=(0,))

@@ -494,5 +494,7 @@ class TestMVBartInterface:
         )
 
         X_test = random.normal(random.key(1), (p, n_test))
-        y_pred = model._predict(X_test)
-        assert y_pred.shape == (ndpost, n_test, k_dim)
+        y_pred = model.predict(X_test)
+        assert y_pred.shape == (ndpost, k_dim, n_test)
+
+    # def test_mvbart_convergence(self, keys):

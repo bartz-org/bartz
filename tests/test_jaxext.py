@@ -231,6 +231,11 @@ def test_split(keys):
     ks = jaxext.split(keys.pop())
     assert len(ks) == 2
 
+    ks = keys.pop(4)
+    k1 = jnp.stack([jaxext.split(k).pop() for k in ks])
+    k2 = jaxext.split(random.clone(ks)).pop()
+    assert not different_keys(k1, k2)
+
 
 class TestJaxPatches:
     """Check that some jax stuff I patch is correct and still to be patched."""

@@ -197,7 +197,7 @@ def evaluate_forest(
     *,
     sum_batch_axis: int | tuple[int, ...] = (),
 ) -> (
-    Float32[Array, '*reduced_batch_size n'] | Float32[Array, '*reduced_batch_size n k']
+    Float32[Array, '*reduced_batch_size n'] | Float32[Array, '*reduced_batch_size k n']
 ):
     """
     Evaluate an ensemble of trees at an array of points.
@@ -222,23 +222,23 @@ def evaluate_forest(
 
     is_mv = trees.leaf_tree.ndim != trees.var_tree.ndim
 
-    bc_indices: UInt[Array, '*forest_shape n 1'] | UInt[Array, '*forest_shape n 1 1']
-    bc_indices = indices[..., None, None] if is_mv else indices[..., None]
+    bc_indices: UInt[Array, '*forest_shape n 1'] | UInt[Array, '*forest_shape 1 n 1']
+    bc_indices = indices[..., None, :, None] if is_mv else indices[..., None]
 
     bc_leaf_tree: (
         Float32[Array, '*forest_shape 1 tree_size']
-        | Float32[Array, '*forest_shape 1 k tree_size']
+        | Float32[Array, '*forest_shape k 1 tree_size']
     )
     bc_leaf_tree = (
-        trees.leaf_tree[..., None, :, :] if is_mv else trees.leaf_tree[..., None, :]
+        trees.leaf_tree[..., :, None, :] if is_mv else trees.leaf_tree[..., None, :]
     )
 
     bc_leaves: (
-        Float32[Array, '*forest_shape n 1'] | Float32[Array, '*forest_shape n k 1']
+        Float32[Array, '*forest_shape n 1'] | Float32[Array, '*forest_shape k n 1']
     )
     bc_leaves = jnp.take_along_axis(bc_leaf_tree, bc_indices, -1)
 
-    leaves: Float32[Array, '*forest_shape n'] | Float32[Array, '*forest_shape n k']
+    leaves: Float32[Array, '*forest_shape n'] | Float32[Array, '*forest_shape k n']
     leaves = jnp.squeeze(bc_leaves, -1)
 
     axis = normalize_axis_tuple(sum_batch_axis, trees.var_tree.ndim - 1)
@@ -299,13 +299,13 @@ def is_leaves_parent(split_tree: UInt[Array, ' 2**(d-1)']) -> Bool[Array, ' 2**(
     # the 0-th item has split == 0, so it's not counted
 
 
-def tree_depths(tree_length: int) -> Int32[Array, ' {tree_length}']:
+def tree_depths(tree_size: int) -> Int32[Array, ' {tree_size}']:
     """
     Return the depth of each node in a binary tree.
 
     Parameters
     ----------
-    tree_length
+    tree_size
         The length of the tree array, i.e., 2 ** d.
 
     Returns
@@ -320,7 +320,7 @@ def tree_depths(tree_length: int) -> Int32[Array, ' {tree_length}']:
     """
     depths = []
     depth = 0
-    for i in range(tree_length):
+    for i in range(tree_size):
         if i == 2**depth:
             depth += 1
         depths.append(depth - 1)
@@ -384,16 +384,16 @@ def var_histogram(
     Parameters
     ----------
     p
-        The number of variables (the maximum value that can occur in
-        `var_tree` is ``p - 1``).
+        The number of variables (the maximum value that can occur in `var_tree`
+        is ``p - 1``).
     var_tree
         The decision axes of the tree.
     split_tree
         The decision boundaries of the tree.
     sum_batch_axis
-        The batch axes to sum over. By default, no summation is performed.
-        Note that negative indices count from the end of the batch dimensions,
-        the core dimension p can't be summed over by this function.
+        The batch axes to sum over. By default, no summation is performed. Note
+        that negative indices count from the end of the batch dimensions, the
+        core dimension p can't be summed over by this function.
 
     Returns
     -------
@@ -413,6 +413,6 @@ def var_histogram(
     for i in reversed(range(batch_ndim)):
         neg_i = i - var_tree.ndim
         if i not in axes:
-            scatter_add = vmap(scatter_add, in_axes=(neg_i, neg_i))
+            scatter_add = vmap(scatter_add, in_axes=neg_i)
 
     return scatter_add(var_tree, is_internal)

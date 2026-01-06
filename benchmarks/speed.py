@@ -1,6 +1,6 @@
 # bartz/benchmarks/speed.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -25,6 +25,7 @@
 """Measure the speed of the MCMC and its interfaces."""
 
 from contextlib import redirect_stdout
+from dataclasses import replace
 from functools import partial
 from inspect import signature
 from io import StringIO
@@ -41,7 +42,7 @@ from jax.errors import JaxRuntimeError
 from jax.tree import map_with_path
 from jax.tree_util import tree_map
 
-from bartz import mcmcstep
+from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
 
 try:
@@ -145,7 +146,9 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
             if not hasattr(mcmcstep, 'step_sparse'):
                 msg = 'sparse not supported'
                 raise NotImplementedError(msg)
-            kw.update(a=0.5, b=1.0, rho=float(p))
+            kw.update(a=0.5, b=1.0, rho=float(p), sparse_on_at=999999)
+            if 'sparse_on_at' not in sig.parameters:
+                kw.pop('sparse_on_at')
 
     kw.update(kwargs)
 
@@ -183,6 +186,8 @@ def vmap_axes_for_state(state):
             'a',
             'b',
             'rho',
+            'sparse_on_at',
+            'steps_done',
         )
         str_path = ''.join(map(str, path))
         if any(match(rf'\b{escape(attr)}\b', str_path) for attr in no_vmap_attrs):
@@ -289,8 +294,11 @@ class TimeStep:
         self.args = (keys, simple_init(P, N, NTREE, kind))
 
         def func(keys, bart):
+            sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
+            if kind == 'sparse' and sparse_inside_step:
+                bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
             bart = step(key=keys.pop(), bart=bart)
-            if kind == 'sparse':
+            if kind == 'sparse' and not sparse_inside_step:
                 bart = mcmcstep.step_sparse(keys.pop(), bart)
             return bart
 
@@ -304,7 +312,7 @@ class TimeStep:
             block_until_ready(self.compiled_func(*self.args))
 
     def time_step(self, mode: Mode, _):
-        """Time running compiling `step` or running it a few times."""
+        """Time compiling `step` or running it a few times."""
         match mode:
             case 'compile':
 

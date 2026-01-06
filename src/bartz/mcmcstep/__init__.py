@@ -36,5 +36,5 @@ The entry points are:
 
 # ruff: noqa: F401
 
-from bartz.mcmcstep._state import Forest, State, init
+from bartz.mcmcstep._state import Forest, State, StepConfig, init
 from bartz.mcmcstep._step import step

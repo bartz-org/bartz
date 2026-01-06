@@ -246,6 +246,8 @@ class State(Module):
         `None` in binary regression.
     forest
         The sum of trees model.
+    config
+        Metadata and configurations for the MCMC step.
     """
 
     X: UInt[Array, 'p n']

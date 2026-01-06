@@ -28,11 +28,14 @@ from collections.abc import Sequence
 from dataclasses import replace
 from operator import ge, le
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import tomli
 from jax import numpy as jnp
-from jaxtyping import ArrayLike
+from jax import vmap
+from jax.scipy.linalg import solve_triangular
+from jaxtyping import Array, ArrayLike, Float, Real
 from scipy import linalg
 
 from bartz.debug import check_tree, describe_error
@@ -198,3 +201,79 @@ def update_version():
     """Update the version file."""
     version = get_version()
     Path('src/bartz/_version.py').write_text(f'__version__ = {version!r}\n')
+
+
+def multivariate_rhat(chains: Real[Any, 'chain sample dim']) -> Float[Array, '']:
+    """
+    Compute the multivariate Gelman-Rubin R-hat.
+
+    Parameters
+    ----------
+    chains
+        Independent chains of samples of a vector.
+
+    Returns
+    -------
+    Multivariate R-hat statistic.
+
+    Raises
+    ------
+    ValueError
+        If there are not enough chains or samples.
+    """
+    chains = jnp.asarray(chains)
+    m, n, p = chains.shape
+
+    if m < 2:  # pragma: no cover
+        msg = 'Need at least 2 chains'
+        raise ValueError(msg)
+    if n < 2:  # pragma: no cover
+        msg = 'Need at least 2 samples per chain'
+        raise ValueError(msg)
+
+    chain_means = jnp.mean(chains, axis=1)
+
+    def compute_chain_cov(chain_samples, chain_mean):
+        centered = chain_samples - chain_mean
+        return jnp.dot(centered.T, centered) / (n - 1)
+
+    within_chain_covs = vmap(compute_chain_cov)(chains, chain_means)
+    W = jnp.mean(within_chain_covs, axis=0)
+
+    overall_mean = jnp.mean(chain_means, axis=0)
+    chain_mean_diffs = chain_means - overall_mean
+    B = (n / (m - 1)) * jnp.dot(chain_mean_diffs.T, chain_mean_diffs)
+
+    V_hat = ((n - 1) / n) * W + ((m + 1) / (m * n)) * B
+
+    # Add regularization to W for numerical stability
+    gershgorin = jnp.max(jnp.sum(jnp.abs(W), axis=1))
+    regularization = jnp.finfo(W.dtype).eps * len(W) * gershgorin
+    W_reg = W + regularization * jnp.eye(p)
+
+    # Compute max(eigvals(W^-1 V_hat))
+    L = jnp.linalg.cholesky(W_reg)
+    # Solve L @ L.T @ x = V_hat @ x = λ @ W @ x
+    # This is equivalent to solving (L^-1 V_hat L^-T) @ y = λ @ y
+    L_1V = solve_triangular(L, V_hat, lower=True)
+    L_1VL_T = solve_triangular(L, L_1V.T, lower=True).T
+    eigenvals = jnp.linalg.eigvalsh(L_1VL_T)
+
+    return jnp.max(eigenvals)
+
+
+def rhat(chains: Real[Any, 'chain sample']) -> Float[Array, '']:
+    """
+    Compute the univariate Gelman-Rubin R-hat.
+
+    Parameters
+    ----------
+    chains
+        Independent chains of samples of a scalar.
+
+    Returns
+    -------
+    Univariate R-hat statistic.
+    """
+    chains = jnp.asarray(chains)
+    return multivariate_rhat(chains[:, :, None])

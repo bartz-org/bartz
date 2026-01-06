@@ -47,7 +47,7 @@ from bartz.mcmcstep._step import (
     _step_error_cov_inv_uv,
     step_trees,
 )
-from tests.util import assert_close_matrices
+from tests.util import assert_close_matrices, rhat
 
 
 class TestWishart:
@@ -497,4 +497,61 @@ class TestMVBartInterface:
         y_pred = model.predict(X_test)
         assert y_pred.shape == (ndpost, k_dim, n_test)
 
-    # def test_mvbart_convergence(self, keys):
+    def test_mvbart_convergence(self, keys):
+        """Test that MV Bart chains converge using R-hat."""
+        n_train = 200
+        p, k_dim = 5, 2
+        sigma_noise = 0.1
+
+        mc_cores = 4
+        ndpost = 2000
+        nsamples_per_chain = ndpost // mc_cores
+        nskip = 1000
+        keepevery = 5
+        ntree = 100
+
+        key_x, key_b, key_n1 = random.split(keys.pop(), 3)
+        X_train = random.normal(key_x, (p, n_train))
+        B = random.uniform(key_b, (p, k_dim), minval=-1, maxval=1)
+        F_train = B.T @ X_train
+        Y_train = F_train + sigma_noise * random.normal(key_n1, (k_dim, n_train))
+
+        model = Bart(
+            x_train=X_train,
+            y_train=Y_train,
+            ntree=ntree,
+            ndpost=ndpost,
+            nskip=nskip,
+            keepevery=keepevery,
+            mc_cores=mc_cores,
+            seed=0,
+        )
+
+        # Check yhat Convergence
+        yhat_train = model.yhat_train.reshape(
+            mc_cores, nsamples_per_chain, k_dim, n_train
+        )
+        summ = yhat_train.mean(axis=-1)  # (mc_cores, nsamples_per_chain, k_dim)
+
+        max_rhats_yhat = [rhat(summ[:, :, j]) for j in range(k_dim)]
+        rhat_mean = jnp.max(jnp.stack(max_rhats_yhat))
+        print('Rhat on mean(yhat_train) per response:', rhat_mean)
+
+        global_max_rhat = jnp.max(jnp.array(max_rhats_yhat))
+        assert global_max_rhat < 1.1
+
+        # Check Covariance Matrix Convergence
+        prec_trace = model._main_trace.error_cov_inv
+        if prec_trace.ndim == 3:  # (ndpost, k, k) -> reshape
+            prec_trace = prec_trace.reshape(mc_cores, nsamples_per_chain, k_dim, k_dim)
+
+        prec_flat = prec_trace.reshape(
+            mc_cores, nsamples_per_chain, -1
+        )  # Result shape: (chains, samples, k*k)
+        assert jnp.all(jnp.std(prec_flat, axis=1) > 1e-8), 'Sigma is not updating!'
+
+        max_rhats_prec = [rhat(prec_flat[:, :, j]) for j in range(k_dim * k_dim)]
+        max_rhat_sigma = jnp.max(jnp.array(max_rhats_prec))
+        print(f'Max R-hat for precision matrix: {max_rhat_sigma}')
+
+        assert max_rhat_sigma < 1.1

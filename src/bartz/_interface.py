@@ -250,7 +250,7 @@ class Bart(Module):
         The prior mean of the latent mean function.
     sigest : Float32[Array, ''] | None
         The estimated standard deviation of the error used to set `lamda`.
-    yhat_test : Float32[Array, 'ndpost m'] | None
+    yhat_test : Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'] | None
         The conditional posterior mean at `x_test` for each MCMC iteration.
 
     References
@@ -272,7 +272,7 @@ class Bart(Module):
     ndpost: int = field(static=True)
     offset: Float32[Array, '']
     sigest: Float32[Array, ''] | None = None
-    yhat_test: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost m k'] | None = None
+    yhat_test: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'] | None = None
 
     def __init__(
         self,
@@ -722,39 +722,42 @@ class Bart(Module):
             return jnp.asarray(t0, dtype=jnp.float32), s0
 
         # if t0 and s0 are none, use a diagonal construction
-        if sigest is not None:
-            sigest = jnp.asarray(sigest, dtype=jnp.float32)
-            if sigest.shape != (k,):
-                msg = f'sigest must have shape ({k},), got {sigest.shape}'
-                raise ValueError(msg)
-            sigest2_vec = jnp.square(sigest)
-
-        elif n < 2:
-            sigest2_vec = jnp.ones((k,), dtype=jnp.float32)
-
-        elif n <= p:
-            sigest2_vec = jnp.var(y_train, axis=1)
-
+        if lamda_vec is not None:
+            lamda_vec = jnp.atleast_1d(lamda_vec).astype(jnp.float32)
         else:
-            # OLS with implicit intercept via centering
-            # Xc: (n,p), Yc: (n,k)
-            Xc = x_train.T - x_train.mean(axis=1, keepdims=True).T
-            Yc = y_train.T - y_train.mean(axis=1, keepdims=True).T
+            if sigest is not None:
+                sigest = jnp.asarray(sigest, dtype=jnp.float32)
+                if sigest.shape != (k,):
+                    msg = f'sigest must have shape ({k},), got {sigest.shape}'
+                    raise ValueError(msg)
+                sigest2_vec = jnp.square(sigest)
+            elif n < 2:
+                sigest2_vec = jnp.ones((k,), dtype=jnp.float32)
+            elif n <= p:
+                sigest2_vec = jnp.var(y_train, axis=1)
 
-            coef, _, rank, _ = jnp.linalg.lstsq(Xc, Yc, rcond=None)  # coef: (p,k)
-            R = Yc - Xc @ coef  # (n,k)
+            else:
+                # OLS with implicit intercept via centering
+                # Xc: (n,p), Yc: (n,k)
+                Xc = x_train.T - x_train.mean(axis=1, keepdims=True).T
+                Yc = y_train.T - y_train.mean(axis=1, keepdims=True).T
 
-            # match univariate: chisq = sum residual^2, dof = n - rank
-            chisq_vec = jnp.sum(jnp.square(R), axis=0)  # (k,)
-            dof = jnp.maximum(1, n - rank)
-            sigest2_vec = chisq_vec / dof
+                coef, _, rank, _ = jnp.linalg.lstsq(Xc, Yc, rcond=None)  # coef: (p,k)
+                R = Yc - Xc @ coef  # (n,k)
 
-        alpha = sigdf / 2.0
-        invchi2 = invgamma.ppf(sigquant, alpha) / 2.0
-        invchi2rid = invchi2 * sigdf
-        lamda_vec = jnp.atleast_1d(sigest2_vec / invchi2rid).astype(jnp.float32)  # (k,)
+                # match univariate: chisq = sum residual^2, dof = n - rank
+                chisq_vec = jnp.sum(jnp.square(R), axis=0)  # (k,)
+                dof = jnp.maximum(1, n - rank)
+                sigest2_vec = chisq_vec / dof
 
-        s0 = jnp.diag(t0 * lamda_vec).astype(jnp.float32)
+            alpha = sigdf / 2.0
+            invchi2 = invgamma.ppf(sigquant, alpha) / 2.0
+            invchi2rid = invchi2 * sigdf
+            lamda_vec = jnp.atleast_1d(sigest2_vec / invchi2rid).astype(
+                jnp.float32
+            )  # (k,)
+
+        s0 = jnp.diag(sigdf * lamda_vec).astype(jnp.float32)
         return jnp.asarray(t0, dtype=jnp.float32), s0
 
     @staticmethod
@@ -884,7 +887,7 @@ class Bart(Module):
     @staticmethod
     def _setup_mcmc(
         x_train: Real[Array, 'p n'],
-        y_train: Float32[Array, ' n'] | Float32[Array, 'p n'] | Bool[Array, ' n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
         offset: Float32[Array, ''],
         w: Float[Array, ' n'] | None,
         max_split: UInt[Array, ' p'],

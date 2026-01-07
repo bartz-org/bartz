@@ -46,6 +46,7 @@ from jax import numpy as jnp
 from jax.lax import collapse
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logit, ndtr
+from jax.sharding import SingleDeviceSharding
 from jax.tree import map_with_path
 from jax.tree_util import KeyPath
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, UInt
@@ -68,6 +69,7 @@ from bartz.jaxext import get_default_device, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
+from tests.test_mcmcstep import check_chain_sharding
 from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
@@ -230,9 +232,12 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 numcut=10,
                 maxdepth=8,  # 8 to check if leaf_indices changes type too soon
                 seed=keys.pop(),
-                mc_cores=1,
+                mc_cores=2,
                 init_kw=dict(
-                    resid_batch_size=None, count_batch_size=None, save_ratios=True
+                    resid_batch_size=None,
+                    count_batch_size=None,
+                    save_ratios=True,
+                    chain_devices=2,
                 ),
             )
 
@@ -506,7 +511,7 @@ def clipped_logit(x: Array, eps: float) -> Array:
     return logit(jnp.clip(x, eps, 1 - eps))
 
 
-def test_sequential_guarantee(kw):
+def test_sequential_guarantee(kw: dict, subtests: SubTests):
     """Check that the way iterations are saved does not influence the result."""
     # reference run
     kw['keepevery'] = 1
@@ -525,12 +530,14 @@ def test_sequential_guarantee(kw):
     bart2_yhat_train = bart2.yhat_train.reshape(
         kw2['mc_cores'], kw2['ndpost'] // kw2['mc_cores'], n
     )[:, delta:, :].reshape(bart1.ndpost, n)
-    if bart1.yhat_train.device.platform == 'cpu':
-        assert_array_equal(bart1.yhat_train, bart2_yhat_train)
-    else:
-        # on gpu typically it works fine, but in one case there was a small
-        # numerical difference in one of two chains
-        assert_close_matrices(bart1.yhat_train, bart2_yhat_train, rtol=2e-6)
+
+    with subtests.test('shift burn-in'):
+        if bart1.yhat_train.platform() == 'cpu':
+            assert_array_equal(bart1.yhat_train, bart2_yhat_train)
+        else:
+            # on gpu typically it works fine, but in one case there was a small
+            # numerical difference in one of two chains
+            assert_close_matrices(bart1.yhat_train, bart2_yhat_train, rtol=2e-6)
 
     # run keeping 1 every 2 samples
     kw3 = kw.copy()
@@ -543,14 +550,18 @@ def test_sequential_guarantee(kw):
     bart3_yhat_train = bart3.yhat_train.reshape(
         kw3['mc_cores'], kw3['ndpost'] // kw3['mc_cores'], n
     )[:, : bart1_yhat_train.shape[1], :]
-    if bart1.yhat_train.device.platform == 'cpu':
-        assert_array_equal(bart1_yhat_train, bart3_yhat_train)
-    else:
-        # on gpu typically it works fine, but in one case there was a small
-        # numerical difference in one of two chains
-        assert_close_matrices(
-            bart1_yhat_train.reshape(-1, n), bart3_yhat_train.reshape(-1, n), rtol=2e-6
-        )
+
+    with subtests.test('change thinning'):
+        if bart1.yhat_train.platform() == 'cpu':
+            assert_array_equal(bart1_yhat_train, bart3_yhat_train)
+        else:
+            # on gpu typically it works fine, but in one case there was a small
+            # numerical difference in one of two chains
+            assert_close_matrices(
+                bart1_yhat_train.reshape(-1, n),
+                bart3_yhat_train.reshape(-1, n),
+                rtol=2e-6,
+            )
 
 
 def test_output_shapes(kw):
@@ -1296,7 +1307,7 @@ def test_polars(kw):
     bart2 = mc_gbart(**kw)
     pred2 = bart2.predict(kw['x_test'])
 
-    if pred.device.platform == 'cpu':
+    if pred.platform() == 'cpu':
         func = assert_array_equal
     else:
         func = partial(assert_close_matrices, rtol=2e-6)
@@ -1403,3 +1414,32 @@ class TestProfile:
                 pytest.xfail('unsolved bug with old toolchain')
             else:
                 raise
+
+
+def test_sharding(kw: dict):
+    """Check that chains live on their own devices throughout the interface."""
+    chain_devices = kw.get('init_kw', {}).get('chain_devices', None)
+    bart = mc_gbart(**kw)
+    check = partial(check_chain_sharding, sharded=chain_devices is not None)
+    check(bart._mcmc_state)
+    check(bart._burnin_trace)
+    check(bart._main_trace)
+
+    def check_sharding(x: Array | None):
+        if x is None:
+            return
+        if chain_devices is None:
+            assert isinstance(x.sharding, SingleDeviceSharding)
+        else:
+            assert x.sharding.num_devices == 2
+            assert x.sharding.spec == ('chains',)
+
+    check_sharding(bart.yhat_test)
+    check_sharding(bart.prob_test)
+    check_sharding(bart.prob_train)
+    if bart.sigma is not None:
+        check_sharding(bart.sigma.T)
+    check_sharding(bart.sigma_)
+    check_sharding(bart.varcount)
+    check_sharding(bart.varprob)
+    check_sharding(bart.yhat_train)

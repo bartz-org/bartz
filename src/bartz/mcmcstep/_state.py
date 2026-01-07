@@ -44,7 +44,6 @@ from jax import (
     vmap,
 )
 from jax import numpy as jnp
-from jax.errors import ConcretizationTypeError
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree import flatten
@@ -702,10 +701,10 @@ def _asarray_or_none(x):
 def _get_platform(x: Array) -> str:
     """Get the platform of the device where `x` is located, or the default device if that's not possible."""
     try:
-        device = x.devices().pop()
-    except ConcretizationTypeError:
+        platform = x.platform()
+    except AttributeError:
         device = get_default_device()
-    platform = device.platform
+        platform = device.platform
     if platform not in ('cpu', 'gpu'):
         msg = f'Unknown platform: {platform}'
         raise KeyError(msg)

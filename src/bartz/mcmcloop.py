@@ -546,7 +546,7 @@ def print_callback(
             dot_cond,
             lambda: callback_if_not_profiling(
                 lambda: print('.', end='', flush=True),  # noqa: T201
-                ordered=True,
+                ordered=False,
             ),
             # logging can't do in-line printing so I'll stick to print
             lambda: None,
@@ -567,7 +567,7 @@ def print_callback(
                 prune_acc_count=bart.forest.prune_acc_count.mean(),
                 prop_total=bart.forest.split_tree.shape[-2],
                 fill=forest_fill(bart.forest.split_tree),
-                ordered=True,
+                ordered=False,
             )
 
         report_cond = (i_total + 1) % callback_state.report_every == 0
@@ -576,7 +576,7 @@ def print_callback(
         if callback_state.dot_every is not None:
             cond_if_not_profiling(
                 report_cond & dot_cond,
-                lambda: callback_if_not_profiling(print, ordered=True),
+                lambda: callback_if_not_profiling(print, ordered=False),
                 lambda: None,
             )
 

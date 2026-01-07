@@ -449,11 +449,11 @@ class Bart(Module):
     @cached_property
     def sigma_(self) -> Float32[Array, 'ndpost'] | None:
         """The standard deviation of the error, only over the post-burnin samples and flattened."""
-        if self.sigma is None:
+        error_cov_inv = self._main_trace.error_cov_inv
+        if error_cov_inv is None:
             return None
-        nskip = self._burnin_trace.grow_prop_count.shape[-1]
-        sigma = self.sigma[nskip:, ...]
-        return sigma.reshape(-1)
+        else:
+            return jnp.sqrt(jnp.reciprocal(error_cov_inv)).reshape(-1)
 
     @cached_property
     def sigma_mean(self) -> Float32[Array, ''] | None:

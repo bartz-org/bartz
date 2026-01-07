@@ -555,7 +555,7 @@ class TestMultichain:
                 chain_devices='auto' if sharded else None,
             )
             assert state.forest.num_chains() == num_chains
-            self.check_chain_sharding(state, sharded)
+            check_chain_sharding(state, sharded)
 
         with subtests.test('step'):
             typechecking_step = jaxtyped(step, typechecker=beartype)
@@ -563,26 +563,7 @@ class TestMultichain:
                 # key reuse checks trigger with empty key array apparently
                 new_state = typechecking_step(keys.pop(), state)
             assert new_state.forest.num_chains() == num_chains
-            self.check_chain_sharding(new_state, sharded)
-
-    @staticmethod
-    def check_chain_sharding(x: PyTree, sharded: bool):
-        """Check that chains are sharded as expected."""
-        chain_axes = chain_vmap_axes(x)
-
-        def check_leaf(_path: KeyPath, x: Array | None, axis: int | None):
-            if x is None:
-                return
-            if not sharded:
-                assert isinstance(x.sharding, SingleDeviceSharding)
-            else:
-                assert x.sharding.num_devices > 1
-                if axis is None:
-                    assert x.sharding.spec == ()
-                else:
-                    assert x.sharding.spec == ('chains',)
-
-        map_with_path(check_leaf, x, chain_axes)
+            check_chain_sharding(new_state, sharded)
 
     @pytest.mark.parametrize('profile', [False, True])
     def test_multichain_equiv_stack(
@@ -685,3 +666,22 @@ class TestMultichain:
             assert axis == ref_axis
 
         map_with_path(assert_equal, axes, ref_axes)
+
+
+def check_chain_sharding(x: PyTree, sharded: bool):
+    """Check that chains are sharded as expected."""
+    chain_axes = chain_vmap_axes(x)
+
+    def check_leaf(_path: KeyPath, x: Array | None, axis: int | None):
+        if x is None:
+            return
+        if not sharded:
+            assert isinstance(x.sharding, SingleDeviceSharding)
+        else:
+            assert x.sharding.num_devices > 1
+            if axis is None:
+                assert x.sharding.spec == ()
+            else:
+                assert x.sharding.spec == ('chains',)
+
+    map_with_path(check_leaf, x, chain_axes)

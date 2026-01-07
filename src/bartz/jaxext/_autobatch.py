@@ -183,6 +183,14 @@ def autobatch(
     Returns
     -------
     A function with the same signature as `func`, save for the return value if `return_nbatches`.
+
+    Notes
+    -----
+    Unless `return_nbatches` is set, `autobatch` at given arguments is
+    idempotent. Furthermore, `autobatch` can be applied multiple times over
+    multiple axes with the same `max_io_nbytes` limit to work on multiple axes;
+    in this case it won't unnecessarily loop over additional axes if one or more
+    outer `autobatch` are already sufficient.
     """
     initial_in_axes = in_axes
     initial_out_axes = out_axes

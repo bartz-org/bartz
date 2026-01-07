@@ -54,6 +54,7 @@ only-local = [
     "matplotlib>=3.10.3",
     "matplotlib-label-lines>=0.8.1",
     "pre-commit>=4.2.0",
+    "rich>=13.9.4",
     "scikit-learn>=1.6.1",
     "snakeviz>=2.2.2",
     "virtualenv>=20.31.2",

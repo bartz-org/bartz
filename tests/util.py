@@ -92,6 +92,7 @@ def assert_close_matrices(
     tozero: bool = False,
     negate: bool = False,
     ord: int | float | str | None = 2,  # noqa: A002
+    err_msg: str = '',
 ):
     """
     Check if two matrices are similar.
@@ -125,6 +126,8 @@ def assert_close_matrices(
     ord
         Passed to `numpy.linalg.norm` to specify the matrix norm to use, the
         default is 2 which differs from numpy.
+    err_msg
+        Prefix prepended to the error message (without adding newlines).
 
     Raises
     ------
@@ -158,7 +161,7 @@ def assert_close_matrices(
         adnorm = linalg.norm(eval(expr), ord)  # noqa: S307, expr is a literal
         ratio = adnorm / dnorm if dnorm else np.nan
 
-        msg = f"""\
+        msg = f"""{err_msg}\
 matrices actual and {ref} are not {cond} enough in {ord}-norm
 matrix shape: {desired.shape}
 norm(desired) = {dnorm:.2g}

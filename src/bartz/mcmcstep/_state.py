@@ -25,17 +25,27 @@
 """Module defining the BART MCMC state and initialization."""
 
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import fields
 from functools import partial, wraps
 from typing import Any, Literal, TypeVar
 
-from equinox import Module
+import jax
+from equinox import Module, error_if
 from equinox import field as eqx_field
-from jax import eval_shape, random, tree, vmap
+from jax import (
+    Device,
+    NamedSharding,
+    device_put,
+    eval_shape,
+    make_mesh,
+    random,
+    tree,
+    vmap,
+)
 from jax import numpy as jnp
-from jax.errors import ConcretizationTypeError
 from jax.scipy.linalg import solve_triangular
+from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree import flatten
 from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree, Shaped, UInt
 
@@ -207,12 +217,15 @@ class StepConfig(Module):
     count_batch_size
         The data batch sizes for computing the sufficient statistics. If `None`,
         they are computed with no batching.
+    mesh
+        The mesh used to shard data and computation across multiple devices.
     """
 
     steps_done: Int32[Array, '']
     sparse_on_at: Int32[Array, ''] | None
     resid_batch_size: int | None = field(static=True)
     count_batch_size: int | None = field(static=True)
+    mesh: Mesh | None = field(static=True)
 
 
 class State(Module):
@@ -246,6 +259,8 @@ class State(Module):
         `None` in binary regression.
     forest
         The sum of trees model.
+    config
+        Metadata and configurations for the MCMC step.
     """
 
     X: UInt[Array, 'p n']
@@ -347,6 +362,16 @@ def _init_shape_shifting_parameters(
     return is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale
 
 
+def _parse_p_nonterminal(
+    p_nonterminal: Float32[Any, ' d_minus_1'],
+) -> Float32[Array, ' d_minus_1+1']:
+    """Check it's in (0, 1) and pad with a 0 at the end."""
+    p_nonterminal = jnp.asarray(p_nonterminal)
+    ok = (p_nonterminal > 0) & (p_nonterminal < 1)
+    p_nonterminal = error_if(p_nonterminal, ~ok, 'p_nonterminal must be in (0, 1)')
+    return jnp.pad(p_nonterminal, (0, 1))
+
+
 def init(
     *,
     X: UInt[Any, 'p n'],
@@ -372,6 +397,7 @@ def init(
     rho: float | Float32[Any, ''] | None = None,
     sparse_on_at: int | Integer[Any, ''] | None = None,
     num_chains: int | None = None,
+    chain_devices: None | Sequence[Device] | int | Literal['auto'] = None,
 ) -> State:
     """
     Make a BART posterior sampling MCMC initial state.
@@ -453,6 +479,12 @@ def init(
     num_chains
         The number of independent MCMC chains to represent in the state. Single
         chain with scalar values if not specified.
+    chain_devices
+        The devices to shard chains across. If not set, all chains run on the
+        same device. If an integer, let jax automatically pick that number of
+        devices from the default platform. If 'auto', use all available devices
+        on the default platform, or all virtual cpus but for 0 on cpu. If a
+        sequence of devices, use those specified.
 
     Returns
     -------
@@ -470,29 +502,27 @@ def init(
     child iff ``X[i, j] < cutpoint``. Thus it makes sense for ``X[i, :]`` to be
     integers in the range ``[0, 1, ..., max_split[i]]``.
     """
-    p_nonterminal = jnp.asarray(p_nonterminal)
-    p_nonterminal = jnp.pad(p_nonterminal, (0, 1))
-    max_depth = p_nonterminal.size
-
+    # convert to array all array-like arguments that are used in other
+    # configurations but don't need further processing themselves
+    X = jnp.asarray(X)
     y = jnp.asarray(y)
     offset = jnp.asarray(offset)
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
+    max_split = jnp.asarray(max_split)
 
+    # check p_nonterminal and pad it with a 0 at the end (still not final shape)
+    p_nonterminal = _parse_p_nonterminal(p_nonterminal)
+
+    # process arguments that change depending on outcome type
     is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale = (
         _init_shape_shifting_parameters(
             y, offset, error_scale, error_cov_df, error_cov_scale, leaf_prior_cov_inv
         )
     )
 
-    max_split = jnp.asarray(max_split)
+    # extract array sizes from arguments
+    (max_depth,) = p_nonterminal.shape
     p, n = X.shape
-
-    if filter_splitless_vars:
-        (blocked_vars,) = jnp.nonzero(max_split == 0)
-        blocked_vars = blocked_vars.astype(minimal_unsigned_dtype(p))
-        # see `fully_used_variables` for the type cast
-    else:
-        blocked_vars = None
 
     # check and initialize sparsity parameters
     if not _all_none_or_not_none(rho, a, b):
@@ -506,24 +536,20 @@ def init(
         msg = 'sparsity params (either theta or rho,a,b) and sparse_on_at must be either all None or all set'
         raise ValueError(msg)
 
+    # process multichain settings
     chain_shape = () if num_chains is None else (num_chains,)
     resid_shape = chain_shape + y.shape
     tree_shape = (*chain_shape, num_trees)
+    add_chains = partial(_add_chains, chain_shape=chain_shape)
 
-    def add_chains(
-        x: Shaped[Array, '*shape'] | None,
-    ) -> Shaped[Array, '*shape'] | Shaped[Array, ' num_chains *shape'] | None:
-        if x is None:
-            return None
-        else:
-            return jnp.broadcast_to(x, chain_shape + x.shape)
-
+    # determine batch sizes for reductions
     resid_batch_size, count_batch_size = _choose_suffstat_batch_size(
         resid_batch_size, count_batch_size, y, max_depth, num_trees, num_chains
     )
 
-    return State(
-        X=jnp.asarray(X),
+    # initialize all remaining stuff and put it in an unsharded state
+    state = State(
+        X=X,
         y=y,
         z=jnp.full(resid_shape, offset) if is_binary else None,
         offset=offset,
@@ -551,7 +577,7 @@ def init(
                     else n >= min_points_per_decision_node
                 )
             ),
-            blocked_vars=blocked_vars,
+            blocked_vars=_get_blocked_vars(filter_splitless_vars, max_split),
             max_split=max_split,
             grow_prop_count=jnp.zeros(chain_shape, int),
             grow_acc_count=jnp.zeros(chain_shape, int),
@@ -582,8 +608,86 @@ def init(
             sparse_on_at=_asarray_or_none(sparse_on_at),
             resid_batch_size=resid_batch_size,
             count_batch_size=count_batch_size,
+            mesh=_prepare_mesh(num_chains, chain_devices, y),
         ),
     )
+
+    # move all arrays to the appropriate device
+    return _shard_state(state)
+
+
+def _get_blocked_vars(
+    filter_splitless_vars: bool, max_split: UInt[Array, ' p']
+) -> None | UInt[Array, ' q']:
+    """Initialize the `blocked_vars` field."""
+    if filter_splitless_vars:
+        (p,) = max_split.shape
+        (blocked_vars,) = jnp.nonzero(max_split == 0)
+        return blocked_vars.astype(minimal_unsigned_dtype(p))
+        # see `fully_used_variables` for the type cast
+    else:
+        return None
+
+
+def _add_chains(
+    x: Shaped[Array, '*shape'] | None, chain_shape: tuple[int, ...]
+) -> Shaped[Array, '*shape'] | Shaped[Array, ' num_chains *shape'] | None:
+    """Broadcast `x` to all chains."""
+    if x is None:
+        return None
+    else:
+        return jnp.broadcast_to(x, chain_shape + x.shape)
+
+
+def _prepare_mesh(
+    num_chains: int | None,
+    chain_devices: None | Sequence[Device] | int | Literal['auto'],
+    y: Float32[Array, '...'],
+) -> Mesh | None:
+    """Create a `Mesh` object to represent how to map chains to devices."""
+    if num_chains is None:
+        assert chain_devices is None
+        return None
+
+    if chain_devices is None:
+        return None
+
+    if chain_devices == 'auto':
+        platform = _get_platform(y)
+        devices = jax.devices(platform)
+        if platform == 'cpu':
+            devices = devices[1:]
+            # do not use cpu 0 by default, this is a useful convention to
+            # debug because everything will be by default on cpu 0
+        num_devices = len(devices)
+    elif hasattr(chain_devices, '__len__'):
+        devices = chain_devices
+        num_devices = len(devices)
+    else:
+        devices = None
+        num_devices = chain_devices
+
+    return make_mesh(
+        (num_devices,), ('chains',), axis_types=(AxisType.Auto,), devices=devices
+    )
+
+
+def _shard_state(state: State) -> State:
+    """Place all fields in the state on the appropriate devices."""
+    mesh = state.config.mesh
+    if mesh is None:
+        return state
+
+    def shard_leaf(x: Array | None, chain_axis: int | None) -> Array | None:
+        if x is None:
+            return None
+        elif chain_axis is None:
+            return device_put(x, NamedSharding(mesh, PartitionSpec()))
+        else:
+            assert chain_axis == 0
+            return device_put(x, NamedSharding(mesh, PartitionSpec('chains')))
+
+    return tree.map(shard_leaf, state, chain_vmap_axes(state))
 
 
 def _all_none_or_not_none(*args):
@@ -597,13 +701,13 @@ def _asarray_or_none(x):
     return jnp.asarray(x)
 
 
-def _get_platform(x: Array):
+def _get_platform(x: Array) -> str:
     """Get the platform of the device where `x` is located, or the default device if that's not possible."""
     try:
-        device = x.devices().pop()
-    except ConcretizationTypeError:
+        platform = x.platform()
+    except AttributeError:
         device = get_default_device()
-    platform = device.platform
+        platform = device.platform
     if platform not in ('cpu', 'gpu'):
         msg = f'Unknown platform: {platform}'
         raise KeyError(msg)
@@ -618,6 +722,7 @@ def _choose_suffstat_batch_size(
     num_trees: int,
     num_chains: int | None,
 ) -> tuple[int | None, int | None]:
+    """Determine batch sizes for reductions."""
     # get number of outcomes and of datapoints, set to 1 if none
     if y.ndim == 2:
         k, n = y.shape
@@ -729,14 +834,34 @@ def _get_mc_out_axes(
     return chain_vmap_axes(out)
 
 
+def _find_mesh(x: PyTree) -> Mesh | None:
+    """Find the mesh used for chains."""
+
+    class MeshFound(Exception):
+        pass
+
+    def find_mesh(x: State | Any):
+        if isinstance(x, State):
+            raise MeshFound(x.config.mesh)
+
+    try:
+        tree.map(find_mesh, x, is_leaf=lambda x: isinstance(x, State))
+    except MeshFound as e:
+        return e.args[0]
+    else:
+        raise ValueError
+
+
 def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
     """Split all random keys in `num_chains` keys."""
+    mesh = _find_mesh(x)
 
     def split_key(x):
         if is_key(x):
-            return random.split(x, num_chains)
-        else:
-            return x
+            x = random.split(x, num_chains)
+            if mesh is not None:
+                x = device_put(x, NamedSharding(mesh, PartitionSpec('chains')))
+        return x
 
     return tree.map(split_key, x)
 

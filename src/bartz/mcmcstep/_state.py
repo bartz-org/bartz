@@ -666,7 +666,9 @@ def _prepare_mesh(
         devices = None
         num_devices = chain_devices
 
-    return make_mesh((num_devices,), ('chains',), (AxisType.Auto,), devices=devices)
+    return make_mesh(
+        (num_devices,), ('chains',), axis_types=(AxisType.Auto,), devices=devices
+    )
 
 
 def _shard_state(state: State) -> State:

@@ -365,6 +365,7 @@ def _init_shape_shifting_parameters(
 def _parse_p_nonterminal(
     p_nonterminal: Float32[Any, ' d_minus_1'],
 ) -> Float32[Array, ' d_minus_1+1']:
+    """Check it's in (0, 1) and pad with a 0 at the end."""
     p_nonterminal = jnp.asarray(p_nonterminal)
     ok = (p_nonterminal > 0) & (p_nonterminal < 1)
     p_nonterminal = error_if(p_nonterminal, ~ok, 'p_nonterminal must be in (0, 1)')

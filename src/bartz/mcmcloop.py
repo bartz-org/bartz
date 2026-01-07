@@ -577,6 +577,7 @@ def print_callback(
         debug.callback(
             lambda: print('.', end='', flush=True)  # noqa: T201
         )
+        # logging can't do in-line printing so we use print
 
     cond_if_not_profiling(
         report_cond,

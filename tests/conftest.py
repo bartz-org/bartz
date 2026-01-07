@@ -1,6 +1,6 @@
 # bartz/tests/conftest.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -37,6 +37,7 @@ jax.config.update('jax_debug_key_reuse', True)
 jax.config.update('jax_debug_nans', True)
 jax.config.update('jax_debug_infs', True)
 jax.config.update('jax_legacy_prng_key', 'error')
+jax.config.update('jax_num_cpu_devices', 3)
 
 jax.config.update('jax_compilation_cache_dir', 'config/jax_cache')
 jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)

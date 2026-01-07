@@ -33,7 +33,17 @@ from typing import Any, Literal, TypeVar
 import jax
 from equinox import Module, error_if
 from equinox import field as eqx_field
-from jax import Device, eval_shape, make_mesh, random, reshard, set_mesh, tree, vmap
+from jax import (
+    Device,
+    NamedSharding,
+    eval_shape,
+    make_mesh,
+    random,
+    reshard,
+    set_mesh,
+    tree,
+    vmap,
+)
 from jax import numpy as jnp
 from jax.errors import ConcretizationTypeError
 from jax.scipy.linalg import solve_triangular
@@ -824,14 +834,34 @@ def _get_mc_out_axes(
     return chain_vmap_axes(out)
 
 
+def _find_mesh(x: PyTree) -> Mesh | None:
+    """Find the mesh used for chains."""
+
+    class MeshFound(Exception):
+        pass
+
+    def find_mesh(x: State | Any):
+        if isinstance(x, State):
+            raise MeshFound(x.config.mesh)
+
+    try:
+        tree.map(find_mesh, x, is_leaf=lambda x: isinstance(x, State))
+    except MeshFound as e:
+        return e.args[0]
+    else:
+        raise ValueError
+
+
 def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
     """Split all random keys in `num_chains` keys."""
+    mesh = _find_mesh(x)
 
     def split_key(x):
         if is_key(x):
-            return random.split(x, num_chains)
-        else:
-            return x
+            x = random.split(x, num_chains)
+            if mesh is not None:
+                x = reshard(x, NamedSharding(mesh, PartitionSpec('chains')))
+        return x
 
     return tree.map(split_key, x)
 

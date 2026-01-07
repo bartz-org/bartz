@@ -31,10 +31,12 @@ from beartype import beartype
 from jax import debug_key_reuse, random, vmap
 from jax import numpy as jnp
 from jax.random import bernoulli, clone, permutation, randint
+from jax.sharding import SingleDeviceSharding
 from jax.tree import map_with_path
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Bool, Int32, Key, jaxtyped
+from jaxtyping import Array, Bool, Int32, Key, PyTree, jaxtyped
 from numpy.testing import assert_array_equal
+from pytest_subtests import SubTests
 from scipy import stats
 
 from bartz import profile_mode
@@ -513,11 +515,6 @@ class TestSplitRange:
 class TestMultichain:
     """Basic tests of the multichain functionality."""
 
-    @pytest.fixture(params=[None, 0, 1, 4])
-    def num_chains(self, request) -> int | None:
-        """Return the number of chains."""
-        return request.param
-
     @pytest.fixture
     def init_kwargs(self, keys: split) -> dict:
         """Return arguments for `init`."""
@@ -539,20 +536,53 @@ class TestMultichain:
             error_cov_scale=2 * jnp.eye(k),
         )
 
-    def test_num_chains(self, init_kwargs: dict, num_chains: int | None):
-        """Create a multichain `State` with `init` and check it has the right number of chains."""
-        typechecking_init = jaxtyped(init, typechecker=beartype)
-        state = typechecking_init(**init_kwargs, num_chains=num_chains)
-        assert state.forest.num_chains() == num_chains
+    @pytest.mark.parametrize('num_chains', [None, 0, 1, 4, -4])
+    def test_basic(
+        self, init_kwargs: dict, num_chains: int | None, subtests: SubTests, keys: split
+    ):
+        """Create a multichain `State` with `init` and step it once."""
+        if num_chains is None:
+            sharded = False
+        else:
+            sharded = num_chains < 0
+            num_chains = abs(num_chains)
 
-    def test_step(self, init_kwargs: dict, num_chains: int | None, keys: split):
-        """Step a multichain state."""
-        state = init(**init_kwargs, num_chains=num_chains)
-        typechecking_step = jaxtyped(step, typechecker=beartype)
-        with debug_key_reuse(num_chains != 0):
-            # key reuse checks trigger with empty key array apparently
-            new_state = typechecking_step(keys.pop(), state)
-        assert new_state.forest.num_chains() == num_chains
+        with subtests.test('init'):
+            typechecking_init = jaxtyped(init, typechecker=beartype)
+            state = typechecking_init(
+                **init_kwargs,
+                num_chains=num_chains,
+                chain_devices='auto' if sharded else None,
+            )
+            assert state.forest.num_chains() == num_chains
+            self.check_chain_sharding(state, sharded)
+
+        with subtests.test('step'):
+            typechecking_step = jaxtyped(step, typechecker=beartype)
+            with debug_key_reuse(num_chains != 0):
+                # key reuse checks trigger with empty key array apparently
+                new_state = typechecking_step(keys.pop(), state)
+            assert new_state.forest.num_chains() == num_chains
+            self.check_chain_sharding(new_state, sharded)
+
+    @staticmethod
+    def check_chain_sharding(x: PyTree, sharded: bool):
+        """Check that chains are sharded as expected."""
+        chain_axes = chain_vmap_axes(x)
+
+        def check_leaf(_path: KeyPath, x: Array | None, axis: int | None):
+            if x is None:
+                return
+            if not sharded:
+                assert isinstance(x.sharding, SingleDeviceSharding)
+            else:
+                assert x.sharding.num_devices > 1
+                if axis is None:
+                    assert x.sharding.spec == x.ndim * (None,)
+                else:
+                    assert x.sharding.spec == ('chains',) + (None,) * (x.ndim - 1)
+
+        map_with_path(check_leaf, x, chain_axes)
 
     @pytest.mark.parametrize('profile', [False, True])
     def test_multichain_equiv_stack(

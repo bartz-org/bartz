@@ -191,6 +191,13 @@ def autobatch(
     multiple axes with the same `max_io_nbytes` limit to work on multiple axes;
     in this case it won't unnecessarily loop over additional axes if one or more
     outer `autobatch` are already sufficient.
+
+    To handle memory used in intermediate values: assuming all intermediate
+    values have size that scales linearly with the axis batched over, say the
+    batched input/output total size is ``batched_size * core_io_size``, and the
+    intermediate values have size ``batched_size * core_int_size``, then to take
+    them into account divide `max_io_nbytes` by ``(1 + core_int_size /
+    core_io_size)``.
     """
     initial_in_axes = in_axes
     initial_out_axes = out_axes

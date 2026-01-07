@@ -30,7 +30,15 @@ from contextlib import nullcontext
 from functools import partial
 
 import jax
-from jax import Device, debug_key_reuse, ensure_compile_time_eval, jit, random, vmap
+from jax import (
+    Device,
+    debug_key_reuse,
+    device_count,
+    ensure_compile_time_eval,
+    jit,
+    random,
+    vmap,
+)
 from jax import numpy as jnp
 from jax.dtypes import prng_key
 from jax.lax import scan
@@ -266,6 +274,12 @@ def get_default_device() -> Device:
     """Get the current default JAX device."""
     with ensure_compile_time_eval():
         return jnp.zeros(()).device
+
+
+def get_device_count() -> int:
+    """Get the number of available devices on the default platform."""
+    device = get_default_device()
+    return device_count(device.platform)
 
 
 def is_key(x: object) -> bool:

@@ -65,7 +65,7 @@ from bartz.debug import (
 from bartz.debug import debug_gbart as gbart
 from bartz.debug import debug_mc_gbart as mc_gbart
 from bartz.grove import is_actual_leaf, tree_depth, tree_depths
-from bartz.jaxext import get_default_device, split
+from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
@@ -237,7 +237,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     resid_batch_size=None,
                     count_batch_size=None,
                     save_ratios=True,
-                    chain_devices=2,
+                    chain_devices='auto' if get_device_count() >= 2 else None,
                 ),
             )
 

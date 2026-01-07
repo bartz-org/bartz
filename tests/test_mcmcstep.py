@@ -578,9 +578,9 @@ class TestMultichain:
             else:
                 assert x.sharding.num_devices > 1
                 if axis is None:
-                    assert x.sharding.spec == x.ndim * (None,)
+                    assert x.sharding.spec == ()
                 else:
-                    assert x.sharding.spec == ('chains',) + (None,) * (x.ndim - 1)
+                    assert x.sharding.spec == ('chains',)
 
         map_with_path(check_leaf, x, chain_axes)
 

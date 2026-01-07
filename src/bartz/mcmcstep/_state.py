@@ -36,11 +36,10 @@ from equinox import field as eqx_field
 from jax import (
     Device,
     NamedSharding,
+    device_put,
     eval_shape,
     make_mesh,
     random,
-    reshard,
-    set_mesh,
     tree,
     vmap,
 )
@@ -668,7 +667,7 @@ def _prepare_mesh(
         devices = None
         num_devices = chain_devices
 
-    return make_mesh((num_devices,), ('chains',), (AxisType.Explicit,), devices=devices)
+    return make_mesh((num_devices,), ('chains',), (AxisType.Auto,), devices=devices)
 
 
 def _shard_state(state: State) -> State:
@@ -681,13 +680,12 @@ def _shard_state(state: State) -> State:
         if x is None:
             return None
         elif chain_axis is None:
-            return reshard(x, PartitionSpec())
+            return device_put(x, NamedSharding(mesh, PartitionSpec()))
         else:
             assert chain_axis == 0
-            return reshard(x, PartitionSpec('chains'))
+            return device_put(x, NamedSharding(mesh, PartitionSpec('chains')))
 
-    with set_mesh(mesh):
-        return tree.map(shard_leaf, state, chain_vmap_axes(state))
+    return tree.map(shard_leaf, state, chain_vmap_axes(state))
 
 
 def _all_none_or_not_none(*args):
@@ -860,7 +858,7 @@ def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
         if is_key(x):
             x = random.split(x, num_chains)
             if mesh is not None:
-                x = reshard(x, NamedSharding(mesh, PartitionSpec('chains')))
+                x = device_put(x, NamedSharding(mesh, PartitionSpec('chains')))
         return x
 
     return tree.map(split_key, x)

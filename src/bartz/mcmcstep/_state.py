@@ -24,8 +24,8 @@
 
 """Module defining the BART MCMC state and initialization."""
 
-from collections.abc import Callable, Sequence
-from dataclasses import fields
+from collections.abc import Callable, Hashable, Sequence
+from dataclasses import Field, fields
 from functools import partial, wraps
 from math import ceil, log2
 from typing import Any, Literal, TypeVar
@@ -53,14 +53,31 @@ from bartz.grove import make_tree, tree_depths
 from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 
-def field(*, chains: bool = False, **kwargs):
-    """Extend `equinox.field` to add `chains` to mark multichain attributes."""
+def field(*, chains: bool = False, data: bool = False, **kwargs) -> Field:
+    """Extend `equinox.field` with two new parameters.
+
+    Parameters
+    ----------
+    chains
+        Whether the arrays in the field have an optional first axis that
+        represents independent Markov chains.
+    data
+        Whether the last axis of the arrays in the field represent units of
+        the data.
+    **kwargs
+        Other parameters passed to `equinox.field`.
+
+    Returns
+    -------
+    A dataclass field descriptor with the special attributes in the metadata, unset if False.
+    """
     metadata = dict(kwargs.pop('metadata', {}))
-    if 'chains' in metadata:
-        msg = 'Cannot use metadata with `chains` already set.'
-        raise ValueError(msg)
+    assert 'chains' not in metadata
+    assert 'data' not in metadata
     if chains:
         metadata['chains'] = True
+    if data:
+        metadata['data'] = True
     return eqx_field(metadata=metadata, **kwargs)
 
 
@@ -81,17 +98,36 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     -------
     A pytree with the same structure as `x` with 0 or None in the leaves.
     """
+    return _find_metadata(x, 'chains', 0, None)
+
+
+def data_vmap_axis(x: PyTree[Module | Any]) -> PyTree[int | None]:
+    """Determine vmapping axes for data.
+
+    This is analogous to `chain_vmap_axes` but returns -1 for all fields
+    marked with ``field(..., data=True)``.
+    """
+    return _find_metadata(x, 'data', -1, None)
+
+
+T = TypeVar('T')
+
+
+def _find_metadata(
+    x: PyTree[Any, ' S'], key: Hashable, if_true: T, if_false: T
+) -> PyTree[T, ' S']:
+    """Replace all subtrees of x marked with a metadata key."""
     if isinstance(x, Module):
         args = []
         for f in fields(x):
             v = getattr(x, f.name)
             if f.metadata.get('static', False):
                 args.append(v)
-            elif f.metadata.get('chains', False):
-                axes = tree.map(lambda _: 0, v)
-                args.append(axes)
+            elif f.metadata.get(key, False):
+                subtree = tree.map(lambda _: if_true, v)
+                args.append(subtree)
             else:
-                args.append(chain_vmap_axes(v))
+                args.append(_find_metadata(v, key, if_true, if_false))
         return x.__class__(*args)
 
     def is_leaf(x) -> bool:
@@ -99,9 +135,9 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
 
     def get_axes(x: Module | Any) -> PyTree[int | None]:
         if isinstance(x, Module):
-            return chain_vmap_axes(x)
+            return _find_metadata(x, key, if_true, if_false)
         else:
-            return tree.map(lambda _: None, x)
+            return tree.map(lambda _: if_false, x)
 
     return tree.map(get_axes, x, is_leaf=is_leaf)
 
@@ -179,7 +215,7 @@ class Forest(Module):
     blocked_vars: UInt[Array, ' q'] | None
     p_nonterminal: Float32[Array, ' 2**d']
     p_propose_grow: Float32[Array, ' 2**(d-1)']
-    leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=True)
+    leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=True, data=True)
     min_points_per_decision_node: Int32[Array, ''] | None
     min_points_per_leaf: Int32[Array, ''] | None
     log_trans_prior: Float32[Array, '*chains num_trees'] | None = field(chains=True)
@@ -265,15 +301,15 @@ class State(Module):
 
     X: UInt[Array, 'p n']
     y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n']
-    z: None | Float32[Array, '*chains n'] = field(chains=True)
+    z: None | Float32[Array, '*chains n'] = field(chains=True, data=True)
     offset: Float32[Array, ''] | Float32[Array, ' k']
     resid: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
-        chains=True
+        chains=True, data=True
     )
     error_cov_inv: Float32[Array, '*chains'] | Float32[Array, '*chains k k'] | None = (
         field(chains=True)
     )
-    prec_scale: Float32[Array, ' n'] | None
+    prec_scale: Float32[Array, ' n'] | None = field(data=True)
     error_cov_df: Float32[Array, ''] | None
     error_cov_scale: Float32[Array, ''] | Float32[Array, 'k k'] | None
     forest: Forest
@@ -883,9 +919,6 @@ def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
         return x
 
     return tree.map(split_key, x)
-
-
-T = TypeVar('T')
 
 
 def vmap_chains(

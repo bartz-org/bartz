@@ -621,12 +621,14 @@ class TestMultichain:
         # check the mc state is equal to the stacked state
         def check_equal(path: KeyPath, mc: Array, stacked: Array):
             str_path = ''.join(map(str, path))
-            if mc.platform() == 'cpu' or jnp.issubdtype(mc.dtype, jnp.integer):
-                assert_array_equal(mc, stacked, strict=True, err_msg=str_path)
-            else:
-                if mc.ndim > 2:
-                    mc = mc.reshape(-1, mc.shape[-1])
-                assert_close_matrices(mc, stacked, err_msg=f'{str_path}: ', rtol=1e-7)
+            exact = mc.platform() == 'cpu' or jnp.issubdtype(mc.dtype, jnp.integer)
+            assert_close_matrices(
+                mc,
+                stacked,
+                err_msg=f'{str_path}: ',
+                rtol=0 if exact else 1e-7,
+                reduce_rank=True,
+            )
 
         map_with_path(check_equal, mc_state, stacked_state)
 
@@ -690,4 +692,4 @@ def check_chain_sharding(x: PyTree, sharded: bool):
             else:
                 assert x.sharding.spec == ('chains',)
 
-    map_with_path(check_leaf, x, chain_axes)
+    map_with_path(check_leaf, x, chain_axes, is_leaf=lambda x: x is None)

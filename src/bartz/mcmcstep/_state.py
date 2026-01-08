@@ -543,8 +543,9 @@ def init(
     add_chains = partial(_add_chains, chain_shape=chain_shape)
 
     # determine batch sizes for reductions
+    mesh = _prepare_mesh(num_chains, chain_devices, y)
     resid_batch_size, count_batch_size = _choose_suffstat_batch_size(
-        resid_batch_size, count_batch_size, y, max_depth, num_trees, num_chains
+        resid_batch_size, count_batch_size, y, max_depth, num_trees, num_chains, mesh
     )
 
     # initialize all remaining stuff and put it in an unsharded state
@@ -608,7 +609,7 @@ def init(
             sparse_on_at=_asarray_or_none(sparse_on_at),
             resid_batch_size=resid_batch_size,
             count_batch_size=count_batch_size,
-            mesh=_prepare_mesh(num_chains, chain_devices, y),
+            mesh=mesh,
         ),
     )
 
@@ -721,6 +722,7 @@ def _choose_suffstat_batch_size(
     max_depth: int,
     num_trees: int,
     num_chains: int | None,
+    mesh: Mesh | None,
 ) -> tuple[int | None, int | None]:
     """Determine batch sizes for reductions."""
     # get number of outcomes and of datapoints, set to 1 if none
@@ -731,8 +733,11 @@ def _choose_suffstat_batch_size(
         (n,) = y.shape
     n = max(1, n)
 
+    # compute sizes used to adjust batch sizes
     if num_chains is None:
         num_chains = 1
+    if mesh is not None:
+        num_chains //= mesh.size
     batch_size = k * num_chains
     unbatched_accum_bytes_times_batch_size = num_trees * 2**max_depth * 4 * n
 
@@ -742,7 +747,7 @@ def _choose_suffstat_batch_size(
         if platform == 'cpu':
             rbs = 2 ** round(math.log2(n / 6))  # n/6
         elif platform == 'gpu':
-            rbs = 2 ** round((1 + math.log2(n)) / 3)  # n^1/3
+            rbs = 2 ** round((1 + math.log2(n)) / 3)  # (2n)^1/3
         rbs *= batch_size
         rbs = max(1, rbs)
     else:
@@ -753,7 +758,7 @@ def _choose_suffstat_batch_size(
     elif platform == 'cpu':
         cbs = None
     elif platform == 'gpu':
-        cbs = 2 ** round(math.log2(n) / 2 - 2)  # n^1/2
+        cbs = 2 ** round(math.log2(n) / 2 - 2)  # sqrt(n/16)
         # /4 is good on V100, /2 on L4/T4, still haven't tried A100
 
         # ensure we don't exceed ~512MB of memory usage

@@ -43,7 +43,6 @@ import polars as pl
 import pytest
 from jax import debug_nans, lax, random, vmap
 from jax import numpy as jnp
-from jax.lax import collapse
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logit, ndtr
 from jax.sharding import SingleDeviceSharding
@@ -65,7 +64,7 @@ from bartz.debug import (
 from bartz.debug import debug_gbart as gbart
 from bartz.debug import debug_mc_gbart as mc_gbart
 from bartz.grove import is_actual_leaf, tree_depth, tree_depths
-from bartz.jaxext import get_default_device, split
+from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
@@ -172,7 +171,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 usequants=False,
                 numcut=256,  # > 255 to use uint16 for X and split_trees
                 maxdepth=9,  # > 8 to use uint16 for leaf_indices
-                mc_cores=2,
+                mc_cores=1,
                 seed=keys.pop(),
                 init_kw=dict(
                     resid_batch_size=None, count_batch_size=None, save_ratios=True
@@ -201,7 +200,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 numcut=255,
                 maxdepth=6,
                 seed=keys.pop(),
-                mc_cores=1,
+                mc_cores=2,  # keep this 2 on binary so continuous gets 1 and 2
                 init_kw=dict(
                     resid_batch_size=16,
                     count_batch_size=16,
@@ -237,7 +236,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     resid_batch_size=None,
                     count_batch_size=None,
                     save_ratios=True,
-                    chain_devices=2,
+                    chain_devices='auto' if get_device_count() >= 2 else None,
                 ),
             )
 
@@ -365,21 +364,29 @@ class TestWithCachedBart:
 
         # check yhat_train
         yhat_train = evaluate_trace(bart._mcmc_state.X, trace)
-        assert_close_matrices(yhat_train, rbart.yhat_train, rtol=1e-6)
+        assert_close_matrices(
+            yhat_train, rbart.yhat_train.astype(numpy.float32), rtol=1e-6
+        )
 
         # check yhat_test
         Xt = bart._bart._bin_predictors(kw['x_test'], bart._splits)
         yhat_test = evaluate_trace(Xt, trace)
-        assert_close_matrices(yhat_test, rbart.yhat_test, rtol=1e-6)
+        assert_close_matrices(
+            yhat_test, rbart.yhat_test.astype(numpy.float32), rtol=1e-6
+        )
 
         if kw['y_train'].dtype == bool:
             # check prob_train
             prob_train = ndtr(yhat_train)
-            assert_close_matrices(prob_train, rbart.prob_train, rtol=1e-7)
+            assert_close_matrices(
+                prob_train, rbart.prob_train.astype(numpy.float32), rtol=1e-7
+            )
 
             # check prob_test
             prob_test = ndtr(yhat_test)
-            assert_close_matrices(prob_test, rbart.prob_test, rtol=1e-7)
+            assert_close_matrices(
+                prob_test, rbart.prob_test.astype(numpy.float32), rtol=1e-7
+            )
 
     def test_comparison_BART3(self, cachedbart: CachedBart, keys, subtests: SubTests):
         """Check `bartz.BART` gives results similar to the R package BART3."""
@@ -422,12 +429,16 @@ class TestWithCachedBart:
         else:  # continuous regression
             with subtests.test('yhat_train_mean'):
                 assert_close_matrices(
-                    bart.yhat_train_mean, rbart.yhat_train_mean, rtol=0.8
+                    bart.yhat_train_mean,
+                    rbart.yhat_train_mean.astype(numpy.float32),
+                    rtol=0.8,
                 )
 
             with subtests.test('yhat_test_mean'):
                 assert_close_matrices(
-                    bart.yhat_test_mean, rbart.yhat_test_mean, rtol=0.7
+                    bart.yhat_test_mean,
+                    rbart.yhat_test_mean.astype(numpy.float32),
+                    rtol=0.7,
                 )
 
             with subtests.test('sigma'):
@@ -460,7 +471,10 @@ class TestWithCachedBart:
 
             with subtests.test('varcount_mean'):
                 assert_close_matrices(
-                    bart.varcount_mean, rbart.varcount_mean, rtol=0.6, atol=7
+                    bart.varcount_mean,
+                    rbart.varcount_mean.astype(numpy.float32),
+                    rtol=0.6,
+                    atol=7,
                 )
 
             if kw.get('sparse', False):  # pragma: no branch
@@ -493,17 +507,21 @@ class TestWithCachedBart:
                     return
                 if x is not None and chain_axis is not None:
                     ref = jnp.broadcast_to(x.mean(chain_axis, keepdims=True), x.shape)
-                    x = collapse(x, 0, -1)
-                    ref = collapse(ref, 0, -1)
-                    norm = 'fro' if x.ndim == 2 else 2
-                    assert_different_matrices(x, ref, ord=norm, **kwargs)
+                    assert_different_matrices(
+                        x.astype(jnp.float32),
+                        ref,
+                        reduce_rank=True,
+                        ord='fro' if x.ndim >= 2 else 2,
+                        atol=0,
+                        **kwargs,
+                    )
 
             axes = chain_vmap_axes(x)
             map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)
 
-        assert_different(bart._mcmc_state, atol=0, rtol=0.05)
-        assert_different(bart._main_trace, atol=0, rtol=0.03)
-        assert_different(bart._burnin_trace, atol=0, rtol=0.03)
+        assert_different(bart._mcmc_state, rtol=0.05)
+        assert_different(bart._main_trace, rtol=0.03)
+        assert_different(bart._burnin_trace, rtol=0.03)
 
 
 def clipped_logit(x: Array, eps: float) -> Array:
@@ -532,12 +550,10 @@ def test_sequential_guarantee(kw: dict, subtests: SubTests):
     )[:, delta:, :].reshape(bart1.ndpost, n)
 
     with subtests.test('shift burn-in'):
-        if bart1.yhat_train.platform() == 'cpu':
-            assert_array_equal(bart1.yhat_train, bart2_yhat_train)
-        else:
-            # on gpu typically it works fine, but in one case there was a small
-            # numerical difference in one of two chains
-            assert_close_matrices(bart1.yhat_train, bart2_yhat_train, rtol=2e-6)
+        rtol = 0 if bart1.yhat_train.platform() == 'cpu' else 2e-6
+        # on gpu typically it works fine, but in one case there was a small
+        # numerical difference in one of two chains
+        assert_close_matrices(bart1.yhat_train, bart2_yhat_train, rtol=rtol)
 
     # run keeping 1 every 2 samples
     kw3 = kw.copy()
@@ -552,16 +568,12 @@ def test_sequential_guarantee(kw: dict, subtests: SubTests):
     )[:, : bart1_yhat_train.shape[1], :]
 
     with subtests.test('change thinning'):
-        if bart1.yhat_train.platform() == 'cpu':
-            assert_array_equal(bart1_yhat_train, bart3_yhat_train)
-        else:
-            # on gpu typically it works fine, but in one case there was a small
-            # numerical difference in one of two chains
-            assert_close_matrices(
-                bart1_yhat_train.reshape(-1, n),
-                bart3_yhat_train.reshape(-1, n),
-                rtol=2e-6,
-            )
+        rtol = 0 if bart1.yhat_train.platform() == 'cpu' else 2e-6
+        # on gpu typically it works fine, but in one case there was a small
+        # numerical difference in one of two chains
+        assert_close_matrices(
+            bart1_yhat_train, bart3_yhat_train, rtol=rtol, reduce_rank=True
+        )
 
 
 def test_output_shapes(kw):
@@ -1307,15 +1319,12 @@ def test_polars(kw):
     bart2 = mc_gbart(**kw)
     pred2 = bart2.predict(kw['x_test'])
 
-    if pred.platform() == 'cpu':
-        func = assert_array_equal
-    else:
-        func = partial(assert_close_matrices, rtol=2e-6)
+    rtol = 0 if pred.platform() == 'cpu' else 2e-6
 
-    func(bart.yhat_train, bart2.yhat_train)
+    assert_close_matrices(bart.yhat_train, bart2.yhat_train, rtol=rtol)
     if bart.sigma is not None:
-        func(bart.sigma, bart2.sigma)
-    func(pred, pred2)
+        assert_close_matrices(bart.sigma, bart2.sigma, rtol=rtol)
+    assert_close_matrices(pred, pred2, rtol=rtol)
 
 
 def test_data_format_mismatch(kw):

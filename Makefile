@@ -1,6 +1,6 @@
 # bartz/Makefile
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -122,8 +122,6 @@ docs-latest:
 covreport:
 	$(UV_RUN_CI) coverage combine --keep
 	$(UV_RUN_CI) coverage html --include='src/*'
-	@echo
-	@echo "Now open _site/coverage/index.html"
 
 .PHONY: covcheck
 covcheck:
@@ -143,7 +141,7 @@ update-deps:
 .PHONY: copy-version
 copy-version: src/bartz/_version.py
 src/bartz/_version.py: pyproject.toml
-	uv run --group=ci python -c 'from tests.util import update_version; update_version()'
+	uv run --group=ci python config/util.py update_version
 
 .PHONY: check-committed
 check-committed:
@@ -180,7 +178,7 @@ upload-test: check-committed
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN="$$UV_PUBLISH_TOKEN" && \
 	uv publish --check-url=https://test.pypi.org/simple/ --publish-url=https://test.pypi.org/legacy/
-	@VERSION=$$(uv run --group=ci python -c 'from tests.util import get_version; print(get_version())') && \
+	@VERSION=$$(uv run --group=ci python config/util.py get_version) && \
 	echo "Try to install bartz $$VERSION from TestPyPI" && \
 	uv tool run --index=https://test.pypi.org/simple/ --index-strategy=unsafe-best-match --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 

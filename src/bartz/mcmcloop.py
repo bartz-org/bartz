@@ -30,6 +30,7 @@ The entry points are `run_mcmc` and `make_default_callback`.
 from collections.abc import Callable
 from dataclasses import fields
 from functools import partial, wraps
+from math import floor
 from typing import Any, Protocol
 
 import jax
@@ -699,10 +700,23 @@ def evaluate_trace(
     -------
     The predictions for each chain and iteration of the MCMC.
     """
-    # batch evaluate_forest over chains and samples to limit memory usage
-    has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
+    # determine memory limit keeping into account intermediate values
     max_io_nbytes = 2**27  # 128 MiB
+    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+    k = trace.leaf_tree.shape[-2] if is_mv else 1
+    hts = trace.split_tree.shape[-1]
+    core_io_size = hts * (
+        2 * k * trace.leaf_tree.itemsize
+        + trace.var_tree.itemsize
+        + trace.split_tree.itemsize
+    )
+    _, n = X.shape
+    core_int_size = k * n * trace.leaf_tree.itemsize  # the value of each tree
+    max_io_nbytes = max(1, floor(max_io_nbytes / (1 + core_int_size / core_io_size)))
+
+    # batch evaluate_forest over chains and samples to limit memory usage
     batched_eval = partial(evaluate_forest, sum_batch_axis=-1)  # sum over trees
+    has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
     if has_chains:
         batched_eval = autobatch(batched_eval, max_io_nbytes, (None, 1), 1)
     batched_eval = autobatch(batched_eval, max_io_nbytes, (None, 0))

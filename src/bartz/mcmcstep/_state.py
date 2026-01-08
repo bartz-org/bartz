@@ -24,10 +24,10 @@
 
 """Module defining the BART MCMC state and initialization."""
 
-import math
 from collections.abc import Callable, Sequence
 from dataclasses import fields
 from functools import partial, wraps
+from math import ceil, log2
 from typing import Any, Literal, TypeVar
 
 import jax
@@ -718,20 +718,15 @@ def _get_platform(x: Array) -> str:
 def _choose_suffstat_batch_size(
     resid_batch_size: int | None | Literal['auto'],
     count_batch_size: int | None | Literal['auto'],
-    y: Float32[Any, ' n'] | Float32[Array, ' k n'] | Bool[Any, ' n'],
+    y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'],
     max_depth: int,
     num_trees: int,
     num_chains: int | None,
     mesh: Mesh | None,
 ) -> tuple[int | None, int | None]:
     """Determine batch sizes for reductions."""
-    # get number of outcomes and of datapoints, set to 1 if none
-    if y.ndim == 2:
-        k, n = y.shape
-    else:
-        k = 1
-        (n,) = y.shape
-    n = max(1, n)
+    # get number of outcomes and of datapoints
+    k, n = _get_k_n(y)
 
     # compute sizes used to adjust batch sizes
     if num_chains is None:
@@ -743,33 +738,52 @@ def _choose_suffstat_batch_size(
 
     platform = _get_platform(y)
 
-    if resid_batch_size == 'auto':
-        if platform == 'cpu':
-            rbs = 2 ** round(math.log2(n / 6))  # n/6
-        elif platform == 'gpu':
-            rbs = 2 ** round((1 + math.log2(n)) / 3)  # (2n)^1/3
-        rbs *= batch_size
-        rbs = max(1, rbs)
-    else:
+    def final_round(s: float) -> int | None:
+        # multiply by batch_size because if the calculation is already
+        # parallelizable over batching dims there is correspondingly less need
+        # to parallelize across datapoints
+        s *= batch_size
+
+        # at least 1, i.e., each datapoint is its own batch
+        s = max(1, s)
+
+        # round to the nearest power of 2 because I guess XLA and the hardware
+        # will like that
+        s = 2 ** round(log2(s))
+
+        # disable batching if the batch is as large as the whole dataset
+        return s if s < n else None
+
+    if resid_batch_size != 'auto':
         rbs = resid_batch_size
+    elif platform == 'cpu':
+        rbs = final_round(n / 6)
+    elif platform == 'gpu':
+        rbs = final_round((2 * n) ** (1 / 3))
 
     if count_batch_size != 'auto':
         cbs = count_batch_size
     elif platform == 'cpu':
         cbs = None
     elif platform == 'gpu':
-        cbs = 2 ** round(math.log2(n) / 2 - 2)  # sqrt(n/16)
-        # /4 is good on V100, /2 on L4/T4, still haven't tried A100
+        cbs = (n / 16) ** 0.5
 
-        # ensure we don't exceed ~512MB of memory usage
+        # ensure we don't exceed ~512MiB of memory usage per device
         max_memory = 2**29
-        min_batch_size = math.ceil(unbatched_accum_bytes_times_batch_size / max_memory)
+        min_batch_size = ceil(unbatched_accum_bytes_times_batch_size / max_memory)
         cbs = max(cbs, min_batch_size)
 
-        cbs *= batch_size
-        cbs = max(1, cbs)
+        cbs = final_round(cbs)
 
     return rbs, cbs
+
+
+def _get_k_n(y: Array) -> tuple[int, int]:
+    if y.ndim == 2:
+        return y.shape
+    else:
+        (n,) = y.shape
+        return 1, n
 
 
 def chol_with_gersh(

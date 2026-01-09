@@ -547,16 +547,14 @@ class TestMultichain:
             sharded = num_chains < 0
             num_chains = abs(num_chains)
 
-        target_num_devices = 2
-        if sharded and get_device_count() < target_num_devices:
-            pytest.skip('Skipping sharded test: requires multiple devices.')
+        target_num_devices = min(2, get_device_count())
 
         with subtests.test('init'):
             typechecking_init = jaxtyped(init, typechecker=beartype)
             state = typechecking_init(
                 **init_kwargs,
                 num_chains=num_chains,
-                chain_devices=target_num_devices if sharded else None,
+                mesh=dict(chains=target_num_devices) if sharded else None,
             )
             assert state.forest.num_chains() == num_chains
             check_chain_sharding(state, sharded)
@@ -683,13 +681,18 @@ def check_chain_sharding(x: PyTree, sharded: bool):
     def check_leaf(_path: KeyPath, x: Array | None, axis: int | None):
         if x is None:
             return
-        if not sharded:
+        elif not sharded:
             assert isinstance(x.sharding, SingleDeviceSharding)
+        elif axis is None:
+            assert get_normal_spec(x) == (None,) * x.ndim
         else:
-            assert x.sharding.num_devices > 1
-            if axis is None:
-                assert x.sharding.spec == ()
-            else:
-                assert x.sharding.spec == ('chains',)
+            assert get_normal_spec(x) == ('chains',) + (None,) * (x.ndim - 1)
 
     map_with_path(check_leaf, x, chain_axes, is_leaf=lambda x: x is None)
+
+
+def get_normal_spec(x: Array) -> tuple[str | None, ...]:
+    """Get the partition spec of `x` with the same length as ``x.ndim``."""
+    spec = x.sharding.spec
+    spec += (None,) * (x.ndim - len(spec))
+    return spec

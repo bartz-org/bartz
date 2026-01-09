@@ -68,7 +68,7 @@ from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
-from tests.test_mcmcstep import check_chain_sharding
+from tests.test_mcmcstep import check_chain_sharding, get_normal_spec
 from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
@@ -236,7 +236,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     resid_batch_size=None,
                     count_batch_size=None,
                     save_ratios=True,
-                    chain_devices='auto' if get_device_count() >= 2 else None,
+                    mesh=dict(chains=min(2, get_device_count())),
                 ),
             )
 
@@ -1427,9 +1427,9 @@ class TestProfile:
 
 def test_sharding(kw: dict):
     """Check that chains live on their own devices throughout the interface."""
-    chain_devices = kw.get('init_kw', {}).get('chain_devices', None)
+    mesh = kw.get('init_kw', {}).get('mesh', None)
     bart = mc_gbart(**kw)
-    check = partial(check_chain_sharding, sharded=chain_devices is not None)
+    check = partial(check_chain_sharding, sharded=mesh is not None)
     check(bart._mcmc_state)
     check(bart._burnin_trace)
     check(bart._main_trace)
@@ -1437,11 +1437,12 @@ def test_sharding(kw: dict):
     def check_sharding(x: Array | None):
         if x is None:
             return
-        if chain_devices is None:
+        elif mesh is None:
             assert isinstance(x.sharding, SingleDeviceSharding)
         else:
-            assert x.sharding.num_devices == 2
-            assert x.sharding.spec == ('chains',)
+            expected_num_devices = min(2, get_device_count())
+            assert x.sharding.num_devices == expected_num_devices
+            assert get_normal_spec(x) == ('chains',) + (None,) * (x.ndim - 1)
 
     check_sharding(bart.yhat_test)
     check_sharding(bart.prob_test)

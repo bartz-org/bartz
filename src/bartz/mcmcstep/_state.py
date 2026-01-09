@@ -24,25 +24,15 @@
 
 """Module defining the BART MCMC state and initialization."""
 
-from collections.abc import Callable, Hashable, Sequence
+from collections.abc import Callable, Hashable
 from dataclasses import Field, fields
 from functools import partial, wraps
 from math import ceil, log2
 from typing import Any, Literal, TypeVar
 
-import jax
 from equinox import Module, error_if
 from equinox import field as eqx_field
-from jax import (
-    Device,
-    NamedSharding,
-    device_put,
-    eval_shape,
-    make_mesh,
-    random,
-    tree,
-    vmap,
-)
+from jax import NamedSharding, device_put, eval_shape, make_mesh, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
@@ -101,7 +91,7 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     return _find_metadata(x, 'chains', 0, None)
 
 
-def data_vmap_axis(x: PyTree[Module | Any]) -> PyTree[int | None]:
+def data_vmap_axes(x: PyTree[Module | Any]) -> PyTree[int | None]:
     """Determine vmapping axes for data.
 
     This is analogous to `chain_vmap_axes` but returns -1 for all fields
@@ -433,7 +423,7 @@ def init(
     rho: float | Float32[Any, ''] | None = None,
     sparse_on_at: int | Integer[Any, ''] | None = None,
     num_chains: int | None = None,
-    chain_devices: None | Sequence[Device] | int | Literal['auto'] = None,
+    mesh: Mesh | dict[str, int] | None = None,
 ) -> State:
     """
     Make a BART posterior sampling MCMC initial state.
@@ -479,7 +469,9 @@ def init(
     count_batch_size
         The batch sizes, along datapoints, for summing the residuals and
         counting the number of datapoints in each leaf. `None` for no batching.
-        If 'auto', pick a value based on the device of `y`, or the default
+        If 'auto', it's chosen automatically based on the devices used in `mesh`
+        if specified, else the default device. Note: in the latter case, this
+        won't respect the device of `y` if it's different from the default
         device.
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
@@ -515,12 +507,20 @@ def init(
     num_chains
         The number of independent MCMC chains to represent in the state. Single
         chain with scalar values if not specified.
-    chain_devices
-        The devices to shard chains across. If not set, all chains run on the
-        same device. If an integer, let jax automatically pick that number of
-        devices from the default platform. If 'auto', use all available devices
-        on the default platform, or all virtual cpus but for 0 on cpu. If a
-        sequence of devices, use those specified.
+    mesh
+        A jax mesh used to shard data and computation across multiple devices.
+        If it has a 'chains' axis, that axis is used to shard the chains. If it
+        has a 'data' axis, that axis is used to shard the datapoints.
+
+        As a shorthand, if a dictionary mapping axis names to axis size is
+        passed, the corresponding mesh is created, e.g., ``dict(chains=4,
+        data=2)`` will let jax pick 8 devices to split chains (which must be a
+        multiple of 4) across 4 pairs of devices, where in each pair the data is
+        split in two.
+
+        Note: if a mesh is passed, the arrays are always sharded according to
+        it. In particular even if the mesh has no 'chains' or 'data' axis, the
+        arrays will be replicated on all devices in the mesh.
 
     Returns
     -------
@@ -579,7 +579,7 @@ def init(
     add_chains = partial(_add_chains, chain_shape=chain_shape)
 
     # determine batch sizes for reductions
-    mesh = _prepare_mesh(num_chains, chain_devices, y)
+    mesh = _parse_mesh(num_chains, mesh)
     resid_batch_size, count_batch_size = _choose_suffstat_batch_size(
         resid_batch_size, count_batch_size, y, max_depth, num_trees, num_chains, mesh
     )
@@ -676,37 +676,29 @@ def _add_chains(
         return jnp.broadcast_to(x, chain_shape + x.shape)
 
 
-def _prepare_mesh(
-    num_chains: int | None,
-    chain_devices: None | Sequence[Device] | int | Literal['auto'],
-    y: Float32[Array, '...'],
+def _parse_mesh(
+    num_chains: int | None, mesh: Mesh | dict[str, int] | None
 ) -> Mesh | None:
-    """Create a `Mesh` object to represent how to map chains to devices."""
+    """Parse the `mesh` argument."""
+    if mesh is None:
+        return None
+
+    # convert dict format to actual mesh
+    if isinstance(mesh, dict):
+        assert set(mesh).issubset({'chains', 'data'})
+        mesh = make_mesh(
+            tuple(mesh.values()), tuple(mesh), (AxisType.Auto,) * len(mesh)
+        )
+
+    # check there's no chain mesh axis if there are no chains
     if num_chains is None:
-        assert chain_devices is None
-        return None
+        assert 'chains' not in mesh.axis_names
 
-    if chain_devices is None:
-        return None
+    # check the axes we use are in auto mode
+    assert 'chains' not in mesh.axis_names or 'chains' in mesh.auto_axes
+    assert 'data' not in mesh.axis_names or 'data' in mesh.auto_axes
 
-    if chain_devices == 'auto':
-        platform = _get_platform(y)
-        devices = jax.devices(platform)
-        if platform == 'cpu':
-            devices = devices[1:]
-            # do not use cpu 0 by default, this is a useful convention to
-            # debug because everything will be by default on cpu 0
-        num_devices = len(devices)
-    elif hasattr(chain_devices, '__len__'):
-        devices = chain_devices
-        num_devices = len(devices)
-    else:
-        devices = None
-        num_devices = chain_devices
-
-    return make_mesh(
-        (num_devices,), ('chains',), axis_types=(AxisType.Auto,), devices=devices
-    )
+    return mesh
 
 
 def _shard_state(state: State) -> State:
@@ -715,16 +707,22 @@ def _shard_state(state: State) -> State:
     if mesh is None:
         return state
 
-    def shard_leaf(x: Array | None, chain_axis: int | None) -> Array | None:
+    def shard_leaf(
+        x: Array | None, chain_axis: int | None, data_axis: int | None
+    ) -> Array | None:
         if x is None:
             return None
-        elif chain_axis is None:
-            return device_put(x, NamedSharding(mesh, PartitionSpec()))
-        else:
-            assert chain_axis == 0
-            return device_put(x, NamedSharding(mesh, PartitionSpec('chains')))
 
-    return tree.map(shard_leaf, state, chain_vmap_axes(state))
+        spec = [None] * x.ndim
+        if chain_axis is not None and 'chains' in mesh.axis_names:
+            spec[chain_axis] = 'chains'
+        if data_axis is not None and 'data' in mesh.axis_names:
+            spec[data_axis] = 'data'
+
+        spec = PartitionSpec(*spec)
+        return device_put(x, NamedSharding(mesh, spec))
+
+    return tree.map(shard_leaf, state, chain_vmap_axes(state), data_vmap_axes(state))
 
 
 def _all_none_or_not_none(*args):
@@ -738,17 +736,11 @@ def _asarray_or_none(x):
     return jnp.asarray(x)
 
 
-def _get_platform(x: Array) -> str:
-    """Get the platform of the device where `x` is located, or the default device if that's not possible."""
-    try:
-        platform = x.platform()
-    except AttributeError:
-        device = get_default_device()
-        platform = device.platform
-    if platform not in ('cpu', 'gpu'):
-        msg = f'Unknown platform: {platform}'
-        raise KeyError(msg)
-    return platform
+def _get_platform(mesh: Mesh | None) -> str:
+    if mesh is None:
+        return get_default_device().platform
+    else:
+        return mesh.devices.flat[0].platform
 
 
 def _choose_suffstat_batch_size(
@@ -772,7 +764,7 @@ def _choose_suffstat_batch_size(
     batch_size = k * num_chains
     unbatched_accum_bytes_times_batch_size = num_trees * 2**max_depth * 4 * n
 
-    platform = _get_platform(y)
+    platform = _get_platform(mesh)
 
     def final_round(s: float) -> int | None:
         # multiply by batch_size because if the calculation is already

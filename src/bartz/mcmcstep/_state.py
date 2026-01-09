@@ -91,7 +91,7 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     return _find_metadata(x, 'chains', 0, None)
 
 
-def data_vmap_axes(x: PyTree[Module | Any]) -> PyTree[int | None]:
+def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     """Determine vmapping axes for data.
 
     This is analogous to `chain_vmap_axes` but returns -1 for all fields
@@ -123,7 +123,7 @@ def _find_metadata(
     def is_leaf(x) -> bool:
         return isinstance(x, Module)
 
-    def get_axes(x: Module | Any) -> PyTree[int | None]:
+    def get_axes(x: Module | Any) -> PyTree[T]:
         if isinstance(x, Module):
             return _find_metadata(x, key, if_true, if_false)
         else:
@@ -289,8 +289,10 @@ class State(Module):
         Metadata and configurations for the MCMC step.
     """
 
-    X: UInt[Array, 'p n']
-    y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n']
+    X: UInt[Array, 'p n'] = field(data=True)
+    y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'] = field(
+        data=True
+    )
     z: None | Float32[Array, '*chains n'] = field(chains=True, data=True)
     offset: Float32[Array, ''] | Float32[Array, ' k']
     resid: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(

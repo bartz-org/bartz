@@ -48,7 +48,7 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._state import chain_vmap_axes
+from bartz.mcmcstep._state import chain_vmap_axes, data_vmap_axes
 from tests.util import assert_close_matrices, manual_tree
 
 
@@ -630,7 +630,7 @@ class TestMultichain:
 
         map_with_path(check_equal, mc_state, stacked_state)
 
-    def vmap_axes_for_state(self, state: State) -> State:
+    def chain_vmap_axes(self, state: State) -> State:
         """Old manual version of `chain_vmap_axes(_: State)`."""
 
         def choose_vmap_index(path, _) -> Literal[0, None]:
@@ -662,16 +662,41 @@ class TestMultichain:
 
         return map_with_path(choose_vmap_index, state)
 
-    def test_chain_vmap_axes(self, init_kwargs: dict):
-        """Check `chain_vmap_axes` on a `State`."""
+    def data_vmap_axes(self, state: State) -> State:
+        """Hardcoded version of `data_vmap_axes(_: State)`."""
+
+        def choose_vmap_index(path: KeyPath, _) -> Literal[-1, None]:
+            vmap_attrs = (
+                '.X',
+                '.y',
+                '.z',
+                '.resid',
+                '.prec_scale',
+                '.forest.leaf_indices',
+            )
+            str_path = ''.join(map(str, path))
+            if str_path in vmap_attrs:
+                return -1
+            else:
+                return None
+
+        return map_with_path(choose_vmap_index, state)
+
+    def test_vmap_axes(self, init_kwargs: dict):
+        """Check `data_vmap_axes` and `chain_vmap_axes` on a `State`."""
         state = init(**init_kwargs)
-        axes = chain_vmap_axes(state)
-        ref_axes = self.vmap_axes_for_state(state)
+
+        chain_axes = chain_vmap_axes(state)
+        data_axes = data_vmap_axes(state)
+
+        ref_chain_axes = self.chain_vmap_axes(state)
+        ref_data_axes = self.data_vmap_axes(state)
 
         def assert_equal(_path: KeyPath, axis: int | None, ref_axis: int | None):
             assert axis == ref_axis
 
-        map_with_path(assert_equal, axes, ref_axes)
+        map_with_path(assert_equal, chain_axes, ref_chain_axes)
+        map_with_path(assert_equal, data_axes, ref_data_axes)
 
 
 def check_chain_sharding(x: PyTree, sharded: bool):

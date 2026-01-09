@@ -721,7 +721,10 @@ class TestMultichain:
         """Test `normalize_spec`."""
         devices = jax.devices('cpu')[:3]
         mesh = make_mesh(
-            (3, 1), ('ciao', 'bau'), (AxisType.Auto, AxisType.Auto), devices=devices
+            (3, 1),
+            ('ciao', 'bau'),
+            axis_types=(AxisType.Auto, AxisType.Auto),
+            devices=devices,
         )
         assert normalize_spec(['ciao'], mesh, (1, 1, 1)) == PartitionSpec(
             'ciao', None, None

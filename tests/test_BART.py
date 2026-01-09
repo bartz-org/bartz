@@ -178,7 +178,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     count_batch_size=None,
                     save_ratios=True,
                     mesh=make_mesh(
-                        (min(2, get_device_count()),), ('data',), (AxisType.Auto,)
+                        (min(2, get_device_count()),),
+                        ('data',),
+                        axis_types=(AxisType.Auto,),
                     ),
                 ),
             )
@@ -242,7 +244,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     count_batch_size=None,
                     save_ratios=True,
                     mesh=make_mesh(
-                        (min(2, get_device_count()),), ('chains',), (AxisType.Auto,)
+                        (min(2, get_device_count()),),
+                        ('chains',),
+                        axis_types=(AxisType.Auto,),
                     ),
                 ),
             )

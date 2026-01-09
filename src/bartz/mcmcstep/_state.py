@@ -689,7 +689,7 @@ def _parse_mesh(
     if isinstance(mesh, dict):
         assert set(mesh).issubset({'chains', 'data'})
         mesh = make_mesh(
-            tuple(mesh.values()), tuple(mesh), (AxisType.Auto,) * len(mesh)
+            tuple(mesh.values()), tuple(mesh), axis_types=(AxisType.Auto,) * len(mesh)
         )
 
     # check there's no chain mesh axis if there are no chains
@@ -697,10 +697,19 @@ def _parse_mesh(
         assert 'chains' not in mesh.axis_names
 
     # check the axes we use are in auto mode
-    assert 'chains' not in mesh.axis_names or 'chains' in mesh.auto_axes
-    assert 'data' not in mesh.axis_names or 'data' in mesh.auto_axes
+    assert 'chains' not in mesh.axis_names or 'chains' in _auto_axes(mesh)
+    assert 'data' not in mesh.axis_names or 'data' in _auto_axes(mesh)
 
     return mesh
+
+
+def _auto_axes(mesh: Mesh) -> list[str]:
+    """Re-implement `Mesh.auto_axes` because that's missing in jax 5."""
+    return [
+        n
+        for n, t in zip(mesh.axis_names, mesh.axis_types, strict=True)
+        if t == AxisType.Auto
+    ]
 
 
 def _shard_state(state: State) -> State:

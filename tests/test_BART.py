@@ -41,11 +41,11 @@ import jax
 import numpy
 import polars as pl
 import pytest
-from jax import debug_nans, lax, random, vmap
+from jax import debug_nans, lax, make_mesh, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logit, ndtr
-from jax.sharding import SingleDeviceSharding
+from jax.sharding import AxisType, SingleDeviceSharding
 from jax.tree import map_with_path
 from jax.tree_util import KeyPath
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, UInt
@@ -68,7 +68,7 @@ from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
-from tests.test_mcmcstep import check_chain_sharding, get_normal_spec
+from tests.test_mcmcstep import check_sharding, get_normal_spec
 from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
@@ -174,7 +174,12 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 mc_cores=1,
                 seed=keys.pop(),
                 init_kw=dict(
-                    resid_batch_size=None, count_batch_size=None, save_ratios=True
+                    resid_batch_size=None,
+                    count_batch_size=None,
+                    save_ratios=True,
+                    mesh=make_mesh(
+                        (min(2, get_device_count()),), ('data',), (AxisType.Auto,)
+                    ),
                 ),
             )
 
@@ -236,7 +241,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     resid_batch_size=None,
                     count_batch_size=None,
                     save_ratios=True,
-                    mesh=dict(chains=min(2, get_device_count())),
+                    mesh=make_mesh(
+                        (min(2, get_device_count()),), ('chains',), (AxisType.Auto,)
+                    ),
                 ),
             )
 
@@ -855,6 +862,11 @@ def test_one_datapoint(kw):
         xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
         kw.update(xinfo=xinfo)
 
+    # disable data sharding
+    mesh = kw.get('init_kw', {}).get('mesh', None)
+    if mesh is not None and 'data' in mesh.axis_names:
+        kw['init_kw']['mesh'] = None
+
     bart = mc_gbart(**kw)
     if kw['y_train'].dtype == bool:
         tau_num = 3
@@ -891,7 +903,7 @@ def test_few_datapoints(kw):
     kw.setdefault('init_kw', {}).update(
         min_points_per_decision_node=10, min_points_per_leaf=None
     )
-    kw = set_num_datapoints(kw, 9)  # < 10 = 2 * 5
+    kw = set_num_datapoints(kw, 8)  # < 10 = 2 * 5, multiple of 2 shards
     bart = mc_gbart(**kw)
     assert jnp.all(bart.yhat_train == bart.yhat_train[:, :1])
 
@@ -1428,28 +1440,45 @@ class TestProfile:
 def test_sharding(kw: dict):
     """Check that chains live on their own devices throughout the interface."""
     mesh = kw.get('init_kw', {}).get('mesh', None)
+
     bart = mc_gbart(**kw)
-    check = partial(check_chain_sharding, sharded=mesh is not None)
+
+    check = partial(check_sharding, mesh=mesh)
     check(bart._mcmc_state)
     check(bart._burnin_trace)
     check(bart._main_trace)
 
-    def check_sharding(x: Array | None):
+    def check_chain_sharding(x: Array | None):
         if x is None:
             return
         elif mesh is None:
             assert isinstance(x.sharding, SingleDeviceSharding)
-        else:
+        elif 'chains' in mesh.axis_names:
             expected_num_devices = min(2, get_device_count())
             assert x.sharding.num_devices == expected_num_devices
             assert get_normal_spec(x) == ('chains',) + (None,) * (x.ndim - 1)
 
-    check_sharding(bart.yhat_test)
-    check_sharding(bart.prob_test)
-    check_sharding(bart.prob_train)
+    check_chain_sharding(bart.yhat_test)
+    check_chain_sharding(bart.prob_test)
+    check_chain_sharding(bart.prob_train)
     if bart.sigma is not None:
-        check_sharding(bart.sigma.T)
-    check_sharding(bart.sigma_)
-    check_sharding(bart.varcount)
-    check_sharding(bart.varprob)
-    check_sharding(bart.yhat_train)
+        check_chain_sharding(bart.sigma.T)
+    check_chain_sharding(bart.sigma_)
+    check_chain_sharding(bart.varcount)
+    check_chain_sharding(bart.varprob)
+    check_chain_sharding(bart.yhat_train)
+
+    def check_data_sharding(x: Array | None):
+        if x is None:
+            return
+        elif mesh is None:
+            assert isinstance(x.sharding, SingleDeviceSharding)
+        elif 'data' in mesh.axis_names:
+            expected_num_devices = min(2, get_device_count())
+            assert x.sharding.num_devices == expected_num_devices
+            assert get_normal_spec(x) == (None,) * (x.ndim - 1) + ('data',)
+
+    check_data_sharding(bart.prob_train)
+    check_data_sharding(bart.prob_train_mean)
+    check_data_sharding(bart.yhat_train)
+    check_data_sharding(bart.yhat_train_mean)

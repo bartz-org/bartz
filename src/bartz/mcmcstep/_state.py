@@ -724,7 +724,13 @@ def _shard_state(state: State) -> State:
         spec = PartitionSpec(*spec)
         return device_put(x, NamedSharding(mesh, spec))
 
-    return tree.map(shard_leaf, state, chain_vmap_axes(state), data_vmap_axes(state))
+    return tree.map(
+        shard_leaf,
+        state,
+        chain_vmap_axes(state),
+        data_vmap_axes(state),
+        is_leaf=lambda x: x is None,
+    )
 
 
 def _all_none_or_not_none(*args):
@@ -908,7 +914,7 @@ def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
     def split_key(x):
         if is_key(x):
             x = random.split(x, num_chains)
-            if mesh is not None:
+            if mesh is not None and 'chains' in mesh.axis_names:
                 x = device_put(x, NamedSharding(mesh, PartitionSpec('chains')))
         return x
 

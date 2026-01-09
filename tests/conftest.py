@@ -37,7 +37,7 @@ jax.config.update('jax_debug_key_reuse', True)
 jax.config.update('jax_debug_nans', True)
 jax.config.update('jax_debug_infs', True)
 jax.config.update('jax_legacy_prng_key', 'error')
-jax.config.update('jax_num_cpu_devices', 3)  # 1 cpu0 + 2 for sharding chains
+jax.config.update('jax_num_cpu_devices', 10)  # 2 * 5
 
 jax.config.update('jax_compilation_cache_dir', 'config/jax_cache')
 jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)

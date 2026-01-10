@@ -27,9 +27,16 @@
 from dataclasses import replace
 from functools import partial
 
+try:
+    # available since jax v0.6.1
+    from jax import shard_map
+except ImportError:
+    # deprecated in jax v0.8.0
+    from jax.experimental.shard_map import shard_map
+
 import jax
 from equinox import Module, tree_at
-from jax import lax, random, shard_map
+from jax import lax, random
 from jax import numpy as jnp
 from jax.lax import cond
 from jax.scipy.linalg import solve_triangular
@@ -1131,9 +1138,17 @@ def _scatter_add(
         in_specs=in_specs,
         out_specs=PartitionSpec(),
         mesh=mesh,
-        check_vma=False,  # because of jax/issues/#34249 in jax v0.8.1 and v0.8.2
+        **_get_shard_map_patch_kwargs(),
     )
     return _scatter_add(values, indices)
+
+
+def _get_shard_map_patch_kwargs():
+    # see jax/issues/#34249, problem with vmap(shard_map(psum))
+    if jax.__version__ in ('0.8.1', '0.8.2'):
+        return {'check_vma': False}
+    else:
+        return {}
 
 
 def _scatter_add_impl(

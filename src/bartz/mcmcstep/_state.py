@@ -704,7 +704,8 @@ def _parse_mesh(
 
 
 def _auto_axes(mesh: Mesh) -> list[str]:
-    """Re-implement `Mesh.auto_axes` because that's missing in jax 5."""
+    """Re-implement `Mesh.auto_axes` because that's missing in jax v0.5."""
+    # Mesh.auto_axes added in jax v0.6.0
     return [
         n
         for n, t in zip(mesh.axis_names, mesh.axis_types, strict=True)

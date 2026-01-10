@@ -341,4 +341,4 @@ jobs:
       - docs
       - covreport
       - benchmarks
-      - devcmds
+      - dev-commands

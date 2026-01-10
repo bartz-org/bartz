@@ -342,3 +342,6 @@ jobs:
       - covreport
       - benchmarks
       - dev-commands
+    steps:
+      - name: Do nothing
+        run: "Hey doc what's up"

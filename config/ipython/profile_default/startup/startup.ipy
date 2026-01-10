@@ -24,7 +24,12 @@ appnope.nope()
 from functools import partial
 
 import jax
-from jax import jit, vmap, numpy as jnp
+jax.config.update('jax_num_cpu_devices', 8)
+
+from jax import jit, vmap, shard_map, make_mesh, lax
+from jax.sharding import NamedSharding, PartitionSpec
+from jax import numpy as jnp
+
 import numpy as np
 import equinox as eqx
 import jaxtyping as jt

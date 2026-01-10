@@ -26,7 +26,12 @@ from functools import partial
 import jax
 jax.config.update('jax_num_cpu_devices', 8)
 
-from jax import jit, vmap, shard_map, make_mesh, lax
+try:
+    from jax import shard_map  # available since jax v0.6.1
+except ImportError:
+    from jax.experimental.shard_map import shard_map
+
+from jax import jit, vmap, make_mesh, lax
 from jax.sharding import NamedSharding, PartitionSpec
 from jax import numpy as jnp
 

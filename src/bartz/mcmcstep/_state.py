@@ -773,11 +773,13 @@ def _choose_suffstat_batch_size(
     # get number of outcomes and of datapoints
     k, n = _get_k_n(y)
 
-    # compute sizes used to adjust batch sizes
+    # get per-device values
     if num_chains is None:
         num_chains = 1
-    if mesh is not None:
-        num_chains //= mesh.size
+    num_chains //= _get_axis_size(mesh, 'chains')
+    n //= _get_axis_size(mesh, 'data')
+
+    # compute auxiliary sizes
     batch_size = k * num_chains
     unbatched_accum_bytes_times_batch_size = num_trees * 2**max_depth * 4 * n
 
@@ -803,6 +805,8 @@ def _choose_suffstat_batch_size(
         rbs = resid_batch_size
     elif platform == 'cpu':
         rbs = final_round(n / 6)
+        # instead of 6 I guess I should have in general the number of "good"
+        # physical cores
     elif platform == 'gpu':
         rbs = final_round((2 * n) ** (1 / 3))
 
@@ -821,6 +825,14 @@ def _choose_suffstat_batch_size(
         cbs = final_round(cbs)
 
     return rbs, cbs
+
+
+def _get_axis_size(mesh: Mesh | None, axis_name: str) -> int:
+    if mesh is None or axis_name not in mesh.axis_names:
+        return 1
+    else:
+        i = mesh.axis_names.index(axis_name)
+        return mesh.axis_sizes[i]
 
 
 def _get_k_n(y: Array) -> tuple[int, int]:

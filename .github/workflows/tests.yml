@@ -331,7 +331,7 @@ jobs:
         run: make ipython ARGS=config/ipython/profile_default/startup/startup.ipy
 
       - name: run IPython with old toolchain
-        run: make ipython-old ARGS=config/ipython/profile_default/startup/startup.ipy
+        run: RPY2_CFFI_MODE=ABI make ipython-old ARGS=config/ipython/profile_default/startup/startup.ipy
 
   required-dummy:
     runs-on: ubuntu-latest

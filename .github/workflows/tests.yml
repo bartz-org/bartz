@@ -314,3 +314,34 @@ jobs:
 
       - name: Run asv in quick mode
         run: make asv-quick ARGS='--attribute timeout=120' # long timeout because CI runners are slow
+
+  dev-commands:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: run IPython
+        run: make ipython ARGS=config/ipython/profile_default/startup/startup.ipy
+
+      - name: run IPython with old toolchain
+        run: RPY2_CFFI_MODE=ABI make ipython-old ARGS=config/ipython/profile_default/startup/startup.ipy
+
+  required-dummy:
+    runs-on: ubuntu-latest
+    needs:
+      - pre-commit
+      - tests
+      - docs
+      - covreport
+      - benchmarks
+      - dev-commands
+    steps:
+      - name: Do nothing
+        run: echo "Hey doc what's up"

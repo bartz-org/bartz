@@ -708,19 +708,6 @@ def evaluate_trace(
     num_devices = get_axis_size(mesh, 'chains') * get_axis_size(mesh, 'data')
     max_io_nbytes *= num_devices
 
-    # adjust memory limit keeping into account intermediate values
-    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
-    k = trace.leaf_tree.shape[-2] if is_mv else 1
-    hts = trace.split_tree.shape[-1]
-    core_io_size = hts * (
-        2 * k * trace.leaf_tree.itemsize
-        + trace.var_tree.itemsize
-        + trace.split_tree.itemsize
-    )
-    _, n = X.shape
-    core_int_size = k * n * trace.leaf_tree.itemsize  # the value of each tree
-    max_io_nbytes = max(1, floor(max_io_nbytes / (1 + core_int_size / core_io_size)))
-
     # determine batching axes
     has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
     if has_chains:
@@ -739,9 +726,28 @@ def evaluate_trace(
         reduce_ufunc=jnp.add,
     )
 
-    # determine output shapes (to avoid autobatch tracing everything 4 times)
+    # determine output shape (to avoid autobatch tracing everything 4 times)
+    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+    k = trace.leaf_tree.shape[-2] if is_mv else 1
     mv_shape = (k,) if is_mv else ()
-    out_shape = (*trace.leaf_tree.shape[:tree_axis], *mv_shape, n)
+    _, n = X.shape
+    out_shape = (*trace.split_tree.shape[:-2], *mv_shape, n)
+
+    # adjust memory limit keeping into account that trees are summed over
+    num_trees, hts = trace.split_tree.shape[-2:]
+    out_size = k * n * jnp.float32.dtype.itemsize  # the value of the forest
+    core_io_size = (
+        num_trees
+        * hts
+        * (
+            2 * k * trace.leaf_tree.itemsize
+            + trace.var_tree.itemsize
+            + trace.split_tree.itemsize
+        )
+        + out_size
+    )
+    core_int_size = (num_trees - 1) * out_size
+    max_io_nbytes = max(1, floor(max_io_nbytes / (1 + core_int_size / core_io_size)))
 
     # batch over mcmc samples
     batched_eval = autobatch(

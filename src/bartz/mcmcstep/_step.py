@@ -27,6 +27,13 @@
 from dataclasses import replace
 from functools import partial
 
+try:
+    # available since jax v0.6.1
+    from jax import shard_map
+except ImportError:
+    # deprecated in jax v0.8.0
+    from jax.experimental.shard_map import shard_map
+
 import jax
 from equinox import Module, tree_at
 from jax import lax, random
@@ -34,7 +41,8 @@ from jax import numpy as jnp
 from jax.lax import cond
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
-from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, Shaped, UInt
+from jax.sharding import Mesh, PartitionSpec
+from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, Shaped, UInt, UInt32
 
 from bartz._profiler import (
     get_profile_mode,
@@ -47,7 +55,7 @@ from bartz._profiler import (
 from bartz.grove import var_histogram
 from bartz.jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz.mcmcstep._moves import Moves, propose_moves
-from bartz.mcmcstep._state import State, chol_with_gersh, field
+from bartz.mcmcstep._state import State, StepConfig, chol_with_gersh, field
 
 
 @jit_if_not_profiling
@@ -338,7 +346,7 @@ def accept_moves_parallel_stage(
         or bart.prec_scale is None
     ):
         count_trees, move_counts = compute_count_trees(
-            bart.forest.leaf_indices, moves, bart.config.count_batch_size
+            bart.forest.leaf_indices, moves, bart.config
         )
 
     # mark which leaves & potential leaves have enough points to be grown
@@ -368,10 +376,7 @@ def accept_moves_parallel_stage(
         move_precs = move_counts
     else:
         prec_trees, move_precs = compute_prec_trees(
-            bart.prec_scale,
-            bart.forest.leaf_indices,
-            moves,
-            bart.config.count_batch_size,
+            bart.prec_scale, bart.forest.leaf_indices, moves, bart.config
         )
     assert move_precs is not None
 
@@ -428,7 +433,8 @@ def apply_grow_to_indices(
     The updated leaf indices.
     """
     left_child = moves.node.astype(leaf_indices.dtype) << 1
-    go_right = X[moves.grow_var, :] >= moves.grow_split
+    x: UInt[Array, ' n'] = X[moves.grow_var, :]
+    go_right = x >= moves.grow_split
     tree_size = jnp.array(2 * moves.var_tree.size)
     node_to_update = jnp.where(moves.grow, moves.node, tree_size)
     return jnp.where(
@@ -436,9 +442,46 @@ def apply_grow_to_indices(
     )
 
 
+@partial(vmap_nodoc, in_axes=(None, 0, 0, None))
+def _compute_count_or_prec_trees(
+    prec_scale: Float32[Array, ' n'] | None,
+    leaf_indices: UInt[Array, 'num_trees n'],
+    moves: Moves,
+    config: StepConfig,
+) -> (
+    tuple[UInt32[Array, 'num_trees 2**d'], Counts]
+    | tuple[Float32[Array, 'num_trees 2**d'], Precs]
+):
+    (tree_size,) = moves.var_tree.shape
+    tree_size *= 2
+
+    if prec_scale is None:
+        value = 1
+        cls = Counts
+        dtype = jnp.uint32
+    else:
+        value = prec_scale
+        cls = Precs
+        dtype = jnp.float32
+
+    trees = _scatter_add(
+        value, leaf_indices, tree_size, dtype, config.count_batch_size, config.mesh
+    )
+
+    # count datapoints in nodes modified by move
+    left = trees[moves.left]
+    right = trees[moves.right]
+    counts = cls(left=left, right=right, total=left + right)
+
+    # write count into non-leaf node
+    trees = trees.at[moves.node].set(counts.total)
+
+    return trees, counts
+
+
 def compute_count_trees(
-    leaf_indices: UInt[Array, 'num_trees n'], moves: Moves, batch_size: int | None
-) -> tuple[Int32[Array, 'num_trees 2**d'], Counts]:
+    leaf_indices: UInt[Array, 'num_trees n'], moves: Moves, config: StepConfig
+) -> tuple[UInt32[Array, 'num_trees 2**d'], Counts]:
     """
     Count the number of datapoints in each leaf.
 
@@ -449,8 +492,8 @@ def compute_count_trees(
         of the tree (post-GROW, pre-PRUNE).
     moves
         The proposed moves, see `propose_moves`.
-    batch_size
-        The data batch size to use for the summation.
+    config
+        The MCMC configuration.
 
     Returns
     -------
@@ -460,100 +503,14 @@ def compute_count_trees(
         The counts of the number of points in the leaves grown or pruned by the
         moves.
     """
-    num_trees, tree_size = moves.var_tree.shape
-    tree_size *= 2
-    tree_indices = jnp.arange(num_trees)
-
-    count_trees = count_datapoints_per_leaf(leaf_indices, tree_size, batch_size)
-
-    # count datapoints in nodes modified by move
-    left = count_trees[tree_indices, moves.left]
-    right = count_trees[tree_indices, moves.right]
-    counts = Counts(left=left, right=right, total=left + right)
-
-    # write count into non-leaf node
-    count_trees = count_trees.at[tree_indices, moves.node].set(counts.total)
-
-    return count_trees, counts
-
-
-def count_datapoints_per_leaf(
-    leaf_indices: UInt[Array, 'num_trees n'], tree_size: int, batch_size: int | None
-) -> Int32[Array, 'num_trees {tree_size}']:
-    """
-    Count the number of datapoints in each leaf.
-
-    Parameters
-    ----------
-    leaf_indices
-        The index of the leaf each datapoint falls into.
-    tree_size
-        The size of the leaf tree array (2 ** d).
-    batch_size
-        The data batch size to use for the summation.
-
-    Returns
-    -------
-    The number of points in each leaf node.
-    """
-    if batch_size is None:
-        return _count_scan(leaf_indices, tree_size)
-    else:
-        return _count_vec(leaf_indices, tree_size, batch_size)
-
-
-def _count_scan(
-    leaf_indices: UInt[Array, 'num_trees n'], tree_size: int
-) -> Int32[Array, 'num_trees {tree_size}']:
-    def loop(_, leaf_indices):
-        return None, _aggregate_scatter(1, leaf_indices, tree_size, jnp.uint32)
-
-    _, count_trees = lax.scan(loop, None, leaf_indices)
-    return count_trees
-
-
-def _aggregate_scatter(
-    values: Shaped[Array, '*'],
-    indices: Integer[Array, '*'],
-    size: int,
-    dtype: jnp.dtype,
-) -> Shaped[Array, ' {size}']:
-    return jnp.zeros(size, dtype).at[indices].add(values)
-
-
-def _count_vec(
-    leaf_indices: UInt[Array, 'num_trees n'], tree_size: int, batch_size: int
-) -> Int32[Array, 'num_trees {tree_size}']:
-    return _aggregate_batched_alltrees(
-        jnp.uint32(1), leaf_indices, tree_size, jnp.uint32, batch_size
-    )
-    # uint16 is super-slow on gpu, don't use it even if n < 2^16
-
-
-def _aggregate_batched_alltrees(
-    values: Shaped[Array, '*'],
-    indices: UInt[Array, 'num_trees n'],
-    size: int,
-    dtype: jnp.dtype,
-    batch_size: int,
-) -> Shaped[Array, 'num_trees {size}']:
-    num_trees, n = indices.shape
-    tree_indices = jnp.arange(num_trees)
-    nbatches = n // batch_size + bool(n % batch_size)
-    batch_indices = jnp.arange(n) % nbatches
-    return (
-        jnp.zeros((num_trees, size, nbatches), dtype)
-        .at[tree_indices[:, None], indices, batch_indices]
-        .add(values)
-        .sum(axis=2)
-    )
+    return _compute_count_or_prec_trees(None, leaf_indices, moves, config)
 
 
 def compute_prec_trees(
     prec_scale: Float32[Array, ' n'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
-    batch_size: int | None,
+    config: StepConfig,
 ) -> tuple[Float32[Array, 'num_trees 2**d'], Precs]:
     """
     Compute the likelihood precision scale in each leaf.
@@ -567,8 +524,8 @@ def compute_prec_trees(
         of the tree (post-GROW, pre-PRUNE).
     moves
         The proposed moves, see `propose_moves`.
-    batch_size
-        The data batch size to use for the summation.
+    config
+        The MCMC configuration.
 
     Returns
     -------
@@ -577,78 +534,10 @@ def compute_prec_trees(
     precs : Precs
         The likelihood precision scale in the nodes involved in the moves.
     """
-    num_trees, tree_size = moves.var_tree.shape
-    tree_size *= 2
-    tree_indices = jnp.arange(num_trees)
-
-    prec_trees = prec_per_leaf(prec_scale, leaf_indices, tree_size, batch_size)
-
-    # prec datapoints in nodes modified by move
-    left = prec_trees[tree_indices, moves.left]
-    right = prec_trees[tree_indices, moves.right]
-    precs = Precs(left=left, right=right, total=left + right)
-
-    # write prec into non-leaf node
-    prec_trees = prec_trees.at[tree_indices, moves.node].set(precs.total)
-
-    return prec_trees, precs
+    return _compute_count_or_prec_trees(prec_scale, leaf_indices, moves, config)
 
 
-def prec_per_leaf(
-    prec_scale: Float32[Array, ' n'],
-    leaf_indices: UInt[Array, 'num_trees n'],
-    tree_size: int,
-    batch_size: int | None,
-) -> Float32[Array, 'num_trees {tree_size}']:
-    """
-    Compute the likelihood precision scale in each leaf.
-
-    Parameters
-    ----------
-    prec_scale
-        The scale of the precision of the error on each datapoint.
-    leaf_indices
-        The index of the leaf each datapoint falls into.
-    tree_size
-        The size of the leaf tree array (2 ** d).
-    batch_size
-        The data batch size to use for the summation.
-
-    Returns
-    -------
-    The likelihood precision scale in each leaf node.
-    """
-    if batch_size is None:
-        return _prec_scan(prec_scale, leaf_indices, tree_size)
-    else:
-        return _prec_vec(prec_scale, leaf_indices, tree_size, batch_size)
-
-
-def _prec_scan(
-    prec_scale: Float32[Array, ' n'],
-    leaf_indices: UInt[Array, 'num_trees n'],
-    tree_size: int,
-) -> Float32[Array, 'num_trees {tree_size}']:
-    def loop(_, leaf_indices):
-        return None, _aggregate_scatter(
-            prec_scale, leaf_indices, tree_size, jnp.float32
-        )
-
-    _, prec_trees = lax.scan(loop, None, leaf_indices)
-    return prec_trees
-
-
-def _prec_vec(
-    prec_scale: Float32[Array, ' n'],
-    leaf_indices: UInt[Array, 'num_trees n'],
-    tree_size: int,
-    batch_size: int,
-) -> Float32[Array, 'num_trees {tree_size}']:
-    return _aggregate_batched_alltrees(
-        prec_scale, leaf_indices, tree_size, jnp.float32, batch_size
-    )
-
-
+@partial(vmap_nodoc, in_axes=(0, None))
 def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' 2**d']) -> Moves:
     """
     Complete non-likelihood MH ratio calculation.
@@ -672,19 +561,17 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' 2**d']) -> Move
     The updated moves, with `partial_ratio=None` and `log_trans_prior_ratio` set.
     """
     # can the leaves be grown?
-    num_trees, _ = moves.affluence_tree.shape
-    tree_indices = jnp.arange(num_trees)
-    left_growable = moves.affluence_tree.at[tree_indices, moves.left].get(
+    left_growable = moves.affluence_tree.at[moves.left].get(
         mode='fill', fill_value=False
     )
-    right_growable = moves.affluence_tree.at[tree_indices, moves.right].get(
+    right_growable = moves.affluence_tree.at[moves.right].get(
         mode='fill', fill_value=False
     )
 
     # p_prune if grow
     other_growable_leaves = moves.num_growable >= 2
     grow_again_allowed = other_growable_leaves | left_growable | right_growable
-    grow_p_prune = jnp.where(grow_again_allowed, 0.5, 1)
+    grow_p_prune = jnp.where(grow_again_allowed, 0.5, 1.0)
 
     # p_prune if prune
     prune_p_prune = jnp.where(moves.num_growable, 0.5, 1)
@@ -993,6 +880,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
             SeqStageInAllTrees(
                 pso.bart.X,
                 pso.bart.config.resid_batch_size,
+                pso.bart.config.mesh,
                 pso.bart.prec_scale,
                 pso.bart.forest.log_likelihood is not None,
                 pso.prelk,
@@ -1032,6 +920,8 @@ class SeqStageInAllTrees(Module):
         The predictors.
     resid_batch_size
         The batch size for computing the sum of residuals in each leaf.
+    mesh
+        The mesh of devices to use.
     prec_scale
         The scale of the precision of the error on each datapoint. If None, it
         is assumed to be 1.
@@ -1044,6 +934,7 @@ class SeqStageInAllTrees(Module):
 
     X: UInt[Array, 'p n']
     resid_batch_size: int | None = field(static=True)
+    mesh: Mesh | None = field(static=True)
     prec_scale: Float32[Array, ' n'] | None
     save_ratios: bool = field(static=True)
     prelk: PreLk | None
@@ -1128,7 +1019,7 @@ def accept_move_and_sample_leaves(
     tree_size = pt.leaf_tree.shape[-1]  # 2**d
 
     resid_tree = sum_resid(
-        scaled_resid, pt.leaf_indices, tree_size, at.resid_batch_size
+        scaled_resid, pt.leaf_indices, tree_size, at.resid_batch_size, at.mesh
     )
 
     # subtract starting tree from function
@@ -1175,12 +1066,13 @@ def accept_move_and_sample_leaves(
     return resid, leaf_tree, acc, to_prune, log_lk_ratio
 
 
-@partial(jnp.vectorize, excluded=(1, 2, 3), signature='(n)->(m)')
+@partial(jnp.vectorize, excluded=(1, 2, 3, 4), signature='(n)->(ts)')
 def sum_resid(
     scaled_resid: Float32[Array, ' n'] | Float32[Array, 'k n'],
     leaf_indices: UInt[Array, ' n'],
     tree_size: int,
-    batch_size: int | None,
+    resid_batch_size: int | None,
+    mesh: Mesh | None,
 ) -> Float32[Array, ' {tree_size}'] | Float32[Array, 'k {tree_size}']:
     """
     Sum the residuals in each leaf.
@@ -1198,38 +1090,96 @@ def sum_resid(
         The leaf indices of the tree (in which leaf each data point falls into).
     tree_size
         The size of the tree array (2 ** d).
-    batch_size
-        The data batch size for the aggregation. Batching increases numerical
-        accuracy and parallelism.
+    resid_batch_size
+        The batch size for computing the sum of residuals in each leaf.
+    mesh
+        The mesh of devices to use.
 
     Returns
     -------
     The sum of the residuals at data points in each leaf. For multivariate
     case, returns per-leaf sums of residual vectors.
     """
-    if batch_size is None:
-        aggr_func = _aggregate_scatter
-    else:
-        aggr_func = partial(_aggregate_batched_onetree, batch_size=batch_size)
-    return aggr_func(scaled_resid, leaf_indices, tree_size, jnp.float32)
+    return _scatter_add(
+        scaled_resid, leaf_indices, tree_size, jnp.float32, resid_batch_size, mesh
+    )
 
 
-def _aggregate_batched_onetree(
-    values: Shaped[Array, '*'],
-    indices: Integer[Array, '*'],
+def _scatter_add(
+    values: Float32[Array, ' n'] | int,
+    indices: Integer[Array, ' n'],
     size: int,
     dtype: jnp.dtype,
-    batch_size: int,
-) -> Float32[Array, ' {size}']:
-    (n,) = indices.shape
-    nbatches = n // batch_size + bool(n % batch_size)
-    batch_indices = jnp.arange(n) % nbatches
-    return (
-        jnp.zeros((size, nbatches), dtype)
-        .at[indices, batch_indices]
-        .add(values)
-        .sum(axis=1)
+    batch_size: int | None,
+    mesh: Mesh | None,
+) -> Shaped[Array, ' {size}']:
+    """Indexed reduce with optional batching."""
+    # check `values`
+    values = jnp.asarray(values)
+    assert values.ndim == 0 or values.shape == indices.shape
+
+    # set configuration
+    _scatter_add = partial(
+        _scatter_add_impl, size=size, dtype=dtype, batch_size=batch_size
     )
+
+    # single-device invocation
+    if mesh is None or 'data' not in mesh.axis_names:
+        return _scatter_add(values, indices)
+
+    # multi-device invocation
+    if values.shape:
+        in_specs = PartitionSpec('data'), PartitionSpec('data')
+    else:
+        in_specs = PartitionSpec(), PartitionSpec('data')
+    _scatter_add = partial(_scatter_add, final_psum=True)
+    _scatter_add = shard_map(
+        _scatter_add,
+        in_specs=in_specs,
+        out_specs=PartitionSpec(),
+        mesh=mesh,
+        **_get_shard_map_patch_kwargs(),
+    )
+    return _scatter_add(values, indices)
+
+
+def _get_shard_map_patch_kwargs():
+    # see jax/issues/#34249, problem with vmap(shard_map(psum))
+    if jax.__version__ in ('0.8.1', '0.8.2'):
+        return {'check_vma': False}
+    else:
+        return {}
+
+
+def _scatter_add_impl(
+    values: Float32[Array, ' n'] | Int32[Array, ''],
+    indices: Integer[Array, ' n'],
+    /,
+    *,
+    size: int,
+    dtype: jnp.dtype,
+    batch_size: int | None,
+    final_psum: bool = False,
+) -> Shaped[Array, ' {size}']:
+    if batch_size is None:
+        out = jnp.zeros(size, dtype).at[indices].add(values)
+
+    else:
+        # in the sharded case, n is the size of the local shard, not the full
+        # size
+        (n,) = indices.shape
+        nbatches = n // batch_size + bool(n % batch_size)
+        batch_indices = jnp.arange(n) % nbatches
+        out = (
+            jnp.zeros((size, nbatches), dtype)
+            .at[indices, batch_indices]
+            .add(values)
+            .sum(axis=1)
+        )
+
+    if final_psum:
+        out = lax.psum(out, 'data')
+    return out
 
 
 def _compute_likelihood_ratio_uv(

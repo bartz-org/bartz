@@ -24,20 +24,26 @@
 
 """Test `bartz.mcmcstep`."""
 
+from collections.abc import Sequence
+from math import prod
 from typing import Literal
 
+import jax
 import pytest
 from beartype import beartype
-from jax import debug_key_reuse, random, vmap
+from jax import debug_key_reuse, make_mesh, random, vmap
 from jax import numpy as jnp
-from jax.random import bernoulli, clone, permutation, randint
+from jax.random import bernoulli, clone, normal, permutation, randint
+from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
 from jax.tree import map_with_path
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Bool, Int32, Key, jaxtyped
+from jaxtyping import Array, Bool, Int32, Key, PyTree, jaxtyped
 from numpy.testing import assert_array_equal
+from pytest_subtests import SubTests
 from scipy import stats
 
-from bartz.jaxext import minimal_unsigned_dtype, split
+from bartz import profile_mode
+from bartz.jaxext import get_device_count, minimal_unsigned_dtype, split
 from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._moves import (
     ancestor_variables,
@@ -45,8 +51,8 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._state import chain_vmap_axes
-from tests.util import manual_tree
+from bartz.mcmcstep._state import chain_vmap_axes, data_vmap_axes
+from tests.util import assert_close_matrices, manual_tree
 
 
 def vmap_randint_masked(
@@ -512,48 +518,78 @@ class TestSplitRange:
 class TestMultichain:
     """Basic tests of the multichain functionality."""
 
-    @pytest.fixture(params=[None, 0, 1, 4])
-    def num_chains(self, request) -> int | None:
-        """Return the number of chains."""
-        return request.param
+    n = 100
 
     @pytest.fixture
     def init_kwargs(self, keys: split) -> dict:
         """Return arguments for `init`."""
         p = 10
-        n = 100
         k = 2
         d = 6
         numcut = 10
         num_trees = 5
         return dict(
-            X=random.randint(keys.pop(), (p, n), 0, numcut + 1, jnp.uint32),
-            y=random.normal(keys.pop(), (k, n)),
-            offset=random.normal(keys.pop(), (k,)),
+            X=randint(keys.pop(), (p, self.n), 0, numcut + 1, jnp.uint32),
+            y=normal(keys.pop(), (k, self.n)),
+            offset=normal(keys.pop(), (k,)),
             max_split=jnp.full(p, numcut + 1, jnp.uint32),
             num_trees=num_trees,
-            p_nonterminal=jnp.ones(d - 1),
+            p_nonterminal=jnp.full(d - 1, 0.9),
             leaf_prior_cov_inv=jnp.eye(k) * num_trees,
             error_cov_df=2.0,
             error_cov_scale=2 * jnp.eye(k),
         )
 
-    def test_num_chains(self, init_kwargs: dict, num_chains: int | None):
-        """Create a multichain `State` with `init` and check it has the right number of chains."""
-        typechecking_init = jaxtyped(init, typechecker=beartype)
-        state = typechecking_init(**init_kwargs, num_chains=num_chains)
-        assert state.forest.num_chains() == num_chains
+    @pytest.mark.parametrize('num_chains', [None, 0, 1, -1, 4, -4])
+    @pytest.mark.parametrize('shard_data', [False, True])
+    def test_basic(
+        self,
+        init_kwargs: dict,
+        num_chains: int | None,
+        shard_data: bool,
+        subtests: SubTests,
+        keys: split,
+    ):
+        """Create a multichain `State` with `init` and step it once."""
+        mesh = {}
 
-    def test_step(self, init_kwargs: dict, num_chains: int | None, keys: split):
-        """Step a multichain state."""
-        state = init(**init_kwargs, num_chains=num_chains)
-        typechecking_step = jaxtyped(step, typechecker=beartype)
-        with debug_key_reuse(num_chains != 0):
-            # key reuse checks trigger with empty key array apparently
-            new_state = typechecking_step(keys.pop(), state)
-        assert new_state.forest.num_chains() == num_chains
+        if num_chains is not None and num_chains < 0:
+            num_chains = -num_chains
+            mesh.update(chains=min(2, num_chains) if num_chains else 2)
 
-    def test_multichain_equiv_stack(self, init_kwargs: dict, keys: split):
+        if shard_data:
+            mesh.update(data=5)
+
+        if not mesh:
+            mesh = None
+        else:
+            targets = dict(chains=num_chains, data=self.n)
+            while prod(mesh.values()) > get_device_count():
+                for key in mesh:
+                    if mesh[key] > 1:
+                        mesh[key] -= 1
+                        while targets[key] % mesh[key] != 0:
+                            mesh[key] -= 1
+                        break
+
+        with subtests.test('init'):
+            typechecking_init = jaxtyped(init, typechecker=beartype)
+            state = typechecking_init(**init_kwargs, num_chains=num_chains, mesh=mesh)
+            assert state.forest.num_chains() == num_chains
+            check_sharding(state, state.config.mesh)
+
+        with subtests.test('step'):
+            typechecking_step = jaxtyped(step, typechecker=beartype)
+            with debug_key_reuse(num_chains != 0):
+                # key reuse checks trigger with empty key array apparently
+                new_state = typechecking_step(keys.pop(), state)
+            assert new_state.forest.num_chains() == num_chains
+            check_sharding(new_state, state.config.mesh)
+
+    @pytest.mark.parametrize('profile', [False, True])
+    def test_multichain_equiv_stack(
+        self, init_kwargs: dict, keys: split, profile: bool
+    ):
         """Check that stacking multiple chains is equivalent to a multichain trace."""
         num_chains = 4
         num_iters = 10
@@ -571,14 +607,16 @@ class TestMultichain:
         ]
 
         # run a few mcmc steps with the same random keys
-        for _ in range(num_iters):
-            mc_key = keys.pop()
-            sc_keys = random.split(random.clone(mc_key), num_chains)
+        with profile_mode(profile):
+            for _ in range(num_iters):
+                mc_key = keys.pop()
+                sc_keys = random.split(random.clone(mc_key), num_chains)
 
-            mc_state = step(mc_key, mc_state)
-            sc_states = [
-                step(key, state) for key, state in zip(sc_keys, sc_states, strict=True)
-            ]
+                mc_state = step(mc_key, mc_state)
+                sc_states = [
+                    step(key, state)
+                    for key, state in zip(sc_keys, sc_states, strict=True)
+                ]
 
         # stack single-chain states
         def stack_leaf(
@@ -600,11 +638,18 @@ class TestMultichain:
         # check the mc state is equal to the stacked state
         def check_equal(path: KeyPath, mc: Array, stacked: Array):
             str_path = ''.join(map(str, path))
-            assert_array_equal(mc, stacked, strict=True, err_msg=str_path)
+            exact = mc.platform() == 'cpu' or jnp.issubdtype(mc.dtype, jnp.integer)
+            assert_close_matrices(
+                mc,
+                stacked,
+                err_msg=f'{str_path}: ',
+                rtol=0 if exact else 1e-6,
+                reduce_rank=True,
+            )
 
         map_with_path(check_equal, mc_state, stacked_state)
 
-    def vmap_axes_for_state(self, state: State) -> State:
+    def chain_vmap_axes(self, state: State) -> State:
         """Old manual version of `chain_vmap_axes(_: State)`."""
 
         def choose_vmap_index(path, _) -> Literal[0, None]:
@@ -636,13 +681,109 @@ class TestMultichain:
 
         return map_with_path(choose_vmap_index, state)
 
-    def test_chain_vmap_axes(self, init_kwargs: dict):
-        """Check `chain_vmap_axes` on a `State`."""
+    def data_vmap_axes(self, state: State) -> State:
+        """Hardcoded version of `data_vmap_axes(_: State)`."""
+
+        def choose_vmap_index(path: KeyPath, _) -> Literal[-1, None]:
+            vmap_attrs = (
+                '.X',
+                '.y',
+                '.z',
+                '.resid',
+                '.prec_scale',
+                '.forest.leaf_indices',
+            )
+            str_path = ''.join(map(str, path))
+            if str_path in vmap_attrs:
+                return -1
+            else:
+                return None
+
+        return map_with_path(choose_vmap_index, state)
+
+    def test_vmap_axes(self, init_kwargs: dict):
+        """Check `data_vmap_axes` and `chain_vmap_axes` on a `State`."""
         state = init(**init_kwargs)
-        axes = chain_vmap_axes(state)
-        ref_axes = self.vmap_axes_for_state(state)
+
+        chain_axes = chain_vmap_axes(state)
+        data_axes = data_vmap_axes(state)
+
+        ref_chain_axes = self.chain_vmap_axes(state)
+        ref_data_axes = self.data_vmap_axes(state)
 
         def assert_equal(_path: KeyPath, axis: int | None, ref_axis: int | None):
             assert axis == ref_axis
 
-        map_with_path(assert_equal, axes, ref_axes)
+        map_with_path(assert_equal, chain_axes, ref_chain_axes)
+        map_with_path(assert_equal, data_axes, ref_data_axes)
+
+    def test_normalize_spec(self):
+        """Test `normalize_spec`."""
+        devices = jax.devices('cpu')[:3]
+        mesh = make_mesh(
+            (3, 1),
+            ('ciao', 'bau'),
+            axis_types=(AxisType.Auto, AxisType.Auto),
+            devices=devices,
+        )
+        assert normalize_spec(['ciao'], mesh, (1, 1, 1)) == PartitionSpec(
+            'ciao', None, None
+        )
+        assert normalize_spec([None, 'bau'], mesh, (1, 1)) == PartitionSpec(None, None)
+        assert normalize_spec(['ciao'], mesh, (0,)) == PartitionSpec(None)
+        assert normalize_spec([None, 'ciao'], mesh, (0, 1)) == PartitionSpec(None, None)
+
+
+def check_sharding(x: PyTree, mesh: Mesh | None):
+    """Check that chains and data are sharded as expected."""
+    chain_axes = chain_vmap_axes(x)
+    data_axes = data_vmap_axes(x)
+
+    def check_leaf(
+        _path: KeyPath, x: Array | None, chain_axis: int | None, data_axis: int | None
+    ):
+        if x is None:
+            return
+        elif mesh is None:
+            assert isinstance(x.sharding, SingleDeviceSharding)
+        else:
+            spec = get_normal_spec(x)
+
+            expected_spec = [None] * x.ndim
+            if 'chains' in mesh.axis_names and chain_axis is not None:
+                expected_spec[chain_axis] = 'chains'
+            if 'data' in mesh.axis_names and data_axis is not None:
+                expected_spec[data_axis] = 'data'
+            expected_spec = normalize_spec(expected_spec, mesh, x.shape)
+
+            assert spec == expected_spec
+
+    map_with_path(check_leaf, x, chain_axes, data_axes, is_leaf=lambda x: x is None)
+
+
+def get_normal_spec(x: Array) -> PartitionSpec:
+    """Get the partition spec of `x` and apply `normalize_spec`."""
+    spec = x.sharding.spec
+    mesh = x.sharding.mesh
+    return normalize_spec(spec, mesh, x.shape)
+
+
+def normalize_spec(
+    spec: Sequence[str | None], mesh: Mesh, shape: tuple[int, ...]
+) -> PartitionSpec:
+    """Put a spec in standard form, i.e., fill with `None` until length `ndim` and put `None` on axes with mesh size 1 or if array size is 0."""
+    s = list(spec)
+    ndim = len(shape)
+    assert len(s) <= ndim
+    s.extend([None] * (ndim - len(s)))
+
+    array_size = prod(shape)
+    for i in range(ndim):
+        if s[i] is not None:
+            j = mesh.axis_names.index(s[i])
+            mesh_size = mesh.axis_sizes[j]
+            if mesh_size == 1 or array_size == 0:
+                s[i] = None
+
+    assert len(s) == ndim
+    return PartitionSpec(*s)

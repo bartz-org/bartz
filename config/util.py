@@ -1,6 +1,6 @@
-# bartz/src/bartz/mcmcstep/__init__.py
+# bartz/config/util.py
 #
-# Copyright (c) 2025-2026, The Bartz Contributors
+# Copyright (c) 2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -22,14 +22,33 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""
-Functions that implement the BART posterior MCMC initialization and update step.
+import sys
+from pathlib import Path
 
-  - `init`: Creates an initial `State` from data and configurations.
-  - `step`: Performs one full MCMC step on a `State`, returning a new `State`.
-"""
+import tomli
 
-# ruff: noqa: F401
 
-from bartz.mcmcstep._state import Forest, State, StepConfig, init
-from bartz.mcmcstep._step import step
+def get_version() -> str:
+    """Read the bartz version from pyproject.toml."""
+    with Path('pyproject.toml').open('rb') as file:
+        return tomli.load(file)['project']['version']
+
+
+def update_version():
+    """Update the version file."""
+    version = get_version()
+    Path('src/bartz/_version.py').write_text(f'__version__ = {version!r}\n')
+
+
+def main():
+    command = sys.argv[1]
+    if command == 'get_version':
+        print(get_version())
+    elif command == 'update_version':
+        update_version()
+    else:
+        raise ValueError(command)
+
+
+if __name__ == '__main__':
+    main()

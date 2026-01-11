@@ -30,6 +30,7 @@ The entry points are `run_mcmc` and `make_default_callback`.
 from collections.abc import Callable
 from dataclasses import fields
 from functools import partial, wraps
+from math import floor
 from typing import Any, Protocol
 
 import jax
@@ -42,7 +43,6 @@ from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, PyTree, Shaped,
 
 from bartz import jaxext, mcmcstep
 from bartz._profiler import (
-    callback_if_not_profiling,
     cond_if_not_profiling,
     jit_if_not_profiling,
     scan_if_not_profiling,
@@ -540,47 +540,51 @@ def print_callback(
     **_,
 ):
     """Print a dot and/or a report periodically during the MCMC."""
-    if callback_state.dot_every is not None:
-        dot_cond = (i_total + 1) % callback_state.dot_every == 0
-        cond_if_not_profiling(
-            dot_cond,
-            lambda: callback_if_not_profiling(
-                lambda: print('.', end='', flush=True),  # noqa: T201
-                ordered=True,
-            ),
-            # logging can't do in-line printing so I'll stick to print
-            lambda: None,
+    report_every = callback_state.report_every
+    dot_every = callback_state.dot_every
+    it = i_total + 1
+
+    def get_cond(every: Int32[Array, ''] | None) -> bool | Bool[Array, '']:
+        return False if every is None else it % every == 0
+
+    report_cond = get_cond(report_every)
+    dot_cond = get_cond(dot_every)
+
+    def line_report_branch():
+        if report_every is None:
+            return
+        if dot_every is None:
+            print_newline = False
+        else:
+            print_newline = it % report_every > it % dot_every
+        debug.callback(
+            _print_report,
+            print_dot=dot_cond,
+            print_newline=print_newline,
+            burnin=burnin,
+            it=it,
+            n_iters=n_burn + n_save * n_skip,
+            num_chains=bart.forest.num_chains(),
+            grow_prop_count=bart.forest.grow_prop_count.mean(),
+            grow_acc_count=bart.forest.grow_acc_count.mean(),
+            prune_acc_count=bart.forest.prune_acc_count.mean(),
+            prop_total=bart.forest.split_tree.shape[-2],
+            fill=forest_fill(bart.forest.split_tree),
         )
 
-    if callback_state.report_every is not None:
+    def just_dot_branch():
+        if dot_every is None:
+            return
+        debug.callback(
+            lambda: print('.', end='', flush=True)  # noqa: T201
+        )
+        # logging can't do in-line printing so we use print
 
-        def print_report():
-            num_chains = bart.forest.num_chains()
-            debug.callback(
-                _print_report,
-                burnin=burnin,
-                i_total=i_total,
-                n_iters=n_burn + n_save * n_skip,
-                num_chains=num_chains,
-                grow_prop_count=bart.forest.grow_prop_count.mean(),
-                grow_acc_count=bart.forest.grow_acc_count.mean(),
-                prune_acc_count=bart.forest.prune_acc_count.mean(),
-                prop_total=bart.forest.split_tree.shape[-2],
-                fill=forest_fill(bart.forest.split_tree),
-                ordered=True,
-            )
-
-        report_cond = (i_total + 1) % callback_state.report_every == 0
-
-        # print a newline after dots
-        if callback_state.dot_every is not None:
-            cond_if_not_profiling(
-                report_cond & dot_cond,
-                lambda: callback_if_not_profiling(print, ordered=True),
-                lambda: None,
-            )
-
-        cond_if_not_profiling(report_cond, print_report, lambda: None)
+    cond_if_not_profiling(
+        report_cond,
+        line_report_branch,
+        lambda: cond_if_not_profiling(dot_cond, just_dot_branch, lambda: None),
+    )
 
 
 def _convert_jax_arrays_in_args(func: Callable) -> Callable:
@@ -592,7 +596,7 @@ def _convert_jax_arrays_in_args(func: Callable) -> Callable:
 
     def convert_jax_arrays(pytree: PyTree) -> PyTree:
         def convert_jax_array(val: Any) -> Any:
-            if not isinstance(val, jax.Array):
+            if not isinstance(val, Array):
                 return val
             elif val.shape:
                 return numpy.array(val)
@@ -615,8 +619,10 @@ def _convert_jax_arrays_in_args(func: Callable) -> Callable:
 # deadlock with the main thread
 def _print_report(
     *,
+    print_dot: bool,
+    print_newline: bool,
     burnin: bool,
-    i_total: int,
+    it: int,
     n_iters: int,
     num_chains: int | None,
     grow_prop_count: float,
@@ -626,9 +632,19 @@ def _print_report(
     fill: float,
 ):
     """Print the report for `print_callback`."""
+    # compute fractions
     grow_prop = grow_prop_count / prop_total
     move_acc = (grow_acc_count + prune_acc_count) / prop_total
 
+    # determine prefix
+    if print_dot:
+        prefix = '.\n'
+    elif print_newline:
+        prefix = '\n'
+    else:
+        prefix = ''
+
+    # determine suffix in parentheses
     msgs = []
     if num_chains is not None:
         msgs.append(f'avg. {num_chains} chains')
@@ -637,7 +653,7 @@ def _print_report(
     suffix = f' ({", ".join(msgs)})' if msgs else ''
 
     print(  # noqa: T201, see print_callback for why not logging
-        f'Iteration {i_total + 1}/{n_iters}, '
+        f'{prefix}Iteration {it}/{n_iters}, '
         f'grow prob: {grow_prop:.0%}, '
         f'move acc: {move_acc:.0%}, '
         f'fill: {fill:.0%}{suffix}'
@@ -684,10 +700,23 @@ def evaluate_trace(
     -------
     The predictions for each chain and iteration of the MCMC.
     """
-    # batch evaluate_forest over chains and samples to limit memory usage
-    has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
+    # determine memory limit keeping into account intermediate values
     max_io_nbytes = 2**27  # 128 MiB
+    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+    k = trace.leaf_tree.shape[-2] if is_mv else 1
+    hts = trace.split_tree.shape[-1]
+    core_io_size = hts * (
+        2 * k * trace.leaf_tree.itemsize
+        + trace.var_tree.itemsize
+        + trace.split_tree.itemsize
+    )
+    _, n = X.shape
+    core_int_size = k * n * trace.leaf_tree.itemsize  # the value of each tree
+    max_io_nbytes = max(1, floor(max_io_nbytes / (1 + core_int_size / core_io_size)))
+
+    # batch evaluate_forest over chains and samples to limit memory usage
     batched_eval = partial(evaluate_forest, sum_batch_axis=-1)  # sum over trees
+    has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
     if has_chains:
         batched_eval = autobatch(batched_eval, max_io_nbytes, (None, 1), 1)
     batched_eval = autobatch(batched_eval, max_io_nbytes, (None, 0))

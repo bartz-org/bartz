@@ -24,18 +24,18 @@
 
 """Module defining the BART MCMC state and initialization."""
 
-import math
-from collections.abc import Callable
-from dataclasses import fields
+from collections.abc import Callable, Hashable
+from dataclasses import Field, fields
 from functools import partial, wraps
+from math import ceil, log2
 from typing import Any, Literal, TypeVar
 
-from equinox import Module
+from equinox import Module, error_if
 from equinox import field as eqx_field
-from jax import eval_shape, random, tree, vmap
+from jax import NamedSharding, device_put, eval_shape, make_mesh, random, tree, vmap
 from jax import numpy as jnp
-from jax.errors import ConcretizationTypeError
 from jax.scipy.linalg import solve_triangular
+from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree import flatten
 from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree, Shaped, UInt
 
@@ -43,14 +43,31 @@ from bartz.grove import make_tree, tree_depths
 from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 
-def field(*, chains: bool = False, **kwargs):
-    """Extend `equinox.field` to add `chains` to mark multichain attributes."""
+def field(*, chains: bool = False, data: bool = False, **kwargs) -> Field:
+    """Extend `equinox.field` with two new parameters.
+
+    Parameters
+    ----------
+    chains
+        Whether the arrays in the field have an optional first axis that
+        represents independent Markov chains.
+    data
+        Whether the last axis of the arrays in the field represent units of
+        the data.
+    **kwargs
+        Other parameters passed to `equinox.field`.
+
+    Returns
+    -------
+    A dataclass field descriptor with the special attributes in the metadata, unset if False.
+    """
     metadata = dict(kwargs.pop('metadata', {}))
-    if 'chains' in metadata:
-        msg = 'Cannot use metadata with `chains` already set.'
-        raise ValueError(msg)
+    assert 'chains' not in metadata
+    assert 'data' not in metadata
     if chains:
         metadata['chains'] = True
+    if data:
+        metadata['data'] = True
     return eqx_field(metadata=metadata, **kwargs)
 
 
@@ -71,27 +88,46 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     -------
     A pytree with the same structure as `x` with 0 or None in the leaves.
     """
+    return _find_metadata(x, 'chains', 0, None)
+
+
+def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
+    """Determine vmapping axes for data.
+
+    This is analogous to `chain_vmap_axes` but returns -1 for all fields
+    marked with ``field(..., data=True)``.
+    """
+    return _find_metadata(x, 'data', -1, None)
+
+
+T = TypeVar('T')
+
+
+def _find_metadata(
+    x: PyTree[Any, ' S'], key: Hashable, if_true: T, if_false: T
+) -> PyTree[T, ' S']:
+    """Replace all subtrees of x marked with a metadata key."""
     if isinstance(x, Module):
         args = []
         for f in fields(x):
             v = getattr(x, f.name)
             if f.metadata.get('static', False):
                 args.append(v)
-            elif f.metadata.get('chains', False):
-                axes = tree.map(lambda _: 0, v)
-                args.append(axes)
+            elif f.metadata.get(key, False):
+                subtree = tree.map(lambda _: if_true, v)
+                args.append(subtree)
             else:
-                args.append(chain_vmap_axes(v))
+                args.append(_find_metadata(v, key, if_true, if_false))
         return x.__class__(*args)
 
     def is_leaf(x) -> bool:
         return isinstance(x, Module)
 
-    def get_axes(x: Module | Any) -> PyTree[int | None]:
+    def get_axes(x: Module | Any) -> PyTree[T]:
         if isinstance(x, Module):
-            return chain_vmap_axes(x)
+            return _find_metadata(x, key, if_true, if_false)
         else:
-            return tree.map(lambda _: None, x)
+            return tree.map(lambda _: if_false, x)
 
     return tree.map(get_axes, x, is_leaf=is_leaf)
 
@@ -169,7 +205,7 @@ class Forest(Module):
     blocked_vars: UInt[Array, ' q'] | None
     p_nonterminal: Float32[Array, ' 2**d']
     p_propose_grow: Float32[Array, ' 2**(d-1)']
-    leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=True)
+    leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=True, data=True)
     min_points_per_decision_node: Int32[Array, ''] | None
     min_points_per_leaf: Int32[Array, ''] | None
     log_trans_prior: Float32[Array, '*chains num_trees'] | None = field(chains=True)
@@ -207,12 +243,15 @@ class StepConfig(Module):
     count_batch_size
         The data batch sizes for computing the sufficient statistics. If `None`,
         they are computed with no batching.
+    mesh
+        The mesh used to shard data and computation across multiple devices.
     """
 
     steps_done: Int32[Array, '']
     sparse_on_at: Int32[Array, ''] | None
     resid_batch_size: int | None = field(static=True)
     count_batch_size: int | None = field(static=True)
+    mesh: Mesh | None = field(static=True)
 
 
 class State(Module):
@@ -246,19 +285,23 @@ class State(Module):
         `None` in binary regression.
     forest
         The sum of trees model.
+    config
+        Metadata and configurations for the MCMC step.
     """
 
-    X: UInt[Array, 'p n']
-    y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n']
-    z: None | Float32[Array, '*chains n'] = field(chains=True)
+    X: UInt[Array, 'p n'] = field(data=True)
+    y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'] = field(
+        data=True
+    )
+    z: None | Float32[Array, '*chains n'] = field(chains=True, data=True)
     offset: Float32[Array, ''] | Float32[Array, ' k']
     resid: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
-        chains=True
+        chains=True, data=True
     )
     error_cov_inv: Float32[Array, '*chains'] | Float32[Array, '*chains k k'] | None = (
         field(chains=True)
     )
-    prec_scale: Float32[Array, ' n'] | None
+    prec_scale: Float32[Array, ' n'] | None = field(data=True)
     error_cov_df: Float32[Array, ''] | None
     error_cov_scale: Float32[Array, ''] | Float32[Array, 'k k'] | None
     forest: Forest
@@ -347,6 +390,16 @@ def _init_shape_shifting_parameters(
     return is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale
 
 
+def _parse_p_nonterminal(
+    p_nonterminal: Float32[Any, ' d_minus_1'],
+) -> Float32[Array, ' d_minus_1+1']:
+    """Check it's in (0, 1) and pad with a 0 at the end."""
+    p_nonterminal = jnp.asarray(p_nonterminal)
+    ok = (p_nonterminal > 0) & (p_nonterminal < 1)
+    p_nonterminal = error_if(p_nonterminal, ~ok, 'p_nonterminal must be in (0, 1)')
+    return jnp.pad(p_nonterminal, (0, 1))
+
+
 def init(
     *,
     X: UInt[Any, 'p n'],
@@ -372,6 +425,7 @@ def init(
     rho: float | Float32[Any, ''] | None = None,
     sparse_on_at: int | Integer[Any, ''] | None = None,
     num_chains: int | None = None,
+    mesh: Mesh | dict[str, int] | None = None,
 ) -> State:
     """
     Make a BART posterior sampling MCMC initial state.
@@ -417,7 +471,9 @@ def init(
     count_batch_size
         The batch sizes, along datapoints, for summing the residuals and
         counting the number of datapoints in each leaf. `None` for no batching.
-        If 'auto', pick a value based on the device of `y`, or the default
+        If 'auto', it's chosen automatically based on the devices used in `mesh`
+        if specified, else the default device. Note: in the latter case, this
+        won't respect the device of `y` if it's different from the default
         device.
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
@@ -453,6 +509,20 @@ def init(
     num_chains
         The number of independent MCMC chains to represent in the state. Single
         chain with scalar values if not specified.
+    mesh
+        A jax mesh used to shard data and computation across multiple devices.
+        If it has a 'chains' axis, that axis is used to shard the chains. If it
+        has a 'data' axis, that axis is used to shard the datapoints.
+
+        As a shorthand, if a dictionary mapping axis names to axis size is
+        passed, the corresponding mesh is created, e.g., ``dict(chains=4,
+        data=2)`` will let jax pick 8 devices to split chains (which must be a
+        multiple of 4) across 4 pairs of devices, where in each pair the data is
+        split in two.
+
+        Note: if a mesh is passed, the arrays are always sharded according to
+        it. In particular even if the mesh has no 'chains' or 'data' axis, the
+        arrays will be replicated on all devices in the mesh.
 
     Returns
     -------
@@ -470,29 +540,27 @@ def init(
     child iff ``X[i, j] < cutpoint``. Thus it makes sense for ``X[i, :]`` to be
     integers in the range ``[0, 1, ..., max_split[i]]``.
     """
-    p_nonterminal = jnp.asarray(p_nonterminal)
-    p_nonterminal = jnp.pad(p_nonterminal, (0, 1))
-    max_depth = p_nonterminal.size
-
+    # convert to array all array-like arguments that are used in other
+    # configurations but don't need further processing themselves
+    X = jnp.asarray(X)
     y = jnp.asarray(y)
     offset = jnp.asarray(offset)
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
+    max_split = jnp.asarray(max_split)
 
+    # check p_nonterminal and pad it with a 0 at the end (still not final shape)
+    p_nonterminal = _parse_p_nonterminal(p_nonterminal)
+
+    # process arguments that change depending on outcome type
     is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale = (
         _init_shape_shifting_parameters(
             y, offset, error_scale, error_cov_df, error_cov_scale, leaf_prior_cov_inv
         )
     )
 
-    max_split = jnp.asarray(max_split)
+    # extract array sizes from arguments
+    (max_depth,) = p_nonterminal.shape
     p, n = X.shape
-
-    if filter_splitless_vars:
-        (blocked_vars,) = jnp.nonzero(max_split == 0)
-        blocked_vars = blocked_vars.astype(minimal_unsigned_dtype(p))
-        # see `fully_used_variables` for the type cast
-    else:
-        blocked_vars = None
 
     # check and initialize sparsity parameters
     if not _all_none_or_not_none(rho, a, b):
@@ -506,24 +574,21 @@ def init(
         msg = 'sparsity params (either theta or rho,a,b) and sparse_on_at must be either all None or all set'
         raise ValueError(msg)
 
+    # process multichain settings
     chain_shape = () if num_chains is None else (num_chains,)
     resid_shape = chain_shape + y.shape
     tree_shape = (*chain_shape, num_trees)
+    add_chains = partial(_add_chains, chain_shape=chain_shape)
 
-    def add_chains(
-        x: Shaped[Array, '*shape'] | None,
-    ) -> Shaped[Array, '*shape'] | Shaped[Array, ' num_chains *shape'] | None:
-        if x is None:
-            return None
-        else:
-            return jnp.broadcast_to(x, chain_shape + x.shape)
-
+    # determine batch sizes for reductions
+    mesh = _parse_mesh(num_chains, mesh)
     resid_batch_size, count_batch_size = _choose_suffstat_batch_size(
-        resid_batch_size, count_batch_size, y, max_depth, num_trees, num_chains
+        resid_batch_size, count_batch_size, y, max_depth, num_trees, num_chains, mesh
     )
 
-    return State(
-        X=jnp.asarray(X),
+    # initialize all remaining stuff and put it in an unsharded state
+    state = State(
+        X=X,
         y=y,
         z=jnp.full(resid_shape, offset) if is_binary else None,
         offset=offset,
@@ -551,7 +616,7 @@ def init(
                     else n >= min_points_per_decision_node
                 )
             ),
-            blocked_vars=blocked_vars,
+            blocked_vars=_get_blocked_vars(filter_splitless_vars, max_split),
             max_split=max_split,
             grow_prop_count=jnp.zeros(chain_shape, int),
             grow_acc_count=jnp.zeros(chain_shape, int),
@@ -582,7 +647,99 @@ def init(
             sparse_on_at=_asarray_or_none(sparse_on_at),
             resid_batch_size=resid_batch_size,
             count_batch_size=count_batch_size,
+            mesh=mesh,
         ),
+    )
+
+    # move all arrays to the appropriate device
+    return _shard_state(state)
+
+
+def _get_blocked_vars(
+    filter_splitless_vars: bool, max_split: UInt[Array, ' p']
+) -> None | UInt[Array, ' q']:
+    """Initialize the `blocked_vars` field."""
+    if filter_splitless_vars:
+        (p,) = max_split.shape
+        (blocked_vars,) = jnp.nonzero(max_split == 0)
+        return blocked_vars.astype(minimal_unsigned_dtype(p))
+        # see `fully_used_variables` for the type cast
+    else:
+        return None
+
+
+def _add_chains(
+    x: Shaped[Array, '*shape'] | None, chain_shape: tuple[int, ...]
+) -> Shaped[Array, '*shape'] | Shaped[Array, ' num_chains *shape'] | None:
+    """Broadcast `x` to all chains."""
+    if x is None:
+        return None
+    else:
+        return jnp.broadcast_to(x, chain_shape + x.shape)
+
+
+def _parse_mesh(
+    num_chains: int | None, mesh: Mesh | dict[str, int] | None
+) -> Mesh | None:
+    """Parse the `mesh` argument."""
+    if mesh is None:
+        return None
+
+    # convert dict format to actual mesh
+    if isinstance(mesh, dict):
+        assert set(mesh).issubset({'chains', 'data'})
+        mesh = make_mesh(
+            tuple(mesh.values()), tuple(mesh), axis_types=(AxisType.Auto,) * len(mesh)
+        )
+
+    # check there's no chain mesh axis if there are no chains
+    if num_chains is None:
+        assert 'chains' not in mesh.axis_names
+
+    # check the axes we use are in auto mode
+    assert 'chains' not in mesh.axis_names or 'chains' in _auto_axes(mesh)
+    assert 'data' not in mesh.axis_names or 'data' in _auto_axes(mesh)
+
+    return mesh
+
+
+def _auto_axes(mesh: Mesh) -> list[str]:
+    """Re-implement `Mesh.auto_axes` because that's missing in jax v0.5."""
+    # Mesh.auto_axes added in jax v0.6.0
+    return [
+        n
+        for n, t in zip(mesh.axis_names, mesh.axis_types, strict=True)
+        if t == AxisType.Auto
+    ]
+
+
+def _shard_state(state: State) -> State:
+    """Place all fields in the state on the appropriate devices."""
+    mesh = state.config.mesh
+    if mesh is None:
+        return state
+
+    def shard_leaf(
+        x: Array | None, chain_axis: int | None, data_axis: int | None
+    ) -> Array | None:
+        if x is None:
+            return None
+
+        spec = [None] * x.ndim
+        if chain_axis is not None and 'chains' in mesh.axis_names:
+            spec[chain_axis] = 'chains'
+        if data_axis is not None and 'data' in mesh.axis_names:
+            spec[data_axis] = 'data'
+
+        spec = PartitionSpec(*spec)
+        return device_put(x, NamedSharding(mesh, spec))
+
+    return tree.map(
+        shard_leaf,
+        state,
+        chain_vmap_axes(state),
+        data_vmap_axes(state),
+        is_leaf=lambda x: x is None,
     )
 
 
@@ -597,69 +754,94 @@ def _asarray_or_none(x):
     return jnp.asarray(x)
 
 
-def _get_platform(x: Array):
-    """Get the platform of the device where `x` is located, or the default device if that's not possible."""
-    try:
-        device = x.devices().pop()
-    except ConcretizationTypeError:
-        device = get_default_device()
-    platform = device.platform
-    if platform not in ('cpu', 'gpu'):
-        msg = f'Unknown platform: {platform}'
-        raise KeyError(msg)
-    return platform
+def _get_platform(mesh: Mesh | None) -> str:
+    if mesh is None:
+        return get_default_device().platform
+    else:
+        return mesh.devices.flat[0].platform
 
 
 def _choose_suffstat_batch_size(
     resid_batch_size: int | None | Literal['auto'],
     count_batch_size: int | None | Literal['auto'],
-    y: Float32[Any, ' n'] | Float32[Array, ' k n'] | Bool[Any, ' n'],
+    y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'],
     max_depth: int,
     num_trees: int,
     num_chains: int | None,
+    mesh: Mesh | None,
 ) -> tuple[int | None, int | None]:
-    # get number of outcomes and of datapoints, set to 1 if none
-    if y.ndim == 2:
-        k, n = y.shape
-    else:
-        k = 1
-        (n,) = y.shape
-    n = max(1, n)
+    """Determine batch sizes for reductions."""
+    # get number of outcomes and of datapoints
+    k, n = _get_k_n(y)
 
+    # get per-device values
     if num_chains is None:
         num_chains = 1
+    num_chains //= _get_axis_size(mesh, 'chains')
+    n //= _get_axis_size(mesh, 'data')
+
+    # compute auxiliary sizes
     batch_size = k * num_chains
     unbatched_accum_bytes_times_batch_size = num_trees * 2**max_depth * 4 * n
 
-    platform = _get_platform(y)
+    platform = _get_platform(mesh)
 
-    if resid_batch_size == 'auto':
-        if platform == 'cpu':
-            rbs = 2 ** round(math.log2(n / 6))  # n/6
-        elif platform == 'gpu':
-            rbs = 2 ** round((1 + math.log2(n)) / 3)  # n^1/3
-        rbs *= batch_size
-        rbs = max(1, rbs)
-    else:
+    def final_round(s: float) -> int | None:
+        # multiply by batch_size because if the calculation is already
+        # parallelizable over batching dims there is correspondingly less need
+        # to parallelize across datapoints
+        s *= batch_size
+
+        # at least 1, i.e., each datapoint is its own batch
+        s = max(1, s)
+
+        # round to the nearest power of 2 because I guess XLA and the hardware
+        # will like that
+        s = 2 ** round(log2(s))
+
+        # disable batching if the batch is as large as the whole dataset
+        return s if s < n else None
+
+    if resid_batch_size != 'auto':
         rbs = resid_batch_size
+    elif platform == 'cpu':
+        rbs = final_round(n / 6)
+        # instead of 6 I guess I should have in general the number of "good"
+        # physical cores
+    elif platform == 'gpu':
+        rbs = final_round((2 * n) ** (1 / 3))
 
     if count_batch_size != 'auto':
         cbs = count_batch_size
     elif platform == 'cpu':
         cbs = None
     elif platform == 'gpu':
-        cbs = 2 ** round(math.log2(n) / 2 - 2)  # n^1/2
-        # /4 is good on V100, /2 on L4/T4, still haven't tried A100
+        cbs = (n / 16) ** 0.5
 
-        # ensure we don't exceed ~512MB of memory usage
+        # ensure we don't exceed ~512MiB of memory usage per device
         max_memory = 2**29
-        min_batch_size = math.ceil(unbatched_accum_bytes_times_batch_size / max_memory)
+        min_batch_size = ceil(unbatched_accum_bytes_times_batch_size / max_memory)
         cbs = max(cbs, min_batch_size)
 
-        cbs *= batch_size
-        cbs = max(1, cbs)
+        cbs = final_round(cbs)
 
     return rbs, cbs
+
+
+def _get_axis_size(mesh: Mesh | None, axis_name: str) -> int:
+    if mesh is None or axis_name not in mesh.axis_names:
+        return 1
+    else:
+        i = mesh.axis_names.index(axis_name)
+        return mesh.axis_sizes[i]
+
+
+def _get_k_n(y: Array) -> tuple[int, int]:
+    if y.ndim == 2:
+        return y.shape
+    else:
+        (n,) = y.shape
+        return 1, n
 
 
 def chol_with_gersh(
@@ -729,19 +911,36 @@ def _get_mc_out_axes(
     return chain_vmap_axes(out)
 
 
+def _find_mesh(x: PyTree) -> Mesh | None:
+    """Find the mesh used for chains."""
+
+    class MeshFound(Exception):
+        pass
+
+    def find_mesh(x: State | Any):
+        if isinstance(x, State):
+            raise MeshFound(x.config.mesh)
+
+    try:
+        tree.map(find_mesh, x, is_leaf=lambda x: isinstance(x, State))
+    except MeshFound as e:
+        return e.args[0]
+    else:
+        raise ValueError
+
+
 def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
     """Split all random keys in `num_chains` keys."""
+    mesh = _find_mesh(x)
 
     def split_key(x):
         if is_key(x):
-            return random.split(x, num_chains)
-        else:
-            return x
+            x = random.split(x, num_chains)
+            if mesh is not None and 'chains' in mesh.axis_names:
+                x = device_put(x, NamedSharding(mesh, PartitionSpec('chains')))
+        return x
 
     return tree.map(split_key, x)
-
-
-T = TypeVar('T')
 
 
 def vmap_chains(

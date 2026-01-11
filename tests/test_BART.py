@@ -41,10 +41,10 @@ import jax
 import numpy
 import polars as pl
 import pytest
-from jax import debug_nans, lax, random, vmap
+from jax import debug_nans, lax, make_mesh, random, vmap
 from jax import numpy as jnp
-from jax.lax import collapse
 from jax.scipy.special import logit, ndtr
+from jax.sharding import AxisType, SingleDeviceSharding
 from jax.tree import map_with_path
 from jax.tree_util import KeyPath
 from jaxtyping import Array, Bool, Float32, Int32, Key, Real, UInt
@@ -63,10 +63,11 @@ from bartz.debug import (
 from bartz.debug import debug_gbart as gbart
 from bartz.debug import debug_mc_gbart as mc_gbart
 from bartz.grove import is_actual_leaf, tree_depth, tree_depths
-from bartz.jaxext import get_default_device, split
+from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
+from tests.test_mcmcstep import check_sharding, get_normal_spec
 from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
@@ -171,10 +172,17 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 usequants=False,
                 numcut=256,  # > 255 to use uint16 for X and split_trees
                 maxdepth=9,  # > 8 to use uint16 for leaf_indices
-                mc_cores=2,
+                mc_cores=1,
                 seed=keys.pop(),
                 init_kw=dict(
-                    resid_batch_size=None, count_batch_size=None, save_ratios=True
+                    resid_batch_size=None,
+                    count_batch_size=None,
+                    save_ratios=True,
+                    mesh=make_mesh(
+                        (min(2, get_device_count()),),
+                        ('data',),
+                        axis_types=(AxisType.Auto,),
+                    ),
                 ),
             )
 
@@ -200,7 +208,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 numcut=255,
                 maxdepth=6,
                 seed=keys.pop(),
-                mc_cores=1,
+                mc_cores=2,  # keep this 2 on binary so continuous gets 1 and 2
                 init_kw=dict(
                     resid_batch_size=16,
                     count_batch_size=16,
@@ -231,9 +239,16 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 numcut=10,
                 maxdepth=8,  # 8 to check if leaf_indices changes type too soon
                 seed=keys.pop(),
-                mc_cores=1,
+                mc_cores=2,
                 init_kw=dict(
-                    resid_batch_size=None, count_batch_size=None, save_ratios=True
+                    resid_batch_size=None,
+                    count_batch_size=None,
+                    save_ratios=True,
+                    mesh=make_mesh(
+                        (min(2, get_device_count()),),
+                        ('chains',),
+                        axis_types=(AxisType.Auto,),
+                    ),
                 ),
             )
 
@@ -361,21 +376,29 @@ class TestWithCachedBart:
 
         # check yhat_train
         yhat_train = evaluate_trace(bart._mcmc_state.X, trace)
-        assert_close_matrices(yhat_train, rbart.yhat_train, rtol=1e-6)
+        assert_close_matrices(
+            yhat_train, rbart.yhat_train.astype(numpy.float32), rtol=1e-6
+        )
 
         # check yhat_test
         Xt = bart._bart._bin_predictors(kw['x_test'], bart._splits)
         yhat_test = evaluate_trace(Xt, trace)
-        assert_close_matrices(yhat_test, rbart.yhat_test, rtol=1e-6)
+        assert_close_matrices(
+            yhat_test, rbart.yhat_test.astype(numpy.float32), rtol=1e-6
+        )
 
         if kw['y_train'].dtype == bool:
             # check prob_train
             prob_train = ndtr(yhat_train)
-            assert_close_matrices(prob_train, rbart.prob_train, rtol=1e-7)
+            assert_close_matrices(
+                prob_train, rbart.prob_train.astype(numpy.float32), rtol=1e-7
+            )
 
             # check prob_test
             prob_test = ndtr(yhat_test)
-            assert_close_matrices(prob_test, rbart.prob_test, rtol=1e-7)
+            assert_close_matrices(
+                prob_test, rbart.prob_test.astype(numpy.float32), rtol=1e-7
+            )
 
     def test_comparison_BART3(self, cachedbart: CachedBart, keys, subtests: SubTests):
         """Check `bartz.BART` gives results similar to the R package BART3."""
@@ -418,12 +441,16 @@ class TestWithCachedBart:
         else:  # continuous regression
             with subtests.test('yhat_train_mean'):
                 assert_close_matrices(
-                    bart.yhat_train_mean, rbart.yhat_train_mean, rtol=0.8
+                    bart.yhat_train_mean,
+                    rbart.yhat_train_mean.astype(numpy.float32),
+                    rtol=0.8,
                 )
 
             with subtests.test('yhat_test_mean'):
                 assert_close_matrices(
-                    bart.yhat_test_mean, rbart.yhat_test_mean, rtol=0.7
+                    bart.yhat_test_mean,
+                    rbart.yhat_test_mean.astype(numpy.float32),
+                    rtol=0.7,
                 )
 
             with subtests.test('sigma'):
@@ -456,7 +483,10 @@ class TestWithCachedBart:
 
             with subtests.test('varcount_mean'):
                 assert_close_matrices(
-                    bart.varcount_mean, rbart.varcount_mean, rtol=0.6, atol=7
+                    bart.varcount_mean,
+                    rbart.varcount_mean.astype(numpy.float32),
+                    rtol=0.6,
+                    atol=7,
                 )
 
             if kw.get('sparse', False):  # pragma: no branch
@@ -489,17 +519,21 @@ class TestWithCachedBart:
                     return
                 if x is not None and chain_axis is not None:
                     ref = jnp.broadcast_to(x.mean(chain_axis, keepdims=True), x.shape)
-                    x = collapse(x, 0, -1)
-                    ref = collapse(ref, 0, -1)
-                    norm = 'fro' if x.ndim == 2 else 2
-                    assert_different_matrices(x, ref, ord=norm, **kwargs)
+                    assert_different_matrices(
+                        x.astype(jnp.float32),
+                        ref,
+                        reduce_rank=True,
+                        ord='fro' if x.ndim >= 2 else 2,
+                        atol=0,
+                        **kwargs,
+                    )
 
             axes = chain_vmap_axes(x)
             map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)
 
-        assert_different(bart._mcmc_state, atol=0, rtol=0.05)
-        assert_different(bart._main_trace, atol=0, rtol=0.03)
-        assert_different(bart._burnin_trace, atol=0, rtol=0.03)
+        assert_different(bart._mcmc_state, rtol=0.05)
+        assert_different(bart._main_trace, rtol=0.03)
+        assert_different(bart._burnin_trace, rtol=0.03)
 
 
 def clipped_logit(x: Array, eps: float) -> Array:
@@ -507,7 +541,7 @@ def clipped_logit(x: Array, eps: float) -> Array:
     return logit(jnp.clip(x, eps, 1 - eps))
 
 
-def test_sequential_guarantee(kw):
+def test_sequential_guarantee(kw: dict, subtests: SubTests):
     """Check that the way iterations are saved does not influence the result."""
     # reference run
     kw['keepevery'] = 1
@@ -526,12 +560,12 @@ def test_sequential_guarantee(kw):
     bart2_yhat_train = bart2.yhat_train.reshape(
         kw2['mc_cores'], kw2['ndpost'] // kw2['mc_cores'], n
     )[:, delta:, :].reshape(bart1.ndpost, n)
-    if bart1.yhat_train.device.platform == 'cpu':
-        assert_array_equal(bart1.yhat_train, bart2_yhat_train)
-    else:
+
+    with subtests.test('shift burn-in'):
+        rtol = 0 if bart1.yhat_train.platform() == 'cpu' else 2e-6
         # on gpu typically it works fine, but in one case there was a small
         # numerical difference in one of two chains
-        assert_close_matrices(bart1.yhat_train, bart2_yhat_train, rtol=2e-6)
+        assert_close_matrices(bart1.yhat_train, bart2_yhat_train, rtol=rtol)
 
     # run keeping 1 every 2 samples
     kw3 = kw.copy()
@@ -544,13 +578,13 @@ def test_sequential_guarantee(kw):
     bart3_yhat_train = bart3.yhat_train.reshape(
         kw3['mc_cores'], kw3['ndpost'] // kw3['mc_cores'], n
     )[:, : bart1_yhat_train.shape[1], :]
-    if bart1.yhat_train.device.platform == 'cpu':
-        assert_array_equal(bart1_yhat_train, bart3_yhat_train)
-    else:
+
+    with subtests.test('change thinning'):
+        rtol = 0 if bart1.yhat_train.platform() == 'cpu' else 2e-6
         # on gpu typically it works fine, but in one case there was a small
         # numerical difference in one of two chains
         assert_close_matrices(
-            bart1_yhat_train.reshape(-1, n), bart3_yhat_train.reshape(-1, n), rtol=2e-6
+            bart1_yhat_train, bart3_yhat_train, rtol=rtol, reduce_rank=True
         )
 
 
@@ -833,6 +867,11 @@ def test_one_datapoint(kw):
         xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
         kw.update(xinfo=xinfo)
 
+    # disable data sharding
+    mesh = kw.get('init_kw', {}).get('mesh', None)
+    if mesh is not None and 'data' in mesh.axis_names:
+        kw['init_kw']['mesh'] = None
+
     bart = mc_gbart(**kw)
     if kw['y_train'].dtype == bool:
         tau_num = 3
@@ -869,7 +908,7 @@ def test_few_datapoints(kw):
     kw.setdefault('init_kw', {}).update(
         min_points_per_decision_node=10, min_points_per_leaf=None
     )
-    kw = set_num_datapoints(kw, 9)  # < 10 = 2 * 5
+    kw = set_num_datapoints(kw, 8)  # < 10 = 2 * 5, multiple of 2 shards
     bart = mc_gbart(**kw)
     assert jnp.all(bart.yhat_train == bart.yhat_train[:, :1])
 
@@ -1221,15 +1260,12 @@ def test_polars(kw):
     bart2 = mc_gbart(**kw)
     pred2 = bart2.predict(kw['x_test'])
 
-    if pred.device.platform == 'cpu':
-        func = assert_array_equal
-    else:
-        func = partial(assert_close_matrices, rtol=2e-6)
+    rtol = 0 if pred.platform() == 'cpu' else 2e-6
 
-    func(bart.yhat_train, bart2.yhat_train)
+    assert_close_matrices(bart.yhat_train, bart2.yhat_train, rtol=rtol)
     if bart.sigma is not None:
-        func(bart.sigma, bart2.sigma)
-    func(pred, pred2)
+        assert_close_matrices(bart.sigma, bart2.sigma, rtol=rtol)
+    assert_close_matrices(pred, pred2, rtol=rtol)
 
 
 def test_data_format_mismatch(kw):
@@ -1328,3 +1364,50 @@ class TestProfile:
                 pytest.xfail('unsolved bug with old toolchain')
             else:
                 raise
+
+
+def test_sharding(kw: dict):
+    """Check that chains live on their own devices throughout the interface."""
+    mesh = kw.get('init_kw', {}).get('mesh', None)
+
+    bart = mc_gbart(**kw)
+
+    check = partial(check_sharding, mesh=mesh)
+    check(bart._mcmc_state)
+    check(bart._burnin_trace)
+    check(bart._main_trace)
+
+    def check_chain_sharding(x: Array | None):
+        if x is None:
+            return
+        elif mesh is None:
+            assert isinstance(x.sharding, SingleDeviceSharding)
+        elif 'chains' in mesh.axis_names:
+            expected_num_devices = min(2, get_device_count())
+            assert x.sharding.num_devices == expected_num_devices
+            assert get_normal_spec(x) == ('chains',) + (None,) * (x.ndim - 1)
+
+    check_chain_sharding(bart.yhat_test)
+    check_chain_sharding(bart.prob_test)
+    check_chain_sharding(bart.prob_train)
+    if bart.sigma is not None:
+        check_chain_sharding(bart.sigma.T)
+    check_chain_sharding(bart.sigma_)
+    check_chain_sharding(bart.varcount)
+    check_chain_sharding(bart.varprob)
+    check_chain_sharding(bart.yhat_train)
+
+    def check_data_sharding(x: Array | None):
+        if x is None:
+            return
+        elif mesh is None:
+            assert isinstance(x.sharding, SingleDeviceSharding)
+        elif 'data' in mesh.axis_names:
+            expected_num_devices = min(2, get_device_count())
+            assert x.sharding.num_devices == expected_num_devices
+            assert get_normal_spec(x) == (None,) * (x.ndim - 1) + ('data',)
+
+    check_data_sharding(bart.prob_train)
+    check_data_sharding(bart.prob_train_mean)
+    check_data_sharding(bart.yhat_train)
+    check_data_sharding(bart.yhat_train_mean)

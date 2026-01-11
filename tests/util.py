@@ -95,6 +95,8 @@ def assert_close_matrices(
     tozero: bool = False,
     negate: bool = False,
     ord: int | float | str | None = 2,  # noqa: A002
+    err_msg: str = '',
+    reduce_rank: bool = False,
 ):
     """
     Check if two matrices are similar.
@@ -105,7 +107,7 @@ def assert_close_matrices(
     desired
         The two matrices to be compared. Must be scalars, vectors, or 2d arrays.
         Scalars and vectors are intepreted as 1x1 and Nx1 matrices, but the two
-        arrays must have the same shape beforehand.
+        arrays must have the same shape and dtype beforehand.
     rtol
     atol
         Relative and absolute tolerances for the comparison. The closeness
@@ -128,20 +130,33 @@ def assert_close_matrices(
     ord
         Passed to `numpy.linalg.norm` to specify the matrix norm to use, the
         default is 2 which differs from numpy.
+    err_msg
+        Prefix prepended to the error message (without adding newlines).
+    reduce_rank
+        If True, reduce the input arrays to 2d by collapsing leading dimensions.
 
-    Raises
-    ------
-    ValueError
-        If the two matrices have different shapes.
+    Notes
+    -----
+    Boolean values are converted to uint8.
     """
     actual = np.asarray(actual)
     desired = np.asarray(desired)
-    if actual.shape != desired.shape:
-        msg = f'{actual.shape=} != {desired.shape=}'
-        raise ValueError(msg)
+
+    assert actual.shape == desired.shape
+    assert actual.dtype == desired.dtype
+
+    if actual.dtype == bool:
+        actual = actual.astype(np.uint8)
+        desired = desired.astype(np.uint8)
+
     if actual.size > 0:
         actual = np.atleast_1d(actual)
         desired = np.atleast_1d(desired)
+
+        if actual.ndim > 2 and reduce_rank:
+            n = actual.shape[-1]
+            actual = actual.reshape(-1, n)
+            desired = desired.reshape(-1, n)
 
         if tozero:
             expr = 'actual'
@@ -161,7 +176,7 @@ def assert_close_matrices(
         adnorm = linalg.norm(eval(expr), ord)  # noqa: S307, expr is a literal
         ratio = adnorm / dnorm if dnorm else np.nan
 
-        msg = f"""\
+        msg = f"""{err_msg}\
 matrices actual and {ref} are not {cond} enough in {ord}-norm
 matrix shape: {desired.shape}
 norm(desired) = {dnorm:.2g}
@@ -189,18 +204,6 @@ def get_old_python_tuple() -> tuple[int, int]:
     ver_str = get_old_python_str()
     major, minor = ver_str.split('.')
     return int(major), int(minor)
-
-
-def get_version() -> str:
-    """Read the bartz version from pyproject.toml."""
-    with Path('pyproject.toml').open('rb') as file:
-        return tomli.load(file)['project']['version']
-
-
-def update_version():
-    """Update the version file."""
-    version = get_version()
-    Path('src/bartz/_version.py').write_text(f'__version__ = {version!r}\n')
 
 
 def multivariate_rhat(chains: Real[Any, 'chain sample dim']) -> Float[Array, '']:

@@ -36,7 +36,7 @@ from typing import Any, Protocol
 import jax
 import numpy
 from equinox import Module
-from jax import debug, eval_shape, jit, tree
+from jax import ShapeDtypeStruct, debug, eval_shape, jit, tree
 from jax import numpy as jnp
 from jax.nn import softmax
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, PyTree, Shaped, UInt
@@ -50,7 +50,7 @@ from bartz._profiler import (
 from bartz.grove import TreeHeaps, evaluate_forest, forest_fill, var_histogram
 from bartz.jaxext import autobatch
 from bartz.mcmcstep import State
-from bartz.mcmcstep._state import chain_vmap_axes, field, get_num_chains
+from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size, get_num_chains
 
 
 class BurninTrace(Module):
@@ -700,8 +700,15 @@ def evaluate_trace(
     -------
     The predictions for each chain and iteration of the MCMC.
     """
-    # determine memory limit keeping into account intermediate values
+    # per-device memory limit
     max_io_nbytes = 2**27  # 128 MiB
+
+    # adjust memory limit for number of devices
+    mesh = jax.typeof(trace.leaf_tree).sharding.mesh
+    num_devices = get_axis_size(mesh, 'chains') * get_axis_size(mesh, 'data')
+    max_io_nbytes *= num_devices
+
+    # adjust memory limit keeping into account intermediate values
     is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
     k = trace.leaf_tree.shape[-2] if is_mv else 1
     hts = trace.split_tree.shape[-1]
@@ -714,9 +721,7 @@ def evaluate_trace(
     core_int_size = k * n * trace.leaf_tree.itemsize  # the value of each tree
     max_io_nbytes = max(1, floor(max_io_nbytes / (1 + core_int_size / core_io_size)))
 
-    # batch evaluate_forest over mcmc samples and trees, do not loop over chains
-    # because they may be sharded
-    batched_eval = evaluate_forest
+    # determine batching axes
     has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
     if has_chains:
         sample_axis = 1
@@ -724,11 +729,30 @@ def evaluate_trace(
     else:
         sample_axis = 0
         tree_axis = 1
+
+    # determine output shapes (to avoid autobatch tracing everything twice)
+    mv_shape = (k,) if is_mv else ()
+    out_shape_w_trees = (*trace.leaf_tree.shape[: tree_axis + 1], *mv_shape, n)
+    out_shape = (*trace.leaf_tree.shape[:tree_axis], *mv_shape, n)
+
+    # batch evaluate_forest over mcmc samples and trees, do not loop over chains
+    # because they may be sharded
+    batched_eval = evaluate_forest
     batched_eval = autobatch(
-        batched_eval, max_io_nbytes, (None, tree_axis), tree_axis, reduce_ufunc=jnp.add
+        batched_eval,
+        max_io_nbytes,
+        (None, tree_axis),
+        tree_axis,
+        reduce_ufunc=jnp.add,
+        result_shape_dtype=ShapeDtypeStruct(out_shape_w_trees, jnp.float32),
     )
     batched_eval = autobatch(
-        batched_eval, max_io_nbytes, (None, sample_axis), sample_axis
+        batched_eval,
+        max_io_nbytes,
+        (None, sample_axis),
+        sample_axis,
+        warn_on_overflow=False,  # the inner autobatch will handle it
+        result_shape_dtype=ShapeDtypeStruct(out_shape, jnp.float32),
     )
 
     # extract only the trees from the trace

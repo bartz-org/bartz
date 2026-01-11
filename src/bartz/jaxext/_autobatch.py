@@ -243,6 +243,10 @@ def check_same(tree1, tree2):
     tree_map(check_same, tree1, tree2)
 
 
+class NotDefined:
+    pass
+
+
 def autobatch(
     func: Callable,
     max_io_nbytes: int,
@@ -251,6 +255,8 @@ def autobatch(
     *,
     return_nbatches: bool = False,
     reduce_ufunc: jnp.ufunc | None = None,
+    warn_on_overflow: bool = True,
+    result_shape_dtype: PyTree[ShapeDtypeStruct] = NotDefined,
 ) -> Callable:
     """
     Batch a function such that each batch is smaller than a threshold.
@@ -274,6 +280,13 @@ def autobatch(
     reduce_ufunc
         Function used to reduce the output along the batched axis (e.g.,
         `jax.numpy.add`).
+    warn_on_overflow
+        If True, a warning is raised if the memory limit could not be
+        respected.
+    result_shape_dtype
+        A pytree of dummy arrays matching the expected output. If not provided,
+        the function is traced an additional time to determine the output
+        structure.
 
     Returns
     -------
@@ -299,7 +312,15 @@ def autobatch(
     @wraps(func)
     def autobatch_wrapper(*args):
         return batched_func(
-            func, max_io_nbytes, in_axes, out_axes, return_nbatches, reduce_ufunc, args
+            func,
+            max_io_nbytes,
+            in_axes,
+            out_axes,
+            return_nbatches,
+            reduce_ufunc,
+            warn_on_overflow,
+            result_shape_dtype,
+            args,
         )
 
     return autobatch_wrapper
@@ -312,11 +333,16 @@ def batched_func(
     out_axes: PyTree[int],
     return_nbatches: bool,
     reduce_ufunc: jnp.ufunc | None,
+    warn_on_overflow: bool,
+    result_shape_dtype: PyTree[ShapeDtypeStruct] | NotDefined,
     args: tuple[PyTree[Array], ...],
 ) -> PyTree[Array]:
     """Implement the wrapper used in `autobatch`."""
     # determine the output structure of the function
-    example_result = eval_shape(func, *args)
+    if result_shape_dtype is NotDefined:
+        example_result = eval_shape(func, *args)
+    else:
+        example_result = result_shape_dtype
 
     # expand the axes pytrees if they are prefixes
     in_axes = expand_axes(in_axes, args)
@@ -345,7 +371,7 @@ def batched_func(
 
     # warn if the memory limit could not be respected
     batch_nbytes = total_nbytes // nbatches
-    if batch_nbytes > max_io_nbytes:
+    if batch_nbytes > max_io_nbytes and warn_on_overflow:
         assert size == nbatches
         msg = f'batch_nbytes = {batch_nbytes} > max_io_nbytes = {max_io_nbytes}'
         warn(msg)

@@ -288,7 +288,9 @@ class TestAutoBatch:
         )
         result, nbatches = batched_func(x)
 
-        assert isinstance(nbatches, int)
+        assert nbatches.shape == ()
+        assert jnp.issubdtype(nbatches.dtype, jnp.integer)
+
         assert result.shape == (10,)
         assert_allclose(result, expected, rtol=1e-6)
 

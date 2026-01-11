@@ -732,7 +732,7 @@ def _shard_state(state: State) -> State:
             spec[data_axis] = 'data'
 
         spec = PartitionSpec(*spec)
-        return device_put(x, NamedSharding(mesh, spec))
+        return device_put(x, NamedSharding(mesh, spec), donate=True)
 
     return tree.map(
         shard_leaf,

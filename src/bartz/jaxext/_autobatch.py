@@ -29,6 +29,8 @@ from collections.abc import Callable
 from functools import partial, wraps
 from warnings import warn
 
+from jax.typing import DTypeLike
+
 try:
     from numpy.lib.array_utils import normalize_axis_index  # numpy 2
 except ImportError:
@@ -40,7 +42,7 @@ from jax.lax import scan
 from jax.tree import flatten as tree_flatten
 from jax.tree import map as tree_map
 from jax.tree import reduce as tree_reduce
-from jaxtyping import Array, PyTree
+from jaxtyping import Array, PyTree, Shaped
 
 
 def expand_axes(axes, tree):
@@ -74,13 +76,14 @@ def check_no_nones(axes, tree):
 
 
 def remove_axis(
-    x: PyTree[ShapeDtypeStruct, ' T'], axis: PyTree[int, ' T']
+    x: PyTree[ShapeDtypeStruct, ' T'], axis: PyTree[int, ' T'], ufunc: jnp.ufunc
 ) -> PyTree[ShapeDtypeStruct, ' T']:
-    """Remove an axis from dummy arrays."""
+    """Remove an axis from dummy arrays and change the type to reduction type."""
 
     def remove_axis(x: ShapeDtypeStruct, axis: int) -> ShapeDtypeStruct:
         new_shape = x.shape[:axis] + x.shape[axis + 1 :]
-        return ShapeDtypeStruct(new_shape, x.dtype)
+        new_dtype = reduction_dtype(ufunc, x.dtype)
+        return ShapeDtypeStruct(new_shape, new_dtype)
 
     return tree_map(remove_axis, x, axis)
 
@@ -123,6 +126,7 @@ def next_divisor_large(dividend, min_divisor):
 
 
 def next_divisor(dividend, min_divisor):
+    """Return divisor >= min_divisor such that divided % divisor == 0."""
     if dividend == 0:
         return min_divisor
     if min_divisor * min_divisor <= dividend:
@@ -199,7 +203,8 @@ def reduce(
     else:
 
         def reduce(x: Array, initial: Array, axis: int) -> Array:
-            return ufunc.reduce(x, axis=axis, initial=initial)
+            reduced = ufunc.reduce(x, axis=axis)
+            return ufunc(initial, reduced)
 
         return tree_map(reduce, x, initial, axes)
 
@@ -210,10 +215,24 @@ def identity(
     """Get the identity element for `ufunc` and each array in `x`."""
 
     def identity(x: ShapeDtypeStruct) -> Array:
-        dtype = ufunc.reduce(jnp.empty(1, x.dtype)).dtype
-        return jnp.broadcast_to(jnp.array(ufunc.identity, dtype), x.shape)
+        identity = identity_for(ufunc, x.dtype)
+        return jnp.broadcast_to(identity, x.shape)
 
     return tree_map(identity, x)
+
+
+def reduction_dtype(ufunc: jnp.ufunc, input_dtype: DTypeLike) -> DTypeLike:
+    """Return the output dtype for a reduction with `ufunc` on inputs of type `dtype`."""
+    return ufunc.reduce(jnp.empty(1, input_dtype)).dtype
+
+
+def identity_for(ufunc: jnp.ufunc, input_dtype: DTypeLike) -> Shaped[Array, '']:
+    """Return the identity for ufunc, filling in missing cases."""
+    # get output type from input type, e.g., int8 is accumulated to int32
+    dtype = reduction_dtype(ufunc, input_dtype)
+
+    # return as explicitly typed array
+    return jnp.array(ufunc.identity, dtype)
 
 
 def check_same(tree1, tree2):
@@ -293,7 +312,7 @@ def batched_func(
     out_axes: PyTree[int],
     return_nbatches: bool,
     reduce_ufunc: jnp.ufunc | None,
-    args: tuple[PyTree[Array]],
+    args: tuple[PyTree[Array], ...],
 ) -> PyTree[Array]:
     """Implement the wrapper used in `autobatch`."""
     # determine the output structure of the function
@@ -307,10 +326,6 @@ def batched_func(
     # check the axes are valid
     in_axes = normalize_axes(in_axes, args)
     out_axes = normalize_axes(out_axes, example_result)
-
-    # squeeze out the output dims that will be reduced
-    if reduce_ufunc is not None:
-        out_axes = remove_axis(example_result, out_axes)
 
     # get the size of the batched axis
     size = extract_size((in_axes, out_axes), (args, example_result))
@@ -334,6 +349,10 @@ def batched_func(
         assert size == nbatches
         msg = f'batch_nbytes = {batch_nbytes} > max_io_nbytes = {max_io_nbytes}'
         warn(msg)
+
+    # squeeze out the output dims that will be reduced
+    if reduce_ufunc is not None:
+        example_result = remove_axis(example_result, out_axes, reduce_ufunc)
 
     if nbatches > 1:
         # prepare arguments for looping

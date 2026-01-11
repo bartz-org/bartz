@@ -24,18 +24,24 @@
 
 """Test bartz.jaxext."""
 
+from collections.abc import Callable
+from functools import partial
+
 import numpy
 import pytest
-from jax import debug_infs, jit, random
+from jax import debug_infs, jit, random, tree
 from jax import numpy as jnp
 from jax.scipy.special import ndtri
+from jax.typing import DTypeLike
 from numpy.testing import assert_allclose
 from scipy.stats import invgamma as scipy_invgamma
 from scipy.stats import ks_1samp, truncnorm
 
 from bartz import jaxext
+from bartz.jaxext import split
 from bartz.jaxext.scipy.special import ndtri as patched_ndtri
 from bartz.jaxext.scipy.stats import invgamma
+from tests.util import assert_close_matrices
 
 
 class TestUnique:
@@ -184,6 +190,107 @@ class TestAutoBatch:
         y, nbatches = g(x)
         assert nbatches == 1
         assert jnp.all(y == x)
+
+    @pytest.mark.parametrize(
+        'op',
+        [
+            (None, lambda x, **_kw: x),
+            (jnp.add, jnp.sum),
+            (jnp.multiply, jnp.prod),
+            (jnp.logical_and, jnp.all),
+            (jnp.logical_or, jnp.any),
+        ],
+    )
+    @pytest.mark.parametrize(
+        'shape_axis',
+        [
+            ((10,), 0),
+            ((10, 100), 0),
+            ((10, 100), 1),
+            ((10, 100), -1),
+            ((10, 100), -2),
+            ((0,), 0),
+            ((10, 0), 0),
+        ],
+    )
+    @pytest.mark.parametrize('max_io_nbytes', [1, 100, 100_000_000])
+    @pytest.mark.parametrize('nin', [1, 2])
+    @pytest.mark.parametrize('dtype', [jnp.float32, jnp.int8, jnp.bool_])
+    def test_reduction_basic(
+        self,
+        keys: split,
+        op: tuple[jnp.ufunc, Callable],
+        shape_axis: tuple[tuple[int, ...], int],
+        max_io_nbytes: int,
+        nin: int,
+        dtype: DTypeLike,
+    ):
+        """Check that reduction produces the expected result."""
+        ufunc, reduction = op
+        shape, axis = shape_axis
+
+        def func(*args):
+            out = sum(args)
+            if nin == 1:
+                return out
+            else:
+                return tuple(i * out for i in range(1, nin + 1))
+
+        if jnp.issubdtype(dtype, jnp.floating):
+            args = random.uniform(keys.pop(), (nin, *shape), dtype)
+        elif jnp.issubdtype(dtype, jnp.integer):
+            args = random.randint(
+                keys.pop(),
+                (nin, *shape),
+                jnp.iinfo(dtype).min // 2,
+                (jnp.iinfo(dtype).max + 1) // 2,
+                dtype,
+            )
+        elif jnp.issubdtype(dtype, jnp.bool_):
+            args = random.bernoulli(keys.pop(), 0.5, (nin, *shape))
+
+        expected = tree.map(partial(reduction, axis=axis), func(*args))
+
+        batched_func = jaxext.autobatch(
+            func, max_io_nbytes, axis, axis, reduce_ufunc=ufunc
+        )
+        result = batched_func(*args)
+
+        tree.map(partial(assert_close_matrices, rtol=1e-6), result, expected)
+
+    def test_reduction_with_unbatched_input(self, keys):
+        """Check reduction works with unbatched (None) input arguments."""
+
+        def func(x, scalar):
+            return x * scalar
+
+        x = random.uniform(keys.pop(), (50, 8))
+        scalar = 3.0
+        expected = func(x, scalar).sum(axis=0)
+
+        batched_func = jaxext.autobatch(func, 100, (0, None), 0, reduce_ufunc=jnp.add)
+        result = batched_func(x, scalar)
+
+        assert result.shape == (8,)
+        assert_allclose(result, expected, rtol=1e-5)
+
+    def test_reduction_with_return_nbatches(self, keys):
+        """Check reduce_ufunc works together with return_nbatches."""
+
+        def func(x):
+            return x
+
+        x = random.uniform(keys.pop(), (100, 10))
+        expected = x.sum(axis=0)
+
+        batched_func = jaxext.autobatch(
+            func, 200, 0, 0, return_nbatches=True, reduce_ufunc=jnp.add
+        )
+        result, nbatches = batched_func(x)
+
+        assert isinstance(nbatches, int) or hasattr(nbatches, 'item')
+        assert result.shape == (10,)
+        assert_allclose(result, expected, rtol=1e-5)
 
 
 def different_keys(keya, keyb):

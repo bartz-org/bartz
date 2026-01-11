@@ -26,16 +26,21 @@
 
 import math
 from collections.abc import Callable
-from functools import wraps
+from functools import partial, wraps
 from warnings import warn
 
-from jax import eval_shape, jit
+try:
+    from numpy.lib.array_utils import normalize_axis_index  # numpy 2
+except ImportError:
+    from numpy.core.numeric import normalize_axis_index  # numpy 1
+
+from jax import ShapeDtypeStruct, eval_shape, jit
 from jax import numpy as jnp
 from jax.lax import scan
 from jax.tree import flatten as tree_flatten
 from jax.tree import map as tree_map
 from jax.tree import reduce as tree_reduce
-from jaxtyping import PyTree
+from jaxtyping import Array, PyTree
 
 
 def expand_axes(axes, tree):
@@ -47,14 +52,42 @@ def expand_axes(axes, tree):
     return tree_map(expand_axis, axes, tree, is_leaf=lambda x: x is None)
 
 
+def normalize_axes(
+    axes: PyTree[int | None, ' T'], tree: PyTree[Array, ' T']
+) -> PyTree[int | None, ' T']:
+    """Normalize axes to be non-negative and valid for the corresponding arrays in the tree."""
+
+    def normalize_axis(axis: int | None, x: Array) -> int | None:
+        if axis is None:
+            return None
+        else:
+            return normalize_axis_index(axis, len(x.shape))
+
+    return tree_map(normalize_axis, axes, tree, is_leaf=lambda x: x is None)
+
+
 def check_no_nones(axes, tree):
     def check_not_none(_, axis):
         assert axis is not None
 
-    tree_map(check_not_none, tree, axes)
+    tree_map(check_not_none, tree, axes, is_leaf=lambda x: x is None)
+
+
+def remove_axis(
+    x: PyTree[ShapeDtypeStruct, ' T'], axis: PyTree[int, ' T']
+) -> PyTree[ShapeDtypeStruct, ' T']:
+    """Remove an axis from dummy arrays."""
+
+    def remove_axis(x: ShapeDtypeStruct, axis: int) -> ShapeDtypeStruct:
+        new_shape = x.shape[:axis] + x.shape[axis + 1 :]
+        return ShapeDtypeStruct(new_shape, x.dtype)
+
+    return tree_map(remove_axis, x, axis)
 
 
 def extract_size(axes, tree):
+    """Get the size of each array in tree at the axis in axes, check they are equal and return it."""
+
     def get_size(x, axis):
         if axis is None:
             return None
@@ -131,18 +164,56 @@ def move_axes_in(axes, tree):
     return tree_map(move_axis_in, tree, axes)
 
 
-def batch(tree, nbatches):
+def batch(tree: PyTree[Array, ' T'], nbatches: int) -> PyTree[Array, ' T']:
+    """Split the first axis into two axes, the first of size `nbatches`."""
+
     def batch(x):
         return x.reshape(nbatches, x.shape[0] // nbatches, *x.shape[1:])
 
     return tree_map(batch, tree)
 
 
-def unbatch(tree):
+def unbatch(tree: PyTree[Array, ' T']) -> PyTree[Array, ' T']:
+    """Merge the first two axes into a single axis."""
+
     def unbatch(x):
         return x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
 
     return tree_map(unbatch, tree)
+
+
+def reduce(
+    ufunc: jnp.ufunc,
+    x: PyTree[Array, ' T'],
+    axes: PyTree[int, ' T'],
+    initial: PyTree[Array, ' T'] | None,
+) -> PyTree[Array, ' T']:
+    """Reduce each array in `x` along the axes in `axes` starting from `initial` using `ufunc.reduce`."""
+    if initial is None:
+
+        def reduce(x: Array, axis: int) -> Array:
+            return ufunc.reduce(x, axis=axis)
+
+        return tree_map(reduce, x, axes)
+
+    else:
+
+        def reduce(x: Array, initial: Array, axis: int) -> Array:
+            return ufunc.reduce(x, axis=axis, initial=initial)
+
+        return tree_map(reduce, x, initial, axes)
+
+
+def identity(
+    ufunc: jnp.ufunc, x: PyTree[ShapeDtypeStruct, ' T']
+) -> PyTree[ShapeDtypeStruct, ' T']:
+    """Get the identity element for `ufunc` and each array in `x`."""
+
+    def identity(x: ShapeDtypeStruct) -> Array:
+        dtype = ufunc.reduce(jnp.empty(1, x.dtype)).dtype
+        return jnp.broadcast_to(jnp.array(ufunc.identity, dtype), x.shape)
+
+    return tree_map(identity, x)
 
 
 def check_same(tree1, tree2):
@@ -158,7 +229,9 @@ def autobatch(
     max_io_nbytes: int,
     in_axes: PyTree[int | None] = 0,
     out_axes: PyTree[int] = 0,
+    *,
     return_nbatches: bool = False,
+    reduce_ufunc: jnp.ufunc | None = None,
 ) -> Callable:
     """
     Batch a function such that each batch is smaller than a threshold.
@@ -179,6 +252,9 @@ def autobatch(
         The same for outputs (but non-batching is not allowed).
     return_nbatches
         If True, the number of batches is returned as a second output.
+    reduce_ufunc
+        Function used to reduce the output along the batched axis (e.g.,
+        `jax.numpy.add`).
 
     Returns
     -------
@@ -186,11 +262,11 @@ def autobatch(
 
     Notes
     -----
-    Unless `return_nbatches` is set, `autobatch` at given arguments is
-    idempotent. Furthermore, `autobatch` can be applied multiple times over
-    multiple axes with the same `max_io_nbytes` limit to work on multiple axes;
-    in this case it won't unnecessarily loop over additional axes if one or more
-    outer `autobatch` are already sufficient.
+    Unless `return_nbatches` or `reduce_ufunc` are set, `autobatch` at given
+    arguments is idempotent. Furthermore, `autobatch` can be applied multiple
+    times over multiple axes with the same `max_io_nbytes` limit to work on
+    multiple axes; in this case it won't unnecessarily loop over additional axes
+    if one or more outer `autobatch` are already sufficient.
 
     To handle memory used in intermediate values: assuming all intermediate
     values have size that scales linearly with the axis batched over, say the
@@ -199,59 +275,125 @@ def autobatch(
     them into account divide `max_io_nbytes` by ``(1 + core_int_size /
     core_io_size)``.
     """
-    initial_in_axes = in_axes
-    initial_out_axes = out_axes
 
     @jit
     @wraps(func)
-    def batched_func(*args):
-        example_result = eval_shape(func, *args)
-
-        in_axes = expand_axes(initial_in_axes, args)
-        out_axes = expand_axes(initial_out_axes, example_result)
-        check_no_nones(out_axes, example_result)
-
-        size = extract_size((in_axes, out_axes), (args, example_result))
-
-        original_args = args
-        args, nonbatched_args = pull_nonbatched(in_axes, args)
-
-        total_nbytes = sum_nbytes((args, example_result))
-        min_nbatches = total_nbytes // max_io_nbytes + bool(
-            total_nbytes % max_io_nbytes
+    def autobatch_wrapper(*args):
+        return batched_func(
+            func, max_io_nbytes, in_axes, out_axes, return_nbatches, reduce_ufunc, args
         )
-        min_nbatches = max(1, min_nbatches)
-        nbatches = next_divisor(size, min_nbatches)
-        assert 1 <= nbatches <= max(1, size)
-        assert size % nbatches == 0
-        assert total_nbytes % nbatches == 0
 
-        batch_nbytes = total_nbytes // nbatches
-        if batch_nbytes > max_io_nbytes:
-            assert size == nbatches
-            msg = f'batch_nbytes = {batch_nbytes} > max_io_nbytes = {max_io_nbytes}'
-            warn(msg)
+    return autobatch_wrapper
 
-        def loop(_, args):
-            args = move_axes_in(in_axes, args)
-            args = push_nonbatched(in_axes, args, nonbatched_args)
-            result = func(*args)
-            result = move_axes_out(out_axes, result)
-            return None, result
 
-        if nbatches > 1:
-            args = move_axes_out(in_axes, args)
-            args = batch(args, nbatches)
-            _, result = scan(loop, None, args)
+def batched_func(
+    func: Callable,
+    max_io_nbytes: int,
+    in_axes: PyTree[int | None],
+    out_axes: PyTree[int],
+    return_nbatches: bool,
+    reduce_ufunc: jnp.ufunc | None,
+    args: tuple[PyTree[Array]],
+) -> PyTree[Array]:
+    """Implement the wrapper used in `autobatch`."""
+    # determine the output structure of the function
+    example_result = eval_shape(func, *args)
+
+    # expand the axes pytrees if they are prefixes
+    in_axes = expand_axes(in_axes, args)
+    out_axes = expand_axes(out_axes, example_result)
+    check_no_nones(out_axes, example_result)
+
+    # check the axes are valid
+    in_axes = normalize_axes(in_axes, args)
+    out_axes = normalize_axes(out_axes, example_result)
+
+    # squeeze out the output dims that will be reduced
+    if reduce_ufunc is not None:
+        out_axes = remove_axis(example_result, out_axes)
+
+    # get the size of the batched axis
+    size = extract_size((in_axes, out_axes), (args, example_result))
+
+    # split arguments in batched and not batched
+    original_args = args
+    args, nonbatched_args = pull_nonbatched(in_axes, args)
+
+    # determine the number of batches to respect the memory limit
+    total_nbytes = sum_nbytes((args, example_result))
+    min_nbatches = total_nbytes // max_io_nbytes + bool(total_nbytes % max_io_nbytes)
+    min_nbatches = max(1, min_nbatches)
+    nbatches = next_divisor(size, min_nbatches)
+    assert 1 <= nbatches <= max(1, size)
+    assert size % nbatches == 0
+    assert total_nbytes % nbatches == 0
+
+    # warn if the memory limit could not be respected
+    batch_nbytes = total_nbytes // nbatches
+    if batch_nbytes > max_io_nbytes:
+        assert size == nbatches
+        msg = f'batch_nbytes = {batch_nbytes} > max_io_nbytes = {max_io_nbytes}'
+        warn(msg)
+
+    if nbatches > 1:
+        # prepare arguments for looping
+        args = move_axes_out(in_axes, args)
+        args = batch(args, nbatches)
+
+        # prepare carry for reduction
+        if reduce_ufunc is None:
+            initial = None
+        else:
+            initial = identity(reduce_ufunc, example_result)
+
+        # loop and invoke the function in batches
+        loop = partial(
+            batching_loop,
+            func=func,
+            nonbatched_args=nonbatched_args,
+            in_axes=in_axes,
+            out_axes=out_axes,
+            reduce_ufunc=reduce_ufunc,
+        )
+        reduced_result, result = scan(loop, initial, args)
+
+        # remove auxiliary batching axis and reverse transposition
+        if reduce_ufunc is None:
+            assert reduced_result is None
             result = unbatch(result)
             result = move_axes_in(out_axes, result)
         else:
-            result = func(*original_args)
+            assert result is None
+            result = reduced_result
 
-        check_same(example_result, result)
+    # trivial case: no batching needed
+    else:
+        result = func(*original_args)
+        if reduce_ufunc is not None:
+            result = reduce(reduce_ufunc, result, out_axes, None)
 
-        if return_nbatches:
-            return result, nbatches
-        return result
+    check_same(example_result, result)
 
-    return batched_func
+    if return_nbatches:
+        return result, nbatches
+    return result
+
+
+def batching_loop(
+    initial, args, *, func, nonbatched_args, in_axes, out_axes, reduce_ufunc
+):
+    """Implement the batching loop in `autobatch`."""
+    # evaluate the function
+    args = move_axes_in(in_axes, args)
+    args = push_nonbatched(in_axes, args, nonbatched_args)
+    result = func(*args)
+
+    # unreduced case: transpose for concatenation and return
+    if reduce_ufunc is None:
+        result = move_axes_out(out_axes, result)
+        return None, result
+
+    # reduced case: reduce starting from initial
+    else:
+        reduced_result = reduce(reduce_ufunc, result, out_axes, initial)
+        return reduced_result, None

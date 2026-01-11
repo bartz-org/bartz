@@ -272,7 +272,7 @@ class TestAutoBatch:
         result = batched_func(x, scalar)
 
         assert result.shape == (8,)
-        assert_allclose(result, expected, rtol=1e-5)
+        assert_allclose(result, expected, rtol=1e-6)
 
     def test_reduction_with_return_nbatches(self, keys):
         """Check reduce_ufunc works together with return_nbatches."""
@@ -288,9 +288,9 @@ class TestAutoBatch:
         )
         result, nbatches = batched_func(x)
 
-        assert isinstance(nbatches, int) or hasattr(nbatches, 'item')
+        assert isinstance(nbatches, int)
         assert result.shape == (10,)
-        assert_allclose(result, expected, rtol=1e-5)
+        assert_allclose(result, expected, rtol=1e-6)
 
 
 def different_keys(keya, keyb):

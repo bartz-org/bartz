@@ -211,7 +211,7 @@ def reduce(
 
 def identity(
     ufunc: jnp.ufunc, x: PyTree[ShapeDtypeStruct, ' T']
-) -> PyTree[ShapeDtypeStruct, ' T']:
+) -> PyTree[Array, ' T']:
     """Get the identity element for `ufunc` and each array in `x`."""
 
     def identity(x: ShapeDtypeStruct) -> Array:
@@ -227,7 +227,7 @@ def reduction_dtype(ufunc: jnp.ufunc, input_dtype: DTypeLike) -> DTypeLike:
 
 
 def identity_for(ufunc: jnp.ufunc, input_dtype: DTypeLike) -> Shaped[Array, '']:
-    """Return the identity for ufunc, filling in missing cases."""
+    """Return the identity for ufunc as an array scalar with the right dtype."""
     # get output type from input type, e.g., int8 is accumulated to int32
     dtype = reduction_dtype(ufunc, input_dtype)
 

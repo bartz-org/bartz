@@ -730,22 +730,20 @@ def evaluate_trace(
         sample_axis = 0
         tree_axis = 1
 
-    # determine output shapes (to avoid autobatch tracing everything twice)
-    mv_shape = (k,) if is_mv else ()
-    out_shape_w_trees = (*trace.leaf_tree.shape[: tree_axis + 1], *mv_shape, n)
-    out_shape = (*trace.leaf_tree.shape[:tree_axis], *mv_shape, n)
-
-    # batch evaluate_forest over mcmc samples and trees, do not loop over chains
-    # because they may be sharded
-    batched_eval = evaluate_forest
+    # batch and sum over trees
     batched_eval = autobatch(
-        batched_eval,
+        evaluate_forest,
         max_io_nbytes,
         (None, tree_axis),
         tree_axis,
         reduce_ufunc=jnp.add,
-        result_shape_dtype=ShapeDtypeStruct(out_shape_w_trees, jnp.float32),
     )
+
+    # determine output shapes (to avoid autobatch tracing everything 4 times)
+    mv_shape = (k,) if is_mv else ()
+    out_shape = (*trace.leaf_tree.shape[:tree_axis], *mv_shape, n)
+
+    # batch over mcmc samples
     batched_eval = autobatch(
         batched_eval,
         max_io_nbytes,

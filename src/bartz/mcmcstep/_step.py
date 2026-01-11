@@ -58,7 +58,7 @@ from bartz.mcmcstep._moves import Moves, propose_moves
 from bartz.mcmcstep._state import State, StepConfig, chol_with_gersh, field
 
 
-@jit_if_not_profiling
+@partial(jit_if_not_profiling, donate_argnums=(1,))
 @partial(vmap_chains_if_not_profiling, auto_split_keys=True)
 def step(key: Key[Array, ''], bart: State) -> State:
     """
@@ -74,6 +74,12 @@ def step(key: Key[Array, ''], bart: State) -> State:
     Returns
     -------
     The new BART mcmc state.
+
+    Notes
+    -----
+    The memory of the input state is re-used for the output state, so the input
+    state can not be used any more after calling `step`. All this applies
+    outside of `jax.jit`.
     """
     # handle the interactions between chains and profile mode
     num_chains = bart.forest.num_chains()

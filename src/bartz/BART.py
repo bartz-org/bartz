@@ -1,6 +1,6 @@
 # bartz/src/bartz/BART.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -24,7 +24,9 @@
 
 """Implement classes `mc_gbart` and `gbart` that mimic the R BART3 package."""
 
+from collections.abc import Mapping
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any, Literal
 
 from equinox import Module
@@ -183,10 +185,8 @@ class mc_gbart(Module):
     maxdepth
         The maximum depth of the trees. This is 1-based, so with the default
         ``maxdepth=6``, the depths of the levels range from 0 to 5.
-    init_kw
-        Additional arguments passed to `bartz.mcmcstep.init`.
-    run_mcmc_kw
-        Additional arguments passed to `bartz.mcmcloop.run_mcmc`.
+    bart_kwargs
+        Additional arguments passed to `bartz.Bart`.
 
     Notes
     -----
@@ -253,8 +253,7 @@ class mc_gbart(Module):
         mc_cores: int = 2,
         seed: int | Key[Array, ''] = 0,
         maxdepth: int = 6,
-        init_kw: dict | None = None,
-        run_mcmc_kw: dict | None = None,
+        bart_kwargs: Mapping = MappingProxyType({}),
     ):
         self._bart = Bart(
             x_train,
@@ -285,11 +284,10 @@ class mc_gbart(Module):
             nskip=nskip,
             keepevery=keepevery,
             printevery=printevery,
-            mc_cores=mc_cores,
+            num_chains=None if mc_cores == 1 else mc_cores,
             seed=seed,
             maxdepth=maxdepth,
-            init_kw=init_kw,
-            run_mcmc_kw=run_mcmc_kw,
+            **bart_kwargs,
         )
 
     # Public attributes from Bart

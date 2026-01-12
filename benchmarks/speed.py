@@ -143,7 +143,10 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
             kw.pop('error_cov_scale', None)
 
         case 'sparse':
-            if not hasattr(mcmcstep, 'step_sparse'):
+            if (
+                not hasattr(mcmcstep, 'step_sparse')
+                and 'sparse_on_at' not in sig.parameters
+            ):
                 msg = 'sparse not supported'
                 raise NotImplementedError(msg)
             kw.update(a=0.5, b=1.0, rho=float(p), sparse_on_at=999999)

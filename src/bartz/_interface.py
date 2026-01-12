@@ -415,7 +415,7 @@ class Bart(Module):
 
     @property
     def ndpost(self):
-        """The total number of posterior samples across all chains.
+        """The total number of posterior samples after burn-in across all chains.
 
         May be larger that the initialization argument `ndpost` it it was not
         divisible by the number of chains.

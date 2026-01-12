@@ -238,7 +238,7 @@ class Bart(Module):
         The number of independent Markov chains to run. By default only one
         chain is run.
 
-        The difference bewtween not specifying `num_chains` and setting it to 1
+        The difference between not specifying `num_chains` and setting it to 1
         is that in the latter case in the object attributes and some methods
         there will be an explicit chain axis of size 1.
     num_chain_devices
@@ -417,7 +417,7 @@ class Bart(Module):
     def ndpost(self):
         """The total number of posterior samples after burn-in across all chains.
 
-        May be larger that the initialization argument `ndpost` it it was not
+        May be larger than the initialization argument `ndpost` if it was not
         divisible by the number of chains.
         """
         return self._main_trace.grow_prop_count.size

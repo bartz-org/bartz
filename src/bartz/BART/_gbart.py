@@ -1,4 +1,4 @@
-# bartz/src/bartz/BART.py
+# bartz/src/bartz/BART/_gbart.py
 #
 # Copyright (c) 2024-2026, The Bartz Contributors
 #
@@ -26,14 +26,19 @@
 
 from collections.abc import Mapping
 from functools import cached_property
+from os import cpu_count
 from types import MappingProxyType
 from typing import Any, Literal
+from warnings import warn
 
 from equinox import Module
+from jax import device_count
+from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real
 
 from bartz import mcmcloop, mcmcstep
 from bartz._interface import Bart, DataFrame, FloatLike, Series
+from bartz.jaxext import get_default_device
 
 
 class mc_gbart(Module):
@@ -182,9 +187,6 @@ class mc_gbart(Module):
         The number of independent MCMC chains.
     seed
         The seed for the random number generator.
-    maxdepth
-        The maximum depth of the trees. This is 1-based, so with the default
-        ``maxdepth=6``, the depths of the levels range from 0 to 5.
     bart_kwargs
         Additional arguments passed to `bartz.Bart`.
 
@@ -201,7 +203,7 @@ class mc_gbart(Module):
     - Some functionality is missing.
     - The error variance parameter is called `lamda` instead of `lambda`.
     - There are some additional attributes, and some missing.
-    - The trees have a maximum depth.
+    - The trees have a maximum depth of 8.
     - `rm_const` refers to predictors without decision rules instead of
       predictors that are constant in `x_train`.
     - If `rm_const=True` and some variables are dropped, the predictors
@@ -252,12 +254,11 @@ class mc_gbart(Module):
         printevery: int | None = 100,
         mc_cores: int = 2,
         seed: int | Key[Array, ''] = 0,
-        maxdepth: int = 6,
         bart_kwargs: Mapping = MappingProxyType({}),
     ):
-        self._bart = Bart(
-            x_train,
-            y_train,
+        kwargs: dict = dict(
+            x_train=x_train,
+            y_train=y_train,
             x_test=x_test,
             type=type,
             sparse=sparse,
@@ -284,11 +285,12 @@ class mc_gbart(Module):
             nskip=nskip,
             keepevery=keepevery,
             printevery=printevery,
-            num_chains=None if mc_cores == 1 else mc_cores,
             seed=seed,
-            maxdepth=maxdepth,
-            **bart_kwargs,
+            maxdepth=8,
+            **process_mc_cores(y_train, mc_cores),
         )
+        kwargs.update(bart_kwargs)
+        self._bart = Bart(**kwargs)
 
     # Public attributes from Bart
 
@@ -449,3 +451,75 @@ class gbart(mc_gbart):
             raise TypeError(msg)
         kwargs.update(mc_cores=1)
         super().__init__(*args, **kwargs)
+
+
+def process_mc_cores(y_train: Array | Any, mc_cores: int) -> dict[str, Any]:
+    """Determine the arguments to pass to `Bart` to configure multiple chains."""
+    # one chain, leave default configuration which is num_chains=None
+    if abs(mc_cores) == 1:
+        return {}
+
+    # determine if we are on cpu; this point may raise an exception
+    platform = get_platform(y_train, mc_cores)
+
+    # set the num_chains argument
+    mc_cores = abs(mc_cores)
+    kwargs = dict(num_chains=mc_cores)
+
+    # if on cpu, try to shard the chains across multiple virtual cpus
+    if platform == 'cpu':
+        # determine number of logical cpu cores
+        num_cores = cpu_count()
+        assert num_cores is not None, 'could not determine number of cpu cores'
+
+        # determine number of shards that evenly divides chains
+        for num_shards in range(num_cores, 0, -1):
+            if mc_cores % num_shards == 0:
+                break
+
+        # handle the case where there are less jax cpu devices that that
+        if num_shards > 1:
+            num_jax_cpus = device_count('cpu')
+            if num_jax_cpus < num_shards:
+                for new_num_shards in range(num_jax_cpus, 0, -1):
+                    if mc_cores % new_num_shards == 0:
+                        break
+                msg = (
+                    f'`mc_gbart` would like to shard {mc_cores} chains across '
+                    f'{num_shards} virtual jax cpu devices, but jax is set up '
+                    f'with only {num_jax_cpus} cpu devices, so it will use '
+                    f'{new_num_shards} devices instead. To enable '
+                    'parallelization, please increase the limit with '
+                    '`jax.config.update("jax_num_cpu_devices", <num_devices>)`.'
+                )
+                warn(msg)
+                num_shards = new_num_shards
+
+        # set the number of shards
+        if num_shards > 1:
+            kwargs.update(num_chain_devices=num_shards)
+
+    return kwargs
+
+
+def get_platform(y_train: Array | Any, mc_cores: int) -> str:
+    """Get the platform for `process_mc_cores` from `y_train` or the default device."""
+    if isinstance(y_train, Array) and hasattr(y_train, 'platform'):
+        return y_train.platform()
+    elif (
+        not isinstance(y_train, Array) and hasattr(jnp.zeros(()), 'platform')
+        # this condition means: y_train is not an array, but we are not under
+        # jit, so y_train is going to be converted to an array on the default
+        # device
+    ) or mc_cores < 0:
+        return get_default_device().platform
+    else:
+        msg = (
+            'Could not determine the platform from `y_train`, maybe `mc_gbart` '
+            'was used with a `jax.jit`ted function? The platform is needed to '
+            'determine whether the computation is going to run on CPU to '
+            'automatically shard the chains across multiple virtual CPU '
+            'devices. To acknowledge this problem and circumvent it '
+            'by using the current default jax device, negate `mc_cores`.'
+        )
+        raise RuntimeError(msg)

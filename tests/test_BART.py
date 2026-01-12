@@ -170,10 +170,10 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 printevery=50,
                 usequants=False,
                 numcut=256,  # > 255 to use uint16 for X and split_trees
-                maxdepth=9,  # > 8 to use uint16 for leaf_indices
                 mc_cores=1,
                 seed=keys.pop(),
                 bart_kwargs=dict(
+                    maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     num_data_devices=min(2, get_device_count()),
                     init_kw=dict(
                         resid_batch_size=None,
@@ -204,10 +204,11 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 # usequants=True with binary X to check the case in which the
                 # splits are less than the statically known maximum
                 numcut=255,
-                maxdepth=6,
                 seed=keys.pop(),
                 mc_cores=2,  # keep this 2 on binary so continuous gets 1 and 2
                 bart_kwargs=dict(
+                    maxdepth=6,
+                    num_chain_devices=None,
                     init_kw=dict(
                         resid_batch_size=16,
                         count_batch_size=16,
@@ -215,7 +216,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                         save_ratios=False,
                         min_points_per_decision_node=None,
                         min_points_per_leaf=None,
-                    )
+                    ),
                 ),
             )
 
@@ -238,11 +239,10 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 printevery=50,
                 usequants=True,
                 numcut=10,
-                maxdepth=8,  # 8 to check if leaf_indices changes type too soon
                 seed=keys.pop(),
                 mc_cores=2,
                 bart_kwargs=dict(
-                    num_chain_devices=min(2, get_device_count()),
+                    maxdepth=8,  # 8 to check if leaf_indices changes type too soon
                     init_kw=dict(save_ratios=True),
                 ),
             )
@@ -1219,6 +1219,9 @@ def test_jit(kw):
     platform = kw['y_train'].platform()
     kw.setdefault('bart_kwargs', {}).update(devices=jax.devices(platform))
 
+    # negate mc_cores to silence error about device not possible to infer
+    kw.update(mc_cores=-kw['mc_cores'])
+
     # remove arguments passed through the jit call
     X = kw.pop('x_train')
     y = kw.pop('y_train')
@@ -1382,7 +1385,7 @@ def test_automatic_integer_types(kw):
     def select_type(cond):
         return jnp.uint8 if cond else jnp.uint16
 
-    leaf_indices_type = select_type(kw['maxdepth'] <= 8)
+    leaf_indices_type = select_type(kw['bart_kwargs']['maxdepth'] <= 8)
     split_trees_type = X_type = select_type(kw['numcut'] <= 255)
     var_trees_type = select_type(kw['x_train'].shape[0] <= 256)
 
@@ -1464,7 +1467,16 @@ def test_sharding(kw: dict):
     bart_kwargs = kw.get('bart_kwargs', {})
     num_chain_devices = bart_kwargs.get('num_chain_devices')
     num_data_devices = bart_kwargs.get('num_data_devices')
-    expect_sharded = num_chain_devices is not None or num_data_devices is not None
+    expect_sharded = (
+        num_chain_devices is not None
+        or num_data_devices is not None
+        or (
+            kw.get('mc_cores', 2) > 1
+            and get_device_count() > 1
+            and get_default_device().platform == 'cpu'
+            and 'num_chain_devices' not in bart_kwargs
+        )
+    )
 
     bart = mc_gbart(**kw)
 

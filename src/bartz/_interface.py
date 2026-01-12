@@ -270,7 +270,6 @@ class Bart(Module):
     _splits: Real[Array, 'p max_num_splits']
     _x_train_fmt: Any = field(static=True)
 
-    ndpost: int = field(static=True)
     offset: Float32[Array, '']
     sigest: Float32[Array, ''] | None = None
     yhat_test: Float32[Array, 'ndpost m'] | None = None
@@ -376,7 +375,6 @@ class Bart(Module):
 
         # set public attributes
         self.offset = final_state.offset  # from the state because of buffer donation
-        self.ndpost = main_trace.grow_prop_count.size
         self.sigest = sigest
 
         # set private attributes
@@ -389,6 +387,15 @@ class Bart(Module):
         # predict at test points
         if x_test is not None:
             self.yhat_test = self.predict(x_test)
+
+    @property
+    def ndpost(self):
+        """The total number of posterior samples across all chains.
+
+        May be larger that the initialization argument `ndpost` it it was not
+        divisible by the number of chains.
+        """
+        return self._main_trace.grow_prop_count.size
 
     @cached_property
     def prob_test(self) -> Float32[Array, 'ndpost m'] | None:

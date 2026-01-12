@@ -449,7 +449,7 @@ class Bart(Module):
             return self.prob_train.mean(axis=0)
 
     @cached_property
-    def sigma(
+    def sigma(  # need to change to adapt to matrix covariance matrix
         self,
     ) -> (
         Float32[Array, ' nskip+ndpost']
@@ -473,7 +473,7 @@ class Bart(Module):
             )
         )
 
-    @cached_property
+    @cached_property  # need to change to adapt to matrix covariance matrix
     def sigma_(self) -> Float32[Array, 'ndpost'] | None:
         """The standard deviation of the error, only over the post-burnin samples and flattened."""
         error_cov_inv = self._main_trace.error_cov_inv

@@ -32,6 +32,7 @@ from jax import random, vmap
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
+from bartz._interface import Bart
 from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._step import (
     Counts,
@@ -46,7 +47,7 @@ from bartz.mcmcstep._step import (
     _step_error_cov_inv_uv,
     step_trees,
 )
-from tests.util import assert_close_matrices
+from tests.util import assert_close_matrices, rhat
 
 
 class TestWishart:
@@ -474,3 +475,101 @@ class TestMVBartSteps:
 
             assert mv_state.error_cov_inv.shape == (k, k)
             assert mv_state.resid.shape == (k, y.shape[1])
+
+
+class TestMVBartInterface:
+    """Tests for mvBart Interface."""
+
+    @pytest.fixture(params=[(10, 2, 2), (20, 5, 3), (3, 100, 4), (50, 50, 5)])
+    def data_shape(self, request):
+        """Provide (n, p, k) triples for testing."""
+        n, p, k = request.param
+        return n, p, k
+
+    @pytest.fixture
+    def data(self, keys, data_shape):
+        """Generate a toy dataset. Mimic dgp from test_BART.py."""
+        n, p, k = data_shape
+        sigma_noise = 0.1
+
+        key_x, key_eps = random.split(keys.pop(), 2)
+        X = random.uniform(key_x, (p, n), float, -2, 2)
+
+        s = jnp.ones((k, p))
+        norm_s = jnp.sqrt(jnp.sum(s * s, axis=1, keepdims=True))  # (k, 1)
+
+        # F[d, i] = (s_d @ cos(pi * x_i)) / ||s_d||
+        F = (s @ jnp.cos(jnp.pi * X)) / norm_s  # (k, n)
+
+        # iid N(0, sigma^2) noise across dims and obs
+        y = F + sigma_noise * random.normal(key_eps, (k, n))
+        return X, y
+
+    def test_initialization_and_shapes(self, data):
+        """Test that mvBart predicts with correct shapes."""
+        X, Y = data
+        nskip, ndpost = 10, 50
+        n_test = 40
+        p, k_dim = X.shape[0], Y.shape[0]
+
+        model = Bart(
+            x_train=X, y_train=Y, ntree=10, ndpost=ndpost, nskip=nskip, mc_cores=2
+        )
+
+        X_test = random.normal(random.key(1), (p, n_test))
+        y_pred = model.predict(X_test)
+        assert y_pred.shape == (ndpost, k_dim, n_test)
+
+    def test_mvbart_convergence(self, data):
+        """Test that MV Bart chains converge using R-hat."""
+        X_train, Y_train = data
+        _, n_train = X_train.shape
+        k_dim = Y_train.shape[0]
+
+        mc_cores = 4
+        ndpost = 2000
+        nsamples_per_chain = ndpost // mc_cores
+        nskip = 4000
+        keepevery = 5
+        ntree = 100
+
+        model = Bart(
+            x_train=X_train,
+            y_train=Y_train,
+            ntree=ntree,
+            ndpost=ndpost,
+            nskip=nskip,
+            keepevery=keepevery,
+            mc_cores=mc_cores,
+            seed=0,
+        )
+
+        # Check yhat Convergence
+        yhat_train = model.yhat_train.reshape(
+            mc_cores, nsamples_per_chain, k_dim, n_train
+        )
+        yhat_train_mean = yhat_train.mean(
+            axis=-1
+        )  # (mc_cores, nsamples_per_chain, k_dim)
+        max_rhats_yhat = [rhat(yhat_train_mean[:, :, j]) for j in range(k_dim)]
+        rhat_mean = jnp.max(jnp.stack(max_rhats_yhat))
+        print('Rhat on mean(yhat_train) per response:', rhat_mean)
+
+        global_max_rhat = jnp.max(jnp.array(max_rhats_yhat))
+        assert global_max_rhat < 1.1
+
+        # Check Covariance Matrix Convergence
+        prec_trace = model._main_trace.error_cov_inv
+        if prec_trace.ndim == 3:
+            prec_trace = prec_trace.reshape(mc_cores, nsamples_per_chain, k_dim, k_dim)
+
+        prec_flat = prec_trace.reshape(mc_cores, nsamples_per_chain, -1)
+        assert jnp.all(jnp.std(prec_flat, axis=1) > 1e-8), 'Sigma is not updating!'
+
+        max_rhats_prec = [rhat(prec_flat[:, :, j]) for j in range(k_dim * k_dim)]
+        max_rhat_sigma = jnp.max(jnp.array(max_rhats_prec))
+        print(f'R-hat for precision matrix: {jnp.array(max_rhats_prec)}')
+        print(f'Max R-hat for precision matrix: {max_rhat_sigma}')
+
+        assert all(max_rhats_prec) < 1.1
+        assert max_rhat_sigma < 1.1

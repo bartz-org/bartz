@@ -36,7 +36,7 @@ from jaxtyping import Array, Float32, UInt8
 from numpy.testing import assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
 
-from bartz.jaxext import split
+from bartz.jaxext import get_default_device, split
 from bartz.mcmcloop import run_mcmc
 from bartz.mcmcstep import State, init
 from bartz.mcmcstep._state import chain_vmap_axes
@@ -86,6 +86,7 @@ def simple_init(p: int, n: int, ntree: int, k: int | None, **kwargs) -> State:
         error_cov_scale=2 * eye,
         min_points_per_decision_node=10,
         filter_splitless_vars=False,
+        target_platform=get_default_device().platform,
         **kwargs,
     )
 

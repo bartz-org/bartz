@@ -426,6 +426,7 @@ def init(
     sparse_on_at: int | Integer[Any, ''] | None = None,
     num_chains: int | None = None,
     mesh: Mesh | dict[str, int] | None = None,
+    target_platform: Literal['cpu', 'gpu'] | None = None,
 ) -> State:
     """
     Make a BART posterior sampling MCMC initial state.
@@ -471,10 +472,8 @@ def init(
     count_batch_size
         The batch sizes, along datapoints, for summing the residuals and
         counting the number of datapoints in each leaf. `None` for no batching.
-        If 'auto', it's chosen automatically based on the devices used in `mesh`
-        if specified, else the default device. Note: in the latter case, this
-        won't respect the device of `y` if it's different from the default
-        device.
+        If 'auto', it's chosen automatically based on the target platform; see
+        the description of `target_platform` below for how it is determined.
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
     filter_splitless_vars
@@ -523,6 +522,16 @@ def init(
         Note: if a mesh is passed, the arrays are always sharded according to
         it. In particular even if the mesh has no 'chains' or 'data' axis, the
         arrays will be replicated on all devices in the mesh.
+    target_platform
+        Platform ('cpu' or 'gpu') used to determine the batch sizes
+        automatically. If `mesh` is specified, the platform is inferred from the
+        devices in the mesh. Otherwise, if `y` is a concrete array (i.e., `init`
+        is not invoked in a `jax.jit` context), the platform is set to the
+        platform of `y`. Otherwise, use `target_platform`.
+
+        To avoid confusion, in all cases where the `target_platform` argument
+        would be ignored, `init` raises an exception if `target_platform` is
+        set.
 
     Returns
     -------
@@ -582,8 +591,18 @@ def init(
 
     # determine batch sizes for reductions
     mesh = _parse_mesh(num_chains, mesh)
+    target_platform = _parse_target_platform(
+        y, mesh, target_platform, resid_batch_size, count_batch_size
+    )
     resid_batch_size, count_batch_size = _choose_suffstat_batch_size(
-        resid_batch_size, count_batch_size, y, max_depth, num_trees, num_chains, mesh
+        resid_batch_size,
+        count_batch_size,
+        y,
+        max_depth,
+        num_trees,
+        num_chains,
+        mesh,
+        target_platform,
     )
 
     # initialize all remaining stuff and put it in an unsharded state
@@ -703,6 +722,27 @@ def _parse_mesh(
     return mesh
 
 
+def _parse_target_platform(
+    y: Array,
+    mesh: Mesh | None,
+    target_platform: Literal['cpu', 'gpu'] | None,
+    resid_batch_size: int | None | Literal['auto'],
+    count_batch_size: int | None | Literal['auto'],
+) -> Literal['cpu', 'gpu'] | None:
+    if mesh is not None:
+        assert target_platform is None, 'mesh provided, do not set target_platform'
+        return mesh.devices.flat[0].platform
+    elif hasattr(y, 'platform'):
+        assert target_platform is None, 'device inferred from y, unset target_platform'
+        return y.platform()
+    elif resid_batch_size == 'auto' or count_batch_size == 'auto':
+        assert target_platform in ('cpu', 'gpu')
+        return target_platform
+    else:
+        assert target_platform is None, 'target_platform not used, unset it'
+        return target_platform
+
+
 def _auto_axes(mesh: Mesh) -> list[str]:
     """Re-implement `Mesh.auto_axes` because that's missing in jax v0.5."""
     # Mesh.auto_axes added in jax v0.6.0
@@ -769,6 +809,7 @@ def _choose_suffstat_batch_size(
     num_trees: int,
     num_chains: int | None,
     mesh: Mesh | None,
+    target_platform: Literal['cpu', 'gpu'] | None,
 ) -> tuple[int | None, int | None]:
     """Determine batch sizes for reductions."""
     # get number of outcomes and of datapoints
@@ -783,8 +824,6 @@ def _choose_suffstat_batch_size(
     # compute auxiliary sizes
     batch_size = k * num_chains
     unbatched_accum_bytes_times_batch_size = num_trees * 2**max_depth * 4 * n
-
-    platform = _get_platform(mesh)
 
     def final_round(s: float) -> int | None:
         # multiply by batch_size because if the calculation is already
@@ -804,18 +843,18 @@ def _choose_suffstat_batch_size(
 
     if resid_batch_size != 'auto':
         rbs = resid_batch_size
-    elif platform == 'cpu':
+    elif target_platform == 'cpu':
         rbs = final_round(n / 6)
         # instead of 6 I guess I should have in general the number of "good"
         # physical cores
-    elif platform == 'gpu':
+    elif target_platform == 'gpu':
         rbs = final_round((2 * n) ** (1 / 3))
 
     if count_batch_size != 'auto':
         cbs = count_batch_size
-    elif platform == 'cpu':
+    elif target_platform == 'cpu':
         cbs = None
-    elif platform == 'gpu':
+    elif target_platform == 'gpu':
         cbs = (n / 16) ** 0.5
 
         # ensure we don't exceed ~512MiB of memory usage per device

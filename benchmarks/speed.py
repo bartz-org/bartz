@@ -36,7 +36,15 @@ from typing import Literal
 import jax
 from asv_runner.benchmarks.mark import skip_for_params
 from equinox import error_if
-from jax import block_until_ready, clear_caches, eval_shape, jit, random, vmap
+from jax import (
+    block_until_ready,
+    clear_caches,
+    ensure_compile_time_eval,
+    eval_shape,
+    jit,
+    random,
+    vmap,
+)
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.tree import map_with_path
@@ -82,8 +90,14 @@ def make_p_nonterminal(maxdepth: int):
 Kind = Literal['plain', 'weights', 'binary', 'sparse', 'vmap-1', 'vmap-2']
 
 
+def get_default_platform() -> str:
+    """Get the default JAX platform (cpu, gpu)."""
+    with ensure_compile_time_eval():
+        return jnp.zeros(()).platform()
+
+
 @partial(jit, static_argnums=(0, 1, 2, 3))
-def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs):  # noqa: C901
+def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs):  # noqa: C901, PLR0915
     """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
     X, y, max_split = gen_data(p, n)
 
@@ -99,6 +113,7 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
         error_cov_scale=2.0,
         min_points_per_decision_node=10,
         filter_splitless_vars=False,
+        target_platform=get_default_platform(),
     )
 
     # adapt arguments for old versions
@@ -123,6 +138,8 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
     if 'suffstat_batch_size' in sig.parameters:
         # bypass the tracing bug fixed in v0.2.1
         kw.update(suffstat_batch_size=None)
+    if 'target_platform' not in sig.parameters:
+        kw.pop('target_platform')
 
     match kind:
         case 'weights':

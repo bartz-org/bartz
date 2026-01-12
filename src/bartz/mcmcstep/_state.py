@@ -732,7 +732,7 @@ def _shard_state(state: State) -> State:
             spec[data_axis] = 'data'
 
         spec = PartitionSpec(*spec)
-        return device_put(x, NamedSharding(mesh, spec))
+        return device_put(x, NamedSharding(mesh, spec), donate=True)
 
     return tree.map(
         shard_leaf,
@@ -777,8 +777,8 @@ def _choose_suffstat_batch_size(
     # get per-device values
     if num_chains is None:
         num_chains = 1
-    num_chains //= _get_axis_size(mesh, 'chains')
-    n //= _get_axis_size(mesh, 'data')
+    num_chains //= get_axis_size(mesh, 'chains')
+    n //= get_axis_size(mesh, 'data')
 
     # compute auxiliary sizes
     batch_size = k * num_chains
@@ -828,7 +828,7 @@ def _choose_suffstat_batch_size(
     return rbs, cbs
 
 
-def _get_axis_size(mesh: Mesh | None, axis_name: str) -> int:
+def get_axis_size(mesh: Mesh | None, axis_name: str) -> int:
     if mesh is None or axis_name not in mesh.axis_names:
         return 1
     else:

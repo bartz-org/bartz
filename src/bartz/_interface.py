@@ -32,6 +32,7 @@ from typing import Any, Literal, Protocol
 import jax
 import jax.numpy as jnp
 from equinox import Module, field
+from jax import jit
 from jax.lax import collapse
 from jax.scipy.special import ndtr
 from jaxtyping import (
@@ -651,9 +652,9 @@ class Bart(Module):
         get_length = lambda x: x.shape[-1]
         assert get_length(x1) == get_length(x2)
 
-    @staticmethod
+    @classmethod
     def _process_error_variance_settings(
-        x_train, y_train, sigest, sigdf, sigquant, lamda
+        cls, x_train, y_train, sigest, sigdf, sigquant, lamda
     ) -> tuple[Float32[Array, ''] | None, ...]:
         """Return (lamda, sigest)."""
         if y_train.dtype == bool:
@@ -677,13 +678,7 @@ class Bart(Module):
             elif y_train.size <= x_train.shape[0]:
                 sigest2 = jnp.var(y_train)
             else:
-                x_centered = x_train.T - x_train.mean(axis=1)
-                y_centered = y_train - y_train.mean()
-                # centering is equivalent to adding an intercept column
-                _, chisq, rank, _ = jnp.linalg.lstsq(x_centered, y_centered)
-                chisq = chisq.squeeze(0)
-                dof = len(y_train) - rank
-                sigest2 = chisq / dof
+                sigest2 = cls._linear_regression(x_train, y_train)
             alpha = sigdf / 2
             invchi2 = invgamma.ppf(sigquant, alpha) / 2
             invchi2rid = invchi2 * sigdf
@@ -759,6 +754,20 @@ class Bart(Module):
 
         s0 = jnp.diag(sigdf * lamda_vec).astype(jnp.float32)
         return jnp.asarray(t0, dtype=jnp.float32), s0
+
+    @staticmethod
+    @jit
+    def _linear_regression(
+        x_train: Shaped[Array, 'p n'], y_train: Float32[Array, ' n']
+    ):
+        """Return the error variance estimated with OLS with intercept."""
+        x_centered = x_train.T - x_train.mean(axis=1)
+        y_centered = y_train - y_train.mean()
+        # centering is equivalent to adding an intercept column
+        _, chisq, rank, _ = jnp.linalg.lstsq(x_centered, y_centered)
+        chisq = chisq.squeeze(0)
+        dof = len(y_train) - rank
+        return chisq / dof
 
     @staticmethod
     def _check_type_settings(y_train, type, w):  # noqa: A002

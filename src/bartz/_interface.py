@@ -352,19 +352,6 @@ class Bart(Module):
             )
         )
 
-        if y_train.ndim == 2:  # Multivariate standardization
-            error_cov_df, error_cov_scale = self._process_error_variance_settings_mv(
-                x_train, y_train, sigest, sigdf, sigquant, lamda
-            )
-            leaf_prior_cov_inv = (1.0 / (sigma_mu**2)) * jnp.eye(
-                y_train.shape[0], dtype=jnp.float32
-            )
-        else:  # Univariate standardization
-            lamda, sigest = self._process_error_variance_settings(
-                x_train, y_train, sigest, sigdf, sigquant, lamda
-            )
-            leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu))
-
         # determine splits
         splits, max_split = self._determine_splits(x_train, usequants, numcut, xinfo)
         x_train = self._bin_predictors(x_train, splits)
@@ -691,7 +678,7 @@ class Bart(Module):
         sigest: Float32[Array, ' k'] | None,
         sigdf: float,
         sigquant: float,
-        lamda_vec: float | Float32[Array, ' k'] | None,
+        lamda: float | Float32[Array, ' k'] | None,
         *,
         t0: float | None = None,
         s0: Float32[Array, 'k k'] | None = None,
@@ -717,8 +704,8 @@ class Bart(Module):
             return jnp.asarray(t0, dtype=jnp.float32), s0
 
         # if t0 and s0 are none, use a diagonal construction
-        if lamda_vec is not None:
-            lamda_vec = jnp.atleast_1d(lamda_vec).astype(jnp.float32)
+        if lamda is not None:
+            lamda = jnp.atleast_1d(lamda).astype(jnp.float32)
         else:
             if sigest is not None:
                 sigest = jnp.asarray(sigest, dtype=jnp.float32)
@@ -748,11 +735,9 @@ class Bart(Module):
             alpha = sigdf / 2.0
             invchi2 = invgamma.ppf(sigquant, alpha) / 2.0
             invchi2rid = invchi2 * sigdf
-            lamda_vec = jnp.atleast_1d(sigest2_vec / invchi2rid).astype(
-                jnp.float32
-            )  # (k,)
+            lamda = jnp.atleast_1d(sigest2_vec / invchi2rid).astype(jnp.float32)  # (k,)
 
-        s0 = jnp.diag(sigdf * lamda_vec).astype(jnp.float32)
+        s0 = jnp.diag(sigdf * lamda).astype(jnp.float32)
         return jnp.asarray(t0, dtype=jnp.float32), s0
 
     @staticmethod

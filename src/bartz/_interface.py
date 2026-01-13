@@ -27,14 +27,15 @@
 import math
 from collections.abc import Sequence
 from functools import cached_property
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypedDict
 
 import jax
 import jax.numpy as jnp
 from equinox import Module, field
-from jax import jit
+from jax import Device, device_put, jit, make_mesh
 from jax.lax import collapse
 from jax.scipy.special import ndtr
+from jax.sharding import AxisType, Mesh
 from jaxtyping import (
     Array,
     Bool,
@@ -233,8 +234,26 @@ class Bart(Module):
         line. Set to `None` to disable logging. ^C interrupts the MCMC only
         every `printevery` iterations, so with logging disabled it's impossible
         to kill the MCMC conveniently.
-    mc_cores
-        The number of independent MCMC chains.
+    num_chains
+        The number of independent Markov chains to run. By default only one
+        chain is run.
+
+        The difference between not specifying `num_chains` and setting it to 1
+        is that in the latter case in the object attributes and some methods
+        there will be an explicit chain axis of size 1.
+    num_chain_devices
+        The number of devices to spread the chains across. Must be a divisor of
+        `num_chains`. Each device will run a fraction of the chains.
+    num_data_devices
+        The number of devices to split datapoints across. Must be a divisor of
+        `n`. This is useful only with very high `n`, about > 1000_000.
+
+        If both num_chain_devices and num_data_devices are specified, the total
+        number of devices used is the product of the two.
+    devices
+        One or more devices used to run the MCMC on. If not specified, the
+        computation will follow the placement of the input arrays. If a list of
+        devices, this argument can be longer than the number of devices needed.
     seed
         The seed for the random number generator.
     maxdepth
@@ -270,7 +289,6 @@ class Bart(Module):
     _splits: Real[Array, 'p max_num_splits']
     _x_train_fmt: Any = field(static=True)
 
-    ndpost: int = field(static=True)
     offset: Float32[Array, '']
     sigest: Float32[Array, ''] | None = None
     yhat_test: Float32[Array, 'ndpost m'] | None = None
@@ -306,7 +324,10 @@ class Bart(Module):
         nskip: int = 100,
         keepevery: int | None = None,
         printevery: int | None = 100,
-        mc_cores: int = 2,
+        num_chains: int | None = None,
+        num_chain_devices: int | None = None,
+        num_data_devices: int | None = None,
+        devices: Device | Sequence[Device] | None = None,
         seed: int | Key[Array, ''] = 0,
         maxdepth: int = 6,
         init_kw: dict | None = None,
@@ -366,7 +387,10 @@ class Bart(Module):
             a,
             b,
             rho,
-            mc_cores,
+            num_chains,
+            num_chain_devices,
+            num_data_devices,
+            devices,
             sparse,
             nskip,
         )
@@ -376,7 +400,6 @@ class Bart(Module):
 
         # set public attributes
         self.offset = final_state.offset  # from the state because of buffer donation
-        self.ndpost = main_trace.grow_prop_count.size
         self.sigest = sigest
 
         # set private attributes
@@ -389,6 +412,15 @@ class Bart(Module):
         # predict at test points
         if x_test is not None:
             self.yhat_test = self.predict(x_test)
+
+    @property
+    def ndpost(self):
+        """The total number of posterior samples after burn-in across all chains.
+
+        May be larger than the initialization argument `ndpost` if it was not
+        divisible by the number of chains.
+        """
+        return self._main_trace.grow_prop_count.size
 
     @cached_property
     def prob_test(self) -> Float32[Array, 'ndpost m'] | None:
@@ -751,7 +783,10 @@ class Bart(Module):
         a: FloatLike | None,
         b: FloatLike | None,
         rho: FloatLike | None,
-        mc_cores: int,
+        num_chains: int | None,
+        num_chain_devices: int | None,
+        num_data_devices: int | None,
+        devices: Device | Sequence[Device] | None,
         sparse: bool,
         nskip: int,
     ):
@@ -766,6 +801,11 @@ class Bart(Module):
             # inverse gamma prior: alpha = df / 2, beta = scale / 2
             error_cov_df = sigdf
             error_cov_scale = lamda * sigdf
+
+        # process device settings
+        device_kw, device = process_device_settings(
+            y_train, num_chains, num_chain_devices, num_data_devices, devices
+        )
 
         kw: dict = dict(
             X=x_train,
@@ -786,7 +826,7 @@ class Bart(Module):
             b=b,
             rho=rho,
             sparse_on_at=nskip // 2 if sparse else None,
-            num_chains=None if mc_cores == 1 else mc_cores,
+            **device_kw,
         )
 
         if rm_const is None:
@@ -803,7 +843,13 @@ class Bart(Module):
         if init_kw is not None:
             kw.update(init_kw)
 
-        return mcmcstep.init(**kw)
+        state = mcmcstep.init(**kw)
+
+        # put state on device if requested explicitly by the user
+        if device is not None:
+            state = device_put(state, device, donate=True)
+
+        return state
 
     @classmethod
     def _run_mcmc(
@@ -845,3 +891,70 @@ class Bart(Module):
         """Evaluate trees on already quantized `x`."""
         out = evaluate_trace(x, self._main_trace)
         return collapse(out, 0, -1)
+
+
+class DeviceKwArgs(TypedDict):
+    num_chains: int | None
+    mesh: Mesh | None
+    target_platform: Literal['cpu', 'gpu'] | None
+
+
+def process_device_settings(
+    y_train: Array,
+    num_chains: int | None,
+    num_chain_devices: int | None,
+    num_data_devices: int | None,
+    devices: Device | Sequence[Device] | None,
+) -> tuple[DeviceKwArgs, Device | None]:
+    """Return the arguments for `mcmcstep.init` related to devices, and an optional device where to put the state."""
+    # determine devices
+    if devices is not None:
+        if not hasattr(devices, '__len__'):
+            devices = (devices,)
+        device = devices[0]
+        platform = device.platform
+    elif hasattr(y_train, 'platform'):
+        platform = y_train.platform()
+        device = None
+        # set device=None because if the devices were not specified explicitly
+        # we may be in the case where computation will follow data placement,
+        # do not disturb jax as the user may be playing with vmap, jit, reshard...
+        devices = jax.devices(platform)
+    else:
+        msg = 'not possible to infer device from `y_train`, please set `devices`'
+        raise ValueError(msg)
+
+    # create mesh
+    if num_chain_devices is None and num_data_devices is None:
+        mesh = None
+    else:
+        mesh = dict()
+        if num_chain_devices is not None:
+            mesh.update(chains=num_chain_devices)
+        if num_data_devices is not None:
+            mesh.update(data=num_data_devices)
+        mesh = make_mesh(
+            axis_shapes=tuple(mesh.values()),
+            axis_names=tuple(mesh),
+            axis_types=(AxisType.Auto,) * len(mesh),
+            devices=devices,
+        )
+        device = None
+        # set device=None because `mcmcstep.init` will `device_put` with the
+        # mesh already, we don't want to undo its work
+
+    # prepare arguments to `init`
+    settings = DeviceKwArgs(
+        num_chains=num_chains,
+        mesh=mesh,
+        target_platform=None
+        if mesh is not None or hasattr(y_train, 'platform')
+        else platform,
+        # here we don't take into account the case where the user has set both
+        # batch sizes; since the user has to be playing with `init_kw` to do
+        # that, we'll let `init` throw the error and the user set
+        # `target_platform` themselves so they have a clearer idea how the
+        # thing works.
+    )
+
+    return settings, device

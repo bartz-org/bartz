@@ -41,11 +41,11 @@ import jax
 import numpy
 import polars as pl
 import pytest
-from jax import debug_nans, lax, make_mesh, random, vmap
+from jax import debug_nans, lax, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logit, ndtr
-from jax.sharding import AxisType, SingleDeviceSharding
+from jax.sharding import SingleDeviceSharding
 from jax.tree import map_with_path
 from jax.tree_util import KeyPath
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, UInt
@@ -170,17 +170,16 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 printevery=50,
                 usequants=False,
                 numcut=256,  # > 255 to use uint16 for X and split_trees
-                maxdepth=9,  # > 8 to use uint16 for leaf_indices
                 mc_cores=1,
                 seed=keys.pop(),
-                init_kw=dict(
-                    resid_batch_size=None,
-                    count_batch_size=None,
-                    save_ratios=True,
-                    mesh=make_mesh(
-                        (min(2, get_device_count()),),
-                        ('data',),
-                        axis_types=(AxisType.Auto,),
+                bart_kwargs=dict(
+                    maxdepth=9,  # > 8 to use uint16 for leaf_indices
+                    num_data_devices=min(2, get_device_count()),
+                    init_kw=dict(
+                        resid_batch_size=None,
+                        count_batch_size=None,
+                        target_platform=None,
+                        save_ratios=True,
                     ),
                 ),
             )
@@ -205,15 +204,19 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 # usequants=True with binary X to check the case in which the
                 # splits are less than the statically known maximum
                 numcut=255,
-                maxdepth=6,
                 seed=keys.pop(),
                 mc_cores=2,  # keep this 2 on binary so continuous gets 1 and 2
-                init_kw=dict(
-                    resid_batch_size=16,
-                    count_batch_size=16,
-                    save_ratios=False,
-                    min_points_per_decision_node=None,
-                    min_points_per_leaf=None,
+                bart_kwargs=dict(
+                    maxdepth=6,
+                    num_chain_devices=None,
+                    init_kw=dict(
+                        resid_batch_size=16,
+                        count_batch_size=16,
+                        target_platform=None,
+                        save_ratios=False,
+                        min_points_per_decision_node=None,
+                        min_points_per_leaf=None,
+                    ),
                 ),
             )
 
@@ -236,18 +239,11 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 printevery=50,
                 usequants=True,
                 numcut=10,
-                maxdepth=8,  # 8 to check if leaf_indices changes type too soon
                 seed=keys.pop(),
                 mc_cores=2,
-                init_kw=dict(
-                    resid_batch_size=None,
-                    count_batch_size=None,
-                    save_ratios=True,
-                    mesh=make_mesh(
-                        (min(2, get_device_count()),),
-                        ('chains',),
-                        axis_types=(AxisType.Auto,),
-                    ),
+                bart_kwargs=dict(
+                    maxdepth=8,  # 8 to check if leaf_indices changes type too soon
+                    init_kw=dict(save_ratios=True),
                 ),
             )
 
@@ -288,7 +284,9 @@ class TestWithCachedBart:
             mc_cores=nchains,
         )
         # R BART can't change the min_points_per_leaf setting
-        kw['init_kw'].update(min_points_per_decision_node=10, min_points_per_leaf=5)
+        kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
+            min_points_per_decision_node=10, min_points_per_leaf=5
+        )
 
         bart = mc_gbart(**kw)
 
@@ -340,7 +338,7 @@ class TestWithCachedBart:
     def kw_bartz_to_BART3(self, key: Key[Array, ''], kw: dict, bart: mc_gbart) -> dict:
         """Convert bartz keyword arguments to R BART3 keyword arguments."""
         kw_BART: dict = dict(**kw, rm_const=False)
-        kw_BART.pop('init_kw')
+        kw_BART.pop('bart_kwargs')
         kw_BART.pop('maxdepth', None)
         for arg in 'w', 'printevery':
             if arg in kw_BART and kw_BART[arg] is None:
@@ -550,7 +548,9 @@ def test_sequential_guarantee(kw: dict, subtests: SubTests):
     kw2 = kw.copy()
     kw2['seed'] = random.clone(kw2['seed'])
     if kw2.get('sparse', False):
-        kw2.setdefault('init_kw', {}).setdefault('sparse_on_at', kw2['nskip'] // 2)
+        kw2.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).setdefault(
+            'sparse_on_at', kw2['nskip'] // 2
+        )
     delta = 1
     kw2['nskip'] -= delta
     kw2['ndpost'] += delta * kw2['mc_cores']
@@ -785,12 +785,18 @@ def test_scale_shift(kw):
 
 def test_min_points_per_decision_node(kw):
     """Check that the limit of at least 10 datapoints per decision node is respected."""
-    kw['init_kw'].update(min_points_per_leaf=None)
+    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
+        min_points_per_leaf=None
+    )
     bart = mc_gbart(**kw)
     distr = bart.points_per_decision_node_distr()
     distr_marg = distr.sum(axis=(0, 1))
 
-    min_points = kw['init_kw'].get('min_points_per_decision_node', 10)
+    min_points = (
+        kw.get('bart_kwargs', {})
+        .get('init_kw', {})
+        .get('min_points_per_decision_node', 10)
+    )
 
     if min_points is None:
         assert distr_marg[9] > 0
@@ -801,12 +807,16 @@ def test_min_points_per_decision_node(kw):
 
 def test_min_points_per_leaf(kw):
     """Check that the limit of at least 5 datapoints per leaf is respected."""
-    kw['init_kw'].update(min_points_per_decision_node=None)
+    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
+        min_points_per_decision_node=None
+    )
     bart = mc_gbart(**kw)
     distr = bart.points_per_leaf_distr()
     distr_marg = distr.sum(axis=(0, 1))
 
-    min_points = kw['init_kw'].get('min_points_per_leaf', 5)
+    min_points = (
+        kw.get('bart_kwargs', {}).get('init_kw', {}).get('min_points_per_leaf', 5)
+    )
 
     if min_points is None:
         assert distr_marg[4] > 0
@@ -867,9 +877,7 @@ def test_one_datapoint(kw):
         kw.update(xinfo=xinfo)
 
     # disable data sharding
-    mesh = kw.get('init_kw', {}).get('mesh', None)
-    if mesh is not None and 'data' in mesh.axis_names:
-        kw['init_kw']['mesh'] = None
+    kw.setdefault('bart_kwargs', {}).update(num_data_devices=None)
 
     bart = mc_gbart(**kw)
     if kw['y_train'].dtype == bool:
@@ -904,14 +912,16 @@ def test_few_datapoints(kw):
     points per decision node requirement, neither the 5 datapoints per leaf
     constraint.
     """
-    kw.setdefault('init_kw', {}).update(
+    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
         min_points_per_decision_node=10, min_points_per_leaf=None
     )
     kw = set_num_datapoints(kw, 8)  # < 10 = 2 * 5, multiple of 2 shards
     bart = mc_gbart(**kw)
     assert jnp.all(bart.yhat_train == bart.yhat_train[:, :1])
 
-    kw['init_kw'].update(min_points_per_decision_node=None, min_points_per_leaf=5)
+    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
+        min_points_per_decision_node=None, min_points_per_leaf=5
+    )
     kw['seed'] = random.clone(kw['seed'])
     bart = mc_gbart(**kw)
     assert jnp.all(bart.yhat_train == bart.yhat_train[:, :1])
@@ -978,7 +988,9 @@ def test_prior(keys, p, nsplits):
         xinfo=xinfo,
         seed=keys.pop(),
         mc_cores=1,
-        init_kw=dict(min_points_per_decision_node=None, min_points_per_leaf=None),
+        bart_kwargs=dict(
+            init_kw=dict(min_points_per_decision_node=None, min_points_per_leaf=None)
+        ),
         # unset limits on datapoints per node because there's no data
     )
     bart = mc_gbart(**kw)
@@ -1203,6 +1215,14 @@ def test_jit(kw):
     # later in this test
     kw.update(rm_const=None)
 
+    # set device as under jit it can not be inferred from the array
+    platform = kw['y_train'].platform()
+    kw.setdefault('bart_kwargs', {}).update(devices=jax.devices(platform))
+
+    # negate mc_cores to silence error about device not possible to infer
+    kw.update(mc_cores=-kw['mc_cores'])
+
+    # remove arguments passed through the jit call
     X = kw.pop('x_train')
     y = kw.pop('y_train')
     w = kw.pop('w', None)
@@ -1365,7 +1385,7 @@ def test_automatic_integer_types(kw):
     def select_type(cond):
         return jnp.uint8 if cond else jnp.uint16
 
-    leaf_indices_type = select_type(kw['maxdepth'] <= 8)
+    leaf_indices_type = select_type(kw['bart_kwargs']['maxdepth'] <= 8)
     split_trees_type = X_type = select_type(kw['numcut'] <= 255)
     var_trees_type = select_type(kw['x_train'].shape[0] <= 256)
 
@@ -1443,9 +1463,26 @@ class TestProfile:
 
 def test_sharding(kw: dict):
     """Check that chains live on their own devices throughout the interface."""
-    mesh = kw.get('init_kw', {}).get('mesh', None)
+    # determine whether we expect sharding to be set up based on the arguments
+    bart_kwargs = kw.get('bart_kwargs', {})
+    num_chain_devices = bart_kwargs.get('num_chain_devices')
+    num_data_devices = bart_kwargs.get('num_data_devices')
+    expect_sharded = (
+        num_chain_devices is not None
+        or num_data_devices is not None
+        or (
+            kw.get('mc_cores', 2) > 1
+            and get_device_count() > 1
+            and get_default_device().platform == 'cpu'
+            and 'num_chain_devices' not in bart_kwargs
+        )
+    )
 
     bart = mc_gbart(**kw)
+
+    # check the mesh is set up iff we expect sharding
+    mesh = bart._mcmc_state.config.mesh
+    assert expect_sharded == (mesh is not None)
 
     check = partial(check_sharding, mesh=mesh)
     check(bart._mcmc_state)

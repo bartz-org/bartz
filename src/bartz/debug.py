@@ -38,7 +38,8 @@ from jax import numpy as jnp
 from jax.tree_util import tree_map
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
-from bartz.BART import FloatLike, gbart, mc_gbart
+from bartz.BART import gbart, mc_gbart
+from bartz.BART._gbart import FloatLike
 from bartz.grove import (
     TreeHeaps,
     evaluate_forest,

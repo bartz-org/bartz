@@ -30,13 +30,10 @@ from dataclasses import replace
 from functools import partial
 from inspect import signature
 from io import StringIO
-from itertools import product
 from re import escape, match
 from types import MappingProxyType
 from typing import Any, Literal
 
-import jax
-from asv_runner.benchmarks.mark import skip_for_params
 from equinox import error_if
 from jax import (
     block_until_ready,
@@ -226,77 +223,6 @@ Mode = Literal['compile', 'run']
 Cache = Literal['cold', 'warm']
 
 
-class TimeRunMcmc:
-    """Timings of `run_mcmc`."""
-
-    # asv config
-    params: tuple[tuple[Mode, ...], tuple[int, ...], tuple[Cache, ...]] = (
-        ('compile', 'run'),
-        (0, NITERS),
-        ('cold', 'warm'),
-    )
-    param_names = ('mode', 'niters', 'cache')
-    warmup_time = 0.0
-    number = 1
-
-    def setup(self, mode: Mode, niters: int, cache: Cache):
-        """Prepare the arguments, compile the function, and run to warm-up."""
-        self.kw = dict(
-            key=random.key(2025_04_25_15_57),
-            bart=simple_init(P, N, NTREE),
-            n_save=niters // 2,
-            n_burn=niters // 2,
-            n_skip=1,
-            callback=lambda **_: None,
-        )
-
-        # catch bug and skip if found
-        try:
-            array_kw = {k: v for k, v in self.kw.items() if isinstance(v, jnp.ndarray)}
-            nonarray_kw = {
-                k: v for k, v in self.kw.items() if not isinstance(v, jnp.ndarray)
-            }
-            partial_run_mcmc = partial(run_mcmc, **nonarray_kw)
-            eval_shape(partial_run_mcmc, **array_kw)
-        except ZeroDivisionError:
-            if niters:
-                raise
-            else:
-                msg = 'skipping due to division by zero bug with zero iterations'
-                raise NotImplementedError(msg) from None
-
-        # decide how much to cold-start
-        match cache:
-            case 'cold':
-                clear_caches()
-            case 'warm':
-                # prepare copies of the args because of buffer donation
-                key = jnp.copy(self.kw['key'])
-                bart = tree_map(jnp.copy, self.kw['bart'])
-                self.time_run_mcmc(mode)
-                # put copies in place of donated buffers
-                self.kw.update(key=key, bart=bart)
-
-    # skip compile with 0 iters bc in past versions 0 iters had a noop code path
-    @skip_for_params(list(product(['compile'], [0], params[2])))
-    def time_run_mcmc(self, mode: Mode, *_):
-        """Time running or compiling the function."""
-        match mode:
-            case 'compile':
-                # re-wrap and jit the function in the benchmark case because otherwise
-                # the compiled function gets cached even if I call `compile` explicitly
-                @partial(
-                    jit, static_argnames=('n_save', 'n_skip', 'n_burn', 'callback')
-                )
-                def f(**kw):
-                    return run_mcmc(**kw)
-
-                f.lower(**self.kw).compile()
-
-            case 'run':
-                block_until_ready(run_mcmc(**self.kw))
-
-
 class TimeStep:
     """Benchmarks of `mcmcstep.step`."""
 
@@ -358,9 +284,7 @@ class AutoParamNames:
         sig = signature(method)
         params = list(sig.parameters)
         assert params[0] == 'self'
-        param_names = tuple(params[1:])
-        assert not hasattr(cls, 'param_names') or cls.param_names == param_names
-        cls.param_names = param_names
+        cls.param_names = tuple(params[1:])
 
 
 class BaseGbart(AutoParamNames):
@@ -459,7 +383,111 @@ class GbartCompile(BaseGbart):
     params = ((0, NITERS), (1, 6), ('warm', 'cold'))
 
 
-class TimeRunMcmcVsTraceLength:
+class BaseRunMcmc(AutoParamNames):
+    """Base class to benchmark `run_mcmc`."""
+
+    # asv config
+    params = ((),)  # empty to make asv skip this class
+    warmup_time = 0.0
+    number = 1
+
+    # other config
+    kill_canary = 'kill-canary happy-chinese-voiceover'
+
+    def setup(
+        self,
+        kill_niters: int | None = None,
+        mode: Mode = 'run',
+        cache: Cache = 'warm',
+        kwargs: Mapping[str, Any] = MappingProxyType({}),
+    ):
+        """Prepare the arguments, compile the function, and run to warm-up."""
+
+        def kill_callback(*, bart, i_total, **_):
+            # error_cov_inv (or sigma2 in old versions) is one of the last things
+            # modified in the mcmc loop, so using it as token ensures ordering,
+            # also it does not have n in the dimensionality
+            token_attr = 'sigma2' if hasattr(bart, 'sigma2') else 'error_cov_inv'
+            stop = i_total + 1 == kill_niters  # i_total is updated after callback
+            token = getattr(bart, token_attr)
+            token = error_if(token, stop, self.kill_canary)
+            bart = replace(bart, **{token_attr: token})
+            return bart, None
+
+        kw: dict = dict(
+            key=random.key(2025_04_25_15_57),
+            bart=simple_init(P, 0, NTREE),
+            n_save=NITERS,
+            n_burn=0,
+            n_skip=1,
+            callback=(lambda **_: None) if kill_niters is None else kill_callback,
+        )
+        kw.update(kwargs)
+
+        # catch bug and skip if found
+        try:
+            array_kw = {k: v for k, v in kw.items() if isinstance(v, jnp.ndarray)}
+            nonarray_kw = {
+                k: v for k, v in kw.items() if not isinstance(v, jnp.ndarray)
+            }
+            partial_run_mcmc = partial(run_mcmc, **nonarray_kw)
+            eval_shape(partial_run_mcmc, **array_kw)
+
+        except ZeroDivisionError:
+            if kw['n_save'] + kw['n_burn']:
+                raise
+            else:
+                msg = 'skipping due to division by zero bug with zero iterations'
+                raise NotImplementedError(msg) from None
+
+        # prepare task to run in benchmark
+        match mode:
+            case 'compile':
+                f = jit(
+                    run_mcmc, static_argnames=('n_save', 'n_skip', 'n_burn', 'callback')
+                )
+
+                def task():
+                    f.clear_cache()
+                    f.lower(**kw).compile()
+            case 'run':
+
+                def task():
+                    block_until_ready(run_mcmc(**kw))
+            case _:
+                raise KeyError(mode)
+        self.task = task
+        self.kill_niters = kill_niters
+
+        # decide how much to cold-start
+        match cache:
+            case 'cold':
+                clear_caches()
+            case 'warm':
+                # prepare copies of the args because of buffer donation
+                key = jnp.copy(kw['key'])
+                bart = tree_map(jnp.copy, kw['bart'])
+                self.time_run_mcmc()
+                # put copies in place of donated buffers
+                kw.update(key=key, bart=bart)
+            case _:
+                raise KeyError(cache)
+
+    def time_run_mcmc(self, *_):
+        """Time running or compiling the function."""
+        try:
+            self.task()
+        except JaxRuntimeError as e:
+            is_expected = self.kill_canary in str(e)
+            if not is_expected:
+                raise
+        else:
+            if self.kill_niters is not None:
+                msg = 'expected JaxRuntimeError with canary not raised'
+                raise RuntimeError(msg)
+
+
+class RunMcmcVsTraceLength(BaseRunMcmc):
     """Timings of `run_mcmc` parametrized by length of the trace to save.
 
     This benchmark is intended to pin a bug where the whole trace is duplicated
@@ -467,54 +495,22 @@ class TimeRunMcmcVsTraceLength:
     """
 
     # asv config
-    params: tuple[tuple[int, ...]] = ((2**6, 2**8, 2**10, 2**12, 2**14, 2**16),)
-    param_names = ('n_save',)
-    warmup_time = 0.0
-    number = 1
+    params = ((2**6, 2**8, 2**10, 2**12, 2**14, 2**16),)
 
-    # other config
-    canary = 'canary happy-chinese-voiceover'
+    def setup(self, n_save: int):  # ty:ignore[invalid-method-override]
+        """Set up to kill after a certain number of iterations."""
+        kill_niters = min(self.params[0])
+        super().setup(kill_niters, kwargs=dict(n_save=n_save))
 
-    def setup(self, n_save: int):
+
+class RunMcmc(BaseRunMcmc):
+    """Timings of `run_mcmc`."""
+
+    # asv config
+    params = (('compile', 'run'), (0, NITERS), ('cold', 'warm'))
+
+    def setup(self, mode: Mode, niters: int, cache: Cache):  # ty:ignore[invalid-method-override]
         """Prepare the arguments, compile the function, and run to warm-up."""
-        n_iters = min(self.params[0])
-
-        def callback(*, bart, i_total, **_):
-            # error_cov_inv (or sigma2 in old versions) is one of the last things
-            # modified in the mcmc loop, so using it as token ensures ordering,
-            # also it does not have n in the dimensionality
-            if hasattr(bart, 'sigma2'):
-                token = bart.sigma2
-            else:
-                token = bart.error_cov_inv
-            stop = i_total + 1 == n_iters  # i_total is updated after callback
-            token = error_if(token, stop, self.canary)
-            jax.debug.print('{}', token)  # prevent dead code elimination
-
-        self.kw: dict = dict(
-            key=random.key(2025_04_25_15_57),
-            bart=simple_init(P, 0, NTREE),
-            n_save=n_save,
-            n_burn=0,
-            n_skip=1,
-            callback=callback,
+        super().setup(
+            None, mode, cache, dict(n_save=niters // 2, n_burn=(niters - niters // 2))
         )
-
-        # prepare copies of the args because of buffer donation
-        key = jnp.copy(self.kw['key'])
-        bart = tree_map(jnp.copy, self.kw['bart'])
-        self.time_run_mcmc()
-        # put copies in place of donated buffers
-        self.kw.update(key=key, bart=bart)
-
-    def time_run_mcmc(self, *_):
-        """Time running the function."""
-        try:
-            run_mcmc(**self.kw)
-        except JaxRuntimeError as e:
-            is_expected = self.canary in str(e)
-            if not is_expected:
-                raise
-        else:
-            msg = 'expected JaxRuntimeError with canary not raised'
-            raise RuntimeError(msg)

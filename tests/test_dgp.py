@@ -37,6 +37,11 @@ from scipy.stats import norm
 
 from bartz.jaxext import split
 from bartz.testing import DGP
+from bartz.testing._dgp import (
+    generate_partition,
+    interaction_pattern,
+    partitioned_interaction_pattern,
+)
 
 # Test parameters
 ALPHA = 5e-7  # probability of false positive
@@ -372,12 +377,12 @@ def test_rows_identical(dgps_lambda_one):
 
 
 class TestInteractionPattern:
-    """Test the interaction pattern method."""
+    """Test the interaction_pattern function."""
 
     @pytest.fixture
     def pattern(self) -> Bool[Array, 'p p']:
         """Return the predictor interaction pattern."""
-        return DGP._interaction_pattern(p=10, q=4)
+        return interaction_pattern(p=10, q=4)
 
     def test_symmetry(self, pattern):
         """Test that interaction pattern is symmetric."""
@@ -394,13 +399,13 @@ class TestInteractionPattern:
 
 
 class TestPartitionedInteractionPattern:
-    """Test the partitioned interaction pattern method."""
+    """Test the partitioned_interaction_pattern function."""
 
     @pytest.fixture
     def partition(self, keys: split) -> Bool[Array, 'k p']:
         """Generate a partition of predictors."""
         p, k = 20, 3
-        return DGP._generate_partition(keys.pop(), p=p, k=k)
+        return generate_partition(keys.pop(), p=p, k=k)
 
     @pytest.fixture
     def q(self) -> int:
@@ -410,7 +415,7 @@ class TestPartitionedInteractionPattern:
     @pytest.fixture
     def pattern(self, partition: Bool[Array, 'k p'], q: int) -> Bool[Array, 'k p p']:
         """Generate a multivariate interaction pattern that respects `partition`."""
-        return DGP._partitioned_interaction_pattern(partition, q=q)
+        return partitioned_interaction_pattern(partition, q=q)
 
     def test_respects_partition(self, partition, pattern):
         """Test that pattern only has True values within partition blocks."""

@@ -33,6 +33,203 @@ from jaxtyping import Array, Bool, Float, Int, Integer, Key
 from bartz.jaxext import split
 
 
+def generate_x(key: Key[Array, ''], n: int, p: int) -> Float[Array, 'p n']:
+    """Generate predictors with mean 0 and variance 1.
+
+    x_rj ~iid U(-√3, √3)
+    """
+    return random.uniform(key, (p, n), minval=-jnp.sqrt(3.0), maxval=jnp.sqrt(3.0))
+
+
+def generate_partition(key: Key[Array, ''], p: int, k: int) -> Bool[Array, 'k p']:
+    """Partition x components amongst y components.
+
+    Each row i has either p // k or p // k + 1 non-zero entries.
+    """
+    keys = split(key)
+    indices: Int[Array, 'p'] = jnp.linspace(0, k, p, endpoint=False)
+    indices = jnp.trunc(indices).astype(jnp.int32)
+    indices = random.permutation(keys.pop(), indices)
+    assignments: Int[Array, 'k'] = random.permutation(keys.pop(), k)
+    return indices == assignments[:, None]
+
+
+def generate_beta_shared(
+    key: Key[Array, ''], p: int, sigma2_lin: Float[Array, '']
+) -> Float[Array, ' p']:
+    """Generate shared linear coefficients for the lambda=1 case."""
+    sigma2_beta = sigma2_lin / p
+    return random.normal(key, (p,)) * jnp.sqrt(sigma2_beta)
+
+
+def generate_beta_separate(
+    key: Key[Array, ''], partition: Bool[Array, 'k p'], sigma2_lin: Float[Array, '']
+) -> Float[Array, 'k p']:
+    """Generate separate linear coefficients for the lambda=0 case."""
+    k, p = partition.shape
+    beta_separate: Float[Array, 'k p'] = random.normal(key, (k, p))
+    sigma2_beta = sigma2_lin / (p / k)
+    return jnp.where(partition, beta_separate, 0.0) * jnp.sqrt(sigma2_beta)
+
+
+def compute_linear_mean_shared(
+    beta_shared: Float[Array, ' p'], x: Float[Array, 'p n']
+) -> Float[Array, ' n']:
+    """mulin_ij = beta_r x_rj."""
+    return beta_shared @ x
+
+
+def compute_linear_mean_separate(
+    beta_separate: Float[Array, 'k p'], x: Float[Array, 'p n']
+) -> Float[Array, 'k n']:
+    """mulin_ij = beta_ir x_rj."""
+    return beta_separate @ x
+
+
+def combine_mulin(
+    mulin_shared: Float[Array, ' n'],
+    mulin_separate: Float[Array, 'k n'],
+    lam: Float[Array, ''],
+) -> Float[Array, 'k n']:
+    """Combine shared and separate linear means."""
+    return jnp.sqrt(1.0 - lam) * mulin_separate + jnp.sqrt(lam) * mulin_shared
+
+
+def interaction_pattern(p: int, q: Integer[Array, ''] | int) -> Bool[Array, 'p p']:
+    """Create a symmetric interaction pattern for q interactions per variable.
+
+    Parameters
+    ----------
+    p
+        Number of predictors
+    q
+        Number of interactions per predictor (must be even)
+
+    Returns
+    -------
+    Symmetric binary pattern of shape (p, p) where each row/col sums to q+1
+    """
+    q = error_if(q, q % 2 != 0, 'q must be even')
+    q = error_if(q, q >= p, 'q must be less than p')
+
+    i, j = jnp.ogrid[:p, :p]
+    dist = jnp.minimum(jnp.abs(i - j), p - jnp.abs(i - j))
+    return dist <= (q // 2)
+
+
+def generate_A_shared(
+    key: Key[Array, ''],
+    p: int,
+    q: Integer[Array, ''],
+    sigma2_quad: Float[Array, ''],
+    kurt_x: float,
+) -> Float[Array, 'p p']:
+    """Generate shared quadratic coefficients for the lambda=1 case."""
+    pattern: Bool[Array, 'p p'] = interaction_pattern(p, q)
+    A_shared: Float[Array, 'p p'] = random.normal(key, (p, p))
+    A_shared = jnp.where(pattern, A_shared, 0.0)
+    sigma2_A = sigma2_quad / (p * (kurt_x - 1 + q))
+    return A_shared * jnp.sqrt(sigma2_A)
+
+
+def partitioned_interaction_pattern(
+    partition: Bool[Array, 'k p'], q: Integer[Array, ''] | int
+) -> Bool[Array, 'k p p']:
+    """Create k interaction patterns that use disjoint variable sets.
+
+    Parameters
+    ----------
+    partition
+        Binary partition of shape (k, p) indicating variable assignments
+        to components
+    q
+        Number of interactions per predictor (must be even and < p // k)
+
+    Returns
+    -------
+    Interaction patterns of shape (k, p, p)
+    """
+    k, p = partition.shape
+    q = error_if(q, q % 2 != 0, 'q must be even')
+    q = error_if(q, q >= p // k, 'q must be less than p // k')
+
+    indices: Int[Array, 'k p'] = jnp.cumsum(partition, axis=1)
+    linear_dist: Int[Array, 'k p p'] = jnp.abs(
+        indices[:, :, None] - indices[:, None, :]
+    )
+    num_vars: Int[Array, 'k'] = jnp.max(indices, axis=1)
+    wrapped_dist: Int[Array, 'k p p'] = jnp.minimum(
+        linear_dist, num_vars[:, None, None] - linear_dist
+    )
+    interacts: Bool[Array, 'k p p'] = wrapped_dist <= (q // 2)
+    interacts = jnp.where(partition[:, :, None], interacts, False)
+    return jnp.where(partition[:, None, :], interacts, False)
+
+
+def generate_A_separate(
+    key: Key[Array, ''],
+    partition: Bool[Array, 'k p'],
+    q: Integer[Array, ''],
+    sigma2_quad: Float[Array, ''],
+    kurt_x: float,
+) -> Float[Array, 'k p p']:
+    """Generate separate quadratic coefficients for the lambda=0 case."""
+    k, p = partition.shape
+    A_separate: Float[Array, 'k p p'] = random.normal(key, (k, p, p))
+    component_pattern: Bool[Array, 'k p p'] = partitioned_interaction_pattern(
+        partition, q
+    )
+    A_separate = jnp.where(component_pattern, A_separate, 0.0)
+    sigma2_A = sigma2_quad / (p / k * (kurt_x - 1 + q))
+    return A_separate * jnp.sqrt(sigma2_A)
+
+
+def compute_muquad_shared(
+    A_shared: Float[Array, 'p p'], x: Float[Array, 'p n']
+) -> Float[Array, ' n']:
+    """Compute quadratic mean for the lambda=1 case.
+
+    muquad_ij = A_rs x_rj x_sj
+    Rows identical across components.
+    """
+    return jnp.einsum('rs,rj,sj->j', A_shared, x, x)
+
+
+def compute_muquad_separate(
+    A_separate: Float[Array, 'k p p'], x: Float[Array, 'p n']
+) -> Float[Array, 'k n']:
+    """Compute quadratic mean for the lambda=0 case.
+
+    muquad_ij = A_irs x_rj x_sj
+    Rows independent across components.
+    """
+    return jnp.einsum('irs,rj,sj->ij', A_separate, x, x)
+
+
+def combine_muquad(
+    muquad_shared: Float[Array, ' n'],
+    muquad_separate: Float[Array, 'k n'],
+    lam: Float[Array, ''],
+) -> Float[Array, 'k n']:
+    """Combine shared and separate quadratic means."""
+    return jnp.sqrt(1.0 - lam) * muquad_separate + jnp.sqrt(lam) * muquad_shared
+
+
+def compute_quadratic_mean(
+    A: Float[Array, 'k p p'], x: Float[Array, 'p n']
+) -> Float[Array, 'k n']:
+    """Compute quadratic part of the latent mean."""
+    return jnp.einsum('irs,rj,sj->ij', A, x, x)
+
+
+def generate_outcome(
+    key: Key[Array, ''], mu: Float[Array, 'k n'], sigma2_eps: Float[Array, '']
+) -> Float[Array, 'k n']:
+    """Generate noisy outcome."""
+    eps: Float[Array, 'k n'] = random.normal(key, mu.shape)
+    return mu + eps * jnp.sqrt(sigma2_eps)
+
+
 class Split(Module):
     x_train: Float[Array, 'p n_train']
     y_train: Float[Array, 'k n_train']
@@ -188,228 +385,23 @@ class DGP(Module):
         self.sigma2_quad = jnp.asarray(sigma2_quad)
         self.sigma2_eps = jnp.asarray(sigma2_eps)
 
-        self.x = self._generate_x(keys.pop(), n, p)
-        self.partition = self._generate_partition(keys.pop(), p, k)
-        self.beta_shared = self._generate_beta_shared(keys.pop(), p, self.sigma2_lin)
-        self.beta_separate = self._generate_beta_separate(
+        self.x = generate_x(keys.pop(), n, p)
+        self.partition = generate_partition(keys.pop(), p, k)
+        self.beta_shared = generate_beta_shared(keys.pop(), p, self.sigma2_lin)
+        self.beta_separate = generate_beta_separate(
             keys.pop(), self.partition, self.sigma2_lin
         )
-        self.mulin_shared = self._compute_linear_mean_shared(self.beta_shared, self.x)
-        self.mulin_separate = self._compute_linear_mean_separate(
-            self.beta_separate, self.x
-        )
-        self.mulin = self._combine_mulin(
-            self.mulin_shared, self.mulin_separate, self.lam
-        )
-        self.A_shared = self._generate_A_shared(
+        self.mulin_shared = compute_linear_mean_shared(self.beta_shared, self.x)
+        self.mulin_separate = compute_linear_mean_separate(self.beta_separate, self.x)
+        self.mulin = combine_mulin(self.mulin_shared, self.mulin_separate, self.lam)
+        self.A_shared = generate_A_shared(
             keys.pop(), p, self.q, self.sigma2_quad, self.kurt_x
         )
-        self.A_separate = self._generate_A_separate(
+        self.A_separate = generate_A_separate(
             keys.pop(), self.partition, self.q, self.sigma2_quad, self.kurt_x
         )
-        self.muquad_shared = self._compute_muquad_shared(self.A_shared, self.x)
-        self.muquad_separate = self._compute_muquad_separate(self.A_separate, self.x)
-        self.muquad = self._combine_muquad(
-            self.muquad_shared, self.muquad_separate, self.lam
-        )
+        self.muquad_shared = compute_muquad_shared(self.A_shared, self.x)
+        self.muquad_separate = compute_muquad_separate(self.A_separate, self.x)
+        self.muquad = combine_muquad(self.muquad_shared, self.muquad_separate, self.lam)
         self.mu = self.mulin + self.muquad
-        self.y = self._generate_outcome(keys.pop(), self.mu, self.sigma2_eps)
-
-    @staticmethod
-    def _generate_x(key: Key[Array, ''], n: int, p: int) -> Float[Array, 'p n']:
-        """Generate predictors with mean 0 and variance 1.
-
-        x_rj ~iid U(-√3, √3)
-        """
-        return random.uniform(key, (p, n), minval=-jnp.sqrt(3.0), maxval=jnp.sqrt(3.0))
-
-    @staticmethod
-    def _generate_partition(key: Key[Array, ''], p: int, k: int) -> Bool[Array, 'k p']:
-        """Partition x components amongst y components.
-
-        Each row i has either p // k or p // k + 1 non-zero entries.
-        """
-        keys = split(key)
-        indices: Int[Array, 'p'] = jnp.linspace(0, k, p, endpoint=False)
-        indices = jnp.trunc(indices).astype(jnp.int32)
-        indices = random.permutation(keys.pop(), indices)
-        assignments: Int[Array, 'k'] = random.permutation(keys.pop(), k)
-        return indices == assignments[:, None]
-
-    @staticmethod
-    def _generate_beta_shared(
-        key: Key[Array, ''], p: int, sigma2_lin: Float[Array, '']
-    ) -> Float[Array, ' p']:
-        """Generate shared linear coefficients for the lambda=1 case."""
-        sigma2_beta = sigma2_lin / p
-        return random.normal(key, (p,)) * jnp.sqrt(sigma2_beta)
-
-    @staticmethod
-    def _generate_beta_separate(
-        key: Key[Array, ''], partition: Bool[Array, 'k p'], sigma2_lin: Float[Array, '']
-    ) -> Float[Array, 'k p']:
-        """Generate separate linear coefficients for the lambda=0 case."""
-        k, p = partition.shape
-        beta_separate: Float[Array, 'k p'] = random.normal(key, (k, p))
-        sigma2_beta = sigma2_lin / (p / k)
-        return jnp.where(partition, beta_separate, 0.0) * jnp.sqrt(sigma2_beta)
-
-    @staticmethod
-    def _compute_linear_mean_shared(
-        beta_shared: Float[Array, ' p'], x: Float[Array, 'p n']
-    ) -> Float[Array, ' n']:
-        """mulin_ij = beta_r x_rj."""
-        return beta_shared @ x
-
-    @staticmethod
-    def _compute_linear_mean_separate(
-        beta_separate: Float[Array, 'k p'], x: Float[Array, 'p n']
-    ) -> Float[Array, 'k n']:
-        """mulin_ij = beta_ir x_rj."""
-        return beta_separate @ x
-
-    @staticmethod
-    def _combine_mulin(
-        mulin_shared: Float[Array, ' n'],
-        mulin_separate: Float[Array, 'k n'],
-        lam: Float[Array, ''],
-    ) -> Float[Array, 'k n']:
-        """Combine shared and separate linear means."""
-        return jnp.sqrt(1.0 - lam) * mulin_separate + jnp.sqrt(lam) * mulin_shared
-
-    @staticmethod
-    def _interaction_pattern(p: int, q: Integer[Array, ''] | int) -> Bool[Array, 'p p']:
-        """Create a symmetric interaction pattern for q interactions per variable.
-
-        Parameters
-        ----------
-        p
-            Number of predictors
-        q
-            Number of interactions per predictor (must be even)
-
-        Returns
-        -------
-        Symmetric binary pattern of shape (p, p) where each row/col sums to q+1
-        """
-        q = error_if(q, q % 2 != 0, 'q must be even')
-        q = error_if(q, q >= p, 'q must be less than p')
-
-        i, j = jnp.ogrid[:p, :p]
-        dist = jnp.minimum(jnp.abs(i - j), p - jnp.abs(i - j))
-        return dist <= (q // 2)
-
-    @classmethod
-    def _generate_A_shared(
-        cls,
-        key: Key[Array, ''],
-        p: int,
-        q: Integer[Array, ''],
-        sigma2_quad: Float[Array, ''],
-        kurt_x: float,
-    ) -> Float[Array, 'p p']:
-        """Generate shared quadratic coefficients for the lambda=1 case."""
-        interaction_pattern: Bool[Array, 'p p'] = cls._interaction_pattern(p, q)
-        A_shared: Float[Array, 'p p'] = random.normal(key, (p, p))
-        A_shared = jnp.where(interaction_pattern, A_shared, 0.0)
-        sigma2_A = sigma2_quad / (p * (kurt_x - 1 + q))
-        return A_shared * jnp.sqrt(sigma2_A)
-
-    @staticmethod
-    def _partitioned_interaction_pattern(
-        partition: Bool[Array, 'k p'], q: Integer[Array, ''] | int
-    ) -> Bool[Array, 'k p p']:
-        """Create k interaction patterns that use disjoint variable sets.
-
-        Parameters
-        ----------
-        partition
-            Binary partition of shape (k, p) indicating variable assignments
-            to components
-        q
-            Number of interactions per predictor (must be even and < p // k)
-
-        Returns
-        -------
-        Interaction patterns of shape (k, p, p)
-        """
-        k, p = partition.shape
-        q = error_if(q, q % 2 != 0, 'q must be even')
-        q = error_if(q, q >= p // k, 'q must be less than p // k')
-
-        indices: Int[Array, 'k p'] = jnp.cumsum(partition, axis=1)
-        linear_dist: Int[Array, 'k p p'] = jnp.abs(
-            indices[:, :, None] - indices[:, None, :]
-        )
-        num_vars: Int[Array, 'k'] = jnp.max(indices, axis=1)
-        wrapped_dist: Int[Array, 'k p p'] = jnp.minimum(
-            linear_dist, num_vars[:, None, None] - linear_dist
-        )
-        interacts: Bool[Array, 'k p p'] = wrapped_dist <= (q // 2)
-        interacts = jnp.where(partition[:, :, None], interacts, False)
-        return jnp.where(partition[:, None, :], interacts, False)
-
-    @classmethod
-    def _generate_A_separate(
-        cls,
-        key: Key[Array, ''],
-        partition: Bool[Array, 'k p'],
-        q: Integer[Array, ''],
-        sigma2_quad: Float[Array, ''],
-        kurt_x: float,
-    ) -> Float[Array, 'k p p']:
-        """Generate separate quadratic coefficients for the lambda=0 case."""
-        k, p = partition.shape
-        A_separate: Float[Array, 'k p p'] = random.normal(key, (k, p, p))
-        component_pattern: Bool[Array, 'k p p'] = cls._partitioned_interaction_pattern(
-            partition, q
-        )
-        A_separate = jnp.where(component_pattern, A_separate, 0.0)
-        sigma2_A = sigma2_quad / (p / k * (kurt_x - 1 + q))
-        return A_separate * jnp.sqrt(sigma2_A)
-
-    @staticmethod
-    def _compute_muquad_shared(
-        A_shared: Float[Array, 'p p'], x: Float[Array, 'p n']
-    ) -> Float[Array, ' n']:
-        """Compute quadratic mean for the lambda=1 case.
-
-        muquad_ij = A_rs x_rj x_sj
-        Rows identical across components.
-        """
-        return jnp.einsum('rs,rj,sj->j', A_shared, x, x)
-
-    @staticmethod
-    def _compute_muquad_separate(
-        A_separate: Float[Array, 'k p p'], x: Float[Array, 'p n']
-    ) -> Float[Array, 'k n']:
-        """Compute quadratic mean for the lambda=0 case.
-
-        muquad_ij = A_irs x_rj x_sj
-        Rows independent across components.
-        """
-        return jnp.einsum('irs,rj,sj->ij', A_separate, x, x)
-
-    @staticmethod
-    def _combine_muquad(
-        muquad_shared: Float[Array, ' n'],
-        muquad_separate: Float[Array, 'k n'],
-        lam: Float[Array, ''],
-    ) -> Float[Array, 'k n']:
-        """Combine shared and separate quadratic means."""
-        return jnp.sqrt(1.0 - lam) * muquad_separate + jnp.sqrt(lam) * muquad_shared
-
-    @staticmethod
-    def _compute_quadratic_mean(
-        A: Float[Array, 'k p p'], x: Float[Array, 'p n']
-    ) -> Float[Array, 'k n']:
-        """Compute quadratic part of the latent mean."""
-        return jnp.einsum('irs,rj,sj->ij', A, x, x)
-
-    @staticmethod
-    def _generate_outcome(
-        key: Key[Array, ''], mu: Float[Array, 'k n'], sigma2_eps: Float[Array, '']
-    ) -> Float[Array, 'k n']:
-        """Generate noisy outcome."""
-        eps: Float[Array, 'k n'] = random.normal(key, mu.shape)
-        return mu + eps * jnp.sqrt(sigma2_eps)
+        self.y = generate_outcome(keys.pop(), self.mu, self.sigma2_eps)

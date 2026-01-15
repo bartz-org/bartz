@@ -24,6 +24,7 @@
 
 """Measure the speed of the MCMC and its interfaces."""
 
+from collections.abc import Mapping
 from contextlib import redirect_stdout
 from dataclasses import replace
 from functools import partial
@@ -31,7 +32,8 @@ from inspect import signature
 from io import StringIO
 from itertools import product
 from re import escape, match
-from typing import Literal
+from types import MappingProxyType
+from typing import Any, Literal
 
 import jax
 from asv_runner.benchmarks.mark import skip_for_params
@@ -348,26 +350,38 @@ class TimeStep:
                 block_until_ready(self.compiled_func(*self.args))
 
 
-class TimeGbart:
-    """Benchmarks of `BART.mc_gbart`."""
+class AutoParamNames:
+    """Superclass that automatically sets `param_names` on subclasses."""
+
+    def __init_subclass__(cls, **_):
+        method = cls.setup
+        sig = signature(method)
+        params = list(sig.parameters)
+        assert params[0] == 'self'
+        param_names = tuple(params[1:])
+        assert not hasattr(cls, 'param_names') or cls.param_names == param_names
+        cls.param_names = param_names
+
+
+class BaseGbart(AutoParamNames):
+    """Base class to benchmark `mc_gbart`."""
 
     # asv config
-    params: tuple[tuple[int, ...], tuple[Cache, ...], tuple[int, ...]] = (
-        (0, NITERS),
-        ('cold', 'warm'),
-        (1, 2, 8, 32),
-    )
-    param_names = ('niters', 'cache', 'nchains')
+    # the param list is empty in this class, this makes asv skip this class
+    # instead of considering it a benchmark to run
+    params = ((),)
     warmup_time = 0.0
     number = 1
 
-    def setup(self, niters: int, cache: Cache, nchains: int):
+    def setup(
+        self,
+        niters: int = NITERS,
+        nchains: int = 1,
+        cache: Cache = 'warm',
+        kwargs: Mapping[str, Any] = MappingProxyType({}),
+    ):
         """Prepare the arguments and run once to warm-up."""
         # check support for multiple chains
-        if (niters == 0 or cache == 'cold') and nchains > 1:
-            msg = 'skip multi-chain with 0 iterations or cold cache'
-            raise NotImplementedError(msg)
-
         sig = signature(gbart)
         support_multichain = 'mc_cores' in sig.parameters
         if nchains != 1 and not support_multichain:
@@ -394,12 +408,14 @@ class TimeGbart:
         self.kw = dict(
             x_train=dgp.x,
             y_train=dgp.y.squeeze(0),
+            ntree=NTREE,
             nskip=niters // 2,
             ndpost=(niters - niters // 2) * nchains,
             seed=keys.pop(),
         )
         if support_multichain:
             self.kw.update(mc_cores=nchains)
+        self.kw.update(kwargs)
 
         # decide how much to cold-start
         match cache:
@@ -407,12 +423,34 @@ class TimeGbart:
                 clear_caches()
             case 'warm':
                 self.time_gbart()
+            case _:
+                raise KeyError(cache)
 
     def time_gbart(self, *_):
         """Time instantiating the class."""
         with redirect_stdout(StringIO()):
             bart = gbart(**self.kw)
-            block_until_ready((bart._mcmc_state, bart._main_trace))
+            block_until_ready(bart)
+
+
+class GbartIters(BaseGbart):
+    """Time `mc_gbart` vs. the number of iterations.
+
+    This is useful to distinguish the startup time from the time per iteration.
+    """
+
+    params = ((0, NITERS, 2 * NITERS, 3 * NITERS, 4 * NITERS, 5 * NITERS),)
+
+
+class GbartChains(BaseGbart):
+    """Time `mc_gbart` vs. the number of chains."""
+
+    params = (
+        (NITERS,),
+        (1, 2, 4, 8, 16, 32),
+        ('warm',),
+        ({}, dict(bart_kwargs=dict(num_chain_devices=None))),
+    )
 
 
 class TimeRunMcmcVsTraceLength:

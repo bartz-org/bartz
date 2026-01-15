@@ -24,6 +24,10 @@
 
 """Benchmarking code run by asv."""
 
+from jax import config
+
 from benchmarks._vendor_latest_bartz import ensure_vendored
 
 ensure_vendored()
+
+config.update('jax_num_cpu_devices', 32)

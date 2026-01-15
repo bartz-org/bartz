@@ -33,7 +33,7 @@ from jax import numpy as jnp
 from jaxtyping import Array, Key
 
 from bartz.BART import gbart
-from benchmarks.testing import DGP, gen_data
+from benchmarks.latest_bartz.testing import DGP, gen_data
 
 
 @partial(jit, static_argnums=(1, 2, 3))

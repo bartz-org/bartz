@@ -132,7 +132,7 @@ local = [
 ]
 
 [tool.ruff]
-exclude = [".asv", "*.ipynb"]
+exclude = [".asv", "*.ipynb", "benchmarks/latest_bartz"]
 cache-dir = "config/ruff_cache"
 
 [tool.ruff.format]
@@ -214,7 +214,7 @@ ignore = [
 "src/bartz/_version.py" = [
     "CPY001", # Missing copyright notice at top of file
 ]
-"{config/*,docs/*,tests/*}" = [
+"{config/*,docs/*,tests/*,benchmarks/_vendor_latest_bartz.py}" = [
     "T201", # `print` found
 ]
 "{tests/*,benchmarks/*}" = [

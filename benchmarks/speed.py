@@ -59,7 +59,7 @@ except ImportError:
     from bartz.BART import gbart
 
 from bartz.mcmcstep import init, step
-from benchmarks.testing import gen_data
+from benchmarks.latest_bartz.testing import gen_data
 
 # asv config
 timeout = 30.0

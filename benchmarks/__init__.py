@@ -1,6 +1,6 @@
 # bartz/benchmarks/__init__.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -23,3 +23,7 @@
 # SOFTWARE.
 
 """Benchmarking code run by asv."""
+
+from benchmarks._vendor_latest_bartz import ensure_vendored
+
+ensure_vendored()

@@ -453,6 +453,12 @@ class GbartChains(BaseGbart):
     )
 
 
+class GbartCompile(BaseGbart):
+    """Compare cold-start with warmed-up to measure compilation time of `mc_gbart`."""
+
+    params = ((0, NITERS), (1, 6), ('warm', 'cold'))
+
+
 class TimeRunMcmcVsTraceLength:
     """Timings of `run_mcmc` parametrized by length of the trace to save.
 

@@ -36,7 +36,7 @@ from numpy.testing import assert_allclose, assert_array_equal, assert_array_less
 from scipy.stats import norm
 
 from bartz.jaxext import split
-from bartz.testing import DGP
+from bartz.testing import DGP, gen_data
 from bartz.testing._dgp import (
     generate_partition,
     interaction_pattern,
@@ -56,7 +56,7 @@ REPS: int = 10_000  # number of datasets
 @partial(vmap, in_axes=(0, None))
 def generate_dgps(key: Key[Array, 'REPS'], lam: Float[Array, '']) -> DGP:
     """Generate one dataset per random key."""
-    return DGP(key, lam=lam, **KWARGS)
+    return gen_data(key, lam=lam, **KWARGS)
 
 
 @pytest.fixture
@@ -79,7 +79,7 @@ def dgps_lambda_one(keys: split) -> DGP:
 
 def test_shapes_and_dtypes(keys: split):
     """Test that all DGP attributes have correct shapes and dtypes."""
-    dgp = DGP(keys.pop(), lam=0.5, **KWARGS)
+    dgp = gen_data(keys.pop(), lam=0.5, **KWARGS)
     n, p, k = KWARGS['n'], KWARGS['p'], KWARGS['k']
 
     # Test shapes

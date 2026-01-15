@@ -25,6 +25,8 @@
 
 """Data generating process for bivariate BART testing."""
 
+from dataclasses import replace
+
 from equinox import Module, error_if
 from jax import numpy as jnp
 from jax import random
@@ -230,38 +232,10 @@ def generate_outcome(
     return mu + eps * jnp.sqrt(sigma2_eps)
 
 
-class Split(Module):
-    x_train: Float[Array, 'p n_train']
-    y_train: Float[Array, 'k n_train']
-    x_test: Float[Array, 'p n_test']
-    y_test: Float[Array, 'k n_test']
-
-
 class DGP(Module):
     """Quadratic multivariate DGP.
 
     Parameters
-    ----------
-    key
-        JAX random key
-    n
-        Number of observations
-    p
-        Number of predictors
-    k
-        Number of outcome components
-    q
-        Number of interactions per predictor (must be even and < p // k)
-    lam
-        Coupling parameter in [0, 1]. 0=independent, 1=identical components
-    sigma2_lin
-        Prior and expected population variance of the linear term
-    sigma2_quad
-        Expected population variance of the quadratic term
-    sigma2_eps
-        Variance of the error term
-
-    Attributes
     ----------
     x
         Predictors of shape (p, n), variance 1
@@ -328,6 +302,8 @@ class DGP(Module):
     sigma2_quad: Float[Array, '']
     sigma2_eps: Float[Array, '']
 
+    kurt_x: float = 9 / 5  # kurtosis of uniform distribution
+
     @property
     def sigma2_pri(self) -> Float[Array, '']:
         """Prior variance of y."""
@@ -343,68 +319,124 @@ class DGP(Module):
         """Variance of the mean function."""
         return self.sigma2_quad / (self.kurt_x - 1 + self.q)
 
-    @property
-    def kurt_x(self) -> float:
-        """Kurtosis of the predictors."""
-        return 9 / 5  # uniform distribution
-
-    def split(self, n_train: int | None = None) -> Split:
+    def split(self, n_train: int | None = None) -> tuple['DGP', 'DGP']:
         """Split the data into training and test sets."""
         if n_train is None:
             n_train = self.x.shape[1] // 2
         assert 0 < n_train < self.x.shape[1], 'n_train must be in (0, n)'
-        return Split(
-            x_train=self.x[:, :n_train],
-            y_train=self.y[:, :n_train],
-            x_test=self.x[:, n_train:],
-            y_test=self.y[:, n_train:],
+        train = replace(
+            self,
+            x=self.x[:, :n_train],
+            y=self.y[:, :n_train],
+            mulin_shared=self.mulin_shared[:n_train],
+            mulin_separate=self.mulin_separate[:, :n_train],
+            mulin=self.mulin[:, :n_train],
+            muquad_shared=self.muquad_shared[:n_train],
+            muquad_separate=self.muquad_separate[:, :n_train],
+            muquad=self.muquad[:, :n_train],
+            mu=self.mu[:, :n_train],
         )
-
-    def __init__(
-        self,
-        key: Key[Array, ''],
-        *,
-        n: int,
-        p: int,
-        k: int,
-        q: Integer[Array, ''] | int,
-        lam: Float[Array, ''] | float,
-        sigma2_lin: Float[Array, ''] | float,
-        sigma2_quad: Float[Array, ''] | float,
-        sigma2_eps: Float[Array, ''] | float,
-    ):
-        assert p >= k, 'p must be at least k'
-
-        # check q
-        q = jnp.asarray(q)
-        q = error_if(q, q % 2 != 0, 'q must be even')
-        q = error_if(q, q >= p // k, 'q must be less than p // k')
-
-        keys = split(key, 7)
-
-        self.q = q
-        self.lam = jnp.asarray(lam)
-        self.sigma2_lin = jnp.asarray(sigma2_lin)
-        self.sigma2_quad = jnp.asarray(sigma2_quad)
-        self.sigma2_eps = jnp.asarray(sigma2_eps)
-
-        self.x = generate_x(keys.pop(), n, p)
-        self.partition = generate_partition(keys.pop(), p, k)
-        self.beta_shared = generate_beta_shared(keys.pop(), p, self.sigma2_lin)
-        self.beta_separate = generate_beta_separate(
-            keys.pop(), self.partition, self.sigma2_lin
+        test = replace(
+            self,
+            x=self.x[:, n_train:],
+            y=self.y[:, n_train:],
+            mulin_shared=self.mulin_shared[n_train:],
+            mulin_separate=self.mulin_separate[:, n_train:],
+            mulin=self.mulin[:, n_train:],
+            muquad_shared=self.muquad_shared[n_train:],
+            muquad_separate=self.muquad_separate[:, n_train:],
+            muquad=self.muquad[:, n_train:],
+            mu=self.mu[:, n_train:],
         )
-        self.mulin_shared = compute_linear_mean_shared(self.beta_shared, self.x)
-        self.mulin_separate = compute_linear_mean_separate(self.beta_separate, self.x)
-        self.mulin = combine_mulin(self.mulin_shared, self.mulin_separate, self.lam)
-        self.A_shared = generate_A_shared(
-            keys.pop(), p, self.q, self.sigma2_quad, self.kurt_x
-        )
-        self.A_separate = generate_A_separate(
-            keys.pop(), self.partition, self.q, self.sigma2_quad, self.kurt_x
-        )
-        self.muquad_shared = compute_muquad_shared(self.A_shared, self.x)
-        self.muquad_separate = compute_muquad_separate(self.A_separate, self.x)
-        self.muquad = combine_muquad(self.muquad_shared, self.muquad_separate, self.lam)
-        self.mu = self.mulin + self.muquad
-        self.y = generate_outcome(keys.pop(), self.mu, self.sigma2_eps)
+        return train, test
+
+
+def gen_data(
+    key: Key[Array, ''],
+    *,
+    n: int,
+    p: int,
+    k: int,
+    q: Integer[Array, ''] | int,
+    lam: Float[Array, ''] | float,
+    sigma2_lin: Float[Array, ''] | float,
+    sigma2_quad: Float[Array, ''] | float,
+    sigma2_eps: Float[Array, ''] | float,
+) -> DGP:
+    """Generate data from a quadratic multivariate DGP.
+
+    Parameters
+    ----------
+    key
+        JAX random key
+    n
+        Number of observations
+    p
+        Number of predictors
+    k
+        Number of outcome components
+    q
+        Number of interactions per predictor (must be even and < p // k)
+    lam
+        Coupling parameter in [0, 1]. 0=independent, 1=identical components
+    sigma2_lin
+        Prior and expected population variance of the linear term
+    sigma2_quad
+        Expected population variance of the quadratic term
+    sigma2_eps
+        Variance of the error term
+
+    Returns
+    -------
+    An object with all generated data and parameters.
+    """
+    assert p >= k, 'p must be at least k'
+
+    # check q
+    q = jnp.asarray(q)
+    q = error_if(q, q % 2 != 0, 'q must be even')
+    q = error_if(q, q >= p // k, 'q must be less than p // k')
+
+    keys = split(key, 7)
+
+    lam = jnp.asarray(lam)
+    sigma2_lin = jnp.asarray(sigma2_lin)
+    sigma2_quad = jnp.asarray(sigma2_quad)
+    sigma2_eps = jnp.asarray(sigma2_eps)
+
+    x = generate_x(keys.pop(), n, p)
+    partition = generate_partition(keys.pop(), p, k)
+    beta_shared = generate_beta_shared(keys.pop(), p, sigma2_lin)
+    beta_separate = generate_beta_separate(keys.pop(), partition, sigma2_lin)
+    mulin_shared = compute_linear_mean_shared(beta_shared, x)
+    mulin_separate = compute_linear_mean_separate(beta_separate, x)
+    mulin = combine_mulin(mulin_shared, mulin_separate, lam)
+    A_shared = generate_A_shared(keys.pop(), p, q, sigma2_quad, DGP.kurt_x)
+    A_separate = generate_A_separate(keys.pop(), partition, q, sigma2_quad, DGP.kurt_x)
+    muquad_shared = compute_muquad_shared(A_shared, x)
+    muquad_separate = compute_muquad_separate(A_separate, x)
+    muquad = combine_muquad(muquad_shared, muquad_separate, lam)
+    mu = mulin + muquad
+    y = generate_outcome(keys.pop(), mu, sigma2_eps)
+
+    return DGP(
+        x=x,
+        y=y,
+        partition=partition,
+        beta_shared=beta_shared,
+        beta_separate=beta_separate,
+        mulin_shared=mulin_shared,
+        mulin_separate=mulin_separate,
+        mulin=mulin,
+        A_shared=A_shared,
+        A_separate=A_separate,
+        muquad_shared=muquad_shared,
+        muquad_separate=muquad_separate,
+        muquad=muquad,
+        mu=mu,
+        q=q,
+        lam=lam,
+        sigma2_lin=sigma2_lin,
+        sigma2_quad=sigma2_quad,
+        sigma2_eps=sigma2_eps,
+    )

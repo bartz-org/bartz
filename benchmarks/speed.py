@@ -59,6 +59,7 @@ except ImportError:
     from bartz.BART import gbart
 
 from bartz.mcmcstep import init, step
+from benchmarks.testing import gen_data
 
 # asv config
 timeout = 30.0
@@ -70,7 +71,7 @@ NTREE = 50
 NITERS = 10
 
 
-def gen_data(p: int, n: int):
+def gen_nonsense_data(p: int, n: int):
     """Generate pretty nonsensical data."""
     X = jnp.arange(p * n, dtype=jnp.uint8).reshape(p, n)
     X = vmap(jnp.roll)(X, jnp.arange(p))
@@ -81,6 +82,7 @@ def gen_data(p: int, n: int):
 
 def make_p_nonterminal(maxdepth: int):
     """Prepare the p_nonterminal argument to `mcmcstep.init`."""
+    # this is available in mcmcstep since v0.8.0
     depth = jnp.arange(maxdepth - 1)
     base = 0.95
     power = 2
@@ -99,7 +101,7 @@ def get_default_platform() -> str:
 @partial(jit, static_argnums=(0, 1, 2, 3))
 def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs):  # noqa: C901, PLR0915
     """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
-    X, y, max_split = gen_data(p, n)
+    X, y, max_split = gen_nonsense_data(p, n)
 
     kw: dict = dict(
         X=X,
@@ -373,20 +375,25 @@ class TimeGbart:
             raise NotImplementedError(msg)
 
         # random seed
-        key = random.key(2025_06_24_14_55)
-        keys = list(random.split(key, 3))
+        keys = list(random.split(random.key(2025_06_24_14_55)))
 
         # generate simulated data
-        sigma = 0.1
-        T = 2
-        X = random.uniform(keys.pop(), (P, N), float, -2, 2)
-        f = lambda X: jnp.sum(jnp.cos(2 * jnp.pi / T * X), axis=0)
-        y = f(X) + sigma * random.normal(keys.pop(), (N,))
+        dgp = gen_data(
+            keys.pop(),
+            n=N,
+            p=P,
+            k=1,
+            q=2,
+            lam=0,
+            sigma2_lin=0.4,
+            sigma2_quad=0.4,
+            sigma2_eps=0.2,
+        )
 
         # arguments
         self.kw = dict(
-            x_train=X,
-            y_train=y,
+            x_train=dgp.x,
+            y_train=dgp.y.squeeze(0),
             nskip=niters // 2,
             ndpost=(niters - niters // 2) * nchains,
             seed=keys.pop(),

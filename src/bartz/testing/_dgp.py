@@ -374,12 +374,15 @@ class DGP(Module):
         sigma2_eps: Float[Array, ''] | float,
     ):
         assert p >= k, 'p must be at least k'
-        assert q % 2 == 0, 'q must be even'
-        assert q < p // k, 'q must be less than p // k'
+
+        # check q
+        q = jnp.asarray(q)
+        q = error_if(q, q % 2 != 0, 'q must be even')
+        q = error_if(q, q >= p // k, 'q must be less than p // k')
 
         keys = split(key, 7)
 
-        self.q = jnp.asarray(q)
+        self.q = q
         self.lam = jnp.asarray(lam)
         self.sigma2_lin = jnp.asarray(sigma2_lin)
         self.sigma2_quad = jnp.asarray(sigma2_quad)

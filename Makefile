@@ -79,7 +79,7 @@ setup:
 ################# TESTS #################
 
 TESTS_VARS = COVERAGE_FILE=.coverage.tests$(COVERAGE_SUFFIX)
-TESTS_COMMAND = python -m pytest --cov --cov-context=test --numprocesses=2 --dist=worksteal
+TESTS_COMMAND = python -m pytest --cov --cov-context=test --numprocesses=2 --dist=worksteal --durations=1000
 
 UV_RUN_CI = uv run --group=ci
 UV_OPTS_OLD = --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE)

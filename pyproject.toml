@@ -72,7 +72,6 @@ ci = [
     "pytest-cov>=6.1.1",
     "pytest-subtests>=0.14.1",
     "pytest-timeout>=2.4.0",
-    "pytest-timer[termcolor]>=1.0.0",
     "pytest-xdist>=3.6.1",
     "rpy2>=3.5.17",
     "sphinx>=8.1.3",

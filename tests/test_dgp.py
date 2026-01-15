@@ -42,7 +42,7 @@ from bartz.testing import DGP
 ALPHA = 5e-7  # probability of false positive
 SIGMA_THRESHOLD = norm.isf(ALPHA / 2)  # threshold for z tests
 KWARGS: Mapping = MappingProxyType(
-    dict(n=100, p=20, c=3, q=4, sigma2_eps=0.1, sigma2_lin=0.4, sigma2_quad=0.5)
+    dict(n=100, p=20, k=3, q=4, sigma2_eps=0.1, sigma2_lin=0.4, sigma2_quad=0.5)
 )
 REPS: int = 10_000  # number of datasets
 
@@ -75,23 +75,23 @@ def dgps_lambda_one(keys: split):
 def test_shapes_and_dtypes(keys: split):
     """Test that all DGP attributes have correct shapes and dtypes."""
     dgp = DGP(keys.pop(), lam=0.5, **KWARGS)
-    n, p, c = KWARGS['n'], KWARGS['p'], KWARGS['c']
+    n, p, k = KWARGS['n'], KWARGS['p'], KWARGS['k']
 
     # Test shapes
     assert dgp.x.shape == (p, n)
-    assert dgp.y.shape == (c, n)
-    assert dgp.partition.shape == (c, p)
+    assert dgp.y.shape == (k, n)
+    assert dgp.partition.shape == (k, p)
     assert dgp.beta_shared.shape == (p,)
-    assert dgp.beta_separate.shape == (c, p)
+    assert dgp.beta_separate.shape == (k, p)
     assert dgp.mulin_shared.shape == (n,)
-    assert dgp.mulin_separate.shape == (c, n)
-    assert dgp.mulin.shape == (c, n)
+    assert dgp.mulin_separate.shape == (k, n)
+    assert dgp.mulin.shape == (k, n)
     assert dgp.A_shared.shape == (p, p)
-    assert dgp.A_separate.shape == (c, p, p)
+    assert dgp.A_separate.shape == (k, p, p)
     assert dgp.muquad_shared.shape == (n,)
-    assert dgp.muquad_separate.shape == (c, n)
-    assert dgp.muquad.shape == (c, n)
-    assert dgp.mu.shape == (c, n)
+    assert dgp.muquad_separate.shape == (k, n)
+    assert dgp.muquad.shape == (k, n)
+    assert dgp.mu.shape == (k, n)
     assert dgp.q.shape == ()
     assert dgp.lam.shape == ()
     assert dgp.sigma2_lin.shape == ()
@@ -125,7 +125,7 @@ class TestGenerateX:
 
     def test_x_mean(self, dgps):
         """Test that x has mean close to 0."""
-        x_samples = dgps.x  # Shape: (N_REPS, P, N)
+        x_samples = dgps.x  # Shape: (REPS, P, N)
         n_reps = x_samples.shape[0]
 
         # Compute mean and std of mean for each element
@@ -138,7 +138,7 @@ class TestGenerateX:
 
     def test_x_variance(self, dgps):
         """Test that x has variance close to 1."""
-        x_samples = dgps.x  # Shape: (N_REPS, P, N)
+        x_samples = dgps.x  # Shape: (REPS, P, N)
         n_reps = x_samples.shape[0]
 
         # Compute variance for each element
@@ -158,7 +158,7 @@ class TestGeneratePartition:
 
     def test_partition_coverage(self, dgps):
         """Test that each predictor is assigned to exactly one component."""
-        partitions = dgps.partition  # Shape: (N_REPS, C, P)
+        partitions = dgps.partition  # Shape: (REPS, K, P)
 
         # Each column should sum to 1
         col_sums = jnp.sum(partitions, axis=1)  # Shape: (N_REPS, P)
@@ -166,27 +166,27 @@ class TestGeneratePartition:
 
     def test_partition_counts(self, dgps):
         """Test that counts are either p//c or p//c + 1."""
-        partitions = dgps.partition  # Shape: (N_REPS, C, P)
-        p, c = partitions.shape[2], partitions.shape[1]
+        partitions = dgps.partition  # Shape: (REPS, K, P)
+        p, k = partitions.shape[2], partitions.shape[1]
 
-        counts = jnp.sum(partitions, axis=2)  # Shape: (N_REPS, C)
+        counts = jnp.sum(partitions, axis=2)  # Shape: (REPS, K)
 
-        # Each count should be either P//C or P//C + 1
-        floor_count = p // c
+        # Each count should be either P//K or P//K + 1
+        floor_count = p // k
         valid = (counts == floor_count) | (counts == floor_count + 1)
         assert_array_equal(valid, True)
 
     def test_partition_balance(self, dgps):
         """Test that predictors are roughly balanced across components."""
-        partitions = dgps.partition  # Shape: (N_REPS, C, P)
-        n_reps, c, p = partitions.shape
+        partitions = dgps.partition  # Shape: (REPS, K, P)
+        n_reps, k, p = partitions.shape
 
-        counts = jnp.sum(partitions, axis=2)  # Shape: (N_REPS, C)
+        counts = jnp.sum(partitions, axis=2)  # Shape: (REPS, K)
 
-        # Mean count per component should be P/C
-        expected_mean = p / c
-        means = jnp.mean(counts, axis=0)  # Shape: (C,)
-        stds_of_mean = jnp.std(counts, axis=0) / jnp.sqrt(n_reps)  # Shape: (C,)
+        # Mean count per component should be P/K
+        expected_mean = p / k
+        means = jnp.mean(counts, axis=0)  # Shape: (K,)
+        stds_of_mean = jnp.std(counts, axis=0) / jnp.sqrt(n_reps)  # Shape: (K,)
 
         z_scores = jnp.abs((means - expected_mean) / stds_of_mean)
         assert_array_less(z_scores, SIGMA_THRESHOLD)
@@ -197,7 +197,7 @@ class TestGenerateBetaShared:
 
     def test_beta_shared_mean(self, dgps):
         """Test that beta_shared has mean close to 0."""
-        beta_samples = dgps.beta_shared  # Shape: (N_REPS, P)
+        beta_samples = dgps.beta_shared  # Shape: (REPS, P)
         n_reps = beta_samples.shape[0]
 
         means = jnp.mean(beta_samples, axis=0)  # Shape: (P,)
@@ -212,22 +212,22 @@ class TestGenerateBetaSeparate:
 
     def test_beta_separate_mean(self, dgps):
         """Test that beta_separate has mean close to 0."""
-        beta_samples = dgps.beta_separate  # Shape: (N_REPS, C, P)
+        beta_samples = dgps.beta_separate  # Shape: (REPS, K, P)
         n_reps = beta_samples.shape[0]
 
-        means = jnp.mean(beta_samples, axis=0)  # Shape: (C, P)
-        stds_of_mean = jnp.std(beta_samples, axis=0) / jnp.sqrt(n_reps)  # Shape: (C, P)
+        means = jnp.mean(beta_samples, axis=0)  # Shape: (K, P)
+        stds_of_mean = jnp.std(beta_samples, axis=0) / jnp.sqrt(n_reps)  # Shape: (K, P)
 
         z_scores = jnp.abs(means / stds_of_mean)
         assert_array_less(z_scores, SIGMA_THRESHOLD)
 
     def test_beta_separate_independence(self, dgps):
         """Test that rows of beta_separate are independent."""
-        beta_samples = dgps.beta_separate  # Shape: (N_REPS, C, P)
+        beta_samples = dgps.beta_separate  # Shape: (REPS, K, P)
         n_reps = beta_samples.shape[0]
 
-        beta0 = beta_samples[:, 0, :]  # Shape: (N_REPS, P)
-        beta1 = beta_samples[:, 1, :]  # Shape: (N_REPS, P)
+        beta0 = beta_samples[:, 0, :]  # Shape: (REPS, P)
+        beta1 = beta_samples[:, 1, :]  # Shape: (REPS, P)
 
         # Compute covariance for each predictor position
         mean0 = jnp.mean(beta0, axis=0)  # Shape: (P,)
@@ -258,10 +258,10 @@ class TestGenerateBetaSeparate:
 )
 def test_outcome_prior_variance(dgps, which: str):
     """Test that latent mean and outcome have the expected elementwise variance."""
-    samples = getattr(dgps, which)  # Shape: (N_REPS, C?, N)
+    samples = getattr(dgps, which)  # Shape: (REPS, K?, N)
     n_reps = samples.shape[0]
 
-    var = jnp.var(samples, axis=0)  # Shape: (C?, N)
+    var = jnp.var(samples, axis=0)  # Shape: (K?, N)
 
     if which.startswith('mulin'):
         expected_var = dgps.sigma2_lin
@@ -296,11 +296,11 @@ def test_outcome_prior_variance(dgps, which: str):
 )
 def test_outcome_pop_variance(dgps, which: str):
     """Test that latent mean and outcome have the expected elementwise variance."""
-    samples = getattr(dgps, which)  # Shape: (N_REPS, C?, N)
+    samples = getattr(dgps, which)  # Shape: (REPS, K?, N)
     n_reps = samples.shape[0]
 
-    var = jnp.var(samples, axis=-1, ddof=1)  # Shape: (N_REPS, C?)
-    var = jnp.mean(var, axis=0)  # Shape: (C?,)
+    var = jnp.var(samples, axis=-1, ddof=1)  # Shape: (REPS, K?)
+    var = jnp.mean(var, axis=0)  # Shape: (K?,)
 
     if which.startswith('mulin'):
         expected_var = dgps.sigma2_lin
@@ -343,11 +343,11 @@ def test_variance_relationships(dgps):
 )
 def test_rows_independent(dgps_lambda_zero, which):
     """Test that rows are independent when lambda=0."""
-    samples = getattr(dgps_lambda_zero, which)  # Shape: (N_REPS, C, N or P)
+    samples = getattr(dgps_lambda_zero, which)  # Shape: (REPS, K, N or P)
     n_reps = samples.shape[0]
 
-    samples0 = samples[:, 0, :]  # Shape: (N_REPS, N or P)
-    samples1 = samples[:, 1, :]  # Shape: (N_REPS, N or P)
+    samples0 = samples[:, 0, :]  # Shape: (REPS, N or P)
+    samples1 = samples[:, 1, :]  # Shape: (REPS, N or P)
 
     # Compute covariance for each observation position
     mean0 = jnp.mean(samples0, axis=0)
@@ -364,12 +364,10 @@ def test_rows_independent(dgps_lambda_zero, which):
 
 def test_rows_identical(dgps_lambda_one):
     """Test that rows are identical when lambda=1."""
-    mulins = dgps_lambda_one.mulin  # Shape: (N_REPS, C, N)
+    mulins = dgps_lambda_one.mulin  # Shape: (REPS, K, N)
 
     # Check that all rows are identical within each sample
-    diffs = jnp.max(
-        jnp.abs(mulins[:, 0:1, :] - mulins), axis=(1, 2)
-    )  # Shape: (N_REPS,)
+    diffs = jnp.max(jnp.abs(mulins[:, 0:1, :] - mulins), axis=(1, 2))  # Shape: (REPS,)
     assert_allclose(diffs, 0.0, atol=1e-5)
 
 
@@ -399,10 +397,10 @@ class TestPartitionedInteractionPattern:
     """Test the partitioned interaction pattern method."""
 
     @pytest.fixture
-    def partition(self, keys: split) -> Bool[Array, 'c p']:
+    def partition(self, keys: split) -> Bool[Array, 'k p']:
         """Generate a partition of predictors."""
-        p, c = 20, 3
-        return DGP._generate_partition(keys.pop(), p=p, c=c)
+        p, k = 20, 3
+        return DGP._generate_partition(keys.pop(), p=p, k=k)
 
     @pytest.fixture
     def q(self) -> int:
@@ -410,21 +408,21 @@ class TestPartitionedInteractionPattern:
         return 2
 
     @pytest.fixture
-    def pattern(self, partition: Bool[Array, 'c p'], q: int) -> Bool[Array, 'c p p']:
+    def pattern(self, partition: Bool[Array, 'k p'], q: int) -> Bool[Array, 'k p p']:
         """Generate a multivariate interaction pattern that respects `partition`."""
         return DGP._partitioned_interaction_pattern(partition, q=q)
 
     def test_respects_partition(self, partition, pattern):
         """Test that pattern only has True values within partition blocks."""
         # For each component, check that True values only occur where partition is True
-        # pattern[i, k, l] can only be True if partition[i, k] and partition[i, l] are True
-        mask = partition[:, :, None] & partition[:, None, :]  # Shape: (c, p, p)
+        # pattern[i, r, s] can only be True if partition[i, r] and partition[i, s] are True
+        mask = partition[:, :, None] & partition[:, None, :]  # Shape: (k, p, p)
         assert_array_equal(pattern & ~mask, False)
 
     def test_diagonal_within_partition(self, partition, pattern):
         """Test that diagonal elements within partition are True."""
-        c, _, _ = pattern.shape
-        for i in range(c):
+        k, _, _ = pattern.shape
+        for i in range(k):
             diagonal = pattern[i, partition[i], partition[i]]
             assert_array_equal(diagonal, True)
 

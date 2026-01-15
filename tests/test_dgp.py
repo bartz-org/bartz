@@ -367,12 +367,15 @@ def test_rows_independent(dgps_lambda_zero: DGP, which: str):
     assert_array_less(z_scores, SIGMA_THRESHOLD)
 
 
-def test_rows_identical(dgps_lambda_one: DGP):
+@pytest.mark.parametrize('which', ['mulin', 'muquad', 'mu'])
+def test_rows_identical(dgps_lambda_one: DGP, which: str):
     """Test that rows are identical when lambda=1."""
-    mulins = dgps_lambda_one.mulin  # Shape: (REPS, K, N)
+    samples = getattr(dgps_lambda_one, which)  # Shape: (REPS, K, N)
 
     # Check that all rows are identical within each sample
-    diffs = jnp.max(jnp.abs(mulins[:, 0:1, :] - mulins), axis=(1, 2))  # Shape: (REPS,)
+    diffs = jnp.max(
+        jnp.abs(samples[:, 0:1, :] - samples), axis=(1, 2)
+    )  # Shape: (REPS,)
     assert_allclose(diffs, 0.0, atol=1e-5)
 
 

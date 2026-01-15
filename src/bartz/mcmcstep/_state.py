@@ -400,6 +400,35 @@ def _parse_p_nonterminal(
     return jnp.pad(p_nonterminal, (0, 1))
 
 
+def make_p_nonterminal(
+    d: int, alpha: float | Float32[Array, ''], beta: float | Float32[Array, '']
+) -> Float32[Array, ' {d}-1']:
+    """Prepare the `p_nonterminal` argument to `init`.
+
+    It is calculated according to the formula:
+
+        P_nt(depth) = alpha / (1 + depth)^beta,     with depth 0-based
+
+    Parameters
+    ----------
+    d
+        The maximum depth of the trees (d=1 means tree with only root node)
+    alpha
+        The a priori probability of the root node having children, conditional
+        on it being possible
+    beta
+        The exponent of the power decay of the probability of having children
+        with depth.
+
+    Returns
+    -------
+    An array of probabilities, one per tree level but the last.
+    """
+    assert d >= 1
+    depth = jnp.arange(d - 1)
+    return alpha / (1 + depth).astype(float) ** beta
+
+
 def init(
     *,
     X: UInt[Any, 'p n'],
@@ -447,7 +476,8 @@ def init(
         The number of trees in the forest.
     p_nonterminal
         The probability of a nonterminal node at each depth. The maximum depth
-        of trees is fixed by the length of this array.
+        of trees is fixed by the length of this array. Use `make_p_nonterminal`
+        to set it with the conventional formula.
     leaf_prior_cov_inv
         The prior precision matrix of a leaf, conditional on the tree structure.
         For the univariate case (k=1), this is a scalar (the inverse variance).

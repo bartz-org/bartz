@@ -31,5 +31,5 @@ Functions that implement the BART posterior MCMC initialization and update step.
 
 # ruff: noqa: F401
 
-from bartz.mcmcstep._state import Forest, State, StepConfig, init
+from bartz.mcmcstep._state import Forest, State, StepConfig, init, make_p_nonterminal
 from bartz.mcmcstep._step import step

@@ -55,6 +55,7 @@ from bartz.jaxext import is_key
 from bartz.jaxext.scipy.special import ndtri
 from bartz.jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import compute_varcount, evaluate_trace, run_mcmc
+from bartz.mcmcstep import make_p_nonterminal
 from bartz.mcmcstep._state import get_num_chains
 
 FloatLike = float | Float[Any, '']
@@ -790,8 +791,7 @@ class Bart(Module):
         sparse: bool,
         nskip: int,
     ):
-        depth = jnp.arange(maxdepth - 1)
-        p_nonterminal = base / (1 + depth).astype(float) ** power
+        p_nonterminal = make_p_nonterminal(maxdepth, base, power)
 
         if y_train.dtype == bool:
             error_cov_df = None

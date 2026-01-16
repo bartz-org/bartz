@@ -24,19 +24,19 @@
 
 """Measure the predictive performance on test sets."""
 
-from contextlib import redirect_stdout
 from functools import partial
-from io import StringIO
 
-from jax import jit, random
+import jax
+from jax import jit, lax, random
 from jax import numpy as jnp
-from jaxtyping import Array, Key
+from jaxtyping import Array, Float32, Key
 
 from bartz.BART import gbart
+from benchmarks.latest_bartz.jaxext import split
 from benchmarks.latest_bartz.testing import DGP, gen_data
+from benchmarks.speed import get_default_platform
 
 
-@partial(jit, static_argnums=(1, 2, 3))
 def make_data(
     key: Key[Array, ''], n_train: int, n_test: int, p: int
 ) -> tuple[DGP, DGP]:
@@ -46,34 +46,58 @@ def make_data(
         n=n_train + n_test,
         p=p,
         k=1,
-        q=4,
+        q=2,
         lam=0,
-        sigma2_lin=0.4,
-        sigma2_quad=0.4,
+        sigma2_lin=0.5,
+        sigma2_quad=0.5,
         sigma2_eps=0.2,
+        # the function `run_sim_impl` below compares the prediction with the
+        # true latent mean, so the mse lower bound is 0 rather than sigma2_eps,
+        # so the total latent variance is 1 to have a nice reference.
     ).split(n_train)
+
+
+@partial(jit, static_argnums=(1, 2, 3))
+def run_sim(
+    keys: Key[Array, ' nreps'], n_train: int, n_test: int, p: int
+) -> Float32[Array, '']:
+    """Run simulation experiment for each key in `keys`, return avg mse."""
+    run_sim_loop = lambda key: run_sim_impl(key, n_train, n_test, p)
+    mses = lax.map(run_sim_loop, keys)
+    return jnp.mean(mses)
+
+
+def run_sim_impl(
+    key: Key[Array, ' nreps'], n_train: int, n_test: int, p: int
+) -> Float32[Array, '']:
+    """Simulate data, run gbart, return mse."""
+    keys = split(key)
+    train, test = make_data(keys.pop(), n_train, n_test, p)
+
+    bart = gbart(
+        train.x,
+        train.y.squeeze(0),
+        x_test=test.x,
+        nskip=1000,
+        ndpost=1000,
+        seed=keys.pop(),
+        rm_const=None,
+        printevery=None,
+        bart_kwargs=dict(devices=jax.devices(get_default_platform())),
+    )
+
+    return jnp.mean(jnp.square(bart.yhat_test_mean - test.mu.squeeze(0)))
 
 
 class EvalGbart:
     """Out-of-sample evaluation of gbart."""
 
     # asv config
-    timeout = 120.0
-    unit = 'latent_sdev'
+    timeout = 300
+    unit = 'latent_var'
 
-    def track_rmse(self) -> float:
+    def track_mse(self) -> float:
         """Return the RMSE for predictions on a test set."""
         key = random.key(2025_06_26_21_02)
-        train, test = make_data(key, 100, 1000, 20)
-        with redirect_stdout(StringIO()):
-            bart = gbart(
-                train.x,
-                train.y.squeeze(0),
-                x_test=test.x,
-                nskip=1000,
-                ndpost=1000,
-                seed=key,
-            )
-        return jnp.sqrt(
-            jnp.mean(jnp.square(bart.yhat_test_mean - test.mu.squeeze(0)))
-        ).item()
+        keys = random.split(key, 30)
+        return run_sim(keys, 50, 30, 5).item()

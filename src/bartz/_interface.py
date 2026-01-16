@@ -154,10 +154,7 @@ class Bart(Module):
     rm_const
         How to treat predictors with no associated decision rules (i.e., there
         are no available cutpoints for that predictor). If `True` (default),
-        they are ignored. If `False`, an error is raised if there are any. If
-        `None`, no check is performed, and the output of the MCMC may not make
-        sense if there are predictors without cutpoints. The option `None` is
-        provided only to allow jax tracing.
+        they are ignored. If `False`, an error is raised if there are any.
     sigest
         An estimate of the residual standard deviation on `y_train`, used to set
         `lamda`. If not specified, it is estimated by linear regression (with
@@ -308,7 +305,7 @@ class Bart(Module):
         rho: FloatLike | None = None,
         xinfo: Float[Array, 'p n'] | None = None,
         usequants: bool = False,
-        rm_const: bool | None = True,
+        rm_const: bool = True,
         sigest: FloatLike | None = None,
         sigdf: FloatLike = 3.0,
         sigquant: FloatLike = 0.9,
@@ -779,7 +776,7 @@ class Bart(Module):
         maxdepth: int,
         ntree: int,
         init_kw: dict[str, Any] | None,
-        rm_const: bool | None,
+        rm_const: bool,
         theta: FloatLike | None,
         a: FloatLike | None,
         b: FloatLike | None,
@@ -829,16 +826,9 @@ class Bart(Module):
             **device_kw,
         )
 
-        if rm_const is None:
-            kw.update(filter_splitless_vars=False)
-        elif rm_const:
-            kw.update(filter_splitless_vars=True)
-        else:
-            n_empty = jnp.count_nonzero(max_split == 0)
-            if n_empty:
-                msg = f'There are {n_empty}/{max_split.size} predictors without decision rules'
-                raise ValueError(msg)
-            kw.update(filter_splitless_vars=False)
+        if rm_const:
+            n_empty = jnp.sum(max_split == 0).item()
+            kw.update(filter_splitless_vars=n_empty)
 
         if init_kw is not None:
             kw.update(init_kw)

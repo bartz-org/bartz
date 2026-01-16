@@ -87,7 +87,6 @@ def simple_init(p: int, n: int, ntree: int, k: int | None = None, **kwargs) -> S
         error_cov_df=2,
         error_cov_scale=2 * eye,
         min_points_per_decision_node=10,
-        filter_splitless_vars=False,
         target_platform=get_default_device().platform,
         **kwargs,
     )

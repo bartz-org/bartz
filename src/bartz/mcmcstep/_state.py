@@ -445,7 +445,7 @@ def init(
     resid_batch_size: int | None | Literal['auto'] = 'auto',
     count_batch_size: int | None | Literal['auto'] = 'auto',
     save_ratios: bool = False,
-    filter_splitless_vars: bool = True,
+    filter_splitless_vars: int = 0,
     min_points_per_leaf: int | Integer[Any, ''] | None = None,
     log_s: Float32[Any, ' p'] | None = None,
     theta: float | Float32[Any, ''] | None = None,
@@ -507,11 +507,8 @@ def init(
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
     filter_splitless_vars
-        Whether to check `max_split` for variables without available cutpoints.
-        If any are found, they are put into a list of variables to exclude from
-        the MCMC. If `False`, no check is performed, but the results may be
-        wrong if any variable is blocked. The function is jax-traceable only
-        if this is set to `False`.
+        The maximum number of variables without splits that can be ignored. If
+        there are more, `init` raises an exception.
     min_points_per_leaf
         The minimum number of datapoints in a leaf node. 0 if not specified.
         Unlike `min_points_per_decision_node`, this constraint is not taken into
@@ -635,6 +632,13 @@ def init(
         target_platform,
     )
 
+    # check there aren't too many deactivated predictors
+    msg = (
+        f'there are more than {filter_splitless_vars=} predictors with no splits, '
+        'please increase `filter_splitless_vars` or investigate the missing splits'
+    )
+    offset = error_if(offset, jnp.sum(max_split == 0) > filter_splitless_vars, msg)
+
     # initialize all remaining stuff and put it in an unsharded state
     state = State(
         X=X,
@@ -705,12 +709,14 @@ def init(
 
 
 def _get_blocked_vars(
-    filter_splitless_vars: bool, max_split: UInt[Array, ' p']
+    filter_splitless_vars: int, max_split: UInt[Array, ' p']
 ) -> None | UInt[Array, ' q']:
     """Initialize the `blocked_vars` field."""
     if filter_splitless_vars:
         (p,) = max_split.shape
-        (blocked_vars,) = jnp.nonzero(max_split == 0)
+        (blocked_vars,) = jnp.nonzero(
+            max_split == 0, size=filter_splitless_vars, fill_value=p
+        )
         return blocked_vars.astype(minimal_unsigned_dtype(p))
         # see `fully_used_variables` for the type cast
     else:

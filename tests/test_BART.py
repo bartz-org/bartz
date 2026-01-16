@@ -1211,9 +1211,8 @@ def test_jit(kw):
     # do not check trees because the assert breaks abstract tracing
     kw.update(check_trees=False)
 
-    # do not check for splitless variables because it breaks tracing, I check it
-    # later in this test
-    kw.update(rm_const=None)
+    # do not count splitless variables because it breaks tracing
+    kw.update(rm_const=False)
 
     # set device as under jit it can not be inferred from the array
     platform = kw['y_train'].platform()
@@ -1234,12 +1233,8 @@ def test_jit(kw):
 
     task_compiled = jax.jit(task)
 
-    state1, pred1 = task(X, y, w, key)
-    state2, pred2 = task_compiled(X, y, w, random.clone(key))
-
-    # because the check is disabled for traceability
-    assert jnp.all(state1.forest.max_split > 0)
-    assert jnp.all(state2.forest.max_split > 0)
+    _state1, pred1 = task(X, y, w, key)
+    _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
     assert_close_matrices(pred1, pred2, rtol=1e-5)
 

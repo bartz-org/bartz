@@ -81,7 +81,7 @@ def run_sim_impl(
         nskip=1000,
         ndpost=1000,
         seed=keys.pop(),
-        rm_const=None,
+        rm_const=False,
         printevery=None,
         bart_kwargs=dict(devices=jax.devices(get_default_platform())),
     )

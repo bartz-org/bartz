@@ -25,7 +25,7 @@
 """Measure the speed of the MCMC and its interfaces."""
 
 from collections.abc import Mapping
-from contextlib import redirect_stdout
+from contextlib import nullcontext, redirect_stdout
 from dataclasses import replace
 from functools import partial
 from inspect import signature
@@ -34,7 +34,7 @@ from re import escape, match
 from types import MappingProxyType
 from typing import Any, Literal
 
-from equinox import error_if
+from equinox import Module, error_if
 from jax import (
     block_until_ready,
     clear_caches,
@@ -49,6 +49,7 @@ from jax.errors import JaxRuntimeError
 from jax.tree import map_with_path
 from jax.tree_util import tree_map
 
+import bartz
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
 
@@ -58,6 +59,7 @@ except ImportError:
     from bartz.BART import gbart
 
 from bartz.mcmcstep import init, step
+from benchmarks.latest_bartz.mcmcstep import make_p_nonterminal
 from benchmarks.latest_bartz.testing import gen_data
 
 # asv config
@@ -77,15 +79,6 @@ def gen_nonsense_data(p: int, n: int):
     max_split = jnp.full(p, 255, jnp.uint8)
     y = jnp.cos(jnp.linspace(0, 2 * jnp.pi / 32 * n, n))
     return X, y, max_split
-
-
-def make_p_nonterminal(maxdepth: int):
-    """Prepare the p_nonterminal argument to `mcmcstep.init`."""
-    # this is available in mcmcstep since v0.8.0
-    depth = jnp.arange(maxdepth - 1)
-    base = 0.95
-    power = 2
-    return base / (1 + depth).astype(float) ** power
 
 
 Kind = Literal['plain', 'weights', 'binary', 'sparse', 'vmap-1', 'vmap-2']
@@ -108,7 +101,7 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
         offset=0.0,
         max_split=max_split,
         num_trees=ntree,
-        p_nonterminal=make_p_nonterminal(6),
+        p_nonterminal=make_p_nonterminal(6, 0.95, 2),
         leaf_prior_cov_inv=jnp.float32(ntree),
         error_cov_df=2.0,
         error_cov_scale=2.0,
@@ -303,6 +296,7 @@ class BaseGbart(AutoParamNames):
         nchains: int = 1,
         cache: Cache = 'warm',
         kwargs: Mapping[str, Any] = MappingProxyType({}),
+        profile: bool = False,
     ):
         """Prepare the arguments and run once to warm-up."""
         # check support for multiple chains
@@ -341,6 +335,15 @@ class BaseGbart(AutoParamNames):
             self.kw.update(mc_cores=nchains)
         self.kw.update(kwargs)
 
+        # set profile mode
+        if not profile:
+            self.context = nullcontext()
+        elif hasattr(bartz, 'profile_mode'):
+            self.context = bartz.profile_mode(True)
+        else:
+            msg = 'Profile mode not supported.'
+            raise NotImplementedError(msg)
+
         # decide how much to cold-start
         match cache:
             case 'cold':
@@ -352,9 +355,14 @@ class BaseGbart(AutoParamNames):
 
     def time_gbart(self, *_):
         """Time instantiating the class."""
-        with redirect_stdout(StringIO()):
+        with redirect_stdout(StringIO()), self.context:
             bart = gbart(**self.kw)
-            block_until_ready(bart)
+            if isinstance(bart, Module):
+                block_until_ready(bart)
+            else:
+                block_until_ready(
+                    (bart._mcmc_state, bart._main_trace, bart._burnin_trace)
+                )
 
 
 class GbartIters(BaseGbart):
@@ -377,10 +385,10 @@ class GbartChains(BaseGbart):
     )
 
 
-class GbartCompile(BaseGbart):
-    """Compare cold-start with warmed-up to measure compilation time of `mc_gbart`."""
+class GbartGeneric(BaseGbart):
+    """General timing of `mc_gbart` with many settings."""
 
-    params = ((0, NITERS), (1, 6), ('warm', 'cold'))
+    params = ((0, NITERS), (1, 6), ('warm', 'cold'), ({},), (False, True))
 
 
 class BaseRunMcmc(AutoParamNames):

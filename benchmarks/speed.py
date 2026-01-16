@@ -45,7 +45,9 @@ from jax import (
 )
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
+from jax.sharding import Mesh
 from jax.tree_util import tree_map
+from jaxtyping import Array, Float32, UInt8
 
 import bartz
 from bartz import mcmcloop, mcmcstep
@@ -70,7 +72,10 @@ NTREE = 50
 NITERS = 10
 
 
-def gen_nonsense_data(p: int, n: int):
+@partial(jit, static_argnums=(0, 1))
+def gen_nonsense_data(
+    p: int, n: int
+) -> tuple[UInt8[Array, '{p} {n}'], Float32[Array, ' {n}'], UInt8[Array, ' {p}']]:
     """Generate pretty nonsensical data."""
     X = jnp.arange(p * n, dtype=jnp.uint8).reshape(p, n)
     X = vmap(jnp.roll)(X, jnp.arange(p))
@@ -79,7 +84,7 @@ def gen_nonsense_data(p: int, n: int):
     return X, y, max_split
 
 
-Kind = Literal['plain', 'weights', 'binary', 'sparse', 'vmap-1', 'vmap-2']
+Kind = Literal['plain', 'weights', 'binary', 'sparse']
 
 
 def get_default_platform() -> str:
@@ -88,15 +93,14 @@ def get_default_platform() -> str:
         return jnp.zeros(()).platform()
 
 
-@partial(jit, static_argnums=(0, 1, 2, 3), static_argnames=('num_chains'))
 def simple_init(  # noqa: C901, PLR0915
     p: int,
     n: int,
     ntree: int,
     kind: Kind = 'plain',
-    /,
     *,
     num_chains: int | None = None,
+    mesh: dict[str, int] | Mesh | None = None,
     **kwargs,
 ):
     """Glue code to support `mcmcstep.init` across API changes."""
@@ -113,9 +117,8 @@ def simple_init(  # noqa: C901, PLR0915
         error_cov_df=2.0,
         error_cov_scale=2.0,
         min_points_per_decision_node=10,
-        filter_splitless_vars=False,
-        target_platform=get_default_platform(),
         num_chains=num_chains,
+        mesh=mesh,
     )
 
     # adapt arguments for old versions
@@ -135,15 +138,15 @@ def simple_init(  # noqa: C901, PLR0915
     if 'min_points_per_decision_node' not in sig.parameters:
         kw.pop('min_points_per_decision_node')
         kw.update(min_points_per_leaf=5)
-    if 'filter_splitless_vars' not in sig.parameters:
-        kw.pop('filter_splitless_vars')
     if 'suffstat_batch_size' in sig.parameters:
         # bypass the tracing bug fixed in v0.2.1
         kw.update(suffstat_batch_size=None)
-    if 'target_platform' not in sig.parameters:
-        kw.pop('target_platform')
-
-    # handle number of chains
+    if 'mesh' not in sig.parameters:
+        if mesh is None:
+            kw.pop('mesh')
+        else:
+            msg = 'mesh not supported.'
+            raise NotImplementedError(msg)
     if 'num_chains' not in sig.parameters:
         if num_chains is None:
             kw.pop('num_chains')
@@ -200,7 +203,7 @@ class AutoParamNames:
         cls.param_names = tuple(params[1:])
 
 
-class TimeStep(AutoParamNames):
+class StepGeneric(AutoParamNames):
     """Benchmarks of `mcmcstep.step`."""
 
     params: tuple[tuple[Mode, ...], tuple[Kind, ...], tuple[int | None, ...]] = (
@@ -209,11 +212,14 @@ class TimeStep(AutoParamNames):
         (None, 1, 2),
     )
 
-    def setup(self, mode: Mode, kind: Kind, chains: int | None):
+    def setup(self, mode: Mode, kind: Kind, chains: int | None, **kwargs):
         """Create an initial MCMC state and random seed, compile & warm-up."""
         keys = list(random.split(random.key(2025_06_24_12_07)))
 
-        self.args = (keys, simple_init(P, N, NTREE, kind, num_chains=chains))
+        kw: dict = dict(p=P, n=N, ntree=NTREE, kind=kind, num_chains=chains)
+        kw.update(kwargs)
+
+        self.args = (keys, simple_init(**kw))
 
         def func(keys, bart):
             sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
@@ -228,17 +234,41 @@ class TimeStep(AutoParamNames):
         self.compiled_func = self.jitted_func.lower(*self.args).compile()
         if mode == 'run':
             block_until_ready(self.compiled_func(*self.args))
+        self.mode = mode
 
-    def time_step(self, mode: Mode, *_):
+    def time_step(self, *_):
         """Time compiling `step` or running it."""
-        match mode:
+        match self.mode:
             case 'compile':
                 self.jitted_func.clear_cache()
                 self.jitted_func.lower(*self.args).compile()
             case 'run':
                 block_until_ready(self.compiled_func(*self.args))
             case _:
-                raise KeyError(mode)
+                raise KeyError(self.mode)
+
+
+class StepSharded(StepGeneric):
+    """Benchmark `mcmcstep.step` with sharded data."""
+
+    params = ((False, True),)
+
+    def setup(self, sharded: bool):  # ty:ignore[invalid-method-override]
+        """Set up with settings that make the effect of sharding salient."""
+        sig = signature(init)
+        if 'mesh' not in sig.parameters:
+            msg = 'data sharding not supported'
+            raise NotImplementedError(msg)
+
+        super().setup(
+            'run',
+            'plain',
+            None,
+            p=1,
+            n=2000_000,
+            ntree=1,
+            mesh=dict(data=2) if sharded else None,
+        )
 
 
 class BaseGbart(AutoParamNames):

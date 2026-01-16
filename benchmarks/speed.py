@@ -37,6 +37,7 @@ from equinox import Module, error_if
 from jax import (
     block_until_ready,
     clear_caches,
+    debug,
     ensure_compile_time_eval,
     eval_shape,
     jit,
@@ -351,9 +352,7 @@ class BaseGbart(AutoParamNames):
             if isinstance(bart, Module):
                 block_until_ready(bart)
             else:
-                block_until_ready(
-                    (bart._mcmc_state, bart._main_trace, bart._burnin_trace)
-                )
+                block_until_ready((bart._mcmc_state, bart._main_trace))
 
 
 class GbartIters(BaseGbart):
@@ -372,6 +371,11 @@ class GbartChains(BaseGbart):
 
     def setup(self, nchains: int, shard: bool):  # ty:ignore[invalid-method-override]
         """Set up to use or not multiple cpus."""
+        # check there is support for multichain
+        if 'mc_cores' not in signature(gbart).parameters:
+            msg = 'multichain not supported'
+            raise NotImplementedError(msg)
+
         super().setup(
             NITERS,
             nchains,
@@ -404,52 +408,38 @@ class BaseRunMcmc(AutoParamNames):
         mode: Mode = 'run',
         cache: Cache = 'warm',
         kwargs: Mapping[str, Any] = MappingProxyType({}),
+        n: int = N,
     ):
         """Prepare the arguments, compile the function, and run to warm-up."""
-
-        def kill_callback(*, bart, i_total, **_):
-            # error_cov_inv (or sigma2 in old versions) is one of the last things
-            # modified in the mcmc loop, so using it as token ensures ordering,
-            # also it does not have n in the dimensionality
-            token_attr = 'sigma2' if hasattr(bart, 'sigma2') else 'error_cov_inv'
-            stop = i_total + 1 == kill_niters  # i_total is updated after callback
-            token = getattr(bart, token_attr)
-            token = error_if(token, stop, self.kill_canary)
-            bart = replace(bart, **{token_attr: token})
-            return bart, None
-
         kw: dict = dict(
             key=random.key(2025_04_25_15_57),
-            bart=simple_init(P, 0, NTREE),
+            bart=simple_init(P, n, NTREE),
             n_save=NITERS,
             n_burn=0,
             n_skip=1,
-            callback=(lambda **_: None) if kill_niters is None else kill_callback,
+            callback=partial(
+                kill_callback, canary=self.kill_canary, kill_niters=kill_niters
+            ),
         )
         kw.update(kwargs)
 
-        # catch bug and skip if found
-        try:
-            array_kw = {k: v for k, v in kw.items() if isinstance(v, jnp.ndarray)}
-            nonarray_kw = {
-                k: v for k, v in kw.items() if not isinstance(v, jnp.ndarray)
-            }
-            partial_run_mcmc = partial(run_mcmc, **nonarray_kw)
-            eval_shape(partial_run_mcmc, **array_kw)
+        # handle different callback name in v0.6.0
+        params = signature(run_mcmc).parameters
+        if 'callback' not in params:
+            kw['inner_callback'] = kw.pop('callback')
 
-        except ZeroDivisionError:
-            if kw['n_save'] + kw['n_burn']:
-                raise
-            else:
-                msg = 'skipping due to division by zero bug with zero iterations'
-                raise NotImplementedError(msg) from None
+        # catch bug and skip if found
+        detect_zero_division_error_bug(kw)
 
         # prepare task to run in benchmark
         match mode:
             case 'compile':
-                f = jit(
-                    run_mcmc, static_argnames=('n_save', 'n_skip', 'n_burn', 'callback')
-                )
+                static_argnames = ('n_save', 'n_skip', 'n_burn')
+                if 'callback' in params:
+                    static_argnames += ('callback',)
+                else:
+                    static_argnames += ('inner_callback',)
+                f = jit(run_mcmc, static_argnames=static_argnames)
 
                 def task():
                     f.clear_cache()
@@ -491,6 +481,44 @@ class BaseRunMcmc(AutoParamNames):
                 raise RuntimeError(msg)
 
 
+def kill_callback(*, canary: str, kill_niters: int | None, bart, i_total, **_):
+    """Throw error `canary` after `kill_niters` in `run_mcmc`.
+
+    Partially evaluate `kill_callback` on the first two arguments before
+    passing it to `run_mcmc`.
+    """
+    if kill_niters is None:
+        return
+    # error_cov_inv (or sigma2 in old versions) is one of the last things
+    # modified in the mcmc loop, so using it as token ensures ordering,
+    # also it does not have n in the dimensionality
+    if isinstance(bart, dict):
+        token = bart['sigma2']
+    elif hasattr(bart, 'sigma2'):
+        token = bart.sigma2
+    else:
+        token = bart.error_cov_inv
+    stop = i_total + 1 == kill_niters  # i_total is updated after callback
+    token = error_if(token, stop, canary)
+    debug.callback(lambda _token: None, token)  # to avoid DCE
+
+
+def detect_zero_division_error_bug(kw: dict):
+    """Detect a division by zero error with 0 iterations in v0.6.0."""
+    try:
+        array_kw = {k: v for k, v in kw.items() if isinstance(v, jnp.ndarray)}
+        nonarray_kw = {k: v for k, v in kw.items() if not isinstance(v, jnp.ndarray)}
+        partial_run_mcmc = partial(run_mcmc, **nonarray_kw)
+        eval_shape(partial_run_mcmc, **array_kw)
+
+    except ZeroDivisionError:
+        if kw['n_save'] + kw['n_burn']:
+            raise
+        else:
+            msg = 'skipping due to division by zero bug with zero iterations'
+            raise NotImplementedError(msg) from None
+
+
 class RunMcmcVsTraceLength(BaseRunMcmc):
     """Timings of `run_mcmc` parametrized by length of the trace to save.
 
@@ -504,7 +532,7 @@ class RunMcmcVsTraceLength(BaseRunMcmc):
     def setup(self, n_save: int):  # ty:ignore[invalid-method-override]
         """Set up to kill after a certain number of iterations."""
         kill_niters = min(self.params[0])
-        super().setup(kill_niters, kwargs=dict(n_save=n_save))
+        super().setup(kill_niters, kwargs=dict(n_save=n_save), n=0)
 
 
 class RunMcmc(BaseRunMcmc):

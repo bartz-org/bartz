@@ -24,7 +24,10 @@
 
 """Measure the predictive performance on test sets."""
 
+from contextlib import redirect_stdout
 from functools import partial
+from inspect import signature
+from io import StringIO
 
 import jax
 from jax import jit, lax, random
@@ -74,17 +77,26 @@ def run_sim_impl(
     keys = split(key)
     train, test = make_data(keys.pop(), n_train, n_test, p)
 
-    bart = gbart(
-        train.x,
-        train.y.squeeze(0),
+    kw: dict = dict(
+        x_train=train.x,
+        y_train=train.y.squeeze(0),
         x_test=test.x,
         nskip=1000,
         ndpost=1000,
         seed=keys.pop(),
-        rm_const=False,
-        printevery=None,
+        rm_const=False,  # needed to jit everything
+        printevery=2001,  # in old versions it can't be set to None
         bart_kwargs=dict(devices=jax.devices(get_default_platform())),
     )
+
+    # adapt for older versions
+    sig = signature(gbart)
+    if 'rm_const' not in sig.parameters:
+        kw.pop('rm_const')
+    if 'bart_kwargs' not in sig.parameters:
+        kw.pop('bart_kwargs')
+
+    bart = gbart(**kw)
 
     return jnp.mean(jnp.square(bart.yhat_test_mean - test.mu.squeeze(0)))
 
@@ -100,4 +112,5 @@ class EvalGbart:
         """Return the RMSE for predictions on a test set."""
         key = random.key(2025_06_26_21_02)
         keys = random.split(key, 30)
-        return run_sim(keys, 50, 30, 5).item()
+        with redirect_stdout(StringIO()):  # bc we can't set printevery=None
+            return run_sim(keys, 50, 30, 5).item()

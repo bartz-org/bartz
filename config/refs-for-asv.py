@@ -1,6 +1,6 @@
 # bartz/config/refs-for-asv.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -26,7 +26,7 @@
 Print a list of git refs for ASV benchmarking.
 
 This script outputs:
-1. All tags on the default branch with commit dates after CUTOFF_DATE
+1. All version tags on the default branch with commit dates after CUTOFF_DATE
 2. The HEAD of the default branch
 
 The output format is one ref per line, suitable for piping to `asv run HASHFILE:-`
@@ -68,7 +68,7 @@ def main():
             commit.committed_date, tz=datetime.timezone.utc
         )
 
-        if commit_date >= CUTOFF_DATE:
+        if commit_date >= CUTOFF_DATE and tag.name.startswith('v'):
             tags_to_include.append((commit_date, tag.name))
 
     # Sort tags by commit date

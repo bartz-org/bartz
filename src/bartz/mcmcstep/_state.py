@@ -25,7 +25,7 @@
 """Module defining the BART MCMC state and initialization."""
 
 from collections.abc import Callable, Hashable
-from dataclasses import Field, fields
+from dataclasses import fields
 from functools import partial, wraps
 from math import ceil, log2
 from typing import Any, Literal, TypeVar
@@ -43,7 +43,7 @@ from bartz.grove import make_tree, tree_depths
 from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 
-def field(*, chains: bool = False, data: bool = False, **kwargs) -> Field:
+def field(*, chains: bool = False, data: bool = False, **kwargs):
     """Extend `equinox.field` with two new parameters.
 
     Parameters

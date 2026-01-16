@@ -30,7 +30,6 @@ from dataclasses import replace
 from functools import partial
 from inspect import signature
 from io import StringIO
-from re import escape, match
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -46,7 +45,6 @@ from jax import (
 )
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
-from jax.tree import map_with_path
 from jax.tree_util import tree_map
 
 import bartz
@@ -90,9 +88,18 @@ def get_default_platform() -> str:
         return jnp.zeros(()).platform()
 
 
-@partial(jit, static_argnums=(0, 1, 2, 3))
-def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs):  # noqa: C901, PLR0915
-    """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
+@partial(jit, static_argnums=(0, 1, 2, 3), static_argnames=('num_chains'))
+def simple_init(  # noqa: C901, PLR0915
+    p: int,
+    n: int,
+    ntree: int,
+    kind: Kind = 'plain',
+    /,
+    *,
+    num_chains: int | None = None,
+    **kwargs,
+):
+    """Glue code to support `mcmcstep.init` across API changes."""
     X, y, max_split = gen_nonsense_data(p, n)
 
     kw: dict = dict(
@@ -108,6 +115,7 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
         min_points_per_decision_node=10,
         filter_splitless_vars=False,
         target_platform=get_default_platform(),
+        num_chains=num_chains,
     )
 
     # adapt arguments for old versions
@@ -134,6 +142,14 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
         kw.update(suffstat_batch_size=None)
     if 'target_platform' not in sig.parameters:
         kw.pop('target_platform')
+
+    # handle number of chains
+    if 'num_chains' not in sig.parameters:
+        if num_chains is None:
+            kw.pop('num_chains')
+        else:
+            msg = 'multichain not supported'
+            raise NotImplementedError(msg)
 
     match kind:
         case 'weights':
@@ -166,107 +182,11 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
 
     kw.update(kwargs)
 
-    state = init(**kw)
-
-    if kind.startswith('vmap-'):
-        axes = vmap_axes_for_state(state)
-        length = int(kind.split('-')[1])
-        state = vmap(lambda x: x, in_axes=None, out_axes=axes, axis_size=length)(state)
-
-    return state
-
-
-def vmap_axes_for_state(state):
-    """Get vmap axes for the MCMC state."""
-
-    def choose_vmap_index(path, _) -> Literal[0, None]:
-        no_vmap_attrs = (
-            'X',
-            'y',
-            'offset',
-            'prec_scale',
-            'sigma2_alpha',
-            'sigma2_beta',
-            'error_cov_df',
-            'error_cov_scale',
-            'max_split',
-            'blocked_vars',
-            'p_nonterminal',
-            'p_propose_grow',
-            'min_points_per_decision_node',
-            'min_points_per_leaf',
-            'sigma_mu2',
-            'leaf_prior_cov_inv',
-            'a',
-            'b',
-            'rho',
-            'sparse_on_at',
-            'steps_done',
-        )
-        str_path = ''.join(map(str, path))
-        if any(match(rf'\b{escape(attr)}\b', str_path) for attr in no_vmap_attrs):
-            return None
-        else:
-            return 0
-
-    return map_with_path(choose_vmap_index, state)
+    return init(**kw)
 
 
 Mode = Literal['compile', 'run']
 Cache = Literal['cold', 'warm']
-
-
-class TimeStep:
-    """Benchmarks of `mcmcstep.step`."""
-
-    params: tuple[tuple[Mode, ...], tuple[Kind, ...]] = (
-        ('compile', 'run'),
-        ('plain', 'binary', 'weights', 'sparse', 'vmap-1', 'vmap-2'),
-    )
-    param_names = ('mode', 'kind')
-
-    def setup(self, mode: Mode, kind: Kind):
-        """Create an initial MCMC state and random seed, compile & warm-up."""
-        key = random.key(2025_06_24_12_07)
-        if kind.startswith('vmap-'):
-            length = int(kind.split('-')[1])
-            keys = list(random.split(key, (2, length)))
-        else:
-            keys = list(random.split(key))
-
-        self.args = (keys, simple_init(P, N, NTREE, kind))
-
-        def func(keys, bart):
-            sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
-            if kind == 'sparse' and sparse_inside_step:
-                bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
-            bart = step(key=keys.pop(), bart=bart)
-            if kind == 'sparse' and not sparse_inside_step:
-                bart = mcmcstep.step_sparse(keys.pop(), bart)
-            return bart
-
-        if kind.startswith('vmap-'):
-            axes = vmap_axes_for_state(self.args[1])
-            func = vmap(func, in_axes=(0, axes), out_axes=axes)
-
-        self.func = func
-        self.compiled_func = jit(func).lower(*self.args).compile()
-        if mode == 'run':
-            block_until_ready(self.compiled_func(*self.args))
-
-    def time_step(self, mode: Mode, _):
-        """Time compiling `step` or running it a few times."""
-        match mode:
-            case 'compile':
-
-                @jit
-                def f(*args):
-                    return self.func(*args)
-
-                f.lower(*self.args).compile()
-
-            case 'run':
-                block_until_ready(self.compiled_func(*self.args))
 
 
 class AutoParamNames:
@@ -278,6 +198,47 @@ class AutoParamNames:
         params = list(sig.parameters)
         assert params[0] == 'self'
         cls.param_names = tuple(params[1:])
+
+
+class TimeStep(AutoParamNames):
+    """Benchmarks of `mcmcstep.step`."""
+
+    params: tuple[tuple[Mode, ...], tuple[Kind, ...], tuple[int | None, ...]] = (
+        ('compile', 'run'),
+        ('plain', 'binary', 'weights', 'sparse'),
+        (None, 1, 2),
+    )
+
+    def setup(self, mode: Mode, kind: Kind, chains: int | None):
+        """Create an initial MCMC state and random seed, compile & warm-up."""
+        keys = list(random.split(random.key(2025_06_24_12_07)))
+
+        self.args = (keys, simple_init(P, N, NTREE, kind, num_chains=chains))
+
+        def func(keys, bart):
+            sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
+            if kind == 'sparse' and sparse_inside_step:
+                bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
+            bart = step(key=keys.pop(), bart=bart)
+            if kind == 'sparse' and not sparse_inside_step:
+                bart = mcmcstep.step_sparse(keys.pop(), bart)  # ty:ignore[unresolved-attribute] in this case it's an old version that has that attribute
+            return bart
+
+        self.jitted_func = jit(func)
+        self.compiled_func = self.jitted_func.lower(*self.args).compile()
+        if mode == 'run':
+            block_until_ready(self.compiled_func(*self.args))
+
+    def time_step(self, mode: Mode, *_):
+        """Time compiling `step` or running it."""
+        match mode:
+            case 'compile':
+                self.jitted_func.clear_cache()
+                self.jitted_func.lower(*self.args).compile()
+            case 'run':
+                block_until_ready(self.compiled_func(*self.args))
+            case _:
+                raise KeyError(mode)
 
 
 class BaseGbart(AutoParamNames):
@@ -295,8 +256,8 @@ class BaseGbart(AutoParamNames):
         niters: int = NITERS,
         nchains: int = 1,
         cache: Cache = 'warm',
-        kwargs: Mapping[str, Any] = MappingProxyType({}),
         profile: bool = False,
+        kwargs: Mapping[str, Any] = MappingProxyType({}),
     ):
         """Prepare the arguments and run once to warm-up."""
         # check support for multiple chains
@@ -337,9 +298,9 @@ class BaseGbart(AutoParamNames):
 
         # set profile mode
         if not profile:
-            self.context = nullcontext()
+            self.context = nullcontext
         elif hasattr(bartz, 'profile_mode'):
-            self.context = bartz.profile_mode(True)
+            self.context = lambda: bartz.profile_mode(True)
         else:
             msg = 'Profile mode not supported.'
             raise NotImplementedError(msg)
@@ -355,7 +316,7 @@ class BaseGbart(AutoParamNames):
 
     def time_gbart(self, *_):
         """Time instantiating the class."""
-        with redirect_stdout(StringIO()), self.context:
+        with redirect_stdout(StringIO()), self.context():
             bart = gbart(**self.kw)
             if isinstance(bart, Module):
                 block_until_ready(bart)
@@ -377,18 +338,23 @@ class GbartIters(BaseGbart):
 class GbartChains(BaseGbart):
     """Time `mc_gbart` vs. the number of chains."""
 
-    params = (
-        (NITERS,),
-        (1, 2, 4, 8, 16, 32),
-        ('warm',),
-        ({}, dict(bart_kwargs=dict(num_chain_devices=None))),
-    )
+    params = ((1, 2, 4, 8, 16, 32), (False, True))
+
+    def setup(self, nchains: int, shard: bool):  # ty:ignore[invalid-method-override]
+        """Set up to use or not multiple cpus."""
+        super().setup(
+            NITERS,
+            nchains,
+            'warm',
+            False,
+            {} if shard else dict(bart_kwargs=dict(num_chain_devices=None)),
+        )
 
 
 class GbartGeneric(BaseGbart):
     """General timing of `mc_gbart` with many settings."""
 
-    params = ((0, NITERS), (1, 6), ('warm', 'cold'), ({},), (False, True))
+    params = ((0, NITERS), (1, 6), ('warm', 'cold'), (False, True))
 
 
 class BaseRunMcmc(AutoParamNames):

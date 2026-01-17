@@ -88,7 +88,9 @@ def run_sim_impl(
         nskip=1000,
         ndpost=1000,
         seed=keys.pop(),
-        rm_const=False,  # needed to jit everything
+        rm_const=None,  # needed to jit everything
+        # None is needed for old versions, still works in place of False in new
+        # ones
         printevery=2001,  # in old versions it can't be set to None
         bart_kwargs=dict(devices=jax.devices(get_default_platform())),
         mc_cores=1,

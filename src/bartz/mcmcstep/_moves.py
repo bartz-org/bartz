@@ -111,7 +111,7 @@ class Moves(Module):
     to_prune: None | Bool[Array, '*chains num_trees'] = field(chains=True)
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(1,))
+@jit_and_block_if_profiling
 @vmap_chains
 def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
     """

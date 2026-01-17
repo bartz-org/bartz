@@ -1,6 +1,6 @@
-# bartz/src/bartz/mcmcstep/__init__.py
+# bartz/src/bartz/testing/__init__.py
 #
-# Copyright (c) 2025-2026, The Bartz Contributors
+# Copyright (c) 2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -22,14 +22,8 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""
-Functions that implement the BART posterior MCMC initialization and update step.
-
-  - `init`: Creates an initial `State` from data and configurations.
-  - `step`: Performs one full MCMC step on a `State`, returning a new `State`.
-"""
+"""Testing utilities."""
 
 # ruff: noqa: F401
 
-from bartz.mcmcstep._state import Forest, State, StepConfig, init, make_p_nonterminal
-from bartz.mcmcstep._step import step
+from bartz.testing._dgp import DGP, gen_data

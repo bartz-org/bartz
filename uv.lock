@@ -150,7 +150,6 @@ ci = [
     { name = "pytest-cov" },
     { name = "pytest-subtests" },
     { name = "pytest-timeout" },
-    { name = "pytest-timer", extra = ["termcolor"] },
     { name = "pytest-xdist" },
     { name = "rpy2" },
     { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -196,7 +195,6 @@ ci = [
     { name = "pytest-cov", specifier = ">=6.1.1" },
     { name = "pytest-subtests", specifier = ">=0.14.1" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
-    { name = "pytest-timer", extras = ["termcolor"], specifier = ">=1.0.0" },
     { name = "pytest-xdist", specifier = ">=3.6.1" },
     { name = "rpy2", specifier = ">=3.5.17" },
     { name = "sphinx", specifier = ">=8.1.3" },
@@ -2188,23 +2186,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pytest-timer"
-version = "1.0.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pytest" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b1/f7/bc223798d5cccf2f03ed224a6fdceae005d06ae33fbd302741da9eb9e95a/pytest-timer-1.0.0.tar.gz", hash = "sha256:c65a36970e4425c0fd43bdf63b60359b353382632b08418c7c25918ec18a3829", size = 5812, upload-time = "2023-12-26T22:21:42.447Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/91/48/486b6ff8b910852affeab5b628910f8faa861450a37c21c19902b798ebda/pytest_timer-1.0.0-py3-none-any.whl", hash = "sha256:60f16a6d98dd5e8ce3e57ece829592f6e081e18be9f1b20e5bc93e5e7196b065", size = 5331, upload-time = "2023-12-26T22:21:40.947Z" },
-]
-
-[package.optional-dependencies]
-termcolor = [
-    { name = "termcolor" },
-]
-
-[[package]]
 name = "pytest-xdist"
 version = "3.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2869,15 +2850,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/ec/fe/802052aecb21e3797b8f7902564ab6ea0d60ff8ca23952079064155d1ae1/tabulate-0.9.0.tar.gz", hash = "sha256:0095b12bf5966de529c0feb1fa08671671b3368eec77d7ef7ab114be2c068b3c", size = 81090, upload-time = "2022-10-06T17:21:48.54Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/40/44/4a5f08c96eb108af5cb50b41f76142f0afa346dfa99d5296fe7202a11854/tabulate-0.9.0-py3-none-any.whl", hash = "sha256:024ca478df22e9340661486f85298cff5f6dcdba14f3813e8830015b9ed1948f", size = 35252, upload-time = "2022-10-06T17:21:44.262Z" },
-]
-
-[[package]]
-name = "termcolor"
-version = "3.2.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/87/56/ab275c2b56a5e2342568838f0d5e3e66a32354adcc159b495e374cda43f5/termcolor-3.2.0.tar.gz", hash = "sha256:610e6456feec42c4bcd28934a8c87a06c3fa28b01561d46aa09a9881b8622c58", size = 14423, upload-time = "2025-10-25T19:11:42.586Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f9/d5/141f53d7c1eb2a80e6d3e9a390228c3222c27705cbe7f048d3623053f3ca/termcolor-3.2.0-py3-none-any.whl", hash = "sha256:a10343879eba4da819353c55cb8049b0933890c2ebf9ad5d3ecd2bb32ea96ea6", size = 7698, upload-time = "2025-10-25T19:11:41.536Z" },
 ]
 
 [[package]]

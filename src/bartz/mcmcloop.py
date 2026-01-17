@@ -44,6 +44,7 @@ from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, PyTree, Shaped,
 from bartz import jaxext, mcmcstep
 from bartz._profiler import (
     cond_if_not_profiling,
+    get_profile_mode,
     jit_if_not_profiling,
     scan_if_not_profiling,
 )
@@ -263,6 +264,12 @@ def run_mcmc(
     main_trace : PyTree[Shaped[Array, 'n_save *']]
         The trace of the main phase. For the default layout, see `MainTrace`.
 
+    Raises
+    ------
+    RuntimeError
+        If `run_mcmc` detects it's being invoked in a `jit`-wrapped context and
+        with settings that would create unrolled loops in the trace.
+
     Notes
     -----
     The number of MCMC updates is ``n_burn + n_skip * n_save``. The traces do
@@ -281,6 +288,17 @@ def run_mcmc(
         n_outer = 1
         # setting to 0 would make for a clean noop, but it's useful to keep the
         # same code path for benchmarking and testing
+
+    # error if under jit and there are unrolled loops or profile mode is on
+    under_jit = not hasattr(jnp.zeros(()), 'platform')
+    if under_jit and (n_outer > 1 or get_profile_mode()):
+        msg = (
+            '`run_mcmc` was called within a jit-compiled function and '
+            'there are either more than 1 outer loops or profile mode is active, '
+            'please either do not jit, set `inner_loop_length=None`, or disable '
+            'profile mode.'
+        )
+        raise RuntimeError(msg)
 
     carry = _Carry(bart, jnp.int32(0), key, burnin_trace, main_trace, callback_state)
     for i_outer in range(n_outer):

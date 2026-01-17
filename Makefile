@@ -79,7 +79,7 @@ setup:
 ################# TESTS #################
 
 TESTS_VARS = COVERAGE_FILE=.coverage.tests$(COVERAGE_SUFFIX)
-TESTS_COMMAND = python -m pytest --cov --cov-context=test --numprocesses=2 --dist=worksteal
+TESTS_COMMAND = python -m pytest --cov --cov-context=test --numprocesses=2 --dist=worksteal --durations=1000
 
 UV_RUN_CI = uv run --group=ci
 UV_OPTS_OLD = --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE)
@@ -189,7 +189,7 @@ ASV = $(UV_RUN_CI) python -m asv
 
 .PHONY: asv-run
 asv-run:
-	$(UV_RUN_CI) python config/refs-for-asv.py | $(ASV) run --skip-existing --show-stderr HASHFILE:- $(ARGS)
+	$(UV_RUN_CI) python config/refs-for-asv.py | $(ASV) run --skip-existing-successful --show-stderr HASHFILE:- $(ARGS)
 
 .PHONY: asv-publish
 asv-publish:

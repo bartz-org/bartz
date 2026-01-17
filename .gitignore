@@ -4,6 +4,9 @@ dist/
 .coverage*
 .venv/
 
+# Vendored latest bartz for benchmarks (auto-generated)
+benchmarks/latest_bartz/
+
 # jax tracer
 **/????_??_??_??_??_??/ALL_HOSTS.op_stats.pb
 **/????_??_??_??_??_??/cache_version.txt
@@ -15,3 +18,6 @@ dist/
 
 # python profiler
 *.prof
+
+# editor
+.zed/

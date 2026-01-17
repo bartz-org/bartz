@@ -25,104 +25,103 @@
 """Measure the predictive performance on test sets."""
 
 from contextlib import redirect_stdout
-from dataclasses import dataclass
 from functools import partial
+from inspect import signature
 from io import StringIO
 
-from jax import jit, random, vmap
+import jax
+from jax import jit, lax, random
 from jax import numpy as jnp
+from jaxtyping import Array, Float32, Key
 
-from bartz.BART import gbart
+try:
+    from bartz.BART import mc_gbart
+except ImportError:
+    from bartz.BART import gbart as mc_gbart  # pre v0.8.0
 
-
-@partial(jit, static_argnums=(1, 2))
-def simulate_data(key, n: int, p: int, max_interactions):
-    """Simulate data for regression.
-
-    This uses data-based standardization, so you have to generate train &
-    test at once.
-    """
-    # split random key
-    keys = list(random.split(key, 4))
-
-    # generate matrices
-    X = random.uniform(keys.pop(), (p, n))
-    beta = random.normal(keys.pop(), (p,))
-    A = random.normal(keys.pop(), (p, p))
-    error = random.normal(keys.pop(), (n,))
-
-    # make A banded to limit the number of interactions
-    num_nonzero = 1 + (max_interactions - 1) // 2
-    num_nonzero = jnp.clip(num_nonzero, 0, p)
-    interaction_pattern = jnp.arange(p) < num_nonzero
-    multi_roll = vmap(jnp.roll, in_axes=(None, 0))
-    nonzero = multi_roll(interaction_pattern, jnp.arange(p))
-    A *= nonzero
-
-    # compute terms
-    linear = beta @ X
-    quadratic = jnp.einsum('ai,bi,ab->i', X, X, A)
-
-    # equalize the terms
-    mu = linear / jnp.std(linear) + quadratic / jnp.std(quadratic)
-    mu /= jnp.std(mu)  # because linear and quadratic are correlated
-
-    return X, mu, error
+from benchmarks.latest_bartz.jaxext import split
+from benchmarks.latest_bartz.testing import DGP, gen_data
+from benchmarks.speed import get_default_platform
 
 
-@dataclass(frozen=True)
-class Data:
-    """Data for regression."""
-
-    X_train: jnp.ndarray
-    mu_train: jnp.ndarray
-    error_train: jnp.ndarray
-    X_test: jnp.ndarray
-    mu_test: jnp.ndarray
-    error_test: jnp.ndarray
-
-    @property
-    def y_train(self):
-        """Return the training targets."""
-        return self.mu_train + self.error_train
-
-    @property
-    def y_test(self):
-        """Return the test targets."""
-        return self.mu_test + self.error_test
-
-
-def make_data(key, n_train: int, n_test: int, p: int) -> Data:
+def make_data(
+    key: Key[Array, ''], n_train: int, n_test: int, p: int
+) -> tuple[DGP, DGP]:
     """Simulate data and split in train-test set."""
-    X, mu, error = simulate_data(key, n_train + n_test, p, 5)
-    return Data(
-        X[:, :n_train],
-        mu[:n_train],
-        error[:n_train],
-        X[:, n_train:],
-        mu[n_train:],
-        error[n_train:],
+    return gen_data(
+        key,
+        n=n_train + n_test,
+        p=p,
+        k=1,
+        q=2,
+        lam=0,
+        sigma2_lin=0.5,
+        sigma2_quad=0.5,
+        sigma2_eps=0.2,
+        # the function `run_sim_impl` below compares the prediction with the
+        # true latent mean, so the mse lower bound is 0 rather than sigma2_eps,
+        # so the total latent variance is 1 to have a nice reference.
+    ).split(n_train)
+
+
+@partial(jit, static_argnums=(1, 2, 3))
+def run_sim(
+    keys: Key[Array, ' nreps'], n_train: int, n_test: int, p: int
+) -> Float32[Array, '']:
+    """Run simulation experiment for each key in `keys`, return avg mse."""
+    run_sim_loop = lambda key: run_sim_impl(key, n_train, n_test, p)
+    mses = lax.map(run_sim_loop, keys)
+    return jnp.mean(mses)
+
+
+def run_sim_impl(
+    key: Key[Array, ' nreps'], n_train: int, n_test: int, p: int
+) -> Float32[Array, '']:
+    """Simulate data, run gbart, return mse."""
+    keys = split(key)
+    train, test = make_data(keys.pop(), n_train, n_test, p)
+
+    kw: dict = dict(
+        x_train=train.x,
+        y_train=train.y.squeeze(0),
+        x_test=test.x,
+        nskip=1000,
+        ndpost=1000,
+        seed=keys.pop(),
+        rm_const=None,  # needed to jit everything
+        # None is needed for old versions, still works in place of False in new
+        # ones
+        printevery=2001,  # in old versions it can't be set to None
+        bart_kwargs=dict(devices=jax.devices(get_default_platform())),
+        mc_cores=1,
     )
+
+    # adapt for older versions
+    sig = signature(mc_gbart)
+
+    def drop_if_missing(arg: str):
+        if arg not in sig.parameters:
+            kw.pop(arg)
+
+    drop_if_missing('rm_const')
+    drop_if_missing('bart_kwargs')
+    drop_if_missing('mc_cores')
+
+    bart = mc_gbart(**kw)
+
+    return jnp.mean(jnp.square(bart.yhat_test_mean - test.mu.squeeze(0)))
 
 
 class EvalGbart:
     """Out-of-sample evaluation of gbart."""
 
     # asv config
-    timeout = 120.0
-    unit = 'latent_sdev'
+    timeout = 300
+    unit = 'latent_var'
 
-    def track_rmse(self) -> float:
+    def track_mse(self) -> float:
         """Return the RMSE for predictions on a test set."""
         key = random.key(2025_06_26_21_02)
-        data = make_data(key, 100, 1000, 20)
-        with redirect_stdout(StringIO()):
-            bart = gbart(
-                data.X_train,
-                data.y_train,
-                x_test=data.X_test,
-                nskip=1000,
-                ndpost=1000,
-                seed=key,
-            )
-        return jnp.sqrt(jnp.mean(jnp.square(bart.yhat_test_mean - data.mu_test))).item()
+        keys = random.split(key, 30)
+        with redirect_stdout(StringIO()):  # bc we can't set printevery=None
+            return run_sim(keys, 50, 30, 5).item()

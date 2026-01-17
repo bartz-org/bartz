@@ -328,7 +328,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
 
       - name: run IPython
-        run: make ipython ARGS=config/ipython/profile_default/startup/startup.ipy
+        run: RPY2_CFFI_MODE=ABI make ipython ARGS=config/ipython/profile_default/startup/startup.ipy
 
       - name: run IPython with old toolchain
         run: RPY2_CFFI_MODE=ABI make ipython-old ARGS=config/ipython/profile_default/startup/startup.ipy

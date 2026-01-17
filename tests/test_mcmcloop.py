@@ -28,14 +28,16 @@ from functools import partial
 
 import pytest
 from equinox import filter_jit
-from jax import debug_key_reuse, vmap
+from jax import debug_key_reuse, jit, vmap
 from jax import numpy as jnp
 from jax.tree import map_with_path
 from jax.tree_util import tree_map
 from jaxtyping import Array, Float32, UInt8
 from numpy.testing import assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
+from pytest_subtests import SubTests
 
+from bartz import profile_mode
 from bartz.jaxext import get_default_device, split
 from bartz.mcmcloop import run_mcmc
 from bartz.mcmcstep import State, init
@@ -70,7 +72,7 @@ def make_p_nonterminal(maxdepth: int) -> Float32[Array, ' {maxdepth}-1']:
 
 
 @filter_jit
-def simple_init(p: int, n: int, ntree: int, k: int | None, **kwargs) -> State:
+def simple_init(p: int, n: int, ntree: int, k: int | None = None, **kwargs) -> State:
     """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
     X, y, max_split = gen_data(p, n, k)
     eye = 1.0 if k is None else jnp.eye(k)
@@ -85,7 +87,6 @@ def simple_init(p: int, n: int, ntree: int, k: int | None, **kwargs) -> State:
         error_cov_df=2,
         error_cov_scale=2 * eye,
         min_points_per_decision_node=10,
-        filter_splitless_vars=False,
         target_platform=get_default_device().platform,
         **kwargs,
     )
@@ -159,3 +160,23 @@ class TestRunMcmc:
 
         check_trace(burnin_trace)
         check_trace(main_trace)
+
+    def test_jit_error(self, keys: split, subtests: SubTests):
+        """Check that an error is raised under jit in some conditions."""
+        initial_state = simple_init(10, 100, 20)
+
+        compiled_run_mcmc = jit(
+            run_mcmc, static_argnames=('n_save', 'inner_loop_length')
+        )
+
+        msg = r'there are either more than 1 outer loops'
+
+        with subtests.test('outer loops'), pytest.raises(RuntimeError, match=msg):
+            compiled_run_mcmc(keys.pop(), initial_state, 2, inner_loop_length=1)
+
+        with (
+            subtests.test('profile mode'),
+            profile_mode(True),
+            pytest.raises(RuntimeError, match=msg),
+        ):
+            compiled_run_mcmc(keys.pop(), initial_state, 1)

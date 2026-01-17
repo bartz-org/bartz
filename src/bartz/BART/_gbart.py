@@ -102,10 +102,7 @@ class mc_gbart(Module):
     rm_const
         How to treat predictors with no associated decision rules (i.e., there
         are no available cutpoints for that predictor). If `True` (default),
-        they are ignored. If `False`, an error is raised if there are any. If
-        `None`, no check is performed, and the output of the MCMC may not make
-        sense if there are predictors without cutpoints. The option `None` is
-        provided only to allow jax tracing.
+        they are ignored. If `False`, an error is raised if there are any.
     sigest
         An estimate of the residual standard deviation on `y_train`, used to set
         `lamda`. If not specified, it is estimated by linear regression (with
@@ -235,7 +232,7 @@ class mc_gbart(Module):
         rho: FloatLike | None = None,
         xinfo: Float[Array, 'p n'] | None = None,
         usequants: bool = False,
-        rm_const: bool | None = True,
+        rm_const: bool = True,
         sigest: FloatLike | None = None,
         sigdf: FloatLike = 3.0,
         sigquant: FloatLike = 0.9,

@@ -24,21 +24,20 @@
 
 """Measure the speed of the MCMC and its interfaces."""
 
-from contextlib import redirect_stdout
+from collections.abc import Mapping
+from contextlib import nullcontext, redirect_stdout
 from dataclasses import replace
 from functools import partial
 from inspect import signature
 from io import StringIO
-from itertools import product
-from re import escape, match
-from typing import Literal
+from types import MappingProxyType
+from typing import Any, Literal
 
-import jax
-from asv_runner.benchmarks.mark import skip_for_params
-from equinox import error_if
+from equinox import Module, error_if
 from jax import (
     block_until_ready,
     clear_caches,
+    debug,
     ensure_compile_time_eval,
     eval_shape,
     jit,
@@ -47,11 +46,14 @@ from jax import (
 )
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
-from jax.tree import map_with_path
+from jax.sharding import Mesh
 from jax.tree_util import tree_map
+from jaxtyping import Array, Float32, UInt8
 
+import bartz
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
+from benchmarks.latest_bartz.jaxext import split
 
 try:
     from bartz.BART import mc_gbart as gbart
@@ -59,6 +61,8 @@ except ImportError:
     from bartz.BART import gbart
 
 from bartz.mcmcstep import init, step
+from benchmarks.latest_bartz.mcmcstep import make_p_nonterminal
+from benchmarks.latest_bartz.testing import gen_data
 
 # asv config
 timeout = 30.0
@@ -70,7 +74,10 @@ NTREE = 50
 NITERS = 10
 
 
-def gen_data(p: int, n: int):
+@partial(jit, static_argnums=(0, 1))
+def gen_nonsense_data(
+    p: int, n: int
+) -> tuple[UInt8[Array, '{p} {n}'], Float32[Array, ' {n}'], UInt8[Array, ' {p}']]:
     """Generate pretty nonsensical data."""
     X = jnp.arange(p * n, dtype=jnp.uint8).reshape(p, n)
     X = vmap(jnp.roll)(X, jnp.arange(p))
@@ -79,15 +86,7 @@ def gen_data(p: int, n: int):
     return X, y, max_split
 
 
-def make_p_nonterminal(maxdepth: int):
-    """Prepare the p_nonterminal argument to `mcmcstep.init`."""
-    depth = jnp.arange(maxdepth - 1)
-    base = 0.95
-    power = 2
-    return base / (1 + depth).astype(float) ** power
-
-
-Kind = Literal['plain', 'weights', 'binary', 'sparse', 'vmap-1', 'vmap-2']
+Kind = Literal['plain', 'weights', 'binary', 'sparse']
 
 
 def get_default_platform() -> str:
@@ -96,10 +95,18 @@ def get_default_platform() -> str:
         return jnp.zeros(()).platform()
 
 
-@partial(jit, static_argnums=(0, 1, 2, 3))
-def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs):  # noqa: C901, PLR0915
-    """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
-    X, y, max_split = gen_data(p, n)
+def simple_init(  # noqa: C901, PLR0915
+    p: int,
+    n: int,
+    ntree: int,
+    kind: Kind = 'plain',
+    *,
+    num_chains: int | None = None,
+    mesh: dict[str, int] | Mesh | None = None,
+    **kwargs,
+):
+    """Glue code to support `mcmcstep.init` across API changes."""
+    X, y, max_split = gen_nonsense_data(p, n)
 
     kw: dict = dict(
         X=X,
@@ -107,13 +114,13 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
         offset=0.0,
         max_split=max_split,
         num_trees=ntree,
-        p_nonterminal=make_p_nonterminal(6),
+        p_nonterminal=make_p_nonterminal(6, 0.95, 2),
         leaf_prior_cov_inv=jnp.float32(ntree),
         error_cov_df=2.0,
         error_cov_scale=2.0,
         min_points_per_decision_node=10,
-        filter_splitless_vars=False,
-        target_platform=get_default_platform(),
+        num_chains=num_chains,
+        mesh=mesh,
     )
 
     # adapt arguments for old versions
@@ -133,13 +140,21 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
     if 'min_points_per_decision_node' not in sig.parameters:
         kw.pop('min_points_per_decision_node')
         kw.update(min_points_per_leaf=5)
-    if 'filter_splitless_vars' not in sig.parameters:
-        kw.pop('filter_splitless_vars')
     if 'suffstat_batch_size' in sig.parameters:
         # bypass the tracing bug fixed in v0.2.1
         kw.update(suffstat_batch_size=None)
-    if 'target_platform' not in sig.parameters:
-        kw.pop('target_platform')
+    if 'mesh' not in sig.parameters:
+        if mesh is None:
+            kw.pop('mesh')
+        else:
+            msg = 'mesh not supported.'
+            raise NotImplementedError(msg)
+    if 'num_chains' not in sig.parameters:
+        if num_chains is None:
+            kw.pop('num_chains')
+        else:
+            msg = 'multichain not supported'
+            raise NotImplementedError(msg)
 
     match kind:
         case 'weights':
@@ -172,146 +187,41 @@ def simple_init(p: int, n: int, ntree: int, kind: Kind = 'plain', /, **kwargs): 
 
     kw.update(kwargs)
 
-    state = init(**kw)
-
-    if kind.startswith('vmap-'):
-        axes = vmap_axes_for_state(state)
-        length = int(kind.split('-')[1])
-        state = vmap(lambda x: x, in_axes=None, out_axes=axes, axis_size=length)(state)
-
-    return state
-
-
-def vmap_axes_for_state(state):
-    """Get vmap axes for the MCMC state."""
-
-    def choose_vmap_index(path, _) -> Literal[0, None]:
-        no_vmap_attrs = (
-            'X',
-            'y',
-            'offset',
-            'prec_scale',
-            'sigma2_alpha',
-            'sigma2_beta',
-            'error_cov_df',
-            'error_cov_scale',
-            'max_split',
-            'blocked_vars',
-            'p_nonterminal',
-            'p_propose_grow',
-            'min_points_per_decision_node',
-            'min_points_per_leaf',
-            'sigma_mu2',
-            'leaf_prior_cov_inv',
-            'a',
-            'b',
-            'rho',
-            'sparse_on_at',
-            'steps_done',
-        )
-        str_path = ''.join(map(str, path))
-        if any(match(rf'\b{escape(attr)}\b', str_path) for attr in no_vmap_attrs):
-            return None
-        else:
-            return 0
-
-    return map_with_path(choose_vmap_index, state)
+    return init(**kw)
 
 
 Mode = Literal['compile', 'run']
 Cache = Literal['cold', 'warm']
 
 
-class TimeRunMcmc:
-    """Timings of `run_mcmc`."""
+class AutoParamNames:
+    """Superclass that automatically sets `param_names` on subclasses."""
 
-    # asv config
-    params: tuple[tuple[Mode, ...], tuple[int, ...], tuple[Cache, ...]] = (
-        ('compile', 'run'),
-        (0, NITERS),
-        ('cold', 'warm'),
-    )
-    param_names = ('mode', 'niters', 'cache')
-    warmup_time = 0.0
-    number = 1
-
-    def setup(self, mode: Mode, niters: int, cache: Cache):
-        """Prepare the arguments, compile the function, and run to warm-up."""
-        self.kw = dict(
-            key=random.key(2025_04_25_15_57),
-            bart=simple_init(P, N, NTREE),
-            n_save=niters // 2,
-            n_burn=niters // 2,
-            n_skip=1,
-            callback=lambda **_: None,
-        )
-
-        # catch bug and skip if found
-        try:
-            array_kw = {k: v for k, v in self.kw.items() if isinstance(v, jnp.ndarray)}
-            nonarray_kw = {
-                k: v for k, v in self.kw.items() if not isinstance(v, jnp.ndarray)
-            }
-            partial_run_mcmc = partial(run_mcmc, **nonarray_kw)
-            eval_shape(partial_run_mcmc, **array_kw)
-        except ZeroDivisionError:
-            if niters:
-                raise
-            else:
-                msg = 'skipping due to division by zero bug with zero iterations'
-                raise NotImplementedError(msg) from None
-
-        # decide how much to cold-start
-        match cache:
-            case 'cold':
-                clear_caches()
-            case 'warm':
-                # prepare copies of the args because of buffer donation
-                key = jnp.copy(self.kw['key'])
-                bart = tree_map(jnp.copy, self.kw['bart'])
-                self.time_run_mcmc(mode)
-                # put copies in place of donated buffers
-                self.kw.update(key=key, bart=bart)
-
-    # skip compile with 0 iters bc in past versions 0 iters had a noop code path
-    @skip_for_params(list(product(['compile'], [0], params[2])))
-    def time_run_mcmc(self, mode: Mode, *_):
-        """Time running or compiling the function."""
-        match mode:
-            case 'compile':
-                # re-wrap and jit the function in the benchmark case because otherwise
-                # the compiled function gets cached even if I call `compile` explicitly
-                @partial(
-                    jit, static_argnames=('n_save', 'n_skip', 'n_burn', 'callback')
-                )
-                def f(**kw):
-                    return run_mcmc(**kw)
-
-                f.lower(**self.kw).compile()
-
-            case 'run':
-                block_until_ready(run_mcmc(**self.kw))
+    def __init_subclass__(cls, **_):
+        method = cls.setup
+        sig = signature(method)
+        params = list(sig.parameters)
+        assert params[0] == 'self'
+        cls.param_names = tuple(params[1:])
 
 
-class TimeStep:
+class StepGeneric(AutoParamNames):
     """Benchmarks of `mcmcstep.step`."""
 
-    params: tuple[tuple[Mode, ...], tuple[Kind, ...]] = (
+    params: tuple[tuple[Mode, ...], tuple[Kind, ...], tuple[int | None, ...]] = (
         ('compile', 'run'),
-        ('plain', 'binary', 'weights', 'sparse', 'vmap-1', 'vmap-2'),
+        ('plain', 'binary', 'weights', 'sparse'),
+        (None, 1, 2),
     )
-    param_names = ('mode', 'kind')
 
-    def setup(self, mode: Mode, kind: Kind):
+    def setup(self, mode: Mode, kind: Kind, chains: int | None, **kwargs):
         """Create an initial MCMC state and random seed, compile & warm-up."""
-        key = random.key(2025_06_24_12_07)
-        if kind.startswith('vmap-'):
-            length = int(kind.split('-')[1])
-            keys = list(random.split(key, (2, length)))
-        else:
-            keys = list(random.split(key))
+        keys = list(random.split(random.key(2025_06_24_12_07)))
 
-        self.args = (keys, simple_init(P, N, NTREE, kind))
+        kw: dict = dict(p=P, n=N, ntree=NTREE, kind=kind, num_chains=chains)
+        kw.update(kwargs)
+
+        self.args = (keys, simple_init(**kw))
 
         def func(keys, bart):
             sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
@@ -319,53 +229,70 @@ class TimeStep:
                 bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
             bart = step(key=keys.pop(), bart=bart)
             if kind == 'sparse' and not sparse_inside_step:
-                bart = mcmcstep.step_sparse(keys.pop(), bart)
+                bart = mcmcstep.step_sparse(keys.pop(), bart)  # ty:ignore[unresolved-attribute] in this case it's an old version that has that attribute
             return bart
 
-        if kind.startswith('vmap-'):
-            axes = vmap_axes_for_state(self.args[1])
-            func = vmap(func, in_axes=(0, axes), out_axes=axes)
-
-        self.func = func
-        self.compiled_func = jit(func).lower(*self.args).compile()
+        self.jitted_func = jit(func)
+        self.compiled_func = self.jitted_func.lower(*self.args).compile()
         if mode == 'run':
             block_until_ready(self.compiled_func(*self.args))
+        self.mode = mode
 
-    def time_step(self, mode: Mode, _):
-        """Time compiling `step` or running it a few times."""
-        match mode:
+    def time_step(self, *_):
+        """Time compiling `step` or running it."""
+        match self.mode:
             case 'compile':
-
-                @jit
-                def f(*args):
-                    return self.func(*args)
-
-                f.lower(*self.args).compile()
-
+                self.jitted_func.clear_cache()
+                self.jitted_func.lower(*self.args).compile()
             case 'run':
                 block_until_ready(self.compiled_func(*self.args))
+            case _:
+                raise KeyError(self.mode)
 
 
-class TimeGbart:
-    """Benchmarks of `BART.mc_gbart`."""
+class StepSharded(StepGeneric):
+    """Benchmark `mcmcstep.step` with sharded data."""
+
+    params = ((False, True),)
+
+    def setup(self, sharded: bool):  # ty:ignore[invalid-method-override]
+        """Set up with settings that make the effect of sharding salient."""
+        sig = signature(init)
+        if 'mesh' not in sig.parameters:
+            msg = 'data sharding not supported'
+            raise NotImplementedError(msg)
+
+        super().setup(
+            'run',
+            'plain',
+            None,
+            p=1,
+            n=2000_000,
+            ntree=1,
+            mesh=dict(data=2) if sharded else None,
+        )
+
+
+class BaseGbart(AutoParamNames):
+    """Base class to benchmark `mc_gbart`."""
 
     # asv config
-    params: tuple[tuple[int, ...], tuple[Cache, ...], tuple[int, ...]] = (
-        (0, NITERS),
-        ('cold', 'warm'),
-        (1, 2, 8, 32),
-    )
-    param_names = ('niters', 'cache', 'nchains')
+    # the param list is empty in this class, this makes asv skip this class
+    # instead of considering it a benchmark to run
+    params = ((),)
     warmup_time = 0.0
     number = 1
 
-    def setup(self, niters: int, cache: Cache, nchains: int):
+    def setup(
+        self,
+        niters: int = NITERS,
+        nchains: int = 1,
+        cache: Cache = 'warm',
+        profile: bool = False,
+        kwargs: Mapping[str, Any] = MappingProxyType({}),
+    ):
         """Prepare the arguments and run once to warm-up."""
         # check support for multiple chains
-        if (niters == 0 or cache == 'cold') and nchains > 1:
-            msg = 'skip multi-chain with 0 iterations or cold cache'
-            raise NotImplementedError(msg)
-
         sig = signature(gbart)
         support_multichain = 'mc_cores' in sig.parameters
         if nchains != 1 and not support_multichain:
@@ -373,26 +300,42 @@ class TimeGbart:
             raise NotImplementedError(msg)
 
         # random seed
-        key = random.key(2025_06_24_14_55)
-        keys = list(random.split(key, 3))
+        keys = split(random.key(2025_06_24_14_55))
 
         # generate simulated data
-        sigma = 0.1
-        T = 2
-        X = random.uniform(keys.pop(), (P, N), float, -2, 2)
-        f = lambda X: jnp.sum(jnp.cos(2 * jnp.pi / T * X), axis=0)
-        y = f(X) + sigma * random.normal(keys.pop(), (N,))
+        dgp = gen_data(
+            keys.pop(),
+            n=N,
+            p=P,
+            k=1,
+            q=2,
+            lam=0,
+            sigma2_lin=0.4,
+            sigma2_quad=0.4,
+            sigma2_eps=0.2,
+        )
 
         # arguments
         self.kw = dict(
-            x_train=X,
-            y_train=y,
+            x_train=dgp.x,
+            y_train=dgp.y.squeeze(0),
+            ntree=NTREE,
             nskip=niters // 2,
             ndpost=(niters - niters // 2) * nchains,
             seed=keys.pop(),
         )
         if support_multichain:
             self.kw.update(mc_cores=nchains)
+        self.kw.update(kwargs)
+
+        # set profile mode
+        if not profile:
+            self.context = nullcontext
+        elif hasattr(bartz, 'profile_mode'):
+            self.context = lambda: bartz.profile_mode(True)
+        else:
+            msg = 'Profile mode not supported.'
+            raise NotImplementedError(msg)
 
         # decide how much to cold-start
         match cache:
@@ -400,15 +343,184 @@ class TimeGbart:
                 clear_caches()
             case 'warm':
                 self.time_gbart()
+            case _:
+                raise KeyError(cache)
 
     def time_gbart(self, *_):
         """Time instantiating the class."""
-        with redirect_stdout(StringIO()):
+        with redirect_stdout(StringIO()), self.context():
             bart = gbart(**self.kw)
-            block_until_ready((bart._mcmc_state, bart._main_trace))
+            if isinstance(bart, Module):
+                block_until_ready(bart)
+            else:
+                block_until_ready((bart._mcmc_state, bart._main_trace))
 
 
-class TimeRunMcmcVsTraceLength:
+class GbartIters(BaseGbart):
+    """Time `mc_gbart` vs. the number of iterations.
+
+    This is useful to distinguish the startup time from the time per iteration.
+    """
+
+    params = ((0, NITERS, 2 * NITERS, 3 * NITERS, 4 * NITERS, 5 * NITERS),)
+
+
+class GbartChains(BaseGbart):
+    """Time `mc_gbart` vs. the number of chains."""
+
+    params = ((1, 2, 4, 8, 16, 32), (False, True))
+
+    def setup(self, nchains: int, shard: bool):  # ty:ignore[invalid-method-override]
+        """Set up to use or not multiple cpus."""
+        # check there is support for multichain
+        if 'mc_cores' not in signature(gbart).parameters:
+            msg = 'multichain not supported'
+            raise NotImplementedError(msg)
+
+        super().setup(
+            NITERS,
+            nchains,
+            'warm',
+            False,
+            {} if shard else dict(bart_kwargs=dict(num_chain_devices=None)),
+        )
+
+
+class GbartGeneric(BaseGbart):
+    """General timing of `mc_gbart` with many settings."""
+
+    params = ((0, NITERS), (1, 6), ('warm', 'cold'), (False, True))
+
+
+class BaseRunMcmc(AutoParamNames):
+    """Base class to benchmark `run_mcmc`."""
+
+    # asv config
+    params = ((),)  # empty to make asv skip this class
+    warmup_time = 0.0
+    number = 1
+
+    # other config
+    kill_canary = 'kill-canary happy-chinese-voiceover'
+
+    def setup(
+        self,
+        kill_niters: int | None = None,
+        mode: Mode = 'run',
+        cache: Cache = 'warm',
+        kwargs: Mapping[str, Any] = MappingProxyType({}),
+        n: int = N,
+    ):
+        """Prepare the arguments, compile the function, and run to warm-up."""
+        kw: dict = dict(
+            key=random.key(2025_04_25_15_57),
+            bart=simple_init(P, n, NTREE),
+            n_save=NITERS,
+            n_burn=0,
+            n_skip=1,
+            callback=partial(
+                kill_callback, canary=self.kill_canary, kill_niters=kill_niters
+            ),
+        )
+        kw.update(kwargs)
+
+        # handle different callback name in v0.6.0
+        params = signature(run_mcmc).parameters
+        if 'callback' not in params:
+            kw['inner_callback'] = kw.pop('callback')
+
+        # catch bug and skip if found
+        detect_zero_division_error_bug(kw)
+
+        # prepare task to run in benchmark
+        match mode:
+            case 'compile':
+                static_argnames = ('n_save', 'n_skip', 'n_burn')
+                if 'callback' in params:
+                    static_argnames += ('callback',)
+                else:
+                    static_argnames += ('inner_callback',)
+                f = jit(run_mcmc, static_argnames=static_argnames)
+
+                def task():
+                    f.clear_cache()
+                    f.lower(**kw).compile()
+            case 'run':
+
+                def task():
+                    block_until_ready(run_mcmc(**kw))
+            case _:
+                raise KeyError(mode)
+        self.task = task
+        self.kill_niters = kill_niters
+
+        # decide how much to cold-start
+        match cache:
+            case 'cold':
+                clear_caches()
+            case 'warm':
+                # prepare copies of the args because of buffer donation
+                key = jnp.copy(kw['key'])
+                bart = tree_map(jnp.copy, kw['bart'])
+                self.time_run_mcmc()
+                # put copies in place of donated buffers
+                kw.update(key=key, bart=bart)
+            case _:
+                raise KeyError(cache)
+
+    def time_run_mcmc(self, *_):
+        """Time running or compiling the function."""
+        try:
+            self.task()
+        except JaxRuntimeError as e:
+            is_expected = self.kill_canary in str(e)
+            if not is_expected:
+                raise
+        else:
+            if self.kill_niters is not None:
+                msg = 'expected JaxRuntimeError with canary not raised'
+                raise RuntimeError(msg)
+
+
+def kill_callback(*, canary: str, kill_niters: int | None, bart, i_total, **_):
+    """Throw error `canary` after `kill_niters` in `run_mcmc`.
+
+    Partially evaluate `kill_callback` on the first two arguments before
+    passing it to `run_mcmc`.
+    """
+    if kill_niters is None:
+        return
+    # error_cov_inv (or sigma2 in old versions) is one of the last things
+    # modified in the mcmc loop, so using it as token ensures ordering,
+    # also it does not have n in the dimensionality
+    if isinstance(bart, dict):
+        token = bart['sigma2']
+    elif hasattr(bart, 'sigma2'):
+        token = bart.sigma2
+    else:
+        token = bart.error_cov_inv
+    stop = i_total + 1 == kill_niters  # i_total is updated after callback
+    token = error_if(token, stop, canary)
+    debug.callback(lambda _token: None, token)  # to avoid DCE
+
+
+def detect_zero_division_error_bug(kw: dict):
+    """Detect a division by zero error with 0 iterations in v0.6.0."""
+    try:
+        array_kw = {k: v for k, v in kw.items() if isinstance(v, jnp.ndarray)}
+        nonarray_kw = {k: v for k, v in kw.items() if not isinstance(v, jnp.ndarray)}
+        partial_run_mcmc = partial(run_mcmc, **nonarray_kw)
+        eval_shape(partial_run_mcmc, **array_kw)
+
+    except ZeroDivisionError:
+        if kw['n_save'] + kw['n_burn']:
+            raise
+        else:
+            msg = 'skipping due to division by zero bug with zero iterations'
+            raise NotImplementedError(msg) from None
+
+
+class RunMcmcVsTraceLength(BaseRunMcmc):
     """Timings of `run_mcmc` parametrized by length of the trace to save.
 
     This benchmark is intended to pin a bug where the whole trace is duplicated
@@ -416,54 +528,22 @@ class TimeRunMcmcVsTraceLength:
     """
 
     # asv config
-    params: tuple[tuple[int, ...]] = ((2**6, 2**8, 2**10, 2**12, 2**14, 2**16),)
-    param_names = ('n_save',)
-    warmup_time = 0.0
-    number = 1
+    params = ((2**6, 2**8, 2**10, 2**12, 2**14, 2**16),)
 
-    # other config
-    canary = 'canary happy-chinese-voiceover'
+    def setup(self, n_save: int):  # ty:ignore[invalid-method-override]
+        """Set up to kill after a certain number of iterations."""
+        kill_niters = min(self.params[0])
+        super().setup(kill_niters, kwargs=dict(n_save=n_save), n=0)
 
-    def setup(self, n_save: int):
+
+class RunMcmc(BaseRunMcmc):
+    """Timings of `run_mcmc`."""
+
+    # asv config
+    params = (('compile', 'run'), (0, NITERS), ('cold', 'warm'))
+
+    def setup(self, mode: Mode, niters: int, cache: Cache):  # ty:ignore[invalid-method-override]
         """Prepare the arguments, compile the function, and run to warm-up."""
-        n_iters = min(self.params[0])
-
-        def callback(*, bart, i_total, **_):
-            # error_cov_inv (or sigma2 in old versions) is one of the last things
-            # modified in the mcmc loop, so using it as token ensures ordering,
-            # also it does not have n in the dimensionality
-            if hasattr(bart, 'sigma2'):
-                token = bart.sigma2
-            else:
-                token = bart.error_cov_inv
-            stop = i_total + 1 == n_iters  # i_total is updated after callback
-            token = error_if(token, stop, self.canary)
-            jax.debug.print('{}', token)  # prevent dead code elimination
-
-        self.kw: dict = dict(
-            key=random.key(2025_04_25_15_57),
-            bart=simple_init(P, 0, NTREE),
-            n_save=n_save,
-            n_burn=0,
-            n_skip=1,
-            callback=callback,
+        super().setup(
+            None, mode, cache, dict(n_save=niters // 2, n_burn=(niters - niters // 2))
         )
-
-        # prepare copies of the args because of buffer donation
-        key = jnp.copy(self.kw['key'])
-        bart = tree_map(jnp.copy, self.kw['bart'])
-        self.time_run_mcmc()
-        # put copies in place of donated buffers
-        self.kw.update(key=key, bart=bart)
-
-    def time_run_mcmc(self, *_):
-        """Time running the function."""
-        try:
-            run_mcmc(**self.kw)
-        except JaxRuntimeError as e:
-            is_expected = self.canary in str(e)
-            if not is_expected:
-                raise
-        else:
-            msg = 'expected JaxRuntimeError with canary not raised'
-            raise RuntimeError(msg)

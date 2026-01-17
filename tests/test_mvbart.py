@@ -256,7 +256,6 @@ class TestMVBartIntegration:
             p_nonterminal=p_nonterminal,
             resid_batch_size=None,
             count_batch_size=None,
-            filter_splitless_vars=False,
         )
 
         bart_uv = init(
@@ -374,7 +373,6 @@ class TestMVBartSteps:
             p_nonterminal=jnp.array([0.9, 0.5]),
             resid_batch_size=None,
             count_batch_size=None,
-            filter_splitless_vars=False,
         )
 
         uv_state = init(
@@ -462,7 +460,6 @@ class TestMVBartSteps:
             error_cov_scale=jnp.eye(k),
             resid_batch_size=None,
             count_batch_size=None,
-            filter_splitless_vars=False,
         )
 
         for key in random.split(keys.pop(), 10):

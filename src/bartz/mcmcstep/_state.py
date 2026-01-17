@@ -25,7 +25,7 @@
 """Module defining the BART MCMC state and initialization."""
 
 from collections.abc import Callable, Hashable
-from dataclasses import Field, fields
+from dataclasses import fields
 from functools import partial, wraps
 from math import ceil, log2
 from typing import Any, Literal, TypeVar
@@ -43,7 +43,7 @@ from bartz.grove import make_tree, tree_depths
 from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 
-def field(*, chains: bool = False, data: bool = False, **kwargs) -> Field:
+def field(*, chains: bool = False, data: bool = False, **kwargs):
     """Extend `equinox.field` with two new parameters.
 
     Parameters
@@ -400,6 +400,35 @@ def _parse_p_nonterminal(
     return jnp.pad(p_nonterminal, (0, 1))
 
 
+def make_p_nonterminal(
+    d: int, alpha: float | Float32[Array, ''], beta: float | Float32[Array, '']
+) -> Float32[Array, ' {d}-1']:
+    """Prepare the `p_nonterminal` argument to `init`.
+
+    It is calculated according to the formula:
+
+        P_nt(depth) = alpha / (1 + depth)^beta,     with depth 0-based
+
+    Parameters
+    ----------
+    d
+        The maximum depth of the trees (d=1 means tree with only root node)
+    alpha
+        The a priori probability of the root node having children, conditional
+        on it being possible
+    beta
+        The exponent of the power decay of the probability of having children
+        with depth.
+
+    Returns
+    -------
+    An array of probabilities, one per tree level but the last.
+    """
+    assert d >= 1
+    depth = jnp.arange(d - 1)
+    return alpha / (1 + depth).astype(float) ** beta
+
+
 def init(
     *,
     X: UInt[Any, 'p n'],
@@ -416,7 +445,7 @@ def init(
     resid_batch_size: int | None | Literal['auto'] = 'auto',
     count_batch_size: int | None | Literal['auto'] = 'auto',
     save_ratios: bool = False,
-    filter_splitless_vars: bool = True,
+    filter_splitless_vars: int = 0,
     min_points_per_leaf: int | Integer[Any, ''] | None = None,
     log_s: Float32[Any, ' p'] | None = None,
     theta: float | Float32[Any, ''] | None = None,
@@ -447,7 +476,8 @@ def init(
         The number of trees in the forest.
     p_nonterminal
         The probability of a nonterminal node at each depth. The maximum depth
-        of trees is fixed by the length of this array.
+        of trees is fixed by the length of this array. Use `make_p_nonterminal`
+        to set it with the conventional formula.
     leaf_prior_cov_inv
         The prior precision matrix of a leaf, conditional on the tree structure.
         For the univariate case (k=1), this is a scalar (the inverse variance).
@@ -477,11 +507,8 @@ def init(
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
     filter_splitless_vars
-        Whether to check `max_split` for variables without available cutpoints.
-        If any are found, they are put into a list of variables to exclude from
-        the MCMC. If `False`, no check is performed, but the results may be
-        wrong if any variable is blocked. The function is jax-traceable only
-        if this is set to `False`.
+        The maximum number of variables without splits that can be ignored. If
+        there are more, `init` raises an exception.
     min_points_per_leaf
         The minimum number of datapoints in a leaf node. 0 if not specified.
         Unlike `min_points_per_decision_node`, this constraint is not taken into
@@ -605,6 +632,13 @@ def init(
         target_platform,
     )
 
+    # check there aren't too many deactivated predictors
+    msg = (
+        f'there are more than {filter_splitless_vars=} predictors with no splits, '
+        'please increase `filter_splitless_vars` or investigate the missing splits'
+    )
+    offset = error_if(offset, jnp.sum(max_split == 0) > filter_splitless_vars, msg)
+
     # initialize all remaining stuff and put it in an unsharded state
     state = State(
         X=X,
@@ -675,12 +709,14 @@ def init(
 
 
 def _get_blocked_vars(
-    filter_splitless_vars: bool, max_split: UInt[Array, ' p']
+    filter_splitless_vars: int, max_split: UInt[Array, ' p']
 ) -> None | UInt[Array, ' q']:
     """Initialize the `blocked_vars` field."""
     if filter_splitless_vars:
         (p,) = max_split.shape
-        (blocked_vars,) = jnp.nonzero(max_split == 0)
+        (blocked_vars,) = jnp.nonzero(
+            max_split == 0, size=filter_splitless_vars, fill_value=p
+        )
         return blocked_vars.astype(minimal_unsigned_dtype(p))
         # see `fully_used_variables` for the type cast
     else:

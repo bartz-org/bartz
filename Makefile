@@ -189,7 +189,7 @@ ASV = $(UV_RUN_CI) python -m asv
 
 .PHONY: asv-run
 asv-run:
-	$(UV_RUN_CI) python config/refs-for-asv.py | $(ASV) run --skip-existing --show-stderr HASHFILE:- $(ARGS)
+	$(UV_RUN_CI) python config/refs-for-asv.py | $(ASV) run --skip-existing-successful --show-stderr HASHFILE:- $(ARGS)
 
 .PHONY: asv-publish
 asv-publish:

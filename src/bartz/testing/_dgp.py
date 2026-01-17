@@ -23,7 +23,7 @@
 # SOFTWARE.
 
 
-"""Data generating process for bivariate BART testing."""
+"""Define `gen_data` that generates simulated data for testing."""
 
 from dataclasses import replace
 

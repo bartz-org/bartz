@@ -22,7 +22,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Tests for the DGP data generating process."""
+"""Tests `bartz.testing.gen_data`."""
 
 from collections.abc import Mapping
 from functools import partial
@@ -44,7 +44,7 @@ from bartz.testing._dgp import (
 )
 
 # Test parameters
-ALPHA = 5e-7  # probability of false positive
+ALPHA = 5e-7  # probability of false positive (aaaaapprox)
 SIGMA_THRESHOLD = norm.isf(ALPHA / 2)  # threshold for z tests
 KWARGS: Mapping = MappingProxyType(
     dict(n=100, p=20, k=3, q=4, sigma2_eps=0.1, sigma2_lin=0.4, sigma2_quad=0.5)

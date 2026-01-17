@@ -53,6 +53,7 @@ from jaxtyping import Array, Float32, UInt8
 import bartz
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
+from benchmarks.latest_bartz.jaxext import split
 
 try:
     from bartz.BART import mc_gbart as gbart
@@ -299,7 +300,7 @@ class BaseGbart(AutoParamNames):
             raise NotImplementedError(msg)
 
         # random seed
-        keys = list(random.split(random.key(2025_06_24_14_55)))
+        keys = split(random.key(2025_06_24_14_55))
 
         # generate simulated data
         dgp = gen_data(

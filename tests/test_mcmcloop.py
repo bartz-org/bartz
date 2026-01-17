@@ -162,7 +162,7 @@ class TestRunMcmc:
         check_trace(main_trace)
 
     def test_jit_error(self, keys: split, subtests: SubTests):
-        """Check that an error is raise under jit in some conditions."""
+        """Check that an error is raised under jit in some conditions."""
         initial_state = simple_init(10, 100, 20)
 
         compiled_run_mcmc = jit(

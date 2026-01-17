@@ -34,7 +34,11 @@ from jax import jit, lax, random
 from jax import numpy as jnp
 from jaxtyping import Array, Float32, Key
 
-from bartz.BART import gbart
+try:
+    from bartz.BART import mc_gbart
+except ImportError:
+    from bartz.BART import gbart as mc_gbart  # pre v0.8.0
+
 from benchmarks.latest_bartz.jaxext import split
 from benchmarks.latest_bartz.testing import DGP, gen_data
 from benchmarks.speed import get_default_platform
@@ -87,16 +91,21 @@ def run_sim_impl(
         rm_const=False,  # needed to jit everything
         printevery=2001,  # in old versions it can't be set to None
         bart_kwargs=dict(devices=jax.devices(get_default_platform())),
+        mc_cores=1,
     )
 
     # adapt for older versions
-    sig = signature(gbart)
-    if 'rm_const' not in sig.parameters:
-        kw.pop('rm_const')
-    if 'bart_kwargs' not in sig.parameters:
-        kw.pop('bart_kwargs')
+    sig = signature(mc_gbart)
 
-    bart = gbart(**kw)
+    def drop_if_missing(arg: str):
+        if arg not in sig.parameters:
+            kw.pop(arg)
+
+    drop_if_missing('rm_const')
+    drop_if_missing('bart_kwargs')
+    drop_if_missing('mc_cores')
+
+    bart = mc_gbart(**kw)
 
     return jnp.mean(jnp.square(bart.yhat_test_mean - test.mu.squeeze(0)))
 

@@ -254,8 +254,8 @@ class TestMVBartIntegration:
             max_split=max_split,
             num_trees=10,
             p_nonterminal=p_nonterminal,
-            resid_batch_size=None,
-            count_batch_size=None,
+            resid_num_batches=None,
+            count_num_batches=None,
         )
 
         bart_uv = init(
@@ -371,8 +371,8 @@ class TestMVBartSteps:
             max_split=max_split,
             num_trees=n_trees,
             p_nonterminal=jnp.array([0.9, 0.5]),
-            resid_batch_size=None,
-            count_batch_size=None,
+            resid_num_batches=None,
+            count_num_batches=None,
         )
 
         uv_state = init(
@@ -458,8 +458,8 @@ class TestMVBartSteps:
             leaf_prior_cov_inv=jnp.eye(k),
             error_cov_df=jnp.array(10.0),
             error_cov_scale=jnp.eye(k),
-            resid_batch_size=None,
-            count_batch_size=None,
+            resid_num_batches=None,
+            count_num_batches=None,
         )
 
         for key in random.split(keys.pop(), 10):

@@ -176,8 +176,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     num_data_devices=min(2, get_device_count()),
                     init_kw=dict(
-                        resid_batch_size=None,
-                        count_batch_size=None,
+                        resid_num_batches=None,
+                        count_num_batches=None,
                         target_platform=None,
                         save_ratios=True,
                     ),
@@ -210,8 +210,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     maxdepth=6,
                     num_chain_devices=None,
                     init_kw=dict(
-                        resid_batch_size=16,
-                        count_batch_size=16,
+                        resid_num_batches=16,
+                        count_num_batches=16,
                         target_platform=None,
                         save_ratios=False,
                         min_points_per_decision_node=None,

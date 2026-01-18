@@ -27,7 +27,7 @@
 from collections.abc import Callable, Hashable
 from dataclasses import fields
 from functools import partial, wraps
-from math import ceil, log2
+from math import floor, log2
 from typing import Any, Literal, TypeVar
 
 from equinox import Module, error_if
@@ -239,18 +239,18 @@ class StepConfig(Module):
         The number of MCMC steps completed so far.
     sparse_on_at
         After how many steps to turn on variable selection.
-    resid_batch_size
-    count_batch_size
-        The data batch sizes for computing the sufficient statistics. If `None`,
-        they are computed with no batching.
+    resid_num_batches
+    count_num_batches
+        The number of batches for computing the sufficient statistics. If
+        `None`, they are computed with no batching.
     mesh
         The mesh used to shard data and computation across multiple devices.
     """
 
     steps_done: Int32[Array, '']
     sparse_on_at: Int32[Array, ''] | None
-    resid_batch_size: int | None = field(static=True)
-    count_batch_size: int | None = field(static=True)
+    resid_num_batches: int | None = field(static=True)
+    count_num_batches: int | None = field(static=True)
     mesh: Mesh | None = field(static=True)
 
 
@@ -442,8 +442,8 @@ def init(
     error_cov_scale: float | Float32[Any, ''] | Float32[Array, 'k k'] | None = None,
     error_scale: Float32[Any, ' n'] | None = None,
     min_points_per_decision_node: int | Integer[Any, ''] | None = None,
-    resid_batch_size: int | None | Literal['auto'] = 'auto',
-    count_batch_size: int | None | Literal['auto'] = 'auto',
+    resid_num_batches: int | None | Literal['auto'] = 'auto',
+    count_num_batches: int | None | Literal['auto'] = 'auto',
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
     min_points_per_leaf: int | Integer[Any, ''] | None = None,
@@ -498,9 +498,9 @@ def init(
     min_points_per_decision_node
         The minimum number of data points in a decision node. 0 if not
         specified.
-    resid_batch_size
-    count_batch_size
-        The batch sizes, along datapoints, for summing the residuals and
+    resid_num_batches
+    count_num_batches
+        The number of batches, along datapoints, for summing the residuals and
         counting the number of datapoints in each leaf. `None` for no batching.
         If 'auto', it's chosen automatically based on the target platform; see
         the description of `target_platform` below for how it is determined.
@@ -550,7 +550,7 @@ def init(
         it. In particular even if the mesh has no 'chains' or 'data' axis, the
         arrays will be replicated on all devices in the mesh.
     target_platform
-        Platform ('cpu' or 'gpu') used to determine the batch sizes
+        Platform ('cpu' or 'gpu') used to determine the number of batches
         automatically. If `mesh` is specified, the platform is inferred from the
         devices in the mesh. Otherwise, if `y` is a concrete array (i.e., `init`
         is not invoked in a `jax.jit` context), the platform is set to the
@@ -619,11 +619,11 @@ def init(
     # determine batch sizes for reductions
     mesh = _parse_mesh(num_chains, mesh)
     target_platform = _parse_target_platform(
-        y, mesh, target_platform, resid_batch_size, count_batch_size
+        y, mesh, target_platform, resid_num_batches, count_num_batches
     )
-    resid_batch_size, count_batch_size = _choose_suffstat_batch_size(
-        resid_batch_size,
-        count_batch_size,
+    resid_num_batches, count_num_batches = _choose_suffstat_num_batches(
+        resid_num_batches,
+        count_num_batches,
         y,
         max_depth,
         num_trees,
@@ -698,8 +698,8 @@ def init(
         config=StepConfig(
             steps_done=jnp.int32(0),
             sparse_on_at=_asarray_or_none(sparse_on_at),
-            resid_batch_size=resid_batch_size,
-            count_batch_size=count_batch_size,
+            resid_num_batches=resid_num_batches,
+            count_num_batches=count_num_batches,
             mesh=mesh,
         ),
     )
@@ -762,8 +762,8 @@ def _parse_target_platform(
     y: Array,
     mesh: Mesh | None,
     target_platform: Literal['cpu', 'gpu'] | None,
-    resid_batch_size: int | None | Literal['auto'],
-    count_batch_size: int | None | Literal['auto'],
+    resid_num_batches: int | None | Literal['auto'],
+    count_num_batches: int | None | Literal['auto'],
 ) -> Literal['cpu', 'gpu'] | None:
     if mesh is not None:
         assert target_platform is None, 'mesh provided, do not set target_platform'
@@ -771,7 +771,7 @@ def _parse_target_platform(
     elif hasattr(y, 'platform'):
         assert target_platform is None, 'device inferred from y, unset target_platform'
         return y.platform()
-    elif resid_batch_size == 'auto' or count_batch_size == 'auto':
+    elif resid_num_batches == 'auto' or count_num_batches == 'auto':
         assert target_platform in ('cpu', 'gpu')
         return target_platform
     else:
@@ -837,9 +837,9 @@ def _get_platform(mesh: Mesh | None) -> str:
         return mesh.devices.flat[0].platform
 
 
-def _choose_suffstat_batch_size(
-    resid_batch_size: int | None | Literal['auto'],
-    count_batch_size: int | None | Literal['auto'],
+def _choose_suffstat_num_batches(
+    resid_num_batches: int | None | Literal['auto'],
+    count_num_batches: int | None | Literal['auto'],
     y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'],
     max_depth: int,
     num_trees: int,
@@ -847,7 +847,7 @@ def _choose_suffstat_batch_size(
     mesh: Mesh | None,
     target_platform: Literal['cpu', 'gpu'] | None,
 ) -> tuple[int | None, int | None]:
-    """Determine batch sizes for reductions."""
+    """Determine number of batches for reductions."""
     # get number of outcomes and of datapoints
     k, n = _get_k_n(y)
 
@@ -859,48 +859,52 @@ def _choose_suffstat_batch_size(
 
     # compute auxiliary sizes
     batch_size = k * num_chains
-    unbatched_accum_bytes_times_batch_size = num_trees * 2**max_depth * 4 * n
+    accum_bytes = num_trees * 2**max_depth * 4
 
-    def final_round(s: float) -> int | None:
-        # multiply by batch_size because if the calculation is already
+    def final_round(num: float) -> int | None:
+        # divide by batch_size because if the calculation is already
         # parallelizable over batching dims there is correspondingly less need
         # to parallelize across datapoints
-        s *= batch_size
+        num /= max(1, batch_size)
 
-        # at least 1, i.e., each datapoint is its own batch
-        s = max(1, s)
+        # no more batches than items
+        num = min(n, num)
 
         # round to the nearest power of 2 because I guess XLA and the hardware
         # will like that
-        s = 2 ** round(log2(s))
+        num = 2 ** round(log2(num)) if num else 0
+
+        # no more batches than items, again because rounding could shoot over
+        if num > n:
+            num //= 2
 
         # disable batching if the batch is as large as the whole dataset
-        return s if s < n else None
+        return num if num > 1 else None
 
-    if resid_batch_size != 'auto':
-        rbs = resid_batch_size
+    if resid_num_batches != 'auto':
+        rnb = resid_num_batches
     elif target_platform == 'cpu':
-        rbs = final_round(n / 6)
+        rnb = final_round(6)
         # instead of 6 I guess I should have in general the number of "good"
         # physical cores
     elif target_platform == 'gpu':
-        rbs = final_round((2 * n) ** (1 / 3))
+        rnb = final_round(0.8 * n ** (2 / 3))
 
-    if count_batch_size != 'auto':
-        cbs = count_batch_size
+    if count_num_batches != 'auto':
+        cnb = count_num_batches
     elif target_platform == 'cpu':
-        cbs = None
+        cnb = None
     elif target_platform == 'gpu':
-        cbs = (n / 16) ** 0.5
+        cnb = (16 * n) ** 0.5
 
         # ensure we don't exceed ~512MiB of memory usage per device
         max_memory = 2**29
-        min_batch_size = ceil(unbatched_accum_bytes_times_batch_size / max_memory)
-        cbs = max(cbs, min_batch_size)
+        max_num_batches = floor(max_memory / accum_bytes)
+        cnb = min(cnb, max_num_batches)
 
-        cbs = final_round(cbs)
+        cnb = final_round(cnb)
 
-    return rbs, cbs
+    return rnb, cnb
 
 
 def get_axis_size(mesh: Mesh | None, axis_name: str) -> int:

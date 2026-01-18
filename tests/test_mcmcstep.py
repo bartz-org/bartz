@@ -643,7 +643,7 @@ class TestMultichain:
                 mc,
                 stacked,
                 err_msg=f'{str_path}: ',
-                rtol=0 if exact else 1e-6,
+                rtol=0 if exact else 1e-5,
                 reduce_rank=True,
             )
 

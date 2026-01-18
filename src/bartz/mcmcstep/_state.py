@@ -27,7 +27,7 @@
 from collections.abc import Callable, Hashable
 from dataclasses import fields
 from functools import partial, wraps
-from math import floor, log2
+from math import log2
 from typing import Any, Literal, TypeVar
 
 from equinox import Module, error_if
@@ -625,7 +625,6 @@ def init(
         resid_num_batches,
         count_num_batches,
         y,
-        max_depth,
         num_trees,
         num_chains,
         mesh,
@@ -841,37 +840,34 @@ def _choose_suffstat_num_batches(
     resid_num_batches: int | None | Literal['auto'],
     count_num_batches: int | None | Literal['auto'],
     y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'],
-    max_depth: int,
     num_trees: int,
     num_chains: int | None,
     mesh: Mesh | None,
     target_platform: Literal['cpu', 'gpu'] | None,
 ) -> tuple[int | None, int | None]:
     """Determine number of batches for reductions."""
-    # get number of outcomes and of datapoints
-    k, n = _get_k_n(y)
-
-    # get per-device values
+    # get per-device number of datapoints and chains
+    n = y.shape[-1]
+    n //= get_axis_size(mesh, 'data')
     if num_chains is None:
         num_chains = 1
     num_chains //= get_axis_size(mesh, 'chains')
-    n //= get_axis_size(mesh, 'data')
 
-    # compute auxiliary sizes
-    batch_size = k * num_chains
-    accum_bytes = num_trees * 2**max_depth * 4
+    def final_round(num: float, other_num_batches: int = 1) -> int | None:
+        # multiply the number of pre-existing batches by the number of chains
+        # because it's always possible to parallelize across chains
+        other_num_batches *= num_chains
 
-    def final_round(num: float) -> int | None:
-        # divide by batch_size because if the calculation is already
+        # divide by other_num_batches because if the calculation is already
         # parallelizable over batching dims there is correspondingly less need
         # to parallelize across datapoints
-        num /= max(1, batch_size)
+        num /= max(1, other_num_batches)
 
         # no more batches than items
         num = min(n, num)
 
         # round to the nearest power of 2 because I guess XLA and the hardware
-        # will like that
+        # will like that (not sure about this, maybe just multiple of 32?)
         num = 2 ** round(log2(num)) if num else 0
 
         # no more batches than items, again because rounding could shoot over
@@ -893,16 +889,9 @@ def _choose_suffstat_num_batches(
     if count_num_batches != 'auto':
         cnb = count_num_batches
     elif target_platform == 'cpu':
-        cnb = None
+        cnb = final_round(6, num_trees)  # see above
     elif target_platform == 'gpu':
-        cnb = (16 * n) ** 0.5
-
-        # ensure we don't exceed ~512MiB of memory usage per device
-        max_memory = 2**29
-        max_num_batches = floor(max_memory / accum_bytes)
-        cnb = min(cnb, max_num_batches)
-
-        cnb = final_round(cnb)
+        cnb = final_round(800 * n**0.5, num_trees)
 
     return rnb, cnb
 
@@ -913,14 +902,6 @@ def get_axis_size(mesh: Mesh | None, axis_name: str) -> int:
     else:
         i = mesh.axis_names.index(axis_name)
         return mesh.axis_sizes[i]
-
-
-def _get_k_n(y: Array) -> tuple[int, int]:
-    if y.ndim == 2:
-        return y.shape
-    else:
-        (n,) = y.shape
-        return 1, n
 
 
 def chol_with_gersh(

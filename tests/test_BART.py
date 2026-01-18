@@ -68,7 +68,7 @@ from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
-from tests.test_mcmcstep import check_sharding, get_normal_spec
+from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
@@ -1512,7 +1512,8 @@ def test_sharding(kw: dict):
         elif 'data' in mesh.axis_names:
             expected_num_devices = min(2, get_device_count())
             assert x.sharding.num_devices == expected_num_devices
-            assert get_normal_spec(x) == (None,) * (x.ndim - 1) + ('data',)
+            expected_spec = (None,) * (x.ndim - 1) + ('data',)
+            assert get_normal_spec(x) == normalize_spec(expected_spec, mesh, x.shape)
 
     check_data_sharding(bart.prob_train)
     check_data_sharding(bart.prob_train_mean)

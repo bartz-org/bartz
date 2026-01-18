@@ -30,18 +30,23 @@ from re import fullmatch
 import jax
 import numpy as np
 import pytest
+from jax import config, random
 
 from bartz.jaxext import get_default_device, split
 
-jax.config.update('jax_debug_key_reuse', True)
-jax.config.update('jax_debug_nans', True)
-jax.config.update('jax_debug_infs', True)
-jax.config.update('jax_legacy_prng_key', 'error')
-jax.config.update('jax_num_cpu_devices', 10)  # 2 * 5
+# enable debug checks; these slow down unit tests
+config.update('jax_debug_key_reuse', True)
+config.update('jax_debug_nans', True)
+config.update('jax_debug_infs', True)
+config.update('jax_legacy_prng_key', 'error')
 
-jax.config.update('jax_compilation_cache_dir', 'config/jax_cache')
-jax.config.update('jax_persistent_cache_min_entry_size_bytes', -1)
-jax.config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
+# enable virtual cpu devices to do multi-device testing on cpu
+config.update('jax_num_cpu_devices', 10)  # 2 * 5
+
+# enable compilation cache
+config.update('jax_compilation_cache_dir', 'config/jax_cache')
+config.update('jax_persistent_cache_min_entry_size_bytes', -1)
+config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
 
 
 @pytest.fixture
@@ -59,7 +64,7 @@ def keys(request) -> split:
     seed = np.array([nodeid], np.bytes_).view(np.uint8)
     rng = np.random.default_rng(seed)
     seed = np.array(rng.bytes(4)).view(np.uint32)
-    key = jax.random.key(seed)
+    key = random.key(seed)
     return split(key, 128)
 
 
@@ -82,7 +87,7 @@ def pytest_sessionstart(session: pytest.Session) -> None:
     if platform != 'auto':
         current_platform = get_default_device().platform
         if current_platform != platform:
-            jax.config.update('jax_default_device', jax.devices(platform)[0])
+            config.update('jax_default_device', jax.devices(platform)[0])
         assert get_default_device().platform == platform
 
     # Get the capture manager plugin

@@ -74,15 +74,20 @@ NTREE = 50
 NITERS = 10
 
 
-@partial(jit, static_argnums=(0, 1))
+@partial(jit, static_argnums=(0, 1, 2))
 def gen_nonsense_data(
-    p: int, n: int
-) -> tuple[UInt8[Array, '{p} {n}'], Float32[Array, ' {n}'], UInt8[Array, ' {p}']]:
+    p: int, n: int, k: int | None
+) -> tuple[
+    UInt8[Array, '{p} {n}'],
+    Float32[Array, ' {n}'] | Float32[Array, '{k} {n}'],
+    UInt8[Array, ' {p}'],
+]:
     """Generate pretty nonsensical data."""
     X = jnp.arange(p * n, dtype=jnp.uint8).reshape(p, n)
     X = vmap(jnp.roll)(X, jnp.arange(p))
     max_split = jnp.full(p, 255, jnp.uint8)
-    y = jnp.cos(jnp.linspace(0, 2 * jnp.pi / 32 * n, n))
+    shift = 0 if k is None else jnp.linspace(0, 2 * jnp.pi, k, endpoint=False)[:, None]
+    y = jnp.cos(jnp.linspace(0, 2 * jnp.pi / 32 * n, n) + shift)
     return X, y, max_split
 
 
@@ -98,24 +103,25 @@ def get_default_platform() -> str:
 def simple_init(  # noqa: C901, PLR0915
     p: int,
     n: int,
-    ntree: int,
+    num_trees: int,
     kind: Kind = 'plain',
     *,
+    k: int | None = None,
     num_chains: int | None = None,
     mesh: dict[str, int] | Mesh | None = None,
     **kwargs,
 ):
     """Glue code to support `mcmcstep.init` across API changes."""
-    X, y, max_split = gen_nonsense_data(p, n)
+    X, y, max_split = gen_nonsense_data(p, n, k)
 
     kw: dict = dict(
         X=X,
         y=y,
         offset=0.0,
         max_split=max_split,
-        num_trees=ntree,
+        num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(6, 0.95, 2),
-        leaf_prior_cov_inv=jnp.float32(ntree),
+        leaf_prior_cov_inv=jnp.float32(num_trees),
         error_cov_df=2.0,
         error_cov_scale=2.0,
         min_points_per_decision_node=10,
@@ -218,7 +224,7 @@ class StepGeneric(AutoParamNames):
         """Create an initial MCMC state and random seed, compile & warm-up."""
         keys = list(random.split(random.key(2025_06_24_12_07)))
 
-        kw: dict = dict(p=P, n=N, ntree=NTREE, kind=kind, num_chains=chains)
+        kw: dict = dict(p=P, n=N, num_trees=NTREE, kind=kind, num_chains=chains)
         kw.update(kwargs)
 
         self.args = (keys, simple_init(**kw))
@@ -268,8 +274,32 @@ class StepSharded(StepGeneric):
             None,
             p=1,
             n=2000_000,
-            ntree=1,
+            num_trees=1,
             mesh=dict(data=2) if sharded else None,
+        )
+
+
+class StepResid(StepGeneric):
+    """Benchmark `step` to optimize resid_num_batches."""
+
+    params = (
+        (False, True),
+        (None, 1, 2, 4),
+        tuple(4**i for i in range(12 + 1)),
+        (None, *(2**i for i in range(10 + 1))),
+    )
+
+    def setup(self, weights: bool, k: int | None, n: int, num_batches: None | int):  # ty:ignore[invalid-method-override]
+        """Set up to change settings that influence the sum of residuals."""
+        super().setup(
+            'run',
+            'weights' if weights else 'plain',
+            None,
+            n=n,
+            p=1,
+            num_trees=1,
+            k=k,
+            resid_num_batches=num_batches,
         )
 
 

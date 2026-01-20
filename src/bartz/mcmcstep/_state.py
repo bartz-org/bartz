@@ -880,16 +880,14 @@ def _choose_suffstat_num_batches(
     if resid_num_batches != 'auto':
         rnb = resid_num_batches
     elif target_platform == 'cpu':
-        rnb = final_round(6)
-        # instead of 6 I guess I should have in general the number of "good"
-        # physical cores
+        rnb = final_round(16)
     elif target_platform == 'gpu':
         rnb = final_round(0.8 * n ** (2 / 3))
 
     if count_num_batches != 'auto':
         cnb = count_num_batches
     elif target_platform == 'cpu':
-        cnb = final_round(6, num_trees)  # see above
+        cnb = final_round(6, num_trees)
     elif target_platform == 'gpu':
         cnb = final_round(800 * n**0.5, num_trees)
 

@@ -22,17 +22,19 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Optimize number of batches, bartz circa v0.8.0."""
+"""Clock `step_trees` to find the optimal number of batches for indexed reductions."""
 
+from abc import ABC, abstractmethod
+from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from enum import Enum, auto
+from enum import StrEnum, auto  # ty:ignore[unresolved-import], assume py314
 from functools import partial
 from gc import collect
 from itertools import product
 from pathlib import Path
 from time import perf_counter
-from typing import Any
+from typing import Any, TypeVar
 
 from jax import block_until_ready, config, jit, random
 from jax import numpy as jnp
@@ -44,32 +46,73 @@ from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._step import step_trees
 from benchmarks.speed import gen_nonsense_data
 
+T = TypeVar('T')
+
+MAX_LEAF_INDICES_SIZE = 2**30  # 1 GiB
+
 
 @dataclass(frozen=True)
-class Params:
-    """Benchmark parameter grid for batch optimization tests."""
+class ParamsBase(ABC):
+    """Base class to define hyperparameter grids."""
 
     weights: Sequence[bool] = (False, True)
-    k: Sequence[int | None] = (None, 1, 2, 4)
     n: Sequence[int] = tuple(4**i for i in range(12 + 1))
-    num_batches: Sequence[None | int] = (None, *(2**i for i in range(10 + 1)))
+
+    @abstractmethod
+    def valid(self, **values) -> bool:
+        """Check if a set of parameter values is valid."""
+        ...
 
     def product_iter(self) -> Iterator[dict[str, Any]]:
         """Yield parameter dictionaries for all valid combinations."""
         stuff = vars(self)
         for vals in product(*stuff.values()):
-            # skip heteroskedastic multivariate, it's not implemented
-            weights, k, _, _ = vals
-            if weights and k is not None:
-                continue
+            result = dict(zip(stuff, vals, strict=True))
+            if self.valid(**result):
+                yield result
 
-            yield dict(zip(stuff, vals, strict=True))
-
-    def minimal(self) -> 'Params':
-        """Return a Params instance with minimal value ranges."""
-        return Params(
+    def minimal(self: T) -> T:
+        """Drop all values but the first and last in each range."""
+        return self.__class__(
             *((v[0], v[-1]) if len(v) > 1 else v for v in vars(self).values())
         )
+
+
+@dataclass(frozen=True)
+class ParamsResid(ParamsBase):
+    """Hyperparamer grid to clock summing residuals."""
+
+    k: Sequence[int | None] = (None, 1, 2, 4)
+    num_batches: Sequence[None | int] = (None, *(2**i for i in range(10 + 1)))
+
+    def valid(
+        self, *, weights: bool, n: int, k: int | None, num_batches: None | int
+    ) -> bool:  # ty:ignore[invalid-method-override]
+        """Skip heteroskedastic multivariate, and more batches than values."""
+        return (not weights or k is None) and (num_batches is None or num_batches <= n)
+
+
+@dataclass(frozen=True)
+class ParamsCount(ParamsBase):
+    """Hyperparamer grid to clock summing residuals."""
+
+    num_trees: Sequence[int] = tuple(4**i for i in range(5 + 1))
+    num_trees_times_num_batches: Sequence[None | int] = (
+        None,
+        *(2**i for i in range(10 + 1)),
+    )
+
+    def valid(
+        self, *, n: int, num_trees: int, num_trees_times_num_batches: int | None, **_
+    ) -> bool:  # ty:ignore[invalid-method-override]
+        """Skip < 1 batches, more batches than values to reduce, and too much memory."""
+        return (
+            num_trees_times_num_batches is None
+            or (
+                num_trees_times_num_batches >= num_trees
+                and num_trees_times_num_batches // num_trees <= n
+            )
+        ) and num_trees * n <= MAX_LEAF_INDICES_SIZE
 
 
 @partial(jit, donate_argnums=(1,))
@@ -81,10 +124,49 @@ def step_func(key: Key[Array, ''], state: State) -> State:
 class Benchmark:
     """Benchmark harness for JAX tree stepping."""
 
-    def setup(self, weights: bool, k: None | int, n: int, num_batches: None | int):
-        """Initialize benchmark state for the given parameters."""
+    def setup(
+        self,
+        paramcls: type[ParamsBase],
+        *,
+        weights: bool,
+        n: int,
+        k: int | None = None,
+        num_batches: None | int = None,
+        num_trees: int = 1,
+        num_trees_times_num_batches: int | None = None,
+    ):
+        """Initialize BART state and warmup MCMC step."""
+        # generate data
         X, y, max_split = gen_nonsense_data(1, n, k)
-        num_trees = 10
+
+        # determine the number of batches
+        match (num_batches, num_trees_times_num_batches):
+            case None, None:
+                # num_batches=None and it must be None, already ok
+                pass
+            case None, ntnb:
+                assert ntnb % num_trees == 0
+                num_batches = ntnb // num_trees
+            case _nb, None:
+                # num_batches int and nbnt not defined, use num_batches as is
+                pass
+            case _:
+                # both values defined, error
+                raise ValueError
+
+        # determine which reduction to configure
+        if paramcls is ParamsResid:
+            nb_kwargs: dict = dict(
+                resid_num_batches=num_batches, count_num_batches=None
+            )
+        elif paramcls is ParamsCount:
+            nb_kwargs: dict = dict(
+                resid_num_batches=None, count_num_batches=num_batches
+            )
+        else:
+            raise TypeError
+
+        # initialize state
         self.state = init(
             X=X,
             y=y,
@@ -96,28 +178,38 @@ class Benchmark:
             error_cov_df=2.0,
             error_cov_scale=2 * (1.0 if k is None else jnp.eye(k)),
             error_scale=jnp.ones(n) if weights else None,
-            resid_num_batches=num_batches,
+            **nb_kwargs,
         )
         self.key = random.key(2026_01_20_13_31)
-        self.task()  # warmup
+
+        # warm up MCMC
+        self.task()
 
     def task(self):
-        """Run a single benchmark task step."""
+        """Run `step_trees` once."""
         self.state = block_until_ready(step_func(self.key, self.state))
 
     def teardown(self):
-        """Clean up benchmark state and caches."""
+        """Delete the state and the compiled function."""
         del self.state
         step_func.clear_cache()
+        # don't use jax.clear_caches() because it makes everything 3x slower
         collect()
 
 
-class Logging(Enum):
+class Logging(StrEnum):
     """Logging mode for benchmark runs."""
 
     no = auto()
     pbar = auto()
     results = auto()
+
+
+class Reduction(StrEnum):
+    """Which reduction to benchmark."""
+
+    resid = auto()
+    count = auto()
 
 
 def clock(func: Callable) -> float:
@@ -127,46 +219,55 @@ def clock(func: Callable) -> float:
     return perf_counter() - start
 
 
-def benchmark_loop(
-    *, logging: Logging = Logging.pbar, num: int = 10, minimal: bool = False
-) -> DataFrame:
+def benchmark_loop(args: Namespace) -> DataFrame:
     """Run timing benchmarks over parameter combinations."""
-    params = Params()
-    if minimal:
+    # get grid of hyperparameters
+    if args.reduction == Reduction.resid:
+        params = ParamsResid()
+    else:
+        params = ParamsCount()
+    if args.minimal:
         params = params.minimal()
-    results: dict[str, list[Any]] = {}
     iterator = list(params.product_iter())
-
-    if logging == Logging.pbar:
+    if args.logging == Logging.pbar:
         iterator = tqdm(iterator)
 
+    # loop over hyperparameter combinations
+    results: dict[str, list[Any]] = {}
     for param in iterator:
-        if logging == Logging.results:
+        # print hypers
+        if args.logging == Logging.results:
             print(
                 ' '.join(f'{k}={v}' for k, v in param.items()) + '...',
                 end='',
                 flush=True,
             )
 
+        # create BART state
         bench = Benchmark()
-        bench.setup(**param)
+        bench.setup(type(params), **param)
 
-        times = [clock(bench.task) for _ in range(num)]
+        # clock MCMC step
+        times = [clock(bench.task) for _ in range(args.num)]
         time_est = min(times)
         time_lo = min(times)
-        time_up = min(times) + (max(times) - min(times)) / num
+        time_up = min(times) + (max(times) - min(times)) / args.num
 
+        # free memory
         bench.teardown()
 
-        if logging == Logging.results:
+        # print timing results
+        if args.logging == Logging.results:
             print(f' {time_est:#.2g} s')
 
+        # save results
         for k, v in param.items():
             results.setdefault(k, []).append(v)
         results.setdefault('time_est', []).append(time_est)
         results.setdefault('time_lo', []).append(time_lo)
         results.setdefault('time_up', []).append(time_up)
 
+    # convert to polars dataframe
     return DataFrame(results)
 
 
@@ -184,7 +285,47 @@ def save_results(results: DataFrame) -> None:
     results.write_parquet(file)
 
 
-if __name__ == '__main__':
+def parse_args() -> Namespace:
+    """Parse CLI arguments."""
+    parser = ArgumentParser(
+        description='Clock step_trees to find the optimal number of batches.',
+        formatter_class=ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        'reduction',
+        type=Reduction,
+        choices=list(Reduction),
+        help='Which reduction to benchmark.',
+    )
+    parser.add_argument(
+        '--logging',
+        type=Logging,
+        choices=list(Logging),
+        default=Logging.pbar,
+        help='Logging mode for benchmark runs.',
+    )
+    parser.add_argument(
+        '--num',
+        type=int,
+        default=10,
+        help='Number of timing repetitions for each configuration.',
+    )
+    parser.add_argument(
+        '--minimal',
+        action='store_true',
+        default=False,
+        help='Use a minimal hyperparameter grid.',
+    )
+    return parser.parse_args()
+
+
+def main():
+    """Entry point of the script."""
     enable_compilation_cache()
-    result = benchmark_loop()
+    args = parse_args()
+    result = benchmark_loop(args)
     save_results(result)
+
+
+if __name__ == '__main__':
+    main()

@@ -57,6 +57,7 @@ only-local = [
     "rich>=13.9.4",
     "scikit-learn>=1.6.1",
     "snakeviz>=2.2.2",
+    "tqdm>=4.67.1",
     "virtualenv>=20.31.2",
     "xgboost>=3.0.0",
 ]
@@ -214,7 +215,7 @@ ignore = [
 "src/bartz/_version.py" = [
     "CPY001", # Missing copyright notice at top of file
 ]
-"{config/*,docs/*,tests/*,benchmarks/_vendor_latest_bartz.py}" = [
+"{config/*,docs/*,tests/*,benchmarks/_vendor_latest_bartz.py,scripts/*}" = [
     "T201", # `print` found
 ]
 "{tests/*,benchmarks/*}" = [

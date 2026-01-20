@@ -279,30 +279,6 @@ class StepSharded(StepGeneric):
         )
 
 
-class StepResid(StepGeneric):
-    """Benchmark `step` to optimize resid_num_batches."""
-
-    params = (
-        (False, True),
-        (None, 1, 2, 4),
-        tuple(4**i for i in range(12 + 1)),
-        (None, *(2**i for i in range(10 + 1))),
-    )
-
-    def setup(self, weights: bool, k: int | None, n: int, num_batches: None | int):  # ty:ignore[invalid-method-override]
-        """Set up to change settings that influence the sum of residuals."""
-        super().setup(
-            'run',
-            'weights' if weights else 'plain',
-            None,
-            n=n,
-            p=1,
-            num_trees=1,
-            k=k,
-            resid_num_batches=num_batches,
-        )
-
-
 class BaseGbart(AutoParamNames):
     """Base class to benchmark `mc_gbart`."""
 

@@ -278,9 +278,11 @@ def enable_compilation_cache():
     config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
 
 
-def save_results(results: DataFrame) -> None:
+def save_results(results: DataFrame, args: Namespace) -> None:
     """Write benchmark results to a parquet file."""
-    file = Path(__file__).with_suffix('.parquet')
+    base = Path(__file__).stem
+    filename = f'{base}_{args.reduction}_{args.num}_{args.minimal}.parquet'
+    file = Path(__file__).with_name(filename)
     print(f'write {file}...')
     results.write_parquet(file)
 
@@ -324,7 +326,7 @@ def main():
     enable_compilation_cache()
     args = parse_args()
     result = benchmark_loop(args)
-    save_results(result)
+    save_results(result, args)
 
 
 if __name__ == '__main__':

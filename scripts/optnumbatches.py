@@ -28,7 +28,7 @@ from abc import ABC, abstractmethod
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
-from enum import StrEnum, auto  # ty:ignore[unresolved-import], assume py314
+from enum import StrEnum, auto
 from functools import partial
 from gc import collect
 from itertools import product
@@ -38,10 +38,12 @@ from typing import Any, TypeVar
 
 from jax import block_until_ready, config, jit, random
 from jax import numpy as jnp
+from jax.errors import JaxRuntimeError
 from jaxtyping import Array, Key
 from polars import DataFrame
 from tqdm import tqdm
 
+from bartz.jaxext import get_default_device
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._step import step_trees
 from benchmarks.speed import gen_nonsense_data
@@ -57,11 +59,12 @@ class ParamsBase(ABC):
 
     weights: Sequence[bool] = (False, True)
     n: Sequence[int] = tuple(4**i for i in range(12 + 1))
+    num_batches: Sequence[None | int] = (None, *(2**i for i in range(13 + 1)))
 
     @abstractmethod
-    def valid(self, **values) -> bool:
+    def valid(self, *, n: int, num_batches: int | None, **_) -> bool:
         """Check if a set of parameter values is valid."""
-        ...
+        return num_batches is None or num_batches <= n
 
     def product_iter(self) -> Iterator[dict[str, Any]]:
         """Yield parameter dictionaries for all valid combinations."""
@@ -83,36 +86,21 @@ class ParamsResid(ParamsBase):
     """Hyperparamer grid to clock summing residuals."""
 
     k: Sequence[int | None] = (None, 1, 2, 4)
-    num_batches: Sequence[None | int] = (None, *(2**i for i in range(10 + 1)))
 
-    def valid(
-        self, *, weights: bool, n: int, k: int | None, num_batches: None | int
-    ) -> bool:  # ty:ignore[invalid-method-override]
-        """Skip heteroskedastic multivariate, and more batches than values."""
-        return (not weights or k is None) and (num_batches is None or num_batches <= n)
+    def valid(self, *, weights: bool, k: int | None, **values) -> bool:  # ty:ignore[invalid-method-override]
+        """Skip heteroskedastic multivariate."""
+        return (not weights or k is None) and super().valid(**values)
 
 
 @dataclass(frozen=True)
 class ParamsCount(ParamsBase):
-    """Hyperparamer grid to clock summing residuals."""
+    """Hyperparamer grid to clock summing precisions or counting datapoints."""
 
     num_trees: Sequence[int] = tuple(4**i for i in range(5 + 1))
-    num_trees_times_num_batches: Sequence[None | int] = (
-        None,
-        *(2**i for i in range(10 + 1)),
-    )
 
-    def valid(
-        self, *, n: int, num_trees: int, num_trees_times_num_batches: int | None, **_
-    ) -> bool:  # ty:ignore[invalid-method-override]
-        """Skip < 1 batches, more batches than values to reduce, and too much memory."""
-        return (
-            num_trees_times_num_batches is None
-            or (
-                num_trees_times_num_batches >= num_trees
-                and num_trees_times_num_batches // num_trees <= n
-            )
-        ) and num_trees * n <= MAX_LEAF_INDICES_SIZE
+    def valid(self, *, n: int, num_trees: int, **values) -> bool:  # ty:ignore[invalid-method-override]
+        """Skip if it would use too much memory."""
+        return num_trees * n <= MAX_LEAF_INDICES_SIZE and super().valid(n=n, **values)
 
 
 @partial(jit, donate_argnums=(1,))
@@ -130,29 +118,13 @@ class Benchmark:
         *,
         weights: bool,
         n: int,
+        num_batches: None | int,
         k: int | None = None,
-        num_batches: None | int = None,
-        num_trees: int = 1,
-        num_trees_times_num_batches: int | None = None,
+        num_trees: int = 5,
     ):
         """Initialize BART state and warmup MCMC step."""
         # generate data
         X, y, max_split = gen_nonsense_data(1, n, k)
-
-        # determine the number of batches
-        match (num_batches, num_trees_times_num_batches):
-            case None, None:
-                # num_batches=None and it must be None, already ok
-                pass
-            case None, ntnb:
-                assert ntnb % num_trees == 0
-                num_batches = ntnb // num_trees
-            case _nb, None:
-                # num_batches int and nbnt not defined, use num_batches as is
-                pass
-            case _:
-                # both values defined, error
-                raise ValueError
 
         # determine which reduction to configure
         if paramcls is ParamsResid:
@@ -219,15 +191,21 @@ def clock(func: Callable) -> float:
     return perf_counter() - start
 
 
-def benchmark_loop(args: Namespace) -> DataFrame:
-    """Run timing benchmarks over parameter combinations."""
-    # get grid of hyperparameters
+def get_params(args: Namespace) -> ParamsBase:
+    """Choose the grid of hyperparameters."""
     if args.reduction == Reduction.resid:
         params = ParamsResid()
     else:
         params = ParamsCount()
     if args.minimal:
         params = params.minimal()
+    return params
+
+
+def benchmark_loop(args: Namespace) -> DataFrame:
+    """Run timing benchmarks over parameter combinations."""
+    # get grid of hyperparameters
+    params = get_params(args)
     iterator = list(params.product_iter())
     if args.logging == Logging.pbar:
         iterator = tqdm(iterator)
@@ -243,15 +221,30 @@ def benchmark_loop(args: Namespace) -> DataFrame:
                 flush=True,
             )
 
-        # create BART state
+        # create benchmark harness object
         bench = Benchmark()
-        bench.setup(type(params), **param)
 
-        # clock MCMC step
-        times = [clock(bench.task) for _ in range(args.num)]
-        time_est = min(times)
-        time_lo = min(times)
-        time_up = min(times) + (max(times) - min(times)) / args.num
+        # handle out-of-memory errors
+        try:
+            # create bart state
+            bench.setup(type(params), **param)
+
+        except JaxRuntimeError as e:
+            # out of memory
+            if 'RESOURCE_EXHAUSTED: Out of memory while trying to allocate' in str(e):
+                time_est = float('nan')
+                time_lo = float('nan')
+                time_up = float('nan')
+
+            # some other error
+            else:
+                raise
+        else:
+            # clock MCMC step
+            times = [clock(bench.task) for _ in range(args.num)]
+            time_est = min(times)
+            time_lo = min(times)
+            time_up = min(times) + (max(times) - min(times)) / args.num
 
         # free memory
         bench.teardown()
@@ -281,7 +274,8 @@ def enable_compilation_cache():
 def save_results(results: DataFrame, args: Namespace) -> None:
     """Write benchmark results to a parquet file."""
     base = Path(__file__).stem
-    filename = f'{base}_{args.reduction}_{args.num}_{args.minimal}.parquet'
+    device = get_default_device().device_kind.replace(' ', '_')
+    filename = f'{base}_{args.reduction}_{args.num}_{args.minimal}_{device}.parquet'
     file = Path(__file__).with_name(filename)
     print(f'write {file}...')
     results.write_parquet(file)

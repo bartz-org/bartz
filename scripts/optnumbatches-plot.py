@@ -48,24 +48,15 @@ def save_fig(fig: plt.Figure) -> None:
 
 def load_and_prepare_data(
     input_path: Path,
-) -> tuple[pl.DataFrame, pl.DataFrame, list[str], str]:
+) -> tuple[pl.DataFrame, pl.DataFrame, list[str]]:
     """Load parquet data and return full/optimal datasets plus labels."""
     df = pl.read_parquet(input_path)
 
-    required_base_cols = {'n', 'time_est', 'time_lo', 'time_up'}
+    required_base_cols = {'n', 'time_est', 'time_lo', 'time_up', 'num_batches'}
     missing_base_cols = required_base_cols - set(df.columns)
     if missing_base_cols:
         missing_list = ', '.join(sorted(missing_base_cols))
         msg = f'Missing required columns: {missing_list}'
-        raise ValueError(msg)
-
-    if 'num_batches' in df.columns:
-        batch_col_name = 'num_batches'
-    elif 'num_trees_times_num_batches' in df.columns:
-        batch_col_name = 'num_trees_times_num_batches'
-        df = df.rename({'num_trees_times_num_batches': 'num_batches'})
-    else:
-        msg = 'Missing required column: num_batches or num_trees_times_num_batches'
         raise ValueError(msg)
 
     # Treat null num_batches as 0.5 (so it's visible on log scale)
@@ -74,7 +65,7 @@ def load_and_prepare_data(
     # Drop rows where num_batches exceeds n
     df = df.filter(pl.col('num_batches') <= pl.col('n'))
 
-    required_cols = {*required_base_cols, 'num_batches'}
+    required_cols = required_base_cols
     hyperparam_cols = [c for c in df.columns if c not in required_cols]
 
     # Create a label for each combination of hyperparameters
@@ -95,20 +86,20 @@ def load_and_prepare_data(
         .sort(group_cols)
     )
 
-    labels = df.select('label').unique().sort('label').to_series().to_list()
+    labels = df.select('label').unique(maintain_order=True).to_series().to_list()
 
-    return df, optimal_df, labels, batch_col_name
+    return df, optimal_df, labels
 
 
 def plot_optimal_num_batches(
-    optimal_df: pl.DataFrame,
-    labels: list[str],
-    batch_col_name: str,
-    fig_name_prefix: str,
+    optimal_df: pl.DataFrame, labels: list[str], fig_name_prefix: str
 ) -> None:
     """Plot optimal num_batches vs n."""
     fig, ax = plt.subplots(
-        num=fig_name_prefix, figsize=(10, 6), layout='constrained', clear=True
+        num=f'{fig_name_prefix}_optimal',
+        figsize=(10, 6),
+        layout='constrained',
+        clear=True,
     )
 
     for label in labels:
@@ -121,8 +112,8 @@ def plot_optimal_num_batches(
         xscale='log',
         yscale='log',
         xlabel='n',
-        ylabel=f'optimal {batch_col_name}',
-        title=f'Optimal {batch_col_name} vs n',
+        ylabel='optimal num_batches',
+        title='Optimal num_batches vs n',
     )
     ax.legend()
     ax.grid(True, alpha=0.3)
@@ -131,7 +122,7 @@ def plot_optimal_num_batches(
 
 
 def plot_time_vs_num_batches_series(
-    df: pl.DataFrame, labels: list[str], batch_col_name: str, fig_name_prefix: str
+    df: pl.DataFrame, labels: list[str], fig_name_prefix: str
 ) -> None:
     """Plot time vs num_batches for each n, one figure per hyperparameter combo."""
     n_values = df.select('n').unique().sort('n').to_series().to_list()
@@ -176,7 +167,7 @@ def plot_time_vs_num_batches_series(
 
         ax.set(
             xscale='log',
-            xlabel=f'{batch_col_name}',
+            xlabel='num_batches',
             ylabel='time range / min(time_est)',
             title='Time vs num batches',
             ylim=(0, None),
@@ -202,10 +193,10 @@ def main() -> None:
     """Entry point of the script."""
     args = parse_args()
     input_prefix = args.input_path.stem
-    df, optimal_df, labels, batch_col_name = load_and_prepare_data(args.input_path)
+    df, optimal_df, labels = load_and_prepare_data(args.input_path)
 
-    plot_optimal_num_batches(optimal_df, labels, batch_col_name, input_prefix)
-    plot_time_vs_num_batches_series(df, labels, batch_col_name, input_prefix)
+    plot_optimal_num_batches(optimal_df, labels, input_prefix)
+    plot_time_vs_num_batches_series(df, labels, input_prefix)
 
     plt.show()
 

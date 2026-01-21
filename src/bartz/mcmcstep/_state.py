@@ -32,7 +32,16 @@ from typing import Any, Literal, TypeVar
 
 from equinox import Module, error_if
 from equinox import field as eqx_field
-from jax import NamedSharding, device_put, eval_shape, make_mesh, random, tree, vmap
+from jax import (
+    NamedSharding,
+    device_put,
+    eval_shape,
+    jit,
+    make_mesh,
+    random,
+    tree,
+    vmap,
+)
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
@@ -648,9 +657,7 @@ def init(
         if is_binary
         else jnp.broadcast_to(y - offset[..., None], resid_shape),
         error_cov_inv=add_chains(error_cov_inv),
-        prec_scale=(
-            None if error_scale is None else jnp.reciprocal(jnp.square(error_scale))
-        ),
+        prec_scale=_get_prec_scale(error_scale),
         error_cov_df=error_cov_df,
         error_cov_scale=error_cov_scale,
         forest=Forest(
@@ -705,6 +712,21 @@ def init(
 
     # move all arrays to the appropriate device
     return _shard_state(state)
+
+
+@partial(jit, donate_argnums=(0,))
+def _get_prec_scale(
+    error_scale: Float32[Array, ' n'] | None,
+) -> Float32[Array, ' n'] | None:
+    """Compute 1 / error_scale**2.
+
+    This is a separate function to use donate_argnums to avoid intermediate
+    copies.
+    """
+    if error_scale is None:
+        return None
+    else:
+        return jnp.reciprocal(jnp.square(jnp.asarray(error_scale)))
 
 
 def _get_blocked_vars(

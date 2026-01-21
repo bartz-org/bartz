@@ -27,6 +27,8 @@
 COVERAGE_SUFFIX =
 OLD_PYTHON = $(shell uv run --group=ci python -c 'from tests.util import get_old_python_str; print(get_old_python_str())')
 OLD_DATE = 2025-05-15
+CUDA_VERSION = $(shell nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3)
+EXTRAS = $(if $(filter 12 13,$(CUDA_VERSION)),--extra=cuda$(CUDA_VERSION),)
 
 .PHONY: all
 all:
@@ -63,17 +65,7 @@ all:
 .PHONY: setup
 setup:
 	Rscript -e "renv::restore()"
-	uv run --all-groups pre-commit install
-	@CUDA_VERSION=$$(nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3); \
-	if [ "$$CUDA_VERSION" = "12" ]; then \
-		echo "Detected CUDA 12, installing jax[cuda12]"; \
-		uv pip install "jax[cuda12]"; \
-	elif [ "$$CUDA_VERSION" = "13" ]; then \
-		echo "Detected CUDA 13, installing jax[cuda13]"; \
-		uv pip install "jax[cuda13]"; \
-	else \
-		echo "No CUDA detected"; \
-	fi
+	uv run --all-groups $(EXTRAS) pre-commit install
 
 
 ################# TESTS #################
@@ -81,7 +73,7 @@ setup:
 TESTS_VARS = COVERAGE_FILE=.coverage.tests$(COVERAGE_SUFFIX)
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --numprocesses=2 --dist=worksteal --durations=1000
 
-UV_RUN_CI = uv run --group=ci
+UV_RUN_CI = uv run --group=ci $(EXTRAS)
 UV_OPTS_OLD = --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE)
 UV_VARS_OLD = UV_PROJECT_ENVIRONMENT=.venv-old
 UV_RUN_CI_OLD = $(UV_VARS_OLD) $(UV_RUN_CI) $(UV_OPTS_OLD)

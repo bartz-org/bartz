@@ -42,6 +42,10 @@ dependencies = [
     "scipy>=1.11.4",
 ]
 
+[project.optional-dependencies]
+cuda12 = ["jax[cuda12]"]
+cuda13 = ["jax[cuda13]"]
+
 [project.urls]
 Homepage = "https://github.com/bartz-org/bartz"
 Documentation = "https://bartz-org.github.io/bartz/docs-dev"

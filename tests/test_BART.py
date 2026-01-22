@@ -179,6 +179,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                         resid_num_batches=None,
                         count_num_batches=None,
                         prec_num_batches=None,
+                        prec_count_num_trees=5,
                         target_platform=None,
                         save_ratios=True,
                     ),
@@ -211,10 +212,6 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     maxdepth=6,
                     num_chain_devices=None,
                     init_kw=dict(
-                        resid_num_batches=16,
-                        count_num_batches=16,
-                        prec_num_batches=16,
-                        target_platform=None,
                         save_ratios=False,
                         min_points_per_decision_node=None,
                         min_points_per_leaf=None,
@@ -245,7 +242,14 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 mc_cores=2,
                 bart_kwargs=dict(
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
-                    init_kw=dict(save_ratios=True),
+                    init_kw=dict(
+                        save_ratios=True,
+                        resid_num_batches=16,
+                        count_num_batches=16,
+                        prec_num_batches=16,
+                        target_platform=None,
+                        prec_count_num_trees=7,
+                    ),
                 ),
             )
 

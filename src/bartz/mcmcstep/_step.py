@@ -36,7 +36,7 @@ except ImportError:
 
 import jax
 from equinox import Module, tree_at
-from jax import lax, random
+from jax import lax, random, vmap
 from jax import numpy as jnp
 from jax.lax import cond
 from jax.scipy.linalg import solve_triangular
@@ -448,7 +448,6 @@ def apply_grow_to_indices(
     )
 
 
-@partial(vmap_nodoc, in_axes=(None, 0, 0, None))
 def _compute_count_or_prec_trees(
     prec_scale: Float32[Array, ' n'] | None,
     leaf_indices: UInt[Array, 'num_trees n'],
@@ -458,6 +457,27 @@ def _compute_count_or_prec_trees(
     tuple[UInt32[Array, 'num_trees 2**d'], Counts]
     | tuple[Float32[Array, 'num_trees 2**d'], Precs]
 ):
+    """Implement `compute_count_trees` and `compute_prec_trees`."""
+    if config.prec_count_num_trees is None:
+        compute = vmap(_compute_count_or_prec_tree, in_axes=(None, 0, 0, None))
+        return compute(prec_scale, leaf_indices, moves, config)
+
+    def compute(args):
+        leaf_indices, moves = args
+        return _compute_count_or_prec_tree(prec_scale, leaf_indices, moves, config)
+
+    return lax.map(
+        compute, (leaf_indices, moves), batch_size=config.prec_count_num_trees
+    )
+
+
+def _compute_count_or_prec_tree(
+    prec_scale: Float32[Array, ' n'] | None,
+    leaf_indices: UInt[Array, ' n'],
+    moves: Moves,
+    config: StepConfig,
+) -> tuple[UInt32[Array, ' 2**d'], Counts] | tuple[Float32[Array, ' 2**d'], Precs]:
+    """Compute count or precision tree for a single tree."""
     (tree_size,) = moves.var_tree.shape
     tree_size *= 2
 

@@ -30,6 +30,7 @@ from functools import partial, wraps
 from math import log2
 from typing import Any, Literal, TypedDict, TypeVar
 
+import numpy
 from equinox import Module, error_if
 from equinox import field as eqx_field
 from jax import (
@@ -253,6 +254,8 @@ class StepConfig(Module):
     prec_num_batches
         The number of batches for computing the sufficient statistics. If
         `None`, they are computed with no batching.
+    prec_count_num_trees
+        Batch size for processing trees to compute count and prec trees.
     mesh
         The mesh used to shard data and computation across multiple devices.
     """
@@ -262,6 +265,7 @@ class StepConfig(Module):
     resid_num_batches: int | None = field(static=True)
     count_num_batches: int | None = field(static=True)
     prec_num_batches: int | None = field(static=True)
+    prec_count_num_trees: int | None = field(static=True)
     mesh: Mesh | None = field(static=True)
 
 
@@ -456,6 +460,7 @@ def init(
     resid_num_batches: int | None | Literal['auto'] = 'auto',
     count_num_batches: int | None | Literal['auto'] = 'auto',
     prec_num_batches: int | None | Literal['auto'] = 'auto',
+    prec_count_num_trees: int | None | Literal['auto'] = 'auto',
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
     min_points_per_leaf: int | Integer[Any, ''] | None = None,
@@ -518,6 +523,11 @@ def init(
         likelihood precision in each leaf, respectively. `None` for no batching.
         If 'auto', it's chosen automatically based on the target platform; see
         the description of `target_platform` below for how it is determined.
+    prec_count_num_trees
+        The number of trees to process at a time when counting datapoints or
+        computing the likelihood precision. If `None`, do all trees at once,
+        which may use too much memory. If 'auto' (default), it's chosen
+        automatically.
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
     filter_splitless_vars
@@ -639,6 +649,7 @@ def init(
         resid_num_batches,
         count_num_batches,
         prec_num_batches,
+        prec_count_num_trees,
         y,
         num_trees,
         mesh,
@@ -868,14 +879,16 @@ class _ReductionConfig(TypedDict):
     resid_num_batches: int | None
     count_num_batches: int | None
     prec_num_batches: int | None
+    prec_count_num_trees: int | None
 
 
 def _parse_reduction_configs(
     resid_num_batches: int | None | Literal['auto'],
     count_num_batches: int | None | Literal['auto'],
     prec_num_batches: int | None | Literal['auto'],
+    prec_count_num_trees: int | None | Literal['auto'],
     y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'],
-    _num_trees: int,  # to be used later
+    num_trees: int,
     mesh: Mesh | None,
     target_platform: Literal['cpu', 'gpu'] | None,
 ) -> _ReductionConfig:
@@ -887,6 +900,9 @@ def _parse_reduction_configs(
         resid_num_batches=parse_num_batches(resid_num_batches, 'resid'),
         count_num_batches=parse_num_batches(count_num_batches, 'count'),
         prec_num_batches=parse_num_batches(prec_num_batches, 'prec'),
+        prec_count_num_trees=_parse_prec_count_num_trees(
+            prec_count_num_trees, num_trees, n
+        ),
     )
 
 
@@ -923,6 +939,42 @@ def _final_round(n: int, num: float) -> int | None:
 
     # disable batching if the batch is as large as the whole dataset
     return num if num > 1 else None
+
+
+def _parse_prec_count_num_trees(
+    prec_count_num_trees: int | None | Literal['auto'], num_trees: int, n: int
+) -> int | None:
+    """Return the number of trees to process at a time or determine it automatically."""
+    if prec_count_num_trees != 'auto':
+        return prec_count_num_trees
+    max_n_by_ntree = 2**27  # about 100M
+    pcnt = max_n_by_ntree // max(1, n)
+    pcnt = min(num_trees, pcnt)
+    pcnt = max(1, pcnt)
+    pcnt = _search_divisor(
+        pcnt, num_trees, max(1, pcnt // 2), max(1, min(num_trees, pcnt * 2))
+    )
+    if pcnt >= num_trees:
+        pcnt = None
+    return pcnt
+
+
+def _search_divisor(target_divisor: int, dividend: int, low: int, up: int) -> int:
+    """Find the divisor closest to `target_divisor` in [low, up] if `target_divisor` is not already.
+
+    If there is none, give up and return `target_divisor`.
+    """
+    assert target_divisor >= 1
+    assert 1 <= low <= up <= dividend
+    if dividend % target_divisor == 0:
+        return target_divisor
+    candidates = numpy.arange(low, up + 1)
+    divisors = candidates[dividend % candidates == 0]
+    if divisors.size == 0:
+        return target_divisor
+    penalty = numpy.abs(divisors - target_divisor)
+    closest = numpy.argmin(penalty)
+    return divisors[closest].item()
 
 
 def get_axis_size(mesh: Mesh | None, axis_name: str) -> int:

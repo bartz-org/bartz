@@ -178,6 +178,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     init_kw=dict(
                         resid_num_batches=None,
                         count_num_batches=None,
+                        prec_num_batches=None,
                         target_platform=None,
                         save_ratios=True,
                     ),
@@ -212,6 +213,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     init_kw=dict(
                         resid_num_batches=16,
                         count_num_batches=16,
+                        prec_num_batches=16,
                         target_platform=None,
                         save_ratios=False,
                         min_points_per_decision_node=None,

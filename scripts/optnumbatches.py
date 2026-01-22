@@ -129,11 +129,21 @@ class Benchmark:
         # determine which reduction to configure
         if paramcls is ParamsResid:
             nb_kwargs: dict = dict(
-                resid_num_batches=num_batches, count_num_batches=None
+                resid_num_batches=num_batches,
+                count_num_batches=None,
+                prec_num_batches=None,
             )
-        elif paramcls is ParamsCount:
+        elif paramcls is ParamsCount and weights:
             nb_kwargs: dict = dict(
-                resid_num_batches=None, count_num_batches=num_batches
+                resid_num_batches=None,
+                count_num_batches=None,
+                prec_num_batches=num_batches,
+            )
+        elif paramcls is ParamsCount and not weights:
+            nb_kwargs: dict = dict(
+                resid_num_batches=None,
+                count_num_batches=num_batches,
+                prec_num_batches=None,
             )
         else:
             raise TypeError

@@ -260,6 +260,7 @@ class StepConfig(Module):
     sparse_on_at: Int32[Array, ''] | None
     resid_num_batches: int | None = field(static=True)
     count_num_batches: int | None = field(static=True)
+    prec_num_batches: int | None = field(static=True)
     mesh: Mesh | None = field(static=True)
 
 
@@ -453,6 +454,7 @@ def init(
     min_points_per_decision_node: int | Integer[Any, ''] | None = None,
     resid_num_batches: int | None | Literal['auto'] = 'auto',
     count_num_batches: int | None | Literal['auto'] = 'auto',
+    prec_num_batches: int | None | Literal['auto'] = 'auto',
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
     min_points_per_leaf: int | Integer[Any, ''] | None = None,
@@ -509,8 +511,10 @@ def init(
         specified.
     resid_num_batches
     count_num_batches
-        The number of batches, along datapoints, for summing the residuals and
-        counting the number of datapoints in each leaf. `None` for no batching.
+    prec_num_batches
+        The number of batches, along datapoints, for summing the residuals,
+        counting the number of datapoints in each leaf, and computing the
+        likelihood precision in each leaf, respectively. `None` for no batching.
         If 'auto', it's chosen automatically based on the target platform; see
         the description of `target_platform` below for how it is determined.
     save_ratios
@@ -630,14 +634,17 @@ def init(
     target_platform = _parse_target_platform(
         y, mesh, target_platform, resid_num_batches, count_num_batches
     )
-    resid_num_batches, count_num_batches = _choose_suffstat_num_batches(
-        resid_num_batches,
-        count_num_batches,
-        y,
-        num_trees,
-        num_chains,
-        mesh,
-        target_platform,
+    resid_num_batches, count_num_batches, prec_num_batches = (
+        _choose_suffstat_num_batches(
+            resid_num_batches,
+            count_num_batches,
+            prec_num_batches,
+            y,
+            num_trees,
+            num_chains,
+            mesh,
+            target_platform,
+        )
     )
 
     # check there aren't too many deactivated predictors
@@ -706,6 +713,7 @@ def init(
             sparse_on_at=_asarray_or_none(sparse_on_at),
             resid_num_batches=resid_num_batches,
             count_num_batches=count_num_batches,
+            prec_num_batches=prec_num_batches,
             mesh=mesh,
         ),
     )
@@ -858,15 +866,16 @@ def _get_platform(mesh: Mesh | None) -> str:
         return mesh.devices.flat[0].platform
 
 
-def _choose_suffstat_num_batches(
+def _choose_suffstat_num_batches(  # noqa: C901
     resid_num_batches: int | None | Literal['auto'],
     count_num_batches: int | None | Literal['auto'],
+    prec_num_batches: int | None | Literal['auto'],
     y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'],
     num_trees: int,
     num_chains: int | None,
     mesh: Mesh | None,
     target_platform: Literal['cpu', 'gpu'] | None,
-) -> tuple[int | None, int | None]:
+) -> tuple[int | None, ...]:
     """Determine number of batches for reductions."""
     # get per-device number of datapoints and chains
     n = y.shape[-1]
@@ -875,29 +884,8 @@ def _choose_suffstat_num_batches(
         num_chains = 1
     num_chains //= get_axis_size(mesh, 'chains')
 
-    def final_round(num: float, other_num_batches: int = 1) -> int | None:
-        # multiply the number of pre-existing batches by the number of chains
-        # because it's always possible to parallelize across chains
-        other_num_batches *= num_chains
-
-        # divide by other_num_batches because if the calculation is already
-        # parallelizable over batching dims there is correspondingly less need
-        # to parallelize across datapoints
-        num /= max(1, other_num_batches)
-
-        # no more batches than items
-        num = min(n, num)
-
-        # round to the nearest power of 2 because I guess XLA and the hardware
-        # will like that (not sure about this, maybe just multiple of 32?)
-        num = 2 ** round(log2(num)) if num else 0
-
-        # no more batches than items, again because rounding could shoot over
-        if num > n:
-            num //= 2
-
-        # disable batching if the batch is as large as the whole dataset
-        return num if num > 1 else None
+    def final_round(*args) -> int | None:
+        return _final_round(num_chains, n, *args)
 
     if resid_num_batches != 'auto':
         rnb = resid_num_batches
@@ -913,7 +901,42 @@ def _choose_suffstat_num_batches(
     elif target_platform == 'gpu':
         cnb = final_round(800 * n**0.5, num_trees)
 
-    return rnb, cnb
+    if prec_num_batches != 'auto':
+        pnb = prec_num_batches
+    elif target_platform == 'cpu':
+        pnb = final_round(6, num_trees)
+    elif target_platform == 'gpu':
+        pnb = final_round(800 * n**0.5, num_trees)
+
+    return rnb, cnb, pnb
+
+
+def _final_round(
+    num_chains: int, n: int, num: float, other_num_batches: int = 1
+) -> int | None:
+    """Post-process an automatically determined number of batches."""
+    # multiply the number of pre-existing batches by the number of chains
+    # because it's always possible to parallelize across chains
+    other_num_batches *= num_chains
+
+    # divide by other_num_batches because if the calculation is already
+    # parallelizable over batching dims there is correspondingly less need
+    # to parallelize across datapoints
+    num /= max(1, other_num_batches)
+
+    # no more batches than items
+    num = min(n, num)
+
+    # round to the nearest power of 2 because I guess XLA and the hardware
+    # will like that (not sure about this, maybe just multiple of 32?)
+    num = 2 ** round(log2(num)) if num else 0
+
+    # no more batches than items, again because rounding could shoot over
+    if num > n:
+        num //= 2
+
+    # disable batching if the batch is as large as the whole dataset
+    return num if num > 1 else None
 
 
 def get_axis_size(mesh: Mesh | None, axis_name: str) -> int:

@@ -28,7 +28,7 @@ from collections.abc import Callable, Hashable
 from dataclasses import fields
 from functools import partial, wraps
 from math import log2
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TypedDict, TypeVar
 
 from equinox import Module, error_if
 from equinox import field as eqx_field
@@ -250,6 +250,7 @@ class StepConfig(Module):
         After how many steps to turn on variable selection.
     resid_num_batches
     count_num_batches
+    prec_num_batches
         The number of batches for computing the sufficient statistics. If
         `None`, they are computed with no batching.
     mesh
@@ -634,17 +635,14 @@ def init(
     target_platform = _parse_target_platform(
         y, mesh, target_platform, resid_num_batches, count_num_batches
     )
-    resid_num_batches, count_num_batches, prec_num_batches = (
-        _choose_suffstat_num_batches(
-            resid_num_batches,
-            count_num_batches,
-            prec_num_batches,
-            y,
-            num_trees,
-            num_chains,
-            mesh,
-            target_platform,
-        )
+    red_cfg = _parse_reduction_configs(
+        resid_num_batches,
+        count_num_batches,
+        prec_num_batches,
+        y,
+        num_trees,
+        mesh,
+        target_platform,
     )
 
     # check there aren't too many deactivated predictors
@@ -711,10 +709,8 @@ def init(
         config=StepConfig(
             steps_done=jnp.int32(0),
             sparse_on_at=_asarray_or_none(sparse_on_at),
-            resid_num_batches=resid_num_batches,
-            count_num_batches=count_num_batches,
-            prec_num_batches=prec_num_batches,
             mesh=mesh,
+            **red_cfg,
         ),
     )
 
@@ -866,64 +862,54 @@ def _get_platform(mesh: Mesh | None) -> str:
         return mesh.devices.flat[0].platform
 
 
-def _choose_suffstat_num_batches(  # noqa: C901
+class _ReductionConfig(TypedDict):
+    """Fields of `StepConfig` related to reductions."""
+
+    resid_num_batches: int | None
+    count_num_batches: int | None
+    prec_num_batches: int | None
+
+
+def _parse_reduction_configs(
     resid_num_batches: int | None | Literal['auto'],
     count_num_batches: int | None | Literal['auto'],
     prec_num_batches: int | None | Literal['auto'],
     y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'],
-    num_trees: int,
-    num_chains: int | None,
+    _num_trees: int,  # to be used later
     mesh: Mesh | None,
     target_platform: Literal['cpu', 'gpu'] | None,
-) -> tuple[int | None, ...]:
-    """Determine number of batches for reductions."""
-    # get per-device number of datapoints and chains
+) -> _ReductionConfig:
+    """Determine settings for indexed reduces."""
     n = y.shape[-1]
-    n //= get_axis_size(mesh, 'data')
-    if num_chains is None:
-        num_chains = 1
-    num_chains //= get_axis_size(mesh, 'chains')
-
-    def final_round(*args) -> int | None:
-        return _final_round(num_chains, n, *args)
-
-    if resid_num_batches != 'auto':
-        rnb = resid_num_batches
-    elif target_platform == 'cpu':
-        rnb = final_round(16)
-    elif target_platform == 'gpu':
-        rnb = final_round(0.8 * n ** (2 / 3))
-
-    if count_num_batches != 'auto':
-        cnb = count_num_batches
-    elif target_platform == 'cpu':
-        cnb = final_round(6, num_trees)
-    elif target_platform == 'gpu':
-        cnb = final_round(800 * n**0.5, num_trees)
-
-    if prec_num_batches != 'auto':
-        pnb = prec_num_batches
-    elif target_platform == 'cpu':
-        pnb = final_round(6, num_trees)
-    elif target_platform == 'gpu':
-        pnb = final_round(800 * n**0.5, num_trees)
-
-    return rnb, cnb, pnb
+    n //= get_axis_size(mesh, 'data')  # per-device datapoints
+    parse_num_batches = partial(_parse_num_batches, target_platform, n)
+    return dict(
+        resid_num_batches=parse_num_batches(resid_num_batches, 'resid'),
+        count_num_batches=parse_num_batches(count_num_batches, 'count'),
+        prec_num_batches=parse_num_batches(prec_num_batches, 'prec'),
+    )
 
 
-def _final_round(
-    num_chains: int, n: int, num: float, other_num_batches: int = 1
+def _parse_num_batches(
+    target_platform: Literal['cpu', 'gpu'] | None,
+    n: int,
+    num_batches: int | None | Literal['auto'],
+    which: Literal['resid', 'count', 'prec'],
 ) -> int | None:
-    """Post-process an automatically determined number of batches."""
-    # multiply the number of pre-existing batches by the number of chains
-    # because it's always possible to parallelize across chains
-    other_num_batches *= num_chains
+    """Return the number of batches or determine it automatically."""
+    final_round = partial(_final_round, n)
+    if num_batches != 'auto':
+        nb = num_batches
+    elif target_platform == 'cpu':
+        nb = final_round(16)
+    elif target_platform == 'gpu':
+        nb = dict(resid=1024, count=2048, prec=1024)[which]  # on an A4000
+        nb = final_round(nb)
+    return nb
 
-    # divide by other_num_batches because if the calculation is already
-    # parallelizable over batching dims there is correspondingly less need
-    # to parallelize across datapoints
-    num /= max(1, other_num_batches)
 
+def _final_round(n: int, num: float) -> int | None:
+    """Round number of batches to a power of 2, but less than n, and set to None if 1."""
     # no more batches than items
     num = min(n, num)
 

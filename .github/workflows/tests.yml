@@ -137,7 +137,7 @@ jobs:
           echo "R_HOME=$(R RHOME)" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$(R RHOME)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
           ldd "$(R RHOME)/library/methods/libs/methods.so" || true
-          uv run --group ci python -c "import rpy2.situation as s; print('\n'.join(map(str, s.iter_info())))"
+          uv run --dev python -c "import rpy2.situation as s; print('\n'.join(map(str, s.iter_info())))"
 
       - name: Install jax GPU support
         if: matrix.target-suffix == '-gpu'
@@ -220,9 +220,9 @@ jobs:
 
       - name: Print coverage debug
         run: |
-          uv run --group ci coverage debug config
-          uv run --group ci coverage debug sys
-          uv run --group ci coverage debug data
+          uv run --dev python -m coverage debug config
+          uv run --dev python -m coverage debug sys
+          uv run --dev python -m coverage debug data
 
       - name: Generate coverage report
         run: make covreport
@@ -304,7 +304,7 @@ jobs:
           cache-suffix: -${{ matrix.os }}${{ matrix.target-suffix }}
 
       - name: Get machine information for asv
-        run: RPY2_CFFI_MODE=ABI uv run --group ci python -m asv machine --yes
+        run: RPY2_CFFI_MODE=ABI uv run --dev python -m asv machine --yes
 
       - name: Install jax GPU support
         if: matrix.target-suffix == '-gpu'

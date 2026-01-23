@@ -31,7 +31,9 @@
 
     // Customizable commands for installing and uninstalling the project.
     // See asv.conf.json documentation.
-    // "install_command": ["in-dir={env_dir} python -mpip install {wheel_file}"],
+    "install_command": [
+        "/bin/bash {conf_dir}/config/asv-install.sh {wheel_file} {env_dir}"
+    ],
     // "uninstall_command": ["return-code=any python -mpip uninstall -y {project}"],
 
     // List of branches to benchmark. If not provided, defaults to "main"

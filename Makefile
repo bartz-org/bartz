@@ -134,6 +134,7 @@ covcheck:
 	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total
 	$(UV_RUN) coverage report --include='src/*' --fail-under=90 --format=total
 
+
 ################# RELEASE #################
 
 .PHONY: update-deps
@@ -192,7 +193,7 @@ ASV = $(UV_RUN) python -m asv
 
 .PHONY: asv-run
 asv-run:
-	$(UV_RUN) python config/refs-for-asv.py | $(ASV) run --skip-existing-successful --show-stderr HASHFILE:- $(ARGS)
+	$(UV_RUN) python config/refs-for-asv.py | $(ASV) run --durations=all --skip-existing-successful --show-stderr HASHFILE:- $(ARGS)
 
 .PHONY: asv-publish
 asv-publish:
@@ -208,7 +209,7 @@ asv-main:
 
 .PHONY: asv-quick
 asv-quick:
-	$(ASV) run --python=same --quick --dry-run --show-stderr $(ARGS)
+	$(ASV) run --durations=all --python=same --quick --dry-run --show-stderr $(ARGS)
 
 
 ################# IPYTHON SHELL #################

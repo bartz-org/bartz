@@ -79,17 +79,19 @@ setup:
 ################# TESTS #################
 
 TESTS_VARS = COVERAGE_FILE=.coverage.tests$(COVERAGE_SUFFIX)
-TESTS_COMMAND = python -m pytest --cov --cov-context=test --numprocesses=2 --dist=worksteal --durations=1000
-TESTS_GPU_VARS = XLA_PYTHON_CLIENT_MEM_FRACTION=.20 $(TESTS_VARS)
+TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
+TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
+TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=2
+TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_MEM_FRACTION=.20
 TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=3
 
 .PHONY: tests
 tests:
-	$(TESTS_VARS) $(UV_RUN) $(TESTS_COMMAND) $(ARGS)
+	$(TESTS_CPU_VARS) $(UV_RUN) $(TESTS_CPU_COMMAND) $(ARGS)
 
 .PHONY: tests-old
 tests-old:
-	$(TESTS_VARS) $(UV_RUN_OLD) $(TESTS_COMMAND) $(ARGS)
+	$(TESTS_CPU_VARS) $(UV_RUN_OLD) $(TESTS_CPU_COMMAND) $(ARGS)
 
 .PHONY: tests-gpu
 tests-gpu:

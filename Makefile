@@ -32,7 +32,7 @@ EXTRAS = $(if $(filter 12 13,$(CUDA_VERSION)),--extra=cuda$(CUDA_VERSION),)
 UV_RUN = uv run --dev $(EXTRAS)
 
 # define command to run python with oldest supported dependencies
-OLD_PYTHON = $(shell $(UV_RUN) python -c 'from tests.util import get_old_python_str; print(get_old_python_str())')
+OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]*\).*/\1/')
 OLD_DATE = 2025-05-15
 UV_OPTS_OLD = --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE)
 UV_VARS_OLD = UV_PROJECT_ENVIRONMENT=.venv-old
@@ -80,6 +80,8 @@ setup:
 
 TESTS_VARS = COVERAGE_FILE=.coverage.tests$(COVERAGE_SUFFIX)
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --numprocesses=2 --dist=worksteal --durations=1000
+TESTS_GPU_VARS = XLA_PYTHON_CLIENT_MEM_FRACTION=.20 $(TESTS_VARS)
+TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=3
 
 .PHONY: tests
 tests:
@@ -92,7 +94,13 @@ tests-old:
 .PHONY: tests-gpu
 tests-gpu:
 	nvidia-smi
-	XLA_PYTHON_CLIENT_MEM_FRACTION=.20 $(TESTS_VARS) $(UV_RUN) $(TESTS_COMMAND) --platform=gpu --numprocesses=3 $(ARGS)
+	$(TESTS_GPU_VARS) $(UV_RUN) $(TESTS_GPU_COMMAND) $(ARGS)
+
+.PHONY: tests-gpu-old
+tests-gpu-old:
+	nvidia-smi
+	$(TESTS_GPU_VARS) $(UV_RUN_OLD) $(TESTS_GPU_COMMAND) $(ARGS)
+
 
 ################# DOCS #################
 

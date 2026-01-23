@@ -925,17 +925,13 @@ def _parse_num_batches(
 
 
 def _final_round(n: int, num: float) -> int | None:
-    """Round number of batches to a power of 2, but less than n, and set to None if 1."""
-    # no more batches than items
-    num = min(n, num)
+    """Bound batch size, round number of batches to a power of 2, and disable batching if there's only 1 batch."""
+    # at least some elements per batch
+    num = min(n // 32, num)
 
     # round to the nearest power of 2 because I guess XLA and the hardware
     # will like that (not sure about this, maybe just multiple of 32?)
     num = 2 ** round(log2(num)) if num else 0
-
-    # no more batches than items, again because rounding could shoot over
-    if num > n:
-        num //= 2
 
     # disable batching if the batch is as large as the whole dataset
     return num if num > 1 else None

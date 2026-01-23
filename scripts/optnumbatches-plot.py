@@ -24,12 +24,23 @@
 
 """Plot the results produced by optnumbatches.py."""
 
+import colorsys
 from argparse import ArgumentParser, Namespace
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+
+
+@dataclass(frozen=True)
+class Data:
+    """Container for prepared data from load_and_prepare_data."""
+
+    df: pl.DataFrame
+    optimal_df: pl.DataFrame
+    hyperparam_cols: tuple[str, ...]
 
 
 def sanitize_for_filename(name: str) -> str:
@@ -46,10 +57,8 @@ def save_fig(fig: plt.Figure) -> None:
     fig.savefig(save_file, dpi=150)
 
 
-def load_and_prepare_data(
-    input_path: Path,
-) -> tuple[pl.DataFrame, pl.DataFrame, list[str]]:
-    """Load parquet data and return full/optimal datasets plus labels."""
+def load_and_prepare_data(input_path: Path) -> Data:
+    """Load parquet data and return full/optimal datasets with metadata."""
     df = pl.read_parquet(input_path)
 
     required_base_cols = {'n', 'time_est', 'time_lo', 'time_up', 'num_batches'}
@@ -80,21 +89,19 @@ def load_and_prepare_data(
 
     # For each combination of hyperparameters and n, find the num_batches that minimizes time_est
     group_cols = [*hyperparam_cols, 'n', 'label']
-    optimal_df = (
-        df.group_by(group_cols)
-        .agg(pl.col('num_batches').sort_by('time_est').first().alias('opt_num_batches'))
-        .sort(group_cols)
+    optimal_df = df.group_by(group_cols, maintain_order=True).agg(
+        pl.col('num_batches').sort_by('time_est').first().alias('opt_num_batches')
     )
 
-    labels = df.select('label').unique(maintain_order=True).to_series().to_list()
-
-    return df, optimal_df, labels
+    return Data(df=df, optimal_df=optimal_df, hyperparam_cols=tuple(hyperparam_cols))
 
 
-def plot_optimal_num_batches(
-    optimal_df: pl.DataFrame, labels: list[str], fig_name_prefix: str
-) -> None:
+def plot_optimal_num_batches(data: Data, fig_name_prefix: str) -> None:
     """Plot optimal num_batches vs n."""
+    assert len(data.hyperparam_cols) == 2, (
+        f'Expected exactly 2 hyperparams, got {len(data.hyperparam_cols)}'
+    )
+
     fig, ax = plt.subplots(
         num=f'{fig_name_prefix}_optimal',
         figsize=(10, 6),
@@ -102,11 +109,43 @@ def plot_optimal_num_batches(
         clear=True,
     )
 
-    for label in labels:
-        subset = optimal_df.filter(pl.col('label') == label)
+    # Get unique sorted values for each hyperparam and create index mappings
+    hp_to_idx = []
+    for hp_name in data.hyperparam_cols:
+        values = data.optimal_df[hp_name].unique().sort()
+        hp_to_idx.append({v: i for i, v in enumerate(values)})
+
+    # Create hue and brightness arrays
+    hues = np.linspace(0, 1, len(hp_to_idx[0]), endpoint=False)
+    saturation = np.linspace(0.05, 0.95, len(hp_to_idx[1]))
+    brightness = np.linspace(0.95, 0.50, len(hp_to_idx[1]))
+
+    group_cols = [*data.hyperparam_cols, 'label']
+    for group_keys, subset in data.optimal_df.group_by(group_cols, maintain_order=True):
+        # Extract hyperparam values and label from group_keys
+        hp_vals = group_keys[:-1]
+        label = group_keys[-1]
+
+        # Get indices for each hyperparam
+        hp_indices = [
+            hp_to_idx[i][hp_vals[i]] for i in range(len(data.hyperparam_cols))
+        ]
+
+        hue = hues[hp_indices[0]]
+        sat = saturation[hp_indices[1]]
+        bri = brightness[hp_indices[1]]
+        color = colorsys.hsv_to_rgb(hue, sat, bri)
+
         n_values = subset['n'].to_numpy()
         opt_num_batches = subset['opt_num_batches'].to_numpy()
-        ax.plot(n_values, opt_num_batches, marker='o', label=label, markersize=4)
+        ax.plot(
+            n_values,
+            opt_num_batches,
+            marker='o',
+            label=label,
+            markersize=4,
+            color=color,
+        )
 
     ax.set(
         xscale='log',
@@ -121,15 +160,11 @@ def plot_optimal_num_batches(
     save_fig(fig)
 
 
-def plot_time_vs_num_batches_series(
-    df: pl.DataFrame, labels: list[str], fig_name_prefix: str
-) -> None:
+def plot_time_vs_num_batches_series(data: Data, fig_name_prefix: str) -> None:
     """Plot time vs num_batches for each n, one figure per hyperparameter combo."""
-    n_values = df.select('n').unique().sort('n').to_series().to_list()
+    n_values = data.df.select('n').unique().sort('n').to_series().to_list()
 
-    for label in labels:
-        subset = df.filter(pl.col('label') == label)
-
+    for (label,), subset in data.df.group_by('label', maintain_order=True):
         fig, ax = plt.subplots(
             num=f'{fig_name_prefix}_{label}',
             figsize=(10, 6),
@@ -193,10 +228,10 @@ def main() -> None:
     """Entry point of the script."""
     args = parse_args()
     input_prefix = args.input_path.stem
-    df, optimal_df, labels = load_and_prepare_data(args.input_path)
+    data = load_and_prepare_data(args.input_path)
 
-    plot_optimal_num_batches(optimal_df, labels, input_prefix)
-    plot_time_vs_num_batches_series(df, labels, input_prefix)
+    plot_optimal_num_batches(data, input_prefix)
+    plot_time_vs_num_batches_series(data, input_prefix)
 
     plt.show()
 

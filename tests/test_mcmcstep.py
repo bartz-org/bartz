@@ -602,6 +602,7 @@ class TestMultichain:
                 num_chains=None,
                 resid_num_batches=mc_state.config.resid_num_batches,
                 count_num_batches=mc_state.config.count_num_batches,
+                prec_num_batches=mc_state.config.prec_num_batches,
             )
             for _ in range(num_chains)
         ]

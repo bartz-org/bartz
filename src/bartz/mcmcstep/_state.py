@@ -643,7 +643,7 @@ def init(
     # determine batch sizes for reductions
     mesh = _parse_mesh(num_chains, mesh)
     target_platform = _parse_target_platform(
-        y, mesh, target_platform, resid_num_batches, count_num_batches
+        y, mesh, target_platform, resid_num_batches, count_num_batches, prec_num_batches
     )
     red_cfg = _parse_reduction_configs(
         resid_num_batches,
@@ -800,6 +800,7 @@ def _parse_target_platform(
     target_platform: Literal['cpu', 'gpu'] | None,
     resid_num_batches: int | None | Literal['auto'],
     count_num_batches: int | None | Literal['auto'],
+    prec_num_batches: int | None | Literal['auto'],
 ) -> Literal['cpu', 'gpu'] | None:
     if mesh is not None:
         assert target_platform is None, 'mesh provided, do not set target_platform'
@@ -807,7 +808,11 @@ def _parse_target_platform(
     elif hasattr(y, 'platform'):
         assert target_platform is None, 'device inferred from y, unset target_platform'
         return y.platform()
-    elif resid_num_batches == 'auto' or count_num_batches == 'auto':
+    elif (
+        resid_num_batches == 'auto'
+        or count_num_batches == 'auto'
+        or prec_num_batches == 'auto'
+    ):
         assert target_platform in ('cpu', 'gpu')
         return target_platform
     else:

@@ -1200,7 +1200,7 @@ def _scatter_add_impl(
         out = (
             jnp.zeros((size, num_batches), dtype)
             .at[indices, batch_indices]
-            .add(values, wrap_negative_indices=False)
+            .add(values)
             .sum(axis=1)
         )
 

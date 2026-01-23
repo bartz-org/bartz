@@ -42,25 +42,26 @@ dependencies = [
     "scipy>=1.11.4",
 ]
 
+[project.optional-dependencies]
+cuda12 = ["jax[cuda12]"]
+cuda13 = ["jax[cuda13]"]
+
 [project.urls]
 Homepage = "https://github.com/bartz-org/bartz"
 Documentation = "https://bartz-org.github.io/bartz/docs-dev"
 Issues = "https://github.com/bartz-org/bartz/issues"
 
 [dependency-groups]
-only-local = [
+dev = [
     "appnope>=0.1.4",
     "ipython>=8.36.0",
     "matplotlib>=3.10.3",
     "matplotlib-label-lines>=0.8.1",
     "pre-commit>=4.2.0",
     "rich>=13.9.4",
-    "scikit-learn>=1.6.1",
     "snakeviz>=2.2.2",
+    "tqdm>=4.67.1",
     "virtualenv>=20.31.2",
-    "xgboost>=3.0.0",
-]
-ci = [
     "asv>=0.6.4",
     "beartype>=0.20.2",
     "flaky>=3.8.1",
@@ -214,7 +215,7 @@ ignore = [
 "src/bartz/_version.py" = [
     "CPY001", # Missing copyright notice at top of file
 ]
-"{config/*,docs/*,tests/*,benchmarks/_vendor_latest_bartz.py}" = [
+"{config/*,docs/*,tests/*,benchmarks/_vendor_latest_bartz.py,scripts/*}" = [
     "T201", # `print` found
 ]
 "{tests/*,benchmarks/*}" = [

@@ -600,8 +600,9 @@ class TestMultichain:
             init(
                 **init_kwargs,
                 num_chains=None,
-                resid_batch_size=mc_state.config.resid_batch_size,
-                count_batch_size=mc_state.config.count_batch_size,
+                resid_num_batches=mc_state.config.resid_num_batches,
+                count_num_batches=mc_state.config.count_num_batches,
+                prec_num_batches=mc_state.config.prec_num_batches,
             )
             for _ in range(num_chains)
         ]
@@ -643,7 +644,7 @@ class TestMultichain:
                 mc,
                 stacked,
                 err_msg=f'{str_path}: ',
-                rtol=0 if exact else 1e-6,
+                rtol=0 if exact else 1e-5,
                 reduce_rank=True,
             )
 

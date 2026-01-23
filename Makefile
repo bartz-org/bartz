@@ -25,8 +25,18 @@
 # Makefile for running tests, prepare and upload a release.
 
 COVERAGE_SUFFIX =
-OLD_PYTHON = $(shell uv run --group=ci python -c 'from tests.util import get_old_python_str; print(get_old_python_str())')
+
+# define command to run python
+CUDA_VERSION = $(shell nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3)
+EXTRAS = $(if $(filter 12 13,$(CUDA_VERSION)),--extra=cuda$(CUDA_VERSION),)
+UV_RUN = uv run --dev $(EXTRAS)
+
+# define command to run python with oldest supported dependencies
+OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]*\).*/\1/')
 OLD_DATE = 2025-05-15
+UV_OPTS_OLD = --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE)
+UV_VARS_OLD = UV_PROJECT_ENVIRONMENT=.venv-old
+UV_RUN_OLD = $(UV_VARS_OLD) $(UV_RUN) $(UV_OPTS_OLD)
 
 .PHONY: all
 all:
@@ -63,47 +73,42 @@ all:
 .PHONY: setup
 setup:
 	Rscript -e "renv::restore()"
-	uv run --all-groups pre-commit install
-	@CUDA_VERSION=$$(nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3); \
-	if [ "$$CUDA_VERSION" = "12" ]; then \
-		echo "Detected CUDA 12, installing jax[cuda12]"; \
-		uv pip install "jax[cuda12]"; \
-	elif [ "$$CUDA_VERSION" = "13" ]; then \
-		echo "Detected CUDA 13, installing jax[cuda13]"; \
-		uv pip install "jax[cuda13]"; \
-	else \
-		echo "No CUDA detected"; \
-	fi
+	$(UV_RUN) pre-commit install
 
 
 ################# TESTS #################
 
 TESTS_VARS = COVERAGE_FILE=.coverage.tests$(COVERAGE_SUFFIX)
-TESTS_COMMAND = python -m pytest --cov --cov-context=test --numprocesses=2 --dist=worksteal --durations=1000
-
-UV_RUN_CI = uv run --group=ci
-UV_OPTS_OLD = --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE)
-UV_VARS_OLD = UV_PROJECT_ENVIRONMENT=.venv-old
-UV_RUN_CI_OLD = $(UV_VARS_OLD) $(UV_RUN_CI) $(UV_OPTS_OLD)
+TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
+TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
+TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=2
+TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_MEM_FRACTION=.20
+TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=3
 
 .PHONY: tests
 tests:
-	$(TESTS_VARS) $(UV_RUN_CI) $(TESTS_COMMAND) $(ARGS)
+	$(TESTS_CPU_VARS) $(UV_RUN) $(TESTS_CPU_COMMAND) $(ARGS)
 
 .PHONY: tests-old
 tests-old:
-	$(TESTS_VARS) $(UV_RUN_CI_OLD) $(TESTS_COMMAND) $(ARGS)
+	$(TESTS_CPU_VARS) $(UV_RUN_OLD) $(TESTS_CPU_COMMAND) $(ARGS)
 
 .PHONY: tests-gpu
 tests-gpu:
 	nvidia-smi
-	XLA_PYTHON_CLIENT_MEM_FRACTION=.20 $(TESTS_VARS) $(UV_RUN_CI) $(TESTS_COMMAND) --platform=gpu --numprocesses=3 $(ARGS)
+	$(TESTS_GPU_VARS) $(UV_RUN) $(TESTS_GPU_COMMAND) $(ARGS)
+
+.PHONY: tests-gpu-old
+tests-gpu-old:
+	nvidia-smi
+	$(TESTS_GPU_VARS) $(UV_RUN_OLD) $(TESTS_GPU_COMMAND) $(ARGS)
+
 
 ################# DOCS #################
 
 .PHONY: docs
 docs:
-	$(UV_RUN_CI) make -C docs html
+	$(UV_RUN) make -C docs html
 	test ! -d _site/docs-dev || rm -r _site/docs-dev
 	mv docs/_build/html _site/docs-dev
 	@echo
@@ -111,7 +116,7 @@ docs:
 
 .PHONY: docs-latest
 docs-latest:
-	BARTZ_DOC_VARIANT=latest $(UV_RUN_CI) make -C docs html
+	BARTZ_DOC_VARIANT=latest $(UV_RUN) make -C docs html
 	git switch - || git switch main
 	test ! -d _site/docs || rm -r _site/docs
 	mv docs/_build/html _site/docs
@@ -120,16 +125,17 @@ docs-latest:
 
 .PHONY: covreport
 covreport:
-	$(UV_RUN_CI) coverage combine --keep
-	$(UV_RUN_CI) coverage html --include='src/*'
+	$(UV_RUN) coverage combine --keep
+	$(UV_RUN) coverage html --include='src/*'
 
 .PHONY: covcheck
 covcheck:
-	$(UV_RUN_CI) coverage combine --keep
-	$(UV_RUN_CI) coverage report --include='tests/**/test_*.py'
-	$(UV_RUN_CI) coverage report --include='src/*'
-	$(UV_RUN_CI) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total
-	$(UV_RUN_CI) coverage report --include='src/*' --fail-under=90 --format=total
+	$(UV_RUN) coverage combine --keep
+	$(UV_RUN) coverage report --include='tests/**/test_*.py'
+	$(UV_RUN) coverage report --include='src/*'
+	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total
+	$(UV_RUN) coverage report --include='src/*' --fail-under=90 --format=total
+
 
 ################# RELEASE #################
 
@@ -141,7 +147,7 @@ update-deps:
 .PHONY: copy-version
 copy-version: src/bartz/_version.py
 src/bartz/_version.py: pyproject.toml
-	uv run --group=ci python config/util.py update_version
+	$(UV_RUN) python config/util.py update_version
 
 .PHONY: check-committed
 check-committed:
@@ -178,18 +184,18 @@ upload-test: check-committed
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN="$$UV_PUBLISH_TOKEN" && \
 	uv publish --check-url=https://test.pypi.org/simple/ --publish-url=https://test.pypi.org/legacy/
-	@VERSION=$$(uv run --group=ci python config/util.py get_version) && \
+	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
 	echo "Try to install bartz $$VERSION from TestPyPI" && \
 	uv tool run --index=https://test.pypi.org/simple/ --index-strategy=unsafe-best-match --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
 
 ################# BENCHMARKS #################
 
-ASV = $(UV_RUN_CI) python -m asv
+ASV = $(UV_RUN) python -m asv
 
 .PHONY: asv-run
 asv-run:
-	$(UV_RUN_CI) python config/refs-for-asv.py | $(ASV) run --skip-existing-successful --show-stderr HASHFILE:- $(ARGS)
+	$(UV_RUN) python config/refs-for-asv.py | $(ASV) run --durations=all --skip-existing-successful --show-stderr HASHFILE:- $(ARGS)
 
 .PHONY: asv-publish
 asv-publish:
@@ -205,15 +211,15 @@ asv-main:
 
 .PHONY: asv-quick
 asv-quick:
-	$(ASV) run --python=same --quick --dry-run --show-stderr $(ARGS)
+	$(ASV) run --durations=all --python=same --quick --dry-run --show-stderr $(ARGS)
 
 
 ################# IPYTHON SHELL #################
 
 .PHONY: ipython
 ipython:
-	IPYTHONDIR=config/ipython uv run --all-groups python -m IPython $(ARGS)
+	IPYTHONDIR=config/ipython $(UV_RUN) python -m IPython $(ARGS)
 
 .PHONY: ipython-old
 ipython-old:
-	IPYTHONDIR=config/ipython $(UV_VARS_OLD) uv run --all-groups $(UV_OPTS_OLD) python -m IPython $(ARGS)
+	IPYTHONDIR=config/ipython $(UV_RUN_OLD) python -m IPython $(ARGS)

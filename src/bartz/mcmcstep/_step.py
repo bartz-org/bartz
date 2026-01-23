@@ -36,7 +36,7 @@ except ImportError:
 
 import jax
 from equinox import Module, tree_at
-from jax import lax, random
+from jax import lax, random, vmap
 from jax import numpy as jnp
 from jax.lax import cond
 from jax.scipy.linalg import solve_triangular
@@ -448,7 +448,6 @@ def apply_grow_to_indices(
     )
 
 
-@partial(vmap_nodoc, in_axes=(None, 0, 0, None))
 def _compute_count_or_prec_trees(
     prec_scale: Float32[Array, ' n'] | None,
     leaf_indices: UInt[Array, 'num_trees n'],
@@ -458,6 +457,27 @@ def _compute_count_or_prec_trees(
     tuple[UInt32[Array, 'num_trees 2**d'], Counts]
     | tuple[Float32[Array, 'num_trees 2**d'], Precs]
 ):
+    """Implement `compute_count_trees` and `compute_prec_trees`."""
+    if config.prec_count_num_trees is None:
+        compute = vmap(_compute_count_or_prec_tree, in_axes=(None, 0, 0, None))
+        return compute(prec_scale, leaf_indices, moves, config)
+
+    def compute(args):
+        leaf_indices, moves = args
+        return _compute_count_or_prec_tree(prec_scale, leaf_indices, moves, config)
+
+    return lax.map(
+        compute, (leaf_indices, moves), batch_size=config.prec_count_num_trees
+    )
+
+
+def _compute_count_or_prec_tree(
+    prec_scale: Float32[Array, ' n'] | None,
+    leaf_indices: UInt[Array, ' n'],
+    moves: Moves,
+    config: StepConfig,
+) -> tuple[UInt32[Array, ' 2**d'], Counts] | tuple[Float32[Array, ' 2**d'], Precs]:
+    """Compute count or precision tree for a single tree."""
     (tree_size,) = moves.var_tree.shape
     tree_size *= 2
 
@@ -465,13 +485,15 @@ def _compute_count_or_prec_trees(
         value = 1
         cls = Counts
         dtype = jnp.uint32
+        num_batches = config.count_num_batches
     else:
         value = prec_scale
         cls = Precs
         dtype = jnp.float32
+        num_batches = config.prec_num_batches
 
     trees = _scatter_add(
-        value, leaf_indices, tree_size, dtype, config.count_batch_size, config.mesh
+        value, leaf_indices, tree_size, dtype, num_batches, config.mesh
     )
 
     # count datapoints in nodes modified by move
@@ -885,7 +907,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
             resid,
             SeqStageInAllTrees(
                 pso.bart.X,
-                pso.bart.config.resid_batch_size,
+                pso.bart.config.resid_num_batches,
                 pso.bart.config.mesh,
                 pso.bart.prec_scale,
                 pso.bart.forest.log_likelihood is not None,
@@ -924,8 +946,8 @@ class SeqStageInAllTrees(Module):
     ----------
     X
         The predictors.
-    resid_batch_size
-        The batch size for computing the sum of residuals in each leaf.
+    resid_num_batches
+        The number of batches for computing the sum of residuals in each leaf.
     mesh
         The mesh of devices to use.
     prec_scale
@@ -939,7 +961,7 @@ class SeqStageInAllTrees(Module):
     """
 
     X: UInt[Array, 'p n']
-    resid_batch_size: int | None = field(static=True)
+    resid_num_batches: int | None = field(static=True)
     mesh: Mesh | None = field(static=True)
     prec_scale: Float32[Array, ' n'] | None
     save_ratios: bool = field(static=True)
@@ -1025,7 +1047,7 @@ def accept_move_and_sample_leaves(
     tree_size = pt.leaf_tree.shape[-1]  # 2**d
 
     resid_tree = sum_resid(
-        scaled_resid, pt.leaf_indices, tree_size, at.resid_batch_size, at.mesh
+        scaled_resid, pt.leaf_indices, tree_size, at.resid_num_batches, at.mesh
     )
 
     # subtract starting tree from function
@@ -1077,7 +1099,7 @@ def sum_resid(
     scaled_resid: Float32[Array, ' n'] | Float32[Array, 'k n'],
     leaf_indices: UInt[Array, ' n'],
     tree_size: int,
-    resid_batch_size: int | None,
+    resid_num_batches: int | None,
     mesh: Mesh | None,
 ) -> Float32[Array, ' {tree_size}'] | Float32[Array, 'k {tree_size}']:
     """
@@ -1096,8 +1118,8 @@ def sum_resid(
         The leaf indices of the tree (in which leaf each data point falls into).
     tree_size
         The size of the tree array (2 ** d).
-    resid_batch_size
-        The batch size for computing the sum of residuals in each leaf.
+    resid_num_batches
+        The number of batches for computing the sum of residuals in each leaf.
     mesh
         The mesh of devices to use.
 
@@ -1107,7 +1129,7 @@ def sum_resid(
     case, returns per-leaf sums of residual vectors.
     """
     return _scatter_add(
-        scaled_resid, leaf_indices, tree_size, jnp.float32, resid_batch_size, mesh
+        scaled_resid, leaf_indices, tree_size, jnp.float32, resid_num_batches, mesh
     )
 
 
@@ -1126,7 +1148,7 @@ def _scatter_add(
 
     # set configuration
     _scatter_add = partial(
-        _scatter_add_impl, size=size, dtype=dtype, batch_size=batch_size
+        _scatter_add_impl, size=size, dtype=dtype, num_batches=batch_size
     )
 
     # single-device invocation
@@ -1151,6 +1173,7 @@ def _scatter_add(
 
 def _get_shard_map_patch_kwargs():
     # see jax/issues/#34249, problem with vmap(shard_map(psum))
+    # we tried the config jax_disable_vmap_shmap_error but it didn't work
     if jax.__version__ in ('0.8.1', '0.8.2'):
         return {'check_vma': False}
     else:
@@ -1164,20 +1187,18 @@ def _scatter_add_impl(
     *,
     size: int,
     dtype: jnp.dtype,
-    batch_size: int | None,
+    num_batches: int | None,
     final_psum: bool = False,
 ) -> Shaped[Array, ' {size}']:
-    if batch_size is None:
+    if num_batches is None:
         out = jnp.zeros(size, dtype).at[indices].add(values)
 
     else:
-        # in the sharded case, n is the size of the local shard, not the full
-        # size
+        # in the sharded case, n is the size of the local shard, not the full size
         (n,) = indices.shape
-        nbatches = n // batch_size + bool(n % batch_size)
-        batch_indices = jnp.arange(n) % nbatches
+        batch_indices = jnp.arange(n) % num_batches
         out = (
-            jnp.zeros((size, nbatches), dtype)
+            jnp.zeros((size, num_batches), dtype)
             .at[indices, batch_indices]
             .add(values)
             .sum(axis=1)

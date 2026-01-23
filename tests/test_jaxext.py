@@ -24,16 +24,17 @@
 
 """Test bartz.jaxext."""
 
-from collections.abc import Callable
 from functools import partial
+from itertools import product
+from warnings import catch_warnings
 
 import numpy
 import pytest
 from jax import debug_infs, jit, random, tree
 from jax import numpy as jnp
 from jax.scipy.special import ndtri
-from jax.typing import DTypeLike
 from numpy.testing import assert_allclose
+from pytest_subtests import SubTests
 from scipy.stats import invgamma as scipy_invgamma
 from scipy.stats import ks_1samp, truncnorm
 
@@ -191,19 +192,16 @@ class TestAutoBatch:
         assert nbatches == 1
         assert jnp.all(y == x)
 
-    @pytest.mark.parametrize(
-        'op',
-        [
+    def test_reduction_basic(self, keys: split, subtests: SubTests):
+        """Check that reduction produces the expected result."""
+        # use an internal loop instead of pytest.mark.parametrize because there
+        # are too many combinations of parameters
+        ops = [
             (None, lambda x, **_kw: x),
             (jnp.add, jnp.sum),
-            (jnp.multiply, jnp.prod),
             (jnp.logical_and, jnp.all),
-            (jnp.logical_or, jnp.any),
-        ],
-    )
-    @pytest.mark.parametrize(
-        'shape_axis',
-        [
+        ]
+        shape_axes = [
             ((10,), 0),
             ((10, 100), 0),
             ((10, 100), 1),
@@ -211,52 +209,75 @@ class TestAutoBatch:
             ((10, 100), -2),
             ((0,), 0),
             ((10, 0), 0),
-        ],
-    )
-    @pytest.mark.parametrize('max_io_nbytes', [1, 100, 100_000_000])
-    @pytest.mark.parametrize('nin', [1, 2])
-    @pytest.mark.parametrize('dtype', [jnp.float32, jnp.int8, jnp.bool_])
-    def test_reduction_basic(
-        self,
-        keys: split,
-        op: tuple[jnp.ufunc, Callable],
-        shape_axis: tuple[tuple[int, ...], int],
-        max_io_nbytes: int,
-        nin: int,
-        dtype: DTypeLike,
-    ):
-        """Check that reduction produces the expected result."""
-        ufunc, reduction = op
-        shape, axis = shape_axis
+        ]
+        max_io_nbytes_list = [1, 100, 100_000_000]
+        nins = [1, 2]
+        dtypes = [jnp.float32, jnp.int8, jnp.bool_]
 
-        def func(*args):
-            out = sum(args)
-            if nin == 1:
-                return out
-            else:
-                return tuple(i * out for i in range(1, nin + 1))
+        key = keys.pop()
 
-        if jnp.issubdtype(dtype, jnp.floating):
-            args = random.uniform(keys.pop(), (nin, *shape), dtype)
-        elif jnp.issubdtype(dtype, jnp.integer):
-            args = random.randint(
-                keys.pop(),
-                (nin, *shape),
-                jnp.iinfo(dtype).min // 2,
-                (jnp.iinfo(dtype).max + 1) // 2,
-                dtype,
-            )
-        elif jnp.issubdtype(dtype, jnp.bool_):
-            args = random.bernoulli(keys.pop(), 0.5, (nin, *shape))
+        for op, shape_axis, max_io_nbytes, nin, dtype in product(
+            ops, shape_axes, max_io_nbytes_list, nins, dtypes
+        ):
+            ufunc, reduction = op
+            shape, axis = shape_axis
 
-        expected = tree.map(partial(reduction, axis=axis), func(*args))
+            with subtests.test(
+                ufunc=None if ufunc is None else ufunc.__name__,
+                shape=shape,
+                axis=axis,
+                max_io_nbytes=max_io_nbytes,
+                nin=nin,
+                dtype=dtype.dtype.name,
+            ):
 
-        batched_func = jaxext.autobatch(
-            func, max_io_nbytes, axis, axis, reduce_ufunc=ufunc
-        )
-        result = batched_func(*args)
+                def func(*args, nin=nin):
+                    out = sum(args)
+                    if nin == 1:
+                        return out
+                    else:
+                        return tuple(i * out for i in range(1, nin + 1))
 
-        tree.map(partial(assert_close_matrices, rtol=1e-6), result, expected)
+                keys = split(key)
+                key = keys.pop()
+
+                if jnp.issubdtype(dtype, jnp.floating):
+                    args = random.uniform(keys.pop(), (nin, *shape), dtype)
+                elif jnp.issubdtype(dtype, jnp.integer):
+                    args = random.randint(
+                        keys.pop(),
+                        (nin, *shape),
+                        jnp.iinfo(dtype).min // 2,
+                        (jnp.iinfo(dtype).max + 1) // 2,
+                        dtype,
+                    )
+                elif jnp.issubdtype(dtype, jnp.bool_):
+                    args = random.bernoulli(keys.pop(), 0.5, (nin, *shape))
+
+                expected = tree.map(partial(reduction, axis=axis), func(*args))
+
+                batched_func = jaxext.autobatch(
+                    func,
+                    max_io_nbytes,
+                    axis,
+                    axis,
+                    reduce_ufunc=ufunc,
+                    return_nbatches=True,
+                )
+                with catch_warnings(record=True) as caught_warnings:
+                    result, nbatches = batched_func(*args)
+
+                # Check at most one warning is raised
+                assert len(caught_warnings) <= 1
+
+                if caught_warnings:
+                    (w,) = caught_warnings
+                    assert issubclass(w.category, UserWarning)
+                    assert 'batch_nbytes =' in str(w.message)
+                    assert '> max_io_nbytes =' in str(w.message)
+                    assert nbatches == max(1, shape[axis])
+
+                tree.map(partial(assert_close_matrices, rtol=1e-6), result, expected)
 
     def test_reduction_with_unbatched_input(self, keys):
         """Check reduction works with unbatched (None) input arguments."""

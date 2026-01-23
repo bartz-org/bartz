@@ -68,7 +68,7 @@ from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
-from tests.test_mcmcstep import check_sharding, get_normal_spec
+from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
@@ -176,8 +176,10 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     num_data_devices=min(2, get_device_count()),
                     init_kw=dict(
-                        resid_batch_size=None,
-                        count_batch_size=None,
+                        resid_num_batches=None,
+                        count_num_batches=None,
+                        prec_num_batches=None,
+                        prec_count_num_trees=5,
                         target_platform=None,
                         save_ratios=True,
                     ),
@@ -210,9 +212,6 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                     maxdepth=6,
                     num_chain_devices=None,
                     init_kw=dict(
-                        resid_batch_size=16,
-                        count_batch_size=16,
-                        target_platform=None,
                         save_ratios=False,
                         min_points_per_decision_node=None,
                         min_points_per_leaf=None,
@@ -243,7 +242,14 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 mc_cores=2,
                 bart_kwargs=dict(
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
-                    init_kw=dict(save_ratios=True),
+                    init_kw=dict(
+                        save_ratios=True,
+                        resid_num_batches=16,
+                        count_num_batches=16,
+                        prec_num_batches=16,
+                        target_platform=None,
+                        prec_count_num_trees=7,
+                    ),
                 ),
             )
 
@@ -1512,7 +1518,8 @@ def test_sharding(kw: dict):
         elif 'data' in mesh.axis_names:
             expected_num_devices = min(2, get_device_count())
             assert x.sharding.num_devices == expected_num_devices
-            assert get_normal_spec(x) == (None,) * (x.ndim - 1) + ('data',)
+            expected_spec = (None,) * (x.ndim - 1) + ('data',)
+            assert get_normal_spec(x) == normalize_spec(expected_spec, mesh, x.shape)
 
     check_data_sharding(bart.prob_train)
     check_data_sharding(bart.prob_train_mean)

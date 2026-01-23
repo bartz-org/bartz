@@ -48,12 +48,10 @@ repos:
     rev: 0.7.6
     hooks:
       - id: pydoclint
-  - repo: https://github.com/abravalheri/validate-pyproject
-    rev: v0.24.1
+  - repo: https://github.com/henryiii/validate-pyproject-schema-store
+    rev: 2026.01.10
     hooks:
       - id: validate-pyproject
-        # Optional extra validations from SchemaStore:
-        additional_dependencies: ["validate-pyproject-schema-store[all]"]
   - repo: https://github.com/jorisroovers/gitlint
     rev: v0.19.1
     hooks:

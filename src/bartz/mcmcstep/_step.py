@@ -485,13 +485,15 @@ def _compute_count_or_prec_tree(
         value = 1
         cls = Counts
         dtype = jnp.uint32
+        num_batches = config.count_num_batches
     else:
         value = prec_scale
         cls = Precs
         dtype = jnp.float32
+        num_batches = config.prec_num_batches
 
     trees = _scatter_add(
-        value, leaf_indices, tree_size, dtype, config.count_num_batches, config.mesh
+        value, leaf_indices, tree_size, dtype, num_batches, config.mesh
     )
 
     # count datapoints in nodes modified by move

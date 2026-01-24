@@ -1,0 +1,9 @@
+{
+    "arch": "x86_64",
+    "cpu": "AMD Ryzen 5 5600X 6-Core Processor",
+    "machine": "vast-A4000",
+    "num_cpu": "12",
+    "os": "Linux 6.8.0-47-generic",
+    "ram": "49248528",
+    "version": 1
+}

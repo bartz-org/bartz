@@ -33,10 +33,7 @@ UV_RUN = uv run --dev $(EXTRAS)
 
 # define command to run python with oldest supported dependencies
 OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]*\).*/\1/')
-OLD_DATE = 2025-05-15
-UV_OPTS_OLD = --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE)
-UV_VARS_OLD = UV_PROJECT_ENVIRONMENT=.venv-old
-UV_RUN_OLD = $(UV_VARS_OLD) $(UV_RUN) $(UV_OPTS_OLD)
+UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=2025-05-15 --isolated
 
 .PHONY: all
 all:

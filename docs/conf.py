@@ -108,8 +108,7 @@ extensions = [
     'sphinx_autodoc_typehints',  # (!) keep after napoleon
     'sphinx.ext.mathjax',
     'sphinx.ext.intersphinx',  # link to other documentations automatically
-    'myst_parser',  # markdown support
-    'nbsphinx',
+    'myst_nb',  # markdown + jupyter notebook support
 ]
 
 # decide whether to use viewcode or linkcode extension
@@ -189,6 +188,9 @@ intersphinx_mapping = dict(
     numpy=('https://numpy.org/doc/stable', None),
     jax=('https://docs.jax.dev/en/latest', None),
 )
+
+# myst_nb
+nb_execution_mode = 'off'
 
 # viewcode
 viewcode_line_numbers = True

@@ -1,6 +1,6 @@
-.. bartz/docs/index.rst
+.. bartz/docs/examples/index.rst
 ..
-.. Copyright (c) 2024-2026, The Bartz Contributors
+.. Copyright (c) 2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -22,32 +22,11 @@
 .. OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 .. SOFTWARE.
 
-.. module:: bartz
 
-bartz
-=====
-
-Contents
---------
+Examples
+========
 
 .. toctree::
     :maxdepth: 1
 
-    readme.md
-
-.. toctree::
-    :maxdepth: 2
-
-    guide/index.rst
-    examples/index.rst
-    reference/index.rst
-
-.. toctree::
-    :maxdepth: 1
-
-    changelog.md
-    development.rst
-    pkglist.md
-
-* :ref:`genindex`
-* :ref:`search`
+    basic_simdata.ipynb

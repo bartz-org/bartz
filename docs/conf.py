@@ -1,6 +1,6 @@
 # bartz/docs/conf.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -109,6 +109,7 @@ extensions = [
     'sphinx.ext.mathjax',
     'sphinx.ext.intersphinx',  # link to other documentations automatically
     'myst_parser',  # markdown support
+    'nbsphinx',
 ]
 
 # decide whether to use viewcode or linkcode extension

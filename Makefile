@@ -39,14 +39,19 @@ UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclu
 all:
 	@echo "Available targets:"
 	@echo "- setup: create R and Python environments for development"
-	@echo "- tests: run unit tests, saving coverage information"
-	@echo "- tests-old: run unit tests with oldest supported python and dependencies"
-	@echo '- tests-gpu: variant of `tests` that works on gpu'
+	@echo "- tests: run unit tests on cpu, saving coverage information"
+	@echo "- tests-old: run unit tests on cpu with oldest supported python and dependencies"
+	@echo '- tests-gpu: like `tests` but on gpu'
+	@echo '- tests-gpu-old: like `tests-old` but on gpu'
 	@echo "- docs: build html documentation"
 	@echo "- docs-latest: build html documentation for latest release"
 	@echo "- covreport: build html coverage report"
 	@echo "- covcheck: check coverage is above some thresholds"
+	@echo "- update-deps: remove .venv and upgrade uv.lock"
+	@echo "- copy-version: sync version from pyproject.toml to _version.py"
+	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- release: packages the python module, invokes tests and docs first"
+	@echo "- version-tag: create and push git tag for current version"
 	@echo "- upload: upload release to PyPI"
 	@echo "- upload-test: upload release to TestPyPI"
 	@echo "- asv-run: run benchmarks on all unbenchmarked tagged releases and main"

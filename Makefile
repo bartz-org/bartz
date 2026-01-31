@@ -118,10 +118,16 @@ docs:
 
 .PHONY: docs-latest
 docs-latest:
-	BARTZ_DOC_VARIANT=latest $(UV_RUN) make -C docs html
-	git switch - || git switch main
-	test ! -d _site/docs || rm -r _site/docs
-	mv docs/_build/html _site/docs
+	@LATEST_TAG=$$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | sort -V | tail -1) && \
+	if [ -z "$$LATEST_TAG" ]; then echo "No release tags found"; exit 1; fi && \
+	echo "Building docs for $$LATEST_TAG" && \
+	WORKTREE_DIR=$$(mktemp -d) && \
+	trap "git worktree remove --force '$$WORKTREE_DIR' 2>/dev/null || rm -rf '$$WORKTREE_DIR'" EXIT && \
+	git worktree add --detach "$$WORKTREE_DIR" "$$LATEST_TAG" && \
+	uv sync --all-groups --directory "$$WORKTREE_DIR" && \
+	$(MAKE) -C "$$WORKTREE_DIR" docs && \
+	test ! -d _site/docs || rm -r _site/docs && \
+	mv "$$WORKTREE_DIR/_site/docs-dev" _site/docs
 	@echo
 	@echo "Now open _site/index.html"
 

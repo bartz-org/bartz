@@ -30,57 +30,31 @@
 
 import datetime
 import inspect
-import os
 import pathlib
+import re
 import sys
 from functools import cached_property
 
 import git
-from packaging import version as pkgversion
 
-# -- Doc variant -------------------------------------------------------------
+# -- Version info ------------------------------------------------------------
 
 repo = git.Repo(search_parent_directories=True)
 
-variant = os.environ.get('BARTZ_DOC_VARIANT', 'dev')
+commit = repo.head.commit.hexsha
+uncommitted_stuff = repo.is_dirty()
 
-if variant == 'dev':
-    commit = repo.head.commit.hexsha
-    uncommitted_stuff = repo.is_dirty()
+# Check if current commit has a version tag (vX.Y.Z)
+version = None
+for tag in repo.tags:
+    if tag.commit == repo.head.commit:
+        match = re.match(r'^v(\d+\.\d+\.\d+)$', tag.name)
+        if match:
+            version = match.group(1)
+            break
+
+if version is None:
     version = f'{commit[:7]}{"+" if uncommitted_stuff else ""}'
-
-elif variant == 'latest':
-    # list git tags
-    tags = [t.name for t in repo.tags]
-    print(f'git tags: {tags}')
-
-    # find final versions in tags
-    versions = []
-    for t in tags:
-        try:
-            v = pkgversion.parse(t)
-        except pkgversion.InvalidVersion:
-            continue
-        if v.is_prerelease or v.is_devrelease:
-            continue
-        versions.append((v, t))
-    print(f'tags for releases: {versions}')
-
-    # find latest versions
-    versions.sort(key=lambda x: x[0])
-    version, tag = versions[-1]
-
-    # check it out and check it matches the version in the package
-    repo.git.checkout(tag)
-    import bartz
-
-    assert pkgversion.parse(bartz.__version__) == version
-
-    version = str(version)
-    uncommitted_stuff = False
-
-else:
-    raise KeyError(variant)
 
 import bartz
 

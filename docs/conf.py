@@ -27,13 +27,13 @@
 # This file only contains a selection of the most common options. For a full
 # list see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
-
 import datetime
-import inspect
 import pathlib
 import re
 import sys
 from functools import cached_property
+from inspect import getsourcefile, getsourcelines, isclass, unwrap
+from os import getenv
 
 import git
 
@@ -87,7 +87,9 @@ extensions = [
 
 # decide whether to use viewcode or linkcode extension
 ext = 'viewcode'  # copy source code in static website
-if not uncommitted_stuff:
+if getenv('BARTZ_FORCE_LINKCODE'):
+    ext = 'linkcode'  # links to code on github
+elif not uncommitted_stuff:
     commit = repo.head.commit.hexsha
     branches = repo.git.branch('--remotes', '--contains', commit)
     commit_on_github = bool(branches.strip())
@@ -187,18 +189,23 @@ def linkcode_resolve(domain, info):
 
     obj = submod
     for part in fullname.split('.'):
-        obj = getattr(obj, part)
+        if isclass(obj) and part in obj.__annotations__:
+            # this is a class attribute and it does not make much sense create
+            # the source link
+            return None
+        else:
+            obj = getattr(obj, part)
 
     if isinstance(obj, cached_property):
         obj = obj.func
     elif isinstance(obj, property):
         obj = obj.fget
-    obj = inspect.unwrap(obj)
+    obj = unwrap(obj)
 
-    fn = inspect.getsourcefile(obj)
+    fn = getsourcefile(obj)
     assert fn
 
-    source, lineno = inspect.getsourcelines(obj)
+    source, lineno = getsourcelines(obj)
     assert lineno
     linespec = f'#L{lineno}-L{lineno + len(source) - 1}'
 

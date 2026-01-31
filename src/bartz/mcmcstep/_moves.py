@@ -39,76 +39,71 @@ from bartz.mcmcstep._state import Forest, field, vmap_chains
 
 
 class Moves(Module):
-    """
-    Moves proposed to modify each tree.
-
-    Parameters
-    ----------
-    allowed
-        Whether there is a possible move. If `False`, the other values may not
-        make sense. The only case in which a move is marked as allowed but is
-        then vetoed is if it does not satisfy `min_points_per_leaf`, which for
-        efficiency is implemented post-hoc without changing the rest of the
-        MCMC logic.
-    grow
-        Whether the move is a grow move or a prune move.
-    num_growable
-        The number of growable leaves in the original tree.
-    node
-        The index of the leaf to grow or node to prune.
-    left
-    right
-        The indices of the children of 'node'.
-    partial_ratio
-        A factor of the Metropolis-Hastings ratio of the move. It lacks the
-        likelihood ratio, the probability of proposing the prune move, and the
-        probability that the children of the modified node are terminal. If the
-        move is PRUNE, the ratio is inverted. `None` once
-        `log_trans_prior_ratio` has been computed.
-    log_trans_prior_ratio
-        The logarithm of the product of the transition and prior terms of the
-        Metropolis-Hastings ratio for the acceptance of the proposed move.
-        `None` if not yet computed. If PRUNE, the log-ratio is negated.
-    grow_var
-        The decision axes of the new rules.
-    grow_split
-        The decision boundaries of the new rules.
-    var_tree
-        The updated decision axes of the trees, valid whatever move.
-    affluence_tree
-        A partially updated `affluence_tree`, marking non-leaf nodes that would
-        become leaves if the move was accepted. This mark initially (out of
-        `propose_moves`) takes into account if there would be available decision
-        rules to grow the leaf, and whether there are enough datapoints in the
-        node is instead checked later in `accept_moves_parallel_stage`.
-    logu
-        The logarithm of a uniform (0, 1] random variable to be used to
-        accept the move. It's in (-oo, 0].
-    acc
-        Whether the move was accepted. `None` if not yet computed.
-    to_prune
-        Whether the final operation to apply the move is pruning. This indicates
-        an accepted prune move or a rejected grow move. `None` if not yet
-        computed.
-    """
+    """Moves proposed to modify each tree."""
 
     allowed: Bool[Array, '*chains num_trees'] = field(chains=True)
+    """Whether there is a possible move. If `False`, the other values may not
+    make sense. The only case in which a move is marked as allowed but is
+    then vetoed is if it does not satisfy `min_points_per_leaf`, which for
+    efficiency is implemented post-hoc without changing the rest of the
+    MCMC logic."""
+
     grow: Bool[Array, '*chains num_trees'] = field(chains=True)
+    """Whether the move is a grow move or a prune move."""
+
     num_growable: UInt[Array, '*chains num_trees'] = field(chains=True)
+    """The number of growable leaves in the original tree."""
+
     node: UInt[Array, '*chains num_trees'] = field(chains=True)
+    """The index of the leaf to grow or node to prune."""
+
     left: UInt[Array, '*chains num_trees'] = field(chains=True)
+    """The index of the left child of 'node'."""
+
     right: UInt[Array, '*chains num_trees'] = field(chains=True)
+    """The index of the right child of 'node'."""
+
     partial_ratio: Float32[Array, '*chains num_trees'] | None = field(chains=True)
+    """A factor of the Metropolis-Hastings ratio of the move. It lacks the
+    likelihood ratio, the probability of proposing the prune move, and the
+    probability that the children of the modified node are terminal. If the
+    move is PRUNE, the ratio is inverted. `None` once
+    `log_trans_prior_ratio` has been computed."""
+
     log_trans_prior_ratio: None | Float32[Array, '*chains num_trees'] = field(
         chains=True
     )
+    """The logarithm of the product of the transition and prior terms of the
+    Metropolis-Hastings ratio for the acceptance of the proposed move.
+    `None` if not yet computed. If PRUNE, the log-ratio is negated."""
+
     grow_var: UInt[Array, '*chains num_trees'] = field(chains=True)
+    """The decision axes of the new rules."""
+
     grow_split: UInt[Array, '*chains num_trees'] = field(chains=True)
+    """The decision boundaries of the new rules."""
+
     var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    """The updated decision axes of the trees, valid whatever move."""
+
     affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    """A partially updated `affluence_tree`, marking non-leaf nodes that would
+    become leaves if the move was accepted. This mark initially (out of
+    `propose_moves`) takes into account if there would be available decision
+    rules to grow the leaf, and whether there are enough datapoints in the
+    node is instead checked later in `accept_moves_parallel_stage`."""
+
     logu: Float32[Array, '*chains num_trees'] = field(chains=True)
+    """The logarithm of a uniform (0, 1] random variable to be used to
+    accept the move. It's in (-oo, 0]."""
+
     acc: None | Bool[Array, '*chains num_trees'] = field(chains=True)
+    """Whether the move was accepted. `None` if not yet computed."""
+
     to_prune: None | Bool[Array, '*chains num_trees'] = field(chains=True)
+    """Whether the final operation to apply the move is pruning. This indicates
+    an accepted prune move or a rejected grow move. `None` if not yet
+    computed."""
 
 
 @jit_and_block_if_profiling
@@ -192,40 +187,35 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
 
 
 class GrowMoves(Module):
-    """
-    Represent a proposed grow move for each tree.
-
-    Parameters
-    ----------
-    allowed
-        Whether the move is allowed for proposal.
-    num_growable
-        The number of leaves that can be proposed for grow.
-    node
-        The index of the leaf to grow. ``2 ** d`` if there are no growable
-        leaves.
-    var
-    split
-        The decision axis and boundary of the new rule.
-    partial_ratio
-        A factor of the Metropolis-Hastings ratio of the move. It lacks
-        the likelihood ratio and the probability of proposing the prune
-        move.
-    var_tree
-        The updated decision axes of the tree.
-    affluence_tree
-        A partially updated `affluence_tree` that marks each new leaf that
-        would be produced as `True` if it would have available decision rules.
-    """
+    """Represent a proposed grow move for each tree."""
 
     allowed: Bool[Array, ' num_trees']
+    """Whether the move is allowed for proposal."""
+
     num_growable: UInt[Array, ' num_trees']
+    """The number of leaves that can be proposed for grow."""
+
     node: UInt[Array, ' num_trees']
+    """The index of the leaf to grow. ``2 ** d`` if there are no growable
+    leaves."""
+
     var: UInt[Array, ' num_trees']
+    """The decision axis of the new rule."""
+
     split: UInt[Array, ' num_trees']
+    """The decision boundary of the new rule."""
+
     partial_ratio: Float32[Array, ' num_trees']
+    """A factor of the Metropolis-Hastings ratio of the move. It lacks
+    the likelihood ratio and the probability of proposing the prune
+    move."""
+
     var_tree: UInt[Array, 'num_trees 2**(d-1)']
+    """The updated decision axes of the tree."""
+
     affluence_tree: Bool[Array, 'num_trees 2**(d-1)']
+    """A partially updated `affluence_tree` that marks each new leaf that
+    would be produced as `True` if it would have available decision rules."""
 
 
 @partial(vmap_nodoc, in_axes=(0, 0, 0, 0, None, None, None, None, None))
@@ -767,30 +757,24 @@ def compute_partial_ratio(
 
 
 class PruneMoves(Module):
-    """
-    Represent a proposed prune move for each tree.
-
-    Parameters
-    ----------
-    allowed
-        Whether the move is possible.
-    node
-        The index of the node to prune. ``2 ** d`` if no node can be pruned.
-    partial_ratio
-        A factor of the Metropolis-Hastings ratio of the move. It lacks the
-        likelihood ratio, the probability of proposing the prune move, and the
-        prior probability that the children of the node to prune are leaves.
-        This ratio is inverted, and is meant to be inverted back in
-        `accept_move_and_sample_leaves`.
-    affluence_tree
-        A partially updated `affluence_tree`, marking the node to prune as
-        growable.
-    """
+    """Represent a proposed prune move for each tree."""
 
     allowed: Bool[Array, ' num_trees']
+    """Whether the move is possible."""
+
     node: UInt[Array, ' num_trees']
+    """The index of the node to prune. ``2 ** d`` if no node can be pruned."""
+
     partial_ratio: Float32[Array, ' num_trees']
+    """A factor of the Metropolis-Hastings ratio of the move. It lacks the
+    likelihood ratio, the probability of proposing the prune move, and the
+    prior probability that the children of the node to prune are leaves.
+    This ratio is inverted, and is meant to be inverted back in
+    `accept_move_and_sample_leaves`."""
+
     affluence_tree: Bool[Array, 'num_trees 2**(d-1)']
+    """A partially updated `affluence_tree`, marking the node to prune as
+    growable."""
 
 
 @partial(vmap_nodoc, in_axes=(0, 0, 0, None, None))

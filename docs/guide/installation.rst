@@ -1,6 +1,6 @@
 .. bartz/docs/guide/installation.rst
 ..
-.. Copyright (c) 2024-2025, The Bartz Contributors
+.. Copyright (c) 2024-2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -31,7 +31,7 @@ Install and set up Python. There are various ways to do it; my favorite one is t
 
     pip install bartz
 
-To install the latest development version, do instead
+(Or the equivalent command for your Python installation manager, e.g., :code:`uv add bartz`.) To install the latest development version, do instead
 
 .. code-block:: sh
 
@@ -43,4 +43,11 @@ To install a specific commit, do
 
     pip install git+https://github.com/bartz-org/bartz.git@<commit hash>
 
-To use on GPU on a system that doesn't provide `jax` pre-installed, read how to install jax `in its manual <https://docs.jax.dev/en/latest/installation.html>`_.
+`bartz` is meant to be used with GPUs. This requires to install special driver modules. To install support for a NVIDIA GPU, use one of these two extras:
+
+.. code-block:: sh
+
+    pip install bartz[cuda12]
+    pip install bartz[cuda13]
+
+The CUDA version can be read from the output of the command, e.g., :code:`nvidia-smi`. For other GPUs, follow `the installation instructions of jax <https://docs.jax.dev/en/latest/installation.html>`_.

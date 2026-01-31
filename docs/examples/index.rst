@@ -26,6 +26,8 @@
 Examples
 ========
 
+The example notebooks rendered here can be found in the `docs/examples/ <https://github.com/bartz-org/bartz/tree/main/docs/examples>`_ directory of the repository.
+
 .. toctree::
     :maxdepth: 1
 

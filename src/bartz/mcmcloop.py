@@ -531,19 +531,14 @@ def make_default_callback(
 
 
 class PrintCallbackState(Module):
-    """State for `print_callback`.
-
-    Parameters
-    ----------
-    dot_every
-        A dot is printed every `dot_every` MCMC iterations, `None` to disable.
-    report_every
-        A one line report is printed every `report_every` MCMC iterations,
-        `None` to disable.
-    """
+    """State for `print_callback`."""
 
     dot_every: Int32[Array, ''] | None
+    """A dot is printed every `dot_every` MCMC iterations, `None` to disable."""
+
     report_every: Int32[Array, ''] | None
+    """A one line report is printed every `report_every` MCMC iterations,
+    `None` to disable."""
 
 
 def print_callback(

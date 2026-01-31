@@ -15,6 +15,8 @@ On CPU, bartz runs at the speed of dbarts (the fastest implementation I know of)
 
 [This Colab notebook](https://colab.research.google.com/github/bartz-org/bartz/blob/main/docs/examples/basic_simdata.ipynb) runs bartz with n = 100,000 observations, p = 1000 predictors, 10,000 trees, for 1000 MCMC iterations, in 6 minutes.
 
+BART is a very flexible method with many variants. This implementation provides only a small subset of the possible features. If you need a feature from [another BART implementation](https://bartz-org.github.io/bartz/docs-dev/pkglist.html) or from the BART literature, please [open an issue on github](https://github.com/bartz-org/bartz/issues).
+
 ## Links
 
 - [Documentation (latest release)](https://bartz-org.github.io/bartz/docs)

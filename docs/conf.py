@@ -27,6 +27,7 @@
 # This file only contains a selection of the most common options. For a full
 # list see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
+
 import datetime
 import pathlib
 import re
@@ -190,8 +191,8 @@ def linkcode_resolve(domain, info):
     obj = submod
     for part in fullname.split('.'):
         if isclass(obj) and part in obj.__annotations__:
-            # this is a class attribute and it does not make much sense create
-            # the source link
+            # this is a class attribute and it does not make much sense to
+            # create the source link
             return None
         else:
             obj = getattr(obj, part)

@@ -78,6 +78,7 @@ dev = [
     "sphinx-autodoc-typehints>=3.0.1",
     "tomli>=2.2.1",
     "myst-nb>=1.2.0",
+    "jupyterlab>=4.4.2",
 ]
 
 [tool.pytest.ini_options]

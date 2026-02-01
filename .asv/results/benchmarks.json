@@ -4,7 +4,7 @@
         "name": "rmse.EvalGbart.track_mse",
         "param_names": [],
         "params": [],
-        "timeout": 300,
+        "timeout": 1000,
         "type": "track",
         "unit": "latent_var",
         "version": "7f53ac52751858a05647717fd1a54fc370f83123ddf31f6a51fcfb41c1eee6bc"

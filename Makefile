@@ -75,7 +75,7 @@ all:
 .PHONY: setup
 setup:
 	Rscript -e "renv::restore()"
-	$(UV_RUN) pre-commit install
+	$(UV_RUN) pre-commit install --install-hooks
 
 
 ################# TESTS #################
@@ -151,6 +151,7 @@ covcheck:
 update-deps:
 	test ! -d .venv || rm -r .venv
 	uv lock --upgrade
+	uv run pre-commit autoupdate
 
 .PHONY: copy-version
 copy-version: src/bartz/_version.py

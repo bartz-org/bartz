@@ -298,7 +298,7 @@ dev = [
     { name = "flaky", specifier = ">=3.8.1" },
     { name = "gitpython", specifier = ">=3.1.43" },
     { name = "ipython", specifier = ">=8.36.0" },
-    { name = "jupyterlab", specifier = ">=4.5.3" },
+    { name = "jupyterlab", specifier = ">=4.4.2" },
     { name = "matplotlib", specifier = ">=3.10.3" },
     { name = "matplotlib-label-lines", specifier = ">=0.8.1" },
     { name = "myst-nb", specifier = ">=1.2.0" },

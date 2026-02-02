@@ -275,6 +275,7 @@ def run_mcmc(
     The number of MCMC updates is ``n_burn + n_skip * n_save``. The traces do
     not include the initial state, and include the final state.
     """
+    # create empty traces
     burnin_trace = _empty_trace(n_burn, bart, burnin_extractor)
     main_trace = _empty_trace(n_save, bart, main_extractor)
 
@@ -290,7 +291,7 @@ def run_mcmc(
         # same code path for benchmarking and testing
 
     # error if under jit and there are unrolled loops or profile mode is on
-    under_jit = not hasattr(jnp.zeros(()), 'platform')
+    under_jit = not hasattr(jnp.empty(0), 'platform')
     if under_jit and (n_outer > 1 or get_profile_mode()):
         msg = (
             '`run_mcmc` was called within a jit-compiled function and '
@@ -301,6 +302,7 @@ def run_mcmc(
         raise RuntimeError(msg)
 
     carry = _Carry(bart, jnp.int32(0), key, burnin_trace, main_trace, callback_state)
+    _run_mcmc_inner_loop._fun.reset_trace_counter()  # noqa: SLF001
     for i_outer in range(n_outer):
         carry = _run_mcmc_inner_loop(
             carry,
@@ -348,7 +350,34 @@ def _compute_i_skip(
     )
 
 
+class _CallCounter:
+    """Wrap a callable to check it's not called more than once."""
+
+    def __init__(self, func: Callable) -> None:
+        self.func = func
+        self.n_calls = 0
+
+    def reset_trace_counter(self) -> None:
+        """Reset the call counter."""
+        self.n_calls = 0
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if self.n_calls and not get_profile_mode():
+            msg = (
+                'The inner loop of `run_mcmc` was traced more than once, '
+                'which indicates a double compilation of the MCMC code. This '
+                'probably depends on the input state having different type from the '
+                'output state. Check the input is in a format that is the '
+                'same jax would output, e.g., all arrays and scalars are jax '
+                'arrays.'
+            )
+            raise RuntimeError(msg)
+        self.n_calls += 1
+        return self.func(*args, **kwargs)
+
+
 @partial(jit_if_not_profiling, donate_argnums=(0,), static_argnums=(1, 2, 3, 4))
+@_CallCounter
 def _run_mcmc_inner_loop(
     carry: _Carry,
     inner_loop_length: int,

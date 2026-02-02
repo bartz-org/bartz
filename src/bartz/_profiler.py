@@ -26,7 +26,7 @@
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from functools import wraps
+from functools import update_wrapper, wraps
 from typing import Any, TypeVar
 
 from jax import block_until_ready, debug, jit
@@ -180,7 +180,7 @@ def jit_if_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T
     return wrapper
 
 
-def jit_if_not_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T]:
+class jit_if_not_profiling:
     """Apply JIT compilation only when not profiling.
 
     When profile mode is off, the function is JIT compiled. When profile mode is
@@ -193,21 +193,18 @@ def jit_if_not_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..
     *args
     **kwargs
         Additional arguments to pass to `jax.jit`.
-
-    Returns
-    -------
-    Wrapped function.
     """
-    jitted_func = jit(func, *args, **kwargs)
 
-    @wraps(func)
-    def wrapper(*args: Any, **kwargs: Any) -> T:
+    def __init__(self, func: Callable[..., T], *args, **kwargs) -> None:
+        self._fun = func
+        self._jit_fun = jit(func, *args, **kwargs)
+        update_wrapper(self, func)
+
+    def __call__(self, *args: Any, **kwargs: Any) -> T:
         if get_profile_mode():
-            return func(*args, **kwargs)
+            return self._fun(*args, **kwargs)
         else:
-            return jitted_func(*args, **kwargs)
-
-    return wrapper
+            return self._jit_fun(*args, **kwargs)
 
 
 def scan_if_not_profiling(

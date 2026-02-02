@@ -854,6 +854,7 @@ class Bart(Module):
         kw: dict = dict(n_burn=nskip, n_skip=keepevery, inner_loop_length=printevery)
         kw.update(
             mcmcloop.make_default_callback(
+                mcmc_state,
                 dot_every=None if printevery is None or printevery == 1 else 1,
                 report_every=printevery,
             )

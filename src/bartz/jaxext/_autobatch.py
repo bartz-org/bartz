@@ -373,7 +373,7 @@ def batched_func(
     batch_nbytes = total_nbytes // nbatches
     if batch_nbytes > max_io_nbytes and warn_on_overflow:
         assert size == nbatches
-        msg = f'batch_nbytes = {batch_nbytes} > max_io_nbytes = {max_io_nbytes}'
+        msg = f'batch_nbytes = {batch_nbytes:_} > max_io_nbytes = {max_io_nbytes:_}'
         warn(msg)
 
     # squeeze out the output dims that will be reduced

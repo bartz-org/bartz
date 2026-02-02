@@ -26,7 +26,7 @@
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from functools import update_wrapper, wraps
+from functools import wraps
 from typing import Any, TypeVar
 
 from jax import block_until_ready, debug, jit
@@ -180,7 +180,7 @@ def jit_if_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T
     return wrapper
 
 
-class jit_if_not_profiling:
+def jit_if_not_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T]:
     """Apply JIT compilation only when not profiling.
 
     When profile mode is off, the function is JIT compiled. When profile mode is
@@ -193,18 +193,23 @@ class jit_if_not_profiling:
     *args
     **kwargs
         Additional arguments to pass to `jax.jit`.
+
+    Returns
+    -------
+    Wrapped function.
     """
+    jitted_func = jit(func, *args, **kwargs)
 
-    def __init__(self, func: Callable[..., T], *args, **kwargs) -> None:
-        self._fun = func
-        self._jit_fun = jit(func, *args, **kwargs)
-        update_wrapper(self, func)
-
-    def __call__(self, *args: Any, **kwargs: Any) -> T:
+    @wraps(func)
+    def wrapper(*args: Any, **kwargs: Any) -> T:
         if get_profile_mode():
-            return self._fun(*args, **kwargs)
+            return func(*args, **kwargs)
         else:
-            return self._jit_fun(*args, **kwargs)
+            return jitted_func(*args, **kwargs)
+
+    wrapper._fun = func  # used by run_mcmc  # noqa: SLF001
+
+    return wrapper
 
 
 def scan_if_not_profiling(

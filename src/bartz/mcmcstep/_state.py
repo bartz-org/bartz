@@ -845,6 +845,11 @@ def _shard_state(state: State) -> State:
         if data_axis is not None and 'data' in mesh.axis_names:
             spec[data_axis] = 'data'
 
+        # remove trailing Nones to be consistent with jax's output, it's useful
+        # for comparing shardings during debugging
+        while spec and spec[-1] is None:
+            spec.pop()
+
         spec = PartitionSpec(*spec)
         return device_put(x, NamedSharding(mesh, spec), donate=True)
 

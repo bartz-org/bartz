@@ -36,9 +36,18 @@ from typing import Any, Protocol
 import jax
 import numpy
 from equinox import Module
-from jax import ShapeDtypeStruct, debug, eval_shape, jit, tree
+from jax import (
+    NamedSharding,
+    ShapeDtypeStruct,
+    debug,
+    device_put,
+    eval_shape,
+    jit,
+    tree,
+)
 from jax import numpy as jnp
 from jax.nn import softmax
+from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, PyTree, Shaped, UInt
 
 from bartz import jaxext, mcmcstep
@@ -301,8 +310,16 @@ def run_mcmc(
         )
         raise RuntimeError(msg)
 
-    carry = _Carry(bart, jnp.int32(0), key, burnin_trace, main_trace, callback_state)
-    _run_mcmc_inner_loop._fun.reset_trace_counter()  # noqa: SLF001
+    replicate = partial(_replicate, mesh=bart.config.mesh)
+    carry = _Carry(
+        bart,
+        replicate(jnp.int32(0)),
+        replicate(key),
+        burnin_trace,
+        main_trace,
+        callback_state,
+    )
+    _run_mcmc_inner_loop._fun.reset_call_counter()  # noqa: SLF001
     for i_outer in range(n_outer):
         carry = _run_mcmc_inner_loop(
             carry,
@@ -318,6 +335,13 @@ def run_mcmc(
         )
 
     return carry.bart, carry.burnin_trace, carry.main_trace
+
+
+def _replicate(x: Array, mesh: Mesh | None) -> Array:
+    if mesh is None:
+        return x
+    else:
+        return device_put(x, NamedSharding(mesh, PartitionSpec()))
 
 
 @partial(jit, static_argnums=(0, 2))
@@ -357,7 +381,7 @@ class _CallCounter:
         self.func = func
         self.n_calls = 0
 
-    def reset_trace_counter(self) -> None:
+    def reset_call_counter(self) -> None:
         """Reset the call counter."""
         self.n_calls = 0
 
@@ -369,7 +393,7 @@ class _CallCounter:
                 'probably depends on the input state having different type from the '
                 'output state. Check the input is in a format that is the '
                 'same jax would output, e.g., all arrays and scalars are jax '
-                'arrays.'
+                'arrays, with the right shardings.'
             )
             raise RuntimeError(msg)
         self.n_calls += 1
@@ -521,6 +545,7 @@ def _set(
 
 
 def make_default_callback(
+    state: State,
     *,
     dot_every: int | Integer[Array, ''] | None = 1,
     report_every: int | Integer[Array, ''] | None = 100,
@@ -533,6 +558,9 @@ def make_default_callback(
 
     Parameters
     ----------
+    state
+        The bart state to use the callback with, used to determine device
+        sharding.
     dot_every
         A dot is printed every `dot_every` MCMC iterations, `None` to disable.
     report_every
@@ -548,13 +576,14 @@ def make_default_callback(
     >>> run_mcmc(..., **make_default_callback())
     """
 
-    def asarray_or_none(val: None | Any) -> None | Array:
-        return None if val is None else jnp.asarray(val)
+    def as_replicated_array_or_none(val: None | Any) -> None | Array:
+        return None if val is None else _replicate(jnp.asarray(val), state.config.mesh)
 
     return dict(
         callback=print_callback,
         callback_state=PrintCallbackState(
-            asarray_or_none(dot_every), asarray_or_none(report_every)
+            as_replicated_array_or_none(dot_every),
+            as_replicated_array_or_none(report_every),
         ),
     )
 

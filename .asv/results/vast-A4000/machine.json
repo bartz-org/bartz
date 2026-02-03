@@ -3,7 +3,7 @@
     "cpu": "AMD Ryzen 5 5600X 6-Core Processor",
     "machine": "vast-A4000",
     "num_cpu": "12",
-    "os": "Linux 6.8.0-47-generic",
-    "ram": "49248528",
+    "os": "Linux 5.15.0-91-generic",
+    "ram": "49246992",
     "version": 1
 }

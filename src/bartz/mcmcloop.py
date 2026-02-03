@@ -36,9 +36,18 @@ from typing import Any, Protocol
 import jax
 import numpy
 from equinox import Module
-from jax import ShapeDtypeStruct, debug, eval_shape, jit, tree
+from jax import (
+    NamedSharding,
+    ShapeDtypeStruct,
+    debug,
+    device_put,
+    eval_shape,
+    jit,
+    tree,
+)
 from jax import numpy as jnp
 from jax.nn import softmax
+from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, PyTree, Shaped, UInt
 
 from bartz import jaxext, mcmcstep
@@ -275,6 +284,7 @@ def run_mcmc(
     The number of MCMC updates is ``n_burn + n_skip * n_save``. The traces do
     not include the initial state, and include the final state.
     """
+    # create empty traces
     burnin_trace = _empty_trace(n_burn, bart, burnin_extractor)
     main_trace = _empty_trace(n_save, bart, main_extractor)
 
@@ -290,7 +300,7 @@ def run_mcmc(
         # same code path for benchmarking and testing
 
     # error if under jit and there are unrolled loops or profile mode is on
-    under_jit = not hasattr(jnp.zeros(()), 'platform')
+    under_jit = not hasattr(jnp.empty(0), 'platform')
     if under_jit and (n_outer > 1 or get_profile_mode()):
         msg = (
             '`run_mcmc` was called within a jit-compiled function and '
@@ -300,7 +310,16 @@ def run_mcmc(
         )
         raise RuntimeError(msg)
 
-    carry = _Carry(bart, jnp.int32(0), key, burnin_trace, main_trace, callback_state)
+    replicate = partial(_replicate, mesh=bart.config.mesh)
+    carry = _Carry(
+        bart,
+        replicate(jnp.int32(0)),
+        replicate(key),
+        burnin_trace,
+        main_trace,
+        callback_state,
+    )
+    _run_mcmc_inner_loop._fun.reset_call_counter()  # noqa: SLF001
     for i_outer in range(n_outer):
         carry = _run_mcmc_inner_loop(
             carry,
@@ -316,6 +335,13 @@ def run_mcmc(
         )
 
     return carry.bart, carry.burnin_trace, carry.main_trace
+
+
+def _replicate(x: Array, mesh: Mesh | None) -> Array:
+    if mesh is None:
+        return x
+    else:
+        return device_put(x, NamedSharding(mesh, PartitionSpec()))
 
 
 @partial(jit, static_argnums=(0, 2))
@@ -348,7 +374,34 @@ def _compute_i_skip(
     )
 
 
+class _CallCounter:
+    """Wrap a callable to check it's not called more than once."""
+
+    def __init__(self, func: Callable) -> None:
+        self.func = func
+        self.n_calls = 0
+
+    def reset_call_counter(self) -> None:
+        """Reset the call counter."""
+        self.n_calls = 0
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if self.n_calls and not get_profile_mode():
+            msg = (
+                'The inner loop of `run_mcmc` was traced more than once, '
+                'which indicates a double compilation of the MCMC code. This '
+                'probably depends on the input state having different type from the '
+                'output state. Check the input is in a format that is the '
+                'same jax would output, e.g., all arrays and scalars are jax '
+                'arrays, with the right shardings.'
+            )
+            raise RuntimeError(msg)
+        self.n_calls += 1
+        return self.func(*args, **kwargs)
+
+
 @partial(jit_if_not_profiling, donate_argnums=(0,), static_argnums=(1, 2, 3, 4))
+@_CallCounter
 def _run_mcmc_inner_loop(
     carry: _Carry,
     inner_loop_length: int,
@@ -492,6 +545,7 @@ def _set(
 
 
 def make_default_callback(
+    state: State,
     *,
     dot_every: int | Integer[Array, ''] | None = 1,
     report_every: int | Integer[Array, ''] | None = 100,
@@ -504,6 +558,9 @@ def make_default_callback(
 
     Parameters
     ----------
+    state
+        The bart state to use the callback with, used to determine device
+        sharding.
     dot_every
         A dot is printed every `dot_every` MCMC iterations, `None` to disable.
     report_every
@@ -516,34 +573,30 @@ def make_default_callback(
 
     Examples
     --------
-    >>> run_mcmc(..., **make_default_callback())
+    >>> run_mcmc(key, state, ..., **make_default_callback(state, ...))
     """
 
-    def asarray_or_none(val: None | Any) -> None | Array:
-        return None if val is None else jnp.asarray(val)
+    def as_replicated_array_or_none(val: None | Any) -> None | Array:
+        return None if val is None else _replicate(jnp.asarray(val), state.config.mesh)
 
     return dict(
         callback=print_callback,
         callback_state=PrintCallbackState(
-            asarray_or_none(dot_every), asarray_or_none(report_every)
+            as_replicated_array_or_none(dot_every),
+            as_replicated_array_or_none(report_every),
         ),
     )
 
 
 class PrintCallbackState(Module):
-    """State for `print_callback`.
-
-    Parameters
-    ----------
-    dot_every
-        A dot is printed every `dot_every` MCMC iterations, `None` to disable.
-    report_every
-        A one line report is printed every `report_every` MCMC iterations,
-        `None` to disable.
-    """
+    """State for `print_callback`."""
 
     dot_every: Int32[Array, ''] | None
+    """A dot is printed every `dot_every` MCMC iterations, `None` to disable."""
+
     report_every: Int32[Array, ''] | None
+    """A one line report is printed every `report_every` MCMC iterations,
+    `None` to disable."""
 
 
 def print_callback(

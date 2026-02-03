@@ -62,15 +62,10 @@ FloatLike = float | Float[Any, '']
 
 
 class DataFrame(Protocol):
-    """DataFrame duck-type for `Bart`.
-
-    Attributes
-    ----------
-    columns : Sequence[str]
-        The names of the columns.
-    """
+    """DataFrame duck-type for `Bart`."""
 
     columns: Sequence[str]
+    """The names of the columns."""
 
     def to_numpy(self) -> ndarray:
         """Convert the dataframe to a 2d numpy array with columns on the second axis."""
@@ -78,15 +73,10 @@ class DataFrame(Protocol):
 
 
 class Series(Protocol):
-    """Series duck-type for `Bart`.
-
-    Attributes
-    ----------
-    name : str | None
-        The name of the series.
-    """
+    """Series duck-type for `Bart`."""
 
     name: str | None
+    """The name of the series."""
 
     def to_numpy(self) -> ndarray:
         """Convert the series to a 1d numpy array."""
@@ -262,15 +252,6 @@ class Bart(Module):
     run_mcmc_kw
         Additional arguments passed to `bartz.mcmcloop.run_mcmc`.
 
-    Attributes
-    ----------
-    offset : Float32[Array, '']
-        The prior mean of the latent mean function.
-    sigest : Float32[Array, ''] | None
-        The estimated standard deviation of the error used to set `lamda`.
-    yhat_test : Float32[Array, 'ndpost m'] | None
-        The conditional posterior mean at `x_test` for each MCMC iteration.
-
     References
     ----------
     .. [1] Linero, Antonio R. (2018). “Bayesian Regression Trees for
@@ -288,8 +269,13 @@ class Bart(Module):
     _x_train_fmt: Any = field(static=True)
 
     offset: Float32[Array, '']
+    """The prior mean of the latent mean function."""
+
     sigest: Float32[Array, ''] | None = None
+    """The estimated standard deviation of the error used to set `lamda`."""
+
     yhat_test: Float32[Array, 'ndpost m'] | None = None
+    """The conditional posterior mean at `x_test` for each MCMC iteration."""
 
     def __init__(
         self,
@@ -868,6 +854,7 @@ class Bart(Module):
         kw: dict = dict(n_burn=nskip, n_skip=keepevery, inner_loop_length=printevery)
         kw.update(
             mcmcloop.make_default_callback(
+                mcmc_state,
                 dot_every=None if printevery is None or printevery == 1 else 1,
                 report_every=printevery,
             )

@@ -116,7 +116,7 @@ class EvalGbart:
     """Out-of-sample evaluation of gbart."""
 
     # asv config
-    timeout = 300
+    timeout = 1000
     unit = 'latent_var'
 
     def track_mse(self) -> float:

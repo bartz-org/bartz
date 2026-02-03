@@ -53,7 +53,7 @@ from jaxtyping import Array, Float32, UInt8
 import bartz
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
-from benchmarks.latest_bartz.jaxext import split
+from benchmarks.latest_bartz.jaxext import get_device_count, split
 
 try:
     from bartz.BART import mc_gbart as gbart
@@ -268,6 +268,10 @@ class StepSharded(StepGeneric):
             msg = 'data sharding not supported'
             raise NotImplementedError(msg)
 
+        if get_device_count() < 2:
+            msg = 'Only one device, can not shard'
+            raise NotImplementedError(msg)
+
         super().setup(
             'run',
             'plain',
@@ -383,13 +387,23 @@ class GbartChains(BaseGbart):
             msg = 'multichain not supported'
             raise NotImplementedError(msg)
 
-        super().setup(
-            NITERS,
-            nchains,
-            'warm',
-            False,
-            {} if shard else dict(bart_kwargs=dict(num_chain_devices=None)),
-        )
+        # check there are enough devices to shard
+        if shard and get_device_count() < 2:
+            msg = 'Only one device, can not shard'
+            raise NotImplementedError(msg)
+
+        # determine the arguments to set up sharding
+        if not shard:
+            # disable sharding unconditionally
+            kwargs = dict(num_chain_devices=None)
+        elif get_default_platform() == 'cpu':
+            # on cpu sharding is automatical, no arguments needed
+            kwargs = {}
+        else:
+            # on gpu shard explicitly
+            kwargs = dict(num_chain_devices=min(nchains, get_device_count()))
+
+        super().setup(NITERS, nchains, 'warm', False, dict(bart_kwargs=kwargs))
 
 
 class GbartGeneric(BaseGbart):

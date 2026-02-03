@@ -143,93 +143,93 @@ def _find_metadata(
 
 
 class Forest(Module):
-    """
-    Represents the MCMC state of a sum of trees.
-
-    Parameters
-    ----------
-    leaf_tree
-        The leaf values.
-    var_tree
-        The decision axes.
-    split_tree
-        The decision boundaries.
-    affluence_tree
-        Marks leaves that can be grown.
-    max_split
-        The maximum split index for each predictor.
-    blocked_vars
-        Indices of variables that are not used. This shall include at least
-        the `i` such that ``max_split[i] == 0``, otherwise behavior is
-        undefined.
-    p_nonterminal
-        The prior probability of each node being nonterminal, conditional on
-        its ancestors. Includes the nodes at maximum depth which should be set
-        to 0.
-    p_propose_grow
-        The unnormalized probability of picking a leaf for a grow proposal.
-    leaf_indices
-        The index of the leaf each datapoints falls into, for each tree.
-    min_points_per_decision_node
-        The minimum number of data points in a decision node.
-    min_points_per_leaf
-        The minimum number of data points in a leaf node.
-    log_trans_prior
-        The log transition and prior Metropolis-Hastings ratio for the
-        proposed move on each tree.
-    log_likelihood
-        The log likelihood ratio.
-    grow_prop_count
-    prune_prop_count
-        The number of grow/prune proposals made during one full MCMC cycle.
-    grow_acc_count
-    prune_acc_count
-        The number of grow/prune moves accepted during one full MCMC cycle.
-    leaf_prior_cov_inv
-        The prior precision matrix of a leaf, conditional on the tree structure.
-        For the univariate case (k=1), this is a scalar (the inverse variance).
-        The prior covariance of the sum of trees is
-        ``num_trees * leaf_prior_cov_inv^-1``.
-    log_s
-        The logarithm of the prior probability for choosing a variable to split
-        along in a decision rule, conditional on the ancestors. Not normalized.
-        If `None`, use a uniform distribution.
-    theta
-        The concentration parameter for the Dirichlet prior on the variable
-        distribution `s`. Required only to update `s`.
-    a
-    b
-    rho
-        Parameters of the prior on `theta`. Required only to sample `theta`.
-        See `step_theta`.
-    """
+    """Represents the MCMC state of a sum of trees."""
 
     leaf_tree: (
         Float32[Array, '*chains num_trees 2**d']
         | Float32[Array, '*chains num_trees k 2**d']
     ) = field(chains=True)
+    """The leaf values."""
+
     var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    """The decision axes."""
+
     split_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    """The decision boundaries."""
+
     affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    """Marks leaves that can be grown."""
+
     max_split: UInt[Array, ' p']
+    """The maximum split index for each predictor."""
+
     blocked_vars: UInt[Array, ' q'] | None
+    """Indices of variables that are not used. This shall include at least
+    the `i` such that ``max_split[i] == 0``, otherwise behavior is
+    undefined."""
+
     p_nonterminal: Float32[Array, ' 2**d']
+    """The prior probability of each node being nonterminal, conditional on
+    its ancestors. Includes the nodes at maximum depth which should be set
+    to 0."""
+
     p_propose_grow: Float32[Array, ' 2**(d-1)']
+    """The unnormalized probability of picking a leaf for a grow proposal."""
+
     leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=True, data=True)
+    """The index of the leaf each datapoints falls into, for each tree."""
+
     min_points_per_decision_node: Int32[Array, ''] | None
+    """The minimum number of data points in a decision node."""
+
     min_points_per_leaf: Int32[Array, ''] | None
+    """The minimum number of data points in a leaf node."""
+
     log_trans_prior: Float32[Array, '*chains num_trees'] | None = field(chains=True)
+    """The log transition and prior Metropolis-Hastings ratio for the
+    proposed move on each tree."""
+
     log_likelihood: Float32[Array, '*chains num_trees'] | None = field(chains=True)
+    """The log likelihood ratio."""
+
     grow_prop_count: Int32[Array, '*chains'] = field(chains=True)
+    """The number of grow proposals made during one full MCMC cycle."""
+
     prune_prop_count: Int32[Array, '*chains'] = field(chains=True)
+    """The number of prune proposals made during one full MCMC cycle."""
+
     grow_acc_count: Int32[Array, '*chains'] = field(chains=True)
+    """The number of grow moves accepted during one full MCMC cycle."""
+
     prune_acc_count: Int32[Array, '*chains'] = field(chains=True)
+    """The number of prune moves accepted during one full MCMC cycle."""
+
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'] | None
+    """The prior precision matrix of a leaf, conditional on the tree structure.
+    For the univariate case (k=1), this is a scalar (the inverse variance).
+    The prior covariance of the sum of trees is
+    ``num_trees * leaf_prior_cov_inv^-1``."""
+
     log_s: Float32[Array, '*chains p'] | None = field(chains=True)
+    """The logarithm of the prior probability for choosing a variable to split
+    along in a decision rule, conditional on the ancestors. Not normalized.
+    If `None`, use a uniform distribution."""
+
     theta: Float32[Array, '*chains'] | None = field(chains=True)
+    """The concentration parameter for the Dirichlet prior on the variable
+    distribution `s`. Required only to update `log_s`."""
+
     a: Float32[Array, ''] | None
+    """Parameter of the prior on `theta`. Required only to sample `theta`.
+    See `step_theta`."""
+
     b: Float32[Array, ''] | None
+    """Parameter of the prior on `theta`. Required only to sample `theta`.
+    See `step_theta`."""
+
     rho: Float32[Array, ''] | None
+    """Parameter of the prior on `theta`. Required only to sample `theta`.
+    See `step_theta`."""
 
     def num_chains(self) -> int | None:
         """Return the number of chains, or `None` if not multichain."""
@@ -241,86 +241,83 @@ class Forest(Module):
 
 
 class StepConfig(Module):
-    """Options for the MCMC step.
-
-    Parameters
-    ----------
-    steps_done
-        The number of MCMC steps completed so far.
-    sparse_on_at
-        After how many steps to turn on variable selection.
-    resid_num_batches
-    count_num_batches
-    prec_num_batches
-        The number of batches for computing the sufficient statistics. If
-        `None`, they are computed with no batching.
-    prec_count_num_trees
-        Batch size for processing trees to compute count and prec trees.
-    mesh
-        The mesh used to shard data and computation across multiple devices.
-    """
+    """Options for the MCMC step."""
 
     steps_done: Int32[Array, '']
+    """The number of MCMC steps completed so far."""
+
     sparse_on_at: Int32[Array, ''] | None
+    """After how many steps to turn on variable selection."""
+
     resid_num_batches: int | None = field(static=True)
+    """The number of batches for computing the sum of residuals. If
+    `None`, they are computed with no batching."""
+
     count_num_batches: int | None = field(static=True)
+    """The number of batches for computing counts. If
+    `None`, they are computed with no batching."""
+
     prec_num_batches: int | None = field(static=True)
+    """The number of batches for computing precision scales. If
+    `None`, they are computed with no batching."""
+
     prec_count_num_trees: int | None = field(static=True)
+    """Batch size for processing trees to compute count and prec trees."""
+
     mesh: Mesh | None = field(static=True)
+    """The mesh used to shard data and computation across multiple devices."""
 
 
 class State(Module):
-    """
-    Represents the MCMC state of BART.
-
-    Parameters
-    ----------
-    X
-        The predictors.
-    y
-        The response. If the data type is `bool`, the model is binary regression.
-    resid
-        The residuals (`y` or `z` minus sum of trees).
-    z
-        The latent variable for binary regression. `None` in continuous
-        regression.
-    offset
-        Constant shift added to the sum of trees.
-    error_cov_inv
-        The inverse error covariance (scalar for univariate, matrix for multivariate).
-        `None` in binary regression.
-    prec_scale
-        The scale on the error precision, i.e., ``1 / error_scale ** 2``.
-        `None` in binary regression.
-    error_cov_df
-    error_cov_scale
-        The df and scale parameters of the inverse Wishart prior on the noise
-        covariance. For the univariate case, the relationship to the inverse
-        gamma prior parameters is ``alpha = df / 2``, ``beta = scale / 2``.
-        `None` in binary regression.
-    forest
-        The sum of trees model.
-    config
-        Metadata and configurations for the MCMC step.
-    """
+    """Represents the MCMC state of BART."""
 
     X: UInt[Array, 'p n'] = field(data=True)
+    """The predictors."""
+
     y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'] = field(
         data=True
     )
+    """The response. If the data type is `bool`, the model is binary regression."""
+
     z: None | Float32[Array, '*chains n'] = field(chains=True, data=True)
+    """The latent variable for binary regression. `None` in continuous
+    regression."""
+
     offset: Float32[Array, ''] | Float32[Array, ' k']
+    """Constant shift added to the sum of trees."""
+
     resid: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
         chains=True, data=True
     )
+    """The residuals (`y` or `z` minus sum of trees)."""
+
     error_cov_inv: Float32[Array, '*chains'] | Float32[Array, '*chains k k'] | None = (
         field(chains=True)
     )
+    """The inverse error covariance (scalar for univariate, matrix for multivariate).
+    `None` in binary regression."""
+
     prec_scale: Float32[Array, ' n'] | None = field(data=True)
+    """The scale on the error precision, i.e., ``1 / error_scale ** 2``.
+    `None` in binary regression."""
+
     error_cov_df: Float32[Array, ''] | None
+    """The df parameter of the inverse Wishart prior on the noise
+    covariance. For the univariate case, the relationship to the inverse
+    gamma prior parameters is ``alpha = df / 2``.
+    `None` in binary regression."""
+
     error_cov_scale: Float32[Array, ''] | Float32[Array, 'k k'] | None
+    """The scale parameter of the inverse Wishart prior on the noise
+    covariance. For the univariate case, the relationship to the inverse
+    gamma prior parameters is ``beta = scale / 2``.
+    `None` in binary regression."""
+
     forest: Forest
+    """The sum of trees model."""
+
     config: StepConfig
+    """Metadata and configurations for the MCMC step."""
 
 
 def _init_shape_shifting_parameters(
@@ -847,6 +844,11 @@ def _shard_state(state: State) -> State:
             spec[chain_axis] = 'chains'
         if data_axis is not None and 'data' in mesh.axis_names:
             spec[data_axis] = 'data'
+
+        # remove trailing Nones to be consistent with jax's output, it's useful
+        # for comparing shardings during debugging
+        while spec and spec[-1] is None:
+            spec.pop()
 
         spec = PartitionSpec(*spec)
         return device_put(x, NamedSharding(mesh, spec), donate=True)

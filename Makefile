@@ -39,14 +39,19 @@ UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclu
 all:
 	@echo "Available targets:"
 	@echo "- setup: create R and Python environments for development"
-	@echo "- tests: run unit tests, saving coverage information"
-	@echo "- tests-old: run unit tests with oldest supported python and dependencies"
-	@echo '- tests-gpu: variant of `tests` that works on gpu'
+	@echo "- tests: run unit tests on cpu, saving coverage information"
+	@echo "- tests-old: run unit tests on cpu with oldest supported python and dependencies"
+	@echo '- tests-gpu: like `tests` but on gpu'
+	@echo '- tests-gpu-old: like `tests-old` but on gpu'
 	@echo "- docs: build html documentation"
 	@echo "- docs-latest: build html documentation for latest release"
 	@echo "- covreport: build html coverage report"
 	@echo "- covcheck: check coverage is above some thresholds"
+	@echo "- update-deps: remove .venv, upgrade uv.lock, update pre-commit hooks"
+	@echo "- copy-version: sync version from pyproject.toml to _version.py"
+	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- release: packages the python module, invokes tests and docs first"
+	@echo "- version-tag: create and push git tag for current version"
 	@echo "- upload: upload release to PyPI"
 	@echo "- upload-test: upload release to TestPyPI"
 	@echo "- asv-run: run benchmarks on all unbenchmarked tagged releases and main"
@@ -70,7 +75,7 @@ all:
 .PHONY: setup
 setup:
 	Rscript -e "renv::restore()"
-	$(UV_RUN) pre-commit install
+	$(UV_RUN) pre-commit install --install-hooks
 
 
 ################# TESTS #################
@@ -113,10 +118,16 @@ docs:
 
 .PHONY: docs-latest
 docs-latest:
-	BARTZ_DOC_VARIANT=latest $(UV_RUN) make -C docs html
-	git switch - || git switch main
-	test ! -d _site/docs || rm -r _site/docs
-	mv docs/_build/html _site/docs
+	@LATEST_TAG=$$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | sort -V | tail -1) && \
+	if [ -z "$$LATEST_TAG" ]; then echo "No release tags found"; exit 1; fi && \
+	echo "Building docs for $$LATEST_TAG" && \
+	WORKTREE_DIR=$$(mktemp -d) && \
+	trap "git worktree remove --force '$$WORKTREE_DIR' 2>/dev/null || rm -rf '$$WORKTREE_DIR'" EXIT && \
+	git worktree add --detach "$$WORKTREE_DIR" "$$LATEST_TAG" && \
+	uv sync --all-groups --directory "$$WORKTREE_DIR" && \
+	$(MAKE) -C "$$WORKTREE_DIR" docs && \
+	test ! -d _site/docs || rm -r _site/docs && \
+	mv "$$WORKTREE_DIR/_site/docs-dev" _site/docs
 	@echo
 	@echo "Now open _site/index.html"
 
@@ -140,6 +151,7 @@ covcheck:
 update-deps:
 	test ! -d .venv || rm -r .venv
 	uv lock --upgrade
+	uv run pre-commit autoupdate
 
 .PHONY: copy-version
 copy-version: src/bartz/_version.py

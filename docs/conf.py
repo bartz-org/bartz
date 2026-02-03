@@ -1,6 +1,6 @@
 # bartz/docs/conf.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -29,58 +29,33 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
 import datetime
-import inspect
-import os
 import pathlib
+import re
 import sys
 from functools import cached_property
+from inspect import getsourcefile, getsourcelines, isclass, unwrap
+from os import getenv
 
 import git
-from packaging import version as pkgversion
 
-# -- Doc variant -------------------------------------------------------------
+# -- Version info ------------------------------------------------------------
 
 repo = git.Repo(search_parent_directories=True)
 
-variant = os.environ.get('BARTZ_DOC_VARIANT', 'dev')
+commit = repo.head.commit.hexsha
+uncommitted_stuff = repo.is_dirty()
 
-if variant == 'dev':
-    commit = repo.head.commit.hexsha
-    uncommitted_stuff = repo.is_dirty()
+# Check if current commit has a version tag (vX.Y.Z)
+version = None
+for tag in repo.tags:
+    if tag.commit == repo.head.commit:
+        match = re.match(r'^v(\d+\.\d+\.\d+)$', tag.name)
+        if match:
+            version = match.group(1)
+            break
+
+if version is None:
     version = f'{commit[:7]}{"+" if uncommitted_stuff else ""}'
-
-elif variant == 'latest':
-    # list git tags
-    tags = [t.name for t in repo.tags]
-    print(f'git tags: {tags}')
-
-    # find final versions in tags
-    versions = []
-    for t in tags:
-        try:
-            v = pkgversion.parse(t)
-        except pkgversion.InvalidVersion:
-            continue
-        if v.is_prerelease or v.is_devrelease:
-            continue
-        versions.append((v, t))
-    print(f'tags for releases: {versions}')
-
-    # find latest versions
-    versions.sort(key=lambda x: x[0])
-    version, tag = versions[-1]
-
-    # check it out and check it matches the version in the package
-    repo.git.checkout(tag)
-    import bartz
-
-    assert pkgversion.parse(bartz.__version__) == version
-
-    version = str(version)
-    uncommitted_stuff = False
-
-else:
-    raise KeyError(variant)
 
 import bartz
 
@@ -108,12 +83,14 @@ extensions = [
     'sphinx_autodoc_typehints',  # (!) keep after napoleon
     'sphinx.ext.mathjax',
     'sphinx.ext.intersphinx',  # link to other documentations automatically
-    'myst_parser',  # markdown support
+    'myst_nb',  # markdown + jupyter notebook support
 ]
 
 # decide whether to use viewcode or linkcode extension
 ext = 'viewcode'  # copy source code in static website
-if not uncommitted_stuff:
+if getenv('BARTZ_FORCE_LINKCODE'):
+    ext = 'linkcode'  # links to code on github
+elif not uncommitted_stuff:
     commit = repo.head.commit.hexsha
     branches = repo.git.branch('--remotes', '--contains', commit)
     commit_on_github = bool(branches.strip())
@@ -189,6 +166,9 @@ intersphinx_mapping = dict(
     jax=('https://docs.jax.dev/en/latest', None),
 )
 
+# myst_nb
+nb_execution_mode = 'off'
+
 # viewcode
 viewcode_line_numbers = True
 
@@ -210,18 +190,23 @@ def linkcode_resolve(domain, info):
 
     obj = submod
     for part in fullname.split('.'):
-        obj = getattr(obj, part)
+        if isclass(obj) and part in obj.__annotations__:
+            # this is a class attribute and it does not make much sense to
+            # create the source link
+            return None
+        else:
+            obj = getattr(obj, part)
 
     if isinstance(obj, cached_property):
         obj = obj.func
     elif isinstance(obj, property):
         obj = obj.fget
-    obj = inspect.unwrap(obj)
+    obj = unwrap(obj)
 
-    fn = inspect.getsourcefile(obj)
+    fn = getsourcefile(obj)
     assert fn
 
-    source, lineno = inspect.getsourcelines(obj)
+    source, lineno = getsourcelines(obj)
     assert lineno
     linespec = f'#L{lineno}-L{lineno + len(source) - 1}'
 

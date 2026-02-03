@@ -48,34 +48,28 @@ class TreeHeaps(Protocol):
     (left child) and :math:`2i + 1` (right child). The array element at index 0
     is unused.
 
-    Arrays may have additional initial axes to represent multple trees.
-
-    Parameters
-    ----------
-    leaf_tree
-        The values in the leaves of the trees. This array can be dirty, i.e.,
-        unused nodes can have whatever value. It may have an additional axis
-        for multivariate leaves.
-    var_tree
-        The axes along which the decision nodes operate. This array can be
-        dirty but for the always unused node at index 0 which must be set to 0.
-    split_tree
-        The decision boundaries of the trees. The boundaries are open on the
-        right, i.e., a point belongs to the left child iff x < split. Whether a
-        node is a leaf is indicated by the corresponding 'split' element being
-        0. Unused nodes also have split set to 0. This array can't be dirty.
-
-    Notes
-    -----
     Since the nodes at the bottom can only be leaves and not decision nodes,
     `var_tree` and `split_tree` are half as long as `leaf_tree`.
+
+    Arrays may have additional initial axes to represent multiple trees.
     """
 
     leaf_tree: (
         Float32[Array, '*batch_shape 2**d'] | Float32[Array, '*batch_shape k 2**d']
     )
+    """The values in the leaves of the trees. This array can be dirty, i.e.,
+    unused nodes can have whatever value. It may have an additional axis
+    for multivariate leaves."""
+
     var_tree: UInt[Array, '*batch_shape 2**(d-1)']
+    """The axes along which the decision nodes operate. This array can be
+    dirty but for the always unused node at index 0 which must be set to 0."""
+
     split_tree: UInt[Array, '*batch_shape 2**(d-1)']
+    """The decision boundaries of the trees. The boundaries are open on the
+    right, i.e., a point belongs to the left child iff x < split. Whether a
+    node is a leaf is indicated by the corresponding 'split' element being
+    0. Unused nodes also have split set to 0. This array can't be dirty."""
 
 
 def make_tree(

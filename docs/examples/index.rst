@@ -1,6 +1,6 @@
-.. bartz/docs/reference/interface.rst
+.. bartz/docs/examples/index.rst
 ..
-.. Copyright (c) 2024-2026, The Bartz Contributors
+.. Copyright (c) 2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -22,8 +22,13 @@
 .. OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 .. SOFTWARE.
 
-BART3 Interface
-===============
 
-.. automodule:: bartz.BART
-    :members: mc_gbart, gbart
+Examples
+========
+
+The example notebooks rendered here can be found in the `docs/examples/ <https://github.com/bartz-org/bartz/tree/main/docs/examples>`_ directory of the repository.
+
+.. toctree::
+    :maxdepth: 1
+
+    basic_simdata.ipynb

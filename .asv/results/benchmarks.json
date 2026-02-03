@@ -4,7 +4,7 @@
         "name": "rmse.EvalGbart.track_mse",
         "param_names": [],
         "params": [],
-        "timeout": 300,
+        "timeout": 1000,
         "type": "track",
         "unit": "latent_var",
         "version": "7f53ac52751858a05647717fd1a54fc370f83123ddf31f6a51fcfb41c1eee6bc"
@@ -50,7 +50,7 @@
         "warmup_time": 0.0
     },
     "speed.GbartChains.time_gbart": {
-        "code": "class BaseGbart:\n    def time_gbart(self, *_):\n        \"\"\"Time instantiating the class.\"\"\"\n        with redirect_stdout(StringIO()), self.context():\n            bart = gbart(**self.kw)\n            if isinstance(bart, Module):\n                block_until_ready(bart)\n            else:\n                block_until_ready((bart._mcmc_state, bart._main_trace))\n\nclass GbartChains:\n    def setup(self, nchains: int, shard: bool):  # ty:ignore[invalid-method-override]\n        \"\"\"Set up to use or not multiple cpus.\"\"\"\n        # check there is support for multichain\n        if 'mc_cores' not in signature(gbart).parameters:\n            msg = 'multichain not supported'\n            raise NotImplementedError(msg)\n    \n        super().setup(\n            NITERS,\n            nchains,\n            'warm',\n            False,\n            {} if shard else dict(bart_kwargs=dict(num_chain_devices=None)),\n        )",
+        "code": "class BaseGbart:\n    def time_gbart(self, *_):\n        \"\"\"Time instantiating the class.\"\"\"\n        with redirect_stdout(StringIO()), self.context():\n            bart = gbart(**self.kw)\n            if isinstance(bart, Module):\n                block_until_ready(bart)\n            else:\n                block_until_ready((bart._mcmc_state, bart._main_trace))\n\nclass GbartChains:\n    def setup(self, nchains: int, shard: bool):  # ty:ignore[invalid-method-override]\n        \"\"\"Set up to use or not multiple cpus.\"\"\"\n        # check there is support for multichain\n        if 'mc_cores' not in signature(gbart).parameters:\n            msg = 'multichain not supported'\n            raise NotImplementedError(msg)\n    \n        # check there are enough devices to shard\n        if shard and get_device_count() < 2:\n            msg = 'Only one device, can not shard'\n            raise NotImplementedError(msg)\n    \n        # determine the arguments to set up sharding\n        if not shard:\n            # disable sharding unconditionally\n            kwargs = dict(num_chain_devices=None)\n        elif get_default_platform() == 'cpu':\n            # on cpu sharding is automatical, no arguments needed\n            kwargs = {}\n        else:\n            # on gpu shard explicitly\n            kwargs = dict(num_chain_devices=min(nchains, get_device_count()))\n    \n        super().setup(NITERS, nchains, 'warm', False, dict(bart_kwargs=kwargs))",
         "min_run_count": 2,
         "name": "speed.GbartChains.time_gbart",
         "number": 1,
@@ -78,7 +78,7 @@
         "timeout": 30.0,
         "type": "time",
         "unit": "seconds",
-        "version": "ff9d8fe50771315847d1fc179fcc3b6434575c392d4281979839b402804bdddc",
+        "version": "2c07dbb0efa767072e39f840738643ff1e55ead51c8c2401aed2d3cb9c745a1b",
         "warmup_time": 0.0
     },
     "speed.GbartGeneric.time_gbart": {
@@ -243,7 +243,7 @@
         "warmup_time": -1
     },
     "speed.StepSharded.time_step": {
-        "code": "class StepGeneric:\n    def time_step(self, *_):\n        \"\"\"Time compiling `step` or running it.\"\"\"\n        match self.mode:\n            case 'compile':\n                self.jitted_func.clear_cache()\n                self.jitted_func.lower(*self.args).compile()\n            case 'run':\n                block_until_ready(self.compiled_func(*self.args))\n            case _:\n                raise KeyError(self.mode)\n\nclass StepSharded:\n    def setup(self, sharded: bool):  # ty:ignore[invalid-method-override]\n        \"\"\"Set up with settings that make the effect of sharding salient.\"\"\"\n        sig = signature(init)\n        if 'mesh' not in sig.parameters:\n            msg = 'data sharding not supported'\n            raise NotImplementedError(msg)\n    \n        super().setup(\n            'run',\n            'plain',\n            None,\n            p=1,\n            n=2000_000,\n            num_trees=1,\n            mesh=dict(data=2) if sharded else None,\n        )",
+        "code": "class StepGeneric:\n    def time_step(self, *_):\n        \"\"\"Time compiling `step` or running it.\"\"\"\n        match self.mode:\n            case 'compile':\n                self.jitted_func.clear_cache()\n                self.jitted_func.lower(*self.args).compile()\n            case 'run':\n                block_until_ready(self.compiled_func(*self.args))\n            case _:\n                raise KeyError(self.mode)\n\nclass StepSharded:\n    def setup(self, sharded: bool):  # ty:ignore[invalid-method-override]\n        \"\"\"Set up with settings that make the effect of sharding salient.\"\"\"\n        sig = signature(init)\n        if 'mesh' not in sig.parameters:\n            msg = 'data sharding not supported'\n            raise NotImplementedError(msg)\n    \n        if get_device_count() < 2:\n            msg = 'Only one device, can not shard'\n            raise NotImplementedError(msg)\n    \n        super().setup(\n            'run',\n            'plain',\n            None,\n            p=1,\n            n=2000_000,\n            num_trees=1,\n            mesh=dict(data=2) if sharded else None,\n        )",
         "min_run_count": 2,
         "name": "speed.StepSharded.time_step",
         "number": 0,
@@ -262,7 +262,7 @@
         "timeout": 30.0,
         "type": "time",
         "unit": "seconds",
-        "version": "54471016c8f703b199da216af3af28df889d97c5cf3576d2d0f28929d9167793",
+        "version": "7d30667b973985c8c64607844c97e736fa14dd819ef21152cfaf910c93d9224f",
         "warmup_time": -1
     },
     "version": 2

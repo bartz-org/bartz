@@ -1,6 +1,6 @@
 .. bartz/docs/index.rst
 ..
-.. Copyright (c) 2024-2025, The Bartz Contributors
+.. Copyright (c) 2024-2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -39,6 +39,7 @@ Contents
     :maxdepth: 2
 
     guide/index.rst
+    examples/index.rst
     reference/index.rst
 
 .. toctree::

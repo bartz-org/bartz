@@ -153,164 +153,147 @@ def accept_moves_and_sample_leaves(
 
 
 class Counts(Module):
-    """
-    Number of datapoints in the nodes involved in proposed moves for each tree.
-
-    Parameters
-    ----------
-    left
-        Number of datapoints in the left child.
-    right
-        Number of datapoints in the right child.
-    total
-        Number of datapoints in the parent (``= left + right``).
-    """
+    """Number of datapoints in the nodes involved in proposed moves for each tree."""
 
     left: UInt[Array, '*chains num_trees'] = field(chains=True)
+    """Number of datapoints in the left child."""
+
     right: UInt[Array, '*chains num_trees'] = field(chains=True)
+    """Number of datapoints in the right child."""
+
     total: UInt[Array, '*chains num_trees'] = field(chains=True)
+    """Number of datapoints in the parent (``= left + right``)."""
 
 
 class Precs(Module):
-    """
-    Likelihood precision scale in the nodes involved in proposed moves for each tree.
+    """Likelihood precision scale in the nodes involved in proposed moves for each tree.
 
     The "likelihood precision scale" of a tree node is the sum of the inverse
     squared error scales of the datapoints selected by the node.
-
-    Parameters
-    ----------
-    left
-        Likelihood precision scale in the left child.
-    right
-        Likelihood precision scale in the right child.
-    total
-        Likelihood precision scale in the parent (``= left + right``).
     """
 
     left: Float32[Array, '*chains num_trees'] = field(chains=True)
+    """Likelihood precision scale in the left child."""
+
     right: Float32[Array, '*chains num_trees'] = field(chains=True)
+    """Likelihood precision scale in the right child."""
+
     total: Float32[Array, '*chains num_trees'] = field(chains=True)
+    """Likelihood precision scale in the parent (``= left + right``)."""
 
 
 class PreLkV(Module):
-    """
-    Non-sequential terms of the likelihood ratio for each tree.
+    """Non-sequential terms of the likelihood ratio for each tree.
 
     These terms can be computed in parallel across trees.
-
-    Parameters
-    ----------
-    left
-    right
-    total
-        In the univariate case, this is the scalar term
-
-            ``1 / error_cov_inv + n_* / leaf_prior_cov_inv``
-
-        In the multivariate case, this is the matrix term
-
-            ``error_cov_inv @ inv(leaf_prior_cov_inv + n_* * error_cov_inv) @ error_cov_inv``
-
-        In both cases, ``n_*`` is n_left/right/total, the number of datapoints
-        respectively in the left child, right child, and parent node, or the
-        likelihood precision scale in the heteroskedastic case.
-    log_sqrt_term
-        The logarithm of the square root term of the likelihood ratio.
     """
 
     left: (
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
     ) = field(chains=True)
+    """In the univariate case, this is the scalar term
+
+        ``1 / error_cov_inv + n_left / leaf_prior_cov_inv``.
+
+    In the multivariate case, this is the matrix term
+
+        ``error_cov_inv @ inv(leaf_prior_cov_inv + n_left * error_cov_inv) @ error_cov_inv``.
+
+    ``n_left`` is the number of datapoints in the left child, or the
+    likelihood precision scale in the heteroskedastic case."""
+
     right: (
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
     ) = field(chains=True)
+    """In the univariate case, this is the scalar term
+
+        ``1 / error_cov_inv + n_right / leaf_prior_cov_inv``.
+
+    In the multivariate case, this is the matrix term
+
+        ``error_cov_inv @ inv(leaf_prior_cov_inv + n_right * error_cov_inv) @ error_cov_inv``.
+
+    ``n_right`` is the number of datapoints in the right child, or the
+    likelihood precision scale in the heteroskedastic case."""
+
     total: (
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
     ) = field(chains=True)
+    """In the univariate case, this is the scalar term
+
+        ``1 / error_cov_inv + n_total / leaf_prior_cov_inv``.
+
+    In the multivariate case, this is the matrix term
+
+        ``error_cov_inv @ inv(leaf_prior_cov_inv + n_total * error_cov_inv) @ error_cov_inv``.
+
+    ``n_total`` is the number of datapoints in the parent node, or the
+    likelihood precision scale in the heteroskedastic case."""
+
     log_sqrt_term: Float32[Array, '*chains num_trees'] = field(chains=True)
+    """The logarithm of the square root term of the likelihood ratio."""
 
 
 class PreLk(Module):
-    """
-    Non-sequential terms of the likelihood ratio shared by all trees.
-
-    Parameters
-    ----------
-    exp_factor
-        The factor to multiply the likelihood ratio by, shared by all trees.
-    """
+    """Non-sequential terms of the likelihood ratio shared by all trees."""
 
     exp_factor: Float32[Array, '*chains'] = field(chains=True)
+    """The factor to multiply the likelihood ratio by, shared by all trees."""
 
 
 class PreLf(Module):
-    """
-    Pre-computed terms used to sample leaves from their posterior.
+    """Pre-computed terms used to sample leaves from their posterior.
 
     These terms can be computed in parallel across trees.
 
     For each tree and leaf, the terms are scalars in the univariate case, and
     matrices/vectors in the multivariate case.
-
-    Parameters
-    ----------
-    mean_factor
-        The factor to be right-multiplied by the sum of the scaled residuals to
-        obtain the posterior mean.
-    centered_leaves
-        The mean-zero normal values to be added to the posterior mean to
-        obtain the posterior leaf samples.
     """
 
     mean_factor: (
         Float32[Array, '*chains num_trees 2**d']
         | Float32[Array, '*chains num_trees k k 2**d']
     ) = field(chains=True)
+    """The factor to be right-multiplied by the sum of the scaled residuals to
+    obtain the posterior mean."""
+
     centered_leaves: (
         Float32[Array, '*chains num_trees 2**d']
         | Float32[Array, '*chains num_trees k 2**d']
     ) = field(chains=True)
+    """The mean-zero normal values to be added to the posterior mean to
+    obtain the posterior leaf samples."""
 
 
 class ParallelStageOut(Module):
-    """
-    The output of `accept_moves_parallel_stage`.
-
-    Parameters
-    ----------
-    bart
-        A partially updated BART mcmc state.
-    moves
-        The proposed moves, with `partial_ratio` set to `None` and
-        `log_trans_prior_ratio` set to its final value.
-    prec_trees
-        The likelihood precision scale in each potential or actual leaf node. If
-        there is no precision scale, this is the number of points in each leaf.
-    move_counts
-        The counts of the number of points in the the nodes modified by the
-        moves. If `bart.min_points_per_leaf` is not set and
-        `bart.prec_scale` is set, they are not computed.
-    move_precs
-        The likelihood precision scale in each node modified by the moves. If
-        `bart.prec_scale` is not set, this is set to `move_counts`.
-    prelkv
-    prelk
-    prelf
-        Objects with pre-computed terms of the likelihood ratios and leaf
-        samples.
-    """
+    """The output of `accept_moves_parallel_stage`."""
 
     bart: State
+    """A partially updated BART mcmc state."""
+
     moves: Moves
+    """The proposed moves, with `partial_ratio` set to `None` and
+    `log_trans_prior_ratio` set to its final value."""
+
     prec_trees: (
         Float32[Array, '*chains num_trees 2**d']
         | Int32[Array, '*chains num_trees 2**d']
     ) = field(chains=True)
+    """The likelihood precision scale in each potential or actual leaf node. If
+    there is no precision scale, this is the number of points in each leaf."""
+
     move_precs: Precs | Counts
+    """The likelihood precision scale in each node modified by the moves. If
+    `bart.prec_scale` is not set, this is set to `move_counts`."""
+
     prelkv: PreLkV
+    """Object with pre-computed terms of the likelihood ratios."""
+
     prelk: PreLk | None
+    """Object with pre-computed terms of the likelihood ratios."""
+
     prelf: PreLf
+    """Object with pre-computed terms of the leaf samples."""
 
 
 @partial(jit_and_block_if_profiling, donate_argnums=(1, 2))
@@ -939,65 +922,53 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
 
 
 class SeqStageInAllTrees(Module):
-    """
-    The inputs to `accept_move_and_sample_leaves` that are shared by all trees.
-
-    Parameters
-    ----------
-    X
-        The predictors.
-    resid_num_batches
-        The number of batches for computing the sum of residuals in each leaf.
-    mesh
-        The mesh of devices to use.
-    prec_scale
-        The scale of the precision of the error on each datapoint. If None, it
-        is assumed to be 1.
-    save_ratios
-        Whether to save the acceptance ratios.
-    prelk
-        The pre-computed terms of the likelihood ratio which are shared across
-        trees.
-    """
+    """The inputs to `accept_move_and_sample_leaves` that are shared by all trees."""
 
     X: UInt[Array, 'p n']
+    """The predictors."""
+
     resid_num_batches: int | None = field(static=True)
+    """The number of batches for computing the sum of residuals in each leaf."""
+
     mesh: Mesh | None = field(static=True)
+    """The mesh of devices to use."""
+
     prec_scale: Float32[Array, ' n'] | None
+    """The scale of the precision of the error on each datapoint. If None, it
+    is assumed to be 1."""
+
     save_ratios: bool = field(static=True)
+    """Whether to save the acceptance ratios."""
+
     prelk: PreLk | None
+    """The pre-computed terms of the likelihood ratio which are shared across
+    trees."""
 
 
 class SeqStageInPerTree(Module):
-    """
-    The inputs to `accept_move_and_sample_leaves` that are separate for each tree.
-
-    Parameters
-    ----------
-    leaf_tree
-        The leaf values of the tree.
-    prec_tree
-        The likelihood precision scale in each potential or actual leaf node.
-    move
-        The proposed move, see `propose_moves`.
-    move_precs
-        The likelihood precision scale in each node modified by the moves.
-    leaf_indices
-        The leaf indices for the largest version of the tree compatible with
-        the move.
-    prelkv
-    prelf
-        The pre-computed terms of the likelihood ratio and leaf sampling which
-        are specific to the tree.
-    """
+    """The inputs to `accept_move_and_sample_leaves` that are separate for each tree."""
 
     leaf_tree: Float32[Array, ' 2**d'] | Float32[Array, ' k 2**d']
+    """The leaf values of the tree."""
+
     prec_tree: Float32[Array, ' 2**d']
+    """The likelihood precision scale in each potential or actual leaf node."""
+
     move: Moves
+    """The proposed move, see `propose_moves`."""
+
     move_precs: Precs | Counts
+    """The likelihood precision scale in each node modified by the moves."""
+
     leaf_indices: UInt[Array, ' n']
+    """The leaf indices for the largest version of the tree compatible with
+    the move."""
+
     prelkv: PreLkV
+    """The pre-computed terms of the likelihood ratio which are specific to the tree."""
+
     prelf: PreLf
+    """The pre-computed terms of the leaf sampling which are specific to the tree."""
 
 
 def accept_move_and_sample_leaves(

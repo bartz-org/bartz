@@ -1,6 +1,6 @@
 .. bartz/docs/guide/quickstart.rst
 ..
-.. Copyright (c) 2024-2025, The Bartz Contributors
+.. Copyright (c) 2024-2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -40,6 +40,11 @@ The interface hews to the R package `BART3 <https://github.com/rsparapa/bnptools
 
 There is also a new interface where new features are added, `bartz.Bart`. However it is unstable and continuously evolving.
 
+Getting a GPU
+-------------
+
+`bartz` works decently on CPU, but it shines on GPU where it can be up to 200x faster. Your personal computer may already have a nvidia GPU. The integrated GPUs on Apple Silicon Macs are not supported and won't ever be. If you don't have a GPU, you can rent one on the cloud, starting from about 0.10 $/hour, e.g., on `vast.ai <https://vast.ai>`_. If you are not familiar with connecting to remote machines, you can use `Google colab <https://colab.research.google.com>`_.
+
 JAX
 ---
 
@@ -52,4 +57,4 @@ For advanced usage, refer to the `jax documentation <https://docs.jax.dev>`_.
 Advanced
 --------
 
-`bartz` exposes the various functions that implement the MCMC of BART. You can use those yourself to try to make your own variant of BART. See the rest of the documentation for reference; the main entry points are `bartz.mcmcstep.init` and `bartz.mcmcloop.run_mcmc`. Using the internals is the only way to change the device used by each step of the algorithm, which is useful to pre-process data on CPU and move to GPU only the state of the MCMC if the data preprocessing step does not fit in the GPU memory.
+`bartz` exposes the various functions that implement the MCMC of BART. You can use those yourself to try to make your own variant of BART. See the rest of the documentation for reference; the main entry points are `bartz.mcmcstep.init` and `bartz.mcmcloop.run_mcmc`.

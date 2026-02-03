@@ -207,6 +207,8 @@ def jit_if_not_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..
         else:
             return jitted_func(*args, **kwargs)
 
+    wrapper._fun = func  # used by run_mcmc  # noqa: SLF001
+
     return wrapper
 
 

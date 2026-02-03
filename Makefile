@@ -47,7 +47,7 @@ all:
 	@echo "- docs-latest: build html documentation for latest release"
 	@echo "- covreport: build html coverage report"
 	@echo "- covcheck: check coverage is above some thresholds"
-	@echo "- update-deps: remove .venv and upgrade uv.lock"
+	@echo "- update-deps: remove .venv, upgrade uv.lock, update pre-commit hooks"
 	@echo "- copy-version: sync version from pyproject.toml to _version.py"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- release: packages the python module, invokes tests and docs first"

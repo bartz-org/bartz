@@ -192,9 +192,13 @@ class PreLkV(Module):
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
     ) = field(chains=True)
     """In the univariate case, this is the scalar term
-    ``1 / error_cov_inv + n_left / leaf_prior_cov_inv``.
+
+        ``1 / error_cov_inv + n_left / leaf_prior_cov_inv``.
+
     In the multivariate case, this is the matrix term
-    ``error_cov_inv @ inv(leaf_prior_cov_inv + n_left * error_cov_inv) @ error_cov_inv``.
+
+        ``error_cov_inv @ inv(leaf_prior_cov_inv + n_left * error_cov_inv) @ error_cov_inv``.
+
     ``n_left`` is the number of datapoints in the left child, or the
     likelihood precision scale in the heteroskedastic case."""
 
@@ -202,9 +206,13 @@ class PreLkV(Module):
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
     ) = field(chains=True)
     """In the univariate case, this is the scalar term
-    ``1 / error_cov_inv + n_right / leaf_prior_cov_inv``.
+
+        ``1 / error_cov_inv + n_right / leaf_prior_cov_inv``.
+
     In the multivariate case, this is the matrix term
-    ``error_cov_inv @ inv(leaf_prior_cov_inv + n_right * error_cov_inv) @ error_cov_inv``.
+
+        ``error_cov_inv @ inv(leaf_prior_cov_inv + n_right * error_cov_inv) @ error_cov_inv``.
+
     ``n_right`` is the number of datapoints in the right child, or the
     likelihood precision scale in the heteroskedastic case."""
 
@@ -212,9 +220,13 @@ class PreLkV(Module):
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
     ) = field(chains=True)
     """In the univariate case, this is the scalar term
-    ``1 / error_cov_inv + n_total / leaf_prior_cov_inv``.
+
+        ``1 / error_cov_inv + n_total / leaf_prior_cov_inv``.
+
     In the multivariate case, this is the matrix term
-    ``error_cov_inv @ inv(leaf_prior_cov_inv + n_total * error_cov_inv) @ error_cov_inv``.
+
+        ``error_cov_inv @ inv(leaf_prior_cov_inv + n_total * error_cov_inv) @ error_cov_inv``.
+
     ``n_total`` is the number of datapoints in the parent node, or the
     likelihood precision scale in the heteroskedastic case."""
 

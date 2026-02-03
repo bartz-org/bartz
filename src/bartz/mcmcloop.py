@@ -573,7 +573,7 @@ def make_default_callback(
 
     Examples
     --------
-    >>> run_mcmc(..., **make_default_callback())
+    >>> run_mcmc(key, state, ..., **make_default_callback(state, ...))
     """
 
     def as_replicated_array_or_none(val: None | Any) -> None | Array:

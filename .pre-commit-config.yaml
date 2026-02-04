@@ -39,17 +39,17 @@ repos:
         files: \.(py|rst)$
         exclude: src/bartz/_version\.py$
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.3
+    rev: v0.15.0
     hooks:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
   - repo: https://github.com/jsh9/pydoclint
-    rev: 0.7.6
+    rev: 0.8.3
     hooks:
       - id: pydoclint
   - repo: https://github.com/henryiii/validate-pyproject-schema-store
-    rev: 2026.01.10
+    rev: 2026.01.22
     hooks:
       - id: validate-pyproject
   - repo: https://github.com/jorisroovers/gitlint

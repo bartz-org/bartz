@@ -167,12 +167,13 @@ check-committed:
 	git diff --quiet
 	git diff --quiet --staged
 
+.PHONY: clean
+clean:
+	rm -fr dist
+	rm -fr config/jax_cache
+
 .PHONY: release
-release: update-deps copy-version check-committed
-	@$(MAKE) tests
-	@$(MAKE) tests-old
-	@$(MAKE) docs
-	test ! -d dist || rm -r dist
+release: update-deps copy-version check-committed clean tests tests-old docs
 	uv build
 
 .PHONY: version-tag

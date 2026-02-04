@@ -306,8 +306,8 @@ class TestMVBartIntegration:
         resid = random.normal(keys.pop(), (y.size,))
 
         # inverse gamma prior: alpha = df / 2, beta = scale / 2
-        df_prior = 20.0
-        scale_prior = 10.0
+        df_prior = jnp.float32(20.0)
+        scale_prior = jnp.float32(10.0)
 
         st_uv = State(
             X=X,
@@ -327,7 +327,7 @@ class TestMVBartIntegration:
             X=X,
             y=y[None, :],
             resid=resid[None, :],
-            error_cov_df=jnp.array(df_prior),
+            error_cov_df=df_prior,
             error_cov_scale=jnp.array([[scale_prior]]),
             z=None,
             offset=0.0,
@@ -341,7 +341,7 @@ class TestMVBartIntegration:
             return _step_error_cov_inv_uv(k, st_uv).error_cov_inv
 
         def sample_mv(k):
-            return _step_error_cov_inv_mv(k, st_mv).error_cov_inv[0, 0]
+            return _step_error_cov_inv_mv(k, st_mv).error_cov_inv.reshape(())
 
         n_samples = 10000
         samples_uv = vmap(sample_uv)(keys.pop(n_samples))

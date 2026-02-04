@@ -63,10 +63,14 @@ all:
 	@echo "- ipython-old: start an ipython shell with oldest supported python and dependencies"
 	@echo
 	@echo "Release workflow:"
+	@echo "- create a new branch"
 	@echo "- $$ uv version --bump major|minor|patch"
 	@echo "- describe release in docs/changelog.md"
-	@echo "- $$ make release (repeat until it goes smoothly)"
-	@echo "- push and check CI completes (if it doesn't, go to previous step)"
+	@echo "- commit"
+	@echo "- open a PR"
+	@echo "- $$ make release (iterate to fix problems)"
+	@echo "- if CI does not pass, go back to previous step"
+	@echo "- merge PR"
 	@echo "- $$ make upload"
 	@echo "- publish github release (updates zenodo automatically)"
 	@echo "- if the online docs are not up-to-date, press 'run workflow' on https://github.com/bartz-org/bartz/actions/workflows/tests.yml, and try to understand why 'make upload' didn't do it"
@@ -149,9 +153,8 @@ covcheck:
 
 .PHONY: update-deps
 update-deps:
-	test ! -d .venv || rm -r .venv
 	uv lock --upgrade
-	uv run pre-commit autoupdate
+	$(UV_RUN) pre-commit autoupdate
 
 .PHONY: copy-version
 copy-version: src/bartz/_version.py
@@ -163,12 +166,14 @@ check-committed:
 	git diff --quiet
 	git diff --quiet --staged
 
+.PHONY: clean
+clean:
+	rm -fr .venv
+	rm -fr dist
+	rm -fr config/jax_cache
+
 .PHONY: release
-release: update-deps copy-version check-committed
-	@$(MAKE) tests
-	@$(MAKE) tests-old
-	@$(MAKE) docs
-	test ! -d dist || rm -r dist
+release: clean update-deps copy-version check-committed tests tests-old docs
 	uv build
 
 .PHONY: version-tag

@@ -1,7 +1,7 @@
 <!--
 bartz/docs/changelog.md
 
-Copyright (c) 2024-2025, The Bartz Contributors
+Copyright (c) 2024-2026, The Bartz Contributors
 
 This file is part of bartz.
 
@@ -29,6 +29,31 @@ SOFTWARE.
 
 
 # Changelog
+
+
+## 0.8.0 The Dark Side of Big Bayes (2026-02-04)
+
+The highlights of this release are multiple parallel Markov chains and splitting data and/or chains across multiple devices. The repository has been moved to [bartz-org](https://github.com/bartz-org) to welcome the first contributor @miaoqingyu2.
+
+* New features
+    * New interface `bartz.Bart` intended to supersede `bartz.BART.gbart`. `gbart` will continue to match the R package BART3, while new functionality will be added in `bartz.Bart`.
+    * Built-in support for running multiple independent chains in parallel. At the interface level, this is available through `bartz.Bart` and `bartz.BART.mc_gbart`.
+    * Support for multiple devices. Data and/or chains can be split across gpus. This can be controlled only through the new interface `bartz.Bart`, while `mc_gbart` will shard chains automatically on cpu but otherwise not provide settings.
+    * Multivariate regression thanks to @miaoqingyu2. This is currently only implemented at low level, not in the easy to use interface.
+* Performance improvements
+    * Generally faster, in particular on gpu at low $n$ and on cpu with heteroskedasticity.
+    * Fixed a performance regression in v0.7.0 where the running time per iteration would grow with the total number of iterations because the full trace array was duplicated on each iteration.
+    * Undid the weird thing where if the number of iterations is not a multiple of `printevery` there are leftover iterations which are performed but not saved.
+    * `run_mcmc` will raise an error if for any reason the MCMC code is compiled twice. This can be triggered by internal errors or by misconfiguration.
+* Bugs fixed
+    * Fixed wrong rare misspecified corner cases in the MCMC.
+    * Fixed binary regression producing nans/infs on gpu.
+    * Fixed slightly out of sync MCMC iteration logging on gpu.
+* Usability improvements
+    * Convenience attribute `bartz.BART.mc_gbart.sigma_` for accessing the post-burnin sigma samples.
+    * Extras `bartz[cuda12]` and `bartz[cuda13]` to easily install dependencies for working with nvidia gpus; they simply mirror the corresponding jax extras.
+    * Variable selection has been integrated into `bartz.mcmcstep.step`.
+    * The MCMC state class `bartz.mcmcstep.State` has a new `config` attribute that, amongst other things, tracks the number of steps done on the state.
 
 
 ## 0.7.0 Every woman knows the pain of deciding which predictors to throw away when her design matrix is full to the brim and the last season brought out new lagged features. Our 100% money-back guarantee Bayesian variable selection Dirichlet prior will pick out the best predictors for you automatically while the MCMC is running! (2025-07-07)

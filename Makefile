@@ -153,9 +153,8 @@ covcheck:
 
 .PHONY: update-deps
 update-deps:
-	test ! -d .venv || rm -r .venv
 	uv lock --upgrade
-	uv run pre-commit autoupdate
+	$(UV_RUN) pre-commit autoupdate
 
 .PHONY: copy-version
 copy-version: src/bartz/_version.py
@@ -169,11 +168,12 @@ check-committed:
 
 .PHONY: clean
 clean:
+	rm -fr .venv
 	rm -fr dist
 	rm -fr config/jax_cache
 
 .PHONY: release
-release: update-deps copy-version check-committed clean tests tests-old docs
+release: clean update-deps copy-version check-committed tests tests-old docs
 	uv build
 
 .PHONY: version-tag

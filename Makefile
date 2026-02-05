@@ -69,11 +69,12 @@ all:
 	@echo "- commit"
 	@echo "- open a PR"
 	@echo "- $$ make release (iterate to fix problems)"
-	@echo "- if CI does not pass, go back to previous step"
+	@echo "- if CI does not pass, debug and go back to make release"
 	@echo "- merge PR"
+	@echo "- if CI does not pass, debug and go back to make release"
 	@echo "- $$ make upload"
 	@echo "- publish github release (updates zenodo automatically)"
-	@echo "- if the online docs are not up-to-date, press 'run workflow' on https://github.com/bartz-org/bartz/actions/workflows/tests.yml, and try to understand why 'make upload' didn't do it"
+	@echo "- if the online docs are not up-to-date, merge another PR to trigger a new merge CI"
 
 
 .PHONY: setup

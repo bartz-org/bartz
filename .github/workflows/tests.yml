@@ -54,7 +54,7 @@ jobs:
 
       - name: Determine base ref
         id: refs
-        run: echo "from=${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}" >> "$GITHUB_OUTPUT"
+        run: echo "from=${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (startsWith(github.ref, 'refs/heads/') && github.event.before) || '' }}" >> "$GITHUB_OUTPUT"
 
       - name: Run pre-commit on changed files
         # even if I run it on all files below, it's convenient to see if something fails in new changes first

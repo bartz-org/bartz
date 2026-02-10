@@ -232,6 +232,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 w=w,
                 sparse=True,
                 theta=2,
+                varprob=jnp.array([0.2, 0.8]),
                 ntree=20,
                 ndpost=100,
                 nskip=50,

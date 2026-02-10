@@ -41,6 +41,7 @@ import jax
 import numpy
 import polars as pl
 import pytest
+from equinox import EquinoxRuntimeError
 from jax import debug_nans, lax, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
@@ -232,6 +233,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
                 w=w,
                 sparse=True,
                 theta=2,
+                varprob=jnp.array([0.2, 0.8]),
                 ntree=20,
                 ndpost=100,
                 nskip=50,
@@ -1525,3 +1527,36 @@ def test_sharding(kw: dict):
     check_data_sharding(bart.prob_train_mean)
     check_data_sharding(bart.yhat_train)
     check_data_sharding(bart.yhat_train_mean)
+
+
+class TestVarprob:
+    """Test the `varprob` parameter thoroughly."""
+
+    def test_biased_predictor_choice(self, keys: split, kw: dict) -> None:
+        """Check that if `varprob[i]` is high then predictor `i` is used more than others."""
+        p, _ = kw['x_train'].shape
+        i = random.randint(keys.pop(), (), 0, p)
+        vp = jnp.full(p, 0.001).at[i].set(1)
+        vp /= vp.sum()
+        kw.update(sparse=False, varprob=vp)
+        bart = mc_gbart(**kw)
+        vc = bart.varcount_mean
+        vc /= vc.sum()
+        assert vc[i] > vp[i] * 0.6
+
+    def test_positive(self, kw: dict, subtests: SubTests) -> None:
+        """Check that an error is raised if varprob is not > 0."""
+        p, _ = kw['x_train'].shape
+
+        with subtests.test('not negative'):
+            assert p > 1
+            varprob = jnp.ones(p).at[0].set(-1.0)
+            kw.update(varprob=varprob)
+            with pytest.raises(EquinoxRuntimeError, match='varprob must be > 0'):
+                mc_gbart(**kw)
+
+        with subtests.test('not 0'):
+            varprob = jnp.zeros(p).at[0].set(1.0)
+            kw.update(varprob=varprob)
+            with pytest.raises(EquinoxRuntimeError, match='varprob must be > 0'):
+                mc_gbart(**kw)

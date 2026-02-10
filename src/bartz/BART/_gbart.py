@@ -86,6 +86,12 @@ class mc_gbart(Module):
         the prior, consider setting a lower `rho` to prefer more sparsity.
         If setting `theta` directly, it should be in the ballpark of p or lower
         as well.
+    varprob
+        The probability distribution over the `p` predictors for choosing a
+        predictor to split on in a decision node a priori. Must be > 0. It does
+        not need to be normalized to sum to 1. If not specified, use a uniform
+        distribution. If ``sparse=True``, this is used as initial value for the
+        MCMC.
     xinfo
         A matrix with the cutpoins to use to bin each predictor. If not
         specified, it is generated automatically according to `usequants` and
@@ -230,6 +236,7 @@ class mc_gbart(Module):
         a: FloatLike = 0.5,
         b: FloatLike = 1.0,
         rho: FloatLike | None = None,
+        varprob: Float[Array, ' p'] | None = None,
         xinfo: Float[Array, 'p n'] | None = None,
         usequants: bool = False,
         rm_const: bool = True,
@@ -263,6 +270,7 @@ class mc_gbart(Module):
             a=a,
             b=b,
             rho=rho,
+            varprob=varprob,
             xinfo=xinfo,
             usequants=usequants,
             rm_const=rm_const,

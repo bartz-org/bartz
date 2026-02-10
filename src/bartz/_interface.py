@@ -31,7 +31,7 @@ from typing import Any, Literal, Protocol, TypedDict
 
 import jax
 import jax.numpy as jnp
-from equinox import Module, field
+from equinox import Module, error_if, field
 from jax import Device, device_put, jit, make_mesh
 from jax.lax import collapse
 from jax.scipy.special import ndtr
@@ -128,6 +128,11 @@ class Bart(Module):
         the prior, consider setting a lower `rho` to prefer more sparsity.
         If setting `theta` directly, it should be in the ballpark of p or lower
         as well.
+    varprob
+        The probability distribution over the `p` predictors for choosing a
+        predictor to split on in a decision node a priori. Must be in (0, 1)
+        and sum to 1. If not specified, use a uniform distribution. If
+        ``sparse=True``, this is used as initial value for the MCMC.
     xinfo
         A matrix with the cutpoins to use to bin each predictor. If not
         specified, it is generated automatically according to `usequants` and
@@ -289,6 +294,7 @@ class Bart(Module):
         a: FloatLike = 0.5,
         b: FloatLike = 1.0,
         rho: FloatLike | None = None,
+        varprob: Float[Array, ' p'] | None = None,
         xinfo: Float[Array, 'p n'] | None = None,
         usequants: bool = False,
         rm_const: bool = True,
@@ -371,6 +377,7 @@ class Bart(Module):
             a,
             b,
             rho,
+            varprob,
             num_chains,
             num_chain_devices,
             num_data_devices,
@@ -767,6 +774,7 @@ class Bart(Module):
         a: FloatLike | None,
         b: FloatLike | None,
         rho: FloatLike | None,
+        varprob: Float[Any, ' p'] | None,
         num_chains: int | None,
         num_chain_devices: int | None,
         num_data_devices: int | None,
@@ -804,6 +812,7 @@ class Bart(Module):
             error_cov_scale=error_cov_scale,
             min_points_per_decision_node=10,
             min_points_per_leaf=5,
+            log_s=process_varprob(varprob, max_split),
             theta=theta,
             a=a,
             b=b,
@@ -935,3 +944,18 @@ def process_device_settings(
     )
 
     return settings, device
+
+
+def process_varprob(
+    varprob: Float[Any, ' p'] | None, max_split: UInt[Array, ' p']
+) -> Float32[Array, ' p'] | None:
+    """Convert varprob to log_s."""
+    if varprob is None:
+        return None
+    varprob = jnp.asarray(varprob)
+    assert varprob.shape == max_split.shape, 'varprob must have shape (p,)'
+    varprob = error_if(
+        varprob, (varprob <= 0) | (varprob >= 1), 'varprob must be in (0, 1)'
+    )
+    varprob = error_if(varprob, jnp.sum(varprob) != 1, 'varprob must sum to 1')
+    return jnp.log(varprob)

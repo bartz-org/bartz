@@ -1545,7 +1545,7 @@ class TestVarprob:
         assert vc[i] > vp[i] * 0.6
 
     def test_positive(self, kw: dict, subtests: SubTests) -> None:
-        """Check that an error is raised if varprob is not in (0, 1)."""
+        """Check that an error is raised if varprob is not > 0."""
         p, _ = kw['x_train'].shape
 
         with subtests.test('not negative'):

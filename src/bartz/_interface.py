@@ -131,7 +131,7 @@ class Bart(Module):
     varprob
         The probability distribution over the `p` predictors for choosing a
         predictor to split on in a decision node a priori. Must be > 0. It does
-        not need to be normalized to sum 1. If not specified, use a uniform
+        not need to be normalized to sum to 1. If not specified, use a uniform
         distribution. If ``sparse=True``, this is used as initial value for the
         MCMC.
     xinfo

@@ -130,9 +130,10 @@ class Bart(Module):
         as well.
     varprob
         The probability distribution over the `p` predictors for choosing a
-        predictor to split on in a decision node a priori. Must be in (0, 1)
-        and sum to 1. If not specified, use a uniform distribution. If
-        ``sparse=True``, this is used as initial value for the MCMC.
+        predictor to split on in a decision node a priori. Must be > 0. It does
+        not need to be normalized to sum 1. If not specified, use a uniform
+        distribution. If ``sparse=True``, this is used as initial value for the
+        MCMC.
     xinfo
         A matrix with the cutpoins to use to bin each predictor. If not
         specified, it is generated automatically according to `usequants` and
@@ -954,8 +955,5 @@ def process_varprob(
         return None
     varprob = jnp.asarray(varprob)
     assert varprob.shape == max_split.shape, 'varprob must have shape (p,)'
-    varprob = error_if(
-        varprob, (varprob <= 0) | (varprob >= 1), 'varprob must be in (0, 1)'
-    )
-    varprob = error_if(varprob, jnp.sum(varprob) != 1, 'varprob must sum to 1')
+    varprob = error_if(varprob, varprob <= 0, 'varprob must be > 0')
     return jnp.log(varprob)

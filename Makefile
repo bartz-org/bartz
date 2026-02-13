@@ -71,7 +71,7 @@ help:
 	@echo "- $$ make release (iterate to fix problems)"
 	@echo "- if CI does not pass, debug and go back to make release"
 	@echo "- merge PR"
-	@echo "- if CI does not pass, debug and go back to make release"
+	@echo "- if CI does not pass, debug and go back to open PR"
 	@echo "- $$ make upload"
 	@echo "- publish github release (updates zenodo automatically)"
 	@echo "- if the online docs are not up-to-date, merge another PR to trigger a new merge CI"

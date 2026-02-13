@@ -187,6 +187,7 @@ select = [
     "FURB", # refurb
     "RUF",  # Ruff-specific rules
     "TRY",  # tryceratops
+    "ANN",  # flake8-annotations
 ]
 ignore = [
     "B028",    # warn with stacklevel = 2

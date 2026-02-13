@@ -82,6 +82,9 @@ setup:
 	Rscript -e "renv::restore()"
 	$(UV_RUN) pre-commit install --install-hooks
 
+.PHONY: lint
+lint:
+	$(UV_RUN) pre-commit run --all-files ruff-check
 
 ################# TESTS #################
 

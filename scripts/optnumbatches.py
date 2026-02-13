@@ -121,7 +121,7 @@ class Benchmark:
         num_batches: None | int,
         k: int | None = None,
         num_trees: int = 5,
-    ):
+    ) -> None:
         """Initialize BART state and warmup MCMC step."""
         # generate data
         X, y, max_split = gen_nonsense_data(1, n, k)
@@ -167,11 +167,11 @@ class Benchmark:
         # warm up MCMC
         self.task()
 
-    def task(self):
+    def task(self) -> None:
         """Run `step_trees` once."""
         self.state = block_until_ready(step_func(self.key, self.state))
 
-    def teardown(self):
+    def teardown(self) -> None:
         """Delete the state and the compiled function."""
         del self.state
         step_func.clear_cache()
@@ -274,7 +274,7 @@ def benchmark_loop(args: Namespace) -> DataFrame:
     return DataFrame(results)
 
 
-def enable_compilation_cache():
+def enable_compilation_cache() -> None:
     """Enable JAX compilation caching to speed repeated runs."""
     config.update('jax_compilation_cache_dir', 'config/jax_cache')
     config.update('jax_persistent_cache_min_entry_size_bytes', -1)
@@ -325,7 +325,7 @@ def parse_args() -> Namespace:
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     """Entry point of the script."""
     enable_compilation_cache()
     args = parse_args()

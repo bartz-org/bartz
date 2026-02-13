@@ -259,7 +259,7 @@ class mc_gbart(Module):
         mc_cores: int = 2,
         seed: int | Key[Array, ''] = 0,
         bart_kwargs: Mapping = MappingProxyType({}),
-    ):
+    ) -> None:
         kwargs: dict = dict(
             x_train=x_train,
             y_train=y_train,
@@ -450,7 +450,7 @@ class mc_gbart(Module):
 class gbart(mc_gbart):
     """Subclass of `mc_gbart` that forces `mc_cores=1`."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, **kwargs) -> None:
         if 'mc_cores' in kwargs:
             msg = "gbart.__init__() got an unexpected keyword argument 'mc_cores'"
             raise TypeError(msg)

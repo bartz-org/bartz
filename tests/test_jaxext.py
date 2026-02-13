@@ -48,7 +48,7 @@ from tests.util import assert_close_matrices
 class TestUnique:
     """Test jaxext.unique."""
 
-    def test_sort(self):
+    def test_sort(self) -> None:
         """Check that it's equivalent to sort if no values are repeated."""
         x = jnp.arange(10)[::-1]
         out, length = jaxext.unique(x, x.size, 666)
@@ -56,7 +56,7 @@ class TestUnique:
         assert out.dtype == x.dtype
         assert length == x.size
 
-    def test_fill(self):
+    def test_fill(self) -> None:
         """Check that the trailing fill value is used correctly."""
         x = jnp.ones(10)
         out, length = jaxext.unique(x, x.size, 666)
@@ -64,7 +64,7 @@ class TestUnique:
         assert out.dtype == x.dtype
         assert length == 1
 
-    def test_empty_input(self):
+    def test_empty_input(self) -> None:
         """Check that the function works on empty input."""
         x = jnp.array([])
         out, length = jaxext.unique(x, 2, 666)
@@ -72,7 +72,7 @@ class TestUnique:
         assert out.dtype == x.dtype
         assert length == 0
 
-    def test_empty_output(self):
+    def test_empty_output(self) -> None:
         """Check that the function works if the output is forced to be empty."""
         x = jnp.array([1, 1, 1])
         out, length = jaxext.unique(x, 0, 666)
@@ -87,7 +87,9 @@ class TestAutoBatch:
     @pytest.mark.parametrize('target_nbatches', [1, 7])
     @pytest.mark.parametrize('with_margin', [False, True])
     @pytest.mark.parametrize('additional_size', [3, 0])
-    def test_batch_size(self, keys, target_nbatches, with_margin, additional_size):
+    def test_batch_size(
+        self, keys, target_nbatches, with_margin, additional_size
+    ) -> None:
         """Check batch sizes are correct in various conditions."""
 
         def func(a, b, c):
@@ -125,7 +127,7 @@ class TestAutoBatch:
 
     @pytest.mark.parametrize('max_memory', [32, 1024])
     # test with large max memory to trigger noop code path
-    def test_unbatched_arg(self, max_memory: int):
+    def test_unbatched_arg(self, max_memory: int) -> None:
         """Check the function with batching disabled on a scalar argument."""
 
         def func(a, b):
@@ -141,7 +143,7 @@ class TestAutoBatch:
 
         numpy.testing.assert_array_max_ulp(out1, out2)
 
-    def test_batch_axis_pytree(self):
+    def test_batch_axis_pytree(self) -> None:
         """Check the that a batch axis can be specified for a whole sub-pytree."""
 
         def func(a, b):
@@ -157,7 +159,7 @@ class TestAutoBatch:
 
         numpy.testing.assert_array_max_ulp(out1, out2)
 
-    def test_large_batch_warning(self):
+    def test_large_batch_warning(self) -> None:
         """Check the function emits a warning if the size limit can't be honored."""
         x = jnp.arange(10_000).reshape(10, 1000)
 
@@ -168,7 +170,7 @@ class TestAutoBatch:
         with pytest.warns(UserWarning, match=' > max_io_nbytes = '):
             g(x)
 
-    def test_empty_values(self):
+    def test_empty_values(self) -> None:
         """Check that the function works with batchable empty arrays."""
         x = jnp.empty((10, 0))
 
@@ -180,7 +182,7 @@ class TestAutoBatch:
         assert nbatches == 1
         assert jnp.all(y == x)
 
-    def test_zero_size(self):
+    def test_zero_size(self) -> None:
         """Check the function works with a batch axis with length 0."""
         x = jnp.empty((0, 10))
 
@@ -192,7 +194,7 @@ class TestAutoBatch:
         assert nbatches == 1
         assert jnp.all(y == x)
 
-    def test_reduction_basic(self, keys: split, subtests: SubTests):
+    def test_reduction_basic(self, keys: split, subtests: SubTests) -> None:
         """Check that reduction produces the expected result."""
         # use an internal loop instead of pytest.mark.parametrize because there
         # are too many combinations of parameters
@@ -279,7 +281,7 @@ class TestAutoBatch:
 
                 tree.map(partial(assert_close_matrices, rtol=1e-6), result, expected)
 
-    def test_reduction_with_unbatched_input(self, keys):
+    def test_reduction_with_unbatched_input(self, keys) -> None:
         """Check reduction works with unbatched (None) input arguments."""
 
         def func(x, scalar):
@@ -295,7 +297,7 @@ class TestAutoBatch:
         assert result.shape == (8,)
         assert_allclose(result, expected, rtol=1e-6)
 
-    def test_reduction_with_return_nbatches(self, keys):
+    def test_reduction_with_return_nbatches(self, keys) -> None:
         """Check reduce_ufunc works together with return_nbatches."""
 
         def func(x):
@@ -321,7 +323,7 @@ def different_keys(keya, keyb):
     return jnp.any(random.key_data(keya) != random.key_data(keyb)).item()
 
 
-def test_split(keys):
+def test_split(keys) -> None:
     """Test jaxext.split."""
     key = keys.pop()
     ks = jaxext.split(key, 3)
@@ -370,14 +372,14 @@ def test_split(keys):
 class TestJaxPatches:
     """Check that some jax stuff I patch is correct and still to be patched."""
 
-    def test_invgamma_missing(self):
+    def test_invgamma_missing(self) -> None:
         """Check that jax does not implement the inverse gamma distribution."""
         with pytest.raises(ImportError, match=r'gammainccinv'):
             from jax.scipy.special import gammainccinv  # noqa: F401, PLC0415
         with pytest.raises(ImportError, match=r'invgamma'):
             from jax.scipy.stats import invgamma  # noqa: F401, PLC0415
 
-    def test_invgamma_correct(self, keys):
+    def test_invgamma_correct(self, keys) -> None:
         """Compare my implementation of invgamma against scipy's."""
         p = random.uniform(keys.pop(), (100,), float, 0.01, 0.99)
         alpha = 3.5
@@ -386,13 +388,13 @@ class TestJaxPatches:
         assert_allclose(x1, x0, rtol=1e-6)
 
     @pytest.mark.xfail(reason='Fixed in jax 0.6.2.')
-    def test_ndtri_bugged(self, keys):
+    def test_ndtri_bugged(self, keys) -> None:
         """Check that `jax.scipy.special.ndtri` triggers `jax.debug_infs`."""
         x = random.uniform(keys.pop(), (100,), float, 0.01, 0.99)
         with debug_infs(True), pytest.raises(FloatingPointError, match=r'inf'):
             ndtri(x)
 
-    def test_ndtri_correct(self, keys):
+    def test_ndtri_correct(self, keys) -> None:
         """Check that my copy-pasted ndtri impl is equivalent to the jax one."""
         x = random.uniform(keys.pop(), (100,), float, 0.01, 0.99)
         with debug_infs(False):
@@ -404,7 +406,7 @@ class TestJaxPatches:
 class TestTruncatedNormalOneSided:
     """Test `jaxext.truncated_normal_onesided`."""
 
-    def test_truncated_normal_incorrect(self, keys):
+    def test_truncated_normal_incorrect(self, keys) -> None:
         """Check that `jax.random.truncated_normal` is wrong out of 5 sigma."""
         nsamples = 1000
         lower, upper = jnp.array([(-100.0, -5.0), (5.0, 100.0)]).T
@@ -415,7 +417,7 @@ class TestTruncatedNormalOneSided:
             test = ks_1samp(sample, truncnorm(l, u).cdf)
             assert test.pvalue < 0.01
 
-    def test_correct(self, keys):
+    def test_correct(self, keys) -> None:
         """Check the samples come from the right distribution."""
         nparams = 20
         nsamples = 1000
@@ -430,7 +432,7 @@ class TestTruncatedNormalOneSided:
             test = ks_1samp(sample, truncnorm(left, right).cdf)
             assert test.pvalue > 0.01
 
-    def test_accurate(self, keys):
+    def test_accurate(self, keys) -> None:
         """Check that it does not over/under shoot."""
         x = jaxext.truncated_normal_onesided(
             keys.pop(), (), jnp.bool_(True), jnp.float32(-12)
@@ -441,7 +443,7 @@ class TestTruncatedNormalOneSided:
         )
         assert 12 < x <= 12.1
 
-    def test_finite(self, keys):
+    def test_finite(self, keys) -> None:
         """Check that the outputs are always finite."""
         # shape and n_loops combined shall be enough that all possible
         # float32 values in [0, 1) are drawn by random.uniform
@@ -467,7 +469,7 @@ class TestTruncatedNormalOneSided:
             assert jnp.all(jnp.isfinite(vals))
 
 
-def test_is_key(keys):
+def test_is_key(keys) -> None:
     """Test jaxext.is_key."""
     # JAX keys should be recognized
     key = keys.pop()

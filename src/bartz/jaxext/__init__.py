@@ -136,7 +136,7 @@ class split:
     _keys: tuple[Key[Array, '*batch'], ...]
     _num_used: int
 
-    def __init__(self, key: Key[Array, '*batch'], num: int = 2):
+    def __init__(self, key: Key[Array, '*batch'], num: int = 2) -> None:
         if key.ndim:
             context = debug_key_reuse(False)
         else:
@@ -147,7 +147,7 @@ class split:
             self._keys = _split_unpack(key, num)
         self._num_used = 0
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._keys) - self._num_used
 
     def pop(self, shape: int | tuple[int, ...] = ()) -> Key[Array, '*batch {shape}']:

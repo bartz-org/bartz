@@ -220,7 +220,7 @@ class StepGeneric(AutoParamNames):
         (None, 1, 2),
     )
 
-    def setup(self, mode: Mode, kind: Kind, chains: int | None, **kwargs):
+    def setup(self, mode: Mode, kind: Kind, chains: int | None, **kwargs) -> None:
         """Create an initial MCMC state and random seed, compile & warm-up."""
         keys = list(random.split(random.key(2025_06_24_12_07)))
 
@@ -244,7 +244,7 @@ class StepGeneric(AutoParamNames):
             block_until_ready(self.compiled_func(*self.args))
         self.mode = mode
 
-    def time_step(self, *_):
+    def time_step(self, *_) -> None:
         """Time compiling `step` or running it."""
         match self.mode:
             case 'compile':
@@ -261,7 +261,7 @@ class StepSharded(StepGeneric):
 
     params = ((False, True),)
 
-    def setup(self, sharded: bool):  # ty:ignore[invalid-method-override]
+    def setup(self, sharded: bool) -> None:  # ty:ignore[invalid-method-override]
         """Set up with settings that make the effect of sharding salient."""
         sig = signature(init)
         if 'mesh' not in sig.parameters:
@@ -300,7 +300,7 @@ class BaseGbart(AutoParamNames):
         cache: Cache = 'warm',
         profile: bool = False,
         kwargs: Mapping[str, Any] = MappingProxyType({}),
-    ):
+    ) -> None:
         """Prepare the arguments and run once to warm-up."""
         # check support for multiple chains
         sig = signature(gbart)
@@ -356,7 +356,7 @@ class BaseGbart(AutoParamNames):
             case _:
                 raise KeyError(cache)
 
-    def time_gbart(self, *_):
+    def time_gbart(self, *_) -> None:
         """Time instantiating the class."""
         with redirect_stdout(StringIO()), self.context():
             bart = gbart(**self.kw)
@@ -380,7 +380,7 @@ class GbartChains(BaseGbart):
 
     params = ((1, 2, 4, 8, 16, 32), (False, True))
 
-    def setup(self, nchains: int, shard: bool):  # ty:ignore[invalid-method-override]
+    def setup(self, nchains: int, shard: bool) -> None:  # ty:ignore[invalid-method-override]
         """Set up to use or not multiple cpus."""
         # check there is support for multichain
         if 'mc_cores' not in signature(gbart).parameters:
@@ -430,7 +430,7 @@ class BaseRunMcmc(AutoParamNames):
         cache: Cache = 'warm',
         kwargs: Mapping[str, Any] = MappingProxyType({}),
         n: int = N,
-    ):
+    ) -> None:
         """Prepare the arguments, compile the function, and run to warm-up."""
         kw: dict = dict(
             key=random.key(2025_04_25_15_57),
@@ -462,12 +462,12 @@ class BaseRunMcmc(AutoParamNames):
                     static_argnames += ('inner_callback',)
                 f = jit(run_mcmc, static_argnames=static_argnames)
 
-                def task():
+                def task() -> None:
                     f.clear_cache()
                     f.lower(**kw).compile()
             case 'run':
 
-                def task():
+                def task() -> None:
                     block_until_ready(run_mcmc(**kw))
             case _:
                 raise KeyError(mode)
@@ -488,7 +488,7 @@ class BaseRunMcmc(AutoParamNames):
             case _:
                 raise KeyError(cache)
 
-    def time_run_mcmc(self, *_):
+    def time_run_mcmc(self, *_) -> None:
         """Time running or compiling the function."""
         try:
             self.task()
@@ -502,7 +502,7 @@ class BaseRunMcmc(AutoParamNames):
                 raise RuntimeError(msg)
 
 
-def kill_callback(*, canary: str, kill_niters: int | None, bart, i_total, **_):
+def kill_callback(*, canary: str, kill_niters: int | None, bart, i_total, **_) -> None:
     """Throw error `canary` after `kill_niters` in `run_mcmc`.
 
     Partially evaluate `kill_callback` on the first two arguments before
@@ -524,7 +524,7 @@ def kill_callback(*, canary: str, kill_niters: int | None, bart, i_total, **_):
     debug.callback(lambda _token: None, token)  # to avoid DCE
 
 
-def detect_zero_division_error_bug(kw: dict):
+def detect_zero_division_error_bug(kw: dict) -> None:
     """Detect a division by zero error with 0 iterations in v0.6.0."""
     try:
         array_kw = {k: v for k, v in kw.items() if isinstance(v, jnp.ndarray)}
@@ -550,7 +550,7 @@ class RunMcmcVsTraceLength(BaseRunMcmc):
     # asv config
     params = ((2**6, 2**8, 2**10, 2**12, 2**14, 2**16),)
 
-    def setup(self, n_save: int):  # ty:ignore[invalid-method-override]
+    def setup(self, n_save: int) -> None:  # ty:ignore[invalid-method-override]
         """Set up to kill after a certain number of iterations."""
         kill_niters = min(self.params[0])
         super().setup(kill_niters, kwargs=dict(n_save=n_save), n=0)
@@ -562,7 +562,7 @@ class RunMcmc(BaseRunMcmc):
     # asv config
     params = (('compile', 'run'), (0, NITERS), ('cold', 'warm'))
 
-    def setup(self, mode: Mode, niters: int, cache: Cache):  # ty:ignore[invalid-method-override]
+    def setup(self, mode: Mode, niters: int, cache: Cache) -> None:  # ty:ignore[invalid-method-override]
         """Prepare the arguments, compile the function, and run to warm-up."""
         super().setup(
             None, mode, cache, dict(n_save=niters // 2, n_burn=(niters - niters // 2))

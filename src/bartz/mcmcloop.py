@@ -609,7 +609,7 @@ def print_callback(
     n_skip: Int32[Array, ''],
     callback_state: PrintCallbackState,
     **_,
-):
+) -> None:
     """Print a dot and/or a report periodically during the MCMC."""
     report_every = callback_state.report_every
     dot_every = callback_state.dot_every
@@ -621,7 +621,7 @@ def print_callback(
     report_cond = get_cond(report_every)
     dot_cond = get_cond(dot_every)
 
-    def line_report_branch():
+    def line_report_branch() -> None:
         if report_every is None:
             return
         if dot_every is None:
@@ -643,7 +643,7 @@ def print_callback(
             fill=forest_fill(bart.forest.split_tree),
         )
 
-    def just_dot_branch():
+    def just_dot_branch() -> None:
         if dot_every is None:
             return
         debug.callback(
@@ -701,7 +701,7 @@ def _print_report(
     prune_acc_count: float,
     prop_total: int,
     fill: float,
-):
+) -> None:
     """Print the report for `print_callback`."""
     # compute fractions
     grow_prop = grow_prop_count / prop_total

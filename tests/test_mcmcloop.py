@@ -110,7 +110,7 @@ class TestRunMcmc:
         """Prepare state for tests."""
         return simple_init(10, 100, 20, k, num_chains=num_chains)
 
-    def test_final_state_overflow(self, keys: split, initial_state: State):
+    def test_final_state_overflow(self, keys: split, initial_state: State) -> None:
         """Check that the final state is the one in the trace even if there's overflow."""
         with debug_key_reuse(initial_state.forest.num_chains() != 0):
             final_state, _, main_trace = run_mcmc(
@@ -133,7 +133,7 @@ class TestRunMcmc:
             final_state.error_cov_inv, main_trace.error_cov_inv[last_index]
         )
 
-    def test_zero_iterations(self, keys: split, initial_state: State):
+    def test_zero_iterations(self, keys: split, initial_state: State) -> None:
         """Check 0 iterations produces a noop."""
         with debug_key_reuse(initial_state.forest.num_chains() != 0):
             final_state, burnin_trace, main_trace = run_mcmc(
@@ -142,7 +142,7 @@ class TestRunMcmc:
 
         tree_map(partial(assert_array_equal, strict=True), initial_state, final_state)
 
-        def assert_empty_trace(_path, x, chain_axis):
+        def assert_empty_trace(_path, x, chain_axis) -> None:
             if initial_state.forest.num_chains() is None or chain_axis is None:
                 sample_axis = 0
             else:
@@ -150,7 +150,7 @@ class TestRunMcmc:
             if x is not None:
                 assert x.shape[sample_axis] == 0
 
-        def check_trace(trace):
+        def check_trace(trace) -> None:
             map_with_path(
                 assert_empty_trace,
                 trace,
@@ -161,7 +161,7 @@ class TestRunMcmc:
         check_trace(burnin_trace)
         check_trace(main_trace)
 
-    def test_jit_error(self, keys: split, subtests: SubTests):
+    def test_jit_error(self, keys: split, subtests: SubTests) -> None:
         """Check that an error is raised under jit in some conditions."""
         initial_state = simple_init(10, 100, 20)
 

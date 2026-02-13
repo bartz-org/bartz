@@ -173,7 +173,7 @@ nb_execution_mode = 'off'
 viewcode_line_numbers = True
 
 
-def linkcode_resolve(domain, info):
+def linkcode_resolve(domain, info) -> str | None:
     """
     Determine the URL corresponding to Python object, for extension linkcode.
 

@@ -1,6 +1,6 @@
 # bartz/tests/rbartpackages/bartMachine.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -24,7 +24,7 @@
 
 """Python wrapper of the R package bartMachine."""
 
-# ruff: noqa: D102
+# ruff: noqa: D102, ANN201
 
 from rpy2 import robjects
 
@@ -34,7 +34,7 @@ from tests.rbartpackages._base import RObjectBase, rmethod
 class bartMachine(RObjectBase):  # noqa: D101, because the doc is pulled from R
     _rfuncname = 'bartMachine::bartMachine'
 
-    def __init__(self, *args, num_cores=None, megabytes=5000, **kw):
+    def __init__(self, *args, num_cores=None, megabytes=5000, **kw) -> None:
         robjects.r(f'options(java.parameters = "-Xmx{megabytes:d}m")')
         robjects.r('loadNamespace("bartMachine")')
         if num_cores is not None:

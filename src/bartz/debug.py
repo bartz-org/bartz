@@ -85,7 +85,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         first_indent: str,
         next_indent: str,
         unused: bool,
-    ):
+    ) -> None:
         if index >= len(tree.leaf_tree):
             return
 
@@ -1091,7 +1091,7 @@ class debug_mc_gbart(mc_gbart):
         Passed to `mc_gbart`.
     """
 
-    def __init__(self, *args, check_trees: bool = True, **kw):
+    def __init__(self, *args, check_trees: bool = True, **kw) -> None:
         super().__init__(*args, **kw)
         if check_trees:
             bad = self.check_trees()
@@ -1100,7 +1100,7 @@ class debug_mc_gbart(mc_gbart):
 
     def print_tree(
         self, i_chain: int, i_sample: int, i_tree: int, print_all: bool = False
-    ):
+    ) -> None:
         """Print a single tree in human-readable format.
 
         Parameters

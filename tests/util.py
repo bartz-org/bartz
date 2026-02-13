@@ -94,7 +94,7 @@ def assert_close_matrices(
     ord: int | float | str | None = 2,  # noqa: A002
     err_msg: str = '',
     reduce_rank: bool = False,
-):
+) -> None:
     """
     Check if two matrices are similar.
 
@@ -183,7 +183,7 @@ ratio = {ratio:.2g}  (rtol = {rtol:.2g})"""
         assert op(adnorm, atol + rtol * dnorm), msg
 
 
-def assert_different_matrices(*args, **kwargs):
+def assert_different_matrices(*args, **kwargs) -> None:
     """Invoke `assert_close_matrices` with negate=True and default inf tolerance."""
     default_kwargs: dict = dict(rtol=np.inf, atol=np.inf)
     default_kwargs.update(kwargs)

@@ -300,12 +300,12 @@ class TestWithCachedBart:
 
         return CachedBart(kwargs=kw, bart=bart)
 
-    def test_residuals_accuracy(self, cachedbart: CachedBart):
+    def test_residuals_accuracy(self, cachedbart: CachedBart) -> None:
         """Check that running residuals are close to the recomputed final residuals."""
         accum_resid, actual_resid = cachedbart.bart.compare_resid()
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4)
 
-    def test_convergence(self, cachedbart: CachedBart):
+    def test_convergence(self, cachedbart: CachedBart) -> None:
         """Run multiple chains and check convergence with rhat."""
         bart = cachedbart.bart
         nchains, _ = bart._mcmc_state.resid.shape
@@ -363,7 +363,7 @@ class TestWithCachedBart:
 
         return kw_BART
 
-    def check_rbart(self, kw, bart, rbart):
+    def check_rbart(self, kw, bart, rbart) -> None:
         """Subroutine for `test_comparison_BART3`, check that the R BART output is self-consistent."""
         # convert the trees to bartz format
         trees = rbart.treedraws['trees']
@@ -405,7 +405,9 @@ class TestWithCachedBart:
                 prob_test, rbart.prob_test.astype(numpy.float32), rtol=1e-7
             )
 
-    def test_comparison_BART3(self, cachedbart: CachedBart, keys, subtests: SubTests):
+    def test_comparison_BART3(
+        self, cachedbart: CachedBart, keys, subtests: SubTests
+    ) -> None:
         """Check `bartz.BART` gives results similar to the R package BART3."""
         bart = cachedbart.bart
         kw = cachedbart.kwargs
@@ -511,14 +513,14 @@ class TestWithCachedBart:
                         atol=1.7 * (p - 1) ** 0.5,
                     )
 
-    def test_different_chains(self, cachedbart: CachedBart):
+    def test_different_chains(self, cachedbart: CachedBart) -> None:
         """Check that different chains give different results."""
         bart = cachedbart.bart
 
         step_theta = bart._mcmc_state.forest.rho is not None
 
-        def assert_different(x, **kwargs):
-            def assert_different(path: KeyPath, x, chain_axis: int | None):
+        def assert_different(x, **kwargs) -> None:
+            def assert_different(path: KeyPath, x, chain_axis: int | None) -> None:
                 str_path = ''.join(map(str, path))
                 if str_path.endswith('.theta') and not step_theta:
                     return
@@ -546,7 +548,7 @@ def clipped_logit(x: Array, eps: float) -> Array:
     return logit(jnp.clip(x, eps, 1 - eps))
 
 
-def test_sequential_guarantee(kw: dict, subtests: SubTests):
+def test_sequential_guarantee(kw: dict, subtests: SubTests) -> None:
     """Check that the way iterations are saved does not influence the result."""
     # reference run
     kw['keepevery'] = 1
@@ -595,7 +597,7 @@ def test_sequential_guarantee(kw: dict, subtests: SubTests):
         )
 
 
-def test_output_shapes(kw):
+def test_output_shapes(kw) -> None:
     """Check the output shapes of all the array attributes of `bartz.BART.mc_gbart`."""
     bart = mc_gbart(**kw)
 
@@ -644,7 +646,7 @@ def test_output_shapes(kw):
         assert bart.yhat_train_mean.shape == (n,)
 
 
-def test_output_types(kw):
+def test_output_types(kw) -> None:
     """Check the output types of all the attributes of BART.gbart."""
     bart = mc_gbart(**kw)
 
@@ -673,14 +675,14 @@ def test_output_types(kw):
         assert bart.yhat_train_mean.dtype == jnp.float32
 
 
-def test_predict(kw):
+def test_predict(kw) -> None:
     """Check that the public BART.gbart.predict method works."""
     bart = mc_gbart(**kw)
     yhat_train = bart.predict(kw['x_train'])
     assert_array_equal(bart.yhat_train, yhat_train)
 
 
-def test_varprob(kw):
+def test_varprob(kw) -> None:
     """Basic checks of the `varprob` attribute."""
     bart = mc_gbart(**kw)
 
@@ -701,7 +703,7 @@ def test_varprob(kw):
     assert_array_equal(bart.varprob_mean, bart.varprob.mean(axis=0))
 
 
-def test_varprob_blocked_vars(keys):
+def test_varprob_blocked_vars(keys) -> None:
     """Check that varprob = 0 on predictors blocked a priori."""
     X = gen_X(keys.pop(), 2, 30, 'continuous')
     y = gen_y(keys.pop(), X, None, 'continuous')
@@ -714,7 +716,7 @@ def test_varprob_blocked_vars(keys):
 
 
 @pytest.mark.parametrize('theta', ['fixed', 'free'])
-def test_variable_selection(keys: split, theta: Literal['fixed', 'free']):
+def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> None:
     """Check that variable selection works."""
     # data config
     p = 100  # number of predictors
@@ -746,7 +748,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']):
     assert bart.varprob_mean[~mask].max().item() < 1 / (p - peff)
 
 
-def test_scale_shift(kw):
+def test_scale_shift(kw) -> None:
     """Check self-consistency of rescaling the inputs."""
     if kw['y_train'].dtype == bool:
         pytest.skip('Cannot rescale binary responses.')
@@ -791,7 +793,7 @@ def test_scale_shift(kw):
     assert_allclose(bart1.sigma_mean, bart2.sigma_mean / scale, rtol=1e-6, atol=1e-6)
 
 
-def test_min_points_per_decision_node(kw):
+def test_min_points_per_decision_node(kw) -> None:
     """Check that the limit of at least 10 datapoints per decision node is respected."""
     kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
         min_points_per_leaf=None
@@ -813,7 +815,7 @@ def test_min_points_per_decision_node(kw):
         assert jnp.any(distr_marg[min_points:] > 0)
 
 
-def test_min_points_per_leaf(kw):
+def test_min_points_per_leaf(kw) -> None:
     """Check that the limit of at least 5 datapoints per leaf is respected."""
     kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
         min_points_per_decision_node=None
@@ -844,7 +846,7 @@ def set_num_datapoints(kw: dict, n):
     return kw
 
 
-def test_no_datapoints(kw):
+def test_no_datapoints(kw) -> None:
     """Check automatic data scaling with 0 datapoints."""
     # remove all datapoints
     kw = set_num_datapoints(kw, 0)
@@ -872,7 +874,7 @@ def test_no_datapoints(kw):
     )
 
 
-def test_one_datapoint(kw):
+def test_one_datapoint(kw) -> None:
     """Check automatic data scaling with 1 datapoint."""
     kw = set_num_datapoints(kw, 1)
 
@@ -903,7 +905,7 @@ def test_one_datapoint(kw):
     )
 
 
-def test_two_datapoints(kw):
+def test_two_datapoints(kw) -> None:
     """Check automatic data scaling with 2 datapoints."""
     kw = set_num_datapoints(kw, 2)
     bart = mc_gbart(**kw)
@@ -913,7 +915,7 @@ def test_two_datapoints(kw):
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
 
 
-def test_few_datapoints(kw):
+def test_few_datapoints(kw) -> None:
     """Check that the trees cannot grow if there are not enough datapoints.
 
     If there are less than 10 datapoints, it is not possible to satisfy the 10
@@ -935,7 +937,7 @@ def test_few_datapoints(kw):
     assert jnp.all(bart.yhat_train == bart.yhat_train[:, :1])
 
 
-def test_xinfo():
+def test_xinfo() -> None:
     """Simple check that the `xinfo` parameter works."""
     with debug_nans(False):
         xinfo = jnp.array(
@@ -959,7 +961,7 @@ def test_xinfo():
     assert_array_equal(bart._mcmc_state.forest.max_split, [2, 3, 0])
 
 
-def test_xinfo_wrong_p():
+def test_xinfo_wrong_p() -> None:
     """Check that `xinfo` must have the same number of rows as `X`."""
     with debug_nans(False):
         xinfo = jnp.array(
@@ -981,7 +983,7 @@ def test_xinfo_wrong_p():
         (10, 255),  # likely always available decision rules for all variables
     ],
 )
-def test_prior(keys, p, nsplits):
+def test_prior(keys, p, nsplits) -> None:
     """Check that the posterior without data is equivalent to the prior."""
     # sample from posterior without data
     xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
@@ -1199,7 +1201,7 @@ def rhat(chains: Real[Any, 'chain sample']) -> Float[Array, '']:
     return multivariate_rhat(chains[:, :, None])
 
 
-def test_rhat(keys):
+def test_rhat(keys) -> None:
     """Test the multivariate R-hat implementation."""
     chains, divergent_chains = random.normal(keys.pop(), (2, 2, 1000, 10))
     mean_offset = jnp.arange(len(chains))
@@ -1210,7 +1212,7 @@ def test_rhat(keys):
     assert rhat_divergent > 5
 
 
-def test_jit(kw):
+def test_jit(kw) -> None:
     """Test that jitting around the whole interface works."""
     # set printevery to None to move all iterations to the inner loop and avoid
     # multiple compilation
@@ -1260,7 +1262,7 @@ class PeriodicSigintTimer:
         Whether to print messages when sending SIGINTs and when stopping.
     """
 
-    def __init__(self, *, first_after: float, interval: float, announce: bool):
+    def __init__(self, *, first_after: float, interval: float, announce: bool) -> None:
         self.first_after = max(0.0, float(first_after))
         self.interval = max(0.001, float(interval))
         self.pid = getpid()
@@ -1325,7 +1327,7 @@ def periodic_sigint(*, first_after: float, interval: float, announce: bool):
 @pytest.mark.flaky
 # it's flaky because the interrupt may be caught and converted by jax internals (#33054)
 @pytest.mark.timeout(32)
-def test_interrupt(kw):
+def test_interrupt(kw) -> None:
     """Test that the MCMC can be interrupted with ^C."""
     kw['printevery'] = 1
     kw.update(ndpost=0, nskip=10000)
@@ -1343,7 +1345,7 @@ def test_interrupt(kw):
             pass
 
 
-def test_polars(kw):
+def test_polars(kw) -> None:
     """Test passing data as DataFrame and Series."""
     bart = mc_gbart(**kw)
     pred = bart.predict(kw['x_test'])
@@ -1366,7 +1368,7 @@ def test_polars(kw):
     assert_close_matrices(pred, pred2, rtol=rtol)
 
 
-def test_data_format_mismatch(kw):
+def test_data_format_mismatch(kw) -> None:
     """Test that passing predictors with mismatched formats raises an error."""
     kw.update(
         x_train=pl.DataFrame(numpy.array(kw['x_train']).T),
@@ -1378,7 +1380,7 @@ def test_data_format_mismatch(kw):
         bart.predict(kw['x_test'].to_numpy().T)
 
 
-def test_automatic_integer_types(kw):
+def test_automatic_integer_types(kw) -> None:
     """Test that integer variables in the MCMC state have the correct type.
 
     Some integer variables change type automatically to be as small as possible.
@@ -1399,7 +1401,7 @@ def test_automatic_integer_types(kw):
     assert bart._mcmc_state.forest.max_split.dtype == split_trees_type
 
 
-def test_gbart_multichain_error(keys):
+def test_gbart_multichain_error(keys) -> None:
     """Check that `bartz.BART.gbart` does not support `mc_cores`."""
     X = gen_X(keys.pop(), 10, 100, 'continuous')
     y = gen_y(keys.pop(), X, None, 'continuous')
@@ -1423,14 +1425,14 @@ class TestProfile:
     @pytest.mark.xfail(
         not EXACT_CHECK, reason='exact equality fails on old toolchain or gpu'
     )
-    def test_same_result(self, kw: dict):
+    def test_same_result(self, kw: dict) -> None:
         """Check that the result is the same in profiling mode."""
         bart = mc_gbart(**kw)
         with profile_mode(True):
             kw.update(seed=random.clone(kw['seed']))
             bartp = mc_gbart(**kw)
 
-        def check_same(_path, x, xp):
+        def check_same(_path, x, xp) -> None:
             assert_array_equal(xp, x)
 
         map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
@@ -1439,14 +1441,14 @@ class TestProfile:
     @pytest.mark.skipif(
         EXACT_CHECK, reason='run only when same_result is expected to fail'
     )
-    def test_similar_result(self, kw: dict, variant: int):
+    def test_similar_result(self, kw: dict, variant: int) -> None:
         """Check that the result is similar in profiling mode."""
         bart = mc_gbart(**kw)
         with profile_mode(True):
             kw.update(seed=random.clone(kw['seed']))
             bartp = mc_gbart(**kw)
 
-        def check_same(_path, x, xp):
+        def check_same(_path, x, xp) -> None:
             assert_allclose(xp, x, atol=1e-5, rtol=1e-5)
             # maybe this should be close_matrices
 
@@ -1464,7 +1466,7 @@ class TestProfile:
                 raise
 
 
-def test_sharding(kw: dict):
+def test_sharding(kw: dict) -> None:
     """Check that chains live on their own devices throughout the interface."""
     # determine whether we expect sharding to be set up based on the arguments
     bart_kwargs = kw.get('bart_kwargs', {})
@@ -1492,7 +1494,7 @@ def test_sharding(kw: dict):
     check(bart._burnin_trace)
     check(bart._main_trace)
 
-    def check_chain_sharding(x: Array | None):
+    def check_chain_sharding(x: Array | None) -> None:
         if x is None:
             return
         elif mesh is None:
@@ -1512,7 +1514,7 @@ def test_sharding(kw: dict):
     check_chain_sharding(bart.varprob)
     check_chain_sharding(bart.yhat_train)
 
-    def check_data_sharding(x: Array | None):
+    def check_data_sharding(x: Array | None) -> None:
         if x is None:
             return
         elif mesh is None:

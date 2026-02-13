@@ -282,7 +282,7 @@ def cond_if_not_profiling(
 
 def callback_if_not_profiling(
     callback: Callable[..., None], *args: Any, ordered: bool = False, **kwargs: Any
-):
+) -> None:
     """Restricted replacement for `jax.debug.callback` that calls the callback directly in profiling mode."""
     if get_profile_mode():
         callback(*args, **kwargs)

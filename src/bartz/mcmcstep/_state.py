@@ -1061,7 +1061,7 @@ def _find_mesh(x: PyTree) -> Mesh | None:
     class MeshFound(Exception):
         pass
 
-    def find_mesh(x: State | Any):
+    def find_mesh(x: State | Any) -> None:
         if isinstance(x, State):
             raise MeshFound(x.config.mesh)
 

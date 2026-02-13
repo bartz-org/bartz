@@ -1,6 +1,6 @@
 # bartz/tests/rbartpackages/BART.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -87,7 +87,7 @@ class mc_gbart(RObjectBase):
     yhat_train: Float64[ndarray, 'ndpost n']
     yhat_train_mean: Float64[ndarray, ' n'] | None = None
 
-    def __init__(self, *args, **kw):
+    def __init__(self, *args, **kw) -> None:
         super().__init__(*args, **kw)
 
         # fix up attributes

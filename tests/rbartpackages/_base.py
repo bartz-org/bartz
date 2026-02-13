@@ -1,6 +1,6 @@
 # bartz/tests/rbartpackages/_base.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -153,7 +153,7 @@ class RObjectBase:
             raise ValueError(msg)
         return m.group(1)
 
-    def __init__(self, *args, **kw):
+    def __init__(self, *args, **kw) -> None:
         robjects.r(f'loadNamespace("{self._library}")')
         func = robjects.r(self._rfuncname)
         obj = func(*self._args2r(args), **self._kw2r(kw))

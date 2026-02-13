@@ -49,18 +49,18 @@ from bartz.jaxext import get_default_device
 class TestFlag:
     """Test the functionality of the global profile mode flag."""
 
-    def test_initial_state(self):
+    def test_initial_state(self) -> None:
         """Check profiling mode is off by default."""
         assert not get_profile_mode()
 
-    def test_getter_setter(self):
+    def test_getter_setter(self) -> None:
         """Test setting and getting the profile mode."""
         set_profile_mode(True)
         assert get_profile_mode()
         set_profile_mode(False)
         assert not get_profile_mode()
 
-    def test_context_manager(self):
+    def test_context_manager(self) -> None:
         """Test the profile mode context manager."""
         with profile_mode(True):
             assert get_profile_mode()
@@ -84,7 +84,7 @@ class TestScanIfNotProfiling:
     """Test `scan_if_not_profiling`."""
 
     @pytest.mark.parametrize('mode', [True, False])
-    def test_result(self, mode: bool):
+    def test_result(self, mode: bool) -> None:
         """Test that `scan_if_not_profiling` has the right output on a simple example."""
 
         def body(carry, _):
@@ -95,7 +95,7 @@ class TestScanIfNotProfiling:
             assert ys is None
             assert carry == 5
 
-    def test_does_not_jit(self):
+    def test_does_not_jit(self) -> None:
         """Check that `scan_if_not_profiling` does not jit the function in profiling mode."""
 
         def body(carry, _):
@@ -117,7 +117,7 @@ class TestCondIfNotProfiling:
 
     @pytest.mark.parametrize('mode', [True, False])
     @pytest.mark.parametrize('pred', [True, False])
-    def test_result(self, mode: bool, pred: bool):
+    def test_result(self, mode: bool, pred: bool) -> None:
         """Test that `cond_if_not_profiling` has the right output on a simple example."""
         with profile_mode(mode):
             out = cond_if_not_profiling(
@@ -125,7 +125,7 @@ class TestCondIfNotProfiling:
             )
             assert out == (4 if pred else 6)
 
-    def test_does_not_jit(self):
+    def test_does_not_jit(self) -> None:
         """Check that `cond_if_not_profiling` does not jit the function in profiling mode."""
         with profile_mode(True):
             cond_if_not_profiling(
@@ -151,7 +151,7 @@ class TestJitIfNotProfiling:
     """Test `jit_if_not_profiling`."""
 
     @pytest.mark.parametrize('mode', [True, False])
-    def test_result(self, mode: bool):
+    def test_result(self, mode: bool) -> None:
         """Test that `jit_if_not_profiling` has the right output in both modes."""
 
         def func(x):
@@ -163,7 +163,7 @@ class TestJitIfNotProfiling:
             result = jitted_func(5)
             assert result == 11
 
-    def test_does_not_jit(self):
+    def test_does_not_jit(self) -> None:
         """Check that `jit_if_not_profiling` does not jit the function in profiling mode."""
 
         def func(x):
@@ -187,7 +187,7 @@ class TestJitAndBlockIfProfiling:
     """Test `jit_and_block_if_profiling`."""
 
     @pytest.mark.parametrize('mode', [True, False])
-    def test_result(self, mode: bool):
+    def test_result(self, mode: bool) -> None:
         """Test that `jit_and_block_if_profiling` has the right output in both modes."""
 
         def func(x):
@@ -199,7 +199,7 @@ class TestJitAndBlockIfProfiling:
             result = jitted_func(5)
             assert result == 11
 
-    def test_jits_when_profiling(self):
+    def test_jits_when_profiling(self) -> None:
         """Check that `jit_and_block_if_profiling` jits when profiling is enabled."""
 
         def func(x):
@@ -222,7 +222,7 @@ class TestJitAndBlockIfProfiling:
         with profile_mode(False):
             jitted_func(jnp.int32(0))
 
-    def test_static_args(self):
+    def test_static_args(self) -> None:
         """Check that it works with static arguments."""
 
         def func(n: int):
@@ -236,7 +236,7 @@ class TestJitAndBlockIfProfiling:
 
     @pytest.mark.flaky(max_runs=3)
     # flaky because it involves comparing time measurements done on the fly
-    def test_blocks_execution(self):
+    def test_blocks_execution(self) -> None:
         """Check that `jit_and_block_if_profiling` blocks execution when profiling."""
         with debug_nans(False), debug_infs(False):
             platform = get_default_device().platform
@@ -287,7 +287,7 @@ class TestJitAndBlockIfProfiling:
                 f'Expected async execution << {expected:#.2g}s, got {elapsed:#.2g}s'
             )
 
-    def test_profile(self):
+    def test_profile(self) -> None:
         """Test `jit_and_block_if_profiling` under the Python profiler."""
         runtime = 0.1
 

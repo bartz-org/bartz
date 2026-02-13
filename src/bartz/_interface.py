@@ -323,7 +323,7 @@ class Bart(Module):
         maxdepth: int = 6,
         init_kw: dict | None = None,
         run_mcmc_kw: dict | None = None,
-    ):
+    ) -> None:
         # check data and put it in the right format
         x_train, x_train_fmt = self._process_predictor_input(x_train)
         y_train = self._process_response_input(y_train)
@@ -596,7 +596,7 @@ class Bart(Module):
         return y
 
     @staticmethod
-    def _check_same_length(x1, x2):
+    def _check_same_length(x1, x2) -> None:
         get_length = lambda x: x.shape[-1]
         assert get_length(x1) == get_length(x2)
 
@@ -647,7 +647,7 @@ class Bart(Module):
         return chisq / dof
 
     @staticmethod
-    def _check_type_settings(y_train, type, w):  # noqa: A002
+    def _check_type_settings(y_train, type, w) -> None:  # noqa: A002
         match type:
             case 'wbart':
                 if y_train.dtype != jnp.float32:

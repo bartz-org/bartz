@@ -68,8 +68,8 @@ def normalize_axes(
     return tree_map(normalize_axis, axes, tree, is_leaf=lambda x: x is None)
 
 
-def check_no_nones(axes, tree):
-    def check_not_none(_, axis):
+def check_no_nones(axes, tree) -> None:
+    def check_not_none(_, axis) -> None:
         assert axis is not None
 
     tree_map(check_not_none, tree, axes, is_leaf=lambda x: x is None)
@@ -235,8 +235,8 @@ def identity_for(ufunc: jnp.ufunc, input_dtype: DTypeLike) -> Shaped[Array, '']:
     return jnp.array(ufunc.identity, dtype)
 
 
-def check_same(tree1, tree2):
-    def check_same(x1, x2):
+def check_same(tree1, tree2) -> None:
+    def check_same(x1, x2) -> None:
         assert x1.shape == x2.shape
         assert x1.dtype == x2.dtype
 

@@ -35,8 +35,8 @@ UV_RUN = uv run --dev $(EXTRAS)
 OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]*\).*/\1/')
 UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=2025-05-15 --isolated
 
-.PHONY: all
-all:
+.PHONY: help
+help:
 	@echo "Available targets:"
 	@echo "- setup: create R and Python environments for development"
 	@echo "- tests: run unit tests on cpu, saving coverage information"

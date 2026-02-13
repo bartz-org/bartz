@@ -89,7 +89,7 @@ TESTS_VARS = COVERAGE_FILE=.coverage.tests$(COVERAGE_SUFFIX)
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
 TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=2
-TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_MEM_FRACTION=.20
+TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_PREALLOCATE=false
 TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=3
 
 .PHONY: tests

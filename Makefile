@@ -180,8 +180,9 @@ release: clean update-deps copy-version check-committed tests tests-old docs
 .PHONY: version-tag
 version-tag: copy-version check-committed
 	git fetch --tags
-	git tag v$(shell uv run python -c 'import bartz; print(bartz.__version__)')
-	git push --tags
+	$(eval VERSION_TAG := v$(shell uv run python -c 'import bartz; print(bartz.__version__)'))
+	git tag $(VERSION_TAG)
+	git push origin $(VERSION_TAG)
 
 .PHONY: upload
 upload: version-tag

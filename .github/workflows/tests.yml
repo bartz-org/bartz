@@ -134,12 +134,6 @@ jobs:
           ldd "$(R RHOME)/library/methods/libs/methods.so" || true
           uv run --dev python -c "import rpy2.situation as s; print('\n'.join(map(str, s.iter_info())))"
 
-      - name: Install jax GPU support
-        if: matrix.target-suffix == '-gpu'
-        run: |
-          CUDA_VERSION=`nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3`
-          uv pip install "jax[cuda$CUDA_VERSION]"
-
       - name: Run unit tests
         timeout-minutes: 30
         run: make COVERAGE_SUFFIX=-${{ matrix.os }}${{ matrix.target-suffix }} tests${{ matrix.target-suffix }}
@@ -300,12 +294,6 @@ jobs:
 
       - name: Get machine information for asv
         run: RPY2_CFFI_MODE=ABI uv run --dev python -m asv machine --yes
-
-      - name: Install jax GPU support
-        if: matrix.target-suffix == '-gpu'
-        run: |
-          CUDA_VERSION=`nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3`
-          uv pip install "jax[cuda$CUDA_VERSION]"
 
       - name: Run asv in quick mode
         run: make asv-quick ARGS='--attribute timeout=120' # long timeout because CI runners are slow

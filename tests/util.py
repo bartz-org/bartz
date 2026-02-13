@@ -28,6 +28,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from operator import ge, le
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import tomli
@@ -51,7 +52,7 @@ def manual_tree(
     """Facilitate the hardcoded definition of tree heaps."""
     assert len(leaf) == len(var) + 1 == len(split) + 1
 
-    def check_powers_of_2(seq: list[list]):
+    def check_powers_of_2(seq: list[list]) -> bool:
         """Check if the lengths of the lists in `seq` are powers of 2."""
         return all(len(x) == 2**i for i, x in enumerate(seq))
 
@@ -183,7 +184,7 @@ ratio = {ratio:.2g}  (rtol = {rtol:.2g})"""
         assert op(adnorm, atol + rtol * dnorm), msg
 
 
-def assert_different_matrices(*args, **kwargs) -> None:
+def assert_different_matrices(*args: ArrayLike, **kwargs: Any) -> None:
     """Invoke `assert_close_matrices` with negate=True and default inf tolerance."""
     default_kwargs: dict = dict(rtol=np.inf, atol=np.inf)
     default_kwargs.update(kwargs)

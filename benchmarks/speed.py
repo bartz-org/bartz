@@ -48,12 +48,18 @@ from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.sharding import Mesh
 from jax.tree_util import tree_map
-from jaxtyping import Array, Float32, UInt8
+from jaxtyping import Array, Float32, Integer, Key, UInt8
 
 import bartz
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
 from benchmarks.latest_bartz.jaxext import get_device_count, split
+
+try:
+    from bartz.mcmcstep import State
+except ImportError:
+    # old versions use a dictionary to store the mcmc state
+    State: type = dict
 
 try:
     from bartz.BART import mc_gbart as gbart
@@ -109,8 +115,8 @@ def simple_init(  # noqa: C901, PLR0915
     k: int | None = None,
     num_chains: int | None = None,
     mesh: dict[str, int] | Mesh | None = None,
-    **kwargs,
-):
+    **kwargs: Any,
+) -> State:
     """Glue code to support `mcmcstep.init` across API changes."""
     X, y, max_split = gen_nonsense_data(p, n, k)
 
@@ -203,7 +209,7 @@ Cache = Literal['cold', 'warm']
 class AutoParamNames:
     """Superclass that automatically sets `param_names` on subclasses."""
 
-    def __init_subclass__(cls, **_):
+    def __init_subclass__(cls, **_: Any) -> None:
         method = cls.setup
         sig = signature(method)
         params = list(sig.parameters)
@@ -220,7 +226,7 @@ class StepGeneric(AutoParamNames):
         (None, 1, 2),
     )
 
-    def setup(self, mode: Mode, kind: Kind, chains: int | None, **kwargs) -> None:
+    def setup(self, mode: Mode, kind: Kind, chains: int | None, **kwargs: Any) -> None:
         """Create an initial MCMC state and random seed, compile & warm-up."""
         keys = list(random.split(random.key(2025_06_24_12_07)))
 
@@ -229,7 +235,7 @@ class StepGeneric(AutoParamNames):
 
         self.args = (keys, simple_init(**kw))
 
-        def func(keys, bart):
+        def func(keys: list[Key[Array, '']], bart: State) -> State:
             sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
             if kind == 'sparse' and sparse_inside_step:
                 bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
@@ -244,7 +250,7 @@ class StepGeneric(AutoParamNames):
             block_until_ready(self.compiled_func(*self.args))
         self.mode = mode
 
-    def time_step(self, *_) -> None:
+    def time_step(self, *_: Any) -> None:
         """Time compiling `step` or running it."""
         match self.mode:
             case 'compile':
@@ -356,7 +362,7 @@ class BaseGbart(AutoParamNames):
             case _:
                 raise KeyError(cache)
 
-    def time_gbart(self, *_) -> None:
+    def time_gbart(self, *_: Any) -> None:
         """Time instantiating the class."""
         with redirect_stdout(StringIO()), self.context():
             bart = gbart(**self.kw)
@@ -488,7 +494,7 @@ class BaseRunMcmc(AutoParamNames):
             case _:
                 raise KeyError(cache)
 
-    def time_run_mcmc(self, *_) -> None:
+    def time_run_mcmc(self, *_: Any) -> None:
         """Time running or compiling the function."""
         try:
             self.task()
@@ -502,7 +508,14 @@ class BaseRunMcmc(AutoParamNames):
                 raise RuntimeError(msg)
 
 
-def kill_callback(*, canary: str, kill_niters: int | None, bart, i_total, **_) -> None:
+def kill_callback(
+    *,
+    canary: str,
+    kill_niters: int | None,
+    bart: State,
+    i_total: Integer[Array, ''],
+    **_: Any,
+) -> None:
     """Throw error `canary` after `kill_niters` in `run_mcmc`.
 
     Partially evaluate `kill_callback` on the first two arguments before

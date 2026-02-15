@@ -135,11 +135,11 @@ class TestWishart:
         scale_inv = jnp.linalg.inv(sigma)
 
         a = random.normal(keys.pop(), (k,))
-        denumerator = a.T @ sigma @ a
+        denominator = a.T @ sigma @ a
 
         sampler = vmap(_sample_wishart_bartlett, in_axes=(0, None, None))
         W = sampler(keys.pop(1000), float(df), scale_inv)
-        t = jnp.einsum('ijk,j,k->i', W, a, a) / denumerator
+        t = jnp.einsum('ijk,j,k->i', W, a, a) / denominator
 
         test = ks_1samp(t, chi2(df).cdf)
         assert test.pvalue > 0.01

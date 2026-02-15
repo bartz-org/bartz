@@ -1439,57 +1439,37 @@ def test_gbart_multichain_error(keys: split) -> None:
         gbart(X, y, mc_cores='gatto')
 
 
-PLATFORM = get_default_device().platform
-PYTHON_VERSION = version_info[:2]
-OLD_PYTHON = get_old_python_tuple()
-EXACT_CHECK = PLATFORM != 'gpu' and PYTHON_VERSION != OLD_PYTHON
+def test_same_result_profiling(variant: int, kw: dict) -> None:
+    """Check that the result is the same in profiling mode."""
+    bart = mc_gbart(**kw)
+    with profile_mode(True):
+        kw.update(seed=random.clone(kw['seed']))
+        bartp = mc_gbart(**kw)
 
+    platform = get_default_device().platform
+    python_version = version_info[:2]
+    old_python = get_old_python_tuple()
+    exact_check = platform != 'gpu' and python_version != old_python
 
-class TestProfile:
-    """Test the behavior of `mc_gbart` in profiling mode."""
-
-    @pytest.mark.xfail(
-        not EXACT_CHECK, reason='exact equality fails on old toolchain or gpu'
-    )
-    def test_same_result(self, kw: dict) -> None:
-        """Check that the result is the same in profiling mode."""
-        bart = mc_gbart(**kw)
-        with profile_mode(True):
-            kw.update(seed=random.clone(kw['seed']))
-            bartp = mc_gbart(**kw)
-
-        def check_same(_path: KeyPath, x: Array, xp: Array) -> None:
+    def check_same(_path: KeyPath, x: Array, xp: Array) -> None:
+        if exact_check:
             assert_array_equal(xp, x)
+        else:
+            assert_allclose(xp, x, atol=1e-5, rtol=1e-5)
 
+    try:
         map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
         map_with_path(check_same, bart._main_trace, bartp._main_trace)
-
-    @pytest.mark.skipif(
-        EXACT_CHECK, reason='run only when same_result is expected to fail'
-    )
-    def test_similar_result(self, kw: dict, variant: int) -> None:
-        """Check that the result is similar in profiling mode."""
-        bart = mc_gbart(**kw)
-        with profile_mode(True):
-            kw.update(seed=random.clone(kw['seed']))
-            bartp = mc_gbart(**kw)
-
-        def check_same(_path: KeyPath, x: Array, xp: Array) -> None:
-            assert_allclose(xp, x, atol=1e-5, rtol=1e-5)
-            # maybe this should be close_matrices
-
-        try:
-            map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
-            map_with_path(check_same, bart._main_trace, bartp._main_trace)
-        except AssertionError as a:
-            if (
-                '\nNot equal to tolerance ' in str(a)
-                and PYTHON_VERSION == OLD_PYTHON
-                and variant in (1, 3)
-            ):
-                pytest.xfail('unsolved bug with old toolchain')
-            else:
-                raise
+    except AssertionError as a:
+        if (
+            '\nNot equal to tolerance ' in str(a)
+            and not exact_check
+            and python_version == old_python
+            and variant in (1, 3)
+        ):
+            pytest.xfail('unsolved bug with old toolchain')
+        else:
+            raise
 
 
 def test_sharding(kw: dict) -> None:

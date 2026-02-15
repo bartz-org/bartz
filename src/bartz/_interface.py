@@ -26,7 +26,7 @@
 
 import math
 from collections.abc import Mapping, Sequence
-from functools import cached_property
+from functools import cached_property, partial
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypedDict
 
@@ -491,9 +491,7 @@ class Bart(Module):
     def varcount(self) -> Int32[Array, 'ndpost p']:
         """Histogram of predictor usage for decision rules in the trees."""
         p = self._mcmc_state.forest.max_split.size
-        varcount: Int32[Array, '*chains samples p']
-        varcount = compute_varcount(p, self._main_trace)
-        return lax.collapse(varcount, 0, -1)
+        return varcount(p, self._main_trace)
 
     @cached_property
     def varcount_mean(self) -> Float32[Array, ' p']:
@@ -886,8 +884,26 @@ class Bart(Module):
 
     def _predict(self, x: UInt[Array, 'p m']) -> Float32[Array, 'ndpost m']:
         """Evaluate trees on already quantized `x`."""
-        out = evaluate_trace(x, self._main_trace)
-        return lax.collapse(out, 0, -1)
+        return predict(x, self._main_trace)
+
+
+@partial(jit, static_argnames='p')
+# this is jitted such that lax.collapse below does not create a copy
+def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
+    """Histogram of predictor usage for decision rules in the trees, squashing chains."""
+    varcount: Int32[Array, '*chains samples p']
+    varcount = compute_varcount(p, trace)
+    return lax.collapse(varcount, 0, -1)
+
+
+@jit
+# this is jitted such that lax.collapse below does not create a copy
+def predict(
+    x: UInt[Array, 'p m'], trace: mcmcloop.MainTrace
+) -> Float32[Array, 'ndpost m']:
+    """Evaluate trees on already quantized `x`, and squash chains."""
+    out = evaluate_trace(x, trace)
+    return lax.collapse(out, 0, -1)
 
 
 class DeviceKwArgs(TypedDict):

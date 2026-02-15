@@ -36,7 +36,7 @@ from jax import numpy as jnp
 from jax.random import bernoulli, clone, normal, permutation, randint
 from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
 from jax.tree import map_with_path
-from jax.tree_util import KeyPath
+from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, Bool, Int32, Key, PyTree, UInt8, jaxtyped
 from numpy.testing import assert_array_equal
 from pytest_subtests import SubTests
@@ -659,7 +659,7 @@ class TestMultichain:
 
         # check the mc state is equal to the stacked state
         def check_equal(path: KeyPath, mc: Array, stacked: Array) -> None:
-            str_path = ''.join(map(str, path))
+            str_path = keystr(path)
             exact = mc.platform() == 'cpu' or jnp.issubdtype(mc.dtype, jnp.integer)
             assert_close_matrices(
                 mc,
@@ -695,8 +695,7 @@ class TestMultichain:
                 '.config.sparse_on_at',
                 '.config.steps_done',
             )
-            str_path = ''.join(map(str, path))
-            if str_path in no_vmap_attrs:
+            if keystr(path) in no_vmap_attrs:
                 return None
             else:
                 return 0
@@ -715,8 +714,7 @@ class TestMultichain:
                 '.prec_scale',
                 '.forest.leaf_indices',
             )
-            str_path = ''.join(map(str, path))
-            if str_path in vmap_attrs:
+            if keystr(path) in vmap_attrs:
                 return -1
             else:
                 return None

@@ -49,7 +49,7 @@ from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logit, ndtr
 from jax.sharding import SingleDeviceSharding
 from jax.tree import map_with_path
-from jax.tree_util import KeyPath
+from jax.tree_util import KeyPath, keystr
 from jaxtyping import (
     Array,
     Bool,
@@ -538,7 +538,7 @@ class TestWithCachedBart:
             def assert_different(
                 path: KeyPath, x: Array | None, chain_axis: int | None
             ) -> None:
-                str_path = ''.join(map(str, path))
+                str_path = keystr(path)
                 if str_path.endswith('.theta') and not step_theta:
                     return
                 if x is not None and chain_axis is not None:

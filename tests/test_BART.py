@@ -873,6 +873,9 @@ def test_no_datapoints(kw: dict[str, Any]) -> None:
     xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
     kw.update(xinfo=xinfo)
 
+    # disable data sharding
+    kw.setdefault('bart_kwargs', {}).update(num_data_devices=None)
+
     bart = mc_gbart(**kw)
     ndpost = kw['ndpost']
     assert bart.yhat_train.shape == (ndpost, 0)

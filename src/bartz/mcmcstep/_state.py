@@ -721,6 +721,8 @@ def init(
         ),
     )
 
+    state = _remove_weak_types(state)
+
     # move all arrays to the appropriate device
     return _shard_state(state)
 
@@ -824,6 +826,23 @@ def _auto_axes(mesh: Mesh) -> list[str]:
         for n, t in zip(mesh.axis_names, mesh.axis_types, strict=True)
         if t == AxisType.Auto
     ]
+
+
+@partial(jit, donate_argnums=(0,))
+# jit and donate because otherwise type conversion would create copies
+def _remove_weak_types(x: PyTree[Array, 'T']) -> PyTree[Array, 'T']:
+    """Make all types strong.
+
+    This is to avoid recompilation in `run_mcmc` or `step`.
+    """
+
+    def remove_weak(x: Array) -> Array:
+        if x.weak_type:
+            return x.astype(x.dtype)
+        else:
+            return x
+
+    return tree.map(remove_weak, x)
 
 
 def _shard_state(state: State) -> State:

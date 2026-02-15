@@ -38,7 +38,6 @@ from bartz.mcmcstep._state import vmap_chains
 PROFILE_MODE: bool = False
 
 T = TypeVar('T')
-Carry = TypeVar('Carry')
 
 
 def get_profile_mode() -> bool:
@@ -215,39 +214,35 @@ def jit_if_not_profiling(
     return wrapper
 
 
-def scan_if_not_profiling(
-    f: Callable[[Carry, None], tuple[Carry, None]],
-    init: Carry,
-    xs: None,
-    length: int,
+def while_loop_if_not_profiling(
+    cond_fun: Callable[[T], Bool[Array, ''] | bool],
+    body_fun: Callable[[T], T],
+    init_val: T,
     /,
-) -> tuple[Carry, None]:
-    """Restricted replacement for `jax.lax.scan` that uses a Python loop when profiling.
+) -> T:
+    """Restricted replacement for `jax.lax.while_loop` that uses a Python loop when profiling.
 
     Parameters
     ----------
-    f
-        Scan body function with signature (carry, None) -> (carry, None).
-    init
-        Initial carry value.
-    xs
-        Input values to scan over (not supported).
-    length
-        Integer specifying the number of loop iterations.
+    cond_fun
+        Function to evaluate to determine whether to continue the loop.
+    body_fun
+        Function that updates the state in each iteration.
+    init_val
+        Initial state.
 
     Returns
     -------
-    Tuple of (final_carry, None) (stacked outputs not supported).
+    Final state.
     """
-    assert xs is None
     if get_profile_mode():
-        carry = init
-        for _i in range(length):
-            carry, _ = f(carry, None)
-        return carry, None
+        val = init_val
+        while cond_fun(val):
+            val = body_fun(val)
+        return val
 
     else:
-        return lax.scan(f, init, None, length)
+        return lax.while_loop(cond_fun, body_fun, init_val)
 
 
 def cond_if_not_profiling(

@@ -66,7 +66,7 @@ from bartz._profiler import (
     cond_if_not_profiling,
     get_profile_mode,
     jit_if_not_profiling,
-    scan_if_not_profiling,
+    while_loop_if_not_profiling,
 )
 from bartz.grove import TreeHeaps, evaluate_forest, forest_fill, var_histogram
 from bartz.jaxext import autobatch
@@ -428,8 +428,15 @@ def _run_mcmc_inner_loop(
     i_outer: Int32[Array, ''],
     n_iters: Int32[Array, ''],
 ) -> _Carry:
-    def loop_impl(carry: _Carry) -> _Carry:
-        """Loop body to run if i_total < n_iters."""
+    # determine number of iterations for this loop batch
+    i_upper = jnp.minimum(carry.i_total + inner_loop_length, n_iters)
+
+    def cond(carry: _Carry) -> Bool[Array, '']:
+        """Whether to continue the MCMC loop."""
+        return carry.i_total < i_upper
+
+    def body(carry: _Carry) -> _Carry:
+        """Update the MCMC state."""
         # split random key
         keys = jaxext.split(carry.key, 3)
         key = keys.pop()
@@ -478,18 +485,7 @@ def _run_mcmc_inner_loop(
             callback_state=callback_state,
         )
 
-    def loop_noop(carry: _Carry) -> _Carry:
-        """Loop body to run if i_total >= n_iters; it does nothing."""
-        return carry
-
-    def loop(carry: _Carry, _: None) -> tuple[_Carry, None]:
-        carry = cond_if_not_profiling(
-            carry.i_total < n_iters, loop_impl, loop_noop, carry
-        )
-        return carry, None
-
-    carry, _ = scan_if_not_profiling(loop, carry, None, inner_loop_length)
-    return carry
+    return while_loop_if_not_profiling(cond, body, carry)
 
 
 @partial(jit, donate_argnums=(0, 1), static_argnums=(2, 3))

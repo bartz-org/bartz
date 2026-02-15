@@ -28,11 +28,12 @@ from cProfile import Profile
 from functools import partial
 from pstats import Stats
 from time import perf_counter, sleep
+from typing import NamedTuple
 
 import pytest
 from jax import debug_infs, debug_nans, jit, pure_callback, random
 from jax import numpy as jnp
-from jaxtyping import Array, Float32, Int32, Integer
+from jaxtyping import Array, Bool, Float32, Int32, Integer
 from numpy.testing import assert_array_equal
 
 from bartz._profiler import (
@@ -41,8 +42,8 @@ from bartz._profiler import (
     jit_and_block_if_profiling,
     jit_if_not_profiling,
     profile_mode,
-    scan_if_not_profiling,
     set_profile_mode,
+    while_loop_if_not_profiling,
 )
 from bartz.jaxext import get_default_device
 
@@ -88,29 +89,37 @@ class TestScanIfNotProfiling:
     def test_result(self, mode: bool) -> None:
         """Test that `scan_if_not_profiling` has the right output on a simple example."""
 
-        def body(carry: Integer[Array, ''], _: None) -> tuple[Integer[Array, ''], None]:
-            return carry + 1, None
+        def cond(carry: Integer[Array, '']) -> Bool[Array, '']:
+            return carry < 5
+
+        def body(carry: Integer[Array, '']) -> Integer[Array, '']:
+            return carry + 1
 
         with profile_mode(mode):
-            carry, ys = scan_if_not_profiling(body, 0, None, 5)
-            assert ys is None
+            carry = while_loop_if_not_profiling(cond, body, 0)
             assert carry == 5
 
     def test_does_not_jit(self) -> None:
         """Check that `scan_if_not_profiling` does not jit the function in profiling mode."""
 
-        def body(carry: Int32[Array, ''], _: None) -> tuple[Int32[Array, ''], None]:
-            return carry.block_until_ready(), None
-            # block_until_ready errors under jit
+        class Carry(NamedTuple):
+            i: Int32[Array, '']
+            state: Int32[Array, '']
+
+        def cond(carry: Carry) -> Bool[Array, '']:
+            return carry.i < 5
+
+        def body(carry: Carry) -> Carry:
+            return Carry(carry.i + 1, carry.state.block_until_ready())
 
         with profile_mode(True):
-            scan_if_not_profiling(body, jnp.int32(0), None, 5)
+            while_loop_if_not_profiling(cond, body, Carry(jnp.int32(0), jnp.int32(0)))
 
         with pytest.raises(
             AttributeError,
             match='DynamicJaxprTracer has no attribute block_until_ready',
         ):
-            scan_if_not_profiling(body, 0, None, 5)
+            while_loop_if_not_profiling(cond, body, Carry(jnp.int32(0), jnp.int32(0)))
 
 
 class TestCondIfNotProfiling:

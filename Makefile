@@ -133,7 +133,6 @@ docs-latest:
 	WORKTREE_DIR=$$(mktemp -d) && \
 	trap "git worktree remove --force '$$WORKTREE_DIR' 2>/dev/null || rm -rf '$$WORKTREE_DIR'" EXIT && \
 	git worktree add --detach "$$WORKTREE_DIR" "$$LATEST_TAG" && \
-	uv sync --all-groups --directory "$$WORKTREE_DIR" && \
 	$(MAKE) -C "$$WORKTREE_DIR" docs && \
 	test ! -d _site/docs || rm -r _site/docs && \
 	mv "$$WORKTREE_DIR/_site/docs-dev" _site/docs

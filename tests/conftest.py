@@ -47,9 +47,12 @@ if jax.__version_info__ >= (0, 9, 0):
 config.update('jax_num_cpu_devices', 10)  # 2 * 5
 
 # enable compilation cache
-config.update('jax_compilation_cache_dir', 'config/jax_cache')
-config.update('jax_persistent_cache_min_entry_size_bytes', -1)
-config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
+if jax.__version_info__ >= (0, 9, 0):
+    # enable only on latest jax because `make tests-old` fails if there is a
+    # cache created with a newer jax version
+    config.update('jax_compilation_cache_dir', 'config/jax_cache')
+    config.update('jax_persistent_cache_min_entry_size_bytes', -1)
+    config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
 
 
 @pytest.fixture

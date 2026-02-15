@@ -32,7 +32,7 @@ from re import fullmatch
 from typing import Any, Literal
 
 import numpy
-from equinox import Module, field
+from equinox import Module, error_if, field
 from jax import jit, lax, random, vmap
 from jax import numpy as jnp
 from jax.tree_util import tree_map
@@ -1098,7 +1098,9 @@ class debug_mc_gbart(mc_gbart):
         if check_trees:
             bad = self.check_trees()
             bad_count = jnp.count_nonzero(bad)
-            assert bad_count == 0
+            self._bart.__dict__['offset'] = error_if(
+                self._bart.offset, bad_count > 0, 'invalid trees found in trace'
+            )
 
     def print_tree(
         self, i_chain: int, i_sample: int, i_tree: int, print_all: bool = False
@@ -1315,7 +1317,7 @@ class debug_gbart(debug_mc_gbart, gbart):
         Passed to `gbart`.
     check_trees
         If `True`, check all trees with `check_trace` after running the MCMC,
-        and assert that they are all valid. Set to `False` to allow jax tracing.
+        and assert that they are all valid.
     **kw
         Passed to `gbart`.
     """

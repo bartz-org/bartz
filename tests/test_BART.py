@@ -1237,9 +1237,6 @@ def test_jit(kw: dict[str, Any]) -> None:
     # multiple compilation
     kw.update(printevery=None)
 
-    # do not check trees because the assert breaks abstract tracing
-    kw.update(check_trees=False)
-
     # do not count splitless variables because it breaks tracing
     kw.update(rm_const=False)
 

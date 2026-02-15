@@ -127,7 +127,7 @@ def next_divisor_large(dividend: int, min_divisor: int) -> int:
 
 
 def next_divisor(dividend: int, min_divisor: int) -> int:
-    """Return divisor >= min_divisor such that divided % divisor == 0."""
+    """Return divisor >= min_divisor such that dividend % divisor == 0."""
     if dividend == 0:
         return min_divisor
     if min_divisor * min_divisor <= dividend:

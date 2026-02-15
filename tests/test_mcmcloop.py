@@ -40,7 +40,7 @@ from pytest_subtests import SubTests
 from bartz import profile_mode
 from bartz.jaxext import get_default_device, split
 from bartz.mcmcloop import BurninTrace, MainTrace, run_mcmc
-from bartz.mcmcstep import State, init
+from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._state import chain_vmap_axes
 
 
@@ -61,14 +61,6 @@ def gen_data(
         shift = jnp.linspace(0, 2 * jnp.pi, k, endpoint=False)[:, None]
     y = jnp.cos(jnp.linspace(0, 2 * jnp.pi / 32 * n, n) + shift)
     return X, y, max_split
-
-
-def make_p_nonterminal(maxdepth: int) -> Float32[Array, ' {maxdepth}-1']:
-    """Prepare the p_nonterminal argument to `mcmcstep.init`."""
-    depth = jnp.arange(maxdepth - 1)
-    base = 0.95
-    power = 2
-    return base / (1 + depth).astype(float) ** power
 
 
 @filter_jit

@@ -412,7 +412,9 @@ def _parse_p_nonterminal(
 
 
 def make_p_nonterminal(
-    d: int, alpha: float | Float32[Array, ''], beta: float | Float32[Array, '']
+    d: int,
+    alpha: float | Float32[Array, ''] = 0.95,
+    beta: float | Float32[Array, ''] = 2.0,
 ) -> Float32[Array, ' {d}-1']:
     """Prepare the `p_nonterminal` argument to `init`.
 

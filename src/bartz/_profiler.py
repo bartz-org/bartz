@@ -100,7 +100,7 @@ def profile_mode(value: bool, /) -> Iterator[None]:
 
 
 def jit_and_block_if_profiling(
-    func: Callable[..., T], block_before: bool = False, **kwargs
+    func: Callable[..., T], block_before: bool = False, **kwargs: Any
 ) -> Callable[..., T]:
     """Apply JIT compilation and block if profiling is enabled.
 
@@ -136,7 +136,7 @@ def jit_and_block_if_profiling(
     event_name = f'jab[{func.__name__}]'
 
     # this wrapper is meant to measure the time spent executing the function
-    def jab_inner_wrapper(*args, **kwargs) -> T:
+    def jab_inner_wrapper(*args: Any, **kwargs: Any) -> T:
         with TraceAnnotation(event_name):
             result = jitted_func(*args, **kwargs)
             return block_until_ready(result)
@@ -153,7 +153,9 @@ def jit_and_block_if_profiling(
     return jab_outer_wrapper
 
 
-def jit_if_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T]:
+def jit_if_profiling(
+    func: Callable[..., T], *args: Any, **kwargs: Any
+) -> Callable[..., T]:
     """Apply JIT compilation only when profiling.
 
     Parameters
@@ -180,7 +182,9 @@ def jit_if_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T
     return wrapper
 
 
-def jit_if_not_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T]:
+def jit_if_not_profiling(
+    func: Callable[..., T], *args: Any, **kwargs: Any
+) -> Callable[..., T]:
     """Apply JIT compilation only when not profiling.
 
     When profile mode is off, the function is JIT compiled. When profile mode is
@@ -252,7 +256,7 @@ def cond_if_not_profiling(
     true_fun: Callable[..., T],
     false_fun: Callable[..., T],
     /,
-    *operands,
+    *operands: Any,
 ) -> T:
     """Restricted replacement for `jax.lax.cond` that uses a Python if when profiling.
 
@@ -290,12 +294,12 @@ def callback_if_not_profiling(
         debug.callback(callback, *args, ordered=ordered, **kwargs)
 
 
-def vmap_chains_if_profiling(fun: Callable[..., T], **kwargs) -> Callable[..., T]:
+def vmap_chains_if_profiling(fun: Callable[..., T], **kwargs: Any) -> Callable[..., T]:
     """Apply `vmap_chains` only when profile mode is enabled."""
     new_fun = vmap_chains(fun, **kwargs)
 
     @wraps(fun)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> T:
         if get_profile_mode():
             return new_fun(*args, **kwargs)
         else:
@@ -304,12 +308,14 @@ def vmap_chains_if_profiling(fun: Callable[..., T], **kwargs) -> Callable[..., T
     return wrapper
 
 
-def vmap_chains_if_not_profiling(fun: Callable[..., T], **kwargs) -> Callable[..., T]:
+def vmap_chains_if_not_profiling(
+    fun: Callable[..., T], **kwargs: Any
+) -> Callable[..., T]:
     """Apply `vmap_chains` only when profile mode is disabled."""
     new_fun = vmap_chains(fun, **kwargs)
 
     @wraps(fun)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> T:
         if get_profile_mode():
             return fun(*args, **kwargs)
         else:

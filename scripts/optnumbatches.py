@@ -62,7 +62,7 @@ class ParamsBase(ABC):
     num_batches: Sequence[None | int] = (None, *(2**i for i in range(13 + 1)))
 
     @abstractmethod
-    def valid(self, *, n: int, num_batches: int | None, **_) -> bool:
+    def valid(self, *, n: int, num_batches: int | None, **_: Any) -> bool:
         """Check if a set of parameter values is valid."""
         return num_batches is None or num_batches <= n
 
@@ -87,7 +87,7 @@ class ParamsResid(ParamsBase):
 
     k: Sequence[int | None] = (None, 1, 2, 4)
 
-    def valid(self, *, weights: bool, k: int | None, **values) -> bool:  # ty:ignore[invalid-method-override]
+    def valid(self, *, weights: bool, k: int | None, **values: Any) -> bool:  # ty:ignore[invalid-method-override]
         """Skip heteroskedastic multivariate."""
         return (not weights or k is None) and super().valid(**values)
 
@@ -98,7 +98,7 @@ class ParamsCount(ParamsBase):
 
     num_trees: Sequence[int] = tuple(4**i for i in range(5 + 1))
 
-    def valid(self, *, n: int, num_trees: int, **values) -> bool:  # ty:ignore[invalid-method-override]
+    def valid(self, *, n: int, num_trees: int, **values: Any) -> bool:  # ty:ignore[invalid-method-override]
         """Skip if it would use too much memory."""
         return num_trees * n <= MAX_LEAF_INDICES_SIZE and super().valid(n=n, **values)
 

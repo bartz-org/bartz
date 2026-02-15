@@ -406,7 +406,7 @@ class Bart(Module):
             self.yhat_test = self.predict(x_test)
 
     @property
-    def ndpost(self):
+    def ndpost(self) -> int:
         """The total number of posterior samples after burn-in across all chains.
 
         May be larger than the initialization argument `ndpost` if it was not
@@ -577,7 +577,9 @@ class Bart(Module):
         return self._predict(x_test)
 
     @staticmethod
-    def _process_predictor_input(x) -> tuple[Shaped[Array, 'p n'], Any]:
+    def _process_predictor_input(
+        x: Real[Any, 'p n'] | DataFrame,
+    ) -> tuple[Shaped[Array, 'p n'], Any]:
         if hasattr(x, 'columns'):
             fmt = dict(kind='dataframe', columns=x.columns)
             x = x.to_numpy().T
@@ -588,7 +590,7 @@ class Bart(Module):
         return x, fmt
 
     @staticmethod
-    def _process_response_input(y) -> Shaped[Array, ' n']:
+    def _process_response_input(y: Shaped[Array, ' n'] | Series) -> Shaped[Array, ' n']:
         if hasattr(y, 'to_numpy'):
             y = y.to_numpy()
         y = jnp.asarray(y)
@@ -596,13 +598,19 @@ class Bart(Module):
         return y
 
     @staticmethod
-    def _check_same_length(x1, x2) -> None:
+    def _check_same_length(x1: Array, x2: Array) -> None:
         get_length = lambda x: x.shape[-1]
         assert get_length(x1) == get_length(x2)
 
     @classmethod
     def _process_error_variance_settings(
-        cls, x_train, y_train, sigest, sigdf, sigquant, lamda
+        cls,
+        x_train: Shaped[Array, 'p n'],
+        y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
+        sigest: FloatLike | None,
+        sigdf: FloatLike,
+        sigquant: FloatLike,
+        lamda: FloatLike | None,
     ) -> tuple[Float32[Array, ''] | None, ...]:
         """Return (lamda, sigest)."""
         if y_train.dtype == bool:
@@ -636,7 +644,7 @@ class Bart(Module):
     @jit
     def _linear_regression(
         x_train: Shaped[Array, 'p n'], y_train: Float32[Array, ' n']
-    ):
+    ) -> Float32[Array, '']:
         """Return the error variance estimated with OLS with intercept."""
         x_centered = x_train.T - x_train.mean(axis=1)
         y_centered = y_train - y_train.mean()
@@ -647,7 +655,11 @@ class Bart(Module):
         return chisq / dof
 
     @staticmethod
-    def _check_type_settings(y_train, type, w) -> None:  # noqa: A002
+    def _check_type_settings(
+        y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
+        type: str,  # noqa: A002
+        w: Float[Array, ' n'] | None,
+    ) -> None:
         match type:
             case 'wbart':
                 if y_train.dtype != jnp.float32:
@@ -717,10 +729,10 @@ class Bart(Module):
     @staticmethod
     def _process_leaf_sdev_settings(
         y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
-        k: float,
+        k: FloatLike,
         ntree: int,
         tau_num: FloatLike | None,
-    ):
+    ) -> FloatLike:
         """Return sigma_mu."""
         if tau_num is None:
             if y_train.dtype == bool:
@@ -782,7 +794,7 @@ class Bart(Module):
         devices: Device | Sequence[Device] | None,
         sparse: bool,
         nskip: int,
-    ):
+    ) -> mcmcstep.State:
         p_nonterminal = make_p_nonterminal(maxdepth, base, power)
 
         if y_train.dtype == bool:

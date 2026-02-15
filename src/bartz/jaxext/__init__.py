@@ -25,9 +25,10 @@
 """Additions to jax."""
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from functools import partial
+from typing import Any
 
 import jax
 from jax import (
@@ -49,7 +50,7 @@ from bartz.jaxext._autobatch import autobatch  # noqa: F401
 from bartz.jaxext.scipy.special import ndtri
 
 
-def vmap_nodoc(fun, *args, **kw):
+def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:
     """
     Acts like `jax.vmap` but preserves the docstring of the function unchanged.
 
@@ -62,7 +63,7 @@ def vmap_nodoc(fun, *args, **kw):
     return fun
 
 
-def minimal_unsigned_dtype(value):
+def minimal_unsigned_dtype(value: int) -> jnp.dtype:
     """Return the smallest unsigned integer dtype that can represent `value`."""
     if value < 2**8:
         return jnp.uint8
@@ -103,7 +104,9 @@ def unique(
         return jnp.empty(0, x.dtype), 0
     x = jnp.sort(x)
 
-    def loop(carry, x):
+    def loop(
+        carry: tuple[Scalar, Scalar, Shaped[Array, ' {size}']], x: Scalar
+    ) -> tuple[tuple[Scalar, Scalar, Shaped[Array, ' {size}']], None]:
         i_out, last, out = carry
         i_out = jnp.where(x == last, i_out, i_out + 1)
         out = out.at[i_out].set(x)

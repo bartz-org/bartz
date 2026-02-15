@@ -50,7 +50,7 @@ config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
 
 
 @pytest.fixture
-def keys(request) -> split:
+def keys(request: pytest.FixtureRequest) -> split:
     """
     Return a deterministic per-test-case list of jax random keys.
 

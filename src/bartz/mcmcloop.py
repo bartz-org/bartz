@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import fields
 from functools import partial, wraps
 from math import floor
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 import jax
 import numpy
@@ -48,7 +48,18 @@ from jax import (
 from jax import numpy as jnp
 from jax.nn import softmax
 from jax.sharding import Mesh, PartitionSpec
-from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, PyTree, Shaped, UInt
+from jaxtyping import (
+    Array,
+    ArrayLike,
+    Bool,
+    Float32,
+    Int32,
+    Integer,
+    Key,
+    PyTree,
+    Shaped,
+    UInt,
+)
 
 from bartz import jaxext, mcmcstep
 from bartz._profiler import (
@@ -374,10 +385,13 @@ def _compute_i_skip(
     )
 
 
+T = TypeVar('T')
+
+
 class _CallCounter:
     """Wrap a callable to check it's not called more than once."""
 
-    def __init__(self, func: Callable) -> None:
+    def __init__(self, func: Callable[..., T]) -> None:
         self.func = func
         self.n_calls = 0
 
@@ -385,7 +399,7 @@ class _CallCounter:
         """Reset the call counter."""
         self.n_calls = 0
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> T:
         if self.n_calls and not get_profile_mode():
             msg = (
                 'The inner loop of `run_mcmc` was traced more than once, '
@@ -468,7 +482,7 @@ def _run_mcmc_inner_loop(
         """Loop body to run if i_total >= n_iters; it does nothing."""
         return carry
 
-    def loop(carry: _Carry, _) -> tuple[_Carry, None]:
+    def loop(carry: _Carry, _: None) -> tuple[_Carry, None]:
         carry = cond_if_not_profiling(
             carry.i_total < n_iters, loop_impl, loop_noop, carry
         )
@@ -522,11 +536,12 @@ def _set(
 
     def at_set(
         trace: Shaped[Array, 'chains samples *shape']
+        | None
         | Shaped[Array, ' samples *shape']
         | None,
         val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'] | None,
         chain_axis: int | None,
-    ):
+    ) -> Shaped[Array, 'chains samples *shape'] | None:
         if trace is None or trace.size == 0:
             # this handles the case where an array is empty because jax refuses
             # to index into an axis of length 0, even if just in the abstract,
@@ -576,7 +591,7 @@ def make_default_callback(
     >>> run_mcmc(key, state, ..., **make_default_callback(state, ...))
     """
 
-    def as_replicated_array_or_none(val: None | Any) -> None | Array:
+    def as_replicated_array_or_none(val: ArrayLike | None) -> None | Array:
         return None if val is None else _replicate(jnp.asarray(val), state.config.mesh)
 
     return dict(
@@ -608,7 +623,7 @@ def print_callback(
     n_save: Int32[Array, ''],
     n_skip: Int32[Array, ''],
     callback_state: PrintCallbackState,
-    **_,
+    **_: Any,
 ) -> None:
     """Print a dot and/or a report periodically during the MCMC."""
     report_every = callback_state.report_every
@@ -658,7 +673,7 @@ def print_callback(
     )
 
 
-def _convert_jax_arrays_in_args(func: Callable) -> Callable:
+def _convert_jax_arrays_in_args(func: Callable[..., T]) -> Callable[..., T]:
     """Remove jax arrays from a function arguments.
 
     Converts all `jax.Array` instances in the arguments to either Python scalars
@@ -666,7 +681,7 @@ def _convert_jax_arrays_in_args(func: Callable) -> Callable:
     """
 
     def convert_jax_arrays(pytree: PyTree) -> PyTree:
-        def convert_jax_array(val: Any) -> Any:
+        def convert_jax_array(val: object) -> object:
             if not isinstance(val, Array):
                 return val
             elif val.shape:
@@ -677,7 +692,7 @@ def _convert_jax_arrays_in_args(func: Callable) -> Callable:
         return tree.map(convert_jax_array, pytree)
 
     @wraps(func)
-    def new_func(*args, **kw):
+    def new_func(*args: Any, **kw: Any) -> T:
         args = convert_jax_arrays(args)
         kw = convert_jax_arrays(kw)
         return func(*args, **kw)
@@ -748,7 +763,7 @@ class TreesTrace(Module):
     split_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
 
     @classmethod
-    def from_dataclass(cls, obj: TreeHeaps):
+    def from_dataclass(cls, obj: TreeHeaps) -> 'TreesTrace':
         """Create a `TreesTrace` from any `bartz.grove.TreeHeaps`."""
         return cls(**{f.name: getattr(obj, f.name) for f in fields(cls)})
 

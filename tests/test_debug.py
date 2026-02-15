@@ -34,7 +34,7 @@ from scipy import stats
 from scipy.stats import ks_1samp
 
 from bartz.debug import check_trace, format_tree, sample_prior
-from bartz.jaxext import minimal_unsigned_dtype
+from bartz.jaxext import minimal_unsigned_dtype, split
 from tests.util import manual_tree
 
 
@@ -63,7 +63,7 @@ class TestSamplePrior:
     )
 
     @pytest.fixture
-    def args(self, keys):
+    def args(self, keys: split) -> Args:
         """Prepare arguments for `sample_prior`."""
         # config
         trace_length = 1000
@@ -96,7 +96,7 @@ class TestSamplePrior:
         num_bad = jnp.count_nonzero(bad).item()
         assert num_bad == 0
 
-    def test_max_depth(self, keys, args: Args) -> None:
+    def test_max_depth(self, keys: split, args: Args) -> None:
         """Check that trees stop growing when p_nonterminal = 0."""
         for max_depth in range(args.p_nonterminal.size + 1):
             p_nonterminal = jnp.zeros_like(args.p_nonterminal)
@@ -107,7 +107,7 @@ class TestSamplePrior:
             assert jnp.all(trees.split_tree[:, :, 1 : 2**max_depth])
             assert not jnp.any(trees.split_tree[:, :, 2**max_depth :])
 
-    def test_forest_sdev(self, keys, args: Args) -> None:
+    def test_forest_sdev(self, keys: split, args: Args) -> None:
         """Check that the sum of trees is standard Normal."""
         trees = sample_prior(*args)
         leaf_indices = random.randint(

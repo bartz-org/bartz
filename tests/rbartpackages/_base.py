@@ -22,9 +22,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from functools import wraps
 from re import fullmatch, match
+from typing import Any
 
 import numpy as np
 from rpy2 import robjects
@@ -50,7 +51,7 @@ except ImportError:
     pass
 else:
 
-    def polars_to_r(df):
+    def polars_to_r(df: polars.DataFrame) -> object:
         df = df.to_pandas()
         return pandas2ri.py2rpy(df)
 
@@ -65,7 +66,7 @@ except ImportError:
     pass
 else:
 
-    def jax_to_r(x):
+    def jax_to_r(x: jax.Array) -> object:
         x = np.asarray(x)
         if x.ndim == 0:
             x = x[()]
@@ -78,7 +79,7 @@ numpy_converter = numpy2ri.converter
 
 
 # converter for BoolVector (why isn't it in the numpy converter?)
-def bool_vector_to_python(x):
+def bool_vector_to_python(x: BoolVector) -> np.ndarray[Any, np.dtype[np.bool_]]:
     return np.array(x, bool)
 
 
@@ -90,7 +91,7 @@ bool_vector_converter.rpy2py.register(BoolVector, bool_vector_to_python)
 dict_converter = conversion.Converter('dict')
 
 
-def dict_to_r(x):
+def dict_to_r(x: dict[str, Any]) -> robjects.ListVector:
     return robjects.ListVector(x)
 
 
@@ -125,20 +126,20 @@ class RObjectBase:
     )
     _convctx = conversion.localconverter(_converter)
 
-    def _py2r(self, x):
+    def _py2r(self, x: object) -> object:
         if isinstance(x, __class__):
             return x._robject
         with self._convctx:
             return self._converter.py2rpy(x)
 
-    def _r2py(self, x):
+    def _r2py(self, x: object) -> object:
         with self._convctx:
             return self._converter.rpy2py(x)
 
-    def _args2r(self, args):
+    def _args2r(self, args: Iterable[Any]) -> tuple[Any, ...]:
         return tuple(map(self._py2r, args))
 
-    def _kw2r(self, kw):
+    def _kw2r(self, kw: Mapping[str, Any]) -> dict[str, Any]:
         return {key: self._py2r(value) for key, value in kw.items()}
 
     _rfuncname: str = NotImplemented
@@ -153,7 +154,7 @@ class RObjectBase:
             raise ValueError(msg)
         return m.group(1)
 
-    def __init__(self, *args, **kw) -> None:
+    def __init__(self, *args: Any, **kw: Any) -> None:
         robjects.r(f'loadNamespace("{self._library}")')
         func = robjects.r(self._rfuncname)
         obj = func(*self._args2r(args), **self._kw2r(kw))
@@ -162,7 +163,7 @@ class RObjectBase:
             for s, v in obj.items():
                 setattr(self, s.replace('.', '_'), self._r2py(v))
 
-    def __init_subclass__(cls, **kw):
+    def __init_subclass__(cls, **kw: Any) -> None:
         """Automatically add R documentation to subclasses."""
         library, name = cls._rfuncname.split('::')
         page = Package(library).fetch(name)
@@ -202,7 +203,7 @@ def rmethod(meth: Callable, *, rname: str | None = None) -> Callable:
     # can be determined at runtime
 
     @wraps(meth)
-    def impl(self, *args, **kw):
+    def impl(self: RObjectBase, *args: Any, **kw: Any) -> object:
         if isinstance(self._robject, RS4):
             func = robjects.r['$'](self._robject, rname)
             out = func(*self._args2r(args), **self._kw2r(kw))

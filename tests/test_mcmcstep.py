@@ -26,7 +26,7 @@
 
 from collections.abc import Sequence
 from math import prod
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import jax
 import pytest
@@ -37,7 +37,7 @@ from jax.random import bernoulli, clone, normal, permutation, randint
 from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
 from jax.tree import map_with_path
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Bool, Int32, Key, PyTree, jaxtyped
+from jaxtyping import Array, Bool, Int32, Key, PyTree, UInt8, jaxtyped
 from numpy.testing import assert_array_equal
 from pytest_subtests import SubTests
 from scipy import stats
@@ -55,6 +55,21 @@ from bartz.mcmcstep._state import chain_vmap_axes, data_vmap_axes
 from tests.util import assert_close_matrices, manual_tree
 
 
+class VarTreeData(NamedTuple):
+    """Fixture data pairing a variable tree with its max-split array."""
+
+    var_tree: UInt8[Array, ' nodes']
+    max_split: UInt8[Array, ' p']
+
+
+class SplitRangeData(NamedTuple):
+    """Fixture data pairing variable/split trees with a max-split array."""
+
+    var_tree: UInt8[Array, ' nodes']
+    split_tree: UInt8[Array, ' nodes']
+    max_split: UInt8[Array, ' p']
+
+
 def vmap_randint_masked(
     key: Key[Array, ''], mask: Bool[Array, ' n'], size: int
 ) -> Int32[Array, '* n']:
@@ -67,13 +82,13 @@ def vmap_randint_masked(
 class TestRandintMasked:
     """Test `mcmcstep.randint_masked`."""
 
-    def test_all_false(self, keys) -> None:
+    def test_all_false(self, keys: split) -> None:
         """Check what happens when no value is allowed."""
         for size in range(1, 10):
             u = randint_masked(keys.pop(), jnp.zeros(size, bool))
             assert u == size
 
-    def test_all_true(self, keys) -> None:
+    def test_all_true(self, keys: split) -> None:
         """Check it's equivalent to `randint` when all values are allowed."""
         key = keys.pop()
         size = 10_000
@@ -81,7 +96,7 @@ class TestRandintMasked:
         u2 = randint(clone(key), (), 0, size)
         assert u1 == u2
 
-    def test_no_disallowed_values(self, keys) -> None:
+    def test_no_disallowed_values(self, keys: split) -> None:
         """Check disallowed values are never selected."""
         key = keys.pop()
         for _ in range(100):
@@ -94,7 +109,7 @@ class TestRandintMasked:
             assert mask[u]
             key = keys.pop()
 
-    def test_correct_distribution(self, keys) -> None:
+    def test_correct_distribution(self, keys: split) -> None:
         """Check the distribution of values is uniform."""
         # create mask
         num_allowed = 10
@@ -123,7 +138,7 @@ class TestAncestorVariables:
     """Test `mcmcstep._moves.ancestor_variables`."""
 
     @pytest.fixture
-    def depth2_tree(self):
+    def depth2_tree(self) -> VarTreeData:
         R"""
         Tree with var_tree of size 4 (tree_depth=2, max_num_ancestors=1).
 
@@ -141,10 +156,10 @@ class TestAncestorVariables:
         )
         var_tree = tree.var_tree.astype(jnp.uint8)
         max_split = jnp.full(5, 10, jnp.uint8)
-        return var_tree, max_split
+        return VarTreeData(var_tree, max_split)
 
     @pytest.fixture
-    def depth3_tree(self):
+    def depth3_tree(self) -> VarTreeData:
         """
         Tree with var_tree of size 8 (tree_depth=3, max_num_ancestors=2).
 
@@ -157,9 +172,9 @@ class TestAncestorVariables:
         )
         var_tree = tree.var_tree.astype(jnp.uint8)
         max_split = jnp.full(10, 10, jnp.uint8)
-        return var_tree, max_split
+        return VarTreeData(var_tree, max_split)
 
-    def test_root_node(self, depth2_tree) -> None:
+    def test_root_node(self, depth2_tree: VarTreeData) -> None:
         """Check that root node has no ancestors (all slots filled with p)."""
         var_tree, max_split = depth2_tree
 
@@ -169,7 +184,7 @@ class TestAncestorVariables:
         # All slots should be p (sentinel) since root has no ancestors
         assert_array_equal(result, [max_split.size])
 
-    def test_child_of_root(self, depth2_tree) -> None:
+    def test_child_of_root(self, depth2_tree: VarTreeData) -> None:
         """Check that children of root have one ancestor (the root's variable)."""
         var_tree, max_split = depth2_tree
 
@@ -182,7 +197,7 @@ class TestAncestorVariables:
         result = ancestor_variables(var_tree, max_split, jnp.int32(3))
         assert_array_equal(result, [2])
 
-    def test_deep_node(self, depth3_tree) -> None:
+    def test_deep_node(self, depth3_tree: VarTreeData) -> None:
         """Check ancestors for nodes at depth 3."""
         var_tree, max_split = depth3_tree
 
@@ -203,7 +218,7 @@ class TestAncestorVariables:
         result = ancestor_variables(var_tree, max_split, jnp.int32(7))
         assert_array_equal(result, [3, 1])
 
-    def test_intermediate_node(self, depth3_tree) -> None:
+    def test_intermediate_node(self, depth3_tree: VarTreeData) -> None:
         """Check ancestors for an intermediate (non-leaf) node."""
         var_tree, max_split = depth3_tree
 
@@ -231,7 +246,7 @@ class TestAncestorVariables:
         result = ancestor_variables(var_tree, max_split, jnp.int32(1))
         assert_array_equal(result, [max_split.size])
 
-    def test_type_edge(self, depth3_tree) -> None:
+    def test_type_edge(self, depth3_tree: VarTreeData) -> None:
         """Check that types are handled correctly when using uint8 and uint16 together."""
         var_tree, max_split = depth3_tree
         var_tree = var_tree.astype(jnp.uint8)
@@ -250,7 +265,7 @@ class TestAncestorVariables:
 class TestRandintExclude:
     """Test `mcmcstep._moves.randint_exclude`."""
 
-    def test_empty_exclude(self, keys) -> None:
+    def test_empty_exclude(self, keys: split) -> None:
         """If exclude is empty, it's equivalent to randint(key, (), 0, sup)."""
         key = keys.pop()
         sup = 10_000
@@ -259,7 +274,7 @@ class TestRandintExclude:
         assert num_allowed == sup
         assert u1 == u2
 
-    def test_exclude_out_of_range_is_ignored(self, keys) -> None:
+    def test_exclude_out_of_range_is_ignored(self, keys: split) -> None:
         """Values >= sup are ignored for both u and num_allowed."""
         key = keys.pop()
         sup = 7
@@ -268,7 +283,7 @@ class TestRandintExclude:
         assert num_allowed == sup
         assert 0 <= u < sup
 
-    def test_duplicate_excludes_ignored(self, keys) -> None:
+    def test_duplicate_excludes_ignored(self, keys: split) -> None:
         """Duplicates should be de-duplicated (set semantics for allowed count)."""
         sup = 10
         exclude_with_dupes = jnp.array([1, 1, 1, 3, 3, 9])
@@ -280,7 +295,7 @@ class TestRandintExclude:
         assert u1 == u2
         assert n1 == n2 == (sup - 3)
 
-    def test_all_values_excluded_returns_sup(self, keys) -> None:
+    def test_all_values_excluded_returns_sup(self, keys: split) -> None:
         """If all values are excluded, u must be sup and num_allowed=0."""
         for sup in range(1, 30, 5):
             exclude = jnp.arange(sup)
@@ -288,7 +303,7 @@ class TestRandintExclude:
             assert num_allowed == 0
             assert u == sup
 
-    def test_never_returns_excluded_values(self, keys) -> None:
+    def test_never_returns_excluded_values(self, keys: split) -> None:
         """Across repeated sampling, u is always in [0,sup) and not excluded, unless num_allowed=0."""
         sup = 20
         reps = 200
@@ -310,7 +325,7 @@ class TestRandintExclude:
             )
         )
 
-    def test_num_allowed_matches_count(self, keys) -> None:
+    def test_num_allowed_matches_count(self, keys: split) -> None:
         """num_allowed must match sup - |unique(exclude ∩ [0,sup))|."""
         sup = 50
         reps = 50
@@ -332,7 +347,7 @@ class TestRandintExclude:
 
         assert jnp.all(num_allowed == expected_num_allowed)
 
-    def test_correct_distribution_single_excluded(self, keys) -> None:
+    def test_correct_distribution_single_excluded(self, keys: split) -> None:
         """
         With one excluded value, u should be uniform over the remaining sup-1 values.
 
@@ -366,14 +381,14 @@ class TestSplitRange:
     """Test `mcmcstep._moves.split_range`."""
 
     @pytest.fixture
-    def max_split(self):
+    def max_split(self) -> UInt8[Array, ' p']:
         """Maximum split indices for 3 variables."""
         # max_split[v] = maximum split index for variable v
         # split_range returns [l, r) in *1-based* split indices, so initial r = 1 + max_split[v]
         return jnp.array([10, 10, 10], dtype=jnp.uint8)
 
     @pytest.fixture
-    def depth3_tree(self, max_split):
+    def depth3_tree(self, max_split: UInt8[Array, ' p']) -> SplitRangeData:
         R"""
         Small depth-3 tree (var_tree size 8 => nodes 1..7 exist).
 
@@ -393,9 +408,9 @@ class TestSplitRange:
         )
         var_tree = tree.var_tree.astype(jnp.uint8)
         split_tree = tree.split_tree.astype(jnp.uint8)
-        return var_tree, split_tree, max_split
+        return SplitRangeData(var_tree, split_tree, max_split)
 
-    def test_dtypes(self, depth3_tree) -> None:
+    def test_dtypes(self, depth3_tree: SplitRangeData) -> None:
         """Check the output types."""
         var_tree, split_tree, max_split = depth3_tree
         l, r = split_range(
@@ -404,7 +419,7 @@ class TestSplitRange:
         assert l.dtype == jnp.int32
         assert r.dtype == jnp.int32
 
-    def test_ref_var_out_of_bounds(self, depth3_tree) -> None:
+    def test_ref_var_out_of_bounds(self, depth3_tree: SplitRangeData) -> None:
         """If ref_var is out of bounds, l=r=1."""
         var_tree, split_tree, max_split = depth3_tree
         l, r = split_range(
@@ -413,7 +428,7 @@ class TestSplitRange:
         assert l == 1
         assert r == 1
 
-    def test_root_node_no_constraints(self, depth3_tree) -> None:
+    def test_root_node_no_constraints(self, depth3_tree: SplitRangeData) -> None:
         """Root has no ancestors => range should be the full [1, 1+max_split[var])."""
         var_tree, split_tree, max_split = depth3_tree
 
@@ -422,7 +437,9 @@ class TestSplitRange:
         assert l == 1
         assert r == 1 + max_split[0]
 
-    def test_unrelated_variable_no_constraints(self, depth3_tree) -> None:
+    def test_unrelated_variable_no_constraints(
+        self, depth3_tree: SplitRangeData
+    ) -> None:
         """If ancestors don't use ref_var, range should be full [1, 1+max_split[ref_var])."""
         var_tree, split_tree, max_split = depth3_tree
 
@@ -432,7 +449,7 @@ class TestSplitRange:
         assert l == 1
         assert r == 1 + max_split[2]
 
-    def test_left_child_sets_upper_bound(self, depth3_tree) -> None:
+    def test_left_child_sets_upper_bound(self, depth3_tree: SplitRangeData) -> None:
         """For left subtree of an ancestor split on ref_var, r should be tightened to that split."""
         var_tree, split_tree, max_split = depth3_tree
 
@@ -442,7 +459,7 @@ class TestSplitRange:
         assert l == 1
         assert r == 5
 
-    def test_right_child_sets_lower_bound(self, depth3_tree) -> None:
+    def test_right_child_sets_lower_bound(self, depth3_tree: SplitRangeData) -> None:
         """For right subtree of an ancestor split on ref_var, l should be raised to that split+1."""
         var_tree, split_tree, max_split = depth3_tree
 
@@ -452,7 +469,7 @@ class TestSplitRange:
         assert l == 6
         assert r == 1 + max_split[0]
 
-    def test_two_ancestors_combine_bounds(self, depth3_tree) -> None:
+    def test_two_ancestors_combine_bounds(self, depth3_tree: SplitRangeData) -> None:
         """Bounds from multiple ancestors on the same variable should combine (max lower, min upper)."""
         var_tree, split_tree, max_split = depth3_tree
 
@@ -463,7 +480,9 @@ class TestSplitRange:
         assert l == 6
         assert r == 8
 
-    def test_ref_var_constraints_from_parent_only(self, depth3_tree) -> None:
+    def test_ref_var_constraints_from_parent_only(
+        self, depth3_tree: SplitRangeData
+    ) -> None:
         """If only a deeper ancestor matches ref_var, constraints should come only from those matches."""
         var_tree, split_tree, max_split = depth3_tree
 
@@ -474,7 +493,9 @@ class TestSplitRange:
         assert l == 1
         assert r == 7
 
-    def test_no_allowed_splits_when_bounds_cross(self, max_split) -> None:
+    def test_no_allowed_splits_when_bounds_cross(
+        self, max_split: UInt8[Array, ' p']
+    ) -> None:
         """
         If constraints make the interval empty, l can become >= r.
 
@@ -653,7 +674,7 @@ class TestMultichain:
     def chain_vmap_axes(self, state: State) -> State:
         """Old manual version of `chain_vmap_axes(_: State)`."""
 
-        def choose_vmap_index(path, _) -> Literal[0, None]:
+        def choose_vmap_index(path: KeyPath, _: Array) -> Literal[0, None]:
             no_vmap_attrs = (
                 '.X',
                 '.y',
@@ -685,7 +706,7 @@ class TestMultichain:
     def data_vmap_axes(self, state: State) -> State:
         """Hardcoded version of `data_vmap_axes(_: State)`."""
 
-        def choose_vmap_index(path: KeyPath, _) -> Literal[-1, None]:
+        def choose_vmap_index(path: KeyPath, _: Array) -> Literal[-1, None]:
             vmap_attrs = (
                 '.X',
                 '.y',

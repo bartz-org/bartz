@@ -53,7 +53,7 @@ from bartz.grove import make_tree, tree_depths
 from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 
-def field(*, chains: bool = False, data: bool = False, **kwargs):
+def field(*, chains: bool = False, data: bool = False, **kwargs: Any):  # noqa: ANN202
     """Extend `equinox.field` with two new parameters.
 
     Parameters
@@ -130,10 +130,10 @@ def _find_metadata(
                 args.append(_find_metadata(v, key, if_true, if_false))
         return x.__class__(*args)
 
-    def is_leaf(x) -> bool:
+    def is_leaf(x: object) -> bool:
         return isinstance(x, Module)
 
-    def get_axes(x: Module | Any) -> PyTree[T]:
+    def get_axes(x: object) -> PyTree[T]:
         if isinstance(x, Module):
             return _find_metadata(x, key, if_true, if_false)
         else:
@@ -862,12 +862,12 @@ def _shard_state(state: State) -> State:
     )
 
 
-def _all_none_or_not_none(*args):
+def _all_none_or_not_none(*args: object) -> bool:
     is_none = [x is None for x in args]
     return all(is_none) or not any(is_none)
 
 
-def _asarray_or_none(x):
+def _asarray_or_none(x: object) -> Array | None:
     if x is None:
         return None
     return jnp.asarray(x)
@@ -1037,7 +1037,7 @@ def _chain_axes_with_keys(x: PyTree) -> PyTree[int | None]:
     """Return `chain_vmap_axes(x)` but also set to 0 for random keys."""
     axes = chain_vmap_axes(x)
 
-    def axis_if_key(x, axis):
+    def axis_if_key(x: object, axis: int | None) -> int | None:
         if is_key(x):
             return 0
         else:
@@ -1061,7 +1061,7 @@ def _find_mesh(x: PyTree) -> Mesh | None:
     class MeshFound(Exception):
         pass
 
-    def find_mesh(x: State | Any) -> None:
+    def find_mesh(x: object) -> None:
         if isinstance(x, State):
             raise MeshFound(x.config.mesh)
 
@@ -1077,7 +1077,7 @@ def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
     """Split all random keys in `num_chains` keys."""
     mesh = _find_mesh(x)
 
-    def split_key(x):
+    def split_key(x: object) -> object:
         if is_key(x):
             x = random.split(x, num_chains)
             if mesh is not None and 'chains' in mesh.axis_names:
@@ -1093,14 +1093,14 @@ def vmap_chains(
     """Apply vmap on chain axes automatically if the inputs are multichain."""
 
     @wraps(fun)
-    def auto_vmapped_fun(*args, **kwargs) -> T:
+    def auto_vmapped_fun(*args: Any, **kwargs: Any) -> T:
         all_args = args, kwargs
         num_chains = get_num_chains(all_args)
         if num_chains is not None:
             if auto_split_keys:
                 all_args = _split_all_keys(all_args, num_chains)
 
-            def wrapped_fun(args, kwargs):
+            def wrapped_fun(args: tuple[Any, ...], kwargs: dict[str, Any]) -> T:
                 return fun(*args, **kwargs)
 
             mc_in_axes = _chain_axes_with_keys(all_args)

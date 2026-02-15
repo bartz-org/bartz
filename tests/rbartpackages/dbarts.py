@@ -24,7 +24,7 @@
 
 """Python wrapper of the R package `dbarts`."""
 
-# ruff: noqa: D101, D102, ANN201
+# ruff: noqa: D101, D102, ANN201, ANN002, ANN003
 
 from rpy2 import robjects
 
@@ -78,9 +78,9 @@ class bart2(bart):
     _rfuncname = 'dbarts::bart2'
     _split_probs = 'split_probs'
 
-    def __init__(self, formula, *args, **kw) -> None:
-        formula = robjects.Formula(formula)
-        super().__init__(formula, *args, **kw)
+    def __init__(self, formula: str, *args, **kw) -> None:
+        rformula = robjects.Formula(formula)
+        super().__init__(rformula, *args, **kw)
 
 
 class rbart_vi(bart2):

@@ -1,6 +1,6 @@
 # bartz/src/bartz/prepcovars.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -25,6 +25,7 @@
 """Functions to preprocess data."""
 
 from functools import partial
+from typing import Any
 
 from jax import jit, vmap
 from jax import numpy as jnp
@@ -100,7 +101,9 @@ def quantilized_splits_from_matrix(
         raise ValueError(msg)
 
     @partial(autobatch, max_io_nbytes=2**29)
-    def quantilize(X):
+    def quantilize(
+        X: Real[Array, 'p n'],
+    ) -> tuple[Real[Array, 'p m'], UInt[Array, ' p']]:
         # wrap this function because autobatch needs traceable args
         return _quantilized_splits_from_matrix(X, out_length)
 
@@ -221,7 +224,7 @@ def uniform_splits_from_matrix(
 
 @partial(jit, static_argnames=('method',))
 def bin_predictors(
-    X: Real[Array, 'p n'], splits: Real[Array, 'p m'], **kw
+    X: Real[Array, 'p n'], splits: Real[Array, 'p m'], **kw: Any
 ) -> UInt[Array, 'p n']:
     """
     Bin the predictors according to the given splits.
@@ -247,7 +250,9 @@ def bin_predictors(
 
     @partial(autobatch, max_io_nbytes=2**29)
     @vmap
-    def bin_predictors(x, splits):
+    def bin_predictors(
+        x: Real[Array, 'p n'], splits: Real[Array, 'p m']
+    ) -> UInt[Array, 'p n']:
         dtype = minimal_unsigned_dtype(splits.size)
         return jnp.searchsorted(splits, x, **kw).astype(dtype)
 

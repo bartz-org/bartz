@@ -32,6 +32,7 @@ from time import perf_counter, sleep
 import pytest
 from jax import debug_infs, debug_nans, jit, pure_callback, random
 from jax import numpy as jnp
+from jaxtyping import Array, Float32, Int32, Integer
 from numpy.testing import assert_array_equal
 
 from bartz._profiler import (
@@ -87,7 +88,7 @@ class TestScanIfNotProfiling:
     def test_result(self, mode: bool) -> None:
         """Test that `scan_if_not_profiling` has the right output on a simple example."""
 
-        def body(carry, _):
+        def body(carry: Integer[Array, ''], _: None) -> tuple[Integer[Array, ''], None]:
             return carry + 1, None
 
         with profile_mode(mode):
@@ -98,7 +99,7 @@ class TestScanIfNotProfiling:
     def test_does_not_jit(self) -> None:
         """Check that `scan_if_not_profiling` does not jit the function in profiling mode."""
 
-        def body(carry, _):
+        def body(carry: Int32[Array, ''], _: None) -> tuple[Int32[Array, ''], None]:
             return carry.block_until_ready(), None
             # block_until_ready errors under jit
 
@@ -154,7 +155,7 @@ class TestJitIfNotProfiling:
     def test_result(self, mode: bool) -> None:
         """Test that `jit_if_not_profiling` has the right output in both modes."""
 
-        def func(x):
+        def func(x: Integer[Array, '']) -> Integer[Array, '']:
             return x * 2 + 1
 
         jitted_func = jit_if_not_profiling(func)
@@ -166,7 +167,7 @@ class TestJitIfNotProfiling:
     def test_does_not_jit(self) -> None:
         """Check that `jit_if_not_profiling` does not jit the function in profiling mode."""
 
-        def func(x):
+        def func(x: Int32[Array, '']) -> Int32[Array, '']:
             return x.block_until_ready()
             # block_until_ready errors under jit
 
@@ -190,7 +191,7 @@ class TestJitAndBlockIfProfiling:
     def test_result(self, mode: bool) -> None:
         """Test that `jit_and_block_if_profiling` has the right output in both modes."""
 
-        def func(x):
+        def func(x: Integer[Array, '']) -> Integer[Array, '']:
             return x * 2 + 1
 
         jitted_func = jit_and_block_if_profiling(func)
@@ -202,7 +203,7 @@ class TestJitAndBlockIfProfiling:
     def test_jits_when_profiling(self) -> None:
         """Check that `jit_and_block_if_profiling` jits when profiling is enabled."""
 
-        def func(x):
+        def func(x: Int32[Array, '']) -> Int32[Array, '']:
             return x.block_until_ready()
             # block_until_ready errors under jit
 
@@ -225,7 +226,7 @@ class TestJitAndBlockIfProfiling:
     def test_static_args(self) -> None:
         """Check that it works with static arguments."""
 
-        def func(n: int):
+        def func(n: int) -> Integer[Array, ' {n}']:
             return jnp.arange(n)
 
         jitted_func = jit_and_block_if_profiling(func, static_argnums=(0,))
@@ -292,10 +293,11 @@ class TestJitAndBlockIfProfiling:
         runtime = 0.1
 
         @jit_and_block_if_profiling
-        def awlkugh():  # weird name to make sure identifiers are legit
+        # weird name to make sure identifiers are legit
+        def awlkugh() -> Int32[Array, '']:
             x = jnp.int32(0)
 
-            def sleeper(x):
+            def sleeper(x: Int32[Array, '']) -> Int32[Array, '']:
                 sleep(runtime)
                 return x
 
@@ -319,7 +321,7 @@ class TestJitAndBlockIfProfiling:
 
 
 @partial(jit, static_argnums=(0,))
-def idle(n: int):
+def idle(n: int) -> Float32[Array, ' {n} {n}']:
     """Waste time in jax computation."""
     key = random.key(0)
     x = random.normal(key, (n, n))

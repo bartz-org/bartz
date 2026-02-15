@@ -24,6 +24,8 @@
 
 """Wrapper for the R package BART3."""
 
+# ruff: noqa: ANN002, ANN003
+
 from typing import NamedTuple, TypedDict
 
 import numpy as np

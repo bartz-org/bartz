@@ -25,13 +25,14 @@
 """Test `bartz.mcmcloop`."""
 
 from functools import partial
+from typing import Any
 
 import pytest
 from equinox import filter_jit
 from jax import debug_key_reuse, jit, vmap
 from jax import numpy as jnp
 from jax.tree import map_with_path
-from jax.tree_util import tree_map
+from jax.tree_util import KeyPath, tree_map
 from jaxtyping import Array, Float32, UInt8
 from numpy.testing import assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
@@ -39,7 +40,7 @@ from pytest_subtests import SubTests
 
 from bartz import profile_mode
 from bartz.jaxext import get_default_device, split
-from bartz.mcmcloop import run_mcmc
+from bartz.mcmcloop import BurninTrace, MainTrace, run_mcmc
 from bartz.mcmcstep import State, init
 from bartz.mcmcstep._state import chain_vmap_axes
 
@@ -72,7 +73,9 @@ def make_p_nonterminal(maxdepth: int) -> Float32[Array, ' {maxdepth}-1']:
 
 
 @filter_jit
-def simple_init(p: int, n: int, ntree: int, k: int | None = None, **kwargs) -> State:
+def simple_init(
+    p: int, n: int, ntree: int, k: int | None = None, **kwargs: Any
+) -> State:
     """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
     X, y, max_split = gen_data(p, n, k)
     eye = 1.0 if k is None else jnp.eye(k)
@@ -142,7 +145,9 @@ class TestRunMcmc:
 
         tree_map(partial(assert_array_equal, strict=True), initial_state, final_state)
 
-        def assert_empty_trace(_path, x, chain_axis) -> None:
+        def assert_empty_trace(
+            _path: KeyPath, x: Array | None, chain_axis: int | None
+        ) -> None:
             if initial_state.forest.num_chains() is None or chain_axis is None:
                 sample_axis = 0
             else:
@@ -150,7 +155,7 @@ class TestRunMcmc:
             if x is not None:
                 assert x.shape[sample_axis] == 0
 
-        def check_trace(trace) -> None:
+        def check_trace(trace: MainTrace | BurninTrace) -> None:
             map_with_path(
                 assert_empty_trace,
                 trace,

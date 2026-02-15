@@ -38,7 +38,7 @@ class TestQuantilizer:
     @pytest.mark.parametrize(
         'fill_value', [jnp.finfo(jnp.float32).max, jnp.iinfo(jnp.int32).max]
     )
-    def test_splits_fill(self, fill_value) -> None:
+    def test_splits_fill(self, fill_value: float | int) -> None:
         """Check how predictors with less unique values are right-padded."""
         with debug_infs(not jnp.isinf(fill_value)):
             fill_value = jnp.array(fill_value)
@@ -61,7 +61,7 @@ class TestQuantilizer:
         assert_array_equal(splits, expected_splits)
 
     @pytest.mark.parametrize('dtype', [int, float])
-    def test_splits_type(self, dtype) -> None:
+    def test_splits_type(self, dtype: type) -> None:
         """Check that the input type is preserved."""
         x = jnp.arange(10, dtype=dtype)[None, :]
         splits, _ = quantilized_splits_from_matrix(x, 100)

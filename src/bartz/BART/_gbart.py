@@ -24,7 +24,7 @@
 
 """Implement classes `mc_gbart` and `gbart` that mimic the R BART3 package."""
 
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 from functools import cached_property
 from os import cpu_count
 from types import MappingProxyType
@@ -338,7 +338,7 @@ class mc_gbart(Module):
         return self._bart._splits  # noqa: SLF001
 
     @property
-    def _x_train_fmt(self) -> Any:
+    def _x_train_fmt(self) -> Hashable:
         return self._bart._x_train_fmt  # noqa: SLF001
 
     # Cached properties from Bart
@@ -450,7 +450,7 @@ class mc_gbart(Module):
 class gbart(mc_gbart):
     """Subclass of `mc_gbart` that forces `mc_cores=1`."""
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         if 'mc_cores' in kwargs:
             msg = "gbart.__init__() got an unexpected keyword argument 'mc_cores'"
             raise TypeError(msg)
@@ -458,7 +458,7 @@ class gbart(mc_gbart):
         super().__init__(*args, **kwargs)
 
 
-def process_mc_cores(y_train: Array | Any, mc_cores: int) -> dict[str, Any]:
+def process_mc_cores(y_train: Array | Series, mc_cores: int) -> dict[str, Any]:
     """Determine the arguments to pass to `Bart` to configure multiple chains."""
     # one chain, leave default configuration which is num_chains=None
     if abs(mc_cores) == 1:
@@ -507,7 +507,7 @@ def process_mc_cores(y_train: Array | Any, mc_cores: int) -> dict[str, Any]:
     return kwargs
 
 
-def get_platform(y_train: Array | Any, mc_cores: int) -> str:
+def get_platform(y_train: Array | Series, mc_cores: int) -> str:
     """Get the platform for `process_mc_cores` from `y_train` or the default device."""
     if isinstance(y_train, Array) and hasattr(y_train, 'platform'):
         return y_train.platform()

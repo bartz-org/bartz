@@ -31,11 +31,9 @@ from typing import Literal, NamedTuple
 import jax
 import pytest
 from beartype import beartype
-from jax import debug_key_reuse, make_mesh, random, vmap
+from jax import debug_key_reuse, make_mesh, random, tree, vmap
 from jax import numpy as jnp
-from jax.random import bernoulli, clone, normal, permutation, randint
 from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
-from jax.tree import map_with_path
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, Bool, Int32, Key, PyTree, UInt8, jaxtyped
 from numpy.testing import assert_array_equal
@@ -93,7 +91,7 @@ class TestRandintMasked:
         key = keys.pop()
         size = 10_000
         u1 = randint_masked(key, jnp.ones(size, bool))
-        u2 = randint(clone(key), (), 0, size)
+        u2 = random.randint(random.clone(key), (), 0, size)
         assert u1 == u2
 
     def test_no_disallowed_values(self, keys: split) -> None:
@@ -101,7 +99,7 @@ class TestRandintMasked:
         key = keys.pop()
         for _ in range(100):
             keys = split(key, 3)
-            mask = bernoulli(keys.pop(), 0.5, (10,))
+            mask = random.bernoulli(keys.pop(), 0.5, (10,))
             if not jnp.any(mask):  # pragma: no cover, rarely happens
                 continue
             u = randint_masked(keys.pop(), mask)
@@ -116,7 +114,7 @@ class TestRandintMasked:
         mask = jnp.zeros(2 * num_allowed, bool)
         mask = mask.at[:num_allowed].set(True)
         indices = jnp.arange(mask.size)
-        indices = permutation(keys.pop(), indices)
+        indices = random.permutation(keys.pop(), indices)
         mask = mask[indices]
 
         # sample values
@@ -270,7 +268,7 @@ class TestRandintExclude:
         key = keys.pop()
         sup = 10_000
         u1, num_allowed = randint_exclude(key, sup, jnp.array([], jnp.int32))
-        u2 = randint(clone(key), (), 0, sup)
+        u2 = random.randint(random.clone(key), (), 0, sup)
         assert num_allowed == sup
         assert u1 == u2
 
@@ -309,7 +307,7 @@ class TestRandintExclude:
         reps = 200
 
         # Use a fixed-length exclude array; include invalid values so masking paths are hit.
-        exclude = randint(keys.pop(), (reps, 30), 0, sup + 10)
+        exclude = random.randint(keys.pop(), (reps, 30), 0, sup + 10)
         randint_exclude_v = vmap(randint_exclude, in_axes=(0, None, 0))
         keys_v = keys.pop(reps)
         u, num_allowed = randint_exclude_v(keys_v, sup, exclude)
@@ -330,7 +328,9 @@ class TestRandintExclude:
         sup = 50
         reps = 50
 
-        exclude = randint(keys.pop(), (reps, 80), 0, sup + 25)  # includes some >= sup
+        exclude = random.randint(
+            keys.pop(), (reps, 80), 0, sup + 25
+        )  # includes some >= sup
 
         randint_exclude_v = vmap(randint_exclude, in_axes=(0, None, 0))
         keys_v = keys.pop(reps)
@@ -550,9 +550,9 @@ class TestMultichain:
         numcut = 10
         num_trees = 5
         return dict(
-            X=randint(keys.pop(), (p, self.n), 0, numcut + 1, jnp.uint32),
-            y=normal(keys.pop(), (k, self.n)),
-            offset=normal(keys.pop(), (k,)),
+            X=random.randint(keys.pop(), (p, self.n), 0, numcut + 1, jnp.uint32),
+            y=random.normal(keys.pop(), (k, self.n)),
+            offset=random.normal(keys.pop(), (k,)),
             max_split=jnp.full(p, numcut + 1, jnp.uint32),
             num_trees=num_trees,
             p_nonterminal=jnp.full(d - 1, 0.9),
@@ -653,7 +653,7 @@ class TestMultichain:
                 return jnp.stack(sc_xs, axis=chain_axis)
 
         chain_axes = chain_vmap_axes(mc_state)
-        stacked_state = map_with_path(
+        stacked_state = tree.map_with_path(
             stack_leaf, chain_axes, mc_state, *sc_states, is_leaf=lambda x: x is None
         )
 
@@ -669,7 +669,7 @@ class TestMultichain:
                 reduce_rank=True,
             )
 
-        map_with_path(check_equal, mc_state, stacked_state)
+        tree.map_with_path(check_equal, mc_state, stacked_state)
 
     def chain_vmap_axes(self, state: State) -> State:
         """Old manual version of `chain_vmap_axes(_: State)`."""
@@ -700,7 +700,7 @@ class TestMultichain:
             else:
                 return 0
 
-        return map_with_path(choose_vmap_index, state)
+        return tree.map_with_path(choose_vmap_index, state)
 
     def data_vmap_axes(self, state: State) -> State:
         """Hardcoded version of `data_vmap_axes(_: State)`."""
@@ -719,7 +719,7 @@ class TestMultichain:
             else:
                 return None
 
-        return map_with_path(choose_vmap_index, state)
+        return tree.map_with_path(choose_vmap_index, state)
 
     def test_vmap_axes(self, init_kwargs: dict) -> None:
         """Check `data_vmap_axes` and `chain_vmap_axes` on a `State`."""
@@ -736,8 +736,8 @@ class TestMultichain:
         ) -> None:
             assert axis == ref_axis
 
-        map_with_path(assert_equal, chain_axes, ref_chain_axes)
-        map_with_path(assert_equal, data_axes, ref_data_axes)
+        tree.map_with_path(assert_equal, chain_axes, ref_chain_axes)
+        tree.map_with_path(assert_equal, data_axes, ref_data_axes)
 
     def test_normalize_spec(self) -> None:
         """Test `normalize_spec`."""
@@ -780,7 +780,9 @@ def check_sharding(x: PyTree, mesh: Mesh | None) -> None:
 
             assert spec == expected_spec
 
-    map_with_path(check_leaf, x, chain_axes, data_axes, is_leaf=lambda x: x is None)
+    tree.map_with_path(
+        check_leaf, x, chain_axes, data_axes, is_leaf=lambda x: x is None
+    )
 
 
 def get_normal_spec(x: Array) -> PartitionSpec:

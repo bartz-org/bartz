@@ -33,8 +33,7 @@ from typing import Any, Literal, Protocol, TypedDict
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field
-from jax import Device, device_put, jit, make_mesh
-from jax.lax import collapse
+from jax import Device, device_put, jit, lax, make_mesh
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh
 from jaxtyping import (
@@ -494,7 +493,7 @@ class Bart(Module):
         p = self._mcmc_state.forest.max_split.size
         varcount: Int32[Array, '*chains samples p']
         varcount = compute_varcount(p, self._main_trace)
-        return collapse(varcount, 0, -1)
+        return lax.collapse(varcount, 0, -1)
 
     @cached_property
     def varcount_mean(self) -> Float32[Array, ' p']:
@@ -888,7 +887,7 @@ class Bart(Module):
     def _predict(self, x: UInt[Array, 'p m']) -> Float32[Array, 'ndpost m']:
         """Evaluate trees on already quantized `x`."""
         out = evaluate_trace(x, self._main_trace)
-        return collapse(out, 0, -1)
+        return lax.collapse(out, 0, -1)
 
 
 class DeviceKwArgs(TypedDict):

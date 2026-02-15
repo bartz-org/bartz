@@ -29,9 +29,8 @@ from typing import Any
 
 import pytest
 from equinox import filter_jit
-from jax import debug_key_reuse, jit, vmap
+from jax import debug_key_reuse, jit, tree, vmap
 from jax import numpy as jnp
-from jax.tree import map_with_path
 from jax.tree_util import KeyPath, tree_map
 from jaxtyping import Array, Float32, UInt8
 from numpy.testing import assert_array_equal
@@ -156,7 +155,7 @@ class TestRunMcmc:
                 assert x.shape[sample_axis] == 0
 
         def check_trace(trace: MainTrace | BurninTrace) -> None:
-            map_with_path(
+            tree.map_with_path(
                 assert_empty_trace,
                 trace,
                 chain_vmap_axes(trace),

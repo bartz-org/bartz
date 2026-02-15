@@ -43,12 +43,11 @@ import numpy
 import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError
-from jax import debug_nans, lax, random, vmap
+from jax import debug_nans, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logit, ndtr
 from jax.sharding import SingleDeviceSharding
-from jax.tree import map_with_path
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import (
     Array,
@@ -553,7 +552,7 @@ class TestWithCachedBart:
                     )
 
             axes = chain_vmap_axes(x)
-            map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)
+            tree.map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)
 
         assert_different(bart._mcmc_state, rtol=0.05)
         assert_different(bart._main_trace, rtol=0.03)
@@ -1035,7 +1034,7 @@ def test_prior(keys: split, p: int, nsplits: int) -> None:
         kw['ntree'],
         bart._mcmc_state.forest.max_split,
         p_nonterminal,
-        jnp.sqrt(lax.reciprocal(bart._mcmc_state.forest.leaf_prior_cov_inv)),
+        jnp.sqrt(jnp.reciprocal(bart._mcmc_state.forest.leaf_prior_cov_inv)),
     )
     prior_trace = TraceWithOffset.from_trees_trace(prior_trees, bart.offset)
 
@@ -1455,8 +1454,8 @@ def test_same_result_profiling(variant: int, kw: dict) -> None:
             assert_allclose(xp, x, atol=1e-5, rtol=1e-5)
 
     try:
-        map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
-        map_with_path(check_same, bart._main_trace, bartp._main_trace)
+        tree.map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
+        tree.map_with_path(check_same, bart._main_trace, bartp._main_trace)
     except AssertionError as a:
         if (
             '\nNot equal to tolerance ' in str(a)

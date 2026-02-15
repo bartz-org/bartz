@@ -37,12 +37,12 @@ from jax import (
     device_count,
     ensure_compile_time_eval,
     jit,
+    lax,
     random,
     vmap,
 )
 from jax import numpy as jnp
 from jax.dtypes import prng_key
-from jax.lax import scan
 from jax.scipy.special import ndtr
 from jaxtyping import Array, Bool, Float32, Key, Scalar, Shaped
 
@@ -113,7 +113,7 @@ def unique(
         return (i_out, x, out), None
 
     carry = 0, x[0], jnp.full(size, fill_value, x.dtype)
-    (actual_length, _, out), _ = scan(loop, carry, x[:size])
+    (actual_length, _, out), _ = lax.scan(loop, carry, x[:size])
     return out, actual_length + 1
 
 

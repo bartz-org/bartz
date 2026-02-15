@@ -29,8 +29,7 @@ from contextlib import contextmanager
 from functools import wraps
 from typing import Any, TypeVar
 
-from jax import block_until_ready, debug, jit
-from jax.lax import cond, scan
+from jax import block_until_ready, debug, jit, lax
 from jax.profiler import TraceAnnotation
 from jaxtyping import Array, Bool
 
@@ -248,7 +247,7 @@ def scan_if_not_profiling(
         return carry, None
 
     else:
-        return scan(f, init, None, length)
+        return lax.scan(f, init, None, length)
 
 
 def cond_if_not_profiling(
@@ -281,7 +280,7 @@ def cond_if_not_profiling(
         else:
             return false_fun(*operands)
     else:
-        return cond(pred, true_fun, false_fun, *operands)
+        return lax.cond(pred, true_fun, false_fun, *operands)
 
 
 def callback_if_not_profiling(

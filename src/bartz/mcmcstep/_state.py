@@ -46,7 +46,6 @@ from jax import (
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
-from jax.tree import flatten
 from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree, Shaped, UInt
 
 from bartz.grove import make_tree, tree_depths
@@ -1026,7 +1025,7 @@ def get_num_chains(x: PyTree) -> int | None:
     traversal at nodes that define it. Check all values obtained invoking
     `num_chains` are equal, then return it.
     """
-    leaves, _ = flatten(x, is_leaf=lambda x: hasattr(x, 'num_chains'))
+    leaves, _ = tree.flatten(x, is_leaf=lambda x: hasattr(x, 'num_chains'))
     num_chains = [x.num_chains() for x in leaves if hasattr(x, 'num_chains')]
     ref = num_chains[0]
     assert all(c == ref for c in num_chains)

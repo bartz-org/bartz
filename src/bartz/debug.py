@@ -1148,7 +1148,7 @@ class debug_mc_gbart(mc_gbart):
             norm2 = jnp.einsum('ij,ij->i', bart.resid, bart.resid)
             beta = bart.error_cov_scale / 2 + norm2 / 2
         error_cov_inv = alpha / beta
-        return jnp.sqrt(lax.reciprocal(error_cov_inv))
+        return jnp.sqrt(jnp.reciprocal(error_cov_inv))
 
     def compare_resid(
         self,

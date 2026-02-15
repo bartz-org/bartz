@@ -38,7 +38,6 @@ import jax
 from equinox import Module, tree_at
 from jax import lax, random, vmap
 from jax import numpy as jnp
-from jax.lax import cond
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
 from jax.sharding import Mesh, PartitionSpec
@@ -646,8 +645,8 @@ def _precompute_likelihood_terms_uv(
     leaf_prior_cov_inv: Float32[Array, ''],
     move_precs: Precs | Counts,
 ) -> tuple[PreLkV, PreLk]:
-    sigma2 = lax.reciprocal(error_cov_inv)
-    sigma_mu2 = lax.reciprocal(leaf_prior_cov_inv)
+    sigma2 = jnp.reciprocal(error_cov_inv)
+    sigma_mu2 = jnp.reciprocal(leaf_prior_cov_inv)
     left = sigma2 + move_precs.left * sigma_mu2
     right = sigma2 + move_precs.right * sigma_mu2
     total = sigma2 + move_precs.total * sigma_mu2
@@ -754,7 +753,7 @@ def _precompute_leaf_terms_uv(
     z: Float32[Array, 'num_trees 2**d'] | None = None,
 ) -> PreLf:
     prec_lk = prec_trees * error_cov_inv
-    var_post = lax.reciprocal(prec_lk + leaf_prior_cov_inv)
+    var_post = jnp.reciprocal(prec_lk + leaf_prior_cov_inv)
     if z is None:
         z = random.normal(key, prec_trees.shape, error_cov_inv.dtype)
     return PreLf(
@@ -1591,7 +1590,7 @@ def step_sparse(key: Key[Array, ''], bart: State) -> State:
     Updated BART state with re-sampled `log_s` and `theta`.
     """
     if bart.config.sparse_on_at is not None:
-        bart = cond(
+        bart = lax.cond(
             bart.config.steps_done < bart.config.sparse_on_at,
             lambda _key, bart: bart,
             _step_sparse,

@@ -1,6 +1,6 @@
 /* bartz/docs/_static/custom.css
  *
- * Copyright (c) 2024-2025, The Bartz Contributors
+ * Copyright (c) 2024-2026, The Bartz Contributors
  *
  * This file is part of bartz.
  *
@@ -23,21 +23,25 @@
  * SOFTWARE.
  */
 
-dl.py.method, dl.py.function {
+dl.py.method,
+dl.py.function {
     margin-top: 2em;
     margin-bottom: 2em;
 }
 
-dl.py.property {
+dl.py.property,
+dl.py.attribute {
     margin-top: 1em;
 }
 
-dl.py.class, dl.py.function {
+dl.py.class,
+dl.py.function {
     margin-top: 2.5em;
     margin-bottom: 2.5em;
 }
 
-h2 + dl.py.class, h2 + dl.py.function {
+h2 + dl.py.class,
+h2 + dl.py.function {
     margin-top: 1em;
 }
 

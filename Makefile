@@ -63,6 +63,7 @@ help:
 	@echo "- ipython-old: start an ipython shell with oldest supported python and dependencies"
 	@echo
 	@echo "Release workflow:"
+	@echo "- do a PR that re-runs benchmarks"
 	@echo "- create a new branch"
 	@echo "- $$ uv version --bump major|minor|patch"
 	@echo "- describe release in docs/changelog.md"

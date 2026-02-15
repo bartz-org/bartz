@@ -25,8 +25,9 @@
 """Main high-level interface of the package."""
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypedDict
 
 import jax
@@ -321,8 +322,8 @@ class Bart(Module):
         devices: Device | Sequence[Device] | None = None,
         seed: int | Key[Array, ''] = 0,
         maxdepth: int = 6,
-        init_kw: dict | None = None,
-        run_mcmc_kw: dict | None = None,
+        init_kw: Mapping = MappingProxyType({}),
+        run_mcmc_kw: Mapping = MappingProxyType({}),
     ) -> None:
         # check data and put it in the right format
         x_train, x_train_fmt = self._process_predictor_input(x_train)
@@ -781,7 +782,7 @@ class Bart(Module):
         base: FloatLike,
         maxdepth: int,
         ntree: int,
-        init_kw: dict[str, Any] | None,
+        init_kw: Mapping[str, Any],
         rm_const: bool,
         theta: FloatLike | None,
         a: FloatLike | None,
@@ -838,8 +839,7 @@ class Bart(Module):
             n_empty = jnp.sum(max_split == 0).item()
             kw.update(filter_splitless_vars=n_empty)
 
-        if init_kw is not None:
-            kw.update(init_kw)
+        kw.update(init_kw)
 
         state = mcmcstep.init(**kw)
 
@@ -858,7 +858,7 @@ class Bart(Module):
         keepevery: int,
         printevery: int | None,
         seed: int | Integer[Array, ''] | Key[Array, ''],
-        run_mcmc_kw: dict | None,
+        run_mcmc_kw: Mapping,
     ) -> tuple[mcmcstep.State, mcmcloop.BurninTrace, mcmcloop.MainTrace]:
         # prepare random generator seed
         if is_key(seed):
@@ -881,8 +881,7 @@ class Bart(Module):
                 report_every=printevery,
             )
         )
-        if run_mcmc_kw is not None:
-            kw.update(run_mcmc_kw)
+        kw.update(run_mcmc_kw)
 
         return run_mcmc(key, mcmc_state, n_save, **kw)
 

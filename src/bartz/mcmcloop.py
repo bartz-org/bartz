@@ -69,7 +69,7 @@ from bartz._profiler import (
     while_loop_if_not_profiling,
 )
 from bartz.grove import TreeHeaps, evaluate_forest, forest_fill, var_histogram
-from bartz.jaxext import autobatch
+from bartz.jaxext import autobatch, jit_active
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size, get_num_chains
 
@@ -311,8 +311,7 @@ def run_mcmc(
         # same code path for benchmarking and testing
 
     # error if under jit and there are unrolled loops or profile mode is on
-    under_jit = not hasattr(jnp.empty(0), 'platform')
-    if under_jit and (n_outer > 1 or get_profile_mode()):
+    if jit_active() and (n_outer > 1 or get_profile_mode()):
         msg = (
             '`run_mcmc` was called within a jit-compiled function and '
             'there are either more than 1 outer loops or profile mode is active, '

@@ -103,7 +103,7 @@ Kind = Literal['plain', 'weights', 'binary', 'sparse']
 def get_default_platform() -> str:
     """Get the default JAX platform (cpu, gpu)."""
     with ensure_compile_time_eval():
-        return jnp.zeros(()).platform()
+        return jnp.zeros(0).platform()
 
 
 def simple_init(  # noqa: C901, PLR0915

@@ -276,7 +276,7 @@ def truncated_normal_onesided(
 def get_default_device() -> Device:
     """Get the current default JAX device."""
     with ensure_compile_time_eval():
-        return jnp.zeros(()).device
+        return jnp.empty(0).device
 
 
 def get_device_count() -> int:
@@ -288,3 +288,8 @@ def get_device_count() -> int:
 def is_key(x: object) -> bool:
     """Determine if `x` is a jax random key."""
     return isinstance(x, Array) and jnp.issubdtype(x.dtype, prng_key)
+
+
+def jit_active() -> bool:
+    """Check if we are under jit."""
+    return not hasattr(jnp.empty(0), 'platform')

@@ -33,12 +33,11 @@ from warnings import warn
 
 from equinox import Module
 from jax import device_count
-from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real
 
 from bartz import mcmcloop, mcmcstep
 from bartz._interface import Bart, DataFrame, FloatLike, Series
-from bartz.jaxext import get_default_device
+from bartz.jaxext import get_default_device, jit_active
 
 
 class mc_gbart(Module):
@@ -512,7 +511,7 @@ def get_platform(y_train: Array | Series, mc_cores: int) -> str:
     if isinstance(y_train, Array) and hasattr(y_train, 'platform'):
         return y_train.platform()
     elif (
-        not isinstance(y_train, Array) and hasattr(jnp.zeros(()), 'platform')
+        not isinstance(y_train, Array) and not jit_active()
         # this condition means: y_train is not an array, but we are not under
         # jit, so y_train is going to be converted to an array on the default
         # device

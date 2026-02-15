@@ -35,8 +35,8 @@ UV_RUN = uv run --dev $(EXTRAS)
 OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]*\).*/\1/')
 UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=2025-05-15 --isolated
 
-.PHONY: all
-all:
+.PHONY: help
+help:
 	@echo "Available targets:"
 	@echo "- setup: create R and Python environments for development"
 	@echo "- tests: run unit tests on cpu, saving coverage information"
@@ -63,6 +63,7 @@ all:
 	@echo "- ipython-old: start an ipython shell with oldest supported python and dependencies"
 	@echo
 	@echo "Release workflow:"
+	@echo "- do a PR that re-runs benchmarks"
 	@echo "- create a new branch"
 	@echo "- $$ uv version --bump major|minor|patch"
 	@echo "- describe release in docs/changelog.md"
@@ -71,7 +72,7 @@ all:
 	@echo "- $$ make release (iterate to fix problems)"
 	@echo "- if CI does not pass, debug and go back to make release"
 	@echo "- merge PR"
-	@echo "- if CI does not pass, debug and go back to make release"
+	@echo "- if CI does not pass, debug and go back to open PR"
 	@echo "- $$ make upload"
 	@echo "- publish github release (updates zenodo automatically)"
 	@echo "- if the online docs are not up-to-date, merge another PR to trigger a new merge CI"
@@ -82,6 +83,9 @@ setup:
 	Rscript -e "renv::restore()"
 	$(UV_RUN) pre-commit install --install-hooks
 
+.PHONY: lint
+lint:
+	$(UV_RUN) pre-commit run --all-files ruff-check
 
 ################# TESTS #################
 
@@ -89,7 +93,7 @@ TESTS_VARS = COVERAGE_FILE=.coverage.tests$(COVERAGE_SUFFIX)
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
 TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=2
-TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_MEM_FRACTION=.20
+TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_PREALLOCATE=false
 TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=3
 
 .PHONY: tests
@@ -129,7 +133,6 @@ docs-latest:
 	WORKTREE_DIR=$$(mktemp -d) && \
 	trap "git worktree remove --force '$$WORKTREE_DIR' 2>/dev/null || rm -rf '$$WORKTREE_DIR'" EXIT && \
 	git worktree add --detach "$$WORKTREE_DIR" "$$LATEST_TAG" && \
-	uv sync --all-groups --directory "$$WORKTREE_DIR" && \
 	$(MAKE) -C "$$WORKTREE_DIR" docs && \
 	test ! -d _site/docs || rm -r _site/docs && \
 	mv "$$WORKTREE_DIR/_site/docs-dev" _site/docs
@@ -180,8 +183,9 @@ release: clean update-deps copy-version check-committed tests tests-old docs
 .PHONY: version-tag
 version-tag: copy-version check-committed
 	git fetch --tags
-	git tag v$(shell uv run python -c 'import bartz; print(bartz.__version__)')
-	git push --tags
+	$(eval VERSION_TAG := v$(shell uv run python -c 'import bartz; print(bartz.__version__)'))
+	git tag $(VERSION_TAG)
+	git push origin $(VERSION_TAG)
 
 .PHONY: upload
 upload: version-tag

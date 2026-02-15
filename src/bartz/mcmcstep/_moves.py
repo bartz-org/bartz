@@ -616,7 +616,9 @@ def randint_exclude(
     return u, num_allowed
 
 
-def _process_exclude(sup, exclude):
+def _process_exclude(
+    sup: int | Integer[Array, ''], exclude: Integer[Array, ' n']
+) -> tuple[Integer[Array, ' n'], Integer[Array, '']]:
     exclude = jnp.unique(exclude, size=exclude.size, fill_value=sup)
     num_allowed = sup - jnp.sum(exclude < sup)
     return exclude, num_allowed

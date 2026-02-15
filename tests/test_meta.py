@@ -30,26 +30,29 @@ import pytest
 from jax import debug_nans, jit, random
 from jax import numpy as jnp
 from jax.errors import KeyReuseError
+from jaxtyping import Array, Float, Key
+
+from bartz.jaxext import split
 
 
 @pytest.fixture
-def keys1(keys):
+def keys1(keys: split) -> split:
     """Pass-through the `keys` fixture."""
     return keys
 
 
 @pytest.fixture
-def keys2(keys):
+def keys2(keys: split) -> split:
     """Pass-through the `keys` fixture."""
     return keys
 
 
-def test_random_keys_do_not_depend_on_fixture(keys1, keys2):
+def test_random_keys_do_not_depend_on_fixture(keys1: split, keys2: split) -> None:
     """Check that the `keys` fixture is per-test-case, not per-fixture."""
     assert keys1 is keys2
 
 
-def test_number_of_random_keys(keys):
+def test_number_of_random_keys(keys: split) -> None:
     """Check the fixed number of available keys.
 
     This is here just as reference for the `test_random_keys_are_consumed` test
@@ -59,21 +62,25 @@ def test_number_of_random_keys(keys):
 
 
 @pytest.fixture
-def consume_one_key(keys):  # noqa: D103
+def consume_one_key(keys: split) -> Key[Array, '']:  # noqa: D103
     return keys.pop()
 
 
 @pytest.fixture
-def consume_another_key(keys):  # noqa: D103
+def consume_another_key(keys: split) -> Key[Array, '']:  # noqa: D103
     return keys.pop()
 
 
-def test_random_keys_are_consumed(consume_one_key, consume_another_key, keys):  # noqa: ARG001
+def test_random_keys_are_consumed(
+    consume_one_key: Key[Array, ''],  # noqa: ARG001
+    consume_another_key: Key[Array, ''],  # noqa: ARG001
+    keys: split,
+) -> None:
     """Check that the random keys in `keys` can't be used more than once."""
     assert len(keys) == 126
 
 
-def test_debug_key_reuse(keys):
+def test_debug_key_reuse(keys: split) -> None:
     """Check that the jax debug_key_reuse option works."""
     key = keys.pop()
     random.uniform(key)
@@ -81,11 +88,11 @@ def test_debug_key_reuse(keys):
         random.uniform(key)
 
 
-def test_debug_key_reuse_within_jit(keys):
+def test_debug_key_reuse_within_jit(keys: split) -> None:
     """Check that the jax debug_key_reuse option works within a jitted function."""
 
     @jit
-    def func(key):
+    def func(key: Key[Array, '']) -> Float[Array, '']:
         return random.uniform(key) + random.uniform(key)
 
     with pytest.raises(KeyReuseError):
@@ -95,7 +102,7 @@ def test_debug_key_reuse_within_jit(keys):
 class TestJaxNoCopyBehavior:
     """Check whether jax makes actual copies of arrays in various conditions."""
 
-    def test_unconditional_buffer_donation(self):
+    def test_unconditional_buffer_donation(self) -> None:
         """Test jax donates buffers even if they are small."""
         # donation disabled under debug_nans, see jax/issues/#33949
         with debug_nans(False):
@@ -104,7 +111,7 @@ class TestJaxNoCopyBehavior:
             xp = x.unsafe_buffer_pointer()
 
             @partial(jit, donate_argnums=(0,))
-            def noop(x):
+            def noop(x: Array) -> Array:
                 return x
 
             y = noop(x)
@@ -114,7 +121,7 @@ class TestJaxNoCopyBehavior:
             with pytest.raises(RuntimeError, match=r'delete'):
                 x[0]
 
-    def test_jnp_array_copy_no_jit(self):
+    def test_jnp_array_copy_no_jit(self) -> None:
         """Test jnp.array makes copies outside jitted functions."""
         y = jnp.arange(100)
         yp = y.unsafe_buffer_pointer()
@@ -124,7 +131,7 @@ class TestJaxNoCopyBehavior:
 
         assert zp != yp
 
-    def test_jnp_array_no_copy_jit(self):
+    def test_jnp_array_no_copy_jit(self) -> None:
         """Check jnp.array does not make copies within jit."""
         # donation disabled under debug_nans, see jax/issues/#33949
         with debug_nans(False):
@@ -132,7 +139,7 @@ class TestJaxNoCopyBehavior:
             yp = y.unsafe_buffer_pointer()
 
             @partial(jit, donate_argnums=(0,))
-            def array(x):
+            def array(x: Array) -> Array:
                 return jnp.array(x)
 
             q = array(y)

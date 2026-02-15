@@ -29,10 +29,10 @@ from dataclasses import replace
 from functools import partial
 from math import ceil, log2
 from re import fullmatch
-from typing import Literal
+from typing import Any, Literal
 
 import numpy
-from equinox import Module, field
+from equinox import Module, error_if, field
 from jax import jit, lax, random, vmap
 from jax import numpy as jnp
 from jax.tree_util import tree_map
@@ -85,7 +85,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         first_indent: str,
         next_indent: str,
         unused: bool,
-    ):
+    ) -> None:
         if index >= len(tree.leaf_tree):
             return
 
@@ -372,7 +372,9 @@ def check_rule_consistency(
     upper = jnp.full(max_split.size, large, dtype)
     # the split must be in (lower[var], upper[var]]
 
-    def _check_recursive(node, lower, upper):
+    def _check_recursive(
+        node: int, lower: UInt[Array, ' p'], upper: UInt[Array, ' p']
+    ) -> Bool[Array, '']:
         # read decision rule
         var = tree.var_tree[node]
         split = tree.split_tree[node]
@@ -943,7 +945,7 @@ def sample_prior_onetree(
     carry = SamplePriorCarry.initial(key, sigma_mu, p_nonterminal, max_split)
     xs = SamplePriorX.initial(p_nonterminal)
 
-    def loop(carry: SamplePriorCarry, x: SamplePriorX):
+    def loop(carry: SamplePriorCarry, x: SamplePriorX) -> tuple[SamplePriorCarry, None]:
         keys = split_key(carry.key, 4)
 
         # get variables at current stack level
@@ -1091,16 +1093,18 @@ class debug_mc_gbart(mc_gbart):
         Passed to `mc_gbart`.
     """
 
-    def __init__(self, *args, check_trees: bool = True, **kw):
+    def __init__(self, *args: Any, check_trees: bool = True, **kw: Any) -> None:
         super().__init__(*args, **kw)
         if check_trees:
             bad = self.check_trees()
             bad_count = jnp.count_nonzero(bad)
-            assert bad_count == 0
+            self._bart.__dict__['offset'] = error_if(
+                self._bart.offset, bad_count > 0, 'invalid trees found in trace'
+            )
 
     def print_tree(
         self, i_chain: int, i_sample: int, i_tree: int, print_all: bool = False
-    ):
+    ) -> None:
         """Print a single tree in human-readable format.
 
         Parameters
@@ -1144,7 +1148,7 @@ class debug_mc_gbart(mc_gbart):
             norm2 = jnp.einsum('ij,ij->i', bart.resid, bart.resid)
             beta = bart.error_cov_scale / 2 + norm2 / 2
         error_cov_inv = alpha / beta
-        return jnp.sqrt(lax.reciprocal(error_cov_inv))
+        return jnp.sqrt(jnp.reciprocal(error_cov_inv))
 
     def compare_resid(
         self,
@@ -1186,7 +1190,7 @@ class debug_mc_gbart(mc_gbart):
         """
         trace = self._main_trace
 
-        def acc(prefix):
+        def acc(prefix: str) -> Float32[Array, ' mc_cores']:
             acc = getattr(trace, f'{prefix}_acc_count')
             prop = getattr(trace, f'{prefix}_prop_count')
             return acc.sum(axis=1) / prop.sum(axis=1)
@@ -1212,7 +1216,7 @@ class debug_mc_gbart(mc_gbart):
         """
         trace = self._main_trace
 
-        def prop(prefix):
+        def prop(prefix: str) -> Array:
             return getattr(trace, f'{prefix}_prop_count').sum(axis=1)
 
         pgrow = prop('grow')
@@ -1313,7 +1317,7 @@ class debug_gbart(debug_mc_gbart, gbart):
         Passed to `gbart`.
     check_trees
         If `True`, check all trees with `check_trace` after running the MCMC,
-        and assert that they are all valid. Set to `False` to allow jax tracing.
+        and assert that they are all valid.
     **kw
         Passed to `gbart`.
     """

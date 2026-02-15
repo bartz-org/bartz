@@ -99,7 +99,7 @@ def run_sim_impl(
     # adapt for older versions
     sig = signature(mc_gbart)
 
-    def drop_if_missing(arg: str):
+    def drop_if_missing(arg: str) -> None:
         if arg not in sig.parameters:
             kw.pop(arg)
 

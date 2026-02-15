@@ -28,10 +28,12 @@ from cProfile import Profile
 from functools import partial
 from pstats import Stats
 from time import perf_counter, sleep
+from typing import NamedTuple
 
 import pytest
 from jax import debug_infs, debug_nans, jit, pure_callback, random
 from jax import numpy as jnp
+from jaxtyping import Array, Bool, Float32, Int32, Integer
 from numpy.testing import assert_array_equal
 
 from bartz._profiler import (
@@ -40,8 +42,8 @@ from bartz._profiler import (
     jit_and_block_if_profiling,
     jit_if_not_profiling,
     profile_mode,
-    scan_if_not_profiling,
     set_profile_mode,
+    while_loop_if_not_profiling,
 )
 from bartz.jaxext import get_default_device
 
@@ -49,18 +51,18 @@ from bartz.jaxext import get_default_device
 class TestFlag:
     """Test the functionality of the global profile mode flag."""
 
-    def test_initial_state(self):
+    def test_initial_state(self) -> None:
         """Check profiling mode is off by default."""
         assert not get_profile_mode()
 
-    def test_getter_setter(self):
+    def test_getter_setter(self) -> None:
         """Test setting and getting the profile mode."""
         set_profile_mode(True)
         assert get_profile_mode()
         set_profile_mode(False)
         assert not get_profile_mode()
 
-    def test_context_manager(self):
+    def test_context_manager(self) -> None:
         """Test the profile mode context manager."""
         with profile_mode(True):
             assert get_profile_mode()
@@ -84,32 +86,40 @@ class TestScanIfNotProfiling:
     """Test `scan_if_not_profiling`."""
 
     @pytest.mark.parametrize('mode', [True, False])
-    def test_result(self, mode: bool):
+    def test_result(self, mode: bool) -> None:
         """Test that `scan_if_not_profiling` has the right output on a simple example."""
 
-        def body(carry, _):
-            return carry + 1, None
+        def cond(carry: Integer[Array, '']) -> Bool[Array, '']:
+            return carry < 5
+
+        def body(carry: Integer[Array, '']) -> Integer[Array, '']:
+            return carry + 1
 
         with profile_mode(mode):
-            carry, ys = scan_if_not_profiling(body, 0, None, 5)
-            assert ys is None
+            carry = while_loop_if_not_profiling(cond, body, 0)
             assert carry == 5
 
-    def test_does_not_jit(self):
+    def test_does_not_jit(self) -> None:
         """Check that `scan_if_not_profiling` does not jit the function in profiling mode."""
 
-        def body(carry, _):
-            return carry.block_until_ready(), None
-            # block_until_ready errors under jit
+        class Carry(NamedTuple):
+            i: Int32[Array, '']
+            state: Int32[Array, '']
+
+        def cond(carry: Carry) -> Bool[Array, '']:
+            return carry.i < 5
+
+        def body(carry: Carry) -> Carry:
+            return Carry(carry.i + 1, carry.state.block_until_ready())
 
         with profile_mode(True):
-            scan_if_not_profiling(body, jnp.int32(0), None, 5)
+            while_loop_if_not_profiling(cond, body, Carry(jnp.int32(0), jnp.int32(0)))
 
         with pytest.raises(
             AttributeError,
             match='DynamicJaxprTracer has no attribute block_until_ready',
         ):
-            scan_if_not_profiling(body, 0, None, 5)
+            while_loop_if_not_profiling(cond, body, Carry(jnp.int32(0), jnp.int32(0)))
 
 
 class TestCondIfNotProfiling:
@@ -117,7 +127,7 @@ class TestCondIfNotProfiling:
 
     @pytest.mark.parametrize('mode', [True, False])
     @pytest.mark.parametrize('pred', [True, False])
-    def test_result(self, mode: bool, pred: bool):
+    def test_result(self, mode: bool, pred: bool) -> None:
         """Test that `cond_if_not_profiling` has the right output on a simple example."""
         with profile_mode(mode):
             out = cond_if_not_profiling(
@@ -125,7 +135,7 @@ class TestCondIfNotProfiling:
             )
             assert out == (4 if pred else 6)
 
-    def test_does_not_jit(self):
+    def test_does_not_jit(self) -> None:
         """Check that `cond_if_not_profiling` does not jit the function in profiling mode."""
         with profile_mode(True):
             cond_if_not_profiling(
@@ -151,10 +161,10 @@ class TestJitIfNotProfiling:
     """Test `jit_if_not_profiling`."""
 
     @pytest.mark.parametrize('mode', [True, False])
-    def test_result(self, mode: bool):
+    def test_result(self, mode: bool) -> None:
         """Test that `jit_if_not_profiling` has the right output in both modes."""
 
-        def func(x):
+        def func(x: Integer[Array, '']) -> Integer[Array, '']:
             return x * 2 + 1
 
         jitted_func = jit_if_not_profiling(func)
@@ -163,10 +173,10 @@ class TestJitIfNotProfiling:
             result = jitted_func(5)
             assert result == 11
 
-    def test_does_not_jit(self):
+    def test_does_not_jit(self) -> None:
         """Check that `jit_if_not_profiling` does not jit the function in profiling mode."""
 
-        def func(x):
+        def func(x: Int32[Array, '']) -> Int32[Array, '']:
             return x.block_until_ready()
             # block_until_ready errors under jit
 
@@ -187,10 +197,10 @@ class TestJitAndBlockIfProfiling:
     """Test `jit_and_block_if_profiling`."""
 
     @pytest.mark.parametrize('mode', [True, False])
-    def test_result(self, mode: bool):
+    def test_result(self, mode: bool) -> None:
         """Test that `jit_and_block_if_profiling` has the right output in both modes."""
 
-        def func(x):
+        def func(x: Integer[Array, '']) -> Integer[Array, '']:
             return x * 2 + 1
 
         jitted_func = jit_and_block_if_profiling(func)
@@ -199,10 +209,10 @@ class TestJitAndBlockIfProfiling:
             result = jitted_func(5)
             assert result == 11
 
-    def test_jits_when_profiling(self):
+    def test_jits_when_profiling(self) -> None:
         """Check that `jit_and_block_if_profiling` jits when profiling is enabled."""
 
-        def func(x):
+        def func(x: Int32[Array, '']) -> Int32[Array, '']:
             return x.block_until_ready()
             # block_until_ready errors under jit
 
@@ -222,10 +232,10 @@ class TestJitAndBlockIfProfiling:
         with profile_mode(False):
             jitted_func(jnp.int32(0))
 
-    def test_static_args(self):
+    def test_static_args(self) -> None:
         """Check that it works with static arguments."""
 
-        def func(n: int):
+        def func(n: int) -> Integer[Array, ' {n}']:
             return jnp.arange(n)
 
         jitted_func = jit_and_block_if_profiling(func, static_argnums=(0,))
@@ -236,7 +246,7 @@ class TestJitAndBlockIfProfiling:
 
     @pytest.mark.flaky(max_runs=3)
     # flaky because it involves comparing time measurements done on the fly
-    def test_blocks_execution(self):
+    def test_blocks_execution(self) -> None:
         """Check that `jit_and_block_if_profiling` blocks execution when profiling."""
         with debug_nans(False), debug_infs(False):
             platform = get_default_device().platform
@@ -287,15 +297,16 @@ class TestJitAndBlockIfProfiling:
                 f'Expected async execution << {expected:#.2g}s, got {elapsed:#.2g}s'
             )
 
-    def test_profile(self):
+    def test_profile(self) -> None:
         """Test `jit_and_block_if_profiling` under the Python profiler."""
         runtime = 0.1
 
         @jit_and_block_if_profiling
-        def awlkugh():  # weird name to make sure identifiers are legit
+        # weird name to make sure identifiers are legit
+        def awlkugh() -> Int32[Array, '']:
             x = jnp.int32(0)
 
-            def sleeper(x):
+            def sleeper(x: Int32[Array, '']) -> Int32[Array, '']:
                 sleep(runtime)
                 return x
 
@@ -319,7 +330,7 @@ class TestJitAndBlockIfProfiling:
 
 
 @partial(jit, static_argnums=(0,))
-def idle(n: int):
+def idle(n: int) -> Float32[Array, ' {n} {n}']:
     """Waste time in jax computation."""
     key = random.key(0)
     x = random.normal(key, (n, n))

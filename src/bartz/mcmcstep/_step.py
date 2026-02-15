@@ -38,7 +38,6 @@ import jax
 from equinox import Module, tree_at
 from jax import lax, random, vmap
 from jax import numpy as jnp
-from jax.lax import cond
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
 from jax.sharding import Mesh, PartitionSpec
@@ -445,7 +444,9 @@ def _compute_count_or_prec_trees(
         compute = vmap(_compute_count_or_prec_tree, in_axes=(None, 0, 0, None))
         return compute(prec_scale, leaf_indices, moves, config)
 
-    def compute(args):
+    def compute(
+        args: tuple[UInt[Array, ' n'], Moves],
+    ) -> tuple[UInt32[Array, ' 2**d'], Counts] | tuple[Float32[Array, ' 2**d'], Precs]:
         leaf_indices, moves = args
         return _compute_count_or_prec_tree(prec_scale, leaf_indices, moves, config)
 
@@ -644,8 +645,8 @@ def _precompute_likelihood_terms_uv(
     leaf_prior_cov_inv: Float32[Array, ''],
     move_precs: Precs | Counts,
 ) -> tuple[PreLkV, PreLk]:
-    sigma2 = lax.reciprocal(error_cov_inv)
-    sigma_mu2 = lax.reciprocal(leaf_prior_cov_inv)
+    sigma2 = jnp.reciprocal(error_cov_inv)
+    sigma_mu2 = jnp.reciprocal(leaf_prior_cov_inv)
     left = sigma2 + move_precs.left * sigma_mu2
     right = sigma2 + move_precs.right * sigma_mu2
     total = sigma2 + move_precs.total * sigma_mu2
@@ -752,7 +753,7 @@ def _precompute_leaf_terms_uv(
     z: Float32[Array, 'num_trees 2**d'] | None = None,
 ) -> PreLf:
     prec_lk = prec_trees * error_cov_inv
-    var_post = lax.reciprocal(prec_lk + leaf_prior_cov_inv)
+    var_post = jnp.reciprocal(prec_lk + leaf_prior_cov_inv)
     if z is None:
         z = random.normal(key, prec_trees.shape, error_cov_inv.dtype)
     return PreLf(
@@ -885,7 +886,17 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
         The accepted/rejected moves, with `acc` and `to_prune` set.
     """
 
-    def loop(resid, pt):
+    def loop(
+        resid: Float32[Array, ' n'] | Float32[Array, ' k n'], pt: SeqStageInPerTree
+    ) -> tuple[
+        Float32[Array, ' n'] | Float32[Array, ' k n'],
+        tuple[
+            Float32[Array, ' 2**d'] | Float32[Array, ' k 2**d'],
+            Bool[Array, ''],
+            Bool[Array, ''],
+            Float32[Array, ''] | None,
+        ],
+    ]:
         resid, leaf_tree, acc, to_prune, lkratio = accept_move_and_sample_leaves(
             resid,
             SeqStageInAllTrees(
@@ -1142,7 +1153,7 @@ def _scatter_add(
     return _scatter_add(values, indices)
 
 
-def _get_shard_map_patch_kwargs():
+def _get_shard_map_patch_kwargs() -> dict[str, bool]:
     # see jax/issues/#34249, problem with vmap(shard_map(psum))
     # we tried the config jax_disable_vmap_shmap_error but it didn't work
     if jax.__version__ in ('0.8.1', '0.8.2'):
@@ -1201,7 +1212,9 @@ def _compute_likelihood_ratio_mv(
     right_resid: Float32[Array, ' k'],
     prelkv: PreLkV,
 ) -> Float32[Array, '']:
-    def _quadratic_form(r, mat):
+    def _quadratic_form(
+        r: Float32[Array, ' k'], mat: Float32[Array, 'k k']
+    ) -> Float32[Array, '']:
         return r @ mat @ r
 
     qf_left = _quadratic_form(left_resid, prelkv.left)
@@ -1577,7 +1590,7 @@ def step_sparse(key: Key[Array, ''], bart: State) -> State:
     Updated BART state with re-sampled `log_s` and `theta`.
     """
     if bart.config.sparse_on_at is not None:
-        bart = cond(
+        bart = lax.cond(
             bart.config.steps_done < bart.config.sparse_on_at,
             lambda _key, bart: bart,
             _step_sparse,
@@ -1587,7 +1600,7 @@ def step_sparse(key: Key[Array, ''], bart: State) -> State:
     return bart
 
 
-def _step_sparse(key, bart):
+def _step_sparse(key: Key[Array, ''], bart: State) -> State:
     keys = split(key)
     bart = step_s(keys.pop(), bart)
     if bart.forest.rho is not None:
@@ -1597,7 +1610,7 @@ def _step_sparse(key, bart):
 
 @jit_if_profiling
 # jit to avoid the overhead of replace(_: Module)
-def step_config(bart):
+def step_config(bart: State) -> State:
     config = bart.config
     config = replace(config, steps_done=config.steps_done + 1)
     return replace(bart, config=config)

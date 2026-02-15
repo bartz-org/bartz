@@ -25,9 +25,10 @@
 """Additions to jax."""
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from functools import partial
+from typing import Any
 
 import jax
 from jax import (
@@ -36,12 +37,12 @@ from jax import (
     device_count,
     ensure_compile_time_eval,
     jit,
+    lax,
     random,
     vmap,
 )
 from jax import numpy as jnp
 from jax.dtypes import prng_key
-from jax.lax import scan
 from jax.scipy.special import ndtr
 from jaxtyping import Array, Bool, Float32, Key, Scalar, Shaped
 
@@ -49,7 +50,7 @@ from bartz.jaxext._autobatch import autobatch  # noqa: F401
 from bartz.jaxext.scipy.special import ndtri
 
 
-def vmap_nodoc(fun, *args, **kw):
+def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:
     """
     Acts like `jax.vmap` but preserves the docstring of the function unchanged.
 
@@ -62,7 +63,7 @@ def vmap_nodoc(fun, *args, **kw):
     return fun
 
 
-def minimal_unsigned_dtype(value):
+def minimal_unsigned_dtype(value: int) -> jnp.dtype:
     """Return the smallest unsigned integer dtype that can represent `value`."""
     if value < 2**8:
         return jnp.uint8
@@ -103,14 +104,16 @@ def unique(
         return jnp.empty(0, x.dtype), 0
     x = jnp.sort(x)
 
-    def loop(carry, x):
+    def loop(
+        carry: tuple[Scalar, Scalar, Shaped[Array, ' {size}']], x: Scalar
+    ) -> tuple[tuple[Scalar, Scalar, Shaped[Array, ' {size}']], None]:
         i_out, last, out = carry
         i_out = jnp.where(x == last, i_out, i_out + 1)
         out = out.at[i_out].set(x)
         return (i_out, x, out), None
 
     carry = 0, x[0], jnp.full(size, fill_value, x.dtype)
-    (actual_length, _, out), _ = scan(loop, carry, x[:size])
+    (actual_length, _, out), _ = lax.scan(loop, carry, x[:size])
     return out, actual_length + 1
 
 
@@ -136,7 +139,7 @@ class split:
     _keys: tuple[Key[Array, '*batch'], ...]
     _num_used: int
 
-    def __init__(self, key: Key[Array, '*batch'], num: int = 2):
+    def __init__(self, key: Key[Array, '*batch'], num: int = 2) -> None:
         if key.ndim:
             context = debug_key_reuse(False)
         else:
@@ -147,7 +150,7 @@ class split:
             self._keys = _split_unpack(key, num)
         self._num_used = 0
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._keys) - self._num_used
 
     def pop(self, shape: int | tuple[int, ...] = ()) -> Key[Array, '*batch {shape}']:
@@ -273,7 +276,7 @@ def truncated_normal_onesided(
 def get_default_device() -> Device:
     """Get the current default JAX device."""
     with ensure_compile_time_eval():
-        return jnp.zeros(()).device
+        return jnp.empty(0).device
 
 
 def get_device_count() -> int:
@@ -285,3 +288,8 @@ def get_device_count() -> int:
 def is_key(x: object) -> bool:
     """Determine if `x` is a jax random key."""
     return isinstance(x, Array) and jnp.issubdtype(x.dtype, prng_key)
+
+
+def jit_active() -> bool:
+    """Check if we are under jit."""
+    return not hasattr(jnp.empty(0), 'platform')

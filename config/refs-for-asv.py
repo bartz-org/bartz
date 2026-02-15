@@ -40,7 +40,7 @@ from git import Repo
 CUTOFF_DATE = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
 
 
-def main():
+def main() -> None:
     repo = Repo('.')
 
     # Get the default branch name from git

@@ -34,13 +34,13 @@ def get_version() -> str:
         return tomli.load(file)['project']['version']
 
 
-def update_version():
+def update_version() -> None:
     """Update the version file."""
     version = get_version()
     Path('src/bartz/_version.py').write_text(f'__version__ = {version!r}\n')
 
 
-def main():
+def main() -> None:
     command = sys.argv[1]
     if command == 'get_version':
         print(get_version())

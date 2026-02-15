@@ -144,8 +144,12 @@ skip-magic-trailing-comma = true
 [tool.ruff.lint.isort]
 split-on-trailing-comma = false
 
+[tool.ruff.lint.flake8-annotations]
+allow-star-arg-any = true
+
 [tool.ruff.lint]
 select = [
+    "ICN",  # flake8-import-conventions
     "ERA",  # eradicate
     "S",    # flake8-bandit
     "BLE",  # flake8-blind-except
@@ -187,6 +191,7 @@ select = [
     "FURB", # refurb
     "RUF",  # Ruff-specific rules
     "TRY",  # tryceratops
+    "ANN",  # flake8-annotations
 ]
 ignore = [
     "B028",    # warn with stacklevel = 2
@@ -236,6 +241,15 @@ min-file-size = 1
 [tool.ruff.lint.flake8-tidy-imports]
 banned-module-level-imports = ["bartz.debug"]
 ban-relative-imports = "all"
+
+[tool.ruff.lint.flake8-import-conventions.aliases]
+"jax.numpy" = "jnp"
+
+[tool.ruff.lint.flake8-import-conventions]
+banned-from = ["jax.random", "jax.lax", "jax.numpy", "jax.tree"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"jax.lax.reciprocal".msg = "Use jnp.reciprocal"
 
 [tool.pydoclint]
 arg-type-hints-in-signature = true

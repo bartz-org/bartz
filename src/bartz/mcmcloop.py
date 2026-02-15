@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import fields
 from functools import partial, wraps
 from math import floor
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 import jax
 import numpy
@@ -48,17 +48,28 @@ from jax import (
 from jax import numpy as jnp
 from jax.nn import softmax
 from jax.sharding import Mesh, PartitionSpec
-from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, PyTree, Shaped, UInt
+from jaxtyping import (
+    Array,
+    ArrayLike,
+    Bool,
+    Float32,
+    Int32,
+    Integer,
+    Key,
+    PyTree,
+    Shaped,
+    UInt,
+)
 
 from bartz import jaxext, mcmcstep
 from bartz._profiler import (
     cond_if_not_profiling,
     get_profile_mode,
     jit_if_not_profiling,
-    scan_if_not_profiling,
+    while_loop_if_not_profiling,
 )
 from bartz.grove import TreeHeaps, evaluate_forest, forest_fill, var_histogram
-from bartz.jaxext import autobatch
+from bartz.jaxext import autobatch, jit_active
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size, get_num_chains
 
@@ -300,8 +311,7 @@ def run_mcmc(
         # same code path for benchmarking and testing
 
     # error if under jit and there are unrolled loops or profile mode is on
-    under_jit = not hasattr(jnp.empty(0), 'platform')
-    if under_jit and (n_outer > 1 or get_profile_mode()):
+    if jit_active() and (n_outer > 1 or get_profile_mode()):
         msg = (
             '`run_mcmc` was called within a jit-compiled function and '
             'there are either more than 1 outer loops or profile mode is active, '
@@ -374,10 +384,13 @@ def _compute_i_skip(
     )
 
 
+T = TypeVar('T')
+
+
 class _CallCounter:
     """Wrap a callable to check it's not called more than once."""
 
-    def __init__(self, func: Callable) -> None:
+    def __init__(self, func: Callable[..., T]) -> None:
         self.func = func
         self.n_calls = 0
 
@@ -385,7 +398,7 @@ class _CallCounter:
         """Reset the call counter."""
         self.n_calls = 0
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    def __call__(self, *args: Any, **kwargs: Any) -> T:
         if self.n_calls and not get_profile_mode():
             msg = (
                 'The inner loop of `run_mcmc` was traced more than once, '
@@ -414,8 +427,15 @@ def _run_mcmc_inner_loop(
     i_outer: Int32[Array, ''],
     n_iters: Int32[Array, ''],
 ) -> _Carry:
-    def loop_impl(carry: _Carry) -> _Carry:
-        """Loop body to run if i_total < n_iters."""
+    # determine number of iterations for this loop batch
+    i_upper = jnp.minimum(carry.i_total + inner_loop_length, n_iters)
+
+    def cond(carry: _Carry) -> Bool[Array, '']:
+        """Whether to continue the MCMC loop."""
+        return carry.i_total < i_upper
+
+    def body(carry: _Carry) -> _Carry:
+        """Update the MCMC state."""
         # split random key
         keys = jaxext.split(carry.key, 3)
         key = keys.pop()
@@ -464,18 +484,7 @@ def _run_mcmc_inner_loop(
             callback_state=callback_state,
         )
 
-    def loop_noop(carry: _Carry) -> _Carry:
-        """Loop body to run if i_total >= n_iters; it does nothing."""
-        return carry
-
-    def loop(carry: _Carry, _) -> tuple[_Carry, None]:
-        carry = cond_if_not_profiling(
-            carry.i_total < n_iters, loop_impl, loop_noop, carry
-        )
-        return carry, None
-
-    carry, _ = scan_if_not_profiling(loop, carry, None, inner_loop_length)
-    return carry
+    return while_loop_if_not_profiling(cond, body, carry)
 
 
 @partial(jit, donate_argnums=(0, 1), static_argnums=(2, 3))
@@ -522,11 +531,12 @@ def _set(
 
     def at_set(
         trace: Shaped[Array, 'chains samples *shape']
+        | None
         | Shaped[Array, ' samples *shape']
         | None,
         val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'] | None,
         chain_axis: int | None,
-    ):
+    ) -> Shaped[Array, 'chains samples *shape'] | None:
         if trace is None or trace.size == 0:
             # this handles the case where an array is empty because jax refuses
             # to index into an axis of length 0, even if just in the abstract,
@@ -576,7 +586,7 @@ def make_default_callback(
     >>> run_mcmc(key, state, ..., **make_default_callback(state, ...))
     """
 
-    def as_replicated_array_or_none(val: None | Any) -> None | Array:
+    def as_replicated_array_or_none(val: ArrayLike | None) -> None | Array:
         return None if val is None else _replicate(jnp.asarray(val), state.config.mesh)
 
     return dict(
@@ -608,8 +618,8 @@ def print_callback(
     n_save: Int32[Array, ''],
     n_skip: Int32[Array, ''],
     callback_state: PrintCallbackState,
-    **_,
-):
+    **_: Any,
+) -> None:
     """Print a dot and/or a report periodically during the MCMC."""
     report_every = callback_state.report_every
     dot_every = callback_state.dot_every
@@ -621,7 +631,7 @@ def print_callback(
     report_cond = get_cond(report_every)
     dot_cond = get_cond(dot_every)
 
-    def line_report_branch():
+    def line_report_branch() -> None:
         if report_every is None:
             return
         if dot_every is None:
@@ -643,7 +653,7 @@ def print_callback(
             fill=forest_fill(bart.forest.split_tree),
         )
 
-    def just_dot_branch():
+    def just_dot_branch() -> None:
         if dot_every is None:
             return
         debug.callback(
@@ -658,7 +668,7 @@ def print_callback(
     )
 
 
-def _convert_jax_arrays_in_args(func: Callable) -> Callable:
+def _convert_jax_arrays_in_args(func: Callable[..., T]) -> Callable[..., T]:
     """Remove jax arrays from a function arguments.
 
     Converts all `jax.Array` instances in the arguments to either Python scalars
@@ -666,7 +676,7 @@ def _convert_jax_arrays_in_args(func: Callable) -> Callable:
     """
 
     def convert_jax_arrays(pytree: PyTree) -> PyTree:
-        def convert_jax_array(val: Any) -> Any:
+        def convert_jax_array(val: object) -> object:
             if not isinstance(val, Array):
                 return val
             elif val.shape:
@@ -677,7 +687,7 @@ def _convert_jax_arrays_in_args(func: Callable) -> Callable:
         return tree.map(convert_jax_array, pytree)
 
     @wraps(func)
-    def new_func(*args, **kw):
+    def new_func(*args: Any, **kw: Any) -> T:
         args = convert_jax_arrays(args)
         kw = convert_jax_arrays(kw)
         return func(*args, **kw)
@@ -701,7 +711,7 @@ def _print_report(
     prune_acc_count: float,
     prop_total: int,
     fill: float,
-):
+) -> None:
     """Print the report for `print_callback`."""
     # compute fractions
     grow_prop = grow_prop_count / prop_total
@@ -748,7 +758,7 @@ class TreesTrace(Module):
     split_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
 
     @classmethod
-    def from_dataclass(cls, obj: TreeHeaps):
+    def from_dataclass(cls, obj: TreeHeaps) -> 'TreesTrace':
         """Create a `TreesTrace` from any `bartz.grove.TreeHeaps`."""
         return cls(**{f.name: getattr(obj, f.name) for f in fields(cls)})
 

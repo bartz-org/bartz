@@ -25,15 +25,15 @@
 """Main high-level interface of the package."""
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypedDict
 
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field
-from jax import Device, device_put, jit, make_mesh
-from jax.lax import collapse
+from jax import Device, device_put, jit, lax, make_mesh
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh
 from jaxtyping import (
@@ -321,9 +321,9 @@ class Bart(Module):
         devices: Device | Sequence[Device] | None = None,
         seed: int | Key[Array, ''] = 0,
         maxdepth: int = 6,
-        init_kw: dict | None = None,
-        run_mcmc_kw: dict | None = None,
-    ):
+        init_kw: Mapping = MappingProxyType({}),
+        run_mcmc_kw: Mapping = MappingProxyType({}),
+    ) -> None:
         # check data and put it in the right format
         x_train, x_train_fmt = self._process_predictor_input(x_train)
         y_train = self._process_response_input(y_train)
@@ -406,7 +406,7 @@ class Bart(Module):
             self.yhat_test = self.predict(x_test)
 
     @property
-    def ndpost(self):
+    def ndpost(self) -> int:
         """The total number of posterior samples after burn-in across all chains.
 
         May be larger than the initialization argument `ndpost` if it was not
@@ -493,7 +493,7 @@ class Bart(Module):
         p = self._mcmc_state.forest.max_split.size
         varcount: Int32[Array, '*chains samples p']
         varcount = compute_varcount(p, self._main_trace)
-        return collapse(varcount, 0, -1)
+        return lax.collapse(varcount, 0, -1)
 
     @cached_property
     def varcount_mean(self) -> Float32[Array, ' p']:
@@ -577,7 +577,9 @@ class Bart(Module):
         return self._predict(x_test)
 
     @staticmethod
-    def _process_predictor_input(x) -> tuple[Shaped[Array, 'p n'], Any]:
+    def _process_predictor_input(
+        x: Real[Any, 'p n'] | DataFrame,
+    ) -> tuple[Shaped[Array, 'p n'], Any]:
         if hasattr(x, 'columns'):
             fmt = dict(kind='dataframe', columns=x.columns)
             x = x.to_numpy().T
@@ -588,7 +590,7 @@ class Bart(Module):
         return x, fmt
 
     @staticmethod
-    def _process_response_input(y) -> Shaped[Array, ' n']:
+    def _process_response_input(y: Shaped[Array, ' n'] | Series) -> Shaped[Array, ' n']:
         if hasattr(y, 'to_numpy'):
             y = y.to_numpy()
         y = jnp.asarray(y)
@@ -596,13 +598,19 @@ class Bart(Module):
         return y
 
     @staticmethod
-    def _check_same_length(x1, x2):
+    def _check_same_length(x1: Array, x2: Array) -> None:
         get_length = lambda x: x.shape[-1]
         assert get_length(x1) == get_length(x2)
 
     @classmethod
     def _process_error_variance_settings(
-        cls, x_train, y_train, sigest, sigdf, sigquant, lamda
+        cls,
+        x_train: Shaped[Array, 'p n'],
+        y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
+        sigest: FloatLike | None,
+        sigdf: FloatLike,
+        sigquant: FloatLike,
+        lamda: FloatLike | None,
     ) -> tuple[Float32[Array, ''] | None, ...]:
         """Return (lamda, sigest)."""
         if y_train.dtype == bool:
@@ -636,7 +644,7 @@ class Bart(Module):
     @jit
     def _linear_regression(
         x_train: Shaped[Array, 'p n'], y_train: Float32[Array, ' n']
-    ):
+    ) -> Float32[Array, '']:
         """Return the error variance estimated with OLS with intercept."""
         x_centered = x_train.T - x_train.mean(axis=1)
         y_centered = y_train - y_train.mean()
@@ -647,7 +655,11 @@ class Bart(Module):
         return chisq / dof
 
     @staticmethod
-    def _check_type_settings(y_train, type, w):  # noqa: A002
+    def _check_type_settings(
+        y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
+        type: str,  # noqa: A002
+        w: Float[Array, ' n'] | None,
+    ) -> None:
         match type:
             case 'wbart':
                 if y_train.dtype != jnp.float32:
@@ -717,10 +729,10 @@ class Bart(Module):
     @staticmethod
     def _process_leaf_sdev_settings(
         y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
-        k: float,
+        k: FloatLike,
         ntree: int,
         tau_num: FloatLike | None,
-    ):
+    ) -> FloatLike:
         """Return sigma_mu."""
         if tau_num is None:
             if y_train.dtype == bool:
@@ -769,7 +781,7 @@ class Bart(Module):
         base: FloatLike,
         maxdepth: int,
         ntree: int,
-        init_kw: dict[str, Any] | None,
+        init_kw: Mapping[str, Any],
         rm_const: bool,
         theta: FloatLike | None,
         a: FloatLike | None,
@@ -782,7 +794,7 @@ class Bart(Module):
         devices: Device | Sequence[Device] | None,
         sparse: bool,
         nskip: int,
-    ):
+    ) -> mcmcstep.State:
         p_nonterminal = make_p_nonterminal(maxdepth, base, power)
 
         if y_train.dtype == bool:
@@ -826,8 +838,7 @@ class Bart(Module):
             n_empty = jnp.sum(max_split == 0).item()
             kw.update(filter_splitless_vars=n_empty)
 
-        if init_kw is not None:
-            kw.update(init_kw)
+        kw.update(init_kw)
 
         state = mcmcstep.init(**kw)
 
@@ -846,7 +857,7 @@ class Bart(Module):
         keepevery: int,
         printevery: int | None,
         seed: int | Integer[Array, ''] | Key[Array, ''],
-        run_mcmc_kw: dict | None,
+        run_mcmc_kw: Mapping,
     ) -> tuple[mcmcstep.State, mcmcloop.BurninTrace, mcmcloop.MainTrace]:
         # prepare random generator seed
         if is_key(seed):
@@ -869,15 +880,14 @@ class Bart(Module):
                 report_every=printevery,
             )
         )
-        if run_mcmc_kw is not None:
-            kw.update(run_mcmc_kw)
+        kw.update(run_mcmc_kw)
 
         return run_mcmc(key, mcmc_state, n_save, **kw)
 
     def _predict(self, x: UInt[Array, 'p m']) -> Float32[Array, 'ndpost m']:
         """Evaluate trees on already quantized `x`."""
         out = evaluate_trace(x, self._main_trace)
-        return collapse(out, 0, -1)
+        return lax.collapse(out, 0, -1)
 
 
 class DeviceKwArgs(TypedDict):

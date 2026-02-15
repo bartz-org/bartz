@@ -1,6 +1,6 @@
 # bartz/src/bartz/jaxext/scipy/special.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -24,29 +24,33 @@
 
 """Mockup of the :external:py:mod:`scipy.special` module."""
 
+from collections.abc import Callable, Sequence
 from functools import wraps
+from typing import Any
 
 from jax import ShapeDtypeStruct, jit, pure_callback
 from jax import numpy as jnp
+from jax.typing import DTypeLike
+from jaxtyping import Array, Float
 from scipy.special import gammainccinv as scipy_gammainccinv
 
 
-def _float_type(*args):
+def _float_type(*args: DTypeLike | Array) -> jnp.dtype:
     """Determine the jax floating point result type given operands/types."""
     t = jnp.result_type(*args)
     return jnp.sin(jnp.empty(0, t)).dtype
 
 
-def _castto(func, dtype):
+def _castto(func: Callable[..., Array], dtype: DTypeLike) -> Callable[..., Array]:
     @wraps(func)
-    def newfunc(*args, **kw):
+    def newfunc(*args: Any, **kw: Any) -> Array:
         return func(*args, **kw).astype(dtype)
 
     return newfunc
 
 
 @jit
-def gammainccinv(a, y):
+def gammainccinv(a: Float[Array, '...'], y: Float[Array, '...']) -> Float[Array, '...']:
     """Survival function inverse of the Gamma(a, 1) distribution."""
     shape = jnp.broadcast_shapes(a.shape, y.shape)
     dtype = _float_type(a.dtype, y.dtype)
@@ -74,7 +78,7 @@ import numpy as np
 from jax import debug_infs, lax
 
 
-def ndtri(p):
+def ndtri(p: Float[Array, '...']) -> Float[Array, '...']:
     """Compute the inverse of the CDF of the Normal distribution function.
 
     This is a patch of `jax.scipy.special.ndtri`.
@@ -86,7 +90,7 @@ def ndtri(p):
     return _ndtri(p)
 
 
-def _ndtri(p):
+def _ndtri(p: Float[Array, '...']) -> Float[Array, '...']:
     # Constants used in piece-wise rational approximations. Taken from the cephes
     # library:
     # https://root.cern.ch/doc/v608/SpecFuncCephesInv_8cxx_source.html
@@ -180,7 +184,9 @@ def _ndtri(p):
     dtype = lax.dtype(p).type
     shape = jnp.shape(p)
 
-    def _create_polynomial(var, coeffs):
+    def _create_polynomial(
+        var: Float[Array, '...'], coeffs: Sequence[float]
+    ) -> Float[Array, '...']:
         """Compute n_th order polynomial via Horner's method."""
         coeffs = np.array(coeffs, dtype)
         if not coeffs.size:

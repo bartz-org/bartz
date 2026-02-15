@@ -1,6 +1,6 @@
 # bartz/tests/rbartpackages/BART3.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -23,6 +23,8 @@
 # SOFTWARE.
 
 """Wrapper for the R package BART3."""
+
+# ruff: noqa: ANN002, ANN003
 
 from typing import NamedTuple, TypedDict
 
@@ -92,7 +94,7 @@ class mc_gbart(RObjectBase):  # noqa: D101 because the R doc is added automatica
     yhat_train_mean: Float64[ndarray, ' n'] | None = None
     yhat_train_upper: Float64[ndarray, ' n'] | None = None
 
-    def __init__(self, *args, **kw):
+    def __init__(self, *args, **kw) -> None:
         super().__init__(*args, **kw)
 
         # fix up attributes

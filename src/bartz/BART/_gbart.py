@@ -24,7 +24,7 @@
 
 """Implement classes `mc_gbart` and `gbart` that mimic the R BART3 package."""
 
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 from functools import cached_property
 from os import cpu_count
 from types import MappingProxyType
@@ -33,12 +33,11 @@ from warnings import warn
 
 from equinox import Module
 from jax import device_count
-from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real
 
 from bartz import mcmcloop, mcmcstep
 from bartz._interface import Bart, DataFrame, FloatLike, Series
-from bartz.jaxext import get_default_device
+from bartz.jaxext import get_default_device, jit_active
 
 
 class mc_gbart(Module):
@@ -259,7 +258,7 @@ class mc_gbart(Module):
         mc_cores: int = 2,
         seed: int | Key[Array, ''] = 0,
         bart_kwargs: Mapping = MappingProxyType({}),
-    ):
+    ) -> None:
         kwargs: dict = dict(
             x_train=x_train,
             y_train=y_train,
@@ -338,7 +337,7 @@ class mc_gbart(Module):
         return self._bart._splits  # noqa: SLF001
 
     @property
-    def _x_train_fmt(self) -> Any:
+    def _x_train_fmt(self) -> Hashable:
         return self._bart._x_train_fmt  # noqa: SLF001
 
     # Cached properties from Bart
@@ -450,7 +449,7 @@ class mc_gbart(Module):
 class gbart(mc_gbart):
     """Subclass of `mc_gbart` that forces `mc_cores=1`."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         if 'mc_cores' in kwargs:
             msg = "gbart.__init__() got an unexpected keyword argument 'mc_cores'"
             raise TypeError(msg)
@@ -458,7 +457,7 @@ class gbart(mc_gbart):
         super().__init__(*args, **kwargs)
 
 
-def process_mc_cores(y_train: Array | Any, mc_cores: int) -> dict[str, Any]:
+def process_mc_cores(y_train: Array | Series, mc_cores: int) -> dict[str, Any]:
     """Determine the arguments to pass to `Bart` to configure multiple chains."""
     # one chain, leave default configuration which is num_chains=None
     if abs(mc_cores) == 1:
@@ -507,12 +506,12 @@ def process_mc_cores(y_train: Array | Any, mc_cores: int) -> dict[str, Any]:
     return kwargs
 
 
-def get_platform(y_train: Array | Any, mc_cores: int) -> str:
+def get_platform(y_train: Array | Series, mc_cores: int) -> str:
     """Get the platform for `process_mc_cores` from `y_train` or the default device."""
     if isinstance(y_train, Array) and hasattr(y_train, 'platform'):
         return y_train.platform()
     elif (
-        not isinstance(y_train, Array) and hasattr(jnp.zeros(()), 'platform')
+        not isinstance(y_train, Array) and not jit_active()
         # this condition means: y_train is not an array, but we are not under
         # jit, so y_train is going to be converted to an array on the default
         # device

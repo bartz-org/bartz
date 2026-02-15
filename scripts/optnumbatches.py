@@ -62,7 +62,7 @@ class ParamsBase(ABC):
     num_batches: Sequence[None | int] = (None, *(2**i for i in range(13 + 1)))
 
     @abstractmethod
-    def valid(self, *, n: int, num_batches: int | None, **_) -> bool:
+    def valid(self, *, n: int, num_batches: int | None, **_: Any) -> bool:
         """Check if a set of parameter values is valid."""
         return num_batches is None or num_batches <= n
 
@@ -87,7 +87,7 @@ class ParamsResid(ParamsBase):
 
     k: Sequence[int | None] = (None, 1, 2, 4)
 
-    def valid(self, *, weights: bool, k: int | None, **values) -> bool:  # ty:ignore[invalid-method-override]
+    def valid(self, *, weights: bool, k: int | None, **values: Any) -> bool:  # ty:ignore[invalid-method-override]
         """Skip heteroskedastic multivariate."""
         return (not weights or k is None) and super().valid(**values)
 
@@ -98,7 +98,7 @@ class ParamsCount(ParamsBase):
 
     num_trees: Sequence[int] = tuple(4**i for i in range(5 + 1))
 
-    def valid(self, *, n: int, num_trees: int, **values) -> bool:  # ty:ignore[invalid-method-override]
+    def valid(self, *, n: int, num_trees: int, **values: Any) -> bool:  # ty:ignore[invalid-method-override]
         """Skip if it would use too much memory."""
         return num_trees * n <= MAX_LEAF_INDICES_SIZE and super().valid(n=n, **values)
 
@@ -121,7 +121,7 @@ class Benchmark:
         num_batches: None | int,
         k: int | None = None,
         num_trees: int = 5,
-    ):
+    ) -> None:
         """Initialize BART state and warmup MCMC step."""
         # generate data
         X, y, max_split = gen_nonsense_data(1, n, k)
@@ -167,11 +167,11 @@ class Benchmark:
         # warm up MCMC
         self.task()
 
-    def task(self):
+    def task(self) -> None:
         """Run `step_trees` once."""
         self.state = block_until_ready(step_func(self.key, self.state))
 
-    def teardown(self):
+    def teardown(self) -> None:
         """Delete the state and the compiled function."""
         del self.state
         step_func.clear_cache()
@@ -274,7 +274,7 @@ def benchmark_loop(args: Namespace) -> DataFrame:
     return DataFrame(results)
 
 
-def enable_compilation_cache():
+def enable_compilation_cache() -> None:
     """Enable JAX compilation caching to speed repeated runs."""
     config.update('jax_compilation_cache_dir', 'config/jax_cache')
     config.update('jax_persistent_cache_min_entry_size_bytes', -1)
@@ -325,7 +325,7 @@ def parse_args() -> Namespace:
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     """Entry point of the script."""
     enable_compilation_cache()
     args = parse_args()

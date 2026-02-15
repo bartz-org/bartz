@@ -140,7 +140,9 @@ def traverse_tree(
         jnp.ones((), minimal_unsigned_dtype(2 * var_tree.size - 1)),
     )
 
-    def loop(carry, _):
+    def loop(
+        carry: tuple[Bool[Array, ''], UInt[Array, '']], _: None
+    ) -> tuple[tuple[Bool[Array, ''], UInt[Array, '']], None]:
         leaf_found, index = carry
 
         split = split_tree[index]

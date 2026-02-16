@@ -30,7 +30,7 @@ from typing import Protocol
 
 from jax import jit, lax, vmap
 from jax import numpy as jnp
-from jaxtyping import Array, Bool, DTypeLike, Float32, Int32, Shaped, UInt
+from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
 
 try:
     from numpy.lib.array_utils import normalize_axis_tuple  # numpy 2
@@ -72,31 +72,6 @@ class TreeHeaps(Protocol):
     0. Unused nodes also have split set to 0. This array can't be dirty."""
 
 
-def make_tree(
-    depth: int, dtype: DTypeLike, batch_shape: tuple[int, ...] = ()
-) -> Shaped[Array, '*batch_shape 2**{depth}']:
-    """
-    Make an array to represent a binary tree.
-
-    Parameters
-    ----------
-    depth
-        The maximum depth of the tree. Depth 1 means that there is only a root
-        node.
-    dtype
-        The dtype of the array.
-    batch_shape
-        The leading shape of the array, to represent multiple trees and/or
-        multivariate trees.
-
-    Returns
-    -------
-    An array of zeroes with the appropriate shape.
-    """
-    shape = (*batch_shape, 2**depth)
-    return jnp.zeros(shape, dtype)
-
-
 def tree_depth(tree: Shaped[Array, '*batch_shape 2**d']) -> int:
     """
     Return the maximum depth of a tree.
@@ -104,8 +79,8 @@ def tree_depth(tree: Shaped[Array, '*batch_shape 2**d']) -> int:
     Parameters
     ----------
     tree
-        A tree created by `make_tree`. If the array is ND, the tree structure is
-        assumed to be along the last axis.
+        A tree array like those in a `TreeHeaps`. If the array is ND, the tree
+        structure is assumed to be along the last axis.
 
     Returns
     -------

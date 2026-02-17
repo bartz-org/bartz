@@ -30,6 +30,11 @@ from contextlib import nullcontext
 from functools import partial
 from typing import Any
 
+try:
+    from jax import shard_map  # available since jax v0.6.1
+except ImportError:
+    from jax.experimental.shard_map import shard_map
+
 import jax
 from jax import (
     Device,
@@ -39,7 +44,6 @@ from jax import (
     jit,
     lax,
     random,
-    shard_map,
     tree,
     vmap,
 )

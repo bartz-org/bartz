@@ -33,8 +33,9 @@ from typing import Any, Literal
 
 import numpy
 from equinox import Module, error_if, field
-from jax import jit, lax, random, vmap
+from jax import jit, lax, random, tree, vmap
 from jax import numpy as jnp
+from jax.sharding import PartitionSpec
 from jax.tree_util import tree_map
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
@@ -50,7 +51,7 @@ from bartz.grove import (
     tree_depth,
     tree_depths,
 )
-from bartz.jaxext import autobatch, minimal_unsigned_dtype, vmap_nodoc
+from bartz.jaxext import autobatch, equal_shards, minimal_unsigned_dtype, vmap_nodoc
 from bartz.jaxext import split as split_key
 from bartz.mcmcloop import TreesTrace
 from bartz.mcmcstep._moves import randint_masked
@@ -1088,19 +1089,42 @@ class debug_mc_gbart(mc_gbart):
         Passed to `mc_gbart`.
     check_trees
         If `True`, check all trees with `check_trace` after running the MCMC,
-        and assert that they are all valid. Set to `False` to allow jax tracing.
-    **kw
+        and assert that they are all valid.
+    check_replicated_trees
+        If the data is sharded across devices, check that the trees are equal
+        on all devices in the final state. Set to `False` to allow jax tracing.
+    **kwargs
         Passed to `mc_gbart`.
     """
 
-    def __init__(self, *args: Any, check_trees: bool = True, **kw: Any) -> None:
-        super().__init__(*args, **kw)
+    def __init__(
+        self,
+        *args: Any,
+        check_trees: bool = True,
+        check_replicated_trees: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+
         if check_trees:
             bad = self.check_trees()
             bad_count = jnp.count_nonzero(bad)
             self._bart.__dict__['offset'] = error_if(
                 self._bart.offset, bad_count > 0, 'invalid trees found in trace'
             )
+
+        state = self._mcmc_state
+        mesh = state.config.mesh
+        if check_replicated_trees and mesh is not None and 'data' in mesh.axis_names:
+            replicated_forest = replace(state.forest, leaf_indices=None)
+            equal = equal_shards(
+                replicated_forest, 'data', in_specs=PartitionSpec(), mesh=mesh
+            )
+            equal_array = jnp.stack(tree.leaves(equal))
+            all_equal = jnp.all(equal_array)
+            # we could use error_if here for traceability, but last time we
+            # tried it hanged on error, maybe it was due to sharding.
+            assert all_equal.item(), 'the trees are different across devices'
 
     def print_tree(
         self, i_chain: int, i_sample: int, i_tree: int, print_all: bool = False
@@ -1318,6 +1342,9 @@ class debug_gbart(debug_mc_gbart, gbart):
     check_trees
         If `True`, check all trees with `check_trace` after running the MCMC,
         and assert that they are all valid.
+    check_replicated_trees
+        If the data is sharded across devices, check that the trees are equal
+        on all devices in the final state. Set to `False` to allow jax tracing.
     **kw
         Passed to `gbart`.
     """

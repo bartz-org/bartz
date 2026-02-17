@@ -39,12 +39,15 @@ from jax import (
     jit,
     lax,
     random,
+    shard_map,
+    tree,
     vmap,
 )
 from jax import numpy as jnp
 from jax.dtypes import prng_key
 from jax.scipy.special import ndtr
-from jaxtyping import Array, Bool, Float32, Key, Scalar, Shaped
+from jax.sharding import PartitionSpec
+from jaxtyping import Array, Bool, Float32, Key, PyTree, Scalar, Shaped
 
 from bartz.jaxext._autobatch import autobatch  # noqa: F401
 from bartz.jaxext.scipy.special import ndtri
@@ -293,3 +296,47 @@ def is_key(x: object) -> bool:
 def jit_active() -> bool:
     """Check if we are under jit."""
     return not hasattr(jnp.empty(0), 'platform')
+
+
+def _equal_shards(x: Array, axis_name: str) -> Bool[Array, '']:
+    """Check if all shards of `x` are equal, to be used in a `shard_map` context."""
+    size = lax.axis_size(axis_name)
+    perm = [(i, (i + 1) % size) for i in range(size)]
+    perm_x = lax.ppermute(x, axis_name, perm)
+    diff = jnp.any(x != perm_x)
+    return jnp.logical_not(lax.psum(diff, axis_name))
+
+
+def equal_shards(
+    x: PyTree[Array, ' S'], axis_name: str, **shard_map_kwargs: Any
+) -> PyTree[Bool[Array, ''], ' S']:
+    """Check that all shards of `x` are equal across axis `axis_name`.
+
+    Parameters
+    ----------
+    x
+        A pytree of arrays to check. Each array is checked separately.
+    axis_name
+        The mesh axis name across which equality is checked. It's not checked
+        across other axes.
+    **shard_map_kwargs
+        Additional arguments passed to `jax.shard_map` to set up the function
+        that checks equality. You may need to specify `in_specs` passing
+        the (pytree of) `jax.sharding.PartitionSpec` that specifies how `x`
+        is sharded, if the axes are not explicit, and `mesh` if there is not
+        a default mesh set by `jax.set_mesh`.
+
+    Returns
+    -------
+    A pytree of booleans indicating whether each leaf is equal across devices along the mesh axis.
+    """
+    equal_shards_leaf = partial(_equal_shards, axis_name=axis_name)
+
+    def check_equal(x: PyTree[Array, ' S']) -> PyTree[Bool[Array, ''], ' S']:
+        return tree.map(equal_shards_leaf, x)
+
+    sharded_check_equal = shard_map(
+        check_equal, out_specs=PartitionSpec(), **shard_map_kwargs
+    )
+
+    return sharded_check_equal(x)

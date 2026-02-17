@@ -30,17 +30,29 @@ from warnings import catch_warnings
 
 import numpy
 import pytest
-from jax import debug_infs, jit, random, tree
+from jax import (
+    NamedSharding,
+    debug_infs,
+    device_put,
+    devices,
+    jit,
+    lax,
+    make_mesh,
+    random,
+    shard_map,
+    tree,
+)
 from jax import numpy as jnp
 from jax.scipy.special import ndtri
+from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import Array, Float, Float32, Key, Shaped
-from numpy.testing import assert_allclose
+from numpy.testing import assert_allclose, assert_array_equal
 from pytest_subtests import SubTests
 from scipy.stats import invgamma as scipy_invgamma
 from scipy.stats import ks_1samp, truncnorm
 
 from bartz import jaxext
-from bartz.jaxext import split
+from bartz.jaxext import equal_shards, split
 from bartz.jaxext.scipy.special import ndtri as patched_ndtri
 from bartz.jaxext.scipy.stats import invgamma
 from tests.util import assert_close_matrices
@@ -498,3 +510,65 @@ def test_is_key(keys: split) -> None:
 
     # NumPy arrays should not be recognized
     assert not jaxext.is_key(numpy.array([1, 2, 3]))
+
+
+def make_broken_replicated_array(x: Array, axis_name: str, mesh: Mesh) -> Array:
+    """Replicate `x` across devices, but make it different on each device across an axis."""
+
+    @partial(
+        shard_map,
+        mesh=mesh,
+        in_specs=PartitionSpec(),
+        out_specs=PartitionSpec(),
+        check_vma=False,  # this disables the check that would notice the inconsistency
+    )
+    def breaker(x: Array) -> Array:
+        return x + lax.axis_index(axis_name)
+
+    return breaker(x)
+
+
+def test_make_broken_replicated_array() -> None:
+    """Test `make_broken_replicated_array`."""
+    nd = len(devices())
+    if nd < 2:
+        pytest.skip('Requires at least 2 devices')
+    mesh = make_mesh((nd,), ('a',), axis_types=(AxisType.Auto,))
+    x = jnp.arange(nd)
+    xb = make_broken_replicated_array(x, 'a', mesh)
+    for i, shard in enumerate(xb.addressable_shards):
+        data: Array = shard.data
+        if i == 0:
+            assert_array_equal(data, x, strict=True)
+        else:
+            assert jnp.all(data != x)
+
+
+@pytest.mark.parametrize('equal', [True, False])
+@pytest.mark.parametrize('replicated', [True, False])
+def test_equal_shards(equal: bool, replicated: bool) -> None:
+    """Test `jaxext.equal_shards`."""
+    nd = len(devices())
+    if nd < 2:
+        pytest.skip('Requires at least 2 devices')
+
+    # define mesh
+    mesh = make_mesh((nd,), ('a',), axis_types=(AxisType.Auto,))
+
+    # create dummy array
+    if equal:
+        x = jnp.zeros(nd)
+    elif replicated:
+        x = jnp.zeros(nd)
+        x = make_broken_replicated_array(x, 'a', mesh)
+    else:
+        x = jnp.arange(nd)
+
+    # shard x
+    spec = PartitionSpec() if replicated else PartitionSpec('a')
+    sharding = NamedSharding(mesh, spec)
+    x = device_put(x, sharding)
+
+    # check the shards are equal or different
+    result = equal_shards(x, 'a', mesh=mesh, in_specs=spec)
+    assert result.item() == equal

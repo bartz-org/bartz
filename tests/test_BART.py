@@ -1242,6 +1242,9 @@ def test_jit(kw: dict[str, Any]) -> None:
     # do not count splitless variables because it breaks tracing
     kw.update(rm_const=False)
 
+    # do not check tree replicas because it breaks tracing
+    kw.update(check_replicated_trees=False)
+
     # set device as under jit it can not be inferred from the array
     platform = kw['y_train'].platform()
     kw.setdefault('bart_kwargs', {}).update(devices=jax.devices(platform))

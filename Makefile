@@ -187,8 +187,13 @@ version-tag: copy-version check-committed
 	git tag $(VERSION_TAG)
 	git push origin $(VERSION_TAG)
 
+.PHONY: smoke-test
+smoke-test:
+	uv run --isolated --no-project --with dist/*.whl python -c 'import bartz'
+	uv run --isolated --no-project --with dist/*.tar.gz python -c 'import bartz'
+
 .PHONY: upload
-upload: version-tag
+upload: smoke-test version-tag
 	@echo "Enter PyPI token:"
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN="$$UV_PUBLISH_TOKEN" && \
@@ -198,7 +203,7 @@ upload: version-tag
 	uv tool run --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
 .PHONY: upload-test
-upload-test: check-committed
+upload-test: smoke-test check-committed
 	@echo "Enter TestPyPI token:"
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN="$$UV_PUBLISH_TOKEN" && \

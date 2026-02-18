@@ -1648,25 +1648,29 @@ class TestVarprobParam:
                 mc_gbart(**kw)
 
 
+def run_bart_and_block(kw: dict) -> None:
+    """Run bart and block until all outputs are ready."""
+    bart = mc_gbart(**kw)
+    stuff = (
+        bart.yhat_test,
+        bart.prob_test,
+        bart.prob_train,
+        bart.sigma,
+        bart.sigma_,
+        bart.varcount,
+        bart.varprob,
+        bart.yhat_train,
+    )
+    block_until_ready((bart, *stuff))
+
+
 def test_array_no_gc(kw: dict) -> None:
     """Check that arrays are not garbage collected."""
     setting = 'jax_array_garbage_collection_guard'
     prev = getattr(config, setting)
     config.update(setting, 'fatal')
     try:
-        bart = mc_gbart(**kw)
-        stuff = (
-            bart.yhat_test,
-            bart.prob_test,
-            bart.prob_train,
-            bart.sigma,
-            bart.sigma_,
-            bart.varcount,
-            bart.varprob,
-            bart.yhat_train,
-        )
-        block_until_ready((bart, *stuff))
-        del bart, stuff
+        run_bart_and_block(kw)
         collect()
     finally:
         config.update(setting, prev)

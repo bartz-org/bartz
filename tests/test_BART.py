@@ -31,6 +31,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
+from gc import collect
 from os import getpid, kill
 from signal import SIG_IGN, SIGINT, getsignal, signal
 from sys import version_info
@@ -43,7 +44,7 @@ import numpy
 import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError
-from jax import debug_nans, random, tree, vmap
+from jax import block_until_ready, config, debug_nans, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logit, ndtr
@@ -1624,3 +1625,27 @@ class TestVarprobParam:
             kw.update(varprob=varprob)
             with pytest.raises(EquinoxRuntimeError, match='varprob must be > 0'):
                 mc_gbart(**kw)
+
+
+def test_array_no_gc(kw: dict) -> None:
+    """Check that arrays are not garbage collected."""
+    setting = 'jax_array_garbage_collection_guard'
+    prev = getattr(config, setting)
+    config.update(setting, 'fatal')
+    try:
+        bart = mc_gbart(**kw)
+        stuff = (
+            bart.yhat_test,
+            bart.prob_test,
+            bart.prob_train,
+            bart.sigma,
+            bart.sigma_,
+            bart.varcount,
+            bart.varprob,
+            bart.yhat_train,
+        )
+        block_until_ready((bart, *stuff))
+        del bart, stuff
+        collect()
+    finally:
+        config.update(setting, prev)

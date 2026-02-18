@@ -46,6 +46,9 @@ if jax.__version_info__ >= (0, 9, 0):
 # enable virtual cpu devices to do multi-device testing on cpu
 config.update('jax_num_cpu_devices', 10)  # 2 * 5
 
+# enable logging arrays destroyed by the gc
+config.update('jax_array_garbage_collection_guard', 'log')
+
 # enable compilation cache
 if jax.__version_info__ >= (0, 9, 0):
     # enable only on latest jax because `make tests-old` fails if there is a

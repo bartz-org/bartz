@@ -701,7 +701,7 @@ def test_predict(kw: dict[str, Any]) -> None:
 class TestVarprobAttr:
     """Test the `mc_gbart.varprob` attribute."""
 
-    def test_basic_properties(kw: dict[str, Any]) -> None:
+    def test_basic_properties(self, kw: dict[str, Any]) -> None:
         """Basic checks of the `varprob` attribute."""
         bart = mc_gbart(**kw)
 
@@ -721,7 +721,7 @@ class TestVarprobAttr:
         # the mean is the mean
         assert_array_equal(bart.varprob_mean, bart.varprob.mean(axis=0))
 
-    def test_blocked_vars(keys: split) -> None:
+    def test_blocked_vars(self, keys: split) -> None:
         """Check that varprob = 0 on predictors blocked a priori."""
         X = gen_X(keys.pop(), 2, 30, 'continuous')
         y = gen_y(keys.pop(), X, None, 'continuous')

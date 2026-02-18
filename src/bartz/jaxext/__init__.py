@@ -45,6 +45,7 @@ from jax import (
     lax,
     random,
     tree,
+    typeof,
     vmap,
 )
 from jax import numpy as jnp
@@ -304,7 +305,12 @@ def jit_active() -> bool:
 
 def _equal_shards(x: Array, axis_name: str) -> Bool[Array, '']:
     """Check if all shards of `x` are equal, to be used in a `shard_map` context."""
-    size = lax.axis_size(axis_name)
+    # get axis size, this could be `size = lax.axis_size(axis_name)`, but it's
+    # supported only since jax v0.6.1
+    mesh = typeof(x).sharding.mesh
+    i = mesh.axis_names.index(axis_name)
+    size = mesh.axis_sizes[i]
+
     perm = [(i, (i + 1) % size) for i in range(size)]
     perm_x = lax.ppermute(x, axis_name, perm)
     diff = jnp.any(x != perm_x)

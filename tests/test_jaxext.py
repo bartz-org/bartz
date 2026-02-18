@@ -25,8 +25,14 @@
 """Test bartz.jaxext."""
 
 from functools import partial
+from inspect import signature
 from itertools import product
 from warnings import catch_warnings
+
+try:
+    from jax import shard_map  # available since jax v0.6.1
+except ImportError:
+    from jax.experimental.shard_map import shard_map
 
 import numpy
 import pytest
@@ -39,7 +45,6 @@ from jax import (
     lax,
     make_mesh,
     random,
-    shard_map,
     tree,
 )
 from jax import numpy as jnp
@@ -520,12 +525,23 @@ def make_broken_replicated_array(x: Array, axis_name: str, mesh: Mesh) -> Array:
         mesh=mesh,
         in_specs=PartitionSpec(),
         out_specs=PartitionSpec(),
-        check_vma=False,  # this disables the check that would notice the inconsistency
+        # this disables the check that would notice the inconsistency
+        **_get_check_vma_false_kwargs(),
     )
     def breaker(x: Array) -> Array:
         return x + lax.axis_index(axis_name)
 
     return breaker(x)
+
+
+def _get_check_vma_false_kwargs() -> dict[str, bool]:
+    """Get `dict(check_vma=False)` or the equivalent for old jax versions."""
+    sig = signature(shard_map)
+    if 'check_vma' in sig.parameters:
+        # since jax v0.6.1
+        return dict(check_vma=False)
+    else:
+        return dict(check_rep=False)
 
 
 def test_make_broken_replicated_array() -> None:

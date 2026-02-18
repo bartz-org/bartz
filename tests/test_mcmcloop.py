@@ -24,13 +24,15 @@
 
 """Test `bartz.mcmcloop`."""
 
+from dataclasses import replace
 from functools import partial
 from typing import Any
 
 import pytest
 from equinox import filter_jit
-from jax import debug_key_reuse, jit, tree, vmap
+from jax import NamedSharding, debug_key_reuse, device_put, jit, make_mesh, tree, vmap
 from jax import numpy as jnp
+from jax.sharding import AxisType, PartitionSpec
 from jax.tree_util import KeyPath, tree_map
 from jaxtyping import Array, Float32, UInt8
 from numpy.testing import assert_array_equal
@@ -157,8 +159,10 @@ class TestRunMcmc:
         check_trace(burnin_trace)
         check_trace(main_trace)
 
-    def test_jit_error(self, keys: split, subtests: SubTests) -> None:
-        """Check that an error is raised under jit in some conditions."""
+    def test_predicted_double_compilation(
+        self, keys: split, subtests: SubTests
+    ) -> None:
+        """Check that an error is raised under jit if the configuration would lead to double compilation."""
         initial_state = simple_init(10, 100, 20)
 
         compiled_run_mcmc = jit(
@@ -176,3 +180,17 @@ class TestRunMcmc:
             pytest.raises(RuntimeError, match=msg),
         ):
             compiled_run_mcmc(keys.pop(), initial_state, 1)
+
+    def test_detected_double_compilation(self, keys: split) -> None:
+        """Check that double compilation is detected."""
+        state = simple_init(10, 100, 20)
+
+        mesh = make_mesh((1,), ('a',), axis_types=(AxisType.Auto,))
+        sharding = NamedSharding(mesh, PartitionSpec())
+        resid = device_put(state.resid, sharding)
+        state = replace(state, resid=resid)
+
+        with pytest.raises(
+            RuntimeError, match='The inner loop of `run_mcmc` was traced more than once'
+        ):
+            run_mcmc(keys.pop(), state, 2, inner_loop_length=1)

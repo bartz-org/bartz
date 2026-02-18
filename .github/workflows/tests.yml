@@ -86,11 +86,12 @@ jobs:
       - id: set-matrix
         run: |
           BASE_MATRIX='[
-            {"os":"ubuntu-latest","runs-on":"ubuntu-latest","target-suffix":""},
-            {"os":"ubuntu-22.04","runs-on":"ubuntu-22.04","target-suffix":"-old"}
+            {id:"latest","runs-on":"ubuntu-latest","target-suffix":"",tests-args:""},
+            {id:"old","runs-on":"ubuntu-22.04","target-suffix":"-old",tests-args:""},
+            {id:"single-cpu","runs-on":"ubuntu-latest","target-suffix":"",tests-args:"ARGS=--num-cpu-devices=1"},
           ]'
           BENCHMARKS_BASE_MATRIX='[
-            {"os":"ubuntu-latest","runs-on":"ubuntu-latest","target-suffix":""}
+            {"id":"latest","runs-on":"ubuntu-latest","target-suffix":""}
           ]'
 
           MATRIX=$(echo "$BASE_MATRIX" | jq -c ".")
@@ -100,7 +101,7 @@ jobs:
           echo "benchmarks-matrix={\"include\":$BENCHMARKS_MATRIX}" >> $GITHUB_OUTPUT
 
   tests:
-    name: tests-${{ matrix.os }}${{ matrix.target-suffix }}
+    name: tests-${{ matrix.id }}
     needs: setup-matrix
     runs-on: ${{ matrix.runs-on }}
     continue-on-error: ${{ matrix.target-suffix == '-gpu' }}
@@ -117,7 +118,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: ${{ env.UV_VERSION }}
-          cache-suffix: -${{ matrix.os }}${{ matrix.target-suffix }}
+          cache-suffix: -${{ matrix.id }}
 
       - name: Install R
         uses: r-lib/actions/setup-r@v2
@@ -138,13 +139,13 @@ jobs:
 
       - name: Run unit tests
         timeout-minutes: 30
-        run: make COVERAGE_SUFFIX=-${{ matrix.os }}${{ matrix.target-suffix }} tests${{ matrix.target-suffix }}
+        run: make COVERAGE_SUFFIX=-${{ matrix.id }} tests${{ matrix.target-suffix }} ${{ matrix.tests-args }}
 
       - name: Save coverage information
         uses: actions/upload-artifact@v6
         with:
-          name: coverage.tests-${{ matrix.os }}${{ matrix.target-suffix }}
-          path: .coverage.tests-${{ matrix.os }}${{ matrix.target-suffix }}
+          name: coverage.tests-${{ matrix.id }}
+          path: .coverage.tests-${{ matrix.id }}
           include-hidden-files: true
           if-no-files-found: error
 
@@ -275,7 +276,7 @@ jobs:
         uses: actions/deploy-pages@v4
 
   benchmarks:
-    name: benchmarks-${{ matrix.os }}${{ matrix.target-suffix }}
+    name: benchmarks-${{ matrix.id }}
     needs: setup-matrix
     runs-on: ${{ matrix.runs-on }}
     continue-on-error: ${{ matrix.target-suffix == '-gpu' }}
@@ -292,7 +293,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: ${{ env.UV_VERSION }}
-          cache-suffix: -${{ matrix.os }}${{ matrix.target-suffix }}
+          cache-suffix: -${{ matrix.id }}
 
       - name: Get machine information for asv
         run: RPY2_CFFI_MODE=ABI uv run --dev python -m asv machine --yes

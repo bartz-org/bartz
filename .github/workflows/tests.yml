@@ -109,7 +109,12 @@ jobs:
             {
               "id": "latest",
               "runs-on": "ubuntu-latest",
-              "target-suffix": ""
+              "vars": ""
+            },
+            {
+              "id": "single-cpu",
+              "runs-on": "ubuntu-latest",
+              "vars": "BARTZ_BENCHMARKS_SINGLE_CPU_DEVICE=1 "
             }
           ]'
 
@@ -318,7 +323,8 @@ jobs:
         run: RPY2_CFFI_MODE=ABI uv run --dev python -m asv machine --yes
 
       - name: Run asv in quick mode
-        run: make asv-quick ARGS='--attribute timeout=120' # long timeout because CI runners are slow
+        # long timeout because CI runners are slow
+        run: ${{ matrix.vars }}make asv-quick ARGS='--attribute timeout=120'
 
   dev-commands:
     runs-on: ubuntu-latest

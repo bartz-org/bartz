@@ -103,7 +103,7 @@ jobs:
               "runs-on": "ubuntu-latest",
               "target-suffix": "",
               "tests-args": "ARGS=--num-cpu-devices=1"
-            },
+            }
           ]'
           BENCHMARKS_BASE_MATRIX='[
             {

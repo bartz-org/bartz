@@ -77,24 +77,17 @@ class TestWishart:
         return A @ A.T + jnp.eye(k)
 
     def ill_conditioned_matrix(
-        self,
-        key: Key[Array, ''],
-        k: int,
-        condition_number: float = 1e6,
-        exact_psd: bool = True,
+        self, key: Key[Array, ''], k: int, condition_number: float = 1e6
     ) -> Float[Array, '{k} {k}']:
         """Generate a ill conditioned random positive semi-definite matrix."""
         A = random.normal(key, (k, k))
         U, _ = jnp.linalg.qr(A)
 
-        if exact_psd:
-            if k == 1:
-                eigs = jnp.zeros(1)
-            else:
-                smalls = jnp.geomspace(1.0, 1.0 / condition_number, num=k - 1)
-                eigs = jnp.concatenate([smalls, jnp.array([0.0])])
+        if k == 1:
+            eigs = jnp.zeros(1)
         else:
-            eigs = jnp.geomspace(1.0, 1.0 / condition_number, num=k)
+            smalls = jnp.geomspace(1.0, 1.0 / condition_number, num=k - 1)
+            eigs = jnp.concatenate([smalls, jnp.array([0.0])])
         return (U * eigs) @ U.T
 
     def test_size(self, keys: split, wishart_params: tuple[int, int]) -> None:

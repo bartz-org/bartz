@@ -1284,35 +1284,31 @@ class PeriodicSigintTimer:
         Time in seconds to wait before sending the first SIGINT.
     interval
         Time in seconds between subsequent SIGINTs.
-    announce
-        Whether to print messages when sending SIGINTs and when stopping.
     """
 
-    def __init__(self, *, first_after: float, interval: float, announce: bool) -> None:
+    def __init__(self, *, first_after: float, interval: float) -> None:
         self.first_after = max(0.0, float(first_after))
         self.interval = max(0.001, float(interval))
         self.pid = getpid()
         self._stop = Event()
         self._thread: Thread | None = None
         self.sent = 0
-        self.announce = announce
 
     def _run(self) -> None:
         """Run the main loop of the timer."""
         t0 = monotonic()
+
         # Wait initial delay (cancellable)
-        if self._stop.wait(self.first_after):
+        if self._stop.wait(self.first_after):  # pragma: no cover
             return
+
         # Periodically send SIGINT until stopped
-        while not self._stop.is_set():
+        while not self._stop.is_set():  # pragma: no branch
             kill(self.pid, SIGINT)
             self.sent += 1
-            if self.announce:
-                elapsed = monotonic() - t0
-                print(
-                    f'[PeriodicSigintTimer] sent SIGINT #{self.sent} at t={elapsed:.2f}s'
-                )
-            if self._stop.wait(self.interval):
+            elapsed = monotonic() - t0
+            print(f'[PeriodicSigintTimer] sent SIGINT #{self.sent} at t={elapsed:.2f}s')
+            if self._stop.wait(self.interval):  # pragma: no branch
                 break
 
     def start(self) -> None:
@@ -1331,20 +1327,17 @@ class PeriodicSigintTimer:
 
         try:
             self._stop.set()
-            if self.announce:
-                print(f'[PeriodicSigintTimer] stopped after {self.sent} SIGINT(s)')
+            print(f'[PeriodicSigintTimer] stopped after {self.sent} SIGINT(s)')
         finally:
             signal(SIGINT, prev)
 
 
 @contextmanager
 def periodic_sigint(
-    *, first_after: float, interval: float, announce: bool
+    *, first_after: float, interval: float
 ) -> Generator[PeriodicSigintTimer, None, None]:
     """Context manager to periodically send SIGINT to the main thread."""
-    timer = PeriodicSigintTimer(
-        first_after=first_after, interval=interval, announce=announce
-    )
+    timer = PeriodicSigintTimer(first_after=first_after, interval=interval)
     timer.start()
     try:
         yield timer
@@ -1364,11 +1357,11 @@ def test_interrupt(kw: dict[str, Any]) -> None:
     # a first interruptible phase of jax compilation. Then send ^C every second,
     # in case the first ^C landed during a second non-interruptible compilation phase
     # that eats ^C and ignores it.
-    with periodic_sigint(first_after=3.0, interval=1.0, announce=True):
+    with periodic_sigint(first_after=3.0, interval=1.0):
         try:
             with pytest.raises(KeyboardInterrupt):
                 mc_gbart(**kw)
-        except KeyboardInterrupt:
+        except KeyboardInterrupt:  # pragma: no cover
             # Stray ^C during/after __exit__; treat as expected.
             pass
 

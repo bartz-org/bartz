@@ -275,7 +275,7 @@ class TestAutoBatch:
                         (jnp.iinfo(dtype).max + 1) // 2,
                         dtype,
                     )
-                elif jnp.issubdtype(dtype, jnp.bool_):
+                elif jnp.issubdtype(dtype, jnp.bool_):  # pragma: no branch
                     args = random.bernoulli(keys.pop(), 0.5, (nin, *shape))
 
                 expected = tree.map(partial(reduction, axis=axis), func(*args))

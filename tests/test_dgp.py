@@ -276,7 +276,7 @@ def test_outcome_prior_variance(dgps: DGP, which: str) -> None:
         expected_var = dgps.sigma2_pri - dgps.sigma2_eps
     elif which == 'y':
         expected_var = dgps.sigma2_pri
-    else:
+    else:  # pragma: no cover
         raise KeyError(which)
 
     expected_var = expected_var[0].item()
@@ -315,7 +315,7 @@ def test_outcome_pop_variance(dgps: DGP, which: str) -> None:
         expected_var = dgps.sigma2_pop - dgps.sigma2_eps
     elif which == 'y':
         expected_var = dgps.sigma2_pop
-    else:
+    else:  # pragma: no cover
         raise KeyError(which)
 
     expected_var = expected_var[0].item()

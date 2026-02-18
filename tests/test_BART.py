@@ -879,7 +879,9 @@ def test_no_datapoints(kw: dict[str, Any]) -> None:
     kw.setdefault('bart_kwargs', {}).update(num_data_devices=None)
 
     # enable saving the likelihood ratio to check it's always 1
-    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(save_ratios=True)
+    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
+        save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
+    )
 
     # run bart
     bart = mc_gbart(**kw)
@@ -923,7 +925,9 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
     kw.setdefault('bart_kwargs', {}).update(num_data_devices=None)
 
     # enable saving the likelihood ratio to check it's always 1
-    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(save_ratios=True)
+    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
+        save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
+    )
 
     bart = mc_gbart(**kw)
     if kw['y_train'].dtype == bool:
@@ -948,11 +952,16 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
 def test_two_datapoints(kw: dict[str, Any]) -> None:
     """Check automatic data scaling with 2 datapoints."""
     kw = set_num_datapoints(kw, 2)
+    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
+        save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
+    )
     bart = mc_gbart(**kw)
     if kw['y_train'].dtype != bool:
         assert_allclose(bart.sigest, kw['y_train'].std(), rtol=1e-6)
     if kw['usequants']:
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
+    assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)
+    assert not jnp.all(bart._main_trace.log_likelihood == 0.0)
 
 
 def test_few_datapoints(kw: dict[str, Any]) -> None:

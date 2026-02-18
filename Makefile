@@ -175,6 +175,7 @@ clean:
 	rm -fr .venv
 	rm -fr dist
 	rm -fr config/jax_cache
+	rm -fr docs/_build
 
 .PHONY: release
 release: clean update-deps copy-version check-committed tests tests-old docs

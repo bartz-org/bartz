@@ -878,9 +878,17 @@ def test_no_datapoints(kw: dict[str, Any]) -> None:
     # disable data sharding
     kw.setdefault('bart_kwargs', {}).update(num_data_devices=None)
 
+    # enable saving the likelihood ratio to check it's always 1
+    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(save_ratios=True)
+
+    # run bart
     bart = mc_gbart(**kw)
+
+    # check there are indeed 0 datapoints in the output
     ndpost = kw['ndpost']
     assert bart.yhat_train.shape == (ndpost, 0)
+
+    # check default values that may be set in a special way if there are 0 datapoints
     assert bart.offset == 0
     if kw['y_train'].dtype == bool:
         tau_num = 3
@@ -893,6 +901,10 @@ def test_no_datapoints(kw: dict[str, Any]) -> None:
         (2**2 * kw['ntree']) / tau_num**2,
         rtol=1e-6,
     )
+
+    # check the likelihood ratio is always 1
+    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
+    assert_array_equal(bart._main_trace.log_likelihood, 0.0)
 
 
 def test_one_datapoint(kw: dict[str, Any]) -> None:
@@ -910,6 +922,9 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
     # disable data sharding
     kw.setdefault('bart_kwargs', {}).update(num_data_devices=None)
 
+    # enable saving the likelihood ratio to check it's always 1
+    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(save_ratios=True)
+
     bart = mc_gbart(**kw)
     if kw['y_train'].dtype == bool:
         tau_num = 3
@@ -924,6 +939,10 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
         (2**2 * kw['ntree']) / tau_num**2,
         rtol=1e-6,
     )
+
+    # check the likelihood ratio is always 1
+    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
+    assert_array_equal(bart._main_trace.log_likelihood, 0.0)
 
 
 def test_two_datapoints(kw: dict[str, Any]) -> None:
@@ -1004,12 +1023,82 @@ def test_xinfo_wrong_p() -> None:
         (10, 255),  # likely always available decision rules for all variables
     ],
 )
-def test_prior(keys: split, p: int, nsplits: int) -> None:
+def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
     """Check that the posterior without data is equivalent to the prior."""
-    # sample from posterior without data
-    xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
+    # run bart without data
+    bart = run_bart_like_prior(keys.pop(), p, nsplits, subtests)
+
+    # sample from prior
+    prior_trace = sample_prior_like(keys.pop(), bart, subtests)
+
+    with subtests.test('number of stub trees'):
+        nstub_mcmc = count_stub_trees(bart._main_trace.split_tree)
+        nstub_prior = count_stub_trees(prior_trace.split_tree)
+        rhat_nstub = rhat([nstub_mcmc, nstub_prior])
+        assert rhat_nstub < 1.01
+
+    if (p, nsplits) != (1, 1):
+        # all the following are equivalent to nstub in the 1-1 case
+
+        with subtests.test('number of simple trees'):
+            nsimple_mcmc = count_simple_trees(bart._main_trace.split_tree)
+            nsimple_prior = count_simple_trees(prior_trace.split_tree)
+            rhat_nsimple = rhat([nsimple_mcmc, nsimple_prior])
+            assert rhat_nsimple < 1.01
+
+        varcount_prior = compute_varcount(
+            bart._mcmc_state.forest.max_split.size, prior_trace
+        )
+
+        with subtests.test('varcount'):
+            rhat_varcount = multivariate_rhat([bart.varcount, varcount_prior])
+            if p == 10:
+                # varcount is p-dimensional
+                assert rhat_varcount < 1.4
+            else:
+                assert rhat_varcount < 1.05
+
+        with subtests.test('number of nodes'):
+            sum_varcount_mcmc = bart.varcount.sum(axis=1)
+            sum_varcount_prior = varcount_prior.sum(axis=1)
+            rhat_sum_varcount = rhat([sum_varcount_mcmc, sum_varcount_prior])
+            assert rhat_sum_varcount < 1.05
+
+        with subtests.test('imbalance index'):
+            imb_mcmc = avg_imbalance_index(bart._main_trace.split_tree)
+            imb_prior = avg_imbalance_index(prior_trace.split_tree)
+            rhat_imb = rhat([imb_mcmc, imb_prior])
+            assert rhat_imb < 1.02
+
+        with subtests.test('average max tree depth'):
+            maxd_mcmc = avg_max_tree_depth(bart._main_trace.split_tree)
+            maxd_prior = avg_max_tree_depth(prior_trace.split_tree)
+            rhat_maxd = rhat([maxd_mcmc, maxd_prior])
+            assert rhat_maxd < 1.02
+
+        with subtests.test('max tree depth distribution'):
+            dd_mcmc = bart.depth_distr()
+            dd_prior = forest_depth_distr(prior_trace.split_tree)
+            rhat_dd = multivariate_rhat([dd_mcmc.squeeze(0), dd_prior])
+            assert rhat_dd < 1.05
+
+    with subtests.test('y_test'):
+        X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1)
+        yhat_mcmc = bart._bart._predict(X)
+        yhat_prior = evaluate_trace(X, prior_trace)
+        rhat_yhat = multivariate_rhat([yhat_mcmc, yhat_prior])
+        assert rhat_yhat < 1.1
+
+
+def run_bart_like_prior(
+    key: Key[Array, ''], p: int, nsplits: int, subtests: SubTests
+) -> mc_gbart:
+    """Run `mc_gbart` without datapoints to sample the prior distribution."""
     # set the split grid manually because automatic setting relies on datapoints
-    kw = dict(
+    xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
+
+    # configure bart to run many mcmc iterations, without data
+    kw: dict = dict(
         x_train=jnp.empty((p, 0)),
         y_train=jnp.empty(0),
         ntree=20,
@@ -1017,15 +1106,32 @@ def test_prior(keys: split, p: int, nsplits: int) -> None:
         nskip=3000,
         printevery=None,
         xinfo=xinfo,
-        seed=keys.pop(),
+        seed=key,
         mc_cores=1,
         bart_kwargs=dict(
-            init_kw=dict(min_points_per_decision_node=None, min_points_per_leaf=None)
+            init_kw=dict(
+                # unset limits on datapoints per node because there's no data
+                min_points_per_decision_node=None,
+                min_points_per_leaf=None,
+                # save likelihood ratio to check it's 1
+                save_ratios=True,
+            )
         ),
-        # unset limits on datapoints per node because there's no data
     )
+
     bart = mc_gbart(**kw)
 
+    with subtests.test('likelihood ratio = 1'):
+        assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
+        assert_array_equal(bart._main_trace.log_likelihood, 0.0)
+
+    return bart
+
+
+def sample_prior_like(
+    key: Key[Array, ''], bart: mc_gbart, subtests: SubTests
+) -> TraceWithOffset:
+    """Sample from the prior with the same settings used in `bart`."""
     # extract p_nonterminal in original format from mcmc state
     p_nonterminal = bart._mcmc_state.forest.p_nonterminal
     max_depth = tree_depth(p_nonterminal)
@@ -1034,77 +1140,21 @@ def test_prior(keys: split, p: int, nsplits: int) -> None:
 
     # sample from prior
     prior_trees = sample_prior(
-        keys.pop(),
-        kw['ndpost'],
-        kw['ntree'],
+        key,
+        bart.ndpost,
+        len(bart._mcmc_state.forest.leaf_tree),
         bart._mcmc_state.forest.max_split,
         p_nonterminal,
         jnp.sqrt(jnp.reciprocal(bart._mcmc_state.forest.leaf_prior_cov_inv)),
     )
-    prior_trace = TraceWithOffset.from_trees_trace(prior_trees, bart.offset)
 
-    # check prior samples
-    bad = check_trace(prior_trees, bart._mcmc_state.forest.max_split)
-    bad_count = jnp.count_nonzero(bad)
-    assert bad_count == 0
+    with subtests.test('check prior trees'):
+        bad = check_trace(prior_trees, bart._mcmc_state.forest.max_split)
+        bad_count = jnp.count_nonzero(bad)
+        assert bad_count == 0
 
-    # compare number of stub trees
-    nstub_mcmc = count_stub_trees(bart._main_trace.split_tree)
-    nstub_prior = count_stub_trees(prior_trace.split_tree)
-    rhat_nstub = rhat([nstub_mcmc, nstub_prior])
-    assert rhat_nstub < 1.01
-
-    if (p, nsplits) != (1, 1):
-        # all the following are equivalent to nstub in the 1-1 case
-
-        # compare number of "simple" trees
-        nsimple_mcmc = count_simple_trees(bart._main_trace.split_tree)
-        nsimple_prior = count_simple_trees(prior_trace.split_tree)
-        rhat_nsimple = rhat([nsimple_mcmc, nsimple_prior])
-        assert rhat_nsimple < 1.01
-
-        # compare varcount
-        varcount_prior = compute_varcount(
-            bart._mcmc_state.forest.max_split.size, prior_trace
-        )
-        rhat_varcount = multivariate_rhat([bart.varcount, varcount_prior])
-        if p == 10:
-            # varcount is p-dimensional
-            assert rhat_varcount < 1.4
-        else:
-            assert rhat_varcount < 1.05
-
-        # compare number of nodes. since #leaves = 1 + #(internal nodes) in binary
-        # trees, I only check #(internal nodes) = sum(varcount).
-        sum_varcount_mcmc = bart.varcount.sum(axis=1)
-        sum_varcount_prior = varcount_prior.sum(axis=1)
-        rhat_sum_varcount = rhat([sum_varcount_mcmc, sum_varcount_prior])
-        assert rhat_sum_varcount < 1.05
-
-        # compare imbalance index
-        imb_mcmc = avg_imbalance_index(bart._main_trace.split_tree)
-        imb_prior = avg_imbalance_index(prior_trace.split_tree)
-        rhat_imb = rhat([imb_mcmc, imb_prior])
-        assert rhat_imb < 1.02
-
-        # compare average max tree depth
-        maxd_mcmc = avg_max_tree_depth(bart._main_trace.split_tree)
-        maxd_prior = avg_max_tree_depth(prior_trace.split_tree)
-        rhat_maxd = rhat([maxd_mcmc, maxd_prior])
-        assert rhat_maxd < 1.02
-
-        # compare max tree depth distribution
-        dd_mcmc = bart.depth_distr()
-        dd_prior = forest_depth_distr(prior_trace.split_tree)
-        rhat_dd = multivariate_rhat([dd_mcmc.squeeze(0), dd_prior])
-        assert rhat_dd < 1.05
-
-    # compare y
-    X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1)
-    yhat_mcmc = bart._bart._predict(X)
-    yhat_prior = evaluate_trace(X, prior_trace)
-    rhat_yhat = multivariate_rhat([yhat_mcmc, yhat_prior])
-    assert rhat_yhat < 1.1
+    # pack up trees together with offset
+    return TraceWithOffset.from_trees_trace(prior_trees, bart.offset)
 
 
 def count_stub_trees(

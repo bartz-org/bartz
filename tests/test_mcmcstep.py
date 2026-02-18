@@ -745,13 +745,13 @@ class TestMultichain:
         """Test `normalize_spec`."""
         devices = jax.devices('cpu')[:3]
         mesh = make_mesh(
-            (3, 1),
+            (len(devices), 1),
             ('ciao', 'bau'),
             axis_types=(AxisType.Auto, AxisType.Auto),
             devices=devices,
         )
         assert normalize_spec(['ciao'], mesh, (1, 1, 1)) == PartitionSpec(
-            'ciao', None, None
+            'ciao' if len(devices) > 1 else None, None, None
         )
         assert normalize_spec([None, 'bau'], mesh, (1, 1)) == PartitionSpec(None, None)
         assert normalize_spec(['ciao'], mesh, (0,)) == PartitionSpec(None)

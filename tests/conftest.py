@@ -43,9 +43,6 @@ if jax.__version_info__ >= (0, 9, 0):
     config.update('jax_check_static_indices', True)
     config.update('jax_explicit_x64_dtypes', 'error')
 
-# enable virtual cpu devices to do multi-device testing on cpu
-config.update('jax_num_cpu_devices', 10)  # 2 * 5
-
 # enable logging arrays destroyed by the gc
 config.update('jax_array_garbage_collection_guard', 'log')
 
@@ -85,10 +82,28 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default='auto',
         help='JAX platform to use: cpu, gpu, or auto (default: auto)',
     )
+    parser.addoption(
+        '--num-cpu-devices',
+        type=int,
+        default=10,
+        help='Number of virtual jax cpu devices to create (default: 10)',
+    )
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:
-    """Configure and print the jax device."""
+    """Customizable jax setup."""
+    setup_jax_num_cpu_devices(session)
+    setup_jax_platform(session)
+
+
+def setup_jax_num_cpu_devices(session: pytest.Session) -> None:
+    """Configure the number of virtual jax cpu devices."""
+    num_cpu_devices = session.config.getoption('--num-cpu-devices')
+    config.update('jax_num_cpu_devices', num_cpu_devices)
+
+
+def setup_jax_platform(session: pytest.Session) -> None:
+    """Configure, check, and log the default jax platform."""
     # Get the platform option
     platform = session.config.getoption('--platform')
 
@@ -109,5 +124,6 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         ctx = nullcontext()
 
     with ctx:
-        device_kind = get_default_device().device_kind
-        print(f'jax default device: {device_kind}')
+        dd = get_default_device()
+        num_devices = len(jax.devices(dd.platform))
+        print(f'jax default device: {dd.device_kind}, num devices: {num_devices}')

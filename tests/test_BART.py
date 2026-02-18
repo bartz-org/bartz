@@ -698,37 +698,39 @@ def test_predict(kw: dict[str, Any]) -> None:
     assert_array_equal(bart.yhat_train, yhat_train)
 
 
-def test_varprob(kw: dict[str, Any]) -> None:
-    """Basic checks of the `varprob` attribute."""
-    bart = mc_gbart(**kw)
+class TestVarprobAttr:
+    """Test the `mc_gbart.varprob` attribute."""
 
-    # basic properties of probabilities
-    assert jnp.all(bart.varprob >= 0)
-    assert jnp.all(bart.varprob <= 1)
-    assert_allclose(bart.varprob.sum(axis=1), 1, rtol=1e-6)
+    def test_basic_properties(kw: dict[str, Any]) -> None:
+        """Basic checks of the `varprob` attribute."""
+        bart = mc_gbart(**kw)
 
-    # probabilities are either 0 or 1/peff if sparsity is disabled
-    sparse = kw.get('sparse', False)
-    if not sparse:
-        unique = jnp.unique(bart.varprob)
-        assert unique.size in (1, 2)
-        if unique.size == 2:  # pragma: no cover
-            assert unique[0] == 0
+        # basic properties of probabilities
+        assert jnp.all(bart.varprob >= 0)
+        assert jnp.all(bart.varprob <= 1)
+        assert_allclose(bart.varprob.sum(axis=1), 1, rtol=1e-6)
 
-    # the mean is the mean
-    assert_array_equal(bart.varprob_mean, bart.varprob.mean(axis=0))
+        # probabilities are either 0 or 1/peff if sparsity is disabled
+        sparse = kw.get('sparse', False)
+        if not sparse:
+            unique = jnp.unique(bart.varprob)
+            assert unique.size in (1, 2)
+            if unique.size == 2:  # pragma: no cover
+                assert unique[0] == 0
 
+        # the mean is the mean
+        assert_array_equal(bart.varprob_mean, bart.varprob.mean(axis=0))
 
-def test_varprob_blocked_vars(keys: split) -> None:
-    """Check that varprob = 0 on predictors blocked a priori."""
-    X = gen_X(keys.pop(), 2, 30, 'continuous')
-    y = gen_y(keys.pop(), X, None, 'continuous')
-    with debug_nans(False):
-        xinfo = jnp.array([[jnp.nan], [0]])
-    bart = mc_gbart(x_train=X, y_train=y, xinfo=xinfo, seed=keys.pop())
-    assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1])
-    assert_array_equal(bart.varprob_mean, [0, 1])
-    assert jnp.all(bart.varprob_mean == bart.varprob)
+    def test_blocked_vars(keys: split) -> None:
+        """Check that varprob = 0 on predictors blocked a priori."""
+        X = gen_X(keys.pop(), 2, 30, 'continuous')
+        y = gen_y(keys.pop(), X, None, 'continuous')
+        with debug_nans(False):
+            xinfo = jnp.array([[jnp.nan], [0]])
+        bart = mc_gbart(x_train=X, y_train=y, xinfo=xinfo, seed=keys.pop())
+        assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1])
+        assert_array_equal(bart.varprob_mean, [0, 1])
+        assert jnp.all(bart.varprob_mean == bart.varprob)
 
 
 @pytest.mark.parametrize('theta', ['fixed', 'free'])
@@ -1532,8 +1534,8 @@ def test_sharding(kw: dict) -> None:
     check_data_sharding(bart.yhat_train_mean)
 
 
-class TestVarprob:
-    """Test the `varprob` parameter thoroughly."""
+class TestVarprobParam:
+    """Test the `varprob` parameter."""
 
     def test_biased_predictor_choice(self, keys: split, kw: dict) -> None:
         """Check that if `varprob[i]` is high then predictor `i` is used more than others."""

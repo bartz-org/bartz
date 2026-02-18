@@ -557,7 +557,7 @@ class TestMultichain:
             num_trees=num_trees,
             p_nonterminal=jnp.full(d - 1, 0.9),
             leaf_prior_cov_inv=jnp.eye(k) * num_trees,
-            error_cov_df=2.0,
+            error_cov_df=2.0,  # keep this a weak type
             error_cov_scale=2 * jnp.eye(k),
         )
 
@@ -597,6 +597,7 @@ class TestMultichain:
             typechecking_init = jaxtyped(init, typechecker=beartype)
             state = typechecking_init(**init_kwargs, num_chains=num_chains, mesh=mesh)
             assert state.forest.num_chains() == num_chains
+            check_strong_types(state)
             check_sharding(state, state.config.mesh)
 
         with subtests.test('step'):
@@ -605,6 +606,7 @@ class TestMultichain:
                 # key reuse checks trigger with empty key array apparently
                 new_state = typechecking_step(keys.pop(), state)
             assert new_state.forest.num_chains() == num_chains
+            check_strong_types(new_state)
             check_sharding(new_state, state.config.mesh)
 
     @pytest.mark.parametrize('profile', [False, True])
@@ -811,3 +813,12 @@ def normalize_spec(
 
     assert len(s) == ndim
     return PartitionSpec(*s)
+
+
+def check_strong_types(x: PyTree[Array]) -> None:
+    """Check all arrays in `x` have strong types."""
+
+    def check_leaf(path: KeyPath, x: Array) -> None:
+        assert not x.weak_type, f'{keystr(path)} has weak type'
+
+    tree.map_with_path(check_leaf, x)

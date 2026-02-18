@@ -86,12 +86,31 @@ jobs:
       - id: set-matrix
         run: |
           BASE_MATRIX='[
-            {id:"latest","runs-on":"ubuntu-latest","target-suffix":"",tests-args:""},
-            {id:"old","runs-on":"ubuntu-22.04","target-suffix":"-old",tests-args:""},
-            {id:"single-cpu","runs-on":"ubuntu-latest","target-suffix":"",tests-args:"ARGS=--num-cpu-devices=1"},
+            {
+              "id": "latest",
+              "runs-on": "ubuntu-latest",
+              "target-suffix": "",
+              "tests-args": ""
+            },
+            {
+              "id": "old",
+              "runs-on": "ubuntu-22.04",
+              "target-suffix": "-old",
+              "tests-args": ""
+            },
+            {
+              "id": "single-cpu",
+              "runs-on": "ubuntu-latest",
+              "target-suffix": "",
+              "tests-args": "ARGS=--num-cpu-devices=1"
+            },
           ]'
           BENCHMARKS_BASE_MATRIX='[
-            {"id":"latest","runs-on":"ubuntu-latest","target-suffix":""}
+            {
+              "id": "latest",
+              "runs-on": "ubuntu-latest",
+              "target-suffix": ""
+            }
           ]'
 
           MATRIX=$(echo "$BASE_MATRIX" | jq -c ".")

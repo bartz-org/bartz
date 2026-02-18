@@ -29,7 +29,7 @@ This is the main suite of tests.
 
 from collections.abc import Generator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from gc import collect
 from os import getpid, kill
@@ -43,8 +43,8 @@ import jax
 import numpy
 import polars as pl
 import pytest
-from equinox import EquinoxRuntimeError
-from jax import block_until_ready, config, debug_nans, random, tree, vmap
+from equinox import EquinoxRuntimeError, tree_at
+from jax import block_until_ready, config, debug_nans, devices, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logit, ndtr
@@ -1674,3 +1674,51 @@ def test_array_no_gc(kw: dict) -> None:
         collect()
     finally:
         config.update(setting, prev)
+
+
+def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
+    """Check that the result is the same with/without sharding."""
+    if len(devices()) < 2:
+        pytest.skip('Need at least 2 devices for this test')
+
+    # baseline without sharding
+    baseline_kw = tree.map(lambda x: x, kw)  # deep copy of structure
+    baseline_kw.setdefault('bart_kwargs', {}).update(
+        num_chain_devices=None, num_data_devices=None
+    )
+    baseline_kw.update(nskip=0, ndpost=20, mc_cores=2)
+    bart = mc_gbart(**baseline_kw)
+
+    def check_equal(path: KeyPath, xb: Array, xs: Array) -> None:
+        assert_close_matrices(
+            xs, xb, err_msg=f'{keystr(path)}: ', rtol=1e-5, reduce_rank=True
+        )
+
+    def remove_mesh(bart: mc_gbart) -> mc_gbart:
+        config = bart._mcmc_state.config
+        config = replace(config, mesh=None)
+        return tree_at(lambda bart: bart._mcmc_state.config, bart, config)
+
+    with subtests.test('shard chains'):
+        chains_kw = tree.map(lambda x: x, baseline_kw)
+        chains_kw.setdefault('bart_kwargs', {}).update(num_chain_devices=2)
+        bart_chains = mc_gbart(**chains_kw)
+        bart_chains = remove_mesh(bart_chains)
+        tree.map_with_path(check_equal, bart, bart_chains)
+
+    with subtests.test('shard data'):
+        data_kw = tree.map(lambda x: x, baseline_kw)
+        data_kw.setdefault('bart_kwargs', {}).update(num_data_devices=2)
+        bart_data = mc_gbart(**data_kw)
+        bart_data = remove_mesh(bart_data)
+        tree.map_with_path(check_equal, bart, bart_data)
+
+    if len(devices()) >= 4:
+        with subtests.test('shard data and chains'):
+            both_kw = tree.map(lambda x: x, baseline_kw)
+            both_kw.setdefault('bart_kwargs', {}).update(
+                num_chain_devices=2, num_data_devices=2
+            )
+            bart_both = mc_gbart(**both_kw)
+            bart_both = remove_mesh(bart_both)
+            tree.map_with_path(check_equal, bart, bart_both)

@@ -150,7 +150,6 @@ class Callback(Protocol):
         bart: State,
         burnin: Bool[Array, ''],
         i_total: Int32[Array, ''],
-        i_skip: Int32[Array, ''],
         callback_state: CallbackState,
         n_burn: Int32[Array, ''],
         n_save: Int32[Array, ''],
@@ -170,9 +169,6 @@ class Callback(Protocol):
             Whether the last iteration was in the burn-in phase.
         i_total
             The index of the last MCMC iteration (0-based).
-        i_skip
-            The number of MCMC updates from the last saved state. The initial
-            state counts as saved, even if it's not copied into the trace.
         callback_state
             The callback state, initially set to the argument passed to
             `run_mcmc`, afterwards to the value returned by the last invocation
@@ -370,20 +366,6 @@ def _empty_trace(
     return jax.vmap(extractor, in_axes=None, out_axes=out_axes, axis_size=length)(bart)
 
 
-@jit
-def _compute_i_skip(
-    i_total: Int32[Array, ''], n_burn: Int32[Array, ''], n_skip: Int32[Array, '']
-) -> Int32[Array, '']:
-    """Compute the `i_skip` argument passed to `callback`."""
-    burnin = i_total < n_burn
-    return jnp.where(
-        burnin,
-        i_total + 1,
-        (i_total - n_burn + 1) % n_skip
-        + jnp.where(i_total - n_burn + 1 < n_skip, n_burn, 0),
-    )
-
-
 T = TypeVar('T')
 
 
@@ -446,13 +428,11 @@ def _run_mcmc_inner_loop(
         # invoke callback
         callback_state = carry.callback_state
         if callback is not None:
-            i_skip = _compute_i_skip(carry.i_total, n_burn, n_skip)
             rt = callback(
                 key=keys.pop(),
                 bart=bart,
                 burnin=carry.i_total < n_burn,
                 i_total=carry.i_total,
-                i_skip=i_skip,
                 callback_state=callback_state,
                 n_burn=n_burn,
                 n_save=n_save,

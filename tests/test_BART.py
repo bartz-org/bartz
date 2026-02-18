@@ -48,7 +48,7 @@ from jax import block_until_ready, config, debug_nans, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logit, ndtr
-from jax.sharding import SingleDeviceSharding
+from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import (
     Array,
@@ -1529,13 +1529,12 @@ def test_same_result_profiling(variant: int, kw: dict) -> None:
             raise
 
 
-def test_sharding(kw: dict) -> None:
-    """Check that chains live on their own devices throughout the interface."""
-    # determine whether we expect sharding to be set up based on the arguments
+def get_expect_sharded(kw: dict) -> bool:
+    """Check whether we expect sharding to be set up based on the arguments."""
     bart_kwargs = kw.get('bart_kwargs', {})
     num_chain_devices = bart_kwargs.get('num_chain_devices')
     num_data_devices = bart_kwargs.get('num_data_devices')
-    expect_sharded = (
+    return (
         num_chain_devices is not None
         or num_data_devices is not None
         or (
@@ -1546,9 +1545,38 @@ def test_sharding(kw: dict) -> None:
         )
     )
 
+
+def check_data_sharding(x: Array | None, mesh: Mesh) -> None:
+    """Check the sharding of `x` assuming it may be sharded only along the last 'data' axis."""
+    if x is None:
+        return
+    elif mesh is None:
+        assert isinstance(x.sharding, SingleDeviceSharding)
+    elif 'data' in mesh.axis_names:
+        expected_num_devices = min(2, get_device_count())
+        assert x.sharding.num_devices == expected_num_devices
+        expected_spec = (None,) * (x.ndim - 1) + ('data',)
+        assert get_normal_spec(x) == normalize_spec(expected_spec, mesh, x.shape)
+
+
+def check_chain_sharding(x: Array | None, mesh: Mesh) -> None:
+    """Check the sharding of `x` assuming it may be sharded only along the first 'chains' axis."""
+    if x is None:
+        return
+    elif mesh is None:
+        assert isinstance(x.sharding, SingleDeviceSharding)
+    elif 'chains' in mesh.axis_names:
+        expected_num_devices = min(2, get_device_count())
+        assert x.sharding.num_devices == expected_num_devices
+        assert get_normal_spec(x) == ('chains',) + (None,) * (x.ndim - 1)
+
+
+def test_sharding(kw: dict) -> None:
+    """Check that chains live on their own devices throughout the interface."""
     bart = mc_gbart(**kw)
 
     # check the mesh is set up iff we expect sharding
+    expect_sharded = get_expect_sharded(kw)
     mesh = bart._mcmc_state.config.mesh
     assert expect_sharded == (mesh is not None)
 
@@ -1557,41 +1585,34 @@ def test_sharding(kw: dict) -> None:
     check(bart._burnin_trace)
     check(bart._main_trace)
 
-    def check_chain_sharding(x: Array | None) -> None:
-        if x is None:
-            return
-        elif mesh is None:
-            assert isinstance(x.sharding, SingleDeviceSharding)
-        elif 'chains' in mesh.axis_names:
-            expected_num_devices = min(2, get_device_count())
-            assert x.sharding.num_devices == expected_num_devices
-            assert get_normal_spec(x) == ('chains',) + (None,) * (x.ndim - 1)
+    check_chain = partial(check_chain_sharding, mesh=mesh)
 
-    check_chain_sharding(bart.yhat_test)
-    check_chain_sharding(bart.prob_test)
-    check_chain_sharding(bart.prob_train)
+    check_chain(bart.yhat_test)
+    check_chain(bart.prob_test)
+    check_chain(bart.prob_train)
     if bart.sigma is not None:
-        check_chain_sharding(bart.sigma.T)
-    check_chain_sharding(bart.sigma_)
-    check_chain_sharding(bart.varcount)
-    check_chain_sharding(bart.varprob)
-    check_chain_sharding(bart.yhat_train)
+        check_chain(bart.sigma.T)
+    check_chain(bart.sigma_)
+    check_chain(bart.varcount)
+    check_chain(bart.varprob)
+    check_chain(bart.yhat_train)
 
-    def check_data_sharding(x: Array | None) -> None:
-        if x is None:
-            return
-        elif mesh is None:
-            assert isinstance(x.sharding, SingleDeviceSharding)
-        elif 'data' in mesh.axis_names:
-            expected_num_devices = min(2, get_device_count())
-            assert x.sharding.num_devices == expected_num_devices
-            expected_spec = (None,) * (x.ndim - 1) + ('data',)
-            assert get_normal_spec(x) == normalize_spec(expected_spec, mesh, x.shape)
+    check_data = partial(check_data_sharding, mesh=mesh)
 
-    check_data_sharding(bart.prob_train)
-    check_data_sharding(bart.prob_train_mean)
-    check_data_sharding(bart.yhat_train)
-    check_data_sharding(bart.yhat_train_mean)
+    check_data(bart.prob_train)
+    check_data(bart.prob_train_mean)
+    check_data(bart.yhat_train)
+    check_data(bart.yhat_train_mean)
+
+    assert bart.offset.is_fully_replicated
+    if bart.sigest is not None:
+        assert bart.sigest.is_fully_replicated
+    if bart.sigma_mean is not None:
+        assert bart.sigma_mean.is_fully_replicated
+    assert bart.varcount_mean.is_fully_replicated
+    assert bart.varprob_mean.is_fully_replicated
+    if bart.yhat_test_mean is not None:
+        assert bart.yhat_test_mean.is_fully_replicated
 
 
 class TestVarprobParam:

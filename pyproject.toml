@@ -259,6 +259,7 @@ check-yield-types = false
 treat-property-methods-as-class-attributes = true
 check-style-mismatch = true
 show-filenames-in-every-violation-message = true
+allow-init-docstring = false
 check-class-attributes = false
-# do not check class attributes because in dataclasses I document them as
-# init parameters because they are duplicated in the html docs otherwise.
+# do not check class attributes because pydoclint only supports them being
+# documented in the class docstring while we document them individually

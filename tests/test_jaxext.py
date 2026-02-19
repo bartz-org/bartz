@@ -472,14 +472,14 @@ class TestTruncatedNormalOneSided:
         shape = (1_000_000,)
         n_loops = 100
 
-        keys = random.split(keys.pop(), n_loops)
+        keys = keys.pop(n_loops)
 
         platform = keys.device.platform
         clip = platform == 'gpu'
 
         @jit
         def loop_body(key: Key[Array, '']) -> Float32[Array, ' n']:
-            keys = jaxext.split(key, 3)
+            keys = split(key, 3)
             upper = random.bernoulli(keys.pop(), 0.5, shape)
             bound = random.uniform(keys.pop(), shape, float, -1, 1)
             return jaxext.truncated_normal_onesided(

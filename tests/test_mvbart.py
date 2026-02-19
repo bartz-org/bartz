@@ -471,7 +471,7 @@ class TestMVBartSteps:
             count_num_batches=None,
         )
 
-        for key in random.split(keys.pop(), 10):
+        for key in keys.pop(10):
             mv_state = step(key, mv_state)
 
             assert jnp.all(jnp.isfinite(mv_state.resid))

@@ -265,6 +265,7 @@ class mc_gbart(Module):
         if ntree is None:
             ntree = 50 if type == 'pbart' else 200
 
+        # set most calling arguments for Bart
         kwargs: dict = dict(
             x_train=x_train,
             y_train=y_train,
@@ -299,7 +300,18 @@ class mc_gbart(Module):
             maxdepth=6,
             **process_mc_cores(y_train, mc_cores),
         )
+
+        # set min_points_per_leaf unless the user set it already
+        if 'min_points_per_leaf' not in bart_kwargs.get('init_kw', {}):
+            bart_kwargs = dict(bart_kwargs)
+            init_kw = dict(bart_kwargs.get('init_kw', {}))
+            init_kw['min_points_per_leaf'] = 5
+            bart_kwargs['init_kw'] = init_kw
+
+        # add user arguments
         kwargs.update(bart_kwargs)
+
+        # invoke Bart
         self._bart = Bart(**kwargs)
 
     # Public attributes from Bart

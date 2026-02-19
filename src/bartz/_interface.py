@@ -819,7 +819,6 @@ class Bart(Module):
             error_cov_df=error_cov_df,
             error_cov_scale=error_cov_scale,
             min_points_per_decision_node=10,
-            min_points_per_leaf=5,
             log_s=process_varprob(varprob, max_split),
             theta=theta,
             a=a,

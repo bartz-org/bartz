@@ -308,7 +308,7 @@ class Bart(Module):
         offset: FloatLike | None = None,
         w: Float[Array, ' n'] | Series | None = None,
         num_trees: int = 200,
-        numcut: int = 100,
+        numcut: int = 255,
         ndpost: int = 1000,
         nskip: int = 1000,
         keepevery: int = 1,

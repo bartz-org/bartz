@@ -71,12 +71,11 @@ from bartz.debug import (
     check_trace,
     forest_depth_distr,
     sample_prior,
-    tree_actual_depth,
     trees_BART_to_bartz,
 )
 from bartz.debug import debug_gbart as gbart
 from bartz.debug import debug_mc_gbart as mc_gbart
-from bartz.grove import is_actual_leaf, tree_depth, tree_depths
+from bartz.grove import is_actual_leaf, tree_actual_depth, tree_depth, tree_depths
 from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State

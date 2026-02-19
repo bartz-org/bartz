@@ -250,6 +250,7 @@ banned-from = ["jax.random", "jax.lax", "jax.numpy", "jax.tree"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "jax.lax.reciprocal".msg = "Use jnp.reciprocal"
+"jax.random.PRNGKey".msg = "User jax.random.key"
 
 [tool.pydoclint]
 arg-type-hints-in-signature = true

@@ -195,8 +195,7 @@ class Bart(Module):
         `sigest`, so either the weights should be O(1), or `sigest` should be
         specified by the user.
     num_trees
-        The number of trees used to represent the latent mean function. By
-        default 200 for continuous regression and 50 for binary regression.
+        The number of trees used to represent the latent mean function.
     numcut
         If `usequants` is `False`: the exact number of cutpoints used to bin the
         predictors, ranging between the minimum and maximum observed values
@@ -309,7 +308,7 @@ class Bart(Module):
         tau_num: FloatLike | None = None,
         offset: FloatLike | None = None,
         w: Float[Array, ' n'] | Series | None = None,
-        num_trees: int | None = None,
+        num_trees: int = 200,
         numcut: int = 100,
         ndpost: int = 1000,
         nskip: int = 100,
@@ -337,8 +336,6 @@ class Bart(Module):
         # from here onwards, the type is determined by y_train.dtype == bool
 
         # set defaults that depend on type of regression
-        if num_trees is None:
-            num_trees = 50 if y_train.dtype == bool else 200
         if keepevery is None:
             keepevery = 10 if y_train.dtype == bool else 1
 

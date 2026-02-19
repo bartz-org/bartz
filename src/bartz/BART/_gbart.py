@@ -259,6 +259,9 @@ class mc_gbart(Module):
         seed: int | Key[Array, ''] = 0,
         bart_kwargs: Mapping = MappingProxyType({}),
     ) -> None:
+        if ntree is None:
+            ntree = 50 if type == 'pbart' else 200
+
         kwargs: dict = dict(
             x_train=x_train,
             y_train=y_train,

@@ -36,7 +36,7 @@ from jax import numpy as jnp
 from jaxtyping import ArrayLike
 from scipy import linalg
 
-from bartz.debug import check_tree, describe_error
+from bartz.debug import check_trace, describe_error
 from bartz.jaxext import minimal_unsigned_dtype
 from bartz.mcmcloop import TreesTrace
 
@@ -76,7 +76,7 @@ def manual_tree(
         split_tree=tree.split_tree.astype(split_type),
     )
 
-    error = check_tree(tree, max_split)
+    error = check_trace(tree, max_split)
     descr = describe_error(error)
     bad = any(d not in ignore_errors for d in descr)
     assert not bad, descr

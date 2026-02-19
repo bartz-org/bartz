@@ -66,16 +66,16 @@ from numpy.testing import assert_allclose, assert_array_equal
 from pytest_subtests import SubTests
 
 from bartz import profile_mode
-from bartz.debug import (
-    TraceWithOffset,
-    check_trace,
-    forest_depth_distr,
-    sample_prior,
-    trees_BART_to_bartz,
-)
+from bartz.debug import TraceWithOffset, check_trace, sample_prior, trees_BART_to_bartz
 from bartz.debug import debug_gbart as gbart
 from bartz.debug import debug_mc_gbart as mc_gbart
-from bartz.grove import is_actual_leaf, tree_actual_depth, tree_depth, tree_depths
+from bartz.grove import (
+    forest_depth_distr,
+    is_actual_leaf,
+    tree_actual_depth,
+    tree_depth,
+    tree_depths,
+)
 from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State

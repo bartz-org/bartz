@@ -27,4 +27,5 @@ Debugging
 
 .. automodule:: bartz.debug
     :members:
+    :imported-members:
     :special-members: __call__

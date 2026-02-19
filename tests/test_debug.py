@@ -33,7 +33,8 @@ from jax import random
 from scipy import stats
 from scipy.stats import ks_1samp
 
-from bartz.debug import check_trace, format_tree, sample_prior
+from bartz.debug import check_trace, sample_prior
+from bartz.grove import format_tree
 from bartz.jaxext import minimal_unsigned_dtype, split
 from tests.util import manual_tree
 

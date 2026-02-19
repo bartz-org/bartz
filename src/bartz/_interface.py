@@ -415,6 +415,11 @@ class Bart(Module):
         """
         return self._main_trace.grow_prop_count.size
 
+    @property
+    def num_trees(self) -> int:
+        """Return the number of trees used in the model."""
+        return self._mcmc_state.forest.split_tree.shape[-2]
+
     @cached_property
     def prob_test(self) -> Float32[Array, 'ndpost m'] | None:
         """The posterior probability of y being True at `x_test` for each MCMC iteration."""

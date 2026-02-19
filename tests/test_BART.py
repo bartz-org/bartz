@@ -1722,3 +1722,21 @@ def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
             bart_both = mc_gbart(**both_kw)
             bart_both = remove_mesh(bart_both)
             tree.map_with_path(check_equal, bart, bart_both)
+
+
+def test_num_trees(kw: dict, subtests: SubTests) -> None:
+    """Test the number of trees."""
+    kw.update(nskip=0, ndpost=0)
+
+    with subtests.test('given ntree'):
+        bart = mc_gbart(**kw)
+        assert bart._bart.num_trees == kw['ntree']
+
+    with subtests.test('default ntree'):
+        if kw['y_train'].dtype == bool:
+            default_ntree = 50
+        else:
+            default_ntree = 200
+        kw.pop('ntree')
+        bart = mc_gbart(**kw)
+        assert bart._bart.num_trees == default_ntree

@@ -194,7 +194,7 @@ class Bart(Module):
         datapoints. Note: `w` is ignored in the automatic determination of
         `sigest`, so either the weights should be O(1), or `sigest` should be
         specified by the user.
-    ntree
+    num_trees
         The number of trees used to represent the latent mean function. By
         default 200 for continuous regression and 50 for binary regression.
     numcut
@@ -309,7 +309,7 @@ class Bart(Module):
         tau_num: FloatLike | None = None,
         offset: FloatLike | None = None,
         w: Float[Array, ' n'] | Series | None = None,
-        ntree: int | None = None,
+        num_trees: int | None = None,
         numcut: int = 100,
         ndpost: int = 1000,
         nskip: int = 100,
@@ -337,8 +337,8 @@ class Bart(Module):
         # from here onwards, the type is determined by y_train.dtype == bool
 
         # set defaults that depend on type of regression
-        if ntree is None:
-            ntree = 50 if y_train.dtype == bool else 200
+        if num_trees is None:
+            num_trees = 50 if y_train.dtype == bool else 200
         if keepevery is None:
             keepevery = 10 if y_train.dtype == bool else 1
 
@@ -349,7 +349,7 @@ class Bart(Module):
 
         # process "standardization" settings
         offset = self._process_offset_settings(y_train, offset)
-        sigma_mu = self._process_leaf_sdev_settings(y_train, k, ntree, tau_num)
+        sigma_mu = self._process_leaf_sdev_settings(y_train, k, num_trees, tau_num)
         lamda, sigest = self._process_error_variance_settings(
             x_train, y_train, sigest, sigdf, sigquant, lamda
         )
@@ -371,7 +371,7 @@ class Bart(Module):
             power,
             base,
             maxdepth,
-            ntree,
+            num_trees,
             init_kw,
             rm_const,
             theta,
@@ -734,7 +734,7 @@ class Bart(Module):
     def _process_leaf_sdev_settings(
         y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
         k: FloatLike,
-        ntree: int,
+        num_trees: int,
         tau_num: FloatLike | None,
     ) -> FloatLike:
         """Return sigma_mu."""
@@ -746,7 +746,7 @@ class Bart(Module):
             else:
                 tau_num = (y_train.max() - y_train.min()) / 2
 
-        return tau_num / (k * math.sqrt(ntree))
+        return tau_num / (k * math.sqrt(num_trees))
 
     @staticmethod
     def _determine_splits(
@@ -784,7 +784,7 @@ class Bart(Module):
         power: FloatLike,
         base: FloatLike,
         maxdepth: int,
-        ntree: int,
+        num_trees: int,
         init_kw: Mapping[str, Any],
         rm_const: bool,
         theta: FloatLike | None,
@@ -822,7 +822,7 @@ class Bart(Module):
             offset=offset,
             error_scale=w,
             max_split=max_split,
-            num_trees=ntree,
+            num_trees=num_trees,
             p_nonterminal=p_nonterminal,
             leaf_prior_cov_inv=jnp.reciprocal(jnp.square(sigma_mu)),
             error_cov_df=error_cov_df,

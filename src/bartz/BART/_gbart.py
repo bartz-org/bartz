@@ -259,6 +259,9 @@ class mc_gbart(Module):
         seed: int | Key[Array, ''] = 0,
         bart_kwargs: Mapping = MappingProxyType({}),
     ) -> None:
+        # set defaults that depend on type of regression
+        if keepevery is None:
+            keepevery = 10 if type == 'pbart' else 1
         if ntree is None:
             ntree = 50 if type == 'pbart' else 200
 

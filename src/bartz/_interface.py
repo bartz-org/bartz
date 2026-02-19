@@ -220,8 +220,7 @@ class Bart(Module):
         The number of initial MCMC samples to discard as burn-in. This number
         of samples is discarded from each chain.
     keepevery
-        The thinning factor for the MCMC samples, after burn-in. By default, 1
-        for continuous regression and 10 for binary regression.
+        The thinning factor for the MCMC samples, after burn-in.
     printevery
         The number of iterations (including thinned-away ones) between each log
         line. Set to `None` to disable logging. ^C interrupts the MCMC only
@@ -312,7 +311,7 @@ class Bart(Module):
         numcut: int = 100,
         ndpost: int = 1000,
         nskip: int = 1000,
-        keepevery: int | None = None,
+        keepevery: int = 1,
         printevery: int | None = 100,
         num_chains: int | None = None,
         num_chain_devices: int | None = None,
@@ -334,10 +333,6 @@ class Bart(Module):
         # check data types are correct for continuous/binary regression
         self._check_type_settings(y_train, type, w)
         # from here onwards, the type is determined by y_train.dtype == bool
-
-        # set defaults that depend on type of regression
-        if keepevery is None:
-            keepevery = 10 if y_train.dtype == bool else 1
 
         # process sparsity settings
         theta, a, b, rho = self._process_sparsity_settings(

@@ -97,7 +97,7 @@ def gen_nonsense_data(
     return X, y, max_split
 
 
-Kind = Literal['plain', 'weights', 'binary', 'sparse']
+Kind = Literal['plain', 'weights', 'binary', 'sparse', 'multivariate']
 
 
 def get_default_platform() -> str:
@@ -112,24 +112,28 @@ def simple_init(  # noqa: C901, PLR0915
     num_trees: int,
     kind: Kind = 'plain',
     *,
-    k: int | None = None,
     num_chains: int | None = None,
     mesh: dict[str, int] | Mesh | None = None,
     **kwargs: Any,
 ) -> State:
     """Glue code to support `mcmcstep.init` across API changes."""
+    # generate data
+    if kind == 'multivariate':
+        k = 2
+    else:
+        k = None
     X, y, max_split = gen_nonsense_data(p, n, k)
 
     kw: dict = dict(
         X=X,
         y=y,
-        offset=0.0,
+        offset=0.0 if k is None else jnp.zeros(k),
         max_split=max_split,
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(6, 0.95, 2),
-        leaf_prior_cov_inv=jnp.float32(num_trees),
+        leaf_prior_cov_inv=jnp.float32(num_trees) * (1.0 if k is None else jnp.eye(k)),
         error_cov_df=2.0,
-        error_cov_scale=2.0,
+        error_cov_scale=2.0 * (1.0 if k is None else jnp.eye(k)),
         min_points_per_decision_node=10,
         num_chains=num_chains,
         mesh=mesh,
@@ -197,6 +201,11 @@ def simple_init(  # noqa: C901, PLR0915
             if 'sparse_on_at' not in sig.parameters:
                 kw.pop('sparse_on_at')
 
+        case 'multivariate':
+            if 'leaf_prior_cov_inv' not in sig.parameters:
+                msg = 'multivariate not supported'
+                raise NotImplementedError(msg)
+
     kw.update(kwargs)
 
     return init(**kw)
@@ -222,7 +231,7 @@ class StepGeneric(AutoParamNames):
 
     params: tuple[tuple[Mode, ...], tuple[Kind, ...], tuple[int | None, ...]] = (
         ('compile', 'run'),
-        ('plain', 'binary', 'weights', 'sparse'),
+        ('plain', 'binary', 'weights', 'sparse', 'multivariate'),
         (None, 1, 2),
     )
 

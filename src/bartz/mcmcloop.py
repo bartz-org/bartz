@@ -155,7 +155,7 @@ class Callback(Protocol):
         n_save: Int32[Array, ''],
         n_skip: Int32[Array, ''],
         i_outer: Int32[Array, ''],
-        inner_loop_length: int,
+        inner_loop_length: Int32[Array, ''],
     ) -> tuple[State, CallbackState] | None:
         """Do an arbitrary action after an iteration of the MCMC.
 
@@ -395,11 +395,11 @@ class _CallCounter:
         return self.func(*args, **kwargs)
 
 
-@partial(jit_if_not_profiling, donate_argnums=(0,), static_argnums=(1, 2, 3, 4))
+@partial(jit_if_not_profiling, donate_argnums=(0,), static_argnums=(2, 3, 4))
 @_CallCounter
 def _run_mcmc_inner_loop(
     carry: _Carry,
-    inner_loop_length: int,
+    inner_loop_length: Int32[Array, ''],
     callback: Callback | None,
     burnin_extractor: Callable[[State], PyTree],
     main_extractor: Callable[[State], PyTree],

@@ -477,9 +477,9 @@ class gbart(mc_gbart):
 
 def process_mc_cores(y_train: Array | Series, mc_cores: int) -> dict[str, Any]:
     """Determine the arguments to pass to `Bart` to configure multiple chains."""
-    # one chain, leave default configuration which is num_chains=None
+    # one chain, disable multichain altogether
     if abs(mc_cores) == 1:
-        return {}
+        return dict(num_chains=None)
 
     # determine if we are on cpu; this point may raise an exception
     platform = get_platform(y_train, mc_cores)

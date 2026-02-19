@@ -314,6 +314,7 @@ class BaseGbart(AutoParamNames):
         nchains: int = 1,
         cache: Cache = 'warm',
         profile: bool = False,
+        predict: bool = False,
         kwargs: Mapping[str, Any] = MappingProxyType({}),
     ) -> None:
         """Prepare the arguments and run once to warm-up."""
@@ -330,7 +331,7 @@ class BaseGbart(AutoParamNames):
         # generate simulated data
         dgp = gen_data(
             keys.pop(),
-            n=N,
+            n=2 * N,
             p=P,
             k=1,
             q=2,
@@ -339,11 +340,13 @@ class BaseGbart(AutoParamNames):
             sigma2_quad=0.4,
             sigma2_eps=0.2,
         )
+        train, test = dgp.split()
+        block_until_ready((train, test))
 
         # arguments
-        self.kw = dict(
-            x_train=dgp.x,
-            y_train=dgp.y.squeeze(0),
+        self.kw: dict = dict(
+            x_train=train.x,
+            y_train=train.y.squeeze(0),
             ntree=NTREE,
             nskip=niters // 2,
             ndpost=(niters - niters // 2) * nchains,
@@ -352,6 +355,7 @@ class BaseGbart(AutoParamNames):
         if support_multichain:
             self.kw.update(mc_cores=nchains)
         self.kw.update(kwargs)
+        block_until_ready(self.kw)
 
         # set profile mode
         if not profile:
@@ -361,6 +365,14 @@ class BaseGbart(AutoParamNames):
         else:
             msg = 'Profile mode not supported.'
             raise NotImplementedError(msg)
+
+        # save information used to run predictions
+        self.predict = predict
+        if predict:
+            self.test = test
+            with self.context():
+                self.bart = gbart(**self.kw)
+                block_bart(self.bart)
 
         # decide how much to cold-start
         match cache:
@@ -374,11 +386,20 @@ class BaseGbart(AutoParamNames):
     def time_gbart(self, *_: Any) -> None:
         """Time instantiating the class."""
         with redirect_stdout(StringIO()), self.context():
-            bart = gbart(**self.kw)
-            if isinstance(bart, Module):
-                block_until_ready(bart)
+            if self.predict:
+                ypred = self.bart.predict(self.test.x)
+                block_until_ready(ypred)
             else:
-                block_until_ready((bart._mcmc_state, bart._main_trace))
+                bart = gbart(**self.kw)
+                block_bart(bart)
+
+
+def block_bart(bart: gbart) -> None:
+    """Block a bart object until ready, adapting for old versions."""
+    if isinstance(bart, Module):
+        block_until_ready(bart)
+    else:
+        block_until_ready((bart._mcmc_state, bart._main_trace))
 
 
 class GbartIters(BaseGbart):
@@ -418,13 +439,13 @@ class GbartChains(BaseGbart):
             # on gpu shard explicitly
             kwargs = dict(num_chain_devices=min(nchains, get_device_count()))
 
-        super().setup(NITERS, nchains, 'warm', False, dict(bart_kwargs=kwargs))
+        super().setup(NITERS, nchains, 'warm', False, False, dict(bart_kwargs=kwargs))
 
 
 class GbartGeneric(BaseGbart):
     """General timing of `mc_gbart` with many settings."""
 
-    params = ((0, NITERS), (1, 6), ('warm', 'cold'), (False, True))
+    params = ((0, NITERS), (1, 6), ('warm', 'cold'), (False, True), (False, True))
 
 
 class BaseRunMcmc(AutoParamNames):

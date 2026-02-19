@@ -311,7 +311,7 @@ class Bart(Module):
         num_trees: int = 200,
         numcut: int = 100,
         ndpost: int = 1000,
-        nskip: int = 100,
+        nskip: int = 1000,
         keepevery: int | None = None,
         printevery: int | None = 100,
         num_chains: int | None = None,

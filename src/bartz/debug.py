@@ -24,12 +24,11 @@
 
 """Debugging utilities. The main functionality is the class `debug_mc_gbart`."""
 
-from collections.abc import Callable
 from dataclasses import replace
 from functools import partial
 from math import ceil, log2
 from re import fullmatch
-from typing import Any
+from typing import Any, Protocol
 
 import numpy
 from equinox import Module, error_if, field
@@ -57,7 +56,26 @@ from bartz.mcmcstep._moves import randint_masked
 check_functions = []
 
 
-CheckFunc = Callable[[TreeHeaps, UInt[Array, ' p']], bool | Bool[Array, '']]
+class CheckFunc(Protocol):
+    """Protocol for functions that check whether a tree is valid."""
+
+    def __call__(
+        self, tree: TreeHeaps, max_split: UInt[Array, ' p'], /
+    ) -> bool | Bool[Array, '']:
+        """Check whether a tree is valid.
+
+        Parameters
+        ----------
+        tree
+            The tree to check.
+        max_split
+            The maximum split value for each variable.
+
+        Returns
+        -------
+        A boolean scalar indicating whether the tree is valid.
+        """
+        ...
 
 
 def check(func: CheckFunc) -> CheckFunc:

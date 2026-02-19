@@ -1,6 +1,6 @@
 .. bartz/docs/reference/debug.rst
 ..
-.. Copyright (c) 2025, The Bartz Contributors
+.. Copyright (c) 2025-2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -27,3 +27,4 @@ Debugging
 
 .. automodule:: bartz.debug
     :members:
+    :special-members: __call__

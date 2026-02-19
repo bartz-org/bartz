@@ -31,7 +31,7 @@ from collections.abc import Callable
 from dataclasses import fields
 from functools import partial, wraps
 from math import floor
-from typing import Any, Protocol, TypeVar
+from typing import Any, NamedTuple, Protocol, TypeVar
 
 import jax
 import numpy
@@ -140,6 +140,23 @@ class MainTrace(BurninTrace):
 CallbackState = PyTree[Any, 'T']
 
 
+class RunMCMCResult(NamedTuple):
+    """Return value of `run_mcmc`."""
+
+    final_state: State
+    """The final MCMC state."""
+
+    burnin_trace: PyTree[
+        Shaped[Array, 'n_burn ...'] | Shaped[Array, 'num_chains n_burn ...']
+    ]
+    """The trace of the burn-in phase. For the default layout, see `BurninTrace`."""
+
+    main_trace: PyTree[
+        Shaped[Array, 'n_save ...'] | Shaped[Array, 'num_chains n_save ...']
+    ]
+    """The trace of the main phase. For the default layout, see `MainTrace`."""
+
+
 class Callback(Protocol):
     """Callback type for `run_mcmc`."""
 
@@ -225,11 +242,7 @@ def run_mcmc(
     callback_state: CallbackState = None,
     burnin_extractor: Callable[[State], PyTree] = BurninTrace.from_state,
     main_extractor: Callable[[State], PyTree] = MainTrace.from_state,
-) -> tuple[
-    State,
-    PyTree[Shaped[Array, 'n_burn ...'] | Shaped[Array, 'num_chains n_burn ...']],
-    PyTree[Shaped[Array, 'n_save ...'] | Shaped[Array, 'num_chains n_save ...']],
-]:
+) -> RunMCMCResult:
     """
     Run the MCMC for the BART posterior.
 
@@ -273,12 +286,7 @@ def run_mcmc(
 
     Returns
     -------
-    bart : State
-        The final MCMC state.
-    burnin_trace : PyTree[Shaped[Array, 'n_burn *']]
-        The trace of the burn-in phase. For the default layout, see `BurninTrace`.
-    main_trace : PyTree[Shaped[Array, 'n_save *']]
-        The trace of the main phase. For the default layout, see `MainTrace`.
+    A namedtuple with the final state, the burn-in trace, and the main trace.
 
     Raises
     ------
@@ -340,7 +348,7 @@ def run_mcmc(
             n_iters,
         )
 
-    return carry.bart, carry.burnin_trace, carry.main_trace
+    return RunMCMCResult(carry.bart, carry.burnin_trace, carry.main_trace)
 
 
 def _replicate(x: Array, mesh: Mesh | None) -> Array:

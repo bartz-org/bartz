@@ -33,6 +33,6 @@ class invgamma:
     """Class that represents the distribution InvGamma(a, 1)."""
 
     @staticmethod
-    def ppf(q: Float[Array, '...'], a: Float[Array, '...']) -> Float[Array, '...']:
+    def ppf(q: Float[Array, '*'], a: Float[Array, '*']) -> Float[Array, '*']:
         """Percentile point function."""
         return 1 / gammainccinv(a, q)

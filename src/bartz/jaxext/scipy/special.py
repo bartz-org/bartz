@@ -50,7 +50,7 @@ def _castto(func: Callable[..., Array], dtype: DTypeLike) -> Callable[..., Array
 
 
 @jit
-def gammainccinv(a: Float[Array, '...'], y: Float[Array, '...']) -> Float[Array, '...']:
+def gammainccinv(a: Float[Array, '*'], y: Float[Array, '*']) -> Float[Array, '*']:
     """Survival function inverse of the Gamma(a, 1) distribution."""
     shape = jnp.broadcast_shapes(a.shape, y.shape)
     dtype = _float_type(a.dtype, y.dtype)
@@ -78,7 +78,7 @@ import numpy as np
 from jax import debug_infs, lax
 
 
-def ndtri(p: Float[Array, '...']) -> Float[Array, '...']:
+def ndtri(p: Float[Array, '*']) -> Float[Array, '*']:
     """Compute the inverse of the CDF of the Normal distribution function.
 
     This is a patch of `jax.scipy.special.ndtri`.

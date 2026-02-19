@@ -54,7 +54,7 @@ from bartz import mcmcloop, mcmcstep, prepcovars
 from bartz.jaxext import is_key
 from bartz.jaxext.scipy.special import ndtri
 from bartz.jaxext.scipy.stats import invgamma
-from bartz.mcmcloop import compute_varcount, evaluate_trace, run_mcmc
+from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
 from bartz.mcmcstep import make_p_nonterminal
 from bartz.mcmcstep._state import get_num_chains
 
@@ -386,18 +386,19 @@ class Bart(Module):
             sparse,
             nskip,
         )
-        final_state, burnin_trace, main_trace = self._run_mcmc(
+        result = self._run_mcmc(
             initial_state, ndpost, nskip, keepevery, printevery, seed, run_mcmc_kw
         )
 
         # set public attributes
-        self.offset = final_state.offset  # from the state because of buffer donation
+        # set offset from the state because of buffer donation
+        self.offset = result.final_state.offset
         self.sigest = sigest
 
         # set private attributes
-        self._main_trace = main_trace
-        self._burnin_trace = burnin_trace
-        self._mcmc_state = final_state
+        self._main_trace = result.main_trace
+        self._burnin_trace = result.burnin_trace
+        self._mcmc_state = result.final_state
         self._splits = splits
         self._x_train_fmt = x_train_fmt
 
@@ -856,7 +857,7 @@ class Bart(Module):
         printevery: int | None,
         seed: int | Integer[Array, ''] | Key[Array, ''],
         run_mcmc_kw: Mapping,
-    ) -> tuple[mcmcstep.State, mcmcloop.BurninTrace, mcmcloop.MainTrace]:
+    ) -> RunMCMCResult:
         # prepare random generator seed
         if is_key(seed):
             key = jnp.copy(seed)

@@ -143,7 +143,7 @@ master_doc = 'index'
 default_role = 'py:obj'
 
 # autodoc
-autoclass_content = 'both'  # concatenate the class and __init__ docstrings
+autoclass_content = 'class'
 # default arguments are printed as in source instead of being evaluated
 autodoc_preserve_defaults = True
 autodoc_default_options = {'member-order': 'bysource'}

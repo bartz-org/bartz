@@ -227,12 +227,11 @@ class Bart(Module):
         every `printevery` iterations, so with logging disabled it's impossible
         to kill the MCMC conveniently.
     num_chains
-        The number of independent Markov chains to run. By default only one
-        chain is run.
+        The number of independent Markov chains to run.
 
-        The difference between not specifying `num_chains` and setting it to 1
-        is that in the latter case in the object attributes and some methods
-        there will be an explicit chain axis of size 1.
+        The difference between ``num_chains=None`` and ``num_chains=1`` is that
+        in the latter case in the object attributes and some methods there will
+        be an explicit chain axis of size 1.
     num_chain_devices
         The number of devices to spread the chains across. Must be a divisor of
         `num_chains`. Each device will run a fraction of the chains.
@@ -313,7 +312,7 @@ class Bart(Module):
         nskip: int = 1000,
         keepevery: int = 1,
         printevery: int | None = 100,
-        num_chains: int | None = None,
+        num_chains: int | None = 4,
         num_chain_devices: int | None = None,
         num_data_devices: int | None = None,
         devices: Device | Sequence[Device] | None = None,

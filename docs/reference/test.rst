@@ -1,6 +1,6 @@
-.. bartz/docs/reference/index.rst
+.. bartz/docs/reference/test.rst
 ..
-.. Copyright (c) 2024-2026, The Bartz Contributors
+.. Copyright (c) 2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -22,19 +22,9 @@
 .. OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 .. SOFTWARE.
 
-Reference
-=========
+Testing
+-------
 
-.. toctree::
-    :maxdepth: 1
-
-    interface.rst
-    newinterf.rst
-    grove.rst
-    mcmcstep.rst
-    mcmcloop.rst
-    prepcovars.rst
-    jaxext.rst
-    debug.rst
-    test.rst
-    profile.rst
+.. automodule:: bartz.testing
+    :members:
+    :imported-members:

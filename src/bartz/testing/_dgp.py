@@ -234,7 +234,7 @@ def generate_outcome(
 
 
 class DGP(Module):
-    """Quadratic multivariate DGP with n units, p predictors, k outcomes.
+    """Output of `gen_data`.
 
     Parameters
     ----------
@@ -321,7 +321,17 @@ class DGP(Module):
         return self.sigma2_quad / (self.kurt_x - 1 + self.q)
 
     def split(self, n_train: int | None = None) -> tuple['DGP', 'DGP']:
-        """Split the data into training and test sets."""
+        """Split the data into training and test sets.
+
+        Parameters
+        ----------
+        n_train
+            Number of training observations. If None, split in half.
+
+        Returns
+        -------
+        Two `DGP` object with the train and test splits.
+        """
         if n_train is None:
             n_train = self.x.shape[1] // 2
         assert 0 < n_train < self.x.shape[1], 'n_train must be in (0, n)'

@@ -233,14 +233,14 @@ def generate_outcome(
 
 
 class DGP(Module):
-    """Quadratic multivariate DGP.
+    """Quadratic multivariate DGP with n units, p predictors, k outcomes.
 
     Parameters
     ----------
     x
         Predictors of shape (p, n), variance 1
     y
-        Noisy outcomes of shape (k, n)
+        Noisy outcomes of shape (k, n) or (n,)
     partition
         Predictor-outcome assignment partition of shape (k, p)
     beta_shared
@@ -279,7 +279,7 @@ class DGP(Module):
 
     # Main outputs
     x: Float[Array, 'p n']
-    y: Float[Array, 'k n']
+    y: Float[Array, 'k n'] | Float[Array, ' n']
 
     # Intermediate results
     partition: Bool[Array, 'k p']
@@ -356,7 +356,7 @@ def gen_data(
     *,
     n: int,
     p: int,
-    k: int,
+    k: int | None = None,
     q: Integer[Array, ''] | int,
     lam: Float[Array, ''] | float,
     sigma2_lin: Float[Array, ''] | float,
@@ -390,6 +390,10 @@ def gen_data(
     -------
     An object with all generated data and parameters.
     """
+    squeeze = k is None
+    if squeeze:
+        k = 1
+
     assert p >= k, 'p must be at least k'
 
     # check q
@@ -418,6 +422,8 @@ def gen_data(
     muquad = combine_muquad(muquad_shared, muquad_separate, lam)
     mu = mulin + muquad
     y = generate_outcome(keys.pop(), mu, sigma2_eps)
+    if squeeze:
+        y = y.squeeze(0)
 
     return DGP(
         x=x,

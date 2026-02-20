@@ -25,11 +25,12 @@
 """Tests `bartz.testing.gen_data`."""
 
 from collections.abc import Mapping
+from dataclasses import replace
 from functools import partial
 from types import MappingProxyType
 
 import pytest
-from jax import jit, vmap
+from jax import jit, random, tree, vmap
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float, Key
 from numpy.testing import assert_allclose, assert_array_equal, assert_array_less
@@ -449,3 +450,16 @@ class TestPartitionedInteractionPattern:
     def test_symmetry(self, pattern: Bool[Array, 'k p p']) -> None:
         """Test that interaction pattern is symmetric."""
         assert_array_equal(pattern, jnp.swapaxes(pattern, 1, 2))
+
+
+def test_univariate(keys: split) -> None:
+    """Check that k=None produces the same result with squeezed y."""
+    key = keys.pop()
+    kw = dict(KWARGS)
+    kw.update(lam=0.5, k=1)
+    dgp_mv = gen_data(key, **kw)
+    kw.update(k=None)
+    key = random.clone(key)
+    dgp_uv = gen_data(key, **kw)
+    dgp_mv = replace(dgp_mv, y=dgp_mv.y.squeeze(0))
+    tree.map(partial(assert_array_equal, strict=True), dgp_mv, dgp_uv)

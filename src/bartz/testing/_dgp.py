@@ -26,10 +26,11 @@
 """Define `gen_data` that generates simulated data for testing."""
 
 from dataclasses import replace
+from functools import partial
 
 from equinox import Module, error_if
+from jax import jit, random
 from jax import numpy as jnp
-from jax import random
 from jaxtyping import Array, Bool, Float, Int, Integer, Key
 
 from bartz.jaxext import split
@@ -351,6 +352,7 @@ class DGP(Module):
         return train, test
 
 
+@partial(jit, static_argnames=('n', 'p', 'k'))
 def gen_data(
     key: Key[Array, ''],
     *,
@@ -397,16 +399,10 @@ def gen_data(
     assert p >= k, 'p must be at least k'
 
     # check q
-    q = jnp.asarray(q)
     q = error_if(q, q % 2 != 0, 'q must be even')
     q = error_if(q, q >= p // k, 'q must be less than p // k')
 
     keys = split(key, 7)
-
-    lam = jnp.asarray(lam)
-    sigma2_lin = jnp.asarray(sigma2_lin)
-    sigma2_quad = jnp.asarray(sigma2_quad)
-    sigma2_eps = jnp.asarray(sigma2_eps)
 
     x = generate_x(keys.pop(), n, p)
     partition = generate_partition(keys.pop(), p, k)

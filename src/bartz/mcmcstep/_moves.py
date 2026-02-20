@@ -28,8 +28,8 @@ from functools import partial
 
 import jax
 from equinox import Module
+from jax import named_call, random
 from jax import numpy as jnp
-from jax import random
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
 from bartz import grove
@@ -105,6 +105,7 @@ class Moves(Module):
     computed."""
 
 
+@named_call
 def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
     """
     Propose moves for all the trees.
@@ -215,6 +216,7 @@ class GrowMoves(Module):
     would be produced as `True` if it would have available decision rules."""
 
 
+@named_call
 @partial(vmap_nodoc, in_axes=(0, 0, 0, 0, None, None, None, None, None))
 def propose_grow_moves(
     key: Key[Array, ' num_trees'],
@@ -776,6 +778,7 @@ class PruneMoves(Module):
     growable."""
 
 
+@named_call
 @partial(vmap_nodoc, in_axes=(0, 0, 0, None, None))
 def propose_prune_moves(
     key: Key[Array, ''],

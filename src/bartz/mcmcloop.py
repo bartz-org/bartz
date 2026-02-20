@@ -29,7 +29,7 @@ The entry points are `run_mcmc` and `make_default_callback`.
 
 from collections.abc import Callable
 from dataclasses import fields
-from functools import partial, wraps
+from functools import partial, update_wrapper, wraps
 from math import floor
 from typing import Any, NamedTuple, Protocol, TypeVar
 
@@ -44,6 +44,7 @@ from jax import (
     eval_shape,
     jit,
     lax,
+    named_call,
     tree,
 )
 from jax import numpy as jnp
@@ -377,6 +378,7 @@ class _CallCounter:
     def __init__(self, func: Callable[..., T]) -> None:
         self.func = func
         self.n_calls = 0
+        update_wrapper(self, func)
 
     def reset_call_counter(self) -> None:
         """Reset the call counter."""
@@ -469,6 +471,7 @@ def _run_mcmc_inner_loop(
     return lax.while_loop(cond, body, carry)
 
 
+@named_call
 def _save_state_to_trace(
     burnin_trace: PyTree,
     main_trace: PyTree,

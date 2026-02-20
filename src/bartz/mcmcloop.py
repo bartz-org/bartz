@@ -29,7 +29,7 @@ The entry points are `run_mcmc` and `make_default_callback`.
 
 from collections.abc import Callable
 from dataclasses import fields
-from functools import partial, wraps
+from functools import partial, update_wrapper, wraps
 from math import floor
 from typing import Any, NamedTuple, Protocol, TypeVar
 
@@ -43,6 +43,8 @@ from jax import (
     device_put,
     eval_shape,
     jit,
+    lax,
+    named_call,
     tree,
 )
 from jax import numpy as jnp
@@ -62,12 +64,6 @@ from jaxtyping import (
 )
 
 from bartz import jaxext, mcmcstep
-from bartz._profiler import (
-    cond_if_not_profiling,
-    get_profile_mode,
-    jit_if_not_profiling,
-    while_loop_if_not_profiling,
-)
 from bartz.grove import TreeHeaps, evaluate_forest, forest_fill, var_histogram
 from bartz.jaxext import autobatch, jit_active
 from bartz.mcmcstep import State
@@ -314,13 +310,12 @@ def run_mcmc(
         # setting to 0 would make for a clean noop, but it's useful to keep the
         # same code path for benchmarking and testing
 
-    # error if under jit and there are unrolled loops or profile mode is on
-    if jit_active() and (n_outer > 1 or get_profile_mode()):
+    # error if under jit and there are unrolled loops
+    if jit_active() and n_outer > 1:
         msg = (
             '`run_mcmc` was called within a jit-compiled function and '
-            'there are either more than 1 outer loops or profile mode is active, '
-            'please either do not jit, set `inner_loop_length=None`, or disable '
-            'profile mode.'
+            'there are more than 1 outer loops, '
+            'please either do not jit or set `inner_loop_length=None`'
         )
         raise RuntimeError(msg)
 
@@ -383,13 +378,14 @@ class _CallCounter:
     def __init__(self, func: Callable[..., T]) -> None:
         self.func = func
         self.n_calls = 0
+        update_wrapper(self, func)
 
     def reset_call_counter(self) -> None:
         """Reset the call counter."""
         self.n_calls = 0
 
     def __call__(self, *args: Any, **kwargs: Any) -> T:
-        if self.n_calls and not get_profile_mode():
+        if self.n_calls:
             msg = (
                 'The inner loop of `run_mcmc` was traced more than once, '
                 'which indicates a double compilation of the MCMC code. This '
@@ -403,7 +399,7 @@ class _CallCounter:
         return self.func(*args, **kwargs)
 
 
-@partial(jit_if_not_profiling, donate_argnums=(0,), static_argnums=(2, 3, 4))
+@partial(jit, donate_argnums=(0,), static_argnums=(2, 3, 4))
 @_CallCounter
 def _run_mcmc_inner_loop(
     carry: _Carry,
@@ -472,13 +468,10 @@ def _run_mcmc_inner_loop(
             callback_state=callback_state,
         )
 
-    return while_loop_if_not_profiling(cond, body, carry)
+    return lax.while_loop(cond, body, carry)
 
 
-@partial(jit, donate_argnums=(0, 1), static_argnums=(2, 3))
-# this is jitted because under profiling _run_mcmc_inner_loop and the loop
-# within it are not, so I need the donate_argnums feature of jit to avoid
-# creating copies of the traces
+@named_call
 def _save_state_to_trace(
     burnin_trace: PyTree,
     main_trace: PyTree,
@@ -649,10 +642,10 @@ def print_callback(
         )
         # logging can't do in-line printing so we use print
 
-    cond_if_not_profiling(
+    lax.cond(
         report_cond,
         line_report_branch,
-        lambda: cond_if_not_profiling(dot_cond, just_dot_branch, lambda: None),
+        lambda: lax.cond(dot_cond, just_dot_branch, lambda: None),
     )
 
 

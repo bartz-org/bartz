@@ -26,7 +26,6 @@
 
 import math
 from collections.abc import Callable, Sequence
-from contextlib import nullcontext
 from functools import partial
 from typing import Any
 
@@ -38,7 +37,6 @@ except ImportError:
 import jax
 from jax import (
     Device,
-    debug_key_reuse,
     device_count,
     ensure_compile_time_eval,
     jit,
@@ -46,7 +44,6 @@ from jax import (
     random,
     tree,
     typeof,
-    vmap,
 )
 from jax import numpy as jnp
 from jax.dtypes import prng_key
@@ -135,33 +132,19 @@ class split:
         The key to split.
     num
         The number of keys to split into.
-
-    Notes
-    -----
-    Unlike `jax.random.split`, this class supports a vector of keys as input. In
-    this case, it behaves as if everything had been vmapped over, so `keys.pop`
-    has an additional initial output dimension equal to the number of input
-    keys, and the deterministic dependency respects this axis.
     """
 
-    _keys: tuple[Key[Array, '*batch'], ...]
+    _keys: tuple[Key[Array, ''], ...]
     _num_used: int
 
-    def __init__(self, key: Key[Array, '*batch'], num: int = 2) -> None:
-        if key.ndim:
-            context = debug_key_reuse(False)
-        else:
-            context = nullcontext()
-        with context:
-            # jitted-vmapped key split seems to be triggering a false positive
-            # with key reuse checks
-            self._keys = _split_unpack(key, num)
+    def __init__(self, key: Key[Array, ''], num: int = 2) -> None:
+        self._keys = _split_unpack(key, num)
         self._num_used = 0
 
     def __len__(self) -> int:
         return len(self._keys) - self._num_used
 
-    def pop(self, shape: int | tuple[int, ...] = ()) -> Key[Array, '*batch {shape}']:
+    def pop(self, shape: int | tuple[int, ...] = ()) -> Key[Array, ' {shape}']:
         """
         Pop one or more keys from the list.
 
@@ -194,26 +177,18 @@ class split:
 
 
 @partial(jit, static_argnums=(1,))
-def _split_unpack(
-    key: Key[Array, '*batch'], num: int
-) -> tuple[Key[Array, '*batch'], ...]:
-    if key.ndim == 0:
-        keys = random.split(key, num)
-    elif key.ndim == 1:
-        keys = vmap(random.split, in_axes=(0, None), out_axes=1)(key, num)
+def _split_unpack(key: Key[Array, ''], num: int) -> tuple[Key[Array, ''], ...]:
+    keys = random.split(key, num)
     return tuple(keys)
 
 
 @partial(jit, static_argnums=(1,))
 def _split_shaped(
-    key: Key[Array, '*batch'], shape: tuple[int, ...]
-) -> Key[Array, '*batch {shape}']:
+    key: Key[Array, ''], shape: tuple[int, ...]
+) -> Key[Array, ' {shape}']:
     num = math.prod(shape)
-    if key.ndim == 0:
-        keys = random.split(key, num)
-    elif key.ndim == 1:
-        keys = vmap(random.split, in_axes=(0, None))(key, num)
-    return keys.reshape(*key.shape, *shape)
+    keys = random.split(key, num)
+    return keys.reshape(shape)
 
 
 def truncated_normal_onesided(

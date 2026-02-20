@@ -36,29 +36,21 @@ except ImportError:
 
 import jax
 from equinox import Module, tree_at
-from jax import lax, random, vmap
+from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
 from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, Shaped, UInt, UInt32
 
-from bartz._profiler import (
-    get_profile_mode,
-    jit_and_block_if_profiling,
-    jit_if_not_profiling,
-    jit_if_profiling,
-    vmap_chains_if_not_profiling,
-    vmap_chains_if_profiling,
-)
 from bartz.grove import var_histogram
 from bartz.jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz.mcmcstep._moves import Moves, propose_moves
-from bartz.mcmcstep._state import State, StepConfig, chol_with_gersh, field
+from bartz.mcmcstep._state import State, StepConfig, chol_with_gersh, field, vmap_chains
 
 
-@partial(jit_if_not_profiling, donate_argnums=(1,))
-@partial(vmap_chains_if_not_profiling, auto_split_keys=True)
+@partial(jit, donate_argnums=(1,))
+@vmap_chains
 def step(key: Key[Array, ''], bart: State) -> State:
     """
     Do one MCMC step.
@@ -80,17 +72,10 @@ def step(key: Key[Array, ''], bart: State) -> State:
     state can not be used any more after calling `step`. All this applies
     outside of `jax.jit`.
     """
-    # handle the interactions between chains and profile mode
-    num_chains = bart.forest.num_chains()
-    chain_shape = () if num_chains is None else (num_chains,)
-    if get_profile_mode() and num_chains is not None and key.ndim == 0:
-        key = random.split(key, num_chains)
-    assert key.shape == chain_shape
-
     keys = split(key, 3)
 
     if bart.y.dtype == bool:
-        bart = replace(bart, error_cov_inv=jnp.ones(chain_shape))
+        bart = replace(bart, error_cov_inv=jnp.array(1.0))
         bart = step_trees(keys.pop(), bart)
         bart = replace(bart, error_cov_inv=None)
         bart = step_z(keys.pop(), bart)
@@ -103,6 +88,7 @@ def step(key: Key[Array, ''], bart: State) -> State:
     return step_config(bart)
 
 
+@named_call
 def step_trees(key: Key[Array, ''], bart: State) -> State:
     """
     Forest sampling step of BART MCMC.
@@ -127,6 +113,7 @@ def step_trees(key: Key[Array, ''], bart: State) -> State:
     return accept_moves_and_sample_leaves(keys.pop(), bart, moves)
 
 
+@named_call
 def accept_moves_and_sample_leaves(
     key: Key[Array, ''], bart: State, moves: Moves
 ) -> State:
@@ -295,8 +282,7 @@ class ParallelStageOut(Module):
     """Object with pre-computed terms of the leaf samples."""
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(1, 2))
-@vmap_chains_if_profiling
+@named_call
 def accept_moves_parallel_stage(
     key: Key[Array, ''], bart: State, moves: Moves
 ) -> ParallelStageOut:
@@ -400,6 +386,7 @@ def accept_moves_parallel_stage(
     )
 
 
+@named_call
 @partial(vmap_nodoc, in_axes=(0, 0, None))
 def apply_grow_to_indices(
     moves: Moves, leaf_indices: UInt[Array, 'num_trees n'], X: UInt[Array, 'p n']
@@ -491,6 +478,7 @@ def _compute_count_or_prec_tree(
     return trees, counts
 
 
+@named_call
 def compute_count_trees(
     leaf_indices: UInt[Array, 'num_trees n'], moves: Moves, config: StepConfig
 ) -> tuple[UInt32[Array, 'num_trees 2**d'], Counts]:
@@ -518,6 +506,7 @@ def compute_count_trees(
     return _compute_count_or_prec_trees(None, leaf_indices, moves, config)
 
 
+@named_call
 def compute_prec_trees(
     prec_scale: Float32[Array, ' n'],
     leaf_indices: UInt[Array, 'num_trees n'],
@@ -604,6 +593,7 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' 2**d']) -> Move
     )
 
 
+@named_call
 @vmap_nodoc
 def adapt_leaf_trees_to_grow_indices(
     leaf_trees: Float32[Array, 'num_trees 2**d'], moves: Moves
@@ -702,6 +692,7 @@ def _precompute_likelihood_terms_mv(
     return prelkv, None
 
 
+@named_call
 def precompute_likelihood_terms(
     error_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
@@ -818,6 +809,7 @@ def _precompute_leaf_terms_mv(
     return PreLf(mean_factor=mean_factor_out, centered_leaves=centered_leaves_out)
 
 
+@named_call
 def precompute_leaf_terms(
     key: Key[Array, ''],
     prec_trees: Float32[Array, 'num_trees 2**d'],
@@ -864,8 +856,7 @@ def precompute_leaf_terms(
         )
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(0,))
-@vmap_chains_if_profiling
+@named_call
 def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
     """
     Accept/reject the moves one tree at a time.
@@ -982,6 +973,7 @@ class SeqStageInPerTree(Module):
     """The pre-computed terms of the leaf sampling which are specific to the tree."""
 
 
+@named_call
 def accept_move_and_sample_leaves(
     resid: Float32[Array, ' n'] | Float32[Array, ' k n'],
     at: SeqStageInAllTrees,
@@ -1076,6 +1068,7 @@ def accept_move_and_sample_leaves(
     return resid, leaf_tree, acc, to_prune, log_lk_ratio
 
 
+@named_call
 @partial(jnp.vectorize, excluded=(1, 2, 3, 4), signature='(n)->(ts)')
 def sum_resid(
     scaled_resid: Float32[Array, ' n'] | Float32[Array, 'k n'],
@@ -1224,6 +1217,7 @@ def _compute_likelihood_ratio_mv(
     return prelkv.log_sqrt_term + exp_term
 
 
+@named_call
 def compute_likelihood_ratio(
     total_resid: Float32[Array, ''] | Float32[Array, ' k'],
     left_resid: Float32[Array, ''] | Float32[Array, ' k'],
@@ -1264,8 +1258,7 @@ def compute_likelihood_ratio(
         )
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(0, 1))
-@vmap_chains_if_profiling
+@named_call
 def accept_moves_final_stage(bart: State, moves: Moves) -> State:
     """
     Post-process the mcmc state after accepting/rejecting the moves.
@@ -1297,6 +1290,7 @@ def accept_moves_final_stage(bart: State, moves: Moves) -> State:
     )
 
 
+@named_call
 @vmap_nodoc
 def apply_moves_to_leaf_indices(
     leaf_indices: UInt[Array, 'num_trees n'], moves: Moves
@@ -1325,6 +1319,7 @@ def apply_moves_to_leaf_indices(
     )
 
 
+@named_call
 @vmap_nodoc
 def apply_moves_to_split_trees(
     split_tree: UInt[Array, 'num_trees 2**(d-1)'], moves: Moves
@@ -1416,8 +1411,7 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], bart: State) -> State:
     return replace(bart, error_cov_inv=prec)
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(1,))
-@vmap_chains_if_profiling
+@named_call
 def step_error_cov_inv(key: Key[Array, ''], bart: State) -> State:
     """
     MCMC-update the inverse error covariance.
@@ -1443,8 +1437,7 @@ def step_error_cov_inv(key: Key[Array, ''], bart: State) -> State:
         return _step_error_cov_inv_uv(key, bart)
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(1,))
-@vmap_chains_if_profiling
+@named_call
 def step_z(key: Key[Array, ''], bart: State) -> State:
     """
     MCMC-update the latent variable for binary regression.
@@ -1467,6 +1460,7 @@ def step_z(key: Key[Array, ''], bart: State) -> State:
     return replace(bart, z=z, resid=resid)
 
 
+@named_call
 def step_s(key: Key[Array, ''], bart: State) -> State:
     """
     Update `log_s` using Dirichlet sampling.
@@ -1508,6 +1502,7 @@ def step_s(key: Key[Array, ''], bart: State) -> State:
     return replace(bart, forest=replace(bart.forest, log_s=log_s))
 
 
+@named_call
 def step_theta(key: Key[Array, ''], bart: State, *, num_grid: int = 1000) -> State:
     """
     Update `theta`.
@@ -1569,8 +1564,7 @@ def _log_p_lamda(
     ), theta
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(1,))
-@vmap_chains_if_profiling
+@named_call
 def step_sparse(key: Key[Array, ''], bart: State) -> State:
     """
     Update the sparsity parameters.
@@ -1608,8 +1602,7 @@ def _step_sparse(key: Key[Array, ''], bart: State) -> State:
     return bart
 
 
-@jit_if_profiling
-# jit to avoid the overhead of replace(_: Module)
+@named_call
 def step_config(bart: State) -> State:
     config = bart.config
     config = replace(config, steps_done=config.steps_done + 1)

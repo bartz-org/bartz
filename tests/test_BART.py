@@ -34,7 +34,6 @@ from functools import partial
 from gc import collect
 from os import getpid, kill
 from signal import SIG_IGN, SIGINT, getsignal, signal
-from sys import version_info
 from threading import Event, Thread
 from time import monotonic
 from typing import Any, Literal
@@ -65,7 +64,6 @@ from jaxtyping import (
 from numpy.testing import assert_allclose, assert_array_equal
 from pytest_subtests import SubTests
 
-from bartz import profile_mode
 from bartz.debug import TraceWithOffset, check_trace, sample_prior, trees_BART_to_bartz
 from bartz.debug import debug_gbart as gbart
 from bartz.debug import debug_mc_gbart as mc_gbart
@@ -82,11 +80,7 @@ from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
-from tests.util import (
-    assert_close_matrices,
-    assert_different_matrices,
-    get_old_python_tuple,
-)
+from tests.util import assert_close_matrices, assert_different_matrices
 
 
 def gen_X(
@@ -1493,39 +1487,6 @@ def test_gbart_multichain_error(keys: split) -> None:
         gbart(X, y, mc_cores=2)
     with pytest.raises(TypeError, match=r'mc_cores'):
         gbart(X, y, mc_cores='gatto')
-
-
-def test_same_result_profiling(variant: int, kw: dict) -> None:
-    """Check that the result is the same in profiling mode."""
-    bart = mc_gbart(**kw)
-    with profile_mode(True):
-        kw.update(seed=random.clone(kw['seed']))
-        bartp = mc_gbart(**kw)
-
-    platform = get_default_device().platform
-    python_version = version_info[:2]
-    old_python = get_old_python_tuple()
-    exact_check = platform != 'gpu' and python_version != old_python
-
-    def check_same(_path: KeyPath, x: Array, xp: Array) -> None:
-        if exact_check:
-            assert_array_equal(xp, x)
-        else:
-            assert_allclose(xp, x, atol=1e-5, rtol=1e-5)
-
-    try:
-        tree.map_with_path(check_same, bart._mcmc_state, bartp._mcmc_state)
-        tree.map_with_path(check_same, bart._main_trace, bartp._main_trace)
-    except AssertionError as a:
-        if (
-            '\nNot equal to tolerance ' in str(a)
-            and not exact_check
-            and python_version == old_python
-            and variant in (1, 3)
-        ):
-            pytest.xfail('unsolved bug with old toolchain')
-        else:
-            raise
 
 
 def get_expect_sharded(kw: dict) -> bool:

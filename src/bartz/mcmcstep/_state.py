@@ -1203,9 +1203,7 @@ def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
     return tree.map(split_key, x)
 
 
-def vmap_chains(
-    fun: Callable[..., T], *, auto_split_keys: bool = False
-) -> Callable[..., T]:
+def vmap_chains(fun: Callable[..., T]) -> Callable[..., T]:
     """Apply vmap on chain axes automatically if the inputs are multichain."""
 
     @wraps(fun)
@@ -1213,8 +1211,7 @@ def vmap_chains(
         all_args = args, kwargs
         num_chains = get_num_chains(all_args)
         if num_chains is not None:
-            if auto_split_keys:
-                all_args = _split_all_keys(all_args, num_chains)
+            all_args = _split_all_keys(all_args, num_chains)
 
             def wrapped_fun(args: tuple[Any, ...], kwargs: dict[str, Any]) -> T:
                 return fun(*args, **kwargs)

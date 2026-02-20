@@ -25,7 +25,7 @@
 """Measure the speed of the MCMC and its interfaces."""
 
 from collections.abc import Mapping
-from contextlib import nullcontext, redirect_stdout
+from contextlib import redirect_stdout
 from dataclasses import replace
 from functools import partial
 from inspect import signature
@@ -50,7 +50,6 @@ from jax.sharding import Mesh
 from jax.tree_util import tree_map
 from jaxtyping import Array, Float32, Integer, Key, UInt8
 
-import bartz
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
 from benchmarks.latest_bartz.jaxext import get_device_count, split
@@ -313,7 +312,6 @@ class BaseGbart(AutoParamNames):
         niters: int = NITERS,
         nchains: int = 1,
         cache: Cache = 'warm',
-        profile: bool = False,
         predict: bool = False,
         kwargs: Mapping[str, Any] = MappingProxyType({}),
     ) -> None:
@@ -357,22 +355,12 @@ class BaseGbart(AutoParamNames):
         self.kw.update(kwargs)
         block_until_ready(self.kw)
 
-        # set profile mode
-        if not profile:
-            self.context = nullcontext
-        elif hasattr(bartz, 'profile_mode'):
-            self.context = lambda: bartz.profile_mode(True)
-        else:
-            msg = 'Profile mode not supported.'
-            raise NotImplementedError(msg)
-
         # save information used to run predictions
         self.predict = predict
         if predict:
             self.test = test
-            with self.context():
-                self.bart = gbart(**self.kw)
-                block_bart(self.bart)
+            self.bart = gbart(**self.kw)
+            block_bart(self.bart)
 
         # decide how much to cold-start
         match cache:
@@ -385,7 +373,7 @@ class BaseGbart(AutoParamNames):
 
     def time_gbart(self, *_: Any) -> None:
         """Time instantiating the class."""
-        with redirect_stdout(StringIO()), self.context():
+        with redirect_stdout(StringIO()):
             if self.predict:
                 ypred = self.bart.predict(self.test.x)
                 block_until_ready(ypred)
@@ -439,13 +427,13 @@ class GbartChains(BaseGbart):
             # on gpu shard explicitly
             kwargs = dict(num_chain_devices=min(nchains, get_device_count()))
 
-        super().setup(NITERS, nchains, 'warm', False, False, dict(bart_kwargs=kwargs))
+        super().setup(NITERS, nchains, 'warm', False, dict(bart_kwargs=kwargs))
 
 
 class GbartGeneric(BaseGbart):
     """General timing of `mc_gbart` with many settings."""
 
-    params = ((0, NITERS), (1, 6), ('warm', 'cold'), (False, True), (False, True))
+    params = ((0, NITERS), (1, 6), ('warm', 'cold'), (False, True))
 
 
 class BaseRunMcmc(AutoParamNames):

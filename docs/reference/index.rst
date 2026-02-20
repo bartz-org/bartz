@@ -37,4 +37,3 @@ Reference
     jaxext.rst
     debug.rst
     test.rst
-    profile.rst

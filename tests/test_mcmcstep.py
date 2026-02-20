@@ -25,6 +25,7 @@
 """Test `bartz.mcmcstep`."""
 
 from collections.abc import Sequence
+from functools import wraps
 from math import prod
 from typing import Literal, NamedTuple
 
@@ -40,7 +41,6 @@ from numpy.testing import assert_array_equal
 from pytest_subtests import SubTests
 from scipy import stats
 
-from bartz import profile_mode
 from bartz.jaxext import get_device_count, minimal_unsigned_dtype, split
 from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._moves import (
@@ -536,6 +536,13 @@ class TestSplitRange:
         assert r == 4
 
 
+@jaxtyped(typechecker=beartype)
+@wraps(step)
+def typechecking_step(key: Key[Array, ''], state: State) -> State:
+    """Wrap `bartz.mcmcstep.step` because `jaxtyping.jaxtyped` can not be applied to a jitted function."""
+    return step(key, state)
+
+
 class TestMultichain:
     """Basic tests of the multichain functionality."""
 
@@ -601,7 +608,6 @@ class TestMultichain:
             check_sharding(state, state.config.mesh)
 
         with subtests.test('step'):
-            typechecking_step = jaxtyped(step, typechecker=beartype)
             with debug_key_reuse(num_chains != 0):
                 # key reuse checks trigger with empty key array apparently
                 new_state = typechecking_step(keys.pop(), state)
@@ -609,10 +615,7 @@ class TestMultichain:
             check_strong_types(new_state)
             check_sharding(new_state, state.config.mesh)
 
-    @pytest.mark.parametrize('profile', [False, True])
-    def test_multichain_equiv_stack(
-        self, init_kwargs: dict, keys: split, profile: bool
-    ) -> None:
+    def test_multichain_equiv_stack(self, init_kwargs: dict, keys: split) -> None:
         """Check that stacking multiple chains is equivalent to a multichain trace."""
         num_chains = 4
         num_iters = 10
@@ -631,16 +634,14 @@ class TestMultichain:
         ]
 
         # run a few mcmc steps with the same random keys
-        with profile_mode(profile):
-            for _ in range(num_iters):
-                mc_key = keys.pop()
-                sc_keys = random.split(random.clone(mc_key), num_chains)
+        for _ in range(num_iters):
+            mc_key = keys.pop()
+            sc_keys = random.split(random.clone(mc_key), num_chains)
 
-                mc_state = step(mc_key, mc_state)
-                sc_states = [
-                    step(key, state)
-                    for key, state in zip(sc_keys, sc_states, strict=True)
-                ]
+            mc_state = step(mc_key, mc_state)
+            sc_states = [
+                step(key, state) for key, state in zip(sc_keys, sc_states, strict=True)
+            ]
 
         # stack single-chain states
         def stack_leaf(

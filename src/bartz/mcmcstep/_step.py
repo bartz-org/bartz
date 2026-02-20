@@ -36,29 +36,21 @@ except ImportError:
 
 import jax
 from equinox import Module, tree_at
-from jax import lax, random, vmap
+from jax import jit, lax, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
 from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, Shaped, UInt, UInt32
 
-from bartz._profiler import (
-    get_profile_mode,
-    jit_and_block_if_profiling,
-    jit_if_not_profiling,
-    jit_if_profiling,
-    vmap_chains_if_not_profiling,
-    vmap_chains_if_profiling,
-)
 from bartz.grove import var_histogram
 from bartz.jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz.mcmcstep._moves import Moves, propose_moves
-from bartz.mcmcstep._state import State, StepConfig, chol_with_gersh, field
+from bartz.mcmcstep._state import State, StepConfig, chol_with_gersh, field, vmap_chains
 
 
-@partial(jit_if_not_profiling, donate_argnums=(1,))
-@partial(vmap_chains_if_not_profiling, auto_split_keys=True)
+@partial(jit, donate_argnums=(1,))
+@vmap_chains
 def step(key: Key[Array, ''], bart: State) -> State:
     """
     Do one MCMC step.
@@ -80,17 +72,10 @@ def step(key: Key[Array, ''], bart: State) -> State:
     state can not be used any more after calling `step`. All this applies
     outside of `jax.jit`.
     """
-    # handle the interactions between chains and profile mode
-    num_chains = bart.forest.num_chains()
-    chain_shape = () if num_chains is None else (num_chains,)
-    if get_profile_mode() and num_chains is not None and key.ndim == 0:
-        key = random.split(key, num_chains)
-    assert key.shape == chain_shape
-
     keys = split(key, 3)
 
     if bart.y.dtype == bool:
-        bart = replace(bart, error_cov_inv=jnp.ones(chain_shape))
+        bart = replace(bart, error_cov_inv=jnp.array(1.0))
         bart = step_trees(keys.pop(), bart)
         bart = replace(bart, error_cov_inv=None)
         bart = step_z(keys.pop(), bart)
@@ -295,8 +280,6 @@ class ParallelStageOut(Module):
     """Object with pre-computed terms of the leaf samples."""
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(1, 2))
-@vmap_chains_if_profiling
 def accept_moves_parallel_stage(
     key: Key[Array, ''], bart: State, moves: Moves
 ) -> ParallelStageOut:
@@ -864,8 +847,6 @@ def precompute_leaf_terms(
         )
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(0,))
-@vmap_chains_if_profiling
 def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
     """
     Accept/reject the moves one tree at a time.
@@ -1264,8 +1245,6 @@ def compute_likelihood_ratio(
         )
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(0, 1))
-@vmap_chains_if_profiling
 def accept_moves_final_stage(bart: State, moves: Moves) -> State:
     """
     Post-process the mcmc state after accepting/rejecting the moves.
@@ -1416,8 +1395,6 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], bart: State) -> State:
     return replace(bart, error_cov_inv=prec)
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(1,))
-@vmap_chains_if_profiling
 def step_error_cov_inv(key: Key[Array, ''], bart: State) -> State:
     """
     MCMC-update the inverse error covariance.
@@ -1443,8 +1420,6 @@ def step_error_cov_inv(key: Key[Array, ''], bart: State) -> State:
         return _step_error_cov_inv_uv(key, bart)
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(1,))
-@vmap_chains_if_profiling
 def step_z(key: Key[Array, ''], bart: State) -> State:
     """
     MCMC-update the latent variable for binary regression.
@@ -1569,8 +1544,6 @@ def _log_p_lamda(
     ), theta
 
 
-@partial(jit_and_block_if_profiling, donate_argnums=(1,))
-@vmap_chains_if_profiling
 def step_sparse(key: Key[Array, ''], bart: State) -> State:
     """
     Update the sparsity parameters.
@@ -1608,7 +1581,6 @@ def _step_sparse(key: Key[Array, ''], bart: State) -> State:
     return bart
 
 
-@jit_if_profiling
 # jit to avoid the overhead of replace(_: Module)
 def step_config(bart: State) -> State:
     config = bart.config

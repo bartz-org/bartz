@@ -37,9 +37,7 @@ from jax.tree_util import KeyPath, tree_map
 from jaxtyping import Array, Float32, UInt8
 from numpy.testing import assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
-from pytest_subtests import SubTests
 
-from bartz import profile_mode
 from bartz.jaxext import get_default_device, split
 from bartz.mcmcloop import BurninTrace, MainTrace, run_mcmc
 from bartz.mcmcstep import State, init, make_p_nonterminal
@@ -159,9 +157,7 @@ class TestRunMcmc:
         check_trace(burnin_trace)
         check_trace(main_trace)
 
-    def test_predicted_double_compilation(
-        self, keys: split, subtests: SubTests
-    ) -> None:
+    def test_predicted_double_compilation(self, keys: split) -> None:
         """Check that an error is raised under jit if the configuration would lead to double compilation."""
         initial_state = simple_init(10, 100, 20)
 
@@ -169,17 +165,9 @@ class TestRunMcmc:
             run_mcmc, static_argnames=('n_save', 'inner_loop_length')
         )
 
-        msg = r'there are either more than 1 outer loops'
-
-        with subtests.test('outer loops'), pytest.raises(RuntimeError, match=msg):
+        msg = r'there are more than 1 outer loops'
+        with pytest.raises(RuntimeError, match=msg):
             compiled_run_mcmc(keys.pop(), initial_state, 2, inner_loop_length=1)
-
-        with (
-            subtests.test('profile mode'),
-            profile_mode(True),
-            pytest.raises(RuntimeError, match=msg),
-        ):
-            compiled_run_mcmc(keys.pop(), initial_state, 1)
 
     def test_detected_double_compilation(self, keys: split) -> None:
         """Check that double compilation is detected."""

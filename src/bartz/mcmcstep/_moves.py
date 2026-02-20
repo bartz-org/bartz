@@ -33,9 +33,8 @@ from jax import random
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
 from bartz import grove
-from bartz._profiler import jit_and_block_if_profiling
 from bartz.jaxext import minimal_unsigned_dtype, split, vmap_nodoc
-from bartz.mcmcstep._state import Forest, field, vmap_chains
+from bartz.mcmcstep._state import Forest, field
 
 
 class Moves(Module):
@@ -106,8 +105,6 @@ class Moves(Module):
     computed."""
 
 
-@jit_and_block_if_profiling
-@vmap_chains
 def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
     """
     Propose moves for all the trees.

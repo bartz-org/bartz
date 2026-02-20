@@ -26,18 +26,18 @@
 
 import math
 from functools import partial
-from typing import Protocol
+from typing import Literal, Protocol
 
 from jax import jit, lax, vmap
 from jax import numpy as jnp
-from jaxtyping import Array, Bool, DTypeLike, Float32, Int32, Shaped, UInt
+from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
 
 try:
     from numpy.lib.array_utils import normalize_axis_tuple  # numpy 2
 except ImportError:
     from numpy.core.numeric import normalize_axis_tuple  # numpy 1
 
-from bartz.jaxext import minimal_unsigned_dtype, vmap_nodoc
+from bartz.jaxext import autobatch, minimal_unsigned_dtype, vmap_nodoc
 
 
 class TreeHeaps(Protocol):
@@ -72,31 +72,6 @@ class TreeHeaps(Protocol):
     0. Unused nodes also have split set to 0. This array can't be dirty."""
 
 
-def make_tree(
-    depth: int, dtype: DTypeLike, batch_shape: tuple[int, ...] = ()
-) -> Shaped[Array, '*batch_shape 2**{depth}']:
-    """
-    Make an array to represent a binary tree.
-
-    Parameters
-    ----------
-    depth
-        The maximum depth of the tree. Depth 1 means that there is only a root
-        node.
-    dtype
-        The dtype of the array.
-    batch_shape
-        The leading shape of the array, to represent multiple trees and/or
-        multivariate trees.
-
-    Returns
-    -------
-    An array of zeroes with the appropriate shape.
-    """
-    shape = (*batch_shape, 2**depth)
-    return jnp.zeros(shape, dtype)
-
-
 def tree_depth(tree: Shaped[Array, '*batch_shape 2**d']) -> int:
     """
     Return the maximum depth of a tree.
@@ -104,8 +79,8 @@ def tree_depth(tree: Shaped[Array, '*batch_shape 2**d']) -> int:
     Parameters
     ----------
     tree
-        A tree created by `make_tree`. If the array is ND, the tree structure is
-        assumed to be along the last axis.
+        A tree array like those in a `TreeHeaps`. If the array is ND, the tree
+        structure is assumed to be along the last axis.
 
     Returns
     -------
@@ -140,7 +115,9 @@ def traverse_tree(
         jnp.ones((), minimal_unsigned_dtype(2 * var_tree.size - 1)),
     )
 
-    def loop(carry, _):
+    def loop(
+        carry: tuple[Bool[Array, ''], UInt[Array, '']], _: None
+    ) -> tuple[tuple[Bool[Array, ''], UInt[Array, '']], None]:
         leaf_found, index = carry
 
         split = split_tree[index]
@@ -410,3 +387,223 @@ def var_histogram(
             scatter_add = vmap(scatter_add, in_axes=neg_i)
 
     return scatter_add(var_tree, is_internal)
+
+
+def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
+    """Convert a tree to a human-readable string.
+
+    Parameters
+    ----------
+    tree
+        A single tree to format.
+    print_all
+        If `True`, also print the contents of unused node slots in the arrays.
+
+    Returns
+    -------
+    A string representation of the tree.
+    """
+    tee = '├──'
+    corner = '└──'
+    join = '│  '
+    space = '   '
+    down = '┐'
+    bottom = '╢'  # '┨' #
+
+    def traverse_tree(
+        lines: list[str],
+        index: int,
+        depth: int,
+        indent: str,
+        first_indent: str,
+        next_indent: str,
+        unused: bool,
+    ) -> None:
+        if index >= len(tree.leaf_tree):
+            return
+
+        var: int = tree.var_tree.at[index].get(mode='fill', fill_value=0).item()
+        split: int = tree.split_tree.at[index].get(mode='fill', fill_value=0).item()
+
+        is_leaf = split == 0
+        left_child = 2 * index
+        right_child = 2 * index + 1
+
+        if print_all:
+            if unused:
+                category = 'unused'
+            elif is_leaf:
+                category = 'leaf'
+            else:
+                category = 'decision'
+            node_str = f'{category}({var}, {split}, {tree.leaf_tree[index]})'
+        else:
+            assert not unused
+            if is_leaf:
+                node_str = f'{tree.leaf_tree[index]:#.2g}'
+            else:
+                node_str = f'x{var} < {split}'
+
+        if not is_leaf or (print_all and left_child < len(tree.leaf_tree)):
+            link = down
+        elif not print_all and left_child >= len(tree.leaf_tree):
+            link = bottom
+        else:
+            link = ' '
+
+        max_number = len(tree.leaf_tree) - 1
+        ndigits = len(str(max_number))
+        number = str(index).rjust(ndigits)
+
+        lines.append(f' {number} {indent}{first_indent}{link}{node_str}')
+
+        indent += next_indent
+        unused = unused or is_leaf
+
+        if unused and not print_all:
+            return
+
+        traverse_tree(lines, left_child, depth + 1, indent, tee, join, unused)
+        traverse_tree(lines, right_child, depth + 1, indent, corner, space, unused)
+
+    lines = []
+    traverse_tree(lines, 1, 0, '', '', '', False)
+    return '\n'.join(lines)
+
+
+def tree_actual_depth(split_tree: UInt[Array, ' 2**(d-1)']) -> Int32[Array, '']:
+    """Measure the depth of the tree.
+
+    Parameters
+    ----------
+    split_tree
+        The cutpoints of the decision rules.
+
+    Returns
+    -------
+    The depth of the deepest leaf in the tree. The root is at depth 0.
+    """
+    # this could be done just with split_tree != 0
+    is_leaf = is_actual_leaf(split_tree, add_bottom_level=True)
+    depth = tree_depths(is_leaf.size)
+    depth = jnp.where(is_leaf, depth, 0)
+    return jnp.max(depth)
+
+
+@jit
+@partial(jnp.vectorize, signature='(nt,hts)->(d)')
+def forest_depth_distr(
+    split_tree: UInt[Array, '*batch_shape num_trees 2**(d-1)'],
+) -> Int32[Array, '*batch_shape d']:
+    """Histogram the depths of a set of trees.
+
+    Parameters
+    ----------
+    split_tree
+        The cutpoints of the decision rules of the trees.
+
+    Returns
+    -------
+    An integer vector where the i-th element counts how many trees have depth i.
+    """
+    depth = tree_depth(split_tree) + 1
+    depths = vmap(tree_actual_depth)(split_tree)
+    return jnp.bincount(depths, length=depth)
+
+
+@partial(jit, static_argnames=('node_type', 'sum_batch_axis'))
+def points_per_node_distr(
+    X: UInt[Array, 'p n'],
+    var_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+    split_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+    node_type: Literal['leaf', 'leaf-parent'],
+    *,
+    sum_batch_axis: int | tuple[int, ...] = (),
+) -> Int32[Array, '*reduced_batch_shape n+1']:
+    """Histogram points-per-node counts in a set of trees.
+
+    Count how many nodes in a tree select each possible amount of points,
+    over a certain subset of nodes.
+
+    Parameters
+    ----------
+    X
+        The set of points to count.
+    var_tree
+        The variables of the decision rules.
+    split_tree
+        The cutpoints of the decision rules.
+    node_type
+        The type of nodes to consider. Can be:
+
+        'leaf'
+            Count only leaf nodes.
+        'leaf-parent'
+            Count only parent-of-leaf nodes.
+    sum_batch_axis
+        Aggregate the histogram over these batch axes, counting how many nodes
+        have each possible amount of points over subsets of trees instead of
+        in each tree separately.
+
+    Returns
+    -------
+    A vector where the i-th element counts how many nodes have i points.
+    """
+    batch_ndim = var_tree.ndim - 1
+    axes = normalize_axis_tuple(sum_batch_axis, batch_ndim)
+
+    def func(
+        var_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+        split_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+    ) -> Int32[Array, '*reduced_batch_shape n+1']:
+        indices: UInt[Array, '*batch_shape n']
+        indices = traverse_forest(X, var_tree, split_tree)
+
+        @partial(jnp.vectorize, signature='(hts),(n)->(ts_or_hts),(ts_or_hts)')
+        def count_points(
+            split_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+            indices: UInt[Array, '*batch_shape n'],
+        ) -> (
+            tuple[UInt[Array, '*batch_shape 2**d'], Bool[Array, '*batch_shape 2**d']]
+            | tuple[
+                UInt[Array, '*batch_shape 2**(d-1)'],
+                Bool[Array, '*batch_shape 2**(d-1)'],
+            ]
+        ):
+            if node_type == 'leaf-parent':
+                indices >>= 1
+                predicate = is_leaves_parent(split_tree)
+            elif node_type == 'leaf':
+                predicate = is_actual_leaf(split_tree, add_bottom_level=True)
+            else:
+                raise ValueError(node_type)
+            count_tree = jnp.zeros(predicate.size, int).at[indices].add(1).at[0].set(0)
+            return count_tree, predicate
+
+        count_tree, predicate = count_points(split_tree, indices)
+
+        def count_nodes(
+            count_tree: UInt[Array, '*summed_batch_axes half_tree_size'],
+            predicate: Bool[Array, '*summed_batch_axes half_tree_size'],
+        ) -> Int32[Array, ' n+1']:
+            return jnp.zeros(X.shape[1] + 1, int).at[count_tree].add(predicate)
+
+        # vmap count_nodes over non-batched dims
+        for i in reversed(range(batch_ndim)):
+            neg_i = i - var_tree.ndim
+            if i not in axes:
+                count_nodes = vmap(count_nodes, in_axes=neg_i)
+
+        return count_nodes(count_tree, predicate)
+
+    # automatically batch over all batch dimensions
+    max_io_nbytes = 2**27  # 128 MiB
+    out_dim_shift = len(axes)
+    for i in reversed(range(batch_ndim)):
+        if i in axes:
+            out_dim_shift -= 1
+        else:
+            func = autobatch(func, max_io_nbytes, i, i - out_dim_shift)
+    assert out_dim_shift == 0
+
+    return func(var_tree, split_tree)

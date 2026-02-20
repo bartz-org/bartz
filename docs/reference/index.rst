@@ -1,6 +1,6 @@
 .. bartz/docs/reference/index.rst
 ..
-.. Copyright (c) 2024-2025, The Bartz Contributors
+.. Copyright (c) 2024-2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -36,4 +36,5 @@ Reference
     prepcovars.rst
     jaxext.rst
     debug.rst
+    test.rst
     profile.rst

@@ -24,10 +24,13 @@
 
 """Benchmarking code run by asv."""
 
+from os import getenv
+
 from jax import config
 
 from benchmarks._vendor_latest_bartz import ensure_vendored
 
 ensure_vendored()
 
-config.update('jax_num_cpu_devices', 16)
+if getenv('BARTZ_BENCHMARKS_SINGLE_CPU_DEVICE') is None:
+    config.update('jax_num_cpu_devices', 16)

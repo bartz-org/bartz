@@ -25,9 +25,15 @@
 """Additions to jax."""
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from functools import partial
+from typing import Any
+
+try:
+    from jax import shard_map  # available since jax v0.6.1
+except ImportError:
+    from jax.experimental.shard_map import shard_map
 
 import jax
 from jax import (
@@ -36,20 +42,23 @@ from jax import (
     device_count,
     ensure_compile_time_eval,
     jit,
+    lax,
     random,
+    tree,
+    typeof,
     vmap,
 )
 from jax import numpy as jnp
 from jax.dtypes import prng_key
-from jax.lax import scan
 from jax.scipy.special import ndtr
-from jaxtyping import Array, Bool, Float32, Key, Scalar, Shaped
+from jax.sharding import PartitionSpec
+from jaxtyping import Array, Bool, Float32, Key, PyTree, Scalar, Shaped
 
 from bartz.jaxext._autobatch import autobatch  # noqa: F401
 from bartz.jaxext.scipy.special import ndtri
 
 
-def vmap_nodoc(fun, *args, **kw):
+def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:
     """
     Acts like `jax.vmap` but preserves the docstring of the function unchanged.
 
@@ -62,7 +71,7 @@ def vmap_nodoc(fun, *args, **kw):
     return fun
 
 
-def minimal_unsigned_dtype(value):
+def minimal_unsigned_dtype(value: int) -> jnp.dtype:
     """Return the smallest unsigned integer dtype that can represent `value`."""
     if value < 2**8:
         return jnp.uint8
@@ -103,14 +112,16 @@ def unique(
         return jnp.empty(0, x.dtype), 0
     x = jnp.sort(x)
 
-    def loop(carry, x):
+    def loop(
+        carry: tuple[Scalar, Scalar, Shaped[Array, ' {size}']], x: Scalar
+    ) -> tuple[tuple[Scalar, Scalar, Shaped[Array, ' {size}']], None]:
         i_out, last, out = carry
         i_out = jnp.where(x == last, i_out, i_out + 1)
         out = out.at[i_out].set(x)
         return (i_out, x, out), None
 
     carry = 0, x[0], jnp.full(size, fill_value, x.dtype)
-    (actual_length, _, out), _ = scan(loop, carry, x[:size])
+    (actual_length, _, out), _ = lax.scan(loop, carry, x[:size])
     return out, actual_length + 1
 
 
@@ -136,7 +147,7 @@ class split:
     _keys: tuple[Key[Array, '*batch'], ...]
     _num_used: int
 
-    def __init__(self, key: Key[Array, '*batch'], num: int = 2):
+    def __init__(self, key: Key[Array, '*batch'], num: int = 2) -> None:
         if key.ndim:
             context = debug_key_reuse(False)
         else:
@@ -147,7 +158,7 @@ class split:
             self._keys = _split_unpack(key, num)
         self._num_used = 0
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self._keys) - self._num_used
 
     def pop(self, shape: int | tuple[int, ...] = ()) -> Key[Array, '*batch {shape}']:
@@ -273,7 +284,7 @@ def truncated_normal_onesided(
 def get_default_device() -> Device:
     """Get the current default JAX device."""
     with ensure_compile_time_eval():
-        return jnp.zeros(()).device
+        return jnp.empty(0).device
 
 
 def get_device_count() -> int:
@@ -285,3 +296,57 @@ def get_device_count() -> int:
 def is_key(x: object) -> bool:
     """Determine if `x` is a jax random key."""
     return isinstance(x, Array) and jnp.issubdtype(x.dtype, prng_key)
+
+
+def jit_active() -> bool:
+    """Check if we are under jit."""
+    return not hasattr(jnp.empty(0), 'platform')
+
+
+def _equal_shards(x: Array, axis_name: str) -> Bool[Array, '']:
+    """Check if all shards of `x` are equal, to be used in a `shard_map` context."""
+    # get axis size, this could be `size = lax.axis_size(axis_name)`, but it's
+    # supported only since jax v0.6.1
+    mesh = typeof(x).sharding.mesh
+    i = mesh.axis_names.index(axis_name)
+    size = mesh.axis_sizes[i]
+
+    perm = [(i, (i + 1) % size) for i in range(size)]
+    perm_x = lax.ppermute(x, axis_name, perm)
+    diff = jnp.any(x != perm_x)
+    return jnp.logical_not(lax.psum(diff, axis_name))
+
+
+def equal_shards(
+    x: PyTree[Array, ' S'], axis_name: str, **shard_map_kwargs: Any
+) -> PyTree[Bool[Array, ''], ' S']:
+    """Check that all shards of `x` are equal across axis `axis_name`.
+
+    Parameters
+    ----------
+    x
+        A pytree of arrays to check. Each array is checked separately.
+    axis_name
+        The mesh axis name across which equality is checked. It's not checked
+        across other axes.
+    **shard_map_kwargs
+        Additional arguments passed to `jax.shard_map` to set up the function
+        that checks equality. You may need to specify `in_specs` passing
+        the (pytree of) `jax.sharding.PartitionSpec` that specifies how `x`
+        is sharded, if the axes are not explicit, and `mesh` if there is not
+        a default mesh set by `jax.set_mesh`.
+
+    Returns
+    -------
+    A pytree of booleans indicating whether each leaf is equal across devices along the mesh axis.
+    """
+    equal_shards_leaf = partial(_equal_shards, axis_name=axis_name)
+
+    def check_equal(x: PyTree[Array, ' S']) -> PyTree[Bool[Array, ''], ' S']:
+        return tree.map(equal_shards_leaf, x)
+
+    sharded_check_equal = shard_map(
+        check_equal, out_specs=PartitionSpec(), **shard_map_kwargs
+    )
+
+    return sharded_check_equal(x)

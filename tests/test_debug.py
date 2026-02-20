@@ -1,6 +1,6 @@
 # bartz/tests/test_debug.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -33,12 +33,13 @@ from jax import random
 from scipy import stats
 from scipy.stats import ks_1samp
 
-from bartz.debug import check_trace, format_tree, sample_prior
-from bartz.jaxext import minimal_unsigned_dtype
+from bartz.debug import check_trace, sample_prior
+from bartz.grove import format_tree
+from bartz.jaxext import minimal_unsigned_dtype, split
 from tests.util import manual_tree
 
 
-def test_format_tree():
+def test_format_tree() -> None:
     """Check the output of `format_tree` on a single example."""
     tree = manual_tree(
         [[1.0], [2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], [[4], [1, 2]], [[15], [0, 3]]
@@ -63,7 +64,7 @@ class TestSamplePrior:
     )
 
     @pytest.fixture
-    def args(self, keys):
+    def args(self, keys: split) -> Args:
         """Prepare arguments for `sample_prior`."""
         # config
         trace_length = 1000
@@ -84,7 +85,7 @@ class TestSamplePrior:
             keys.pop(), trace_length, num_trees, max_split, p_nonterminal, sigma_mu
         )
 
-    def test_valid_trees(self, args: Args):
+    def test_valid_trees(self, args: Args) -> None:
         """Check all sampled trees are valid."""
         trees = sample_prior(*args)
         batch_shape = (args.trace_length, args.num_trees)
@@ -96,7 +97,7 @@ class TestSamplePrior:
         num_bad = jnp.count_nonzero(bad).item()
         assert num_bad == 0
 
-    def test_max_depth(self, keys, args: Args):
+    def test_max_depth(self, keys: split, args: Args) -> None:
         """Check that trees stop growing when p_nonterminal = 0."""
         for max_depth in range(args.p_nonterminal.size + 1):
             p_nonterminal = jnp.zeros_like(args.p_nonterminal)
@@ -107,7 +108,7 @@ class TestSamplePrior:
             assert jnp.all(trees.split_tree[:, :, 1 : 2**max_depth])
             assert not jnp.any(trees.split_tree[:, :, 2**max_depth :])
 
-    def test_forest_sdev(self, keys, args: Args):
+    def test_forest_sdev(self, keys: split, args: Args) -> None:
         """Check that the sum of trees is standard Normal."""
         trees = sample_prior(*args)
         leaf_indices = random.randint(
@@ -122,7 +123,7 @@ class TestSamplePrior:
         test = ks_1samp(sum_of_trees, stats.norm.cdf)
         assert test.pvalue > 0.1
 
-    def test_trees_differ(self, args: Args):
+    def test_trees_differ(self, args: Args) -> None:
         """Check that trees are different across iterations."""
         trees = sample_prior(*args)
         for attr in ('leaf_tree', 'var_tree', 'split_tree'):

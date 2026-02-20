@@ -29,8 +29,7 @@ from contextlib import contextmanager
 from functools import wraps
 from typing import Any, TypeVar
 
-from jax import block_until_ready, debug, jit
-from jax.lax import cond, scan
+from jax import block_until_ready, debug, jit, lax
 from jax.profiler import TraceAnnotation
 from jaxtyping import Array, Bool
 
@@ -39,7 +38,6 @@ from bartz.mcmcstep._state import vmap_chains
 PROFILE_MODE: bool = False
 
 T = TypeVar('T')
-Carry = TypeVar('Carry')
 
 
 def get_profile_mode() -> bool:
@@ -100,7 +98,7 @@ def profile_mode(value: bool, /) -> Iterator[None]:
 
 
 def jit_and_block_if_profiling(
-    func: Callable[..., T], block_before: bool = False, **kwargs
+    func: Callable[..., T], block_before: bool = False, **kwargs: Any
 ) -> Callable[..., T]:
     """Apply JIT compilation and block if profiling is enabled.
 
@@ -136,7 +134,7 @@ def jit_and_block_if_profiling(
     event_name = f'jab[{func.__name__}]'
 
     # this wrapper is meant to measure the time spent executing the function
-    def jab_inner_wrapper(*args, **kwargs) -> T:
+    def jab_inner_wrapper(*args: Any, **kwargs: Any) -> T:
         with TraceAnnotation(event_name):
             result = jitted_func(*args, **kwargs)
             return block_until_ready(result)
@@ -153,7 +151,9 @@ def jit_and_block_if_profiling(
     return jab_outer_wrapper
 
 
-def jit_if_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T]:
+def jit_if_profiling(
+    func: Callable[..., T], *args: Any, **kwargs: Any
+) -> Callable[..., T]:
     """Apply JIT compilation only when profiling.
 
     Parameters
@@ -180,7 +180,9 @@ def jit_if_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T
     return wrapper
 
 
-def jit_if_not_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..., T]:
+def jit_if_not_profiling(
+    func: Callable[..., T], *args: Any, **kwargs: Any
+) -> Callable[..., T]:
     """Apply JIT compilation only when not profiling.
 
     When profile mode is off, the function is JIT compiled. When profile mode is
@@ -212,39 +214,35 @@ def jit_if_not_profiling(func: Callable[..., T], *args, **kwargs) -> Callable[..
     return wrapper
 
 
-def scan_if_not_profiling(
-    f: Callable[[Carry, None], tuple[Carry, None]],
-    init: Carry,
-    xs: None,
-    length: int,
+def while_loop_if_not_profiling(
+    cond_fun: Callable[[T], Bool[Array, ''] | bool],
+    body_fun: Callable[[T], T],
+    init_val: T,
     /,
-) -> tuple[Carry, None]:
-    """Restricted replacement for `jax.lax.scan` that uses a Python loop when profiling.
+) -> T:
+    """Restricted replacement for `jax.lax.while_loop` that uses a Python loop when profiling.
 
     Parameters
     ----------
-    f
-        Scan body function with signature (carry, None) -> (carry, None).
-    init
-        Initial carry value.
-    xs
-        Input values to scan over (not supported).
-    length
-        Integer specifying the number of loop iterations.
+    cond_fun
+        Function to evaluate to determine whether to continue the loop.
+    body_fun
+        Function that updates the state in each iteration.
+    init_val
+        Initial state.
 
     Returns
     -------
-    Tuple of (final_carry, None) (stacked outputs not supported).
+    Final state.
     """
-    assert xs is None
     if get_profile_mode():
-        carry = init
-        for _i in range(length):
-            carry, _ = f(carry, None)
-        return carry, None
+        val = init_val
+        while cond_fun(val):
+            val = body_fun(val)
+        return val
 
     else:
-        return scan(f, init, None, length)
+        return lax.while_loop(cond_fun, body_fun, init_val)
 
 
 def cond_if_not_profiling(
@@ -252,7 +250,7 @@ def cond_if_not_profiling(
     true_fun: Callable[..., T],
     false_fun: Callable[..., T],
     /,
-    *operands,
+    *operands: Any,
 ) -> T:
     """Restricted replacement for `jax.lax.cond` that uses a Python if when profiling.
 
@@ -277,12 +275,12 @@ def cond_if_not_profiling(
         else:
             return false_fun(*operands)
     else:
-        return cond(pred, true_fun, false_fun, *operands)
+        return lax.cond(pred, true_fun, false_fun, *operands)
 
 
 def callback_if_not_profiling(
     callback: Callable[..., None], *args: Any, ordered: bool = False, **kwargs: Any
-):
+) -> None:
     """Restricted replacement for `jax.debug.callback` that calls the callback directly in profiling mode."""
     if get_profile_mode():
         callback(*args, **kwargs)
@@ -290,12 +288,12 @@ def callback_if_not_profiling(
         debug.callback(callback, *args, ordered=ordered, **kwargs)
 
 
-def vmap_chains_if_profiling(fun: Callable[..., T], **kwargs) -> Callable[..., T]:
+def vmap_chains_if_profiling(fun: Callable[..., T], **kwargs: Any) -> Callable[..., T]:
     """Apply `vmap_chains` only when profile mode is enabled."""
     new_fun = vmap_chains(fun, **kwargs)
 
     @wraps(fun)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> T:
         if get_profile_mode():
             return new_fun(*args, **kwargs)
         else:
@@ -304,12 +302,14 @@ def vmap_chains_if_profiling(fun: Callable[..., T], **kwargs) -> Callable[..., T
     return wrapper
 
 
-def vmap_chains_if_not_profiling(fun: Callable[..., T], **kwargs) -> Callable[..., T]:
+def vmap_chains_if_not_profiling(
+    fun: Callable[..., T], **kwargs: Any
+) -> Callable[..., T]:
     """Apply `vmap_chains` only when profile mode is disabled."""
     new_fun = vmap_chains(fun, **kwargs)
 
     @wraps(fun)
-    def wrapper(*args, **kwargs):
+    def wrapper(*args: Any, **kwargs: Any) -> T:
         if get_profile_mode():
             return fun(*args, **kwargs)
         else:

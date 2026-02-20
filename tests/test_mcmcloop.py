@@ -24,14 +24,16 @@
 
 """Test `bartz.mcmcloop`."""
 
+from dataclasses import replace
 from functools import partial
+from typing import Any
 
 import pytest
 from equinox import filter_jit
-from jax import debug_key_reuse, jit, vmap
+from jax import NamedSharding, debug_key_reuse, device_put, jit, make_mesh, tree, vmap
 from jax import numpy as jnp
-from jax.tree import map_with_path
-from jax.tree_util import tree_map
+from jax.sharding import AxisType, PartitionSpec
+from jax.tree_util import KeyPath, tree_map
 from jaxtyping import Array, Float32, UInt8
 from numpy.testing import assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
@@ -39,8 +41,8 @@ from pytest_subtests import SubTests
 
 from bartz import profile_mode
 from bartz.jaxext import get_default_device, split
-from bartz.mcmcloop import run_mcmc
-from bartz.mcmcstep import State, init
+from bartz.mcmcloop import BurninTrace, MainTrace, run_mcmc
+from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._state import chain_vmap_axes
 
 
@@ -63,16 +65,10 @@ def gen_data(
     return X, y, max_split
 
 
-def make_p_nonterminal(maxdepth: int) -> Float32[Array, ' {maxdepth}-1']:
-    """Prepare the p_nonterminal argument to `mcmcstep.init`."""
-    depth = jnp.arange(maxdepth - 1)
-    base = 0.95
-    power = 2
-    return base / (1 + depth).astype(float) ** power
-
-
 @filter_jit
-def simple_init(p: int, n: int, ntree: int, k: int | None = None, **kwargs) -> State:
+def simple_init(
+    p: int, n: int, ntree: int, k: int | None = None, **kwargs: Any
+) -> State:
     """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
     X, y, max_split = gen_data(p, n, k)
     eye = 1.0 if k is None else jnp.eye(k)
@@ -110,7 +106,7 @@ class TestRunMcmc:
         """Prepare state for tests."""
         return simple_init(10, 100, 20, k, num_chains=num_chains)
 
-    def test_final_state_overflow(self, keys: split, initial_state: State):
+    def test_final_state_overflow(self, keys: split, initial_state: State) -> None:
         """Check that the final state is the one in the trace even if there's overflow."""
         with debug_key_reuse(initial_state.forest.num_chains() != 0):
             final_state, _, main_trace = run_mcmc(
@@ -133,7 +129,7 @@ class TestRunMcmc:
             final_state.error_cov_inv, main_trace.error_cov_inv[last_index]
         )
 
-    def test_zero_iterations(self, keys: split, initial_state: State):
+    def test_zero_iterations(self, keys: split, initial_state: State) -> None:
         """Check 0 iterations produces a noop."""
         with debug_key_reuse(initial_state.forest.num_chains() != 0):
             final_state, burnin_trace, main_trace = run_mcmc(
@@ -142,7 +138,9 @@ class TestRunMcmc:
 
         tree_map(partial(assert_array_equal, strict=True), initial_state, final_state)
 
-        def assert_empty_trace(_path, x, chain_axis):
+        def assert_empty_trace(
+            _path: KeyPath, x: Array | None, chain_axis: int | None
+        ) -> None:
             if initial_state.forest.num_chains() is None or chain_axis is None:
                 sample_axis = 0
             else:
@@ -150,8 +148,8 @@ class TestRunMcmc:
             if x is not None:
                 assert x.shape[sample_axis] == 0
 
-        def check_trace(trace):
-            map_with_path(
+        def check_trace(trace: MainTrace | BurninTrace) -> None:
+            tree.map_with_path(
                 assert_empty_trace,
                 trace,
                 chain_vmap_axes(trace),
@@ -161,8 +159,10 @@ class TestRunMcmc:
         check_trace(burnin_trace)
         check_trace(main_trace)
 
-    def test_jit_error(self, keys: split, subtests: SubTests):
-        """Check that an error is raised under jit in some conditions."""
+    def test_predicted_double_compilation(
+        self, keys: split, subtests: SubTests
+    ) -> None:
+        """Check that an error is raised under jit if the configuration would lead to double compilation."""
         initial_state = simple_init(10, 100, 20)
 
         compiled_run_mcmc = jit(
@@ -180,3 +180,17 @@ class TestRunMcmc:
             pytest.raises(RuntimeError, match=msg),
         ):
             compiled_run_mcmc(keys.pop(), initial_state, 1)
+
+    def test_detected_double_compilation(self, keys: split) -> None:
+        """Check that double compilation is detected."""
+        state = simple_init(10, 100, 20)
+
+        mesh = make_mesh((1,), ('a',), axis_types=(AxisType.Auto,))
+        sharding = NamedSharding(mesh, PartitionSpec())
+        resid = device_put(state.resid, sharding)
+        state = replace(state, resid=resid)
+
+        with pytest.raises(
+            RuntimeError, match='The inner loop of `run_mcmc` was traced more than once'
+        ):
+            run_mcmc(keys.pop(), state, 2, inner_loop_length=1)

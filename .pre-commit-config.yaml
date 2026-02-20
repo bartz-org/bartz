@@ -31,6 +31,7 @@ repos:
         exclude: tests/(rbartpackages/.+\.py|util\.py)$
       - id: trailing-whitespace
         exclude: '^renv/activate\.R$' # because renv edits it automatically, with trailing whitespace
+      - id: no-commit-to-branch
   - repo: https://github.com/sbrunner/hooks
     rev: 1.6.1
     hooks:
@@ -55,4 +56,8 @@ repos:
   - repo: https://github.com/jorisroovers/gitlint
     rev: v0.19.1
     hooks:
-      - id: gitlint # this is already defined on stage commit-msg
+      - id: gitlint # this is already defined to run in stage commit-msg
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.10.4
+    hooks:
+      - id: uv-lock

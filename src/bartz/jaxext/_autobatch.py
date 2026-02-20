@@ -27,6 +27,7 @@
 import math
 from collections.abc import Callable
 from functools import partial, wraps
+from typing import Any
 from warnings import warn
 
 from jax.typing import DTypeLike
@@ -36,28 +37,24 @@ try:
 except ImportError:
     from numpy.core.numeric import normalize_axis_index  # numpy 1
 
-from jax import ShapeDtypeStruct, eval_shape, jit
+from jax import ShapeDtypeStruct, eval_shape, jit, lax, tree
 from jax import numpy as jnp
-from jax.lax import scan
-from jax.tree import flatten as tree_flatten
-from jax.tree import map as tree_map
-from jax.tree import reduce as tree_reduce
 from jaxtyping import Array, PyTree, Shaped
 
 
-def expand_axes(axes, tree):
-    """Expand `axes` such that they match the pytreedef of `tree`."""
+def expand_axes(axes: PyTree[int | None], tree_arg: PyTree) -> PyTree[int | None]:
+    """Expand `axes` such that they match the pytreedef of `tree_arg`."""
 
-    def expand_axis(axis, subtree):
-        return tree_map(lambda _: axis, subtree)
+    def expand_axis(axis: int | None, subtree: PyTree) -> PyTree[int | None]:
+        return tree.map(lambda _: axis, subtree)
 
-    return tree_map(expand_axis, axes, tree, is_leaf=lambda x: x is None)
+    return tree.map(expand_axis, axes, tree_arg, is_leaf=lambda x: x is None)
 
 
 def normalize_axes(
-    axes: PyTree[int | None, ' T'], tree: PyTree[Array, ' T']
+    axes: PyTree[int | None, ' T'], tree_arg: PyTree[Array, ' T']
 ) -> PyTree[int | None, ' T']:
-    """Normalize axes to be non-negative and valid for the corresponding arrays in the tree."""
+    """Normalize axes to be non-negative and valid for the corresponding arrays in the tree_arg."""
 
     def normalize_axis(axis: int | None, x: Array) -> int | None:
         if axis is None:
@@ -65,14 +62,14 @@ def normalize_axes(
         else:
             return normalize_axis_index(axis, len(x.shape))
 
-    return tree_map(normalize_axis, axes, tree, is_leaf=lambda x: x is None)
+    return tree.map(normalize_axis, axes, tree_arg, is_leaf=lambda x: x is None)
 
 
-def check_no_nones(axes, tree):
-    def check_not_none(_, axis):
+def check_no_nones(axes: PyTree[int | None], tree_arg: PyTree) -> None:
+    def check_not_none(_: object, axis: int | None) -> None:
         assert axis is not None
 
-    tree_map(check_not_none, tree, axes, is_leaf=lambda x: x is None)
+    tree.map(check_not_none, tree_arg, axes, is_leaf=lambda x: x is None)
 
 
 def remove_axis(
@@ -85,39 +82,39 @@ def remove_axis(
         new_dtype = reduction_dtype(ufunc, x.dtype)
         return ShapeDtypeStruct(new_shape, new_dtype)
 
-    return tree_map(remove_axis, x, axis)
+    return tree.map(remove_axis, x, axis)
 
 
-def extract_size(axes, tree):
-    """Get the size of each array in tree at the axis in axes, check they are equal and return it."""
+def extract_size(axes: PyTree[int | None], tree_arg: PyTree) -> int:
+    """Get the size of each array in tree_arg at the axis in axes, check they are equal and return it."""
 
-    def get_size(x, axis):
+    def get_size(x: object, axis: int | None) -> int | None:
         if axis is None:
             return None
         else:
             return x.shape[axis]
 
-    sizes = tree_map(get_size, tree, axes)
-    sizes, _ = tree_flatten(sizes)
+    sizes = tree.map(get_size, tree_arg, axes)
+    sizes, _ = tree.flatten(sizes)
     assert all(s == sizes[0] for s in sizes)
     return sizes[0]
 
 
-def sum_nbytes(tree):
-    def nbytes(x):
+def sum_nbytes(tree_arg: PyTree[Array | ShapeDtypeStruct]) -> int:
+    def nbytes(x: Array | ShapeDtypeStruct) -> int:
         return math.prod(x.shape) * x.dtype.itemsize
 
-    return tree_reduce(lambda size, x: size + nbytes(x), tree, 0)
+    return tree.reduce(lambda size, x: size + nbytes(x), tree_arg, 0)
 
 
-def next_divisor_small(dividend, min_divisor):
+def next_divisor_small(dividend: int, min_divisor: int) -> int:
     for divisor in range(min_divisor, int(math.sqrt(dividend)) + 1):
         if dividend % divisor == 0:
             return divisor
     return dividend
 
 
-def next_divisor_large(dividend, min_divisor):
+def next_divisor_large(dividend: int, min_divisor: int) -> int:
     max_inv_divisor = dividend // min_divisor
     for inv_divisor in range(max_inv_divisor, 0, -1):
         if dividend % inv_divisor == 0:
@@ -125,8 +122,8 @@ def next_divisor_large(dividend, min_divisor):
     return dividend
 
 
-def next_divisor(dividend, min_divisor):
-    """Return divisor >= min_divisor such that divided % divisor == 0."""
+def next_divisor(dividend: int, min_divisor: int) -> int:
+    """Return divisor >= min_divisor such that dividend % divisor == 0."""
     if dividend == 0:
         return min_divisor
     if min_divisor * min_divisor <= dividend:
@@ -134,56 +131,60 @@ def next_divisor(dividend, min_divisor):
     return next_divisor_large(dividend, min_divisor)
 
 
-def pull_nonbatched(axes, tree):
-    def pull_nonbatched(x, axis):
+def pull_nonbatched(
+    axes: PyTree[int | None], tree_arg: PyTree
+) -> tuple[PyTree, PyTree]:
+    def pull_nonbatched(x: object, axis: int | None) -> object:
         if axis is None:
             return None
         else:
             return x
 
-    return tree_map(pull_nonbatched, tree, axes), tree
+    return tree.map(pull_nonbatched, tree_arg, axes), tree_arg
 
 
-def push_nonbatched(axes, tree, original_tree):
-    def push_nonbatched(original_x, x, axis):
+def push_nonbatched(
+    axes: PyTree[int | None], tree_arg: PyTree, original_tree: PyTree
+) -> PyTree[Any]:
+    def push_nonbatched(original_x: object, x: object, axis: int | None) -> object:
         if axis is None:
             return original_x
         else:
             return x
 
-    return tree_map(push_nonbatched, original_tree, tree, axes)
+    return tree.map(push_nonbatched, original_tree, tree_arg, axes)
 
 
-def move_axes_out(axes, tree):
-    def move_axis_out(x, axis):
+def move_axes_out(axes: PyTree[int], tree_arg: PyTree[Array]) -> PyTree[Array]:
+    def move_axis_out(x: Array, axis: int) -> Array:
         return jnp.moveaxis(x, axis, 0)
 
-    return tree_map(move_axis_out, tree, axes)
+    return tree.map(move_axis_out, tree_arg, axes)
 
 
-def move_axes_in(axes, tree):
-    def move_axis_in(x, axis):
+def move_axes_in(axes: PyTree[int], tree_arg: PyTree[Array]) -> PyTree[Array]:
+    def move_axis_in(x: Array, axis: int) -> Array:
         return jnp.moveaxis(x, 0, axis)
 
-    return tree_map(move_axis_in, tree, axes)
+    return tree.map(move_axis_in, tree_arg, axes)
 
 
-def batch(tree: PyTree[Array, ' T'], nbatches: int) -> PyTree[Array, ' T']:
+def batch(tree_arg: PyTree[Array, ' T'], nbatches: int) -> PyTree[Array, ' T']:
     """Split the first axis into two axes, the first of size `nbatches`."""
 
-    def batch(x):
+    def batch(x: Array) -> Array:
         return x.reshape(nbatches, x.shape[0] // nbatches, *x.shape[1:])
 
-    return tree_map(batch, tree)
+    return tree.map(batch, tree_arg)
 
 
-def unbatch(tree: PyTree[Array, ' T']) -> PyTree[Array, ' T']:
+def unbatch(tree_arg: PyTree[Array, ' T']) -> PyTree[Array, ' T']:
     """Merge the first two axes into a single axis."""
 
-    def unbatch(x):
+    def unbatch(x: Array) -> Array:
         return x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
 
-    return tree_map(unbatch, tree)
+    return tree.map(unbatch, tree_arg)
 
 
 def reduce(
@@ -198,7 +199,7 @@ def reduce(
         def reduce(x: Array, axis: int) -> Array:
             return ufunc.reduce(x, axis=axis)
 
-        return tree_map(reduce, x, axes)
+        return tree.map(reduce, x, axes)
 
     else:
 
@@ -206,7 +207,7 @@ def reduce(
             reduced = ufunc.reduce(x, axis=axis)
             return ufunc(initial, reduced)
 
-        return tree_map(reduce, x, initial, axes)
+        return tree.map(reduce, x, initial, axes)
 
 
 def identity(
@@ -218,7 +219,7 @@ def identity(
         identity = identity_for(ufunc, x.dtype)
         return jnp.broadcast_to(identity, x.shape)
 
-    return tree_map(identity, x)
+    return tree.map(identity, x)
 
 
 def reduction_dtype(ufunc: jnp.ufunc, input_dtype: DTypeLike) -> DTypeLike:
@@ -235,12 +236,12 @@ def identity_for(ufunc: jnp.ufunc, input_dtype: DTypeLike) -> Shaped[Array, '']:
     return jnp.array(ufunc.identity, dtype)
 
 
-def check_same(tree1, tree2):
-    def check_same(x1, x2):
+def check_same(tree1: PyTree, tree2: PyTree) -> None:
+    def check_same(x1: Array | ShapeDtypeStruct, x2: Array | ShapeDtypeStruct) -> None:
         assert x1.shape == x2.shape
         assert x1.dtype == x2.dtype
 
-    tree_map(check_same, tree1, tree2)
+    tree.map(check_same, tree1, tree2)
 
 
 class NotDefined:
@@ -310,7 +311,7 @@ def autobatch(
 
     @jit
     @wraps(func)
-    def autobatch_wrapper(*args):
+    def autobatch_wrapper(*args: PyTree) -> PyTree:
         return batched_func(
             func,
             max_io_nbytes,
@@ -400,7 +401,7 @@ def batched_func(
             out_axes=out_axes,
             reduce_ufunc=reduce_ufunc,
         )
-        reduced_result, result = scan(loop, initial, args)
+        reduced_result, result = lax.scan(loop, initial, args)
 
         # remove auxiliary batching axis and reverse transposition
         if reduce_ufunc is None:
@@ -425,8 +426,15 @@ def batched_func(
 
 
 def batching_loop(
-    initial, args, *, func, nonbatched_args, in_axes, out_axes, reduce_ufunc
-):
+    initial: PyTree[Array] | None,
+    args: PyTree[Array],
+    *,
+    func: Callable,
+    nonbatched_args: PyTree,
+    in_axes: PyTree[int | None],
+    out_axes: PyTree[int],
+    reduce_ufunc: jnp.ufunc | None,
+) -> tuple[PyTree[Array], None] | tuple[None, PyTree[Array]]:
     """Implement the batching loop in `autobatch`."""
     # evaluate the function
     args = move_axes_in(in_axes, args)

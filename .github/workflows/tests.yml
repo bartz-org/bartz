@@ -43,6 +43,8 @@ env:
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
+    env:
+      SKIP: no-commit-to-branch
     steps:
       - uses: actions/checkout@v6
         with:
@@ -84,11 +86,36 @@ jobs:
       - id: set-matrix
         run: |
           BASE_MATRIX='[
-            {"os":"ubuntu-latest","runs-on":"ubuntu-latest","target-suffix":""},
-            {"os":"ubuntu-22.04","runs-on":"ubuntu-22.04","target-suffix":"-old"}
+            {
+              "id": "latest",
+              "runs-on": "ubuntu-latest",
+              "target-suffix": "",
+              "tests-args": ""
+            },
+            {
+              "id": "old",
+              "runs-on": "ubuntu-22.04",
+              "target-suffix": "-old",
+              "tests-args": ""
+            },
+            {
+              "id": "single-cpu",
+              "runs-on": "ubuntu-latest",
+              "target-suffix": "",
+              "tests-args": "ARGS=--num-cpu-devices=1"
+            }
           ]'
           BENCHMARKS_BASE_MATRIX='[
-            {"os":"ubuntu-latest","runs-on":"ubuntu-latest","target-suffix":""}
+            {
+              "id": "latest",
+              "runs-on": "ubuntu-latest",
+              "vars": ""
+            },
+            {
+              "id": "single-cpu",
+              "runs-on": "ubuntu-latest",
+              "vars": "BARTZ_BENCHMARKS_SINGLE_CPU_DEVICE=1 "
+            }
           ]'
 
           MATRIX=$(echo "$BASE_MATRIX" | jq -c ".")
@@ -98,7 +125,7 @@ jobs:
           echo "benchmarks-matrix={\"include\":$BENCHMARKS_MATRIX}" >> $GITHUB_OUTPUT
 
   tests:
-    name: tests-${{ matrix.os }}${{ matrix.target-suffix }}
+    name: tests-${{ matrix.id }}
     needs: setup-matrix
     runs-on: ${{ matrix.runs-on }}
     continue-on-error: ${{ matrix.target-suffix == '-gpu' }}
@@ -115,7 +142,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: ${{ env.UV_VERSION }}
-          cache-suffix: -${{ matrix.os }}${{ matrix.target-suffix }}
+          cache-suffix: -${{ matrix.id }}
 
       - name: Install R
         uses: r-lib/actions/setup-r@v2
@@ -134,21 +161,15 @@ jobs:
           ldd "$(R RHOME)/library/methods/libs/methods.so" || true
           uv run --dev python -c "import rpy2.situation as s; print('\n'.join(map(str, s.iter_info())))"
 
-      - name: Install jax GPU support
-        if: matrix.target-suffix == '-gpu'
-        run: |
-          CUDA_VERSION=`nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3`
-          uv pip install "jax[cuda$CUDA_VERSION]"
-
       - name: Run unit tests
         timeout-minutes: 30
-        run: make COVERAGE_SUFFIX=-${{ matrix.os }}${{ matrix.target-suffix }} tests${{ matrix.target-suffix }}
+        run: make COVERAGE_SUFFIX=-${{ matrix.id }} tests${{ matrix.target-suffix }} ${{ matrix.tests-args }}
 
       - name: Save coverage information
         uses: actions/upload-artifact@v6
         with:
-          name: coverage.tests-${{ matrix.os }}${{ matrix.target-suffix }}
-          path: .coverage.tests-${{ matrix.os }}${{ matrix.target-suffix }}
+          name: coverage.tests-${{ matrix.id }}
+          path: .coverage.tests-${{ matrix.id }}
           include-hidden-files: true
           if-no-files-found: error
 
@@ -279,7 +300,7 @@ jobs:
         uses: actions/deploy-pages@v4
 
   benchmarks:
-    name: benchmarks-${{ matrix.os }}${{ matrix.target-suffix }}
+    name: benchmarks-${{ matrix.id }}
     needs: setup-matrix
     runs-on: ${{ matrix.runs-on }}
     continue-on-error: ${{ matrix.target-suffix == '-gpu' }}
@@ -296,19 +317,14 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: ${{ env.UV_VERSION }}
-          cache-suffix: -${{ matrix.os }}${{ matrix.target-suffix }}
+          cache-suffix: -${{ matrix.id }}
 
       - name: Get machine information for asv
         run: RPY2_CFFI_MODE=ABI uv run --dev python -m asv machine --yes
 
-      - name: Install jax GPU support
-        if: matrix.target-suffix == '-gpu'
-        run: |
-          CUDA_VERSION=`nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3`
-          uv pip install "jax[cuda$CUDA_VERSION]"
-
       - name: Run asv in quick mode
-        run: make asv-quick ARGS='--attribute timeout=120' # long timeout because CI runners are slow
+        # long timeout because CI runners are slow
+        run: ${{ matrix.vars }}make asv-quick ARGS='--attribute timeout=120'
 
   dev-commands:
     runs-on: ubuntu-latest
@@ -327,6 +343,9 @@ jobs:
 
       - name: run IPython with old toolchain
         run: RPY2_CFFI_MODE=ABI make ipython-old ARGS=config/ipython/profile_default/startup/startup.ipy
+
+      - name: Update package version
+        run: make copy-version
 
   required-dummy:
     runs-on: ubuntu-latest

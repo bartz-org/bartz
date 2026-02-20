@@ -25,21 +25,39 @@
 """Test bartz.jaxext."""
 
 from functools import partial
+from inspect import signature
 from itertools import product
 from warnings import catch_warnings
 
+try:
+    from jax import shard_map  # available since jax v0.6.1
+except ImportError:
+    from jax.experimental.shard_map import shard_map
+
 import numpy
 import pytest
-from jax import debug_infs, jit, random, tree
+from jax import (
+    NamedSharding,
+    debug_infs,
+    device_put,
+    devices,
+    jit,
+    lax,
+    make_mesh,
+    random,
+    tree,
+)
 from jax import numpy as jnp
 from jax.scipy.special import ndtri
-from numpy.testing import assert_allclose
+from jax.sharding import AxisType, Mesh, PartitionSpec
+from jaxtyping import Array, Float, Float32, Key, Shaped
+from numpy.testing import assert_allclose, assert_array_equal
 from pytest_subtests import SubTests
 from scipy.stats import invgamma as scipy_invgamma
 from scipy.stats import ks_1samp, truncnorm
 
 from bartz import jaxext
-from bartz.jaxext import split
+from bartz.jaxext import equal_shards, split
 from bartz.jaxext.scipy.special import ndtri as patched_ndtri
 from bartz.jaxext.scipy.stats import invgamma
 from tests.util import assert_close_matrices
@@ -48,7 +66,7 @@ from tests.util import assert_close_matrices
 class TestUnique:
     """Test jaxext.unique."""
 
-    def test_sort(self):
+    def test_sort(self) -> None:
         """Check that it's equivalent to sort if no values are repeated."""
         x = jnp.arange(10)[::-1]
         out, length = jaxext.unique(x, x.size, 666)
@@ -56,7 +74,7 @@ class TestUnique:
         assert out.dtype == x.dtype
         assert length == x.size
 
-    def test_fill(self):
+    def test_fill(self) -> None:
         """Check that the trailing fill value is used correctly."""
         x = jnp.ones(10)
         out, length = jaxext.unique(x, x.size, 666)
@@ -64,7 +82,7 @@ class TestUnique:
         assert out.dtype == x.dtype
         assert length == 1
 
-    def test_empty_input(self):
+    def test_empty_input(self) -> None:
         """Check that the function works on empty input."""
         x = jnp.array([])
         out, length = jaxext.unique(x, 2, 666)
@@ -72,7 +90,7 @@ class TestUnique:
         assert out.dtype == x.dtype
         assert length == 0
 
-    def test_empty_output(self):
+    def test_empty_output(self) -> None:
         """Check that the function works if the output is forced to be empty."""
         x = jnp.array([1, 1, 1])
         out, length = jaxext.unique(x, 0, 666)
@@ -87,10 +105,14 @@ class TestAutoBatch:
     @pytest.mark.parametrize('target_nbatches', [1, 7])
     @pytest.mark.parametrize('with_margin', [False, True])
     @pytest.mark.parametrize('additional_size', [3, 0])
-    def test_batch_size(self, keys, target_nbatches, with_margin, additional_size):
+    def test_batch_size(
+        self, keys: split, target_nbatches: int, with_margin: bool, additional_size: int
+    ) -> None:
         """Check batch sizes are correct in various conditions."""
 
-        def func(a, b, c):
+        def func(
+            a: Float[Array, 'n m'], b: Float[Array, ' n'], c: Float[Array, 'p n']
+        ) -> tuple[Float[Array, ' n'], Float[Array, 'p n']]:
             return (a * b[:, None]).sum(1), c * b[None, :]
 
         atomic_batch_size = additional_size + 12
@@ -125,10 +147,10 @@ class TestAutoBatch:
 
     @pytest.mark.parametrize('max_memory', [32, 1024])
     # test with large max memory to trigger noop code path
-    def test_unbatched_arg(self, max_memory: int):
+    def test_unbatched_arg(self, max_memory: int) -> None:
         """Check the function with batching disabled on a scalar argument."""
 
-        def func(a, b):
+        def func(a: Shaped[Array, ' n'], b: int) -> Shaped[Array, ' n']:
             return a + b
 
         batched_func = jaxext.autobatch(func, max_memory, (0, None))
@@ -141,10 +163,10 @@ class TestAutoBatch:
 
         numpy.testing.assert_array_max_ulp(out1, out2)
 
-    def test_batch_axis_pytree(self):
+    def test_batch_axis_pytree(self) -> None:
         """Check the that a batch axis can be specified for a whole sub-pytree."""
 
-        def func(a, b):
+        def func(a: int, b: dict[str, Shaped[Array, ' n']]) -> Shaped[Array, ' n']:
             return a + b['foo'] + b['bar']
 
         batched_func = jaxext.autobatch(func, 32, (None, 0))
@@ -157,22 +179,22 @@ class TestAutoBatch:
 
         numpy.testing.assert_array_max_ulp(out1, out2)
 
-    def test_large_batch_warning(self):
+    def test_large_batch_warning(self) -> None:
         """Check the function emits a warning if the size limit can't be honored."""
         x = jnp.arange(10_000).reshape(10, 1000)
 
-        def f(x):
+        def f(x: Shaped[Array, 'n m']) -> Shaped[Array, 'n m']:
             return x
 
         g = jaxext.autobatch(f, 100)
         with pytest.warns(UserWarning, match=' > max_io_nbytes = '):
             g(x)
 
-    def test_empty_values(self):
+    def test_empty_values(self) -> None:
         """Check that the function works with batchable empty arrays."""
         x = jnp.empty((10, 0))
 
-        def f(x):
+        def f(x: Shaped[Array, 'n m']) -> Shaped[Array, 'n m']:
             return x
 
         g = jaxext.autobatch(f, 100, return_nbatches=True)
@@ -180,11 +202,11 @@ class TestAutoBatch:
         assert nbatches == 1
         assert jnp.all(y == x)
 
-    def test_zero_size(self):
+    def test_zero_size(self) -> None:
         """Check the function works with a batch axis with length 0."""
         x = jnp.empty((0, 10))
 
-        def f(x):
+        def f(x: Shaped[Array, 'n m']) -> Shaped[Array, 'n m']:
             return x
 
         g = jaxext.autobatch(f, 100, return_nbatches=True)
@@ -192,7 +214,7 @@ class TestAutoBatch:
         assert nbatches == 1
         assert jnp.all(y == x)
 
-    def test_reduction_basic(self, keys: split, subtests: SubTests):
+    def test_reduction_basic(self, keys: split, subtests: SubTests) -> None:
         """Check that reduction produces the expected result."""
         # use an internal loop instead of pytest.mark.parametrize because there
         # are too many combinations of parameters
@@ -231,7 +253,9 @@ class TestAutoBatch:
                 dtype=dtype.dtype.name,
             ):
 
-                def func(*args, nin=nin):
+                def func(
+                    *args: Shaped[Array, '*shape'], nin: int = nin
+                ) -> Shaped[Array, '*shape'] | tuple[Shaped[Array, '*shape'], ...]:
                     out = sum(args)
                     if nin == 1:
                         return out
@@ -251,7 +275,7 @@ class TestAutoBatch:
                         (jnp.iinfo(dtype).max + 1) // 2,
                         dtype,
                     )
-                elif jnp.issubdtype(dtype, jnp.bool_):
+                elif jnp.issubdtype(dtype, jnp.bool_):  # pragma: no branch
                     args = random.bernoulli(keys.pop(), 0.5, (nin, *shape))
 
                 expected = tree.map(partial(reduction, axis=axis), func(*args))
@@ -279,10 +303,10 @@ class TestAutoBatch:
 
                 tree.map(partial(assert_close_matrices, rtol=1e-6), result, expected)
 
-    def test_reduction_with_unbatched_input(self, keys):
+    def test_reduction_with_unbatched_input(self, keys: split) -> None:
         """Check reduction works with unbatched (None) input arguments."""
 
-        def func(x, scalar):
+        def func(x: Float[Array, 'n m'], scalar: float) -> Float[Array, 'n m']:
             return x * scalar
 
         x = random.uniform(keys.pop(), (50, 8))
@@ -295,10 +319,10 @@ class TestAutoBatch:
         assert result.shape == (8,)
         assert_allclose(result, expected, rtol=1e-6)
 
-    def test_reduction_with_return_nbatches(self, keys):
+    def test_reduction_with_return_nbatches(self, keys: split) -> None:
         """Check reduce_ufunc works together with return_nbatches."""
 
-        def func(x):
+        def func(x: Float[Array, 'n m']) -> Float[Array, 'n m']:
             return x
 
         x = random.uniform(keys.pop(), (100, 10))
@@ -316,12 +340,12 @@ class TestAutoBatch:
         assert_allclose(result, expected, rtol=1e-6)
 
 
-def different_keys(keya, keyb):
+def different_keys(keya: Key[Array, ''], keyb: Key[Array, '']) -> bool:
     """Return True iff two jax random keys are different."""
     return jnp.any(random.key_data(keya) != random.key_data(keyb)).item()
 
 
-def test_split(keys):
+def test_split(keys: split) -> None:
     """Test jaxext.split."""
     key = keys.pop()
     ks = jaxext.split(key, 3)
@@ -370,14 +394,14 @@ def test_split(keys):
 class TestJaxPatches:
     """Check that some jax stuff I patch is correct and still to be patched."""
 
-    def test_invgamma_missing(self):
+    def test_invgamma_missing(self) -> None:
         """Check that jax does not implement the inverse gamma distribution."""
         with pytest.raises(ImportError, match=r'gammainccinv'):
             from jax.scipy.special import gammainccinv  # noqa: F401, PLC0415
         with pytest.raises(ImportError, match=r'invgamma'):
             from jax.scipy.stats import invgamma  # noqa: F401, PLC0415
 
-    def test_invgamma_correct(self, keys):
+    def test_invgamma_correct(self, keys: split) -> None:
         """Compare my implementation of invgamma against scipy's."""
         p = random.uniform(keys.pop(), (100,), float, 0.01, 0.99)
         alpha = 3.5
@@ -386,13 +410,13 @@ class TestJaxPatches:
         assert_allclose(x1, x0, rtol=1e-6)
 
     @pytest.mark.xfail(reason='Fixed in jax 0.6.2.')
-    def test_ndtri_bugged(self, keys):
+    def test_ndtri_bugged(self, keys: split) -> None:
         """Check that `jax.scipy.special.ndtri` triggers `jax.debug_infs`."""
         x = random.uniform(keys.pop(), (100,), float, 0.01, 0.99)
         with debug_infs(True), pytest.raises(FloatingPointError, match=r'inf'):
             ndtri(x)
 
-    def test_ndtri_correct(self, keys):
+    def test_ndtri_correct(self, keys: split) -> None:
         """Check that my copy-pasted ndtri impl is equivalent to the jax one."""
         x = random.uniform(keys.pop(), (100,), float, 0.01, 0.99)
         with debug_infs(False):
@@ -404,7 +428,7 @@ class TestJaxPatches:
 class TestTruncatedNormalOneSided:
     """Test `jaxext.truncated_normal_onesided`."""
 
-    def test_truncated_normal_incorrect(self, keys):
+    def test_truncated_normal_incorrect(self, keys: split) -> None:
         """Check that `jax.random.truncated_normal` is wrong out of 5 sigma."""
         nsamples = 1000
         lower, upper = jnp.array([(-100.0, -5.0), (5.0, 100.0)]).T
@@ -415,7 +439,7 @@ class TestTruncatedNormalOneSided:
             test = ks_1samp(sample, truncnorm(l, u).cdf)
             assert test.pvalue < 0.01
 
-    def test_correct(self, keys):
+    def test_correct(self, keys: split) -> None:
         """Check the samples come from the right distribution."""
         nparams = 20
         nsamples = 1000
@@ -430,7 +454,7 @@ class TestTruncatedNormalOneSided:
             test = ks_1samp(sample, truncnorm(left, right).cdf)
             assert test.pvalue > 0.01
 
-    def test_accurate(self, keys):
+    def test_accurate(self, keys: split) -> None:
         """Check that it does not over/under shoot."""
         x = jaxext.truncated_normal_onesided(
             keys.pop(), (), jnp.bool_(True), jnp.float32(-12)
@@ -441,21 +465,21 @@ class TestTruncatedNormalOneSided:
         )
         assert 12 < x <= 12.1
 
-    def test_finite(self, keys):
+    def test_finite(self, keys: split) -> None:
         """Check that the outputs are always finite."""
         # shape and n_loops combined shall be enough that all possible
         # float32 values in [0, 1) are drawn by random.uniform
         shape = (1_000_000,)
         n_loops = 100
 
-        keys = random.split(keys.pop(), n_loops)
+        keys = keys.pop(n_loops)
 
         platform = keys.device.platform
         clip = platform == 'gpu'
 
         @jit
-        def loop_body(key):
-            keys = jaxext.split(key, 3)
+        def loop_body(key: Key[Array, '']) -> Float32[Array, ' n']:
+            keys = split(key, 3)
             upper = random.bernoulli(keys.pop(), 0.5, shape)
             bound = random.uniform(keys.pop(), shape, float, -1, 1)
             return jaxext.truncated_normal_onesided(
@@ -467,7 +491,7 @@ class TestTruncatedNormalOneSided:
             assert jnp.all(jnp.isfinite(vals))
 
 
-def test_is_key(keys):
+def test_is_key(keys: split) -> None:
     """Test jaxext.is_key."""
     # JAX keys should be recognized
     key = keys.pop()
@@ -491,3 +515,76 @@ def test_is_key(keys):
 
     # NumPy arrays should not be recognized
     assert not jaxext.is_key(numpy.array([1, 2, 3]))
+
+
+def make_broken_replicated_array(x: Array, axis_name: str, mesh: Mesh) -> Array:
+    """Replicate `x` across devices, but make it different on each device across an axis."""
+
+    @partial(
+        shard_map,
+        mesh=mesh,
+        in_specs=PartitionSpec(),
+        out_specs=PartitionSpec(),
+        # this disables the check that would notice the inconsistency
+        **_get_check_vma_false_kwargs(),
+    )
+    def breaker(x: Array) -> Array:
+        return x + lax.axis_index(axis_name)
+
+    return breaker(x)
+
+
+def _get_check_vma_false_kwargs() -> dict[str, bool]:
+    """Get `dict(check_vma=False)` or the equivalent for old jax versions."""
+    sig = signature(shard_map)
+    if 'check_vma' in sig.parameters:
+        # since jax v0.6.1
+        return dict(check_vma=False)
+    else:
+        return dict(check_rep=False)
+
+
+def test_make_broken_replicated_array() -> None:
+    """Test `make_broken_replicated_array`."""
+    nd = len(devices())
+    if nd < 2:
+        pytest.skip('Requires at least 2 devices')
+    mesh = make_mesh((nd,), ('a',), axis_types=(AxisType.Auto,))
+    x = jnp.arange(nd)
+    xb = make_broken_replicated_array(x, 'a', mesh)
+    for i, shard in enumerate(xb.addressable_shards):
+        data: Array = shard.data
+        if i == 0:
+            assert_array_equal(data, x, strict=True)
+        else:
+            assert jnp.all(data != x)
+
+
+@pytest.mark.parametrize('equal', [True, False])
+@pytest.mark.parametrize('replicated', [True, False])
+def test_equal_shards(equal: bool, replicated: bool) -> None:
+    """Test `jaxext.equal_shards`."""
+    nd = len(devices())
+    if nd < 2:
+        pytest.skip('Requires at least 2 devices')
+
+    # define mesh
+    mesh = make_mesh((nd,), ('a',), axis_types=(AxisType.Auto,))
+
+    # create dummy array
+    if equal:
+        x = jnp.zeros(nd)
+    elif replicated:
+        x = jnp.zeros(nd)
+        x = make_broken_replicated_array(x, 'a', mesh)
+    else:
+        x = jnp.arange(nd)
+
+    # shard x
+    spec = PartitionSpec() if replicated else PartitionSpec('a')
+    sharding = NamedSharding(mesh, spec)
+    x = device_put(x, sharding)
+
+    # check the shards are equal or different
+    result = equal_shards(x, 'a', mesh=mesh, in_specs=spec)
+    assert result.item() == equal

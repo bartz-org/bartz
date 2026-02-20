@@ -1,6 +1,6 @@
-# bartz/tests/rbartpackages/bartMachine.py
+# bartz/src/bartz/debug/__init__.py
 #
-# Copyright (c) 2025-2026, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -22,32 +22,18 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Python wrapper of the R package bartMachine."""
+"""
+Debugging utilities.
 
-# ruff: noqa: D102, ANN201, ANN002, ANN003
+  - `check_trace`: check the validity of a set of trees.
+  - `debug_mc_gbart`: version of `mc_gbart` with debug checks and methods.
+  - `trees_BART_to_bartz`: convert an R package BART3 trace to a bartz trace.
+  - `sample_prior`: sample the bart prior.
+"""
 
-from rpy2 import robjects
+# ruff: noqa: F401
 
-from tests.rbartpackages._base import RObjectBase, rmethod
-
-
-class bartMachine(RObjectBase):  # noqa: D101, because the doc is pulled from R
-    _rfuncname = 'bartMachine::bartMachine'
-
-    def __init__(
-        self, *args, num_cores: int | None = None, megabytes: int = 5000, **kw
-    ) -> None:
-        robjects.r(f'options(java.parameters = "-Xmx{megabytes:d}m")')
-        robjects.r('loadNamespace("bartMachine")')
-        if num_cores is not None:
-            robjects.r(f'bartMachine::set_bart_machine_num_cores({int(num_cores)})')
-        super().__init__(*args, **kw)
-
-    @rmethod
-    def predict(self, *args, **kw): ...
-
-    @rmethod
-    def get_posterior(self, *args, **kw): ...
-
-    @rmethod
-    def get_sigsqs(self, *args, **kw): ...
+from bartz.debug._check import check_trace, describe_error
+from bartz.debug._debuggbart import debug_gbart, debug_mc_gbart
+from bartz.debug._prior import SamplePriorTrees, sample_prior
+from bartz.debug._traceconv import BARTTraceMeta, TraceWithOffset, trees_BART_to_bartz

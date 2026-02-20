@@ -28,6 +28,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from operator import ge, le
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import tomli
@@ -35,7 +36,7 @@ from jax import numpy as jnp
 from jaxtyping import ArrayLike
 from scipy import linalg
 
-from bartz.debug import check_tree, describe_error
+from bartz.debug import check_trace, describe_error
 from bartz.jaxext import minimal_unsigned_dtype
 from bartz.mcmcloop import TreesTrace
 
@@ -51,7 +52,7 @@ def manual_tree(
     """Facilitate the hardcoded definition of tree heaps."""
     assert len(leaf) == len(var) + 1 == len(split) + 1
 
-    def check_powers_of_2(seq: list[list]):
+    def check_powers_of_2(seq: list[list]) -> bool:
         """Check if the lengths of the lists in `seq` are powers of 2."""
         return all(len(x) == 2**i for i, x in enumerate(seq))
 
@@ -75,7 +76,7 @@ def manual_tree(
         split_tree=tree.split_tree.astype(split_type),
     )
 
-    error = check_tree(tree, max_split)
+    error = check_trace(tree, max_split)
     descr = describe_error(error)
     bad = any(d not in ignore_errors for d in descr)
     assert not bad, descr
@@ -94,7 +95,7 @@ def assert_close_matrices(
     ord: int | float | str | None = 2,  # noqa: A002
     err_msg: str = '',
     reduce_rank: bool = False,
-):
+) -> None:
     """
     Check if two matrices are similar.
 
@@ -183,7 +184,7 @@ ratio = {ratio:.2g}  (rtol = {rtol:.2g})"""
         assert op(adnorm, atol + rtol * dnorm), msg
 
 
-def assert_different_matrices(*args, **kwargs):
+def assert_different_matrices(*args: ArrayLike, **kwargs: Any) -> None:
     """Invoke `assert_close_matrices` with negate=True and default inf tolerance."""
     default_kwargs: dict = dict(rtol=np.inf, atol=np.inf)
     default_kwargs.update(kwargs)

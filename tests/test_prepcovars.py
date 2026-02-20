@@ -1,6 +1,6 @@
 # bartz/tests/test_prepcovars.py
 #
-# Copyright (c) 2024-2025, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -38,7 +38,7 @@ class TestQuantilizer:
     @pytest.mark.parametrize(
         'fill_value', [jnp.finfo(jnp.float32).max, jnp.iinfo(jnp.int32).max]
     )
-    def test_splits_fill(self, fill_value):
+    def test_splits_fill(self, fill_value: float | int) -> None:
         """Check how predictors with less unique values are right-padded."""
         with debug_infs(not jnp.isinf(fill_value)):
             fill_value = jnp.array(fill_value)
@@ -47,13 +47,13 @@ class TestQuantilizer:
         expected_splits = [[2, fill_value, fill_value], [2, 4, fill_value], [2, 4, 6]]
         assert_array_equal(splits, expected_splits)
 
-    def test_max_splits(self):
+    def test_max_splits(self) -> None:
         """Check that the number of splits per predictor is counted correctly."""
         x = jnp.array([[1, 1, 1, 1], [4, 4, 1, 1], [2, 1, 3, 2], [1, 4, 2, 3]])
         _, max_split = quantilized_splits_from_matrix(x, 100)
         assert_array_equal(max_split, jnp.arange(4))
 
-    def test_integer_splits_overflow(self):
+    def test_integer_splits_overflow(self) -> None:
         """Check that the splits are computed correctly at the limit of overflow."""
         x = jnp.array([[-(2**31), 2**31 - 2]])
         splits, _ = quantilized_splits_from_matrix(x, 100)
@@ -61,13 +61,13 @@ class TestQuantilizer:
         assert_array_equal(splits, expected_splits)
 
     @pytest.mark.parametrize('dtype', [int, float])
-    def test_splits_type(self, dtype):
+    def test_splits_type(self, dtype: type) -> None:
         """Check that the input type is preserved."""
         x = jnp.arange(10, dtype=dtype)[None, :]
         splits, _ = quantilized_splits_from_matrix(x, 100)
         assert splits.dtype == x.dtype
 
-    def test_splits_length(self):
+    def test_splits_length(self) -> None:
         """Check that the correct number of splits is returned in corner cases."""
         x = jnp.linspace(0, 1, 10)[None, :]
 
@@ -83,33 +83,33 @@ class TestQuantilizer:
         no_splits, _ = quantilized_splits_from_matrix(x, 1)
         assert no_splits.shape == (1, 0)
 
-    def test_round_trip(self):
+    def test_round_trip(self) -> None:
         """Check that `bin_predictors` is the ~inverse of `quantilized_splits_from_matrix`."""
         x = jnp.arange(10)[None, :]
         splits, _ = quantilized_splits_from_matrix(x, 100)
         b = bin_predictors(x, splits)
         assert_array_equal(x, b)
 
-    def test_one_value(self):
+    def test_one_value(self) -> None:
         """Check there's only 1 bin (0 splits) if there is 1 datapoint."""
         x = jnp.arange(10)[:, None]
         _, max_split = quantilized_splits_from_matrix(x, 100)
         assert_array_equal(max_split, jnp.full(len(x), 0))
 
-    def test_zero_values(self):
+    def test_zero_values(self) -> None:
         """Check what happens when no binning is possible."""
         x = jnp.empty((1, 0))
         with pytest.raises(ValueError, match='at least 1'):
             quantilized_splits_from_matrix(x, 100)
 
-    def test_zero_bins(self):
+    def test_zero_bins(self) -> None:
         """Check what happens when no binning is possible."""
         x = jnp.arange(10)[None, :]
         with pytest.raises(ValueError, match='at least 1'):
             quantilized_splits_from_matrix(x, 0)
 
 
-def test_binner_left_boundary():
+def test_binner_left_boundary() -> None:
     """Check that the first bin is right-closed."""
     splits = jnp.array([[1, 2, 3]])
 
@@ -118,7 +118,7 @@ def test_binner_left_boundary():
     assert_array_equal(b, [[0, 0]])
 
 
-def test_binner_right_boundary():
+def test_binner_right_boundary() -> None:
     """Check that the next-to-last bin is right-closed."""
     splits = jnp.array([[1, 2, 3, 2**31 - 1]])
 

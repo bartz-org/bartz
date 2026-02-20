@@ -25,19 +25,20 @@
 """Module defining the BART MCMC state and initialization."""
 
 from collections.abc import Callable, Hashable
-from dataclasses import fields
+from dataclasses import fields, replace
 from functools import partial, wraps
 from math import log2
 from typing import Any, Literal, TypedDict, TypeVar
 
 import numpy
-from equinox import Module, error_if
+from equinox import Module, error_if, filter_jit
 from equinox import field as eqx_field
 from jax import (
     NamedSharding,
     device_put,
     eval_shape,
     jit,
+    lax,
     make_mesh,
     random,
     tree,
@@ -46,14 +47,13 @@ from jax import (
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
-from jax.tree import flatten
 from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree, Shaped, UInt
 
-from bartz.grove import make_tree, tree_depths
+from bartz.grove import tree_depths
 from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 
-def field(*, chains: bool = False, data: bool = False, **kwargs):
+def field(*, chains: bool = False, data: bool = False, **kwargs: Any):  # noqa: ANN202
     """Extend `equinox.field` with two new parameters.
 
     Parameters
@@ -117,27 +117,34 @@ def _find_metadata(
     x: PyTree[Any, ' S'], key: Hashable, if_true: T, if_false: T
 ) -> PyTree[T, ' S']:
     """Replace all subtrees of x marked with a metadata key."""
-    if isinstance(x, Module):
+
+    def is_lazy_array(x: object) -> bool:
+        return isinstance(x, _LazyArray)
+
+    def is_module(x: object) -> bool:
+        return isinstance(x, Module) and not is_lazy_array(x)
+
+    if is_module(x):
         args = []
         for f in fields(x):
             v = getattr(x, f.name)
             if f.metadata.get('static', False):
                 args.append(v)
             elif f.metadata.get(key, False):
-                subtree = tree.map(lambda _: if_true, v)
+                subtree = tree.map(lambda _: if_true, v, is_leaf=is_lazy_array)
                 args.append(subtree)
             else:
                 args.append(_find_metadata(v, key, if_true, if_false))
         return x.__class__(*args)
 
-    def is_leaf(x) -> bool:
-        return isinstance(x, Module)
-
-    def get_axes(x: Module | Any) -> PyTree[T]:
-        if isinstance(x, Module):
+    def get_axes(x: object) -> PyTree[T]:
+        if is_module(x):
             return _find_metadata(x, key, if_true, if_false)
         else:
-            return tree.map(lambda _: if_false, x)
+            return tree.map(lambda _: if_false, x, is_leaf=is_lazy_array)
+
+    def is_leaf(x: object) -> bool:
+        return isinstance(x, Module)  # this catches _LazyArray as well
 
     return tree.map(get_axes, x, is_leaf=is_leaf)
 
@@ -413,7 +420,9 @@ def _parse_p_nonterminal(
 
 
 def make_p_nonterminal(
-    d: int, alpha: float | Float32[Array, ''], beta: float | Float32[Array, '']
+    d: int,
+    alpha: float | Float32[Array, ''] = 0.95,
+    beta: float | Float32[Array, ''] = 2.0,
 ) -> Float32[Array, ' {d}-1']:
     """Prepare the `p_nonterminal` argument to `init`.
 
@@ -439,6 +448,28 @@ def make_p_nonterminal(
     assert d >= 1
     depth = jnp.arange(d - 1)
     return alpha / (1 + depth).astype(float) ** beta
+
+
+class _LazyArray(Module):
+    """Like `functools.partial` but specialized to array-creating functions like `jax.numpy.zeros`."""
+
+    array_creator: Callable
+    shape: tuple[int, ...]
+    args: tuple
+
+    def __init__(
+        self, array_creator: Callable, shape: tuple[int, ...], *args: Any
+    ) -> None:
+        self.array_creator = array_creator
+        self.shape = shape
+        self.args = args
+
+    def __call__(self, **kwargs: Any) -> T:
+        return self.array_creator(self.shape, *self.args, **kwargs)
+
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
 
 
 def init(
@@ -634,7 +665,6 @@ def init(
     # process multichain settings
     chain_shape = () if num_chains is None else (num_chains,)
     resid_shape = chain_shape + y.shape
-    tree_shape = (*chain_shape, num_trees)
     add_chains = partial(_add_chains, chain_shape=chain_shape)
 
     # determine batch sizes for reductions
@@ -660,51 +690,56 @@ def init(
     )
     offset = error_if(offset, jnp.sum(max_split == 0) > filter_splitless_vars, msg)
 
+    # determine shapes for trees
+    tree_shape = (*chain_shape, num_trees)
+    tree_size = 2**max_depth
+
     # initialize all remaining stuff and put it in an unsharded state
     state = State(
         X=X,
         y=y,
-        z=jnp.full(resid_shape, offset) if is_binary else None,
+        z=_LazyArray(jnp.full, resid_shape, offset) if is_binary else None,
         offset=offset,
-        resid=jnp.zeros(resid_shape)
+        resid=_LazyArray(jnp.zeros, resid_shape)
         if is_binary
-        else jnp.broadcast_to(y - offset[..., None], resid_shape),
+        else None,  # in this case, resid is created later after y and offset are sharded
         error_cov_inv=add_chains(error_cov_inv),
-        prec_scale=_get_prec_scale(error_scale),
+        prec_scale=error_scale,  # temporarily set to error_scale, fix after sharding
         error_cov_df=error_cov_df,
         error_cov_scale=error_cov_scale,
         forest=Forest(
-            leaf_tree=make_tree(max_depth, jnp.float32, tree_shape + kshape),
-            var_tree=make_tree(
-                max_depth - 1, minimal_unsigned_dtype(p - 1), tree_shape
+            leaf_tree=_LazyArray(
+                jnp.zeros, (*tree_shape, *kshape, tree_size), jnp.float32
             ),
-            split_tree=make_tree(max_depth - 1, max_split.dtype, tree_shape),
-            affluence_tree=(
-                make_tree(max_depth - 1, bool, tree_shape)
-                .at[..., 1]
-                .set(
-                    True
-                    if min_points_per_decision_node is None
-                    else n >= min_points_per_decision_node
-                )
+            var_tree=_LazyArray(
+                jnp.zeros, (*tree_shape, tree_size // 2), minimal_unsigned_dtype(p - 1)
+            ),
+            split_tree=_LazyArray(
+                jnp.zeros, (*tree_shape, tree_size // 2), max_split.dtype
+            ),
+            affluence_tree=_LazyArray(
+                _initial_affluence_tree,
+                (*tree_shape, tree_size // 2),
+                n,
+                min_points_per_decision_node,
             ),
             blocked_vars=_get_blocked_vars(filter_splitless_vars, max_split),
             max_split=max_split,
-            grow_prop_count=jnp.zeros(chain_shape, int),
-            grow_acc_count=jnp.zeros(chain_shape, int),
-            prune_prop_count=jnp.zeros(chain_shape, int),
-            prune_acc_count=jnp.zeros(chain_shape, int),
-            p_nonterminal=p_nonterminal[tree_depths(2**max_depth)],
-            p_propose_grow=p_nonterminal[tree_depths(2 ** (max_depth - 1))],
-            leaf_indices=jnp.ones(
-                (*tree_shape, n), minimal_unsigned_dtype(2**max_depth - 1)
+            grow_prop_count=_LazyArray(jnp.zeros, chain_shape, int),
+            grow_acc_count=_LazyArray(jnp.zeros, chain_shape, int),
+            prune_prop_count=_LazyArray(jnp.zeros, chain_shape, int),
+            prune_acc_count=_LazyArray(jnp.zeros, chain_shape, int),
+            p_nonterminal=p_nonterminal[tree_depths(tree_size)],
+            p_propose_grow=p_nonterminal[tree_depths(tree_size // 2)],
+            leaf_indices=_LazyArray(
+                jnp.ones, (*tree_shape, n), minimal_unsigned_dtype(tree_size - 1)
             ),
             min_points_per_decision_node=_asarray_or_none(min_points_per_decision_node),
             min_points_per_leaf=_asarray_or_none(min_points_per_leaf),
-            log_trans_prior=jnp.zeros((*chain_shape, num_trees))
+            log_trans_prior=_LazyArray(jnp.zeros, (*chain_shape, num_trees))
             if save_ratios
             else None,
-            log_likelihood=jnp.zeros((*chain_shape, num_trees))
+            log_likelihood=_LazyArray(jnp.zeros, (*chain_shape, num_trees))
             if save_ratios
             else None,
             leaf_prior_cov_inv=leaf_prior_cov_inv,
@@ -722,23 +757,62 @@ def init(
         ),
     )
 
+    # delete big input arrays such that they can be deleted as soon as they
+    # are sharded, only those arrays that contain an (n,) sized axis
+    del X, y, error_scale
+
     # move all arrays to the appropriate device
-    return _shard_state(state)
+    state = _shard_state(state)
+
+    # calculate initial resid in the continuous outcome case, such that y and
+    # offset are already sharded if needed
+    if state.resid is None:
+        resid = _LazyArray(_initial_resid, resid_shape, state.y, state.offset)
+        resid = _shard_leaf(resid, 0, -1, state.config.mesh)
+        state = replace(state, resid=resid)
+
+    # calculate prec_scale after sharding to do the calculation on the right
+    # devices
+    if state.prec_scale is not None:
+        prec_scale = _compute_prec_scale(state.prec_scale)
+        state = replace(state, prec_scale=prec_scale)
+
+    # make all types strong to avoid unwanted recompilations
+    return _remove_weak_types(state)
+
+
+def _initial_resid(
+    shape: tuple[int, ...],
+    y: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    offset: Float32[Array, ''] | Float32[Array, ' k'],
+) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
+    """Calculate the initial value for `State.resid` in the continuous outcome case."""
+    return jnp.broadcast_to(y - offset[..., None], shape)
+
+
+def _initial_affluence_tree(
+    shape: tuple[int, ...], n: int, min_points_per_decision_node: int | None
+) -> Array:
+    """Create the initial value of `Forest.affluence_tree`."""
+    return (
+        jnp.zeros(shape, bool)
+        .at[..., 1]
+        .set(
+            True
+            if min_points_per_decision_node is None
+            else n >= min_points_per_decision_node
+        )
+    )
 
 
 @partial(jit, donate_argnums=(0,))
-def _get_prec_scale(
-    error_scale: Float32[Array, ' n'] | None,
-) -> Float32[Array, ' n'] | None:
+def _compute_prec_scale(error_scale: Float32[Array, ' n']) -> Float32[Array, ' n']:
     """Compute 1 / error_scale**2.
 
     This is a separate function to use donate_argnums to avoid intermediate
     copies.
     """
-    if error_scale is None:
-        return None
-    else:
-        return jnp.reciprocal(jnp.square(jnp.asarray(error_scale)))
+    return jnp.reciprocal(jnp.square(error_scale))
 
 
 def _get_blocked_vars(
@@ -827,18 +901,49 @@ def _auto_axes(mesh: Mesh) -> list[str]:
     ]
 
 
+@partial(filter_jit, donate='all')
+# jit and donate because otherwise type conversion would create copies
+def _remove_weak_types(x: PyTree[Array, 'T']) -> PyTree[Array, 'T']:
+    """Make all types strong.
+
+    This is to avoid recompilation in `run_mcmc` or `step`.
+    """
+
+    def remove_weak(x: T) -> T:
+        if isinstance(x, Array) and x.weak_type:
+            return x.astype(x.dtype)
+        else:
+            return x
+
+    return tree.map(remove_weak, x)
+
+
 def _shard_state(state: State) -> State:
-    """Place all fields in the state on the appropriate devices."""
+    """Place all arrays on the appropriate devices, and instantiate lazily defined arrays."""
     mesh = state.config.mesh
+    shard_leaf = partial(_shard_leaf, mesh=mesh)
+    return tree.map(
+        shard_leaf,
+        state,
+        chain_vmap_axes(state),
+        data_vmap_axes(state),
+        is_leaf=lambda x: x is None or isinstance(x, _LazyArray),
+    )
+
+
+def _shard_leaf(
+    x: Array | None | _LazyArray,
+    chain_axis: int | None,
+    data_axis: int | None,
+    mesh: Mesh | None,
+) -> Array | None:
+    """Create `x` if it's lazy and shard it."""
+    if x is None:
+        return None
+
     if mesh is None:
-        return state
-
-    def shard_leaf(
-        x: Array | None, chain_axis: int | None, data_axis: int | None
-    ) -> Array | None:
-        if x is None:
-            return None
-
+        sharding = None
+    else:
         spec = [None] * x.ndim
         if chain_axis is not None and 'chains' in mesh.axis_names:
             spec[chain_axis] = 'chains'
@@ -851,23 +956,34 @@ def _shard_state(state: State) -> State:
             spec.pop()
 
         spec = PartitionSpec(*spec)
-        return device_put(x, NamedSharding(mesh, spec), donate=True)
+        sharding = NamedSharding(mesh, spec)
 
-    return tree.map(
-        shard_leaf,
-        state,
-        chain_vmap_axes(state),
-        data_vmap_axes(state),
-        is_leaf=lambda x: x is None,
-    )
+    if isinstance(x, _LazyArray):
+        x = _concretize_lazy_array(x, sharding)
+    elif sharding is not None:
+        x = device_put(x, sharding, donate=True)
+
+    return x
 
 
-def _all_none_or_not_none(*args):
+@filter_jit
+# jit such that in recent jax versions the shards are created on the right
+# devices immediately instead of being created on the wrong device and then
+# copied
+def _concretize_lazy_array(x: _LazyArray, sharding: NamedSharding | None) -> Array:
+    """Create an array from an abstract spec on the appropriate devices."""
+    x = x()
+    if sharding is not None:
+        x = lax.with_sharding_constraint(x, sharding)
+    return x
+
+
+def _all_none_or_not_none(*args: object) -> bool:
     is_none = [x is None for x in args]
     return all(is_none) or not any(is_none)
 
 
-def _asarray_or_none(x):
+def _asarray_or_none(x: object) -> Array | None:
     if x is None:
         return None
     return jnp.asarray(x)
@@ -1026,7 +1142,7 @@ def get_num_chains(x: PyTree) -> int | None:
     traversal at nodes that define it. Check all values obtained invoking
     `num_chains` are equal, then return it.
     """
-    leaves, _ = flatten(x, is_leaf=lambda x: hasattr(x, 'num_chains'))
+    leaves, _ = tree.flatten(x, is_leaf=lambda x: hasattr(x, 'num_chains'))
     num_chains = [x.num_chains() for x in leaves if hasattr(x, 'num_chains')]
     ref = num_chains[0]
     assert all(c == ref for c in num_chains)
@@ -1037,7 +1153,7 @@ def _chain_axes_with_keys(x: PyTree) -> PyTree[int | None]:
     """Return `chain_vmap_axes(x)` but also set to 0 for random keys."""
     axes = chain_vmap_axes(x)
 
-    def axis_if_key(x, axis):
+    def axis_if_key(x: object, axis: int | None) -> int | None:
         if is_key(x):
             return 0
         else:
@@ -1061,7 +1177,7 @@ def _find_mesh(x: PyTree) -> Mesh | None:
     class MeshFound(Exception):
         pass
 
-    def find_mesh(x: State | Any):
+    def find_mesh(x: object) -> None:
         if isinstance(x, State):
             raise MeshFound(x.config.mesh)
 
@@ -1077,7 +1193,7 @@ def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
     """Split all random keys in `num_chains` keys."""
     mesh = _find_mesh(x)
 
-    def split_key(x):
+    def split_key(x: object) -> object:
         if is_key(x):
             x = random.split(x, num_chains)
             if mesh is not None and 'chains' in mesh.axis_names:
@@ -1093,14 +1209,14 @@ def vmap_chains(
     """Apply vmap on chain axes automatically if the inputs are multichain."""
 
     @wraps(fun)
-    def auto_vmapped_fun(*args, **kwargs) -> T:
+    def auto_vmapped_fun(*args: Any, **kwargs: Any) -> T:
         all_args = args, kwargs
         num_chains = get_num_chains(all_args)
         if num_chains is not None:
             if auto_split_keys:
                 all_args = _split_all_keys(all_args, num_chains)
 
-            def wrapped_fun(args, kwargs):
+            def wrapped_fun(args: tuple[Any, ...], kwargs: dict[str, Any]) -> T:
                 return fun(*args, **kwargs)
 
             mc_in_axes = _chain_axes_with_keys(all_args)

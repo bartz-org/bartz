@@ -26,10 +26,11 @@
 """Define `gen_data` that generates simulated data for testing."""
 
 from dataclasses import replace
+from functools import partial
 
 from equinox import Module, error_if
+from jax import jit, random
 from jax import numpy as jnp
-from jax import random
 from jaxtyping import Array, Bool, Float, Int, Integer, Key
 
 from bartz.jaxext import split
@@ -233,14 +234,14 @@ def generate_outcome(
 
 
 class DGP(Module):
-    """Quadratic multivariate DGP.
+    """Output of `gen_data`.
 
     Parameters
     ----------
     x
         Predictors of shape (p, n), variance 1
     y
-        Noisy outcomes of shape (k, n)
+        Noisy outcomes of shape (k, n) or (n,)
     partition
         Predictor-outcome assignment partition of shape (k, p)
     beta_shared
@@ -279,7 +280,7 @@ class DGP(Module):
 
     # Main outputs
     x: Float[Array, 'p n']
-    y: Float[Array, 'k n']
+    y: Float[Array, 'k n'] | Float[Array, ' n']
 
     # Intermediate results
     partition: Bool[Array, 'k p']
@@ -320,7 +321,17 @@ class DGP(Module):
         return self.sigma2_quad / (self.kurt_x - 1 + self.q)
 
     def split(self, n_train: int | None = None) -> tuple['DGP', 'DGP']:
-        """Split the data into training and test sets."""
+        """Split the data into training and test sets.
+
+        Parameters
+        ----------
+        n_train
+            Number of training observations. If None, split in half.
+
+        Returns
+        -------
+        Two `DGP` object with the train and test splits.
+        """
         if n_train is None:
             n_train = self.x.shape[1] // 2
         assert 0 < n_train < self.x.shape[1], 'n_train must be in (0, n)'
@@ -351,12 +362,13 @@ class DGP(Module):
         return train, test
 
 
+@partial(jit, static_argnames=('n', 'p', 'k'))
 def gen_data(
     key: Key[Array, ''],
     *,
     n: int,
     p: int,
-    k: int,
+    k: int | None = None,
     q: Integer[Array, ''] | int,
     lam: Float[Array, ''] | float,
     sigma2_lin: Float[Array, ''] | float,
@@ -390,19 +402,17 @@ def gen_data(
     -------
     An object with all generated data and parameters.
     """
+    squeeze = k is None
+    if squeeze:
+        k = 1
+
     assert p >= k, 'p must be at least k'
 
     # check q
-    q = jnp.asarray(q)
     q = error_if(q, q % 2 != 0, 'q must be even')
     q = error_if(q, q >= p // k, 'q must be less than p // k')
 
     keys = split(key, 7)
-
-    lam = jnp.asarray(lam)
-    sigma2_lin = jnp.asarray(sigma2_lin)
-    sigma2_quad = jnp.asarray(sigma2_quad)
-    sigma2_eps = jnp.asarray(sigma2_eps)
 
     x = generate_x(keys.pop(), n, p)
     partition = generate_partition(keys.pop(), p, k)
@@ -418,6 +428,8 @@ def gen_data(
     muquad = combine_muquad(muquad_shared, muquad_separate, lam)
     mu = mulin + muquad
     y = generate_outcome(keys.pop(), mu, sigma2_eps)
+    if squeeze:
+        y = y.squeeze(0)
 
     return DGP(
         x=x,

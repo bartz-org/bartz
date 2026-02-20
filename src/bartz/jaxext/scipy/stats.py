@@ -1,6 +1,6 @@
 # bartz/src/bartz/jaxext/scipy/stats.py
 #
-# Copyright (c) 2025, The Bartz Contributors
+# Copyright (c) 2025-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -24,6 +24,8 @@
 
 """Mockup of the :external:py:mod:`scipy.stats` module."""
 
+from jaxtyping import Array, Float
+
 from bartz.jaxext.scipy.special import gammainccinv
 
 
@@ -31,6 +33,6 @@ class invgamma:
     """Class that represents the distribution InvGamma(a, 1)."""
 
     @staticmethod
-    def ppf(q, a):
+    def ppf(q: Float[Array, '*'], a: Float[Array, '*']) -> Float[Array, '*']:
         """Percentile point function."""
         return 1 / gammainccinv(a, q)

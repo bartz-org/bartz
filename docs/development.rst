@@ -1,6 +1,6 @@
 .. bartz/docs/development.rst
 ..
-.. Copyright (c) 2024-2025, The Bartz Contributors
+.. Copyright (c) 2024-2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -41,16 +41,33 @@ Install `R <https://cran.r-project.org>`_ and `uv <https://docs.astral.sh/uv/get
 
     make setup
 
-to set up the Python and R environments.
+to set up the Python and R environments. (Note: at the time of writing, the `R installation instructions for ubuntu <https://cran.r-project.org/bin/linux/ubuntu>`_ miss a :code:`sudo apt install r-base-dev` at the end.)
 
 The Python environment is managed by uv. To run commands that involve the Python installation, do :literal:`uv run <command>`. For example, to start an IPython shell, do :literal:`uv run ipython`. Alternatively, do :literal:`source .venv/bin/activate` to activate the virtual environment in the current shell.
 
 The R environment is automatically active when you use :literal:`R` in the project directory.
 
+We don't support using conda's R, though it might work.
+
+Contributing
+------------
+
+To contribute code changes to the main repository, create a `pull request <https://github.com/bartz-org/bartz/pulls>`_ from your fork to the main repo.
+
 Pre-defined commands
 --------------------
 
-Development commands are defined in a makefile. Run :literal:`make` without arguments to list the targets.
+Development commands are defined in a makefile. Run :literal:`make` without arguments to list the targets. All commands that simply consist in invoking a tool with the right command line arguments use the :literal:`ARGS` variable to add extra arguments, for example:
+
+.. code-block:: shell
+
+    make tests ARGS='-k test_pigs_fly'
+
+will invoke something like
+
+.. code-block:: shell
+
+    uv run pytest --foo=1 --bar=128 --etc-etc -k test_pigs_fly
 
 Documentation
 -------------
@@ -72,6 +89,40 @@ To debug the documentation build, do
 .. code-block:: shell
 
     make docs SPHINXOPTS='--fresh-env --pdb'
+
+Unit tests
+----------
+
+The typical workflow to debug new changes is to first run all tests with
+
+.. code-block:: shell
+
+    make tests
+
+Then, if some tests fail, use :literal:`pytest` directly to run and debug only the relevant tests, e.g., with
+
+.. code-block:: shell
+
+    uv run pytest --lf --sw --pdb
+
+Where :code:`--lf` selects only the tests that failed, :code:`--sw` stops on the first failed test, starting again from it on the next run, and :code:`--pdb` opens the python debugger at the point where the test failed. Another useful option is :code:`-k <pattern>`, which selects only tests whose name matches <pattern>.
+
+Debugging dependencies
+----------------------
+
+To debug tests that fail with old versions of dependencies, it's convenient to piggyback on the predefined make target using :code:`ARGS`:
+
+.. code-block:: shell
+
+    make tests-old ARGS='-n0 -k test_pigs_fly'
+
+Where :code:`-n0` disables test parallelization.
+
+For more fine-grained control, it's useful to invoke directly :code:`uv` with the :code:`--with` option, e.g., the following command will start an IPython shell equipped with specific versions of python and jax:
+
+.. code-block:: shell
+
+    uv run --with='jax<0.7,jaxlib<0.7' --isolated --python=3.11 --dev python -m IPython
 
 Benchmarks
 ----------

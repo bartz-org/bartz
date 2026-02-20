@@ -25,15 +25,15 @@
 """Main high-level interface of the package."""
 
 import math
-from collections.abc import Sequence
-from functools import cached_property
+from collections.abc import Mapping, Sequence
+from functools import cached_property, partial
+from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypedDict
 
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field
-from jax import Device, device_put, jit, make_mesh
-from jax.lax import collapse
+from jax import Device, device_put, jit, lax, make_mesh
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh
 from jaxtyping import (
@@ -54,7 +54,7 @@ from bartz import mcmcloop, mcmcstep, prepcovars
 from bartz.jaxext import is_key
 from bartz.jaxext.scipy.special import ndtri
 from bartz.jaxext.scipy.stats import invgamma
-from bartz.mcmcloop import compute_varcount, evaluate_trace, run_mcmc
+from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
 from bartz.mcmcstep import make_p_nonterminal
 from bartz.mcmcstep._state import get_num_chains
 
@@ -194,9 +194,8 @@ class Bart(Module):
         datapoints. Note: `w` is ignored in the automatic determination of
         `sigest`, so either the weights should be O(1), or `sigest` should be
         specified by the user.
-    ntree
-        The number of trees used to represent the latent mean function. By
-        default 200 for continuous regression and 50 for binary regression.
+    num_trees
+        The number of trees used to represent the latent mean function.
     numcut
         If `usequants` is `False`: the exact number of cutpoints used to bin the
         predictors, ranging between the minimum and maximum observed values
@@ -221,20 +220,18 @@ class Bart(Module):
         The number of initial MCMC samples to discard as burn-in. This number
         of samples is discarded from each chain.
     keepevery
-        The thinning factor for the MCMC samples, after burn-in. By default, 1
-        for continuous regression and 10 for binary regression.
+        The thinning factor for the MCMC samples, after burn-in.
     printevery
         The number of iterations (including thinned-away ones) between each log
         line. Set to `None` to disable logging. ^C interrupts the MCMC only
         every `printevery` iterations, so with logging disabled it's impossible
         to kill the MCMC conveniently.
     num_chains
-        The number of independent Markov chains to run. By default only one
-        chain is run.
+        The number of independent Markov chains to run.
 
-        The difference between not specifying `num_chains` and setting it to 1
-        is that in the latter case in the object attributes and some methods
-        there will be an explicit chain axis of size 1.
+        The difference between ``num_chains=None`` and ``num_chains=1`` is that
+        in the latter case in the object attributes and some methods there will
+        be an explicit chain axis of size 1.
     num_chain_devices
         The number of devices to spread the chains across. Must be a divisor of
         `num_chains`. Each device will run a fraction of the chains.
@@ -309,21 +306,21 @@ class Bart(Module):
         tau_num: FloatLike | None = None,
         offset: FloatLike | None = None,
         w: Float[Array, ' n'] | Series | None = None,
-        ntree: int | None = None,
-        numcut: int = 100,
+        num_trees: int = 200,
+        numcut: int = 255,
         ndpost: int = 1000,
-        nskip: int = 100,
-        keepevery: int | None = None,
+        nskip: int = 1000,
+        keepevery: int = 1,
         printevery: int | None = 100,
-        num_chains: int | None = None,
+        num_chains: int | None = 4,
         num_chain_devices: int | None = None,
         num_data_devices: int | None = None,
         devices: Device | Sequence[Device] | None = None,
         seed: int | Key[Array, ''] = 0,
         maxdepth: int = 6,
-        init_kw: dict | None = None,
-        run_mcmc_kw: dict | None = None,
-    ):
+        init_kw: Mapping = MappingProxyType({}),
+        run_mcmc_kw: Mapping = MappingProxyType({}),
+    ) -> None:
         # check data and put it in the right format
         x_train, x_train_fmt = self._process_predictor_input(x_train)
         y_train = self._process_response_input(y_train)
@@ -336,12 +333,6 @@ class Bart(Module):
         self._check_type_settings(y_train, type, w)
         # from here onwards, the type is determined by y_train.dtype == bool
 
-        # set defaults that depend on type of regression
-        if ntree is None:
-            ntree = 50 if y_train.dtype == bool else 200
-        if keepevery is None:
-            keepevery = 10 if y_train.dtype == bool else 1
-
         # process sparsity settings
         theta, a, b, rho = self._process_sparsity_settings(
             x_train, sparse, theta, a, b, rho
@@ -349,7 +340,7 @@ class Bart(Module):
 
         # process "standardization" settings
         offset = self._process_offset_settings(y_train, offset)
-        sigma_mu = self._process_leaf_sdev_settings(y_train, k, ntree, tau_num)
+        sigma_mu = self._process_leaf_sdev_settings(y_train, k, num_trees, tau_num)
         lamda, sigest = self._process_error_variance_settings(
             x_train, y_train, sigest, sigdf, sigquant, lamda
         )
@@ -371,7 +362,7 @@ class Bart(Module):
             power,
             base,
             maxdepth,
-            ntree,
+            num_trees,
             init_kw,
             rm_const,
             theta,
@@ -386,18 +377,19 @@ class Bart(Module):
             sparse,
             nskip,
         )
-        final_state, burnin_trace, main_trace = self._run_mcmc(
+        result = self._run_mcmc(
             initial_state, ndpost, nskip, keepevery, printevery, seed, run_mcmc_kw
         )
 
         # set public attributes
-        self.offset = final_state.offset  # from the state because of buffer donation
+        # set offset from the state because of buffer donation
+        self.offset = result.final_state.offset
         self.sigest = sigest
 
         # set private attributes
-        self._main_trace = main_trace
-        self._burnin_trace = burnin_trace
-        self._mcmc_state = final_state
+        self._main_trace = result.main_trace
+        self._burnin_trace = result.burnin_trace
+        self._mcmc_state = result.final_state
         self._splits = splits
         self._x_train_fmt = x_train_fmt
 
@@ -406,13 +398,18 @@ class Bart(Module):
             self.yhat_test = self.predict(x_test)
 
     @property
-    def ndpost(self):
+    def ndpost(self) -> int:
         """The total number of posterior samples after burn-in across all chains.
 
         May be larger than the initialization argument `ndpost` if it was not
         divisible by the number of chains.
         """
         return self._main_trace.grow_prop_count.size
+
+    @property
+    def num_trees(self) -> int:
+        """Return the number of trees used in the model."""
+        return self._mcmc_state.forest.split_tree.shape[-2]
 
     @cached_property
     def prob_test(self) -> Float32[Array, 'ndpost m'] | None:
@@ -491,9 +488,7 @@ class Bart(Module):
     def varcount(self) -> Int32[Array, 'ndpost p']:
         """Histogram of predictor usage for decision rules in the trees."""
         p = self._mcmc_state.forest.max_split.size
-        varcount: Int32[Array, '*chains samples p']
-        varcount = compute_varcount(p, self._main_trace)
-        return collapse(varcount, 0, -1)
+        return varcount(p, self._main_trace)
 
     @cached_property
     def varcount_mean(self) -> Float32[Array, ' p']:
@@ -577,7 +572,9 @@ class Bart(Module):
         return self._predict(x_test)
 
     @staticmethod
-    def _process_predictor_input(x) -> tuple[Shaped[Array, 'p n'], Any]:
+    def _process_predictor_input(
+        x: Real[Any, 'p n'] | DataFrame,
+    ) -> tuple[Shaped[Array, 'p n'], Any]:
         if hasattr(x, 'columns'):
             fmt = dict(kind='dataframe', columns=x.columns)
             x = x.to_numpy().T
@@ -588,7 +585,7 @@ class Bart(Module):
         return x, fmt
 
     @staticmethod
-    def _process_response_input(y) -> Shaped[Array, ' n']:
+    def _process_response_input(y: Shaped[Array, ' n'] | Series) -> Shaped[Array, ' n']:
         if hasattr(y, 'to_numpy'):
             y = y.to_numpy()
         y = jnp.asarray(y)
@@ -596,13 +593,19 @@ class Bart(Module):
         return y
 
     @staticmethod
-    def _check_same_length(x1, x2):
+    def _check_same_length(x1: Array, x2: Array) -> None:
         get_length = lambda x: x.shape[-1]
         assert get_length(x1) == get_length(x2)
 
     @classmethod
     def _process_error_variance_settings(
-        cls, x_train, y_train, sigest, sigdf, sigquant, lamda
+        cls,
+        x_train: Shaped[Array, 'p n'],
+        y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
+        sigest: FloatLike | None,
+        sigdf: FloatLike,
+        sigquant: FloatLike,
+        lamda: FloatLike | None,
     ) -> tuple[Float32[Array, ''] | None, ...]:
         """Return (lamda, sigest)."""
         if y_train.dtype == bool:
@@ -636,7 +639,7 @@ class Bart(Module):
     @jit
     def _linear_regression(
         x_train: Shaped[Array, 'p n'], y_train: Float32[Array, ' n']
-    ):
+    ) -> Float32[Array, '']:
         """Return the error variance estimated with OLS with intercept."""
         x_centered = x_train.T - x_train.mean(axis=1)
         y_centered = y_train - y_train.mean()
@@ -647,7 +650,11 @@ class Bart(Module):
         return chisq / dof
 
     @staticmethod
-    def _check_type_settings(y_train, type, w):  # noqa: A002
+    def _check_type_settings(
+        y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
+        type: str,  # noqa: A002
+        w: Float[Array, ' n'] | None,
+    ) -> None:
         match type:
             case 'wbart':
                 if y_train.dtype != jnp.float32:
@@ -717,10 +724,10 @@ class Bart(Module):
     @staticmethod
     def _process_leaf_sdev_settings(
         y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
-        k: float,
-        ntree: int,
+        k: FloatLike,
+        num_trees: int,
         tau_num: FloatLike | None,
-    ):
+    ) -> FloatLike:
         """Return sigma_mu."""
         if tau_num is None:
             if y_train.dtype == bool:
@@ -730,7 +737,7 @@ class Bart(Module):
             else:
                 tau_num = (y_train.max() - y_train.min()) / 2
 
-        return tau_num / (k * math.sqrt(ntree))
+        return tau_num / (k * math.sqrt(num_trees))
 
     @staticmethod
     def _determine_splits(
@@ -768,8 +775,8 @@ class Bart(Module):
         power: FloatLike,
         base: FloatLike,
         maxdepth: int,
-        ntree: int,
-        init_kw: dict[str, Any] | None,
+        num_trees: int,
+        init_kw: Mapping[str, Any],
         rm_const: bool,
         theta: FloatLike | None,
         a: FloatLike | None,
@@ -782,7 +789,7 @@ class Bart(Module):
         devices: Device | Sequence[Device] | None,
         sparse: bool,
         nskip: int,
-    ):
+    ) -> mcmcstep.State:
         p_nonterminal = make_p_nonterminal(maxdepth, base, power)
 
         if y_train.dtype == bool:
@@ -806,13 +813,12 @@ class Bart(Module):
             offset=offset,
             error_scale=w,
             max_split=max_split,
-            num_trees=ntree,
+            num_trees=num_trees,
             p_nonterminal=p_nonterminal,
             leaf_prior_cov_inv=jnp.reciprocal(jnp.square(sigma_mu)),
             error_cov_df=error_cov_df,
             error_cov_scale=error_cov_scale,
             min_points_per_decision_node=10,
-            min_points_per_leaf=5,
             log_s=process_varprob(varprob, max_split),
             theta=theta,
             a=a,
@@ -826,8 +832,7 @@ class Bart(Module):
             n_empty = jnp.sum(max_split == 0).item()
             kw.update(filter_splitless_vars=n_empty)
 
-        if init_kw is not None:
-            kw.update(init_kw)
+        kw.update(init_kw)
 
         state = mcmcstep.init(**kw)
 
@@ -846,8 +851,8 @@ class Bart(Module):
         keepevery: int,
         printevery: int | None,
         seed: int | Integer[Array, ''] | Key[Array, ''],
-        run_mcmc_kw: dict | None,
-    ) -> tuple[mcmcstep.State, mcmcloop.BurninTrace, mcmcloop.MainTrace]:
+        run_mcmc_kw: Mapping,
+    ) -> RunMCMCResult:
         # prepare random generator seed
         if is_key(seed):
             key = jnp.copy(seed)
@@ -869,15 +874,32 @@ class Bart(Module):
                 report_every=printevery,
             )
         )
-        if run_mcmc_kw is not None:
-            kw.update(run_mcmc_kw)
+        kw.update(run_mcmc_kw)
 
         return run_mcmc(key, mcmc_state, n_save, **kw)
 
     def _predict(self, x: UInt[Array, 'p m']) -> Float32[Array, 'ndpost m']:
         """Evaluate trees on already quantized `x`."""
-        out = evaluate_trace(x, self._main_trace)
-        return collapse(out, 0, -1)
+        return predict(x, self._main_trace)
+
+
+@partial(jit, static_argnames='p')
+# this is jitted such that lax.collapse below does not create a copy
+def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
+    """Histogram of predictor usage for decision rules in the trees, squashing chains."""
+    varcount: Int32[Array, '*chains samples p']
+    varcount = compute_varcount(p, trace)
+    return lax.collapse(varcount, 0, -1)
+
+
+@jit
+# this is jitted such that lax.collapse below does not create a copy
+def predict(
+    x: UInt[Array, 'p m'], trace: mcmcloop.MainTrace
+) -> Float32[Array, 'ndpost m']:
+    """Evaluate trees on already quantized `x`, and squash chains."""
+    out = evaluate_trace(x, trace)
+    return lax.collapse(out, 0, -1)
 
 
 class DeviceKwArgs(TypedDict):

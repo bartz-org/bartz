@@ -223,7 +223,7 @@ jobs:
           version: ${{ env.UV_VERSION }}
 
       - name: Get coverage files
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage.*
           merge-multiple: true
@@ -275,13 +275,13 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Get documentation and benchmarks
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: docs
           path: _site
 
       - name: Get coverage report
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: covreport
           path: _site/coverage

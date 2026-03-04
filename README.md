@@ -5,7 +5,7 @@
 
 An implementation of Bayesian Additive Regression Trees (BART) in JAX.
 
-If you don't know what BART is, but know XGBoost, consider BART as a sort of Bayesian XGBoost. bartz makes BART run as fast as XGBoost.
+If you don't know what BART is, but know XGBoost, consider BART as a sort of Bayesian XGBoost. bartz makes BART run fast enough to be used in place of XGBoost/lightgbm/etc. even on large datasets.
 
 BART is a nonparametric Bayesian regression technique. Given training predictors $X$ and responses $y$, BART finds a function to predict $y$ given $X$. The result of the inference is a sample of possible functions, representing the uncertainty over the determination of the function.
 

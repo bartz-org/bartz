@@ -689,7 +689,7 @@ def test_predict(kw: dict[str, Any]) -> None:
     """Check that the public BART.gbart.predict method works."""
     bart = mc_gbart(**kw)
     yhat_train = bart.predict(kw['x_train'])
-    assert_close_matrices(bart.yhat_train, yhat_train, atol=1e-6)
+    assert_close_matrices(bart.yhat_train, yhat_train, rtol=1e-6)
     # the need for this approximate comparison is surprising; exact comparison
     # fails on cpu ci on linux
 

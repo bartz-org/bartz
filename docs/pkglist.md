@@ -1,7 +1,7 @@
 <!--
 bartz/docs/pkglist.md
 
-Copyright (c) 2024-2025, The Bartz Contributors
+Copyright (c) 2024-2026, The Bartz Contributors
 
 This file is part of bartz.
 
@@ -60,3 +60,4 @@ SOFTWARE.
 - [HE-BART](https://github.com/brunaw/HE-BART)
 - [pgbart](https://github.com/balajiln/pgbart) Particle Gibbs BART
 - [skewBART](https://github.com/Seungha-Um/skewBART) multivariate skewed responses
+- [missBART](https://github.com/yongchengoh/missBART) BART for missing outcome data

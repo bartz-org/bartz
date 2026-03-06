@@ -61,3 +61,5 @@ SOFTWARE.
 - [pgbart](https://github.com/balajiln/pgbart) Particle Gibbs BART
 - [skewBART](https://github.com/Seungha-Um/skewBART) multivariate skewed responses
 - [missBART](https://github.com/yongchengoh/missBART) BART for missing outcome data
+- [mvbcf](https://github.com/Nathan-McJames/mvbcf) Multivariate BCF
+- [rBART](https://github.com/andrewcparnell/rBART) Slow version of BART in R

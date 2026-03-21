@@ -271,19 +271,21 @@ class Bart(Module):
     _splits: Real[Array, 'p max_num_splits']
     _x_train_fmt: Any = field(static=True)
 
-    offset: Float32[Array, '']
+    offset: Float32[Array, ''] | Float32[Array, ' k']
     """The prior mean of the latent mean function."""
 
     sigest: Float32[Array, ''] | None = None
     """The estimated standard deviation of the error used to set `lamda`."""
 
-    yhat_test: Float32[Array, 'ndpost m'] | None = None
+    yhat_test: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'] | None = None
     """The conditional posterior mean at `x_test` for each MCMC iteration."""
 
     def __init__(
         self,
         x_train: Real[Array, 'p n'] | DataFrame,
-        y_train: Bool[Array, ' n'] | Float32[Array, ' n'] | Series,
+        y_train: (
+            Bool[Array, ' n'] | Float32[Array, ' n'] | Float32[Array, 'k n'] | Series
+        ),
         *,
         x_test: Real[Array, 'p m'] | DataFrame | None = None,
         type: Literal['wbart', 'pbart'] = 'wbart',  # noqa: A002
@@ -325,12 +327,14 @@ class Bart(Module):
         x_train, x_train_fmt = self._process_predictor_input(x_train)
         y_train = self._process_response_input(y_train)
         self._check_same_length(x_train, y_train)
+        self._validate_compatibility(y_train, w, type)
         if w is not None:
             w = self._process_response_input(w)
             self._check_same_length(x_train, w)
 
         # check data types are correct for continuous/binary regression
-        self._check_type_settings(y_train, type, w)
+        if y_train.ndim == 1:
+            self._check_type_settings(y_train, type, w)
         # from here onwards, the type is determined by y_train.dtype == bool
 
         # process sparsity settings
@@ -341,8 +345,12 @@ class Bart(Module):
         # process "standardization" settings
         offset = self._process_offset_settings(y_train, offset)
         sigma_mu = self._process_leaf_sdev_settings(y_train, k, num_trees, tau_num)
-        lamda, sigest = self._process_error_variance_settings(
-            x_train, y_train, sigest, sigdf, sigquant, lamda
+
+        # configure priors (UV vs MV)
+        error_cov_df, error_cov_scale, leaf_prior_cov_inv, sigest = (
+            self._configure_priors(
+                x_train, y_train, sigma_mu, sigest, sigdf, sigquant, lamda
+            )
         )
 
         # determine splits
@@ -356,9 +364,9 @@ class Bart(Module):
             offset,
             w,
             max_split,
-            lamda,
-            sigma_mu,
-            sigdf,
+            leaf_prior_cov_inv,
+            error_cov_df,
+            error_cov_scale,
             power,
             base,
             maxdepth,
@@ -384,7 +392,7 @@ class Bart(Module):
         # set public attributes
         # set offset from the state because of buffer donation
         self.offset = result.final_state.offset
-        self.sigest = sigest
+        self.sigest = sigest if y_train.ndim == 1 else None
 
         # set private attributes
         self._main_trace = result.main_trace
@@ -451,10 +459,16 @@ class Bart(Module):
         | Float32[Array, 'nskip+ndpost/mc_cores mc_cores']
         | None
     ):
-        """The standard deviation of the error, including burn-in samples."""
+        """The standard deviation of the error, including burn-in samples.
+
+        Returns `None` for binary regression or multivariate regression.
+        """
         if self._burnin_trace.error_cov_inv is None:
             return None
         assert self._main_trace.error_cov_inv is not None
+        # not meaningful for MV (error_cov_inv is a matrix)
+        if self._mcmc_state.y.ndim == 2:
+            return None
         return jnp.sqrt(
             jnp.reciprocal(
                 jnp.concatenate(
@@ -470,12 +484,17 @@ class Bart(Module):
 
     @cached_property
     def sigma_(self) -> Float32[Array, 'ndpost'] | None:
-        """The standard deviation of the error, only over the post-burnin samples and flattened."""
+        """The standard deviation of the error, only over the post-burnin samples and flattened.
+
+        Returns `None` for binary regression or multivariate regression.
+        """
         error_cov_inv = self._main_trace.error_cov_inv
         if error_cov_inv is None:
             return None
-        else:
-            return jnp.sqrt(jnp.reciprocal(error_cov_inv)).reshape(-1)
+        # not meaningful for MV (error_cov_inv is a matrix)
+        if self._mcmc_state.y.ndim == 2:
+            return None
+        return jnp.sqrt(jnp.reciprocal(error_cov_inv)).reshape(-1)
 
     @cached_property
     def sigma_mean(self) -> Float32[Array, ''] | None:
@@ -527,13 +546,13 @@ class Bart(Module):
             return self.yhat_test.mean(axis=0)
 
     @cached_property
-    def yhat_train(self) -> Float32[Array, 'ndpost n']:
+    def yhat_train(self) -> Float32[Array, 'ndpost n'] | Float32[Array, 'ndpost k n']:
         """The conditional posterior mean at `x_train` for each MCMC iteration."""
         x_train = self._mcmc_state.X
         return self._predict(x_train)
 
     @cached_property
-    def yhat_train_mean(self) -> Float32[Array, ' n'] | None:
+    def yhat_train_mean(self) -> Float32[Array, ' n'] | Float32[Array, 'k n'] | None:
         """The marginal posterior mean at `x_train`.
 
         Not defined with binary regression because it's error-prone, typically
@@ -546,7 +565,7 @@ class Bart(Module):
 
     def predict(
         self, x_test: Real[Array, 'p m'] | DataFrame
-    ) -> Float32[Array, 'ndpost m']:
+    ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
         """
         Compute the posterior mean at `x_test` for each MCMC iteration.
 
@@ -585,17 +604,134 @@ class Bart(Module):
         return x, fmt
 
     @staticmethod
-    def _process_response_input(y: Shaped[Array, ' n'] | Series) -> Shaped[Array, ' n']:
+    def _process_response_input(
+        y: Shaped[Array, ' n'] | Shaped[Array, 'k n'] | Series,
+    ) -> Shaped[Array, ' n'] | Shaped[Array, 'k n']:
         if hasattr(y, 'to_numpy'):
             y = y.to_numpy()
         y = jnp.asarray(y)
-        assert y.ndim == 1
-        return y
+        if y.ndim == 1:
+            return y
+        elif y.ndim == 2:
+            if y.dtype == bool:
+                msg = 'Multivariate binary regression is not supported.'
+                raise ValueError(msg)
+            return y.astype(jnp.float32)
+        else:
+            msg = f'y_train must be 1D (n,) or 2D (k, n). Got ndim={y.ndim}.'
+            raise ValueError(msg)
 
     @staticmethod
     def _check_same_length(x1: Array, x2: Array) -> None:
         get_length = lambda x: x.shape[-1]
         assert get_length(x1) == get_length(x2)
+
+    @staticmethod
+    def _validate_compatibility(
+        y_train: Shaped[Array, ' n'] | Shaped[Array, 'k n'],
+        w: Float[Array, ' n'] | Series | None,
+        type: str,  # noqa: A002
+    ) -> None:
+        """Validate inputs based on regression type (univariate/multivariate)."""
+        if y_train.ndim == 2:
+            if w is not None:
+                msg = "Weights 'w' are not supported for multivariate regression."
+                raise ValueError(msg)
+            if type != 'wbart':
+                msg = "Multivariate regression requires type='wbart'."
+                raise ValueError(msg)
+            if y_train.dtype == bool:
+                msg = 'Multivariate binary regression is not supported.'
+                raise TypeError(msg)
+
+    @classmethod
+    def _configure_priors(
+        cls,
+        x_train: Shaped[Array, 'p n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
+        sigma_mu: FloatLike,
+        sigest: FloatLike | None,
+        sigdf: FloatLike,
+        sigquant: FloatLike,
+        lamda: FloatLike | None,
+    ) -> tuple:
+        """Return (error_cov_df, error_cov_scale, leaf_prior_cov_inv, sigest)."""
+        if y_train.ndim == 2:
+            error_cov_df, error_cov_scale = cls._process_error_variance_settings_mv(
+                x_train, y_train, sigest, sigdf, sigquant, lamda
+            )
+            leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu)) * jnp.eye(
+                y_train.shape[0], dtype=jnp.float32
+            )
+            return error_cov_df, error_cov_scale, leaf_prior_cov_inv, None
+        else:
+            lamda_val, sigest_val = cls._process_error_variance_settings(
+                x_train, y_train, sigest, sigdf, sigquant, lamda
+            )
+            leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu))
+
+            if y_train.dtype == bool:
+                error_cov_df = None
+                error_cov_scale = None
+            else:
+                # inverse gamma prior: alpha = df / 2, beta = scale / 2
+                error_cov_df = sigdf
+                error_cov_scale = lamda_val * sigdf
+
+            return error_cov_df, error_cov_scale, leaf_prior_cov_inv, sigest_val
+
+    @classmethod
+    def _process_error_variance_settings_mv(
+        cls,
+        x_train: Real[Array, 'p n'],
+        y_train: Float32[Array, 'k n'],
+        sigest: FloatLike | None,
+        sigdf: FloatLike,
+        sigquant: FloatLike,
+        lamda: FloatLike | None,
+    ) -> tuple[Float32[Array, ''], Float32[Array, 'k k']]:
+        """Return (error_cov_df, error_cov_scale) for the Inverse-Wishart prior."""
+        p = x_train.shape[0]
+        k, n = y_train.shape
+
+        # df of IW prior
+        t0 = float(sigdf + k - 1)
+        if t0 <= k - 1:
+            msg = f'Degrees of freedom must be > {k - 1}, got {t0}'
+            raise ValueError(msg)
+
+        # per-component error variance estimation (diagonal scale)
+        if lamda is not None:
+            lamda_vec = jnp.atleast_1d(jnp.asarray(lamda, dtype=jnp.float32))
+            if lamda_vec.size == 1:
+                lamda_vec = jnp.broadcast_to(lamda_vec, (k,))
+        else:
+            if sigest is not None:
+                sigest_arr = jnp.asarray(sigest, dtype=jnp.float32)
+                sigest2_vec = jnp.square(jnp.atleast_1d(sigest_arr))
+                if sigest2_vec.size == 1:
+                    sigest2_vec = jnp.broadcast_to(sigest2_vec, (k,))
+            elif n < 2:
+                sigest2_vec = jnp.ones(k, dtype=jnp.float32)
+            elif n <= p:
+                sigest2_vec = jnp.var(y_train, axis=1)
+            else:
+                # OLS with implicit intercept via centering
+                Xc = x_train.T - x_train.mean(axis=1, keepdims=True).T
+                Yc = y_train.T - y_train.mean(axis=1, keepdims=True).T
+                coef, _, rank, _ = jnp.linalg.lstsq(Xc, Yc, rcond=None)
+                R = Yc - Xc @ coef
+                chisq_vec = jnp.sum(jnp.square(R), axis=0)
+                dof = jnp.maximum(1, n - rank)
+                sigest2_vec = chisq_vec / dof
+
+            alpha = sigdf / 2.0
+            invchi2 = invgamma.ppf(sigquant, alpha) / 2.0
+            invchi2rid = invchi2 * sigdf
+            lamda_vec = jnp.atleast_1d(sigest2_vec / invchi2rid).astype(jnp.float32)
+
+        s0 = jnp.diag(sigdf * lamda_vec).astype(jnp.float32)
+        return jnp.asarray(t0, dtype=jnp.float32), s0
 
     @classmethod
     def _process_error_variance_settings(
@@ -703,12 +839,22 @@ class Bart(Module):
 
     @staticmethod
     def _process_offset_settings(
-        y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
         offset: float | Float32[Any, ''] | None,
-    ) -> Float32[Array, '']:
+    ) -> Float32[Array, ''] | Float32[Array, ' k']:
         """Return offset."""
         if offset is not None:
-            return jnp.asarray(offset)
+            off = jnp.asarray(offset, dtype=jnp.float32)
+            if y_train.ndim == 2:
+                k = y_train.shape[0]
+                if off.ndim == 0:
+                    return jnp.broadcast_to(off, (k,))
+                if off.shape != (k,):
+                    msg = f'Expected offset shape ({k},), got {off.shape}'
+                    raise ValueError(msg)
+            return off
+        if y_train.ndim == 2:
+            return y_train.mean(axis=1)
         elif y_train.size < 1:
             return jnp.array(0.0)
         else:
@@ -723,7 +869,7 @@ class Bart(Module):
 
     @staticmethod
     def _process_leaf_sdev_settings(
-        y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
         k: FloatLike,
         num_trees: int,
         tau_num: FloatLike | None,
@@ -732,6 +878,11 @@ class Bart(Module):
         if tau_num is None:
             if y_train.dtype == bool:
                 tau_num = 3.0
+            elif y_train.ndim == 2:
+                if y_train.shape[1] < 2:
+                    tau_num = jnp.ones(y_train.shape[0])
+                else:
+                    tau_num = (y_train.max(axis=1) - y_train.min(axis=1)) / 2
             elif y_train.size < 2:
                 tau_num = 1.0
             else:
@@ -765,13 +916,13 @@ class Bart(Module):
     @staticmethod
     def _setup_mcmc(
         x_train: Real[Array, 'p n'],
-        y_train: Float32[Array, ' n'] | Bool[Array, ' n'],
-        offset: Float32[Array, ''],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
+        offset: Float32[Array, ''] | Float32[Array, ' k'],
         w: Float[Array, ' n'] | None,
         max_split: UInt[Array, ' p'],
-        lamda: Float32[Array, ''] | None,
-        sigma_mu: FloatLike,
-        sigdf: FloatLike,
+        leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+        error_cov_df: FloatLike | None,
+        error_cov_scale: FloatLike | Float32[Array, 'k k'] | None,
         power: FloatLike,
         base: FloatLike,
         maxdepth: int,
@@ -792,15 +943,6 @@ class Bart(Module):
     ) -> mcmcstep.State:
         p_nonterminal = make_p_nonterminal(maxdepth, base, power)
 
-        if y_train.dtype == bool:
-            error_cov_df = None
-            error_cov_scale = None
-        else:
-            assert lamda is not None
-            # inverse gamma prior: alpha = df / 2, beta = scale / 2
-            error_cov_df = sigdf
-            error_cov_scale = lamda * sigdf
-
         # process device settings
         device_kw, device = process_device_settings(
             y_train, num_chains, num_chain_devices, num_data_devices, devices
@@ -815,7 +957,7 @@ class Bart(Module):
             max_split=max_split,
             num_trees=num_trees,
             p_nonterminal=p_nonterminal,
-            leaf_prior_cov_inv=jnp.reciprocal(jnp.square(sigma_mu)),
+            leaf_prior_cov_inv=leaf_prior_cov_inv,
             error_cov_df=error_cov_df,
             error_cov_scale=error_cov_scale,
             min_points_per_decision_node=10,
@@ -878,7 +1020,9 @@ class Bart(Module):
 
         return run_mcmc(key, mcmc_state, n_save, **kw)
 
-    def _predict(self, x: UInt[Array, 'p m']) -> Float32[Array, 'ndpost m']:
+    def _predict(
+        self, x: UInt[Array, 'p m']
+    ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
         """Evaluate trees on already quantized `x`."""
         return predict(x, self._main_trace)
 
@@ -896,10 +1040,15 @@ def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
 # this is jitted such that lax.collapse below does not create a copy
 def predict(
     x: UInt[Array, 'p m'], trace: mcmcloop.MainTrace
-) -> Float32[Array, 'ndpost m']:
+) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
     """Evaluate trees on already quantized `x`, and squash chains."""
     out = evaluate_trace(x, trace)
-    return lax.collapse(out, 0, -1)
+    # For MV, out has shape (*trace_shape, k, n); for UV, (*trace_shape, n).
+    # We must collapse only the chain/sample dims, not k.
+    # Detect MV: leaf_tree has an extra axis compared to split_tree.
+    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+    end = -2 if is_mv else -1
+    return lax.collapse(out, 0, end)
 
 
 class DeviceKwArgs(TypedDict):

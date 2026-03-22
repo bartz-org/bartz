@@ -524,6 +524,67 @@ class TestMVBartInterface:
         y_pred = model.predict(X_test)
         assert y_pred.shape == (model.ndpost, k_dim, n_test)
 
+    def test_mv_rejects_binary(self) -> None:
+        """MV + binary should raise."""
+        X = jnp.ones((2, 5))
+        y = jnp.array(
+            [[True, False, True, False, True], [False, True, False, True, False]]
+        )
+        with pytest.raises(ValueError, match='multivariate'):
+            Bart(x_train=X, y_train=y, num_trees=2, ndpost=4, nskip=2, num_chains=None)
+
+    def test_mv_rejects_weights(self) -> None:
+        """MV + weights should raise."""
+        X = jnp.ones((2, 5))
+        y = jnp.ones((3, 5))
+        w = jnp.ones(5)
+        with pytest.raises(ValueError, match='weights'):
+            Bart(
+                x_train=X,
+                y_train=y,
+                w=w,
+                num_trees=2,
+                ndpost=4,
+                nskip=2,
+                num_chains=None,
+            )
+
+    def test_mv_rejects_pbart(self) -> None:
+        """MV + pbart should raise."""
+        X = jnp.ones((2, 5))
+        y = jnp.ones((3, 5))
+        with pytest.raises(ValueError, match='wbart'):
+            Bart(
+                x_train=X,
+                y_train=y,
+                type='pbart',
+                num_trees=2,
+                ndpost=4,
+                nskip=2,
+                num_chains=None,
+            )
+
+    def test_mv_sigma_is_none(self, mv_data: tuple) -> None:
+        """Sigma and sigma_ should return None for MV."""
+        X, Y = mv_data
+        model = Bart(
+            x_train=X, y_train=Y, num_trees=5, ndpost=10, nskip=5, num_chains=None
+        )
+        assert model.sigma is None
+        assert model.sigma_ is None
+        assert model.sigma_mean is None
+        assert model.sigest is None
+
+    def test_mv_yhat_train_shape(self, mv_data: tuple) -> None:
+        """yhat_train should have shape (ndpost, k, n)."""
+        X, Y = mv_data
+        k, n = Y.shape
+        model = Bart(
+            x_train=X, y_train=Y, num_trees=5, ndpost=10, nskip=5, num_chains=None
+        )
+        assert model.yhat_train.shape == (model.ndpost, k, n)
+        assert model.yhat_train_mean.shape == (k, n)
+
     def test_mvbart_convergence(self, mv_data: tuple) -> None:
         """Test that MV Bart chains converge using R-hat."""
         X_train, Y_train = mv_data

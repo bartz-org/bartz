@@ -530,7 +530,7 @@ class TestMVBartInterface:
         y = jnp.array(
             [[True, False, True, False, True], [False, True, False, True, False]]
         )
-        with pytest.raises(ValueError, match='multivariate'):
+        with pytest.raises(ValueError, match='Multivariate'):
             Bart(x_train=X, y_train=y, num_trees=2, ndpost=4, nskip=2, num_chains=None)
 
     def test_mv_rejects_weights(self) -> None:
@@ -538,7 +538,7 @@ class TestMVBartInterface:
         X = jnp.ones((2, 5))
         y = jnp.ones((3, 5))
         w = jnp.ones(5)
-        with pytest.raises(ValueError, match='weights'):
+        with pytest.raises(ValueError, match='Weights'):
             Bart(
                 x_train=X,
                 y_train=y,

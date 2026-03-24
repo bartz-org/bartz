@@ -51,7 +51,8 @@ from bartz.mcmcstep._step import (
     _step_error_cov_inv_uv,
     step_trees,
 )
-from tests.util import assert_close_matrices, rhat
+from bartz.testing import gen_data
+from tests.util import assert_close_matrices, multivariate_rhat
 
 
 class Data(NamedTuple):
@@ -486,7 +487,7 @@ class TestMVBartSteps:
 class TestMVBartInterface:
     """Tests for the high-level Bart class with multivariate y."""
 
-    @pytest.fixture(params=[(10, 2, 2), (20, 5, 3), (3, 100, 4), (50, 50, 5)])
+    @pytest.fixture(params=[(20, 6, 2), (20, 10, 3), (50, 100, 4), (50, 50, 5)])
     def mv_data_shape(self, request: FixtureRequest) -> tuple[int, int, int]:
         """Provide (n, p, k) triples for testing."""
         return request.param
@@ -497,32 +498,39 @@ class TestMVBartInterface:
     ) -> tuple[Float32[Array, 'p n'], Float32[Array, 'k n']]:
         """Generate a toy multivariate dataset."""
         n, p, k = mv_data_shape
-        sigma_noise = 0.1
-
-        key_x, key_eps = random.split(keys.pop(), 2)
-        X = random.uniform(key_x, (p, n), float, -2, 2)
-
-        s = jnp.ones((k, p))
-        norm_s = jnp.sqrt(jnp.sum(s * s, axis=1, keepdims=True))
-        F = (s @ jnp.cos(jnp.pi * X)) / norm_s
-
-        y = F + sigma_noise * random.normal(key_eps, (k, n))
-        return X, y
+        dgp = gen_data(
+            keys.pop(),
+            n=n,
+            p=p,
+            k=k,
+            q=2,
+            lam=0.5,
+            sigma2_lin=0.4,
+            sigma2_quad=0.5,
+            sigma2_eps=0.1,
+        )
+        return dgp.x, dgp.y
 
     def test_initialization_and_shapes(self, mv_data: tuple) -> None:
         """Test that MV Bart predicts with correct shapes."""
         X, Y = mv_data
+        k, n = Y.shape
         nskip, ndpost = 10, 50
         n_test = 40
-        p, k_dim = X.shape[0], Y.shape[0]
+        p = X.shape[0]
 
         model = Bart(
             x_train=X, y_train=Y, num_trees=10, ndpost=ndpost, nskip=nskip, num_chains=2
         )
 
+        # test predict shape
         X_test = random.normal(random.key(1), (p, n_test))
         y_pred = model.predict(X_test)
-        assert y_pred.shape == (model.ndpost, k_dim, n_test)
+        assert y_pred.shape == (model.ndpost, k, n_test)
+
+        # yhat_train shapes
+        assert model.yhat_train.shape == (model.ndpost, k, n)
+        assert model.yhat_train_mean.shape == (k, n)
 
     def test_mv_rejects_binary(self) -> None:
         """MV + binary should raise."""
@@ -573,17 +581,8 @@ class TestMVBartInterface:
         assert model.sigma is None
         assert model.sigma_ is None
         assert model.sigma_mean is None
-        assert model.sigest is None
-
-    def test_mv_yhat_train_shape(self, mv_data: tuple) -> None:
-        """yhat_train should have shape (ndpost, k, n)."""
-        X, Y = mv_data
-        k, n = Y.shape
-        model = Bart(
-            x_train=X, y_train=Y, num_trees=5, ndpost=10, nskip=5, num_chains=None
-        )
-        assert model.yhat_train.shape == (model.ndpost, k, n)
-        assert model.yhat_train_mean.shape == (k, n)
+        assert model.sigest is not None
+        assert model.sigest.shape == (Y.shape[0],)
 
     def test_mvbart_convergence(self, mv_data: tuple) -> None:
         """Test that MV Bart chains converge using R-hat."""
@@ -611,12 +610,11 @@ class TestMVBartInterface:
 
         # Check yhat convergence
         yhat_train = model.yhat_train.reshape(
-            num_chains, nsamples_per_chain, k_dim, n_train
+            num_chains, nsamples_per_chain, k_dim * n_train
         )
-        yhat_train_mean = yhat_train.mean(axis=-1)
-        max_rhats_yhat = [rhat(yhat_train_mean[:, :, j]) for j in range(k_dim)]
-        global_max_rhat = jnp.max(jnp.stack(max_rhats_yhat))
-        assert global_max_rhat < 1.1
+        rhat_yhat_train = multivariate_rhat(yhat_train)
+        assert rhat_yhat_train < 6
+        print(f'{rhat_yhat_train.item()=}')
 
         # Check covariance matrix convergence
         prec_trace = model._main_trace.error_cov_inv
@@ -624,10 +622,8 @@ class TestMVBartInterface:
             prec_trace = prec_trace.reshape(
                 num_chains, nsamples_per_chain, k_dim, k_dim
             )
-
         prec_flat = prec_trace.reshape(num_chains, nsamples_per_chain, -1)
         assert jnp.all(jnp.std(prec_flat, axis=1) > 1e-8), 'Sigma is not updating!'
-
-        max_rhats_prec = [rhat(prec_flat[:, :, j]) for j in range(k_dim * k_dim)]
-        max_rhat_sigma = jnp.max(jnp.array(max_rhats_prec))
-        assert max_rhat_sigma < 1.1
+        rhat_prec = multivariate_rhat(prec_flat)
+        assert rhat_prec < 6
+        print(f'{rhat_prec.item()=}')

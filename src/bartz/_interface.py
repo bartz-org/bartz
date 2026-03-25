@@ -96,7 +96,9 @@ class Bart(Module):
     x_train
         The training predictors.
     y_train
-        The training responses.
+        The training responses. For univariate regression, a 1D array of shape
+        `(n,)`. For multivariate regression, a 2D array of shape `(k, n)`where
+        `k` is the number of response components.
     x_test
         The test predictors.
     type
@@ -156,10 +158,13 @@ class Bart(Module):
         `lamda`. If not specified, it is estimated by linear regression (with
         intercept, and without taking into account `w`). If `y_train` has less
         than two elements, it is set to 1. If n <= p, it is set to the standard
-        deviation of `y_train`. Ignored if `lamda` is specified.
+        deviation of `y_train`. Ignored if `lamda` is specified. For
+        multivariate regression, can be a scalar (broadcast to all components)
+        or a `(k,)` vector of per-component estimates.
     sigdf
         The degrees of freedom of the scaled inverse-chisquared prior on the
-        noise variance.
+        noise variance. For multivariate regression, the Inverse-Wishart
+        degrees of freedom are set to `sigdf + k - 1`.
     sigquant
         The quantile of the prior on the noise variance that shall match
         `sigest` to set the scale of the prior. Ignored if `lamda` is specified.
@@ -175,25 +180,29 @@ class Bart(Module):
     lamda
         The prior harmonic mean of the error variance. (The harmonic mean of x
         is 1/mean(1/x).) If not specified, it is set based on `sigest` and
-        `sigquant`.
+        `sigquant`. For multivariate regression, can be a scalar (broadcast
+        to all components) or a `(k,)` vector.
     tau_num
         The numerator in the expression that determines the prior standard
         deviation of leaves. If not specified, default to ``(max(y_train) -
         min(y_train)) / 2`` (or 1 if `y_train` has less than two elements) for
-        continuous regression, and 3 for binary regression.
+        continuous regression, and 3 for binary regression. For multivariate
+        regression, the range is computed per component.
     offset
         The prior mean of the latent mean function. If not specified, it is set
         to the mean of `y_train` for continuous regression, and to
         ``Phi^-1(mean(y_train))`` for binary regression. If `y_train` is empty,
         `offset` is set to 0. With binary regression, if `y_train` is all
         `False` or `True`, it is set to ``Phi^-1(1/(n+1))`` or
-        ``Phi^-1(n/(n+1))``, respectively.
+        ``Phi^-1(n/(n+1))``, respectively. For multivariate regression, can be
+        a scalar (broadcast to all components) or a `(k,)` vector. If not
+        specified, it is set to the per-component mean of `y_train`.
     w
         Coefficients that rescale the error standard deviation on each
         datapoint. Not specifying `w` is equivalent to setting it to 1 for all
         datapoints. Note: `w` is ignored in the automatic determination of
         `sigest`, so either the weights should be O(1), or `sigest` should be
-        specified by the user.
+        specified by the user. Not supported for multivariate regression for now.
     num_trees
         The number of trees used to represent the latent mean function.
     numcut

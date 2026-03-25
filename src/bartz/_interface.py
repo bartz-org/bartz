@@ -358,13 +358,11 @@ class Bart(Module):
 
         # process "standardization" settings
         offset = self._process_offset_settings(y_train, offset)
-        sigma_mu = self._process_leaf_sdev_settings(y_train, k, num_trees, tau_num)
-
-        # configure priors (UV vs MV)
-        error_cov_df, error_cov_scale, leaf_prior_cov_inv, sigest = (
-            self._configure_variances(
-                x_train, y_train, sigma_mu, sigest, sigdf, sigquant, lamda
-            )
+        leaf_prior_cov_inv = self._process_leaf_variance_settings(
+            y_train, k, num_trees, tau_num
+        )
+        error_cov_df, error_cov_scale, sigest = self._process_error_variance_settings(
+            x_train, y_train, sigest, sigdf, sigquant, lamda
         )
 
         # determine splits
@@ -641,50 +639,6 @@ class Bart(Module):
         assert get_length(x1) == get_length(x2)
 
     @classmethod
-    def _configure_variances(
-        cls,
-        x_train: Shaped[Array, 'p n'],
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
-        sigma_mu: FloatLike | Float32[Array, ' k'],
-        sigest: FloatLike | Float[Array, ' k'] | None,
-        sigdf: FloatLike,
-        sigquant: FloatLike,
-        lamda: FloatLike | Float[Array, ' k'] | None,
-    ) -> (
-        tuple[
-            FloatLike, FloatLike, Float32[Array, ''], Float32[Array, '']
-        ]  # UV continuous
-        | tuple[
-            Float32[Array, ''],
-            Float32[Array, 'k k'],
-            Float32[Array, 'k k'],
-            Float32[Array, ' k'],
-        ]  # MV
-        | tuple[None, None, Float32[Array, ''], None]  # UV binary
-    ):
-        """Return (error_cov_df, error_cov_scale, leaf_prior_cov_inv, sigest)."""
-        lamda_val, sigest_val = cls._process_error_variance_settings(
-            x_train, y_train, sigest, sigdf, sigquant, lamda
-        )
-
-        if y_train.ndim == 2:
-            k = y_train.shape[0]
-            lamda_val = jnp.broadcast_to(lamda_val, (k,))
-            error_cov_df = sigdf + k - 1
-            error_cov_scale = jnp.diag(sigdf * lamda_val)
-            leaf_prior_cov_inv = jnp.diag(jnp.reciprocal(jnp.square(sigma_mu)))
-        elif y_train.dtype == bool:
-            error_cov_df = None
-            error_cov_scale = None
-            leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu))
-        else:
-            error_cov_df = sigdf
-            error_cov_scale = lamda_val * sigdf
-            leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu))
-
-        return error_cov_df, error_cov_scale, leaf_prior_cov_inv, sigest_val
-
-    @classmethod
     def _process_error_variance_settings(
         cls,
         x_train: Shaped[Array, 'p n'],
@@ -693,39 +647,48 @@ class Bart(Module):
         sigdf: FloatLike,
         sigquant: FloatLike,
         lamda: FloatLike | Float[Array, ' k'] | None,
-    ) -> tuple[Float32[Array, ''] | Float32[Array, ' k'] | None, ...]:
-        """Return (lamda, sigest)."""
+    ) -> tuple[Float32[Array, ''] | Float32[Array, 'k k'] | None, ...]:
+        """Return (error_cov_df, error_cov_scale, sigest)."""
         if y_train.dtype == bool:
-            if sigest is not None:
-                msg = 'Let `sigest=None` for binary regression'
+            if sigest is not None or lamda is not None:
+                msg = 'Let `sigest=None` and `lamda=None` for binary regression'
                 raise ValueError(msg)
-            if lamda is not None:
-                msg = 'Let `lamda=None` for binary regression'
-                raise ValueError(msg)
-            return None, None
+            return None, None, None
 
-        if lamda is not None:
+        if lamda is None:
+            # estimate sigest²
+            n = y_train.shape[-1]
             if sigest is not None:
-                msg = 'Let `sigest=None` if `lamda` is specified'
-                raise ValueError(msg)
-            return jnp.asarray(lamda, dtype=jnp.float32), None
+                sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
+            elif n < 2:
+                sigest2 = jnp.ones(y_train.shape[:-1])
+            elif n <= x_train.shape[0]:
+                sigest2 = jnp.var(y_train, axis=-1)
+            else:
+                sigest2 = cls._linear_regression(x_train, y_train)
+            sigest = jnp.sqrt(sigest2)
 
-        # estimate sigest²
-        n = y_train.shape[-1]
-        if sigest is not None:
-            sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
-        elif n < 2:
-            sigest2 = jnp.ones(y_train.shape[:-1])
-        elif n <= x_train.shape[0]:
-            sigest2 = jnp.var(y_train, axis=-1)
+            # lamda from sigest²
+            alpha = sigdf / 2
+            invchi2 = invgamma.ppf(sigquant, alpha) / 2
+            invchi2rid = invchi2 * sigdf
+            lamda = sigest2 / invchi2rid
+
+        elif sigest is not None:
+            msg = 'Let `sigest=None` if `lamda` is specified'
+            raise ValueError(msg)
+
+        # params written in multivariate form
+        if y_train.ndim == 2:
+            k = y_train.shape[0]
+            lamda = jnp.broadcast_to(lamda, (k,))
+            error_cov_df = jnp.asarray(sigdf) + k - 1
+            error_cov_scale = jnp.diag(sigdf * lamda)
         else:
-            sigest2 = cls._linear_regression(x_train, y_train)
+            error_cov_df = jnp.asarray(sigdf)
+            error_cov_scale = jnp.asarray(sigdf * lamda)
 
-        # lamda from sigest²
-        alpha = sigdf / 2
-        invchi2 = invgamma.ppf(sigquant, alpha) / 2
-        invchi2rid = invchi2 * sigdf
-        return sigest2 / invchi2rid, jnp.sqrt(sigest2)
+        return error_cov_df, error_cov_scale, sigest
 
     @staticmethod
     @jit
@@ -735,9 +698,9 @@ class Bart(Module):
     ) -> Float32[Array, ''] | Float32[Array, ' k']:
         """Return the error variance estimated with OLS with intercept."""
         x_centered = x_train.T - x_train.mean(axis=1)
-        y_centered = y_train - y_train.mean(axis=-1, keepdims=True)
+        y_centered = y_train.T - y_train.mean(axis=-1)
         # centering is equivalent to adding an intercept column
-        _, chisq, rank, _ = jnp.linalg.lstsq(x_centered, y_centered.T)
+        _, chisq, rank, _ = jnp.linalg.lstsq(x_centered, y_centered)
         chisq = chisq.reshape(y_train.shape[:-1])
         dof = y_train.shape[-1] - rank
         return chisq / dof
@@ -829,13 +792,14 @@ class Bart(Module):
             return mean
 
     @staticmethod
-    def _process_leaf_sdev_settings(
+    def _process_leaf_variance_settings(
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
         k: FloatLike,
         num_trees: int,
         tau_num: FloatLike | None,
-    ) -> FloatLike | Float32[Array, ' k']:
-        """Return sigma_mu."""
+    ) -> Float32[Array, ''] | Float32[Array, 'k k']:
+        """Return `leaf_prior_cov_inv`."""
+        # determine `tau_num` if not specified
         if tau_num is None:
             if y_train.dtype == bool:
                 tau_num = 3.0
@@ -844,7 +808,14 @@ class Bart(Module):
             else:
                 tau_num = (y_train.max(-1) - y_train.min(-1)) / 2
 
-        return tau_num / (k * math.sqrt(num_trees))
+        # leaf prior standard deviation
+        sigma_mu = tau_num / (k * math.sqrt(num_trees))
+
+        # leaf prior precision matrix
+        leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu))
+        if leaf_prior_cov_inv.ndim:
+            leaf_prior_cov_inv = jnp.diag(leaf_prior_cov_inv)
+        return leaf_prior_cov_inv
 
     @staticmethod
     def _determine_splits(

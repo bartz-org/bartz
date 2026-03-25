@@ -298,7 +298,7 @@ class Bart(Module):
         xinfo: Float[Array, 'p n'] | None = None,
         usequants: bool = False,
         rm_const: bool = True,
-        sigest: FloatLike | None = None,
+        sigest: FloatLike | Float[Array, ' k'] | None = None,
         sigdf: FloatLike = 3.0,
         sigquant: FloatLike = 0.9,
         k: FloatLike = 2.0,
@@ -306,7 +306,7 @@ class Bart(Module):
         base: FloatLike = 0.95,
         lamda: FloatLike | Float[Array, ' k'] | None = None,
         tau_num: FloatLike | None = None,
-        offset: FloatLike | None = None,
+        offset: FloatLike | Float[Array, ' k'] | None = None,
         w: Float[Array, ' n'] | Series | None = None,
         num_trees: int = 200,
         numcut: int = 255,
@@ -533,7 +533,7 @@ class Bart(Module):
         return self.varprob.mean(axis=0)
 
     @cached_property
-    def yhat_test_mean(self) -> Float32[Array, ' m'] | None:
+    def yhat_test_mean(self) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
         """The marginal posterior mean at `x_test`.
 
         Not defined with binary regression because it's error-prone, typically
@@ -631,7 +631,7 @@ class Bart(Module):
         x_train: Shaped[Array, 'p n'],
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
         sigma_mu: FloatLike | Float32[Array, ' k'],
-        sigest: FloatLike | None,
+        sigest: FloatLike | Float[Array, ' k'] | None,
         sigdf: FloatLike,
         sigquant: FloatLike,
         lamda: FloatLike | Float[Array, ' k'] | None,
@@ -654,7 +654,7 @@ class Bart(Module):
 
         if y_train.ndim == 2:
             k = y_train.shape[0]
-            lamda_val = jnp.broadcast_to(jnp.atleast_1d(lamda_val), (k,))
+            lamda_val = jnp.broadcast_to(lamda_val, (k,))
             error_cov_df = sigdf + k - 1
             error_cov_scale = jnp.diag(sigdf * lamda_val)
             leaf_prior_cov_inv = jnp.diag(jnp.reciprocal(jnp.square(sigma_mu)))
@@ -674,7 +674,7 @@ class Bart(Module):
         cls,
         x_train: Shaped[Array, 'p n'],
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
-        sigest: FloatLike | None,
+        sigest: FloatLike | Float[Array, ' k'] | None,
         sigdf: FloatLike,
         sigquant: FloatLike,
         lamda: FloatLike | Float[Array, ' k'] | None,
@@ -700,7 +700,7 @@ class Bart(Module):
         if sigest is not None:
             sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
         elif n < 2:
-            sigest2 = jnp.ones(y_train.shape[:-1], dtype=jnp.float32)
+            sigest2 = jnp.ones(y_train.shape[:-1])
         elif n <= x_train.shape[0]:
             sigest2 = jnp.var(y_train, axis=-1)
         else:
@@ -735,13 +735,10 @@ class Bart(Module):
     ) -> None:
         match type:
             case 'wbart':
-                if y_train.ndim == 2:
-                    if w is not None:
-                        msg = (
-                            "Weights 'w' are not supported for multivariate regression."
-                        )
-                        raise ValueError(msg)
-                elif y_train.dtype != jnp.float32:
+                if y_train.ndim == 2 and w is not None:
+                    msg = "Weights 'w' are not supported for multivariate regression."
+                    raise ValueError(msg)
+                if y_train.dtype != jnp.float32:
                     msg = (
                         'Continuous regression requires y_train.dtype=float32,'
                         f' got {y_train.dtype=} instead.'
@@ -804,14 +801,10 @@ class Bart(Module):
                     msg = f'Expected offset shape ({k},), got {off.shape}'
                     raise ValueError(msg)
             return off
-        if y_train.ndim == 2:
-            if y_train.shape[1] < 1:
-                return jnp.zeros(y_train.shape[0], dtype=jnp.float32)
-            return y_train.mean(axis=1)
-        elif y_train.size < 1:
-            return jnp.array(0.0)
+        if y_train.shape[-1] < 1:
+            return jnp.zeros(y_train.shape[:-1])
         else:
-            mean = y_train.mean()
+            mean = y_train.mean(-1)
 
         if y_train.dtype == bool:
             bound = 1 / (1 + y_train.size)

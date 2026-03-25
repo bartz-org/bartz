@@ -367,6 +367,61 @@ class TestMVBartIntegration:
         assert jnp.abs(jnp.mean(samples_uv) - jnp.mean(samples_mv)) < 0.01
         assert p_value > 0.01
 
+    def test_uv_mv_k1_equivalence(self, keys: split) -> None:
+        """Test that Bart class initializes equivalent states for UV and MV (k=1)."""
+        n, p = 20, 5
+        X = random.normal(keys.pop(), (p, n))
+        y_uv = random.normal(keys.pop(), (n,))
+        y_mv = y_uv[None, :]  # shape (1, n)
+
+        bart_uv = Bart(
+            x_train=X,
+            y_train=y_uv,
+            num_trees=10,
+            ndpost=0,
+            nskip=0,
+            num_chains=1,
+            seed=42,
+        )
+        bart_mv = Bart(
+            x_train=X,
+            y_train=y_mv,
+            num_trees=10,
+            ndpost=0,
+            nskip=0,
+            num_chains=1,
+            seed=42,
+        )
+
+        state_uv = bart_uv._mcmc_state
+        state_mv = bart_mv._mcmc_state
+
+        # Residuals and error covariance
+        assert_allclose(state_uv.resid, state_mv.resid.squeeze(0), atol=1e-6, rtol=1e-6)
+        assert_allclose(
+            state_uv.error_cov_inv,
+            state_mv.error_cov_inv.reshape(()),
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+        # Forest structure
+        assert_array_equal(state_uv.forest.var_tree, state_mv.forest.var_tree)
+        assert_array_equal(state_uv.forest.split_tree, state_mv.forest.split_tree)
+        assert_allclose(
+            state_uv.forest.leaf_tree,
+            state_mv.forest.leaf_tree.squeeze(-2),
+            atol=1e-6,
+            rtol=1e-6,
+        )
+        assert_array_equal(state_uv.forest.leaf_indices, state_mv.forest.leaf_indices)
+
+        # Offset
+        assert_allclose(bart_uv.offset, bart_mv.offset.squeeze(0), atol=1e-6, rtol=1e-6)
+
+        # Sigest
+        assert_allclose(bart_uv.sigest, bart_mv.sigest.squeeze(0), atol=1e-6, rtol=1e-6)
+
 
 class TestMVBartSteps:
     """Test the full MCMC step trajectory (init + multiple steps)."""
@@ -613,7 +668,7 @@ class TestMVBartInterface:
             num_chains, nsamples_per_chain, k_dim * n_train
         )
         rhat_yhat_train = multivariate_rhat(yhat_train)
-        assert rhat_yhat_train < 6
+        assert rhat_yhat_train < 1.5
         print(f'{rhat_yhat_train.item()=}')
 
         # Check covariance matrix convergence
@@ -625,5 +680,5 @@ class TestMVBartInterface:
         prec_flat = prec_trace.reshape(num_chains, nsamples_per_chain, -1)
         assert jnp.all(jnp.std(prec_flat, axis=1) > 1e-8), 'Sigma is not updating!'
         rhat_prec = multivariate_rhat(prec_flat)
-        assert rhat_prec < 6
+        assert rhat_prec < 1.1
         print(f'{rhat_prec.item()=}')

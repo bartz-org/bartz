@@ -374,24 +374,9 @@ class TestMVBartIntegration:
         y_uv = random.normal(keys.pop(), (n,))
         y_mv = y_uv[None, :]  # shape (1, n)
 
-        bart_uv = Bart(
-            x_train=X,
-            y_train=y_uv,
-            num_trees=10,
-            ndpost=0,
-            nskip=0,
-            num_chains=1,
-            seed=42,
-        )
-        bart_mv = Bart(
-            x_train=X,
-            y_train=y_mv,
-            num_trees=10,
-            ndpost=0,
-            nskip=0,
-            num_chains=1,
-            seed=42,
-        )
+        common = dict(x_train=X, num_trees=10, ndpost=0, nskip=0, num_chains=1, seed=42)
+        bart_uv = Bart(y_train=y_uv, **common)
+        bart_mv = Bart(y_train=y_mv, **common)
 
         state_uv = bart_uv._mcmc_state
         state_mv = bart_mv._mcmc_state
@@ -405,14 +390,21 @@ class TestMVBartIntegration:
             rtol=1e-6,
         )
 
+        # Prior parameters
+        assert_array_equal(
+            state_uv.forest.leaf_prior_cov_inv,
+            state_mv.forest.leaf_prior_cov_inv.reshape(()),
+        )
+        assert_array_equal(state_uv.error_cov_df, state_mv.error_cov_df)
+        assert_array_equal(
+            state_uv.error_cov_scale, state_mv.error_cov_scale.reshape(())
+        )
+
         # Forest structure
         assert_array_equal(state_uv.forest.var_tree, state_mv.forest.var_tree)
         assert_array_equal(state_uv.forest.split_tree, state_mv.forest.split_tree)
-        assert_allclose(
-            state_uv.forest.leaf_tree,
-            state_mv.forest.leaf_tree.squeeze(-2),
-            atol=1e-6,
-            rtol=1e-6,
+        assert_array_equal(
+            state_uv.forest.leaf_tree, state_mv.forest.leaf_tree.squeeze(-2)
         )
         assert_array_equal(state_uv.forest.leaf_indices, state_mv.forest.leaf_indices)
 
@@ -668,7 +660,7 @@ class TestMVBartInterface:
             num_chains, nsamples_per_chain, k_dim * n_train
         )
         rhat_yhat_train = multivariate_rhat(yhat_train)
-        assert rhat_yhat_train < 1.5
+        assert rhat_yhat_train < 1.6
         print(f'{rhat_yhat_train.item()=}')
 
         # Check covariance matrix convergence

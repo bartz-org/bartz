@@ -97,13 +97,14 @@ class Bart(Module):
         The training predictors.
     y_train
         The training responses. For univariate regression, a 1D array of shape
-        `(n,)`. For multivariate regression, a 2D array of shape `(k, n)`where
-        `k` is the number of response components.
+        `(n,)`. For multivariate regression, a 2D array of shape `(k, n)` where
+        `k` is the number of response components, as introduced in [3]_.
     x_test
         The test predictors.
     type
         The type of regression. 'wbart' for continuous regression, 'pbart' for
-        binary regression with probit link.
+        binary regression with probit link. Multivariate regression only support
+        'wbart' for now.
     sparse
         Whether to activate variable selection on the predictors as done in
         [1]_.
@@ -202,7 +203,7 @@ class Bart(Module):
         datapoint. Not specifying `w` is equivalent to setting it to 1 for all
         datapoints. Note: `w` is ignored in the automatic determination of
         `sigest`, so either the weights should be O(1), or `sigest` should be
-        specified by the user. Not supported for multivariate regression for now.
+        specified by the user. Not supported for multivariate regression.
     num_trees
         The number of trees used to represent the latent mean function.
     numcut
@@ -272,6 +273,11 @@ class Bart(Module):
     .. [2] Hugh A. Chipman, Edward I. George, Robert E. McCulloch "BART:
        Bayesian additive regression trees," The Annals of Applied Statistics,
        Ann. Appl. Stat. 4(1), 266-298, (March 2010).
+    .. [3] Um, Seungha, Antonio R. Linero, Debajyoti Sinha, and Dipankar
+       Bandyopadhyay (2023). "Bayesian additive regression trees for
+       multivariate skewed responses". In: Statistics in Medicine 42.3,
+       pp. 246-263.
+
     """
 
     _main_trace: mcmcloop.MainTrace

@@ -104,7 +104,7 @@ class Bart(Module):
     type
         The type of regression. 'wbart' for continuous regression, 'pbart' for
         binary regression with probit link. Multivariate regression only support
-        'wbart' for now.
+        'wbart'.
     sparse
         Whether to activate variable selection on the predictors as done in
         [1]_.

@@ -35,6 +35,7 @@ from numpy.testing import assert_allclose, assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
+from bartz import Bart
 from bartz.jaxext import split
 from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._step import (
@@ -50,7 +51,8 @@ from bartz.mcmcstep._step import (
     _step_error_cov_inv_uv,
     step_trees,
 )
-from tests.util import assert_close_matrices
+from bartz.testing import gen_data
+from tests.util import assert_close_matrices, multivariate_rhat
 
 
 class Data(NamedTuple):
@@ -365,6 +367,53 @@ class TestMVBartIntegration:
         assert jnp.abs(jnp.mean(samples_uv) - jnp.mean(samples_mv)) < 0.01
         assert p_value > 0.01
 
+    def test_uv_mv_k1_equivalence(self, keys: split) -> None:
+        """Test that Bart class initializes equivalent states for UV and MV (k=1)."""
+        n, p = 20, 5
+        X = random.normal(keys.pop(), (p, n))
+        y_uv = random.normal(keys.pop(), (n,))
+        y_mv = y_uv[None, :]  # shape (1, n)
+
+        common = dict(x_train=X, num_trees=10, ndpost=0, nskip=0, num_chains=1, seed=42)
+        bart_uv = Bart(y_train=y_uv, **common)
+        bart_mv = Bart(y_train=y_mv, **common)
+
+        state_uv = bart_uv._mcmc_state
+        state_mv = bart_mv._mcmc_state
+
+        # Residuals and error covariance
+        assert_allclose(state_uv.resid, state_mv.resid.squeeze(0), atol=1e-6, rtol=1e-6)
+        assert_allclose(
+            state_uv.error_cov_inv,
+            state_mv.error_cov_inv.reshape(()),
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+        # Prior parameters
+        assert_array_equal(
+            state_uv.forest.leaf_prior_cov_inv,
+            state_mv.forest.leaf_prior_cov_inv.reshape(()),
+        )
+        assert_array_equal(state_uv.error_cov_df, state_mv.error_cov_df)
+        assert_array_equal(
+            state_uv.error_cov_scale, state_mv.error_cov_scale.reshape(())
+        )
+
+        # Forest structure
+        assert_array_equal(state_uv.forest.var_tree, state_mv.forest.var_tree)
+        assert_array_equal(state_uv.forest.split_tree, state_mv.forest.split_tree)
+        assert_array_equal(
+            state_uv.forest.leaf_tree, state_mv.forest.leaf_tree.squeeze(-2)
+        )
+        assert_array_equal(state_uv.forest.leaf_indices, state_mv.forest.leaf_indices)
+
+        # Offset
+        assert_allclose(bart_uv.offset, bart_mv.offset.squeeze(0), atol=1e-6, rtol=1e-6)
+
+        # Sigest
+        assert_allclose(bart_uv.sigest, bart_mv.sigest.squeeze(0), atol=1e-6, rtol=1e-6)
+
 
 class TestMVBartSteps:
     """Test the full MCMC step trajectory (init + multiple steps)."""
@@ -480,3 +529,148 @@ class TestMVBartSteps:
 
             assert mv_state.error_cov_inv.shape == (k, k)
             assert mv_state.resid.shape == (k, y.shape[1])
+
+
+class TestMVBartInterface:
+    """Tests for the high-level Bart class with multivariate y."""
+
+    @pytest.fixture(params=[(20, 6, 2), (20, 10, 3), (50, 100, 4), (50, 50, 5)])
+    def mv_data_shape(self, request: FixtureRequest) -> tuple[int, int, int]:
+        """Provide (n, p, k) triples for testing."""
+        return request.param
+
+    @pytest.fixture
+    def mv_data(
+        self, keys: split, mv_data_shape: tuple[int, int, int]
+    ) -> tuple[Float32[Array, 'p n'], Float32[Array, 'k n']]:
+        """Generate a toy multivariate dataset."""
+        n, p, k = mv_data_shape
+        dgp = gen_data(
+            keys.pop(),
+            n=n,
+            p=p,
+            k=k,
+            q=2,
+            lam=0.5,
+            sigma2_lin=0.4,
+            sigma2_quad=0.5,
+            sigma2_eps=0.1,
+        )
+        return dgp.x, dgp.y
+
+    def test_initialization_and_shapes(self, mv_data: tuple) -> None:
+        """Test that MV Bart predicts with correct shapes."""
+        X, Y = mv_data
+        k, n = Y.shape
+        nskip, ndpost = 10, 50
+        n_test = 40
+        p = X.shape[0]
+
+        model = Bart(
+            x_train=X, y_train=Y, num_trees=10, ndpost=ndpost, nskip=nskip, num_chains=2
+        )
+
+        # test predict shape
+        X_test = random.normal(random.key(1), (p, n_test))
+        y_pred = model.predict(X_test)
+        assert y_pred.shape == (model.ndpost, k, n_test)
+
+        # yhat_train shapes
+        assert model.yhat_train.shape == (model.ndpost, k, n)
+        assert model.yhat_train_mean.shape == (k, n)
+
+    def test_mv_rejects_binary(self) -> None:
+        """MV + binary should raise."""
+        X = jnp.ones((2, 5))
+        y = jnp.array(
+            [[True, False, True, False, True], [False, True, False, True, False]]
+        )
+        with pytest.raises(ValueError, match='Multivariate'):
+            Bart(x_train=X, y_train=y, num_trees=2, ndpost=4, nskip=2, num_chains=None)
+
+    def test_mv_rejects_weights(self) -> None:
+        """MV + weights should raise."""
+        X = jnp.ones((2, 5))
+        y = jnp.ones((3, 5))
+        w = jnp.ones(5)
+        with pytest.raises(ValueError, match='Weights'):
+            Bart(
+                x_train=X,
+                y_train=y,
+                w=w,
+                num_trees=2,
+                ndpost=4,
+                nskip=2,
+                num_chains=None,
+            )
+
+    def test_mv_rejects_pbart(self) -> None:
+        """MV + pbart should raise."""
+        X = jnp.ones((2, 5))
+        y = jnp.ones((3, 5))
+        with pytest.raises(ValueError, match='wbart'):
+            Bart(
+                x_train=X,
+                y_train=y,
+                type='pbart',
+                num_trees=2,
+                ndpost=4,
+                nskip=2,
+                num_chains=None,
+            )
+
+    def test_mv_sigma_is_none(self, mv_data: tuple) -> None:
+        """Sigma and sigma_ should return None for MV."""
+        X, Y = mv_data
+        model = Bart(
+            x_train=X, y_train=Y, num_trees=5, ndpost=10, nskip=5, num_chains=None
+        )
+        assert model.sigma is None
+        assert model.sigma_ is None
+        assert model.sigma_mean is None
+        assert model.sigest is not None
+        assert model.sigest.shape == (Y.shape[0],)
+
+    def test_mvbart_convergence(self, mv_data: tuple) -> None:
+        """Test that MV Bart chains converge using R-hat."""
+        X_train, Y_train = mv_data
+        _, n_train = X_train.shape
+        k_dim = Y_train.shape[0]
+
+        num_chains = 4
+        ndpost = 2000
+        nsamples_per_chain = ndpost // num_chains
+        nskip = 4000
+        keepevery = 5
+        num_trees = 100
+
+        model = Bart(
+            x_train=X_train,
+            y_train=Y_train,
+            num_trees=num_trees,
+            ndpost=ndpost,
+            nskip=nskip,
+            keepevery=keepevery,
+            num_chains=num_chains,
+            seed=0,
+        )
+
+        # Check yhat convergence
+        yhat_train = model.yhat_train.reshape(
+            num_chains, nsamples_per_chain, k_dim * n_train
+        )
+        rhat_yhat_train = multivariate_rhat(yhat_train)
+        assert rhat_yhat_train < 1.6
+        print(f'{rhat_yhat_train.item()=}')
+
+        # Check covariance matrix convergence
+        prec_trace = model._main_trace.error_cov_inv
+        if prec_trace.ndim == 3:
+            prec_trace = prec_trace.reshape(
+                num_chains, nsamples_per_chain, k_dim, k_dim
+            )
+        prec_flat = prec_trace.reshape(num_chains, nsamples_per_chain, -1)
+        assert jnp.all(jnp.std(prec_flat, axis=1) > 1e-8), 'Sigma is not updating!'
+        rhat_prec = multivariate_rhat(prec_flat)
+        assert rhat_prec < 1.1
+        print(f'{rhat_prec.item()=}')

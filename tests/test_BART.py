@@ -45,22 +45,10 @@ import pytest
 from equinox import EquinoxRuntimeError, tree_at
 from jax import block_until_ready, config, debug_nans, devices, random, tree, vmap
 from jax import numpy as jnp
-from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logit, ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
-from jaxtyping import (
-    Array,
-    Bool,
-    Float,
-    Float32,
-    Int32,
-    Key,
-    PyTree,
-    Real,
-    Shaped,
-    UInt,
-)
+from jaxtyping import Array, Bool, Float32, Int32, Key, PyTree, Real, Shaped, UInt
 from numpy.testing import assert_allclose, assert_array_equal
 from pytest_subtests import SubTests
 
@@ -80,7 +68,12 @@ from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.rbartpackages import BART3
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
-from tests.util import assert_close_matrices, assert_different_matrices
+from tests.util import (
+    assert_close_matrices,
+    assert_different_matrices,
+    multivariate_rhat,
+    rhat,
+)
 
 
 def gen_X(
@@ -1199,84 +1192,6 @@ def avg_max_tree_depth(
     """Measure average maximum tree depth in the forest."""
     depth = vmap(tree_actual_depth)(split_tree)
     return depth.mean(-1)
-
-
-def multivariate_rhat(chains: Real[Any, 'chain sample dim']) -> Float[Array, '']:
-    """
-    Compute the multivariate Gelman-Rubin R-hat.
-
-    Parameters
-    ----------
-    chains
-        Independent chains of samples of a vector.
-
-    Returns
-    -------
-    Multivariate R-hat statistic.
-
-    Raises
-    ------
-    ValueError
-        If there are not enough chains or samples.
-    """
-    chains = jnp.asarray(chains)
-    m, n, p = chains.shape
-
-    if m < 2:  # pragma: no cover
-        msg = 'Need at least 2 chains'
-        raise ValueError(msg)
-    if n < 2:  # pragma: no cover
-        msg = 'Need at least 2 samples per chain'
-        raise ValueError(msg)
-
-    chain_means = jnp.mean(chains, axis=1)
-
-    def compute_chain_cov(
-        chain_samples: Float[Array, 'sample dim'], chain_mean: Float[Array, ' dim']
-    ) -> Float[Array, 'dim dim']:
-        centered = chain_samples - chain_mean
-        return jnp.dot(centered.T, centered) / (n - 1)
-
-    within_chain_covs = vmap(compute_chain_cov)(chains, chain_means)
-    W = jnp.mean(within_chain_covs, axis=0)
-
-    overall_mean = jnp.mean(chain_means, axis=0)
-    chain_mean_diffs = chain_means - overall_mean
-    B = (n / (m - 1)) * jnp.dot(chain_mean_diffs.T, chain_mean_diffs)
-
-    V_hat = ((n - 1) / n) * W + ((m + 1) / (m * n)) * B
-
-    # Add regularization to W for numerical stability
-    gershgorin = jnp.max(jnp.sum(jnp.abs(W), axis=1))
-    regularization = jnp.finfo(W.dtype).eps * len(W) * gershgorin
-    W_reg = W + regularization * jnp.eye(p)
-
-    # Compute max(eigvals(W^-1 V_hat))
-    L = jnp.linalg.cholesky(W_reg)
-    # Solve L @ L.T @ x = V_hat @ x = λ @ W @ x
-    # This is equivalent to solving (L^-1 V_hat L^-T) @ y = λ @ y
-    L_1V = solve_triangular(L, V_hat, lower=True)
-    L_1VL_T = solve_triangular(L, L_1V.T, lower=True).T
-    eigenvals = jnp.linalg.eigvalsh(L_1VL_T)
-
-    return jnp.max(eigenvals)
-
-
-def rhat(chains: Real[Any, 'chain sample']) -> Float[Array, '']:
-    """
-    Compute the univariate Gelman-Rubin R-hat.
-
-    Parameters
-    ----------
-    chains
-        Independent chains of samples of a scalar.
-
-    Returns
-    -------
-    Univariate R-hat statistic.
-    """
-    chains = jnp.asarray(chains)
-    return multivariate_rhat(chains[:, :, None])
 
 
 def test_rhat(keys: split) -> None:

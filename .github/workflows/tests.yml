@@ -197,7 +197,7 @@ jobs:
         run: RPY2_CFFI_MODE=ABI make asv-publish
 
       - name: Generate documentation
-        run: make docs docs-latest
+        run: RPY2_CFFI_MODE=ABI make docs docs-latest
 
       - name: Save documentation
         uses: actions/upload-artifact@v7

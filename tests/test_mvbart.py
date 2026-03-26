@@ -33,6 +33,7 @@ from jax import random, vmap
 from jaxtyping import Array, Float, Float32, Int32, Key, UInt32
 from numpy.testing import assert_allclose, assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
+from pytest_subtests import SubTests
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
 from bartz import Bart
@@ -531,6 +532,14 @@ class TestMVBartSteps:
             assert mv_state.resid.shape == (k, y.shape[1])
 
 
+class MVData(NamedTuple):
+    """Dataset for testing in `TestMVBartInterface`."""
+
+    x: Float32[Array, 'p n']
+    y: Float32[Array, 'k n']
+    w: Float32[Array, ' n'] | None = None
+
+
 class TestMVBartInterface:
     """Tests for the high-level Bart class with multivariate y."""
 
@@ -540,9 +549,7 @@ class TestMVBartInterface:
         return request.param
 
     @pytest.fixture
-    def mv_data(
-        self, keys: split, mv_data_shape: tuple[int, int, int]
-    ) -> tuple[Float32[Array, 'p n'], Float32[Array, 'k n']]:
+    def mv_data(self, keys: split, mv_data_shape: tuple[int, int, int]) -> MVData:
         """Generate a toy multivariate dataset."""
         n, p, k = mv_data_shape
         dgp = gen_data(
@@ -556,62 +563,94 @@ class TestMVBartInterface:
             sigma2_quad=0.5,
             sigma2_eps=0.1,
         )
-        return dgp.x, dgp.y
+        return MVData(dgp.x, dgp.y)
 
-    def test_initialization_and_shapes(self, mv_data: tuple) -> None:
+    @pytest.fixture
+    def example_data(self, keys: split) -> MVData:
+        """Return a small nonsense dataset for tests that don't need realistic data."""
+        return MVData(
+            random.normal(keys.pop(), (2, 5)),
+            random.normal(keys.pop(), (3, 5)),
+            random.normal(keys.pop(), (5,)),
+        )
+
+    def test_initialization_and_shapes(self, keys: split, mv_data: MVData) -> None:
         """Test that MV Bart predicts with correct shapes."""
-        X, Y = mv_data
-        k, n = Y.shape
-        nskip, ndpost = 10, 50
+        k, n = mv_data.y.shape
         n_test = 40
-        p = X.shape[0]
+        p = mv_data.x.shape[0]
 
         model = Bart(
-            x_train=X, y_train=Y, num_trees=10, ndpost=ndpost, nskip=nskip, num_chains=2
+            x_train=mv_data.x,
+            y_train=mv_data.y,
+            num_trees=10,
+            ndpost=50,
+            nskip=10,
+            num_chains=2,
         )
 
         # test predict shape
-        X_test = random.normal(random.key(1), (p, n_test))
-        y_pred = model.predict(X_test)
+        x_test = random.normal(keys.pop(), (p, n_test))
+        y_pred = model.predict(x_test)
         assert y_pred.shape == (model.ndpost, k, n_test)
 
         # yhat_train shapes
         assert model.yhat_train.shape == (model.ndpost, k, n)
         assert model.yhat_train_mean.shape == (k, n)
 
-    def test_mv_rejects_binary(self) -> None:
-        """MV + binary should raise."""
-        X = jnp.ones((2, 5))
-        y = jnp.array(
-            [[True, False, True, False, True], [False, True, False, True, False]]
-        )
-        with pytest.raises(ValueError, match='Multivariate'):
-            Bart(x_train=X, y_train=y, num_trees=2, ndpost=4, nskip=2, num_chains=None)
+        # config params shape
+        assert model.sigest.shape == (k,)
+        assert model.offset.shape == (k,)
 
-    def test_mv_rejects_weights(self) -> None:
-        """MV + weights should raise."""
-        X = jnp.ones((2, 5))
-        y = jnp.ones((3, 5))
-        w = jnp.ones(5)
-        with pytest.raises(ValueError, match='Weights'):
+    def test_scalar_params(self, example_data: MVData, subtests: SubTests) -> None:
+        """Test that scalar configuration params are broadcasted."""
+        kwargs: dict = dict(ndpost=0, nskip=0)
+        k, _ = example_data.y.shape
+
+        with subtests.test('offset'):
+            bart = Bart(example_data.x, example_data.y, offset=0.0, **kwargs)
+            assert bart.offset.shape == (k,)
+
+        with subtests.test('sigest'):
+            bart = Bart(example_data.x, example_data.y, sigest=1.0, **kwargs)
+            assert bart.sigest.shape == (k,)
+
+        with subtests.test('lamda'):
+            bart = Bart(example_data.x, example_data.y, lamda=1.0, **kwargs)
+            assert bart.sigest is None
+            assert bart._mcmc_state.error_cov_scale.shape == (k, k)
+
+    def test_mv_rejects_binary(self, example_data: MVData) -> None:
+        """MV + binary should raise."""
+        with pytest.raises(ValueError, match='Multivariate'):
             Bart(
-                x_train=X,
-                y_train=y,
-                w=w,
+                x_train=example_data.x,
+                y_train=example_data.y > 0,
                 num_trees=2,
                 ndpost=4,
                 nskip=2,
                 num_chains=None,
             )
 
-    def test_mv_rejects_pbart(self) -> None:
+    def test_mv_rejects_weights(self, example_data: MVData) -> None:
+        """MV + weights should raise."""
+        with pytest.raises(ValueError, match='Weights'):
+            Bart(
+                x_train=example_data.x,
+                y_train=example_data.y,
+                w=example_data.w,
+                num_trees=2,
+                ndpost=4,
+                nskip=2,
+                num_chains=None,
+            )
+
+    def test_mv_rejects_pbart(self, example_data: MVData) -> None:
         """MV + pbart should raise."""
-        X = jnp.ones((2, 5))
-        y = jnp.ones((3, 5))
         with pytest.raises(ValueError, match='wbart'):
             Bart(
-                x_train=X,
-                y_train=y,
+                x_train=example_data.x,
+                y_train=example_data.y,
                 type='pbart',
                 num_trees=2,
                 ndpost=4,
@@ -619,23 +658,26 @@ class TestMVBartInterface:
                 num_chains=None,
             )
 
-    def test_mv_sigma_is_none(self, mv_data: tuple) -> None:
+    def test_mv_sigma_is_none(self, mv_data: MVData) -> None:
         """Sigma and sigma_ should return None for MV."""
-        X, Y = mv_data
         model = Bart(
-            x_train=X, y_train=Y, num_trees=5, ndpost=10, nskip=5, num_chains=None
+            x_train=mv_data.x,
+            y_train=mv_data.y,
+            num_trees=5,
+            ndpost=10,
+            nskip=5,
+            num_chains=None,
         )
         assert model.sigma is None
         assert model.sigma_ is None
         assert model.sigma_mean is None
         assert model.sigest is not None
-        assert model.sigest.shape == (Y.shape[0],)
+        assert model.sigest.shape == (mv_data.y.shape[0],)
 
-    def test_mvbart_convergence(self, mv_data: tuple) -> None:
+    def test_mvbart_convergence(self, mv_data: MVData, keys: split) -> None:
         """Test that MV Bart chains converge using R-hat."""
-        X_train, Y_train = mv_data
-        _, n_train = X_train.shape
-        k_dim = Y_train.shape[0]
+        _, n_train = mv_data.x.shape
+        k_dim = mv_data.y.shape[0]
 
         num_chains = 4
         ndpost = 2000
@@ -645,14 +687,14 @@ class TestMVBartInterface:
         num_trees = 100
 
         model = Bart(
-            x_train=X_train,
-            y_train=Y_train,
+            x_train=mv_data.x,
+            y_train=mv_data.y,
             num_trees=num_trees,
             ndpost=ndpost,
             nskip=nskip,
             keepevery=keepevery,
             num_chains=num_chains,
-            seed=0,
+            seed=keys.pop(),
         )
 
         # Check yhat convergence

@@ -103,8 +103,8 @@ class Bart(Module):
         The test predictors.
     type
         The type of regression. 'wbart' for continuous regression, 'pbart' for
-        binary regression with probit link. Multivariate regression only support
-        'wbart'.
+        binary regression with probit link. Multivariate regression only
+        supports 'wbart'.
     sparse
         Whether to activate variable selection on the predictors as done in
         [1]_.
@@ -647,7 +647,11 @@ class Bart(Module):
         sigdf: FloatLike,
         sigquant: FloatLike,
         lamda: FloatLike | Float[Array, ' k'] | None,
-    ) -> tuple[Float32[Array, ''] | Float32[Array, 'k k'] | None, ...]:
+    ) -> tuple[
+        Float32[Array, ''] | None,
+        Float32[Array, ''] | Float32[Array, 'k k'] | None,
+        Float32[Array, ''] | Float32[Array, ' k'] | None,
+    ]:
         """Return (error_cov_df, error_cov_scale, sigest)."""
         if y_train.dtype == bool:
             if sigest is not None or lamda is not None:
@@ -660,6 +664,7 @@ class Bart(Module):
             n = y_train.shape[-1]
             if sigest is not None:
                 sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
+                sigest2 = jnp.broadcast_to(sigest2, y_train.shape[:-1])
             elif n < 2:
                 sigest2 = jnp.ones(y_train.shape[:-1])
             elif n <= x_train.shape[0]:
@@ -813,8 +818,10 @@ class Bart(Module):
 
         # leaf prior precision matrix
         leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu))
-        if leaf_prior_cov_inv.ndim:
-            leaf_prior_cov_inv = jnp.diag(leaf_prior_cov_inv)
+        if y_train.ndim == 2:
+            leaf_prior_cov_inv = jnp.diag(
+                jnp.broadcast_to(leaf_prior_cov_inv, y_train.shape[:-1])
+            )
         return leaf_prior_cov_inv
 
     @staticmethod

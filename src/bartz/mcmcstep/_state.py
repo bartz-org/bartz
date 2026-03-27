@@ -281,10 +281,8 @@ class State(Module):
     X: UInt[Array, 'p n'] = field(data=True)
     """The predictors."""
 
-    y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'] = field(
-        data=True
-    )
-    """The response. If the data type is `bool`, the model is binary regression."""
+    binary_y: None | Bool[Array, ' n'] = field(data=True)
+    """The response as booleans for binary regression, `None` for continuous."""
 
     z: None | Float32[Array, '*chains n'] = field(chains=True, data=True)
     """The latent variable for binary regression. `None` in continuous
@@ -697,7 +695,7 @@ def init(
     # initialize all remaining stuff and put it in an unsharded state
     state = State(
         X=X,
-        y=y,
+        binary_y=jnp.asarray(y, dtype=bool) if is_binary else None,
         z=_LazyArray(jnp.full, resid_shape, offset) if is_binary else None,
         offset=offset,
         resid=_LazyArray(jnp.zeros, resid_shape)
@@ -759,7 +757,7 @@ def init(
 
     # delete big input arrays such that they can be deleted as soon as they
     # are sharded, only those arrays that contain an (n,) sized axis
-    del X, y, error_scale
+    del X, error_scale
 
     # move all arrays to the appropriate device
     state = _shard_state(state)
@@ -767,9 +765,13 @@ def init(
     # calculate initial resid in the continuous outcome case, such that y and
     # offset are already sharded if needed
     if state.resid is None:
-        resid = _LazyArray(_initial_resid, resid_shape, state.y, state.offset)
+        sharded_y = _shard_leaf(y, None, -1, state.config.mesh)
+        del y
+        resid = _LazyArray(_initial_resid, resid_shape, sharded_y, state.offset)
         resid = _shard_leaf(resid, 0, -1, state.config.mesh)
         state = replace(state, resid=resid)
+    else:
+        del y
 
     # calculate prec_scale after sharding to do the calculation on the right
     # devices

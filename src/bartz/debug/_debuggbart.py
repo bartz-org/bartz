@@ -141,9 +141,16 @@ class debug_mc_gbart(mc_gbart):
         return jnp.sqrt(jnp.reciprocal(error_cov_inv))
 
     def compare_resid(
-        self,
+        self, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = None
     ) -> tuple[Float32[Array, 'mc_cores n'], Float32[Array, 'mc_cores n']]:
         """Re-compute residuals to compare them with the updated ones.
+
+        Parameters
+        ----------
+        y
+            The response variable. Required for continuous regression (since
+            ``State`` does not store ``y`` in continuous mode). Ignored for
+            binary regression (where ``State.z`` is used instead).
 
         Returns
         -------
@@ -161,7 +168,8 @@ class debug_mc_gbart(mc_gbart):
         if bart.z is not None:
             ref = bart.z
         else:
-            ref = bart.y
+            assert y is not None, 'y is required for continuous regression'
+            ref = jnp.asarray(y)
         resid2 = ref - (trees + bart.offset)
 
         return resid1, resid2

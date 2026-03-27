@@ -1,0 +1,19 @@
+{
+  "enableAllProjectMcpServers": false,
+  "permissions": {
+	  "allow": [
+		  "Edit(/.claude/worktrees/**)"
+	  ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "allowWrite": [
+        "~/Library/Caches/uv",
+        "/private/tmp/Rtmp*"
+      ]
+    }
+  }
+}

@@ -327,7 +327,7 @@ class TestMVBartIntegration:
 
         st_uv = State(
             X=X,
-            y=y,
+            binary_y=None,
             resid=resid,
             error_cov_df=df_prior,
             error_cov_scale=scale_prior,
@@ -341,7 +341,7 @@ class TestMVBartIntegration:
 
         st_mv = State(
             X=X,
-            y=y[None, :],
+            binary_y=None,
             resid=resid[None, :],
             error_cov_df=df_prior,
             error_cov_scale=jnp.array([[scale_prior]]),

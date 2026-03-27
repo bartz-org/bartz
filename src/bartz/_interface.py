@@ -434,7 +434,7 @@ class Bart(Module):
     @cached_property
     def prob_test(self) -> Float32[Array, 'ndpost m'] | None:
         """The posterior probability of y being True at `x_test` for each MCMC iteration."""
-        if self.yhat_test is None or self._mcmc_state.y.dtype != bool:
+        if self.yhat_test is None or self._mcmc_state.binary_y is None:
             return None
         else:
             return ndtr(self.yhat_test)
@@ -450,7 +450,7 @@ class Bart(Module):
     @cached_property
     def prob_train(self) -> Float32[Array, 'ndpost n'] | None:
         """The posterior probability of y being True at `x_train` for each MCMC iteration."""
-        if self._mcmc_state.y.dtype == bool:
+        if self._mcmc_state.binary_y is not None:
             return ndtr(self.yhat_train)
         else:
             return None
@@ -479,7 +479,7 @@ class Bart(Module):
             return None
         assert self._main_trace.error_cov_inv is not None
         # not meaningful for MV (error_cov_inv is a matrix)
-        if self._mcmc_state.y.ndim == 2:
+        if self._mcmc_state.offset.ndim == 1:
             return None
         return jnp.sqrt(
             jnp.reciprocal(
@@ -504,7 +504,7 @@ class Bart(Module):
         if error_cov_inv is None:
             return None
         # not meaningful for MV (error_cov_inv is a matrix)
-        if self._mcmc_state.y.ndim == 2:
+        if self._mcmc_state.offset.ndim == 1:
             return None
         return jnp.sqrt(jnp.reciprocal(error_cov_inv)).reshape(-1)
 
@@ -552,7 +552,7 @@ class Bart(Module):
         Not defined with binary regression because it's error-prone, typically
         the right thing to consider would be `prob_test_mean`.
         """
-        if self.yhat_test is None or self._mcmc_state.y.dtype == bool:
+        if self.yhat_test is None or self._mcmc_state.binary_y is not None:
             return None
         else:
             return self.yhat_test.mean(axis=0)
@@ -570,7 +570,7 @@ class Bart(Module):
         Not defined with binary regression because it's error-prone, typically
         the right thing to consider would be `prob_train_mean`.
         """
-        if self._mcmc_state.y.dtype == bool:
+        if self._mcmc_state.binary_y is not None:
             return None
         else:
             return self.yhat_train.mean(axis=0)

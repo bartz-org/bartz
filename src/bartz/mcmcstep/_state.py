@@ -26,6 +26,7 @@
 
 from collections.abc import Callable, Hashable
 from dataclasses import fields, replace
+from enum import Enum
 from functools import partial, wraps
 from math import log2
 from typing import Any, Literal, TypedDict, TypeVar
@@ -51,6 +52,13 @@ from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree, Shaped, UInt
 
 from bartz.grove import tree_depths
 from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
+
+
+class OutcomeType(str, Enum):
+    """Whether the regression outcome is continuous or binary (probit)."""
+
+    continuous = 'continuous'
+    binary = 'binary'
 
 
 def field(*, chains: bool = False, data: bool = False, **kwargs: Any):  # noqa: ANN202
@@ -326,7 +334,8 @@ class State(Module):
 
 
 def _init_shape_shifting_parameters(
-    y: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
+    y: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    outcome_type: OutcomeType,
     offset: Float32[Array, ''] | Float32[Array, ' k'],
     error_scale: Float32[Any, ' n'] | None,
     error_cov_df: float | Float32[Any, ''] | None,
@@ -345,8 +354,9 @@ def _init_shape_shifting_parameters(
     Parameters
     ----------
     y
-        The response variable; the outcome type is deduced from `y` and then
-        all other parameters are checked against it.
+        The response variable (used only for shape checks).
+    outcome_type
+        Whether the regression is continuous or binary.
     offset
         The offset to add to the predictions.
     error_scale
@@ -374,11 +384,11 @@ def _init_shape_shifting_parameters(
     Raises
     ------
     ValueError
-        If `y` is binary and multivariate.
+        If outcome is binary and multivariate.
     """
     # determine outcome kind, binary/continuous x univariate/multivariate
-    is_binary = y.dtype == bool
-    kshape = y.shape[:-1]
+    is_binary = outcome_type is OutcomeType.binary
+    kshape = offset.shape
 
     # Binary vs continuous
     if is_binary:
@@ -401,8 +411,8 @@ def _init_shape_shifting_parameters(
             # inverse gamma prior: alpha = df / 2, beta = scale / 2
             error_cov_inv = error_cov_df / error_cov_scale
 
+    assert y.shape[:-1] == kshape
     assert leaf_prior_cov_inv.shape == 2 * kshape
-    assert offset.shape == kshape
 
     return is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale
 
@@ -473,7 +483,8 @@ class _LazyArray(Module):
 def init(
     *,
     X: UInt[Any, 'p n'],
-    y: Float32[Any, ' n'] | Float32[Any, ' k n'] | Bool[Any, ' n'],
+    y: Float32[Any, ' n'] | Float32[Any, ' k n'],
+    outcome_type: OutcomeType = 'continuous',
     offset: float | Float32[Any, ''] | Float32[Any, ' k'],
     max_split: UInt[Any, ' p'],
     num_trees: int,
@@ -508,9 +519,11 @@ def init(
     X
         The predictors. Note this is trasposed compared to the usual convention.
     y
-        The response. If the data type is `bool`, the regression model is binary
-        regression with probit. If two-dimensional, the outcome is multivariate
-        with the first axis indicating the component.
+        The response. If two-dimensional, the outcome is multivariate with the
+        first axis indicating the component. For binary data, non-zero means 1,
+        zero means 0.
+    outcome_type
+        Whether the regression is continuous or binary (probit).
     offset
         Constant shift added to the sum of trees. 0 if not specified.
     max_split
@@ -617,7 +630,7 @@ def init(
     Raises
     ------
     ValueError
-        If `y` is boolean and arguments unused in binary regression are set.
+        If arguments unused in binary regression are set.
 
     Notes
     -----
@@ -634,13 +647,23 @@ def init(
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
     max_split = jnp.asarray(max_split)
 
+    # normalize outcome_type to enum
+    assert y.dtype == jnp.float32
+    outcome_type = OutcomeType(outcome_type)
+
     # check p_nonterminal and pad it with a 0 at the end (still not final shape)
     p_nonterminal = _parse_p_nonterminal(p_nonterminal)
 
     # process arguments that change depending on outcome type
     is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale = (
         _init_shape_shifting_parameters(
-            y, offset, error_scale, error_cov_df, error_cov_scale, leaf_prior_cov_inv
+            y,
+            outcome_type,
+            offset,
+            error_scale,
+            error_cov_df,
+            error_cov_scale,
+            leaf_prior_cov_inv,
         )
     )
 
@@ -695,7 +718,7 @@ def init(
     # initialize all remaining stuff and put it in an unsharded state
     state = State(
         X=X,
-        binary_y=jnp.asarray(y, dtype=bool) if is_binary else None,
+        binary_y=jnp.asarray(y, bool) if is_binary else None,
         z=_LazyArray(jnp.full, resid_shape, offset) if is_binary else None,
         offset=offset,
         resid=_LazyArray(jnp.zeros, resid_shape)

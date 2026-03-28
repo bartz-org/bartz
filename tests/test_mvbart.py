@@ -646,12 +646,12 @@ class TestMVBartInterface:
             )
 
     def test_mv_rejects_pbart(self, example_data: MVData) -> None:
-        """MV + pbart should raise."""
-        with pytest.raises(ValueError, match='wbart'):
+        """MV + binary should raise."""
+        with pytest.raises(ValueError, match='continuous'):
             Bart(
                 x_train=example_data.x,
                 y_train=example_data.y,
-                type='pbart',
+                outcome_type='binary',
                 num_trees=2,
                 ndpost=4,
                 nskip=2,

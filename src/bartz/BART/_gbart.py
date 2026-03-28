@@ -270,7 +270,7 @@ class mc_gbart(Module):
             x_train=x_train,
             y_train=y_train,
             x_test=x_test,
-            type=type,
+            outcome_type='binary' if type == 'pbart' else 'continuous',
             sparse=sparse,
             theta=theta,
             a=a,

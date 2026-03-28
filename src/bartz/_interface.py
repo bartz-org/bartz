@@ -55,7 +55,7 @@ from bartz.jaxext import is_key
 from bartz.jaxext.scipy.special import ndtri
 from bartz.jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
-from bartz.mcmcstep import make_p_nonterminal
+from bartz.mcmcstep import OutcomeType, make_p_nonterminal
 from bartz.mcmcstep._state import get_num_chains
 
 FloatLike = float | Float[Any, '']
@@ -101,10 +101,10 @@ class Bart(Module):
         `k` is the number of response components, as introduced in [3]_.
     x_test
         The test predictors.
-    type
-        The type of regression. 'wbart' for continuous regression, 'pbart' for
-        binary regression with probit link. Multivariate regression only
-        supports 'wbart'.
+    outcome_type
+        The type of regression. ``'continuous'`` for continuous regression,
+        ``'binary'`` for binary regression with probit link. Multivariate
+        regression only supports ``'continuous'``.
     sparse
         Whether to activate variable selection on the predictors as done in
         [1]_.
@@ -303,7 +303,7 @@ class Bart(Module):
         ),
         *,
         x_test: Real[Array, 'p m'] | DataFrame | None = None,
-        type: Literal['wbart', 'pbart'] = 'wbart',  # noqa: A002
+        outcome_type: OutcomeType = 'continuous',
         sparse: bool = False,
         theta: FloatLike | None = None,
         a: FloatLike = 0.5,
@@ -348,8 +348,8 @@ class Bart(Module):
             self._check_same_length(x_train, w)
 
         # check data types are correct for continuous/binary/multivariate regression
-        self._check_type_settings(y_train, type, w)
-        # from here onwards, the type is determined by y_train.dtype == bool
+        self._check_type_settings(y_train, outcome_type, w)
+        # from here onwards, the outcome type is determined by y_train.dtype == bool
 
         # process sparsity settings
         theta, a, b, rho = self._process_sparsity_settings(
@@ -713,11 +713,12 @@ class Bart(Module):
     @staticmethod
     def _check_type_settings(
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
-        type: str,  # noqa: A002
+        outcome_type: OutcomeType,
         w: Float[Array, ' n'] | None,
     ) -> None:
-        match type:
-            case 'wbart':
+        outcome_type = OutcomeType(outcome_type)
+        match outcome_type:
+            case OutcomeType.continuous:
                 if y_train.ndim == 2 and w is not None:
                     msg = "Weights 'w' are not supported for multivariate regression."
                     raise ValueError(msg)
@@ -727,9 +728,9 @@ class Bart(Module):
                         f' got {y_train.dtype=} instead.'
                     )
                     raise TypeError(msg)
-            case 'pbart':
+            case OutcomeType.binary:
                 if y_train.ndim == 2:
-                    msg = "Multivariate regression requires type='wbart'."
+                    msg = "Multivariate regression requires outcome_type='continuous'."
                     raise ValueError(msg)
                 if w is not None:
                     msg = 'Binary regression does not support weights, set `w=None`'
@@ -740,9 +741,6 @@ class Bart(Module):
                         f' got {y_train.dtype=} instead.'
                     )
                     raise TypeError(msg)
-            case _:
-                msg = f'Invalid {type=}'
-                raise ValueError(msg)
 
     @staticmethod
     def _process_sparsity_settings(

@@ -33,7 +33,7 @@ from warnings import warn
 
 from equinox import Module
 from jax import device_count
-from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real
+from jaxtyping import Array, Float, Float32, Int32, Key, Real
 
 from bartz import mcmcloop, mcmcstep
 from bartz._interface import Bart, DataFrame, FloatLike, Series
@@ -226,7 +226,7 @@ class mc_gbart(Module):
     def __init__(
         self,
         x_train: Real[Array, 'p n'] | DataFrame,
-        y_train: Bool[Array, ' n'] | Float32[Array, ' n'] | Series,
+        y_train: Float32[Array, ' n'] | Series,
         *,
         x_test: Real[Array, 'p m'] | DataFrame | None = None,
         type: Literal['wbart', 'pbart'] = 'wbart',  # noqa: A002

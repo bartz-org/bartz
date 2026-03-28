@@ -36,18 +36,7 @@ from equinox import Module, error_if, field
 from jax import Device, device_put, jit, lax, make_mesh
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh
-from jaxtyping import (
-    Array,
-    Bool,
-    Float,
-    Float32,
-    Int32,
-    Integer,
-    Key,
-    Real,
-    Shaped,
-    UInt,
-)
+from jaxtyping import Array, Float, Float32, Int32, Integer, Key, Real, Shaped, UInt
 from numpy import ndarray
 
 from bartz import mcmcloop, mcmcstep, prepcovars
@@ -98,7 +87,9 @@ class Bart(Module):
     y_train
         The training responses. For univariate regression, a 1D array of shape
         `(n,)`. For multivariate regression, a 2D array of shape `(k, n)` where
-        `k` is the number of response components, as introduced in [3]_.
+        `k` is the number of response components, as introduced in [3]_. For
+        binary regression, the convention is that non-zero values mean 1, zero
+        mean 0, like booleans.
     x_test
         The test predictors.
     outcome_type
@@ -192,9 +183,9 @@ class Bart(Module):
     offset
         The prior mean of the latent mean function. If not specified, it is set
         to the mean of `y_train` for continuous regression, and to
-        ``Phi^-1(mean(y_train))`` for binary regression. If `y_train` is empty,
-        `offset` is set to 0. With binary regression, if `y_train` is all
-        `False` or `True`, it is set to ``Phi^-1(1/(n+1))`` or
+        ``Phi^-1(mean(y_train != 0))`` for binary regression. If `y_train` is
+        empty, `offset` is set to 0. With binary regression, if `y_train` is
+        all zero or all non-zero, it is set to ``Phi^-1(1/(n+1))`` or
         ``Phi^-1(n/(n+1))``, respectively. For multivariate regression, can be
         a scalar (broadcast to all components) or a `(k,)` vector. If not
         specified, it is set to the per-component mean of `y_train`.
@@ -298,12 +289,10 @@ class Bart(Module):
     def __init__(
         self,
         x_train: Real[Array, 'p n'] | DataFrame,
-        y_train: (
-            Bool[Array, ' n'] | Float32[Array, ' n'] | Float32[Array, 'k n'] | Series
-        ),
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Series,
         *,
         x_test: Real[Array, 'p m'] | DataFrame | None = None,
-        outcome_type: OutcomeType = 'continuous',
+        outcome_type: OutcomeType | str = 'continuous',
         sparse: bool = False,
         theta: FloatLike | None = None,
         a: FloatLike = 0.5,
@@ -348,8 +337,7 @@ class Bart(Module):
             self._check_same_length(x_train, w)
 
         # check data types are correct for continuous/binary/multivariate regression
-        self._check_type_settings(y_train, outcome_type, w)
-        # from here onwards, the outcome type is determined by y_train.dtype == bool
+        outcome_type = self._check_type_settings(y_train, outcome_type, w)
 
         # process sparsity settings
         theta, a, b, rho = self._process_sparsity_settings(
@@ -357,12 +345,12 @@ class Bart(Module):
         )
 
         # process "standardization" settings
-        offset = self._process_offset_settings(y_train, offset)
+        offset = self._process_offset_settings(y_train, outcome_type, offset)
         leaf_prior_cov_inv = self._process_leaf_variance_settings(
-            y_train, k, num_trees, tau_num
+            y_train, outcome_type, k, num_trees, tau_num
         )
         error_cov_df, error_cov_scale, sigest = self._process_error_variance_settings(
-            x_train, y_train, sigest, sigdf, sigquant, lamda
+            x_train, y_train, outcome_type, sigest, sigdf, sigquant, lamda
         )
 
         # determine splits
@@ -373,6 +361,7 @@ class Bart(Module):
         initial_state = self._setup_mcmc(
             x_train,
             y_train,
+            outcome_type,
             offset,
             w,
             max_split,
@@ -618,20 +607,14 @@ class Bart(Module):
     @staticmethod
     def _process_response_input(
         y: Shaped[Array, ' n'] | Shaped[Array, 'k n'] | Series,
-    ) -> Shaped[Array, ' n'] | Shaped[Array, 'k n']:
+    ) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
         if hasattr(y, 'to_numpy'):
             y = y.to_numpy()
-        y = jnp.asarray(y)
-        if y.ndim == 1:
-            return y
-        elif y.ndim == 2:
-            if y.dtype == bool:
-                msg = 'Multivariate binary regression is not supported.'
-                raise ValueError(msg)
-            return y.astype(jnp.float32)
-        else:
+        y = jnp.asarray(y, jnp.float32)
+        if y.ndim < 1 or y.ndim > 2:
             msg = f'y_train must be 1D (n,) or 2D (k, n). Got {y.ndim=}.'
             raise ValueError(msg)
+        return y
 
     @staticmethod
     def _check_same_length(x1: Array, x2: Array) -> None:
@@ -642,7 +625,8 @@ class Bart(Module):
     def _process_error_variance_settings(
         cls,
         x_train: Shaped[Array, 'p n'],
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+        outcome_type: OutcomeType,
         sigest: FloatLike | Float[Array, ' k'] | None,
         sigdf: FloatLike,
         sigquant: FloatLike,
@@ -653,7 +637,7 @@ class Bart(Module):
         Float32[Array, ''] | Float32[Array, ' k'] | None,
     ]:
         """Return (error_cov_df, error_cov_scale, sigest)."""
-        if y_train.dtype == bool:
+        if outcome_type is OutcomeType.binary:
             if sigest is not None or lamda is not None:
                 msg = 'Let `sigest=None` and `lamda=None` for binary regression'
                 raise ValueError(msg)
@@ -712,22 +696,16 @@ class Bart(Module):
 
     @staticmethod
     def _check_type_settings(
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
-        outcome_type: OutcomeType,
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+        outcome_type: OutcomeType | str,
         w: Float[Array, ' n'] | None,
-    ) -> None:
+    ) -> OutcomeType:
         outcome_type = OutcomeType(outcome_type)
         match outcome_type:
             case OutcomeType.continuous:
                 if y_train.ndim == 2 and w is not None:
                     msg = "Weights 'w' are not supported for multivariate regression."
                     raise ValueError(msg)
-                if y_train.dtype != jnp.float32:
-                    msg = (
-                        'Continuous regression requires y_train.dtype=float32,'
-                        f' got {y_train.dtype=} instead.'
-                    )
-                    raise TypeError(msg)
             case OutcomeType.binary:
                 if y_train.ndim == 2:
                     msg = "Multivariate regression requires outcome_type='continuous'."
@@ -735,12 +713,7 @@ class Bart(Module):
                 if w is not None:
                     msg = 'Binary regression does not support weights, set `w=None`'
                     raise ValueError(msg)
-                if y_train.dtype != bool:
-                    msg = (
-                        'Binary regression requires y_train.dtype=bool,'
-                        f' got {y_train.dtype=} instead.'
-                    )
-                    raise TypeError(msg)
+        return outcome_type
 
     @staticmethod
     def _process_sparsity_settings(
@@ -768,35 +741,29 @@ class Bart(Module):
 
     @staticmethod
     def _process_offset_settings(
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+        outcome_type: OutcomeType,
         offset: float | Float32[Any, ''] | Float32[Any, ' k'] | None,
     ) -> Float32[Array, ''] | Float32[Array, ' k']:
         """Return offset."""
         if offset is not None:
-            off = jnp.asarray(offset, dtype=jnp.float32)
-            if y_train.ndim == 2:
-                k = y_train.shape[0]
-                if off.ndim == 0:
-                    off = jnp.broadcast_to(off, (k,))
-                elif off.shape != (k,):
-                    msg = f'Expected offset shape ({k},), got {off.shape}'
-                    raise ValueError(msg)
-            return off
+            off = jnp.asarray(offset, jnp.float32)
+            return jnp.broadcast_to(off, y_train.shape[:-1])
         if y_train.shape[-1] < 1:
             return jnp.zeros(y_train.shape[:-1])
-        else:
-            mean = y_train.mean(-1)
 
-        if y_train.dtype == bool:
-            bound = 1 / (1 + y_train.size)
+        if outcome_type is OutcomeType.binary:
+            mean = (y_train != 0).mean(-1)
+            bound = 1 / (1 + y_train.shape[-1])
             mean = jnp.clip(mean, bound, 1 - bound)
             return ndtri(mean)
         else:
-            return mean
+            return y_train.mean(-1)
 
     @staticmethod
     def _process_leaf_variance_settings(
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+        outcome_type: OutcomeType,
         k: FloatLike,
         num_trees: int,
         tau_num: FloatLike | None,
@@ -804,7 +771,7 @@ class Bart(Module):
         """Return `leaf_prior_cov_inv`."""
         # determine `tau_num` if not specified
         if tau_num is None:
-            if y_train.dtype == bool:
+            if outcome_type is OutcomeType.binary:
                 tau_num = 3.0
             elif y_train.shape[-1] < 2:
                 tau_num = jnp.ones(y_train.shape[:-1])
@@ -848,7 +815,8 @@ class Bart(Module):
     @staticmethod
     def _setup_mcmc(
         x_train: Real[Array, 'p n'],
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+        outcome_type: OutcomeType,
         offset: Float32[Array, ''] | Float32[Array, ' k'],
         w: Float[Array, ' n'] | None,
         max_split: UInt[Array, ' p'],
@@ -884,6 +852,7 @@ class Bart(Module):
             X=x_train,
             # copy y_train because it's going to be donated in the mcmc loop
             y=jnp.array(y_train),
+            outcome_type=outcome_type,
             offset=offset,
             error_scale=w,
             max_split=max_split,

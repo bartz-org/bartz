@@ -37,7 +37,7 @@ from jax.scipy.special import ndtr
 from jaxtyping import Array, Float, Float32, Int32, Key, Real
 
 from bartz import mcmcloop, mcmcstep
-from bartz._interface import Bart, DataFrame, FloatLike, Series
+from bartz._interface import Bart, DataFrame, FloatLike, PredictKind, Series
 from bartz.jaxext import get_default_device, jit_active
 
 
@@ -317,7 +317,9 @@ class mc_gbart(Module):
 
         # predict at test points
         if x_test is not None:
-            self._yhat_test = self._bart.predict(x_test)
+            self._yhat_test = self._bart.predict(
+                x_test, kind=PredictKind.latent_samples
+            )
 
     # Public attributes from Bart
 
@@ -450,7 +452,7 @@ class mc_gbart(Module):
     @cached_property
     def yhat_train(self) -> Float32[Array, 'ndpost n']:
         """The conditional posterior mean at `x_train` for each MCMC iteration."""
-        return self._bart.predict('train')
+        return self._bart.predict('train', kind=PredictKind.latent_samples)
 
     @cached_property
     def yhat_train_mean(self) -> Float32[Array, ' n'] | None:
@@ -470,7 +472,7 @@ class mc_gbart(Module):
         self, x_test: Real[Array, 'p m'] | DataFrame
     ) -> Float32[Array, 'ndpost m']:
         """
-        Compute the posterior mean at `x_test` for each MCMC iteration.
+        Evaluate the sum-of-trees at `x_test` for each MCMC iteration.
 
         Parameters
         ----------
@@ -479,9 +481,9 @@ class mc_gbart(Module):
 
         Returns
         -------
-        The conditional posterior mean at `x_test` for each MCMC iteration.
+        Posterior samples of the latent function value at `x_test`. In the continuous case, this is the conditional mean.
         """
-        return self._bart.predict(x_test)
+        return self._bart.predict(x_test, kind=PredictKind.latent_samples)
 
 
 class gbart(mc_gbart):

@@ -384,12 +384,18 @@ class mc_gbart(Module):
     @cached_property
     def prob_train(self) -> Float32[Array, 'ndpost n'] | None:
         """The posterior probability of y being True at `x_train` for each MCMC iteration."""
-        return self._bart.prob_train
+        if self._mcmc_state.binary_y is not None:
+            return ndtr(self.yhat_train)
+        else:
+            return None
 
     @cached_property
     def prob_train_mean(self) -> Float32[Array, ' n'] | None:
         """The marginal posterior probability of y being True at `x_train`."""
-        return self._bart.prob_train_mean
+        if self.prob_train is None:
+            return None
+        else:
+            return self.prob_train.mean(axis=0)
 
     @cached_property
     def sigma(
@@ -444,18 +450,22 @@ class mc_gbart(Module):
         return self._yhat_test.mean(axis=0)
 
     @cached_property
-    def yhat_train(self) -> Float32[Array, 'ndpost n']:
+    def yhat_train(self) -> Float32[Array, 'ndpost n'] | Float32[Array, 'ndpost k n']:
         """The conditional posterior mean at `x_train` for each MCMC iteration."""
-        return self._bart.yhat_train
+        x_train = self._mcmc_state.X
+        return self._bart._predict(x_train)  # noqa: SLF001
 
     @cached_property
-    def yhat_train_mean(self) -> Float32[Array, ' n'] | None:
+    def yhat_train_mean(self) -> Float32[Array, ' n'] | Float32[Array, 'k n'] | None:
         """The marginal posterior mean at `x_train`.
 
         Not defined with binary regression because it's error-prone, typically
         the right thing to consider would be `prob_train_mean`.
         """
-        return self._bart.yhat_train_mean
+        if self._mcmc_state.binary_y is not None:
+            return None
+        else:
+            return self.yhat_train.mean(axis=0)
 
     # Public methods from Bart
 

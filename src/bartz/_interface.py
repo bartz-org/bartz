@@ -34,7 +34,6 @@ import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field
 from jax import Device, device_put, jit, lax, make_mesh
-from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh
 from jaxtyping import Array, Float, Float32, Int32, Integer, Key, Real, Shaped, UInt
 from numpy import ndarray
@@ -411,22 +410,6 @@ class Bart(Module):
         return self._mcmc_state.forest.split_tree.shape[-2]
 
     @cached_property
-    def prob_train(self) -> Float32[Array, 'ndpost n'] | None:
-        """The posterior probability of y being True at `x_train` for each MCMC iteration."""
-        if self._mcmc_state.binary_y is not None:
-            return ndtr(self.yhat_train)
-        else:
-            return None
-
-    @cached_property
-    def prob_train_mean(self) -> Float32[Array, ' n'] | None:
-        """The marginal posterior probability of y being True at `x_train`."""
-        if self.prob_train is None:
-            return None
-        else:
-            return self.prob_train.mean(axis=0)
-
-    @cached_property
     def sigma(
         self,
     ) -> (
@@ -507,24 +490,6 @@ class Bart(Module):
     def varprob_mean(self) -> Float32[Array, ' p']:
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)
-
-    @cached_property
-    def yhat_train(self) -> Float32[Array, 'ndpost n'] | Float32[Array, 'ndpost k n']:
-        """The conditional posterior mean at `x_train` for each MCMC iteration."""
-        x_train = self._mcmc_state.X
-        return self._predict(x_train)
-
-    @cached_property
-    def yhat_train_mean(self) -> Float32[Array, ' n'] | Float32[Array, 'k n'] | None:
-        """The marginal posterior mean at `x_train`.
-
-        Not defined with binary regression because it's error-prone, typically
-        the right thing to consider would be `prob_train_mean`.
-        """
-        if self._mcmc_state.binary_y is not None:
-            return None
-        else:
-            return self.yhat_train.mean(axis=0)
 
     def predict(
         self, x_test: Real[Array, 'p m'] | DataFrame

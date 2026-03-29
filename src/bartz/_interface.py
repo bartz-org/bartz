@@ -492,7 +492,7 @@ class Bart(Module):
         return self.varprob.mean(axis=0)
 
     def predict(
-        self, x_test: Real[Array, 'p m'] | DataFrame
+        self, x_test: Real[Array, 'p m'] | DataFrame | str
     ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
         """
         Compute the posterior mean at `x_test` for each MCMC iteration.
@@ -500,7 +500,8 @@ class Bart(Module):
         Parameters
         ----------
         x_test
-            The test predictors.
+            The test predictors, or the string ``'train'`` to compute
+            predictions on the training data.
 
         Returns
         -------
@@ -511,11 +512,19 @@ class Bart(Module):
         ValueError
             If `x_test` has a different format than `x_train`.
         """
-        x_test, x_test_fmt = self._process_predictor_input(x_test)
-        if x_test_fmt != self._x_train_fmt:
-            msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
-            raise ValueError(msg)
-        x_test = self._bin_predictors(x_test, self._splits)
+        if isinstance(x_test, str):
+            if x_test != 'train':
+                msg = (
+                    f"x_test must be an array, a DataFrame, or 'train', got {x_test!r}"
+                )
+                raise ValueError(msg)
+            x_test = self._mcmc_state.X
+        else:
+            x_test, x_test_fmt = self._process_predictor_input(x_test)
+            if x_test_fmt != self._x_train_fmt:
+                msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
+                raise ValueError(msg)
+            x_test = self._bin_predictors(x_test, self._splits)
         return self._predict(x_test)
 
     @staticmethod

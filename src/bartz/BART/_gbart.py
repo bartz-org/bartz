@@ -450,8 +450,7 @@ class mc_gbart(Module):
     @cached_property
     def yhat_train(self) -> Float32[Array, 'ndpost n']:
         """The conditional posterior mean at `x_train` for each MCMC iteration."""
-        x_train = self._mcmc_state.X
-        return self._bart._predict(x_train)  # noqa: SLF001
+        return self._bart.predict('train')
 
     @cached_property
     def yhat_train_mean(self) -> Float32[Array, ' n'] | None:

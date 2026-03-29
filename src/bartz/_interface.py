@@ -35,6 +35,7 @@ import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field
 from jax import Device, device_put, jit, lax, make_mesh, random
+from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh
 from jaxtyping import Array, Float, Float32, Int32, Integer, Key, Real, Shaped, UInt
@@ -46,7 +47,7 @@ from bartz.jaxext.scipy.special import ndtri
 from bartz.jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
-from bartz.mcmcstep._state import get_num_chains
+from bartz.mcmcstep._state import chol_with_gersh, get_num_chains
 
 FloatLike = float | Float[Any, '']
 
@@ -549,8 +550,7 @@ class Bart(Module):
         ------
         ValueError
             If `x_test` has a different format than `x_train`.
-        NotImplementedError
-            If `kind='outcome_samples'` is requested for multivariate regression.
+
         """
         # parse arguments
         kind = PredictKind(kind)
@@ -582,11 +582,19 @@ class Bart(Module):
         if is_binary:
             return random.bernoulli(key, mean_samples).astype(jnp.float32)
         else:
-            if latent.ndim > 2:
-                msg = 'Outcome samples are not supported for multivariate regression.'
-                raise NotImplementedError(msg)
-            sigma = self.sigma_
-            error = sigma[..., None] * random.normal(key, latent.shape)
+            if latent.ndim > 2:  # multivariate case
+                error_cov_inv = self._main_trace.error_cov_inv
+                error_cov_inv = lax.collapse(error_cov_inv, 0, -2)  # squash chains
+
+                # Cholesky of precision: error_cov_inv = L @ L^T
+                L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
+
+                # Sample z ~ N(0, I) and solve L^T @ error = z
+                # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
+                z = random.normal(key, latent.shape)  # (ndpost, k, m)
+                error = solve_triangular(L, z, trans='T', lower=True)
+            else:
+                error = self.sigma_[..., None] * random.normal(key, latent.shape)
             return latent + error
 
     def _process_x_test(

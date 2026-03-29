@@ -54,7 +54,7 @@ from bartz.grove import tree_depths
 from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 
-class OutcomeType(str, Enum):
+class OutcomeType(Enum):
     """Whether the regression outcome is continuous or binary (probit)."""
 
     continuous = 'continuous'
@@ -484,7 +484,7 @@ def init(
     *,
     X: UInt[Any, 'p n'],
     y: Float32[Any, ' n'] | Float32[Any, ' k n'],
-    outcome_type: OutcomeType = 'continuous',
+    outcome_type: OutcomeType | str = 'continuous',
     offset: float | Float32[Any, ''] | Float32[Any, ' k'],
     max_split: UInt[Any, ' p'],
     num_trees: int,

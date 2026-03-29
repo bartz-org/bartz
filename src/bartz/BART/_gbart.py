@@ -33,6 +33,7 @@ from warnings import warn
 
 from equinox import Module
 from jax import device_count
+from jax.scipy.special import ndtr
 from jaxtyping import Array, Float, Float32, Int32, Key, Real
 
 from bartz import mcmcloop, mcmcstep
@@ -222,6 +223,7 @@ class mc_gbart(Module):
     """
 
     _bart: Bart
+    _yhat_test: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'] | None = None
 
     def __init__(
         self,
@@ -269,7 +271,6 @@ class mc_gbart(Module):
         kwargs: dict = dict(
             x_train=x_train,
             y_train=y_train,
-            x_test=x_test,
             outcome_type='binary' if type == 'pbart' else 'continuous',
             sparse=sparse,
             theta=theta,
@@ -314,6 +315,10 @@ class mc_gbart(Module):
         # invoke Bart
         self._bart = Bart(**kwargs)
 
+        # predict at test points
+        if x_test is not None:
+            self._yhat_test = self._bart.predict(x_test)
+
     # Public attributes from Bart
 
     @property
@@ -332,9 +337,11 @@ class mc_gbart(Module):
         return self._bart.sigest
 
     @property
-    def yhat_test(self) -> Float32[Array, 'ndpost m'] | None:
+    def yhat_test(
+        self,
+    ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'] | None:
         """The conditional posterior mean at `x_test` for each MCMC iteration."""
-        return self._bart.yhat_test
+        return self._yhat_test
 
     # Private attributes from Bart
 
@@ -363,12 +370,16 @@ class mc_gbart(Module):
     @cached_property
     def prob_test(self) -> Float32[Array, 'ndpost m'] | None:
         """The posterior probability of y being True at `x_test` for each MCMC iteration."""
-        return self._bart.prob_test
+        if self._yhat_test is None or self._mcmc_state.binary_y is None:
+            return None
+        return ndtr(self._yhat_test)
 
     @cached_property
     def prob_test_mean(self) -> Float32[Array, ' m'] | None:
         """The marginal posterior probability of y being True at `x_test`."""
-        return self._bart.prob_test_mean
+        if self.prob_test is None:
+            return None
+        return self.prob_test.mean(axis=0)
 
     @cached_property
     def prob_train(self) -> Float32[Array, 'ndpost n'] | None:
@@ -422,13 +433,15 @@ class mc_gbart(Module):
         return self._bart.varprob_mean
 
     @cached_property
-    def yhat_test_mean(self) -> Float32[Array, ' m'] | None:
+    def yhat_test_mean(self) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
         """The marginal posterior mean at `x_test`.
 
         Not defined with binary regression because it's error-prone, typically
         the right thing to consider would be `prob_test_mean`.
         """
-        return self._bart.yhat_test_mean
+        if self._yhat_test is None or self._mcmc_state.binary_y is not None:
+            return None
+        return self._yhat_test.mean(axis=0)
 
     @cached_property
     def yhat_train(self) -> Float32[Array, 'ndpost n']:

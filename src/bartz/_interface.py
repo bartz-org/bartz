@@ -90,8 +90,6 @@ class Bart(Module):
         `k` is the number of response components, as introduced in [3]_. For
         binary regression, the convention is that non-zero values mean 1, zero
         mean 0, like booleans.
-    x_test
-        The test predictors.
     outcome_type
         The type of regression. ``'continuous'`` for continuous regression,
         ``'binary'`` for binary regression with probit link. Multivariate
@@ -283,15 +281,11 @@ class Bart(Module):
     sigest: Float32[Array, ''] | Float32[Array, ' k'] | None = None
     """The estimated standard deviation of the error used to set `lamda`."""
 
-    yhat_test: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'] | None = None
-    """The conditional posterior mean at `x_test` for each MCMC iteration."""
-
     def __init__(
         self,
         x_train: Real[Array, 'p n'] | DataFrame,
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Series,
         *,
-        x_test: Real[Array, 'p m'] | DataFrame | None = None,
         outcome_type: OutcomeType | str = 'continuous',
         sparse: bool = False,
         theta: FloatLike | None = None,
@@ -402,10 +396,6 @@ class Bart(Module):
         self._splits = splits
         self._x_train_fmt = x_train_fmt
 
-        # predict at test points
-        if x_test is not None:
-            self.yhat_test = self.predict(x_test)
-
     @property
     def ndpost(self) -> int:
         """The total number of posterior samples after burn-in across all chains.
@@ -419,22 +409,6 @@ class Bart(Module):
     def num_trees(self) -> int:
         """Return the number of trees used in the model."""
         return self._mcmc_state.forest.split_tree.shape[-2]
-
-    @cached_property
-    def prob_test(self) -> Float32[Array, 'ndpost m'] | None:
-        """The posterior probability of y being True at `x_test` for each MCMC iteration."""
-        if self.yhat_test is None or self._mcmc_state.binary_y is None:
-            return None
-        else:
-            return ndtr(self.yhat_test)
-
-    @cached_property
-    def prob_test_mean(self) -> Float32[Array, ' m'] | None:
-        """The marginal posterior probability of y being True at `x_test`."""
-        if self.prob_test is None:
-            return None
-        else:
-            return self.prob_test.mean(axis=0)
 
     @cached_property
     def prob_train(self) -> Float32[Array, 'ndpost n'] | None:
@@ -533,18 +507,6 @@ class Bart(Module):
     def varprob_mean(self) -> Float32[Array, ' p']:
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)
-
-    @cached_property
-    def yhat_test_mean(self) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
-        """The marginal posterior mean at `x_test`.
-
-        Not defined with binary regression because it's error-prone, typically
-        the right thing to consider would be `prob_test_mean`.
-        """
-        if self.yhat_test is None or self._mcmc_state.binary_y is not None:
-            return None
-        else:
-            return self.yhat_test.mean(axis=0)
 
     @cached_property
     def yhat_train(self) -> Float32[Array, 'ndpost n'] | Float32[Array, 'ndpost k n']:

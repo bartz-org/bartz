@@ -223,7 +223,7 @@ class mc_gbart(Module):
     """
 
     _bart: Bart
-    _yhat_test: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'] | None = None
+    _yhat_test: Float32[Array, 'ndpost m'] | None = None
 
     def __init__(
         self,
@@ -337,9 +337,7 @@ class mc_gbart(Module):
         return self._bart.sigest
 
     @property
-    def yhat_test(
-        self,
-    ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'] | None:
+    def yhat_test(self) -> Float32[Array, 'ndpost m'] | None:
         """The conditional posterior mean at `x_test` for each MCMC iteration."""
         return self._yhat_test
 
@@ -439,7 +437,7 @@ class mc_gbart(Module):
         return self._bart.varprob_mean
 
     @cached_property
-    def yhat_test_mean(self) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
+    def yhat_test_mean(self) -> Float32[Array, ' m'] | None:
         """The marginal posterior mean at `x_test`.
 
         Not defined with binary regression because it's error-prone, typically
@@ -450,13 +448,13 @@ class mc_gbart(Module):
         return self._yhat_test.mean(axis=0)
 
     @cached_property
-    def yhat_train(self) -> Float32[Array, 'ndpost n'] | Float32[Array, 'ndpost k n']:
+    def yhat_train(self) -> Float32[Array, 'ndpost n']:
         """The conditional posterior mean at `x_train` for each MCMC iteration."""
         x_train = self._mcmc_state.X
         return self._bart._predict(x_train)  # noqa: SLF001
 
     @cached_property
-    def yhat_train_mean(self) -> Float32[Array, ' n'] | Float32[Array, 'k n'] | None:
+    def yhat_train_mean(self) -> Float32[Array, ' n'] | None:
         """The marginal posterior mean at `x_train`.
 
         Not defined with binary regression because it's error-prone, typically

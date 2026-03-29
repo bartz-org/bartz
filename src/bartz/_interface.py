@@ -565,7 +565,7 @@ class Bart(Module):
             msg = '`key` not specified'
             raise ValueError(msg)
         w = self._process_w_test(x_test, kind, w)
-        x_test = self._process_x_test(x_test)
+        x_test = self._process_x_test(x_test, w)
 
         # get latent i.e. bare sum-of-trees predictions
         latent = self._predict(x_test)
@@ -678,7 +678,9 @@ class Bart(Module):
         return self._process_response_input(w)
 
     def _process_x_test(
-        self, x_test: Real[Array, 'p m'] | DataFrame | str
+        self,
+        x_test: Real[Array, 'p m'] | DataFrame | str,
+        w: Float32[Array, ' m'] | None,
     ) -> UInt[Array, 'p m']:
         """Convert x_test to binned format suitable for prediction."""
         if isinstance(x_test, str):
@@ -692,6 +694,8 @@ class Bart(Module):
         if x_test_fmt != self._x_train_fmt:
             msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
             raise ValueError(msg)
+        if w is not None:
+            self._check_same_length(w, x_test)
         return self._bin_predictors(x_test, self._splits)
 
     @staticmethod

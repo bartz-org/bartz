@@ -523,6 +523,7 @@ class Bart(Module):
         *,
         kind: PredictKind | str = 'mean',
         key: Key[Array, ''] | None = None,
+        w: Float[Array, ' m'] | Series | None = None,
     ) -> (
         Float32[Array, ' m']
         | Float32[Array, 'k m']
@@ -541,6 +542,10 @@ class Bart(Module):
             The kind of output. See `PredictKind` for details.
         key
             Jax random key, required when ``kind='outcome_samples'``.
+        w
+            Per-observation error scale for ``kind='outcome_samples'``.
+            Required when the model was fit with weights and ``x_test`` is
+            new data.
 
         Returns
         -------
@@ -549,7 +554,9 @@ class Bart(Module):
         Raises
         ------
         ValueError
-            If `x_test` has a different format than `x_train`.
+            If `x_test` has a different format than `x_train`, or if `w`
+            is specified when it should be `None`, or if `w` is not
+            specified when it is required.
 
         """
         # parse arguments
@@ -557,6 +564,7 @@ class Bart(Module):
         if kind is PredictKind.outcome_samples and key is None:
             msg = '`key` not specified'
             raise ValueError(msg)
+        w = self._process_w_test(x_test, kind, w)
         x_test = self._process_x_test(x_test)
 
         # get latent i.e. bare sum-of-trees predictions
@@ -565,8 +573,7 @@ class Bart(Module):
             return latent
 
         # squash predictions to (0, 1) if probit
-        is_binary = self._mcmc_state.binary_y is not None
-        if is_binary:
+        if self._mcmc_state.binary_y is not None:
             mean_samples = ndtr(latent)
         else:
             mean_samples = latent
@@ -579,23 +586,96 @@ class Bart(Module):
 
         # sample posterior
         assert kind is PredictKind.outcome_samples
-        if is_binary:
+        if self._mcmc_state.binary_y is not None:
             return random.bernoulli(key, mean_samples).astype(jnp.float32)
-        else:
-            if latent.ndim > 2:  # multivariate case
-                error_cov_inv = self._main_trace.error_cov_inv
-                error_cov_inv = lax.collapse(error_cov_inv, 0, -2)  # squash chains
 
-                # Cholesky of precision: error_cov_inv = L @ L^T
-                L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
+        # continuous case
+        if latent.ndim > 2:  # multivariate case
+            error_cov_inv = self._main_trace.error_cov_inv
+            error_cov_inv = lax.collapse(error_cov_inv, 0, -2)  # squash chains
 
-                # Sample z ~ N(0, I) and solve L^T @ error = z
-                # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
-                z = random.normal(key, latent.shape)  # (ndpost, k, m)
-                error = solve_triangular(L, z, trans='T', lower=True)
-            else:
-                error = self.sigma_[..., None] * random.normal(key, latent.shape)
-            return latent + error
+            # Cholesky of precision: error_cov_inv = L @ L^T
+            L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
+
+            # Sample z ~ N(0, I) and solve L^T @ error = z
+            # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
+            z = random.normal(key, latent.shape)  # (ndpost, k, m)
+            error = solve_triangular(L, z, trans='T', lower=True)
+        else:  # univariate case
+            error = self.sigma_[..., None] * random.normal(key, latent.shape)
+            if w is not None:
+                error *= w[None, :]
+
+        return latent + error
+
+    def _process_w_test(
+        self,
+        x_test: Real[Array, 'p m'] | DataFrame | str,
+        kind: PredictKind,
+        w: Float[Array, ' m'] | Series | None,
+    ) -> Float32[Array, ' m'] | None:
+        """Validate and resolve the error weights for prediction.
+
+        Parameters
+        ----------
+        x_test
+            The raw (not yet processed) test predictors, or ``'train'``.
+        kind
+            The prediction kind.
+        w
+            User-provided per-observation error scale, or `None`.
+
+        Returns
+        -------
+        The resolved error scale as a float32 array, or `None` if weights
+        are not applicable.
+
+        Raises
+        ------
+        ValueError
+            If `w` is specified when it should be `None`, or missing when
+            required.
+
+        """
+        x_test_is_train = isinstance(x_test, str) and x_test == 'train'
+        has_train_weights = self._mcmc_state.prec_scale is not None
+        is_binary = self._mcmc_state.binary_y is not None
+        is_multivariate = self._mcmc_state.offset.ndim == 1
+        needs_weights = (
+            kind is PredictKind.outcome_samples
+            and not is_binary
+            and not is_multivariate
+            and has_train_weights
+        )
+
+        if not needs_weights:
+            if w is not None:
+                msg = (
+                    '`w` must be `None` in this configuration'
+                    " (it is used only with kind='outcome_samples',"
+                    ' univariate continuous regression fitted with'
+                    ' weights)'
+                )
+                raise ValueError(msg)
+            return None
+
+        if x_test_is_train:
+            if w is not None:
+                msg = (
+                    "`w` must be `None` when x_test='train'"
+                    ' (training weights are used automatically)'
+                )
+                raise ValueError(msg)
+            return jnp.reciprocal(jnp.sqrt(self._mcmc_state.prec_scale))
+
+        # new test data, model was fit with weights
+        if w is None:
+            msg = (
+                '`w` is required because the model was fit with'
+                ' weights and x_test is new data'
+            )
+            raise ValueError(msg)
+        return self._process_response_input(w)
 
     def _process_x_test(
         self, x_test: Real[Array, 'p m'] | DataFrame | str

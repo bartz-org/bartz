@@ -338,11 +338,6 @@ class mc_gbart(Module):
         """The estimated standard deviation of the error used to set `lamda`."""
         return self._bart.sigest
 
-    @property
-    def yhat_test(self) -> Float32[Array, 'ndpost m'] | None:
-        """The conditional posterior mean at `x_test` for each MCMC iteration."""
-        return self._yhat_test
-
     # Private attributes from Bart
 
     @property
@@ -365,7 +360,12 @@ class mc_gbart(Module):
     def _x_train_fmt(self) -> Hashable:
         return self._bart._x_train_fmt  # noqa: SLF001
 
-    # Cached properties from Bart
+    # Properties
+
+    @property
+    def yhat_test(self) -> Float32[Array, 'ndpost m'] | None:
+        """The conditional posterior mean at `x_test` for each MCMC iteration."""
+        return self._yhat_test
 
     @cached_property
     def prob_test(self) -> Float32[Array, 'ndpost m'] | None:

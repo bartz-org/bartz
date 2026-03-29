@@ -1,6 +1,6 @@
 .. bartz/docs/reference/newinterf.rst
 ..
-.. Copyright (c) 2025, The Bartz Contributors
+.. Copyright (c) 2025-2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -26,4 +26,7 @@ New interface
 ===============
 
 .. autoclass:: bartz.Bart
+    :members:
+
+.. autoclass:: bartz.PredictKind
     :members:

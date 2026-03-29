@@ -26,6 +26,7 @@
 
 import math
 from collections.abc import Mapping, Sequence
+from enum import Enum
 from functools import cached_property, partial
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypedDict
@@ -33,7 +34,8 @@ from typing import Any, Literal, Protocol, TypedDict
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field
-from jax import Device, device_put, jit, lax, make_mesh
+from jax import Device, device_put, jit, lax, make_mesh, random
+from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh
 from jaxtyping import Array, Float, Float32, Int32, Integer, Key, Real, Shaped, UInt
 from numpy import ndarray
@@ -47,6 +49,29 @@ from bartz.mcmcstep import OutcomeType, make_p_nonterminal
 from bartz.mcmcstep._state import get_num_chains
 
 FloatLike = float | Float[Any, '']
+
+
+class PredictKind(Enum):
+    """Kind of output of `Bart.predict`."""
+
+    mean = 'mean'
+    """The posterior mean of the conditional mean, shape ``(m,)`` (or
+    ``(k, m)`` for multivariate regression)."""
+
+    mean_samples = 'mean_samples'
+    """Per-sample conditional mean, shape ``(ndpost, m)`` (or ``(ndpost,
+    k, m)``). For binary regression, this is the probit-transformed
+    sum-of-trees."""
+
+    outcome_samples = 'outcome_samples'
+    """Samples of the outcome variable, shape ``(ndpost, m)`` (or
+    ``(ndpost, k, m)``). For binary regression, these are Bernoulli
+    draws. For continuous regression, these are Gaussian draws with the
+    posterior noise variance."""
+
+    latent_samples = 'latent_samples'
+    """Raw sum-of-trees values, shape ``(ndpost, m)`` (or ``(ndpost, k,
+    m)``)."""
 
 
 class DataFrame(Protocol):
@@ -492,40 +517,94 @@ class Bart(Module):
         return self.varprob.mean(axis=0)
 
     def predict(
-        self, x_test: Real[Array, 'p m'] | DataFrame | str
-    ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
+        self,
+        x_test: Real[Array, 'p m'] | DataFrame | str,
+        *,
+        kind: PredictKind | str = 'mean',
+        key: Key[Array, ''] | None = None,
+    ) -> (
+        Float32[Array, ' m']
+        | Float32[Array, 'k m']
+        | Float32[Array, 'ndpost m']
+        | Float32[Array, 'ndpost k m']
+    ):
         """
-        Compute the posterior mean at `x_test` for each MCMC iteration.
+        Compute predictions at `x_test`.
 
         Parameters
         ----------
         x_test
             The test predictors, or the string ``'train'`` to compute
             predictions on the training data.
+        kind
+            The kind of output. See `PredictKind` for details.
+        key
+            Jax random key, required when ``kind='outcome_samples'``.
 
         Returns
         -------
-        The conditional posterior mean at `x_test` for each MCMC iteration.
+        Predictions at `x_test` in the requested format.
 
         Raises
         ------
         ValueError
             If `x_test` has a different format than `x_train`.
+        NotImplementedError
+            If `kind='outcome_samples'` is requested for multivariate regression.
         """
+        # parse arguments
+        kind = PredictKind(kind)
+        if kind is PredictKind.outcome_samples and key is None:
+            msg = '`key` not specified'
+            raise ValueError(msg)
+        x_test = self._process_x_test(x_test)
+
+        # get latent i.e. bare sum-of-trees predictions
+        latent = self._predict(x_test)
+        if kind is PredictKind.latent_samples:
+            return latent
+
+        # squash predictions to (0, 1) if probit
+        is_binary = self._mcmc_state.binary_y is not None
+        if is_binary:
+            mean_samples = ndtr(latent)
+        else:
+            mean_samples = latent
+
+        # take mean and return if no sampling requested
+        if kind is PredictKind.mean_samples:
+            return mean_samples
+        elif kind is PredictKind.mean:
+            return mean_samples.mean(axis=0)
+
+        # sample posterior
+        assert kind is PredictKind.outcome_samples
+        if is_binary:
+            return random.bernoulli(key, mean_samples).astype(jnp.float32)
+        else:
+            if latent.ndim > 2:
+                msg = 'Outcome samples are not supported for multivariate regression.'
+                raise NotImplementedError(msg)
+            sigma = self.sigma_
+            error = sigma[..., None] * random.normal(key, latent.shape)
+            return latent + error
+
+    def _process_x_test(
+        self, x_test: Real[Array, 'p m'] | DataFrame | str
+    ) -> UInt[Array, 'p m']:
+        """Convert x_test to binned format suitable for prediction."""
         if isinstance(x_test, str):
             if x_test != 'train':
                 msg = (
                     f"x_test must be an array, a DataFrame, or 'train', got {x_test!r}"
                 )
                 raise ValueError(msg)
-            x_test = self._mcmc_state.X
-        else:
-            x_test, x_test_fmt = self._process_predictor_input(x_test)
-            if x_test_fmt != self._x_train_fmt:
-                msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
-                raise ValueError(msg)
-            x_test = self._bin_predictors(x_test, self._splits)
-        return self._predict(x_test)
+            return self._mcmc_state.X
+        x_test, x_test_fmt = self._process_predictor_input(x_test)
+        if x_test_fmt != self._x_train_fmt:
+            msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
+            raise ValueError(msg)
+        return self._bin_predictors(x_test, self._splits)
 
     @staticmethod
     def _process_predictor_input(

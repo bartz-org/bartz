@@ -72,9 +72,17 @@ def step(key: Key[Array, ''], bart: State) -> State:
     state can not be used any more after calling `step`. All this applies
     outside of `jax.jit`.
     """
-    keys = split(key, 3)
+    keys = split(key, 4)
 
-    if bart.binary_y is not None:
+    if bart.binary_indices is not None:
+        # Mixed binary-continuous: error_cov_inv is already a diagonal matrix
+        # with 1s for binary components and estimated values for continuous
+        bart = step_trees(keys.pop(), bart)
+        bart = step_z(keys.pop(), bart)
+        bart = step_error_cov_inv(keys.pop(), bart)
+
+    elif bart.binary_y is not None:
+        # Pure binary
         if bart.binary_y.ndim == 1:
             error_cov_inv = jnp.array(1.0)
         else:
@@ -1391,6 +1399,9 @@ def _sample_wishart_bartlett(
 
 
 def _step_error_cov_inv_uv(key: Key[Array, ''], bart: State) -> State:
+    assert bart.error_cov_df is not None
+    assert bart.error_cov_scale is not None
+
     resid = bart.resid
     # inverse gamma prior: alpha = df / 2, beta = scale / 2
     alpha = bart.error_cov_df / 2 + resid.size / 2
@@ -1408,6 +1419,9 @@ def _step_error_cov_inv_uv(key: Key[Array, ''], bart: State) -> State:
 
 
 def _step_error_cov_inv_mv(key: Key[Array, ''], bart: State) -> State:
+    assert bart.error_cov_df is not None
+    assert bart.error_cov_scale is not None
+
     n = bart.resid.shape[-1]
     df_post = bart.error_cov_df + n
     scale_post = bart.error_cov_scale + bart.resid @ bart.resid.T
@@ -1416,13 +1430,42 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], bart: State) -> State:
     return replace(bart, error_cov_inv=prec)
 
 
+def _step_error_cov_inv_diag(key: Key[Array, ''], bart: State) -> State:
+    """Update diagonal error_cov_inv for mixed binary-continuous.
+
+    Each continuous component gets an independent inverse-gamma update
+    (like `_step_error_cov_inv_uv` repeated per component). Binary
+    components stay fixed at 1.
+    """
+    assert bart.binary_indices is not None
+    assert bart.error_cov_scale is not None
+    assert bart.error_cov_df is not None
+
+    # per-component sum of squared residuals, shape (k,)
+    norm2 = jnp.einsum('kn,kn->k', bart.resid, bart.resid)
+
+    # inverse-gamma posterior parameters
+    *_, k, n = bart.resid.shape
+    scale_diag = jnp.diag(bart.error_cov_scale)
+    alpha = bart.error_cov_df / 2 + n / 2
+    beta = scale_diag / 2 + norm2 / 2
+
+    # sample independent gamma variates for all k components
+    samples = random.gamma(key, alpha, (k,))
+    new_diag = samples / beta
+
+    # keep binary components at 1.0
+    new_diag = new_diag.at[bart.binary_indices].set(1.0)
+
+    return replace(bart, error_cov_inv=jnp.diag(new_diag))
+
+
 @named_call
 def step_error_cov_inv(key: Key[Array, ''], bart: State) -> State:
     """
     MCMC-update the inverse error covariance.
 
-    Handles both univariate and multivariate cases based on the BART state's
-    `kind` attribute.
+    Handles univariate, multivariate, and mixed binary-continuous cases.
 
     Parameters
     ----------
@@ -1436,7 +1479,9 @@ def step_error_cov_inv(key: Key[Array, ''], bart: State) -> State:
     The new BART mcmc state, with an updated `error_cov_inv`.
     """
     assert bart.error_cov_inv is not None
-    if bart.error_cov_inv.ndim == 2:
+    if bart.binary_indices is not None:
+        return _step_error_cov_inv_diag(key, bart)
+    elif bart.error_cov_inv.ndim == 2:
         return _step_error_cov_inv_mv(key, bart)
     else:
         return _step_error_cov_inv_uv(key, bart)
@@ -1460,9 +1505,19 @@ def step_z(key: Key[Array, ''], bart: State) -> State:
     """
     assert bart.z is not None
     assert bart.binary_y is not None
-    trees_plus_offset = bart.z - bart.resid
+
+    if bart.binary_indices is not None:
+        resid = bart.resid[..., bart.binary_indices, :]
+    else:
+        resid = bart.resid
+
+    trees_plus_offset = bart.z - resid
     resid = truncated_normal_onesided(key, (), ~bart.binary_y, -trees_plus_offset)
     z = trees_plus_offset + resid
+
+    if bart.binary_indices is not None:
+        resid = bart.resid.at[..., bart.binary_indices, :].set(resid)
+
     return replace(bart, z=z, resid=resid)
 
 

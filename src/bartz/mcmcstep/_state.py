@@ -24,7 +24,7 @@
 
 """Module defining the BART MCMC state and initialization."""
 
-from collections.abc import Callable, Hashable
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import fields, replace
 from enum import Enum
 from functools import partial, wraps
@@ -290,13 +290,21 @@ class State(Module):
     """The predictors."""
 
     binary_y: None | Bool[Array, ' n'] | Bool[Array, 'k n'] = field(data=True)
-    """The response as booleans for binary regression, `None` for continuous."""
+    """The response as booleans for binary regression, `None` for continuous.
+    In the mixed binary-continuous case, only the binary outcome components
+    are stored, with shape ``(kb, n)``."""
 
     z: None | Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
         chains=True, data=True
     )
     """The latent variable for binary regression. `None` in continuous
-    regression."""
+    regression. In the mixed binary-continuous case, only the binary outcome
+    components are stored, with shape ``(*chains, kb, n)``."""
+
+    binary_indices: None | Int32[Array, ' kb']
+    """The indices of binary outcome components in the full list of outcome
+    components. `None` when there are no binary components. Filled in by
+    `init` and used by `step_z` to update only the binary rows of `resid`."""
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
     """Constant shift added to the sum of trees."""
@@ -337,7 +345,7 @@ class State(Module):
 
 def _init_shape_shifting_parameters(
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
-    outcome_type: OutcomeType,
+    outcome_type: OutcomeType | list[OutcomeType],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
     error_scale: Float32[Any, ' n'] | None,
     error_cov_df: float | Float32[Any, ''] | None,
@@ -349,6 +357,7 @@ def _init_shape_shifting_parameters(
     None | Float32[Array, ''],
     None | Float32[Array, ''],
     None | Float32[Array, ''],
+    None | Int32[Array, ' kb'],
 ]:
     """
     Check and initialize parameters that change array type/shape based on outcome kind.
@@ -358,7 +367,8 @@ def _init_shape_shifting_parameters(
     y
         The response variable (used only for shape checks).
     outcome_type
-        Whether the regression is continuous or binary.
+        Whether the regression is continuous or binary. Can be a list of
+        `OutcomeType` for per-component specification in the multivariate case.
     offset
         The offset to add to the predictions.
     error_scale
@@ -373,7 +383,7 @@ def _init_shape_shifting_parameters(
     Returns
     -------
     is_binary
-        Whether the outcome is binary.
+        Whether all outcomes are binary.
     kshape
         The outcome shape, empty for univariate, (k,) for multivariate.
     error_cov_inv
@@ -382,17 +392,59 @@ def _init_shape_shifting_parameters(
         The error covariance degrees of freedom (as array).
     error_cov_scale
         The error covariance scale (as array).
+    binary_indices
+        The indices of binary outcome components, or `None` if there are none.
     """
-    # determine outcome kind, binary/continuous x univariate/multivariate
-    is_binary = outcome_type is OutcomeType.binary
     kshape = offset.shape
 
-    # Binary vs continuous
+    # determine per-component outcome kinds
+    if isinstance(outcome_type, list):
+        assert kshape, 'per-component outcome_type requires multivariate y'
+        (k,) = kshape
+        assert len(outcome_type) == k
+        binary_mask = [t is OutcomeType.binary for t in outcome_type]
+        is_binary = all(binary_mask)
+        is_mixed = any(binary_mask) and not is_binary
+    else:
+        is_binary = outcome_type is OutcomeType.binary
+        is_mixed = False
+
+    if is_mixed:
+        binary_indices = jnp.array([i for i, b in enumerate(binary_mask) if b])
+    else:
+        binary_indices = None
+
+    # All-binary
     if is_binary:
         assert error_scale is None
         assert error_cov_df is None
         assert error_cov_scale is None
         error_cov_inv = None
+
+    # Mixed binary-continuous (multivariate, diagonal error covariance)
+    elif is_mixed:
+        assert error_scale is None, (
+            'error_scale is not supported for mixed binary-continuous'
+        )
+        error_cov_df = jnp.asarray(error_cov_df)
+        error_cov_scale = jnp.asarray(error_cov_scale)
+        assert error_cov_scale.shape == 2 * kshape
+
+        # enforce diagonal error_cov_scale
+        diag = jnp.diag(jnp.diag(error_cov_scale))
+        error_cov_scale = error_if(
+            error_cov_scale,
+            jnp.any(error_cov_scale != diag),
+            'error_cov_scale must be diagonal for mixed binary-continuous',
+        )
+
+        # initialize diagonal error_cov_inv: use inv-gamma mode for continuous
+        # components, 1.0 for binary components
+        scale_diag = jnp.diag(error_cov_scale)
+        inv_diag = jnp.where(jnp.array(binary_mask), 1.0, error_cov_df / scale_diag)
+        error_cov_inv = jnp.diag(inv_diag)
+
+    # All-continuous
     else:
         error_cov_df = jnp.asarray(error_cov_df)
         error_cov_scale = jnp.asarray(error_cov_scale)
@@ -408,7 +460,37 @@ def _init_shape_shifting_parameters(
     assert y.shape[:-1] == kshape
     assert leaf_prior_cov_inv.shape == 2 * kshape
 
-    return is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale
+    return (
+        is_binary,
+        kshape,
+        error_cov_inv,
+        error_cov_df,
+        error_cov_scale,
+        binary_indices,
+    )
+
+
+def _check_splitless_vars(
+    filter_splitless_vars: int,
+    max_split: UInt[Array, ' p'],
+    offset: Float32[Array, ''] | Float32[Array, ' k'],
+) -> Float32[Array, ''] | Float32[Array, ' k']:
+    """Check there aren't too many deactivated predictors."""
+    msg = (
+        f'there are more than {filter_splitless_vars=} predictors with no splits, '
+        'please increase `filter_splitless_vars` or investigate the missing splits'
+    )
+    return error_if(offset, jnp.sum(max_split == 0) > filter_splitless_vars, msg)
+
+
+def _parse_outcome_type(
+    outcome_type: 'OutcomeType | str | Sequence[OutcomeType | str]',
+) -> 'OutcomeType | list[OutcomeType]':
+    """Normalize outcome_type to enum (or list of enums)."""
+    if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
+        return [OutcomeType(t) for t in outcome_type]
+    else:
+        return OutcomeType(outcome_type)
 
 
 def _parse_p_nonterminal(
@@ -478,7 +560,7 @@ def init(
     *,
     X: UInt[Any, 'p n'],
     y: Float32[Any, ' n'] | Float32[Any, ' k n'],
-    outcome_type: OutcomeType | str = 'continuous',
+    outcome_type: OutcomeType | str | Sequence[OutcomeType | str] = 'continuous',
     offset: float | Float32[Any, ''] | Float32[Any, ' k'],
     max_split: UInt[Any, ' p'],
     num_trees: int,
@@ -517,7 +599,9 @@ def init(
         first axis indicating the component. For binary data, non-zero means 1,
         zero means 0.
     outcome_type
-        Whether the regression is continuous or binary (probit).
+        Whether the regression is continuous or binary (probit). Can also be a
+        sequence of `OutcomeType` values, one per outcome component, for mixed
+        binary-continuous multivariate regression.
     offset
         Constant shift added to the sum of trees. 0 if not specified.
     max_split
@@ -637,19 +721,19 @@ def init(
     # configurations but don't need further processing themselves
     X = jnp.asarray(X)
     y = jnp.asarray(y)
+    assert y.dtype == jnp.float32
     offset = jnp.asarray(offset)
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
     max_split = jnp.asarray(max_split)
 
-    # normalize outcome_type to enum
-    assert y.dtype == jnp.float32
-    outcome_type = OutcomeType(outcome_type)
+    # normalize outcome_type to enum (or list of enums)
+    outcome_type = _parse_outcome_type(outcome_type)
 
     # check p_nonterminal and pad it with a 0 at the end (still not final shape)
     p_nonterminal = _parse_p_nonterminal(p_nonterminal)
 
     # process arguments that change depending on outcome type
-    is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale = (
+    is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale, binary_indices = (
         _init_shape_shifting_parameters(
             y,
             outcome_type,
@@ -699,11 +783,7 @@ def init(
     )
 
     # check there aren't too many deactivated predictors
-    msg = (
-        f'there are more than {filter_splitless_vars=} predictors with no splits, '
-        'please increase `filter_splitless_vars` or investigate the missing splits'
-    )
-    offset = error_if(offset, jnp.sum(max_split == 0) > filter_splitless_vars, msg)
+    offset = _check_splitless_vars(filter_splitless_vars, max_split, offset)
 
     # determine shapes for trees
     tree_shape = (*chain_shape, num_trees)
@@ -712,12 +792,25 @@ def init(
     # initialize all remaining stuff and put it in an unsharded state
     state = State(
         X=X,
-        binary_y=jnp.asarray(y, bool) if is_binary else None,
-        z=_LazyArray(jnp.full, resid_shape, offset[..., None]) if is_binary else None,
+        binary_y=y,  # temporary to be sharded together with everything else
+        z=(
+            _LazyArray(jnp.full, resid_shape, offset[..., None])
+            if is_binary
+            else _LazyArray(
+                jnp.full,
+                (*chain_shape, binary_indices.size, n),
+                offset[binary_indices, None],
+            )
+            if binary_indices is not None
+            else None
+        ),
+        binary_indices=binary_indices,
         offset=offset,
-        resid=_LazyArray(jnp.zeros, resid_shape)
-        if is_binary
-        else None,  # in this case, resid is created later after y and offset are sharded
+        resid=(
+            _LazyArray(jnp.zeros, resid_shape)
+            if is_binary
+            else None  # resid is created later after y and offset are sharded
+        ),
         error_cov_inv=add_chains(error_cov_inv),
         prec_scale=error_scale,  # temporarily set to error_scale, fix after sharding
         error_cov_df=error_cov_df,
@@ -774,7 +867,7 @@ def init(
 
     # delete big input arrays such that they can be deleted as soon as they
     # are sharded, only those arrays that contain an (n,) sized axis
-    del X, error_scale
+    del X, error_scale, y
 
     # move all arrays to the appropriate device
     state = _shard_state(state)
@@ -782,13 +875,30 @@ def init(
     # calculate initial resid in the continuous outcome case, such that y and
     # offset are already sharded if needed
     if state.resid is None:
-        sharded_y = _shard_leaf(y, None, -1, state.config.mesh)
-        del y
-        resid = _LazyArray(_initial_resid, resid_shape, sharded_y, state.offset)
+        resid = _LazyArray(
+            _initial_resid,
+            resid_shape,
+            state.binary_y,  # this is actually y
+            state.offset,
+            binary_indices,
+        )
         resid = _shard_leaf(resid, 0, -1, state.config.mesh)
         state = replace(state, resid=resid)
+
+    # calculate initial binary_y
+    if is_binary or binary_indices is not None:
+        binary_y = _LazyArray(
+            _initial_binary_y,
+            state.binary_y.shape
+            if binary_indices is None
+            else (binary_indices.size, n),
+            state.binary_y,  # this is actually y
+            binary_indices,
+        )
+        binary_y = _shard_leaf(binary_y, None, -1, state.config.mesh)
     else:
-        del y
+        binary_y = None
+    state = replace(state, binary_y=binary_y)
 
     # calculate prec_scale after sharding to do the calculation on the right
     # devices
@@ -804,9 +914,31 @@ def _initial_resid(
     shape: tuple[int, ...],
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
+    binary_indices: Int32[Array, ' kb'],
 ) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
-    """Calculate the initial value for `State.resid` in the continuous outcome case."""
-    return jnp.broadcast_to(y - offset[..., None], shape)
+    """Calculate the initial value for `State.resid` in the continuous outcome case.
+
+    In the mixed binary-continuous case, binary rows are zeroed out (their
+    residual starts at ``z - trees - offset = 0``).
+    """
+    resid = jnp.broadcast_to(y - offset[..., None], shape)
+    if binary_indices is not None:
+        resid = resid.at[..., binary_indices, :].set(0.0)
+    return resid
+
+
+def _initial_binary_y(
+    shape: tuple[int, ...],
+    y: Float32[Array, 'k n'] | Float32[Array, ' n'],
+    binary_indices: Int32[Array, ' kb'] | None,
+) -> Bool[Array, 'kb n'] | Bool[Array, ' n']:
+    """Extract and convert the binary outcome components from ``y``."""
+    if binary_indices is None:
+        out = y.astype(bool)
+    else:
+        out = y[binary_indices, :].astype(bool)
+    assert out.shape == shape
+    return out
 
 
 def _initial_affluence_tree(

@@ -3,6 +3,7 @@ __pycache__
 dist/
 .coverage*
 .venv/
+*.prof
 
 # Vendored latest bartz for benchmarks (auto-generated)
 benchmarks/latest_bartz/
@@ -16,8 +17,8 @@ benchmarks/latest_bartz/
 **/????_??_??_??_??_??/*.hlo_proto.pb
 **/????_??_??_??_??_??/.cached_tools.json
 
-# python profiler
-*.prof
-
 # editor
 .zed/
+
+# Claude
+.claude/worktrees/

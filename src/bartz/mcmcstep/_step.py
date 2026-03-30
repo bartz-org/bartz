@@ -74,7 +74,7 @@ def step(key: Key[Array, ''], bart: State) -> State:
     """
     keys = split(key, 3)
 
-    if bart.y.dtype == bool:
+    if bart.binary_y is not None:
         bart = replace(bart, error_cov_inv=jnp.array(1.0))
         bart = step_trees(keys.pop(), bart)
         bart = replace(bart, error_cov_inv=None)
@@ -1454,8 +1454,7 @@ def step_z(key: Key[Array, ''], bart: State) -> State:
     The updated BART MCMC state.
     """
     trees_plus_offset = bart.z - bart.resid
-    assert bart.y.dtype == bool
-    resid = truncated_normal_onesided(key, (), ~bart.y, -trees_plus_offset)
+    resid = truncated_normal_onesided(key, (), ~bart.binary_y, -trees_plus_offset)
     z = trees_plus_offset + resid
     return replace(bart, z=z, resid=resid)
 

@@ -680,7 +680,7 @@ class TestMultichain:
         def choose_vmap_index(path: KeyPath, _: Array) -> Literal[0, None]:
             no_vmap_attrs = (
                 '.X',
-                '.y',
+                '.binary_y',
                 '.offset',
                 '.prec_scale',
                 '.error_cov_df',
@@ -711,7 +711,7 @@ class TestMultichain:
         def choose_vmap_index(path: KeyPath, _: Array) -> Literal[-1, None]:
             vmap_attrs = (
                 '.X',
-                '.y',
+                '.binary_y',
                 '.z',
                 '.resid',
                 '.prec_scale',

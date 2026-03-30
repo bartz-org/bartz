@@ -327,7 +327,7 @@ class TestMVBartIntegration:
 
         st_uv = State(
             X=X,
-            y=y,
+            binary_y=None,
             resid=resid,
             error_cov_df=df_prior,
             error_cov_scale=scale_prior,
@@ -341,7 +341,7 @@ class TestMVBartIntegration:
 
         st_mv = State(
             X=X,
-            y=y[None, :],
+            binary_y=None,
             resid=resid[None, :],
             error_cov_df=df_prior,
             error_cov_scale=jnp.array([[scale_prior]]),
@@ -591,12 +591,18 @@ class TestMVBartInterface:
 
         # test predict shape
         x_test = random.normal(keys.pop(), (p, n_test))
-        y_pred = model.predict(x_test)
-        assert y_pred.shape == (model.ndpost, k, n_test)
+        for x, m in [('train', n), (x_test, n_test)]:
+            y_pred = model.predict(x, kind='latent_samples')
+            assert y_pred.shape == (model.ndpost, k, m)
 
-        # yhat_train shapes
-        assert model.yhat_train.shape == (model.ndpost, k, n)
-        assert model.yhat_train_mean.shape == (k, n)
+            y_pred = model.predict(x, kind='mean_samples')
+            assert y_pred.shape == (model.ndpost, k, m)
+
+            y_pred = model.predict(x, kind='mean')
+            assert y_pred.shape == (k, m)
+
+            y_pred = model.predict(x, kind='outcome_samples', key=keys.pop())
+            assert y_pred.shape == (model.ndpost, k, m)
 
         # config params shape
         assert model.sigest.shape == (k,)
@@ -626,6 +632,7 @@ class TestMVBartInterface:
             Bart(
                 x_train=example_data.x,
                 y_train=example_data.y > 0,
+                outcome_type='binary',
                 num_trees=2,
                 ndpost=4,
                 nskip=2,
@@ -639,19 +646,6 @@ class TestMVBartInterface:
                 x_train=example_data.x,
                 y_train=example_data.y,
                 w=example_data.w,
-                num_trees=2,
-                ndpost=4,
-                nskip=2,
-                num_chains=None,
-            )
-
-    def test_mv_rejects_pbart(self, example_data: MVData) -> None:
-        """MV + pbart should raise."""
-        with pytest.raises(ValueError, match='wbart'):
-            Bart(
-                x_train=example_data.x,
-                y_train=example_data.y,
-                type='pbart',
                 num_trees=2,
                 ndpost=4,
                 nskip=2,
@@ -698,9 +692,8 @@ class TestMVBartInterface:
         )
 
         # Check yhat convergence
-        yhat_train = model.yhat_train.reshape(
-            num_chains, nsamples_per_chain, k_dim * n_train
-        )
+        yhat_train = model.predict('train', kind='latent_samples')
+        yhat_train = yhat_train.reshape(num_chains, nsamples_per_chain, k_dim * n_train)
         rhat_yhat_train = multivariate_rhat(yhat_train)
         assert rhat_yhat_train < 1.6
         print(f'{rhat_yhat_train.item()=}')

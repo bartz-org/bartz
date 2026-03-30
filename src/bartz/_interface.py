@@ -26,6 +26,7 @@
 
 import math
 from collections.abc import Mapping, Sequence
+from enum import Enum
 from functools import cached_property, partial
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypedDict
@@ -33,21 +34,11 @@ from typing import Any, Literal, Protocol, TypedDict
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field
-from jax import Device, device_put, jit, lax, make_mesh
+from jax import Device, device_put, jit, lax, make_mesh, random
+from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh
-from jaxtyping import (
-    Array,
-    Bool,
-    Float,
-    Float32,
-    Int32,
-    Integer,
-    Key,
-    Real,
-    Shaped,
-    UInt,
-)
+from jaxtyping import Array, Float, Float32, Int32, Integer, Key, Real, Shaped, UInt
 from numpy import ndarray
 
 from bartz import mcmcloop, mcmcstep, prepcovars
@@ -55,10 +46,33 @@ from bartz.jaxext import is_key
 from bartz.jaxext.scipy.special import ndtri
 from bartz.jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
-from bartz.mcmcstep import make_p_nonterminal
-from bartz.mcmcstep._state import get_num_chains
+from bartz.mcmcstep import OutcomeType, make_p_nonterminal
+from bartz.mcmcstep._state import chol_with_gersh, get_num_chains
 
 FloatLike = float | Float[Any, '']
+
+
+class PredictKind(Enum):
+    """Kind of output of `Bart.predict`."""
+
+    mean = 'mean'
+    """The posterior mean of the conditional mean, shape ``(m,)`` (or
+    ``(k, m)`` for multivariate regression)."""
+
+    mean_samples = 'mean_samples'
+    """Per-sample conditional mean, shape ``(ndpost, m)`` (or ``(ndpost,
+    k, m)``). For binary regression, this is the probit-transformed
+    sum-of-trees."""
+
+    outcome_samples = 'outcome_samples'
+    """Samples of the outcome variable, shape ``(ndpost, m)`` (or
+    ``(ndpost, k, m)``). For binary regression, these are Bernoulli
+    draws. For continuous regression, these are Gaussian draws with the
+    posterior noise variance."""
+
+    latent_samples = 'latent_samples'
+    """Raw sum-of-trees values, shape ``(ndpost, m)`` (or ``(ndpost, k,
+    m)``)."""
 
 
 class DataFrame(Protocol):
@@ -98,13 +112,13 @@ class Bart(Module):
     y_train
         The training responses. For univariate regression, a 1D array of shape
         `(n,)`. For multivariate regression, a 2D array of shape `(k, n)` where
-        `k` is the number of response components, as introduced in [3]_.
-    x_test
-        The test predictors.
-    type
-        The type of regression. 'wbart' for continuous regression, 'pbart' for
-        binary regression with probit link. Multivariate regression only
-        supports 'wbart'.
+        `k` is the number of response components, as introduced in [3]_. For
+        binary regression, the convention is that non-zero values mean 1, zero
+        mean 0, like booleans.
+    outcome_type
+        The type of regression. ``'continuous'`` for continuous regression,
+        ``'binary'`` for binary regression with probit link. Multivariate
+        regression only supports ``'continuous'``.
     sparse
         Whether to activate variable selection on the predictors as done in
         [1]_.
@@ -192,9 +206,9 @@ class Bart(Module):
     offset
         The prior mean of the latent mean function. If not specified, it is set
         to the mean of `y_train` for continuous regression, and to
-        ``Phi^-1(mean(y_train))`` for binary regression. If `y_train` is empty,
-        `offset` is set to 0. With binary regression, if `y_train` is all
-        `False` or `True`, it is set to ``Phi^-1(1/(n+1))`` or
+        ``Phi^-1(mean(y_train != 0))`` for binary regression. If `y_train` is
+        empty, `offset` is set to 0. With binary regression, if `y_train` is
+        all zero or all non-zero, it is set to ``Phi^-1(1/(n+1))`` or
         ``Phi^-1(n/(n+1))``, respectively. For multivariate regression, can be
         a scalar (broadcast to all components) or a `(k,)` vector. If not
         specified, it is set to the per-component mean of `y_train`.
@@ -292,18 +306,12 @@ class Bart(Module):
     sigest: Float32[Array, ''] | Float32[Array, ' k'] | None = None
     """The estimated standard deviation of the error used to set `lamda`."""
 
-    yhat_test: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'] | None = None
-    """The conditional posterior mean at `x_test` for each MCMC iteration."""
-
     def __init__(
         self,
         x_train: Real[Array, 'p n'] | DataFrame,
-        y_train: (
-            Bool[Array, ' n'] | Float32[Array, ' n'] | Float32[Array, 'k n'] | Series
-        ),
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Series,
         *,
-        x_test: Real[Array, 'p m'] | DataFrame | None = None,
-        type: Literal['wbart', 'pbart'] = 'wbart',  # noqa: A002
+        outcome_type: OutcomeType | str = 'continuous',
         sparse: bool = False,
         theta: FloatLike | None = None,
         a: FloatLike = 0.5,
@@ -348,8 +356,7 @@ class Bart(Module):
             self._check_same_length(x_train, w)
 
         # check data types are correct for continuous/binary/multivariate regression
-        self._check_type_settings(y_train, type, w)
-        # from here onwards, the type is determined by y_train.dtype == bool
+        outcome_type = self._check_type_settings(y_train, outcome_type, w)
 
         # process sparsity settings
         theta, a, b, rho = self._process_sparsity_settings(
@@ -357,12 +364,12 @@ class Bart(Module):
         )
 
         # process "standardization" settings
-        offset = self._process_offset_settings(y_train, offset)
+        offset = self._process_offset_settings(y_train, outcome_type, offset)
         leaf_prior_cov_inv = self._process_leaf_variance_settings(
-            y_train, k, num_trees, tau_num
+            y_train, outcome_type, k, num_trees, tau_num
         )
         error_cov_df, error_cov_scale, sigest = self._process_error_variance_settings(
-            x_train, y_train, sigest, sigdf, sigquant, lamda
+            x_train, y_train, outcome_type, sigest, sigdf, sigquant, lamda
         )
 
         # determine splits
@@ -373,6 +380,7 @@ class Bart(Module):
         initial_state = self._setup_mcmc(
             x_train,
             y_train,
+            outcome_type,
             offset,
             w,
             max_split,
@@ -413,10 +421,6 @@ class Bart(Module):
         self._splits = splits
         self._x_train_fmt = x_train_fmt
 
-        # predict at test points
-        if x_test is not None:
-            self.yhat_test = self.predict(x_test)
-
     @property
     def ndpost(self) -> int:
         """The total number of posterior samples after burn-in across all chains.
@@ -430,38 +434,6 @@ class Bart(Module):
     def num_trees(self) -> int:
         """Return the number of trees used in the model."""
         return self._mcmc_state.forest.split_tree.shape[-2]
-
-    @cached_property
-    def prob_test(self) -> Float32[Array, 'ndpost m'] | None:
-        """The posterior probability of y being True at `x_test` for each MCMC iteration."""
-        if self.yhat_test is None or self._mcmc_state.y.dtype != bool:
-            return None
-        else:
-            return ndtr(self.yhat_test)
-
-    @cached_property
-    def prob_test_mean(self) -> Float32[Array, ' m'] | None:
-        """The marginal posterior probability of y being True at `x_test`."""
-        if self.prob_test is None:
-            return None
-        else:
-            return self.prob_test.mean(axis=0)
-
-    @cached_property
-    def prob_train(self) -> Float32[Array, 'ndpost n'] | None:
-        """The posterior probability of y being True at `x_train` for each MCMC iteration."""
-        if self._mcmc_state.y.dtype == bool:
-            return ndtr(self.yhat_train)
-        else:
-            return None
-
-    @cached_property
-    def prob_train_mean(self) -> Float32[Array, ' n'] | None:
-        """The marginal posterior probability of y being True at `x_train`."""
-        if self.prob_train is None:
-            return None
-        else:
-            return self.prob_train.mean(axis=0)
 
     @cached_property
     def sigma(
@@ -479,7 +451,7 @@ class Bart(Module):
             return None
         assert self._main_trace.error_cov_inv is not None
         # not meaningful for MV (error_cov_inv is a matrix)
-        if self._mcmc_state.y.ndim == 2:
+        if self._mcmc_state.offset.ndim == 1:
             return None
         return jnp.sqrt(
             jnp.reciprocal(
@@ -504,7 +476,7 @@ class Bart(Module):
         if error_cov_inv is None:
             return None
         # not meaningful for MV (error_cov_inv is a matrix)
-        if self._mcmc_state.y.ndim == 2:
+        if self._mcmc_state.offset.ndim == 1:
             return None
         return jnp.sqrt(jnp.reciprocal(error_cov_inv)).reshape(-1)
 
@@ -545,62 +517,186 @@ class Bart(Module):
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)
 
-    @cached_property
-    def yhat_test_mean(self) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
-        """The marginal posterior mean at `x_test`.
-
-        Not defined with binary regression because it's error-prone, typically
-        the right thing to consider would be `prob_test_mean`.
-        """
-        if self.yhat_test is None or self._mcmc_state.y.dtype == bool:
-            return None
-        else:
-            return self.yhat_test.mean(axis=0)
-
-    @cached_property
-    def yhat_train(self) -> Float32[Array, 'ndpost n'] | Float32[Array, 'ndpost k n']:
-        """The conditional posterior mean at `x_train` for each MCMC iteration."""
-        x_train = self._mcmc_state.X
-        return self._predict(x_train)
-
-    @cached_property
-    def yhat_train_mean(self) -> Float32[Array, ' n'] | Float32[Array, 'k n'] | None:
-        """The marginal posterior mean at `x_train`.
-
-        Not defined with binary regression because it's error-prone, typically
-        the right thing to consider would be `prob_train_mean`.
-        """
-        if self._mcmc_state.y.dtype == bool:
-            return None
-        else:
-            return self.yhat_train.mean(axis=0)
-
     def predict(
-        self, x_test: Real[Array, 'p m'] | DataFrame
-    ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
+        self,
+        x_test: Real[Array, 'p m'] | DataFrame | str,
+        *,
+        kind: PredictKind | str = 'mean',
+        key: Key[Array, ''] | None = None,
+        w: Float[Array, ' m'] | Series | None = None,
+    ) -> (
+        Float32[Array, ' m']
+        | Float32[Array, 'k m']
+        | Float32[Array, 'ndpost m']
+        | Float32[Array, 'ndpost k m']
+    ):
         """
-        Compute the posterior mean at `x_test` for each MCMC iteration.
+        Compute predictions at `x_test`.
 
         Parameters
         ----------
         x_test
-            The test predictors.
+            The test predictors, or the string ``'train'`` to compute
+            predictions on the training data.
+        kind
+            The kind of output. See `PredictKind` for details.
+        key
+            Jax random key, required when ``kind='outcome_samples'``.
+        w
+            Per-observation error scale for ``kind='outcome_samples'``.
+            Required when the model was fit with weights and ``x_test`` is
+            new data.
 
         Returns
         -------
-        The conditional posterior mean at `x_test` for each MCMC iteration.
+        Predictions at `x_test` in the requested format.
 
         Raises
         ------
         ValueError
-            If `x_test` has a different format than `x_train`.
+            If `x_test` has a different format than `x_train`, or if `w`
+            is specified when it should be `None`, or if `w` is not
+            specified when it is required.
+
         """
+        # parse arguments
+        kind = PredictKind(kind)
+        if kind is PredictKind.outcome_samples and key is None:
+            msg = '`key` not specified'
+            raise ValueError(msg)
+        w = self._process_w_test(x_test, kind, w)
+        x_test = self._process_x_test(x_test, w)
+
+        # get latent i.e. bare sum-of-trees predictions
+        latent = self._predict(x_test)
+        if kind is PredictKind.latent_samples:
+            return latent
+
+        # squash predictions to (0, 1) if probit
+        if self._mcmc_state.binary_y is not None:
+            mean_samples = ndtr(latent)
+        else:
+            mean_samples = latent
+
+        # take mean and return if no sampling requested
+        if kind is PredictKind.mean_samples:
+            return mean_samples
+        elif kind is PredictKind.mean:
+            return mean_samples.mean(axis=0)
+
+        # sample posterior
+        assert kind is PredictKind.outcome_samples
+        if self._mcmc_state.binary_y is not None:
+            return random.bernoulli(key, mean_samples).astype(jnp.float32)
+
+        # continuous case
+        if latent.ndim > 2:  # multivariate case
+            error_cov_inv = self._main_trace.error_cov_inv
+            error_cov_inv = lax.collapse(error_cov_inv, 0, -2)  # squash chains
+
+            # Cholesky of precision: error_cov_inv = L @ L^T
+            L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
+
+            # Sample z ~ N(0, I) and solve L^T @ error = z
+            # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
+            z = random.normal(key, latent.shape)  # (ndpost, k, m)
+            error = solve_triangular(L, z, trans='T', lower=True)
+        else:  # univariate case
+            error = self.sigma_[..., None] * random.normal(key, latent.shape)
+            if w is not None:
+                error *= w[None, :]
+
+        return latent + error
+
+    def _process_w_test(
+        self,
+        x_test: Real[Array, 'p m'] | DataFrame | str,
+        kind: PredictKind,
+        w: Float[Array, ' m'] | Series | None,
+    ) -> Float32[Array, ' m'] | None:
+        """Validate and resolve the error weights for prediction.
+
+        Parameters
+        ----------
+        x_test
+            The raw (not yet processed) test predictors, or ``'train'``.
+        kind
+            The prediction kind.
+        w
+            User-provided per-observation error scale, or `None`.
+
+        Returns
+        -------
+        The resolved error scale as a float32 array, or `None` if weights
+        are not applicable.
+
+        Raises
+        ------
+        ValueError
+            If `w` is specified when it should be `None`, or missing when
+            required.
+
+        """
+        x_test_is_train = isinstance(x_test, str) and x_test == 'train'
+        has_train_weights = self._mcmc_state.prec_scale is not None
+        is_binary = self._mcmc_state.binary_y is not None
+        is_multivariate = self._mcmc_state.offset.ndim == 1
+        needs_weights = (
+            kind is PredictKind.outcome_samples
+            and not is_binary
+            and not is_multivariate
+            and has_train_weights
+        )
+
+        if not needs_weights:
+            if w is not None:
+                msg = (
+                    '`w` must be `None` in this configuration'
+                    " (it is used only with kind='outcome_samples',"
+                    ' univariate continuous regression fitted with'
+                    ' weights)'
+                )
+                raise ValueError(msg)
+            return None
+
+        if x_test_is_train:
+            if w is not None:
+                msg = (
+                    "`w` must be `None` when x_test='train'"
+                    ' (training weights are used automatically)'
+                )
+                raise ValueError(msg)
+            return jnp.reciprocal(jnp.sqrt(self._mcmc_state.prec_scale))
+
+        # new test data, model was fit with weights
+        if w is None:
+            msg = (
+                '`w` is required because the model was fit with'
+                ' weights and x_test is new data'
+            )
+            raise ValueError(msg)
+        return self._process_response_input(w)
+
+    def _process_x_test(
+        self,
+        x_test: Real[Array, 'p m'] | DataFrame | str,
+        w: Float32[Array, ' m'] | None,
+    ) -> UInt[Array, 'p m']:
+        """Convert x_test to binned format suitable for prediction."""
+        if isinstance(x_test, str):
+            if x_test != 'train':
+                msg = (
+                    f"x_test must be an array, a DataFrame, or 'train', got {x_test!r}"
+                )
+                raise ValueError(msg)
+            return self._mcmc_state.X
         x_test, x_test_fmt = self._process_predictor_input(x_test)
         if x_test_fmt != self._x_train_fmt:
             msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
             raise ValueError(msg)
-        x_test = self._bin_predictors(x_test, self._splits)
-        return self._predict(x_test)
+        if w is not None:
+            self._check_same_length(w, x_test)
+        return self._bin_predictors(x_test, self._splits)
 
     @staticmethod
     def _process_predictor_input(
@@ -618,20 +714,14 @@ class Bart(Module):
     @staticmethod
     def _process_response_input(
         y: Shaped[Array, ' n'] | Shaped[Array, 'k n'] | Series,
-    ) -> Shaped[Array, ' n'] | Shaped[Array, 'k n']:
+    ) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
         if hasattr(y, 'to_numpy'):
             y = y.to_numpy()
-        y = jnp.asarray(y)
-        if y.ndim == 1:
-            return y
-        elif y.ndim == 2:
-            if y.dtype == bool:
-                msg = 'Multivariate binary regression is not supported.'
-                raise ValueError(msg)
-            return y.astype(jnp.float32)
-        else:
+        y = jnp.asarray(y, jnp.float32)
+        if y.ndim < 1 or y.ndim > 2:
             msg = f'y_train must be 1D (n,) or 2D (k, n). Got {y.ndim=}.'
             raise ValueError(msg)
+        return y
 
     @staticmethod
     def _check_same_length(x1: Array, x2: Array) -> None:
@@ -642,7 +732,8 @@ class Bart(Module):
     def _process_error_variance_settings(
         cls,
         x_train: Shaped[Array, 'p n'],
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+        outcome_type: OutcomeType,
         sigest: FloatLike | Float[Array, ' k'] | None,
         sigdf: FloatLike,
         sigquant: FloatLike,
@@ -653,7 +744,7 @@ class Bart(Module):
         Float32[Array, ''] | Float32[Array, ' k'] | None,
     ]:
         """Return (error_cov_df, error_cov_scale, sigest)."""
-        if y_train.dtype == bool:
+        if outcome_type is OutcomeType.binary:
             if sigest is not None or lamda is not None:
                 msg = 'Let `sigest=None` and `lamda=None` for binary regression'
                 raise ValueError(msg)
@@ -712,37 +803,24 @@ class Bart(Module):
 
     @staticmethod
     def _check_type_settings(
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
-        type: str,  # noqa: A002
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+        outcome_type: OutcomeType | str,
         w: Float[Array, ' n'] | None,
-    ) -> None:
-        match type:
-            case 'wbart':
+    ) -> OutcomeType:
+        outcome_type = OutcomeType(outcome_type)
+        match outcome_type:
+            case OutcomeType.continuous:
                 if y_train.ndim == 2 and w is not None:
                     msg = "Weights 'w' are not supported for multivariate regression."
                     raise ValueError(msg)
-                if y_train.dtype != jnp.float32:
-                    msg = (
-                        'Continuous regression requires y_train.dtype=float32,'
-                        f' got {y_train.dtype=} instead.'
-                    )
-                    raise TypeError(msg)
-            case 'pbart':
+            case OutcomeType.binary:
                 if y_train.ndim == 2:
-                    msg = "Multivariate regression requires type='wbart'."
+                    msg = "Multivariate regression requires outcome_type='continuous'."
                     raise ValueError(msg)
                 if w is not None:
                     msg = 'Binary regression does not support weights, set `w=None`'
                     raise ValueError(msg)
-                if y_train.dtype != bool:
-                    msg = (
-                        'Binary regression requires y_train.dtype=bool,'
-                        f' got {y_train.dtype=} instead.'
-                    )
-                    raise TypeError(msg)
-            case _:
-                msg = f'Invalid {type=}'
-                raise ValueError(msg)
+        return outcome_type
 
     @staticmethod
     def _process_sparsity_settings(
@@ -770,35 +848,29 @@ class Bart(Module):
 
     @staticmethod
     def _process_offset_settings(
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+        outcome_type: OutcomeType,
         offset: float | Float32[Any, ''] | Float32[Any, ' k'] | None,
     ) -> Float32[Array, ''] | Float32[Array, ' k']:
         """Return offset."""
         if offset is not None:
-            off = jnp.asarray(offset, dtype=jnp.float32)
-            if y_train.ndim == 2:
-                k = y_train.shape[0]
-                if off.ndim == 0:
-                    off = jnp.broadcast_to(off, (k,))
-                elif off.shape != (k,):
-                    msg = f'Expected offset shape ({k},), got {off.shape}'
-                    raise ValueError(msg)
-            return off
+            off = jnp.asarray(offset, jnp.float32)
+            return jnp.broadcast_to(off, y_train.shape[:-1])
         if y_train.shape[-1] < 1:
             return jnp.zeros(y_train.shape[:-1])
-        else:
-            mean = y_train.mean(-1)
 
-        if y_train.dtype == bool:
-            bound = 1 / (1 + y_train.size)
+        if outcome_type is OutcomeType.binary:
+            mean = (y_train != 0).mean(-1)
+            bound = 1 / (1 + y_train.shape[-1])
             mean = jnp.clip(mean, bound, 1 - bound)
             return ndtri(mean)
         else:
-            return mean
+            return y_train.mean(-1)
 
     @staticmethod
     def _process_leaf_variance_settings(
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+        outcome_type: OutcomeType,
         k: FloatLike,
         num_trees: int,
         tau_num: FloatLike | None,
@@ -806,7 +878,7 @@ class Bart(Module):
         """Return `leaf_prior_cov_inv`."""
         # determine `tau_num` if not specified
         if tau_num is None:
-            if y_train.dtype == bool:
+            if outcome_type is OutcomeType.binary:
                 tau_num = 3.0
             elif y_train.shape[-1] < 2:
                 tau_num = jnp.ones(y_train.shape[:-1])
@@ -850,7 +922,8 @@ class Bart(Module):
     @staticmethod
     def _setup_mcmc(
         x_train: Real[Array, 'p n'],
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Bool[Array, ' n'],
+        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+        outcome_type: OutcomeType,
         offset: Float32[Array, ''] | Float32[Array, ' k'],
         w: Float[Array, ' n'] | None,
         max_split: UInt[Array, ' p'],
@@ -886,6 +959,7 @@ class Bart(Module):
             X=x_train,
             # copy y_train because it's going to be donated in the mcmc loop
             y=jnp.array(y_train),
+            outcome_type=outcome_type,
             offset=offset,
             error_scale=w,
             max_split=max_split,

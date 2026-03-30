@@ -189,6 +189,13 @@ def simple_init(  # noqa: C901, PLR0915
             kw.pop('error_cov_df', None)
             kw.pop('error_cov_scale', None)
 
+            # since bartz 0.9, binary y is float instead of bool, and the type
+            # is to be specified separately
+            sig = signature(init)
+            if 'outcome_type' in sig.parameters:
+                kw['outcome_type'] = 'binary'
+                kw['y'] = kw['y'].astype(jnp.float32)
+
         case 'sparse':
             if (
                 not hasattr(mcmcstep, 'step_sparse')

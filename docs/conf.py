@@ -32,6 +32,7 @@ import datetime
 import pathlib
 import re
 import sys
+from enum import Enum
 from functools import cached_property
 from inspect import getsourcefile, getsourcelines, isclass, unwrap
 from os import getenv
@@ -201,6 +202,8 @@ def linkcode_resolve(domain: str, info: dict[str, str]) -> str | None:
         obj = obj.func
     elif isinstance(obj, property):
         obj = obj.fget
+    elif isinstance(obj, Enum):
+        obj = type(obj)
     obj = unwrap(obj)
 
     fn = getsourcefile(obj)

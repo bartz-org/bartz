@@ -255,11 +255,14 @@ def data(data_shape: tuple[int, int]) -> Data:
 class TestMVBartIntegration:
     """Test equivalence between Univariate and Multivariate (k=1) modes."""
 
-    def test_init_equivalence(self, data: Data) -> None:
+    @pytest.mark.parametrize('binary', [False, True])
+    def test_init_equivalence(self, data: Data, binary: bool) -> None:
         """Test that init produces compatible structures for UV and MV(k=1)."""
         X, y, max_split = data
-        y_mv = y[None, :]
         p_nonterminal = jnp.array([0.9, 0.5])
+
+        if binary:
+            y = (y > 0).astype(jnp.float32)
 
         common: dict = dict(
             X=X,
@@ -270,35 +273,44 @@ class TestMVBartIntegration:
             count_num_batches=None,
         )
 
-        bart_uv = init(
-            y=y,
-            offset=0.0,
-            leaf_prior_cov_inv=1.0,
-            error_cov_df=6.0,
-            error_cov_scale=4.0,
-            **common,
+        uv_kw = dict(y=y, offset=0.0, leaf_prior_cov_inv=1.0)
+        mv_kw = dict(
+            y=y[None, :], offset=jnp.zeros(1), leaf_prior_cov_inv=jnp.array([[1.0]])
         )
 
-        bart_mv = init(
-            y=y_mv,
-            offset=jnp.zeros(1),
-            leaf_prior_cov_inv=jnp.array([[1.0]]),
-            error_cov_df=jnp.array(6.0),
-            error_cov_scale=4.0 * jnp.eye(1),
-            **common,
-        )
+        if binary:
+            uv_kw.update(outcome_type='binary')
+            mv_kw.update(outcome_type='binary')
+        else:
+            uv_kw.update(error_cov_df=6.0, error_cov_scale=4.0)
+            mv_kw.update(error_cov_df=jnp.array(6.0), error_cov_scale=4.0 * jnp.eye(1))
 
-        assert bart_uv.error_cov_inv is not None
-
-        assert bart_mv.error_cov_inv is not None
+        bart_uv = init(**uv_kw, **common)
+        bart_mv = init(**mv_kw, **common)
 
         assert bart_uv.resid.ndim == 1
         assert bart_mv.resid.ndim == 2
         assert bart_mv.resid.shape[0] == 1
         assert bart_mv.resid.shape[1] == bart_uv.resid.shape[0]
 
-        assert jnp.ndim(bart_uv.error_cov_inv) == 0
-        assert bart_mv.error_cov_inv.shape == (1, 1)
+        if binary:
+            assert bart_uv.error_cov_inv is None
+            assert bart_mv.error_cov_inv is None
+            assert bart_uv.binary_y is not None
+            assert bart_mv.binary_y is not None
+            assert bart_uv.binary_y.ndim == 1
+            assert bart_mv.binary_y.ndim == 2
+            assert_array_equal(bart_uv.binary_y, bart_mv.binary_y.squeeze(0))
+            assert bart_uv.z is not None
+            assert bart_mv.z is not None
+            assert bart_uv.z.ndim == 1
+            assert bart_mv.z.ndim == 2
+            assert_array_equal(bart_uv.z, bart_mv.z.squeeze(0))
+        else:
+            assert bart_uv.error_cov_inv is not None
+            assert bart_mv.error_cov_inv is not None
+            assert jnp.ndim(bart_uv.error_cov_inv) == 0
+            assert bart_mv.error_cov_inv.shape == (1, 1)
 
         assert_array_equal(bart_uv.resid, bart_mv.resid.squeeze(0))
         assert_array_equal(bart_uv.forest.var_tree, bart_mv.forest.var_tree)
@@ -419,11 +431,16 @@ class TestMVBartIntegration:
 class TestMVBartSteps:
     """Test the full MCMC step trajectory (init + multiple steps)."""
 
-    def test_step_trees_exact_match(self, keys: split, data: Data) -> None:
+    @pytest.mark.parametrize('binary', [False, True])
+    def test_step_trees_exact_match(
+        self, keys: split, data: Data, binary: bool
+    ) -> None:
         """Test that MV tree logic is Identical to UV logic."""
         X, y, max_split = data
-        y_mv = y[None, :]
         n_trees = 100
+
+        if binary:
+            y = (y > 0).astype(jnp.float32)
 
         params: dict = dict(
             X=X,
@@ -434,27 +451,32 @@ class TestMVBartSteps:
             count_num_batches=None,
         )
 
-        uv_state = init(
-            y=y,
-            offset=0.0,
-            leaf_prior_cov_inv=jnp.float32(n_trees),
-            error_cov_df=4.0,
-            error_cov_scale=2.0,
-            **params,
+        uv_kw = dict(y=y, offset=0.0, leaf_prior_cov_inv=jnp.float32(n_trees))
+        mv_kw = dict(
+            y=y[None, :], offset=jnp.zeros(1), leaf_prior_cov_inv=n_trees * jnp.eye(1)
         )
-        mv_state = init(
-            y=y_mv,
-            offset=jnp.zeros(1),
-            leaf_prior_cov_inv=n_trees * jnp.eye(1),
-            error_cov_df=jnp.array(4.0),
-            error_cov_scale=2 * jnp.eye(1),
-            **params,
-        )
+
+        if binary:
+            uv_kw.update(outcome_type='binary')
+            mv_kw.update(outcome_type='binary')
+        else:
+            uv_kw.update(error_cov_df=4.0, error_cov_scale=2.0)
+            mv_kw.update(error_cov_df=jnp.array(4.0), error_cov_scale=2 * jnp.eye(1))
+
+        uv_state = init(**uv_kw, **params)
+        mv_state = init(**mv_kw, **params)
+
+        if binary:
+            uv_error_cov_inv = jnp.array(1.0)
+            mv_error_cov_inv = jnp.eye(1)
+        else:
+            uv_error_cov_inv = uv_state.error_cov_inv
+            mv_error_cov_inv = jnp.array([[uv_state.error_cov_inv]])
 
         mv_state = replace(
             mv_state,
             resid=uv_state.resid[None, :],
-            error_cov_inv=jnp.array([[uv_state.error_cov_inv]]),
+            error_cov_inv=mv_error_cov_inv,
             forest=replace(
                 mv_state.forest,
                 var_tree=uv_state.forest.var_tree,
@@ -464,6 +486,7 @@ class TestMVBartSteps:
                 affluence_tree=uv_state.forest.affluence_tree,
             ),
         )
+        uv_state = replace(uv_state, error_cov_inv=uv_error_cov_inv)
 
         key = keys.pop()
         uv_next = step_trees(key, uv_state)
@@ -499,15 +522,19 @@ class TestMVBartSteps:
             uv_state.forest.prune_acc_count, mv_state.forest.prune_acc_count
         )
 
-    def test_mv_steps(self, keys: split, data: Data) -> None:
+    @pytest.mark.parametrize('binary', [False, True])
+    def test_mv_steps(self, keys: split, data: Data, binary: bool) -> None:
         """Test that mv mode can run without crashing."""
         X, y_uv, max_split = data
         k = 3
 
-        y = jnp.tile(y_uv, (k, 1))
-        y = y + random.normal(keys.pop(), y.shape) * 0.1
+        if binary:
+            y = random.bernoulli(keys.pop(), 0.5, (k, y_uv.size)).astype(jnp.float32)
+        else:
+            y = jnp.tile(y_uv, (k, 1))
+            y = y + random.normal(keys.pop(), y.shape) * 0.1
 
-        mv_state = init(
+        kw: dict = dict(
             X=X,
             y=y,
             offset=jnp.zeros(k),
@@ -515,21 +542,33 @@ class TestMVBartSteps:
             num_trees=5,
             p_nonterminal=jnp.array([0.9, 0.5]),
             leaf_prior_cov_inv=jnp.eye(k),
-            error_cov_df=jnp.array(10.0),
-            error_cov_scale=jnp.eye(k),
             resid_num_batches=None,
             count_num_batches=None,
         )
+
+        if binary:
+            kw.update(outcome_type='binary')
+        else:
+            kw.update(error_cov_df=jnp.array(10.0), error_cov_scale=jnp.eye(k))
+
+        mv_state = init(**kw)
 
         for key in keys.pop(10):
             mv_state = step(key, mv_state)
 
             assert jnp.all(jnp.isfinite(mv_state.resid))
-            assert jnp.all(jnp.isfinite(mv_state.error_cov_inv))
             assert jnp.all(jnp.isfinite(mv_state.forest.leaf_tree))
 
-            assert mv_state.error_cov_inv.shape == (k, k)
             assert mv_state.resid.shape == (k, y.shape[1])
+
+            if binary:
+                assert mv_state.error_cov_inv is None
+                assert mv_state.z is not None
+                assert jnp.all(jnp.isfinite(mv_state.z))
+                assert mv_state.z.shape == (k, y.shape[1])
+            else:
+                assert jnp.all(jnp.isfinite(mv_state.error_cov_inv))
+                assert mv_state.error_cov_inv.shape == (k, k)
 
 
 class MVData(NamedTuple):

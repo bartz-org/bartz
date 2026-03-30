@@ -548,25 +548,60 @@ class TestMultichain:
 
     n = 100
 
+    @pytest.fixture(params=[False, True])
+    def mv(self, request: pytest.FixtureRequest) -> bool:
+        """Whether the outcome is multivariate."""
+        return request.param
+
+    @pytest.fixture(params=[False, True])
+    def binary(self, request: pytest.FixtureRequest) -> bool:
+        """Whether the outcome is binary."""
+        return request.param
+
     @pytest.fixture
-    def init_kwargs(self, keys: split) -> dict:
+    def init_kwargs(self, keys: split, mv: bool, binary: bool) -> dict:
         """Return arguments for `init`."""
         p = 10
         k = 2
         d = 6
         numcut = 10
         num_trees = 5
-        return dict(
-            X=random.randint(keys.pop(), (p, self.n), 0, numcut + 1, jnp.uint32),
-            y=random.normal(keys.pop(), (k, self.n)),
-            offset=random.normal(keys.pop(), (k,)),
-            max_split=jnp.full(p, numcut + 1, jnp.uint32),
+        X = random.randint(keys.pop(), (p, self.n), 0, numcut + 1, jnp.uint32)
+        max_split = jnp.full(p, numcut + 1, jnp.uint32)
+
+        if mv:
+            y_shape = (k, self.n)
+            offset = random.normal(keys.pop(), (k,))
+            leaf_prior_cov_inv = jnp.eye(k) * num_trees
+        else:
+            y_shape = (self.n,)
+            offset = random.normal(keys.pop(), ())
+            leaf_prior_cov_inv = jnp.float32(num_trees)
+
+        if binary:
+            y = random.bernoulli(keys.pop(), 0.5, y_shape).astype(jnp.float32)
+        else:
+            y = random.normal(keys.pop(), y_shape)
+
+        kw = dict(
+            X=X,
+            y=y,
+            offset=offset,
+            max_split=max_split,
             num_trees=num_trees,
             p_nonterminal=jnp.full(d - 1, 0.9),
-            leaf_prior_cov_inv=jnp.eye(k) * num_trees,
-            error_cov_df=2.0,  # keep this a weak type
-            error_cov_scale=2 * jnp.eye(k),
+            leaf_prior_cov_inv=leaf_prior_cov_inv,
         )
+
+        if binary:
+            kw.update(outcome_type='binary')
+        else:
+            kw.update(
+                error_cov_df=2.0,  # keep this a weak type
+                error_cov_scale=2 * jnp.eye(k) if mv else 2.0,
+            )
+
+        return kw
 
     @pytest.mark.parametrize('num_chains', [None, 0, 1, -1, 4, -4])
     @pytest.mark.parametrize('shard_data', [False, True])

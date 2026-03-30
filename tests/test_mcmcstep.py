@@ -25,6 +25,7 @@
 """Test `bartz.mcmcstep`."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 from functools import wraps
 from math import prod
 from typing import Literal, NamedTuple
@@ -50,6 +51,7 @@ from bartz.mcmcstep._moves import (
     split_range,
 )
 from bartz.mcmcstep._state import chain_vmap_axes, data_vmap_axes
+from bartz.mcmcstep._step import step_error_cov_inv, step_trees, step_z
 from tests.util import assert_close_matrices, manual_tree
 
 
@@ -548,19 +550,16 @@ class TestMultichain:
 
     n = 100
 
-    @pytest.fixture(params=[False, True])
-    def mv(self, request: pytest.FixtureRequest) -> bool:
-        """Whether the outcome is multivariate."""
-        return request.param
-
-    @pytest.fixture(params=[False, True])
-    def binary(self, request: pytest.FixtureRequest) -> bool:
-        """Whether the outcome is binary."""
-        return request.param
-
-    @pytest.fixture
-    def init_kwargs(self, keys: split, mv: bool, binary: bool) -> dict:
+    @pytest.fixture(
+        params=['uv-binary', 'uv-continuous', 'mv-binary', 'mv-continuous', 'mv-mixed']
+    )
+    def init_kwargs(self, keys: split, request: pytest.FixtureRequest) -> dict:
         """Return arguments for `init`."""
+        kind = request.param
+        mv = kind.startswith('mv-')
+        binary = kind.endswith('-binary')
+        mixed = kind == 'mv-mixed'
+
         p = 10
         k = 2
         d = 6
@@ -569,19 +568,28 @@ class TestMultichain:
         X = random.randint(keys.pop(), (p, self.n), 0, numcut + 1, jnp.uint32)
         max_split = jnp.full(p, numcut + 1, jnp.uint32)
 
-        if mv:
-            y_shape = (k, self.n)
+        if mixed:
+            y = jnp.zeros((k, self.n), jnp.float32)
+            y = y.at[0].set(
+                random.bernoulli(keys.pop(), 0.5, (self.n,)).astype(jnp.float32)
+            )
+            y = y.at[1].set(random.normal(keys.pop(), (self.n,)))
             offset = random.normal(keys.pop(), (k,))
             leaf_prior_cov_inv = jnp.eye(k) * num_trees
         else:
-            y_shape = (self.n,)
-            offset = random.normal(keys.pop(), ())
-            leaf_prior_cov_inv = jnp.float32(num_trees)
+            if mv:
+                y_shape = (k, self.n)
+                offset = random.normal(keys.pop(), (k,))
+                leaf_prior_cov_inv = jnp.eye(k) * num_trees
+            else:
+                y_shape = (self.n,)
+                offset = random.normal(keys.pop(), ())
+                leaf_prior_cov_inv = jnp.float32(num_trees)
 
-        if binary:
-            y = random.bernoulli(keys.pop(), 0.5, y_shape).astype(jnp.float32)
-        else:
-            y = random.normal(keys.pop(), y_shape)
+            if binary:
+                y = random.bernoulli(keys.pop(), 0.5, y_shape).astype(jnp.float32)
+            else:
+                y = random.normal(keys.pop(), y_shape)
 
         kw = dict(
             X=X,
@@ -593,7 +601,13 @@ class TestMultichain:
             leaf_prior_cov_inv=leaf_prior_cov_inv,
         )
 
-        if binary:
+        if mixed:
+            kw.update(
+                outcome_type=['binary', 'continuous'],
+                error_cov_df=2.0,  # keep this a weak type
+                error_cov_scale=jnp.diag(jnp.array([0.0, 2.0])),
+            )
+        elif binary:
             kw.update(outcome_type='binary')
         else:
             kw.update(
@@ -649,6 +663,7 @@ class TestMultichain:
             assert new_state.forest.num_chains() == num_chains
             check_strong_types(new_state)
             check_sharding(new_state, state.config.mesh)
+            check_same_structure(state, new_state)
 
     def test_multichain_equiv_stack(self, init_kwargs: dict, keys: split) -> None:
         """Check that stacking multiple chains is equivalent to a multichain trace."""
@@ -716,6 +731,7 @@ class TestMultichain:
             no_vmap_attrs = (
                 '.X',
                 '.binary_y',
+                '.binary_indices',
                 '.offset',
                 '.prec_scale',
                 '.error_cov_df',
@@ -858,3 +874,210 @@ def check_strong_types(x: PyTree[Array]) -> None:
         assert not x.weak_type, f'{keystr(path)} has weak type'
 
     tree.map_with_path(check_leaf, x)
+
+
+def check_same_structure(x: PyTree, y: PyTree) -> None:
+    """Check that two PyTrees have the same structure, incl. shape and type of the arrays."""
+
+    def check(_path: KeyPath, x: Array, y: Array) -> None:
+        assert x.shape == y.shape
+        assert x.dtype == y.dtype
+        assert x.sharding == y.sharding
+
+    tree.map_with_path(check, x, y)
+
+
+class TestMixedBinaryContinuous:
+    """Tests for mixed binary-continuous multivariate outcome support."""
+
+    n = 100
+    p = 10
+    k = 3
+    numcut = 10
+    num_trees = 5
+    d = 6
+
+    @pytest.fixture
+    def init_kwargs(self, keys: split) -> dict:
+        """Return arguments for `init` with mixed binary-continuous outcomes."""
+        X = random.randint(keys.pop(), (self.p, self.n), 0, self.numcut + 1, jnp.uint32)
+        max_split = jnp.full(self.p, self.numcut + 1, jnp.uint32)
+
+        y = jnp.zeros((self.k, self.n), jnp.float32)
+        y = y.at[0].set(random.bernoulli(keys.pop(), 0.5, (self.n,)))
+        y = y.at[1].set(random.normal(keys.pop(), (self.n,)))
+        y = y.at[2].set(random.bernoulli(keys.pop(), 0.3, (self.n,)))
+
+        return dict(
+            X=X,
+            y=y,
+            outcome_type=['binary', 'continuous', 'binary'],
+            offset=random.normal(keys.pop(), (self.k,)),
+            max_split=max_split,
+            num_trees=self.num_trees,
+            p_nonterminal=jnp.full(self.d - 1, 0.9),
+            leaf_prior_cov_inv=jnp.eye(self.k) * self.num_trees,
+            error_cov_df=2.0,
+            error_cov_scale=jnp.diag(jnp.array([0.0, 2.0, 0.0])),
+        )
+
+    def test_init_shapes(self, init_kwargs: dict) -> None:
+        """Check that init produces correct shapes for mixed outcomes."""
+        state = init(**init_kwargs)
+
+        # binary_indices should contain indices of binary components
+        assert state.binary_indices is not None
+        assert_array_equal(state.binary_indices, jnp.array([0, 2], jnp.int32))
+
+        # binary_y should have only binary rows (kb=2)
+        assert state.binary_y is not None
+        assert state.binary_y.shape == (2, self.n)
+        assert state.binary_y.dtype == jnp.bool_
+
+        # z should have only binary rows (kb=2)
+        assert state.z is not None
+        assert state.z.shape == (2, self.n)
+
+        # resid should have all k rows
+        assert state.resid.shape == (self.k, self.n)
+
+        # error_cov_inv should be a (k, k) diagonal matrix
+        assert state.error_cov_inv is not None
+        assert state.error_cov_inv.shape == (self.k, self.k)
+        # off-diagonal should be zero
+        assert_array_equal(state.error_cov_inv, jnp.diag(jnp.diag(state.error_cov_inv)))
+
+        # binary diagonal entries should be 1.0
+        assert state.error_cov_inv[0, 0] == 1.0
+        assert state.error_cov_inv[2, 2] == 1.0
+
+        # error_cov_df and error_cov_scale should be set
+        assert state.error_cov_df is not None
+        assert state.error_cov_scale is not None
+
+    def test_init_binary_y_values(self, init_kwargs: dict) -> None:
+        """Check that binary_y correctly extracts binary components from y."""
+        y = init_kwargs['y']
+        state = init(**init_kwargs)
+
+        assert state.binary_y is not None
+        # binary_y[0] should correspond to y[0] (first binary component)
+        assert_array_equal(state.binary_y[0], y[0] != 0)
+        # binary_y[1] should correspond to y[2] (second binary component)
+        assert_array_equal(state.binary_y[1], y[2] != 0)
+
+    def test_init_resid_binary_rows_zero(self, init_kwargs: dict) -> None:
+        """Check that the binary rows of resid are initialized to zero."""
+        state = init(**init_kwargs)
+
+        # binary rows (0 and 2) should be zero
+        assert_array_equal(state.resid[0], jnp.zeros(self.n))
+        assert_array_equal(state.resid[2], jnp.zeros(self.n))
+
+        # continuous row (1) should be y[1] - offset[1]
+        y = init_kwargs['y']
+        offset = init_kwargs['offset']
+        expected = y[1] - offset[1]
+        assert_array_equal(state.resid[1], expected)
+
+    def test_init_z_values(self, init_kwargs: dict) -> None:
+        """Check that z is initialized to offset for binary components."""
+        state = init(**init_kwargs)
+
+        assert state.z is not None
+        offset = init_kwargs['offset']
+        # z[0] should be offset[0] (first binary component)
+        assert_array_equal(state.z[0], jnp.full(self.n, offset[0]))
+        # z[1] should be offset[2] (second binary component, index 2 in y)
+        assert_array_equal(state.z[1], jnp.full(self.n, offset[2]))
+
+    def test_init_rejects_nondiagonal_scale(self, init_kwargs: dict) -> None:
+        """Check that init rejects non-diagonal error_cov_scale."""
+        init_kwargs['error_cov_scale'] += 0.1 * jnp.ones((self.k, self.k))
+        with pytest.raises(Exception, match='diagonal'):
+            _state = init(**init_kwargs)
+
+    def test_init_rejects_error_scale(self, init_kwargs: dict) -> None:
+        """Check that init rejects error_scale for mixed outcomes."""
+        with pytest.raises(AssertionError, match='error_scale'):
+            init(**init_kwargs, error_scale=jnp.ones(self.n))
+
+    def test_step_z_updates_only_binary_resid(
+        self, init_kwargs: dict, keys: split
+    ) -> None:
+        """Check that step_z modifies only the binary rows of resid."""
+        state = init(**init_kwargs)
+
+        # run a few tree steps first so resid is nonzero
+        state = step_trees(keys.pop(), state)
+
+        new_state = step_z(keys.pop(), state)
+
+        # continuous row (index 1) should be unchanged
+        assert_array_equal(new_state.resid[1], state.resid[1])
+
+        # binary rows should generally change (could be same by extreme
+        # coincidence, but practically never for 100 points)
+        assert not jnp.array_equal(new_state.resid[0], state.resid[0])
+
+    def test_step_error_cov_inv_updates_only_continuous(
+        self, init_kwargs: dict, keys: split
+    ) -> None:
+        """Check that step_error_cov_inv updates only continuous diagonal entries."""
+        state = init(**init_kwargs)
+        prec = state.error_cov_inv[1, 1]
+
+        # replace resid because the default initial resid is 0 for binary
+        # outcomes, which triggers a division by zero in step_error_cov_inv
+        state = replace(state, resid=jnp.full_like(state.resid, 1.0))
+
+        new_state = step_error_cov_inv(keys.pop(), state)
+
+        # binary diagonal entries (indices 0, 2) should stay 1.0
+        assert new_state.error_cov_inv[0, 0] == 1.0
+        assert new_state.error_cov_inv[2, 2] == 1.0
+
+        # continuous diagonal entry (index 1) should be updated (not the init value)
+        assert new_state.error_cov_inv[1, 1] != prec
+
+        # off-diagonal should remain zero
+        assert_array_equal(
+            new_state.error_cov_inv, jnp.diag(jnp.diag(new_state.error_cov_inv))
+        )
+
+    @pytest.mark.parametrize('outcome_type', ['binary', 'continuous'])
+    def test_all_same_outcome_sequence(
+        self, outcome_type: str, keys: split, init_kwargs: dict
+    ) -> None:
+        """Check that uniform sequence outcome_type matches the scalar form."""
+        if outcome_type == 'binary':
+            init_kwargs.update(
+                y=random.bernoulli(keys.pop(), 0.5, (self.k, self.n)).astype(
+                    jnp.float32
+                ),
+                error_cov_df=None,
+                error_cov_scale=None,
+            )
+        else:
+            init_kwargs.update(
+                y=random.normal(keys.pop(), (self.k, self.n)),
+                error_cov_df=2.0,
+                error_cov_scale=2 * jnp.eye(self.k),
+            )
+
+        init_kwargs.update(outcome_type=outcome_type)
+        scalar_state = init(**init_kwargs)
+
+        init_kwargs.update(outcome_type=[outcome_type] * self.k)
+        sequence_state = init(**init_kwargs)
+
+        def check_equal(path: KeyPath, scalar: Array, sequence: Array) -> None:
+            assert_array_equal(scalar, sequence, err_msg=f'{keystr(path)}: ')
+
+        tree.map_with_path(check_equal, scalar_state, sequence_state)
+
+    def test_outcome_type_length_mismatch(self, init_kwargs: dict) -> None:
+        """Check that mismatched outcome_type length raises."""
+        init_kwargs.update(outcome_type=['binary'] * (self.k - 1))
+        with pytest.raises(AssertionError):
+            init(**init_kwargs)

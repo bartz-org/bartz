@@ -441,7 +441,11 @@ def _init_shape_shifting_parameters(
         # initialize diagonal error_cov_inv: use inv-gamma mode for continuous
         # components, 1.0 for binary components
         scale_diag = jnp.diag(error_cov_scale)
-        inv_diag = jnp.where(jnp.array(binary_mask), 1.0, error_cov_df / scale_diag)
+        inv_diag = jnp.where(
+            jnp.array(binary_mask),
+            1.0,
+            error_cov_df / jnp.where(scale_diag, scale_diag, 1.0),
+        )
         error_cov_inv = jnp.diag(inv_diag)
 
     # All-continuous

@@ -289,10 +289,12 @@ class State(Module):
     X: UInt[Array, 'p n'] = field(data=True)
     """The predictors."""
 
-    binary_y: None | Bool[Array, ' n'] = field(data=True)
+    binary_y: None | Bool[Array, ' n'] | Bool[Array, 'k n'] = field(data=True)
     """The response as booleans for binary regression, `None` for continuous."""
 
-    z: None | Float32[Array, '*chains n'] = field(chains=True, data=True)
+    z: None | Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
+        chains=True, data=True
+    )
     """The latent variable for binary regression. `None` in continuous
     regression."""
 
@@ -380,11 +382,6 @@ def _init_shape_shifting_parameters(
         The error covariance degrees of freedom (as array).
     error_cov_scale
         The error covariance scale (as array).
-
-    Raises
-    ------
-    ValueError
-        If outcome is binary and multivariate.
     """
     # determine outcome kind, binary/continuous x univariate/multivariate
     is_binary = outcome_type is OutcomeType.binary
@@ -392,9 +389,6 @@ def _init_shape_shifting_parameters(
 
     # Binary vs continuous
     if is_binary:
-        if kshape:
-            msg = 'Binary multivariate regression not supported, open an issue at https://github.com/bartz-org/bartz/issues if you need it.'
-            raise ValueError(msg)
         assert error_scale is None
         assert error_cov_df is None
         assert error_cov_scale is None
@@ -719,7 +713,7 @@ def init(
     state = State(
         X=X,
         binary_y=jnp.asarray(y, bool) if is_binary else None,
-        z=_LazyArray(jnp.full, resid_shape, offset) if is_binary else None,
+        z=_LazyArray(jnp.full, resid_shape, offset[..., None]) if is_binary else None,
         offset=offset,
         resid=_LazyArray(jnp.zeros, resid_shape)
         if is_binary

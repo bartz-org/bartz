@@ -75,7 +75,12 @@ def step(key: Key[Array, ''], bart: State) -> State:
     keys = split(key, 3)
 
     if bart.binary_y is not None:
-        bart = replace(bart, error_cov_inv=jnp.array(1.0))
+        if bart.binary_y.ndim == 1:
+            error_cov_inv = jnp.array(1.0)
+        else:
+            k = bart.binary_y.shape[0]
+            error_cov_inv = jnp.eye(k)
+        bart = replace(bart, error_cov_inv=error_cov_inv)
         bart = step_trees(keys.pop(), bart)
         bart = replace(bart, error_cov_inv=None)
         bart = step_z(keys.pop(), bart)
@@ -1453,6 +1458,8 @@ def step_z(key: Key[Array, ''], bart: State) -> State:
     -------
     The updated BART MCMC state.
     """
+    assert bart.z is not None
+    assert bart.binary_y is not None
     trees_plus_offset = bart.z - bart.resid
     resid = truncated_normal_onesided(key, (), ~bart.binary_y, -trees_plus_offset)
     z = trees_plus_offset + resid

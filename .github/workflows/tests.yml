@@ -162,7 +162,7 @@ jobs:
           uv run --dev python -c "import rpy2.situation as s; print('\n'.join(map(str, s.iter_info())))"
 
       - name: Run unit tests
-        timeout-minutes: 30
+        timeout-minutes: 60
         run: make COVERAGE_SUFFIX=-${{ matrix.id }} tests${{ matrix.target-suffix }} ${{ matrix.tests-args }}
 
       - name: Save coverage information

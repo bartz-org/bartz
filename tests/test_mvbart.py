@@ -337,32 +337,27 @@ class TestMVBartIntegration:
         df_prior = jnp.float32(20.0)
         scale_prior = jnp.float32(10.0)
 
-        st_uv = State(
+        common: dict = dict(
             X=X,
             binary_y=None,
-            resid=resid,
+            binary_indices=None,
             error_cov_df=df_prior,
-            error_cov_scale=scale_prior,
             z=None,
             offset=0.0,
-            error_cov_inv=1.0,
             prec_scale=None,
             forest=None,
             config=None,
         )
 
+        st_uv = State(
+            **common, resid=resid, error_cov_scale=scale_prior, error_cov_inv=1.0
+        )
+
         st_mv = State(
-            X=X,
-            binary_y=None,
+            **common,
             resid=resid[None, :],
-            error_cov_df=df_prior,
             error_cov_scale=jnp.array([[scale_prior]]),
-            z=None,
-            offset=0.0,
             error_cov_inv=jnp.eye(1),
-            prec_scale=None,
-            forest=None,
-            config=None,
         )
 
         def sample_uv(k: Key[Array, '']) -> Float32[Array, '']:

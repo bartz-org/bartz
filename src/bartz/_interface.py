@@ -117,8 +117,10 @@ class Bart(Module):
         mean 0, like booleans.
     outcome_type
         The type of regression. ``'continuous'`` for continuous regression,
-        ``'binary'`` for binary regression with probit link. Multivariate
-        regression only supports ``'continuous'``.
+        ``'binary'`` for binary regression with probit link. For multivariate
+        regression, a scalar value applies to all components; alternatively, a
+        sequence of per-component types (e.g., ``['binary', 'continuous']``)
+        specifies mixed outcome types.
     sparse
         Whether to activate variable selection on the predictors as done in
         [1]_.
@@ -175,7 +177,8 @@ class Bart(Module):
         than two elements, it is set to 1. If n <= p, it is set to the standard
         deviation of `y_train`. Ignored if `lamda` is specified. For
         multivariate regression, can be a scalar (broadcast to all components)
-        or a `(k,)` vector of per-component estimates.
+        or a `(k,)` vector of per-component estimates. For mixed outcome types,
+        binary component values are ignored.
     sigdf
         The degrees of freedom of the scaled inverse-chisquared prior on the
         noise variance. For multivariate regression, the Inverse-Wishart
@@ -196,13 +199,15 @@ class Bart(Module):
         The prior harmonic mean of the error variance. (The harmonic mean of x
         is 1/mean(1/x).) If not specified, it is set based on `sigest` and
         `sigquant`. For multivariate regression, can be a scalar (broadcast
-        to all components) or a `(k,)` vector.
+        to all components) or a `(k,)` vector. For mixed outcome types, binary
+        component values are ignored.
     tau_num
         The numerator in the expression that determines the prior standard
         deviation of leaves. If not specified, default to ``(max(y_train) -
         min(y_train)) / 2`` (or 1 if `y_train` has less than two elements) for
         continuous regression, and 3 for binary regression. For multivariate
-        regression, the range is computed per component.
+        regression, the range is computed per component. For mixed outcome
+        types, each component uses the default for its type.
     offset
         The prior mean of the latent mean function. If not specified, it is set
         to the mean of `y_train` for continuous regression, and to
@@ -211,7 +216,8 @@ class Bart(Module):
         all zero or all non-zero, it is set to ``Phi^-1(1/(n+1))`` or
         ``Phi^-1(n/(n+1))``, respectively. For multivariate regression, can be
         a scalar (broadcast to all components) or a `(k,)` vector. If not
-        specified, it is set to the per-component mean of `y_train`.
+        specified, it is set to the per-component mean of `y_train`. For mixed
+        outcome types, each component uses the default for its type.
     w
         Coefficients that rescale the error standard deviation on each
         datapoint. Not specifying `w` is equivalent to setting it to 1 for all
@@ -311,7 +317,7 @@ class Bart(Module):
         x_train: Real[Array, 'p n'] | DataFrame,
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Series,
         *,
-        outcome_type: OutcomeType | str = 'continuous',
+        outcome_type: OutcomeType | str | Sequence[OutcomeType | str] = 'continuous',
         sparse: bool = False,
         theta: FloatLike | None = None,
         a: FloatLike = 0.5,
@@ -573,7 +579,13 @@ class Bart(Module):
             return latent
 
         # squash predictions to (0, 1) if probit
-        if self._mcmc_state.binary_y is not None:
+        binary_indices = self._mcmc_state.binary_indices
+        if binary_indices is not None:
+            # mixed: apply probit only to binary component rows
+            mean_samples = latent.at[..., binary_indices, :].set(
+                ndtr(latent[..., binary_indices, :])
+            )
+        elif self._mcmc_state.binary_y is not None:
             mean_samples = ndtr(latent)
         else:
             mean_samples = latent
@@ -586,6 +598,31 @@ class Bart(Module):
 
         # sample posterior
         assert kind is PredictKind.outcome_samples
+        return self._sample_outcome(key, latent, mean_samples, binary_indices, w)
+
+    def _sample_outcome(
+        self,
+        key: Key[Array, ''],
+        latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
+        mean_samples: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
+        binary_indices: Int32[Array, ' kb'] | None,
+        w: Float32[Array, ' m'] | None,
+    ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
+        """Sample from the posterior predictive distribution."""
+        if binary_indices is not None:
+            # mixed: continuous noise + Bernoulli for binary rows
+            error_cov_inv = self._main_trace.error_cov_inv
+            error_cov_inv = lax.collapse(error_cov_inv, 0, -2)
+            L = chol_with_gersh(error_cov_inv)
+            key1, key2 = random.split(key)
+            z = random.normal(key1, latent.shape)
+            error = solve_triangular(L, z, trans='T', lower=True)
+            outcome = latent + error
+            bern = random.bernoulli(key2, mean_samples[..., binary_indices, :]).astype(
+                jnp.float32
+            )
+            return outcome.at[..., binary_indices, :].set(bern)
+
         if self._mcmc_state.binary_y is not None:
             return random.bernoulli(key, mean_samples).astype(jnp.float32)
 
@@ -733,7 +770,7 @@ class Bart(Module):
         cls,
         x_train: Shaped[Array, 'p n'],
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        outcome_type: OutcomeType,
+        outcome_type: OutcomeType | tuple[OutcomeType, ...],
         sigest: FloatLike | Float[Array, ' k'] | None,
         sigdf: FloatLike,
         sigquant: FloatLike,
@@ -749,6 +786,12 @@ class Bart(Module):
                 msg = 'Let `sigest=None` and `lamda=None` for binary regression'
                 raise ValueError(msg)
             return None, None, None
+
+        if isinstance(outcome_type, tuple):
+            binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
+            return cls._process_mixed_error_variance_settings(
+                x_train, y_train, binary_mask, sigest, sigdf, sigquant, lamda
+            )
 
         if lamda is None:
             # estimate sigest²
@@ -786,6 +829,51 @@ class Bart(Module):
 
         return error_cov_df, error_cov_scale, sigest
 
+    @classmethod
+    def _process_mixed_error_variance_settings(
+        cls,
+        x_train: Shaped[Array, 'p n'],
+        y_train: Float32[Array, 'k n'],
+        binary_mask: Shaped[Array, ' k'],
+        sigest: FloatLike | Float[Array, ' k'] | None,
+        sigdf: FloatLike,
+        sigquant: FloatLike,
+        lamda: FloatLike | Float[Array, ' k'] | None,
+    ) -> tuple[Float32[Array, ''], Float32[Array, 'k k'], Float32[Array, ' k'] | None]:
+        """Return (error_cov_df, error_cov_scale, sigest) for mixed outcomes."""
+        k = y_train.shape[0]
+
+        if lamda is None:
+            n = y_train.shape[-1]
+            if sigest is not None:
+                sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
+                sigest2 = jnp.broadcast_to(sigest2, (k,))
+            elif n < 2:
+                sigest2 = jnp.ones((k,))
+            elif n <= x_train.shape[0]:
+                sigest2 = jnp.var(y_train, axis=-1)
+            else:
+                sigest2 = cls._linear_regression(x_train, y_train)
+            sigest2 = jnp.where(binary_mask, 0.0, sigest2)
+            sigest_out = jnp.sqrt(sigest2)
+
+            alpha = sigdf / 2
+            invchi2 = invgamma.ppf(sigquant, alpha) / 2
+            invchi2rid = invchi2 * sigdf
+            lamda = jnp.where(binary_mask, 0.0, sigest2 / invchi2rid)
+        elif sigest is not None:
+            msg = 'Let `sigest=None` if `lamda` is specified'
+            raise ValueError(msg)
+        else:
+            lamda = jnp.broadcast_to(jnp.asarray(lamda, jnp.float32), (k,))
+            lamda = jnp.where(binary_mask, 0.0, lamda)
+            sigest_out = None
+
+        error_cov_df = jnp.asarray(sigdf) + k - 1
+        error_cov_scale = jnp.diag(sigdf * lamda)
+
+        return error_cov_df, error_cov_scale, sigest_out
+
     @staticmethod
     @jit
     def _linear_regression(
@@ -804,9 +892,29 @@ class Bart(Module):
     @staticmethod
     def _check_type_settings(
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        outcome_type: OutcomeType | str,
+        outcome_type: OutcomeType | str | Sequence[OutcomeType | str],
         w: Float[Array, ' n'] | None,
-    ) -> OutcomeType:
+    ) -> OutcomeType | tuple[OutcomeType, ...]:
+        if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
+            types = tuple(OutcomeType(t) for t in outcome_type)
+            if y_train.ndim != 2:
+                msg = 'Sequence outcome_type requires 2D y_train (k, n).'
+                raise ValueError(msg)
+            if len(types) != y_train.shape[0]:
+                msg = (
+                    f'outcome_type length {len(types)} does not match'
+                    f' y_train components {y_train.shape[0]}.'
+                )
+                raise ValueError(msg)
+            # collapse uniform sequences to scalar
+            if len(set(types)) == 1:
+                outcome_type = types[0]
+            else:
+                if w is not None:
+                    msg = 'Weights are not supported for mixed outcome types.'
+                    raise ValueError(msg)
+                return types
+
         outcome_type = OutcomeType(outcome_type)
         match outcome_type:
             case OutcomeType.continuous:
@@ -814,9 +922,6 @@ class Bart(Module):
                     msg = "Weights 'w' are not supported for multivariate regression."
                     raise ValueError(msg)
             case OutcomeType.binary:
-                if y_train.ndim == 2:
-                    msg = "Multivariate regression requires outcome_type='continuous'."
-                    raise ValueError(msg)
                 if w is not None:
                     msg = 'Binary regression does not support weights, set `w=None`'
                     raise ValueError(msg)
@@ -849,7 +954,7 @@ class Bart(Module):
     @staticmethod
     def _process_offset_settings(
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        outcome_type: OutcomeType,
+        outcome_type: OutcomeType | tuple[OutcomeType, ...],
         offset: float | Float32[Any, ''] | Float32[Any, ' k'] | None,
     ) -> Float32[Array, ''] | Float32[Array, ' k']:
         """Return offset."""
@@ -859,7 +964,13 @@ class Bart(Module):
         if y_train.shape[-1] < 1:
             return jnp.zeros(y_train.shape[:-1])
 
-        if outcome_type is OutcomeType.binary:
+        if isinstance(outcome_type, tuple):
+            binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
+            bound = 1 / (1 + y_train.shape[-1])
+            binary_offset = ndtri(jnp.clip((y_train != 0).mean(-1), bound, 1 - bound))
+            continuous_offset = y_train.mean(-1)
+            return jnp.where(binary_mask, binary_offset, continuous_offset)
+        elif outcome_type is OutcomeType.binary:
             mean = (y_train != 0).mean(-1)
             bound = 1 / (1 + y_train.shape[-1])
             mean = jnp.clip(mean, bound, 1 - bound)
@@ -870,7 +981,7 @@ class Bart(Module):
     @staticmethod
     def _process_leaf_variance_settings(
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        outcome_type: OutcomeType,
+        outcome_type: OutcomeType | tuple[OutcomeType, ...],
         k: FloatLike,
         num_trees: int,
         tau_num: FloatLike | None,
@@ -878,7 +989,14 @@ class Bart(Module):
         """Return `leaf_prior_cov_inv`."""
         # determine `tau_num` if not specified
         if tau_num is None:
-            if outcome_type is OutcomeType.binary:
+            if isinstance(outcome_type, tuple):
+                binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
+                if y_train.shape[-1] < 2:
+                    range_tau = jnp.ones(y_train.shape[:-1])
+                else:
+                    range_tau = (y_train.max(-1) - y_train.min(-1)) / 2
+                tau_num = jnp.where(binary_mask, 3.0, range_tau)
+            elif outcome_type is OutcomeType.binary:
                 tau_num = 3.0
             elif y_train.shape[-1] < 2:
                 tau_num = jnp.ones(y_train.shape[:-1])
@@ -923,7 +1041,7 @@ class Bart(Module):
     def _setup_mcmc(
         x_train: Real[Array, 'p n'],
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        outcome_type: OutcomeType,
+        outcome_type: OutcomeType | tuple[OutcomeType, ...],
         offset: Float32[Array, ''] | Float32[Array, ' k'],
         w: Float[Array, ' n'] | None,
         max_split: UInt[Array, ' p'],

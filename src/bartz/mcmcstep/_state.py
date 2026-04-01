@@ -918,7 +918,7 @@ def _initial_resid(
     shape: tuple[int, ...],
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
-    binary_indices: Int32[Array, ' kb'],
+    binary_indices: Int32[Array, ' kb'] | None,
 ) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
     """Calculate the initial value for `State.resid` in the continuous outcome case.
 

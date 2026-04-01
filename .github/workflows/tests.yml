@@ -84,6 +84,7 @@ jobs:
       benchmarks-matrix: ${{ steps.set-matrix.outputs.benchmarks-matrix }}
     steps:
       - id: set-matrix
+        # numprocesses=0 in the "old" config is a workaround for unsolved issues
         run: |
           BASE_MATRIX='[
             {
@@ -96,7 +97,7 @@ jobs:
               "id": "old",
               "runs-on": "ubuntu-22.04",
               "target-suffix": "-old",
-              "tests-args": ""
+              "tests-args": "ARGS=--numprocesses=0"
             },
             {
               "id": "single-cpu",

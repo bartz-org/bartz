@@ -608,15 +608,29 @@ class TestMVBartInterface:
             random.normal(keys.pop(), (5,)),
         )
 
-    def test_initialization_and_shapes(self, keys: split, mv_data: MVData) -> None:
+    @pytest.mark.parametrize('outcome_mode', ['continuous', 'binary', 'mixed'])
+    def test_initialization_and_shapes(
+        self, keys: split, mv_data: MVData, outcome_mode: str
+    ) -> None:
         """Test that MV Bart predicts with correct shapes."""
         k, n = mv_data.y.shape
         n_test = 40
         p = mv_data.x.shape[0]
 
+        if outcome_mode == 'binary':
+            y = (mv_data.y > 0).astype(jnp.float32)
+            outcome_type = 'binary'
+        elif outcome_mode == 'mixed':
+            y = mv_data.y.at[0].set((mv_data.y[0] > 0).astype(jnp.float32))
+            outcome_type = ['binary'] + ['continuous'] * (k - 1)
+        else:
+            y = mv_data.y
+            outcome_type = 'continuous'
+
         model = Bart(
             x_train=mv_data.x,
-            y_train=mv_data.y,
+            y_train=y,
+            outcome_type=outcome_type,
             num_trees=10,
             ndpost=50,
             nskip=10,
@@ -638,14 +652,40 @@ class TestMVBartInterface:
             y_pred = model.predict(x, kind='outcome_samples', key=keys.pop())
             assert y_pred.shape == (model.ndpost, k, m)
 
-        # config params shape
-        assert model.sigest.shape == (k,)
-        assert model.offset.shape == (k,)
+            if outcome_mode == 'binary':
+                mean = model.predict(x, kind='mean')
+                assert jnp.all((mean >= 0) & (mean <= 1))
+                outcomes = model.predict(x, kind='outcome_samples', key=keys.pop())
+                assert jnp.all((outcomes == 0) | (outcomes == 1))
+            elif outcome_mode == 'mixed':
+                mean = model.predict(x, kind='mean')
+                assert jnp.all((mean[0] >= 0) & (mean[0] <= 1))
+                outcomes = model.predict(x, kind='outcome_samples', key=keys.pop())
+                assert jnp.all((outcomes[..., 0, :] == 0) | (outcomes[..., 0, :] == 1))
 
-    def test_scalar_params(self, example_data: MVData, subtests: SubTests) -> None:
+        # config params shape
+        assert model.offset.shape == (k,)
+        if outcome_mode == 'binary':
+            assert model.sigest is None
+        elif outcome_mode == 'mixed':
+            sigest = model.sigest
+            assert sigest.shape == (k,)
+            assert sigest[0] == 0.0  # binary component
+            assert jnp.all(sigest[1:] > 0)  # continuous components
+        else:
+            assert model.sigest.shape == (k,)
+
+    @pytest.mark.parametrize('outcome_mode', ['continuous', 'mixed'])
+    def test_scalar_params(
+        self, example_data: MVData, subtests: SubTests, outcome_mode: str
+    ) -> None:
         """Test that scalar configuration params are broadcasted."""
-        kwargs: dict = dict(ndpost=0, nskip=0)
         k, _ = example_data.y.shape
+        if outcome_mode == 'mixed':
+            outcome_type = ['binary'] + ['continuous'] * (k - 1)
+        else:
+            outcome_type = 'continuous'
+        kwargs: dict = dict(ndpost=0, nskip=0, outcome_type=outcome_type)
 
         with subtests.test('offset'):
             bart = Bart(example_data.x, example_data.y, offset=0.0, **kwargs)
@@ -660,19 +700,6 @@ class TestMVBartInterface:
             assert bart.sigest is None
             assert bart._mcmc_state.error_cov_scale.shape == (k, k)
 
-    def test_mv_rejects_binary(self, example_data: MVData) -> None:
-        """MV + binary should raise."""
-        with pytest.raises(ValueError, match='Multivariate'):
-            Bart(
-                x_train=example_data.x,
-                y_train=example_data.y > 0,
-                outcome_type='binary',
-                num_trees=2,
-                ndpost=4,
-                nskip=2,
-                num_chains=None,
-            )
-
     def test_mv_rejects_weights(self, example_data: MVData) -> None:
         """MV + weights should raise."""
         with pytest.raises(ValueError, match='Weights'):
@@ -686,11 +713,24 @@ class TestMVBartInterface:
                 num_chains=None,
             )
 
-    def test_mv_sigma_is_none(self, mv_data: MVData) -> None:
+    @pytest.mark.parametrize('outcome_mode', ['continuous', 'binary', 'mixed'])
+    def test_mv_sigma_is_none(self, mv_data: MVData, outcome_mode: str) -> None:
         """Sigma and sigma_ should return None for MV."""
+        k = mv_data.y.shape[0]
+        if outcome_mode == 'binary':
+            y = (mv_data.y > 0).astype(jnp.float32)
+            outcome_type = 'binary'
+        elif outcome_mode == 'mixed':
+            y = mv_data.y.at[0].set((mv_data.y[0] > 0).astype(jnp.float32))
+            outcome_type = ['binary'] + ['continuous'] * (k - 1)
+        else:
+            y = mv_data.y
+            outcome_type = 'continuous'
+
         model = Bart(
             x_train=mv_data.x,
-            y_train=mv_data.y,
+            y_train=y,
+            outcome_type=outcome_type,
             num_trees=5,
             ndpost=10,
             nskip=5,
@@ -699,8 +739,51 @@ class TestMVBartInterface:
         assert model.sigma is None
         assert model.sigma_ is None
         assert model.sigma_mean is None
-        assert model.sigest is not None
-        assert model.sigest.shape == (mv_data.y.shape[0],)
+        if outcome_mode == 'binary':
+            assert model.sigest is None
+        else:
+            assert model.sigest is not None
+            assert model.sigest.shape == (k,)
+
+    def test_mixed_rejects_weights(self, example_data: MVData) -> None:
+        """Mixed outcome_type + weights should raise."""
+        k, _ = example_data.y.shape
+        with pytest.raises(ValueError, match='mixed'):
+            Bart(
+                x_train=example_data.x,
+                y_train=example_data.y,
+                outcome_type=['binary'] + ['continuous'] * (k - 1),
+                w=example_data.w,
+                num_trees=2,
+                ndpost=0,
+                nskip=0,
+            )
+
+    def test_outcome_type_length_mismatch(self, example_data: MVData) -> None:
+        """Sequence outcome_type with wrong length should raise."""
+        with pytest.raises(ValueError, match='length'):
+            Bart(
+                x_train=example_data.x,
+                y_train=example_data.y,
+                outcome_type=['continuous', 'continuous'],
+                num_trees=2,
+                ndpost=0,
+                nskip=0,
+            )
+
+    def test_sequence_outcome_type_requires_2d(self, keys: split) -> None:
+        """Sequence outcome_type with 1D y should raise."""
+        x = random.normal(keys.pop(), (2, 5))
+        y = random.normal(keys.pop(), (5,))
+        with pytest.raises(ValueError, match='2D'):
+            Bart(
+                x_train=x,
+                y_train=y,
+                outcome_type=['continuous'],
+                num_trees=2,
+                ndpost=0,
+                nskip=0,
+            )
 
     def test_mvbart_convergence(self, mv_data: MVData, keys: split) -> None:
         """Test that MV Bart chains converge using R-hat."""

@@ -598,52 +598,49 @@ class Bart(Module):
 
         # sample posterior
         assert kind is PredictKind.outcome_samples
-        return self._sample_outcome(key, latent, mean_samples, binary_indices, w)
+        return self._sample_outcome(key, latent, binary_indices, w)
 
     def _sample_outcome(
         self,
         key: Key[Array, ''],
         latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
-        mean_samples: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
         binary_indices: Int32[Array, ' kb'] | None,
         w: Float32[Array, ' m'] | None,
     ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
         """Sample from the posterior predictive distribution."""
-        if binary_indices is not None:
-            # mixed: continuous noise + Bernoulli for binary rows
-            error_cov_inv = self._main_trace.error_cov_inv
-            error_cov_inv = lax.collapse(error_cov_inv, 0, -2)
-            L = chol_with_gersh(error_cov_inv)
-            key1, key2 = random.split(key)
-            z = random.normal(key1, latent.shape)
-            error = solve_triangular(L, z, trans='T', lower=True)
-            outcome = latent + error
-            bern = random.bernoulli(key2, mean_samples[..., binary_indices, :]).astype(
-                jnp.float32
-            )
-            return outcome.at[..., binary_indices, :].set(bern)
-
-        if self._mcmc_state.binary_y is not None:
-            return random.bernoulli(key, mean_samples).astype(jnp.float32)
-
-        # continuous case
         if latent.ndim > 2:  # multivariate case
             error_cov_inv = self._main_trace.error_cov_inv
-            error_cov_inv = lax.collapse(error_cov_inv, 0, -2)  # squash chains
+            if error_cov_inv is not None:
+                error_cov_inv = lax.collapse(error_cov_inv, 0, -2)
 
-            # Cholesky of precision: error_cov_inv = L @ L^T
-            L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
+                # Cholesky of precision: error_cov_inv = L @ L^T
+                L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
 
-            # Sample z ~ N(0, I) and solve L^T @ error = z
-            # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
-            z = random.normal(key, latent.shape)  # (ndpost, k, m)
-            error = solve_triangular(L, z, trans='T', lower=True)
-        else:  # univariate case
+                # Sample z ~ N(0, I) and solve L^T @ error = z
+                # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
+                z = random.normal(key, latent.shape)  # (ndpost, k, m)
+                error = solve_triangular(L, z, trans='T', lower=True)
+            else:
+                # pure binary MV: probit has sigma = I
+                error = random.normal(key, latent.shape)
+        elif self._mcmc_state.binary_y is not None:
+            # pure binary UV: probit has sigma = 1
+            error = random.normal(key, latent.shape)
+        else:  # univariate continuous
             error = self.sigma_[..., None] * random.normal(key, latent.shape)
             if w is not None:
                 error *= w[None, :]
 
-        return latent + error
+        outcome = latent + error
+
+        # convert binary outcomes via latent probit thresholding
+        if binary_indices is not None:
+            idx = jnp.s_[..., binary_indices, :]
+            outcome = outcome.at[idx].set(jnp.where(outcome[idx] > 0, 1.0, 0.0))
+        elif self._mcmc_state.binary_y is not None:
+            outcome = jnp.where(outcome > 0, 1.0, 0.0)
+
+        return outcome
 
     def _process_w_test(
         self,

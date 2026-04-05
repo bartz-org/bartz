@@ -572,6 +572,7 @@ class MVData(NamedTuple):
     x: Float32[Array, 'p n']
     y: Float32[Array, 'k n']
     w: Float32[Array, ' n'] | None = None
+    outcome_type: str | list[str] = 'continuous'
 
 
 class TestMVBartInterface:
@@ -608,15 +609,11 @@ class TestMVBartInterface:
             random.normal(keys.pop(), (5,)),
         )
 
-    @pytest.mark.parametrize('outcome_mode', ['continuous', 'binary', 'mixed'])
-    def test_initialization_and_shapes(
-        self, keys: split, mv_data: MVData, outcome_mode: str
-    ) -> None:
-        """Test that MV Bart predicts with correct shapes."""
-        k, n = mv_data.y.shape
-        n_test = 40
-        p = mv_data.x.shape[0]
-
+    @pytest.fixture(params=['continuous', 'binary', 'mixed'])
+    def mv_outcome_data(self, request: FixtureRequest, mv_data: MVData) -> MVData:
+        """Apply outcome_mode postprocessing to mv_data."""
+        outcome_mode = request.param
+        k = mv_data.y.shape[0]
         if outcome_mode == 'binary':
             y = (mv_data.y > 0).astype(jnp.float32)
             outcome_type = 'binary'
@@ -626,10 +623,20 @@ class TestMVBartInterface:
         else:
             y = mv_data.y
             outcome_type = 'continuous'
+        return MVData(x=mv_data.x, y=y, outcome_type=outcome_type)
+
+    def test_initialization_and_shapes(
+        self, keys: split, mv_outcome_data: MVData
+    ) -> None:
+        """Test that MV Bart predicts with correct shapes."""
+        k, n = mv_outcome_data.y.shape
+        n_test = 40
+        p = mv_outcome_data.x.shape[0]
+        outcome_type = mv_outcome_data.outcome_type
 
         model = Bart(
-            x_train=mv_data.x,
-            y_train=y,
+            x_train=mv_outcome_data.x,
+            y_train=mv_outcome_data.y,
             outcome_type=outcome_type,
             num_trees=10,
             ndpost=50,
@@ -652,12 +659,12 @@ class TestMVBartInterface:
             y_pred = model.predict(x, kind='outcome_samples', key=keys.pop())
             assert y_pred.shape == (model.ndpost, k, m)
 
-            if outcome_mode == 'binary':
+            if outcome_type == 'binary':
                 mean = model.predict(x, kind='mean')
                 assert jnp.all((mean >= 0) & (mean <= 1))
                 outcomes = model.predict(x, kind='outcome_samples', key=keys.pop())
                 assert jnp.all((outcomes == 0) | (outcomes == 1))
-            elif outcome_mode == 'mixed':
+            elif isinstance(outcome_type, list):
                 mean = model.predict(x, kind='mean')
                 assert jnp.all((mean[0] >= 0) & (mean[0] <= 1))
                 outcomes = model.predict(x, kind='outcome_samples', key=keys.pop())
@@ -665,9 +672,9 @@ class TestMVBartInterface:
 
         # config params shape
         assert model.offset.shape == (k,)
-        if outcome_mode == 'binary':
+        if outcome_type == 'binary':
             assert model.sigest is None
-        elif outcome_mode == 'mixed':
+        elif isinstance(outcome_type, list):
             sigest = model.sigest
             assert sigest.shape == (k,)
             assert sigest[0] == 0.0  # binary component
@@ -713,23 +720,14 @@ class TestMVBartInterface:
                 num_chains=None,
             )
 
-    @pytest.mark.parametrize('outcome_mode', ['continuous', 'binary', 'mixed'])
-    def test_mv_sigma_is_none(self, mv_data: MVData, outcome_mode: str) -> None:
+    def test_mv_sigma_is_none(self, mv_outcome_data: MVData) -> None:
         """Sigma and sigma_ should return None for MV."""
-        k = mv_data.y.shape[0]
-        if outcome_mode == 'binary':
-            y = (mv_data.y > 0).astype(jnp.float32)
-            outcome_type = 'binary'
-        elif outcome_mode == 'mixed':
-            y = mv_data.y.at[0].set((mv_data.y[0] > 0).astype(jnp.float32))
-            outcome_type = ['binary'] + ['continuous'] * (k - 1)
-        else:
-            y = mv_data.y
-            outcome_type = 'continuous'
+        k = mv_outcome_data.y.shape[0]
+        outcome_type = mv_outcome_data.outcome_type
 
         model = Bart(
-            x_train=mv_data.x,
-            y_train=y,
+            x_train=mv_outcome_data.x,
+            y_train=mv_outcome_data.y,
             outcome_type=outcome_type,
             num_trees=5,
             ndpost=10,
@@ -739,7 +737,7 @@ class TestMVBartInterface:
         assert model.sigma is None
         assert model.sigma_ is None
         assert model.sigma_mean is None
-        if outcome_mode == 'binary':
+        if outcome_type == 'binary':
             assert model.sigest is None
         else:
             assert model.sigest is not None

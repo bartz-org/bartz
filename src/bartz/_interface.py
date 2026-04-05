@@ -962,17 +962,14 @@ class Bart(Module):
         if tau_num is None:
             if isinstance(outcome_type, tuple):
                 binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
-                if y_train.shape[-1] < 2:
-                    range_tau = jnp.ones(y_train.shape[:-1])
-                else:
-                    range_tau = (y_train.max(-1) - y_train.min(-1)) / 2
-                tau_num = jnp.where(binary_mask, 3.0, range_tau)
-            elif outcome_type is OutcomeType.binary:
-                tau_num = 3.0
-            elif y_train.shape[-1] < 2:
-                tau_num = jnp.ones(y_train.shape[:-1])
             else:
-                tau_num = (y_train.max(-1) - y_train.min(-1)) / 2
+                binary_mask = outcome_type is OutcomeType.binary
+
+            if y_train.shape[-1] < 2:
+                continuous_tau = jnp.ones(y_train.shape[:-1])
+            else:
+                continuous_tau = (y_train.max(-1) - y_train.min(-1)) / 2
+            tau_num = jnp.where(binary_mask, 3.0, continuous_tau)
 
         # leaf prior standard deviation
         sigma_mu = tau_num / (k * math.sqrt(num_trees))

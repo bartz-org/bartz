@@ -38,7 +38,18 @@ from jax import Device, device_put, jit, lax, make_mesh, random
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh
-from jaxtyping import Array, Float, Float32, Int32, Integer, Key, Real, Shaped, UInt
+from jaxtyping import (
+    Array,
+    Bool,
+    Float,
+    Float32,
+    Int32,
+    Integer,
+    Key,
+    Real,
+    Shaped,
+    UInt,
+)
 from numpy import ndarray
 
 from bartz import mcmcloop, mcmcstep, prepcovars
@@ -786,22 +797,12 @@ class Bart(Module):
 
         if isinstance(outcome_type, tuple):
             binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
-            return cls._process_mixed_error_variance_settings(
-                x_train, y_train, binary_mask, sigest, sigdf, sigquant, lamda
-            )
+        else:
+            binary_mask = None
 
         if lamda is None:
             # estimate sigest²
-            n = y_train.shape[-1]
-            if sigest is not None:
-                sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
-                sigest2 = jnp.broadcast_to(sigest2, y_train.shape[:-1])
-            elif n < 2:
-                sigest2 = jnp.ones(y_train.shape[:-1])
-            elif n <= x_train.shape[0]:
-                sigest2 = jnp.var(y_train, axis=-1)
-            else:
-                sigest2 = cls._linear_regression(x_train, y_train)
+            sigest2 = cls._estimate_sigest2(x_train, y_train, sigest, binary_mask)
             sigest = jnp.sqrt(sigest2)
 
             # lamda from sigest²
@@ -813,6 +814,11 @@ class Bart(Module):
         elif sigest is not None:
             msg = 'Let `sigest=None` if `lamda` is specified'
             raise ValueError(msg)
+        elif binary_mask is not None:
+            lamda = jnp.broadcast_to(
+                jnp.asarray(lamda, jnp.float32), (y_train.shape[0],)
+            )
+            lamda = jnp.where(binary_mask, 0.0, lamda)
 
         # params written in multivariate form
         if y_train.ndim == 2:
@@ -827,49 +833,26 @@ class Bart(Module):
         return error_cov_df, error_cov_scale, sigest
 
     @classmethod
-    def _process_mixed_error_variance_settings(
+    def _estimate_sigest2(
         cls,
         x_train: Shaped[Array, 'p n'],
-        y_train: Float32[Array, 'k n'],
-        binary_mask: Shaped[Array, ' k'],
-        sigest: FloatLike | Float[Array, ' k'] | None,
-        sigdf: FloatLike,
-        sigquant: FloatLike,
-        lamda: FloatLike | Float[Array, ' k'] | None,
-    ) -> tuple[Float32[Array, ''], Float32[Array, 'k k'], Float32[Array, ' k'] | None]:
-        """Return (error_cov_df, error_cov_scale, sigest) for mixed outcomes."""
-        k = y_train.shape[0]
-
-        if lamda is None:
-            n = y_train.shape[-1]
-            if sigest is not None:
-                sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
-                sigest2 = jnp.broadcast_to(sigest2, (k,))
-            elif n < 2:
-                sigest2 = jnp.ones((k,))
-            elif n <= x_train.shape[0]:
-                sigest2 = jnp.var(y_train, axis=-1)
-            else:
-                sigest2 = cls._linear_regression(x_train, y_train)
-            sigest2 = jnp.where(binary_mask, 0.0, sigest2)
-            sigest_out = jnp.sqrt(sigest2)
-
-            alpha = sigdf / 2
-            invchi2 = invgamma.ppf(sigquant, alpha) / 2
-            invchi2rid = invchi2 * sigdf
-            lamda = jnp.where(binary_mask, 0.0, sigest2 / invchi2rid)
-        elif sigest is not None:
-            msg = 'Let `sigest=None` if `lamda` is specified'
-            raise ValueError(msg)
+        y_train: Float32[Array, '*k n'],
+        sigest: float | Shaped[Array, '*k'] | None,
+        binary_mask: Bool[Array, '*k'] | None,
+    ) -> Float32[Array, '*k']:
+        n = y_train.shape[-1]
+        if sigest is not None:
+            sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
+            sigest2 = jnp.broadcast_to(sigest2, y_train.shape[:-1])
+        elif n < 2:
+            sigest2 = jnp.ones(y_train.shape[:-1])
+        elif n <= x_train.shape[0]:
+            sigest2 = jnp.var(y_train, axis=-1)
         else:
-            lamda = jnp.broadcast_to(jnp.asarray(lamda, jnp.float32), (k,))
-            lamda = jnp.where(binary_mask, 0.0, lamda)
-            sigest_out = None
-
-        error_cov_df = jnp.asarray(sigdf) + k - 1
-        error_cov_scale = jnp.diag(sigdf * lamda)
-
-        return error_cov_df, error_cov_scale, sigest_out
+            sigest2 = cls._linear_regression(x_train, y_train)
+        if binary_mask is not None:
+            sigest2 = jnp.where(binary_mask, 0.0, sigest2)
+        return sigest2
 
     @staticmethod
     @jit
@@ -892,36 +875,31 @@ class Bart(Module):
         outcome_type: OutcomeType | str | Sequence[OutcomeType | str],
         w: Float[Array, ' n'] | None,
     ) -> OutcomeType | tuple[OutcomeType, ...]:
+        # standardize outcome_type to OutcomeType or tuple[OutcomeType, ...]
         if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
-            types = tuple(OutcomeType(t) for t in outcome_type)
-            if y_train.ndim != 2:
-                msg = 'Sequence outcome_type requires 2D y_train (k, n).'
-                raise ValueError(msg)
-            if len(types) != y_train.shape[0]:
-                msg = (
-                    f'outcome_type length {len(types)} does not match'
-                    f' y_train components {y_train.shape[0]}.'
-                )
-                raise ValueError(msg)
-            # collapse uniform sequences to scalar
-            if len(set(types)) == 1:
-                outcome_type = types[0]
-            else:
-                if w is not None:
-                    msg = 'Weights are not supported for mixed outcome types.'
-                    raise ValueError(msg)
-                return types
+            outcome_type = tuple(OutcomeType(t) for t in outcome_type)
+            num_types = len(outcome_type)
+            if len(set(outcome_type)) == 1:
+                outcome_type = outcome_type[0]
+        else:
+            num_types = None
+            outcome_type = OutcomeType(outcome_type)
 
-        outcome_type = OutcomeType(outcome_type)
-        match outcome_type:
-            case OutcomeType.continuous:
-                if y_train.ndim == 2 and w is not None:
-                    msg = "Weights 'w' are not supported for multivariate regression."
-                    raise ValueError(msg)
-            case OutcomeType.binary:
-                if w is not None:
-                    msg = 'Binary regression does not support weights, set `w=None`'
-                    raise ValueError(msg)
+        # validation
+        if num_types is not None and (
+            y_train.ndim != 2 or num_types != y_train.shape[0]
+        ):
+            msg = (
+                f'Sequence outcome_type of length {num_types}'
+                f' requires y_train.shape=({num_types}, n),'
+                f' found {y_train.shape=}.'
+            )
+            raise ValueError(msg)
+        if w is not None and not (
+            outcome_type is OutcomeType.continuous and y_train.ndim == 1
+        ):
+            msg = 'Weights are only supported for univariate continuous regression.'
+            raise ValueError(msg)
         return outcome_type
 
     @staticmethod

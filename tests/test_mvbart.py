@@ -748,7 +748,7 @@ class TestMVBartInterface:
     def test_mixed_rejects_weights(self, example_data: MVData) -> None:
         """Mixed outcome_type + weights should raise."""
         k, _ = example_data.y.shape
-        with pytest.raises(ValueError, match='mixed'):
+        with pytest.raises(ValueError, match='univariate continuous'):
             Bart(
                 x_train=example_data.x,
                 y_train=example_data.y,
@@ -775,7 +775,7 @@ class TestMVBartInterface:
         """Sequence outcome_type with 1D y should raise."""
         x = random.normal(keys.pop(), (2, 5))
         y = random.normal(keys.pop(), (5,))
-        with pytest.raises(ValueError, match='2D'):
+        with pytest.raises(ValueError, match=r'y_train\.shape=\(1, n\)'):
             Bart(
                 x_train=x,
                 y_train=y,

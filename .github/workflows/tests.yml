@@ -84,7 +84,6 @@ jobs:
       benchmarks-matrix: ${{ steps.set-matrix.outputs.benchmarks-matrix }}
     steps:
       - id: set-matrix
-        # numprocesses=0 in the "old" config is a workaround for unsolved issues
         run: |
           BASE_MATRIX='[
             {

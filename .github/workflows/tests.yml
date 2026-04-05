@@ -97,7 +97,7 @@ jobs:
               "id": "old",
               "runs-on": "ubuntu-22.04",
               "target-suffix": "-old",
-              "tests-args": "ARGS=--numprocesses=0"
+              "tests-args": ""
             },
             {
               "id": "single-cpu",

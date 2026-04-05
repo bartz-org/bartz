@@ -84,6 +84,7 @@ jobs:
       benchmarks-matrix: ${{ steps.set-matrix.outputs.benchmarks-matrix }}
     steps:
       - id: set-matrix
+        # the "old" tests run on macos as an attempt at solving mysterious issues
         run: |
           BASE_MATRIX='[
             {
@@ -94,7 +95,7 @@ jobs:
             },
             {
               "id": "old",
-              "runs-on": "ubuntu-22.04",
+              "runs-on": "macos-latest",
               "target-suffix": "-old",
               "tests-args": ""
             },

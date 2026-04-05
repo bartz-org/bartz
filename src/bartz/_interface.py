@@ -592,10 +592,8 @@ class Bart(Module):
         # squash predictions to (0, 1) if probit
         binary_indices = self._mcmc_state.binary_indices
         if binary_indices is not None:
-            # mixed: apply probit only to binary component rows
-            mean_samples = latent.at[..., binary_indices, :].set(
-                ndtr(latent[..., binary_indices, :])
-            )
+            indexing = jnp.s_[..., binary_indices, :]
+            mean_samples = latent.at[indexing].set(ndtr(latent[indexing]))
         elif self._mcmc_state.binary_y is not None:
             mean_samples = ndtr(latent)
         else:

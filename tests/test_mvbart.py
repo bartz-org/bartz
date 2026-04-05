@@ -659,15 +659,13 @@ class TestMVBartInterface:
             y_pred = model.predict(x, kind='outcome_samples', key=keys.pop())
             assert y_pred.shape == (model.ndpost, k, m)
 
+            mean = model.predict(x, kind='mean')
+            outcomes = model.predict(x, kind='outcome_samples', key=keys.pop())
             if outcome_type == 'binary':
-                mean = model.predict(x, kind='mean')
                 assert jnp.all((mean >= 0) & (mean <= 1))
-                outcomes = model.predict(x, kind='outcome_samples', key=keys.pop())
                 assert jnp.all((outcomes == 0) | (outcomes == 1))
             elif isinstance(outcome_type, list):
-                mean = model.predict(x, kind='mean')
                 assert jnp.all((mean[0] >= 0) & (mean[0] <= 1))
-                outcomes = model.predict(x, kind='outcome_samples', key=keys.pop())
                 assert jnp.all((outcomes[..., 0, :] == 0) | (outcomes[..., 0, :] == 1))
 
         # config params shape

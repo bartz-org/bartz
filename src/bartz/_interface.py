@@ -373,7 +373,7 @@ class Bart(Module):
             self._check_same_length(x_train, w)
 
         # check data types are correct for continuous/binary/multivariate regression
-        outcome_type = self._check_type_settings(y_train, outcome_type, w)
+        outcome_type, binary_mask = self._check_type_settings(y_train, outcome_type, w)
 
         # process sparsity settings
         theta, a, b, rho = self._process_sparsity_settings(
@@ -381,12 +381,12 @@ class Bart(Module):
         )
 
         # process "standardization" settings
-        offset = self._process_offset_settings(y_train, outcome_type, offset)
+        offset = self._process_offset_settings(y_train, binary_mask, offset)
         leaf_prior_cov_inv = self._process_leaf_variance_settings(
-            y_train, outcome_type, k, num_trees, tau_num
+            y_train, binary_mask, k, num_trees, tau_num
         )
         error_cov_df, error_cov_scale, sigest = self._process_error_variance_settings(
-            x_train, y_train, outcome_type, sigest, sigdf, sigquant, lamda
+            x_train, y_train, outcome_type, binary_mask, sigest, sigdf, sigquant, lamda
         )
 
         # determine splits
@@ -779,6 +779,7 @@ class Bart(Module):
         x_train: Shaped[Array, 'p n'],
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
         outcome_type: OutcomeType | tuple[OutcomeType, ...],
+        binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
         sigest: FloatLike | Float[Array, ' k'] | None,
         sigdf: FloatLike,
         sigquant: FloatLike,
@@ -795,11 +796,6 @@ class Bart(Module):
                 raise ValueError(msg)
             return None, None, None
 
-        if isinstance(outcome_type, tuple):
-            binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
-        else:
-            binary_mask = None
-
         if lamda is None:
             # estimate sigest²
             sigest2 = cls._estimate_sigest2(x_train, y_train, sigest, binary_mask)
@@ -814,10 +810,8 @@ class Bart(Module):
         elif sigest is not None:
             msg = 'Let `sigest=None` if `lamda` is specified'
             raise ValueError(msg)
-        elif binary_mask is not None:
-            lamda = jnp.broadcast_to(
-                jnp.asarray(lamda, jnp.float32), (y_train.shape[0],)
-            )
+
+        else:
             lamda = jnp.where(binary_mask, 0.0, lamda)
 
         # params written in multivariate form
@@ -838,7 +832,7 @@ class Bart(Module):
         x_train: Shaped[Array, 'p n'],
         y_train: Float32[Array, '*k n'],
         sigest: float | Shaped[Array, '*k'] | None,
-        binary_mask: Bool[Array, '*k'] | None,
+        binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
     ) -> Float32[Array, '*k']:
         n = y_train.shape[-1]
         if sigest is not None:
@@ -850,9 +844,7 @@ class Bart(Module):
             sigest2 = jnp.var(y_train, axis=-1)
         else:
             sigest2 = cls._linear_regression(x_train, y_train)
-        if binary_mask is not None:
-            sigest2 = jnp.where(binary_mask, 0.0, sigest2)
-        return sigest2
+        return jnp.where(binary_mask, 0.0, sigest2)
 
     @staticmethod
     @jit
@@ -874,7 +866,9 @@ class Bart(Module):
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
         outcome_type: OutcomeType | str | Sequence[OutcomeType | str],
         w: Float[Array, ' n'] | None,
-    ) -> OutcomeType | tuple[OutcomeType, ...]:
+    ) -> tuple[
+        OutcomeType | tuple[OutcomeType, ...], Bool[Array, ''] | Bool[Array, ' k']
+    ]:
         # standardize outcome_type to OutcomeType or tuple[OutcomeType, ...]
         if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
             outcome_type = tuple(OutcomeType(t) for t in outcome_type)
@@ -900,7 +894,13 @@ class Bart(Module):
         ):
             msg = 'Weights are only supported for univariate continuous regression.'
             raise ValueError(msg)
-        return outcome_type
+
+        if isinstance(outcome_type, tuple):
+            binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
+        else:
+            binary_mask = jnp.bool_(outcome_type is OutcomeType.binary)
+
+        return outcome_type, binary_mask
 
     @staticmethod
     def _process_sparsity_settings(
@@ -929,7 +929,7 @@ class Bart(Module):
     @staticmethod
     def _process_offset_settings(
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        outcome_type: OutcomeType | tuple[OutcomeType, ...],
+        binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
         offset: float | Float32[Any, ''] | Float32[Any, ' k'] | None,
     ) -> Float32[Array, ''] | Float32[Array, ' k']:
         """Return offset."""
@@ -939,11 +939,6 @@ class Bart(Module):
         if y_train.shape[-1] < 1:
             return jnp.zeros(y_train.shape[:-1])
 
-        if isinstance(outcome_type, tuple):
-            binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
-        else:
-            binary_mask = outcome_type is OutcomeType.binary
-
         bound = 1 / (1 + y_train.shape[-1])
         binary_offset = ndtri(jnp.clip((y_train != 0).mean(-1), bound, 1 - bound))
         continuous_offset = y_train.mean(-1)
@@ -952,7 +947,7 @@ class Bart(Module):
     @staticmethod
     def _process_leaf_variance_settings(
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        outcome_type: OutcomeType | tuple[OutcomeType, ...],
+        binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
         k: FloatLike,
         num_trees: int,
         tau_num: FloatLike | None,
@@ -960,11 +955,6 @@ class Bart(Module):
         """Return `leaf_prior_cov_inv`."""
         # determine `tau_num` if not specified
         if tau_num is None:
-            if isinstance(outcome_type, tuple):
-                binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
-            else:
-                binary_mask = outcome_type is OutcomeType.binary
-
             if y_train.shape[-1] < 2:
                 continuous_tau = jnp.ones(y_train.shape[:-1])
             else:

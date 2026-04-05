@@ -941,17 +941,13 @@ class Bart(Module):
 
         if isinstance(outcome_type, tuple):
             binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
-            bound = 1 / (1 + y_train.shape[-1])
-            binary_offset = ndtri(jnp.clip((y_train != 0).mean(-1), bound, 1 - bound))
-            continuous_offset = y_train.mean(-1)
-            return jnp.where(binary_mask, binary_offset, continuous_offset)
-        elif outcome_type is OutcomeType.binary:
-            mean = (y_train != 0).mean(-1)
-            bound = 1 / (1 + y_train.shape[-1])
-            mean = jnp.clip(mean, bound, 1 - bound)
-            return ndtri(mean)
         else:
-            return y_train.mean(-1)
+            binary_mask = outcome_type is OutcomeType.binary
+
+        bound = 1 / (1 + y_train.shape[-1])
+        binary_offset = ndtri(jnp.clip((y_train != 0).mean(-1), bound, 1 - bound))
+        continuous_offset = y_train.mean(-1)
+        return jnp.where(binary_mask, binary_offset, continuous_offset)
 
     @staticmethod
     def _process_leaf_variance_settings(

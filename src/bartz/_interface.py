@@ -589,8 +589,12 @@ class Bart(Module):
         if kind is PredictKind.latent_samples:
             return latent
 
-        # squash predictions to (0, 1) if probit
+        # sample posterior (uses latent directly, no probit squash needed)
         binary_indices = self._mcmc_state.binary_indices
+        if kind is PredictKind.outcome_samples:
+            return self._sample_outcome(key, latent, binary_indices, w)
+
+        # squash predictions to (0, 1) if probit
         if binary_indices is not None:
             indexing = jnp.s_[..., binary_indices, :]
             mean_samples = latent.at[indexing].set(ndtr(latent[indexing]))
@@ -599,15 +603,10 @@ class Bart(Module):
         else:
             mean_samples = latent
 
-        # take mean and return if no sampling requested
-        if kind is PredictKind.mean_samples:
-            return mean_samples
-        elif kind is PredictKind.mean:
+        # take mean or return samples
+        if kind is PredictKind.mean:
             return mean_samples.mean(axis=0)
-
-        # sample posterior
-        assert kind is PredictKind.outcome_samples
-        return self._sample_outcome(key, latent, binary_indices, w)
+        return mean_samples
 
     def _sample_outcome(
         self,

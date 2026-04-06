@@ -280,13 +280,20 @@ class TestWithCachedBart:
         key = keys[variant - 1]
         kw = make_kw(key, variant)
 
-        # modify configs to make them appropriate for convergence checks
+        # modify configs to make them appropriate for convergence checks and R
         p, n = kw['x_train'].shape
         nchains = 4
         kw.update(
             ntree=max(2 * n, p),
             nskip=3000,
-            ndpost=nchains * 1000,
+            ndpost=nchains * 1002,
+            # 1002 instead of 1000 because it is divisible by 3. R's BART3 caps
+            # the number of chains at the number of cores on the machine. On CI
+            # we have 2 or 3 cores, so this is going to happen. If it wasn't
+            # divisible, ndpost would be rounded up to the next multiple for
+            # BART3 but not for bartz that just honors the user request, the
+            # lengths would not match, and so stacking to compute rhat would
+            # fail.
             keepevery=1,
             mc_cores=nchains,
         )

@@ -293,9 +293,10 @@ class TestMVBartIntegration:
         assert bart_mv.resid.shape[0] == 1
         assert bart_mv.resid.shape[1] == bart_uv.resid.shape[0]
 
+        assert jnp.ndim(bart_uv.error_cov_inv) == 0
+        assert bart_mv.error_cov_inv.shape == (1, 1)
+
         if binary:
-            assert bart_uv.error_cov_inv is None
-            assert bart_mv.error_cov_inv is None
             assert bart_uv.binary_y is not None
             assert bart_mv.binary_y is not None
             assert bart_uv.binary_y.ndim == 1
@@ -306,11 +307,6 @@ class TestMVBartIntegration:
             assert bart_uv.z.ndim == 1
             assert bart_mv.z.ndim == 2
             assert_array_equal(bart_uv.z, bart_mv.z.squeeze(0))
-        else:
-            assert bart_uv.error_cov_inv is not None
-            assert bart_mv.error_cov_inv is not None
-            assert jnp.ndim(bart_uv.error_cov_inv) == 0
-            assert bart_mv.error_cov_inv.shape == (1, 1)
 
         assert_array_equal(bart_uv.resid, bart_mv.resid.squeeze(0))
         assert_array_equal(bart_uv.forest.var_tree, bart_mv.forest.var_tree)
@@ -461,17 +457,10 @@ class TestMVBartSteps:
         uv_state = init(**uv_kw, **params)
         mv_state = init(**mv_kw, **params)
 
-        if binary:
-            uv_error_cov_inv = jnp.array(1.0)
-            mv_error_cov_inv = jnp.eye(1)
-        else:
-            uv_error_cov_inv = uv_state.error_cov_inv
-            mv_error_cov_inv = jnp.array([[uv_state.error_cov_inv]])
-
         mv_state = replace(
             mv_state,
             resid=uv_state.resid[None, :],
-            error_cov_inv=mv_error_cov_inv,
+            error_cov_inv=jnp.array([[uv_state.error_cov_inv]]),
             forest=replace(
                 mv_state.forest,
                 var_tree=uv_state.forest.var_tree,
@@ -481,7 +470,6 @@ class TestMVBartSteps:
                 affluence_tree=uv_state.forest.affluence_tree,
             ),
         )
-        uv_state = replace(uv_state, error_cov_inv=uv_error_cov_inv)
 
         key = keys.pop()
         uv_next = step_trees(key, uv_state)
@@ -556,14 +544,13 @@ class TestMVBartSteps:
 
             assert mv_state.resid.shape == (k, y.shape[1])
 
+            assert jnp.all(jnp.isfinite(mv_state.error_cov_inv))
+            assert mv_state.error_cov_inv.shape == (k, k)
+
             if binary:
-                assert mv_state.error_cov_inv is None
                 assert mv_state.z is not None
                 assert jnp.all(jnp.isfinite(mv_state.z))
                 assert mv_state.z.shape == (k, y.shape[1])
-            else:
-                assert jnp.all(jnp.isfinite(mv_state.error_cov_inv))
-                assert mv_state.error_cov_inv.shape == (k, k)
 
 
 class MVData(NamedTuple):

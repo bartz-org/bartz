@@ -464,9 +464,8 @@ class Bart(Module):
 
         Returns `None` for binary regression or multivariate regression.
         """
-        if self._burnin_trace.error_cov_inv is None:
+        if self._mcmc_state.binary_y is not None:
             return None
-        assert self._main_trace.error_cov_inv is not None
         # not meaningful for MV (error_cov_inv is a matrix)
         if self._mcmc_state.offset.ndim == 1:
             return None
@@ -489,13 +488,12 @@ class Bart(Module):
 
         Returns `None` for binary regression or multivariate regression.
         """
-        error_cov_inv = self._main_trace.error_cov_inv
-        if error_cov_inv is None:
+        if self._mcmc_state.binary_y is not None:
             return None
         # not meaningful for MV (error_cov_inv is a matrix)
         if self._mcmc_state.offset.ndim == 1:
             return None
-        return jnp.sqrt(jnp.reciprocal(error_cov_inv)).reshape(-1)
+        return jnp.sqrt(jnp.reciprocal(self._main_trace.error_cov_inv)).reshape(-1)
 
     @cached_property
     def sigma_mean(self) -> Float32[Array, ''] | None:
@@ -618,19 +616,15 @@ class Bart(Module):
         """Sample from the posterior predictive distribution."""
         if latent.ndim > 2:  # multivariate case
             error_cov_inv = self._main_trace.error_cov_inv
-            if error_cov_inv is not None:
-                error_cov_inv = lax.collapse(error_cov_inv, 0, -2)
+            error_cov_inv = lax.collapse(error_cov_inv, 0, -2)
 
-                # Cholesky of precision: error_cov_inv = L @ L^T
-                L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
+            # Cholesky of precision: error_cov_inv = L @ L^T
+            L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
 
-                # Sample z ~ N(0, I) and solve L^T @ error = z
-                # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
-                z = random.normal(key, latent.shape)  # (ndpost, k, m)
-                error = solve_triangular(L, z, trans='T', lower=True)
-            else:
-                # pure binary MV: probit has sigma = I
-                error = random.normal(key, latent.shape)
+            # Sample z ~ N(0, I) and solve L^T @ error = z
+            # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
+            z = random.normal(key, latent.shape)  # (ndpost, k, m)
+            error = solve_triangular(L, z, trans='T', lower=True)
         elif self._mcmc_state.binary_y is not None:
             # pure binary UV: probit has sigma = 1
             error = random.normal(key, latent.shape)

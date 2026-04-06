@@ -544,13 +544,14 @@ class TestWithCachedBart:
                         reduce_rank=True,
                         ord='fro' if x.ndim >= 2 else 2,
                         atol=0,
+                        err_msg=f'chain samples are not different for {str_path}\n',
                         **kwargs,
                     )
 
             axes = chain_vmap_axes(x)
             tree.map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)
 
-        assert_different(bart._mcmc_state, rtol=0.05)
+        assert_different(bart._mcmc_state, rtol=0.02)
         assert_different(bart._main_trace, rtol=0.03)
         assert_different(bart._burnin_trace, rtol=0.03)
 

@@ -76,7 +76,6 @@ class BurninTrace(Module):
     error_cov_inv: (
         Float32[Array, '*chains_and_samples']
         | Float32[Array, '*chains_and_samples k k']
-        | None
     ) = field(chains=True)
     theta: Float32[Array, '*chains_and_samples'] | None = field(chains=True)
     grow_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=True)

@@ -536,6 +536,11 @@ class TestWithCachedBart:
                 str_path = keystr(path)
                 if str_path.endswith('.theta') and not step_theta:
                     return
+                if (
+                    str_path.endswith('.error_cov_inv')
+                    and bart._mcmc_state.error_cov_df is None
+                ):
+                    return
                 if x is not None and chain_axis is not None:
                     ref = jnp.broadcast_to(x.mean(chain_axis, keepdims=True), x.shape)
                     assert_different_matrices(

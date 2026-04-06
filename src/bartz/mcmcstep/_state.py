@@ -314,11 +314,11 @@ class State(Module):
     )
     """The residuals (`y` or `z` minus sum of trees)."""
 
-    error_cov_inv: Float32[Array, '*chains'] | Float32[Array, '*chains k k'] | None = (
-        field(chains=True)
+    error_cov_inv: Float32[Array, '*chains'] | Float32[Array, '*chains k k'] = field(
+        chains=True
     )
     """The inverse error covariance (scalar for univariate, matrix for multivariate).
-    `None` in binary regression."""
+    Identity in binary regression."""
 
     prec_scale: Float32[Array, ' n'] | None = field(data=True)
     """The scale on the error precision, i.e., ``1 / error_scale ** 2``.
@@ -419,7 +419,10 @@ def _init_shape_shifting_parameters(
         assert error_scale is None
         assert error_cov_df is None
         assert error_cov_scale is None
-        error_cov_inv = None
+        if kshape:
+            error_cov_inv = jnp.eye(kshape[0])
+        else:
+            error_cov_inv = jnp.array(1.0)
 
     # Mixed binary-continuous (multivariate, diagonal error covariance)
     elif is_mixed:

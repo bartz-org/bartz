@@ -74,27 +74,12 @@ def step(key: Key[Array, ''], bart: State) -> State:
     """
     keys = split(key, 4)
 
-    if bart.binary_indices is not None:
-        # Mixed binary-continuous: error_cov_inv is already a diagonal matrix
-        # with 1s for binary components and estimated values for continuous
-        bart = step_trees(keys.pop(), bart)
-        bart = step_z(keys.pop(), bart)
-        bart = step_error_cov_inv(keys.pop(), bart)
+    bart = step_trees(keys.pop(), bart)
 
-    elif bart.binary_y is not None:
-        # Pure binary
-        if bart.binary_y.ndim == 1:
-            error_cov_inv = jnp.array(1.0)
-        else:
-            k = bart.binary_y.shape[0]
-            error_cov_inv = jnp.eye(k)
-        bart = replace(bart, error_cov_inv=error_cov_inv)
-        bart = step_trees(keys.pop(), bart)
-        bart = replace(bart, error_cov_inv=None)
+    if bart.z is not None:
         bart = step_z(keys.pop(), bart)
 
-    else:  # continuous or multivariate regression
-        bart = step_trees(keys.pop(), bart)
+    if bart.error_cov_df is not None:
         bart = step_error_cov_inv(keys.pop(), bart)
 
     bart = step_sparse(keys.pop(), bart)
@@ -380,7 +365,6 @@ def accept_moves_parallel_stage(
         ),
     )
 
-    assert bart.error_cov_inv is not None
     prelkv, prelk = precompute_likelihood_terms(
         bart.error_cov_inv, bart.forest.leaf_prior_cov_inv, move_precs
     )
@@ -1478,7 +1462,6 @@ def step_error_cov_inv(key: Key[Array, ''], bart: State) -> State:
     -------
     The new BART mcmc state, with an updated `error_cov_inv`.
     """
-    assert bart.error_cov_inv is not None
     if bart.binary_indices is not None:
         return _step_error_cov_inv_diag(key, bart)
     elif bart.error_cov_inv.ndim == 2:

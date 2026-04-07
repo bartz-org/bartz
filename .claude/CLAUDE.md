@@ -24,9 +24,10 @@ All commands use `uv run` under the hood. Tests run with `--import-mode=importli
 ## Workflow
 
 - After implementing a feature or fix, run all unit tests.
+- Use `make lint` to run `ruff check --fix` in a project-compatible way. Run it to check and auto-fix linting issues.
 - Prefer `uv run pytest` over `make tests` for day-to-day testing (simpler output).
 - When running all tests, pipe output to a scratch file (e.g., `uv run pytest > scratch_test_output.txt 2>&1`) with a 20-minute timeout, then read it, to avoid flooding the terminal.
-- If tests fail with errors unrelated to your changes (missing packages, broken environment), the worktree likely needs `make setup` — stop and ask the user to run it.
+- If tests fail with errors unrelated to your changes (missing packages, broken environment), run `make setup` yourself first, then retry. Ignore any failed pre-commit installation during setup.
 
 ## Architecture
 
@@ -35,7 +36,7 @@ All commands use `uv run` under the hood. Tests run with `--import-mode=importli
 | Module | Role |
 |---|---|
 | `_interface.py` | `Bart` class — high-level public API |
-| `BART/` | R BART3-compatible wrappers (`mc_gbart`, `gbart`) |
+| `BART/` | R BART3-compatible wrappers (`mc_gbart`, `gbart`). The purpose of `mc_gbart` is to maintain a stable interface matching the R BART3 package; when modifying the library internals, adapt `mc_gbart`'s implementation to fit while preserving its external interface. |
 | `mcmcstep/` | MCMC state (`State`, `Forest`, `StepConfig`), `init`, `step` |
 | `mcmcloop.py` | MCMC loop orchestration (`run_mcmc`, `evaluate_trace`) |
 | `grove.py` | Decision tree operations on heap arrays (leaves, splits, traversal) |

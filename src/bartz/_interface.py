@@ -34,7 +34,7 @@ from typing import Any, Literal, Protocol, TypedDict
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field
-from jax import Device, device_put, jit, lax, make_mesh, random
+from jax import Device, debug_nans, device_put, jit, lax, make_mesh, random
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh
@@ -452,55 +452,123 @@ class Bart(Module):
         """Return the number of trees used in the model."""
         return self._mcmc_state.forest.split_tree.shape[-2]
 
-    @cached_property
-    def sigma(
-        self,
+    def get_latent_prec(
+        self, only_continuous: bool = False
     ) -> (
-        Float32[Array, ' nskip+ndpost']
-        | Float32[Array, 'nskip+ndpost/mc_cores mc_cores']
+        Float32[Array, '*chains_and_samples']
+        | Float32[Array, '*chains_and_samples k k']
         | None
     ):
-        """The standard deviation of the error, including burn-in samples.
+        """Return the inverse error covariance trace, including burn-in.
 
-        Returns `None` for binary regression or multivariate regression.
+        Parameters
+        ----------
+        only_continuous
+            If `True` and the model has mixed binary-continuous outcomes,
+            return only the submatrix for the continuous components. Returns
+            `None` for multivariate all-binary (no continuous submatrix).
+            No effect for univariate models.
+
+        Returns
+        -------
+        The error precision trace with shape ``(*chains_and_samples,)`` for
+        univariate or ``(*chains_and_samples, k, k)`` for multivariate,
+        or a submatrix thereof if `only_continuous` is `True`. Chains are
+        not collapsed, so the shape depends on the number of chains.
         """
-        if self._mcmc_state.binary_y is not None:
-            return None
-        # not meaningful for MV (error_cov_inv is a matrix)
-        if self._mcmc_state.offset.ndim == 1:
-            return None
-        return jnp.sqrt(
-            jnp.reciprocal(
-                jnp.concatenate(
-                    [
-                        self._burnin_trace.error_cov_inv.T,
-                        self._main_trace.error_cov_inv.T,
-                    ],
-                    axis=0,
-                    # error_cov_inv has shape (chains? samples) in the trace
-                )
-            )
-        )
+        burnin = self._burnin_trace.error_cov_inv
+        main = self._main_trace.error_cov_inv
+        # trace shape is (chains?, samples, ...) where chains is optional
+        # first axis; samples is the axis to concatenate along
+        num_chains = get_num_chains(self._mcmc_state)
+        sample_axis = 1 if num_chains is not None else 0
+        prec = jnp.concatenate([burnin, main], axis=sample_axis)
 
-    @cached_property
-    def sigma_(self) -> Float32[Array, 'ndpost'] | None:
-        """The standard deviation of the error, only over the post-burnin samples and flattened.
+        if only_continuous and prec.ndim >= sample_axis + 3:
+            binary_indices = self._mcmc_state.binary_indices
+            if binary_indices is not None:
+                # mixed case: extract continuous submatrix
+                k = prec.shape[-1]
+                mask = jnp.ones(k, dtype=bool).at[binary_indices].set(False)
+                cont_indices = jnp.arange(k)[mask]
+                if cont_indices.size == 0:
+                    return None
+                prec = prec[..., cont_indices[:, None], cont_indices[None, :]]
+            elif self._mcmc_state.binary_y is not None:
+                # all-binary MV: no continuous submatrix
+                return None
 
-        Returns `None` for binary regression or multivariate regression.
+        return prec
+
+    def get_error_sdev(
+        self, mean: bool = False
+    ) -> (
+        Float32[Array, 'ndpost']
+        | Float32[Array, '']
+        | Float32[Array, 'ndpost k']
+        | Float32[Array, ' k']
+    ):
+        """Return the error standard deviation, post-burnin, chains squashed.
+
+        Parameters
+        ----------
+        mean
+            If `True`, average the precision across samples first (harmonic
+            mean at the covariance matrix level), returning a scalar or
+            vector instead of samples.
+
+        Returns
+        -------
+        Error standard deviations. Binary components are filled with NaN.
+        Shape ``(ndpost,)`` or ``()`` for univariate, ``(ndpost, k)`` or
+        ``(k,)`` for multivariate.
         """
-        if self._mcmc_state.binary_y is not None:
-            return None
-        # not meaningful for MV (error_cov_inv is a matrix)
-        if self._mcmc_state.offset.ndim == 1:
-            return None
-        return jnp.sqrt(jnp.reciprocal(self._main_trace.error_cov_inv)).reshape(-1)
+        error_cov_inv = self._main_trace.error_cov_inv
+        is_mv = error_cov_inv.ndim >= 3  # (..., k, k)
 
-    @cached_property
-    def sigma_mean(self) -> Float32[Array, ''] | None:
-        """The mean of `sigma`, only over the post-burnin samples."""
-        if self.sigma_ is None:
-            return None
-        return self.sigma_.mean()
+        if is_mv:
+            error_cov_inv = lax.collapse(error_cov_inv, 0, -2)  # (ndpost, k, k)
+            if mean:
+                error_cov_inv = error_cov_inv.mean(axis=0, keepdims=True)
+
+            # build per-component NaN mask
+            k = error_cov_inv.shape[-1]
+            binary_indices = self._mcmc_state.binary_indices
+            if binary_indices is not None:
+                nan_mask = jnp.zeros(k, dtype=bool).at[binary_indices].set(True)
+            elif self._mcmc_state.binary_y is not None:
+                nan_mask = jnp.ones(k, dtype=bool)
+            else:
+                nan_mask = jnp.zeros(k, dtype=bool)
+
+            # invert precision to covariance via Cholesky
+            L = chol_with_gersh(error_cov_inv)
+            eye = jnp.broadcast_to(jnp.eye(k, dtype=L.dtype), L.shape)
+            Linv = solve_triangular(L, eye, lower=True)
+            cov = Linv.swapaxes(-2, -1) @ Linv
+            sdev = jnp.sqrt(jnp.diagonal(cov, axis1=-2, axis2=-1))
+
+            # set binary components to NaN
+            if nan_mask.any():
+                with debug_nans(False):
+                    sdev = jnp.where(~nan_mask, sdev, float('nan'))
+
+            if mean:
+                return sdev.squeeze(axis=0)
+            return sdev
+        else:
+            error_cov_inv = error_cov_inv.reshape(-1)  # (ndpost,)
+            if self._mcmc_state.binary_y is not None:
+                with debug_nans(False):
+                    sdev = jnp.full_like(error_cov_inv, float('nan'))
+                    if mean:
+                        return sdev.mean()
+                    return sdev
+            else:
+                sdev = jnp.sqrt(jnp.reciprocal(error_cov_inv))
+                if mean:
+                    return sdev.mean()
+                return sdev
 
     @cached_property
     def varcount(self) -> Int32[Array, 'ndpost p']:
@@ -629,7 +697,8 @@ class Bart(Module):
             # pure binary UV: probit has sigma = 1
             error = random.normal(key, latent.shape)
         else:  # univariate continuous
-            error = self.sigma_[..., None] * random.normal(key, latent.shape)
+            sigma = jnp.sqrt(jnp.reciprocal(self._main_trace.error_cov_inv)).reshape(-1)
+            error = sigma[..., None] * random.normal(key, latent.shape)
             if w is not None:
                 error *= w[None, :]
 

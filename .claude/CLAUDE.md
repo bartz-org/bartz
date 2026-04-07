@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code when working with code in this repository.
 
 ## Project
 
@@ -9,25 +9,30 @@ bartz (BART vectoriZed) — a fast implementation of Bayesian Additive Regressio
 ## Commands
 
 ```bash
+make setup                        # setup dev env (Python and, more importantly, R)
 uv run pytest                     # run all tests
+make tests                        # run all tests but faster (use parallelization) + very verbose configs
 uv run pytest -k test_name        # run a single test or subset
 uv run pytest tests/test_foo.py   # run one test file
-make tests                        # run tests on CPU with coverage + xdist (CI-like)
-make tests-gpu                    # run tests on GPU
-make lint                         # ruff check via pre-commit
+make lint                         # ruff check --fix, invoked via pre-commit
 make docs                         # build Sphinx HTML docs
-make setup                        # initial dev environment (Python + R)
 ```
 
-All commands use `uv run` under the hood. Tests run with `--import-mode=importlib`, 512s timeout. Coverage thresholds: 99% for tests, 90% for src.
+All make targets use `uv run` under the hood.
 
 ## Workflow
 
-- After implementing a feature or fix, run all unit tests.
-- Use `make lint` to run `ruff check --fix` in a project-compatible way. Run it to check and auto-fix linting issues.
-- Prefer `uv run pytest` over `make tests` for day-to-day testing (simpler output).
-- When running all tests, pipe output to a scratch file (e.g., `uv run pytest > scratch_test_output.txt 2>&1`) with a 20-minute timeout, then read it, to avoid flooding the terminal.
-- If tests fail with errors unrelated to your changes (missing packages, broken environment), run `make setup` yourself first, then retry. Ignore any failed pre-commit installation during setup.
+To check the code you write:
+- `make lint`
+- `make setup`
+    - pre-commit may complain during this if you are in a worktree, ignore that
+    - this is needed just once in your session to set up the env to run unit tests
+- run the unit tests relevant to your code changes with `uv run pytest ...`
+    - not all tests right away because the full test suite takes a long time to run
+    - when running multiple tests, the output may be long; pipe the output to a scratch file to be read afterwards
+    - use `scratch_tests_output.txt` for temporary test output, that specific file name is gitignored just for you
+- at the end of debugging, run the full test suite to check everything works
+    - use the command `make tests > make_tests_output.txt 2>&1` _verbatim_, it's pre-authorized in your configs
 
 ## Architecture
 
@@ -64,4 +69,4 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
 - `keys` fixture provides deterministic per-test JAX random keys (use `keys.pop()`)
 - Debug flags enabled in conftest: `jax_debug_key_reuse`, `jax_debug_nans`, `jax_debug_infs`, `jax_legacy_prng_key='error'`
 - Custom options: `--platform` (cpu/gpu/auto), `--num-cpu-devices`
-- R integration tests in `tests/rbartpackages/` compare against R BART3 package
+- the subpackage `tests/rbartpackages/` contains wrappers of R BART packages

@@ -461,10 +461,10 @@ class Bart(Module):
     def get_latent_prec(
         self, only_continuous: bool = False
     ) -> (
-        Float32[Array, 'ndpost']
-        | Float32[Array, 'ndpost k k']
-        | Float32[Array, 'num_chains ndpost/num_chains']
-        | Float32[Array, 'num_chains ndpost/num_chains k k']
+        Float32[Array, ' nskip+ndpost']
+        | Float32[Array, 'nskip+ndpost k k']
+        | Float32[Array, 'num_chains nskip+ndpost/num_chains']
+        | Float32[Array, 'num_chains nskip+ndpost/num_chains k k']
     ):
         """Return the posterior samples of the latent error precision matrix.
 

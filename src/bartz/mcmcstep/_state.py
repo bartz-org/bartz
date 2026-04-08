@@ -1282,15 +1282,20 @@ def _chol_with_gersh_impl(
     return jnp.linalg.cholesky(mat)
 
 
-def _inv_via_chol_with_gersh(mat: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
+def _inv_via_chol_with_gersh(
+    mat: Float32[Array, '*batch_shape k k'],
+) -> Float32[Array, '*batch_shape k k']:
     """Compute matrix inverse via Cholesky with Gershgorin stabilization.
 
     DO NOT USE THIS FUNCTION UNLESS YOU REALLY NEED TO.
     """
+    # mat = L L^T
+    # mat^-1 = L^-T L^-1 = L^-T I L^-1 = L^-T (L^-T I)^T
+    # I suspect this to be more accurate than (L^-1 I)^T (L^-1 I)
     L = chol_with_gersh(mat)
-    I = jnp.eye(mat.shape[0], dtype=mat.dtype)
-    L_inv = solve_triangular(L, I, lower=True)
-    return L_inv.T @ L_inv
+    eye = jnp.broadcast_to(jnp.eye(mat.shape[-1]), mat.shape)
+    Ltinv = solve_triangular(L, eye, trans='T', lower=True)
+    return solve_triangular(L, Ltinv.mT, trans='T', lower=True)
 
 
 def get_num_chains(x: PyTree) -> int | None:

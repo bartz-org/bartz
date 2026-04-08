@@ -31,6 +31,7 @@ from types import MappingProxyType
 from typing import Any, Literal
 from warnings import warn
 
+import jax.numpy as jnp
 from equinox import Module
 from jax import device_count
 from jax.scipy.special import ndtr
@@ -406,17 +407,35 @@ class mc_gbart(Module):
         | None
     ):
         """The standard deviation of the error, including burn-in samples."""
-        return self._bart.sigma
+        if self._mcmc_state.binary_y is not None:
+            return None
+        assert self._burnin_trace.error_cov_inv.ndim <= 2  # chains and samples
+        return jnp.sqrt(
+            jnp.reciprocal(
+                jnp.concatenate(
+                    [
+                        self._burnin_trace.error_cov_inv.T,
+                        self._main_trace.error_cov_inv.T,
+                    ],
+                    axis=0,
+                )
+            )
+        )
 
     @cached_property
     def sigma_(self) -> Float32[Array, 'ndpost'] | None:
         """The standard deviation of the error, only over the post-burnin samples and flattened."""
-        return self._bart.sigma_
+        if self._mcmc_state.binary_y is not None:
+            return None
+        assert self._main_trace.error_cov_inv.ndim <= 2  # chains and samples
+        return jnp.sqrt(jnp.reciprocal(self._main_trace.error_cov_inv)).reshape(-1)
 
     @cached_property
     def sigma_mean(self) -> Float32[Array, ''] | None:
         """The mean of `sigma`, only over the post-burnin samples."""
-        return self._bart.sigma_mean
+        if self.sigma_ is None:
+            return None
+        return self.sigma_.mean()
 
     @cached_property
     def varcount(self) -> Int32[Array, 'ndpost p']:

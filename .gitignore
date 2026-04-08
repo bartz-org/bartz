@@ -22,3 +22,5 @@ benchmarks/latest_bartz/
 
 # Claude
 .claude/worktrees/
+make_tests_output.txt
+scratch_tests_output.txt

@@ -705,42 +705,117 @@ class TestMVBartInterface:
                 num_chains=None,
             )
 
-    def test_mv_error_cov_accessors(self, mv_outcome_data: MVData) -> None:
-        """Test get_latent_prec and get_error_sdev for MV models."""
-        k = mv_outcome_data.y.shape[0]
-        outcome_type = mv_outcome_data.outcome_type
-        ndpost = 10
-        nskip = 5
-
-        model = Bart(
+    @pytest.fixture
+    def model(self, mv_outcome_data: MVData) -> Bart:
+        """Fit a small model for testing accessors."""
+        return Bart(
             x_train=mv_outcome_data.x,
             y_train=mv_outcome_data.y,
-            outcome_type=outcome_type,
+            outcome_type=mv_outcome_data.outcome_type,
             num_trees=5,
-            ndpost=ndpost,
-            nskip=nskip,
-            num_chains=2,
+            ndpost=10,
+            nskip=5,
+            num_chains=None,
         )
 
-        # get_latent_prec
+    def test_get_latent_prec_shape(self, model: Bart, mv_outcome_data: MVData) -> None:
+        """get_latent_prec returns correct shape and dtype."""
+        k = mv_outcome_data.y.shape[0]
         prec = model.get_latent_prec()
-        assert prec.shape == (2, nskip + ndpost // 2, k, k)
+        assert prec.shape == (5 + 10, k, k)  # nskip + ndpost
+        assert prec.dtype == jnp.float32
 
-        # get_error_sdev
+    def test_get_latent_prec_only_continuous(
+        self, model: Bart, mv_outcome_data: MVData
+    ) -> None:
+        """get_latent_prec(only_continuous=True) removes binary components."""
+        k = mv_outcome_data.y.shape[0]
+        outcome_type = mv_outcome_data.outcome_type
+
+        if outcome_type == 'binary':
+            with pytest.raises(ValueError, match='only binary'):
+                model.get_latent_prec(only_continuous=True)
+            return
+
+        prec = model.get_latent_prec(only_continuous=True)
+        if isinstance(outcome_type, list):
+            kb = sum(1 for t in outcome_type if t == 'binary')
+            kc = k - kb
+            assert prec.shape == (5 + 10, kc, kc)
+        else:
+            assert prec.shape == (5 + 10, k, k)
+
+    def test_get_latent_prec_positive_definite(self, mv_data: MVData) -> None:
+        """Precision matrices should be symmetric positive definite."""
+        model = Bart(
+            x_train=mv_data.x,
+            y_train=mv_data.y,
+            num_trees=5,
+            ndpost=10,
+            nskip=5,
+            num_chains=None,
+        )
+        prec = model.get_latent_prec()
+        # check symmetry
+        assert_close_matrices(prec, prec.mT, rtol=1e-6, reduce_rank=True)
+        # check positive definite via eigenvalues
+        eigvals = jnp.linalg.eigvalsh(prec)
+        assert jnp.all(eigvals > 0)
+
+    def test_get_error_sdev_shape(self, model: Bart, mv_outcome_data: MVData) -> None:
+        """get_error_sdev returns correct shape and NaN pattern."""
+        k = mv_outcome_data.y.shape[0]
+        outcome_type = mv_outcome_data.outcome_type
         with debug_nans(False):
             sdev = model.get_error_sdev()
-            assert sdev.shape == (ndpost, k)
+            assert sdev.shape == (10, k)  # ndpost
 
+            if outcome_type == 'binary':
+                assert jnp.all(jnp.isnan(sdev))
+            elif isinstance(outcome_type, list):
+                binary_mask = jnp.array([t == 'binary' for t in outcome_type])
+                assert jnp.all(jnp.isnan(sdev[:, binary_mask]))
+                assert jnp.all(jnp.isfinite(sdev[:, ~binary_mask]))
+            else:
+                assert jnp.all(jnp.isfinite(sdev))
+                assert jnp.all(sdev > 0)
+
+    def test_get_error_sdev_mean(self, model: Bart, mv_outcome_data: MVData) -> None:
+        """get_error_sdev(mean=True) returns correct shape and NaN pattern."""
+        k = mv_outcome_data.y.shape[0]
+        outcome_type = mv_outcome_data.outcome_type
+        with debug_nans(False):
             sdev_mean = model.get_error_sdev(mean=True)
             assert sdev_mean.shape == (k,)
 
             if outcome_type == 'binary':
-                assert model.sigest is None
-                assert jnp.all(jnp.isnan(sdev))
                 assert jnp.all(jnp.isnan(sdev_mean))
+            elif isinstance(outcome_type, list):
+                binary_mask = jnp.array([t == 'binary' for t in outcome_type])
+                assert jnp.all(jnp.isnan(sdev_mean[binary_mask]))
+                assert jnp.all(jnp.isfinite(sdev_mean[~binary_mask]))
             else:
-                assert model.sigest is not None
-                assert model.sigest.shape == (k,)
+                assert jnp.all(jnp.isfinite(sdev_mean))
+                assert jnp.all(sdev_mean > 0)
+
+    def test_get_error_sdev_values(self, mv_data: MVData) -> None:
+        """get_error_sdev matches manual computation from precision matrices."""
+        model = Bart(
+            x_train=mv_data.x,
+            y_train=mv_data.y,
+            num_trees=5,
+            ndpost=10,
+            nskip=5,
+            num_chains=None,
+        )
+        sdev = model.get_error_sdev()
+
+        # manual: invert each precision matrix, take sqrt of diagonal
+        prec = model.get_latent_prec()
+        prec_post = prec[5:]  # skip burnin
+        cov = jnp.linalg.inv(prec_post)
+        expected = jnp.sqrt(jnp.diagonal(cov, axis1=-2, axis2=-1))
+        assert_allclose(sdev, expected, rtol=1e-4)
 
     def test_mixed_rejects_weights(self, example_data: MVData) -> None:
         """Mixed outcome_type + weights should raise."""
@@ -823,157 +898,3 @@ class TestMVBartInterface:
         rhat_prec = multivariate_rhat(prec_flat)
         assert rhat_prec < 1.1
         print(f'{rhat_prec.item()=}')
-
-
-class TestErrorCovAccessors:
-    """Tests for Bart.get_latent_prec() and Bart.get_error_sdev()."""
-
-    @pytest.fixture(params=[(50, 10, 2), (50, 10, 3)])
-    def mv_data_shape(self, request: FixtureRequest) -> tuple[int, int, int]:
-        """Provide (n, p, k) triples for testing."""
-        return request.param
-
-    @pytest.fixture
-    def mv_data(self, keys: split, mv_data_shape: tuple[int, int, int]) -> MVData:
-        """Generate a toy multivariate dataset."""
-        n, p, k = mv_data_shape
-        dgp = gen_data(
-            keys.pop(),
-            n=n,
-            p=p,
-            k=k,
-            q=2,
-            lam=0.5,
-            sigma2_lin=0.4,
-            sigma2_quad=0.5,
-            sigma2_eps=0.1,
-        )
-        return MVData(dgp.x, dgp.y)
-
-    @pytest.fixture(params=['continuous', 'binary', 'mixed'])
-    def mv_outcome_data(self, request: FixtureRequest, mv_data: MVData) -> MVData:
-        """Apply outcome_mode postprocessing to mv_data."""
-        outcome_mode = request.param
-        k = mv_data.y.shape[0]
-        if outcome_mode == 'binary':
-            y = (mv_data.y > 0).astype(jnp.float32)
-            outcome_type = 'binary'
-        elif outcome_mode == 'mixed':
-            y = mv_data.y.at[0].set((mv_data.y[0] > 0).astype(jnp.float32))
-            outcome_type = ['binary'] + ['continuous'] * (k - 1)
-        else:
-            y = mv_data.y
-            outcome_type = 'continuous'
-        return MVData(x=mv_data.x, y=y, outcome_type=outcome_type)
-
-    @pytest.fixture
-    def model(self, mv_outcome_data: MVData) -> Bart:
-        """Fit a small model for testing accessors."""
-        return Bart(
-            x_train=mv_outcome_data.x,
-            y_train=mv_outcome_data.y,
-            outcome_type=mv_outcome_data.outcome_type,
-            num_trees=5,
-            ndpost=10,
-            nskip=5,
-            num_chains=None,
-        )
-
-    def test_get_latent_prec_shape(self, model: Bart, mv_outcome_data: MVData) -> None:
-        """get_latent_prec returns correct shape and dtype."""
-        k = mv_outcome_data.y.shape[0]
-        prec = model.get_latent_prec()
-        assert prec.shape == (5 + 10, k, k)  # nskip + ndpost
-        assert prec.dtype == jnp.float32
-
-    def test_get_latent_prec_only_continuous(
-        self, model: Bart, mv_outcome_data: MVData
-    ) -> None:
-        """get_latent_prec(only_continuous=True) removes binary components."""
-        k = mv_outcome_data.y.shape[0]
-        outcome_type = mv_outcome_data.outcome_type
-
-        if outcome_type == 'binary':
-            with pytest.raises(ValueError, match='only binary'):
-                model.get_latent_prec(only_continuous=True)
-            return
-
-        prec = model.get_latent_prec(only_continuous=True)
-        if isinstance(outcome_type, list):
-            kb = sum(1 for t in outcome_type if t == 'binary')
-            kc = k - kb
-            assert prec.shape == (5 + 10, kc, kc)
-        else:
-            assert prec.shape == (5 + 10, k, k)
-
-    def test_get_latent_prec_positive_definite(self, mv_data: MVData) -> None:
-        """Precision matrices should be symmetric positive definite."""
-        model = Bart(
-            x_train=mv_data.x,
-            y_train=mv_data.y,
-            num_trees=5,
-            ndpost=10,
-            nskip=5,
-            num_chains=None,
-        )
-        prec = model.get_latent_prec()
-        # check symmetry
-        assert_close_matrices(prec, prec.mT, reduce_rank=True)
-        # check positive definite via eigenvalues
-        eigvals = jnp.linalg.eigvalsh(prec)
-        assert jnp.all(eigvals > 0)
-
-    def test_get_error_sdev_shape(self, model: Bart, mv_outcome_data: MVData) -> None:
-        """get_error_sdev returns correct shape and NaN pattern."""
-        k = mv_outcome_data.y.shape[0]
-        outcome_type = mv_outcome_data.outcome_type
-        with debug_nans(False):
-            sdev = model.get_error_sdev()
-            assert sdev.shape == (10, k)  # ndpost
-
-            if outcome_type == 'binary':
-                assert jnp.all(jnp.isnan(sdev))
-            elif isinstance(outcome_type, list):
-                binary_mask = jnp.array([t == 'binary' for t in outcome_type])
-                assert jnp.all(jnp.isnan(sdev[:, binary_mask]))
-                assert jnp.all(jnp.isfinite(sdev[:, ~binary_mask]))
-            else:
-                assert jnp.all(jnp.isfinite(sdev))
-                assert jnp.all(sdev > 0)
-
-    def test_get_error_sdev_mean(self, model: Bart, mv_outcome_data: MVData) -> None:
-        """get_error_sdev(mean=True) returns correct shape and NaN pattern."""
-        k = mv_outcome_data.y.shape[0]
-        outcome_type = mv_outcome_data.outcome_type
-        with debug_nans(False):
-            sdev_mean = model.get_error_sdev(mean=True)
-            assert sdev_mean.shape == (k,)
-
-            if outcome_type == 'binary':
-                assert jnp.all(jnp.isnan(sdev_mean))
-            elif isinstance(outcome_type, list):
-                binary_mask = jnp.array([t == 'binary' for t in outcome_type])
-                assert jnp.all(jnp.isnan(sdev_mean[binary_mask]))
-                assert jnp.all(jnp.isfinite(sdev_mean[~binary_mask]))
-            else:
-                assert jnp.all(jnp.isfinite(sdev_mean))
-                assert jnp.all(sdev_mean > 0)
-
-    def test_get_error_sdev_values(self, mv_data: MVData) -> None:
-        """get_error_sdev matches manual computation from precision matrices."""
-        model = Bart(
-            x_train=mv_data.x,
-            y_train=mv_data.y,
-            num_trees=5,
-            ndpost=10,
-            nskip=5,
-            num_chains=None,
-        )
-        sdev = model.get_error_sdev()
-
-        # manual: invert each precision matrix, take sqrt of diagonal
-        prec = model.get_latent_prec()
-        prec_post = prec[5:]  # skip burnin
-        cov = jnp.linalg.inv(prec_post)
-        expected = jnp.sqrt(jnp.diagonal(cov, axis1=-2, axis2=-1))
-        assert_allclose(sdev, expected, rtol=1e-4)

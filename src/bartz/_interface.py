@@ -533,8 +533,8 @@ class Bart(Module):
         ----------
         mean
             If `True`, average the precision matrix across samples first
-            (harmonic mean at the covariance matrix level), returning a scalar
-            or vector instead of samples.
+            (harmonic mean at the covariance matrix level), returning a single
+            scalar or vector instead of posterior samples.
 
         Returns
         -------

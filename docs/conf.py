@@ -87,6 +87,40 @@ extensions = [
     'myst_nb',  # markdown + jupyter notebook support
 ]
 
+# Workaround for sphinx-autodoc-typehints bug on Python 3.14: Union type aliases
+# (like jax.typing.DTypeLike = str | ...) have __module__='typing' and
+# __qualname__='Union', so build_type_mapping() creates a bogus mapping
+# typing.Union -> jax.typing.DTypeLike, rendering every Union as DTypeLike[...].
+if sys.version_info >= (3, 14):
+    import importlib as _importlib
+    import types as _types
+
+    def _resolves_to_union_instance(dotted_path) -> bool:  # noqa: ANN001
+        """Check whether *dotted_path* points at a Union instance."""
+        mod_path, _, attr = dotted_path.rpartition('.')
+        if not mod_path:
+            return False
+        try:
+            obj = getattr(_importlib.import_module(mod_path), attr)
+            return isinstance(obj, _types.UnionType) and not isinstance(obj, type)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _remove_union_aliases_from_mapping(app, _env, _docnames) -> None:  # noqa: ANN001
+        mapping = getattr(app.config, '_intersphinx_type_mapping', None)
+        if mapping:
+            app.config._intersphinx_type_mapping = {  # noqa: SLF001
+                k: v for k, v in mapping.items() if not _resolves_to_union_instance(v)
+            }
+
+    def setup(app) -> None:  # noqa: ANN001
+        # priority 501 runs after validate_config (default 500) which populates
+        # the mapping
+        app.connect(
+            'env-before-read-docs', _remove_union_aliases_from_mapping, priority=501
+        )
+
+
 # decide whether to use viewcode or linkcode extension
 ext = 'viewcode'  # copy source code in static website
 if getenv('BARTZ_FORCE_LINKCODE'):

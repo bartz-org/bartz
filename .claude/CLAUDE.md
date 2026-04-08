@@ -69,5 +69,6 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
 - Framework: pytest with `pytest-xdist`, `pytest-subtests`, `pytest-timeout`, `flaky`
 - `keys` fixture provides deterministic per-test JAX random keys (use `keys.pop()`)
 - Debug flags enabled in conftest: `jax_debug_key_reuse`, `jax_debug_nans`, `jax_debug_infs`, `jax_legacy_prng_key='error'`
-- Custom options: `--platform` (cpu/gpu/auto), `--num-cpu-devices`
-- the subpackage `tests/rbartpackages/` contains wrappers of R BART packages
+- Custom pytest options: `--platform` (cpu/gpu/auto), `--num-cpu-devices`
+- The subpackage `tests/rbartpackages/` contains wrappers of R BART packages, not unit tests
+- To compare vectors/matrices/tensors, use `tests.util.assert_close_matrices` instead of numpy's `assert_allclose`

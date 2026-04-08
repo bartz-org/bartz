@@ -719,12 +719,12 @@ class TestMVBartInterface:
             num_trees=5,
             ndpost=ndpost,
             nskip=nskip,
-            num_chains=None,
+            num_chains=2,
         )
 
         # get_latent_prec
         prec = model.get_latent_prec()
-        assert prec.shape == (nskip + ndpost, k, k)
+        assert prec.shape == (2, nskip + ndpost // 2, k, k)
 
         # get_error_sdev
         with debug_nans(False):
@@ -892,11 +892,14 @@ class TestErrorCovAccessors:
         """get_latent_prec(only_continuous=True) removes binary components."""
         k = mv_outcome_data.y.shape[0]
         outcome_type = mv_outcome_data.outcome_type
-        prec = model.get_latent_prec(only_continuous=True)
 
         if outcome_type == 'binary':
-            assert prec is None
-        elif isinstance(outcome_type, list):
+            with pytest.raises(ValueError, match='only binary'):
+                model.get_latent_prec(only_continuous=True)
+            return
+
+        prec = model.get_latent_prec(only_continuous=True)
+        if isinstance(outcome_type, list):
             kb = sum(1 for t in outcome_type if t == 'binary')
             kc = k - kb
             assert prec.shape == (5 + 10, kc, kc)
@@ -915,7 +918,7 @@ class TestErrorCovAccessors:
         )
         prec = model.get_latent_prec()
         # check symmetry
-        assert_allclose(prec, jnp.swapaxes(prec, -2, -1), atol=1e-6)
+        assert_close_matrices(prec, prec.mT, reduce_rank=True)
         # check positive definite via eigenvalues
         eigvals = jnp.linalg.eigvalsh(prec)
         assert jnp.all(eigvals > 0)

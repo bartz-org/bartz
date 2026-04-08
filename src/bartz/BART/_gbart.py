@@ -409,8 +409,7 @@ class mc_gbart(Module):
         """The standard deviation of the error, including burn-in samples."""
         if self._mcmc_state.binary_y is not None:
             return None
-        if self._mcmc_state.offset.ndim == 1:
-            return None
+        assert self._burnin_trace.error_cov_inv.ndim <= 2  # chains and samples
         return jnp.sqrt(
             jnp.reciprocal(
                 jnp.concatenate(
@@ -428,8 +427,7 @@ class mc_gbart(Module):
         """The standard deviation of the error, only over the post-burnin samples and flattened."""
         if self._mcmc_state.binary_y is not None:
             return None
-        if self._mcmc_state.offset.ndim == 1:
-            return None
+        assert self._main_trace.error_cov_inv.ndim <= 2  # chains and samples
         return jnp.sqrt(jnp.reciprocal(self._main_trace.error_cov_inv)).reshape(-1)
 
     @cached_property

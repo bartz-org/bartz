@@ -14,6 +14,7 @@ uv run pytest                     # run all tests
 make tests                        # run all tests but faster (use parallelization) + very verbose configs
 uv run pytest -k test_name        # run a single test or subset
 uv run pytest tests/test_foo.py   # run one test file
+uv run pytest --lf                # run the tests failed last time
 make lint                         # ruff check --fix, invoked via pre-commit
 make docs                         # build Sphinx HTML docs
 ```

@@ -87,6 +87,7 @@ setup:
 .PHONY: lint
 lint:
 	$(UV_RUN) pre-commit run --all-files ruff-check
+	$(UV_RUN) pre-commit run --all-files ruff-format
 
 ################# TESTS #################
 

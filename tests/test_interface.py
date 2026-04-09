@@ -24,20 +24,199 @@
 
 """Test the multivariate interface of `bartz.Bart`."""
 
-from typing import NamedTuple
+from typing import Any, Literal, NamedTuple
 
+import jax
 import pytest
 from jax import debug_nans, random
 from jax import numpy as jnp
-from jaxtyping import Array, Float32
+from jax.scipy.special import ndtr
+from jaxtyping import Array, Bool, Float32, Key, Real
 from numpy.testing import assert_allclose, assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
 
 from bartz import Bart
-from bartz.jaxext import split
+from bartz.jaxext import get_device_count, split
 from bartz.testing import gen_data
 from tests.util import assert_close_matrices, multivariate_rhat
+
+
+def gen_X(
+    key: Key[Array, ''], p: int, n: int, kind: Literal['continuous', 'binary']
+) -> Real[Array, 'p n']:
+    """Generate a matrix of predictors."""
+    match kind:
+        case 'continuous':
+            return random.uniform(key, (p, n), float, -2, 2)
+        case 'binary':  # pragma: no branch
+            return random.bernoulli(key, 0.5, (p, n)).astype(float)
+
+
+def f(x: Real[Array, 'p n'], s: Real[Array, ' p']) -> Float32[Array, ' n']:
+    """Conditional mean of the DGP."""
+    T = 2
+    return s @ jnp.cos(2 * jnp.pi / T * x) / jnp.sqrt(s @ s)
+
+
+def gen_w(key: Key[Array, ''], n: int) -> Float32[Array, ' n']:
+    """Generate a vector of error weights."""
+    return jnp.exp(random.uniform(key, (n,), float, -1, 1))
+
+
+def gen_y(
+    key: Key[Array, ''],
+    X: Real[Array, 'p n'],
+    w: Float32[Array, ' n'] | None,
+    kind: Literal['continuous', 'probit'],
+    *,
+    s: Real[Array, ' p'] | Literal['uniform', 'random'] = 'uniform',
+) -> Float32[Array, ' n'] | Bool[Array, ' n']:
+    """Generate responses given predictors."""
+    keys = split(key, 3)
+
+    p, n = X.shape
+    if isinstance(s, jax.Array):
+        pass
+    elif s == 'random':
+        s = jnp.exp(random.uniform(keys.pop(), (p,), float, -1, 1))
+    elif s == 'uniform':  # pragma: no branch
+        s = jnp.ones(p)
+
+    match kind:
+        case 'continuous':
+            sigma = 0.1
+            error = sigma * random.normal(keys.pop(), (n,))
+            if w is not None:
+                error *= w
+            return f(X, s) + error
+
+        case 'probit':  # pragma: no branch
+            assert w is None
+            _, n = X.shape
+            error = random.normal(keys.pop(), (n,))
+            prob = ndtr(f(X, s) + error)
+            return random.bernoulli(keys.pop(), prob, (n,))
+
+
+class BartKW(NamedTuple):
+    """Keyword arguments for `Bart` plus associated test data."""
+
+    kw: dict[str, Any]
+    x_test: Real[Array, 'p m']
+
+
+def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
+    """Return keyword arguments for `Bart` and test predictors."""
+    keys = split(key, 5)
+
+    match variant:
+        # continuous regression with some settings that induce large types,
+        # sparsity with free theta
+        case 1:
+            X = gen_X(keys.pop(), 2, 30, 'continuous')
+            Xt = gen_X(keys.pop(), 2, 31, 'continuous')
+            y = gen_y(keys.pop(), X, None, 'continuous', s='random')
+            return BartKW(
+                kw=dict(
+                    x_train=X,
+                    y_train=y,
+                    sparse=True,
+                    num_trees=20,
+                    ndpost=100,
+                    nskip=50,
+                    printevery=50,
+                    usequants=False,
+                    numcut=256,  # > 255 to use uint16 for X and split_trees
+                    num_chains=None,
+                    seed=keys.pop(),
+                    maxdepth=9,  # > 8 to use uint16 for leaf_indices
+                    num_data_devices=min(2, get_device_count()),
+                    init_kw=dict(
+                        resid_num_batches=None,
+                        count_num_batches=None,
+                        prec_num_batches=None,
+                        prec_count_num_trees=5,
+                        target_platform=None,
+                        save_ratios=True,
+                        min_points_per_leaf=5,
+                    ),
+                ),
+                x_test=Xt,
+            )
+
+        # binary regression with binary X and high p
+        case 2:
+            p = 257  # > 256 to use uint16 for var_trees.
+            X = gen_X(keys.pop(), p, 30, 'binary')
+            Xt = gen_X(keys.pop(), p, 31, 'binary')
+            y = gen_y(keys.pop(), X, None, 'probit')
+            return BartKW(
+                kw=dict(
+                    x_train=X,
+                    y_train=y,
+                    outcome_type='binary',
+                    num_trees=20,
+                    ndpost=100,
+                    nskip=50,
+                    keepevery=1,  # the default with binary would be 10
+                    printevery=None,
+                    usequants=True,
+                    # usequants=True with binary X to check the case in which the
+                    # splits are less than the statically known maximum
+                    numcut=255,
+                    seed=keys.pop(),
+                    num_chains=2,
+                    maxdepth=6,
+                    num_chain_devices=None,
+                    init_kw=dict(
+                        save_ratios=False,
+                        min_points_per_decision_node=None,
+                        min_points_per_leaf=None,
+                    ),
+                ),
+                x_test=Xt,
+            )
+
+        # continuous regression with error weights and sparsity with fixed theta
+        case 3:  # pragma: no branch
+            X = gen_X(keys.pop(), 2, 30, 'continuous')
+            Xt = gen_X(keys.pop(), 2, 31, 'continuous')
+            w = gen_w(keys.pop(), X.shape[1])
+            y = gen_y(keys.pop(), X, w, 'continuous', s='random')
+            return BartKW(
+                kw=dict(
+                    x_train=X,
+                    y_train=y,
+                    w=w,
+                    sparse=True,
+                    theta=2,
+                    varprob=jnp.array([0.2, 0.8]),
+                    num_trees=20,
+                    ndpost=100,
+                    nskip=50,
+                    printevery=50,
+                    usequants=True,
+                    numcut=10,
+                    seed=keys.pop(),
+                    num_chains=2,
+                    maxdepth=8,  # 8 to check if leaf_indices changes type too soon
+                    init_kw=dict(
+                        save_ratios=True,
+                        resid_num_batches=16,
+                        count_num_batches=16,
+                        prec_num_batches=16,
+                        target_platform=None,
+                        prec_count_num_trees=7,
+                        min_points_per_leaf=5,
+                    ),
+                ),
+                x_test=Xt,
+            )
+
+        case _:  # pragma: no cover
+            msg = f'Unknown variant {variant}'
+            raise ValueError(msg)
 
 
 class MVData(NamedTuple):

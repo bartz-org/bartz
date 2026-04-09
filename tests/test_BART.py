@@ -48,7 +48,7 @@ from jax import numpy as jnp
 from jax.scipy.special import logit, ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
-from jaxtyping import Array, Bool, Float32, Int32, Key, PyTree, Real, Shaped, UInt
+from jaxtyping import Array, Float32, Int32, Key, PyTree, Shaped, UInt
 from numpy.testing import assert_allclose, assert_array_equal
 from pytest_subtests import SubTests
 
@@ -66,7 +66,9 @@ from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
+from tests._old_make_kw import make_kw as old_make_kw
 from tests.rbartpackages import BART3
+from tests.test_interface import BartKW, gen_X, gen_y, make_kw
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
     assert_close_matrices,
@@ -76,61 +78,55 @@ from tests.util import (
 )
 
 
-def gen_X(
-    key: Key[Array, ''], p: int, n: int, kind: Literal['continuous', 'binary']
-) -> Real[Array, 'p n']:
-    """Generate a matrix of predictors."""
-    match kind:
-        case 'continuous':
-            return random.uniform(key, (p, n), float, -2, 2)
-        case 'binary':  # pragma: no branch
-            return random.bernoulli(key, 0.5, (p, n)).astype(float)
+def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
+    """Convert `Bart` keyword arguments to `mc_gbart` keyword arguments."""
+    kw = dict(bkw.kw)
+
+    # outcome_type -> type
+    outcome_type = kw.pop('outcome_type', 'continuous')
+    if outcome_type == 'binary':
+        kw['type'] = 'pbart'
+
+    # num_trees -> ntree
+    kw['ntree'] = kw.pop('num_trees')  # must be present bc different defaults
+
+    # num_chains -> mc_cores
+    num_chains = kw.pop('num_chains')  # must be present bc different defaults
+    assert num_chains != 1  # because mc_gbart does not have an equivalent option
+    kw['mc_cores'] = 1 if num_chains is None else num_chains
+
+    # collect bart_kwargs from top-level Bart params
+    bart_kwargs: dict[str, Any] = {}
+    for bk in ['num_data_devices', 'num_chain_devices']:
+        if bk in kw:
+            bart_kwargs[bk] = kw.pop(bk)
+
+    # maxdepth has the same default
+    if 'maxdepth' in kw:
+        bart_kwargs['maxdepth'] = kw.pop('maxdepth')
+
+    # init_kw must be present bc it contains min_points_per_leaf which has
+    # different defaults
+    init_kw = dict(kw.pop('init_kw'))
+    # min_points_per_leaf: remove if equal to mc_gbart default (5) so mc_gbart's
+    # default-setting code is tested
+    if init_kw['min_points_per_leaf'] == 5:
+        del init_kw['min_points_per_leaf']
+    if init_kw:
+        bart_kwargs['init_kw'] = init_kw
+
+    if bart_kwargs:
+        kw['bart_kwargs'] = bart_kwargs
+
+    # re-add x_test
+    kw['x_test'] = bkw.x_test
+
+    return kw
 
 
-def f(x: Real[Array, 'p n'], s: Real[Array, ' p']) -> Float32[Array, ' n']:
-    """Conditional mean of the DGP."""
-    T = 2
-    return s @ jnp.cos(2 * jnp.pi / T * x) / jnp.sqrt(s @ s)
-
-
-def gen_w(key: Key[Array, ''], n: int) -> Float32[Array, ' n']:
-    """Generate a vector of error weights."""
-    return jnp.exp(random.uniform(key, (n,), float, -1, 1))
-
-
-def gen_y(
-    key: Key[Array, ''],
-    X: Real[Array, 'p n'],
-    w: Float32[Array, ' n'] | None,
-    kind: Literal['continuous', 'probit'],
-    *,
-    s: Real[Array, ' p'] | Literal['uniform', 'random'] = 'uniform',
-) -> Float32[Array, ' n'] | Bool[Array, ' n']:
-    """Generate responses given predictors."""
-    keys = split(key, 3)
-
-    p, n = X.shape
-    if isinstance(s, jax.Array):
-        pass
-    elif s == 'random':
-        s = jnp.exp(random.uniform(keys.pop(), (p,), float, -1, 1))
-    elif s == 'uniform':  # pragma: no branch
-        s = jnp.ones(p)
-
-    match kind:
-        case 'continuous':
-            sigma = 0.1
-            error = sigma * random.normal(keys.pop(), (n,))
-            if w is not None:
-                error *= w
-            return f(X, s) + error
-
-        case 'probit':  # pragma: no branch
-            assert w is None
-            _, n = X.shape
-            error = random.normal(keys.pop(), (n,))
-            prob = ndtr(f(X, s) + error)
-            return random.bernoulli(keys.pop(), prob, (n,))
+def make_gbart_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
+    """Return a dictionary of keyword arguments for `mc_gbart`."""
+    return bart_kw_to_mc_gbart(make_kw(key, variant))
 
 
 N_VARIANTS = 3
@@ -145,118 +141,55 @@ def variant(request: pytest.FixtureRequest) -> int:
 @pytest.fixture
 def kw(keys: split, variant: int) -> dict[str, Any]:
     """Return a dictionary of keyword arguments for BART."""
-    return make_kw(keys.pop(), variant)
+    return make_gbart_kw(keys.pop(), variant)
 
 
-def make_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
-    """Return a dictionary of keyword arguments for BART."""
-    keys = split(key, 5)
+def _normalize_mc_gbart_kw(kw: dict) -> dict:
+    """Normalize mc_gbart kwargs by removing args equal to mc_gbart defaults.
 
-    match variant:
-        # continuous regression with some settings that induce large types,
-        # sparsity with free theta
-        case 1:
-            X = gen_X(keys.pop(), 2, 30, 'continuous')
-            Xt = gen_X(keys.pop(), 2, 31, 'continuous')
-            y = gen_y(keys.pop(), X, None, 'continuous', s='random')
-            return dict(
-                x_train=X,
-                y_train=y,
-                x_test=Xt,
-                sparse=True,
-                ntree=20,
-                ndpost=100,
-                nskip=50,
-                printevery=50,
-                usequants=False,
-                numcut=256,  # > 255 to use uint16 for X and split_trees
-                mc_cores=1,
-                seed=keys.pop(),
-                bart_kwargs=dict(
-                    maxdepth=9,  # > 8 to use uint16 for leaf_indices
-                    num_data_devices=min(2, get_device_count()),
-                    init_kw=dict(
-                        resid_num_batches=None,
-                        count_num_batches=None,
-                        prec_num_batches=None,
-                        prec_count_num_trees=5,
-                        target_platform=None,
-                        save_ratios=True,
-                    ),
-                ),
-            )
+    This makes it possible to compare dicts that are semantically equivalent
+    for mc_gbart even when one explicitly includes default values.
+    """
+    kw = dict(kw)
+    bart_kwargs = dict(kw.get('bart_kwargs', {}))
 
-        # binary regression with binary X and high p
-        case 2:
-            p = 257  # > 256 to use uint16 for var_trees.
-            X = gen_X(keys.pop(), p, 30, 'binary')
-            Xt = gen_X(keys.pop(), p, 31, 'binary')
-            y = gen_y(keys.pop(), X, None, 'probit')
-            return dict(
-                x_train=X,
-                y_train=y,
-                x_test=Xt,
-                type='pbart',
-                ntree=20,
-                ndpost=100,
-                nskip=50,
-                keepevery=1,  # the default with binary would be 10
-                printevery=None,
-                usequants=True,
-                # usequants=True with binary X to check the case in which the
-                # splits are less than the statically known maximum
-                numcut=255,
-                seed=keys.pop(),
-                mc_cores=2,  # keep this 2 on binary so continuous gets 1 and 2
-                bart_kwargs=dict(
-                    maxdepth=6,
-                    num_chain_devices=None,
-                    init_kw=dict(
-                        save_ratios=False,
-                        min_points_per_decision_node=None,
-                        min_points_per_leaf=None,
-                    ),
-                ),
-            )
+    # maxdepth=6 is mc_gbart's default
+    if bart_kwargs.get('maxdepth') == 6:
+        del bart_kwargs['maxdepth']
 
-        # continuous regression with error weights and sparsity with fixed theta
-        case 3:  # pragma: no branch
-            X = gen_X(keys.pop(), 2, 30, 'continuous')
-            Xt = gen_X(keys.pop(), 2, 31, 'continuous')
-            w = gen_w(keys.pop(), X.shape[1])
-            y = gen_y(keys.pop(), X, w, 'continuous', s='random')
-            return dict(
-                x_train=X,
-                x_test=Xt,
-                y_train=y,
-                w=w,
-                sparse=True,
-                theta=2,
-                varprob=jnp.array([0.2, 0.8]),
-                ntree=20,
-                ndpost=100,
-                nskip=50,
-                printevery=50,
-                usequants=True,
-                numcut=10,
-                seed=keys.pop(),
-                mc_cores=2,
-                bart_kwargs=dict(
-                    maxdepth=8,  # 8 to check if leaf_indices changes type too soon
-                    init_kw=dict(
-                        save_ratios=True,
-                        resid_num_batches=16,
-                        count_num_batches=16,
-                        prec_num_batches=16,
-                        target_platform=None,
-                        prec_count_num_trees=7,
-                    ),
-                ),
-            )
+    # min_points_per_leaf=5 is mc_gbart's default
+    if 'init_kw' in bart_kwargs:
+        init_kw = dict(bart_kwargs['init_kw'])
+        if init_kw.get('min_points_per_leaf') == 5:
+            del init_kw['min_points_per_leaf']
+        bart_kwargs['init_kw'] = init_kw
 
-        case _:  # pragma: no cover
-            msg = f'Unknown variant {variant}'
-            raise ValueError(msg)
+    kw['bart_kwargs'] = bart_kwargs
+    return kw
+
+
+def test_make_kw_equivalence(keys: split, variant: int) -> None:
+    """Temporary: verify new make_gbart_kw matches old make_kw."""
+    key = keys.pop()
+    old = _normalize_mc_gbart_kw(old_make_kw(key, variant))
+    new = _normalize_mc_gbart_kw(make_gbart_kw(random.clone(key), variant))
+
+    def compare_dicts(old_d: dict, new_d: dict, path: str = '') -> None:
+        assert set(old_d.keys()) == set(new_d.keys()), f'keys mismatch at {path}'
+        for k, old_v in old_d.items():
+            new_v = new_d[k]
+            loc = f'{path}.{k}' if path else k
+            if isinstance(old_v, dict):
+                assert isinstance(new_v, dict), f'type mismatch at {loc}'
+                compare_dicts(old_v, new_v, loc)
+            elif isinstance(old_v, jnp.ndarray):
+                assert jnp.array_equal(old_v, new_v), f'array mismatch at {loc}'
+            else:
+                assert old_v == new_v, (
+                    f'value mismatch at {loc}: {old_v!r} != {new_v!r}'
+                )
+
+    compare_dicts(old, new)
 
 
 @dataclass(frozen=True)
@@ -278,7 +211,7 @@ class TestWithCachedBart:
         key = random.key(0x139CD0C0)
         keys = random.split(key, N_VARIANTS)
         key = keys[variant - 1]
-        kw = make_kw(key, variant)
+        kw = make_gbart_kw(key, variant)
 
         # modify configs to make them appropriate for convergence checks and R
         p, n = kw['x_train'].shape
@@ -1398,7 +1331,7 @@ def test_automatic_integer_types(kw: dict[str, Any]) -> None:
     def select_type(cond: bool) -> type:
         return jnp.uint8 if cond else jnp.uint16
 
-    leaf_indices_type = select_type(kw['bart_kwargs']['maxdepth'] <= 8)
+    leaf_indices_type = select_type(kw.get('bart_kwargs', {}).get('maxdepth', 6) <= 8)
     split_trees_type = X_type = select_type(kw['numcut'] <= 255)
     var_trees_type = select_type(kw['x_train'].shape[0] <= 256)
 

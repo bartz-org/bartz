@@ -3,7 +3,7 @@
     "allow": [
       "Bash(make setup)",
       "Bash(make lint)",
-      "Bash(make tests > make_tests_output.txt 2>&1)"
+      "Bash(make tests > scratch_tests_output.txt 2>&1)"
     ]
   }
 }

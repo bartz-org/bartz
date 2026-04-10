@@ -93,9 +93,16 @@ def check_types(tree: TreeHeaps, max_split: UInt[Array, ' p']) -> bool:
 
 
 @check
-def check_sizes(tree: TreeHeaps, _max_split: UInt[Array, ' p']) -> bool:
-    """Check that array sizes are coherent."""
-    return tree.leaf_tree.size == 2 * tree.var_tree.size == 2 * tree.split_tree.size
+def check_shapes(tree: TreeHeaps, _max_split: UInt[Array, ' p']) -> bool:
+    """Check that array shapes are coherent."""
+    return (
+        tree.leaf_tree.ndim in (1, 2)
+        and tree.var_tree.ndim == 1
+        and tree.split_tree.ndim == 1
+        and tree.leaf_tree.shape[-1]
+        == 2 * tree.var_tree.size
+        == 2 * tree.split_tree.size
+    )
 
 
 @check

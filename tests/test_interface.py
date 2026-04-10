@@ -1284,11 +1284,6 @@ def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:
         assert bart.num_trees == 200
 
 
-# Reset Bart to the original (non-debug) version for the MV tests below.
-# The debug wrapper fails on some MV configurations; fixing that is out of scope.
-Bart = OriginalBart
-
-
 class MVData(NamedTuple):
     """Dataset for testing in `TestMVBartInterface`."""
 

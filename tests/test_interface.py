@@ -37,7 +37,7 @@ import numpy
 import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError, tree_at
-from jax import block_until_ready, config, debug_nans, random, vmap
+from jax import block_until_ready, config, debug_nans, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.special import ndtr
 from jax.sharding import SingleDeviceSharding
@@ -403,9 +403,7 @@ class TestWithCachedBart:
                     )
 
             axes = chain_vmap_axes(x)
-            jax.tree.map_with_path(
-                assert_different, x, axes, is_leaf=lambda x: x is None
-            )
+            tree.map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)
 
         assert_different(bart._mcmc_state, rtol=0.02)
         assert_different(bart._main_trace, rtol=0.03)
@@ -1232,7 +1230,7 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     if len(jax.devices()) < 2:
         pytest.skip('Need at least 2 devices for this test')
 
-    baseline_kw = jax.tree.map(lambda x: x, bkw.kw)
+    baseline_kw = tree.map(lambda x: x, bkw.kw)
     baseline_kw.update(
         num_chain_devices=None, num_data_devices=None, nskip=0, ndpost=20, num_chains=2
     )
@@ -1249,26 +1247,26 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
         return tree_at(lambda b: b._mcmc_state.config, bart, cfg)
 
     with subtests.test('shard chains'):
-        chains_kw = jax.tree.map(lambda x: x, baseline_kw)
+        chains_kw = tree.map(lambda x: x, baseline_kw)
         chains_kw.update(num_chain_devices=2)
         bart_chains = Bart(**chains_kw)
         bart_chains = remove_mesh(bart_chains)
-        jax.tree.map_with_path(check_equal, bart, bart_chains)
+        tree.map_with_path(check_equal, bart, bart_chains)
 
     with subtests.test('shard data'):
-        data_kw = jax.tree.map(lambda x: x, baseline_kw)
+        data_kw = tree.map(lambda x: x, baseline_kw)
         data_kw.update(num_data_devices=2)
         bart_data = Bart(**data_kw)
         bart_data = remove_mesh(bart_data)
-        jax.tree.map_with_path(check_equal, bart, bart_data)
+        tree.map_with_path(check_equal, bart, bart_data)
 
     if len(jax.devices()) >= 4:
         with subtests.test('shard data and chains'):
-            both_kw = jax.tree.map(lambda x: x, baseline_kw)
+            both_kw = tree.map(lambda x: x, baseline_kw)
             both_kw.update(num_chain_devices=2, num_data_devices=2)
             bart_both = Bart(**both_kw)
             bart_both = remove_mesh(bart_both)
-            jax.tree.map_with_path(check_equal, bart, bart_both)
+            tree.map_with_path(check_equal, bart, bart_both)
 
 
 def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:

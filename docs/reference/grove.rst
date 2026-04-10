@@ -1,6 +1,6 @@
 .. bartz/docs/reference/grove.rst
 ..
-.. Copyright (c) 2024-2025, The Bartz Contributors
+.. Copyright (c) 2024-2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -27,3 +27,4 @@ Tree manipulation
 
 .. automodule:: bartz.grove
     :members:
+    :imported-members:

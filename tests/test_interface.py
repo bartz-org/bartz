@@ -27,15 +27,9 @@
 This is the main suite of tests.
 """
 
-from collections.abc import Generator
-from contextlib import contextmanager
 from dataclasses import replace
 from functools import partial
 from gc import collect
-from os import getpid, kill
-from signal import SIG_IGN, SIGINT, getsignal, signal
-from threading import Event, Thread
-from time import monotonic
 from typing import Any, Literal, NamedTuple
 
 import jax
@@ -73,6 +67,7 @@ from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
     multivariate_rhat,
+    periodic_sigint,
     rhat,
 )
 
@@ -1022,65 +1017,6 @@ def test_jit(kw: dict[str, Any]) -> None:
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
     assert_close_matrices(pred1, pred2, rtol=1e-5)
-
-
-class PeriodicSigintTimer:
-    """Periodically send SIGINT (^C) to the main thread."""
-
-    def __init__(self, *, first_after: float, interval: float) -> None:
-        self.first_after = max(0.0, float(first_after))
-        self.interval = max(0.001, float(interval))
-        self.pid = getpid()
-        self._stop = Event()
-        self._thread: Thread | None = None
-        self.sent = 0
-
-    def _run(self) -> None:
-        """Run the main loop of the timer."""
-        t0 = monotonic()
-
-        if self._stop.wait(self.first_after):  # pragma: no cover
-            return
-
-        while not self._stop.is_set():  # pragma: no branch
-            kill(self.pid, SIGINT)
-            self.sent += 1
-            elapsed = monotonic() - t0
-            print(f'[PeriodicSigintTimer] sent SIGINT #{self.sent} at t={elapsed:.2f}s')
-            if self._stop.wait(self.interval):  # pragma: no branch
-                break
-
-    def start(self) -> None:
-        """Start the timer."""
-        assert self._thread is None, 'Timer already started'
-        self._thread = Thread(target=self._run, name='PeriodicSigintTimer', daemon=True)
-        self._thread.start()
-
-    def cancel(self) -> None:
-        """Stop the timer."""
-        assert self._thread is not None, 'Timer not started'
-
-        prev = getsignal(SIGINT)
-        signal(SIGINT, SIG_IGN)
-
-        try:
-            self._stop.set()
-            print(f'[PeriodicSigintTimer] stopped after {self.sent} SIGINT(s)')
-        finally:
-            signal(SIGINT, prev)
-
-
-@contextmanager
-def periodic_sigint(
-    *, first_after: float, interval: float
-) -> Generator[PeriodicSigintTimer, None, None]:
-    """Context manager to periodically send SIGINT to the main thread."""
-    timer = PeriodicSigintTimer(first_after=first_after, interval=interval)
-    timer.start()
-    try:
-        yield timer
-    finally:
-        timer.cancel()
 
 
 @pytest.mark.flaky

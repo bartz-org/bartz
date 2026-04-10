@@ -27,7 +27,7 @@
 This is the main suite of tests.
 """
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from gc import collect
 from typing import Any, Literal, NamedTuple
@@ -290,11 +290,25 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     return kw
 
 
+def test_meta_kw_is_not_shared(kw: dict) -> None:
+    """Check that the kw dictionary is not shared across tests."""
+    kw.clear()
+    # this will make other tests fail if it's a shared dictionary
+
+
+@dataclass(frozen=True)
+class CachedBart:
+    """Pre-computed BART run shared between multiple tests that do not change the arguments."""
+
+    bkw: BartKW
+    bart: Bart
+
+
 class TestWithCachedBart:
     """Group of slow tests that check the same BART run, for efficiency."""
 
     @pytest.fixture(scope='class')
-    def cachedbart(self, variant: int) -> Bart:
+    def cachedbart(self, variant: int) -> CachedBart:
         """Return a pre-computed Bart."""
         key = random.key(0x139CD0C0)
         keys = random.split(key, N_VARIANTS)
@@ -315,26 +329,23 @@ class TestWithCachedBart:
         init_kw.update(min_points_per_decision_node=10, min_points_per_leaf=5)
         kw['init_kw'] = init_kw
 
-        return Bart(**kw)
+        return CachedBart(bkw=bkw, bart=Bart(**kw))
 
-    def test_residuals_accuracy(self, cachedbart: Bart, variant: int) -> None:
+    def test_residuals_accuracy(self, cachedbart: CachedBart) -> None:
         """Check that running residuals are close to the recomputed final residuals."""
-        kw = make_kw(
-            random.split(random.key(0x139CD0C0), N_VARIANTS)[variant - 1], variant
+        accum_resid, actual_resid = cachedbart.bart.compare_resid(
+            y=cachedbart.bkw.kw['y_train']
         )
-        accum_resid, actual_resid = cachedbart.compare_resid(y=kw.kw['y_train'])
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4)
 
-    def test_convergence(self, cachedbart: Bart, variant: int) -> None:
+    def test_convergence(self, cachedbart: CachedBart) -> None:
         """Run multiple chains and check convergence with rhat."""
-        bart = cachedbart
-        kw = make_kw(
-            random.split(random.key(0x139CD0C0), N_VARIANTS)[variant - 1], variant
-        )
-        p, n = kw.kw['x_train'].shape
+        bart = cachedbart.bart
+        bkw = cachedbart.bkw
+        p, n = bkw.kw['x_train'].shape
         num_chains = 4
         nsamples = bart.ndpost // num_chains
-        binary = kw.kw['y_train'].dtype == bool
+        binary = bkw.kw['y_train'].dtype == bool
 
         yhat_train = bart.predict('train', kind='latent_samples')
         yhat_train_chains = yhat_train.reshape(num_chains, nsamples, n)
@@ -361,15 +372,15 @@ class TestWithCachedBart:
             assert rhat_varcount < 7
             print(f'{rhat_varcount.item()=}')
 
-            if kw.kw.get('sparse', False):  # pragma: no branch
+            if bkw.kw.get('sparse', False):  # pragma: no branch
                 varprob_vals = bart.varprob.reshape(num_chains, nsamples, p)
                 rhat_varprob = multivariate_rhat(varprob_vals[:, :, 1:])
                 assert rhat_varprob < 7
                 print(f'{rhat_varprob.item()=}')
 
-    def test_different_chains(self, cachedbart: Bart) -> None:
+    def test_different_chains(self, cachedbart: CachedBart) -> None:
         """Check that different chains give different results."""
-        bart = cachedbart
+        bart = cachedbart.bart
 
         step_theta = bart._mcmc_state.forest.rho is not None
 

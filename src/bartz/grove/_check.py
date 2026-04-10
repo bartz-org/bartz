@@ -1,4 +1,4 @@
-# bartz/src/bartz/debug/_check.py
+# bartz/src/bartz/grove/_check.py
 #
 # Copyright (c) 2026, The Bartz Contributors
 #
@@ -30,9 +30,8 @@ from jax import jit
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Integer, UInt
 
-from bartz.grove import TreeHeaps, is_actual_leaf
+from bartz.grove._grove import TreeHeaps, TreesTrace, is_actual_leaf
 from bartz.jaxext import autobatch, minimal_unsigned_dtype
-from bartz.mcmcloop import TreesTrace
 
 CHECK_FUNCTIONS = []
 

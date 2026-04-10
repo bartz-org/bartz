@@ -28,7 +28,6 @@ The entry points are `run_mcmc` and `make_default_callback`.
 """
 
 from collections.abc import Callable
-from dataclasses import fields
 from functools import partial, update_wrapper, wraps
 from math import floor
 from typing import Any, NamedTuple, Protocol, TypeVar
@@ -64,7 +63,13 @@ from jaxtyping import (
 )
 
 from bartz import jaxext, mcmcstep
-from bartz.grove import TreeHeaps, evaluate_forest, forest_fill, var_histogram
+from bartz.grove import (
+    TreeHeaps,
+    TreesTrace,
+    evaluate_forest,
+    forest_fill,
+    var_histogram,
+)
 from bartz.jaxext import autobatch, jit_active
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size, get_num_chains
@@ -725,22 +730,6 @@ class Trace(TreeHeaps, Protocol):
     """Protocol for a MCMC trace."""
 
     offset: Float32[Array, '*trace_shape']
-
-
-class TreesTrace(Module):
-    """Implementation of `bartz.grove.TreeHeaps` for an MCMC trace."""
-
-    leaf_tree: (
-        Float32[Array, '*trace_shape num_trees 2**d']
-        | Float32[Array, '*trace_shape num_trees k 2**d']
-    )
-    var_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
-    split_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
-
-    @classmethod
-    def from_dataclass(cls, obj: TreeHeaps) -> 'TreesTrace':
-        """Create a `TreesTrace` from any `bartz.grove.TreeHeaps`."""
-        return cls(**{f.name: getattr(obj, f.name) for f in fields(cls)})
 
 
 @jit

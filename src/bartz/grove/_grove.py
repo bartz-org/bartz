@@ -1,4 +1,4 @@
-# bartz/src/bartz/grove.py
+# bartz/src/bartz/grove/_grove.py
 #
 # Copyright (c) 2024-2026, The Bartz Contributors
 #
@@ -25,9 +25,11 @@
 """Functions to create and manipulate binary decision trees."""
 
 import math
+from dataclasses import fields
 from functools import partial
 from typing import Literal, Protocol
 
+from equinox import Module
 from jax import jit, lax, vmap
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
@@ -70,6 +72,22 @@ class TreeHeaps(Protocol):
     right, i.e., a point belongs to the left child iff x < split. Whether a
     node is a leaf is indicated by the corresponding 'split' element being
     0. Unused nodes also have split set to 0. This array can't be dirty."""
+
+
+class TreesTrace(Module):
+    """Implementation of `bartz.grove.TreeHeaps` for an MCMC trace."""
+
+    leaf_tree: (
+        Float32[Array, '*trace_shape num_trees 2**d']
+        | Float32[Array, '*trace_shape num_trees k 2**d']
+    )
+    var_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
+    split_tree: UInt[Array, '*trace_shape num_trees 2**(d-1)']
+
+    @classmethod
+    def from_dataclass(cls, obj: TreeHeaps) -> 'TreesTrace':
+        """Create a `TreesTrace` from any `bartz.grove.TreeHeaps`."""
+        return cls(**{f.name: getattr(obj, f.name) for f in fields(cls)})
 
 
 def tree_depth(tree: Shaped[Array, '*batch_shape 2**d']) -> int:

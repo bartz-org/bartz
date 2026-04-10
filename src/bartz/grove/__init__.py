@@ -1,4 +1,4 @@
-# bartz/src/bartz/debug/__init__.py
+# bartz/src/bartz/grove/__init__.py
 #
 # Copyright (c) 2024-2026, The Bartz Contributors
 #
@@ -22,16 +22,26 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""
-Debugging utilities.
-
-  - `debug_mc_gbart`: version of `mc_gbart` with debug checks and methods.
-  - `trees_BART_to_bartz`: convert an R package BART3 trace to a bartz trace.
-  - `sample_prior`: sample the bart prior.
-"""
+"""Functions to create, manipulate, and check binary decision trees."""
 
 # ruff: noqa: F401
 
-from bartz.debug._debuggbart import debug_gbart, debug_mc_gbart
-from bartz.debug._prior import SamplePriorTrees, sample_prior
-from bartz.debug._traceconv import BARTTraceMeta, TraceWithOffset, trees_BART_to_bartz
+from bartz.grove._check import check_trace, describe_error
+from bartz.grove._grove import (
+    TreeHeaps,
+    TreesTrace,
+    evaluate_forest,
+    forest_depth_distr,
+    forest_fill,
+    format_tree,
+    is_actual_leaf,
+    is_leaves_parent,
+    is_used,
+    points_per_node_distr,
+    traverse_forest,
+    traverse_tree,
+    tree_actual_depth,
+    tree_depth,
+    tree_depths,
+    var_histogram,
+)

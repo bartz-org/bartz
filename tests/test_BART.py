@@ -52,10 +52,11 @@ from jaxtyping import Array, Float32, Int32, Key, PyTree, Shaped, UInt
 from numpy.testing import assert_allclose, assert_array_equal
 from pytest_subtests import SubTests
 
-from bartz.debug import TraceWithOffset, check_trace, sample_prior, trees_BART_to_bartz
+from bartz.debug import TraceWithOffset, sample_prior, trees_BART_to_bartz
 from bartz.debug import debug_gbart as gbart
 from bartz.debug import debug_mc_gbart as mc_gbart
 from bartz.grove import (
+    check_trace,
     forest_depth_distr,
     is_actual_leaf,
     tree_actual_depth,
@@ -1162,8 +1163,8 @@ def test_jit(kw: dict[str, Any]) -> None:
     # do not count splitless variables because it breaks tracing
     kw.update(rm_const=False)
 
-    # do not check tree replicas because it breaks tracing
-    kw.update(check_replicated_trees=False)
+    # do not check trees because it breaks tracing
+    kw.update(check_trees=False, check_replicated_trees=False)
 
     # set device as under jit it can not be inferred from the array
     platform = kw['y_train'].platform()

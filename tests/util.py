@@ -38,9 +38,8 @@ from jax.scipy.linalg import solve_triangular
 from jaxtyping import Array, ArrayLike, Float, Real
 from scipy import linalg
 
-from bartz.debug import check_trace, describe_error
+from bartz.grove import TreesTrace, check_trace, describe_error
 from bartz.jaxext import minimal_unsigned_dtype
-from bartz.mcmcloop import TreesTrace
 
 
 def manual_tree(

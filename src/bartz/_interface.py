@@ -26,6 +26,7 @@
 
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from enum import Enum
 from functools import cached_property, partial
 from types import MappingProxyType
@@ -34,10 +35,10 @@ from typing import Any, Literal, Protocol, TypedDict
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field
-from jax import Device, debug_nans, device_put, jit, lax, make_mesh, random
+from jax import Device, debug_nans, device_put, jit, lax, make_mesh, random, tree
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
-from jax.sharding import AxisType, Mesh
+from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import (
     Array,
     Bool,
@@ -53,7 +54,14 @@ from jaxtyping import (
 from numpy import ndarray
 
 from bartz import mcmcloop, mcmcstep, prepcovars
-from bartz.jaxext import is_key
+from bartz.grove import (
+    TreesTrace,
+    check_trace,
+    evaluate_forest,
+    forest_depth_distr,
+    points_per_node_distr,
+)
+from bartz.jaxext import equal_shards, is_key
 from bartz.jaxext.scipy.special import ndtri
 from bartz.jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
@@ -444,6 +452,80 @@ class Bart(Module):
         self._x_train_fmt = x_train_fmt
         self._binary_mask = binary_mask
 
+    def predict(
+        self,
+        x_test: Real[Array, 'p m'] | DataFrame | str,
+        *,
+        kind: PredictKind | str = 'mean',
+        key: Key[Array, ''] | None = None,
+        w: Float[Array, ' m'] | Series | None = None,
+    ) -> (
+        Float32[Array, ' m']
+        | Float32[Array, 'k m']
+        | Float32[Array, 'ndpost m']
+        | Float32[Array, 'ndpost k m']
+    ):
+        """
+        Compute predictions at `x_test`.
+
+        Parameters
+        ----------
+        x_test
+            The test predictors, or the string ``'train'`` to compute
+            predictions on the training data.
+        kind
+            The kind of output. See `PredictKind` for details.
+        key
+            Jax random key, required when ``kind='outcome_samples'``.
+        w
+            Per-observation error scale for ``kind='outcome_samples'``.
+            Required when the model was fit with weights and ``x_test`` is
+            new data.
+
+        Returns
+        -------
+        Predictions at `x_test` in the requested format.
+
+        Raises
+        ------
+        ValueError
+            If `x_test` has a different format than `x_train`, or if `w`
+            is specified when it should be `None`, or if `w` is not
+            specified when it is required.
+
+        """
+        # parse arguments
+        kind = PredictKind(kind)
+        if kind is PredictKind.outcome_samples and key is None:
+            msg = '`key` not specified'
+            raise ValueError(msg)
+        w = self._process_w_test(x_test, kind, w)
+        x_test = self._process_x_test(x_test, w)
+
+        # get latent i.e. bare sum-of-trees predictions
+        latent = self._predict(x_test)
+        if kind is PredictKind.latent_samples:
+            return latent
+
+        # sample posterior (uses latent directly, no probit squash needed)
+        binary_indices = self._mcmc_state.binary_indices
+        if kind is PredictKind.outcome_samples:
+            return self._sample_outcome(key, latent, binary_indices, w)
+
+        # squash predictions to (0, 1) if probit
+        if binary_indices is not None:
+            indexing = jnp.s_[..., binary_indices, :]
+            mean_samples = latent.at[indexing].set(ndtr(latent[indexing]))
+        elif self._mcmc_state.binary_y is not None:
+            mean_samples = ndtr(latent)
+        else:
+            mean_samples = latent
+
+        # take mean or return samples
+        if kind is PredictKind.mean:
+            return mean_samples.mean(axis=0)
+        return mean_samples
+
     @property
     def ndpost(self) -> int:
         """The total number of posterior samples after burn-in across all chains.
@@ -595,80 +677,6 @@ class Bart(Module):
     def varprob_mean(self) -> Float32[Array, ' p']:
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)
-
-    def predict(
-        self,
-        x_test: Real[Array, 'p m'] | DataFrame | str,
-        *,
-        kind: PredictKind | str = 'mean',
-        key: Key[Array, ''] | None = None,
-        w: Float[Array, ' m'] | Series | None = None,
-    ) -> (
-        Float32[Array, ' m']
-        | Float32[Array, 'k m']
-        | Float32[Array, 'ndpost m']
-        | Float32[Array, 'ndpost k m']
-    ):
-        """
-        Compute predictions at `x_test`.
-
-        Parameters
-        ----------
-        x_test
-            The test predictors, or the string ``'train'`` to compute
-            predictions on the training data.
-        kind
-            The kind of output. See `PredictKind` for details.
-        key
-            Jax random key, required when ``kind='outcome_samples'``.
-        w
-            Per-observation error scale for ``kind='outcome_samples'``.
-            Required when the model was fit with weights and ``x_test`` is
-            new data.
-
-        Returns
-        -------
-        Predictions at `x_test` in the requested format.
-
-        Raises
-        ------
-        ValueError
-            If `x_test` has a different format than `x_train`, or if `w`
-            is specified when it should be `None`, or if `w` is not
-            specified when it is required.
-
-        """
-        # parse arguments
-        kind = PredictKind(kind)
-        if kind is PredictKind.outcome_samples and key is None:
-            msg = '`key` not specified'
-            raise ValueError(msg)
-        w = self._process_w_test(x_test, kind, w)
-        x_test = self._process_x_test(x_test, w)
-
-        # get latent i.e. bare sum-of-trees predictions
-        latent = self._predict(x_test)
-        if kind is PredictKind.latent_samples:
-            return latent
-
-        # sample posterior (uses latent directly, no probit squash needed)
-        binary_indices = self._mcmc_state.binary_indices
-        if kind is PredictKind.outcome_samples:
-            return self._sample_outcome(key, latent, binary_indices, w)
-
-        # squash predictions to (0, 1) if probit
-        if binary_indices is not None:
-            indexing = jnp.s_[..., binary_indices, :]
-            mean_samples = latent.at[indexing].set(ndtr(latent[indexing]))
-        elif self._mcmc_state.binary_y is not None:
-            mean_samples = ndtr(latent)
-        else:
-            mean_samples = latent
-
-        # take mean or return samples
-        if kind is PredictKind.mean:
-            return mean_samples.mean(axis=0)
-        return mean_samples
 
     def _sample_outcome(
         self,
@@ -1165,6 +1173,147 @@ class Bart(Module):
     ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
         """Evaluate trees on already quantized `x`."""
         return predict(x, self._main_trace)
+
+    def check_trees(
+        self, error: bool = False
+    ) -> UInt[Array, 'num_chains ndpost/num_chains num_trees']:
+        """Apply `bartz.grove.check_trace` to all the tree draws.
+
+        Parameters
+        ----------
+        error
+            If `True`, throw an error if any invalid trees are found.
+
+        Returns
+        -------
+        An array where non-zero entries indicate invalid trees.
+
+        Raises
+        ------
+        RuntimeError
+            If `error` is `True` and any invalid trees are found.
+        """
+        out: UInt[Array, '*chains samples num_trees']
+        out = check_trace(self._main_trace, self._mcmc_state.forest.max_split)
+        if out.ndim < 3:
+            out = out[None, :, :]
+        if error:
+            bad_count = jnp.count_nonzero(out)
+            if bad_count > 0:
+                msg = f'Found {bad_count} invalid trees in the MCMC trace.'
+                raise RuntimeError(msg)
+        return out
+
+    def check_replicated_trees(self) -> None:
+        """Check that the trees are equal across data-sharded devices.
+
+        If the data is sharded across devices, verify that the trees (which
+        should be replicated) are identical on all shards.
+
+        Raises
+        ------
+        RuntimeError
+            If the trees differ across devices.
+        """
+        state = self._mcmc_state
+        mesh = state.config.mesh
+        if mesh is not None and 'data' in mesh.axis_names:
+            replicated_forest = replace(state.forest, leaf_indices=None)
+            equal = equal_shards(
+                replicated_forest, 'data', in_specs=PartitionSpec(), mesh=mesh
+            )
+            equal_array = jnp.stack(tree.leaves(equal))
+            all_equal = jnp.all(equal_array)
+            if not all_equal.item():
+                msg = 'The trees differ across data-sharded devices.'
+                raise RuntimeError(msg)
+
+    def compare_resid(
+        self, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = None
+    ) -> tuple[
+        Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
+        Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
+    ]:
+        """Re-compute residuals to compare them with the updated ones.
+
+        Parameters
+        ----------
+        y
+            The response variable. Required for continuous regression (since
+            ``State`` does not store ``y`` in continuous mode). Ignored for
+            binary regression (where ``State.z`` is used instead).
+
+        Returns
+        -------
+        resid1
+            The final state of the residuals updated during the MCMC.
+        resid2
+            The residuals computed from the final state of the trees.
+        """
+        state = self._mcmc_state
+        resid1 = state.resid
+
+        forests = TreesTrace.from_dataclass(state.forest)
+        trees = evaluate_forest(state.X, forests, sum_batch_axis=-1)
+
+        if state.z is not None:
+            ref = state.z
+        else:
+            assert y is not None, 'y is required for continuous regression'
+            ref = jnp.asarray(y)
+        resid2 = ref - (trees + state.offset)
+
+        return resid1, resid2
+
+    def depth_distr(self) -> Int32[Array, '*num_chains ndpost/num_chains d']:
+        """Histogram of tree depths for each state of the trees.
+
+        Returns
+        -------
+        A matrix where each row contains a histogram of tree depths.
+        """
+        out: Int32[Array, '*chains samples d']
+        out = forest_depth_distr(self._main_trace.split_tree)
+        if out.ndim < 3:
+            out = out[None, :, :]
+        return out
+
+    def _points_per_node_distr(
+        self, node_type: str
+    ) -> Int32[Array, '*num_chains ndpost/num_chains n+1']:
+        out: Int32[Array, '*chains samples n+1']
+        out = points_per_node_distr(
+            self._mcmc_state.X,
+            self._main_trace.var_tree,
+            self._main_trace.split_tree,
+            node_type,
+            sum_batch_axis=-1,
+        )
+        if out.ndim < 3:
+            out = out[None, :, :]
+        return out
+
+    def points_per_decision_node_distr(
+        self,
+    ) -> Int32[Array, '*num_chains ndpost/num_chains n+1']:
+        """Histogram of number of points belonging to parent-of-leaf nodes.
+
+        Returns
+        -------
+        For each chain, a matrix where each row contains a histogram of number of points.
+        """
+        return self._points_per_node_distr('leaf-parent')
+
+    def points_per_leaf_distr(
+        self,
+    ) -> Int32[Array, '*num_chains ndpost/num_chains n+1']:
+        """Histogram of number of points belonging to leaves.
+
+        Returns
+        -------
+        A matrix where each row contains a histogram of number of points.
+        """
+        return self._points_per_node_distr('leaf')
 
 
 @partial(jit, static_argnames='p')

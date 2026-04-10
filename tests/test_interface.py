@@ -273,12 +273,6 @@ def bkw(keys: split, variant: int) -> BartKW:
     return make_kw(keys.pop(), variant)
 
 
-@pytest.fixture
-def kw(bkw: BartKW) -> dict[str, Any]:
-    """Return a dictionary of keyword arguments for Bart."""
-    return dict(bkw.kw)
-
-
 def set_num_datapoints(kw: dict, n: int) -> dict:
     """Set the number of datapoints in the kw dictionary."""
     assert n <= kw['y_train'].size
@@ -290,9 +284,9 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     return kw
 
 
-def test_meta_kw_is_not_shared(kw: dict) -> None:
+def test_meta_bkw_is_not_shared(bkw: BartKW) -> None:
     """Check that the kw dictionary is not shared across tests."""
-    kw.clear()
+    bkw.kw.clear()
     # this will make other tests fail if it's a shared dictionary
 
 
@@ -314,7 +308,7 @@ class TestWithCachedBart:
         keys = random.split(key, N_VARIANTS)
         key = keys[variant - 1]
         bkw = make_kw(key, variant)
-        kw = dict(bkw.kw)
+        kw = bkw.kw
 
         p, n = kw['x_train'].shape
         nchains = 4
@@ -420,7 +414,7 @@ class TestWithCachedBart:
 
 def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     """Check that the way iterations are saved does not influence the result."""
-    kw = dict(bkw.kw)
+    kw = bkw.kw
     kw['keepevery'] = 1
     bart1 = Bart(**kw)
 
@@ -480,7 +474,7 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
 
 def test_output_shapes(bkw: BartKW) -> None:
     """Check the output shapes of the Bart predictions and attributes."""
-    kw = dict(bkw.kw)
+    kw = bkw.kw
     bart = Bart(**kw)
 
     ndpost = bart.ndpost
@@ -513,7 +507,7 @@ def test_output_shapes(bkw: BartKW) -> None:
 
 def test_output_types(bkw: BartKW) -> None:
     """Check the output types of all the attributes of Bart."""
-    kw = dict(bkw.kw)
+    kw = bkw.kw
     bart = Bart(**kw)
 
     binary = kw['y_train'].dtype == bool
@@ -536,7 +530,7 @@ def test_output_types(bkw: BartKW) -> None:
 
 def test_predict(bkw: BartKW) -> None:
     """Check that predict with x_train matches predict with 'train'."""
-    kw = dict(bkw.kw)
+    kw = bkw.kw
     bart = Bart(**kw)
     yhat_train = bart.predict(kw['x_train'], kind='latent_samples')
     assert_close_matrices(
@@ -549,7 +543,7 @@ class TestVarprobAttr:
 
     def test_basic_properties(self, bkw: BartKW) -> None:
         """Basic checks of the `varprob` attribute."""
-        kw = dict(bkw.kw)
+        kw = bkw.kw
         bart = Bart(**kw)
 
         assert jnp.all(bart.varprob >= 0)
@@ -605,8 +599,9 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
     assert bart.varprob_mean[~mask].max().item() < 1 / (p - peff)
 
 
-def test_scale_shift(kw: dict[str, Any]) -> None:
+def test_scale_shift(bkw: BartKW) -> None:
     """Check self-consistency of rescaling the inputs."""
+    kw = bkw.kw
     if kw['y_train'].dtype == bool:
         pytest.skip('Cannot rescale binary responses.')
 
@@ -662,11 +657,12 @@ def test_scale_shift(kw: dict[str, Any]) -> None:
     )
 
 
-def test_min_points_per_decision_node(kw: dict[str, Any]) -> None:
+def test_min_points_per_decision_node(bkw: BartKW) -> None:
     """Check that the limit of at least 10 datapoints per decision node is respected."""
+    kw = bkw.kw
     init_kw = dict(kw.get('init_kw', {}))
     init_kw['min_points_per_leaf'] = None
-    kw = dict(kw, init_kw=init_kw)
+    kw['init_kw'] = init_kw
     bart = Bart(**kw)
     distr = bart.points_per_decision_node_distr()
     distr_marg = distr.sum(axis=(0, 1))
@@ -680,11 +676,12 @@ def test_min_points_per_decision_node(kw: dict[str, Any]) -> None:
         assert jnp.any(distr_marg[min_points:] > 0)
 
 
-def test_min_points_per_leaf(kw: dict[str, Any]) -> None:
+def test_min_points_per_leaf(bkw: BartKW) -> None:
     """Check that the limit of at least 5 datapoints per leaf is respected."""
+    kw = bkw.kw
     init_kw = dict(kw.get('init_kw', {}))
     init_kw['min_points_per_decision_node'] = None
-    kw = dict(kw, init_kw=init_kw)
+    kw['init_kw'] = init_kw
     bart = Bart(**kw)
     distr = bart.points_per_leaf_distr()
     distr_marg = distr.sum(axis=(0, 1))
@@ -698,9 +695,9 @@ def test_min_points_per_leaf(kw: dict[str, Any]) -> None:
         assert distr_marg[min_points] > 0
 
 
-def test_no_datapoints(kw: dict[str, Any]) -> None:
+def test_no_datapoints(bkw: BartKW) -> None:
     """Check automatic data scaling with 0 datapoints."""
-    kw = set_num_datapoints(kw, 0)
+    kw = set_num_datapoints(bkw.kw, 0)
 
     p, _ = kw['x_train'].shape
     nsplits = 10
@@ -738,9 +735,9 @@ def test_no_datapoints(kw: dict[str, Any]) -> None:
     assert_array_equal(bart._main_trace.log_likelihood, 0.0)
 
 
-def test_one_datapoint(kw: dict[str, Any]) -> None:
+def test_one_datapoint(bkw: BartKW) -> None:
     """Check automatic data scaling with 1 datapoint."""
-    kw = set_num_datapoints(kw, 1)
+    kw = set_num_datapoints(bkw.kw, 1)
 
     if kw.get('usequants', False):
         p, _ = kw['x_train'].shape
@@ -776,9 +773,9 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
     assert_array_equal(bart._main_trace.log_likelihood, 0.0)
 
 
-def test_two_datapoints(kw: dict[str, Any]) -> None:
+def test_two_datapoints(bkw: BartKW) -> None:
     """Check automatic data scaling with 2 datapoints."""
-    kw = set_num_datapoints(kw, 2)
+    kw = set_num_datapoints(bkw.kw, 2)
     init_kw = dict(kw.get('init_kw', {}))
     init_kw.update(
         save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
@@ -793,8 +790,9 @@ def test_two_datapoints(kw: dict[str, Any]) -> None:
     assert not jnp.all(bart._main_trace.log_likelihood == 0.0)
 
 
-def test_few_datapoints(kw: dict[str, Any]) -> None:
+def test_few_datapoints(bkw: BartKW) -> None:
     """Check that the trees cannot grow if there are not enough datapoints."""
+    kw = bkw.kw
     init_kw = dict(kw.get('init_kw', {}))
     init_kw.update(min_points_per_decision_node=10, min_points_per_leaf=None)
     kw1 = dict(set_num_datapoints(kw, 8), init_kw=init_kw)
@@ -1001,8 +999,9 @@ def avg_max_tree_depth(
     return depth.mean(-1)
 
 
-def test_jit(kw: dict[str, Any]) -> None:
+def test_jit(bkw: BartKW) -> None:
     """Test that jitting around the whole interface works."""
+    kw = bkw.kw
     kw.update(printevery=None, rm_const=False)
 
     platform = kw['y_train'].platform()
@@ -1032,8 +1031,9 @@ def test_jit(kw: dict[str, Any]) -> None:
 
 @pytest.mark.flaky
 @pytest.mark.timeout(32)
-def test_interrupt(kw: dict[str, Any]) -> None:
+def test_interrupt(bkw: BartKW) -> None:
     """Test that the MCMC can be interrupted with ^C."""
+    kw = bkw.kw
     kw.update(printevery=1, ndpost=0, nskip=10000)
 
     with periodic_sigint(first_after=3.0, interval=1.0):
@@ -1046,7 +1046,7 @@ def test_interrupt(kw: dict[str, Any]) -> None:
 
 def test_polars(bkw: BartKW) -> None:
     """Test passing data as DataFrame and Series."""
-    kw = dict(bkw.kw)
+    kw = bkw.kw
     bart = Bart(**kw)
     pred = bart.predict(bkw.x_test, kind='latent_samples')
 
@@ -1077,7 +1077,7 @@ def test_polars(bkw: BartKW) -> None:
 
 def test_data_format_mismatch(bkw: BartKW) -> None:
     """Test that passing predictors with mismatched formats raises an error."""
-    kw = dict(bkw.kw)
+    kw = bkw.kw
     kw.update(
         x_train=pl.DataFrame(numpy.array(kw['x_train']).T),
         w=None if kw.get('w') is None else pl.Series(numpy.array(kw['w'])),
@@ -1087,8 +1087,9 @@ def test_data_format_mismatch(bkw: BartKW) -> None:
         bart.predict(numpy.array(bkw.x_test))
 
 
-def test_automatic_integer_types(kw: dict[str, Any]) -> None:
+def test_automatic_integer_types(bkw: BartKW) -> None:
     """Test that integer variables in the MCMC state have the correct type."""
+    kw = bkw.kw
     bart = Bart(**kw)
 
     def select_type(cond: bool) -> type:
@@ -1139,8 +1140,9 @@ def get_expect_sharded(kw: dict) -> bool:
     )
 
 
-def test_sharding(kw: dict) -> None:
+def test_sharding(bkw: BartKW) -> None:
     """Check that chains live on their own devices throughout the interface."""
+    kw = bkw.kw
     bart = Bart(**kw)
 
     expect_sharded = get_expect_sharded(kw)
@@ -1168,8 +1170,9 @@ def test_sharding(kw: dict) -> None:
 class TestVarprobParam:
     """Test the `varprob` parameter."""
 
-    def test_biased_predictor_choice(self, keys: split, kw: dict) -> None:
+    def test_biased_predictor_choice(self, keys: split, bkw: BartKW) -> None:
         """Check that if `varprob[i]` is high then predictor `i` is used more than others."""
+        kw = bkw.kw
         p, _ = kw['x_train'].shape
         i = random.randint(keys.pop(), (), 0, p)
         vp = jnp.full(p, 0.001).at[i].set(1)
@@ -1180,8 +1183,9 @@ class TestVarprobParam:
         vc /= vc.sum()
         assert vc[i] > vp[i] * 0.6
 
-    def test_positive(self, kw: dict, subtests: SubTests) -> None:
+    def test_positive(self, bkw: BartKW, subtests: SubTests) -> None:
         """Check that an error is raised if varprob is not > 0."""
+        kw = bkw.kw
         p, _ = kw['x_train'].shape
 
         with subtests.test('not negative'):
@@ -1211,24 +1215,24 @@ def run_bart_and_block(kw: dict) -> None:
     block_until_ready((bart, *stuff))
 
 
-def test_array_no_gc(kw: dict) -> None:
+def test_array_no_gc(bkw: BartKW) -> None:
     """Check that arrays are not garbage collected."""
     setting = 'jax_array_garbage_collection_guard'
     prev = getattr(config, setting)
     config.update(setting, 'fatal')
     try:
-        run_bart_and_block(kw)
+        run_bart_and_block(bkw.kw)
         collect()
     finally:
         config.update(setting, prev)
 
 
-def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
+def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
     if len(jax.devices()) < 2:
         pytest.skip('Need at least 2 devices for this test')
 
-    baseline_kw = jax.tree.map(lambda x: x, kw)
+    baseline_kw = jax.tree.map(lambda x: x, bkw.kw)
     baseline_kw.update(
         num_chain_devices=None, num_data_devices=None, nskip=0, ndpost=20, num_chains=2
     )
@@ -1267,9 +1271,10 @@ def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
             jax.tree.map_with_path(check_equal, bart, bart_both)
 
 
-def test_num_trees(kw: dict, subtests: SubTests) -> None:
+def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:
     """Test the number of trees."""
-    kw = dict(kw, nskip=0, ndpost=0)
+    kw = bkw.kw
+    kw.update(nskip=0, ndpost=0)
 
     with subtests.test('given num_trees'):
         bart = Bart(**kw)

@@ -86,8 +86,8 @@ setup:
 
 .PHONY: lint
 lint:
-	$(UV_RUN) pre-commit run --all-files ruff-check
-	$(UV_RUN) pre-commit run --all-files ruff-format
+	# the git config vars are a workaround for https://github.com/sbrunner/hooks/issues/374
+	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=log.showSignature GIT_CONFIG_VALUE_0=false $(UV_RUN) pre-commit run --all-files
 
 ################# TESTS #################
 

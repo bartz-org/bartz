@@ -27,6 +27,7 @@
 This is the main suite of tests.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from gc import collect
@@ -39,10 +40,9 @@ import pytest
 from equinox import EquinoxRuntimeError, tree_at
 from jax import block_until_ready, config, debug_nans, random, tree, vmap
 from jax import numpy as jnp
-from jax.scipy.special import ndtr
 from jax.sharding import SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
-from jaxtyping import Array, Bool, Float32, Int32, Key, PyTree, Real, Shaped, UInt
+from jaxtyping import Array, Float32, Int32, Key, PyTree, Real, Shaped, UInt
 from numpy.testing import assert_allclose, assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
@@ -92,10 +92,13 @@ def gen_X(
             return random.bernoulli(key, 0.5, (p, n)).astype(float)
 
 
-def f(x: Real[Array, 'p n'], s: Real[Array, ' p']) -> Float32[Array, ' n']:
+def f(x: Real[Array, 'p n'], s: Real[Array, ' p'], k: int) -> Float32[Array, 'k n']:
     """Conditional mean of the DGP."""
     T = 2
-    return s @ jnp.cos(2 * jnp.pi / T * x) / jnp.sqrt(s @ s)
+    shifts = jnp.linspace(0, T, k, endpoint=False)
+    arg = 2 * jnp.pi / T * x + shifts[:, None, None]  # (k, p, n)
+    norm = jnp.sqrt(s @ s)
+    return jnp.einsum('p,kpn->kn', s, jnp.cos(arg)) / norm
 
 
 def gen_w(key: Key[Array, ''], n: int) -> Float32[Array, ' n']:
@@ -107,35 +110,47 @@ def gen_y(
     key: Key[Array, ''],
     X: Real[Array, 'p n'],
     w: Float32[Array, ' n'] | None,
-    kind: Literal['continuous', 'probit'],
+    outcome_type: str | Sequence[str] = 'continuous',
     *,
+    k: int | None = None,
     s: Real[Array, ' p'] | Literal['uniform', 'random'] = 'uniform',
-) -> Float32[Array, ' n'] | Bool[Array, ' n']:
+) -> Float32[Array, 'k n'] | Float32[Array, ' n']:
     """Generate responses given predictors."""
-    keys = split(key, 3)
+    keys = split(key, 2)
 
     p, n = X.shape
-    if isinstance(s, jax.Array):
+    if isinstance(s, Array):
         pass
     elif s == 'random':
         s = jnp.exp(random.uniform(keys.pop(), (p,), float, -1, 1))
     elif s == 'uniform':  # pragma: no branch
         s = jnp.ones(p)
 
-    match kind:
-        case 'continuous':
-            sigma = 0.1
-            error = sigma * random.normal(keys.pop(), (n,))
-            if w is not None:
-                error *= w
-            return f(X, s) + error
+    # normalize outcome_type to list
+    if isinstance(outcome_type, str):
+        outcome_type = [outcome_type]
 
-        case 'probit':  # pragma: no branch
-            assert w is None
-            _, n = X.shape
-            error = random.normal(keys.pop(), (n,))
-            prob = ndtr(f(X, s) + error)
-            return random.bernoulli(keys.pop(), prob, (n,))
+    effective_k = 1 if k is None else k
+    assert len(outcome_type) == effective_k
+
+    # mean and noise — always (effective_k, n)
+    mu = f(X, s, effective_k)
+    sigma = 0.1
+    error = sigma * random.normal(keys.pop(), (effective_k, n))
+    if w is not None:
+        error = error * w
+    y = mu + error
+
+    # binarize
+    for i, ot in enumerate(outcome_type):
+        if ot == 'binary':
+            y = y.at[i].set((y[i] > 0).astype(float))
+
+    # squeeze for univariate
+    if k is None:
+        y = y.squeeze(axis=0)
+
+    return y
 
 
 class BartKW(NamedTuple):
@@ -160,6 +175,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 kw=dict(
                     x_train=X,
                     y_train=y,
+                    outcome_type='continuous',
                     sparse=True,
                     num_trees=20,
                     ndpost=100,
@@ -189,7 +205,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             p = 257  # > 256 to use uint16 for var_trees.
             X = gen_X(keys.pop(), p, 30, 'binary')
             Xt = gen_X(keys.pop(), p, 31, 'binary')
-            y = gen_y(keys.pop(), X, None, 'probit')
+            y = gen_y(keys.pop(), X, None, 'binary')
             return BartKW(
                 kw=dict(
                     x_train=X,
@@ -227,6 +243,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 kw=dict(
                     x_train=X,
                     y_train=y,
+                    outcome_type='continuous',
                     w=w,
                     sparse=True,
                     theta=2,
@@ -275,10 +292,10 @@ def bkw(keys: split, variant: int) -> BartKW:
 
 def set_num_datapoints(kw: dict, n: int) -> dict:
     """Set the number of datapoints in the kw dictionary."""
-    assert n <= kw['y_train'].size
+    assert n <= kw['y_train'].shape[-1]
     kw = kw.copy()
     kw['x_train'] = kw['x_train'][:, :n]
-    kw['y_train'] = kw['y_train'][:n]
+    kw['y_train'] = kw['y_train'][..., :n]
     if kw.get('w') is not None:
         kw['w'] = kw['w'][:n]
     return kw
@@ -339,7 +356,7 @@ class TestWithCachedBart:
         p, n = bkw.kw['x_train'].shape
         num_chains = 4
         nsamples = bart.ndpost // num_chains
-        binary = bkw.kw['y_train'].dtype == bool
+        binary = bkw.kw['outcome_type'] == 'binary'
 
         yhat_train = bart.predict('train', kind='latent_samples')
         yhat_train_chains = yhat_train.reshape(num_chains, nsamples, n)
@@ -479,7 +496,7 @@ def test_output_shapes(bkw: BartKW) -> None:
     p, n = kw['x_train'].shape
     _, m = bkw.x_test.shape
 
-    binary = kw['y_train'].dtype == bool
+    binary = kw['outcome_type'] == 'binary'
 
     assert bart.offset.shape == ()
     if binary:
@@ -508,7 +525,7 @@ def test_output_types(bkw: BartKW) -> None:
     kw = bkw.kw
     bart = Bart(**kw)
 
-    binary = kw['y_train'].dtype == bool
+    binary = kw['outcome_type'] == 'binary'
 
     assert bart.offset.dtype == jnp.float32
     assert isinstance(bart.ndpost, int)
@@ -600,7 +617,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
 def test_scale_shift(bkw: BartKW) -> None:
     """Check self-consistency of rescaling the inputs."""
     kw = bkw.kw
-    if kw['y_train'].dtype == bool:
+    if kw['outcome_type'] == 'binary':
         pytest.skip('Cannot rescale binary responses.')
 
     bart1 = Bart(**kw)
@@ -716,7 +733,7 @@ def test_no_datapoints(bkw: BartKW) -> None:
     assert bart.predict('train', kind='latent_samples').shape == (ndpost, 0)
 
     assert bart.offset == 0
-    binary = kw['y_train'].dtype == bool
+    binary = kw['outcome_type'] == 'binary'
     if binary:
         tau_num = 3
         assert bart.sigest is None
@@ -752,7 +769,7 @@ def test_one_datapoint(bkw: BartKW) -> None:
     kw['init_kw'] = init_kw
 
     bart = Bart(**kw)
-    binary = kw['y_train'].dtype == bool
+    binary = kw['outcome_type'] == 'binary'
     if binary:
         tau_num = 3
         assert bart.sigest is None
@@ -780,7 +797,7 @@ def test_two_datapoints(bkw: BartKW) -> None:
     )
     kw['init_kw'] = init_kw
     bart = Bart(**kw)
-    if kw['y_train'].dtype != bool:
+    if kw['outcome_type'] != 'binary':
         assert_allclose(bart.sigest, kw['y_train'].std(), rtol=1e-6)
     if kw.get('usequants', False):
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
@@ -1066,8 +1083,8 @@ def test_polars(bkw: BartKW) -> None:
         bart2.predict('train', kind='latent_samples'),
         rtol=rtol,
     )
-    sdev1 = bart.get_error_sdev() if kw['y_train'].dtype != bool else None
-    sdev2 = bart2.get_error_sdev() if kw['y_train'].dtype != bool else None
+    sdev1 = bart.get_error_sdev() if kw['outcome_type'] != 'binary' else None
+    sdev2 = bart2.get_error_sdev() if kw['outcome_type'] != 'binary' else None
     if sdev1 is not None:
         assert_close_matrices(sdev1, sdev2, rtol=rtol)
     assert_close_matrices(pred, pred2, rtol=rtol)
@@ -1206,7 +1223,7 @@ def run_bart_and_block(kw: dict) -> None:
     stuff = (
         bart.predict('train', kind='latent_samples'),
         bart.predict('train', kind='mean'),
-        bart.get_error_sdev() if kw['y_train'].dtype != bool else None,
+        bart.get_error_sdev() if kw['outcome_type'] != 'binary' else None,
         bart.varcount,
         bart.varprob,
     )

@@ -61,7 +61,6 @@ from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
-from tests._old_make_kw import make_kw as old_make_kw
 from tests.rbartpackages import BART3
 from tests.test_interface import BartKW, gen_X, gen_y, make_kw
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
@@ -80,8 +79,7 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
 
     # outcome_type -> type
     outcome_type = kw.pop('outcome_type', 'continuous')
-    if outcome_type == 'binary':
-        kw['type'] = 'pbart'
+    kw['type'] = 'pbart' if outcome_type == 'binary' else 'wbart'
 
     # num_trees -> ntree
     kw['ntree'] = kw.pop('num_trees')  # must be present bc different defaults
@@ -138,54 +136,6 @@ def variant(request: pytest.FixtureRequest) -> int:
 def kw(keys: split, variant: int) -> dict[str, Any]:
     """Return a dictionary of keyword arguments for BART."""
     return make_gbart_kw(keys.pop(), variant)
-
-
-def _normalize_mc_gbart_kw(kw: dict) -> dict:
-    """Normalize mc_gbart kwargs by removing args equal to mc_gbart defaults.
-
-    This makes it possible to compare dicts that are semantically equivalent
-    for mc_gbart even when one explicitly includes default values.
-    """
-    kw = dict(kw)
-    bart_kwargs = dict(kw.get('bart_kwargs', {}))
-
-    # maxdepth=6 is mc_gbart's default
-    if bart_kwargs.get('maxdepth') == 6:
-        del bart_kwargs['maxdepth']
-
-    # min_points_per_leaf=5 is mc_gbart's default
-    if 'init_kw' in bart_kwargs:
-        init_kw = dict(bart_kwargs['init_kw'])
-        if init_kw.get('min_points_per_leaf') == 5:
-            del init_kw['min_points_per_leaf']
-        bart_kwargs['init_kw'] = init_kw
-
-    kw['bart_kwargs'] = bart_kwargs
-    return kw
-
-
-def test_make_kw_equivalence(keys: split, variant: int) -> None:
-    """Temporary: verify new make_gbart_kw matches old make_kw."""
-    key = keys.pop()
-    old = _normalize_mc_gbart_kw(old_make_kw(key, variant))
-    new = _normalize_mc_gbart_kw(make_gbart_kw(random.clone(key), variant))
-
-    def compare_dicts(old_d: dict, new_d: dict, path: str = '') -> None:
-        assert set(old_d.keys()) == set(new_d.keys()), f'keys mismatch at {path}'
-        for k, old_v in old_d.items():
-            new_v = new_d[k]
-            loc = f'{path}.{k}' if path else k
-            if isinstance(old_v, dict):
-                assert isinstance(new_v, dict), f'type mismatch at {loc}'
-                compare_dicts(old_v, new_v, loc)
-            elif isinstance(old_v, jnp.ndarray):
-                assert jnp.array_equal(old_v, new_v), f'array mismatch at {loc}'
-            else:
-                assert old_v == new_v, (
-                    f'value mismatch at {loc}: {old_v!r} != {new_v!r}'
-                )
-
-    compare_dicts(old, new)
 
 
 @dataclass(frozen=True)
@@ -255,7 +205,7 @@ class TestWithCachedBart:
         assert rhat_yhat_train < 6
         print(f'{rhat_yhat_train.item()=}')
 
-        if kw['y_train'].dtype == bool:  # binary regression
+        if kw['type'] == 'pbart':  # binary regression
             prob_train = bart.prob_train.reshape(nchains, nsamples, n)
             rhat_prob_train = multivariate_rhat(prob_train)
             assert rhat_prob_train < 1.2
@@ -331,7 +281,7 @@ class TestWithCachedBart:
             yhat_test, rbart.yhat_test.astype(numpy.float32), rtol=1e-6
         )
 
-        if kw['y_train'].dtype == bool:
+        if kw['type'] == 'pbart':
             # check prob_train
             prob_train = ndtr(yhat_train)
             assert_close_matrices(
@@ -375,7 +325,7 @@ class TestWithCachedBart:
             rhat_yhat_test = multivariate_rhat([bart.yhat_test, rbart.yhat_test])
             assert rhat_yhat_test < 2.5
 
-        if kw['y_train'].dtype == bool:  # binary regression
+        if kw['type'] == 'pbart':  # binary regression
             with subtests.test('prob_train'):
                 rhat_prob_train = multivariate_rhat([bart.prob_train, rbart.prob_train])
                 assert rhat_prob_train < 1.2
@@ -554,7 +504,7 @@ def test_output_shapes(kw: dict[str, Any]) -> None:
     p, n = kw['x_train'].shape
     _, m = kw['x_test'].shape
 
-    binary = kw['y_train'].dtype == bool
+    binary = kw['type'] == 'pbart'
 
     assert ndpost == bart.ndpost
     assert bart.offset.shape == ()
@@ -597,7 +547,7 @@ def test_output_types(kw: dict[str, Any]) -> None:
     """Check the output types of all the attributes of BART.gbart."""
     bart = mc_gbart(**kw)
 
-    binary = kw['y_train'].dtype == bool
+    binary = kw['type'] == 'pbart'
 
     assert bart.offset.dtype == jnp.float32
     assert isinstance(bart.ndpost, int)
@@ -701,7 +651,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
 
 def test_scale_shift(kw: dict[str, Any]) -> None:
     """Check self-consistency of rescaling the inputs."""
-    if kw['y_train'].dtype == bool:
+    if kw['type'] == 'pbart':
         pytest.skip('Cannot rescale binary responses.')
 
     bart1 = mc_gbart(**kw)
@@ -825,7 +775,7 @@ def test_no_datapoints(kw: dict[str, Any]) -> None:
 
     # check default values that may be set in a special way if there are 0 datapoints
     assert bart.offset == 0
-    if kw['y_train'].dtype == bool:
+    if kw['type'] == 'pbart':
         tau_num = 3
         assert bart.sigest is None
     else:
@@ -863,7 +813,7 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
     )
 
     bart = mc_gbart(**kw)
-    if kw['y_train'].dtype == bool:
+    if kw['type'] == 'pbart':
         tau_num = 3
         assert bart.sigest is None
         assert bart.offset == 0
@@ -889,7 +839,7 @@ def test_two_datapoints(kw: dict[str, Any]) -> None:
         save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
     )
     bart = mc_gbart(**kw)
-    if kw['y_train'].dtype != bool:
+    if kw['type'] != 'pbart':
         assert_allclose(bart.sigest, kw['y_train'].std(), rtol=1e-6)
     if kw['usequants']:
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
@@ -1484,7 +1434,7 @@ def test_num_trees(kw: dict, subtests: SubTests) -> None:
         assert bart._bart.num_trees == kw['ntree']
 
     with subtests.test('default ntree'):
-        if kw['y_train'].dtype == bool:
+        if kw['type'] == 'pbart':
             default_ntree = 50
         else:
             default_ntree = 200

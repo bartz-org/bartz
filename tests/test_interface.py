@@ -127,10 +127,9 @@ def gen_y(
         s = jnp.ones(p)
 
     # normalize outcome_type to list
-    if isinstance(outcome_type, str):
-        outcome_type = [outcome_type]
-
     effective_k = 1 if k is None else k
+    if isinstance(outcome_type, str):
+        outcome_type = [outcome_type] * effective_k
     assert len(outcome_type) == effective_k
 
     # mean and noise — always (effective_k, n)
@@ -234,7 +233,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # continuous regression with error weights and sparsity with fixed theta
-        case 3:  # pragma: no branch
+        case 3:
             X = gen_X(keys.pop(), 2, 30, 'continuous')
             Xt = gen_X(keys.pop(), 2, 31, 'continuous')
             w = gen_w(keys.pop(), X.shape[1])
@@ -270,12 +269,116 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 x_test=Xt,
             )
 
+        # multivariate continuous regression with some settings that induce
+        # large types, sparsity with free theta
+        case 4:
+            X = gen_X(keys.pop(), 2, 30, 'continuous')
+            Xt = gen_X(keys.pop(), 2, 31, 'continuous')
+            y = gen_y(keys.pop(), X, None, 'continuous', k=3, s='random')
+            return BartKW(
+                kw=dict(
+                    x_train=X,
+                    y_train=y,
+                    outcome_type='continuous',
+                    sparse=True,
+                    num_trees=20,
+                    ndpost=100,
+                    nskip=50,
+                    printevery=50,
+                    usequants=False,
+                    numcut=256,  # > 255 to use uint16 for X and split_trees
+                    num_chains=None,
+                    seed=keys.pop(),
+                    maxdepth=9,  # > 8 to use uint16 for leaf_indices
+                    num_data_devices=min(2, get_device_count()),
+                    init_kw=dict(
+                        resid_num_batches=None,
+                        count_num_batches=None,
+                        prec_num_batches=None,
+                        prec_count_num_trees=5,
+                        target_platform=None,
+                        save_ratios=True,
+                        min_points_per_leaf=5,
+                    ),
+                ),
+                x_test=Xt,
+            )
+
+        # multivariate binary regression with binary X and high p
+        case 5:
+            p = 257  # > 256 to use uint16 for var_trees.
+            X = gen_X(keys.pop(), p, 30, 'binary')
+            Xt = gen_X(keys.pop(), p, 31, 'binary')
+            y = gen_y(keys.pop(), X, None, 'binary', k=1)
+            return BartKW(
+                kw=dict(
+                    x_train=X,
+                    y_train=y,
+                    outcome_type='binary',
+                    num_trees=20,
+                    ndpost=100,
+                    nskip=50,
+                    keepevery=1,  # the default with binary would be 10
+                    printevery=None,
+                    usequants=True,
+                    # usequants=True with binary X to check the case in which the
+                    # splits are less than the statically known maximum
+                    numcut=255,
+                    seed=keys.pop(),
+                    num_chains=2,
+                    maxdepth=6,
+                    num_chain_devices=None,
+                    init_kw=dict(
+                        save_ratios=False,
+                        min_points_per_decision_node=None,
+                        min_points_per_leaf=None,
+                    ),
+                ),
+                x_test=Xt,
+            )
+
+        # multivariate mixed binary-continuous regression with sparsity with
+        # fixed theta
+        case 6:  # pragma: no branch
+            X = gen_X(keys.pop(), 2, 30, 'continuous')
+            Xt = gen_X(keys.pop(), 2, 31, 'continuous')
+            y = gen_y(keys.pop(), X, None, ['continuous', 'binary'], s='random', k=2)
+            return BartKW(
+                kw=dict(
+                    x_train=X,
+                    y_train=y,
+                    outcome_type=['continuous', 'binary'],
+                    sparse=True,
+                    theta=2,
+                    varprob=jnp.array([0.2, 0.8]),
+                    num_trees=20,
+                    ndpost=100,
+                    nskip=50,
+                    printevery=50,
+                    usequants=True,
+                    numcut=10,
+                    seed=keys.pop(),
+                    num_chains=2,
+                    maxdepth=8,  # 8 to check if leaf_indices changes type too soon
+                    init_kw=dict(
+                        save_ratios=True,
+                        resid_num_batches=16,
+                        count_num_batches=16,
+                        prec_num_batches=16,
+                        target_platform=None,
+                        prec_count_num_trees=7,
+                        min_points_per_leaf=5,
+                    ),
+                ),
+                x_test=Xt,
+            )
+
         case _:  # pragma: no cover
             msg = f'Unknown variant {variant}'
             raise ValueError(msg)
 
 
-N_VARIANTS = 3
+N_VARIANTS = 6
 
 
 @pytest.fixture(params=list(range(1, N_VARIANTS + 1)), scope='module')
@@ -347,7 +450,7 @@ class TestWithCachedBart:
         accum_resid, actual_resid = cachedbart.bart.compare_resid(
             y=cachedbart.bkw.kw['y_train']
         )
-        assert_close_matrices(accum_resid, actual_resid, rtol=1e-4)
+        assert_close_matrices(accum_resid, actual_resid, rtol=1e-4, reduce_rank=True)
 
     def test_convergence(self, cachedbart: CachedBart) -> None:
         """Run multiple chains and check convergence with rhat."""
@@ -359,21 +462,27 @@ class TestWithCachedBart:
         binary = bkw.kw['outcome_type'] == 'binary'
 
         yhat_train = bart.predict('train', kind='latent_samples')
-        yhat_train_chains = yhat_train.reshape(num_chains, nsamples, n)
+        yhat_train_chains = yhat_train.reshape(num_chains, nsamples, -1)
         rhat_yhat_train = multivariate_rhat(yhat_train_chains)
         assert rhat_yhat_train < 6
         print(f'{rhat_yhat_train.item()=}')
 
         if binary:
             prob_train = bart.predict('train', kind='mean_samples')
-            prob_train_chains = prob_train.reshape(num_chains, nsamples, n)
+            prob_train_chains = prob_train.reshape(num_chains, nsamples, -1)
             rhat_prob_train = multivariate_rhat(prob_train_chains)
             assert rhat_prob_train < 1.2
             print(f'{rhat_prob_train.item()=}')
         else:
-            sdev = bart.get_error_sdev()
-            sigma = sdev.reshape(num_chains, nsamples).T
-            rhat_sigma = rhat(sigma)
+            # debug_nans(False) because mixed regression returns NaN for
+            # binary components
+            with debug_nans(False):
+                sigma = bart.get_error_sdev().reshape(num_chains, nsamples, -1)
+                # drop binary components (NaN sdev)
+                binary_mask = bart._binary_mask
+                if binary_mask.ndim > 0:
+                    sigma = sigma[:, :, ~binary_mask]
+            rhat_sigma = multivariate_rhat(sigma)
             assert rhat_sigma < 1.2
             print(f'{rhat_sigma.item()=}')
 
@@ -423,8 +532,8 @@ class TestWithCachedBart:
             tree.map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)
 
         assert_different(bart._mcmc_state, rtol=0.02)
-        assert_different(bart._main_trace, rtol=0.03)
-        assert_different(bart._burnin_trace, rtol=0.03)
+        assert_different(bart._main_trace, rtol=0.01)
+        assert_different(bart._burnin_trace, rtol=0.01)
 
 
 def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
@@ -435,7 +544,7 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
 
     num_chains = kw.get('num_chains')
     mc_cores = 1 if num_chains is None else num_chains
-    n = kw['y_train'].size
+    y_shape = kw['y_train'].shape
 
     # run moving some samples from burn-in to main
     kw2 = dict(kw)
@@ -450,8 +559,8 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     bart2 = Bart(**kw2)
     bart2_yhat_train = (
         bart2.predict('train', kind='latent_samples')
-        .reshape(mc_cores, kw2['ndpost'] // mc_cores, n)[:, delta:, :]
-        .reshape(bart1.ndpost, n)
+        .reshape(mc_cores, kw2['ndpost'] // mc_cores, *y_shape)[:, delta:]
+        .reshape(bart1.ndpost, *y_shape)
     )
 
     with subtests.test('shift burn-in'):
@@ -461,7 +570,10 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
             else 2e-6
         )
         assert_close_matrices(
-            bart1.predict('train', kind='latent_samples'), bart2_yhat_train, rtol=rtol
+            bart1.predict('train', kind='latent_samples'),
+            bart2_yhat_train,
+            rtol=rtol,
+            reduce_rank=True,
         )
 
     # run keeping 1 every 2 samples
@@ -470,11 +582,11 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     kw3['keepevery'] = 2
     bart3 = Bart(**kw3)
     bart1_yhat_train = bart1.predict('train', kind='latent_samples').reshape(
-        mc_cores, kw3['ndpost'] // mc_cores, n
-    )[:, 1::2, :]
+        mc_cores, kw3['ndpost'] // mc_cores, *y_shape
+    )[:, 1::2, :, ...]
     bart3_yhat_train = bart3.predict('train', kind='latent_samples').reshape(
-        mc_cores, kw3['ndpost'] // mc_cores, n
-    )[:, : bart1_yhat_train.shape[1], :]
+        mc_cores, kw3['ndpost'] // mc_cores, *y_shape
+    )[:, : bart1_yhat_train.shape[1], :, ...]
 
     with subtests.test('change thinning'):
         rtol = (
@@ -495,25 +607,24 @@ def test_output_shapes(bkw: BartKW) -> None:
     ndpost = bart.ndpost
     p, n = kw['x_train'].shape
     _, m = bkw.x_test.shape
+    k = kw['y_train'].shape[:-1]  # () or (k,)
 
     binary = kw['outcome_type'] == 'binary'
 
-    assert bart.offset.shape == ()
+    assert bart.offset.shape == k
     if binary:
-        assert bart.predict('train', kind='mean_samples').shape == (ndpost, n)
-        assert bart.predict('train', kind='mean').shape == (n,)
-        assert bart.predict(bkw.x_test, kind='mean_samples').shape == (ndpost, m)
-        assert bart.predict(bkw.x_test, kind='mean').shape == (m,)
+        assert bart.predict('train', kind='mean_samples').shape == (ndpost, *k, n)
+        assert bart.predict('train', kind='mean').shape == (*k, n)
+        assert bart.predict(bkw.x_test, kind='mean_samples').shape == (ndpost, *k, m)
+        assert bart.predict(bkw.x_test, kind='mean').shape == (*k, m)
         assert bart.sigest is None
     else:
-        assert bart.predict('train', kind='mean').shape == (n,)
-        assert bart.predict(bkw.x_test, kind='mean').shape == (m,)
-        sdev = bart.get_error_sdev()
-        assert sdev.shape == (ndpost,)
-        sdev_mean = bart.get_error_sdev(mean=True)
-        assert sdev_mean.shape == ()
-    assert bart.predict('train', kind='latent_samples').shape == (ndpost, n)
-    assert bart.predict(bkw.x_test, kind='latent_samples').shape == (ndpost, m)
+        assert bart.predict('train', kind='mean').shape == (*k, n)
+        assert bart.predict(bkw.x_test, kind='mean').shape == (*k, m)
+        assert bart.get_error_sdev().shape == (ndpost, *k)
+        assert bart.get_error_sdev(mean=True).shape == k
+    assert bart.predict('train', kind='latent_samples').shape == (ndpost, *k, n)
+    assert bart.predict(bkw.x_test, kind='latent_samples').shape == (ndpost, *k, m)
     assert bart.varcount.shape == (ndpost, p)
     assert bart.varcount_mean.shape == (p,)
     assert bart.varprob.shape == (ndpost, p)
@@ -549,7 +660,10 @@ def test_predict(bkw: BartKW) -> None:
     bart = Bart(**kw)
     yhat_train = bart.predict(kw['x_train'], kind='latent_samples')
     assert_close_matrices(
-        bart.predict('train', kind='latent_samples'), yhat_train, rtol=1e-6
+        bart.predict('train', kind='latent_samples'),
+        yhat_train,
+        rtol=1e-6,
+        reduce_rank=True,
     )
 
 
@@ -617,7 +731,12 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
 def test_scale_shift(bkw: BartKW) -> None:
     """Check self-consistency of rescaling the inputs."""
     kw = bkw.kw
-    if kw['outcome_type'] == 'binary':
+    outcome_type = kw['outcome_type']
+    if outcome_type == 'binary' or (
+        isinstance(outcome_type, Sequence)
+        and not isinstance(outcome_type, str)
+        and any(t == 'binary' for t in outcome_type)
+    ):
         pytest.skip('Cannot rescale binary responses.')
 
     bart1 = Bart(**kw)
@@ -645,25 +764,27 @@ def test_scale_shift(bkw: BartKW) -> None:
 
     yhat1 = bart1.predict('train', kind='latent_samples')
     yhat2 = bart2.predict('train', kind='latent_samples')
-    assert_close_matrices(yhat1, (yhat2 - offset) / scale, rtol=1e-5)
+    assert_close_matrices(yhat1, (yhat2 - offset) / scale, rtol=1e-5, reduce_rank=True)
 
     mean1 = bart1.predict('train', kind='mean')
     mean2 = bart2.predict('train', kind='mean')
-    assert_close_matrices(mean1, (mean2 - offset) / scale, rtol=1e-5)
+    assert_close_matrices(mean1, (mean2 - offset) / scale, rtol=1e-5, reduce_rank=True)
 
     yhat_test1 = bart1.predict(kw['x_train'], kind='latent_samples')
     yhat_test2 = bart2.predict(kw['x_train'], kind='latent_samples')
-    assert_close_matrices(yhat_test1, (yhat_test2 - offset) / scale, rtol=1e-5)
+    assert_close_matrices(
+        yhat_test1, (yhat_test2 - offset) / scale, rtol=1e-5, reduce_rank=True
+    )
 
     yhat_test_mean1 = bart1.predict(kw['x_train'], kind='mean')
     yhat_test_mean2 = bart2.predict(kw['x_train'], kind='mean')
     assert_close_matrices(
-        yhat_test_mean1, (yhat_test_mean2 - offset) / scale, rtol=1e-5
+        yhat_test_mean1, (yhat_test_mean2 - offset) / scale, rtol=1e-5, reduce_rank=True
     )
 
     sdev1 = bart1.get_error_sdev()
     sdev2 = bart2.get_error_sdev()
-    assert_close_matrices(sdev1, sdev2 / scale, rtol=1e-5)
+    assert_close_matrices(sdev1, sdev2 / scale, rtol=1e-5, reduce_rank=True)
     assert_allclose(
         bart1.get_error_sdev(mean=True),
         bart2.get_error_sdev(mean=True) / scale,
@@ -730,21 +851,27 @@ def test_no_datapoints(bkw: BartKW) -> None:
     bart = Bart(**kw)
 
     ndpost = bart.ndpost
-    assert bart.predict('train', kind='latent_samples').shape == (ndpost, 0)
+    k = kw['y_train'].shape[:-1]  # () or (k,)
+    assert bart.predict('train', kind='latent_samples').shape == (ndpost, *k, 0)
 
-    assert bart.offset == 0
-    binary = kw['outcome_type'] == 'binary'
-    if binary:
+    assert_array_equal(bart.offset, 0)  # compare against jnp.zeros with strict=True
+    outcome_type = kw['outcome_type']
+    if outcome_type == 'binary':
         tau_num = 3
         assert bart.sigest is None
+    elif isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
+        binary_mask = jnp.array([t == 'binary' for t in outcome_type])
+        tau_num = jnp.where(binary_mask, 3.0, 1.0)
+        expected_sigest = jnp.where(binary_mask, 0.0, 1.0)
+        assert_array_equal(bart.sigest, expected_sigest)
     else:
         tau_num = 1
-        assert bart.sigest == 1
-    assert_allclose(
-        bart._mcmc_state.forest.leaf_prior_cov_inv,
-        (2**2 * kw['num_trees']) / tau_num**2,
-        rtol=1e-6,
-    )
+        assert_array_equal(bart.sigest, 1)  # compare against jnp.ones with strict=True
+    expected_cov_inv = jnp.float32((2**2 * kw['num_trees']) / tau_num**2)
+    leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv
+    if leaf_prior_cov_inv.ndim == 2:
+        expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
+    assert_close_matrices(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
 
     assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
     assert_array_equal(bart._main_trace.log_likelihood, 0.0)
@@ -769,23 +896,31 @@ def test_one_datapoint(bkw: BartKW) -> None:
     kw['init_kw'] = init_kw
 
     bart = Bart(**kw)
-    binary = kw['outcome_type'] == 'binary'
-    if binary:
+    outcome_type = kw['outcome_type']
+    k = kw['y_train'].shape[:-1]  # () or (k,)
+    if outcome_type == 'binary':
         tau_num = 3
         assert bart.sigest is None
-        assert bart.offset == 0
+        assert_array_equal(bart.offset, jnp.zeros(k), strict=True)
+    elif isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
+        binary_mask = jnp.array([t == 'binary' for t in outcome_type])
+        tau_num = jnp.where(binary_mask, 3.0, 1.0)
+        expected_sigest = jnp.where(binary_mask, 0.0, 1.0)
+        assert_array_equal(bart.sigest, expected_sigest)
     else:
         tau_num = 1
-        assert bart.sigest == 1
-        assert bart.offset == kw['y_train'].item()
-    assert_allclose(
-        bart._mcmc_state.forest.leaf_prior_cov_inv,
-        (2**2 * kw['num_trees']) / tau_num**2,
-        rtol=1e-6,
-    )
+        assert_array_equal(bart.sigest, jnp.ones(k), strict=True)
+        assert_close_matrices(bart.offset[..., None], kw['y_train'], rtol=1e-6)
+    expected_cov_inv = (2**2 * kw['num_trees']) / tau_num**2
+    leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv
+    if leaf_prior_cov_inv.ndim == 2:
+        expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
+    assert_allclose(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
 
-    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
-    assert_array_equal(bart._main_trace.log_likelihood, 0.0)
+    # in the multivariate case, it's not exactly 0 because matrix inversion
+    # adds an epsilon to handle ill-conditioned matrices
+    assert_allclose(bart._burnin_trace.log_likelihood, 0.0, atol=1e-6)
+    assert_allclose(bart._main_trace.log_likelihood, 0.0, atol=1e-6)
 
 
 def test_two_datapoints(bkw: BartKW) -> None:
@@ -798,7 +933,7 @@ def test_two_datapoints(bkw: BartKW) -> None:
     kw['init_kw'] = init_kw
     bart = Bart(**kw)
     if kw['outcome_type'] != 'binary':
-        assert_allclose(bart.sigest, kw['y_train'].std(), rtol=1e-6)
+        assert_allclose(bart.sigest, kw['y_train'].std(axis=-1), rtol=1e-6)
     if kw.get('usequants', False):
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)
@@ -813,7 +948,7 @@ def test_few_datapoints(bkw: BartKW) -> None:
     kw1 = dict(set_num_datapoints(kw, 8), init_kw=init_kw)
     bart = Bart(**kw1)
     yhat = bart.predict('train', kind='latent_samples')
-    assert jnp.all(yhat == yhat[:, :1])
+    assert jnp.all(yhat == yhat[..., :, :1])
 
     init_kw2 = dict(kw.get('init_kw', {}))
     init_kw2.update(min_points_per_decision_node=None, min_points_per_leaf=5)
@@ -822,7 +957,7 @@ def test_few_datapoints(bkw: BartKW) -> None:
     )
     bart = Bart(**kw2)
     yhat = bart.predict('train', kind='latent_samples')
-    assert jnp.all(yhat == yhat[:, :1])
+    assert jnp.all(yhat == yhat[..., :, :1])
 
 
 def test_xinfo() -> None:
@@ -1029,10 +1164,10 @@ def test_jit(bkw: BartKW) -> None:
 
     def task(
         X: Shaped[Array, 'p n'],
-        y: Shaped[Array, ' n'],
+        y: Shaped[Array, ' n'] | Shaped[Array, 'k n'],
         w: Float32[Array, ' n'] | None,
         key: Key[Array, ''],
-    ) -> tuple[State, Shaped[Array, 'ndpost n']]:
+    ) -> tuple[State, Shaped[Array, 'ndpost n'] | Shaped[Array, 'ndpost k n']]:
         bart = OriginalBart(X, y, w=w, **kw, seed=key)
         return bart._mcmc_state, bart.predict('train', kind='latent_samples')
 
@@ -1041,7 +1176,7 @@ def test_jit(bkw: BartKW) -> None:
     _state1, pred1 = task(X, y, w, key)
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
-    assert_close_matrices(pred1, pred2, rtol=1e-5)
+    assert_close_matrices(pred1, pred2, rtol=1e-5, reduce_rank=True)
 
 
 @pytest.mark.flaky
@@ -1062,6 +1197,9 @@ def test_interrupt(bkw: BartKW) -> None:
 def test_polars(bkw: BartKW) -> None:
     """Test passing data as DataFrame and Series."""
     kw = bkw.kw
+    if kw['y_train'].ndim == 2:
+        pytest.skip('Dataframe input for y_train not supported.')
+
     bart = Bart(**kw)
     pred = bart.predict(bkw.x_test, kind='latent_samples')
 

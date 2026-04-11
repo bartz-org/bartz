@@ -1256,12 +1256,18 @@ class Bart(Module):
         forests = TreesTrace.from_dataclass(state.forest)
         trees = evaluate_forest(state.X, forests, sum_batch_axis=-1)
 
-        if state.z is not None:
+        if state.binary_indices is not None:
+            # mixed binary-continuous: z has only binary rows, y has all rows
+            assert y is not None, 'y is required for mixed regression'
+            ref = jnp.asarray(y)
+            ref = jnp.broadcast_to(ref, state.resid.shape)
+            ref = ref.at[..., state.binary_indices, :].set(state.z)
+        elif state.z is not None:
             ref = state.z
         else:
             assert y is not None, 'y is required for continuous regression'
             ref = jnp.asarray(y)
-        resid2 = ref - (trees + state.offset)
+        resid2 = ref - (trees + state.offset[..., None])
 
         return resid1, resid2
 

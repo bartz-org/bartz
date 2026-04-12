@@ -378,10 +378,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             raise ValueError(msg)
 
 
-N_VARIANTS = 6
-
-
-@pytest.fixture(params=list(range(1, N_VARIANTS + 1)), scope='module')
+# test only the multivariate variants, because the other ones are tested in
+# test_BART.py
+@pytest.fixture(params=(4, 5, 6), scope='module')
 def variant(request: FixtureRequest) -> int:
     """Return a parametrized indicator to select different BART configurations."""
     return request.param
@@ -425,8 +424,8 @@ class TestWithCachedBart:
     def cachedbart(self, variant: int) -> CachedBart:
         """Return a pre-computed Bart."""
         key = random.key(0x139CD0C0)
-        keys = random.split(key, N_VARIANTS)
-        key = keys[variant - 1]
+        keys = random.split(key, 10)  # 10 is just some high number
+        key = keys[variant]
         bkw = make_kw(key, variant)
         kw = bkw.kw
 
@@ -435,7 +434,7 @@ class TestWithCachedBart:
         kw.update(
             num_trees=max(2 * n, p),
             nskip=3000,
-            ndpost=nchains * 1002,
+            ndpost=nchains * 1000,
             keepevery=1,
             num_chains=nchains,
         )

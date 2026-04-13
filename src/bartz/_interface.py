@@ -963,6 +963,7 @@ class Bart(Module):
             binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
         else:
             binary_mask = jnp.bool_(outcome_type is OutcomeType.binary)
+        binary_mask = jnp.broadcast_to(binary_mask, y_train.shape[:-1])
 
         return outcome_type, binary_mask
 

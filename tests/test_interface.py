@@ -38,7 +38,7 @@ import numpy
 import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError, tree_at
-from jax import block_until_ready, config, debug_nans, random, tree, vmap
+from jax import block_until_ready, config, debug_nans, lax, random, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
@@ -61,7 +61,6 @@ from bartz.jaxext import get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
-from bartz.testing import gen_data
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
     assert_close_matrices,
@@ -157,11 +156,12 @@ class BartKW(NamedTuple):
 
     kw: dict[str, Any]
     x_test: Real[Array, 'p m']
+    w_test: Float32[Array, ' m'] | None = None
 
 
 def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     """Return keyword arguments for `Bart` and test predictors."""
-    keys = split(key, 5)
+    keys = split(key, 10)  # 10 is just some high number
 
     match variant:
         # continuous regression with some settings that induce large types,
@@ -237,6 +237,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             X = gen_X(keys.pop(), 2, 30, 'continuous')
             Xt = gen_X(keys.pop(), 2, 31, 'continuous')
             w = gen_w(keys.pop(), X.shape[1])
+            wt = gen_w(keys.pop(), Xt.shape[1])
             y = gen_y(keys.pop(), X, w, 'continuous', s='random')
             return BartKW(
                 kw=dict(
@@ -267,6 +268,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     ),
                 ),
                 x_test=Xt,
+                w_test=wt,
             )
 
         # multivariate continuous regression with some settings that induce
@@ -466,24 +468,36 @@ class TestWithCachedBart:
         assert rhat_yhat_train < 6
         print(f'{rhat_yhat_train.item()=}')
 
+        mixed = isinstance(bkw.kw['outcome_type'], list)
         if binary:
             prob_train = bart.predict('train', kind='mean_samples')
             prob_train_chains = prob_train.reshape(num_chains, nsamples, -1)
             rhat_prob_train = multivariate_rhat(prob_train_chains)
             assert rhat_prob_train < 1.2
             print(f'{rhat_prob_train.item()=}')
-        else:
-            # debug_nans(False) because mixed regression returns NaN for
-            # binary components
+        elif mixed:
+            # mixed regression: check get_error_sdev, dropping binary
+            # components (NaN sdev)
             with debug_nans(False):
                 sigma = bart.get_error_sdev().reshape(num_chains, nsamples, -1)
-                # drop binary components (NaN sdev)
                 binary_mask = bart._binary_mask
                 if binary_mask.ndim > 0:
                     sigma = sigma[:, :, ~binary_mask]
             rhat_sigma = multivariate_rhat(sigma)
             assert rhat_sigma < 1.2
             print(f'{rhat_sigma.item()=}')
+        else:
+            # all continuous: check full precision matrix convergence
+            # using upper triangular elements (matrix is symmetric)
+            error_cov_inv = bart._main_trace.error_cov_inv
+            if error_cov_inv.ndim == 2:
+                error_cov_inv = error_cov_inv[:, :, None, None]
+            _, _, k, _ = error_cov_inv.shape
+            ti, tj = jnp.triu_indices(k)
+            error_cov_inv = error_cov_inv[:, :, ti, tj]
+            rhat_prec = multivariate_rhat(error_cov_inv)
+            assert rhat_prec < 1.2
+            print(f'{rhat_prec.item()=}')
 
         if p < n:
             varcount_vals = bart.varcount.reshape(num_chains, nsamples, p)
@@ -530,7 +544,7 @@ class TestWithCachedBart:
             axes = chain_vmap_axes(x)
             tree.map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)
 
-        assert_different(bart._mcmc_state, rtol=0.02)
+        assert_different(bart._mcmc_state, rtol=0.01)
         assert_different(bart._main_trace, rtol=0.01)
         assert_different(bart._burnin_trace, rtol=0.01)
 
@@ -598,7 +612,7 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
         )
 
 
-def test_output_shapes(bkw: BartKW) -> None:
+def test_output_shapes(bkw: BartKW, keys: split) -> None:
     """Check the output shapes of the Bart predictions and attributes."""
     kw = bkw.kw
     bart = Bart(**kw)
@@ -608,49 +622,142 @@ def test_output_shapes(bkw: BartKW) -> None:
     _, m = bkw.x_test.shape
     k = kw['y_train'].shape[:-1]  # () or (k,)
 
-    binary = kw['outcome_type'] == 'binary'
-
     assert bart.offset.shape == k
-    if binary:
-        assert bart.predict('train', kind='mean_samples').shape == (ndpost, *k, n)
-        assert bart.predict('train', kind='mean').shape == (*k, n)
-        assert bart.predict(bkw.x_test, kind='mean_samples').shape == (ndpost, *k, m)
-        assert bart.predict(bkw.x_test, kind='mean').shape == (*k, m)
-        assert bart.sigest is None
-    else:
-        assert bart.predict('train', kind='mean').shape == (*k, n)
-        assert bart.predict(bkw.x_test, kind='mean').shape == (*k, m)
+
+    assert bart.predict('train', kind='mean_samples').shape == (ndpost, *k, n)
+    assert bart.predict('train', kind='mean').shape == (*k, n)
+    assert bart.predict('train', kind='latent_samples').shape == (ndpost, *k, n)
+    assert bart.predict('train', kind='outcome_samples', key=keys.pop()).shape == (
+        ndpost,
+        *k,
+        n,
+    )
+
+    assert bart.predict(bkw.x_test, kind='mean_samples').shape == (ndpost, *k, m)
+    assert bart.predict(bkw.x_test, kind='mean').shape == (*k, m)
+    assert bart.predict(bkw.x_test, kind='latent_samples').shape == (ndpost, *k, m)
+    assert bart.predict(
+        bkw.x_test, kind='outcome_samples', w=bkw.w_test, key=keys.pop()
+    ).shape == (ndpost, *k, m)
+
+    with debug_nans(False):
         assert bart.get_error_sdev().shape == (ndpost, *k)
         assert bart.get_error_sdev(mean=True).shape == k
-    assert bart.predict('train', kind='latent_samples').shape == (ndpost, *k, n)
-    assert bart.predict(bkw.x_test, kind='latent_samples').shape == (ndpost, *k, m)
+
+    if kw['outcome_type'] == 'binary':
+        assert bart.sigest is None
+    else:
+        assert bart.sigest.shape == k
+
     assert bart.varcount.shape == (ndpost, p)
     assert bart.varcount_mean.shape == (p,)
     assert bart.varprob.shape == (ndpost, p)
     assert bart.varprob_mean.shape == (p,)
 
+    # get_latent_prec shape
+    num_chains = kw.get('num_chains')
+    nskip = kw['nskip']
+    prec = bart.get_latent_prec()
+    if num_chains is not None:
+        assert prec.shape == (num_chains, nskip + ndpost // num_chains, *k, *k)
+    else:
+        assert prec.shape == (nskip + ndpost, *k, *k)
 
-def test_output_types(bkw: BartKW) -> None:
+
+def test_output_types(bkw: BartKW, keys: split) -> None:
     """Check the output types of all the attributes of Bart."""
     kw = bkw.kw
     bart = Bart(**kw)
 
-    binary = kw['outcome_type'] == 'binary'
-
+    if kw['outcome_type'] != 'binary':
+        assert bart.sigest.dtype == jnp.float32
     assert bart.offset.dtype == jnp.float32
     assert isinstance(bart.ndpost, int)
-    if binary:
-        assert bart.predict('train', kind='mean_samples').dtype == jnp.float32
-        assert bart.predict('train', kind='mean').dtype == jnp.float32
-    else:
+    assert bart.predict('train', kind='mean').dtype == jnp.float32
+    assert bart.predict('train', kind='mean_samples').dtype == jnp.float32
+    assert bart.predict('train', kind='latent_samples').dtype == jnp.float32
+    assert (
+        bart.predict('train', kind='outcome_samples', key=keys.pop()).dtype
+        == jnp.float32
+    )
+    assert bart.get_latent_prec().dtype == jnp.float32
+    with debug_nans(False):
         assert bart.get_error_sdev().dtype == jnp.float32
         assert bart.get_error_sdev(mean=True).dtype == jnp.float32
     assert bart.varcount.dtype == jnp.int32
     assert bart.varcount_mean.dtype == jnp.float32
     assert bart.varprob.dtype == jnp.float32
     assert bart.varprob_mean.dtype == jnp.float32
-    assert bart.predict('train', kind='latent_samples').dtype == jnp.float32
-    assert bart.predict('train', kind='mean').dtype == jnp.float32
+
+
+def test_output_ranges(bkw: BartKW, keys: split) -> None:
+    """Check value constraints on Bart outputs."""
+    kw = bkw.kw
+    bart = Bart(**kw)
+
+    binary_mask = bart._binary_mask
+
+    mean = bart.predict('train', kind='mean')
+    bmean = mean[binary_mask, ...]
+    assert jnp.all((bmean >= 0) & (bmean <= 1))
+
+    outcomes = bart.predict('train', kind='outcome_samples', key=keys.pop())
+    boutcomes = outcomes[:, binary_mask, ...]
+    assert jnp.all((boutcomes == 0) | (boutcomes == 1))
+
+    with debug_nans(False):
+        sdev = bart.get_error_sdev()
+        assert jnp.all(jnp.isnan(sdev[..., binary_mask]))
+        assert jnp.all(jnp.isfinite(sdev[..., ~binary_mask]))
+        assert jnp.all(sdev[..., ~binary_mask] > 0)
+
+        sdev_mean = bart.get_error_sdev(mean=True)
+        assert jnp.all(jnp.isnan(sdev_mean[binary_mask]))
+        assert jnp.all(jnp.isfinite(sdev_mean[~binary_mask]))
+        assert jnp.all(sdev_mean[~binary_mask] > 0)
+
+    # sigest values for mixed
+    if binary_mask.all():
+        assert bart.sigest is None
+    else:
+        assert jnp.all(bart.sigest[binary_mask] == 0.0)
+        assert jnp.all(bart.sigest[~binary_mask] > 0)
+
+    # get_latent_prec: symmetry and positive definiteness
+    if kw['y_train'].ndim == 2:
+        prec = bart.get_latent_prec()
+        assert_close_matrices(prec, prec.mT, rtol=1e-6, reduce_rank=True)
+        eigvals = jnp.linalg.eigvalsh(prec)
+        assert jnp.all(eigvals > 0)
+
+
+def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
+    """Check that the various outputs of `Bart.predict` are consistent."""
+    bart = Bart(**bkw.kw)
+
+    mean = bart.predict('train', kind='mean')  # (*k, n)
+    mean_samples = bart.predict('train', kind='mean_samples')  # (ndpost, *k, n)
+    latent_samples = bart.predict('train', kind='latent_samples')  # (ndpost, *k, n)
+    outcome_samples = bart.predict('train', kind='outcome_samples', key=keys.pop())
+    # outcome_samples has shape (ndpost, *k, n)
+
+    with subtests.test('mean_samples vs mean'):
+        mean_from_mean_samples = mean_samples.mean(0)
+        assert_close_matrices(mean, mean_from_mean_samples)
+
+    with subtests.test('latent_samples vs mean_samples'):
+        binary_mask = bart._binary_mask
+        cont_mean_samples = mean_samples[:, ~binary_mask, ...]
+        cont_latent_samples = latent_samples[:, ~binary_mask, ...]
+        assert_close_matrices(
+            cont_mean_samples.T, cont_latent_samples.T, reduce_rank=True
+        )
+
+    with subtests.test('outcome_samples vs mean'):
+        mean_from_os = outcome_samples.mean(0)
+        sdev = outcome_samples.std(0) / jnp.sqrt(outcome_samples.shape[0])
+        t = jnp.abs(mean - mean_from_os) / sdev
+        assert jnp.all(t < 5)
 
 
 def test_predict(bkw: BartKW) -> None:
@@ -1438,387 +1545,189 @@ def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:
         assert bart.num_trees == 200
 
 
-class MVData(NamedTuple):
-    """Dataset for testing in `TestMVBartInterface`."""
+class ExampleData(NamedTuple):
+    """Small nonsense MV dataset for TestMVBartInterface."""
 
     x: Float32[Array, 'p n']
     y: Float32[Array, 'k n']
-    w: Float32[Array, ' n'] | None = None
-    outcome_type: str | list[str] = 'continuous'
+    w: Float32[Array, ' n']
+    kwargs: dict[str, Any]
 
 
 class TestMVBartInterface:
-    """Tests for the high-level Bart class with multivariate y."""
+    """Some specific multivariate tests with their own data in and parametrization."""
 
     @pytest.fixture
-    def kwargs(self) -> dict:
-        """Provide base keyword arguments for Bart initialization."""
-        return dict(num_trees=5, ndpost=10, nskip=5, num_chains=None)
-
-    @pytest.fixture(params=[None, 2])
-    def num_chains(self, request: FixtureRequest) -> int | None:
-        """Provide the number of chains to test with."""
-        return request.param
-
-    @pytest.fixture(params=[(20, 6, 2), (20, 10, 3), (50, 100, 4), (50, 50, 5)])
-    def mv_data_shape(self, request: FixtureRequest) -> tuple[int, int, int]:
-        """Provide (n, p, k) triples for testing."""
-        return request.param
-
-    @pytest.fixture
-    def mv_data(self, keys: split, mv_data_shape: tuple[int, int, int]) -> MVData:
-        """Generate a toy multivariate dataset."""
-        n, p, k = mv_data_shape
-        dgp = gen_data(
-            keys.pop(),
-            n=n,
-            p=p,
-            k=k,
-            q=2,
-            lam=0.5,
-            sigma2_lin=0.4,
-            sigma2_quad=0.5,
-            sigma2_eps=0.1,
+    def example_data(self, keys: split) -> ExampleData:
+        """Return a small nonsense MV dataset (x, y, w)."""
+        return ExampleData(
+            x=random.normal(keys.pop(), (2, 5)),
+            y=random.normal(keys.pop(), (3, 5)),
+            w=random.normal(keys.pop(), (5,)),
+            kwargs=dict(num_trees=5, ndpost=0, nskip=0, num_chains=None),
         )
-        return MVData(dgp.x, dgp.y)
-
-    @pytest.fixture
-    def example_data(self, keys: split) -> MVData:
-        """Return a small nonsense dataset for tests that don't need realistic data."""
-        return MVData(
-            random.normal(keys.pop(), (2, 5)),
-            random.normal(keys.pop(), (3, 5)),
-            random.normal(keys.pop(), (5,)),
-        )
-
-    @pytest.fixture(params=['continuous', 'binary', 'mixed'])
-    def mv_outcome_data(self, request: FixtureRequest, mv_data: MVData) -> MVData:
-        """Apply outcome_mode postprocessing to mv_data."""
-        outcome_mode = request.param
-        k = mv_data.y.shape[0]
-        if outcome_mode == 'binary':
-            y = (mv_data.y > 0).astype(jnp.float32)
-            outcome_type = 'binary'
-        elif outcome_mode == 'mixed':
-            y = mv_data.y.at[0].set((mv_data.y[0] > 0).astype(jnp.float32))
-            outcome_type = ['binary'] + ['continuous'] * (k - 1)
-        else:
-            y = mv_data.y
-            outcome_type = 'continuous'
-        return MVData(x=mv_data.x, y=y, outcome_type=outcome_type)
-
-    def test_initialization_and_shapes(
-        self, keys: split, mv_outcome_data: MVData, kwargs: dict, num_chains: int | None
-    ) -> None:
-        """Test that MV Bart predicts with correct shapes."""
-        k, n = mv_outcome_data.y.shape
-        n_test = 40
-        p = mv_outcome_data.x.shape[0]
-        outcome_type = mv_outcome_data.outcome_type
-
-        kwargs.update(num_chains=num_chains, outcome_type=outcome_type)
-        bart = Bart(x_train=mv_outcome_data.x, y_train=mv_outcome_data.y, **kwargs)
-
-        # test predict shape
-        x_test = random.normal(keys.pop(), (p, n_test))
-        for x, m in [('train', n), (x_test, n_test)]:
-            y_pred = bart.predict(x, kind='latent_samples')
-            assert y_pred.shape == (bart.ndpost, k, m)
-
-            y_pred = bart.predict(x, kind='mean_samples')
-            assert y_pred.shape == (bart.ndpost, k, m)
-
-            y_pred = bart.predict(x, kind='mean')
-            assert y_pred.shape == (k, m)
-
-            y_pred = bart.predict(x, kind='outcome_samples', key=keys.pop())
-            assert y_pred.shape == (bart.ndpost, k, m)
-
-            mean = bart.predict(x, kind='mean')
-            outcomes = bart.predict(x, kind='outcome_samples', key=keys.pop())
-            if outcome_type == 'binary':
-                assert jnp.all((mean >= 0) & (mean <= 1))
-                assert jnp.all((outcomes == 0) | (outcomes == 1))
-            elif isinstance(outcome_type, list):
-                assert jnp.all((mean[0] >= 0) & (mean[0] <= 1))
-                assert jnp.all((outcomes[..., 0, :] == 0) | (outcomes[..., 0, :] == 1))
-
-        # config params shape
-        assert bart.offset.shape == (k,)
-        if outcome_type == 'binary':
-            assert bart.sigest is None
-        elif isinstance(outcome_type, list):
-            sigest = bart.sigest
-            assert sigest.shape == (k,)
-            assert sigest[0] == 0.0  # binary component
-            assert jnp.all(sigest[1:] > 0)  # continuous components
-        else:
-            assert bart.sigest.shape == (k,)
 
     @pytest.mark.parametrize('outcome_mode', ['continuous', 'mixed'])
     def test_scalar_params(
-        self, example_data: MVData, subtests: SubTests, outcome_mode: str, kwargs: dict
+        self, example_data: ExampleData, subtests: SubTests, outcome_mode: str
     ) -> None:
         """Test that scalar configuration params are broadcasted."""
-        k, _ = example_data.y.shape
+        x, y, _, kw = example_data
+        k, _ = y.shape
         if outcome_mode == 'mixed':
             outcome_type = ['binary'] + ['continuous'] * (k - 1)
         else:
             outcome_type = 'continuous'
-        kwargs.update(ndpost=0, nskip=0, outcome_type=outcome_type)
+        kw.update(x_train=x, y_train=y, outcome_type=outcome_type)
 
         with subtests.test('offset'):
-            bart = Bart(example_data.x, example_data.y, offset=0.0, **kwargs)
+            bart = Bart(offset=0.0, **kw)
             assert bart.offset.shape == (k,)
 
         with subtests.test('sigest'):
-            bart = Bart(example_data.x, example_data.y, sigest=1.0, **kwargs)
+            bart = Bart(sigest=1.0, **kw)
             assert bart.sigest.shape == (k,)
 
         with subtests.test('lamda'):
-            bart = Bart(example_data.x, example_data.y, lamda=1.0, **kwargs)
+            bart = Bart(lamda=1.0, **kw)
             assert bart.sigest is None
             assert bart._mcmc_state.error_cov_scale.shape == (k, k)
 
-    def test_mv_rejects_weights(self, example_data: MVData, kwargs: dict) -> None:
+    def test_mv_rejects_weights(self, example_data: ExampleData) -> None:
         """MV + weights should raise."""
+        x, y, w, kw = example_data
         with pytest.raises(ValueError, match='Weights'):
-            Bart(
-                x_train=example_data.x,
-                y_train=example_data.y,
-                w=example_data.w,
-                **kwargs,
-            )
+            Bart(x_train=x, y_train=y, w=w, **kw)
 
-    def test_get_latent_prec(
-        self, mv_outcome_data: MVData, kwargs: dict, num_chains: int | None
-    ) -> None:
-        """get_latent_prec returns correct shape, dtype, and is symmetric PD."""
-        k = mv_outcome_data.y.shape[0]
-        kwargs.update(num_chains=num_chains, outcome_type=mv_outcome_data.outcome_type)
-        bart = Bart(x_train=mv_outcome_data.x, y_train=mv_outcome_data.y, **kwargs)
-        ndpost = kwargs['ndpost']
-        nskip = kwargs['nskip']
-
-        prec = bart.get_latent_prec()
-        if num_chains is not None:
-            assert prec.shape == (num_chains, nskip + ndpost // num_chains, k, k)
-        else:
-            assert prec.shape == (nskip + ndpost, k, k)
-        assert prec.dtype == jnp.float32
-
-        # check symmetry and positive definiteness
-        assert_close_matrices(prec, prec.mT, rtol=1e-6, reduce_rank=True)
-        eigvals = jnp.linalg.eigvalsh(prec)
-        assert jnp.all(eigvals > 0)
-
-    def test_get_latent_prec_only_continuous(
-        self, mv_outcome_data: MVData, kwargs: dict, num_chains: int | None
-    ) -> None:
-        """get_latent_prec(only_continuous=True) removes binary components."""
-        k = mv_outcome_data.y.shape[0]
-        outcome_type = mv_outcome_data.outcome_type
-        kwargs.update(num_chains=num_chains, outcome_type=outcome_type)
-        bart = Bart(x_train=mv_outcome_data.x, y_train=mv_outcome_data.y, **kwargs)
-        ndpost = kwargs['ndpost']
-        nskip = kwargs['nskip']
-
-        if outcome_type == 'binary':
-            with pytest.raises(ValueError, match='only binary'):
-                bart.get_latent_prec(only_continuous=True)
-            return
-
-        prec = bart.get_latent_prec(only_continuous=True)
-        if isinstance(outcome_type, list):
-            kb = sum(1 for t in outcome_type if t == 'binary')
-            kc = k - kb
-        else:
-            kc = k
-        if num_chains is not None:
-            assert prec.shape == (num_chains, nskip + ndpost // num_chains, kc, kc)
-        else:
-            assert prec.shape == (nskip + ndpost, kc, kc)
-
-    def test_get_error_sdev_shape(
-        self, mv_outcome_data: MVData, kwargs: dict, num_chains: int | None
-    ) -> None:
-        """get_error_sdev returns correct shape and NaN pattern."""
-        k = mv_outcome_data.y.shape[0]
-        outcome_type = mv_outcome_data.outcome_type
-        kwargs.update(num_chains=num_chains, outcome_type=outcome_type)
-        bart = Bart(x_train=mv_outcome_data.x, y_train=mv_outcome_data.y, **kwargs)
-        ndpost = kwargs['ndpost']
-
-        with debug_nans(False):
-            sdev = bart.get_error_sdev()
-            assert sdev.shape == (ndpost, k)
-
-            if outcome_type == 'binary':
-                assert jnp.all(jnp.isnan(sdev))
-            elif isinstance(outcome_type, list):
-                binary_mask = jnp.array([t == 'binary' for t in outcome_type])
-                assert jnp.all(jnp.isnan(sdev[:, binary_mask]))
-                assert jnp.all(jnp.isfinite(sdev[:, ~binary_mask]))
-            else:
-                assert jnp.all(jnp.isfinite(sdev))
-                assert jnp.all(sdev > 0)
-
-    def test_get_error_sdev_mean(
-        self, mv_outcome_data: MVData, kwargs: dict, num_chains: int | None
-    ) -> None:
-        """get_error_sdev(mean=True) returns correct shape and NaN pattern."""
-        k = mv_outcome_data.y.shape[0]
-        outcome_type = mv_outcome_data.outcome_type
-        kwargs.update(num_chains=num_chains, outcome_type=outcome_type)
-        bart = Bart(x_train=mv_outcome_data.x, y_train=mv_outcome_data.y, **kwargs)
-
-        with debug_nans(False):
-            sdev_mean = bart.get_error_sdev(mean=True)
-            assert sdev_mean.shape == (k,)
-
-            if outcome_type == 'binary':
-                assert jnp.all(jnp.isnan(sdev_mean))
-            elif isinstance(outcome_type, list):
-                binary_mask = jnp.array([t == 'binary' for t in outcome_type])
-                assert jnp.all(jnp.isnan(sdev_mean[binary_mask]))
-                assert jnp.all(jnp.isfinite(sdev_mean[~binary_mask]))
-            else:
-                assert jnp.all(jnp.isfinite(sdev_mean))
-                assert jnp.all(sdev_mean > 0)
-
-    def test_get_error_sdev_values(
-        self, mv_data: MVData, kwargs: dict, num_chains: int | None
-    ) -> None:
-        """get_error_sdev matches manual computation from precision matrices."""
-        kwargs.update(num_chains=num_chains)
-        bart = Bart(x_train=mv_data.x, y_train=mv_data.y, **kwargs)
-        nskip = kwargs['nskip']
-        sdev = bart.get_error_sdev()
-
-        # manual: invert each precision matrix, take sqrt of diagonal
-        prec = bart.get_latent_prec()
-        if num_chains is not None:
-            prec_post = prec[:, nskip:]  # skip burnin per chain
-            prec_post = prec_post.reshape(-1, *prec_post.shape[2:])  # flatten chains
-        else:
-            prec_post = prec[nskip:]  # skip burnin
-        cov = jnp.linalg.inv(prec_post)
-        expected = jnp.sqrt(jnp.diagonal(cov, axis1=-2, axis2=-1))
-        assert_close_matrices(sdev, expected, rtol=1e-5)
-
-    def test_mixed_rejects_weights(self, example_data: MVData, kwargs: dict) -> None:
+    def test_mixed_rejects_weights(self, example_data: ExampleData) -> None:
         """Mixed outcome_type + weights should raise."""
-        k, _ = example_data.y.shape
-        kwargs.update(outcome_type=['binary'] + ['continuous'] * (k - 1))
+        x, y, w, kw = example_data
+        k, _ = y.shape
         with pytest.raises(ValueError, match='univariate continuous'):
             Bart(
-                x_train=example_data.x,
-                y_train=example_data.y,
-                w=example_data.w,
-                **kwargs,
+                x_train=x,
+                y_train=y,
+                w=w,
+                **kw,
+                outcome_type=['binary'] + ['continuous'] * (k - 1),
             )
 
-    def test_outcome_type_length_mismatch(
-        self, example_data: MVData, kwargs: dict
-    ) -> None:
+    def test_outcome_type_length_mismatch(self, example_data: ExampleData) -> None:
         """Sequence outcome_type with wrong length should raise."""
-        kwargs.update(outcome_type=['continuous', 'continuous'])
+        x, y, _, kw = example_data
         with pytest.raises(ValueError, match='length'):
-            Bart(x_train=example_data.x, y_train=example_data.y, **kwargs)
+            Bart(x_train=x, y_train=y, **kw, outcome_type=['continuous', 'continuous'])
 
-    def test_sequence_outcome_type_requires_2d(self, keys: split, kwargs: dict) -> None:
+    def test_sequence_outcome_type_requires_2d(self, example_data: ExampleData) -> None:
         """Sequence outcome_type with 1D y should raise."""
-        x = random.normal(keys.pop(), (2, 5))
-        y = random.normal(keys.pop(), (5,))
-        kwargs.update(outcome_type=['continuous'])
+        x, y, _, kw = example_data
         with pytest.raises(ValueError, match=r'y_train\.shape=\(1, n\)'):
-            Bart(x_train=x, y_train=y, **kwargs)
+            Bart(x_train=x, y_train=y[0, :], **kw, outcome_type=['continuous'])
 
-    def test_uv_mv_k1_equivalence(self, keys: split) -> None:
-        """Test that Bart class initializes equivalent states for UV and MV (k=1)."""
-        n, p = 20, 5
-        X = random.normal(keys.pop(), (p, n))
-        y_uv = random.normal(keys.pop(), (n,))
-        y_mv = y_uv[None, :]  # shape (1, n)
 
-        common = dict(x_train=X, num_trees=10, ndpost=0, nskip=0, num_chains=1, seed=42)
-        bart_uv = Bart(y_train=y_uv, **common)
-        bart_mv = Bart(y_train=y_mv, **common)
+def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
+    """Test that Bart initializes equivalent states for UV and MV(k=1)."""
+    outcome_type = bkw.kw['outcome_type']
+    if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
+        outcome_type = outcome_type[0]
 
-        state_uv = bart_uv._mcmc_state
-        state_mv = bart_mv._mcmc_state
+    y_mv = bkw.kw['y_train']
+    if y_mv.ndim == 1:
+        y_mv = y_mv[None, :]
+    y_mv = y_mv[:1, :]
+    y_uv = y_mv.squeeze(0)
 
-        # Residuals and error covariance
-        assert_allclose(state_uv.resid, state_mv.resid.squeeze(0), atol=1e-6, rtol=1e-6)
-        assert_allclose(
-            state_uv.error_cov_inv,
-            state_mv.error_cov_inv.reshape(()),
-            atol=1e-6,
-            rtol=1e-6,
-        )
+    bkw.kw.update(outcome_type=outcome_type, nskip=0, ndpost=0, w=None)
+    del bkw.kw['y_train']
+    bart_uv = Bart(y_train=y_uv, **bkw.kw)
+    bart_mv = Bart(y_train=y_mv, **bkw.kw)
 
-        # Prior parameters
-        assert_array_equal(
-            state_uv.forest.leaf_prior_cov_inv,
-            state_mv.forest.leaf_prior_cov_inv.reshape(()),
-        )
+    state_uv = bart_uv._mcmc_state
+    state_mv = bart_mv._mcmc_state
+
+    # Residuals and error covariance
+    assert_close_matrices(state_uv.resid, state_mv.resid.squeeze(-2))
+    assert_allclose(
+        state_uv.error_cov_inv, state_mv.error_cov_inv.squeeze((-2, -1)), rtol=1e-6
+    )
+
+    # Prior parameters
+    assert_array_equal(bart_uv.offset, bart_mv.offset.squeeze(0))
+    assert_array_equal(
+        state_uv.forest.leaf_prior_cov_inv,
+        state_mv.forest.leaf_prior_cov_inv.reshape(()),
+    )
+    if outcome_type == 'continuous':
         assert_array_equal(state_uv.error_cov_df, state_mv.error_cov_df)
         assert_array_equal(
             state_uv.error_cov_scale, state_mv.error_cov_scale.reshape(())
         )
+        assert_array_equal(bart_uv.sigest, bart_mv.sigest.squeeze(0))
 
-        # Forest structure
-        assert_array_equal(state_uv.forest.var_tree, state_mv.forest.var_tree)
-        assert_array_equal(state_uv.forest.split_tree, state_mv.forest.split_tree)
-        assert_array_equal(
-            state_uv.forest.leaf_tree, state_mv.forest.leaf_tree.squeeze(-2)
-        )
-        assert_array_equal(state_uv.forest.leaf_indices, state_mv.forest.leaf_indices)
+    # Forest structure
+    assert_array_equal(state_uv.forest.var_tree, state_mv.forest.var_tree)
+    assert_array_equal(state_uv.forest.split_tree, state_mv.forest.split_tree)
+    assert_array_equal(state_uv.forest.leaf_tree, state_mv.forest.leaf_tree.squeeze(-2))
+    assert_array_equal(state_uv.forest.leaf_indices, state_mv.forest.leaf_indices)
 
-        # Offset
-        assert_allclose(bart_uv.offset, bart_mv.offset.squeeze(0), atol=1e-6, rtol=1e-6)
 
-        # Sigest
-        assert_allclose(bart_uv.sigest, bart_mv.sigest.squeeze(0), atol=1e-6, rtol=1e-6)
+def test_get_latent_prec_only_continuous(bkw: BartKW) -> None:
+    """get_latent_prec(only_continuous=True) removes binary components."""
+    kw = bkw.kw
+    if kw['y_train'].ndim < 2:
+        pytest.skip('UV variant')
 
-    def test_mvbart_convergence(self, mv_data: MVData, keys: split) -> None:
-        """Test that MV Bart chains converge using R-hat."""
-        _, n_train = mv_data.x.shape
-        k_dim = mv_data.y.shape[0]
+    bart = Bart(**kw)
+    outcome_type = kw['outcome_type']
+    if outcome_type == 'binary':
+        with pytest.raises(ValueError, match='only binary'):
+            bart.get_latent_prec(only_continuous=True)
+        return
 
-        num_chains = 4
-        ndpost = 2000
-        nsamples_per_chain = ndpost // num_chains
-        nskip = 4000
-        keepevery = 5
-        num_trees = 100
+    k, _ = kw['y_train'].shape
 
-        bart = Bart(
-            x_train=mv_data.x,
-            y_train=mv_data.y,
-            num_trees=num_trees,
-            ndpost=ndpost,
-            nskip=nskip,
-            keepevery=keepevery,
-            num_chains=num_chains,
-            seed=keys.pop(),
-        )
+    prec = bart.get_latent_prec(only_continuous=True)
+    if isinstance(outcome_type, list):
+        kc = sum(1 for t in outcome_type if t != 'binary')
+    else:
+        kc = k
 
-        # Check yhat convergence
-        yhat_train = bart.predict('train', kind='latent_samples')
-        yhat_train = yhat_train.reshape(num_chains, nsamples_per_chain, k_dim * n_train)
-        rhat_yhat_train = multivariate_rhat(yhat_train)
-        assert rhat_yhat_train < 1.6
-        print(f'{rhat_yhat_train.item()=}')
+    ndpost = bart.ndpost
+    nskip = kw['nskip']
+    num_chains = kw.get('num_chains')
+    if num_chains is not None:
+        assert prec.shape == (num_chains, nskip + ndpost // num_chains, kc, kc)
+    else:
+        assert prec.shape == (nskip + ndpost, kc, kc)
 
-        # Check covariance matrix convergence
-        prec_trace = bart._main_trace.error_cov_inv
-        if prec_trace.ndim == 3:
-            prec_trace = prec_trace.reshape(
-                num_chains, nsamples_per_chain, k_dim, k_dim
-            )
-        prec_flat = prec_trace.reshape(num_chains, nsamples_per_chain, -1)
-        assert jnp.all(jnp.std(prec_flat, axis=1) > 1e-8), 'Sigma is not updating!'
-        rhat_prec = multivariate_rhat(prec_flat)
-        assert rhat_prec < 1.1
-        print(f'{rhat_prec.item()=}')
+
+def test_get_error_sdev_values(bkw: BartKW) -> None:
+    """get_error_sdev matches manual computation from precision matrices."""
+    kw = bkw.kw
+    outcome_type = kw['outcome_type']
+    if outcome_type == 'binary':
+        pytest.skip('binary variant')
+    bart = Bart(**kw)
+    nskip = kw['nskip']
+
+    with debug_nans(False):
+        sdev = bart.get_error_sdev()
+        if sdev.ndim == 1:  # univariate
+            sdev = sdev[:, None]  # reshape as vector of length 1
+
+    # manual: invert each precision matrix, take sqrt of diagonal
+    prec = bart.get_latent_prec()
+    if prec.ndim < 3:  # univariate
+        prec = prec[..., :, None, None]  # reshape as 1x1 matrix
+    prec = prec[..., nskip:, :, :]  # skip burnin
+    prec = lax.collapse(prec, 0, -2)  # flatten chains
+
+    cov = jnp.linalg.inv(prec)
+    sdev_ref = jnp.sqrt(jnp.diagonal(cov, axis1=-2, axis2=-1))
+
+    # for mixed, compare only continuous components (binary have NaN sdev)
+    mask = jnp.atleast_1d(~bart._binary_mask)
+    sdev = sdev[:, mask]
+    sdev_ref = sdev_ref[:, mask]
+
+    assert_close_matrices(sdev, sdev_ref, rtol=1e-5)

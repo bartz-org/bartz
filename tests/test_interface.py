@@ -319,7 +319,6 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     num_trees=20,
                     ndpost=100,
                     nskip=50,
-                    keepevery=1,  # the default with binary would be 10
                     printevery=None,
                     usequants=True,
                     # usequants=True with binary X to check the case in which the

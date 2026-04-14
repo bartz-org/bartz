@@ -185,7 +185,6 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     num_chains=None,
                     seed=keys.pop(),
                     maxdepth=9,  # > 8 to use uint16 for leaf_indices
-                    num_data_devices=min(2, get_device_count()),
                     init_kw=dict(
                         resid_num_batches=None,
                         count_num_batches=None,
@@ -222,6 +221,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     seed=keys.pop(),
                     num_chains=2,
                     maxdepth=6,
+                    num_data_devices=min(2, get_device_count()),
                     num_chain_devices=None,
                     init_kw=dict(
                         save_ratios=False,
@@ -292,7 +292,6 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     num_chains=None,
                     seed=keys.pop(),
                     maxdepth=9,  # > 8 to use uint16 for leaf_indices
-                    num_data_devices=min(2, get_device_count()),
                     init_kw=dict(
                         resid_num_batches=None,
                         count_num_batches=None,
@@ -329,6 +328,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     seed=keys.pop(),
                     num_chains=2,
                     maxdepth=6,
+                    num_data_devices=min(2, get_device_count()),
                     num_chain_devices=None,
                     init_kw=dict(
                         save_ratios=False,

@@ -1041,7 +1041,8 @@ def test_two_datapoints(bkw: BartKW) -> None:
     kw['init_kw'] = init_kw
     bart = Bart(**kw)
     if kw['outcome_type'] != 'binary':
-        assert_allclose(bart.sigest, kw['y_train'].std(axis=-1), rtol=1e-6)
+        ref_sigest = jnp.where(bart._binary_mask, 0.0, kw['y_train'].std(axis=-1))
+        assert_close_matrices(bart.sigest, ref_sigest, rtol=1e-6)
     if kw.get('usequants', False):
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)

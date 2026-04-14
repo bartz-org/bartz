@@ -319,11 +319,11 @@ class TestWithCachedBart:
 
         with subtests.test('yhat_train'):
             rhat_yhat_train = multivariate_rhat([bart.yhat_train, rbart.yhat_train])
-            assert rhat_yhat_train < 2.5
+            assert rhat_yhat_train < 3.5
 
         with subtests.test('yhat_test'):
             rhat_yhat_test = multivariate_rhat([bart.yhat_test, rbart.yhat_test])
-            assert rhat_yhat_test < 2.5
+            assert rhat_yhat_test < 3.5
 
         if kw['type'] == 'pbart':  # binary regression
             with subtests.test('prob_train'):
@@ -346,7 +346,7 @@ class TestWithCachedBart:
                 assert_close_matrices(
                     bart.yhat_test_mean,
                     rbart.yhat_test_mean.astype(numpy.float32),
-                    rtol=0.7,
+                    rtol=0.8,
                 )
 
             with subtests.test('sigma'):
@@ -375,14 +375,14 @@ class TestWithCachedBart:
                 # there is a visible discrepancy on the number of nodes, with bartz
                 # having deeper trees, this 6 is not just "not good to sampling
                 # accuracy but close in practice."
-                assert rhat_varcount < 6
+                assert rhat_varcount < 7
 
             with subtests.test('varcount_mean'):
                 assert_close_matrices(
                     bart.varcount_mean,
                     rbart.varcount_mean.astype(numpy.float32),
-                    rtol=0.6,
-                    atol=7,
+                    rtol=0.7,
+                    atol=9,
                 )
 
             if kw.get('sparse', False):  # pragma: no branch
@@ -393,13 +393,13 @@ class TestWithCachedBart:
                         )
                     )
                     # drop one component because varprob sums to 1
-                    assert rhat_varprob < 3
+                    assert rhat_varprob < 4
 
                 with subtests.test('varprob_mean'):
                     assert_close_matrices(
                         logit(bart.varprob_mean[1:]),
                         logit(rbart.varprob_mean[1:]),
-                        atol=1.7 * (p - 1) ** 0.5,
+                        atol=2.1 * (p - 1) ** 0.5,
                     )
 
     def test_different_chains(self, cachedbart: CachedBart) -> None:

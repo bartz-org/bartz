@@ -276,7 +276,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
         case 4:
             X = gen_X(keys.pop(), 2, 30, 'continuous')
             Xt = gen_X(keys.pop(), 2, 31, 'continuous')
-            y = gen_y(keys.pop(), X, None, 'continuous', k=3, s='random')
+            y = gen_y(keys.pop(), X, None, 'continuous', k=1, s='random')
             return BartKW(
                 kw=dict(
                     x_train=X,
@@ -310,7 +310,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             p = 257  # > 256 to use uint16 for var_trees.
             X = gen_X(keys.pop(), p, 30, 'binary')
             Xt = gen_X(keys.pop(), p, 31, 'binary')
-            y = gen_y(keys.pop(), X, None, 'binary', k=1)
+            y = gen_y(keys.pop(), X, None, 'binary', k=2)
             return BartKW(
                 kw=dict(
                     x_train=X,
@@ -343,12 +343,15 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
         case 6:  # pragma: no branch
             X = gen_X(keys.pop(), 2, 30, 'continuous')
             Xt = gen_X(keys.pop(), 2, 31, 'continuous')
-            y = gen_y(keys.pop(), X, None, ['continuous', 'binary'], s='random', k=2)
+            outcome_type = ['continuous', 'binary', 'binary']
+            y = gen_y(
+                keys.pop(), X, None, outcome_type, s='random', k=len(outcome_type)
+            )
             return BartKW(
                 kw=dict(
                     x_train=X,
                     y_train=y,
-                    outcome_type=['continuous', 'binary'],
+                    outcome_type=outcome_type,
                     sparse=True,
                     theta=2,
                     varprob=jnp.array([0.2, 0.8]),

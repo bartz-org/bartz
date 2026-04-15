@@ -173,8 +173,8 @@ class BartKW(NamedTuple):
 def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     """Return keyword arguments for `Bart` and test predictors."""
     keys = split(key, 10)  # 10 is just some high number
-    n = 30
-    nt = 31
+    n = 20
+    nt = 21
     p = 2
     high_p = 257  # > 256 to use uint16 for var_trees.
 

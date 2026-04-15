@@ -172,13 +172,17 @@ class BartKW(NamedTuple):
 def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     """Return keyword arguments for `Bart` and test predictors."""
     keys = split(key, 10)  # 10 is just some high number
+    n = 30
+    nt = 31
+    p = 2
+    high_p = 257  # > 256 to use uint16 for var_trees.
 
     match variant:
         # continuous regression with some settings that induce large types,
         # sparsity with free theta
         case 1:
-            X = gen_X(keys.pop(), 2, 30, 'continuous')
-            Xt = gen_X(keys.pop(), 2, 31, 'continuous')
+            X = gen_X(keys.pop(), p, n, 'continuous')
+            Xt = gen_X(keys.pop(), p, nt, 'continuous')
             y = gen_y(keys.pop(), X, None, 'continuous', s='random')
             return BartKW(
                 kw=dict(
@@ -210,9 +214,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
         # binary regression with binary X and high p
         case 2:
-            p = 257  # > 256 to use uint16 for var_trees.
-            X = gen_X(keys.pop(), p, 30, 'binary')
-            Xt = gen_X(keys.pop(), p, 31, 'binary')
+            X = gen_X(keys.pop(), high_p, n, 'binary')
+            Xt = gen_X(keys.pop(), high_p, nt, 'binary')
             y = gen_y(keys.pop(), X, None, 'binary')
             return BartKW(
                 kw=dict(
@@ -244,8 +247,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
         # continuous regression with error weights and sparsity with fixed theta
         case 3:
-            X = gen_X(keys.pop(), 2, 30, 'continuous')
-            Xt = gen_X(keys.pop(), 2, 31, 'continuous')
+            X = gen_X(keys.pop(), p, n, 'continuous')
+            Xt = gen_X(keys.pop(), p, nt, 'continuous')
             w = gen_w(keys.pop(), X.shape[1])
             wt = gen_w(keys.pop(), Xt.shape[1])
             y = gen_y(keys.pop(), X, w, 'continuous', s='random')
@@ -284,8 +287,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
         # multivariate continuous regression with some settings that induce
         # large types, sparsity with free theta
         case 4:
-            X = gen_X(keys.pop(), 2, 30, 'continuous')
-            Xt = gen_X(keys.pop(), 2, 31, 'continuous')
+            X = gen_X(keys.pop(), p, n, 'continuous')
+            Xt = gen_X(keys.pop(), p, nt, 'continuous')
             y = gen_y(keys.pop(), X, None, 'continuous', k=1, s='random')
             return BartKW(
                 kw=dict(
@@ -317,9 +320,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
         # multivariate binary regression with binary X and high p
         case 5:
-            p = 257  # > 256 to use uint16 for var_trees.
-            X = gen_X(keys.pop(), p, 30, 'binary')
-            Xt = gen_X(keys.pop(), p, 31, 'binary')
+            X = gen_X(keys.pop(), high_p, n, 'binary')
+            Xt = gen_X(keys.pop(), high_p, nt, 'binary')
             y = gen_y(keys.pop(), X, None, 'binary', k=2)
             return BartKW(
                 kw=dict(
@@ -351,8 +353,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
         # multivariate mixed binary-continuous regression with sparsity with
         # fixed theta
         case 6:  # pragma: no branch
-            X = gen_X(keys.pop(), 2, 30, 'continuous')
-            Xt = gen_X(keys.pop(), 2, 31, 'continuous')
+            X = gen_X(keys.pop(), p, n, 'continuous')
+            Xt = gen_X(keys.pop(), p, nt, 'continuous')
             outcome_type = ['continuous', 'binary', 'binary']
             y = gen_y(
                 keys.pop(), X, None, outcome_type, s='random', k=len(outcome_type)

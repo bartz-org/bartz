@@ -94,8 +94,8 @@ addopts = [
 filterwarnings = [
     "ignore:unclosed database:ResourceWarning",
 ]
-timeout = 512
-timeout_method = "thread" # when jax hangs, signals do not work
+timeout = 1024  # about 15 min, ci runners are slow
+timeout_method = "thread"  # when jax hangs, signals do not work
 
 [tool.coverage.run]
 branch = true

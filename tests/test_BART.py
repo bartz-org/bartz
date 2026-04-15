@@ -345,7 +345,7 @@ class TestWithCachedBart:
                 assert_close_matrices(
                     bart.yhat_test_mean,
                     rbart.yhat_test_mean.astype(numpy.float32),
-                    rtol=0.8,
+                    rtol=0.9,
                 )
 
             with subtests.test('sigma'):

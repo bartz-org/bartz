@@ -1308,12 +1308,11 @@ def test_interrupt(bkw: BartKW) -> None:
     kw = bkw.kw
     kw.update(printevery=1, ndpost=0, nskip=10000)
 
-    with periodic_sigint(first_after=3.0, interval=1.0):
-        try:
-            with pytest.raises(KeyboardInterrupt):
-                Bart(**kw)
-        except KeyboardInterrupt:  # pragma: no cover
-            pass
+    with (
+        pytest.raises(KeyboardInterrupt),
+        periodic_sigint(first_after=3.0, interval=1.0),
+    ):
+        Bart(**kw)
 
 
 def test_polars(bkw: BartKW) -> None:

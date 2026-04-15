@@ -30,7 +30,7 @@ from dataclasses import replace
 from operator import ge, le
 from os import getpid, kill
 from pathlib import Path
-from signal import SIG_IGN, SIGINT, getsignal, signal
+from signal import SIGINT
 from threading import Event, Thread
 from time import monotonic
 from typing import Any
@@ -292,8 +292,7 @@ class PeriodicSigintTimer:
         t0 = monotonic()
 
         # Wait initial delay (cancellable)
-        if self._stop.wait(self.first_after):  # pragma: no cover
-            return
+        self._stop.wait(self.first_after)
 
         # Periodically send SIGINT until stopped
         while not self._stop.is_set():  # pragma: no branch
@@ -301,8 +300,7 @@ class PeriodicSigintTimer:
             self.sent += 1
             elapsed = monotonic() - t0
             print(f'[PeriodicSigintTimer] sent SIGINT #{self.sent} at t={elapsed:.2f}s')
-            if self._stop.wait(self.interval):  # pragma: no branch
-                break
+            self._stop.wait(self.interval)
 
     def start(self) -> None:
         """Start the timer."""
@@ -313,16 +311,12 @@ class PeriodicSigintTimer:
     def cancel(self) -> None:
         """Stop the timer."""
         assert self._thread is not None, 'Timer not started'
-
-        # Guard against a stray ^C arriving during teardown
-        prev = getsignal(SIGINT)
-        signal(SIGINT, SIG_IGN)
-
-        try:
-            self._stop.set()
-            print(f'[PeriodicSigintTimer] stopped after {self.sent} SIGINT(s)')
-        finally:
-            signal(SIGINT, prev)
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+        if self._thread.is_alive():  # pragma: no cover
+            msg = '[PeriodicSigintTimer] failed to stop timer'
+            raise RuntimeError(msg)
+        print(f'[PeriodicSigintTimer] stopped after {self.sent} SIGINT(s)')
 
 
 @contextmanager
@@ -331,11 +325,12 @@ def periodic_sigint(
 ) -> Generator[PeriodicSigintTimer, None, None]:
     """Context manager to periodically send SIGINT to the main thread."""
     timer = PeriodicSigintTimer(first_after=first_after, interval=interval)
-    timer.start()
     try:
+        timer.start()
         yield timer
     finally:
-        timer.cancel()
+        if timer._thread is not None:
+            timer.cancel()
 
 
 def rhat(chains: Real[Array, 'chain sample']) -> Float[Array, '']:

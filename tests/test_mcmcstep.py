@@ -575,7 +575,7 @@ def typechecking_step(key: Key[Array, ''], state: State) -> State:
 class TestMultichain:
     """Basic tests of the multichain functionality."""
 
-    n = 100
+    n = 60  # 3 * 4 * 5, maximize divisibility for sharding tests
 
     @pytest.fixture(
         params=['uv-binary', 'uv-continuous', 'mv-binary', 'mv-continuous', 'mv-mixed']

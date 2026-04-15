@@ -38,7 +38,17 @@ import numpy
 import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError, tree_at
-from jax import block_until_ready, config, debug_nans, lax, random, tree, vmap
+from jax import (
+    array_garbage_collection_guard,
+    block_until_ready,
+    debug_infs,
+    debug_key_reuse,
+    debug_nans,
+    lax,
+    random,
+    tree,
+    vmap,
+)
 from jax import numpy as jnp
 from jax.sharding import SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
@@ -1464,29 +1474,37 @@ class TestVarprobParam:
                 Bart(**kw_zero)
 
 
-def run_bart_and_block(kw: dict) -> None:
+def run_bart_and_block(bkw: BartKW, keys: split) -> None:
     """Run bart and block until all outputs are ready."""
-    bart = Bart(**kw)
+    bart = Bart(**bkw.kw)
     stuff = (
+        bart,
         bart.predict('train', kind='latent_samples'),
         bart.predict('train', kind='mean'),
-        bart.get_error_sdev() if kw['outcome_type'] != 'binary' else None,
+        bart.predict('train', kind='mean_samples'),
+        bart.predict('train', kind='outcome_samples', key=keys.pop()),
+        bart.predict(bkw.x_test, kind='latent_samples'),
+        bart.predict(bkw.x_test, kind='mean'),
+        bart.predict(bkw.x_test, kind='mean_samples'),
+        bart.predict(bkw.x_test, kind='outcome_samples', key=keys.pop(), w=bkw.w_test),
+        bart.get_error_sdev(),
+        bart.get_latent_prec(),
         bart.varcount,
         bart.varprob,
     )
-    block_until_ready((bart, *stuff))
+    block_until_ready(stuff)
 
 
-def test_array_no_gc(bkw: BartKW) -> None:
-    """Check that arrays are not garbage collected."""
-    setting = 'jax_array_garbage_collection_guard'
-    prev = getattr(config, setting)
-    config.update(setting, 'fatal')
-    try:
-        run_bart_and_block(bkw.kw)
+def test_debug_checks(keys: split, bkw: BartKW) -> None:
+    """Run with invasive jax debug options active."""
+    with (
+        debug_nans(True),
+        debug_infs(True),
+        debug_key_reuse(True),
+        array_garbage_collection_guard('fatal'),
+    ):
+        run_bart_and_block(bkw, keys)
         collect()
-    finally:
-        config.update(setting, prev)
 
 
 def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:

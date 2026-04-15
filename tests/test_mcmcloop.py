@@ -33,7 +33,7 @@ from equinox import filter_jit
 from jax import NamedSharding, debug_key_reuse, device_put, jit, make_mesh, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import AxisType, PartitionSpec
-from jax.tree_util import KeyPath, tree_map
+from jax.tree_util import KeyPath
 from jaxtyping import Array, Float32, UInt8
 from numpy.testing import assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
@@ -106,9 +106,10 @@ class TestRunMcmc:
 
     def test_final_state_overflow(self, keys: split, initial_state: State) -> None:
         """Check that the final state is the one in the trace even if there's overflow."""
-        with debug_key_reuse(initial_state.forest.num_chains() != 0):
+        initial_state_copy = tree.map(jnp.copy, initial_state)  # donated
+        with debug_key_reuse(False):
             final_state, _, main_trace = run_mcmc(
-                keys.pop(), initial_state, 10, inner_loop_length=9
+                keys.pop(), initial_state_copy, 10, inner_loop_length=9
             )
 
         if initial_state.forest.num_chains() is None:
@@ -129,12 +130,13 @@ class TestRunMcmc:
 
     def test_zero_iterations(self, keys: split, initial_state: State) -> None:
         """Check 0 iterations produces a noop."""
-        with debug_key_reuse(initial_state.forest.num_chains() != 0):
+        initial_state_copy = tree.map(jnp.copy, initial_state)  # donated
+        with debug_key_reuse(False):
             final_state, burnin_trace, main_trace = run_mcmc(
-                keys.pop(), initial_state, 0, n_burn=0
+                keys.pop(), initial_state_copy, 0, n_burn=0
             )
 
-        tree_map(partial(assert_array_equal, strict=True), initial_state, final_state)
+        tree.map(partial(assert_array_equal, strict=True), initial_state, final_state)
 
         def assert_empty_trace(
             _path: KeyPath, x: Array | None, chain_axis: int | None

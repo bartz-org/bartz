@@ -1102,7 +1102,8 @@ class Bart(Module):
             y=jnp.array(y_train),
             outcome_type=outcome_type,
             offset=offset,
-            error_scale=w,
+            # copy w because it's going to be donated in init
+            error_scale=None if w is None else jnp.array(w),
             max_split=max_split,
             num_trees=num_trees,
             p_nonterminal=p_nonterminal,

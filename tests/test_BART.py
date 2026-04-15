@@ -29,7 +29,6 @@ This is the main suite of tests.
 
 from dataclasses import dataclass, replace
 from functools import partial
-from gc import collect
 from typing import Any, Literal
 
 import jax
@@ -37,7 +36,7 @@ import numpy
 import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError, tree_at
-from jax import block_until_ready, config, debug_nans, devices, random, tree, vmap
+from jax import debug_nans, devices, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.special import logit, ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
@@ -1347,34 +1346,6 @@ class TestVarprobParam:
             kw.update(varprob=varprob)
             with pytest.raises(EquinoxRuntimeError, match='varprob must be > 0'):
                 mc_gbart(**kw)
-
-
-def run_bart_and_block(kw: dict) -> None:
-    """Run bart and block until all outputs are ready."""
-    bart = mc_gbart(**kw)
-    stuff = (
-        bart.yhat_test,
-        bart.prob_test,
-        bart.prob_train,
-        bart.sigma,
-        bart.sigma_,
-        bart.varcount,
-        bart.varprob,
-        bart.yhat_train,
-    )
-    block_until_ready((bart, *stuff))
-
-
-def test_array_no_gc(kw: dict) -> None:
-    """Check that arrays are not garbage collected."""
-    setting = 'jax_array_garbage_collection_guard'
-    prev = getattr(config, setting)
-    config.update(setting, 'fatal')
-    try:
-        run_bart_and_block(kw)
-        collect()
-    finally:
-        config.update(setting, prev)
 
 
 def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:

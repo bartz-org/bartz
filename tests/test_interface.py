@@ -27,7 +27,8 @@
 This is the main suite of tests.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from functools import partial
 from gc import collect
@@ -39,8 +40,8 @@ import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError, tree_at
 from jax import (
-    array_garbage_collection_guard,
     block_until_ready,
+    config,
     debug_infs,
     debug_key_reuse,
     debug_nans,
@@ -1499,6 +1500,18 @@ def run_bart_and_block(bkw: BartKW, keys: split) -> None:
 
 def test_debug_checks(keys: split, bkw: BartKW) -> None:
     """Run with invasive jax debug options active."""
+
+    @contextmanager
+    def array_garbage_collection_guard(value: str) -> Iterator[None]:
+        """Implement `jax.array_garbage_collection_guard`, added in jax v0.9.1."""
+        setting = 'jax_array_garbage_collection_guard'
+        prev = getattr(config, setting)
+        config.update(setting, value)
+        try:
+            yield
+        finally:
+            config.update(setting, prev)
+
     with (
         debug_nans(True),
         debug_infs(True),

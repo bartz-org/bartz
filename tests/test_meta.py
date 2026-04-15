@@ -27,7 +27,7 @@
 from functools import partial
 
 import pytest
-from jax import debug_nans, jit, random
+from jax import config, debug_nans, jit, random
 from jax import numpy as jnp
 from jax.errors import KeyReuseError
 from jaxtyping import Array, Float, Key
@@ -80,7 +80,9 @@ def test_random_keys_are_consumed(
     assert len(keys) == 126
 
 
-@pytest.mark.xfail(reason='jax_debug_key_reuse not set')
+@pytest.mark.xfail(
+    condition=not config.jax_debug_key_reuse, reason='jax_debug_key_reuse not set'
+)
 def test_debug_key_reuse(keys: split) -> None:
     """Check that the jax debug_key_reuse option works."""
     key = keys.pop()
@@ -89,7 +91,9 @@ def test_debug_key_reuse(keys: split) -> None:
         random.uniform(key)
 
 
-@pytest.mark.xfail(reason='jax_debug_key_reuse not set')
+@pytest.mark.xfail(
+    condition=not config.jax_debug_key_reuse, reason='jax_debug_key_reuse not set'
+)
 def test_debug_key_reuse_within_jit(keys: split) -> None:
     """Check that the jax debug_key_reuse option works within a jitted function."""
 

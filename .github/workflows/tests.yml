@@ -84,19 +84,21 @@ jobs:
       benchmarks-matrix: ${{ steps.set-matrix.outputs.benchmarks-matrix }}
     steps:
       - id: set-matrix
+        # ci crashes with xdist + multiple jax cpu devices + multivariate, we
+        # don't know why, so `latest` and `old` disable xdist with '-n0'
         run: |
           BASE_MATRIX='[
             {
               "id": "latest",
               "runs-on": "ubuntu-latest",
               "target-suffix": "",
-              "tests-args": "ARGS=--num-cpu-devices=4"
+              "tests-args": "ARGS=-n0"
             },
             {
               "id": "old",
               "runs-on": "ubuntu-latest",
               "target-suffix": "-old",
-              "tests-args": "ARGS=--num-cpu-devices=4"
+              "tests-args": "ARGS=-n0"
             },
             {
               "id": "single-cpu",

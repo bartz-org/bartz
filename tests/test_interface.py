@@ -28,10 +28,11 @@ This is the main suite of tests.
 """
 
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass, replace
 from functools import partial
 from gc import collect
+from io import StringIO
 from typing import Any, Literal, NamedTuple
 
 import jax
@@ -1497,25 +1498,38 @@ def run_bart_and_block(bkw: BartKW, keys: split) -> None:
     block_until_ready(stuff)
 
 
+@contextmanager
+def array_garbage_collection_guard(value: str) -> Iterator[None]:
+    """Implement `jax.array_garbage_collection_guard`, added in jax v0.9.1."""
+    setting = 'jax_array_garbage_collection_guard'
+    prev = getattr(config, setting)
+    config.update(setting, value)
+    try:
+        yield
+    finally:
+        config.update(setting, prev)
+
+
+@contextmanager
+def catch_array_gc_guard() -> Iterator[None]:
+    """Catch array GC guard log messages and raise as exceptions."""
+    # we need this because array_garbage_collection_guard('fatal')
+    # terminates the process
+    buf = StringIO()
+    with array_garbage_collection_guard('log'), redirect_stderr(buf):
+        yield
+    captured = buf.getvalue()
+    if '`jax.Array` was deleted by the Python garbage collector' in captured:
+        raise RuntimeError(captured)
+
+
 def test_debug_checks(keys: split, bkw: BartKW) -> None:
     """Run with invasive jax debug options active."""
-
-    @contextmanager
-    def array_garbage_collection_guard(value: str) -> Iterator[None]:
-        """Implement `jax.array_garbage_collection_guard`, added in jax v0.9.1."""
-        setting = 'jax_array_garbage_collection_guard'
-        prev = getattr(config, setting)
-        config.update(setting, value)
-        try:
-            yield
-        finally:
-            config.update(setting, prev)
-
     with (
         debug_nans(True),
         debug_infs(True),
         debug_key_reuse(True),
-        array_garbage_collection_guard('fatal'),
+        catch_array_gc_guard(),
     ):
         run_bart_and_block(bkw, keys)
         collect()

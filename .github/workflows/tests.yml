@@ -90,13 +90,13 @@ jobs:
               "id": "latest",
               "runs-on": "ubuntu-latest",
               "target-suffix": "",
-              "tests-args": "ARGS=--num-cpu-devices=2"
+              "tests-args": "ARGS=--num-cpu-devices=4"
             },
             {
               "id": "old",
               "runs-on": "ubuntu-latest",
               "target-suffix": "-old",
-              "tests-args": "ARGS=--num-cpu-devices=2"
+              "tests-args": "ARGS=--num-cpu-devices=4"
             },
             {
               "id": "single-cpu",

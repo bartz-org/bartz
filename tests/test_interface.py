@@ -73,6 +73,7 @@ from bartz.jaxext import get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
+from tests.conftest import get_disable_problematic_sharding
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
     assert_close_matrices,
@@ -186,7 +187,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             X = gen_X(keys.pop(), p, n, 'continuous')
             Xt = gen_X(keys.pop(), p, nt, 'continuous')
             y = gen_y(keys.pop(), X, None, 'continuous', s='random')
-            return BartKW(
+            bkw = BartKW(
                 kw=dict(
                     x_train=X,
                     y_train=y,
@@ -219,7 +220,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             X = gen_X(keys.pop(), high_p, n, 'binary')
             Xt = gen_X(keys.pop(), high_p, nt, 'binary')
             y = gen_y(keys.pop(), X, None, 'binary')
-            return BartKW(
+            bkw = BartKW(
                 kw=dict(
                     x_train=X,
                     y_train=y,
@@ -254,7 +255,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             w = gen_w(keys.pop(), X.shape[1])
             wt = gen_w(keys.pop(), Xt.shape[1])
             y = gen_y(keys.pop(), X, w, 'continuous', s='random')
-            return BartKW(
+            bkw = BartKW(
                 kw=dict(
                     x_train=X,
                     y_train=y,
@@ -292,7 +293,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             X = gen_X(keys.pop(), p, n, 'continuous')
             Xt = gen_X(keys.pop(), p, nt, 'continuous')
             y = gen_y(keys.pop(), X, None, 'continuous', k=1, s='random')
-            return BartKW(
+            bkw = BartKW(
                 kw=dict(
                     x_train=X,
                     y_train=y,
@@ -325,7 +326,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             X = gen_X(keys.pop(), high_p, n, 'binary')
             Xt = gen_X(keys.pop(), high_p, nt, 'binary')
             y = gen_y(keys.pop(), X, None, 'binary', k=2)
-            return BartKW(
+            bkw = BartKW(
                 kw=dict(
                     x_train=X,
                     y_train=y,
@@ -361,7 +362,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             y = gen_y(
                 keys.pop(), X, None, outcome_type, s='random', k=len(outcome_type)
             )
-            return BartKW(
+            bkw = BartKW(
                 kw=dict(
                     x_train=X,
                     y_train=y,
@@ -394,6 +395,12 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
         case _:  # pragma: no cover
             msg = f'Unknown variant {variant}'
             raise ValueError(msg)
+
+    if get_disable_problematic_sharding():
+        bkw.kw['num_data_devices'] = None
+        bkw.kw['num_chain_devices'] = None
+
+    return bkw
 
 
 # test only the multivariate variants, because the other ones are tested in
@@ -1537,6 +1544,8 @@ def test_debug_checks(keys: split, bkw: BartKW) -> None:
 
 def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
+    if get_disable_problematic_sharding():
+        pytest.skip('Sharding disabled by --disable-problematic-sharding')
     if len(jax.devices()) < 2:
         pytest.skip('Need at least 2 devices for this test')
 

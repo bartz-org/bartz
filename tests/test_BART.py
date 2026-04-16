@@ -60,6 +60,7 @@ from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
+from tests.conftest import get_disable_problematic_sharding
 from tests.rbartpackages import BART3
 from tests.test_interface import BartKW, gen_X, gen_y, make_kw
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
@@ -1350,6 +1351,8 @@ class TestVarprobParam:
 
 def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
+    if get_disable_problematic_sharding():
+        pytest.skip('Sharding disabled by --disable-problematic-sharding')
     if len(devices()) < 2:
         pytest.skip('Need at least 2 devices for this test')
 

@@ -92,13 +92,13 @@ jobs:
               "id": "latest",
               "runs-on": "ubuntu-latest",
               "target-suffix": "",
-              "tests-args": "ARGS=-n0"
+              "tests-args": "ARGS=--disable-problematic-sharding"
             },
             {
               "id": "old",
               "runs-on": "ubuntu-latest",
               "target-suffix": "-old",
-              "tests-args": "ARGS=-n0"
+              "tests-args": "ARGS=--disable-problematic-sharding"
             },
             {
               "id": "single-cpu",

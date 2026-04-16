@@ -37,7 +37,7 @@ import numpy
 import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError, tree_at
-from jax import debug_nans, devices, random, tree, vmap
+from jax import block_until_ready, debug_nans, devices, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.special import logit, ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
@@ -1148,20 +1148,17 @@ def test_jit(kw: dict[str, Any]) -> None:
 @pytest.mark.timeout(32)
 def test_interrupt(kw: dict[str, Any]) -> None:
     """Test that the MCMC can be interrupted with ^C."""
-    kw['printevery'] = 1
-    kw.update(ndpost=0, nskip=10000)
+    kw.update(printevery=1, ndpost=0, nskip=10000)
 
     # Send the first ^C after 3 s, if the time was too short, it would interrupt
     # a first interruptible phase of jax compilation. Then send ^C every second,
-    # in case the first ^C landed during a second non-interruptible compilation phase
-    # that eats ^C and ignores it.
-    with periodic_sigint(first_after=3.0, interval=1.0):
-        try:
-            with pytest.raises(KeyboardInterrupt):
-                mc_gbart(**kw)
-        except KeyboardInterrupt:  # pragma: no cover
-            # Stray ^C during/after __exit__; treat as expected.
-            pass
+    # in case the first ^C landed during a second non-interruptible compilation
+    # phase that eats ^C and ignores it.
+    with (
+        pytest.raises(KeyboardInterrupt),
+        periodic_sigint(first_after=3.0, interval=1.0),
+    ):
+        block_until_ready(mc_gbart(**kw))
 
 
 def test_polars(kw: dict[str, Any]) -> None:

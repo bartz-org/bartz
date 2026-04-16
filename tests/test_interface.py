@@ -1312,17 +1312,22 @@ def test_jit(bkw: BartKW) -> None:
 
 
 @pytest.mark.flaky
+# it's flaky because the interrupt may be caught and converted by jax internals (#33054)
 @pytest.mark.timeout(32)
 def test_interrupt(bkw: BartKW) -> None:
     """Test that the MCMC can be interrupted with ^C."""
     kw = bkw.kw
     kw.update(printevery=1, ndpost=0, nskip=10000)
 
+    # Send the first ^C after 3 s, if the time was too short, it would interrupt
+    # a first interruptible phase of jax compilation. Then send ^C every second,
+    # in case the first ^C landed during a second non-interruptible compilation
+    # phase that eats ^C and ignores it.
     with (
         pytest.raises(KeyboardInterrupt),
         periodic_sigint(first_after=3.0, interval=1.0),
     ):
-        Bart(**kw)
+        block_until_ready(Bart(**kw))
 
 
 def test_polars(bkw: BartKW) -> None:

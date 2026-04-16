@@ -1532,6 +1532,7 @@ def catch_array_gc_guard() -> Iterator[None]:
 
 def test_debug_checks(keys: split, bkw: BartKW) -> None:
     """Run with invasive jax debug options active."""
+    collect()
     with (
         debug_nans(True),
         debug_infs(True),

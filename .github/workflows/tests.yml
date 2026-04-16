@@ -85,7 +85,8 @@ jobs:
     steps:
       - id: set-matrix
         # ci crashes with xdist + multiple jax cpu devices + multivariate, we
-        # don't know why, so `latest` and `old` disable xdist with '-n0'
+        # don't know why, so `latest` disables most sharding in tests, and `old`
+        # even required disabling virtual cpu devices
         run: |
           BASE_MATRIX='[
             {
@@ -98,7 +99,7 @@ jobs:
               "id": "old",
               "runs-on": "ubuntu-latest",
               "target-suffix": "-old",
-              "tests-args": "ARGS=--disable-problematic-sharding"
+              "tests-args": "ARGS=--num-cpu-devices=1"
             },
             {
               "id": "single-cpu",

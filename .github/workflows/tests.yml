@@ -99,7 +99,7 @@ jobs:
               "id": "old",
               "runs-on": "ubuntu-latest",
               "target-suffix": "-old",
-              "tests-args": "ARGS='--disable-problematic-sharding --num-cpu-devices=1'"
+              "tests-args": "ARGS=\u0027--disable-problematic-sharding --num-cpu-devices=1\u0027"
             },
             {
               "id": "single-cpu",

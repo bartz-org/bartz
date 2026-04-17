@@ -1358,7 +1358,7 @@ def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
     if get_disable_problematic_sharding():  # pragma: no cover
         pytest.skip('Sharding disabled by --disable-problematic-sharding')
-    if len(devices()) < 2:  # pragma: no cover
+    if len(devices()) < 2:  # this branch is covered in the single cpu test config
         pytest.skip('Need at least 2 devices for this test')
 
     # baseline without sharding

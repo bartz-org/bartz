@@ -1555,7 +1555,7 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
     if get_disable_problematic_sharding():  # pragma: no cover
         pytest.skip('Sharding disabled by --disable-problematic-sharding')
-    if len(jax.devices()) < 2:  # pragma: no cover
+    if len(jax.devices()) < 2:  # this branch is covered in single cpu tests config
         pytest.skip('Need at least 2 devices for this test')
 
     baseline_kw = tree.map(lambda x: x, bkw.kw)
@@ -1784,7 +1784,7 @@ def test_get_error_sdev_values(bkw: BartKW) -> None:
 
     # manual: invert each precision matrix, take sqrt of diagonal
     prec = bart.get_latent_prec()
-    if prec.ndim < 3:  # pragma: no cover, bc defaults are uv only
+    if prec.ndim < 3:  # pragma: no cover, bc defaults are mv only
         prec = prec[..., :, None, None]  # reshape as 1x1 matrix
     prec = prec[..., nskip:, :, :]  # skip burnin
     prec = lax.collapse(prec, 0, -2)  # flatten chains

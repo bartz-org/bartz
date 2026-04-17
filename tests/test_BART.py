@@ -93,9 +93,16 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
 
     # collect bart_kwargs from top-level Bart params
     bart_kwargs: dict[str, Any] = {}
-    for bk in ['num_data_devices', 'num_chain_devices']:
-        if bk in kw:
-            bart_kwargs[bk] = kw.pop(bk)
+
+    # drop num_chain_devices on cpu because mc_gbart has automatic sharding on
+    # cpu, unless it's None which disables the automatism
+    if 'num_chain_devices' in kw:
+        num_chain_devices = kw.pop('num_chain_devices')
+        if get_default_device().platform != 'cpu' or num_chain_devices is None:
+            bart_kwargs['num_chain_devices'] = num_chain_devices
+
+    if 'num_data_devices' in kw:
+        bart_kwargs['num_data_devices'] = kw.pop('num_data_devices')
 
     # maxdepth has the same default
     if 'maxdepth' in kw:
@@ -108,11 +115,8 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     # default-setting code is tested
     if init_kw['min_points_per_leaf'] == 5:
         del init_kw['min_points_per_leaf']
-    if init_kw:
-        bart_kwargs['init_kw'] = init_kw
-
-    if bart_kwargs:
-        kw['bart_kwargs'] = bart_kwargs
+    bart_kwargs['init_kw'] = init_kw
+    kw['bart_kwargs'] = bart_kwargs
 
     # re-add x_test
     kw['x_test'] = bkw.x_test
@@ -1352,9 +1356,9 @@ class TestVarprobParam:
 
 def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
-    if get_disable_problematic_sharding():
+    if get_disable_problematic_sharding():  # pragma: no cover
         pytest.skip('Sharding disabled by --disable-problematic-sharding')
-    if len(devices()) < 2:
+    if len(devices()) < 2:  # pragma: no cover
         pytest.skip('Need at least 2 devices for this test')
 
     # baseline without sharding
@@ -1389,7 +1393,7 @@ def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
         bart_data = remove_mesh(bart_data)
         tree.map_with_path(check_equal, bart, bart_data)
 
-    if len(devices()) >= 4:
+    if len(devices()) >= 4:  # pragma: no branch
         with subtests.test('shard data and chains'):
             both_kw = tree.map(lambda x: x, baseline_kw)
             both_kw.setdefault('bart_kwargs', {}).update(

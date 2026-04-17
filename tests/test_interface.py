@@ -35,6 +35,7 @@ from gc import collect
 from io import StringIO
 from sys import version_info
 from typing import Any, Literal, NamedTuple
+from weakref import ReferenceType, ref
 
 import jax
 import numpy
@@ -53,7 +54,7 @@ from jax import (
     vmap,
 )
 from jax import numpy as jnp
-from jax.sharding import SingleDeviceSharding
+from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, Float32, Int32, Key, PyTree, Real, Shaped, UInt
 from numpy.testing import assert_allclose, assert_array_equal
@@ -61,6 +62,7 @@ from pytest import FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
 
 from bartz import Bart as OriginalBart
+from bartz import PredictKind
 from bartz.debug import TraceWithOffset, sample_prior
 from bartz.grove import (
     check_trace,
@@ -181,28 +183,24 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     nt = 21
     p = 2
     high_p = 257  # > 256 to use uint16 for var_trees.
+    common = dict(num_trees=20, ndpost=100, nskip=50, seed=keys.pop())
 
     match variant:
         # continuous regression with some settings that induce large types,
         # sparsity with free theta
         case 1:
             X = gen_X(keys.pop(), p, n, 'continuous')
-            Xt = gen_X(keys.pop(), p, nt, 'continuous')
-            y = gen_y(keys.pop(), X, None, 'continuous', s='random')
             bkw = BartKW(
                 kw=dict(
                     x_train=X,
-                    y_train=y,
+                    y_train=gen_y(keys.pop(), X, None, 'continuous', s='random'),
                     outcome_type='continuous',
                     sparse=True,
-                    num_trees=20,
-                    ndpost=100,
-                    nskip=50,
+                    **common,
                     printevery=50,
                     usequants=False,
                     numcut=256,  # > 255 to use uint16 for X and split_trees
                     num_chains=None,
-                    seed=keys.pop(),
                     maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     init_kw=dict(
                         resid_num_batches=None,
@@ -214,66 +212,56 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         min_points_per_leaf=5,
                     ),
                 ),
-                x_test=Xt,
+                x_test=gen_X(keys.pop(), p, nt, 'continuous'),
             )
 
         # binary regression with binary X and high p
         case 2:
             X = gen_X(keys.pop(), high_p, n, 'binary')
-            Xt = gen_X(keys.pop(), high_p, nt, 'binary')
-            y = gen_y(keys.pop(), X, None, 'binary')
             bkw = BartKW(
                 kw=dict(
                     x_train=X,
-                    y_train=y,
+                    y_train=gen_y(keys.pop(), X, None, 'binary'),
                     outcome_type='binary',
-                    num_trees=20,
-                    ndpost=100,
-                    nskip=50,
+                    **common,
                     keepevery=1,  # the default with binary would be 10
                     printevery=None,
                     usequants=True,
                     # usequants=True with binary X to check the case in which the
                     # splits are less than the statically known maximum
                     numcut=255,
-                    seed=keys.pop(),
                     num_chains=2,
                     maxdepth=6,
                     num_data_devices=min(2, get_device_count()),
-                    num_chain_devices=None,
+                    num_chain_devices=None,  # for mc_gbart, turn autoshard off
                     init_kw=dict(
                         save_ratios=False,
                         min_points_per_decision_node=None,
                         min_points_per_leaf=None,
                     ),
                 ),
-                x_test=Xt,
+                x_test=gen_X(keys.pop(), high_p, nt, 'binary'),
             )
 
         # continuous regression with error weights and sparsity with fixed theta
         case 3:
             X = gen_X(keys.pop(), p, n, 'continuous')
-            Xt = gen_X(keys.pop(), p, nt, 'continuous')
             w = gen_w(keys.pop(), X.shape[1])
-            wt = gen_w(keys.pop(), Xt.shape[1])
-            y = gen_y(keys.pop(), X, w, 'continuous', s='random')
             bkw = BartKW(
                 kw=dict(
                     x_train=X,
-                    y_train=y,
+                    y_train=gen_y(keys.pop(), X, w, 'continuous', s='random'),
                     outcome_type='continuous',
                     w=w,
                     sparse=True,
                     theta=2,
                     varprob=jnp.array([0.2, 0.8]),
-                    num_trees=20,
-                    ndpost=100,
-                    nskip=50,
+                    **common,
                     printevery=50,
                     usequants=True,
                     numcut=10,
-                    seed=keys.pop(),
                     num_chains=2,
+                    num_chain_devices=min(2, get_device_count()),
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
                     init_kw=dict(
                         save_ratios=True,
@@ -285,30 +273,25 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         min_points_per_leaf=5,
                     ),
                 ),
-                x_test=Xt,
-                w_test=wt,
+                x_test=gen_X(keys.pop(), p, nt, 'continuous'),
+                w_test=gen_w(keys.pop(), nt),
             )
 
         # multivariate continuous regression with some settings that induce
         # large types, sparsity with free theta
         case 4:
             X = gen_X(keys.pop(), p, n, 'continuous')
-            Xt = gen_X(keys.pop(), p, nt, 'continuous')
-            y = gen_y(keys.pop(), X, None, 'continuous', k=1, s='random')
             bkw = BartKW(
                 kw=dict(
                     x_train=X,
-                    y_train=y,
+                    y_train=gen_y(keys.pop(), X, None, 'continuous', k=1, s='random'),
                     outcome_type='continuous',
                     sparse=True,
-                    num_trees=20,
-                    ndpost=100,
-                    nskip=50,
+                    **common,
                     printevery=50,
                     usequants=False,
                     numcut=256,  # > 255 to use uint16 for X and split_trees
                     num_chains=None,
-                    seed=keys.pop(),
                     maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     init_kw=dict(
                         resid_num_batches=None,
@@ -320,66 +303,54 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         min_points_per_leaf=5,
                     ),
                 ),
-                x_test=Xt,
+                x_test=gen_X(keys.pop(), p, nt, 'continuous'),
             )
 
         # multivariate binary regression with binary X and high p
         case 5:
             X = gen_X(keys.pop(), high_p, n, 'binary')
-            Xt = gen_X(keys.pop(), high_p, nt, 'binary')
-            y = gen_y(keys.pop(), X, None, 'binary', k=2)
             bkw = BartKW(
                 kw=dict(
                     x_train=X,
-                    y_train=y,
+                    y_train=gen_y(keys.pop(), X, None, 'binary', k=2),
                     outcome_type='binary',
-                    num_trees=20,
-                    ndpost=100,
-                    nskip=50,
+                    **common,
                     printevery=None,
                     usequants=True,
                     # usequants=True with binary X to check the case in which the
                     # splits are less than the statically known maximum
                     numcut=255,
-                    seed=keys.pop(),
                     num_chains=2,
                     maxdepth=6,
                     num_data_devices=min(2, get_device_count()),
-                    num_chain_devices=None,
                     init_kw=dict(
                         save_ratios=False,
                         min_points_per_decision_node=None,
                         min_points_per_leaf=None,
                     ),
                 ),
-                x_test=Xt,
+                x_test=gen_X(keys.pop(), high_p, nt, 'binary'),
             )
 
         # multivariate mixed binary-continuous regression with sparsity with
         # fixed theta
         case 6:  # pragma: no branch
             X = gen_X(keys.pop(), p, n, 'continuous')
-            Xt = gen_X(keys.pop(), p, nt, 'continuous')
             outcome_type = ['continuous', 'binary', 'binary']
-            y = gen_y(
-                keys.pop(), X, None, outcome_type, s='random', k=len(outcome_type)
-            )
             bkw = BartKW(
                 kw=dict(
                     x_train=X,
-                    y_train=y,
+                    y_train=gen_y(keys.pop(), X, None, outcome_type, s='random', k=3),
                     outcome_type=outcome_type,
                     sparse=True,
                     theta=2,
                     varprob=jnp.array([0.2, 0.8]),
-                    num_trees=20,
-                    ndpost=100,
-                    nskip=50,
+                    **common,
                     printevery=50,
                     usequants=True,
                     numcut=10,
-                    seed=keys.pop(),
                     num_chains=2,
+                    num_chain_devices=min(2, get_device_count()),
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
                     init_kw=dict(
                         save_ratios=True,
@@ -391,14 +362,14 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         min_points_per_leaf=5,
                     ),
                 ),
-                x_test=Xt,
+                x_test=gen_X(keys.pop(), p, nt, 'continuous'),
             )
 
         case _:  # pragma: no cover
             msg = f'Unknown variant {variant}'
             raise ValueError(msg)
 
-    if get_disable_problematic_sharding():
+    if get_disable_problematic_sharding():  # pragma: no cover, debug setting
         bkw.kw['num_data_devices'] = None
         bkw.kw['num_chain_devices'] = None
 
@@ -425,7 +396,7 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     kw = kw.copy()
     kw['x_train'] = kw['x_train'][:, :n]
     kw['y_train'] = kw['y_train'][..., :n]
-    if kw.get('w') is not None:
+    if kw.get('w') is not None:  # pragma: no cover, never true in mv variants
         kw['w'] = kw['w'][:n]
     return kw
 
@@ -506,7 +477,7 @@ class TestWithCachedBart:
             with debug_nans(False):
                 sigma = bart.get_error_sdev().reshape(num_chains, nsamples, -1)
                 binary_mask = bart._binary_mask
-                if binary_mask.ndim > 0:
+                if binary_mask.ndim > 0:  # pragma: no branch, always on in mv variants
                     sigma = sigma[:, :, ~binary_mask]
             rhat_sigma = multivariate_rhat(sigma)
             assert rhat_sigma < 1.2
@@ -515,7 +486,7 @@ class TestWithCachedBart:
             # all continuous: check full precision matrix convergence
             # using upper triangular elements (matrix is symmetric)
             error_cov_inv = bart._main_trace.error_cov_inv
-            if error_cov_inv.ndim == 2:
+            if error_cov_inv.ndim == 2:  # pragma: no cover, only mv by default
                 error_cov_inv = error_cov_inv[:, :, None, None]
             _, _, k, _ = error_cov_inv.shape
             ti, tj = jnp.triu_indices(k)
@@ -749,7 +720,7 @@ def test_output_ranges(bkw: BartKW, keys: split) -> None:
         assert jnp.all(bart.sigest[~binary_mask] > 0)
 
     # get_latent_prec: symmetry and positive definiteness
-    if kw['y_train'].ndim == 2:
+    if kw['y_train'].ndim == 2:  # pragma: no branch, always mv with defaults
         prec = bart.get_latent_prec()
         assert_close_matrices(prec, prec.mT, rtol=1e-6, reduce_rank=True)
         eigvals = jnp.linalg.eigvalsh(prec)
@@ -1000,7 +971,7 @@ def test_no_datapoints(bkw: BartKW) -> None:
         assert_array_equal(bart.sigest, 1)  # compare against jnp.ones with strict=True
     expected_cov_inv = jnp.float32((2**2 * kw['num_trees']) / tau_num**2)
     leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv
-    if leaf_prior_cov_inv.ndim == 2:
+    if leaf_prior_cov_inv.ndim == 2:  # pragma: no branch, always mv with defaults
         expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
     assert_close_matrices(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
 
@@ -1044,7 +1015,7 @@ def test_one_datapoint(bkw: BartKW) -> None:
         assert_close_matrices(bart.offset[..., None], kw['y_train'], rtol=1e-6)
     expected_cov_inv = (2**2 * kw['num_trees']) / tau_num**2
     leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv
-    if leaf_prior_cov_inv.ndim == 2:
+    if leaf_prior_cov_inv.ndim == 2:  # pragma: no branch, always mv with defaults
         expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
     assert_allclose(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
 
@@ -1330,7 +1301,7 @@ def test_interrupt(bkw: BartKW) -> None:
         block_until_ready(Bart(**kw))
 
 
-def test_polars(bkw: BartKW) -> None:
+def test_polars(bkw: BartKW) -> None:  # pragma: no cover, skipped with mv
     """Test passing data as DataFrame and Series."""
     kw = bkw.kw
     if kw['y_train'].ndim == 2:
@@ -1396,11 +1367,9 @@ def test_automatic_integer_types(bkw: BartKW) -> None:
     assert bart._mcmc_state.forest.max_split.dtype == split_trees_type
 
 
-def check_data_sharding(x: Array | None, mesh: jax.sharding.Mesh) -> None:
+def check_data_sharding(x: Array | None, mesh: Mesh) -> None:
     """Check the sharding of `x` assuming it may be sharded only along the last 'data' axis."""
-    if x is None:
-        return
-    elif mesh is None:
+    if mesh is None:
         assert isinstance(x.sharding, SingleDeviceSharding)
     elif 'data' in mesh.axis_names:
         expected_num_devices = min(2, get_device_count())
@@ -1409,11 +1378,9 @@ def check_data_sharding(x: Array | None, mesh: jax.sharding.Mesh) -> None:
         assert get_normal_spec(x) == normalize_spec(expected_spec, mesh, x.shape)
 
 
-def check_chain_sharding(x: Array | None, mesh: jax.sharding.Mesh) -> None:
+def check_chain_sharding(x: Array | None, mesh: Mesh) -> None:
     """Check the sharding of `x` assuming it may be sharded only along the first 'chains' axis."""
-    if x is None:
-        return
-    elif mesh is None:
+    if mesh is None:
         assert isinstance(x.sharding, SingleDeviceSharding)
     elif 'chains' in mesh.axis_names:
         expected_num_devices = min(2, get_device_count())
@@ -1429,7 +1396,7 @@ def get_expect_sharded(kw: dict) -> bool:
     )
 
 
-def test_sharding(bkw: BartKW, variant: int) -> None:
+def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
     """Check that chains live on their own devices throughout the interface."""
     if version_info[:2] == get_old_python_tuple() and variant in (2, 5):
         pytest.xfail('Actual sharding bug in bartz with old jax, no time to fix.')
@@ -1447,9 +1414,16 @@ def test_sharding(bkw: BartKW, variant: int) -> None:
 
     check_chain = partial(check_chain_sharding, mesh=mesh)
 
-    yhat_train = bart.predict('train', kind='latent_samples')
-    check_chain(yhat_train)
-    check_data_sharding(yhat_train, mesh)
+    for kind in PredictKind:
+        extra: dict = {'key': keys.pop()} if kind is PredictKind.outcome_samples else {}
+        yhat_train = bart.predict('train', kind=kind, **extra)
+        check_data_sharding(yhat_train, mesh)
+        if kind is not PredictKind.mean:
+            check_chain(yhat_train)
+
+            extra['w'] = bkw.w_test
+            yhat_test = bart.predict(bkw.x_test, kind=kind, **extra)
+            check_chain(yhat_test)
 
     assert bart.offset.is_fully_replicated
     if bart.sigest is not None:
@@ -1530,13 +1504,38 @@ def array_garbage_collection_guard(value: str) -> Iterator[None]:
 def catch_array_gc_guard() -> Iterator[None]:
     """Catch array GC guard log messages and raise as exceptions."""
     # we need this because array_garbage_collection_guard('fatal')
-    # terminates the process
+    # terminates the process, and the 'log' messages are emitted from C++
+    # code that swallows Python exceptions, so we can only check after the
+    # context exits
     buf = StringIO()
-    with array_garbage_collection_guard('log'), redirect_stderr(buf):
+    with redirect_stderr(buf), array_garbage_collection_guard('log'):
         yield
     captured = buf.getvalue()
-    if '`jax.Array` was deleted by the Python garbage collector' in captured:
+    errmsg = '`jax.Array` was deleted by the Python garbage collector'
+    if errmsg in captured:
         raise RuntimeError(captured)
+
+
+def create_array_cycle() -> ReferenceType[Array]:
+    """Create a reference cycle of two jax.Arrays."""
+    n1 = jnp.ones((2, 2))
+    n2 = jnp.zeros((2, 2))
+    n1.next = n2
+    n2.next = n1
+    return ref(n1)
+
+
+def test_catch_array_gc_guard() -> None:
+    """Test `catch_array_gc_guard`."""
+    collect()
+    with (  # noqa: PT012, in case a gc collection happened before the explicit one
+        pytest.raises(RuntimeError, match='deleted by the Python garbage collector'),
+        catch_array_gc_guard(),
+    ):
+        weak = create_array_cycle()
+        assert weak() is not None
+        collect()
+    assert weak() is None
 
 
 def test_debug_checks(keys: split, bkw: BartKW) -> None:
@@ -1554,9 +1553,9 @@ def test_debug_checks(keys: split, bkw: BartKW) -> None:
 
 def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
-    if get_disable_problematic_sharding():
+    if get_disable_problematic_sharding():  # pragma: no cover
         pytest.skip('Sharding disabled by --disable-problematic-sharding')
-    if len(jax.devices()) < 2:
+    if len(jax.devices()) < 2:  # pragma: no cover
         pytest.skip('Need at least 2 devices for this test')
 
     baseline_kw = tree.map(lambda x: x, bkw.kw)
@@ -1589,7 +1588,7 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
         bart_data = remove_mesh(bart_data)
         tree.map_with_path(check_equal, bart, bart_data)
 
-    if len(jax.devices()) >= 4:
+    if len(jax.devices()) >= 4:  # pragma: no branch
         with subtests.test('shard data and chains'):
             both_kw = tree.map(lambda x: x, baseline_kw)
             both_kw.update(num_chain_devices=2, num_data_devices=2)
@@ -1700,7 +1699,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         outcome_type = outcome_type[0]
 
     y_mv = bkw.kw['y_train']
-    if y_mv.ndim == 1:
+    if y_mv.ndim == 1:  # pragma: no cover, bc defaults are mv only
         y_mv = y_mv[None, :]
     y_mv = y_mv[:1, :]
     y_uv = y_mv.squeeze(0)
@@ -1742,7 +1741,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
 def test_get_latent_prec_only_continuous(bkw: BartKW) -> None:
     """get_latent_prec(only_continuous=True) removes binary components."""
     kw = bkw.kw
-    if kw['y_train'].ndim < 2:
+    if kw['y_train'].ndim < 2:  # pragma: no cover, bc defaults are mv only
         pytest.skip('UV variant')
 
     bart = Bart(**kw)
@@ -1780,12 +1779,12 @@ def test_get_error_sdev_values(bkw: BartKW) -> None:
 
     with debug_nans(False):
         sdev = bart.get_error_sdev()
-        if sdev.ndim == 1:  # univariate
+        if sdev.ndim == 1:  # pragma: no cover, bc defaults are mv only
             sdev = sdev[:, None]  # reshape as vector of length 1
 
     # manual: invert each precision matrix, take sqrt of diagonal
     prec = bart.get_latent_prec()
-    if prec.ndim < 3:  # univariate
+    if prec.ndim < 3:  # pragma: no cover, bc defaults are uv only
         prec = prec[..., :, None, None]  # reshape as 1x1 matrix
     prec = prec[..., nskip:, :, :]  # skip burnin
     prec = lax.collapse(prec, 0, -2)  # flatten chains

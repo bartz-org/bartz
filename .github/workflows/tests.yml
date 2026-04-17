@@ -89,12 +89,12 @@ jobs:
             {
               "id": "latest",
               "runs-on": "ubuntu-latest",
-              "args": "tests ARGS=--disable-problematic-sharding"
+              "args": "tests ARGS=-n0"
             },
             {
               "id": "old",
               "runs-on": "ubuntu-latest",
-              "args": "tests-old ARGS=\u0027-k \"not ([4] or [5] or [6])\"\u0027"
+              "args": "tests-old ARGS=-n0"
             },
             {
               "id": "single-cpu",

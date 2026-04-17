@@ -61,7 +61,7 @@ help:
 	@echo "- asv-quick: run quick benchmarks on current code, no saving"
 	@echo "- ipython: start an ipython shell with stuff pre-imported"
 	@echo "- ipython-old: start an ipython shell with oldest supported python and dependencies"
-	@echo "- lint: run the linter used in pre-commit"
+	@echo "- lint: run pre-commit hooks on all files"
 	@echo
 	@echo "Release workflow:"
 	@echo "- do a PR that re-runs benchmarks"

@@ -1367,7 +1367,7 @@ def test_automatic_integer_types(bkw: BartKW) -> None:
     assert bart._mcmc_state.forest.max_split.dtype == split_trees_type
 
 
-def check_data_sharding(x: Array | None, mesh: Mesh) -> None:
+def check_data_sharding(x: Array, mesh: Mesh) -> None:
     """Check the sharding of `x` assuming it may be sharded only along the last 'data' axis."""
     if mesh is None:
         assert isinstance(x.sharding, SingleDeviceSharding)
@@ -1378,14 +1378,14 @@ def check_data_sharding(x: Array | None, mesh: Mesh) -> None:
         assert get_normal_spec(x) == normalize_spec(expected_spec, mesh, x.shape)
 
 
-def check_chain_sharding(x: Array | None, mesh: Mesh) -> None:
+def check_chain_sharding(x: Array, mesh: Mesh) -> None:
     """Check the sharding of `x` assuming it may be sharded only along the first 'chains' axis."""
     if mesh is None:
         assert isinstance(x.sharding, SingleDeviceSharding)
     elif 'chains' in mesh.axis_names:
         expected_num_devices = min(2, get_device_count())
         assert x.sharding.num_devices == expected_num_devices
-        assert get_normal_spec(x) == ('chains',) + (None,) * (x.ndim - 1)
+        assert get_normal_spec(x) == normalize_spec(('chains',), mesh, x.shape)
 
 
 def get_expect_sharded(kw: dict) -> bool:

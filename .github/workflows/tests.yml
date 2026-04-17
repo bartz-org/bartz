@@ -89,20 +89,17 @@ jobs:
             {
               "id": "latest",
               "runs-on": "ubuntu-latest",
-              "target-suffix": "",
-              "tests-args": "ARGS=--disable-problematic-sharding"
+              "args": "tests ARGS=--disable-problematic-sharding"
             },
             {
               "id": "old",
               "runs-on": "ubuntu-latest",
-              "target-suffix": "-old",
-              "tests-args": "ARGS=\u0027-k \"not ([4] or [5] or [6])\"\u0027"
+              "args": "tests-old ARGS=\u0027-k \"not ([4] or [5] or [6])\"\u0027"
             },
             {
               "id": "single-cpu",
               "runs-on": "ubuntu-latest",
-              "target-suffix": "",
-              "tests-args": "ARGS=--num-cpu-devices=1"
+              "args": "tests ARGS=--num-cpu-devices=1 COVERAGE_SUFFIX=-single-cpu"
             }
           ]'
           BENCHMARKS_BASE_MATRIX='[
@@ -128,7 +125,6 @@ jobs:
     name: tests-${{ matrix.id }}
     needs: setup-matrix
     runs-on: ${{ matrix.runs-on }}
-    continue-on-error: ${{ matrix.target-suffix == '-gpu' }}
 
     strategy:
       fail-fast: false
@@ -163,13 +159,13 @@ jobs:
 
       - name: Run unit tests
         timeout-minutes: 120
-        run: make COVERAGE_SUFFIX=-${{ matrix.id }} tests${{ matrix.target-suffix }} ${{ matrix.tests-args }}
+        run: make ${{ matrix.args }}
 
       - name: Save coverage information
         uses: actions/upload-artifact@v7
         with:
-          name: coverage.tests-${{ matrix.id }}
-          path: .coverage.tests-${{ matrix.id }}
+          archive: false # the artifact name is equal to the file name
+          path: .coverage*
           include-hidden-files: true
           if-no-files-found: error
 
@@ -225,7 +221,7 @@ jobs:
       - name: Get coverage files
         uses: actions/download-artifact@v8
         with:
-          pattern: coverage.*
+          pattern: .coverage*
           merge-multiple: true
 
       - name: List files
@@ -303,7 +299,6 @@ jobs:
     name: benchmarks-${{ matrix.id }}
     needs: setup-matrix
     runs-on: ${{ matrix.runs-on }}
-    continue-on-error: ${{ matrix.target-suffix == '-gpu' }}
 
     strategy:
       fail-fast: false

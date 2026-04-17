@@ -92,7 +92,7 @@ lint:
 
 ################# TESTS #################
 
-TESTS_VARS = COVERAGE_FILE=.coverage.tests$(COVERAGE_SUFFIX)
+TESTS_VARS = COVERAGE_FILE=.coverage.$@$(COVERAGE_SUFFIX)
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
 TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=2

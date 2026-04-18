@@ -50,16 +50,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      # this python is for the pre-commit action
       - uses: actions/setup-python@v6
         with:
           python-version-file: ".python-version"
+
+      # this python is for the pre-commit hooks
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: ${{ env.UV_VERSION }}
 
       - name: Determine base ref
         id: refs
         run: echo "from=${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (startsWith(github.ref, 'refs/heads/') && github.event.before) || '' }}" >> "$GITHUB_OUTPUT"
 
       - name: Run pre-commit on changed files
-        # even if I run it on all files below, it's convenient to see if something fails in new changes first
+        # even if we run it on all files below, it's convenient to see if something fails in new changes first
         if: steps.refs.outputs.from != ''
         uses: pre-commit/action@v3.0.1
         with:

@@ -33,14 +33,14 @@ repos:
         exclude: '^renv/activate\.R$' # because renv edits it automatically, with trailing whitespace
       - id: no-commit-to-branch
   - repo: https://github.com/sbrunner/hooks
-    rev: 1.6.1
+    rev: 1.7.0
     hooks:
       - id: copyright
       - id: copyright-required
         files: \.(py|rst)$
         exclude: src/bartz/_version\.py$
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.9
+    rev: v0.15.11
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -50,7 +50,7 @@ repos:
     hooks:
       - id: pydoclint
   - repo: https://github.com/henryiii/validate-pyproject-schema-store
-    rev: 2026.04.03
+    rev: 2026.04.17
     hooks:
       - id: validate-pyproject
   - repo: https://github.com/jorisroovers/gitlint
@@ -58,6 +58,6 @@ repos:
     hooks:
       - id: gitlint # this is already defined to run in stage commit-msg
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.11.4
+    rev: 0.11.7
     hooks:
       - id: uv-lock

@@ -45,6 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SKIP: no-commit-to-branch
+      RPY2_CFFI_MODE: ABI
     steps:
       - uses: actions/checkout@v6
         with:

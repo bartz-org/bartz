@@ -24,10 +24,15 @@
 
 """Functions intended to be shared across the test suite."""
 
-from collections.abc import Sequence
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 from operator import ge, le
+from os import getpid, kill
 from pathlib import Path
+from signal import SIGINT
+from threading import Event, Thread
+from time import monotonic
 from typing import Any
 
 import numpy as np
@@ -38,9 +43,8 @@ from jax.scipy.linalg import solve_triangular
 from jaxtyping import Array, ArrayLike, Float, Real
 from scipy import linalg
 
-from bartz.debug import check_trace, describe_error
+from bartz.grove import TreesTrace, check_trace, describe_error
 from bartz.jaxext import minimal_unsigned_dtype
-from bartz.mcmcloop import TreesTrace
 
 
 def manual_tree(
@@ -262,6 +266,71 @@ def multivariate_rhat(chains: Real[Array, 'chain sample dim']) -> Float[Array, '
     eigenvals = jnp.linalg.eigvalsh(L_1VL_T)
 
     return jnp.max(eigenvals)
+
+
+class PeriodicSigintTimer:
+    """Periodically send SIGINT (^C) to the main thread.
+
+    Parameters
+    ----------
+    first_after
+        Time in seconds to wait before sending the first SIGINT.
+    interval
+        Time in seconds between subsequent SIGINTs.
+    """
+
+    def __init__(self, *, first_after: float, interval: float) -> None:
+        self.first_after = max(0.0, float(first_after))
+        self.interval = max(0.001, float(interval))
+        self.pid = getpid()
+        self._stop = Event()
+        self._thread: Thread | None = None
+        self.sent = 0
+
+    def _run(self) -> None:
+        """Run the main loop of the timer."""
+        t0 = monotonic()
+
+        # Wait initial delay (cancellable)
+        self._stop.wait(self.first_after)
+
+        # Periodically send SIGINT until stopped
+        while not self._stop.is_set():  # pragma: no branch
+            kill(self.pid, SIGINT)
+            self.sent += 1
+            elapsed = monotonic() - t0
+            print(f'[PeriodicSigintTimer] sent SIGINT #{self.sent} at t={elapsed:.2f}s')
+            self._stop.wait(self.interval)
+
+    def start(self) -> None:
+        """Start the timer."""
+        assert self._thread is None, 'Timer already started'
+        self._thread = Thread(target=self._run, name='PeriodicSigintTimer', daemon=True)
+        self._thread.start()
+
+    def cancel(self) -> None:
+        """Stop the timer."""
+        assert self._thread is not None, 'Timer not started'
+        self._stop.set()
+        self._thread.join(timeout=5.0)
+        if self._thread.is_alive():  # pragma: no cover
+            msg = '[PeriodicSigintTimer] failed to stop timer'
+            raise RuntimeError(msg)
+        print(f'[PeriodicSigintTimer] stopped after {self.sent} SIGINT(s)')
+
+
+@contextmanager
+def periodic_sigint(
+    *, first_after: float, interval: float
+) -> Generator[PeriodicSigintTimer, None, None]:
+    """Context manager to periodically send SIGINT to the main thread."""
+    timer = PeriodicSigintTimer(first_after=first_after, interval=interval)
+    try:
+        timer.start()
+        yield timer
+    finally:
+        if timer._thread is not None:
+            timer.cancel()
 
 
 def rhat(chains: Real[Array, 'chain sample']) -> Float[Array, '']:

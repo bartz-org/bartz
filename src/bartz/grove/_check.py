@@ -1,4 +1,4 @@
-# bartz/src/bartz/debug/_check.py
+# bartz/src/bartz/grove/_check.py
 #
 # Copyright (c) 2026, The Bartz Contributors
 #
@@ -30,9 +30,8 @@ from jax import jit
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Integer, UInt
 
-from bartz.grove import TreeHeaps, is_actual_leaf
+from bartz.grove._grove import TreeHeaps, TreesTrace, is_actual_leaf
 from bartz.jaxext import autobatch, minimal_unsigned_dtype
-from bartz.mcmcloop import TreesTrace
 
 CHECK_FUNCTIONS = []
 
@@ -94,9 +93,16 @@ def check_types(tree: TreeHeaps, max_split: UInt[Array, ' p']) -> bool:
 
 
 @check
-def check_sizes(tree: TreeHeaps, _max_split: UInt[Array, ' p']) -> bool:
-    """Check that array sizes are coherent."""
-    return tree.leaf_tree.size == 2 * tree.var_tree.size == 2 * tree.split_tree.size
+def check_shapes(tree: TreeHeaps, _max_split: UInt[Array, ' p']) -> bool:
+    """Check that array shapes are coherent."""
+    return (
+        tree.leaf_tree.ndim in (1, 2)
+        and tree.var_tree.ndim == 1
+        and tree.split_tree.ndim == 1
+        and tree.leaf_tree.shape[-1]
+        == 2 * tree.var_tree.size
+        == 2 * tree.split_tree.size
+    )
 
 
 @check

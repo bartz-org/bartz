@@ -723,6 +723,10 @@ def init(
     of the range ``[1, 2, ..., max_split[i]]``. A point belongs to the left
     child iff ``X[i, j] < cutpoint``. Thus it makes sense for ``X[i, :]`` to be
     integers in the range ``[0, 1, ..., max_split[i]]``.
+
+    In general the arrays passed to this function as arguments may be donated,
+    invalidating them. Create copies before passing them to `init` if this
+    happens and you need them again.
     """
     # convert to array all array-like arguments that are used in other
     # configurations but don't need further processing themselves

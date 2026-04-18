@@ -61,7 +61,7 @@ help:
 	@echo "- asv-quick: run quick benchmarks on current code, no saving"
 	@echo "- ipython: start an ipython shell with stuff pre-imported"
 	@echo "- ipython-old: start an ipython shell with oldest supported python and dependencies"
-	@echo "- lint: run the linter used in pre-commit"
+	@echo "- lint: run pre-commit hooks on all files"
 	@echo
 	@echo "Release workflow:"
 	@echo "- do a PR that re-runs benchmarks"
@@ -86,11 +86,13 @@ setup:
 
 .PHONY: lint
 lint:
-	$(UV_RUN) pre-commit run --all-files ruff-check
+	# the git config vars are a workaround for https://github.com/sbrunner/hooks/issues/374
+	# fixed in sbrunner/hooks v1.7.0
+	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=log.showSignature GIT_CONFIG_VALUE_0=false $(UV_RUN) pre-commit run --all-files
 
 ################# TESTS #################
 
-TESTS_VARS = COVERAGE_FILE=.coverage.tests$(COVERAGE_SUFFIX)
+TESTS_VARS = COVERAGE_FILE=.coverage.$@$(COVERAGE_SUFFIX)
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
 TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=2

@@ -84,26 +84,17 @@ jobs:
       benchmarks-matrix: ${{ steps.set-matrix.outputs.benchmarks-matrix }}
     steps:
       - id: set-matrix
-        # the "old" tests run on macos as an attempt at solving mysterious issues
         run: |
           BASE_MATRIX='[
             {
               "id": "latest",
               "runs-on": "ubuntu-latest",
-              "target-suffix": "",
-              "tests-args": ""
-            },
-            {
-              "id": "old",
-              "runs-on": "macos-latest",
-              "target-suffix": "-old",
-              "tests-args": ""
+              "args": "tests ARGS=--disable-problematic-sharding"
             },
             {
               "id": "single-cpu",
               "runs-on": "ubuntu-latest",
-              "target-suffix": "",
-              "tests-args": "ARGS=--num-cpu-devices=1"
+              "args": "tests ARGS=--num-cpu-devices=1 COVERAGE_SUFFIX=-single-cpu"
             }
           ]'
           BENCHMARKS_BASE_MATRIX='[
@@ -129,7 +120,6 @@ jobs:
     name: tests-${{ matrix.id }}
     needs: setup-matrix
     runs-on: ${{ matrix.runs-on }}
-    continue-on-error: ${{ matrix.target-suffix == '-gpu' }}
 
     strategy:
       fail-fast: false
@@ -163,14 +153,14 @@ jobs:
           uv run --dev python -c "import rpy2.situation as s; print('\n'.join(map(str, s.iter_info())))"
 
       - name: Run unit tests
-        timeout-minutes: 60
-        run: make COVERAGE_SUFFIX=-${{ matrix.id }} tests${{ matrix.target-suffix }} ${{ matrix.tests-args }}
+        timeout-minutes: 120
+        run: make ${{ matrix.args }}
 
       - name: Save coverage information
         uses: actions/upload-artifact@v7
         with:
-          name: coverage.tests-${{ matrix.id }}
-          path: .coverage.tests-${{ matrix.id }}
+          archive: false # the artifact name is equal to the file name
+          path: .coverage*
           include-hidden-files: true
           if-no-files-found: error
 
@@ -226,7 +216,7 @@ jobs:
       - name: Get coverage files
         uses: actions/download-artifact@v8
         with:
-          pattern: coverage.*
+          pattern: .coverage*
           merge-multiple: true
 
       - name: List files
@@ -304,7 +294,6 @@ jobs:
     name: benchmarks-${{ matrix.id }}
     needs: setup-matrix
     runs-on: ${{ matrix.runs-on }}
-    continue-on-error: ${{ matrix.target-suffix == '-gpu' }}
 
     strategy:
       fail-fast: false

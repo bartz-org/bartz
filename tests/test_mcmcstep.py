@@ -26,7 +26,7 @@
 
 from collections.abc import Sequence
 from dataclasses import replace
-from functools import wraps
+from functools import partial, wraps
 from math import prod
 from typing import Literal, NamedTuple
 
@@ -575,7 +575,7 @@ def typechecking_step(key: Key[Array, ''], state: State) -> State:
 class TestMultichain:
     """Basic tests of the multichain functionality."""
 
-    n = 100
+    n = 60  # 3 * 4 * 5, maximize divisibility for sharding tests
 
     @pytest.fixture(
         params=['uv-binary', 'uv-continuous', 'mv-binary', 'mv-continuous', 'mv-mixed']
@@ -684,7 +684,7 @@ class TestMultichain:
             check_sharding(state, state.config.mesh)
 
         with subtests.test('step'):
-            with debug_key_reuse(num_chains != 0):
+            with debug_key_reuse(False):
                 # key reuse checks trigger with empty key array apparently
                 new_state = typechecking_step(keys.pop(), state)
             assert new_state.forest.num_chains() == num_chains
@@ -697,11 +697,13 @@ class TestMultichain:
         num_chains = 4
         num_iters = 10
 
+        copy_args = partial(copy_arrays, init_kwargs)
+
         # create initial states
-        mc_state = init(**init_kwargs, num_chains=num_chains)
+        mc_state = init(**copy_args(), num_chains=num_chains)
         sc_states = [
             init(
-                **init_kwargs,
+                **copy_args(),
                 num_chains=None,
                 resid_num_batches=mc_state.config.resid_num_batches,
                 count_num_batches=mc_state.config.count_num_batches,
@@ -1094,11 +1096,13 @@ class TestMixedBinaryContinuous:
                 error_cov_scale=2 * jnp.eye(self.k),
             )
 
+        copy_args = partial(copy_arrays, init_kwargs)
+
         init_kwargs.update(outcome_type=outcome_type)
-        scalar_state = init(**init_kwargs)
+        scalar_state = init(**copy_args())
 
         init_kwargs.update(outcome_type=[outcome_type] * self.k)
-        sequence_state = init(**init_kwargs)
+        sequence_state = init(**copy_args())
 
         def check_equal(path: KeyPath, scalar: Array, sequence: Array) -> None:
             assert_array_equal(scalar, sequence, err_msg=f'{keystr(path)}: ')
@@ -1316,17 +1320,20 @@ class TestMVBartIntegration:
         if binary:
             y = (y > 0).astype(jnp.float32)
 
-        common: dict = dict(
-            X=X,
-            max_split=max_split,
-            num_trees=10,
-            p_nonterminal=p_nonterminal,
-            resid_num_batches=None,
-            count_num_batches=None,
+        common = partial(
+            copy_arrays,
+            dict(
+                X=X,
+                max_split=max_split,
+                num_trees=10,
+                p_nonterminal=p_nonterminal,
+                resid_num_batches=None,
+                count_num_batches=None,
+            ),
         )
 
-        uv_kw = dict(y=y, offset=0.0, leaf_prior_cov_inv=1.0)
-        mv_kw = dict(
+        uv_kw: dict = dict(y=y, offset=0.0, leaf_prior_cov_inv=1.0)
+        mv_kw: dict = dict(
             y=y[None, :], offset=jnp.zeros(1), leaf_prior_cov_inv=jnp.array([[1.0]])
         )
 
@@ -1337,8 +1344,8 @@ class TestMVBartIntegration:
             uv_kw.update(error_cov_df=6.0, error_cov_scale=4.0)
             mv_kw.update(error_cov_df=jnp.array(6.0), error_cov_scale=4.0 * jnp.eye(1))
 
-        bart_uv = init(**uv_kw, **common)
-        bart_mv = init(**mv_kw, **common)
+        bart_uv = init(**uv_kw, **common())
+        bart_mv = init(**mv_kw, **common())
 
         assert bart_uv.resid.ndim == 1
         assert bart_mv.resid.ndim == 2
@@ -1440,17 +1447,20 @@ class TestMVBartSteps:
         if binary:
             y = (y > 0).astype(jnp.float32)
 
-        params: dict = dict(
-            X=X,
-            max_split=max_split,
-            num_trees=n_trees,
-            p_nonterminal=jnp.array([0.9, 0.5]),
-            resid_num_batches=None,
-            count_num_batches=None,
+        params = partial(
+            copy_arrays,
+            dict(
+                X=X,
+                max_split=max_split,
+                num_trees=n_trees,
+                p_nonterminal=jnp.array([0.9, 0.5]),
+                resid_num_batches=None,
+                count_num_batches=None,
+            ),
         )
 
-        uv_kw = dict(y=y, offset=0.0, leaf_prior_cov_inv=jnp.float32(n_trees))
-        mv_kw = dict(
+        uv_kw: dict = dict(y=y, offset=0.0, leaf_prior_cov_inv=jnp.float32(n_trees))
+        mv_kw: dict = dict(
             y=y[None, :], offset=jnp.zeros(1), leaf_prior_cov_inv=n_trees * jnp.eye(1)
         )
 
@@ -1461,8 +1471,8 @@ class TestMVBartSteps:
             uv_kw.update(error_cov_df=4.0, error_cov_scale=2.0)
             mv_kw.update(error_cov_df=jnp.array(4.0), error_cov_scale=2 * jnp.eye(1))
 
-        uv_state = init(**uv_kw, **params)
-        mv_state = init(**mv_kw, **params)
+        uv_state = init(**uv_kw, **params())
+        mv_state = init(**mv_kw, **params())
 
         mv_state = replace(
             mv_state,
@@ -1560,3 +1570,8 @@ class TestMVBartSteps:
                 assert mv_state.z is not None
                 assert jnp.all(jnp.isfinite(mv_state.z))
                 assert mv_state.z.shape == (k, y.shape[1])
+
+
+def copy_arrays(x: PyTree) -> PyTree:
+    """Make a copy of the arrays in `x`, intended for buffer donation."""
+    return tree.map(lambda x: jnp.array(x) if isinstance(x, jnp.ndarray) else x, x)

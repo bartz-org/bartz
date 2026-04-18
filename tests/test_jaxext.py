@@ -542,7 +542,7 @@ def _get_check_vma_false_kwargs() -> dict[str, bool]:
 def test_make_broken_replicated_array() -> None:
     """Test `make_broken_replicated_array`."""
     nd = len(devices())
-    if nd < 2:
+    if nd < 2:  # branch covered in single jax cpu test config
         pytest.skip('Requires at least 2 devices')
     mesh = make_mesh((nd,), ('a',), axis_types=(AxisType.Auto,))
     x = jnp.arange(nd)
@@ -560,7 +560,7 @@ def test_make_broken_replicated_array() -> None:
 def test_equal_shards(equal: bool, replicated: bool) -> None:
     """Test `jaxext.equal_shards`."""
     nd = len(devices())
-    if nd < 2:
+    if nd < 2:  # branch covered in single jax cpu test config
         pytest.skip('Requires at least 2 devices')
 
     # define mesh

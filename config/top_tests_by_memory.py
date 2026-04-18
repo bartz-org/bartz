@@ -1,6 +1,6 @@
-# bartz/src/bartz/debug/__init__.py
+# bartz/config/top_tests_by_memory.py
 #
-# Copyright (c) 2024-2026, The Bartz Contributors
+# Copyright (c) 2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -22,16 +22,36 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""
-Debugging utilities.
+"""Print the top tests by memory usage from a test resource usage CSV."""
 
-  - `debug_mc_gbart`: version of `mc_gbart` with debug checks and methods.
-  - `trees_BART_to_bartz`: convert an R package BART3 trace to a bartz trace.
-  - `sample_prior`: sample the bart prior.
-"""
+import argparse
 
-# ruff: noqa: F401
+import polars as pl
 
-from bartz.debug._debuggbart import debug_gbart, debug_mc_gbart
-from bartz.debug._prior import SamplePriorTrees, sample_prior
-from bartz.debug._traceconv import BARTTraceMeta, TraceWithOffset, trees_BART_to_bartz
+parser = argparse.ArgumentParser(description='Show top tests by peak memory usage.')
+parser.add_argument('csv', help='Path to the test resource usage CSV file.')
+parser.add_argument(
+    '-n',
+    '--num',
+    type=int,
+    default=20,
+    help='Number of top tests to show (default: %(default)s).',
+)
+args = parser.parse_args()
+
+df = (
+    pl.read_csv(args.csv)
+    .with_columns(
+        peak_memory_bytes=pl.max_horizontal('peak_rss_bytes', 'peak_footprint_bytes')
+    )
+    .sort('peak_memory_bytes', descending=True)
+    .head(args.num)
+    .with_columns(
+        peak_memory_gb=(pl.col('peak_memory_bytes') / 1e9).round(1),
+        duration_min=(pl.col('duration_s') / 60).round(1),
+    )
+    .select('test', 'peak_memory_gb', 'duration_min')
+)
+
+with pl.Config(tbl_width_chars=200, fmt_str_lengths=120, set_tbl_rows=args.num):
+    print(df)

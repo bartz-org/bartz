@@ -34,10 +34,21 @@ from jax import config, random
 
 from bartz.jaxext import get_default_device, split
 
-# enable debug checks; some of these slow down unit tests
-config.update('jax_debug_key_reuse', True)
-config.update('jax_debug_nans', True)
-config.update('jax_debug_infs', True)
+DISABLE_PROBLEMATIC_SHARDING = False
+
+
+def get_disable_problematic_sharding() -> bool:
+    """Return whether problematic sharding is disabled via --disable-problematic-sharding."""
+    return DISABLE_PROBLEMATIC_SHARDING
+
+
+INVASIVE_DEBUG_CHECKS = False
+if INVASIVE_DEBUG_CHECKS:
+    # they make the tests 10% slower, disable buffer donation, and yield some
+    # false positive, so we don't keep them on by default
+    config.update('jax_debug_key_reuse', True)
+    config.update('jax_debug_nans', True)
+    config.update('jax_debug_infs', True)
 config.update('jax_legacy_prng_key', 'error')
 if jax.__version_info__ >= (0, 9, 0):
     config.update('jax_check_static_indices', True)
@@ -88,6 +99,18 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=10,
         help='Number of virtual jax cpu devices to create (default: 10)',
     )
+    parser.addoption(
+        '--disable-problematic-sharding',
+        action='store_true',
+        default=False,
+        help='Disable sharding options in test configurations',
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Store global options."""
+    global DISABLE_PROBLEMATIC_SHARDING  # noqa: PLW0603
+    DISABLE_PROBLEMATIC_SHARDING = config.getoption('--disable-problematic-sharding')
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:

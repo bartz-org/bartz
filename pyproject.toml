@@ -36,15 +36,15 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "equinox>=0.12.2",
-    "jax>=0.5.3",
+    "jax>=0.6.0",
     "jaxtyping>=0.3.2",
-    "numpy>=1.25.2",
-    "scipy>=1.11.4",
+    "numpy>=2.2.5",
+    "scipy>=1.15.3",
 ]
 
 [project.optional-dependencies]
-cuda12 = ["jax[cuda12]"]
-cuda13 = ["jax[cuda13]"]
+cuda12 = ["jax[cuda12]>=0.6.0"]
+cuda13 = ["jax[cuda13]>=0.6.0"]
 
 [project.urls]
 Homepage = "https://github.com/bartz-org/bartz"
@@ -58,14 +58,14 @@ dev = [
     "matplotlib>=3.10.3",
     "matplotlib-label-lines>=0.8.1",
     "pre-commit>=4.2.0",
-    "rich>=13.9.4",
+    "rich>=14.0.0",
     "snakeviz>=2.2.2",
     "tqdm>=4.67.1",
     "virtualenv>=20.31.2",
     "asv>=0.6.4",
     "beartype>=0.20.2",
     "flaky>=3.8.1",
-    "gitpython>=3.1.43",
+    "gitpython>=3.1.44",
     "packaging>=25.0",
     "polars[pandas,pyarrow]>=1.29.0",
     "pytest>=8.3.5",
@@ -227,9 +227,6 @@ ignore = [
 "{tests/*,benchmarks/*}" = [
     "SLF001", # Private member accessed: `*`
     "TID253", # `{module}` is banned at the module level
-]
-"docs/conf.py" = [
-    "S607", # Starting a process with a partial executable path. Ignored because for a build script it makes more sense to use PATH.
 ]
 
 [tool.ruff.lint.pydocstyle]

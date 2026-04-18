@@ -87,12 +87,11 @@ extensions = [
     'myst_nb',  # markdown + jupyter notebook support
 ]
 
-# Workaround for sphinx-autodoc-typehints bug on Python 3.14: Union type aliases
+# WORKAROUND(sphinx-autodoc-typehints<3.10.0): on Python 3.14 Union type aliases
 # (like jax.typing.DTypeLike = str | ...) have __module__='typing' and
 # __qualname__='Union', so build_type_mapping() creates a bogus mapping
 # typing.Union -> jax.typing.DTypeLike, rendering every Union as DTypeLike[...].
-# https://github.com/tox-dev/sphinx-autodoc-typehints/issues/677
-# fixed in sphinx-autodoc-typehints 3.10.0
+# See https://github.com/tox-dev/sphinx-autodoc-typehints/issues/677.
 if sys.version_info >= (3, 14):
     import importlib as _importlib
     import types as _types

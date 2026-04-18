@@ -32,8 +32,14 @@ EXTRAS = $(if $(filter 12 13,$(CUDA_VERSION)),--extra=cuda$(CUDA_VERSION),)
 UV_RUN = uv run --dev $(EXTRAS)
 
 # define command to run python with oldest supported dependencies
+# OLD_DATE / OLD_DELAY_DAYS / BUMP_PYTHON_VERSION_DATE / NUM_SUPPORTED_PYTHON_RELEASES
+# drive the `update-oldest-deps` policy.
+OLD_DATE = 2025-05-15
+OLD_DELAY_DAYS = 365
+BUMP_PYTHON_VERSION_DATE = 10-31
+NUM_SUPPORTED_PYTHON_RELEASES = 5
 OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]*\).*/\1/')
-UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=2025-05-15 --isolated
+UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --isolated
 
 .PHONY: help
 help:
@@ -48,6 +54,7 @@ help:
 	@echo "- covreport: build html coverage report"
 	@echo "- covcheck: check coverage is above some thresholds"
 	@echo "- update-deps: remove .venv, upgrade uv.lock, update pre-commit hooks"
+	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- copy-version: sync version from pyproject.toml to _version.py"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- release: packages the python module, invokes tests and docs first"
@@ -62,6 +69,13 @@ help:
 	@echo "- ipython: start an ipython shell with stuff pre-imported"
 	@echo "- ipython-old: start an ipython shell with oldest supported python and dependencies"
 	@echo "- lint: run pre-commit hooks on all files"
+	@echo
+	@echo "Update dependencies workflow:"
+	@echo "- new PR"
+	@echo "- $$ make update-deps"
+	@echo "- $$ make tests  # and debug"
+	@echo "- $$ make update-oldest-deps"
+	@echo "- $$ make tests-old  # and debug"
 	@echo
 	@echo "Release workflow:"
 	@echo "- do a PR that re-runs benchmarks"
@@ -86,9 +100,7 @@ setup:
 
 .PHONY: lint
 lint:
-	# the git config vars are a workaround for https://github.com/sbrunner/hooks/issues/374
-	# fixed in sbrunner/hooks v1.7.0
-	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=log.showSignature GIT_CONFIG_VALUE_0=false $(UV_RUN) pre-commit run --all-files
+	$(UV_RUN) pre-commit run --all-files
 
 ################# TESTS #################
 
@@ -162,6 +174,12 @@ covcheck:
 update-deps:
 	uv lock --upgrade
 	$(UV_RUN) pre-commit autoupdate
+
+.PHONY: update-oldest-deps
+update-oldest-deps:
+	$(UV_RUN) python config/update_python_version.py --bump-date=$(BUMP_PYTHON_VERSION_DATE) --num-supported=$(NUM_SUPPORTED_PYTHON_RELEASES)
+	$(UV_RUN) python config/update_oldest_deps.py --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS)
+	uv lock
 
 .PHONY: copy-version
 copy-version: src/bartz/_version.py

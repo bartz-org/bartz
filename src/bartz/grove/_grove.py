@@ -33,11 +33,7 @@ from equinox import Module
 from jax import jit, lax, vmap
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
-
-try:
-    from numpy.lib.array_utils import normalize_axis_tuple  # numpy 2
-except ImportError:
-    from numpy.core.numeric import normalize_axis_tuple  # numpy 1
+from numpy.lib.array_utils import normalize_axis_tuple
 
 from bartz.jaxext import autobatch, minimal_unsigned_dtype, vmap_nodoc
 

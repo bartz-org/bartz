@@ -1551,7 +1551,9 @@ def test_debug_checks(keys: split, bkw: BartKW) -> None:
         collect()
 
 
-def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
+# this entire function is marked not to be covered due to the current desperate
+# hacks in tests.yml, there's its twin in test_BART.py doing some work
+def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:  # pragma: no cover
     """Check that the result is the same with/without sharding."""
     if get_disable_problematic_sharding():  # pragma: no cover
         pytest.skip('Sharding disabled by --disable-problematic-sharding')

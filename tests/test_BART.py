@@ -1272,7 +1272,7 @@ def check_chain_sharding(x: Array | None, mesh: Mesh) -> None:
     elif 'chains' in mesh.axis_names:
         expected_num_devices = min(2, get_device_count())
         assert x.sharding.num_devices == expected_num_devices
-        assert get_normal_spec(x) == ('chains',) + (None,) * (x.ndim - 1)
+        assert get_normal_spec(x) == normalize_spec(('chains',), mesh, x.shape)
 
 
 def test_sharding(kw: dict, variant: int) -> None:

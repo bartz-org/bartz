@@ -42,7 +42,7 @@ from pathlib import Path
 
 import tomli
 from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 PYPI_URL = 'https://pypi.org/pypi/{name}/json'
@@ -113,8 +113,38 @@ def earliest_upload(files: list[dict]) -> datetime.datetime | None:
     return min(times) if times else None
 
 
-def latest_before(name: str, cutoff: datetime.date) -> Version | None:
-    """Latest final release of `name` whose earliest upload is < cutoff."""
+def release_supports_python(files: list[dict], oldest_python: Version) -> bool:
+    """Check Python compatibility of a release.
+
+    Return True iff any non-yanked file's `requires_python` accepts
+    `oldest_python`. Files with no `requires_python` metadata are treated as
+    universally compatible (common for old releases predating PEP 345).
+    """
+    any_non_yanked = False
+    for f in files:
+        if f.get('yanked'):
+            continue
+        any_non_yanked = True
+        spec_str = f.get('requires_python')
+        if not spec_str:
+            return True
+        try:
+            spec = SpecifierSet(spec_str)
+        except InvalidSpecifier:
+            return True
+        if spec.contains(str(oldest_python), prereleases=True):
+            return True
+    return not any_non_yanked
+
+
+def latest_before(
+    name: str, cutoff: datetime.date, oldest_python: Version
+) -> Version | None:
+    """Return the latest final release of `name` matching the constraints.
+
+    The release must have earliest upload strictly before `cutoff` and must
+    support `oldest_python`.
+    """
     data = fetch_pypi(name)
     cutoff_dt = datetime.datetime.combine(
         cutoff, datetime.time.min, tzinfo=datetime.timezone.utc
@@ -132,8 +162,11 @@ def latest_before(name: str, cutoff: datetime.date) -> Version | None:
         upload = earliest_upload(files)
         if upload is None:
             continue
-        if upload < cutoff_dt:
-            candidates.append(v)
+        if upload >= cutoff_dt:
+            continue
+        if not release_supports_python(files, oldest_python):
+            continue
+        candidates.append(v)
     return max(candidates) if candidates else None
 
 
@@ -191,7 +224,7 @@ def update_makefile_old_date(makefile_path: Path, new_date: datetime.date) -> bo
     return True
 
 
-def main() -> int:
+def main() -> int:  # noqa: C901, PLR0915
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         '--min-old-date',
@@ -213,6 +246,19 @@ def main() -> int:
     with args.pyproject.open('rb') as f:
         pyproject = tomli.load(f)
 
+    requires_python = pyproject.get('project', {}).get('requires-python')
+    if not requires_python:
+        msg = 'project.requires-python missing from pyproject.toml'
+        raise RuntimeError(msg)
+    rp_spec = SpecifierSet(requires_python)
+    oldest_python = next(
+        (Version(s.version) for s in rp_spec if s.operator in ('>=', '==', '~=')), None
+    )
+    if oldest_python is None:
+        msg = f'cannot derive oldest Python from requires-python={requires_python!r}'
+        raise RuntimeError(msg)
+    print(f'oldest supported Python: {oldest_python}')
+
     raw_reqs = collect_requirements(pyproject)
     # Deduplicate while preserving order (a dep may appear in multiple groups).
     seen: set[str] = set()
@@ -231,7 +277,7 @@ def main() -> int:
             continue
         floor = current_lower_bound(req.specifier)
         try:
-            pypi_cand = latest_before(req.name, new_old_date)
+            pypi_cand = latest_before(req.name, new_old_date, oldest_python)
         except Exception as e:  # noqa: BLE001
             rows.append((req.name, 'error', str(e)))
             continue

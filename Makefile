@@ -32,8 +32,11 @@ EXTRAS = $(if $(filter 12 13,$(CUDA_VERSION)),--extra=cuda$(CUDA_VERSION),)
 UV_RUN = uv run --dev $(EXTRAS)
 
 # define command to run python with oldest supported dependencies
+# OLD_DATE and OLD_DELAY_DAYS drive the `update-oldest-deps` policy.
+OLD_DATE = 2025-05-15
+OLD_DELAY_DAYS = 365
 OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]*\).*/\1/')
-UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=2025-05-15 --isolated
+UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --isolated
 
 .PHONY: help
 help:
@@ -48,6 +51,7 @@ help:
 	@echo "- covreport: build html coverage report"
 	@echo "- covcheck: check coverage is above some thresholds"
 	@echo "- update-deps: remove .venv, upgrade uv.lock, update pre-commit hooks"
+	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- copy-version: sync version from pyproject.toml to _version.py"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- release: packages the python module, invokes tests and docs first"
@@ -162,6 +166,11 @@ covcheck:
 update-deps:
 	uv lock --upgrade
 	$(UV_RUN) pre-commit autoupdate
+
+.PHONY: update-oldest-deps
+update-oldest-deps:
+	$(UV_RUN) python config/update_oldest_deps.py --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS)
+	uv lock
 
 .PHONY: copy-version
 copy-version: src/bartz/_version.py

@@ -27,11 +27,10 @@
 from dataclasses import replace
 from functools import partial
 
+# WORKAROUND(jax<0.6.1): shard_map was promoted from jax.experimental to top-level in 0.6.1
 try:
-    # available since jax v0.6.1
     from jax import shard_map
 except ImportError:
-    # deprecated in jax v0.8.0
     from jax.experimental.shard_map import shard_map
 
 import jax
@@ -1144,8 +1143,8 @@ def _scatter_add(
 
 
 def _get_shard_map_patch_kwargs() -> dict[str, bool]:
-    # see jax/issues/#34249, problem with vmap(shard_map(psum))
-    # we tried the config jax_disable_vmap_shmap_error but it didn't work
+    # WORKAROUND(jax<=0.8.2): vmap(shard_map(psum)), jax#34249; the
+    # jax_disable_vmap_shmap_error config did not work
     if jax.__version__ in ('0.8.1', '0.8.2'):
         return {'check_vma': False}
     else:

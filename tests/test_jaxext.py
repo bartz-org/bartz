@@ -29,8 +29,9 @@ from inspect import signature
 from itertools import product
 from warnings import catch_warnings
 
+# WORKAROUND(jax<0.6.1): shard_map was promoted from jax.experimental to top-level in 0.6.1
 try:
-    from jax import shard_map  # available since jax v0.6.1
+    from jax import shard_map
 except ImportError:
     from jax.experimental.shard_map import shard_map
 
@@ -404,6 +405,7 @@ class TestJaxPatches:
         x1 = invgamma.ppf(p, alpha)
         assert_allclose(x1, x0, rtol=1e-6)
 
+    # WORKAROUND(jax<0.6.2): ndtri bug
     @pytest.mark.xfail(reason='Fixed in jax 0.6.2.')
     def test_ndtri_bugged(self, keys: split) -> None:
         """Check that `jax.scipy.special.ndtri` triggers `jax.debug_infs`."""
@@ -531,9 +533,9 @@ def make_broken_replicated_array(x: Array, axis_name: str, mesh: Mesh) -> Array:
 
 def _get_check_vma_false_kwargs() -> dict[str, bool]:
     """Get `dict(check_vma=False)` or the equivalent for old jax versions."""
+    # WORKAROUND(jax<0.6.1): check_rep was renamed to check_vma in 0.6.1
     sig = signature(shard_map)
     if 'check_vma' in sig.parameters:
-        # since jax v0.6.1
         return dict(check_vma=False)
     else:
         return dict(check_rep=False)

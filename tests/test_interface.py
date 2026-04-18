@@ -1491,6 +1491,7 @@ def run_bart_and_block(bkw: BartKW, keys: split) -> None:
 @contextmanager
 def array_garbage_collection_guard(value: str) -> Iterator[None]:
     """Implement `jax.array_garbage_collection_guard`, added in jax v0.9.1."""
+    # WORKAROUND(jax<0.9.1): replace with `jax.array_garbage_collection_guard`
     setting = 'jax_array_garbage_collection_guard'
     prev = getattr(config, setting)
     config.update(setting, value)

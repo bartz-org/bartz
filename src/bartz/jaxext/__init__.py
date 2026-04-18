@@ -29,8 +29,9 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
 
+# WORKAROUND(jax<0.6.1): shard_map was promoted from jax.experimental to top-level in 0.6.1
 try:
-    from jax import shard_map  # available since jax v0.6.1
+    from jax import shard_map
 except ImportError:
     from jax.experimental.shard_map import shard_map
 
@@ -280,8 +281,7 @@ def jit_active() -> bool:
 
 def _equal_shards(x: Array, axis_name: str) -> Bool[Array, '']:
     """Check if all shards of `x` are equal, to be used in a `shard_map` context."""
-    # get axis size, this could be `size = lax.axis_size(axis_name)`, but it's
-    # supported only since jax v0.6.1
+    # WORKAROUND(jax<0.6.1): could be `size = lax.axis_size(axis_name)`
     mesh = typeof(x).sharding.mesh
     i = mesh.axis_names.index(axis_name)
     size = mesh.axis_sizes[i]

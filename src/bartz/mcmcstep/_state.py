@@ -1021,8 +1021,8 @@ def _parse_mesh(
         assert 'chains' not in mesh.axis_names
 
     # check the axes we use are in auto mode
-    assert 'chains' not in mesh.axis_names or 'chains' in _auto_axes(mesh)
-    assert 'data' not in mesh.axis_names or 'data' in _auto_axes(mesh)
+    assert 'chains' not in mesh.axis_names or 'chains' in mesh.auto_axes
+    assert 'data' not in mesh.axis_names or 'data' in mesh.auto_axes
 
     return mesh
 
@@ -1051,16 +1051,6 @@ def _parse_target_platform(
     else:
         assert target_platform is None, 'target_platform not used, unset it'
         return target_platform
-
-
-def _auto_axes(mesh: Mesh) -> list[str]:
-    """Re-implement `Mesh.auto_axes` because that's missing in jax v0.5."""
-    # Mesh.auto_axes added in jax v0.6.0
-    return [
-        n
-        for n, t in zip(mesh.axis_names, mesh.axis_types, strict=True)
-        if t == AxisType.Auto
-    ]
 
 
 @partial(filter_jit, donate='all')

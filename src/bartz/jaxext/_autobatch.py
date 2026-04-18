@@ -30,16 +30,11 @@ from functools import partial, wraps
 from typing import Any
 from warnings import warn
 
-from jax.typing import DTypeLike
-
-try:
-    from numpy.lib.array_utils import normalize_axis_index  # numpy 2
-except ImportError:
-    from numpy.core.numeric import normalize_axis_index  # numpy 1
-
 from jax import ShapeDtypeStruct, eval_shape, jit, lax, tree
 from jax import numpy as jnp
+from jax.typing import DTypeLike
 from jaxtyping import Array, PyTree, Shaped
+from numpy.lib.array_utils import normalize_axis_index
 
 
 def expand_axes(axes: PyTree[int | None], tree_arg: PyTree) -> PyTree[int | None]:

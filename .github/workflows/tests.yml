@@ -337,6 +337,12 @@ jobs:
       - name: Update package version
         run: make copy-version
 
+      - name: Update locked dependencies
+        run: make update-deps
+
+      - name: Bump oldest supported dependencies
+        run: make update-oldest-deps
+
   required-dummy:
     runs-on: ubuntu-latest
     needs:

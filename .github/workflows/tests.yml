@@ -92,6 +92,11 @@ jobs:
               "args": "tests ARGS=--disable-problematic-sharding"
             },
             {
+              "id": "old",
+              "runs-on": "ubuntu-latest",
+              "args": "tests-old ARGS=--disable-problematic-sharding"
+            },
+            {
               "id": "single-cpu",
               "runs-on": "ubuntu-latest",
               "args": "tests ARGS=--num-cpu-devices=1 COVERAGE_SUFFIX=-single-cpu"

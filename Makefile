@@ -182,6 +182,7 @@ update-oldest-deps:
 	$(UV_RUN) python config/update_python_version.py --bump-date=$(BUMP_PYTHON_VERSION_DATE) --num-supported=$(NUM_SUPPORTED_PYTHON_RELEASES)
 	$(UV_RUN) python config/update_oldest_deps.py --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS)
 	uv lock
+	@$(UV_RUN) python config/check_workarounds.py || echo "^^ some WORKAROUND(...) markers are now obsolete; please review and remove"
 
 .PHONY: copy-version
 copy-version: src/bartz/_version.py

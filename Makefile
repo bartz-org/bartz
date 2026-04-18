@@ -100,9 +100,7 @@ setup:
 
 .PHONY: lint
 lint:
-	# the git config vars are a workaround for https://github.com/sbrunner/hooks/issues/374
-	# fixed in sbrunner/hooks v1.7.0
-	GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=log.showSignature GIT_CONFIG_VALUE_0=false $(UV_RUN) pre-commit run --all-files
+	$(UV_RUN) pre-commit run --all-files
 
 ################# TESTS #################
 

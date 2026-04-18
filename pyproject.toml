@@ -228,9 +228,6 @@ ignore = [
     "SLF001", # Private member accessed: `*`
     "TID253", # `{module}` is banned at the module level
 ]
-"docs/conf.py" = [
-    "S607", # Starting a process with a partial executable path. Ignored because for a build script it makes more sense to use PATH.
-]
 
 [tool.ruff.lint.pydocstyle]
 convention = "numpy"

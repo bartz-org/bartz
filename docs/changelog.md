@@ -31,6 +31,33 @@ SOFTWARE.
 # Changelog
 
 
+## 0.9.0 This release creates a shared environment where response variable components of different types are given equal consideration without residual correlations (2026-04-20)
+
+The highlight of this release is exposing the multivariate outcome regression functionality in the high-level interface.
+
+* New features
+    * Multivariate outcomes exposed in the high-level interface `bartz.Bart` (thanks @miaoqingyu2)
+    * Binary and mixed binary-continuous multivariate outcomes, but without error correlations
+    * `Bart` can compute outcome-level samples in predictions (i.e., "sample the likelihood")
+    * `varprob` input parameter to `mc_gbart` and `Bart`, to set or initialize the a priori importance of each predictor
+* `Bart` changes
+    * New defaults `nskip=1000`, `numcut=255`, `num_chains=4`
+    * Prediction properties `yhat_train`, `yhat_test`, etc., integrated into `Bart.predict`
+    * Standard deviation properties `sigma` and `sigma_` replaced by methods `get_latent_prec()` and `get_error_sdev()`
+    * `y_train` must be floating point for binary regression instead of boolean (also in `mc_gbart`)
+    * Default arguments `num_trees=200` and `keepevery=1` unconditionally instead of changing based on continuous/binary like `mc_gbart`
+    * Property `Bart.num_trees`
+* Other changes
+    * Removed profile mode, detailed jax profiling is available only on gpu
+    * Moved various debug methods from `debug_mc_gbart` to `Bart`
+    * Moved various tree inspection functions from `bartz.debug` to `bartz.grove`
+    * `mcmcstep.init()` may now steal the buffers of most array inputs
+    * `mcmcstep.init()` always returns a `State` with strong-typed arrays
+    * `mcmcloop.run_mcmc()` returns a named tuple instead of a plain tuple, for convenience
+    * Added `bartz.__version_info__` to allow comparing version numbers directly with tuple comparison
+* Dependencies: introduced a policy of supporting all the officially supported Python releases (last 5 releases, currently Python 3.10 to 3.14) and Python package releases no older than 1 year ago, rounded to the first release towards the past. Informally, the main dependencies (jax, numpy, scipy) are actually supported for 1 year rather than up to 1 year.
+
+
 ## 0.8.0 The Dark Side of Big Bayes (2026-02-04)
 
 The highlights of this release are multiple parallel Markov chains and splitting data and/or chains across multiple devices. The repository has been moved to [bartz-org](https://github.com/bartz-org) to welcome the first contributor @miaoqingyu2.

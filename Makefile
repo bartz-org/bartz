@@ -61,6 +61,7 @@ help:
 	@echo "- version-tag: create and push git tag for current version"
 	@echo "- upload: upload release to PyPI"
 	@echo "- upload-test: upload release to TestPyPI"
+	@echo "- asv-machine: initialize ~/.asv-machine.json with a human-readable id"
 	@echo "- asv-run: run benchmarks on all unbenchmarked tagged releases and main"
 	@echo "- asv-publish: create html benchmark report"
 	@echo "- asv-preview: create html report and start server"
@@ -239,8 +240,12 @@ upload-test: smoke-test check-committed
 
 ASV = $(UV_RUN) python -m asv
 
+.PHONY: asv-machine
+asv-machine:
+	$(UV_RUN) python config/asv_machine.py
+
 .PHONY: asv-run
-asv-run:
+asv-run: asv-machine
 	$(UV_RUN) python config/refs-for-asv.py | $(ASV) run --durations=all --skip-existing-successful --show-stderr HASHFILE:- $(ARGS)
 
 .PHONY: asv-publish
@@ -252,11 +257,11 @@ asv-preview: asv-publish
 	$(ASV) preview $(ARGS)
 
 .PHONY: asv-main
-asv-main:
+asv-main: asv-machine
 	$(ASV) run --show-stderr main^! $(ARGS)
 
 .PHONY: asv-quick
-asv-quick:
+asv-quick: asv-machine
 	$(ASV) run --durations=all --python=same --quick --dry-run --show-stderr $(ARGS)
 
 

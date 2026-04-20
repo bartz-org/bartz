@@ -62,7 +62,6 @@ from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.conftest import get_disable_problematic_sharding
-from tests.rbartpackages import BART3
 from tests.test_interface import BartKW, gen_X, gen_y, make_kw
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
@@ -73,6 +72,13 @@ from tests.util import (
     periodic_sigint,
     rhat,
 )
+
+try:
+    from tests.rbartpackages import BART3
+except ValueError as exc:
+    # on PR ci, R is not installed because the tests using it are skipped
+    if 'r_home' not in str(exc):
+        raise
 
 
 def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:

@@ -97,13 +97,13 @@ jobs:
             {
               "id": "latest",
               "runs-on": "ubuntu-latest",
-              "args": "tests",
+              "argv": "tests",
               "ARGS": "--disable-problematic-sharding"
             },
             {
               "id": "single-cpu",
               "runs-on": "ubuntu-latest",
-              "args": "tests COVERAGE_SUFFIX=-single-cpu",
+              "argv": "tests COVERAGE_SUFFIX=-single-cpu",
               "ARGS": "--num-cpu-devices=1"
             }
           ]'
@@ -170,7 +170,7 @@ jobs:
 
       - name: Run unit tests
         timeout-minutes: 120
-        run: make ${{ matrix.args }} ARGS='${{ matrix.ARGS }}${{ github.event_name == 'pull_request' && ' -m "not slow"' || '' }}'
+        run: make ${{ matrix.argv }} ARGS='${{ matrix.ARGS }}${{ github.event_name == 'pull_request' && ' -m "not slow"' || '' }}'
 
       - name: Save coverage information
         uses: actions/upload-artifact@v7

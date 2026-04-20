@@ -216,7 +216,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # binary regression with binary X and high p
-        case 2:
+        case 2:  # pragma: slow
             X = gen_X(keys.pop(), high_p, n, 'binary')
             bkw = BartKW(
                 kw=dict(
@@ -244,7 +244,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # continuous regression with error weights and sparsity with fixed theta
-        case 3:
+        case 3:  # pragma: slow
             X = gen_X(keys.pop(), p, n, 'continuous')
             w = gen_w(keys.pop(), X.shape[1])
             bkw = BartKW(
@@ -307,7 +307,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # multivariate binary regression with binary X and high p
-        case 5:
+        case 5:  # pragma: slow
             X = gen_X(keys.pop(), high_p, n, 'binary')
             bkw = BartKW(
                 kw=dict(
@@ -334,7 +334,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
         # multivariate mixed binary-continuous regression with sparsity with
         # fixed theta
-        case 6:  # pragma: no branch
+        case 6:  # pragma: no branch  # pragma: slow
             X = gen_X(keys.pop(), p, n, 'continuous')
             outcome_type = ['continuous', 'binary', 'binary']
             bkw = BartKW(
@@ -378,7 +378,14 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
 # test only the multivariate variants, because the other ones are tested in
 # test_BART.py
-@pytest.fixture(params=(4, 5, 6), scope='module')
+@pytest.fixture(
+    params=(
+        4,
+        pytest.param(5, marks=pytest.mark.slow),
+        pytest.param(6, marks=pytest.mark.slow),
+    ),
+    scope='module',
+)
 def variant(request: FixtureRequest) -> int:
     """Return a parametrized indicator to select different BART configurations."""
     return request.param
@@ -415,7 +422,8 @@ class CachedBart:
     bart: Bart
 
 
-class TestWithCachedBart:
+@pytest.mark.slow
+class TestWithCachedBart:  # pragma: slow
     """Group of slow tests that check the same BART run, for efficiency."""
 
     @pytest.fixture(scope='class')
@@ -1554,7 +1562,10 @@ def test_debug_checks(keys: split, bkw: BartKW) -> None:
 
 # this entire function is marked not to be covered due to the current desperate
 # hacks in tests.yml, there's its twin in test_BART.py doing some work
-def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:  # pragma: no cover
+@pytest.mark.slow
+def test_equiv_sharding(  # pragma: no cover  # pragma: slow
+    bkw: BartKW, subtests: SubTests
+) -> None:
     """Check that the result is the same with/without sharding."""
     if get_disable_problematic_sharding():  # pragma: no cover
         pytest.skip('Sharding disabled by --disable-problematic-sharding')

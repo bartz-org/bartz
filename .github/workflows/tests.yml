@@ -97,12 +97,14 @@ jobs:
             {
               "id": "latest",
               "runs-on": "ubuntu-latest",
-              "args": "tests ARGS=--disable-problematic-sharding"
+              "argv": "tests",
+              "ARGS": "--disable-problematic-sharding"
             },
             {
               "id": "single-cpu",
               "runs-on": "ubuntu-latest",
-              "args": "tests ARGS=--num-cpu-devices=1 COVERAGE_SUFFIX=-single-cpu"
+              "argv": "tests COVERAGE_SUFFIX=-single-cpu",
+              "ARGS": "--num-cpu-devices=1"
             }
           ]'
           BENCHMARKS_BASE_MATRIX='[
@@ -129,6 +131,9 @@ jobs:
     needs: setup-matrix
     runs-on: ${{ matrix.runs-on }}
 
+    env:
+      RPY2_CFFI_MODE: ${{ github.event_name == 'pull_request' && 'ABI' || '' }}
+
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
@@ -144,16 +149,19 @@ jobs:
           cache-suffix: -${{ matrix.id }}
 
       - name: Install R
+        if: github.event_name != 'pull_request'
         uses: r-lib/actions/setup-r@v2
         with:
           r-version: "renv"
 
       - name: Install R dependencies
+        if: github.event_name != 'pull_request'
         uses: r-lib/actions/setup-renv@v2
         env:
           GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure R PATHS for rpy2 (Linux only)
+        if: github.event_name != 'pull_request'
         run: |
           echo "R_HOME=$(R RHOME)" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$(R RHOME)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
@@ -162,7 +170,7 @@ jobs:
 
       - name: Run unit tests
         timeout-minutes: 120
-        run: make ${{ matrix.args }}
+        run: make ${{ matrix.argv }} ARGS='${{ matrix.ARGS }}${{ github.event_name == 'pull_request' && ' -m "not slow"' || '' }}'
 
       - name: Save coverage information
         uses: actions/upload-artifact@v7
@@ -227,6 +235,11 @@ jobs:
           pattern: .coverage*
           merge-multiple: true
 
+      - name: Exclude slow-only code from coverage
+        # slow tests are skipped on PRs, don't count them for coverage
+        if: github.event_name == 'pull_request'
+        run: 'sed -i ''/^\[tool.coverage.report\]$/a exclude_also = ["# pragma: slow"]\nomit = ["src/bartz/debug/_traceconv.py"]'' pyproject.toml'
+
       - name: List files
         run: |
           pwd
@@ -250,7 +263,7 @@ jobs:
           if-no-files-found: error
 
       - name: Check coverage threshold
-        run: make covcheck
+        run: make covcheck ${{ github.event_name == 'pull_request' && 'ARGS=--fail-under=90' || '' }}
 
   deploy:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))

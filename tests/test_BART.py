@@ -62,7 +62,6 @@ from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
 from tests.conftest import get_disable_problematic_sharding
-from tests.rbartpackages import BART3
 from tests.test_interface import BartKW, gen_X, gen_y, make_kw
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
@@ -73,6 +72,13 @@ from tests.util import (
     periodic_sigint,
     rhat,
 )
+
+try:
+    from tests.rbartpackages import BART3
+except ValueError as exc:
+    # on PR ci, R is not installed because the tests using it are skipped
+    if 'r_home' not in str(exc):
+        raise
 
 
 def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
@@ -132,7 +138,14 @@ def make_gbart_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
 N_VARIANTS = 3
 
 
-@pytest.fixture(params=list(range(1, N_VARIANTS + 1)), scope='module')
+@pytest.fixture(
+    params=[
+        1,
+        pytest.param(2, marks=pytest.mark.slow),
+        pytest.param(3, marks=pytest.mark.slow),
+    ],
+    scope='module',
+)
 def variant(request: pytest.FixtureRequest) -> int:
     """Return a parametrized indicator to select different BART configurations."""
     return request.param
@@ -152,7 +165,8 @@ class CachedBart:
     bart: mc_gbart
 
 
-class TestWithCachedBart:
+@pytest.mark.slow
+class TestWithCachedBart:  # pragma: slow
     """Group of slow tests that check the same BART run, for efficiency."""
 
     @pytest.fixture(scope='class')
@@ -1354,7 +1368,8 @@ class TestVarprobParam:
                 mc_gbart(**kw)
 
 
-def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
+@pytest.mark.slow
+def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:  # pragma: slow
     """Check that the result is the same with/without sharding."""
     if get_disable_problematic_sharding():  # pragma: no cover
         pytest.skip('Sharding disabled by --disable-problematic-sharding')

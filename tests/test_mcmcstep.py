@@ -647,7 +647,7 @@ class TestMultichain:
     @pytest.mark.slow
     @pytest.mark.parametrize('num_chains', [None, 0, 1, -1, 4, -4])
     @pytest.mark.parametrize('shard_data', [False, True])
-    def test_basic(
+    def test_basic(  # pragma: slow
         self,
         init_kwargs: dict,
         num_chains: int | None,

@@ -153,7 +153,7 @@ class CachedBart:
 
 
 @pytest.mark.slow
-class TestWithCachedBart:
+class TestWithCachedBart:  # pragma: slow
     """Group of slow tests that check the same BART run, for efficiency."""
 
     @pytest.fixture(scope='class')
@@ -1356,7 +1356,7 @@ class TestVarprobParam:
 
 
 @pytest.mark.slow
-def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
+def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:  # pragma: slow
     """Check that the result is the same with/without sharding."""
     if get_disable_problematic_sharding():  # pragma: no cover
         pytest.skip('Sharding disabled by --disable-problematic-sharding')

@@ -97,12 +97,14 @@ jobs:
             {
               "id": "latest",
               "runs-on": "ubuntu-latest",
-              "args": "tests ARGS=--disable-problematic-sharding"
+              "args": "tests",
+              "ARGS": "--disable-problematic-sharding"
             },
             {
               "id": "single-cpu",
               "runs-on": "ubuntu-latest",
-              "args": "tests ARGS=--num-cpu-devices=1 COVERAGE_SUFFIX=-single-cpu"
+              "args": "tests COVERAGE_SUFFIX=-single-cpu",
+              "ARGS": "--num-cpu-devices=1"
             }
           ]'
           BENCHMARKS_BASE_MATRIX='[
@@ -162,7 +164,7 @@ jobs:
 
       - name: Run unit tests
         timeout-minutes: 120
-        run: make ${{ matrix.args }}
+        run: make ${{ matrix.args }} ARGS='${{ matrix.ARGS }}${{ github.event_name == 'pull_request' && ' -m "not slow"' || '' }}'
 
       - name: Save coverage information
         uses: actions/upload-artifact@v7
@@ -226,6 +228,11 @@ jobs:
         with:
           pattern: .coverage*
           merge-multiple: true
+
+      - name: Exclude slow-only code from coverage
+        # slow tests are skipped on PRs, don't count them for coverage
+        if: github.event_name == 'pull_request'
+        run: 'sed -i ''/^\[tool.coverage.report\]$/a exclude_also = ["# pragma: slow"]'' pyproject.toml'
 
       - name: List files
         run: |

@@ -165,7 +165,7 @@ covcheck:
 	$(UV_RUN) coverage combine --keep
 	$(UV_RUN) coverage report --include='tests/**/test_*.py'
 	$(UV_RUN) coverage report --include='src/*'
-	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total
+	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total $(ARGS)
 	$(UV_RUN) coverage report --include='src/*' --fail-under=90 --format=total
 
 

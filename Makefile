@@ -205,9 +205,16 @@ release: clean update-deps copy-version check-committed tests tests-old docs
 
 .PHONY: version-tag
 version-tag: copy-version check-committed
+	test $(shell git rev-parse --abbrev-ref HEAD) = main
 	git fetch --tags
 	$(eval VERSION_TAG := v$(shell uv run python -c 'import bartz; print(bartz.__version__)'))
-	git tag $(VERSION_TAG)
+	@if git rev-parse -q --verify refs/tags/$(VERSION_TAG) >/dev/null; then \
+		test "$$(git rev-list -n 1 $(VERSION_TAG))" = "$$(git rev-parse HEAD)" \
+			|| { echo "Tag $(VERSION_TAG) exists but points to a different commit"; exit 1; }; \
+		echo "Tag $(VERSION_TAG) already exists on current commit"; \
+	else \
+		git tag --message=$(VERSION_TAG) $(VERSION_TAG); \
+	fi
 	git push origin $(VERSION_TAG)
 
 .PHONY: smoke-test

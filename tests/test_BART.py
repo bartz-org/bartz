@@ -152,6 +152,7 @@ class CachedBart:
     bart: mc_gbart
 
 
+@pytest.mark.slow
 class TestWithCachedBart:
     """Group of slow tests that check the same BART run, for efficiency."""
 
@@ -1354,6 +1355,7 @@ class TestVarprobParam:
                 mc_gbart(**kw)
 
 
+@pytest.mark.slow
 def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
     if get_disable_problematic_sharding():  # pragma: no cover

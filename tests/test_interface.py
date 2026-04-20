@@ -415,6 +415,7 @@ class CachedBart:
     bart: Bart
 
 
+@pytest.mark.slow
 class TestWithCachedBart:
     """Group of slow tests that check the same BART run, for efficiency."""
 
@@ -1554,6 +1555,7 @@ def test_debug_checks(keys: split, bkw: BartKW) -> None:
 
 # this entire function is marked not to be covered due to the current desperate
 # hacks in tests.yml, there's its twin in test_BART.py doing some work
+@pytest.mark.slow
 def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:  # pragma: no cover
     """Check that the result is the same with/without sharding."""
     if get_disable_problematic_sharding():  # pragma: no cover

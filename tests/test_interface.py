@@ -378,7 +378,14 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
 # test only the multivariate variants, because the other ones are tested in
 # test_BART.py
-@pytest.fixture(params=(4, 5, 6), scope='module')
+@pytest.fixture(
+    params=(
+        4,
+        pytest.param(5, marks=pytest.mark.slow),
+        pytest.param(6, marks=pytest.mark.slow),
+    ),
+    scope='module',
+)
 def variant(request: FixtureRequest) -> int:
     """Return a parametrized indicator to select different BART configurations."""
     return request.param

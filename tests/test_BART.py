@@ -138,7 +138,14 @@ def make_gbart_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
 N_VARIANTS = 3
 
 
-@pytest.fixture(params=list(range(1, N_VARIANTS + 1)), scope='module')
+@pytest.fixture(
+    params=[
+        1,
+        pytest.param(2, marks=pytest.mark.slow),
+        pytest.param(3, marks=pytest.mark.slow),
+    ],
+    scope='module',
+)
 def variant(request: pytest.FixtureRequest) -> int:
     """Return a parametrized indicator to select different BART configurations."""
     return request.param

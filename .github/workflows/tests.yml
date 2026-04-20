@@ -238,7 +238,7 @@ jobs:
       - name: Exclude slow-only code from coverage
         # slow tests are skipped on PRs, don't count them for coverage
         if: github.event_name == 'pull_request'
-        run: 'sed -i ''/^\[tool.coverage.report\]$/a exclude_also = ["# pragma: slow"]'' pyproject.toml'
+        run: 'sed -i ''/^\[tool.coverage.report\]$/a exclude_also = ["# pragma: slow"]\nomit = ["src/bartz/debug/_traceconv.py"]'' pyproject.toml'
 
       - name: List files
         run: |

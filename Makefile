@@ -207,7 +207,7 @@ release: clean update-deps copy-version check-committed tests tests-old docs
 version-tag: copy-version check-committed
 	git fetch --tags
 	$(eval VERSION_TAG := v$(shell uv run python -c 'import bartz; print(bartz.__version__)'))
-	git tag $(VERSION_TAG)
+	git tag --message=$(VERSION_TAG) $(VERSION_TAG)
 	git push origin $(VERSION_TAG)
 
 .PHONY: smoke-test

@@ -216,7 +216,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # binary regression with binary X and high p
-        case 2:
+        case 2:  # pragma: slow
             X = gen_X(keys.pop(), high_p, n, 'binary')
             bkw = BartKW(
                 kw=dict(
@@ -244,7 +244,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # continuous regression with error weights and sparsity with fixed theta
-        case 3:
+        case 3:  # pragma: slow
             X = gen_X(keys.pop(), p, n, 'continuous')
             w = gen_w(keys.pop(), X.shape[1])
             bkw = BartKW(
@@ -307,7 +307,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # multivariate binary regression with binary X and high p
-        case 5:
+        case 5:  # pragma: slow
             X = gen_X(keys.pop(), high_p, n, 'binary')
             bkw = BartKW(
                 kw=dict(
@@ -334,7 +334,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
         # multivariate mixed binary-continuous regression with sparsity with
         # fixed theta
-        case 6:  # pragma: no branch
+        case 6:  # pragma: no branch  # pragma: slow
             X = gen_X(keys.pop(), p, n, 'continuous')
             outcome_type = ['continuous', 'binary', 'binary']
             bkw = BartKW(

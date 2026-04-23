@@ -86,44 +86,44 @@ def test_shapes_and_dtypes(keys: split) -> None:
     # Test shapes
     assert dgp.x.shape == (p, n)
     assert dgp.y.shape == (k, n)
-    assert dgp.partition.shape == (k, p)
-    assert dgp.beta_shared.shape == (p,)
-    assert dgp.beta_separate.shape == (k, p)
+    assert dgp.params.partition.shape == (k, p)
+    assert dgp.params.beta_shared.shape == (p,)
+    assert dgp.params.beta_separate.shape == (k, p)
     assert dgp.mulin_shared.shape == (n,)
     assert dgp.mulin_separate.shape == (k, n)
     assert dgp.mulin.shape == (k, n)
-    assert dgp.A_shared.shape == (p, p)
-    assert dgp.A_separate.shape == (k, p, p)
+    assert dgp.params.A_shared.shape == (p, p)
+    assert dgp.params.A_separate.shape == (k, p, p)
     assert dgp.muquad_shared.shape == (n,)
     assert dgp.muquad_separate.shape == (k, n)
     assert dgp.muquad.shape == (k, n)
     assert dgp.mu.shape == (k, n)
-    assert dgp.q.shape == ()
-    assert dgp.lam.shape == ()
-    assert dgp.sigma2_lin.shape == ()
-    assert dgp.sigma2_quad.shape == ()
-    assert dgp.sigma2_eps.shape == ()
+    assert dgp.params.q.shape == ()
+    assert dgp.params.lam.shape == ()
+    assert dgp.params.sigma2_lin.shape == ()
+    assert dgp.params.sigma2_quad.shape == ()
+    assert dgp.params.sigma2_eps.shape == ()
 
     # Test dtypes
     assert jnp.issubdtype(dgp.x.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.y.dtype, jnp.floating)
-    assert dgp.partition.dtype == jnp.bool_
-    assert jnp.issubdtype(dgp.beta_shared.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.beta_separate.dtype, jnp.floating)
+    assert dgp.params.partition.dtype == jnp.bool_
+    assert jnp.issubdtype(dgp.params.beta_shared.dtype, jnp.floating)
+    assert jnp.issubdtype(dgp.params.beta_separate.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.mulin_shared.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.mulin_separate.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.mulin.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.A_shared.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.A_separate.dtype, jnp.floating)
+    assert jnp.issubdtype(dgp.params.A_shared.dtype, jnp.floating)
+    assert jnp.issubdtype(dgp.params.A_separate.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.muquad_shared.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.muquad_separate.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.muquad.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.mu.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.q.dtype, jnp.integer)
-    assert jnp.issubdtype(dgp.lam.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.sigma2_lin.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.sigma2_quad.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.sigma2_eps.dtype, jnp.floating)
+    assert jnp.issubdtype(dgp.params.q.dtype, jnp.integer)
+    assert jnp.issubdtype(dgp.params.lam.dtype, jnp.floating)
+    assert jnp.issubdtype(dgp.params.sigma2_lin.dtype, jnp.floating)
+    assert jnp.issubdtype(dgp.params.sigma2_quad.dtype, jnp.floating)
+    assert jnp.issubdtype(dgp.params.sigma2_eps.dtype, jnp.floating)
 
 
 class TestGenerateX:
@@ -164,7 +164,7 @@ class TestGeneratePartition:
 
     def test_partition_coverage(self, dgps: DGP) -> None:
         """Test that each predictor is assigned to exactly one component."""
-        partitions = dgps.partition  # Shape: (REPS, K, P)
+        partitions = dgps.params.partition  # Shape: (REPS, K, P)
 
         # Each column should sum to 1
         col_sums = jnp.sum(partitions, axis=1)  # Shape: (N_REPS, P)
@@ -172,7 +172,7 @@ class TestGeneratePartition:
 
     def test_partition_counts(self, dgps: DGP) -> None:
         """Test that counts are either p//c or p//c + 1."""
-        partitions = dgps.partition  # Shape: (REPS, K, P)
+        partitions = dgps.params.partition  # Shape: (REPS, K, P)
         p, k = partitions.shape[2], partitions.shape[1]
 
         counts = jnp.sum(partitions, axis=2)  # Shape: (REPS, K)
@@ -184,7 +184,7 @@ class TestGeneratePartition:
 
     def test_partition_balance(self, dgps: DGP) -> None:
         """Test that predictors are roughly balanced across components."""
-        partitions = dgps.partition  # Shape: (REPS, K, P)
+        partitions = dgps.params.partition  # Shape: (REPS, K, P)
         n_reps, k, p = partitions.shape
 
         counts = jnp.sum(partitions, axis=2)  # Shape: (REPS, K)
@@ -203,7 +203,7 @@ class TestGenerateBetaShared:
 
     def test_beta_shared_mean(self, dgps: DGP) -> None:
         """Test that beta_shared has mean close to 0."""
-        beta_samples = dgps.beta_shared  # Shape: (REPS, P)
+        beta_samples = dgps.params.beta_shared  # Shape: (REPS, P)
         n_reps = beta_samples.shape[0]
 
         means = jnp.mean(beta_samples, axis=0)  # Shape: (P,)
@@ -218,7 +218,7 @@ class TestGenerateBetaSeparate:
 
     def test_beta_separate_mean(self, dgps: DGP) -> None:
         """Test that beta_separate has mean close to 0."""
-        beta_samples = dgps.beta_separate  # Shape: (REPS, K, P)
+        beta_samples = dgps.params.beta_separate  # Shape: (REPS, K, P)
         n_reps = beta_samples.shape[0]
 
         means = jnp.mean(beta_samples, axis=0)  # Shape: (K, P)
@@ -229,7 +229,7 @@ class TestGenerateBetaSeparate:
 
     def test_beta_separate_independence(self, dgps: DGP) -> None:
         """Test that rows of beta_separate are independent."""
-        beta_samples = dgps.beta_separate  # Shape: (REPS, K, P)
+        beta_samples = dgps.params.beta_separate  # Shape: (REPS, K, P)
         n_reps = beta_samples.shape[0]
 
         beta0 = beta_samples[:, 0, :]  # Shape: (REPS, P)
@@ -270,13 +270,13 @@ def test_outcome_prior_variance(dgps: DGP, which: str) -> None:
     var = jnp.var(samples, axis=0)  # Shape: (K?, N)
 
     if which.startswith('mulin'):
-        expected_var = dgps.sigma2_lin
+        expected_var = dgps.params.sigma2_lin
     elif which.startswith('muquad'):
-        expected_var = dgps.sigma2_quad + dgps.sigma2_mean
+        expected_var = dgps.params.sigma2_quad + dgps.params.sigma2_mean
     elif which == 'mu':
-        expected_var = dgps.sigma2_pri - dgps.sigma2_eps
+        expected_var = dgps.params.sigma2_pri - dgps.params.sigma2_eps
     elif which == 'y':
-        expected_var = dgps.sigma2_pri
+        expected_var = dgps.params.sigma2_pri
     else:  # pragma: no cover
         raise KeyError(which)
 
@@ -309,13 +309,13 @@ def test_outcome_pop_variance(dgps: DGP, which: str) -> None:
     var = jnp.mean(var, axis=0)  # Shape: (K?,)
 
     if which.startswith('mulin'):
-        expected_var = dgps.sigma2_lin
+        expected_var = dgps.params.sigma2_lin
     elif which.startswith('muquad'):
-        expected_var = dgps.sigma2_quad
+        expected_var = dgps.params.sigma2_quad
     elif which == 'mu':
-        expected_var = dgps.sigma2_pop - dgps.sigma2_eps
+        expected_var = dgps.params.sigma2_pop - dgps.params.sigma2_eps
     elif which == 'y':
-        expected_var = dgps.sigma2_pop
+        expected_var = dgps.params.sigma2_pop
     else:  # pragma: no cover
         raise KeyError(which)
 
@@ -328,11 +328,11 @@ def test_outcome_pop_variance(dgps: DGP, which: str) -> None:
 
 def test_variance_relationships(dgps: DGP) -> None:
     """Check some simple inequalities on variances."""
-    assert jnp.all(dgps.sigma2_pri >= 0)
-    assert jnp.all(dgps.sigma2_pop >= 0)
-    assert jnp.all(dgps.sigma2_mean >= 0)
-    assert jnp.all(dgps.sigma2_pri >= dgps.sigma2_pop)
-    assert jnp.all(dgps.sigma2_pop >= dgps.sigma2_eps)
+    assert jnp.all(dgps.params.sigma2_pri >= 0)
+    assert jnp.all(dgps.params.sigma2_pop >= 0)
+    assert jnp.all(dgps.params.sigma2_mean >= 0)
+    assert jnp.all(dgps.params.sigma2_pri >= dgps.params.sigma2_pop)
+    assert jnp.all(dgps.params.sigma2_pop >= dgps.params.sigma2_eps)
 
 
 @pytest.mark.parametrize(
@@ -349,7 +349,8 @@ def test_variance_relationships(dgps: DGP) -> None:
 )
 def test_rows_independent(dgps_lambda_zero: DGP, which: str) -> None:
     """Test that rows are independent when lambda=0."""
-    samples = getattr(dgps_lambda_zero, which)  # Shape: (REPS, K, N or P)
+    source = dgps_lambda_zero.params if which == 'beta_separate' else dgps_lambda_zero
+    samples = getattr(source, which)  # Shape: (REPS, K, N or P)
     n_reps = samples.shape[0]
 
     samples0 = samples[:, 0, :]  # Shape: (REPS, N or P)

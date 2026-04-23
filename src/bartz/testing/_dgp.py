@@ -233,39 +233,21 @@ def generate_outcome(
     return mu + eps * jnp.sqrt(sigma2_eps)
 
 
-class DGP(Module):
-    """Output of `gen_data`.
+class Params(Module):
+    """Output of `gen_params`: all quantities that do not depend on `n`.
 
     Parameters
     ----------
-    x
-        Predictors of shape (p, n), variance 1
-    y
-        Noisy outcomes of shape (k, n) or (n,)
     partition
         Predictor-outcome assignment partition of shape (k, p)
     beta_shared
         Shared linear coefficients of shape (p,)
     beta_separate
         Separate linear coefficients of shape (k, p)
-    mulin_shared
-        Linear mean at lambda=1 (shared), shape (k, n), rows identical
-    mulin_separate
-        Linear mean at lambda=0 (separate), shape (k, n), rows independent
-    mulin
-        Linear part of latent mean of shape (k, n)
     A_shared
         Shared quadratic coefficients of shape (p, p)
     A_separate
         Separate quadratic coefficients of shape (k, p, p)
-    muquad_shared
-        Quadratic mean at lambda=1 (shared), shape (k, n), rows identical
-    muquad_separate
-        Quadratic mean at lambda=0 (separate), shape (k, n), rows independent
-    muquad
-        Quadratic part of latent mean of shape (k, n)
-    mu
-        True latent means of shape (k, n)
     q
         Number of interactions per predictor
     lam
@@ -278,25 +260,12 @@ class DGP(Module):
         Variance of the error
     """
 
-    # Main outputs
-    x: Float[Array, 'p n']
-    y: Float[Array, 'k n'] | Float[Array, ' n']
-
-    # Intermediate results
     partition: Bool[Array, 'k p']
     beta_shared: Float[Array, ' p']
     beta_separate: Float[Array, 'k p']
-    mulin_shared: Float[Array, ' n']
-    mulin_separate: Float[Array, 'k n']
-    mulin: Float[Array, 'k n']
     A_shared: Float[Array, 'p p']
     A_separate: Float[Array, 'k p p']
-    muquad_shared: Float[Array, ' n']
-    muquad_separate: Float[Array, 'k n']
-    muquad: Float[Array, 'k n']
-    mu: Float[Array, 'k n']
 
-    # Params
     q: Integer[Array, '']
     lam: Float[Array, '']
     sigma2_lin: Float[Array, '']
@@ -320,6 +289,47 @@ class DGP(Module):
         """Variance of the mean function."""
         return self.sigma2_quad / (self.kurt_x - 1 + self.q)
 
+
+class DGP(Module):
+    """Output of `gen_data`.
+
+    Parameters
+    ----------
+    x
+        Predictors of shape (p, n), variance 1
+    y
+        Noisy outcomes of shape (k, n) or (n,)
+    mulin_shared
+        Linear mean at lambda=1 (shared), shape (n,)
+    mulin_separate
+        Linear mean at lambda=0 (separate), shape (k, n), rows independent
+    mulin
+        Linear part of latent mean of shape (k, n)
+    muquad_shared
+        Quadratic mean at lambda=1 (shared), shape (n,)
+    muquad_separate
+        Quadratic mean at lambda=0 (separate), shape (k, n), rows independent
+    muquad
+        Quadratic part of latent mean of shape (k, n)
+    mu
+        True latent means of shape (k, n)
+    params
+        Parameters of the DGP (see `Params`)
+    """
+
+    x: Float[Array, 'p n']
+    y: Float[Array, 'k n'] | Float[Array, ' n']
+
+    mulin_shared: Float[Array, ' n']
+    mulin_separate: Float[Array, 'k n']
+    mulin: Float[Array, 'k n']
+    muquad_shared: Float[Array, ' n']
+    muquad_separate: Float[Array, 'k n']
+    muquad: Float[Array, 'k n']
+    mu: Float[Array, 'k n']
+
+    params: Params
+
     def split(self, n_train: int | None = None) -> tuple['DGP', 'DGP']:
         """Split the data into training and test sets.
 
@@ -338,7 +348,7 @@ class DGP(Module):
         train = replace(
             self,
             x=self.x[:, :n_train],
-            y=self.y[:, :n_train],
+            y=self.y[..., :n_train],
             mulin_shared=self.mulin_shared[:n_train],
             mulin_separate=self.mulin_separate[:, :n_train],
             mulin=self.mulin[:, :n_train],
@@ -350,7 +360,7 @@ class DGP(Module):
         test = replace(
             self,
             x=self.x[:, n_train:],
-            y=self.y[:, n_train:],
+            y=self.y[..., n_train:],
             mulin_shared=self.mulin_shared[n_train:],
             mulin_separate=self.mulin_separate[:, n_train:],
             mulin=self.mulin[:, n_train:],
@@ -360,6 +370,119 @@ class DGP(Module):
             mu=self.mu[:, n_train:],
         )
         return train, test
+
+
+@partial(jit, static_argnames=('p', 'k'))
+def gen_params(
+    key: Key[Array, ''],
+    *,
+    p: int,
+    k: int,
+    q: Integer[Array, ''] | int,
+    lam: Float[Array, ''] | float,
+    sigma2_lin: Float[Array, ''] | float,
+    sigma2_quad: Float[Array, ''] | float,
+    sigma2_eps: Float[Array, ''] | float,
+) -> Params:
+    """Generate DGP parameters (no dependence on `n`).
+
+    Parameters
+    ----------
+    key
+        JAX random key
+    p
+        Number of predictors
+    k
+        Number of outcome components
+    q
+        Number of interactions per predictor (must be even and < p // k)
+    lam
+        Coupling parameter in [0, 1]. 0=independent, 1=identical components
+    sigma2_lin
+        Prior and expected population variance of the linear term
+    sigma2_quad
+        Expected population variance of the quadratic term
+    sigma2_eps
+        Variance of the error term
+
+    Returns
+    -------
+    A `Params` object with all the sampled coefficients and parameters.
+    """
+    assert p >= k, 'p must be at least k'
+
+    q = error_if(q, q % 2 != 0, 'q must be even')
+    q = error_if(q, q >= p // k, 'q must be less than p // k')
+
+    keys = split(key, 5)
+
+    partition = generate_partition(keys.pop(), p, k)
+    beta_shared = generate_beta_shared(keys.pop(), p, sigma2_lin)
+    beta_separate = generate_beta_separate(keys.pop(), partition, sigma2_lin)
+    A_shared = generate_A_shared(keys.pop(), p, q, sigma2_quad, Params.kurt_x)
+    A_separate = generate_A_separate(
+        keys.pop(), partition, q, sigma2_quad, Params.kurt_x
+    )
+
+    return Params(
+        partition=partition,
+        beta_shared=beta_shared,
+        beta_separate=beta_separate,
+        A_shared=A_shared,
+        A_separate=A_separate,
+        q=q,
+        lam=lam,
+        sigma2_lin=sigma2_lin,
+        sigma2_quad=sigma2_quad,
+        sigma2_eps=sigma2_eps,
+    )
+
+
+@partial(jit, static_argnames=('n',))
+def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
+    """Sample predictors and outcomes given fixed DGP parameters.
+
+    The output `y` always has shape `(k, n)`; squeezing to `(n,)` for
+    univariate outputs is done by `gen_data`.
+
+    Parameters
+    ----------
+    key
+        JAX random key
+    params
+        DGP parameters from `gen_params`
+    n
+        Number of observations
+
+    Returns
+    -------
+    A `DGP` object with `params` and the sampled data.
+    """
+    keys = split(key, 2)
+    p = params.beta_shared.shape[0]
+
+    x = generate_x(keys.pop(), n, p)
+    mulin_shared = compute_linear_mean_shared(params.beta_shared, x)
+    mulin_separate = compute_linear_mean_separate(params.beta_separate, x)
+    mulin = combine_mulin(mulin_shared, mulin_separate, params.lam)
+    muquad_shared = compute_muquad_shared(params.A_shared, x)
+    muquad_separate = compute_muquad_separate(params.A_separate, x)
+    muquad = combine_muquad(muquad_shared, muquad_separate, params.lam)
+    mu = mulin + muquad
+    y = generate_outcome(keys.pop(), mu, params.sigma2_eps)
+
+    return DGP(
+        x=x,
+        y=y,
+        mulin_shared=mulin_shared,
+        mulin_separate=mulin_separate,
+        mulin=mulin,
+        muquad_shared=muquad_shared,
+        muquad_separate=muquad_separate,
+        muquad=muquad,
+        mu=mu,
+        params=params,
+    )
 
 
 @partial(jit, static_argnames=('n', 'p', 'k'))
@@ -377,6 +500,10 @@ def gen_data(
 ) -> DGP:
     """Generate data from a quadratic multivariate DGP.
 
+    Thin wrapper around `gen_params` followed by `gen_data_from_params`.
+    To batch data generation across `n` (e.g. to fit memory), call
+    `gen_params` once and then invoke `gen_data_from_params` per batch.
+
     Parameters
     ----------
     key
@@ -386,7 +513,8 @@ def gen_data(
     p
         Number of predictors
     k
-        Number of outcome components
+        Number of outcome components. If `None`, produces a univariate
+        output with `y.shape == (n,)`.
     q
         Number of interactions per predictor (must be even and < p // k)
     lam
@@ -406,49 +534,18 @@ def gen_data(
     if squeeze:
         k = 1
 
-    assert p >= k, 'p must be at least k'
-
-    # check q
-    q = error_if(q, q % 2 != 0, 'q must be even')
-    q = error_if(q, q >= p // k, 'q must be less than p // k')
-
-    keys = split(key, 7)
-
-    x = generate_x(keys.pop(), n, p)
-    partition = generate_partition(keys.pop(), p, k)
-    beta_shared = generate_beta_shared(keys.pop(), p, sigma2_lin)
-    beta_separate = generate_beta_separate(keys.pop(), partition, sigma2_lin)
-    mulin_shared = compute_linear_mean_shared(beta_shared, x)
-    mulin_separate = compute_linear_mean_separate(beta_separate, x)
-    mulin = combine_mulin(mulin_shared, mulin_separate, lam)
-    A_shared = generate_A_shared(keys.pop(), p, q, sigma2_quad, DGP.kurt_x)
-    A_separate = generate_A_separate(keys.pop(), partition, q, sigma2_quad, DGP.kurt_x)
-    muquad_shared = compute_muquad_shared(A_shared, x)
-    muquad_separate = compute_muquad_separate(A_separate, x)
-    muquad = combine_muquad(muquad_shared, muquad_separate, lam)
-    mu = mulin + muquad
-    y = generate_outcome(keys.pop(), mu, sigma2_eps)
-    if squeeze:
-        y = y.squeeze(0)
-
-    return DGP(
-        x=x,
-        y=y,
-        partition=partition,
-        beta_shared=beta_shared,
-        beta_separate=beta_separate,
-        mulin_shared=mulin_shared,
-        mulin_separate=mulin_separate,
-        mulin=mulin,
-        A_shared=A_shared,
-        A_separate=A_separate,
-        muquad_shared=muquad_shared,
-        muquad_separate=muquad_separate,
-        muquad=muquad,
-        mu=mu,
+    keys = split(key, 2)
+    params = gen_params(
+        keys.pop(),
+        p=p,
+        k=k,
         q=q,
         lam=lam,
         sigma2_lin=sigma2_lin,
         sigma2_quad=sigma2_quad,
         sigma2_eps=sigma2_eps,
     )
+    dgp = gen_data_from_params(keys.pop(), params, n=n)
+    if squeeze:
+        dgp = replace(dgp, y=dgp.y.squeeze(0))
+    return dgp

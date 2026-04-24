@@ -234,66 +234,59 @@ class Params(Module):
         y_ij = mu_ij + eps_ij * sqrt(sigma2_eps),   eps_ij ~iid N(0, 1),
 
     possibly thresholded at 0 for binary components (see `outcome_type`).
-
-    Parameters
-    ----------
-    partition
-        Predictor-outcome assignment partition of shape (k, p), used only at
-        ``lam < 1``. Row ``i`` is the binary mask of predictors assigned to
-        component ``i``; rows are disjoint and each has either ``p // k`` or
-        ``p // k + 1`` entries.
-    beta_shared
-        Shared linear coefficients of shape (p,), used at ``lam > 0``.
-    beta_separate
-        Separate linear coefficients of shape (k, p), used at ``lam < 1``.
-        Row ``i`` is supported on ``partition[i]``.
-    A_shared
-        Shared quadratic coefficients of shape (p, p), used at ``lam > 0``.
-        Nonzero on a symmetric band of ``q + 1`` entries per row/col.
-    A_separate
-        Separate quadratic coefficients of shape (k, p, p), used at
-        ``lam < 1``. Slice ``i`` is supported on the outer product of
-        ``partition[i]`` with itself.
-    q
-        Number of quadratic interactions per predictor (even, ``< p // k``).
-    lam
-        Coupling parameter in ``[0, 1]``: 0 = independent components,
-        1 = identical components.
-    sigma2_lin
-        Prior and expected population variance of the linear term of ``mu``.
-    sigma2_quad
-        Expected population variance of the quadratic term of ``mu``.
-    sigma2_eps
-        Variance of the additive error.
-    outcome_type
-        Per-component outcome type, either a single `OutcomeType` applied to
-        every row, or a tuple of length ``k`` for mixed outcomes. For binary
-        components the continuous latent ``mu + eps * sqrt(sigma2_eps)`` is
-        thresholded at 0, yielding 0.0/1.0 floats. Unlike the standard probit
-        convention used by `bartz.mcmcstep.init` (which fixes the latent noise
-        variance to 1), here the binary latents share the same ``sigma2_eps``
-        as the continuous ones, so the marginal success probability is
-        ``Phi(mu / sqrt(sigma2_eps))``.
-    kurt_x
-        Kurtosis of the predictor distribution. Defaults to ``9 / 5``, the
-        kurtosis of the uniform distribution used by `gen_data_from_params`.
     """
 
     partition: Bool[Array, 'k p']
+    """Predictor-outcome assignment partition of shape (k, p), used only at
+    ``lam < 1``. Row ``i`` is the binary mask of predictors assigned to
+    component ``i``; rows are disjoint and each has either ``p // k`` or
+    ``p // k + 1`` entries."""
+
     beta_shared: Float[Array, ' p']
+    """Shared linear coefficients of shape (p,), used at ``lam > 0``."""
+
     beta_separate: Float[Array, 'k p']
+    """Separate linear coefficients of shape (k, p), used at ``lam < 1``.
+    Row ``i`` is supported on ``partition[i]``."""
+
     A_shared: Float[Array, 'p p']
+    """Shared quadratic coefficients of shape (p, p), used at ``lam > 0``.
+    Nonzero on a symmetric band of ``q + 1`` entries per row/col."""
+
     A_separate: Float[Array, 'k p p']
+    """Separate quadratic coefficients of shape (k, p, p), used at
+    ``lam < 1``. Slice ``i`` is supported on the outer product of
+    ``partition[i]`` with itself."""
 
     q: Integer[Array, '']
+    """Number of quadratic interactions per predictor (even, ``< p // k``)."""
+
     lam: Float[Array, '']
+    """Coupling parameter in ``[0, 1]``: 0 = independent components,
+    1 = identical components."""
+
     sigma2_lin: Float[Array, '']
+    """Prior and expected population variance of the linear term of ``mu``."""
+
     sigma2_quad: Float[Array, '']
+    """Expected population variance of the quadratic term of ``mu``."""
+
     sigma2_eps: Float[Array, '']
+    """Variance of the additive error."""
 
     outcome_type: OutcomeType | tuple[OutcomeType, ...] = field(static=True)
+    """Per-component outcome type, either a single `OutcomeType` applied to
+    every row, or a tuple of length ``k`` for mixed outcomes. For binary
+    components the continuous latent ``mu + eps * sqrt(sigma2_eps)`` is
+    thresholded at 0, yielding 0.0/1.0 floats. Unlike the standard probit
+    convention used by `bartz.mcmcstep.init` (which fixes the latent noise
+    variance to 1), here the binary latents share the same ``sigma2_eps``
+    as the continuous ones, so the marginal success probability is
+    ``Phi(mu / sqrt(sigma2_eps))``."""
 
     kurt_x: float = 9 / 5  # kurtosis of uniform distribution
+    """Kurtosis of the predictor distribution. Defaults to ``9 / 5``, the
+    kurtosis of the uniform distribution used by `gen_data_from_params`."""
 
     @property
     def sigma2_pri(self) -> Float[Array, '']:
@@ -319,44 +312,38 @@ class DGP(Module):
     ``_separate`` fields are the ``lam=0`` limit (independent across
     components), and the plain names are the realized mix at the sampled
     ``params.lam``.
-
-    Parameters
-    ----------
-    x
-        Predictors of shape (p, n), marginally mean 0 and variance 1.
-    y
-        Noisy outcomes of shape (k, n), or (n,) if `gen_data` was called with
-        ``k=None``.
-    mulin_shared
-        Shared linear mean of shape (n,).
-    mulin_separate
-        Separate linear mean of shape (k, n), rows independent.
-    mulin
-        Linear part of the latent mean of shape (k, n).
-    muquad_shared
-        Shared quadratic mean of shape (n,).
-    muquad_separate
-        Separate quadratic mean of shape (k, n), rows independent.
-    muquad
-        Quadratic part of the latent mean of shape (k, n).
-    mu
-        Latent mean ``mulin + muquad`` of shape (k, n).
-    params
-        DGP parameters, see `Params`.
     """
 
     x: Float[Array, 'p n']
+    """Predictors of shape (p, n), marginally mean 0 and variance 1."""
+
     y: Float[Array, 'k n'] | Float[Array, ' n']
+    """Noisy outcomes of shape (k, n), or (n,) if `gen_data` was called with
+    ``k=None``."""
 
     mulin_shared: Float[Array, ' n']
+    """Shared linear mean of shape (n,)."""
+
     mulin_separate: Float[Array, 'k n']
+    """Separate linear mean of shape (k, n), rows independent."""
+
     mulin: Float[Array, 'k n']
+    """Linear part of the latent mean of shape (k, n)."""
+
     muquad_shared: Float[Array, ' n']
+    """Shared quadratic mean of shape (n,)."""
+
     muquad_separate: Float[Array, 'k n']
+    """Separate quadratic mean of shape (k, n), rows independent."""
+
     muquad: Float[Array, 'k n']
+    """Quadratic part of the latent mean of shape (k, n)."""
+
     mu: Float[Array, 'k n']
+    """Latent mean ``mulin + muquad`` of shape (k, n)."""
 
     params: Params
+    """DGP parameters, see `Params`."""
 
     def split(self, n_train: int | None = None) -> tuple['DGP', 'DGP']:
         """Split the data into training and test sets.

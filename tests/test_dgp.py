@@ -25,12 +25,11 @@
 """Tests `bartz.testing.gen_data`."""
 
 from collections.abc import Mapping
-from dataclasses import replace
 from functools import partial
 from types import MappingProxyType
 
 import pytest
-from jax import jit, random, tree, vmap
+from jax import jit, random, vmap
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float, Key
 from numpy.testing import assert_allclose, assert_array_equal, assert_array_less
@@ -455,16 +454,73 @@ class TestPartitionedInteractionPattern:
 
 
 def test_univariate(keys: split) -> None:
-    """Check that k=None produces the same result with squeezed y."""
+    """Check that k=None skips the separate path.
+
+    At k=1/lam=1, the univariate output is the k=1 multivariate output
+    with the leading axis squeezed away.
+    """
     key = keys.pop()
     kw = dict(KWARGS)
-    kw.update(lam=0.5, k=1)
+    kw.update(lam=1.0, k=1)
     dgp_mv = gen_data(key, **kw)
-    kw.update(k=None)
-    key = random.clone(key)
-    dgp_uv = gen_data(key, **kw)
-    dgp_mv = replace(dgp_mv, y=dgp_mv.y.squeeze(0))
-    tree.map(partial(assert_array_equal, strict=True), dgp_mv, dgp_uv)
+    kw.update(lam=None, k=None)
+    dgp_uv = gen_data(random.clone(key), **kw)
+
+    assert dgp_uv.params.partition is None
+    assert dgp_uv.params.beta_separate is None
+    assert dgp_uv.params.A_separate is None
+    assert dgp_uv.params.lam is None
+    assert dgp_uv.mulin_separate is None
+    assert dgp_uv.muquad_separate is None
+    assert dgp_mv.params.partition is not None
+
+    assert_array_equal(dgp_uv.x, dgp_mv.x)
+    assert_array_equal(dgp_uv.params.beta_shared, dgp_mv.params.beta_shared)
+    assert_array_equal(dgp_uv.params.A_shared, dgp_mv.params.A_shared)
+    assert_array_equal(dgp_uv.mulin_shared, dgp_mv.mulin_shared)
+    assert_array_equal(dgp_uv.muquad_shared, dgp_mv.muquad_shared)
+    assert_array_equal(dgp_uv.mulin, dgp_mv.mulin.squeeze(0))
+    assert_array_equal(dgp_uv.muquad, dgp_mv.muquad.squeeze(0))
+    assert_array_equal(dgp_uv.mu, dgp_mv.mu.squeeze(0))
+    assert_array_equal(dgp_uv.y, dgp_mv.y.squeeze(0))
+
+
+def test_lam_required_when_multivariate(keys: split) -> None:
+    """`lam=None` with `k` set raises `ValueError`."""
+    with pytest.raises(ValueError, match='lam is required'):
+        gen_data(keys.pop(), lam=None, **KWARGS)
+
+
+def test_lam_forbidden_when_univariate(keys: split) -> None:
+    """`lam` not None with `k=None` raises `ValueError`."""
+    kw = dict(KWARGS, k=None)
+    with pytest.raises(ValueError, match='lam must be None'):
+        gen_data(keys.pop(), lam=0.5, **kw)
+
+
+def test_univariate_split(keys: split) -> None:
+    """`DGP.split()` on a univariate DGP preserves `None` separate fields.
+
+    Also checks that the shared/blended fields are sliced consistently.
+    """
+    kw = dict(KWARGS, k=None)
+    dgp = gen_data(keys.pop(), **kw)
+    n_train = kw['n'] // 3
+    train, test = dgp.split(n_train)
+
+    for part, length in ((train, n_train), (test, kw['n'] - n_train)):
+        assert part.params.partition is None
+        assert part.params.beta_separate is None
+        assert part.params.A_separate is None
+        assert part.mulin_separate is None
+        assert part.muquad_separate is None
+        assert part.y.shape == (length,)
+        assert part.mulin_shared.shape == (length,)
+        assert part.muquad_shared.shape == (length,)
+        assert part.mulin.shape == (length,)
+        assert part.muquad.shape == (length,)
+        assert part.mu.shape == (length,)
+        assert part.x.shape == (kw['p'], length)
 
 
 class TestOutcomeType:
@@ -477,7 +533,7 @@ class TestOutcomeType:
 
     def test_binary_univariate(self, keys: split) -> None:
         """Binary univariate output contains only 0.0/1.0 float values."""
-        kw = dict(KWARGS, lam=0.5, k=None, outcome_type='binary')
+        kw = dict(KWARGS, k=None, outcome_type='binary')
         dgp = gen_data(keys.pop(), **kw)
         assert dgp.y.shape == (kw['n'],)
         assert dgp.y.dtype == jnp.float32
@@ -538,6 +594,6 @@ class TestOutcomeType:
 
     def test_validation_tuple_with_univariate(self, keys: split) -> None:
         """A tuple combined with the univariate path (`k is None`) raises."""
-        kw = dict(KWARGS, lam=0.5, k=None, outcome_type=('continuous',))
+        kw = dict(KWARGS, k=None, outcome_type=('continuous',))
         with pytest.raises(ValueError, match='tuple outcome_type requires'):
             gen_data(keys.pop(), **kw)

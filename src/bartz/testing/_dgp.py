@@ -221,7 +221,8 @@ def generate_outcome(
 class Params(Module):
     """Output of `gen_params`: all DGP quantities that do not depend on `n`.
 
-    The latent mean for component ``i`` at observation ``j`` is
+    For multivariate outputs (``k is not None``) the latent mean for
+    component ``i`` at observation ``j`` is
 
         mu_ij = sqrt(lam) * (beta_shared . x_j + x_j^T A_shared x_j)
               + sqrt(1 - lam) * (beta_separate_i . x_j + x_j^T A_separate_i x_j)
@@ -229,41 +230,51 @@ class Params(Module):
     with ``lam`` in ``[0, 1]`` interpolating between fully independent
     components (``lam=0``, each row uses its own coefficients restricted to the
     variables it owns via `partition`) and fully shared ones (``lam=1``, all
-    rows share the same coefficients). The outcome is
+    rows share the same coefficients).
+
+    For univariate outputs (``k is None``) the separate path is skipped and
+
+        mu_j = beta_shared . x_j + x_j^T A_shared x_j;
+
+    ``partition``, ``beta_separate``, ``A_separate`` and ``lam`` are all
+    ``None``. The outcome is
 
         y_ij = mu_ij + eps_ij * sqrt(sigma2_eps),   eps_ij ~iid N(0, 1),
 
     possibly thresholded at 0 for binary components (see `outcome_type`).
     """
 
-    partition: Bool[Array, 'k p']
+    partition: Bool[Array, 'k p'] | None
     """Predictor-outcome assignment partition of shape (k, p), used only at
     ``lam < 1``. Row ``i`` is the binary mask of predictors assigned to
     component ``i``; rows are disjoint and each has either ``p // k`` or
-    ``p // k + 1`` entries."""
+    ``p // k + 1`` entries. ``None`` in univariate mode (``k is None``)."""
 
     beta_shared: Float[Array, ' p']
     """Shared linear coefficients of shape (p,), used at ``lam > 0``."""
 
-    beta_separate: Float[Array, 'k p']
+    beta_separate: Float[Array, 'k p'] | None
     """Separate linear coefficients of shape (k, p), used at ``lam < 1``.
-    Row ``i`` is supported on ``partition[i]``."""
+    Row ``i`` is supported on ``partition[i]``. ``None`` in univariate
+    mode (``k is None``)."""
 
     A_shared: Float[Array, 'p p']
     """Shared quadratic coefficients of shape (p, p), used at ``lam > 0``.
     Nonzero on a symmetric band of ``q + 1`` entries per row/col."""
 
-    A_separate: Float[Array, 'k p p']
+    A_separate: Float[Array, 'k p p'] | None
     """Separate quadratic coefficients of shape (k, p, p), used at
     ``lam < 1``. Slice ``i`` is supported on the outer product of
-    ``partition[i]`` with itself."""
+    ``partition[i]`` with itself. ``None`` in univariate mode
+    (``k is None``)."""
 
     q: Integer[Array, '']
     """Number of quadratic interactions per predictor (even, ``< p // k``)."""
 
-    lam: Float[Array, '']
+    lam: Float[Array, ''] | None
     """Coupling parameter in ``[0, 1]``: 0 = independent components,
-    1 = identical components."""
+    1 = identical components. ``None`` iff univariate (``partition is
+    None``), in which case only the shared path contributes to ``mu``."""
 
     sigma2_lin: Float[Array, '']
     """Prior and expected population variance of the linear term of ``mu``."""
@@ -324,23 +335,28 @@ class DGP(Module):
     mulin_shared: Float[Array, ' n']
     """Shared linear mean of shape (n,)."""
 
-    mulin_separate: Float[Array, 'k n']
-    """Separate linear mean of shape (k, n), rows independent."""
+    mulin_separate: Float[Array, 'k n'] | None
+    """Separate linear mean of shape (k, n), rows independent. ``None`` in
+    univariate mode (``k is None``)."""
 
-    mulin: Float[Array, 'k n']
-    """Linear part of the latent mean of shape (k, n)."""
+    mulin: Float[Array, 'k n'] | Float[Array, ' n']
+    """Linear part of the latent mean of shape (k, n), or (n,) in univariate
+    mode (``k is None``, equal to ``mulin_shared``)."""
 
     muquad_shared: Float[Array, ' n']
     """Shared quadratic mean of shape (n,)."""
 
-    muquad_separate: Float[Array, 'k n']
-    """Separate quadratic mean of shape (k, n), rows independent."""
+    muquad_separate: Float[Array, 'k n'] | None
+    """Separate quadratic mean of shape (k, n), rows independent. ``None`` in
+    univariate mode (``k is None``)."""
 
-    muquad: Float[Array, 'k n']
-    """Quadratic part of the latent mean of shape (k, n)."""
+    muquad: Float[Array, 'k n'] | Float[Array, ' n']
+    """Quadratic part of the latent mean of shape (k, n), or (n,) in
+    univariate mode (``k is None``, equal to ``muquad_shared``)."""
 
-    mu: Float[Array, 'k n']
-    """Latent mean ``mulin + muquad`` of shape (k, n)."""
+    mu: Float[Array, 'k n'] | Float[Array, ' n']
+    """Latent mean ``mulin + muquad`` of shape (k, n), or (n,) in univariate
+    mode (``k is None``)."""
 
     params: Params
     """DGP parameters, see `Params`."""
@@ -365,24 +381,40 @@ class DGP(Module):
             x=self.x[:, :n_train],
             y=self.y[..., :n_train],
             mulin_shared=self.mulin_shared[:n_train],
-            mulin_separate=self.mulin_separate[:, :n_train],
-            mulin=self.mulin[:, :n_train],
+            mulin_separate=(
+                None
+                if self.mulin_separate is None
+                else self.mulin_separate[:, :n_train]
+            ),
+            mulin=self.mulin[..., :n_train],
             muquad_shared=self.muquad_shared[:n_train],
-            muquad_separate=self.muquad_separate[:, :n_train],
-            muquad=self.muquad[:, :n_train],
-            mu=self.mu[:, :n_train],
+            muquad_separate=(
+                None
+                if self.muquad_separate is None
+                else self.muquad_separate[:, :n_train]
+            ),
+            muquad=self.muquad[..., :n_train],
+            mu=self.mu[..., :n_train],
         )
         test = replace(
             self,
             x=self.x[:, n_train:],
             y=self.y[..., n_train:],
             mulin_shared=self.mulin_shared[n_train:],
-            mulin_separate=self.mulin_separate[:, n_train:],
-            mulin=self.mulin[:, n_train:],
+            mulin_separate=(
+                None
+                if self.mulin_separate is None
+                else self.mulin_separate[:, n_train:]
+            ),
+            mulin=self.mulin[..., n_train:],
             muquad_shared=self.muquad_shared[n_train:],
-            muquad_separate=self.muquad_separate[:, n_train:],
-            muquad=self.muquad[:, n_train:],
-            mu=self.mu[:, n_train:],
+            muquad_separate=(
+                None
+                if self.muquad_separate is None
+                else self.muquad_separate[:, n_train:]
+            ),
+            muquad=self.muquad[..., n_train:],
+            mu=self.mu[..., n_train:],
         )
         return train, test
 
@@ -392,9 +424,9 @@ def gen_params(
     key: Key[Array, ''],
     *,
     p: int,
-    k: int,
+    k: int | None,
     q: Integer[Array, ''] | int,
-    lam: Float[Array, ''] | float,
+    lam: Float[Array, ''] | float | None = None,
     sigma2_lin: Float[Array, ''] | float,
     sigma2_quad: Float[Array, ''] | float,
     sigma2_eps: Float[Array, ''] | float,
@@ -412,9 +444,14 @@ def gen_params(
     p
         Number of predictors.
     k
-        Number of outcome components.
+        Number of outcome components. If `None`, generate a univariate DGP
+        and skip the separate code path: ``partition``, ``beta_separate``,
+        ``A_separate`` and ``lam`` are all set to ``None`` on the returned
+        `Params`, and only the shared coefficients are drawn.
     q
+        See `Params`.
     lam
+        Coupling parameter; must be ``None`` iff ``k is None``. See `Params`.
     sigma2_lin
     sigma2_quad
     sigma2_eps
@@ -422,7 +459,8 @@ def gen_params(
     outcome_type
         ``'continuous'``, ``'binary'``, an `OutcomeType`, or a tuple of length
         ``k`` for mixed outcomes. Tuples with all elements equal are collapsed
-        to the scalar form. See `Params` for the semantics.
+        to the scalar form. Tuples are not allowed when ``k is None``. See
+        `Params` for the semantics.
 
     Returns
     -------
@@ -431,11 +469,22 @@ def gen_params(
     Raises
     ------
     ValueError
-        If ``outcome_type`` is a tuple whose length does not match ``k``.
+        If ``outcome_type`` is a tuple whose length does not match ``k``, or
+        if a tuple ``outcome_type`` is combined with ``k=None``, or if
+        ``(lam is None) != (k is None)``.
     """
-    assert p >= k, 'p must be at least k'
+    if (lam is None) != (k is None):
+        msg = (
+            'lam must be None when k is None'
+            if k is None
+            else 'lam is required when k is not None'
+        )
+        raise ValueError(msg)
 
     if isinstance(outcome_type, tuple):
+        if k is None:
+            msg = 'tuple outcome_type requires a multivariate outcome (k != None)'
+            raise ValueError(msg)
         types = tuple(OutcomeType(t) for t in outcome_type)
         if len(types) != k:
             msg = f'outcome_type has length {len(types)} but k={k}'
@@ -444,18 +493,22 @@ def gen_params(
     else:
         outcome_type = OutcomeType(outcome_type)
 
-    q = error_if(q, q % 2 != 0, 'q must be even')
-    q = error_if(q, q >= p // k, 'q must be less than p // k')
-
     keys = split(key, 5)
 
-    partition = generate_partition(keys.pop(), p, k)
     beta_shared = generate_beta_shared(keys.pop(), p, sigma2_lin)
-    beta_separate = generate_beta_separate(keys.pop(), partition, sigma2_lin)
     A_shared = generate_A_shared(keys.pop(), p, q, sigma2_quad, Params.kurt_x)
-    A_separate = generate_A_separate(
-        keys.pop(), partition, q, sigma2_quad, Params.kurt_x
-    )
+
+    if k is None:
+        partition = None
+        beta_separate = None
+        A_separate = None
+    else:
+        assert p >= k, 'p must be at least k'
+        partition = generate_partition(keys.pop(), p, k)
+        beta_separate = generate_beta_separate(keys.pop(), partition, sigma2_lin)
+        A_separate = generate_A_separate(
+            keys.pop(), partition, q, sigma2_quad, Params.kurt_x
+        )
 
     return Params(
         partition=partition,
@@ -497,11 +550,19 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
 
     x = generate_x(keys.pop(), n, p)
     mulin_shared = compute_linear_mean_shared(params.beta_shared, x)
-    mulin_separate = compute_linear_mean_separate(params.beta_separate, x)
-    mulin = combine_mulin(mulin_shared, mulin_separate, params.lam)
     muquad_shared = compute_muquad_shared(params.A_shared, x)
-    muquad_separate = compute_muquad_separate(params.A_separate, x)
-    muquad = combine_muquad(muquad_shared, muquad_separate, params.lam)
+
+    if params.partition is None:
+        mulin_separate = None
+        muquad_separate = None
+        mulin = mulin_shared
+        muquad = muquad_shared
+    else:
+        mulin_separate = compute_linear_mean_separate(params.beta_separate, x)
+        muquad_separate = compute_muquad_separate(params.A_separate, x)
+        mulin = combine_mulin(mulin_shared, mulin_separate, params.lam)
+        muquad = combine_muquad(muquad_shared, muquad_separate, params.lam)
+
     mu = mulin + muquad
     y = generate_outcome(keys.pop(), mu, params.sigma2_eps, params.outcome_type)
 
@@ -527,7 +588,7 @@ def gen_data(
     p: int,
     k: int | None = None,
     q: Integer[Array, ''] | int,
-    lam: Float[Array, ''] | float,
+    lam: Float[Array, ''] | float | None = None,
     sigma2_lin: Float[Array, ''] | float,
     sigma2_quad: Float[Array, ''] | float,
     sigma2_eps: Float[Array, ''] | float,
@@ -550,7 +611,7 @@ def gen_data(
         Number of predictors.
     k
         Number of outcome components. If `None`, produces a univariate output
-        with ``y.shape == (n,)``; not compatible with a tuple `outcome_type`.
+        with ``y.shape == (n,)`` and skips the separate code path entirely.
     q
     lam
     sigma2_lin
@@ -562,20 +623,7 @@ def gen_data(
     Returns
     -------
     A `DGP` object with the sampled data and parameters.
-
-    Raises
-    ------
-    ValueError
-        If ``outcome_type`` is a tuple but ``k`` is `None`.
     """
-    if isinstance(outcome_type, tuple) and k is None:
-        msg = 'tuple outcome_type requires a multivariate outcome (k != None)'
-        raise ValueError(msg)
-
-    squeeze = k is None
-    if squeeze:
-        k = 1
-
     keys = split(key, 2)
     params = gen_params(
         keys.pop(),
@@ -588,7 +636,4 @@ def gen_data(
         sigma2_eps=sigma2_eps,
         outcome_type=outcome_type,
     )
-    dgp = gen_data_from_params(keys.pop(), params, n=n)
-    if squeeze:
-        dgp = replace(dgp, y=dgp.y.squeeze(0))
-    return dgp
+    return gen_data_from_params(keys.pop(), params, n=n)

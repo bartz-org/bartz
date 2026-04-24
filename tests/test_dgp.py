@@ -37,6 +37,7 @@ from numpy.testing import assert_allclose, assert_array_equal, assert_array_less
 from scipy.stats import norm
 
 from bartz.jaxext import split
+from bartz.mcmcstep import OutcomeType
 from bartz.testing import DGP, gen_data
 from bartz.testing._dgp import (
     generate_partition,
@@ -464,3 +465,79 @@ def test_univariate(keys: split) -> None:
     dgp_uv = gen_data(key, **kw)
     dgp_mv = replace(dgp_mv, y=dgp_mv.y.squeeze(0))
     tree.map(partial(assert_array_equal, strict=True), dgp_mv, dgp_uv)
+
+
+class TestOutcomeType:
+    """Tests for the `outcome_type` parameter of `gen_data`."""
+
+    def test_default_is_continuous(self, keys: split) -> None:
+        """Default `outcome_type` stores `OutcomeType.continuous` on Params."""
+        dgp = gen_data(keys.pop(), lam=0.5, **KWARGS)
+        assert dgp.params.outcome_type is OutcomeType.continuous
+
+    def test_binary_univariate(self, keys: split) -> None:
+        """Binary univariate output contains only 0.0/1.0 float values."""
+        kw = dict(KWARGS, lam=0.5, k=None, outcome_type='binary')
+        dgp = gen_data(keys.pop(), **kw)
+        assert dgp.y.shape == (kw['n'],)
+        assert dgp.y.dtype == jnp.float32
+        assert_array_equal(jnp.unique(dgp.y), jnp.array([0.0, 1.0]))
+        assert dgp.params.outcome_type is OutcomeType.binary
+
+    def test_binary_multivariate(self, keys: split) -> None:
+        """Binary multivariate output contains only 0.0/1.0 in every row."""
+        kw = dict(KWARGS, lam=0.5, outcome_type='binary')
+        dgp = gen_data(keys.pop(), **kw)
+        assert dgp.y.shape == (kw['k'], kw['n'])
+        assert_array_equal(jnp.unique(dgp.y), jnp.array([0.0, 1.0]))
+
+    def test_binary_threshold_matches_latent(self, keys: split) -> None:
+        """With the same key, binary `y` equals `(continuous_y > 0)`.
+
+        The key flow in `gen_data_from_params` is independent of outcome_type,
+        so generating with `'continuous'` and `'binary'` under the same top
+        level key must yield latents that differ only by the final threshold.
+        """
+        kw = dict(KWARGS, lam=0.5)
+        key = keys.pop()
+        dgp_cont = gen_data(key, **kw)
+        dgp_bin = gen_data(random.clone(key), outcome_type='binary', **kw)
+        assert_array_equal(dgp_bin.y, (dgp_cont.y > 0).astype(jnp.float32))
+
+    def test_mixed(self, keys: split) -> None:
+        """Mixed outcome_type: binary rows are 0/1, continuous rows match the baseline."""
+        kw = dict(KWARGS, lam=0.5)
+        assert kw['k'] == 3
+        key = keys.pop()
+        dgp_cont = gen_data(key, **kw)
+        dgp_mix = gen_data(
+            random.clone(key), outcome_type=('continuous', 'binary', 'continuous'), **kw
+        )
+        assert dgp_mix.params.outcome_type == (
+            OutcomeType.continuous,
+            OutcomeType.binary,
+            OutcomeType.continuous,
+        )
+        # continuous rows unchanged
+        assert_array_equal(dgp_mix.y[0], dgp_cont.y[0])
+        assert_array_equal(dgp_mix.y[2], dgp_cont.y[2])
+        # binary row is the threshold of the latent
+        assert_array_equal(dgp_mix.y[1], (dgp_cont.y[1] > 0).astype(jnp.float32))
+
+    def test_all_same_tuple_collapses_to_scalar(self, keys: split) -> None:
+        """A tuple of identical types is stored as a scalar `OutcomeType`."""
+        kw = dict(KWARGS, lam=0.5, outcome_type=('binary', 'binary', 'binary'))
+        dgp = gen_data(keys.pop(), **kw)
+        assert dgp.params.outcome_type is OutcomeType.binary
+
+    def test_validation_tuple_wrong_length(self, keys: split) -> None:
+        """A tuple whose length does not match `k` raises `ValueError`."""
+        kw = dict(KWARGS, lam=0.5, outcome_type=('continuous', 'binary'))
+        with pytest.raises(ValueError, match='outcome_type has length'):
+            gen_data(keys.pop(), **kw)
+
+    def test_validation_tuple_with_univariate(self, keys: split) -> None:
+        """A tuple combined with the univariate path (`k is None`) raises."""
+        kw = dict(KWARGS, lam=0.5, k=None, outcome_type=('continuous',))
+        with pytest.raises(ValueError, match='tuple outcome_type requires'):
+            gen_data(keys.pop(), **kw)

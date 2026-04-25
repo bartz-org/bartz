@@ -268,6 +268,12 @@ class mc_gbart(Module):
         if ntree is None:
             ntree = 50 if type == 'pbart' else 200
 
+        # round up ndpost (across-chains total) to a multiple of num_chains
+        # and convert to per-chain n_save for Bart
+        mc_cores_kw = process_mc_cores(y_train, mc_cores)
+        num_chains = mc_cores_kw['num_chains'] or 1
+        n_save = ndpost // num_chains + bool(ndpost % num_chains)
+
         # set most calling arguments for Bart
         kwargs: dict = dict(
             x_train=x_train,
@@ -294,13 +300,13 @@ class mc_gbart(Module):
             w=w,
             num_trees=ntree,
             numcut=numcut,
-            ndpost=ndpost,
+            n_save=n_save,
             nskip=nskip,
             keepevery=keepevery,
             printevery=printevery,
             seed=seed,
             maxdepth=6,
-            **process_mc_cores(y_train, mc_cores),
+            **mc_cores_kw,
         )
 
         # set min_points_per_leaf unless the user set it already

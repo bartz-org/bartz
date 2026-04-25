@@ -83,19 +83,19 @@ class PredictKind(Enum):
     ``(k, m)`` for multivariate regression)."""
 
     mean_samples = 'mean_samples'
-    """Per-sample conditional mean, shape ``(ndpost, m)`` (or ``(ndpost,
-    k, m)``). For binary regression, this is the probit-transformed
-    sum-of-trees."""
+    """Per-sample conditional mean, shape ``(num_chains * n_save, m)``
+    (or ``(num_chains * n_save, k, m)``). For binary regression, this is
+    the probit-transformed sum-of-trees."""
 
     outcome_samples = 'outcome_samples'
-    """Samples of the outcome variable, shape ``(ndpost, m)`` (or
-    ``(ndpost, k, m)``). For binary regression, these are Bernoulli
-    draws. For continuous regression, these are Gaussian draws with the
-    posterior noise variance."""
+    """Samples of the outcome variable, shape ``(num_chains * n_save,
+    m)`` (or ``(num_chains * n_save, k, m)``). For binary regression,
+    these are Bernoulli draws. For continuous regression, these are
+    Gaussian draws with the posterior noise variance."""
 
     latent_samples = 'latent_samples'
-    """Raw sum-of-trees values, shape ``(ndpost, m)`` (or ``(ndpost, k,
-    m)``)."""
+    """Raw sum-of-trees values, shape ``(num_chains * n_save, m)`` (or
+    ``(num_chains * n_save, k, m)``)."""
 
 
 class DataFrame(Protocol):
@@ -265,10 +265,9 @@ class Bart(Module):
         to the maximum value of an unsigned integer type, like 255.
 
         Ignored if `xinfo` is specified.
-    ndpost
-        The number of MCMC samples to save, after burn-in. `ndpost` is the
-        total number of samples across all chains. `ndpost` is rounded up to the
-        first multiple of `num_chains`.
+    n_save
+        The number of MCMC samples to save, after burn-in, per chain. The
+        total trace length across all chains is ``num_chains * n_save``.
     nskip
         The number of initial MCMC samples to discard as burn-in. This number
         of samples is discarded from each chain.
@@ -363,7 +362,7 @@ class Bart(Module):
         w: Float[Array, ' n'] | Series | None = None,
         num_trees: int = 200,
         numcut: int = 255,
-        ndpost: int = 1000,
+        n_save: int = 1000,
         nskip: int = 1000,
         keepevery: int = 1,
         printevery: int | None = 100,
@@ -436,7 +435,7 @@ class Bart(Module):
             nskip,
         )
         result = self._run_mcmc(
-            initial_state, ndpost, nskip, keepevery, printevery, seed, run_mcmc_kw
+            initial_state, n_save, nskip, keepevery, printevery, seed, run_mcmc_kw
         )
 
         # set public attributes
@@ -527,12 +526,20 @@ class Bart(Module):
         return mean_samples
 
     @property
-    def ndpost(self) -> int:
-        """The total number of posterior samples after burn-in across all chains.
+    def n_save(self) -> int:
+        """The number of posterior samples after burn-in saved per chain."""
+        *_, n_save = self._main_trace.grow_prop_count.shape
+        return n_save
 
-        May be larger than the initialization argument `ndpost` if it was not
-        divisible by the number of chains.
-        """
+    @property
+    def num_chains(self) -> int | None:
+        """The number of chains, `None` if scalar."""
+        *num_chains, _ = self._main_trace.grow_prop_count.shape
+        return num_chains[0] if num_chains else None
+
+    @property
+    def ndpost(self) -> int:
+        """The total number of posterior samples after burn-in across all chains."""
         return self._main_trace.grow_prop_count.size
 
     @property
@@ -543,10 +550,10 @@ class Bart(Module):
     def get_latent_prec(
         self, only_continuous: bool = False
     ) -> (
-        Float32[Array, ' nskip+ndpost']
-        | Float32[Array, 'nskip+ndpost k k']
-        | Float32[Array, 'num_chains nskip+ndpost/num_chains']
-        | Float32[Array, 'num_chains nskip+ndpost/num_chains k k']
+        Float32[Array, ' nskip+n_save']
+        | Float32[Array, 'nskip+n_save k k']
+        | Float32[Array, 'num_chains nskip+n_save']
+        | Float32[Array, 'num_chains nskip+n_save k k']
     ):
         """Return the posterior samples of the latent error precision matrix.
 
@@ -604,7 +611,7 @@ class Bart(Module):
     def get_error_sdev(
         self, mean: bool = False
     ) -> (
-        Float32[Array, 'ndpost']
+        Float32[Array, ' ndpost']
         | Float32[Array, 'ndpost k']
         | Float32[Array, '']
         | Float32[Array, ' k']
@@ -1138,7 +1145,7 @@ class Bart(Module):
     def _run_mcmc(
         cls,
         mcmc_state: mcmcstep.State,
-        ndpost: int,
+        n_save: int,
         nskip: int,
         keepevery: int,
         printevery: int | None,
@@ -1150,12 +1157,6 @@ class Bart(Module):
             key = jnp.copy(seed)
         else:
             key = jax.random.key(seed)
-
-        # round up ndpost
-        num_chains = get_num_chains(mcmc_state)
-        if num_chains is None:
-            num_chains = 1
-        n_save = ndpost // num_chains + bool(ndpost % num_chains)
 
         # prepare arguments
         kw: dict = dict(n_burn=nskip, n_skip=keepevery, inner_loop_length=printevery)
@@ -1178,7 +1179,7 @@ class Bart(Module):
 
     def check_trees(
         self, error: bool = False
-    ) -> UInt[Array, 'num_chains ndpost/num_chains num_trees']:
+    ) -> UInt[Array, 'num_chains n_save num_trees']:
         """Apply `bartz.grove.check_trace` to all the tree draws.
 
         Parameters
@@ -1273,7 +1274,7 @@ class Bart(Module):
 
         return resid1, resid2
 
-    def depth_distr(self) -> Int32[Array, '*num_chains ndpost/num_chains d']:
+    def depth_distr(self) -> Int32[Array, '*num_chains n_save d']:
         """Histogram of tree depths for each state of the trees.
 
         Returns
@@ -1288,7 +1289,7 @@ class Bart(Module):
 
     def _points_per_node_distr(
         self, node_type: str
-    ) -> Int32[Array, '*num_chains ndpost/num_chains n+1']:
+    ) -> Int32[Array, '*num_chains n_save n+1']:
         out: Int32[Array, '*chains samples n+1']
         out = points_per_node_distr(
             self._mcmc_state.X,
@@ -1301,9 +1302,7 @@ class Bart(Module):
             out = out[None, :, :]
         return out
 
-    def points_per_decision_node_distr(
-        self,
-    ) -> Int32[Array, '*num_chains ndpost/num_chains n+1']:
+    def points_per_decision_node_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
         """Histogram of number of points belonging to parent-of-leaf nodes.
 
         Returns
@@ -1312,9 +1311,7 @@ class Bart(Module):
         """
         return self._points_per_node_distr('leaf-parent')
 
-    def points_per_leaf_distr(
-        self,
-    ) -> Int32[Array, '*num_chains ndpost/num_chains n+1']:
+    def points_per_leaf_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
         """Histogram of number of points belonging to leaves.
 
         Returns

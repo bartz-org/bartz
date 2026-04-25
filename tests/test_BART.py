@@ -95,7 +95,11 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     # num_chains -> mc_cores
     num_chains = kw.pop('num_chains')  # must be present bc different defaults
     assert num_chains != 1  # because mc_gbart does not have an equivalent option
-    kw['mc_cores'] = 1 if num_chains is None else num_chains
+    mc_cores = 1 if num_chains is None else num_chains
+    kw['mc_cores'] = mc_cores
+
+    # n_save (per-chain) -> ndpost (across-chains total)
+    kw['ndpost'] = kw.pop('n_save') * mc_cores
 
     # collect bart_kwargs from top-level Bart params
     bart_kwargs: dict[str, Any] = {}

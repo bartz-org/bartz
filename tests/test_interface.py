@@ -183,7 +183,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     nt = 21
     p = 2
     high_p = 257  # > 256 to use uint16 for var_trees.
-    common = dict(num_trees=20, ndpost=100, nskip=50, seed=keys.pop())
+    common = dict(num_trees=20, n_save=50, nskip=50, seed=keys.pop())
 
     match variant:
         # continuous regression with some settings that induce large types,
@@ -440,7 +440,7 @@ class TestWithCachedBart:  # pragma: slow
         kw.update(
             num_trees=max(2 * n, p),
             nskip=3000,
-            ndpost=nchains * 1000,
+            n_save=1000,
             keepevery=1,
             num_chains=nchains,
         )
@@ -463,7 +463,7 @@ class TestWithCachedBart:  # pragma: slow
         bkw = cachedbart.bkw
         p, n = bkw.kw['x_train'].shape
         num_chains = 4
-        nsamples = bart.ndpost // num_chains
+        nsamples = bart.n_save
         binary = bkw.kw['outcome_type'] == 'binary'
 
         yhat_train = bart.predict('train', kind='latent_samples')
@@ -559,8 +559,7 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     kw['keepevery'] = 1
     bart1 = Bart(**kw)
 
-    num_chains = kw.get('num_chains')
-    mc_cores = 1 if num_chains is None else num_chains
+    num_chains = bart1.num_chains or 1
     y_shape = kw['y_train'].shape
 
     # run moving some samples from burn-in to main
@@ -572,12 +571,12 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
         kw2['init_kw'] = init_kw
     delta = 1
     kw2['nskip'] -= delta
-    kw2['ndpost'] += delta * mc_cores
+    kw2['n_save'] += delta
     bart2 = Bart(**kw2)
     bart2_yhat_train = (
         bart2.predict('train', kind='latent_samples')
-        .reshape(mc_cores, kw2['ndpost'] // mc_cores, *y_shape)[:, delta:]
-        .reshape(bart1.ndpost, *y_shape)
+        .reshape(num_chains, kw2['n_save'], *y_shape)[:, delta:]
+        .reshape(num_chains * bart1.n_save, *y_shape)
     )
 
     with subtests.test('shift burn-in'):
@@ -599,10 +598,10 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     kw3['keepevery'] = 2
     bart3 = Bart(**kw3)
     bart1_yhat_train = bart1.predict('train', kind='latent_samples').reshape(
-        mc_cores, kw3['ndpost'] // mc_cores, *y_shape
+        num_chains, kw3['n_save'], *y_shape
     )[:, 1::2, :, ...]
     bart3_yhat_train = bart3.predict('train', kind='latent_samples').reshape(
-        mc_cores, kw3['ndpost'] // mc_cores, *y_shape
+        num_chains, kw3['n_save'], *y_shape
     )[:, : bart1_yhat_train.shape[1], :, ...]
 
     with subtests.test('change thinning'):
@@ -659,13 +658,14 @@ def test_output_shapes(bkw: BartKW, keys: split) -> None:
     assert bart.varprob_mean.shape == (p,)
 
     # get_latent_prec shape
-    num_chains = kw.get('num_chains')
     nskip = kw['nskip']
+    n_save = bart.n_save
+    num_chains = bart.num_chains
     prec = bart.get_latent_prec()
     if num_chains is not None:
-        assert prec.shape == (num_chains, nskip + ndpost // num_chains, *k, *k)
+        assert prec.shape == (num_chains, nskip + n_save, *k, *k)
     else:
-        assert prec.shape == (nskip + ndpost, *k, *k)
+        assert prec.shape == (nskip + n_save, *k, *k)
 
 
 def test_output_types(bkw: BartKW, keys: split) -> None:
@@ -676,7 +676,7 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     if kw['outcome_type'] != 'binary':
         assert bart.sigest.dtype == jnp.float32
     assert bart.offset.dtype == jnp.float32
-    assert isinstance(bart.ndpost, int)
+    assert isinstance(bart.n_save, int)
     assert bart.predict('train', kind='mean').dtype == jnp.float32
     assert bart.predict('train', kind='mean_samples').dtype == jnp.float32
     assert bart.predict('train', kind='latent_samples').dtype == jnp.float32
@@ -743,7 +743,7 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
     mean_samples = bart.predict('train', kind='mean_samples')  # (ndpost, *k, n)
     latent_samples = bart.predict('train', kind='latent_samples')  # (ndpost, *k, n)
     outcome_samples = bart.predict('train', kind='outcome_samples', key=keys.pop())
-    # outcome_samples has shape (ndpost, *k, n)
+    # outcome_samples has shape (num_chains*n_save, *k, n)
 
     with subtests.test('mean_samples vs mean'):
         mean_from_mean_samples = mean_samples.mean(0)
@@ -1080,7 +1080,7 @@ def test_xinfo() -> None:
     kw = dict(
         x_train=jnp.empty((3, 0)),
         y_train=jnp.empty(0),
-        ndpost=0,
+        n_save=0,
         nskip=0,
         usequants=True,
         numcut=0,
@@ -1100,7 +1100,7 @@ def test_xinfo_wrong_p() -> None:
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
         )
     kw = dict(
-        x_train=jnp.empty((5, 0)), y_train=jnp.empty(0), ndpost=0, nskip=0, xinfo=xinfo
+        x_train=jnp.empty((5, 0)), y_train=jnp.empty(0), n_save=0, nskip=0, xinfo=xinfo
     )
     with pytest.raises(ValueError, match=r'xinfo\.shape'):
         Bart(**kw)
@@ -1179,7 +1179,7 @@ def run_bart_like_prior(
         x_train=jnp.empty((p, 0)),
         y_train=jnp.empty(0),
         num_trees=20,
-        ndpost=1000,
+        n_save=1000,
         nskip=3000,
         printevery=None,
         xinfo=xinfo,
@@ -1210,7 +1210,7 @@ def sample_prior_like(
 
     prior_trees = sample_prior(
         key,
-        bart.ndpost,
+        bart.n_save,
         len(bart._mcmc_state.forest.leaf_tree),
         bart._mcmc_state.forest.max_split,
         p_nonterminal,
@@ -1296,7 +1296,7 @@ def test_jit(bkw: BartKW) -> None:
 def test_interrupt(bkw: BartKW) -> None:
     """Test that the MCMC can be interrupted with ^C."""
     kw = bkw.kw
-    kw.update(printevery=1, ndpost=0, nskip=10000)
+    kw.update(printevery=1, n_save=0, nskip=10000)
 
     # Send the first ^C after 3 s, if the time was too short, it would interrupt
     # a first interruptible phase of jax compilation. Then send ^C every second,
@@ -1574,7 +1574,7 @@ def test_equiv_sharding(  # pragma: no cover  # pragma: slow
 
     baseline_kw = tree.map(lambda x: x, bkw.kw)
     baseline_kw.update(
-        num_chain_devices=None, num_data_devices=None, nskip=0, ndpost=20, num_chains=2
+        num_chain_devices=None, num_data_devices=None, nskip=0, n_save=10, num_chains=2
     )
     bart = Bart(**baseline_kw)
 
@@ -1614,7 +1614,7 @@ def test_equiv_sharding(  # pragma: no cover  # pragma: slow
 def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:
     """Test the number of trees."""
     kw = bkw.kw
-    kw.update(nskip=0, ndpost=0)
+    kw.update(nskip=0, n_save=0)
 
     with subtests.test('given num_trees'):
         bart = Bart(**kw)
@@ -1645,7 +1645,7 @@ class TestMVBartInterface:
             x=random.normal(keys.pop(), (2, 5)),
             y=random.normal(keys.pop(), (3, 5)),
             w=random.normal(keys.pop(), (5,)),
-            kwargs=dict(num_trees=5, ndpost=0, nskip=0, num_chains=None),
+            kwargs=dict(num_trees=5, n_save=0, nskip=0, num_chains=None),
         )
 
     @pytest.mark.parametrize('outcome_mode', ['continuous', 'mixed'])
@@ -1718,7 +1718,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     y_mv = y_mv[:1, :]
     y_uv = y_mv.squeeze(0)
 
-    bkw.kw.update(outcome_type=outcome_type, nskip=0, ndpost=0, w=None)
+    bkw.kw.update(outcome_type=outcome_type, nskip=0, n_save=0, w=None)
     del bkw.kw['y_train']
     bart_uv = Bart(y_train=y_uv, **bkw.kw)
     bart_mv = Bart(y_train=y_mv, **bkw.kw)
@@ -1773,13 +1773,13 @@ def test_get_latent_prec_only_continuous(bkw: BartKW) -> None:
     else:
         kc = k
 
-    ndpost = bart.ndpost
+    n_save = bart.n_save
     nskip = kw['nskip']
-    num_chains = kw.get('num_chains')
+    num_chains = bart.num_chains
     if num_chains is not None:
-        assert prec.shape == (num_chains, nskip + ndpost // num_chains, kc, kc)
+        assert prec.shape == (num_chains, nskip + n_save, kc, kc)
     else:
-        assert prec.shape == (nskip + ndpost, kc, kc)
+        assert prec.shape == (nskip + n_save, kc, kc)
 
 
 def test_get_error_sdev_values(bkw: BartKW) -> None:

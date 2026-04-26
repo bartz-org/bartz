@@ -84,7 +84,8 @@ from bartz.mcmcstep._state import (
     get_num_chains,
 )
 
-FloatLike = float | Float[Any, '']
+ArrayLike = Array | ndarray
+FloatLike = float | Float[ArrayLike, '']
 
 
 class PredictKind(Enum):
@@ -352,8 +353,8 @@ class Bart(Module):
 
     def __init__(
         self,
-        x_train: Real[Array, 'p n'] | DataFrame,
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Series,
+        x_train: Real[ArrayLike, 'p n'] | DataFrame,
+        y_train: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | Series,
         *,
         outcome_type: OutcomeType | str | Sequence[OutcomeType | str] = 'continuous',
         sparse: bool = False,
@@ -361,20 +362,20 @@ class Bart(Module):
         a: FloatLike = 0.5,
         b: FloatLike = 1.0,
         rho: FloatLike | None = None,
-        varprob: Float[Array, ' p'] | None = None,
-        xinfo: Float[Array, 'p n'] | None = None,
+        varprob: Float[ArrayLike, ' p'] | None = None,
+        xinfo: Float[ArrayLike, 'p n'] | None = None,
         usequants: bool = False,
         rm_const: bool = True,
-        sigest: FloatLike | Float[Array, ' k'] | None = None,
+        sigest: FloatLike | Float[ArrayLike, ' k'] | None = None,
         sigdf: FloatLike = 3.0,
         sigquant: FloatLike = 0.9,
         k: FloatLike = 2.0,
         power: FloatLike = 2.0,
         base: FloatLike = 0.95,
-        lamda: FloatLike | Float[Array, ' k'] | None = None,
+        lamda: FloatLike | Float[ArrayLike, ' k'] | None = None,
         tau_num: FloatLike | None = None,
-        offset: FloatLike | Float[Array, ' k'] | None = None,
-        w: Float[Array, ' n'] | Series | None = None,
+        offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
+        w: Float[ArrayLike, ' n'] | Series | None = None,
         num_trees: int = 200,
         numcut: int = 255,
         n_save: int = 1000,

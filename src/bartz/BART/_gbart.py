@@ -35,7 +35,7 @@ from jax.scipy.special import ndtr
 from jaxtyping import Array, Float, Float32, Int32, Key, Real
 
 from bartz import mcmcloop, mcmcstep
-from bartz._interface import Bart, DataFrame, FloatLike, PredictKind, Series
+from bartz._interface import ArrayLike, Bart, DataFrame, FloatLike, PredictKind, Series
 
 
 class mc_gbart(Module):
@@ -224,18 +224,18 @@ class mc_gbart(Module):
 
     def __init__(
         self,
-        x_train: Real[Array, 'p n'] | DataFrame,
-        y_train: Float32[Array, ' n'] | Series,
+        x_train: Real[ArrayLike, 'p n'] | DataFrame,
+        y_train: Float32[ArrayLike, ' n'] | Series,
         *,
-        x_test: Real[Array, 'p m'] | DataFrame | None = None,
+        x_test: Real[ArrayLike, 'p m'] | DataFrame | None = None,
         type: Literal['wbart', 'pbart'] = 'wbart',  # noqa: A002
         sparse: bool = False,
         theta: FloatLike | None = None,
         a: FloatLike = 0.5,
         b: FloatLike = 1.0,
         rho: FloatLike | None = None,
-        varprob: Float[Array, ' p'] | None = None,
-        xinfo: Float[Array, 'p n'] | None = None,
+        varprob: Float[ArrayLike, ' p'] | None = None,
+        xinfo: Float[ArrayLike, 'p n'] | None = None,
         usequants: bool = False,
         rm_const: bool = True,
         sigest: FloatLike | None = None,
@@ -247,7 +247,7 @@ class mc_gbart(Module):
         lamda: FloatLike | None = None,
         tau_num: FloatLike | None = None,
         offset: FloatLike | None = None,
-        w: Float[Array, ' n'] | None = None,
+        w: Float[ArrayLike, ' n'] | None = None,
         ntree: int | None = None,
         numcut: int = 100,
         ndpost: int = 1000,

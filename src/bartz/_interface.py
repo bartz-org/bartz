@@ -385,7 +385,7 @@ class Bart(Module):
         num_chains: int | None = 4,
         num_chain_devices: int | None | Literal['auto'] = 'auto',
         num_data_devices: int | None = None,
-        devices: Device | Sequence[Device] | None = None,
+        devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None = None,
         seed: int | Key[Array, ''] = 0,
         maxdepth: int = 6,
         init_kw: Mapping = MappingProxyType({}),
@@ -1108,7 +1108,7 @@ class Bart(Module):
         num_chains: int | None,
         num_chain_devices: int | None | Literal['auto'],
         num_data_devices: int | None,
-        devices: Device | Sequence[Device] | None,
+        devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
         sparse: bool,
         n_burn: int,
     ) -> mcmcstep.State:
@@ -1372,7 +1372,7 @@ def process_device_settings(
     num_chains: int | None,
     num_chain_devices: int | None | Literal['auto'],
     num_data_devices: int | None,
-    devices: Device | Sequence[Device] | None,
+    devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
 ) -> tuple[DeviceKwArgs, Device | None]:
     """Return the arguments for `mcmcstep.init` related to devices, and an optional device where to put the state."""
     platform, device, devices = _determine_devices(y_train, devices)
@@ -1400,10 +1400,14 @@ def process_device_settings(
 
 
 def _determine_devices(
-    y_train: Array, devices: Device | Sequence[Device] | None
+    y_train: Array, devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None
 ) -> tuple[str, Device | None, tuple[Device, ...]]:
     """Determine the target platform and set of devices for the MCMC, and possibly a single target device."""
-    if devices is not None:
+    if isinstance(devices, str):
+        platform = devices
+        devices = jax.devices(platform)
+        return platform, devices[0], devices
+    elif devices is not None:
         if not hasattr(devices, '__len__'):
             devices = (devices,)
         device = devices[0]

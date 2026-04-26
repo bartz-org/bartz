@@ -72,7 +72,7 @@ from bartz.grove import (
     tree_depth,
     tree_depths,
 )
-from bartz.jaxext import get_default_device, get_device_count, split
+from bartz.jaxext import get_default_device, get_device_count, is_key, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
@@ -1819,3 +1819,44 @@ def test_get_error_sdev_values(bkw: BartKW) -> None:
     sdev_ref = sdev_ref[:, mask]
 
     assert_close_matrices(sdev, sdev_ref, rtol=1e-5)
+
+
+def test_devices_platform(bkw: BartKW) -> None:
+    """Check that passing `devices='cpu'/'gpu'` ends up on the expected device."""
+    bart1 = Bart(**bkw.kw)
+    platform = bart1._main_trace.grow_prop_count.platform()
+    kw2 = dict(bkw.kw, devices=platform)
+    bart2 = Bart(**kw2)
+    assert_identical_bart(bart1, bart2)
+
+
+def assert_identical_bart(bart1: Bart, bart2: Bart) -> None:
+    """Check that two `Bart` objects are equal."""
+
+    def check_same(path: KeyPath, x1: Array, x2: Array) -> None:
+        assert x1.shape == x2.shape
+        assert x1.dtype == x2.dtype
+        assert x1.sharding.is_equivalent_to(x2.sharding, x1.ndim)
+        assert_array_equal(x1, x2, strict=True, err_msg=keystr(path))
+
+    tree.map_with_path(check_same, bart1, bart2)
+
+    treedef1 = tree.structure(bart1)
+    treedef2 = tree.structure(bart2)
+    assert treedef1 == treedef2
+
+
+def test_numpy_input(bkw: BartKW) -> None:
+    """Check if all numerical inputs are numpy arrays, everything works as usual."""
+    bart1 = Bart(**bkw.kw)
+
+    def to_numpy_array(x: Array | object) -> numpy.ndarray | object:
+        if isinstance(x, (Array, float)) and not is_key(x):
+            return numpy.asarray(x)
+        else:
+            return x
+
+    kw2 = tree.map(to_numpy_array, bkw.kw)
+    bart2 = Bart(**kw2)
+
+    assert_identical_bart(bart1, bart2)

@@ -29,13 +29,25 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from enum import Enum
 from functools import cached_property, partial
+from os import cpu_count
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypedDict
+from warnings import warn
 
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field
-from jax import Device, debug_nans, device_put, jit, lax, make_mesh, random, tree
+from jax import (
+    Device,
+    debug_nans,
+    device_count,
+    device_put,
+    jit,
+    lax,
+    make_mesh,
+    random,
+    tree,
+)
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh, PartitionSpec
@@ -286,7 +298,10 @@ class Bart(Module):
         be an explicit chain axis of size 1.
     num_chain_devices
         The number of devices to spread the chains across. Must be a divisor of
-        `num_chains`. Each device will run a fraction of the chains.
+        `num_chains`. Each device will run a fraction of the chains. If 'auto'
+        (default) and running on cpu, the number of devices is picked
+        automatically based on the number of cores and the number of virtual jax
+        cpu devices.
     num_data_devices
         The number of devices to split datapoints across. Must be a divisor of
         `n`. This is useful only with very high `n`, about > 1000_000.
@@ -367,7 +382,7 @@ class Bart(Module):
         keepevery: int = 1,
         printevery: int | None = 100,
         num_chains: int | None = 4,
-        num_chain_devices: int | None = None,
+        num_chain_devices: int | None | Literal['auto'] = 'auto',
         num_data_devices: int | None = None,
         devices: Device | Sequence[Device] | None = None,
         seed: int | Key[Array, ''] = 0,
@@ -1090,7 +1105,7 @@ class Bart(Module):
         rho: FloatLike | None,
         varprob: Float[Any, ' p'] | None,
         num_chains: int | None,
-        num_chain_devices: int | None,
+        num_chain_devices: int | None | Literal['auto'],
         num_data_devices: int | None,
         devices: Device | Sequence[Device] | None,
         sparse: bool,
@@ -1354,46 +1369,16 @@ class DeviceKwArgs(TypedDict):
 def process_device_settings(
     y_train: Array,
     num_chains: int | None,
-    num_chain_devices: int | None,
+    num_chain_devices: int | None | Literal['auto'],
     num_data_devices: int | None,
     devices: Device | Sequence[Device] | None,
 ) -> tuple[DeviceKwArgs, Device | None]:
     """Return the arguments for `mcmcstep.init` related to devices, and an optional device where to put the state."""
-    # determine devices
-    if devices is not None:
-        if not hasattr(devices, '__len__'):
-            devices = (devices,)
-        device = devices[0]
-        platform = device.platform
-    elif hasattr(y_train, 'platform'):
-        platform = y_train.platform()
-        device = None
-        # set device=None because if the devices were not specified explicitly
-        # we may be in the case where computation will follow data placement,
-        # do not disturb jax as the user may be playing with vmap, jit, reshard...
-        devices = jax.devices(platform)
-    else:
-        msg = 'not possible to infer device from `y_train`, please set `devices`'
-        raise ValueError(msg)
-
-    # create mesh
-    if num_chain_devices is None and num_data_devices is None:
-        mesh = None
-    else:
-        mesh = dict()
-        if num_chain_devices is not None:
-            mesh.update(chains=num_chain_devices)
-        if num_data_devices is not None:
-            mesh.update(data=num_data_devices)
-        mesh = make_mesh(
-            axis_shapes=tuple(mesh.values()),
-            axis_names=tuple(mesh),
-            axis_types=(AxisType.Auto,) * len(mesh),
-            devices=devices,
-        )
-        device = None
-        # set device=None because `mcmcstep.init` will `device_put` with the
-        # mesh already, we don't want to undo its work
+    platform, device, devices = _determine_devices(y_train, devices)
+    num_chain_devices = _determine_num_chain_devices(
+        platform, num_chains, num_chain_devices
+    )
+    mesh, device = _determine_mesh(num_chain_devices, num_data_devices, device, devices)
 
     # prepare arguments to `init`
     settings = DeviceKwArgs(
@@ -1406,10 +1391,98 @@ def process_device_settings(
         # batch sizes; since the user has to be playing with `init_kw` to do
         # that, we'll let `init` throw the error and the user set
         # `target_platform` themselves so they have a clearer idea how the
-        # thing works.
+        # thing works (i.e.: init won't be happy to receive target_platform if
+        # it's not needed because all device-dependent defaults are overridden)
     )
 
     return settings, device
+
+
+def _determine_devices(
+    y_train: Array, devices: Device | Sequence[Device] | None
+) -> tuple[str, Device | None, tuple[Device, ...]]:
+    """Determine the target platform and set of devices for the MCMC, and possibly a single target device."""
+    if devices is not None:
+        if not hasattr(devices, '__len__'):
+            devices = (devices,)
+        device = devices[0]
+        return device.platform, device, devices
+    elif hasattr(y_train, 'platform'):
+        # set device=None because if the devices were not specified explicitly
+        # we may be in the case where computation will follow data placement,
+        # do not disturb jax as the user may be playing with vmap, jit, reshard...
+        platform = y_train.platform()
+        return platform, None, jax.devices(platform)
+    else:
+        msg = 'not possible to infer device from `y_train`, please set `devices`'
+        raise ValueError(msg)
+
+
+def _largest_divisor_at_most(n: int, cap: int) -> int:
+    """Return the largest divisor of `n` in [1, cap]."""
+    for d in range(cap, 0, -1):
+        if n % d == 0:
+            return d
+    return 1  # unreachable: 1 always divides n
+
+
+def _determine_num_chain_devices(
+    platform: str,
+    num_chains: int | None,
+    num_chain_devices: int | None | Literal['auto'],
+) -> int | None:
+    """Decide the value of `num_chain_devices` when it's set to 'auto'."""
+    if num_chain_devices != 'auto':
+        return num_chain_devices
+    elif num_chains is None or num_chains == 1 or platform != 'cpu':
+        return None
+    else:
+        num_cores = cpu_count()
+        assert num_cores is not None, 'could not determine number of cpu cores'
+        num_shards = _largest_divisor_at_most(num_chains, num_cores)
+
+        if num_shards > 1:
+            num_jax_cpus = device_count('cpu')
+            if num_jax_cpus < num_shards:
+                new_num_shards = _largest_divisor_at_most(num_chains, num_jax_cpus)
+                msg = (
+                    f'`Bart` would like to shard {num_chains} chains across '
+                    f'{num_shards} virtual jax cpu devices, but jax is set up '
+                    f'with only {num_jax_cpus} cpu devices, so it will use '
+                    f'{new_num_shards} devices instead. To enable '
+                    'parallelization, please increase the limit with '
+                    '`jax.config.update("jax_num_cpu_devices", <num_devices>)`.'
+                )
+                warn(msg)
+                num_shards = new_num_shards
+
+        return num_shards if num_shards > 1 else None
+
+
+def _determine_mesh(
+    num_chain_devices: int | None,
+    num_data_devices: int | None,
+    device: Device | None,
+    devices: Sequence[Device],
+) -> tuple[Mesh | None, Device | None]:
+    """Create a jax device mesh for `mcmcstep.init()`."""
+    if num_chain_devices is None and num_data_devices is None:
+        return None, device
+    else:
+        mesh = dict()
+        if num_chain_devices is not None:
+            mesh.update(chains=num_chain_devices)
+        if num_data_devices is not None:
+            mesh.update(data=num_data_devices)
+        mesh = make_mesh(
+            axis_shapes=tuple(mesh.values()),
+            axis_names=tuple(mesh),
+            axis_types=(AxisType.Auto,) * len(mesh),
+            devices=devices,
+        )
+        return mesh, None
+        # set device=None because `mcmcstep.init` will `device_put` with the
+        # mesh already, we don't want to undo its work
 
 
 def process_varprob(

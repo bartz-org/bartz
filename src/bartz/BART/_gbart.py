@@ -26,20 +26,16 @@
 
 from collections.abc import Hashable, Mapping
 from functools import cached_property
-from os import cpu_count
 from types import MappingProxyType
 from typing import Any, Literal
-from warnings import warn
 
 import jax.numpy as jnp
 from equinox import Module
-from jax import device_count
 from jax.scipy.special import ndtr
 from jaxtyping import Array, Float, Float32, Int32, Key, Real
 
 from bartz import mcmcloop, mcmcstep
 from bartz._interface import Bart, DataFrame, FloatLike, PredictKind, Series
-from bartz.jaxext import get_default_device, jit_active
 
 
 class mc_gbart(Module):
@@ -268,11 +264,10 @@ class mc_gbart(Module):
         if ntree is None:
             ntree = 50 if type == 'pbart' else 200
 
-        # round up ndpost (across-chains total) to a multiple of num_chains
-        # and convert to per-chain n_save for Bart
-        mc_cores_kw = process_mc_cores(y_train, mc_cores)
-        num_chains = mc_cores_kw['num_chains'] or 1
-        n_save = ndpost // num_chains + bool(ndpost % num_chains)
+        # convert to per-chain n_save for Bart
+        num_chains = None if mc_cores == 1 else mc_cores
+        actual_num_chains = num_chains or 1
+        n_save = ndpost // actual_num_chains + bool(ndpost % actual_num_chains)
 
         # set most calling arguments for Bart
         kwargs: dict = dict(
@@ -306,7 +301,7 @@ class mc_gbart(Module):
             printevery=printevery,
             seed=seed,
             maxdepth=6,
-            **mc_cores_kw,
+            num_chains=num_chains,
         )
 
         # set min_points_per_leaf unless the user set it already
@@ -520,75 +515,3 @@ class gbart(mc_gbart):
             raise TypeError(msg)
         kwargs.update(mc_cores=1)
         super().__init__(*args, **kwargs)
-
-
-def process_mc_cores(y_train: Array | Series, mc_cores: int) -> dict[str, Any]:
-    """Determine the arguments to pass to `Bart` to configure multiple chains."""
-    # one chain, disable multichain altogether
-    if abs(mc_cores) == 1:
-        return dict(num_chains=None)
-
-    # determine if we are on cpu; this point may raise an exception
-    platform = get_platform(y_train, mc_cores)
-
-    # set the num_chains argument
-    mc_cores = abs(mc_cores)
-    kwargs = dict(num_chains=mc_cores)
-
-    # if on cpu, try to shard the chains across multiple virtual cpus
-    if platform == 'cpu':
-        # determine number of logical cpu cores
-        num_cores = cpu_count()
-        assert num_cores is not None, 'could not determine number of cpu cores'
-
-        # determine number of shards that evenly divides chains
-        for num_shards in range(num_cores, 0, -1):
-            if mc_cores % num_shards == 0:
-                break
-
-        # handle the case where there are less jax cpu devices that that
-        if num_shards > 1:
-            num_jax_cpus = device_count('cpu')
-            if num_jax_cpus < num_shards:
-                for new_num_shards in range(num_jax_cpus, 0, -1):
-                    if mc_cores % new_num_shards == 0:
-                        break
-                msg = (
-                    f'`mc_gbart` would like to shard {mc_cores} chains across '
-                    f'{num_shards} virtual jax cpu devices, but jax is set up '
-                    f'with only {num_jax_cpus} cpu devices, so it will use '
-                    f'{new_num_shards} devices instead. To enable '
-                    'parallelization, please increase the limit with '
-                    '`jax.config.update("jax_num_cpu_devices", <num_devices>)`.'
-                )
-                warn(msg)
-                num_shards = new_num_shards
-
-        # set the number of shards
-        if num_shards > 1:
-            kwargs.update(num_chain_devices=num_shards)
-
-    return kwargs
-
-
-def get_platform(y_train: Array | Series, mc_cores: int) -> str:
-    """Get the platform for `process_mc_cores` from `y_train` or the default device."""
-    if isinstance(y_train, Array) and hasattr(y_train, 'platform'):
-        return y_train.platform()
-    elif (
-        not isinstance(y_train, Array) and not jit_active()
-        # this condition means: y_train is not an array, but we are not under
-        # jit, so y_train is going to be converted to an array on the default
-        # device
-    ) or mc_cores < 0:
-        return get_default_device().platform
-    else:
-        msg = (
-            'Could not determine the platform from `y_train`, maybe `mc_gbart` '
-            'was used with a `jax.jit`ted function? The platform is needed to '
-            'determine whether the computation is going to run on CPU to '
-            'automatically shard the chains across multiple virtual CPU '
-            'devices. To acknowledge this problem and circumvent it '
-            'by using the current default jax device, negate `mc_cores`.'
-        )
-        raise RuntimeError(msg)

@@ -104,19 +104,10 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     # collect bart_kwargs from top-level Bart params
     bart_kwargs: dict[str, Any] = {}
 
-    # drop num_chain_devices on cpu because mc_gbart has automatic sharding on
-    # cpu, unless it's None which disables the automatism
-    if 'num_chain_devices' in kw:
-        num_chain_devices = kw.pop('num_chain_devices')
-        if get_default_device().platform != 'cpu' or num_chain_devices is None:
-            bart_kwargs['num_chain_devices'] = num_chain_devices
-
-    if 'num_data_devices' in kw:
-        bart_kwargs['num_data_devices'] = kw.pop('num_data_devices')
-
-    # maxdepth has the same default
-    if 'maxdepth' in kw:
-        bart_kwargs['maxdepth'] = kw.pop('maxdepth')
+    # move Bart-only keys that mc_gbart does not change the default of
+    for key in ('num_chain_devices', 'num_data_devices', 'maxdepth'):
+        if key in kw:
+            bart_kwargs[key] = kw.pop(key)
 
     # init_kw must be present bc it contains min_points_per_leaf which has
     # different defaults
@@ -1139,9 +1130,6 @@ def test_jit(kw: dict[str, Any]) -> None:
     platform = kw['y_train'].platform()
     kw.setdefault('bart_kwargs', {}).update(devices=jax.devices(platform))
 
-    # negate mc_cores to silence error about device not possible to infer
-    kw.update(mc_cores=-kw['mc_cores'])
-
     # remove arguments passed through the jit call
     X = kw.pop('x_train')
     y = kw.pop('y_train')
@@ -1254,16 +1242,16 @@ def test_gbart_multichain_error(keys: split) -> None:
 def get_expect_sharded(kw: dict) -> bool:
     """Check whether we expect sharding to be set up based on the arguments."""
     bart_kwargs = kw.get('bart_kwargs', {})
-    num_chain_devices = bart_kwargs.get('num_chain_devices')
-    num_data_devices = bart_kwargs.get('num_data_devices')
+    num_chain_devices = bart_kwargs.get('num_chain_devices', 'auto')
+    num_data_devices = bart_kwargs.get('num_data_devices', None)
     return (
-        num_chain_devices is not None
+        hasattr(num_chain_devices, '__index__')
         or num_data_devices is not None
         or (
-            kw.get('mc_cores', 2) > 1
+            num_chain_devices == 'auto'
+            and kw.get('mc_cores', 2) > 1
             and get_device_count() > 1
             and get_default_device().platform == 'cpu'
-            and 'num_chain_devices' not in bart_kwargs
         )
     )
 

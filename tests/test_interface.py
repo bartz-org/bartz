@@ -72,7 +72,7 @@ from bartz.grove import (
     tree_depth,
     tree_depths,
 )
-from bartz.jaxext import get_device_count, split
+from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
@@ -1375,37 +1375,41 @@ def test_automatic_integer_types(bkw: BartKW) -> None:
     assert bart._mcmc_state.forest.max_split.dtype == split_trees_type
 
 
-def check_data_sharding(x: Array, mesh: Mesh) -> None:
-    """Check the sharding of `x` assuming it may be sharded only along the last 'data' axis."""
+def check_chains_data_sharding(
+    x: Array, chains: bool, data: bool, mesh: Mesh | None
+) -> None:
+    """Check `x` is sharded as indicated by the boolean flags."""
     if mesh is None:
         assert isinstance(x.sharding, SingleDeviceSharding)
-    elif 'data' in mesh.axis_names:
-        expected_num_devices = min(2, get_device_count())
-        assert x.sharding.num_devices == expected_num_devices
-        expected_spec = (None,) * (x.ndim - 1) + ('data',)
-        assert get_normal_spec(x) == normalize_spec(expected_spec, mesh, x.shape)
-
-
-def check_chain_sharding(x: Array, mesh: Mesh) -> None:
-    """Check the sharding of `x` assuming it may be sharded only along the first 'chains' axis."""
-    if mesh is None:
-        assert isinstance(x.sharding, SingleDeviceSharding)
-    elif 'chains' in mesh.axis_names:
-        expected_num_devices = min(2, get_device_count())
-        assert x.sharding.num_devices == expected_num_devices
-        assert get_normal_spec(x) == normalize_spec(('chains',), mesh, x.shape)
+        return
+    expected_spec = [None] * x.ndim
+    if data and 'data' in mesh.axis_names:
+        expected_spec[-1] = 'data'
+    if chains and 'chains' in mesh.axis_names:
+        expected_spec[0] = 'chains'
+    expected_spec = normalize_spec(expected_spec, mesh, x.shape)
+    assert get_normal_spec(x) == expected_spec
 
 
 def get_expect_sharded(kw: dict) -> bool:
     """Check whether we expect sharding to be set up based on the arguments."""
+    num_chain_devices = kw.get('num_chain_devices', 'auto')
+    num_chains = kw.get('num_chains', 4)
     return (
-        kw.get('num_chain_devices') is not None
+        hasattr(num_chain_devices, '__index__')
         or kw.get('num_data_devices') is not None
+        or (
+            num_chain_devices == 'auto'
+            and num_chains is not None
+            and num_chains > 1
+            and get_device_count() > 1
+            and get_default_device().platform == 'cpu'
+        )
     )
 
 
 def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
-    """Check that chains live on their own devices throughout the interface."""
+    """Check that chains and data shards live on their own devices throughout the interface."""
     if version_info[:2] == get_old_python_tuple() and variant in (2, 5):
         pytest.xfail('Actual sharding bug in bartz with old jax, no time to fix.')
     kw = bkw.kw
@@ -1415,23 +1419,26 @@ def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
     mesh = bart._mcmc_state.config.mesh
     assert expect_sharded == (mesh is not None)
 
+    # check internal attributes that have chains/data metadata, so their
+    # expected sharding can be automatically inferred by `check_sharding`
     check = partial(check_sharding, mesh=mesh)
     check(bart._mcmc_state)
     check(bart._burnin_trace)
     check(bart._main_trace)
 
-    check_chain = partial(check_chain_sharding, mesh=mesh)
+    check = partial(check_chains_data_sharding, mesh=mesh)
 
     for kind in PredictKind:
         extra: dict = {'key': keys.pop()} if kind is PredictKind.outcome_samples else {}
         yhat_train = bart.predict('train', kind=kind, **extra)
-        check_data_sharding(yhat_train, mesh)
-        if kind is not PredictKind.mean:
-            check_chain(yhat_train)
+        if kind is PredictKind.mean:
+            check(yhat_train, chains=False, data=True)
+        else:
+            check(yhat_train, chains=True, data=True)
 
             extra['w'] = bkw.w_test
             yhat_test = bart.predict(bkw.x_test, kind=kind, **extra)
-            check_chain(yhat_test)
+            check(yhat_test, chains=True, data=False)
 
     assert bart.offset.is_fully_replicated
     if bart.sigest is not None:

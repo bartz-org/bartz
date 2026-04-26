@@ -101,6 +101,11 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     # n_save (per-chain) -> ndpost (across-chains total)
     kw['ndpost'] = kw.pop('n_save') * mc_cores
 
+    # n_burn -> nskip, n_skip -> keepevery
+    kw['nskip'] = kw.pop('n_burn')
+    if 'n_skip' in kw:
+        kw['keepevery'] = kw.pop('n_skip')
+
     # collect bart_kwargs from top-level Bart params
     bart_kwargs: dict[str, Any] = {}
 

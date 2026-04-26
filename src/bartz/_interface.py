@@ -280,10 +280,10 @@ class Bart(Module):
     n_save
         The number of MCMC samples to save, after burn-in, per chain. The
         total trace length across all chains is ``num_chains * n_save``.
-    nskip
+    n_burn
         The number of initial MCMC samples to discard as burn-in. This number
         of samples is discarded from each chain.
-    keepevery
+    n_skip
         The thinning factor for the MCMC samples, after burn-in.
     printevery
         The number of iterations (including thinned-away ones) between each log
@@ -378,8 +378,8 @@ class Bart(Module):
         num_trees: int = 200,
         numcut: int = 255,
         n_save: int = 1000,
-        nskip: int = 1000,
-        keepevery: int = 1,
+        n_burn: int = 1000,
+        n_skip: int = 1,
         printevery: int | None = 100,
         num_chains: int | None = 4,
         num_chain_devices: int | None | Literal['auto'] = 'auto',
@@ -447,10 +447,10 @@ class Bart(Module):
             num_data_devices,
             devices,
             sparse,
-            nskip,
+            n_burn,
         )
         result = self._run_mcmc(
-            initial_state, n_save, nskip, keepevery, printevery, seed, run_mcmc_kw
+            initial_state, n_save, n_burn, n_skip, printevery, seed, run_mcmc_kw
         )
 
         # set public attributes
@@ -565,10 +565,10 @@ class Bart(Module):
     def get_latent_prec(
         self, only_continuous: bool = False
     ) -> (
-        Float32[Array, ' nskip+n_save']
-        | Float32[Array, 'nskip+n_save k k']
-        | Float32[Array, 'num_chains nskip+n_save']
-        | Float32[Array, 'num_chains nskip+n_save k k']
+        Float32[Array, ' n_burn+n_save']
+        | Float32[Array, 'n_burn+n_save k k']
+        | Float32[Array, 'num_chains n_burn+n_save']
+        | Float32[Array, 'num_chains n_burn+n_save k k']
     ):
         """Return the posterior samples of the latent error precision matrix.
 
@@ -1109,7 +1109,7 @@ class Bart(Module):
         num_data_devices: int | None,
         devices: Device | Sequence[Device] | None,
         sparse: bool,
-        nskip: int,
+        n_burn: int,
     ) -> mcmcstep.State:
         p_nonterminal = make_p_nonterminal(maxdepth, base, power)
 
@@ -1138,7 +1138,7 @@ class Bart(Module):
             a=a,
             b=b,
             rho=rho,
-            sparse_on_at=nskip // 2 if sparse else None,
+            sparse_on_at=n_burn // 2 if sparse else None,
             **device_kw,
         )
 
@@ -1161,8 +1161,8 @@ class Bart(Module):
         cls,
         mcmc_state: mcmcstep.State,
         n_save: int,
-        nskip: int,
-        keepevery: int,
+        n_burn: int,
+        n_skip: int,
         printevery: int | None,
         seed: int | Integer[Array, ''] | Key[Array, ''],
         run_mcmc_kw: Mapping,
@@ -1174,7 +1174,7 @@ class Bart(Module):
             key = jax.random.key(seed)
 
         # prepare arguments
-        kw: dict = dict(n_burn=nskip, n_skip=keepevery, inner_loop_length=printevery)
+        kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
         kw.update(
             mcmcloop.make_default_callback(
                 mcmc_state,

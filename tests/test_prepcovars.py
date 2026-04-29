@@ -25,11 +25,12 @@
 """Test the `bartz.prepcovars` module."""
 
 import pytest
-from jax import debug_infs
+from jax import debug_infs, random
 from jax import numpy as jnp
 from numpy.testing import assert_array_equal
 
-from bartz.prepcovars import bin_predictors, quantilized_splits_from_matrix
+from bartz.jaxext import split
+from bartz.prepcovars import bin_predictors, quantilized_splits_from_matrix, subsample
 
 
 class TestQuantilizer:
@@ -107,6 +108,109 @@ class TestQuantilizer:
         x = jnp.arange(10)[None, :]
         with pytest.raises(ValueError, match='at least 1'):
             quantilized_splits_from_matrix(x, 0)
+
+
+class TestSubsample:
+    """Test `prepcovars.subsample`."""
+
+    def test_shape_and_subset(self, keys: split) -> None:
+        """When n > max_samples, output has shape (p, max_samples) and values come from the matching row."""
+        p, n, max_samples = 3, 100, 10
+        x = jnp.arange(p * n).reshape(p, n)
+        out = subsample(keys.pop(), x, max_samples)
+        assert out.shape == (p, max_samples)
+        for i in range(p):
+            assert jnp.all(jnp.isin(out[i], x[i]))
+
+    def test_no_replacement(self, keys: split) -> None:
+        """Each output row contains distinct values (no replacement) when input row is distinct."""
+        p, n, max_samples = 4, 50, 20
+        x = jnp.arange(p * n).reshape(p, n)
+        out = subsample(keys.pop(), x, max_samples)
+        for i in range(p):
+            assert jnp.unique(out[i]).size == max_samples
+
+    def test_n_equals_max_samples(self, keys: split) -> None:
+        """When n == max_samples, X is returned unchanged."""
+        x = jnp.arange(12.0).reshape(3, 4)
+        out = subsample(keys.pop(), x, 4)
+        assert_array_equal(out, x, strict=True)
+
+    def test_n_less_than_max_samples(self, keys: split) -> None:
+        """When n < max_samples, X is returned unchanged."""
+        x = jnp.arange(12.0).reshape(3, 4)
+        out = subsample(keys.pop(), x, 100)
+        assert out.shape == x.shape
+        assert_array_equal(out, x, strict=True)
+
+    @pytest.mark.parametrize('dtype', [jnp.float32, jnp.int32])
+    def test_dtype_preservation(self, keys: split, dtype: jnp.dtype) -> None:
+        """Output dtype matches input dtype."""
+        x = jnp.arange(60, dtype=dtype).reshape(3, 20)
+        out = subsample(keys.pop(), x, 5)
+        assert out.dtype == x.dtype
+
+    def test_per_row_independence(self, keys: split) -> None:
+        """Rows are sampled independently (output values stay within the originating row)."""
+        # Use disjoint value ranges per row so we can detect cross-row leakage.
+        n, max_samples = 40, 8
+        row0 = jnp.arange(0, n)
+        row1 = jnp.arange(1000, 1000 + n)
+        row2 = jnp.arange(2000, 2000 + n)
+        x = jnp.stack([row0, row1, row2])
+        out = subsample(keys.pop(), x, max_samples)
+        assert jnp.all((out[0] >= 0) & (out[0] < n))
+        assert jnp.all((out[1] >= 1000) & (out[1] < 1000 + n))
+        assert jnp.all((out[2] >= 2000) & (out[2] < 2000 + n))
+        # Different rows should not all pick the same column indices: convert
+        # back to indices within each row and check they differ across rows.
+        idx0 = out[0]
+        idx1 = out[1] - 1000
+        assert not jnp.array_equal(jnp.sort(idx0), jnp.sort(idx1))
+
+    def test_determinism(self, keys: split) -> None:
+        """Calling subsample twice with the same key gives identical output."""
+        key = keys.pop()
+        x = jnp.arange(60.0).reshape(3, 20)
+        out1 = subsample(key, x, 5)
+        out2 = subsample(random.clone(key), x, 5)
+        assert_array_equal(out1, out2, strict=True)
+
+    def test_different_keys_give_different_output(self, keys: split) -> None:
+        """Two distinct keys produce different subsamples (collision negligible at this size)."""
+        x = jnp.arange(200)[None, :]
+        out1 = subsample(keys.pop(), x, 20)
+        out2 = subsample(keys.pop(), x, 20)
+        assert not jnp.array_equal(out1, out2)
+
+    def test_max_samples_one(self, keys: split) -> None:
+        """max_samples == 1 yields shape (p, 1) with each value drawn from its row."""
+        p, n = 3, 7
+        x = jnp.arange(p * n).reshape(p, n)
+        out = subsample(keys.pop(), x, 1)
+        assert out.shape == (p, 1)
+        for i in range(p):
+            assert jnp.isin(out[i, 0], x[i])
+
+    def test_max_samples_zero_raises(self, keys: split) -> None:
+        """max_samples < 1 raises ValueError."""
+        x = jnp.arange(20.0).reshape(2, 10)
+        with pytest.raises(ValueError, match='at least 1'):
+            subsample(keys.pop(), x, 0)
+
+    def test_n_zero(self, keys: split) -> None:
+        """An (p, 0) input is returned unchanged regardless of max_samples."""
+        x = jnp.empty((3, 0))
+        out = subsample(keys.pop(), x, 5)
+        assert out.shape == (3, 0)
+        assert_array_equal(out, x, strict=True)
+
+    def test_p_one(self, keys: split) -> None:
+        """Single-row matrix works."""
+        x = jnp.arange(50)[None, :]
+        out = subsample(keys.pop(), x, 5)
+        assert out.shape == (1, 5)
+        assert jnp.all(jnp.isin(out[0], x[0]))
 
 
 def test_binner_left_boundary() -> None:

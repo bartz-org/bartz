@@ -27,9 +27,9 @@
 from functools import partial
 from typing import Any
 
-from jax import jit, vmap
+from jax import jit, random, vmap
 from jax import numpy as jnp
-from jaxtyping import Array, Float, Integer, Real, UInt
+from jaxtyping import Array, Float, Integer, Key, Real, UInt
 
 from bartz.jaxext import autobatch, minimal_unsigned_dtype, unique
 
@@ -62,6 +62,52 @@ def parse_xinfo(
     huge = _huge_value(xinfo)
     splits = jnp.where(is_not_nan, xinfo, huge)
     return splits, max_split
+
+
+@partial(jit, static_argnums=(2,))
+def subsample(
+    key: Key[Array, ''], X: Real[Array, 'p n'], max_samples: int
+) -> Real[Array, 'p m']:
+    """Randomly thin each predictor row to at most `max_samples` elements.
+
+    Parameters
+    ----------
+    key
+        A jax random key.
+    X
+        A matrix with `p` predictors and `n` observations.
+    max_samples
+        The target maximum number of samples per row.
+
+    Returns
+    -------
+    A matrix with `p` rows and ``min(n, max_samples)`` columns. If
+    ``n <= max_samples``, `X` is returned unchanged. Otherwise each row contains
+    `max_samples` distinct values drawn without replacement from the
+    corresponding row of `X`, with rows sampled independently. The order of
+    values within each row is unspecified.
+
+    Raises
+    ------
+    ValueError
+        If `max_samples` is less than 1.
+    """
+    if max_samples < 1:
+        msg = f'{max_samples=}, must be at least 1.'
+        raise ValueError(msg)
+
+    p, n = X.shape
+    if n <= max_samples:
+        return X
+
+    keys = random.split(key, p)
+
+    @partial(autobatch, max_io_nbytes=2**29)
+    @vmap
+    def per_row(k: Key[Array, ''], x: Real[Array, ' n']) -> Real[Array, ' m']:
+        return random.choice(k, x, shape=(max_samples,), replace=False)
+
+    return per_row(keys, X)
 
 
 @partial(jit, static_argnums=(1,))

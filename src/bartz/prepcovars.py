@@ -22,11 +22,13 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Functions to preprocess data."""
+"""Functions and classes to preprocess data."""
 
+from abc import abstractmethod
 from functools import partial
-from typing import Any
+from typing import Any, Protocol
 
+from equinox import AbstractVar, Module
 from jax import jit, random, vmap
 from jax import numpy as jnp
 from jaxtyping import Array, Float, Integer, Key, Real, UInt
@@ -303,3 +305,180 @@ def bin_predictors(
         return jnp.searchsorted(splits, x, **kw).astype(dtype)
 
     return bin_predictors(X, splits)
+
+
+class Binner(Module):
+    """Abstract base class for predictor binners.
+
+    A binner inspects the training predictors at construction time and
+    encapsulates the logic that maps any predictor matrix (training or
+    test) to bin indices via `bin`. The number of cutpoints used per
+    predictor is exposed as `max_split`.
+
+    The constructor takes the training predictors and an optional random
+    key. Concrete subclasses may add their own keyword arguments. Binners
+    that do not use the key still accept it for protocol uniformity and
+    silently ignore it. Binners that need it raise `ValueError` if it is
+    not provided.
+    """
+
+    max_split: AbstractVar[UInt[Array, ' p']]
+
+    @abstractmethod
+    def __init__(
+        self, X: Real[Array, 'p n'], *, key: Key[Array, ''] | None = None
+    ) -> None: ...
+
+    @abstractmethod
+    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:
+        """Bin `X` according to the cutpoints determined at construction."""
+        ...
+
+
+class BinnerFactory(Protocol):
+    """Callable that constructs a `Binner` from training predictors.
+
+    This is the type of the `binner` argument of `bartz.Bart`. A bare
+    `Binner` subclass satisfies this protocol, as does
+    ``functools.partial(BinnerSubclass, **subclass_kwargs)``.
+    """
+
+    def __call__(
+        self, X: Real[Array, 'p n'], *, key: Key[Array, ''] | None = None
+    ) -> Binner:
+        """Construct a `Binner` from `X` and an optional random key."""
+        ...
+
+
+class RangeEvenBinner(Binner):
+    """Binner with cutpoints evenly spaced over the observed range.
+
+    Parameters
+    ----------
+    X
+        Training predictors with `p` predictors and `n` observations.
+    max_bins
+        The number of bins per predictor; ``max_bins - 1`` cutpoints are
+        produced per predictor.
+    key
+        Accepted for protocol uniformity; unused.
+    """
+
+    _splits: Real[Array, 'p m']
+    max_split: UInt[Array, ' p']
+
+    def __init__(
+        self,
+        X: Real[Array, 'p n'],
+        *,
+        max_bins: int = 256,
+        key: Key[Array, ''] | None = None,
+    ) -> None:
+        del key
+        self._splits, self.max_split = uniform_splits_from_matrix(X, max_bins)
+
+    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:
+        """Bin `X` with `bin_predictors` using the cutpoints chosen at construction."""
+        return bin_predictors(X, self._splits)
+
+
+class UniqueQuantileBinner(Binner):
+    """Binner with quantile-based cutpoints from observed unique values.
+
+    For each predictor, cutpoints are placed between sorted unique values
+    so that the empirical distribution is approximately uniform across
+    bins. The number of cutpoints is at most ``max_bins - 1`` and at most
+    one less than the number of unique values.
+
+    When ``n > max_subsample``, the predictor matrix is randomly thinned
+    along the observation axis to ``max_subsample`` columns before
+    quantilization, which keeps quantilization tractable on very large
+    datasets at the cost of approximate quantiles.
+
+    Note: the quantiles are on the unique values, not the original distribution.
+
+    Parameters
+    ----------
+    X
+        Training predictors with `p` predictors and `n` observations.
+    max_bins
+        The maximum number of bins per predictor.
+    max_subsample
+        The maximum number of observations to use when computing
+        quantiles. If `None`, no subsampling is performed. If `n` exceeds
+        this, `key` is required.
+    key
+        Random key for subsampling. Required when ``X.shape[1] >
+        max_subsample``; otherwise unused.
+
+    Raises
+    ------
+    ValueError
+        If subsampling would trigger but `key` is `None`.
+    """
+
+    _splits: Real[Array, 'p m']
+    max_split: UInt[Array, ' p']
+
+    def __init__(
+        self,
+        X: Real[Array, 'p n'],
+        *,
+        max_bins: int = 256,
+        max_subsample: int | None = 100_000,
+        key: Key[Array, ''] | None = None,
+    ) -> None:
+        if max_subsample is not None and X.shape[1] > max_subsample:
+            if key is None:
+                msg = (
+                    'UniqueQuantileBinner requires a `key` because '
+                    f'n={X.shape[1]} exceeds max_subsample={max_subsample}.'
+                )
+                raise ValueError(msg)
+            X = subsample(key, X, max_subsample)
+        self._splits, self.max_split = quantilized_splits_from_matrix(X, max_bins)
+
+    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:
+        """Bin `X` with `bin_predictors` using the cutpoints chosen at construction."""
+        return bin_predictors(X, self._splits)
+
+
+class GivenSplitsBinner(Binner):
+    """Binner with cutpoints supplied directly in R BART `xinfo` format.
+
+    Parameters
+    ----------
+    X
+        Training predictors. Used only to validate the shape of `xinfo`.
+    xinfo
+        A `(p, m)` matrix of cutpoints; see `parse_xinfo`. NaN-padded
+        entries are treated as unused.
+    key
+        Accepted for protocol uniformity; unused.
+
+    Raises
+    ------
+    ValueError
+        If `xinfo` is not 2D, or if its first dimension does not match
+        ``X.shape[0]``.
+    """
+
+    _splits: Float[Array, 'p m']
+    max_split: UInt[Array, ' p']
+
+    def __init__(
+        self,
+        X: Real[Array, 'p n'],
+        *,
+        xinfo: Float[Array, 'p m'],
+        key: Key[Array, ''] | None = None,
+    ) -> None:
+        del key
+        if xinfo.ndim != 2 or xinfo.shape[0] != X.shape[0]:
+            msg = f'{xinfo.shape=} different from expected ({X.shape[0]}, *)'
+            raise ValueError(msg)
+        self._splits, self.max_split = parse_xinfo(xinfo)
+
+    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:
+        """Bin `X` with `bin_predictors` using the cutpoints chosen at construction."""
+        return bin_predictors(X, self._splits)

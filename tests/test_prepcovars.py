@@ -30,7 +30,17 @@ from jax import numpy as jnp
 from numpy.testing import assert_array_equal
 
 from bartz.jaxext import split
-from bartz.prepcovars import bin_predictors, quantilized_splits_from_matrix, subsample
+from bartz.prepcovars import (
+    Binner,
+    GivenSplitsBinner,
+    RangeEvenBinner,
+    UniqueQuantileBinner,
+    bin_predictors,
+    parse_xinfo,
+    quantilized_splits_from_matrix,
+    subsample,
+    uniform_splits_from_matrix,
+)
 
 
 class TestQuantilizer:
@@ -211,6 +221,86 @@ class TestSubsample:
         out = subsample(keys.pop(), x, 5)
         assert out.shape == (1, 5)
         assert jnp.all(jnp.isin(out[0], x[0]))
+
+
+class TestBinners:
+    """Test the `Binner` subclasses."""
+
+    def test_base_class_is_abstract(self) -> None:
+        """The base `Binner` class cannot be instantiated directly."""
+        x = jnp.arange(8.0).reshape(2, 4)
+        with pytest.raises(TypeError, match='abstract'):
+            Binner(x)  # type: ignore[abstract]
+
+    def test_range_even_matches_underlying(self) -> None:
+        """`RangeEvenBinner` is consistent with `uniform_splits_from_matrix`."""
+        x = jnp.linspace(-1, 1, 24).reshape(3, 8)
+        binner = RangeEvenBinner(x, max_bins=8)
+        ref_splits, ref_max_split = uniform_splits_from_matrix(x, 8)
+        assert_array_equal(binner._splits, ref_splits)
+        assert_array_equal(binner.max_split, ref_max_split)
+        assert_array_equal(binner.bin(x), bin_predictors(x, ref_splits))
+
+    def test_range_even_ignores_key(self, keys: split) -> None:
+        """`RangeEvenBinner` accepts a `key` and produces the same output."""
+        x = jnp.linspace(-1, 1, 24).reshape(3, 8)
+        without = RangeEvenBinner(x, max_bins=8)
+        withk = RangeEvenBinner(x, max_bins=8, key=keys.pop())
+        assert_array_equal(withk._splits, without._splits)
+        assert_array_equal(withk.max_split, without.max_split)
+
+    def test_unique_quantile_no_subsample(self) -> None:
+        """With `max_subsample=None`, output matches `quantilized_splits_from_matrix`."""
+        x = jnp.tile(jnp.arange(10.0), (3, 1))
+        binner = UniqueQuantileBinner(x, max_bins=8, max_subsample=None)
+        ref_splits, ref_max_split = quantilized_splits_from_matrix(x, 8)
+        assert_array_equal(binner._splits, ref_splits)
+        assert_array_equal(binner.max_split, ref_max_split)
+        assert_array_equal(binner.bin(x), bin_predictors(x, ref_splits))
+
+    def test_unique_quantile_no_subsample_does_not_need_key(self) -> None:
+        """When `n <= max_subsample`, no `key` is required."""
+        x = jnp.tile(jnp.arange(10.0), (3, 1))
+        # n=10, max_subsample=100 -> no subsampling, key=None is fine
+        binner = UniqueQuantileBinner(x, max_bins=8, max_subsample=100)
+        assert binner.max_split.shape == (3,)
+
+    def test_unique_quantile_requires_key_when_subsampling(self) -> None:
+        """`UniqueQuantileBinner` raises if `n > max_subsample` and `key=None`."""
+        x = jnp.tile(jnp.arange(10.0), (3, 1))
+        with pytest.raises(ValueError, match='requires a `key`'):
+            UniqueQuantileBinner(x, max_bins=8, max_subsample=4)
+
+    def test_unique_quantile_subsamples_with_key(self, keys: split) -> None:
+        """When subsampling triggers, the binner caps `max_split` and bins data correctly."""
+        x = jnp.tile(jnp.arange(20.0), (2, 1))
+        max_sub = 5
+        binner = UniqueQuantileBinner(
+            x, max_bins=64, max_subsample=max_sub, key=keys.pop()
+        )
+        # at most max_sub - 1 cutpoints once subsampling has taken place
+        assert jnp.all(binner.max_split <= max_sub - 1)
+        # the binner can still bin its training input without falling off the
+        # end of the splits array (no out-of-range bin indices)
+        bins = binner.bin(x)
+        assert bins.shape == x.shape
+        assert jnp.all(bins <= binner.max_split[:, None])
+
+    def test_given_splits_matches_parse_xinfo(self) -> None:
+        """`GivenSplitsBinner` matches `parse_xinfo` semantics."""
+        xinfo = jnp.array([[1.1, 2.3, jnp.nan], [-50.0, 10.0, 20.0]], dtype=jnp.float32)
+        x = jnp.zeros((2, 5), dtype=jnp.float32)
+        binner = GivenSplitsBinner(x, xinfo=xinfo)
+        ref_splits, ref_max_split = parse_xinfo(xinfo)
+        assert_array_equal(binner._splits, ref_splits)
+        assert_array_equal(binner.max_split, ref_max_split)
+
+    def test_given_splits_wrong_p_raises(self) -> None:
+        """Mismatched `xinfo.shape[0]` vs `X.shape[0]` raises ValueError."""
+        xinfo = jnp.array([[1.0, 2.0], [3.0, 4.0]], dtype=jnp.float32)
+        x = jnp.zeros((5, 0), dtype=jnp.float32)
+        with pytest.raises(ValueError, match=r'xinfo\.shape'):
+            GivenSplitsBinner(x, xinfo=xinfo)
 
 
 def test_binner_left_boundary() -> None:

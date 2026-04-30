@@ -25,7 +25,7 @@
 """Implement classes `mc_gbart` and `gbart` that mimic the R BART3 package."""
 
 from collections.abc import Hashable, Mapping
-from functools import cached_property
+from functools import cached_property, partial
 from types import MappingProxyType
 from typing import Any, Literal
 
@@ -36,6 +36,7 @@ from jaxtyping import Array, Float, Float32, Int32, Key, Real
 
 from bartz import mcmcloop, mcmcstep
 from bartz._interface import ArrayLike, Bart, DataFrame, FloatLike, PredictKind, Series
+from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 
 
 class mc_gbart(Module):
@@ -269,6 +270,16 @@ class mc_gbart(Module):
         actual_num_chains = num_chains or 1
         n_save = ndpost // actual_num_chains + bool(ndpost % actual_num_chains)
 
+        # translate xinfo/usequants/numcut to a binner factory
+        if xinfo is not None:
+            binner = partial(GivenSplitsBinner, xinfo=jnp.asarray(xinfo))
+        elif usequants:
+            binner = partial(
+                UniqueQuantileBinner, max_bins=numcut + 1, max_subsample=None
+            )
+        else:
+            binner = partial(RangeEvenBinner, max_bins=numcut + 1)
+
         # set most calling arguments for Bart
         kwargs: dict = dict(
             x_train=x_train,
@@ -280,8 +291,7 @@ class mc_gbart(Module):
             b=b,
             rho=rho,
             varprob=varprob,
-            xinfo=xinfo,
-            usequants=usequants,
+            binner=binner,
             rm_const=rm_const,
             sigest=sigest,
             sigdf=sigdf,
@@ -294,7 +304,6 @@ class mc_gbart(Module):
             offset=offset,
             w=w,
             num_trees=ntree,
-            numcut=numcut,
             n_save=n_save,
             n_burn=nskip,
             n_skip=keepevery,
@@ -356,7 +365,7 @@ class mc_gbart(Module):
 
     @property
     def _splits(self) -> Real[Array, 'p max_num_splits']:
-        return self._bart._splits  # noqa: SLF001
+        return self._bart._binner._splits  # noqa: SLF001
 
     @property
     def _x_train_fmt(self) -> Hashable:

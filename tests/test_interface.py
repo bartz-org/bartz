@@ -32,6 +32,7 @@ from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass, replace
 from functools import partial
 from gc import collect
+from inspect import signature
 from io import StringIO
 from sys import version_info
 from typing import Any, Literal, NamedTuple
@@ -76,6 +77,7 @@ from bartz.jaxext import get_default_device, get_device_count, is_key, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
+from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from tests.conftest import get_disable_problematic_sharding
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
@@ -175,6 +177,35 @@ class BartKW(NamedTuple):
     x_test: Real[Array, 'p m']
     w_test: Float32[Array, ' m'] | None = None
 
+    @property
+    def uses_quantile_binner(self) -> bool:
+        """Whether `kw['binner']` (a class or `partial`) is `UniqueQuantileBinner`."""
+        binner = self.kw.get('binner')
+        return getattr(binner, 'func', binner) is UniqueQuantileBinner
+
+    @property
+    def max_bins(self) -> int:
+        """Upper bound on the number of bins implied by `kw['binner']`."""
+        binner = self.kw.get(
+            'binner', signature(OriginalBart).parameters['binner'].default
+        )
+        if isinstance(binner, partial):
+            subcls = binner.func
+            partial_kwargs = binner.keywords
+        else:
+            subcls = binner
+            partial_kwargs = {}
+        bound = signature(subcls).bind_partial(**partial_kwargs)
+        bound.apply_defaults()
+        defaults = dict(bound.arguments)
+        if subcls is GivenSplitsBinner:
+            return defaults['xinfo'].shape[1] + 1
+        elif subcls in (UniqueQuantileBinner, RangeEvenBinner):
+            return defaults['max_bins']
+        else:
+            msg = f'Cannot deduce max_bins for binner of type {subcls.__name__}'
+            raise NotImplementedError(msg)
+
 
 def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     """Return keyword arguments for `Bart` and test predictors."""
@@ -198,8 +229,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     sparse=True,
                     **common,
                     printevery=50,
-                    usequants=False,
-                    numcut=256,  # > 255 to use uint16 for X and split_trees
+                    binner=partial(RangeEvenBinner, max_bins=257),
+                    # > 256 to use uint16 for X and split_trees
                     num_chains=None,
                     maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     init_kw=dict(
@@ -226,10 +257,12 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     **common,
                     n_skip=1,  # the mc_gbart default with binary would be 10
                     printevery=None,
-                    usequants=True,
-                    # usequants=True with binary X to check the case in which the
-                    # splits are less than the statically known maximum
-                    numcut=255,
+                    # quantile-binned, with binary X, to check the case in
+                    # which the splits are less than the statically known
+                    # maximum; full-sample quantilization for determinism
+                    binner=partial(
+                        UniqueQuantileBinner, max_bins=256, max_subsample=None
+                    ),
                     num_chains=2,
                     maxdepth=6,
                     num_data_devices=min(2, get_device_count()),
@@ -258,8 +291,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     varprob=jnp.array([0.2, 0.8]),
                     **common,
                     printevery=50,
-                    usequants=True,
-                    numcut=10,
+                    binner=partial(
+                        UniqueQuantileBinner, max_bins=11, max_subsample=None
+                    ),
                     num_chains=2,
                     num_chain_devices=min(2, get_device_count()),
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
@@ -289,8 +323,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     sparse=True,
                     **common,
                     printevery=50,
-                    usequants=False,
-                    numcut=256,  # > 255 to use uint16 for X and split_trees
+                    binner=partial(RangeEvenBinner, max_bins=257),
+                    # > 256 to use uint16 for X and split_trees
                     num_chains=None,
                     maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     init_kw=dict(
@@ -316,10 +350,11 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     outcome_type='binary',
                     **common,
                     printevery=None,
-                    usequants=True,
-                    # usequants=True with binary X to check the case in which the
-                    # splits are less than the statically known maximum
-                    numcut=255,
+                    # quantile-binned with binary X, deterministic via
+                    # full-sample quantilization
+                    binner=partial(
+                        UniqueQuantileBinner, max_bins=256, max_subsample=None
+                    ),
                     num_chains=2,
                     maxdepth=6,
                     num_data_devices=min(2, get_device_count()),
@@ -347,8 +382,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     varprob=jnp.array([0.2, 0.8]),
                     **common,
                     printevery=50,
-                    usequants=True,
-                    numcut=10,
+                    binner=partial(
+                        UniqueQuantileBinner, max_bins=11, max_subsample=None
+                    ),
                     num_chains=2,
                     num_chain_devices=min(2, get_device_count()),
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
@@ -526,11 +562,19 @@ class TestWithCachedBart:  # pragma: slow
                 path: KeyPath, x: Array | None, chain_axis: int | None
             ) -> None:
                 str_path = keystr(path)
-                if str_path.endswith('.theta') and not step_theta:
-                    return
                 if (
-                    str_path.endswith('.error_cov_inv')
-                    and bart._mcmc_state.error_cov_df is None
+                    (str_path.endswith('.theta') and not step_theta)
+                    or (
+                        str_path.endswith('.error_cov_inv')
+                        and bart._mcmc_state.error_cov_df is None
+                        # fixed covariance matrix, all chains equal
+                    )
+                    or (
+                        x is not None
+                        and jnp.issubdtype(x.dtype, jnp.integer)
+                        and x.ndim == 1
+                        # too few integers, may collide
+                    )
                 ):
                     return
                 if x is not None and chain_axis is not None:
@@ -804,7 +848,12 @@ class TestVarprobAttr:
         y = gen_y(keys.pop(), X, None, 'continuous')
         with debug_nans(False):
             xinfo = jnp.array([[jnp.nan], [0]])
-        bart = Bart(x_train=X, y_train=y, xinfo=xinfo, seed=keys.pop())
+        bart = Bart(
+            x_train=X,
+            y_train=y,
+            binner=partial(GivenSplitsBinner, xinfo=xinfo),
+            seed=keys.pop(),
+        )
         assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1])
         assert_array_equal(bart.varprob_mean, [0, 1])
         assert jnp.all(bart.varprob_mean == bart.varprob)
@@ -948,7 +997,7 @@ def test_no_datapoints(bkw: BartKW) -> None:
     p, _ = kw['x_train'].shape
     nsplits = 10
     xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
-    kw.update(xinfo=xinfo)
+    kw.update(binner=partial(GivenSplitsBinner, xinfo=xinfo))
 
     kw.update(num_data_devices=None)
 
@@ -991,11 +1040,11 @@ def test_one_datapoint(bkw: BartKW) -> None:
     """Check automatic data scaling with 1 datapoint."""
     kw = set_num_datapoints(bkw.kw, 1)
 
-    if kw.get('usequants', False):
+    if bkw.uses_quantile_binner:
         p, _ = kw['x_train'].shape
         nsplits = 10
         xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
-        kw.update(xinfo=xinfo)
+        kw.update(binner=partial(GivenSplitsBinner, xinfo=xinfo))
 
     kw.update(num_data_devices=None)
 
@@ -1045,7 +1094,7 @@ def test_two_datapoints(bkw: BartKW) -> None:
     if kw['outcome_type'] != 'binary':
         ref_sigest = jnp.where(bart._binary_mask, 0.0, kw['y_train'].std(axis=-1))
         assert_close_matrices(bart.sigest, ref_sigest, rtol=1e-6)
-    if kw.get('usequants', False):
+    if bkw.uses_quantile_binner:
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)
     assert not jnp.all(bart._main_trace.log_likelihood == 0.0)
@@ -1072,7 +1121,7 @@ def test_few_datapoints(bkw: BartKW) -> None:
 
 
 def test_xinfo() -> None:
-    """Simple check that the `xinfo` parameter works."""
+    """Simple check that `GivenSplitsBinner` works as the `binner`."""
     with debug_nans(False):
         xinfo = jnp.array(
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
@@ -1082,25 +1131,27 @@ def test_xinfo() -> None:
         y_train=jnp.empty(0),
         n_save=0,
         n_burn=0,
-        usequants=True,
-        numcut=0,
-        xinfo=xinfo,
+        binner=partial(GivenSplitsBinner, xinfo=xinfo),
     )
     bart = Bart(**kw)
 
     xinfo_wo_nan = jnp.where(jnp.isnan(xinfo), jnp.finfo(jnp.float32).max, xinfo)
-    assert_array_equal(bart._splits, xinfo_wo_nan)
+    assert_array_equal(bart._binner._splits, xinfo_wo_nan)
     assert_array_equal(bart._mcmc_state.forest.max_split, [2, 3, 0])
 
 
 def test_xinfo_wrong_p() -> None:
-    """Check that `xinfo` must have the same number of rows as `X`."""
+    """Check that `GivenSplitsBinner` rejects mismatched shapes."""
     with debug_nans(False):
         xinfo = jnp.array(
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
         )
     kw = dict(
-        x_train=jnp.empty((5, 0)), y_train=jnp.empty(0), n_save=0, n_burn=0, xinfo=xinfo
+        x_train=jnp.empty((5, 0)),
+        y_train=jnp.empty(0),
+        n_save=0,
+        n_burn=0,
+        binner=partial(GivenSplitsBinner, xinfo=xinfo),
     )
     with pytest.raises(ValueError, match=r'xinfo\.shape'):
         Bart(**kw)
@@ -1182,7 +1233,7 @@ def run_bart_like_prior(
         n_save=1000,
         n_burn=3000,
         printevery=None,
-        xinfo=xinfo,
+        binner=partial(GivenSplitsBinner, xinfo=xinfo),
         seed=key,
         num_chains=None,
         init_kw=dict(
@@ -1365,7 +1416,7 @@ def test_automatic_integer_types(bkw: BartKW) -> None:
 
     maxdepth = kw.get('maxdepth', 6)
     leaf_indices_type = select_type(maxdepth <= 8)
-    split_trees_type = X_type = select_type(kw['numcut'] <= 255)
+    split_trees_type = X_type = select_type(bkw.max_bins <= 256)
     var_trees_type = select_type(kw['x_train'].shape[0] <= 256)
 
     assert bart._mcmc_state.forest.var_tree.dtype == var_trees_type

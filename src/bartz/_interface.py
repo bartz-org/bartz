@@ -51,21 +51,10 @@ from jax import (
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh, PartitionSpec
-from jaxtyping import (
-    Array,
-    Bool,
-    Float,
-    Float32,
-    Int32,
-    Integer,
-    Key,
-    Real,
-    Shaped,
-    UInt,
-)
+from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz import mcmcloop, mcmcstep, prepcovars
+from bartz import mcmcloop, mcmcstep
 from bartz.grove import (
     TreesTrace,
     check_trace,
@@ -73,7 +62,7 @@ from bartz.grove import (
     forest_depth_distr,
     points_per_node_distr,
 )
-from bartz.jaxext import equal_shards, is_key
+from bartz.jaxext import equal_shards, is_key, split
 from bartz.jaxext.scipy.special import ndtri
 from bartz.jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
@@ -83,6 +72,7 @@ from bartz.mcmcstep._state import (
     chol_with_gersh,
     get_num_chains,
 )
+from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
 
 ArrayLike = Array | ndarray
 FloatLike = float | Float[ArrayLike, '']
@@ -189,19 +179,14 @@ class Bart(Module):
         not need to be normalized to sum to 1. If not specified, use a uniform
         distribution. If ``sparse=True``, this is used as initial value for the
         MCMC.
-    xinfo
-        A matrix with the cutpoins to use to bin each predictor. If not
-        specified, it is generated automatically according to `usequants` and
-        `numcut`.
-
-        Each row shall contain a sorted list of cutpoints for a predictor. If
-        there are less cutpoints than the number of columns in the matrix,
-        fill the remaining cells with NaN.
-
-        `xinfo` shall be a matrix even if `x_train` is a dataframe.
-    usequants
-        Whether to use predictors quantiles instead of a uniform grid to bin
-        predictors. Ignored if `xinfo` is specified.
+    binner
+        A callable that, given the training predictors and a random key,
+        returns a `Binner` instance. The default is `UniqueQuantileBinner`,
+        which places cutpoints at the quantiles of each predictor. Other
+        built-in options are `RangeEvenBinner` (evenly-spaced cutpoints over
+        the observed range) and `GivenSplitsBinner` (R BART ``xinfo`` format).
+        To pass options, use `functools.partial`, e.g.
+        ``binner=partial(UniqueQuantileBinner, max_bins=128)``.
     rm_const
         How to treat predictors with no associated decision rules (i.e., there
         are no available cutpoints for that predictor). If `True` (default),
@@ -262,22 +247,6 @@ class Bart(Module):
         specified by the user. Not supported for multivariate regression.
     num_trees
         The number of trees used to represent the latent mean function.
-    numcut
-        If `usequants` is `False`: the exact number of cutpoints used to bin the
-        predictors, ranging between the minimum and maximum observed values
-        (excluded).
-
-        If `usequants` is `True`: the maximum number of cutpoints to use for
-        binning the predictors. Each predictor is binned such that its
-        distribution in `x_train` is approximately uniform across bins. The
-        number of bins is at most the number of unique values appearing in
-        `x_train`, or ``numcut + 1``.
-
-        Before running the algorithm, the predictors are compressed to the
-        smallest integer type that fits the bin indices, so `numcut` is best set
-        to the maximum value of an unsigned integer type, like 255.
-
-        Ignored if `xinfo` is specified.
     n_save
         The number of MCMC samples to save, after burn-in, per chain. The
         total trace length across all chains is ``num_chains * n_save``.
@@ -341,7 +310,7 @@ class Bart(Module):
     _main_trace: mcmcloop.MainTrace
     _burnin_trace: mcmcloop.BurninTrace
     _mcmc_state: mcmcstep.State
-    _splits: Real[Array, 'p max_num_splits']
+    _binner: Binner
     _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
     _x_train_fmt: Any = field(static=True)
 
@@ -363,8 +332,7 @@ class Bart(Module):
         b: FloatLike = 1.0,
         rho: FloatLike | None = None,
         varprob: Float[ArrayLike, ' p'] | None = None,
-        xinfo: Float[ArrayLike, 'p n'] | None = None,
-        usequants: bool = False,
+        binner: BinnerFactory = UniqueQuantileBinner,
         rm_const: bool = True,
         sigest: FloatLike | Float[ArrayLike, ' k'] | None = None,
         sigdf: FloatLike = 3.0,
@@ -377,7 +345,6 @@ class Bart(Module):
         offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
         w: Float[ArrayLike, ' n'] | Series | None = None,
         num_trees: int = 200,
-        numcut: int = 255,
         n_save: int = 1000,
         n_burn: int = 1000,
         n_skip: int = 1,
@@ -417,9 +384,16 @@ class Bart(Module):
             x_train, y_train, outcome_type, binary_mask, sigest, sigdf, sigquant, lamda
         )
 
-        # determine splits
-        splits, max_split = self._determine_splits(x_train, usequants, numcut, xinfo)
-        x_train = self._bin_predictors(x_train, splits)
+        # split the user-provided seed into an mcmc key and a binner key
+        if not is_key(seed):
+            seed = random.key(seed)
+        keys = split(seed)
+
+        # construct the binner and bin x_train
+        binner_obj = binner(x_train, key=keys.pop())
+        x_train = binner_obj.bin(x_train)
+        # copy max_split because `mcmcstep.init` donates it
+        max_split = jnp.array(binner_obj.max_split)
 
         # setup and run mcmc
         initial_state = self._setup_mcmc(
@@ -451,7 +425,7 @@ class Bart(Module):
             n_burn,
         )
         result = self._run_mcmc(
-            initial_state, n_save, n_burn, n_skip, printevery, seed, run_mcmc_kw
+            initial_state, n_save, n_burn, n_skip, printevery, keys.pop(), run_mcmc_kw
         )
 
         # set public attributes
@@ -463,7 +437,7 @@ class Bart(Module):
         self._main_trace = result.main_trace
         self._burnin_trace = result.burnin_trace
         self._mcmc_state = result.final_state
-        self._splits = splits
+        self._binner = binner_obj
         self._x_train_fmt = x_train_fmt
         self._binary_mask = binary_mask
 
@@ -828,7 +802,7 @@ class Bart(Module):
             raise ValueError(msg)
         if w is not None:
             self._check_same_length(w, x_test)
-        return self._bin_predictors(x_test, self._splits)
+        return self._binner.bin(x_test)
 
     @staticmethod
     def _process_predictor_input(
@@ -1061,29 +1035,6 @@ class Bart(Module):
         return leaf_prior_cov_inv
 
     @staticmethod
-    def _determine_splits(
-        x_train: Real[Array, 'p n'],
-        usequants: bool,
-        numcut: int,
-        xinfo: Float[Array, 'p n'] | None,
-    ) -> tuple[Real[Array, 'p m'], UInt[Array, ' p']]:
-        if xinfo is not None:
-            if xinfo.ndim != 2 or xinfo.shape[0] != x_train.shape[0]:
-                msg = f'{xinfo.shape=} different from expected ({x_train.shape[0]}, *)'
-                raise ValueError(msg)
-            return prepcovars.parse_xinfo(xinfo)
-        elif usequants:
-            return prepcovars.quantilized_splits_from_matrix(x_train, numcut + 1)
-        else:
-            return prepcovars.uniform_splits_from_matrix(x_train, numcut + 1)
-
-    @staticmethod
-    def _bin_predictors(
-        x: Real[Array, 'p n'], splits: Real[Array, 'p max_num_splits']
-    ) -> UInt[Array, 'p n']:
-        return prepcovars.bin_predictors(x, splits)
-
-    @staticmethod
     def _setup_mcmc(
         x_train: Real[Array, 'p n'],
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
@@ -1165,15 +1116,9 @@ class Bart(Module):
         n_burn: int,
         n_skip: int,
         printevery: int | None,
-        seed: int | Integer[Array, ''] | Key[Array, ''],
+        key: Key[Array, ''],
         run_mcmc_kw: Mapping,
     ) -> RunMCMCResult:
-        # prepare random generator seed
-        if is_key(seed):
-            key = jnp.copy(seed)
-        else:
-            key = jax.random.key(seed)
-
         # prepare arguments
         kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
         kw.update(

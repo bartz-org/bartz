@@ -284,7 +284,7 @@ class mc_gbart(Module):
         kwargs: dict = dict(
             x_train=x_train,
             y_train=y_train,
-            outcome_type='binary' if type == 'pbart' else 'continuous',
+            outcome_type=dict(wbart='continuous', pbart='binary')[type],
             sparse=sparse,
             theta=theta,
             a=a,
@@ -293,7 +293,7 @@ class mc_gbart(Module):
             varprob=varprob,
             binner=binner,
             rm_const=rm_const,
-            sigest=sigest,
+            sigest='ols-or-variance' if sigest is None else sigest,
             sigdf=sigdf,
             sigquant=sigquant,
             k=k,

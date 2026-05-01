@@ -31,7 +31,8 @@ from typing import Any, Protocol
 from equinox import AbstractVar, Module
 from jax import jit, random, vmap
 from jax import numpy as jnp
-from jaxtyping import Array, Float, Integer, Key, Real, UInt
+from jax.scipy.sparse.linalg import cg
+from jaxtyping import Array, Float, Float32, Integer, Key, Real, Shaped, UInt
 
 from bartz.jaxext import autobatch, minimal_unsigned_dtype, unique
 
@@ -526,3 +527,70 @@ class GivenSplitsBinner(Binner):
 
     def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:  # noqa: D102
         return _bin_predictors(X, self._splits)
+
+
+@jit
+def _sigma2_from_ols(
+    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, ' n'] | Float32[Array, 'k n']
+) -> Float32[Array, ''] | Float32[Array, ' k']:
+    """Return the error variance estimated with OLS with intercept."""
+    x_centered = x_train.T - x_train.mean(axis=1)
+    y_centered = y_train.T - y_train.mean(axis=-1)
+    # centering is equivalent to adding an intercept column
+    _, chisq, rank, _ = jnp.linalg.lstsq(x_centered, y_centered)
+    chisq = chisq.reshape(y_train.shape[:-1])
+    dof = y_train.shape[-1] - rank
+    return chisq / dof
+
+
+@jit
+def _sigma2_from_cg(
+    x: Shaped[Array, 'p n'], y: Float32[Array, ' *k n'], maxiter: Integer[Array, '']
+) -> Float32[Array, ' *k']:
+    """Estimate the error variance using approximate OLS with cg for large-scale problems."""
+    # center both variables, and rescale x. centering is equivalent to adding
+    # an intercept term, while rescaling x does not change the result since we
+    # are returning something that depends on the residuals only
+    y -= y.mean(axis=-1, keepdims=True)
+    x -= x.mean(axis=-1, keepdims=True)
+    scale = x.std(axis=1, keepdims=True)
+    x /= jnp.where(scale, scale, 1.0)
+
+    # compute residuals
+    p, n = x.shape
+    if p <= n:
+        rhs: Float32[Array, ' p *k'] = x @ y.T
+        beta: Float32[Array, ' p *k'] = _cg_x_x_t(x, rhs, maxiter)
+        r: Float32[Array, ' n *k'] = y.T - x.T @ beta
+    else:
+        z: Float32[Array, ' n *k'] = _cg_x_x_t(x.T, y.T, maxiter)
+        r: Float32[Array, ' n *k'] = y.T - x.T @ (x @ z)
+
+    # estimate residual variance
+    return jnp.sum(jnp.square(r), axis=0) / (n - maxiter)
+
+
+def _cg_x_x_t(
+    x: Shaped[Array, 'p n'] | Shaped[Array, 'n p'],
+    rhs: Float32[Array, ' p *k'] | Float32[Array, ' n *k'],
+    maxiter: Integer[Array, ''],
+) -> Float32[Array, ' p *k'] | Float32[Array, ' n *k']:
+    """Solve (XX' + eps I) u = rhs."""
+    # check x is transposed to be a short matrix, and other properties
+    p, n = x.shape
+    assert p <= n
+    r1, *_ = rhs.shape
+    assert p == r1
+
+    # upper bound the max eigenvalue of XX' to determine epsilon
+    abs_x = jnp.abs(x)
+    max_eigv = jnp.max(abs_x @ (abs_x.T @ jnp.ones(p)))
+    eps = jnp.finfo(max_eigv.dtype).eps * p * max_eigv
+
+    # solve with vmapped cg
+    xxt = lambda rhs: x @ (x.T @ rhs) + eps * rhs
+    func = lambda rhs: cg(xxt, rhs, tol=0, maxiter=maxiter)
+    if rhs.ndim == 2:
+        func = vmap(func, in_axes=1, out_axes=1)
+    out, _ = func(rhs)
+    return out

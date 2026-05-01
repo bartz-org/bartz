@@ -24,8 +24,12 @@
 
 """Test the `bartz.prepcovars` module."""
 
+import math
+from collections.abc import Callable
+from functools import partial
+
 import pytest
-from jax import debug_infs, random
+from jax import Array, debug_infs, random
 from jax import numpy as jnp
 from numpy.testing import assert_array_equal
 
@@ -38,9 +42,12 @@ from bartz.prepcovars import (
     _bin_predictors,
     _parse_xinfo,
     _quantilized_splits_from_matrix,
+    _sigma2_from_cg,
+    _sigma2_from_ols,
     _subsample,
     _uniform_splits_from_matrix,
 )
+from tests.util import assert_close_matrices
 
 
 class TestQuantilizer:
@@ -319,3 +326,131 @@ def test_binner_right_boundary() -> None:
     x = jnp.array([[2**31 - 1]])
     b = _bin_predictors(x, splits)
     assert_array_equal(b, [[3]])
+
+
+class TestSigma2Estimates:
+    """Test functions that estimate the residual variance."""
+
+    @pytest.mark.parametrize(
+        'func', [_sigma2_from_ols, partial(_sigma2_from_cg, maxiter=3)]
+    )
+    @pytest.mark.parametrize('k', [(), (3,)])
+    @pytest.mark.parametrize('p', [5, 60])  # < n, > n
+    def test_scaling(
+        self, keys: split, func: Callable[..., Array], k: tuple[int, ...], p: int
+    ) -> None:
+        """Check that f(ax + b, cy + d) = c^2 f(x, y)."""
+        n = 30
+
+        x = random.normal(keys.pop(), (p, n))
+        beta = random.normal(keys.pop(), (*k, p))
+        beta /= jnp.sqrt(p)
+        y = beta @ x
+        y += random.normal(keys.pop(), y.shape)
+
+        ref = func(x, y)
+
+        assert ref.shape == k
+        assert_close_matrices(ref, jnp.maximum(ref, 0))
+        assert_close_matrices(ref, jnp.minimum(ref, jnp.var(y, axis=-1, ddof=1)))
+
+        a, b = random.normal(keys.pop(), (2, p))
+        c, d = random.normal(keys.pop(), (2, *k))
+        sx = a[:, None] * x + b[:, None]
+        sy = c[..., None] * y + d[..., None]
+        scaled = func(sx, sy)
+
+        assert_close_matrices(scaled, jnp.square(c) * ref, rtol=1e-4, atol=1e-10)
+
+    @pytest.mark.parametrize(
+        'func', [_sigma2_from_ols, partial(_sigma2_from_cg, maxiter=3)]
+    )
+    @pytest.mark.parametrize('p', [5, 60])  # < n, > n
+    def test_batching_consistency(
+        self, keys: split, func: Callable[..., Array], p: int
+    ) -> None:
+        """Check that batched ``y`` matches per-row scalar evaluations."""
+        n, k = 30, 4
+        x = random.normal(keys.pop(), (p, n))
+        y = random.normal(keys.pop(), (k, n))
+        batched = func(x, y)
+        per_row = jnp.stack([func(x, y[i]) for i in range(k)])
+        assert_close_matrices(batched, per_row, rtol=1e-5, atol=1e-10)
+
+    @pytest.mark.parametrize('k', [(), (3,)])
+    @pytest.mark.parametrize('p', [5, 60])  # < n, > n
+    def test_cg_converges_to_ols(self, keys: split, k: tuple[int, ...], p: int) -> None:
+        """Check that CG converges to full OLS as `maxiter` is increased."""
+        n = 30
+
+        x = random.normal(keys.pop(), (p, n))
+        y = random.normal(keys.pop(), (*k, n))
+
+        ols = _sigma2_from_ols(x, y)
+        cg_series = jnp.stack(
+            [_sigma2_from_cg(x, y, maxiter) for maxiter in range(1, p + 1)]
+        )
+        last = cg_series[-1, ...]
+
+        if p < n:
+            assert_close_matrices(last, ols, rtol=1e-6)
+            delta = jnp.diff(jnp.abs(cg_series - ols), axis=0)
+            assert_close_matrices(jnp.minimum(delta, 0), delta, rtol=0.2)
+        else:
+            assert_close_matrices(ols, jnp.zeros_like(ols), atol=1e-8)
+            assert_close_matrices(last, jnp.zeros_like(last), atol=1e-6)
+            first = cg_series[0, ...]
+            assert_close_matrices(jnp.maximum(first, 0), first)
+
+    @pytest.mark.parametrize(
+        'func', [_sigma2_from_ols, partial(_sigma2_from_cg, maxiter=3)]
+    )
+    @pytest.mark.parametrize('k', [(), (3,)])
+    def test_oracle_comparison(
+        self, keys: split, func: Callable[..., Array], k: tuple[int, ...]
+    ) -> None:
+        """Check that the estimated variance is close to the true one."""
+        n = 1000
+        p = 10
+        true = jnp.ones(k)
+
+        x = random.normal(keys.pop(), (p, n))
+        beta = random.normal(keys.pop(), (*k, p))
+        beta /= jnp.sqrt(p)
+        y = beta @ x
+        y += jnp.sqrt(true)[..., None] * random.normal(keys.pop(), y.shape)
+
+        est = func(x, y)
+
+        assert_close_matrices(est, true, rtol=0.2)
+
+    @pytest.mark.parametrize(
+        'func', [_sigma2_from_ols, partial(_sigma2_from_cg, maxiter=3)]
+    )
+    @pytest.mark.parametrize('k', [(), (3,)])
+    def test_orthogonal_returns_y_norm_squared(
+        self, keys: split, func: Callable[..., Array], k: tuple[int, ...]
+    ) -> None:
+        """Check that if y is orthogonal to X, then the estimated variance is var(y)."""
+        n = 100
+        p = 10
+
+        # generate x, y with y orthogonal to x
+        knum = math.prod(k)
+        a = random.normal(keys.pop(), (n, knum + p))
+        q, _ = jnp.linalg.qr(a)
+        q = q.T
+        y = q[:knum, :]
+        x = q[knum:, :]
+        assert x.shape == (p, n)
+        assert y.shape == (knum, n)
+        y = y.reshape(*k, n)
+
+        xy = x @ y.T
+        ref = jnp.abs(x) @ jnp.abs(y.T)
+        assert_close_matrices(xy, ref, tozero=True, rtol=1e-7)
+
+        var = func(x, y)
+        ddof = getattr(func, 'keywords', dict(maxiter=p))['maxiter']
+        ref = jnp.var(y, axis=-1, ddof=ddof)
+        assert_close_matrices(var, ref, rtol=0.01)

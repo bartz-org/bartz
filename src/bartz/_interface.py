@@ -72,10 +72,18 @@ from bartz.mcmcstep._state import (
     chol_with_gersh,
     get_num_chains,
 )
-from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
+from bartz.prepcovars import (
+    Binner,
+    BinnerFactory,
+    UniqueQuantileBinner,
+    _sigma2_from_cg,
+    _sigma2_from_ols,
+)
 
 ArrayLike = Array | ndarray
 FloatLike = float | Float[ArrayLike, '']
+
+CG_MAXITER = 20
 
 
 class PredictKind(Enum):
@@ -193,13 +201,22 @@ class Bart(Module):
         they are ignored. If `False`, an error is raised if there are any.
     sigest
         An estimate of the residual standard deviation on `y_train`, used to set
-        `lamda`. If not specified, it is estimated by linear regression (with
-        intercept, and without taking into account `w`). If `y_train` has less
-        than two elements, it is set to 1. If n <= p, it is set to the standard
-        deviation of `y_train`. Ignored if `lamda` is specified. For
-        multivariate regression, can be a scalar (broadcast to all components)
-        or a `(k,)` vector of per-component estimates. For mixed outcome types,
-        binary component values are ignored.
+        `lamda`. Ignored if `lamda` is specified. For multivariate regression,
+        can be a scalar (broadcast to all components) or a `(k,)` vector of
+        per-component estimates. For mixed outcome types, binary component
+        values are ignored. Can be one of the following special values to set
+        automatically based on the data:
+
+        'ols-or-variance'
+            If less than two datapoints, set ``sigest=1``. If ``n > p``, use the
+            OLS error standard deviation estimate (w/ intercept, w/o taking into
+            account `w`), else use the standard deviation of `y_train`.
+        'gc'
+            Use an approximate and regularized version of the OLS residual
+            standard deviation estimate.
+        'auto' (default)
+            Use 'ols-or-variance' if the dataset is smaller than a threshold,
+            else 'gc' for larger datasets.
     sigdf
         The degrees of freedom of the scaled inverse-chisquared prior on the
         noise variance. For multivariate regression, the Inverse-Wishart
@@ -334,7 +351,9 @@ class Bart(Module):
         varprob: Float[ArrayLike, ' p'] | None = None,
         binner: BinnerFactory = UniqueQuantileBinner,
         rm_const: bool = True,
-        sigest: FloatLike | Float[ArrayLike, ' k'] | None = None,
+        sigest: FloatLike
+        | Float[ArrayLike, ' k']
+        | Literal['auto', 'ols-or-variance', 'cg'] = 'auto',
         sigdf: FloatLike = 3.0,
         sigquant: FloatLike = 0.9,
         k: FloatLike = 2.0,
@@ -841,7 +860,9 @@ class Bart(Module):
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
         outcome_type: OutcomeType | tuple[OutcomeType, ...],
         binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-        sigest: FloatLike | Float[Array, ' k'] | None,
+        sigest: FloatLike
+        | Float[Array, ' k']
+        | Literal['auto', 'ols-or-variance', 'cg'],
         sigdf: FloatLike,
         sigquant: FloatLike,
         lamda: FloatLike | Float[Array, ' k'] | None,
@@ -852,8 +873,8 @@ class Bart(Module):
     ]:
         """Return (error_cov_df, error_cov_scale, sigest)."""
         if outcome_type is OutcomeType.binary:
-            if sigest is not None or lamda is not None:
-                msg = 'Let `sigest=None` and `lamda=None` for binary regression'
+            if not isinstance(sigest, str) or lamda is not None:
+                msg = 'Do not set `sigest` or `lamda` for binary regression, they are ignored'
                 raise ValueError(msg)
             return None, None, None
 
@@ -868,12 +889,13 @@ class Bart(Module):
             invchi2rid = invchi2 * sigdf
             lamda = sigest2 / invchi2rid
 
-        elif sigest is not None:
-            msg = 'Let `sigest=None` if `lamda` is specified'
+        elif not isinstance(sigest, str):
+            msg = "Do not set `sigest` if `lamda` is specified, it's ignored"
             raise ValueError(msg)
 
         else:
             lamda = jnp.where(binary_mask, 0.0, lamda)
+            sigest = None
 
         # params written in multivariate form
         if y_train.ndim == 2:
@@ -892,35 +914,59 @@ class Bart(Module):
         cls,
         x_train: Shaped[Array, 'p n'],
         y_train: Float32[Array, '*k n'],
-        sigest: float | Shaped[Array, '*k'] | None,
-        binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
+        sigest: FloatLike
+        | Float[Array, ' k']
+        | Literal['auto', 'ols-or-variance', 'cg'],
+        binary_mask: Bool[Array, '*k'],
     ) -> Float32[Array, '*k']:
-        n = y_train.shape[-1]
-        if sigest is not None:
+        if not isinstance(sigest, str):
             sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
             sigest2 = jnp.broadcast_to(sigest2, y_train.shape[:-1])
-        elif n < 2:
-            sigest2 = jnp.ones(y_train.shape[:-1])
-        elif n <= x_train.shape[0]:
-            sigest2 = jnp.var(y_train, axis=-1)
+        elif sigest == 'ols-or-variance':
+            sigest2 = cls._sigest2_ols_or_variance(x_train, y_train)
+        elif sigest == 'cg':
+            sigest2 = cls._sigest2_cg(x_train, y_train)
+        elif sigest == 'auto':
+            sigest2 = cls._sigest2_auto(x_train, y_train)
         else:
-            sigest2 = cls._linear_regression(x_train, y_train)
+            msg = f'unrecognized value {sigest=}'
+            raise ValueError(msg)
         return jnp.where(binary_mask, 0.0, sigest2)
 
     @staticmethod
-    @jit
-    def _linear_regression(
-        x_train: Shaped[Array, 'p n'],
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-    ) -> Float32[Array, ''] | Float32[Array, ' k']:
-        """Return the error variance estimated with OLS with intercept."""
-        x_centered = x_train.T - x_train.mean(axis=1)
-        y_centered = y_train.T - y_train.mean(axis=-1)
-        # centering is equivalent to adding an intercept column
-        _, chisq, rank, _ = jnp.linalg.lstsq(x_centered, y_centered)
-        chisq = chisq.reshape(y_train.shape[:-1])
-        dof = y_train.shape[-1] - rank
-        return chisq / dof
+    def _sigest2_ols_or_variance(
+        x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
+    ) -> Float32[Array, '*k']:
+        """Implement the case `sigest='ols-or-variance'`."""
+        p, n = x_train.shape
+        if n < 2:
+            *k, _ = y_train.shape
+            return jnp.ones(k)
+        elif n <= p:
+            return jnp.var(y_train, axis=-1)
+        else:
+            return _sigma2_from_ols(x_train, y_train)
+
+    @staticmethod
+    def _sigest2_cg(
+        x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
+    ) -> Float32[Array, '*k']:
+        """Implement the case `sigest='cg'`."""
+        p, n = x_train.shape
+        maxiter = max(1, min(n, p, CG_MAXITER))
+        return _sigma2_from_cg(x_train, y_train, maxiter)
+
+    @classmethod
+    def _sigest2_auto(
+        cls, x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
+    ) -> Float32[Array, ' *k']:
+        """Implement the case `sigest='auto'`."""
+        p, n = x_train.shape
+        threshold = 10_000 * 100**2
+        if n * p * p > threshold and min(n, p) > CG_MAXITER:
+            return cls._sigest2_cg(x_train, y_train)
+        else:
+            return cls._sigest2_ols_or_variance(x_train, y_train)
 
     @staticmethod
     def _check_type_settings(

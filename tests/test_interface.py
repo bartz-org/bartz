@@ -1911,3 +1911,42 @@ def test_numpy_input(bkw: BartKW) -> None:
     bart2 = Bart(**kw2)
 
     assert_identical_bart(bart1, bart2)
+
+
+def test_sigest_wrong_special_value(bkw: BartKW) -> None:
+    """Trigger error on unrecognized `sigest` value."""
+    value = 'ohohoh'
+    if bkw.kw['outcome_type'] == 'binary':
+        pytest.skip('Parameter ignored with binary outcomes.')
+    kw = dict(bkw.kw, sigest=value)
+    with pytest.raises(ValueError, match=value):
+        Bart(**kw)
+
+
+def test_sigest_cg(bkw: BartKW) -> None:
+    """Check the `sigest='cg'` is an approximation of `sigest='ols-or-variance'`."""
+    p, n = bkw.kw['x_train'].shape
+    if p >= n or bkw.kw['outcome_type'] == 'binary':
+        pytest.skip('Requires p < n and continuous outcomes.')
+    bart_ols = Bart(**dict(bkw.kw, sigest='ols-or-variance'))
+    bart_cg = Bart(**dict(bkw.kw, sigest='cg'))
+    mask = ~bart_ols._binary_mask
+    assert_close_matrices(bart_cg.sigest[mask], bart_ols.sigest[mask])
+
+
+def test_sigest_auto_cg(keys: split) -> None:
+    """Check the `sigest='auto'` branch that switches to 'cg'."""
+    n = 110
+    p = 1000
+    assert n * p * p > 10_000 * 100 * 100
+
+    x = random.normal(keys.pop(), (p, n))
+    y = random.normal(keys.pop(), (n,))
+    # y is random so we can check 'cg' is regularizing in this high-p problem:
+    # the correct answer is sigest = std(y), but since p > n ordinary linear
+    # regression would always overfit perfectly and return sigest = 0.
+
+    bart = Bart(x, y, seed=keys.pop(), n_save=0, n_burn=0)
+    stdy = jnp.std(y)
+    assert bart.sigest <= stdy
+    assert bart.sigest >= stdy * 1e-3  # not that much regularization...

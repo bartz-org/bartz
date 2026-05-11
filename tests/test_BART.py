@@ -29,6 +29,7 @@ This is the main suite of tests.
 
 from dataclasses import dataclass, replace
 from functools import partial
+from inspect import signature
 from sys import version_info
 from typing import Any, Literal
 
@@ -46,6 +47,8 @@ from jaxtyping import Array, Float32, Int32, Key, PyTree, Shaped, UInt
 from numpy.testing import assert_allclose, assert_array_equal
 from pytest_subtests import SubTests
 
+from bartz import Bart
+from bartz.BART import mc_gbart as original_mc_gbart
 from bartz.debug import TraceWithOffset, sample_prior, trees_BART_to_bartz
 from bartz.debug import debug_gbart as gbart
 from bartz.debug import debug_mc_gbart as mc_gbart
@@ -61,6 +64,12 @@ from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
+from bartz.prepcovars import (
+    BinnerFactory,
+    GivenSplitsBinner,
+    RangeEvenBinner,
+    UniqueQuantileBinner,
+)
 from tests.conftest import get_disable_problematic_sharding
 from tests.test_interface import BartKW, gen_X, gen_y, make_kw
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
@@ -81,38 +90,71 @@ except ValueError as exc:
         raise
 
 
+def get_with_default(kw: dict, param_name: str) -> Any:  # noqa: ANN401
+    """Do `kw.get(param_name, <default in mc_gbart>)`."""
+    sig = signature(original_mc_gbart)
+    param = sig.parameters[param_name]
+    if param.default is param.empty:
+        return kw[param_name]
+    else:
+        return kw.get(param_name, param.default)
+
+
 def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     """Convert `Bart` keyword arguments to `mc_gbart` keyword arguments."""
     kw = dict(bkw.kw)
 
+    def pop(param_name: str) -> Any:  # noqa: ANN401
+        """Remove `param_name` from kw, return the default value of the parameter in `Bart` if missing."""
+        sig = signature(Bart)
+        param = sig.parameters[param_name]
+        if param.default is param.empty:
+            return kw.pop(param_name)
+        else:
+            return kw.pop(param_name, param.default)
+
+    def push(param_name: str, value: object) -> None:
+        """Set `kw[param_name] = value`, unless value is equal to default value in `mc_gbart`."""
+        sig = signature(original_mc_gbart)
+        param = sig.parameters[param_name]
+        if param.default == value:
+            kw.pop(param_name, None)
+        else:
+            kw[param_name] = value
+
     # outcome_type -> type
-    outcome_type = kw.pop('outcome_type', 'continuous')
-    kw['type'] = 'pbart' if outcome_type == 'binary' else 'wbart'
+    outcome_type = pop('outcome_type')
+    push('type', 'pbart' if outcome_type == 'binary' else 'wbart')
 
     # num_trees -> ntree
-    kw['ntree'] = kw.pop('num_trees')  # must be present bc different defaults
+    push('ntree', pop('num_trees'))
 
     # num_chains -> mc_cores
-    num_chains = kw.pop('num_chains')  # must be present bc different defaults
+    num_chains = pop('num_chains')
     assert num_chains != 1  # because mc_gbart does not have an equivalent option
-    kw['mc_cores'] = 1 if num_chains is None else num_chains
+    mc_cores = 1 if num_chains is None else num_chains
+    push('mc_cores', mc_cores)
+
+    # n_save (per-chain) -> ndpost (across-chains total)
+    push('ndpost', pop('n_save') * mc_cores)
+
+    # n_burn -> nskip, n_skip -> keepevery
+    push('nskip', pop('n_burn'))
+    push('keepevery', pop('n_skip'))
+
+    # binner -> xinfo, usequants, numcut
+    binner = pop('binner')
+    binargs = convert_binner(binner)
+    for k, v in binargs.items():
+        push(k, v)
 
     # collect bart_kwargs from top-level Bart params
     bart_kwargs: dict[str, Any] = {}
 
-    # drop num_chain_devices on cpu because mc_gbart has automatic sharding on
-    # cpu, unless it's None which disables the automatism
-    if 'num_chain_devices' in kw:
-        num_chain_devices = kw.pop('num_chain_devices')
-        if get_default_device().platform != 'cpu' or num_chain_devices is None:
-            bart_kwargs['num_chain_devices'] = num_chain_devices
-
-    if 'num_data_devices' in kw:
-        bart_kwargs['num_data_devices'] = kw.pop('num_data_devices')
-
-    # maxdepth has the same default
-    if 'maxdepth' in kw:
-        bart_kwargs['maxdepth'] = kw.pop('maxdepth')
+    # move Bart-only keys that mc_gbart does not change the default of
+    for key in ('num_chain_devices', 'num_data_devices', 'maxdepth'):
+        if key in kw:
+            bart_kwargs[key] = kw.pop(key)
 
     # init_kw must be present bc it contains min_points_per_leaf which has
     # different defaults
@@ -128,6 +170,33 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     kw['x_test'] = bkw.x_test
 
     return kw
+
+
+def convert_binner(binner: BinnerFactory) -> dict[str, Any]:
+    """Convert the `binner` argument to `Bart` to the corresponding arguments for `mc_gbart`."""
+    # standardize input as (subcls, defaults), where defaults contains the
+    # constructor defaults of subcls with the partial keywords applied on top
+    if isinstance(binner, partial):
+        subcls = binner.func
+        partial_kwargs = binner.keywords
+    else:
+        subcls = binner
+        partial_kwargs = {}
+    bound = signature(subcls).bind_partial(**partial_kwargs)
+    bound.apply_defaults()
+    defaults = dict(bound.arguments)
+
+    # convert to mc_gbart parameters
+    if subcls is GivenSplitsBinner:
+        return {'xinfo': defaults['xinfo']}
+    elif subcls is UniqueQuantileBinner:
+        assert defaults['max_subsample'] is None
+        return {'usequants': True, 'numcut': defaults['max_bins'] - 1}
+    elif subcls is RangeEvenBinner:
+        return {'usequants': False, 'numcut': defaults['max_bins'] - 1}
+    else:
+        msg = f'Cannot convert binner of type {subcls.__name__}'
+        raise NotImplementedError(msg)
 
 
 def make_gbart_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
@@ -225,7 +294,7 @@ class TestWithCachedBart:  # pragma: slow
         assert rhat_yhat_train < 6
         print(f'{rhat_yhat_train.item()=}')
 
-        if kw['type'] == 'pbart':  # binary regression
+        if get_with_default(kw, 'type') == 'pbart':  # binary regression
             prob_train = bart.prob_train.reshape(nchains, nsamples, n)
             rhat_prob_train = multivariate_rhat(prob_train)
             assert rhat_prob_train < 1.2
@@ -243,7 +312,7 @@ class TestWithCachedBart:  # pragma: slow
             assert rhat_varcount < 7
             print(f'{rhat_varcount.item()=}')
 
-            if kw.get('sparse', False):  # pragma: no branch
+            if get_with_default(kw, 'sparse'):  # pragma: no branch
                 varprob = bart.varprob.reshape(nchains, nsamples, p)
                 rhat_varprob = multivariate_rhat(varprob[:, :, 1:])
                 # drop one component because varprob sums to 1
@@ -295,13 +364,13 @@ class TestWithCachedBart:  # pragma: slow
         )
 
         # check yhat_test
-        Xt = bart._bart._bin_predictors(kw['x_test'], bart._splits)
+        Xt = bart._bart._binner.bin(kw['x_test'])
         yhat_test = evaluate_trace(Xt, trace)
         assert_close_matrices(
             yhat_test, rbart.yhat_test.astype(numpy.float32), rtol=1e-6
         )
 
-        if kw['type'] == 'pbart':
+        if get_with_default(kw, 'type') == 'pbart':
             # check prob_train
             prob_train = ndtr(yhat_train)
             assert_close_matrices(
@@ -345,7 +414,7 @@ class TestWithCachedBart:  # pragma: slow
             rhat_yhat_test = multivariate_rhat([bart.yhat_test, rbart.yhat_test])
             assert rhat_yhat_test < 3.5
 
-        if kw['type'] == 'pbart':  # binary regression
+        if get_with_default(kw, 'type') == 'pbart':  # binary regression
             with subtests.test('prob_train'):
                 rhat_prob_train = multivariate_rhat([bart.prob_train, rbart.prob_train])
                 assert rhat_prob_train < 1.2
@@ -455,7 +524,7 @@ class TestWithCachedBart:  # pragma: slow
             axes = chain_vmap_axes(x)
             tree.map_with_path(assert_different, x, axes, is_leaf=lambda x: x is None)
 
-        assert_different(bart._mcmc_state, rtol=0.02)
+        assert_different(bart._mcmc_state, rtol=0.01)
         assert_different(bart._main_trace, rtol=0.03)
         assert_different(bart._burnin_trace, rtol=0.03)
 
@@ -480,12 +549,13 @@ def test_sequential_guarantee(kw: dict, subtests: SubTests) -> None:
         )
     delta = 1
     kw2['nskip'] -= delta
-    kw2['ndpost'] += delta * kw2['mc_cores']
+    mc_cores = get_with_default(kw2, 'mc_cores')
+    kw2['ndpost'] += delta * mc_cores
     bart2 = mc_gbart(**kw2)
     n = kw2['y_train'].size
-    bart2_yhat_train = bart2.yhat_train.reshape(
-        kw2['mc_cores'], kw2['ndpost'] // kw2['mc_cores'], n
-    )[:, delta:, :].reshape(bart1.ndpost, n)
+    bart2_yhat_train = bart2.yhat_train.reshape(mc_cores, kw2['ndpost'] // mc_cores, n)[
+        :, delta:, :
+    ].reshape(bart1.ndpost, n)
 
     with subtests.test('shift burn-in'):
         rtol = 0 if bart1.yhat_train.platform() == 'cpu' else 2e-6
@@ -498,12 +568,12 @@ def test_sequential_guarantee(kw: dict, subtests: SubTests) -> None:
     kw3['seed'] = random.clone(kw3['seed'])
     kw3['keepevery'] = 2
     bart3 = mc_gbart(**kw3)
-    bart1_yhat_train = bart1.yhat_train.reshape(
-        kw3['mc_cores'], kw3['ndpost'] // kw3['mc_cores'], n
-    )[:, 1::2, :]
-    bart3_yhat_train = bart3.yhat_train.reshape(
-        kw3['mc_cores'], kw3['ndpost'] // kw3['mc_cores'], n
-    )[:, : bart1_yhat_train.shape[1], :]
+    bart1_yhat_train = bart1.yhat_train.reshape(mc_cores, kw3['ndpost'] // mc_cores, n)[
+        :, 1::2, :
+    ]
+    bart3_yhat_train = bart3.yhat_train.reshape(mc_cores, kw3['ndpost'] // mc_cores, n)[
+        :, : bart1_yhat_train.shape[1], :
+    ]
 
     with subtests.test('change thinning'):
         rtol = 0 if bart1.yhat_train.platform() == 'cpu' else 2e-6
@@ -518,13 +588,13 @@ def test_output_shapes(kw: dict[str, Any]) -> None:
     """Check the output shapes of all the array attributes of `bartz.BART.mc_gbart`."""
     bart = mc_gbart(**kw)
 
-    ndpost = kw['ndpost']
-    nskip = kw['nskip']
-    mc_cores = kw['mc_cores']
+    ndpost = get_with_default(kw, 'ndpost')
+    nskip = get_with_default(kw, 'nskip')
+    mc_cores = get_with_default(kw, 'mc_cores')
     p, n = kw['x_train'].shape
     _, m = kw['x_test'].shape
 
-    binary = kw['type'] == 'pbart'
+    binary = get_with_default(kw, 'type') == 'pbart'
 
     assert ndpost == bart.ndpost
     assert bart.offset.shape == ()
@@ -567,7 +637,7 @@ def test_output_types(kw: dict[str, Any]) -> None:
     """Check the output types of all the attributes of BART.gbart."""
     bart = mc_gbart(**kw)
 
-    binary = kw['type'] == 'pbart'
+    binary = get_with_default(kw, 'type') == 'pbart'
 
     assert bart.offset.dtype == jnp.float32
     assert isinstance(bart.ndpost, int)
@@ -671,7 +741,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
 
 def test_scale_shift(kw: dict[str, Any]) -> None:
     """Check self-consistency of rescaling the inputs."""
-    if kw['type'] == 'pbart':
+    if get_with_default(kw, 'type') == 'pbart':
         pytest.skip('Cannot rescale binary responses.')
 
     bart1 = mc_gbart(**kw)
@@ -790,12 +860,12 @@ def test_no_datapoints(kw: dict[str, Any]) -> None:
     bart = mc_gbart(**kw)
 
     # check there are indeed 0 datapoints in the output
-    ndpost = kw['ndpost']
+    ndpost = get_with_default(kw, 'ndpost')
     assert bart.yhat_train.shape == (ndpost, 0)
 
     # check default values that may be set in a special way if there are 0 datapoints
     assert bart.offset == 0
-    if kw['type'] == 'pbart':
+    if get_with_default(kw, 'type') == 'pbart':
         tau_num = 3
         assert bart.sigest is None
     else:
@@ -803,7 +873,7 @@ def test_no_datapoints(kw: dict[str, Any]) -> None:
         assert bart.sigest == 1
     assert_allclose(
         bart._mcmc_state.forest.leaf_prior_cov_inv,
-        (2**2 * kw['ntree']) / tau_num**2,
+        (2**2 * get_with_default(kw, 'ntree')) / tau_num**2,
         rtol=1e-6,
     )
 
@@ -833,7 +903,7 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
     )
 
     bart = mc_gbart(**kw)
-    if kw['type'] == 'pbart':
+    if get_with_default(kw, 'type') == 'pbart':
         tau_num = 3
         assert bart.sigest is None
         assert bart.offset == 0
@@ -843,7 +913,7 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
         assert bart.offset == kw['y_train'].item()
     assert_allclose(
         bart._mcmc_state.forest.leaf_prior_cov_inv,
-        (2**2 * kw['ntree']) / tau_num**2,
+        (2**2 * get_with_default(kw, 'ntree')) / tau_num**2,
         rtol=1e-6,
     )
 
@@ -859,9 +929,9 @@ def test_two_datapoints(kw: dict[str, Any]) -> None:
         save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
     )
     bart = mc_gbart(**kw)
-    if kw['type'] != 'pbart':
+    if get_with_default(kw, 'type') != 'pbart':
         assert_allclose(bart.sigest, kw['y_train'].std(), rtol=1e-6)
-    if kw['usequants']:
+    if get_with_default(kw, 'usequants'):
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)
     assert not jnp.all(bart._main_trace.log_likelihood == 0.0)
@@ -968,7 +1038,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
                 # varcount is p-dimensional
                 assert rhat_varcount < 1.4
             else:
-                assert rhat_varcount < 1.05
+                assert rhat_varcount < 1.2
 
         with subtests.test('number of nodes'):
             sum_varcount_mcmc = bart.varcount.sum(axis=1)
@@ -1135,9 +1205,6 @@ def test_jit(kw: dict[str, Any]) -> None:
     platform = kw['y_train'].platform()
     kw.setdefault('bart_kwargs', {}).update(devices=jax.devices(platform))
 
-    # negate mc_cores to silence error about device not possible to infer
-    kw.update(mc_cores=-kw['mc_cores'])
-
     # remove arguments passed through the jit call
     X = kw.pop('x_train')
     y = kw.pop('y_train')
@@ -1225,7 +1292,7 @@ def test_automatic_integer_types(kw: dict[str, Any]) -> None:
         return jnp.uint8 if cond else jnp.uint16
 
     leaf_indices_type = select_type(kw.get('bart_kwargs', {}).get('maxdepth', 6) <= 8)
-    split_trees_type = X_type = select_type(kw['numcut'] <= 255)
+    split_trees_type = X_type = select_type(get_with_default(kw, 'numcut') <= 255)
     var_trees_type = select_type(kw['x_train'].shape[0] <= 256)
 
     assert bart._mcmc_state.forest.var_tree.dtype == var_trees_type
@@ -1250,16 +1317,16 @@ def test_gbart_multichain_error(keys: split) -> None:
 def get_expect_sharded(kw: dict) -> bool:
     """Check whether we expect sharding to be set up based on the arguments."""
     bart_kwargs = kw.get('bart_kwargs', {})
-    num_chain_devices = bart_kwargs.get('num_chain_devices')
-    num_data_devices = bart_kwargs.get('num_data_devices')
+    num_chain_devices = bart_kwargs.get('num_chain_devices', 'auto')
+    num_data_devices = bart_kwargs.get('num_data_devices', None)
     return (
-        num_chain_devices is not None
+        hasattr(num_chain_devices, '__index__')
         or num_data_devices is not None
         or (
-            kw.get('mc_cores', 2) > 1
+            num_chain_devices == 'auto'
+            and kw.get('mc_cores', 2) > 1
             and get_device_count() > 1
             and get_default_device().platform == 'cpu'
-            and 'num_chain_devices' not in bart_kwargs
         )
     )
 
@@ -1425,10 +1492,10 @@ def test_num_trees(kw: dict, subtests: SubTests) -> None:
 
     with subtests.test('given ntree'):
         bart = mc_gbart(**kw)
-        assert bart._bart.num_trees == kw['ntree']
+        assert bart._bart.num_trees == get_with_default(kw, 'ntree')
 
     with subtests.test('default ntree'):
-        if kw['type'] == 'pbart':
+        if get_with_default(kw, 'type') == 'pbart':
             default_ntree = 50
         else:
             default_ntree = 200

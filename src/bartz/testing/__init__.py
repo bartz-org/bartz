@@ -26,4 +26,4 @@
 
 # ruff: noqa: F401
 
-from bartz.testing._dgp import DGP, gen_data
+from bartz.testing._dgp import DGP, Params, gen_data, gen_data_from_params, gen_params

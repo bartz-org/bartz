@@ -29,31 +29,32 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from enum import Enum
 from functools import cached_property, partial
+from os import cpu_count
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypedDict
+from warnings import warn
 
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field
-from jax import Device, debug_nans, device_put, jit, lax, make_mesh, random, tree
+from jax import (
+    Device,
+    debug_nans,
+    device_count,
+    device_put,
+    jit,
+    lax,
+    make_mesh,
+    random,
+    tree,
+)
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh, PartitionSpec
-from jaxtyping import (
-    Array,
-    Bool,
-    Float,
-    Float32,
-    Int32,
-    Integer,
-    Key,
-    Real,
-    Shaped,
-    UInt,
-)
+from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz import mcmcloop, mcmcstep, prepcovars
+from bartz import mcmcloop, mcmcstep
 from bartz.grove import (
     TreesTrace,
     check_trace,
@@ -61,7 +62,7 @@ from bartz.grove import (
     forest_depth_distr,
     points_per_node_distr,
 )
-from bartz.jaxext import equal_shards, is_key
+from bartz.jaxext import equal_shards, is_key, split
 from bartz.jaxext.scipy.special import ndtri
 from bartz.jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
@@ -71,8 +72,18 @@ from bartz.mcmcstep._state import (
     chol_with_gersh,
     get_num_chains,
 )
+from bartz.prepcovars import (
+    Binner,
+    BinnerFactory,
+    UniqueQuantileBinner,
+    _sigma2_from_cg,
+    _sigma2_from_ols,
+)
 
-FloatLike = float | Float[Any, '']
+ArrayLike = Array | ndarray
+FloatLike = float | Float[ArrayLike, '']
+
+CG_MAXITER = 20
 
 
 class PredictKind(Enum):
@@ -83,19 +94,19 @@ class PredictKind(Enum):
     ``(k, m)`` for multivariate regression)."""
 
     mean_samples = 'mean_samples'
-    """Per-sample conditional mean, shape ``(ndpost, m)`` (or ``(ndpost,
-    k, m)``). For binary regression, this is the probit-transformed
-    sum-of-trees."""
+    """Per-sample conditional mean, shape ``(num_chains * n_save, m)``
+    (or ``(num_chains * n_save, k, m)``). For binary regression, this is
+    the probit-transformed sum-of-trees."""
 
     outcome_samples = 'outcome_samples'
-    """Samples of the outcome variable, shape ``(ndpost, m)`` (or
-    ``(ndpost, k, m)``). For binary regression, these are Bernoulli
-    draws. For continuous regression, these are Gaussian draws with the
-    posterior noise variance."""
+    """Samples of the outcome variable, shape ``(num_chains * n_save,
+    m)`` (or ``(num_chains * n_save, k, m)``). For binary regression,
+    these are Bernoulli draws. For continuous regression, these are
+    Gaussian draws with the posterior noise variance."""
 
     latent_samples = 'latent_samples'
-    """Raw sum-of-trees values, shape ``(ndpost, m)`` (or ``(ndpost, k,
-    m)``)."""
+    """Raw sum-of-trees values, shape ``(num_chains * n_save, m)`` (or
+    ``(num_chains * n_save, k, m)``)."""
 
 
 class DataFrame(Protocol):
@@ -176,32 +187,36 @@ class Bart(Module):
         not need to be normalized to sum to 1. If not specified, use a uniform
         distribution. If ``sparse=True``, this is used as initial value for the
         MCMC.
-    xinfo
-        A matrix with the cutpoins to use to bin each predictor. If not
-        specified, it is generated automatically according to `usequants` and
-        `numcut`.
-
-        Each row shall contain a sorted list of cutpoints for a predictor. If
-        there are less cutpoints than the number of columns in the matrix,
-        fill the remaining cells with NaN.
-
-        `xinfo` shall be a matrix even if `x_train` is a dataframe.
-    usequants
-        Whether to use predictors quantiles instead of a uniform grid to bin
-        predictors. Ignored if `xinfo` is specified.
+    binner
+        A callable that, given the training predictors and a random key,
+        returns a `Binner` instance. The default is `UniqueQuantileBinner`,
+        which places cutpoints at the quantiles of each predictor. Other
+        built-in options are `RangeEvenBinner` (evenly-spaced cutpoints over
+        the observed range) and `GivenSplitsBinner` (R BART ``xinfo`` format).
+        To pass options, use `functools.partial`, e.g.
+        ``binner=partial(UniqueQuantileBinner, max_bins=128)``.
     rm_const
         How to treat predictors with no associated decision rules (i.e., there
         are no available cutpoints for that predictor). If `True` (default),
         they are ignored. If `False`, an error is raised if there are any.
     sigest
         An estimate of the residual standard deviation on `y_train`, used to set
-        `lamda`. If not specified, it is estimated by linear regression (with
-        intercept, and without taking into account `w`). If `y_train` has less
-        than two elements, it is set to 1. If n <= p, it is set to the standard
-        deviation of `y_train`. Ignored if `lamda` is specified. For
-        multivariate regression, can be a scalar (broadcast to all components)
-        or a `(k,)` vector of per-component estimates. For mixed outcome types,
-        binary component values are ignored.
+        `lamda`. Ignored if `lamda` is specified. For multivariate regression,
+        can be a scalar (broadcast to all components) or a `(k,)` vector of
+        per-component estimates. For mixed outcome types, binary component
+        values are ignored. Can be one of the following special values to set
+        automatically based on the data:
+
+        'ols-or-variance'
+            If less than two datapoints, set ``sigest=1``. If ``n > p``, use the
+            OLS error standard deviation estimate (w/ intercept, w/o taking into
+            account `w`), else use the standard deviation of `y_train`.
+        'gc'
+            Use an approximate and regularized version of the OLS residual
+            standard deviation estimate.
+        'auto' (default)
+            Use 'ols-or-variance' if the dataset is smaller than a threshold,
+            else 'gc' for larger datasets.
     sigdf
         The degrees of freedom of the scaled inverse-chisquared prior on the
         noise variance. For multivariate regression, the Inverse-Wishart
@@ -249,30 +264,13 @@ class Bart(Module):
         specified by the user. Not supported for multivariate regression.
     num_trees
         The number of trees used to represent the latent mean function.
-    numcut
-        If `usequants` is `False`: the exact number of cutpoints used to bin the
-        predictors, ranging between the minimum and maximum observed values
-        (excluded).
-
-        If `usequants` is `True`: the maximum number of cutpoints to use for
-        binning the predictors. Each predictor is binned such that its
-        distribution in `x_train` is approximately uniform across bins. The
-        number of bins is at most the number of unique values appearing in
-        `x_train`, or ``numcut + 1``.
-
-        Before running the algorithm, the predictors are compressed to the
-        smallest integer type that fits the bin indices, so `numcut` is best set
-        to the maximum value of an unsigned integer type, like 255.
-
-        Ignored if `xinfo` is specified.
-    ndpost
-        The number of MCMC samples to save, after burn-in. `ndpost` is the
-        total number of samples across all chains. `ndpost` is rounded up to the
-        first multiple of `num_chains`.
-    nskip
+    n_save
+        The number of MCMC samples to save, after burn-in, per chain. The
+        total trace length across all chains is ``num_chains * n_save``.
+    n_burn
         The number of initial MCMC samples to discard as burn-in. This number
         of samples is discarded from each chain.
-    keepevery
+    n_skip
         The thinning factor for the MCMC samples, after burn-in.
     printevery
         The number of iterations (including thinned-away ones) between each log
@@ -287,7 +285,10 @@ class Bart(Module):
         be an explicit chain axis of size 1.
     num_chain_devices
         The number of devices to spread the chains across. Must be a divisor of
-        `num_chains`. Each device will run a fraction of the chains.
+        `num_chains`. Each device will run a fraction of the chains. If 'auto'
+        (default) and running on cpu, the number of devices is picked
+        automatically based on the number of cores and the number of virtual jax
+        cpu devices.
     num_data_devices
         The number of devices to split datapoints across. Must be a divisor of
         `n`. This is useful only with very high `n`, about > 1000_000.
@@ -326,7 +327,7 @@ class Bart(Module):
     _main_trace: mcmcloop.MainTrace
     _burnin_trace: mcmcloop.BurninTrace
     _mcmc_state: mcmcstep.State
-    _splits: Real[Array, 'p max_num_splits']
+    _binner: Binner
     _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
     _x_train_fmt: Any = field(static=True)
 
@@ -338,8 +339,8 @@ class Bart(Module):
 
     def __init__(
         self,
-        x_train: Real[Array, 'p n'] | DataFrame,
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'] | Series,
+        x_train: Real[ArrayLike, 'p n'] | DataFrame,
+        y_train: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | Series,
         *,
         outcome_type: OutcomeType | str | Sequence[OutcomeType | str] = 'continuous',
         sparse: bool = False,
@@ -347,30 +348,30 @@ class Bart(Module):
         a: FloatLike = 0.5,
         b: FloatLike = 1.0,
         rho: FloatLike | None = None,
-        varprob: Float[Array, ' p'] | None = None,
-        xinfo: Float[Array, 'p n'] | None = None,
-        usequants: bool = False,
+        varprob: Float[ArrayLike, ' p'] | None = None,
+        binner: BinnerFactory = UniqueQuantileBinner,
         rm_const: bool = True,
-        sigest: FloatLike | Float[Array, ' k'] | None = None,
+        sigest: FloatLike
+        | Float[ArrayLike, ' k']
+        | Literal['auto', 'ols-or-variance', 'cg'] = 'auto',
         sigdf: FloatLike = 3.0,
         sigquant: FloatLike = 0.9,
         k: FloatLike = 2.0,
         power: FloatLike = 2.0,
         base: FloatLike = 0.95,
-        lamda: FloatLike | Float[Array, ' k'] | None = None,
+        lamda: FloatLike | Float[ArrayLike, ' k'] | None = None,
         tau_num: FloatLike | None = None,
-        offset: FloatLike | Float[Array, ' k'] | None = None,
-        w: Float[Array, ' n'] | Series | None = None,
+        offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
+        w: Float[ArrayLike, ' n'] | Series | None = None,
         num_trees: int = 200,
-        numcut: int = 255,
-        ndpost: int = 1000,
-        nskip: int = 1000,
-        keepevery: int = 1,
+        n_save: int = 1000,
+        n_burn: int = 1000,
+        n_skip: int = 1,
         printevery: int | None = 100,
         num_chains: int | None = 4,
-        num_chain_devices: int | None = None,
+        num_chain_devices: int | None | Literal['auto'] = 'auto',
         num_data_devices: int | None = None,
-        devices: Device | Sequence[Device] | None = None,
+        devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None = None,
         seed: int | Key[Array, ''] = 0,
         maxdepth: int = 6,
         init_kw: Mapping = MappingProxyType({}),
@@ -402,9 +403,16 @@ class Bart(Module):
             x_train, y_train, outcome_type, binary_mask, sigest, sigdf, sigquant, lamda
         )
 
-        # determine splits
-        splits, max_split = self._determine_splits(x_train, usequants, numcut, xinfo)
-        x_train = self._bin_predictors(x_train, splits)
+        # split the user-provided seed into an mcmc key and a binner key
+        if not is_key(seed):
+            seed = random.key(seed)
+        keys = split(seed)
+
+        # construct the binner and bin x_train
+        binner_obj = binner(x_train, key=keys.pop())
+        x_train = binner_obj.bin(x_train)
+        # copy max_split because `mcmcstep.init` donates it
+        max_split = jnp.array(binner_obj.max_split)
 
         # setup and run mcmc
         initial_state = self._setup_mcmc(
@@ -433,10 +441,10 @@ class Bart(Module):
             num_data_devices,
             devices,
             sparse,
-            nskip,
+            n_burn,
         )
         result = self._run_mcmc(
-            initial_state, ndpost, nskip, keepevery, printevery, seed, run_mcmc_kw
+            initial_state, n_save, n_burn, n_skip, printevery, keys.pop(), run_mcmc_kw
         )
 
         # set public attributes
@@ -448,7 +456,7 @@ class Bart(Module):
         self._main_trace = result.main_trace
         self._burnin_trace = result.burnin_trace
         self._mcmc_state = result.final_state
-        self._splits = splits
+        self._binner = binner_obj
         self._x_train_fmt = x_train_fmt
         self._binary_mask = binary_mask
 
@@ -527,12 +535,20 @@ class Bart(Module):
         return mean_samples
 
     @property
-    def ndpost(self) -> int:
-        """The total number of posterior samples after burn-in across all chains.
+    def n_save(self) -> int:
+        """The number of posterior samples after burn-in saved per chain."""
+        *_, n_save = self._main_trace.grow_prop_count.shape
+        return n_save
 
-        May be larger than the initialization argument `ndpost` if it was not
-        divisible by the number of chains.
-        """
+    @property
+    def num_chains(self) -> int | None:
+        """The number of chains, `None` if scalar."""
+        *num_chains, _ = self._main_trace.grow_prop_count.shape
+        return num_chains[0] if num_chains else None
+
+    @property
+    def ndpost(self) -> int:
+        """The total number of posterior samples after burn-in across all chains."""
         return self._main_trace.grow_prop_count.size
 
     @property
@@ -543,10 +559,10 @@ class Bart(Module):
     def get_latent_prec(
         self, only_continuous: bool = False
     ) -> (
-        Float32[Array, ' nskip+ndpost']
-        | Float32[Array, 'nskip+ndpost k k']
-        | Float32[Array, 'num_chains nskip+ndpost/num_chains']
-        | Float32[Array, 'num_chains nskip+ndpost/num_chains k k']
+        Float32[Array, ' n_burn+n_save']
+        | Float32[Array, 'n_burn+n_save k k']
+        | Float32[Array, 'num_chains n_burn+n_save']
+        | Float32[Array, 'num_chains n_burn+n_save k k']
     ):
         """Return the posterior samples of the latent error precision matrix.
 
@@ -604,7 +620,7 @@ class Bart(Module):
     def get_error_sdev(
         self, mean: bool = False
     ) -> (
-        Float32[Array, 'ndpost']
+        Float32[Array, ' ndpost']
         | Float32[Array, 'ndpost k']
         | Float32[Array, '']
         | Float32[Array, ' k']
@@ -805,7 +821,7 @@ class Bart(Module):
             raise ValueError(msg)
         if w is not None:
             self._check_same_length(w, x_test)
-        return self._bin_predictors(x_test, self._splits)
+        return self._binner.bin(x_test)
 
     @staticmethod
     def _process_predictor_input(
@@ -844,7 +860,9 @@ class Bart(Module):
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
         outcome_type: OutcomeType | tuple[OutcomeType, ...],
         binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-        sigest: FloatLike | Float[Array, ' k'] | None,
+        sigest: FloatLike
+        | Float[Array, ' k']
+        | Literal['auto', 'ols-or-variance', 'cg'],
         sigdf: FloatLike,
         sigquant: FloatLike,
         lamda: FloatLike | Float[Array, ' k'] | None,
@@ -855,8 +873,8 @@ class Bart(Module):
     ]:
         """Return (error_cov_df, error_cov_scale, sigest)."""
         if outcome_type is OutcomeType.binary:
-            if sigest is not None or lamda is not None:
-                msg = 'Let `sigest=None` and `lamda=None` for binary regression'
+            if not isinstance(sigest, str) or lamda is not None:
+                msg = 'Do not set `sigest` or `lamda` for binary regression, they are ignored'
                 raise ValueError(msg)
             return None, None, None
 
@@ -871,12 +889,13 @@ class Bart(Module):
             invchi2rid = invchi2 * sigdf
             lamda = sigest2 / invchi2rid
 
-        elif sigest is not None:
-            msg = 'Let `sigest=None` if `lamda` is specified'
+        elif not isinstance(sigest, str):
+            msg = "Do not set `sigest` if `lamda` is specified, it's ignored"
             raise ValueError(msg)
 
         else:
             lamda = jnp.where(binary_mask, 0.0, lamda)
+            sigest = None
 
         # params written in multivariate form
         if y_train.ndim == 2:
@@ -895,35 +914,59 @@ class Bart(Module):
         cls,
         x_train: Shaped[Array, 'p n'],
         y_train: Float32[Array, '*k n'],
-        sigest: float | Shaped[Array, '*k'] | None,
-        binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
+        sigest: FloatLike
+        | Float[Array, ' k']
+        | Literal['auto', 'ols-or-variance', 'cg'],
+        binary_mask: Bool[Array, '*k'],
     ) -> Float32[Array, '*k']:
-        n = y_train.shape[-1]
-        if sigest is not None:
+        if not isinstance(sigest, str):
             sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
             sigest2 = jnp.broadcast_to(sigest2, y_train.shape[:-1])
-        elif n < 2:
-            sigest2 = jnp.ones(y_train.shape[:-1])
-        elif n <= x_train.shape[0]:
-            sigest2 = jnp.var(y_train, axis=-1)
+        elif sigest == 'ols-or-variance':
+            sigest2 = cls._sigest2_ols_or_variance(x_train, y_train)
+        elif sigest == 'cg':
+            sigest2 = cls._sigest2_cg(x_train, y_train)
+        elif sigest == 'auto':
+            sigest2 = cls._sigest2_auto(x_train, y_train)
         else:
-            sigest2 = cls._linear_regression(x_train, y_train)
+            msg = f'unrecognized value {sigest=}'
+            raise ValueError(msg)
         return jnp.where(binary_mask, 0.0, sigest2)
 
     @staticmethod
-    @jit
-    def _linear_regression(
-        x_train: Shaped[Array, 'p n'],
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-    ) -> Float32[Array, ''] | Float32[Array, ' k']:
-        """Return the error variance estimated with OLS with intercept."""
-        x_centered = x_train.T - x_train.mean(axis=1)
-        y_centered = y_train.T - y_train.mean(axis=-1)
-        # centering is equivalent to adding an intercept column
-        _, chisq, rank, _ = jnp.linalg.lstsq(x_centered, y_centered)
-        chisq = chisq.reshape(y_train.shape[:-1])
-        dof = y_train.shape[-1] - rank
-        return chisq / dof
+    def _sigest2_ols_or_variance(
+        x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
+    ) -> Float32[Array, '*k']:
+        """Implement the case `sigest='ols-or-variance'`."""
+        p, n = x_train.shape
+        if n < 2:
+            *k, _ = y_train.shape
+            return jnp.ones(k)
+        elif n <= p:
+            return jnp.var(y_train, axis=-1)
+        else:
+            return _sigma2_from_ols(x_train, y_train)
+
+    @staticmethod
+    def _sigest2_cg(
+        x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
+    ) -> Float32[Array, '*k']:
+        """Implement the case `sigest='cg'`."""
+        p, n = x_train.shape
+        maxiter = max(1, min(n, p, CG_MAXITER))
+        return _sigma2_from_cg(x_train, y_train, maxiter)
+
+    @classmethod
+    def _sigest2_auto(
+        cls, x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
+    ) -> Float32[Array, ' *k']:
+        """Implement the case `sigest='auto'`."""
+        p, n = x_train.shape
+        threshold = 10_000 * 100**2
+        if n * p * p > threshold and min(n, p) > CG_MAXITER:
+            return cls._sigest2_cg(x_train, y_train)
+        else:
+            return cls._sigest2_ols_or_variance(x_train, y_train)
 
     @staticmethod
     def _check_type_settings(
@@ -1038,29 +1081,6 @@ class Bart(Module):
         return leaf_prior_cov_inv
 
     @staticmethod
-    def _determine_splits(
-        x_train: Real[Array, 'p n'],
-        usequants: bool,
-        numcut: int,
-        xinfo: Float[Array, 'p n'] | None,
-    ) -> tuple[Real[Array, 'p m'], UInt[Array, ' p']]:
-        if xinfo is not None:
-            if xinfo.ndim != 2 or xinfo.shape[0] != x_train.shape[0]:
-                msg = f'{xinfo.shape=} different from expected ({x_train.shape[0]}, *)'
-                raise ValueError(msg)
-            return prepcovars.parse_xinfo(xinfo)
-        elif usequants:
-            return prepcovars.quantilized_splits_from_matrix(x_train, numcut + 1)
-        else:
-            return prepcovars.uniform_splits_from_matrix(x_train, numcut + 1)
-
-    @staticmethod
-    def _bin_predictors(
-        x: Real[Array, 'p n'], splits: Real[Array, 'p max_num_splits']
-    ) -> UInt[Array, 'p n']:
-        return prepcovars.bin_predictors(x, splits)
-
-    @staticmethod
     def _setup_mcmc(
         x_train: Real[Array, 'p n'],
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
@@ -1083,11 +1103,11 @@ class Bart(Module):
         rho: FloatLike | None,
         varprob: Float[Any, ' p'] | None,
         num_chains: int | None,
-        num_chain_devices: int | None,
+        num_chain_devices: int | None | Literal['auto'],
         num_data_devices: int | None,
-        devices: Device | Sequence[Device] | None,
+        devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
         sparse: bool,
-        nskip: int,
+        n_burn: int,
     ) -> mcmcstep.State:
         p_nonterminal = make_p_nonterminal(maxdepth, base, power)
 
@@ -1116,7 +1136,7 @@ class Bart(Module):
             a=a,
             b=b,
             rho=rho,
-            sparse_on_at=nskip // 2 if sparse else None,
+            sparse_on_at=n_burn // 2 if sparse else None,
             **device_kw,
         )
 
@@ -1138,27 +1158,15 @@ class Bart(Module):
     def _run_mcmc(
         cls,
         mcmc_state: mcmcstep.State,
-        ndpost: int,
-        nskip: int,
-        keepevery: int,
+        n_save: int,
+        n_burn: int,
+        n_skip: int,
         printevery: int | None,
-        seed: int | Integer[Array, ''] | Key[Array, ''],
+        key: Key[Array, ''],
         run_mcmc_kw: Mapping,
     ) -> RunMCMCResult:
-        # prepare random generator seed
-        if is_key(seed):
-            key = jnp.copy(seed)
-        else:
-            key = jax.random.key(seed)
-
-        # round up ndpost
-        num_chains = get_num_chains(mcmc_state)
-        if num_chains is None:
-            num_chains = 1
-        n_save = ndpost // num_chains + bool(ndpost % num_chains)
-
         # prepare arguments
-        kw: dict = dict(n_burn=nskip, n_skip=keepevery, inner_loop_length=printevery)
+        kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
         kw.update(
             mcmcloop.make_default_callback(
                 mcmc_state,
@@ -1178,7 +1186,7 @@ class Bart(Module):
 
     def check_trees(
         self, error: bool = False
-    ) -> UInt[Array, 'num_chains ndpost/num_chains num_trees']:
+    ) -> UInt[Array, 'num_chains n_save num_trees']:
         """Apply `bartz.grove.check_trace` to all the tree draws.
 
         Parameters
@@ -1273,7 +1281,7 @@ class Bart(Module):
 
         return resid1, resid2
 
-    def depth_distr(self) -> Int32[Array, '*num_chains ndpost/num_chains d']:
+    def depth_distr(self) -> Int32[Array, '*num_chains n_save d']:
         """Histogram of tree depths for each state of the trees.
 
         Returns
@@ -1288,7 +1296,7 @@ class Bart(Module):
 
     def _points_per_node_distr(
         self, node_type: str
-    ) -> Int32[Array, '*num_chains ndpost/num_chains n+1']:
+    ) -> Int32[Array, '*num_chains n_save n+1']:
         out: Int32[Array, '*chains samples n+1']
         out = points_per_node_distr(
             self._mcmc_state.X,
@@ -1301,9 +1309,7 @@ class Bart(Module):
             out = out[None, :, :]
         return out
 
-    def points_per_decision_node_distr(
-        self,
-    ) -> Int32[Array, '*num_chains ndpost/num_chains n+1']:
+    def points_per_decision_node_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
         """Histogram of number of points belonging to parent-of-leaf nodes.
 
         Returns
@@ -1312,9 +1318,7 @@ class Bart(Module):
         """
         return self._points_per_node_distr('leaf-parent')
 
-    def points_per_leaf_distr(
-        self,
-    ) -> Int32[Array, '*num_chains ndpost/num_chains n+1']:
+    def points_per_leaf_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
         """Histogram of number of points belonging to leaves.
 
         Returns
@@ -1357,46 +1361,16 @@ class DeviceKwArgs(TypedDict):
 def process_device_settings(
     y_train: Array,
     num_chains: int | None,
-    num_chain_devices: int | None,
+    num_chain_devices: int | None | Literal['auto'],
     num_data_devices: int | None,
-    devices: Device | Sequence[Device] | None,
+    devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
 ) -> tuple[DeviceKwArgs, Device | None]:
     """Return the arguments for `mcmcstep.init` related to devices, and an optional device where to put the state."""
-    # determine devices
-    if devices is not None:
-        if not hasattr(devices, '__len__'):
-            devices = (devices,)
-        device = devices[0]
-        platform = device.platform
-    elif hasattr(y_train, 'platform'):
-        platform = y_train.platform()
-        device = None
-        # set device=None because if the devices were not specified explicitly
-        # we may be in the case where computation will follow data placement,
-        # do not disturb jax as the user may be playing with vmap, jit, reshard...
-        devices = jax.devices(platform)
-    else:
-        msg = 'not possible to infer device from `y_train`, please set `devices`'
-        raise ValueError(msg)
-
-    # create mesh
-    if num_chain_devices is None and num_data_devices is None:
-        mesh = None
-    else:
-        mesh = dict()
-        if num_chain_devices is not None:
-            mesh.update(chains=num_chain_devices)
-        if num_data_devices is not None:
-            mesh.update(data=num_data_devices)
-        mesh = make_mesh(
-            axis_shapes=tuple(mesh.values()),
-            axis_names=tuple(mesh),
-            axis_types=(AxisType.Auto,) * len(mesh),
-            devices=devices,
-        )
-        device = None
-        # set device=None because `mcmcstep.init` will `device_put` with the
-        # mesh already, we don't want to undo its work
+    platform, device, devices = _determine_devices(y_train, devices)
+    num_chain_devices = _determine_num_chain_devices(
+        platform, num_chains, num_chain_devices
+    )
+    mesh, device = _determine_mesh(num_chain_devices, num_data_devices, device, devices)
 
     # prepare arguments to `init`
     settings = DeviceKwArgs(
@@ -1409,10 +1383,102 @@ def process_device_settings(
         # batch sizes; since the user has to be playing with `init_kw` to do
         # that, we'll let `init` throw the error and the user set
         # `target_platform` themselves so they have a clearer idea how the
-        # thing works.
+        # thing works (i.e.: init won't be happy to receive target_platform if
+        # it's not needed because all device-dependent defaults are overridden)
     )
 
     return settings, device
+
+
+def _determine_devices(
+    y_train: Array, devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None
+) -> tuple[str, Device | None, tuple[Device, ...]]:
+    """Determine the target platform and set of devices for the MCMC, and possibly a single target device."""
+    if isinstance(devices, str):
+        platform = devices
+        devices = jax.devices(platform)
+        return platform, devices[0], devices
+    elif devices is not None:
+        if not hasattr(devices, '__len__'):
+            devices = (devices,)
+        device = devices[0]
+        return device.platform, device, devices
+    elif hasattr(y_train, 'platform'):
+        # set device=None because if the devices were not specified explicitly
+        # we may be in the case where computation will follow data placement,
+        # do not disturb jax as the user may be playing with vmap, jit, reshard...
+        platform = y_train.platform()
+        return platform, None, jax.devices(platform)
+    else:
+        msg = 'not possible to infer device from `y_train`, please set `devices`'
+        raise ValueError(msg)
+
+
+def _largest_divisor_at_most(n: int, cap: int) -> int:
+    """Return the largest divisor of `n` in [1, cap]."""
+    for d in range(cap, 0, -1):
+        if n % d == 0:
+            return d
+    return 1  # unreachable: 1 always divides n
+
+
+def _determine_num_chain_devices(
+    platform: str,
+    num_chains: int | None,
+    num_chain_devices: int | None | Literal['auto'],
+) -> int | None:
+    """Decide the value of `num_chain_devices` when it's set to 'auto'."""
+    if num_chain_devices != 'auto':
+        return num_chain_devices
+    elif num_chains is None or num_chains == 1 or platform != 'cpu':
+        return None
+    else:
+        num_cores = cpu_count()
+        assert num_cores is not None, 'could not determine number of cpu cores'
+        num_shards = _largest_divisor_at_most(num_chains, num_cores)
+
+        if num_shards > 1:
+            num_jax_cpus = device_count('cpu')
+            if num_jax_cpus < num_shards:
+                new_num_shards = _largest_divisor_at_most(num_chains, num_jax_cpus)
+                msg = (
+                    f'`Bart` would like to shard {num_chains} chains across '
+                    f'{num_shards} virtual jax cpu devices, but jax is set up '
+                    f'with only {num_jax_cpus} cpu devices, so it will use '
+                    f'{new_num_shards} devices instead. To enable '
+                    'parallelization, please increase the limit with '
+                    '`jax.config.update("jax_num_cpu_devices", <num_devices>)`.'
+                )
+                warn(msg)
+                num_shards = new_num_shards
+
+        return num_shards if num_shards > 1 else None
+
+
+def _determine_mesh(
+    num_chain_devices: int | None,
+    num_data_devices: int | None,
+    device: Device | None,
+    devices: Sequence[Device],
+) -> tuple[Mesh | None, Device | None]:
+    """Create a jax device mesh for `mcmcstep.init()`."""
+    if num_chain_devices is None and num_data_devices is None:
+        return None, device
+    else:
+        mesh = dict()
+        if num_chain_devices is not None:
+            mesh.update(chains=num_chain_devices)
+        if num_data_devices is not None:
+            mesh.update(data=num_data_devices)
+        mesh = make_mesh(
+            axis_shapes=tuple(mesh.values()),
+            axis_names=tuple(mesh),
+            axis_types=(AxisType.Auto,) * len(mesh),
+            devices=devices,
+        )
+        return mesh, None
+        # set device=None because `mcmcstep.init` will `device_put` with the
+        # mesh already, we don't want to undo its work
 
 
 def process_varprob(

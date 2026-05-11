@@ -32,6 +32,7 @@ from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass, replace
 from functools import partial
 from gc import collect
+from inspect import signature
 from io import StringIO
 from sys import version_info
 from typing import Any, Literal, NamedTuple
@@ -72,10 +73,11 @@ from bartz.grove import (
     tree_depth,
     tree_depths,
 )
-from bartz.jaxext import get_device_count, split
+from bartz.jaxext import get_default_device, get_device_count, is_key, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
+from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from tests.conftest import get_disable_problematic_sharding
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
@@ -175,6 +177,35 @@ class BartKW(NamedTuple):
     x_test: Real[Array, 'p m']
     w_test: Float32[Array, ' m'] | None = None
 
+    @property
+    def uses_quantile_binner(self) -> bool:
+        """Whether `kw['binner']` (a class or `partial`) is `UniqueQuantileBinner`."""
+        binner = self.kw.get('binner')
+        return getattr(binner, 'func', binner) is UniqueQuantileBinner
+
+    @property
+    def max_bins(self) -> int:
+        """Upper bound on the number of bins implied by `kw['binner']`."""
+        binner = self.kw.get(
+            'binner', signature(OriginalBart).parameters['binner'].default
+        )
+        if isinstance(binner, partial):
+            subcls = binner.func
+            partial_kwargs = binner.keywords
+        else:
+            subcls = binner
+            partial_kwargs = {}
+        bound = signature(subcls).bind_partial(**partial_kwargs)
+        bound.apply_defaults()
+        defaults = dict(bound.arguments)
+        if subcls is GivenSplitsBinner:
+            return defaults['xinfo'].shape[1] + 1
+        elif subcls in (UniqueQuantileBinner, RangeEvenBinner):
+            return defaults['max_bins']
+        else:
+            msg = f'Cannot deduce max_bins for binner of type {subcls.__name__}'
+            raise NotImplementedError(msg)
+
 
 def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     """Return keyword arguments for `Bart` and test predictors."""
@@ -183,7 +214,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     nt = 21
     p = 2
     high_p = 257  # > 256 to use uint16 for var_trees.
-    common = dict(num_trees=20, ndpost=100, nskip=50, seed=keys.pop())
+    common = dict(num_trees=20, n_save=50, n_burn=50, seed=keys.pop())
 
     match variant:
         # continuous regression with some settings that induce large types,
@@ -198,8 +229,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     sparse=True,
                     **common,
                     printevery=50,
-                    usequants=False,
-                    numcut=256,  # > 255 to use uint16 for X and split_trees
+                    binner=partial(RangeEvenBinner, max_bins=257),
+                    # > 256 to use uint16 for X and split_trees
                     num_chains=None,
                     maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     init_kw=dict(
@@ -224,12 +255,14 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     y_train=gen_y(keys.pop(), X, None, 'binary'),
                     outcome_type='binary',
                     **common,
-                    keepevery=1,  # the default with binary would be 10
+                    n_skip=1,  # the mc_gbart default with binary would be 10
                     printevery=None,
-                    usequants=True,
-                    # usequants=True with binary X to check the case in which the
-                    # splits are less than the statically known maximum
-                    numcut=255,
+                    # quantile-binned, with binary X, to check the case in
+                    # which the splits are less than the statically known
+                    # maximum; full-sample quantilization for determinism
+                    binner=partial(
+                        UniqueQuantileBinner, max_bins=256, max_subsample=None
+                    ),
                     num_chains=2,
                     maxdepth=6,
                     num_data_devices=min(2, get_device_count()),
@@ -258,8 +291,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     varprob=jnp.array([0.2, 0.8]),
                     **common,
                     printevery=50,
-                    usequants=True,
-                    numcut=10,
+                    binner=partial(
+                        UniqueQuantileBinner, max_bins=11, max_subsample=None
+                    ),
                     num_chains=2,
                     num_chain_devices=min(2, get_device_count()),
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
@@ -289,8 +323,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     sparse=True,
                     **common,
                     printevery=50,
-                    usequants=False,
-                    numcut=256,  # > 255 to use uint16 for X and split_trees
+                    binner=partial(RangeEvenBinner, max_bins=257),
+                    # > 256 to use uint16 for X and split_trees
                     num_chains=None,
                     maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     init_kw=dict(
@@ -316,10 +350,11 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     outcome_type='binary',
                     **common,
                     printevery=None,
-                    usequants=True,
-                    # usequants=True with binary X to check the case in which the
-                    # splits are less than the statically known maximum
-                    numcut=255,
+                    # quantile-binned with binary X, deterministic via
+                    # full-sample quantilization
+                    binner=partial(
+                        UniqueQuantileBinner, max_bins=256, max_subsample=None
+                    ),
                     num_chains=2,
                     maxdepth=6,
                     num_data_devices=min(2, get_device_count()),
@@ -347,8 +382,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     varprob=jnp.array([0.2, 0.8]),
                     **common,
                     printevery=50,
-                    usequants=True,
-                    numcut=10,
+                    binner=partial(
+                        UniqueQuantileBinner, max_bins=11, max_subsample=None
+                    ),
                     num_chains=2,
                     num_chain_devices=min(2, get_device_count()),
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
@@ -439,9 +475,9 @@ class TestWithCachedBart:  # pragma: slow
         nchains = 4
         kw.update(
             num_trees=max(2 * n, p),
-            nskip=3000,
-            ndpost=nchains * 1000,
-            keepevery=1,
+            n_burn=3000,
+            n_save=1000,
+            n_skip=1,
             num_chains=nchains,
         )
         init_kw = dict(kw.get('init_kw', {}))
@@ -463,7 +499,7 @@ class TestWithCachedBart:  # pragma: slow
         bkw = cachedbart.bkw
         p, n = bkw.kw['x_train'].shape
         num_chains = 4
-        nsamples = bart.ndpost // num_chains
+        nsamples = bart.n_save
         binary = bkw.kw['outcome_type'] == 'binary'
 
         yhat_train = bart.predict('train', kind='latent_samples')
@@ -526,11 +562,19 @@ class TestWithCachedBart:  # pragma: slow
                 path: KeyPath, x: Array | None, chain_axis: int | None
             ) -> None:
                 str_path = keystr(path)
-                if str_path.endswith('.theta') and not step_theta:
-                    return
                 if (
-                    str_path.endswith('.error_cov_inv')
-                    and bart._mcmc_state.error_cov_df is None
+                    (str_path.endswith('.theta') and not step_theta)
+                    or (
+                        str_path.endswith('.error_cov_inv')
+                        and bart._mcmc_state.error_cov_df is None
+                        # fixed covariance matrix, all chains equal
+                    )
+                    or (
+                        x is not None
+                        and jnp.issubdtype(x.dtype, jnp.integer)
+                        and x.ndim == 1
+                        # too few integers, may collide
+                    )
                 ):
                     return
                 if x is not None and chain_axis is not None:
@@ -556,11 +600,10 @@ class TestWithCachedBart:  # pragma: slow
 def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     """Check that the way iterations are saved does not influence the result."""
     kw = bkw.kw
-    kw['keepevery'] = 1
+    kw['n_skip'] = 1
     bart1 = Bart(**kw)
 
-    num_chains = kw.get('num_chains')
-    mc_cores = 1 if num_chains is None else num_chains
+    num_chains = bart1.num_chains or 1
     y_shape = kw['y_train'].shape
 
     # run moving some samples from burn-in to main
@@ -568,16 +611,16 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     kw2['seed'] = random.clone(kw2['seed'])
     if kw2.get('sparse', False):
         init_kw = dict(kw2.get('init_kw', {}))
-        init_kw.setdefault('sparse_on_at', kw2['nskip'] // 2)
+        init_kw.setdefault('sparse_on_at', kw2['n_burn'] // 2)
         kw2['init_kw'] = init_kw
     delta = 1
-    kw2['nskip'] -= delta
-    kw2['ndpost'] += delta * mc_cores
+    kw2['n_burn'] -= delta
+    kw2['n_save'] += delta
     bart2 = Bart(**kw2)
     bart2_yhat_train = (
         bart2.predict('train', kind='latent_samples')
-        .reshape(mc_cores, kw2['ndpost'] // mc_cores, *y_shape)[:, delta:]
-        .reshape(bart1.ndpost, *y_shape)
+        .reshape(num_chains, kw2['n_save'], *y_shape)[:, delta:]
+        .reshape(num_chains * bart1.n_save, *y_shape)
     )
 
     with subtests.test('shift burn-in'):
@@ -596,13 +639,13 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     # run keeping 1 every 2 samples
     kw3 = dict(kw)
     kw3['seed'] = random.clone(kw3['seed'])
-    kw3['keepevery'] = 2
+    kw3['n_skip'] = 2
     bart3 = Bart(**kw3)
     bart1_yhat_train = bart1.predict('train', kind='latent_samples').reshape(
-        mc_cores, kw3['ndpost'] // mc_cores, *y_shape
+        num_chains, kw3['n_save'], *y_shape
     )[:, 1::2, :, ...]
     bart3_yhat_train = bart3.predict('train', kind='latent_samples').reshape(
-        mc_cores, kw3['ndpost'] // mc_cores, *y_shape
+        num_chains, kw3['n_save'], *y_shape
     )[:, : bart1_yhat_train.shape[1], :, ...]
 
     with subtests.test('change thinning'):
@@ -659,13 +702,14 @@ def test_output_shapes(bkw: BartKW, keys: split) -> None:
     assert bart.varprob_mean.shape == (p,)
 
     # get_latent_prec shape
-    num_chains = kw.get('num_chains')
-    nskip = kw['nskip']
+    n_burn = kw['n_burn']
+    n_save = bart.n_save
+    num_chains = bart.num_chains
     prec = bart.get_latent_prec()
     if num_chains is not None:
-        assert prec.shape == (num_chains, nskip + ndpost // num_chains, *k, *k)
+        assert prec.shape == (num_chains, n_burn + n_save, *k, *k)
     else:
-        assert prec.shape == (nskip + ndpost, *k, *k)
+        assert prec.shape == (n_burn + n_save, *k, *k)
 
 
 def test_output_types(bkw: BartKW, keys: split) -> None:
@@ -676,7 +720,7 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     if kw['outcome_type'] != 'binary':
         assert bart.sigest.dtype == jnp.float32
     assert bart.offset.dtype == jnp.float32
-    assert isinstance(bart.ndpost, int)
+    assert isinstance(bart.n_save, int)
     assert bart.predict('train', kind='mean').dtype == jnp.float32
     assert bart.predict('train', kind='mean_samples').dtype == jnp.float32
     assert bart.predict('train', kind='latent_samples').dtype == jnp.float32
@@ -743,7 +787,7 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
     mean_samples = bart.predict('train', kind='mean_samples')  # (ndpost, *k, n)
     latent_samples = bart.predict('train', kind='latent_samples')  # (ndpost, *k, n)
     outcome_samples = bart.predict('train', kind='outcome_samples', key=keys.pop())
-    # outcome_samples has shape (ndpost, *k, n)
+    # outcome_samples has shape (num_chains*n_save, *k, n)
 
     with subtests.test('mean_samples vs mean'):
         mean_from_mean_samples = mean_samples.mean(0)
@@ -804,7 +848,12 @@ class TestVarprobAttr:
         y = gen_y(keys.pop(), X, None, 'continuous')
         with debug_nans(False):
             xinfo = jnp.array([[jnp.nan], [0]])
-        bart = Bart(x_train=X, y_train=y, xinfo=xinfo, seed=keys.pop())
+        bart = Bart(
+            x_train=X,
+            y_train=y,
+            binner=partial(GivenSplitsBinner, xinfo=xinfo),
+            seed=keys.pop(),
+        )
         assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1])
         assert_array_equal(bart.varprob_mean, [0, 1])
         assert jnp.all(bart.varprob_mean == bart.varprob)
@@ -827,7 +876,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
     bart = Bart(
         x_train=X,
         y_train=y,
-        nskip=1000,
+        n_burn=1000,
         sparse=True,
         theta=peff if theta == 'fixed' else None,
         seed=keys.pop(),
@@ -948,7 +997,7 @@ def test_no_datapoints(bkw: BartKW) -> None:
     p, _ = kw['x_train'].shape
     nsplits = 10
     xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
-    kw.update(xinfo=xinfo)
+    kw.update(binner=partial(GivenSplitsBinner, xinfo=xinfo))
 
     kw.update(num_data_devices=None)
 
@@ -991,11 +1040,11 @@ def test_one_datapoint(bkw: BartKW) -> None:
     """Check automatic data scaling with 1 datapoint."""
     kw = set_num_datapoints(bkw.kw, 1)
 
-    if kw.get('usequants', False):
+    if bkw.uses_quantile_binner:
         p, _ = kw['x_train'].shape
         nsplits = 10
         xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
-        kw.update(xinfo=xinfo)
+        kw.update(binner=partial(GivenSplitsBinner, xinfo=xinfo))
 
     kw.update(num_data_devices=None)
 
@@ -1045,7 +1094,7 @@ def test_two_datapoints(bkw: BartKW) -> None:
     if kw['outcome_type'] != 'binary':
         ref_sigest = jnp.where(bart._binary_mask, 0.0, kw['y_train'].std(axis=-1))
         assert_close_matrices(bart.sigest, ref_sigest, rtol=1e-6)
-    if kw.get('usequants', False):
+    if bkw.uses_quantile_binner:
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)
     assert not jnp.all(bart._main_trace.log_likelihood == 0.0)
@@ -1072,7 +1121,7 @@ def test_few_datapoints(bkw: BartKW) -> None:
 
 
 def test_xinfo() -> None:
-    """Simple check that the `xinfo` parameter works."""
+    """Simple check that `GivenSplitsBinner` works as the `binner`."""
     with debug_nans(False):
         xinfo = jnp.array(
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
@@ -1080,27 +1129,29 @@ def test_xinfo() -> None:
     kw = dict(
         x_train=jnp.empty((3, 0)),
         y_train=jnp.empty(0),
-        ndpost=0,
-        nskip=0,
-        usequants=True,
-        numcut=0,
-        xinfo=xinfo,
+        n_save=0,
+        n_burn=0,
+        binner=partial(GivenSplitsBinner, xinfo=xinfo),
     )
     bart = Bart(**kw)
 
     xinfo_wo_nan = jnp.where(jnp.isnan(xinfo), jnp.finfo(jnp.float32).max, xinfo)
-    assert_array_equal(bart._splits, xinfo_wo_nan)
+    assert_array_equal(bart._binner._splits, xinfo_wo_nan)
     assert_array_equal(bart._mcmc_state.forest.max_split, [2, 3, 0])
 
 
 def test_xinfo_wrong_p() -> None:
-    """Check that `xinfo` must have the same number of rows as `X`."""
+    """Check that `GivenSplitsBinner` rejects mismatched shapes."""
     with debug_nans(False):
         xinfo = jnp.array(
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
         )
     kw = dict(
-        x_train=jnp.empty((5, 0)), y_train=jnp.empty(0), ndpost=0, nskip=0, xinfo=xinfo
+        x_train=jnp.empty((5, 0)),
+        y_train=jnp.empty(0),
+        n_save=0,
+        n_burn=0,
+        binner=partial(GivenSplitsBinner, xinfo=xinfo),
     )
     with pytest.raises(ValueError, match=r'xinfo\.shape'):
         Bart(**kw)
@@ -1179,10 +1230,10 @@ def run_bart_like_prior(
         x_train=jnp.empty((p, 0)),
         y_train=jnp.empty(0),
         num_trees=20,
-        ndpost=1000,
-        nskip=3000,
+        n_save=1000,
+        n_burn=3000,
         printevery=None,
-        xinfo=xinfo,
+        binner=partial(GivenSplitsBinner, xinfo=xinfo),
         seed=key,
         num_chains=None,
         init_kw=dict(
@@ -1210,7 +1261,7 @@ def sample_prior_like(
 
     prior_trees = sample_prior(
         key,
-        bart.ndpost,
+        bart.n_save,
         len(bart._mcmc_state.forest.leaf_tree),
         bart._mcmc_state.forest.max_split,
         p_nonterminal,
@@ -1296,7 +1347,7 @@ def test_jit(bkw: BartKW) -> None:
 def test_interrupt(bkw: BartKW) -> None:
     """Test that the MCMC can be interrupted with ^C."""
     kw = bkw.kw
-    kw.update(printevery=1, ndpost=0, nskip=10000)
+    kw.update(printevery=1, n_save=0, n_burn=10000)
 
     # Send the first ^C after 3 s, if the time was too short, it would interrupt
     # a first interruptible phase of jax compilation. Then send ^C every second,
@@ -1365,7 +1416,7 @@ def test_automatic_integer_types(bkw: BartKW) -> None:
 
     maxdepth = kw.get('maxdepth', 6)
     leaf_indices_type = select_type(maxdepth <= 8)
-    split_trees_type = X_type = select_type(kw['numcut'] <= 255)
+    split_trees_type = X_type = select_type(bkw.max_bins <= 256)
     var_trees_type = select_type(kw['x_train'].shape[0] <= 256)
 
     assert bart._mcmc_state.forest.var_tree.dtype == var_trees_type
@@ -1375,37 +1426,41 @@ def test_automatic_integer_types(bkw: BartKW) -> None:
     assert bart._mcmc_state.forest.max_split.dtype == split_trees_type
 
 
-def check_data_sharding(x: Array, mesh: Mesh) -> None:
-    """Check the sharding of `x` assuming it may be sharded only along the last 'data' axis."""
+def check_chains_data_sharding(
+    x: Array, chains: bool, data: bool, mesh: Mesh | None
+) -> None:
+    """Check `x` is sharded as indicated by the boolean flags."""
     if mesh is None:
         assert isinstance(x.sharding, SingleDeviceSharding)
-    elif 'data' in mesh.axis_names:
-        expected_num_devices = min(2, get_device_count())
-        assert x.sharding.num_devices == expected_num_devices
-        expected_spec = (None,) * (x.ndim - 1) + ('data',)
-        assert get_normal_spec(x) == normalize_spec(expected_spec, mesh, x.shape)
-
-
-def check_chain_sharding(x: Array, mesh: Mesh) -> None:
-    """Check the sharding of `x` assuming it may be sharded only along the first 'chains' axis."""
-    if mesh is None:
-        assert isinstance(x.sharding, SingleDeviceSharding)
-    elif 'chains' in mesh.axis_names:
-        expected_num_devices = min(2, get_device_count())
-        assert x.sharding.num_devices == expected_num_devices
-        assert get_normal_spec(x) == normalize_spec(('chains',), mesh, x.shape)
+        return
+    expected_spec = [None] * x.ndim
+    if data and 'data' in mesh.axis_names:
+        expected_spec[-1] = 'data'
+    if chains and 'chains' in mesh.axis_names:
+        expected_spec[0] = 'chains'
+    expected_spec = normalize_spec(expected_spec, mesh, x.shape)
+    assert get_normal_spec(x) == expected_spec
 
 
 def get_expect_sharded(kw: dict) -> bool:
     """Check whether we expect sharding to be set up based on the arguments."""
+    num_chain_devices = kw.get('num_chain_devices', 'auto')
+    num_chains = kw.get('num_chains', 4)
     return (
-        kw.get('num_chain_devices') is not None
+        hasattr(num_chain_devices, '__index__')
         or kw.get('num_data_devices') is not None
+        or (
+            num_chain_devices == 'auto'
+            and num_chains is not None
+            and num_chains > 1
+            and get_device_count() > 1
+            and get_default_device().platform == 'cpu'
+        )
     )
 
 
 def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
-    """Check that chains live on their own devices throughout the interface."""
+    """Check that chains and data shards live on their own devices throughout the interface."""
     if version_info[:2] == get_old_python_tuple() and variant in (2, 5):
         pytest.xfail('Actual sharding bug in bartz with old jax, no time to fix.')
     kw = bkw.kw
@@ -1415,23 +1470,26 @@ def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
     mesh = bart._mcmc_state.config.mesh
     assert expect_sharded == (mesh is not None)
 
+    # check internal attributes that have chains/data metadata, so their
+    # expected sharding can be automatically inferred by `check_sharding`
     check = partial(check_sharding, mesh=mesh)
     check(bart._mcmc_state)
     check(bart._burnin_trace)
     check(bart._main_trace)
 
-    check_chain = partial(check_chain_sharding, mesh=mesh)
+    check = partial(check_chains_data_sharding, mesh=mesh)
 
     for kind in PredictKind:
         extra: dict = {'key': keys.pop()} if kind is PredictKind.outcome_samples else {}
         yhat_train = bart.predict('train', kind=kind, **extra)
-        check_data_sharding(yhat_train, mesh)
-        if kind is not PredictKind.mean:
-            check_chain(yhat_train)
+        if kind is PredictKind.mean:
+            check(yhat_train, chains=False, data=True)
+        else:
+            check(yhat_train, chains=True, data=True)
 
             extra['w'] = bkw.w_test
             yhat_test = bart.predict(bkw.x_test, kind=kind, **extra)
-            check_chain(yhat_test)
+            check(yhat_test, chains=True, data=False)
 
     assert bart.offset.is_fully_replicated
     if bart.sigest is not None:
@@ -1574,7 +1632,7 @@ def test_equiv_sharding(  # pragma: no cover  # pragma: slow
 
     baseline_kw = tree.map(lambda x: x, bkw.kw)
     baseline_kw.update(
-        num_chain_devices=None, num_data_devices=None, nskip=0, ndpost=20, num_chains=2
+        num_chain_devices=None, num_data_devices=None, n_burn=0, n_save=10, num_chains=2
     )
     bart = Bart(**baseline_kw)
 
@@ -1614,7 +1672,7 @@ def test_equiv_sharding(  # pragma: no cover  # pragma: slow
 def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:
     """Test the number of trees."""
     kw = bkw.kw
-    kw.update(nskip=0, ndpost=0)
+    kw.update(n_burn=0, n_save=0)
 
     with subtests.test('given num_trees'):
         bart = Bart(**kw)
@@ -1645,7 +1703,7 @@ class TestMVBartInterface:
             x=random.normal(keys.pop(), (2, 5)),
             y=random.normal(keys.pop(), (3, 5)),
             w=random.normal(keys.pop(), (5,)),
-            kwargs=dict(num_trees=5, ndpost=0, nskip=0, num_chains=None),
+            kwargs=dict(num_trees=5, n_save=0, n_burn=0, num_chains=None),
         )
 
     @pytest.mark.parametrize('outcome_mode', ['continuous', 'mixed'])
@@ -1718,7 +1776,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     y_mv = y_mv[:1, :]
     y_uv = y_mv.squeeze(0)
 
-    bkw.kw.update(outcome_type=outcome_type, nskip=0, ndpost=0, w=None)
+    bkw.kw.update(outcome_type=outcome_type, n_burn=0, n_save=0, w=None)
     del bkw.kw['y_train']
     bart_uv = Bart(y_train=y_uv, **bkw.kw)
     bart_mv = Bart(y_train=y_mv, **bkw.kw)
@@ -1773,13 +1831,13 @@ def test_get_latent_prec_only_continuous(bkw: BartKW) -> None:
     else:
         kc = k
 
-    ndpost = bart.ndpost
-    nskip = kw['nskip']
-    num_chains = kw.get('num_chains')
+    n_save = bart.n_save
+    n_burn = kw['n_burn']
+    num_chains = bart.num_chains
     if num_chains is not None:
-        assert prec.shape == (num_chains, nskip + ndpost // num_chains, kc, kc)
+        assert prec.shape == (num_chains, n_burn + n_save, kc, kc)
     else:
-        assert prec.shape == (nskip + ndpost, kc, kc)
+        assert prec.shape == (n_burn + n_save, kc, kc)
 
 
 def test_get_error_sdev_values(bkw: BartKW) -> None:
@@ -1789,7 +1847,7 @@ def test_get_error_sdev_values(bkw: BartKW) -> None:
     if outcome_type == 'binary':
         pytest.skip('binary variant')
     bart = Bart(**kw)
-    nskip = kw['nskip']
+    n_burn = kw['n_burn']
 
     with debug_nans(False):
         sdev = bart.get_error_sdev()
@@ -1800,7 +1858,7 @@ def test_get_error_sdev_values(bkw: BartKW) -> None:
     prec = bart.get_latent_prec()
     if prec.ndim < 3:  # pragma: no cover, bc defaults are mv only
         prec = prec[..., :, None, None]  # reshape as 1x1 matrix
-    prec = prec[..., nskip:, :, :]  # skip burnin
+    prec = prec[..., n_burn:, :, :]  # skip burnin
     prec = lax.collapse(prec, 0, -2)  # flatten chains
 
     cov = jnp.linalg.inv(prec)
@@ -1812,3 +1870,83 @@ def test_get_error_sdev_values(bkw: BartKW) -> None:
     sdev_ref = sdev_ref[:, mask]
 
     assert_close_matrices(sdev, sdev_ref, rtol=1e-5)
+
+
+def test_devices_platform(bkw: BartKW) -> None:
+    """Check that passing `devices='cpu'/'gpu'` ends up on the expected device."""
+    bart1 = Bart(**bkw.kw)
+    platform = bart1._main_trace.grow_prop_count.platform()
+    kw2 = dict(bkw.kw, devices=platform)
+    bart2 = Bart(**kw2)
+    assert_identical_bart(bart1, bart2)
+
+
+def assert_identical_bart(bart1: Bart, bart2: Bart) -> None:
+    """Check that two `Bart` objects are equal."""
+
+    def check_same(path: KeyPath, x1: Array, x2: Array) -> None:
+        assert x1.shape == x2.shape
+        assert x1.dtype == x2.dtype
+        assert x1.sharding.is_equivalent_to(x2.sharding, x1.ndim)
+        assert_array_equal(x1, x2, strict=True, err_msg=keystr(path))
+
+    tree.map_with_path(check_same, bart1, bart2)
+
+    treedef1 = tree.structure(bart1)
+    treedef2 = tree.structure(bart2)
+    assert treedef1 == treedef2
+
+
+def test_numpy_input(bkw: BartKW) -> None:
+    """Check if all numerical inputs are numpy arrays, everything works as usual."""
+    bart1 = Bart(**bkw.kw)
+
+    def to_numpy_array(x: Array | object) -> numpy.ndarray | object:
+        if isinstance(x, (Array, float)) and not is_key(x):
+            return numpy.asarray(x)
+        else:
+            return x
+
+    kw2 = tree.map(to_numpy_array, bkw.kw)
+    bart2 = Bart(**kw2)
+
+    assert_identical_bart(bart1, bart2)
+
+
+def test_sigest_wrong_special_value(bkw: BartKW) -> None:
+    """Trigger error on unrecognized `sigest` value."""
+    value = 'ohohoh'
+    if bkw.kw['outcome_type'] == 'binary':
+        pytest.skip('Parameter ignored with binary outcomes.')
+    kw = dict(bkw.kw, sigest=value)
+    with pytest.raises(ValueError, match=value):
+        Bart(**kw)
+
+
+def test_sigest_cg(bkw: BartKW) -> None:
+    """Check the `sigest='cg'` is an approximation of `sigest='ols-or-variance'`."""
+    p, n = bkw.kw['x_train'].shape
+    if p >= n or bkw.kw['outcome_type'] == 'binary':
+        pytest.skip('Requires p < n and continuous outcomes.')
+    bart_ols = Bart(**dict(bkw.kw, sigest='ols-or-variance'))
+    bart_cg = Bart(**dict(bkw.kw, sigest='cg'))
+    mask = ~bart_ols._binary_mask
+    assert_close_matrices(bart_cg.sigest[mask], bart_ols.sigest[mask])
+
+
+def test_sigest_auto_cg(keys: split) -> None:
+    """Check the `sigest='auto'` branch that switches to 'cg'."""
+    n = 110
+    p = 1000
+    assert n * p * p > 10_000 * 100 * 100
+
+    x = random.normal(keys.pop(), (p, n))
+    y = random.normal(keys.pop(), (n,))
+    # y is random so we can check 'cg' is regularizing in this high-p problem:
+    # the correct answer is sigest = std(y), but since p > n ordinary linear
+    # regression would always overfit perfectly and return sigest = 0.
+
+    bart = Bart(x, y, seed=keys.pop(), n_save=0, n_burn=0)
+    stdy = jnp.std(y)
+    assert bart.sigest <= stdy
+    assert bart.sigest >= stdy * 1e-3  # not that much regularization...

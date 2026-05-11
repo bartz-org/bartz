@@ -55,10 +55,13 @@ from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 
 class OutcomeType(Enum):
-    """Whether the regression outcome is continuous or binary (probit)."""
+    """Likelihood types for each outcome component in the regression."""
 
     continuous = 'continuous'
+    """Continuous outcome with Normal error."""
+
     binary = 'binary'
+    """Binary outcome in {0, 1} with probit link."""
 
 
 def field(*, chains: bool = False, data: bool = False, **kwargs: Any):  # noqa: ANN202

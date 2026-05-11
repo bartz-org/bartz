@@ -28,12 +28,13 @@
 from dataclasses import replace
 from functools import partial
 
-from equinox import Module, error_if
+from equinox import Module, error_if, field
 from jax import jit, random
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float, Int, Integer, Key
 
 from bartz.jaxext import split
+from bartz.mcmcstep import OutcomeType
 
 
 def generate_x(key: Key[Array, ''], n: int, p: int) -> Float[Array, 'p n']:
@@ -99,19 +100,7 @@ def combine_mulin(
 
 
 def interaction_pattern(p: int, q: Integer[Array, ''] | int) -> Bool[Array, 'p p']:
-    """Create a symmetric interaction pattern for q interactions per variable.
-
-    Parameters
-    ----------
-    p
-        Number of predictors
-    q
-        Number of interactions per predictor (must be even)
-
-    Returns
-    -------
-    Symmetric binary pattern of shape (p, p) where each row/col sums to q+1
-    """
+    """Symmetric pattern where each row/col sums to q+1 (q must be even)."""
     q = error_if(q, q % 2 != 0, 'q must be even')
     q = error_if(q, q >= p, 'q must be less than p')
 
@@ -138,20 +127,7 @@ def generate_A_shared(
 def partitioned_interaction_pattern(
     partition: Bool[Array, 'k p'], q: Integer[Array, ''] | int
 ) -> Bool[Array, 'k p p']:
-    """Create k interaction patterns that use disjoint variable sets.
-
-    Parameters
-    ----------
-    partition
-        Binary partition of shape (k, p) indicating variable assignments
-        to components
-    q
-        Number of interactions per predictor (must be even and < p // k)
-
-    Returns
-    -------
-    Interaction patterns of shape (k, p, p)
-    """
+    """Interaction patterns over k disjoint variable sets (q even, < p // k)."""
     k, p = partition.shape
     q = error_if(q, q % 2 != 0, 'q must be even')
     q = error_if(q, q >= p // k, 'q must be less than p // k')
@@ -226,84 +202,102 @@ def compute_quadratic_mean(
 
 
 def generate_outcome(
-    key: Key[Array, ''], mu: Float[Array, 'k n'], sigma2_eps: Float[Array, '']
+    key: Key[Array, ''],
+    mu: Float[Array, 'k n'],
+    sigma2_eps: Float[Array, ''],
+    outcome_type: OutcomeType | tuple[OutcomeType, ...],
 ) -> Float[Array, 'k n']:
-    """Generate noisy outcome."""
+    """Sample y from mu and sigma2_eps (see `Params` for binary semantics)."""
     eps: Float[Array, 'k n'] = random.normal(key, mu.shape)
-    return mu + eps * jnp.sqrt(sigma2_eps)
+    latent = mu + eps * jnp.sqrt(sigma2_eps)
+    if outcome_type is OutcomeType.continuous:
+        return latent
+    if outcome_type is OutcomeType.binary:
+        return (latent > 0).astype(latent.dtype)
+    binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
+    return jnp.where(binary_mask[:, None], (latent > 0).astype(latent.dtype), latent)
 
 
-class DGP(Module):
-    """Output of `gen_data`.
+class Params(Module):
+    """Output of `gen_params`: all DGP quantities that do not depend on `n`.
 
-    Parameters
-    ----------
-    x
-        Predictors of shape (p, n), variance 1
-    y
-        Noisy outcomes of shape (k, n) or (n,)
-    partition
-        Predictor-outcome assignment partition of shape (k, p)
-    beta_shared
-        Shared linear coefficients of shape (p,)
-    beta_separate
-        Separate linear coefficients of shape (k, p)
-    mulin_shared
-        Linear mean at lambda=1 (shared), shape (k, n), rows identical
-    mulin_separate
-        Linear mean at lambda=0 (separate), shape (k, n), rows independent
-    mulin
-        Linear part of latent mean of shape (k, n)
-    A_shared
-        Shared quadratic coefficients of shape (p, p)
-    A_separate
-        Separate quadratic coefficients of shape (k, p, p)
-    muquad_shared
-        Quadratic mean at lambda=1 (shared), shape (k, n), rows identical
-    muquad_separate
-        Quadratic mean at lambda=0 (separate), shape (k, n), rows independent
-    muquad
-        Quadratic part of latent mean of shape (k, n)
-    mu
-        True latent means of shape (k, n)
-    q
-        Number of interactions per predictor
-    lam
-        Coupling parameter in [0, 1]
-    sigma2_lin
-        Prior and expected population variance of mulin
-    sigma2_quad
-        Expected population variance of muquad
-    sigma2_eps
-        Variance of the error
+    For multivariate outputs (``k is not None``) the latent mean for
+    component ``i`` at observation ``j`` is
+
+        mu_ij = sqrt(lam) * (beta_shared . x_j + x_j^T A_shared x_j)
+              + sqrt(1 - lam) * (beta_separate_i . x_j + x_j^T A_separate_i x_j)
+
+    with ``lam`` in ``[0, 1]`` interpolating between fully independent
+    components (``lam=0``, each row uses its own coefficients restricted to the
+    variables it owns via `partition`) and fully shared ones (``lam=1``, all
+    rows share the same coefficients).
+
+    For univariate outputs (``k is None``) the separate path is skipped and
+
+        mu_j = beta_shared . x_j + x_j^T A_shared x_j;
+
+    ``partition``, ``beta_separate``, ``A_separate`` and ``lam`` are all
+    ``None``. The outcome is
+
+        y_ij = mu_ij + eps_ij * sqrt(sigma2_eps),   eps_ij ~iid N(0, 1),
+
+    possibly thresholded at 0 for binary components (see `outcome_type`).
     """
 
-    # Main outputs
-    x: Float[Array, 'p n']
-    y: Float[Array, 'k n'] | Float[Array, ' n']
+    partition: Bool[Array, 'k p'] | None
+    """Predictor-outcome assignment partition of shape (k, p), used only at
+    ``lam < 1``. Row ``i`` is the binary mask of predictors assigned to
+    component ``i``; rows are disjoint and each has either ``p // k`` or
+    ``p // k + 1`` entries. ``None`` in univariate mode (``k is None``)."""
 
-    # Intermediate results
-    partition: Bool[Array, 'k p']
     beta_shared: Float[Array, ' p']
-    beta_separate: Float[Array, 'k p']
-    mulin_shared: Float[Array, ' n']
-    mulin_separate: Float[Array, 'k n']
-    mulin: Float[Array, 'k n']
-    A_shared: Float[Array, 'p p']
-    A_separate: Float[Array, 'k p p']
-    muquad_shared: Float[Array, ' n']
-    muquad_separate: Float[Array, 'k n']
-    muquad: Float[Array, 'k n']
-    mu: Float[Array, 'k n']
+    """Shared linear coefficients of shape (p,), used at ``lam > 0``."""
 
-    # Params
+    beta_separate: Float[Array, 'k p'] | None
+    """Separate linear coefficients of shape (k, p), used at ``lam < 1``.
+    Row ``i`` is supported on ``partition[i]``. ``None`` in univariate
+    mode (``k is None``)."""
+
+    A_shared: Float[Array, 'p p']
+    """Shared quadratic coefficients of shape (p, p), used at ``lam > 0``.
+    Nonzero on a symmetric band of ``q + 1`` entries per row/col."""
+
+    A_separate: Float[Array, 'k p p'] | None
+    """Separate quadratic coefficients of shape (k, p, p), used at
+    ``lam < 1``. Slice ``i`` is supported on the outer product of
+    ``partition[i]`` with itself. ``None`` in univariate mode
+    (``k is None``)."""
+
     q: Integer[Array, '']
-    lam: Float[Array, '']
+    """Number of quadratic interactions per predictor (even, ``< p // k``)."""
+
+    lam: Float[Array, ''] | None
+    """Coupling parameter in ``[0, 1]``: 0 = independent components,
+    1 = identical components. ``None`` iff univariate (``partition is
+    None``), in which case only the shared path contributes to ``mu``."""
+
     sigma2_lin: Float[Array, '']
+    """Prior and expected population variance of the linear term of ``mu``."""
+
     sigma2_quad: Float[Array, '']
+    """Expected population variance of the quadratic term of ``mu``."""
+
     sigma2_eps: Float[Array, '']
+    """Variance of the additive error."""
+
+    outcome_type: OutcomeType | tuple[OutcomeType, ...] = field(static=True)
+    """Per-component outcome type, either a single `OutcomeType` applied to
+    every row, or a tuple of length ``k`` for mixed outcomes. For binary
+    components the continuous latent ``mu + eps * sqrt(sigma2_eps)`` is
+    thresholded at 0, yielding 0.0/1.0 floats. Unlike the standard probit
+    convention used by `bartz.mcmcstep.init` (which fixes the latent noise
+    variance to 1), here the binary latents share the same ``sigma2_eps``
+    as the continuous ones, so the marginal success probability is
+    ``Phi(mu / sqrt(sigma2_eps))``."""
 
     kurt_x: float = 9 / 5  # kurtosis of uniform distribution
+    """Kurtosis of the predictor distribution. Defaults to ``9 / 5``, the
+    kurtosis of the uniform distribution used by `gen_data_from_params`."""
 
     @property
     def sigma2_pri(self) -> Float[Array, '']:
@@ -319,6 +313,53 @@ class DGP(Module):
     def sigma2_mean(self) -> Float[Array, '']:
         """Variance of the mean function."""
         return self.sigma2_quad / (self.kurt_x - 1 + self.q)
+
+
+class DGP(Module):
+    """Output of `gen_data` / `gen_data_from_params`: sampled data and parameters.
+
+    See `Params` for the definition of the generative model. The ``_shared``
+    fields are the ``lam=1`` limit (common across components), the
+    ``_separate`` fields are the ``lam=0`` limit (independent across
+    components), and the plain names are the realized mix at the sampled
+    ``params.lam``.
+    """
+
+    x: Float[Array, 'p n']
+    """Predictors of shape (p, n), marginally mean 0 and variance 1."""
+
+    y: Float[Array, 'k n'] | Float[Array, ' n']
+    """Noisy outcomes of shape (k, n), or (n,) if `gen_data` was called with
+    ``k=None``."""
+
+    mulin_shared: Float[Array, ' n']
+    """Shared linear mean of shape (n,)."""
+
+    mulin_separate: Float[Array, 'k n'] | None
+    """Separate linear mean of shape (k, n), rows independent. ``None`` in
+    univariate mode (``k is None``)."""
+
+    mulin: Float[Array, 'k n'] | Float[Array, ' n']
+    """Linear part of the latent mean of shape (k, n), or (n,) in univariate
+    mode (``k is None``, equal to ``mulin_shared``)."""
+
+    muquad_shared: Float[Array, ' n']
+    """Shared quadratic mean of shape (n,)."""
+
+    muquad_separate: Float[Array, 'k n'] | None
+    """Separate quadratic mean of shape (k, n), rows independent. ``None`` in
+    univariate mode (``k is None``)."""
+
+    muquad: Float[Array, 'k n'] | Float[Array, ' n']
+    """Quadratic part of the latent mean of shape (k, n), or (n,) in
+    univariate mode (``k is None``, equal to ``muquad_shared``)."""
+
+    mu: Float[Array, 'k n'] | Float[Array, ' n']
+    """Latent mean ``mulin + muquad`` of shape (k, n), or (n,) in univariate
+    mode (``k is None``)."""
+
+    params: Params
+    """DGP parameters, see `Params`."""
 
     def split(self, n_train: int | None = None) -> tuple['DGP', 'DGP']:
         """Split the data into training and test sets.
@@ -338,31 +379,208 @@ class DGP(Module):
         train = replace(
             self,
             x=self.x[:, :n_train],
-            y=self.y[:, :n_train],
+            y=self.y[..., :n_train],
             mulin_shared=self.mulin_shared[:n_train],
-            mulin_separate=self.mulin_separate[:, :n_train],
-            mulin=self.mulin[:, :n_train],
+            mulin_separate=(
+                None
+                if self.mulin_separate is None
+                else self.mulin_separate[:, :n_train]
+            ),
+            mulin=self.mulin[..., :n_train],
             muquad_shared=self.muquad_shared[:n_train],
-            muquad_separate=self.muquad_separate[:, :n_train],
-            muquad=self.muquad[:, :n_train],
-            mu=self.mu[:, :n_train],
+            muquad_separate=(
+                None
+                if self.muquad_separate is None
+                else self.muquad_separate[:, :n_train]
+            ),
+            muquad=self.muquad[..., :n_train],
+            mu=self.mu[..., :n_train],
         )
         test = replace(
             self,
             x=self.x[:, n_train:],
-            y=self.y[:, n_train:],
+            y=self.y[..., n_train:],
             mulin_shared=self.mulin_shared[n_train:],
-            mulin_separate=self.mulin_separate[:, n_train:],
-            mulin=self.mulin[:, n_train:],
+            mulin_separate=(
+                None
+                if self.mulin_separate is None
+                else self.mulin_separate[:, n_train:]
+            ),
+            mulin=self.mulin[..., n_train:],
             muquad_shared=self.muquad_shared[n_train:],
-            muquad_separate=self.muquad_separate[:, n_train:],
-            muquad=self.muquad[:, n_train:],
-            mu=self.mu[:, n_train:],
+            muquad_separate=(
+                None
+                if self.muquad_separate is None
+                else self.muquad_separate[:, n_train:]
+            ),
+            muquad=self.muquad[..., n_train:],
+            mu=self.mu[..., n_train:],
         )
         return train, test
 
 
-@partial(jit, static_argnames=('n', 'p', 'k'))
+@partial(jit, static_argnames=('p', 'k', 'outcome_type'))
+def gen_params(
+    key: Key[Array, ''],
+    *,
+    p: int,
+    k: int | None,
+    q: Integer[Array, ''] | int,
+    lam: Float[Array, ''] | float | None = None,
+    sigma2_lin: Float[Array, ''] | float,
+    sigma2_quad: Float[Array, ''] | float,
+    sigma2_eps: Float[Array, ''] | float,
+    outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
+) -> Params:
+    """Sample DGP coefficients and parameters (no dependence on `n`).
+
+    See `Params` for the meaning of every parameter and the generative model
+    they parametrize.
+
+    Parameters
+    ----------
+    key
+        JAX random key.
+    p
+        Number of predictors.
+    k
+        Number of outcome components. If `None`, generate a univariate DGP
+        and skip the separate code path: ``partition``, ``beta_separate``,
+        ``A_separate`` and ``lam`` are all set to ``None`` on the returned
+        `Params`, and only the shared coefficients are drawn.
+    q
+        See `Params`.
+    lam
+        Coupling parameter; must be ``None`` iff ``k is None``. See `Params`.
+    sigma2_lin
+    sigma2_quad
+    sigma2_eps
+        See `Params`.
+    outcome_type
+        ``'continuous'``, ``'binary'``, an `OutcomeType`, or a tuple of length
+        ``k`` for mixed outcomes. Tuples with all elements equal are collapsed
+        to the scalar form. Tuples are not allowed when ``k is None``. See
+        `Params` for the semantics.
+
+    Returns
+    -------
+    A `Params` with the sampled coefficients and forwarded hyperparameters.
+
+    Raises
+    ------
+    ValueError
+        If ``outcome_type`` is a tuple whose length does not match ``k``, or
+        if a tuple ``outcome_type`` is combined with ``k=None``, or if
+        ``(lam is None) != (k is None)``.
+    """
+    if (lam is None) != (k is None):
+        msg = (
+            'lam must be None when k is None'
+            if k is None
+            else 'lam is required when k is not None'
+        )
+        raise ValueError(msg)
+
+    if isinstance(outcome_type, tuple):
+        if k is None:
+            msg = 'tuple outcome_type requires a multivariate outcome (k != None)'
+            raise ValueError(msg)
+        types = tuple(OutcomeType(t) for t in outcome_type)
+        if len(types) != k:
+            msg = f'outcome_type has length {len(types)} but k={k}'
+            raise ValueError(msg)
+        outcome_type = types[0] if len(set(types)) == 1 else types
+    else:
+        outcome_type = OutcomeType(outcome_type)
+
+    keys = split(key, 5)
+
+    beta_shared = generate_beta_shared(keys.pop(), p, sigma2_lin)
+    A_shared = generate_A_shared(keys.pop(), p, q, sigma2_quad, Params.kurt_x)
+
+    if k is None:
+        partition = None
+        beta_separate = None
+        A_separate = None
+    else:
+        assert p >= k, 'p must be at least k'
+        partition = generate_partition(keys.pop(), p, k)
+        beta_separate = generate_beta_separate(keys.pop(), partition, sigma2_lin)
+        A_separate = generate_A_separate(
+            keys.pop(), partition, q, sigma2_quad, Params.kurt_x
+        )
+
+    return Params(
+        partition=partition,
+        beta_shared=beta_shared,
+        beta_separate=beta_separate,
+        A_shared=A_shared,
+        A_separate=A_separate,
+        q=q,
+        lam=lam,
+        sigma2_lin=sigma2_lin,
+        sigma2_quad=sigma2_quad,
+        sigma2_eps=sigma2_eps,
+        outcome_type=outcome_type,
+    )
+
+
+@partial(jit, static_argnames=('n',))
+def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
+    """Sample predictors and outcomes given fixed `params`.
+
+    The output ``y`` always has shape ``(k, n)``; squeezing to ``(n,)`` for
+    univariate outputs is done by `gen_data`.
+
+    Parameters
+    ----------
+    key
+        JAX random key.
+    params
+        DGP parameters from `gen_params`.
+    n
+        Number of observations.
+
+    Returns
+    -------
+    A `DGP` object with `params` and the sampled data.
+    """
+    keys = split(key, 2)
+    p = params.beta_shared.shape[0]
+
+    x = generate_x(keys.pop(), n, p)
+    mulin_shared = compute_linear_mean_shared(params.beta_shared, x)
+    muquad_shared = compute_muquad_shared(params.A_shared, x)
+
+    if params.partition is None:
+        mulin_separate = None
+        muquad_separate = None
+        mulin = mulin_shared
+        muquad = muquad_shared
+    else:
+        mulin_separate = compute_linear_mean_separate(params.beta_separate, x)
+        muquad_separate = compute_muquad_separate(params.A_separate, x)
+        mulin = combine_mulin(mulin_shared, mulin_separate, params.lam)
+        muquad = combine_muquad(muquad_shared, muquad_separate, params.lam)
+
+    mu = mulin + muquad
+    y = generate_outcome(keys.pop(), mu, params.sigma2_eps, params.outcome_type)
+
+    return DGP(
+        x=x,
+        y=y,
+        mulin_shared=mulin_shared,
+        mulin_separate=mulin_separate,
+        mulin=mulin,
+        muquad_shared=muquad_shared,
+        muquad_separate=muquad_separate,
+        muquad=muquad,
+        mu=mu,
+        params=params,
+    )
+
+
+@partial(jit, static_argnames=('n', 'p', 'k', 'outcome_type'))
 def gen_data(
     key: Key[Array, ''],
     *,
@@ -370,85 +588,52 @@ def gen_data(
     p: int,
     k: int | None = None,
     q: Integer[Array, ''] | int,
-    lam: Float[Array, ''] | float,
+    lam: Float[Array, ''] | float | None = None,
     sigma2_lin: Float[Array, ''] | float,
     sigma2_quad: Float[Array, ''] | float,
     sigma2_eps: Float[Array, ''] | float,
+    outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
 ) -> DGP:
     """Generate data from a quadratic multivariate DGP.
+
+    Thin wrapper around `gen_params` followed by `gen_data_from_params`. To
+    batch across `n` (e.g. to fit memory), call `gen_params` once and then
+    invoke `gen_data_from_params` per batch. See `Params` for the generative
+    model and `DGP` for the returned fields.
 
     Parameters
     ----------
     key
-        JAX random key
+        JAX random key.
     n
-        Number of observations
+        Number of observations.
     p
-        Number of predictors
+        Number of predictors.
     k
-        Number of outcome components
+        Number of outcome components. If `None`, produces a univariate output
+        with ``y.shape == (n,)`` and skips the separate code path entirely.
     q
-        Number of interactions per predictor (must be even and < p // k)
     lam
-        Coupling parameter in [0, 1]. 0=independent, 1=identical components
     sigma2_lin
-        Prior and expected population variance of the linear term
     sigma2_quad
-        Expected population variance of the quadratic term
     sigma2_eps
-        Variance of the error term
+    outcome_type
+        Forwarded to `gen_params`; see `Params`.
 
     Returns
     -------
-    An object with all generated data and parameters.
+    A `DGP` object with the sampled data and parameters.
     """
-    squeeze = k is None
-    if squeeze:
-        k = 1
-
-    assert p >= k, 'p must be at least k'
-
-    # check q
-    q = error_if(q, q % 2 != 0, 'q must be even')
-    q = error_if(q, q >= p // k, 'q must be less than p // k')
-
-    keys = split(key, 7)
-
-    x = generate_x(keys.pop(), n, p)
-    partition = generate_partition(keys.pop(), p, k)
-    beta_shared = generate_beta_shared(keys.pop(), p, sigma2_lin)
-    beta_separate = generate_beta_separate(keys.pop(), partition, sigma2_lin)
-    mulin_shared = compute_linear_mean_shared(beta_shared, x)
-    mulin_separate = compute_linear_mean_separate(beta_separate, x)
-    mulin = combine_mulin(mulin_shared, mulin_separate, lam)
-    A_shared = generate_A_shared(keys.pop(), p, q, sigma2_quad, DGP.kurt_x)
-    A_separate = generate_A_separate(keys.pop(), partition, q, sigma2_quad, DGP.kurt_x)
-    muquad_shared = compute_muquad_shared(A_shared, x)
-    muquad_separate = compute_muquad_separate(A_separate, x)
-    muquad = combine_muquad(muquad_shared, muquad_separate, lam)
-    mu = mulin + muquad
-    y = generate_outcome(keys.pop(), mu, sigma2_eps)
-    if squeeze:
-        y = y.squeeze(0)
-
-    return DGP(
-        x=x,
-        y=y,
-        partition=partition,
-        beta_shared=beta_shared,
-        beta_separate=beta_separate,
-        mulin_shared=mulin_shared,
-        mulin_separate=mulin_separate,
-        mulin=mulin,
-        A_shared=A_shared,
-        A_separate=A_separate,
-        muquad_shared=muquad_shared,
-        muquad_separate=muquad_separate,
-        muquad=muquad,
-        mu=mu,
+    keys = split(key, 2)
+    params = gen_params(
+        keys.pop(),
+        p=p,
+        k=k,
         q=q,
         lam=lam,
         sigma2_lin=sigma2_lin,
         sigma2_quad=sigma2_quad,
         sigma2_eps=sigma2_eps,
+        outcome_type=outcome_type,
     )
+    return gen_data_from_params(keys.pop(), params, n=n)

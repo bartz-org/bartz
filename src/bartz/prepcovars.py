@@ -22,19 +22,22 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Functions to preprocess data."""
+"""Functions and classes to preprocess data."""
 
+from abc import abstractmethod
 from functools import partial
-from typing import Any
+from typing import Any, Protocol
 
-from jax import jit, vmap
+from equinox import AbstractVar, Module
+from jax import jit, random, vmap
 from jax import numpy as jnp
-from jaxtyping import Array, Float, Integer, Real, UInt
+from jax.scipy.sparse.linalg import cg
+from jaxtyping import Array, Float, Float32, Integer, Key, Real, Shaped, UInt
 
 from bartz.jaxext import autobatch, minimal_unsigned_dtype, unique
 
 
-def parse_xinfo(
+def _parse_xinfo(
     xinfo: Float[Array, 'p m'],
 ) -> tuple[Float[Array, 'p m'], UInt[Array, ' p']]:
     """Parse pre-defined splits in the format of the R package BART.
@@ -64,8 +67,54 @@ def parse_xinfo(
     return splits, max_split
 
 
+@partial(jit, static_argnums=(2,))
+def _subsample(
+    key: Key[Array, ''], X: Real[Array, 'p n'], max_samples: int
+) -> Real[Array, 'p m']:
+    """Randomly thin each predictor row to at most `max_samples` elements.
+
+    Parameters
+    ----------
+    key
+        A jax random key.
+    X
+        A matrix with `p` predictors and `n` observations.
+    max_samples
+        The target maximum number of samples per row.
+
+    Returns
+    -------
+    A matrix with `p` rows and ``min(n, max_samples)`` columns. If
+    ``n <= max_samples``, `X` is returned unchanged. Otherwise each row contains
+    `max_samples` distinct values drawn without replacement from the
+    corresponding row of `X`, with rows sampled independently. The order of
+    values within each row is unspecified.
+
+    Raises
+    ------
+    ValueError
+        If `max_samples` is less than 1.
+    """
+    if max_samples < 1:
+        msg = f'{max_samples=}, must be at least 1.'
+        raise ValueError(msg)
+
+    p, n = X.shape
+    if n <= max_samples:
+        return X
+
+    keys = random.split(key, p)
+
+    @partial(autobatch, max_io_nbytes=2**29)
+    @vmap
+    def per_row(k: Key[Array, ''], x: Real[Array, ' n']) -> Real[Array, ' m']:
+        return random.choice(k, x, shape=(max_samples,), replace=False)
+
+    return per_row(keys, X)
+
+
 @partial(jit, static_argnums=(1,))
-def quantilized_splits_from_matrix(
+def _quantilized_splits_from_matrix(
     X: Real[Array, 'p n'], max_bins: int
 ) -> tuple[Real[Array, 'p m'], UInt[Array, ' p']]:
     """
@@ -105,13 +154,13 @@ def quantilized_splits_from_matrix(
         X: Real[Array, 'p n'],
     ) -> tuple[Real[Array, 'p m'], UInt[Array, ' p']]:
         # wrap this function because autobatch needs traceable args
-        return _quantilized_splits_from_matrix(X, out_length)
+        return _quantilized_splits_from_vector(X, out_length)
 
     return quantilize(X)
 
 
 @partial(vmap, in_axes=(0, None))
-def _quantilized_splits_from_matrix(
+def _quantilized_splits_from_vector(
     x: Real[Array, 'p n'], out_length: int
 ) -> tuple[Real[Array, 'p m'], UInt[Array, ' p']]:
     # find the sorted unique values in x
@@ -192,7 +241,7 @@ def _signed_to_unsigned(int_dtype: jnp.dtype) -> jnp.dtype:
 
 
 @partial(jit, static_argnums=(1,))
-def uniform_splits_from_matrix(
+def _uniform_splits_from_matrix(
     X: Real[Array, 'p n'], num_bins: int
 ) -> tuple[Real[Array, 'p m'], UInt[Array, ' p']]:
     """
@@ -223,7 +272,7 @@ def uniform_splits_from_matrix(
 
 
 @partial(jit, static_argnames=('method',))
-def bin_predictors(
+def _bin_predictors(
     X: Real[Array, 'p n'], splits: Real[Array, 'p m'], **kw: Any
 ) -> UInt[Array, 'p n']:
     """
@@ -257,3 +306,291 @@ def bin_predictors(
         return jnp.searchsorted(splits, x, **kw).astype(dtype)
 
     return bin_predictors(X, splits)
+
+
+class Binner(Module):
+    """Abstract base class for predictor binners.
+
+    A binner inspects the training predictors at construction time,
+    chooses cutpoints for each predictor, and encapsulates the logic
+    that maps any predictor matrix (training or test) to bin indices via
+    `bin`.
+
+    A predictor value ``x`` is mapped to bin ``i`` iff
+    ``c[i - 1] < x <= c[i]``, where ``c`` are the cutpoints chosen for
+    that predictor at construction. A predictor with ``k`` cutpoints
+    therefore has ``k + 1`` bins indexed from ``0`` to ``k``. The number
+    of cutpoints actually used per predictor is exposed as `max_split`
+    and may differ across predictors; the remaining capacity, if any, is
+    padded internally with the maximum value representable in the dtype
+    of the cutpoints, so binning still produces a valid in-range index.
+
+    The constructor takes the training predictors and an optional random
+    key. Concrete subclasses may add their own keyword arguments. Binners
+    that do not use the key still accept it for protocol uniformity and
+    silently ignore it. Binners that need it raise `ValueError` if it is
+    not provided.
+    """
+
+    max_split: AbstractVar[UInt[Array, ' p']]
+    """The number of cutpoints actually used for each of the `p` predictors."""
+
+    @abstractmethod
+    def __init__(
+        self, X: Real[Array, 'p n'], *, key: Key[Array, ''] | None = None
+    ) -> None: ...
+
+    @abstractmethod
+    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:
+        """Map predictors to bin indices using the cutpoints chosen at construction.
+
+        Parameters
+        ----------
+        X
+            A matrix with `p` predictors and `n` observations. Must have
+            the same number of predictors as the training matrix passed
+            to the constructor.
+
+        Returns
+        -------
+        Quantized `X` with minimal data type.
+        """
+        ...
+
+
+class BinnerFactory(Protocol):
+    """Callable that constructs a `Binner` from training predictors.
+
+    This is the type of the `binner` argument of `bartz.Bart`. A bare
+    `Binner` subclass satisfies this protocol, as does
+    ``functools.partial(BinnerSubclass, **subclass_kwargs)``.
+    """
+
+    def __call__(
+        self, X: Real[Array, 'p n'], *, key: Key[Array, ''] | None = None
+    ) -> Binner:
+        """Construct a `Binner` from `X` and an optional random key."""
+        ...
+
+
+class RangeEvenBinner(Binner):
+    """Binner with cutpoints evenly spaced over the observed range.
+
+    For each predictor, ``max_bins - 1`` cutpoints are placed at
+    equally spaced positions strictly between the minimum and the
+    maximum value observed in the training matrix. All predictors use
+    the same number of cutpoints.
+
+    Parameters
+    ----------
+    X
+        Training predictors with `p` predictors and `n` observations.
+    max_bins
+        The number of bins per predictor; ``max_bins - 1`` cutpoints
+        are produced per predictor.
+    key
+        Accepted for protocol uniformity; unused.
+    """
+
+    _splits: Real[Array, 'p m']
+    """Cutpoints per predictor."""
+
+    max_split: UInt[Array, ' p']
+
+    def __init__(
+        self,
+        X: Real[Array, 'p n'],
+        *,
+        max_bins: int = 256,
+        key: Key[Array, ''] | None = None,
+    ) -> None:
+        del key
+        self._splits, self.max_split = _uniform_splits_from_matrix(X, max_bins)
+
+    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:  # noqa: D102
+        return _bin_predictors(X, self._splits)
+
+
+class UniqueQuantileBinner(Binner):
+    """Binner with quantile-based cutpoints from observed unique values.
+
+    For each predictor, cutpoints are placed between sorted unique
+    values so that the empirical distribution is approximately uniform
+    across bins. The number of cutpoints is at most ``max_bins - 1``
+    and at most one less than the number of unique values, so different
+    predictors may end up with different effective cutpoint counts.
+    Trailing unused entries of the cutpoint matrix are padded with the
+    maximum value representable in the dtype of `X`.
+
+    Note: the quantiles are over the *unique* values, not over the
+    original distribution.
+
+    When ``n > max_subsample``, the predictor matrix is randomly thinned
+    along the observation axis to ``max_subsample`` columns before
+    quantilization. Each predictor row is thinned independently and
+    without replacement. This keeps quantilization tractable on very
+    large datasets at the cost of approximate quantiles.
+
+    Parameters
+    ----------
+    X
+        Training predictors with `p` predictors and `n` observations.
+    max_bins
+        The maximum number of bins per predictor.
+    max_subsample
+        The maximum number of observations to use when computing
+        quantiles. If `None`, no subsampling is performed. If `n`
+        exceeds this, `key` is required.
+    key
+        Random key for subsampling. Required when ``X.shape[1] >
+        max_subsample``; otherwise unused.
+
+    Raises
+    ------
+    ValueError
+        If subsampling would trigger but `key` is `None`.
+    """
+
+    _splits: Real[Array, 'p m']
+    """Cutpoints per predictor, padded on the right with the dtype's maximum value."""
+
+    max_split: UInt[Array, ' p']
+
+    def __init__(
+        self,
+        X: Real[Array, 'p n'],
+        *,
+        max_bins: int = 256,
+        max_subsample: int | None = 100_000,
+        key: Key[Array, ''] | None = None,
+    ) -> None:
+        if max_subsample is not None and X.shape[1] > max_subsample:
+            if key is None:
+                msg = (
+                    'UniqueQuantileBinner requires a `key` because '
+                    f'n={X.shape[1]} exceeds max_subsample={max_subsample}.'
+                )
+                raise ValueError(msg)
+            X = _subsample(key, X, max_subsample)
+        self._splits, self.max_split = _quantilized_splits_from_matrix(X, max_bins)
+
+    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:  # noqa: D102
+        return _bin_predictors(X, self._splits)
+
+
+class GivenSplitsBinner(Binner):
+    """Binner with cutpoints supplied directly in R BART `xinfo` format.
+
+    The cutpoints are taken verbatim from `xinfo`: a `(p, m)` matrix
+    whose rows hold per-predictor sorted cutpoints, with NaN-padded
+    trailing entries marking unused capacity. Internally NaNs are
+    replaced by the maximum representable value in the dtype of
+    `xinfo`, and `max_split` is set to the count of non-NaN entries
+    per row, so binning behaves as if the row had been declared with
+    only its non-NaN cutpoints.
+
+    Parameters
+    ----------
+    X
+        Training predictors. Used only to validate the shape of `xinfo`.
+    xinfo
+        A `(p, m)` matrix of cutpoints. Each row holds a sorted list of
+        cutpoints for one predictor, optionally padded on the right with
+        NaN.
+    key
+        Accepted for protocol uniformity; unused.
+
+    Raises
+    ------
+    ValueError
+        If `xinfo` is not 2D, or if its first dimension does not match
+        ``X.shape[0]``.
+    """
+
+    _splits: Float[Array, 'p m']
+    """Cutpoints per predictor, with NaNs replaced by the dtype's maximum value."""
+
+    max_split: UInt[Array, ' p']
+
+    def __init__(
+        self,
+        X: Real[Array, 'p n'],
+        *,
+        xinfo: Float[Array, 'p m'],
+        key: Key[Array, ''] | None = None,
+    ) -> None:
+        del key
+        if xinfo.ndim != 2 or xinfo.shape[0] != X.shape[0]:
+            msg = f'{xinfo.shape=} different from expected ({X.shape[0]}, *)'
+            raise ValueError(msg)
+        self._splits, self.max_split = _parse_xinfo(xinfo)
+
+    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:  # noqa: D102
+        return _bin_predictors(X, self._splits)
+
+
+@jit
+def _sigma2_from_ols(
+    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, ' n'] | Float32[Array, 'k n']
+) -> Float32[Array, ''] | Float32[Array, ' k']:
+    """Return the error variance estimated with OLS with intercept."""
+    x_centered = x_train.T - x_train.mean(axis=1)
+    y_centered = y_train.T - y_train.mean(axis=-1)
+    # centering is equivalent to adding an intercept column
+    _, chisq, rank, _ = jnp.linalg.lstsq(x_centered, y_centered)
+    chisq = chisq.reshape(y_train.shape[:-1])
+    dof = y_train.shape[-1] - rank
+    return chisq / dof
+
+
+@jit
+def _sigma2_from_cg(
+    x: Shaped[Array, 'p n'], y: Float32[Array, ' *k n'], maxiter: Integer[Array, '']
+) -> Float32[Array, ' *k']:
+    """Estimate the error variance using approximate OLS with cg for large-scale problems."""
+    # center both variables, and rescale x. centering is equivalent to adding
+    # an intercept term, while rescaling x does not change the result since we
+    # are returning something that depends on the residuals only
+    y -= y.mean(axis=-1, keepdims=True)
+    x -= x.mean(axis=-1, keepdims=True)
+    scale = x.std(axis=1, keepdims=True)
+    x /= jnp.where(scale, scale, 1.0)
+
+    # compute residuals
+    p, n = x.shape
+    if p <= n:
+        rhs: Float32[Array, ' p *k'] = x @ y.T
+        beta: Float32[Array, ' p *k'] = _cg_x_x_t(x, rhs, maxiter)
+        r: Float32[Array, ' n *k'] = y.T - x.T @ beta
+    else:
+        z: Float32[Array, ' n *k'] = _cg_x_x_t(x.T, y.T, maxiter)
+        r: Float32[Array, ' n *k'] = y.T - x.T @ (x @ z)
+
+    # estimate residual variance
+    return jnp.sum(jnp.square(r), axis=0) / (n - maxiter)
+
+
+def _cg_x_x_t(
+    x: Shaped[Array, 'p n'] | Shaped[Array, 'n p'],
+    rhs: Float32[Array, ' p *k'] | Float32[Array, ' n *k'],
+    maxiter: Integer[Array, ''],
+) -> Float32[Array, ' p *k'] | Float32[Array, ' n *k']:
+    """Solve (XX' + eps I) u = rhs."""
+    # check x is transposed to be a short matrix, and other properties
+    p, n = x.shape
+    assert p <= n
+    r1, *_ = rhs.shape
+    assert p == r1
+
+    # upper bound the max eigenvalue of XX' to determine epsilon
+    abs_x = jnp.abs(x)
+    max_eigv = jnp.max(abs_x @ (abs_x.T @ jnp.ones(p)))
+    eps = jnp.finfo(max_eigv.dtype).eps * p * max_eigv
+
+    # solve with vmapped cg
+    xxt = lambda rhs: x @ (x.T @ rhs) + eps * rhs
+    func = lambda rhs: cg(xxt, rhs, tol=0, maxiter=maxiter)
+    if rhs.ndim == 2:
+        func = vmap(func, in_axes=1, out_axes=1)
+    out, _ = func(rhs)
+    return out

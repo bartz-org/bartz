@@ -29,14 +29,12 @@ from contextlib import contextmanager
 from dataclasses import replace
 from operator import ge, le
 from os import getpid, kill
-from pathlib import Path
 from signal import SIGINT
 from threading import Event, Thread
 from time import monotonic
 from typing import Any
 
 import numpy as np
-import tomli
 from jax import numpy as jnp
 from jax import vmap
 from jax.scipy.linalg import solve_triangular
@@ -195,19 +193,6 @@ def assert_different_matrices(*args: ArrayLike, **kwargs: Any) -> None:
     default_kwargs: dict = dict(rtol=np.inf, atol=np.inf)
     default_kwargs.update(kwargs)
     assert_close_matrices(*args, negate=True, **default_kwargs)
-
-
-def get_old_python_str() -> str:
-    """Read the oldest supported Python from pyproject.toml."""
-    with Path('pyproject.toml').open('rb') as file:
-        return tomli.load(file)['project']['requires-python'].removeprefix('>=')
-
-
-def get_old_python_tuple() -> tuple[int, int]:
-    """Read the oldest supported Python from pyproject.toml as a tuple."""
-    ver_str = get_old_python_str()
-    major, minor = ver_str.split('.')
-    return int(major), int(minor)
 
 
 def multivariate_rhat(chains: Real[Array, 'chain sample dim']) -> Float[Array, '']:

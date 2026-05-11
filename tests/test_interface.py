@@ -34,7 +34,6 @@ from functools import partial
 from gc import collect
 from inspect import signature
 from io import StringIO
-from sys import version_info
 from typing import Any, Literal, NamedTuple
 from weakref import ReferenceType, ref
 
@@ -83,7 +82,6 @@ from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
-    get_old_python_tuple,
     multivariate_rhat,
     periodic_sigint,
     rhat,
@@ -1461,8 +1459,9 @@ def get_expect_sharded(kw: dict) -> bool:
 
 def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
     """Check that chains and data shards live on their own devices throughout the interface."""
-    if version_info[:2] == get_old_python_tuple() and variant in (2, 5):
-        pytest.xfail('Actual sharding bug in bartz with old jax, no time to fix.')
+    # WORKAROUND(jax<0.7): sharding bug, no time to fix
+    if jax.__version_info__ < (0, 7, 0) and variant in (2, 5):
+        pytest.xfail('Sharding bug in bartz with jax<0.7.')
     kw = bkw.kw
     bart = Bart(**kw)
 

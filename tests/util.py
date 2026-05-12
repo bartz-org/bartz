@@ -41,7 +41,7 @@ from jax.scipy.linalg import solve_triangular
 from jaxtyping import Array, ArrayLike, Float, Real
 from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
 from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
-from scipy import linalg
+from scipy import linalg, stats
 
 from bartz.grove import TreesTrace, check_trace, describe_error
 from bartz.jaxext import minimal_unsigned_dtype
@@ -353,3 +353,81 @@ def rhat(chains: Real[Array, 'chain sample']) -> Float[Array, '']:
     """
     chains = jnp.asarray(chains)
     return multivariate_rhat(chains[:, :, None])
+
+
+def rhat_rank(
+    data: ArrayLike, *, chain_axis: int = 0, draw_axis: int = 1
+) -> Float[np.ndarray, ' *leading']:
+    """Elementwise rank-normalized split-Rhat.
+
+    Port of ``arviz_stats.rhat`` with ``method='rank'``, the rank-normalized
+    folded split-Rhat of Vehtari et al. (2021),
+    https://arxiv.org/abs/1903.08008. Vectorized over the leading shape.
+
+    Parameters
+    ----------
+    data
+        Array of MCMC draws with chains along ``chain_axis`` and draws along
+        ``draw_axis``.
+    chain_axis
+    draw_axis
+        Axes of ``data`` indexing chains and draws. Default to the arviz
+        ``(chain, draw, ...)`` layout.
+
+    Returns
+    -------
+    Array with ``chain_axis`` and ``draw_axis`` of ``data`` removed; each entry
+    is the rank-normalized split-Rhat over the corresponding (chain, draw)
+    slice. NaNs in a slice propagate to ``nan`` in its Rhat.
+
+    Raises
+    ------
+    ValueError
+        If the chain dimension has fewer than 2 entries, or the draw dimension
+        fewer than 4.
+    """
+    ary = np.asarray(data, float)
+    ary = np.moveaxis(ary, (chain_axis, draw_axis), (-2, -1))
+    *_, n_chain, n_draw = ary.shape
+    if n_chain < 2 or n_draw < 4:
+        msg = (
+            f'need at least 2 chains and 4 draws, got {n_chain} chains and '
+            f'{n_draw} draws'
+        )
+        raise ValueError(msg)
+
+    split = _split_chains_v(ary)
+    rhat_bulk = _rhat_v(_z_scale_v(split))
+    folded = np.abs(split - np.median(split, axis=(-2, -1), keepdims=True))
+    rhat_tail = _rhat_v(_z_scale_v(folded))
+    return np.maximum(rhat_bulk, rhat_tail)
+
+
+def _split_chains_v(
+    ary: Float[np.ndarray, '*leading chain draw'],
+) -> Float[np.ndarray, '*leading two_chain half_draw']:
+    """Split each chain in half along the draw axis; stack along chain axis."""
+    half = ary.shape[-1] // 2
+    return np.concatenate([ary[..., :half], ary[..., -half:]], axis=-2)
+
+
+def _z_scale_v(
+    ary: Float[np.ndarray, '*leading chain draw'],
+) -> Float[np.ndarray, '*leading chain draw']:
+    """Rank-normalize jointly over the last two axes (chain, draw)."""
+    flat = ary.reshape(*ary.shape[:-2], -1)
+    rank = stats.rankdata(flat, method='average', axis=-1)
+    z = stats.norm.ppf((rank - 3 / 8) / (rank.shape[-1] + 1 / 4))
+    return z.reshape(ary.shape)
+
+
+def _rhat_v(
+    ary: Float[np.ndarray, '*leading chain draw'],
+) -> Float[np.ndarray, ' *leading']:
+    """Classic Gelman-Rubin Rhat reducing the last two ``(chain, draw)`` axes."""
+    n = ary.shape[-1]
+    chain_mean = ary.mean(axis=-1)
+    chain_var = ary.var(axis=-1, ddof=1)
+    between = n * chain_mean.var(axis=-1, ddof=1)
+    within = chain_var.mean(axis=-1)
+    return np.sqrt((between / within + n - 1) / n)

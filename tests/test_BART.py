@@ -43,6 +43,7 @@ from jax.scipy.special import logit, ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, Float32, Int32, Key, PyTree, Shaped, UInt
+from numpy.testing import assert_array_less
 from pytest_subtests import SubTests
 
 from bartz import Bart
@@ -79,6 +80,7 @@ from tests.util import (
     multivariate_rhat,
     periodic_sigint,
     rhat,
+    rhat_rank,
 )
 
 try:
@@ -1186,6 +1188,36 @@ def test_rhat(keys: split) -> None:
     rhat_divergent = multivariate_rhat(divergent_chains)
     assert rhat < 1.02
     assert rhat_divergent > 5
+
+
+def test_rhat_rank(keys: split) -> None:
+    """Test the rank-normalized split-Rhat port from arviz_stats."""
+    chains, divergent_chains = random.normal(keys.pop(), (2, 2, 1000, 10))
+    mean_offset = 10 * jnp.arange(len(chains))
+    divergent_chains += mean_offset[:, None, None]
+    rhat = rhat_rank(chains)
+    rhat_divergent = rhat_rank(divergent_chains)
+    assert rhat.shape == (10,)
+    assert rhat_divergent.shape == (10,)
+    assert_array_less(rhat, 1.01)
+    assert_array_less(1.3, rhat_divergent)
+
+
+def test_rhat_rank_axes(keys: split) -> None:
+    """Test ``rhat_rank`` honors ``chain_axis`` and ``draw_axis``."""
+    chains = random.normal(keys.pop(), (2, 1000, 5))
+    reference = rhat_rank(chains)
+    transposed = jnp.moveaxis(chains, (0, 1), (2, 0))
+    relocated = rhat_rank(transposed, chain_axis=2, draw_axis=0)
+    assert_allclose(relocated, reference, rtol=1e-12)
+
+
+def test_rhat_rank_shape_errors() -> None:
+    """Test ``rhat_rank`` rejects undersized chain/draw dimensions."""
+    with pytest.raises(ValueError, match='2 chains'):
+        rhat_rank(jnp.zeros((1, 200)))
+    with pytest.raises(ValueError, match='4 draws'):
+        rhat_rank(jnp.zeros((2, 3)))
 
 
 def test_jit(kw: dict[str, Any]) -> None:

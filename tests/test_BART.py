@@ -280,7 +280,7 @@ class TestWithCachedBart:  # pragma: slow
         )
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4)
 
-    def test_convergence(self, cachedbart: CachedBart) -> None:
+    def test_convergence(self, cachedbart: CachedBart, subtests: SubTests) -> None:
         """Run multiple chains and check convergence with rhat."""
         bart = cachedbart.bart
         nchains, _ = bart._mcmc_state.resid.shape
@@ -288,35 +288,35 @@ class TestWithCachedBart:  # pragma: slow
         kw = cachedbart.kwargs
         p, n = kw['x_train'].shape
 
-        yhat_train = bart.yhat_train.reshape(nchains, nsamples, n)
-        rhat_yhat_train = multivariate_rhat(yhat_train)
-        assert rhat_yhat_train < 6
-        print(f'{rhat_yhat_train.item()=}')
+        with subtests.test('yhat_train'):
+            yhat_train = bart.yhat_train.reshape(nchains, nsamples, n)
+            rhat_yhat_train = multivariate_rhat(yhat_train)
+            assert rhat_yhat_train < 6
 
         if get_with_default(kw, 'type') == 'pbart':  # binary regression
-            prob_train = bart.prob_train.reshape(nchains, nsamples, n)
-            rhat_prob_train = multivariate_rhat(prob_train)
-            assert rhat_prob_train < 1.2
-            print(f'{rhat_prob_train.item()=}')
+            with subtests.test('prob_train'):
+                prob_train = bart.prob_train.reshape(nchains, nsamples, n)
+                rhat_prob_train = multivariate_rhat(prob_train)
+                assert rhat_prob_train < 1.2
 
         else:  # continuous regression
-            sigma = bart.sigma[nsamples:, :].T
-            rhat_sigma = rhat(sigma)
-            assert rhat_sigma < 1.2
-            print(f'{rhat_sigma.item()=}')
+            with subtests.test('sigma'):
+                sigma = bart.sigma[nsamples:, :].T
+                rhat_sigma = rhat(sigma)
+                assert rhat_sigma < 1.2
 
         if p < n:
-            varcount = bart.varcount.reshape(nchains, nsamples, p)
-            rhat_varcount = multivariate_rhat(varcount)
-            assert rhat_varcount < 7
-            print(f'{rhat_varcount.item()=}')
+            with subtests.test('varcount'):
+                varcount = bart.varcount.reshape(nchains, nsamples, p)
+                rhat_varcount = multivariate_rhat(varcount)
+                assert rhat_varcount < 7
 
             if get_with_default(kw, 'sparse'):  # pragma: no branch
-                varprob = bart.varprob.reshape(nchains, nsamples, p)
-                rhat_varprob = multivariate_rhat(varprob[:, :, 1:])
-                # drop one component because varprob sums to 1
-                assert rhat_varprob < 7
-                print(f'{rhat_varprob.item()=}')
+                with subtests.test('varprob'):
+                    varprob = bart.varprob.reshape(nchains, nsamples, p)
+                    rhat_varprob = multivariate_rhat(varprob[:, :, 1:])
+                    # drop one component because varprob sums to 1
+                    assert rhat_varprob < 7
 
     def kw_bartz_to_BART3(self, key: Key[Array, ''], kw: dict, bart: mc_gbart) -> dict:
         """Convert bartz keyword arguments to R BART3 keyword arguments."""

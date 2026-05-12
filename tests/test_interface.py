@@ -492,7 +492,7 @@ class TestWithCachedBart:  # pragma: slow
         )
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4, reduce_rank=True)
 
-    def test_convergence(self, cachedbart: CachedBart) -> None:
+    def test_convergence(self, cachedbart: CachedBart, subtests: SubTests) -> None:
         """Run multiple chains and check convergence with rhat."""
         bart = cachedbart.bart
         bkw = cachedbart.bkw
@@ -501,54 +501,54 @@ class TestWithCachedBart:  # pragma: slow
         nsamples = bart.n_save
         binary = bkw.kw['outcome_type'] == 'binary'
 
-        yhat_train = bart.predict('train', kind='latent_samples')
-        yhat_train_chains = yhat_train.reshape(num_chains, nsamples, -1)
-        rhat_yhat_train = multivariate_rhat(yhat_train_chains)
-        assert rhat_yhat_train < 6
-        print(f'{rhat_yhat_train.item()=}')
+        with subtests.test('yhat_train'):
+            yhat_train = bart.predict('train', kind='latent_samples')
+            yhat_train_chains = yhat_train.reshape(num_chains, nsamples, -1)
+            rhat_yhat_train = multivariate_rhat(yhat_train_chains)
+            assert rhat_yhat_train < 6
 
         mixed = isinstance(bkw.kw['outcome_type'], list)
         if binary:
-            prob_train = bart.predict('train', kind='mean_samples')
-            prob_train_chains = prob_train.reshape(num_chains, nsamples, -1)
-            rhat_prob_train = multivariate_rhat(prob_train_chains)
-            assert rhat_prob_train < 1.2
-            print(f'{rhat_prob_train.item()=}')
+            with subtests.test('prob_train'):
+                prob_train = bart.predict('train', kind='mean_samples')
+                prob_train_chains = prob_train.reshape(num_chains, nsamples, -1)
+                rhat_prob_train = multivariate_rhat(prob_train_chains)
+                assert rhat_prob_train < 1.2
         elif mixed:
-            # mixed regression: check get_error_sdev, dropping binary
-            # components (NaN sdev)
-            with debug_nans(False):
-                sigma = bart.get_error_sdev().reshape(num_chains, nsamples, -1)
-                binary_mask = bart._binary_mask
-                if binary_mask.ndim > 0:  # pragma: no branch, always on in mv variants
-                    sigma = sigma[:, :, ~binary_mask]
-            rhat_sigma = multivariate_rhat(sigma)
-            assert rhat_sigma < 1.2
-            print(f'{rhat_sigma.item()=}')
+            with subtests.test('sigma'):
+                # mixed regression: check get_error_sdev, dropping binary
+                # components (NaN sdev)
+                with debug_nans(False):
+                    sigma = bart.get_error_sdev().reshape(num_chains, nsamples, -1)
+                    binary_mask = bart._binary_mask
+                    if binary_mask.ndim > 0:  # pragma: no branch, always on in mv variants
+                        sigma = sigma[:, :, ~binary_mask]
+                rhat_sigma = multivariate_rhat(sigma)
+                assert rhat_sigma < 1.2
         else:
-            # all continuous: check full precision matrix convergence
-            # using upper triangular elements (matrix is symmetric)
-            error_cov_inv = bart._main_trace.error_cov_inv
-            if error_cov_inv.ndim == 2:  # pragma: no cover, only mv by default
-                error_cov_inv = error_cov_inv[:, :, None, None]
-            _, _, k, _ = error_cov_inv.shape
-            ti, tj = jnp.triu_indices(k)
-            error_cov_inv = error_cov_inv[:, :, ti, tj]
-            rhat_prec = multivariate_rhat(error_cov_inv)
-            assert rhat_prec < 1.2
-            print(f'{rhat_prec.item()=}')
+            with subtests.test('error_cov_inv'):
+                # all continuous: check full precision matrix convergence
+                # using upper triangular elements (matrix is symmetric)
+                error_cov_inv = bart._main_trace.error_cov_inv
+                if error_cov_inv.ndim == 2:  # pragma: no cover, only mv by default
+                    error_cov_inv = error_cov_inv[:, :, None, None]
+                _, _, k, _ = error_cov_inv.shape
+                ti, tj = jnp.triu_indices(k)
+                error_cov_inv = error_cov_inv[:, :, ti, tj]
+                rhat_prec = multivariate_rhat(error_cov_inv)
+                assert rhat_prec < 1.2
 
         if p < n:
-            varcount_vals = bart.varcount.reshape(num_chains, nsamples, p)
-            rhat_varcount = multivariate_rhat(varcount_vals)
-            assert rhat_varcount < 7
-            print(f'{rhat_varcount.item()=}')
+            with subtests.test('varcount'):
+                varcount_vals = bart.varcount.reshape(num_chains, nsamples, p)
+                rhat_varcount = multivariate_rhat(varcount_vals)
+                assert rhat_varcount < 7
 
             if bkw.kw.get('sparse', False):  # pragma: no branch
-                varprob_vals = bart.varprob.reshape(num_chains, nsamples, p)
-                rhat_varprob = multivariate_rhat(varprob_vals[:, :, 1:])
-                assert rhat_varprob < 7
-                print(f'{rhat_varprob.item()=}')
+                with subtests.test('varprob'):
+                    varprob_vals = bart.varprob.reshape(num_chains, nsamples, p)
+                    rhat_varprob = multivariate_rhat(varprob_vals[:, :, 1:])
+                    assert rhat_varprob < 7
 
     def test_different_chains(self, cachedbart: CachedBart) -> None:
         """Check that different chains give different results."""

@@ -356,9 +356,13 @@ def rhat(chains: Real[Array, 'chain sample']) -> Float[Array, '']:
 
 
 def rhat_rank(
-    data: ArrayLike, *, chain_axis: int = 0, draw_axis: int = 1
+    data: ArrayLike,
+    *,
+    split: bool,
+    chain_axis: int = 0,
+    draw_axis: int = 1,
 ) -> Float[np.ndarray, ' *leading']:
-    """Elementwise rank-normalized split-Rhat.
+    """Elementwise rank-normalized (split-)Rhat.
 
     Port of ``arviz_stats.rhat`` with ``method='rank'``, the rank-normalized
     folded split-Rhat of Vehtari et al. (2021),
@@ -369,6 +373,11 @@ def rhat_rank(
     data
         Array of MCMC draws with chains along ``chain_axis`` and draws along
         ``draw_axis``.
+    split
+        If True, split each chain in half along the draw axis before computing
+        Rhat (the standard rank-normalized split-Rhat). If False, skip the
+        split step and compute the rank-normalized Rhat on the chains as
+        given.
     chain_axis
     draw_axis
         Axes of ``data`` indexing chains and draws. Default to the arviz
@@ -377,28 +386,29 @@ def rhat_rank(
     Returns
     -------
     Array with ``chain_axis`` and ``draw_axis`` of ``data`` removed; each entry
-    is the rank-normalized split-Rhat over the corresponding (chain, draw)
+    is the rank-normalized (split-)Rhat over the corresponding (chain, draw)
     slice. NaNs in a slice propagate to ``nan`` in its Rhat.
 
     Raises
     ------
     ValueError
         If the chain dimension has fewer than 2 entries, or the draw dimension
-        fewer than 4.
+        has fewer than 4 (with ``split=True``) or 2 (with ``split=False``).
     """
     ary = np.asarray(data, float)
     ary = np.moveaxis(ary, (chain_axis, draw_axis), (-2, -1))
     *_, n_chain, n_draw = ary.shape
-    if n_chain < 2 or n_draw < 4:
+    min_draw = 4 if split else 2
+    if n_chain < 2 or n_draw < min_draw:
         msg = (
-            f'need at least 2 chains and 4 draws, got {n_chain} chains and '
-            f'{n_draw} draws'
+            f'need at least 2 chains and {min_draw} draws, got {n_chain} '
+            f'chains and {n_draw} draws'
         )
         raise ValueError(msg)
 
-    split = _split_chains_v(ary)
-    rhat_bulk = _rhat_v(_z_scale_v(split))
-    folded = np.abs(split - np.median(split, axis=(-2, -1), keepdims=True))
+    prepared = _split_chains_v(ary) if split else ary
+    rhat_bulk = _rhat_v(_z_scale_v(prepared))
+    folded = np.abs(prepared - np.median(prepared, axis=(-2, -1), keepdims=True))
     rhat_tail = _rhat_v(_z_scale_v(folded))
     return np.maximum(rhat_bulk, rhat_tail)
 

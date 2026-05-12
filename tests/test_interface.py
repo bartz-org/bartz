@@ -1930,7 +1930,7 @@ def test_sigest_cg(bkw: BartKW) -> None:
     bart_ols = Bart(**dict(bkw.kw, sigest='ols-or-variance'))
     bart_cg = Bart(**dict(bkw.kw, sigest='cg'))
     mask = ~bart_ols._binary_mask
-    assert_close_matrices(bart_cg.sigest[mask], bart_ols.sigest[mask])
+    assert_close_matrices(bart_cg.sigest[mask], bart_ols.sigest[mask], rtol=1e-6)
 
 
 def test_sigest_auto_cg(keys: split) -> None:

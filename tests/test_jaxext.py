@@ -52,7 +52,6 @@ from jax import numpy as jnp
 from jax.scipy.special import ndtri
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import Array, Float, Float32, Key, Shaped
-from numpy.testing import assert_allclose, assert_array_equal
 from pytest_subtests import SubTests
 from scipy.stats import invgamma as scipy_invgamma
 from scipy.stats import ks_1samp, truncnorm
@@ -61,7 +60,7 @@ from bartz import jaxext
 from bartz.jaxext import equal_shards, split
 from bartz.jaxext.scipy.special import ndtri as patched_ndtri
 from bartz.jaxext.scipy.stats import invgamma
-from tests.util import assert_close_matrices
+from tests.util import assert_allclose, assert_array_equal, assert_close_matrices
 
 
 class TestUnique:
@@ -71,7 +70,7 @@ class TestUnique:
         """Check that it's equivalent to sort if no values are repeated."""
         x = jnp.arange(10)[::-1]
         out, length = jaxext.unique(x, x.size, 666)
-        numpy.testing.assert_array_equal(jnp.sort(x), out)
+        assert_array_equal(jnp.sort(x), out)
         assert out.dtype == x.dtype
         assert length == x.size
 
@@ -79,7 +78,7 @@ class TestUnique:
         """Check that the trailing fill value is used correctly."""
         x = jnp.ones(10)
         out, length = jaxext.unique(x, x.size, 666)
-        numpy.testing.assert_array_equal([1] + 9 * [666], out)
+        assert_array_equal(jnp.asarray([1.0] + 9 * [666.0]), out)
         assert out.dtype == x.dtype
         assert length == 1
 
@@ -87,7 +86,7 @@ class TestUnique:
         """Check that the function works on empty input."""
         x = jnp.array([])
         out, length = jaxext.unique(x, 2, 666)
-        numpy.testing.assert_array_equal([666, 666], out)
+        assert_array_equal(jnp.asarray([666.0, 666.0]), out)
         assert out.dtype == x.dtype
         assert length == 0
 
@@ -95,7 +94,7 @@ class TestUnique:
         """Check that the function works if the output is forced to be empty."""
         x = jnp.array([1, 1, 1])
         out, length = jaxext.unique(x, 0, 666)
-        numpy.testing.assert_array_equal([], out)
+        assert_array_equal(jnp.zeros(0, dtype=x.dtype), out)
         assert out.dtype == x.dtype
         assert length == 0
 

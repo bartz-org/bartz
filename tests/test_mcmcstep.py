@@ -49,7 +49,6 @@ from jaxtyping import (
     UInt32,
     jaxtyped,
 )
-from numpy.testing import assert_allclose, assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
 from scipy import stats
@@ -79,7 +78,12 @@ from bartz.mcmcstep._step import (
     step_trees,
     step_z,
 )
-from tests.util import assert_close_matrices, manual_tree
+from tests.util import (
+    assert_allclose,
+    assert_array_equal,
+    assert_close_matrices,
+    manual_tree,
+)
 
 
 class VarTreeData(NamedTuple):
@@ -209,7 +213,7 @@ class TestAncestorVariables:
         result = ancestor_variables(var_tree, max_split, jnp.int32(1))
         # var_tree size=4 -> tree_depth=2 -> max_num_ancestors=1
         # All slots should be p (sentinel) since root has no ancestors
-        assert_array_equal(result, [max_split.size])
+        assert_array_equal(result, [max_split.size], strict=False)
 
     def test_child_of_root(self, depth2_tree: VarTreeData) -> None:
         """Check that children of root have one ancestor (the root's variable)."""
@@ -218,11 +222,11 @@ class TestAncestorVariables:
         # Left child of root (index 2): ancestor is root (var=2)
         result = ancestor_variables(var_tree, max_split, jnp.int32(2))
         assert result.shape == (1,)
-        assert_array_equal(result, [2])
+        assert_array_equal(result, [2], strict=False)
 
         # Right child of root (index 3): ancestor is root (var=2)
         result = ancestor_variables(var_tree, max_split, jnp.int32(3))
-        assert_array_equal(result, [2])
+        assert_array_equal(result, [2], strict=False)
 
     def test_deep_node(self, depth3_tree: VarTreeData) -> None:
         """Check ancestors for nodes at depth 3."""
@@ -231,19 +235,19 @@ class TestAncestorVariables:
         # Node 4: parent is 2 (var=2), grandparent is 1 (var=3)
         result = ancestor_variables(var_tree, max_split, jnp.int32(4))
         assert result.shape == (2,)
-        assert_array_equal(result, [3, 2])
+        assert_array_equal(result, [3, 2], strict=False)
 
         # Node 5: parent is 2 (var=2), grandparent is 1 (var=3)
         result = ancestor_variables(var_tree, max_split, jnp.int32(5))
-        assert_array_equal(result, [3, 2])
+        assert_array_equal(result, [3, 2], strict=False)
 
         # Node 6: parent is 3 (var=1), grandparent is 1 (var=3)
         result = ancestor_variables(var_tree, max_split, jnp.int32(6))
-        assert_array_equal(result, [3, 1])
+        assert_array_equal(result, [3, 1], strict=False)
 
         # Node 7: parent is 3 (var=1), grandparent is 1 (var=3)
         result = ancestor_variables(var_tree, max_split, jnp.int32(7))
-        assert_array_equal(result, [3, 1])
+        assert_array_equal(result, [3, 1], strict=False)
 
     def test_intermediate_node(self, depth3_tree: VarTreeData) -> None:
         """Check ancestors for an intermediate (non-leaf) node."""
@@ -251,11 +255,11 @@ class TestAncestorVariables:
 
         # Node 2: parent is 1 (var=3), one slot filled, one sentinel
         result = ancestor_variables(var_tree, max_split, jnp.int32(2))
-        assert_array_equal(result, [max_split.size, 3])
+        assert_array_equal(result, [max_split.size, 3], strict=False)
 
         # Node 3: parent is 1 (var=3), one slot filled, one sentinel
         result = ancestor_variables(var_tree, max_split, jnp.int32(3))
-        assert_array_equal(result, [max_split.size, 3])
+        assert_array_equal(result, [max_split.size, 3], strict=False)
 
     def test_single_variable(self) -> None:
         """Check with only one variable (p=1)."""
@@ -267,11 +271,11 @@ class TestAncestorVariables:
 
         # Node 2: ancestor is root (var=0)
         result = ancestor_variables(var_tree, max_split, jnp.int32(2))
-        assert_array_equal(result, [0])
+        assert_array_equal(result, [0], strict=False)
 
         # Root has no ancestors
         result = ancestor_variables(var_tree, max_split, jnp.int32(1))
-        assert_array_equal(result, [max_split.size])
+        assert_array_equal(result, [max_split.size], strict=False)
 
     def test_type_edge(self, depth3_tree: VarTreeData) -> None:
         """Check that types are handled correctly when using uint8 and uint16 together."""
@@ -282,11 +286,11 @@ class TestAncestorVariables:
 
         # Node 2: parent is 1 (var=3), one slot filled, one sentinel
         result = ancestor_variables(var_tree, max_split, jnp.int32(2))
-        assert_array_equal(result, [max_split.size, 3])
+        assert_array_equal(result, [max_split.size, 3], strict=False)
 
         # Node 3: parent is 1 (var=3), one slot filled, one sentinel
         result = ancestor_variables(var_tree, max_split, jnp.int32(3))
-        assert_array_equal(result, [max_split.size, 3])
+        assert_array_equal(result, [max_split.size, 3], strict=False)
 
 
 class TestRandintExclude:

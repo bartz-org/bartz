@@ -31,7 +31,6 @@ from functools import partial
 import pytest
 from jax import Array, debug_infs, random
 from jax import numpy as jnp
-from numpy.testing import assert_array_equal
 
 from bartz.jaxext import split
 from bartz.prepcovars import (
@@ -47,7 +46,7 @@ from bartz.prepcovars import (
     _subsample,
     _uniform_splits_from_matrix,
 )
-from tests.util import assert_close_matrices
+from tests.util import assert_array_equal, assert_close_matrices
 
 
 class TestQuantilizer:
@@ -63,20 +62,20 @@ class TestQuantilizer:
             x = jnp.array([[1, 1, 3, 3], [1, 3, 3, 5], [1, 3, 5, 7]], fill_value.dtype)
             splits, _ = _quantilized_splits_from_matrix(x, 100)
         expected_splits = [[2, fill_value, fill_value], [2, 4, fill_value], [2, 4, 6]]
-        assert_array_equal(splits, expected_splits)
+        assert_array_equal(splits, expected_splits, strict=False)
 
     def test_max_splits(self) -> None:
         """Check that the number of splits per predictor is counted correctly."""
         x = jnp.array([[1, 1, 1, 1], [4, 4, 1, 1], [2, 1, 3, 2], [1, 4, 2, 3]])
         _, max_split = _quantilized_splits_from_matrix(x, 100)
-        assert_array_equal(max_split, jnp.arange(4))
+        assert_array_equal(max_split, jnp.arange(4), strict=False)
 
     def test_integer_splits_overflow(self) -> None:
         """Check that the splits are computed correctly at the limit of overflow."""
         x = jnp.array([[-(2**31), 2**31 - 2]])
         splits, _ = _quantilized_splits_from_matrix(x, 100)
         expected_splits = [[-1]]
-        assert_array_equal(splits, expected_splits)
+        assert_array_equal(splits, expected_splits, strict=False)
 
     @pytest.mark.parametrize('dtype', [int, float])
     def test_splits_type(self, dtype: type) -> None:
@@ -106,13 +105,13 @@ class TestQuantilizer:
         x = jnp.arange(10)[None, :]
         splits, _ = _quantilized_splits_from_matrix(x, 100)
         b = _bin_predictors(x, splits)
-        assert_array_equal(x, b)
+        assert_array_equal(x, b, strict=False)
 
     def test_one_value(self) -> None:
         """Check there's only 1 bin (0 splits) if there is 1 datapoint."""
         x = jnp.arange(10)[:, None]
         _, max_split = _quantilized_splits_from_matrix(x, 100)
-        assert_array_equal(max_split, jnp.full(len(x), 0))
+        assert_array_equal(max_split, jnp.full(len(x), 0), strict=False)
 
     def test_zero_values(self) -> None:
         """Check what happens when no binning is possible."""
@@ -316,7 +315,7 @@ def test_binner_left_boundary() -> None:
 
     x = jnp.array([[0, 1]])
     b = _bin_predictors(x, splits)
-    assert_array_equal(b, [[0, 0]])
+    assert_array_equal(b, [[0, 0]], strict=False)
 
 
 def test_binner_right_boundary() -> None:
@@ -325,7 +324,7 @@ def test_binner_right_boundary() -> None:
 
     x = jnp.array([[2**31 - 1]])
     b = _bin_predictors(x, splits)
-    assert_array_equal(b, [[3]])
+    assert_array_equal(b, [[3]], strict=False)
 
 
 class TestSigma2Estimates:

@@ -35,13 +35,13 @@ from jax import numpy as jnp
 from jax.sharding import AxisType, PartitionSpec
 from jax.tree_util import KeyPath
 from jaxtyping import Array, Float32, UInt8
-from numpy.testing import assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz.jaxext import get_default_device, split
 from bartz.mcmcloop import BurninTrace, MainTrace, run_mcmc
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._state import chain_vmap_axes
+from tests.util import assert_array_equal
 
 
 def gen_data(

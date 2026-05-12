@@ -250,6 +250,8 @@ banned-from = ["jax.random", "jax.lax", "jax.numpy", "jax.tree"]
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "jax.lax.reciprocal".msg = "Use jnp.reciprocal"
 "jax.random.PRNGKey".msg = "User jax.random.key"
+"numpy.testing.assert_allclose".msg = "Use tests.util.assert_allclose (zero default tolerances)."
+"numpy.testing.assert_array_equal".msg = "Use tests.util.assert_array_equal (strict=True default)."
 
 [tool.pydoclint]
 arg-type-hints-in-signature = true

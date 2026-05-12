@@ -43,7 +43,6 @@ from jax.scipy.special import logit, ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, Float32, Int32, Key, PyTree, Shaped, UInt
-from numpy.testing import assert_allclose, assert_array_equal
 from pytest_subtests import SubTests
 
 from bartz import Bart
@@ -73,6 +72,8 @@ from tests.conftest import get_disable_problematic_sharding
 from tests.test_interface import BartKW, gen_X, gen_y, make_kw
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
+    assert_allclose,
+    assert_array_equal,
     assert_close_matrices,
     assert_different_matrices,
     multivariate_rhat,
@@ -699,8 +700,8 @@ class TestVarprobAttr:
         with debug_nans(False):
             xinfo = jnp.array([[jnp.nan], [0]])
         bart = mc_gbart(x_train=X, y_train=y, xinfo=xinfo, seed=keys.pop())
-        assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1])
-        assert_array_equal(bart.varprob_mean, [0, 1])
+        assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1], strict=False)
+        assert_array_equal(bart.varprob_mean, [0, 1], strict=False)
         assert jnp.all(bart.varprob_mean == bart.varprob)
 
 
@@ -876,8 +877,8 @@ def test_no_datapoints(kw: dict[str, Any]) -> None:
     )
 
     # check the likelihood ratio is always 1
-    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
-    assert_array_equal(bart._main_trace.log_likelihood, 0.0)
+    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
+    assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
 
 
 def test_one_datapoint(kw: dict[str, Any]) -> None:
@@ -916,8 +917,8 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
     )
 
     # check the likelihood ratio is always 1
-    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
-    assert_array_equal(bart._main_trace.log_likelihood, 0.0)
+    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
+    assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
 
 
 def test_two_datapoints(kw: dict[str, Any]) -> None:
@@ -978,7 +979,7 @@ def test_xinfo() -> None:
 
     xinfo_wo_nan = jnp.where(jnp.isnan(xinfo), jnp.finfo(jnp.float32).max, xinfo)
     assert_array_equal(bart._splits, xinfo_wo_nan)
-    assert_array_equal(bart._mcmc_state.forest.max_split, [2, 3, 0])
+    assert_array_equal(bart._mcmc_state.forest.max_split, [2, 3, 0], strict=False)
 
 
 def test_xinfo_wrong_p() -> None:
@@ -1102,8 +1103,8 @@ def run_bart_like_prior(
     bart = mc_gbart(**kw)
 
     with subtests.test('likelihood ratio = 1'):
-        assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
-        assert_array_equal(bart._main_trace.log_likelihood, 0.0)
+        assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
+        assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
 
     return bart
 

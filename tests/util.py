@@ -39,6 +39,8 @@ from jax import numpy as jnp
 from jax import vmap
 from jax.scipy.linalg import solve_triangular
 from jaxtyping import Array, ArrayLike, Float, Real
+from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
+from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
 from scipy import linalg
 
 from bartz.grove import TreesTrace, check_trace, describe_error
@@ -193,6 +195,25 @@ def assert_different_matrices(*args: ArrayLike, **kwargs: Any) -> None:
     default_kwargs: dict = dict(rtol=np.inf, atol=np.inf)
     default_kwargs.update(kwargs)
     assert_close_matrices(*args, negate=True, **default_kwargs)
+
+
+def assert_allclose(
+    actual: ArrayLike,
+    desired: ArrayLike,
+    *,
+    rtol: float = 0.0,
+    atol: float = 0.0,
+    **kwargs: Any,
+) -> None:
+    """Wrap `numpy.testing.assert_allclose` with zero default tolerances."""
+    _np_assert_allclose(actual, desired, rtol=rtol, atol=atol, **kwargs)
+
+
+def assert_array_equal(
+    actual: ArrayLike, desired: ArrayLike, *, strict: bool = True, **kwargs: Any
+) -> None:
+    """Wrap `numpy.testing.assert_array_equal` with `strict=True` default."""
+    _np_assert_array_equal(actual, desired, strict=strict, **kwargs)
 
 
 def multivariate_rhat(chains: Real[Array, 'chain sample dim']) -> Float[Array, '']:

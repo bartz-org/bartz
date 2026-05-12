@@ -57,7 +57,6 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, Float32, Int32, Key, PyTree, Real, Shaped, UInt
-from numpy.testing import assert_allclose, assert_array_equal
 from pytest import FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
 
@@ -80,6 +79,8 @@ from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileB
 from tests.conftest import get_disable_problematic_sharding
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
+    assert_allclose,
+    assert_array_equal,
     assert_close_matrices,
     assert_different_matrices,
     multivariate_rhat,
@@ -852,8 +853,8 @@ class TestVarprobAttr:
             binner=partial(GivenSplitsBinner, xinfo=xinfo),
             seed=keys.pop(),
         )
-        assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1])
-        assert_array_equal(bart.varprob_mean, [0, 1])
+        assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1], strict=False)
+        assert_array_equal(bart.varprob_mean, [0, 1], strict=False)
         assert jnp.all(bart.varprob_mean == bart.varprob)
 
 
@@ -1011,7 +1012,7 @@ def test_no_datapoints(bkw: BartKW) -> None:
     k = kw['y_train'].shape[:-1]  # () or (k,)
     assert bart.predict('train', kind='latent_samples').shape == (ndpost, *k, 0)
 
-    assert_array_equal(bart.offset, 0)  # compare against jnp.zeros with strict=True
+    assert_array_equal(bart.offset, jnp.zeros_like(bart.offset))
     outcome_type = kw['outcome_type']
     if outcome_type == 'binary':
         tau_num = 3
@@ -1023,15 +1024,21 @@ def test_no_datapoints(bkw: BartKW) -> None:
         assert_array_equal(bart.sigest, expected_sigest)
     else:
         tau_num = 1
-        assert_array_equal(bart.sigest, 1)  # compare against jnp.ones with strict=True
+        assert_array_equal(bart.sigest, jnp.ones_like(bart.sigest))
     expected_cov_inv = jnp.float32((2**2 * kw['num_trees']) / tau_num**2)
     leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv
     if leaf_prior_cov_inv.ndim == 2:  # pragma: no branch, always mv with defaults
         expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
     assert_close_matrices(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
 
-    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
-    assert_array_equal(bart._main_trace.log_likelihood, 0.0)
+    assert_array_equal(
+        bart._burnin_trace.log_likelihood,
+        jnp.zeros_like(bart._burnin_trace.log_likelihood),
+    )
+    assert_array_equal(
+        bart._main_trace.log_likelihood,
+        jnp.zeros_like(bart._main_trace.log_likelihood),
+    )
 
 
 def test_one_datapoint(bkw: BartKW) -> None:
@@ -1135,7 +1142,7 @@ def test_xinfo() -> None:
 
     xinfo_wo_nan = jnp.where(jnp.isnan(xinfo), jnp.finfo(jnp.float32).max, xinfo)
     assert_array_equal(bart._binner._splits, xinfo_wo_nan)
-    assert_array_equal(bart._mcmc_state.forest.max_split, [2, 3, 0])
+    assert_array_equal(bart._mcmc_state.forest.max_split, [2, 3, 0], strict=False)
 
 
 def test_xinfo_wrong_p() -> None:
@@ -1242,8 +1249,14 @@ def run_bart_like_prior(
     )
 
     with subtests.test('likelihood ratio = 1'):
-        assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
-        assert_array_equal(bart._main_trace.log_likelihood, 0.0)
+        assert_array_equal(
+            bart._burnin_trace.log_likelihood,
+            jnp.zeros_like(bart._burnin_trace.log_likelihood),
+        )
+        assert_array_equal(
+            bart._main_trace.log_likelihood,
+            jnp.zeros_like(bart._main_trace.log_likelihood),
+        )
 
     return bart
 

@@ -203,9 +203,6 @@ def make_gbart_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
     return bart_kw_to_mc_gbart(make_kw(key, variant))
 
 
-N_VARIANTS = 3
-
-
 @pytest.fixture(
     params=[
         1,
@@ -243,8 +240,8 @@ class TestWithCachedBart:  # pragma: slow
         # create a random seed that depends only on the variant, since this
         # fixture is shared between multiple tests
         key = random.key(0x139CD0C0)
-        keys = random.split(key, N_VARIANTS)
-        key = keys[variant - 1]
+        keys = random.split(key, 10)  # 10 is just some high number
+        key = keys[variant]
         kw = make_gbart_kw(key, variant)
 
         # modify configs to make them appropriate for convergence checks and R

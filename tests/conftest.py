@@ -24,12 +24,15 @@
 
 """Pytest configuration."""
 
+import sys
 from contextlib import nullcontext
+from pathlib import Path
 from re import fullmatch
 
 import jax
 import numpy as np
 import pytest
+import tomli
 from jax import config, random
 
 from bartz.jaxext import get_default_device, split
@@ -42,6 +45,16 @@ def get_disable_problematic_sharding() -> bool:
     return DISABLE_PROBLEMATIC_SHARDING
 
 
+def get_old_python_version() -> tuple[int, int]:
+    """Return the minimum Python version required by pyproject.toml as (major, minor)."""
+    pyproject = Path(__file__).parent.parent / 'pyproject.toml'
+    with pyproject.open('rb') as f:
+        data = tomli.load(f)
+    spec = data['project']['requires-python'].strip()
+    match = fullmatch(r'>=\s*(\d+)\.(\d+)', spec)
+    return (int(match.group(1)), int(match.group(2)))
+
+
 INVASIVE_DEBUG_CHECKS = False
 if INVASIVE_DEBUG_CHECKS:
     # they make the tests 10% slower, disable buffer donation, and yield some
@@ -50,16 +63,17 @@ if INVASIVE_DEBUG_CHECKS:
     config.update('jax_debug_nans', True)
     config.update('jax_debug_infs', True)
 config.update('jax_legacy_prng_key', 'error')
-if jax.__version_info__ >= (0, 9, 0):
-    config.update('jax_check_static_indices', True)
+if jax.__version_info__ >= (0, 8, 0):
     config.update('jax_explicit_x64_dtypes', 'error')
+if jax.__version_info__ >= (0, 8, 2):
+    config.update('jax_check_static_indices', True)
 
 # enable logging arrays destroyed by the gc
 config.update('jax_array_garbage_collection_guard', 'log')
 
 # enable compilation cache
-if jax.__version_info__ >= (0, 9, 0):
-    # enable only on latest jax because `make tests-old` fails if there is a
+if sys.version_info[:2] > get_old_python_version():
+    # enable only on latest config because `make tests-old` fails if there is a
     # cache created with a newer jax version
     config.update('jax_compilation_cache_dir', 'config/jax_cache')
     config.update('jax_persistent_cache_min_entry_size_bytes', -1)

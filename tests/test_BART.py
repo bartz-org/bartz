@@ -428,16 +428,18 @@ class TestWithCachedBart:  # pragma: slow
         else:  # continuous regression
             with subtests.test('yhat_train_mean'):
                 assert_close_matrices(
-                    bart.yhat_train_mean,
-                    rbart.yhat_train_mean.astype(numpy.float32),
-                    rtol=0.8,
+                    bart.yhat_train_mean - rbart.yhat_train_mean.astype(numpy.float32),
+                    jnp.concatenate([bart.yhat_train, rbart.yhat_train]).std(axis=0),
+                    tozero=True,
+                    rtol=0.3,
                 )
 
             with subtests.test('yhat_test_mean'):
                 assert_close_matrices(
-                    bart.yhat_test_mean,
-                    rbart.yhat_test_mean.astype(numpy.float32),
-                    rtol=0.9,
+                    bart.yhat_test_mean - rbart.yhat_test_mean.astype(numpy.float32),
+                    jnp.concatenate([bart.yhat_test, rbart.yhat_test]).std(axis=0),
+                    tozero=True,
+                    rtol=0.3,
                 )
 
             with subtests.test('sigma'):

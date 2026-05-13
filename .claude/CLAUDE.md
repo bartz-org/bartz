@@ -27,7 +27,6 @@ To check the code you write:
 - `make lint`
 - `make setup`
     - this is needed before running any tests
-    - pre-commit may complain during this if you are in a worktree, ignore that
 - run the unit tests relevant to your code changes with `uv run pytest ...`
     - not all tests right away because the full test suite takes a long time to run
     - when running multiple tests, the output may be long; pipe the output to a scratch file to be read afterwards

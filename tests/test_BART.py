@@ -291,32 +291,32 @@ class TestWithCachedBart:  # pragma: slow
         with subtests.test('yhat_train'):
             yhat_train = bart.yhat_train.reshape(nchains, nsamples, n)
             rhat_yhat_train = rhat_rank(yhat_train, split=True)
-            assert_array_less(rhat_yhat_train, 6)
+            assert_array_less(rhat_yhat_train, 1.1)
 
         if get_with_default(kw, 'type') == 'pbart':  # binary regression
             with subtests.test('prob_train'):
                 prob_train = bart.prob_train.reshape(nchains, nsamples, n)
                 rhat_prob_train = rhat_rank(prob_train, split=True)
-                assert_array_less(rhat_prob_train, 1.2)
+                assert_array_less(rhat_prob_train, 1.01)
 
         else:  # continuous regression
             with subtests.test('sigma'):
                 sigma = bart.sigma[nsamples:, :].T
                 rhat_sigma = rhat_rank(sigma, split=True)
-                assert rhat_sigma < 1.2
+                assert_array_less(rhat_sigma, 1.01)
 
         if p < n:
             with subtests.test('varcount'):
                 varcount = bart.varcount.reshape(nchains, nsamples, p)
                 rhat_varcount = rhat_rank(varcount, split=True)
-                assert_array_less(rhat_varcount, 7)
+                assert_array_less(rhat_varcount, 1.8)
 
             if get_with_default(kw, 'sparse'):  # pragma: no branch
                 with subtests.test('varprob'):
                     varprob = bart.varprob.reshape(nchains, nsamples, p)
                     rhat_varprob = rhat_rank(varprob[:, :, 1:], split=True)
                     # drop one component because varprob sums to 1
-                    assert_array_less(rhat_varprob, 7)
+                    assert_array_less(rhat_varprob, 1.7)
 
     def kw_bartz_to_BART3(self, key: Key[Array, ''], kw: dict, bart: mc_gbart) -> dict:
         """Convert bartz keyword arguments to R BART3 keyword arguments."""
@@ -409,24 +409,24 @@ class TestWithCachedBart:  # pragma: slow
             rhat_yhat_train = rhat_rank(
                 [bart.yhat_train, rbart.yhat_train], split=False
             )
-            assert_array_less(rhat_yhat_train, 3.5)
+            assert_array_less(rhat_yhat_train, 1.05)
 
         with subtests.test('yhat_test'):
             rhat_yhat_test = rhat_rank([bart.yhat_test, rbart.yhat_test], split=False)
-            assert_array_less(rhat_yhat_test, 3.5)
+            assert_array_less(rhat_yhat_test, 1.05)
 
         if get_with_default(kw, 'type') == 'pbart':  # binary regression
             with subtests.test('prob_train'):
                 rhat_prob_train = rhat_rank(
                     [bart.prob_train, rbart.prob_train], split=False
                 )
-                assert_array_less(rhat_prob_train, 1.2)
+                assert_array_less(rhat_prob_train, 1.01)
 
             with subtests.test('prob_test'):
                 rhat_prob_test = rhat_rank(
                     [bart.prob_test, rbart.prob_test], split=False
                 )
-                assert_array_less(rhat_prob_test, 1.2)
+                assert_array_less(rhat_prob_test, 1.01)
 
         else:  # continuous regression
             with subtests.test('yhat_train_mean'):
@@ -448,7 +448,7 @@ class TestWithCachedBart:  # pragma: slow
                     [bart.sigma_[-bart.ndpost :], rbart.sigma_[-rbart.ndpost :]],
                     split=False,
                 )
-                assert rhat_sigma < 1.3
+                assert_array_less(rhat_sigma, 1.01)
 
             with subtests.test('sigma_mean'):
                 assert_allclose(bart.sigma_mean, rbart.sigma_mean, rtol=0.1)
@@ -458,7 +458,7 @@ class TestWithCachedBart:  # pragma: slow
             bart_count = bart.varcount.sum(axis=1)
             rbart_count = rbart.varcount.sum(axis=1)
             rhat_count = rhat_rank([bart_count, rbart_count], split=False)
-            assert rhat_count < 30  # genuinely bad, see below
+            assert_array_less(rhat_count, 2.5)  # genuinely bad, see below
             assert_allclose(bart_count.mean(), rbart_count.mean(), rtol=0.2)
 
         if p < n:
@@ -470,7 +470,7 @@ class TestWithCachedBart:  # pragma: slow
                 # there is a visible discrepancy on the number of nodes, with bartz
                 # having deeper trees, this 6 is not just "not good to sampling
                 # accuracy but close in practice."
-                assert_array_less(rhat_varcount, 7)
+                assert_array_less(rhat_varcount, 1.4)
 
             with subtests.test('varcount_mean'):
                 assert_close_matrices(
@@ -489,7 +489,7 @@ class TestWithCachedBart:  # pragma: slow
                         split=False,
                     )
                     # drop one component because varprob sums to 1
-                    assert_array_less(rhat_varprob, 4)
+                    assert_array_less(rhat_varprob, 1.3)
 
                 with subtests.test('varprob_mean'):
                     assert_close_matrices(
@@ -1024,7 +1024,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
         nstub_mcmc = count_stub_trees(bart._main_trace.split_tree)
         nstub_prior = count_stub_trees(prior_trace.split_tree)
         rhat_nstub = rhat_rank([nstub_mcmc, nstub_prior], split=False)
-        assert rhat_nstub < 1.01
+        assert_array_less(rhat_nstub, 1.01)
 
     if (p, nsplits) != (1, 1):
         # all the following are equivalent to nstub in the 1-1 case
@@ -1033,7 +1033,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
             nsimple_mcmc = count_simple_trees(bart._main_trace.split_tree)
             nsimple_prior = count_simple_trees(prior_trace.split_tree)
             rhat_nsimple = rhat_rank([nsimple_mcmc, nsimple_prior], split=False)
-            assert rhat_nsimple < 1.01
+            assert_array_less(rhat_nsimple, 1.01)
 
         varcount_prior = compute_varcount(
             bart._mcmc_state.forest.max_split.size, prior_trace
@@ -1041,11 +1041,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
 
         with subtests.test('varcount'):
             rhat_varcount = rhat_rank([bart.varcount, varcount_prior], split=False)
-            if p == 10:
-                # varcount is p-dimensional
-                assert_array_less(rhat_varcount, 1.4)
-            else:
-                assert_array_less(rhat_varcount, 1.2)
+            assert_array_less(rhat_varcount, 1.05)
 
         with subtests.test('number of nodes'):
             sum_varcount_mcmc = bart.varcount.sum(axis=1)
@@ -1053,32 +1049,32 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
             rhat_sum_varcount = rhat_rank(
                 [sum_varcount_mcmc, sum_varcount_prior], split=False
             )
-            assert rhat_sum_varcount < 1.05
+            assert_array_less(rhat_sum_varcount, 1.01)
 
         with subtests.test('imbalance index'):
             imb_mcmc = avg_imbalance_index(bart._main_trace.split_tree)
             imb_prior = avg_imbalance_index(prior_trace.split_tree)
             rhat_imb = rhat_rank([imb_mcmc, imb_prior], split=False)
-            assert rhat_imb < 1.02
+            assert_array_less(rhat_imb, 1.01)
 
         with subtests.test('average max tree depth'):
             maxd_mcmc = avg_max_tree_depth(bart._main_trace.split_tree)
             maxd_prior = avg_max_tree_depth(prior_trace.split_tree)
             rhat_maxd = rhat_rank([maxd_mcmc, maxd_prior], split=False)
-            assert rhat_maxd < 1.02
+            assert_array_less(rhat_maxd, 1.01)
 
         with subtests.test('max tree depth distribution'):
             dd_mcmc = bart.depth_distr()
             dd_prior = forest_depth_distr(prior_trace.split_tree)
             rhat_dd = rhat_rank([dd_mcmc.squeeze(0), dd_prior], split=False)
-            assert_array_less(rhat_dd, 1.05)
+            assert_array_less(rhat_dd, 1.02)
 
     with subtests.test('y_test'):
         X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1)
         yhat_mcmc = bart._bart._predict(X)
         yhat_prior = evaluate_trace(X, prior_trace)
         rhat_yhat = rhat_rank([yhat_mcmc, yhat_prior], split=False)
-        assert_array_less(rhat_yhat, 1.1)
+        assert_array_less(rhat_yhat, 1.01)
 
 
 def run_bart_like_prior(

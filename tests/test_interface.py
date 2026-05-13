@@ -889,68 +889,104 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
 
 
 def test_scale_shift(bkw: BartKW) -> None:
-    """Check self-consistency of rescaling the inputs."""
+    """Check self-consistency of rescaling the inputs.
+
+    For mixed binary-continuous outcomes, only the continuous components
+    of `y_train` are rescaled, and binary components are matched between
+    `bart1` and `bart2` via `bart._binary_mask`.
+    """
     kw = bkw.kw
-    outcome_type = kw['outcome_type']
-    if outcome_type == 'binary' or (
-        isinstance(outcome_type, Sequence)
-        and not isinstance(outcome_type, str)
-        and any(t == 'binary' for t in outcome_type)
-    ):
-        pytest.skip('Cannot rescale binary responses.')
 
     bart1 = Bart(**kw)
+    mask = bart1._binary_mask
+    if mask.all():
+        pytest.skip('Cannot rescale binary responses.')
 
     offset = 0.4703189
     scale = 0.5294714
+
+    y = kw['y_train']
+    y = jnp.where(mask[..., None], y, offset + y * scale)
+
     kw2 = dict(kw)
-    kw2.update(y_train=offset + kw['y_train'] * scale, seed=random.clone(kw['seed']))
+    kw2.update(y_train=y, seed=random.clone(kw['seed']))
     bart2 = Bart(**kw2)
 
-    assert_allclose(bart1.offset, (bart2.offset - offset) / scale, rtol=1e-6, atol=1e-6)
-    assert_allclose(
-        bart1._mcmc_state.forest.leaf_prior_cov_inv,
-        bart2._mcmc_state.forest.leaf_prior_cov_inv * scale**2,
-        rtol=1e-6,
-        atol=0,
+    assert_close_matrices(
+        bart1.offset,
+        jnp.where(mask, bart2.offset, (bart2.offset - offset) / scale),
+        rtol=1e-5,
     )
-    assert_allclose(bart1.sigest, bart2.sigest / scale, rtol=1e-6)
+    assert_close_matrices(
+        bart1.sigest, jnp.where(mask, bart2.sigest, bart2.sigest / scale), rtol=1e-6
+    )
     assert_array_equal(bart1._mcmc_state.error_cov_df, bart2._mcmc_state.error_cov_df)
-    assert_allclose(
-        bart1._mcmc_state.error_cov_scale,
-        bart2._mcmc_state.error_cov_scale / scale**2,
+
+    masked_scale = jnp.where(mask, 1.0, scale)
+    if masked_scale.ndim:
+        masked_scale = masked_scale[:, None]
+    cov_scale = masked_scale * masked_scale.T
+
+    assert_close_matrices(
+        bart1._mcmc_state.forest.leaf_prior_cov_inv,
+        bart2._mcmc_state.forest.leaf_prior_cov_inv * cov_scale,
         rtol=1e-6,
     )
+
+    assert_close_matrices(
+        bart1._mcmc_state.error_cov_scale * cov_scale,
+        bart2._mcmc_state.error_cov_scale,
+        rtol=1e-6,
+    )
+
+    mask_pred = mask[..., None]
 
     yhat1 = bart1.predict('train', kind='latent_samples')
     yhat2 = bart2.predict('train', kind='latent_samples')
-    assert_close_matrices(yhat1, (yhat2 - offset) / scale, rtol=1e-5, reduce_rank=True)
+    assert_close_matrices(
+        yhat1,
+        jnp.where(mask_pred, yhat2, (yhat2 - offset) / scale),
+        rtol=1e-5,
+        reduce_rank=True,
+    )
 
     mean1 = bart1.predict('train', kind='mean')
     mean2 = bart2.predict('train', kind='mean')
-    assert_close_matrices(mean1, (mean2 - offset) / scale, rtol=1e-5, reduce_rank=True)
+    assert_close_matrices(
+        mean1,
+        jnp.where(mask_pred, mean2, (mean2 - offset) / scale),
+        rtol=1e-5,
+        reduce_rank=True,
+    )
 
     yhat_test1 = bart1.predict(kw['x_train'], kind='latent_samples')
     yhat_test2 = bart2.predict(kw['x_train'], kind='latent_samples')
     assert_close_matrices(
-        yhat_test1, (yhat_test2 - offset) / scale, rtol=1e-5, reduce_rank=True
+        yhat_test1,
+        jnp.where(mask_pred, yhat_test2, (yhat_test2 - offset) / scale),
+        rtol=1e-5,
+        reduce_rank=True,
     )
 
     yhat_test_mean1 = bart1.predict(kw['x_train'], kind='mean')
     yhat_test_mean2 = bart2.predict(kw['x_train'], kind='mean')
     assert_close_matrices(
-        yhat_test_mean1, (yhat_test_mean2 - offset) / scale, rtol=1e-5, reduce_rank=True
+        yhat_test_mean1,
+        jnp.where(mask_pred, yhat_test_mean2, (yhat_test_mean2 - offset) / scale),
+        rtol=1e-5,
+        reduce_rank=True,
     )
 
-    sdev1 = bart1.get_error_sdev()
-    sdev2 = bart2.get_error_sdev()
-    assert_close_matrices(sdev1, sdev2 / scale, rtol=1e-5, reduce_rank=True)
-    assert_allclose(
-        bart1.get_error_sdev(mean=True),
-        bart2.get_error_sdev(mean=True) / scale,
-        rtol=1e-6,
-        atol=1e-6,
-    )
+    # binary positions of get_error_sdev are NaN; replace with 0 to compare.
+    with debug_nans(False):
+        sdev_actual = jnp.where(mask, 0.0, bart1.get_error_sdev())
+        sdev_expected = jnp.where(mask, 0.0, bart2.get_error_sdev() / scale)
+        sdev_mean_actual = jnp.where(mask, 0.0, bart1.get_error_sdev(mean=True))
+        sdev_mean_expected = jnp.where(
+            mask, 0.0, bart2.get_error_sdev(mean=True) / scale
+        )
+    assert_close_matrices(sdev_actual, sdev_expected, rtol=1e-5, reduce_rank=True)
+    assert_close_matrices(sdev_mean_actual, sdev_mean_expected, rtol=1e-6)
 
 
 def test_min_points_per_decision_node(bkw: BartKW) -> None:

@@ -63,8 +63,10 @@ if INVASIVE_DEBUG_CHECKS:
     config.update('jax_debug_nans', True)
     config.update('jax_debug_infs', True)
 config.update('jax_legacy_prng_key', 'error')
+# WORKAROUND(jax<0.8.0): jax_explicit_x64_dtypes config option added in 0.8.0
 if jax.__version_info__ >= (0, 8, 0):
     config.update('jax_explicit_x64_dtypes', 'error')
+# WORKAROUND(jax<0.8.2): jax_check_static_indices config option added in 0.8.2
 if jax.__version_info__ >= (0, 8, 2):
     config.update('jax_check_static_indices', True)
 

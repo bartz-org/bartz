@@ -43,7 +43,7 @@ from jax.scipy.special import logit, ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, Float32, Int32, Key, PyTree, Shaped, UInt
-from numpy.testing import assert_allclose, assert_array_equal
+from numpy.testing import assert_array_less
 from pytest_subtests import SubTests
 
 from bartz import Bart
@@ -73,11 +73,13 @@ from tests.conftest import get_disable_problematic_sharding
 from tests.test_interface import BartKW, gen_X, gen_y, make_kw
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
+    assert_allclose,
+    assert_array_equal,
     assert_close_matrices,
     assert_different_matrices,
-    multivariate_rhat,
+    clipped_logit,
     periodic_sigint,
-    rhat,
+    rhat_rank,
 )
 
 try:
@@ -202,9 +204,6 @@ def make_gbart_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
     return bart_kw_to_mc_gbart(make_kw(key, variant))
 
 
-N_VARIANTS = 3
-
-
 @pytest.fixture(
     params=[
         1,
@@ -242,8 +241,8 @@ class TestWithCachedBart:  # pragma: slow
         # create a random seed that depends only on the variant, since this
         # fixture is shared between multiple tests
         key = random.key(0x139CD0C0)
-        keys = random.split(key, N_VARIANTS)
-        key = keys[variant - 1]
+        keys = random.split(key, 10)  # 10 is just some high number
+        key = keys[variant]
         kw = make_gbart_kw(key, variant)
 
         # modify configs to make them appropriate for convergence checks and R
@@ -279,7 +278,7 @@ class TestWithCachedBart:  # pragma: slow
         )
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4)
 
-    def test_convergence(self, cachedbart: CachedBart) -> None:
+    def test_convergence(self, cachedbart: CachedBart, subtests: SubTests) -> None:
         """Run multiple chains and check convergence with rhat."""
         bart = cachedbart.bart
         nchains, _ = bart._mcmc_state.resid.shape
@@ -287,35 +286,35 @@ class TestWithCachedBart:  # pragma: slow
         kw = cachedbart.kwargs
         p, n = kw['x_train'].shape
 
-        yhat_train = bart.yhat_train.reshape(nchains, nsamples, n)
-        rhat_yhat_train = multivariate_rhat(yhat_train)
-        assert rhat_yhat_train < 6
-        print(f'{rhat_yhat_train.item()=}')
+        with subtests.test('yhat_train'):
+            yhat_train = bart.yhat_train.reshape(nchains, nsamples, n)
+            rhat_yhat_train = rhat_rank(yhat_train, split=True)
+            assert_array_less(rhat_yhat_train, 1.1)
 
         if get_with_default(kw, 'type') == 'pbart':  # binary regression
-            prob_train = bart.prob_train.reshape(nchains, nsamples, n)
-            rhat_prob_train = multivariate_rhat(prob_train)
-            assert rhat_prob_train < 1.2
-            print(f'{rhat_prob_train.item()=}')
+            with subtests.test('prob_train'):
+                prob_train = bart.prob_train.reshape(nchains, nsamples, n)
+                rhat_prob_train = rhat_rank(clipped_logit(prob_train, 1e-5), split=True)
+                assert_array_less(rhat_prob_train, 1.005)
 
         else:  # continuous regression
-            sigma = bart.sigma[nsamples:, :].T
-            rhat_sigma = rhat(sigma)
-            assert rhat_sigma < 1.2
-            print(f'{rhat_sigma.item()=}')
+            with subtests.test('sigma'):
+                sigma = bart.sigma[nsamples:, :].T
+                rhat_sigma = rhat_rank(sigma, split=True)
+                assert_array_less(rhat_sigma, 1.01)
 
         if p < n:
-            varcount = bart.varcount.reshape(nchains, nsamples, p)
-            rhat_varcount = multivariate_rhat(varcount)
-            assert rhat_varcount < 7
-            print(f'{rhat_varcount.item()=}')
+            with subtests.test('varcount'):
+                varcount = bart.varcount.reshape(nchains, nsamples, p)
+                rhat_varcount = rhat_rank(varcount, split=True)
+                assert_array_less(rhat_varcount, 1.8)
 
             if get_with_default(kw, 'sparse'):  # pragma: no branch
-                varprob = bart.varprob.reshape(nchains, nsamples, p)
-                rhat_varprob = multivariate_rhat(varprob[:, :, 1:])
-                # drop one component because varprob sums to 1
-                assert rhat_varprob < 7
-                print(f'{rhat_varprob.item()=}')
+                with subtests.test('varprob'):
+                    varprob = bart.varprob.reshape(nchains, nsamples, p)
+                    rhat_varprob = rhat_rank(varprob[:, :, 1:], split=True)
+                    # drop one component because varprob sums to 1
+                    assert_array_less(rhat_varprob, 1.7)
 
     def kw_bartz_to_BART3(self, key: Key[Array, ''], kw: dict, bart: mc_gbart) -> dict:
         """Convert bartz keyword arguments to R BART3 keyword arguments."""
@@ -405,42 +404,53 @@ class TestWithCachedBart:  # pragma: slow
             # the documentation says
 
         with subtests.test('yhat_train'):
-            rhat_yhat_train = multivariate_rhat([bart.yhat_train, rbart.yhat_train])
-            assert rhat_yhat_train < 3.5
+            rhat_yhat_train = rhat_rank(
+                [bart.yhat_train, rbart.yhat_train], split=False
+            )
+            assert_array_less(rhat_yhat_train, 1.05)
 
         with subtests.test('yhat_test'):
-            rhat_yhat_test = multivariate_rhat([bart.yhat_test, rbart.yhat_test])
-            assert rhat_yhat_test < 3.5
+            rhat_yhat_test = rhat_rank([bart.yhat_test, rbart.yhat_test], split=False)
+            assert_array_less(rhat_yhat_test, 1.05)
 
         if get_with_default(kw, 'type') == 'pbart':  # binary regression
             with subtests.test('prob_train'):
-                rhat_prob_train = multivariate_rhat([bart.prob_train, rbart.prob_train])
-                assert rhat_prob_train < 1.2
+                rhat_prob_train = rhat_rank(
+                    clipped_logit(jnp.stack([bart.prob_train, rbart.prob_train]), 1e-5),
+                    split=False,
+                )
+                assert_array_less(rhat_prob_train, 1.005)
 
             with subtests.test('prob_test'):
-                rhat_prob_test = multivariate_rhat([bart.prob_test, rbart.prob_test])
-                assert rhat_prob_test < 1.2
+                rhat_prob_test = rhat_rank(
+                    clipped_logit(jnp.stack([bart.prob_test, rbart.prob_test]), 1e-5),
+                    split=False,
+                )
+                assert_array_less(rhat_prob_test, 1.005)
 
         else:  # continuous regression
             with subtests.test('yhat_train_mean'):
                 assert_close_matrices(
-                    bart.yhat_train_mean,
-                    rbart.yhat_train_mean.astype(numpy.float32),
-                    rtol=0.8,
+                    bart.yhat_train_mean - rbart.yhat_train_mean.astype(numpy.float32),
+                    jnp.concatenate([bart.yhat_train, rbart.yhat_train]).std(axis=0),
+                    tozero=True,
+                    rtol=0.3,
                 )
 
             with subtests.test('yhat_test_mean'):
                 assert_close_matrices(
-                    bart.yhat_test_mean,
-                    rbart.yhat_test_mean.astype(numpy.float32),
-                    rtol=0.9,
+                    bart.yhat_test_mean - rbart.yhat_test_mean.astype(numpy.float32),
+                    jnp.concatenate([bart.yhat_test, rbart.yhat_test]).std(axis=0),
+                    tozero=True,
+                    rtol=0.3,
                 )
 
             with subtests.test('sigma'):
-                rhat_sigma = rhat(
-                    [bart.sigma_[-bart.ndpost :], rbart.sigma_[-rbart.ndpost :]]
+                rhat_sigma = rhat_rank(
+                    [bart.sigma_[-bart.ndpost :], rbart.sigma_[-rbart.ndpost :]],
+                    split=False,
                 )
-                assert rhat_sigma < 1.3
+                assert_array_less(rhat_sigma, 1.01)
 
             with subtests.test('sigma_mean'):
                 assert_allclose(bart.sigma_mean, rbart.sigma_mean, rtol=0.1)
@@ -449,8 +459,8 @@ class TestWithCachedBart:  # pragma: slow
             # check number of tree nodes in forest
             bart_count = bart.varcount.sum(axis=1)
             rbart_count = rbart.varcount.sum(axis=1)
-            rhat_count = rhat([bart_count, rbart_count])
-            assert rhat_count < 30  # genuinely bad, see below
+            rhat_count = rhat_rank([bart_count, rbart_count], split=False)
+            assert_array_less(rhat_count, 2.5)  # genuinely bad, see below
             assert_allclose(bart_count.mean(), rbart_count.mean(), rtol=0.2)
 
         if p < n:
@@ -458,11 +468,11 @@ class TestWithCachedBart:  # pragma: slow
             # stuff about predictors right
 
             with subtests.test('varcount'):
-                rhat_varcount = multivariate_rhat([bart.varcount, rbart.varcount])
+                rhat_varcount = rhat_rank([bart.varcount, rbart.varcount], split=False)
                 # there is a visible discrepancy on the number of nodes, with bartz
                 # having deeper trees, this 6 is not just "not good to sampling
                 # accuracy but close in practice."
-                assert rhat_varcount < 7
+                assert_array_less(rhat_varcount, 1.4)
 
             with subtests.test('varcount_mean'):
                 assert_close_matrices(
@@ -474,13 +484,14 @@ class TestWithCachedBart:  # pragma: slow
 
             if kw.get('sparse', False):  # pragma: no branch
                 with subtests.test('varprob'):
-                    rhat_varprob = multivariate_rhat(
+                    rhat_varprob = rhat_rank(
                         clipped_logit(
                             jnp.stack([bart.varprob, rbart.varprob])[:, :, 1:], 1e-5
-                        )
+                        ),
+                        split=False,
                     )
                     # drop one component because varprob sums to 1
-                    assert rhat_varprob < 4
+                    assert_array_less(rhat_varprob, 1.3)
 
                 with subtests.test('varprob_mean'):
                     assert_close_matrices(
@@ -525,11 +536,6 @@ class TestWithCachedBart:  # pragma: slow
         assert_different(bart._mcmc_state, rtol=0.01)
         assert_different(bart._main_trace, rtol=0.03)
         assert_different(bart._burnin_trace, rtol=0.03)
-
-
-def clipped_logit(x: Array, eps: float) -> Array:
-    """Compute the logit of x, clipping x to [eps, 1-eps] to avoid infinities."""
-    return logit(jnp.clip(x, eps, 1 - eps))
 
 
 def test_sequential_guarantee(kw: dict, subtests: SubTests) -> None:
@@ -699,8 +705,8 @@ class TestVarprobAttr:
         with debug_nans(False):
             xinfo = jnp.array([[jnp.nan], [0]])
         bart = mc_gbart(x_train=X, y_train=y, xinfo=xinfo, seed=keys.pop())
-        assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1])
-        assert_array_equal(bart.varprob_mean, [0, 1])
+        assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1], strict=False)
+        assert_array_equal(bart.varprob_mean, [0, 1], strict=False)
         assert jnp.all(bart.varprob_mean == bart.varprob)
 
 
@@ -835,58 +841,12 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     return kw
 
 
-def test_no_datapoints(kw: dict[str, Any]) -> None:
-    """Check automatic data scaling with 0 datapoints."""
-    # remove all datapoints
-    kw = set_num_datapoints(kw, 0)
+@pytest.mark.parametrize('num_datapoints', [0, 1])
+def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
+    """Check automatic data scaling with 0 or 1 datapoints."""
+    kw = set_num_datapoints(kw, num_datapoints)
 
-    # set the split grid manually because automatic setting relies on datapoints
-    p, _ = kw['x_train'].shape
-    nsplits = 10
-    xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
-    kw.update(xinfo=xinfo)
-
-    # disable data sharding
-    kw.setdefault('bart_kwargs', {}).update(num_data_devices=None)
-
-    # enable saving the likelihood ratio to check it's always 1
-    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
-        save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
-    )
-
-    # run bart
-    bart = mc_gbart(**kw)
-
-    # check there are indeed 0 datapoints in the output
-    ndpost = get_with_default(kw, 'ndpost')
-    assert bart.yhat_train.shape == (ndpost, 0)
-
-    # check default values that may be set in a special way if there are 0 datapoints
-    assert bart.offset == 0
-    if get_with_default(kw, 'type') == 'pbart':
-        tau_num = 3
-        assert bart.sigest is None
-    else:
-        tau_num = 1
-        assert bart.sigest == 1
-    assert_allclose(
-        bart._mcmc_state.forest.leaf_prior_cov_inv,
-        (2**2 * get_with_default(kw, 'ntree')) / tau_num**2,
-        rtol=1e-6,
-    )
-
-    # check the likelihood ratio is always 1
-    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
-    assert_array_equal(bart._main_trace.log_likelihood, 0.0)
-
-
-def test_one_datapoint(kw: dict[str, Any]) -> None:
-    """Check automatic data scaling with 1 datapoint."""
-    kw = set_num_datapoints(kw, 1)
-
-    # set the split grid manually because otherwise there would be 0 cutpoints
-    # when usequants=True, and computing varprob produces nans in that case
-    if kw.get('usequants', False):
+    if num_datapoints == 0 or get_with_default(kw, 'usequants'):
         p, _ = kw['x_train'].shape
         nsplits = 10
         xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
@@ -900,7 +860,14 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
         save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
     )
 
+    # run bart
     bart = mc_gbart(**kw)
+
+    # check there are indeed num_datapoints datapoints in the output
+    ndpost = get_with_default(kw, 'ndpost')
+    assert bart.yhat_train.shape == (ndpost, num_datapoints)
+
+    # check default values that may be set in a special way
     if get_with_default(kw, 'type') == 'pbart':
         tau_num = 3
         assert bart.sigest is None
@@ -908,7 +875,10 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
     else:
         tau_num = 1
         assert bart.sigest == 1
-        assert bart.offset == kw['y_train'].item()
+        if num_datapoints:
+            assert bart.offset == kw['y_train'].item()
+        else:
+            assert bart.offset == 0
     assert_allclose(
         bart._mcmc_state.forest.leaf_prior_cov_inv,
         (2**2 * get_with_default(kw, 'ntree')) / tau_num**2,
@@ -916,8 +886,8 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
     )
 
     # check the likelihood ratio is always 1
-    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
-    assert_array_equal(bart._main_trace.log_likelihood, 0.0)
+    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
+    assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
 
 
 def test_two_datapoints(kw: dict[str, Any]) -> None:
@@ -978,7 +948,7 @@ def test_xinfo() -> None:
 
     xinfo_wo_nan = jnp.where(jnp.isnan(xinfo), jnp.finfo(jnp.float32).max, xinfo)
     assert_array_equal(bart._splits, xinfo_wo_nan)
-    assert_array_equal(bart._mcmc_state.forest.max_split, [2, 3, 0])
+    assert_array_equal(bart._mcmc_state.forest.max_split, [2, 3, 0], strict=False)
 
 
 def test_xinfo_wrong_p() -> None:
@@ -1014,8 +984,8 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
     with subtests.test('number of stub trees'):
         nstub_mcmc = count_stub_trees(bart._main_trace.split_tree)
         nstub_prior = count_stub_trees(prior_trace.split_tree)
-        rhat_nstub = rhat([nstub_mcmc, nstub_prior])
-        assert rhat_nstub < 1.01
+        rhat_nstub = rhat_rank([nstub_mcmc, nstub_prior], split=False)
+        assert_array_less(rhat_nstub, 1.01)
 
     if (p, nsplits) != (1, 1):
         # all the following are equivalent to nstub in the 1-1 case
@@ -1023,51 +993,49 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
         with subtests.test('number of simple trees'):
             nsimple_mcmc = count_simple_trees(bart._main_trace.split_tree)
             nsimple_prior = count_simple_trees(prior_trace.split_tree)
-            rhat_nsimple = rhat([nsimple_mcmc, nsimple_prior])
-            assert rhat_nsimple < 1.01
+            rhat_nsimple = rhat_rank([nsimple_mcmc, nsimple_prior], split=False)
+            assert_array_less(rhat_nsimple, 1.01)
 
         varcount_prior = compute_varcount(
             bart._mcmc_state.forest.max_split.size, prior_trace
         )
 
         with subtests.test('varcount'):
-            rhat_varcount = multivariate_rhat([bart.varcount, varcount_prior])
-            if p == 10:
-                # varcount is p-dimensional
-                assert rhat_varcount < 1.4
-            else:
-                assert rhat_varcount < 1.2
+            rhat_varcount = rhat_rank([bart.varcount, varcount_prior], split=False)
+            assert_array_less(rhat_varcount, 1.05)
 
         with subtests.test('number of nodes'):
             sum_varcount_mcmc = bart.varcount.sum(axis=1)
             sum_varcount_prior = varcount_prior.sum(axis=1)
-            rhat_sum_varcount = rhat([sum_varcount_mcmc, sum_varcount_prior])
-            assert rhat_sum_varcount < 1.05
+            rhat_sum_varcount = rhat_rank(
+                [sum_varcount_mcmc, sum_varcount_prior], split=False
+            )
+            assert_array_less(rhat_sum_varcount, 1.01)
 
         with subtests.test('imbalance index'):
             imb_mcmc = avg_imbalance_index(bart._main_trace.split_tree)
             imb_prior = avg_imbalance_index(prior_trace.split_tree)
-            rhat_imb = rhat([imb_mcmc, imb_prior])
-            assert rhat_imb < 1.02
+            rhat_imb = rhat_rank([imb_mcmc, imb_prior], split=False)
+            assert_array_less(rhat_imb, 1.01)
 
         with subtests.test('average max tree depth'):
             maxd_mcmc = avg_max_tree_depth(bart._main_trace.split_tree)
             maxd_prior = avg_max_tree_depth(prior_trace.split_tree)
-            rhat_maxd = rhat([maxd_mcmc, maxd_prior])
-            assert rhat_maxd < 1.02
+            rhat_maxd = rhat_rank([maxd_mcmc, maxd_prior], split=False)
+            assert_array_less(rhat_maxd, 1.01)
 
         with subtests.test('max tree depth distribution'):
             dd_mcmc = bart.depth_distr()
             dd_prior = forest_depth_distr(prior_trace.split_tree)
-            rhat_dd = multivariate_rhat([dd_mcmc.squeeze(0), dd_prior])
-            assert rhat_dd < 1.05
+            rhat_dd = rhat_rank([dd_mcmc.squeeze(0), dd_prior], split=False)
+            assert_array_less(rhat_dd, 1.02)
 
     with subtests.test('y_test'):
         X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1)
         yhat_mcmc = bart._bart._predict(X)
         yhat_prior = evaluate_trace(X, prior_trace)
-        rhat_yhat = multivariate_rhat([yhat_mcmc, yhat_prior])
-        assert rhat_yhat < 1.1
+        rhat_yhat = rhat_rank([yhat_mcmc, yhat_prior], split=False)
+        assert_array_less(rhat_yhat, 1.01)
 
 
 def run_bart_like_prior(
@@ -1102,8 +1070,8 @@ def run_bart_like_prior(
     bart = mc_gbart(**kw)
 
     with subtests.test('likelihood ratio = 1'):
-        assert_array_equal(bart._burnin_trace.log_likelihood, 0.0)
-        assert_array_equal(bart._main_trace.log_likelihood, 0.0)
+        assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
+        assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
 
     return bart
 
@@ -1176,15 +1144,40 @@ def avg_max_tree_depth(
     return depth.mean(-1)
 
 
-def test_rhat(keys: split) -> None:
-    """Test the multivariate R-hat implementation."""
+@pytest.mark.parametrize('split', [True, False])
+def test_rhat_rank(keys: split, split: bool) -> None:
+    """Test the rank-normalized (split-)Rhat port from arviz_stats."""
     chains, divergent_chains = random.normal(keys.pop(), (2, 2, 1000, 10))
-    mean_offset = jnp.arange(len(chains))
+    mean_offset = 10 * jnp.arange(len(chains))
     divergent_chains += mean_offset[:, None, None]
-    rhat = multivariate_rhat(chains)
-    rhat_divergent = multivariate_rhat(divergent_chains)
-    assert rhat < 1.02
-    assert rhat_divergent > 5
+    rhat = rhat_rank(chains, split=split)
+    rhat_divergent = rhat_rank(divergent_chains, split=split)
+    assert rhat.shape == (10,)
+    assert rhat_divergent.shape == (10,)
+    assert_array_less(rhat, 1.01)
+    assert_array_less(1.3, rhat_divergent)
+
+
+@pytest.mark.parametrize('split', [True, False])
+def test_rhat_rank_axes(keys: split, split: bool) -> None:
+    """Test ``rhat_rank`` honors ``chain_axis`` and ``draw_axis``."""
+    chains = random.normal(keys.pop(), (2, 1000, 5))
+    reference = rhat_rank(chains, split=split)
+    transposed = jnp.moveaxis(chains, (0, 1), (2, 0))
+    relocated = rhat_rank(transposed, split=split, chain_axis=2, draw_axis=0)
+    assert_allclose(relocated, reference, rtol=1e-12)
+
+
+def test_rhat_rank_shape_errors() -> None:
+    """Test ``rhat_rank`` rejects undersized chain/draw dimensions."""
+    with pytest.raises(ValueError, match='2 chains'):
+        rhat_rank(jnp.zeros((1, 200)), split=True)
+    with pytest.raises(ValueError, match='4 draws'):
+        rhat_rank(jnp.zeros((2, 3)), split=True)
+    with pytest.raises(ValueError, match='2 chains'):
+        rhat_rank(jnp.zeros((1, 200)), split=False)
+    with pytest.raises(ValueError, match='2 draws'):
+        rhat_rank(jnp.zeros((2, 1)), split=False)
 
 
 def test_jit(kw: dict[str, Any]) -> None:

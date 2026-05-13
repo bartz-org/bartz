@@ -32,7 +32,7 @@ import pytest
 from jax import jit, random, vmap
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float, Key
-from numpy.testing import assert_allclose, assert_array_equal, assert_array_less
+from numpy.testing import assert_array_less
 from scipy.stats import norm
 
 from bartz.jaxext import split
@@ -43,6 +43,7 @@ from bartz.testing._dgp import (
     interaction_pattern,
     partitioned_interaction_pattern,
 )
+from tests.util import assert_allclose, assert_array_equal
 
 # Test parameters
 ALPHA = 5e-7  # probability of false positive (aaaaapprox)
@@ -168,7 +169,7 @@ class TestGeneratePartition:
 
         # Each column should sum to 1
         col_sums = jnp.sum(partitions, axis=1)  # Shape: (N_REPS, P)
-        assert_array_equal(col_sums, 1)
+        assert_array_equal(col_sums, 1, strict=False)
 
     def test_partition_counts(self, dgps: DGP) -> None:
         """Test that counts are either p//c or p//c + 1."""
@@ -180,7 +181,7 @@ class TestGeneratePartition:
         # Each count should be either P//K or P//K + 1
         floor_count = p // k
         valid = (counts == floor_count) | (counts == floor_count + 1)
-        assert_array_equal(valid, True)
+        assert_array_equal(valid, True, strict=False)
 
     def test_partition_balance(self, dgps: DGP) -> None:
         """Test that predictors are roughly balanced across components."""
@@ -395,12 +396,12 @@ class TestInteractionPattern:
 
     def test_diagonal(self, pattern: Bool[Array, 'p p']) -> None:
         """Test that diagonal is True."""
-        assert_array_equal(jnp.diag(pattern), True)
+        assert_array_equal(jnp.diag(pattern), True, strict=False)
 
     def test_row_sums(self, pattern: Bool[Array, 'p p']) -> None:
         """Test that each row sums to q+1."""
         row_sums = jnp.sum(pattern, axis=1)
-        assert_array_equal(row_sums, 4 + 1)
+        assert_array_equal(row_sums, 4 + 1, strict=False)
 
 
 class TestPartitionedInteractionPattern:
@@ -429,7 +430,7 @@ class TestPartitionedInteractionPattern:
         # For each component, check that True values only occur where partition is True
         # pattern[i, r, s] can only be True if partition[i, r] and partition[i, s] are True
         mask = partition[:, :, None] & partition[:, None, :]  # Shape: (k, p, p)
-        assert_array_equal(pattern & ~mask, False)
+        assert_array_equal(pattern & ~mask, False, strict=False)
 
     def test_diagonal_within_partition(
         self, partition: Bool[Array, 'k p'], pattern: Bool[Array, 'k p p']
@@ -438,7 +439,7 @@ class TestPartitionedInteractionPattern:
         k, _, _ = pattern.shape
         for i in range(k):
             diagonal = pattern[i, partition[i], partition[i]]
-            assert_array_equal(diagonal, True)
+            assert_array_equal(diagonal, True, strict=False)
 
     def test_row_sums(
         self, pattern: Bool[Array, 'k p p'], partition: Bool[Array, 'k p'], q: int

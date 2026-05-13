@@ -36,10 +36,11 @@ from typing import Any
 
 import numpy as np
 from jax import numpy as jnp
-from jax import vmap
-from jax.scipy.linalg import solve_triangular
-from jaxtyping import Array, ArrayLike, Float, Real
-from scipy import linalg
+from jax.scipy.special import logit
+from jaxtyping import Array, ArrayLike, Float
+from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
+from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
+from scipy import linalg, stats
 
 from bartz.grove import TreesTrace, check_trace, describe_error
 from bartz.jaxext import minimal_unsigned_dtype
@@ -195,62 +196,23 @@ def assert_different_matrices(*args: ArrayLike, **kwargs: Any) -> None:
     assert_close_matrices(*args, negate=True, **default_kwargs)
 
 
-def multivariate_rhat(chains: Real[Array, 'chain sample dim']) -> Float[Array, '']:
-    """Compute the multivariate Gelman-Rubin R-hat.
+def assert_allclose(
+    actual: ArrayLike,
+    desired: ArrayLike,
+    *,
+    rtol: float = 0.0,
+    atol: float = 0.0,
+    **kwargs: Any,
+) -> None:
+    """Wrap `numpy.testing.assert_allclose` with zero default tolerances."""
+    _np_assert_allclose(actual, desired, rtol=rtol, atol=atol, **kwargs)
 
-    Parameters
-    ----------
-    chains
-        Independent chains of samples of a vector, shape ``(m, n, p)``.
 
-    Returns
-    -------
-    The maximum eigenvalue of ``W^{-1} V_hat``, which generalizes R-hat.
-
-    Raises
-    ------
-    ValueError
-        If there are not enough chains or samples.
-    """
-    chains = jnp.asarray(chains)
-    m, n, p = chains.shape
-
-    if m < 2:  # pragma: no cover
-        msg = 'Need at least 2 chains'
-        raise ValueError(msg)
-    if n < 2:  # pragma: no cover
-        msg = 'Need at least 2 samples per chain'
-        raise ValueError(msg)
-
-    chain_means = jnp.mean(chains, axis=1)
-
-    def compute_chain_cov(
-        chain_samples: Float[Array, 'sample dim'], chain_mean: Float[Array, ' dim']
-    ) -> Float[Array, 'dim dim']:
-        centered = chain_samples - chain_mean
-        return jnp.dot(centered.T, centered) / (n - 1)
-
-    within_chain_covs = vmap(compute_chain_cov)(chains, chain_means)
-    W = jnp.mean(within_chain_covs, axis=0)
-
-    overall_mean = jnp.mean(chain_means, axis=0)
-    chain_mean_diffs = chain_means - overall_mean
-    B = (n / (m - 1)) * jnp.dot(chain_mean_diffs.T, chain_mean_diffs)
-
-    V_hat = ((n - 1) / n) * W + ((m + 1) / (m * n)) * B
-
-    # Add regularization to W for numerical stability
-    gershgorin = jnp.max(jnp.sum(jnp.abs(W), axis=1))
-    regularization = jnp.finfo(W.dtype).eps * len(W) * gershgorin
-    W_reg = W + regularization * jnp.eye(p)
-
-    # Compute max(eigvals(W^-1 V_hat))
-    L = jnp.linalg.cholesky(W_reg)
-    L_1V = solve_triangular(L, V_hat, lower=True)
-    L_1VL_T = solve_triangular(L, L_1V.T, lower=True).T
-    eigenvals = jnp.linalg.eigvalsh(L_1VL_T)
-
-    return jnp.max(eigenvals)
+def assert_array_equal(
+    actual: ArrayLike, desired: ArrayLike, *, strict: bool = True, **kwargs: Any
+) -> None:
+    """Wrap `numpy.testing.assert_array_equal` with `strict=True` default."""
+    _np_assert_array_equal(actual, desired, strict=strict, **kwargs)
 
 
 class PeriodicSigintTimer:
@@ -318,17 +280,90 @@ def periodic_sigint(
             timer.cancel()
 
 
-def rhat(chains: Real[Array, 'chain sample']) -> Float[Array, '']:
-    """Compute the univariate Gelman-Rubin R-hat.
+def clipped_logit(x: ArrayLike, eps: float) -> Array:
+    """Compute the logit of x, clipping x to [eps, 1-eps] to avoid infinities."""
+    return logit(jnp.clip(x, eps, 1 - eps))
+
+
+def rhat_rank(
+    data: ArrayLike, *, split: bool, chain_axis: int = 0, draw_axis: int = 1
+) -> Float[np.ndarray, ' *leading']:
+    """Elementwise rank-normalized (split-)Rhat.
+
+    Port of ``arviz_stats.rhat`` with ``method='rank'``, the rank-normalized
+    folded split-Rhat of Vehtari et al. (2021),
+    https://arxiv.org/abs/1903.08008. Vectorized over the leading shape.
 
     Parameters
     ----------
-    chains
-        Independent chains of samples of a scalar, shape ``(m, n)``.
+    data
+        Array of MCMC draws with chains along ``chain_axis`` and draws along
+        ``draw_axis``.
+    split
+        If True, split each chain in half along the draw axis before computing
+        Rhat (the standard rank-normalized split-Rhat). If False, skip the
+        split step and compute the rank-normalized Rhat on the chains as
+        given.
+    chain_axis
+    draw_axis
+        Axes of ``data`` indexing chains and draws. Default to the arviz
+        ``(chain, draw, ...)`` layout.
 
     Returns
     -------
-    The univariate R-hat statistic.
+    Array with ``chain_axis`` and ``draw_axis`` of ``data`` removed; each entry
+    is the rank-normalized (split-)Rhat over the corresponding (chain, draw)
+    slice. NaNs in a slice propagate to ``nan`` in its Rhat.
+
+    Raises
+    ------
+    ValueError
+        If the chain dimension has fewer than 2 entries, or the draw dimension
+        has fewer than 4 (with ``split=True``) or 2 (with ``split=False``).
     """
-    chains = jnp.asarray(chains)
-    return multivariate_rhat(chains[:, :, None])
+    ary = np.asarray(data, float)
+    ary = np.moveaxis(ary, (chain_axis, draw_axis), (-2, -1))
+    *_, n_chain, n_draw = ary.shape
+    min_draw = 4 if split else 2
+    if n_chain < 2 or n_draw < min_draw:
+        msg = (
+            f'need at least 2 chains and {min_draw} draws, got {n_chain} '
+            f'chains and {n_draw} draws'
+        )
+        raise ValueError(msg)
+
+    prepared = _split_chains_v(ary) if split else ary
+    rhat_bulk = _rhat_v(_z_scale_v(prepared))
+    folded = np.abs(prepared - np.median(prepared, axis=(-2, -1), keepdims=True))
+    rhat_tail = _rhat_v(_z_scale_v(folded))
+    return np.maximum(rhat_bulk, rhat_tail)
+
+
+def _split_chains_v(
+    ary: Float[np.ndarray, '*leading chain draw'],
+) -> Float[np.ndarray, '*leading two_chain half_draw']:
+    """Split each chain in half along the draw axis; stack along chain axis."""
+    half = ary.shape[-1] // 2
+    return np.concatenate([ary[..., :half], ary[..., -half:]], axis=-2)
+
+
+def _z_scale_v(
+    ary: Float[np.ndarray, '*leading chain draw'],
+) -> Float[np.ndarray, '*leading chain draw']:
+    """Rank-normalize jointly over the last two axes (chain, draw)."""
+    flat = ary.reshape(*ary.shape[:-2], -1)
+    rank = stats.rankdata(flat, method='average', axis=-1)
+    z = stats.norm.ppf((rank - 3 / 8) / (rank.shape[-1] + 1 / 4))
+    return z.reshape(ary.shape)
+
+
+def _rhat_v(
+    ary: Float[np.ndarray, '*leading chain draw'],
+) -> Float[np.ndarray, ' *leading']:
+    """Classic Gelman-Rubin Rhat reducing the last two ``(chain, draw)`` axes."""
+    n = ary.shape[-1]
+    chain_mean = ary.mean(axis=-1)
+    chain_var = ary.var(axis=-1, ddof=1)
+    between = n * chain_mean.var(axis=-1, ddof=1)
+    within = chain_var.mean(axis=-1)
+    return np.sqrt((between / within + n - 1) / n)

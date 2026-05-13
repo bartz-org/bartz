@@ -841,58 +841,12 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     return kw
 
 
-def test_no_datapoints(kw: dict[str, Any]) -> None:
-    """Check automatic data scaling with 0 datapoints."""
-    # remove all datapoints
-    kw = set_num_datapoints(kw, 0)
+@pytest.mark.parametrize('num_datapoints', [0, 1])
+def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
+    """Check automatic data scaling with 0 or 1 datapoints."""
+    kw = set_num_datapoints(kw, num_datapoints)
 
-    # set the split grid manually because automatic setting relies on datapoints
-    p, _ = kw['x_train'].shape
-    nsplits = 10
-    xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
-    kw.update(xinfo=xinfo)
-
-    # disable data sharding
-    kw.setdefault('bart_kwargs', {}).update(num_data_devices=None)
-
-    # enable saving the likelihood ratio to check it's always 1
-    kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
-        save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
-    )
-
-    # run bart
-    bart = mc_gbart(**kw)
-
-    # check there are indeed 0 datapoints in the output
-    ndpost = get_with_default(kw, 'ndpost')
-    assert bart.yhat_train.shape == (ndpost, 0)
-
-    # check default values that may be set in a special way if there are 0 datapoints
-    assert bart.offset == 0
-    if get_with_default(kw, 'type') == 'pbart':
-        tau_num = 3
-        assert bart.sigest is None
-    else:
-        tau_num = 1
-        assert bart.sigest == 1
-    assert_allclose(
-        bart._mcmc_state.forest.leaf_prior_cov_inv,
-        (2**2 * get_with_default(kw, 'ntree')) / tau_num**2,
-        rtol=1e-6,
-    )
-
-    # check the likelihood ratio is always 1
-    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
-    assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
-
-
-def test_one_datapoint(kw: dict[str, Any]) -> None:
-    """Check automatic data scaling with 1 datapoint."""
-    kw = set_num_datapoints(kw, 1)
-
-    # set the split grid manually because otherwise there would be 0 cutpoints
-    # when usequants=True, and computing varprob produces nans in that case
-    if kw.get('usequants', False):
+    if num_datapoints == 0 or get_with_default(kw, 'usequants'):
         p, _ = kw['x_train'].shape
         nsplits = 10
         xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
@@ -906,7 +860,14 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
         save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
     )
 
+    # run bart
     bart = mc_gbart(**kw)
+
+    # check there are indeed num_datapoints datapoints in the output
+    ndpost = get_with_default(kw, 'ndpost')
+    assert bart.yhat_train.shape == (ndpost, num_datapoints)
+
+    # check default values that may be set in a special way
     if get_with_default(kw, 'type') == 'pbart':
         tau_num = 3
         assert bart.sigest is None
@@ -914,7 +875,10 @@ def test_one_datapoint(kw: dict[str, Any]) -> None:
     else:
         tau_num = 1
         assert bart.sigest == 1
-        assert bart.offset == kw['y_train'].item()
+        if num_datapoints:
+            assert bart.offset == kw['y_train'].item()
+        else:
+            assert bart.offset == 0
     assert_allclose(
         bart._mcmc_state.forest.leaf_prior_cov_inv,
         (2**2 * get_with_default(kw, 'ntree')) / tau_num**2,

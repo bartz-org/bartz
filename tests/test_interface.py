@@ -991,62 +991,12 @@ def test_min_points_per_leaf(bkw: BartKW) -> None:
         assert distr_marg[min_points] > 0
 
 
-def test_no_datapoints(bkw: BartKW) -> None:
-    """Check automatic data scaling with 0 datapoints."""
-    kw = set_num_datapoints(bkw.kw, 0)
+@pytest.mark.parametrize('num_datapoints', [0, 1])
+def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
+    """Check automatic data scaling with 0 or 1 datapoints."""
+    kw = set_num_datapoints(bkw.kw, num_datapoints)
 
-    p, _ = kw['x_train'].shape
-    nsplits = 10
-    xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
-    kw.update(binner=partial(GivenSplitsBinner, xinfo=xinfo))
-
-    kw.update(num_data_devices=None)
-
-    init_kw = dict(kw.get('init_kw', {}))
-    init_kw.update(
-        save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
-    )
-    kw['init_kw'] = init_kw
-
-    bart = Bart(**kw)
-
-    ndpost = bart.ndpost
-    k = kw['y_train'].shape[:-1]  # () or (k,)
-    assert bart.predict('train', kind='latent_samples').shape == (ndpost, *k, 0)
-
-    assert_array_equal(bart.offset, jnp.zeros_like(bart.offset))
-    outcome_type = kw['outcome_type']
-    if outcome_type == 'binary':
-        tau_num = 3
-        assert bart.sigest is None
-    elif isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
-        binary_mask = jnp.array([t == 'binary' for t in outcome_type])
-        tau_num = jnp.where(binary_mask, 3.0, 1.0)
-        expected_sigest = jnp.where(binary_mask, 0.0, 1.0)
-        assert_array_equal(bart.sigest, expected_sigest)
-    else:
-        tau_num = 1
-        assert_array_equal(bart.sigest, jnp.ones_like(bart.sigest))
-    expected_cov_inv = jnp.float32((2**2 * kw['num_trees']) / tau_num**2)
-    leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv
-    if leaf_prior_cov_inv.ndim == 2:  # pragma: no branch, always mv with defaults
-        expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
-    assert_close_matrices(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
-
-    assert_array_equal(
-        bart._burnin_trace.log_likelihood,
-        jnp.zeros_like(bart._burnin_trace.log_likelihood),
-    )
-    assert_array_equal(
-        bart._main_trace.log_likelihood, jnp.zeros_like(bart._main_trace.log_likelihood)
-    )
-
-
-def test_one_datapoint(bkw: BartKW) -> None:
-    """Check automatic data scaling with 1 datapoint."""
-    kw = set_num_datapoints(bkw.kw, 1)
-
-    if bkw.uses_quantile_binner:
+    if num_datapoints == 0 or bkw.uses_quantile_binner:
         p, _ = kw['x_train'].shape
         nsplits = 10
         xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
@@ -1063,29 +1013,45 @@ def test_one_datapoint(bkw: BartKW) -> None:
     bart = Bart(**kw)
     outcome_type = kw['outcome_type']
     k = kw['y_train'].shape[:-1]  # () or (k,)
+
+    assert bart.predict('train', kind='latent_samples').shape == (
+        bart.ndpost,
+        *k,
+        num_datapoints,
+    )
+
+    # check bart.offset
+    mask = bart._binary_mask
+    if num_datapoints == 0 or outcome_type == 'binary':
+        assert_array_equal(bart.offset, jnp.zeros_like(bart.offset))
+    else:
+        assert_allclose(
+            bart.offset[..., None],
+            jnp.where(mask[..., None], 0.0, kw['y_train']),
+            rtol=1e-6,
+        )
+
+    # check bart.sigest and set expected tau_num
     if outcome_type == 'binary':
         tau_num = 3
         assert bart.sigest is None
-        assert_array_equal(bart.offset, jnp.zeros(k), strict=True)
-    elif isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
-        binary_mask = jnp.array([t == 'binary' for t in outcome_type])
-        tau_num = jnp.where(binary_mask, 3.0, 1.0)
-        expected_sigest = jnp.where(binary_mask, 0.0, 1.0)
-        assert_array_equal(bart.sigest, expected_sigest)
     else:
-        tau_num = 1
-        assert_array_equal(bart.sigest, jnp.ones(k), strict=True)
-        assert_close_matrices(bart.offset[..., None], kw['y_train'], rtol=1e-6)
+        tau_num = jnp.where(mask, 3.0, 1.0)
+        expected_sigest = jnp.where(mask, 0.0, 1.0)
+        assert_array_equal(bart.sigest, expected_sigest)
+
+    # check leaf_prior_cov_inv
     expected_cov_inv = (2**2 * kw['num_trees']) / tau_num**2
     leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv
     if leaf_prior_cov_inv.ndim == 2:  # pragma: no branch, always mv with defaults
         expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
-    assert_allclose(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
+    assert_close_matrices(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
 
-    # in the multivariate case, it's not exactly 0 because matrix inversion
-    # adds an epsilon to handle ill-conditioned matrices
-    assert_allclose(bart._burnin_trace.log_likelihood, 0.0, atol=1e-6)
-    assert_allclose(bart._main_trace.log_likelihood, 0.0, atol=1e-6)
+    # with 1 datapoint in the multivariate case, log_likelihood is not exactly 0
+    # because matrix inversion adds an epsilon to handle ill-conditioned matrices
+    atol = 0.0 if num_datapoints == 0 else 1e-6
+    assert_allclose(bart._burnin_trace.log_likelihood, 0.0, atol=atol)
+    assert_allclose(bart._main_trace.log_likelihood, 0.0, atol=atol)
 
 
 def test_two_datapoints(bkw: BartKW) -> None:

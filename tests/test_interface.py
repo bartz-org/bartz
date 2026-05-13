@@ -84,6 +84,7 @@ from tests.util import (
     assert_array_equal,
     assert_close_matrices,
     assert_different_matrices,
+    clipped_logit,
     periodic_sigint,
     rhat_rank,
 )
@@ -512,8 +513,10 @@ class TestWithCachedBart:  # pragma: slow
             with subtests.test('prob_train'):
                 prob_train = bart.predict('train', kind='mean_samples')
                 prob_train_chains = prob_train.reshape(num_chains, nsamples, -1)
-                rhat_prob_train = rhat_rank(prob_train_chains, split=True)
-                assert_array_less(rhat_prob_train, 1.01)
+                rhat_prob_train = rhat_rank(
+                    clipped_logit(prob_train_chains, 1e-5), split=True
+                )
+                assert_array_less(rhat_prob_train, 1.005)
         elif mixed:
             with subtests.test('sigma'):
                 # mixed regression: check get_error_sdev, dropping binary

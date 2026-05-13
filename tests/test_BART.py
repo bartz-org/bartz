@@ -77,6 +77,7 @@ from tests.util import (
     assert_array_equal,
     assert_close_matrices,
     assert_different_matrices,
+    clipped_logit,
     periodic_sigint,
     rhat_rank,
 )
@@ -296,8 +297,8 @@ class TestWithCachedBart:  # pragma: slow
         if get_with_default(kw, 'type') == 'pbart':  # binary regression
             with subtests.test('prob_train'):
                 prob_train = bart.prob_train.reshape(nchains, nsamples, n)
-                rhat_prob_train = rhat_rank(prob_train, split=True)
-                assert_array_less(rhat_prob_train, 1.01)
+                rhat_prob_train = rhat_rank(clipped_logit(prob_train, 1e-5), split=True)
+                assert_array_less(rhat_prob_train, 1.005)
 
         else:  # continuous regression
             with subtests.test('sigma'):
@@ -418,15 +419,17 @@ class TestWithCachedBart:  # pragma: slow
         if get_with_default(kw, 'type') == 'pbart':  # binary regression
             with subtests.test('prob_train'):
                 rhat_prob_train = rhat_rank(
-                    [bart.prob_train, rbart.prob_train], split=False
+                    clipped_logit(jnp.stack([bart.prob_train, rbart.prob_train]), 1e-5),
+                    split=False,
                 )
-                assert_array_less(rhat_prob_train, 1.01)
+                assert_array_less(rhat_prob_train, 1.005)
 
             with subtests.test('prob_test'):
                 rhat_prob_test = rhat_rank(
-                    [bart.prob_test, rbart.prob_test], split=False
+                    clipped_logit(jnp.stack([bart.prob_test, rbart.prob_test]), 1e-5),
+                    split=False,
                 )
-                assert_array_less(rhat_prob_test, 1.01)
+                assert_array_less(rhat_prob_test, 1.005)
 
         else:  # continuous regression
             with subtests.test('yhat_train_mean'):
@@ -534,11 +537,6 @@ class TestWithCachedBart:  # pragma: slow
         assert_different(bart._mcmc_state, rtol=0.01)
         assert_different(bart._main_trace, rtol=0.03)
         assert_different(bart._burnin_trace, rtol=0.03)
-
-
-def clipped_logit(x: Array, eps: float) -> Array:
-    """Compute the logit of x, clipping x to [eps, 1-eps] to avoid infinities."""
-    return logit(jnp.clip(x, eps, 1 - eps))
 
 
 def test_sequential_guarantee(kw: dict, subtests: SubTests) -> None:

@@ -36,7 +36,8 @@ from typing import Any
 
 import numpy as np
 from jax import numpy as jnp
-from jaxtyping import ArrayLike, Float
+from jax.scipy.special import logit
+from jaxtyping import Array, ArrayLike, Float
 from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
 from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
 from scipy import linalg, stats
@@ -277,6 +278,11 @@ def periodic_sigint(
     finally:
         if timer._thread is not None:
             timer.cancel()
+
+
+def clipped_logit(x: ArrayLike, eps: float) -> Array:
+    """Compute the logit of x, clipping x to [eps, 1-eps] to avoid infinities."""
+    return logit(jnp.clip(x, eps, 1 - eps))
 
 
 def rhat_rank(

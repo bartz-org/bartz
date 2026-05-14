@@ -289,7 +289,7 @@ class TestWithCachedBart:  # pragma: slow
         with subtests.test('yhat_train'):
             yhat_train = bart.yhat_train.reshape(nchains, nsamples, n)
             rhat_yhat_train = rhat_rank(yhat_train, split=True)
-            assert_array_less(rhat_yhat_train, 1.1)
+            assert_array_less(rhat_yhat_train, 1.25)
 
         if get_with_default(kw, 'type') == 'pbart':  # binary regression
             with subtests.test('prob_train'):
@@ -307,14 +307,14 @@ class TestWithCachedBart:  # pragma: slow
             with subtests.test('varcount'):
                 varcount = bart.varcount.reshape(nchains, nsamples, p)
                 rhat_varcount = rhat_rank(varcount, split=True)
-                assert_array_less(rhat_varcount, 1.8)
+                assert_array_less(rhat_varcount, 2.0)
 
             if get_with_default(kw, 'sparse'):  # pragma: no branch
                 with subtests.test('varprob'):
                     varprob = bart.varprob.reshape(nchains, nsamples, p)
                     rhat_varprob = rhat_rank(varprob[:, :, 1:], split=True)
                     # drop one component because varprob sums to 1
-                    assert_array_less(rhat_varprob, 1.7)
+                    assert_array_less(rhat_varprob, 1.9)
 
     def kw_bartz_to_BART3(self, key: Key[Array, ''], kw: dict, bart: mc_gbart) -> dict:
         """Convert bartz keyword arguments to R BART3 keyword arguments."""

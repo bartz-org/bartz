@@ -261,7 +261,9 @@ class Bart(Module):
         datapoint. Not specifying `w` is equivalent to setting it to 1 for all
         datapoints. Note: `w` is ignored in the automatic determination of
         `sigest`, so either the weights should be O(1), or `sigest` should be
-        specified by the user. Not supported for multivariate regression.
+        specified by the user. For multivariate regression, the same scalar
+        weight is broadcast to all outcome components. Not supported when any
+        outcome is binary.
     num_trees
         The number of trees used to represent the latent mean function.
     n_save
@@ -713,6 +715,8 @@ class Bart(Module):
             # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
             z = random.normal(key, latent.shape)  # (ndpost, k, m)
             error = solve_triangular(L, z, trans='T', lower=True)
+            if w is not None:
+                error *= w[None, None, :]
         elif self._mcmc_state.binary_y is not None:
             # pure binary UV: probit has sigma = 1
             error = random.normal(key, latent.shape)
@@ -765,12 +769,8 @@ class Bart(Module):
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
         has_train_weights = self._mcmc_state.prec_scale is not None
         is_binary = self._mcmc_state.binary_y is not None
-        is_multivariate = self._mcmc_state.offset.ndim == 1
         needs_weights = (
-            kind is PredictKind.outcome_samples
-            and not is_binary
-            and not is_multivariate
-            and has_train_weights
+            kind is PredictKind.outcome_samples and not is_binary and has_train_weights
         )
 
         if not needs_weights:
@@ -778,8 +778,7 @@ class Bart(Module):
                 msg = (
                     '`w` must be `None` in this configuration'
                     " (it is used only with kind='outcome_samples',"
-                    ' univariate continuous regression fitted with'
-                    ' weights)'
+                    ' continuous regression fitted with weights)'
                 )
                 raise ValueError(msg)
             return None
@@ -996,10 +995,8 @@ class Bart(Module):
                 f' found {y_train.shape=}.'
             )
             raise ValueError(msg)
-        if w is not None and not (
-            outcome_type is OutcomeType.continuous and y_train.ndim == 1
-        ):
-            msg = 'Weights are only supported for univariate continuous regression.'
+        if w is not None and outcome_type is not OutcomeType.continuous:
+            msg = 'Weights are not supported when any outcome is binary.'
             raise ValueError(msg)
 
         if isinstance(outcome_type, tuple):

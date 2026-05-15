@@ -648,11 +648,11 @@ def _precompute_likelihood_terms_uv(
 def _precompute_likelihood_terms_mv(
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
-    move_precs: Counts,
+    move_precs: Precs | Counts,
 ) -> tuple[PreLkV, None]:
-    nL: UInt[Array, 'num_trees 1 1'] = move_precs.left[..., None, None]
-    nR: UInt[Array, 'num_trees 1 1'] = move_precs.right[..., None, None]
-    nT: UInt[Array, 'num_trees 1 1'] = move_precs.total[..., None, None]
+    nL: Shaped[Array, 'num_trees 1 1'] = move_precs.left[..., None, None]
+    nR: Shaped[Array, 'num_trees 1 1'] = move_precs.right[..., None, None]
+    nT: Shaped[Array, 'num_trees 1 1'] = move_precs.total[..., None, None]
 
     L_left: Float32[Array, 'num_trees k k'] = chol_with_gersh(
         error_cov_inv * nL + leaf_prior_cov_inv
@@ -698,15 +698,17 @@ def precompute_likelihood_terms(
     Pre-compute terms used in the likelihood ratio of the acceptance step.
 
     Handles both univariate and multivariate cases based on the shape of the
-    input arrays. The multivariate implementation assumes a homoskedastic error
-    model (i.e., the residual covariance is the same for all observations).
+    input arrays. In the multivariate case, per-datapoint error precision
+    scales (if any) are isotropic across components, so they enter the
+    likelihood only through the per-leaf scalar precision sum carried by
+    `move_precs` (a `Precs` instead of a `Counts`).
 
     Parameters
     ----------
     error_cov_inv
         The inverse error variance (univariate) or the inverse of the error
-        covariance matrix (multivariate). For univariate case, this is the
-        inverse global error variance factor if `prec_scale` is set.
+        covariance matrix (multivariate). This is the inverse global error
+        variance factor if `prec_scale` is set.
     leaf_prior_cov_inv
         The inverse prior variance of each leaf (univariate) or the inverse of
         prior covariance matrix of each leaf (multivariate).
@@ -722,7 +724,6 @@ def precompute_likelihood_terms(
         Pre-computed terms of the likelihood ratio, shared by all trees.
     """
     if error_cov_inv.ndim == 2:
-        assert isinstance(move_precs, Counts)
         return _precompute_likelihood_terms_mv(
             error_cov_inv, leaf_prior_cov_inv, move_precs
         )
@@ -1403,9 +1404,12 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], bart: State) -> State:
     assert bart.error_cov_df is not None
     assert bart.error_cov_scale is not None
 
-    n = bart.resid.shape[-1]
+    resid = bart.resid
+    if bart.inv_sdev_scale is not None:
+        resid *= bart.inv_sdev_scale
+    _, n = resid.shape
     df_post = bart.error_cov_df + n
-    scale_post = bart.error_cov_scale + bart.resid @ bart.resid.T
+    scale_post = bart.error_cov_scale + resid @ resid.T
 
     prec = _sample_wishart_bartlett(key, df_post, scale_post)
     return replace(bart, error_cov_inv=prec)

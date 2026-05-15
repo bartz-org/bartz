@@ -641,8 +641,10 @@ def init(
     error_scale
         Each error is scaled by the corresponding factor in `error_scale`, so
         the error variance for ``y[i]`` is ``sigma2 * error_scale[i] ** 2``.
-        Not supported for binary regression. If not specified, defaults to 1 for
-        all points, but potentially skipping calculations.
+        For multivariate regression, the same scalar scale is applied to all
+        outcome components of ``y[i]``. Not supported for binary or mixed
+        binary-continuous regression. If not specified, defaults to 1 for all
+        points, but potentially skipping calculations.
     min_points_per_decision_node
         The minimum number of data points in a decision node. 0 if not
         specified.

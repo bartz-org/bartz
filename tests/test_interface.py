@@ -311,15 +311,17 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 w_test=gen_w(keys.pop(), nt),
             )
 
-        # multivariate continuous regression with some settings that induce
-        # large types, sparsity with free theta
+        # multivariate continuous regression with error weights and some
+        # settings that induce large types, sparsity with free theta
         case 4:
             X = gen_X(keys.pop(), p, n, 'continuous')
+            w = gen_w(keys.pop(), X.shape[1])
             bkw = BartKW(
                 kw=dict(
                     x_train=X,
-                    y_train=gen_y(keys.pop(), X, None, 'continuous', k=1, s='random'),
+                    y_train=gen_y(keys.pop(), X, w, 'continuous', k=2, s='random'),
                     outcome_type='continuous',
+                    w=w,
                     sparse=True,
                     **common,
                     printevery=50,
@@ -338,6 +340,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     ),
                 ),
                 x_test=gen_X(keys.pop(), p, nt, 'continuous'),
+                w_test=gen_w(keys.pop(), nt),
             )
 
         # multivariate binary regression with binary X and high p
@@ -439,7 +442,7 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     kw = kw.copy()
     kw['x_train'] = kw['x_train'][:, :n]
     kw['y_train'] = kw['y_train'][..., :n]
-    if kw.get('w') is not None:  # pragma: no cover, never true in mv variants
+    if kw.get('w') is not None:
         kw['w'] = kw['w'][:n]
     return kw
 
@@ -1507,7 +1510,8 @@ def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
         else:
             check(yhat_train, chains=True, data=True)
 
-            extra['w'] = bkw.w_test
+            if kind is PredictKind.outcome_samples:
+                extra['w'] = bkw.w_test
             yhat_test = bart.predict(bkw.x_test, kind=kind, **extra)
             check(yhat_test, chains=True, data=False)
 
@@ -1752,17 +1756,11 @@ class TestMVBartInterface:
             assert bart.sigest is None
             assert bart._mcmc_state.error_cov_scale.shape == (k, k)
 
-    def test_mv_rejects_weights(self, example_data: ExampleData) -> None:
-        """MV + weights should raise."""
-        x, y, w, kw = example_data
-        with pytest.raises(ValueError, match='Weights'):
-            Bart(x_train=x, y_train=y, w=w, **kw)
-
     def test_mixed_rejects_weights(self, example_data: ExampleData) -> None:
         """Mixed outcome_type + weights should raise."""
         x, y, w, kw = example_data
         k, _ = y.shape
-        with pytest.raises(ValueError, match='univariate continuous'):
+        with pytest.raises(ValueError, match='binary'):
             Bart(
                 x_train=x,
                 y_train=y,

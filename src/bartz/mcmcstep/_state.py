@@ -327,6 +327,10 @@ class State(Module):
     """The scale on the error precision, i.e., ``1 / error_scale ** 2``.
     `None` in binary regression."""
 
+    inv_sdev_scale: Float32[Array, ' n'] | None = field(data=True)
+    """The reciprocal of the per-observation scale on the error standard deviation,
+    i.e., ``1 / error_scale``. `None` in binary regression."""
+
     error_cov_df: Float32[Array, ''] | None
     """The df parameter of the inverse Wishart prior on the noise
     covariance. For the univariate case, the relationship to the inverse
@@ -827,6 +831,7 @@ def init(
         ),
         error_cov_inv=add_chains(error_cov_inv),
         prec_scale=error_scale,  # temporarily set to error_scale, fix after sharding
+        inv_sdev_scale=error_scale,  # temporarily set to error_scale, fix after sharding
         error_cov_df=error_cov_df,
         error_cov_scale=error_cov_scale,
         forest=Forest(
@@ -914,11 +919,11 @@ def init(
         binary_y = None
     state = replace(state, binary_y=binary_y)
 
-    # calculate prec_scale after sharding to do the calculation on the right
-    # devices
-    if state.prec_scale is not None:
-        prec_scale = _compute_prec_scale(state.prec_scale)
-        state = replace(state, prec_scale=prec_scale)
+    # calculate prec_scale and inv_sdev_scale after sharding to do the
+    # calculation on the right devices
+    if state.inv_sdev_scale is not None:
+        inv_sdev_scale, prec_scale = _compute_scales(state.inv_sdev_scale)
+        state = replace(state, inv_sdev_scale=inv_sdev_scale, prec_scale=prec_scale)
 
     # make all types strong to avoid unwanted recompilations
     return _remove_weak_types(state)
@@ -971,13 +976,29 @@ def _initial_affluence_tree(
 
 
 @partial(jit, donate_argnums=(0,))
-def _compute_prec_scale(error_scale: Float32[Array, ' n']) -> Float32[Array, ' n']:
-    """Compute 1 / error_scale**2.
+def _compute_scales(
+    error_scale: Float32[Array, ' n'],
+) -> tuple[Float32[Array, ' n'], Float32[Array, ' n']]:
+    """Compute ``(1 / error_scale, 1 / error_scale ** 2)``.
 
     This is a separate function to use donate_argnums to avoid intermediate
     copies.
+
+    Parameters
+    ----------
+    error_scale
+        Per-observation error standard deviation scale.
+
+    Returns
+    -------
+    inv_sdev_scale
+        ``1 / error_scale``.
+    prec_scale
+        ``1 / error_scale ** 2``.
     """
-    return jnp.reciprocal(jnp.square(error_scale))
+    inv_sdev_scale = jnp.reciprocal(error_scale)
+    prec_scale = jnp.square(inv_sdev_scale)
+    return inv_sdev_scale, prec_scale
 
 
 def _get_blocked_vars(

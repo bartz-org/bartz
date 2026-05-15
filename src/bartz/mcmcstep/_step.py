@@ -1388,11 +1388,9 @@ def _step_error_cov_inv_uv(key: Key[Array, ''], bart: State) -> State:
     resid = bart.resid
     # inverse gamma prior: alpha = df / 2, beta = scale / 2
     alpha = bart.error_cov_df / 2 + resid.size / 2
-    if bart.prec_scale is None:
-        scaled_resid = resid
-    else:
-        scaled_resid = resid * bart.prec_scale
-    norm2 = resid @ scaled_resid
+    if bart.inv_sdev_scale is not None:
+        resid = resid * bart.inv_sdev_scale
+    norm2 = resid @ resid
     beta = bart.error_cov_scale / 2 + norm2 / 2
 
     sample = random.gamma(key, alpha)

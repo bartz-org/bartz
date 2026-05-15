@@ -768,6 +768,7 @@ class TestMultichain:
                 '.binary_indices',
                 '.offset',
                 '.prec_scale',
+                '.inv_sdev_scale',
                 '.error_cov_df',
                 '.error_cov_scale',
                 '.forest.max_split',
@@ -800,6 +801,7 @@ class TestMultichain:
                 '.z',
                 '.resid',
                 '.prec_scale',
+                '.inv_sdev_scale',
                 '.forest.leaf_indices',
             )
             if keystr(path) in vmap_attrs:
@@ -1408,6 +1410,7 @@ class TestMVBartIntegration:
             z=None,
             offset=0.0,
             prec_scale=None,
+            inv_sdev_scale=None,
             forest=None,
             config=None,
         )

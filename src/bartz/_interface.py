@@ -791,7 +791,7 @@ class Bart(Module):
                     ' (training weights are used automatically)'
                 )
                 raise ValueError(msg)
-            return jnp.reciprocal(jnp.sqrt(self._mcmc_state.prec_scale))
+            return jnp.reciprocal(self._mcmc_state.inv_sdev_scale)
 
         # new test data, model was fit with weights
         if w is None:

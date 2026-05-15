@@ -582,7 +582,14 @@ class TestMultichain:
     n = 60  # 3 * 4 * 5, maximize divisibility for sharding tests
 
     @pytest.fixture(
-        params=['uv-binary', 'uv-continuous', 'mv-binary', 'mv-continuous', 'mv-mixed']
+        params=[
+            'uv-binary',
+            'uv-continuous',
+            'mv-binary',
+            'mv-continuous',
+            'mv-continuous-vec-weights',
+            'mv-mixed',
+        ]
     )
     def init_kwargs(self, keys: split, request: pytest.FixtureRequest) -> dict:
         """Return arguments for `init`."""
@@ -590,6 +597,7 @@ class TestMultichain:
         mv = kind.startswith('mv-')
         binary = kind.endswith('-binary')
         mixed = kind == 'mv-mixed'
+        vec_weights = kind == 'mv-continuous-vec-weights'
 
         p = 10
         k = 2
@@ -644,6 +652,13 @@ class TestMultichain:
             kw.update(
                 error_cov_df=2.0,  # keep this a weak type
                 error_cov_scale=2 * jnp.eye(k) if mv else 2.0,
+            )
+
+        if vec_weights:
+            kw.update(
+                error_scale=jnp.exp(
+                    random.uniform(keys.pop(), (k, self.n), float, -0.5, 0.5)
+                )
             )
 
         return kw
@@ -1038,7 +1053,7 @@ class TestMixedBinaryContinuous:
 
     def test_init_rejects_error_scale(self, init_kwargs: dict) -> None:
         """Check that init rejects error_scale for mixed outcomes."""
-        with pytest.raises(AssertionError, match='error_scale'):
+        with pytest.raises(AssertionError):
             init(**init_kwargs, error_scale=jnp.ones(self.n))
 
     def test_step_z_updates_only_binary_resid(
@@ -1442,18 +1457,18 @@ class TestMVBartIntegration:
         assert p_value > 0.01
 
 
-class TestMVBartSteps:
-    """Test the full MCMC step trajectory (init + multiple steps)."""
+class TestMultivariate:
+    """Test for multivariate outcomes specifically."""
 
-    @pytest.mark.parametrize('binary', [False, True])
-    def test_step_trees_exact_match(
-        self, keys: split, mcmcstep_data: MCMCStepData, binary: bool
+    @pytest.mark.parametrize('kind', ['binary', 'homo', 'het'])
+    def test_1d_mv_matches_uv(
+        self, keys: split, mcmcstep_data: MCMCStepData, kind: str
     ) -> None:
-        """Test that MV tree logic is Identical to UV logic."""
+        """Check that multivariate with k=1 is equivalent to univariate."""
         X, y, max_split = mcmcstep_data
         n_trees = 100
 
-        if binary:
+        if kind == 'binary':
             y = (y > 0).astype(jnp.float32)
 
         params = partial(
@@ -1473,12 +1488,17 @@ class TestMVBartSteps:
             y=y[None, :], offset=jnp.zeros(1), leaf_prior_cov_inv=n_trees * jnp.eye(1)
         )
 
-        if binary:
+        if kind == 'binary':
             uv_kw.update(outcome_type='binary')
             mv_kw.update(outcome_type='binary')
         else:
             uv_kw.update(error_cov_df=4.0, error_cov_scale=2.0)
             mv_kw.update(error_cov_df=jnp.array(4.0), error_cov_scale=2 * jnp.eye(1))
+
+        if kind == 'het':
+            w = jnp.exp(random.uniform(keys.pop(), (y.size,), float, -0.5, 0.5))
+            uv_kw.update(error_scale=w)
+            mv_kw.update(error_scale=w[None, :])  # (1, n) — triggers vector-het path
 
         uv_state = init(**uv_kw, **params())
         mv_state = init(**mv_kw, **params())
@@ -1489,58 +1509,62 @@ class TestMVBartSteps:
             error_cov_inv=jnp.array([[uv_state.error_cov_inv]]),
             forest=replace(
                 mv_state.forest,
-                var_tree=uv_state.forest.var_tree,
-                split_tree=uv_state.forest.split_tree,
-                leaf_tree=uv_state.forest.leaf_tree[:, None, :],
-                leaf_indices=uv_state.forest.leaf_indices,
-                affluence_tree=uv_state.forest.affluence_tree,
+                **copy_arrays(
+                    dict(
+                        var_tree=uv_state.forest.var_tree,
+                        split_tree=uv_state.forest.split_tree,
+                        leaf_tree=uv_state.forest.leaf_tree[:, None, :],
+                        leaf_indices=uv_state.forest.leaf_indices,
+                        affluence_tree=uv_state.forest.affluence_tree,
+                    )
+                ),
             ),
         )
 
-        key = keys.pop()
-        uv_next = step_trees(key, uv_state)
-        mv_next = step_trees(random.clone(key), mv_state)
+        for key in keys.pop(3):
+            assert_close_matrices(
+                uv_state.resid, mv_state.resid.squeeze(0), rtol=1e-6, atol=1e-6
+            )
+            assert_close_matrices(
+                uv_state.forest.leaf_tree,
+                mv_state.forest.leaf_tree.squeeze(1),
+                rtol=1e-6,
+            )
 
-        assert_close_matrices(
-            uv_next.resid, mv_next.resid.squeeze(0), atol=1e-6, rtol=1e-6
-        )
-        assert_close_matrices(
-            uv_state.forest.leaf_tree,
-            mv_state.forest.leaf_tree.squeeze(1),
-            atol=1e-6,
-            rtol=1e-6,
-        )
+            assert_array_equal(uv_state.forest.var_tree, mv_state.forest.var_tree)
+            assert_array_equal(uv_state.forest.split_tree, mv_state.forest.split_tree)
+            assert_array_equal(
+                uv_state.forest.leaf_indices, mv_state.forest.leaf_indices
+            )
+            assert_array_equal(
+                uv_state.forest.affluence_tree, mv_state.forest.affluence_tree
+            )
 
-        assert_array_equal(uv_state.forest.var_tree, mv_state.forest.var_tree)
-        assert_array_equal(uv_state.forest.split_tree, mv_state.forest.split_tree)
-        assert_array_equal(uv_state.forest.leaf_indices, mv_state.forest.leaf_indices)
-        assert_array_equal(
-            uv_state.forest.affluence_tree, mv_state.forest.affluence_tree
-        )
+            assert_array_equal(
+                uv_state.forest.grow_prop_count, mv_state.forest.grow_prop_count
+            )
+            assert_array_equal(
+                uv_state.forest.grow_acc_count, mv_state.forest.grow_acc_count
+            )
+            assert_array_equal(
+                uv_state.forest.prune_prop_count, mv_state.forest.prune_prop_count
+            )
+            assert_array_equal(
+                uv_state.forest.prune_acc_count, mv_state.forest.prune_acc_count
+            )
 
-        assert_array_equal(
-            uv_state.forest.grow_prop_count, mv_state.forest.grow_prop_count
-        )
-        assert_array_equal(
-            uv_state.forest.grow_acc_count, mv_state.forest.grow_acc_count
-        )
-        assert_array_equal(
-            uv_state.forest.prune_prop_count, mv_state.forest.prune_prop_count
-        )
-        assert_array_equal(
-            uv_state.forest.prune_acc_count, mv_state.forest.prune_acc_count
-        )
+            uv_state = step_trees(key, uv_state)
+            mv_state = step_trees(random.clone(key), mv_state)
 
-    @pytest.mark.parametrize('binary', [False, True])
-    def test_mv_steps(
-        self, keys: split, mcmcstep_data: MCMCStepData, binary: bool
-    ) -> None:
-        """Test that mv mode can run without crashing."""
+    @pytest.mark.parametrize('kind', ['binary', 'homo', 'het'])
+    def test_smoke(self, keys: split, mcmcstep_data: MCMCStepData, kind: str) -> None:
+        """Run a few steps, check shapes and valid values."""
         X, y_uv, max_split = mcmcstep_data
         k = 3
+        n = y_uv.size
 
-        if binary:
-            y = random.bernoulli(keys.pop(), 0.5, (k, y_uv.size)).astype(jnp.float32)
+        if kind == 'binary':
+            y = random.bernoulli(keys.pop(), 0.5, (k, n)).astype(jnp.float32)
         else:
             y = jnp.tile(y_uv, (k, 1))
             y = y + random.normal(keys.pop(), y.shape) * 0.1
@@ -1557,12 +1581,22 @@ class TestMVBartSteps:
             count_num_batches=None,
         )
 
-        if binary:
+        if kind == 'binary':
             kw.update(outcome_type='binary')
         else:
             kw.update(error_cov_df=jnp.array(10.0), error_cov_scale=jnp.eye(k))
 
+        if kind == 'het':
+            w = jnp.exp(random.uniform(keys.pop(), (k, n), float, -0.5, 0.5))
+            kw.update(error_scale=w)
+
         mv_state = init(**kw)
+
+        if kind == 'het':
+            assert mv_state.prec_scale is not None
+            assert mv_state.prec_scale.shape == (k, k, n)
+            assert mv_state.inv_sdev_scale is not None
+            assert mv_state.inv_sdev_scale.shape == (k, n)
 
         for key in keys.pop(10):
             mv_state = step(key, mv_state)
@@ -1570,15 +1604,70 @@ class TestMVBartSteps:
             assert jnp.all(jnp.isfinite(mv_state.resid))
             assert jnp.all(jnp.isfinite(mv_state.forest.leaf_tree))
 
-            assert mv_state.resid.shape == (k, y.shape[1])
+            assert mv_state.resid.shape == y.shape
 
             assert jnp.all(jnp.isfinite(mv_state.error_cov_inv))
             assert mv_state.error_cov_inv.shape == (k, k)
 
-            if binary:
+            if kind == 'binary':
                 assert mv_state.z is not None
                 assert jnp.all(jnp.isfinite(mv_state.z))
-                assert mv_state.z.shape == (k, y.shape[1])
+                assert mv_state.z.shape == y.shape
+
+    @pytest.mark.parametrize('k', [1, 3])
+    def test_mv_het_vector_equiv_scalar(
+        self, keys: split, mcmcstep_data: MCMCStepData, k: int
+    ) -> None:
+        """Constant vector weights equal scalar weights."""
+        X, y_uv, max_split = mcmcstep_data
+        n = y_uv.size
+
+        y = jnp.tile(y_uv, (k, 1))
+        y = y + random.normal(keys.pop(), y.shape) * 0.1
+
+        w_scalar = jnp.exp(random.uniform(keys.pop(), (n,), float, -0.5, 0.5))
+        w_vector = jnp.broadcast_to(w_scalar, (k, n))
+
+        params = partial(
+            copy_arrays,
+            dict(
+                X=X,
+                y=y,
+                offset=jnp.zeros(k),
+                max_split=max_split,
+                num_trees=10,
+                p_nonterminal=jnp.array([0.9, 0.5]),
+                leaf_prior_cov_inv=jnp.eye(k),
+                error_cov_df=jnp.array(4.0 + k),
+                error_cov_scale=jnp.eye(k),
+                resid_num_batches=None,
+                count_num_batches=None,
+            ),
+        )
+
+        scalar_state = init(error_scale=w_scalar, **params())
+        vector_state = init(error_scale=w_vector, **params())
+
+        assert scalar_state.prec_scale is not None
+        assert scalar_state.prec_scale.shape == (n,)
+        assert vector_state.prec_scale is not None
+        assert vector_state.prec_scale.shape == (k, k, n)
+
+        for _ in range(3):
+            key = keys.pop()
+            scalar_state = step(key, scalar_state)
+            vector_state = step(random.clone(key), vector_state)
+
+            assert_close_matrices(scalar_state.resid, vector_state.resid, rtol=1e-5)
+            assert_close_matrices(
+                scalar_state.forest.leaf_tree,
+                vector_state.forest.leaf_tree,
+                rtol=1e-5,
+                reduce_rank=True,
+            )
+            assert_close_matrices(
+                scalar_state.error_cov_inv, vector_state.error_cov_inv, rtol=1e-5
+            )
 
 
 def copy_arrays(x: PyTree) -> PyTree:

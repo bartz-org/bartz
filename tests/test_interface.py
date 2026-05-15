@@ -119,15 +119,19 @@ def f(x: Real[Array, 'p n'], s: Real[Array, ' p'], k: int) -> Float32[Array, 'k 
     return jnp.einsum('p,kpn->kn', s, jnp.cos(arg)) / norm
 
 
-def gen_w(key: Key[Array, ''], n: int) -> Float32[Array, ' n']:
+def gen_w(
+    key: Key[Array, ''], shape: int | Sequence[int]
+) -> Float32[Array, ' {shape}']:
     """Generate a vector of error weights."""
-    return jnp.exp(random.uniform(key, (n,), float, -1, 1))
+    if isinstance(shape, int):
+        shape = (shape,)
+    return jnp.exp(random.uniform(key, shape, float, -1, 1))
 
 
 def gen_y(
     key: Key[Array, ''],
     X: Real[Array, 'p n'],
-    w: Float32[Array, ' n'] | None,
+    w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
     outcome_type: str | Sequence[str] = 'continuous',
     *,
     k: int | None = None,
@@ -175,7 +179,7 @@ class BartKW(NamedTuple):
 
     kw: dict[str, Any]
     x_test: Real[Array, 'p m']
-    w_test: Float32[Array, ' m'] | None = None
+    w_test: Float32[Array, ' m'] | Float32[Array, 'k m'] | None = None
 
     @property
     def uses_quantile_binner(self) -> bool:
@@ -372,7 +376,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
         # multivariate mixed binary-continuous regression with sparsity with
         # fixed theta
-        case 6:  # pragma: no branch  # pragma: slow
+        case 6:  # pragma: slow
             X = gen_X(keys.pop(), p, n, 'continuous')
             outcome_type = ['continuous', 'binary', 'binary']
             bkw = BartKW(
@@ -404,6 +408,24 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 x_test=gen_X(keys.pop(), p, nt, 'continuous'),
             )
 
+        # multivariate continuous regression with vector weights
+        case 7:  # pragma: no branch  # pragma: slow
+            k = 2
+            X = gen_X(keys.pop(), p, n, 'continuous')
+            w = gen_w(keys.pop(), (k, n))
+            bkw = BartKW(
+                kw=dict(
+                    x_train=X,
+                    y_train=gen_y(keys.pop(), X, w, 'continuous', k=k, s='random'),
+                    outcome_type='continuous',
+                    w=w,
+                    **common,
+                    num_chains=None,
+                ),
+                x_test=gen_X(keys.pop(), p, nt, 'continuous'),
+                w_test=gen_w(keys.pop(), (k, nt)),
+            )
+
         case _:  # pragma: no cover
             msg = f'Unknown variant {variant}'
             raise ValueError(msg)
@@ -422,6 +444,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
         4,
         pytest.param(5, marks=pytest.mark.slow),
         pytest.param(6, marks=pytest.mark.slow),
+        pytest.param(7, marks=pytest.mark.slow),
     ),
     scope='module',
 )
@@ -443,7 +466,7 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     kw['x_train'] = kw['x_train'][:, :n]
     kw['y_train'] = kw['y_train'][..., :n]
     if kw.get('w') is not None:
-        kw['w'] = kw['w'][:n]
+        kw['w'] = kw['w'][..., :n]
     return kw
 
 
@@ -1024,7 +1047,7 @@ def test_min_points_per_leaf(bkw: BartKW) -> None:
     distr = bart.points_per_leaf_distr()
     distr_marg = distr.sum(axis=(0, 1))
 
-    min_points = init_kw.get('min_points_per_leaf', 5)
+    min_points = init_kw.get('min_points_per_leaf')  # default None
 
     if min_points is None:
         assert distr_marg[4] > 0

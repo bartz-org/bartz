@@ -261,9 +261,9 @@ class Bart(Module):
         datapoint. Not specifying `w` is equivalent to setting it to 1 for all
         datapoints. Note: `w` is ignored in the automatic determination of
         `sigest`, so either the weights should be O(1), or `sigest` should be
-        specified by the user. For multivariate regression, the same scalar
-        weight is broadcast to all outcome components. Not supported when any
-        outcome is binary.
+        specified by the user. Shape ``(n,)`` applies the same scalar weight
+        to every outcome component; for multivariate continuous regression,
+        ``(k, n)`` instead supplies a per-component weight per datapoint.
     num_trees
         The number of trees used to represent the latent mean function.
     n_save
@@ -364,7 +364,7 @@ class Bart(Module):
         lamda: FloatLike | Float[ArrayLike, ' k'] | None = None,
         tau_num: FloatLike | None = None,
         offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
-        w: Float[ArrayLike, ' n'] | Series | None = None,
+        w: Float[ArrayLike, ' n'] | Float[ArrayLike, 'k n'] | Series | None = None,
         num_trees: int = 200,
         n_save: int = 1000,
         n_burn: int = 1000,
@@ -468,7 +468,7 @@ class Bart(Module):
         *,
         kind: PredictKind | str = 'mean',
         key: Key[Array, ''] | None = None,
-        w: Float[Array, ' m'] | Series | None = None,
+        w: Float[Array, ' m'] | Float[Array, 'k m'] | Series | None = None,
     ) -> (
         Float32[Array, ' m']
         | Float32[Array, 'k m']
@@ -490,7 +490,8 @@ class Bart(Module):
         w
             Per-observation error scale for ``kind='outcome_samples'``.
             Required when the model was fit with weights and ``x_test`` is
-            new data.
+            new data. Shape matches the shape used at fitting: ``(m,)`` for
+            scalar weights, ``(k, m)`` for multivariate vector weights.
 
         Returns
         -------
@@ -701,7 +702,7 @@ class Bart(Module):
         key: Key[Array, ''],
         latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
         binary_indices: Int32[Array, ' kb'] | None,
-        w: Float32[Array, ' m'] | None,
+        w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
         """Sample from the posterior predictive distribution."""
         if latent.ndim > 2:  # multivariate case
@@ -714,9 +715,10 @@ class Bart(Module):
             # Sample z ~ N(0, I) and solve L^T @ error = z
             # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
             z = random.normal(key, latent.shape)  # (ndpost, k, m)
-            error = solve_triangular(L, z, trans='T', lower=True)
+            error = solve_triangular(L, z, trans='T', lower=True)  # (ndpost, k, m)
             if w is not None:
-                error *= w[None, None, :]
+                # w is (m,) or (k, m) so it always broadcasts right
+                error *= w
         elif self._mcmc_state.binary_y is not None:
             # pure binary UV: probit has sigma = 1
             error = random.normal(key, latent.shape)
@@ -741,8 +743,8 @@ class Bart(Module):
         self,
         x_test: Real[Array, 'p m'] | DataFrame | str,
         kind: PredictKind,
-        w: Float[Array, ' m'] | Series | None,
-    ) -> Float32[Array, ' m'] | None:
+        w: Float[Array, ' m'] | Float[Array, 'k m'] | Series | None,
+    ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
         """Validate and resolve the error weights for prediction.
 
         Parameters
@@ -799,7 +801,15 @@ class Bart(Module):
                 ' weights and x_test is new data'
             )
             raise ValueError(msg)
-        return self._process_response_input(w)
+        w_test = self._process_response_input(w)
+        if w_test.ndim != self._mcmc_state.inv_sdev_scale.ndim:
+            msg = (
+                f'`w` shape mismatch with training weights: got '
+                f'{w_test.shape=}, expected {self._mcmc_state.inv_sdev_scale.ndim}D '
+                f'(matching the training-weight shape).'
+            )
+            raise ValueError(msg)
+        return w_test
 
     def _process_x_test(
         self,
@@ -971,7 +981,7 @@ class Bart(Module):
     def _check_type_settings(
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
         outcome_type: OutcomeType | str | Sequence[OutcomeType | str],
-        w: Float[Array, ' n'] | None,
+        w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
     ) -> tuple[
         OutcomeType | tuple[OutcomeType, ...], Bool[Array, ''] | Bool[Array, ' k']
     ]:
@@ -997,6 +1007,17 @@ class Bart(Module):
             raise ValueError(msg)
         if w is not None and outcome_type is not OutcomeType.continuous:
             msg = 'Weights are not supported when any outcome is binary.'
+            raise ValueError(msg)
+        if (
+            w is not None
+            and w.ndim == 2
+            and (y_train.ndim != 2 or w.shape[0] != y_train.shape[0])
+        ):
+            msg = (
+                f'2D w (vector per-component weights) requires y_train of '
+                f'shape (k, n) with matching k; got {w.shape=}, '
+                f'{y_train.shape=}.'
+            )
             raise ValueError(msg)
 
         if isinstance(outcome_type, tuple):
@@ -1083,7 +1104,7 @@ class Bart(Module):
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
         outcome_type: OutcomeType | tuple[OutcomeType, ...],
         offset: Float32[Array, ''] | Float32[Array, ' k'],
-        w: Float[Array, ' n'] | None,
+        w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
         max_split: UInt[Array, ' p'],
         leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
         error_cov_df: FloatLike | None,

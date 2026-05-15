@@ -323,13 +323,18 @@ class State(Module):
     """The inverse error covariance (scalar for univariate, matrix for multivariate).
     Identity in binary regression."""
 
-    prec_scale: Float32[Array, ' n'] | None = field(data=True)
-    """The scale on the error precision, i.e., ``1 / error_scale ** 2``.
-    `None` in binary regression."""
+    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None = field(data=True)
+    """The scale on the error precision. `None` in binary regression. With
+    scalar per-datapoint weights, shape ``(n,)`` and value
+    ``1 / error_scale ** 2``. With vector per-datapoint weights, shape ``(k, k, n)``
+    and value ``1/outer(error_scale, error_scale)`` repeated over datapoints."""
 
-    inv_sdev_scale: Float32[Array, ' n'] | None = field(data=True)
-    """The reciprocal of the per-observation scale on the error standard deviation,
-    i.e., ``1 / error_scale``. `None` in binary regression."""
+    inv_sdev_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(
+        data=True
+    )
+    """The reciprocal of the per-observation error standard-deviation scale.
+    `None` in binary regression. Shape ``(n,)`` for scalar weights, or
+    ``(k, n)`` for per-component vector weights."""
 
     error_cov_df: Float32[Array, ''] | None
     """The df parameter of the inverse Wishart prior on the noise
@@ -354,7 +359,7 @@ def _init_shape_shifting_parameters(
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | list[OutcomeType],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
-    error_scale: Float32[Any, ' n'] | None,
+    error_scale: Float32[Any, ' n'] | Float32[Any, 'k n'] | None,
     error_cov_df: float | Float32[Any, ''] | None,
     error_cov_scale: float | Float32[Any, ''] | Float32[Any, 'k k'] | None,
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
@@ -433,9 +438,7 @@ def _init_shape_shifting_parameters(
 
     # Mixed binary-continuous (multivariate, diagonal error covariance)
     elif is_mixed:
-        assert error_scale is None, (
-            'error_scale is not supported for mixed binary-continuous'
-        )
+        assert error_scale is None
         error_cov_df = jnp.asarray(error_cov_df)
         error_cov_scale = jnp.asarray(error_cov_scale)
         assert error_cov_scale.shape == 2 * kshape
@@ -460,6 +463,11 @@ def _init_shape_shifting_parameters(
 
     # All-continuous
     else:
+        assert (
+            error_scale is None
+            or error_scale.shape == y.shape  # (k, n)
+            or error_scale.shape == y.shape[-1:]  # (n,)
+        )
         error_cov_df = jnp.asarray(error_cov_df)
         error_cov_scale = jnp.asarray(error_cov_scale)
         assert error_cov_scale.shape == 2 * kshape
@@ -582,7 +590,7 @@ def init(
     leaf_prior_cov_inv: float | Float32[Any, ''] | Float32[Array, 'k k'],
     error_cov_df: float | Float32[Any, ''] | None = None,
     error_cov_scale: float | Float32[Any, ''] | Float32[Array, 'k k'] | None = None,
-    error_scale: Float32[Any, ' n'] | None = None,
+    error_scale: Float32[Any, ' n'] | Float32[Any, 'k n'] | None = None,
     min_points_per_decision_node: int | Integer[Any, ''] | None = None,
     resid_num_batches: int | None | Literal['auto'] = 'auto',
     count_num_batches: int | None | Literal['auto'] = 'auto',
@@ -639,10 +647,11 @@ def init(
         gamma prior parameters is ``alpha = df / 2``, ``beta = scale / 2``.
         Leave unspecified for binary regression.
     error_scale
-        Each error is scaled by the corresponding factor in `error_scale`, so
-        the error variance for ``y[i]`` is ``sigma2 * error_scale[i] ** 2``.
-        For multivariate regression, the same scalar scale is applied to all
-        outcome components of ``y[i]``. Not supported for binary or mixed
+        Each error is scaled by the corresponding factor in `error_scale`. If
+        ``error_scale[..., i]`` is a scalar, each error variance or covariance
+        matrix is multiplied by ``error_scale[..., i] ** 2``. If
+        ``error_scale[:, i]`` is a vector, then the covariance matrix is
+        rescaled by its outer product. Not supported for binary or mixed
         binary-continuous regression. If not specified, defaults to 1 for all
         points, but potentially skipping calculations.
     min_points_per_decision_node
@@ -979,9 +988,12 @@ def _initial_affluence_tree(
 
 @partial(jit, donate_argnums=(0,))
 def _compute_scales(
-    error_scale: Float32[Array, ' n'],
-) -> tuple[Float32[Array, ' n'], Float32[Array, ' n']]:
-    """Compute ``(1 / error_scale, 1 / error_scale ** 2)``.
+    error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'],
+) -> tuple[
+    Float32[Array, ' n'] | Float32[Array, 'k n'],
+    Float32[Array, ' n'] | Float32[Array, 'k k n'],
+]:
+    """Compute the inverse and (outer-)squared inverse of ``error_scale``.
 
     This is a separate function to use donate_argnums to avoid intermediate
     copies.
@@ -989,17 +1001,24 @@ def _compute_scales(
     Parameters
     ----------
     error_scale
-        Per-observation error standard deviation scale.
+        Per-observation error standard deviation scale. Either shape ``(n,)``
+        (scalar weight per datapoint) or shape ``(k, n)`` (per-component
+        weight per datapoint, multivariate continuous case).
 
     Returns
     -------
     inv_sdev_scale
-        ``1 / error_scale``.
+        ``1 / error_scale``, same shape as ``error_scale``.
     prec_scale
-        ``1 / error_scale ** 2``.
+        ``1 / error_scale ** 2`` for shape ``(n,)``, or ``einsum('an,bn->abn',
+        inv_sdev_scale, inv_sdev_scale)`` = stacked outer products of shape
+        ``(k, k, n)`` for vector weights.
     """
     inv_sdev_scale = jnp.reciprocal(error_scale)
-    prec_scale = jnp.square(inv_sdev_scale)
+    if inv_sdev_scale.ndim == 1:
+        prec_scale = jnp.square(inv_sdev_scale)
+    else:
+        prec_scale = jnp.einsum('an,bn->abn', inv_sdev_scale, inv_sdev_scale)
     return inv_sdev_scale, prec_scale
 
 

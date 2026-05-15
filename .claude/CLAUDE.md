@@ -15,18 +15,22 @@ make tests                        # run all tests but faster (use parallelizatio
 uv run pytest -k test_name        # run a single test or subset
 uv run pytest tests/test_foo.py   # run one test file
 uv run pytest --lf                # run the tests failed last time
-make lint                         # ruff check --fix, invoked via pre-commit
+make lint                         # run all linters on everything
 make docs                         # build Sphinx HTML docs
 ```
 
 All make targets use `uv run` under the hood.
+
+## Directory layout
+
+We often use a worktree-first layout where the directory bartz/ is not a worktree, while each subdirectory bartz/foo, bartz/bar, etc. is a worktree. When started from a subdirectory, stay there, and don't try to read/access stuff outside of the worktree.
 
 ## Workflow
 
 To check the code you write:
 - `make lint`
 - `make setup`
-    - this is needed before running any tests
+    - this sets R up if you are in a clean worktree
 - run the unit tests relevant to your code changes with `uv run pytest ...`
     - not all tests right away because the full test suite takes a long time to run
     - when running multiple tests, the output may be long; pipe the output to a scratch file to be read afterwards
@@ -57,17 +61,16 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
 ## Code style
 
 - **Formatter/linter:** ruff with single quotes, numpy docstring convention
-- **Imports:** `import jax.numpy as jnp` (enforced alias); `jax.random`, `jax.lax`, `jax.numpy`, `jax.tree` must be imported as modules, not `from`-imported; no relative imports
-- **Banned:** `jax.lax.reciprocal` (use `jnp.reciprocal`), `jax.random.PRNGKey` (use `jax.random.key`)
-- **Type annotations:** jaxtyping for array shapes (`Float32[Array, 'n p']`), signatures not docstrings
-- **All source files** carry an MIT copyright header
-- **Docstrings:** numpy convention, enforced by pydoclint; class attributes documented individually (not in class docstring)
+- **Imports:** generally use `from foo import bar` (relative import) instead of `import foo; foo.bar`, but for some heavily used big submodules, e.g., `from jax import random; random.foo` is preferred to `from jax.random import foo, foo1, foo2, ..., foo999999`.
+- **Type annotations:** jaxtyping for array shapes (`Float32[Array, 'n p']`), signatures not docstrings, space before single-axis annotation `Float32[Array, ' n']` because of linter bug
+- **Headers** All source files carry an MIT copyright header
+- **Docstrings:** numpy convention, enforced by pydoclint; class attributes documented individually with string just below (not in class docstring)
 
 ## Testing
 
-- Framework: pytest with `pytest-xdist`, `pytest-subtests`, `pytest-timeout`, `flaky`
-- `keys` fixture provides deterministic per-test JAX random keys (use `keys.pop()`)
-- Debug flags enabled in conftest: `jax_debug_key_reuse`, `jax_debug_nans`, `jax_debug_infs`, `jax_legacy_prng_key='error'`
-- Custom pytest options: `--platform` (cpu/gpu/auto), `--num-cpu-devices`
+- Framework: pytest with w/ `pytest-subtests`
+- global `keys` fixture provides deterministic per-test JAX random keys (use `keys.pop()`)
+- Custom pytest options: `--platform` (cpu/gpu/auto), `--num-cpu-devices` (sets up jax virtual cpu devices)
 - The subpackage `tests/rbartpackages/` contains wrappers of R BART packages, not unit tests
 - To compare vectors/matrices/tensors, use `tests.util.assert_close_matrices` instead of numpy's `assert_allclose`
+- in general prefer `assert_` functions from `tests.util` and `numpy.testing` to plain `assert` if appropriate

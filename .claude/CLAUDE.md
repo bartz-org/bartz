@@ -29,6 +29,9 @@ We often use a worktree-first layout where the directory bartz/ is not a worktre
 
 To check the code you write:
 - `make lint`
+- when adding/removing/moving functions or classes:
+    - check the rst documentation in `docs/` is up-to-date
+    - run `make docs`
 - `make setup`
     - this sets R up if you are in a clean worktree
 - run the unit tests relevant to your code changes with `uv run pytest ...`
@@ -62,9 +65,29 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
 
 - **Formatter/linter:** ruff with single quotes, numpy docstring convention
 - **Imports:** generally use `from foo import bar` (relative import) instead of `import foo; foo.bar`, but for some heavily used big submodules, e.g., `from jax import random; random.foo` is preferred to `from jax.random import foo, foo1, foo2, ..., foo999999`.
-- **Type annotations:** jaxtyping for array shapes (`Float32[Array, 'n p']`), signatures not docstrings, space before single-axis annotation `Float32[Array, ' n']` because of linter bug
+- **Type annotations:**
 - **Headers** All source files carry an MIT copyright header
-- **Docstrings:** numpy convention, enforced by pydoclint; class attributes documented individually with string just below (not in class docstring)
+- **docstrings:**
+    - numpy convention
+    - class attributes documented individually with string just below (not in class docstring)
+    - keep docstrings short, don't fill them with implementation details
+    - keep private/internal docstrings short or absent if they are so already
+    - keep return value description relatively short and strictly on one line, html render garbles it otherwise
+- **jax** conventions:
+    - don't cast to jax arrays things which are already jax arrays (e.g., notice type hints or previous casts)
+    - avoid explicit jax types if not necessary, e.g., do `jnp.ones(shape)` instead of `jnp.ones(shape, jnp.float32)`, `1.0` instead of `jnp.float32(1.0)` (unless we need a strong type to auto-cast unsanitized arrays), etc.
+    - try to unify code paths by clever usage of array indexing/broadcasting/axes, e.g., `x[..., i]` will work both if x is 2d or 1d, many places in the library use such tricks
+    - indexing/shape conventions that improve readability and implicitly check for shape errors:
+        - to get an axis length in an array, use tuple unpacking, e.g.: `_, _, k = x.shape`, `*_, l, _ = y.shape`
+        - to index into an array, keep all dimensions explicit, e.g.: `x[0, :]`, `y[..., :, :, 4, :]`
+- other **python** conventions:
+    - use dicts as if they were frozendicts when possible: e.g., do `d = dict(d, a=1, b=2)` to set values instead of `d['a'] = 1` or `d.update(a=1)`, safer
+    - type annotations:
+        - do not stringify type annotations
+        - jaxtyping for array shapes (`Float32[Array, 'n p']`)
+            - space before single-axis annotation `Float32[Array, ' n']` because of linter bug
+        - type hints in signatures, not in docstrings
+            - but when returning multiple values, copy the type hints verbatim in the return values list, because the html doc render does not support multi-valued return natively
 
 ## Testing
 
@@ -73,4 +96,5 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
 - Custom pytest options: `--platform` (cpu/gpu/auto), `--num-cpu-devices` (sets up jax virtual cpu devices)
 - The subpackage `tests/rbartpackages/` contains wrappers of R BART packages, not unit tests
 - To compare vectors/matrices/tensors, use `tests.util.assert_close_matrices` instead of numpy's `assert_allclose`
+    - use `rtol` in test comparisons, add `atol` only if necessary (comparison of values that are near zero on some relevant scale)
 - in general prefer `assert_` functions from `tests.util` and `numpy.testing` to plain `assert` if appropriate

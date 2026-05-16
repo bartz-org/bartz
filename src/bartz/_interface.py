@@ -264,6 +264,10 @@ class Bart(Module):
         specified by the user. Shape ``(n,)`` applies the same scalar weight
         to every outcome component; for multivariate continuous regression,
         ``(k, n)`` instead supplies a per-component weight per datapoint.
+    missing
+        Boolean mask with the same shape as `y_train`; `True` marks entries
+        to be ignored by the MCMC. Values of `y_train` must be finite
+        everywhere, including at masked positions.
     num_trees
         The number of trees used to represent the latent mean function.
     n_save
@@ -331,6 +335,7 @@ class Bart(Module):
     _mcmc_state: mcmcstep.State
     _binner: Binner
     _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
+    _w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
     _x_train_fmt: Any = field(static=True)
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
@@ -365,6 +370,7 @@ class Bart(Module):
         tau_num: FloatLike | None = None,
         offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
         w: Float[ArrayLike, ' n'] | Float[ArrayLike, 'k n'] | Series | None = None,
+        missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
         num_trees: int = 200,
         n_save: int = 1000,
         n_burn: int = 1000,
@@ -387,6 +393,8 @@ class Bart(Module):
         if w is not None:
             w = self._process_response_input(w)
             self._check_same_length(x_train, w)
+
+        missing = self._process_missing_input(missing, y_train.shape)
 
         # check data types are correct for continuous/binary/multivariate regression
         outcome_type, binary_mask = self._check_type_settings(y_train, outcome_type, w)
@@ -423,6 +431,7 @@ class Bart(Module):
             outcome_type,
             offset,
             w,
+            missing,
             max_split,
             leaf_prior_cov_inv,
             error_cov_df,
@@ -461,6 +470,7 @@ class Bart(Module):
         self._binner = binner_obj
         self._x_train_fmt = x_train_fmt
         self._binary_mask = binary_mask
+        self._w = w
 
     def predict(
         self,
@@ -769,7 +779,7 @@ class Bart(Module):
 
         """
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
-        has_train_weights = self._mcmc_state.prec_scale is not None
+        has_train_weights = self._w is not None
         is_binary = self._mcmc_state.binary_y is not None
         needs_weights = (
             kind is PredictKind.outcome_samples and not is_binary and has_train_weights
@@ -792,7 +802,7 @@ class Bart(Module):
                     ' (training weights are used automatically)'
                 )
                 raise ValueError(msg)
-            return jnp.reciprocal(self._mcmc_state.inv_sdev_scale)
+            return self._w
 
         # new test data, model was fit with weights
         if w is None:
@@ -802,10 +812,10 @@ class Bart(Module):
             )
             raise ValueError(msg)
         w_test = self._process_response_input(w)
-        if w_test.ndim != self._mcmc_state.inv_sdev_scale.ndim:
+        if w_test.ndim != self._w.ndim:
             msg = (
                 f'`w` shape mismatch with training weights: got '
-                f'{w_test.shape=}, expected {self._mcmc_state.inv_sdev_scale.ndim}D '
+                f'{w_test.shape=}, expected {self._w.ndim}D '
                 f'(matching the training-weight shape).'
             )
             raise ValueError(msg)
@@ -856,6 +866,19 @@ class Bart(Module):
             msg = f'y_train must be 1D (n,) or 2D (k, n). Got {y.ndim=}.'
             raise ValueError(msg)
         return y
+
+    @staticmethod
+    def _process_missing_input(
+        missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
+        y_shape: tuple[int, ...],
+    ) -> Bool[Array, ' n'] | Bool[Array, 'k n'] | None:
+        if missing is None:
+            return None
+        missing = jnp.asarray(missing, jnp.bool_)
+        if missing.shape != y_shape:
+            msg = f'missing.shape={missing.shape} must equal y_train.shape={y_shape}.'
+            raise ValueError(msg)
+        return missing
 
     @staticmethod
     def _check_same_length(x1: Array, x2: Array) -> None:
@@ -1105,6 +1128,7 @@ class Bart(Module):
         outcome_type: OutcomeType | tuple[OutcomeType, ...],
         offset: Float32[Array, ''] | Float32[Array, ' k'],
         w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
+        missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
         max_split: UInt[Array, ' p'],
         leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
         error_cov_df: FloatLike | None,
@@ -1140,8 +1164,9 @@ class Bart(Module):
             y=jnp.array(y_train),
             outcome_type=outcome_type,
             offset=offset,
-            # copy w because it's going to be donated in init
+            # copy w and missing because they are going to be donated in init
             error_scale=None if w is None else jnp.array(w),
+            missing=None if missing is None else jnp.array(missing),
             max_split=max_split,
             num_trees=num_trees,
             p_nonterminal=p_nonterminal,

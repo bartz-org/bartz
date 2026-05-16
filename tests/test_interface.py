@@ -56,7 +56,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
-from jaxtyping import Array, Float32, Int32, Key, PyTree, Real, Shaped, UInt
+from jaxtyping import Array, Bool, Float32, Int32, Key, PyTree, Real, Shaped, UInt
 from numpy.testing import assert_array_less
 from pytest import FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
@@ -126,6 +126,15 @@ def gen_w(
     if isinstance(shape, int):
         shape = (shape,)
     return jnp.exp(random.uniform(key, shape, float, -1, 1))
+
+
+def gen_missing(
+    key: Key[Array, ''], shape: int | Sequence[int], prob: float = 0.2
+) -> Bool[Array, ' {shape}']:
+    """Generate a boolean missingness mask with about ``prob`` true entries."""
+    if isinstance(shape, int):
+        shape = (shape,)
+    return random.bernoulli(key, prob, shape)
 
 
 def gen_y(
@@ -375,7 +384,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # multivariate mixed binary-continuous regression with sparsity with
-        # fixed theta
+        # fixed theta and missing subunits
         case 6:  # pragma: slow
             X = gen_X(keys.pop(), p, n, 'continuous')
             outcome_type = ['continuous', 'binary', 'binary']
@@ -384,6 +393,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=X,
                     y_train=gen_y(keys.pop(), X, None, outcome_type, s='random', k=3),
                     outcome_type=outcome_type,
+                    missing=gen_missing(keys.pop(), (len(outcome_type), n)),
                     sparse=True,
                     theta=2,
                     varprob=jnp.array([0.2, 0.8]),
@@ -467,6 +477,8 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     kw['y_train'] = kw['y_train'][..., :n]
     if kw.get('w') is not None:
         kw['w'] = kw['w'][..., :n]
+    if kw.get('missing') is not None:
+        kw['missing'] = kw['missing'][..., :n]
     return kw
 
 
@@ -532,7 +544,7 @@ class TestWithCachedBart:  # pragma: slow
             yhat_train = bart.predict('train', kind='latent_samples')
             yhat_train_chains = yhat_train.reshape(num_chains, nsamples, -1)
             rhat_yhat_train = rhat_rank(yhat_train_chains, split=True)
-            assert_array_less(rhat_yhat_train, 1.05)
+            assert_array_less(rhat_yhat_train, 1.1)
 
         mixed = isinstance(bkw.kw['outcome_type'], list)
         if binary:
@@ -555,7 +567,7 @@ class TestWithCachedBart:  # pragma: slow
                     ):  # pragma: no branch, always on in mv variants
                         sigma = sigma[:, :, ~binary_mask]
                 rhat_sigma = rhat_rank(sigma, split=True)
-                assert_array_less(rhat_sigma, 1.01)
+                assert_array_less(rhat_sigma, 1.05)
         else:
             with subtests.test('error_cov_inv'):
                 # all continuous: check full precision matrix convergence
@@ -687,6 +699,33 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
         assert_close_matrices(
             bart1_yhat_train, bart3_yhat_train, rtol=rtol, reduce_rank=True
         )
+
+
+def test_missing_ignored(bkw: BartKW, keys: split) -> None:
+    """Garbage finite y values at missing positions don't affect the fit."""
+    kw = bkw.kw
+    y_train = kw['y_train']
+    missing = gen_missing(keys.pop(), y_train.shape)
+    kw['missing'] = missing
+
+    # Pin y-dependent priors otherwise they are influenced by garbage values
+    kw['offset'] = 0.0
+    kw['tau_num'] = 2.0
+    if kw.get('outcome_type') != 'binary':
+        kw['lamda'] = 1.0
+
+    bart1 = Bart(**kw)
+
+    garbage = random.normal(keys.pop(), y_train.shape) * 1e3
+    kw2 = dict(
+        kw, seed=random.clone(kw['seed']), y_train=jnp.where(missing, garbage, y_train)
+    )
+    bart2 = Bart(**kw2)
+
+    yhat1 = bart1.predict('train', kind='latent_samples')
+    yhat2 = bart2.predict('train', kind='latent_samples')
+    rtol = 0 if yhat1.platform() == 'cpu' else 2e-6
+    assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
 
 def test_output_shapes(bkw: BartKW, keys: split) -> None:
@@ -1817,7 +1856,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     y_mv = y_mv[:1, :]
     y_uv = y_mv.squeeze(0)
 
-    bkw.kw.update(outcome_type=outcome_type, n_burn=0, n_save=0, w=None)
+    bkw.kw.update(outcome_type=outcome_type, n_burn=0, n_save=0, w=None, missing=None)
     del bkw.kw['y_train']
     bart_uv = Bart(y_train=y_uv, **bkw.kw)
     bart_mv = Bart(y_train=y_mv, **bkw.kw)

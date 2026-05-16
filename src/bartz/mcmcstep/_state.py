@@ -591,6 +591,7 @@ def init(
     error_cov_df: float | Float32[Any, ''] | None = None,
     error_cov_scale: float | Float32[Any, ''] | Float32[Array, 'k k'] | None = None,
     error_scale: Float32[Any, ' n'] | Float32[Any, 'k n'] | None = None,
+    missing: Bool[Any, ' n'] | Bool[Any, 'k n'] | None = None,
     min_points_per_decision_node: int | Integer[Any, ''] | None = None,
     resid_num_batches: int | None | Literal['auto'] = 'auto',
     count_num_batches: int | None | Literal['auto'] = 'auto',
@@ -654,6 +655,10 @@ def init(
         rescaled by its outer product. Not supported for binary or mixed
         binary-continuous regression. If not specified, defaults to 1 for all
         points, but potentially skipping calculations.
+    missing
+        Boolean mask, same shape as `y`; `True` marks entries to be ignored
+        by the MCMC. Values of `y` must be finite everywhere, including at
+        masked positions.
     min_points_per_decision_node
         The minimum number of data points in a decision node. 0 if not
         specified.
@@ -754,6 +759,7 @@ def init(
     offset = jnp.asarray(offset)
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
     max_split = jnp.asarray(max_split)
+    assert missing is None or missing.shape == y.shape
 
     # normalize outcome_type to enum (or list of enums)
     outcome_type = _parse_outcome_type(outcome_type)
@@ -841,8 +847,10 @@ def init(
             else None  # resid is created later after y and offset are sharded
         ),
         error_cov_inv=add_chains(error_cov_inv),
-        prec_scale=error_scale,  # temporarily set to error_scale, fix after sharding
-        inv_sdev_scale=error_scale,  # temporarily set to error_scale, fix after sharding
+        # temporarily store user inputs in these slots so they get sharded
+        # with everything else; `_compute_scales` replaces them post-shard.
+        prec_scale=error_scale,
+        inv_sdev_scale=missing,
         error_cov_df=error_cov_df,
         error_cov_scale=error_cov_scale,
         forest=Forest(
@@ -897,7 +905,7 @@ def init(
 
     # delete big input arrays such that they can be deleted as soon as they
     # are sharded, only those arrays that contain an (n,) sized axis
-    del X, error_scale, y
+    del X, error_scale, missing, y
 
     # move all arrays to the appropriate device
     state = _shard_state(state)
@@ -931,9 +939,13 @@ def init(
     state = replace(state, binary_y=binary_y)
 
     # calculate prec_scale and inv_sdev_scale after sharding to do the
-    # calculation on the right devices
-    if state.inv_sdev_scale is not None:
-        inv_sdev_scale, prec_scale = _compute_scales(state.inv_sdev_scale)
+    # calculation on the right devices. Pre-shard, `state.prec_scale` holds
+    # the user-supplied `error_scale` and `state.inv_sdev_scale` holds the
+    # user-supplied `missing` mask.
+    if state.prec_scale is not None or state.inv_sdev_scale is not None:
+        inv_sdev_scale, prec_scale = _compute_scales(
+            state.prec_scale, state.inv_sdev_scale
+        )
         state = replace(state, inv_sdev_scale=inv_sdev_scale, prec_scale=prec_scale)
 
     # make all types strong to avoid unwanted recompilations
@@ -986,35 +998,25 @@ def _initial_affluence_tree(
     )
 
 
-@partial(jit, donate_argnums=(0,))
+@partial(jit, donate_argnums=(0, 1))
 def _compute_scales(
-    error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
 ) -> tuple[
     Float32[Array, ' n'] | Float32[Array, 'k n'],
     Float32[Array, ' n'] | Float32[Array, 'k k n'],
 ]:
-    """Compute the inverse and (outer-)squared inverse of ``error_scale``.
+    """Compute ``inv_sdev_scale`` and ``prec_scale``.
 
     This is a separate function to use donate_argnums to avoid intermediate
-    copies.
-
-    Parameters
-    ----------
-    error_scale
-        Per-observation error standard deviation scale. Either shape ``(n,)``
-        (scalar weight per datapoint) or shape ``(k, n)`` (per-component
-        weight per datapoint, multivariate continuous case).
-
-    Returns
-    -------
-    inv_sdev_scale
-        ``1 / error_scale``, same shape as ``error_scale``.
-    prec_scale
-        ``1 / error_scale ** 2`` for shape ``(n,)``, or ``einsum('an,bn->abn',
-        inv_sdev_scale, inv_sdev_scale)`` = stacked outer products of shape
-        ``(k, k, n)`` for vector weights.
+    copies. At least one of `error_scale` and `missing` must be non-None.
     """
-    inv_sdev_scale = jnp.reciprocal(error_scale)
+    if error_scale is None:
+        inv_sdev_scale = 1.0
+    else:
+        inv_sdev_scale = jnp.reciprocal(error_scale)
+    if missing is not None:
+        inv_sdev_scale = jnp.where(missing, 0.0, inv_sdev_scale)
     if inv_sdev_scale.ndim == 1:
         prec_scale = jnp.square(inv_sdev_scale)
     else:

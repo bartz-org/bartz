@@ -1557,7 +1557,12 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], bart: State) -> State:
     assert bart.error_cov_df is not None
 
     # per-component sum of squared residuals, shape (k,)
-    norm2 = jnp.einsum('kn,kn->k', bart.resid, bart.resid)
+    resid = bart.resid
+    if bart.inv_sdev_scale is not None:
+        # this is currently used only for missing data, no heteroskedasticity
+        # in the mixed/binary case
+        resid = resid * bart.inv_sdev_scale
+    norm2 = jnp.einsum('kn,kn->k', resid, resid)
 
     # inverse-gamma posterior parameters
     *_, k, n = bart.resid.shape

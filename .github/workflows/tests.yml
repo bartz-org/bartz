@@ -51,12 +51,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # this python is for the pre-commit action
-      - uses: actions/setup-python@v6
-        with:
-          python-version-file: ".python-version"
-
-      # this python is for the pre-commit hooks
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
@@ -69,21 +63,15 @@ jobs:
       - name: Run pre-commit on changed files
         # even if we run it on all files below, it's convenient to see if something fails in new changes first
         if: steps.refs.outputs.from != ''
-        uses: pre-commit/action@v3.0.1
-        with:
-          extra_args: --verbose --show-diff-on-failure --from-ref=${{ steps.refs.outputs.from }} --to-ref=HEAD
+        run: make lint ARGS='--verbose --show-diff-on-failure --from-ref=${{ steps.refs.outputs.from }} --to-ref=HEAD'
 
       - name: Run pre-commit on all files
         # this is for when pre-commit itself is changed, which may affect unchanged files
-        uses: pre-commit/action@v3.0.1
-        with:
-          extra_args: --verbose --all-files
+        run: make lint ARGS='--verbose --all-files'
 
       - name: Run gitlint on new commits
         if: steps.refs.outputs.from != ''
-        run: |
-          python -m pip install gitlint
-          gitlint --commits=${{ steps.refs.outputs.from }}..HEAD --fail-without-commits --debug
+        run: uvx --from gitlint-core gitlint --commits=${{ steps.refs.outputs.from }}..HEAD --fail-without-commits --debug
 
   setup-matrix:
     runs-on: ubuntu-latest

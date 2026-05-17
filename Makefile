@@ -100,7 +100,7 @@ setup:
 
 .PHONY: lint
 lint:
-	$(UV_RUN) pre-commit run --all-files
+	$(UV_RUN) pre-commit run $(if $(ARGS),$(ARGS),--all-files)
 
 ################# TESTS #################
 

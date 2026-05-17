@@ -206,8 +206,8 @@ def make_gbart_kw(key: Key[Array, ''], variant: int) -> dict[str, Any]:
 @pytest.fixture(
     params=[
         pytest.param(1, id='v1'),
-        pytest.param(2, marks=pytest.mark.slow, id='v2'),
-        pytest.param(3, marks=pytest.mark.slow, id='v3'),
+        pytest.param(2, id='v2'),
+        pytest.param(3, id='v3'),
     ],
     scope='module',
 )
@@ -230,8 +230,7 @@ class CachedBart:
     bart: mc_gbart
 
 
-@pytest.mark.slow
-class TestWithCachedBart:  # pragma: slow
+class TestWithCachedBart:
     """Group of slow tests that check the same BART run, for efficiency."""
 
     @pytest.fixture(scope='class')
@@ -1426,8 +1425,7 @@ class TestVarprobParam:
                 mc_gbart(**kw)
 
 
-@pytest.mark.slow
-def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:  # pragma: slow
+def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
     if len(devices()) < 2:  # this branch is covered in the single cpu test config
         pytest.skip('Need at least 2 devices for this test')

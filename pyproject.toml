@@ -91,9 +91,6 @@ addopts = [
     "--verbose",
     "--import-mode=importlib",
 ]
-markers = [
-    "slow: marks tests as slow, skipped on PR CI",
-]
 filterwarnings = [
     "ignore:unclosed database:ResourceWarning",
 ]

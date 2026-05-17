@@ -259,7 +259,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # binary regression with binary X and high p
-        case 2:  # pragma: slow
+        case 2:
             X = gen_X(keys.pop(), high_p, n, 'binary')
             bkw = BartKW(
                 kw=dict(
@@ -289,7 +289,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # continuous regression with error weights and sparsity with fixed theta
-        case 3:  # pragma: slow
+        case 3:
             X = gen_X(keys.pop(), p, n, 'continuous')
             w = gen_w(keys.pop(), X.shape[1])
             bkw = BartKW(
@@ -356,7 +356,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # multivariate binary regression with binary X and high p
-        case 5:  # pragma: slow
+        case 5:
             X = gen_X(keys.pop(), high_p, n, 'binary')
             bkw = BartKW(
                 kw=dict(
@@ -384,7 +384,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
         # multivariate mixed binary-continuous regression with sparsity with
         # fixed theta and missing subunits
-        case 6:  # pragma: slow
+        case 6:
             X = gen_X(keys.pop(), p, n, 'continuous')
             outcome_type = ['continuous', 'binary', 'binary']
             bkw = BartKW(
@@ -418,7 +418,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # multivariate continuous regression with vector weights
-        case 7:  # pragma: no branch  # pragma: slow
+        case 7:  # pragma: no branch
             k = 2
             X = gen_X(keys.pop(), p, n, 'continuous')
             w = gen_w(keys.pop(), (k, n))
@@ -447,9 +447,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 @pytest.fixture(
     params=(
         pytest.param(4, id='v4'),
-        pytest.param(5, marks=pytest.mark.slow, id='v5'),
-        pytest.param(6, marks=pytest.mark.slow, id='v6'),
-        pytest.param(7, marks=pytest.mark.slow, id='v7'),
+        pytest.param(5, id='v5'),
+        pytest.param(6, id='v6'),
+        pytest.param(7, id='v7'),
     ),
     scope='module',
 )
@@ -491,8 +491,7 @@ class CachedBart:
     bart: Bart
 
 
-@pytest.mark.slow
-class TestWithCachedBart:  # pragma: slow
+class TestWithCachedBart:
     """Group of slow tests that check the same BART run, for efficiency."""
 
     @pytest.fixture(scope='class')
@@ -1706,10 +1705,7 @@ def test_debug_checks(keys: split, bkw: BartKW) -> None:
         collect()
 
 
-@pytest.mark.slow
-def test_equiv_sharding(  # pragma: slow
-    bkw: BartKW, subtests: SubTests
-) -> None:
+def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
     if len(jax.devices()) < 2:  # this branch is covered in single cpu tests config
         pytest.skip('Need at least 2 devices for this test')

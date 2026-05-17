@@ -30,6 +30,8 @@ from dataclasses import replace
 from enum import Enum
 from functools import cached_property, partial
 from os import cpu_count
+
+# WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
 from typing import Any, Literal, Protocol, TypedDict
 from warnings import warn

@@ -32,6 +32,8 @@ from re import fullmatch
 import jax
 import numpy as np
 import pytest
+
+# WORKAROUND(python<3.11): use stdlib tomllib instead of tomli
 import tomli
 from jax import config, random
 

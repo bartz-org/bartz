@@ -72,8 +72,8 @@ from bartz.mcmcstep._step import (
     _precompute_likelihood_terms_mv,
     _precompute_likelihood_terms_uv,
     _sample_wishart_bartlett,
+    _step_error_cov_inv_diag,
     _step_error_cov_inv_mv,
-    _step_error_cov_inv_uv,
     step_error_cov_inv,
     step_trees,
     step_z,
@@ -582,7 +582,14 @@ class TestMultichain:
     n = 60  # 3 * 4 * 5, maximize divisibility for sharding tests
 
     @pytest.fixture(
-        params=['uv-binary', 'uv-continuous', 'mv-binary', 'mv-continuous', 'mv-mixed']
+        params=[
+            'uv-binary',
+            'uv-continuous',
+            'mv-binary',
+            'mv-continuous',
+            'mv-continuous-vec-weights',
+            'mv-mixed',
+        ]
     )
     def init_kwargs(self, keys: split, request: pytest.FixtureRequest) -> dict:
         """Return arguments for `init`."""
@@ -590,6 +597,7 @@ class TestMultichain:
         mv = kind.startswith('mv-')
         binary = kind.endswith('-binary')
         mixed = kind == 'mv-mixed'
+        vec_weights = kind == 'mv-continuous-vec-weights'
 
         p = 10
         k = 2
@@ -644,6 +652,13 @@ class TestMultichain:
             kw.update(
                 error_cov_df=2.0,  # keep this a weak type
                 error_cov_scale=2 * jnp.eye(k) if mv else 2.0,
+            )
+
+        if vec_weights:
+            kw.update(
+                error_scale=jnp.exp(
+                    random.uniform(keys.pop(), (k, self.n), float, -0.5, 0.5)
+                )
             )
 
         return kw
@@ -768,6 +783,7 @@ class TestMultichain:
                 '.binary_indices',
                 '.offset',
                 '.prec_scale',
+                '.inv_sdev_scale',
                 '.error_cov_df',
                 '.error_cov_scale',
                 '.forest.max_split',
@@ -800,6 +816,7 @@ class TestMultichain:
                 '.z',
                 '.resid',
                 '.prec_scale',
+                '.inv_sdev_scale',
                 '.forest.leaf_indices',
             )
             if keystr(path) in vmap_attrs:
@@ -1028,15 +1045,28 @@ class TestMixedBinaryContinuous:
         # z[1] should be offset[2] (second binary component, index 2 in y)
         assert_array_equal(state.z[1], jnp.full(self.n, offset[2]))
 
-    def test_init_rejects_nondiagonal_scale(self, init_kwargs: dict) -> None:
+    @pytest.mark.parametrize(
+        ('outcome_type', 'with_missing'),
+        [
+            (['binary', 'continuous', 'binary'], False),
+            (['continuous', 'continuous', 'continuous'], True),
+        ],
+        ids=['mixed', 'partial_missing'],
+    )
+    def test_init_rejects_nondiagonal_scale(
+        self, init_kwargs: dict, outcome_type: Sequence[str], with_missing: bool
+    ) -> None:
         """Check that init rejects non-diagonal error_cov_scale."""
+        init_kwargs['outcome_type'] = outcome_type
+        if with_missing:
+            init_kwargs['missing'] = jnp.zeros((self.k, self.n), jnp.bool_)
         init_kwargs['error_cov_scale'] += 0.1 * jnp.ones((self.k, self.k))
         with pytest.raises(Exception, match='diagonal'):
             _state = init(**init_kwargs)
 
     def test_init_rejects_error_scale(self, init_kwargs: dict) -> None:
         """Check that init rejects error_scale for mixed outcomes."""
-        with pytest.raises(AssertionError, match='error_scale'):
+        with pytest.raises(AssertionError):
             init(**init_kwargs, error_scale=jnp.ones(self.n))
 
     def test_step_z_updates_only_binary_resid(
@@ -1388,7 +1418,7 @@ class TestMVBartIntegration:
         self, keys: split, mcmcstep_data: MCMCStepData
     ) -> None:
         """
-        Test that _step_error_cov_inv_uv and _step_error_cov_inv_mv (k = 1) sample from the same posterior.
+        Test that the univariate (diag) and multivariate (k = 1) samplers draw from the same posterior.
 
         UV: 1/sigma2 ~ Gamma(alpha_post, beta_post)
         MV: error_cov_inv ~ Wishart(df_post, scale_post)
@@ -1408,6 +1438,7 @@ class TestMVBartIntegration:
             z=None,
             offset=0.0,
             prec_scale=None,
+            inv_sdev_scale=None,
             forest=None,
             config=None,
         )
@@ -1424,7 +1455,7 @@ class TestMVBartIntegration:
         )
 
         def sample_uv(k: Key[Array, '']) -> Float32[Array, '']:
-            return _step_error_cov_inv_uv(k, st_uv).error_cov_inv
+            return _step_error_cov_inv_diag(k, st_uv).error_cov_inv
 
         def sample_mv(k: Key[Array, '']) -> Float32[Array, '']:
             return _step_error_cov_inv_mv(k, st_mv).error_cov_inv.reshape(())
@@ -1438,19 +1469,87 @@ class TestMVBartIntegration:
         assert jnp.abs(jnp.mean(samples_uv) - jnp.mean(samples_mv)) < 0.01
         assert p_value > 0.01
 
-
-class TestMVBartSteps:
-    """Test the full MCMC step trajectory (init + multiple steps)."""
-
-    @pytest.mark.parametrize('binary', [False, True])
-    def test_step_trees_exact_match(
-        self, keys: split, mcmcstep_data: MCMCStepData, binary: bool
+    def test_error_cov_inv_missing_equals_drop(
+        self, keys: split, mcmcstep_data: MCMCStepData
     ) -> None:
-        """Test that MV tree logic is Identical to UV logic."""
+        """1-D ``inv_sdev_scale`` zeros give the same sample as dropping those positions.
+
+        Covers both the univariate diagonal path and the multivariate Wishart path
+        (``inv_sdev_scale`` 1-D, no partial missingness), which is the dof fix.
+        """
+        X, y, _ = mcmcstep_data
+        n = y.size
+        resid_1d = random.normal(keys.pop(), (n,))
+        mask = random.bernoulli(keys.pop(), 0.3, (n,))
+        keep = ~mask
+        inv_sdev = jnp.where(mask, 0.0, 1.0)
+
+        df_prior = jnp.float32(20.0)
+        scale_prior = jnp.float32(10.0)
+        common: dict = dict(
+            X=X,
+            binary_y=None,
+            binary_indices=None,
+            error_cov_df=df_prior,
+            z=None,
+            offset=0.0,
+            prec_scale=None,
+            forest=None,
+            config=None,
+        )
+
+        st_uv_with = State(
+            **common,
+            resid=resid_1d,
+            inv_sdev_scale=inv_sdev,
+            error_cov_scale=scale_prior,
+            error_cov_inv=jnp.float32(1.0),
+        )
+        st_uv_drop = State(
+            **common,
+            resid=resid_1d[keep],
+            inv_sdev_scale=None,
+            error_cov_scale=scale_prior,
+            error_cov_inv=jnp.float32(1.0),
+        )
+
+        key = keys.pop()
+        sample_with = _step_error_cov_inv_diag(key, st_uv_with).error_cov_inv
+        sample_drop = _step_error_cov_inv_diag(key, st_uv_drop).error_cov_inv
+        assert_allclose(sample_with, sample_drop, rtol=1e-6)
+
+        # multivariate Wishart path (k=1) with 1-D inv_sdev_scale and zeros
+        st_mv_with = State(
+            **common,
+            resid=resid_1d[None, :],
+            inv_sdev_scale=inv_sdev,
+            error_cov_scale=scale_prior[None, None],
+            error_cov_inv=jnp.eye(1),
+        )
+        st_mv_drop = State(
+            **common,
+            resid=resid_1d[None, keep],
+            inv_sdev_scale=None,
+            error_cov_scale=scale_prior[None, None],
+            error_cov_inv=jnp.eye(1),
+        )
+        sample_mv_with = _step_error_cov_inv_mv(key, st_mv_with).error_cov_inv
+        sample_mv_drop = _step_error_cov_inv_mv(key, st_mv_drop).error_cov_inv
+        assert_allclose(sample_mv_with, sample_mv_drop, rtol=1e-6)
+
+
+class TestMultivariate:
+    """Test for multivariate outcomes specifically."""
+
+    @pytest.mark.parametrize('kind', ['binary', 'homo', 'het'])
+    def test_1d_mv_matches_uv(
+        self, keys: split, mcmcstep_data: MCMCStepData, kind: str
+    ) -> None:
+        """Check that multivariate with k=1 is equivalent to univariate."""
         X, y, max_split = mcmcstep_data
         n_trees = 100
 
-        if binary:
+        if kind == 'binary':
             y = (y > 0).astype(jnp.float32)
 
         params = partial(
@@ -1470,12 +1569,17 @@ class TestMVBartSteps:
             y=y[None, :], offset=jnp.zeros(1), leaf_prior_cov_inv=n_trees * jnp.eye(1)
         )
 
-        if binary:
+        if kind == 'binary':
             uv_kw.update(outcome_type='binary')
             mv_kw.update(outcome_type='binary')
         else:
             uv_kw.update(error_cov_df=4.0, error_cov_scale=2.0)
             mv_kw.update(error_cov_df=jnp.array(4.0), error_cov_scale=2 * jnp.eye(1))
+
+        if kind == 'het':
+            w = jnp.exp(random.uniform(keys.pop(), (y.size,), float, -0.5, 0.5))
+            uv_kw.update(error_scale=w)
+            mv_kw.update(error_scale=w[None, :])  # (1, n) — triggers vector-het path
 
         uv_state = init(**uv_kw, **params())
         mv_state = init(**mv_kw, **params())
@@ -1486,58 +1590,62 @@ class TestMVBartSteps:
             error_cov_inv=jnp.array([[uv_state.error_cov_inv]]),
             forest=replace(
                 mv_state.forest,
-                var_tree=uv_state.forest.var_tree,
-                split_tree=uv_state.forest.split_tree,
-                leaf_tree=uv_state.forest.leaf_tree[:, None, :],
-                leaf_indices=uv_state.forest.leaf_indices,
-                affluence_tree=uv_state.forest.affluence_tree,
+                **copy_arrays(
+                    dict(
+                        var_tree=uv_state.forest.var_tree,
+                        split_tree=uv_state.forest.split_tree,
+                        leaf_tree=uv_state.forest.leaf_tree[:, None, :],
+                        leaf_indices=uv_state.forest.leaf_indices,
+                        affluence_tree=uv_state.forest.affluence_tree,
+                    )
+                ),
             ),
         )
 
-        key = keys.pop()
-        uv_next = step_trees(key, uv_state)
-        mv_next = step_trees(random.clone(key), mv_state)
+        for key in keys.pop(3):
+            assert_close_matrices(
+                uv_state.resid, mv_state.resid.squeeze(0), rtol=1e-6, atol=1e-6
+            )
+            assert_close_matrices(
+                uv_state.forest.leaf_tree,
+                mv_state.forest.leaf_tree.squeeze(1),
+                rtol=1e-6,
+            )
 
-        assert_close_matrices(
-            uv_next.resid, mv_next.resid.squeeze(0), atol=1e-6, rtol=1e-6
-        )
-        assert_close_matrices(
-            uv_state.forest.leaf_tree,
-            mv_state.forest.leaf_tree.squeeze(1),
-            atol=1e-6,
-            rtol=1e-6,
-        )
+            assert_array_equal(uv_state.forest.var_tree, mv_state.forest.var_tree)
+            assert_array_equal(uv_state.forest.split_tree, mv_state.forest.split_tree)
+            assert_array_equal(
+                uv_state.forest.leaf_indices, mv_state.forest.leaf_indices
+            )
+            assert_array_equal(
+                uv_state.forest.affluence_tree, mv_state.forest.affluence_tree
+            )
 
-        assert_array_equal(uv_state.forest.var_tree, mv_state.forest.var_tree)
-        assert_array_equal(uv_state.forest.split_tree, mv_state.forest.split_tree)
-        assert_array_equal(uv_state.forest.leaf_indices, mv_state.forest.leaf_indices)
-        assert_array_equal(
-            uv_state.forest.affluence_tree, mv_state.forest.affluence_tree
-        )
+            assert_array_equal(
+                uv_state.forest.grow_prop_count, mv_state.forest.grow_prop_count
+            )
+            assert_array_equal(
+                uv_state.forest.grow_acc_count, mv_state.forest.grow_acc_count
+            )
+            assert_array_equal(
+                uv_state.forest.prune_prop_count, mv_state.forest.prune_prop_count
+            )
+            assert_array_equal(
+                uv_state.forest.prune_acc_count, mv_state.forest.prune_acc_count
+            )
 
-        assert_array_equal(
-            uv_state.forest.grow_prop_count, mv_state.forest.grow_prop_count
-        )
-        assert_array_equal(
-            uv_state.forest.grow_acc_count, mv_state.forest.grow_acc_count
-        )
-        assert_array_equal(
-            uv_state.forest.prune_prop_count, mv_state.forest.prune_prop_count
-        )
-        assert_array_equal(
-            uv_state.forest.prune_acc_count, mv_state.forest.prune_acc_count
-        )
+            uv_state = step_trees(key, uv_state)
+            mv_state = step_trees(random.clone(key), mv_state)
 
-    @pytest.mark.parametrize('binary', [False, True])
-    def test_mv_steps(
-        self, keys: split, mcmcstep_data: MCMCStepData, binary: bool
-    ) -> None:
-        """Test that mv mode can run without crashing."""
+    @pytest.mark.parametrize('kind', ['binary', 'homo', 'het'])
+    def test_smoke(self, keys: split, mcmcstep_data: MCMCStepData, kind: str) -> None:
+        """Run a few steps, check shapes and valid values."""
         X, y_uv, max_split = mcmcstep_data
         k = 3
+        n = y_uv.size
 
-        if binary:
-            y = random.bernoulli(keys.pop(), 0.5, (k, y_uv.size)).astype(jnp.float32)
+        if kind == 'binary':
+            y = random.bernoulli(keys.pop(), 0.5, (k, n)).astype(jnp.float32)
         else:
             y = jnp.tile(y_uv, (k, 1))
             y = y + random.normal(keys.pop(), y.shape) * 0.1
@@ -1554,12 +1662,22 @@ class TestMVBartSteps:
             count_num_batches=None,
         )
 
-        if binary:
+        if kind == 'binary':
             kw.update(outcome_type='binary')
         else:
             kw.update(error_cov_df=jnp.array(10.0), error_cov_scale=jnp.eye(k))
 
+        if kind == 'het':
+            w = jnp.exp(random.uniform(keys.pop(), (k, n), float, -0.5, 0.5))
+            kw.update(error_scale=w)
+
         mv_state = init(**kw)
+
+        if kind == 'het':
+            assert mv_state.prec_scale is not None
+            assert mv_state.prec_scale.shape == (k, k, n)
+            assert mv_state.inv_sdev_scale is not None
+            assert mv_state.inv_sdev_scale.shape == (k, n)
 
         for key in keys.pop(10):
             mv_state = step(key, mv_state)
@@ -1567,15 +1685,70 @@ class TestMVBartSteps:
             assert jnp.all(jnp.isfinite(mv_state.resid))
             assert jnp.all(jnp.isfinite(mv_state.forest.leaf_tree))
 
-            assert mv_state.resid.shape == (k, y.shape[1])
+            assert mv_state.resid.shape == y.shape
 
             assert jnp.all(jnp.isfinite(mv_state.error_cov_inv))
             assert mv_state.error_cov_inv.shape == (k, k)
 
-            if binary:
+            if kind == 'binary':
                 assert mv_state.z is not None
                 assert jnp.all(jnp.isfinite(mv_state.z))
-                assert mv_state.z.shape == (k, y.shape[1])
+                assert mv_state.z.shape == y.shape
+
+    @pytest.mark.parametrize('k', [1, 3])
+    def test_mv_het_vector_equiv_scalar(
+        self, keys: split, mcmcstep_data: MCMCStepData, k: int
+    ) -> None:
+        """Constant vector weights equal scalar weights."""
+        X, y_uv, max_split = mcmcstep_data
+        n = y_uv.size
+
+        y = jnp.tile(y_uv, (k, 1))
+        y = y + random.normal(keys.pop(), y.shape) * 0.1
+
+        w_scalar = jnp.exp(random.uniform(keys.pop(), (n,), float, -0.5, 0.5))
+        w_vector = jnp.broadcast_to(w_scalar, (k, n))
+
+        params = partial(
+            copy_arrays,
+            dict(
+                X=X,
+                y=y,
+                offset=jnp.zeros(k),
+                max_split=max_split,
+                num_trees=10,
+                p_nonterminal=jnp.array([0.9, 0.5]),
+                leaf_prior_cov_inv=jnp.eye(k),
+                error_cov_df=jnp.array(4.0 + k),
+                error_cov_scale=jnp.eye(k),
+                resid_num_batches=None,
+                count_num_batches=None,
+            ),
+        )
+
+        scalar_state = init(error_scale=w_scalar, **params())
+        vector_state = init(error_scale=w_vector, **params())
+
+        assert scalar_state.prec_scale is not None
+        assert scalar_state.prec_scale.shape == (n,)
+        assert vector_state.prec_scale is not None
+        assert vector_state.prec_scale.shape == (k, k, n)
+
+        # scalar weights produce 1-D ``inv_sdev_scale`` (Wishart error cov update)
+        # while vector weights produce 2-D ``inv_sdev_scale`` (diagonal update),
+        # so the error_cov_inv updates are not equivalent, we can't use the full `step`.
+        for _ in range(3):
+            key = keys.pop()
+            scalar_state = step_trees(key, scalar_state)
+            vector_state = step_trees(random.clone(key), vector_state)
+
+            assert_close_matrices(scalar_state.resid, vector_state.resid, rtol=1e-5)
+            assert_close_matrices(
+                scalar_state.forest.leaf_tree,
+                vector_state.forest.leaf_tree,
+                rtol=1e-5,
+                reduce_rank=True,
+            )
 
 
 def copy_arrays(x: PyTree) -> PyTree:

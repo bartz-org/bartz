@@ -261,7 +261,14 @@ class Bart(Module):
         datapoint. Not specifying `w` is equivalent to setting it to 1 for all
         datapoints. Note: `w` is ignored in the automatic determination of
         `sigest`, so either the weights should be O(1), or `sigest` should be
-        specified by the user. Not supported for multivariate regression.
+        specified by the user. Shape ``(n,)`` applies the same scalar weight
+        to every outcome component; for multivariate continuous regression,
+        ``(k, n)`` instead supplies a per-component weight per datapoint.
+    missing
+        Boolean mask with the same shape as `y_train`; `True` marks entries
+        to be ignored by the MCMC. Values of `y_train` must be finite
+        everywhere, including at masked positions. If 2-D,
+        ``error_cov_scale`` must be diagonal.
     num_trees
         The number of trees used to represent the latent mean function.
     n_save
@@ -329,6 +336,7 @@ class Bart(Module):
     _mcmc_state: mcmcstep.State
     _binner: Binner
     _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
+    _w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
     _x_train_fmt: Any = field(static=True)
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
@@ -362,7 +370,8 @@ class Bart(Module):
         lamda: FloatLike | Float[ArrayLike, ' k'] | None = None,
         tau_num: FloatLike | None = None,
         offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
-        w: Float[ArrayLike, ' n'] | Series | None = None,
+        w: Float[ArrayLike, ' n'] | Float[ArrayLike, 'k n'] | Series | None = None,
+        missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
         num_trees: int = 200,
         n_save: int = 1000,
         n_burn: int = 1000,
@@ -385,6 +394,8 @@ class Bart(Module):
         if w is not None:
             w = self._process_response_input(w)
             self._check_same_length(x_train, w)
+
+        missing = self._process_missing_input(missing, y_train.shape)
 
         # check data types are correct for continuous/binary/multivariate regression
         outcome_type, binary_mask = self._check_type_settings(y_train, outcome_type, w)
@@ -421,6 +432,7 @@ class Bart(Module):
             outcome_type,
             offset,
             w,
+            missing,
             max_split,
             leaf_prior_cov_inv,
             error_cov_df,
@@ -459,6 +471,7 @@ class Bart(Module):
         self._binner = binner_obj
         self._x_train_fmt = x_train_fmt
         self._binary_mask = binary_mask
+        self._w = w
 
     def predict(
         self,
@@ -466,7 +479,7 @@ class Bart(Module):
         *,
         kind: PredictKind | str = 'mean',
         key: Key[Array, ''] | None = None,
-        w: Float[Array, ' m'] | Series | None = None,
+        w: Float[Array, ' m'] | Float[Array, 'k m'] | Series | None = None,
     ) -> (
         Float32[Array, ' m']
         | Float32[Array, 'k m']
@@ -488,7 +501,8 @@ class Bart(Module):
         w
             Per-observation error scale for ``kind='outcome_samples'``.
             Required when the model was fit with weights and ``x_test`` is
-            new data.
+            new data. Shape matches the shape used at fitting: ``(m,)`` for
+            scalar weights, ``(k, m)`` for multivariate vector weights.
 
         Returns
         -------
@@ -699,7 +713,7 @@ class Bart(Module):
         key: Key[Array, ''],
         latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
         binary_indices: Int32[Array, ' kb'] | None,
-        w: Float32[Array, ' m'] | None,
+        w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
         """Sample from the posterior predictive distribution."""
         if latent.ndim > 2:  # multivariate case
@@ -712,7 +726,10 @@ class Bart(Module):
             # Sample z ~ N(0, I) and solve L^T @ error = z
             # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
             z = random.normal(key, latent.shape)  # (ndpost, k, m)
-            error = solve_triangular(L, z, trans='T', lower=True)
+            error = solve_triangular(L, z, trans='T', lower=True)  # (ndpost, k, m)
+            if w is not None:
+                # w is (m,) or (k, m) so it always broadcasts right
+                error *= w
         elif self._mcmc_state.binary_y is not None:
             # pure binary UV: probit has sigma = 1
             error = random.normal(key, latent.shape)
@@ -737,8 +754,8 @@ class Bart(Module):
         self,
         x_test: Real[Array, 'p m'] | DataFrame | str,
         kind: PredictKind,
-        w: Float[Array, ' m'] | Series | None,
-    ) -> Float32[Array, ' m'] | None:
+        w: Float[Array, ' m'] | Float[Array, 'k m'] | Series | None,
+    ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
         """Validate and resolve the error weights for prediction.
 
         Parameters
@@ -763,14 +780,10 @@ class Bart(Module):
 
         """
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
-        has_train_weights = self._mcmc_state.prec_scale is not None
+        has_train_weights = self._w is not None
         is_binary = self._mcmc_state.binary_y is not None
-        is_multivariate = self._mcmc_state.offset.ndim == 1
         needs_weights = (
-            kind is PredictKind.outcome_samples
-            and not is_binary
-            and not is_multivariate
-            and has_train_weights
+            kind is PredictKind.outcome_samples and not is_binary and has_train_weights
         )
 
         if not needs_weights:
@@ -778,8 +791,7 @@ class Bart(Module):
                 msg = (
                     '`w` must be `None` in this configuration'
                     " (it is used only with kind='outcome_samples',"
-                    ' univariate continuous regression fitted with'
-                    ' weights)'
+                    ' continuous regression fitted with weights)'
                 )
                 raise ValueError(msg)
             return None
@@ -791,7 +803,7 @@ class Bart(Module):
                     ' (training weights are used automatically)'
                 )
                 raise ValueError(msg)
-            return jnp.reciprocal(jnp.sqrt(self._mcmc_state.prec_scale))
+            return self._w
 
         # new test data, model was fit with weights
         if w is None:
@@ -800,7 +812,15 @@ class Bart(Module):
                 ' weights and x_test is new data'
             )
             raise ValueError(msg)
-        return self._process_response_input(w)
+        w_test = self._process_response_input(w)
+        if w_test.ndim != self._w.ndim:
+            msg = (
+                f'`w` shape mismatch with training weights: got '
+                f'{w_test.shape=}, expected {self._w.ndim}D '
+                f'(matching the training-weight shape).'
+            )
+            raise ValueError(msg)
+        return w_test
 
     def _process_x_test(
         self,
@@ -847,6 +867,19 @@ class Bart(Module):
             msg = f'y_train must be 1D (n,) or 2D (k, n). Got {y.ndim=}.'
             raise ValueError(msg)
         return y
+
+    @staticmethod
+    def _process_missing_input(
+        missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
+        y_shape: tuple[int, ...],
+    ) -> Bool[Array, ' n'] | Bool[Array, 'k n'] | None:
+        if missing is None:
+            return None
+        missing = jnp.asarray(missing, jnp.bool_)
+        if missing.shape != y_shape:
+            msg = f'missing.shape={missing.shape} must equal y_train.shape={y_shape}.'
+            raise ValueError(msg)
+        return missing
 
     @staticmethod
     def _check_same_length(x1: Array, x2: Array) -> None:
@@ -972,7 +1005,7 @@ class Bart(Module):
     def _check_type_settings(
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
         outcome_type: OutcomeType | str | Sequence[OutcomeType | str],
-        w: Float[Array, ' n'] | None,
+        w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
     ) -> tuple[
         OutcomeType | tuple[OutcomeType, ...], Bool[Array, ''] | Bool[Array, ' k']
     ]:
@@ -996,10 +1029,19 @@ class Bart(Module):
                 f' found {y_train.shape=}.'
             )
             raise ValueError(msg)
-        if w is not None and not (
-            outcome_type is OutcomeType.continuous and y_train.ndim == 1
+        if w is not None and outcome_type is not OutcomeType.continuous:
+            msg = 'Weights are not supported when any outcome is binary.'
+            raise ValueError(msg)
+        if (
+            w is not None
+            and w.ndim == 2
+            and (y_train.ndim != 2 or w.shape[0] != y_train.shape[0])
         ):
-            msg = 'Weights are only supported for univariate continuous regression.'
+            msg = (
+                f'2D w (vector per-component weights) requires y_train of '
+                f'shape (k, n) with matching k; got {w.shape=}, '
+                f'{y_train.shape=}.'
+            )
             raise ValueError(msg)
 
         if isinstance(outcome_type, tuple):
@@ -1086,7 +1128,8 @@ class Bart(Module):
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
         outcome_type: OutcomeType | tuple[OutcomeType, ...],
         offset: Float32[Array, ''] | Float32[Array, ' k'],
-        w: Float[Array, ' n'] | None,
+        w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
+        missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
         max_split: UInt[Array, ' p'],
         leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
         error_cov_df: FloatLike | None,
@@ -1122,8 +1165,9 @@ class Bart(Module):
             y=jnp.array(y_train),
             outcome_type=outcome_type,
             offset=offset,
-            # copy w because it's going to be donated in init
+            # copy w and missing because they are going to be donated in init
             error_scale=None if w is None else jnp.array(w),
+            missing=None if missing is None else jnp.array(missing),
             max_split=max_split,
             num_trees=num_trees,
             p_nonterminal=p_nonterminal,

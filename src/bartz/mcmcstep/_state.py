@@ -323,9 +323,18 @@ class State(Module):
     """The inverse error covariance (scalar for univariate, matrix for multivariate).
     Identity in binary regression."""
 
-    prec_scale: Float32[Array, ' n'] | None = field(data=True)
-    """The scale on the error precision, i.e., ``1 / error_scale ** 2``.
-    `None` in binary regression."""
+    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None = field(data=True)
+    """The scale on the error precision. `None` in binary regression. With
+    scalar per-datapoint weights, shape ``(n,)`` and value
+    ``1 / error_scale ** 2``. With vector per-datapoint weights, shape ``(k, k, n)``
+    and value ``1/outer(error_scale, error_scale)`` repeated over datapoints."""
+
+    inv_sdev_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(
+        data=True
+    )
+    """The reciprocal of the per-observation error standard-deviation scale.
+    `None` in binary regression. Shape ``(n,)`` for scalar weights, or
+    ``(k, n)`` for per-component vector weights."""
 
     error_cov_df: Float32[Array, ''] | None
     """The df parameter of the inverse Wishart prior on the noise
@@ -346,14 +355,38 @@ class State(Module):
     """Metadata and configurations for the MCMC step."""
 
 
+def _check_diagonal(error_cov_scale: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
+    """Raise if `error_cov_scale` is not diagonal."""
+    diag = jnp.diag(jnp.diag(error_cov_scale))
+    return error_if(
+        error_cov_scale,
+        jnp.any(error_cov_scale != diag),
+        'error_cov_scale must be diagonal',
+    )
+
+
+def _init_diag_error_cov_inv(
+    error_cov_df: Float32[Array, ''],
+    error_cov_scale: Float32[Array, 'k k'],
+    binary_mask: Sequence[bool] | None = None,
+) -> Float32[Array, 'k k']:
+    """Initialize diagonal `error_cov_inv` from inverse-gamma mode per component."""
+    scale_diag = jnp.diag(error_cov_scale)
+    inv_diag = error_cov_df / jnp.where(scale_diag, scale_diag, 1.0)
+    if binary_mask is not None:
+        inv_diag = jnp.where(jnp.array(binary_mask), 1.0, inv_diag)
+    return jnp.diag(inv_diag)
+
+
 def _init_shape_shifting_parameters(
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | list[OutcomeType],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
-    error_scale: Float32[Any, ' n'] | None,
+    error_scale: Float32[Any, ' n'] | Float32[Any, 'k n'] | None,
     error_cov_df: float | Float32[Any, ''] | None,
     error_cov_scale: float | Float32[Any, ''] | Float32[Any, 'k k'] | None,
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+    missing: Bool[Any, ' n'] | Bool[Any, 'k n'] | None,
 ) -> tuple[
     bool,
     tuple[()] | tuple[int],
@@ -382,6 +415,9 @@ def _init_shape_shifting_parameters(
         The error covariance scale.
     leaf_prior_cov_inv
         The inverse of the leaf prior covariance.
+    missing
+        The per-datapoint missingness mask, used to detect partial missingness
+        (2-D mask) so that diagonal-mode initialization is selected.
 
     Returns
     -------
@@ -417,6 +453,8 @@ def _init_shape_shifting_parameters(
     else:
         binary_indices = None
 
+    partial_missing = missing is not None and missing.ndim == 2 and kshape
+
     # All-binary
     if is_binary:
         assert error_scale is None
@@ -427,35 +465,25 @@ def _init_shape_shifting_parameters(
         else:
             error_cov_inv = jnp.array(1.0)
 
-    # Mixed binary-continuous (multivariate, diagonal error covariance)
-    elif is_mixed:
-        assert error_scale is None, (
-            'error_scale is not supported for mixed binary-continuous'
-        )
+    # Mixed binary-continuous, or continuous-mv with 2-D missingness:
+    # diagonal error covariance, updated component-wise.
+    elif is_mixed or partial_missing:
+        if is_mixed:
+            assert error_scale is None
         error_cov_df = jnp.asarray(error_cov_df)
-        error_cov_scale = jnp.asarray(error_cov_scale)
+        error_cov_scale = _check_diagonal(jnp.asarray(error_cov_scale))
         assert error_cov_scale.shape == 2 * kshape
-
-        # enforce diagonal error_cov_scale
-        diag = jnp.diag(jnp.diag(error_cov_scale))
-        error_cov_scale = error_if(
-            error_cov_scale,
-            jnp.any(error_cov_scale != diag),
-            'error_cov_scale must be diagonal for mixed binary-continuous',
+        error_cov_inv = _init_diag_error_cov_inv(
+            error_cov_df, error_cov_scale, binary_mask if is_mixed else None
         )
-
-        # initialize diagonal error_cov_inv: use inv-gamma mode for continuous
-        # components, 1.0 for binary components
-        scale_diag = jnp.diag(error_cov_scale)
-        inv_diag = jnp.where(
-            jnp.array(binary_mask),
-            1.0,
-            error_cov_df / jnp.where(scale_diag, scale_diag, 1.0),
-        )
-        error_cov_inv = jnp.diag(inv_diag)
 
     # All-continuous
     else:
+        assert (
+            error_scale is None
+            or error_scale.shape == y.shape  # (k, n)
+            or error_scale.shape == y.shape[-1:]  # (n,)
+        )
         error_cov_df = jnp.asarray(error_cov_df)
         error_cov_scale = jnp.asarray(error_cov_scale)
         assert error_cov_scale.shape == 2 * kshape
@@ -578,7 +606,8 @@ def init(
     leaf_prior_cov_inv: float | Float32[Any, ''] | Float32[Array, 'k k'],
     error_cov_df: float | Float32[Any, ''] | None = None,
     error_cov_scale: float | Float32[Any, ''] | Float32[Array, 'k k'] | None = None,
-    error_scale: Float32[Any, ' n'] | None = None,
+    error_scale: Float32[Any, ' n'] | Float32[Any, 'k n'] | None = None,
+    missing: Bool[Any, ' n'] | Bool[Any, 'k n'] | None = None,
     min_points_per_decision_node: int | Integer[Any, ''] | None = None,
     resid_num_batches: int | None | Literal['auto'] = 'auto',
     count_num_batches: int | None | Literal['auto'] = 'auto',
@@ -635,10 +664,17 @@ def init(
         gamma prior parameters is ``alpha = df / 2``, ``beta = scale / 2``.
         Leave unspecified for binary regression.
     error_scale
-        Each error is scaled by the corresponding factor in `error_scale`, so
-        the error variance for ``y[i]`` is ``sigma2 * error_scale[i] ** 2``.
-        Not supported for binary regression. If not specified, defaults to 1 for
-        all points, but potentially skipping calculations.
+        Each error is scaled by the corresponding factor in `error_scale`. If
+        ``error_scale[..., i]`` is a scalar, each error variance or covariance
+        matrix is multiplied by ``error_scale[..., i] ** 2``. If
+        ``error_scale[:, i]`` is a vector, then the covariance matrix is
+        rescaled by its outer product. Not supported for binary or mixed
+        binary-continuous regression. If not specified, defaults to 1 for all
+        points, but potentially skipping calculations.
+    missing
+        Boolean mask, same shape as `y`; `True` marks entries to be ignored
+        by the MCMC. Values of `y` must be finite everywhere, including at
+        masked positions. If 2-D, `error_cov_scale` must be diagonal.
     min_points_per_decision_node
         The minimum number of data points in a decision node. 0 if not
         specified.
@@ -739,6 +775,7 @@ def init(
     offset = jnp.asarray(offset)
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
     max_split = jnp.asarray(max_split)
+    assert missing is None or missing.shape == y.shape
 
     # normalize outcome_type to enum (or list of enums)
     outcome_type = _parse_outcome_type(outcome_type)
@@ -756,6 +793,7 @@ def init(
             error_cov_df,
             error_cov_scale,
             leaf_prior_cov_inv,
+            missing,
         )
     )
 
@@ -826,7 +864,10 @@ def init(
             else None  # resid is created later after y and offset are sharded
         ),
         error_cov_inv=add_chains(error_cov_inv),
-        prec_scale=error_scale,  # temporarily set to error_scale, fix after sharding
+        # temporarily store user inputs in these slots so they get sharded
+        # with everything else; `_compute_scales` replaces them post-shard.
+        prec_scale=error_scale,
+        inv_sdev_scale=missing,
         error_cov_df=error_cov_df,
         error_cov_scale=error_cov_scale,
         forest=Forest(
@@ -881,7 +922,7 @@ def init(
 
     # delete big input arrays such that they can be deleted as soon as they
     # are sharded, only those arrays that contain an (n,) sized axis
-    del X, error_scale, y
+    del X, error_scale, missing, y
 
     # move all arrays to the appropriate device
     state = _shard_state(state)
@@ -914,11 +955,15 @@ def init(
         binary_y = None
     state = replace(state, binary_y=binary_y)
 
-    # calculate prec_scale after sharding to do the calculation on the right
-    # devices
-    if state.prec_scale is not None:
-        prec_scale = _compute_prec_scale(state.prec_scale)
-        state = replace(state, prec_scale=prec_scale)
+    # calculate prec_scale and inv_sdev_scale after sharding to do the
+    # calculation on the right devices. Pre-shard, `state.prec_scale` holds
+    # the user-supplied `error_scale` and `state.inv_sdev_scale` holds the
+    # user-supplied `missing` mask.
+    if state.prec_scale is not None or state.inv_sdev_scale is not None:
+        inv_sdev_scale, prec_scale = _compute_scales(
+            state.prec_scale, state.inv_sdev_scale
+        )
+        state = replace(state, inv_sdev_scale=inv_sdev_scale, prec_scale=prec_scale)
 
     # make all types strong to avoid unwanted recompilations
     return _remove_weak_types(state)
@@ -970,14 +1015,30 @@ def _initial_affluence_tree(
     )
 
 
-@partial(jit, donate_argnums=(0,))
-def _compute_prec_scale(error_scale: Float32[Array, ' n']) -> Float32[Array, ' n']:
-    """Compute 1 / error_scale**2.
+@partial(jit, donate_argnums=(0, 1))
+def _compute_scales(
+    error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+) -> tuple[
+    Float32[Array, ' n'] | Float32[Array, 'k n'],
+    Float32[Array, ' n'] | Float32[Array, 'k k n'],
+]:
+    """Compute ``inv_sdev_scale`` and ``prec_scale``.
 
     This is a separate function to use donate_argnums to avoid intermediate
-    copies.
+    copies. At least one of `error_scale` and `missing` must be non-None.
     """
-    return jnp.reciprocal(jnp.square(error_scale))
+    if error_scale is None:
+        inv_sdev_scale = 1.0
+    else:
+        inv_sdev_scale = jnp.reciprocal(error_scale)
+    if missing is not None:
+        inv_sdev_scale = jnp.where(missing, 0.0, inv_sdev_scale)
+    if inv_sdev_scale.ndim == 1:
+        prec_scale = jnp.square(inv_sdev_scale)
+    else:
+        prec_scale = jnp.einsum('an,bn->abn', inv_sdev_scale, inv_sdev_scale)
+    return inv_sdev_scale, prec_scale
 
 
 def _get_blocked_vars(

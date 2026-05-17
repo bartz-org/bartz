@@ -104,27 +104,30 @@ lint:
 
 ################# TESTS #################
 
-# Test groups: each is a chunk of pytest args (paths + -k expression) that
-# selects a balanced subset of the suite. CI runs one group per matrix cell to
-# keep each job under ~10 minutes without xdist. To run a single group locally
-# (composes with any tests target):
-#   make tests             GROUP=iface-v4
-#   make tests-single-cpu  GROUP=mcmcstep
-#   make tests-old         GROUP=bart-v1
+# Test groups: each is a chunk of pytest args (paths/nodeids + -k expression)
+# that selects a balanced slice of the suite. CI runs one group per matrix cell
+# to fit each job under ~15 minutes on the slow `tests-old` target without
+# xdist. To run a single group locally (composes with any tests target):
+#   make tests             GROUP=v4light
+#   make tests-single-cpu  GROUP=misc
+#   make tests-old         GROUP=v1v7
 # Leaving GROUP unset runs the whole suite.
 #
-# Each variant of the variant fixture in test_BART.py (v1/v2/v3) and
-# test_interface.py (v4/v5/v6/v7) is its own atom because each re-fits the
-# CachedBart and re-triggers JIT compilations on different static configs.
-GROUP_mcmcstep    := tests/test_mcmcstep.py
-GROUP_iface-v4    := tests/test_interface.py -k "v4 or not (v5 or v6 or v7)"
-GROUP_iface-v5    := tests/test_interface.py -k v5
-GROUP_iface-v6-v7 := tests/test_interface.py -k "v6 or v7"
-GROUP_bart-v1     := tests/test_BART.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py -k "not (v2 or v3)"
-GROUP_bart-v2     := tests/test_BART.py tests/test_jaxext.py -k "v2 or test_jaxext"
-GROUP_bart-v3     := tests/test_BART.py -k v3
+# The two test files with a variant fixture (test_BART.py for v1/v2/v3 and
+# test_interface.py for v4/v5/v6/v7) dominate cost: each variant re-fits the
+# CachedBart and re-triggers JIT compilations. v4 and v5 are too heavy to fit
+# in one group on their own, so they're sliced further: v4's test_equiv_sharding
+# is carved out (no class-scoped fixture), and v5's TestWithCachedBart class is
+# pulled into its own group (the cachedbart fixture, scope='class', is the bulk
+# of the cost — splitting members across groups would pay it twice).
+GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py 'tests/test_interface.py::test_equiv_sharding[v4]'
+GROUP_v1v7        := tests/test_BART.py tests/test_interface.py -k "v1 or v7 or not (v2 or v3 or v4 or v5 or v6)"
+GROUP_v2v3jaxext  := tests/test_BART.py tests/test_jaxext.py -k "v2 or v3 or jaxext"
+GROUP_v5heavy     := tests/test_interface.py::TestWithCachedBart -k v5
+GROUP_v4light     := tests/test_interface.py -k "v4 and not test_equiv_sharding"
+GROUP_v5light-v6  := tests/test_interface.py -k "(v5 and not TestWithCachedBart) or v6"
 
-GROUPS := mcmcstep iface-v4 iface-v5 iface-v6-v7 bart-v1 bart-v2 bart-v3
+GROUPS := misc v1v7 v2v3jaxext v5heavy v4light v5light-v6
 
 SELECT = $(if $(GROUP),$(GROUP_$(GROUP)))
 

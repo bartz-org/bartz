@@ -93,6 +93,8 @@ help:
 	@echo "- if the online docs are not up-to-date, merge another PR to trigger a new merge CI"
 
 
+################# SETUP #################
+
 .PHONY: setup
 setup:
 	Rscript -e "renv::restore()"
@@ -101,6 +103,13 @@ setup:
 .PHONY: lint
 lint:
 	$(UV_RUN) pre-commit run $(if $(ARGS),$(ARGS),--all-files)
+
+.PHONY: clean
+clean:
+	rm -fr .venv
+	rm -fr dist
+	rm -fr config/jax_cache
+	rm -fr docs/_build
 
 ################# TESTS #################
 
@@ -189,6 +198,9 @@ docs-latest:
 	@echo
 	@echo "Now open _site/index.html"
 
+
+################# COVERAGE #################
+
 .PHONY: covreport
 covreport:
 	$(UV_RUN) coverage combine --keep
@@ -203,7 +215,7 @@ covcheck:
 	$(UV_RUN) coverage report --include='src/*' --fail-under=90 --format=total
 
 
-################# RELEASE #################
+################# DEPENDENCIES #################
 
 .PHONY: update-deps
 update-deps:
@@ -216,6 +228,9 @@ update-oldest-deps:
 	$(UV_RUN) python config/update_oldest_deps.py --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS)
 	uv lock
 
+
+################# RELEASE #################
+
 .PHONY: copy-version
 copy-version: src/bartz/_version.py
 src/bartz/_version.py: pyproject.toml
@@ -225,13 +240,6 @@ src/bartz/_version.py: pyproject.toml
 check-committed:
 	git diff --quiet
 	git diff --quiet --staged
-
-.PHONY: clean
-clean:
-	rm -fr .venv
-	rm -fr dist
-	rm -fr config/jax_cache
-	rm -fr docs/_build
 
 .PHONY: release
 release: clean update-deps copy-version check-committed tests tests-single-cpu tests-old docs

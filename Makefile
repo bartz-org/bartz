@@ -104,8 +104,10 @@ lint:
 
 ################# TESTS #################
 
+# FAST=1 enables a faster, less thorough test/coverage configuration; matches
+# the CI mode used on pull requests.
 TESTS_VARS = COVERAGE_FILE=.coverage.$@
-TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
+TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000 $(if $(FAST),-m "not slow")
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
 TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=2
 TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_PREALLOCATE=false
@@ -168,7 +170,7 @@ covcheck:
 	$(UV_RUN) coverage combine --keep
 	$(UV_RUN) coverage report --include='tests/**/test_*.py'
 	$(UV_RUN) coverage report --include='src/*'
-	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total $(ARGS)
+	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=$(if $(FAST),90,99) --format=total
 	$(UV_RUN) coverage report --include='src/*' --fail-under=90 --format=total
 
 

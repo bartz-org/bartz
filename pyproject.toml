@@ -106,6 +106,7 @@ source_pkgs = ["bartz", "tests"]
 
 [tool.coverage.report]
 show_missing = true
+skip_covered = true
 
 [tool.coverage.html]
 show_contexts = true

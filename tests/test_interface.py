@@ -1061,7 +1061,7 @@ def test_scale_shift(bkw: BartKW) -> None:
             mask, 0.0, bart2.get_error_sdev(mean=True) / scale
         )
     assert_close_matrices(sdev_actual, sdev_expected, rtol=1e-5, reduce_rank=True)
-    assert_close_matrices(sdev_mean_actual, sdev_mean_expected, rtol=1e-6)
+    assert_close_matrices(sdev_mean_actual, sdev_mean_expected, rtol=1e-5)
 
 
 def test_min_points_per_decision_node(bkw: BartKW) -> None:

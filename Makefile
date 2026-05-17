@@ -268,7 +268,7 @@ smoke-test:
 upload: smoke-test version-tag
 	@echo "Enter PyPI token:"
 	@read -s UV_PUBLISH_TOKEN && \
-	export UV_PUBLISH_TOKEN="$$UV_PUBLISH_TOKEN" && \
+	export UV_PUBLISH_TOKEN && \
 	uv publish
 	@VERSION=$$(uv run python -c 'import bartz; print(bartz.__version__)') && \
 	echo "Try to install bartz $$VERSION from PyPI" && \
@@ -278,7 +278,7 @@ upload: smoke-test version-tag
 upload-test: smoke-test check-committed
 	@echo "Enter TestPyPI token:"
 	@read -s UV_PUBLISH_TOKEN && \
-	export UV_PUBLISH_TOKEN="$$UV_PUBLISH_TOKEN" && \
+	export UV_PUBLISH_TOKEN && \
 	uv publish --check-url=https://test.pypi.org/simple/ --publish-url=https://test.pypi.org/legacy/
 	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
 	echo "Try to install bartz $$VERSION from TestPyPI" && \

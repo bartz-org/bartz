@@ -103,8 +103,8 @@ jobs:
             {
               "id": "single-cpu",
               "runs-on": "ubuntu-latest",
-              "argv": "tests COVERAGE_SUFFIX=-single-cpu",
-              "ARGS": "--num-cpu-devices=1"
+              "argv": "tests-single-cpu",
+              "ARGS": ""
             }
           ]'
           BENCHMARKS_BASE_MATRIX='[

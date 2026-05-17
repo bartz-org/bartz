@@ -24,8 +24,6 @@
 
 # Makefile for running tests, prepare and upload a release.
 
-COVERAGE_SUFFIX =
-
 # define command to run python
 CUDA_VERSION = $(shell nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3)
 EXTRAS = $(if $(filter 12 13,$(CUDA_VERSION)),--extra=cuda$(CUDA_VERSION),)
@@ -46,6 +44,7 @@ help:
 	@echo "Available targets:"
 	@echo "- setup: create R and Python environments for development"
 	@echo "- tests: run unit tests on cpu, saving coverage information"
+	@echo "- tests-single-cpu: like \`tests\` but with a single jax cpu device"
 	@echo "- tests-old: run unit tests on cpu with oldest supported python and dependencies"
 	@echo '- tests-gpu: like `tests` but on gpu'
 	@echo '- tests-gpu-old: like `tests-old` but on gpu'
@@ -105,7 +104,7 @@ lint:
 
 ################# TESTS #################
 
-TESTS_VARS = COVERAGE_FILE=.coverage.$@$(COVERAGE_SUFFIX)
+TESTS_VARS = COVERAGE_FILE=.coverage.$@
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
 TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=2
@@ -115,6 +114,10 @@ TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=3
 .PHONY: tests
 tests:
 	$(TESTS_CPU_VARS) $(UV_RUN) $(TESTS_CPU_COMMAND) $(ARGS)
+
+.PHONY: tests-single-cpu
+tests-single-cpu:
+	$(TESTS_CPU_VARS) $(UV_RUN) $(TESTS_CPU_COMMAND) --num-cpu-devices=1 $(ARGS)
 
 .PHONY: tests-old
 tests-old:
@@ -200,7 +203,7 @@ clean:
 	rm -fr docs/_build
 
 .PHONY: release
-release: clean update-deps copy-version check-committed tests tests-old docs
+release: clean update-deps copy-version check-committed tests tests-single-cpu tests-old docs
 	uv build
 
 .PHONY: version-tag

@@ -355,6 +355,29 @@ class State(Module):
     """Metadata and configurations for the MCMC step."""
 
 
+def _check_diagonal(error_cov_scale: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
+    """Raise if `error_cov_scale` is not diagonal."""
+    diag = jnp.diag(jnp.diag(error_cov_scale))
+    return error_if(
+        error_cov_scale,
+        jnp.any(error_cov_scale != diag),
+        'error_cov_scale must be diagonal',
+    )
+
+
+def _init_diag_error_cov_inv(
+    error_cov_df: Float32[Array, ''],
+    error_cov_scale: Float32[Array, 'k k'],
+    binary_mask: Sequence[bool] | None = None,
+) -> Float32[Array, 'k k']:
+    """Initialize diagonal `error_cov_inv` from inverse-gamma mode per component."""
+    scale_diag = jnp.diag(error_cov_scale)
+    inv_diag = error_cov_df / jnp.where(scale_diag, scale_diag, 1.0)
+    if binary_mask is not None:
+        inv_diag = jnp.where(jnp.array(binary_mask), 1.0, inv_diag)
+    return jnp.diag(inv_diag)
+
+
 def _init_shape_shifting_parameters(
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | list[OutcomeType],
@@ -363,6 +386,7 @@ def _init_shape_shifting_parameters(
     error_cov_df: float | Float32[Any, ''] | None,
     error_cov_scale: float | Float32[Any, ''] | Float32[Any, 'k k'] | None,
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+    missing: Bool[Any, ' n'] | Bool[Any, 'k n'] | None,
 ) -> tuple[
     bool,
     tuple[()] | tuple[int],
@@ -391,6 +415,9 @@ def _init_shape_shifting_parameters(
         The error covariance scale.
     leaf_prior_cov_inv
         The inverse of the leaf prior covariance.
+    missing
+        The per-datapoint missingness mask, used to detect partial missingness
+        (2-D mask) so that diagonal-mode initialization is selected.
 
     Returns
     -------
@@ -426,6 +453,8 @@ def _init_shape_shifting_parameters(
     else:
         binary_indices = None
 
+    partial_missing = missing is not None and missing.ndim == 2 and kshape
+
     # All-binary
     if is_binary:
         assert error_scale is None
@@ -436,30 +465,17 @@ def _init_shape_shifting_parameters(
         else:
             error_cov_inv = jnp.array(1.0)
 
-    # Mixed binary-continuous (multivariate, diagonal error covariance)
-    elif is_mixed:
-        assert error_scale is None
+    # Mixed binary-continuous, or continuous-mv with 2-D missingness:
+    # diagonal error covariance, updated component-wise.
+    elif is_mixed or partial_missing:
+        if is_mixed:
+            assert error_scale is None
         error_cov_df = jnp.asarray(error_cov_df)
-        error_cov_scale = jnp.asarray(error_cov_scale)
+        error_cov_scale = _check_diagonal(jnp.asarray(error_cov_scale))
         assert error_cov_scale.shape == 2 * kshape
-
-        # enforce diagonal error_cov_scale
-        diag = jnp.diag(jnp.diag(error_cov_scale))
-        error_cov_scale = error_if(
-            error_cov_scale,
-            jnp.any(error_cov_scale != diag),
-            'error_cov_scale must be diagonal for mixed binary-continuous',
+        error_cov_inv = _init_diag_error_cov_inv(
+            error_cov_df, error_cov_scale, binary_mask if is_mixed else None
         )
-
-        # initialize diagonal error_cov_inv: use inv-gamma mode for continuous
-        # components, 1.0 for binary components
-        scale_diag = jnp.diag(error_cov_scale)
-        inv_diag = jnp.where(
-            jnp.array(binary_mask),
-            1.0,
-            error_cov_df / jnp.where(scale_diag, scale_diag, 1.0),
-        )
-        error_cov_inv = jnp.diag(inv_diag)
 
     # All-continuous
     else:
@@ -658,7 +674,7 @@ def init(
     missing
         Boolean mask, same shape as `y`; `True` marks entries to be ignored
         by the MCMC. Values of `y` must be finite everywhere, including at
-        masked positions.
+        masked positions. If 2-D, `error_cov_scale` must be diagonal.
     min_points_per_decision_node
         The minimum number of data points in a decision node. 0 if not
         specified.
@@ -777,6 +793,7 @@ def init(
             error_cov_df,
             error_cov_scale,
             leaf_prior_cov_inv,
+            missing,
         )
     )
 

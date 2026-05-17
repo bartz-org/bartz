@@ -72,8 +72,8 @@ from bartz.mcmcstep._step import (
     _precompute_likelihood_terms_mv,
     _precompute_likelihood_terms_uv,
     _sample_wishart_bartlett,
+    _step_error_cov_inv_diag,
     _step_error_cov_inv_mv,
-    _step_error_cov_inv_uv,
     step_error_cov_inv,
     step_trees,
     step_z,
@@ -1045,8 +1045,21 @@ class TestMixedBinaryContinuous:
         # z[1] should be offset[2] (second binary component, index 2 in y)
         assert_array_equal(state.z[1], jnp.full(self.n, offset[2]))
 
-    def test_init_rejects_nondiagonal_scale(self, init_kwargs: dict) -> None:
+    @pytest.mark.parametrize(
+        ('outcome_type', 'with_missing'),
+        [
+            (['binary', 'continuous', 'binary'], False),
+            (['continuous', 'continuous', 'continuous'], True),
+        ],
+        ids=['mixed', 'partial_missing'],
+    )
+    def test_init_rejects_nondiagonal_scale(
+        self, init_kwargs: dict, outcome_type: Sequence[str], with_missing: bool
+    ) -> None:
         """Check that init rejects non-diagonal error_cov_scale."""
+        init_kwargs['outcome_type'] = outcome_type
+        if with_missing:
+            init_kwargs['missing'] = jnp.zeros((self.k, self.n), jnp.bool_)
         init_kwargs['error_cov_scale'] += 0.1 * jnp.ones((self.k, self.k))
         with pytest.raises(Exception, match='diagonal'):
             _state = init(**init_kwargs)
@@ -1405,7 +1418,7 @@ class TestMVBartIntegration:
         self, keys: split, mcmcstep_data: MCMCStepData
     ) -> None:
         """
-        Test that _step_error_cov_inv_uv and _step_error_cov_inv_mv (k = 1) sample from the same posterior.
+        Test that the univariate (diag) and multivariate (k = 1) samplers draw from the same posterior.
 
         UV: 1/sigma2 ~ Gamma(alpha_post, beta_post)
         MV: error_cov_inv ~ Wishart(df_post, scale_post)
@@ -1442,7 +1455,7 @@ class TestMVBartIntegration:
         )
 
         def sample_uv(k: Key[Array, '']) -> Float32[Array, '']:
-            return _step_error_cov_inv_uv(k, st_uv).error_cov_inv
+            return _step_error_cov_inv_diag(k, st_uv).error_cov_inv
 
         def sample_mv(k: Key[Array, '']) -> Float32[Array, '']:
             return _step_error_cov_inv_mv(k, st_mv).error_cov_inv.reshape(())
@@ -1455,6 +1468,74 @@ class TestMVBartIntegration:
 
         assert jnp.abs(jnp.mean(samples_uv) - jnp.mean(samples_mv)) < 0.01
         assert p_value > 0.01
+
+    def test_error_cov_inv_missing_equals_drop(
+        self, keys: split, mcmcstep_data: MCMCStepData
+    ) -> None:
+        """1-D ``inv_sdev_scale`` zeros give the same sample as dropping those positions.
+
+        Covers both the univariate diagonal path and the multivariate Wishart path
+        (``inv_sdev_scale`` 1-D, no partial missingness), which is the dof fix.
+        """
+        X, y, _ = mcmcstep_data
+        n = y.size
+        resid_1d = random.normal(keys.pop(), (n,))
+        mask = random.bernoulli(keys.pop(), 0.3, (n,))
+        keep = ~mask
+        inv_sdev = jnp.where(mask, 0.0, 1.0)
+
+        df_prior = jnp.float32(20.0)
+        scale_prior = jnp.float32(10.0)
+        common: dict = dict(
+            X=X,
+            binary_y=None,
+            binary_indices=None,
+            error_cov_df=df_prior,
+            z=None,
+            offset=0.0,
+            prec_scale=None,
+            forest=None,
+            config=None,
+        )
+
+        st_uv_with = State(
+            **common,
+            resid=resid_1d,
+            inv_sdev_scale=inv_sdev,
+            error_cov_scale=scale_prior,
+            error_cov_inv=jnp.float32(1.0),
+        )
+        st_uv_drop = State(
+            **common,
+            resid=resid_1d[keep],
+            inv_sdev_scale=None,
+            error_cov_scale=scale_prior,
+            error_cov_inv=jnp.float32(1.0),
+        )
+
+        key = keys.pop()
+        sample_with = _step_error_cov_inv_diag(key, st_uv_with).error_cov_inv
+        sample_drop = _step_error_cov_inv_diag(key, st_uv_drop).error_cov_inv
+        assert_allclose(sample_with, sample_drop, rtol=1e-6)
+
+        # multivariate Wishart path (k=1) with 1-D inv_sdev_scale and zeros
+        st_mv_with = State(
+            **common,
+            resid=resid_1d[None, :],
+            inv_sdev_scale=inv_sdev,
+            error_cov_scale=scale_prior[None, None],
+            error_cov_inv=jnp.eye(1),
+        )
+        st_mv_drop = State(
+            **common,
+            resid=resid_1d[None, keep],
+            inv_sdev_scale=None,
+            error_cov_scale=scale_prior[None, None],
+            error_cov_inv=jnp.eye(1),
+        )
+        sample_mv_with = _step_error_cov_inv_mv(key, st_mv_with).error_cov_inv
+        sample_mv_drop = _step_error_cov_inv_mv(key, st_mv_drop).error_cov_inv
+        assert_allclose(sample_mv_with, sample_mv_drop, rtol=1e-6)
 
 
 class TestMultivariate:
@@ -1653,10 +1734,13 @@ class TestMultivariate:
         assert vector_state.prec_scale is not None
         assert vector_state.prec_scale.shape == (k, k, n)
 
+        # scalar weights produce 1-D ``inv_sdev_scale`` (Wishart error cov update)
+        # while vector weights produce 2-D ``inv_sdev_scale`` (diagonal update),
+        # so the error_cov_inv updates are not equivalent, we can't use the full `step`.
         for _ in range(3):
             key = keys.pop()
-            scalar_state = step(key, scalar_state)
-            vector_state = step(random.clone(key), vector_state)
+            scalar_state = step_trees(key, scalar_state)
+            vector_state = step_trees(random.clone(key), vector_state)
 
             assert_close_matrices(scalar_state.resid, vector_state.resid, rtol=1e-5)
             assert_close_matrices(
@@ -1664,9 +1748,6 @@ class TestMultivariate:
                 vector_state.forest.leaf_tree,
                 rtol=1e-5,
                 reduce_rank=True,
-            )
-            assert_close_matrices(
-                scalar_state.error_cov_inv, vector_state.error_cov_inv, rtol=1e-5
             )
 
 

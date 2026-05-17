@@ -538,7 +538,6 @@ class TestWithCachedBart:  # pragma: slow
         p, n = bkw.kw['x_train'].shape
         num_chains = 4
         nsamples = bart.n_save
-        binary = bkw.kw['outcome_type'] == 'binary'
 
         with subtests.test('yhat_train'):
             yhat_train = bart.predict('train', kind='latent_samples')
@@ -546,8 +545,7 @@ class TestWithCachedBart:  # pragma: slow
             rhat_yhat_train = rhat_rank(yhat_train_chains, split=True)
             assert_array_less(rhat_yhat_train, 1.1)
 
-        mixed = isinstance(bkw.kw['outcome_type'], list)
-        if binary:
+        if bkw.kw['outcome_type'] == 'binary':
             with subtests.test('prob_train'):
                 prob_train = bart.predict('train', kind='mean_samples')
                 prob_train_chains = prob_train.reshape(num_chains, nsamples, -1)
@@ -555,7 +553,8 @@ class TestWithCachedBart:  # pragma: slow
                     clipped_logit(prob_train_chains, 1e-5), split=True
                 )
                 assert_array_less(rhat_prob_train, 1.005)
-        elif mixed:
+
+        elif isinstance(bkw.kw['outcome_type'], list):
             with subtests.test('sigma'):
                 # mixed regression: check get_error_sdev, dropping binary
                 # components (NaN sdev)
@@ -568,15 +567,23 @@ class TestWithCachedBart:  # pragma: slow
                         sigma = sigma[:, :, ~binary_mask]
                 rhat_sigma = rhat_rank(sigma, split=True)
                 assert_array_less(rhat_sigma, 1.05)
+
         else:
             with subtests.test('error_cov_inv'):
                 # all continuous: check full precision matrix convergence
-                # using upper triangular elements (matrix is symmetric)
+                # using upper triangular elements (matrix is symmetric).
+                # When the error covariance is constrained diagonal (2-D
+                # inv_sdev_scale), off-diagonal entries are deterministically
+                # zero, so rhat is undefined there; check only the diagonal.
                 error_cov_inv = bart._main_trace.error_cov_inv
                 if error_cov_inv.ndim == 2:  # pragma: no cover, only mv by default
                     error_cov_inv = error_cov_inv[:, :, None, None]
                 _, _, k, _ = error_cov_inv.shape
-                ti, tj = jnp.triu_indices(k)
+                inv_sdev = bart._mcmc_state.inv_sdev_scale
+                if inv_sdev is not None and inv_sdev.ndim == 2:
+                    ti = tj = jnp.arange(k)
+                else:
+                    ti, tj = jnp.triu_indices(k)
                 error_cov_inv = error_cov_inv[:, :, ti, tj]
                 rhat_prec = rhat_rank(error_cov_inv, split=True)
                 assert_array_less(rhat_prec, 1.01)

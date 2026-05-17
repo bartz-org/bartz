@@ -267,7 +267,8 @@ class Bart(Module):
     missing
         Boolean mask with the same shape as `y_train`; `True` marks entries
         to be ignored by the MCMC. Values of `y_train` must be finite
-        everywhere, including at masked positions.
+        everywhere, including at masked positions. If 2-D,
+        ``error_cov_scale`` must be diagonal.
     num_trees
         The number of trees used to represent the latent mean function.
     n_save

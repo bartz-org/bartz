@@ -1512,33 +1512,18 @@ def _sample_wishart_bartlett(
     return T @ T.T
 
 
-def _step_error_cov_inv_uv(key: Key[Array, ''], bart: State) -> State:
-    assert bart.error_cov_df is not None
-    assert bart.error_cov_scale is not None
-
-    resid = bart.resid
-    # inverse gamma prior: alpha = df / 2, beta = scale / 2
-    alpha = bart.error_cov_df / 2 + resid.size / 2
-    if bart.inv_sdev_scale is not None:
-        resid = resid * bart.inv_sdev_scale
-    norm2 = resid @ resid
-    beta = bart.error_cov_scale / 2 + norm2 / 2
-
-    sample = random.gamma(key, alpha)
-    # random.gamma seems to be slow at compiling, maybe cdf inversion would
-    # be better, but it's not implemented in jax
-    return replace(bart, error_cov_inv=sample / beta)
-
-
 def _step_error_cov_inv_mv(key: Key[Array, ''], bart: State) -> State:
     assert bart.error_cov_df is not None
     assert bart.error_cov_scale is not None
 
     resid = bart.resid
-    if bart.inv_sdev_scale is not None:
+    if bart.inv_sdev_scale is None:
+        _, n_eff = resid.shape
+    else:
+        # 2-D inv_sdev_scale dispatches to the diagonal path, so here it is 1-D
+        n_eff = jnp.sum(bart.inv_sdev_scale != 0, axis=-1)
         resid *= bart.inv_sdev_scale
-    _, n = resid.shape
-    df_post = bart.error_cov_df + n
+    df_post = bart.error_cov_df + n_eff
     scale_post = bart.error_cov_scale + resid @ resid.T
 
     prec = _sample_wishart_bartlett(key, df_post, scale_post)
@@ -1546,64 +1531,49 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], bart: State) -> State:
 
 
 def _step_error_cov_inv_diag(key: Key[Array, ''], bart: State) -> State:
-    """Update diagonal error_cov_inv for mixed binary-continuous.
-
-    Each continuous component gets an independent inverse-gamma update
-    (like `_step_error_cov_inv_uv` repeated per component). Binary
-    components stay fixed at 1.
-    """
-    assert bart.binary_indices is not None
+    """Per-component inverse-gamma update for univariate, mixed, and partial-missing paths."""
     assert bart.error_cov_scale is not None
     assert bart.error_cov_df is not None
 
-    # per-component sum of squared residuals, shape (k,)
     resid = bart.resid
     if bart.inv_sdev_scale is not None:
-        # this is currently used only for missing data, no heteroskedasticity
-        # in the mixed/binary case
         resid = resid * bart.inv_sdev_scale
-    norm2 = jnp.einsum('kn,kn->k', resid, resid)
 
-    # inverse-gamma posterior parameters
-    *_, k, n = bart.resid.shape
-    scale_diag = jnp.diag(bart.error_cov_scale)
-    alpha = bart.error_cov_df / 2 + n / 2
-    beta = scale_diag / 2 + norm2 / 2
+    # alpha
+    if bart.inv_sdev_scale is None:
+        *_, n_eff = resid.shape
+    else:
+        n_eff = jnp.sum(bart.inv_sdev_scale != 0, axis=-1)
+    alpha = bart.error_cov_df / 2 + n_eff / 2
 
-    # sample independent gamma variates for all k components
-    samples = random.gamma(key, alpha, (k,))
-    new_diag = samples / beta
+    # beta
+    norm2 = jnp.einsum('...n,...n->...', resid, resid)
+    scale = bart.error_cov_scale
+    kshape = resid.shape[:-1]
+    if kshape:
+        scale = jnp.diag(scale)
+    beta = scale / 2 + norm2 / 2
 
-    # keep binary components at 1.0
-    new_diag = new_diag.at[bart.binary_indices].set(1.0)
-
-    return replace(bart, error_cov_inv=jnp.diag(new_diag))
+    samples = random.gamma(key, alpha, kshape)
+    prec = samples / beta
+    if bart.binary_indices is not None:
+        prec = prec.at[bart.binary_indices].set(1.0)
+    if kshape:
+        prec = jnp.diag(prec)
+    return replace(bart, error_cov_inv=prec)
 
 
 @named_call
 def step_error_cov_inv(key: Key[Array, ''], bart: State) -> State:
-    """
-    MCMC-update the inverse error covariance.
-
-    Handles univariate, multivariate, and mixed binary-continuous cases.
-
-    Parameters
-    ----------
-    key
-        A jax random key.
-    bart
-        A BART mcmc state.
-
-    Returns
-    -------
-    The new BART mcmc state, with an updated `error_cov_inv`.
-    """
-    if bart.binary_indices is not None:
-        return _step_error_cov_inv_diag(key, bart)
-    elif bart.error_cov_inv.ndim == 2:
+    """MCMC-update the inverse error covariance."""
+    if (
+        bart.error_cov_inv.ndim == 2
+        and bart.binary_indices is None
+        and (bart.inv_sdev_scale is None or bart.inv_sdev_scale.ndim == 1)
+    ):
         return _step_error_cov_inv_mv(key, bart)
     else:
-        return _step_error_cov_inv_uv(key, bart)
+        return _step_error_cov_inv_diag(key, bart)
 
 
 @named_call

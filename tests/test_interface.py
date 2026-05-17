@@ -77,7 +77,6 @@ from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
-from tests.conftest import get_disable_problematic_sharding
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
     assert_allclose,
@@ -440,10 +439,6 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             msg = f'Unknown variant {variant}'
             raise ValueError(msg)
 
-    if get_disable_problematic_sharding():  # pragma: no cover, debug setting
-        bkw.kw['num_data_devices'] = None
-        bkw.kw['num_chain_devices'] = None
-
     return bkw
 
 
@@ -451,10 +446,10 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 # test_BART.py
 @pytest.fixture(
     params=(
-        4,
-        pytest.param(5, marks=pytest.mark.slow),
-        pytest.param(6, marks=pytest.mark.slow),
-        pytest.param(7, marks=pytest.mark.slow),
+        pytest.param(4, id='v4'),
+        pytest.param(5, marks=pytest.mark.slow, id='v5'),
+        pytest.param(6, marks=pytest.mark.slow, id='v6'),
+        pytest.param(7, marks=pytest.mark.slow, id='v7'),
     ),
     scope='module',
 )
@@ -1711,15 +1706,11 @@ def test_debug_checks(keys: split, bkw: BartKW) -> None:
         collect()
 
 
-# this entire function is marked not to be covered due to the current desperate
-# hacks in tests.yml, there's its twin in test_BART.py doing some work
 @pytest.mark.slow
-def test_equiv_sharding(  # pragma: no cover  # pragma: slow
+def test_equiv_sharding(  # pragma: slow
     bkw: BartKW, subtests: SubTests
 ) -> None:
     """Check that the result is the same with/without sharding."""
-    if get_disable_problematic_sharding():  # pragma: no cover
-        pytest.skip('Sharding disabled by --disable-problematic-sharding')
     if len(jax.devices()) < 2:  # this branch is covered in single cpu tests config
         pytest.skip('Need at least 2 devices for this test')
 

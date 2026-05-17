@@ -39,9 +39,6 @@ on:
 
 env:
   UV_VERSION: "0.9.5"
-  # Use the FAST test configuration on pull requests (skips slow tests, lowers
-  # coverage threshold). See `Makefile` for what FAST toggles.
-  FAST: ${{ github.event_name == 'pull_request' && '1' || '' }}
 
 jobs:
   pre-commit:
@@ -79,25 +76,10 @@ jobs:
   setup-matrix:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
       benchmarks-matrix: ${{ steps.set-matrix.outputs.benchmarks-matrix }}
     steps:
       - id: set-matrix
         run: |
-          BASE_MATRIX='[
-            {
-              "id": "latest",
-              "runs-on": "ubuntu-latest",
-              "argv": "tests",
-              "ARGS": "--disable-problematic-sharding"
-            },
-            {
-              "id": "single-cpu",
-              "runs-on": "ubuntu-latest",
-              "argv": "tests-single-cpu",
-              "ARGS": ""
-            }
-          ]'
           BENCHMARKS_BASE_MATRIX='[
             {
               "id": "latest",
@@ -111,23 +93,20 @@ jobs:
             }
           ]'
 
-          MATRIX=$(echo "$BASE_MATRIX" | jq -c ".")
           BENCHMARKS_MATRIX=$(echo "$BENCHMARKS_BASE_MATRIX" | jq -c ".")
 
-          echo "matrix={\"include\":$MATRIX}" >> $GITHUB_OUTPUT
           echo "benchmarks-matrix={\"include\":$BENCHMARKS_MATRIX}" >> $GITHUB_OUTPUT
 
   tests:
-    name: tests-${{ matrix.id }}
-    needs: setup-matrix
-    runs-on: ${{ matrix.runs-on }}
-
-    env:
-      RPY2_CFFI_MODE: ${{ github.event_name == 'pull_request' && 'ABI' || '' }}
+    name: ${{ matrix.target }}/${{ matrix.group }}
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
+      matrix:
+        # The list of groups lives in `Makefile` as `GROUPS`; keep this in sync.
+        target: [tests, tests-single-cpu, tests-old]
+        group: [mcmcstep, iface-v4, iface-v5, iface-v6-v7, bart-v1, bart-v2, bart-v3]
 
     steps:
       - name: Checkout repository
@@ -137,22 +116,19 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: ${{ env.UV_VERSION }}
-          cache-suffix: -${{ matrix.id }}
+          cache-suffix: -${{ matrix.target }}-${{ matrix.group }}
 
       - name: Install R
-        if: github.event_name != 'pull_request'
         uses: r-lib/actions/setup-r@v2
         with:
           r-version: "renv"
 
       - name: Install R dependencies
-        if: github.event_name != 'pull_request'
         uses: r-lib/actions/setup-renv@v2
         env:
           GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure R PATHS for rpy2 (Linux only)
-        if: github.event_name != 'pull_request'
         run: |
           echo "R_HOME=$(R RHOME)" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$(R RHOME)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
@@ -160,8 +136,10 @@ jobs:
           uv run --dev python -c "import rpy2.situation as s; print('\n'.join(map(str, s.iter_info())))"
 
       - name: Run unit tests
-        timeout-minutes: 120
-        run: make ${{ matrix.argv }} ARGS='${{ matrix.ARGS }}'
+        timeout-minutes: 30
+        # NPROC=0 disables pytest-xdist: the small CI runners OOM under
+        # parallel test execution. Each matrix cell runs one group serially.
+        run: make ${{ matrix.target }} GROUP=${{ matrix.group }} NPROC=0
 
       - name: Save coverage information
         uses: actions/upload-artifact@v7
@@ -225,11 +203,6 @@ jobs:
         with:
           pattern: .coverage*
           merge-multiple: true
-
-      - name: Exclude slow-only code from coverage
-        # slow tests are skipped when FAST is set, don't count them for coverage
-        if: env.FAST == '1'
-        run: 'sed -i ''/^\[tool.coverage.report\]$/a exclude_also = ["# pragma: slow"]\nomit = ["src/bartz/debug/_traceconv.py"]'' pyproject.toml'
 
       - name: List files
         run: |

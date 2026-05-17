@@ -39,13 +39,6 @@ from jax import config, random
 
 from bartz.jaxext import get_default_device, split
 
-DISABLE_PROBLEMATIC_SHARDING = False
-
-
-def get_disable_problematic_sharding() -> bool:
-    """Return whether problematic sharding is disabled via --disable-problematic-sharding."""
-    return DISABLE_PROBLEMATIC_SHARDING
-
 
 def get_old_python_version() -> tuple[int, int]:
     """Return the minimum Python version required by pyproject.toml as (major, minor)."""
@@ -117,18 +110,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=10,
         help='Number of virtual jax cpu devices to create (default: 10)',
     )
-    parser.addoption(
-        '--disable-problematic-sharding',
-        action='store_true',
-        default=False,
-        help='Disable sharding options in test configurations',
-    )
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    """Store global options."""
-    global DISABLE_PROBLEMATIC_SHARDING  # noqa: PLW0603
-    DISABLE_PROBLEMATIC_SHARDING = config.getoption('--disable-problematic-sharding')
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:

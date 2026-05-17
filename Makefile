@@ -104,14 +104,40 @@ lint:
 
 ################# TESTS #################
 
-# FAST=1 enables a faster, less thorough test/coverage configuration; matches
-# the CI mode used on pull requests.
-TESTS_VARS = COVERAGE_FILE=.coverage.$@
-TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000 $(if $(FAST),-m "not slow")
+# Test groups: each is a chunk of pytest args (paths + -k expression) that
+# selects a balanced subset of the suite. CI runs one group per matrix cell to
+# keep each job under ~10 minutes without xdist. To run a single group locally
+# (composes with any tests target):
+#   make tests             GROUP=iface-v4
+#   make tests-single-cpu  GROUP=mcmcstep
+#   make tests-old         GROUP=bart-v1
+# Leaving GROUP unset runs the whole suite.
+#
+# Each variant of the variant fixture in test_BART.py (v1/v2/v3) and
+# test_interface.py (v4/v5/v6/v7) is its own atom because each re-fits the
+# CachedBart and re-triggers JIT compilations on different static configs.
+GROUP_mcmcstep    := tests/test_mcmcstep.py
+GROUP_iface-v4    := tests/test_interface.py -k "v4 or not (v5 or v6 or v7)"
+GROUP_iface-v5    := tests/test_interface.py -k v5
+GROUP_iface-v6-v7 := tests/test_interface.py -k "v6 or v7"
+GROUP_bart-v1     := tests/test_BART.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py -k "not (v2 or v3)"
+GROUP_bart-v2     := tests/test_BART.py tests/test_jaxext.py -k "v2 or test_jaxext"
+GROUP_bart-v3     := tests/test_BART.py -k v3
+
+GROUPS := mcmcstep iface-v4 iface-v5 iface-v6-v7 bart-v1 bart-v2 bart-v3
+
+SELECT = $(if $(GROUP),$(GROUP_$(GROUP)))
+
+# Number of xdist workers. Default to 2 for local speed; CI overrides to 0
+# (xdist off) because the small runners OOM under parallel test execution.
+NPROC ?= 2
+
+TESTS_VARS = COVERAGE_FILE=.coverage.$@$(if $(GROUP),-$(GROUP))
+TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
-TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=2
+TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=$(NPROC) $(SELECT)
 TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_PREALLOCATE=false
-TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=3
+TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=$(NPROC) $(SELECT)
 
 .PHONY: tests
 tests:
@@ -170,7 +196,7 @@ covcheck:
 	$(UV_RUN) coverage combine --keep
 	$(UV_RUN) coverage report --include='tests/**/test_*.py'
 	$(UV_RUN) coverage report --include='src/*'
-	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=$(if $(FAST),90,99) --format=total
+	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total
 	$(UV_RUN) coverage report --include='src/*' --fail-under=90 --format=total
 
 

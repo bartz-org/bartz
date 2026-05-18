@@ -77,10 +77,10 @@ def generate_beta_separate(
 
 
 def combine_shared_separate(
-    shared: Float[Array, ' n'], separate: Float[Array, 'k n'], lam: Float[Array, '']
+    shared: Float[Array, ' n'], separate: Float[Array, 'k n'], lambda_: Float[Array, '']
 ) -> Float[Array, 'k n']:
-    """Combine shared and separate components via the lam mixing weights."""
-    return jnp.sqrt(1.0 - lam) * separate + jnp.sqrt(lam) * shared
+    """Combine shared and separate components via the lambda_ mixing weights."""
+    return jnp.sqrt(1.0 - lambda_) * separate + jnp.sqrt(lambda_) * shared
 
 
 def interaction_pattern(p: int, q: Integer[Array, ''] | int) -> Bool[Array, 'p p']:
@@ -170,19 +170,19 @@ class Params(Module):
     For multivariate outputs (``k is not None``) the latent mean for
     component ``i`` at observation ``j`` is
 
-        mu_ij = sqrt(lam) * (beta_shared . x_j + x_j^T A_shared x_j)
-              + sqrt(1 - lam) * (beta_separate_i . x_j + x_j^T A_separate_i x_j)
+        mu_ij = sqrt(lambda_) * (beta_shared . x_j + x_j^T A_shared x_j)
+              + sqrt(1 - lambda_) * (beta_separate_i . x_j + x_j^T A_separate_i x_j)
 
-    with ``lam`` in ``[0, 1]`` interpolating between fully independent
-    components (``lam=0``, each row uses its own coefficients restricted to the
-    variables it owns via `partition`) and fully shared ones (``lam=1``, all
-    rows share the same coefficients).
+    with ``lambda_`` in ``[0, 1]`` interpolating between fully independent
+    components (``lambda_=0``, each row uses its own coefficients restricted to
+    the variables it owns via `partition`) and fully shared ones
+    (``lambda_=1``, all rows share the same coefficients).
 
     For univariate outputs (``k is None``) the separate path is skipped and
 
         mu_j = beta_shared . x_j + x_j^T A_shared x_j;
 
-    ``partition``, ``beta_separate``, ``A_separate`` and ``lam`` are all
+    ``partition``, ``beta_separate``, ``A_separate`` and ``lambda_`` are all
     ``None``. The outcome is
 
         y_ij = mu_ij + eps_ij * sqrt(sigma2_eps),   eps_ij ~iid N(0, 1),
@@ -192,32 +192,32 @@ class Params(Module):
 
     partition: Bool[Array, 'k p'] | None
     """Predictor-outcome assignment partition of shape (k, p), used only at
-    ``lam < 1``. Row ``i`` is the binary mask of predictors assigned to
+    ``lambda_ < 1``. Row ``i`` is the binary mask of predictors assigned to
     component ``i``; rows are disjoint and each has either ``p // k`` or
     ``p // k + 1`` entries. ``None`` in univariate mode (``k is None``)."""
 
     beta_shared: Float[Array, ' p']
-    """Shared linear coefficients of shape (p,), used at ``lam > 0``."""
+    """Shared linear coefficients of shape (p,), used at ``lambda_ > 0``."""
 
     beta_separate: Float[Array, 'k p'] | None
-    """Separate linear coefficients of shape (k, p), used at ``lam < 1``.
+    """Separate linear coefficients of shape (k, p), used at ``lambda_ < 1``.
     Row ``i`` is supported on ``partition[i]``. ``None`` in univariate
     mode (``k is None``)."""
 
     A_shared: Float[Array, 'p p']
-    """Shared quadratic coefficients of shape (p, p), used at ``lam > 0``.
+    """Shared quadratic coefficients of shape (p, p), used at ``lambda_ > 0``.
     Nonzero on a symmetric band of ``q + 1`` entries per row/col."""
 
     A_separate: Float[Array, 'k p p'] | None
     """Separate quadratic coefficients of shape (k, p, p), used at
-    ``lam < 1``. Slice ``i`` is supported on the outer product of
+    ``lambda_ < 1``. Slice ``i`` is supported on the outer product of
     ``partition[i]`` with itself. ``None`` in univariate mode
     (``k is None``)."""
 
     q: Integer[Array, '']
     """Number of quadratic interactions per predictor (even, ``< p // k``)."""
 
-    lam: Float[Array, ''] | None
+    lambda_: Float[Array, ''] | None
     """Coupling parameter in ``[0, 1]``: 0 = independent components,
     1 = identical components. ``None`` iff univariate (``partition is
     None``), in which case only the shared path contributes to ``mu``."""
@@ -265,10 +265,10 @@ class DGP(Module):
     """Output of `gen_data` / `gen_data_from_params`: sampled data and parameters.
 
     See `Params` for the definition of the generative model. The ``_shared``
-    fields are the ``lam=1`` limit (common across components), the
-    ``_separate`` fields are the ``lam=0`` limit (independent across
+    fields are the ``lambda_=1`` limit (common across components), the
+    ``_separate`` fields are the ``lambda_=0`` limit (independent across
     components), and the plain names are the realized mix at the sampled
-    ``params.lam``.
+    ``params.lambda_``.
     """
 
     x: Float[Array, 'p n']
@@ -372,7 +372,7 @@ def gen_params(
     p: int,
     k: int | None,
     q: Integer[Array, ''] | int,
-    lam: Float[Array, ''] | float | None = None,
+    lambda_: Float[Array, ''] | float | None = None,
     sigma2_lin: Float[Array, ''] | float,
     sigma2_quad: Float[Array, ''] | float,
     sigma2_eps: Float[Array, ''] | float,
@@ -392,11 +392,11 @@ def gen_params(
     k
         Number of outcome components. If `None`, generate a univariate DGP
         and skip the separate code path: ``partition``, ``beta_separate``,
-        ``A_separate`` and ``lam`` are all set to ``None`` on the returned
+        ``A_separate`` and ``lambda_`` are all set to ``None`` on the returned
         `Params`, and only the shared coefficients are drawn.
     q
         See `Params`.
-    lam
+    lambda_
         Coupling parameter; must be ``None`` iff ``k is None``. See `Params`.
     sigma2_lin
     sigma2_quad
@@ -417,13 +417,13 @@ def gen_params(
     ValueError
         If ``outcome_type`` is a tuple whose length does not match ``k``, or
         if a tuple ``outcome_type`` is combined with ``k=None``, or if
-        ``(lam is None) != (k is None)``.
+        ``(lambda_ is None) != (k is None)``.
     """
-    if (lam is None) != (k is None):
+    if (lambda_ is None) != (k is None):
         msg = (
-            'lam must be None when k is None'
+            'lambda_ must be None when k is None'
             if k is None
-            else 'lam is required when k is not None'
+            else 'lambda_ is required when k is not None'
         )
         raise ValueError(msg)
 
@@ -463,7 +463,7 @@ def gen_params(
         A_shared=A_shared,
         A_separate=A_separate,
         q=q,
-        lam=lam,
+        lambda_=lambda_,
         sigma2_lin=sigma2_lin,
         sigma2_quad=sigma2_quad,
         sigma2_eps=sigma2_eps,
@@ -506,8 +506,8 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
     else:
         mulin_separate = params.beta_separate @ x
         muquad_separate = jnp.einsum('irs,rj,sj->ij', params.A_separate, x, x)
-        mulin = combine_shared_separate(mulin_shared, mulin_separate, params.lam)
-        muquad = combine_shared_separate(muquad_shared, muquad_separate, params.lam)
+        mulin = combine_shared_separate(mulin_shared, mulin_separate, params.lambda_)
+        muquad = combine_shared_separate(muquad_shared, muquad_separate, params.lambda_)
 
     mu = mulin + muquad
     y = generate_outcome(keys.pop(), mu, params.sigma2_eps, params.outcome_type)
@@ -534,7 +534,7 @@ def gen_data(
     p: int,
     k: int | None = None,
     q: Integer[Array, ''] | int,
-    lam: Float[Array, ''] | float | None = None,
+    lambda_: Float[Array, ''] | float | None = None,
     sigma2_lin: Float[Array, ''] | float,
     sigma2_quad: Float[Array, ''] | float,
     sigma2_eps: Float[Array, ''] | float,
@@ -559,7 +559,7 @@ def gen_data(
         Number of outcome components. If `None`, produces a univariate output
         with ``y.shape == (n,)`` and skips the separate code path entirely.
     q
-    lam
+    lambda_
     sigma2_lin
     sigma2_quad
     sigma2_eps
@@ -576,7 +576,7 @@ def gen_data(
         p=p,
         k=k,
         q=q,
-        lam=lam,
+        lambda_=lambda_,
         sigma2_lin=sigma2_lin,
         sigma2_quad=sigma2_quad,
         sigma2_eps=sigma2_eps,

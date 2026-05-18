@@ -34,16 +34,16 @@ from rpy2.robjects.help import Package
 from rpy2.robjects.methods import RS4
 
 # converter for pandas
-pandas_converter = conversion.Converter('pandas')
+PANDAS_CONVERTER = conversion.Converter('pandas')
 try:
     from rpy2.robjects import pandas2ri
 except ImportError:
     pass
 else:
-    pandas_converter = pandas2ri.converter
+    PANDAS_CONVERTER = pandas2ri.converter
 
 # converter for polars
-polars_converter = conversion.Converter('polars')
+POLARS_CONVERTER = conversion.Converter('polars')
 try:
     import polars
     from rpy2.robjects import pandas2ri
@@ -55,11 +55,11 @@ else:
         df = df.to_pandas()
         return pandas2ri.py2rpy(df)
 
-    polars_converter.py2rpy.register(polars.DataFrame, polars_to_r)
-    polars_converter.py2rpy.register(polars.Series, polars_to_r)
+    POLARS_CONVERTER.py2rpy.register(polars.DataFrame, polars_to_r)
+    POLARS_CONVERTER.py2rpy.register(polars.Series, polars_to_r)
 
 # converter for jax
-jax_converter = conversion.Converter('jax')
+JAX_CONVERTER = conversion.Converter('jax')
 try:
     import jax
 except ImportError:
@@ -72,10 +72,10 @@ else:
             x = x[()]
         return numpy2ri.py2rpy(x)
 
-    jax_converter.py2rpy.register(jax.Array, jax_to_r)
+    JAX_CONVERTER.py2rpy.register(jax.Array, jax_to_r)
 
 # converter for numpy
-numpy_converter = numpy2ri.converter
+NUMPY_CONVERTER = numpy2ri.converter
 
 
 # converter for BoolVector (why isn't it in the numpy converter?)
@@ -83,19 +83,19 @@ def bool_vector_to_python(x: BoolVector) -> np.ndarray[Any, np.dtype[np.bool_]]:
     return np.array(x, bool)
 
 
-bool_vector_converter = conversion.Converter('bool_vector')
-bool_vector_converter.rpy2py.register(BoolVector, bool_vector_to_python)
+BOOL_VECTOR_CONVERTER = conversion.Converter('bool_vector')
+BOOL_VECTOR_CONVERTER.rpy2py.register(BoolVector, bool_vector_to_python)
 
 
 # converter for python dictionaries
-dict_converter = conversion.Converter('dict')
+DICT_CONVERTER = conversion.Converter('dict')
 
 
 def dict_to_r(x: dict[str, Any]) -> robjects.ListVector:
     return robjects.ListVector(x)
 
 
-dict_converter.py2rpy.register(dict, dict_to_r)
+DICT_CONVERTER.py2rpy.register(dict, dict_to_r)
 
 R_IDENTIFIER = r'(?:[a-zA-Z]|\.(?![0-9]))[a-zA-Z0-9._]*'
 
@@ -117,12 +117,12 @@ class RObjectBase:
 
     _converter = (
         robjects.default_converter
-        + pandas_converter
-        + polars_converter
-        + numpy_converter
-        + bool_vector_converter
-        + jax_converter
-        + dict_converter
+        + PANDAS_CONVERTER
+        + POLARS_CONVERTER
+        + NUMPY_CONVERTER
+        + BOOL_VECTOR_CONVERTER
+        + JAX_CONVERTER
+        + DICT_CONVERTER
     )
     _convctx = conversion.localconverter(_converter)
 

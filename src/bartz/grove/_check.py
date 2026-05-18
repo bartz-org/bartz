@@ -30,8 +30,8 @@ from jax import jit
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Integer, UInt
 
+from bartz._jaxext import autobatch, minimal_unsigned_dtype
 from bartz.grove._grove import TreeHeaps, TreesTrace, is_actual_leaf
-from bartz.jaxext import autobatch, minimal_unsigned_dtype
 
 CHECK_FUNCTIONS = []
 
@@ -62,8 +62,7 @@ def check(func: CheckFunc) -> CheckFunc:
     """Add a function to a list of functions used to check trees.
 
     Use to decorate functions that check whether a tree is valid in some way.
-    These functions are invoked automatically by `check_tree`, `check_trace` and
-    `debug_gbart`.
+    These functions are invoked automatically by `check_tree` and `check_trace`.
 
     Parameters
     ----------

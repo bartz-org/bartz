@@ -24,10 +24,10 @@
 
 """Test `bartz.mcmcstep`."""
 
+import math
 from collections.abc import Sequence
 from dataclasses import replace
 from functools import partial, wraps
-from math import prod
 from typing import Literal, NamedTuple
 
 import jax
@@ -54,7 +54,7 @@ from pytest_subtests import SubTests
 from scipy import stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
-from bartz.jaxext import get_device_count, minimal_unsigned_dtype, split
+from bartz._jaxext import get_device_count, minimal_unsigned_dtype, split
 from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._moves import (
     ancestor_variables,
@@ -62,7 +62,7 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._state import chain_vmap_axes, data_vmap_axes
+from bartz.mcmcstep._state import StepConfig, chain_vmap_axes, data_vmap_axes
 from bartz.mcmcstep._step import (
     Counts,
     _compute_likelihood_ratio_mv,
@@ -82,6 +82,7 @@ from tests.util import (
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
+    assert_different_matrices,
     manual_tree,
 )
 
@@ -99,6 +100,19 @@ class SplitRangeData(NamedTuple):
     var_tree: UInt8[Array, ' nodes']
     split_tree: UInt8[Array, ' nodes']
     max_split: UInt8[Array, ' p']
+
+
+def _minimal_step_config() -> StepConfig:
+    """Single-device `StepConfig` with all reduction settings disabled."""
+    return StepConfig(
+        steps_done=jnp.int32(0),
+        sparse_on_at=None,
+        resid_num_batches=None,
+        count_num_batches=None,
+        prec_num_batches=None,
+        prec_count_num_trees=None,
+        mesh=None,
+    )
 
 
 def vmap_randint_masked(
@@ -160,8 +174,8 @@ class TestRandintMasked:
         # likelihood ratio test for multinomial with free p vs. constant p
         k = jnp.bincount(u, length=num_allowed)
         llr = jnp.sum(jnp.where(k, k * jnp.log(k / n * num_allowed), 0))
-        lamda = 2 * llr
-        pvalue = stats.chi2.sf(lamda, num_allowed - 1)
+        lambda_ = 2 * llr
+        pvalue = stats.chi2.sf(lambda_, num_allowed - 1)
         assert pvalue > 0.1
 
 
@@ -687,7 +701,7 @@ class TestMultichain:
             mesh = None
         else:
             targets = dict(chains=num_chains, data=self.n)
-            while prod(mesh.values()) > get_device_count():
+            while math.prod(mesh.values()) > get_device_count():
                 for key in mesh:
                     if mesh[key] > 1:
                         mesh[key] -= 1
@@ -698,7 +712,7 @@ class TestMultichain:
         with subtests.test('init'):
             typechecking_init = jaxtyped(init, typechecker=beartype)
             state = typechecking_init(**init_kwargs, num_chains=num_chains, mesh=mesh)
-            assert state.forest.num_chains() == num_chains
+            assert state.num_chains() == num_chains
             check_strong_types(state)
             check_sharding(state, state.config.mesh)
 
@@ -706,7 +720,7 @@ class TestMultichain:
             with debug_key_reuse(False):
                 # key reuse checks trigger with empty key array apparently
                 new_state = typechecking_step(keys.pop(), state)
-            assert new_state.forest.num_chains() == num_chains
+            assert new_state.num_chains() == num_chains
             check_strong_types(new_state)
             check_sharding(new_state, state.config.mesh)
             check_same_structure(state, new_state)
@@ -905,11 +919,10 @@ def normalize_spec(
     assert len(s) <= ndim
     s.extend([None] * (ndim - len(s)))
 
-    array_size = prod(shape)
+    array_size = math.prod(shape)
     for i in range(ndim):
         if s[i] is not None:
-            j = mesh.axis_names.index(s[i])
-            mesh_size = mesh.axis_sizes[j]
+            mesh_size = mesh.shape[s[i]]
             if mesh_size == 1 or array_size == 0:
                 s[i] = None
 
@@ -938,6 +951,58 @@ def check_same_structure(x: PyTree, y: PyTree) -> None:
         )
 
     tree.map_with_path(check, x, y)
+
+
+def test_z_differs_across_data_shards(keys: split) -> None:
+    """Check `step_z` produces independent z per data shard.
+
+    With (X, y) replicated across data shards, the only source of variation
+    between shards is the random key. Guards the
+    `random.fold_in(key, axis_index('data'))` call in `step_z`: without it
+    the same key reaches every shard and, since the local data is
+    identical, the truncated normal draw would be the same on every shard.
+    """
+    num_data_shards = min(4, get_device_count())
+    if num_data_shards < 2:
+        pytest.skip('need at least 2 devices for the data axis')
+
+    n_per_shard = 20
+    p = 5
+    numcut = 10
+    num_trees = 5
+
+    X_one = random.randint(keys.pop(), (p, n_per_shard), 0, numcut + 1, jnp.uint32)
+    y_one = random.bernoulli(keys.pop(), 0.5, (n_per_shard,)).astype(jnp.float32)
+
+    X = jnp.tile(X_one, (1, num_data_shards))
+    y = jnp.tile(y_one, num_data_shards)
+    max_split = jnp.full(p, numcut + 1, jnp.uint32)
+
+    state = init(
+        X=X,
+        y=y,
+        outcome_type='binary',
+        offset=jnp.float32(0.0),
+        max_split=max_split,
+        num_trees=num_trees,
+        p_nonterminal=jnp.full(5, 0.9),
+        leaf_prior_cov_inv=jnp.float32(num_trees),
+        mesh={'data': num_data_shards},
+    )
+
+    new_state = step(keys.pop(), state)
+
+    assert new_state.z is not None
+    z_per_shard = new_state.z.reshape(num_data_shards, n_per_shard)
+    for i in range(num_data_shards):
+        for j in range(i + 1, num_data_shards):
+            assert_different_matrices(
+                z_per_shard[i],
+                z_per_shard[j],
+                rtol=0.5,
+                atol=0,
+                err_msg=f'shards {i} and {j} produced similar z\n',
+            )
 
 
 class TestMixedBinaryContinuous:
@@ -1439,7 +1504,7 @@ class TestMVBartIntegration:
             prec_scale=None,
             inv_sdev_scale=None,
             forest=None,
-            config=None,
+            config=_minimal_step_config(),
         )
 
         st_uv = State(
@@ -1494,7 +1559,7 @@ class TestMVBartIntegration:
             offset=0.0,
             prec_scale=None,
             forest=None,
-            config=None,
+            config=_minimal_step_config(),
         )
 
         st_uv_with = State(

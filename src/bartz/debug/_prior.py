@@ -22,19 +22,18 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Debugging utilities. The main functionality is the class `debug_mc_gbart`."""
+"""Sampling from the BART prior."""
 
 from dataclasses import replace
 from functools import partial
 
 from equinox import Module
-from jax import jit, lax, random
+from jax import jit, lax, random, tree
 from jax import numpy as jnp
-from jax.tree_util import tree_map
 from jaxtyping import Array, Bool, Float32, Int32, Key, UInt
 
-from bartz.jaxext import minimal_unsigned_dtype, vmap_nodoc
-from bartz.jaxext import split as split_key
+from bartz._jaxext import minimal_unsigned_dtype, vmap_nodoc
+from bartz._jaxext import split as split_key
 from bartz.mcmcstep._moves import randint_masked
 
 
@@ -399,4 +398,4 @@ def sample_prior(
     """
     keys = random.split(key, trace_length * num_trees)
     trees = sample_prior_forest(keys, max_split, p_nonterminal, sigma_mu)
-    return tree_map(lambda x: x.reshape(trace_length, num_trees, -1), trees)
+    return tree.map(lambda x: x.reshape(trace_length, num_trees, -1), trees)

@@ -42,8 +42,8 @@ from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
 from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
 from scipy import linalg, stats
 
+from bartz._jaxext import minimal_unsigned_dtype
 from bartz.grove import TreesTrace, check_trace, describe_error
-from bartz.jaxext import minimal_unsigned_dtype
 
 
 def manual_tree(

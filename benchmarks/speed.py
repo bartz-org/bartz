@@ -42,17 +42,17 @@ from jax import (
     eval_shape,
     jit,
     random,
+    tree,
     vmap,
 )
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.sharding import Mesh
-from jax.tree_util import tree_map
 from jaxtyping import Array, Float32, Integer, Key, UInt8
 
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
-from benchmarks.latest_bartz.jaxext import get_device_count, split
+from benchmarks.latest_bartz._jaxext import get_device_count, split
 
 try:
     from bartz.mcmcstep import State
@@ -250,11 +250,20 @@ class StepGeneric(AutoParamNames):
 
         self.args = (keys, simple_init(**kw))
 
+        # in v0.4.1 step had signature (bart, key); from v0.5.0 it became
+        # (key, bart). Use the first parameter name to dispatch positionally,
+        # since the decorator-wrapped step on modern bartz does not accept
+        # `bart` as a keyword argument.
+        step_bart_first = next(iter(signature(step).parameters)) == 'bart'
+
         def func(keys: list[Key[Array, '']], bart: State) -> State:
             sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
             if kind == 'sparse' and sparse_inside_step:
                 bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
-            bart = step(key=keys.pop(), bart=bart)
+            if step_bart_first:
+                bart = step(bart, keys.pop())
+            else:
+                bart = step(keys.pop(), bart)
             if kind == 'sparse' and not sparse_inside_step:
                 bart = mcmcstep.step_sparse(keys.pop(), bart)  # ty:ignore[unresolved-attribute] in this case it's an old version that has that attribute
             return bart
@@ -340,7 +349,7 @@ class BaseGbart(AutoParamNames):
             p=P,
             k=1,
             q=2,
-            lam=0,
+            lambda_=0,
             sigma2_lin=0.4,
             sigma2_quad=0.4,
             sigma2_eps=0.2,
@@ -512,7 +521,7 @@ class BaseRunMcmc(AutoParamNames):
             case 'warm':
                 # prepare copies of the args because of buffer donation
                 key = jnp.copy(kw['key'])
-                bart = tree_map(jnp.copy, kw['bart'])
+                bart = tree.map(jnp.copy, kw['bart'])
                 self.time_run_mcmc()
                 # put copies in place of donated buffers
                 kw.update(key=key, bart=bart)

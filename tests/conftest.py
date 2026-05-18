@@ -37,7 +37,7 @@ import pytest
 import tomli
 from jax import config, random
 
-from bartz.jaxext import get_default_device, split
+from bartz._jaxext import get_default_device, split
 
 
 def get_old_python_version() -> tuple[int, int]:

@@ -35,7 +35,7 @@ from jaxtyping import Array, Bool, Float, Key
 from numpy.testing import assert_array_less
 from scipy.stats import norm
 
-from bartz.jaxext import split
+from bartz._jaxext import split
 from bartz.mcmcstep import OutcomeType
 from bartz.testing import DGP, gen_data
 from bartz.testing._dgp import (
@@ -56,9 +56,9 @@ REPS: int = 10_000  # number of datasets
 
 @jit
 @partial(vmap, in_axes=(0, None))
-def generate_dgps(key: Key[Array, 'REPS'], lam: Float[Array, '']) -> DGP:
+def generate_dgps(key: Key[Array, 'REPS'], lambda_: Float[Array, '']) -> DGP:
     """Generate one dataset per random key."""
-    return gen_data(key, lam=lam, **KWARGS)
+    return gen_data(key, lambda_=lambda_, **KWARGS)
 
 
 @pytest.fixture
@@ -69,19 +69,19 @@ def dgps(keys: split) -> DGP:
 
 @pytest.fixture
 def dgps_lambda_zero(keys: split) -> DGP:
-    """Generate DGP instances with lambda=0."""
+    """Generate DGP instances with lambda_=0."""
     return generate_dgps(keys.pop(REPS), 0.0)
 
 
 @pytest.fixture
 def dgps_lambda_one(keys: split) -> DGP:
-    """Generate DGP instances with lambda=1."""
+    """Generate DGP instances with lambda_=1."""
     return generate_dgps(keys.pop(REPS), 1.0)
 
 
 def test_shapes_and_dtypes(keys: split) -> None:
     """Test that all DGP attributes have correct shapes and dtypes."""
-    dgp = gen_data(keys.pop(), lam=0.5, **KWARGS)
+    dgp = gen_data(keys.pop(), lambda_=0.5, **KWARGS)
     n, p, k = KWARGS['n'], KWARGS['p'], KWARGS['k']
 
     # Test shapes
@@ -100,7 +100,7 @@ def test_shapes_and_dtypes(keys: split) -> None:
     assert dgp.muquad.shape == (k, n)
     assert dgp.mu.shape == (k, n)
     assert dgp.params.q.shape == ()
-    assert dgp.params.lam.shape == ()
+    assert dgp.params.lambda_.shape == ()
     assert dgp.params.sigma2_lin.shape == ()
     assert dgp.params.sigma2_quad.shape == ()
     assert dgp.params.sigma2_eps.shape == ()
@@ -121,7 +121,7 @@ def test_shapes_and_dtypes(keys: split) -> None:
     assert jnp.issubdtype(dgp.muquad.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.mu.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.params.q.dtype, jnp.integer)
-    assert jnp.issubdtype(dgp.params.lam.dtype, jnp.floating)
+    assert jnp.issubdtype(dgp.params.lambda_.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.params.sigma2_lin.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.params.sigma2_quad.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.params.sigma2_eps.dtype, jnp.floating)
@@ -349,7 +349,7 @@ def test_variance_relationships(dgps: DGP) -> None:
     ],
 )
 def test_rows_independent(dgps_lambda_zero: DGP, which: str) -> None:
-    """Test that rows are independent when lambda=0."""
+    """Test that rows are independent when lambda_=0."""
     source = dgps_lambda_zero.params if which == 'beta_separate' else dgps_lambda_zero
     samples = getattr(source, which)  # Shape: (REPS, K, N or P)
     n_reps = samples.shape[0]
@@ -372,7 +372,7 @@ def test_rows_independent(dgps_lambda_zero: DGP, which: str) -> None:
 
 @pytest.mark.parametrize('which', ['mulin', 'muquad', 'mu'])
 def test_rows_identical(dgps_lambda_one: DGP, which: str) -> None:
-    """Test that rows are identical when lambda=1."""
+    """Test that rows are identical when lambda_=1."""
     samples = getattr(dgps_lambda_one, which)  # Shape: (REPS, K, N)
 
     # Check that all rows are identical within each sample
@@ -457,20 +457,20 @@ class TestPartitionedInteractionPattern:
 def test_univariate(keys: split) -> None:
     """Check that k=None skips the separate path.
 
-    At k=1/lam=1, the univariate output is the k=1 multivariate output
+    At k=1/lambda_=1, the univariate output is the k=1 multivariate output
     with the leading axis squeezed away.
     """
     key = keys.pop()
     kw = dict(KWARGS)
-    kw.update(lam=1.0, k=1)
+    kw.update(lambda_=1.0, k=1)
     dgp_mv = gen_data(key, **kw)
-    kw.update(lam=None, k=None)
+    kw.update(lambda_=None, k=None)
     dgp_uv = gen_data(random.clone(key), **kw)
 
     assert dgp_uv.params.partition is None
     assert dgp_uv.params.beta_separate is None
     assert dgp_uv.params.A_separate is None
-    assert dgp_uv.params.lam is None
+    assert dgp_uv.params.lambda_ is None
     assert dgp_uv.mulin_separate is None
     assert dgp_uv.muquad_separate is None
     assert dgp_mv.params.partition is not None
@@ -486,17 +486,17 @@ def test_univariate(keys: split) -> None:
     assert_array_equal(dgp_uv.y, dgp_mv.y.squeeze(0))
 
 
-def test_lam_required_when_multivariate(keys: split) -> None:
-    """`lam=None` with `k` set raises `ValueError`."""
-    with pytest.raises(ValueError, match='lam is required'):
-        gen_data(keys.pop(), lam=None, **KWARGS)
+def test_lambda_required_when_multivariate(keys: split) -> None:
+    """`lambda_=None` with `k` set raises `ValueError`."""
+    with pytest.raises(ValueError, match='lambda_ is required'):
+        gen_data(keys.pop(), lambda_=None, **KWARGS)
 
 
-def test_lam_forbidden_when_univariate(keys: split) -> None:
-    """`lam` not None with `k=None` raises `ValueError`."""
+def test_lambda_forbidden_when_univariate(keys: split) -> None:
+    """`lambda_` not None with `k=None` raises `ValueError`."""
     kw = dict(KWARGS, k=None)
-    with pytest.raises(ValueError, match='lam must be None'):
-        gen_data(keys.pop(), lam=0.5, **kw)
+    with pytest.raises(ValueError, match='lambda_ must be None'):
+        gen_data(keys.pop(), lambda_=0.5, **kw)
 
 
 def test_univariate_split(keys: split) -> None:
@@ -529,7 +529,7 @@ class TestOutcomeType:
 
     def test_default_is_continuous(self, keys: split) -> None:
         """Default `outcome_type` stores `OutcomeType.continuous` on Params."""
-        dgp = gen_data(keys.pop(), lam=0.5, **KWARGS)
+        dgp = gen_data(keys.pop(), lambda_=0.5, **KWARGS)
         assert dgp.params.outcome_type is OutcomeType.continuous
 
     def test_binary_univariate(self, keys: split) -> None:
@@ -543,7 +543,7 @@ class TestOutcomeType:
 
     def test_binary_multivariate(self, keys: split) -> None:
         """Binary multivariate output contains only 0.0/1.0 in every row."""
-        kw = dict(KWARGS, lam=0.5, outcome_type='binary')
+        kw = dict(KWARGS, lambda_=0.5, outcome_type='binary')
         dgp = gen_data(keys.pop(), **kw)
         assert dgp.y.shape == (kw['k'], kw['n'])
         assert_array_equal(jnp.unique(dgp.y), jnp.array([0.0, 1.0]))
@@ -555,7 +555,7 @@ class TestOutcomeType:
         so generating with `'continuous'` and `'binary'` under the same top
         level key must yield latents that differ only by the final threshold.
         """
-        kw = dict(KWARGS, lam=0.5)
+        kw = dict(KWARGS, lambda_=0.5)
         key = keys.pop()
         dgp_cont = gen_data(key, **kw)
         dgp_bin = gen_data(random.clone(key), outcome_type='binary', **kw)
@@ -563,7 +563,7 @@ class TestOutcomeType:
 
     def test_mixed(self, keys: split) -> None:
         """Mixed outcome_type: binary rows are 0/1, continuous rows match the baseline."""
-        kw = dict(KWARGS, lam=0.5)
+        kw = dict(KWARGS, lambda_=0.5)
         assert kw['k'] == 3
         key = keys.pop()
         dgp_cont = gen_data(key, **kw)
@@ -583,13 +583,13 @@ class TestOutcomeType:
 
     def test_all_same_tuple_collapses_to_scalar(self, keys: split) -> None:
         """A tuple of identical types is stored as a scalar `OutcomeType`."""
-        kw = dict(KWARGS, lam=0.5, outcome_type=('binary', 'binary', 'binary'))
+        kw = dict(KWARGS, lambda_=0.5, outcome_type=('binary', 'binary', 'binary'))
         dgp = gen_data(keys.pop(), **kw)
         assert dgp.params.outcome_type is OutcomeType.binary
 
     def test_validation_tuple_wrong_length(self, keys: split) -> None:
         """A tuple whose length does not match `k` raises `ValueError`."""
-        kw = dict(KWARGS, lam=0.5, outcome_type=('continuous', 'binary'))
+        kw = dict(KWARGS, lambda_=0.5, outcome_type=('continuous', 'binary'))
         with pytest.raises(ValueError, match='outcome_type has length'):
             gen_data(keys.pop(), **kw)
 

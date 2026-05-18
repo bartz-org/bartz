@@ -35,7 +35,7 @@ from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
 
-from bartz.jaxext import autobatch, minimal_unsigned_dtype, vmap_nodoc
+from bartz._jaxext import autobatch, minimal_unsigned_dtype, vmap_nodoc
 
 
 class TreeHeaps(Protocol):

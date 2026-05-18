@@ -27,28 +27,32 @@
 from dataclasses import replace
 from functools import partial
 
-# WORKAROUND(jax<0.6.1): shard_map was promoted from jax.experimental to top-level in 0.6.1
-try:
-    from jax import shard_map
-except ImportError:
-    from jax.experimental.shard_map import shard_map
-
 import jax
 from equinox import Module, tree_at
 from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
-from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, Shaped, UInt, UInt32
 
+from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz.grove import var_histogram
-from bartz.jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz.mcmcstep._moves import Moves, propose_moves
-from bartz.mcmcstep._state import State, StepConfig, chol_with_gersh, field, vmap_chains
+from bartz.mcmcstep._state import (
+    State,
+    StepConfig,
+    chol_with_gersh,
+    field,
+    get_axis_size,
+    shard_map_state,
+    split_key_for_chains,
+    vmap_chains,
+)
 
 
 @partial(jit, donate_argnums=(1,))
+@split_key_for_chains
+@shard_map_state
 @vmap_chains
 def step(key: Key[Array, ''], bart: State) -> State:
     """
@@ -471,7 +475,7 @@ def _compute_count_or_prec_tree(
         num_batches = config.prec_num_batches
 
     trees = _scatter_add(
-        value, leaf_indices, tree_size, dtype, num_batches, config.mesh
+        value, leaf_indices, tree_size, dtype, num_batches, config.data_sharded
     )
 
     # count datapoints in nodes modified by move
@@ -985,7 +989,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
             SeqStageInAllTrees(
                 pso.bart.X,
                 pso.bart.config.resid_num_batches,
-                pso.bart.config.mesh,
+                pso.bart.config.data_sharded,
                 pso.bart.prec_scale,
                 pso.bart.forest.log_likelihood is not None,
                 pso.prelk,
@@ -1024,8 +1028,8 @@ class SeqStageInAllTrees(Module):
     resid_num_batches: int | None = field(static=True)
     """The number of batches for computing the sum of residuals in each leaf."""
 
-    mesh: Mesh | None = field(static=True)
-    """The mesh of devices to use."""
+    data_sharded: bool = field(static=True)
+    """Whether the data axis is sharded across devices."""
 
     prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None
     """The scale of the precision of the error on each datapoint. If None, it
@@ -1113,7 +1117,7 @@ def accept_move_and_sample_leaves(
     tree_size = pt.leaf_tree.shape[-1]  # 2**d
 
     resid_tree = sum_resid(
-        scaled_resid, pt.leaf_indices, tree_size, at.resid_num_batches, at.mesh
+        scaled_resid, pt.leaf_indices, tree_size, at.resid_num_batches, at.data_sharded
     )
 
     # subtract starting tree from function
@@ -1178,7 +1182,7 @@ def sum_resid(
     leaf_indices: UInt[Array, ' n'],
     tree_size: int,
     resid_num_batches: int | None,
-    mesh: Mesh | None,
+    data_sharded: bool,
 ) -> (
     Float32[Array, ' {tree_size}']
     | Float32[Array, 'k {tree_size}']
@@ -1198,8 +1202,9 @@ def sum_resid(
         The size of the tree array (2 ** d).
     resid_num_batches
         The number of batches for computing the sum of residuals in each leaf.
-    mesh
-        The mesh of devices to use.
+    data_sharded
+        Whether the data axis is sharded; if true, the result is psum-reduced
+        across the ``'data'`` axis of the enclosing `shard_map`.
 
     Returns
     -------
@@ -1207,7 +1212,12 @@ def sum_resid(
     a trailing axis over the leaves.
     """
     return _scatter_add(
-        scaled_resid, leaf_indices, tree_size, jnp.float32, resid_num_batches, mesh
+        scaled_resid,
+        leaf_indices,
+        tree_size,
+        jnp.float32,
+        resid_num_batches,
+        data_sharded,
     )
 
 
@@ -1217,46 +1227,23 @@ def _scatter_add(
     size: int,
     dtype: jnp.dtype,
     batch_size: int | None,
-    mesh: Mesh | None,
+    data_sharded: bool,
 ) -> Shaped[Array, '*batch_shape {size}']:
-    """Indexed reduce along the last axis of `values`, with optional batching."""
-    # check `values`
+    """Indexed reduce along the last axis of `values`, with optional batching.
+
+    When `data_sharded` is True the result is psum-reduced across the
+    ``'data'`` axis of the current `shard_map` region.
+    """
     values = jnp.asarray(values)
     assert values.ndim == 0 or values.shape[-1:] == indices.shape
-
-    # set configuration
-    _scatter_add = partial(
-        _scatter_add_impl, size=size, dtype=dtype, num_batches=batch_size
+    return _scatter_add_impl(
+        values,
+        indices,
+        size=size,
+        dtype=dtype,
+        num_batches=batch_size,
+        final_psum=data_sharded,
     )
-
-    # single-device invocation
-    if mesh is None or 'data' not in mesh.axis_names:
-        return _scatter_add(values, indices)
-
-    # multi-device invocation
-    if values.shape:
-        value_spec = PartitionSpec(*([None] * (values.ndim - 1)), 'data')
-        in_specs = value_spec, PartitionSpec('data')
-    else:
-        in_specs = PartitionSpec(), PartitionSpec('data')
-    _scatter_add = partial(_scatter_add, final_psum=True)
-    _scatter_add = shard_map(
-        _scatter_add,
-        in_specs=in_specs,
-        out_specs=PartitionSpec(),
-        mesh=mesh,
-        **_get_shard_map_patch_kwargs(),
-    )
-    return _scatter_add(values, indices)
-
-
-def _get_shard_map_patch_kwargs() -> dict[str, bool]:
-    # WORKAROUND(jax<=0.8.2): vmap(shard_map(psum)), jax#34249; the
-    # jax_disable_vmap_shmap_error config did not work
-    if jax.__version__ in ('0.8.1', '0.8.2'):
-        return {'check_vma': False}
-    else:
-        return {}
 
 
 def _scatter_add_impl(
@@ -1519,12 +1506,18 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], bart: State) -> State:
     resid = bart.resid
     if bart.inv_sdev_scale is None:
         _, n_eff = resid.shape
+        n_eff *= get_axis_size(bart.config.mesh, 'data')
     else:
         # 2-D inv_sdev_scale dispatches to the diagonal path, so here it is 1-D
         n_eff = jnp.sum(bart.inv_sdev_scale != 0, axis=-1)
+        if bart.config.data_sharded:
+            n_eff = lax.psum(n_eff, 'data')
         resid *= bart.inv_sdev_scale
     df_post = bart.error_cov_df + n_eff
-    scale_post = bart.error_cov_scale + resid @ resid.T
+    rrt = resid @ resid.T
+    if bart.config.data_sharded:
+        rrt = lax.psum(rrt, 'data')
+    scale_post = bart.error_cov_scale + rrt
 
     prec = _sample_wishart_bartlett(key, df_post, scale_post)
     return replace(bart, error_cov_inv=prec)
@@ -1537,17 +1530,22 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], bart: State) -> State:
 
     resid = bart.resid
     if bart.inv_sdev_scale is not None:
-        resid = resid * bart.inv_sdev_scale
+        resid *= bart.inv_sdev_scale
 
     # alpha
     if bart.inv_sdev_scale is None:
         *_, n_eff = resid.shape
+        n_eff *= get_axis_size(bart.config.mesh, 'data')
     else:
         n_eff = jnp.sum(bart.inv_sdev_scale != 0, axis=-1)
+        if bart.config.data_sharded:
+            n_eff = lax.psum(n_eff, 'data')
     alpha = bart.error_cov_df / 2 + n_eff / 2
 
     # beta
     norm2 = jnp.einsum('...n,...n->...', resid, resid)
+    if bart.config.data_sharded:
+        norm2 = lax.psum(norm2, 'data')
     scale = bart.error_cov_scale
     kshape = resid.shape[:-1]
     if kshape:
@@ -1601,6 +1599,10 @@ def step_z(key: Key[Array, ''], bart: State) -> State:
         resid = bart.resid
 
     trees_plus_offset = bart.z - resid
+    if bart.config.data_sharded:
+        # decorrelate the seed across data shards; the seed is replicated
+        # because the trees and most of the algorithm are replicated
+        key = random.fold_in(key, lax.axis_index('data'))
     resid = truncated_normal_onesided(key, (), ~bart.binary_y, -trees_plus_offset)
     z = trees_plus_offset + resid
 
@@ -1680,14 +1682,14 @@ def step_theta(key: Key[Array, ''], bart: State, *, num_grid: int = 1000) -> Sta
 
     # the grid points are the midpoints of num_grid bins in (0, 1)
     padding = 1 / (2 * num_grid)
-    lamda_grid = jnp.linspace(padding, 1 - padding, num_grid)
+    lambda_grid = jnp.linspace(padding, 1 - padding, num_grid)
 
     # normalize s
     log_s = bart.forest.log_s - logsumexp(bart.forest.log_s)
 
     # sample lambda
-    logp, theta_grid = _log_p_lamda(
-        lamda_grid, log_s, bart.forest.rho, bart.forest.a, bart.forest.b
+    logp, theta_grid = _log_p_lambda(
+        lambda_grid, log_s, bart.forest.rho, bart.forest.a, bart.forest.b
     )
     i = random.categorical(key, logp)
     theta = theta_grid[i]
@@ -1695,19 +1697,19 @@ def step_theta(key: Key[Array, ''], bart: State, *, num_grid: int = 1000) -> Sta
     return replace(bart, forest=replace(bart.forest, theta=theta))
 
 
-def _log_p_lamda(
-    lamda: Float32[Array, ' num_grid'],
+def _log_p_lambda(
+    lambda_: Float32[Array, ' num_grid'],
     log_s: Float32[Array, ' p'],
     rho: Float32[Array, ''],
     a: Float32[Array, ''],
     b: Float32[Array, ''],
 ) -> tuple[Float32[Array, ' num_grid'], Float32[Array, ' num_grid']]:
-    # in the following I use lamda[::-1] == 1 - lamda
-    theta = rho * lamda / lamda[::-1]
+    # in the following I use lambda_[::-1] == 1 - lambda_
+    theta = rho * lambda_ / lambda_[::-1]
     p = log_s.size
     return (
-        (a - 1) * jnp.log1p(-lamda[::-1])  # log(lambda)
-        + (b - 1) * jnp.log1p(-lamda)  # log(1 - lambda)
+        (a - 1) * jnp.log1p(-lambda_[::-1])  # log(lambda)
+        + (b - 1) * jnp.log1p(-lambda_)  # log(1 - lambda)
         + gammaln(theta)
         - p * gammaln(theta / p)
         + theta / p * jnp.sum(log_s)

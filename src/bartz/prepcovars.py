@@ -34,7 +34,7 @@ from jax import numpy as jnp
 from jax.scipy.sparse.linalg import cg
 from jaxtyping import Array, Float, Float32, Integer, Key, Real, Shaped, UInt
 
-from bartz.jaxext import autobatch, minimal_unsigned_dtype, unique
+from bartz._jaxext import autobatch, minimal_unsigned_dtype, unique
 
 
 def _parse_xinfo(

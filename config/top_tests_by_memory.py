@@ -28,24 +28,24 @@ import argparse
 
 import polars as pl
 
-parser = argparse.ArgumentParser(description='Show top tests by peak memory usage.')
-parser.add_argument('csv', help='Path to the test resource usage CSV file.')
-parser.add_argument(
+PARSER = argparse.ArgumentParser(description='Show top tests by peak memory usage.')
+PARSER.add_argument('csv', help='Path to the test resource usage CSV file.')
+PARSER.add_argument(
     '-n',
     '--num',
     type=int,
     default=20,
     help='Number of top tests to show (default: %(default)s).',
 )
-args = parser.parse_args()
+ARGS = PARSER.parse_args()
 
-df = (
-    pl.read_csv(args.csv)
+DF = (
+    pl.read_csv(ARGS.csv)
     .with_columns(
         peak_memory_bytes=pl.max_horizontal('peak_rss_bytes', 'peak_footprint_bytes')
     )
     .sort('peak_memory_bytes', descending=True)
-    .head(args.num)
+    .head(ARGS.num)
     .with_columns(
         peak_memory_gb=(pl.col('peak_memory_bytes') / 1e9).round(1),
         duration_min=(pl.col('duration_s') / 60).round(1),
@@ -53,5 +53,5 @@ df = (
     .select('test', 'peak_memory_gb', 'duration_min')
 )
 
-with pl.Config(tbl_width_chars=200, fmt_str_lengths=120, set_tbl_rows=args.num):
-    print(df)
+with pl.Config(tbl_width_chars=200, fmt_str_lengths=120, set_tbl_rows=ARGS.num):
+    print(DF)

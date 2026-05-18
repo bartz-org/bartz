@@ -1,4 +1,4 @@
-# bartz/src/bartz/jaxext/__init__.py
+# bartz/src/bartz/_jaxext/__init__.py
 #
 # Copyright (c) 2024-2026, The Bartz Contributors
 #
@@ -52,8 +52,8 @@ from jax.scipy.special import ndtr
 from jax.sharding import PartitionSpec
 from jaxtyping import Array, Bool, Float32, Key, PyTree, Scalar, Shaped
 
-from bartz.jaxext._autobatch import autobatch  # noqa: F401
-from bartz.jaxext.scipy.special import ndtri
+from bartz._jaxext._autobatch import autobatch  # noqa: F401
+from bartz._jaxext.scipy.special import ndtri
 
 
 def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:
@@ -283,8 +283,7 @@ def _equal_shards(x: Array, axis_name: str) -> Bool[Array, '']:
     """Check if all shards of `x` are equal, to be used in a `shard_map` context."""
     # WORKAROUND(jax<0.6.1): could be `size = lax.axis_size(axis_name)`
     mesh = typeof(x).sharding.mesh
-    i = mesh.axis_names.index(axis_name)
-    size = mesh.axis_sizes[i]
+    size = mesh.shape[axis_name]
 
     perm = [(i, (i + 1) % size) for i in range(size)]
     perm_x = lax.ppermute(x, axis_name, perm)

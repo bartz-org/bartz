@@ -109,16 +109,16 @@ class mc_gbart(Module):
         they are ignored. If `False`, an error is raised if there are any.
     sigest
         An estimate of the residual standard deviation on `y_train`, used to set
-        `lamda`. If not specified, it is estimated by linear regression (with
+        `lambda_`. If not specified, it is estimated by linear regression (with
         intercept, and without taking into account `w`). If `y_train` has less
         than two elements, it is set to 1. If n <= p, it is set to the standard
-        deviation of `y_train`. Ignored if `lamda` is specified.
+        deviation of `y_train`. Ignored if `lambda_` is specified.
     sigdf
         The degrees of freedom of the scaled inverse-chisquared prior on the
         noise variance.
     sigquant
         The quantile of the prior on the noise variance that shall match
-        `sigest` to set the scale of the prior. Ignored if `lamda` is specified.
+        `sigest` to set the scale of the prior. Ignored if `lambda_` is specified.
     k
         The inverse scale of the prior standard deviation on the latent mean
         function, relative to half the observed range of `y_train`. If `y_train`
@@ -128,7 +128,7 @@ class mc_gbart(Module):
         Parameters of the prior on tree node generation. The probability that a
         node at depth `d` (0-based) is non-terminal is ``base / (1 + d) **
         power``.
-    lamda
+    lambda_
         The prior harmonic mean of the error variance. (The harmonic mean of x
         is 1/mean(1/x).) If not specified, it is set based on `sigest` and
         `sigquant`.
@@ -202,7 +202,8 @@ class mc_gbart(Module):
       less predictor values than the required number of bins, while bartz
       always follows the specification.
     - Some functionality is missing.
-    - The error variance parameter is called `lamda` instead of `lambda`.
+    - The error variance parameter is called `lambda_` instead of `lambda`,
+      since the latter is a reserved word in Python.
     - There are some additional attributes, and some missing.
     - The trees have a maximum depth of 6.
     - `rm_const` refers to predictors without decision rules instead of
@@ -245,7 +246,7 @@ class mc_gbart(Module):
         k: FloatLike = 2.0,
         power: FloatLike = 2.0,
         base: FloatLike = 0.95,
-        lamda: FloatLike | None = None,
+        lambda_: FloatLike | None = None,
         tau_num: FloatLike | None = None,
         offset: FloatLike | None = None,
         w: Float[ArrayLike, ' n'] | None = None,
@@ -299,7 +300,7 @@ class mc_gbart(Module):
             k=k,
             power=power,
             base=base,
-            lamda=lamda,
+            lambda_=lambda_,
             tau_num=tau_num,
             offset=offset,
             w=w,
@@ -346,7 +347,7 @@ class mc_gbart(Module):
 
     @property
     def sigest(self) -> Float32[Array, ''] | None:
-        """The estimated standard deviation of the error used to set `lamda`."""
+        """The estimated standard deviation of the error used to set `lambda_`."""
         return self._bart.sigest
 
     # Private attributes from Bart

@@ -27,9 +27,9 @@
 The entry points are `run_mcmc` and `make_default_callback`.
 """
 
+import math
 from collections.abc import Callable
 from functools import partial, update_wrapper, wraps
-from math import floor
 from typing import Any, NamedTuple, Protocol, TypeVar
 
 import jax
@@ -62,7 +62,8 @@ from jaxtyping import (
     UInt,
 )
 
-from bartz import jaxext, mcmcstep
+from bartz import mcmcstep
+from bartz._jaxext import autobatch, jit_active, split
 from bartz.grove import (
     TreeHeaps,
     TreesTrace,
@@ -70,9 +71,8 @@ from bartz.grove import (
     forest_fill,
     var_histogram,
 )
-from bartz.jaxext import autobatch, jit_active
 from bartz.mcmcstep import State
-from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size, get_num_chains
+from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size
 
 
 class BurninTrace(Module):
@@ -361,7 +361,7 @@ def _replicate(x: Array, mesh: Mesh | None) -> Array:
 def _empty_trace(
     length: int, bart: State, extractor: Callable[[State], PyTree]
 ) -> PyTree:
-    num_chains = get_num_chains(bart)
+    num_chains = bart.num_chains()
     if num_chains is None:
         out_axes = 0
     else:
@@ -427,7 +427,7 @@ def _run_mcmc_inner_loop(
     def body(carry: _Carry) -> _Carry:
         """Update the MCMC state."""
         # split random key
-        keys = jaxext.split(carry.key, 3)
+        keys = split(carry.key, 3)
         key = keys.pop()
 
         # update state
@@ -498,7 +498,7 @@ def _save_state_to_trace(
     main_idx = jnp.where(noop_cond, noop_idx, main_idx)
 
     # prepare array index
-    num_chains = get_num_chains(bart)
+    num_chains = bart.num_chains()
     burnin_trace = _set(burnin_trace, burnin_idx, burnin_extractor(bart), num_chains)
     main_trace = _set(main_trace, main_idx, main_extractor(bart), num_chains)
 
@@ -630,7 +630,7 @@ def print_callback(
             burnin=burnin,
             it=it,
             n_iters=n_burn + n_save * n_skip,
-            num_chains=bart.forest.num_chains(),
+            num_chains=bart.num_chains(),
             grow_prop_count=bart.forest.grow_prop_count.mean(),
             grow_acc_count=bart.forest.grow_acc_count.mean(),
             prune_acc_count=bart.forest.prune_acc_count.mean(),
@@ -732,9 +732,9 @@ class Trace(TreeHeaps, Protocol):
     offset: Float32[Array, '*trace_shape']
 
 
-@jit
+@partial(jit, static_argnames=('flatten_chains',))
 def evaluate_trace(
-    X: UInt[Array, 'p n'], trace: Trace
+    X: UInt[Array, 'p n'], trace: Trace, *, flatten_chains: bool = False
 ) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']:
     """
     Compute predictions for all iterations of the BART MCMC.
@@ -745,6 +745,10 @@ def evaluate_trace(
         The predictors matrix, with `p` predictors and `n` observations.
     trace
         A main trace of the BART MCMC, as returned by `run_mcmc`.
+    flatten_chains
+        If `True` and `trace` has a chain axis, collapse it into the sample
+        axis, so the leading dimension of the output is ``num_chains *
+        num_samples`` instead of ``(num_chains, num_samples)``.
 
     Returns
     -------
@@ -797,7 +801,9 @@ def evaluate_trace(
         + out_size
     )
     core_int_size = (num_trees - 1) * out_size
-    max_io_nbytes = max(1, floor(max_io_nbytes / (1 + core_int_size / core_io_size)))
+    max_io_nbytes = max(
+        1, math.floor(max_io_nbytes / (1 + core_int_size / core_io_size))
+    )
 
     # batch over mcmc samples
     batched_eval = autobatch(
@@ -815,7 +821,12 @@ def evaluate_trace(
     # evaluate trees
     y_centered: Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']
     y_centered = batched_eval(X, trees)
-    return y_centered + trace.offset[..., None]
+    y = y_centered + trace.offset[..., None]
+    if flatten_chains and has_chains:
+        # collapse only the chain/sample dims, not k for MV
+        end = -2 if is_mv else -1
+        y = lax.collapse(y, 0, end)
+    return y
 
 
 @partial(jit, static_argnums=(0,))

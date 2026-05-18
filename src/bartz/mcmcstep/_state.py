@@ -24,34 +24,48 @@
 
 """Module defining the BART MCMC state and initialization."""
 
+import inspect
+import math
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import fields, replace
 from enum import Enum
 from functools import partial, wraps
-from math import log2
 from typing import Any, Literal, TypedDict, TypeVar
 
+import jax
 import numpy
 from equinox import Module, error_if, filter_jit
 from equinox import field as eqx_field
-from jax import (
-    NamedSharding,
-    device_put,
-    eval_shape,
-    jit,
-    lax,
-    make_mesh,
-    random,
-    tree,
-    vmap,
-)
+from jax import NamedSharding, device_put, jit, lax, make_mesh, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
-from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree, Shaped, UInt
 
+# WORKAROUND(jax<0.6.1): shard_map was promoted from jax.experimental to top-level in 0.6.1
+try:
+    from jax import shard_map
+except ImportError:
+    from jax.experimental.shard_map import shard_map
+from jaxtyping import (
+    Array,
+    Bool,
+    Float,
+    Float32,
+    Int32,
+    Integer,
+    Key,
+    PyTree,
+    Shaped,
+    UInt,
+)
+from numpy import ndarray
+
+from bartz._jaxext import get_default_device, minimal_unsigned_dtype
 from bartz.grove import tree_depths
-from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
+
+ArrayLike = Array | ndarray
+
+FloatLike = float | Float[ArrayLike, '']
 
 
 class OutcomeType(Enum):
@@ -249,14 +263,6 @@ class Forest(Module):
     """Parameter of the prior on `theta`. Required only to sample `theta`.
     See `step_theta`."""
 
-    def num_chains(self) -> int | None:
-        """Return the number of chains, or `None` if not multichain."""
-        # maybe this should be replaced by chain_shape() -> () | (int,)
-        if self.var_tree.ndim == 2:
-            return None
-        else:
-            return self.var_tree.shape[0]
-
 
 class StepConfig(Module):
     """Options for the MCMC step."""
@@ -284,6 +290,11 @@ class StepConfig(Module):
 
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
+
+    @property
+    def data_sharded(self) -> bool:
+        """Whether the data axis is sharded across devices."""
+        return self.mesh is not None and 'data' in self.mesh.axis_names
 
 
 class State(Module):
@@ -354,6 +365,13 @@ class State(Module):
     config: StepConfig
     """Metadata and configurations for the MCMC step."""
 
+    def num_chains(self) -> int | None:
+        """Return the number of chains, or `None` if not multichain."""
+        if self.forest.var_tree.ndim == 2:
+            return None
+        else:
+            return self.forest.var_tree.shape[0]
+
 
 def _check_diagonal(error_cov_scale: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
     """Raise if `error_cov_scale` is not diagonal."""
@@ -382,11 +400,11 @@ def _init_shape_shifting_parameters(
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | list[OutcomeType],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
-    error_scale: Float32[Any, ' n'] | Float32[Any, 'k n'] | None,
-    error_cov_df: float | Float32[Any, ''] | None,
-    error_cov_scale: float | Float32[Any, ''] | Float32[Any, 'k k'] | None,
+    error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None,
+    error_cov_df: float | Float32[ArrayLike, ''] | None,
+    error_cov_scale: float | Float32[ArrayLike, ''] | Float32[ArrayLike, 'k k'] | None,
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
-    missing: Bool[Any, ' n'] | Bool[Any, 'k n'] | None,
+    missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
 ) -> tuple[
     bool,
     tuple[()] | tuple[int],
@@ -532,7 +550,7 @@ def _parse_outcome_type(
 
 
 def _parse_p_nonterminal(
-    p_nonterminal: Float32[Any, ' d_minus_1'],
+    p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
 ) -> Float32[Array, ' d_minus_1+1']:
     """Check it's in (0, 1) and pad with a 0 at the end."""
     p_nonterminal = jnp.asarray(p_nonterminal)
@@ -542,9 +560,7 @@ def _parse_p_nonterminal(
 
 
 def make_p_nonterminal(
-    d: int,
-    alpha: float | Float32[Array, ''] = 0.95,
-    beta: float | Float32[Array, ''] = 2.0,
+    d: int, alpha: FloatLike = 0.95, beta: FloatLike = 2.0
 ) -> Float32[Array, ' {d}-1']:
     """Prepare the `p_nonterminal` argument to `init`.
 
@@ -596,32 +612,32 @@ class _LazyArray(Module):
 
 def init(
     *,
-    X: UInt[Any, 'p n'],
-    y: Float32[Any, ' n'] | Float32[Any, ' k n'],
+    X: UInt[ArrayLike, 'p n'],
+    y: Float32[ArrayLike, ' n'] | Float32[ArrayLike, ' k n'],
     outcome_type: OutcomeType | str | Sequence[OutcomeType | str] = 'continuous',
-    offset: float | Float32[Any, ''] | Float32[Any, ' k'],
-    max_split: UInt[Any, ' p'],
+    offset: FloatLike | Float[ArrayLike, ' k'],
+    max_split: UInt[ArrayLike, ' p'],
     num_trees: int,
-    p_nonterminal: Float32[Any, ' d_minus_1'],
-    leaf_prior_cov_inv: float | Float32[Any, ''] | Float32[Array, 'k k'],
-    error_cov_df: float | Float32[Any, ''] | None = None,
-    error_cov_scale: float | Float32[Any, ''] | Float32[Array, 'k k'] | None = None,
-    error_scale: Float32[Any, ' n'] | Float32[Any, 'k n'] | None = None,
-    missing: Bool[Any, ' n'] | Bool[Any, 'k n'] | None = None,
-    min_points_per_decision_node: int | Integer[Any, ''] | None = None,
+    p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
+    leaf_prior_cov_inv: FloatLike | Float[ArrayLike, 'k k'],
+    error_cov_df: FloatLike | None = None,
+    error_cov_scale: FloatLike | Float[ArrayLike, 'k k'] | None = None,
+    error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
+    missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
+    min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
     resid_num_batches: int | None | Literal['auto'] = 'auto',
     count_num_batches: int | None | Literal['auto'] = 'auto',
     prec_num_batches: int | None | Literal['auto'] = 'auto',
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
-    min_points_per_leaf: int | Integer[Any, ''] | None = None,
-    log_s: Float32[Any, ' p'] | None = None,
-    theta: float | Float32[Any, ''] | None = None,
-    a: float | Float32[Any, ''] | None = None,
-    b: float | Float32[Any, ''] | None = None,
-    rho: float | Float32[Any, ''] | None = None,
-    sparse_on_at: int | Integer[Any, ''] | None = None,
+    min_points_per_leaf: int | Integer[ArrayLike, ''] | None = None,
+    log_s: Float32[ArrayLike, ' p'] | None = None,
+    theta: FloatLike | None = None,
+    a: FloatLike | None = None,
+    b: FloatLike | None = None,
+    rho: FloatLike | None = None,
+    sparse_on_at: int | Integer[ArrayLike, ''] | None = None,
     num_chains: int | None = None,
     mesh: Mesh | dict[str, int] | None = None,
     target_platform: Literal['cpu', 'gpu'] | None = None,
@@ -775,7 +791,7 @@ def init(
     offset = jnp.asarray(offset)
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
     max_split = jnp.asarray(max_split)
-    assert missing is None or missing.shape == y.shape
+    assert missing is None or missing.ndim <= y.ndim
 
     # normalize outcome_type to enum (or list of enums)
     outcome_type = _parse_outcome_type(outcome_type)
@@ -830,6 +846,7 @@ def init(
         prec_count_num_trees,
         y,
         num_trees,
+        num_chains,
         mesh,
         target_platform,
     )
@@ -1147,6 +1164,24 @@ def _shard_state(state: State) -> State:
     )
 
 
+def _leaf_partition_spec(
+    ndim: int, chain_axis: int | None, data_axis: int | None, mesh: Mesh
+) -> PartitionSpec:
+    """Build a `PartitionSpec` for a leaf with the given chain/data axes."""
+    spec = [None] * ndim
+    if chain_axis is not None and 'chains' in mesh.axis_names:
+        spec[chain_axis] = 'chains'
+    if data_axis is not None and 'data' in mesh.axis_names:
+        spec[data_axis] = 'data'
+
+    # remove trailing Nones to be consistent with jax's output, it's useful
+    # for comparing shardings during debugging
+    while spec and spec[-1] is None:
+        spec.pop()
+
+    return PartitionSpec(*spec)
+
+
 def _shard_leaf(
     x: Array | None | _LazyArray,
     chain_axis: int | None,
@@ -1160,18 +1195,7 @@ def _shard_leaf(
     if mesh is None:
         sharding = None
     else:
-        spec = [None] * x.ndim
-        if chain_axis is not None and 'chains' in mesh.axis_names:
-            spec[chain_axis] = 'chains'
-        if data_axis is not None and 'data' in mesh.axis_names:
-            spec[data_axis] = 'data'
-
-        # remove trailing Nones to be consistent with jax's output, it's useful
-        # for comparing shardings during debugging
-        while spec and spec[-1] is None:
-            spec.pop()
-
-        spec = PartitionSpec(*spec)
+        spec = _leaf_partition_spec(x.ndim, chain_axis, data_axis, mesh)
         sharding = NamedSharding(mesh, spec)
 
     if isinstance(x, _LazyArray):
@@ -1228,19 +1252,23 @@ def _parse_reduction_configs(
     prec_count_num_trees: int | None | Literal['auto'],
     y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'],
     num_trees: int,
+    num_chains: int | None,
     mesh: Mesh | None,
     target_platform: Literal['cpu', 'gpu'] | None,
 ) -> _ReductionConfig:
     """Determine settings for indexed reduces."""
     n = y.shape[-1]
     n //= get_axis_size(mesh, 'data')  # per-device datapoints
+    # chains are vmapped together on each device, so they share the per-step
+    # memory of the per-tree reduction
+    chains_per_device = (num_chains or 1) // get_axis_size(mesh, 'chains')
     parse_num_batches = partial(_parse_num_batches, target_platform, n)
     return dict(
         resid_num_batches=parse_num_batches(resid_num_batches, 'resid'),
         count_num_batches=parse_num_batches(count_num_batches, 'count'),
         prec_num_batches=parse_num_batches(prec_num_batches, 'prec'),
         prec_count_num_trees=_parse_prec_count_num_trees(
-            prec_count_num_trees, num_trees, n
+            prec_count_num_trees, num_trees, n * chains_per_device
         ),
     )
 
@@ -1270,7 +1298,7 @@ def _final_round(n: int, num: float) -> int | None:
 
     # round to the nearest power of 2 because I guess XLA and the hardware
     # will like that (not sure about this, maybe just multiple of 32?)
-    num = 2 ** round(log2(num)) if num else 0
+    num = 2 ** round(math.log2(num)) if num else 0
 
     # disable batching if the batch is as large as the whole dataset
     return num if num > 1 else None
@@ -1313,11 +1341,10 @@ def _search_divisor(target_divisor: int, dividend: int, low: int, up: int) -> in
 
 
 def get_axis_size(mesh: Mesh | None, axis_name: str) -> int:
-    if mesh is None or axis_name not in mesh.axis_names:
+    if mesh is None or axis_name not in mesh.shape:
         return 1
     else:
-        i = mesh.axis_names.index(axis_name)
-        return mesh.axis_sizes[i]
+        return mesh.shape[axis_name]
 
 
 def chol_with_gersh(
@@ -1356,93 +1383,109 @@ def _inv_via_chol_with_gersh(
     return solve_triangular(L, Ltinv.mT, trans='T', lower=True)
 
 
-def get_num_chains(x: PyTree) -> int | None:
-    """Get the number of chains of a pytree.
+def split_key_for_chains(
+    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State],
+) -> Callable[[Key[Array, ''], State], State]:
+    """Split a single PRNG key into per-chain keys before calling `fun`.
 
-    Find all nodes in the structure that define 'num_chains()', stopping
-    traversal at nodes that define it. Check all values obtained invoking
-    `num_chains` are equal, then return it.
+    When the state is multichain, the input key is split into
+    ``state.num_chains()`` keys. For single-chain states, the key is passed
+    through unchanged.
     """
-    leaves, _ = tree.flatten(x, is_leaf=lambda x: hasattr(x, 'num_chains'))
-    num_chains = [x.num_chains() for x in leaves if hasattr(x, 'num_chains')]
-    ref = num_chains[0]
-    assert all(c == ref for c in num_chains)
-    return ref
-
-
-def _chain_axes_with_keys(x: PyTree) -> PyTree[int | None]:
-    """Return `chain_vmap_axes(x)` but also set to 0 for random keys."""
-    axes = chain_vmap_axes(x)
-
-    def axis_if_key(x: object, axis: int | None) -> int | None:
-        if is_key(x):
-            return 0
-        else:
-            return axis
-
-    return tree.map(axis_if_key, x, axes)
-
-
-def _get_mc_out_axes(
-    fun: Callable[[tuple, dict], PyTree], args: PyTree, in_axes: PyTree[int | None]
-) -> PyTree[int | None]:
-    """Decide chain vmap axes for outputs."""
-    vmapped_fun = vmap(fun, in_axes=in_axes)
-    out = eval_shape(vmapped_fun, *args)
-    return chain_vmap_axes(out)
-
-
-def _find_mesh(x: PyTree) -> Mesh | None:
-    """Find the mesh used for chains."""
-
-    class MeshFound(Exception):
-        pass
-
-    def find_mesh(x: object) -> None:
-        if isinstance(x, State):
-            raise MeshFound(x.config.mesh)
-
-    try:
-        tree.map(find_mesh, x, is_leaf=lambda x: isinstance(x, State))
-    except MeshFound as e:
-        return e.args[0]
-    else:
-        raise ValueError
-
-
-def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
-    """Split all random keys in `num_chains` keys."""
-    mesh = _find_mesh(x)
-
-    def split_key(x: object) -> object:
-        if is_key(x):
-            x = random.split(x, num_chains)
-            if mesh is not None and 'chains' in mesh.axis_names:
-                x = device_put(x, NamedSharding(mesh, PartitionSpec('chains')))
-        return x
-
-    return tree.map(split_key, x)
-
-
-def vmap_chains(fun: Callable[..., T]) -> Callable[..., T]:
-    """Apply vmap on chain axes automatically if the inputs are multichain."""
 
     @wraps(fun)
-    def auto_vmapped_fun(*args: Any, **kwargs: Any) -> T:
-        all_args = args, kwargs
-        num_chains = get_num_chains(all_args)
-        if num_chains is not None:
-            all_args = _split_all_keys(all_args, num_chains)
+    def wrapped(key: Key[Array, ''], state: State) -> State:
+        num_chains = state.num_chains()
+        if num_chains is None:
+            return fun(key, state)
+        keys = random.split(key, num_chains)
+        return fun(keys, state)
 
-            def wrapped_fun(args: tuple[Any, ...], kwargs: dict[str, Any]) -> T:
-                return fun(*args, **kwargs)
+    return wrapped
 
-            mc_in_axes = _chain_axes_with_keys(all_args)
-            mc_out_axes = _get_mc_out_axes(wrapped_fun, all_args, mc_in_axes)
-            vmapped_fun = vmap(wrapped_fun, in_axes=mc_in_axes, out_axes=mc_out_axes)
-            return vmapped_fun(*all_args)
 
+def shard_map_state(
+    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State],
+) -> Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State]:
+    """Wrap a ``(keys, state) -> state`` function in a manual `jax.shard_map`.
+
+    Uses `state.config.mesh` (static). No-op when the mesh is `None`. The keys
+    input is sharded across ``'chains'`` when the state is multichain and
+    ``'chains'`` is in the mesh; otherwise the keys are replicated. State
+    leaves are sharded according to their `chains`/`data` field metadata. The
+    output sharding matches the input sharding.
+    """
+
+    @wraps(fun)
+    def wrapped(key: Key[Array, ''] | Key[Array, ' num_chains'], state: State) -> State:
+        mesh = state.config.mesh
+        if mesh is None:
+            return fun(key, state)
+
+        num_chains = state.num_chains()
+        if num_chains is not None and 'chains' in mesh.axis_names:
+            key_spec = PartitionSpec('chains')
         else:
-            return fun(*args, **kwargs)
+            key_spec = PartitionSpec()
 
-    return auto_vmapped_fun
+        chain_axes = chain_vmap_axes(state)
+        data_axes = data_vmap_axes(state)
+
+        state_specs = tree.map(
+            lambda x, ca, da: _leaf_partition_spec(x.ndim, ca, da, mesh),
+            state,
+            chain_axes,
+            data_axes,
+        )
+
+        mapped = shard_map(
+            fun,
+            mesh=mesh,
+            in_specs=(key_spec, state_specs),
+            out_specs=state_specs,
+            **_get_shard_map_patch_kwargs(),
+        )
+        return mapped(key, state)
+
+    return wrapped
+
+
+def vmap_chains(
+    fun: Callable[[Key[Array, ''], State], State],
+) -> Callable[[Key[Array, ' num_chains'] | Key[Array, ''], State], State]:
+    """Vmap a ``(key, state) -> state`` function over chain axes.
+
+    When the state is multichain, `keys` must have a leading chain axis and
+    `fun` is vmapped over it together with the chain axes of `state`. For
+    single-chain states, the function is called unchanged.
+    """
+
+    @wraps(fun)
+    def wrapped(
+        keys: Key[Array, ' num_chains'] | Key[Array, ''], state: State
+    ) -> State:
+        if state.num_chains() is None:
+            return fun(keys, state)
+        state_axes = chain_vmap_axes(state)
+        vmapped_fun = vmap(fun, in_axes=(0, state_axes), out_axes=state_axes)
+        return vmapped_fun(keys, state)
+
+    return wrapped
+
+
+def _get_shard_map_patch_kwargs() -> dict[str, bool]:
+    # bug 1: jax 0.6.0-0.7.0: the VMA/check_rep checker rejects
+    # random.gamma's internal while_loop when the key axis is sharded but the
+    # alpha is replicated; fixed in jax 0.7.1.
+
+    # bug 2: jax 0.8.1-0.8.2: vmap(shard_map(psum)), jax#34249; the
+    # jax_disable_vmap_shmap_error config did not work.
+
+    # WORKAROUND(jax<=0.8.2): remove this whole function when jax > 0.8.2
+    buggy = ('0.6.0', '0.6.1', '0.6.2', '0.7.0', '0.8.1', '0.8.2')
+    if jax.__version__ in buggy:
+        # WORKAROUND(jax<0.6.1): check_rep instead of check_vma before then
+        params = inspect.signature(shard_map).parameters
+        flag = 'check_rep' if 'check_rep' in params else 'check_vma'
+        return {flag: False}
+    return {}

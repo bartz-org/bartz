@@ -22,9 +22,9 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Debugging utilities. The main functionality is the class `debug_mc_gbart`."""
+"""Parsing of R BART3 tree traces."""
 
-from math import ceil, log2
+import math
 from re import fullmatch
 
 import numpy
@@ -32,9 +32,9 @@ from equinox import Module, field
 from jax import numpy as jnp
 from jaxtyping import Array, Float32, UInt
 
+from bartz._jaxext import minimal_unsigned_dtype
 from bartz.BART._gbart import FloatLike
 from bartz.grove import TreeHeaps
-from bartz.jaxext import minimal_unsigned_dtype
 
 
 def _get_next_line(s: str, i: int) -> tuple[str, int]:
@@ -134,7 +134,7 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
     numcut = jnp.array(numcut.astype(split_dtype))
 
     # determine minimum heap size to store the trees
-    heap_size = 2 ** ceil(log2(max_heap_index + 1))
+    heap_size = 2 ** math.ceil(math.log2(max_heap_index + 1))
 
     return BARTTraceMeta(ndpost=ndpost, ntree=ntree, numcut=numcut, heap_size=heap_size)
 

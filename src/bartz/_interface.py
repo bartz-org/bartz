@@ -656,9 +656,9 @@ class Bart(Module):
         Parameters
         ----------
         mean
-            If `True`, average the precision matrix across samples first
-            (harmonic mean at the covariance matrix level), returning a single
-            scalar or vector instead of posterior samples.
+            If `True`, average the error covariance matrix across samples before
+            taking the square root, returning a single scalar or vector instead
+            of posterior samples.
 
         Returns
         -------
@@ -676,15 +676,16 @@ class Bart(Module):
             # shape (chains, samples) or (chains, samples, k, k), concatenate chains
             error_cov_inv = lax.collapse(error_cov_inv, 0, 2)
         is_uv = error_cov_inv.ndim == 1
-        if mean:
-            error_cov_inv = error_cov_inv.mean(0)
         if is_uv:
             # univariate case, reshape to 1x1 matrix
             error_cov_inv = error_cov_inv[..., None, None]
 
-        # compute sdev and fill in nans for binary outcomes
+        # invert precision to covariance, then take diagonal variance
         cov = _inv_via_chol_with_gersh(error_cov_inv)
-        sdev = jnp.sqrt(jnp.diagonal(cov, axis1=-2, axis2=-1))
+        var = jnp.diagonal(cov, axis1=-2, axis2=-1)
+        if mean:
+            var = var.mean(0)
+        sdev = jnp.sqrt(var)
         if is_uv:
             sdev = sdev.squeeze(-1)
         with debug_nans(False):

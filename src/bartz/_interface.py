@@ -670,26 +670,7 @@ class Bart(Module):
         returned by this method because that would require to evaluate
         predictions on a given X, since the Bernoulli variance is p(1-p).
         """
-        # reshape operations
-        error_cov_inv = self._main_trace.error_cov_inv
-        if error_cov_inv.ndim in (2, 4):
-            # shape (chains, samples) or (chains, samples, k, k), concatenate chains
-            error_cov_inv = lax.collapse(error_cov_inv, 0, 2)
-        is_uv = error_cov_inv.ndim == 1
-        if is_uv:
-            # univariate case, reshape to 1x1 matrix
-            error_cov_inv = error_cov_inv[..., None, None]
-
-        # invert precision to covariance, then take diagonal variance
-        cov = _inv_via_chol_with_gersh(error_cov_inv)
-        var = jnp.diagonal(cov, axis1=-2, axis2=-1)
-        if mean:
-            var = var.mean(0)
-        sdev = jnp.sqrt(var)
-        if is_uv:
-            sdev = sdev.squeeze(-1)
-        with debug_nans(False):
-            return jnp.where(self._binary_mask, jnp.nan, sdev)
+        return get_error_sdev(self._main_trace, self._binary_mask, mean=mean)
 
     @cached_property
     def varcount(self) -> Int32[Array, 'ndpost p']:
@@ -1531,6 +1512,40 @@ def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
     varcount: Int32[Array, '*chains samples p']
     varcount = compute_varcount(p, trace)
     return lax.collapse(varcount, 0, -1)
+
+
+@partial(jit, static_argnames='mean')
+def get_error_sdev(
+    trace: mcmcloop.MainTrace,
+    binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
+    *,
+    mean: bool = False,
+) -> (
+    Float32[Array, ' ndpost']
+    | Float32[Array, 'ndpost k']
+    | Float32[Array, '']
+    | Float32[Array, ' k']
+):
+    """Error standard deviation, post-burnin, chains concatenated."""
+    error_cov_inv = trace.error_cov_inv
+    if error_cov_inv.ndim in (2, 4):
+        # shape (chains, samples) or (chains, samples, k, k), concatenate chains
+        error_cov_inv = lax.collapse(error_cov_inv, 0, 2)
+    is_uv = error_cov_inv.ndim == 1
+    if is_uv:
+        # univariate case, reshape to 1x1 matrix
+        error_cov_inv = error_cov_inv[..., None, None]
+
+    # invert precision to covariance, then take diagonal variance
+    cov = _inv_via_chol_with_gersh(error_cov_inv)
+    var = jnp.diagonal(cov, axis1=-2, axis2=-1)
+    if mean:
+        var = var.mean(0)
+    sdev = jnp.sqrt(var)
+    if is_uv:
+        sdev = sdev.squeeze(-1)
+    with debug_nans(False):
+        return jnp.where(binary_mask, jnp.nan, sdev)
 
 
 def predict(

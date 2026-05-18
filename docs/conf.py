@@ -41,22 +41,22 @@ import git
 
 # -- Version info ------------------------------------------------------------
 
-repo = git.Repo(search_parent_directories=True)
+REPO = git.Repo(search_parent_directories=True)
 
-commit = repo.head.commit.hexsha
-uncommitted_stuff = repo.is_dirty()
+COMMIT = REPO.head.commit.hexsha
+UNCOMMITTED_STUFF = REPO.is_dirty()
 
 # Check if current commit has a version tag (vX.Y.Z)
 version = None
-for tag in repo.tags:
-    if tag.commit == repo.head.commit:
-        match = re.match(r'^v(\d+\.\d+\.\d+)$', tag.name)
-        if match:
-            version = match.group(1)
+for tag in REPO.tags:
+    if tag.commit == REPO.head.commit:
+        MATCH = re.match(r'^v(\d+\.\d+\.\d+)$', tag.name)
+        if MATCH:
+            version = MATCH.group(1)
             break
 
 if version is None:
-    version = f'{commit[:7]}{"+" if uncommitted_stuff else ""}'
+    version = f'{COMMIT[:7]}{"+" if UNCOMMITTED_STUFF else ""}'
 
 import bartz
 
@@ -65,11 +65,11 @@ import bartz
 project = f'bartz {version}'
 author = 'The Bartz Contributors'
 
-now = datetime.datetime.now(tz=datetime.timezone.utc)
-year = '2024'
-if now.year > int(year):
-    year += '-' + str(now.year)
-copyright = year + ', ' + author  # noqa: A001, because sphinx uses this variable
+NOW = datetime.datetime.now(tz=datetime.timezone.utc)
+YEAR = '2024'
+if NOW.year > int(YEAR):
+    YEAR += '-' + str(NOW.year)
+copyright = YEAR + ', ' + author  # noqa: A001, because sphinx uses this variable
 
 release = version
 
@@ -123,16 +123,15 @@ if sys.version_info >= (3, 14):
 
 
 # decide whether to use viewcode or linkcode extension
-ext = 'viewcode'  # copy source code in static website
+EXT = 'viewcode'  # copy source code in static website
 if getenv('BARTZ_FORCE_LINKCODE'):
-    ext = 'linkcode'  # links to code on github
-elif not uncommitted_stuff:
-    commit = repo.head.commit.hexsha
-    branches = repo.git.branch('--remotes', '--contains', commit)
-    commit_on_github = bool(branches.strip())
-    if commit_on_github:
-        ext = 'linkcode'  # links to code on github
-extensions.append(f'sphinx.ext.{ext}')
+    EXT = 'linkcode'  # links to code on github
+elif not UNCOMMITTED_STUFF:
+    BRANCHES = REPO.git.branch('--remotes', '--contains', COMMIT)
+    COMMIT_ON_GITHUB = bool(BRANCHES.strip())
+    if COMMIT_ON_GITHUB:
+        EXT = 'linkcode'  # links to code on github
+extensions.append(f'sphinx.ext.{EXT}')
 
 myst_enable_extensions = [
     # "amsmath",
@@ -251,4 +250,4 @@ def linkcode_resolve(domain: str, info: dict[str, str]) -> str | None:
     prefix = 'https://github.com/bartz-org/bartz/blob'
     root = pathlib.Path(bartz.__file__).parent
     path = pathlib.Path(fn).relative_to(root).as_posix()
-    return f'{prefix}/{commit}/src/bartz/{path}{linespec}'
+    return f'{prefix}/{COMMIT}/src/bartz/{path}{linespec}'

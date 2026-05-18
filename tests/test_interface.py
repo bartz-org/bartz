@@ -196,6 +196,22 @@ class BartKW(NamedTuple):
         return getattr(binner, 'func', binner) is UniqueQuantileBinner
 
     @property
+    def any_binary(self) -> bool:
+        """Whether `kw['outcome_type']` includes any binary component."""
+        outcome_type = self.kw.get('outcome_type', 'continuous')
+        if isinstance(outcome_type, str):
+            return outcome_type == 'binary'
+        return 'binary' in outcome_type
+
+    @property
+    def all_binary(self) -> bool:
+        """Whether all components of `kw['outcome_type']` are binary."""
+        outcome_type = self.kw.get('outcome_type', 'continuous')
+        if isinstance(outcome_type, str):
+            return outcome_type == 'binary'
+        return all(t == 'binary' for t in outcome_type)
+
+    @property
     def max_bins(self) -> int:
         """Upper bound on the number of bins implied by `kw['binner']`."""
         binner = self.kw.get(
@@ -539,7 +555,7 @@ class TestWithCachedBart:
             rhat_yhat_train = rhat_rank(yhat_train_chains, split=True)
             assert_array_less(rhat_yhat_train, 1.1)
 
-        if bkw.kw['outcome_type'] == 'binary':
+        if bkw.all_binary:
             with subtests.test('prob_train'):
                 prob_train = bart.predict('train', kind='mean_samples')
                 prob_train_chains = prob_train.reshape(num_chains, nsamples, -1)
@@ -712,7 +728,7 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     # Pin y-dependent priors otherwise they are influenced by garbage values
     kw['offset'] = 0.0
     kw['tau_num'] = 2.0
-    if kw.get('outcome_type') != 'binary':
+    if not bkw.all_binary:
         kw['lambda_'] = 1.0
 
     bart1 = Bart(**kw)
@@ -761,7 +777,7 @@ def test_output_shapes(bkw: BartKW, keys: split) -> None:
         assert bart.get_error_sdev().shape == (ndpost, *k)
         assert bart.get_error_sdev(mean=True).shape == k
 
-    if kw['outcome_type'] == 'binary':
+    if bkw.all_binary:
         assert bart.sigest is None
     else:
         assert bart.sigest.shape == k
@@ -787,7 +803,7 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     kw = bkw.kw
     bart = Bart(**kw)
 
-    if kw['outcome_type'] != 'binary':
+    if not bkw.all_binary:
         assert bart.sigest.dtype == jnp.float32
     assert bart.offset.dtype == jnp.float32
     assert isinstance(bart.n_save, int)
@@ -835,7 +851,7 @@ def test_output_ranges(bkw: BartKW, keys: split) -> None:
         assert jnp.all(sdev_mean[~binary_mask] > 0)
 
     # sigest values for mixed
-    if binary_mask.all():
+    if bkw.all_binary:
         assert bart.sigest is None
     else:
         assert jnp.all(bart.sigest[binary_mask] == 0.0)
@@ -966,10 +982,11 @@ def test_scale_shift(bkw: BartKW) -> None:
     """
     kw = bkw.kw
 
+    if bkw.all_binary:
+        pytest.skip('Cannot rescale binary responses.')
+
     bart1 = Bart(**kw)
     mask = bart1._binary_mask
-    if mask.all():
-        pytest.skip('Cannot rescale binary responses.')
 
     offset = 0.4703189
     scale = 0.5294714
@@ -1116,7 +1133,6 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
     kw['init_kw'] = init_kw
 
     bart = Bart(**kw)
-    outcome_type = kw['outcome_type']
     k = kw['y_train'].shape[:-1]  # () or (k,)
 
     assert bart.predict('train', kind='latent_samples').shape == (
@@ -1127,7 +1143,7 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
 
     # check bart.offset
     mask = bart._binary_mask
-    if num_datapoints == 0 or outcome_type == 'binary':
+    if num_datapoints == 0 or bkw.all_binary:
         assert_array_equal(bart.offset, jnp.zeros_like(bart.offset))
     else:
         assert_allclose(
@@ -1137,7 +1153,7 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
         )
 
     # check bart.sigest and set expected tau_num
-    if outcome_type == 'binary':
+    if bkw.all_binary:
         tau_num = 3
         assert bart.sigest is None
     else:
@@ -1168,7 +1184,7 @@ def test_two_datapoints(bkw: BartKW) -> None:
     )
     kw['init_kw'] = init_kw
     bart = Bart(**kw)
-    if kw['outcome_type'] != 'binary':
+    if not bkw.all_binary:
         ref_sigest = jnp.where(bart._binary_mask, 0.0, kw['y_train'].std(axis=-1))
         assert_close_matrices(bart.sigest, ref_sigest, rtol=1e-6)
     if bkw.uses_quantile_binner:
@@ -1480,13 +1496,7 @@ def test_polars(bkw: BartKW) -> None:
         rtol=rtol,
         reduce_rank=True,
     )
-    outcome_type = kw['outcome_type']
-    has_binary = outcome_type == 'binary' or (
-        isinstance(outcome_type, Sequence)
-        and not isinstance(outcome_type, str)
-        and 'binary' in outcome_type
-    )
-    if not has_binary:
+    if not bkw.any_binary:
         assert_close_matrices(bart.get_error_sdev(), bart2.get_error_sdev(), rtol=rtol)
     assert_close_matrices(pred, pred2, rtol=rtol, reduce_rank=True)
 
@@ -1910,14 +1920,14 @@ def test_get_latent_prec_only_continuous(bkw: BartKW) -> None:
         pytest.skip('UV variant')
 
     bart = Bart(**kw)
-    outcome_type = kw['outcome_type']
-    if outcome_type == 'binary':
+    if bkw.all_binary:
         with pytest.raises(ValueError, match='only binary'):
             bart.get_latent_prec(only_continuous=True)
         return
 
     k, _ = kw['y_train'].shape
 
+    outcome_type = kw['outcome_type']
     prec = bart.get_latent_prec(only_continuous=True)
     if isinstance(outcome_type, list):
         kc = sum(1 for t in outcome_type if t != 'binary')
@@ -1936,8 +1946,7 @@ def test_get_latent_prec_only_continuous(bkw: BartKW) -> None:
 def test_get_error_sdev_values(bkw: BartKW) -> None:
     """get_error_sdev matches manual computation from precision matrices."""
     kw = bkw.kw
-    outcome_type = kw['outcome_type']
-    if outcome_type == 'binary':
+    if bkw.all_binary:
         pytest.skip('binary variant')
     bart = Bart(**kw)
     n_burn = kw['n_burn']
@@ -2009,7 +2018,7 @@ def test_numpy_input(bkw: BartKW) -> None:
 def test_sigest_wrong_special_value(bkw: BartKW) -> None:
     """Trigger error on unrecognized `sigest` value."""
     value = 'ohohoh'
-    if bkw.kw['outcome_type'] == 'binary':
+    if bkw.all_binary:
         pytest.skip('Parameter ignored with binary outcomes.')
     kw = dict(bkw.kw, sigest=value)
     with pytest.raises(ValueError, match=value):
@@ -2019,7 +2028,7 @@ def test_sigest_wrong_special_value(bkw: BartKW) -> None:
 def test_sigest_cg(bkw: BartKW) -> None:
     """Check the `sigest='cg'` is an approximation of `sigest='ols-or-variance'`."""
     p, n = bkw.kw['x_train'].shape
-    if p >= n or bkw.kw['outcome_type'] == 'binary':
+    if p >= n or bkw.all_binary:
         pytest.skip('Requires p < n and continuous outcomes.')
     bart_ols = Bart(**dict(bkw.kw, sigest='ols-or-variance'))
     bart_cg = Bart(**dict(bkw.kw, sigest='cg'))

@@ -76,27 +76,11 @@ def generate_beta_separate(
     return jnp.where(partition, beta_separate, 0.0) * jnp.sqrt(sigma2_beta)
 
 
-def compute_linear_mean_shared(
-    beta_shared: Float[Array, ' p'], x: Float[Array, 'p n']
-) -> Float[Array, ' n']:
-    """mulin_ij = beta_r x_rj."""
-    return beta_shared @ x
-
-
-def compute_linear_mean_separate(
-    beta_separate: Float[Array, 'k p'], x: Float[Array, 'p n']
+def combine_shared_separate(
+    shared: Float[Array, ' n'], separate: Float[Array, 'k n'], lam: Float[Array, '']
 ) -> Float[Array, 'k n']:
-    """mulin_ij = beta_ir x_rj."""
-    return beta_separate @ x
-
-
-def combine_mulin(
-    mulin_shared: Float[Array, ' n'],
-    mulin_separate: Float[Array, 'k n'],
-    lam: Float[Array, ''],
-) -> Float[Array, 'k n']:
-    """Combine shared and separate linear means."""
-    return jnp.sqrt(1.0 - lam) * mulin_separate + jnp.sqrt(lam) * mulin_shared
+    """Combine shared and separate components via the lam mixing weights."""
+    return jnp.sqrt(1.0 - lam) * separate + jnp.sqrt(lam) * shared
 
 
 def interaction_pattern(p: int, q: Integer[Array, ''] | int) -> Bool[Array, 'p p']:
@@ -161,44 +145,6 @@ def generate_A_separate(
     A_separate = jnp.where(component_pattern, A_separate, 0.0)
     sigma2_A = sigma2_quad / (p / k * (kurt_x - 1 + q))
     return A_separate * jnp.sqrt(sigma2_A)
-
-
-def compute_muquad_shared(
-    A_shared: Float[Array, 'p p'], x: Float[Array, 'p n']
-) -> Float[Array, ' n']:
-    """Compute quadratic mean for the lambda=1 case.
-
-    muquad_ij = A_rs x_rj x_sj
-    Rows identical across components.
-    """
-    return jnp.einsum('rs,rj,sj->j', A_shared, x, x)
-
-
-def compute_muquad_separate(
-    A_separate: Float[Array, 'k p p'], x: Float[Array, 'p n']
-) -> Float[Array, 'k n']:
-    """Compute quadratic mean for the lambda=0 case.
-
-    muquad_ij = A_irs x_rj x_sj
-    Rows independent across components.
-    """
-    return jnp.einsum('irs,rj,sj->ij', A_separate, x, x)
-
-
-def combine_muquad(
-    muquad_shared: Float[Array, ' n'],
-    muquad_separate: Float[Array, 'k n'],
-    lam: Float[Array, ''],
-) -> Float[Array, 'k n']:
-    """Combine shared and separate quadratic means."""
-    return jnp.sqrt(1.0 - lam) * muquad_separate + jnp.sqrt(lam) * muquad_shared
-
-
-def compute_quadratic_mean(
-    A: Float[Array, 'k p p'], x: Float[Array, 'p n']
-) -> Float[Array, 'k n']:
-    """Compute quadratic part of the latent mean."""
-    return jnp.einsum('irs,rj,sj->ij', A, x, x)
 
 
 def generate_outcome(
@@ -549,8 +495,8 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
     p = params.beta_shared.shape[0]
 
     x = generate_x(keys.pop(), n, p)
-    mulin_shared = compute_linear_mean_shared(params.beta_shared, x)
-    muquad_shared = compute_muquad_shared(params.A_shared, x)
+    mulin_shared = params.beta_shared @ x
+    muquad_shared = jnp.einsum('rs,rj,sj->j', params.A_shared, x, x)
 
     if params.partition is None:
         mulin_separate = None
@@ -558,10 +504,10 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
         mulin = mulin_shared
         muquad = muquad_shared
     else:
-        mulin_separate = compute_linear_mean_separate(params.beta_separate, x)
-        muquad_separate = compute_muquad_separate(params.A_separate, x)
-        mulin = combine_mulin(mulin_shared, mulin_separate, params.lam)
-        muquad = combine_muquad(muquad_shared, muquad_separate, params.lam)
+        mulin_separate = params.beta_separate @ x
+        muquad_separate = jnp.einsum('irs,rj,sj->ij', params.A_separate, x, x)
+        mulin = combine_shared_separate(mulin_shared, mulin_separate, params.lam)
+        muquad = combine_shared_separate(muquad_shared, muquad_separate, params.lam)
 
     mu = mulin + muquad
     y = generate_outcome(keys.pop(), mu, params.sigma2_eps, params.outcome_type)

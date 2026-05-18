@@ -24,8 +24,6 @@
 
 # Makefile for running tests, prepare and upload a release.
 
-COVERAGE_SUFFIX =
-
 # define command to run python
 CUDA_VERSION = $(shell nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3)
 EXTRAS = $(if $(filter 12 13,$(CUDA_VERSION)),--extra=cuda$(CUDA_VERSION),)
@@ -46,6 +44,7 @@ help:
 	@echo "Available targets:"
 	@echo "- setup: create R and Python environments for development"
 	@echo "- tests: run unit tests on cpu, saving coverage information"
+	@echo "- tests-single-cpu: like \`tests\` but with a single jax cpu device"
 	@echo "- tests-old: run unit tests on cpu with oldest supported python and dependencies"
 	@echo '- tests-gpu: like `tests` but on gpu'
 	@echo '- tests-gpu-old: like `tests-old` but on gpu'
@@ -94,6 +93,8 @@ help:
 	@echo "- if the online docs are not up-to-date, merge another PR to trigger a new merge CI"
 
 
+################# SETUP #################
+
 .PHONY: setup
 setup:
 	Rscript -e "renv::restore()"
@@ -101,20 +102,62 @@ setup:
 
 .PHONY: lint
 lint:
-	$(UV_RUN) pre-commit run --all-files
+	$(UV_RUN) pre-commit run $(if $(ARGS),$(ARGS),--all-files)
+
+.PHONY: clean
+clean:
+	rm -fr .venv
+	rm -fr dist
+	rm -fr config/jax_cache
+	rm -fr docs/_build
 
 ################# TESTS #################
 
-TESTS_VARS = COVERAGE_FILE=.coverage.$@$(COVERAGE_SUFFIX)
+# Test groups: each is a chunk of pytest args (paths/nodeids + -k expression)
+# that selects a balanced slice of the suite. CI runs one group per matrix cell
+# to fit each job under ~15 minutes on the slow `tests-old` target without
+# xdist. To run a single group locally (composes with any tests target):
+#   make tests             GROUP=v4light
+#   make tests-single-cpu  GROUP=misc
+#   make tests-old         GROUP=v1v7
+# Leaving GROUP unset runs the whole suite.
+#
+# The two test files with a variant fixture (test_BART.py for v1/v2/v3 and
+# test_interface.py for v4/v5/v6/v7) dominate cost: each variant re-fits the
+# CachedBart and re-triggers JIT compilations. v4 and v5 are too heavy to fit
+# in one group on their own, so they're sliced further: v4's test_equiv_sharding
+# is carved out (no class-scoped fixture), and v5's TestWithCachedBart class is
+# pulled into its own group (the cachedbart fixture, scope='class', is the bulk
+# of the cost — splitting members across groups would pay it twice).
+GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py 'tests/test_interface.py::test_equiv_sharding[v4]'
+GROUP_v1v7        := tests/test_BART.py tests/test_interface.py -k "v1 or v7 or not (v2 or v3 or v4 or v5 or v6)"
+GROUP_v2v3jaxext  := tests/test_BART.py tests/test_jaxext.py -k "v2 or v3 or jaxext"
+GROUP_v5heavy     := tests/test_interface.py::TestWithCachedBart -k v5
+GROUP_v4light     := tests/test_interface.py -k "v4 and not test_equiv_sharding"
+GROUP_v5light-v6  := tests/test_interface.py -k "(v5 and not TestWithCachedBart) or v6"
+
+GROUPS := misc v1v7 v2v3jaxext v5heavy v4light v5light-v6
+
+SELECT = $(if $(GROUP),$(GROUP_$(GROUP)))
+
+# Number of xdist workers. Default to 2 for local speed; CI overrides to 0
+# (xdist off) because the small runners OOM under parallel test execution.
+NPROC ?= 2
+
+TESTS_VARS = COVERAGE_FILE=.coverage.$@$(if $(GROUP),-$(GROUP))
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
-TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=2
+TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=$(NPROC) $(SELECT)
 TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_PREALLOCATE=false
-TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=3
+TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=$(NPROC) $(SELECT)
 
 .PHONY: tests
 tests:
 	$(TESTS_CPU_VARS) $(UV_RUN) $(TESTS_CPU_COMMAND) $(ARGS)
+
+.PHONY: tests-single-cpu
+tests-single-cpu:
+	$(TESTS_CPU_VARS) $(UV_RUN) $(TESTS_CPU_COMMAND) --num-cpu-devices=1 $(ARGS)
 
 .PHONY: tests-old
 tests-old:
@@ -155,6 +198,9 @@ docs-latest:
 	@echo
 	@echo "Now open _site/index.html"
 
+
+################# COVERAGE #################
+
 .PHONY: covreport
 covreport:
 	$(UV_RUN) coverage combine --keep
@@ -165,11 +211,11 @@ covcheck:
 	$(UV_RUN) coverage combine --keep
 	$(UV_RUN) coverage report --include='tests/**/test_*.py'
 	$(UV_RUN) coverage report --include='src/*'
-	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total $(ARGS)
+	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total
 	$(UV_RUN) coverage report --include='src/*' --fail-under=90 --format=total
 
 
-################# RELEASE #################
+################# DEPENDENCIES #################
 
 .PHONY: update-deps
 update-deps:
@@ -182,6 +228,9 @@ update-oldest-deps:
 	$(UV_RUN) python config/update_oldest_deps.py --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS)
 	uv lock
 
+
+################# RELEASE #################
+
 .PHONY: copy-version
 copy-version: src/bartz/_version.py
 src/bartz/_version.py: pyproject.toml
@@ -192,15 +241,8 @@ check-committed:
 	git diff --quiet
 	git diff --quiet --staged
 
-.PHONY: clean
-clean:
-	rm -fr .venv
-	rm -fr dist
-	rm -fr config/jax_cache
-	rm -fr docs/_build
-
 .PHONY: release
-release: clean update-deps copy-version check-committed tests tests-old docs
+release: clean update-deps copy-version check-committed tests tests-single-cpu tests-old docs
 	uv build
 
 .PHONY: version-tag
@@ -226,7 +268,7 @@ smoke-test:
 upload: smoke-test version-tag
 	@echo "Enter PyPI token:"
 	@read -s UV_PUBLISH_TOKEN && \
-	export UV_PUBLISH_TOKEN="$$UV_PUBLISH_TOKEN" && \
+	export UV_PUBLISH_TOKEN && \
 	uv publish
 	@VERSION=$$(uv run python -c 'import bartz; print(bartz.__version__)') && \
 	echo "Try to install bartz $$VERSION from PyPI" && \
@@ -236,7 +278,7 @@ upload: smoke-test version-tag
 upload-test: smoke-test check-committed
 	@echo "Enter TestPyPI token:"
 	@read -s UV_PUBLISH_TOKEN && \
-	export UV_PUBLISH_TOKEN="$$UV_PUBLISH_TOKEN" && \
+	export UV_PUBLISH_TOKEN && \
 	uv publish --check-url=https://test.pypi.org/simple/ --publish-url=https://test.pypi.org/legacy/
 	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
 	echo "Try to install bartz $$VERSION from TestPyPI" && \

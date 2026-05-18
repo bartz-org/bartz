@@ -49,7 +49,8 @@ MARKER_RE = re.compile(r'WORKAROUND\(\s*([A-Za-z0-9_.\-]+)\s*(<=|<)\s*([^)\s]+)\
 def floors_from_pyproject(path: Path) -> dict[str, Version]:
     """Return {normalized_pkg_name: lower_bound_version} from pyproject.toml."""
     data = tomli.loads(path.read_text())
-    reqs: list[str] = list(data.get('project', {}).get('dependencies', []))
+    project = data.get('project', {})
+    reqs: list[str] = list(project.get('dependencies', []))
     for group in data.get('dependency-groups', {}).values():
         reqs.extend(group)
     floors: dict[str, Version] = {}
@@ -62,6 +63,11 @@ def floors_from_pyproject(path: Path) -> dict[str, Version]:
         # Take the max: later constraints (e.g. dev-group) only tighten the floor.
         if name not in floors or lb > floors[name]:
             floors[name] = lb
+    requires_python = project.get('requires-python')
+    if requires_python is not None:
+        lb = _lower_bound(SpecifierSet(requires_python))
+        if lb is not None:
+            floors['python'] = lb
     return floors
 
 

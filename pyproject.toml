@@ -91,9 +91,6 @@ addopts = [
     "--verbose",
     "--import-mode=importlib",
 ]
-markers = [
-    "slow: marks tests as slow, skipped on PR CI",
-]
 filterwarnings = [
     "ignore:unclosed database:ResourceWarning",
 ]
@@ -106,6 +103,7 @@ source_pkgs = ["bartz", "tests"]
 
 [tool.coverage.report]
 show_missing = true
+skip_covered = true
 
 [tool.coverage.html]
 show_contexts = true

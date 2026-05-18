@@ -51,12 +51,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # this python is for the pre-commit action
-      - uses: actions/setup-python@v6
-        with:
-          python-version-file: ".python-version"
-
-      # this python is for the pre-commit hooks
       - name: Install uv
         uses: astral-sh/setup-uv@v7
         with:
@@ -69,44 +63,23 @@ jobs:
       - name: Run pre-commit on changed files
         # even if we run it on all files below, it's convenient to see if something fails in new changes first
         if: steps.refs.outputs.from != ''
-        uses: pre-commit/action@v3.0.1
-        with:
-          extra_args: --verbose --show-diff-on-failure --from-ref=${{ steps.refs.outputs.from }} --to-ref=HEAD
+        run: make lint ARGS='--verbose --show-diff-on-failure --from-ref=${{ steps.refs.outputs.from }} --to-ref=HEAD'
 
       - name: Run pre-commit on all files
         # this is for when pre-commit itself is changed, which may affect unchanged files
-        uses: pre-commit/action@v3.0.1
-        with:
-          extra_args: --verbose --all-files
+        run: make lint ARGS='--verbose --all-files'
 
       - name: Run gitlint on new commits
         if: steps.refs.outputs.from != ''
-        run: |
-          python -m pip install gitlint
-          gitlint --commits=${{ steps.refs.outputs.from }}..HEAD --fail-without-commits --debug
+        run: uvx --from gitlint-core gitlint --commits=${{ steps.refs.outputs.from }}..HEAD --fail-without-commits --debug
 
   setup-matrix:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
       benchmarks-matrix: ${{ steps.set-matrix.outputs.benchmarks-matrix }}
     steps:
       - id: set-matrix
         run: |
-          BASE_MATRIX='[
-            {
-              "id": "latest",
-              "runs-on": "ubuntu-latest",
-              "argv": "tests",
-              "ARGS": "--disable-problematic-sharding"
-            },
-            {
-              "id": "single-cpu",
-              "runs-on": "ubuntu-latest",
-              "argv": "tests COVERAGE_SUFFIX=-single-cpu",
-              "ARGS": "--num-cpu-devices=1"
-            }
-          ]'
           BENCHMARKS_BASE_MATRIX='[
             {
               "id": "latest",
@@ -120,23 +93,20 @@ jobs:
             }
           ]'
 
-          MATRIX=$(echo "$BASE_MATRIX" | jq -c ".")
           BENCHMARKS_MATRIX=$(echo "$BENCHMARKS_BASE_MATRIX" | jq -c ".")
 
-          echo "matrix={\"include\":$MATRIX}" >> $GITHUB_OUTPUT
           echo "benchmarks-matrix={\"include\":$BENCHMARKS_MATRIX}" >> $GITHUB_OUTPUT
 
   tests:
-    name: tests-${{ matrix.id }}
-    needs: setup-matrix
-    runs-on: ${{ matrix.runs-on }}
-
-    env:
-      RPY2_CFFI_MODE: ${{ github.event_name == 'pull_request' && 'ABI' || '' }}
+    name: ${{ matrix.target }}/${{ matrix.group }}
+    runs-on: ubuntu-latest
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.setup-matrix.outputs.matrix) }}
+      matrix:
+        # The list of groups lives in `Makefile` as `GROUPS`; keep this in sync.
+        target: [tests, tests-single-cpu, tests-old]
+        group: [misc, v1v7, v2v3jaxext, v5heavy, v4light, v5light-v6]
 
     steps:
       - name: Checkout repository
@@ -146,22 +116,19 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           version: ${{ env.UV_VERSION }}
-          cache-suffix: -${{ matrix.id }}
+          cache-suffix: -${{ matrix.target }}-${{ matrix.group }}
 
       - name: Install R
-        if: github.event_name != 'pull_request'
         uses: r-lib/actions/setup-r@v2
         with:
           r-version: "renv"
 
       - name: Install R dependencies
-        if: github.event_name != 'pull_request'
         uses: r-lib/actions/setup-renv@v2
         env:
           GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure R PATHS for rpy2 (Linux only)
-        if: github.event_name != 'pull_request'
         run: |
           echo "R_HOME=$(R RHOME)" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$(R RHOME)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
@@ -169,8 +136,10 @@ jobs:
           uv run --dev python -c "import rpy2.situation as s; print('\n'.join(map(str, s.iter_info())))"
 
       - name: Run unit tests
-        timeout-minutes: 120
-        run: make ${{ matrix.argv }} ARGS='${{ matrix.ARGS }}${{ github.event_name == 'pull_request' && ' -m "not slow"' || '' }}'
+        timeout-minutes: 30
+        # NPROC=0 disables pytest-xdist: the small CI runners OOM under
+        # parallel test execution. Each matrix cell runs one group serially.
+        run: make ${{ matrix.target }} GROUP=${{ matrix.group }} NPROC=0
 
       - name: Save coverage information
         uses: actions/upload-artifact@v7
@@ -235,11 +204,6 @@ jobs:
           pattern: .coverage*
           merge-multiple: true
 
-      - name: Exclude slow-only code from coverage
-        # slow tests are skipped on PRs, don't count them for coverage
-        if: github.event_name == 'pull_request'
-        run: 'sed -i ''/^\[tool.coverage.report\]$/a exclude_also = ["# pragma: slow"]\nomit = ["src/bartz/debug/_traceconv.py"]'' pyproject.toml'
-
       - name: List files
         run: |
           pwd
@@ -263,7 +227,7 @@ jobs:
           if-no-files-found: error
 
       - name: Check coverage threshold
-        run: make covcheck ${{ github.event_name == 'pull_request' && 'ARGS=--fail-under=90' || '' }}
+        run: make covcheck
 
   deploy:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))

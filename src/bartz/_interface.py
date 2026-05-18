@@ -33,7 +33,7 @@ from os import cpu_count
 
 # WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
-from typing import Any, Literal, Protocol, TypedDict
+from typing import Any, Literal, Protocol, TypedDict, overload
 from warnings import warn
 
 import jax
@@ -1122,6 +1122,25 @@ def _process_predictor_input(
     x = jnp.asarray(x)
     assert x.ndim == 2
     return x, fmt
+
+
+@overload
+def _process_response_input(
+    y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series,
+    *,
+    keep: Literal[False] = False,
+) -> Float32[Array, ' n'] | Float32[Array, 'k n']: ...
+
+
+@overload
+def _process_response_input(
+    y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series,
+    *,
+    keep: Literal[True],
+) -> tuple[
+    Float32[Array, ' n'] | Float32[Array, 'k n'],
+    Float32[Array, ' n'] | Float32[Array, 'k n'],
+]: ...
 
 
 def _process_response_input(

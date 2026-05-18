@@ -62,7 +62,7 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._state import chain_vmap_axes, data_vmap_axes
+from bartz.mcmcstep._state import StepConfig, chain_vmap_axes, data_vmap_axes
 from bartz.mcmcstep._step import (
     Counts,
     _compute_likelihood_ratio_mv,
@@ -99,6 +99,19 @@ class SplitRangeData(NamedTuple):
     var_tree: UInt8[Array, ' nodes']
     split_tree: UInt8[Array, ' nodes']
     max_split: UInt8[Array, ' p']
+
+
+def _minimal_step_config() -> StepConfig:
+    """Single-device `StepConfig` with all reduction settings disabled."""
+    return StepConfig(
+        steps_done=jnp.int32(0),
+        sparse_on_at=None,
+        resid_num_batches=None,
+        count_num_batches=None,
+        prec_num_batches=None,
+        prec_count_num_trees=None,
+        mesh=None,
+    )
 
 
 def vmap_randint_masked(
@@ -1439,7 +1452,7 @@ class TestMVBartIntegration:
             prec_scale=None,
             inv_sdev_scale=None,
             forest=None,
-            config=None,
+            config=_minimal_step_config(),
         )
 
         st_uv = State(
@@ -1494,7 +1507,7 @@ class TestMVBartIntegration:
             offset=0.0,
             prec_scale=None,
             forest=None,
-            config=None,
+            config=_minimal_step_config(),
         )
 
         st_uv_with = State(

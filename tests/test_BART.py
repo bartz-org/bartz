@@ -1449,6 +1449,11 @@ def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
     if len(devices()) < 2:  # this branch is covered in the single cpu test config
         pytest.skip('Need at least 2 devices for this test')
+    if get_with_default(kw, 'type') == 'pbart':
+        # Binary regression uses `step_z`, which on data sharding folds the
+        # shard index into the key to decorrelate per-datapoint draws — this
+        # intentionally breaks bit-equivalence with the unsharded execution.
+        pytest.skip('step_z breaks sharding equivalence on binary outcomes')
 
     # baseline without sharding
     baseline_kw = tree.map(lambda x: x, kw)  # deep copy of structure

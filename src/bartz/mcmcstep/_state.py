@@ -31,6 +31,7 @@ from enum import Enum
 from functools import partial, wraps
 from typing import Any, Literal, TypedDict, TypeVar
 
+import jax
 import numpy
 from equinox import Module, error_if, filter_jit
 from equinox import field as eqx_field
@@ -38,6 +39,12 @@ from jax import NamedSharding, device_put, jit, lax, make_mesh, random, tree, vm
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
+
+# WORKAROUND(jax<0.6.1): shard_map was promoted from jax.experimental to top-level in 0.6.1
+try:
+    from jax import shard_map
+except ImportError:
+    from jax.experimental.shard_map import shard_map
 from jaxtyping import (
     Array,
     Bool,
@@ -282,6 +289,11 @@ class StepConfig(Module):
 
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
+
+    @property
+    def data_sharded(self) -> bool:
+        """Whether the data axis is sharded across devices."""
+        return self.mesh is not None and 'data' in self.mesh.axis_names
 
 
 class State(Module):
@@ -1150,6 +1162,24 @@ def _shard_state(state: State) -> State:
     )
 
 
+def _leaf_partition_spec(
+    ndim: int, chain_axis: int | None, data_axis: int | None, mesh: Mesh
+) -> PartitionSpec:
+    """Build a `PartitionSpec` for a leaf with the given chain/data axes."""
+    spec = [None] * ndim
+    if chain_axis is not None and 'chains' in mesh.axis_names:
+        spec[chain_axis] = 'chains'
+    if data_axis is not None and 'data' in mesh.axis_names:
+        spec[data_axis] = 'data'
+
+    # remove trailing Nones to be consistent with jax's output, it's useful
+    # for comparing shardings during debugging
+    while spec and spec[-1] is None:
+        spec.pop()
+
+    return PartitionSpec(*spec)
+
+
 def _shard_leaf(
     x: Array | None | _LazyArray,
     chain_axis: int | None,
@@ -1163,18 +1193,7 @@ def _shard_leaf(
     if mesh is None:
         sharding = None
     else:
-        spec = [None] * x.ndim
-        if chain_axis is not None and 'chains' in mesh.axis_names:
-            spec[chain_axis] = 'chains'
-        if data_axis is not None and 'data' in mesh.axis_names:
-            spec[data_axis] = 'data'
-
-        # remove trailing Nones to be consistent with jax's output, it's useful
-        # for comparing shardings during debugging
-        while spec and spec[-1] is None:
-            spec.pop()
-
-        spec = PartitionSpec(*spec)
+        spec = _leaf_partition_spec(x.ndim, chain_axis, data_axis, mesh)
         sharding = NamedSharding(mesh, spec)
 
     if isinstance(x, _LazyArray):
@@ -1359,29 +1378,100 @@ def _inv_via_chol_with_gersh(
     return solve_triangular(L, Ltinv.mT, trans='T', lower=True)
 
 
-def vmap_chains(
-    fun: Callable[[Key[Array, ''], State], State],
+def split_key_for_chains(
+    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State],
 ) -> Callable[[Key[Array, ''], State], State]:
-    """Vmap a ``(key, state) -> state`` function over chain axes.
+    """Split a single PRNG key into per-chain keys before calling `fun`.
 
-    If the input state is multichain, the random key is split per chain and
-    `fun` is vmapped over the chain axes. The output is assumed to share the
-    chain layout of the input state.
+    When the state is multichain, the input key is split into
+    ``state.num_chains()`` keys. For single-chain states, the key is passed
+    through unchanged.
     """
 
     @wraps(fun)
-    def auto_vmapped_fun(key: Key[Array, ''], state: State) -> State:
+    def wrapped(key: Key[Array, ''], state: State) -> State:
         num_chains = state.num_chains()
         if num_chains is None:
             return fun(key, state)
-
-        state_axes = chain_vmap_axes(state)
         keys = random.split(key, num_chains)
-        mesh = state.config.mesh
-        if mesh is not None and 'chains' in mesh.axis_names:
-            keys = device_put(keys, NamedSharding(mesh, PartitionSpec('chains')))
+        return fun(keys, state)
 
+    return wrapped
+
+
+def shard_map_state(
+    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State],
+) -> Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State]:
+    """Wrap a ``(keys, state) -> state`` function in a manual `jax.shard_map`.
+
+    Uses `state.config.mesh` (static). No-op when the mesh is `None`. The keys
+    input is sharded across ``'chains'`` when the state is multichain and
+    ``'chains'`` is in the mesh; otherwise the keys are replicated. State
+    leaves are sharded according to their `chains`/`data` field metadata. The
+    output sharding matches the input sharding.
+    """
+
+    @wraps(fun)
+    def wrapped(key: Key[Array, ''] | Key[Array, ' num_chains'], state: State) -> State:
+        mesh = state.config.mesh
+        if mesh is None:
+            return fun(key, state)
+
+        num_chains = state.num_chains()
+        if num_chains is not None and 'chains' in mesh.axis_names:
+            key_spec = PartitionSpec('chains')
+        else:
+            key_spec = PartitionSpec()
+
+        chain_axes = chain_vmap_axes(state)
+        data_axes = data_vmap_axes(state)
+
+        state_specs = tree.map(
+            lambda x, ca, da: _leaf_partition_spec(x.ndim, ca, da, mesh),
+            state,
+            chain_axes,
+            data_axes,
+        )
+
+        mapped = shard_map(
+            fun,
+            mesh=mesh,
+            in_specs=(key_spec, state_specs),
+            out_specs=state_specs,
+            **_get_shard_map_patch_kwargs(),
+        )
+        return mapped(key, state)
+
+    return wrapped
+
+
+def vmap_chains(
+    fun: Callable[[Key[Array, ''], State], State],
+) -> Callable[[Key[Array, ' num_chains'] | Key[Array, ''], State], State]:
+    """Vmap a ``(key, state) -> state`` function over chain axes.
+
+    When the state is multichain, `keys` must have a leading chain axis and
+    `fun` is vmapped over it together with the chain axes of `state`. For
+    single-chain states, the function is called unchanged.
+    """
+
+    @wraps(fun)
+    def wrapped(
+        keys: Key[Array, ' num_chains'] | Key[Array, ''], state: State
+    ) -> State:
+        if state.num_chains() is None:
+            return fun(keys, state)
+        state_axes = chain_vmap_axes(state)
         vmapped_fun = vmap(fun, in_axes=(0, state_axes), out_axes=state_axes)
         return vmapped_fun(keys, state)
 
-    return auto_vmapped_fun
+    return wrapped
+
+
+def _get_shard_map_patch_kwargs() -> dict[str, bool]:
+    # WORKAROUND(jax<=0.8.2): vmap(shard_map(psum)), jax#34249; the
+    # jax_disable_vmap_shmap_error config did not work
+    if jax.__version__ in ('0.8.1', '0.8.2'):
+        return {'check_vma': False}
+    else:
+        return {}

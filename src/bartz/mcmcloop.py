@@ -732,9 +732,9 @@ class Trace(TreeHeaps, Protocol):
     offset: Float32[Array, '*trace_shape']
 
 
-@jit
+@partial(jit, static_argnames=('flatten_chains',))
 def evaluate_trace(
-    X: UInt[Array, 'p n'], trace: Trace
+    X: UInt[Array, 'p n'], trace: Trace, *, flatten_chains: bool = False
 ) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']:
     """
     Compute predictions for all iterations of the BART MCMC.
@@ -745,6 +745,10 @@ def evaluate_trace(
         The predictors matrix, with `p` predictors and `n` observations.
     trace
         A main trace of the BART MCMC, as returned by `run_mcmc`.
+    flatten_chains
+        If `True` and `trace` has a chain axis, collapse it into the sample
+        axis, so the leading dimension of the output is ``num_chains *
+        num_samples`` instead of ``(num_chains, num_samples)``.
 
     Returns
     -------
@@ -817,7 +821,12 @@ def evaluate_trace(
     # evaluate trees
     y_centered: Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']
     y_centered = batched_eval(X, trees)
-    return y_centered + trace.offset[..., None]
+    y = y_centered + trace.offset[..., None]
+    if flatten_chains and has_chains:
+        # collapse only the chain/sample dims, not k for MV
+        end = -2 if is_mv else -1
+        y = lax.collapse(y, 0, end)
+    return y
 
 
 @partial(jit, static_argnums=(0,))

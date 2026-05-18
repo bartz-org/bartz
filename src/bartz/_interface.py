@@ -1390,19 +1390,11 @@ def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
     return lax.collapse(varcount, 0, -1)
 
 
-@jit
-# this is jitted such that lax.collapse below does not create a copy
 def predict(
     x: UInt[Array, 'p m'], trace: mcmcloop.MainTrace
 ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
     """Evaluate trees on already quantized `x`, and squash chains."""
-    out = evaluate_trace(x, trace)
-    # For MV, out has shape (*trace_shape, k, n); for UV, (*trace_shape, n).
-    # We must collapse only the chain/sample dims, not k.
-    # Detect MV: leaf_tree has an extra axis compared to split_tree.
-    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
-    end = -2 if is_mv else -1
-    return lax.collapse(out, 0, end)
+    return evaluate_trace(x, trace, flatten_chains=True)
 
 
 class DeviceKwArgs(TypedDict):

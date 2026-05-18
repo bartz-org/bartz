@@ -250,11 +250,20 @@ class StepGeneric(AutoParamNames):
 
         self.args = (keys, simple_init(**kw))
 
+        # in v0.4.1 step had signature (bart, key); from v0.5.0 it became
+        # (key, bart). Use the first parameter name to dispatch positionally,
+        # since the decorator-wrapped step on modern bartz does not accept
+        # `bart` as a keyword argument.
+        step_bart_first = next(iter(signature(step).parameters)) == 'bart'
+
         def func(keys: list[Key[Array, '']], bart: State) -> State:
             sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
             if kind == 'sparse' and sparse_inside_step:
                 bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
-            bart = step(key=keys.pop(), bart=bart)
+            if step_bart_first:
+                bart = step(bart, keys.pop())
+            else:
+                bart = step(keys.pop(), bart)
             if kind == 'sparse' and not sparse_inside_step:
                 bart = mcmcstep.step_sparse(keys.pop(), bart)  # ty:ignore[unresolved-attribute] in this case it's an old version that has that attribute
             return bart

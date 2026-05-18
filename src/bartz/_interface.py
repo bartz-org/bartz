@@ -668,7 +668,9 @@ class Bart(Module):
         returned by this method because that would require to evaluate
         predictions on a given X, since the Bernoulli variance is p(1-p).
         """
-        return get_error_sdev(self._main_trace, self._binary_mask, mean=mean)
+        # binary outcomes are filled with NaN, so disable the NaN check
+        with debug_nans(False):
+            return get_error_sdev(self._main_trace, self._binary_mask, mean=mean)
 
     @cached_property
     def varcount(self) -> Int32[Array, 'ndpost p']:
@@ -1550,8 +1552,7 @@ def get_error_sdev(
     sdev = jnp.sqrt(var)
     if is_uv:
         sdev = sdev.squeeze(-1)
-    with debug_nans(False):
-        return jnp.where(binary_mask, jnp.nan, sdev)
+    return jnp.where(binary_mask, jnp.nan, sdev)
 
 
 def predict(

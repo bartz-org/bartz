@@ -112,7 +112,7 @@ class TestRunMcmc:
                 keys.pop(), initial_state_copy, 10, inner_loop_length=9
             )
 
-        if initial_state.forest.num_chains() is None:
+        if initial_state.num_chains() is None:
             last_index = -1
         else:
             last_index = (slice(None), -1)
@@ -141,7 +141,7 @@ class TestRunMcmc:
         def assert_empty_trace(
             _path: KeyPath, x: Array | None, chain_axis: int | None
         ) -> None:
-            if initial_state.forest.num_chains() is None or chain_axis is None:
+            if initial_state.num_chains() is None or chain_axis is None:
                 sample_axis = 0
             else:
                 sample_axis = 1

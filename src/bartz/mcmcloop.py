@@ -72,7 +72,7 @@ from bartz.grove import (
     var_histogram,
 )
 from bartz.mcmcstep import State
-from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size, get_num_chains
+from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size
 
 
 class BurninTrace(Module):
@@ -361,7 +361,7 @@ def _replicate(x: Array, mesh: Mesh | None) -> Array:
 def _empty_trace(
     length: int, bart: State, extractor: Callable[[State], PyTree]
 ) -> PyTree:
-    num_chains = get_num_chains(bart)
+    num_chains = bart.num_chains()
     if num_chains is None:
         out_axes = 0
     else:
@@ -498,7 +498,7 @@ def _save_state_to_trace(
     main_idx = jnp.where(noop_cond, noop_idx, main_idx)
 
     # prepare array index
-    num_chains = get_num_chains(bart)
+    num_chains = bart.num_chains()
     burnin_trace = _set(burnin_trace, burnin_idx, burnin_extractor(bart), num_chains)
     main_trace = _set(main_trace, main_idx, main_extractor(bart), num_chains)
 
@@ -630,7 +630,7 @@ def print_callback(
             burnin=burnin,
             it=it,
             n_iters=n_burn + n_save * n_skip,
-            num_chains=bart.forest.num_chains(),
+            num_chains=bart.num_chains(),
             grow_prop_count=bart.forest.grow_prop_count.mean(),
             grow_acc_count=bart.forest.grow_acc_count.mean(),
             prune_acc_count=bart.forest.prune_acc_count.mean(),

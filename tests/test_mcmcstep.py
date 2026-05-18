@@ -698,7 +698,7 @@ class TestMultichain:
         with subtests.test('init'):
             typechecking_init = jaxtyped(init, typechecker=beartype)
             state = typechecking_init(**init_kwargs, num_chains=num_chains, mesh=mesh)
-            assert state.forest.num_chains() == num_chains
+            assert state.num_chains() == num_chains
             check_strong_types(state)
             check_sharding(state, state.config.mesh)
 
@@ -706,7 +706,7 @@ class TestMultichain:
             with debug_key_reuse(False):
                 # key reuse checks trigger with empty key array apparently
                 new_state = typechecking_step(keys.pop(), state)
-            assert new_state.forest.num_chains() == num_chains
+            assert new_state.num_chains() == num_chains
             check_strong_types(new_state)
             check_sharding(new_state, state.config.mesh)
             check_same_structure(state, new_state)

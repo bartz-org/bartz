@@ -75,7 +75,6 @@ from bartz.mcmcstep._state import (
     FloatLike,
     _inv_via_chol_with_gersh,
     chol_with_gersh,
-    get_num_chains,
 )
 from bartz.prepcovars import (
     Binner,
@@ -631,7 +630,7 @@ class Bart(Module):
         main = self._main_trace.error_cov_inv
         # trace shape is (chains?, samples, ...) where chains is optional
         # first axis; samples is the axis to concatenate along
-        num_chains = get_num_chains(self._mcmc_state)
+        num_chains = self._mcmc_state.num_chains()
         sample_axis = 1 if num_chains is not None else 0
         prec = jnp.concatenate([burnin, main], axis=sample_axis)
 

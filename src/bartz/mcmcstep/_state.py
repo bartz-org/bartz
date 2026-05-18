@@ -255,14 +255,6 @@ class Forest(Module):
     """Parameter of the prior on `theta`. Required only to sample `theta`.
     See `step_theta`."""
 
-    def num_chains(self) -> int | None:
-        """Return the number of chains, or `None` if not multichain."""
-        # maybe this should be replaced by chain_shape() -> () | (int,)
-        if self.var_tree.ndim == 2:
-            return None
-        else:
-            return self.var_tree.shape[0]
-
 
 class StepConfig(Module):
     """Options for the MCMC step."""
@@ -359,6 +351,13 @@ class State(Module):
 
     config: StepConfig
     """Metadata and configurations for the MCMC step."""
+
+    def num_chains(self) -> int | None:
+        """Return the number of chains, or `None` if not multichain."""
+        if self.forest.var_tree.ndim == 2:
+            return None
+        else:
+            return self.forest.var_tree.shape[0]
 
 
 def _check_diagonal(error_cov_scale: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
@@ -1360,20 +1359,6 @@ def _inv_via_chol_with_gersh(
     return solve_triangular(L, Ltinv.mT, trans='T', lower=True)
 
 
-def get_num_chains(x: PyTree) -> int | None:
-    """Get the number of chains of a pytree.
-
-    Find all nodes in the structure that define 'num_chains()', stopping
-    traversal at nodes that define it. Check all values obtained invoking
-    `num_chains` are equal, then return it.
-    """
-    leaves, _ = tree.flatten(x, is_leaf=lambda x: hasattr(x, 'num_chains'))
-    num_chains = [x.num_chains() for x in leaves if hasattr(x, 'num_chains')]
-    ref = num_chains[0]
-    assert all(c == ref for c in num_chains)
-    return ref
-
-
 def vmap_chains(
     fun: Callable[[Key[Array, ''], State], State],
 ) -> Callable[[Key[Array, ''], State], State]:
@@ -1386,7 +1371,7 @@ def vmap_chains(
 
     @wraps(fun)
     def auto_vmapped_fun(key: Key[Array, ''], state: State) -> State:
-        num_chains = get_num_chains(state)
+        num_chains = state.num_chains()
         if num_chains is None:
             return fun(key, state)
 

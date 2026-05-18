@@ -54,7 +54,7 @@ def make_data(
         p=p,
         k=1,
         q=2,
-        lam=0,
+        lambda_=0,
         sigma2_lin=0.5,
         sigma2_quad=0.5,
         sigma2_eps=0.2,

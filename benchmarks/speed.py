@@ -340,7 +340,7 @@ class BaseGbart(AutoParamNames):
             p=P,
             k=1,
             q=2,
-            lam=0,
+            lambda_=0,
             sigma2_lin=0.4,
             sigma2_quad=0.4,
             sigma2_eps=0.2,

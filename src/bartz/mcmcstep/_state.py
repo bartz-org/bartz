@@ -48,13 +48,15 @@ from jax import (
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
-from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree, Shaped, UInt
+from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, PyTree, Shaped, UInt
 from numpy import ndarray
 
 from bartz.grove import tree_depths
 from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 ArrayLike = Array | ndarray
+
+FloatLike = float | Float[ArrayLike, '']
 
 
 class OutcomeType(Enum):
@@ -545,9 +547,7 @@ def _parse_p_nonterminal(
 
 
 def make_p_nonterminal(
-    d: int,
-    alpha: float | Float32[Array, ''] = 0.95,
-    beta: float | Float32[Array, ''] = 2.0,
+    d: int, alpha: FloatLike = 0.95, beta: FloatLike = 2.0
 ) -> Float32[Array, ' {d}-1']:
     """Prepare the `p_nonterminal` argument to `init`.
 
@@ -602,16 +602,13 @@ def init(
     X: UInt[ArrayLike, 'p n'],
     y: Float32[ArrayLike, ' n'] | Float32[ArrayLike, ' k n'],
     outcome_type: OutcomeType | str | Sequence[OutcomeType | str] = 'continuous',
-    offset: float | Float32[ArrayLike, ''] | Float32[ArrayLike, ' k'],
+    offset: FloatLike | Float[ArrayLike, ' k'],
     max_split: UInt[ArrayLike, ' p'],
     num_trees: int,
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
-    leaf_prior_cov_inv: float | Float32[ArrayLike, ''] | Float32[ArrayLike, 'k k'],
-    error_cov_df: float | Float32[ArrayLike, ''] | None = None,
-    error_cov_scale: float
-    | Float32[ArrayLike, '']
-    | Float32[ArrayLike, 'k k']
-    | None = None,
+    leaf_prior_cov_inv: FloatLike | Float[ArrayLike, 'k k'],
+    error_cov_df: FloatLike | None = None,
+    error_cov_scale: FloatLike | Float[ArrayLike, 'k k'] | None = None,
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
     min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
@@ -623,10 +620,10 @@ def init(
     filter_splitless_vars: int = 0,
     min_points_per_leaf: int | Integer[ArrayLike, ''] | None = None,
     log_s: Float32[ArrayLike, ' p'] | None = None,
-    theta: float | Float32[ArrayLike, ''] | None = None,
-    a: float | Float32[ArrayLike, ''] | None = None,
-    b: float | Float32[ArrayLike, ''] | None = None,
-    rho: float | Float32[ArrayLike, ''] | None = None,
+    theta: FloatLike | None = None,
+    a: FloatLike | None = None,
+    b: FloatLike | None = None,
+    rho: FloatLike | None = None,
     sparse_on_at: int | Integer[ArrayLike, ''] | None = None,
     num_chains: int | None = None,
     mesh: Mesh | dict[str, int] | None = None,

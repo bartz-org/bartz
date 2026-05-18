@@ -71,6 +71,7 @@ from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
 from bartz.mcmcstep._state import (
     ArrayLike,
+    FloatLike,
     _inv_via_chol_with_gersh,
     chol_with_gersh,
     get_num_chains,
@@ -82,8 +83,6 @@ from bartz.prepcovars import (
     _sigma2_from_cg,
     _sigma2_from_ols,
 )
-
-FloatLike = float | Float[ArrayLike, '']
 
 CG_MAXITER = 20
 
@@ -1083,7 +1082,7 @@ class Bart(Module):
     def _process_offset_settings(
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
         binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-        offset: float | Float32[ArrayLike, ''] | Float32[ArrayLike, ' k'] | None,
+        offset: FloatLike | Float[ArrayLike, ' k'] | None,
     ) -> Float32[Array, ''] | Float32[Array, ' k']:
         """Return offset."""
         if offset is not None:

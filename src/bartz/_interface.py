@@ -391,32 +391,30 @@ class Bart(Module):
         run_mcmc_kw: Mapping = MappingProxyType({}),
     ) -> None:
         # check data and put it in the right format
-        x_train, x_train_fmt = self._process_predictor_input(x_train)
-        y_train = self._process_response_input(y_train)
-        self._check_same_length(x_train, y_train)
+        x_train, x_train_fmt = _process_predictor_input(x_train)
+        y_train = _process_response_input(y_train)
+        _check_same_length(x_train, y_train)
 
         if w is not None:
             # keep=True because `w` is donated downstream but also retained
             # as `self._w` for prediction
-            w, self._w = self._process_response_input(w, keep=True)
-            self._check_same_length(x_train, w)
+            w, self._w = _process_response_input(w, keep=True)
+            _check_same_length(x_train, w)
 
-        missing = self._process_missing_input(missing, y_train.shape)
+        missing = _process_missing_input(missing, y_train.shape)
 
         # check data types are correct for continuous/binary/multivariate regression
-        outcome_type, binary_mask = self._check_type_settings(y_train, outcome_type, w)
+        outcome_type, binary_mask = _check_type_settings(y_train, outcome_type, w)
 
         # process sparsity settings
-        theta, a, b, rho = self._process_sparsity_settings(
-            x_train, sparse, theta, a, b, rho
-        )
+        theta, a, b, rho = _process_sparsity_settings(x_train, sparse, theta, a, b, rho)
 
         # process "standardization" settings
-        offset = self._process_offset_settings(y_train, binary_mask, offset)
-        leaf_prior_cov_inv = self._process_leaf_variance_settings(
+        offset = _process_offset_settings(y_train, binary_mask, offset)
+        leaf_prior_cov_inv = _process_leaf_variance_settings(
             y_train, binary_mask, k, num_trees, tau_num
         )
-        error_cov_df, error_cov_scale, sigest = self._process_error_variance_settings(
+        error_cov_df, error_cov_scale, sigest = _process_error_variance_settings(
             x_train,
             y_train,
             outcome_type,
@@ -439,7 +437,7 @@ class Bart(Module):
         max_split = jnp.array(binner_obj.max_split)
 
         # setup and run mcmc
-        initial_state = self._setup_mcmc(
+        initial_state = _setup_mcmc(
             x_train,
             y_train,
             outcome_type,
@@ -468,7 +466,7 @@ class Bart(Module):
             sparse,
             n_burn,
         )
-        result = self._run_mcmc(
+        result = _run_mcmc(
             initial_state, n_save, n_burn, n_skip, printevery, keys.pop(), run_mcmc_kw
         )
 
@@ -806,7 +804,7 @@ class Bart(Module):
                 ' weights and x_test is new data'
             )
             raise ValueError(msg)
-        w_test = self._process_response_input(w)
+        w_test = _process_response_input(w)
         if w_test.ndim != self._w.ndim:
             msg = (
                 f'`w` shape mismatch with training weights: got '
@@ -829,405 +827,13 @@ class Bart(Module):
                 )
                 raise ValueError(msg)
             return self._mcmc_state.X
-        x_test, x_test_fmt = self._process_predictor_input(x_test)
+        x_test, x_test_fmt = _process_predictor_input(x_test)
         if x_test_fmt != self._x_train_fmt:
             msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
             raise ValueError(msg)
         if w is not None:
-            self._check_same_length(w, x_test)
+            _check_same_length(w, x_test)
         return self._binner.bin(x_test)
-
-    @staticmethod
-    def _process_predictor_input(
-        x: Real[ArrayLike, 'p n'] | DataFrame,
-    ) -> tuple[Shaped[Array, 'p n'], Any]:
-        if hasattr(x, 'columns'):
-            fmt = dict(kind='dataframe', columns=x.columns)
-            x = x.to_numpy().T
-        else:
-            fmt = dict(kind='array', num_covar=x.shape[0])
-        x = jnp.asarray(x)
-        assert x.ndim == 2
-        return x, fmt
-
-    @staticmethod
-    def _process_response_input(
-        y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series,
-        *,
-        keep: bool = False,
-    ) -> (
-        Float32[Array, ' n']
-        | Float32[Array, 'k n']
-        | tuple[
-            Float32[Array, ' n'] | Float32[Array, 'k n'],
-            Float32[Array, ' n'] | Float32[Array, 'k n'],
-        ]
-    ):
-        if hasattr(y, 'to_numpy'):
-            y = y.to_numpy()
-        # in normal mode: one unconditional copy, safe to donate downstream.
-        # in `keep` mode: convert without copying when possible to get the
-        # keep array, then `jnp.copy` to make a separate disposable copy.
-        y = jnp.array(y, jnp.float32, copy=not keep)
-        if y.ndim < 1 or y.ndim > 2:
-            msg = f'y_train must be 1D (n,) or 2D (k, n). Got {y.ndim=}.'
-            raise ValueError(msg)
-        if keep:
-            return jnp.copy(y), y
-        return y
-
-    @staticmethod
-    def _process_missing_input(
-        missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
-        y_shape: tuple[int, ...],
-    ) -> Bool[Array, ' n'] | Bool[Array, 'k n'] | None:
-        if missing is None:
-            return None
-        # see comment in `_process_response_input` about copying
-        missing = jnp.array(missing, jnp.bool_)
-        if missing.shape != y_shape:
-            msg = f'missing.shape={missing.shape} must equal y_train.shape={y_shape}.'
-            raise ValueError(msg)
-        return missing
-
-    @staticmethod
-    def _check_same_length(x1: Array, x2: Array) -> None:
-        get_length = lambda x: x.shape[-1]
-        assert get_length(x1) == get_length(x2)
-
-    @classmethod
-    def _process_error_variance_settings(
-        cls,
-        x_train: Shaped[Array, 'p n'],
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        outcome_type: OutcomeType | tuple[OutcomeType, ...],
-        binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-        sigest: FloatLike
-        | Float[Array, ' k']
-        | Literal['auto', 'ols-or-variance', 'cg'],
-        sigdf: FloatLike,
-        sigquant: FloatLike,
-        lambda_: FloatLike | Float[Array, ' k'] | None,
-    ) -> tuple[
-        Float32[Array, ''] | None,
-        Float32[Array, ''] | Float32[Array, 'k k'] | None,
-        Float32[Array, ''] | Float32[Array, ' k'] | None,
-    ]:
-        """Return (error_cov_df, error_cov_scale, sigest)."""
-        if outcome_type is OutcomeType.binary:
-            if not isinstance(sigest, str) or lambda_ is not None:
-                msg = 'Do not set `sigest` or `lambda_` for binary regression, they are ignored'
-                raise ValueError(msg)
-            return None, None, None
-
-        if lambda_ is None:
-            # estimate sigest²
-            sigest2 = cls._estimate_sigest2(x_train, y_train, sigest, binary_mask)
-            sigest = jnp.sqrt(sigest2)
-
-            # lambda_ from sigest²
-            alpha = sigdf / 2
-            invchi2 = invgamma.ppf(sigquant, alpha) / 2
-            invchi2rid = invchi2 * sigdf
-            lambda_ = sigest2 / invchi2rid
-
-        elif not isinstance(sigest, str):
-            msg = "Do not set `sigest` if `lambda_` is specified, it's ignored"
-            raise ValueError(msg)
-
-        else:
-            lambda_ = jnp.where(binary_mask, 0.0, lambda_)
-            sigest = None
-
-        # params written in multivariate form
-        if y_train.ndim == 2:
-            k = y_train.shape[0]
-            lambda_ = jnp.broadcast_to(lambda_, (k,))
-            error_cov_df = jnp.asarray(sigdf) + k - 1
-            error_cov_scale = jnp.diag(sigdf * lambda_)
-        else:
-            error_cov_df = jnp.asarray(sigdf)
-            error_cov_scale = jnp.asarray(sigdf * lambda_)
-
-        return error_cov_df, error_cov_scale, sigest
-
-    @classmethod
-    def _estimate_sigest2(
-        cls,
-        x_train: Shaped[Array, 'p n'],
-        y_train: Float32[Array, '*k n'],
-        sigest: FloatLike
-        | Float[Array, ' k']
-        | Literal['auto', 'ols-or-variance', 'cg'],
-        binary_mask: Bool[Array, '*k'],
-    ) -> Float32[Array, '*k']:
-        if not isinstance(sigest, str):
-            sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
-            sigest2 = jnp.broadcast_to(sigest2, y_train.shape[:-1])
-        elif sigest == 'ols-or-variance':
-            sigest2 = cls._sigest2_ols_or_variance(x_train, y_train)
-        elif sigest == 'cg':
-            sigest2 = cls._sigest2_cg(x_train, y_train)
-        elif sigest == 'auto':
-            sigest2 = cls._sigest2_auto(x_train, y_train)
-        else:
-            msg = f'unrecognized value {sigest=}'
-            raise ValueError(msg)
-        return jnp.where(binary_mask, 0.0, sigest2)
-
-    @staticmethod
-    def _sigest2_ols_or_variance(
-        x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
-    ) -> Float32[Array, '*k']:
-        """Implement the case `sigest='ols-or-variance'`."""
-        p, n = x_train.shape
-        if n < 2:
-            *k, _ = y_train.shape
-            return jnp.ones(k)
-        elif n <= p:
-            return jnp.var(y_train, axis=-1)
-        else:
-            return _sigma2_from_ols(x_train, y_train)
-
-    @staticmethod
-    def _sigest2_cg(
-        x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
-    ) -> Float32[Array, '*k']:
-        """Implement the case `sigest='cg'`."""
-        p, n = x_train.shape
-        maxiter = max(1, min(n, p, CG_MAXITER))
-        return _sigma2_from_cg(x_train, y_train, maxiter)
-
-    @classmethod
-    def _sigest2_auto(
-        cls, x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
-    ) -> Float32[Array, ' *k']:
-        """Implement the case `sigest='auto'`."""
-        p, n = x_train.shape
-        threshold = 10_000 * 100**2
-        if n * p * p > threshold and min(n, p) > CG_MAXITER:
-            return cls._sigest2_cg(x_train, y_train)
-        else:
-            return cls._sigest2_ols_or_variance(x_train, y_train)
-
-    @staticmethod
-    def _check_type_settings(
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        outcome_type: OutcomeType | str | Sequence[OutcomeType | str],
-        w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
-    ) -> tuple[
-        OutcomeType | tuple[OutcomeType, ...], Bool[Array, ''] | Bool[Array, ' k']
-    ]:
-        # standardize outcome_type to OutcomeType or tuple[OutcomeType, ...]
-        if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
-            outcome_type = tuple(OutcomeType(t) for t in outcome_type)
-            num_types = len(outcome_type)
-            if len(set(outcome_type)) == 1:
-                outcome_type = outcome_type[0]
-        else:
-            num_types = None
-            outcome_type = OutcomeType(outcome_type)
-
-        # validation
-        if num_types is not None and (
-            y_train.ndim != 2 or num_types != y_train.shape[0]
-        ):
-            msg = (
-                f'Sequence outcome_type of length {num_types}'
-                f' requires y_train.shape=({num_types}, n),'
-                f' found {y_train.shape=}.'
-            )
-            raise ValueError(msg)
-        if w is not None and outcome_type is not OutcomeType.continuous:
-            msg = 'Weights are not supported when any outcome is binary.'
-            raise ValueError(msg)
-        if (
-            w is not None
-            and w.ndim == 2
-            and (y_train.ndim != 2 or w.shape[0] != y_train.shape[0])
-        ):
-            msg = (
-                f'2D w (vector per-component weights) requires y_train of '
-                f'shape (k, n) with matching k; got {w.shape=}, '
-                f'{y_train.shape=}.'
-            )
-            raise ValueError(msg)
-
-        if isinstance(outcome_type, tuple):
-            binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
-        else:
-            binary_mask = jnp.bool_(outcome_type is OutcomeType.binary)
-        binary_mask = jnp.broadcast_to(binary_mask, y_train.shape[:-1])
-
-        return outcome_type, binary_mask
-
-    @staticmethod
-    def _process_sparsity_settings(
-        x_train: Real[Array, 'p n'],
-        sparse: bool,
-        theta: FloatLike | None,
-        a: FloatLike,
-        b: FloatLike,
-        rho: FloatLike | None,
-    ) -> (
-        tuple[None, None, None, None]
-        | tuple[FloatLike, None, None, None]
-        | tuple[None, FloatLike, FloatLike, FloatLike]
-    ):
-        """Return (theta, a, b, rho)."""
-        if not sparse:
-            return None, None, None, None
-        elif theta is not None:
-            return theta, None, None, None
-        else:
-            if rho is None:
-                p, _ = x_train.shape
-                rho = float(p)
-            return None, a, b, rho
-
-    @staticmethod
-    def _process_offset_settings(
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-        offset: FloatLike | Float[ArrayLike, ' k'] | None,
-    ) -> Float32[Array, ''] | Float32[Array, ' k']:
-        """Return offset."""
-        if offset is not None:
-            off = jnp.asarray(offset, jnp.float32)
-            return jnp.broadcast_to(off, y_train.shape[:-1])
-        if y_train.shape[-1] < 1:
-            return jnp.zeros(y_train.shape[:-1])
-
-        bound = 1 / (1 + y_train.shape[-1])
-        binary_offset = ndtri(jnp.clip((y_train != 0).mean(-1), bound, 1 - bound))
-        continuous_offset = y_train.mean(-1)
-        return jnp.where(binary_mask, binary_offset, continuous_offset)
-
-    @staticmethod
-    def _process_leaf_variance_settings(
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-        k: FloatLike,
-        num_trees: int,
-        tau_num: FloatLike | None,
-    ) -> Float32[Array, ''] | Float32[Array, 'k k']:
-        """Return `leaf_prior_cov_inv`."""
-        # determine `tau_num` if not specified
-        if tau_num is None:
-            if y_train.shape[-1] < 2:
-                continuous_tau = jnp.ones(y_train.shape[:-1])
-            else:
-                continuous_tau = (y_train.max(-1) - y_train.min(-1)) / 2
-            tau_num = jnp.where(binary_mask, 3.0, continuous_tau)
-
-        # leaf prior standard deviation
-        sigma_mu = tau_num / (k * math.sqrt(num_trees))
-
-        # leaf prior precision matrix
-        leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu))
-        if y_train.ndim == 2:
-            leaf_prior_cov_inv = jnp.diag(
-                jnp.broadcast_to(leaf_prior_cov_inv, y_train.shape[:-1])
-            )
-        return leaf_prior_cov_inv
-
-    @staticmethod
-    def _setup_mcmc(
-        x_train: Real[Array, 'p n'],
-        y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-        outcome_type: OutcomeType | tuple[OutcomeType, ...],
-        offset: Float32[Array, ''] | Float32[Array, ' k'],
-        w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
-        missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
-        max_split: UInt[Array, ' p'],
-        leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
-        error_cov_df: FloatLike | None,
-        error_cov_scale: FloatLike | Float32[Array, 'k k'] | None,
-        power: FloatLike,
-        base: FloatLike,
-        maxdepth: int,
-        num_trees: int,
-        init_kw: Mapping[str, Any],
-        rm_const: bool,
-        theta: FloatLike | None,
-        a: FloatLike | None,
-        b: FloatLike | None,
-        rho: FloatLike | None,
-        varprob: Float[ArrayLike, ' p'] | None,
-        num_chains: int | None,
-        num_chain_devices: int | None | Literal['auto'],
-        num_data_devices: int | None,
-        devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
-        sparse: bool,
-        n_burn: int,
-    ) -> mcmcstep.State:
-        p_nonterminal = make_p_nonterminal(maxdepth, base, power)
-
-        # process device settings
-        device_kw, device = process_device_settings(
-            y_train, num_chains, num_chain_devices, num_data_devices, devices
-        )
-
-        kw: dict = dict(
-            X=x_train,
-            y=y_train,
-            outcome_type=outcome_type,
-            offset=offset,
-            error_scale=w,
-            missing=missing,
-            max_split=max_split,
-            num_trees=num_trees,
-            p_nonterminal=p_nonterminal,
-            leaf_prior_cov_inv=leaf_prior_cov_inv,
-            error_cov_df=error_cov_df,
-            error_cov_scale=error_cov_scale,
-            min_points_per_decision_node=10,
-            log_s=process_varprob(varprob, max_split),
-            theta=theta,
-            a=a,
-            b=b,
-            rho=rho,
-            sparse_on_at=n_burn // 2 if sparse else None,
-            **device_kw,
-        )
-
-        if rm_const:
-            n_empty = jnp.sum(max_split == 0).item()
-            kw.update(filter_splitless_vars=n_empty)
-
-        kw.update(init_kw)
-
-        state = mcmcstep.init(**kw)
-
-        # put state on device if requested explicitly by the user
-        if device is not None:
-            state = device_put(state, device, donate=True)
-
-        return state
-
-    @classmethod
-    def _run_mcmc(
-        cls,
-        mcmc_state: mcmcstep.State,
-        n_save: int,
-        n_burn: int,
-        n_skip: int,
-        printevery: int | None,
-        key: Key[Array, ''],
-        run_mcmc_kw: Mapping,
-    ) -> RunMCMCResult:
-        # prepare arguments
-        kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
-        kw.update(
-            mcmcloop.make_default_callback(
-                mcmc_state,
-                dot_every=None if printevery is None or printevery == 1 else 1,
-                report_every=printevery,
-            )
-        )
-        kw.update(run_mcmc_kw)
-
-        return run_mcmc(key, mcmc_state, n_save, **kw)
 
     def _predict(
         self, x: UInt[Array, 'p m']
@@ -1503,6 +1109,387 @@ class Bart(Module):
         agrow, aprune = self._avg_acc()
         pgrow, pprune = self._avg_prop()
         return agrow * pgrow, aprune * pprune
+
+
+def _process_predictor_input(
+    x: Real[ArrayLike, 'p n'] | DataFrame,
+) -> tuple[Shaped[Array, 'p n'], Any]:
+    if hasattr(x, 'columns'):
+        fmt = dict(kind='dataframe', columns=x.columns)
+        x = x.to_numpy().T
+    else:
+        fmt = dict(kind='array', num_covar=x.shape[0])
+    x = jnp.asarray(x)
+    assert x.ndim == 2
+    return x, fmt
+
+
+def _process_response_input(
+    y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series,
+    *,
+    keep: bool = False,
+) -> (
+    Float32[Array, ' n']
+    | Float32[Array, 'k n']
+    | tuple[
+        Float32[Array, ' n'] | Float32[Array, 'k n'],
+        Float32[Array, ' n'] | Float32[Array, 'k n'],
+    ]
+):
+    if hasattr(y, 'to_numpy'):
+        y = y.to_numpy()
+    # in normal mode: one unconditional copy, safe to donate downstream.
+    # in `keep` mode: convert without copying when possible to get the
+    # keep array, then `jnp.copy` to make a separate disposable copy.
+    y = jnp.array(y, jnp.float32, copy=not keep)
+    if y.ndim < 1 or y.ndim > 2:
+        msg = f'y_train must be 1D (n,) or 2D (k, n). Got {y.ndim=}.'
+        raise ValueError(msg)
+    if keep:
+        return jnp.copy(y), y
+    return y
+
+
+def _process_missing_input(
+    missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
+    y_shape: tuple[int, ...],
+) -> Bool[Array, ' n'] | Bool[Array, 'k n'] | None:
+    if missing is None:
+        return None
+    # see comment in `_process_response_input` about copying
+    missing = jnp.array(missing, jnp.bool_)
+    if missing.shape != y_shape:
+        msg = f'missing.shape={missing.shape} must equal y_train.shape={y_shape}.'
+        raise ValueError(msg)
+    return missing
+
+
+def _check_same_length(x1: Array, x2: Array) -> None:
+    get_length = lambda x: x.shape[-1]
+    assert get_length(x1) == get_length(x2)
+
+
+def _check_type_settings(
+    y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    outcome_type: OutcomeType | str | Sequence[OutcomeType | str],
+    w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
+) -> tuple[OutcomeType | tuple[OutcomeType, ...], Bool[Array, ''] | Bool[Array, ' k']]:
+    # standardize outcome_type to OutcomeType or tuple[OutcomeType, ...]
+    if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
+        outcome_type = tuple(OutcomeType(t) for t in outcome_type)
+        num_types = len(outcome_type)
+        if len(set(outcome_type)) == 1:
+            outcome_type = outcome_type[0]
+    else:
+        num_types = None
+        outcome_type = OutcomeType(outcome_type)
+
+    # validation
+    if num_types is not None and (y_train.ndim != 2 or num_types != y_train.shape[0]):
+        msg = (
+            f'Sequence outcome_type of length {num_types}'
+            f' requires y_train.shape=({num_types}, n),'
+            f' found {y_train.shape=}.'
+        )
+        raise ValueError(msg)
+    if w is not None and outcome_type is not OutcomeType.continuous:
+        msg = 'Weights are not supported when any outcome is binary.'
+        raise ValueError(msg)
+    if (
+        w is not None
+        and w.ndim == 2
+        and (y_train.ndim != 2 or w.shape[0] != y_train.shape[0])
+    ):
+        msg = (
+            f'2D w (vector per-component weights) requires y_train of '
+            f'shape (k, n) with matching k; got {w.shape=}, '
+            f'{y_train.shape=}.'
+        )
+        raise ValueError(msg)
+
+    if isinstance(outcome_type, tuple):
+        binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
+    else:
+        binary_mask = jnp.bool_(outcome_type is OutcomeType.binary)
+    binary_mask = jnp.broadcast_to(binary_mask, y_train.shape[:-1])
+
+    return outcome_type, binary_mask
+
+
+def _process_sparsity_settings(
+    x_train: Real[Array, 'p n'],
+    sparse: bool,
+    theta: FloatLike | None,
+    a: FloatLike,
+    b: FloatLike,
+    rho: FloatLike | None,
+) -> (
+    tuple[None, None, None, None]
+    | tuple[FloatLike, None, None, None]
+    | tuple[None, FloatLike, FloatLike, FloatLike]
+):
+    """Return (theta, a, b, rho)."""
+    if not sparse:
+        return None, None, None, None
+    elif theta is not None:
+        return theta, None, None, None
+    else:
+        if rho is None:
+            p, _ = x_train.shape
+            rho = float(p)
+        return None, a, b, rho
+
+
+def _process_offset_settings(
+    y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
+    offset: FloatLike | Float[ArrayLike, ' k'] | None,
+) -> Float32[Array, ''] | Float32[Array, ' k']:
+    """Return offset."""
+    if offset is not None:
+        off = jnp.asarray(offset, jnp.float32)
+        return jnp.broadcast_to(off, y_train.shape[:-1])
+    if y_train.shape[-1] < 1:
+        return jnp.zeros(y_train.shape[:-1])
+
+    bound = 1 / (1 + y_train.shape[-1])
+    binary_offset = ndtri(jnp.clip((y_train != 0).mean(-1), bound, 1 - bound))
+    continuous_offset = y_train.mean(-1)
+    return jnp.where(binary_mask, binary_offset, continuous_offset)
+
+
+def _process_leaf_variance_settings(
+    y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
+    k: FloatLike,
+    num_trees: int,
+    tau_num: FloatLike | None,
+) -> Float32[Array, ''] | Float32[Array, 'k k']:
+    """Return `leaf_prior_cov_inv`."""
+    # determine `tau_num` if not specified
+    if tau_num is None:
+        if y_train.shape[-1] < 2:
+            continuous_tau = jnp.ones(y_train.shape[:-1])
+        else:
+            continuous_tau = (y_train.max(-1) - y_train.min(-1)) / 2
+        tau_num = jnp.where(binary_mask, 3.0, continuous_tau)
+
+    # leaf prior standard deviation
+    sigma_mu = tau_num / (k * math.sqrt(num_trees))
+
+    # leaf prior precision matrix
+    leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu))
+    if y_train.ndim == 2:
+        leaf_prior_cov_inv = jnp.diag(
+            jnp.broadcast_to(leaf_prior_cov_inv, y_train.shape[:-1])
+        )
+    return leaf_prior_cov_inv
+
+
+def _process_error_variance_settings(
+    x_train: Shaped[Array, 'p n'],
+    y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    outcome_type: OutcomeType | tuple[OutcomeType, ...],
+    binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
+    sigest: FloatLike | Float[Array, ' k'] | Literal['auto', 'ols-or-variance', 'cg'],
+    sigdf: FloatLike,
+    sigquant: FloatLike,
+    lambda_: FloatLike | Float[Array, ' k'] | None,
+) -> tuple[
+    Float32[Array, ''] | None,
+    Float32[Array, ''] | Float32[Array, 'k k'] | None,
+    Float32[Array, ''] | Float32[Array, ' k'] | None,
+]:
+    """Return (error_cov_df, error_cov_scale, sigest)."""
+    if outcome_type is OutcomeType.binary:
+        if not isinstance(sigest, str) or lambda_ is not None:
+            msg = 'Do not set `sigest` or `lambda_` for binary regression, they are ignored'
+            raise ValueError(msg)
+        return None, None, None
+
+    if lambda_ is None:
+        # estimate sigest²
+        sigest2 = _estimate_sigest2(x_train, y_train, sigest, binary_mask)
+        sigest = jnp.sqrt(sigest2)
+
+        # lambda_ from sigest²
+        alpha = sigdf / 2
+        invchi2 = invgamma.ppf(sigquant, alpha) / 2
+        invchi2rid = invchi2 * sigdf
+        lambda_ = sigest2 / invchi2rid
+
+    elif not isinstance(sigest, str):
+        msg = "Do not set `sigest` if `lambda_` is specified, it's ignored"
+        raise ValueError(msg)
+
+    else:
+        lambda_ = jnp.where(binary_mask, 0.0, lambda_)
+        sigest = None
+
+    # params written in multivariate form
+    if y_train.ndim == 2:
+        k = y_train.shape[0]
+        lambda_ = jnp.broadcast_to(lambda_, (k,))
+        error_cov_df = jnp.asarray(sigdf) + k - 1
+        error_cov_scale = jnp.diag(sigdf * lambda_)
+    else:
+        error_cov_df = jnp.asarray(sigdf)
+        error_cov_scale = jnp.asarray(sigdf * lambda_)
+
+    return error_cov_df, error_cov_scale, sigest
+
+
+def _estimate_sigest2(
+    x_train: Shaped[Array, 'p n'],
+    y_train: Float32[Array, '*k n'],
+    sigest: FloatLike | Float[Array, ' k'] | Literal['auto', 'ols-or-variance', 'cg'],
+    binary_mask: Bool[Array, '*k'],
+) -> Float32[Array, '*k']:
+    if not isinstance(sigest, str):
+        sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
+        sigest2 = jnp.broadcast_to(sigest2, y_train.shape[:-1])
+    elif sigest == 'ols-or-variance':
+        sigest2 = _sigest2_ols_or_variance(x_train, y_train)
+    elif sigest == 'cg':
+        sigest2 = _sigest2_cg(x_train, y_train)
+    elif sigest == 'auto':
+        sigest2 = _sigest2_auto(x_train, y_train)
+    else:
+        msg = f'unrecognized value {sigest=}'
+        raise ValueError(msg)
+    return jnp.where(binary_mask, 0.0, sigest2)
+
+
+def _sigest2_ols_or_variance(
+    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
+) -> Float32[Array, '*k']:
+    """Implement the case `sigest='ols-or-variance'`."""
+    p, n = x_train.shape
+    if n < 2:
+        *k, _ = y_train.shape
+        return jnp.ones(k)
+    elif n <= p:
+        return jnp.var(y_train, axis=-1)
+    else:
+        return _sigma2_from_ols(x_train, y_train)
+
+
+def _sigest2_cg(
+    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
+) -> Float32[Array, '*k']:
+    """Implement the case `sigest='cg'`."""
+    p, n = x_train.shape
+    maxiter = max(1, min(n, p, CG_MAXITER))
+    return _sigma2_from_cg(x_train, y_train, maxiter)
+
+
+def _sigest2_auto(
+    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
+) -> Float32[Array, ' *k']:
+    """Implement the case `sigest='auto'`."""
+    p, n = x_train.shape
+    threshold = 10_000 * 100**2
+    if n * p * p > threshold and min(n, p) > CG_MAXITER:
+        return _sigest2_cg(x_train, y_train)
+    else:
+        return _sigest2_ols_or_variance(x_train, y_train)
+
+
+def _setup_mcmc(
+    x_train: Real[Array, 'p n'],
+    y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    outcome_type: OutcomeType | tuple[OutcomeType, ...],
+    offset: Float32[Array, ''] | Float32[Array, ' k'],
+    w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+    max_split: UInt[Array, ' p'],
+    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+    error_cov_df: FloatLike | None,
+    error_cov_scale: FloatLike | Float32[Array, 'k k'] | None,
+    power: FloatLike,
+    base: FloatLike,
+    maxdepth: int,
+    num_trees: int,
+    init_kw: Mapping[str, Any],
+    rm_const: bool,
+    theta: FloatLike | None,
+    a: FloatLike | None,
+    b: FloatLike | None,
+    rho: FloatLike | None,
+    varprob: Float[ArrayLike, ' p'] | None,
+    num_chains: int | None,
+    num_chain_devices: int | None | Literal['auto'],
+    num_data_devices: int | None,
+    devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
+    sparse: bool,
+    n_burn: int,
+) -> mcmcstep.State:
+    p_nonterminal = make_p_nonterminal(maxdepth, base, power)
+
+    # process device settings
+    device_kw, device = process_device_settings(
+        y_train, num_chains, num_chain_devices, num_data_devices, devices
+    )
+
+    kw: dict = dict(
+        X=x_train,
+        y=y_train,
+        outcome_type=outcome_type,
+        offset=offset,
+        error_scale=w,
+        missing=missing,
+        max_split=max_split,
+        num_trees=num_trees,
+        p_nonterminal=p_nonterminal,
+        leaf_prior_cov_inv=leaf_prior_cov_inv,
+        error_cov_df=error_cov_df,
+        error_cov_scale=error_cov_scale,
+        min_points_per_decision_node=10,
+        log_s=process_varprob(varprob, max_split),
+        theta=theta,
+        a=a,
+        b=b,
+        rho=rho,
+        sparse_on_at=n_burn // 2 if sparse else None,
+        **device_kw,
+    )
+
+    if rm_const:
+        n_empty = jnp.sum(max_split == 0).item()
+        kw.update(filter_splitless_vars=n_empty)
+
+    kw.update(init_kw)
+
+    state = mcmcstep.init(**kw)
+
+    # put state on device if requested explicitly by the user
+    if device is not None:
+        state = device_put(state, device, donate=True)
+
+    return state
+
+
+def _run_mcmc(
+    mcmc_state: mcmcstep.State,
+    n_save: int,
+    n_burn: int,
+    n_skip: int,
+    printevery: int | None,
+    key: Key[Array, ''],
+    run_mcmc_kw: Mapping,
+) -> RunMCMCResult:
+    # prepare arguments
+    kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
+    kw.update(
+        mcmcloop.make_default_callback(
+            mcmc_state,
+            dot_every=None if printevery is None or printevery == 1 else 1,
+            report_every=printevery,
+        )
+    )
+    kw.update(run_mcmc_kw)
+
+    return run_mcmc(key, mcmc_state, n_save, **kw)
 
 
 @partial(jit, static_argnames='p')

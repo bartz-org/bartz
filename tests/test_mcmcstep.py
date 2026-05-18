@@ -922,8 +922,7 @@ def normalize_spec(
     array_size = math.prod(shape)
     for i in range(ndim):
         if s[i] is not None:
-            j = mesh.axis_names.index(s[i])
-            mesh_size = mesh.axis_sizes[j]
+            mesh_size = mesh.shape[s[i]]
             if mesh_size == 1 or array_size == 0:
                 s[i] = None
 

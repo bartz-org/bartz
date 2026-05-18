@@ -49,9 +49,12 @@ from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree, Shaped, UInt
+from numpy import ndarray
 
 from bartz.grove import tree_depths
 from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
+
+ArrayLike = Array | ndarray
 
 
 class OutcomeType(Enum):
@@ -382,11 +385,11 @@ def _init_shape_shifting_parameters(
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | list[OutcomeType],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
-    error_scale: Float32[Any, ' n'] | Float32[Any, 'k n'] | None,
-    error_cov_df: float | Float32[Any, ''] | None,
-    error_cov_scale: float | Float32[Any, ''] | Float32[Any, 'k k'] | None,
+    error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None,
+    error_cov_df: float | Float32[ArrayLike, ''] | None,
+    error_cov_scale: float | Float32[ArrayLike, ''] | Float32[ArrayLike, 'k k'] | None,
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
-    missing: Bool[Any, ' n'] | Bool[Any, 'k n'] | None,
+    missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
 ) -> tuple[
     bool,
     tuple[()] | tuple[int],
@@ -532,7 +535,7 @@ def _parse_outcome_type(
 
 
 def _parse_p_nonterminal(
-    p_nonterminal: Float32[Any, ' d_minus_1'],
+    p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
 ) -> Float32[Array, ' d_minus_1+1']:
     """Check it's in (0, 1) and pad with a 0 at the end."""
     p_nonterminal = jnp.asarray(p_nonterminal)
@@ -596,32 +599,35 @@ class _LazyArray(Module):
 
 def init(
     *,
-    X: UInt[Any, 'p n'],
-    y: Float32[Any, ' n'] | Float32[Any, ' k n'],
+    X: UInt[ArrayLike, 'p n'],
+    y: Float32[ArrayLike, ' n'] | Float32[ArrayLike, ' k n'],
     outcome_type: OutcomeType | str | Sequence[OutcomeType | str] = 'continuous',
-    offset: float | Float32[Any, ''] | Float32[Any, ' k'],
-    max_split: UInt[Any, ' p'],
+    offset: float | Float32[ArrayLike, ''] | Float32[ArrayLike, ' k'],
+    max_split: UInt[ArrayLike, ' p'],
     num_trees: int,
-    p_nonterminal: Float32[Any, ' d_minus_1'],
-    leaf_prior_cov_inv: float | Float32[Any, ''] | Float32[Array, 'k k'],
-    error_cov_df: float | Float32[Any, ''] | None = None,
-    error_cov_scale: float | Float32[Any, ''] | Float32[Array, 'k k'] | None = None,
-    error_scale: Float32[Any, ' n'] | Float32[Any, 'k n'] | None = None,
-    missing: Bool[Any, ' n'] | Bool[Any, 'k n'] | None = None,
-    min_points_per_decision_node: int | Integer[Any, ''] | None = None,
+    p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
+    leaf_prior_cov_inv: float | Float32[ArrayLike, ''] | Float32[ArrayLike, 'k k'],
+    error_cov_df: float | Float32[ArrayLike, ''] | None = None,
+    error_cov_scale: float
+    | Float32[ArrayLike, '']
+    | Float32[ArrayLike, 'k k']
+    | None = None,
+    error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
+    missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
+    min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
     resid_num_batches: int | None | Literal['auto'] = 'auto',
     count_num_batches: int | None | Literal['auto'] = 'auto',
     prec_num_batches: int | None | Literal['auto'] = 'auto',
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
-    min_points_per_leaf: int | Integer[Any, ''] | None = None,
-    log_s: Float32[Any, ' p'] | None = None,
-    theta: float | Float32[Any, ''] | None = None,
-    a: float | Float32[Any, ''] | None = None,
-    b: float | Float32[Any, ''] | None = None,
-    rho: float | Float32[Any, ''] | None = None,
-    sparse_on_at: int | Integer[Any, ''] | None = None,
+    min_points_per_leaf: int | Integer[ArrayLike, ''] | None = None,
+    log_s: Float32[ArrayLike, ' p'] | None = None,
+    theta: float | Float32[ArrayLike, ''] | None = None,
+    a: float | Float32[ArrayLike, ''] | None = None,
+    b: float | Float32[ArrayLike, ''] | None = None,
+    rho: float | Float32[ArrayLike, ''] | None = None,
+    sparse_on_at: int | Integer[ArrayLike, ''] | None = None,
     num_chains: int | None = None,
     mesh: Mesh | dict[str, int] | None = None,
     target_platform: Literal['cpu', 'gpu'] | None = None,

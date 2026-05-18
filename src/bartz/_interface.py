@@ -70,6 +70,7 @@ from bartz.jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
 from bartz.mcmcstep._state import (
+    ArrayLike,
     _inv_via_chol_with_gersh,
     chol_with_gersh,
     get_num_chains,
@@ -82,7 +83,6 @@ from bartz.prepcovars import (
     _sigma2_from_ols,
 )
 
-ArrayLike = Array | ndarray
 FloatLike = float | Float[ArrayLike, '']
 
 CG_MAXITER = 20
@@ -478,11 +478,11 @@ class Bart(Module):
 
     def predict(
         self,
-        x_test: Real[Array, 'p m'] | DataFrame | str,
+        x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
         *,
         kind: PredictKind | str = 'mean',
         key: Key[Array, ''] | None = None,
-        w: Float[Array, ' m'] | Float[Array, 'k m'] | Series | None = None,
+        w: Float[ArrayLike, ' m'] | Float[ArrayLike, 'k m'] | Series | None = None,
     ) -> (
         Float32[Array, ' m']
         | Float32[Array, 'k m']
@@ -755,9 +755,9 @@ class Bart(Module):
 
     def _process_w_test(
         self,
-        x_test: Real[Array, 'p m'] | DataFrame | str,
+        x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
         kind: PredictKind,
-        w: Float[Array, ' m'] | Float[Array, 'k m'] | Series | None,
+        w: Float[ArrayLike, ' m'] | Float[ArrayLike, 'k m'] | Series | None,
     ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
         """Validate and resolve the error weights for prediction.
 
@@ -827,7 +827,7 @@ class Bart(Module):
 
     def _process_x_test(
         self,
-        x_test: Real[Array, 'p m'] | DataFrame | str,
+        x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
         w: Float32[Array, ' m'] | None,
     ) -> UInt[Array, 'p m']:
         """Convert x_test to binned format suitable for prediction."""
@@ -848,7 +848,7 @@ class Bart(Module):
 
     @staticmethod
     def _process_predictor_input(
-        x: Real[Any, 'p n'] | DataFrame,
+        x: Real[ArrayLike, 'p n'] | DataFrame,
     ) -> tuple[Shaped[Array, 'p n'], Any]:
         if hasattr(x, 'columns'):
             fmt = dict(kind='dataframe', columns=x.columns)
@@ -861,7 +861,7 @@ class Bart(Module):
 
     @staticmethod
     def _process_response_input(
-        y: Shaped[Array, ' n'] | Shaped[Array, 'k n'] | Series,
+        y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series,
     ) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
         if hasattr(y, 'to_numpy'):
             y = y.to_numpy()
@@ -1083,7 +1083,7 @@ class Bart(Module):
     def _process_offset_settings(
         y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
         binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-        offset: float | Float32[Any, ''] | Float32[Any, ' k'] | None,
+        offset: float | Float32[ArrayLike, ''] | Float32[ArrayLike, ' k'] | None,
     ) -> Float32[Array, ''] | Float32[Array, ' k']:
         """Return offset."""
         if offset is not None:
@@ -1147,7 +1147,7 @@ class Bart(Module):
         a: FloatLike | None,
         b: FloatLike | None,
         rho: FloatLike | None,
-        varprob: Float[Any, ' p'] | None,
+        varprob: Float[ArrayLike, ' p'] | None,
         num_chains: int | None,
         num_chain_devices: int | None | Literal['auto'],
         num_data_devices: int | None,
@@ -1529,7 +1529,7 @@ def _determine_mesh(
 
 
 def process_varprob(
-    varprob: Float[Any, ' p'] | None, max_split: UInt[Array, ' p']
+    varprob: Float[ArrayLike, ' p'] | None, max_split: UInt[Array, ' p']
 ) -> Float32[Array, ' p'] | None:
     """Convert varprob to log_s."""
     if varprob is None:

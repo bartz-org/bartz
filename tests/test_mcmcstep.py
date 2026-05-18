@@ -24,10 +24,10 @@
 
 """Test `bartz.mcmcstep`."""
 
+import math
 from collections.abc import Sequence
 from dataclasses import replace
 from functools import partial, wraps
-from math import prod
 from typing import Literal, NamedTuple
 
 import jax
@@ -687,7 +687,7 @@ class TestMultichain:
             mesh = None
         else:
             targets = dict(chains=num_chains, data=self.n)
-            while prod(mesh.values()) > get_device_count():
+            while math.prod(mesh.values()) > get_device_count():
                 for key in mesh:
                     if mesh[key] > 1:
                         mesh[key] -= 1
@@ -905,7 +905,7 @@ def normalize_spec(
     assert len(s) <= ndim
     s.extend([None] * (ndim - len(s)))
 
-    array_size = prod(shape)
+    array_size = math.prod(shape)
     for i in range(ndim):
         if s[i] is not None:
             j = mesh.axis_names.index(s[i])

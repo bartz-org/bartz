@@ -243,7 +243,7 @@ ban-relative-imports = "all"
 "jax.numpy" = "jnp"
 
 [tool.ruff.lint.flake8-import-conventions]
-banned-from = ["jax.random", "jax.lax", "jax.numpy", "jax.tree"]
+banned-from = ["jax.random", "jax.lax", "jax.numpy", "jax.tree", "math"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "jax.lax.reciprocal".msg = "Use jnp.reciprocal"

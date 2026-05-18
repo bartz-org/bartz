@@ -24,7 +24,7 @@
 
 """Debugging utilities. The main functionality is the class `debug_mc_gbart`."""
 
-from math import ceil, log2
+import math
 from re import fullmatch
 
 import numpy
@@ -134,7 +134,7 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
     numcut = jnp.array(numcut.astype(split_dtype))
 
     # determine minimum heap size to store the trees
-    heap_size = 2 ** ceil(log2(max_heap_index + 1))
+    heap_size = 2 ** math.ceil(math.log2(max_heap_index + 1))
 
     return BARTTraceMeta(ndpost=ndpost, ntree=ntree, numcut=numcut, heap_size=heap_size)
 

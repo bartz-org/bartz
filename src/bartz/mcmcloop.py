@@ -27,9 +27,9 @@
 The entry points are `run_mcmc` and `make_default_callback`.
 """
 
+import math
 from collections.abc import Callable
 from functools import partial, update_wrapper, wraps
-from math import floor
 from typing import Any, NamedTuple, Protocol, TypeVar
 
 import jax
@@ -797,7 +797,9 @@ def evaluate_trace(
         + out_size
     )
     core_int_size = (num_trees - 1) * out_size
-    max_io_nbytes = max(1, floor(max_io_nbytes / (1 + core_int_size / core_io_size)))
+    max_io_nbytes = max(
+        1, math.floor(max_io_nbytes / (1 + core_int_size / core_io_size))
+    )
 
     # batch over mcmc samples
     batched_eval = autobatch(

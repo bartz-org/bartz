@@ -74,3 +74,11 @@ repos:
         language: pygrep
         entry: '\blamda\b'
         types: [python]
+      - id: forbid-jaxext-qualified-call
+        name: forbid `_jaxext.foo(...)` (use `from bartz._jaxext import foo`)
+        language: pygrep
+        # lookbehind `(?<!\.)` allows module paths like `bartz._jaxext.foo`;
+        # the trailing `\(` limits matches to function calls so docstrings that
+        # mention `_jaxext.foo` are not flagged.
+        entry: '(?<!\.)\b_jaxext\.\w+\s*\('
+        types: [python]

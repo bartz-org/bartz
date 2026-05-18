@@ -62,8 +62,8 @@ from jaxtyping import (
     UInt,
 )
 
-from bartz import _jaxext, mcmcstep
-from bartz._jaxext import autobatch, jit_active
+from bartz import mcmcstep
+from bartz._jaxext import autobatch, jit_active, split
 from bartz.grove import (
     TreeHeaps,
     TreesTrace,
@@ -427,7 +427,7 @@ def _run_mcmc_inner_loop(
     def body(carry: _Carry) -> _Carry:
         """Update the MCMC state."""
         # split random key
-        keys = _jaxext.split(carry.key, 3)
+        keys = split(carry.key, 3)
         key = keys.pop()
 
         # update state

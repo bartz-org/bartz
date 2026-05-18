@@ -56,8 +56,14 @@ from pytest_subtests import SubTests
 from scipy.stats import invgamma as scipy_invgamma
 from scipy.stats import ks_1samp, truncnorm
 
-from bartz import _jaxext
-from bartz._jaxext import equal_shards, split
+from bartz._jaxext import (
+    autobatch,
+    equal_shards,
+    is_key,
+    split,
+    truncated_normal_onesided,
+    unique,
+)
 from bartz._jaxext.scipy.special import ndtri as patched_ndtri
 from bartz._jaxext.scipy.stats import invgamma
 from tests.util import assert_allclose, assert_array_equal, assert_close_matrices
@@ -69,7 +75,7 @@ class TestUnique:
     def test_sort(self) -> None:
         """Check that it's equivalent to sort if no values are repeated."""
         x = jnp.arange(10)[::-1]
-        out, length = _jaxext.unique(x, x.size, 666)
+        out, length = unique(x, x.size, 666)
         assert_array_equal(jnp.sort(x), out)
         assert out.dtype == x.dtype
         assert length == x.size
@@ -77,7 +83,7 @@ class TestUnique:
     def test_fill(self) -> None:
         """Check that the trailing fill value is used correctly."""
         x = jnp.ones(10)
-        out, length = _jaxext.unique(x, x.size, 666)
+        out, length = unique(x, x.size, 666)
         assert_array_equal(jnp.asarray([1.0] + 9 * [666.0]), out)
         assert out.dtype == x.dtype
         assert length == 1
@@ -85,7 +91,7 @@ class TestUnique:
     def test_empty_input(self) -> None:
         """Check that the function works on empty input."""
         x = jnp.array([])
-        out, length = _jaxext.unique(x, 2, 666)
+        out, length = unique(x, 2, 666)
         assert_array_equal(jnp.asarray([666.0, 666.0]), out)
         assert out.dtype == x.dtype
         assert length == 0
@@ -93,7 +99,7 @@ class TestUnique:
     def test_empty_output(self) -> None:
         """Check that the function works if the output is forced to be empty."""
         x = jnp.array([1, 1, 1])
-        out, length = _jaxext.unique(x, 0, 666)
+        out, length = unique(x, 0, 666)
         assert_array_equal(jnp.zeros(0, dtype=x.dtype), out)
         assert out.dtype == x.dtype
         assert length == 0
@@ -129,12 +135,10 @@ class TestAutoBatch:
         assert atomic_batch_size == a.shape[1] + 1 + c.shape[0] + 1 + c.shape[0]
 
         batch_nbytes = batch_size * a.itemsize
-        batched_func = _jaxext.autobatch(
+        batched_func = autobatch(
             func, batch_nbytes, (0, 0, 1), (0, 1), return_nbatches=True
         )
-        batched_func_nobatches = _jaxext.autobatch(
-            func, batch_nbytes, (0, 0, 1), (0, 1)
-        )
+        batched_func_nobatches = autobatch(func, batch_nbytes, (0, 0, 1), (0, 1))
 
         out1 = func(a, b, c)
         out2, nbatches = batched_func(a, b, c)
@@ -155,7 +159,7 @@ class TestAutoBatch:
         def func(a: Shaped[Array, ' n'], b: int) -> Shaped[Array, ' n']:
             return a + b
 
-        batched_func = _jaxext.autobatch(func, max_memory, (0, None))
+        batched_func = autobatch(func, max_memory, (0, None))
 
         a = jnp.arange(100)
         b = 2
@@ -171,7 +175,7 @@ class TestAutoBatch:
         def func(a: int, b: dict[str, Shaped[Array, ' n']]) -> Shaped[Array, ' n']:
             return a + b['foo'] + b['bar']
 
-        batched_func = _jaxext.autobatch(func, 32, (None, 0))
+        batched_func = autobatch(func, 32, (None, 0))
 
         a = 2
         b = dict(foo=jnp.arange(100), bar=jnp.arange(100))
@@ -188,7 +192,7 @@ class TestAutoBatch:
         def f(x: Shaped[Array, 'n m']) -> Shaped[Array, 'n m']:
             return x
 
-        g = _jaxext.autobatch(f, 100)
+        g = autobatch(f, 100)
         with pytest.warns(UserWarning, match=' > max_io_nbytes = '):
             g(x)
 
@@ -199,7 +203,7 @@ class TestAutoBatch:
         def f(x: Shaped[Array, 'n m']) -> Shaped[Array, 'n m']:
             return x
 
-        g = _jaxext.autobatch(f, 100, return_nbatches=True)
+        g = autobatch(f, 100, return_nbatches=True)
         y, nbatches = g(x)
         assert nbatches == 1
         assert jnp.all(y == x)
@@ -211,7 +215,7 @@ class TestAutoBatch:
         def f(x: Shaped[Array, 'n m']) -> Shaped[Array, 'n m']:
             return x
 
-        g = _jaxext.autobatch(f, 100, return_nbatches=True)
+        g = autobatch(f, 100, return_nbatches=True)
         y, nbatches = g(x)
         assert nbatches == 1
         assert jnp.all(y == x)
@@ -282,7 +286,7 @@ class TestAutoBatch:
 
                 expected = tree.map(partial(reduction, axis=axis), func(*args))
 
-                batched_func = _jaxext.autobatch(
+                batched_func = autobatch(
                     func,
                     max_io_nbytes,
                     axis,
@@ -315,7 +319,7 @@ class TestAutoBatch:
         scalar = 3.0
         expected = func(x, scalar).sum(axis=0)
 
-        batched_func = _jaxext.autobatch(func, 100, (0, None), 0, reduce_ufunc=jnp.add)
+        batched_func = autobatch(func, 100, (0, None), 0, reduce_ufunc=jnp.add)
         result = batched_func(x, scalar)
 
         assert result.shape == (8,)
@@ -330,7 +334,7 @@ class TestAutoBatch:
         x = random.uniform(keys.pop(), (100, 10))
         expected = x.sum(axis=0)
 
-        batched_func = _jaxext.autobatch(
+        batched_func = autobatch(
             func, 200, 0, 0, return_nbatches=True, reduce_ufunc=jnp.add
         )
         result, nbatches = batched_func(x)
@@ -350,7 +354,7 @@ def different_keys(keya: Key[Array, ''], keyb: Key[Array, '']) -> bool:
 def test_split(keys: split) -> None:
     """Test _jaxext.split."""
     key = keys.pop()
-    ks = _jaxext.split(key, 3)
+    ks = split(key, 3)
 
     assert len(ks) == 3
     key1 = ks.pop()
@@ -370,7 +374,7 @@ def test_split(keys: split) -> None:
     assert different_keys(key1, key3)
     assert different_keys(key2, key3)
 
-    ks = _jaxext.split(random.clone(key), 3)
+    ks = split(random.clone(key), 3)
     key1a = ks.pop()
     key2a = ks.pop(2)
     key3a = ks.pop()
@@ -379,12 +383,12 @@ def test_split(keys: split) -> None:
     assert not different_keys(random.split(key2), key2a)
     assert not different_keys(key3, key3a)
 
-    ks = _jaxext.split(keys.pop(), 1)
+    ks = split(keys.pop(), 1)
     key = ks.pop((2, 3, 5))
     assert key.shape == (2, 3, 5)
     assert len(ks) == 0
 
-    ks = _jaxext.split(keys.pop())
+    ks = split(keys.pop())
     assert len(ks) == 2
 
 
@@ -443,7 +447,7 @@ class TestTruncatedNormalOneSided:
         nsamples = 1000
         upper = random.bernoulli(keys.pop(), 0.5, (nparams,))
         bound = random.uniform(keys.pop(), (nparams,), float, -10, 10)
-        x = _jaxext.truncated_normal_onesided(
+        x = truncated_normal_onesided(
             keys.pop(), (nparams, nsamples), upper[:, None], bound[:, None]
         )
         for sample, u, b in zip(x, upper, bound, strict=True):
@@ -454,13 +458,9 @@ class TestTruncatedNormalOneSided:
 
     def test_accurate(self, keys: split) -> None:
         """Check that it does not over/under shoot."""
-        x = _jaxext.truncated_normal_onesided(
-            keys.pop(), (), jnp.bool_(True), jnp.float32(-12)
-        )
+        x = truncated_normal_onesided(keys.pop(), (), jnp.bool_(True), jnp.float32(-12))
         assert -12.1 <= x < -12
-        x = _jaxext.truncated_normal_onesided(
-            keys.pop(), (), jnp.bool_(False), jnp.float32(12)
-        )
+        x = truncated_normal_onesided(keys.pop(), (), jnp.bool_(False), jnp.float32(12))
         assert 12 < x <= 12.1
 
     def test_finite(self, keys: split) -> None:
@@ -480,9 +480,7 @@ class TestTruncatedNormalOneSided:
             keys = split(key, 3)
             upper = random.bernoulli(keys.pop(), 0.5, shape)
             bound = random.uniform(keys.pop(), shape, float, -1, 1)
-            return _jaxext.truncated_normal_onesided(
-                keys.pop(), shape, upper, bound, clip=clip
-            )
+            return truncated_normal_onesided(keys.pop(), shape, upper, bound, clip=clip)
 
         for key in keys:
             vals = loop_body(key)
@@ -493,26 +491,26 @@ def test_is_key(keys: split) -> None:
     """Test _jaxext.is_key."""
     # JAX keys should be recognized
     key = keys.pop()
-    assert _jaxext.is_key(key)
+    assert is_key(key)
 
     # Array of keys should be recognized
-    assert _jaxext.is_key(keys.pop((2, 5)))
+    assert is_key(keys.pop((2, 5)))
 
     # Non-JAX objects should not be recognized
-    assert not _jaxext.is_key(42)
-    assert not _jaxext.is_key(3.14)
-    assert not _jaxext.is_key('not a key')
-    assert not _jaxext.is_key(None)
-    assert not _jaxext.is_key([1, 2, 3])
-    assert not _jaxext.is_key({'a': 1})
+    assert not is_key(42)
+    assert not is_key(3.14)
+    assert not is_key('not a key')
+    assert not is_key(None)
+    assert not is_key([1, 2, 3])
+    assert not is_key({'a': 1})
 
     # JAX arrays that are not keys should not be recognized
-    assert not _jaxext.is_key(jnp.array([1, 2, 3]))
-    assert not _jaxext.is_key(jnp.zeros((2,), dtype=jnp.uint32))
-    assert not _jaxext.is_key(jnp.ones(()))
+    assert not is_key(jnp.array([1, 2, 3]))
+    assert not is_key(jnp.zeros((2,), dtype=jnp.uint32))
+    assert not is_key(jnp.ones(()))
 
     # NumPy arrays should not be recognized
-    assert not _jaxext.is_key(numpy.array([1, 2, 3]))
+    assert not is_key(numpy.array([1, 2, 3]))
 
 
 def make_broken_replicated_array(x: Array, axis_name: str, mesh: Mesh) -> Array:

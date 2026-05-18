@@ -834,6 +834,7 @@ def init(
         prec_count_num_trees,
         y,
         num_trees,
+        num_chains,
         mesh,
         target_platform,
     )
@@ -1232,19 +1233,23 @@ def _parse_reduction_configs(
     prec_count_num_trees: int | None | Literal['auto'],
     y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'],
     num_trees: int,
+    num_chains: int | None,
     mesh: Mesh | None,
     target_platform: Literal['cpu', 'gpu'] | None,
 ) -> _ReductionConfig:
     """Determine settings for indexed reduces."""
     n = y.shape[-1]
     n //= get_axis_size(mesh, 'data')  # per-device datapoints
+    # chains are vmapped together on each device, so they share the per-step
+    # memory of the per-tree reduction
+    chains_per_device = (num_chains or 1) // get_axis_size(mesh, 'chains')
     parse_num_batches = partial(_parse_num_batches, target_platform, n)
     return dict(
         resid_num_batches=parse_num_batches(resid_num_batches, 'resid'),
         count_num_batches=parse_num_batches(count_num_batches, 'count'),
         prec_num_batches=parse_num_batches(prec_num_batches, 'prec'),
         prec_count_num_trees=_parse_prec_count_num_trees(
-            prec_count_num_trees, num_trees, n
+            prec_count_num_trees, num_trees, n * chains_per_device
         ),
     )
 

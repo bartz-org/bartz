@@ -339,6 +339,7 @@ class Bart(Module):
     _binner: Binner
     _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
     _w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
+    # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
     _x_train_fmt: Any = field(static=True)
 
     offset: Float32[Array, ''] | Float32[Array, ' k']

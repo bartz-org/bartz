@@ -53,6 +53,7 @@ from jax import (
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh, PartitionSpec
+from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
@@ -352,7 +353,10 @@ class Bart(Module):
     def __init__(
         self,
         x_train: Real[ArrayLike, 'p n'] | DataFrame,
-        y_train: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | Series,
+        y_train: Float32[ArrayLike, ' n']
+        | Float32[ArrayLike, 'k n']
+        | Series
+        | DataFrame,
         *,
         outcome_type: OutcomeType | str | Sequence[OutcomeType | str] = 'continuous',
         sparse: bool = False,
@@ -374,8 +378,16 @@ class Bart(Module):
         lambda_: FloatLike | Float[ArrayLike, ' k'] | None = None,
         tau_num: FloatLike | None = None,
         offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
-        w: Float[ArrayLike, ' n'] | Float[ArrayLike, 'k n'] | Series | None = None,
-        missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
+        w: Float[ArrayLike, ' n']
+        | Float[ArrayLike, 'k n']
+        | Series
+        | DataFrame
+        | None = None,
+        missing: Bool[ArrayLike, ' n']
+        | Bool[ArrayLike, 'k n']
+        | Series
+        | DataFrame
+        | None = None,
         num_trees: int = 200,
         n_save: int = 1000,
         n_burn: int = 1000,
@@ -401,8 +413,8 @@ class Bart(Module):
             w, self._w = _process_response_input(w, keep=True)
             _check_same_length(x_train, w)
 
-        missing = _process_missing_input(missing)
         if missing is not None:
+            missing = _process_response_input(missing, dtype=jnp.bool_)
             _check_same_length(x_train, missing)
 
         # check data types are correct for continuous/binary/multivariate regression
@@ -491,7 +503,11 @@ class Bart(Module):
         *,
         kind: PredictKind | str = 'mean',
         key: Key[Array, ''] | None = None,
-        w: Float[ArrayLike, ' m'] | Float[ArrayLike, 'k m'] | Series | None = None,
+        w: Float[ArrayLike, ' m']
+        | Float[ArrayLike, 'k m']
+        | Series
+        | DataFrame
+        | None = None,
     ) -> (
         Float32[Array, ' m']
         | Float32[Array, 'k m']
@@ -750,7 +766,7 @@ class Bart(Module):
         self,
         x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
         kind: PredictKind,
-        w: Float[ArrayLike, ' m'] | Float[ArrayLike, 'k m'] | Series | None,
+        w: Float[ArrayLike, ' m'] | Float[ArrayLike, 'k m'] | Series | DataFrame | None,
     ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
         """Validate and resolve the error weights for prediction.
 
@@ -1130,56 +1146,52 @@ def _process_predictor_input(
 
 @overload
 def _process_response_input(
-    y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series,
+    y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
     *,
     keep: Literal[False] = False,
-) -> Float32[Array, ' n'] | Float32[Array, 'k n']: ...
+    dtype: DTypeLike = jnp.float32,
+) -> Shaped[Array, ' n'] | Shaped[Array, 'k n']: ...
 
 
 @overload
 def _process_response_input(
-    y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series,
+    y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
     *,
     keep: Literal[True],
+    dtype: DTypeLike = jnp.float32,
 ) -> tuple[
-    Float32[Array, ' n'] | Float32[Array, 'k n'],
-    Float32[Array, ' n'] | Float32[Array, 'k n'],
+    Shaped[Array, ' n'] | Shaped[Array, 'k n'],
+    Shaped[Array, ' n'] | Shaped[Array, 'k n'],
 ]: ...
 
 
 def _process_response_input(
-    y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series,
+    arr: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
     *,
     keep: bool = False,
+    dtype: DTypeLike = jnp.float32,
 ) -> (
-    Float32[Array, ' n']
-    | Float32[Array, 'k n']
+    Shaped[Array, ' n']
+    | Shaped[Array, 'k n']
     | tuple[
-        Float32[Array, ' n'] | Float32[Array, 'k n'],
-        Float32[Array, ' n'] | Float32[Array, 'k n'],
+        Shaped[Array, ' n'] | Shaped[Array, 'k n'],
+        Shaped[Array, ' n'] | Shaped[Array, 'k n'],
     ]
 ):
-    if hasattr(y, 'to_numpy'):
-        y = y.to_numpy()
+    if hasattr(arr, 'columns'):
+        arr = arr.to_numpy().T
+    elif hasattr(arr, 'to_numpy'):
+        arr = arr.to_numpy()
     # in normal mode: one unconditional copy, safe to donate downstream.
     # in `keep` mode: convert without copying when possible to get the
     # keep array, then `jnp.copy` to make a separate disposable copy.
-    y = jnp.array(y, jnp.float32, copy=not keep)
-    if y.ndim < 1 or y.ndim > 2:
-        msg = f'y_train must be 1D (n,) or 2D (k, n). Got {y.ndim=}.'
+    arr = jnp.array(arr, dtype, copy=not keep)
+    if arr.ndim < 1 or arr.ndim > 2:
+        msg = f'response-like input must be 1D (n,) or 2D (k, n). Got {arr.ndim=}.'
         raise ValueError(msg)
     if keep:
-        return jnp.copy(y), y
-    return y
-
-
-def _process_missing_input(
-    missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
-) -> Bool[Array, ' n'] | Bool[Array, 'k n'] | None:
-    if missing is None:
-        return None
-    # see comment in `_process_response_input` about copying
-    return jnp.array(missing, jnp.bool_)
+        return jnp.copy(arr), arr
+    return arr
 
 
 def _check_same_length(x1: Array, x2: Array) -> None:

@@ -82,6 +82,7 @@ from tests.util import (
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
+    assert_different_matrices,
     manual_tree,
 )
 
@@ -951,6 +952,58 @@ def check_same_structure(x: PyTree, y: PyTree) -> None:
         )
 
     tree.map_with_path(check, x, y)
+
+
+def test_z_differs_across_data_shards(keys: split) -> None:
+    """Check `step_z` produces independent z per data shard.
+
+    With (X, y) replicated across data shards, the only source of variation
+    between shards is the random key. Guards the
+    `random.fold_in(key, axis_index('data'))` call in `step_z`: without it
+    the same key reaches every shard and, since the local data is
+    identical, the truncated normal draw would be the same on every shard.
+    """
+    num_data_shards = min(4, get_device_count())
+    if num_data_shards < 2:
+        pytest.skip('need at least 2 devices for the data axis')
+
+    n_per_shard = 20
+    p = 5
+    numcut = 10
+    num_trees = 5
+
+    X_one = random.randint(keys.pop(), (p, n_per_shard), 0, numcut + 1, jnp.uint32)
+    y_one = random.bernoulli(keys.pop(), 0.5, (n_per_shard,)).astype(jnp.float32)
+
+    X = jnp.tile(X_one, (1, num_data_shards))
+    y = jnp.tile(y_one, num_data_shards)
+    max_split = jnp.full(p, numcut + 1, jnp.uint32)
+
+    state = init(
+        X=X,
+        y=y,
+        outcome_type='binary',
+        offset=jnp.float32(0.0),
+        max_split=max_split,
+        num_trees=num_trees,
+        p_nonterminal=jnp.full(5, 0.9),
+        leaf_prior_cov_inv=jnp.float32(num_trees),
+        mesh={'data': num_data_shards},
+    )
+
+    new_state = step(keys.pop(), state)
+
+    assert new_state.z is not None
+    z_per_shard = new_state.z.reshape(num_data_shards, n_per_shard)
+    for i in range(num_data_shards):
+        for j in range(i + 1, num_data_shards):
+            assert_different_matrices(
+                z_per_shard[i],
+                z_per_shard[j],
+                rtol=0.5,
+                atol=0,
+                err_msg=f'shards {i} and {j} produced similar z\n',
+            )
 
 
 class TestMixedBinaryContinuous:

@@ -34,24 +34,25 @@ from typing import Any, Literal, TypedDict, TypeVar
 import numpy
 from equinox import Module, error_if, filter_jit
 from equinox import field as eqx_field
-from jax import (
-    NamedSharding,
-    device_put,
-    eval_shape,
-    jit,
-    lax,
-    make_mesh,
-    random,
-    tree,
-    vmap,
-)
+from jax import NamedSharding, device_put, jit, lax, make_mesh, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
-from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, PyTree, Shaped, UInt
+from jaxtyping import (
+    Array,
+    Bool,
+    Float,
+    Float32,
+    Int32,
+    Integer,
+    Key,
+    PyTree,
+    Shaped,
+    UInt,
+)
 from numpy import ndarray
 
-from bartz._jaxext import get_default_device, is_key, minimal_unsigned_dtype
+from bartz._jaxext import get_default_device, minimal_unsigned_dtype
 from bartz.grove import tree_depths
 
 ArrayLike = Array | ndarray
@@ -1373,79 +1374,29 @@ def get_num_chains(x: PyTree) -> int | None:
     return ref
 
 
-def _chain_axes_with_keys(x: PyTree) -> PyTree[int | None]:
-    """Return `chain_vmap_axes(x)` but also set to 0 for random keys."""
-    axes = chain_vmap_axes(x)
+def vmap_chains(
+    fun: Callable[[Key[Array, ''], State], State],
+) -> Callable[[Key[Array, ''], State], State]:
+    """Vmap a ``(key, state) -> state`` function over chain axes.
 
-    def axis_if_key(x: object, axis: int | None) -> int | None:
-        if is_key(x):
-            return 0
-        else:
-            return axis
-
-    return tree.map(axis_if_key, x, axes)
-
-
-def _get_mc_out_axes(
-    fun: Callable[[tuple, dict], PyTree], args: PyTree, in_axes: PyTree[int | None]
-) -> PyTree[int | None]:
-    """Decide chain vmap axes for outputs."""
-    vmapped_fun = vmap(fun, in_axes=in_axes)
-    out = eval_shape(vmapped_fun, *args)
-    return chain_vmap_axes(out)
-
-
-def _find_mesh(x: PyTree) -> Mesh | None:
-    """Find the mesh used for chains."""
-
-    class MeshFound(Exception):
-        pass
-
-    def find_mesh(x: object) -> None:
-        if isinstance(x, State):
-            raise MeshFound(x.config.mesh)
-
-    try:
-        tree.map(find_mesh, x, is_leaf=lambda x: isinstance(x, State))
-    except MeshFound as e:
-        return e.args[0]
-    else:
-        raise ValueError
-
-
-def _split_all_keys(x: PyTree, num_chains: int) -> PyTree:
-    """Split all random keys in `num_chains` keys."""
-    mesh = _find_mesh(x)
-
-    def split_key(x: object) -> object:
-        if is_key(x):
-            x = random.split(x, num_chains)
-            if mesh is not None and 'chains' in mesh.axis_names:
-                x = device_put(x, NamedSharding(mesh, PartitionSpec('chains')))
-        return x
-
-    return tree.map(split_key, x)
-
-
-def vmap_chains(fun: Callable[..., T]) -> Callable[..., T]:
-    """Apply vmap on chain axes automatically if the inputs are multichain."""
+    If the input state is multichain, the random key is split per chain and
+    `fun` is vmapped over the chain axes. The output is assumed to share the
+    chain layout of the input state.
+    """
 
     @wraps(fun)
-    def auto_vmapped_fun(*args: Any, **kwargs: Any) -> T:
-        all_args = args, kwargs
-        num_chains = get_num_chains(all_args)
-        if num_chains is not None:
-            all_args = _split_all_keys(all_args, num_chains)
+    def auto_vmapped_fun(key: Key[Array, ''], state: State) -> State:
+        num_chains = get_num_chains(state)
+        if num_chains is None:
+            return fun(key, state)
 
-            def wrapped_fun(args: tuple[Any, ...], kwargs: dict[str, Any]) -> T:
-                return fun(*args, **kwargs)
+        state_axes = chain_vmap_axes(state)
+        keys = random.split(key, num_chains)
+        mesh = state.config.mesh
+        if mesh is not None and 'chains' in mesh.axis_names:
+            keys = device_put(keys, NamedSharding(mesh, PartitionSpec('chains')))
 
-            mc_in_axes = _chain_axes_with_keys(all_args)
-            mc_out_axes = _get_mc_out_axes(wrapped_fun, all_args, mc_in_axes)
-            vmapped_fun = vmap(wrapped_fun, in_axes=mc_in_axes, out_axes=mc_out_axes)
-            return vmapped_fun(*all_args)
-
-        else:
-            return fun(*args, **kwargs)
+        vmapped_fun = vmap(fun, in_axes=(0, state_axes), out_axes=state_axes)
+        return vmapped_fun(keys, state)
 
     return auto_vmapped_fun

@@ -30,8 +30,8 @@ from jax import jit
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Integer, UInt
 
+from bartz._jaxext import autobatch, minimal_unsigned_dtype
 from bartz.grove._grove import TreeHeaps, TreesTrace, is_actual_leaf
-from bartz.jaxext import autobatch, minimal_unsigned_dtype
 
 CHECK_FUNCTIONS = []
 

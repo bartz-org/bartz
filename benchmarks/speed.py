@@ -42,17 +42,17 @@ from jax import (
     eval_shape,
     jit,
     random,
+    tree,
     vmap,
 )
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.sharding import Mesh
-from jax.tree_util import tree_map
 from jaxtyping import Array, Float32, Integer, Key, UInt8
 
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
-from benchmarks.latest_bartz.jaxext import get_device_count, split
+from benchmarks.latest_bartz._jaxext import get_device_count, split
 
 try:
     from bartz.mcmcstep import State
@@ -512,7 +512,7 @@ class BaseRunMcmc(AutoParamNames):
             case 'warm':
                 # prepare copies of the args because of buffer donation
                 key = jnp.copy(kw['key'])
-                bart = tree_map(jnp.copy, kw['bart'])
+                bart = tree.map(jnp.copy, kw['bart'])
                 self.time_run_mcmc()
                 # put copies in place of donated buffers
                 kw.update(key=key, bart=bart)

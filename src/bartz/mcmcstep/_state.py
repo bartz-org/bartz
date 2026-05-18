@@ -24,11 +24,11 @@
 
 """Module defining the BART MCMC state and initialization."""
 
+import math
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import fields, replace
 from enum import Enum
 from functools import partial, wraps
-from math import log2
 from typing import Any, Literal, TypedDict, TypeVar
 
 import numpy
@@ -51,8 +51,8 @@ from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, PyTree, Shaped, UInt
 from numpy import ndarray
 
+from bartz._jaxext import get_default_device, is_key, minimal_unsigned_dtype
 from bartz.grove import tree_depths
-from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 ArrayLike = Array | ndarray
 
@@ -1273,7 +1273,7 @@ def _final_round(n: int, num: float) -> int | None:
 
     # round to the nearest power of 2 because I guess XLA and the hardware
     # will like that (not sure about this, maybe just multiple of 32?)
-    num = 2 ** round(log2(num)) if num else 0
+    num = 2 ** round(math.log2(num)) if num else 0
 
     # disable batching if the batch is as large as the whole dataset
     return num if num > 1 else None

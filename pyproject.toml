@@ -243,11 +243,22 @@ ban-relative-imports = "all"
 "jax.numpy" = "jnp"
 
 [tool.ruff.lint.flake8-import-conventions]
-banned-from = ["jax.random", "jax.lax", "jax.numpy", "jax.tree"]
+banned-from = ["jax.random", "jax.lax", "jax.numpy", "jax.tree", "math"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "jax.lax.reciprocal".msg = "Use jnp.reciprocal"
 "jax.random.PRNGKey".msg = "User jax.random.key"
+"jax.tree_util.tree_all".msg = "Use jax.tree.all"
+"jax.tree_util.tree_flatten".msg = "Use jax.tree.flatten"
+"jax.tree_util.tree_flatten_with_path".msg = "Use jax.tree.flatten_with_path"
+"jax.tree_util.tree_leaves".msg = "Use jax.tree.leaves"
+"jax.tree_util.tree_leaves_with_path".msg = "Use jax.tree.leaves_with_path"
+"jax.tree_util.tree_map".msg = "Use jax.tree.map"
+"jax.tree_util.tree_map_with_path".msg = "Use jax.tree.map_with_path"
+"jax.tree_util.tree_reduce".msg = "Use jax.tree.reduce"
+"jax.tree_util.tree_structure".msg = "Use jax.tree.structure"
+"jax.tree_util.tree_transpose".msg = "Use jax.tree.transpose"
+"jax.tree_util.tree_unflatten".msg = "Use jax.tree.unflatten"
 "numpy.testing.assert_allclose".msg = "Use tests.util.assert_allclose (zero default tolerances)."
 "numpy.testing.assert_array_equal".msg = "Use tests.util.assert_array_equal (strict=True default)."
 

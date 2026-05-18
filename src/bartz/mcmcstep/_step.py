@@ -42,8 +42,8 @@ from jax.scipy.special import gammaln, logsumexp
 from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, Shaped, UInt, UInt32
 
+from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz.grove import var_histogram
-from bartz.jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz.mcmcstep._moves import Moves, propose_moves
 from bartz.mcmcstep._state import State, StepConfig, chol_with_gersh, field, vmap_chains
 

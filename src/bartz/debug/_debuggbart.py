@@ -27,7 +27,7 @@
 from typing import Any
 
 from jax import numpy as jnp
-from jax.tree_util import tree_map
+from jax import tree
 from jaxtyping import Array, Bool, Float32, Int32, UInt
 
 from bartz.BART import gbart, mc_gbart
@@ -80,9 +80,9 @@ class debug_mc_gbart(mc_gbart):
         print_all
             If `True`, also print the content of unused node slots.
         """
-        tree = TreesTrace.from_dataclass(self._main_trace)
-        tree = tree_map(lambda x: x[i_chain, i_sample, i_tree, :], tree)
-        s = format_tree(tree, print_all=print_all)
+        trees = TreesTrace.from_dataclass(self._main_trace)
+        trees = tree.map(lambda x: x[i_chain, i_sample, i_tree, :], trees)
+        s = format_tree(trees, print_all=print_all)
         print(s)  # noqa: T201, this method is intended for debug
 
     def sigma_harmonic_mean(self, prior: bool = False) -> Float32[Array, ' mc_cores']:

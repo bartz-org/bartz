@@ -27,9 +27,9 @@
 The entry points are `run_mcmc` and `make_default_callback`.
 """
 
+import math
 from collections.abc import Callable
 from functools import partial, update_wrapper, wraps
-from math import floor
 from typing import Any, NamedTuple, Protocol, TypeVar
 
 import jax
@@ -62,7 +62,8 @@ from jaxtyping import (
     UInt,
 )
 
-from bartz import jaxext, mcmcstep
+from bartz import _jaxext, mcmcstep
+from bartz._jaxext import autobatch, jit_active
 from bartz.grove import (
     TreeHeaps,
     TreesTrace,
@@ -70,7 +71,6 @@ from bartz.grove import (
     forest_fill,
     var_histogram,
 )
-from bartz.jaxext import autobatch, jit_active
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size, get_num_chains
 
@@ -427,7 +427,7 @@ def _run_mcmc_inner_loop(
     def body(carry: _Carry) -> _Carry:
         """Update the MCMC state."""
         # split random key
-        keys = jaxext.split(carry.key, 3)
+        keys = _jaxext.split(carry.key, 3)
         key = keys.pop()
 
         # update state
@@ -797,7 +797,9 @@ def evaluate_trace(
         + out_size
     )
     core_int_size = (num_trees - 1) * out_size
-    max_io_nbytes = max(1, floor(max_io_nbytes / (1 + core_int_size / core_io_size)))
+    max_io_nbytes = max(
+        1, math.floor(max_io_nbytes / (1 + core_int_size / core_io_size))
+    )
 
     # batch over mcmc samples
     batched_eval = autobatch(

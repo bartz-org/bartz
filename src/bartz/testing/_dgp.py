@@ -33,7 +33,7 @@ from jax import jit, random
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float, Int, Integer, Key
 
-from bartz.jaxext import split
+from bartz._jaxext import split
 from bartz.mcmcstep import OutcomeType
 
 

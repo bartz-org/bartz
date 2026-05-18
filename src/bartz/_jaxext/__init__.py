@@ -1,4 +1,4 @@
-# bartz/src/bartz/jaxext/__init__.py
+# bartz/src/bartz/_jaxext/__init__.py
 #
 # Copyright (c) 2024-2026, The Bartz Contributors
 #
@@ -52,8 +52,8 @@ from jax.scipy.special import ndtr
 from jax.sharding import PartitionSpec
 from jaxtyping import Array, Bool, Float32, Key, PyTree, Scalar, Shaped
 
-from bartz.jaxext._autobatch import autobatch  # noqa: F401
-from bartz.jaxext.scipy.special import ndtri
+from bartz._jaxext._autobatch import autobatch  # noqa: F401
+from bartz._jaxext.scipy.special import ndtri
 
 
 def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:

@@ -33,7 +33,7 @@ from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
 from bartz import grove
-from bartz.jaxext import minimal_unsigned_dtype, split, vmap_nodoc
+from bartz._jaxext import minimal_unsigned_dtype, split, vmap_nodoc
 from bartz.mcmcstep._state import Forest, field
 
 

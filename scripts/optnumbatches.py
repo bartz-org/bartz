@@ -43,7 +43,7 @@ from jaxtyping import Array, Key
 from polars import DataFrame
 from tqdm import tqdm
 
-from bartz.jaxext import get_default_device
+from bartz._jaxext import get_default_device
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._step import step_trees
 from benchmarks.speed import gen_nonsense_data

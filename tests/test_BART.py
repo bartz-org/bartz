@@ -47,6 +47,7 @@ from numpy.testing import assert_array_less
 from pytest_subtests import SubTests
 
 from bartz import Bart
+from bartz._jaxext import get_default_device, get_device_count, split
 from bartz.BART import mc_gbart as original_mc_gbart
 from bartz.debug import TraceWithOffset, sample_prior, trees_BART_to_bartz
 from bartz.debug import debug_gbart as gbart
@@ -59,7 +60,6 @@ from bartz.grove import (
     tree_depth,
     tree_depths,
 )
-from bartz.jaxext import get_default_device, get_device_count, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes

@@ -35,7 +35,7 @@ from jaxtyping import Array, Bool, Float, Key
 from numpy.testing import assert_array_less
 from scipy.stats import norm
 
-from bartz.jaxext import split
+from bartz._jaxext import split
 from bartz.mcmcstep import OutcomeType
 from bartz.testing import DGP, gen_data
 from bartz.testing._dgp import (

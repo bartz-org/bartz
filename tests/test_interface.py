@@ -63,6 +63,7 @@ from pytest_subtests import SubTests
 
 from bartz import Bart as OriginalBart
 from bartz import PredictKind
+from bartz._jaxext import get_default_device, get_device_count, is_key, split
 from bartz.debug import TraceWithOffset, sample_prior
 from bartz.grove import (
     check_trace,
@@ -72,7 +73,6 @@ from bartz.grove import (
     tree_depth,
     tree_depths,
 )
-from bartz.jaxext import get_default_device, get_device_count, is_key, split
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_vmap_axes

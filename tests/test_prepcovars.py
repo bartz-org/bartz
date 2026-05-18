@@ -32,7 +32,7 @@ import pytest
 from jax import Array, debug_infs, random
 from jax import numpy as jnp
 
-from bartz.jaxext import split
+from bartz._jaxext import split
 from bartz.prepcovars import (
     Binner,
     GivenSplitsBinner,

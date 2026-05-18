@@ -22,7 +22,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Debugging utilities. The main functionality is the class `debug_mc_gbart`."""
+"""Parsing of R BART3 tree traces."""
 
 import math
 from re import fullmatch

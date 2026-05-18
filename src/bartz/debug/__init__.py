@@ -25,13 +25,11 @@
 """
 Debugging utilities.
 
-  - `debug_mc_gbart`: version of `mc_gbart` with debug checks and methods.
   - `trees_BART_to_bartz`: convert an R package BART3 trace to a bartz trace.
   - `sample_prior`: sample the bart prior.
 """
 
 # ruff: noqa: F401
 
-from bartz.debug._debuggbart import debug_gbart, debug_mc_gbart
 from bartz.debug._prior import SamplePriorTrees, sample_prior
 from bartz.debug._traceconv import BARTTraceMeta, TraceWithOffset, trees_BART_to_bartz

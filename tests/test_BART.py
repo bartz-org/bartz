@@ -48,10 +48,9 @@ from pytest_subtests import SubTests
 
 from bartz import Bart
 from bartz._jaxext import get_default_device, get_device_count, split
+from bartz.BART import gbart as original_gbart
 from bartz.BART import mc_gbart as original_mc_gbart
 from bartz.debug import TraceWithOffset, sample_prior, trees_BART_to_bartz
-from bartz.debug import debug_gbart as gbart
-from bartz.debug import debug_mc_gbart as mc_gbart
 from bartz.grove import (
     check_trace,
     forest_depth_distr,
@@ -87,6 +86,27 @@ except ValueError as exc:
     # on PR ci, R is not installed because the tests using it are skipped
     if 'r_home' not in str(exc):
         raise
+
+
+class mc_gbart(original_mc_gbart):
+    """Wrapper that enables debug checks by default."""
+
+    def __init__(
+        self,
+        *args: Any,
+        check_trees: bool = True,
+        check_replicated_trees: bool = True,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        if check_trees:
+            self._bart._check_trees(error=True)
+        if check_replicated_trees:
+            self._bart._check_replicated_trees()
+
+
+class gbart(mc_gbart, original_gbart):
+    """Wrapper of `gbart` that enables debug checks."""
 
 
 def get_with_default(kw: dict, param_name: str) -> Any:  # noqa: ANN401
@@ -271,7 +291,7 @@ class TestWithCachedBart:
 
     def test_residuals_accuracy(self, cachedbart: CachedBart) -> None:
         """Check that running residuals are close to the recomputed final residuals."""
-        accum_resid, actual_resid = cachedbart.bart.compare_resid(
+        accum_resid, actual_resid = cachedbart.bart._bart._compare_resid(
             y=cachedbart.kwargs['y_train']
         )
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4)
@@ -792,7 +812,7 @@ def test_min_points_per_decision_node(kw: dict[str, Any]) -> None:
         min_points_per_leaf=None
     )
     bart = mc_gbart(**kw)
-    distr = bart.points_per_decision_node_distr()
+    distr = bart._bart._points_per_decision_node_distr()
     distr_marg = distr.sum(axis=(0, 1))
 
     min_points = (
@@ -814,7 +834,7 @@ def test_min_points_per_leaf(kw: dict[str, Any]) -> None:
         min_points_per_decision_node=None
     )
     bart = mc_gbart(**kw)
-    distr = bart.points_per_leaf_distr()
+    distr = bart._bart._points_per_leaf_distr()
     distr_marg = distr.sum(axis=(0, 1))
 
     min_points = (
@@ -1023,7 +1043,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
             assert_array_less(rhat_maxd, 1.01)
 
         with subtests.test('max tree depth distribution'):
-            dd_mcmc = bart.depth_distr()
+            dd_mcmc = bart._bart._depth_distr()
             dd_prior = forest_depth_distr(prior_trace.split_tree)
             rhat_dd = rhat_rank([dd_mcmc.squeeze(0), dd_prior], split=False)
             assert_array_less(rhat_dd, 1.02)

@@ -65,6 +65,7 @@ from bartz.grove import (
     check_trace,
     evaluate_forest,
     forest_depth_distr,
+    format_tree,
     points_per_node_distr,
 )
 from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
@@ -1237,7 +1238,7 @@ class Bart(Module):
         """Evaluate trees on already quantized `x`."""
         return predict(x, self._main_trace)
 
-    def check_trees(
+    def _check_trees(
         self, error: bool = False
     ) -> UInt[Array, 'num_chains n_save num_trees']:
         """Apply `bartz.grove.check_trace` to all the tree draws.
@@ -1267,7 +1268,19 @@ class Bart(Module):
                 raise RuntimeError(msg)
         return out
 
-    def check_replicated_trees(self) -> None:
+    def _tree_goes_bad(self) -> Bool[Array, 'num_chains n_save num_trees']:
+        """Find iterations where a tree becomes invalid.
+
+        Returns
+        -------
+        An array where ``(i, j, k)`` is `True` if tree `k` is invalid at
+        iteration `j` in chain `i` but not at iteration ``j - 1``.
+        """
+        bad = self._check_trees().astype(bool)
+        bad_before = jnp.pad(bad[:, :-1, :], [(0, 0), (1, 0), (0, 0)])
+        return bad & ~bad_before
+
+    def _check_replicated_trees(self) -> None:
         """Check that the trees are equal across data-sharded devices.
 
         If the data is sharded across devices, verify that the trees (which
@@ -1291,7 +1304,7 @@ class Bart(Module):
                 msg = 'The trees differ across data-sharded devices.'
                 raise RuntimeError(msg)
 
-    def compare_resid(
+    def _compare_resid(
         self, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = None
     ) -> tuple[
         Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
@@ -1334,7 +1347,7 @@ class Bart(Module):
 
         return resid1, resid2
 
-    def depth_distr(self) -> Int32[Array, '*num_chains n_save d']:
+    def _depth_distr(self) -> Int32[Array, '*num_chains n_save d']:
         """Histogram of tree depths for each state of the trees.
 
         Returns
@@ -1362,7 +1375,7 @@ class Bart(Module):
             out = out[None, :, :]
         return out
 
-    def points_per_decision_node_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
+    def _points_per_decision_node_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
         """Histogram of number of points belonging to parent-of-leaf nodes.
 
         Returns
@@ -1371,7 +1384,7 @@ class Bart(Module):
         """
         return self._points_per_node_distr('leaf-parent')
 
-    def points_per_leaf_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
+    def _points_per_leaf_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
         """Histogram of number of points belonging to leaves.
 
         Returns
@@ -1379,6 +1392,120 @@ class Bart(Module):
         A matrix where each row contains a histogram of number of points.
         """
         return self._points_per_node_distr('leaf')
+
+    def _print_tree(
+        self, i_chain: int, i_sample: int, i_tree: int, print_all: bool = False
+    ) -> None:
+        """Print a single tree in human-readable format.
+
+        Parameters
+        ----------
+        i_chain
+            The index of the MCMC chain.
+        i_sample
+            The index of the (post-burnin) sample in the chain.
+        i_tree
+            The index of the tree in the sample.
+        print_all
+            If `True`, also print the content of unused node slots.
+        """
+        trees = TreesTrace.from_dataclass(self._main_trace)
+        trees = tree.map(lambda x: x[i_chain, i_sample, i_tree, :], trees)
+        s = format_tree(trees, print_all=print_all)
+        print(s)  # noqa: T201, this method is intended for debug
+
+    def _sigma_harmonic_mean(
+        self, prior: bool = False
+    ) -> Float32[Array, ' *num_chains']:
+        """Return the harmonic mean of the error variance.
+
+        Parameters
+        ----------
+        prior
+            If `True`, use the prior distribution, otherwise use the full
+            conditional at the last MCMC iteration.
+
+        Returns
+        -------
+        The harmonic mean 1/E[1/sigma^2] in the selected distribution.
+        """
+        state = self._mcmc_state
+        assert state.error_cov_df is not None
+        assert state.z is None
+        # inverse gamma prior: alpha = df / 2, beta = scale / 2
+        if prior:
+            alpha = state.error_cov_df / 2
+            beta = state.error_cov_scale / 2
+        else:
+            alpha = state.error_cov_df / 2 + state.resid.size / 2
+            norm2 = jnp.einsum('ij,ij->i', state.resid, state.resid)
+            beta = state.error_cov_scale / 2 + norm2 / 2
+        error_cov_inv = alpha / beta
+        return jnp.sqrt(jnp.reciprocal(error_cov_inv))
+
+    def _avg_acc(
+        self,
+    ) -> tuple[Float32[Array, ' *num_chains'], Float32[Array, ' *num_chains']]:
+        """Compute the average acceptance rates of tree moves.
+
+        Returns
+        -------
+        acc_grow : Float32[Array, '*num_chains']
+            The average acceptance rate of grow moves.
+        acc_prune : Float32[Array, '*num_chains']
+            The average acceptance rate of prune moves.
+        """
+        trace = self._main_trace
+
+        def acc(prefix: str) -> Float32[Array, ' *num_chains']:
+            acc = getattr(trace, f'{prefix}_acc_count')
+            prop = getattr(trace, f'{prefix}_prop_count')
+            return acc.sum(axis=-1) / prop.sum(axis=-1)
+
+        return acc('grow'), acc('prune')
+
+    def _avg_prop(
+        self,
+    ) -> tuple[Float32[Array, ' *num_chains'], Float32[Array, ' *num_chains']]:
+        """Compute the average proposal rate of grow and prune moves.
+
+        Returns
+        -------
+        prop_grow : Float32[Array, '*num_chains']
+            The fraction of times grow was proposed instead of prune.
+        prop_prune : Float32[Array, '*num_chains']
+            The fraction of times prune was proposed instead of grow.
+
+        Notes
+        -----
+        This function does not take into account cases where no move was
+        proposed.
+        """
+        trace = self._main_trace
+
+        def prop(prefix: str) -> Array:
+            return getattr(trace, f'{prefix}_prop_count').sum(axis=-1)
+
+        pgrow = prop('grow')
+        pprune = prop('prune')
+        total = pgrow + pprune
+        return pgrow / total, pprune / total
+
+    def _avg_move(
+        self,
+    ) -> tuple[Float32[Array, ' *num_chains'], Float32[Array, ' *num_chains']]:
+        """Compute the move rate.
+
+        Returns
+        -------
+        rate_grow : Float32[Array, '*num_chains']
+            The fraction of times a grow move was proposed and accepted.
+        rate_prune : Float32[Array, '*num_chains']
+            The fraction of times a prune move was proposed and accepted.
+        """
+        agrow, aprune = self._avg_acc()
+        pgrow, pprune = self._avg_prop()
+        return agrow * pgrow, aprune * pprune
 
 
 @partial(jit, static_argnames='p')

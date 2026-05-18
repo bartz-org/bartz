@@ -22,7 +22,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Debugging utilities. The main functionality is the class `debug_mc_gbart`."""
+"""Sampling from the BART prior."""
 
 from dataclasses import replace
 from functools import partial

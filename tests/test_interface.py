@@ -94,8 +94,8 @@ class Bart(OriginalBart):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.check_trees(error=True)
-        self.check_replicated_trees()
+        self._check_trees(error=True)
+        self._check_replicated_trees()
 
 
 def gen_X(
@@ -520,7 +520,7 @@ class TestWithCachedBart:
 
     def test_residuals_accuracy(self, cachedbart: CachedBart) -> None:
         """Check that running residuals are close to the recomputed final residuals."""
-        accum_resid, actual_resid = cachedbart.bart.compare_resid(
+        accum_resid, actual_resid = cachedbart.bart._compare_resid(
             y=cachedbart.bkw.kw['y_train']
         )
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4, reduce_rank=True)
@@ -1065,7 +1065,7 @@ def test_min_points_per_decision_node(bkw: BartKW) -> None:
     init_kw['min_points_per_leaf'] = None
     kw['init_kw'] = init_kw
     bart = Bart(**kw)
-    distr = bart.points_per_decision_node_distr()
+    distr = bart._points_per_decision_node_distr()
     distr_marg = distr.sum(axis=(0, 1))
 
     min_points = init_kw.get('min_points_per_decision_node', 10)
@@ -1084,7 +1084,7 @@ def test_min_points_per_leaf(bkw: BartKW) -> None:
     init_kw['min_points_per_decision_node'] = None
     kw['init_kw'] = init_kw
     bart = Bart(**kw)
-    distr = bart.points_per_leaf_distr()
+    distr = bart._points_per_leaf_distr()
     distr_marg = distr.sum(axis=(0, 1))
 
     min_points = init_kw.get('min_points_per_leaf')  # default None
@@ -1286,7 +1286,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
             assert_array_less(rhat_maxd, 1.02)
 
         with subtests.test('max tree depth distribution'):
-            dd_mcmc = bart.depth_distr()
+            dd_mcmc = bart._depth_distr()
             dd_prior = forest_depth_distr(prior_trace.split_tree)
             rhat_dd = rhat_rank([dd_mcmc.squeeze(0), dd_prior], split=False)
             assert_array_less(rhat_dd, 1.02)

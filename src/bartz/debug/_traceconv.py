@@ -32,9 +32,9 @@ from equinox import Module, field
 from jax import numpy as jnp
 from jaxtyping import Array, Float32, UInt
 
+from bartz._jaxext import minimal_unsigned_dtype
 from bartz.BART._gbart import FloatLike
 from bartz.grove import TreeHeaps
-from bartz.jaxext import minimal_unsigned_dtype
 
 
 def _get_next_line(s: str, i: int) -> tuple[str, int]:

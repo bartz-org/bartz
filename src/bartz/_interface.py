@@ -57,6 +57,9 @@ from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UIn
 from numpy import ndarray
 
 from bartz import mcmcloop, mcmcstep
+from bartz._jaxext import equal_shards, is_key, split
+from bartz._jaxext.scipy.special import ndtri
+from bartz._jaxext.scipy.stats import invgamma
 from bartz.grove import (
     TreesTrace,
     check_trace,
@@ -64,9 +67,6 @@ from bartz.grove import (
     forest_depth_distr,
     points_per_node_distr,
 )
-from bartz.jaxext import equal_shards, is_key, split
-from bartz.jaxext.scipy.special import ndtri
-from bartz.jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
 from bartz.mcmcstep._state import (

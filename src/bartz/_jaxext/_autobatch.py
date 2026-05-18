@@ -1,4 +1,4 @@
-# bartz/src/bartz/jaxext/_autobatch.py
+# bartz/src/bartz/_jaxext/_autobatch.py
 #
 # Copyright (c) 2025-2026, The Bartz Contributors
 #

@@ -32,8 +32,8 @@ from jax import jit, lax, random, tree
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Key, UInt
 
-from bartz.jaxext import minimal_unsigned_dtype, vmap_nodoc
-from bartz.jaxext import split as split_key
+from bartz._jaxext import minimal_unsigned_dtype, vmap_nodoc
+from bartz._jaxext import split as split_key
 from bartz.mcmcstep._moves import randint_masked
 
 

@@ -1,4 +1,4 @@
-# bartz/src/bartz/jaxext/scipy/special.py
+# bartz/src/bartz/_jaxext/scipy/special.py
 #
 # Copyright (c) 2025-2026, The Bartz Contributors
 #

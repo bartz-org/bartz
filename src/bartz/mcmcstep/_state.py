@@ -50,8 +50,8 @@ from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree, Shaped, UInt
 
+from bartz._jaxext import get_default_device, is_key, minimal_unsigned_dtype
 from bartz.grove import tree_depths
-from bartz.jaxext import get_default_device, is_key, minimal_unsigned_dtype
 
 
 class OutcomeType(Enum):

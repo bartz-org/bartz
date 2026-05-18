@@ -54,7 +54,7 @@ from pytest_subtests import SubTests
 from scipy import stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
-from bartz.jaxext import get_device_count, minimal_unsigned_dtype, split
+from bartz._jaxext import get_device_count, minimal_unsigned_dtype, split
 from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._moves import (
     ancestor_variables,

@@ -37,7 +37,7 @@ from jax.tree_util import KeyPath
 from jaxtyping import Array, Float32, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
-from bartz.jaxext import get_default_device, split
+from bartz._jaxext import get_default_device, split
 from bartz.mcmcloop import BurninTrace, MainTrace, run_mcmc
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._state import chain_vmap_axes

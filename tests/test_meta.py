@@ -32,7 +32,7 @@ from jax import numpy as jnp
 from jax.errors import KeyReuseError
 from jaxtyping import Array, Float, Key
 
-from bartz.jaxext import split
+from bartz._jaxext import split
 
 
 @pytest.fixture

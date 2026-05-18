@@ -39,7 +39,7 @@ try:
 except ImportError:
     from bartz.BART import gbart as mc_gbart  # pre v0.8.0
 
-from benchmarks.latest_bartz.jaxext import split
+from benchmarks.latest_bartz._jaxext import split
 from benchmarks.latest_bartz.testing import DGP, gen_data
 from benchmarks.speed import get_default_platform
 

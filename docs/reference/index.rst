@@ -34,6 +34,5 @@ Reference
     mcmcstep.rst
     mcmcloop.rst
     prepcovars.rst
-    jaxext.rst
     debug.rst
     test.rst

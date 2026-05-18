@@ -52,7 +52,7 @@ from jaxtyping import Array, Float32, Integer, Key, UInt8
 
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
-from benchmarks.latest_bartz.jaxext import get_device_count, split
+from benchmarks.latest_bartz._jaxext import get_device_count, split
 
 try:
     from bartz.mcmcstep import State

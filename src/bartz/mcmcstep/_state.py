@@ -790,7 +790,7 @@ def init(
     offset = jnp.asarray(offset)
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
     max_split = jnp.asarray(max_split)
-    assert missing is None or missing.shape == y.shape
+    assert missing is None or missing.ndim <= y.ndim
 
     # normalize outcome_type to enum (or list of enums)
     outcome_type = _parse_outcome_type(outcome_type)

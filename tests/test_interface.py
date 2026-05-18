@@ -1445,21 +1445,28 @@ def test_interrupt(bkw: BartKW) -> None:
         block_until_ready(Bart(**kw))
 
 
-def test_polars(bkw: BartKW) -> None:  # pragma: no cover, skipped with mv
+def test_polars(bkw: BartKW) -> None:
     """Test passing data as DataFrame and Series."""
     kw = bkw.kw
-    if kw['y_train'].ndim == 2:
-        pytest.skip('Dataframe input for y_train not supported.')
 
     bart = Bart(**kw)
     pred = bart.predict(bkw.x_test, kind='latent_samples')
 
+    def to_polars(a: Array | None) -> pl.Series | pl.DataFrame | None:
+        if a is None:
+            return None
+        arr = numpy.array(a)
+        if arr.ndim == 1:
+            return pl.Series(arr)
+        return pl.DataFrame(arr.T)
+
     kw2 = dict(kw)
     kw2.update(
         seed=random.clone(kw2['seed']),
-        x_train=pl.DataFrame(numpy.array(kw['x_train']).T),
-        y_train=pl.Series(numpy.array(kw['y_train'])),
-        w=None if kw.get('w') is None else pl.Series(numpy.array(kw['w'])),
+        x_train=to_polars(kw['x_train']),
+        y_train=to_polars(kw['y_train']),
+        w=to_polars(kw.get('w')),
+        missing=to_polars(kw.get('missing')),
     )
     bart2 = Bart(**kw2)
     x_test_pl = pl.DataFrame(numpy.array(bkw.x_test).T)
@@ -1471,12 +1478,17 @@ def test_polars(bkw: BartKW) -> None:  # pragma: no cover, skipped with mv
         bart.predict('train', kind='latent_samples'),
         bart2.predict('train', kind='latent_samples'),
         rtol=rtol,
+        reduce_rank=True,
     )
-    sdev1 = bart.get_error_sdev() if kw['outcome_type'] != 'binary' else None
-    sdev2 = bart2.get_error_sdev() if kw['outcome_type'] != 'binary' else None
-    if sdev1 is not None:
-        assert_close_matrices(sdev1, sdev2, rtol=rtol)
-    assert_close_matrices(pred, pred2, rtol=rtol)
+    outcome_type = kw['outcome_type']
+    has_binary = outcome_type == 'binary' or (
+        isinstance(outcome_type, Sequence)
+        and not isinstance(outcome_type, str)
+        and 'binary' in outcome_type
+    )
+    if not has_binary:
+        assert_close_matrices(bart.get_error_sdev(), bart2.get_error_sdev(), rtol=rtol)
+    assert_close_matrices(pred, pred2, rtol=rtol, reduce_rank=True)
 
 
 def test_data_format_mismatch(bkw: BartKW) -> None:

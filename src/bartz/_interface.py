@@ -401,7 +401,9 @@ class Bart(Module):
             w, self._w = _process_response_input(w, keep=True)
             _check_same_length(x_train, w)
 
-        missing = _process_missing_input(missing, y_train.shape)
+        missing = _process_missing_input(missing)
+        if missing is not None:
+            _check_same_length(x_train, missing)
 
         # check data types are correct for continuous/binary/multivariate regression
         outcome_type, binary_mask = _check_type_settings(y_train, outcome_type, w)
@@ -1173,16 +1175,11 @@ def _process_response_input(
 
 def _process_missing_input(
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
-    y_shape: tuple[int, ...],
 ) -> Bool[Array, ' n'] | Bool[Array, 'k n'] | None:
     if missing is None:
         return None
     # see comment in `_process_response_input` about copying
-    missing = jnp.array(missing, jnp.bool_)
-    if missing.shape != y_shape:
-        msg = f'missing.shape={missing.shape} must equal y_train.shape={y_shape}.'
-        raise ValueError(msg)
-    return missing
+    return jnp.array(missing, jnp.bool_)
 
 
 def _check_same_length(x1: Array, x2: Array) -> None:

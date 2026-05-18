@@ -338,7 +338,6 @@ class Bart(Module):
     _mcmc_state: mcmcstep.State
     _binner: Binner
     _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
-    _w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
     # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
     _x_train_fmt: Any = field(static=True)
 
@@ -347,6 +346,8 @@ class Bart(Module):
 
     sigest: Float32[Array, ''] | Float32[Array, ' k'] | None = None
     """The estimated standard deviation of the error used to set `lambda_`."""
+
+    _w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = None
 
     def __init__(
         self,
@@ -395,7 +396,9 @@ class Bart(Module):
         self._check_same_length(x_train, y_train)
 
         if w is not None:
-            w = self._process_response_input(w)
+            # keep=True because `w` is donated downstream but also retained
+            # as `self._w` for prediction
+            w, self._w = self._process_response_input(w, keep=True)
             self._check_same_length(x_train, w)
 
         missing = self._process_missing_input(missing, y_train.shape)
@@ -481,7 +484,6 @@ class Bart(Module):
         self._binner = binner_obj
         self._x_train_fmt = x_train_fmt
         self._binary_mask = binary_mask
-        self._w = w
 
     def predict(
         self,
@@ -869,13 +871,27 @@ class Bart(Module):
     @staticmethod
     def _process_response_input(
         y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series,
-    ) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
+        *,
+        keep: bool = False,
+    ) -> (
+        Float32[Array, ' n']
+        | Float32[Array, 'k n']
+        | tuple[
+            Float32[Array, ' n'] | Float32[Array, 'k n'],
+            Float32[Array, ' n'] | Float32[Array, 'k n'],
+        ]
+    ):
         if hasattr(y, 'to_numpy'):
             y = y.to_numpy()
-        y = jnp.asarray(y, jnp.float32)
+        # in normal mode: one unconditional copy, safe to donate downstream.
+        # in `keep` mode: convert without copying when possible to get the
+        # keep array, then `jnp.copy` to make a separate disposable copy.
+        y = jnp.array(y, jnp.float32, copy=not keep)
         if y.ndim < 1 or y.ndim > 2:
             msg = f'y_train must be 1D (n,) or 2D (k, n). Got {y.ndim=}.'
             raise ValueError(msg)
+        if keep:
+            return jnp.copy(y), y
         return y
 
     @staticmethod
@@ -885,7 +901,8 @@ class Bart(Module):
     ) -> Bool[Array, ' n'] | Bool[Array, 'k n'] | None:
         if missing is None:
             return None
-        missing = jnp.asarray(missing, jnp.bool_)
+        # see comment in `_process_response_input` about copying
+        missing = jnp.array(missing, jnp.bool_)
         if missing.shape != y_shape:
             msg = f'missing.shape={missing.shape} must equal y_train.shape={y_shape}.'
             raise ValueError(msg)
@@ -1171,13 +1188,11 @@ class Bart(Module):
 
         kw: dict = dict(
             X=x_train,
-            # copy y_train because it's going to be donated in the mcmc loop
-            y=jnp.array(y_train),
+            y=y_train,
             outcome_type=outcome_type,
             offset=offset,
-            # copy w and missing because they are going to be donated in init
-            error_scale=None if w is None else jnp.array(w),
-            missing=None if missing is None else jnp.array(missing),
+            error_scale=w,
+            missing=missing,
             max_split=max_split,
             num_trees=num_trees,
             p_nonterminal=p_nonterminal,
@@ -1517,19 +1532,11 @@ def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
     return lax.collapse(varcount, 0, -1)
 
 
-@jit
-# this is jitted such that lax.collapse below does not create a copy
 def predict(
     x: UInt[Array, 'p m'], trace: mcmcloop.MainTrace
 ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
     """Evaluate trees on already quantized `x`, and squash chains."""
-    out = evaluate_trace(x, trace)
-    # For MV, out has shape (*trace_shape, k, n); for UV, (*trace_shape, n).
-    # We must collapse only the chain/sample dims, not k.
-    # Detect MV: leaf_tree has an extra axis compared to split_tree.
-    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
-    end = -2 if is_mv else -1
-    return lax.collapse(out, 0, end)
+    return evaluate_trace(x, trace, flatten_chains=True)
 
 
 class DeviceKwArgs(TypedDict):

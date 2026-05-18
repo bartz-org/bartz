@@ -202,7 +202,7 @@ class Bart(Module):
         they are ignored. If `False`, an error is raised if there are any.
     sigest
         An estimate of the residual standard deviation on `y_train`, used to set
-        `lamda`. Ignored if `lamda` is specified. For multivariate regression,
+        `lambda_`. Ignored if `lambda_` is specified. For multivariate regression,
         can be a scalar (broadcast to all components) or a `(k,)` vector of
         per-component estimates. For mixed outcome types, binary component
         values are ignored. Can be one of the following special values to set
@@ -224,7 +224,7 @@ class Bart(Module):
         degrees of freedom are set to `sigdf + k - 1`.
     sigquant
         The quantile of the prior on the noise variance that shall match
-        `sigest` to set the scale of the prior. Ignored if `lamda` is specified.
+        `sigest` to set the scale of the prior. Ignored if `lambda_` is specified.
     k
         The inverse scale of the prior standard deviation on the latent mean
         function, relative to half the observed range of `y_train`. If `y_train`
@@ -234,7 +234,7 @@ class Bart(Module):
         Parameters of the prior on tree node generation. The probability that a
         node at depth `d` (0-based) is non-terminal is ``base / (1 + d) **
         power``.
-    lamda
+    lambda_
         The prior harmonic mean of the error variance. (The harmonic mean of x
         is 1/mean(1/x).) If not specified, it is set based on `sigest` and
         `sigquant`. For multivariate regression, can be a scalar (broadcast
@@ -345,7 +345,7 @@ class Bart(Module):
     """The prior mean of the latent mean function."""
 
     sigest: Float32[Array, ''] | Float32[Array, ' k'] | None = None
-    """The estimated standard deviation of the error used to set `lamda`."""
+    """The estimated standard deviation of the error used to set `lambda_`."""
 
     def __init__(
         self,
@@ -369,7 +369,7 @@ class Bart(Module):
         k: FloatLike = 2.0,
         power: FloatLike = 2.0,
         base: FloatLike = 0.95,
-        lamda: FloatLike | Float[ArrayLike, ' k'] | None = None,
+        lambda_: FloatLike | Float[ArrayLike, ' k'] | None = None,
         tau_num: FloatLike | None = None,
         offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
         w: Float[ArrayLike, ' n'] | Float[ArrayLike, 'k n'] | Series | None = None,
@@ -413,7 +413,14 @@ class Bart(Module):
             y_train, binary_mask, k, num_trees, tau_num
         )
         error_cov_df, error_cov_scale, sigest = self._process_error_variance_settings(
-            x_train, y_train, outcome_type, binary_mask, sigest, sigdf, sigquant, lamda
+            x_train,
+            y_train,
+            outcome_type,
+            binary_mask,
+            sigest,
+            sigdf,
+            sigquant,
+            lambda_,
         )
 
         # split the user-provided seed into an mcmc key and a binner key
@@ -900,7 +907,7 @@ class Bart(Module):
         | Literal['auto', 'ols-or-variance', 'cg'],
         sigdf: FloatLike,
         sigquant: FloatLike,
-        lamda: FloatLike | Float[Array, ' k'] | None,
+        lambda_: FloatLike | Float[Array, ' k'] | None,
     ) -> tuple[
         Float32[Array, ''] | None,
         Float32[Array, ''] | Float32[Array, 'k k'] | None,
@@ -908,39 +915,39 @@ class Bart(Module):
     ]:
         """Return (error_cov_df, error_cov_scale, sigest)."""
         if outcome_type is OutcomeType.binary:
-            if not isinstance(sigest, str) or lamda is not None:
-                msg = 'Do not set `sigest` or `lamda` for binary regression, they are ignored'
+            if not isinstance(sigest, str) or lambda_ is not None:
+                msg = 'Do not set `sigest` or `lambda_` for binary regression, they are ignored'
                 raise ValueError(msg)
             return None, None, None
 
-        if lamda is None:
+        if lambda_ is None:
             # estimate sigest²
             sigest2 = cls._estimate_sigest2(x_train, y_train, sigest, binary_mask)
             sigest = jnp.sqrt(sigest2)
 
-            # lamda from sigest²
+            # lambda_ from sigest²
             alpha = sigdf / 2
             invchi2 = invgamma.ppf(sigquant, alpha) / 2
             invchi2rid = invchi2 * sigdf
-            lamda = sigest2 / invchi2rid
+            lambda_ = sigest2 / invchi2rid
 
         elif not isinstance(sigest, str):
-            msg = "Do not set `sigest` if `lamda` is specified, it's ignored"
+            msg = "Do not set `sigest` if `lambda_` is specified, it's ignored"
             raise ValueError(msg)
 
         else:
-            lamda = jnp.where(binary_mask, 0.0, lamda)
+            lambda_ = jnp.where(binary_mask, 0.0, lambda_)
             sigest = None
 
         # params written in multivariate form
         if y_train.ndim == 2:
             k = y_train.shape[0]
-            lamda = jnp.broadcast_to(lamda, (k,))
+            lambda_ = jnp.broadcast_to(lambda_, (k,))
             error_cov_df = jnp.asarray(sigdf) + k - 1
-            error_cov_scale = jnp.diag(sigdf * lamda)
+            error_cov_scale = jnp.diag(sigdf * lambda_)
         else:
             error_cov_df = jnp.asarray(sigdf)
-            error_cov_scale = jnp.asarray(sigdf * lamda)
+            error_cov_scale = jnp.asarray(sigdf * lambda_)
 
         return error_cov_df, error_cov_scale, sigest
 

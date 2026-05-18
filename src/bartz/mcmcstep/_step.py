@@ -1680,14 +1680,14 @@ def step_theta(key: Key[Array, ''], bart: State, *, num_grid: int = 1000) -> Sta
 
     # the grid points are the midpoints of num_grid bins in (0, 1)
     padding = 1 / (2 * num_grid)
-    lamda_grid = jnp.linspace(padding, 1 - padding, num_grid)
+    lambda_grid = jnp.linspace(padding, 1 - padding, num_grid)
 
     # normalize s
     log_s = bart.forest.log_s - logsumexp(bart.forest.log_s)
 
     # sample lambda
-    logp, theta_grid = _log_p_lamda(
-        lamda_grid, log_s, bart.forest.rho, bart.forest.a, bart.forest.b
+    logp, theta_grid = _log_p_lambda(
+        lambda_grid, log_s, bart.forest.rho, bart.forest.a, bart.forest.b
     )
     i = random.categorical(key, logp)
     theta = theta_grid[i]
@@ -1695,19 +1695,19 @@ def step_theta(key: Key[Array, ''], bart: State, *, num_grid: int = 1000) -> Sta
     return replace(bart, forest=replace(bart.forest, theta=theta))
 
 
-def _log_p_lamda(
-    lamda: Float32[Array, ' num_grid'],
+def _log_p_lambda(
+    lambda_: Float32[Array, ' num_grid'],
     log_s: Float32[Array, ' p'],
     rho: Float32[Array, ''],
     a: Float32[Array, ''],
     b: Float32[Array, ''],
 ) -> tuple[Float32[Array, ' num_grid'], Float32[Array, ' num_grid']]:
-    # in the following I use lamda[::-1] == 1 - lamda
-    theta = rho * lamda / lamda[::-1]
+    # in the following I use lambda_[::-1] == 1 - lambda_
+    theta = rho * lambda_ / lambda_[::-1]
     p = log_s.size
     return (
-        (a - 1) * jnp.log1p(-lamda[::-1])  # log(lambda)
-        + (b - 1) * jnp.log1p(-lamda)  # log(1 - lambda)
+        (a - 1) * jnp.log1p(-lambda_[::-1])  # log(lambda)
+        + (b - 1) * jnp.log1p(-lambda_)  # log(1 - lambda)
         + gammaln(theta)
         - p * gammaln(theta / p)
         + theta / p * jnp.sum(log_s)

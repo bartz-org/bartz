@@ -160,8 +160,8 @@ class TestRandintMasked:
         # likelihood ratio test for multinomial with free p vs. constant p
         k = jnp.bincount(u, length=num_allowed)
         llr = jnp.sum(jnp.where(k, k * jnp.log(k / n * num_allowed), 0))
-        lamda = 2 * llr
-        pvalue = stats.chi2.sf(lamda, num_allowed - 1)
+        lambda_ = 2 * llr
+        pvalue = stats.chi2.sf(lambda_, num_allowed - 1)
         assert pvalue > 0.1
 
 

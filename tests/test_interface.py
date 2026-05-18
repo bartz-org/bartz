@@ -713,7 +713,7 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     kw['offset'] = 0.0
     kw['tau_num'] = 2.0
     if kw.get('outcome_type') != 'binary':
-        kw['lamda'] = 1.0
+        kw['lambda_'] = 1.0
 
     bart1 = Bart(**kw)
 
@@ -1807,8 +1807,8 @@ class TestMVBartInterface:
             bart = Bart(sigest=1.0, **kw)
             assert bart.sigest.shape == (k,)
 
-        with subtests.test('lamda'):
-            bart = Bart(lamda=1.0, **kw)
+        with subtests.test('lambda_'):
+            bart = Bart(lambda_=1.0, **kw)
             assert bart.sigest is None
             assert bart._mcmc_state.error_cov_scale.shape == (k, k)
 

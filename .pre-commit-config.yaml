@@ -69,3 +69,8 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: forbid-lamda
+        name: forbid `lamda` identifier (use `lambda_` per PEP 8)
+        language: pygrep
+        entry: '\blamda\b'
+        types: [python]

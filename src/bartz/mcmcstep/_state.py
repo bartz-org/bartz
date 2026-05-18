@@ -24,6 +24,7 @@
 
 """Module defining the BART MCMC state and initialization."""
 
+import inspect
 import math
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import fields, replace
@@ -1473,9 +1474,18 @@ def vmap_chains(
 
 
 def _get_shard_map_patch_kwargs() -> dict[str, bool]:
-    # WORKAROUND(jax<=0.8.2): vmap(shard_map(psum)), jax#34249; the
-    # jax_disable_vmap_shmap_error config did not work
-    if jax.__version__ in ('0.8.1', '0.8.2'):
-        return {'check_vma': False}
-    else:
-        return {}
+    # bug 1: jax 0.6.0-0.7.0: the VMA/check_rep checker rejects
+    # random.gamma's internal while_loop when the key axis is sharded but the
+    # alpha is replicated; fixed in jax 0.7.1.
+
+    # bug 2: jax 0.8.1-0.8.2: vmap(shard_map(psum)), jax#34249; the
+    # jax_disable_vmap_shmap_error config did not work.
+
+    # WORKAROUND(jax<=0.8.2): remove this whole function when jax > 0.8.2
+    buggy = ('0.6.0', '0.6.1', '0.6.2', '0.7.0', '0.8.1', '0.8.2')
+    if jax.__version__ in buggy:
+        # WORKAROUND(jax<0.6.1): check_rep instead of check_vma before then
+        params = inspect.signature(shard_map).parameters
+        flag = 'check_rep' if 'check_rep' in params else 'check_vma'
+        return {flag: False}
+    return {}

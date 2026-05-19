@@ -69,7 +69,13 @@ from bartz.grove import (
     format_tree,
     points_per_node_distr,
 )
-from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
+from bartz.mcmcloop import (
+    RunMCMCResult,
+    _trace_sample_axis,
+    compute_varcount,
+    evaluate_trace,
+    run_mcmc,
+)
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
 from bartz.mcmcstep._state import (
     ArrayLike,
@@ -580,11 +586,8 @@ class Bart(Module):
     def n_save(self) -> int:
         """The number of posterior samples after burn-in saved per chain."""
         tc = chain_vmap_axes(self._main_trace).grow_prop_count
-        if tc is None or self._mcmc_state.num_chains() is None:
-            sample_axis = 0
-        else:
-            state_k = chain_vmap_axes(self._mcmc_state.forest).grow_prop_count
-            sample_axis = state_k + 1 if tc == state_k else 0
+        state_k = chain_vmap_axes(self._mcmc_state.forest).grow_prop_count
+        sample_axis = _trace_sample_axis(state_k, tc)
         return self._main_trace.grow_prop_count.shape[sample_axis]
 
     @property
@@ -649,14 +652,9 @@ class Bart(Module):
 
         burnin = self._burnin_trace.error_cov_inv
         main = self._main_trace.error_cov_inv
-        # samples axis position depends on the chain marker layout
-        num_chains = self._mcmc_state.num_chains()
-        if num_chains is None:
-            sample_axis = 0
-        else:
-            tc = chain_vmap_axes(self._main_trace).error_cov_inv
-            state_k = chain_vmap_axes(self._mcmc_state).error_cov_inv
-            sample_axis = state_k + 1 if tc == state_k else 0
+        tc = chain_vmap_axes(self._main_trace).error_cov_inv
+        state_k = chain_vmap_axes(self._mcmc_state).error_cov_inv
+        sample_axis = _trace_sample_axis(state_k, tc)
         prec = jnp.concatenate([burnin, main], axis=sample_axis)
 
         if only_continuous and binary_indices is not None:
@@ -720,10 +718,9 @@ class Bart(Module):
             varprob = jnp.where(max_split, 1 / peff, 0)
             varprob = jnp.broadcast_to(varprob, (self.ndpost, p))
         else:
-            if self._mcmc_state.num_chains() is not None:
-                tc = chain_vmap_axes(self._main_trace).varprob
-                if tc != 0:
-                    varprob = jnp.moveaxis(varprob, tc, 0)
+            tc = chain_vmap_axes(self._main_trace).varprob
+            if tc is not None and tc != 0:
+                varprob = jnp.moveaxis(varprob, tc, 0)
             varprob = varprob.reshape(-1, p)
         return varprob
 
@@ -735,10 +732,8 @@ class Bart(Module):
     def _error_cov_inv_chain_first(self) -> Array:
         """Return `_main_trace.error_cov_inv` with the chain axis moved to position 0."""
         arr = self._main_trace.error_cov_inv
-        if self._mcmc_state.num_chains() is None:
-            return arr
         tc = chain_vmap_axes(self._main_trace).error_cov_inv
-        if tc == 0:
+        if tc is None or tc == 0:
             return arr
         return jnp.moveaxis(arr, tc, 0)
 
@@ -1551,10 +1546,9 @@ def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
     """Histogram of predictor usage for decision rules in the trees, squashing chains."""
     varcount: Int32[Array, '*chains samples p']
     varcount = compute_varcount(p, trace)
-    if trace.var_tree.ndim > 3:  # has_chains, shape-based
-        tc = chain_vmap_axes(trace).var_tree
-        if tc != 0:
-            varcount = jnp.moveaxis(varcount, tc, 0)
+    tc = chain_vmap_axes(trace).var_tree
+    if tc is not None and tc != 0:
+        varcount = jnp.moveaxis(varcount, tc, 0)
     return lax.collapse(varcount, 0, -1)
 
 
@@ -1572,7 +1566,7 @@ def get_error_sdev(
 ):
     """Error standard deviation, post-burnin, chains concatenated."""
     error_cov_inv = trace.error_cov_inv
-    if error_cov_inv.ndim in (2, 4):
+    if trace.has_chains:
         # shape (chains, samples) or (chains, samples, k, k), concatenate chains
         tc = chain_vmap_axes(trace).error_cov_inv
         if tc != 0:

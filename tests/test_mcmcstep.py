@@ -31,6 +31,7 @@ from functools import partial, wraps
 from typing import NamedTuple
 
 import jax
+import numpy
 import pytest
 from beartype import beartype
 from equinox import Module
@@ -194,15 +195,35 @@ class TestVmapAxesMarkers:
         # chains=-2 on a 3-D leaf -> normalized to 1
         assert chain_vmap_axes(x).arr == 1
 
-    def test_marker_out_of_bounds_for_leaf(self) -> None:
-        """A marker whose absolute value exceeds the leaf ndim yields None."""
+    def test_marker_out_of_bounds_raises(self) -> None:
+        """A marker whose absolute value exceeds the leaf ndim raises an axis error."""
 
         class _ChainScalar(Module):
             scalar: Array = field(chains=0)
 
-        # 0-D leaf can't have axis 0; the marker is reported as None
+        # 0-D leaf can't have axis 0; strict normalization rejects it
         x = _ChainScalar(scalar=jnp.zeros(()))
-        assert chain_vmap_axes(x).scalar is None
+        with pytest.raises(numpy.exceptions.AxisError):
+            chain_vmap_axes(x)
+
+    def test_no_chains_short_circuit(self) -> None:
+        """When `has_chains` reports False, marked leaves get None even if they'd be valid."""
+
+        class _NoChains(Module):
+            has_chains: bool = field(static=True, default=False)
+            arr: Array = field(chains=0, default_factory=lambda: jnp.zeros((2, 3)))
+
+        x = _NoChains()
+        # `has_chains=False` short-circuits the marker normalization
+        assert chain_vmap_axes(x).arr is None
+        # but `data_vmap_axes` is unaffected by `has_chains`
+
+        class _NoChainsData(Module):
+            has_chains: bool = field(static=True, default=False)
+            arr: Array = field(data=-1, default_factory=lambda: jnp.zeros((2, 3)))
+
+        y = _NoChainsData()
+        assert data_vmap_axes(y).arr == 1
 
     def test_nested_module(self) -> None:
         """Recursion descends into Module-valued fields."""
@@ -960,10 +981,11 @@ class TestMultichain:
     def chain_vmap_axes(self, state: State) -> State:
         """Manual reference for `chain_vmap_axes(_: State)`.
 
-        Mirrors the production semantics: the chain marker is 0 on every
-        chain-bearing field; each leaf normalizes to 0 (its first axis) when
-        it has at least one dim, else None (no chain dim on this leaf).
+        Mirrors the production semantics: when ``state.has_chains`` is False
+        every leaf maps to None; otherwise chain-bearing fields normalize to 0
+        (their first axis), unmarked fields and `None` leaves give None.
         """
+        has_chains = state.has_chains
 
         def choose_vmap_index(path: KeyPath, leaf: Array | None) -> int | None:
             no_vmap_attrs = (
@@ -988,9 +1010,9 @@ class TestMultichain:
                 '.config.sparse_on_at',
                 '.config.steps_done',
             )
-            if keystr(path) in no_vmap_attrs or leaf is None:
+            if not has_chains:
                 return None
-            if leaf.ndim == 0:
+            if keystr(path) in no_vmap_attrs or leaf is None:
                 return None
             return 0
 

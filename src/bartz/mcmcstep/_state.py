@@ -133,8 +133,16 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     A pytree with the same structure as `x`, with each leaf set to the chain
     axis index declared by its owning ``field(chains=...)`` marker, normalized
     against the leaf's ``ndim`` (so the returned indices are non-negative), or
-    `None` for unmarked leaves.
+    `None` for unmarked leaves. If `x` (or one of its sub-trees) defines a
+    `has_chains` property reporting `False`, every leaf is `None`.
     """
+    try:
+        has_chains = get_has_chains(x)
+    except ValueError:
+        # no `has_chains` declared anywhere in the tree; default to strict
+        has_chains = True
+    if not has_chains:
+        return _find_metadata(x, 'chains', replacement=None)
     return _find_metadata(x, 'chains')
 
 
@@ -143,6 +151,7 @@ def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
 
     Analogous to `chain_vmap_axes` but reads the ``field(data=...)`` markers.
     The returned indices are normalized per-leaf against the leaf's ``ndim``.
+    Out-of-bounds markers raise an `numpy.exceptions.AxisError`.
     """
     return _find_metadata(x, 'data')
 
@@ -150,59 +159,110 @@ def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
 T = TypeVar('T')
 
 
+class _HasChainsFound(Exception):
+    """Internal control-flow signal carrying a found `has_chains` value."""
+
+    def __init__(self, value: bool) -> None:
+        self.value = value
+
+
+def get_has_chains(x: PyTree) -> bool:
+    """Return the `has_chains` flag from the first node in `x` that defines it.
+
+    Walks `x` and stops at the first node exposing a `has_chains` attribute,
+    returning its value. The walk uses `jax.tree.map` with an `is_leaf` callback
+    that raises a custom exception to short-circuit traversal.
+
+    Parameters
+    ----------
+    x
+        A pytree, possibly containing nodes that define a `has_chains`
+        attribute.
+
+    Returns
+    -------
+    The value of `has_chains` on the first matching node.
+
+    Raises
+    ------
+    ValueError
+        If no node in `x` defines a `has_chains` property.
+    """
+
+    def is_leaf(node: object) -> bool:
+        try:
+            value = node.has_chains
+        except AttributeError:
+            return False
+        raise _HasChainsFound(value)
+
+    try:
+        tree.map(lambda _: None, x, is_leaf=is_leaf)
+    except _HasChainsFound as exc:
+        return exc.value
+    msg = 'no `has_chains` property found in the pytree'
+    raise ValueError(msg)
+
+
+_NO_REPLACEMENT = object()
+
+
 def _normalize_axis_for_leaf(leaf: object, raw: int) -> int | None:
-    """Normalize a marker axis index against `leaf.ndim`, returning None if out-of-bounds."""
-    if leaf is None:
-        return None
-    # If the leaf doesn't actually have the marked axis (e.g. a scalar/low-ndim
-    # leaf in single-chain mode), report no axis — per design, the presence of
-    # a chain dim is shape-based.
-    if not -leaf.ndim <= raw < leaf.ndim:
-        return None
-    return int(normalize_axis_index(raw, leaf.ndim))
+    """Normalize a marker axis index against `leaf.ndim`.
+
+    Returns `None` if `leaf is None`; raises `numpy.exceptions.AxisError` if
+    `raw` is out of bounds for `leaf.ndim`.
+    """
+    return normalize_axis_index(raw, leaf.ndim)
 
 
-def _find_metadata(x: PyTree[Any, ' S'], key: Hashable) -> PyTree[Any, ' S']:
+def _is_lazy_array(x: object) -> bool:
+    return isinstance(x, _LazyArray)
+
+
+def _is_module(x: object) -> bool:
+    return isinstance(x, Module) and not _is_lazy_array(x)
+
+
+def _marker_subtree(v: object, raw: int, replacement: object) -> PyTree:
+    """Build the subtree value for a marked field."""
+    if replacement is _NO_REPLACEMENT:
+        return tree.map(
+            partial(_normalize_axis_for_leaf, raw=raw), v, is_leaf=_is_lazy_array
+        )
+    return tree.map(lambda _: replacement, v, is_leaf=_is_lazy_array)
+
+
+def _find_metadata(
+    x: PyTree[Any, ' S'], key: Hashable, *, replacement: object = _NO_REPLACEMENT
+) -> PyTree[Any, ' S']:
     """Walk `x` replacing marked subtrees with their metadata value.
 
     For each Module field whose metadata contains `key`, the field's subtree
     is replaced with the stored value normalized per-leaf against the leaf's
     ``ndim`` (so the returned indices are always non-negative); leaves outside
-    any marked field become `None`.
+    any marked field become `None`. If `replacement` is provided, marked
+    leaves are set to that value uniformly instead of being normalized; this
+    is used to short-circuit the result when the metadata is irrelevant.
     """
-
-    def is_lazy_array(x: object) -> bool:
-        return isinstance(x, _LazyArray)
-
-    def is_module(x: object) -> bool:
-        return isinstance(x, Module) and not is_lazy_array(x)
-
-    if is_module(x):
+    if _is_module(x):
         args = []
         for f in fields(x):
             v = getattr(x, f.name)
             if f.metadata.get('static', False):
                 args.append(v)
             elif key in f.metadata:
-                raw = f.metadata[key]
-                subtree = tree.map(
-                    partial(_normalize_axis_for_leaf, raw=raw), v, is_leaf=is_lazy_array
-                )
-                args.append(subtree)
+                args.append(_marker_subtree(v, f.metadata[key], replacement))
             else:
-                args.append(_find_metadata(v, key))
+                args.append(_find_metadata(v, key, replacement=replacement))
         return x.__class__(*args)
 
     def get_axes(x: object) -> PyTree:
-        if is_module(x):
-            return _find_metadata(x, key)
-        else:
-            return tree.map(lambda _: None, x, is_leaf=is_lazy_array)
+        if _is_module(x):
+            return _find_metadata(x, key, replacement=replacement)
+        return tree.map(lambda _: None, x, is_leaf=_is_lazy_array)
 
-    def is_leaf(x: object) -> bool:
-        return isinstance(x, Module)  # this catches _LazyArray as well
-
-    return tree.map(get_axes, x, is_leaf=is_leaf)
+    return tree.map(get_axes, x, is_leaf=lambda x: isinstance(x, Module))
 
 
 class Forest(Module):
@@ -293,6 +353,11 @@ class Forest(Module):
     rho: Float32[Array, ''] | None
     """Parameter of the prior on `theta`. Required only to sample `theta`.
     See `step_theta`."""
+
+    @property
+    def has_chains(self) -> bool:
+        """Whether this forest carries an explicit chain axis."""
+        return self.var_tree.ndim > 2
 
 
 class StepConfig(Module):
@@ -394,9 +459,14 @@ class State(Module):
     config: StepConfig
     """Metadata and configurations for the MCMC step."""
 
+    @property
+    def has_chains(self) -> bool:
+        """Whether this state carries an explicit chain axis."""
+        return self.forest.has_chains
+
     def num_chains(self) -> int | None:
         """Return the number of chains, or `None` if not multichain."""
-        if self.forest.var_tree.ndim == 2:
+        if not self.has_chains:
             return None
         c = chain_vmap_axes(self.forest).var_tree
         return self.forest.var_tree.shape[c]
@@ -1451,8 +1521,7 @@ def shard_map_state(
         if mesh is None:
             return fun(key, state)
 
-        num_chains = state.num_chains()
-        if num_chains is not None and 'chains' in mesh.axis_names:
+        if state.has_chains and 'chains' in mesh.axis_names:
             key_spec = PartitionSpec('chains')
         else:
             key_spec = PartitionSpec()
@@ -1493,7 +1562,7 @@ def vmap_chains(
     def wrapped(
         keys: Key[Array, ' num_chains'] | Key[Array, ''], state: State
     ) -> State:
-        if state.num_chains() is None:
+        if not state.has_chains:
             return fun(keys, state)
         state_axes = chain_vmap_axes(state)
         vmapped_fun = vmap(fun, in_axes=(0, state_axes), out_axes=state_axes)

@@ -422,13 +422,13 @@ class mc_gbart(Module):
         if self._mcmc_state.binary_y is not None:
             return None
         assert self._burnin_trace.error_cov_inv.ndim <= 2  # chains and samples
+        tc = chain_vmap_axes(self._main_trace).error_cov_inv
 
         def arrange(arr: Array) -> Array:
             # Public output is (nskip+ndpost, mc_cores) = (samples, chains).
             # Move chain (if present) to the trailing axis.
-            if arr.ndim < 2:
+            if tc is None:
                 return arr
-            tc = chain_vmap_axes(self._main_trace).error_cov_inv
             return jnp.moveaxis(arr, tc, -1)
 
         return jnp.sqrt(
@@ -450,10 +450,9 @@ class mc_gbart(Module):
             return None
         assert self._main_trace.error_cov_inv.ndim <= 2  # chains and samples
         arr = self._main_trace.error_cov_inv
-        if arr.ndim >= 2:
-            tc = chain_vmap_axes(self._main_trace).error_cov_inv
-            if tc != 0:
-                arr = jnp.moveaxis(arr, tc, 0)
+        tc = chain_vmap_axes(self._main_trace).error_cov_inv
+        if tc is not None and tc != 0:
+            arr = jnp.moveaxis(arr, tc, 0)
         return jnp.sqrt(jnp.reciprocal(arr)).reshape(-1)
 
     @cached_property

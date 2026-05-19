@@ -78,6 +78,9 @@ from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size
 class BurninTrace(Module):
     """MCMC trace with only diagnostic values."""
 
+    has_chains: bool = field(static=True)
+    """Whether the trace carries an explicit chain axis."""
+
     error_cov_inv: (
         Float32[Array, '*chains_and_samples']
         | Float32[Array, '*chains_and_samples k k']
@@ -94,6 +97,7 @@ class BurninTrace(Module):
     def from_state(cls, state: State) -> 'BurninTrace':
         """Create a single-item burn-in trace from a MCMC state."""
         return cls(
+            has_chains=state.has_chains,
             error_cov_inv=state.error_cov_inv,
             theta=state.forest.theta,
             grow_prop_count=state.forest.grow_prop_count,
@@ -357,12 +361,28 @@ def _replicate(x: Array, mesh: Mesh | None) -> Array:
         return device_put(x, NamedSharding(mesh, PartitionSpec()))
 
 
+def _trace_sample_axis(state_k: int | None, tc: int | None) -> int:
+    """Where the sample axis sits in a trace, given chain marker positions.
+
+    `state_k` is the chain axis in the per-step value (the state or extractor
+    output); `tc` is the chain axis in the trace. The sample axis is the one
+    inserted by the stacking-over-iterations step.
+    """
+    if tc is None:
+        return 0
+    # If the raw marker was non-negative, the trace chain axis matches the
+    # state's (`tc == state_k`) and the sample axis sits one slot after.
+    # If the raw marker was negative, the trace chain axis is `state_k + 1`
+    # (it shifted right by one when the sample axis was prepended) and the
+    # sample axis ends up at position 0.
+    return state_k + 1 if tc == state_k else 0
+
+
 @partial(jit, static_argnums=(0, 2))
 def _empty_trace(
     length: int, bart: State, extractor: Callable[[State], PyTree]
 ) -> PyTree:
-    num_chains = bart.num_chains()
-    if num_chains is None:
+    if not bart.has_chains:
         out_axes = 0
     else:
         example_output = eval_shape(extractor, bart)
@@ -378,16 +398,8 @@ def _empty_trace(
         state_axes = chain_vmap_axes(example_output)
         trace_axes = chain_vmap_axes(modified_example)
 
-        def out_axes_for(state_k: int | None, tc: int | None) -> int:
-            if tc is None:
-                return 0
-            if tc == state_k:
-                return state_k + 1
-            # tc == state_k + 1 (raw marker was negative)
-            return 0
-
         out_axes = tree.map(
-            out_axes_for, state_axes, trace_axes, is_leaf=lambda x: x is None
+            _trace_sample_axis, state_axes, trace_axes, is_leaf=lambda x: x is None
         )
 
     return jax.vmap(extractor, in_axes=None, out_axes=out_axes, axis_size=length)(bart)
@@ -518,18 +530,14 @@ def _save_state_to_trace(
     main_idx = jnp.where(noop_cond, noop_idx, main_idx)
 
     # prepare array index
-    num_chains = bart.num_chains()
-    burnin_trace = _set(burnin_trace, burnin_idx, burnin_extractor(bart), num_chains)
-    main_trace = _set(main_trace, main_idx, main_extractor(bart), num_chains)
+    burnin_trace = _set(burnin_trace, burnin_idx, burnin_extractor(bart))
+    main_trace = _set(main_trace, main_idx, main_extractor(bart))
 
     return burnin_trace, main_trace
 
 
 def _set(
-    trace: PyTree[Array, ' T'],
-    index: Int32[Array, ''],
-    val: PyTree[Array, ' T'],
-    num_chains: int | None,
+    trace: PyTree[Array, ' T'], index: Int32[Array, ''], val: PyTree[Array, ' T']
 ) -> PyTree[Array, ' T']:
     """Do ``trace[index] = val`` but fancier."""
     state_axes = chain_vmap_axes(val)
@@ -551,12 +559,8 @@ def _set(
             # below needed to traverse `chain_axis`.
             return trace
 
-        if num_chains is None or tc is None:
-            ndindex = (index, ...)
-        else:
-            sample_axis = state_k + 1 if tc == state_k else 0
-            ndindex = (slice(None),) * sample_axis + (index, ...)
-
+        sample_axis = _trace_sample_axis(state_k, tc)
+        ndindex = (slice(None),) * sample_axis + (index, ...)
         return trace.at[ndindex].set(val, mode='drop')
 
     return tree.map(
@@ -787,18 +791,10 @@ def evaluate_trace(
     num_devices = get_axis_size(mesh, 'chains') * get_axis_size(mesh, 'data')
     max_io_nbytes *= num_devices
 
-    # determine batching axes (shape-based has_chains check; the marker is
-    # always set on chain-bearing trace fields, so it can't tell us whether
-    # the actual array has a chain dim)
-    has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
+    # determine batching axes
     is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
-
-    if has_chains:
-        tc_split = chain_vmap_axes(trace).split_tree
-        tc_leaf = chain_vmap_axes(trace).leaf_tree
-    else:
-        tc_split = None
-        tc_leaf = None
+    tc_split = chain_vmap_axes(trace).split_tree
+    tc_leaf = chain_vmap_axes(trace).leaf_tree
 
     def axis_in_trace(core_pos: int, chain_pos: int | None) -> int:
         """Where a core (non-chain) axis sits in the trace, given chain at chain_pos."""
@@ -871,7 +867,7 @@ def evaluate_trace(
     y_centered: Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']
     y_centered = batched_eval(X, trees)
     y = y_centered + trace.offset[..., None]
-    if flatten_chains and has_chains:
+    if flatten_chains and tc_split is not None:
         # chain position in y: tree_axis and hts_axis were dropped, so axes
         # before the chain in the trace are shifted left by the number of
         # dropped axes below the chain.

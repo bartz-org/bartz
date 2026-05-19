@@ -142,13 +142,13 @@ def accept_moves_and_sample_leaves(
 class Counts(Module):
     """Number of datapoints in the nodes involved in proposed moves for each tree."""
 
-    left: UInt[Array, '*chains num_trees'] = field(chains=True)
+    left: UInt[Array, '*chains num_trees'] = field(chains=0)
     """Number of datapoints in the left child."""
 
-    right: UInt[Array, '*chains num_trees'] = field(chains=True)
+    right: UInt[Array, '*chains num_trees'] = field(chains=0)
     """Number of datapoints in the right child."""
 
-    total: UInt[Array, '*chains num_trees'] = field(chains=True)
+    total: UInt[Array, '*chains num_trees'] = field(chains=0)
     """Number of datapoints in the parent (``= left + right``)."""
 
 
@@ -161,17 +161,17 @@ class Precs(Module):
 
     left: (
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=True)
+    ) = field(chains=0)
     """Likelihood precision scale in the left child."""
 
     right: (
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=True)
+    ) = field(chains=0)
     """Likelihood precision scale in the right child."""
 
     total: (
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=True)
+    ) = field(chains=0)
     """Likelihood precision scale in the parent (``= left + right``)."""
 
 
@@ -198,34 +198,34 @@ class PreLkV(Module):
 
     left: (
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=True)
+    ) = field(chains=0)
     """Full conditional variance, scaled covariance, or precision cholesky, for
     the left leaf."""
 
     right: (
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=True)
+    ) = field(chains=0)
     """Full conditional variance, scaled covariance, or precision cholesky, for
     the right leaf."""
 
     total: (
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=True)
+    ) = field(chains=0)
     """Full conditional variance, scaled covariance, or precision cholesky, for
     the the join of the left and right leaves."""
 
-    log_sqrt_term: Float32[Array, '*chains num_trees'] = field(chains=True)
+    log_sqrt_term: Float32[Array, '*chains num_trees'] = field(chains=0)
     """The logarithm of the square root term of the likelihood ratio."""
 
 
 class PreLk(Module):
     """Non-sequential terms of the likelihood ratio shared by all trees."""
 
-    exp_factor: Float32[Array, '*chains'] | None = field(chains=True)
+    exp_factor: Float32[Array, '*chains'] | None = field(chains=0)
     """The factor to multiply the likelihood ratio by, shared by all trees.
     Set only in the univariate path."""
 
-    error_cov_inv: Float32[Array, '*chains k k'] | None = field(chains=True)
+    error_cov_inv: Float32[Array, '*chains k k'] | None = field(chains=0)
     """The global error precision scale. Set only in the multivariate
     heteroskedastic vector-weight case."""
 
@@ -242,14 +242,14 @@ class PreLf(Module):
     mean_factor: (
         Float32[Array, '*chains num_trees 2**d']
         | Float32[Array, '*chains num_trees k k 2**d']
-    ) = field(chains=True)
+    ) = field(chains=0)
     """The factor to be right-multiplied by the sum of the scaled residuals to
     obtain the posterior mean."""
 
     centered_leaves: (
         Float32[Array, '*chains num_trees 2**d']
         | Float32[Array, '*chains num_trees k 2**d']
-    ) = field(chains=True)
+    ) = field(chains=0)
     """The mean-zero normal values to be added to the posterior mean to
     obtain the posterior leaf samples."""
 
@@ -268,7 +268,7 @@ class ParallelStageOut(Module):
         Float32[Array, '*chains num_trees 2**d']
         | Int32[Array, '*chains num_trees 2**d']
         | Float32[Array, '*chains num_trees k k 2**d']
-    ) = field(chains=True)
+    ) = field(chains=0)
     """The likelihood precision scale in each potential or actual leaf node."""
 
     move_precs: Precs | Counts

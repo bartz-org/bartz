@@ -81,14 +81,14 @@ class BurninTrace(Module):
     error_cov_inv: (
         Float32[Array, '*chains_and_samples']
         | Float32[Array, '*chains_and_samples k k']
-    ) = field(chains=True)
-    theta: Float32[Array, '*chains_and_samples'] | None = field(chains=True)
-    grow_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
-    grow_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
-    prune_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
-    prune_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
-    log_likelihood: Float32[Array, '*chains_and_samples'] | None = field(chains=True)
-    log_trans_prior: Float32[Array, '*chains_and_samples'] | None = field(chains=True)
+    ) = field(chains=0)
+    theta: Float32[Array, '*chains_and_samples'] | None = field(chains=0)
+    grow_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=0)
+    grow_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=0)
+    prune_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=0)
+    prune_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=0)
+    log_likelihood: Float32[Array, '*chains_and_samples'] | None = field(chains=0)
+    log_trans_prior: Float32[Array, '*chains_and_samples'] | None = field(chains=0)
 
     @classmethod
     def from_state(cls, state: State) -> 'BurninTrace':
@@ -111,11 +111,11 @@ class MainTrace(BurninTrace):
     leaf_tree: (
         Float32[Array, '*chains_and_samples 2**d']
         | Float32[Array, '*chains_and_samples k 2**d']
-    ) = field(chains=True)
-    var_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=True)
-    split_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=True)
+    ) = field(chains=0)
+    var_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=0)
+    split_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=0)
     offset: Float32[Array, '*samples'] | Float32[Array, '*samples k']
-    varprob: Float32[Array, '*chains_and_samples p'] | None = field(chains=True)
+    varprob: Float32[Array, '*chains_and_samples p'] | None = field(chains=0)
 
     @classmethod
     def from_state(cls, state: State) -> 'MainTrace':

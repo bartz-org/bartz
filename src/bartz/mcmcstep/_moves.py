@@ -40,66 +40,64 @@ from bartz.mcmcstep._state import Forest, field
 class Moves(Module):
     """Moves proposed to modify each tree."""
 
-    allowed: Bool[Array, '*chains num_trees'] = field(chains=True)
+    allowed: Bool[Array, '*chains num_trees'] = field(chains=0)
     """Whether there is a possible move. If `False`, the other values may not
     make sense. The only case in which a move is marked as allowed but is
     then vetoed is if it does not satisfy `min_points_per_leaf`, which for
     efficiency is implemented post-hoc without changing the rest of the
     MCMC logic."""
 
-    grow: Bool[Array, '*chains num_trees'] = field(chains=True)
+    grow: Bool[Array, '*chains num_trees'] = field(chains=0)
     """Whether the move is a grow move or a prune move."""
 
-    num_growable: UInt[Array, '*chains num_trees'] = field(chains=True)
+    num_growable: UInt[Array, '*chains num_trees'] = field(chains=0)
     """The number of growable leaves in the original tree."""
 
-    node: UInt[Array, '*chains num_trees'] = field(chains=True)
+    node: UInt[Array, '*chains num_trees'] = field(chains=0)
     """The index of the leaf to grow or node to prune."""
 
-    left: UInt[Array, '*chains num_trees'] = field(chains=True)
+    left: UInt[Array, '*chains num_trees'] = field(chains=0)
     """The index of the left child of 'node'."""
 
-    right: UInt[Array, '*chains num_trees'] = field(chains=True)
+    right: UInt[Array, '*chains num_trees'] = field(chains=0)
     """The index of the right child of 'node'."""
 
-    partial_ratio: Float32[Array, '*chains num_trees'] | None = field(chains=True)
+    partial_ratio: Float32[Array, '*chains num_trees'] | None = field(chains=0)
     """A factor of the Metropolis-Hastings ratio of the move. It lacks the
     likelihood ratio, the probability of proposing the prune move, and the
     probability that the children of the modified node are terminal. If the
     move is PRUNE, the ratio is inverted. `None` once
     `log_trans_prior_ratio` has been computed."""
 
-    log_trans_prior_ratio: None | Float32[Array, '*chains num_trees'] = field(
-        chains=True
-    )
+    log_trans_prior_ratio: None | Float32[Array, '*chains num_trees'] = field(chains=0)
     """The logarithm of the product of the transition and prior terms of the
     Metropolis-Hastings ratio for the acceptance of the proposed move.
     `None` if not yet computed. If PRUNE, the log-ratio is negated."""
 
-    grow_var: UInt[Array, '*chains num_trees'] = field(chains=True)
+    grow_var: UInt[Array, '*chains num_trees'] = field(chains=0)
     """The decision axes of the new rules."""
 
-    grow_split: UInt[Array, '*chains num_trees'] = field(chains=True)
+    grow_split: UInt[Array, '*chains num_trees'] = field(chains=0)
     """The decision boundaries of the new rules."""
 
-    var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=0)
     """The updated decision axes of the trees, valid whatever move."""
 
-    affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=0)
     """A partially updated `affluence_tree`, marking non-leaf nodes that would
     become leaves if the move was accepted. This mark initially (out of
     `propose_moves`) takes into account if there would be available decision
     rules to grow the leaf, and whether there are enough datapoints in the
     node is instead checked later in `accept_moves_parallel_stage`."""
 
-    logu: Float32[Array, '*chains num_trees'] = field(chains=True)
+    logu: Float32[Array, '*chains num_trees'] = field(chains=0)
     """The logarithm of a uniform (0, 1] random variable to be used to
     accept the move. It's in (-oo, 0]."""
 
-    acc: None | Bool[Array, '*chains num_trees'] = field(chains=True)
+    acc: None | Bool[Array, '*chains num_trees'] = field(chains=0)
     """Whether the move was accepted. `None` if not yet computed."""
 
-    to_prune: None | Bool[Array, '*chains num_trees'] = field(chains=True)
+    to_prune: None | Bool[Array, '*chains num_trees'] = field(chains=0)
     """Whether the final operation to apply the move is pruning. This indicates
     an accepted prune move or a rejected grow move. `None` if not yet
     computed."""

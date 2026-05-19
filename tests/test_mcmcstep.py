@@ -33,6 +33,7 @@ from typing import Literal, NamedTuple
 import jax
 import pytest
 from beartype import beartype
+from equinox import Module
 from jax import debug_key_reuse, make_mesh, random, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
@@ -62,7 +63,7 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._state import StepConfig, chain_vmap_axes, data_vmap_axes
+from bartz.mcmcstep._state import StepConfig, chain_vmap_axes, data_vmap_axes, field
 from bartz.mcmcstep._step import (
     Counts,
     _compute_likelihood_ratio_mv,
@@ -113,6 +114,149 @@ def _minimal_step_config() -> StepConfig:
         prec_count_num_trees=None,
         mesh=None,
     )
+
+
+class _MarkerLeaf(Module):
+    """Module used by `TestVmapAxesMarkers` covering all marker combinations."""
+
+    chained: Array = field(chains=0, default_factory=lambda: jnp.zeros(2))
+    datad: Array = field(data=-1, default_factory=lambda: jnp.zeros(2))
+    both: Array = field(chains=0, data=-1, default_factory=lambda: jnp.zeros(2))
+    plain: Array = field(default_factory=lambda: jnp.zeros(2))
+    static_thing: int = field(static=True, default=42)
+
+
+class TestVmapAxesMarkers:
+    """Test the `field` / `chain_vmap_axes` / `data_vmap_axes` machinery."""
+
+    @pytest.fixture
+    def x(self) -> _MarkerLeaf:
+        """Build a module instance exercising every marker combination."""
+        return _MarkerLeaf()
+
+    def test_default_none(self, x: _MarkerLeaf) -> None:
+        """An unmarked field becomes None in both axis views."""
+        assert chain_vmap_axes(x).plain is None
+        assert data_vmap_axes(x).plain is None
+
+    def test_chain_marker_value(self, x: _MarkerLeaf) -> None:
+        """A chains-marked field reports its integer axis under chains."""
+        assert chain_vmap_axes(x).chained == 0
+        assert data_vmap_axes(x).chained is None
+
+    def test_data_marker_value(self, x: _MarkerLeaf) -> None:
+        """A data-marked field reports its integer axis under data."""
+        assert chain_vmap_axes(x).datad is None
+        assert data_vmap_axes(x).datad == -1
+
+    def test_both_markers(self, x: _MarkerLeaf) -> None:
+        """A field marked under both keys reports each axis on its own view."""
+        assert chain_vmap_axes(x).both == 0
+        assert data_vmap_axes(x).both == -1
+
+    def test_static_passthrough(self, x: _MarkerLeaf) -> None:
+        """Static fields keep their original (non-axis) value."""
+        assert chain_vmap_axes(x).static_thing == 42
+        assert data_vmap_axes(x).static_thing == 42
+
+    def test_non_canonical_axis(self) -> None:
+        """The machinery returns the stored integer verbatim, not 0 / -1."""
+
+        class _NonCanonicalMarkers(Module):
+            """Module that uses non-default integer axis indices."""
+
+            a: Array = field(chains=2)
+            b: Array = field(data=3)
+            c: Array = field(chains=-2, data=5)
+
+        x = _NonCanonicalMarkers(a=jnp.zeros(()), b=jnp.zeros(()), c=jnp.zeros(()))
+        cax = chain_vmap_axes(x)
+        dax = data_vmap_axes(x)
+        assert cax.a == 2
+        assert cax.b is None
+        assert cax.c == -2
+        assert dax.a is None
+        assert dax.b == 3
+        assert dax.c == 5
+
+    def test_nested_module(self) -> None:
+        """Recursion descends into Module-valued fields."""
+
+        class _InnerMarker(Module):
+            chain_arr: Array = field(chains=0)
+            data_arr: Array = field(data=-1)
+
+        class _OuterMarker(Module):
+            inner: _InnerMarker
+            outer_chain: Array = field(chains=0)
+
+        x = _OuterMarker(
+            inner=_InnerMarker(chain_arr=jnp.zeros(()), data_arr=jnp.zeros(())),
+            outer_chain=jnp.zeros(()),
+        )
+        cax = chain_vmap_axes(x)
+        dax = data_vmap_axes(x)
+        assert cax.outer_chain == 0
+        assert cax.inner.chain_arr == 0
+        assert cax.inner.data_arr is None
+        assert dax.outer_chain is None
+        assert dax.inner.chain_arr is None
+        assert dax.inner.data_arr == -1
+
+    def test_subtree_broadcast(self) -> None:
+        """A marked pytree-valued field gets the marker on every leaf."""
+
+        class _ContainerMarker(Module):
+            tup: tuple = field(chains=0)
+            dct: dict = field(data=-1)
+
+        x = _ContainerMarker(
+            tup=(jnp.zeros(()), jnp.zeros(())),
+            dct={'p': jnp.zeros(()), 'q': jnp.zeros(())},
+        )
+        cax = chain_vmap_axes(x)
+        dax = data_vmap_axes(x)
+        assert cax.tup == (0, 0)
+        assert cax.dct == {'p': None, 'q': None}
+        assert dax.tup == (None, None)
+        assert dax.dct == {'p': -1, 'q': -1}
+
+    def test_none_valued_field(self) -> None:
+        """A marked field holding None yields None (empty pytree)."""
+
+        class _OptionalMarker(Module):
+            maybe: None | Array = field(chains=0)
+
+        x = _OptionalMarker(maybe=None)
+        assert chain_vmap_axes(x).maybe is None
+        assert data_vmap_axes(x).maybe is None
+
+    def test_bool_rejected(self) -> None:
+        """field() rejects bool to avoid the int-subclass footgun."""
+        with pytest.raises(AssertionError):
+            field(chains=True)
+        with pytest.raises(AssertionError):
+            field(data=False)
+        with pytest.raises(AssertionError):
+            field(chains=True, data=-1)
+
+    def test_pytree_container_of_modules(self) -> None:
+        """A list of Modules at the top level is walked per-element."""
+        x = [_MarkerLeaf(), _MarkerLeaf()]
+        cax = chain_vmap_axes(x)
+        dax = data_vmap_axes(x)
+        assert isinstance(cax, list)
+        assert len(cax) == 2
+        for el in cax:
+            assert el.chained == 0
+            assert el.both == 0
+            assert el.plain is None
+            assert el.datad is None
+        for el in dax:
+            assert el.datad == -1
+            assert el.both == -1
+            assert el.plain is None
+            assert el.chained is None
 
 
 def vmap_randint_masked(

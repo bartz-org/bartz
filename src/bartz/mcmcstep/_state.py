@@ -78,31 +78,36 @@ class OutcomeType(Enum):
     """Binary outcome in {0, 1} with probit link."""
 
 
-def field(*, chains: bool = False, data: bool = False, **kwargs: Any):  # noqa: ANN202
-    """Extend `equinox.field` with two new parameters.
+def field(*, chains: int | None = None, data: int | None = None, **kwargs: Any):  # noqa: ANN202
+    """Extend `equinox.field` with chain/data axis markers.
 
     Parameters
     ----------
     chains
-        Whether the arrays in the field have an optional first axis that
-        represents independent Markov chains.
+        Index of the chain axis for the field's arrays, or `None` if the field
+        has no chain axis.
     data
-        Whether the last axis of the arrays in the field represent units of
-        the data.
+        Index of the data axis for the field's arrays, or `None` if the field
+        has no data axis.
     **kwargs
         Other parameters passed to `equinox.field`.
 
     Returns
     -------
-    A dataclass field descriptor with the special attributes in the metadata, unset if False.
+    A dataclass field descriptor with the axis indices in the metadata, unset
+    if `None`.
     """
     metadata = dict(kwargs.pop('metadata', {}))
     assert 'chains' not in metadata
     assert 'data' not in metadata
-    if chains:
-        metadata['chains'] = True
-    if data:
-        metadata['data'] = True
+    for name, value in (('chains', chains), ('data', data)):
+        # bool is a subclass of int; reject it so a boolean value does not
+        # silently mean axis 0 or 1.
+        assert not isinstance(value, bool), (
+            f'{name!r} marker must be an int axis index or None, not bool'
+        )
+        if value is not None:
+            metadata[name] = value
     return eqx_field(metadata=metadata, **kwargs)
 
 
@@ -117,31 +122,36 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     ----------
     x
         A pytree. Subpytrees that are Module attributes marked with
-        ``field(..., chains=True)`` are considered to have a leading chain axis.
+        ``field(chains=<int>)`` are considered to have a chain axis at that
+        index.
 
     Returns
     -------
-    A pytree with the same structure as `x` with 0 or None in the leaves.
+    A pytree with the same structure as `x`, with each leaf set to the chain
+    axis index declared by its owning ``field(chains=...)`` marker, or `None`
+    for unmarked leaves.
     """
-    return _find_metadata(x, 'chains', 0, None)
+    return _find_metadata(x, 'chains')
 
 
 def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     """Determine vmapping axes for data.
 
-    This is analogous to `chain_vmap_axes` but returns -1 for all fields
-    marked with ``field(..., data=True)``.
+    Analogous to `chain_vmap_axes` but reads the ``field(data=...)`` markers.
     """
-    return _find_metadata(x, 'data', -1, None)
+    return _find_metadata(x, 'data')
 
 
 T = TypeVar('T')
 
 
-def _find_metadata(
-    x: PyTree[Any, ' S'], key: Hashable, if_true: T, if_false: T
-) -> PyTree[T, ' S']:
-    """Replace all subtrees of x marked with a metadata key."""
+def _find_metadata(x: PyTree[Any, ' S'], key: Hashable) -> PyTree[Any, ' S']:
+    """Walk `x` replacing marked subtrees with their metadata value.
+
+    For each Module field whose metadata contains `key`, the field's subtree
+    is replaced with the stored value broadcast across its leaves; leaves
+    outside any marked field become `None`.
+    """
 
     def is_lazy_array(x: object) -> bool:
         return isinstance(x, _LazyArray)
@@ -155,18 +165,21 @@ def _find_metadata(
             v = getattr(x, f.name)
             if f.metadata.get('static', False):
                 args.append(v)
-            elif f.metadata.get(key, False):
-                subtree = tree.map(lambda _: if_true, v, is_leaf=is_lazy_array)
+            elif key in f.metadata:
+                value = f.metadata[key]
+                subtree = tree.map(
+                    lambda _, value=value: value, v, is_leaf=is_lazy_array
+                )
                 args.append(subtree)
             else:
-                args.append(_find_metadata(v, key, if_true, if_false))
+                args.append(_find_metadata(v, key))
         return x.__class__(*args)
 
-    def get_axes(x: object) -> PyTree[T]:
+    def get_axes(x: object) -> PyTree:
         if is_module(x):
-            return _find_metadata(x, key, if_true, if_false)
+            return _find_metadata(x, key)
         else:
-            return tree.map(lambda _: if_false, x, is_leaf=is_lazy_array)
+            return tree.map(lambda _: None, x, is_leaf=is_lazy_array)
 
     def is_leaf(x: object) -> bool:
         return isinstance(x, Module)  # this catches _LazyArray as well
@@ -180,16 +193,16 @@ class Forest(Module):
     leaf_tree: (
         Float32[Array, '*chains num_trees 2**d']
         | Float32[Array, '*chains num_trees k 2**d']
-    ) = field(chains=True)
+    ) = field(chains=0)
     """The leaf values."""
 
-    var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=0)
     """The decision axes."""
 
-    split_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    split_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=0)
     """The decision boundaries."""
 
-    affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=True)
+    affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=0)
     """Marks leaves that can be grown."""
 
     max_split: UInt[Array, ' p']
@@ -208,7 +221,7 @@ class Forest(Module):
     p_propose_grow: Float32[Array, ' 2**(d-1)']
     """The unnormalized probability of picking a leaf for a grow proposal."""
 
-    leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=True, data=True)
+    leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=0, data=-1)
     """The index of the leaf each datapoints falls into, for each tree."""
 
     min_points_per_decision_node: Int32[Array, ''] | None
@@ -217,23 +230,23 @@ class Forest(Module):
     min_points_per_leaf: Int32[Array, ''] | None
     """The minimum number of data points in a leaf node."""
 
-    log_trans_prior: Float32[Array, '*chains num_trees'] | None = field(chains=True)
+    log_trans_prior: Float32[Array, '*chains num_trees'] | None = field(chains=0)
     """The log transition and prior Metropolis-Hastings ratio for the
     proposed move on each tree."""
 
-    log_likelihood: Float32[Array, '*chains num_trees'] | None = field(chains=True)
+    log_likelihood: Float32[Array, '*chains num_trees'] | None = field(chains=0)
     """The log likelihood ratio."""
 
-    grow_prop_count: Int32[Array, '*chains'] = field(chains=True)
+    grow_prop_count: Int32[Array, '*chains'] = field(chains=0)
     """The number of grow proposals made during one full MCMC cycle."""
 
-    prune_prop_count: Int32[Array, '*chains'] = field(chains=True)
+    prune_prop_count: Int32[Array, '*chains'] = field(chains=0)
     """The number of prune proposals made during one full MCMC cycle."""
 
-    grow_acc_count: Int32[Array, '*chains'] = field(chains=True)
+    grow_acc_count: Int32[Array, '*chains'] = field(chains=0)
     """The number of grow moves accepted during one full MCMC cycle."""
 
-    prune_acc_count: Int32[Array, '*chains'] = field(chains=True)
+    prune_acc_count: Int32[Array, '*chains'] = field(chains=0)
     """The number of prune moves accepted during one full MCMC cycle."""
 
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'] | None
@@ -242,12 +255,12 @@ class Forest(Module):
     The prior covariance of the sum of trees is
     ``num_trees * leaf_prior_cov_inv^-1``."""
 
-    log_s: Float32[Array, '*chains p'] | None = field(chains=True)
+    log_s: Float32[Array, '*chains p'] | None = field(chains=0)
     """The logarithm of the prior probability for choosing a variable to split
     along in a decision rule, conditional on the ancestors. Not normalized.
     If `None`, use a uniform distribution."""
 
-    theta: Float32[Array, '*chains'] | None = field(chains=True)
+    theta: Float32[Array, '*chains'] | None = field(chains=0)
     """The concentration parameter for the Dirichlet prior on the variable
     distribution `s`. Required only to update `log_s`."""
 
@@ -300,16 +313,16 @@ class StepConfig(Module):
 class State(Module):
     """Represents the MCMC state of BART."""
 
-    X: UInt[Array, 'p n'] = field(data=True)
+    X: UInt[Array, 'p n'] = field(data=-1)
     """The predictors."""
 
-    binary_y: None | Bool[Array, ' n'] | Bool[Array, 'k n'] = field(data=True)
+    binary_y: None | Bool[Array, ' n'] | Bool[Array, 'k n'] = field(data=-1)
     """The response as booleans for binary regression, `None` for continuous.
     In the mixed binary-continuous case, only the binary outcome components
     are stored, with shape ``(kb, n)``."""
 
     z: None | Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
-        chains=True, data=True
+        chains=0, data=-1
     )
     """The latent variable for binary regression. `None` in continuous
     regression. In the mixed binary-continuous case, only the binary outcome
@@ -324,25 +337,23 @@ class State(Module):
     """Constant shift added to the sum of trees."""
 
     resid: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
-        chains=True, data=True
+        chains=0, data=-1
     )
     """The residuals (`y` or `z` minus sum of trees)."""
 
     error_cov_inv: Float32[Array, '*chains'] | Float32[Array, '*chains k k'] = field(
-        chains=True
+        chains=0
     )
     """The inverse error covariance (scalar for univariate, matrix for multivariate).
     Identity in binary regression."""
 
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None = field(data=True)
+    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None = field(data=-1)
     """The scale on the error precision. `None` in binary regression. With
     scalar per-datapoint weights, shape ``(n,)`` and value
     ``1 / error_scale ** 2``. With vector per-datapoint weights, shape ``(k, k, n)``
     and value ``1/outer(error_scale, error_scale)`` repeated over datapoints."""
 
-    inv_sdev_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(
-        data=True
-    )
+    inv_sdev_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(data=-1)
     """The reciprocal of the per-observation error standard-deviation scale.
     `None` in binary regression. Shape ``(n,)`` for scalar weights, or
     ``(k, n)`` for per-component vector weights."""

@@ -40,6 +40,7 @@ from jax import NamedSharding, device_put, jit, lax, make_mesh, random, tree, vm
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
+from numpy.lib.array_utils import normalize_axis_index
 
 # WORKAROUND(jax<0.6.1): shard_map was promoted from jax.experimental to top-level in 0.6.1
 try:
@@ -85,10 +86,12 @@ def field(*, chains: int | None = None, data: int | None = None, **kwargs: Any):
     ----------
     chains
         Index of the chain axis for the field's arrays, or `None` if the field
-        has no chain axis.
+        has no chain axis. Any int is accepted, including negative indices with
+        the usual numpy semantics (e.g. ``-1`` for the last axis); the index is
+        normalized per-leaf against the leaf's ``ndim`` by `chain_vmap_axes`.
     data
         Index of the data axis for the field's arrays, or `None` if the field
-        has no data axis.
+        has no data axis. Same conventions as `chains`.
     **kwargs
         Other parameters passed to `equinox.field`.
 
@@ -128,8 +131,9 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     Returns
     -------
     A pytree with the same structure as `x`, with each leaf set to the chain
-    axis index declared by its owning ``field(chains=...)`` marker, or `None`
-    for unmarked leaves.
+    axis index declared by its owning ``field(chains=...)`` marker, normalized
+    against the leaf's ``ndim`` (so the returned indices are non-negative), or
+    `None` for unmarked leaves.
     """
     return _find_metadata(x, 'chains')
 
@@ -138,6 +142,7 @@ def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     """Determine vmapping axes for data.
 
     Analogous to `chain_vmap_axes` but reads the ``field(data=...)`` markers.
+    The returned indices are normalized per-leaf against the leaf's ``ndim``.
     """
     return _find_metadata(x, 'data')
 
@@ -145,12 +150,25 @@ def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
 T = TypeVar('T')
 
 
+def _normalize_axis_for_leaf(leaf: object, raw: int) -> int | None:
+    """Normalize a marker axis index against `leaf.ndim`, returning None if out-of-bounds."""
+    if leaf is None:
+        return None
+    # If the leaf doesn't actually have the marked axis (e.g. a scalar/low-ndim
+    # leaf in single-chain mode), report no axis — per design, the presence of
+    # a chain dim is shape-based.
+    if not -leaf.ndim <= raw < leaf.ndim:
+        return None
+    return int(normalize_axis_index(raw, leaf.ndim))
+
+
 def _find_metadata(x: PyTree[Any, ' S'], key: Hashable) -> PyTree[Any, ' S']:
     """Walk `x` replacing marked subtrees with their metadata value.
 
     For each Module field whose metadata contains `key`, the field's subtree
-    is replaced with the stored value broadcast across its leaves; leaves
-    outside any marked field become `None`.
+    is replaced with the stored value normalized per-leaf against the leaf's
+    ``ndim`` (so the returned indices are always non-negative); leaves outside
+    any marked field become `None`.
     """
 
     def is_lazy_array(x: object) -> bool:
@@ -166,9 +184,9 @@ def _find_metadata(x: PyTree[Any, ' S'], key: Hashable) -> PyTree[Any, ' S']:
             if f.metadata.get('static', False):
                 args.append(v)
             elif key in f.metadata:
-                value = f.metadata[key]
+                raw = f.metadata[key]
                 subtree = tree.map(
-                    lambda _, value=value: value, v, is_leaf=is_lazy_array
+                    partial(_normalize_axis_for_leaf, raw=raw), v, is_leaf=is_lazy_array
                 )
                 args.append(subtree)
             else:
@@ -380,8 +398,8 @@ class State(Module):
         """Return the number of chains, or `None` if not multichain."""
         if self.forest.var_tree.ndim == 2:
             return None
-        else:
-            return self.forest.var_tree.shape[0]
+        c = chain_vmap_axes(self.forest).var_tree
+        return self.forest.var_tree.shape[c]
 
 
 def _check_diagonal(error_cov_scale: Float32[Array, 'k k']) -> Float32[Array, 'k k']:

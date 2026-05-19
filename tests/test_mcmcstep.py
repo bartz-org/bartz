@@ -28,7 +28,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import replace
 from functools import partial, wraps
-from typing import Literal, NamedTuple
+from typing import NamedTuple
 
 import jax
 import pytest
@@ -119,10 +119,10 @@ def _minimal_step_config() -> StepConfig:
 class _MarkerLeaf(Module):
     """Module used by `TestVmapAxesMarkers` covering all marker combinations."""
 
-    chained: Array = field(chains=0, default_factory=lambda: jnp.zeros(2))
-    datad: Array = field(data=-1, default_factory=lambda: jnp.zeros(2))
-    both: Array = field(chains=0, data=-1, default_factory=lambda: jnp.zeros(2))
-    plain: Array = field(default_factory=lambda: jnp.zeros(2))
+    chained: Array = field(chains=0, default_factory=lambda: jnp.zeros((2, 3)))
+    datad: Array = field(data=-1, default_factory=lambda: jnp.zeros((2, 3)))
+    both: Array = field(chains=0, data=-1, default_factory=lambda: jnp.zeros((2, 3)))
+    plain: Array = field(default_factory=lambda: jnp.zeros((2, 3)))
     static_thing: int = field(static=True, default=42)
 
 
@@ -145,39 +145,64 @@ class TestVmapAxesMarkers:
         assert data_vmap_axes(x).chained is None
 
     def test_data_marker_value(self, x: _MarkerLeaf) -> None:
-        """A data-marked field reports its integer axis under data."""
+        """A data-marked field reports its integer axis under data (normalized)."""
         assert chain_vmap_axes(x).datad is None
-        assert data_vmap_axes(x).datad == -1
+        # raw marker is -1 on a 2-D leaf -> normalized to 1
+        assert data_vmap_axes(x).datad == 1
 
     def test_both_markers(self, x: _MarkerLeaf) -> None:
         """A field marked under both keys reports each axis on its own view."""
         assert chain_vmap_axes(x).both == 0
-        assert data_vmap_axes(x).both == -1
+        # raw marker is -1 on a 2-D leaf -> normalized to 1
+        assert data_vmap_axes(x).both == 1
 
     def test_static_passthrough(self, x: _MarkerLeaf) -> None:
         """Static fields keep their original (non-axis) value."""
         assert chain_vmap_axes(x).static_thing == 42
         assert data_vmap_axes(x).static_thing == 42
 
-    def test_non_canonical_axis(self) -> None:
-        """The machinery returns the stored integer verbatim, not 0 / -1."""
+    def test_normalization(self) -> None:
+        """Negative markers are normalized per-leaf against the leaf's ndim."""
 
         class _NonCanonicalMarkers(Module):
             """Module that uses non-default integer axis indices."""
 
             a: Array = field(chains=2)
-            b: Array = field(data=3)
-            c: Array = field(chains=-2, data=5)
+            b: Array = field(data=-1)
+            c: Array = field(chains=-2, data=0)
 
-        x = _NonCanonicalMarkers(a=jnp.zeros(()), b=jnp.zeros(()), c=jnp.zeros(()))
+        arr = jnp.zeros((2, 3, 4))
+        x = _NonCanonicalMarkers(a=arr, b=arr, c=arr)
         cax = chain_vmap_axes(x)
         dax = data_vmap_axes(x)
+        # 3-D leaves: chains=2 -> 2, chains=-2 -> 1
         assert cax.a == 2
         assert cax.b is None
-        assert cax.c == -2
+        assert cax.c == 1
+        # 3-D leaves: data=-1 -> 2, data=0 -> 0
         assert dax.a is None
-        assert dax.b == 3
-        assert dax.c == 5
+        assert dax.b == 2
+        assert dax.c == 0
+
+    def test_negative_marker_normalization(self) -> None:
+        """A non-trivial negative chain marker on a 3-D leaf normalizes correctly."""
+
+        class _NegativeChainMarker(Module):
+            arr: Array = field(chains=-2)
+
+        x = _NegativeChainMarker(arr=jnp.zeros((2, 3, 4)))
+        # chains=-2 on a 3-D leaf -> normalized to 1
+        assert chain_vmap_axes(x).arr == 1
+
+    def test_marker_out_of_bounds_for_leaf(self) -> None:
+        """A marker whose absolute value exceeds the leaf ndim yields None."""
+
+        class _ChainScalar(Module):
+            scalar: Array = field(chains=0)
+
+        # 0-D leaf can't have axis 0; the marker is reported as None
+        x = _ChainScalar(scalar=jnp.zeros(()))
+        assert chain_vmap_axes(x).scalar is None
 
     def test_nested_module(self) -> None:
         """Recursion descends into Module-valued fields."""
@@ -191,8 +216,8 @@ class TestVmapAxesMarkers:
             outer_chain: Array = field(chains=0)
 
         x = _OuterMarker(
-            inner=_InnerMarker(chain_arr=jnp.zeros(()), data_arr=jnp.zeros(())),
-            outer_chain=jnp.zeros(()),
+            inner=_InnerMarker(chain_arr=jnp.zeros(2), data_arr=jnp.zeros(2)),
+            outer_chain=jnp.zeros(2),
         )
         cax = chain_vmap_axes(x)
         dax = data_vmap_axes(x)
@@ -201,7 +226,8 @@ class TestVmapAxesMarkers:
         assert cax.inner.data_arr is None
         assert dax.outer_chain is None
         assert dax.inner.chain_arr is None
-        assert dax.inner.data_arr == -1
+        # 1-D leaf: data=-1 normalized to 0
+        assert dax.inner.data_arr == 0
 
     def test_subtree_broadcast(self) -> None:
         """A marked pytree-valued field gets the marker on every leaf."""
@@ -211,15 +237,15 @@ class TestVmapAxesMarkers:
             dct: dict = field(data=-1)
 
         x = _ContainerMarker(
-            tup=(jnp.zeros(()), jnp.zeros(())),
-            dct={'p': jnp.zeros(()), 'q': jnp.zeros(())},
+            tup=(jnp.zeros(2), jnp.zeros(2)), dct={'p': jnp.zeros(2), 'q': jnp.zeros(2)}
         )
         cax = chain_vmap_axes(x)
         dax = data_vmap_axes(x)
         assert cax.tup == (0, 0)
         assert cax.dct == {'p': None, 'q': None}
         assert dax.tup == (None, None)
-        assert dax.dct == {'p': -1, 'q': -1}
+        # 1-D leaves: data=-1 normalized to 0
+        assert dax.dct == {'p': 0, 'q': 0}
 
     def test_none_valued_field(self) -> None:
         """A marked field holding None yields None (empty pytree)."""
@@ -253,8 +279,9 @@ class TestVmapAxesMarkers:
             assert el.plain is None
             assert el.datad is None
         for el in dax:
-            assert el.datad == -1
-            assert el.both == -1
+            # _MarkerLeaf uses 2-D leaves: data=-1 normalized to 1
+            assert el.datad == 1
+            assert el.both == 1
             assert el.plain is None
             assert el.chained is None
 
@@ -931,9 +958,14 @@ class TestMultichain:
         tree.map_with_path(check_equal, mc_state, stacked_state)
 
     def chain_vmap_axes(self, state: State) -> State:
-        """Old manual version of `chain_vmap_axes(_: State)`."""
+        """Manual reference for `chain_vmap_axes(_: State)`.
 
-        def choose_vmap_index(path: KeyPath, _: Array) -> Literal[0, None]:
+        Mirrors the production semantics: the chain marker is 0 on every
+        chain-bearing field; each leaf normalizes to 0 (its first axis) when
+        it has at least one dim, else None (no chain dim on this leaf).
+        """
+
+        def choose_vmap_index(path: KeyPath, leaf: Array | None) -> int | None:
             no_vmap_attrs = (
                 '.X',
                 '.binary_y',
@@ -956,17 +988,23 @@ class TestMultichain:
                 '.config.sparse_on_at',
                 '.config.steps_done',
             )
-            if keystr(path) in no_vmap_attrs:
+            if keystr(path) in no_vmap_attrs or leaf is None:
                 return None
-            else:
-                return 0
+            if leaf.ndim == 0:
+                return None
+            return 0
 
         return tree.map_with_path(choose_vmap_index, state)
 
     def data_vmap_axes(self, state: State) -> State:
-        """Hardcoded version of `data_vmap_axes(_: State)`."""
+        """Manual reference for `data_vmap_axes(_: State)`.
 
-        def choose_vmap_index(path: KeyPath, _: Array) -> Literal[-1, None]:
+        Each data field is marked with ``data=-1``; the marker is normalized
+        per-leaf, so the result is ``leaf.ndim - 1`` (or None if the leaf has
+        no axes / no marker).
+        """
+
+        def choose_vmap_index(path: KeyPath, leaf: Array | None) -> int | None:
             vmap_attrs = (
                 '.X',
                 '.binary_y',
@@ -976,10 +1014,11 @@ class TestMultichain:
                 '.inv_sdev_scale',
                 '.forest.leaf_indices',
             )
-            if keystr(path) in vmap_attrs:
-                return -1
-            else:
+            if keystr(path) not in vmap_attrs or leaf is None:
                 return None
+            if leaf.ndim == 0:
+                return None
+            return leaf.ndim - 1
 
         return tree.map_with_path(choose_vmap_index, state)
 

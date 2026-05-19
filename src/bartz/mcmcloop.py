@@ -366,10 +366,30 @@ def _empty_trace(
         out_axes = 0
     else:
         example_output = eval_shape(extractor, bart)
-        chain_axes = chain_vmap_axes(example_output)
-        out_axes = tree.map(
-            lambda a: 0 if a is None else 1, chain_axes, is_leaf=lambda a: a is None
+
+        def add_leading(leaf: ShapeDtypeStruct | None) -> ShapeDtypeStruct | None:
+            if leaf is None:
+                return None
+            return ShapeDtypeStruct((1, *leaf.shape), leaf.dtype)
+
+        modified_example = tree.map(
+            add_leading, example_output, is_leaf=lambda x: x is None
         )
+        state_axes = chain_vmap_axes(example_output)
+        trace_axes = chain_vmap_axes(modified_example)
+
+        def out_axes_for(state_k: int | None, tc: int | None) -> int:
+            if tc is None:
+                return 0
+            if tc == state_k:
+                return state_k + 1
+            # tc == state_k + 1 (raw marker was negative)
+            return 0
+
+        out_axes = tree.map(
+            out_axes_for, state_axes, trace_axes, is_leaf=lambda x: x is None
+        )
+
     return jax.vmap(extractor, in_axes=None, out_axes=out_axes, axis_size=length)(bart)
 
 
@@ -512,7 +532,8 @@ def _set(
     num_chains: int | None,
 ) -> PyTree[Array, ' T']:
     """Do ``trace[index] = val`` but fancier."""
-    chain_axis = chain_vmap_axes(val)
+    state_axes = chain_vmap_axes(val)
+    trace_axes = chain_vmap_axes(trace)
 
     def at_set(
         trace: Shaped[Array, 'chains samples *shape']
@@ -520,7 +541,8 @@ def _set(
         | Shaped[Array, ' samples *shape']
         | None,
         val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'] | None,
-        chain_axis: int | None,
+        state_k: int | None,
+        tc: int | None,
     ) -> Shaped[Array, 'chains samples *shape'] | None:
         if trace is None or trace.size == 0:
             # this handles the case where an array is empty because jax refuses
@@ -529,14 +551,17 @@ def _set(
             # below needed to traverse `chain_axis`.
             return trace
 
-        if num_chains is None or chain_axis is None:
+        if num_chains is None or tc is None:
             ndindex = (index, ...)
         else:
-            ndindex = (slice(None), index, ...)
+            sample_axis = state_k + 1 if tc == state_k else 0
+            ndindex = (slice(None),) * sample_axis + (index, ...)
 
         return trace.at[ndindex].set(val, mode='drop')
 
-    return tree.map(at_set, trace, val, chain_axis, is_leaf=lambda x: x is None)
+    return tree.map(
+        at_set, trace, val, state_axes, trace_axes, is_leaf=lambda x: x is None
+    )
 
 
 def make_default_callback(
@@ -762,14 +787,33 @@ def evaluate_trace(
     num_devices = get_axis_size(mesh, 'chains') * get_axis_size(mesh, 'data')
     max_io_nbytes *= num_devices
 
-    # determine batching axes
+    # determine batching axes (shape-based has_chains check; the marker is
+    # always set on chain-bearing trace fields, so it can't tell us whether
+    # the actual array has a chain dim)
     has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
+    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+
     if has_chains:
-        sample_axis = 1
-        tree_axis = 2
+        tc_split = chain_vmap_axes(trace).split_tree
+        tc_leaf = chain_vmap_axes(trace).leaf_tree
     else:
-        sample_axis = 0
-        tree_axis = 1
+        tc_split = None
+        tc_leaf = None
+
+    def axis_in_trace(core_pos: int, chain_pos: int | None) -> int:
+        """Where a core (non-chain) axis sits in the trace, given chain at chain_pos."""
+        if chain_pos is None or core_pos < chain_pos:
+            return core_pos
+        return core_pos + 1
+
+    # split_tree core layout: (sample, num_trees, hts) at core positions (0, 1, 2)
+    sample_axis = axis_in_trace(0, tc_split)
+    tree_axis = axis_in_trace(1, tc_split)
+    hts_axis = axis_in_trace(2, tc_split)
+
+    # leaf_tree core layout: UV (sample, num_trees, hts) -> (0, 1, 2);
+    # MV (sample, num_trees, k, hts) -> (0, 1, 2, 3)
+    k_axis = axis_in_trace(2, tc_leaf) if is_mv else None
 
     # batch and sum over trees
     batched_eval = autobatch(
@@ -781,14 +825,19 @@ def evaluate_trace(
     )
 
     # determine output shape (to avoid autobatch tracing everything 4 times)
-    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
-    k = trace.leaf_tree.shape[-2] if is_mv else 1
+    k = trace.leaf_tree.shape[k_axis] if is_mv else 1
     mv_shape = (k,) if is_mv else ()
     _, n = X.shape
-    out_shape = (*trace.split_tree.shape[:-2], *mv_shape, n)
+    non_tree_hts_shape = tuple(
+        s
+        for i, s in enumerate(trace.split_tree.shape)
+        if i not in (tree_axis, hts_axis)
+    )
+    out_shape = (*non_tree_hts_shape, *mv_shape, n)
 
     # adjust memory limit keeping into account that trees are summed over
-    num_trees, hts = trace.split_tree.shape[-2:]
+    num_trees = trace.split_tree.shape[tree_axis]
+    hts = trace.split_tree.shape[hts_axis]
     out_size = k * n * jnp.float32.dtype.itemsize  # the value of the forest
     core_io_size = (
         num_trees
@@ -823,9 +872,13 @@ def evaluate_trace(
     y_centered = batched_eval(X, trees)
     y = y_centered + trace.offset[..., None]
     if flatten_chains and has_chains:
-        # collapse only the chain/sample dims, not k for MV
-        end = -2 if is_mv else -1
-        y = lax.collapse(y, 0, end)
+        # chain position in y: tree_axis and hts_axis were dropped, so axes
+        # before the chain in the trace are shifted left by the number of
+        # dropped axes below the chain.
+        y_chain_axis = sum(1 for i in range(tc_split) if i not in (tree_axis, hts_axis))
+        if y_chain_axis != 0:
+            y = jnp.moveaxis(y, y_chain_axis, 0)
+        y = lax.collapse(y, 0, 2)
     return y
 
 

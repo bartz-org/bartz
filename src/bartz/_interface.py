@@ -75,6 +75,7 @@ from bartz.mcmcstep._state import (
     ArrayLike,
     FloatLike,
     _inv_via_chol_with_gersh,
+    chain_vmap_axes,
     chol_with_gersh,
 )
 from bartz.prepcovars import (
@@ -578,14 +579,18 @@ class Bart(Module):
     @property
     def n_save(self) -> int:
         """The number of posterior samples after burn-in saved per chain."""
-        *_, n_save = self._main_trace.grow_prop_count.shape
-        return n_save
+        tc = chain_vmap_axes(self._main_trace).grow_prop_count
+        if tc is None or self._mcmc_state.num_chains() is None:
+            sample_axis = 0
+        else:
+            state_k = chain_vmap_axes(self._mcmc_state.forest).grow_prop_count
+            sample_axis = state_k + 1 if tc == state_k else 0
+        return self._main_trace.grow_prop_count.shape[sample_axis]
 
     @property
     def num_chains(self) -> int | None:
         """The number of chains, `None` if scalar."""
-        *num_chains, _ = self._main_trace.grow_prop_count.shape
-        return num_chains[0] if num_chains else None
+        return self._mcmc_state.num_chains()
 
     @property
     def ndpost(self) -> int:
@@ -644,10 +649,14 @@ class Bart(Module):
 
         burnin = self._burnin_trace.error_cov_inv
         main = self._main_trace.error_cov_inv
-        # trace shape is (chains?, samples, ...) where chains is optional
-        # first axis; samples is the axis to concatenate along
+        # samples axis position depends on the chain marker layout
         num_chains = self._mcmc_state.num_chains()
-        sample_axis = 1 if num_chains is not None else 0
+        if num_chains is None:
+            sample_axis = 0
+        else:
+            tc = chain_vmap_axes(self._main_trace).error_cov_inv
+            state_k = chain_vmap_axes(self._mcmc_state).error_cov_inv
+            sample_axis = state_k + 1 if tc == state_k else 0
         prec = jnp.concatenate([burnin, main], axis=sample_axis)
 
         if only_continuous and binary_indices is not None:
@@ -711,6 +720,10 @@ class Bart(Module):
             varprob = jnp.where(max_split, 1 / peff, 0)
             varprob = jnp.broadcast_to(varprob, (self.ndpost, p))
         else:
+            if self._mcmc_state.num_chains() is not None:
+                tc = chain_vmap_axes(self._main_trace).varprob
+                if tc != 0:
+                    varprob = jnp.moveaxis(varprob, tc, 0)
             varprob = varprob.reshape(-1, p)
         return varprob
 
@@ -718,6 +731,16 @@ class Bart(Module):
     def varprob_mean(self) -> Float32[Array, ' p']:
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)
+
+    def _error_cov_inv_chain_first(self) -> Array:
+        """Return `_main_trace.error_cov_inv` with the chain axis moved to position 0."""
+        arr = self._main_trace.error_cov_inv
+        if self._mcmc_state.num_chains() is None:
+            return arr
+        tc = chain_vmap_axes(self._main_trace).error_cov_inv
+        if tc == 0:
+            return arr
+        return jnp.moveaxis(arr, tc, 0)
 
     def _sample_outcome(
         self,
@@ -728,8 +751,7 @@ class Bart(Module):
     ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
         """Sample from the posterior predictive distribution."""
         if latent.ndim > 2:  # multivariate case
-            error_cov_inv = self._main_trace.error_cov_inv
-            error_cov_inv = lax.collapse(error_cov_inv, 0, -2)
+            error_cov_inv = lax.collapse(self._error_cov_inv_chain_first(), 0, -2)
 
             # Cholesky of precision: error_cov_inv = L @ L^T
             L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
@@ -745,7 +767,9 @@ class Bart(Module):
             # pure binary UV: probit has sigma = 1
             error = random.normal(key, latent.shape)
         else:  # univariate continuous
-            sigma = jnp.sqrt(jnp.reciprocal(self._main_trace.error_cov_inv)).reshape(-1)
+            sigma = jnp.sqrt(jnp.reciprocal(self._error_cov_inv_chain_first())).reshape(
+                -1
+            )
             error = sigma[..., None] * random.normal(key, latent.shape)
             if w is not None:
                 error *= w[None, :]
@@ -1527,6 +1551,10 @@ def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
     """Histogram of predictor usage for decision rules in the trees, squashing chains."""
     varcount: Int32[Array, '*chains samples p']
     varcount = compute_varcount(p, trace)
+    if trace.var_tree.ndim > 3:  # has_chains, shape-based
+        tc = chain_vmap_axes(trace).var_tree
+        if tc != 0:
+            varcount = jnp.moveaxis(varcount, tc, 0)
     return lax.collapse(varcount, 0, -1)
 
 
@@ -1546,6 +1574,9 @@ def get_error_sdev(
     error_cov_inv = trace.error_cov_inv
     if error_cov_inv.ndim in (2, 4):
         # shape (chains, samples) or (chains, samples, k, k), concatenate chains
+        tc = chain_vmap_axes(trace).error_cov_inv
+        if tc != 0:
+            error_cov_inv = jnp.moveaxis(error_cov_inv, tc, 0)
         error_cov_inv = lax.collapse(error_cov_inv, 0, 2)
     is_uv = error_cov_inv.ndim == 1
     if is_uv:

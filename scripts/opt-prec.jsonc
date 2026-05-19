@@ -1,0 +1,9 @@
+{
+    "scan": "n",
+    "reduce": "num_batches",
+    "matrix": ["num_trees", "k"],
+    "defaults": {
+        "reduction": "count",
+        "weights": true,
+    },
+}

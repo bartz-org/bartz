@@ -34,10 +34,12 @@ The config file is a JSONC document that assigns roles to hyperparameters:
     {
         "scan":   "n",                            // x-axis param
         "reduce": "num_batches",                  // min'd over (the "optimal" curve)
-        "matrix": ["reduction", "k", "weights"]  // legend / multi-line dimensions
+        "matrix": ["reduction", "k", "weights"], // legend / multi-line dimensions
+        "defaults": {"num_trees": 16}            // override per-param "rest" value
     }
 
 Parameters not mentioned in any role keep a single "rest" value (see `Defaults`).
+The optional ``defaults`` map overrides those values per config.
 """
 
 import shutil
@@ -229,11 +231,12 @@ def load_config(path: Path) -> dict[str, Any]:
         config = json5.load(f)
 
     required = {'scan', 'reduce', 'matrix'}
+    optional = {'defaults'}
     missing = required - config.keys()
     if missing:
         msg = f'config {path}: missing required keys: {sorted(missing)}'
         raise ValueError(msg)
-    extra = config.keys() - required
+    extra = config.keys() - required - optional
     if extra:
         msg = f'config {path}: unknown top-level keys: {sorted(extra)}'
         raise ValueError(msg)
@@ -263,18 +266,41 @@ def load_config(path: Path) -> dict[str, Any]:
         msg = f'config {path}: parameter(s) in multiple roles: {dups}'
         raise ValueError(msg)
 
+    _validate_defaults(path, config.get('defaults', {}), known, set(named))
+
     return config
+
+
+def _validate_defaults(
+    path: Path, defaults: object, known: set[str], in_roles: set[str]
+) -> None:
+    """Validate the optional ``defaults`` config map."""
+    if not isinstance(defaults, dict):
+        msg = f'config {path}: "defaults" must be an object'
+        raise TypeError(msg)
+    unknown_defaults = defaults.keys() - known
+    if unknown_defaults:
+        msg = f'config {path}: unknown defaults: {sorted(unknown_defaults)}'
+        raise ValueError(msg)
+    overlap = defaults.keys() & in_roles
+    if overlap:
+        msg = f'config {path}: defaults overlap with roles: {sorted(overlap)}'
+        raise ValueError(msg)
 
 
 def params_from_config(config: dict[str, Any], *, minimal: bool) -> Params:
     """Build a `Params` whose ranges include only role-assigned parameters."""
     in_roles = {config['scan'], config['reduce'], *config['matrix']}
+    overrides = dict(config.get('defaults', {}))
+    if 'reduction' in overrides:
+        overrides['reduction'] = Reduction(overrides['reduction'])
+    defaults = Defaults(**overrides)
     full = Params()
     kwargs = {
         name: getattr(full, name) if name in in_roles else (UNSET,)
         for name in Params.range_field_names()
     }
-    params = Params(**kwargs)
+    params = Params(**kwargs, defaults=defaults)
     if minimal:
         params = params.minimal()
     return params

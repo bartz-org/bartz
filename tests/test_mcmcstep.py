@@ -117,7 +117,15 @@ def _minimal_step_config() -> StepConfig:
     )
 
 
-class _MarkerLeaf(Module):
+class _HasChainsBase(Module):
+    """Base for test Modules that declares `has_chains=True`."""
+
+    @property
+    def has_chains(self) -> bool:
+        return True
+
+
+class _MarkerLeaf(_HasChainsBase):
     """Module used by `TestVmapAxesMarkers` covering all marker combinations."""
 
     chained: Array = field(chains=0, default_factory=lambda: jnp.zeros((2, 3)))
@@ -165,7 +173,7 @@ class TestVmapAxesMarkers:
     def test_normalization(self) -> None:
         """Negative markers are normalized per-leaf against the leaf's ndim."""
 
-        class _NonCanonicalMarkers(Module):
+        class _NonCanonicalMarkers(_HasChainsBase):
             """Module that uses non-default integer axis indices."""
 
             a: Array = field(chains=2)
@@ -188,7 +196,7 @@ class TestVmapAxesMarkers:
     def test_negative_marker_normalization(self) -> None:
         """A non-trivial negative chain marker on a 3-D leaf normalizes correctly."""
 
-        class _NegativeChainMarker(Module):
+        class _NegativeChainMarker(_HasChainsBase):
             arr: Array = field(chains=-2)
 
         x = _NegativeChainMarker(arr=jnp.zeros((2, 3, 4)))
@@ -198,7 +206,7 @@ class TestVmapAxesMarkers:
     def test_marker_out_of_bounds_raises(self) -> None:
         """A marker whose absolute value exceeds the leaf ndim raises an axis error."""
 
-        class _ChainScalar(Module):
+        class _ChainScalar(_HasChainsBase):
             scalar: Array = field(chains=0)
 
         # 0-D leaf can't have axis 0; strict normalization rejects it
@@ -209,18 +217,24 @@ class TestVmapAxesMarkers:
     def test_no_chains_short_circuit(self) -> None:
         """When `has_chains` reports False, marked leaves get None even if they'd be valid."""
 
-        class _NoChains(Module):
-            has_chains: bool = field(static=True, default=False)
+        class _NoChains(_HasChainsBase):
             arr: Array = field(chains=0, default_factory=lambda: jnp.zeros((2, 3)))
+
+            @property
+            def has_chains(self) -> bool:
+                return False
 
         x = _NoChains()
         # `has_chains=False` short-circuits the marker normalization
         assert chain_vmap_axes(x).arr is None
         # but `data_vmap_axes` is unaffected by `has_chains`
 
-        class _NoChainsData(Module):
-            has_chains: bool = field(static=True, default=False)
+        class _NoChainsData(_HasChainsBase):
             arr: Array = field(data=-1, default_factory=lambda: jnp.zeros((2, 3)))
+
+            @property
+            def has_chains(self) -> bool:
+                return False
 
         y = _NoChainsData()
         assert data_vmap_axes(y).arr == 1
@@ -228,11 +242,11 @@ class TestVmapAxesMarkers:
     def test_nested_module(self) -> None:
         """Recursion descends into Module-valued fields."""
 
-        class _InnerMarker(Module):
+        class _InnerMarker(_HasChainsBase):
             chain_arr: Array = field(chains=0)
             data_arr: Array = field(data=-1)
 
-        class _OuterMarker(Module):
+        class _OuterMarker(_HasChainsBase):
             inner: _InnerMarker
             outer_chain: Array = field(chains=0)
 
@@ -253,7 +267,7 @@ class TestVmapAxesMarkers:
     def test_subtree_broadcast(self) -> None:
         """A marked pytree-valued field gets the marker on every leaf."""
 
-        class _ContainerMarker(Module):
+        class _ContainerMarker(_HasChainsBase):
             tup: tuple = field(chains=0)
             dct: dict = field(data=-1)
 
@@ -271,7 +285,7 @@ class TestVmapAxesMarkers:
     def test_none_valued_field(self) -> None:
         """A marked field holding None yields None (empty pytree)."""
 
-        class _OptionalMarker(Module):
+        class _OptionalMarker(_HasChainsBase):
             maybe: None | Array = field(chains=0)
 
         x = _OptionalMarker(maybe=None)

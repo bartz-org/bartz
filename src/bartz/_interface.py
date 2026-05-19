@@ -69,13 +69,7 @@ from bartz.grove import (
     format_tree,
     points_per_node_distr,
 )
-from bartz.mcmcloop import (
-    RunMCMCResult,
-    _trace_sample_axis,
-    compute_varcount,
-    evaluate_trace,
-    run_mcmc,
-)
+from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
 from bartz.mcmcstep._state import (
     ArrayLike,
@@ -83,6 +77,7 @@ from bartz.mcmcstep._state import (
     _inv_via_chol_with_gersh,
     chain_vmap_axes,
     chol_with_gersh,
+    trace_sample_axes,
 )
 from bartz.prepcovars import (
     Binner,
@@ -585,9 +580,7 @@ class Bart(Module):
     @property
     def n_save(self) -> int:
         """The number of posterior samples after burn-in saved per chain."""
-        tc = chain_vmap_axes(self._main_trace).grow_prop_count
-        state_k = chain_vmap_axes(self._mcmc_state.forest).grow_prop_count
-        sample_axis = _trace_sample_axis(state_k, tc)
+        sample_axis = trace_sample_axes(self._main_trace).grow_prop_count
         return self._main_trace.grow_prop_count.shape[sample_axis]
 
     @property
@@ -652,9 +645,7 @@ class Bart(Module):
 
         burnin = self._burnin_trace.error_cov_inv
         main = self._main_trace.error_cov_inv
-        tc = chain_vmap_axes(self._main_trace).error_cov_inv
-        state_k = chain_vmap_axes(self._mcmc_state).error_cov_inv
-        sample_axis = _trace_sample_axis(state_k, tc)
+        sample_axis = trace_sample_axes(self._main_trace).error_cov_inv
         prec = jnp.concatenate([burnin, main], axis=sample_axis)
 
         if only_continuous and binary_indices is not None:
@@ -719,7 +710,7 @@ class Bart(Module):
             varprob = jnp.broadcast_to(varprob, (self.ndpost, p))
         else:
             tc = chain_vmap_axes(self._main_trace).varprob
-            if tc is not None and tc != 0:
+            if tc:
                 varprob = jnp.moveaxis(varprob, tc, 0)
             varprob = varprob.reshape(-1, p)
         return varprob
@@ -733,7 +724,7 @@ class Bart(Module):
         """Return `_main_trace.error_cov_inv` with the chain axis moved to position 0."""
         arr = self._main_trace.error_cov_inv
         tc = chain_vmap_axes(self._main_trace).error_cov_inv
-        if tc is None or tc == 0:
+        if not tc:
             return arr
         return jnp.moveaxis(arr, tc, 0)
 
@@ -1547,7 +1538,7 @@ def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
     varcount: Int32[Array, '*chains samples p']
     varcount = compute_varcount(p, trace)
     tc = chain_vmap_axes(trace).var_tree
-    if tc is not None and tc != 0:
+    if tc:
         varcount = jnp.moveaxis(varcount, tc, 0)
     return lax.collapse(varcount, 0, -1)
 
@@ -1569,7 +1560,7 @@ def get_error_sdev(
     if trace.has_chains:
         # shape (chains, samples) or (chains, samples, k, k), concatenate chains
         tc = chain_vmap_axes(trace).error_cov_inv
-        if tc != 0:
+        if tc:
             error_cov_inv = jnp.moveaxis(error_cov_inv, tc, 0)
         error_cov_inv = lax.collapse(error_cov_inv, 0, 2)
     is_uv = error_cov_inv.ndim == 1

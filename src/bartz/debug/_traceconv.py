@@ -26,6 +26,7 @@
 
 import math
 from re import fullmatch
+from typing import ClassVar
 
 import numpy
 from equinox import Module, field
@@ -146,6 +147,9 @@ class TraceWithOffset(Module):
     var_tree: UInt[Array, 'ndpost ntree 2**(d-1)']
     split_tree: UInt[Array, 'ndpost ntree 2**(d-1)']
     offset: Float32[Array, ' ndpost']
+
+    has_chains: ClassVar[bool] = False
+    """No chain axis: each leading axis is just the sample axis."""
 
     @classmethod
     def from_trees_trace(

@@ -451,7 +451,7 @@ class mc_gbart(Module):
         assert self._main_trace.error_cov_inv.ndim <= 2  # chains and samples
         arr = self._main_trace.error_cov_inv
         tc = chain_vmap_axes(self._main_trace).error_cov_inv
-        if tc is not None and tc != 0:
+        if tc:
             arr = jnp.moveaxis(arr, tc, 0)
         return jnp.sqrt(jnp.reciprocal(arr)).reshape(-1)
 

@@ -72,7 +72,12 @@ from bartz.grove import (
     var_histogram,
 )
 from bartz.mcmcstep import State
-from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size
+from bartz.mcmcstep._state import (
+    chain_vmap_axes,
+    field,
+    get_axis_size,
+    trace_sample_axes,
+)
 
 
 class BurninTrace(Module):
@@ -361,23 +366,6 @@ def _replicate(x: Array, mesh: Mesh | None) -> Array:
         return device_put(x, NamedSharding(mesh, PartitionSpec()))
 
 
-def _trace_sample_axis(state_k: int | None, tc: int | None) -> int:
-    """Where the sample axis sits in a trace, given chain marker positions.
-
-    `state_k` is the chain axis in the per-step value (the state or extractor
-    output); `tc` is the chain axis in the trace. The sample axis is the one
-    inserted by the stacking-over-iterations step.
-    """
-    if tc is None:
-        return 0
-    # If the raw marker was non-negative, the trace chain axis matches the
-    # state's (`tc == state_k`) and the sample axis sits one slot after.
-    # If the raw marker was negative, the trace chain axis is `state_k + 1`
-    # (it shifted right by one when the sample axis was prepended) and the
-    # sample axis ends up at position 0.
-    return state_k + 1 if tc == state_k else 0
-
-
 @partial(jit, static_argnums=(0, 2))
 def _empty_trace(
     length: int, bart: State, extractor: Callable[[State], PyTree]
@@ -387,20 +375,11 @@ def _empty_trace(
     else:
         example_output = eval_shape(extractor, bart)
 
-        def add_leading(leaf: ShapeDtypeStruct | None) -> ShapeDtypeStruct | None:
-            if leaf is None:
-                return None
+        def add_leading(leaf: ShapeDtypeStruct) -> ShapeDtypeStruct:
             return ShapeDtypeStruct((1, *leaf.shape), leaf.dtype)
 
-        modified_example = tree.map(
-            add_leading, example_output, is_leaf=lambda x: x is None
-        )
-        state_axes = chain_vmap_axes(example_output)
-        trace_axes = chain_vmap_axes(modified_example)
-
-        out_axes = tree.map(
-            _trace_sample_axis, state_axes, trace_axes, is_leaf=lambda x: x is None
-        )
+        modified_example = tree.map(add_leading, example_output)
+        out_axes = trace_sample_axes(modified_example)
 
     return jax.vmap(extractor, in_axes=None, out_axes=out_axes, axis_size=length)(bart)
 
@@ -540,8 +519,7 @@ def _set(
     trace: PyTree[Array, ' T'], index: Int32[Array, ''], val: PyTree[Array, ' T']
 ) -> PyTree[Array, ' T']:
     """Do ``trace[index] = val`` but fancier."""
-    state_axes = chain_vmap_axes(val)
-    trace_axes = chain_vmap_axes(trace)
+    sample_axes = trace_sample_axes(trace)
 
     def at_set(
         trace: Shaped[Array, 'chains samples *shape']
@@ -549,8 +527,7 @@ def _set(
         | Shaped[Array, ' samples *shape']
         | None,
         val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'] | None,
-        state_k: int | None,
-        tc: int | None,
+        sample_axis: int,
     ) -> Shaped[Array, 'chains samples *shape'] | None:
         if trace is None or trace.size == 0:
             # this handles the case where an array is empty because jax refuses
@@ -559,13 +536,10 @@ def _set(
             # below needed to traverse `chain_axis`.
             return trace
 
-        sample_axis = _trace_sample_axis(state_k, tc)
         ndindex = (slice(None),) * sample_axis + (index, ...)
         return trace.at[ndindex].set(val, mode='drop')
 
-    return tree.map(
-        at_set, trace, val, state_axes, trace_axes, is_leaf=lambda x: x is None
-    )
+    return tree.map(at_set, trace, val, sample_axes, is_leaf=lambda x: x is None)
 
 
 def make_default_callback(

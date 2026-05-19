@@ -126,24 +126,26 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     x
         A pytree. Subpytrees that are Module attributes marked with
         ``field(chains=<int>)`` are considered to have a chain axis at that
-        index.
+        index. `x` (or one of its subtrees) must define a `has_chains` property
+        (see `get_has_chains`).
 
     Returns
     -------
     A pytree with the same structure as `x`, with each leaf set to the chain
     axis index declared by its owning ``field(chains=...)`` marker, normalized
     against the leaf's ``ndim`` (so the returned indices are non-negative), or
-    `None` for unmarked leaves. If `x` (or one of its sub-trees) defines a
-    `has_chains` property reporting `False`, every leaf is `None`.
+    `None` for unmarked leaves. If `has_chains` is `False`, every leaf is
+    `None`.
     """
-    try:
-        has_chains = get_has_chains(x)
-    except ValueError:
-        # no `has_chains` declared anywhere in the tree; default to strict
-        has_chains = True
-    if not has_chains:
-        return _find_metadata(x, 'chains', replacement=None)
+    if not get_has_chains(x):
+        return _find_metadata(x, 'chains', marker_value=_none_marker)
+
     return _find_metadata(x, 'chains')
+
+
+def _none_marker(leaf: object, raw: int) -> None:  # noqa: ARG001
+    """Marker mapper that always returns `None`."""
+    return None  # noqa: RET501
 
 
 def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
@@ -154,6 +156,43 @@ def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     Out-of-bounds markers raise an `numpy.exceptions.AxisError`.
     """
     return _find_metadata(x, 'data')
+
+
+def trace_sample_axes(trace: PyTree[Module | Any, 'T']) -> PyTree[int, 'T']:
+    """Determine the position of the sample axis for each leaf of a trace.
+
+    Parameters
+    ----------
+    trace
+        A trace pytree (typically a `~bartz.mcmcloop.BurninTrace` or
+        `~bartz.mcmcloop.MainTrace`). `trace` (or one of its subtrees) must
+        define a `has_chains` property.
+
+    Returns
+    -------
+    A pytree with the same structure as `trace`, with each leaf set to the
+    sample-axis index (0 or 1 if there's a chain axis at index 0).
+    """
+    if not get_has_chains(trace):
+        return _find_metadata(
+            trace, 'chains', marker_value=_zero_marker, default_value=0
+        )
+    return _find_metadata(
+        trace, 'chains', marker_value=_sample_axis_for_marker, default_value=0
+    )
+
+
+def _zero_marker(leaf: object, raw: int) -> int:  # noqa: ARG001
+    """Marker mapper that always returns 0."""
+    return 0
+
+
+def _sample_axis_for_marker(leaf: object, chain: int) -> int:  # noqa: ARG001
+    """Sample-axis position given the raw chain marker for a field."""
+    if chain is None or chain > 0:
+        return 0
+    else:
+        return 1
 
 
 T = TypeVar('T')
@@ -204,14 +243,11 @@ def get_has_chains(x: PyTree) -> bool:
     raise ValueError(msg)
 
 
-_NO_REPLACEMENT = object()
-
-
-def _normalize_axis_for_leaf(leaf: object, raw: int) -> int | None:
+def _normalize_axis_for_leaf(leaf: object, raw: int) -> int:
     """Normalize a marker axis index against `leaf.ndim`.
 
-    Returns `None` if `leaf is None`; raises `numpy.exceptions.AxisError` if
-    `raw` is out of bounds for `leaf.ndim`.
+    Raises `numpy.exceptions.AxisError` if `raw` is out of bounds for
+    `leaf.ndim`.
     """
     return normalize_axis_index(raw, leaf.ndim)
 
@@ -224,26 +260,19 @@ def _is_module(x: object) -> bool:
     return isinstance(x, Module) and not _is_lazy_array(x)
 
 
-def _marker_subtree(v: object, raw: int, replacement: object) -> PyTree:
-    """Build the subtree value for a marked field."""
-    if replacement is _NO_REPLACEMENT:
-        return tree.map(
-            partial(_normalize_axis_for_leaf, raw=raw), v, is_leaf=_is_lazy_array
-        )
-    return tree.map(lambda _: replacement, v, is_leaf=_is_lazy_array)
-
-
 def _find_metadata(
-    x: PyTree[Any, ' S'], key: Hashable, *, replacement: object = _NO_REPLACEMENT
+    x: PyTree[Any, ' S'],
+    key: Hashable,
+    *,
+    marker_value: Callable[[object, int], object] = _normalize_axis_for_leaf,
+    default_value: object = None,
 ) -> PyTree[Any, ' S']:
-    """Walk `x` replacing marked subtrees with their metadata value.
+    """Walk `x` replacing marked subtrees with derived values.
 
     For each Module field whose metadata contains `key`, the field's subtree
-    is replaced with the stored value normalized per-leaf against the leaf's
-    ``ndim`` (so the returned indices are always non-negative); leaves outside
-    any marked field become `None`. If `replacement` is provided, marked
-    leaves are set to that value uniformly instead of being normalized; this
-    is used to short-circuit the result when the metadata is irrelevant.
+    is replaced by mapping ``marker_value(leaf, raw)`` over its leaves, where
+    `raw` is the unnormalized metadata value; leaves outside any marked field
+    become `default_value`.
     """
     if _is_module(x):
         args = []
@@ -252,15 +281,28 @@ def _find_metadata(
             if f.metadata.get('static', False):
                 args.append(v)
             elif key in f.metadata:
-                args.append(_marker_subtree(v, f.metadata[key], replacement))
+                raw = f.metadata[key]
+                args.append(
+                    tree.map(
+                        lambda leaf, raw=raw: marker_value(leaf, raw),
+                        v,
+                        is_leaf=_is_lazy_array,
+                    )
+                )
             else:
-                args.append(_find_metadata(v, key, replacement=replacement))
+                args.append(
+                    _find_metadata(
+                        v, key, marker_value=marker_value, default_value=default_value
+                    )
+                )
         return x.__class__(*args)
 
     def get_axes(x: object) -> PyTree:
         if _is_module(x):
-            return _find_metadata(x, key, replacement=replacement)
-        return tree.map(lambda _: None, x, is_leaf=_is_lazy_array)
+            return _find_metadata(
+                x, key, marker_value=marker_value, default_value=default_value
+            )
+        return tree.map(lambda _: default_value, x, is_leaf=_is_lazy_array)
 
     return tree.map(get_axes, x, is_leaf=lambda x: isinstance(x, Module))
 

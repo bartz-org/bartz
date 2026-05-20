@@ -36,7 +36,17 @@ import jax
 import numpy
 from equinox import Module, error_if, filter_jit
 from equinox import field as eqx_field
-from jax import NamedSharding, device_put, jit, lax, make_mesh, random, tree, vmap
+from jax import (
+    NamedSharding,
+    ShapeDtypeStruct,
+    device_put,
+    jit,
+    lax,
+    make_mesh,
+    random,
+    tree,
+    vmap,
+)
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
@@ -781,6 +791,18 @@ class _LazyArray(Module):
         return len(self.shape)
 
 
+DummyArray = Array | ShapeDtypeStruct | _LazyArray
+
+
+def add_dummy_axis(x: PyTree[DummyArray, 'T']) -> PyTree[ShapeDtypeStruct, 'T']:
+    """Replace array-like leaves with a rank-inflated placeholder."""
+
+    def replace_leaf(leaf: DummyArray) -> ShapeDtypeStruct:
+        return ShapeDtypeStruct((0,) * (leaf.ndim + 1), jnp.float32)
+
+    return tree.map(replace_leaf, x, is_leaf=lambda x: isinstance(x, _LazyArray))
+
+
 def _return_array(shape: tuple[int, ...], arr: Array, **kwargs: Any) -> Array:  # noqa: ARG001
     """`_LazyArray` factory that returns an already-built array."""
     return arr
@@ -815,18 +837,6 @@ def _wrap_chain(
         return inner
     new_shape = inner.shape[:chain_pos] + chain_shape + inner.shape[chain_pos:]
     return _LazyArray(_broadcast_chain, new_shape, inner, chain_shape, chain_pos)
-
-
-def _inflate_lazy(leaf: object) -> object:
-    """Add a unit trailing axis to `_LazyArray` shapes; pass everything else through.
-
-    Used to build a shape preview where `chain_vmap_axes` can normalize raw
-    chain markers against ``core_ndim + 1`` without actually adding the chain
-    axis to the array factories.
-    """
-    if isinstance(leaf, _LazyArray):
-        return _LazyArray(leaf.array_creator, (*leaf.shape, 1), *leaf.args)
-    return leaf
 
 
 def _is_lazy_or_none(x: object) -> bool:
@@ -1220,7 +1230,7 @@ def _set_initial_resid(
         state.offset,
         binary_indices,
     )
-    preview_resid = _inflate_lazy(inner) if chain_shape else inner
+    preview_resid = add_dummy_axis(inner) if chain_shape else inner
     preview = replace(state, resid=preview_resid)
     chain_axis = chain_vmap_axes(preview).resid
     data_axis = data_vmap_axes(preview).resid
@@ -1323,9 +1333,8 @@ def _add_chains(state: 'State', chain_shape: tuple[int, ...]) -> 'State':
     and wraps the carried `_LazyArray` so its factory creates the core array
     and then broadcasts a chain axis in at that position. To make
     `chain_vmap_axes` normalize against the chain-extended ``ndim``, the
-    lookup is done on a shape preview where every ``_LazyArray`` has a unit
-    trailing axis appended (the position is irrelevant — only the rank
-    matters for ``normalize_axis_index``). No-op when `chain_shape` is empty.
+    lookup is done on a shape preview built via `add_dummy_axis`. No-op when
+    `chain_shape` is empty.
 
     Chain-marked leaves are required to be `_LazyArray` (or `None`); eager
     arrays at chain-marked positions are rejected so that all chain insertion
@@ -1333,7 +1342,7 @@ def _add_chains(state: 'State', chain_shape: tuple[int, ...]) -> 'State':
     """
     if not chain_shape:
         return state
-    preview = tree.map(_inflate_lazy, state, is_leaf=_is_lazy_or_none)
+    preview = add_dummy_axis(state)
     chain_axes = chain_vmap_axes(preview)
 
     def wrap(leaf: object, chain_pos: int | None) -> object:

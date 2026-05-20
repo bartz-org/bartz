@@ -74,6 +74,7 @@ from bartz.grove import (
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import (
     CHAIN_AXIS,
+    add_dummy_axis,
     chain_vmap_axes,
     field,
     get_axis_size,
@@ -392,17 +393,7 @@ def _empty_trace(
     length: int, bart: State, extractor: Callable[[State], PyTree]
 ) -> PyTree:
     example_output = eval_shape(extractor, bart)
-
-    def add_leading(leaf: ShapeDtypeStruct) -> ShapeDtypeStruct:
-        # `trace_sample_axes` only needs `leaf.ndim` to match the final trace
-        # ndim; the prepended axis is a placeholder for the future sample axis
-        # and its position is irrelevant. For fields without a `samples` marker
-        # the placeholder is harmless because `trace_sample_axes` returns
-        # `None` regardless of `leaf.ndim`.
-        return ShapeDtypeStruct((1, *leaf.shape), leaf.dtype)
-
-    modified_example = tree.map(add_leading, example_output)
-    out_axes = trace_sample_axes(modified_example)
+    out_axes = trace_sample_axes(add_dummy_axis(example_output))
 
     return jax.vmap(extractor, in_axes=None, out_axes=out_axes, axis_size=length)(bart)
 

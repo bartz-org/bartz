@@ -85,7 +85,7 @@ from jax import Array, block_until_ready, random
 from jax import config as jax_config
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
-from polars import DataFrame
+from polars import DataFrame, concat
 from tqdm import tqdm
 
 from bartz._jaxext import get_default_device
@@ -105,7 +105,14 @@ class Logging(StrEnum):
 
 @dataclass(frozen=True)
 class ConfigParams:
-    """One resolved combination of parameters, as named in the config file."""
+    """One resolved combination of parameters, as named in the config file.
+
+    A field declared with ``dataclasses.field(metadata={'restart': True})`` is
+    "restart-tier": changing its value requires restarting Python (e.g. it
+    affects env vars or import-time configuration). The benchmark loop is
+    two-tiered: the outer loop iterates over restart-tier values in order, and
+    the inner loop randomizes only over the remaining fields.
+    """
 
     n: int
     """Number of data points."""
@@ -135,6 +142,11 @@ class ConfigParams:
     def field_names(cls) -> tuple[str, ...]:
         """Names of every field, in declaration order."""
         return tuple(f.name for f in fields(cls))
+
+    @classmethod
+    def restart_field_names(cls) -> tuple[str, ...]:
+        """Fields marked ``restart=True``; changing one requires restarting Python."""
+        return tuple(f.name for f in fields(cls) if f.metadata.get('restart'))
 
     def is_valid(self) -> bool:
         """Whether this combination of values is admissible."""
@@ -310,12 +322,27 @@ class Config:
             },
         )
 
-    def product_iter(self) -> Iterator[ConfigParams]:
-        """Yield `ConfigParams` for every valid combination."""
-        names = list(self.values)
+    def restart_iter(self) -> Iterator[dict[str, Any]]:
+        """Yield restart-tier value dicts, in deterministic field-declaration order.
+
+        Always yields at least once: an empty dict if no restart-tier fields exist.
+        """
+        names = [n for n in ConfigParams.restart_field_names() if n in self.values]
+        if not names:
+            yield {}
+            return
         ranges = [self.values[n] for n in names]
         for vals in product(*ranges):
-            params = ConfigParams(**dict(zip(names, vals, strict=True)))
+            yield dict(zip(names, vals, strict=True))
+
+    def inner_iter(self, restart_values: dict[str, Any]) -> Iterator[ConfigParams]:
+        """Yield valid `ConfigParams` for every non-restart combination with ``restart_values`` fixed."""
+        names = [n for n in self.values if n not in restart_values]
+        ranges = [self.values[n] for n in names]
+        for vals in product(*ranges):
+            params = ConfigParams(
+                **restart_values, **dict(zip(names, vals, strict=True))
+            )
             if params.is_valid():
                 yield params
 
@@ -349,15 +376,36 @@ def clock(func: Callable[[], None]) -> float:
 
 
 def benchmark_loop(config: Config, args: Namespace) -> DataFrame:
-    """Run timing benchmarks over every valid combination of values."""
+    """Run the two-tiered benchmark scan.
+
+    Outer loop: iterates restart-tier values in order. Inner loop: randomizes
+    the remaining combinations. Once restart-tier params drive a real Python
+    restart, the outer loop will spawn a subprocess per restart-tier value
+    instead of calling `inner_benchmark_loop` directly.
+    """
     if args.minimal:
         config = config.minimal()
-    combinations = list(config.product_iter())
+    frames: list[DataFrame] = []
+    for restart_values in config.restart_iter():
+        if restart_values and args.logging != Logging.no:
+            label = ' '.join(f'{k}={v}' for k, v in restart_values.items())
+            print(f'=== restart: {label} ===', flush=True)
+        frames.append(inner_benchmark_loop(config, args, restart_values))
+    return concat(frames, how='vertical')
+
+
+def inner_benchmark_loop(
+    config: Config, args: Namespace, restart_values: dict[str, Any]
+) -> DataFrame:
+    """Run timing benchmarks over non-restart combinations, with ``restart_values`` fixed."""
+    combinations = list(config.inner_iter(restart_values))
     Random(2026_05_20_10_19).shuffle(combinations)  # noqa: S311
     if args.logging == Logging.pbar:
         combinations = tqdm(combinations)
 
-    results: dict[str, list[Any]] = {}
+    results: dict[str, list[Any]] = {name: [] for name in ConfigParams.field_names()}
+    for col in ('time_est', 'time_lo', 'time_up'):
+        results[col] = []
     for params in combinations:
         if args.logging == Logging.results:
             print(f'{params}...', end='', flush=True)
@@ -384,10 +432,10 @@ def benchmark_loop(config: Config, args: Namespace) -> DataFrame:
             print(f' {time_est:#.2g} s')
 
         for name, value in asdict(params).items():
-            results.setdefault(name, []).append(value)
-        results.setdefault('time_est', []).append(time_est)
-        results.setdefault('time_lo', []).append(time_lo)
-        results.setdefault('time_up', []).append(time_up)
+            results[name].append(value)
+        results['time_est'].append(time_est)
+        results['time_lo'].append(time_lo)
+        results['time_up'].append(time_up)
 
     return DataFrame(results)
 

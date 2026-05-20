@@ -68,6 +68,9 @@ ArrayLike = Array | ndarray
 
 FloatLike = float | Float[ArrayLike, '']
 
+# Default position of the chain axis in chain-bearing leaves; see `field`.
+CHAIN_AXIS = 0
+
 
 class OutcomeType(Enum):
     """Likelihood types for each outcome component in the regression."""
@@ -332,16 +335,16 @@ class Forest(Module):
     leaf_tree: (
         Float32[Array, '*chains num_trees 2**d']
         | Float32[Array, '*chains num_trees k 2**d']
-    ) = field(chains=0)
+    ) = field(chains=CHAIN_AXIS)
     """The leaf values."""
 
-    var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=0)
+    var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=CHAIN_AXIS)
     """The decision axes."""
 
-    split_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=0)
+    split_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=CHAIN_AXIS)
     """The decision boundaries."""
 
-    affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=0)
+    affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=CHAIN_AXIS)
     """Marks leaves that can be grown."""
 
     max_split: UInt[Array, ' p']
@@ -360,7 +363,7 @@ class Forest(Module):
     p_propose_grow: Float32[Array, ' 2**(d-1)']
     """The unnormalized probability of picking a leaf for a grow proposal."""
 
-    leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=0, data=-1)
+    leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=CHAIN_AXIS, data=-1)
     """The index of the leaf each datapoints falls into, for each tree."""
 
     min_points_per_decision_node: Int32[Array, ''] | None
@@ -369,23 +372,27 @@ class Forest(Module):
     min_points_per_leaf: Int32[Array, ''] | None
     """The minimum number of data points in a leaf node."""
 
-    log_trans_prior: Float32[Array, '*chains num_trees'] | None = field(chains=0)
+    log_trans_prior: Float32[Array, '*chains num_trees'] | None = field(
+        chains=CHAIN_AXIS
+    )
     """The log transition and prior Metropolis-Hastings ratio for the
     proposed move on each tree."""
 
-    log_likelihood: Float32[Array, '*chains num_trees'] | None = field(chains=0)
+    log_likelihood: Float32[Array, '*chains num_trees'] | None = field(
+        chains=CHAIN_AXIS
+    )
     """The log likelihood ratio."""
 
-    grow_prop_count: Int32[Array, '*chains'] = field(chains=0)
+    grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of grow proposals made during one full MCMC cycle."""
 
-    prune_prop_count: Int32[Array, '*chains'] = field(chains=0)
+    prune_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of prune proposals made during one full MCMC cycle."""
 
-    grow_acc_count: Int32[Array, '*chains'] = field(chains=0)
+    grow_acc_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of grow moves accepted during one full MCMC cycle."""
 
-    prune_acc_count: Int32[Array, '*chains'] = field(chains=0)
+    prune_acc_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of prune moves accepted during one full MCMC cycle."""
 
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'] | None
@@ -394,12 +401,12 @@ class Forest(Module):
     The prior covariance of the sum of trees is
     ``num_trees * leaf_prior_cov_inv^-1``."""
 
-    log_s: Float32[Array, '*chains p'] | None = field(chains=0)
+    log_s: Float32[Array, '*chains p'] | None = field(chains=CHAIN_AXIS)
     """The logarithm of the prior probability for choosing a variable to split
     along in a decision rule, conditional on the ancestors. Not normalized.
     If `None`, use a uniform distribution."""
 
-    theta: Float32[Array, '*chains'] | None = field(chains=0)
+    theta: Float32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
     """The concentration parameter for the Dirichlet prior on the variable
     distribution `s`. Required only to update `log_s`."""
 
@@ -466,7 +473,7 @@ class State(Module):
     are stored, with shape ``(kb, n)``."""
 
     z: None | Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
-        chains=0, data=-1
+        chains=CHAIN_AXIS, data=-1
     )
     """The latent variable for binary regression. `None` in continuous
     regression. In the mixed binary-continuous case, only the binary outcome
@@ -481,12 +488,12 @@ class State(Module):
     """Constant shift added to the sum of trees."""
 
     resid: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
-        chains=0, data=-1
+        chains=CHAIN_AXIS, data=-1
     )
     """The residuals (`y` or `z` minus sum of trees)."""
 
     error_cov_inv: Float32[Array, '*chains'] | Float32[Array, '*chains k k'] = field(
-        chains=0
+        chains=CHAIN_AXIS
     )
     """The inverse error covariance (scalar for univariate, matrix for multivariate).
     Identity in binary regression."""

@@ -73,6 +73,7 @@ from bartz.grove import (
 )
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import (
+    CHAIN_AXIS,
     chain_vmap_axes,
     field,
     get_axis_size,
@@ -89,17 +90,27 @@ class BurninTrace(Module):
     error_cov_inv: (
         Float32[Array, '*chains_and_samples']
         | Float32[Array, '*chains_and_samples k k']
-    ) = field(chains=0, samples=0)
-    theta: Float32[Array, '*chains_and_samples'] | None = field(chains=0, samples=0)
-    grow_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
-    grow_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
-    prune_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
-    prune_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
+    ) = field(chains=CHAIN_AXIS, samples=0)
+    theta: Float32[Array, '*chains_and_samples'] | None = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    grow_prop_count: Int32[Array, '*chains_and_samples'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    grow_acc_count: Int32[Array, '*chains_and_samples'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    prune_prop_count: Int32[Array, '*chains_and_samples'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    prune_acc_count: Int32[Array, '*chains_and_samples'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
     log_likelihood: Float32[Array, '*chains_and_samples'] | None = field(
-        chains=0, samples=0
+        chains=CHAIN_AXIS, samples=0
     )
     log_trans_prior: Float32[Array, '*chains_and_samples'] | None = field(
-        chains=0, samples=0
+        chains=CHAIN_AXIS, samples=0
     )
 
     @classmethod
@@ -124,11 +135,17 @@ class MainTrace(BurninTrace):
     leaf_tree: (
         Float32[Array, '*chains_and_samples 2**d']
         | Float32[Array, '*chains_and_samples k 2**d']
-    ) = field(chains=0, samples=0)
-    var_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=0, samples=0)
-    split_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=0, samples=0)
+    ) = field(chains=CHAIN_AXIS, samples=0)
+    var_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    split_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
     offset: Float32[Array, ''] | Float32[Array, ' k']
-    varprob: Float32[Array, '*chains_and_samples p'] | None = field(chains=0, samples=0)
+    varprob: Float32[Array, '*chains_and_samples p'] | None = field(
+        chains=CHAIN_AXIS, samples=0
+    )
 
     @classmethod
     def from_state(cls, state: State) -> 'MainTrace':

@@ -219,7 +219,7 @@ covcheck:
 
 .PHONY: update-deps
 update-deps:
-	uv lock --upgrade
+	uv lock --upgrade --exclude-newer=1week
 	$(UV_RUN) pre-commit autoupdate
 
 .PHONY: update-oldest-deps

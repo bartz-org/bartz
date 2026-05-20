@@ -42,7 +42,8 @@ The config file is a JSONC document like:
             "num_trees":          [5, 50, 200],
             "resid_num_batches":  [null, 1, 2, 4, 8],
             "count_num_batches":  [null],
-            "prec_num_batches":   [null]
+            "prec_num_batches":   [null],
+            "num_chains":         [null, 4]
         }
     }
 
@@ -141,6 +142,9 @@ class ConfigParams:
     prec_num_batches: int | None | Literal['auto']
     """`init`'s ``prec_num_batches`` kwarg."""
 
+    num_chains: int | None
+    """`init`'s ``num_chains`` kwarg."""
+
     @classmethod
     def field_names(cls) -> tuple[str, ...]:
         """Names of every field, in declaration order."""
@@ -181,6 +185,7 @@ class ConfigParams:
             resid_num_batches=self.resid_num_batches,
             count_num_batches=self.count_num_batches,
             prec_num_batches=self.prec_num_batches,
+            num_chains=self.num_chains,
         )
 
     def __str__(self) -> str:
@@ -204,6 +209,7 @@ class InitKwargs:
     resid_num_batches: int | None | Literal['auto']
     count_num_batches: int | None | Literal['auto']
     prec_num_batches: int | None | Literal['auto']
+    num_chains: int | None
 
     def init(self) -> State:
         """Call `mcmcstep.init` with these arguments."""

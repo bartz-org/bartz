@@ -68,6 +68,9 @@ in `ConfigParams.to_init_kwargs` and not configurable from the file.
 """
 
 import inspect
+import json
+import subprocess
+import sys
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, fields, replace
@@ -85,7 +88,7 @@ from jax import Array, block_until_ready, random
 from jax import config as jax_config
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
-from polars import DataFrame, concat
+from polars import DataFrame, concat, read_parquet
 from tqdm import tqdm
 
 from bartz._jaxext import get_default_device
@@ -375,22 +378,43 @@ def clock(func: Callable[[], None]) -> float:
     return perf_counter() - start
 
 
-def benchmark_loop(config: Config, args: Namespace) -> DataFrame:
+def benchmark_loop(config: Config, args: Namespace, out_dir: Path) -> DataFrame:
     """Run the two-tiered benchmark scan.
 
-    Outer loop: iterates restart-tier values in order. Inner loop: randomizes
-    the remaining combinations. Once restart-tier params drive a real Python
-    restart, the outer loop will spawn a subprocess per restart-tier value
-    instead of calling `inner_benchmark_loop` directly.
+    Outer loop: iterates restart-tier values in order, spawning a fresh Python
+    subprocess for each non-empty restart-tier combination so that env vars and
+    import-time configuration are picked up cleanly. The empty combination
+    (i.e. no restart-tier fields in the config) runs inline. Inner loop
+    (delegated to `inner_benchmark_loop` either inline or in a worker):
+    randomizes the remaining combinations.
     """
-    if args.minimal:
-        config = config.minimal()
     frames: list[DataFrame] = []
-    for restart_values in config.restart_iter():
+    for i, restart_values in enumerate(config.restart_iter()):
         if restart_values and args.logging != Logging.no:
             label = ' '.join(f'{k}={v}' for k, v in restart_values.items())
             print(f'=== restart: {label} ===', flush=True)
-        frames.append(inner_benchmark_loop(config, args, restart_values))
+        if not restart_values:
+            frames.append(inner_benchmark_loop(config, args, restart_values))
+        else:
+            partial = out_dir / f'_part_{i:03d}.parquet'
+            cmd = [
+                sys.executable,
+                '-m',
+                'scripts.opt',
+                str(args.config),
+                '--logging',
+                args.logging.value,
+                '--num',
+                str(args.num),
+                '--worker',
+                json.dumps(restart_values),
+                '--worker-out',
+                str(partial),
+            ]
+            if args.minimal:
+                cmd.append('--minimal')
+            subprocess.run(cmd, check=True)  # noqa: S603
+            frames.append(read_parquet(partial))
     return concat(frames, how='vertical')
 
 
@@ -486,6 +510,17 @@ def parse_args() -> Namespace:
         default=False,
         help='Use a minimal hyperparameter grid (first + last value per range).',
     )
+    parser.add_argument(
+        '--worker',
+        default=None,
+        help='Internal: JSON-encoded restart_values for worker mode.',
+    )
+    parser.add_argument(
+        '--worker-out',
+        type=Path,
+        default=None,
+        help='Internal: output parquet path for worker mode.',
+    )
     return parser.parse_args()
 
 
@@ -494,6 +529,14 @@ def main() -> None:
     enable_compilation_cache()
     args = parse_args()
     config = Config.load(args.config)
+    if args.minimal:
+        config = config.minimal()
+
+    if args.worker is not None:
+        restart_values = json.loads(args.worker)
+        df = inner_benchmark_loop(config, args, restart_values)
+        df.write_parquet(args.worker_out)
+        return
 
     out_dir = make_output_dir()
     with (out_dir / 'config.jsonc').open('w') as f:
@@ -508,7 +551,7 @@ def main() -> None:
             indent=4,
         )
 
-    results = benchmark_loop(config, args)
+    results = benchmark_loop(config, args, out_dir)
 
     results_path = out_dir / 'results.parquet'
     print(f'write {results_path}...')

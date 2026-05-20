@@ -808,9 +808,11 @@ def _broadcast_chain(
 
 
 def _wrap_chain(
-    inner: _LazyArray, chain_pos: int, chain_shape: tuple[int, ...]
+    inner: _LazyArray, chain_pos: int | None, chain_shape: tuple[int, ...]
 ) -> _LazyArray:
-    """Wrap `inner` so its factory inserts and broadcasts `chain_shape` at `chain_pos`."""
+    """Wrap `inner` so its factory inserts and broadcasts `chain_shape` at `chain_pos`. No-op when `chain_pos` is `None`."""
+    if chain_pos is None:
+        return inner
     new_shape = inner.shape[:chain_pos] + chain_shape + inner.shape[chain_pos:]
     return _LazyArray(_broadcast_chain, new_shape, inner, chain_shape, chain_pos)
 
@@ -1222,9 +1224,7 @@ def _set_initial_resid(
     preview = replace(state, resid=preview_resid)
     chain_axis = chain_vmap_axes(preview).resid
     data_axis = data_vmap_axes(preview).resid
-    resid = (
-        _wrap_chain(inner, chain_axis, chain_shape) if chain_axis is not None else inner
-    )
+    resid = _wrap_chain(inner, chain_axis, chain_shape)
     resid = _shard_leaf(resid, chain_axis, data_axis, state.config.mesh)
     return replace(state, resid=resid)
 

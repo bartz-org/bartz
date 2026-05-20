@@ -346,7 +346,7 @@ class TestCoreAxisMarkers:
             )
 
         # 3-D leaf, chains=2 -> 2; marker=0 in core (ndim-1=2).
-        # chain_pos (2) > axis (0) -> stays at 0.
+        # chain_axis (2) > axis (0) -> stays at 0.
         assert fn(_M()).arr == 0
 
     def test_axis_at_nonzero_position(self, axis_view: CoreAxisView) -> None:
@@ -359,7 +359,7 @@ class TestCoreAxisMarkers:
             )
 
         # 4-D leaf with chain at 0 -> core ndim 3, marker=2 -> 2.
-        # chain_pos (0) <= axis (2) -> shifted to 3.
+        # chain_axis (0) <= axis (2) -> shifted to 3.
         assert fn(_M()).arr == 3
 
     def test_negative_marker(self, axis_view: CoreAxisView) -> None:
@@ -372,7 +372,7 @@ class TestCoreAxisMarkers:
             )
 
         # 3-D leaf with chain at 0 -> core ndim 2, marker=-1 -> 1.
-        # chain_pos (0) <= axis (1) -> shifted to 2.
+        # chain_axis (0) <= axis (1) -> shifted to 2.
         assert fn(_M()).arr == 2
 
     def test_no_marker(self, axis_view: CoreAxisView) -> None:

@@ -218,15 +218,15 @@ def _is_core_axis_leaf(x: object) -> bool:
 
 
 def _compute_core_axis(
-    leaf: object, raw: int | None, chain_pos: int | None
+    leaf: object, raw: int | None, chain_axis: int | None
 ) -> int | None:
     """Combine a raw core-layout marker and a (normalized) chain position."""
     if raw is None:
         return None
-    has_chain = chain_pos is not None
+    has_chain = chain_axis is not None
     core_ndim = leaf.ndim - (1 if has_chain else 0)
     axis = normalize_axis_index(raw, core_ndim)
-    if has_chain and chain_pos <= axis:
+    if has_chain and chain_axis <= axis:
         axis += 1
     return axis
 
@@ -816,27 +816,22 @@ def _lazy_from_array(arr: Array | None) -> _LazyArray | None:
 
 
 def _broadcast_chain(
-    shape: tuple[int, ...],
-    inner: _LazyArray,
-    chain_shape: tuple[int, ...],
-    chain_pos: int,
-    **kwargs: Any,
+    shape: tuple[int, ...], inner: _LazyArray, chain_axis: int, **kwargs: Any
 ) -> Array:
-    """Concretize `inner` then insert and broadcast a chain axis at `chain_pos`."""
+    """Concretize `inner` then insert and broadcast a chain axis at `chain_axis`."""
     arr = inner(**kwargs)
-    for _ in range(len(chain_shape)):
-        arr = jnp.expand_dims(arr, chain_pos)
+    arr = jnp.expand_dims(arr, chain_axis)
     return jnp.broadcast_to(arr, shape)
 
 
 def _wrap_chain(
-    inner: _LazyArray, chain_pos: int | None, chain_shape: tuple[int, ...]
+    inner: _LazyArray, chain_axis: int | None, num_chains: int | None
 ) -> _LazyArray:
-    """Wrap `inner` so its factory inserts and broadcasts `chain_shape` at `chain_pos`. No-op when `chain_pos` is `None`."""
-    if chain_pos is None:
+    """Wrap `inner` so its factory inserts and broadcasts `num_chains` at `chain_axis`. No-op when `chain_axis` is `None`."""
+    if chain_axis is None:
         return inner
-    new_shape = inner.shape[:chain_pos] + chain_shape + inner.shape[chain_pos:]
-    return _LazyArray(_broadcast_chain, new_shape, inner, chain_shape, chain_pos)
+    new_shape = (*inner.shape[:chain_axis], num_chains, *inner.shape[chain_axis:])
+    return _LazyArray(_broadcast_chain, new_shape, inner, chain_axis)
 
 
 def _is_lazy_or_none(x: object) -> bool:
@@ -1063,9 +1058,6 @@ def init(
         msg = 'sparsity params (either theta or rho,a,b) and sparse_on_at must be either all None or all set'
         raise ValueError(msg)
 
-    # process multichain settings
-    chain_shape = () if num_chains is None else (num_chains,)
-
     # determine batch sizes for reductions
     mesh = _parse_mesh(num_chains, mesh)
     target_platform = _parse_target_platform(
@@ -1167,7 +1159,7 @@ def init(
 
     # add the chain axis to every chain-marked leaf at the position declared
     # by its field metadata
-    state = _add_chains(state, chain_shape)
+    state = _add_chains(state, num_chains)
 
     # delete big input arrays such that they can be deleted as soon as they
     # are sharded, only those arrays that contain an (n,) sized axis
@@ -1179,7 +1171,7 @@ def init(
     # calculate initial resid in the continuous outcome case, such that y and
     # offset are already sharded if needed
     if state.resid is None:
-        state = _set_initial_resid(state, binary_indices, chain_shape)
+        state = _set_initial_resid(state, binary_indices, num_chains)
 
     # calculate initial binary_y
     if is_binary or binary_indices is not None:
@@ -1211,9 +1203,7 @@ def init(
 
 
 def _set_initial_resid(
-    state: 'State',
-    binary_indices: Int32[Array, ' kb'] | None,
-    chain_shape: tuple[int, ...],
+    state: 'State', binary_indices: Int32[Array, ' kb'] | None, num_chains: int | None
 ) -> 'State':
     """Build the continuous-outcome `resid` and shard it.
 
@@ -1221,7 +1211,7 @@ def _set_initial_resid(
     are already on the target devices. Sharding axes are read via
     `chain_vmap_axes` / `data_vmap_axes` on a shape preview where the new
     `resid` leaf has the chain-extended ``ndim`` (inflated by a placeholder
-    when `chain_shape` is non-empty).
+    when `num_chains` is not `None`).
     """
     inner = _LazyArray(
         _initial_resid,
@@ -1230,11 +1220,11 @@ def _set_initial_resid(
         state.offset,
         binary_indices,
     )
-    preview_resid = add_dummy_axis(inner) if chain_shape else inner
+    preview_resid = add_dummy_axis(inner) if num_chains is not None else inner
     preview = replace(state, resid=preview_resid)
     chain_axis = chain_vmap_axes(preview).resid
     data_axis = data_vmap_axes(preview).resid
-    resid = _wrap_chain(inner, chain_axis, chain_shape)
+    resid = _wrap_chain(inner, chain_axis, num_chains)
     resid = _shard_leaf(resid, chain_axis, data_axis, state.config.mesh)
     return replace(state, resid=resid)
 
@@ -1326,32 +1316,32 @@ def _get_blocked_vars(
         return None
 
 
-def _add_chains(state: 'State', chain_shape: tuple[int, ...]) -> 'State':
-    """Extend chain-marked `_LazyArray` leaves to include `chain_shape`.
+def _add_chains(state: 'State', num_chains: int | None) -> 'State':
+    """Extend chain-marked `_LazyArray` leaves to include a chain axis of size `num_chains`.
 
     Walks `state`, asks `chain_vmap_axes` where each leaf's chain axis lives,
     and wraps the carried `_LazyArray` so its factory creates the core array
     and then broadcasts a chain axis in at that position. To make
     `chain_vmap_axes` normalize against the chain-extended ``ndim``, the
     lookup is done on a shape preview built via `add_dummy_axis`. No-op when
-    `chain_shape` is empty.
+    `num_chains` is `None`.
 
     Chain-marked leaves are required to be `_LazyArray` (or `None`); eager
     arrays at chain-marked positions are rejected so that all chain insertion
     happens at concretization time inside `_shard_state`.
     """
-    if not chain_shape:
+    if num_chains is None:
         return state
     preview = add_dummy_axis(state)
     chain_axes = chain_vmap_axes(preview)
 
-    def wrap(leaf: object, chain_pos: int | None) -> object:
-        if chain_pos is None or leaf is None:
+    def wrap(leaf: object, chain_axis: int | None) -> object:
+        if chain_axis is None or leaf is None:
             return leaf
         assert isinstance(leaf, _LazyArray), (
             f'expected _LazyArray for chain-marked leaf, got {type(leaf).__name__}'
         )
-        return _wrap_chain(leaf, chain_pos, chain_shape)
+        return _wrap_chain(leaf, chain_axis, num_chains)
 
     return tree.map(wrap, state, chain_axes, is_leaf=_is_lazy_or_none)
 

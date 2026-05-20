@@ -782,9 +782,9 @@ def evaluate_trace(
     tc_split = chain_vmap_axes(trace).split_tree
     tc_leaf = chain_vmap_axes(trace).leaf_tree
 
-    def axis_in_trace(core_pos: int, chain_pos: int | None) -> int:
-        """Where a core (non-chain) axis sits in the trace, given chain at chain_pos."""
-        if chain_pos is None or core_pos < chain_pos:
+    def axis_in_trace(core_pos: int, chain_axis: int | None) -> int:
+        """Where a core (non-chain) axis sits in the trace, given chain at chain_axis."""
+        if chain_axis is None or core_pos < chain_axis:
             return core_pos
         return core_pos + 1
 

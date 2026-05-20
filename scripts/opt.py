@@ -70,11 +70,12 @@ in `ConfigParams.to_init_kwargs` and not configurable from the file.
 
 import inspect
 import json
+import os
 import subprocess
 import sys
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from enum import StrEnum, auto
 from gc import collect
@@ -145,6 +146,27 @@ class ConfigParams:
     num_chains: int | None
     """`init`'s ``num_chains`` kwarg."""
 
+    optimization_level: str | None
+    """JAX ``jax_optimization_level``; one of ``'O0'``..``'O3'`` or ``None`` for default (``'UNKNOWN'``)."""
+
+    exec_time_optimization_effort: float | None
+    """JAX ``jax_exec_time_optimization_effort``; float in ``[-1.0, 1.0]`` or ``None`` for default (``0.0``)."""
+
+    memory_fitting_level: str | None
+    """JAX ``jax_memory_fitting_level``; one of ``'O0'``..``'O3'`` or ``None`` for default (``'O2'``)."""
+
+    memory_fitting_effort: float | None
+    """JAX ``jax_memory_fitting_effort``; float in ``[-1.0, 1.0]`` or ``None`` for default (``0.0``)."""
+
+    gpu_autotune_level: int | None = field(metadata={'restart': True})
+    """XLA ``--xla_gpu_autotune_level`` (integer); ``None`` to leave the env var untouched."""
+
+    cpu_use_thunk_runtime: bool | None = field(metadata={'restart': True})
+    """XLA ``--xla_cpu_use_thunk_runtime`` (bool); ``None`` to leave the env var untouched."""
+
+    cpu_enable_fast_math: bool | None = field(metadata={'restart': True})
+    """XLA ``--xla_cpu_enable_fast_math`` (bool); ``None`` to leave the env var untouched."""
+
     @classmethod
     def field_names(cls) -> tuple[str, ...]:
         """Names of every field, in declaration order."""
@@ -188,6 +210,14 @@ class ConfigParams:
             num_chains=self.num_chains,
         )
 
+    def apply_jax_config(self) -> None:
+        """Apply non-restart JAX config flags from this combo; ``None`` -> JAX default."""
+        for name, default in _JAX_CONFIG_DEFAULTS.items():
+            value = getattr(self, name)
+            if value is None:
+                value = default
+            jax_config.update(f'jax_{name}', value)
+
     def __str__(self) -> str:
         return ' '.join(f'{f.name}={getattr(self, f.name)}' for f in fields(self))
 
@@ -216,15 +246,57 @@ class InitKwargs:
         return init(**{f.name: getattr(self, f.name) for f in fields(self)})
 
 
-def _init_param_defaults() -> dict[str, Any]:
-    """Default values pulled from `init`'s signature, restricted to `ConfigParams` fields."""
+# JAX defaults for the non-restart-tier optimization params, captured at import.
+# Used by `ConfigParams.apply_jax_config` to map ``None`` to the pristine JAX
+# default so prior iterations' values don't leak across the inner loop.
+_JAX_CONFIG_DEFAULTS: dict[str, Any] = {
+    name: getattr(jax_config, f'jax_{name}')
+    for name in (
+        'optimization_level',
+        'exec_time_optimization_effort',
+        'memory_fitting_level',
+        'memory_fitting_effort',
+    )
+}
+
+
+# Defaults for `ConfigParams` fields that aren't kwargs of `init`.
+_EXTRA_PARAM_DEFAULTS: dict[str, Any] = {
+    'optimization_level': None,
+    'exec_time_optimization_effort': None,
+    'memory_fitting_level': None,
+    'memory_fitting_effort': None,
+    'gpu_autotune_level': None,
+    'cpu_use_thunk_runtime': None,
+    'cpu_enable_fast_math': None,
+}
+
+
+def _param_defaults() -> dict[str, Any]:
+    """Default values for `ConfigParams` fields: from `init`'s signature plus extras."""
     sig = inspect.signature(init)
     field_names = set(ConfigParams.field_names())
-    return {
+    init_defaults = {
         name: param.default
         for name, param in sig.parameters.items()
         if name in field_names and param.default is not inspect.Parameter.empty
     }
+    return init_defaults | _EXTRA_PARAM_DEFAULTS
+
+
+def _xla_flags_for_restart(restart_values: dict[str, Any]) -> str:
+    """Build the `XLA_FLAGS` contribution for the XLA-related restart-tier values."""
+    flags: list[str] = []
+    v = restart_values.get('gpu_autotune_level')
+    if v is not None:
+        flags.append(f'--xla_gpu_autotune_level={v}')
+    v = restart_values.get('cpu_use_thunk_runtime')
+    if v is not None:
+        flags.append(f'--xla_cpu_use_thunk_runtime={"true" if v else "false"}')
+    v = restart_values.get('cpu_enable_fast_math')
+    if v is not None:
+        flags.append(f'--xla_cpu_enable_fast_math={"true" if v else "false"}')
+    return ' '.join(flags)
 
 
 @dataclass(frozen=True)
@@ -261,7 +333,7 @@ class Config:
             for name, vals in values.items()
             if name not in (raw['scan'], raw['reduce']) and len(vals) > 1
         )
-        for name, default in _init_param_defaults().items():
+        for name, default in _param_defaults().items():
             values.setdefault(name, [default])
         return cls(scan=raw['scan'], reduce=raw['reduce'], matrix=matrix, values=values)
 
@@ -293,7 +365,7 @@ class Config:
     @staticmethod
     def _check_values_keys(path: Path, values: dict[str, list[Any]]) -> None:
         allowed = set(ConfigParams.field_names())
-        optional = set(_init_param_defaults())
+        optional = set(_param_defaults())
         required = allowed - optional
         missing = required - values.keys()
         if missing:
@@ -419,7 +491,13 @@ def benchmark_loop(config: Config, args: Namespace, out_dir: Path) -> DataFrame:
             ]
             if args.minimal:
                 cmd.append('--minimal')
-            subprocess.run(cmd, check=True)  # noqa: S603
+            extra_flags = _xla_flags_for_restart(restart_values)
+            env = None
+            if extra_flags:
+                env = dict(os.environ)
+                existing = env.get('XLA_FLAGS', '')
+                env['XLA_FLAGS'] = f'{existing} {extra_flags}'.strip()
+            subprocess.run(cmd, check=True, env=env)  # noqa: S603
             frames.append(read_parquet(partial))
     return concat(frames, how='vertical')
 
@@ -439,6 +517,8 @@ def inner_benchmark_loop(
     for params in combinations:
         if args.logging == Logging.results:
             print(f'{params}...', end='', flush=True)
+
+        params.apply_jax_config()
 
         bench = Benchmark()
         try:

@@ -64,13 +64,7 @@ from jaxtyping import (
 
 from bartz import mcmcstep
 from bartz._jaxext import autobatch, jit_active, split
-from bartz.grove import (
-    TreeHeaps,
-    TreesTrace,
-    evaluate_forest,
-    forest_fill,
-    var_histogram,
-)
+from bartz.grove import TreesTrace, evaluate_forest, forest_fill, var_histogram
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import (
     chain_vmap_axes,
@@ -159,15 +153,11 @@ class RunMCMCResult(NamedTuple):
     final_state: State
     """The final MCMC state."""
 
-    burnin_trace: PyTree[
-        Shaped[Array, 'n_burn ...'] | Shaped[Array, 'num_chains n_burn ...']
-    ]
-    """The trace of the burn-in phase. For the default layout, see `BurninTrace`."""
+    burnin_trace: BurninTrace
+    """The trace of the burn-in phase."""
 
-    main_trace: PyTree[
-        Shaped[Array, 'n_save ...'] | Shaped[Array, 'num_chains n_save ...']
-    ]
-    """The trace of the main phase. For the default layout, see `MainTrace`."""
+    main_trace: MainTrace
+    """The trace of the main phase."""
 
 
 class Callback(Protocol):
@@ -234,12 +224,8 @@ class _Carry(Module):
     bart: State
     i_total: Int32[Array, '']
     key: Key[Array, '']
-    burnin_trace: PyTree[
-        Shaped[Array, 'n_burn ...'] | Shaped[Array, 'num_chains n_burn ...']
-    ]
-    main_trace: PyTree[
-        Shaped[Array, 'n_save ...'] | Shaped[Array, 'num_chains n_save ...']
-    ]
+    burnin_trace: BurninTrace
+    main_trace: MainTrace
     callback_state: CallbackState
 
 
@@ -253,8 +239,6 @@ def run_mcmc(
     inner_loop_length: int | None = None,
     callback: Callback | None = None,
     callback_state: CallbackState = None,
-    burnin_extractor: Callable[[State], PyTree] = BurninTrace.from_state,
-    main_extractor: Callable[[State], PyTree] = MainTrace.from_state,
 ) -> RunMCMCResult:
     """
     Run the MCMC for the BART posterior.
@@ -291,11 +275,6 @@ def run_mcmc(
         and the callback state.
     callback_state
         The initial custom state for the callback.
-    burnin_extractor
-    main_extractor
-        Functions that extract the variables to be saved respectively in the
-        burnin trace and main traces, given the MCMC state as argument. Must
-        return a pytree, and must be vmappable.
 
     Returns
     -------
@@ -313,8 +292,8 @@ def run_mcmc(
     not include the initial state, and include the final state.
     """
     # create empty traces
-    burnin_trace = _empty_trace(n_burn, bart, burnin_extractor)
-    main_trace = _empty_trace(n_save, bart, main_extractor)
+    burnin_trace = _empty_trace(n_burn, bart, BurninTrace)
+    main_trace = _empty_trace(n_save, bart, MainTrace)
 
     # determine number of iterations for inner and outer loops
     n_iters = n_burn + n_skip * n_save
@@ -348,16 +327,7 @@ def run_mcmc(
     _run_mcmc_inner_loop._fun.reset_call_counter()  # noqa: SLF001
     for i_outer in range(n_outer):
         carry = _run_mcmc_inner_loop(
-            carry,
-            inner_loop_length,
-            callback,
-            burnin_extractor,
-            main_extractor,
-            n_burn,
-            n_save,
-            n_skip,
-            i_outer,
-            n_iters,
+            carry, inner_loop_length, callback, n_burn, n_save, n_skip, i_outer, n_iters
         )
 
     return RunMCMCResult(carry.bart, carry.burnin_trace, carry.main_trace)
@@ -371,10 +341,8 @@ def _replicate(x: Array, mesh: Mesh | None) -> Array:
 
 
 @partial(jit, static_argnums=(0, 2))
-def _empty_trace(
-    length: int, bart: State, extractor: Callable[[State], PyTree]
-) -> PyTree:
-    example_output = eval_shape(extractor, bart)
+def _empty_trace(length: int, bart: State, trace_cls: type[BurninTrace]) -> BurninTrace:
+    example_output = eval_shape(trace_cls.from_state, bart)
 
     def add_leading(leaf: ShapeDtypeStruct) -> ShapeDtypeStruct:
         # `trace_sample_axes` only needs `leaf.ndim` to match the final trace
@@ -387,7 +355,9 @@ def _empty_trace(
     modified_example = tree.map(add_leading, example_output)
     out_axes = trace_sample_axes(modified_example)
 
-    return jax.vmap(extractor, in_axes=None, out_axes=out_axes, axis_size=length)(bart)
+    return jax.vmap(
+        trace_cls.from_state, in_axes=None, out_axes=out_axes, axis_size=length
+    )(bart)
 
 
 T = TypeVar('T')
@@ -420,14 +390,12 @@ class _CallCounter:
         return self.func(*args, **kwargs)
 
 
-@partial(jit, donate_argnums=(0,), static_argnums=(2, 3, 4))
+@partial(jit, donate_argnums=(0,), static_argnums=(2,))
 @_CallCounter
 def _run_mcmc_inner_loop(
     carry: _Carry,
     inner_loop_length: Int32[Array, ''],
     callback: Callback | None,
-    burnin_extractor: Callable[[State], PyTree],
-    main_extractor: Callable[[State], PyTree],
     n_burn: Int32[Array, ''],
     n_save: Int32[Array, ''],
     n_skip: Int32[Array, ''],
@@ -470,14 +438,7 @@ def _run_mcmc_inner_loop(
 
         # save to trace
         burnin_trace, main_trace = _save_state_to_trace(
-            carry.burnin_trace,
-            carry.main_trace,
-            burnin_extractor,
-            main_extractor,
-            bart,
-            carry.i_total,
-            n_burn,
-            n_skip,
+            carry.burnin_trace, carry.main_trace, bart, carry.i_total, n_burn, n_skip
         )
 
         return _Carry(
@@ -494,15 +455,13 @@ def _run_mcmc_inner_loop(
 
 @named_call
 def _save_state_to_trace(
-    burnin_trace: PyTree,
-    main_trace: PyTree,
-    burnin_extractor: Callable[[State], PyTree],
-    main_extractor: Callable[[State], PyTree],
+    burnin_trace: BurninTrace,
+    main_trace: MainTrace,
     bart: State,
     i_total: Int32[Array, ''],
     n_burn: Int32[Array, ''],
     n_skip: Int32[Array, ''],
-) -> tuple[PyTree, PyTree]:
+) -> tuple[BurninTrace, MainTrace]:
     # trace index where to save during burnin; out-of-bounds => noop after
     # burnin
     burnin_idx = i_total
@@ -515,8 +474,8 @@ def _save_state_to_trace(
     main_idx = jnp.where(noop_cond, noop_idx, main_idx)
 
     # prepare array index
-    burnin_trace = _set(burnin_trace, burnin_idx, burnin_extractor(bart))
-    main_trace = _set(main_trace, main_idx, main_extractor(bart))
+    burnin_trace = _set(burnin_trace, burnin_idx, BurninTrace.from_state(bart))
+    main_trace = _set(main_trace, main_idx, MainTrace.from_state(bart))
 
     return burnin_trace, main_trace
 
@@ -733,15 +692,9 @@ def _print_report(
     )
 
 
-class Trace(TreeHeaps, Protocol):
-    """Protocol for a MCMC trace."""
-
-    offset: Float32[Array, ''] | Float32[Array, ' k']
-
-
 @partial(jit, static_argnames=('flatten_chains',))
 def evaluate_trace(
-    X: UInt[Array, 'p n'], trace: Trace, *, flatten_chains: bool = False
+    X: UInt[Array, 'p n'], trace: MainTrace, *, flatten_chains: bool = False
 ) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']:
     """
     Compute predictions for all iterations of the BART MCMC.
@@ -857,7 +810,7 @@ def evaluate_trace(
 
 
 @partial(jit, static_argnums=(0,))
-def compute_varcount(p: int, trace: TreeHeaps) -> Int32[Array, '*trace_shape {p}']:
+def compute_varcount(p: int, trace: MainTrace) -> Int32[Array, '*trace_shape {p}']:
     """
     Count how many times each predictor is used in each MCMC state.
 

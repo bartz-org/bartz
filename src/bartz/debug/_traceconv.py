@@ -141,7 +141,7 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
 
 
 class TraceWithOffset(Module):
-    """Implementation of `bartz.mcmcloop.Trace`."""
+    """A trace of trees with an offset, compatible with `bartz.mcmcloop.evaluate_trace`."""
 
     leaf_tree: Float32[Array, 'ndpost ntree 2**d']
     var_tree: UInt[Array, 'ndpost ntree 2**(d-1)']

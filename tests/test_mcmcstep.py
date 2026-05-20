@@ -64,7 +64,13 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._state import StepConfig, chain_vmap_axes, data_vmap_axes, field
+from bartz.mcmcstep._state import (
+    StepConfig,
+    chain_vmap_axes,
+    data_vmap_axes,
+    field,
+    trace_sample_axes,
+)
 from bartz.mcmcstep._step import (
     Counts,
     _compute_likelihood_ratio_mv,
@@ -300,6 +306,8 @@ class TestVmapAxesMarkers:
             field(data=False)
         with pytest.raises(AssertionError):
             field(chains=True, data=-1)
+        with pytest.raises(AssertionError):
+            field(samples=True)
 
     def test_pytree_container_of_modules(self) -> None:
         """A list of Modules at the top level is walked per-element."""
@@ -319,6 +327,116 @@ class TestVmapAxesMarkers:
             assert el.both == 1
             assert el.plain is None
             assert el.chained is None
+
+
+class TestTraceSampleAxes:
+    """Test `trace_sample_axes`."""
+
+    def test_no_chains_samples_zero(self) -> None:
+        """Without a chain axis, ``samples=0`` resolves to 0."""
+
+        class _Trace(Module):
+            arr: Array = field(samples=0, default_factory=lambda: jnp.zeros((5, 3)))
+
+            @property
+            def has_chains(self) -> bool:
+                return False
+
+        assert trace_sample_axes(_Trace()).arr == 0
+
+    def test_chains_zero_samples_zero(self) -> None:
+        """``chains=0`` shifts ``samples=0`` to trace position 1."""
+
+        class _Trace(_HasChainsBase):
+            arr: Array = field(
+                chains=0, samples=0, default_factory=lambda: jnp.zeros((4, 5, 3))
+            )
+
+        assert trace_sample_axes(_Trace()).arr == 1
+
+    def test_chains_after_sample_no_shift(self) -> None:
+        """A chain axis past the sample position leaves the sample axis unchanged."""
+
+        class _Trace(_HasChainsBase):
+            arr: Array = field(
+                chains=2, samples=0, default_factory=lambda: jnp.zeros((5, 3, 4))
+            )
+
+        # 3-D leaf, chains=2 normalizes to 2; samples=0 in core (ndim-1=2).
+        # chain_pos (2) > s (0) -> sample axis stays at 0.
+        assert trace_sample_axes(_Trace()).arr == 0
+
+    def test_samples_at_nonzero_position(self) -> None:
+        """A non-zero ``samples`` index in core layout is preserved (shifted by chain if needed)."""
+
+        class _Trace(_HasChainsBase):
+            arr: Array = field(
+                chains=0, samples=2, default_factory=lambda: jnp.zeros((4, 5, 6, 7))
+            )
+
+        # 4-D leaf with chain at 0 -> core ndim 3, samples=2 -> 2.
+        # chain_pos (0) <= s (2) -> sample axis = 3.
+        assert trace_sample_axes(_Trace()).arr == 3
+
+    def test_negative_samples_marker(self) -> None:
+        """Negative ``samples`` markers are normalized against the core ndim."""
+
+        class _Trace(_HasChainsBase):
+            arr: Array = field(
+                chains=0, samples=-1, default_factory=lambda: jnp.zeros((4, 5, 6))
+            )
+
+        # 3-D leaf with chain at 0 -> core ndim 2, samples=-1 -> 1.
+        # chain_pos (0) <= s (1) -> sample axis = 2.
+        assert trace_sample_axes(_Trace()).arr == 2
+
+    def test_no_samples_marker(self) -> None:
+        """A field without a ``samples`` marker resolves to ``None``."""
+
+        class _Trace(_HasChainsBase):
+            arr: Array = field(chains=0, default_factory=lambda: jnp.zeros((4, 5)))
+
+        assert trace_sample_axes(_Trace()).arr is None
+
+    def test_has_chains_false_samples_still_resolved(self) -> None:
+        """``has_chains=False`` does not affect ``samples`` resolution."""
+
+        class _Trace(Module):
+            arr: Array = field(
+                chains=0, samples=0, default_factory=lambda: jnp.zeros((5, 3))
+            )
+
+            @property
+            def has_chains(self) -> bool:
+                return False
+
+        # `has_chains=False` strips the chain offset; sample stays at core 0.
+        assert trace_sample_axes(_Trace()).arr == 0
+
+    def test_optional_field_is_none(self) -> None:
+        """A marked field holding ``None`` yields ``None``."""
+
+        class _Trace(_HasChainsBase):
+            maybe: None | Array = field(chains=0, samples=0)
+
+        assert trace_sample_axes(_Trace(maybe=None)).maybe is None
+
+    def test_mixed_fields(self) -> None:
+        """A trace with both sample-marked and unmarked fields handles each correctly."""
+
+        class _Trace(_HasChainsBase):
+            marked: Array = field(
+                chains=0, samples=0, default_factory=lambda: jnp.zeros((4, 5, 3))
+            )
+            unmarked: Array = field(default_factory=lambda: jnp.zeros((4, 3)))
+            no_chain: Array = field(
+                samples=0, default_factory=lambda: jnp.zeros((5, 3))
+            )
+
+        out = trace_sample_axes(_Trace())
+        assert out.marked == 1
+        assert out.unmarked is None
+        assert out.no_chain == 0
 
 
 def vmap_randint_masked(

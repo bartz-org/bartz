@@ -89,14 +89,18 @@ class BurninTrace(Module):
     error_cov_inv: (
         Float32[Array, '*chains_and_samples']
         | Float32[Array, '*chains_and_samples k k']
-    ) = field(chains=0)
-    theta: Float32[Array, '*chains_and_samples'] | None = field(chains=0)
-    grow_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=0)
-    grow_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=0)
-    prune_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=0)
-    prune_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=0)
-    log_likelihood: Float32[Array, '*chains_and_samples'] | None = field(chains=0)
-    log_trans_prior: Float32[Array, '*chains_and_samples'] | None = field(chains=0)
+    ) = field(chains=0, samples=0)
+    theta: Float32[Array, '*chains_and_samples'] | None = field(chains=0, samples=0)
+    grow_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
+    grow_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
+    prune_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
+    prune_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
+    log_likelihood: Float32[Array, '*chains_and_samples'] | None = field(
+        chains=0, samples=0
+    )
+    log_trans_prior: Float32[Array, '*chains_and_samples'] | None = field(
+        chains=0, samples=0
+    )
 
     @classmethod
     def from_state(cls, state: State) -> 'BurninTrace':
@@ -120,11 +124,11 @@ class MainTrace(BurninTrace):
     leaf_tree: (
         Float32[Array, '*chains_and_samples 2**d']
         | Float32[Array, '*chains_and_samples k 2**d']
-    ) = field(chains=0)
-    var_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=0)
-    split_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=0)
-    offset: Float32[Array, '*samples'] | Float32[Array, '*samples k']
-    varprob: Float32[Array, '*chains_and_samples p'] | None = field(chains=0)
+    ) = field(chains=0, samples=0)
+    var_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=0, samples=0)
+    split_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=0, samples=0)
+    offset: Float32[Array, '*samples'] | Float32[Array, '*samples k'] = field(samples=0)
+    varprob: Float32[Array, '*chains_and_samples p'] | None = field(chains=0, samples=0)
 
     @classmethod
     def from_state(cls, state: State) -> 'MainTrace':
@@ -370,16 +374,18 @@ def _replicate(x: Array, mesh: Mesh | None) -> Array:
 def _empty_trace(
     length: int, bart: State, extractor: Callable[[State], PyTree]
 ) -> PyTree:
-    if not bart.has_chains:
-        out_axes = 0
-    else:
-        example_output = eval_shape(extractor, bart)
+    example_output = eval_shape(extractor, bart)
 
-        def add_leading(leaf: ShapeDtypeStruct) -> ShapeDtypeStruct:
-            return ShapeDtypeStruct((1, *leaf.shape), leaf.dtype)
+    def add_leading(leaf: ShapeDtypeStruct) -> ShapeDtypeStruct:
+        # `trace_sample_axes` only needs `leaf.ndim` to match the final trace
+        # ndim; the prepended axis is a placeholder for the future sample axis
+        # and its position is irrelevant. For fields without a `samples` marker
+        # the placeholder is harmless because `trace_sample_axes` returns
+        # `None` regardless of `leaf.ndim`.
+        return ShapeDtypeStruct((1, *leaf.shape), leaf.dtype)
 
-        modified_example = tree.map(add_leading, example_output)
-        out_axes = trace_sample_axes(modified_example)
+    modified_example = tree.map(add_leading, example_output)
+    out_axes = trace_sample_axes(modified_example)
 
     return jax.vmap(extractor, in_axes=None, out_axes=out_axes, axis_size=length)(bart)
 
@@ -527,13 +533,15 @@ def _set(
         | Shaped[Array, ' samples *shape']
         | None,
         val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'] | None,
-        sample_axis: int,
+        sample_axis: int | None,
     ) -> Shaped[Array, 'chains samples *shape'] | None:
-        if trace is None or trace.size == 0:
-            # this handles the case where an array is empty because jax refuses
-            # to index into an axis of length 0, even if just in the abstract,
-            # and optional elements that are considered leaves due to `is_leaf`
-            # below needed to traverse `chain_axis`.
+        if trace is None or sample_axis is None or trace.size == 0:
+            # `trace is None`: optional fields that are present in the
+            # structure but unused.
+            # `sample_axis is None`: fields without a `samples` marker have
+            # no per-iteration slot to update.
+            # `trace.size == 0`: jax refuses to index into an axis of length
+            # 0, even in the abstract.
             return trace
 
         ndindex = (slice(None),) * sample_axis + (index, ...)

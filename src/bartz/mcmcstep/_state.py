@@ -79,8 +79,14 @@ class OutcomeType(Enum):
     """Binary outcome in {0, 1} with probit link."""
 
 
-def field(*, chains: int | None = None, data: int | None = None, **kwargs: Any):  # noqa: ANN202
-    """Extend `equinox.field` with chain/data axis markers.
+def field(  # noqa: ANN202
+    *,
+    chains: int | None = None,
+    data: int | None = None,
+    samples: int | None = None,
+    **kwargs: Any,
+):
+    """Extend `equinox.field` with chain/data/sample axis markers.
 
     Parameters
     ----------
@@ -92,6 +98,15 @@ def field(*, chains: int | None = None, data: int | None = None, **kwargs: Any):
     data
         Index of the data axis for the field's arrays, or `None` if the field
         has no data axis. Same conventions as `chains`.
+    samples
+        Index of the sample axis for the field's arrays, declared in the
+        chain-less "core" layout. `None` if the field has no sample axis. The
+        index is normalized per-leaf against the core ``ndim`` (the leaf's
+        ``ndim`` minus 1 when a chain axis is present, else the leaf's
+        ``ndim``); the chain axis, if any, is treated as inserted after the
+        sample axis exists, so `trace_sample_axes` shifts the returned sample
+        index up by 1 when the chain position is at or before the core sample
+        index.
     **kwargs
         Other parameters passed to `equinox.field`.
 
@@ -103,7 +118,8 @@ def field(*, chains: int | None = None, data: int | None = None, **kwargs: Any):
     metadata = dict(kwargs.pop('metadata', {}))
     assert 'chains' not in metadata
     assert 'data' not in metadata
-    for name, value in (('chains', chains), ('data', data)):
+    assert 'samples' not in metadata
+    for name, value in (('chains', chains), ('data', data), ('samples', samples)):
         # bool is a subclass of int; reject it so a boolean value does not
         # silently mean axis 0 or 1.
         assert not isinstance(value, bool), (
@@ -158,7 +174,7 @@ def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     return _find_metadata(x, 'data')
 
 
-def trace_sample_axes(trace: PyTree[Module | Any, 'T']) -> PyTree[int, 'T']:
+def trace_sample_axes(trace: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     """Determine the position of the sample axis for each leaf of a trace.
 
     Parameters
@@ -170,29 +186,32 @@ def trace_sample_axes(trace: PyTree[Module | Any, 'T']) -> PyTree[int, 'T']:
 
     Returns
     -------
-    A pytree with the same structure as `trace`, with each leaf set to the
-    sample-axis index (0 or 1 if there's a chain axis at index 0).
+    A pytree with the same structure as `trace` but with sample axes in the leaves, see `field`.
     """
-    if not get_has_chains(trace):
-        return _find_metadata(
-            trace, 'chains', marker_value=_zero_marker, default_value=0
-        )
-    return _find_metadata(
-        trace, 'chains', marker_value=_sample_axis_for_marker, default_value=0
+    chain_axes = chain_vmap_axes(trace)
+    sample_raw = _find_metadata(trace, 'samples', marker_value=_raw_marker)
+    return tree.map(
+        _compute_sample_axis, trace, sample_raw, chain_axes, is_leaf=lambda x: x is None
     )
 
 
-def _zero_marker(leaf: object, raw: int) -> int:  # noqa: ARG001
-    """Marker mapper that always returns 0."""
-    return 0
+def _raw_marker(leaf: object, raw: int) -> int:  # noqa: ARG001
+    """Marker mapper that returns the raw marker value."""
+    return raw
 
 
-def _sample_axis_for_marker(leaf: object, chain: int) -> int:  # noqa: ARG001
-    """Sample-axis position given the raw chain marker for a field."""
-    if chain is None or chain > 0:
-        return 0
-    else:
-        return 1
+def _compute_sample_axis(
+    leaf: object, raw_s: int | None, chain_pos: int | None
+) -> int | None:
+    """Combine a raw `samples` marker and a (normalized) chain position."""
+    if raw_s is None:
+        return None
+    has_chain = chain_pos is not None
+    core_ndim = leaf.ndim - (1 if has_chain else 0)
+    s = normalize_axis_index(raw_s, core_ndim)
+    if has_chain and chain_pos <= s:
+        s += 1
+    return s
 
 
 T = TypeVar('T')

@@ -63,8 +63,8 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
 
 ## Code style
 
-- **Formatter/linter:** ruff with single quotes, numpy docstring convention
-- **Imports:** generally use `from foo import bar` (relative import) instead of `import foo; foo.bar`, but for some heavily used big submodules, e.g., `from jax import random; random.foo` is preferred to `from jax.random import foo, foo1, foo2, ..., foo999999`.
+- **Formatter/linter:** ruff with single quotes
+- **Imports:** generally use `from foo import bar` (relative import) instead of `import foo; foo.bar`, but for some heavily used big (sub)modules, e.g., `from jax import random; random.foo` is preferred to `from jax.random import foo, foo1, foo2, ..., foo999999`.
 - **Type annotations:**
 - **Headers** All source files carry an MIT copyright header
 - **docstrings:**
@@ -80,6 +80,7 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
     - indexing/shape conventions that improve readability and implicitly check for shape errors:
         - to get an axis length in an array, use tuple unpacking, e.g.: `_, _, k = x.shape`, `*_, l, _ = y.shape`
         - to index into an array, keep all dimensions explicit, e.g.: `x[0, :]`, `y[..., :, :, 4, :]`
+    - use `array.item()` to cast an array to a scalar python type
 - other **python** conventions:
     - use dicts as if they were frozendicts when possible: e.g., do `d = dict(d, a=1, b=2)` to set values instead of `d['a'] = 1` or `d.update(a=1)`, safer
     - type annotations:
@@ -91,10 +92,11 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
 
 ## Testing
 
-- Framework: pytest with w/ `pytest-subtests`
+- Framework: pytest, we also use subtests and heavily use parametrization
 - global `keys` fixture provides deterministic per-test JAX random keys (use `keys.pop()`)
 - Custom pytest options: `--platform` (cpu/gpu/auto), `--num-cpu-devices` (sets up jax virtual cpu devices)
 - The subpackage `tests/rbartpackages/` contains wrappers of R BART packages, not unit tests
 - To compare vectors/matrices/tensors, use `tests.util.assert_close_matrices` instead of numpy's `assert_allclose`
     - use `rtol` in test comparisons, add `atol` only if necessary (comparison of values that are near zero on some relevant scale)
+    - there's also `assert_different_matrices` to check things are not equal, this requires to set both atol and rtol which are +inf by default
 - in general prefer `assert_` functions from `tests.util` and `numpy.testing` to plain `assert` if appropriate

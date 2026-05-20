@@ -52,7 +52,7 @@ from jax import numpy as jnp
 from jax.scipy.special import ndtri
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import Array, Float, Float32, Key, Shaped
-from pytest_subtests import SubTests
+from pytest import Subtests  # noqa: PT013
 from scipy.stats import invgamma as scipy_invgamma
 from scipy.stats import ks_1samp, truncnorm
 
@@ -220,7 +220,7 @@ class TestAutoBatch:
         assert nbatches == 1
         assert jnp.all(y == x)
 
-    def test_reduction_basic(self, keys: split, subtests: SubTests) -> None:
+    def test_reduction_basic(self, keys: split, subtests: Subtests) -> None:
         """Check that reduction produces the expected result."""
         # use an internal loop instead of pytest.mark.parametrize because there
         # are too many combinations of parameters

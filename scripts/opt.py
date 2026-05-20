@@ -44,13 +44,14 @@ The optional ``defaults`` map overrides those values per config.
 
 import shutil
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from enum import StrEnum, auto
 from gc import collect
 from itertools import product
 from pathlib import Path
+from random import Random
 from time import perf_counter
 from typing import Any
 
@@ -296,12 +297,13 @@ def params_from_config(config: dict[str, Any], *, minimal: bool) -> Params:
 
 def benchmark_loop(params: Params, args: Namespace) -> DataFrame:
     """Run timing benchmarks over every valid combination of `params`."""
-    iterator: Iterable[dict[str, Any]] = list(params.product_iter())
+    combinations = list(params.product_iter())
+    Random(2026_05_20_10_19).shuffle(combinations)  # noqa: S311
     if args.logging == Logging.pbar:
-        iterator = tqdm(iterator)
+        combinations = tqdm(combinations)
 
     results: dict[str, list[Any]] = {}
-    for resolved in iterator:
+    for resolved in combinations:
         if args.logging == Logging.results:
             print(
                 ' '.join(f'{k}={v}' for k, v in resolved.items()) + '...',

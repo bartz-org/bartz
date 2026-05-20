@@ -146,7 +146,7 @@ class TraceWithOffset(Module):
     leaf_tree: Float32[Array, 'ndpost ntree 2**d']
     var_tree: UInt[Array, 'ndpost ntree 2**(d-1)']
     split_tree: UInt[Array, 'ndpost ntree 2**(d-1)']
-    offset: Float32[Array, ' ndpost']
+    offset: Float32[Array, '']
 
     has_chains: ClassVar[bool] = False
     """No chain axis: each leading axis is just the sample axis."""
@@ -156,12 +156,11 @@ class TraceWithOffset(Module):
         cls, trees: TreeHeaps, offset: Float32[Array, '']
     ) -> 'TraceWithOffset':
         """Create a `TraceWithOffset` from a `TreeHeaps`."""
-        ndpost, _, _ = trees.leaf_tree.shape
         return cls(
             leaf_tree=trees.leaf_tree,
             var_tree=trees.var_tree,
             split_tree=trees.split_tree,
-            offset=jnp.full(ndpost, offset),
+            offset=offset,
         )
 
 
@@ -243,7 +242,5 @@ def trees_BART_to_bartz(
         leaf_tree=jnp.array(leaf_trees),
         var_tree=jnp.array(var_trees),
         split_tree=jnp.array(split_trees),
-        offset=jnp.zeros(meta.ndpost)
-        if offset is None
-        else jnp.full(meta.ndpost, offset),
+        offset=jnp.float32(0.0 if offset is None else offset),
     ), meta

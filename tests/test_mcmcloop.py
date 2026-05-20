@@ -40,7 +40,7 @@ from pytest import FixtureRequest  # noqa: PT013
 from bartz._jaxext import get_default_device, split
 from bartz.mcmcloop import BurninTrace, MainTrace, run_mcmc
 from bartz.mcmcstep import State, init, make_p_nonterminal
-from bartz.mcmcstep._state import chain_vmap_axes
+from bartz.mcmcstep._state import trace_sample_axes
 from tests.util import assert_array_equal
 
 
@@ -139,20 +139,16 @@ class TestRunMcmc:
         tree.map(partial(assert_array_equal, strict=True), initial_state, final_state)
 
         def assert_empty_trace(
-            _path: KeyPath, x: Array | None, chain_axis: int | None
+            _path: KeyPath, x: Array | None, sample_axis: int | None
         ) -> None:
-            if initial_state.num_chains() is None or chain_axis is None:
-                sample_axis = 0
-            else:
-                sample_axis = 1
-            if x is not None:
+            if x is not None and sample_axis is not None:
                 assert x.shape[sample_axis] == 0
 
         def check_trace(trace: MainTrace | BurninTrace) -> None:
             tree.map_with_path(
                 assert_empty_trace,
                 trace,
-                chain_vmap_axes(trace),
+                trace_sample_axes(trace),
                 is_leaf=lambda x: x is None,
             )
 

@@ -127,7 +127,7 @@ class MainTrace(BurninTrace):
     ) = field(chains=0, samples=0)
     var_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=0, samples=0)
     split_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=0, samples=0)
-    offset: Float32[Array, '*samples'] | Float32[Array, '*samples k'] = field(samples=0)
+    offset: Float32[Array, ''] | Float32[Array, ' k']
     varprob: Float32[Array, '*chains_and_samples p'] | None = field(chains=0, samples=0)
 
     @classmethod
@@ -740,7 +740,7 @@ def _print_report(
 class Trace(TreeHeaps, Protocol):
     """Protocol for a MCMC trace."""
 
-    offset: Float32[Array, '*trace_shape']
+    offset: Float32[Array, ''] | Float32[Array, ' k']
 
 
 @partial(jit, static_argnames=('flatten_chains',))

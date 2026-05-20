@@ -47,18 +47,7 @@ try:
     from jax import shard_map
 except ImportError:
     from jax.experimental.shard_map import shard_map
-from jaxtyping import (
-    Array,
-    Bool,
-    Float,
-    Float32,
-    Int32,
-    Integer,
-    Key,
-    PyTree,
-    Shaped,
-    UInt,
-)
+from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Key, PyTree, UInt
 from numpy import ndarray
 
 from bartz._jaxext import get_default_device, minimal_unsigned_dtype
@@ -792,6 +781,57 @@ class _LazyArray(Module):
         return len(self.shape)
 
 
+def _return_array(shape: tuple[int, ...], arr: Array, **kwargs: Any) -> Array:  # noqa: ARG001
+    """`_LazyArray` factory that returns an already-built array."""
+    return arr
+
+
+def _lazy_from_array(arr: Array | None) -> _LazyArray | None:
+    """Wrap an existing array as a `_LazyArray` reporting `arr.shape`, or pass `None`."""
+    if arr is None:
+        return None
+    return _LazyArray(_return_array, arr.shape, arr)
+
+
+def _broadcast_chain(
+    shape: tuple[int, ...],
+    inner: _LazyArray,
+    chain_shape: tuple[int, ...],
+    chain_pos: int,
+    **kwargs: Any,
+) -> Array:
+    """Concretize `inner` then insert and broadcast a chain axis at `chain_pos`."""
+    arr = inner(**kwargs)
+    for _ in range(len(chain_shape)):
+        arr = jnp.expand_dims(arr, chain_pos)
+    return jnp.broadcast_to(arr, shape)
+
+
+def _wrap_chain(
+    inner: _LazyArray, chain_pos: int, chain_shape: tuple[int, ...]
+) -> _LazyArray:
+    """Wrap `inner` so its factory inserts and broadcasts `chain_shape` at `chain_pos`."""
+    new_shape = inner.shape[:chain_pos] + chain_shape + inner.shape[chain_pos:]
+    return _LazyArray(_broadcast_chain, new_shape, inner, chain_shape, chain_pos)
+
+
+def _inflate_lazy(leaf: object) -> object:
+    """Add a unit trailing axis to `_LazyArray` shapes; pass everything else through.
+
+    Used to build a shape preview where `chain_vmap_axes` can normalize raw
+    chain markers against ``core_ndim + 1`` without actually adding the chain
+    axis to the array factories.
+    """
+    if isinstance(leaf, _LazyArray):
+        return _LazyArray(leaf.array_creator, (*leaf.shape, 1), *leaf.args)
+    return leaf
+
+
+def _is_lazy_or_none(x: object) -> bool:
+    """`tree.map(is_leaf=...)` predicate that stops at `_LazyArray` or `None`."""
+    return x is None or isinstance(x, _LazyArray)
+
+
 def init(
     *,
     X: UInt[ArrayLike, 'p n'],
@@ -1013,8 +1053,6 @@ def init(
 
     # process multichain settings
     chain_shape = () if num_chains is None else (num_chains,)
-    resid_shape = chain_shape + y.shape
-    add_chains = partial(_add_chains, chain_shape=chain_shape)
 
     # determine batch sizes for reductions
     mesh = _parse_mesh(num_chains, mesh)
@@ -1036,21 +1074,19 @@ def init(
     # check there aren't too many deactivated predictors
     offset = _check_splitless_vars(filter_splitless_vars, max_split, offset)
 
-    # determine shapes for trees
-    tree_shape = (*chain_shape, num_trees)
     tree_size = 2**max_depth
 
-    # initialize all remaining stuff and put it in an unsharded state
+    # initialize all remaining stuff and put it in an unsharded state. Every
+    # chain-bearing leaf is built as a `_LazyArray` at its core (no-chain)
+    # shape; `_add_chains` then wraps each one to broadcast in the chain axis.
     state = State(
         X=X,
         binary_y=y,  # temporary to be sharded together with everything else
         z=(
-            _LazyArray(jnp.full, resid_shape, offset[..., None])
+            _LazyArray(jnp.full, y.shape, offset[..., None])
             if is_binary
             else _LazyArray(
-                jnp.full,
-                (*chain_shape, binary_indices.size, n),
-                offset[binary_indices, None],
+                jnp.full, (binary_indices.size, n), offset[binary_indices, None]
             )
             if binary_indices is not None
             else None
@@ -1058,11 +1094,11 @@ def init(
         binary_indices=binary_indices,
         offset=offset,
         resid=(
-            _LazyArray(jnp.zeros, resid_shape)
+            _LazyArray(jnp.zeros, y.shape)
             if is_binary
             else None  # resid is created later after y and offset are sharded
         ),
-        error_cov_inv=add_chains(error_cov_inv),
+        error_cov_inv=_lazy_from_array(error_cov_inv),
         # temporarily store user inputs in these slots so they get sharded
         # with everything else; `_compute_scales` replaces them post-shard.
         prec_scale=error_scale,
@@ -1071,42 +1107,40 @@ def init(
         error_cov_scale=error_cov_scale,
         forest=Forest(
             leaf_tree=_LazyArray(
-                jnp.zeros, (*tree_shape, *kshape, tree_size), jnp.float32
+                jnp.zeros, (num_trees, *kshape, tree_size), jnp.float32
             ),
             var_tree=_LazyArray(
-                jnp.zeros, (*tree_shape, tree_size // 2), minimal_unsigned_dtype(p - 1)
+                jnp.zeros, (num_trees, tree_size // 2), minimal_unsigned_dtype(p - 1)
             ),
             split_tree=_LazyArray(
-                jnp.zeros, (*tree_shape, tree_size // 2), max_split.dtype
+                jnp.zeros, (num_trees, tree_size // 2), max_split.dtype
             ),
             affluence_tree=_LazyArray(
                 _initial_affluence_tree,
-                (*tree_shape, tree_size // 2),
+                (num_trees, tree_size // 2),
                 n,
                 min_points_per_decision_node,
             ),
             blocked_vars=_get_blocked_vars(filter_splitless_vars, max_split),
             max_split=max_split,
-            grow_prop_count=_LazyArray(jnp.zeros, chain_shape, int),
-            grow_acc_count=_LazyArray(jnp.zeros, chain_shape, int),
-            prune_prop_count=_LazyArray(jnp.zeros, chain_shape, int),
-            prune_acc_count=_LazyArray(jnp.zeros, chain_shape, int),
+            grow_prop_count=_LazyArray(jnp.zeros, (), int),
+            grow_acc_count=_LazyArray(jnp.zeros, (), int),
+            prune_prop_count=_LazyArray(jnp.zeros, (), int),
+            prune_acc_count=_LazyArray(jnp.zeros, (), int),
             p_nonterminal=p_nonterminal[tree_depths(tree_size)],
             p_propose_grow=p_nonterminal[tree_depths(tree_size // 2)],
             leaf_indices=_LazyArray(
-                jnp.ones, (*tree_shape, n), minimal_unsigned_dtype(tree_size - 1)
+                jnp.ones, (num_trees, n), minimal_unsigned_dtype(tree_size - 1)
             ),
             min_points_per_decision_node=_asarray_or_none(min_points_per_decision_node),
             min_points_per_leaf=_asarray_or_none(min_points_per_leaf),
-            log_trans_prior=_LazyArray(jnp.zeros, (*chain_shape, num_trees))
+            log_trans_prior=_LazyArray(jnp.zeros, (num_trees,))
             if save_ratios
             else None,
-            log_likelihood=_LazyArray(jnp.zeros, (*chain_shape, num_trees))
-            if save_ratios
-            else None,
+            log_likelihood=_LazyArray(jnp.zeros, (num_trees,)) if save_ratios else None,
             leaf_prior_cov_inv=leaf_prior_cov_inv,
-            log_s=add_chains(_asarray_or_none(log_s)),
-            theta=add_chains(_asarray_or_none(theta)),
+            log_s=_lazy_from_array(_asarray_or_none(log_s)),
+            theta=_lazy_from_array(_asarray_or_none(theta)),
             rho=_asarray_or_none(rho),
             a=_asarray_or_none(a),
             b=_asarray_or_none(b),
@@ -1119,6 +1153,10 @@ def init(
         ),
     )
 
+    # add the chain axis to every chain-marked leaf at the position declared
+    # by its field metadata
+    state = _add_chains(state, chain_shape)
+
     # delete big input arrays such that they can be deleted as soon as they
     # are sharded, only those arrays that contain an (n,) sized axis
     del X, error_scale, missing, y
@@ -1129,15 +1167,7 @@ def init(
     # calculate initial resid in the continuous outcome case, such that y and
     # offset are already sharded if needed
     if state.resid is None:
-        resid = _LazyArray(
-            _initial_resid,
-            resid_shape,
-            state.binary_y,  # this is actually y
-            state.offset,
-            binary_indices,
-        )
-        resid = _shard_leaf(resid, 0, -1, state.config.mesh)
-        state = replace(state, resid=resid)
+        state = _set_initial_resid(state, binary_indices, chain_shape)
 
     # calculate initial binary_y
     if is_binary or binary_indices is not None:
@@ -1166,6 +1196,37 @@ def init(
 
     # make all types strong to avoid unwanted recompilations
     return _remove_weak_types(state)
+
+
+def _set_initial_resid(
+    state: 'State',
+    binary_indices: Int32[Array, ' kb'] | None,
+    chain_shape: tuple[int, ...],
+) -> 'State':
+    """Build the continuous-outcome `resid` and shard it.
+
+    Called post-shard so the captured ``state.binary_y`` and ``state.offset``
+    are already on the target devices. Sharding axes are read via
+    `chain_vmap_axes` / `data_vmap_axes` on a shape preview where the new
+    `resid` leaf has the chain-extended ``ndim`` (inflated by a placeholder
+    when `chain_shape` is non-empty).
+    """
+    inner = _LazyArray(
+        _initial_resid,
+        state.binary_y.shape,
+        state.binary_y,
+        state.offset,
+        binary_indices,
+    )
+    preview_resid = _inflate_lazy(inner) if chain_shape else inner
+    preview = replace(state, resid=preview_resid)
+    chain_axis = chain_vmap_axes(preview).resid
+    data_axis = data_vmap_axes(preview).resid
+    resid = (
+        _wrap_chain(inner, chain_axis, chain_shape) if chain_axis is not None else inner
+    )
+    resid = _shard_leaf(resid, chain_axis, data_axis, state.config.mesh)
+    return replace(state, resid=resid)
 
 
 def _initial_resid(
@@ -1255,14 +1316,35 @@ def _get_blocked_vars(
         return None
 
 
-def _add_chains(
-    x: Shaped[Array, '*shape'] | None, chain_shape: tuple[int, ...]
-) -> Shaped[Array, '*shape'] | Shaped[Array, ' num_chains *shape'] | None:
-    """Broadcast `x` to all chains."""
-    if x is None:
-        return None
-    else:
-        return jnp.broadcast_to(x, chain_shape + x.shape)
+def _add_chains(state: 'State', chain_shape: tuple[int, ...]) -> 'State':
+    """Extend chain-marked `_LazyArray` leaves to include `chain_shape`.
+
+    Walks `state`, asks `chain_vmap_axes` where each leaf's chain axis lives,
+    and wraps the carried `_LazyArray` so its factory creates the core array
+    and then broadcasts a chain axis in at that position. To make
+    `chain_vmap_axes` normalize against the chain-extended ``ndim``, the
+    lookup is done on a shape preview where every ``_LazyArray`` has a unit
+    trailing axis appended (the position is irrelevant — only the rank
+    matters for ``normalize_axis_index``). No-op when `chain_shape` is empty.
+
+    Chain-marked leaves are required to be `_LazyArray` (or `None`); eager
+    arrays at chain-marked positions are rejected so that all chain insertion
+    happens at concretization time inside `_shard_state`.
+    """
+    if not chain_shape:
+        return state
+    preview = tree.map(_inflate_lazy, state, is_leaf=_is_lazy_or_none)
+    chain_axes = chain_vmap_axes(preview)
+
+    def wrap(leaf: object, chain_pos: int | None) -> object:
+        if chain_pos is None or leaf is None:
+            return leaf
+        assert isinstance(leaf, _LazyArray), (
+            f'expected _LazyArray for chain-marked leaf, got {type(leaf).__name__}'
+        )
+        return _wrap_chain(leaf, chain_pos, chain_shape)
+
+    return tree.map(wrap, state, chain_axes, is_leaf=_is_lazy_or_none)
 
 
 def _parse_mesh(

@@ -27,25 +27,50 @@
 Run from the project root as a module so ``benchmarks`` is importable, e.g.
 ``uv run python -m scripts.opt config.jsonc --minimal``.
 
-The config file is a JSONC document that assigns roles to hyperparameters:
+The config file is a JSONC document like:
 
 .. code-block:: jsonc
 
     {
-        "scan":   "n",                            // x-axis param
-        "reduce": "num_batches",                  // min'd over (the "optimal" curve)
-        "matrix": ["reduction", "k", "weights"], // legend / multi-line dimensions
-        "defaults": {"num_trees": 16}            // override per-param "rest" value
+        "scan":   "n",                              // x-axis param
+        "reduce": "resid_num_batches",              // min'd over (the "optimal" curve)
+        "values": {                                 // value list for every param
+            "n":                  [1024, 4096, 16384],
+            "k":                  [null, 2],
+            "maxdepth":           [6],
+            "weights":            [false],
+            "num_trees":          [5, 50, 200],
+            "resid_num_batches":  [null, 1, 2, 4, 8],
+            "count_num_batches":  [null],
+            "prec_num_batches":   [null]
+        }
     }
 
-Parameters not mentioned in any role keep a single "rest" value (see `Defaults`).
-The optional ``defaults`` map overrides those values per config.
+``values`` may list any subset of the fields of `ConfigParams`; fields whose
+name matches a parameter of `init` with a default are filled in with that
+default if omitted. ``scan`` and ``reduce`` must be one of `ConfigParams`'s
+fields. The legend / multi-line dimensions (the "matrix") are derived
+automatically as the params in ``values`` with more than one value, other than
+``scan`` and ``reduce``; the resulting list is written into the output config
+under the key ``matrix`` for downstream tools.
+
+`ConfigParams` covers two kinds of params:
+
+- ``n`` and ``k`` set the data shape: ``X``, ``y``, ``max_split`` come from
+  `benchmarks.speed.gen_nonsense_data(1, n, k)`.
+- ``maxdepth`` and ``weights`` map to `init` args without being literal init
+  kwargs: ``maxdepth`` -> ``p_nonterminal = make_p_nonterminal(maxdepth, 0.95,
+  2)``; ``weights = True`` -> ``error_scale = jnp.ones(n)`` (else ``None``).
+- The remaining fields are forwarded to `init` verbatim.
+
+``leaf_prior_cov_inv``, ``error_cov_df`` and ``error_cov_scale`` are hardcoded
+in `ConfigParams.to_init_kwargs` and not configurable from the file.
 """
 
-import shutil
+import inspect
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
-from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field, fields
+from collections.abc import Callable, Iterator
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import UTC, datetime
 from enum import StrEnum, auto
 from gc import collect
@@ -53,10 +78,10 @@ from itertools import product
 from pathlib import Path
 from random import Random
 from time import perf_counter
-from typing import Any
+from typing import Any, Literal
 
 import json5
-from jax import block_until_ready, random
+from jax import Array, block_until_ready, random
 from jax import config as jax_config
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
@@ -69,16 +94,6 @@ from benchmarks.speed import gen_nonsense_data
 
 MAX_LEAF_INDICES_SIZE = 2**30  # 1 GiB
 
-# Sentinel: param has no role assigned, fill in from Defaults.
-UNSET = object()
-
-
-class Reduction(StrEnum):
-    """Which `init` reduction kwarg `num_batches` configures."""
-
-    resid = auto()
-    count = auto()
-
 
 class Logging(StrEnum):
     """Logging mode for benchmark runs."""
@@ -89,109 +104,228 @@ class Logging(StrEnum):
 
 
 @dataclass(frozen=True)
-class Defaults:
-    """Single-valued rest values for every hyperparameter."""
+class ConfigParams:
+    """One resolved combination of parameters, as named in the config file."""
 
-    reduction: Reduction = Reduction.resid
-    weights: bool = False
-    n: int = 1024
-    num_batches: int | None = None
-    k: int | None = None
-    num_trees: int = 5
+    n: int
+    """Number of data points."""
+
+    k: int | None
+    """Multivariate outcome dimension; ``None`` for univariate."""
+
+    maxdepth: int
+    """Maximum tree depth; passed through `make_p_nonterminal`."""
+
+    weights: bool
+    """Whether to set `init`'s ``error_scale`` to ``jnp.ones(n)``."""
+
+    num_trees: int
+    """`init`'s ``num_trees`` kwarg."""
+
+    resid_num_batches: int | None | Literal['auto']
+    """`init`'s ``resid_num_batches`` kwarg."""
+
+    count_num_batches: int | None | Literal['auto']
+    """`init`'s ``count_num_batches`` kwarg."""
+
+    prec_num_batches: int | None | Literal['auto']
+    """`init`'s ``prec_num_batches`` kwarg."""
+
+    @classmethod
+    def field_names(cls) -> tuple[str, ...]:
+        """Names of every field, in declaration order."""
+        return tuple(f.name for f in fields(cls))
+
+    def is_valid(self) -> bool:
+        """Whether this combination of values is admissible."""
+        for nb in (
+            self.resid_num_batches,
+            self.count_num_batches,
+            self.prec_num_batches,
+        ):
+            if isinstance(nb, int) and nb > self.n:
+                return False
+        uses_count = self.count_num_batches != 'auto' or self.prec_num_batches != 'auto'
+        return not (uses_count and self.num_trees * self.n > MAX_LEAF_INDICES_SIZE)
+
+    def to_init_kwargs(self) -> 'InitKwargs':
+        """Translate this combination into kwargs for `init`."""
+        X, y, max_split = gen_nonsense_data(1, self.n, self.k)
+        eye = 1.0 if self.k is None else jnp.eye(self.k)
+        return InitKwargs(
+            X=X,
+            y=y,
+            offset=jnp.zeros(y.shape[:-1]),
+            max_split=max_split,
+            num_trees=self.num_trees,
+            p_nonterminal=make_p_nonterminal(self.maxdepth, 0.95, 2),
+            leaf_prior_cov_inv=self.num_trees * eye,
+            error_cov_df=2.0,
+            error_cov_scale=2 * eye,
+            error_scale=jnp.ones(self.n) if self.weights else None,
+            resid_num_batches=self.resid_num_batches,
+            count_num_batches=self.count_num_batches,
+            prec_num_batches=self.prec_num_batches,
+        )
+
+    def __str__(self) -> str:
+        return ' '.join(f'{f.name}={getattr(self, f.name)}' for f in fields(self))
 
 
 @dataclass(frozen=True)
-class Params:
-    """Value ranges for every hyperparameter plus the matching `Defaults`."""
+class InitKwargs:
+    """Keyword arguments for `bartz.mcmcstep.init`, in init's signature order."""
 
-    reduction: Sequence[Any] = (Reduction.resid, Reduction.count)
-    weights: Sequence[Any] = (False, True)
-    n: Sequence[Any] = tuple(4**i for i in range(12 + 1))
-    num_batches: Sequence[Any] = (None, *(2**i for i in range(13 + 1)))
-    k: Sequence[Any] = (None, 1, 2, 4)
-    num_trees: Sequence[Any] = tuple(4**i for i in range(4 + 1))
+    X: Array
+    y: Array
+    offset: Array
+    max_split: Array
+    num_trees: int
+    p_nonterminal: Array
+    leaf_prior_cov_inv: float | Array
+    error_cov_df: float
+    error_cov_scale: float | Array
+    error_scale: Array | None
+    resid_num_batches: int | None | Literal['auto']
+    count_num_batches: int | None | Literal['auto']
+    prec_num_batches: int | None | Literal['auto']
 
-    defaults: Defaults = field(default_factory=Defaults)
+    def init(self) -> State:
+        """Call `mcmcstep.init` with these arguments."""
+        return init(**{f.name: getattr(self, f.name) for f in fields(self)})
+
+
+def _init_param_defaults() -> dict[str, Any]:
+    """Default values pulled from `init`'s signature, restricted to `ConfigParams` fields."""
+    sig = inspect.signature(init)
+    field_names = set(ConfigParams.field_names())
+    return {
+        name: param.default
+        for name, param in sig.parameters.items()
+        if name in field_names and param.default is not inspect.Parameter.empty
+    }
+
+
+@dataclass(frozen=True)
+class Config:
+    """Parsed and validated config file content."""
+
+    scan: str
+    """Field plotted on the x-axis."""
+
+    reduce: str
+    """Field minimised over to build the 'optimal' curve."""
+
+    matrix: tuple[str, ...]
+    """Fields used as legend / multi-line dimensions.
+
+    Derived from ``values``: params (other than ``scan`` and ``reduce``) that
+    were given more than one value in the input config.
+    """
+
+    values: dict[str, list[Any]]
+    """Per-field list of values to enumerate; keys = `ConfigParams.field_names()`."""
 
     @classmethod
-    def range_field_names(cls) -> tuple[str, ...]:
-        """Names of every value-range field (everything except `defaults`)."""
-        return tuple(f.name for f in fields(cls) if f.name != 'defaults')
-
-    def valid(
-        self,
-        *,
-        reduction: Reduction,
-        weights: bool,  # noqa: ARG002
-        n: int,
-        num_batches: int | None,
-        k: int | None,  # noqa: ARG002
-        num_trees: int,
-    ) -> bool:
-        """Whether a fully-resolved combination of values is admissible."""
-        num_batches_ok = num_batches is None or num_batches <= n
-        memory_ok = (
-            reduction != Reduction.count or num_trees * n <= MAX_LEAF_INDICES_SIZE
+    def load(cls, path: Path) -> 'Config':
+        """Load and validate a JSONC config file."""
+        with path.open() as f:
+            raw = json5.load(f)
+        cls._check_schema(path, raw)
+        values = dict(raw['values'])
+        cls._check_values_keys(path, values)
+        cls._check_roles(path, [raw['scan'], raw['reduce']], set(values))
+        matrix = tuple(
+            name
+            for name, vals in values.items()
+            if name not in (raw['scan'], raw['reduce']) and len(vals) > 1
         )
-        return num_batches_ok and memory_ok
+        for name, default in _init_param_defaults().items():
+            values.setdefault(name, [default])
+        return cls(scan=raw['scan'], reduce=raw['reduce'], matrix=matrix, values=values)
 
-    def product_iter(self) -> Iterator[dict[str, Any]]:
-        """Yield resolved (UNSET-free) dicts for every valid combination."""
-        names = self.range_field_names()
-        ranges = [getattr(self, name) for name in names]
+    @staticmethod
+    def _check_schema(path: Path, raw: dict[str, Any]) -> None:
+        required = {'scan', 'reduce', 'values'}
+        missing = required - raw.keys()
+        if missing:
+            msg = f'config {path}: missing required keys: {sorted(missing)}'
+            raise ValueError(msg)
+        extra = raw.keys() - required
+        if extra:
+            msg = f'config {path}: unknown top-level keys: {sorted(extra)}'
+            raise ValueError(msg)
+        if not isinstance(raw['scan'], str):
+            msg = f'config {path}: "scan" must be a string'
+            raise TypeError(msg)
+        if not isinstance(raw['reduce'], str):
+            msg = f'config {path}: "reduce" must be a string'
+            raise TypeError(msg)
+        if not isinstance(raw['values'], dict):
+            msg = f'config {path}: "values" must be an object'
+            raise TypeError(msg)
+        for k, v in raw['values'].items():
+            if not isinstance(v, list) or len(v) == 0:
+                msg = f'config {path}: "values[{k!r}]" must be a non-empty list'
+                raise TypeError(msg)
+
+    @staticmethod
+    def _check_values_keys(path: Path, values: dict[str, list[Any]]) -> None:
+        allowed = set(ConfigParams.field_names())
+        optional = set(_init_param_defaults())
+        required = allowed - optional
+        missing = required - values.keys()
+        if missing:
+            msg = f'config {path}: "values" missing params: {sorted(missing)}'
+            raise ValueError(msg)
+        extra = values.keys() - allowed
+        if extra:
+            msg = (
+                f'config {path}: "values" has unknown params: {sorted(extra)}. '
+                f'Allowed: {sorted(allowed)}.'
+            )
+            raise ValueError(msg)
+
+    @staticmethod
+    def _check_roles(path: Path, named: list[str], known: set[str]) -> None:
+        missing_role = [n for n in named if n not in known]
+        if missing_role:
+            msg = f'config {path}: scan/reduce names not in values: {missing_role}'
+            raise ValueError(msg)
+        if len(named) != len(set(named)):
+            counts: dict[str, int] = {}
+            for n in named:
+                counts[n] = counts.get(n, 0) + 1
+            dups = sorted(n for n, c in counts.items() if c > 1)
+            msg = f'config {path}: parameter(s) in multiple roles: {dups}'
+            raise ValueError(msg)
+
+    def minimal(self) -> 'Config':
+        """Return a Config with each multi-element range truncated to (first, last)."""
+        return replace(
+            self,
+            values={
+                k: ([v[0], v[-1]] if len(v) > 1 else list(v))
+                for k, v in self.values.items()
+            },
+        )
+
+    def product_iter(self) -> Iterator[ConfigParams]:
+        """Yield `ConfigParams` for every valid combination."""
+        names = list(self.values)
+        ranges = [self.values[n] for n in names]
         for vals in product(*ranges):
-            resolved = {
-                name: getattr(self.defaults, name) if v is UNSET else v
-                for name, v in zip(names, vals, strict=True)
-            }
-            if self.valid(**resolved):
-                yield resolved
-
-    def minimal(self) -> 'Params':
-        """Truncate every multi-element range to (first, last); keep singletons."""
-        kwargs: dict[str, Any] = {}
-        for name in self.range_field_names():
-            v = getattr(self, name)
-            kwargs[name] = (v[0], v[-1]) if len(v) > 1 else v
-        return Params(**kwargs, defaults=self.defaults)
+            params = ConfigParams(**dict(zip(names, vals, strict=True)))
+            if params.is_valid():
+                yield params
 
 
 class Benchmark:
     """Benchmark harness for one full MCMC step."""
 
-    def setup(
-        self,
-        *,
-        reduction: Reduction,
-        weights: bool,
-        n: int,
-        num_batches: int | None,
-        k: int | None,
-        num_trees: int,
-    ) -> None:
+    def setup(self, init_kwargs: InitKwargs) -> None:
         """Initialize BART state and warm up the MCMC step."""
-        X, y, max_split = gen_nonsense_data(1, n, k)
-
-        if reduction == Reduction.resid:
-            nb_kwargs = dict(resid_num_batches=num_batches)
-        elif weights:  # count + weights -> prec
-            nb_kwargs = dict(prec_num_batches=num_batches)
-        else:  # count, no weights -> count
-            nb_kwargs = dict(count_num_batches=num_batches)
-
-        self.state: State = init(
-            X=X,
-            y=y,
-            offset=jnp.zeros(y.shape[:-1]),
-            max_split=max_split,
-            num_trees=num_trees,
-            p_nonterminal=make_p_nonterminal(6, 0.95, 2),
-            leaf_prior_cov_inv=num_trees * (1.0 if k is None else jnp.eye(k)),
-            error_cov_df=2.0,
-            error_cov_scale=2 * (1.0 if k is None else jnp.eye(k)),
-            error_scale=jnp.ones(n) if weights else None,
-            **nb_kwargs,
-        )
+        self.state: State = init_kwargs.init()
         self.key = random.key(2026_01_20_13_31)
         self.task()
 
@@ -214,106 +348,23 @@ def clock(func: Callable[[], None]) -> float:
     return perf_counter() - start
 
 
-def load_config(path: Path) -> dict[str, Any]:
-    """Load and validate the JSONC role-mapping config file."""
-    with path.open() as f:
-        config = json5.load(f)
-
-    required = {'scan', 'reduce', 'matrix'}
-    optional = {'defaults'}
-    missing = required - config.keys()
-    if missing:
-        msg = f'config {path}: missing required keys: {sorted(missing)}'
-        raise ValueError(msg)
-    extra = config.keys() - required - optional
-    if extra:
-        msg = f'config {path}: unknown top-level keys: {sorted(extra)}'
-        raise ValueError(msg)
-    if not isinstance(config['scan'], str):
-        msg = f'config {path}: "scan" must be a string'
-        raise TypeError(msg)
-    if not isinstance(config['reduce'], str):
-        msg = f'config {path}: "reduce" must be a string'
-        raise TypeError(msg)
-    if not isinstance(config['matrix'], list) or not all(
-        isinstance(x, str) for x in config['matrix']
-    ):
-        msg = f'config {path}: "matrix" must be a list of strings'
-        raise TypeError(msg)
-
-    known = set(Params.range_field_names())
-    named = [config['scan'], config['reduce'], *config['matrix']]
-    unknown = [name for name in named if name not in known]
-    if unknown:
-        msg = f'config {path}: unknown parameter names: {unknown}'
-        raise ValueError(msg)
-    if len(named) != len(set(named)):
-        counts: dict[str, int] = {}
-        for name in named:
-            counts[name] = counts.get(name, 0) + 1
-        dups = sorted(name for name, c in counts.items() if c > 1)
-        msg = f'config {path}: parameter(s) in multiple roles: {dups}'
-        raise ValueError(msg)
-
-    _validate_defaults(path, config.get('defaults', {}), known, set(named))
-
-    return config
-
-
-def _validate_defaults(
-    path: Path, defaults: object, known: set[str], in_roles: set[str]
-) -> None:
-    """Validate the optional ``defaults`` config map."""
-    if not isinstance(defaults, dict):
-        msg = f'config {path}: "defaults" must be an object'
-        raise TypeError(msg)
-    unknown_defaults = defaults.keys() - known
-    if unknown_defaults:
-        msg = f'config {path}: unknown defaults: {sorted(unknown_defaults)}'
-        raise ValueError(msg)
-    overlap = defaults.keys() & in_roles
-    if overlap:
-        msg = f'config {path}: defaults overlap with roles: {sorted(overlap)}'
-        raise ValueError(msg)
-
-
-def params_from_config(config: dict[str, Any], *, minimal: bool) -> Params:
-    """Build a `Params` whose ranges include only role-assigned parameters."""
-    in_roles = {config['scan'], config['reduce'], *config['matrix']}
-    overrides = dict(config.get('defaults', {}))
-    if 'reduction' in overrides:
-        overrides['reduction'] = Reduction(overrides['reduction'])
-    defaults = Defaults(**overrides)
-    full = Params()
-    kwargs = {
-        name: getattr(full, name) if name in in_roles else (UNSET,)
-        for name in Params.range_field_names()
-    }
-    params = Params(**kwargs, defaults=defaults)
-    if minimal:
-        params = params.minimal()
-    return params
-
-
-def benchmark_loop(params: Params, args: Namespace) -> DataFrame:
-    """Run timing benchmarks over every valid combination of `params`."""
-    combinations = list(params.product_iter())
+def benchmark_loop(config: Config, args: Namespace) -> DataFrame:
+    """Run timing benchmarks over every valid combination of values."""
+    if args.minimal:
+        config = config.minimal()
+    combinations = list(config.product_iter())
     Random(2026_05_20_10_19).shuffle(combinations)  # noqa: S311
     if args.logging == Logging.pbar:
         combinations = tqdm(combinations)
 
     results: dict[str, list[Any]] = {}
-    for resolved in combinations:
+    for params in combinations:
         if args.logging == Logging.results:
-            print(
-                ' '.join(f'{k}={v}' for k, v in resolved.items()) + '...',
-                end='',
-                flush=True,
-            )
+            print(f'{params}...', end='', flush=True)
 
         bench = Benchmark()
         try:
-            bench.setup(**resolved)
+            bench.setup(params.to_init_kwargs())
         except JaxRuntimeError as e:
             if 'RESOURCE_EXHAUSTED: Out of memory while trying to allocate' in str(e):
                 time_est = float('nan')
@@ -332,8 +383,8 @@ def benchmark_loop(params: Params, args: Namespace) -> DataFrame:
         if args.logging == Logging.results:
             print(f' {time_est:#.2g} s')
 
-        for k, v in resolved.items():
-            results.setdefault(k, []).append(v)
+        for name, value in asdict(params).items():
+            results.setdefault(name, []).append(value)
         results.setdefault('time_est', []).append(time_est)
         results.setdefault('time_lo', []).append(time_lo)
         results.setdefault('time_up', []).append(time_up)
@@ -366,7 +417,7 @@ def parse_args() -> Namespace:
     parser.add_argument(
         'config',
         type=Path,
-        help='Path to a JSONC config file mapping roles to parameter names.',
+        help='Path to a JSONC config file defining roles and value ranges.',
     )
     parser.add_argument(
         '--logging',
@@ -394,13 +445,22 @@ def main() -> None:
     """Entry point of the script."""
     enable_compilation_cache()
     args = parse_args()
-    config = load_config(args.config)
-    params = params_from_config(config, minimal=args.minimal)
+    config = Config.load(args.config)
 
     out_dir = make_output_dir()
-    shutil.copy(args.config, out_dir / 'config.jsonc')
+    with (out_dir / 'config.jsonc').open('w') as f:
+        json5.dump(
+            {
+                'scan': config.scan,
+                'reduce': config.reduce,
+                'matrix': list(config.matrix),
+                'values': config.values,
+            },
+            f,
+            indent=4,
+        )
 
-    results = benchmark_loop(params, args)
+    results = benchmark_loop(config, args)
 
     results_path = out_dir / 'results.parquet'
     print(f'write {results_path}...')

@@ -56,7 +56,8 @@ help:
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- copy-version: sync version from pyproject.toml to _version.py"
 	@echo "- check-committed: verify there are no uncommitted changes"
-	@echo "- release: packages the python module, invokes tests and docs first"
+	@echo "- build: build the python wheel and sdist"
+	@echo "- release: run tests, build, and upload to PyPI (run on main)"
 	@echo "- version-tag: create and push git tag for current version"
 	@echo "- upload: upload release to PyPI"
 	@echo "- upload-test: upload release to TestPyPI"
@@ -79,16 +80,12 @@ help:
 	@echo
 	@echo "Release workflow:"
 	@echo "- do a PR that re-runs benchmarks"
-	@echo "- create a new branch"
 	@echo "- $$ uv version --bump major|minor|patch"
 	@echo "- describe release in docs/changelog.md"
-	@echo "- commit"
-	@echo "- open a PR"
-	@echo "- $$ make release (iterate to fix problems)"
-	@echo "- if CI does not pass, debug and go back to make release"
-	@echo "- merge PR"
-	@echo "- if CI does not pass, debug and go back to open PR"
-	@echo "- $$ make upload"
+	@echo "- $$ make release, will not release but runs all tests, iterate and debug"
+	@echo "- merge a PR with the changes"
+	@echo "- on main: $$ make release"
+	@echo "- merge fix PR and try again until make release passes"
 	@echo "- publish github release (updates zenodo automatically)"
 	@echo "- if the online docs are not up-to-date, merge another PR to trigger a new merge CI"
 
@@ -241,9 +238,13 @@ check-committed:
 	git diff --quiet
 	git diff --quiet --staged
 
-.PHONY: release
-release: clean update-deps copy-version check-committed tests tests-single-cpu tests-old docs
+.PHONY: build
+build:
 	uv build
+
+.PHONY: release
+release: clean update-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload
+	@echo "Done!"
 
 .PHONY: version-tag
 version-tag: copy-version check-committed

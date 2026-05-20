@@ -108,7 +108,7 @@ class Params:
     n: Sequence[Any] = tuple(4**i for i in range(12 + 1))
     num_batches: Sequence[Any] = (None, *(2**i for i in range(13 + 1)))
     k: Sequence[Any] = (None, 1, 2, 4)
-    num_trees: Sequence[Any] = tuple(4**i for i in range(5 + 1))
+    num_trees: Sequence[Any] = tuple(4**i for i in range(4 + 1))
 
     defaults: Defaults = field(default_factory=Defaults)
 
@@ -172,23 +172,11 @@ class Benchmark:
         X, y, max_split = gen_nonsense_data(1, n, k)
 
         if reduction == Reduction.resid:
-            nb_kwargs = dict(
-                resid_num_batches=num_batches,
-                count_num_batches=None,
-                prec_num_batches=None,
-            )
+            nb_kwargs = dict(resid_num_batches=num_batches)
         elif weights:  # count + weights -> prec
-            nb_kwargs = dict(
-                resid_num_batches=None,
-                count_num_batches=None,
-                prec_num_batches=num_batches,
-            )
+            nb_kwargs = dict(prec_num_batches=num_batches)
         else:  # count, no weights -> count
-            nb_kwargs = dict(
-                resid_num_batches=None,
-                count_num_batches=num_batches,
-                prec_num_batches=None,
-            )
+            nb_kwargs = dict(count_num_batches=num_batches)
 
         self.state: State = init(
             X=X,

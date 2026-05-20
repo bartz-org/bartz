@@ -529,15 +529,11 @@ def _set(
 
     def at_set(
         trace: Shaped[Array, 'chains samples *shape']
-        | None
-        | Shaped[Array, ' samples *shape']
-        | None,
-        val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'] | None,
+        | Shaped[Array, ' samples *shape'],
+        val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'],
         sample_axis: int | None,
-    ) -> Shaped[Array, 'chains samples *shape'] | None:
-        if trace is None or sample_axis is None or trace.size == 0:
-            # `trace is None`: optional fields that are present in the
-            # structure but unused.
+    ) -> Shaped[Array, 'chains samples *shape']:
+        if sample_axis is None or trace.size == 0:
             # `sample_axis is None`: fields without a `samples` marker have
             # no per-iteration slot to update.
             # `trace.size == 0`: jax refuses to index into an axis of length
@@ -547,7 +543,7 @@ def _set(
         ndindex = (slice(None),) * sample_axis + (index, ...)
         return trace.at[ndindex].set(val, mode='drop')
 
-    return tree.map(at_set, trace, val, sample_axes, is_leaf=lambda x: x is None)
+    return tree.map(at_set, trace, val, sample_axes)
 
 
 def make_default_callback(

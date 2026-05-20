@@ -61,6 +61,7 @@ help:
 	@echo "- version-tag: create and push git tag for current version"
 	@echo "- upload: upload release to PyPI"
 	@echo "- upload-test: upload release to TestPyPI"
+	@echo "- gh-release: create draft GitHub release from docs/changelog.md"
 	@echo "- asv-machine: initialize ~/.asv-machine.json with a human-readable id"
 	@echo "- asv-run: run benchmarks on all unbenchmarked tagged releases and main"
 	@echo "- asv-publish: create html benchmark report"
@@ -86,7 +87,7 @@ help:
 	@echo "- merge a PR with the changes"
 	@echo "- on main: $$ make release"
 	@echo "- merge fix PR and try again until make release passes"
-	@echo "- publish github release (updates zenodo automatically)"
+	@echo "- publish the draft github release created by make release (updates zenodo automatically)"
 	@echo "- if the online docs are not up-to-date, merge another PR to trigger a new merge CI"
 
 
@@ -243,7 +244,7 @@ build:
 	uv build
 
 .PHONY: release
-release: clean update-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload
+release: clean update-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload gh-release
 	@echo "Done!"
 
 .PHONY: version-tag
@@ -284,6 +285,10 @@ upload-test: smoke-test check-committed
 	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
 	echo "Try to install bartz $$VERSION from TestPyPI" && \
 	uv tool run --index=https://test.pypi.org/simple/ --index-strategy=unsafe-best-match --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
+
+.PHONY: gh-release
+gh-release: version-tag
+	$(UV_RUN) python config/util.py gh_release
 
 
 ################# BENCHMARKS #################

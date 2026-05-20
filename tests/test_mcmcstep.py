@@ -25,7 +25,7 @@
 """Test `bartz.mcmcstep`."""
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from functools import partial, wraps
 from typing import NamedTuple
@@ -142,7 +142,7 @@ class _MarkerLeaf(_HasChainsBase):
 
 
 class TestVmapAxesMarkers:
-    """Test the `field` / `chain_vmap_axes` / `data_vmap_axes` machinery."""
+    """Test the `field` / `chain_vmap_axes` machinery."""
 
     @pytest.fixture
     def x(self) -> _MarkerLeaf:
@@ -150,34 +150,27 @@ class TestVmapAxesMarkers:
         return _MarkerLeaf()
 
     def test_default_none(self, x: _MarkerLeaf) -> None:
-        """An unmarked field becomes None in both axis views."""
+        """An unmarked field becomes None."""
         assert chain_vmap_axes(x).plain is None
-        assert data_vmap_axes(x).plain is None
 
     def test_chain_marker_value(self, x: _MarkerLeaf) -> None:
         """A chains-marked field reports its integer axis under chains."""
         assert chain_vmap_axes(x).chained == 0
-        assert data_vmap_axes(x).chained is None
 
-    def test_data_marker_value(self, x: _MarkerLeaf) -> None:
-        """A data-marked field reports its integer axis under data (normalized)."""
+    def test_data_marker_no_chain(self, x: _MarkerLeaf) -> None:
+        """A data-only marked field reports None under chains."""
         assert chain_vmap_axes(x).datad is None
-        # raw marker is -1 on a 2-D leaf -> normalized to 1
-        assert data_vmap_axes(x).datad == 1
 
     def test_both_markers(self, x: _MarkerLeaf) -> None:
-        """A field marked under both keys reports each axis on its own view."""
+        """A field marked under both keys reports its chain axis under chains."""
         assert chain_vmap_axes(x).both == 0
-        # raw marker is -1 on a 2-D leaf -> normalized to 1
-        assert data_vmap_axes(x).both == 1
 
     def test_static_passthrough(self, x: _MarkerLeaf) -> None:
         """Static fields keep their original (non-axis) value."""
         assert chain_vmap_axes(x).static_thing == 42
-        assert data_vmap_axes(x).static_thing == 42
 
     def test_normalization(self) -> None:
-        """Negative markers are normalized per-leaf against the leaf's ndim."""
+        """Negative chain markers are normalized per-leaf against the leaf's ndim."""
 
         class _NonCanonicalMarkers(_HasChainsBase):
             """Module that uses non-default integer axis indices."""
@@ -189,15 +182,10 @@ class TestVmapAxesMarkers:
         arr = jnp.zeros((2, 3, 4))
         x = _NonCanonicalMarkers(a=arr, b=arr, c=arr)
         cax = chain_vmap_axes(x)
-        dax = data_vmap_axes(x)
         # 3-D leaves: chains=2 -> 2, chains=-2 -> 1
         assert cax.a == 2
         assert cax.b is None
         assert cax.c == 1
-        # 3-D leaves: data=-1 -> 2, data=0 -> 0
-        assert dax.a is None
-        assert dax.b == 2
-        assert dax.c == 0
 
     def test_negative_marker_normalization(self) -> None:
         """A non-trivial negative chain marker on a 3-D leaf normalizes correctly."""
@@ -210,7 +198,7 @@ class TestVmapAxesMarkers:
         assert chain_vmap_axes(x).arr == 1
 
     def test_marker_out_of_bounds_raises(self) -> None:
-        """A marker whose absolute value exceeds the leaf ndim raises an axis error."""
+        """A chain marker whose absolute value exceeds the leaf ndim raises an axis error."""
 
         class _ChainScalar(_HasChainsBase):
             scalar: Array = field(chains=0)
@@ -233,17 +221,6 @@ class TestVmapAxesMarkers:
         x = _NoChains()
         # `has_chains=False` short-circuits the marker normalization
         assert chain_vmap_axes(x).arr is None
-        # but `data_vmap_axes` is unaffected by `has_chains`
-
-        class _NoChainsData(_HasChainsBase):
-            arr: Array = field(data=-1, default_factory=lambda: jnp.zeros((2, 3)))
-
-            @property
-            def has_chains(self) -> bool:
-                return False
-
-        y = _NoChainsData()
-        assert data_vmap_axes(y).arr == 1
 
     def test_nested_module(self) -> None:
         """Recursion descends into Module-valued fields."""
@@ -261,14 +238,9 @@ class TestVmapAxesMarkers:
             outer_chain=jnp.zeros(2),
         )
         cax = chain_vmap_axes(x)
-        dax = data_vmap_axes(x)
         assert cax.outer_chain == 0
         assert cax.inner.chain_arr == 0
         assert cax.inner.data_arr is None
-        assert dax.outer_chain is None
-        assert dax.inner.chain_arr is None
-        # 1-D leaf: data=-1 normalized to 0
-        assert dax.inner.data_arr == 0
 
     def test_subtree_broadcast(self) -> None:
         """A marked pytree-valued field gets the marker on every leaf."""
@@ -281,12 +253,8 @@ class TestVmapAxesMarkers:
             tup=(jnp.zeros(2), jnp.zeros(2)), dct={'p': jnp.zeros(2), 'q': jnp.zeros(2)}
         )
         cax = chain_vmap_axes(x)
-        dax = data_vmap_axes(x)
         assert cax.tup == (0, 0)
         assert cax.dct == {'p': None, 'q': None}
-        assert dax.tup == (None, None)
-        # 1-D leaves: data=-1 normalized to 0
-        assert dax.dct == {'p': 0, 'q': 0}
 
     def test_none_valued_field(self) -> None:
         """A marked field holding None yields None (empty pytree)."""
@@ -296,7 +264,6 @@ class TestVmapAxesMarkers:
 
         x = _OptionalMarker(maybe=None)
         assert chain_vmap_axes(x).maybe is None
-        assert data_vmap_axes(x).maybe is None
 
     def test_bool_rejected(self) -> None:
         """field() rejects bool to avoid the int-subclass footgun."""
@@ -313,7 +280,6 @@ class TestVmapAxesMarkers:
         """A list of Modules at the top level is walked per-element."""
         x = [_MarkerLeaf(), _MarkerLeaf()]
         cax = chain_vmap_axes(x)
-        dax = data_vmap_axes(x)
         assert isinstance(cax, list)
         assert len(cax) == 2
         for el in cax:
@@ -321,122 +287,213 @@ class TestVmapAxesMarkers:
             assert el.both == 0
             assert el.plain is None
             assert el.datad is None
-        for el in dax:
-            # _MarkerLeaf uses 2-D leaves: data=-1 normalized to 1
-            assert el.datad == 1
-            assert el.both == 1
-            assert el.plain is None
-            assert el.chained is None
 
 
-class TestTraceSampleAxes:
-    """Test `trace_sample_axes`."""
+CoreAxisView = tuple[str, Callable[[PyTree], PyTree]]
 
-    def test_no_chains_samples_zero(self) -> None:
-        """Without a chain axis, ``samples=0`` resolves to 0."""
 
-        class _Trace(Module):
-            arr: Array = field(samples=0, default_factory=lambda: jnp.zeros((5, 3)))
+class TestCoreAxisMarkers:
+    """Test marker resolution under the chain-less core convention.
+
+    Both `data_vmap_axes` and `trace_sample_axes` resolve a marker declared
+    in the chain-less "core" layout; the chain axis, if any, is treated as
+    inserted afterward. These tests are parametrized over the ``data`` and
+    ``samples`` markers because their resolution semantics are identical
+    modulo the metadata key they read.
+    """
+
+    @pytest.fixture(
+        params=[
+            pytest.param(('data', data_vmap_axes), id='data'),
+            pytest.param(('samples', trace_sample_axes), id='samples'),
+        ]
+    )
+    def axis_view(self, request: FixtureRequest) -> CoreAxisView:
+        """Return a (marker name, axis-resolution function) pair."""
+        return request.param
+
+    def test_no_chains_axis_zero(self, axis_view: CoreAxisView) -> None:
+        """Without a chain axis, marker=0 resolves to 0."""
+        kind, fn = axis_view
+
+        class _M(Module):
+            arr: Array = field(**{kind: 0}, default_factory=lambda: jnp.zeros((5, 3)))
 
             @property
             def has_chains(self) -> bool:
                 return False
 
-        assert trace_sample_axes(_Trace()).arr == 0
+        assert fn(_M()).arr == 0
 
-    def test_chains_zero_samples_zero(self) -> None:
-        """``chains=0`` shifts ``samples=0`` to trace position 1."""
+    def test_chains_zero_axis_zero(self, axis_view: CoreAxisView) -> None:
+        """``chains=0`` shifts marker=0 to trace position 1."""
+        kind, fn = axis_view
 
-        class _Trace(_HasChainsBase):
+        class _M(_HasChainsBase):
             arr: Array = field(
-                chains=0, samples=0, default_factory=lambda: jnp.zeros((4, 5, 3))
+                chains=0, **{kind: 0}, default_factory=lambda: jnp.zeros((4, 5, 3))
             )
 
-        assert trace_sample_axes(_Trace()).arr == 1
+        assert fn(_M()).arr == 1
 
-    def test_chains_after_sample_no_shift(self) -> None:
-        """A chain axis past the sample position leaves the sample axis unchanged."""
+    def test_chains_after_axis_no_shift(self, axis_view: CoreAxisView) -> None:
+        """A chain axis past the marker leaves the marker unchanged."""
+        kind, fn = axis_view
 
-        class _Trace(_HasChainsBase):
+        class _M(_HasChainsBase):
             arr: Array = field(
-                chains=2, samples=0, default_factory=lambda: jnp.zeros((5, 3, 4))
+                chains=2, **{kind: 0}, default_factory=lambda: jnp.zeros((5, 3, 4))
             )
 
-        # 3-D leaf, chains=2 normalizes to 2; samples=0 in core (ndim-1=2).
-        # chain_pos (2) > s (0) -> sample axis stays at 0.
-        assert trace_sample_axes(_Trace()).arr == 0
+        # 3-D leaf, chains=2 -> 2; marker=0 in core (ndim-1=2).
+        # chain_pos (2) > axis (0) -> stays at 0.
+        assert fn(_M()).arr == 0
 
-    def test_samples_at_nonzero_position(self) -> None:
-        """A non-zero ``samples`` index in core layout is preserved (shifted by chain if needed)."""
+    def test_axis_at_nonzero_position(self, axis_view: CoreAxisView) -> None:
+        """A non-zero marker in core layout is preserved (shifted by chain if needed)."""
+        kind, fn = axis_view
 
-        class _Trace(_HasChainsBase):
+        class _M(_HasChainsBase):
             arr: Array = field(
-                chains=0, samples=2, default_factory=lambda: jnp.zeros((4, 5, 6, 7))
+                chains=0, **{kind: 2}, default_factory=lambda: jnp.zeros((4, 5, 6, 7))
             )
 
-        # 4-D leaf with chain at 0 -> core ndim 3, samples=2 -> 2.
-        # chain_pos (0) <= s (2) -> sample axis = 3.
-        assert trace_sample_axes(_Trace()).arr == 3
+        # 4-D leaf with chain at 0 -> core ndim 3, marker=2 -> 2.
+        # chain_pos (0) <= axis (2) -> shifted to 3.
+        assert fn(_M()).arr == 3
 
-    def test_negative_samples_marker(self) -> None:
-        """Negative ``samples`` markers are normalized against the core ndim."""
+    def test_negative_marker(self, axis_view: CoreAxisView) -> None:
+        """Negative markers are normalized against the core ndim."""
+        kind, fn = axis_view
 
-        class _Trace(_HasChainsBase):
+        class _M(_HasChainsBase):
             arr: Array = field(
-                chains=0, samples=-1, default_factory=lambda: jnp.zeros((4, 5, 6))
+                chains=0, **{kind: -1}, default_factory=lambda: jnp.zeros((4, 5, 6))
             )
 
-        # 3-D leaf with chain at 0 -> core ndim 2, samples=-1 -> 1.
-        # chain_pos (0) <= s (1) -> sample axis = 2.
-        assert trace_sample_axes(_Trace()).arr == 2
+        # 3-D leaf with chain at 0 -> core ndim 2, marker=-1 -> 1.
+        # chain_pos (0) <= axis (1) -> shifted to 2.
+        assert fn(_M()).arr == 2
 
-    def test_no_samples_marker(self) -> None:
-        """A field without a ``samples`` marker resolves to ``None``."""
+    def test_no_marker(self, axis_view: CoreAxisView) -> None:
+        """A field without the marker resolves to None."""
+        _, fn = axis_view
 
-        class _Trace(_HasChainsBase):
+        class _M(_HasChainsBase):
             arr: Array = field(chains=0, default_factory=lambda: jnp.zeros((4, 5)))
 
-        assert trace_sample_axes(_Trace()).arr is None
+        assert fn(_M()).arr is None
 
-    def test_has_chains_false_samples_still_resolved(self) -> None:
-        """``has_chains=False`` does not affect ``samples`` resolution."""
+    def test_has_chains_false_marker_still_resolved(
+        self, axis_view: CoreAxisView
+    ) -> None:
+        """``has_chains=False`` does not affect marker resolution."""
+        kind, fn = axis_view
 
-        class _Trace(Module):
+        class _M(Module):
             arr: Array = field(
-                chains=0, samples=0, default_factory=lambda: jnp.zeros((5, 3))
+                chains=0, **{kind: 0}, default_factory=lambda: jnp.zeros((5, 3))
             )
 
             @property
             def has_chains(self) -> bool:
                 return False
 
-        # `has_chains=False` strips the chain offset; sample stays at core 0.
-        assert trace_sample_axes(_Trace()).arr == 0
+        # `has_chains=False` strips the chain offset; marker stays at core 0.
+        assert fn(_M()).arr == 0
 
-    def test_optional_field_is_none(self) -> None:
+    def test_optional_field_is_none(self, axis_view: CoreAxisView) -> None:
         """A marked field holding ``None`` yields ``None``."""
+        kind, fn = axis_view
 
-        class _Trace(_HasChainsBase):
-            maybe: None | Array = field(chains=0, samples=0)
+        class _M(_HasChainsBase):
+            maybe: None | Array = field(chains=0, **{kind: 0})
 
-        assert trace_sample_axes(_Trace(maybe=None)).maybe is None
+        assert fn(_M(maybe=None)).maybe is None
 
-    def test_mixed_fields(self) -> None:
-        """A trace with both sample-marked and unmarked fields handles each correctly."""
+    def test_mixed_fields(self, axis_view: CoreAxisView) -> None:
+        """A module with both marked and unmarked fields handles each correctly."""
+        kind, fn = axis_view
 
-        class _Trace(_HasChainsBase):
+        class _M(_HasChainsBase):
             marked: Array = field(
-                chains=0, samples=0, default_factory=lambda: jnp.zeros((4, 5, 3))
+                chains=0, **{kind: 0}, default_factory=lambda: jnp.zeros((4, 5, 3))
             )
             unmarked: Array = field(default_factory=lambda: jnp.zeros((4, 3)))
             no_chain: Array = field(
-                samples=0, default_factory=lambda: jnp.zeros((5, 3))
+                **{kind: 0}, default_factory=lambda: jnp.zeros((5, 3))
             )
 
-        out = trace_sample_axes(_Trace())
+        out = fn(_M())
         assert out.marked == 1
         assert out.unmarked is None
         assert out.no_chain == 0
+
+    def test_no_chain_marker_uses_leaf_ndim(self, axis_view: CoreAxisView) -> None:
+        """A field with no chain marker normalizes the marker against the leaf ndim."""
+        kind, fn = axis_view
+
+        class _M(_HasChainsBase):
+            arr: Array = field(**{kind: -1}, default_factory=lambda: jnp.zeros((2, 3)))
+
+        # No chain on this leaf -> core ndim = leaf.ndim = 2, marker=-1 -> 1.
+        assert fn(_M()).arr == 1
+
+    def test_marker_out_of_bounds_raises(self, axis_view: CoreAxisView) -> None:
+        """A marker out of bounds for the core ndim raises an axis error."""
+        kind, fn = axis_view
+
+        class _M(_HasChainsBase):
+            arr: Array = field(
+                chains=0, **{kind: 5}, default_factory=lambda: jnp.zeros((4, 5, 3))
+            )
+
+        # core ndim is 2; raw=5 is out of bounds.
+        with pytest.raises(numpy.exceptions.AxisError):
+            fn(_M())
+
+    def test_nested_module(self, axis_view: CoreAxisView) -> None:
+        """Recursion descends into Module-valued fields."""
+        kind, fn = axis_view
+
+        class _Inner(_HasChainsBase):
+            marked: Array = field(**{kind: -1})
+
+        class _Outer(_HasChainsBase):
+            inner: _Inner
+            outer_marked: Array = field(**{kind: 0})
+
+        x = _Outer(inner=_Inner(marked=jnp.zeros(2)), outer_marked=jnp.zeros((3, 4)))
+        out = fn(x)
+        # 1-D leaf: marker=-1 -> 0
+        assert out.inner.marked == 0
+        # 2-D leaf: marker=0 -> 0
+        assert out.outer_marked == 0
+
+    def test_subtree_broadcast(self, axis_view: CoreAxisView) -> None:
+        """A marked pytree-valued field gets the marker on every leaf."""
+        kind, fn = axis_view
+
+        class _Container(_HasChainsBase):
+            dct: dict = field(**{kind: -1})
+
+        x = _Container(dct={'p': jnp.zeros(2), 'q': jnp.zeros(2)})
+        # 1-D leaves: marker=-1 -> 0
+        assert fn(x).dct == {'p': 0, 'q': 0}
+
+    def test_pytree_container_of_modules(self, axis_view: CoreAxisView) -> None:
+        """A list of Modules at the top level is walked per-element."""
+        kind, fn = axis_view
+
+        class _M(_HasChainsBase):
+            arr: Array = field(**{kind: -1}, default_factory=lambda: jnp.zeros((2, 3)))
+
+        out = fn([_M(), _M()])
+        assert isinstance(out, list)
+        assert len(out) == 2
+        # 2-D leaves, no chain on this leaf -> core ndim 2, marker=-1 -> 1
+        for el in out:
+            assert el.arr == 1
 
 
 def vmap_randint_masked(

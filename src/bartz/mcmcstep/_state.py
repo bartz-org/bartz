@@ -99,17 +99,15 @@ def field(  # noqa: ANN202
         the usual numpy semantics (e.g. ``-1`` for the last axis); the index is
         normalized per-leaf against the leaf's ``ndim`` by `chain_vmap_axes`.
     data
-        Index of the data axis for the field's arrays, or `None` if the field
-        has no data axis. Same conventions as `chains`.
     samples
-        Index of the sample axis for the field's arrays, declared in the
-        chain-less "core" layout. `None` if the field has no sample axis. The
-        index is normalized per-leaf against the core ``ndim`` (the leaf's
+        Indices of the data/sample axes for the field's arrays, declared in the
+        chain-less "core" layout. `None` if the field has no data/sample axis.
+        The index is normalized per-leaf against the core ``ndim`` (the leaf's
         ``ndim`` minus 1 when a chain axis is present, else the leaf's
         ``ndim``); the chain axis, if any, is treated as inserted after the
-        sample axis exists, so `trace_sample_axes` shifts the returned sample
-        index up by 1 when the chain position is at or before the core sample
-        index.
+        data/sample axis exists, so `data_vmap_axes`/`trace_sample_axes` shift
+        the returned sample index up by 1 when the chain position is at or
+        before the core data/sample index.
     **kwargs
         Other parameters passed to `equinox.field`.
 
@@ -170,11 +168,23 @@ def _none_marker(leaf: object, raw: int) -> None:  # noqa: ARG001
 def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     """Determine vmapping axes for data.
 
-    Analogous to `chain_vmap_axes` but reads the ``field(data=...)`` markers.
-    The returned indices are normalized per-leaf against the leaf's ``ndim``.
-    Out-of-bounds markers raise an `numpy.exceptions.AxisError`.
+    Parameters
+    ----------
+    x
+        A pytree. Subpytrees that are Module attributes marked with
+        ``field(data=<int>)`` are considered to have a data axis at that
+        position in the chain-less layout. `x` (or one of its subtrees) must
+        define a `has_chains` property (see `get_has_chains`).
+
+    Returns
+    -------
+    A pytree with the same structure as `x`, with each leaf set to the data axis index (normalized and chain-shifted), or `None` for unmarked leaves.
     """
-    return _find_metadata(x, 'data')
+    chain_axes = chain_vmap_axes(x)
+    data_raw = _find_metadata(x, 'data', marker_value=_raw_marker)
+    return tree.map(
+        _compute_core_axis, x, data_raw, chain_axes, is_leaf=_is_core_axis_leaf
+    )
 
 
 def trace_sample_axes(trace: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
@@ -194,7 +204,7 @@ def trace_sample_axes(trace: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T
     chain_axes = chain_vmap_axes(trace)
     sample_raw = _find_metadata(trace, 'samples', marker_value=_raw_marker)
     return tree.map(
-        _compute_sample_axis, trace, sample_raw, chain_axes, is_leaf=lambda x: x is None
+        _compute_core_axis, trace, sample_raw, chain_axes, is_leaf=_is_core_axis_leaf
     )
 
 
@@ -203,18 +213,23 @@ def _raw_marker(leaf: object, raw: int) -> int:  # noqa: ARG001
     return raw
 
 
-def _compute_sample_axis(
-    leaf: object, raw_s: int | None, chain_pos: int | None
+def _is_core_axis_leaf(x: object) -> bool:
+    """Treat `None` and `_LazyArray` as leaves when resolving core-axis markers."""
+    return x is None or _is_lazy_array(x)
+
+
+def _compute_core_axis(
+    leaf: object, raw: int | None, chain_pos: int | None
 ) -> int | None:
-    """Combine a raw `samples` marker and a (normalized) chain position."""
-    if raw_s is None:
+    """Combine a raw core-layout marker and a (normalized) chain position."""
+    if raw is None:
         return None
     has_chain = chain_pos is not None
     core_ndim = leaf.ndim - (1 if has_chain else 0)
-    s = normalize_axis_index(raw_s, core_ndim)
-    if has_chain and chain_pos <= s:
-        s += 1
-    return s
+    axis = normalize_axis_index(raw, core_ndim)
+    if has_chain and chain_pos <= axis:
+        axis += 1
+    return axis
 
 
 T = TypeVar('T')

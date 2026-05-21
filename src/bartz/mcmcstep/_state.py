@@ -26,6 +26,7 @@
 
 import inspect
 import math
+import os
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import fields, replace
 from enum import Enum
@@ -68,7 +69,7 @@ ArrayLike = Array | ndarray
 FloatLike = float | Float[ArrayLike, '']
 
 # Default position of the chain axis in chain-bearing leaves; see `field`.
-CHAIN_AXIS = 0
+CHAIN_AXIS = int(os.environ.get('CHAIN_AXIS', '0'))
 
 
 class OutcomeType(Enum):

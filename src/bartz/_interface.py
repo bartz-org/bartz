@@ -57,7 +57,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz import mcmcloop, mcmcstep
+from bartz import mcmcstep
 from bartz._jaxext import equal_shards, is_key, split
 from bartz._jaxext.scipy.special import ndtri
 from bartz._jaxext.scipy.stats import invgamma
@@ -69,7 +69,15 @@ from bartz.grove import (
     format_tree,
     points_per_node_distr,
 )
-from bartz.mcmcloop import RunMCMCResult, compute_varcount, evaluate_trace, run_mcmc
+from bartz.mcmcloop import (
+    BurninTrace,
+    MainTrace,
+    RunMCMCResult,
+    compute_varcount,
+    evaluate_trace,
+    make_default_callback,
+    run_mcmc,
+)
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
 from bartz.mcmcstep._state import (
     ArrayLike,
@@ -333,8 +341,8 @@ class Bart(Module):
 
     """
 
-    _main_trace: mcmcloop.MainTrace
-    _burnin_trace: mcmcloop.BurninTrace
+    _main_trace: MainTrace
+    _burnin_trace: BurninTrace
     _mcmc_state: mcmcstep.State
     _binner: Binner
     _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
@@ -1449,7 +1457,7 @@ def _run_mcmc(
     # prepare arguments
     kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
     kw.update(
-        mcmcloop.make_default_callback(
+        make_default_callback(
             mcmc_state,
             dot_every=None if printevery is None or printevery == 1 else 1,
             report_every=printevery,
@@ -1462,7 +1470,7 @@ def _run_mcmc(
 
 @partial(jit, static_argnames='p')
 # this is jitted such that lax.collapse below does not create a copy
-def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
+def varcount(p: int, trace: MainTrace) -> Int32[Array, 'ndpost p']:
     """Histogram of predictor usage for decision rules in the trees, squashing chains."""
     varcount: Int32[Array, '*chains samples p']
     varcount = compute_varcount(p, trace, out_chain_axis=0)
@@ -1471,7 +1479,7 @@ def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
 
 @partial(jit, static_argnames='mean')
 def get_error_sdev(
-    trace: mcmcloop.MainTrace,
+    trace: MainTrace,
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
     *,
     mean: bool = False,
@@ -1504,7 +1512,7 @@ def get_error_sdev(
 
 
 def predict(
-    x: UInt[Array, 'p m'], trace: mcmcloop.MainTrace
+    x: UInt[Array, 'p m'], trace: MainTrace
 ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
     """Evaluate trees on already quantized `x`, and squash chains."""
     return evaluate_trace(x, trace, flatten_chains=True)

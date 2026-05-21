@@ -36,7 +36,7 @@ from jaxtyping import Array, Float, Float32, Int32, Key, Real
 
 from bartz import mcmcloop, mcmcstep
 from bartz._interface import ArrayLike, Bart, DataFrame, FloatLike, PredictKind, Series
-from bartz.mcmcstep._state import chain_vmap_axes
+from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 
 
@@ -426,10 +426,7 @@ class mc_gbart(Module):
 
         def arrange(arr: Array) -> Array:
             # Public output is (nskip+ndpost, mc_cores) = (samples, chains).
-            # Move chain (if present) to the trailing axis.
-            if tc is None:
-                return arr
-            return jnp.moveaxis(arr, tc, -1)
+            return chain_to_axis(arr, tc, target=-1)
 
         return jnp.sqrt(
             jnp.reciprocal(
@@ -449,10 +446,10 @@ class mc_gbart(Module):
         if self._mcmc_state.binary_y is not None:
             return None
         assert self._main_trace.error_cov_inv.ndim <= 2  # chains and samples
-        arr = self._main_trace.error_cov_inv
-        tc = chain_vmap_axes(self._main_trace).error_cov_inv
-        if tc:
-            arr = jnp.moveaxis(arr, tc, 0)
+        arr = chain_to_axis(
+            self._main_trace.error_cov_inv,
+            chain_vmap_axes(self._main_trace).error_cov_inv,
+        )
         return jnp.sqrt(jnp.reciprocal(arr)).reshape(-1)
 
     @cached_property

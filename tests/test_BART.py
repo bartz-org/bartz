@@ -299,7 +299,7 @@ class TestWithCachedBart:
     def test_convergence(self, cachedbart: CachedBart, subtests: SubTests) -> None:
         """Run multiple chains and check convergence with rhat."""
         bart = cachedbart.bart
-        nchains, _ = bart._mcmc_state.resid.shape
+        nchains = bart._mcmc_state.num_chains()
         nsamples = bart.ndpost // nchains
         kw = cachedbart.kwargs
         p, n = kw['x_train'].shape

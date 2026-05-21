@@ -52,7 +52,7 @@ from jax import numpy as jnp
 from jax.scipy.special import ndtri
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import Array, Float, Float32, Key, Shaped
-from pytest_subtests import SubTests
+from pytest import Subtests  # noqa: PT013
 from scipy.stats import invgamma as scipy_invgamma
 from scipy.stats import ks_1samp, truncnorm
 
@@ -220,7 +220,7 @@ class TestAutoBatch:
         assert nbatches == 1
         assert jnp.all(y == x)
 
-    def test_reduction_basic(self, keys: split, subtests: SubTests) -> None:
+    def test_reduction_basic(self, keys: split, subtests: Subtests) -> None:
         """Check that reduction produces the expected result."""
         # use an internal loop instead of pytest.mark.parametrize because there
         # are too many combinations of parameters
@@ -344,6 +344,37 @@ class TestAutoBatch:
 
         assert result.shape == (10,)
         assert_allclose(result, expected, rtol=1e-6)
+
+    @pytest.mark.parametrize('batched', [True, False])
+    def test_none_output_leaf(self, keys: split, batched: bool) -> None:
+        """Check that `None` output leaves are passed through unchanged."""
+
+        def func(x: Float[Array, ' n']) -> tuple[Float[Array, ' n'], None]:
+            return x * 2, None
+
+        x = random.uniform(keys.pop(), (100,))
+        max_io_nbytes = 32 if batched else 1_000_000
+        batched_func = autobatch(func, max_io_nbytes, 0, 0, return_nbatches=True)
+
+        out1 = func(x)
+        (out2_arr, out2_none), nbatches = batched_func(x)
+
+        if batched:
+            assert nbatches > 1
+        else:
+            assert nbatches == 1
+        assert out2_none is None
+        numpy.testing.assert_array_max_ulp(out1[0], out2_arr)
+
+    def test_out_axes_none_mismatch(self, keys: split) -> None:
+        """Check `None` in `out_axes` at non-`None` output positions errors."""
+
+        def func(x: Float[Array, ' n']) -> Float[Array, ' n']:
+            return x * 2
+
+        x = random.uniform(keys.pop(), (10,))
+        with pytest.raises(ValueError, match='Expected None'):
+            autobatch(func, 32, 0, None)(x)
 
 
 def different_keys(keya: Key[Array, ''], keyb: Key[Array, '']) -> bool:

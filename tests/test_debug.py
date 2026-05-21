@@ -35,7 +35,8 @@ from scipy.stats import ks_1samp
 
 from bartz._jaxext import minimal_unsigned_dtype, split
 from bartz.debug import sample_prior
-from bartz.grove import check_trace, format_tree
+from bartz.grove import TreesTrace, check_trace, describe_error, format_tree
+from bartz.grove._check import check_tree
 from tests.util import manual_tree
 
 
@@ -132,3 +133,155 @@ class TestSamplePrior:
             diff_forest = jnp.diff(heap, axis=1)
             assert jnp.any(diff_trace)
             assert jnp.any(diff_forest)
+
+
+class TestCheckTree:
+    """Trigger each subcheck of `bartz.grove._check.check_tree` in isolation.
+
+    Each test crafts a tree that violates one specific invariant, then asserts
+    that `describe_error` reports the expected check (and only the expected
+    checks). When violating one invariant also forces another (e.g.
+    `check_stray_nodes` always breaks `check_num_nodes`), the test asserts the
+    exact set of co-failures.
+    """
+
+    # Two-variable problem with max_split[v] = 4 used by the "easy" cases.
+    _MS = jnp.array([4, 4], jnp.uint8)
+    # Wider range used by the rule/bounds tests.
+    _MS_WIDE = jnp.array([10, 10], jnp.uint8)
+
+    @staticmethod
+    def _zeros_tree() -> TreesTrace:
+        """Return an all-zeros (single-leaf) depth-3 tree, valid by construction."""
+        return TreesTrace(
+            leaf_tree=jnp.zeros(8),
+            var_tree=jnp.zeros(4, jnp.uint8),
+            split_tree=jnp.zeros(4, jnp.uint8),
+        )
+
+    @staticmethod
+    def _describe(tree: TreesTrace, max_split: jnp.ndarray) -> list[str]:
+        """Run `check_tree` and return the names of the failing checks."""
+        return describe_error(check_tree(tree, max_split))
+
+    def test_types_var_dtype(self) -> None:
+        """Wrong `var_tree` dtype trips `check_types`."""
+        tree = tree_at(
+            lambda t: t.var_tree, self._zeros_tree(), jnp.zeros(4, jnp.uint16)
+        )
+        assert self._describe(tree, self._MS) == ['check_types']
+
+    def test_types_split_dtype(self) -> None:
+        """Wrong `split_tree` dtype trips `check_types`."""
+        tree = tree_at(
+            lambda t: t.split_tree, self._zeros_tree(), jnp.zeros(4, jnp.uint16)
+        )
+        assert self._describe(tree, self._MS) == ['check_types']
+
+    def test_types_max_split_signed(self) -> None:
+        """Signed `max_split` dtype trips `check_types`."""
+        # also cast split_tree to match the signed dtype, otherwise the dtype
+        # mismatch between max_split and split_tree would itself trip check_types
+        signed_max_split = jnp.array([4, 4], jnp.int32)
+        tree = tree_at(
+            lambda t: t.split_tree, self._zeros_tree(), jnp.zeros(4, jnp.int32)
+        )
+        assert self._describe(tree, signed_max_split) == ['check_types']
+
+    def test_shapes_leaf_3d(self) -> None:
+        """A 3D `leaf_tree` trips `check_shapes`."""
+        tree = tree_at(lambda t: t.leaf_tree, self._zeros_tree(), jnp.zeros((1, 1, 8)))
+        assert self._describe(tree, self._MS) == ['check_shapes']
+
+    def test_shapes_leaf_size_mismatch(self) -> None:
+        """`leaf_tree.shape[-1] != 2 * var_tree.size` trips `check_shapes`."""
+        tree = tree_at(lambda t: t.leaf_tree, self._zeros_tree(), jnp.zeros(16))
+        assert self._describe(tree, self._MS) == ['check_shapes']
+
+    def test_unused_node_var(self) -> None:
+        """A dirty `var_tree[0]` trips `check_unused_node`."""
+        tree = tree_at(
+            lambda t: t.var_tree, self._zeros_tree(), jnp.array([1, 0, 0, 0], jnp.uint8)
+        )
+        assert self._describe(tree, self._MS) == ['check_unused_node']
+
+    def test_unused_node_split(self) -> None:
+        """A dirty `split_tree[0]` trips `check_unused_node` and `check_num_nodes`.
+
+        Setting `split_tree[0] != 0` bumps the internal-node count without
+        adding a corresponding leaf, so the leaf-vs-internal balance check
+        also fails.
+        """
+        tree = tree_at(
+            lambda t: t.split_tree,
+            self._zeros_tree(),
+            jnp.array([1, 0, 0, 0], jnp.uint8),
+        )
+        assert self._describe(tree, self._MS) == [
+            'check_unused_node',
+            'check_num_nodes',
+        ]
+
+    def test_leaf_values_nan(self) -> None:
+        """A NaN leaf trips `check_leaf_values`."""
+        leaf = jnp.zeros(8).at[1].set(jnp.nan)
+        tree = tree_at(lambda t: t.leaf_tree, self._zeros_tree(), leaf)
+        assert self._describe(tree, self._MS) == ['check_leaf_values']
+
+    def test_leaf_values_inf(self) -> None:
+        """An infinite leaf trips `check_leaf_values`."""
+        leaf = jnp.zeros(8).at[3].set(jnp.inf)
+        tree = tree_at(lambda t: t.leaf_tree, self._zeros_tree(), leaf)
+        assert self._describe(tree, self._MS) == ['check_leaf_values']
+
+    def test_stray_nodes(self) -> None:
+        """A non-leaf node with a leaf parent trips `check_stray_nodes`.
+
+        Such a "stray" is also counted as internal but contributes no leaf, so
+        `check_num_nodes` necessarily fails alongside.
+        """
+        tree = tree_at(
+            lambda t: t.split_tree,
+            self._zeros_tree(),
+            jnp.array([0, 0, 1, 0], jnp.uint8),
+        )
+        assert self._describe(tree, self._MS) == [
+            'check_stray_nodes',
+            'check_num_nodes',
+        ]
+
+    def test_rule_consistency(self) -> None:
+        """A descendant split outside its ancestor's range trips `check_rule_consistency`.
+
+        Root splits var 0 at 5, so the left child's upper bound on var 0 is 4;
+        giving the left child a split of 8 on the same variable violates the
+        ancestor constraint without breaking any other invariant.
+        """
+        tree = TreesTrace(
+            leaf_tree=jnp.zeros(8),
+            var_tree=jnp.zeros(4, jnp.uint8),
+            split_tree=jnp.array([0, 5, 8, 0], jnp.uint8),
+        )
+        assert self._describe(tree, self._MS_WIDE) == ['check_rule_consistency']
+
+    def test_var_in_bounds(self) -> None:
+        """A variable index >= `max_split.size` on a decision node trips `check_var_in_bounds`."""
+        tree = TreesTrace(
+            leaf_tree=jnp.zeros(8),
+            var_tree=jnp.array([0, 2, 0, 0], jnp.uint8),
+            split_tree=jnp.array([0, 5, 0, 0], jnp.uint8),
+        )
+        assert self._describe(tree, self._MS_WIDE) == ['check_var_in_bounds']
+
+    def test_split_in_bounds(self) -> None:
+        """A split above `max_split[var]` trips `check_split_in_bounds`."""
+        tree = TreesTrace(
+            leaf_tree=jnp.zeros(8),
+            var_tree=jnp.zeros(4, jnp.uint8),
+            split_tree=jnp.array([0, 20, 0, 0], jnp.uint8),
+        )
+        assert self._describe(tree, self._MS_WIDE) == ['check_split_in_bounds']
+
+    def test_valid_tree_passes(self) -> None:
+        """Sanity: the base all-zeros tree triggers no checks."""
+        assert self._describe(self._zeros_tree(), self._MS) == []

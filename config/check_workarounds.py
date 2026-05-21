@@ -30,7 +30,8 @@ Marker grammar:
     WORKAROUND(<pkg><op><version>): <free-text>
 with <op> in {<, <=}. A marker is obsolete iff every supported version of
 <pkg> (i.e., versions >= the lower bound in pyproject.toml) satisfies NOT
-(version <op> <version>).
+(version <op> <version>). Markers that do not fit the grammar are reported
+as malformed rather than silently ignored.
 """
 
 import re
@@ -43,7 +44,10 @@ from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
 
-MARKER_RE = re.compile(r'WORKAROUND\(\s*([A-Za-z0-9_.\-]+)\s*(<=|<)\s*([^)\s]+)\s*\)')
+# Loose pattern: find any `WORKAROUND(...)` candidate to inspect.
+CANDIDATE_RE = re.compile(r'WORKAROUND\(([^)]*)\)')
+# Strict grammar applied to the inner contents.
+INNER_RE = re.compile(r'\s*([A-Za-z0-9_.\-]+)\s*(<=|<)\s*(\S+)\s*')
 
 
 def floors_from_pyproject(path: Path) -> dict[str, Version]:
@@ -97,7 +101,7 @@ def is_obsolete(op: str, bound: Version, floor: Version) -> bool:
 def scan(root: Path) -> list[tuple[str, str, str]]:
     """Return grep matches `(file, lineno, line)` for WORKAROUND markers."""
     result = subprocess.run(
-        ['git', 'grep', '--no-color', '-nI', '-E', r'WORKAROUND\([^)]*(<|<=)[^)]*\)'],  # noqa: S607
+        ['git', 'grep', '--no-color', '-nI', '-E', r'WORKAROUND\('],  # noqa: S607
         cwd=root,
         capture_output=True,
         text=True,
@@ -118,28 +122,41 @@ def main() -> int:
     stale: list[str] = []
     unknown: list[str] = []
     for file, lineno, text in scan(root):
-        m = MARKER_RE.search(text)
-        if not m:
-            continue
-        pkg, op, ver = m.group(1).lower(), m.group(2), m.group(3)
-        try:
-            bound = Version(ver)
-        except InvalidVersion:
-            unknown.append(f'{file}:{lineno}: bad version in marker: {text.strip()}')
-            continue
-        floor = floors.get(pkg)
-        if floor is None:
-            unknown.append(f'{file}:{lineno}: {pkg!r} not pinned in pyproject.toml')
-            continue
-        if is_obsolete(op, bound, floor):
-            stale.append(
-                f'{file}:{lineno}: {pkg}{op}{ver} is obsolete (floor={floor}) | {text.strip()}'
+        candidates = list(CANDIDATE_RE.finditer(text))
+        if not candidates:
+            unknown.append(
+                f'{file}:{lineno}: malformed marker (no closing paren on line): {text.strip()}'
             )
+            continue
+        for c in candidates:
+            inner = c.group(1)
+            im = INNER_RE.fullmatch(inner)
+            if not im:
+                unknown.append(
+                    f'{file}:{lineno}: malformed marker {c.group(0)!r}: {text.strip()}'
+                )
+                continue
+            pkg, op, ver = im.group(1).lower(), im.group(2), im.group(3)
+            try:
+                bound = Version(ver)
+            except InvalidVersion:
+                unknown.append(
+                    f'{file}:{lineno}: bad version in marker: {text.strip()}'
+                )
+                continue
+            floor = floors.get(pkg)
+            if floor is None:
+                unknown.append(f'{file}:{lineno}: {pkg!r} not pinned in pyproject.toml')
+                continue
+            if is_obsolete(op, bound, floor):
+                stale.append(
+                    f'{file}:{lineno}: {pkg}{op}{ver} is obsolete (floor={floor}) | {text.strip()}'
+                )
     for line in unknown:
         print(f'WARN  {line}', file=sys.stderr)
     for line in stale:
         print(f'STALE {line}', file=sys.stderr)
-    return 1 if stale else 0
+    return 1 if (stale or unknown) else 0
 
 
 if __name__ == '__main__':

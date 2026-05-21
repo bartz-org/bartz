@@ -1,6 +1,6 @@
 .. bartz/docs/reference/prepcovars.rst
 ..
-.. Copyright (c) 2024-2025, The Bartz Contributors
+.. Copyright (c) 2024-2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -27,3 +27,4 @@ Data processing
 
 .. automodule:: bartz.prepcovars
     :members:
+    :imported-members:

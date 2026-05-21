@@ -38,6 +38,8 @@ from bartz.prepcovars import (
     GivenSplitsBinner,
     RangeEvenBinner,
     UniqueQuantileBinner,
+)
+from bartz.prepcovars._prepcovars import (
     _bin_predictors,
     _parse_xinfo,
     _quantilized_splits_from_matrix,

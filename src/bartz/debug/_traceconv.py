@@ -142,7 +142,7 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
 
 
 class TraceWithOffset(Module):
-    """Implementation of `bartz.mcmcloop.Trace`."""
+    """A trace of trees with an offset, compatible with `bartz.mcmcloop.evaluate_trace`."""
 
     leaf_tree: Float32[Array, 'ndpost ntree 2**d'] = field(samples=0)
     var_tree: UInt[Array, 'ndpost ntree 2**(d-1)'] = field(samples=0)
@@ -150,7 +150,7 @@ class TraceWithOffset(Module):
     offset: Float32[Array, '']
 
     has_chains: ClassVar[bool] = False
-    """No chain axis: each leading axis is just the sample axis."""
+    """No chain axis; each leading axis is just the sample axis."""
 
     @classmethod
     def from_trees_trace(

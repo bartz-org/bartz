@@ -75,6 +75,7 @@ from bartz.mcmcstep._state import (
     ArrayLike,
     FloatLike,
     _inv_via_chol_with_gersh,
+    chain_to_axis,
     chain_vmap_axes,
     chol_with_gersh,
     trace_sample_axes,
@@ -647,6 +648,7 @@ class Bart(Module):
         main = self._main_trace.error_cov_inv
         sample_axis = trace_sample_axes(self._main_trace).error_cov_inv
         prec = jnp.concatenate([burnin, main], axis=sample_axis)
+        prec = chain_to_axis(prec, chain_vmap_axes(self._main_trace).error_cov_inv)
 
         if only_continuous and binary_indices is not None:
             *_, k, _ = prec.shape
@@ -709,9 +711,7 @@ class Bart(Module):
             varprob = jnp.where(max_split, 1 / peff, 0)
             varprob = jnp.broadcast_to(varprob, (self.ndpost, p))
         else:
-            tc = chain_vmap_axes(self._main_trace).varprob
-            if tc:
-                varprob = jnp.moveaxis(varprob, tc, 0)
+            varprob = chain_to_axis(varprob, chain_vmap_axes(self._main_trace).varprob)
             varprob = varprob.reshape(-1, p)
         return varprob
 
@@ -719,14 +719,6 @@ class Bart(Module):
     def varprob_mean(self) -> Float32[Array, ' p']:
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)
-
-    def _error_cov_inv_chain_first(self) -> Array:
-        """Return `_main_trace.error_cov_inv` with the chain axis moved to position 0."""
-        arr = self._main_trace.error_cov_inv
-        tc = chain_vmap_axes(self._main_trace).error_cov_inv
-        if not tc:
-            return arr
-        return jnp.moveaxis(arr, tc, 0)
 
     def _sample_outcome(
         self,
@@ -736,8 +728,12 @@ class Bart(Module):
         w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
         """Sample from the posterior predictive distribution."""
+        # move error_cov_inv chain axis to 0
+        trace = self._main_trace
+        prec = chain_to_axis(trace.error_cov_inv, chain_vmap_axes(trace).error_cov_inv)
+
         if latent.ndim > 2:  # multivariate case
-            error_cov_inv = lax.collapse(self._error_cov_inv_chain_first(), 0, -2)
+            error_cov_inv = lax.collapse(prec, 0, -2)
 
             # Cholesky of precision: error_cov_inv = L @ L^T
             L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
@@ -753,9 +749,7 @@ class Bart(Module):
             # pure binary UV: probit has sigma = 1
             error = random.normal(key, latent.shape)
         else:  # univariate continuous
-            sigma = jnp.sqrt(jnp.reciprocal(self._error_cov_inv_chain_first())).reshape(
-                -1
-            )
+            sigma = jnp.sqrt(jnp.reciprocal(prec)).reshape(-1)
             error = sigma[..., None] * random.normal(key, latent.shape)
             if w is not None:
                 error *= w[None, :]
@@ -891,6 +885,7 @@ class Bart(Module):
         """
         out: UInt[Array, '*chains samples num_trees']
         out = check_trace(self._main_trace, self._mcmc_state.forest.max_split)
+        out = chain_to_axis(out, chain_vmap_axes(self._main_trace).split_tree)
         if out.ndim < 3:
             out = out[None, :, :]
         if error:
@@ -988,6 +983,7 @@ class Bart(Module):
         """
         out: Int32[Array, '*chains samples d']
         out = forest_depth_distr(self._main_trace.split_tree)
+        out = chain_to_axis(out, chain_vmap_axes(self._main_trace).split_tree)
         if out.ndim < 3:
             out = out[None, :, :]
         return out
@@ -1003,6 +999,7 @@ class Bart(Module):
             node_type,
             sum_batch_axis=-1,
         )
+        out = chain_to_axis(out, chain_vmap_axes(self._main_trace).split_tree)
         if out.ndim < 3:
             out = out[None, :, :]
         return out
@@ -1041,103 +1038,19 @@ class Bart(Module):
         print_all
             If `True`, also print the content of unused node slots.
         """
-        trees = TreesTrace.from_dataclass(self._main_trace)
+        trace = self._main_trace
+        trees = TreesTrace.from_dataclass(trace)
+        if trace.has_chains:
+            trees_chain_axes = TreesTrace.from_dataclass(chain_vmap_axes(trace))
+            # WORKAROUND(python<3.14): use operator.is_none
+            trees = tree.map(
+                chain_to_axis, trees, trees_chain_axes, is_leaf=lambda x: x is None
+            )
+        else:
+            i_chain = ...
         trees = tree.map(lambda x: x[i_chain, i_sample, i_tree, :], trees)
         s = format_tree(trees, print_all=print_all)
         print(s)  # noqa: T201, this method is intended for debug
-
-    def _sigma_harmonic_mean(
-        self, prior: bool = False
-    ) -> Float32[Array, ' *num_chains']:
-        """Return the harmonic mean of the error variance.
-
-        Parameters
-        ----------
-        prior
-            If `True`, use the prior distribution, otherwise use the full
-            conditional at the last MCMC iteration.
-
-        Returns
-        -------
-        The harmonic mean 1/E[1/sigma^2] in the selected distribution.
-        """
-        state = self._mcmc_state
-        assert state.error_cov_df is not None
-        assert state.z is None
-        # inverse gamma prior: alpha = df / 2, beta = scale / 2
-        if prior:
-            alpha = state.error_cov_df / 2
-            beta = state.error_cov_scale / 2
-        else:
-            alpha = state.error_cov_df / 2 + state.resid.size / 2
-            norm2 = jnp.einsum('ij,ij->i', state.resid, state.resid)
-            beta = state.error_cov_scale / 2 + norm2 / 2
-        error_cov_inv = alpha / beta
-        return jnp.sqrt(jnp.reciprocal(error_cov_inv))
-
-    def _avg_acc(
-        self,
-    ) -> tuple[Float32[Array, ' *num_chains'], Float32[Array, ' *num_chains']]:
-        """Compute the average acceptance rates of tree moves.
-
-        Returns
-        -------
-        acc_grow : Float32[Array, '*num_chains']
-            The average acceptance rate of grow moves.
-        acc_prune : Float32[Array, '*num_chains']
-            The average acceptance rate of prune moves.
-        """
-        trace = self._main_trace
-
-        def acc(prefix: str) -> Float32[Array, ' *num_chains']:
-            acc = getattr(trace, f'{prefix}_acc_count')
-            prop = getattr(trace, f'{prefix}_prop_count')
-            return acc.sum(axis=-1) / prop.sum(axis=-1)
-
-        return acc('grow'), acc('prune')
-
-    def _avg_prop(
-        self,
-    ) -> tuple[Float32[Array, ' *num_chains'], Float32[Array, ' *num_chains']]:
-        """Compute the average proposal rate of grow and prune moves.
-
-        Returns
-        -------
-        prop_grow : Float32[Array, '*num_chains']
-            The fraction of times grow was proposed instead of prune.
-        prop_prune : Float32[Array, '*num_chains']
-            The fraction of times prune was proposed instead of grow.
-
-        Notes
-        -----
-        This function does not take into account cases where no move was
-        proposed.
-        """
-        trace = self._main_trace
-
-        def prop(prefix: str) -> Array:
-            return getattr(trace, f'{prefix}_prop_count').sum(axis=-1)
-
-        pgrow = prop('grow')
-        pprune = prop('prune')
-        total = pgrow + pprune
-        return pgrow / total, pprune / total
-
-    def _avg_move(
-        self,
-    ) -> tuple[Float32[Array, ' *num_chains'], Float32[Array, ' *num_chains']]:
-        """Compute the move rate.
-
-        Returns
-        -------
-        rate_grow : Float32[Array, '*num_chains']
-            The fraction of times a grow move was proposed and accepted.
-        rate_prune : Float32[Array, '*num_chains']
-            The fraction of times a prune move was proposed and accepted.
-        """
-        agrow, aprune = self._avg_acc()
-        pgrow, pprune = self._avg_prop()
-        return agrow * pgrow, aprune * pprune
 
 
 def _process_predictor_input(
@@ -1537,9 +1450,7 @@ def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
     """Histogram of predictor usage for decision rules in the trees, squashing chains."""
     varcount: Int32[Array, '*chains samples p']
     varcount = compute_varcount(p, trace)
-    tc = chain_vmap_axes(trace).var_tree
-    if tc:
-        varcount = jnp.moveaxis(varcount, tc, 0)
+    varcount = chain_to_axis(varcount, chain_vmap_axes(trace).var_tree)
     return lax.collapse(varcount, 0, -1)
 
 
@@ -1556,20 +1467,18 @@ def get_error_sdev(
     | Float32[Array, ' k']
 ):
     """Error standard deviation, post-burnin, chains concatenated."""
-    error_cov_inv = trace.error_cov_inv
+    prec = trace.error_cov_inv
     if trace.has_chains:
         # shape (chains, samples) or (chains, samples, k, k), concatenate chains
-        tc = chain_vmap_axes(trace).error_cov_inv
-        if tc:
-            error_cov_inv = jnp.moveaxis(error_cov_inv, tc, 0)
-        error_cov_inv = lax.collapse(error_cov_inv, 0, 2)
-    is_uv = error_cov_inv.ndim == 1
+        prec = chain_to_axis(prec, chain_vmap_axes(trace).error_cov_inv)
+        prec = lax.collapse(prec, 0, 2)
+    is_uv = prec.ndim == 1
     if is_uv:
         # univariate case, reshape to 1x1 matrix
-        error_cov_inv = error_cov_inv[..., None, None]
+        prec = prec[..., None, None]
 
     # invert precision to covariance, then take diagonal variance
-    cov = _inv_via_chol_with_gersh(error_cov_inv)
+    cov = _inv_via_chol_with_gersh(prec)
     var = jnp.diagonal(cov, axis1=-2, axis2=-1)
     if mean:
         var = var.mean(0)

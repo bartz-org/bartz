@@ -75,7 +75,7 @@ from bartz.grove import (
 )
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
-from bartz.mcmcstep._state import chain_vmap_axes
+from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
@@ -585,7 +585,10 @@ class TestWithCachedBart:
                 # When the error covariance is constrained diagonal (2-D
                 # inv_sdev_scale), off-diagonal entries are deterministically
                 # zero, so rhat is undefined there; check only the diagonal.
-                error_cov_inv = bart._main_trace.error_cov_inv
+                error_cov_inv = chain_to_axis(
+                    bart._main_trace.error_cov_inv,
+                    chain_vmap_axes(bart._main_trace).error_cov_inv,
+                )
                 if error_cov_inv.ndim == 2:  # pragma: no cover, only mv by default
                     error_cov_inv = error_cov_inv[:, :, None, None]
                 _, _, k, _ = error_cov_inv.shape

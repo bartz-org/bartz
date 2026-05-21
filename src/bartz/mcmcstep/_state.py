@@ -237,6 +237,32 @@ def chainful_axis(core_axis: int, chain_axis: int | None) -> int:
     return core_axis + 1
 
 
+def chain_to_axis(arr: Array, chain_axis: int | None, target: int = 0) -> Array:
+    """Move `chain_axis` of `arr` to position `target`.
+
+    Helper for the common pattern of normalizing the chain axis position in
+    arrays derived from chain-marked Module fields. Pair it with
+    `chain_vmap_axes` to fetch the source axis from a dataclass.
+
+    Parameters
+    ----------
+    arr
+        Array to be reordered.
+    chain_axis
+        Source position of the chain axis, or `None` for arrays with no chain
+        axis (in which case `arr` is returned unchanged).
+    target
+        Destination position of the chain axis.
+
+    Returns
+    -------
+    The reordered array.
+    """
+    if chain_axis is None:
+        return arr
+    return jnp.moveaxis(arr, chain_axis, target)
+
+
 def _compute_core_axis(
     leaf: object, raw_axis: int | None, chain_axis: int | None
 ) -> int | None:

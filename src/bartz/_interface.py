@@ -79,13 +79,8 @@ from bartz.mcmcstep._state import (
     chol_with_gersh,
     trace_sample_axes,
 )
-from bartz.prepcovars import (
-    Binner,
-    BinnerFactory,
-    UniqueQuantileBinner,
-    _sigma2_from_cg,
-    _sigma2_from_ols,
-)
+from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
+from bartz.prepcovars._prepcovars import _sigma2_from_cg, _sigma2_from_ols
 
 CG_MAXITER = 20
 

@@ -77,6 +77,7 @@ from bartz.mcmcstep._state import (
     _inv_via_chol_with_gersh,
     chain_to_axis,
     chain_vmap_axes,
+    chainful_axis,
     chol_with_gersh,
     trace_sample_axes,
 )
@@ -597,7 +598,11 @@ class Bart(Module):
     @property
     def num_trees(self) -> int:
         """Return the number of trees used in the model."""
-        return self._mcmc_state.forest.split_tree.shape[-2]
+        forest = self._mcmc_state.forest
+        chain_axis = chain_vmap_axes(forest).split_tree
+        # chainless split_tree is (num_trees, half_tree_size); num_trees is core axis 0
+        axis = chainful_axis(0, chain_axis)
+        return forest.split_tree.shape[axis]
 
     def get_latent_prec(
         self, only_continuous: bool = False
@@ -883,9 +888,16 @@ class Bart(Module):
         RuntimeError
             If `error` is `True` and any invalid trees are found.
         """
+        trace = self._main_trace
+        trees = TreesTrace.from_dataclass(trace)
+        if trace.has_chains:
+            trees_chain_axes = TreesTrace.from_dataclass(chain_vmap_axes(trace))
+            # WORKAROUND(python<3.14): use operator.is_none
+            trees = tree.map(
+                chain_to_axis, trees, trees_chain_axes, is_leaf=lambda x: x is None
+            )
         out: UInt[Array, '*chains samples num_trees']
-        out = check_trace(self._main_trace, self._mcmc_state.forest.max_split)
-        out = chain_to_axis(out, chain_vmap_axes(self._main_trace).split_tree)
+        out = check_trace(trees, self._mcmc_state.forest.max_split)
         if out.ndim < 3:
             out = out[None, :, :]
         if error:
@@ -954,19 +966,27 @@ class Bart(Module):
             The residuals computed from the final state of the trees.
         """
         state = self._mcmc_state
-        resid1 = state.resid
+        chain_axes = chain_vmap_axes(state)
+        resid1 = chain_to_axis(state.resid, chain_axes.resid)
+        z = chain_to_axis(state.z, chain_axes.z) if state.z is not None else None
 
         forests = TreesTrace.from_dataclass(state.forest)
+        if state.has_chains:
+            forest_chain_axes = TreesTrace.from_dataclass(chain_axes.forest)
+            # WORKAROUND(python<3.14): use operator.is_none
+            forests = tree.map(
+                chain_to_axis, forests, forest_chain_axes, is_leaf=lambda x: x is None
+            )
         trees = evaluate_forest(state.X, forests, sum_batch_axis=-1)
 
         if state.binary_indices is not None:
             # mixed binary-continuous: z has only binary rows, y has all rows
             assert y is not None, 'y is required for mixed regression'
             ref = jnp.asarray(y)
-            ref = jnp.broadcast_to(ref, state.resid.shape)
-            ref = ref.at[..., state.binary_indices, :].set(state.z)
-        elif state.z is not None:
-            ref = state.z
+            ref = jnp.broadcast_to(ref, resid1.shape)
+            ref = ref.at[..., state.binary_indices, :].set(z)
+        elif z is not None:
+            ref = z
         else:
             assert y is not None, 'y is required for continuous regression'
             ref = jnp.asarray(y)
@@ -981,9 +1001,10 @@ class Bart(Module):
         -------
         A matrix where each row contains a histogram of tree depths.
         """
+        trace = self._main_trace
+        split_tree = chain_to_axis(trace.split_tree, chain_vmap_axes(trace).split_tree)
         out: Int32[Array, '*chains samples d']
-        out = forest_depth_distr(self._main_trace.split_tree)
-        out = chain_to_axis(out, chain_vmap_axes(self._main_trace).split_tree)
+        out = forest_depth_distr(split_tree)
         if out.ndim < 3:
             out = out[None, :, :]
         return out
@@ -991,15 +1012,14 @@ class Bart(Module):
     def _points_per_node_distr(
         self, node_type: str
     ) -> Int32[Array, '*num_chains n_save n+1']:
+        trace = self._main_trace
+        chain_axes = chain_vmap_axes(trace)
+        var_tree = chain_to_axis(trace.var_tree, chain_axes.var_tree)
+        split_tree = chain_to_axis(trace.split_tree, chain_axes.split_tree)
         out: Int32[Array, '*chains samples n+1']
         out = points_per_node_distr(
-            self._mcmc_state.X,
-            self._main_trace.var_tree,
-            self._main_trace.split_tree,
-            node_type,
-            sum_batch_axis=-1,
+            self._mcmc_state.X, var_tree, split_tree, node_type, sum_batch_axis=-1
         )
-        out = chain_to_axis(out, chain_vmap_axes(self._main_trace).split_tree)
         if out.ndim < 3:
             out = out[None, :, :]
         return out
@@ -1449,8 +1469,7 @@ def _run_mcmc(
 def varcount(p: int, trace: mcmcloop.MainTrace) -> Int32[Array, 'ndpost p']:
     """Histogram of predictor usage for decision rules in the trees, squashing chains."""
     varcount: Int32[Array, '*chains samples p']
-    varcount = compute_varcount(p, trace)
-    varcount = chain_to_axis(varcount, chain_vmap_axes(trace).var_tree)
+    varcount = compute_varcount(p, trace, out_chain_axis=0)
     return lax.collapse(varcount, 0, -1)
 
 

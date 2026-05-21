@@ -71,6 +71,7 @@ from bartz.mcmcstep import State
 from bartz.mcmcstep._state import (
     CHAIN_AXIS,
     add_dummy_axis,
+    chain_to_axis,
     chain_vmap_axes,
     chainful_axis,
     field,
@@ -642,6 +643,7 @@ def print_callback(
             print_newline = it % report_every > it % dot_every
         chain_axis = chain_vmap_axes(bart.forest).split_tree
         num_trees_axis = chainful_axis(0, chain_axis)  # (num_trees, hts)
+        split_tree = chain_to_axis(bart.forest.split_tree, chain_axis)
         debug.callback(
             _print_report,
             print_dot=dot_cond,
@@ -654,7 +656,7 @@ def print_callback(
             grow_acc_count=bart.forest.grow_acc_count.mean(),
             prune_acc_count=bart.forest.prune_acc_count.mean(),
             prop_total=bart.forest.split_tree.shape[num_trees_axis],
-            fill=forest_fill(bart.forest.split_tree),
+            fill=forest_fill(split_tree),
         )
 
     def just_dot_branch() -> None:
@@ -890,8 +892,10 @@ def evaluate_trace(
     return y
 
 
-@partial(jit, static_argnums=(0,))
-def compute_varcount(p: int, trace: MainTrace) -> Int32[Array, '*trace_shape {p}']:
+@partial(jit, static_argnames=('p', 'out_chain_axis'))
+def compute_varcount(
+    p: int, trace: MainTrace, *, out_chain_axis: int = CHAIN_AXIS
+) -> Int32[Array, '*trace_shape {p}']:
     """
     Count how many times each predictor is used in each MCMC state.
 
@@ -901,12 +905,16 @@ def compute_varcount(p: int, trace: MainTrace) -> Int32[Array, '*trace_shape {p}
         The number of predictors.
     trace
         A main trace of the BART MCMC, as returned by `run_mcmc`.
+    out_chain_axis
+        Position of the chain axis in the output, whose chainless shape is
+        ``(samples, p)``. Negative values count from the end. Ignored when
+        `trace` has no chain axis.
 
     Returns
     -------
     Histogram of predictor usage in each MCMC state.
     """
-    chain_axis = chain_vmap_axes(trace).var_tree
+    chain_axes = chain_vmap_axes(trace)
 
     def histogram(
         var_tree: UInt[Array, 'samples trees nodes'],
@@ -914,7 +922,13 @@ def compute_varcount(p: int, trace: MainTrace) -> Int32[Array, '*trace_shape {p}
     ) -> Int32[Array, 'samples {p}']:
         return var_histogram(p, var_tree, split_tree, sum_batch_axis=-1)
 
-    if chain_axis is not None:
-        histogram = vmap(histogram, in_axes=chain_axis, out_axes=chain_axis)
+    if trace.has_chains:
+        # chainless output ndim is 2 (samples, p); the chain adds one
+        out_axis = normalize_axis_index(out_chain_axis, 3)
+        histogram = vmap(
+            histogram,
+            in_axes=(chain_axes.var_tree, chain_axes.split_tree),
+            out_axes=out_axis,
+        )
 
     return histogram(trace.var_tree, trace.split_tree)

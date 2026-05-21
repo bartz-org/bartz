@@ -237,6 +237,7 @@ napoleon_use_rtype = False
 
 # intersphinx
 intersphinx_mapping = dict(
+    python=('https://docs.python.org/3', None),
     scipy=('https://docs.scipy.org/doc/scipy', None),
     numpy=('https://numpy.org/doc/stable', None),
     jax=('https://docs.jax.dev/en/latest', None),

@@ -188,11 +188,12 @@ class Bart(Module):
         MCMC.
     binner
         A callable that, given the training predictors and a random key,
-        returns a `Binner` instance. The default is `UniqueQuantileBinner`,
-        which places cutpoints at the quantiles of each predictor. Other
-        built-in options are `RangeEvenBinner` (evenly-spaced cutpoints over
-        the observed range) and `GivenSplitsBinner` (R BART ``xinfo`` format).
-        To pass options, use `functools.partial`, e.g.
+        returns a `~bartz.prepcovars.Binner` instance. The default is
+        `~bartz.prepcovars.UniqueQuantileBinner`, which places cutpoints at
+        the quantiles of each predictor. Other built-in options are
+        `~bartz.prepcovars.RangeEvenBinner` (evenly-spaced cutpoints over the
+        observed range) and `~bartz.prepcovars.GivenSplitsBinner` (R BART
+        ``xinfo`` format). To pass options, use `functools.partial`, e.g.
         ``binner=partial(UniqueQuantileBinner, max_bins=128)``.
     rm_const
         How to treat predictors with no associated decision rules (i.e., there

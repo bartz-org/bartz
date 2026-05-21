@@ -40,7 +40,7 @@ from pytest import FixtureRequest  # noqa: PT013
 from bartz._jaxext import get_default_device, split
 from bartz.mcmcloop import BurninTrace, MainTrace, run_mcmc
 from bartz.mcmcstep import State, init, make_p_nonterminal
-from bartz.mcmcstep._state import chain_vmap_axes
+from bartz.mcmcstep._state import trace_sample_axes
 from tests.util import assert_array_equal
 
 
@@ -112,20 +112,26 @@ class TestRunMcmc:
                 keys.pop(), initial_state_copy, 10, inner_loop_length=9
             )
 
-        if initial_state.num_chains() is None:
-            last_index = -1
-        else:
-            last_index = (slice(None), -1)
+        sample_axes = trace_sample_axes(main_trace)
+
+        def last_sample(arr: Array, axis: int) -> Array:
+            return jnp.take(arr, -1, axis=axis)
 
         assert_array_equal(
-            final_state.forest.leaf_tree, main_trace.leaf_tree[last_index]
-        )
-        assert_array_equal(final_state.forest.var_tree, main_trace.var_tree[last_index])
-        assert_array_equal(
-            final_state.forest.split_tree, main_trace.split_tree[last_index]
+            final_state.forest.leaf_tree,
+            last_sample(main_trace.leaf_tree, sample_axes.leaf_tree),
         )
         assert_array_equal(
-            final_state.error_cov_inv, main_trace.error_cov_inv[last_index]
+            final_state.forest.var_tree,
+            last_sample(main_trace.var_tree, sample_axes.var_tree),
+        )
+        assert_array_equal(
+            final_state.forest.split_tree,
+            last_sample(main_trace.split_tree, sample_axes.split_tree),
+        )
+        assert_array_equal(
+            final_state.error_cov_inv,
+            last_sample(main_trace.error_cov_inv, sample_axes.error_cov_inv),
         )
 
     def test_zero_iterations(self, keys: split, initial_state: State) -> None:
@@ -139,20 +145,16 @@ class TestRunMcmc:
         tree.map(partial(assert_array_equal, strict=True), initial_state, final_state)
 
         def assert_empty_trace(
-            _path: KeyPath, x: Array | None, chain_axis: int | None
+            _path: KeyPath, x: Array | None, sample_axis: int | None
         ) -> None:
-            if initial_state.num_chains() is None or chain_axis is None:
-                sample_axis = 0
-            else:
-                sample_axis = 1
-            if x is not None:
+            if x is not None and sample_axis is not None:
                 assert x.shape[sample_axis] == 0
 
         def check_trace(trace: MainTrace | BurninTrace) -> None:
             tree.map_with_path(
                 assert_empty_trace,
                 trace,
-                chain_vmap_axes(trace),
+                trace_sample_axes(trace),
                 is_leaf=lambda x: x is None,
             )
 

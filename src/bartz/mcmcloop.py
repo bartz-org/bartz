@@ -45,6 +45,7 @@ from jax import (
     lax,
     named_call,
     tree,
+    vmap,
 )
 from jax import numpy as jnp
 from jax.nn import softmax
@@ -61,39 +62,61 @@ from jaxtyping import (
     Shaped,
     UInt,
 )
+from numpy.lib.array_utils import normalize_axis_index
 
 from bartz import mcmcstep
 from bartz._jaxext import autobatch, jit_active, split
-from bartz.grove import (
-    TreeHeaps,
-    TreesTrace,
-    evaluate_forest,
-    forest_fill,
-    var_histogram,
-)
+from bartz.grove import TreesTrace, evaluate_forest, forest_fill, var_histogram
 from bartz.mcmcstep import State
-from bartz.mcmcstep._state import chain_vmap_axes, field, get_axis_size
+from bartz.mcmcstep._state import (
+    CHAIN_AXIS,
+    add_dummy_axis,
+    chain_to_axis,
+    chain_vmap_axes,
+    chainful_axis,
+    field,
+    get_axis_size,
+    trace_sample_axes,
+)
 
 
 class BurninTrace(Module):
     """MCMC trace with only diagnostic values."""
 
+    has_chains: bool = field(static=True)
+    """Whether the trace carries an explicit chain axis."""
+
     error_cov_inv: (
         Float32[Array, '*chains_and_samples']
         | Float32[Array, '*chains_and_samples k k']
-    ) = field(chains=True)
-    theta: Float32[Array, '*chains_and_samples'] | None = field(chains=True)
-    grow_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
-    grow_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
-    prune_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
-    prune_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=True)
-    log_likelihood: Float32[Array, '*chains_and_samples'] | None = field(chains=True)
-    log_trans_prior: Float32[Array, '*chains_and_samples'] | None = field(chains=True)
+    ) = field(chains=CHAIN_AXIS, samples=0)
+    theta: Float32[Array, '*chains_and_samples'] | None = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    grow_prop_count: Int32[Array, '*chains_and_samples'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    grow_acc_count: Int32[Array, '*chains_and_samples'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    prune_prop_count: Int32[Array, '*chains_and_samples'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    prune_acc_count: Int32[Array, '*chains_and_samples'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    log_likelihood: Float32[Array, '*chains_and_samples'] | None = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    log_trans_prior: Float32[Array, '*chains_and_samples'] | None = field(
+        chains=CHAIN_AXIS, samples=0
+    )
 
     @classmethod
     def from_state(cls, state: State) -> 'BurninTrace':
         """Create a single-item burn-in trace from a MCMC state."""
         return cls(
+            has_chains=state.has_chains,
             error_cov_inv=state.error_cov_inv,
             theta=state.forest.theta,
             grow_prop_count=state.forest.grow_prop_count,
@@ -111,11 +134,17 @@ class MainTrace(BurninTrace):
     leaf_tree: (
         Float32[Array, '*chains_and_samples 2**d']
         | Float32[Array, '*chains_and_samples k 2**d']
-    ) = field(chains=True)
-    var_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=True)
-    split_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(chains=True)
-    offset: Float32[Array, '*samples'] | Float32[Array, '*samples k']
-    varprob: Float32[Array, '*chains_and_samples p'] | None = field(chains=True)
+    ) = field(chains=CHAIN_AXIS, samples=0)
+    var_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    split_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    offset: Float32[Array, ''] | Float32[Array, ' k']
+    varprob: Float32[Array, '*chains_and_samples p'] | None = field(
+        chains=CHAIN_AXIS, samples=0
+    )
 
     @classmethod
     def from_state(cls, state: State) -> 'MainTrace':
@@ -125,7 +154,12 @@ class MainTrace(BurninTrace):
         if log_s is None:
             varprob = None
         else:
-            varprob = softmax(log_s, where=state.forest.max_split.astype(bool))
+            chain_axis = chain_vmap_axes(state.forest).log_s
+            p_axis = chainful_axis(0, chain_axis)  # (p,)
+            where = state.forest.max_split.astype(bool)
+            if chain_axis is not None:
+                where = jnp.expand_dims(where, chain_axis)
+            varprob = softmax(log_s, axis=p_axis, where=where)
 
         return cls(
             leaf_tree=state.forest.leaf_tree,
@@ -361,15 +395,9 @@ def _replicate(x: Array, mesh: Mesh | None) -> Array:
 def _empty_trace(
     length: int, bart: State, extractor: Callable[[State], PyTree]
 ) -> PyTree:
-    num_chains = bart.num_chains()
-    if num_chains is None:
-        out_axes = 0
-    else:
-        example_output = eval_shape(extractor, bart)
-        chain_axes = chain_vmap_axes(example_output)
-        out_axes = tree.map(
-            lambda a: 0 if a is None else 1, chain_axes, is_leaf=lambda a: a is None
-        )
+    example_output = eval_shape(extractor, bart)
+    out_axes = trace_sample_axes(add_dummy_axis(example_output))
+
     return jax.vmap(extractor, in_axes=None, out_axes=out_axes, axis_size=length)(bart)
 
 
@@ -498,45 +526,35 @@ def _save_state_to_trace(
     main_idx = jnp.where(noop_cond, noop_idx, main_idx)
 
     # prepare array index
-    num_chains = bart.num_chains()
-    burnin_trace = _set(burnin_trace, burnin_idx, burnin_extractor(bart), num_chains)
-    main_trace = _set(main_trace, main_idx, main_extractor(bart), num_chains)
+    burnin_trace = _set(burnin_trace, burnin_idx, burnin_extractor(bart))
+    main_trace = _set(main_trace, main_idx, main_extractor(bart))
 
     return burnin_trace, main_trace
 
 
 def _set(
-    trace: PyTree[Array, ' T'],
-    index: Int32[Array, ''],
-    val: PyTree[Array, ' T'],
-    num_chains: int | None,
+    trace: PyTree[Array, ' T'], index: Int32[Array, ''], val: PyTree[Array, ' T']
 ) -> PyTree[Array, ' T']:
     """Do ``trace[index] = val`` but fancier."""
-    chain_axis = chain_vmap_axes(val)
+    sample_axes = trace_sample_axes(trace)
 
     def at_set(
         trace: Shaped[Array, 'chains samples *shape']
-        | None
-        | Shaped[Array, ' samples *shape']
-        | None,
-        val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'] | None,
-        chain_axis: int | None,
-    ) -> Shaped[Array, 'chains samples *shape'] | None:
-        if trace is None or trace.size == 0:
-            # this handles the case where an array is empty because jax refuses
-            # to index into an axis of length 0, even if just in the abstract,
-            # and optional elements that are considered leaves due to `is_leaf`
-            # below needed to traverse `chain_axis`.
+        | Shaped[Array, ' samples *shape'],
+        val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'],
+        sample_axis: int | None,
+    ) -> Shaped[Array, 'chains samples *shape']:
+        if sample_axis is None or trace.size == 0:
+            # `sample_axis is None`: fields without a `samples` marker have
+            # no per-iteration slot to update.
+            # `trace.size == 0`: jax refuses to index into an axis of length
+            # 0, even in the abstract.
             return trace
 
-        if num_chains is None or chain_axis is None:
-            ndindex = (index, ...)
-        else:
-            ndindex = (slice(None), index, ...)
-
+        ndindex = (slice(None),) * sample_axis + (index, ...)
         return trace.at[ndindex].set(val, mode='drop')
 
-    return tree.map(at_set, trace, val, chain_axis, is_leaf=lambda x: x is None)
+    return tree.map(at_set, trace, val, sample_axes)
 
 
 def make_default_callback(
@@ -623,6 +641,9 @@ def print_callback(
             print_newline = False
         else:
             print_newline = it % report_every > it % dot_every
+        chain_axis = chain_vmap_axes(bart.forest).split_tree
+        num_trees_axis = chainful_axis(0, chain_axis)  # (num_trees, hts)
+        split_tree = chain_to_axis(bart.forest.split_tree, chain_axis)
         debug.callback(
             _print_report,
             print_dot=dot_cond,
@@ -634,8 +655,8 @@ def print_callback(
             grow_prop_count=bart.forest.grow_prop_count.mean(),
             grow_acc_count=bart.forest.grow_acc_count.mean(),
             prune_acc_count=bart.forest.prune_acc_count.mean(),
-            prop_total=bart.forest.split_tree.shape[-2],
-            fill=forest_fill(bart.forest.split_tree),
+            prop_total=bart.forest.split_tree.shape[num_trees_axis],
+            fill=forest_fill(split_tree),
         )
 
     def just_dot_branch() -> None:
@@ -726,15 +747,13 @@ def _print_report(
     )
 
 
-class Trace(TreeHeaps, Protocol):
-    """Protocol for a MCMC trace."""
-
-    offset: Float32[Array, '*trace_shape']
-
-
-@partial(jit, static_argnames=('flatten_chains',))
+@partial(jit, static_argnames=('flatten_chains', 'out_chain_axis_w_trees'))
 def evaluate_trace(
-    X: UInt[Array, 'p n'], trace: Trace, *, flatten_chains: bool = False
+    X: UInt[Array, 'p n'],
+    trace: MainTrace,
+    *,
+    flatten_chains: bool = False,
+    out_chain_axis_w_trees: int = CHAIN_AXIS,
 ) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']:
     """
     Compute predictions for all iterations of the BART MCMC.
@@ -749,6 +768,13 @@ def evaluate_trace(
         If `True` and `trace` has a chain axis, collapse it into the sample
         axis, so the leading dimension of the output is ``num_chains *
         num_samples`` instead of ``(num_chains, num_samples)``.
+    out_chain_axis_w_trees
+        Position of the chain axis in the output. Interpreted against the
+        intermediate, pre-tree-reduction layout ``(sample, tree, *k, n)``;
+        after summing over the tree axis the chain ends up one position
+        earlier if it was after the tree axis. Negative values count from the
+        end. Ignored when `trace` has no chain axis or `flatten_chains` is
+        True.
 
     Returns
     -------
@@ -762,33 +788,69 @@ def evaluate_trace(
     num_devices = get_axis_size(mesh, 'chains') * get_axis_size(mesh, 'data')
     max_io_nbytes *= num_devices
 
+    # extract only the trees from the trace, this will be the input to `evaluate_forest`
+    trees = TreesTrace.from_dataclass(trace)
+    batched_eval = evaluate_forest  # we will transform `batched_eval`
+
     # determine batching axes
-    has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
-    if has_chains:
-        sample_axis = 1
-        tree_axis = 2
-    else:
-        sample_axis = 0
-        tree_axis = 1
+    trace_chain_axes = chain_vmap_axes(trace)
+    # WORKAROUND(python<3.14): use operator.is_none
+    is_none = lambda x: x is None
+    sample_axes = tree.map(partial(chainful_axis, 0), trace_chain_axes, is_leaf=is_none)
+    tree_axes = tree.map(partial(chainful_axis, 1), trace_chain_axes, is_leaf=is_none)
+
+    # stuff to determine output shapes
+    # leaf_tree has shape (sample, tree, *k, ts)
+    k_axis = chainful_axis(2, trace_chain_axes.leaf_tree)
+    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+    kshape = trace.leaf_tree.shape[k_axis : k_axis + is_mv]
+    _, n = X.shape
+    num_samples = trace.leaf_tree.shape[sample_axes.leaf_tree]
+    num_trees = trace.leaf_tree.shape[tree_axes.leaf_tree]
+    if trace.has_chains:
+        num_chains = trace.leaf_tree.shape[trace_chain_axes.leaf_tree]
+
+    def expand_shape(shape: tuple[int, ...], chain_axis: int) -> tuple[int, ...]:
+        return (*shape[:chain_axis], num_chains, *shape[chain_axis:])
+
+    # tree axis to reduce over
+    out_shape_w_trees = (num_samples, num_trees, *kshape, n)
+    tree_axis = 1
+    if trace.has_chains:
+        out_chain_axis_w_trees = normalize_axis_index(
+            out_chain_axis_w_trees, 1 + len(out_shape_w_trees)
+        )
+        tree_axis = chainful_axis(tree_axis, out_chain_axis_w_trees)
+
+    # vmap over chains
+    if trace.has_chains:
+        batched_eval = vmap(
+            batched_eval,
+            in_axes=(None, TreesTrace.from_dataclass(trace_chain_axes)),
+            out_axes=out_chain_axis_w_trees,
+        )
 
     # batch and sum over trees
     batched_eval = autobatch(
-        evaluate_forest,
+        batched_eval,
         max_io_nbytes,
-        (None, tree_axis),
-        tree_axis,
+        in_axes=(None, TreesTrace.from_dataclass(tree_axes)),
+        out_axes=tree_axis,
         reduce_ufunc=jnp.add,
     )
 
-    # determine output shape (to avoid autobatch tracing everything 4 times)
-    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
-    k = trace.leaf_tree.shape[-2] if is_mv else 1
-    mv_shape = (k,) if is_mv else ()
-    _, n = X.shape
-    out_shape = (*trace.split_tree.shape[:-2], *mv_shape, n)
+    # output shape after reducing trees
+    out_shape = (num_samples, *kshape, n)
+    sample_axis = 0
+    if trace.has_chains:
+        out_chain_axis = out_chain_axis_w_trees - (out_chain_axis_w_trees > tree_axis)
+        sample_axis = chainful_axis(0, out_chain_axis)
+        out_shape = expand_shape(out_shape, out_chain_axis)
 
     # adjust memory limit keeping into account that trees are summed over
-    num_trees, hts = trace.split_tree.shape[-2:]
+    # split_tree has shape (sample, tree, hts)
+    hts = trace.split_tree.shape[chainful_axis(2, trace_chain_axes.split_tree)]
+    k = math.prod(kshape)
     out_size = k * n * jnp.float32.dtype.itemsize  # the value of the forest
     core_io_size = (
         num_trees
@@ -809,28 +871,31 @@ def evaluate_trace(
     batched_eval = autobatch(
         batched_eval,
         max_io_nbytes,
-        (None, sample_axis),
-        sample_axis,
+        in_axes=(None, TreesTrace.from_dataclass(sample_axes)),
+        out_axes=sample_axis,
         warn_on_overflow=False,  # the inner autobatch will handle it
         result_shape_dtype=ShapeDtypeStruct(out_shape, jnp.float32),
     )
 
-    # extract only the trees from the trace
-    trees = TreesTrace.from_dataclass(trace)
+    # prepare offset for broadcasting
+    # chainless y shape = (num_samples, *kshape, n), offset shape = kshape
+    offset = trace.offset[None, ..., None]
+    if trace.has_chains:
+        offset = jnp.expand_dims(offset, out_chain_axis)
 
     # evaluate trees
-    y_centered: Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']
     y_centered = batched_eval(X, trees)
-    y = y_centered + trace.offset[..., None]
-    if flatten_chains and has_chains:
-        # collapse only the chain/sample dims, not k for MV
-        end = -2 if is_mv else -1
-        y = lax.collapse(y, 0, end)
+    y = y_centered + offset
+    if flatten_chains and trace.has_chains:
+        y = jnp.moveaxis(y, out_chain_axis, 0)
+        y = lax.collapse(y, 0, 2)
     return y
 
 
-@partial(jit, static_argnums=(0,))
-def compute_varcount(p: int, trace: TreeHeaps) -> Int32[Array, '*trace_shape {p}']:
+@partial(jit, static_argnames=('p', 'out_chain_axis'))
+def compute_varcount(
+    p: int, trace: MainTrace, *, out_chain_axis: int = CHAIN_AXIS
+) -> Int32[Array, '*trace_shape {p}']:
     """
     Count how many times each predictor is used in each MCMC state.
 
@@ -840,10 +905,30 @@ def compute_varcount(p: int, trace: TreeHeaps) -> Int32[Array, '*trace_shape {p}
         The number of predictors.
     trace
         A main trace of the BART MCMC, as returned by `run_mcmc`.
+    out_chain_axis
+        Position of the chain axis in the output, whose chainless shape is
+        ``(samples, p)``. Negative values count from the end. Ignored when
+        `trace` has no chain axis.
 
     Returns
     -------
     Histogram of predictor usage in each MCMC state.
     """
-    # var_tree has shape (chains? samples trees nodes)
-    return var_histogram(p, trace.var_tree, trace.split_tree, sum_batch_axis=-1)
+    chain_axes = chain_vmap_axes(trace)
+
+    def histogram(
+        var_tree: UInt[Array, 'samples trees nodes'],
+        split_tree: UInt[Array, 'samples trees nodes'],
+    ) -> Int32[Array, 'samples {p}']:
+        return var_histogram(p, var_tree, split_tree, sum_batch_axis=-1)
+
+    if trace.has_chains:
+        # chainless output ndim is 2 (samples, p); the chain adds one
+        out_axis = normalize_axis_index(out_chain_axis, 3)
+        histogram = vmap(
+            histogram,
+            in_axes=(chain_axes.var_tree, chain_axes.split_tree),
+            out_axes=out_axis,
+        )
+
+    return histogram(trace.var_tree, trace.split_tree)

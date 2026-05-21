@@ -62,6 +62,7 @@ from jaxtyping import (
     Shaped,
     UInt,
 )
+from numpy.lib.array_utils import normalize_axis_index
 
 from bartz import mcmcstep
 from bartz._jaxext import autobatch, jit_active, split
@@ -744,9 +745,13 @@ def _print_report(
     )
 
 
-@partial(jit, static_argnames=('flatten_chains',))
+@partial(jit, static_argnames=('flatten_chains', 'out_chain_axis_w_trees'))
 def evaluate_trace(
-    X: UInt[Array, 'p n'], trace: MainTrace, *, flatten_chains: bool = False
+    X: UInt[Array, 'p n'],
+    trace: MainTrace,
+    *,
+    flatten_chains: bool = False,
+    out_chain_axis_w_trees: int = CHAIN_AXIS,
 ) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']:
     """
     Compute predictions for all iterations of the BART MCMC.
@@ -761,6 +766,13 @@ def evaluate_trace(
         If `True` and `trace` has a chain axis, collapse it into the sample
         axis, so the leading dimension of the output is ``num_chains *
         num_samples`` instead of ``(num_chains, num_samples)``.
+    out_chain_axis_w_trees
+        Position of the chain axis in the output. Interpreted against the
+        intermediate, pre-tree-reduction layout ``(sample, tree, *k, n)``;
+        after summing over the tree axis the chain ends up one position
+        earlier if it was after the tree axis. Negative values count from the
+        end. Ignored when `trace` has no chain axis or `flatten_chains` is
+        True.
 
     Returns
     -------
@@ -774,33 +786,69 @@ def evaluate_trace(
     num_devices = get_axis_size(mesh, 'chains') * get_axis_size(mesh, 'data')
     max_io_nbytes *= num_devices
 
+    # extract only the trees from the trace, this will be the input to `evaluate_forest`
+    trees = TreesTrace.from_dataclass(trace)
+    batched_eval = evaluate_forest  # we will transform `batched_eval`
+
     # determine batching axes
-    has_chains = trace.split_tree.ndim > 3  # chains, samples, trees, nodes
-    if has_chains:
-        sample_axis = 1
-        tree_axis = 2
-    else:
-        sample_axis = 0
-        tree_axis = 1
+    trace_chain_axes = chain_vmap_axes(trace)
+    # WORKAROUND(python<3.14): use operator.is_none
+    is_none = lambda x: x is None
+    sample_axes = tree.map(partial(chainful_axis, 0), trace_chain_axes, is_leaf=is_none)
+    tree_axes = tree.map(partial(chainful_axis, 1), trace_chain_axes, is_leaf=is_none)
+
+    # stuff to determine output shapes
+    # leaf_tree has shape (sample, tree, *k, ts)
+    k_axis = chainful_axis(2, trace_chain_axes.leaf_tree)
+    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+    kshape = trace.leaf_tree.shape[k_axis : k_axis + is_mv]
+    _, n = X.shape
+    num_samples = trace.leaf_tree.shape[sample_axes.leaf_tree]
+    num_trees = trace.leaf_tree.shape[tree_axes.leaf_tree]
+    if trace.has_chains:
+        num_chains = trace.leaf_tree.shape[trace_chain_axes.leaf_tree]
+
+    def expand_shape(shape: tuple[int, ...], chain_axis: int) -> tuple[int, ...]:
+        return (*shape[:chain_axis], num_chains, *shape[chain_axis:])
+
+    # tree axis to reduce over
+    out_shape_w_trees = (num_samples, num_trees, *kshape, n)
+    tree_axis = 1
+    if trace.has_chains:
+        out_chain_axis_w_trees = normalize_axis_index(
+            out_chain_axis_w_trees, 1 + len(out_shape_w_trees)
+        )
+        tree_axis = chainful_axis(tree_axis, out_chain_axis_w_trees)
+
+    # vmap over chains
+    if trace.has_chains:
+        batched_eval = vmap(
+            batched_eval,
+            in_axes=(None, TreesTrace.from_dataclass(trace_chain_axes)),
+            out_axes=out_chain_axis_w_trees,
+        )
 
     # batch and sum over trees
     batched_eval = autobatch(
-        evaluate_forest,
+        batched_eval,
         max_io_nbytes,
-        (None, tree_axis),
-        tree_axis,
+        in_axes=(None, TreesTrace.from_dataclass(tree_axes)),
+        out_axes=tree_axis,
         reduce_ufunc=jnp.add,
     )
 
-    # determine output shape (to avoid autobatch tracing everything 4 times)
-    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
-    k = trace.leaf_tree.shape[-2] if is_mv else 1
-    mv_shape = (k,) if is_mv else ()
-    _, n = X.shape
-    out_shape = (*trace.split_tree.shape[:-2], *mv_shape, n)
+    # output shape after reducing trees
+    out_shape = (num_samples, *kshape, n)
+    sample_axis = 0
+    if trace.has_chains:
+        out_chain_axis = out_chain_axis_w_trees - (out_chain_axis_w_trees > tree_axis)
+        sample_axis = chainful_axis(0, out_chain_axis)
+        out_shape = expand_shape(out_shape, out_chain_axis)
 
     # adjust memory limit keeping into account that trees are summed over
-    num_trees, hts = trace.split_tree.shape[-2:]
+    # split_tree has shape (sample, tree, hts)
+    hts = trace.split_tree.shape[chainful_axis(2, trace_chain_axes.split_tree)]
+    k = math.prod(kshape)
     out_size = k * n * jnp.float32.dtype.itemsize  # the value of the forest
     core_io_size = (
         num_trees
@@ -821,20 +869,23 @@ def evaluate_trace(
     batched_eval = autobatch(
         batched_eval,
         max_io_nbytes,
-        (None, sample_axis),
-        sample_axis,
+        in_axes=(None, TreesTrace.from_dataclass(sample_axes)),
+        out_axes=sample_axis,
         warn_on_overflow=False,  # the inner autobatch will handle it
         result_shape_dtype=ShapeDtypeStruct(out_shape, jnp.float32),
     )
 
-    # extract only the trees from the trace
-    trees = TreesTrace.from_dataclass(trace)
+    # prepare offset for broadcasting
+    # chainless y shape = (num_samples, *kshape, n), offset shape = kshape
+    offset = trace.offset[None, ..., None]
+    if trace.has_chains:
+        offset = jnp.expand_dims(offset, out_chain_axis)
 
     # evaluate trees
-    y_centered: Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']
     y_centered = batched_eval(X, trees)
-    y = y_centered + trace.offset[..., None]
-    if flatten_chains and has_chains:
+    y = y_centered + offset
+    if flatten_chains and trace.has_chains:
+        y = jnp.moveaxis(y, out_chain_axis, 0)
         y = lax.collapse(y, 0, 2)
     return y
 

@@ -167,6 +167,9 @@ class ConfigParams:
     cpu_enable_fast_math: bool | None = field(metadata={'restart': True})
     """XLA ``--xla_cpu_enable_fast_math`` (bool); ``None`` to leave the env var untouched."""
 
+    chain_axis: int | None = field(metadata={'restart': True})
+    """bartz ``CHAIN_AXIS`` env var (int); ``None`` to leave the env var untouched."""
+
     @classmethod
     def field_names(cls) -> tuple[str, ...]:
         """Names of every field, in declaration order."""
@@ -269,6 +272,7 @@ _EXTRA_PARAM_DEFAULTS: dict[str, Any] = {
     'gpu_autotune_level': None,
     'cpu_use_thunk_runtime': None,
     'cpu_enable_fast_math': None,
+    'chain_axis': None,
 }
 
 
@@ -492,11 +496,15 @@ def benchmark_loop(config: Config, args: Namespace, out_dir: Path) -> DataFrame:
             if args.minimal:
                 cmd.append('--minimal')
             extra_flags = _xla_flags_for_restart(restart_values)
+            chain_axis = restart_values.get('chain_axis')
             env = None
-            if extra_flags:
+            if extra_flags or chain_axis is not None:
                 env = dict(os.environ)
-                existing = env.get('XLA_FLAGS', '')
-                env['XLA_FLAGS'] = f'{existing} {extra_flags}'.strip()
+                if extra_flags:
+                    existing = env.get('XLA_FLAGS', '')
+                    env['XLA_FLAGS'] = f'{existing} {extra_flags}'.strip()
+                if chain_axis is not None:
+                    env['CHAIN_AXIS'] = str(chain_axis)
             subprocess.run(cmd, check=True, env=env)  # noqa: S603
             frames.append(read_parquet(partial))
     return concat(frames, how='vertical')

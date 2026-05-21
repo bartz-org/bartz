@@ -26,9 +26,8 @@
 
 from functools import partial
 
-import jax
 from equinox import Module
-from jax import named_call, random
+from jax import named_call, random, vmap
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
@@ -494,7 +493,7 @@ def fully_used_variables(
     in any particular order, and variables may appear more than once.
     """
     var_to_ignore = ancestor_variables(var_tree, max_split, leaf_index)
-    split_range_vec = jax.vmap(split_range, in_axes=(None, None, None, None, 0))
+    split_range_vec = vmap(split_range, in_axes=(None, None, None, None, 0))
     l, r = split_range_vec(var_tree, split_tree, max_split, leaf_index, var_to_ignore)
     num_split = r - l
     return jnp.where(num_split == 0, var_to_ignore, max_split.size)

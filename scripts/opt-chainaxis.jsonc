@@ -1,0 +1,13 @@
+{
+    "scan": "num_chains",
+    "reduce": "chain_axis",
+    "values": {
+        "n":          [16, 256, 4096],
+        "k":          [null],
+        "maxdepth":   [6],
+        "weights":    [false],
+        "num_trees":  [10],
+        "num_chains": [null, 1, 2, 4, 6, 8, 12, 16, 20],
+        "chain_axis": [0, -1],
+    },
+}

@@ -47,6 +47,7 @@ from numpy.testing import assert_array_less
 from pytest import Subtests  # noqa: PT013
 
 from bartz import Bart
+from bartz._interface import predict_latent
 from bartz._jaxext import get_default_device, get_device_count, split
 from bartz.BART import gbart as original_gbart
 from bartz.BART import mc_gbart as original_mc_gbart
@@ -1050,7 +1051,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: Subtests) -> None:
 
     with subtests.test('y_test'):
         X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1)
-        yhat_mcmc = bart._bart._predict(X)
+        yhat_mcmc = predict_latent(X, bart._main_trace)
         yhat_prior = evaluate_trace(X, prior_trace)
         rhat_yhat = rhat_rank([yhat_mcmc, yhat_prior], split=False)
         assert_array_less(rhat_yhat, 1.01)

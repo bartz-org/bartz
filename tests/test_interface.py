@@ -62,6 +62,7 @@ from pytest import FixtureRequest, Subtests  # noqa: PT013
 
 from bartz import Bart as OriginalBart
 from bartz import PredictKind
+from bartz._interface import predict_latent
 from bartz._jaxext import get_default_device, get_device_count, is_key, split
 from bartz.debug import TraceWithOffset, sample_prior
 from bartz.grove import (
@@ -1387,7 +1388,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: Subtests) -> None:
 
     with subtests.test('y_test'):
         X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1)
-        yhat_mcmc = bart._predict(X)
+        yhat_mcmc = predict_latent(X, bart._main_trace)
         yhat_prior = evaluate_trace(X, prior_trace)
         rhat_yhat = rhat_rank([yhat_mcmc, yhat_prior], split=False)
         assert_array_less(rhat_yhat, 1.01)

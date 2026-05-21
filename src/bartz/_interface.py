@@ -551,29 +551,16 @@ class Bart(Module):
         w = self._process_w_test(x_test, kind, w)
         x_test = self._process_x_test(x_test, w)
 
-        # get latent i.e. bare sum-of-trees predictions
-        latent = self._predict(x_test)
-        if kind is PredictKind.latent_samples:
-            return latent
-
-        # sample posterior (uses latent directly, no probit squash needed)
-        binary_indices = self._mcmc_state.binary_indices
-        if kind is PredictKind.outcome_samples:
-            return self._sample_outcome(key, latent, binary_indices, w)
-
-        # squash predictions to (0, 1) if probit
-        if binary_indices is not None:
-            indexing = jnp.s_[..., binary_indices, :]
-            mean_samples = latent.at[indexing].set(ndtr(latent[indexing]))
-        elif self._mcmc_state.binary_y is not None:
-            mean_samples = ndtr(latent)
-        else:
-            mean_samples = latent
-
-        # take mean or return samples
-        if kind is PredictKind.mean:
-            return mean_samples.mean(axis=0)
-        return mean_samples
+        # invoke jitted implementation
+        return predict(
+            key,
+            self._main_trace,
+            x_test,
+            w,
+            self._mcmc_state.binary_indices,
+            self._mcmc_state.binary_y is not None,
+            kind,
+        )
 
     @property
     def n_save(self) -> int:
@@ -645,19 +632,12 @@ class Bart(Module):
             msg = 'Model has only binary outcomes, so there is no continuous submatrix to return.'
             raise ValueError(msg)
 
-        burnin = self._burnin_trace.error_cov_inv
-        main = self._main_trace.error_cov_inv
-        sample_axis = trace_sample_axes(self._main_trace).error_cov_inv
-        prec = jnp.concatenate([burnin, main], axis=sample_axis)
-        prec = chain_to_axis(prec, chain_vmap_axes(self._main_trace).error_cov_inv)
-
-        if only_continuous and binary_indices is not None:
-            *_, k, _ = prec.shape
-            mask = jnp.ones(k, dtype=bool).at[binary_indices].set(False)
-            cont_indices = jnp.arange(k)[mask]
-            prec = prec[..., cont_indices[:, None], cont_indices[None, :]]
-
-        return prec
+        return get_latent_prec(
+            self._burnin_trace,
+            self._main_trace,
+            binary_indices,
+            only_continuous=only_continuous,
+        )
 
     def get_error_sdev(
         self, mean: bool = False
@@ -704,67 +684,12 @@ class Bart(Module):
     @cached_property
     def varprob(self) -> Float32[Array, 'ndpost p']:
         """Posterior samples of the probability of choosing each predictor for a decision rule."""
-        max_split = self._mcmc_state.forest.max_split
-        p = max_split.size
-        varprob = self._main_trace.varprob
-        if varprob is None:
-            peff = jnp.count_nonzero(max_split)
-            varprob = jnp.where(max_split, 1 / peff, 0)
-            varprob = jnp.broadcast_to(varprob, (self.ndpost, p))
-        else:
-            varprob = chain_to_axis(varprob, chain_vmap_axes(self._main_trace).varprob)
-            varprob = varprob.reshape(-1, p)
-        return varprob
+        return varprob(self._mcmc_state.forest.max_split, self._main_trace)
 
     @cached_property
     def varprob_mean(self) -> Float32[Array, ' p']:
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)
-
-    def _sample_outcome(
-        self,
-        key: Key[Array, ''],
-        latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
-        binary_indices: Int32[Array, ' kb'] | None,
-        w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
-    ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
-        """Sample from the posterior predictive distribution."""
-        # move error_cov_inv chain axis to 0
-        trace = self._main_trace
-        prec = chain_to_axis(trace.error_cov_inv, chain_vmap_axes(trace).error_cov_inv)
-
-        if latent.ndim > 2:  # multivariate case
-            error_cov_inv = lax.collapse(prec, 0, -2)
-
-            # Cholesky of precision: error_cov_inv = L @ L^T
-            L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
-
-            # Sample z ~ N(0, I) and solve L^T @ error = z
-            # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
-            z = random.normal(key, latent.shape)  # (ndpost, k, m)
-            error = solve_triangular(L, z, trans='T', lower=True)  # (ndpost, k, m)
-            if w is not None:
-                # w is (m,) or (k, m) so it always broadcasts right
-                error *= w
-        elif self._mcmc_state.binary_y is not None:
-            # pure binary UV: probit has sigma = 1
-            error = random.normal(key, latent.shape)
-        else:  # univariate continuous
-            sigma = jnp.sqrt(jnp.reciprocal(prec)).reshape(-1)
-            error = sigma[..., None] * random.normal(key, latent.shape)
-            if w is not None:
-                error *= w[None, :]
-
-        outcome = latent + error
-
-        # convert binary outcomes via latent probit thresholding
-        if binary_indices is not None:
-            idx = jnp.s_[..., binary_indices, :]
-            outcome = outcome.at[idx].set(jnp.where(outcome[idx] > 0, 1.0, 0.0))
-        elif self._mcmc_state.binary_y is not None:
-            outcome = jnp.where(outcome > 0, 1.0, 0.0)
-
-        return outcome
 
     def _process_w_test(
         self,
@@ -859,12 +784,6 @@ class Bart(Module):
             _check_same_length(w, x_test)
         return self._binner.bin(x_test)
 
-    def _predict(
-        self, x: UInt[Array, 'p m']
-    ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
-        """Evaluate trees on already quantized `x`."""
-        return predict(x, self._main_trace)
-
     def _check_trees(
         self, error: bool = False
     ) -> UInt[Array, 'num_chains n_save num_trees']:
@@ -884,20 +803,9 @@ class Bart(Module):
         RuntimeError
             If `error` is `True` and any invalid trees are found.
         """
-        trace = self._main_trace
-        trees = TreesTrace.from_dataclass(trace)
-        if trace.has_chains:
-            trees_chain_axes = TreesTrace.from_dataclass(chain_vmap_axes(trace))
-            # WORKAROUND(python<3.14): use operator.is_none
-            trees = tree.map(
-                chain_to_axis, trees, trees_chain_axes, is_leaf=lambda x: x is None
-            )
-        out: UInt[Array, '*chains samples num_trees']
-        out = check_trace(trees, self._mcmc_state.forest.max_split)
-        if out.ndim < 3:
-            out = out[None, :, :]
+        out = check_trees(self._main_trace, self._mcmc_state.forest.max_split)
         if error:
-            bad_count = jnp.count_nonzero(out)
+            bad_count = jnp.count_nonzero(out).item()
             if bad_count > 0:
                 msg = f'Found {bad_count} invalid trees in the MCMC trace.'
                 raise RuntimeError(msg)
@@ -911,9 +819,7 @@ class Bart(Module):
         An array where ``(i, j, k)`` is `True` if tree `k` is invalid at
         iteration `j` in chain `i` but not at iteration ``j - 1``.
         """
-        bad = self._check_trees().astype(bool)
-        bad_before = jnp.pad(bad[:, :-1, :], [(0, 0), (1, 0), (0, 0)])
-        return bad & ~bad_before
+        return tree_goes_bad(self._main_trace, self._mcmc_state.forest.max_split)
 
     def _check_replicated_trees(self) -> None:
         """Check that the trees are equal across data-sharded devices.
@@ -962,33 +868,12 @@ class Bart(Module):
             The residuals computed from the final state of the trees.
         """
         state = self._mcmc_state
-        chain_axes = chain_vmap_axes(state)
-        resid1 = chain_to_axis(state.resid, chain_axes.resid)
-        z = chain_to_axis(state.z, chain_axes.z) if state.z is not None else None
-
-        forests = TreesTrace.from_dataclass(state.forest)
-        if state.has_chains:
-            forest_chain_axes = TreesTrace.from_dataclass(chain_axes.forest)
-            # WORKAROUND(python<3.14): use operator.is_none
-            forests = tree.map(
-                chain_to_axis, forests, forest_chain_axes, is_leaf=lambda x: x is None
-            )
-        trees = evaluate_forest(state.X, forests, sum_batch_axis=-1)
-
         if state.binary_indices is not None:
-            # mixed binary-continuous: z has only binary rows, y has all rows
             assert y is not None, 'y is required for mixed regression'
-            ref = jnp.asarray(y)
-            ref = jnp.broadcast_to(ref, resid1.shape)
-            ref = ref.at[..., state.binary_indices, :].set(z)
-        elif z is not None:
-            ref = z
-        else:
+        elif state.z is None:
             assert y is not None, 'y is required for continuous regression'
-            ref = jnp.asarray(y)
-        resid2 = ref - (trees + state.offset[..., None])
-
-        return resid1, resid2
+        y_arr = jnp.asarray(y) if y is not None else None
+        return compare_resid(state, y_arr)
 
     def _depth_distr(self) -> Int32[Array, '*num_chains n_save d']:
         """Histogram of tree depths for each state of the trees.
@@ -997,28 +882,14 @@ class Bart(Module):
         -------
         A matrix where each row contains a histogram of tree depths.
         """
-        trace = self._main_trace
-        split_tree = chain_to_axis(trace.split_tree, chain_vmap_axes(trace).split_tree)
-        out: Int32[Array, '*chains samples d']
-        out = forest_depth_distr(split_tree)
-        if out.ndim < 3:
-            out = out[None, :, :]
-        return out
+        return depth_distr(self._main_trace)
 
     def _points_per_node_distr(
         self, node_type: str
     ) -> Int32[Array, '*num_chains n_save n+1']:
-        trace = self._main_trace
-        chain_axes = chain_vmap_axes(trace)
-        var_tree = chain_to_axis(trace.var_tree, chain_axes.var_tree)
-        split_tree = chain_to_axis(trace.split_tree, chain_axes.split_tree)
-        out: Int32[Array, '*chains samples n+1']
-        out = points_per_node_distr(
-            self._mcmc_state.X, var_tree, split_tree, node_type, sum_batch_axis=-1
+        return points_per_node_distr_trace(
+            self._mcmc_state.X, self._main_trace, node_type
         )
-        if out.ndim < 3:
-            out = out[None, :, :]
-        return out
 
     def _points_per_decision_node_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
         """Histogram of number of points belonging to parent-of-leaf nodes.
@@ -1084,7 +955,8 @@ def _process_predictor_input(
 
 @overload
 def _process_response_input(
-    y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
+    arr: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
+    /,
     *,
     keep: Literal[False] = False,
     dtype: DTypeLike = jnp.float32,
@@ -1093,7 +965,8 @@ def _process_response_input(
 
 @overload
 def _process_response_input(
-    y: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
+    arr: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
+    /,
     *,
     keep: Literal[True],
     dtype: DTypeLike = jnp.float32,
@@ -1105,6 +978,7 @@ def _process_response_input(
 
 def _process_response_input(
     arr: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
+    /,
     *,
     keep: bool = False,
     dtype: DTypeLike = jnp.float32,
@@ -1503,11 +1377,137 @@ def get_error_sdev(
     return jnp.where(binary_mask, jnp.nan, sdev)
 
 
-def predict(
-    x: UInt[Array, 'p m'], trace: mcmcloop.MainTrace
-) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
-    """Evaluate trees on already quantized `x`, and squash chains."""
-    return evaluate_trace(x, trace, flatten_chains=True)
+@partial(jit, static_argnames='only_continuous')
+def get_latent_prec(
+    burnin_trace: mcmcloop.BurninTrace,
+    main_trace: mcmcloop.MainTrace,
+    binary_indices: Int32[Array, ' kb'] | None,
+    *,
+    only_continuous: bool = False,
+) -> (
+    Float32[Array, ' n_burn+n_save']
+    | Float32[Array, 'n_burn+n_save k k']
+    | Float32[Array, 'num_chains n_burn+n_save']
+    | Float32[Array, 'num_chains n_burn+n_save k k']
+):
+    """Latent error precision trace, burn-in + main concatenated."""
+    burnin = burnin_trace.error_cov_inv
+    main = main_trace.error_cov_inv
+    sample_axis = trace_sample_axes(main_trace).error_cov_inv
+    prec = jnp.concatenate([burnin, main], axis=sample_axis)
+    prec = chain_to_axis(prec, chain_vmap_axes(main_trace).error_cov_inv)
+    if only_continuous and binary_indices is not None:
+        *_, k, _ = prec.shape
+        kc = k - binary_indices.size
+        mask = jnp.ones(k, dtype=bool).at[binary_indices].set(False)
+        (cont_indices,) = jnp.nonzero(mask, size=kc)
+        prec = prec[..., cont_indices[:, None], cont_indices[None, :]]
+    return prec
+
+
+@jit
+def varprob(
+    max_split: UInt[Array, ' p'], trace: mcmcloop.MainTrace
+) -> Float32[Array, 'ndpost p']:
+    """Posterior samples of predictor selection probability, chains concatenated."""
+    p = max_split.size
+    varprob = trace.varprob
+    if varprob is None:
+        ndpost = trace.grow_prop_count.size
+        peff = jnp.count_nonzero(max_split)
+        out = jnp.where(max_split, 1 / peff, 0)
+        return jnp.broadcast_to(out, (ndpost, p))
+    varprob = chain_to_axis(varprob, chain_vmap_axes(trace).varprob)
+    return varprob.reshape(-1, p)
+
+
+@jit
+def check_trees(
+    trace: mcmcloop.MainTrace, max_split: UInt[Array, ' p']
+) -> UInt[Array, 'num_chains n_save num_trees']:
+    """Apply `bartz.grove.check_trace` to all the tree draws."""
+    trees = TreesTrace.from_dataclass(trace)
+    if trace.has_chains:
+        trees_chain_axes = TreesTrace.from_dataclass(chain_vmap_axes(trace))
+        # WORKAROUND(python<3.14): use operator.is_none
+        trees = tree.map(
+            chain_to_axis, trees, trees_chain_axes, is_leaf=lambda x: x is None
+        )
+    out: UInt[Array, '*chains samples num_trees']
+    out = check_trace(trees, max_split)
+    if out.ndim < 3:
+        out = out[None, :, :]
+    return out
+
+
+@jit
+def tree_goes_bad(
+    trace: mcmcloop.MainTrace, max_split: UInt[Array, ' p']
+) -> Bool[Array, 'num_chains n_save num_trees']:
+    """Find iterations where a tree becomes invalid."""
+    bad = check_trees(trace, max_split).astype(bool)
+    bad_before = jnp.pad(bad[:, :-1, :], [(0, 0), (1, 0), (0, 0)])
+    return bad & ~bad_before
+
+
+@jit
+def compare_resid(
+    state: mcmcstep.State, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
+) -> tuple[
+    Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
+    Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
+]:
+    """Re-compute residuals to compare them with the updated ones."""
+    chain_axes = chain_vmap_axes(state)
+    resid1 = chain_to_axis(state.resid, chain_axes.resid)
+    z = chain_to_axis(state.z, chain_axes.z) if state.z is not None else None
+
+    forests = TreesTrace.from_dataclass(state.forest)
+    if state.has_chains:
+        forest_chain_axes = TreesTrace.from_dataclass(chain_axes.forest)
+        # WORKAROUND(python<3.14): use operator.is_none
+        forests = tree.map(
+            chain_to_axis, forests, forest_chain_axes, is_leaf=lambda x: x is None
+        )
+    trees = evaluate_forest(state.X, forests, sum_batch_axis=-1)
+
+    if state.binary_indices is not None:
+        # mixed binary-continuous: z has only binary rows, y has all rows
+        ref = jnp.broadcast_to(y, resid1.shape)
+        ref = ref.at[..., state.binary_indices, :].set(z)
+    elif z is not None:
+        ref = z
+    else:
+        ref = y
+    resid2 = ref - (trees + state.offset[..., None])
+
+    return resid1, resid2
+
+
+@jit
+def depth_distr(trace: mcmcloop.MainTrace) -> Int32[Array, '*num_chains n_save d']:
+    """Histogram of tree depths for each state of the trees."""
+    split_tree = chain_to_axis(trace.split_tree, chain_vmap_axes(trace).split_tree)
+    out: Int32[Array, '*chains samples d']
+    out = forest_depth_distr(split_tree)
+    if out.ndim < 3:
+        out = out[None, :, :]
+    return out
+
+
+@partial(jit, static_argnames='node_type')
+def points_per_node_distr_trace(
+    X: UInt[Array, 'p n'], trace: mcmcloop.MainTrace, node_type: str
+) -> Int32[Array, '*num_chains n_save n+1']:
+    """Histogram of number of points per node, for every tree draw in the trace."""
+    chain_axes = chain_vmap_axes(trace)
+    var_tree = chain_to_axis(trace.var_tree, chain_axes.var_tree)
+    split_tree = chain_to_axis(trace.split_tree, chain_axes.split_tree)
+    out: Int32[Array, '*chains samples n+1']
+    out = points_per_node_distr(X, var_tree, split_tree, node_type, sum_batch_axis=-1)
+    if out.ndim < 3:
+        out = out[None, :, :]
+    return out
 
 
 class DeviceKwArgs(TypedDict):
@@ -1649,3 +1649,100 @@ def process_varprob(
     assert varprob.shape == max_split.shape, 'varprob must have shape (p,)'
     varprob = error_if(varprob, varprob <= 0, 'varprob must be > 0')
     return jnp.log(varprob)
+
+
+def predict_latent(
+    x: UInt[Array, 'p m'], trace: mcmcloop.MainTrace
+) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
+    """Evaluate trees on already quantized `x`, and squash chains."""
+    return evaluate_trace(x, trace, flatten_chains=True)
+
+
+@partial(jit, static_argnums=(5, 6))
+def predict(
+    key: Key[Array, ''] | None,
+    trace: mcmcloop.MainTrace,
+    x_test: UInt[Array, 'p m'],
+    w: Float[Array, ' m'] | Float[Array, 'k m'] | None,
+    binary_indices: Int32[Array, ' kb'] | None,
+    has_binary: bool,
+    kind: PredictKind | str,
+    /,
+) -> (
+    Float32[Array, ' m']
+    | Float32[Array, 'k m']
+    | Float32[Array, 'ndpost m']
+    | Float32[Array, 'ndpost k m']
+):
+    """Implement `Bart.predict`."""
+    # get latent i.e. bare sum-of-trees predictions
+    latent = predict_latent(x_test, trace)
+    if kind is PredictKind.latent_samples:
+        return latent
+
+    # sample posterior (uses latent directly, no probit squash needed)
+    if kind is PredictKind.outcome_samples:
+        assert key is not None
+        return sample_outcome(key, trace, latent, w, binary_indices, has_binary)
+
+    # squash predictions to (0, 1) if probit
+    if binary_indices is not None:
+        indexing = jnp.s_[..., binary_indices, :]
+        mean_samples = latent.at[indexing].set(ndtr(latent[indexing]))
+    elif has_binary:  # self._mcmc_state.binary_y is not None:
+        mean_samples = ndtr(latent)
+    else:
+        mean_samples = latent
+
+    # take mean or return samples
+    if kind is PredictKind.mean:
+        return mean_samples.mean(axis=0)
+    return mean_samples
+
+
+@partial(jit, static_argnums=(5,))
+def sample_outcome(
+    key: Key[Array, ''],
+    trace: mcmcloop.MainTrace,
+    latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
+    w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
+    binary_indices: Int32[Array, ' kb'] | None,
+    has_binary: bool,
+    /,
+) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
+    """Sample from the posterior predictive distribution."""
+    # move error_cov_inv chain axis to 0
+    prec = chain_to_axis(trace.error_cov_inv, chain_vmap_axes(trace).error_cov_inv)
+
+    if latent.ndim > 2:  # multivariate case
+        error_cov_inv = lax.collapse(prec, 0, -2)
+
+        # Cholesky of precision: error_cov_inv = L @ L^T
+        L = chol_with_gersh(error_cov_inv)  # (ndpost, k, k)
+
+        # Sample z ~ N(0, I) and solve L^T @ error = z
+        # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
+        z = random.normal(key, latent.shape)  # (ndpost, k, m)
+        error = solve_triangular(L, z, trans='T', lower=True)  # (ndpost, k, m)
+        if w is not None:
+            # w is (m,) or (k, m) so it always broadcasts right
+            error *= w
+    elif has_binary:
+        # pure binary UV: probit has sigma = 1
+        error = random.normal(key, latent.shape)
+    else:  # univariate continuous
+        sigma = jnp.sqrt(jnp.reciprocal(prec)).reshape(-1)
+        error = sigma[..., None] * random.normal(key, latent.shape)
+        if w is not None:
+            error *= w[None, :]
+
+    outcome = latent + error
+
+    # convert binary outcomes via latent probit thresholding
+    if binary_indices is not None:
+        idx = jnp.s_[..., binary_indices, :]
+        outcome = outcome.at[idx].set(jnp.where(outcome[idx] > 0, 1.0, 0.0))
+    elif has_binary:
+        outcome = jnp.where(outcome > 0, 1.0, 0.0)
+
+    return outcome

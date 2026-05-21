@@ -217,18 +217,36 @@ def _is_core_axis_leaf(x: object) -> bool:
     return x is None or _is_lazy_array(x)
 
 
+def chainful_axis(core_axis: int, chain_axis: int | None) -> int:
+    """Position of a chainless-layout axis in the corresponding chainful array.
+
+    Parameters
+    ----------
+    core_axis
+        Non-negative axis position in the chainless ("core") layout.
+    chain_axis
+        Non-negative position of the chain axis in the chainful layout, or
+        `None` if there is no chain axis.
+
+    Returns
+    -------
+    The non-negative position of `core_axis` after inserting the chain axis at `chain_axis`.
+    """
+    if chain_axis is None or core_axis < chain_axis:
+        return core_axis
+    return core_axis + 1
+
+
 def _compute_core_axis(
-    leaf: object, raw: int | None, chain_axis: int | None
+    leaf: object, raw_axis: int | None, chain_axis: int | None
 ) -> int | None:
     """Combine a raw core-layout marker and a (normalized) chain position."""
-    if raw is None:
+    if raw_axis is None:
         return None
     has_chain = chain_axis is not None
     core_ndim = leaf.ndim - (1 if has_chain else 0)
-    axis = normalize_axis_index(raw, core_ndim)
-    if has_chain and chain_axis <= axis:
-        axis += 1
-    return axis
+    axis = normalize_axis_index(raw_axis, core_ndim)
+    return chainful_axis(axis, chain_axis)
 
 
 T = TypeVar('T')

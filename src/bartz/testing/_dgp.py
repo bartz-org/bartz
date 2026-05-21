@@ -218,8 +218,8 @@ class Params(Module):
     """Number of quadratic interactions per predictor (even, ``< p // k``)."""
 
     lambda_: Float[Array, ''] | None
-    """Coupling parameter in ``[0, 1]``: 0 = independent components,
-    1 = identical components. ``None`` iff univariate (``partition is
+    """Coupling parameter in ``[0, 1]``. 0 is independent components,
+    1 is identical components. ``None`` iff univariate (``partition is
     None``), in which case only the shared path contributes to ``mu``."""
 
     sigma2_lin: Float[Array, '']

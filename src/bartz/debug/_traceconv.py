@@ -149,7 +149,7 @@ class TraceWithOffset(Module):
     offset: Float32[Array, '']
 
     has_chains: ClassVar[bool] = False
-    """No chain axis: each leading axis is just the sample axis."""
+    """No chain axis; each leading axis is just the sample axis."""
 
     @classmethod
     def from_trees_trace(

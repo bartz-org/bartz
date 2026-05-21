@@ -168,7 +168,7 @@ class Params(Module):
     """Output of `gen_params`: all DGP quantities that do not depend on `n`.
 
     For multivariate outputs (``k is not None``) the latent mean for
-    component ``i`` at observation ``j`` is
+    component ``i`` at observation ``j`` is::
 
         mu_ij = sqrt(lambda_) * (beta_shared . x_j + x_j^T A_shared x_j)
               + sqrt(1 - lambda_) * (beta_separate_i . x_j + x_j^T A_separate_i x_j)
@@ -178,12 +178,12 @@ class Params(Module):
     the variables it owns via `partition`) and fully shared ones
     (``lambda_=1``, all rows share the same coefficients).
 
-    For univariate outputs (``k is None``) the separate path is skipped and
+    For univariate outputs (``k is None``) the separate path is skipped and::
 
         mu_j = beta_shared . x_j + x_j^T A_shared x_j;
 
     ``partition``, ``beta_separate``, ``A_separate`` and ``lambda_`` are all
-    ``None``. The outcome is
+    ``None``. The outcome is::
 
         y_ij = mu_ij + eps_ij * sqrt(sigma2_eps),   eps_ij ~iid N(0, 1),
 

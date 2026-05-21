@@ -43,7 +43,7 @@ There is also a new interface where new features are added, `bartz.Bart`. Howeve
 Getting a GPU
 -------------
 
-`bartz` works decently on CPU, but it shines on GPU where it can be up to 200x faster. Your personal computer may already have a nvidia GPU. The integrated GPUs on Apple Silicon Macs are not supported and won't ever be. If you don't have a GPU, you can rent one on the cloud, starting from about 0.10 $/hour, e.g., on `vast.ai <https://vast.ai>`_. If you are not familiar with connecting to remote machines, you can use `Google colab <https://colab.research.google.com>`_.
+`bartz` works decently on CPU, but it shines on GPU where it can be up to 200x faster. Your personal computer may already have a nvidia GPU. The integrated GPUs on Apple Silicon Macs are not supported (if you wish they were supported, help out `jax-mps <https://github.com/tillahoffmann/jax-mps>`_). If you don't have a GPU, you can rent one on the cloud, starting from about 0.10 $/hour, e.g., on `vast.ai <https://vast.ai>`_. If you are not familiar with connecting to remote machines, you can use `Google colab <https://colab.research.google.com>`_.
 
 JAX
 ---

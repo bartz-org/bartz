@@ -1960,10 +1960,19 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     state_uv = bart_uv._mcmc_state
     state_mv = bart_mv._mcmc_state
 
+    # Move chain axis to position 0 so squeezes target the k axis at -2 / -1.
+    uv_axes = chain_vmap_axes(state_uv)
+    mv_axes = chain_vmap_axes(state_mv)
+
     # Residuals and error covariance
-    assert_close_matrices(state_uv.resid, state_mv.resid.squeeze(-2))
+    assert_close_matrices(
+        chain_to_axis(state_uv.resid, uv_axes.resid),
+        chain_to_axis(state_mv.resid, mv_axes.resid).squeeze(-2),
+    )
     assert_allclose(
-        state_uv.error_cov_inv, state_mv.error_cov_inv.squeeze((-2, -1)), rtol=1e-6
+        chain_to_axis(state_uv.error_cov_inv, uv_axes.error_cov_inv),
+        chain_to_axis(state_mv.error_cov_inv, mv_axes.error_cov_inv).squeeze((-2, -1)),
+        rtol=1e-6,
     )
 
     # Prior parameters
@@ -1980,10 +1989,24 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         assert_array_equal(bart_uv.sigest, bart_mv.sigest.squeeze(0))
 
     # Forest structure
-    assert_array_equal(state_uv.forest.var_tree, state_mv.forest.var_tree)
-    assert_array_equal(state_uv.forest.split_tree, state_mv.forest.split_tree)
-    assert_array_equal(state_uv.forest.leaf_tree, state_mv.forest.leaf_tree.squeeze(-2))
-    assert_array_equal(state_uv.forest.leaf_indices, state_mv.forest.leaf_indices)
+    uv_forest_axes = chain_vmap_axes(state_uv.forest)
+    mv_forest_axes = chain_vmap_axes(state_mv.forest)
+    assert_array_equal(
+        chain_to_axis(state_uv.forest.var_tree, uv_forest_axes.var_tree),
+        chain_to_axis(state_mv.forest.var_tree, mv_forest_axes.var_tree),
+    )
+    assert_array_equal(
+        chain_to_axis(state_uv.forest.split_tree, uv_forest_axes.split_tree),
+        chain_to_axis(state_mv.forest.split_tree, mv_forest_axes.split_tree),
+    )
+    assert_array_equal(
+        chain_to_axis(state_uv.forest.leaf_tree, uv_forest_axes.leaf_tree),
+        chain_to_axis(state_mv.forest.leaf_tree, mv_forest_axes.leaf_tree).squeeze(-2),
+    )
+    assert_array_equal(
+        chain_to_axis(state_uv.forest.leaf_indices, uv_forest_axes.leaf_indices),
+        chain_to_axis(state_mv.forest.leaf_indices, mv_forest_axes.leaf_indices),
+    )
 
 
 def test_get_latent_prec_only_continuous(bkw: BartKW) -> None:

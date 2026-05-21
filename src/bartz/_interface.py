@@ -341,9 +341,6 @@ class Bart(Module):
     # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
     _x_train_fmt: Any = field(static=True)
 
-    offset: Float32[Array, ''] | Float32[Array, ' k']
-    """The prior mean of the latent mean function."""
-
     sigest: Float32[Array, ''] | Float32[Array, ' k'] | None = None
     """The estimated standard deviation of the error used to set `lambda_`."""
 
@@ -484,8 +481,6 @@ class Bart(Module):
         )
 
         # set public attributes
-        # set offset from the state because of buffer donation
-        self.offset = result.final_state.offset
         self.sigest = sigest
 
         # set private attributes
@@ -574,6 +569,11 @@ class Bart(Module):
         if kind is PredictKind.mean:
             return mean_samples.mean(axis=0)
         return mean_samples
+
+    @property
+    def offset(self) -> Float32[Array, ''] | Float32[Array, ' k']:
+        """The prior mean of the latent mean function."""
+        return self._mcmc_state.offset
 
     @property
     def n_save(self) -> int:

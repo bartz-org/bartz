@@ -68,8 +68,10 @@ dev = [
     "gitpython>=3.1.44",
     "packaging>=25.0",
     "polars[pandas,pyarrow]>=1.29.0",
-    "pytest>=9.0.0",
+    "pytest>=8.3.5",
     "pytest-cov>=6.1.1",
+    # WORKAROUND(pytest<9): pytest 9 has built-in subtests support
+    "pytest-subtests>=0.14.1",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.6.1",
     "rpy2>=3.5.17",
@@ -80,7 +82,8 @@ dev = [
     "jupyterlab>=4.4.2",
 ]
 
-[tool.pytest]
+# WORKAROUND(pytest<9): use [tool.pytest]
+[tool.pytest.ini_options]
 cache_dir = "config/pytest_cache"
 testpaths = ["tests"]
 addopts = [
@@ -93,7 +96,7 @@ addopts = [
 filterwarnings = [
     "ignore:unclosed database:ResourceWarning",
 ]
-timeout = "1024"  # about 15 min, ci runners are slow
+timeout = 1024  # about 15 min, ci runners are slow
 timeout_method = "thread"  # when jax hangs, signals do not work
 
 [tool.coverage.run]

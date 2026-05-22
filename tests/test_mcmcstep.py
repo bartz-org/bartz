@@ -51,7 +51,8 @@ from jaxtyping import (
     UInt32,
     jaxtyped,
 )
-from pytest import FixtureRequest, Subtests  # noqa: PT013
+from pytest import FixtureRequest  # noqa: PT013
+from pytest_subtests import SubTests
 from scipy import stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
@@ -1144,7 +1145,7 @@ class TestMultichain:
         init_kwargs: dict,
         num_chains: int | None,
         shard_data: bool,
-        subtests: Subtests,
+        subtests: SubTests,
         keys: split,
     ) -> None:
         """Create a multichain `State` with `init` and step it once."""

@@ -58,7 +58,8 @@ from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, Bool, Float32, Int32, Key, PyTree, Real, Shaped, UInt
 from numpy.testing import assert_array_less
-from pytest import CaptureFixture, FixtureRequest, Subtests  # noqa: PT013
+from pytest import CaptureFixture, FixtureRequest  # noqa: PT013
+from pytest_subtests import SubTests
 
 from bartz import Bart as OriginalBart
 from bartz import PredictKind
@@ -622,7 +623,7 @@ class TestWithCachedBart:
         )
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4, reduce_rank=True)
 
-    def test_convergence(self, cachedbart: CachedBart, subtests: Subtests) -> None:
+    def test_convergence(self, cachedbart: CachedBart, subtests: SubTests) -> None:
         """Run multiple chains and check convergence with rhat."""
         bart = cachedbart.bart
         bkw = cachedbart.bkw
@@ -739,7 +740,7 @@ class TestWithCachedBart:
         assert_different(bart._burnin_trace, rtol=0.01)
 
 
-def test_sequential_guarantee(bkw: BartKW, subtests: Subtests) -> None:
+def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     """Check that the way iterations are saved does not influence the result."""
     kw = bkw.kw
     kw['n_skip'] = 1
@@ -945,7 +946,7 @@ def test_output_ranges(bkw: BartKW, keys: split) -> None:
         assert jnp.all(eigvals > 0)
 
 
-def test_predict_means(bkw: BartKW, keys: split, subtests: Subtests) -> None:
+def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
     """Check that the various outputs of `Bart.predict` are consistent."""
     bart = Bart(**bkw.kw)
 
@@ -1330,7 +1331,7 @@ def test_xinfo_wrong_p() -> None:
 
 
 @pytest.mark.parametrize(('p', 'nsplits'), [(1, 1), (3, 2), (10, 1), (10, 255)])
-def test_prior(keys: split, p: int, nsplits: int, subtests: Subtests) -> None:
+def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
     """Check that the posterior without data is equivalent to the prior."""
     bart = run_bart_like_prior(keys.pop(), p, nsplits, subtests)
 
@@ -1395,7 +1396,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: Subtests) -> None:
 
 
 def run_bart_like_prior(
-    key: Key[Array, ''], p: int, nsplits: int, subtests: Subtests
+    key: Key[Array, ''], p: int, nsplits: int, subtests: SubTests
 ) -> Bart:
     """Run `Bart` without datapoints to sample the prior distribution."""
     xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
@@ -1431,7 +1432,7 @@ def run_bart_like_prior(
 
 
 def sample_prior_like(
-    key: Key[Array, ''], bart: Bart, subtests: Subtests
+    key: Key[Array, ''], bart: Bart, subtests: SubTests
 ) -> TraceWithOffset:
     """Sample from the prior with the same settings used in `bart`."""
     p_nonterminal = bart._mcmc_state.forest.p_nonterminal
@@ -1716,7 +1717,7 @@ class TestVarprobParam:
         vc /= vc.sum()
         assert vc[i] > vp[i] * 0.6
 
-    def test_positive(self, bkw: BartKW, subtests: Subtests) -> None:
+    def test_positive(self, bkw: BartKW, subtests: SubTests) -> None:
         """Check that an error is raised if varprob is not > 0."""
         kw = bkw.kw
 
@@ -1819,7 +1820,7 @@ def test_debug_checks(keys: split, bkw: BartKW) -> None:
         collect()
 
 
-def test_equiv_sharding(bkw: BartKW, subtests: Subtests) -> None:
+def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
     if len(jax.devices()) < 2:  # this branch is covered in single cpu tests config
         pytest.skip('Need at least 2 devices for this test')
@@ -1868,7 +1869,7 @@ def test_equiv_sharding(bkw: BartKW, subtests: Subtests) -> None:
             tree.map_with_path(check_equal, bart, bart_both)
 
 
-def test_num_trees(bkw: BartKW, subtests: Subtests) -> None:
+def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:
     """Test the number of trees."""
     kw = bkw.kw
     kw.update(n_burn=0, n_save=0)
@@ -1907,7 +1908,7 @@ class TestMVBartInterface:
 
     @pytest.mark.parametrize('outcome_mode', ['continuous', 'mixed'])
     def test_scalar_params(
-        self, example_data: ExampleData, subtests: Subtests, outcome_mode: str
+        self, example_data: ExampleData, subtests: SubTests, outcome_mode: str
     ) -> None:
         """Test that scalar configuration params are broadcasted."""
         x, y, _, kw = example_data

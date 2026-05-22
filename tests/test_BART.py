@@ -44,7 +44,7 @@ from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, Float32, Int32, Key, PyTree, Shaped, UInt
 from numpy.testing import assert_array_less
-from pytest import Subtests  # noqa: PT013
+from pytest_subtests import SubTests
 
 from bartz import Bart
 from bartz._interface import predict_latent
@@ -297,7 +297,7 @@ class TestWithCachedBart:
         )
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4)
 
-    def test_convergence(self, cachedbart: CachedBart, subtests: Subtests) -> None:
+    def test_convergence(self, cachedbart: CachedBart, subtests: SubTests) -> None:
         """Run multiple chains and check convergence with rhat."""
         bart = cachedbart.bart
         nchains = bart._mcmc_state.num_chains()
@@ -400,7 +400,7 @@ class TestWithCachedBart:
             )
 
     def test_comparison_BART3(
-        self, cachedbart: CachedBart, keys: split, subtests: Subtests
+        self, cachedbart: CachedBart, keys: split, subtests: SubTests
     ) -> None:
         """Check `bartz.BART` gives results similar to the R package BART3."""
         bart = cachedbart.bart
@@ -557,7 +557,7 @@ class TestWithCachedBart:
         assert_different(bart._burnin_trace, rtol=0.03)
 
 
-def test_sequential_guarantee(kw: dict, subtests: Subtests) -> None:
+def test_sequential_guarantee(kw: dict, subtests: SubTests) -> None:
     """Check that the way iterations are saved does not influence the result."""
     # reference run
     kw['keepevery'] = 1
@@ -992,7 +992,7 @@ def test_xinfo_wrong_p() -> None:
         (10, 255),  # likely always available decision rules for all variables
     ],
 )
-def test_prior(keys: split, p: int, nsplits: int, subtests: Subtests) -> None:
+def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
     """Check that the posterior without data is equivalent to the prior."""
     # run bart without data
     bart = run_bart_like_prior(keys.pop(), p, nsplits, subtests)
@@ -1058,7 +1058,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: Subtests) -> None:
 
 
 def run_bart_like_prior(
-    key: Key[Array, ''], p: int, nsplits: int, subtests: Subtests
+    key: Key[Array, ''], p: int, nsplits: int, subtests: SubTests
 ) -> mc_gbart:
     """Run `mc_gbart` without datapoints to sample the prior distribution."""
     # set the split grid manually because automatic setting relies on datapoints
@@ -1096,7 +1096,7 @@ def run_bart_like_prior(
 
 
 def sample_prior_like(
-    key: Key[Array, ''], bart: mc_gbart, subtests: Subtests
+    key: Key[Array, ''], bart: mc_gbart, subtests: SubTests
 ) -> TraceWithOffset:
     """Sample from the prior with the same settings used in `bart`."""
     # extract p_nonterminal in original format from mcmc state
@@ -1428,7 +1428,7 @@ class TestVarprobParam:
         vc /= vc.sum()
         assert vc[i] > vp[i] * 0.6
 
-    def test_positive(self, kw: dict, subtests: Subtests) -> None:
+    def test_positive(self, kw: dict, subtests: SubTests) -> None:
         """Check that an error is raised if varprob is not > 0."""
         p, _ = kw['x_train'].shape
 
@@ -1446,7 +1446,7 @@ class TestVarprobParam:
                 mc_gbart(**kw)
 
 
-def test_equiv_sharding(kw: dict, subtests: Subtests) -> None:
+def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
     if len(devices()) < 2:  # this branch is covered in the single cpu test config
         pytest.skip('Need at least 2 devices for this test')
@@ -1499,7 +1499,7 @@ def test_equiv_sharding(kw: dict, subtests: Subtests) -> None:
             tree.map_with_path(check_equal, bart, bart_both)
 
 
-def test_num_trees(kw: dict, subtests: Subtests) -> None:
+def test_num_trees(kw: dict, subtests: SubTests) -> None:
     """Test the number of trees."""
     kw.update(nskip=0, ndpost=0)
 

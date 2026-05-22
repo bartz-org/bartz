@@ -58,7 +58,7 @@ under the key ``matrix`` for downstream tools.
 `ConfigParams` covers two kinds of params:
 
 - ``n`` and ``k`` set the data shape: ``X``, ``y``, ``max_split`` come from
-  `benchmarks.speed.gen_nonsense_data(1, n, k)`.
+  `bartz.testing.gen_nonsense_data(1, n, k)`.
 - ``maxdepth`` and ``weights`` map to `init` args without being literal init
   kwargs: ``maxdepth`` -> ``p_nonterminal = make_p_nonterminal(maxdepth, 0.95,
   2)``; ``weights = True`` -> ``error_scale = jnp.ones(n)`` (else ``None``).
@@ -95,7 +95,7 @@ from tqdm import tqdm
 
 from bartz._jaxext import get_default_device
 from bartz.mcmcstep import State, init, make_p_nonterminal, step
-from benchmarks.speed import gen_nonsense_data
+from bartz.testing import gen_nonsense_data
 
 MAX_LEAF_INDICES_SIZE = 2**30  # 1 GiB
 

@@ -276,6 +276,14 @@ _EXTRA_PARAM_DEFAULTS: dict[str, Any] = {
 }
 
 
+# Map ConfigParams field name -> function applied to its value before storing
+# it in the results DataFrame
+_SAVE_PREPROCESSORS: dict[str, Callable[[Any], Any]] = {
+    'num_chains': lambda v: -1 if v is None else v
+    # None would be converted to null, ambiguity with missing data
+}
+
+
 def _param_defaults() -> dict[str, Any]:
     """Default values for `ConfigParams` fields: from `init`'s signature plus extras."""
     sig = inspect.signature(init)
@@ -551,7 +559,8 @@ def inner_benchmark_loop(
             print(f' {time_est:#.2g} s')
 
         for name, value in asdict(params).items():
-            results[name].append(value)
+            preprocess = _SAVE_PREPROCESSORS.get(name)
+            results[name].append(preprocess(value) if preprocess else value)
         results['time_est'].append(time_est)
         results['time_lo'].append(time_lo)
         results['time_up'].append(time_up)

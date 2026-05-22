@@ -1,6 +1,6 @@
 .. bartz/docs/reference/mcmcloop.rst
 ..
-.. Copyright (c) 2024-2025, The Bartz Contributors
+.. Copyright (c) 2024-2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -27,4 +27,5 @@ MCMC loop
 
 .. automodule:: bartz.mcmcloop
     :members:
+    :imported-members:
     :special-members: __call__

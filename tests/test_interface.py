@@ -58,7 +58,7 @@ from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, Bool, Float32, Int32, Key, PyTree, Real, Shaped, UInt
 from numpy.testing import assert_array_less
-from pytest import FixtureRequest, Subtests  # noqa: PT013
+from pytest import CaptureFixture, FixtureRequest, Subtests  # noqa: PT013
 
 from bartz import Bart as OriginalBart
 from bartz import PredictKind
@@ -1518,6 +1518,22 @@ def test_jit(bkw: BartKW) -> None:
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
     assert_close_matrices(pred1, pred2, rtol=1e-5, reduce_rank=True)
+
+
+def test_print_callback_terminates_dot_line(
+    bkw: BartKW, capsys: CaptureFixture[str]
+) -> None:
+    """MCMC logging ends with a newline when the last iteration only prints a dot."""
+    kw = bkw.kw
+    n_iters = kw['n_burn'] + kw['n_save'] * _bart_default(kw, 'n_skip')
+    printevery = _bart_default(kw, 'printevery')
+    # ensure the last iteration falls outside a report boundary so it prints
+    # only a dot, exercising the previously buggy path
+    if printevery is None or n_iters % printevery == 0:
+        kw['printevery'] = n_iters - 1
+    block_until_ready(Bart(**kw))
+    captured = capsys.readouterr()
+    assert captured.out.endswith('.\n'), repr(captured.out[-200:])
 
 
 @pytest.mark.flaky

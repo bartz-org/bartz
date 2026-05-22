@@ -974,8 +974,8 @@ def init(
         The number of batches, along datapoints, for summing the residuals,
         counting the number of datapoints in each leaf, and computing the
         likelihood precision in each leaf, respectively. `None` for no batching.
-        If 'auto', it's chosen automatically based on the target platform; see
-        the description of `target_platform` below for how it is determined.
+        If 'auto', it's chosen automatically based on the target platform (see
+        `target_platform` below).
     prec_count_num_trees
         The number of trees to process at a time when counting datapoints or
         computing the likelihood precision. If `None`, do all trees at once,
@@ -1567,16 +1567,20 @@ def _parse_reduction_configs(
     """Determine settings for indexed reduces."""
     n = y.shape[-1]
     n //= get_axis_size(mesh, 'data')  # per-device datapoints
-    # chains are vmapped together on each device, so they share the per-step
-    # memory of the per-tree reduction
     chains_per_device = (num_chains or 1) // get_axis_size(mesh, 'chains')
-    parse_num_batches = partial(_parse_num_batches, target_platform, n)
+    parse_num_batches = partial(
+        _parse_num_batches, target_platform, n, chains_per_device
+    )
     return dict(
         resid_num_batches=parse_num_batches(resid_num_batches, 'resid'),
         count_num_batches=parse_num_batches(count_num_batches, 'count'),
         prec_num_batches=parse_num_batches(prec_num_batches, 'prec'),
         prec_count_num_trees=_parse_prec_count_num_trees(
-            prec_count_num_trees, num_trees, n * chains_per_device
+            prec_count_num_trees,
+            num_trees,
+            n * chains_per_device,
+            # chains are vmapped together on each device, so they share the
+            # per-step memory of the per-tree reduction
         ),
     )
 
@@ -1584,19 +1588,18 @@ def _parse_reduction_configs(
 def _parse_num_batches(
     target_platform: Literal['cpu', 'gpu'] | None,
     n: int,
+    chains_per_device: int,
     num_batches: int | None | Literal['auto'],
     which: Literal['resid', 'count', 'prec'],
 ) -> int | None:
     """Return the number of batches or determine it automatically."""
-    final_round = partial(_final_round, n)
     if num_batches != 'auto':
-        nb = num_batches
-    elif target_platform == 'cpu':
-        nb = final_round(16)
+        return num_batches
+    if target_platform == 'cpu':
+        nb = 16
     elif target_platform == 'gpu':
         nb = dict(resid=1024, count=2048, prec=1024)[which]  # on an A4000
-        nb = final_round(nb)
-    return nb
+    return _final_round(n, nb / chains_per_device)
 
 
 def _final_round(n: int, num: float) -> int | None:

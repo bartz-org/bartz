@@ -39,11 +39,20 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
-# Map column name -> polars expression for column-specific preprocessing
+# Map column name -> polars expression for column-specific preprocessing.
+# Cast via Utf8 so the same expression handles both Int64 columns (with -1
+# sentinel for None) and String columns (containing 'auto').
 _PLOT_PREPROCESSORS: dict[str, pl.Expr] = {
-    'num_chains': pl.when(pl.col('num_chains') == -1)
-    .then(0.5)
-    .otherwise(pl.col('num_chains'))
+    col: pl.col(col)
+    .cast(pl.Utf8)
+    .replace({'-1': '0.5', 'auto': '0.5'})
+    .cast(pl.Float64)
+    for col in (
+        'num_chains',
+        'resid_num_batches',
+        'count_num_batches',
+        'prec_num_batches',
+    )
 }
 
 

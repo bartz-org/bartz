@@ -2,7 +2,7 @@
     "scan": "num_chains",
     "reduce": "chain_axis",
     "values": {
-        "n":          [16, 256, 4096],
+        "n":          [10000, 100000],
         "k":          [null],
         "maxdepth":   [6],
         "weights":    [false],

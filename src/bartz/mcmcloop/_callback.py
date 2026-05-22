@@ -145,8 +145,13 @@ def print_callback(
     def just_dot_branch() -> None:
         if dot_every is None:
             return
-        debug.callback(
-            lambda: print('.', end='', flush=True)  # noqa: T201
+        # terminate the dot line on the final iteration so subsequent output
+        # doesn't continue on the same line as the dots
+        last_iter = it == n_burn + n_save * n_skip
+        lax.cond(
+            last_iter,
+            lambda: debug.callback(lambda: print('.', flush=True)),  # noqa: T201
+            lambda: debug.callback(lambda: print('.', end='', flush=True)),  # noqa: T201
         )
         # logging can't do in-line printing so we use print
 

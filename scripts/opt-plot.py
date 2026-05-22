@@ -58,6 +58,14 @@ def sanitize_for_filename(name: str) -> str:
     return name.replace('=', '-').replace(', ', '_').replace(' ', '_').replace('/', '_')
 
 
+def pick_scale(values: np.ndarray) -> str:
+    """Pick 'log' if all finite values are positive and span more than a decade."""
+    finite = values[np.isfinite(values)]
+    if finite.size and (finite > 0).all() and finite.max() / finite.min() > 10:
+        return 'log'
+    return 'linear'
+
+
 def save_fig(fig: plt.Figure, out_dir: Path) -> None:
     """Save figure to file with a status message."""
     fig_name = sanitize_for_filename(fig.get_label())
@@ -193,9 +201,11 @@ def plot_optimal(data: Data, fig_name_prefix: str) -> None:
             scan_values, opt_values, marker='o', label=label, markersize=4, color=color
         )
 
+    scan_all = data.optimal_df[data.scan_col].to_numpy().astype(float)
+    opt_all = data.optimal_df[f'opt_{data.reduce_col}'].to_numpy().astype(float)
     ax.set(
-        xscale='log',
-        yscale='log',
+        xscale=pick_scale(scan_all),
+        yscale=pick_scale(opt_all),
         xlabel=data.scan_col,
         ylabel=f'optimal {data.reduce_col}',
         title=f'Optimal {data.reduce_col} vs {data.scan_col}',
@@ -252,8 +262,9 @@ def plot_time_vs_reduce_series(data: Data, fig_name_prefix: str) -> None:
                 linestyle='none',
             )
 
+        reduce_all = subset[data.reduce_col].to_numpy().astype(float)
         ax.set(
-            xscale='log',
+            xscale=pick_scale(reduce_all),
             xlabel=data.reduce_col,
             ylabel='time range / min(time_est)',
             title=f'Time vs {data.reduce_col}',

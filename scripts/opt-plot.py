@@ -195,8 +195,9 @@ def plot_optimal(data: Data, fig_name_prefix: str) -> None:
         indices = [hp_to_idx[i][hp_vals[i]] for i in range(len(data.matrix_cols))]
         color = color_for_matrix_indices(indices, dim_sizes)
 
-        scan_values = subset[data.scan_col].to_numpy()
-        opt_values = subset[f'opt_{data.reduce_col}'].to_numpy()
+        sorted_subset = subset.sort(data.scan_col)
+        scan_values = sorted_subset[data.scan_col].to_numpy()
+        opt_values = sorted_subset[f'opt_{data.reduce_col}'].to_numpy()
         ax.plot(
             scan_values, opt_values, marker='o', label=label, markersize=4, color=color
         )

@@ -471,10 +471,11 @@ def benchmark_loop(config: Config, args: Namespace, out_dir: Path) -> DataFrame:
     randomizes the remaining combinations.
     """
     frames: list[DataFrame] = []
-    for i, restart_values in enumerate(config.restart_iter()):
+    restart_combos = list(config.restart_iter())
+    n_restart = len(restart_combos)
+    for i, restart_values in enumerate(restart_combos):
         if restart_values and args.logging != Logging.no:
-            label = ' '.join(f'{k}={v}' for k, v in restart_values.items())
-            print(f'=== restart: {label} ===', flush=True)
+            print(f'=== process set {i + 1}/{n_restart} ===', flush=True)
         if not restart_values:
             frames.append(inner_benchmark_loop(config, args, restart_values))
         else:

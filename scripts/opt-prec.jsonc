@@ -1,6 +1,8 @@
 {
-    "scan": "n",
-    "reduce": "prec_num_batches",
+    "plot": {
+        "scan": "n",
+        "reduce": "prec_num_batches",
+    },
     "values": {
         "n":                  [1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
         "k":                  [null, 1, 2, 4],

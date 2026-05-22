@@ -88,9 +88,10 @@ def load_and_prepare_data(input_dir: Path) -> Data:
     with config_path.open() as f:
         config = json5.load(f)
 
-    scan_col = config['scan']
-    reduce_col = config['reduce']
-    matrix_cols = tuple(config['matrix'])
+    plot_cfg = config['plot']
+    scan_col = plot_cfg['scan']
+    reduce_col = plot_cfg['reduce']
+    matrix_cols = tuple(plot_cfg['matrix'])
 
     df = pl.read_parquet(results_path)
     for col_name, expr in _PLOT_PREPROCESSORS.items():

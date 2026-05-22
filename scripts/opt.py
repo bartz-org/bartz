@@ -32,8 +32,10 @@ The config file is a JSONC document like:
 .. code-block:: jsonc
 
     {
-        "scan":   "n",                              // x-axis param
-        "reduce": "resid_num_batches",              // min'd over (the "optimal" curve)
+        "plot": {                                   // plot-only metadata
+            "scan":   "n",                          // x-axis param
+            "reduce": "resid_num_batches"           // min'd over (the "optimal" curve)
+        },
         "values": {                                 // value list for every param
             "n":                  [1024, 4096, 16384],
             "k":                  [null, 2],
@@ -49,11 +51,11 @@ The config file is a JSONC document like:
 
 ``values`` may list any subset of the fields of `ConfigParams`; fields whose
 name matches a parameter of `init` with a default are filled in with that
-default if omitted. ``scan`` and ``reduce`` must be one of `ConfigParams`'s
-fields. The legend / multi-line dimensions (the "matrix") are derived
-automatically as the params in ``values`` with more than one value, other than
-``scan`` and ``reduce``; the resulting list is written into the output config
-under the key ``matrix`` for downstream tools.
+default if omitted. ``plot.scan`` and ``plot.reduce`` must be one of
+`ConfigParams`'s fields. The legend / multi-line dimensions (the "matrix") are
+derived automatically as the params in ``values`` with more than one value,
+other than ``plot.scan`` and ``plot.reduce``; the resulting list is written
+into the output config under ``plot.matrix`` for downstream tools.
 
 `ConfigParams` covers two kinds of params:
 
@@ -312,8 +314,8 @@ def _xla_flags_for_restart(restart_values: dict[str, Any]) -> str:
 
 
 @dataclass(frozen=True)
-class Config:
-    """Parsed and validated config file content."""
+class PlotConfig:
+    """Plot-only metadata: which params take on x-axis / legend / reduce roles."""
 
     scan: str
     """Field plotted on the x-axis."""
@@ -328,6 +330,14 @@ class Config:
     were given more than one value in the input config.
     """
 
+
+@dataclass(frozen=True)
+class Config:
+    """Parsed and validated config file content."""
+
+    plot: PlotConfig
+    """Plot-only metadata (x-axis, reduce, matrix roles)."""
+
     values: dict[str, list[Any]]
     """Per-field list of values to enumerate; keys = `ConfigParams.field_names()`."""
 
@@ -339,19 +349,23 @@ class Config:
         cls._check_schema(path, raw)
         values = dict(raw['values'])
         cls._check_values_keys(path, values)
-        cls._check_roles(path, [raw['scan'], raw['reduce']], set(values))
+        plot_raw = raw['plot']
+        cls._check_roles(path, [plot_raw['scan'], plot_raw['reduce']], set(values))
         matrix = tuple(
             name
             for name, vals in values.items()
-            if name not in (raw['scan'], raw['reduce']) and len(vals) > 1
+            if name not in (plot_raw['scan'], plot_raw['reduce']) and len(vals) > 1
         )
         for name, default in _param_defaults().items():
             values.setdefault(name, [default])
-        return cls(scan=raw['scan'], reduce=raw['reduce'], matrix=matrix, values=values)
+        plot = PlotConfig(
+            scan=plot_raw['scan'], reduce=plot_raw['reduce'], matrix=matrix
+        )
+        return cls(plot=plot, values=values)
 
     @staticmethod
     def _check_schema(path: Path, raw: dict[str, Any]) -> None:
-        required = {'scan', 'reduce', 'values'}
+        required = {'plot', 'values'}
         missing = required - raw.keys()
         if missing:
             msg = f'config {path}: missing required keys: {sorted(missing)}'
@@ -360,12 +374,7 @@ class Config:
         if extra:
             msg = f'config {path}: unknown top-level keys: {sorted(extra)}'
             raise ValueError(msg)
-        if not isinstance(raw['scan'], str):
-            msg = f'config {path}: "scan" must be a string'
-            raise TypeError(msg)
-        if not isinstance(raw['reduce'], str):
-            msg = f'config {path}: "reduce" must be a string'
-            raise TypeError(msg)
+        Config._check_plot_schema(path, raw['plot'])
         if not isinstance(raw['values'], dict):
             msg = f'config {path}: "values" must be an object'
             raise TypeError(msg)
@@ -373,6 +382,27 @@ class Config:
             if not isinstance(v, list) or len(v) == 0:
                 msg = f'config {path}: "values[{k!r}]" must be a non-empty list'
                 raise TypeError(msg)
+
+    @staticmethod
+    def _check_plot_schema(path: Path, plot: object) -> None:
+        if not isinstance(plot, dict):
+            msg = f'config {path}: "plot" must be an object'
+            raise TypeError(msg)
+        required = {'scan', 'reduce'}
+        missing = required - plot.keys()
+        if missing:
+            msg = f'config {path}: "plot" missing keys: {sorted(missing)}'
+            raise ValueError(msg)
+        extra = plot.keys() - required
+        if extra:
+            msg = f'config {path}: "plot" has unknown keys: {sorted(extra)}'
+            raise ValueError(msg)
+        if not isinstance(plot['scan'], str):
+            msg = f'config {path}: "plot.scan" must be a string'
+            raise TypeError(msg)
+        if not isinstance(plot['reduce'], str):
+            msg = f'config {path}: "plot.reduce" must be a string'
+            raise TypeError(msg)
 
     @staticmethod
     def _check_values_keys(path: Path, values: dict[str, list[Any]]) -> None:
@@ -395,7 +425,7 @@ class Config:
     def _check_roles(path: Path, named: list[str], known: set[str]) -> None:
         missing_role = [n for n in named if n not in known]
         if missing_role:
-            msg = f'config {path}: scan/reduce names not in values: {missing_role}'
+            msg = f'config {path}: plot.scan/reduce names not in values: {missing_role}'
             raise ValueError(msg)
         if len(named) != len(set(named)):
             counts: dict[str, int] = {}
@@ -646,9 +676,11 @@ def main() -> None:
     with (out_dir / 'config.jsonc').open('w') as f:
         json5.dump(
             {
-                'scan': config.scan,
-                'reduce': config.reduce,
-                'matrix': list(config.matrix),
+                'plot': {
+                    'scan': config.plot.scan,
+                    'reduce': config.plot.reduce,
+                    'matrix': list(config.plot.matrix),
+                },
                 'values': config.values,
             },
             f,

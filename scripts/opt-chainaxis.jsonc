@@ -1,6 +1,8 @@
 {
-    "scan": "num_chains",
-    "reduce": "chain_axis",
+    "plot": {
+        "scan": "num_chains",
+        "reduce": "chain_axis",
+    },
     "values": {
         "n": [1000, 10000],
         "k": [null],

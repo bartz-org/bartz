@@ -140,7 +140,7 @@ def add_fixed_textbox(ax: plt.Axes, fixed: dict[str, Any]) -> None:
     """Annotate axes with a small text box listing the fixed param values."""
     if not fixed:
         return
-    text = 'fixed:\n' + '\n'.join(f'  {k}={v}' for k, v in fixed.items())
+    text = '\n'.join(f'{k}={v}' for k, v in fixed.items())
     ax.text(
         0.02,
         0.02,

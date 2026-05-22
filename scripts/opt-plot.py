@@ -39,6 +39,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
+# Map column name -> polars expression for column-specific preprocessing
+_PLOT_PREPROCESSORS: dict[str, pl.Expr] = {
+    'num_chains': pl.when(pl.col('num_chains') == -1)
+    .then(0.5)
+    .otherwise(pl.col('num_chains'))
+}
+
 
 @dataclass(frozen=True)
 class Data:
@@ -81,11 +88,15 @@ def load_and_prepare_data(input_dir: Path) -> Data:
     with config_path.open() as f:
         config = json5.load(f)
 
-    scan_col = config['scan']
-    reduce_col = config['reduce']
-    matrix_cols = tuple(config['matrix'])
+    plot_cfg = config['plot']
+    scan_col = plot_cfg['scan']
+    reduce_col = plot_cfg['reduce']
+    matrix_cols = tuple(plot_cfg['matrix'])
 
     df = pl.read_parquet(results_path)
+    for col_name, expr in _PLOT_PREPROCESSORS.items():
+        if col_name in df.columns:
+            df = df.with_columns(expr.alias(col_name))
 
     time_cols = {'time_est', 'time_lo', 'time_up'}
     required_base_cols = {scan_col, reduce_col, *time_cols}
@@ -104,9 +115,6 @@ def load_and_prepare_data(input_dir: Path) -> Data:
             msg = f'Expected fixed column {c!r} to have one value, got {uniq}'
             raise ValueError(msg)
         fixed[c] = uniq[0]
-
-    # Treat null values of the reduce param as 0.5 (so they're visible on log scale)
-    df = df.with_columns(pl.col(reduce_col).fill_null(0.5))
 
     # Build a per-row label from the matrix params
     if matrix_cols:
@@ -140,7 +148,7 @@ def add_fixed_textbox(ax: plt.Axes, fixed: dict[str, Any]) -> None:
     """Annotate axes with a small text box listing the fixed param values."""
     if not fixed:
         return
-    text = 'fixed:\n' + '\n'.join(f'  {k}={v}' for k, v in fixed.items())
+    text = '\n'.join(f'{k}={v}' for k, v in fixed.items())
     ax.text(
         0.02,
         0.02,

@@ -43,16 +43,16 @@ from jax import (
     jit,
     random,
     tree,
-    vmap,
 )
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.sharding import Mesh
-from jaxtyping import Array, Float32, Integer, Key, UInt8
+from jaxtyping import Array, Integer, Key
 
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
 from benchmarks.latest_bartz._jaxext import get_device_count, split
+from benchmarks.latest_bartz.testing import gen_nonsense_data
 
 try:
     from bartz.mcmcstep import State
@@ -77,23 +77,6 @@ P = 100
 N = 10000
 NTREE = 50
 NITERS = 10
-
-
-@partial(jit, static_argnums=(0, 1, 2))
-def gen_nonsense_data(
-    p: int, n: int, k: int | None
-) -> tuple[
-    UInt8[Array, '{p} {n}'],
-    Float32[Array, ' {n}'] | Float32[Array, '{k} {n}'],
-    UInt8[Array, ' {p}'],
-]:
-    """Generate pretty nonsensical data."""
-    X = jnp.arange(p * n, dtype=jnp.uint8).reshape(p, n)
-    X = vmap(jnp.roll)(X, jnp.arange(p))
-    max_split = jnp.full(p, 255, jnp.uint8)
-    shift = 0 if k is None else jnp.linspace(0, 2 * jnp.pi, k, endpoint=False)[:, None]
-    y = jnp.cos(jnp.linspace(0, 2 * jnp.pi / 32 * n, n) + shift)
-    return X, y, max_split
 
 
 Kind = Literal['plain', 'weights', 'binary', 'sparse', 'multivariate']

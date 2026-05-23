@@ -281,8 +281,11 @@ _EXTRA_PARAM_DEFAULTS: dict[str, Any] = {
 # Map ConfigParams field name -> function applied to its value before storing
 # it in the results DataFrame
 _SAVE_PREPROCESSORS: dict[str, Callable[[Any], Any]] = {
-    'num_chains': lambda v: -1 if v is None else v
     # None would be converted to null, ambiguity with missing data
+    'num_chains': lambda v: -1 if v is None else v,
+    'resid_num_batches': lambda v: -1 if v is None else v,
+    'count_num_batches': lambda v: -1 if v is None else v,
+    'prec_num_batches': lambda v: -1 if v is None else v,
 }
 
 

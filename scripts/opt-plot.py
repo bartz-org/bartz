@@ -305,6 +305,11 @@ def parse_args() -> Namespace:
         type=Path,
         help='Directory produced by opt.py (containing config.jsonc and results.parquet).',
     )
+    parser.add_argument(
+        '--no-interactive',
+        action='store_true',
+        help='Skip plt.show() so execution does not block on the figure window.',
+    )
     return parser.parse_args()
 
 
@@ -317,7 +322,8 @@ def main() -> None:
     plot_optimal(data, input_prefix)
     plot_time_vs_reduce_series(data, input_prefix)
 
-    plt.show()
+    if not args.no_interactive:
+        plt.show()
 
 
 if __name__ == '__main__':

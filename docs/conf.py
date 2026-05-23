@@ -291,5 +291,10 @@ def linkcode_resolve(domain: str, info: dict[str, str]) -> str | None:
 
     prefix = 'https://github.com/bartz-org/bartz/blob'
     root = pathlib.Path(bartz.__file__).parent
-    path = pathlib.Path(fn).relative_to(root).as_posix()
+    fn_path = pathlib.Path(fn)
+    if not fn_path.is_relative_to(root):
+        # re-exported foreign symbol (e.g. a jaxtyping parametric type alias
+        # assigned at module scope); no in-repo source to link to
+        return None
+    path = fn_path.relative_to(root).as_posix()
     return f'{prefix}/{COMMIT}/src/bartz/{path}{linespec}'

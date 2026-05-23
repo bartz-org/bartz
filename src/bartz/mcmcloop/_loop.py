@@ -26,7 +26,7 @@
 
 from collections.abc import Callable
 from functools import partial, update_wrapper
-from typing import Any, NamedTuple, Protocol, TypeVar
+from typing import Any, NamedTuple, Protocol, TypeAlias, TypeVar
 
 from equinox import Module
 from jax import NamedSharding, device_put, eval_shape, jit, lax, named_call, tree, vmap
@@ -39,7 +39,8 @@ from bartz.mcmcloop._trace import BurninTrace, MainTrace
 from bartz.mcmcstep import State, step
 from bartz.mcmcstep._state import add_dummy_axis, trace_sample_axes
 
-CallbackState = PyTree[Any, 'T']
+# WORKAROUND(python<3.12): use `type CallbackState = PyTree[Any, 'T']`
+CallbackState: TypeAlias = PyTree[Any, 'T']
 
 
 class RunMCMCResult(NamedTuple):

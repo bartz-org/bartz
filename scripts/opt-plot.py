@@ -40,13 +40,12 @@ import numpy as np
 import polars as pl
 
 # Map column name -> polars expression for column-specific preprocessing.
-# Cast via Utf8 so the same expression handles both Int64 columns (with -1
-# sentinel for None) and String columns (containing 'auto').
+# Sentinels from opt.py (-1 for None, -2 for 'auto') are remapped to plot
+# positions: None -> 0.5 sits just below the smallest real batch count on a
+# log axis (continuous with the integer values); 'auto' -> -1 is deliberately
+# negative so it breaks the log scale and stands out as a categorical regime.
 _PLOT_PREPROCESSORS: dict[str, pl.Expr] = {
-    col: pl.col(col)
-    .cast(pl.Utf8)
-    .replace({'-1': '0.5', 'auto': '0.5'})
-    .cast(pl.Float64)
+    col: pl.col(col).cast(pl.Float64).replace({-1.0: 0.5, -2.0: -1.0})
     for col in (
         'num_chains',
         'resid_num_batches',

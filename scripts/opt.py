@@ -279,13 +279,22 @@ _EXTRA_PARAM_DEFAULTS: dict[str, Any] = {
 
 
 # Map ConfigParams field name -> function applied to its value before storing
-# it in the results DataFrame
+# it in the results DataFrame. The goal is to keep the columns purely numeric
+# (no mixed int/str, no nulls colliding with missing data) so downstream
+# tooling sees a stable Int64 dtype.
+def _num_batches_save(v: int | None | Literal['auto']) -> int:
+    if v is None:
+        return -1
+    if v == 'auto':
+        return -2
+    return v
+
+
 _SAVE_PREPROCESSORS: dict[str, Callable[[Any], Any]] = {
-    # None would be converted to null, ambiguity with missing data
     'num_chains': lambda v: -1 if v is None else v,
-    'resid_num_batches': lambda v: -1 if v is None else v,
-    'count_num_batches': lambda v: -1 if v is None else v,
-    'prec_num_batches': lambda v: -1 if v is None else v,
+    'resid_num_batches': _num_batches_save,
+    'count_num_batches': _num_batches_save,
+    'prec_num_batches': _num_batches_save,
 }
 
 

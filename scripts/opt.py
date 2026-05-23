@@ -325,6 +325,19 @@ def _xla_flags_for_restart(restart_values: dict[str, Any]) -> str:
     return ' '.join(flags)
 
 
+class _InlineArraysJSON5Encoder(json5.JSON5Encoder):
+    """JSON5 encoder that renders arrays on a single line."""
+
+    def _encode_array(self, obj: Any, seen: set, level: int) -> str:  # noqa: ANN401
+        if not obj:
+            return '[]'
+        return (
+            '['
+            + ', '.join(self.encode(el, seen, level, as_key=False) for el in obj)
+            + ']'
+        )
+
+
 @dataclass(frozen=True)
 class PlotConfig:
     """Plot-only metadata: which params take on x-axis / legend / reduce roles."""
@@ -697,6 +710,8 @@ def main() -> None:
             },
             f,
             indent=4,
+            quote_keys=True,
+            cls=_InlineArraysJSON5Encoder,
         )
 
     results = benchmark_loop(config, args, out_dir)

@@ -38,7 +38,7 @@ on:
       - main
 
 env:
-  UV_VERSION: "0.9.5"
+  UV_VERSION: "0.11.16"
 
 jobs:
   pre-commit:

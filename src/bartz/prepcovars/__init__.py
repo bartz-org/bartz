@@ -1,6 +1,6 @@
-# bartz/src/bartz/testing/__init__.py
+# bartz/src/bartz/prepcovars/__init__.py
 #
-# Copyright (c) 2026, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -22,9 +22,14 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Testing utilities."""
+"""Functions and classes to preprocess data."""
 
 # ruff: noqa: F401
 
-from bartz.testing._dgp import DGP, Params, gen_data, gen_data_from_params, gen_params
-from bartz.testing._nonsense import gen_nonsense_data
+from bartz.prepcovars._prepcovars import (
+    Binner,
+    BinnerFactory,
+    GivenSplitsBinner,
+    RangeEvenBinner,
+    UniqueQuantileBinner,
+)

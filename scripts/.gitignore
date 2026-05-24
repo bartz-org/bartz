@@ -1,2 +1,3 @@
 *.png
 *.parquet
+opt-[0-9]*/

@@ -1,4 +1,4 @@
-# bartz/src/bartz/prepcovars.py
+# bartz/src/bartz/prepcovars/_prepcovars.py
 #
 # Copyright (c) 2024-2026, The Bartz Contributors
 #
@@ -22,7 +22,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Functions and classes to preprocess data."""
+"""Implementation of the predictor preprocessing utilities."""
 
 from abc import abstractmethod
 from functools import partial
@@ -407,7 +407,7 @@ class RangeEvenBinner(Binner):
         del key
         self._splits, self.max_split = _uniform_splits_from_matrix(X, max_bins)
 
-    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:  # noqa: D102
+    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:
         return _bin_predictors(X, self._splits)
 
 
@@ -474,7 +474,7 @@ class UniqueQuantileBinner(Binner):
             X = _subsample(key, X, max_subsample)
         self._splits, self.max_split = _quantilized_splits_from_matrix(X, max_bins)
 
-    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:  # noqa: D102
+    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:
         return _bin_predictors(X, self._splits)
 
 
@@ -525,7 +525,7 @@ class GivenSplitsBinner(Binner):
             raise ValueError(msg)
         self._splits, self.max_split = _parse_xinfo(xinfo)
 
-    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:  # noqa: D102
+    def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:
         return _bin_predictors(X, self._splits)
 
 

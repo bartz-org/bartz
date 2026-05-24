@@ -82,3 +82,10 @@ repos:
         # mention `_jaxext.foo` are not flagged.
         entry: '(?<!\.)\b_jaxext\.\w+\s*\('
         types: [python]
+      - id: forbid-jax-vmap-qualified-call
+        name: forbid `jax.vmap(...)` (use `from jax import vmap`)
+        language: pygrep
+        # the trailing `\(` limits matches to function calls so docstrings that
+        # mention `jax.vmap` are not flagged.
+        entry: '\bjax\.vmap\s*\('
+        types: [python]

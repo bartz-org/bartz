@@ -1,6 +1,6 @@
-# bartz/src/bartz/testing/__init__.py
+# bartz/src/bartz/mcmcloop/__init__.py
 #
-# Copyright (c) 2026, The Bartz Contributors
+# Copyright (c) 2024-2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -22,9 +22,18 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Testing utilities."""
+"""Functions that implement the full BART posterior MCMC loop.
+
+The entry points are `run_mcmc` and `make_default_callback`.
+"""
 
 # ruff: noqa: F401
 
-from bartz.testing._dgp import DGP, Params, gen_data, gen_data_from_params, gen_params
-from bartz.testing._nonsense import gen_nonsense_data
+from bartz.mcmcloop._callback import (
+    PrintCallbackState,
+    make_default_callback,
+    print_callback,
+)
+from bartz.mcmcloop._evaluate import compute_varcount, evaluate_trace
+from bartz.mcmcloop._loop import Callback, CallbackState, RunMCMCResult, run_mcmc
+from bartz.mcmcloop._trace import BurninTrace, MainTrace

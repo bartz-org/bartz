@@ -37,13 +37,16 @@ from jaxtyping import Array, PyTree, Shaped
 from numpy.lib.array_utils import normalize_axis_index
 
 
-def expand_axes(axes: PyTree[int | None], tree_arg: PyTree) -> PyTree[int | None]:
+def expand_axes(
+    axes: PyTree[int | None], tree_arg: PyTree, *, none_is_leaf: bool = True
+) -> PyTree[int | None]:
     """Expand `axes` such that they match the pytreedef of `tree_arg`."""
 
     def expand_axis(axis: int | None, subtree: PyTree) -> PyTree[int | None]:
         return tree.map(lambda _: axis, subtree)
 
-    return tree.map(expand_axis, axes, tree_arg, is_leaf=lambda x: x is None)
+    is_leaf = (lambda x: x is None) if none_is_leaf else None
+    return tree.map(expand_axis, axes, tree_arg, is_leaf=is_leaf)
 
 
 def normalize_axes(
@@ -58,13 +61,6 @@ def normalize_axes(
             return normalize_axis_index(axis, len(x.shape))
 
     return tree.map(normalize_axis, axes, tree_arg, is_leaf=lambda x: x is None)
-
-
-def check_no_nones(axes: PyTree[int | None], tree_arg: PyTree) -> None:
-    def check_not_none(_: object, axis: int | None) -> None:
-        assert axis is not None
-
-    tree.map(check_not_none, tree_arg, axes, is_leaf=lambda x: x is None)
 
 
 def remove_axis(
@@ -342,8 +338,7 @@ def batched_func(
 
     # expand the axes pytrees if they are prefixes
     in_axes = expand_axes(in_axes, args)
-    out_axes = expand_axes(out_axes, example_result)
-    check_no_nones(out_axes, example_result)
+    out_axes = expand_axes(out_axes, example_result, none_is_leaf=False)
 
     # check the axes are valid
     in_axes = normalize_axes(in_axes, args)

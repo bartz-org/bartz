@@ -70,6 +70,7 @@ dev = [
     "polars[pandas,pyarrow]>=1.29.0",
     "pytest>=8.3.5",
     "pytest-cov>=6.1.1",
+    # WORKAROUND(pytest<9): pytest 9 has built-in subtests support
     "pytest-subtests>=0.14.1",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.6.1",
@@ -81,6 +82,7 @@ dev = [
     "jupyterlab>=4.4.2",
 ]
 
+# WORKAROUND(pytest<9): use [tool.pytest]
 [tool.pytest.ini_options]
 cache_dir = "config/pytest_cache"
 testpaths = ["tests"]

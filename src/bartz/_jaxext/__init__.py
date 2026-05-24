@@ -45,6 +45,7 @@ from jax import (
     random,
     tree,
     typeof,
+    vmap,
 )
 from jax import numpy as jnp
 from jax.dtypes import prng_key
@@ -64,7 +65,7 @@ def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:
     arguments have additional axes due to vmap.
     """
     doc = fun.__doc__
-    fun = jax.vmap(fun, *args, **kw)
+    fun = vmap(fun, *args, **kw)
     fun.__doc__ = doc
     return fun
 

@@ -26,15 +26,17 @@
 
 import math
 from re import fullmatch
+from typing import ClassVar
 
 import numpy
-from equinox import Module, field
+from equinox import Module
 from jax import numpy as jnp
 from jaxtyping import Array, Float32, UInt
 
 from bartz._jaxext import minimal_unsigned_dtype
 from bartz.BART._gbart import FloatLike
 from bartz.grove import TreeHeaps
+from bartz.mcmcstep._state import field
 
 
 def _get_next_line(s: str, i: int) -> tuple[str, int]:
@@ -140,24 +142,26 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
 
 
 class TraceWithOffset(Module):
-    """Implementation of `bartz.mcmcloop.Trace`."""
+    """A trace of trees with an offset, compatible with `bartz.mcmcloop.evaluate_trace`."""
 
-    leaf_tree: Float32[Array, 'ndpost ntree 2**d']
-    var_tree: UInt[Array, 'ndpost ntree 2**(d-1)']
-    split_tree: UInt[Array, 'ndpost ntree 2**(d-1)']
-    offset: Float32[Array, ' ndpost']
+    leaf_tree: Float32[Array, 'ndpost ntree 2**d'] = field(samples=0)
+    var_tree: UInt[Array, 'ndpost ntree 2**(d-1)'] = field(samples=0)
+    split_tree: UInt[Array, 'ndpost ntree 2**(d-1)'] = field(samples=0)
+    offset: Float32[Array, '']
+
+    has_chains: ClassVar[bool] = False
+    """No chain axis; each leading axis is just the sample axis."""
 
     @classmethod
     def from_trees_trace(
         cls, trees: TreeHeaps, offset: Float32[Array, '']
     ) -> 'TraceWithOffset':
         """Create a `TraceWithOffset` from a `TreeHeaps`."""
-        ndpost, _, _ = trees.leaf_tree.shape
         return cls(
             leaf_tree=trees.leaf_tree,
             var_tree=trees.var_tree,
             split_tree=trees.split_tree,
-            offset=jnp.full(ndpost, offset),
+            offset=offset,
         )
 
 
@@ -239,7 +243,5 @@ def trees_BART_to_bartz(
         leaf_tree=jnp.array(leaf_trees),
         var_tree=jnp.array(var_trees),
         split_tree=jnp.array(split_trees),
-        offset=jnp.zeros(meta.ndpost)
-        if offset is None
-        else jnp.full(meta.ndpost, offset),
+        offset=jnp.float32(0.0 if offset is None else offset),
     ), meta

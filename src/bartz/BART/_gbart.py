@@ -34,8 +34,10 @@ from equinox import Module
 from jax.scipy.special import ndtr
 from jaxtyping import Array, Float, Float32, Int32, Key, Real
 
-from bartz import mcmcloop, mcmcstep
+from bartz import mcmcstep
 from bartz._interface import ArrayLike, Bart, DataFrame, FloatLike, PredictKind, Series
+from bartz.mcmcloop import BurninTrace, MainTrace
+from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 
 
@@ -353,11 +355,11 @@ class mc_gbart(Module):
     # Private attributes from Bart
 
     @property
-    def _main_trace(self) -> mcmcloop.MainTrace:
+    def _main_trace(self) -> MainTrace:
         return self._bart._main_trace  # noqa: SLF001
 
     @property
-    def _burnin_trace(self) -> mcmcloop.BurninTrace:
+    def _burnin_trace(self) -> BurninTrace:
         return self._bart._burnin_trace  # noqa: SLF001
 
     @property
@@ -421,12 +423,18 @@ class mc_gbart(Module):
         if self._mcmc_state.binary_y is not None:
             return None
         assert self._burnin_trace.error_cov_inv.ndim <= 2  # chains and samples
+        tc = chain_vmap_axes(self._main_trace).error_cov_inv
+
+        def arrange(arr: Array) -> Array:
+            # Public output is (nskip+ndpost, mc_cores) = (samples, chains).
+            return chain_to_axis(arr, tc, target=-1)
+
         return jnp.sqrt(
             jnp.reciprocal(
                 jnp.concatenate(
                     [
-                        self._burnin_trace.error_cov_inv.T,
-                        self._main_trace.error_cov_inv.T,
+                        arrange(self._burnin_trace.error_cov_inv),
+                        arrange(self._main_trace.error_cov_inv),
                     ],
                     axis=0,
                 )
@@ -439,7 +447,11 @@ class mc_gbart(Module):
         if self._mcmc_state.binary_y is not None:
             return None
         assert self._main_trace.error_cov_inv.ndim <= 2  # chains and samples
-        return jnp.sqrt(jnp.reciprocal(self._main_trace.error_cov_inv)).reshape(-1)
+        arr = chain_to_axis(
+            self._main_trace.error_cov_inv,
+            chain_vmap_axes(self._main_trace).error_cov_inv,
+        )
+        return jnp.sqrt(jnp.reciprocal(arr)).reshape(-1)
 
     @cached_property
     def sigma_mean(self) -> Float32[Array, ''] | None:

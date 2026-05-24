@@ -22,10 +22,15 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import datetime
+import re
+import subprocess
 import sys
 from pathlib import Path
 
 import tomli
+
+CHANGELOG_PATH = Path('docs/changelog.md')
 
 
 def get_version() -> str:
@@ -44,12 +49,69 @@ __version_info__ = {version_info!r}
 """)
 
 
+def _parse_changelog_header(line: str) -> tuple[str, str, str]:
+    """Parse a ``## VERSION TITLE (YYYY-MM-DD)`` line, error if malformed."""
+    m = re.fullmatch(r'## (\S+) (.+) \((\d{4}-\d{2}-\d{2})\)', line)
+    if m is None:
+        msg = f'Cannot parse changelog header: {line!r}'
+        raise ValueError(msg)
+    return m[1], m[2], m[3]
+
+
+def _changelog_section(version: str) -> tuple[str, str, str]:
+    """Return ``(title, date, body)`` for the topmost section in the changelog."""
+    lines = CHANGELOG_PATH.read_text().splitlines()
+    headers = [i for i, line in enumerate(lines) if line.startswith('## ')]
+    if len(headers) < 2:
+        msg = f'Expected at least 2 release headers in {CHANGELOG_PATH}, found {len(headers)}'
+        raise ValueError(msg)
+    first, second = headers[0], headers[1]
+    v, title, date = _parse_changelog_header(lines[first])
+    if v != version:
+        msg = f'Topmost changelog section is for {v!r}, expected {version!r}'
+        raise ValueError(msg)
+    _parse_changelog_header(lines[second])  # validate boundary header
+    body = '\n'.join(lines[first + 1 : second]).strip('\n')
+    return title, date, body
+
+
+def gh_release() -> None:
+    """Create a draft GitHub release from the topmost changelog section."""
+    version = get_version()
+    title, date, body = _changelog_section(version)
+    today = datetime.datetime.now(tz=datetime.timezone.utc).date().isoformat()
+    if date != today:
+        print(
+            f'warning: changelog date {date} does not match today {today}',
+            file=sys.stderr,
+        )
+    subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            'gh',
+            'release',
+            'create',
+            f'v{version}',
+            '--draft',
+            '--verify-tag',
+            '--title',
+            title,
+            '--notes-file',
+            '-',
+        ],
+        input=body,
+        text=True,
+        check=True,
+    )
+
+
 def main() -> None:
     command = sys.argv[1]
     if command == 'get_version':
         print(get_version())
     elif command == 'update_version':
         update_version()
+    elif command == 'gh_release':
+        gh_release()
     else:
         raise ValueError(command)
 

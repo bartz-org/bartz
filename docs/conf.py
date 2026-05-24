@@ -28,8 +28,11 @@
 # list see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
+import contextlib
 import datetime
+import importlib
 import pathlib
+import pkgutil
 import re
 import sys
 from enum import Enum
@@ -38,6 +41,8 @@ from inspect import getsourcefile, getsourcelines, isclass, unwrap
 from os import getenv
 
 import git
+from equinox import Module
+from sphinx.ext.autodoc._dynamic._preserve_defaults import update_default_value
 
 # -- Version info ------------------------------------------------------------
 
@@ -114,7 +119,43 @@ if sys.version_info >= (3, 14):
                 k: v for k, v in mapping.items() if not _resolves_to_union_instance(v)
             }
 
-    def setup(app) -> None:  # noqa: ANN001
+
+# equinox.Module's metaclass installs a `__signature__` descriptor on every
+# subclass. Sphinx's autodoc takes that short-circuit (see
+# `_get_object_for_signature` in `sphinx.ext.autodoc._dynamic._signatures`)
+# and never applies `autodoc_preserve_defaults`, so defaults that are class
+# objects (e.g. `binner=UniqueQuantileBinner`) end up rendered via `repr()` as
+# `<class 'pkg.mod.Name'>` in both the signature and the parameter list. Apply
+# `update_default_value` to every equinox `Module` `__init__` we ship so the
+# source-text defaults propagate through the class signature too.
+def _apply_preserve_defaults_to_equinox_modules() -> None:
+    """Apply autodoc preserve_defaults to every equinox.Module subclass in bartz."""
+    seen: set[type] = set()
+    for _finder, mod_name, _ispkg in pkgutil.walk_packages(
+        bartz.__path__, prefix=f'{bartz.__name__}.'
+    ):
+        try:
+            module = importlib.import_module(mod_name)
+        except Exception:  # noqa: BLE001, S112
+            continue
+        for attr in vars(module).values():
+            if not isinstance(attr, type) or attr in seen:
+                continue
+            seen.add(attr)
+            if attr is Module or not issubclass(attr, Module):
+                continue
+            init = attr.__dict__.get('__init__')
+            if init is None:
+                continue
+            with contextlib.suppress(Exception):
+                update_default_value(init, bound_method=True)
+
+
+_apply_preserve_defaults_to_equinox_modules()
+
+
+def setup(app) -> None:  # noqa: ANN001
+    if sys.version_info >= (3, 14):
         # priority 501 runs after validate_config (default 500) which populates
         # the mapping
         app.connect(
@@ -196,6 +237,7 @@ napoleon_use_rtype = False
 
 # intersphinx
 intersphinx_mapping = dict(
+    python=('https://docs.python.org/3', None),
     scipy=('https://docs.scipy.org/doc/scipy', None),
     numpy=('https://numpy.org/doc/stable', None),
     jax=('https://docs.jax.dev/en/latest', None),
@@ -249,5 +291,10 @@ def linkcode_resolve(domain: str, info: dict[str, str]) -> str | None:
 
     prefix = 'https://github.com/bartz-org/bartz/blob'
     root = pathlib.Path(bartz.__file__).parent
-    path = pathlib.Path(fn).relative_to(root).as_posix()
+    fn_path = pathlib.Path(fn)
+    if not fn_path.is_relative_to(root):
+        # re-exported foreign symbol (e.g. a jaxtyping parametric type alias
+        # assigned at module scope); no in-repo source to link to
+        return None
+    path = fn_path.relative_to(root).as_posix()
     return f'{prefix}/{COMMIT}/src/bartz/{path}{linespec}'

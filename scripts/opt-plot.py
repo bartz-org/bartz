@@ -40,13 +40,12 @@ import numpy as np
 import polars as pl
 
 # Map column name -> polars expression for column-specific preprocessing.
-# Cast via Utf8 so the same expression handles both Int64 columns (with -1
-# sentinel for None) and String columns (containing 'auto').
+# Sentinels from opt.py (-1 for None, -2 for 'auto') are remapped to plot
+# positions: None -> 0.5 sits just below the smallest real batch count on a
+# log axis (continuous with the integer values); 'auto' -> -1 is deliberately
+# negative so it breaks the log scale and stands out as a categorical regime.
 _PLOT_PREPROCESSORS: dict[str, pl.Expr] = {
-    col: pl.col(col)
-    .cast(pl.Utf8)
-    .replace({'-1': '0.5', 'auto': '0.5'})
-    .cast(pl.Float64)
+    col: pl.col(col).cast(pl.Float64).replace({-1.0: 0.5, -2.0: -1.0})
     for col in (
         'num_chains',
         'resid_num_batches',
@@ -54,6 +53,11 @@ _PLOT_PREPROCESSORS: dict[str, pl.Expr] = {
         'prec_num_batches',
     )
 }
+
+# Relative tolerance for the local optimal band: walking out from the minimum
+# time_est along the sorted reduce_col axis, the band stops at the first point
+# exceeding (1 + OPTIMAL_BAND_TOLERANCE) * min(time_est).
+OPTIMAL_BAND_TOLERANCE = 0.10
 
 
 @dataclass(frozen=True)
@@ -136,10 +140,25 @@ def load_and_prepare_data(input_dir: Path) -> Data:
         df = df.with_columns(pl.lit('default').alias('label'))
 
     # For each combination of matrix params and scan param, pick the reduce
-    # value that minimises time_est
+    # value that minimises time_est, and a local band around it: walk out from
+    # the minimum along sorted reduce_col until time_est exceeds the threshold.
+    sorted_reduce = pl.col(reduce_col).sort_by(reduce_col)
+    sorted_time = pl.col('time_est').sort_by(reduce_col)
+    n = sorted_time.len()
+    arg_min = sorted_time.arg_min()
+    threshold = sorted_time.min() * (1 + OPTIMAL_BAND_TOLERANCE)
+    is_above = sorted_time > threshold
+    idx = pl.int_range(n)
+    # rightmost above-threshold index strictly left of arg_min (or -1 if none)
+    left_bad = pl.when(is_above & (idx < arg_min)).then(idx).otherwise(-1).max()
+    # leftmost above-threshold index strictly right of arg_min (or n if none)
+    right_bad = pl.when(is_above & (idx > arg_min)).then(idx).otherwise(n).min()
+
     group_cols = [*matrix_cols, scan_col, 'label']
     optimal_df = df.group_by(group_cols, maintain_order=True).agg(
-        pl.col(reduce_col).sort_by('time_est').first().alias(f'opt_{reduce_col}')
+        sorted_reduce.get(arg_min).alias(f'opt_{reduce_col}'),
+        sorted_reduce.get(left_bad + 1).alias(f'lo_{reduce_col}'),
+        sorted_reduce.get(right_bad - 1).alias(f'hi_{reduce_col}'),
     )
 
     return Data(
@@ -215,18 +234,27 @@ def plot_optimal(data: Data, fig_name_prefix: str) -> None:
         sorted_subset = subset.sort(data.scan_col)
         scan_values = sorted_subset[data.scan_col].to_numpy()
         opt_values = sorted_subset[f'opt_{data.reduce_col}'].to_numpy()
+        lo_values = sorted_subset[f'lo_{data.reduce_col}'].to_numpy()
+        hi_values = sorted_subset[f'hi_{data.reduce_col}'].to_numpy()
+        ax.fill_between(
+            scan_values, lo_values, hi_values, color=color, alpha=0.2, linewidth=0
+        )
         ax.plot(
             scan_values, opt_values, marker='o', label=label, markersize=4, color=color
         )
 
     scan_all = data.optimal_df[data.scan_col].to_numpy().astype(float)
     opt_all = data.optimal_df[f'opt_{data.reduce_col}'].to_numpy().astype(float)
+    lo_all = data.optimal_df[f'lo_{data.reduce_col}'].to_numpy().astype(float)
+    hi_all = data.optimal_df[f'hi_{data.reduce_col}'].to_numpy().astype(float)
+    y_all = np.concatenate([opt_all, lo_all, hi_all])
+    pct = round(OPTIMAL_BAND_TOLERANCE * 100)
     ax.set(
         xscale=pick_scale(scan_all),
-        yscale=pick_scale(opt_all),
+        yscale=pick_scale(y_all),
         xlabel=data.scan_col,
         ylabel=f'optimal {data.reduce_col}',
-        title=f'Optimal {data.reduce_col} vs {data.scan_col}',
+        title=f'Optimal {data.reduce_col} vs {data.scan_col} (band: time within {pct}% of min)',
     )
     if data.matrix_cols:
         ax.legend()

@@ -24,9 +24,6 @@
 
 """Clock `mcmcstep.step` over a grid of hyperparameters defined in a config file.
 
-Run from the project root as a module so ``benchmarks`` is importable, e.g.
-``uv run python -m scripts.opt config.jsonc --minimal``.
-
 The config file is a JSONC document like:
 
 .. code-block:: jsonc
@@ -56,18 +53,6 @@ default if omitted. ``plot.scan`` and ``plot.reduce`` must be one of
 derived automatically as the params in ``values`` with more than one value,
 other than ``plot.scan`` and ``plot.reduce``; the resulting list is written
 into the output config under ``plot.matrix`` for downstream tools.
-
-`ConfigParams` covers two kinds of params:
-
-- ``n`` and ``k`` set the data shape: ``X``, ``y``, ``max_split`` come from
-  `bartz.testing.gen_nonsense_data(1, n, k)`.
-- ``maxdepth`` and ``weights`` map to `init` args without being literal init
-  kwargs: ``maxdepth`` -> ``p_nonterminal = make_p_nonterminal(maxdepth, 0.95,
-  2)``; ``weights = True`` -> ``error_scale = jnp.ones(n)`` (else ``None``).
-- The remaining fields are forwarded to `init` verbatim.
-
-``leaf_prior_cov_inv``, ``error_cov_df`` and ``error_cov_scale`` are hardcoded
-in `ConfigParams.to_init_kwargs` and not configurable from the file.
 """
 
 import inspect
@@ -77,7 +62,7 @@ import subprocess
 import sys
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass, field, fields, replace
+from dataclasses import MISSING, asdict, dataclass, field, fields, replace
 from datetime import UTC, datetime
 from enum import StrEnum, auto
 from gc import collect
@@ -100,6 +85,15 @@ from bartz.mcmcstep import State, init, make_p_nonterminal, step
 from bartz.testing import gen_nonsense_data
 
 MAX_LEAF_INDICES_SIZE = 2**30  # 1 GiB
+
+
+def init_default(name: str) -> Any:  # noqa: ANN401
+    """Default value of parameter ``name`` in `init`'s signature."""
+    default = inspect.signature(init).parameters[name].default
+    if default is inspect.Parameter.empty:
+        msg = f'`init` parameter {name!r} has no default'
+        raise ValueError(msg)
+    return default
 
 
 class Logging(StrEnum):
@@ -136,40 +130,49 @@ class ConfigParams:
     num_trees: int
     """`init`'s ``num_trees`` kwarg."""
 
-    resid_num_batches: int | None | Literal['auto']
+    resid_num_batches: int | None | Literal['auto'] = init_default('resid_num_batches')
     """`init`'s ``resid_num_batches`` kwarg."""
 
-    count_num_batches: int | None | Literal['auto']
+    count_num_batches: int | None | Literal['auto'] = init_default('count_num_batches')
     """`init`'s ``count_num_batches`` kwarg."""
 
-    prec_num_batches: int | None | Literal['auto']
+    prec_num_batches: int | None | Literal['auto'] = init_default('prec_num_batches')
     """`init`'s ``prec_num_batches`` kwarg."""
 
-    num_chains: int | None
+    num_chains: int | None = init_default('num_chains')
     """`init`'s ``num_chains`` kwarg."""
 
-    optimization_level: str | None
-    """JAX ``jax_optimization_level``; one of ``'O0'``..``'O3'`` or ``None`` for default (``'UNKNOWN'``)."""
+    optimization_level: str | None = field(
+        default=jax_config.jax_optimization_level, metadata={'jax_config': True}
+    )
+    """JAX ``jax_optimization_level``; one of ``'O0'``..``'O3'``. ``None`` in the config resolves to the JAX default (typically ``'UNKNOWN'``) at load time."""
 
-    exec_time_optimization_effort: float | None
-    """JAX ``jax_exec_time_optimization_effort``; float in ``[-1.0, 1.0]`` or ``None`` for default (``0.0``)."""
+    exec_time_optimization_effort: float | None = field(
+        default=jax_config.jax_exec_time_optimization_effort,
+        metadata={'jax_config': True},
+    )
+    """JAX ``jax_exec_time_optimization_effort``; float in ``[-1.0, 1.0]``. ``None`` in the config resolves to the JAX default (typically ``0.0``) at load time."""
 
-    memory_fitting_level: str | None
-    """JAX ``jax_memory_fitting_level``; one of ``'O0'``..``'O3'`` or ``None`` for default (``'O2'``)."""
+    memory_fitting_level: str | None = field(
+        default=jax_config.jax_memory_fitting_level, metadata={'jax_config': True}
+    )
+    """JAX ``jax_memory_fitting_level``; one of ``'O0'``..``'O3'``. ``None`` in the config resolves to the JAX default (typically ``'O2'``) at load time."""
 
-    memory_fitting_effort: float | None
-    """JAX ``jax_memory_fitting_effort``; float in ``[-1.0, 1.0]`` or ``None`` for default (``0.0``)."""
+    memory_fitting_effort: float | None = field(
+        default=jax_config.jax_memory_fitting_effort, metadata={'jax_config': True}
+    )
+    """JAX ``jax_memory_fitting_effort``; float in ``[-1.0, 1.0]``. ``None`` in the config resolves to the JAX default (typically ``0.0``) at load time."""
 
-    gpu_autotune_level: int | None = field(metadata={'restart': True})
+    gpu_autotune_level: int | None = field(default=None, metadata={'restart': True})
     """XLA ``--xla_gpu_autotune_level`` (integer); ``None`` to leave the env var untouched."""
 
-    cpu_use_thunk_runtime: bool | None = field(metadata={'restart': True})
+    cpu_use_thunk_runtime: bool | None = field(default=None, metadata={'restart': True})
     """XLA ``--xla_cpu_use_thunk_runtime`` (bool); ``None`` to leave the env var untouched."""
 
-    cpu_enable_fast_math: bool | None = field(metadata={'restart': True})
+    cpu_enable_fast_math: bool | None = field(default=None, metadata={'restart': True})
     """XLA ``--xla_cpu_enable_fast_math`` (bool); ``None`` to leave the env var untouched."""
 
-    chain_axis: int | None = field(metadata={'restart': True})
+    chain_axis: int | None = field(default=None, metadata={'restart': True})
     """bartz ``CHAIN_AXIS`` env var (int); ``None`` to leave the env var untouched."""
 
     @classmethod
@@ -181,6 +184,16 @@ class ConfigParams:
     def restart_field_names(cls) -> tuple[str, ...]:
         """Fields marked ``restart=True``; changing one requires restarting Python."""
         return tuple(f.name for f in fields(cls) if f.metadata.get('restart'))
+
+    @classmethod
+    def jax_config_field_names(cls) -> tuple[str, ...]:
+        """Fields marked ``jax_config=True``; applied via `jax_config.update`."""
+        return tuple(f.name for f in fields(cls) if f.metadata.get('jax_config'))
+
+    @classmethod
+    def defaults(cls) -> dict[str, Any]:
+        """Map of field name to default value, for fields that have one."""
+        return {f.name: f.default for f in fields(cls) if f.default is not MISSING}
 
     def is_valid(self) -> bool:
         """Whether this combination of values is admissible."""
@@ -216,12 +229,9 @@ class ConfigParams:
         )
 
     def apply_jax_config(self) -> None:
-        """Apply non-restart JAX config flags from this combo; ``None`` -> JAX default."""
-        for name, default in _JAX_CONFIG_DEFAULTS.items():
-            value = getattr(self, name)
-            if value is None:
-                value = default
-            jax_config.update(f'jax_{name}', value)
+        """Apply non-restart JAX config flags from this combo."""
+        for name in self.jax_config_field_names():
+            jax_config.update(f'jax_{name}', getattr(self, name))
 
     def __str__(self) -> str:
         return ' '.join(f'{f.name}={getattr(self, f.name)}' for f in fields(self))
@@ -251,54 +261,24 @@ class InitKwargs:
         return init(**{f.name: getattr(self, f.name) for f in fields(self)})
 
 
-# JAX defaults for the non-restart-tier optimization params, captured at import.
-# Used by `ConfigParams.apply_jax_config` to map ``None`` to the pristine JAX
-# default so prior iterations' values don't leak across the inner loop.
-_JAX_CONFIG_DEFAULTS: dict[str, Any] = {
-    name: getattr(jax_config, f'jax_{name}')
-    for name in (
-        'optimization_level',
-        'exec_time_optimization_effort',
-        'memory_fitting_level',
-        'memory_fitting_effort',
-    )
-}
-
-
-# Defaults for `ConfigParams` fields that aren't kwargs of `init`.
-_EXTRA_PARAM_DEFAULTS: dict[str, Any] = {
-    'optimization_level': None,
-    'exec_time_optimization_effort': None,
-    'memory_fitting_level': None,
-    'memory_fitting_effort': None,
-    'gpu_autotune_level': None,
-    'cpu_use_thunk_runtime': None,
-    'cpu_enable_fast_math': None,
-    'chain_axis': None,
-}
-
-
 # Map ConfigParams field name -> function applied to its value before storing
-# it in the results DataFrame
+# it in the results DataFrame. The goal is to keep the columns purely numeric
+# (no mixed int/str, no nulls colliding with missing data) so downstream
+# tooling sees a stable Int64 dtype.
+def _num_batches_save(v: int | None | Literal['auto']) -> int:
+    if v is None:
+        return -1
+    if v == 'auto':
+        return -2
+    return v
+
+
 _SAVE_PREPROCESSORS: dict[str, Callable[[Any], Any]] = {
-    # None would be converted to null, ambiguity with missing data
     'num_chains': lambda v: -1 if v is None else v,
-    'resid_num_batches': lambda v: -1 if v is None else v,
-    'count_num_batches': lambda v: -1 if v is None else v,
-    'prec_num_batches': lambda v: -1 if v is None else v,
+    'resid_num_batches': _num_batches_save,
+    'count_num_batches': _num_batches_save,
+    'prec_num_batches': _num_batches_save,
 }
-
-
-def _param_defaults() -> dict[str, Any]:
-    """Default values for `ConfigParams` fields: from `init`'s signature plus extras."""
-    sig = inspect.signature(init)
-    field_names = set(ConfigParams.field_names())
-    init_defaults = {
-        name: param.default
-        for name, param in sig.parameters.items()
-        if name in field_names and param.default is not inspect.Parameter.empty
-    }
-    return init_defaults | _EXTRA_PARAM_DEFAULTS
 
 
 def _xla_flags_for_restart(restart_values: dict[str, Any]) -> str:
@@ -314,6 +294,19 @@ def _xla_flags_for_restart(restart_values: dict[str, Any]) -> str:
     if v is not None:
         flags.append(f'--xla_cpu_enable_fast_math={"true" if v else "false"}')
     return ' '.join(flags)
+
+
+class _InlineArraysJSON5Encoder(json5.JSON5Encoder):
+    """JSON5 encoder that renders arrays on a single line."""
+
+    def _encode_array(self, obj: Any, seen: set, level: int) -> str:  # noqa: ANN401
+        if not obj:
+            return '[]'
+        return (
+            '['
+            + ', '.join(self.encode(el, seen, level, as_key=False) for el in obj)
+            + ']'
+        )
 
 
 @dataclass(frozen=True)
@@ -359,7 +352,15 @@ class Config:
             for name, vals in values.items()
             if name not in (plot_raw['scan'], plot_raw['reduce']) and len(vals) > 1
         )
-        for name, default in _param_defaults().items():
+        # For JAX-config fields, an explicit ``null`` in the file means "use the
+        # JAX default"; substitute it so ConfigParams carries concrete values.
+        defaults = ConfigParams.defaults()
+        for name in ConfigParams.jax_config_field_names():
+            if name in values:
+                values[name] = [
+                    defaults[name] if v is None else v for v in values[name]
+                ]
+        for name, default in defaults.items():
             values.setdefault(name, [default])
         plot = PlotConfig(
             scan=plot_raw['scan'], reduce=plot_raw['reduce'], matrix=matrix
@@ -410,7 +411,7 @@ class Config:
     @staticmethod
     def _check_values_keys(path: Path, values: dict[str, list[Any]]) -> None:
         allowed = set(ConfigParams.field_names())
-        optional = set(_param_defaults())
+        optional = set(ConfigParams.defaults())
         required = allowed - optional
         missing = required - values.keys()
         if missing:
@@ -688,6 +689,8 @@ def main() -> None:
             },
             f,
             indent=4,
+            quote_keys=True,
+            cls=_InlineArraysJSON5Encoder,
         )
 
     results = benchmark_loop(config, args, out_dir)

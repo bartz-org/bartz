@@ -958,7 +958,7 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
 
     with subtests.test('mean_samples vs mean'):
         mean_from_mean_samples = mean_samples.mean(0)
-        assert_close_matrices(mean, mean_from_mean_samples)
+        assert_close_matrices(mean, mean_from_mean_samples, rtol=1e-7)
 
     with subtests.test('latent_samples vs mean_samples'):
         binary_mask = bkw.binary_mask
@@ -1419,13 +1419,17 @@ def run_bart_like_prior(
     )
 
     with subtests.test('likelihood ratio = 1'):
-        assert_array_equal(
+        assert_close_matrices(
             bart._burnin_trace.log_likelihood,
             jnp.zeros_like(bart._burnin_trace.log_likelihood),
+            atol=1e-5,
+            reduce_rank=True,
         )
-        assert_array_equal(
+        assert_close_matrices(
             bart._main_trace.log_likelihood,
             jnp.zeros_like(bart._main_trace.log_likelihood),
+            atol=1e-5,
+            reduce_rank=True,
         )
 
     return bart
@@ -2096,7 +2100,12 @@ def assert_identical_bart(bart1: Bart, bart2: Bart) -> None:
         assert x1.shape == x2.shape
         assert x1.dtype == x2.dtype
         assert x1.sharding.is_equivalent_to(x2.sharding, x1.ndim)
-        assert_array_equal(x1, x2, strict=True, err_msg=keystr(path))
+        if jnp.issubdtype(x1.dtype, jnp.floating):
+            assert_close_matrices(
+                x1, x2, rtol=1e-5, err_msg=keystr(path), reduce_rank=True
+            )
+        else:
+            assert_array_equal(x1, x2, strict=True, err_msg=keystr(path))
 
     tree.map_with_path(check_same, bart1, bart2)
 

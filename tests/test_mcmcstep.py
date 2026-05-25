@@ -1419,7 +1419,11 @@ def check_same_structure(x: PyTree, y: PyTree) -> None:
     def check(_path: KeyPath, x: Array, y: Array) -> None:
         assert x.shape == y.shape
         assert x.dtype == y.dtype
-        assert x.sharding.is_equivalent_to(y.sharding, x.ndim)
+        # WORKAROUND(jax<0.7): empty arrays get their sharding spec canonicalized
+        # inconsistently across code paths, so skip the check in that case.
+        assert x.sharding.is_equivalent_to(y.sharding, x.ndim) or (
+            x.size == 0 and jax.__version_info__ < (0, 7, 0)
+        )
 
     tree.map_with_path(check, x, y)
 

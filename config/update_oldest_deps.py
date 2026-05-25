@@ -290,15 +290,18 @@ def main() -> int:  # noqa: C901, PLR0915
         new_req_str = format_spec(req, chosen)
         if new_req_str != req_str:
             updates.append((req_str, new_req_str))
-        rows.append((req.name, str(floor) if floor else '-', str(chosen)))
+            rows.append((req.name, str(floor) if floor else '-', str(chosen)))
 
-    col1 = max((len(r[0]) for r in rows), default=4)
-    col2 = max((len(r[1]) for r in rows), default=4)
     print()
-    print(f'{"dep".ljust(col1)}  {"from".ljust(col2)}  to')
-    print(f'{"-" * col1}  {"-" * col2}  --')
-    for name, old, new in rows:
-        print(f'{name.ljust(col1)}  {old.ljust(col2)}  {new}')
+    if rows:
+        col1 = max(len(r[0]) for r in rows)
+        col2 = max(len(r[1]) for r in rows)
+        print(f'{"dep".ljust(col1)}  {"from".ljust(col2)}  to')
+        print(f'{"-" * col1}  {"-" * col2}  --')
+        for name, old, new in rows:
+            print(f'{name.ljust(col1)}  {old.ljust(col2)}  {new}')
+    else:
+        print('no dependency bumps')
     print()
 
     if args.dry_run:

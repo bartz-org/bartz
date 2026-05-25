@@ -97,6 +97,7 @@ help:
 setup:
 	Rscript -e "renv::restore()"
 	$(UV_RUN) pre-commit install --install-hooks
+	$(if $(filter 12 13,$(CUDA_VERSION)),JAX_PLATFORMS=cuda) $(UV_RUN) python -c 'import jax; jax.numpy.empty(0)'
 
 .PHONY: lint
 lint:

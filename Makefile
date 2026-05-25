@@ -244,7 +244,7 @@ build:
 	uv build
 
 .PHONY: release
-release: clean update-deps update-oldest-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload gh-release
+release: clean update-oldest-deps update-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload gh-release
 	@echo "Done!"
 
 .PHONY: version-tag

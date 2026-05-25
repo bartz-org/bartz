@@ -136,6 +136,9 @@ local = [
     'C:\hostedtoolcache\windows\Python\*\*\Lib\site-packages\bartz\',
 ]
 
+[tool.uv]
+exclude-newer = '1 week'
+
 [tool.ruff]
 exclude = [".asv", "*.ipynb", "benchmarks/latest_bartz"]
 cache-dir = "config/ruff_cache"

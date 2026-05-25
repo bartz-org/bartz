@@ -24,11 +24,34 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 -->
 
-<!-- This changelog is written in Markdown and without line splits to make it
+<!-- This changelog is written in Markdown and without hard breaks to make it
   copy-pastable to github releases. -->
 
 
 # Changelog
+
+
+## 0.10.0 What do you mean "Maybe I lost a datapoint". You don't just LOSE a datapoint. What happens is that you are an IDIOT and THEN you lose the datapoint. If you weren't IDIOT the datapoint wouldn't be lost, FACTS and LOGIC. The continued survival of this company never ceases to fuel my bewilderment as I am clearly surrounded by IDIOTS. Now listen carefully. As the good idiot you are, you go and flag this datapoint as missing. "Missing" means that you set the "missing" flag to "True". You don't set it to to "False", because evidently "missing=False" would imply we were supposed to have the actual bleeding datapoint in place instead of whatever garbage you managed to conjure in that array. Now get the foobar out of here. (2026-05-25)
+
+This release features some improvements to multivariate outcome modeling, better out-of-the-box experience with the `Bart` interface, and some optimizations.
+
+* New features for multivariate outcomes
+    * Heteroskedasticity with fixed weights, both scalar (one weight per unit) and vector (one weight per outcome component)
+    * Partial missingness: each unit can have any subset of outcome components observed; forces diagonal error covariance matrix
+* Optimizations
+    * Predictor subsampling support, automatic `sigest` now handles large `n`
+    * All `Bart` methods are jitted
+    * Avoid redundant copies further
+    * Reduced MCMC memory usage with multiple chains
+    * Increased performance with device sharding; still not thoroughly optimized
+* `Bart` interface changes
+    * `binner=...` instead of `usequants` and `numcut` parameters
+    * `devices='cpu'` / `'gpu'` for brevity instead of passing a jax device object
+    * Chain auto-sharding on cpu; previously `mc_bart`-only
+    * Accept dataframes all inputs; previously just X and y
+    * Properties `Bart.n_save` and `Bart.num_chains`
+    * Rename MCMC schedule parameters to match `run_mcmc`: `ndpost` → `n_save`, `nskip` → `n_burn`, `keepevery` → `n_skip`
+    * `get_error_sdev()` now averages variance rather than precision across the posterior
 
 
 ## 0.9.0 This release creates a shared environment where response variable components of different types are given equal consideration without residual correlations (2026-04-20)

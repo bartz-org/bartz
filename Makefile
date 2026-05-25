@@ -72,13 +72,6 @@ help:
 	@echo "- ipython-old: start an ipython shell with oldest supported python and dependencies"
 	@echo "- lint: run pre-commit hooks on all files"
 	@echo
-	@echo "Update dependencies workflow:"
-	@echo "- new PR"
-	@echo "- $$ make update-deps"
-	@echo "- $$ make tests  # and debug"
-	@echo "- $$ make update-oldest-deps"
-	@echo "- $$ make tests-old  # and debug"
-	@echo
 	@echo "Release workflow:"
 	@echo "- do a PR that re-runs benchmarks"
 	@echo "- $$ uv version --bump major|minor|patch"

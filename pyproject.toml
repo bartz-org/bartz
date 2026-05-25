@@ -36,15 +36,15 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "equinox>=0.12.2",
-    "jax>=0.6.0",
+    "jax>=0.6.1",
     "jaxtyping>=0.3.2",
-    "numpy>=2.2.5",
+    "numpy>=2.2.6",
     "scipy>=1.15.3",
 ]
 
 [project.optional-dependencies]
-cuda12 = ["jax[cuda12]>=0.6.0"]
-cuda13 = ["jax[cuda13]>=0.6.0"]
+cuda12 = ["jax[cuda12]>=0.6.1"]
+cuda13 = ["jax[cuda13]>=0.6.1"]
 
 [project.urls]
 Homepage = "https://github.com/bartz-org/bartz"
@@ -63,11 +63,11 @@ dev = [
     "tqdm>=4.67.1",
     "virtualenv>=20.31.2",
     "asv>=0.6.4",
-    "beartype>=0.20.2",
+    "beartype>=0.21.0",
     "flaky>=3.8.1",
     "gitpython>=3.1.44",
     "packaging>=25.0",
-    "polars[pandas,pyarrow]>=1.29.0",
+    "polars[pandas,pyarrow]>=1.30.0",
     "pytest>=8.3.5",
     "pytest-cov>=6.1.1",
     # WORKAROUND(pytest<9): pytest 9 has built-in subtests support

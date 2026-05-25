@@ -24,7 +24,6 @@
 
 """Module defining the BART MCMC state and initialization."""
 
-import inspect
 import math
 import os
 from collections.abc import Callable, Hashable, Sequence
@@ -45,21 +44,16 @@ from jax import (
     lax,
     make_mesh,
     random,
+    shard_map,
     tree,
     vmap,
 )
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
-from numpy.lib.array_utils import normalize_axis_index
-
-# WORKAROUND(jax<0.6.1): shard_map was promoted from jax.experimental to top-level in 0.6.1
-try:
-    from jax import shard_map
-except ImportError:
-    from jax.experimental.shard_map import shard_map
 from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Key, PyTree, UInt
 from numpy import ndarray
+from numpy.lib.array_utils import normalize_axis_index
 
 from bartz._jaxext import get_default_device, minimal_unsigned_dtype
 from bartz.grove import tree_depths
@@ -1789,10 +1783,7 @@ def _get_shard_map_patch_kwargs() -> dict[str, bool]:
     # jax_disable_vmap_shmap_error config did not work.
 
     # WORKAROUND(jax<=0.8.2): remove this whole function when jax > 0.8.2
-    buggy = ('0.6.0', '0.6.1', '0.6.2', '0.7.0', '0.8.1', '0.8.2')
+    buggy = ('0.6.1', '0.6.2', '0.7.0', '0.8.1', '0.8.2')
     if jax.__version__ in buggy:
-        # WORKAROUND(jax<0.6.1): check_rep instead of check_vma before then
-        params = inspect.signature(shard_map).parameters
-        flag = 'check_rep' if 'check_rep' in params else 'check_vma'
-        return {flag: False}
+        return {'check_vma': False}
     return {}

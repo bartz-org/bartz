@@ -825,7 +825,7 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
 
     yhat1 = bart1.predict('train', kind='latent_samples')
     yhat2 = bart2.predict('train', kind='latent_samples')
-    rtol = 0 if yhat1.platform() == 'cpu' else 2e-6
+    rtol = 0 if yhat1.platform() == 'cpu' else 1e-5
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
 

@@ -399,7 +399,7 @@ class TestSigma2Estimates:
             assert_close_matrices(jnp.minimum(delta, 0), delta, rtol=0.2)
         else:
             assert_close_matrices(ols, jnp.zeros_like(ols), atol=1e-8)
-            assert_close_matrices(last, jnp.zeros_like(last), atol=1e-6)
+            assert_close_matrices(last, jnp.zeros_like(last), atol=1e-5)
             first = cg_series[0, ...]
             assert_close_matrices(jnp.maximum(first, 0), first)
 

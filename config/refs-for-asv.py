@@ -35,19 +35,32 @@ The output format is one ref per line, suitable for piping to `asv run HASHFILE:
 import datetime
 
 from git import Repo
+from git.exc import GitCommandError
 
 # Configuration
 CUTOFF_DATE = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
 
 
+def get_default_branch_name(repo: Repo) -> str:
+    try:
+        return repo.git.symbolic_ref('refs/remotes/origin/HEAD', short=True).split('/')[
+            -1
+        ]
+    except GitCommandError:
+        pass
+    # Fallback: ask the remote directly. Works even when refs/remotes/origin/HEAD
+    # was never set locally (e.g. origin added after the initial clone).
+    output = repo.git.ls_remote('--symref', 'origin', 'HEAD')
+    for line in output.splitlines():
+        if line.startswith('ref:'):
+            return line.split()[1].split('/')[-1]
+    msg = 'could not determine default branch of origin'
+    raise RuntimeError(msg)
+
+
 def main() -> None:
     repo = Repo('.')
-
-    # Get the default branch name from git
-    # This queries the symbolic-ref for the remote's HEAD
-    default_branch_name = repo.git.symbolic_ref(
-        'refs/remotes/origin/HEAD', short=True
-    ).split('/')[-1]
+    default_branch_name = get_default_branch_name(repo)
 
     # Get the default branch
     main_branch = repo.refs[default_branch_name]

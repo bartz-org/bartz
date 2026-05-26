@@ -1,9 +1,0 @@
-{
-    "arch": "x86_64",
-    "cpu": "AMD EPYC 7B12 64-Core Processor",
-    "machine": "5060ti-2c9f43d575fa",
-    "num_cpu": "128",
-    "os": "Linux 5.15.0-170-generic",
-    "ram": "263948960",
-    "version": 1
-}

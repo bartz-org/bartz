@@ -1,0 +1,8 @@
+Type: Project
+Description: R dependencies for the bartz Python project. bartz tests use BART3
+    via rpy2 to validate against the reference R implementation; this file lets
+    renv discover and install BART3 without dummy R scripts.
+Imports:
+    BART3
+Remotes:
+    rsparapa/bnptools/BART3

@@ -307,8 +307,7 @@ jobs:
         run: RPY2_CFFI_MODE=ABI uv run --dev python -m asv machine --yes
 
       - name: Run asv in quick mode
-        # long timeout because CI runners are slow
-        run: ${{ matrix.vars }}make asv-quick ARGS='--attribute timeout=120'
+        run: ${{ matrix.vars }}make asv-quick
 
   dev-commands:
     runs-on: ubuntu-latest

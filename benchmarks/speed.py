@@ -70,7 +70,7 @@ from benchmarks.latest_bartz.mcmcstep import make_p_nonterminal
 from benchmarks.latest_bartz.testing import gen_data
 
 # asv config
-timeout = 30.0
+timeout = 120.0
 
 # config
 P = 100

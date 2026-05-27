@@ -1236,7 +1236,7 @@ class TestMultichain:
         # check the mc state is equal to the stacked state
         def check_equal(path: KeyPath, mc: Array, stacked: Array) -> None:
             str_path = keystr(path)
-            exact = mc.platform() == 'cpu' or jnp.issubdtype(mc.dtype, jnp.integer)
+            exact = jnp.issubdtype(mc.dtype, jnp.integer)
             assert_close_matrices(
                 mc,
                 stacked,

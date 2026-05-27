@@ -48,12 +48,22 @@ def get_default_branch_name(repo: Repo) -> str:
         ]
     except GitCommandError:
         pass
-    # Fallback: ask the remote directly. Works even when refs/remotes/origin/HEAD
+    # Ask the remote directly. Works even when refs/remotes/origin/HEAD
     # was never set locally (e.g. origin added after the initial clone).
-    output = repo.git.ls_remote('--symref', 'origin', 'HEAD')
+    try:
+        output = repo.git.ls_remote('--symref', 'origin', 'HEAD')
+    except GitCommandError:
+        output = ''
     for line in output.splitlines():
         if line.startswith('ref:'):
             return line.split()[1].split('/')[-1]
+    # Last resort: pick the first conventional name that exists as a local
+    # branch. Hits the asv-on-VM case where origin is unreachable but the
+    # default branch was pushed in by the host-setup step.
+    local = {h.name for h in repo.heads}
+    for candidate in ('main', 'master'):
+        if candidate in local:
+            return candidate
     msg = 'could not determine default branch of origin'
     raise RuntimeError(msg)
 

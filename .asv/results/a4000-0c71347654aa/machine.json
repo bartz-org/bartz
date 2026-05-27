@@ -1,7 +1,7 @@
 {
     "arch": "x86_64",
     "cpu": "AMD Ryzen Threadripper PRO 3955WX 16-Cores",
-    "machine": "a4000-7c259586cfac",
+    "machine": "a4000-0c71347654aa",
     "num_cpu": "32",
     "os": "Linux 5.4.0-216-generic",
     "ram": "197771876",

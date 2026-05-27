@@ -26,7 +26,7 @@
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from functools import partial
 from typing import Any, Literal, TypeVar
 
@@ -41,10 +41,34 @@ from bartz.prepcovars import UniqueQuantileBinner
 
 T = TypeVar('T')
 
+_MAX_DEPTH_LIMIT = 16
 
-@dataclass
+
+def _check_int(value: object, name: str) -> None:
+    # bool is a subclass of int; reject explicitly to avoid silent coercion.
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = f'{name} must be int, got {type(value).__name__}'
+        raise TypeError(msg)
+
+
+def _check_float(value: object, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        msg = f'{name} must be float, got {type(value).__name__}'
+        raise TypeError(msg)
+
+
+def _check_bool(value: object, name: str) -> None:
+    if not isinstance(value, bool):
+        msg = f'{name} must be bool, got {type(value).__name__}'
+        raise TypeError(msg)
+
+
+@dataclass(frozen=True)
 class OutcomeModel:
     """Outcome model specification, matching `stochtree.OutcomeModel`.
+
+    Only ``('continuous', 'identity')`` and ``('binary', 'probit')`` are
+    supported; other combinations raise `NotImplementedError` at construction.
 
     Parameters
     ----------
@@ -57,12 +81,30 @@ class OutcomeModel:
     outcome: Literal['continuous', 'binary'] = 'continuous'
     link: Literal['identity', 'probit'] = 'identity'
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.outcome, str):
+            msg = f'outcome must be str, got {type(self.outcome).__name__}'
+            raise TypeError(msg)
+        if not isinstance(self.link, str):
+            msg = f'link must be str, got {type(self.link).__name__}'
+            raise TypeError(msg)
+        if (self.outcome, self.link) not in (
+            ('continuous', 'identity'),
+            ('binary', 'probit'),
+        ):
+            msg = (
+                f'unsupported outcome_model (outcome={self.outcome!r}, '
+                f"link={self.link!r}); only ('continuous', 'identity') "
+                "and ('binary', 'probit') are supported."
+            )
+            raise NotImplementedError(msg)
+
 
 class NotSampledError(RuntimeError):
     """Raised when calling a method that requires `sample` to have been called."""
 
 
-@dataclass(kw_only=True)
+@dataclass(frozen=True, kw_only=True)
 class GeneralParams:
     """Mirror of stochtree's ``general_params`` dict, with the keys bartz handles.
 
@@ -96,8 +138,6 @@ class GeneralParams:
     outcome_model
         Outcome family / link specification. Only ``('continuous','identity')``
         and ``('binary','probit')`` are supported.
-    probit_outcome_model
-        Deprecated alias of ``outcome_model=OutcomeModel('binary','probit')``.
     """
 
     cutpoint_grid_size: int = 100
@@ -109,11 +149,36 @@ class GeneralParams:
     random_seed: int | None = None
     keep_every: int = 1
     num_chains: int = 1
-    outcome_model: OutcomeModel | None = None
-    probit_outcome_model: bool = False
+    outcome_model: OutcomeModel = field(default_factory=OutcomeModel)
+
+    def __post_init__(self) -> None:
+        _check_int(self.cutpoint_grid_size, 'cutpoint_grid_size')
+        _check_bool(self.standardize, 'standardize')
+        if self.sigma2_init is not None:
+            _check_float(self.sigma2_init, 'sigma2_init')
+        _check_float(self.sigma2_global_shape, 'sigma2_global_shape')
+        _check_float(self.sigma2_global_scale, 'sigma2_global_scale')
+        if self.variable_weights is not None and not isinstance(
+            self.variable_weights, np.ndarray
+        ):
+            msg = (
+                f'variable_weights must be np.ndarray, got '
+                f'{type(self.variable_weights).__name__}'
+            )
+            raise TypeError(msg)
+        if self.random_seed is not None:
+            _check_int(self.random_seed, 'random_seed')
+        _check_int(self.keep_every, 'keep_every')
+        _check_int(self.num_chains, 'num_chains')
+        if not isinstance(self.outcome_model, OutcomeModel):
+            msg = (
+                f'outcome_model must be OutcomeModel, got '
+                f'{type(self.outcome_model).__name__}'
+            )
+            raise TypeError(msg)
 
 
-@dataclass(kw_only=True)
+@dataclass(frozen=True, kw_only=True)
 class MeanForestParams:
     """Mirror of stochtree's ``mean_forest_params`` dict, restricted to the keys bartz handles.
 
@@ -130,7 +195,10 @@ class MeanForestParams:
     min_samples_leaf
         Minimum number of training samples at a leaf.
     max_depth
-        Maximum tree depth. Stochtree convention: ``-1`` means unbounded.
+        Maximum tree depth. Must be a non-negative integer at most
+        ``16``; bartz stores trees as full heap arrays whose size grows
+        exponentially with depth, so the stochtree convention
+        ``max_depth=-1`` (unbounded) is rejected.
     sample_sigma2_leaf
         Stochtree default is ``True`` (sample the leaf-variance prior). bartz
         uses a fixed leaf-variance prior; ``True`` is rejected in
@@ -139,7 +207,8 @@ class MeanForestParams:
         bartz behavior).
     sigma2_leaf_init
         Initial leaf-variance prior. If `None`, defaults to
-        ``1 / num_trees`` (matching stochtree).
+        ``1 / num_trees`` (matching stochtree); the default is materialized in
+        `__post_init__`, so the attribute is always a float after construction.
     """
 
     num_trees: int = 200
@@ -151,6 +220,15 @@ class MeanForestParams:
     sigma2_leaf_init: float | None = None
 
     def __post_init__(self) -> None:
+        _check_int(self.num_trees, 'num_trees')
+        _check_float(self.alpha, 'alpha')
+        _check_float(self.beta, 'beta')
+        _check_int(self.min_samples_leaf, 'min_samples_leaf')
+        _check_int(self.max_depth, 'max_depth')
+        _check_bool(self.sample_sigma2_leaf, 'sample_sigma2_leaf')
+        if self.sigma2_leaf_init is not None:
+            _check_float(self.sigma2_leaf_init, 'sigma2_leaf_init')
+
         if self.sample_sigma2_leaf:
             msg = (
                 'sample_sigma2_leaf=True is not supported (bartz uses a fixed'
@@ -158,6 +236,23 @@ class MeanForestParams:
                 ' False} to acknowledge this.'
             )
             raise NotImplementedError(msg)
+        if self.max_depth < 0:
+            msg = (
+                f'max_depth={self.max_depth} is not supported; bartz stores trees'
+                ' as heap arrays of size 2**max_depth, so the stochtree'
+                ' convention max_depth=-1 (unbounded) is rejected. Pass a'
+                f' non-negative integer at most {_MAX_DEPTH_LIMIT}.'
+            )
+            raise NotImplementedError(msg)
+        if self.max_depth > _MAX_DEPTH_LIMIT:
+            msg = (
+                f'max_depth={self.max_depth} exceeds {_MAX_DEPTH_LIMIT}; bartz'
+                ' stores trees as heap arrays of size 2**max_depth, so memory'
+                ' grows exponentially with depth.'
+            )
+            raise ValueError(msg)
+        if self.sigma2_leaf_init is None:
+            object.__setattr__(self, 'sigma2_leaf_init', 1.0 / self.num_trees)
 
 
 def build_dataclass(cls: type[T], params: dict | None, name: str) -> T:
@@ -194,6 +289,9 @@ class BARTModel:
         )
         yhat = m.predict(X_new, terms='y_hat', type='mean')
 
+    See `GeneralParams` and `MeanForestParams` for the supported keys in the
+    ``general_params`` and ``mean_forest_params`` dicts.
+
     Notes
     -----
     Differences from `stochtree`, by design:
@@ -202,6 +300,12 @@ class BARTModel:
       has no grow-from-root sampler).
     - ``mean_forest_params['sample_sigma2_leaf']`` is rejected when ``True``
       (bartz uses a fixed leaf-variance prior); pass ``False`` explicitly.
+    - ``mean_forest_params['max_depth']`` must be a non-negative integer at
+      most ``16``; stochtree's ``-1`` (unbounded depth) sentinel is rejected
+      because bartz stores trees as full heap arrays.
+    - The deprecated ``general_params['probit_outcome_model']`` flag is not
+      accepted; pass ``outcome_model=OutcomeModel('binary', 'probit')``
+      instead.
     - The stochtree arguments that select unsupported behavior — leaf-basis
       regression, random effects, heteroskedastic variance forests,
       warm-starting from a previous model — are removed from the signatures
@@ -314,47 +418,33 @@ class BARTModel:
             MeanForestParams, mean_forest_params, 'mean_forest_params'
         )
 
-        outcome_model = resolve_outcome_model(gp.outcome_model, gp.probit_outcome_model)
-        is_probit = outcome_model.outcome == 'binary'
+        is_probit = gp.outcome_model.outcome == 'binary'
 
         X_train_np, y_train_np = process_train_inputs(X_train, y_train)
         _, p = X_train_np.shape
 
         # standardization matches stochtree's y_bar / y_std logic
-        standardize = gp.standardize
-        y_bar, y_std, y_for_bartz = standardize_y(y_train_np, is_probit, standardize)
+        y_bar, y_std, y_for_bartz = standardize_y(y_train_np, is_probit, gp.standardize)
 
-        num_trees = int(mfp.num_trees)
-        num_chains = int(gp.num_chains)
-        bart_num_chains = None if num_chains == 1 else num_chains
+        bart_num_chains = None if gp.num_chains == 1 else gp.num_chains
 
         # leaf-prior: bartz uses sigma_mu = tau_num / (k * sqrt(num_trees));
         # stochtree's sigma2_leaf is the leaf-variance prior. Hold k=2 and solve
         # for tau_num so that the two parameterizations agree.
-        sigma2_leaf_init = mfp.sigma2_leaf_init
-        if sigma2_leaf_init is None:
-            sigma2_leaf_init = 1.0 / num_trees
         bartz_k = 2.0
-        tau_num_arg = bartz_k * math.sqrt(num_trees * float(sigma2_leaf_init))
+        tau_num_arg = bartz_k * math.sqrt(mfp.num_trees * mfp.sigma2_leaf_init)
 
-        sigma2_init = gp.sigma2_init
         sigdf, lambda_, sigest_arg = resolve_variance_prior(
-            float(gp.sigma2_global_shape), float(gp.sigma2_global_scale), sigma2_init
+            gp.sigma2_global_shape, gp.sigma2_global_scale, gp.sigma2_init
         )
 
         binner = partial(
-            UniqueQuantileBinner,
-            max_bins=int(gp.cutpoint_grid_size) + 1,
-            max_subsample=None,
+            UniqueQuantileBinner, max_bins=gp.cutpoint_grid_size + 1, max_subsample=None
         )
 
         variable_weights = check_variable_weights(gp.variable_weights, p)
 
-        # stochtree's max_depth == -1 means unbounded; bartz uses a 1-based limit
-        max_depth = int(mfp.max_depth)
-        max_depth_arg = 30 if max_depth < 0 else max_depth + 1
-
-        seed = 0 if gp.random_seed is None else int(gp.random_seed)
+        seed = 0 if gp.random_seed is None else gp.random_seed
         w_arg = (
             None
             if observation_weights is None
@@ -371,30 +461,30 @@ class BARTModel:
             sigdf=sigdf,
             sigquant=0.9,
             k=bartz_k,
-            power=float(mfp.beta),
-            base=float(mfp.alpha),
+            power=mfp.beta,
+            base=mfp.alpha,
             lambda_=lambda_,
             tau_num=tau_num_arg,
             w=w_arg,
-            num_trees=num_trees,
-            n_save=int(num_mcmc),
-            n_burn=int(num_burnin),
-            n_skip=int(gp.keep_every),
+            num_trees=mfp.num_trees,
+            n_save=num_mcmc,
+            n_burn=num_burnin,
+            n_skip=gp.keep_every,
             printevery=None,
             num_chains=bart_num_chains,
             seed=seed,
-            maxdepth=max_depth_arg,
-            init_kw={'min_points_per_leaf': int(mfp.min_samples_leaf)},
+            maxdepth=mfp.max_depth + 1,
+            init_kw={'min_points_per_leaf': mfp.min_samples_leaf},
         )
         self._finalize_sample(
-            outcome_model=outcome_model,
-            num_burnin=int(num_burnin),
-            num_mcmc=int(num_mcmc),
-            num_chains=num_chains,
-            sigma2_init=sigma2_init,
+            outcome_model=gp.outcome_model,
+            num_burnin=num_burnin,
+            num_mcmc=num_mcmc,
+            num_chains=gp.num_chains,
+            sigma2_init=gp.sigma2_init,
             y_bar=y_bar,
             y_std=y_std,
-            standardize=standardize,
+            standardize=gp.standardize,
             X_test=X_test,
         )
 
@@ -527,28 +617,6 @@ class BARTModel:
         if self.standardize:
             return (latent * self.y_std + self.y_bar).T
         return latent.T
-
-
-def resolve_outcome_model(
-    outcome_model: object, probit_outcome_model: bool
-) -> OutcomeModel:
-    if outcome_model is not None:
-        outcome = getattr(outcome_model, 'outcome', None)
-        link = getattr(outcome_model, 'link', None)
-        if outcome is None or link is None:
-            msg = 'outcome_model must have .outcome and .link attributes'
-            raise TypeError(msg)
-        if (outcome, link) not in (('continuous', 'identity'), ('binary', 'probit')):
-            msg = (
-                f'unsupported outcome_model (outcome={outcome!r}, link={link!r});'
-                " only ('continuous', 'identity') and ('binary', 'probit') are"
-                ' supported.'
-            )
-            raise NotImplementedError(msg)
-        return OutcomeModel(outcome=outcome, link=link)
-    if probit_outcome_model:
-        return OutcomeModel(outcome='binary', link='probit')
-    return OutcomeModel(outcome='continuous', link='identity')
 
 
 def standardize_y(

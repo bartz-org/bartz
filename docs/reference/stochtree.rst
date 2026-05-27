@@ -26,4 +26,4 @@ stochtree Interface
 ===================
 
 .. automodule:: bartz.stochtree
-    :members: BARTModel, OutcomeModel, NotSampledError
+    :members: BARTModel, GeneralParams, MeanForestParams, OutcomeModel, NotSampledError

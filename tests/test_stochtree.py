@@ -148,7 +148,9 @@ def test_binary_smoke(keys: split) -> None:
         num_gfr=0,
         num_burnin=30,
         num_mcmc=80,
-        general_params={'probit_outcome_model': True},
+        general_params={
+            'outcome_model': bst.OutcomeModel(outcome='binary', link='probit')
+        },
         mean_forest_params=_MFP_BASE,
     )
     assert m.outcome_model.outcome == 'binary'
@@ -429,7 +431,7 @@ def comparison_binary(keys: split) -> tuple[stochtree.BARTModel, bst.BARTModel]:
         general_params={
             'random_seed': seed,
             'num_chains': 2,
-            'probit_outcome_model': True,
+            'outcome_model': bst.OutcomeModel(outcome='binary', link='probit'),
         },
         mean_forest_params=_MFP_BASE,
     )

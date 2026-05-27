@@ -26,6 +26,8 @@
 
 from bartz.stochtree._stochtree import (  # noqa: F401
     BARTModel,
+    GeneralParams,
+    MeanForestParams,
     NotSampledError,
     OutcomeModel,
 )

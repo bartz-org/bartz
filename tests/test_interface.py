@@ -1813,13 +1813,19 @@ def test_catch_array_gc_guard() -> None:
 
 def test_debug_checks(keys: split, bkw: BartKW) -> None:
     """Run with invasive jax debug options active."""
+    with debug_nans(True), debug_infs(True), debug_key_reuse(True):
+        run_bart_and_block(bkw, keys)
+
+
+def test_no_array_gc(keys: split, bkw: BartKW) -> None:
+    """Check that no reference cycles cause `jax.Array`s to be deleted by gc.
+
+    Kept separate from `test_debug_checks` because `debug_nans` and `debug_infs`
+    force jax through a slow Python dispatch path that itself creates cycles,
+    yielding spurious failures unrelated to bartz code.
+    """
     collect()
-    with (
-        debug_nans(True),
-        debug_infs(True),
-        debug_key_reuse(True),
-        catch_array_gc_guard(),
-    ):
+    with catch_array_gc_guard():
         run_bart_and_block(bkw, keys)
         collect()
 

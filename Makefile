@@ -266,7 +266,7 @@ upload: smoke-test version-tag
 	uv publish
 	@VERSION=$$(uv run python -c 'import bartz; print(bartz.__version__)') && \
 	echo "Try to install bartz $$VERSION from PyPI" && \
-	uv tool run --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
+	uv tool run --exclude-newer-package="bartz=0 days" --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
 .PHONY: upload-test
 upload-test: smoke-test check-committed
@@ -276,7 +276,7 @@ upload-test: smoke-test check-committed
 	uv publish --check-url=https://test.pypi.org/simple/ --publish-url=https://test.pypi.org/legacy/
 	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
 	echo "Try to install bartz $$VERSION from TestPyPI" && \
-	uv tool run --index=https://test.pypi.org/simple/ --index-strategy=unsafe-best-match --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
+	uv tool run --exclude-newer-package="bartz=0 days" --index=https://test.pypi.org/simple/ --index-strategy=unsafe-best-match --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
 .PHONY: gh-release
 gh-release: version-tag

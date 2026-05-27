@@ -195,12 +195,10 @@ docs-latest:
 
 .PHONY: covreport
 covreport:
-	$(UV_RUN) coverage combine --keep
 	$(UV_RUN) coverage html --include='src/*'
 
 .PHONY: covcheck
 covcheck:
-	$(UV_RUN) coverage combine --keep
 	$(UV_RUN) coverage report --include='tests/**/test_*.py'
 	$(UV_RUN) coverage report --include='src/*'
 	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total

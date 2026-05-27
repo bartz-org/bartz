@@ -31,7 +31,7 @@ SOFTWARE.
 # Changelog
 
 
-## 0.10.0 What do you mean "Maybe I lost a datapoint". You don't just LOSE a datapoint. What happens is that you are an IDIOT and THEN you lose the datapoint. If you weren't IDIOT the datapoint wouldn't be lost, FACTS and LOGIC. The continued survival of this company never ceases to fuel my bewilderment as I am clearly surrounded by IDIOTS. Now listen carefully. As the good idiot you are, you go and flag this datapoint as missing. "Missing" means that you set the "missing" flag to "True". You don't set it to to "False", because evidently "missing=False" would imply we were supposed to have the actual bleeding datapoint in place instead of whatever garbage you managed to conjure in that array. Now get the foobar out of here. (2026-05-25)
+## 0.10.0 What do you mean "Maybe I lost a datapoint". You don't just LOSE a datapoint. What happens is that you are an IDIOT and THEN you lose the datapoint. If you weren't IDIOT the datapoint wouldn't be lost, FACTS and LOGIC. The continued survival of this company never ceases to fuel my bewilderment as I am clearly surrounded by IDIOTS. Now listen carefully. As the good idiot you are, you go and flag this datapoint as missing. "Missing" means that you set the "missing" flag to "True". You don't set it to to "False", because evidently "missing=False" would imply we were supposed to have the actual bleeding datapoint in place instead of whatever garbage you managed to conjure in that array. Now get the foobar out of here. (2026-05-27)
 
 This release features some improvements to multivariate outcome modeling, better out-of-the-box experience with the `Bart` interface, and some optimizations.
 

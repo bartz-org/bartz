@@ -89,3 +89,11 @@ repos:
         # mention `jax.vmap` are not flagged.
         entry: '\bjax\.vmap\s*\('
         types: [python]
+      - id: forbid-dunder-all
+        name: forbid setting `__all__` in modules
+        language: pygrep
+        # matches any module-level `__all__` statement (plain/annotated/augmented
+        # assignments, `.append`/`.extend`, `del`, etc.). The `^` anchor restricts
+        # to column 0, so references inside indented code or docstrings are ignored.
+        entry: '^__all__\b'
+        types: [python]

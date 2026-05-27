@@ -58,8 +58,14 @@ def _parse_changelog_header(line: str) -> tuple[str, str, str]:
     return m[1], m[2], m[3]
 
 
-def _changelog_section(version: str) -> tuple[str, str, str]:
-    """Return ``(title, date, body)`` for the topmost section in the changelog."""
+def _read_changelog_section() -> tuple[str, str, str, str]:
+    """Read and validate the topmost changelog section.
+
+    Returns ``(version, title, date, body)``. Raises ValueError if the
+    changelog cannot be parsed, the topmost section's version does not match
+    pyproject.toml, or the date is not today.
+    """
+    version = get_version()
     lines = CHANGELOG_PATH.read_text().splitlines()
     headers = [i for i, line in enumerate(lines) if line.startswith('## ')]
     if len(headers) < 2:
@@ -71,20 +77,22 @@ def _changelog_section(version: str) -> tuple[str, str, str]:
         msg = f'Topmost changelog section is for {v!r}, expected {version!r}'
         raise ValueError(msg)
     _parse_changelog_header(lines[second])  # validate boundary header
+    today = datetime.datetime.now(tz=datetime.timezone.utc).date().isoformat()
+    if date != today:
+        msg = f'Changelog date {date} does not match today {today}'
+        raise ValueError(msg)
     body = '\n'.join(lines[first + 1 : second]).strip('\n')
-    return title, date, body
+    return version, title, date, body
+
+
+def check_changelog() -> None:
+    """Validate the topmost changelog section is for the current version and today."""
+    _read_changelog_section()
 
 
 def gh_release() -> None:
     """Create a draft GitHub release from the topmost changelog section."""
-    version = get_version()
-    title, date, body = _changelog_section(version)
-    today = datetime.datetime.now(tz=datetime.timezone.utc).date().isoformat()
-    if date != today:
-        print(
-            f'warning: changelog date {date} does not match today {today}',
-            file=sys.stderr,
-        )
+    version, title, _date, body = _read_changelog_section()
     subprocess.run(  # noqa: S603
         [  # noqa: S607
             'gh',
@@ -110,6 +118,8 @@ def main() -> None:
         print(get_version())
     elif command == 'update_version':
         update_version()
+    elif command == 'check_changelog':
+        check_changelog()
     elif command == 'gh_release':
         gh_release()
     else:

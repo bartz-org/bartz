@@ -56,6 +56,7 @@ help:
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- copy-version: sync version from pyproject.toml to _version.py"
 	@echo "- check-committed: verify there are no uncommitted changes"
+	@echo "- check-changelog: verify the topmost changelog section matches the current version and today's date"
 	@echo "- build: build the python wheel and sdist"
 	@echo "- release: run tests, build, and upload to PyPI (run on main)"
 	@echo "- version-tag: create and push git tag for current version"
@@ -231,12 +232,16 @@ check-committed:
 	git diff --quiet
 	git diff --quiet --staged
 
+.PHONY: check-changelog
+check-changelog:
+	$(UV_RUN) python config/util.py check_changelog
+
 .PHONY: build
 build:
 	uv build
 
 .PHONY: release
-release: clean update-oldest-deps update-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload gh-release
+release: check-changelog clean update-oldest-deps update-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload gh-release
 	@echo "Done!"
 
 .PHONY: version-tag

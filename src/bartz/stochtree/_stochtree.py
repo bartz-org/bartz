@@ -39,7 +39,7 @@ from scipy.stats import norm
 from bartz._interface import Bart, DataFrame, PredictKind
 from bartz.prepcovars import UniqueQuantileBinner
 
-_T = TypeVar('_T')
+T = TypeVar('T')
 
 
 @dataclass
@@ -63,7 +63,7 @@ class NotSampledError(RuntimeError):
 
 
 @dataclass(kw_only=True)
-class _GeneralParams:
+class GeneralParams:
     """Mirror of stochtree's ``general_params`` dict, with the keys bartz handles.
 
     Parameters
@@ -114,7 +114,7 @@ class _GeneralParams:
 
 
 @dataclass(kw_only=True)
-class _MeanForestParams:
+class MeanForestParams:
     """Mirror of stochtree's ``mean_forest_params`` dict, restricted to the keys bartz handles.
 
     Parameters
@@ -160,7 +160,7 @@ class _MeanForestParams:
             raise NotImplementedError(msg)
 
 
-def _build_dataclass(cls: type[_T], params: dict | None, name: str) -> _T:
+def build_dataclass(cls: type[T], params: dict | None, name: str) -> T:
     """Convert a user-supplied dict to a dataclass, with friendly errors."""
     if params is None:
         params = {}
@@ -291,9 +291,9 @@ class BARTModel:
         num_mcmc
             Number of retained MCMC iterations per chain.
         general_params
-            Optional override for the keys of `_GeneralParams`.
+            Optional override for the keys of `GeneralParams`.
         mean_forest_params
-            Override for the keys of `_MeanForestParams`. Must explicitly
+            Override for the keys of `MeanForestParams`. Must explicitly
             disable ``sample_sigma2_leaf``.
 
         Raises
@@ -309,22 +309,20 @@ class BARTModel:
             )
             raise NotImplementedError(msg)
 
-        gp = _build_dataclass(_GeneralParams, general_params, 'general_params')
-        mfp = _build_dataclass(
-            _MeanForestParams, mean_forest_params, 'mean_forest_params'
+        gp = build_dataclass(GeneralParams, general_params, 'general_params')
+        mfp = build_dataclass(
+            MeanForestParams, mean_forest_params, 'mean_forest_params'
         )
 
-        outcome_model = _resolve_outcome_model(
-            gp.outcome_model, gp.probit_outcome_model
-        )
+        outcome_model = resolve_outcome_model(gp.outcome_model, gp.probit_outcome_model)
         is_probit = outcome_model.outcome == 'binary'
 
-        X_train_np, y_train_np = _process_train_inputs(X_train, y_train)
+        X_train_np, y_train_np = process_train_inputs(X_train, y_train)
         _, p = X_train_np.shape
 
         # standardization matches stochtree's y_bar / y_std logic
         standardize = gp.standardize
-        y_bar, y_std, y_for_bartz = _standardize_y(y_train_np, is_probit, standardize)
+        y_bar, y_std, y_for_bartz = standardize_y(y_train_np, is_probit, standardize)
 
         num_trees = int(mfp.num_trees)
         num_chains = int(gp.num_chains)
@@ -340,7 +338,7 @@ class BARTModel:
         tau_num_arg = bartz_k * math.sqrt(num_trees * float(sigma2_leaf_init))
 
         sigma2_init = gp.sigma2_init
-        sigdf, lambda_, sigest_arg = _resolve_variance_prior(
+        sigdf, lambda_, sigest_arg = resolve_variance_prior(
             float(gp.sigma2_global_shape), float(gp.sigma2_global_scale), sigma2_init
         )
 
@@ -350,7 +348,7 @@ class BARTModel:
             max_subsample=None,
         )
 
-        variable_weights = _check_variable_weights(gp.variable_weights, p)
+        variable_weights = check_variable_weights(gp.variable_weights, p)
 
         # stochtree's max_depth == -1 means unbounded; bartz uses a 1-based limit
         max_depth = int(mfp.max_depth)
@@ -435,7 +433,7 @@ class BARTModel:
         # cached outputs in stochtree's (n, num_samples) layout, original scale
         self.y_hat_train = self._predict_y_hat_internal('train')
         if X_test is not None:
-            X_test_np = _check_X(X_test)
+            X_test_np = check_X(X_test)
             self.y_hat_test = self._predict_y_hat_internal(jnp.asarray(X_test_np.T))
         else:
             self.y_hat_test = None
@@ -491,9 +489,9 @@ class BARTModel:
                 ' using this model.'
             )
             raise NotSampledError(msg)
-        terms_list = _check_predict_args(type, scale, terms, self.probit_outcome_model)
+        terms_list = check_predict_args(type, scale, terms, self.probit_outcome_model)
 
-        X_np = _check_X(X)
+        X_np = check_X(X)
         x_bartz = jnp.asarray(X_np.T)
         pred = self._predict_y_hat_internal(x_bartz)
 
@@ -531,7 +529,7 @@ class BARTModel:
         return latent.T
 
 
-def _resolve_outcome_model(
+def resolve_outcome_model(
     outcome_model: object, probit_outcome_model: bool
 ) -> OutcomeModel:
     if outcome_model is not None:
@@ -553,7 +551,7 @@ def _resolve_outcome_model(
     return OutcomeModel(outcome='continuous', link='identity')
 
 
-def _standardize_y(
+def standardize_y(
     y_train_np: np.ndarray, is_probit: bool, standardize: bool
 ) -> tuple[float, float, np.ndarray]:
     """Return ``(y_bar, y_std, y_for_bartz)`` matching stochtree's standardization."""
@@ -571,7 +569,7 @@ def _standardize_y(
     return 0.0, 1.0, y_train_np.astype(np.float32)
 
 
-def _resolve_variance_prior(
+def resolve_variance_prior(
     shape: float, scale: float, sigma2_init: float | None
 ) -> tuple[float, float | None, float | Literal['auto']]:
     """Translate stochtree's IG(shape, scale) prior to bartz's scaled-inv-chi2.
@@ -600,7 +598,7 @@ def _resolve_variance_prior(
     return 3.0, None, sigest_arg
 
 
-def _check_variable_weights(
+def check_variable_weights(
     variable_weights: np.ndarray | None, p: int
 ) -> Float32[Array, ' p'] | None:
     """Validate `variable_weights`, returning the jax array (or None)."""
@@ -620,7 +618,7 @@ def _check_variable_weights(
     return arr
 
 
-def _check_predict_args(
+def check_predict_args(
     type_: str, scale: str, terms: str | Sequence[str], probit_outcome_model: bool
 ) -> list[str]:
     """Validate `BARTModel.predict` arguments, returning the normalized terms list."""
@@ -650,7 +648,7 @@ def _check_predict_args(
     return terms_list
 
 
-def _process_train_inputs(
+def process_train_inputs(
     X_train: np.ndarray | DataFrame, y_train: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     if hasattr(X_train, 'to_numpy') and hasattr(X_train, 'columns'):
@@ -675,7 +673,7 @@ def _process_train_inputs(
     return X_np, y_np
 
 
-def _check_X(X: np.ndarray | DataFrame) -> np.ndarray:
+def check_X(X: np.ndarray | DataFrame) -> np.ndarray:
     if hasattr(X, 'to_numpy') and hasattr(X, 'columns'):
         X_np = np.asarray(X.to_numpy())
     else:

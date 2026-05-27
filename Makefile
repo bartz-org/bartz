@@ -294,8 +294,9 @@ asv-machine:
 	$(UV_RUN) python config/asv_machine.py
 
 .PHONY: asv-run
+asv-run: ASV_REFS = $(shell $(UV_RUN) python config/refs-for-asv.py)
 asv-run: asv-machine
-	$(UV_RUN) python config/refs-for-asv.py | $(ASV) run --durations=all --skip-existing-successful --show-stderr HASHFILE:- $(ARGS)
+	$(ASV) run --durations=all --skip-existing-successful --show-stderr "$(ASV_REFS)" $(ARGS)
 
 .PHONY: asv-publish
 asv-publish:

@@ -23,13 +23,17 @@
 # SOFTWARE.
 
 """
-Print a list of git refs for ASV benchmarking.
+Print a git rev-list range spec for ASV benchmarking.
 
-This script outputs:
+The output covers:
 1. All version tags on the default branch with commit dates after CUTOFF_DATE
 2. The HEAD of the default branch
 
-The output format is one ref per line, suitable for piping to `asv run HASHFILE:-`
+The output is one space-separated line, prefixed with `--no-walk`, suitable
+for passing directly as the positional `range` argument to `asv run`. asv
+shlex-splits it and feeds it to `git rev-list --first-parent` — which errors
+out on unknown refs, so an unresolvable ref aborts the whole run instead of
+being silently skipped (as `asv run HASHFILE:-` does).
 """
 
 import datetime
@@ -97,12 +101,9 @@ def main() -> None:
     # Sort tags by commit date
     tags_to_include.sort()
 
-    # Print tags
-    for _, tag_name in tags_to_include:
-        print(tag_name)
-
-    # Print default branch ref
-    print(default_branch_name)
+    refs = [tag_name for _, tag_name in tags_to_include]
+    refs.append(default_branch_name)
+    print('--no-walk', *refs)
 
 
 if __name__ == '__main__':

@@ -29,12 +29,6 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
 
-# WORKAROUND(jax<0.6.1): shard_map was promoted from jax.experimental to top-level in 0.6.1
-try:
-    from jax import shard_map
-except ImportError:
-    from jax.experimental.shard_map import shard_map
-
 import jax
 from jax import (
     Device,
@@ -43,8 +37,8 @@ from jax import (
     jit,
     lax,
     random,
+    shard_map,
     tree,
-    typeof,
     vmap,
 )
 from jax import numpy as jnp
@@ -282,10 +276,7 @@ def jit_active() -> bool:
 
 def _equal_shards(x: Array, axis_name: str) -> Bool[Array, '']:
     """Check if all shards of `x` are equal, to be used in a `shard_map` context."""
-    # WORKAROUND(jax<0.6.1): could be `size = lax.axis_size(axis_name)`
-    mesh = typeof(x).sharding.mesh
-    size = mesh.shape[axis_name]
-
+    size = lax.axis_size(axis_name)
     perm = [(i, (i + 1) % size) for i in range(size)]
     perm_x = lax.ppermute(x, axis_name, perm)
     diff = jnp.any(x != perm_x)

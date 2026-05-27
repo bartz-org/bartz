@@ -32,7 +32,7 @@ UV_RUN = uv run --dev $(EXTRAS)
 # define command to run python with oldest supported dependencies
 # OLD_DATE / OLD_DELAY_DAYS / BUMP_PYTHON_VERSION_DATE / NUM_SUPPORTED_PYTHON_RELEASES
 # drive the `update-oldest-deps` policy.
-OLD_DATE = 2025-05-15
+OLD_DATE = 2025-05-27
 OLD_DELAY_DAYS = 365
 BUMP_PYTHON_VERSION_DATE = 10-31
 NUM_SUPPORTED_PYTHON_RELEASES = 5
@@ -72,13 +72,6 @@ help:
 	@echo "- ipython-old: start an ipython shell with oldest supported python and dependencies"
 	@echo "- lint: run pre-commit hooks on all files"
 	@echo
-	@echo "Update dependencies workflow:"
-	@echo "- new PR"
-	@echo "- $$ make update-deps"
-	@echo "- $$ make tests  # and debug"
-	@echo "- $$ make update-oldest-deps"
-	@echo "- $$ make tests-old  # and debug"
-	@echo
 	@echo "Release workflow:"
 	@echo "- do a PR that re-runs benchmarks"
 	@echo "- $$ uv version --bump major|minor|patch"
@@ -97,6 +90,7 @@ help:
 setup:
 	Rscript -e "renv::restore()"
 	$(UV_RUN) pre-commit install --install-hooks
+	$(if $(filter 12 13,$(CUDA_VERSION)),JAX_PLATFORMS=cuda) $(UV_RUN) python -c 'import jax; jax.numpy.empty(0)'
 
 .PHONY: lint
 lint:
@@ -201,12 +195,10 @@ docs-latest:
 
 .PHONY: covreport
 covreport:
-	$(UV_RUN) coverage combine --keep
 	$(UV_RUN) coverage html --include='src/*'
 
 .PHONY: covcheck
 covcheck:
-	$(UV_RUN) coverage combine --keep
 	$(UV_RUN) coverage report --include='tests/**/test_*.py'
 	$(UV_RUN) coverage report --include='src/*'
 	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total
@@ -217,7 +209,7 @@ covcheck:
 
 .PHONY: update-deps
 update-deps:
-	uv lock --upgrade --exclude-newer='1 week'
+	uv lock --upgrade
 	$(UV_RUN) pre-commit autoupdate
 
 .PHONY: update-oldest-deps
@@ -244,7 +236,7 @@ build:
 	uv build
 
 .PHONY: release
-release: clean update-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload gh-release
+release: clean update-oldest-deps update-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload gh-release
 	@echo "Done!"
 
 .PHONY: version-tag
@@ -300,8 +292,9 @@ asv-machine:
 	$(UV_RUN) python config/asv_machine.py
 
 .PHONY: asv-run
+asv-run: ASV_REFS = $(shell $(UV_RUN) python config/refs-for-asv.py)
 asv-run: asv-machine
-	$(UV_RUN) python config/refs-for-asv.py | $(ASV) run --durations=all --skip-existing-successful --show-stderr HASHFILE:- $(ARGS)
+	$(ASV) run --durations=all --skip-existing-successful --show-stderr "$(ASV_REFS)" $(ARGS)
 
 .PHONY: asv-publish
 asv-publish:

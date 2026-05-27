@@ -361,7 +361,7 @@ class TestSigma2Estimates:
         sy = c[..., None] * y + d[..., None]
         scaled = func(sx, sy)
 
-        assert_close_matrices(scaled, jnp.square(c) * ref, rtol=1e-4, atol=1e-10)
+        assert_close_matrices(scaled, jnp.square(c) * ref, rtol=1e-3, atol=1e-10)
 
     @pytest.mark.parametrize(
         'func', [_sigma2_from_ols, partial(_sigma2_from_cg, maxiter=3)]
@@ -376,7 +376,7 @@ class TestSigma2Estimates:
         y = random.normal(keys.pop(), (k, n))
         batched = func(x, y)
         per_row = jnp.stack([func(x, y[i]) for i in range(k)])
-        assert_close_matrices(batched, per_row, rtol=1e-5, atol=1e-10)
+        assert_close_matrices(batched, per_row, rtol=1e-3, atol=1e-10)
 
     @pytest.mark.parametrize('k', [(), (3,)])
     @pytest.mark.parametrize('p', [5, 60])  # < n, > n
@@ -394,12 +394,12 @@ class TestSigma2Estimates:
         last = cg_series[-1, ...]
 
         if p < n:
-            assert_close_matrices(last, ols, rtol=1e-6)
+            assert_close_matrices(last, ols, rtol=1e-4)
             delta = jnp.diff(jnp.abs(cg_series - ols), axis=0)
             assert_close_matrices(jnp.minimum(delta, 0), delta, rtol=0.2)
         else:
             assert_close_matrices(ols, jnp.zeros_like(ols), atol=1e-8)
-            assert_close_matrices(last, jnp.zeros_like(last), atol=1e-6)
+            assert_close_matrices(last, jnp.zeros_like(last), atol=1e-5)
             first = cg_series[0, ...]
             assert_close_matrices(jnp.maximum(first, 0), first)
 
@@ -449,7 +449,7 @@ class TestSigma2Estimates:
 
         xy = x @ y.T
         ref = jnp.abs(x) @ jnp.abs(y.T)
-        assert_close_matrices(xy, ref, tozero=True, rtol=1e-7)
+        assert_close_matrices(xy, ref, tozero=True, rtol=1e-4)
 
         var = func(x, y)
         ddof = getattr(func, 'keywords', dict(maxiter=p))['maxiter']

@@ -24,8 +24,9 @@
 
 """Measure the speed of the MCMC and its interfaces."""
 
+import sys
 from collections.abc import Mapping
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from functools import partial
 from inspect import signature
@@ -70,7 +71,7 @@ from benchmarks.latest_bartz.mcmcstep import make_p_nonterminal
 from benchmarks.latest_bartz.testing import gen_data
 
 # asv config
-timeout = 30.0
+timeout = 120.0
 
 # config
 P = 100
@@ -513,13 +514,19 @@ class BaseRunMcmc(AutoParamNames):
 
     def time_run_mcmc(self, *_: Any) -> None:
         """Time running or compiling the function."""
+        # capture stderr to suppress equinox's noisy traceback when the
+        # kill-canary error is raised as expected
+        captured = StringIO()
         try:
-            self.task()
+            with redirect_stderr(captured):
+                self.task()
         except JaxRuntimeError as e:
             is_expected = self.kill_canary in str(e)
             if not is_expected:
+                sys.stderr.write(captured.getvalue())
                 raise
         else:
+            sys.stderr.write(captured.getvalue())
             if self.kill_niters is not None:
                 msg = 'expected JaxRuntimeError with canary not raised'
                 raise RuntimeError(msg)

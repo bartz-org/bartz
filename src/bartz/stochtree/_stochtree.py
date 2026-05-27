@@ -684,6 +684,3 @@ def check_X(X: np.ndarray | DataFrame) -> np.ndarray:
         msg = f'X must be 2D (m, p); got shape {X_np.shape}'
         raise ValueError(msg)
     return X_np
-
-
-__all__ = ['BARTModel', 'NotSampledError', 'OutcomeModel']

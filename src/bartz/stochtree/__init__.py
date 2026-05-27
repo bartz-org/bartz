@@ -1,6 +1,6 @@
-# bartz/src/bartz/__init__.py
+# bartz/src/bartz/stochtree/__init__.py
 #
-# Copyright (c) 2024-2026, The Bartz Contributors
+# Copyright (c) 2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -22,12 +22,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""
-Super-fast BART (Bayesian Additive Regression Trees) in Python.
+"""`stochtree`-compatible interface to bartz."""
 
-See the manual at https://bartz-org.github.io/bartz/docs
-"""
-
-from bartz import BART, grove, mcmcloop, mcmcstep, prepcovars, stochtree  # noqa: F401
-from bartz._interface import Bart, OutcomeType, PredictKind  # noqa: F401
-from bartz._version import __version__, __version_info__  # noqa: F401
+from bartz.stochtree._stochtree import (  # noqa: F401
+    BARTModel,
+    NotSampledError,
+    OutcomeModel,
+)

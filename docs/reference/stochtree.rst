@@ -1,6 +1,6 @@
-.. bartz/docs/reference/index.rst
+.. bartz/docs/reference/stochtree.rst
 ..
-.. Copyright (c) 2024-2026, The Bartz Contributors
+.. Copyright (c) 2026, The Bartz Contributors
 ..
 .. This file is part of bartz.
 ..
@@ -22,18 +22,8 @@
 .. OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 .. SOFTWARE.
 
-Reference
-=========
+stochtree Interface
+===================
 
-.. toctree::
-    :maxdepth: 1
-
-    interface.rst
-    newinterf.rst
-    stochtree.rst
-    grove.rst
-    mcmcstep.rst
-    mcmcloop.rst
-    prepcovars.rst
-    debug.rst
-    test.rst
+.. automodule:: bartz.stochtree
+    :members: BARTModel, OutcomeModel, NotSampledError

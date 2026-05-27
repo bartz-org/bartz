@@ -68,18 +68,14 @@ class OutcomeModel:
     """Outcome model specification, matching `stochtree.OutcomeModel`.
 
     Only ``('continuous', 'identity')`` and ``('binary', 'probit')`` are
-    supported; other combinations raise `NotImplementedError` at construction.
-
-    Parameters
-    ----------
-    outcome
-        Outcome family. ``'continuous'`` or ``'binary'``.
-    link
-        Link function. ``'identity'`` for continuous, ``'probit'`` for binary.
+    supported.
     """
 
     outcome: Literal['continuous', 'binary'] = 'continuous'
+    """Outcome family."""
+
     link: Literal['identity', 'probit'] = 'identity'
+    """Link function. ``'identity'`` for continuous, ``'probit'`` for binary."""
 
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, str):
@@ -106,50 +102,37 @@ class NotSampledError(RuntimeError):
 
 @dataclass(frozen=True, kw_only=True)
 class GeneralParams:
-    """Mirror of stochtree's ``general_params`` dict, with the keys bartz handles.
-
-    Parameters
-    ----------
-    cutpoint_grid_size
-        Maximum number of cutpoints to consider for each feature.
-    standardize
-        Whether to standardize the outcome before fitting (continuous case
-        only; ignored for probit binary).
-    sigma2_init
-        Starting value of global variance parameter. If `None`, bartz auto-
-        calibrates via its ``sigest='auto'`` heuristic.
-    sigma2_global_shape
-        Shape parameter of the inverse-gamma prior on the global error
-        variance. Stochtree's default ``0`` produces an improper prior; in
-        that case bartz falls back to ``sigdf=3`` / ``sigquant=0.9``.
-    sigma2_global_scale
-        Scale parameter of the inverse-gamma prior on the global error
-        variance.
-    variable_weights
-        Per-predictor sampling weights. Must be strictly positive (bartz does
-        not allow zero weights); pass a small positive value to suppress a
-        variable.
-    random_seed
-        Seed for the random number generator.
-    keep_every
-        Thinning factor for retained MCMC samples.
-    num_chains
-        Number of independent MCMC chains.
-    outcome_model
-        Outcome family / link specification. Only ``('continuous','identity')``
-        and ``('binary','probit')`` are supported.
-    """
+    """Mirror of stochtree's ``general_params`` dict, with the keys bartz handles."""
 
     cutpoint_grid_size: int = 100
+    """Maximum number of cutpoints to consider for each feature."""
+
     standardize: bool = True
+    """Whether to standardize the outcome before fitting. Ignored for probit binary."""
+
     sigma2_init: float | None = None
+    """Starting value of the global error variance. If `None`, bartz picks one automatically."""
+
     sigma2_global_shape: float = 0
+    """Shape parameter of the inverse-gamma prior on the global error variance."""
+
     sigma2_global_scale: float = 0
+    """Scale parameter of the inverse-gamma prior on the global error variance."""
+
     variable_weights: np.ndarray | None = None
+    """Per-predictor sampling weights. Must be strictly positive; pass a small positive value to suppress a variable."""
+
     random_seed: int | None = None
+    """Seed for the random number generator."""
+
     keep_every: int = 1
+    """Thinning factor for retained MCMC samples."""
+
     num_chains: int = 1
+    """Number of independent MCMC chains."""
+
     outcome_model: OutcomeModel = field(default_factory=OutcomeModel)
+    """Outcome family and link specification."""
 
     def __post_init__(self) -> None:
         _check_int(self.cutpoint_grid_size, 'cutpoint_grid_size')
@@ -180,44 +163,28 @@ class GeneralParams:
 
 @dataclass(frozen=True, kw_only=True)
 class MeanForestParams:
-    """Mirror of stochtree's ``mean_forest_params`` dict, restricted to the keys bartz handles.
-
-    Parameters
-    ----------
-    num_trees
-        Number of trees in the conditional mean ensemble.
-    alpha
-        Tree split prior base (``base`` in bartz; stochtree's name is
-        ``alpha``).
-    beta
-        Tree split prior decay (``power`` in bartz; stochtree's name is
-        ``beta``).
-    min_samples_leaf
-        Minimum number of training samples at a leaf.
-    max_depth
-        Maximum tree depth. Must be a non-negative integer at most
-        ``16``; bartz stores trees as full heap arrays whose size grows
-        exponentially with depth, so the stochtree convention
-        ``max_depth=-1`` (unbounded) is rejected.
-    sample_sigma2_leaf
-        Stochtree default is ``True`` (sample the leaf-variance prior). bartz
-        uses a fixed leaf-variance prior; ``True`` is rejected in
-        `__post_init__`. To use this shim, pass
-        ``mean_forest_params={'sample_sigma2_leaf': False}`` (matching the
-        bartz behavior).
-    sigma2_leaf_init
-        Initial leaf-variance prior. If `None`, defaults to
-        ``1 / num_trees`` (matching stochtree); the default is materialized in
-        `__post_init__`, so the attribute is always a float after construction.
-    """
+    """Mirror of stochtree's ``mean_forest_params`` dict, restricted to the keys bartz handles."""
 
     num_trees: int = 200
+    """Number of trees in the conditional mean ensemble."""
+
     alpha: float = 0.95
+    """Tree split prior base."""
+
     beta: float = 2.0
+    """Tree split prior decay."""
+
     min_samples_leaf: int = 5
+    """Minimum number of training samples at a leaf."""
+
     max_depth: int = 10
+    """Maximum tree depth. Must be a non-negative integer at most ``16``."""
+
     sample_sigma2_leaf: bool = True
+    """Whether to sample the leaf-variance prior. Must be set to ``False``."""
+
     sigma2_leaf_init: float | None = None
+    """Initial leaf-variance prior. If `None`, defaults to ``1 / num_trees``."""
 
     def __post_init__(self) -> None:
         _check_int(self.num_trees, 'num_trees')
@@ -296,55 +263,82 @@ class BARTModel:
     -----
     Differences from `stochtree`, by design:
 
-    - ``num_gfr`` has no default and must be set explicitly to ``0`` (bartz
-      has no grow-from-root sampler).
-    - ``mean_forest_params['sample_sigma2_leaf']`` is rejected when ``True``
-      (bartz uses a fixed leaf-variance prior); pass ``False`` explicitly.
+    - ``num_gfr`` has no default and must be set explicitly to ``0``.
+    - ``mean_forest_params['sample_sigma2_leaf']`` must be ``False``.
     - ``mean_forest_params['max_depth']`` must be a non-negative integer at
-      most ``16``; stochtree's ``-1`` (unbounded depth) sentinel is rejected
-      because bartz stores trees as full heap arrays.
+      most ``16``; stochtree's ``-1`` (unbounded depth) sentinel is not
+      accepted.
     - The deprecated ``general_params['probit_outcome_model']`` flag is not
       accepted; pass ``outcome_model=OutcomeModel('binary', 'probit')``
       instead.
-    - The stochtree arguments that select unsupported behavior — leaf-basis
-      regression, random effects, heteroskedastic variance forests,
-      warm-starting from a previous model — are removed from the signatures
-      rather than raising at runtime.
-    - With ``sigma2_global_shape == 0`` and ``sigma2_global_scale == 0``
-      (stochtree's improper-prior default), bartz falls back to its
-      ``sigest='auto'`` / ``sigdf=3`` / ``sigquant=0.9`` automatic
-      calibration; pass explicit positive values to align both packages.
-    - bartz uses single-precision floats, so outputs differ from stochtree at
-      the float32 precision level.
+    - Leaf-basis regression, random effects, heteroskedastic variance
+      forests, and warm-starting from a previous model are not supported.
+    - bartz uses single-precision floats, so outputs differ from stochtree
+      at the float32 precision level.
 
     References
     ----------
-    Krantsevich, N., He, J., Hahn, P. R. (2023). "stochtree: Stochastic Tree
-    Ensembles in Python".
+    Herren, A., Hahn, P. R., Murray, J., Carvalho, C. (2026). "StochTree:
+    BART-based modeling in R and Python". arXiv:2512.12051.
     """
 
     # public, set by sample()
     sampled: bool
+    """Whether `sample` has been called."""
+
     standardize: bool
+    """Whether the outcome was standardized before fitting."""
+
     sample_sigma2_global: bool
+    """Whether the global error variance is sampled (always ``True``)."""
+
     probit_outcome_model: bool
+    """Whether the model uses a binary outcome with probit link."""
+
     outcome_model: OutcomeModel
+    """Outcome family and link specification used during fitting."""
+
     num_gfr: int
+    """Number of grow-from-root iterations (always ``0``)."""
+
     num_burnin: int
+    """Number of MCMC burn-in iterations."""
+
     num_mcmc: int
+    """Number of retained MCMC iterations per chain."""
+
     num_chains: int
+    """Number of independent MCMC chains."""
+
     num_samples: int
+    """Total number of retained posterior samples (``num_mcmc * num_chains``)."""
+
     sigma2_init: float | None
+    """Starting value of the global error variance."""
+
     y_bar: float
+    """Mean used to standardize the outcome (``0`` if not standardized)."""
+
     y_std: float
+    """Standard deviation used to standardize the outcome (``1`` if not standardized)."""
+
     has_rfx: bool
+    """Whether the model includes random effects (always ``False``)."""
+
     include_mean_forest: bool
+    """Whether the model includes a conditional mean forest (always ``True``)."""
+
     include_variance_forest: bool
+    """Whether the model includes a variance forest (always ``False``)."""
 
     y_hat_train: Float32[Array, 'n num_samples']
+    """Posterior predictions at the training covariates, in the original outcome scale."""
+
     global_var_samples: Float32[Array, ' num_samples']
+    """Posterior samples of the global error variance. For probit binary regression, an array of ones."""
 
     y_hat_test: Float32[Array, 'm num_samples'] | None
+    """Posterior predictions at `X_test` if it was supplied to `sample`, else `None`."""
 
     _bart: Bart
 
@@ -370,11 +364,8 @@ class BARTModel:
     ) -> None:
         """Fit the model.
 
-        The signature mirrors `stochtree.BARTModel.sample`, with the
-        unsupported keyword arguments (``leaf_basis_train``,
-        ``rfx_group_ids_train``, ``previous_model_json``,
-        ``variance_forest_params``, ``random_effects_params`` and their
-        siblings) removed instead of raising at runtime.
+        The signature mirrors `stochtree.BARTModel.sample`, restricted to the
+        keyword arguments bartz supports.
 
         Parameters
         ----------
@@ -403,8 +394,7 @@ class BARTModel:
         Raises
         ------
         NotImplementedError
-            If ``num_gfr`` is non-zero, since bartz has no grow-from-root
-            sampler.
+            If ``num_gfr`` is non-zero.
         """
         if num_gfr != 0:
             msg = (

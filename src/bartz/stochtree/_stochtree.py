@@ -666,13 +666,6 @@ def check_variable_weights(
     if arr.shape != (p,):
         msg = f'variable_weights must have shape (p,)=({p},), got {arr.shape}'
         raise ValueError(msg)
-    if jnp.any(arr <= 0).item():
-        msg = (
-            'variable_weights must be strictly positive (bartz does not'
-            ' allow zero weights); use a small value to suppress a'
-            ' variable.'
-        )
-        raise ValueError(msg)
     return arr
 
 

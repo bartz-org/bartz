@@ -29,6 +29,7 @@ from typing import NamedTuple
 import numpy as np
 import pytest
 import stochtree
+from equinox import EquinoxRuntimeError
 from jax.scipy.special import ndtr
 from numpy.testing import assert_array_less
 from pytest_subtests import SubTests
@@ -283,7 +284,7 @@ def test_variable_weights_validation(keys: split) -> None:
     data = _make_continuous(keys, n=40, n_test=5)
     p = data.X_train.shape[1]
     m = bst.BARTModel()
-    with pytest.raises(ValueError, match='strictly positive'):
+    with pytest.raises(EquinoxRuntimeError, match='varprob must be > 0'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,

@@ -134,8 +134,6 @@ def test_predict_shapes(keys: split) -> None:
     full = m.predict(data.X_test, terms='all')
     assert isinstance(full, dict)
     assert full['y_hat'].shape == (data.X_test.shape[0], m.num_samples)
-    assert full['rfx_predictions'] is None
-    assert full['variance_forest_predictions'] is None
 
 
 def test_binary_smoke(keys: split) -> None:

@@ -531,7 +531,7 @@ class BARTModel:
         type: str = 'posterior',  # noqa: A002
         terms: str | Sequence[str] = 'all',
         scale: str = 'linear',
-    ) -> np.ndarray | dict[str, np.ndarray | None]:
+    ) -> np.ndarray | dict[str, np.ndarray]:
         """Predict at new covariates.
 
         Parameters
@@ -545,9 +545,7 @@ class BARTModel:
         terms
             One of ``'y_hat'``, ``'mean_forest'``, ``'all'``, or a list. Since
             random effects and a variance forest are not supported, ``'y_hat'``
-            and ``'mean_forest'`` produce the same result; ``'rfx'`` and
-            ``'variance_forest'`` are accepted (matching stochtree) but the
-            corresponding entries are `None`.
+            and ``'mean_forest'`` produce the same result.
         scale
             For probit binary regression: ``'linear'`` returns the eta values,
             ``'probability'`` returns ``Phi(eta)``, ``'class'`` returns 0 / 1.
@@ -589,12 +587,12 @@ class BARTModel:
         single = sum([wants_y_hat, wants_mean_forest]) == 1
         if single:
             return pred_out
-        return {
-            'y_hat': pred_out if wants_y_hat else None,
-            'mean_forest_predictions': pred_out if wants_mean_forest else None,
-            'rfx_predictions': None,
-            'variance_forest_predictions': None,
-        }
+        result: dict[str, np.ndarray] = {}
+        if wants_y_hat:
+            result['y_hat'] = pred_out
+        if wants_mean_forest:
+            result['mean_forest_predictions'] = pred_out
+        return result
 
     def _predict_y_hat_internal(
         self, x: Float[Array, 'p m'] | Literal['train']
@@ -690,11 +688,8 @@ def check_predict_args(
         raise ValueError(msg)
     terms_list = [terms] if isinstance(terms, str) else list(terms)
     for t in terms_list:
-        if t not in ('y_hat', 'mean_forest', 'rfx', 'variance_forest', 'all'):
-            msg = (
-                f'unknown term {t!r}; valid terms are y_hat, mean_forest,'
-                ' rfx, variance_forest, all'
-            )
+        if t not in ('y_hat', 'mean_forest', 'all'):
+            msg = f'unknown term {t!r}; valid terms are y_hat, mean_forest, all'
             raise ValueError(msg)
     return terms_list
 

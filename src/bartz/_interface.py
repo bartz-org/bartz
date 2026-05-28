@@ -891,7 +891,7 @@ class Bart(Module):
         return depth_distr(self._main_trace)
 
     def _points_per_node_distr(
-        self, node_type: str
+        self, node_type: Literal['leaf', 'leaf-parent']
     ) -> Int32[Array, '*num_chains n_save n+1']:
         return points_per_node_distr_trace(
             self._mcmc_state.X, self._main_trace, node_type
@@ -1503,7 +1503,7 @@ def depth_distr(trace: MainTrace) -> Int32[Array, '*num_chains n_save d']:
 
 @partial(jit, static_argnames='node_type')
 def points_per_node_distr_trace(
-    X: UInt[Array, 'p n'], trace: MainTrace, node_type: str
+    X: UInt[Array, 'p n'], trace: MainTrace, node_type: Literal['leaf', 'leaf-parent']
 ) -> Int32[Array, '*num_chains n_save n+1']:
     """Histogram of number of points per node, for every tree draw in the trace."""
     chain_axes = chain_vmap_axes(trace)

@@ -103,9 +103,9 @@ def run_sim_impl(
         if arg not in sig.parameters:
             kw.pop(arg)
 
-    drop_if_missing('rm_const')
-    drop_if_missing('bart_kwargs')
-    drop_if_missing('mc_cores')
+    drop_if_missing('rm_const')  # WORKAROUND(bartz<0.7.0): rm_const added in 0.7.0
+    drop_if_missing('bart_kwargs')  # WORKAROUND(bartz<0.8.0): mc_gbart kwarg
+    drop_if_missing('mc_cores')  # WORKAROUND(bartz<0.8.0): mc_gbart kwarg
 
     bart = mc_gbart(**kw)
 

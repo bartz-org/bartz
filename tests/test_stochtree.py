@@ -26,10 +26,13 @@
 
 from typing import NamedTuple
 
+import jax
 import numpy as np
 import pytest
 import stochtree
 from equinox import EquinoxRuntimeError
+from jax import numpy as jnp
+from jax import random
 from jax.scipy.special import ndtr
 from numpy.testing import assert_array_less
 from pytest_subtests import SubTests
@@ -37,7 +40,7 @@ from pytest_subtests import SubTests
 import bartz.stochtree as bst
 from bartz._jaxext import split
 from bartz.testing import gen_data
-from tests.util import assert_allclose, clipped_logit, rhat_rank
+from tests.util import assert_allclose, assert_close_matrices, clipped_logit, rhat_rank
 
 _GEN_KW = dict(p=4, q=2, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.5)
 # `mean_forest_params` override that disables the bartz-incompatible
@@ -306,7 +309,7 @@ def test_variable_weights_validation(keys: split) -> None:
 
 
 def test_standardization_matches(keys: split) -> None:
-    """``y_bar`` / ``y_std`` are computed identically to stochtree."""
+    """``y_bar`` / ``y_std`` are computed identically to stochtree (modulo float32)."""
     data = _make_continuous(keys, n=100, n_test=10)
     st_model = stochtree.BARTModel()
     st_model.sample(
@@ -326,8 +329,9 @@ def test_standardization_matches(keys: split) -> None:
         num_mcmc=10,
         mean_forest_params=_MFP_BASE,
     )
-    assert_allclose(bz_model.y_bar, st_model.y_bar, rtol=1e-12)
-    assert_allclose(bz_model.y_std, st_model.y_std, rtol=1e-12)
+    # bartz computes the standardization in float32; stochtree in float64.
+    assert_allclose(bz_model.y_bar, st_model.y_bar, rtol=1e-6)
+    assert_allclose(bz_model.y_std, st_model.y_std, rtol=1e-6)
 
 
 @pytest.fixture
@@ -376,9 +380,9 @@ def test_compare_continuous_with_stochtree(
     st_model, bz_model = comparison_continuous
 
     with subtests.test('y_bar'):
-        assert_allclose(bz_model.y_bar, st_model.y_bar, rtol=1e-12)
+        assert_allclose(bz_model.y_bar, st_model.y_bar, rtol=1e-6)
     with subtests.test('y_std'):
-        assert_allclose(bz_model.y_std, st_model.y_std, rtol=1e-12)
+        assert_allclose(bz_model.y_std, st_model.y_std, rtol=1e-6)
 
     with subtests.test('rhat_y_hat_train'):
         rhat = _rhat_two_chains(bz_model.y_hat_train, st_model.y_hat_train)
@@ -448,9 +452,9 @@ def test_compare_binary_with_stochtree(
     """
     st_model, bz_model = comparison_binary
 
-    # y_bar = norm.ppf(mean(y)) is deterministic and must match exactly
+    # y_bar = ndtri(mean(y)) is deterministic and must match modulo float32 precision
     with subtests.test('y_bar'):
-        assert_allclose(bz_model.y_bar, st_model.y_bar, rtol=1e-12)
+        assert_allclose(bz_model.y_bar, st_model.y_bar, rtol=1e-5)
 
     with subtests.test('rhat_y_hat_train'):
         rhat = _rhat_two_chains(bz_model.y_hat_train, st_model.y_hat_train)
@@ -468,3 +472,97 @@ def test_compare_binary_with_stochtree(
         st_l = np.asarray(clipped_logit(st_prob, 1e-5))
         rhat = _rhat_two_chains(bz_l, st_l)
         assert_array_less(rhat, 1.30)
+
+
+def test_jit(keys: split) -> None:
+    """Test that jitting around BARTModel.sample + predict works.
+
+    All values that aren't used for shape / Python-level control flow are
+    passed as jit arguments, so any accidentally non-traceable use of them
+    surfaces as a ConcretizationTypeError.
+    """
+    data = _make_continuous(keys, n=80, n_test=20)
+    X_train = jnp.asarray(data.X_train)
+    y_train = jnp.asarray(data.y_train)
+    X_test = jnp.asarray(data.X_test)
+    X_predict = jnp.asarray(data.X_test[:5])
+    w = jnp.ones(y_train.shape)
+    key = random.key(0)
+    p = X_train.shape[1]
+    # traceable scalars / arrays
+    sigma2_init = jnp.float32(1.0)
+    alpha = jnp.float32(0.95)
+    beta = jnp.float32(2.0)
+    sigma2_leaf_init = jnp.float32(1.0 / 200)
+    variable_weights = jnp.ones(p)
+    # devices can't be inferred from a jit tracer, so pre-determine the platform;
+    # rm_const requires concrete max_split values, so disable it for tracing.
+    bart_kwargs: dict = {'devices': jax.devices(y_train.platform()), 'rm_const': False}
+
+    def task(
+        X: jax.Array,
+        y: jax.Array,
+        X_test: jax.Array,
+        X_predict: jax.Array,
+        w: jax.Array,
+        key: jax.Array,
+        sigma2_init: jax.Array,
+        alpha: jax.Array,
+        beta: jax.Array,
+        sigma2_leaf_init: jax.Array,
+        variable_weights: jax.Array,
+    ) -> tuple[jax.Array, ...]:
+        m = bst.BARTModel()
+        m.sample(
+            X_train=X,
+            y_train=y,
+            X_test=X_test,
+            observation_weights=w,
+            num_gfr=0,
+            num_burnin=5,
+            num_mcmc=10,
+            general_params={
+                'random_seed': key,
+                'sigma2_init': sigma2_init,
+                'variable_weights': variable_weights,
+            },
+            mean_forest_params={
+                **_MFP_BASE,
+                'alpha': alpha,
+                'beta': beta,
+                'sigma2_leaf_init': sigma2_leaf_init,
+            },
+            bart_kwargs=bart_kwargs,
+        )
+        pred_mean = m.predict(X_predict, type='mean', terms='y_hat')
+        pred_post = m.predict(X_predict, type='posterior', terms='y_hat')
+        return (
+            m.y_hat_train,
+            m.y_hat_test,
+            m.global_var_samples,
+            m.y_bar,
+            m.y_std,
+            pred_mean,
+            pred_post,
+        )
+
+    args = (
+        X_train,
+        y_train,
+        X_test,
+        X_predict,
+        w,
+        key,
+        sigma2_init,
+        alpha,
+        beta,
+        sigma2_leaf_init,
+        variable_weights,
+    )
+    args_cloned = (*args[:5], random.clone(key), *args[6:])
+
+    out1 = task(*args)
+    out2 = jax.jit(task)(*args_cloned)
+
+    for a, b in zip(out1, out2, strict=True):
+        assert_close_matrices(a, b, rtol=1e-5)

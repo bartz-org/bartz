@@ -24,43 +24,26 @@
 
 """Implement class `BARTModel` that mimics the Python package stochtree."""
 
-import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from functools import partial
+
+# WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
+from types import MappingProxyType
 from typing import Any, Literal, TypeVar
 
-import numpy as np
 from jax import numpy as jnp
 from jax.scipy.special import ndtr
-from jaxtyping import Array, Float, Float32
-from scipy.stats import norm
+from jaxtyping import Array, Float, Float32, Key, Real, Shaped
 
-from bartz._interface import Bart, DataFrame, PredictKind
+from bartz._interface import Bart, DataFrame, PredictKind, Series
+from bartz._jaxext.scipy.special import ndtri
+from bartz.mcmcstep._state import ArrayLike, FloatLike
 from bartz.prepcovars import UniqueQuantileBinner
 
 T = TypeVar('T')
 
 _MAX_DEPTH_LIMIT = 16
-
-
-def _check_int(value: object, name: str) -> None:
-    # bool is a subclass of int; reject explicitly to avoid silent coercion.
-    if isinstance(value, bool) or not isinstance(value, int):
-        msg = f'{name} must be int, got {type(value).__name__}'
-        raise TypeError(msg)
-
-
-def _check_float(value: object, name: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        msg = f'{name} must be float, got {type(value).__name__}'
-        raise TypeError(msg)
-
-
-def _check_bool(value: object, name: str) -> None:
-    if not isinstance(value, bool):
-        msg = f'{name} must be bool, got {type(value).__name__}'
-        raise TypeError(msg)
 
 
 @dataclass(frozen=True)
@@ -78,12 +61,6 @@ class OutcomeModel:
     """Link function. ``'identity'`` for continuous, ``'probit'`` for binary."""
 
     def __post_init__(self) -> None:
-        if not isinstance(self.outcome, str):
-            msg = f'outcome must be str, got {type(self.outcome).__name__}'
-            raise TypeError(msg)
-        if not isinstance(self.link, str):
-            msg = f'link must be str, got {type(self.link).__name__}'
-            raise TypeError(msg)
         if (self.outcome, self.link) not in (
             ('continuous', 'identity'),
             ('binary', 'probit'),
@@ -110,19 +87,19 @@ class GeneralParams:
     standardize: bool = True
     """Whether to standardize the outcome before fitting. Ignored for probit binary."""
 
-    sigma2_init: float | None = None
+    sigma2_init: FloatLike | None = None
     """Starting value of the global error variance. If `None`, bartz picks one automatically."""
 
-    sigma2_global_shape: float = 0
+    sigma2_global_shape: FloatLike = 0
     """Shape parameter of the inverse-gamma prior on the global error variance."""
 
-    sigma2_global_scale: float = 0
+    sigma2_global_scale: FloatLike = 0
     """Scale parameter of the inverse-gamma prior on the global error variance."""
 
-    variable_weights: np.ndarray | None = None
+    variable_weights: Float[ArrayLike, ' p'] | None = None
     """Per-predictor sampling weights. Must be strictly positive; pass a small positive value to suppress a variable."""
 
-    random_seed: int | None = None
+    random_seed: int | Key[Array, ''] | None = None
     """Seed for the random number generator."""
 
     keep_every: int = 1
@@ -134,32 +111,6 @@ class GeneralParams:
     outcome_model: OutcomeModel = field(default_factory=OutcomeModel)
     """Outcome family and link specification."""
 
-    def __post_init__(self) -> None:
-        _check_int(self.cutpoint_grid_size, 'cutpoint_grid_size')
-        _check_bool(self.standardize, 'standardize')
-        if self.sigma2_init is not None:
-            _check_float(self.sigma2_init, 'sigma2_init')
-        _check_float(self.sigma2_global_shape, 'sigma2_global_shape')
-        _check_float(self.sigma2_global_scale, 'sigma2_global_scale')
-        if self.variable_weights is not None and not isinstance(
-            self.variable_weights, np.ndarray
-        ):
-            msg = (
-                f'variable_weights must be np.ndarray, got '
-                f'{type(self.variable_weights).__name__}'
-            )
-            raise TypeError(msg)
-        if self.random_seed is not None:
-            _check_int(self.random_seed, 'random_seed')
-        _check_int(self.keep_every, 'keep_every')
-        _check_int(self.num_chains, 'num_chains')
-        if not isinstance(self.outcome_model, OutcomeModel):
-            msg = (
-                f'outcome_model must be OutcomeModel, got '
-                f'{type(self.outcome_model).__name__}'
-            )
-            raise TypeError(msg)
-
 
 @dataclass(frozen=True, kw_only=True)
 class MeanForestParams:
@@ -168,10 +119,10 @@ class MeanForestParams:
     num_trees: int = 200
     """Number of trees in the conditional mean ensemble."""
 
-    alpha: float = 0.95
+    alpha: FloatLike = 0.95
     """Tree split prior base."""
 
-    beta: float = 2.0
+    beta: FloatLike = 2.0
     """Tree split prior decay."""
 
     min_samples_leaf: int = 5
@@ -183,19 +134,10 @@ class MeanForestParams:
     sample_sigma2_leaf: bool = True
     """Whether to sample the leaf-variance prior. Must be set to ``False``."""
 
-    sigma2_leaf_init: float | None = None
+    sigma2_leaf_init: FloatLike | None = None
     """Initial leaf-variance prior. If `None`, defaults to ``1 / num_trees``."""
 
     def __post_init__(self) -> None:
-        _check_int(self.num_trees, 'num_trees')
-        _check_float(self.alpha, 'alpha')
-        _check_float(self.beta, 'beta')
-        _check_int(self.min_samples_leaf, 'min_samples_leaf')
-        _check_int(self.max_depth, 'max_depth')
-        _check_bool(self.sample_sigma2_leaf, 'sample_sigma2_leaf')
-        if self.sigma2_leaf_init is not None:
-            _check_float(self.sigma2_leaf_init, 'sigma2_leaf_init')
-
         if self.sample_sigma2_leaf:
             msg = (
                 'sample_sigma2_leaf=True is not supported (bartz uses a fixed'
@@ -313,13 +255,13 @@ class BARTModel:
     num_samples: int
     """Total number of retained posterior samples (``num_mcmc * num_chains``)."""
 
-    sigma2_init: float | None
+    sigma2_init: FloatLike | None
     """Starting value of the global error variance."""
 
-    y_bar: float
+    y_bar: Float32[Array, '']
     """Mean used to standardize the outcome (``0`` if not standardized)."""
 
-    y_std: float
+    y_std: Float32[Array, '']
     """Standard deviation used to standardize the outcome (``1`` if not standardized)."""
 
     has_rfx: bool
@@ -351,16 +293,17 @@ class BARTModel:
 
     def sample(
         self,
-        X_train: np.ndarray | DataFrame,
-        y_train: np.ndarray,
-        X_test: np.ndarray | DataFrame | None = None,
-        observation_weights: np.ndarray | None = None,
+        X_train: Real[ArrayLike, 'n p'] | DataFrame,
+        y_train: Real[ArrayLike, ' n'] | Series,
+        X_test: Real[ArrayLike, 'm p'] | DataFrame | None = None,
+        observation_weights: Float[ArrayLike, ' n'] | Series | None = None,
         *,
         num_gfr: int,
         num_burnin: int = 0,
         num_mcmc: int = 100,
         general_params: dict[str, Any] | None = None,
         mean_forest_params: dict[str, Any] | None = None,
+        bart_kwargs: Mapping[str, Any] = MappingProxyType({}),
     ) -> None:
         """Fit the model.
 
@@ -390,6 +333,10 @@ class BARTModel:
         mean_forest_params
             Override for the keys of `MeanForestParams`. Must explicitly
             disable ``sample_sigma2_leaf``.
+        bart_kwargs
+            Additional arguments forwarded to `bartz.Bart`. Use this to set
+            ``devices`` and ``rm_const=False`` when wrapping `sample` in
+            `jax.jit`.
 
         Raises
         ------
@@ -410,11 +357,12 @@ class BARTModel:
 
         is_probit = gp.outcome_model.outcome == 'binary'
 
-        X_train_np, y_train_np = process_train_inputs(X_train, y_train)
-        _, p = X_train_np.shape
+        X_train_arr, y_train_arr = process_train_inputs(X_train, y_train)
+        _, p = X_train_arr.shape
 
-        # standardization matches stochtree's y_bar / y_std logic
-        y_bar, y_std, y_for_bartz = standardize_y(y_train_np, is_probit, gp.standardize)
+        y_bar, y_std, y_for_bartz = standardize_y(
+            y_train_arr, is_probit, gp.standardize
+        )
 
         bart_num_chains = None if gp.num_chains == 1 else gp.num_chains
 
@@ -422,7 +370,7 @@ class BARTModel:
         # stochtree's sigma2_leaf is the leaf-variance prior. Hold k=2 and solve
         # for tau_num so that the two parameterizations agree.
         bartz_k = 2.0
-        tau_num_arg = bartz_k * math.sqrt(mfp.num_trees * mfp.sigma2_leaf_init)
+        tau_num_arg = bartz_k * jnp.sqrt(mfp.num_trees * mfp.sigma2_leaf_init)
 
         sigdf, lambda_, sigest_arg = resolve_variance_prior(
             gp.sigma2_global_shape, gp.sigma2_global_scale, gp.sigma2_init
@@ -435,15 +383,10 @@ class BARTModel:
         variable_weights = check_variable_weights(gp.variable_weights, p)
 
         seed = 0 if gp.random_seed is None else gp.random_seed
-        w_arg = (
-            None
-            if observation_weights is None
-            else jnp.asarray(observation_weights, jnp.float32)
-        )
 
-        self._bart = Bart(
-            x_train=jnp.asarray(X_train_np.T),
-            y_train=jnp.asarray(y_for_bartz),
+        kwargs: dict = dict(
+            x_train=X_train_arr.T,
+            y_train=y_for_bartz,
             outcome_type='binary' if is_probit else 'continuous',
             binner=binner,
             varprob=variable_weights,
@@ -455,7 +398,7 @@ class BARTModel:
             base=mfp.alpha,
             lambda_=lambda_,
             tau_num=tau_num_arg,
-            w=w_arg,
+            w=observation_weights,
             num_trees=mfp.num_trees,
             n_save=num_mcmc,
             n_burn=num_burnin,
@@ -466,6 +409,8 @@ class BARTModel:
             maxdepth=mfp.max_depth + 1,
             init_kw={'min_points_per_leaf': mfp.min_samples_leaf},
         )
+        kwargs.update(bart_kwargs)
+        self._bart = Bart(**kwargs)
         self._finalize_sample(
             outcome_model=gp.outcome_model,
             num_burnin=num_burnin,
@@ -485,11 +430,11 @@ class BARTModel:
         num_burnin: int,
         num_mcmc: int,
         num_chains: int,
-        sigma2_init: float | None,
-        y_bar: float,
-        y_std: float,
+        sigma2_init: FloatLike | None,
+        y_bar: Float32[Array, ''],
+        y_std: Float32[Array, ''],
         standardize: bool,
-        X_test: np.ndarray | DataFrame | None,
+        X_test: Real[ArrayLike, 'm p'] | DataFrame | None,
     ) -> None:
         """Populate the public attributes after `_bart` has been constructed."""
         is_probit = outcome_model.outcome == 'binary'
@@ -513,26 +458,25 @@ class BARTModel:
         # cached outputs in stochtree's (n, num_samples) layout, original scale
         self.y_hat_train = self._predict_y_hat_internal('train')
         if X_test is not None:
-            X_test_np = check_X(X_test)
-            self.y_hat_test = self._predict_y_hat_internal(jnp.asarray(X_test_np.T))
+            self.y_hat_test = self._predict_y_hat_internal(check_X(X_test).T)
         else:
             self.y_hat_test = None
 
         if is_probit:
-            self.global_var_samples = jnp.ones((self.num_samples,), dtype=jnp.float32)
+            self.global_var_samples = jnp.ones((self.num_samples,))
         else:
             sigma = self._bart.get_error_sdev()
             self.global_var_samples = (sigma * y_std) ** 2
 
     def predict(
         self,
-        X: np.ndarray | DataFrame,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
         *,
         type: Literal['posterior', 'mean'] = 'posterior',  # noqa: A002
         terms: Literal['y_hat', 'mean_forest', 'all']
         | Sequence[Literal['y_hat', 'mean_forest', 'all']] = 'all',
         scale: Literal['linear', 'probability', 'class'] = 'linear',
-    ) -> np.ndarray | dict[str, np.ndarray]:
+    ) -> Shaped[Array, '...'] | dict[str, Shaped[Array, '...']]:
         """Predict at new covariates.
 
         Parameters
@@ -554,8 +498,7 @@ class BARTModel:
 
         Returns
         -------
-        Either a single numpy array (for a single requested term) or a dict
-        keyed by term name (matching stochtree's behavior).
+        Either a single jax array (for a single requested term) or a dict keyed by term name (matching stochtree's behavior).
 
         Raises
         ------
@@ -570,9 +513,7 @@ class BARTModel:
             raise NotSampledError(msg)
         terms_list = check_predict_args(type, scale, terms, self.probit_outcome_model)
 
-        X_np = check_X(X)
-        x_bartz = jnp.asarray(X_np.T)
-        pred = self._predict_y_hat_internal(x_bartz)
+        pred = self._predict_y_hat_internal(check_X(X).T)
 
         if self.probit_outcome_model and scale in ('probability', 'class'):
             prob = ndtr(pred)
@@ -588,7 +529,7 @@ class BARTModel:
         single = sum([wants_y_hat, wants_mean_forest]) == 1
         if single:
             return pred_out
-        result: dict[str, np.ndarray] = {}
+        result: dict[str, Shaped[Array, '...']] = {}
         if wants_y_hat:
             result['y_hat'] = pred_out
         if wants_mean_forest:
@@ -596,7 +537,7 @@ class BARTModel:
         return result
 
     def _predict_y_hat_internal(
-        self, x: Float[Array, 'p m'] | Literal['train']
+        self, x: Real[ArrayLike, 'p m'] | Literal['train']
     ) -> Float32[Array, 'm num_samples']:
         """Return predictions on the original outcome scale, layout ``(m, num_samples)``."""
         latent = self._bart.predict(x, kind=PredictKind.latent_samples)
@@ -609,26 +550,25 @@ class BARTModel:
 
 
 def standardize_y(
-    y_train_np: np.ndarray, is_probit: bool, standardize: bool
-) -> tuple[float, float, np.ndarray]:
+    y_train: Real[ArrayLike, ' n'], is_probit: bool, standardize: bool
+) -> tuple[Float32[Array, ''], Float32[Array, ''], Float32[Array, ' n']]:
     """Return ``(y_bar, y_std, y_for_bartz)`` matching stochtree's standardization."""
+    y = jnp.asarray(y_train, jnp.float32)
     if is_probit:
-        (n,) = y_train_np.shape
-        mean01 = float(np.mean(y_train_np != 0))
-        mean01 = min(max(mean01, 1.0 / (n + 1)), n / (n + 1))
-        y_bar = float(norm.ppf(mean01))
-        return y_bar, 1.0, (y_train_np != 0).astype(np.float32)
+        (n,) = y.shape
+        mean01 = jnp.clip((y != 0).mean(), 1.0 / (n + 1), n / (n + 1))
+        return ndtri(mean01), jnp.float32(1.0), (y != 0).astype(jnp.float32)
     if standardize:
-        y_bar = float(np.mean(y_train_np))
-        y_std_val = float(np.std(y_train_np))
-        y_std = y_std_val if y_std_val > 0 else 1.0
-        return y_bar, y_std, (y_train_np - y_bar) / y_std
-    return 0.0, 1.0, y_train_np.astype(np.float32)
+        y_bar = y.mean()
+        y_std_val = y.std()
+        y_std = jnp.where(y_std_val > 0, y_std_val, 1.0)
+        return y_bar, y_std, (y - y_bar) / y_std
+    return jnp.float32(0.0), jnp.float32(1.0), y
 
 
 def resolve_variance_prior(
-    shape: float, scale: float, sigma2_init: float | None
-) -> tuple[float, float | None, float | Literal['auto']]:
+    shape: FloatLike, scale: FloatLike, sigma2_init: FloatLike | None
+) -> tuple[FloatLike, FloatLike | None, FloatLike | Literal['auto']]:
     """Translate stochtree's IG(shape, scale) prior to bartz's scaled-inv-chi2.
 
     Parameters
@@ -649,14 +589,14 @@ def resolve_variance_prior(
         # bartz rejects sigest when lambda_ is set; stochtree's sigma2_init is
         # the chain starting value, not the prior scale, so we drop it here.
         return 2.0 * shape, scale / shape, 'auto'
-    sigest_arg: float | Literal['auto'] = (
-        math.sqrt(float(sigma2_init)) if sigma2_init is not None else 'auto'
+    sigest_arg: FloatLike | Literal['auto'] = (
+        jnp.sqrt(sigma2_init) if sigma2_init is not None else 'auto'
     )
     return 3.0, None, sigest_arg
 
 
 def check_variable_weights(
-    variable_weights: np.ndarray | None, p: int
+    variable_weights: Float[ArrayLike, ' p'] | None, p: int
 ) -> Float32[Array, ' p'] | None:
     """Validate `variable_weights`, returning the jax array (or None)."""
     if variable_weights is None:
@@ -700,38 +640,43 @@ def check_predict_args(
 
 
 def process_train_inputs(
-    X_train: np.ndarray | DataFrame, y_train: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    if hasattr(X_train, 'to_numpy') and hasattr(X_train, 'columns'):
-        X_np = np.asarray(X_train.to_numpy())
-    else:
-        X_np = np.asarray(X_train)
-    if X_np.ndim == 1:
-        X_np = X_np[:, None]
-    if X_np.ndim != 2:
-        msg = f'X_train must be 2D (n, p); got shape {X_np.shape}'
-        raise ValueError(msg)
-    y_np = np.asarray(y_train)
-    if y_np.ndim != 1:
-        msg = f'y_train must be 1D (n,); got shape {y_np.shape}'
-        raise ValueError(msg)
-    if y_np.shape[0] != X_np.shape[0]:
+    X_train: Real[ArrayLike, 'n p'] | DataFrame, y_train: Real[ArrayLike, ' n'] | Series
+) -> tuple[Real[Array, 'n p'], Real[Array, ' n']]:
+    """Convert training inputs to 2-D / 1-D jax arrays and verify their shapes are compatible."""
+    X = check_X(X_train, name='X_train')
+    y = _coerce_response(y_train, name='y_train')
+    if y.shape[0] != X.shape[0]:
         msg = (
             f'X_train and y_train length mismatch: X_train has '
-            f'{X_np.shape[0]} rows, y_train has {y_np.shape[0]} entries'
+            f'{X.shape[0]} rows, y_train has {y.shape[0]} entries'
         )
         raise ValueError(msg)
-    return X_np, y_np
+    return X, y
 
 
-def check_X(X: np.ndarray | DataFrame) -> np.ndarray:
-    if hasattr(X, 'to_numpy') and hasattr(X, 'columns'):
-        X_np = np.asarray(X.to_numpy())
-    else:
-        X_np = np.asarray(X)
-    if X_np.ndim == 1:
-        X_np = X_np[:, None]
-    if X_np.ndim != 2:
-        msg = f'X must be 2D (m, p); got shape {X_np.shape}'
+def check_X(
+    X: Real[ArrayLike, 'n p'] | DataFrame, *, name: str = 'X'
+) -> Real[Array, 'n p']:
+    """Convert a DataFrame/array-like to a 2-D jax array in ``(n, p)`` layout."""
+    if hasattr(X, 'columns') and hasattr(X, 'to_numpy'):
+        X = X.to_numpy()
+    arr = jnp.asarray(X)
+    if arr.ndim == 1:
+        arr = arr[:, None]
+    if arr.ndim != 2:
+        msg = f'{name} must be 2D (n, p); got shape {arr.shape}'
         raise ValueError(msg)
-    return X_np
+    return arr
+
+
+def _coerce_response(
+    y: Real[ArrayLike, ' n'] | Series, *, name: str
+) -> Real[Array, ' n']:
+    """Convert a Series/array-like response to a 1-D jax array."""
+    if hasattr(y, 'to_numpy'):
+        y = y.to_numpy()
+    arr = jnp.asarray(y)
+    if arr.ndim != 1:
+        msg = f'{name} must be 1D (n,); got shape {arr.shape}'
+        raise ValueError(msg)
+    return arr

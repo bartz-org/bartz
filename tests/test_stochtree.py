@@ -46,15 +46,6 @@ _GEN_KW = dict(p=4, q=2, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.5)
 # `mean_forest_params` override that disables the bartz-incompatible
 # leaf-variance sampler. All sample()-using tests start from this base.
 _MFP_BASE: dict = {'sample_sigma2_leaf': False}
-# Force both packages to share the same proper variance prior and sigma^2 init.
-# Without this, stochtree falls back to its improper-prior data calibration and
-# bartz falls back to ``sigest='auto'``, so their posteriors disagree by
-# more than the Rhat tolerance below.
-_ALIGNED_PRIOR: dict = {
-    'sigma2_global_shape': 1.5,
-    'sigma2_global_scale': 0.5,
-    'sigma2_init': 1.0,
-}
 
 
 class _Data(NamedTuple):
@@ -228,6 +219,26 @@ def test_sample_sigma2_leaf_true_raises(keys: split) -> None:
         )
 
 
+def test_sigma2_init_with_proper_prior_raises(keys: split) -> None:
+    """`sigma2_init` is allowed only when the variance prior is improper."""
+    data = _make_continuous(keys, n=10, n_test=5)
+    m = bst.BARTModel()
+    with pytest.raises(NotImplementedError, match='sigma2_init'):
+        m.sample(
+            X_train=data.X_train,
+            y_train=data.y_train,
+            num_gfr=0,
+            num_burnin=2,
+            num_mcmc=2,
+            general_params={
+                'sigma2_global_shape': 1.5,
+                'sigma2_global_scale': 0.5,
+                'sigma2_init': 1.0,
+            },
+            mean_forest_params=_MFP_BASE,
+        )
+
+
 def test_unknown_dict_keys_rejected(keys: split) -> None:
     """Unknown keys in `general_params` / `mean_forest_params` raise."""
     data = _make_continuous(keys, n=10, n_test=5)
@@ -332,7 +343,7 @@ def comparison_continuous(keys: split) -> tuple[stochtree.BARTModel, bst.BARTMod
     data = _make_continuous(keys, n=300, n_test=80)
     num_burnin = 300
     num_mcmc = 800
-    common = {'random_seed': 13, 'num_chains': 2, **_ALIGNED_PRIOR}
+    common = {'random_seed': 13, 'num_chains': 2}
 
     st_model = stochtree.BARTModel()
     st_model.sample(

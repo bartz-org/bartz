@@ -93,13 +93,13 @@ class GeneralParams:
     """Whether to standardize the outcome before fitting. Ignored for probit binary."""
 
     sigma2_init: FloatLike | None = None
-    """Starting value of the global error variance. If `None`, bartz picks one automatically."""
+    """Starting value of the global error variance. Only honored when the variance prior is improper (``sigma2_global_shape=0`` or ``sigma2_global_scale=0``); otherwise raises, since bartz cannot decouple the chain start from the prior scale. If `None` (default), uses ``var(resid_train)`` for continuous and ``1.0`` for probit, matching stochtree."""
 
     sigma2_global_shape: FloatLike = 0
-    """Shape parameter of the inverse-gamma prior on the global error variance."""
+    """Shape parameter of the inverse-gamma prior on the global error variance. The default ``0`` is mapped to a near-improper prior, since bartz's scaled-inv-chi² cannot represent ``IG(0, 0)`` exactly."""
 
     sigma2_global_scale: FloatLike = 0
-    """Scale parameter of the inverse-gamma prior on the global error variance."""
+    """Scale parameter of the inverse-gamma prior on the global error variance. The default ``0`` is mapped to a near-improper prior, since bartz's scaled-inv-chi² cannot represent ``IG(0, 0)`` exactly."""
 
     variable_weights: Float[ArrayLike, ' p'] | None = None
     """Per-predictor sampling weights. Must be strictly positive; pass a small positive value to suppress a variable."""
@@ -140,7 +140,7 @@ class MeanForestParams:
     """Whether to sample the leaf-variance prior. Must be set to ``False``."""
 
     sigma2_leaf_init: FloatLike | None = None
-    """Initial leaf-variance prior. If `None`, defaults to ``1 / num_trees``."""
+    """Initial leaf-variance prior (held fixed since ``sample_sigma2_leaf=False``). If `None`, matches stochtree's defaults: ``var(resid_train) / num_trees`` for continuous and ``2 / num_trees`` for probit."""
 
     def __post_init__(self) -> None:
         if self.sample_sigma2_leaf:
@@ -165,8 +165,6 @@ class MeanForestParams:
                 ' grows exponentially with depth.'
             )
             raise ValueError(msg)
-        if self.sigma2_leaf_init is None:
-            object.__setattr__(self, 'sigma2_leaf_init', 1.0 / self.num_trees)
 
 
 def build_dataclass(cls: type[T], params: dict | None, name: str) -> T:
@@ -260,8 +258,8 @@ class BARTModel:
     num_samples: int
     """Total number of retained posterior samples (``num_mcmc * num_chains``)."""
 
-    sigma2_init: FloatLike | None
-    """Starting value of the global error variance."""
+    sigma2_init: FloatLike
+    """Starting value of the global error variance actually used to seed the chain."""
 
     y_bar: Float32[Array, '']
     """Mean used to standardize the outcome (``0`` if not standardized)."""
@@ -371,15 +369,38 @@ class BARTModel:
 
         bart_num_chains = None if gp.num_chains == 1 else gp.num_chains
 
+        # variance of the standardized residual, matching stochtree
+        # (np.var(resid_train) with ddof=0). For standardize=True it is exactly
+        # 1.0; we hardcode that so the value stays trace-time concrete.
+        if is_probit:
+            var_resid_train: FloatLike = 1.0  # bartz ignores σ² for binary
+        elif gp.standardize:
+            var_resid_train = 1.0
+        else:
+            var_resid_train = jnp.var(y_for_bartz)
+
         # leaf-prior: bartz uses sigma_mu = tau_num / (k * sqrt(num_trees));
         # stochtree's sigma2_leaf is the leaf-variance prior. Hold k=2 and solve
         # for tau_num so that the two parameterizations agree.
         bartz_k = 2.0
-        tau_num_arg = bartz_k * jnp.sqrt(mfp.num_trees * mfp.sigma2_leaf_init)
-
-        sigdf, lambda_, sigest_arg = resolve_variance_prior(
-            gp.sigma2_global_shape, gp.sigma2_global_scale, gp.sigma2_init
+        sigma2_leaf_init = resolve_sigma2_leaf_init(
+            mfp.sigma2_leaf_init, mfp.num_trees, is_probit, var_resid_train
         )
+        tau_num_arg = bartz_k * jnp.sqrt(mfp.num_trees * sigma2_leaf_init)
+
+        if is_probit:
+            # stochtree pins σ²=1 for probit; bartz binary branch ignores the
+            # variance prior, so we pass any valid placeholders.
+            sigdf_arg: FloatLike = 3.0
+            lambda_arg: FloatLike | None = None
+            sigma2_init_stored: FloatLike = 1.0
+        else:
+            sigdf_arg, lambda_arg, sigma2_init_stored = resolve_variance_prior(
+                gp.sigma2_global_shape,
+                gp.sigma2_global_scale,
+                gp.sigma2_init,
+                var_resid_train,
+            )
 
         binner = partial(
             UniqueQuantileBinner, max_bins=gp.cutpoint_grid_size + 1, max_subsample=None
@@ -395,13 +416,13 @@ class BARTModel:
             outcome_type='binary' if is_probit else 'continuous',
             binner=binner,
             varprob=variable_weights,
-            sigest=sigest_arg,
-            sigdf=sigdf,
+            sigest='auto',
+            sigdf=sigdf_arg,
             sigquant=0.9,
             k=bartz_k,
             power=mfp.beta,
             base=mfp.alpha,
-            lambda_=lambda_,
+            lambda_=lambda_arg,
             tau_num=tau_num_arg,
             w=observation_weights,
             num_trees=mfp.num_trees,
@@ -421,7 +442,7 @@ class BARTModel:
             num_burnin=num_burnin,
             num_mcmc=num_mcmc,
             num_chains=gp.num_chains,
-            sigma2_init=gp.sigma2_init,
+            sigma2_init=sigma2_init_stored,
             y_bar=y_bar,
             y_std=y_std,
             standardize=gp.standardize,
@@ -435,7 +456,7 @@ class BARTModel:
         num_burnin: int,
         num_mcmc: int,
         num_chains: int,
-        sigma2_init: FloatLike | None,
+        sigma2_init: FloatLike,
         y_bar: Float32[Array, ''],
         y_std: Float32[Array, ''],
         standardize: bool,
@@ -560,9 +581,7 @@ def standardize_y(
     """Return ``(y_bar, y_std, y_for_bartz)`` matching stochtree's standardization."""
     y = jnp.asarray(y_train, jnp.float32)
     if is_probit:
-        (n,) = y.shape
-        mean01 = jnp.clip((y != 0).mean(), 1.0 / (n + 1), n / (n + 1))
-        return ndtri(mean01), jnp.float32(1.0), (y != 0).astype(jnp.float32)
+        return ndtri(y.mean()), jnp.float32(1.0), (y != 0).astype(jnp.float32)
     if standardize:
         y_bar = y.mean()
         y_std_val = y.std()
@@ -571,10 +590,41 @@ def standardize_y(
     return jnp.float32(0.0), jnp.float32(1.0), y
 
 
+def resolve_sigma2_leaf_init(
+    sigma2_leaf_init: FloatLike | None,
+    num_trees: int,
+    is_probit: bool,
+    var_resid_train: FloatLike,
+) -> FloatLike:
+    """Default `sigma2_leaf_init` per stochtree: probit→2/num_trees, continuous→var(resid)/num_trees."""
+    if sigma2_leaf_init is not None:
+        return sigma2_leaf_init
+    if is_probit:
+        return 2.0 / num_trees
+    return var_resid_train / num_trees
+
+
+# Bartz scaled-inv-chi² df used to approximate stochtree's improper IG(0,0).
+# Small enough that the prior contribution to the σ² posterior is dominated by
+# the data (the posterior is IG((sigdf+n)/2, (sigdf*lambda+sum_sq)/2) for any
+# n >= 1), large enough in case the starting MCMC value is computed with a
+# regularized inverse
+_IMPROPER_PRIOR_SIGDF = 0.01
+
+
 def resolve_variance_prior(
-    shape: FloatLike, scale: FloatLike, sigma2_init: FloatLike | None
-) -> tuple[FloatLike, FloatLike | None, FloatLike | Literal['auto']]:
+    shape: FloatLike,
+    scale: FloatLike,
+    sigma2_init: FloatLike | None,
+    var_resid_train: FloatLike,
+) -> tuple[FloatLike, FloatLike, FloatLike]:
     """Translate stochtree's IG(shape, scale) prior to bartz's scaled-inv-chi2.
+
+    Bartz initializes σ² at ``lambda_`` (it cannot decouple the prior scale
+    from the chain start). For the proper-prior path we match the prior
+    exactly and refuse a user-supplied ``sigma2_init``; for the improper-prior
+    path we pin ``lambda_`` to the desired initial value and use a tiny
+    ``sigdf`` so the prior contribution is negligible.
 
     Parameters
     ----------
@@ -583,21 +633,37 @@ def resolve_variance_prior(
     scale
         Stochtree's ``sigma2_global_scale``.
     sigma2_init
-        Stochtree's ``sigma2_init`` (used only when the prior is improper).
+        Stochtree's ``sigma2_init``. Allowed only when the prior is improper.
+    var_resid_train
+        Variance of the residual used to standardize-style initialize σ² when
+        ``sigma2_init`` is unset and the prior is improper.
 
     Returns
     -------
-    ``(sigdf, lambda_, sigest_arg)`` for bartz.
+    ``(sigdf, lambda_, sigma2_init_stored)`` for bartz; ``sigma2_init_stored``
+    is the actual chain starting value, suitable for ``BARTModel.sigma2_init``.
+
+    Raises
+    ------
+    NotImplementedError
+        If `sigma2_init` is set together with a proper variance prior.
     """
     # IG(shape, scale) <=> scaled-inv-chi2(df=2*shape, lambda=scale/shape)
     if shape > 0 and scale > 0:
-        # bartz rejects sigest when lambda_ is set; stochtree's sigma2_init is
-        # the chain starting value, not the prior scale, so we drop it here.
-        return 2.0 * shape, scale / shape, 'auto'
-    sigest_arg: FloatLike | Literal['auto'] = (
-        jnp.sqrt(sigma2_init) if sigma2_init is not None else 'auto'
-    )
-    return 3.0, None, sigest_arg
+        if sigma2_init is not None:
+            msg = (
+                'sigma2_init cannot be set together with a proper variance'
+                ' prior (sigma2_global_shape > 0 and sigma2_global_scale > 0):'
+                ' bartz initializes sigma² at lambda_=scale/shape and cannot'
+                ' separately honor sigma2_init. Drop sigma2_init or use the'
+                ' default improper prior (sigma2_global_shape=0,'
+                ' sigma2_global_scale=0).'
+            )
+            raise NotImplementedError(msg)
+        lambda_ = scale / shape
+        return 2.0 * shape, lambda_, lambda_
+    sigma2_start = sigma2_init if sigma2_init is not None else var_resid_train
+    return _IMPROPER_PRIOR_SIGDF, sigma2_start, sigma2_start
 
 
 def check_variable_weights(

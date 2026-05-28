@@ -43,7 +43,7 @@ from bartz.testing._dgp import (
     interaction_pattern,
     partitioned_interaction_pattern,
 )
-from tests.util import assert_allclose, assert_array_equal
+from tests.util import assert_array_equal, assert_close_matrices
 
 # Test parameters
 ALPHA = 5e-7  # probability of false positive (aaaaapprox)
@@ -379,7 +379,7 @@ def test_rows_identical(dgps_lambda_one: DGP, which: str) -> None:
     diffs = jnp.max(
         jnp.abs(samples[:, 0:1, :] - samples), axis=(1, 2)
     )  # Shape: (REPS,)
-    assert_allclose(diffs, 0.0, atol=1e-5)
+    assert_close_matrices(diffs, jnp.zeros_like(diffs), atol=1e-5)
 
 
 class TestInteractionPattern:

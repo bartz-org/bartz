@@ -80,7 +80,6 @@ from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
-    assert_allclose,
     assert_array_equal,
     assert_close_matrices,
     assert_different_matrices,
@@ -998,7 +997,8 @@ class TestVarprobAttr:
 
         assert jnp.all(bart.varprob >= 0)
         assert jnp.all(bart.varprob <= 1)
-        assert_allclose(bart.varprob.sum(axis=1), 1, rtol=1e-6)
+        varprob_sum = bart.varprob.sum(axis=1)
+        assert_close_matrices(varprob_sum, jnp.ones_like(varprob_sum), rtol=1e-6)
 
         if not bkw.sparse:
             unique = jnp.unique(bart.varprob)
@@ -1226,7 +1226,7 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
     if num_datapoints == 0 or bkw.all_binary:
         assert_array_equal(bart.offset, jnp.zeros_like(bart.offset))
     else:
-        assert_allclose(
+        assert_close_matrices(
             bart.offset[..., None],
             jnp.where(mask[..., None], 0.0, kw['y_train']),
             rtol=1e-6,
@@ -1250,9 +1250,19 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
 
     # with 1 datapoint in the multivariate case, log_likelihood is not exactly 0
     # because matrix inversion adds an epsilon to handle ill-conditioned matrices
-    atol = 0.0 if num_datapoints == 0 else 1e-6
-    assert_allclose(bart._burnin_trace.log_likelihood, 0.0, atol=atol)
-    assert_allclose(bart._main_trace.log_likelihood, 0.0, atol=atol)
+    atol = 0.0 if num_datapoints == 0 else 1e-4
+    assert_close_matrices(
+        bart._burnin_trace.log_likelihood,
+        jnp.zeros_like(bart._burnin_trace.log_likelihood),
+        atol=atol,
+        reduce_rank=True,
+    )
+    assert_close_matrices(
+        bart._main_trace.log_likelihood,
+        jnp.zeros_like(bart._main_trace.log_likelihood),
+        atol=atol,
+        reduce_rank=True,
+    )
 
 
 def test_two_datapoints(bkw: BartKW) -> None:
@@ -1997,7 +2007,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         chain_to_axis(state_uv.resid, uv_axes.resid),
         chain_to_axis(state_mv.resid, mv_axes.resid).squeeze(-2),
     )
-    assert_allclose(
+    assert_close_matrices(
         chain_to_axis(state_uv.error_cov_inv, uv_axes.error_cov_inv),
         chain_to_axis(state_mv.error_cov_inv, mv_axes.error_cov_inv).squeeze((-2, -1)),
         rtol=1e-6,

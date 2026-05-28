@@ -704,7 +704,8 @@ class TestVarprobAttr:
         # basic properties of probabilities
         assert jnp.all(bart.varprob >= 0)
         assert jnp.all(bart.varprob <= 1)
-        assert_allclose(bart.varprob.sum(axis=1), 1, rtol=1e-6)
+        varprob_sum = bart.varprob.sum(axis=1)
+        assert_close_matrices(varprob_sum, jnp.ones_like(varprob_sum), rtol=1e-6)
 
         # probabilities are either 0 or 1/peff if sparsity is disabled
         sparse = kw.get('sparse', False)
@@ -1184,7 +1185,7 @@ def test_rhat_rank_axes(keys: split, split: bool) -> None:
     reference = rhat_rank(chains, split=split)
     transposed = jnp.moveaxis(chains, (0, 1), (2, 0))
     relocated = rhat_rank(transposed, split=split, chain_axis=2, draw_axis=0)
-    assert_allclose(relocated, reference, rtol=1e-12)
+    assert_close_matrices(relocated, reference, rtol=1e-12)
 
 
 def test_rhat_rank_shape_errors() -> None:

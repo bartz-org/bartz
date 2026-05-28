@@ -202,9 +202,26 @@ def assert_allclose(
     *,
     rtol: float = 0.0,
     atol: float = 0.0,
+    allow_non_scalar: bool = False,
     **kwargs: Any,
 ) -> None:
-    """Wrap `numpy.testing.assert_allclose` with zero default tolerances."""
+    """Wrap `numpy.testing.assert_allclose` with zero default tolerances.
+
+    By default, both `actual` and `desired` must be scalars or 0-d arrays;
+    use `assert_close_matrices` for vectors/matrices/tensors. Pass
+    ``allow_non_scalar=True`` to bypass this restriction.
+    """
+    if not allow_non_scalar:
+        actual_arr = np.asarray(actual)
+        desired_arr = np.asarray(desired)
+        if actual_arr.size != 1 or desired_arr.size != 1:
+            msg = (
+                'assert_allclose requires scalar inputs; got shapes '
+                f'{actual_arr.shape} and {desired_arr.shape}. Use '
+                'assert_close_matrices for vectors/matrices/tensors, or '
+                'pass allow_non_scalar=True to bypass.'
+            )
+            raise AssertionError(msg)
     _np_assert_allclose(actual, desired, rtol=rtol, atol=atol, **kwargs)
 
 

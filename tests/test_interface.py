@@ -804,6 +804,33 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
         )
 
 
+def test_acceptance_count_matches_structure_changes(bkw: BartKW) -> None:
+    """Check that the acceptance count equals the number of changed tree structures."""
+    kw = bkw.kw
+    kw['n_skip'] = 1  # so each saved sample is one MCMC step past the previous
+    bart = Bart(**kw)
+
+    trace = bart._main_trace
+    axes = chain_vmap_axes(trace)
+
+    # move the chain axis (if any) to the front, so that the leading `...`
+    # absorbs it uniformly whether or not it is there (CHAIN_AXIS is a global
+    # config, so we can't assume where the chain axis sits in the raw layout)
+    split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
+    grow_acc = chain_to_axis(trace.grow_acc_count, axes.grow_acc_count)
+    prune_acc = chain_to_axis(trace.prune_acc_count, axes.prune_acc_count)
+
+    # a tree structure is fully determined by its split tree (split_tree == 0
+    # marks inactive nodes); accepted grow/prune moves are exactly the ones that
+    # change it, while the optimistically-updated var_tree may differ on rejected
+    # grows too, so it must not be compared
+    changed = jnp.any(split_tree[..., 1:, :, :] != split_tree[..., :-1, :, :], axis=-1)
+    num_changed = jnp.sum(changed, axis=-1)
+    acc_count = grow_acc[..., 1:] + prune_acc[..., 1:]
+
+    assert_array_equal(num_changed, acc_count)
+
+
 def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     """Garbage finite y values at missing positions don't affect the fit."""
     kw = bkw.kw

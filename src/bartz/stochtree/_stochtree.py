@@ -622,7 +622,7 @@ def standardize_y(
         y_bar = float(np.mean(y_train_np))
         y_std_val = float(np.std(y_train_np))
         y_std = y_std_val if y_std_val > 0 else 1.0
-        return y_bar, y_std, ((y_train_np - y_bar) / y_std).astype(np.float32)
+        return y_bar, y_std, (y_train_np - y_bar) / y_std
     return 0.0, 1.0, y_train_np.astype(np.float32)
 
 

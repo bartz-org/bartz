@@ -58,29 +58,21 @@ _ALIGNED_PRIOR: dict = {
 
 
 class _Data(NamedTuple):
-    X_train: np.ndarray  # (n, p)
-    y_train: np.ndarray  # (n,) for continuous, (n,) int for binary
-    X_test: np.ndarray  # (m, p)
+    X_train: Array  # (n, p)
+    y_train: Array  # (n,) for continuous, (n,) int for binary
+    X_test: Array  # (m, p)
 
 
 def _make_continuous(keys: split, n: int = 200, n_test: int = 60) -> _Data:
     train = gen_data(keys.pop(), n=n, outcome_type='continuous', **_GEN_KW)
     test = gen_data(keys.pop(), n=n_test, outcome_type='continuous', **_GEN_KW)
-    return _Data(
-        X_train=np.asarray(train.x.T, dtype=np.float64),
-        y_train=np.asarray(train.y, dtype=np.float64),
-        X_test=np.asarray(test.x.T, dtype=np.float64),
-    )
+    return _Data(X_train=train.x.T, y_train=train.y, X_test=test.x.T)
 
 
 def _make_binary(keys: split, n: int = 200, n_test: int = 60) -> _Data:
     train = gen_data(keys.pop(), n=n, outcome_type='binary', **_GEN_KW)
     test = gen_data(keys.pop(), n=n_test, outcome_type='binary', **_GEN_KW)
-    return _Data(
-        X_train=np.asarray(train.x.T, dtype=np.float64),
-        y_train=np.asarray(train.y, dtype=np.int64),
-        X_test=np.asarray(test.x.T, dtype=np.float64),
-    )
+    return _Data(X_train=train.x.T, y_train=train.y.astype(jnp.int32), X_test=test.x.T)
 
 
 def _rhat_two_chains(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -313,8 +305,8 @@ def test_standardization_matches(keys: split) -> None:
     data = _make_continuous(keys, n=100, n_test=10)
     st_model = stochtree.BARTModel()
     st_model.sample(
-        X_train=data.X_train,
-        y_train=data.y_train,
+        X_train=np.asarray(data.X_train, dtype=np.float64),
+        y_train=np.asarray(data.y_train, dtype=np.float64),
         num_gfr=0,
         num_burnin=5,
         num_mcmc=10,
@@ -344,9 +336,9 @@ def comparison_continuous(keys: split) -> tuple[stochtree.BARTModel, bst.BARTMod
 
     st_model = stochtree.BARTModel()
     st_model.sample(
-        X_train=data.X_train,
-        y_train=data.y_train,
-        X_test=data.X_test,
+        X_train=np.asarray(data.X_train, dtype=np.float64),
+        y_train=np.asarray(data.y_train, dtype=np.float64),
+        X_test=np.asarray(data.X_test, dtype=np.float64),
         num_gfr=0,
         num_burnin=num_burnin,
         num_mcmc=num_mcmc,
@@ -410,9 +402,9 @@ def comparison_binary(keys: split) -> tuple[stochtree.BARTModel, bst.BARTModel]:
 
     st_model = stochtree.BARTModel()
     st_model.sample(
-        X_train=data.X_train,
-        y_train=data.y_train,
-        X_test=data.X_test,
+        X_train=np.asarray(data.X_train, dtype=np.float64),
+        y_train=np.asarray(data.y_train, dtype=np.int64),
+        X_test=np.asarray(data.X_test, dtype=np.float64),
         num_gfr=0,
         num_burnin=num_burnin,
         num_mcmc=num_mcmc,
@@ -485,10 +477,10 @@ def test_jit(keys: split) -> None:
     p = data.X_train.shape[1]
     args: dict = {
         'key': random.key(0),
-        'X': jnp.asarray(data.X_train),
-        'y': jnp.asarray(data.y_train),
-        'X_test': jnp.asarray(data.X_test),
-        'X_predict': jnp.asarray(data.X_test[:5]),
+        'X': data.X_train,
+        'y': data.y_train,
+        'X_test': data.X_test,
+        'X_predict': data.X_test[:5],
         'w': jnp.ones(data.y_train.shape),
         'sigma2_init': 1.0,
         'alpha': 0.95,

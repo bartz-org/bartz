@@ -316,11 +316,21 @@ class mc_gbart(Module):
             num_chains=num_chains,
         )
 
-        # set min_points_per_leaf unless the user set it already
-        if 'min_points_per_leaf' not in bart_kwargs.get('init_kw', {}):
+        # apply BART3-matching defaults to init_kw unless the user set them
+        #
+        # - min_points_per_leaf=5 matches BART3's hard-coded nl>=5 && nr>=5
+        #   birth check.
+        # - min_points_per_decision_node=None disables the bartz extra prior
+        #   modification that BART3 lacks; with it set, bartz targets a
+        #   different posterior (heavier on configurations with sub-affluent
+        #   leaves, i.e. deeper trees).
+        defaults = {'min_points_per_leaf': 5, 'min_points_per_decision_node': None}
+        user_init_kw = bart_kwargs.get('init_kw', {})
+        if any(name not in user_init_kw for name in defaults):
             bart_kwargs = dict(bart_kwargs)
-            init_kw = dict(bart_kwargs.get('init_kw', {}))
-            init_kw['min_points_per_leaf'] = 5
+            init_kw = dict(user_init_kw)
+            for name, value in defaults.items():
+                init_kw.setdefault(name, value)
             bart_kwargs['init_kw'] = init_kw
 
         # add user arguments

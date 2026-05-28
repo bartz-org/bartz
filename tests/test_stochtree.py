@@ -28,19 +28,33 @@ from typing import NamedTuple
 
 import jax
 import numpy as np
+import pandas as pd
+import polars as pl
 import pytest
-import stochtree
 from equinox import EquinoxRuntimeError
 from jax import Array, random
 from jax import numpy as jnp
 from jax.scipy.special import ndtr
 from numpy.testing import assert_array_less
+from numpy.typing import ArrayLike
 from pytest_subtests import SubTests
 
 import bartz.stochtree as bst
+import stochtree
 from bartz._jaxext import split
+from bartz.stochtree._preprocess import (
+    PandasPreprocessor,
+    PolarsPreprocessor,
+    _PreprocessorBase,
+)
 from bartz.testing import gen_data
-from tests.util import assert_allclose, assert_close_matrices, clipped_logit, rhat_rank
+from tests.util import (
+    assert_allclose,
+    assert_array_equal,
+    assert_close_matrices,
+    clipped_logit,
+    rhat_rank,
+)
 
 _GEN_KW = dict(p=4, q=2, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.5)
 # `mean_forest_params` override that disables the bartz-incompatible
@@ -560,3 +574,459 @@ def test_jit(keys: split) -> None:
 
     for a, b in zip(out1, out2, strict=True):
         assert_close_matrices(a, b, rtol=1e-5)
+
+
+class TestPreprocessing:
+    """Tests for the pandas / polars auto-preprocessing pipeline.
+
+    Each test is parametrized on ``flavor in {'pandas', 'polars'}`` to exercise
+    both backends. Helpers at the top build identically-structured frames in
+    both libraries from a shared "spec" so the test body stays library-agnostic.
+    """
+
+    # ------------------------------------------------------------------ helpers
+
+    @staticmethod
+    def _make_pandas_column(spec: dict) -> object:
+        vals = spec['values']
+        k = spec['kind']
+        if k == 'numeric':
+            return pd.array(vals, dtype='Float64')
+        if k == 'bool':
+            return pd.array(vals, dtype='boolean')
+        if k == 'ordered_cat':
+            return pd.Categorical(vals, categories=spec['categories'], ordered=True)
+        if k == 'unordered_cat':
+            return pd.Categorical(vals, categories=spec['categories'], ordered=False)
+        if k == 'string':
+            return pd.array(vals, dtype='string')
+        if k == 'datetime':
+            return pd.to_datetime(vals)
+        msg = f'unknown kind {k!r}'
+        raise ValueError(msg)
+
+    @staticmethod
+    def _make_polars_column(name: str, spec: dict) -> pl.Series:
+        vals = spec['values']
+        k = spec['kind']
+        if k == 'numeric':
+            return pl.Series(name, vals, dtype=pl.Float64)
+        if k == 'bool':
+            return pl.Series(name, vals, dtype=pl.Boolean)
+        if k == 'ordered_cat':
+            return pl.Series(name, vals, dtype=pl.Enum(spec['categories']))
+        if k == 'unordered_cat':
+            return pl.Series(name, vals, dtype=pl.Categorical)
+        if k == 'string':
+            return pl.Series(name, vals, dtype=pl.String)
+        if k == 'datetime':
+            return pl.Series(name, vals).str.strptime(pl.Datetime)
+        msg = f'unknown kind {k!r}'
+        raise ValueError(msg)
+
+    @classmethod
+    def _make_df(
+        cls, flavor: str, columns: dict[str, dict]
+    ) -> pd.DataFrame | pl.DataFrame:
+        """Build a DataFrame from a spec.
+
+        Each entry of `columns` maps a column name to a dict with a 'kind'
+        key in {'numeric', 'bool', 'ordered_cat', 'unordered_cat', 'string',
+        'datetime'} plus a 'values' key (and 'categories' for ordered_cat).
+        """
+        if flavor == 'pandas':
+            return pd.DataFrame(
+                {n: cls._make_pandas_column(s) for n, s in columns.items()}
+            )
+        if flavor == 'polars':
+            return pl.DataFrame(
+                {n: cls._make_polars_column(n, s) for n, s in columns.items()}
+            )
+        msg = f'unknown flavor {flavor!r}'
+        raise ValueError(msg)
+
+    @staticmethod
+    def _make_preprocessor(flavor: str) -> _PreprocessorBase:
+        return PandasPreprocessor() if flavor == 'pandas' else PolarsPreprocessor()
+
+    @staticmethod
+    def _sample(
+        X_train: ArrayLike | pd.DataFrame | pl.DataFrame,
+        y: ArrayLike,
+        X_test: ArrayLike | pd.DataFrame | pl.DataFrame | None = None,
+        seed: int = 0,
+        **extras: object,
+    ) -> bst.BARTModel:
+        m = bst.BARTModel()
+        m.sample(
+            X_train=X_train,
+            y_train=y,
+            X_test=X_test,
+            num_gfr=0,
+            num_burnin=20,
+            num_mcmc=40,
+            general_params=dict(extras.pop('general_params', {}), random_seed=seed),
+            mean_forest_params=_MFP_BASE,
+            **extras,
+        )
+        return m
+
+    # --------------------------------------------------- preprocessor unit tests
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_numeric_passthrough(self, flavor: str) -> None:
+        """Pure-numeric columns are cast to float and forwarded unchanged."""
+        df = self._make_df(
+            flavor,
+            {
+                'a': {'kind': 'numeric', 'values': [0.1, 0.2, 0.3]},
+                'b': {'kind': 'numeric', 'values': [1.0, 2.0, 3.0]},
+            },
+        )
+        pp = self._make_preprocessor(flavor)
+        X, w = pp.fit_transform(df)
+        assert_array_equal(X, np.array([[0.1, 1.0], [0.2, 2.0], [0.3, 3.0]]))
+        assert w is None
+        assert pp.n_processed_columns == 2
+        assert pp.original_var_indices == [0, 1]
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_bool_passthrough(self, flavor: str) -> None:
+        """Boolean columns become a single 0/1 column."""
+        df = self._make_df(
+            flavor, {'b': {'kind': 'bool', 'values': [True, False, True, False]}}
+        )
+        pp = self._make_preprocessor(flavor)
+        X, _ = pp.fit_transform(df)
+        assert_array_equal(X, np.array([[1.0], [0.0], [1.0], [0.0]]))
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_unordered_categorical_one_hot(self, flavor: str) -> None:
+        """Unordered cat with k levels becomes a (n, k) binary matrix."""
+        df = self._make_df(
+            flavor,
+            {
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': ['a', 'b', 'a', 'c'],
+                    'categories': ['a', 'b', 'c'],
+                }
+            },
+        )
+        pp = self._make_preprocessor(flavor)
+        X, _ = pp.fit_transform(df)
+        # Each row has exactly one 1; mass conserved
+        assert X.shape == (4, 3)
+        assert_array_equal(X.sum(axis=1), np.ones(4))
+        # The row values 'a','b','a','c' map to columns in the categories' order
+        cats = pp._specs[0].categories
+        for i, v in enumerate(['a', 'b', 'a', 'c']):
+            assert X[i, cats.index(v)] == 1.0
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_ordered_categorical_ordinal(self, flavor: str) -> None:
+        """Ordered cat becomes a single integer-coded column honoring the declared order."""
+        df = self._make_df(
+            flavor,
+            {
+                'c': {
+                    'kind': 'ordered_cat',
+                    'values': ['low', 'hi', 'mid', 'low'],
+                    'categories': ['low', 'mid', 'hi'],
+                }
+            },
+        )
+        pp = self._make_preprocessor(flavor)
+        X, _ = pp.fit_transform(df)
+        assert_array_equal(X, np.array([[0.0], [2.0], [1.0], [0.0]]))
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_string_column_one_hot_from_data(self, flavor: str) -> None:
+        """String columns become unordered cats using sorted observed values."""
+        df = self._make_df(
+            flavor, {'s': {'kind': 'string', 'values': ['y', 'x', 'y', 'z']}}
+        )
+        pp = self._make_preprocessor(flavor)
+        X, _ = pp.fit_transform(df)
+        assert pp._specs[0].kind == 'unordered_cat'
+        assert sorted(pp._specs[0].categories) == ['x', 'y', 'z']
+        assert X.shape == (4, 3)
+        assert_array_equal(X.sum(axis=1), np.ones(4))
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_datetime_dropped_with_warning(self, flavor: str) -> None:
+        """Datetime columns trigger a UserWarning and are excluded from the output."""
+        df = self._make_df(
+            flavor,
+            {
+                'a': {'kind': 'numeric', 'values': [0.1, 0.2]},
+                'dt': {'kind': 'datetime', 'values': ['2024-01-01', '2024-01-02']},
+            },
+        )
+        pp = self._make_preprocessor(flavor)
+        with pytest.warns(UserWarning, match='unsupported column dtypes'):
+            X, _ = pp.fit_transform(df)
+        assert X.shape == (2, 1)
+        assert pp._specs[1].kind == 'dropped'
+        assert 0 in pp.original_var_indices
+        assert 1 not in pp.original_var_indices
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_variable_weights_split_across_one_hot(self, flavor: str) -> None:
+        """`variable_weights[i]` is divided evenly across an expanded column's k outputs."""
+        df = self._make_df(
+            flavor,
+            {
+                'a': {'kind': 'numeric', 'values': [0.1, 0.2, 0.3, 0.4]},
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': ['a', 'b', 'a', 'c'],
+                    'categories': ['a', 'b', 'c', 'd'],
+                },
+            },
+        )
+        pp = self._make_preprocessor(flavor)
+        weights_in = np.array([2.0, 6.0])
+        _, w_out = pp.fit_transform(df, variable_weights=weights_in)
+        # numeric stays at 2.0; cat with k=4 (pandas) or 3 (polars: observed only) splits evenly
+        k_cat = pp.n_processed_columns - 1
+        expected = np.concatenate([[2.0], np.full(k_cat, 6.0 / k_cat)])
+        assert_allclose(w_out, expected)
+        # Per-original-variable total preserved
+        per_orig_sum = np.zeros(2)
+        for j, w in zip(pp.original_var_indices, w_out, strict=True):
+            per_orig_sum[j] += w
+        assert_allclose(per_orig_sum, weights_in)
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_variable_weights_shape_mismatch_raises(self, flavor: str) -> None:
+        """A mis-shaped `variable_weights` is caught up front."""
+        df = self._make_df(flavor, {'a': {'kind': 'numeric', 'values': [0.1, 0.2]}})
+        pp = self._make_preprocessor(flavor)
+        with pytest.raises(ValueError, match='variable_weights must have shape'):
+            pp.fit_transform(df, variable_weights=np.array([1.0, 2.0]))
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_unseen_category_at_transform_raises(self, flavor: str) -> None:
+        """A category absent from the fit-time data raises at transform time."""
+        df_train = self._make_df(
+            flavor,
+            {
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': ['a', 'b', 'a'],
+                    'categories': ['a', 'b'],
+                }
+            },
+        )
+        df_test = self._make_df(
+            flavor,
+            {
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': ['a', 'b', 'a'],
+                    'categories': ['a', 'b'],
+                }
+            },
+        )
+        pp = self._make_preprocessor(flavor)
+        pp.fit_transform(df_train)
+        # Sanity: equivalent test frame transforms fine
+        pp.transform(df_test)
+        # Now introduce an unseen value
+        df_bad = self._make_df(
+            flavor,
+            {
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': ['a', 'z'],
+                    'categories': ['a', 'z'],
+                }
+            },
+        )
+        with pytest.raises(ValueError, match='not in the fitted category list'):
+            pp.transform(df_bad)
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_disjoint_train_predict_categories_raises(self, flavor: str) -> None:
+        """Completely disjoint training / prediction category sets raise at predict."""
+        df_train = self._make_df(
+            flavor,
+            {
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': ['a', 'b', 'a', 'b'],
+                    'categories': ['a', 'b'],
+                }
+            },
+        )
+        df_predict = self._make_df(
+            flavor,
+            {
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': ['x', 'y', 'z', 'x'],
+                    'categories': ['x', 'y', 'z'],
+                }
+            },
+        )
+        pp = self._make_preprocessor(flavor)
+        pp.fit_transform(df_train)
+        with pytest.raises(ValueError, match='not in the fitted category list'):
+            pp.transform(df_predict)
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_n_columns_mismatch_at_transform_raises(self, flavor: str) -> None:
+        """Transforming a frame with a different column count is rejected."""
+        df_train = self._make_df(
+            flavor,
+            {
+                'a': {'kind': 'numeric', 'values': [0.1, 0.2]},
+                'b': {'kind': 'numeric', 'values': [1.0, 2.0]},
+            },
+        )
+        df_test = self._make_df(
+            flavor, {'a': {'kind': 'numeric', 'values': [0.1, 0.2]}}
+        )
+        pp = self._make_preprocessor(flavor)
+        pp.fit_transform(df_train)
+        with pytest.raises(ValueError, match='preprocessor was fitted on 2 columns'):
+            pp.transform(df_test)
+
+    # ----------------------------------------------------- end-to-end integration
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_end_to_end_numeric_matches_array(self, keys: split, flavor: str) -> None:
+        """A numeric DataFrame produces bit-identical posteriors to the same array."""
+        data = _make_continuous(keys, n=60, n_test=15)
+        X_arr = np.asarray(data.X_train)
+        Xte_arr = np.asarray(data.X_test)
+        names = [f'x{i}' for i in range(X_arr.shape[1])]
+        df_train = self._make_df(
+            flavor,
+            {
+                n: {'kind': 'numeric', 'values': X_arr[:, j].tolist()}
+                for j, n in enumerate(names)
+            },
+        )
+        df_test = self._make_df(
+            flavor,
+            {
+                n: {'kind': 'numeric', 'values': Xte_arr[:, j].tolist()}
+                for j, n in enumerate(names)
+            },
+        )
+        m_arr = self._sample(X_arr, data.y_train, X_test=Xte_arr, seed=11)
+        m_df = self._sample(df_train, data.y_train, X_test=df_test, seed=11)
+        assert_close_matrices(m_arr.y_hat_train, m_df.y_hat_train, rtol=0)
+        assert_close_matrices(m_arr.y_hat_test, m_df.y_hat_test, rtol=0)
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_end_to_end_one_hot_matches_manual(self, keys: split, flavor: str) -> None:
+        """A DataFrame with an unordered cat matches a manually-one-hot-encoded array."""
+        data = _make_continuous(keys, n=60, n_test=15)
+        X_arr = np.asarray(data.X_train)
+        Xte_arr = np.asarray(data.X_test)
+        rng = np.random.default_rng(0)
+        cat_train = rng.choice(['a', 'b', 'c'], size=X_arr.shape[0])
+        cat_test = rng.choice(['a', 'b', 'c'], size=Xte_arr.shape[0])
+        # Manual one-hot via numpy (categories order ['a','b','c'])
+        cats = ['a', 'b', 'c']
+        one_hot_train = np.eye(3)[[cats.index(v) for v in cat_train]]
+        one_hot_test = np.eye(3)[[cats.index(v) for v in cat_test]]
+        X_manual = np.concatenate([X_arr, one_hot_train], axis=1)
+        Xte_manual = np.concatenate([Xte_arr, one_hot_test], axis=1)
+        # DataFrame with the cat column
+        names = [f'x{i}' for i in range(X_arr.shape[1])]
+        df_train = self._make_df(
+            flavor,
+            {
+                **{
+                    n: {'kind': 'numeric', 'values': X_arr[:, j].tolist()}
+                    for j, n in enumerate(names)
+                },
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': cat_train.tolist(),
+                    'categories': cats,
+                },
+            },
+        )
+        df_test = self._make_df(
+            flavor,
+            {
+                **{
+                    n: {'kind': 'numeric', 'values': Xte_arr[:, j].tolist()}
+                    for j, n in enumerate(names)
+                },
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': cat_test.tolist(),
+                    'categories': cats,
+                },
+            },
+        )
+        m_manual = self._sample(X_manual, data.y_train, X_test=Xte_manual, seed=23)
+        m_df = self._sample(df_train, data.y_train, X_test=df_test, seed=23)
+        assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=0)
+        assert_close_matrices(m_manual.y_hat_test, m_df.y_hat_test, rtol=0)
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_end_to_end_unseen_category_in_predict_raises(
+        self, keys: split, flavor: str
+    ) -> None:
+        """`predict()` with a brand-new category value raises a clear error."""
+        data = _make_continuous(keys, n=40, n_test=10)
+        X_arr = np.asarray(data.X_train)
+        names = [f'x{i}' for i in range(X_arr.shape[1])]
+        cat_train = ['a', 'b'] * (X_arr.shape[0] // 2)
+        df_train = self._make_df(
+            flavor,
+            {
+                **{
+                    n: {'kind': 'numeric', 'values': X_arr[:, j].tolist()}
+                    for j, n in enumerate(names)
+                },
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': cat_train,
+                    'categories': ['a', 'b'],
+                },
+            },
+        )
+        m = self._sample(df_train, data.y_train, seed=5)
+        # X to predict at: completely disjoint category set
+        df_predict = self._make_df(
+            flavor,
+            {
+                **{n: {'kind': 'numeric', 'values': [0.0, 0.0]} for n in names},
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': ['x', 'y'],
+                    'categories': ['x', 'y'],
+                },
+            },
+        )
+        with pytest.raises(ValueError, match='not in the fitted category list'):
+            m.predict(df_predict, terms='y_hat')
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_end_to_end_all_columns_dropped_raises(self, flavor: str) -> None:
+        """If every column is dropped the model refuses to fit."""
+        df = self._make_df(
+            flavor, {'dt': {'kind': 'datetime', 'values': ['2024-01-01'] * 10}}
+        )
+        y = np.zeros(10, dtype=np.float32)
+        m = bst.BARTModel()
+        with (
+            pytest.warns(UserWarning, match='unsupported column dtypes'),
+            pytest.raises(ValueError, match='no usable columns'),
+        ):
+            m.sample(
+                X_train=df,
+                y_train=y,
+                num_gfr=0,
+                num_burnin=2,
+                num_mcmc=2,
+                mean_forest_params=_MFP_BASE,
+            )

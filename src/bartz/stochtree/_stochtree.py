@@ -40,6 +40,7 @@ from bartz._interface import Bart, DataFrame, PredictKind, Series
 from bartz._jaxext.scipy.special import ndtri
 from bartz.mcmcstep._state import ArrayLike, FloatLike
 from bartz.prepcovars import RangeEvenBinner
+from bartz.stochtree._preprocess import _PreprocessorBase, make_preprocessor
 
 T = TypeVar('T')
 
@@ -286,9 +287,11 @@ class BARTModel:
     """Posterior predictions at `X_test` if it was supplied to `sample`, else `None`."""
 
     _bart: Bart
+    _preprocessor: _PreprocessorBase | None
 
     def __init__(self) -> None:
         self.sampled = False
+        self._preprocessor = None
 
     def is_sampled(self) -> bool:
         """Return whether `sample` has been called."""
@@ -345,6 +348,9 @@ class BARTModel:
         ------
         NotImplementedError
             If ``num_gfr`` is non-zero.
+        ValueError
+            If ``X_train`` is a DataFrame and either every column is dropped
+            during preprocessing, or its row count does not match ``y_train``.
         """
         if num_gfr != 0:
             msg = (
@@ -360,8 +366,34 @@ class BARTModel:
 
         is_probit = gp.outcome_model.outcome == 'binary'
 
-        X_train_arr, y_train_arr = process_train_inputs(X_train, y_train)
-        _, p = X_train_arr.shape
+        self._preprocessor = make_preprocessor(X_train)
+        if self._preprocessor is None:
+            X_train_arr, y_train_arr = process_train_inputs(X_train, y_train)
+            _, p = X_train_arr.shape
+            variable_weights = check_variable_weights(gp.variable_weights, p)
+        else:
+            y_train_arr = _coerce_response(y_train, name='y_train')
+            X_train_np, weights_np = self._preprocessor.fit_transform(
+                X_train, variable_weights=gp.variable_weights
+            )
+            if X_train_np.shape[0] != y_train_arr.shape[0]:
+                msg = (
+                    f'X_train and y_train length mismatch: X_train has '
+                    f'{X_train_np.shape[0]} rows, y_train has '
+                    f'{y_train_arr.shape[0]} entries'
+                )
+                raise ValueError(msg)
+            if X_train_np.shape[1] == 0:
+                msg = (
+                    'X_train has no usable columns after preprocessing (all'
+                    ' columns were dropped due to unsupported dtypes)'
+                )
+                raise ValueError(msg)
+            X_train_arr = jnp.asarray(X_train_np)
+            _, p = X_train_arr.shape
+            variable_weights = (
+                None if weights_np is None else jnp.asarray(weights_np, jnp.float32)
+            )
 
         y_bar, y_std, y_for_bartz = standardize_y(
             y_train_arr, is_probit, gp.standardize
@@ -403,8 +435,6 @@ class BARTModel:
             )
 
         binner = partial(RangeEvenBinner, max_bins=256)
-
-        variable_weights = check_variable_weights(gp.variable_weights, p)
 
         seed = 0 if gp.random_seed is None else gp.random_seed
 
@@ -495,7 +525,7 @@ class BARTModel:
         # cached outputs in stochtree's (n, num_samples) layout, original scale
         self.y_hat_train = self._predict_y_hat_internal('train')
         if X_test is not None:
-            self.y_hat_test = self._predict_y_hat_internal(check_X(X_test).T)
+            self.y_hat_test = self._predict_y_hat_internal(self._prepare_x(X_test).T)
         else:
             self.y_hat_test = None
 
@@ -550,7 +580,7 @@ class BARTModel:
             raise NotSampledError(msg)
         terms_tuple = check_predict_args(type, scale, terms, self.probit_outcome_model)
 
-        pred = self._predict_y_hat_internal(check_X(X).T)
+        pred = self._predict_y_hat_internal(self._prepare_x(X).T)
 
         if self.probit_outcome_model and scale in ('probability', 'class'):
             prob = ndtr(pred)
@@ -572,6 +602,12 @@ class BARTModel:
         if wants_mean_forest:
             result['mean_forest_predictions'] = pred_out
         return result
+
+    def _prepare_x(self, X: Real[ArrayLike, 'm p'] | DataFrame) -> Real[Array, 'm p']:
+        """Convert covariates to a 2-D jax array, replaying the fitted preprocessor if any."""
+        if self._preprocessor is not None:
+            return jnp.asarray(self._preprocessor.transform(X))
+        return check_X(X)
 
     def _predict_y_hat_internal(
         self, x: Real[ArrayLike, 'p m'] | Literal['train']

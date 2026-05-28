@@ -99,3 +99,16 @@ repos:
         # mention `jax.vmap` are not flagged.
         entry: '\bjax\.vmap\s*\('
         types: [python]
+      - id: forbid-mcmc-module-absolute-import
+        name: forbid `from bartz import mcmcstep/loop (use `from bartz.mcmcstep import foo`)
+        language: pygrep
+        # Forbids `from bartz import ...mcmcstep|mcmcloop...` and `import
+        # bartz.mcmcstep|mcmcloop`, which enable the `mcmcstep.foo`/`mcmcloop.foo`
+        # qualified-access antipattern. `from bartz.mcmcstep import foo` (and
+        # any submodule path like `bartz.mcmcstep._state`) is still allowed.
+        # Excluded: `src/bartz/__init__.py` (legitimate submodule re-export
+        # in the package's own init) and `benchmarks/` (deliberately probes
+        # API surface across bartz versions via module-qualified access).
+        exclude: '^(src/bartz/__init__\.py|benchmarks/)'
+        entry: '^\s*(from\s+bartz\s+import\s+[^\n]*\b(mcmcstep|mcmcloop)\b|import\s+bartz\.(mcmcstep|mcmcloop)\b)'
+        types: [python]

@@ -34,10 +34,9 @@ from equinox import Module
 from jax.scipy.special import ndtr
 from jaxtyping import Array, Float, Float32, Int32, Key, Real
 
-from bartz import mcmcstep
 from bartz._interface import ArrayLike, Bart, DataFrame, FloatLike, PredictKind, Series
 from bartz.mcmcloop import BurninTrace, MainTrace
-from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes
+from bartz.mcmcstep._state import State, chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 
 
@@ -363,7 +362,7 @@ class mc_gbart(Module):
         return self._bart._burnin_trace  # noqa: SLF001
 
     @property
-    def _mcmc_state(self) -> mcmcstep.State:
+    def _mcmc_state(self) -> State:
         return self._bart._mcmc_state  # noqa: SLF001
 
     @property

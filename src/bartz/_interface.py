@@ -57,7 +57,6 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz import mcmcstep
 from bartz._jaxext import equal_shards, is_key, split
 from bartz._jaxext.scipy.special import ndtri
 from bartz._jaxext.scipy.stats import invgamma
@@ -82,11 +81,13 @@ from bartz.mcmcstep import OutcomeType, make_p_nonterminal
 from bartz.mcmcstep._state import (
     ArrayLike,
     FloatLike,
+    State,
     _inv_via_chol_with_gersh,
     chain_to_axis,
     chain_vmap_axes,
     chainful_axis,
     chol_with_gersh,
+    init,
     trace_sample_axes,
 )
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
@@ -348,7 +349,7 @@ class Bart(Module):
 
     _main_trace: MainTrace
     _burnin_trace: BurninTrace
-    _mcmc_state: mcmcstep.State
+    _mcmc_state: State
     _binner: Binner
     _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
     # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
@@ -1278,7 +1279,7 @@ def _setup_mcmc(
     sparse: bool,
     n_burn: int,
     mcmc_key: Key[Array, ''],
-) -> tuple[mcmcstep.State, Key[Array, '']]:
+) -> tuple[State, Key[Array, '']]:
     p_nonterminal = make_p_nonterminal(maxdepth, base, power)
 
     # process device settings
@@ -1315,7 +1316,7 @@ def _setup_mcmc(
 
     kw.update(init_kw)
 
-    state = mcmcstep.init(**kw)
+    state = init(**kw)
 
     # put state and mcmc key on device if requested explicitly by the user
     if device is not None:
@@ -1325,7 +1326,7 @@ def _setup_mcmc(
 
 
 def _run_mcmc(
-    mcmc_state: mcmcstep.State,
+    mcmc_state: State,
     n_save: int,
     n_burn: int,
     n_skip: int,
@@ -1465,7 +1466,7 @@ def tree_goes_bad(
 
 @jit
 def compare_resid(
-    state: mcmcstep.State, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
+    state: State, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
 ) -> tuple[
     Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
     Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],

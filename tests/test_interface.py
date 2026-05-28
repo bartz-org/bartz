@@ -43,6 +43,7 @@ import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError, tree_at
 from jax import (
+    Device,
     block_until_ready,
     config,
     debug_infs,
@@ -2152,6 +2153,101 @@ def test_numpy_input(bkw: BartKW) -> None:
     bart2 = Bart(**kw2)
 
     assert_identical_bart(bart1, bart2)
+
+
+def assert_bart_on_device(bart: Bart, device: Device) -> None:
+    """Check that the MCMC state and traces of ``bart`` live on ``device``."""
+
+    def check(path: KeyPath, x: Array | object) -> None:
+        if isinstance(x, Array):
+            assert x.devices() == {device}, (
+                f'{keystr(path)}: expected {device}, got {x.devices()}'
+            )
+
+    tree.map_with_path(check, (bart._mcmc_state, bart._main_trace, bart._burnin_trace))
+
+
+class TestDevicePlacement:
+    """Test how `Bart` selects the device for the result.
+
+    Skipped if only one device is available.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_single_device(self) -> None:
+        if len(jax.devices()) < 2:  # this branch is covered in single cpu tests config
+            pytest.skip('Need at least 2 devices for device placement tests')
+
+    @pytest.fixture
+    def other_device(self) -> Device:
+        """Return a device different from the default one."""
+        default = get_default_device()
+        return next(d for d in jax.devices() if d != default)
+
+    @pytest.fixture
+    def single_device_kw(self, bkw: BartKW) -> dict:
+        """``bkw.kw`` with sharding disabled so the result lives on a single device."""
+        return dict(bkw.kw, num_chain_devices=None, num_data_devices=None)
+
+    @pytest.fixture
+    def committed_kw(self, single_device_kw: dict, other_device: Device) -> dict:
+        """Like ``single_device_kw`` with all JAX inputs committed to ``other_device``."""
+
+        def commit(x: Any) -> Any:  # noqa: ANN401
+            if isinstance(x, Array):
+                return jax.device_put(x, other_device)
+            return x
+
+        return tree.map(commit, single_device_kw)
+
+    @pytest.fixture(params=['jax', 'numpy'])
+    def uncommitted_kw(self, single_device_kw: dict, request: FixtureRequest) -> dict:
+        """``single_device_kw`` with arrays as JAX or NumPy (both uncommitted)."""
+        if request.param == 'jax':
+            return single_device_kw
+
+        def to_numpy(x: Any) -> Any:  # noqa: ANN401
+            if isinstance(x, Array) and not is_key(x):
+                return numpy.asarray(x)
+            return x
+
+        # numpy doesn't support jax keys; this test only checks device
+        # placement, not values, so swapping the seed is safe
+        return dict(tree.map(to_numpy, single_device_kw), seed=0)
+
+    def test_uncommitted_default(self, uncommitted_kw: dict) -> None:
+        """Uncommitted inputs put the result on the default device."""
+        bart = Bart(**uncommitted_kw)
+        assert_bart_on_device(bart, get_default_device())
+
+    def test_uncommitted_with_devices(
+        self, uncommitted_kw: dict, other_device: Device
+    ) -> None:
+        """With uncommitted inputs, ``devices`` selects the result device."""
+        bart = Bart(**dict(uncommitted_kw, devices=other_device))
+        assert_bart_on_device(bart, other_device)
+
+    def test_committed_followed(self, committed_kw: dict, other_device: Device) -> None:
+        """Committed inputs determine the result device when ``devices`` is unset."""
+        bart = Bart(**committed_kw)
+        assert_bart_on_device(bart, other_device)
+
+    def test_committed_inconsistent_errors(
+        self, single_device_kw: dict, other_device: Device
+    ) -> None:
+        """Committed inputs on different devices raise an error."""
+        kw = dict(
+            single_device_kw,
+            x_train=jax.device_put(single_device_kw['x_train'], get_default_device()),
+            y_train=jax.device_put(single_device_kw['y_train'], other_device),
+        )
+        with pytest.raises(ValueError, match='incompatible devices'):
+            Bart(**kw)
+
+    def test_devices_overrides_committed(self, committed_kw: dict) -> None:
+        """When both committed inputs and ``devices`` are set, ``devices`` wins."""
+        bart = Bart(**dict(committed_kw, devices=get_default_device()))
+        assert_bart_on_device(bart, get_default_device())
 
 
 def test_sigest_wrong_special_value(bkw: BartKW) -> None:

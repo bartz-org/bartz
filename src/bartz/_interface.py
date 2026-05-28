@@ -460,7 +460,7 @@ class Bart(Module):
         max_split = jnp.array(binner_obj.max_split)
 
         # setup and run mcmc
-        initial_state = _setup_mcmc(
+        initial_state, mcmc_key = _setup_mcmc(
             x_train,
             y_train,
             outcome_type,
@@ -488,9 +488,10 @@ class Bart(Module):
             devices,
             sparse,
             n_burn,
+            keys.pop(),
         )
         result = _run_mcmc(
-            initial_state, n_save, n_burn, n_skip, printevery, keys.pop(), run_mcmc_kw
+            initial_state, n_save, n_burn, n_skip, printevery, mcmc_key, run_mcmc_kw
         )
 
         # set public attributes
@@ -1276,7 +1277,8 @@ def _setup_mcmc(
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
     sparse: bool,
     n_burn: int,
-) -> mcmcstep.State:
+    mcmc_key: Key[Array, ''],
+) -> tuple[mcmcstep.State, Key[Array, '']]:
     p_nonterminal = make_p_nonterminal(maxdepth, base, power)
 
     # process device settings
@@ -1315,11 +1317,11 @@ def _setup_mcmc(
 
     state = mcmcstep.init(**kw)
 
-    # put state on device if requested explicitly by the user
+    # put state and mcmc key on device if requested explicitly by the user
     if device is not None:
-        state = device_put(state, device, donate=True)
+        mcmc_key, state = device_put((mcmc_key, state), device, donate=True)
 
-    return state
+    return state, mcmc_key
 
 
 def _run_mcmc(

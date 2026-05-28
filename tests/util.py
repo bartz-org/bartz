@@ -311,9 +311,7 @@ def rhat_rank(
 
     Returns
     -------
-    Array with ``chain_axis`` and ``draw_axis`` of ``data`` removed; each entry
-    is the rank-normalized (split-)Rhat over the corresponding (chain, draw)
-    slice. NaNs in a slice propagate to ``nan`` in its Rhat.
+    Array with ``chain_axis`` and ``draw_axis`` of ``data`` removed; each entry is the rank-normalized (split-)Rhat over the corresponding (chain, draw) slice. NaNs in a slice propagate to ``nan`` in its Rhat.
 
     Raises
     ------

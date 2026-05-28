@@ -69,6 +69,16 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: check-returns-docstring
+        name: forbid multi-line non-list `Returns` docstring sections
+        # Matches a numpy-style `Returns` block whose first two non-blank lines
+        # are both at the section's base indent: i.e., multi-line prose. List-
+        # form (description on a more-indented continuation line) is skipped via
+        # `(?P=i)\S`; the trailing lookahead skips the next section's header.
+        language: pygrep
+        entry: '^(?P<i>[ \t]*)Returns[ \t]*\n(?P=i)-+[ \t]*\n(?P=i)(?!""")\S[^\n]*\n(?:[ \t]*\n)*(?P=i)(?!""")(?!\w+[ \t]*\n(?P=i)-+[ \t]*$)\S'
+        args: [--multiline]
+        types: [python]
       - id: forbid-lam-lamda
         name: forbid `lam`/`lamda` identifier (use `lambda_` per PEP 8)
         language: pygrep

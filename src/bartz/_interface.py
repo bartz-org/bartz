@@ -718,8 +718,7 @@ class Bart(Module):
 
         Returns
         -------
-        The resolved error scale as a float32 array, or `None` if weights
-        are not applicable.
+        The resolved error scale as a float32 array, or `None` if weights are not applicable.
 
         Raises
         ------
@@ -824,8 +823,7 @@ class Bart(Module):
 
         Returns
         -------
-        An array where ``(i, j, k)`` is `True` if tree `k` is invalid at
-        iteration `j` in chain `i` but not at iteration ``j - 1``.
+        An array where ``(i, j, k)`` is `True` if tree `k` is invalid at iteration `j` in chain `i` but not at iteration ``j - 1``.
         """
         return tree_goes_bad(self._main_trace, self._mcmc_state.forest.max_split)
 

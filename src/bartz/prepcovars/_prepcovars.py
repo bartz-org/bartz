@@ -84,11 +84,7 @@ def _subsample(
 
     Returns
     -------
-    A matrix with `p` rows and ``min(n, max_samples)`` columns. If
-    ``n <= max_samples``, `X` is returned unchanged. Otherwise each row contains
-    `max_samples` distinct values drawn without replacement from the
-    corresponding row of `X`, with rows sampled independently. The order of
-    values within each row is unspecified.
+    A matrix with `p` rows and ``min(n, max_samples)`` columns. If ``n <= max_samples``, `X` is returned unchanged. Otherwise each row contains `max_samples` distinct values drawn without replacement from the corresponding row of `X`, with rows sampled independently. The order of values within each row is unspecified.
 
     Raises
     ------

@@ -1209,8 +1209,7 @@ def sum_resid(
 
     Returns
     -------
-    The per-leaf sum, with the same leading dimensions as ``scaled_resid`` and
-    a trailing axis over the leaves.
+    The per-leaf sum, with the same leading dimensions as ``scaled_resid`` and a trailing axis over the leaves.
     """
     return _scatter_add(
         scaled_resid,

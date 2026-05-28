@@ -511,7 +511,7 @@ class BARTModel:
                 ' using this model.'
             )
             raise NotSampledError(msg)
-        terms_list = check_predict_args(type, scale, terms, self.probit_outcome_model)
+        terms_tuple = check_predict_args(type, scale, terms, self.probit_outcome_model)
 
         pred = self._predict_y_hat_internal(check_X(X).T)
 
@@ -524,8 +524,8 @@ class BARTModel:
         if type == 'mean':
             pred_out = jnp.mean(pred_out, axis=1)
 
-        wants_y_hat = ('y_hat' in terms_list) or ('all' in terms_list)
-        wants_mean_forest = ('mean_forest' in terms_list) or ('all' in terms_list)
+        wants_y_hat = ('y_hat' in terms_tuple) or ('all' in terms_tuple)
+        wants_mean_forest = ('mean_forest' in terms_tuple) or ('all' in terms_tuple)
         single = sum([wants_y_hat, wants_mean_forest]) == 1
         if single:
             return pred_out
@@ -614,8 +614,8 @@ def check_predict_args(
     terms: Literal['y_hat', 'mean_forest', 'all']
     | Sequence[Literal['y_hat', 'mean_forest', 'all']],
     probit_outcome_model: bool,
-) -> list[str]:
-    """Validate `BARTModel.predict` arguments, returning the normalized terms list."""
+) -> tuple[str, ...]:
+    """Validate `BARTModel.predict` arguments, returning the normalized terms tuple."""
     if scale not in ('linear', 'probability', 'class'):
         msg = f"scale must be 'linear', 'probability', or 'class'; got {scale!r}"
         raise ValueError(msg)
@@ -631,12 +631,12 @@ def check_predict_args(
     if type_ == 'mean' and scale == 'class':
         msg = "scale='class' is incompatible with type='mean'"
         raise ValueError(msg)
-    terms_list = [terms] if isinstance(terms, str) else list(terms)
-    for t in terms_list:
+    terms_tuple = (terms,) if isinstance(terms, str) else tuple(terms)
+    for t in terms_tuple:
         if t not in ('y_hat', 'mean_forest', 'all'):
             msg = f'unknown term {t!r}; valid terms are y_hat, mean_forest, all'
             raise ValueError(msg)
-    return terms_list
+    return terms_tuple
 
 
 def process_train_inputs(

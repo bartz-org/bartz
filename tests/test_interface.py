@@ -1984,16 +1984,24 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
         outcome_type = outcome_type[0]
 
-    y_mv = bkw.kw['y_train']
-    if bkw.k is None:  # pragma: no cover, bc defaults are mv only
-        y_mv = y_mv[None, :]
-    y_mv = y_mv[:1, :]
-    y_uv = y_mv.squeeze(0)
+    def to_uv_mv(arr: Array | None) -> tuple[Array | None, Array | None]:
+        """Split a ``(n,)`` or ``(k, n)`` array into UV and MV(k=1) versions."""
+        if arr is None:
+            return None, None
+        if arr.ndim == 1:
+            arr = arr[None, :]
+        arr_mv = arr[:1, :]
+        return arr_mv.squeeze(0), arr_mv
 
-    bkw.kw.update(outcome_type=outcome_type, n_burn=0, n_save=0, w=None, missing=None)
-    del bkw.kw['y_train']
-    bart_uv = Bart(y_train=y_uv, **bkw.kw)
-    bart_mv = Bart(y_train=y_mv, **bkw.kw)
+    y_uv, y_mv = to_uv_mv(bkw.kw['y_train'])
+    w_uv, w_mv = to_uv_mv(bkw.kw.get('w'))
+    missing_uv, missing_mv = to_uv_mv(bkw.kw.get('missing'))
+
+    bkw.kw.update(outcome_type=outcome_type, n_burn=0, n_save=0)
+    for key in ('y_train', 'w', 'missing'):
+        bkw.kw.pop(key, None)
+    bart_uv = Bart(y_train=y_uv, w=w_uv, missing=missing_uv, **bkw.kw)
+    bart_mv = Bart(y_train=y_mv, w=w_mv, missing=missing_mv, **bkw.kw)
 
     state_uv = bart_uv._mcmc_state
     state_mv = bart_mv._mcmc_state

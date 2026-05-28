@@ -31,8 +31,8 @@ import numpy as np
 import pytest
 import stochtree
 from equinox import EquinoxRuntimeError
+from jax import Array, random
 from jax import numpy as jnp
-from jax import random
 from jax.scipy.special import ndtr
 from numpy.testing import assert_array_less
 from pytest_subtests import SubTests
@@ -482,36 +482,40 @@ def test_jit(keys: split) -> None:
     surfaces as a ConcretizationTypeError.
     """
     data = _make_continuous(keys, n=80, n_test=20)
-    X_train = jnp.asarray(data.X_train)
-    y_train = jnp.asarray(data.y_train)
-    X_test = jnp.asarray(data.X_test)
-    X_predict = jnp.asarray(data.X_test[:5])
-    w = jnp.ones(y_train.shape)
-    key = random.key(0)
-    p = X_train.shape[1]
-    # traceable scalars / arrays
-    sigma2_init = jnp.float32(1.0)
-    alpha = jnp.float32(0.95)
-    beta = jnp.float32(2.0)
-    sigma2_leaf_init = jnp.float32(1.0 / 200)
-    variable_weights = jnp.ones(p)
+    p = data.X_train.shape[1]
+    args: dict = {
+        'key': random.key(0),
+        'X': jnp.asarray(data.X_train),
+        'y': jnp.asarray(data.y_train),
+        'X_test': jnp.asarray(data.X_test),
+        'X_predict': jnp.asarray(data.X_test[:5]),
+        'w': jnp.ones(data.y_train.shape),
+        'sigma2_init': 1.0,
+        'alpha': 0.95,
+        'beta': 2.0,
+        'sigma2_leaf_init': 1.0 / 200,
+        'variable_weights': jnp.ones(p),
+    }
     # devices can't be inferred from a jit tracer, so pre-determine the platform;
     # rm_const requires concrete max_split values, so disable it for tracing.
-    bart_kwargs: dict = {'devices': jax.devices(y_train.platform()), 'rm_const': False}
+    bart_kwargs: dict = {
+        'devices': jax.devices(args['y'].platform()),
+        'rm_const': False,
+    }
 
     def task(
-        X: jax.Array,
-        y: jax.Array,
-        X_test: jax.Array,
-        X_predict: jax.Array,
-        w: jax.Array,
-        key: jax.Array,
-        sigma2_init: jax.Array,
-        alpha: jax.Array,
-        beta: jax.Array,
-        sigma2_leaf_init: jax.Array,
-        variable_weights: jax.Array,
-    ) -> tuple[jax.Array, ...]:
+        key: Array,
+        X: Array,
+        y: Array,
+        X_test: Array,
+        X_predict: Array,
+        w: Array,
+        sigma2_init: float,
+        alpha: float,
+        beta: float,
+        sigma2_leaf_init: float,
+        variable_weights: Array,
+    ) -> tuple[Array, ...]:
         m = bst.BARTModel()
         m.sample(
             X_train=X,
@@ -546,23 +550,10 @@ def test_jit(keys: split) -> None:
             pred_post,
         )
 
-    args = (
-        X_train,
-        y_train,
-        X_test,
-        X_predict,
-        w,
-        key,
-        sigma2_init,
-        alpha,
-        beta,
-        sigma2_leaf_init,
-        variable_weights,
-    )
-    args_cloned = (*args[:5], random.clone(key), *args[6:])
+    args_cloned = dict(args, key=random.clone(args['key']))
 
-    out1 = task(*args)
-    out2 = jax.jit(task)(*args_cloned)
+    out1 = task(**args)
+    out2 = jax.jit(task)(**args_cloned)
 
     for a, b in zip(out1, out2, strict=True):
         assert_close_matrices(a, b, rtol=1e-5)

@@ -1356,10 +1356,11 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
 
         with subtests.test('varcount'):
             rhat_varcount = rhat_rank([bart.varcount, varcount_prior], split=False)
-            if p == 10:
-                assert_array_less(rhat_varcount, 1.05)
-            else:
-                assert_array_less(rhat_varcount, 1.02)
+            # `rhat_varcount` is a max over `p` rank-rhat values; its upper tail
+            # reaches ~1.05 even when the MCMC matches the prior exactly (checked
+            # over 100 seeds for both p=3 and p=10), so a tighter bound would
+            # false-fail on ~10% of seeds.
+            assert_array_less(rhat_varcount, 1.05)
 
         with subtests.test('number of nodes'):
             sum_varcount_mcmc = bart.varcount.sum(axis=1)

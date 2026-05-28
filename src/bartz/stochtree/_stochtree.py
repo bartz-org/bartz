@@ -57,10 +57,15 @@ class OutcomeModel:
     outcome: Literal['continuous', 'binary'] = 'continuous'
     """Outcome family."""
 
-    link: Literal['identity', 'probit'] = 'identity'
-    """Link function. ``'identity'`` for continuous, ``'probit'`` for binary."""
+    link: Literal['identity', 'probit'] | None = None
+    """Link function. If `None`, defaults to ``'identity'`` for ``'continuous'`` and ``'probit'`` for ``'binary'``."""
 
     def __post_init__(self) -> None:
+        if self.link is None:
+            default_link = {'continuous': 'identity', 'binary': 'probit'}.get(
+                self.outcome
+            )
+            object.__setattr__(self, 'link', default_link)
         if (self.outcome, self.link) not in (
             ('continuous', 'identity'),
             ('binary', 'probit'),
@@ -73,7 +78,7 @@ class OutcomeModel:
             raise NotImplementedError(msg)
 
 
-class NotSampledError(RuntimeError):
+class NotSampledError(ValueError, AttributeError):
     """Raised when calling a method that requires `sample` to have been called."""
 
 

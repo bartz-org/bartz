@@ -528,9 +528,10 @@ class BARTModel:
         self,
         X: np.ndarray | DataFrame,
         *,
-        type: str = 'posterior',  # noqa: A002
-        terms: str | Sequence[str] = 'all',
-        scale: str = 'linear',
+        type: Literal['posterior', 'mean'] = 'posterior',  # noqa: A002
+        terms: Literal['y_hat', 'mean_forest', 'all']
+        | Sequence[Literal['y_hat', 'mean_forest', 'all']] = 'all',
+        scale: Literal['linear', 'probability', 'class'] = 'linear',
     ) -> np.ndarray | dict[str, np.ndarray]:
         """Predict at new covariates.
 
@@ -668,7 +669,11 @@ def check_variable_weights(
 
 
 def check_predict_args(
-    type_: str, scale: str, terms: str | Sequence[str], probit_outcome_model: bool
+    type_: Literal['posterior', 'mean'],
+    scale: Literal['linear', 'probability', 'class'],
+    terms: Literal['y_hat', 'mean_forest', 'all']
+    | Sequence[Literal['y_hat', 'mean_forest', 'all']],
+    probit_outcome_model: bool,
 ) -> list[str]:
     """Validate `BARTModel.predict` arguments, returning the normalized terms list."""
     if scale not in ('linear', 'probability', 'class'):

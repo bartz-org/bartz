@@ -50,6 +50,7 @@ from jax import (
     debug_key_reuse,
     debug_nans,
     lax,
+    no_tracing,
     random,
     tree,
     vmap,
@@ -76,6 +77,7 @@ from bartz.grove import (
     tree_depths,
 )
 from bartz.mcmcloop import compute_varcount, evaluate_trace
+from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
@@ -1539,6 +1541,41 @@ def test_jit(bkw: BartKW) -> None:
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
     assert_close_matrices(pred1, pred2, rtol=1e-5, reduce_rank=True)
+
+
+def test_no_recompilation_no_tracing(bkw: BartKW) -> None:
+    """Check that running the same `Bart` invocation twice does not retrace.
+
+    Uses `jax.no_tracing` to detect any new jaxpr tracing in the second
+    invocation. Forces ``printevery=None`` because `debug.callback` (used by
+    `print_callback`) introduces an unordered effect that disables JAX's C++
+    pjit fastpath cache, which would make `no_tracing` raise even when no
+    actual jaxpr re-tracing happens. Uses `OriginalBart` (not the wrapper)
+    because the wrapper's `_check_replicated_trees` creates a fresh
+    `shard_map` each call, which doesn't cache across invocations.
+    """
+    kw = dict(bkw.kw, printevery=None)
+    OriginalBart(**kw)
+    kw2 = dict(kw, seed=random.clone(kw['seed']))
+    with no_tracing():
+        OriginalBart(**kw2)
+
+
+def test_no_recompilation_inner_loop_counter(bkw: BartKW) -> None:
+    """Check the MCMC inner loop is not retraced on the second `Bart` call.
+
+    Uses the `_CallCounter` already wrapping `_run_mcmc_inner_loop`. The
+    counter is reset at the start of each `run_mcmc` and increments only on
+    actual Python-side tracing of the inner loop; if the JIT cache hits it
+    stays at 0. Unlike `test_no_recompilation_no_tracing`, this works with
+    the default ``printevery`` (which uses `debug.callback`), but only
+    covers `_run_mcmc_inner_loop`.
+    """
+    kw = bkw.kw
+    Bart(**kw)
+    kw2 = dict(kw, seed=random.clone(kw['seed']))
+    Bart(**kw2)
+    assert _run_mcmc_inner_loop._fun.n_calls == 0
 
 
 def test_print_callback_terminates_dot_line(

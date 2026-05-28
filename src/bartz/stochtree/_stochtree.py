@@ -39,7 +39,7 @@ from jaxtyping import Array, Float, Float32, Key, Real, Shaped
 from bartz._interface import Bart, DataFrame, PredictKind, Series
 from bartz._jaxext.scipy.special import ndtri
 from bartz.mcmcstep._state import ArrayLike, FloatLike
-from bartz.prepcovars import UniqueQuantileBinner
+from bartz.prepcovars import RangeEvenBinner
 
 T = TypeVar('T')
 
@@ -85,9 +85,6 @@ class NotSampledError(ValueError, AttributeError):
 @dataclass(frozen=True, kw_only=True)
 class GeneralParams:
     """Mirror of stochtree's ``general_params`` dict, with the keys bartz handles."""
-
-    cutpoint_grid_size: int = 100
-    """Maximum number of cutpoints to consider for each feature."""
 
     standardize: bool = True
     """Whether to standardize the outcome before fitting. Ignored for probit binary."""
@@ -216,6 +213,9 @@ class BARTModel:
     - The deprecated ``general_params['probit_outcome_model']`` flag is not
       accepted; pass ``outcome_model=OutcomeModel('binary', 'probit')``
       instead.
+    - ``general_params['cutpoint_grid_size']`` is not accepted; bartz uses a
+      fixed grid of 256 evenly-spaced bins per predictor. stochtree only
+      uses this parameter for the GFR sampler, which bartz does not support.
     - Leaf-basis regression, random effects, heteroskedastic variance
       forests, and warm-starting from a previous model are not supported.
     - bartz uses single-precision floats, so outputs differ from stochtree
@@ -402,9 +402,7 @@ class BARTModel:
                 var_resid_train,
             )
 
-        binner = partial(
-            UniqueQuantileBinner, max_bins=gp.cutpoint_grid_size + 1, max_subsample=None
-        )
+        binner = partial(RangeEvenBinner, max_bins=256)
 
         variable_weights = check_variable_weights(gp.variable_weights, p)
 
@@ -433,9 +431,22 @@ class BARTModel:
             num_chains=bart_num_chains,
             seed=seed,
             maxdepth=mfp.max_depth + 1,
-            init_kw={'min_points_per_leaf': mfp.min_samples_leaf},
         )
         kwargs.update(bart_kwargs)
+        # match stochtree's gating: only acceptance-time veto on
+        # min_samples_leaf, no per-leaf affluence filter (stochtree picks
+        # leaves uniformly over all of them). User-supplied init_kw values
+        # win on conflicts.
+        kwargs = dict(
+            kwargs,
+            init_kw=dict(
+                {
+                    'min_points_per_leaf': mfp.min_samples_leaf,
+                    'min_points_per_decision_node': None,
+                },
+                **kwargs.get('init_kw', {}),
+            ),
+        )
         self._bart = Bart(**kwargs)
         self._finalize_sample(
             outcome_model=gp.outcome_model,

@@ -163,7 +163,8 @@ class Bart(Module):
         ``'binary'`` for binary regression with probit link. For multivariate
         regression, a scalar value applies to all components; alternatively, a
         sequence of per-component types (e.g., ``['binary', 'continuous']``)
-        specifies mixed outcome types.
+        specifies mixed outcome types. Binary components in multivariate
+        outcomes follow the multivariate probit BART formulation of [4]_.
     sparse
         Whether to activate variable selection on the predictors as done in
         [1]_.
@@ -338,6 +339,10 @@ class Bart(Module):
        Bandyopadhyay (2023). "Bayesian additive regression trees for
        multivariate skewed responses". In: Statistics in Medicine 42.3,
        pp. 246-263.
+    .. [4] Goh, Yong Chen, Wuu Kuang Soh, Andrew C. Parnell, and Keefe
+       Murphy (2024). "Joint Models for Handling Non-Ignorable Missing
+       Data using Bayesian Additive Regression Trees: Application to
+       Leaf Photosynthetic Traits Data". arXiv:2412.14946 [stat.ME].
 
     """
 

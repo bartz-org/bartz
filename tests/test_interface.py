@@ -1075,8 +1075,12 @@ def test_scale_shift(bkw: BartKW) -> None:
     y = kw['y_train']
     y = jnp.where(mask[..., None], y, offset + y * scale)
 
+    x_offset = -0.6184722
+    x_scale = 1.8521347
+    x = x_offset + x_scale * kw['x_train']
+
     kw2 = dict(kw)
-    kw2.update(y_train=y, seed=random.clone(kw['seed']))
+    kw2.update(x_train=x, y_train=y, seed=random.clone(kw['seed']))
     bart2 = Bart(**kw2)
 
     assert_close_matrices(
@@ -1127,7 +1131,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     )
 
     yhat_test1 = bart1.predict(kw['x_train'], kind='latent_samples')
-    yhat_test2 = bart2.predict(kw['x_train'], kind='latent_samples')
+    yhat_test2 = bart2.predict(x, kind='latent_samples')
     assert_close_matrices(
         yhat_test1,
         jnp.where(mask_pred, yhat_test2, (yhat_test2 - offset) / scale),
@@ -1136,7 +1140,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     )
 
     yhat_test_mean1 = bart1.predict(kw['x_train'], kind='mean')
-    yhat_test_mean2 = bart2.predict(kw['x_train'], kind='mean')
+    yhat_test_mean2 = bart2.predict(x, kind='mean')
     assert_close_matrices(
         yhat_test_mean1,
         jnp.where(mask_pred, yhat_test_mean2, (yhat_test_mean2 - offset) / scale),

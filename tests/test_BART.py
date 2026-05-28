@@ -772,7 +772,14 @@ def test_scale_shift(kw: dict[str, Any]) -> None:
 
     offset = 0.4703189
     scale = 0.5294714
-    kw.update(y_train=offset + kw['y_train'] * scale, seed=random.clone(kw['seed']))
+    x_offset = -0.6184722
+    x_scale = 1.8521347
+    kw.update(
+        x_train=x_offset + x_scale * kw['x_train'],
+        x_test=x_offset + x_scale * kw['x_test'],
+        y_train=offset + kw['y_train'] * scale,
+        seed=random.clone(kw['seed']),
+    )
     # note: using the same seed does not guarantee stable error because the mcmc
     # makes discrete choices based on thresholds on floats, so numerical error
     # can be amplified.

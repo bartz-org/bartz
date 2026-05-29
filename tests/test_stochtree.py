@@ -164,6 +164,29 @@ def test_binary_smoke(keys: split) -> None:
     assert np.allclose(np.asarray(m.global_var_samples), 1.0)
 
 
+@pytest.mark.parametrize('terms', ['mean_forest', 'all', ['y_hat', 'mean_forest']])
+def test_class_scale_requires_single_y_hat(keys: split, terms: str | list[str]) -> None:
+    """`scale='class'` matches stochtree: only a single 'y_hat' term is allowed."""
+    data = _make_binary(keys, n=40, n_test=10)
+    m = bst.BARTModel()
+    m.sample(
+        X_train=data.X_train,
+        y_train=data.y_train,
+        num_gfr=0,
+        num_burnin=5,
+        num_mcmc=10,
+        general_params={
+            'outcome_model': bst.OutcomeModel(outcome='binary', link='probit')
+        },
+        mean_forest_params=_MFP_BASE,
+    )
+    with pytest.raises(ValueError, match="single 'y_hat'"):
+        m.predict(data.X_test, terms=terms, scale='class')
+    # the single-'y_hat' request works and returns 0/1 labels
+    cls = np.asarray(m.predict(data.X_test, terms='y_hat', scale='class'))
+    assert np.isin(cls, (0, 1)).all()
+
+
 def test_multi_chain(keys: split) -> None:
     """`num_chains > 1` concatenates samples across chains."""
     data = _make_continuous(keys, n=50, n_test=10)
@@ -251,6 +274,25 @@ def test_sigma2_init_with_proper_prior_raises(keys: split) -> None:
                 'sigma2_global_scale': 0.5,
                 'sigma2_init': 1.0,
             },
+            mean_forest_params=_MFP_BASE,
+        )
+
+
+@pytest.mark.parametrize(('shape', 'scale'), [(1.5, 0.0), (0.0, 0.5)])
+def test_one_sided_improper_prior_raises(
+    keys: split, shape: float, scale: float
+) -> None:
+    """A variance prior with exactly one of shape/scale zero is refused."""
+    data = _make_continuous(keys, n=10, n_test=5)
+    m = bst.BARTModel()
+    with pytest.raises(NotImplementedError, match='one-sided improper'):
+        m.sample(
+            X_train=data.X_train,
+            y_train=data.y_train,
+            num_gfr=0,
+            num_burnin=2,
+            num_mcmc=2,
+            general_params={'sigma2_global_shape': shape, 'sigma2_global_scale': scale},
             mean_forest_params=_MFP_BASE,
         )
 

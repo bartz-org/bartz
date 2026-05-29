@@ -1527,7 +1527,6 @@ def points_per_node_distr_trace(
 class DeviceKwArgs(TypedDict):
     num_chains: int | None
     mesh: Mesh | None
-    target_platform: Literal['cpu', 'gpu'] | None
 
 
 def process_device_settings(
@@ -1545,19 +1544,7 @@ def process_device_settings(
     mesh, device = _determine_mesh(num_chain_devices, num_data_devices, device, devices)
 
     # prepare arguments to `init`
-    settings = DeviceKwArgs(
-        num_chains=num_chains,
-        mesh=mesh,
-        target_platform=None
-        if mesh is not None or hasattr(y_train, 'platform')
-        else platform,
-        # here we don't take into account the case where the user has set both
-        # batch sizes; since the user has to be playing with `init_kw` to do
-        # that, we'll let `init` throw the error and the user set
-        # `target_platform` themselves so they have a clearer idea how the
-        # thing works (i.e.: init won't be happy to receive target_platform if
-        # it's not needed because all device-dependent defaults are overridden)
-    )
+    settings = DeviceKwArgs(num_chains=num_chains, mesh=mesh)
 
     return settings, device
 

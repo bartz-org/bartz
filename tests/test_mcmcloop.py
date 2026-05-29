@@ -37,7 +37,7 @@ from jax.tree_util import KeyPath
 from jaxtyping import Array, Float32, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
-from bartz._jaxext import get_default_device, split
+from bartz._jaxext import split
 from bartz.mcmcloop import BurninTrace, MainTrace, run_mcmc
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._state import trace_sample_axes
@@ -81,7 +81,6 @@ def simple_init(
         error_cov_df=2,
         error_cov_scale=2 * eye,
         min_points_per_decision_node=10,
-        target_platform=get_default_device().platform,
         **kwargs,
     )
 

@@ -55,7 +55,7 @@ from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Key, PyTree, 
 from numpy import ndarray
 from numpy.lib.array_utils import normalize_axis_index
 
-from bartz._jaxext import get_default_device, minimal_unsigned_dtype
+from bartz._jaxext import minimal_unsigned_dtype
 from bartz.grove import tree_depths
 
 ArrayLike = Array | ndarray
@@ -485,17 +485,19 @@ class StepConfig(Module):
     sparse_on_at: Int32[Array, ''] | None
     """After how many steps to turn on variable selection."""
 
-    resid_num_batches: int | None = field(static=True)
-    """The number of batches for computing the sum of residuals. If
-    `None`, they are computed with no batching."""
+    resid_num_batches: int | None | Literal['auto'] = field(static=True)
+    """The number of batches for computing the sum of residuals. If `None`,
+    they are computed with no batching. If 'auto', resolved per-platform at run
+    time."""
 
-    count_num_batches: int | None = field(static=True)
-    """The number of batches for computing counts. If
-    `None`, they are computed with no batching."""
+    count_num_batches: int | None | Literal['auto'] = field(static=True)
+    """The number of batches for computing counts. If `None`, they are computed
+    with no batching. If 'auto', resolved per-platform at run time."""
 
-    prec_num_batches: int | None = field(static=True)
-    """The number of batches for computing precision scales. If
-    `None`, they are computed with no batching."""
+    prec_num_batches: int | None | Literal['auto'] = field(static=True)
+    """The number of batches for computing precision scales. If `None`, they
+    are computed with no batching. If 'auto', resolved per-platform at run
+    time."""
 
     prec_count_num_trees: int | None = field(static=True)
     """Batch size for processing trees to compute count and prec trees."""
@@ -903,7 +905,6 @@ def init(
     sparse_on_at: int | Integer[ArrayLike, ''] | None = None,
     num_chains: int | None = None,
     mesh: Mesh | dict[str, int] | None = None,
-    target_platform: Literal['cpu', 'gpu'] | None = None,
 ) -> State:
     """
     Make a BART posterior sampling MCMC initial state.
@@ -963,8 +964,9 @@ def init(
         The number of batches, along datapoints, for summing the residuals,
         counting the number of datapoints in each leaf, and computing the
         likelihood precision in each leaf, respectively. `None` for no batching.
-        If 'auto', it's chosen automatically based on the target platform; see
-        the description of `target_platform` below for how it is determined.
+        If 'auto' (default), it's chosen automatically based on the platform the
+        MCMC is compiled for, resolved at run time via `lax.platform_dependent`,
+        so the state need not know the platform in advance.
     prec_count_num_trees
         The number of trees to process at a time when counting datapoints or
         computing the likelihood precision. If `None`, do all trees at once,
@@ -1015,16 +1017,6 @@ def init(
         Note: if a mesh is passed, the arrays are always sharded according to
         it. In particular even if the mesh has no 'chains' or 'data' axis, the
         arrays will be replicated on all devices in the mesh.
-    target_platform
-        Platform ('cpu' or 'gpu') used to determine the number of batches
-        automatically. If `mesh` is specified, the platform is inferred from the
-        devices in the mesh. Otherwise, if `y` is a concrete array (i.e., `init`
-        is not invoked in a `jax.jit` context), the platform is set to the
-        platform of `y`. Otherwise, use `target_platform`.
-
-        To avoid confusion, in all cases where the `target_platform` argument
-        would be ignored, `init` raises an exception if `target_platform` is
-        set.
 
     Returns
     -------
@@ -1094,9 +1086,6 @@ def init(
 
     # determine batch sizes for reductions
     mesh = _parse_mesh(num_chains, mesh)
-    target_platform = _parse_target_platform(
-        y, mesh, target_platform, resid_num_batches, count_num_batches, prec_num_batches
-    )
     red_cfg = _parse_reduction_configs(
         resid_num_batches,
         count_num_batches,
@@ -1106,7 +1095,6 @@ def init(
         num_trees,
         num_chains,
         mesh,
-        target_platform,
     )
 
     # check there aren't too many deactivated predictors
@@ -1405,32 +1393,6 @@ def _parse_mesh(
     return mesh
 
 
-def _parse_target_platform(
-    y: Array,
-    mesh: Mesh | None,
-    target_platform: Literal['cpu', 'gpu'] | None,
-    resid_num_batches: int | None | Literal['auto'],
-    count_num_batches: int | None | Literal['auto'],
-    prec_num_batches: int | None | Literal['auto'],
-) -> Literal['cpu', 'gpu'] | None:
-    if mesh is not None:
-        assert target_platform is None, 'mesh provided, do not set target_platform'
-        return mesh.devices.flat[0].platform
-    elif hasattr(y, 'platform'):
-        assert target_platform is None, 'device inferred from y, unset target_platform'
-        return y.platform()
-    elif (
-        resid_num_batches == 'auto'
-        or count_num_batches == 'auto'
-        or prec_num_batches == 'auto'
-    ):
-        assert target_platform in ('cpu', 'gpu')
-        return target_platform
-    else:
-        assert target_platform is None, 'target_platform not used, unset it'
-        return target_platform
-
-
 @partial(filter_jit, donate='all')
 # jit and donate because otherwise type conversion would create copies
 def _remove_weak_types(x: PyTree[Array, 'T']) -> PyTree[Array, 'T']:
@@ -1526,19 +1488,12 @@ def _asarray_or_none(x: object) -> Array | None:
     return jnp.asarray(x)
 
 
-def _get_platform(mesh: Mesh | None) -> str:
-    if mesh is None:
-        return get_default_device().platform
-    else:
-        return mesh.devices.flat[0].platform
-
-
 class _ReductionConfig(TypedDict):
     """Fields of `StepConfig` related to reductions."""
 
-    resid_num_batches: int | None
-    count_num_batches: int | None
-    prec_num_batches: int | None
+    resid_num_batches: int | None | Literal['auto']
+    count_num_batches: int | None | Literal['auto']
+    prec_num_batches: int | None | Literal['auto']
     prec_count_num_trees: int | None
 
 
@@ -1551,7 +1506,6 @@ def _parse_reduction_configs(
     num_trees: int,
     num_chains: int | None,
     mesh: Mesh | None,
-    target_platform: Literal['cpu', 'gpu'] | None,
 ) -> _ReductionConfig:
     """Determine settings for indexed reduces."""
     n = y.shape[-1]
@@ -1559,33 +1513,29 @@ def _parse_reduction_configs(
     # chains are vmapped together on each device, so they share the per-step
     # memory of the per-tree reduction
     chains_per_device = (num_chains or 1) // get_axis_size(mesh, 'chains')
-    parse_num_batches = partial(_parse_num_batches, target_platform, n)
+    # the datapoint-batch counts are resolved per-platform at run time (see
+    # `_auto_num_batches` and `lax.platform_dependent` in `_step`), so the
+    # 'auto' sentinel is stored verbatim; only `prec_count_num_trees`, which
+    # does not depend on the platform, is resolved here
     return dict(
-        resid_num_batches=parse_num_batches(resid_num_batches, 'resid'),
-        count_num_batches=parse_num_batches(count_num_batches, 'count'),
-        prec_num_batches=parse_num_batches(prec_num_batches, 'prec'),
+        resid_num_batches=resid_num_batches,
+        count_num_batches=count_num_batches,
+        prec_num_batches=prec_num_batches,
         prec_count_num_trees=_parse_prec_count_num_trees(
             prec_count_num_trees, num_trees, n * chains_per_device
         ),
     )
 
 
-def _parse_num_batches(
-    target_platform: Literal['cpu', 'gpu'] | None,
-    n: int,
-    num_batches: int | None | Literal['auto'],
-    which: Literal['resid', 'count', 'prec'],
+def _auto_num_batches(
+    platform: Literal['cpu', 'gpu'], n: int, which: Literal['resid', 'count', 'prec']
 ) -> int | None:
-    """Return the number of batches or determine it automatically."""
-    final_round = partial(_final_round, n)
-    if num_batches != 'auto':
-        nb = num_batches
-    elif target_platform == 'cpu':
-        nb = final_round(16)
-    elif target_platform == 'gpu':
+    """Pick the number of datapoint batches for a reduction on a given platform."""
+    if platform == 'cpu':
+        return _final_round(n, 16)
+    else:
         nb = dict(resid=1024, count=2048, prec=1024)[which]  # on an A4000
-        nb = final_round(nb)
-    return nb
+        return _final_round(n, nb)
 
 
 def _final_round(n: int, num: float) -> int | None:

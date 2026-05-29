@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+import stochtree
 from equinox import EquinoxRuntimeError
 from jax import Array, random
 from jax import numpy as jnp
@@ -40,7 +41,6 @@ from numpy.typing import ArrayLike
 from pytest_subtests import SubTests
 
 import bartz.stochtree as bst
-import stochtree
 from bartz._jaxext import split
 from bartz.stochtree._preprocess import (
     PandasPreprocessor,

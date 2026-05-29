@@ -56,6 +56,27 @@ def test_format_tree() -> None:
     assert s == ref_s
 
 
+def test_format_tree_multivariate() -> None:
+    """Check the output of `format_tree` on a tree with multivariate leaves."""
+    tree = manual_tree(
+        [[1.0], [2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], [[4], [1, 2]], [[15], [0, 3]]
+    )
+    # add a leaf axis to turn the univariate tree into a multivariate one
+    tree = tree_at(
+        lambda t: t.leaf_tree, tree, jnp.stack([tree.leaf_tree, -tree.leaf_tree])
+    )
+    assert tree.leaf_tree.ndim == tree.var_tree.ndim + 1
+    s = format_tree(tree)
+    print(s)
+    ref_s = """\
+ 1 ┐x4 < 15
+ 2 ├── [2.0, -2.0]
+ 3 └──┐x2 < 3
+ 6    ├──╢[6.0, -6.0]
+ 7    └──╢[7.0, -7.0]"""
+    assert s == ref_s
+
+
 class TestSamplePrior:
     """Test `debug.sample_prior`."""
 

@@ -931,6 +931,60 @@ def test_constant_y_train(bkw: BartKW, keys: split, subtests: SubTests) -> None:
             assert_array_equal(leaf_tree, jnp.zeros_like(leaf_tree))
 
 
+def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
+    """A constant predictor has no available cutpoints.
+
+    With ``rm_const=False`` the splitless predictor triggers an error; with
+    ``rm_const=True`` (default) predictor 0 is ignored, which must show up in
+    every downstream signal: it is splitless, listed in ``blocked_vars``, never
+    counted in `varcount`, assigned zero `varprob`, and never selected for a
+    decision rule in the `var_tree` of the main trace.
+    """
+    kw = dict(bkw.kw)
+
+    # make predictor 0 constant so it has no available cutpoints; force a
+    # quantile binner because e.g. RangeEvenBinner would still place cutpoints
+    # over the degenerate range, leaving the predictor formally splittable
+    x = kw['x_train']
+    kw['x_train'] = x.at[0, :].set(x[0, 0])
+    kw['binner'] = partial(UniqueQuantileBinner, max_subsample=None)
+
+    bart = Bart(**kw)
+
+    forest = bart._mcmc_state.forest
+    with subtests.test('predictor 0 is splitless'):
+        assert forest.max_split[0] == 0
+
+    with subtests.test('blocked_vars lists predictor 0'):
+        (expected,) = jnp.nonzero(forest.max_split == 0)
+        assert_array_equal(jnp.sort(forest.blocked_vars), expected, strict=False)
+        assert jnp.any(forest.blocked_vars == 0)
+
+    with subtests.test('varcount ignores predictor 0'):
+        assert jnp.all(bart.varcount[:, 0] == 0)
+        assert jnp.any(bart.varcount[:, 1:] > 0)  # the test is not vacuous
+
+    with subtests.test('varprob ignores predictor 0'):
+        assert jnp.all(bart.varprob[:, 0] == 0)
+
+    with subtests.test('predictor 0 absent from var_tree'):
+        trace = bart._main_trace
+        axes = chain_vmap_axes(trace)
+        var_tree = chain_to_axis(trace.var_tree, axes.var_tree)
+        split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
+        # only active decision nodes carry a meaningful variable; predictor 0
+        # (var index 0) must never appear among them
+        active = split_tree > 0
+        assert jnp.any(active)  # the test is not vacuous
+        assert jnp.all(var_tree[active] != 0)
+
+    with (
+        subtests.test('rm_const=False raises'),
+        pytest.raises(EquinoxRuntimeError, match='predictors with no splits'),
+    ):
+        Bart(**dict(kw, rm_const=False, seed=random.clone(kw['seed'])))
+
+
 def test_output_shapes(bkw: BartKW, keys: split) -> None:
     """Check the output shapes of the Bart predictions and attributes."""
     kw = bkw.kw

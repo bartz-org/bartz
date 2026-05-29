@@ -1540,7 +1540,7 @@ def process_device_settings(
     """Return the arguments for `mcmcstep.init` related to devices, and an optional device where to put the state."""
     platform, device, devices = _determine_devices(y_train, devices)
     num_chain_devices = _determine_num_chain_devices(
-        platform, num_chains, num_chain_devices
+        platform, num_chains, num_chain_devices, num_data_devices
     )
     mesh, device = _determine_mesh(num_chain_devices, num_data_devices, device, devices)
 
@@ -1598,33 +1598,83 @@ def _determine_num_chain_devices(
     platform: str,
     num_chains: int | None,
     num_chain_devices: int | None | Literal['auto'],
+    num_data_devices: int | None,
 ) -> int | None:
-    """Decide the value of `num_chain_devices` when it's set to 'auto'."""
-    if num_chain_devices != 'auto':
-        return num_chain_devices
-    elif num_chains is None or num_chains == 1 or platform != 'cpu':
-        return None
-    else:
-        num_cores = cpu_count()
-        assert num_cores is not None, 'could not determine number of cpu cores'
-        num_shards = _largest_divisor_at_most(num_chains, num_cores)
+    """Resolve and validate `num_chain_devices`, returning the chain mesh axis size or `None`."""
+    if num_chain_devices == 'auto':
+        num_chain_devices = _auto_num_chain_devices(
+            platform, num_chains, num_data_devices
+        )
 
-        if num_shards > 1:
-            num_jax_cpus = device_count('cpu')
-            if num_jax_cpus < num_shards:
-                new_num_shards = _largest_divisor_at_most(num_chains, num_jax_cpus)
+    # an explicit value must be a positive divisor of the number of chains
+    if num_chain_devices is not None:
+        effective_chains = 1 if num_chains is None else num_chains
+        if num_chain_devices < 1 or effective_chains % num_chain_devices:
+            chains_desc = (
+                'a single chain (num_chains=None)'
+                if num_chains is None
+                else f'num_chains={num_chains}'
+            )
+            msg = (
+                f'num_chain_devices={num_chain_devices} must be a positive '
+                f'divisor of the number of chains ({chains_desc})'
+            )
+            raise ValueError(msg)
+
+    # there is no chain axis to shard when the chains are scalar
+    if num_chains is None:
+        return None
+    return num_chain_devices
+
+
+def _auto_num_chain_devices(
+    platform: str, num_chains: int | None, num_data_devices: int | None
+) -> int | None:
+    """Pick `num_chain_devices` automatically for multi-chain cpu runs.
+
+    `num_data_devices` reserves devices for the data axis, so the chain axis can
+    only use a fraction of them; this keeps the ``chains x data`` mesh within the
+    available devices.
+    """
+    if num_chains is None or num_chains == 1 or platform != 'cpu':
+        return None
+    data_devices = num_data_devices or 1
+    num_cores = cpu_count()
+    assert num_cores is not None, 'could not determine number of cpu cores'
+
+    # devices available for the chain axis after reserving for the data axis
+    core_budget = max(1, num_cores // data_devices)
+    num_shards = _largest_divisor_at_most(num_chains, core_budget)
+
+    if num_shards > 1:
+        jax_budget = max(1, device_count('cpu') // data_devices)
+        if jax_budget < num_shards:
+            new_num_shards = _largest_divisor_at_most(num_chains, jax_budget)
+            total = device_count('cpu')
+            if num_data_devices:
+                msg = (
+                    f'`Bart` would like to shard {num_chains} chains across '
+                    f'{num_shards} devices, but only {jax_budget} of the '
+                    f'{total} jax cpu devices are free for chains '
+                    f'(num_data_devices={num_data_devices} reserves the rest), '
+                    f'so it will use {new_num_shards} devices for chains '
+                    'instead. To enable more parallelization, increase the '
+                    'limit with '
+                    '`jax.config.update("jax_num_cpu_devices", <num_devices>)`.'
+                )
+            else:
                 msg = (
                     f'`Bart` would like to shard {num_chains} chains across '
                     f'{num_shards} virtual jax cpu devices, but jax is set up '
-                    f'with only {num_jax_cpus} cpu devices, so it will use '
+                    f'with only {total} cpu devices, so it will use '
                     f'{new_num_shards} devices instead. To enable '
                     'parallelization, please increase the limit with '
                     '`jax.config.update("jax_num_cpu_devices", <num_devices>)`.'
                 )
-                warn(msg)
-                num_shards = new_num_shards
+            warn(msg)
+            num_shards = new_num_shards
 
-        return num_shards if num_shards > 1 else None
+    return num_shards if num_shards > 1 else None
 
 
 def _determine_mesh(

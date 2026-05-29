@@ -2216,6 +2216,77 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
             tree.map_with_path(check_equal, bart, bart_both)
 
 
+@pytest.mark.parametrize(
+    ('num_chains', 'num_chain_devices'),
+    [
+        (None, 2),  # cannot shard a scalar (single) chain across 2 devices
+        (1, 2),  # 2 does not divide 1
+        (4, 3),  # 3 does not divide 4
+        (4, 0),  # not a positive number of devices
+    ],
+)
+def test_num_chain_devices_invalid(
+    num_chains: int | None, num_chain_devices: int, keys: split
+) -> None:
+    """`Bart` rejects a `num_chain_devices` that does not divide the chains."""
+    x = gen_X(keys.pop(), 2, 10, 'continuous')
+    y = gen_y(keys.pop(), x, None)
+    with pytest.raises(ValueError, match='must be a positive divisor'):
+        Bart(
+            x,
+            y,
+            seed=keys.pop(),
+            n_save=0,
+            n_burn=0,
+            num_chains=num_chains,
+            num_chain_devices=num_chain_devices,
+        )
+
+
+def test_num_chains_none_with_chain_device(keys: split) -> None:
+    """`num_chains=None` ignores a harmless 1-device request (no chain axis)."""
+    x = gen_X(keys.pop(), 2, 10, 'continuous')
+    y = gen_y(keys.pop(), x, None)
+    bart = Bart(
+        x,
+        y,
+        seed=keys.pop(),
+        n_save=10,
+        n_burn=10,
+        num_chains=None,
+        num_chain_devices=1,
+    )
+    assert bart.num_chains is None
+    mesh = bart._mcmc_state.config.mesh
+    assert mesh is None or 'chains' not in mesh.axis_names
+
+
+def test_auto_chains_fit_with_data_sharding(keys: split) -> None:
+    """Auto chain sharding shrinks to leave room for data sharding."""
+    total = get_device_count()
+    if total < 2:
+        pytest.skip('Need at least 2 devices to reserve some for data sharding.')
+    # reserve every device for the data axis, so auto chain sharding must back
+    # off to a single chain device; pre-fix this overcommitted the devices and
+    # `make_mesh` raised.
+    n = 12 * total  # divisible by total so num_data_devices=total is valid
+    x = gen_X(keys.pop(), 2, n, 'continuous')
+    y = gen_y(keys.pop(), x, None)
+    bart = Bart(
+        x,
+        y,
+        seed=keys.pop(),
+        num_trees=5,
+        n_save=10,
+        n_burn=10,
+        num_chains=4,
+        num_data_devices=total,
+    )
+    mesh = bart._mcmc_state.config.mesh
+    assert mesh is not None
+    assert mesh.size <= total
+
+
 def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:
     """Test the number of trees."""
     kw = bkw.kw

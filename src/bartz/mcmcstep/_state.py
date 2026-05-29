@@ -1394,9 +1394,18 @@ def _parse_mesh(
             tuple(mesh.values()), tuple(mesh), axis_types=(AxisType.Auto,) * len(mesh)
         )
 
-    # check there's no chain mesh axis if there are no chains
-    if num_chains is None:
-        assert 'chains' not in mesh.axis_names
+    # the chains mesh axis must be consistent with the number of chains
+    if 'chains' in mesh.axis_names:
+        if num_chains is None:
+            msg = "mesh has a 'chains' axis but num_chains is None (scalar, no chain axis)"
+            raise ValueError(msg)
+        chains_axis = get_axis_size(mesh, 'chains')
+        if num_chains % chains_axis:
+            msg = (
+                f"mesh 'chains' axis of size {chains_axis} does not divide "
+                f'num_chains={num_chains}'
+            )
+            raise ValueError(msg)
 
     # check the axes we use are in auto mode
     assert 'chains' not in mesh.axis_names or 'chains' in mesh.auto_axes

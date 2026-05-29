@@ -876,6 +876,61 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
 
+def _assert_predictions_finite(bart: Bart, bkw: BartKW, keys: split) -> None:
+    """Assert every prediction kind is finite, on train and test predictors."""
+    for x_test, w in (('train', None), (bkw.x_test, bkw.w_test)):
+        for kind in ('mean', 'mean_samples', 'latent_samples'):
+            pred = bart.predict(x_test, kind=kind)
+            assert jnp.all(jnp.isfinite(pred)), (x_test, kind)
+        out = bart.predict(x_test, kind='outcome_samples', w=w, key=keys.pop())
+        assert jnp.all(jnp.isfinite(out)), (x_test, 'outcome_samples')
+    # error sdev is NaN by design for binary components, so only check it
+    # when there are none
+    if not bkw.any_binary:
+        assert jnp.all(jnp.isfinite(bart.get_error_sdev()))
+
+
+def test_constant_y_train(bkw: BartKW, keys: split, subtests: SubTests) -> None:
+    """Behavior when `y_train` is completely constant.
+
+    A constant response drives the automatic noise-scale estimate
+    (`sigest`, hence `lambda_`) to zero for any continuous outcome component,
+    which the API does not guard against: the degenerate error-variance prior
+    poisons the whole MCMC with NaNs. Binary outcomes are immune, because the
+    offset is clipped away from 0/1 and the noise scale is not a free parameter.
+    Supplying a positive `lambda_` repairs the continuous case; note the leaf
+    scale default ``tau_num = (max - min) / 2 = 0`` is left in place there to
+    confirm it is *not* fatal (it merely pins the leaves to zero).
+    """
+    kw = dict(bkw.kw)
+    # a single constant value: continuous components are flat, binary ones are
+    # all-ones (so the all-zero/all-one offset clipping kicks in)
+    kw['y_train'] = jnp.full_like(kw['y_train'], 1.0)
+
+    if bkw.all_binary:
+        # nothing degenerates with the defaults
+        with subtests.test('all binary, defaults are fine'):
+            bart = Bart(**kw)
+            _assert_predictions_finite(bart, bkw, keys)
+    else:
+        # at least one continuous component: the automatic noise prior collapses
+        with subtests.test('continuous defaults produce NaNs'):
+            # use the unwrapped class: the wrapper's trace-validity check would
+            # itself raise on the degenerate run, but we want to observe the NaNs
+            bart = OriginalBart(**kw)
+            with debug_nans(False):
+                latent = bart.predict('train', kind='latent_samples')
+            assert jnp.any(jnp.isnan(latent))
+
+        with subtests.test('explicit lambda_ repairs it'):
+            bart = Bart(**dict(kw, lambda_=1.0))
+            _assert_predictions_finite(bart, bkw, keys)
+            # tau_num kept at its degenerate default (0): the infinite leaf-prior
+            # precision pins every leaf to exactly zero
+            leaf_tree = bart._mcmc_state.forest.leaf_tree
+            assert_array_equal(leaf_tree, jnp.zeros_like(leaf_tree))
+
+
 def test_output_shapes(bkw: BartKW, keys: split) -> None:
     """Check the output shapes of the Bart predictions and attributes."""
     kw = bkw.kw

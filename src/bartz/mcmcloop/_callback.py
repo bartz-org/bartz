@@ -235,7 +235,6 @@ class TqdmCallbackState(Module):
 def tqdm_callback(
     *,
     bart: State,
-    burnin: Bool[Array, ''],
     i_total: Int32[Array, ''],
     n_burn: Int32[Array, ''],
     n_save: Int32[Array, ''],
@@ -259,9 +258,7 @@ def tqdm_callback(
     if report_every is not None:
 
         def report_branch() -> None:
-            debug.callback(
-                _tqdm_report, bar_id, n_iters, burnin=burnin, **_forest_stats(bart)
-            )
+            debug.callback(_tqdm_report, bar_id, n_iters, **_forest_stats(bart))
 
         lax.cond((it % report_every == 0) | last, report_branch, lambda: None)
 
@@ -377,6 +374,13 @@ class _TqdmEntry:
 _tqdm_registry: dict[int, _TqdmEntry] = {}
 _tqdm_bar_counter = itertools.count()
 
+# tqdm's default layout, but without the ': ' that `format_meter` forces after a
+# non-empty description; the label is set as a `{desc}` ending in a space instead
+_TQDM_BAR_FORMAT = (
+    '{desc}{percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} '
+    '[{elapsed}<{remaining}, {rate_fmt}{postfix}]'
+)
+
 
 def _close_stale_bars() -> None:
     """Close and drop any bars left over from a previous (e.g. interrupted) run."""
@@ -393,7 +397,7 @@ def _get_or_create_bar(bar_id: int, n_iters: int) -> tqdm | None:
         # the bar was already closed (the loop finished, possibly out of order)
         return None
     if entry.bar is None:
-        bar = tqdm(**{'total': n_iters, **entry.kwargs})
+        bar = tqdm(**{'total': n_iters, 'bar_format': _TQDM_BAR_FORMAT, **entry.kwargs})
         _tqdm_registry[bar_id] = replace(entry, bar=bar)
         return bar
     return entry.bar
@@ -418,7 +422,6 @@ def _tqdm_report(
     bar_id: int,
     n_iters: int,
     *,
-    burnin: bool,
     num_chains: int | None,
     grow_prop: float,
     move_acc: float,
@@ -428,11 +431,14 @@ def _tqdm_report(
     bar = _get_or_create_bar(bar_id, n_iters)
     if bar is None:
         return
-    bar.set_description('burn-in' if burnin else 'sampling', refresh=False)
+    # set_description_str (not set_description) to avoid tqdm's ': ' suffix; the
+    # trailing space separates the label from the bar
+    bar.set_description_str('train ', refresh=False)
+    # keep this terse so the bar stays narrow, e.g. '4ch grow 52% acc 25% fill 6%'
     msgs = []
     if num_chains is not None:
-        msgs.append(f'avg. {num_chains} chains')
-    msgs.append(f'grow prob: {grow_prop:.0%}')
-    msgs.append(f'move acc: {move_acc:.0%}')
-    msgs.append(f'fill: {fill:.0%}')
-    bar.set_postfix_str(', '.join(msgs))
+        msgs.append(f'{num_chains}ch')
+    msgs.append(f'grow {grow_prop:.0%}')
+    msgs.append(f'acc {move_acc:.0%}')
+    msgs.append(f'fill {fill:.0%}')
+    bar.set_postfix_str(' '.join(msgs))

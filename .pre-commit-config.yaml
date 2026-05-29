@@ -112,3 +112,11 @@ repos:
         exclude: '^(src/bartz/__init__\.py|benchmarks/)'
         entry: '^\s*(from\s+bartz\s+import\s+[^\n]*\b(mcmcstep|mcmcloop)\b|import\s+bartz\.(mcmcstep|mcmcloop)\b)'
         types: [python]
+      - id: forbid-dunder-all
+        name: forbid setting `__all__` in modules
+        language: pygrep
+        # matches any module-level `__all__` statement (plain/annotated/augmented
+        # assignments, `.append`/`.extend`, `del`, etc.). The `^` anchor restricts
+        # to column 0, so references inside indented code or docstrings are ignored.
+        entry: '^__all__\b'
+        types: [python]

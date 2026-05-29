@@ -327,7 +327,11 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     nt = 21
     p = 2
     high_p = 257  # > 256 to use uint16 for var_trees.
-    common = dict(num_trees=20, n_save=50, n_burn=50, seed=keys.pop())
+    # num_trees differs from n and nt so that the datapoint, test-datapoint, and
+    # tree axes have distinct lengths: an accidental misalignment of these axes
+    # then cannot pass by coincidence (e.g. it lets tests locate the datapoint
+    # axis by its length, see `test_permutation_invariance`)
+    common = dict(num_trees=19, n_save=50, n_burn=50, seed=keys.pop())
 
     match variant:
         # continuous regression with some settings that induce large types,
@@ -1314,6 +1318,54 @@ def test_scale_shift(bkw: BartKW) -> None:
         )
     assert_close_matrices(sdev_actual, sdev_expected, rtol=1e-5, reduce_rank=True)
     assert_close_matrices(sdev_mean_actual, sdev_mean_expected, rtol=1e-5)
+
+
+def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
+    """Check that `Bart` is invariant under permutation of the datapoints.
+
+    Permuting the inputs along their datapoint axis and inverse-permuting the
+    datapoint axis of the fitted arrays must recover the original fit. Binary
+    outcomes are excluded: their latent-variable augmentation draws a
+    per-datapoint normal keyed by the datapoint position, so permuting the
+    data changes the augmentation, and hence the fit.
+    """
+    if bkw.any_binary:
+        pytest.skip('binary latent augmentation is position-dependent')
+
+    kw = bkw.kw
+    bart1 = Bart(**kw)
+
+    # permute every input with a datapoint axis (always the last one)
+    n = bkw.n
+    perm = random.permutation(keys.pop(), n)
+    kw2 = dict(kw, seed=random.clone(kw['seed']))
+    kw2['x_train'] = kw['x_train'][:, perm]
+    kw2['y_train'] = kw['y_train'][..., perm]
+    if kw.get('w') is not None:
+        kw2['w'] = kw['w'][..., perm]
+    if kw.get('missing') is not None:
+        kw2['missing'] = kw['missing'][..., perm]
+    bart2 = Bart(**kw2)
+
+    # inverse-permute every fitted array along its datapoint axis; `n` differs
+    # from every other axis length (see `make_kw`), so the datapoint axis is the
+    # unique axis with that length
+    inv = jnp.argsort(perm)
+
+    def unpermute(x: Array) -> Array:
+        if n not in getattr(x, 'shape', ()):
+            return x
+        (axis,) = (i for i, length in enumerate(x.shape) if length == n)
+        return jnp.take(x, inv, axis=axis)
+
+    bart2 = tree.map(unpermute, bart2)
+
+    def check_equal(path: KeyPath, x1: Array, x2: Array) -> None:
+        assert_close_matrices(
+            x2, x1, err_msg=f'{keystr(path)}: ', rtol=1e-5, reduce_rank=True
+        )
+
+    tree.map_with_path(check_equal, bart1, bart2)
 
 
 def test_min_points_per_decision_node(bkw: BartKW) -> None:

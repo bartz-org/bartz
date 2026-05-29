@@ -34,7 +34,7 @@ from jax import debug, lax, tree
 from jax import numpy as jnp
 from jaxtyping import Array, ArrayLike, Bool, Int32, Integer, PyTree
 
-from bartz.grove import forest_fill
+from bartz.grove import forest_mean_leaves
 from bartz.mcmcloop._loop import _replicate
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes, chainful_axis
@@ -139,7 +139,8 @@ def print_callback(
             grow_acc_count=bart.forest.grow_acc_count.mean(),
             prune_acc_count=bart.forest.prune_acc_count.mean(),
             prop_total=bart.forest.split_tree.shape[num_trees_axis],
-            fill=forest_fill(split_tree),
+            mean_leaves=forest_mean_leaves(split_tree),
+            max_leaves=split_tree.shape[-1],
         )
 
     def just_dot_branch() -> None:
@@ -207,7 +208,8 @@ def _print_report(
     grow_acc_count: float,
     prune_acc_count: float,
     prop_total: int,
-    fill: float,
+    mean_leaves: float,
+    max_leaves: int,
 ) -> None:
     """Print the report for `print_callback`."""
     # compute fractions
@@ -234,5 +236,5 @@ def _print_report(
         f'{prefix}Iteration {it}/{n_iters}, '
         f'grow prob: {grow_prop:.0%}, '
         f'move acc: {move_acc:.0%}, '
-        f'fill: {fill:.0%}{suffix}'
+        f'leaves: {mean_leaves:.1f}/{max_leaves}{suffix}'
     )

@@ -297,6 +297,58 @@ class BARTModel:
         """Return whether `sample` has been called."""
         return self.sampled
 
+    def _prepare_training_inputs(
+        self,
+        X_train: Real[ArrayLike, 'n p'] | DataFrame,
+        y_train: Real[ArrayLike, ' n'] | Series,
+        gp: GeneralParams,
+    ) -> tuple[Real[Array, 'n p'], Real[Array, ' n'], Float32[Array, ' p'] | None]:
+        """Coerce inputs and build variable weights, fitting the DataFrame preprocessor if any."""
+        self._preprocessor = make_preprocessor(X_train)
+        if self._preprocessor is None:
+            X_train_arr, y_train_arr = process_train_inputs(X_train, y_train)
+            _, p = X_train_arr.shape
+            varprob = check_variable_weights(gp.variable_weights, p)
+            return X_train_arr, y_train_arr, varprob
+
+        y_train_arr = _coerce_response(y_train, name='y_train')
+        weights_in = gp.variable_weights
+        if weights_in is None:
+            # Match stochtree: the default is uniform over the *original* columns,
+            # then split across each column's one-hot expansion (inside
+            # fit_transform), so every original variable keeps an equal total
+            # splitting budget. Left as None it would instead be uniform over the
+            # expanded columns, over-weighting one-hot-encoded variables.
+            n_orig = X_train.shape[1]
+            weights_in = jnp.full(n_orig, 1.0 / n_orig)
+        X_train_np, weights_np = self._preprocessor.fit_transform(
+            X_train, variable_weights=weights_in
+        )
+        if X_train_np.shape[0] != y_train_arr.shape[0]:
+            msg = (
+                f'X_train and y_train length mismatch: X_train has '
+                f'{X_train_np.shape[0]} rows, y_train has '
+                f'{y_train_arr.shape[0]} entries'
+            )
+            raise ValueError(msg)
+        if X_train_np.shape[1] == 0:
+            msg = (
+                'X_train has no usable columns after preprocessing (all columns'
+                ' were dropped due to unsupported dtypes)'
+            )
+            raise ValueError(msg)
+        X_train_arr = jnp.asarray(X_train_np)
+        ovi = self._preprocessor.original_var_indices
+        expanded = len(set(ovi)) != len(ovi)
+        if gp.variable_weights is None and not expanded:
+            # No one-hot expansion: the split-default is plain uniform, so defer
+            # to bartz's native `varprob=None` fast-path (also keeps a numeric
+            # DataFrame numerically identical to the equivalent raw array).
+            variable_weights = None
+        else:
+            variable_weights = jnp.asarray(weights_np, jnp.float32)
+        return X_train_arr, y_train_arr, variable_weights
+
     def sample(
         self,
         X_train: Real[ArrayLike, 'n p'] | DataFrame,
@@ -348,9 +400,6 @@ class BARTModel:
         ------
         NotImplementedError
             If ``num_gfr`` is non-zero.
-        ValueError
-            If ``X_train`` is a DataFrame and either every column is dropped
-            during preprocessing, or its row count does not match ``y_train``.
         """
         if num_gfr != 0:
             msg = (
@@ -366,34 +415,9 @@ class BARTModel:
 
         is_probit = gp.outcome_model.outcome == 'binary'
 
-        self._preprocessor = make_preprocessor(X_train)
-        if self._preprocessor is None:
-            X_train_arr, y_train_arr = process_train_inputs(X_train, y_train)
-            _, p = X_train_arr.shape
-            variable_weights = check_variable_weights(gp.variable_weights, p)
-        else:
-            y_train_arr = _coerce_response(y_train, name='y_train')
-            X_train_np, weights_np = self._preprocessor.fit_transform(
-                X_train, variable_weights=gp.variable_weights
-            )
-            if X_train_np.shape[0] != y_train_arr.shape[0]:
-                msg = (
-                    f'X_train and y_train length mismatch: X_train has '
-                    f'{X_train_np.shape[0]} rows, y_train has '
-                    f'{y_train_arr.shape[0]} entries'
-                )
-                raise ValueError(msg)
-            if X_train_np.shape[1] == 0:
-                msg = (
-                    'X_train has no usable columns after preprocessing (all'
-                    ' columns were dropped due to unsupported dtypes)'
-                )
-                raise ValueError(msg)
-            X_train_arr = jnp.asarray(X_train_np)
-            _, p = X_train_arr.shape
-            variable_weights = (
-                None if weights_np is None else jnp.asarray(weights_np, jnp.float32)
-            )
+        X_train_arr, y_train_arr, variable_weights = self._prepare_training_inputs(
+            X_train, y_train, gp
+        )
 
         y_bar, y_std, y_for_bartz = standardize_y(
             y_train_arr, is_probit, gp.standardize
@@ -605,9 +629,18 @@ class BARTModel:
 
     def _prepare_x(self, X: Real[ArrayLike, 'm p'] | DataFrame) -> Real[Array, 'm p']:
         """Convert covariates to a 2-D jax array, replaying the fitted preprocessor if any."""
-        if self._preprocessor is not None:
-            return jnp.asarray(self._preprocessor.transform(X))
-        return check_X(X)
+        if self._preprocessor is None:
+            return check_X(X)
+        if make_preprocessor(X) is None:
+            msg = (
+                'this model was fit on a DataFrame, so prediction covariates must'
+                ' also be a pandas/polars DataFrame with the same columns; got a'
+                ' non-DataFrame. Passing a raw array would bypass the fitted'
+                ' preprocessing (e.g. one-hot encoding) and silently misalign the'
+                ' features.'
+            )
+            raise TypeError(msg)
+        return jnp.asarray(self._preprocessor.transform(X))
 
     def _predict_y_hat_internal(
         self, x: Real[ArrayLike, 'p m'] | Literal['train']

@@ -42,13 +42,14 @@ Per-column handling, matching stochtree's `CovariatePreprocessor`:
 - ordered categorical (pandas ordered `Categorical`, polars `Enum`): ordinal
   encoded into a single integer-valued column, with the declared category order
   giving the integer mapping.
-- unordered categorical / string (pandas unordered `Categorical`, pandas
-  ``string`` / ``object``, polars ``Categorical`` / ``String``): one-hot
-  encoded into one binary column per category, using the categories observed
-  at fit time.
+- unordered categorical (pandas unordered `Categorical`, polars ``Categorical``):
+  one-hot encoded into one binary column per category, using the categories
+  observed at fit time.
 - boolean: cast to ``{0.0, 1.0}``, single column.
 - numeric (integer, unsigned, float): pass-through as float.
-- anything else (datetime, timedelta, etc.): warned and dropped.
+- anything else (strings, ``object``, datetime, timedelta, etc.): warned and
+  dropped. Like stochtree, plain string/object columns are not supported;
+  convert them to an explicit pandas/polars categorical first.
 
 When a single original column expands into ``k`` output columns (one-hot), the
 original `variable_weights` entry for that column is split evenly across the
@@ -315,13 +316,8 @@ class PandasPreprocessor(_PreprocessorBase):
                 _ColumnSpec('numeric', name),
                 series.to_numpy().astype(np.float64).reshape(-1, 1),
             )
-        if dt.kind == 'O' or pd.api.types.is_string_dtype(dt):
-            values = series.to_numpy()
-            cats = sorted(set(values))
-            return (
-                _ColumnSpec('unordered_cat', name, categories=cats),
-                _one_hot_encode(values, cats, name),
-            )
+        # Everything else (string, object, datetime, ...) is unsupported and
+        # dropped, matching stochtree.
         return (_ColumnSpec('dropped', name, dropped_dtype=str(dt)), None)
 
     @staticmethod
@@ -389,12 +385,15 @@ class PolarsPreprocessor(_PreprocessorBase):
                 _ColumnSpec('ordered_cat', name, categories=cats),
                 _polars_encode(pl, series, cats, name, mode='ordinal'),
             )
-        if isinstance(dt, pl.Categorical) or dt == pl.String:
-            # NOTE: post the polars Categorical refactor (PR #23016),
-            # `series.cat.get_categories()` returns the shared global
-            # `Categories` object — not the per-column observed values — so we
-            # extract observed values via `unique()`. Sorted for deterministic
-            # column ordering across runs (`unique()` order is non-deterministic).
+        if isinstance(dt, pl.Categorical):
+            # polars has no per-column category list for `Categorical`:
+            # `series.cat.get_categories()` returns the process-wide string-cache
+            # pool (shared across all Categorical columns), and `to_physical()`
+            # indexes into that global pool — so it over-includes categories from
+            # other columns. The observed values are therefore the only correct
+            # source for this column's categories. Sorted for a deterministic,
+            # backend-independent column order. Plain `String` columns are
+            # unsupported (matching stochtree); convert to a categorical first.
             cats = sorted(series.drop_nulls().unique().to_list())
             return (
                 _ColumnSpec('unordered_cat', name, categories=cats),

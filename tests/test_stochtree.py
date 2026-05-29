@@ -741,17 +741,21 @@ class TestPreprocessing:
         assert_array_equal(X, np.array([[0.0], [2.0], [1.0], [0.0]]))
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
-    def test_string_column_one_hot_from_data(self, flavor: str) -> None:
-        """String columns become unordered cats using sorted observed values."""
+    def test_string_column_dropped_with_warning(self, flavor: str) -> None:
+        """String/object columns are unsupported (like stochtree) and are dropped."""
         df = self._make_df(
-            flavor, {'s': {'kind': 'string', 'values': ['y', 'x', 'y', 'z']}}
+            flavor,
+            {
+                'a': {'kind': 'numeric', 'values': [0.1, 0.2, 0.3, 0.4]},
+                's': {'kind': 'string', 'values': ['y', 'x', 'y', 'z']},
+            },
         )
         pp = self._make_preprocessor(flavor)
-        X, _ = pp.fit_transform(df)
-        assert pp._specs[0].kind == 'unordered_cat'
-        assert sorted(pp._specs[0].categories) == ['x', 'y', 'z']
-        assert X.shape == (4, 3)
-        assert_array_equal(X.sum(axis=1), np.ones(4))
+        with pytest.warns(UserWarning, match='unsupported column dtypes'):
+            X, _ = pp.fit_transform(df)
+        assert X.shape == (4, 1)
+        assert pp._specs[1].kind == 'dropped'
+        assert pp.original_var_indices == [0]
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_datetime_dropped_with_warning(self, flavor: str) -> None:
@@ -966,10 +970,103 @@ class TestPreprocessing:
                 },
             },
         )
-        m_manual = self._sample(X_manual, data.y_train, X_test=Xte_manual, seed=23)
-        m_df = self._sample(df_train, data.y_train, X_test=df_test, seed=23)
+        # Use matching, exactly-representable weights on both sides so the test
+        # isolates the *encoding*: the DataFrame's cat budget (k) splits evenly
+        # to 1.0 per one-hot column, matching the manual array's per-column 1.0.
+        p_num = X_arr.shape[1]
+        k = len(cats)
+        w_manual = np.ones(p_num + k)
+        w_df = np.array([1.0] * p_num + [float(k)])
+        m_manual = self._sample(
+            X_manual,
+            data.y_train,
+            X_test=Xte_manual,
+            seed=23,
+            general_params={'variable_weights': w_manual},
+        )
+        m_df = self._sample(
+            df_train,
+            data.y_train,
+            X_test=df_test,
+            seed=23,
+            general_params={'variable_weights': w_df},
+        )
         assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=0)
         assert_close_matrices(m_manual.y_hat_test, m_df.y_hat_test, rtol=0)
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_end_to_end_default_weights_split_like_stochtree(
+        self, keys: split, flavor: str
+    ) -> None:
+        """Default weights follow stochtree's split, not uniform-over-columns.
+
+        The categorical's budget is split evenly across its one-hot columns
+        (stochtree semantics), not shared uniformly with the numeric columns.
+        Sizes are chosen so every weight is exactly representable in float32
+        (3 numeric cols -> 1/4 each; a 2-level cat -> 1/4/2 = 1/8 each), letting
+        us compare the default-weights DataFrame model bit-for-bit against a
+        manual one-hot array fed the equivalent expanded weights. If the default
+        reverted to uniform-over-expanded-columns (1/5 each) this would fail.
+        """
+        data = _make_continuous(keys, n=60, n_test=15)
+        X_arr = np.asarray(data.X_train)[:, :3]
+        Xte_arr = np.asarray(data.X_test)[:, :3]
+        rng = np.random.default_rng(1)
+        cats = ['a', 'b']
+        cat_train = rng.choice(cats, size=X_arr.shape[0])
+        cat_test = rng.choice(cats, size=Xte_arr.shape[0])
+        one_hot_train = np.eye(2)[[cats.index(v) for v in cat_train]]
+        one_hot_test = np.eye(2)[[cats.index(v) for v in cat_test]]
+        X_manual = np.concatenate([X_arr, one_hot_train], axis=1)
+        Xte_manual = np.concatenate([Xte_arr, one_hot_test], axis=1)
+        names = [f'x{i}' for i in range(X_arr.shape[1])]
+
+        def _spec(arr: np.ndarray, cat: np.ndarray) -> dict:
+            return {
+                **{
+                    n: {'kind': 'numeric', 'values': arr[:, j].tolist()}
+                    for j, n in enumerate(names)
+                },
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': cat.tolist(),
+                    'categories': cats,
+                },
+            }
+
+        df_train = self._make_df(flavor, _spec(X_arr, cat_train))
+        df_test = self._make_df(flavor, _spec(Xte_arr, cat_test))
+        # stochtree's default split: each original variable keeps budget 1/4.
+        w_split = np.array([0.25, 0.25, 0.25, 0.125, 0.125])
+        m_df = self._sample(df_train, data.y_train, X_test=df_test, seed=7)
+        m_manual = self._sample(
+            X_manual,
+            data.y_train,
+            X_test=Xte_manual,
+            seed=7,
+            general_params={'variable_weights': w_split},
+        )
+        assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=0)
+        assert_close_matrices(m_manual.y_hat_test, m_df.y_hat_test, rtol=0)
+
+    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_predict_with_array_after_dataframe_fit_raises(
+        self, keys: split, flavor: str
+    ) -> None:
+        """Predicting on a raw array after a DataFrame fit raises a clear error."""
+        data = _make_continuous(keys, n=40, n_test=10)
+        X_arr = np.asarray(data.X_train)
+        names = [f'x{i}' for i in range(X_arr.shape[1])]
+        df_train = self._make_df(
+            flavor,
+            {
+                n: {'kind': 'numeric', 'values': X_arr[:, j].tolist()}
+                for j, n in enumerate(names)
+            },
+        )
+        m = self._sample(df_train, data.y_train, seed=5)
+        with pytest.raises(TypeError, match='must also be a pandas/polars DataFrame'):
+            m.predict(np.asarray(data.X_test), terms='y_hat')
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_end_to_end_unseen_category_in_predict_raises(

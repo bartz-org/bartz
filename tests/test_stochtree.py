@@ -795,12 +795,12 @@ class TestPreprocessing:
         # numeric stays at 2.0; cat with k=4 (pandas) or 3 (polars: observed only) splits evenly
         k_cat = pp.n_processed_columns - 1
         expected = np.concatenate([[2.0], np.full(k_cat, 6.0 / k_cat)])
-        assert_allclose(w_out, expected)
+        assert_close_matrices(w_out, expected)
         # Per-original-variable total preserved
         per_orig_sum = np.zeros(2)
         for j, w in zip(pp.original_var_indices, w_out, strict=True):
             per_orig_sum[j] += w
-        assert_allclose(per_orig_sum, weights_in)
+        assert_close_matrices(per_orig_sum, weights_in)
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_variable_weights_shape_mismatch_raises(self, flavor: str) -> None:

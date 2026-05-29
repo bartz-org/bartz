@@ -1644,6 +1644,84 @@ def test_jit(bkw: BartKW) -> None:
     assert_close_matrices(pred1, pred2, rtol=1e-5, reduce_rank=True)
 
 
+def test_vmap(bkw: BartKW, keys: split) -> None:
+    """Test that jit(vmap(...))ing around the whole interface works.
+
+    Vmaps `Bart` over a leading repetition axis added to every input carrying
+    the data dimension ``n`` (``x_train``, ``y_train``, ``w``, ``missing``),
+    and checks each leaf of the vmapped `Bart` matches the stack of the
+    corresponding leaves of the per-repetition `Bart` objects.
+    """
+    kw = bkw.kw
+    kw.update(printevery=None, rm_const=False)
+
+    platform = kw['y_train'].platform()
+    kw.update(devices=jax.devices(platform))
+
+    binary_mask = bkw.binary_mask  # read before popping y_train
+
+    X = kw.pop('x_train')
+    y = kw.pop('y_train')
+    w = kw.pop('w', None)
+    missing = kw.pop('missing', None)
+    kw.pop('seed')  # replaced by a distinct per-repetition key below
+
+    nrep = 3
+    key = keys.pop(nrep)  # one MCMC seed per repetition
+
+    def tile(a: Shaped[Array, '...']) -> Shaped[Array, 'nrep ...']:
+        return jnp.broadcast_to(a, (nrep, *a.shape))
+
+    # tile each input over the repetition axis, then add a per-repetition
+    # perturbation that keeps it valid (positive `w`, boolean `missing`,
+    # binary outcome components in ``{0, 1}``)
+    Xb = tile(X) + 0.1 * random.normal(keys.pop(), (nrep, *X.shape))
+
+    is_binary = jnp.broadcast_to(binary_mask[..., None], y.shape)
+    yb_cont = tile(y) + 0.1 * random.normal(keys.pop(), (nrep, *y.shape))
+    yb_bin = tile(y).astype(bool) ^ random.bernoulli(keys.pop(), 0.1, (nrep, *y.shape))
+    yb = jnp.where(tile(is_binary), yb_bin.astype(y.dtype), yb_cont)
+
+    if w is None:
+        wb = None
+    else:
+        wb = tile(w) * jnp.exp(0.1 * random.normal(keys.pop(), (nrep, *w.shape)))
+
+    if missing is None:
+        mb = None
+    else:
+        mb = tile(missing) ^ random.bernoulli(keys.pop(), 0.1, (nrep, *missing.shape))
+
+    def task(
+        X: Shaped[Array, 'p n'],
+        y: Shaped[Array, ' n'] | Shaped[Array, 'k n'],
+        w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
+        missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+        key: Key[Array, ''],
+    ) -> OriginalBart:
+        return OriginalBart(X, y, w=w, missing=missing, **kw, seed=key)
+
+    batched = jax.jit(vmap(task))(Xb, yb, wb, mb, key)
+
+    key_singles = random.clone(key)  # avoid reusing the keys consumed by vmap
+    singles = [
+        task(
+            Xb[i, ...],
+            yb[i, ...],
+            None if wb is None else wb[i, ...],
+            None if mb is None else mb[i, ...],
+            key_singles[i],
+        )
+        for i in range(nrep)
+    ]
+    stacked = tree.map(lambda *leaves: jnp.stack(leaves), *singles)
+
+    def check(a: Array, b: Array) -> None:
+        assert_close_matrices(a, b, rtol=1e-5, reduce_rank=True)
+
+    tree.map(check, batched, stacked)
+
+
 def test_no_recompilation_no_tracing(bkw: BartKW) -> None:
     """Check that running the same `Bart` invocation twice does not retrace.
 

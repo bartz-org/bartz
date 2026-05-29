@@ -720,8 +720,12 @@ def resolve_variance_prior(
 
     Returns
     -------
-    ``(sigdf, lambda_, sigma2_init_stored)`` for bartz; ``sigma2_init_stored``
-    is the actual chain starting value, suitable for ``BARTModel.sigma2_init``.
+    sigdf : FloatLike
+        The bartz prior degrees of freedom.
+    lambda_ : FloatLike
+        The bartz prior scale.
+    sigma2_init_stored : FloatLike
+        The actual chain starting value, suitable for ``BARTModel.sigma2_init``.
 
     Raises
     ------

@@ -1828,6 +1828,18 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
     tree.map(check, batched, stacked)
 
 
+# WORKAROUND(jax<0.7.2): before 0.7.2, callbacks (pure_callback in
+# gammainccinv, equinox debug checks) disable JAX's C++ pjit fastpath cache, so
+# no_tracing raises a false positive without any actual jaxpr re-tracing. Remove
+# this skip once the oldest supported jax is >= 0.7.2.
+@pytest.mark.skipif(
+    jax.__version_info__ < (0, 7, 2),
+    reason='no_tracing gives false positives with jax < 0.7.2: callbacks '
+    '(pure_callback in gammainccinv, equinox debug checks) disable '
+    "JAX's C++ pjit fastpath cache, so no_tracing raises without any actual "
+    'jaxpr re-tracing (see test_no_recompilation_inner_loop_counter for the '
+    'version-robust check)',
+)
 def test_no_recompilation_no_tracing(bkw: BartKW) -> None:
     """Check that running the same `Bart` invocation twice does not retrace.
 

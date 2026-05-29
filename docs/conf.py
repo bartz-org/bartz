@@ -86,6 +86,7 @@ release = version
 extensions = [
     'sphinx.ext.napoleon',
     'sphinx.ext.autodoc',
+    'sphinx.ext.autosummary',  # generate per-object pages and index tables
     'sphinx_autodoc_typehints',  # (!) keep after napoleon
     'sphinx.ext.mathjax',
     'sphinx.ext.intersphinx',  # link to other documentations automatically
@@ -180,7 +181,7 @@ myst_enable_extensions = [
 ]
 
 # Add any paths that contain templates here, relative to this directory.
-# templates_path = ['_templates'] # noqa: ERA001
+templates_path = ['_templates']
 
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
@@ -223,6 +224,16 @@ autoclass_content = 'class'
 # default arguments are printed as in source instead of being evaluated
 autodoc_preserve_defaults = True
 autodoc_default_options = {'member-order': 'bysource'}
+
+# autosummary
+# generate the per-object stub pages at build time
+autosummary_generate = True
+# public modules use an _src-like layout: they re-export the public API from
+# private `_*` submodules, so members' `__module__` is the private submodule,
+# not the public one. Documenting imported members is therefore required. A
+# corollary is that any foreign object leaking into a public module's namespace
+# will show up here, which is by design a module-side bug to fix.
+autosummary_imported_members = True
 
 # autodoc-typehints
 typehints_use_rtype = False

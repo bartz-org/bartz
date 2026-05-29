@@ -370,16 +370,16 @@ def comparison(
     single `OutcomeModel` instance is duck-typed identically by both packages.
     """
     outcome = request.param
-    num_burnin = 300
-    num_mcmc = 800
+    num_burnin = 1000
+    num_mcmc = 1000
 
     if outcome == 'continuous':
-        data = _make_continuous(keys, n=300, n_test=80)
+        data = _make_continuous(keys, n=50, n_test=80)
         seed = 13
         y = np.asarray(data.y_train, dtype=np.float64)
         extra: dict = {}
     else:
-        data = _make_binary(keys, n=300, n_test=80)
+        data = _make_binary(keys, n=50, n_test=80)
         seed = 29
         y = np.asarray(data.y_train, dtype=np.int64)
         extra = {'outcome_model': bst.OutcomeModel(outcome='binary', link='probit')}
@@ -392,7 +392,7 @@ def comparison(
         num_burnin=num_burnin,
         num_mcmc=num_mcmc,
         general_params={'random_seed': seed, 'num_chains': 2, **extra},
-        mean_forest_params=_MFP_BASE,
+        mean_forest_params={**_MFP_BASE, 'num_trees': 50},
     )
 
     st_model = stochtree.BARTModel()
@@ -406,15 +406,12 @@ def comparison(
 def test_compare_with_stochtree(
     comparison: tuple[str, stochtree.BARTModel, bst.BARTModel], subtests: SubTests
 ) -> None:
-    """bartz.stochtree mixes with stochtree; per-output Rhat stays bounded.
+    """bartz.stochtree mixes with stochtree; per-output Rhat stays near 1.
 
-    The threshold is well above 1 because bartz and stochtree implement BART
-    with different internal MCMC schemes (proposal distributions, residual
-    bookkeeping) and so target slightly different finite-sample posteriors
-    even when given the same priors. A single threshold (the looser of the two
-    outcome types) is shared: the probit binary case needs more slack than the
-    continuous one because the latent-variable data augmentation amplifies
-    those per-sampler algorithmic differences.
+    bartz reproduces stochtree's MCMC, so the two target the same posterior and
+    differ only by Monte Carlo noise. The fixture picks an easy-to-converge
+    regime (small ``n``, ``num_trees >= max(n, p)``) so that noise stays small;
+    a single threshold just above 1 bounds both outcome types.
     """
     outcome, st_model, bz_model = comparison
 
@@ -429,11 +426,11 @@ def test_compare_with_stochtree(
 
     with subtests.test('rhat_y_hat_train'):
         rhat = _rhat_two_chains(bz_model.y_hat_train, st_model.y_hat_train)
-        assert_array_less(rhat, 1.30)
+        assert_array_less(rhat, 1.02)
 
     with subtests.test('rhat_y_hat_test'):
         rhat = _rhat_two_chains(bz_model.y_hat_test, st_model.y_hat_test)
-        assert_array_less(rhat, 1.30)
+        assert_array_less(rhat, 1.02)
 
     if outcome == 'continuous':
         with subtests.test('rhat_sigma'):
@@ -441,7 +438,7 @@ def test_compare_with_stochtree(
             st_sigma = np.sqrt(np.asarray(st_model.global_var_samples))
             # shape (1, num_samples) so rhat collapses to a scalar
             rhat = _rhat_two_chains(bz_sigma[None, :], st_sigma[None, :])
-            assert_array_less(rhat, 1.30)
+            assert_array_less(rhat, 1.02)
     else:
         with subtests.test('rhat_prob_train'):
             bz_prob = np.asarray(ndtr(bz_model.y_hat_train))
@@ -450,7 +447,7 @@ def test_compare_with_stochtree(
             bz_l = np.asarray(clipped_logit(bz_prob, 1e-5))
             st_l = np.asarray(clipped_logit(st_prob, 1e-5))
             rhat = _rhat_two_chains(bz_l, st_l)
-            assert_array_less(rhat, 1.30)
+            assert_array_less(rhat, 1.02)
 
 
 def test_jit(keys: split) -> None:

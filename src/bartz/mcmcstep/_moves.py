@@ -218,7 +218,9 @@ def _propose_moves(
     leaf_to_grow, num_growable, grow_prob_choose, grow_num_prunable = choose_leaf(
         keys.pop(), split_tree, affluence_tree, p_propose_grow
     )
-    node_to_prune, prune_num_prunable, prune_prob_choose, pruned_affluence_tree = (
+    # `choose_leaf_parent` returns `affluence_tree` already marking the pruned
+    # node as a growable leaf
+    node_to_prune, prune_num_prunable, prune_prob_choose, affluence_tree = (
         choose_leaf_parent(keys.pop(), split_tree, affluence_tree, p_propose_grow)
     )
 
@@ -259,13 +261,14 @@ def _propose_moves(
         [l < split_idx, split_idx + 1 < r]
     )
 
-    # update affluence_tree as if the chosen move was applied: GROW marks the
-    # new leaves with their admissibility, PRUNE marks the node as a growable
-    # leaf (always admissible because it was a valid decision node).
-    grow_affluence_tree = affluence_tree.at[jnp.stack([left, right])].set(
-        leftright_growable
-    )
-    affluence_tree = jnp.where(grow, grow_affluence_tree, pruned_affluence_tree)
+    # mark the new GROW leaves as growable, on top of the already-marked PRUNE
+    # node. The two updates touch disjoint slots (GROW writes the children of
+    # `node`, PRUNE wrote `node_to_prune`), so a single array carries both with
+    # no `where` over the whole tree: the slot of the move not taken is dirty
+    # but never read (it is not an actual leaf, or it gets the same value it
+    # already had). PRUNE always marks the node as admissible because it was a
+    # valid decision node.
+    affluence_tree = affluence_tree.at[jnp.stack([left, right])].set(leftright_growable)
 
     # partial Metropolis-Hastings ratio; the formula is shared, treating the
     # node as the leaf being grown (for PRUNE this is the reverse grow move,

@@ -1879,6 +1879,17 @@ def test_print_callback_terminates_dot_line(
     assert captured.out.endswith('.\n'), repr(captured.out[-200:])
 
 
+def test_pbar(bkw: BartKW, capsys: CaptureFixture[str]) -> None:
+    """The `pbar=True` progress bar runs to completion across configurations.
+
+    Parametrized over `bkw`, so it also covers chains sharded across devices
+    (e.g. variant v6). This exercises that `tqdm_callback` uses unordered debug
+    callbacks, since ordered ones are unsupported with more than one device.
+    """
+    block_until_ready(Bart(**dict(bkw.kw, pbar=True)))
+    assert '100%' in capsys.readouterr().err  # the bar ran and reached the end
+
+
 @pytest.mark.flaky
 # it's flaky because the interrupt may be caught and converted by jax internals (#33054)
 @pytest.mark.timeout(32)

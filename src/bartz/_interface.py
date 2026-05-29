@@ -75,6 +75,7 @@ from bartz.mcmcloop import (
     compute_varcount,
     evaluate_trace,
     make_print_callback,
+    make_tqdm_callback,
     run_mcmc,
 )
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
@@ -296,6 +297,10 @@ class Bart(Module):
         line. Set to `None` to disable logging. ^C interrupts the MCMC only
         every `printevery` iterations, so with logging disabled it's impossible
         to kill the MCMC conveniently.
+    pbar
+        If `True`, show a `tqdm` progress bar instead of printing log lines. The
+        bar advances every iteration and refreshes the acceptance statistics
+        every `printevery` iterations.
     num_chains
         The number of independent Markov chains to run.
 
@@ -403,6 +408,7 @@ class Bart(Module):
         n_burn: int = 1000,
         n_skip: int = 1,
         printevery: int | None = 100,
+        pbar: bool = False,
         num_chains: int | None = 4,
         num_chain_devices: int | None | Literal['auto'] = 'auto',
         num_data_devices: int | None = None,
@@ -492,7 +498,14 @@ class Bart(Module):
             keys.pop(),
         )
         result = _run_mcmc(
-            initial_state, n_save, n_burn, n_skip, printevery, mcmc_key, run_mcmc_kw
+            initial_state,
+            n_save,
+            n_burn,
+            n_skip,
+            printevery,
+            pbar,
+            mcmc_key,
+            run_mcmc_kw,
         )
 
         # set public attributes
@@ -1331,18 +1344,22 @@ def _run_mcmc(
     n_burn: int,
     n_skip: int,
     printevery: int | None,
+    pbar: bool,
     key: Key[Array, ''],
     run_mcmc_kw: Mapping,
 ) -> RunMCMCResult:
     # prepare arguments
     kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
-    kw.update(
-        make_print_callback(
-            mcmc_state,
-            dot_every=None if printevery is None or printevery == 1 else 1,
-            report_every=printevery,
+    if pbar:
+        kw.update(make_tqdm_callback(mcmc_state, report_every=printevery))
+    else:
+        kw.update(
+            make_print_callback(
+                mcmc_state,
+                dot_every=None if printevery is None or printevery == 1 else 1,
+                report_every=printevery,
+            )
         )
-    )
     kw.update(run_mcmc_kw)
 
     return run_mcmc(key, mcmc_state, n_save, **kw)

@@ -85,7 +85,7 @@ _UNSEEN_PREVIEW = 10
 ColumnKind: TypeAlias = Literal['numeric', 'bool', 'ordered_cat', 'unordered_cat']
 
 
-@dataclass
+@dataclass(frozen=True)
 class _ColumnSpec:
     """Per-original-column fitted state."""
 

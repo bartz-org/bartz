@@ -24,15 +24,19 @@
 
 """Functions that implement the full BART posterior MCMC loop.
 
-The entry points are `run_mcmc` and `make_print_callback`.
+The entry points are `run_mcmc` and the progress callbacks `make_print_callback`
+and `make_tqdm_callback`.
 """
 
 # ruff: noqa: F401
 
 from bartz.mcmcloop._callback import (
     PrintCallbackState,
+    TqdmCallbackState,
     make_print_callback,
+    make_tqdm_callback,
     print_callback,
+    tqdm_callback,
 )
 from bartz.mcmcloop._evaluate import compute_varcount, evaluate_trace
 from bartz.mcmcloop._loop import Callback, CallbackState, RunMCMCResult, run_mcmc

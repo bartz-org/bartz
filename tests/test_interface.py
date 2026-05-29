@@ -804,8 +804,8 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
         )
 
 
-def test_acceptance_count_matches_structure_changes(bkw: BartKW) -> None:
-    """Check that the acceptance count equals the number of changed tree structures."""
+def test_tree_structure_changes(bkw: BartKW, subtests: SubTests) -> None:
+    """Check how the tree structures change between consecutive MCMC iterations."""
     kw = bkw.kw
     kw['n_skip'] = 1  # so each saved sample is one MCMC step past the previous
     bart = Bart(**kw)
@@ -824,11 +824,19 @@ def test_acceptance_count_matches_structure_changes(bkw: BartKW) -> None:
     # marks inactive nodes); accepted grow/prune moves are exactly the ones that
     # change it, while the optimistically-updated var_tree may differ on rejected
     # grows too, so it must not be compared
-    changed = jnp.any(split_tree[..., 1:, :, :] != split_tree[..., :-1, :, :], axis=-1)
-    num_changed = jnp.sum(changed, axis=-1)
-    acc_count = grow_acc[..., 1:] + prune_acc[..., 1:]
+    differs = split_tree[..., 1:, :, :] != split_tree[..., :-1, :, :]
 
-    assert_array_equal(num_changed, acc_count)
+    with subtests.test('acceptance count matches changed trees'):
+        # number of trees whose structure changed between consecutive iterations
+        num_changed = jnp.sum(jnp.any(differs, axis=-1), axis=-1)
+        acc_count = grow_acc[..., 1:] + prune_acc[..., 1:]
+        assert_array_equal(num_changed, acc_count)
+
+    with subtests.test('at most one changed split node per tree'):
+        # a single grow/prune move adds/removes exactly one decision node, so at
+        # most one split node changes per tree between consecutive iterations
+        num_changed_nodes = jnp.sum(differs, axis=-1)
+        assert_array_less(num_changed_nodes, 2)
 
 
 def test_missing_ignored(bkw: BartKW, keys: split) -> None:

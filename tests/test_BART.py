@@ -180,7 +180,8 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     # different defaults
     init_kw = dict(kw.pop('init_kw'))
     # min_points_per_leaf: remove if equal to mc_gbart default (5) so mc_gbart's
-    # default-setting code is tested
+    # default-setting code is tested. min_points_per_decision_node is passed
+    # through: both Bart and mc_gbart default it to 10.
     if init_kw['min_points_per_leaf'] == 5:
         del init_kw['min_points_per_leaf']
     bart_kwargs['init_kw'] = init_kw
@@ -281,7 +282,9 @@ class TestWithCachedBart:
             keepevery=1,
             mc_cores=nchains,
         )
-        # R BART can't change the min_points_per_leaf setting
+        # R BART hard-codes nl>=5 && nr>=5; force the matching bartz constraint.
+        # min_points_per_decision_node=10 is bartz's efficient proposal (skip
+        # leaves too small to split), which targets the same posterior as BART3.
         kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
             min_points_per_decision_node=10, min_points_per_leaf=5
         )
@@ -479,8 +482,10 @@ class TestWithCachedBart:
             bart_count = bart.varcount.sum(axis=1)
             rbart_count = rbart.varcount.sum(axis=1)
             rhat_count = rhat_rank([bart_count, rbart_count], split=False)
-            assert_array_less(rhat_count, 2.5)  # genuinely bad, see below
-            assert_allclose(bart_count.mean(), rbart_count.mean(), rtol=0.2)
+            # threshold is set to accommodate the high-p variant where MCMC
+            # noise dominates; low-p variants give rhat ~ 1.05.
+            assert_array_less(rhat_count, 2.3)
+            assert_allclose(bart_count.mean(), rbart_count.mean(), rtol=0.1)
 
         if p < n:
             # skip if p is large because it would be difficult for the MCMC to get
@@ -488,10 +493,7 @@ class TestWithCachedBart:
 
             with subtests.test('varcount'):
                 rhat_varcount = rhat_rank([bart.varcount, rbart.varcount], split=False)
-                # there is a visible discrepancy on the number of nodes, with bartz
-                # having deeper trees, this 6 is not just "not good to sampling
-                # accuracy but close in practice."
-                assert_array_less(rhat_varcount, 1.4)
+                assert_array_less(rhat_varcount, 1.1)
 
             with subtests.test('varcount_mean'):
                 assert_close_matrices(
@@ -524,6 +526,9 @@ class TestWithCachedBart:
         bart = cachedbart.bart
 
         step_theta = bart._mcmc_state.forest.rho is not None
+        check_affluence = (
+            bart._mcmc_state.forest.min_points_per_decision_node is not None
+        )
 
         def assert_different(x: PyTree[Array], **kwargs: Any) -> None:
             def assert_different(
@@ -536,6 +541,11 @@ class TestWithCachedBart:
                     str_path.endswith('.error_cov_inv')
                     and bart._mcmc_state.error_cov_df is None
                 ):
+                    return
+                if str_path.endswith('.forest.affluence_tree') and not check_affluence:
+                    # without min_points_per_decision_node, affluence_tree only
+                    # tracks structural "has admissible split" and may coincide
+                    # across chains.
                     return
                 if x is not None and chain_axis is not None:
                     ref = jnp.broadcast_to(x.mean(chain_axis, keepdims=True), x.shape)
@@ -824,6 +834,8 @@ def test_min_points_per_decision_node(kw: dict[str, Any]) -> None:
     distr = bart._bart._points_per_decision_node_distr()
     distr_marg = distr.sum(axis=(0, 1))
 
+    # mc_gbart's default for min_points_per_decision_node is 10 (the efficient
+    # proposal, inherited from the Bart default).
     min_points = (
         kw.get('bart_kwargs', {})
         .get('init_kw', {})

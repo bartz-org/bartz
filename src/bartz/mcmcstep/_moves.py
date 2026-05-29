@@ -85,11 +85,22 @@ class Moves(Module):
     """The updated decision axes of the trees, valid whatever move."""
 
     affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=CHAIN_AXIS)
-    """A partially updated `affluence_tree`, marking non-leaf nodes that would
-    become leaves if the move was accepted. This mark initially (out of
-    `propose_moves`) takes into account if there would be available decision
-    rules to grow the leaf, and whether there are enough datapoints in the
-    node is instead checked later in `accept_moves_parallel_stage`."""
+    """A partially updated `affluence_tree`, updated as if the chosen move
+    (grow or prune) was applied: GROW marks the new leaves, PRUNE marks the
+    node that becomes a leaf. This mark initially (out of `propose_moves`)
+    takes into account if there would be available decision rules to grow the
+    leaf, and whether there are enough datapoints in the node is instead
+    checked later in `accept_moves_parallel_stage`."""
+
+    left_growable: Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    """Whether the left child of `node` has available decision rules, *not*
+    counting the datapoint thresholds. This is the admissibility used in the
+    prior term of the Metropolis-Hastings ratio, matching the standard BART
+    prior which ignores the count constraints."""
+
+    right_growable: Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    """Whether the right child of `node` has available decision rules, *not*
+    counting the datapoint thresholds. See `left_growable`."""
 
     logu: Float32[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
     """The logarithm of a uniform (0, 1] random variable to be used to
@@ -125,12 +136,9 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
     The proposed move for each tree.
     """
     num_trees = forest.leaf_tree.shape[0]
-    keys = split(key, 2)
-    grow_keys, prune_keys = keys.pop((2, num_trees))
-
-    # compute moves
-    grow_moves = propose_grow_moves(
-        grow_keys,
+    keys = split(key)
+    return _propose_moves(
+        keys.pop(num_trees),
         forest.var_tree,
         forest.split_tree,
         forest.affluence_tree,
@@ -140,99 +148,34 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
         forest.p_propose_grow,
         forest.log_s,
     )
-    prune_moves = propose_prune_moves(
-        prune_keys,
-        forest.split_tree,
-        grow_moves.affluence_tree,
-        forest.p_nonterminal,
-        forest.p_propose_grow,
-    )
-
-    u, exp1mlogu = random.uniform(keys.pop(), (2, num_trees))
-
-    # choose between grow or prune
-    p_grow = jnp.where(
-        grow_moves.allowed & prune_moves.allowed, 0.5, grow_moves.allowed
-    )
-    grow = u < p_grow  # use < instead of <= because u is in [0, 1)
-
-    # compute children indices
-    node = jnp.where(grow, grow_moves.node, prune_moves.node)
-    left, right = (node << 1) | jnp.arange(2)[:, None]
-
-    return Moves(
-        allowed=grow_moves.allowed | prune_moves.allowed,
-        grow=grow,
-        num_growable=grow_moves.num_growable,
-        node=node,
-        left=left,
-        right=right,
-        partial_ratio=jnp.where(
-            grow, grow_moves.partial_ratio, prune_moves.partial_ratio
-        ),
-        log_trans_prior_ratio=None,  # will be set in complete_ratio
-        grow_var=grow_moves.var,
-        grow_split=grow_moves.split,
-        # var_tree does not need to be updated if prune
-        var_tree=grow_moves.var_tree,
-        # affluence_tree is updated for both moves unconditionally, prune last
-        affluence_tree=prune_moves.affluence_tree,
-        logu=jnp.log1p(-exp1mlogu),
-        acc=None,  # will be set in accept_moves_sequential_stage
-        to_prune=None,  # will be set in accept_moves_sequential_stage
-    )
-
-
-class GrowMoves(Module):
-    """Represent a proposed grow move for each tree."""
-
-    allowed: Bool[Array, ' num_trees']
-    """Whether the move is allowed for proposal."""
-
-    num_growable: UInt[Array, ' num_trees']
-    """The number of leaves that can be proposed for grow."""
-
-    node: UInt[Array, ' num_trees']
-    """The index of the leaf to grow. ``2 ** d`` if there are no growable
-    leaves."""
-
-    var: UInt[Array, ' num_trees']
-    """The decision axis of the new rule."""
-
-    split: UInt[Array, ' num_trees']
-    """The decision boundary of the new rule."""
-
-    partial_ratio: Float32[Array, ' num_trees']
-    """A factor of the Metropolis-Hastings ratio of the move. It lacks
-    the likelihood ratio and the probability of proposing the prune
-    move."""
-
-    var_tree: UInt[Array, 'num_trees 2**(d-1)']
-    """The updated decision axes of the tree."""
-
-    affluence_tree: Bool[Array, 'num_trees 2**(d-1)']
-    """A partially updated `affluence_tree` that marks each new leaf that
-    would be produced as `True` if it would have available decision rules."""
 
 
 @named_call
 @partial(vmap_nodoc, in_axes=(0, 0, 0, 0, None, None, None, None, None))
-def propose_grow_moves(
-    key: Key[Array, ' num_trees'],
-    var_tree: UInt[Array, 'num_trees 2**(d-1)'],
-    split_tree: UInt[Array, 'num_trees 2**(d-1)'],
-    affluence_tree: Bool[Array, 'num_trees 2**(d-1)'],
+def _propose_moves(
+    key: Key[Array, ''],
+    var_tree: UInt[Array, ' 2**(d-1)'],
+    split_tree: UInt[Array, ' 2**(d-1)'],
+    affluence_tree: Bool[Array, ' 2**(d-1)'],
     max_split: UInt[Array, ' p'],
     blocked_vars: Int32[Array, ' k'] | None,
     p_nonterminal: Float32[Array, ' 2**d'],
     p_propose_grow: Float32[Array, ' 2**(d-1)'],
     log_s: Float32[Array, ' p'] | None,
-) -> GrowMoves:
+) -> Moves:
     """
-    Propose a GROW move for each tree.
+    Propose a GROW or PRUNE move for each tree.
 
     A GROW move picks a leaf node and converts it to a non-terminal node with
-    two leaf children.
+    two leaf children. A PRUNE move picks a non-terminal node with two leaf
+    children and converts it back to a leaf.
+
+    The grow leaf and the prune node are both sampled, then one of the two
+    moves is selected, and the decision-rule machinery is run once on the
+    selected node. For GROW this samples a new rule and the admissibility of
+    the new leaves; for PRUNE it re-derives, from the rule already stored at
+    the node, the admissibility of the leaves that would be deleted, reusing
+    the same criterion without a second tree traversal.
 
     Parameters
     ----------
@@ -263,46 +206,97 @@ def propose_grow_moves(
 
     Notes
     -----
-    The move is not proposed if each leaf is already at maximum depth, or has
+    A GROW move is not possible if each leaf is already at maximum depth, or has
     less datapoints than the requested threshold `min_points_per_decision_node`,
-    or it does not have any available decision rules given its ancestors. This
-    is marked by setting `allowed` to `False` and `num_growable` to 0.
+    or it does not have any available decision rules given its ancestors. A
+    PRUNE move is not possible if the tree is a single root. If neither move is
+    possible, `allowed` is set to `False`.
     """
-    keys = split(key, 3)
+    keys = split(key, 5)
 
-    leaf_to_grow, num_growable, prob_choose, num_prunable = choose_leaf(
+    # sample a leaf to grow and a node to prune
+    leaf_to_grow, num_growable, grow_prob_choose, grow_num_prunable = choose_leaf(
         keys.pop(), split_tree, affluence_tree, p_propose_grow
     )
-
-    # sample a decision rule
-    var, num_available_var = choose_variable(
-        keys.pop(), var_tree, split_tree, max_split, leaf_to_grow, blocked_vars, log_s
-    )
-    split_idx, l, r = choose_split(
-        keys.pop(), var, var_tree, split_tree, max_split, leaf_to_grow
+    # `choose_leaf_parent` returns `affluence_tree` already marking the pruned
+    # node as a growable leaf
+    node_to_prune, prune_num_prunable, prune_prob_choose, affluence_tree = (
+        choose_leaf_parent(keys.pop(), split_tree, affluence_tree, p_propose_grow)
     )
 
-    # determine if the new leaves would have available decision rules; if the
-    # move is blocked, these values may not make sense
+    # choose between grow and prune
+    grow_allowed = num_growable > 0
+    prune_allowed = split_tree[1].astype(bool)  # the tree is not a single root
+    u, exp1mlogu = random.uniform(keys.pop(), (2,))
+    p_grow = jnp.where(grow_allowed & prune_allowed, 0.5, grow_allowed)
+    grow = u < p_grow  # use < instead of <= because u is in [0, 1)
+
+    # merge the node the move operates on, and its children indices
+    node = jnp.where(grow, leaf_to_grow, node_to_prune)
+    left, right = (node << 1) | jnp.arange(2)
+
+    # sample a decision rule for GROW; for PRUNE recover the rule already stored
+    # at the node. `num_available_var` is the count of admissible variables at
+    # the node, which is the same quantity needed for either move.
+    sampled_var, num_available_var = choose_variable(
+        keys.pop(), var_tree, split_tree, max_split, node, blocked_vars, log_s
+    )
+    existing_var = var_tree.at[node].get(mode='fill', fill_value=0).astype(jnp.int32)
+    var = jnp.where(grow, sampled_var, existing_var)
+    sampled_split, l, r = choose_split(
+        keys.pop(), var, var_tree, split_tree, max_split, node
+    )
+    existing_split = (
+        split_tree.at[node].get(mode='fill', fill_value=0).astype(jnp.int32)
+    )
+    split_idx = jnp.where(grow, sampled_split, existing_split)
+
+    # admissibility of the two children of `node`, ignoring counts; for GROW
+    # these are the new leaves, for PRUNE the (existing) leaves that would be
+    # deleted. The criterion is the same as for grow: a child is admissible if
+    # there is another available variable, or the used variable still has a
+    # nonempty split range on the child's side. If the move is blocked these
+    # values may not make sense.
     leftright_growable = (num_available_var > 1) | jnp.stack(
         [l < split_idx, split_idx + 1 < r]
     )
-    leftright = (leaf_to_grow << 1) | jnp.arange(2)
-    affluence_tree = affluence_tree.at[leftright].set(leftright_growable)
 
-    ratio = compute_partial_ratio(
-        prob_choose, num_prunable, p_nonterminal, leaf_to_grow
-    )
+    # mark the new GROW leaves as growable, on top of the already-marked PRUNE
+    # node. The two updates touch disjoint slots (GROW writes the children of
+    # `node`, PRUNE wrote `node_to_prune`), so a single array carries both with
+    # no `where` over the whole tree: the slot of the move not taken is dirty
+    # but never read (it is not an actual leaf, or it gets the same value it
+    # already had). PRUNE always marks the node as admissible because it was a
+    # valid decision node.
+    affluence_tree = affluence_tree.at[jnp.stack([left, right])].set(leftright_growable)
 
-    return GrowMoves(
-        allowed=num_growable > 0,
+    # partial Metropolis-Hastings ratio; the formula is shared, treating the
+    # node as the leaf being grown (for PRUNE this is the reverse grow move,
+    # whose ratio is inverted later)
+    prob_choose = jnp.where(grow, grow_prob_choose, prune_prob_choose)
+    num_prunable = jnp.where(grow, grow_num_prunable, prune_num_prunable)
+    ratio = compute_partial_ratio(prob_choose, num_prunable, p_nonterminal, node)
+
+    return Moves(
+        allowed=grow_allowed | prune_allowed,
+        grow=grow,
         num_growable=num_growable,
-        node=leaf_to_grow,
-        var=var,
-        split=split_idx,
+        node=node,
+        left=left,
+        right=right,
         partial_ratio=ratio,
-        var_tree=var_tree.at[leaf_to_grow].set(var.astype(var_tree.dtype)),
+        log_trans_prior_ratio=None,  # will be set in complete_ratio
+        grow_var=sampled_var,
+        grow_split=sampled_split,
+        # var_tree only changes at `node` for GROW; for PRUNE this is a no-op
+        # since `var` equals the existing variable there
+        var_tree=var_tree.at[node].set(var.astype(var_tree.dtype)),
         affluence_tree=affluence_tree,
+        left_growable=leftright_growable[0],
+        right_growable=leftright_growable[1],
+        logu=jnp.log1p(-exp1mlogu),
+        acc=None,  # will be set in accept_moves_sequential_stage
+        to_prune=None,  # will be set in accept_moves_sequential_stage
     )
 
 
@@ -754,73 +748,6 @@ def compute_partial_ratio(
     tree_ratio = pnt / (1 - pnt)
 
     return tree_ratio / jnp.where(inv_trans_ratio, inv_trans_ratio, 1)
-
-
-class PruneMoves(Module):
-    """Represent a proposed prune move for each tree."""
-
-    allowed: Bool[Array, ' num_trees']
-    """Whether the move is possible."""
-
-    node: UInt[Array, ' num_trees']
-    """The index of the node to prune. ``2 ** d`` if no node can be pruned."""
-
-    partial_ratio: Float32[Array, ' num_trees']
-    """A factor of the Metropolis-Hastings ratio of the move. It lacks the
-    likelihood ratio, the probability of proposing the prune move, and the
-    prior probability that the children of the node to prune are leaves.
-    This ratio is inverted, and is meant to be inverted back in
-    `accept_move_and_sample_leaves`."""
-
-    affluence_tree: Bool[Array, 'num_trees 2**(d-1)']
-    """A partially updated `affluence_tree`, marking the node to prune as
-    growable."""
-
-
-@named_call
-@partial(vmap_nodoc, in_axes=(0, 0, 0, None, None))
-def propose_prune_moves(
-    key: Key[Array, ''],
-    split_tree: UInt[Array, ' 2**(d-1)'],
-    affluence_tree: Bool[Array, ' 2**(d-1)'],
-    p_nonterminal: Float32[Array, ' 2**d'],
-    p_propose_grow: Float32[Array, ' 2**(d-1)'],
-) -> PruneMoves:
-    """
-    Tree structure prune move proposal of BART MCMC.
-
-    Parameters
-    ----------
-    key
-        A jax random key.
-    split_tree
-        The splitting points of the tree.
-    affluence_tree
-        Whether each leaf can be grown.
-    p_nonterminal
-        The a priori probability of a node to be nonterminal conditional on
-        the ancestors, including at the maximum depth where it should be zero.
-    p_propose_grow
-        The unnormalized probability of choosing a leaf to grow.
-
-    Returns
-    -------
-    An object representing the proposed moves.
-    """
-    node_to_prune, num_prunable, prob_choose, affluence_tree = choose_leaf_parent(
-        key, split_tree, affluence_tree, p_propose_grow
-    )
-
-    ratio = compute_partial_ratio(
-        prob_choose, num_prunable, p_nonterminal, node_to_prune
-    )
-
-    return PruneMoves(
-        allowed=split_tree[1].astype(bool),  # allowed iff the tree is not a root
-        node=node_to_prune,
-        partial_ratio=ratio,
-        affluence_tree=affluence_tree,
-    )
 
 
 def choose_leaf_parent(

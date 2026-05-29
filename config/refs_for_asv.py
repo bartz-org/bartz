@@ -1,4 +1,4 @@
-# bartz/config/refs-for-asv.py
+# bartz/config/refs_for_asv.py
 #
 # Copyright (c) 2025-2026, The Bartz Contributors
 #
@@ -34,12 +34,17 @@ for passing directly as the positional `range` argument to `asv run`. asv
 shlex-splits it and feeds it to `git rev-list --first-parent` — which errors
 out on unknown refs, so an unresolvable ref aborts the whole run instead of
 being silently skipped (as `asv run HASHFILE:-` does).
+
+The helpers in this module are also used by `check_workarounds.py` to derive
+the floor for `bartz` itself (= oldest benchmarked version).
 """
 
 import datetime
+from pathlib import Path
 
 from git import Repo
 from git.exc import GitCommandError
+from packaging.version import Version
 
 # Configuration
 CUTOFF_DATE = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
@@ -72,36 +77,39 @@ def get_default_branch_name(repo: Repo) -> str:
     raise RuntimeError(msg)
 
 
-def main() -> None:
-    repo = Repo('.')
-    default_branch_name = get_default_branch_name(repo)
+def benchmarked_version_tags(
+    repo_path: Path | str = '.',
+) -> list[tuple[datetime.datetime, str]]:
+    """Return `[(commit_date, tag_name), ...]` of tags benchmarked by ASV.
 
-    # Get the default branch
-    main_branch = repo.refs[default_branch_name]
-
-    # Collect tags that are reachable from main and after cutoff date
-    tags_to_include = []
-
+    A tag is included iff it starts with `v`, is reachable from the default
+    branch, and points at a commit on/after `CUTOFF_DATE`. Sorted oldest first.
+    """
+    repo = Repo(repo_path)
+    main_branch = repo.refs[get_default_branch_name(repo)]
+    tags: list[tuple[datetime.datetime, str]] = []
     for tag in repo.tags:
-        # Get the commit the tag points to
         commit = tag.commit
-
-        # Check if this tag is reachable from main
         if not repo.is_ancestor(commit, main_branch.commit):
             continue
-
-        # Check if commit date is after cutoff
         commit_date = datetime.datetime.fromtimestamp(
             commit.committed_date, tz=datetime.timezone.utc
         )
-
         if commit_date >= CUTOFF_DATE and tag.name.startswith('v'):
-            tags_to_include.append((commit_date, tag.name))
+            tags.append((commit_date, tag.name))
+    tags.sort()
+    return tags
 
-    # Sort tags by commit date
-    tags_to_include.sort()
 
-    refs = [tag_name for _, tag_name in tags_to_include]
+def oldest_benchmarked_version(repo_path: Path | str = '.') -> Version:
+    """Return the oldest bartz version benchmarked by ASV."""
+    return Version(benchmarked_version_tags(repo_path)[0][1])
+
+
+def main() -> None:
+    repo = Repo('.')
+    default_branch_name = get_default_branch_name(repo)
+    refs = [tag_name for _, tag_name in benchmarked_version_tags('.')]
     refs.append(default_branch_name)
     print('--no-walk', *refs)
 

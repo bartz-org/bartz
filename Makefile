@@ -103,6 +103,11 @@ clean:
 	rm -fr dist
 	rm -fr config/jax_cache
 	rm -fr docs/_build
+	rm -fr .coverage*
+	# `renv::clean()` only removes locks/tempdirs/unused packages, not the
+	# whole library, so wipe the gitignored renv subdirs by hand to mirror
+	# `rm -fr .venv`.
+	rm -fr renv/library renv/staging renv/local renv/cellar renv/lock renv/python renv/sandbox
 
 ################# TESTS #################
 
@@ -241,7 +246,7 @@ build:
 	uv build
 
 .PHONY: release
-release: check-changelog clean update-oldest-deps update-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload gh-release
+release: check-changelog clean setup update-oldest-deps update-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload gh-release
 	@echo "Done!"
 
 .PHONY: version-tag
@@ -297,7 +302,7 @@ asv-machine:
 	$(UV_RUN) python config/asv_machine.py
 
 .PHONY: asv-run
-asv-run: ASV_REFS = $(shell $(UV_RUN) python config/refs-for-asv.py)
+asv-run: ASV_REFS = $(shell $(UV_RUN) python config/refs_for_asv.py)
 asv-run: asv-machine
 	$(ASV) run --durations=all --skip-existing-successful --show-stderr "$(ASV_REFS)" $(ARGS)
 

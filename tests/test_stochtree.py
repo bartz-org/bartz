@@ -24,6 +24,8 @@
 
 """Test `bartz.stochtree`, the shim mimicking the stochtree Python package."""
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import NamedTuple
 
 import jax
@@ -59,7 +61,7 @@ from tests.util import (
 _GEN_KW = dict(p=4, q=2, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.5)
 # `mean_forest_params` override that disables the bartz-incompatible
 # leaf-variance sampler. All sample()-using tests start from this base.
-_MFP_BASE: dict = {'sample_sigma2_leaf': False}
+_MFP_BASE: Mapping = MappingProxyType({'sample_sigma2_leaf': False})
 
 
 class _Data(NamedTuple):
@@ -359,6 +361,13 @@ def comparison(
 
     Parametrized indirectly on the outcome type ('continuous' or 'binary').
     Returns the outcome type alongside the two fitted models.
+
+    The *same* keyword-argument dict is fed to both `stochtree.BARTModel` and
+    `bartz.stochtree.BARTModel`, exercising the interface compatibility: the
+    inputs are float64 (which bartz silently downcasts); `num_gfr=0` and
+    `sample_sigma2_leaf=False` are set explicitly because bartz rejects their
+    stochtree defaults while stochtree happily accepts the overrides; and a
+    single `OutcomeModel` instance is duck-typed identically by both packages.
     """
     outcome = request.param
     num_burnin = 300
@@ -367,42 +376,29 @@ def comparison(
     if outcome == 'continuous':
         data = _make_continuous(keys, n=300, n_test=80)
         seed = 13
-        st_y = np.asarray(data.y_train, dtype=np.float64)
-        st_extra: dict = {}
-        bz_extra: dict = {}
+        y = np.asarray(data.y_train, dtype=np.float64)
+        extra: dict = {}
     else:
         data = _make_binary(keys, n=300, n_test=80)
         seed = 29
-        st_y = np.asarray(data.y_train, dtype=np.int64)
-        st_extra = {
-            'outcome_model': stochtree.OutcomeModel(outcome='binary', link='probit')
-        }
-        bz_extra = {'outcome_model': bst.OutcomeModel(outcome='binary', link='probit')}
+        y = np.asarray(data.y_train, dtype=np.int64)
+        extra = {'outcome_model': bst.OutcomeModel(outcome='binary', link='probit')}
 
-    common = {'random_seed': seed, 'num_chains': 2}
-
-    st_model = stochtree.BARTModel()
-    st_model.sample(
+    kwargs: dict = dict(
         X_train=np.asarray(data.X_train, dtype=np.float64),
-        y_train=st_y,
+        y_train=y,
         X_test=np.asarray(data.X_test, dtype=np.float64),
         num_gfr=0,
         num_burnin=num_burnin,
         num_mcmc=num_mcmc,
-        general_params={**common, **st_extra},
-        mean_forest_params={'sample_sigma2_leaf': False},
-    )
-    bz_model = bst.BARTModel()
-    bz_model.sample(
-        X_train=data.X_train,
-        y_train=data.y_train,
-        X_test=data.X_test,
-        num_gfr=0,
-        num_burnin=num_burnin,
-        num_mcmc=num_mcmc,
-        general_params={**common, **bz_extra},
+        general_params={'random_seed': seed, 'num_chains': 2, **extra},
         mean_forest_params=_MFP_BASE,
     )
+
+    st_model = stochtree.BARTModel()
+    st_model.sample(**kwargs)
+    bz_model = bst.BARTModel()
+    bz_model.sample(**kwargs)
     return outcome, st_model, bz_model
 
 

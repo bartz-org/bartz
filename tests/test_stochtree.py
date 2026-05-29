@@ -33,6 +33,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
+import stochtree
 from equinox import EquinoxRuntimeError
 from jax import Array, random
 from jax import numpy as jnp
@@ -42,7 +43,6 @@ from numpy.typing import ArrayLike
 from pytest_subtests import SubTests
 
 import bartz.stochtree as bst
-import stochtree
 from bartz._jaxext import split
 from bartz.stochtree._preprocess import (
     PandasPreprocessor,
@@ -561,8 +561,8 @@ class TestPreprocessing:
             return pd.array(vals, dtype='string')
         if k == 'datetime':
             return pd.to_datetime(vals)
-        msg = f'unknown kind {k!r}'
-        raise ValueError(msg)
+        msg = f'unknown kind {k!r}'  # pragma: no cover
+        raise ValueError(msg)  # pragma: no cover
 
     @staticmethod
     def _make_polars_column(name: str, spec: dict) -> pl.Series:
@@ -582,8 +582,8 @@ class TestPreprocessing:
             return pl.Series(name, vals, dtype=pl.String)
         if k == 'datetime':
             return pl.Series(name, vals).str.strptime(pl.Datetime)
-        msg = f'unknown or pandas-only kind {k!r}'
-        raise ValueError(msg)
+        msg = f'unknown or pandas-only kind {k!r}'  # pragma: no cover
+        raise ValueError(msg)  # pragma: no cover
 
     @classmethod
     def _make_df(
@@ -605,8 +605,8 @@ class TestPreprocessing:
             return pl.DataFrame(
                 {n: cls._make_polars_column(n, s) for n, s in columns.items()}
             )
-        msg = f'unknown flavor {flavor!r}'
-        raise ValueError(msg)
+        msg = f'unknown flavor {flavor!r}'  # pragma: no cover
+        raise ValueError(msg)  # pragma: no cover
 
     @staticmethod
     def _make_preprocessor(flavor: str) -> _PreprocessorBase:

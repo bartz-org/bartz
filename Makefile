@@ -131,7 +131,7 @@ clean:
 # is carved out (no class-scoped fixture), and v5's TestWithCachedBart class is
 # pulled into its own group (the cachedbart fixture, scope='class', is the bulk
 # of the cost — splitting members across groups would pay it twice).
-GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py 'tests/test_interface.py::test_equiv_sharding[v4]'
+GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py tests/test_stochtree.py 'tests/test_interface.py::test_equiv_sharding[v4]'
 GROUP_v1v7        := tests/test_BART.py tests/test_interface.py -k "v1 or v7 or not (v2 or v3 or v4 or v5 or v6)"
 GROUP_v2v3jaxext  := tests/test_BART.py tests/test_jaxext.py -k "v2 or v3 or jaxext"
 GROUP_v5heavy     := tests/test_interface.py::TestWithCachedBart -k v5

@@ -150,6 +150,10 @@ skip-magic-trailing-comma = true
 
 [tool.ruff.lint.isort]
 split-on-trailing-comma = false
+# `stochtree` is a third-party dependency, but a developer checkout of the
+# upstream stochtree repo at the project root makes isort auto-detect it as
+# first-party, so import sorting differs between dev machines and CI. Pin it.
+known-third-party = ["stochtree"]
 
 [tool.ruff.lint.flake8-annotations]
 allow-star-arg-any = true

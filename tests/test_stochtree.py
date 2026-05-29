@@ -352,22 +352,44 @@ def test_standardization_matches(keys: split) -> None:
 
 
 @pytest.fixture
-def comparison_continuous(keys: split) -> tuple[stochtree.BARTModel, bst.BARTModel]:
-    """Sample matching continuous models from stochtree and bartz.stochtree."""
-    data = _make_continuous(keys, n=300, n_test=80)
+def comparison(
+    request: pytest.FixtureRequest, keys: split
+) -> tuple[str, stochtree.BARTModel, bst.BARTModel]:
+    """Sample matching models from stochtree and bartz.stochtree.
+
+    Parametrized indirectly on the outcome type ('continuous' or 'binary').
+    Returns the outcome type alongside the two fitted models.
+    """
+    outcome = request.param
     num_burnin = 300
     num_mcmc = 800
-    common = {'random_seed': 13, 'num_chains': 2}
+
+    if outcome == 'continuous':
+        data = _make_continuous(keys, n=300, n_test=80)
+        seed = 13
+        st_y = np.asarray(data.y_train, dtype=np.float64)
+        st_extra: dict = {}
+        bz_extra: dict = {}
+    else:
+        data = _make_binary(keys, n=300, n_test=80)
+        seed = 29
+        st_y = np.asarray(data.y_train, dtype=np.int64)
+        st_extra = {
+            'outcome_model': stochtree.OutcomeModel(outcome='binary', link='probit')
+        }
+        bz_extra = {'outcome_model': bst.OutcomeModel(outcome='binary', link='probit')}
+
+    common = {'random_seed': seed, 'num_chains': 2}
 
     st_model = stochtree.BARTModel()
     st_model.sample(
         X_train=np.asarray(data.X_train, dtype=np.float64),
-        y_train=np.asarray(data.y_train, dtype=np.float64),
+        y_train=st_y,
         X_test=np.asarray(data.X_test, dtype=np.float64),
         num_gfr=0,
         num_burnin=num_burnin,
         num_mcmc=num_mcmc,
-        general_params=common,
+        general_params={**common, **st_extra},
         mean_forest_params={'sample_sigma2_leaf': False},
     )
     bz_model = bst.BARTModel()
@@ -378,101 +400,37 @@ def comparison_continuous(keys: split) -> tuple[stochtree.BARTModel, bst.BARTMod
         num_gfr=0,
         num_burnin=num_burnin,
         num_mcmc=num_mcmc,
-        general_params=common,
+        general_params={**common, **bz_extra},
         mean_forest_params=_MFP_BASE,
     )
-    return st_model, bz_model
+    return outcome, st_model, bz_model
 
 
-def test_compare_continuous_with_stochtree(
-    comparison_continuous: tuple[stochtree.BARTModel, bst.BARTModel], subtests: SubTests
+@pytest.mark.parametrize('comparison', ['continuous', 'binary'], indirect=True)
+def test_compare_with_stochtree(
+    comparison: tuple[str, stochtree.BARTModel, bst.BARTModel], subtests: SubTests
 ) -> None:
-    """bartz.stochtree mixes with stochtree, per-output Rhat stays bounded.
+    """bartz.stochtree mixes with stochtree; per-output Rhat stays bounded.
 
     The threshold is well above 1 because bartz and stochtree implement BART
     with different internal MCMC schemes (proposal distributions, residual
     bookkeeping) and so target slightly different finite-sample posteriors
-    even when given the same priors.
+    even when given the same priors. A single threshold (the looser of the two
+    outcome types) is shared: the probit binary case needs more slack than the
+    continuous one because the latent-variable data augmentation amplifies
+    those per-sampler algorithmic differences.
     """
-    st_model, bz_model = comparison_continuous
+    outcome, st_model, bz_model = comparison
 
-    with subtests.test('y_bar'):
-        assert_allclose(bz_model.y_bar, st_model.y_bar, rtol=1e-6)
-    with subtests.test('y_std'):
-        assert_allclose(bz_model.y_std, st_model.y_std, rtol=1e-6)
-
-    with subtests.test('rhat_y_hat_train'):
-        rhat = _rhat_two_chains(bz_model.y_hat_train, st_model.y_hat_train)
-        assert_array_less(rhat, 1.15)
-
-    with subtests.test('rhat_y_hat_test'):
-        rhat = _rhat_two_chains(bz_model.y_hat_test, st_model.y_hat_test)
-        assert_array_less(rhat, 1.15)
-
-    with subtests.test('rhat_sigma'):
-        bz_sigma = np.sqrt(np.asarray(bz_model.global_var_samples))
-        st_sigma = np.sqrt(np.asarray(st_model.global_var_samples))
-        # shape (1, num_samples) so rhat collapses to a scalar
-        rhat = _rhat_two_chains(bz_sigma[None, :], st_sigma[None, :])
-        assert_array_less(rhat, 1.15)
-
-
-@pytest.fixture
-def comparison_binary(keys: split) -> tuple[stochtree.BARTModel, bst.BARTModel]:
-    """Sample matching probit binary models from stochtree and bartz.stochtree."""
-    data = _make_binary(keys, n=300, n_test=80)
-    num_burnin = 300
-    num_mcmc = 800
-    seed = 29
-
-    st_model = stochtree.BARTModel()
-    st_model.sample(
-        X_train=np.asarray(data.X_train, dtype=np.float64),
-        y_train=np.asarray(data.y_train, dtype=np.int64),
-        X_test=np.asarray(data.X_test, dtype=np.float64),
-        num_gfr=0,
-        num_burnin=num_burnin,
-        num_mcmc=num_mcmc,
-        general_params={
-            'random_seed': seed,
-            'num_chains': 2,
-            'outcome_model': stochtree.OutcomeModel(outcome='binary', link='probit'),
-        },
-        mean_forest_params={'sample_sigma2_leaf': False},
-    )
-    bz_model = bst.BARTModel()
-    bz_model.sample(
-        X_train=data.X_train,
-        y_train=data.y_train,
-        X_test=data.X_test,
-        num_gfr=0,
-        num_burnin=num_burnin,
-        num_mcmc=num_mcmc,
-        general_params={
-            'random_seed': seed,
-            'num_chains': 2,
-            'outcome_model': bst.OutcomeModel(outcome='binary', link='probit'),
-        },
-        mean_forest_params=_MFP_BASE,
-    )
-    return st_model, bz_model
-
-
-def test_compare_binary_with_stochtree(
-    comparison_binary: tuple[stochtree.BARTModel, bst.BARTModel], subtests: SubTests
-) -> None:
-    """bartz.stochtree probit outputs mix with stochtree without lifting Rhat too much.
-
-    Probit binary regression has a higher tolerance than the continuous case
-    because the latent-variable data augmentation amplifies the per-sampler
-    algorithmic differences.
-    """
-    st_model, bz_model = comparison_binary
-
-    # y_bar = ndtri(mean(y)) is deterministic and must match modulo float32 precision
+    # y_bar is deterministic and must match modulo float32 precision; for
+    # binary it is ndtri(mean(y)).
     with subtests.test('y_bar'):
         assert_allclose(bz_model.y_bar, st_model.y_bar, rtol=1e-5)
 
+    if outcome == 'continuous':
+        with subtests.test('y_std'):
+            assert_allclose(bz_model.y_std, st_model.y_std, rtol=1e-6)
+
     with subtests.test('rhat_y_hat_train'):
         rhat = _rhat_two_chains(bz_model.y_hat_train, st_model.y_hat_train)
         assert_array_less(rhat, 1.30)
@@ -481,14 +439,22 @@ def test_compare_binary_with_stochtree(
         rhat = _rhat_two_chains(bz_model.y_hat_test, st_model.y_hat_test)
         assert_array_less(rhat, 1.30)
 
-    with subtests.test('rhat_prob_train'):
-        bz_prob = np.asarray(ndtr(bz_model.y_hat_train))
-        st_prob = np.asarray(ndtr(st_model.y_hat_train))
-        # logit-transform to spread the tails before computing Rhat
-        bz_l = np.asarray(clipped_logit(bz_prob, 1e-5))
-        st_l = np.asarray(clipped_logit(st_prob, 1e-5))
-        rhat = _rhat_two_chains(bz_l, st_l)
-        assert_array_less(rhat, 1.30)
+    if outcome == 'continuous':
+        with subtests.test('rhat_sigma'):
+            bz_sigma = np.sqrt(np.asarray(bz_model.global_var_samples))
+            st_sigma = np.sqrt(np.asarray(st_model.global_var_samples))
+            # shape (1, num_samples) so rhat collapses to a scalar
+            rhat = _rhat_two_chains(bz_sigma[None, :], st_sigma[None, :])
+            assert_array_less(rhat, 1.30)
+    else:
+        with subtests.test('rhat_prob_train'):
+            bz_prob = np.asarray(ndtr(bz_model.y_hat_train))
+            st_prob = np.asarray(ndtr(st_model.y_hat_train))
+            # logit-transform to spread the tails before computing Rhat
+            bz_l = np.asarray(clipped_logit(bz_prob, 1e-5))
+            st_l = np.asarray(clipped_logit(st_prob, 1e-5))
+            rhat = _rhat_two_chains(bz_l, st_l)
+            assert_array_less(rhat, 1.30)
 
 
 def test_jit(keys: split) -> None:

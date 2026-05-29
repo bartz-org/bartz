@@ -179,15 +179,11 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     # init_kw must be present bc it contains min_points_per_leaf which has
     # different defaults
     init_kw = dict(kw.pop('init_kw'))
-    # min_points_per_leaf / min_points_per_decision_node: remove if equal to
-    # mc_gbart's default so mc_gbart's default-setting code is tested
-    mc_gbart_init_defaults = {
-        'min_points_per_leaf': 5,
-        'min_points_per_decision_node': None,
-    }
-    for key, default in mc_gbart_init_defaults.items():
-        if init_kw.get(key, default) == default:
-            init_kw.pop(key, None)
+    # min_points_per_leaf: remove if equal to mc_gbart default (5) so mc_gbart's
+    # default-setting code is tested. min_points_per_decision_node is passed
+    # through: both Bart and mc_gbart default it to 10.
+    if init_kw['min_points_per_leaf'] == 5:
+        del init_kw['min_points_per_leaf']
     bart_kwargs['init_kw'] = init_kw
     kw['bart_kwargs'] = bart_kwargs
 
@@ -286,10 +282,11 @@ class TestWithCachedBart:
             keepevery=1,
             mc_cores=nchains,
         )
-        # R BART hard-codes nl>=5 && nr>=5; force the matching bartz constraint
-        # (some variants disable it by default for unrelated coverage reasons).
+        # R BART hard-codes nl>=5 && nr>=5; force the matching bartz constraint.
+        # min_points_per_decision_node=10 is bartz's efficient proposal (skip
+        # leaves too small to split), which targets the same posterior as BART3.
         kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
-            min_points_per_leaf=5
+            min_points_per_decision_node=10, min_points_per_leaf=5
         )
 
         bart = mc_gbart(**kw)
@@ -829,12 +826,12 @@ def test_min_points_per_decision_node(kw: dict[str, Any]) -> None:
     distr = bart._bart._points_per_decision_node_distr()
     distr_marg = distr.sum(axis=(0, 1))
 
-    # mc_gbart's default for min_points_per_decision_node is None (no
-    # constraint), so that BART3's posterior is targeted.
+    # mc_gbart's default for min_points_per_decision_node is 10 (the efficient
+    # proposal, inherited from the Bart default).
     min_points = (
         kw.get('bart_kwargs', {})
         .get('init_kw', {})
-        .get('min_points_per_decision_node', None)
+        .get('min_points_per_decision_node', 10)
     )
 
     if min_points is None:

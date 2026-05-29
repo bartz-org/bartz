@@ -27,6 +27,7 @@
 from equinox import Module
 from jax import numpy as jnp
 from jax.nn import softmax
+from jax.sharding import Mesh
 from jaxtyping import Array, Float32, Int32, UInt
 
 from bartz.mcmcstep import State
@@ -38,6 +39,9 @@ class BurninTrace(Module):
 
     has_chains: bool = field(static=True)
     """Whether the trace carries an explicit chain axis."""
+
+    mesh: Mesh | None = field(static=True)
+    """The device mesh the trace arrays are sharded on, or `None`."""
 
     error_cov_inv: (
         Float32[Array, '*chains_and_samples']
@@ -70,6 +74,7 @@ class BurninTrace(Module):
         """Create a single-item burn-in trace from a MCMC state."""
         return cls(
             has_chains=state.has_chains,
+            mesh=state.config.mesh,
             error_cov_inv=state.error_cov_inv,
             theta=state.forest.theta,
             grow_prop_count=state.forest.grow_prop_count,

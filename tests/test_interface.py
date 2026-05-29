@@ -2185,9 +2185,17 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
         )
 
     def remove_mesh(bart: Bart) -> Bart:
-        cfg = bart._mcmc_state.config
-        cfg = replace(cfg, mesh=None)
-        return tree_at(lambda b: b._mcmc_state.config, bart, cfg)
+        # the mesh is static metadata on both the state config and the traces,
+        # so it must be cleared everywhere to make treedefs match the unsharded
+        # baseline before comparing leaves
+        cfg = replace(bart._mcmc_state.config, mesh=None)
+        bart = tree_at(lambda b: b._mcmc_state.config, bart, cfg)
+        bart = tree_at(
+            lambda b: b._main_trace, bart, replace(bart._main_trace, mesh=None)
+        )
+        return tree_at(
+            lambda b: b._burnin_trace, bart, replace(bart._burnin_trace, mesh=None)
+        )
 
     with subtests.test('shard chains'):
         chains_kw = tree.map(lambda x: x, baseline_kw)

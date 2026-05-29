@@ -25,11 +25,12 @@
 """Post-processing of MCMC traces: predictions and predictor usage counts."""
 
 import math
+from collections.abc import Callable
 from functools import partial
 
-import jax
-from jax import ShapeDtypeStruct, jit, lax, tree, vmap
+from jax import ShapeDtypeStruct, jit, lax, shard_map, tree, vmap
 from jax import numpy as jnp
+from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Float32, Int32, UInt
 from numpy.lib.array_utils import normalize_axis_index
 
@@ -41,6 +42,7 @@ from bartz.mcmcstep._state import (
     chain_vmap_axes,
     chainful_axis,
     get_axis_size,
+    partition_specs,
 )
 
 
@@ -80,10 +82,9 @@ def evaluate_trace(
     # per-device memory limit
     max_io_nbytes = 2**27  # 128 MiB
 
-    # adjust memory limit for number of devices
-    mesh = jax.typeof(trace.leaf_tree).sharding.mesh
-    num_devices = get_axis_size(mesh, 'chains') * get_axis_size(mesh, 'data')
-    max_io_nbytes *= num_devices
+    # the mesh the trace is sharded on (`None` if single-device); the chain
+    # axis is parallelized below with a manual `shard_map`
+    mesh = trace.mesh
 
     # extract only the trees from the trace, this will be the input to `evaluate_forest`
     trees = TreesTrace.from_dataclass(trace)
@@ -104,11 +105,16 @@ def evaluate_trace(
     _, n = X.shape
     num_samples = trace.leaf_tree.shape[sample_axes.leaf_tree]
     num_trees = trace.leaf_tree.shape[tree_axes.leaf_tree]
+    # the chain axis is parallelized with a manual `shard_map` (see below), so
+    # the per-device computation only sees `num_chains` divided by the number
+    # of chain devices; the data axis is left automatic and follows the
+    # sharding of `X`
     if trace.has_chains:
         num_chains = trace.leaf_tree.shape[trace_chain_axes.leaf_tree]
+        local_num_chains = num_chains // get_axis_size(mesh, 'chains')
 
     def expand_shape(shape: tuple[int, ...], chain_axis: int) -> tuple[int, ...]:
-        return (*shape[:chain_axis], num_chains, *shape[chain_axis:])
+        return (*shape[:chain_axis], local_num_chains, *shape[chain_axis:])
 
     # tree axis to reduce over
     out_shape_w_trees = (num_samples, num_trees, *kshape, n)
@@ -174,6 +180,12 @@ def evaluate_trace(
         result_shape_dtype=ShapeDtypeStruct(out_shape, jnp.float32),
     )
 
+    # parallelize the chain axis across devices with a manual `shard_map`
+    if mesh is not None and 'chains' in mesh.axis_names and trace.has_chains:
+        batched_eval = _shard_map_over_chains(
+            batched_eval, trace, mesh, len(out_shape), out_chain_axis
+        )
+
     # prepare offset for broadcasting
     # chainless y shape = (num_samples, *kshape, n), offset shape = kshape
     offset = trace.offset[None, ..., None]
@@ -187,6 +199,36 @@ def evaluate_trace(
         y = jnp.moveaxis(y, out_chain_axis, 0)
         y = lax.collapse(y, 0, 2)
     return y
+
+
+def _shard_map_over_chains(
+    fun: Callable[[UInt[Array, 'p n'], TreesTrace], Float32[Array, '*out']],
+    trace: MainTrace,
+    mesh: Mesh,
+    out_ndim: int,
+    out_chain_axis: int,
+) -> Callable[[UInt[Array, 'p n'], TreesTrace], Float32[Array, '*out']]:
+    """Wrap ``fun(X, trees)`` in a `shard_map` that is manual over ``'chains'`` only.
+
+    The trees are sharded over their chain axis; `X` is replicated over
+    ``'chains'``. The data axis is left as an automatic mesh axis, so the
+    output's data axis follows the sharding of `X` (data-sharded for training
+    data, replicated for test data) without forcing any inter-device movement.
+    """
+    spec = [None] * out_ndim
+    spec[out_chain_axis] = 'chains'
+    trees_spec = TreesTrace.from_dataclass(partition_specs(trace, mesh))
+    return shard_map(
+        fun,
+        mesh=mesh,
+        axis_names={'chains'},
+        in_specs=(PartitionSpec(), trees_spec),
+        out_specs=PartitionSpec(*spec),
+        # `traverse_tree`'s `lax.scan` carry starts replicated and becomes
+        # chain-varying, which the VMA checker rejects; the evaluation is
+        # embarrassingly parallel over chains, so the check adds no safety
+        check_vma=False,
+    )
 
 
 @partial(jit, static_argnames=('p', 'out_chain_axis'))

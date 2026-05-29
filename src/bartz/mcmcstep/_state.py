@@ -1651,6 +1651,32 @@ def split_key_for_chains(
     return wrapped
 
 
+def partition_specs(x: PyTree, mesh: Mesh) -> PyTree[PartitionSpec]:
+    """Per-leaf `PartitionSpec`s derived from chain/data `field` markers.
+
+    Each array leaf is sharded over ``'chains'`` along its chain axis and over
+    ``'data'`` along its data axis, when those axes are marked (see `field`)
+    and present in `mesh`; all other axes are replicated.
+
+    Parameters
+    ----------
+    x
+        A pytree of arrays carrying chain/data `field` markers.
+    mesh
+        The device mesh to shard over.
+
+    Returns
+    -------
+    A pytree matching `x` with a `PartitionSpec` in place of each array leaf.
+    """
+    return tree.map(
+        lambda leaf, ca, da: _leaf_partition_spec(leaf.ndim, ca, da, mesh),
+        x,
+        chain_vmap_axes(x),
+        data_vmap_axes(x),
+    )
+
+
 def shard_map_state(
     fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State],
 ) -> Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State]:
@@ -1674,15 +1700,7 @@ def shard_map_state(
         else:
             key_spec = PartitionSpec()
 
-        chain_axes = chain_vmap_axes(state)
-        data_axes = data_vmap_axes(state)
-
-        state_specs = tree.map(
-            lambda x, ca, da: _leaf_partition_spec(x.ndim, ca, da, mesh),
-            state,
-            chain_axes,
-            data_axes,
-        )
+        state_specs = partition_specs(state, mesh)
 
         mapped = shard_map(
             fun,

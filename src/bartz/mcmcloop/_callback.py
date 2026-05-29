@@ -40,17 +40,17 @@ from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes, chainful_axis
 
 
-def make_default_callback(
+def make_print_callback(
     state: State,
     *,
     dot_every: int | Integer[Array, ''] | None = 1,
     report_every: int | Integer[Array, ''] | None = 100,
 ) -> dict[str, Any]:
     """
-    Prepare a default callback for `run_mcmc`.
+    Prepare a progress-printing callback for `run_mcmc`.
 
-    The callback prints a dot on every iteration, and a longer
-    report outer loop iteration, and can do variable selection.
+    The callback prints a dot on every iteration, and a longer report
+    periodically.
 
     Parameters
     ----------
@@ -69,7 +69,7 @@ def make_default_callback(
 
     Examples
     --------
-    >>> run_mcmc(key, state, ..., **make_default_callback(state, ...))
+    >>> run_mcmc(key, state, ..., **make_print_callback(state, ...))
     """
 
     def as_replicated_array_or_none(val: ArrayLike | None) -> None | Array:

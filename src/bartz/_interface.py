@@ -74,7 +74,7 @@ from bartz.mcmcloop import (
     RunMCMCResult,
     compute_varcount,
     evaluate_trace,
-    make_default_callback,
+    make_print_callback,
     run_mcmc,
 )
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
@@ -1337,7 +1337,7 @@ def _run_mcmc(
     # prepare arguments
     kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
     kw.update(
-        make_default_callback(
+        make_print_callback(
             mcmc_state,
             dot_every=None if printevery is None or printevery == 1 else 1,
             report_every=printevery,

@@ -327,7 +327,11 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     nt = 21
     p = 2
     high_p = 257  # > 256 to use uint16 for var_trees.
-    common = dict(num_trees=20, n_save=50, n_burn=50, seed=keys.pop())
+    # num_trees differs from n and nt so that the datapoint, test-datapoint, and
+    # tree axes have distinct lengths: an accidental misalignment of these axes
+    # then cannot pass by coincidence (e.g. it lets tests locate the datapoint
+    # axis by its length, see `test_permutation_invariance`)
+    common = dict(num_trees=19, n_save=50, n_burn=50, seed=keys.pop())
 
     match variant:
         # continuous regression with some settings that induce large types,
@@ -931,6 +935,60 @@ def test_constant_y_train(bkw: BartKW, keys: split, subtests: SubTests) -> None:
             assert_array_equal(leaf_tree, jnp.zeros_like(leaf_tree))
 
 
+def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
+    """A constant predictor has no available cutpoints.
+
+    With ``rm_const=False`` the splitless predictor triggers an error; with
+    ``rm_const=True`` (default) predictor 0 is ignored, which must show up in
+    every downstream signal: it is splitless, listed in ``blocked_vars``, never
+    counted in `varcount`, assigned zero `varprob`, and never selected for a
+    decision rule in the `var_tree` of the main trace.
+    """
+    kw = dict(bkw.kw)
+
+    # make predictor 0 constant so it has no available cutpoints; force a
+    # quantile binner because e.g. RangeEvenBinner would still place cutpoints
+    # over the degenerate range, leaving the predictor formally splittable
+    x = kw['x_train']
+    kw['x_train'] = x.at[0, :].set(x[0, 0])
+    kw['binner'] = partial(UniqueQuantileBinner, max_subsample=None)
+
+    bart = Bart(**kw)
+
+    forest = bart._mcmc_state.forest
+    with subtests.test('predictor 0 is splitless'):
+        assert forest.max_split[0] == 0
+
+    with subtests.test('blocked_vars lists predictor 0'):
+        (expected,) = jnp.nonzero(forest.max_split == 0)
+        assert_array_equal(jnp.sort(forest.blocked_vars), expected, strict=False)
+        assert jnp.any(forest.blocked_vars == 0)
+
+    with subtests.test('varcount ignores predictor 0'):
+        assert jnp.all(bart.varcount[:, 0] == 0)
+        assert jnp.any(bart.varcount[:, 1:] > 0)  # the test is not vacuous
+
+    with subtests.test('varprob ignores predictor 0'):
+        assert jnp.all(bart.varprob[:, 0] == 0)
+
+    with subtests.test('predictor 0 absent from var_tree'):
+        trace = bart._main_trace
+        axes = chain_vmap_axes(trace)
+        var_tree = chain_to_axis(trace.var_tree, axes.var_tree)
+        split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
+        # only active decision nodes carry a meaningful variable; predictor 0
+        # (var index 0) must never appear among them
+        active = split_tree > 0
+        assert jnp.any(active)  # the test is not vacuous
+        assert jnp.all(var_tree[active] != 0)
+
+    with (
+        subtests.test('rm_const=False raises'),
+        pytest.raises(EquinoxRuntimeError, match='predictors with no splits'),
+    ):
+        Bart(**dict(kw, rm_const=False, seed=random.clone(kw['seed'])))
+
+
 def test_output_shapes(bkw: BartKW, keys: split) -> None:
     """Check the output shapes of the Bart predictions and attributes."""
     kw = bkw.kw
@@ -1260,6 +1318,54 @@ def test_scale_shift(bkw: BartKW) -> None:
         )
     assert_close_matrices(sdev_actual, sdev_expected, rtol=1e-5, reduce_rank=True)
     assert_close_matrices(sdev_mean_actual, sdev_mean_expected, rtol=1e-5)
+
+
+def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
+    """Check that `Bart` is invariant under permutation of the datapoints.
+
+    Permuting the inputs along their datapoint axis and inverse-permuting the
+    datapoint axis of the fitted arrays must recover the original fit. Binary
+    outcomes are excluded: their latent-variable augmentation draws a
+    per-datapoint normal keyed by the datapoint position, so permuting the
+    data changes the augmentation, and hence the fit.
+    """
+    if bkw.any_binary:
+        pytest.skip('binary latent augmentation is position-dependent')
+
+    kw = bkw.kw
+    bart1 = Bart(**kw)
+
+    # permute every input with a datapoint axis (always the last one)
+    n = bkw.n
+    perm = random.permutation(keys.pop(), n)
+    kw2 = dict(kw, seed=random.clone(kw['seed']))
+    kw2['x_train'] = kw['x_train'][:, perm]
+    kw2['y_train'] = kw['y_train'][..., perm]
+    if kw.get('w') is not None:
+        kw2['w'] = kw['w'][..., perm]
+    if kw.get('missing') is not None:
+        kw2['missing'] = kw['missing'][..., perm]
+    bart2 = Bart(**kw2)
+
+    # inverse-permute every fitted array along its datapoint axis; `n` differs
+    # from every other axis length (see `make_kw`), so the datapoint axis is the
+    # unique axis with that length
+    inv = jnp.argsort(perm)
+
+    def unpermute(x: Array) -> Array:
+        if n not in getattr(x, 'shape', ()):
+            return x
+        (axis,) = (i for i, length in enumerate(x.shape) if length == n)
+        return jnp.take(x, inv, axis=axis)
+
+    bart2 = tree.map(unpermute, bart2)
+
+    def check_equal(path: KeyPath, x1: Array, x2: Array) -> None:
+        assert_close_matrices(
+            x2, x1, err_msg=f'{keystr(path)}: ', rtol=1e-5, reduce_rank=True
+        )
+
+    tree.map_with_path(check_equal, bart1, bart2)
 
 
 def test_min_points_per_decision_node(bkw: BartKW) -> None:
@@ -1642,6 +1748,84 @@ def test_jit(bkw: BartKW) -> None:
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
     assert_close_matrices(pred1, pred2, rtol=1e-5, reduce_rank=True)
+
+
+def test_vmap(bkw: BartKW, keys: split) -> None:
+    """Test that jit(vmap(...))ing around the whole interface works.
+
+    Vmaps `Bart` over a leading repetition axis added to every input carrying
+    the data dimension ``n`` (``x_train``, ``y_train``, ``w``, ``missing``),
+    and checks each leaf of the vmapped `Bart` matches the stack of the
+    corresponding leaves of the per-repetition `Bart` objects.
+    """
+    kw = bkw.kw
+    kw.update(printevery=None, rm_const=False)
+
+    platform = kw['y_train'].platform()
+    kw.update(devices=jax.devices(platform))
+
+    binary_mask = bkw.binary_mask  # read before popping y_train
+
+    X = kw.pop('x_train')
+    y = kw.pop('y_train')
+    w = kw.pop('w', None)
+    missing = kw.pop('missing', None)
+    kw.pop('seed')  # replaced by a distinct per-repetition key below
+
+    nrep = 3
+    key = keys.pop(nrep)  # one MCMC seed per repetition
+
+    def tile(a: Shaped[Array, '...']) -> Shaped[Array, 'nrep ...']:
+        return jnp.broadcast_to(a, (nrep, *a.shape))
+
+    # tile each input over the repetition axis, then add a per-repetition
+    # perturbation that keeps it valid (positive `w`, boolean `missing`,
+    # binary outcome components in ``{0, 1}``)
+    Xb = tile(X) + 0.1 * random.normal(keys.pop(), (nrep, *X.shape))
+
+    is_binary = jnp.broadcast_to(binary_mask[..., None], y.shape)
+    yb_cont = tile(y) + 0.1 * random.normal(keys.pop(), (nrep, *y.shape))
+    yb_bin = tile(y).astype(bool) ^ random.bernoulli(keys.pop(), 0.1, (nrep, *y.shape))
+    yb = jnp.where(tile(is_binary), yb_bin.astype(y.dtype), yb_cont)
+
+    if w is None:
+        wb = None
+    else:
+        wb = tile(w) * jnp.exp(0.1 * random.normal(keys.pop(), (nrep, *w.shape)))
+
+    if missing is None:
+        mb = None
+    else:
+        mb = tile(missing) ^ random.bernoulli(keys.pop(), 0.1, (nrep, *missing.shape))
+
+    def task(
+        X: Shaped[Array, 'p n'],
+        y: Shaped[Array, ' n'] | Shaped[Array, 'k n'],
+        w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
+        missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+        key: Key[Array, ''],
+    ) -> OriginalBart:
+        return OriginalBart(X, y, w=w, missing=missing, **kw, seed=key)
+
+    batched = jax.jit(vmap(task))(Xb, yb, wb, mb, key)
+
+    key_singles = random.clone(key)  # avoid reusing the keys consumed by vmap
+    singles = [
+        task(
+            Xb[i, ...],
+            yb[i, ...],
+            None if wb is None else wb[i, ...],
+            None if mb is None else mb[i, ...],
+            key_singles[i],
+        )
+        for i in range(nrep)
+    ]
+    stacked = tree.map(lambda *leaves: jnp.stack(leaves), *singles)
+
+    def check(a: Array, b: Array) -> None:
+        assert_close_matrices(a, b, rtol=1e-5, reduce_rank=True)
+
+    tree.map(check, batched, stacked)
 
 
 def test_no_recompilation_no_tracing(bkw: BartKW) -> None:

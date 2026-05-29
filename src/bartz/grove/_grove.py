@@ -403,6 +403,13 @@ def var_histogram(
     return scatter_add(var_tree, is_internal)
 
 
+def _format_leaf(leaf: Float32[Array, ''] | Float32[Array, ' k'], is_mv: bool) -> str:
+    """Format a (possibly multivariate) leaf value to 2 significant digits."""
+    if is_mv:
+        return '[' + ', '.join(f'{v:#.2g}' for v in leaf) + ']'
+    return f'{leaf:#.2g}'
+
+
 def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     """Convert a tree to a human-readable string.
 
@@ -424,6 +431,9 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     down = '┐'
     bottom = '╢'  # '┨' #
 
+    *_, tree_size = tree.leaf_tree.shape
+    is_mv = tree.leaf_tree.ndim != tree.var_tree.ndim
+
     def traverse_tree(
         lines: list[str],
         index: int,
@@ -433,7 +443,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         next_indent: str,
         unused: bool,
     ) -> None:
-        if index >= len(tree.leaf_tree):
+        if index >= tree_size:
             return
 
         var: int = tree.var_tree.at[index].get(mode='fill', fill_value=0).item()
@@ -450,22 +460,22 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
                 category = 'leaf'
             else:
                 category = 'decision'
-            node_str = f'{category}({var}, {split}, {tree.leaf_tree[index]})'
+            node_str = f'{category}({var}, {split}, {tree.leaf_tree[..., index]})'
         else:
             assert not unused
             if is_leaf:
-                node_str = f'{tree.leaf_tree[index]:#.2g}'
+                node_str = _format_leaf(tree.leaf_tree[..., index], is_mv)
             else:
                 node_str = f'x{var} < {split}'
 
-        if not is_leaf or (print_all and left_child < len(tree.leaf_tree)):
+        if not is_leaf or (print_all and left_child < tree_size):
             link = down
-        elif not print_all and left_child >= len(tree.leaf_tree):
+        elif not print_all and left_child >= tree_size:
             link = bottom
         else:
             link = ' '
 
-        max_number = len(tree.leaf_tree) - 1
+        max_number = tree_size - 1
         ndigits = len(str(max_number))
         number = str(index).rjust(ndigits)
 

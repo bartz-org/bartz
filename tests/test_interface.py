@@ -838,6 +838,16 @@ def test_tree_structure_changes(bkw: BartKW, subtests: SubTests) -> None:
         num_changed_nodes = jnp.sum(differs, axis=-1)
         assert_array_less(num_changed_nodes, 2)
 
+    with subtests.test('acceptance count does not exceed proposal count'):
+        # each tree proposes at most one move (grow or prune) per iteration, so
+        # proposals total at most one per tree, and acceptances are a subset
+        grow_prop = chain_to_axis(trace.grow_prop_count, axes.grow_prop_count)
+        prune_prop = chain_to_axis(trace.prune_prop_count, axes.prune_prop_count)
+        *_, num_trees, _ = split_tree.shape
+        assert jnp.all(grow_acc <= grow_prop)
+        assert jnp.all(prune_acc <= prune_prop)
+        assert jnp.all(grow_prop + prune_prop <= num_trees)
+
 
 def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     """Garbage finite y values at missing positions don't affect the fit."""

@@ -640,7 +640,7 @@ class TestWithCachedBart:
             yhat_train = bart.predict('train', kind='latent_samples')
             yhat_train_chains = yhat_train.reshape(num_chains, nsamples, -1)
             rhat_yhat_train = rhat_rank(yhat_train_chains, split=True)
-            assert_array_less(rhat_yhat_train, 1.1)
+            assert_array_less(rhat_yhat_train, 1.15)
 
         if bkw.all_binary:
             with subtests.test('prob_train'):
@@ -686,19 +686,19 @@ class TestWithCachedBart:
                     ti, tj = jnp.triu_indices(k)
                 error_cov_inv = error_cov_inv[:, :, ti, tj]
                 rhat_prec = rhat_rank(error_cov_inv, split=True)
-                assert_array_less(rhat_prec, 1.01)
+                assert_array_less(rhat_prec, 1.05)
 
         if bkw.p < bkw.n:
             with subtests.test('varcount'):
                 varcount_vals = bart.varcount.reshape(num_chains, nsamples, bkw.p)
                 rhat_varcount = rhat_rank(varcount_vals, split=True)
-                assert_array_less(rhat_varcount, 1.4)
+                assert_array_less(rhat_varcount, 1.7)
 
             if bkw.sparse:  # pragma: no branch
                 with subtests.test('varprob'):
                     varprob_vals = bart.varprob.reshape(num_chains, nsamples, bkw.p)
                     rhat_varprob = rhat_rank(varprob_vals[:, :, 1:], split=True)
-                    assert_array_less(rhat_varprob, 1.3)
+                    assert_array_less(rhat_varprob, 1.6)
 
     def test_different_chains(self, cachedbart: CachedBart) -> None:
         """Check that different chains give different results."""

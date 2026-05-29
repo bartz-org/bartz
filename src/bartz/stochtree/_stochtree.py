@@ -304,50 +304,36 @@ class BARTModel:
         gp: GeneralParams,
     ) -> tuple[Real[Array, 'n p'], Real[Array, ' n'], Float32[Array, ' p'] | None]:
         """Coerce inputs and build variable weights, fitting the DataFrame preprocessor if any."""
+        y_train_arr = _coerce_response(y_train, name='y_train')
+
         self._preprocessor = make_preprocessor(X_train)
         if self._preprocessor is None:
-            X_train_arr, y_train_arr = process_train_inputs(X_train, y_train)
+            X_train_arr = check_X(X_train, name='X_train')
             _, p = X_train_arr.shape
             varprob = check_variable_weights(gp.variable_weights, p)
-            return X_train_arr, y_train_arr, varprob
-
-        y_train_arr = _coerce_response(y_train, name='y_train')
-        weights_in = gp.variable_weights
-        if weights_in is None:
-            # Match stochtree: the default is uniform over the *original* columns,
-            # then split across each column's one-hot expansion (inside
-            # fit_transform), so every original variable keeps an equal total
-            # splitting budget. Left as None it would instead be uniform over the
-            # expanded columns, over-weighting one-hot-encoded variables.
-            n_orig = X_train.shape[1]
-            weights_in = jnp.full(n_orig, 1.0 / n_orig)
-        X_train_np, weights_np = self._preprocessor.fit_transform(
-            X_train, variable_weights=weights_in
-        )
-        if X_train_np.shape[0] != y_train_arr.shape[0]:
-            msg = (
-                f'X_train and y_train length mismatch: X_train has '
-                f'{X_train_np.shape[0]} rows, y_train has '
-                f'{y_train_arr.shape[0]} entries'
-            )
-            raise ValueError(msg)
-        if X_train_np.shape[1] == 0:
-            msg = (
-                'X_train has no usable columns after preprocessing (all columns'
-                ' were dropped due to unsupported dtypes)'
-            )
-            raise ValueError(msg)
-        X_train_arr = jnp.asarray(X_train_np)
-        ovi = self._preprocessor.original_var_indices
-        expanded = len(set(ovi)) != len(ovi)
-        if gp.variable_weights is None and not expanded:
-            # No one-hot expansion: the split-default is plain uniform, so defer
-            # to bartz's native `varprob=None` fast-path (also keeps a numeric
-            # DataFrame numerically identical to the equivalent raw array).
-            variable_weights = None
         else:
-            variable_weights = jnp.asarray(weights_np, jnp.float32)
-        return X_train_arr, y_train_arr, variable_weights
+            # The preprocessor decides the default weights: uniform over the
+            # *original* columns split across each one-hot expansion (so every
+            # original variable keeps an equal splitting budget), or `None` when
+            # nothing expands (deferring to bartz's native uniform fast-path).
+            weights_np = self._preprocessor.fit(
+                X_train, variable_weights=gp.variable_weights
+            )
+            X_train_np = self._preprocessor.transform(X_train)
+            if X_train_np.shape[1] == 0:
+                msg = 'X_train has no usable columns after preprocessing'
+                raise ValueError(msg)
+            X_train_arr = jnp.asarray(X_train_np)
+            varprob = None if weights_np is None else jnp.asarray(weights_np)
+
+        n, _ = X_train_arr.shape
+        if y_train_arr.shape[0] != n:
+            msg = (
+                f'X_train and y_train length mismatch: X_train has {n} rows,'
+                f' y_train has {y_train_arr.shape[0]} entries'
+            )
+            raise ValueError(msg)
+        return X_train_arr, y_train_arr, varprob
 
     def sample(
         self,
@@ -720,8 +706,12 @@ def resolve_variance_prior(
 
     Returns
     -------
-    ``(sigdf, lambda_, sigma2_init_stored)`` for bartz; ``sigma2_init_stored``
-    is the actual chain starting value, suitable for ``BARTModel.sigma2_init``.
+    sigdf : FloatLike
+        Degrees of freedom of bartz's scaled-inv-chi² variance prior.
+    lambda_ : FloatLike
+        Scale of bartz's scaled-inv-chi² variance prior.
+    sigma2_init_stored : FloatLike
+        The chain starting value, suitable for ``BARTModel.sigma2_init``.
 
     Raises
     ------
@@ -788,21 +778,6 @@ def check_predict_args(
             msg = f'unknown term {t!r}; valid terms are y_hat, mean_forest, all'
             raise ValueError(msg)
     return terms_tuple
-
-
-def process_train_inputs(
-    X_train: Real[ArrayLike, 'n p'] | DataFrame, y_train: Real[ArrayLike, ' n'] | Series
-) -> tuple[Real[Array, 'n p'], Real[Array, ' n']]:
-    """Convert training inputs to 2-D / 1-D jax arrays and verify their shapes are compatible."""
-    X = check_X(X_train, name='X_train')
-    y = _coerce_response(y_train, name='y_train')
-    if y.shape[0] != X.shape[0]:
-        msg = (
-            f'X_train and y_train length mismatch: X_train has '
-            f'{X.shape[0]} rows, y_train has {y.shape[0]} entries'
-        )
-        raise ValueError(msg)
-    return X, y
 
 
 def check_X(

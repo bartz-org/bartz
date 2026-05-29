@@ -29,41 +29,48 @@ Two parallel implementations are provided, `PandasPreprocessor` and
 classes have the same interface::
 
     pp = PandasPreprocessor()      # or PolarsPreprocessor()
-    x_train, varprob = pp.fit_transform(X_train, variable_weights=w)
-    x_test = pp.transform(X_test)  # if X_test is provided
-    x_new  = pp.transform(X_new)   # at prediction time
+    varprob = pp.fit(X_train, variable_weights=w)
+    x_train = pp.transform(X_train)
+    x_new = pp.transform(X_new)    # at prediction time
 
-`fit_transform` returns the post-processing covariate matrix as a 2-D numpy
-float array (rows=observations, columns=expanded features) plus the variable
-weights vector expanded to match the new column count (or `None`).
+`fit` records the per-column encoding and returns the variable weights expanded
+to match the new column count (or `None`); `transform` returns the
+post-processing covariate matrix as a 2-D numpy float32 array (rows=observations,
+columns=expanded features).
 
-Per-column handling, matching stochtree's `CovariatePreprocessor`:
+Per-column handling:
 
-- ordered categorical (pandas ordered `Categorical`, polars `Enum`): ordinal
-  encoded into a single integer-valued column, with the declared category order
-  giving the integer mapping.
-- unordered categorical (pandas unordered `Categorical`, polars ``Categorical``):
-  one-hot encoded into one binary column per category, using the categories
-  observed at fit time.
+- ordered categorical (pandas ordered `Categorical`): ordinal encoded into a
+  single integer-valued column, with the declared category order giving the
+  integer mapping. polars has no ordered categorical dtype; pass an integer
+  column for ordinal encoding.
+- unordered categorical (pandas unordered `Categorical`, polars `Enum`): one-hot
+  encoded into one binary column per declared category. A polars `Enum`
+  round-trips to a pandas *unordered* `Categorical`, so the two are treated
+  identically.
 - boolean: cast to ``{0.0, 1.0}``, single column.
 - numeric (integer, unsigned, float): pass-through as float.
-- anything else (strings, ``object``, datetime, timedelta, etc.): warned and
-  dropped. Like stochtree, plain string/object columns are not supported;
-  convert them to an explicit pandas/polars categorical first.
+- anything else (strings, ``object``, datetime, polars `Categorical`, etc.):
+  raises `ValueError`. polars `Categorical` has no reliable per-column category
+  list (the categories live in a process-wide string cache shared across
+  columns), so it must be cast to an `Enum` (one-hot) or an integer (ordinal)
+  first.
 
 When a single original column expands into ``k`` output columns (one-hot), the
 original `variable_weights` entry for that column is split evenly across the
 ``k`` expansions, preserving each original variable's total splitting budget
 (matching stochtree's `bart.py` behavior).
 
-Unknown values encountered during `transform` raise `ValueError`.
+Unknown category values encountered during `transform` raise `ValueError`.
 """
 
-import warnings
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, TypeAlias
 
 import numpy as np
+from jaxtyping import Float32, Shaped
+from numpy.typing import ArrayLike
 
 # Duck-typed stand-ins for the optional dataframe libraries. bartz does not
 # depend on pandas or polars at runtime, so we cannot reference their real
@@ -71,34 +78,76 @@ import numpy as np
 # legible names.
 DataFrame: TypeAlias = Any  # a pandas or polars DataFrame
 Series: TypeAlias = Any  # a pandas or polars Series
-PandasModule: TypeAlias = Any  # the pandas top-level module
 PolarsModule: TypeAlias = Any  # the polars top-level module
 
 _UNSEEN_PREVIEW = 10
+
+ColumnKind: TypeAlias = Literal['numeric', 'bool', 'ordered_cat', 'unordered_cat']
 
 
 @dataclass
 class _ColumnSpec:
     """Per-original-column fitted state."""
 
-    kind: str
-    """One of 'numeric', 'bool', 'ordered_cat', 'unordered_cat', 'dropped'."""
+    kind: ColumnKind
+    """Encoding to apply to the column."""
 
     name: str
     """Original column name (for error messages)."""
 
-    categories: list[Any] | None = None
-    """Declared/observed category list for ordered_cat / unordered_cat."""
+    categories: tuple[Any, ...] | None = None
+    """Declared category list for ordered_cat / unordered_cat."""
 
-    dropped_dtype: str | None = None
-    """Stringified dtype that caused the column to be dropped."""
+    @property
+    def width(self) -> int:
+        """Number of output columns this spec produces."""
+        if self.kind == 'unordered_cat':
+            assert self.categories is not None
+            return len(self.categories)
+        return 1
 
 
-def _ordinal_encode(values: np.ndarray, categories: list, name: str) -> np.ndarray:
+def _unseen_error(name: str, unseen: Sequence[Any], known: Sequence[Any]) -> ValueError:
+    """Build the error for category values absent from the fitted list."""
+    uniq = sorted({repr(v) for v in unseen})
+    msg = (
+        f'column {name!r}: {len(unseen)} value(s) at transform time are not in'
+        f' the fitted category list; unseen sample: {uniq[:_UNSEEN_PREVIEW]};'
+        f' known categories: {list(known)[:_UNSEEN_PREVIEW]}'
+    )
+    return ValueError(msg)
+
+
+def _unsupported_dtype_error(name: str, dtype: object) -> ValueError:
+    """Build the error for a column whose dtype has no supported encoding."""
+    msg = (
+        f'column {name!r} has unsupported dtype {dtype!r}; supported types are'
+        ' numeric, boolean, pandas ordered/unordered Categorical, and polars'
+        ' Enum. Convert strings, objects, datetimes, etc. to one of these (e.g.'
+        ' an explicit Categorical / Enum) before fitting.'
+    )
+    return ValueError(msg)
+
+
+def _polars_categorical_error(name: str) -> ValueError:
+    """Build the error rejecting a polars `Categorical` column."""
+    msg = (
+        f'column {name!r} is a polars Categorical, which has no reliable'
+        ' per-column category list (the categories live in a process-wide'
+        ' string cache shared across columns). Cast it to a polars Enum with an'
+        ' explicit category list (pl.Enum([...])) for one-hot encoding, or to an'
+        ' integer column for ordinal encoding.'
+    )
+    return ValueError(msg)
+
+
+def _ordinal_encode(
+    values: Shaped[np.ndarray, ' n'], categories: Sequence[Any], name: str
+) -> Float32[np.ndarray, 'n 1']:
     """Map `values` to integer positions in `categories`; raise on unseen."""
     table = {c: i for i, c in enumerate(categories)}
-    out = np.empty(len(values), dtype=np.float64)
-    unseen: list = []
+    out = np.empty(len(values), dtype=np.float32)
+    unseen: list[Any] = []
     for i, v in enumerate(values):
         code = table.get(v, -1)
         if code < 0:
@@ -106,17 +155,19 @@ def _ordinal_encode(values: np.ndarray, categories: list, name: str) -> np.ndarr
         else:
             out[i] = code
     if unseen:
-        _raise_unseen(name, unseen, categories)
-    return out.reshape(-1, 1)
+        raise _unseen_error(name, unseen, categories)
+    return out[:, None]
 
 
-def _one_hot_encode(values: np.ndarray, categories: list, name: str) -> np.ndarray:
+def _one_hot_encode(
+    values: Shaped[np.ndarray, ' n'], categories: Sequence[Any], name: str
+) -> Float32[np.ndarray, 'n k']:
     """Build a ``(n, k)`` one-hot matrix using `categories` order; raise on unseen."""
     table = {c: i for i, c in enumerate(categories)}
     n = len(values)
     k = len(categories)
-    out = np.zeros((n, k), dtype=np.float64)
-    unseen: list = []
+    out = np.zeros((n, k), dtype=np.float32)
+    unseen: list[Any] = []
     for i, v in enumerate(values):
         code = table.get(v, -1)
         if code < 0:
@@ -124,29 +175,14 @@ def _one_hot_encode(values: np.ndarray, categories: list, name: str) -> np.ndarr
         else:
             out[i, code] = 1.0
     if unseen:
-        _raise_unseen(name, unseen, categories)
+        raise _unseen_error(name, unseen, categories)
     return out
 
 
-def _raise_unseen(name: str, unseen: list, known: list) -> None:
-    uniq = sorted({repr(v) for v in unseen})
-    msg = (
-        f'column {name!r}: {len(unseen)} value(s) at transform time are not in'
-        f' the fitted category list; unseen sample: {uniq[:_UNSEEN_PREVIEW]};'
-        f' known categories: {list(known)[:_UNSEEN_PREVIEW]}'
-    )
-    raise ValueError(msg)
-
-
-def _polars_encode(
-    pl: PolarsModule,
-    series: Series,
-    categories: list,
-    name: str,
-    *,
-    mode: Literal['ordinal', 'one_hot'],
-) -> np.ndarray:
-    """Validate via cast to `pl.Enum(categories)` and encode via polars APIs.
+def _polars_one_hot(
+    pl: PolarsModule, series: Series, categories: Sequence[Any], name: str
+) -> Float32[np.ndarray, 'n k']:
+    """Validate via cast to `pl.Enum(categories)` and one-hot via polars APIs.
 
     Polars's `Enum` cast natively raises on any value not in `categories`, and
     `to_physical` returns the integer codes in the declared-category order. The
@@ -156,29 +192,31 @@ def _polars_encode(
     cats = list(categories)
     try:
         coded = series.cast(pl.Enum(cats))
-    except pl.exceptions.InvalidOperationError:
-        # Identify the actual unseen values for a friendly error. is_in works
-        # against a Python list and is short-circuited by polars.
-        is_known = series.is_in(cats).fill_null(value=False)
-        unseen = series.filter(~is_known).drop_nulls().unique().sort().to_list()
-        _raise_unseen(name, unseen, cats)
-        raise  # unreachable, kept to satisfy the type checker
+    except pl.exceptions.InvalidOperationError as exc:
+        # Identify the actual unseen values for a friendly error. Cast to String
+        # first: the input column may itself be an Enum with different categories,
+        # which would make a direct is_in(cats) fail trying to coerce the list.
+        known = set(cats)
+        unseen = sorted(
+            {
+                v
+                for v in series.cast(pl.String).to_list()
+                if v not in known and v is not None
+            }
+        )
+        raise _unseen_error(name, unseen, cats) from exc
     if coded.null_count():
         msg = f'column {name!r}: null values are not supported in categorical columns'
         raise ValueError(msg)
     codes = coded.to_physical().to_numpy()
-    if mode == 'ordinal':
-        return codes.astype(np.float64).reshape(-1, 1)
-    return np.eye(len(cats), dtype=np.float64)[codes]
+    return np.eye(len(cats), dtype=np.float32)[codes]
 
 
 def _expand_variable_weights(
-    weights: np.ndarray | None, original_var_indices: list[int], n_orig: int
-) -> np.ndarray | None:
+    weights: ArrayLike, original_var_indices: Sequence[int], n_orig: int
+) -> Float32[np.ndarray, ' p']:
     """Split each original weight evenly across its one-hot expansions."""
-    if weights is None:
-        return None
-    w = np.asarray(weights, dtype=np.float64)
+    w = np.asarray(weights, dtype=np.float32)
     if w.shape != (n_orig,):
         msg = (
             f'variable_weights must have shape ({n_orig},) matching the number'
@@ -186,48 +224,93 @@ def _expand_variable_weights(
         )
         raise ValueError(msg)
     if not original_var_indices:
-        return np.empty((0,), dtype=np.float64)
+        return np.empty((0,), dtype=np.float32)
     counts = np.bincount(np.asarray(original_var_indices), minlength=n_orig)
-    return np.array([w[j] / counts[j] for j in original_var_indices], dtype=np.float64)
+    return np.array([w[j] / counts[j] for j in original_var_indices], dtype=np.float32)
 
 
-def _stack(cols: list[np.ndarray], n_rows: int) -> np.ndarray:
+def _stack(
+    cols: Sequence[Float32[np.ndarray, 'n _']], n_rows: int
+) -> Float32[np.ndarray, 'n p']:
     if not cols:
-        return np.empty((n_rows, 0), dtype=np.float64)
+        return np.empty((n_rows, 0), dtype=np.float32)
     return np.concatenate(cols, axis=1)
 
 
 class _PreprocessorBase:
     """Common state for `PandasPreprocessor` and `PolarsPreprocessor`."""
 
-    def __init__(self) -> None:
-        self._fitted: bool = False
-        self._specs: list[_ColumnSpec] = []
-        self._original_var_indices: list[int] = []
+    _library: str = ''
+    """Top-level module prefix of the supported dataframe library."""
+
+    _fitted: bool = False
+    _specs: Sequence[_ColumnSpec] = ()
+    _original_var_indices: Sequence[int] = ()
 
     @property
     def fitted(self) -> bool:
-        """Whether `fit_transform` has been called."""
+        """Whether `fit` has been called."""
         return self._fitted
 
     @property
     def n_original_columns(self) -> int:
-        """Number of columns in the dataframe given to `fit_transform`."""
+        """Number of columns in the dataframe given to `fit`."""
         return len(self._specs)
 
     @property
     def n_processed_columns(self) -> int:
-        """Number of columns in the matrix returned by `fit_transform` / `transform`."""
+        """Number of columns in the matrix returned by `transform`."""
         return len(self._original_var_indices)
 
     @property
-    def original_var_indices(self) -> list[int]:
+    def original_var_indices(self) -> tuple[int, ...]:
         """For each output column, the index of the original column it came from."""
-        return list(self._original_var_indices)
+        return tuple(self._original_var_indices)
+
+    def fit(
+        self, X: DataFrame, *, variable_weights: ArrayLike | None = None
+    ) -> Float32[np.ndarray, ' p'] | None:
+        """Record the per-column encoding and return the expanded variable weights.
+
+        Returns `None` when no weights are supplied and no column expands into
+        several output columns, so the caller can fall back to the native
+        uniform-weights path; otherwise returns the weights split across each
+        original column's one-hot expansion.
+        """
+        self._check_library(X)
+        specs: list[_ColumnSpec] = []
+        original_var_indices: list[int] = []
+        for orig_idx in range(X.shape[1]):
+            name, series = self._get_column(X, orig_idx)
+            spec = self._fit_column(series, str(name))
+            specs.append(spec)
+            original_var_indices.extend([orig_idx] * spec.width)
+        self._specs = tuple(specs)
+        self._original_var_indices = tuple(original_var_indices)
+        self._fitted = True
+        expanded = len(set(original_var_indices)) != len(original_var_indices)
+        if variable_weights is None:
+            if not expanded:
+                return None
+            variable_weights = np.full(len(specs), 1.0 / len(specs))
+        return _expand_variable_weights(
+            variable_weights, self._original_var_indices, len(self._specs)
+        )
+
+    def transform(self, X: DataFrame) -> Float32[np.ndarray, 'n p']:
+        """Apply the fitted transformation to a new dataframe."""
+        self._check_fitted()
+        self._check_library(X)
+        self._check_n_columns(X.shape[1])
+        cols = [
+            self._transform_column(self._get_column(X, orig_idx)[1], spec)
+            for orig_idx, spec in enumerate(self._specs)
+        ]
+        return _stack(cols, X.shape[0])
 
     def _check_fitted(self) -> None:
         if not self._fitted:
-            msg = 'preprocessor has not been fitted yet; call fit_transform first'
+            msg = 'preprocessor has not been fitted yet; call fit first'
             raise RuntimeError(msg)
 
     def _check_n_columns(self, n_cols: int) -> None:
@@ -238,192 +321,108 @@ class _PreprocessorBase:
             )
             raise ValueError(msg)
 
-    def _warn_dropped(self, dropped: list[tuple[str, str]]) -> None:
-        if not dropped:
-            return
-        pretty = ', '.join(f'{n!r} ({d})' for n, d in dropped)
-        warnings.warn(
-            f'unsupported column dtypes (will be ignored): {pretty}', stacklevel=3
-        )
+    def _check_library(self, X: DataFrame) -> None:
+        module = type(X).__module__
+        if not module.startswith(self._library):
+            msg = (
+                f'this preprocessor handles {self._library} dataframes, but got'
+                f' an object from {module!r}; fit and transform must use the same'
+                ' dataframe library'
+            )
+            raise TypeError(msg)
+
+    @staticmethod
+    def _get_column(X: DataFrame, orig_idx: int) -> tuple[Any, Series]:
+        """Return the ``(name, series)`` of the column at position `orig_idx`."""
+        raise NotImplementedError
+
+    @staticmethod
+    def _fit_column(series: Series, name: str) -> _ColumnSpec:
+        """Inspect a column's dtype and return its encoding spec."""
+        raise NotImplementedError
+
+    @staticmethod
+    def _transform_column(
+        series: Series, spec: _ColumnSpec
+    ) -> Float32[np.ndarray, 'n _']:
+        """Encode a single column according to its fitted spec."""
+        raise NotImplementedError
 
 
 class PandasPreprocessor(_PreprocessorBase):
     """Stochtree-style covariate preprocessor for `pandas.DataFrame` inputs."""
 
-    def fit_transform(
-        self, X: DataFrame, *, variable_weights: np.ndarray | None = None
-    ) -> tuple[np.ndarray, np.ndarray | None]:
-        """Fit on `X` and return ``(X_processed, variable_weights_expanded)``."""
+    _library = 'pandas'
+
+    @staticmethod
+    def _get_column(X: DataFrame, orig_idx: int) -> tuple[Any, Series]:
+        return X.columns[orig_idx], X.iloc[:, orig_idx]
+
+    @staticmethod
+    def _fit_column(series: Series, name: str) -> _ColumnSpec:
         import pandas as pd  # noqa: PLC0415  # optional runtime dependency
 
-        self._specs = []
-        self._original_var_indices = []
-        cols_out: list[np.ndarray] = []
-        dropped: list[tuple[str, str]] = []
-        for orig_idx, name in enumerate(X.columns):
-            spec, arr = self._fit_column(pd, X[name], str(name))
-            self._specs.append(spec)
-            if arr is None:
-                dropped.append((spec.name, spec.dropped_dtype or '?'))
-                continue
-            cols_out.append(arr)
-            self._original_var_indices.extend([orig_idx] * arr.shape[1])
-        self._warn_dropped(dropped)
-        self._fitted = True
-        return (
-            _stack(cols_out, X.shape[0]),
-            _expand_variable_weights(
-                variable_weights, self._original_var_indices, len(self._specs)
-            ),
-        )
-
-    def transform(self, X: DataFrame) -> np.ndarray:
-        """Apply the fitted transformation to a new `pandas.DataFrame`."""
-        self._check_fitted()
-        self._check_n_columns(X.shape[1])
-        cols_out: list[np.ndarray] = []
-        for orig_idx, spec in enumerate(self._specs):
-            if spec.kind == 'dropped':
-                continue
-            series = X.iloc[:, orig_idx]
-            cols_out.append(self._transform_column(series, spec))
-        return _stack(cols_out, X.shape[0])
-
-    @staticmethod
-    def _fit_column(
-        pd: PandasModule, series: Series, name: str
-    ) -> tuple[_ColumnSpec, np.ndarray | None]:
         dt = series.dtype
         if isinstance(dt, pd.CategoricalDtype):
-            cats = list(dt.categories)
-            values = series.to_numpy()
-            if dt.ordered:
-                return (
-                    _ColumnSpec('ordered_cat', name, categories=cats),
-                    _ordinal_encode(values, cats, name),
-                )
-            return (
-                _ColumnSpec('unordered_cat', name, categories=cats),
-                _one_hot_encode(values, cats, name),
-            )
+            cats = tuple(dt.categories)
+            kind: ColumnKind = 'ordered_cat' if dt.ordered else 'unordered_cat'
+            return _ColumnSpec(kind, name, categories=cats)
         if pd.api.types.is_bool_dtype(dt):
-            return (
-                _ColumnSpec('bool', name),
-                series.to_numpy().astype(np.float64).reshape(-1, 1),
-            )
+            return _ColumnSpec('bool', name)
         if pd.api.types.is_numeric_dtype(dt):
-            return (
-                _ColumnSpec('numeric', name),
-                series.to_numpy().astype(np.float64).reshape(-1, 1),
-            )
-        # Everything else (string, object, datetime, ...) is unsupported and
-        # dropped, matching stochtree.
-        return (_ColumnSpec('dropped', name, dropped_dtype=str(dt)), None)
+            return _ColumnSpec('numeric', name)
+        raise _unsupported_dtype_error(name, dt)
 
     @staticmethod
-    def _transform_column(series: Series, spec: _ColumnSpec) -> np.ndarray:
-        values = series.to_numpy()
+    def _transform_column(
+        series: Series, spec: _ColumnSpec
+    ) -> Float32[np.ndarray, 'n _']:
         if spec.kind == 'ordered_cat':
-            return _ordinal_encode(values, spec.categories or [], spec.name)
+            return _ordinal_encode(series.to_numpy(), spec.categories, spec.name)
         if spec.kind == 'unordered_cat':
-            return _one_hot_encode(values, spec.categories or [], spec.name)
-        return values.astype(np.float64).reshape(-1, 1)
+            return _one_hot_encode(series.to_numpy(), spec.categories, spec.name)
+        return series.to_numpy(dtype=np.float32)[:, None]
 
 
 class PolarsPreprocessor(_PreprocessorBase):
     """Stochtree-style covariate preprocessor for `polars.DataFrame` inputs."""
 
-    def fit_transform(
-        self, X: DataFrame, *, variable_weights: np.ndarray | None = None
-    ) -> tuple[np.ndarray, np.ndarray | None]:
-        """Fit on `X` and return ``(X_processed, variable_weights_expanded)``."""
-        import polars as pl  # noqa: PLC0415  # optional runtime dependency
-
-        self._specs = []
-        self._original_var_indices = []
-        cols_out: list[np.ndarray] = []
-        dropped: list[tuple[str, str]] = []
-        for orig_idx, name in enumerate(X.columns):
-            spec, arr = self._fit_column(pl, X[name], str(name))
-            self._specs.append(spec)
-            if arr is None:
-                dropped.append((spec.name, spec.dropped_dtype or '?'))
-                continue
-            cols_out.append(arr)
-            self._original_var_indices.extend([orig_idx] * arr.shape[1])
-        self._warn_dropped(dropped)
-        self._fitted = True
-        return (
-            _stack(cols_out, X.shape[0]),
-            _expand_variable_weights(
-                variable_weights, self._original_var_indices, len(self._specs)
-            ),
-        )
-
-    def transform(self, X: DataFrame) -> np.ndarray:
-        """Apply the fitted transformation to a new `polars.DataFrame`."""
-        import polars as pl  # noqa: PLC0415  # optional runtime dependency
-
-        self._check_fitted()
-        self._check_n_columns(X.shape[1])
-        cols_out: list[np.ndarray] = []
-        for orig_idx, spec in enumerate(self._specs):
-            if spec.kind == 'dropped':
-                continue
-            series = X[X.columns[orig_idx]]
-            cols_out.append(self._transform_column(pl, series, spec))
-        return _stack(cols_out, X.shape[0])
+    _library = 'polars'
 
     @staticmethod
-    def _fit_column(
-        pl: PolarsModule, series: Series, name: str
-    ) -> tuple[_ColumnSpec, np.ndarray | None]:
+    def _get_column(X: DataFrame, orig_idx: int) -> tuple[Any, Series]:
+        name = X.columns[orig_idx]
+        return name, X[name]
+
+    @staticmethod
+    def _fit_column(series: Series, name: str) -> _ColumnSpec:
+        import polars as pl  # noqa: PLC0415  # optional runtime dependency
+
         dt = series.dtype
         if isinstance(dt, pl.Enum):
-            cats = dt.categories.to_list()
-            return (
-                _ColumnSpec('ordered_cat', name, categories=cats),
-                _polars_encode(pl, series, cats, name, mode='ordinal'),
+            # A polars Enum round-trips to a pandas *unordered* Categorical, so
+            # we treat it as unordered (one-hot). For ordinal encoding, pass an
+            # integer column.
+            return _ColumnSpec(
+                'unordered_cat', name, categories=tuple(dt.categories.to_list())
             )
         if isinstance(dt, pl.Categorical):
-            # polars has no per-column category list for `Categorical`:
-            # `series.cat.get_categories()` returns the process-wide string-cache
-            # pool (shared across all Categorical columns), and `to_physical()`
-            # indexes into that global pool — so it over-includes categories from
-            # other columns. The observed values are therefore the only correct
-            # source for this column's categories. Sorted for a deterministic,
-            # backend-independent column order. Plain `String` columns are
-            # unsupported (matching stochtree); convert to a categorical first.
-            cats = sorted(series.drop_nulls().unique().to_list())
-            return (
-                _ColumnSpec('unordered_cat', name, categories=cats),
-                _polars_encode(pl, series, cats, name, mode='one_hot'),
-            )
+            raise _polars_categorical_error(name)
         if dt == pl.Boolean:
-            return (
-                _ColumnSpec('bool', name),
-                series.to_numpy().astype(np.float64).reshape(-1, 1),
-            )
+            return _ColumnSpec('bool', name)
         if dt.is_numeric():
-            return (
-                _ColumnSpec('numeric', name),
-                series.to_numpy().astype(np.float64).reshape(-1, 1),
-            )
-        return (_ColumnSpec('dropped', name, dropped_dtype=str(dt)), None)
+            return _ColumnSpec('numeric', name)
+        raise _unsupported_dtype_error(name, dt)
 
     @staticmethod
     def _transform_column(
-        pl: PolarsModule, series: Series, spec: _ColumnSpec
-    ) -> np.ndarray:
-        if spec.kind == 'ordered_cat':
-            return _polars_encode(
-                pl, series, spec.categories or [], spec.name, mode='ordinal'
-            )
+        series: Series, spec: _ColumnSpec
+    ) -> Float32[np.ndarray, 'n _']:
+        import polars as pl  # noqa: PLC0415  # optional runtime dependency
+
         if spec.kind == 'unordered_cat':
-            return _polars_encode(
-                pl, series, spec.categories or [], spec.name, mode='one_hot'
-            )
-        return series.to_numpy().astype(np.float64).reshape(-1, 1)
+            return _polars_one_hot(pl, series, spec.categories, spec.name)
+        return series.cast(pl.Float32).to_numpy()[:, None]
 
 
 def make_preprocessor(X: object) -> _PreprocessorBase | None:

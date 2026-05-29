@@ -185,7 +185,7 @@ myst_enable_extensions = [
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.
-exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
+exclude_patterns = ['_build', '_inventory', 'Thumbs.db', '.DS_Store']
 
 
 # -- Options for HTML output -------------------------------------------------
@@ -236,11 +236,18 @@ napoleon_use_ivar = True
 napoleon_use_rtype = False
 
 # intersphinx
+# stochtree's docs are built with quarto/quartodoc and don't publish a Sphinx
+# objects.inv, so we point intersphinx at a vendored inventory scraped from the
+# quartodoc API reference (see docs/_inventory/make_stochtree_inventory.py).
 intersphinx_mapping = dict(
     python=('https://docs.python.org/3', None),
     scipy=('https://docs.scipy.org/doc/scipy', None),
     numpy=('https://numpy.org/doc/stable', None),
     jax=('https://docs.jax.dev/en/latest', None),
+    stochtree=(
+        'https://stochtree.ai',
+        str(pathlib.Path(__file__).parent / '_inventory' / 'stochtree.inv'),
+    ),
 )
 
 # myst_nb

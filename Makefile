@@ -37,7 +37,11 @@ OLD_DELAY_DAYS = 365
 BUMP_PYTHON_VERSION_DATE = 10-31
 NUM_SUPPORTED_PYTHON_RELEASES = 5
 OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]*\).*/\1/')
-UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --isolated
+# WORKAROUND(stochtree<=0.4.2): 0.4.2 is the oldest stochtree whose probit output
+# matches bartz, but it is newer than OLD_DATE, so the old toolchain cannot
+# resolve it. Exempt stochtree from the cutoff; drop --exclude-newer-package once
+# the stochtree floor rises above 0.4.2 (check-workarounds will flag this then).
+UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --exclude-newer-package="stochtree=0 days" --isolated
 
 .PHONY: help
 help:

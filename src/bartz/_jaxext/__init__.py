@@ -114,11 +114,21 @@ def unique(
         return (i_out, x, out), None
 
     carry = 0, x[0], jnp.full(size, fill_value, x.dtype)
-    # unroll=2 shaves loop overhead (~1.1-1.5x on the scan in cpu benchmarks);
-    # do not raise it: past ~6 the cpu backend stops aliasing `out` in place and
-    # copies the size-`size` buffer each step, making this O(size**2)
-    (actual_length, _, out), _ = lax.scan(loop, carry, x[:size], unroll=2)
-    return out, actual_length + 1
+
+    def run(unroll: int) -> tuple[Shaped[Array, ' {size}'], Scalar]:
+        (actual_length, _, out), _ = lax.scan(loop, carry, x[:size], unroll=unroll)
+        return out, actual_length + 1
+
+    # The optimal scan unroll is opposite on cpu and gpu (benchmarked):
+    # - gpu: the loop is dominated by per-step overhead, so a large unroll is up
+    #   to ~6x faster; the run time plateaus by ~32 while compile time then grows
+    #   steeply, so 32 is the sweet spot.
+    # - cpu: past ~6 the backend stops aliasing `out` in place and copies the
+    #   size-`size` buffer each step (O(size**2), ~100x slower), so 2 is safest.
+    # `default` (cpu, tpu, untested backends) takes the conservative value.
+    return lax.platform_dependent(
+        cuda=partial(run, 32), rocm=partial(run, 32), default=partial(run, 2)
+    )
 
 
 class split:

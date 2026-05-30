@@ -55,6 +55,7 @@ from tests.util import (
     assert_array_equal,
     assert_close_matrices,
     clipped_logit,
+    int_seed,
     rhat_rank,
 )
 
@@ -99,11 +100,6 @@ def _make_binary(keys: split, n: int = N_TRAIN, n_test: int = N_TEST) -> _Data:
     train = gen_data(keys.pop(), n=n, outcome_type='binary', **_GEN_KW)
     test = gen_data(keys.pop(), n=n_test, outcome_type='binary', **_GEN_KW)
     return _Data(X_train=train.x.T, y_train=train.y.astype(jnp.int32), X_test=test.x.T)
-
-
-def _int_seed(keys: split) -> int:
-    """Draw an integer random seed from the test key stream."""
-    return random.randint(keys.pop(), (), 0, 2**31 - 1).item()
 
 
 @pytest.fixture
@@ -403,7 +399,7 @@ def test_standardization_matches(continuous_data: _Data, keys: split) -> None:
         num_burnin=NUM_BURNIN,
         num_mcmc=NUM_MCMC,
         mean_forest_params={'sample_sigma2_leaf': False},
-        general_params={'random_seed': _int_seed(keys)},
+        general_params={'random_seed': int_seed(keys.pop())},
     )
     bz_model = bst.BARTModel()
     bz_model.sample(
@@ -449,7 +445,7 @@ def comparison(
     # The same integer seed is shared by both packages; their unrelated RNGs
     # turn it into two effectively independent chains, which is what the Rhat
     # comparison wants. The OG stochtree requires a plain int seed.
-    seed = _int_seed(keys)
+    seed = int_seed(keys.pop())
 
     kwargs: dict = dict(
         X_train=np.asarray(data.X_train, dtype=np.float64),
@@ -988,7 +984,7 @@ class TestPreprocessing:
         data = continuous_data
         X_arr = np.asarray(data.X_train)
         Xte_arr = np.asarray(data.X_test)
-        rng = np.random.default_rng(_int_seed(keys))
+        rng = np.random.default_rng(int_seed(keys.pop()))
         cat_train = rng.choice(['a', 'b', 'c'], size=X_arr.shape[0])
         cat_test = rng.choice(['a', 'b', 'c'], size=Xte_arr.shape[0])
         # Manual one-hot via numpy (categories order ['a','b','c'])
@@ -1069,7 +1065,7 @@ class TestPreprocessing:
         data = continuous_data
         X_arr = np.asarray(data.X_train)[:, :3]
         Xte_arr = np.asarray(data.X_test)[:, :3]
-        rng = np.random.default_rng(_int_seed(keys))
+        rng = np.random.default_rng(int_seed(keys.pop()))
         cats = ['a', 'b']
         cat_train = rng.choice(cats, size=X_arr.shape[0])
         cat_test = rng.choice(cats, size=Xte_arr.shape[0])

@@ -26,7 +26,7 @@
 
 from functools import partial
 from itertools import product
-from warnings import catch_warnings
+from warnings import catch_warnings, simplefilter
 
 import numpy
 import pytest
@@ -47,8 +47,9 @@ from jax.scipy.special import ndtri
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import Array, Float, Float32, Key, Shaped
 from pytest_subtests import SubTests
+from scipy.stats import anderson_ksamp, ks_1samp, truncnorm
 from scipy.stats import invgamma as scipy_invgamma
-from scipy.stats import ks_1samp, truncnorm
+from scipy.stats import loggamma as scipy_loggamma
 
 from bartz._jaxext import (
     autobatch,
@@ -58,9 +59,10 @@ from bartz._jaxext import (
     truncated_normal_onesided,
     unique,
 )
+from bartz._jaxext.random import loggamma
 from bartz._jaxext.scipy.special import ndtri as patched_ndtri
 from bartz._jaxext.scipy.stats import invgamma
-from tests.util import assert_array_equal, assert_close_matrices
+from tests.util import assert_array_equal, assert_close_matrices, int_seed
 
 
 class TestUnique:
@@ -510,6 +512,39 @@ class TestTruncatedNormalOneSided:
         for key in keys:
             vals = loop_body(key)
             assert jnp.all(jnp.isfinite(vals))
+
+
+class TestLoggamma:
+    """Test `_jaxext.random.loggamma`."""
+
+    @pytest.fixture(params=(1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4, 1e5))
+    def alpha(self, request: pytest.FixtureRequest) -> None:
+        """Gamma shape parameter."""
+        return request.param
+
+    def test_distribution(self, keys: split, alpha: float, subtests: SubTests) -> None:
+        """Check the samples follow log-Gamma(alpha, 1) against a cdf and a sample."""
+        nsamples = 100_000  # tested up to 100M
+        sample = loggamma(keys.pop(), alpha, (nsamples,))
+
+        # no sample underflows to -inf for small alpha
+        assert jnp.all(jnp.isfinite(sample))
+
+        dist = scipy_loggamma(alpha)
+
+        with subtests.test('KS'):
+            ks = ks_1samp(sample, dist.cdf)
+            assert ks.pvalue > 1e-3
+
+        # the anderson-darling test is more sensitive in the tails
+        with subtests.test('AD'):
+            reference = dist.rvs(size=nsamples, random_state=int_seed(keys.pop()))
+            with catch_warnings():
+                # AD caps/floors its reported p-value to [0.001, 0.25], warning on it
+                simplefilter('ignore')
+                ad = anderson_ksamp([sample, reference])
+            # AD floors its p-value at 0.001, so we cut on the statistic instead
+            assert ad.statistic <= ad.critical_values[-1]  # 0.001 threshold
 
 
 def test_is_key(keys: split) -> None:

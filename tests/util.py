@@ -36,6 +36,7 @@ from typing import Any
 
 import numpy as np
 from jax import numpy as jnp
+from jax import random
 from jax.scipy.special import logit
 from jaxtyping import Array, ArrayLike, Float
 from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
@@ -300,6 +301,11 @@ def periodic_sigint(
 def clipped_logit(x: ArrayLike, eps: float) -> Array:
     """Compute the logit of x, clipping x to [eps, 1-eps] to avoid infinities."""
     return logit(jnp.clip(x, eps, 1 - eps))
+
+
+def int_seed(key: Array) -> int:
+    """Draw an integer random seed from a JAX random key."""
+    return random.randint(key, (), 0, 2**31 - 1).item()
 
 
 def rhat_rank(

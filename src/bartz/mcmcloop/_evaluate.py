@@ -27,6 +27,7 @@
 import math
 from collections.abc import Callable
 from functools import partial
+from typing import Literal
 
 from jax import ShapeDtypeStruct, jit, lax, shard_map, tree, vmap
 from jax import numpy as jnp
@@ -45,13 +46,23 @@ from bartz.mcmcstep._state import (
 )
 
 
-@partial(jit, static_argnames=('flatten_chains', 'out_chain_axis_w_trees'))
+@partial(
+    jit,
+    static_argnames=(
+        'flatten_chains',
+        'out_chain_axis_w_trees',
+        'test_points',
+        'max_io_nbytes',
+    ),
+)
 def evaluate_trace(
     X: UInt[Array, 'p n'],
     trace: MainTrace,
     *,
     flatten_chains: bool = False,
     out_chain_axis_w_trees: int = CHAIN_AXIS,
+    test_points: Literal['none', 'autobatch', 'shard_and_autobatch'] = 'none',
+    max_io_nbytes: int = 2**27,  # 128 MiB, per device
 ) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']:
     """
     Compute predictions for all iterations of the BART MCMC.
@@ -73,26 +84,65 @@ def evaluate_trace(
         earlier if it was after the tree axis. Negative values count from the
         end. Ignored when `trace` has no chain axis or `flatten_chains` is
         True.
+    test_points
+        How to handle the observation (``n``) axis of `X` across devices. The
+        sharding of `X` can't be read at trace time, so the caller declares it:
+
+        - ``'none'`` (default): leave `X` alone, neither sharding nor batching
+          its ``n`` axis. Safe whatever the sharding of `X` is.
+        - ``'autobatch'``: loop over the ``n`` axis to bound memory. Assumes
+          `X` is *not* sharded over the mesh ``'data'`` axis; batching a
+          sharded axis would serialize the devices.
+        - ``'shard_and_autobatch'``: shard the ``n`` axis of `X` over the mesh
+          ``'data'`` axis with a manual `shard_map` and batch the per-device
+          chunk. Falls back to ``'autobatch'`` if the mesh has no ``'data'``
+          axis.
+    max_io_nbytes
+        Soft limit, in bytes, on the input plus output of each batch of the
+        autobatching loops (per device). Lower it to reduce peak memory at the
+        cost of more iterations.
 
     Returns
     -------
     The predictions for each chain and iteration of the MCMC.
     """
+    mesh = trace.mesh
+    shard_chains = mesh is not None and 'chains' in mesh.axis_names and trace.has_chains
+    shard_data = (
+        test_points == 'shard_and_autobatch'
+        and mesh is not None
+        and 'data' in mesh.axis_names
+    )
+    batch_test_points = test_points in ('autobatch', 'shard_and_autobatch')
+
+    # `_evaluate_trace` batches the test-point (`n`) axis itself as an inner
+    # loop (see there); when sharding it runs per-device shard inside the
+    # `shard_map`, so the chunk it loops over is already the per-device one
     fun = partial(
         _evaluate_trace,
         flatten_chains=flatten_chains,
         out_chain_axis_w_trees=out_chain_axis_w_trees,
+        batch_test_points=batch_test_points,
+        max_io_nbytes=max_io_nbytes,
     )
 
-    # parallelize the chain axis across devices with a manual `shard_map`; the
-    # bulk runs per-device shard, so its sizes come out per-device on their own
-    mesh = trace.mesh
-    if mesh is not None and 'chains' in mesh.axis_names and trace.has_chains:
-        if flatten_chains:
-            chain_axis = 0  # chains are folded into the leading (sample) axis
-        else:
-            *_, chain_axis, _ = _output_axes(trace, out_chain_axis_w_trees)
-        fun = _shard_map_over_chains(fun, trace, mesh, chain_axis)
+    # parallelize chains (and, on request, test points) across devices with a
+    # manual `shard_map`; the bulk runs per-device shard, so its sizes come out
+    # per-device on their own
+    if shard_chains or shard_data:
+        out_ndim, out_chain_axis, n_axis = _output_layout(
+            trace, out_chain_axis_w_trees, flatten_chains
+        )
+        fun = _shard_map_eval(
+            fun,
+            trace,
+            mesh,
+            shard_chains=shard_chains,
+            shard_data=shard_data,
+            out_chain_axis=out_chain_axis,
+            n_axis=n_axis,
+            out_ndim=out_ndim,
+        )
 
     return fun(X, trace)
 
@@ -103,16 +153,18 @@ def _evaluate_trace(
     *,
     flatten_chains: bool,
     out_chain_axis_w_trees: int,
+    batch_test_points: bool,
+    max_io_nbytes: int,
 ) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']:
     """Evaluate `trace` on `X` for a single device shard.
 
     This holds the bulk of `evaluate_trace` and is unaware of the mesh: all
     batch sizes are read from the array shapes, so under the `shard_map` applied
     by `evaluate_trace` they come out per-device automatically.
-    """
-    # per-device memory limit
-    max_io_nbytes = 2**27  # 128 MiB
 
+    If `batch_test_points`, the ``n`` axis of `X` is also looped over (see the
+    autobatch nesting below). `max_io_nbytes` bounds each batch's I/O.
+    """
     # extract only the trees from the trace, this will be the input to `evaluate_forest`
     trees = TreesTrace.from_dataclass(trace)
     batched_eval = evaluate_forest  # we will transform `batched_eval`
@@ -146,7 +198,7 @@ def _evaluate_trace(
             out_axes=out_chain_axis_w_trees,
         )
 
-    # batch and sum over trees
+    # batch and sum over trees (innermost loop)
     batched_eval = autobatch(
         batched_eval,
         max_io_nbytes,
@@ -170,16 +222,23 @@ def _evaluate_trace(
         max_io_nbytes, trace, trace_chain_axes, kshape, n, num_trees
     )
 
-    # batch over chains; the chain axis is manual inside the `shard_map`, so
-    # looping over it stays within the per-device shard
-    if trace.has_chains:
+    # batch over the test points (the `n` axis of `X`). It sits outside the tree
+    # reduction (so each tree-sum only materializes a chunk of `n`) but inside
+    # the sample/chain loops, to mirror the output layout where `n` is the
+    # innermost axis. The chunks are concatenated back, no reduction.
+    if batch_test_points:
+        n_axis = chainful_axis(1 + is_mv, out_chain_axis if trace.has_chains else None)
         batched_eval = autobatch(
             batched_eval,
             max_io_nbytes,
-            in_axes=(None, TreesTrace.from_dataclass(trace_chain_axes)),
-            out_axes=out_chain_axis,
+            in_axes=(1, None),
+            out_axes=n_axis,
             warn_on_overflow=False,  # the inner autobatch will handle it
         )
+
+    # the outermost loop is the only one whose per-call output is statically the
+    # full output, so it alone can take `result_shape_dtype` (skips a trace)
+    full_shape = dict(result_shape_dtype=ShapeDtypeStruct(out_shape, jnp.float32))
 
     # batch over mcmc samples
     batched_eval = autobatch(
@@ -188,8 +247,21 @@ def _evaluate_trace(
         in_axes=(None, TreesTrace.from_dataclass(sample_axes)),
         out_axes=sample_axis,
         warn_on_overflow=False,  # the inner autobatch will handle it
-        result_shape_dtype=ShapeDtypeStruct(out_shape, jnp.float32),
+        **({} if trace.has_chains else full_shape),
     )
+
+    # batch over chains (outermost loop, mirroring the output layout); the chain
+    # axis is manual inside the `shard_map`, so looping over it stays within the
+    # per-device shard
+    if trace.has_chains:
+        batched_eval = autobatch(
+            batched_eval,
+            max_io_nbytes,
+            in_axes=(None, TreesTrace.from_dataclass(trace_chain_axes)),
+            out_axes=out_chain_axis,
+            warn_on_overflow=False,  # the inner autobatch will handle it
+            **full_shape,
+        )
 
     # prepare offset for broadcasting
     # chainless y shape = (num_samples, *kshape, n), offset shape = kshape
@@ -243,6 +315,49 @@ def _output_axes(
     return out_chain_axis_w_trees, tree_axis, out_chain_axis, sample_axis
 
 
+def _output_layout(
+    trace: MainTrace, out_chain_axis_w_trees: int, flatten_chains: bool
+) -> tuple[int, int | None, int]:
+    """Rank and axis positions of the `evaluate_trace` output.
+
+    Like `_output_axes`, but for the final (post-tree-reduction) layout and
+    accounting for `flatten_chains`. Used to build the `shard_map` specs and
+    the test-point autobatch.
+
+    Parameters
+    ----------
+    trace
+        A main trace of the BART MCMC.
+    out_chain_axis_w_trees
+        Requested chain position in the pre-tree-reduction layout.
+    flatten_chains
+        Whether the chain axis is folded into the leading sample axis.
+
+    Returns
+    -------
+    out_ndim : int
+        The number of axes of the output.
+    out_chain_axis : int | None
+        Position of the chain axis, or `None` if `trace` has no chain axis.
+    n_axis : int
+        Position of the observation (``n``) axis.
+    """
+    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+    chainless_ndim = 2 + is_mv  # (sample, *k, n)
+    n_core = chainless_ndim - 1  # `n` is the last chainless axis
+    if trace.has_chains and not flatten_chains:
+        out_ndim = chainless_ndim + 1
+        *_, out_chain_axis, _ = _output_axes(trace, out_chain_axis_w_trees)
+        # `n` shifts only if the chain was inserted at or before it
+        n_axis = chainful_axis(n_core, out_chain_axis)
+    else:
+        out_ndim = chainless_ndim
+        # when flattening, chains are folded into the leading (sample) axis
+        out_chain_axis = 0 if trace.has_chains else None
+        n_axis = n_core
+    return out_ndim, out_chain_axis, n_axis
+
+
 def _tree_sum_budget(
     max_io_nbytes: int,
     trace: MainTrace,
@@ -275,29 +390,53 @@ def _tree_sum_budget(
     return max(1, math.floor(max_io_nbytes / (1 + core_int_size / core_io_size)))
 
 
-def _shard_map_over_chains(
+def _shard_map_eval(
     fun: Callable[[UInt[Array, 'p n'], MainTrace], Float32[Array, '*out']],
     trace: MainTrace,
     mesh: Mesh,
-    out_chain_axis: int,
+    *,
+    shard_chains: bool,
+    shard_data: bool,
+    out_chain_axis: int | None,
+    n_axis: int,
+    out_ndim: int,
 ) -> Callable[[UInt[Array, 'p n'], MainTrace], Float32[Array, '*out']]:
-    """Wrap ``fun(X, trace)`` in a `shard_map` that is manual over ``'chains'`` only.
+    """Wrap ``fun(X, trace)`` in a `shard_map` manual over ``'chains'``/``'data'``.
 
-    The trace is sharded over its chain axis and `X` is replicated over
-    ``'chains'``. The data axis is left as an automatic mesh axis, so the
-    output's data axis follows the sharding of `X` (data-sharded for training
-    data, replicated for test data) without forcing any inter-device movement.
+    When `shard_chains`, the trace is sharded over its chain axis and the
+    output over `out_chain_axis`. When `shard_data`, the ``n`` axis of `X` and
+    the output are sharded over ``'data'``; the trace, which has no data axis,
+    is replicated. Mesh axes not made manual here stay automatic, so the
+    corresponding output axes follow whatever sharding the computation produces
+    without forcing any inter-device movement.
     """
-    out_spec = [None] * out_chain_axis + ['chains']
+    axis_names = set()
+    x_spec = [None, None]  # (p, n)
+    out_spec = [None] * out_ndim
+    if shard_chains:
+        axis_names.add('chains')
+        out_spec[out_chain_axis] = 'chains'
+    if shard_data:
+        axis_names.add('data')
+        x_spec[1] = 'data'
+        out_spec[n_axis] = 'data'
+
+    # drop trailing Nones to match jax's canonical specs (eases sharding
+    # comparisons during debugging)
+    for spec in (x_spec, out_spec):
+        while spec and spec[-1] is None:
+            spec.pop()
+
     return shard_map(
         fun,
         mesh=mesh,
-        axis_names={'chains'},
-        in_specs=(PartitionSpec(), partition_specs(trace, mesh)),
+        axis_names=axis_names,
+        in_specs=(PartitionSpec(*x_spec), partition_specs(trace, mesh)),
         out_specs=PartitionSpec(*out_spec),
         # `traverse_tree`'s `lax.scan` carry starts replicated and becomes
-        # chain-varying, which the VMA checker rejects; the evaluation is
-        # embarrassingly parallel over chains, so the check adds no safety
+        # chain/data-varying, which the VMA checker rejects; the evaluation is
+        # embarrassingly parallel over chains and points, so the check adds no
+        # safety
         check_vma=False,
     )
 

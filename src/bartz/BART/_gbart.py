@@ -42,10 +42,10 @@ from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileB
 
 class mc_gbart(Module):
     R"""
-    Nonparametric regression with Bayesian Additive Regression Trees (BART) [2]_.
+    Nonparametric regression with Bayesian Additive Regression Trees (BART).
 
     Regress `y_train` on `x_train` with a latent mean function represented as
-    a sum of decision trees. The inference is carried out by sampling the
+    a sum of decision trees [2]_. The inference is carried out by sampling the
     posterior distribution of the tree ensemble with an MCMC.
 
     Parameters

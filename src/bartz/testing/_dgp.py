@@ -165,29 +165,83 @@ def generate_outcome(
 
 
 class Params(Module):
-    """Output of `gen_params`: all DGP quantities that do not depend on `n`.
+    R"""Output of `gen_params`: all DGP quantities that do not depend on `n`.
 
-    For multivariate outputs (``k is not None``) the latent mean for
-    component ``i`` at observation ``j`` is::
+    The data follows a multivariate quadratic Gaussian model. With observations
+    :math:`i`, predictors :math:`j, j'` and outcome components :math:`c`, the
+    predictors, coefficients and outcomes are
 
-        mu_ij = sqrt(lambda_) * (beta_shared . x_j + x_j^T A_shared x_j)
-              + sqrt(1 - lambda_) * (beta_separate_i . x_j + x_j^T A_separate_i x_j)
+    .. math::
+        :nowrap:
 
-    with ``lambda_`` in ``[0, 1]`` interpolating between fully independent
-    components (``lambda_=0``, each row uses its own coefficients restricted to
-    the variables it owns via `partition`) and fully shared ones
-    (``lambda_=1``, all rows share the same coefficients).
+        \begin{align}
+            X_{ij} &\overset{\mathrm{i.i.d.}}\sim U(-\sqrt 3, \sqrt 3),
+                \quad i = 1, \ldots, n, \quad j, j' = 1, \ldots, p,
+                \quad c = 1, \ldots, k, \\
+            \{S_c\}_{c=1}^k &= \text{a random partition of } \{1, \ldots, p\},
+                \quad \lfloor p/k \rfloor \le |S_c| \le \lceil p/k \rceil, \\
+            \beta^{\mathrm{sh}}_j &\overset{\mathrm{i.i.d.}}\sim
+                N(0,\, \sigma^2_{\mathrm{lin}} / p), \\
+            \beta^{\mathrm{sep}}_{cj} &\sim
+                \mathbb 1[j \in S_c]\, N(0,\, \sigma^2_{\mathrm{lin}} / (p / k)), \\
+            P^{\mathrm{sh}}_{jj'} &= \begin{cases}
+                    1 & \min(|j - j'|,\, p - |j - j'|) \le q / 2, \\
+                    0 & \text{otherwise,}
+                \end{cases}
+                \quad q \bmod 2 = 0, \quad q < p, \\
+            A^{\mathrm{sh}}_{jj'} &\sim P^{\mathrm{sh}}_{jj'}\,
+                N(0,\, \sigma^2_{\mathrm{quad}} / (p\, (\kappa_X - 1 + q))), \\
+            A^{\mathrm{sep}}_{cjj'} &\sim P^{\mathrm{sep}}_{cjj'}\,
+                N(0,\, \sigma^2_{\mathrm{quad}} / ((p / k)\, (\kappa_X - 1 + q))), \\
+            \mu^{\mathrm L}_{ci} &= \sqrt\lambda \textstyle\sum_j
+                    \beta^{\mathrm{sh}}_j X_{ij}
+                + \sqrt{1 - \lambda} \textstyle\sum_j
+                    \beta^{\mathrm{sep}}_{cj} X_{ij}, \\
+            \mu^{\mathrm Q}_{ci} &= \sqrt\lambda \textstyle\sum_{jj'}
+                    A^{\mathrm{sh}}_{jj'} X_{ij} X_{ij'}
+                + \sqrt{1 - \lambda} \textstyle\sum_{jj'}
+                    A^{\mathrm{sep}}_{cjj'} X_{ij} X_{ij'},
+                \quad \lambda \in [0, 1], \\
+            Y_{ci} &\sim N(\mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci},\,
+                \sigma^2_{\mathrm{eps}}),
+        \end{align}
 
-    For univariate outputs (``k is None``) the separate path is skipped and::
+    with binary components instead thresholded at zero, i.e. :math:`Y_{ci} =
+    \mathbb 1[\mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci} + \sigma_{\mathrm{eps}}
+    \varepsilon_{ci} > 0]`, :math:`\varepsilon_{ci} \sim N(0, 1)` (see
+    `outcome_type`). Here :math:`\kappa_X = E[X_{ij}^4] = 9/5` is the kurtosis
+    of the predictors (`kurt_x`), so :math:`\kappa_X - 1 = 4/5`. The separate
+    quadratic pattern :math:`P^{\mathrm{sep}}_{cjj'}` is the same circular band
+    of half-width :math:`q / 2` as :math:`P^{\mathrm{sh}}`, but built on the
+    within-component ranks of the predictors owned by :math:`c` and wrapped at
+    :math:`|S_c|` (requiring :math:`q < \lfloor p/k \rfloor`); it is nonzero
+    only for :math:`j, j' \in S_c`.
 
-        mu_j = beta_shared . x_j + x_j^T A_shared x_j;
+    The coupling :math:`\lambda` interpolates between independent components
+    (:math:`\lambda = 0`, each uses its own coefficients on its own predictors)
+    and identical ones (:math:`\lambda = 1`, all share the shared
+    coefficients). The per-component variance decomposition holds for every
+    :math:`\lambda`:
 
-    ``partition``, ``beta_separate``, ``A_separate`` and ``lambda_`` are all
-    ``None``. The outcome is::
+    .. math::
+        :nowrap:
 
-        y_ij = mu_ij + eps_ij * sqrt(sigma2_eps),   eps_ij ~iid N(0, 1),
+        \begin{align}
+            E[\operatorname{Var}[Y_{ci} \mid X, \beta, A]] &=
+                \sigma^2_{\mathrm{lin}} + \sigma^2_{\mathrm{quad}}
+                + \sigma^2_{\mathrm{eps}}
+                \quad \text{(expected population variance)}, \\
+            \operatorname{Var}[Y_{ci}] &=
+                E[\operatorname{Var}[Y_{ci} \mid X, \beta, A]]
+                + \sigma^2_{\mathrm{quad}} / (\kappa_X - 1 + q)
+                \quad \text{(prior variance)}.
+        \end{align}
 
-    possibly thresholded at 0 for binary components (see `outcome_type`).
+    For univariate outputs (``k is None``) the separate path and
+    :math:`\lambda` are dropped (``partition``, ``beta_separate``,
+    ``A_separate`` and ``lambda_`` are all ``None``) and :math:`\mu_i = \sum_j
+    \beta^{\mathrm{sh}}_j X_{ij} + \sum_{jj'} A^{\mathrm{sh}}_{jj'} X_{ij}
+    X_{ij'}`.
     """
 
     partition: Bool[Array, 'k p'] | None
@@ -257,7 +311,7 @@ class Params(Module):
 
     @property
     def sigma2_mean(self) -> Float[Array, '']:
-        """Variance of the mean function."""
+        """Variance of the expected mean function."""
         return self.sigma2_quad / (self.kurt_x - 1 + self.q)
 
 

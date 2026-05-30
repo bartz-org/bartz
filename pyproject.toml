@@ -41,6 +41,7 @@ dependencies = [
     "numpy>=2.2.6",
     "scipy>=1.15.3",
     "stochtree>=0.4.2",
+    "tqdm>=4.67.1",
 ]
 
 [project.optional-dependencies]
@@ -61,7 +62,6 @@ dev = [
     "pre-commit>=4.2.0",
     "rich>=14.0.0",
     "snakeviz>=2.2.2",
-    "tqdm>=4.67.1",
     "virtualenv>=20.31.2",
     "asv>=0.6.4",
     "beartype>=0.21.0",

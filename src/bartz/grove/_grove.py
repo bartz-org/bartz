@@ -313,32 +313,12 @@ def tree_depths(tree_size: int) -> Int32[Array, ' {tree_size}']:
     return jnp.array(depths, minimal_unsigned_dtype(max(depths)))
 
 
-@partial(jnp.vectorize, signature='(half_tree_size)->(tree_size)')
-def is_used(
-    split_tree: UInt[Array, '*batch_shape 2**(d-1)'],
-) -> Bool[Array, '*batch_shape 2**d']:
-    """
-    Return a mask indicating the used nodes in a tree.
-
-    Parameters
-    ----------
-    split_tree
-        The decision boundaries of the tree.
-
-    Returns
-    -------
-    A mask indicating which nodes are actually used.
-    """
-    internal_node = split_tree.astype(bool)
-    internal_node = jnp.concatenate([internal_node, jnp.zeros_like(internal_node)])
-    actual_leaf = is_actual_leaf(split_tree, add_bottom_level=True)
-    return internal_node | actual_leaf
-
-
 @jit
-def forest_fill(split_tree: UInt[Array, '*batch_shape 2**(d-1)']) -> Float32[Array, '']:
+def forest_mean_leaves(
+    split_tree: UInt[Array, '*batch_shape 2**(d-1)'],
+) -> Float32[Array, '']:
     """
-    Return the fraction of used nodes in a set of trees.
+    Return the average number of leaves per tree in a set of trees.
 
     Parameters
     ----------
@@ -347,12 +327,12 @@ def forest_fill(split_tree: UInt[Array, '*batch_shape 2**(d-1)']) -> Float32[Arr
 
     Returns
     -------
-    Number of tree nodes over the maximum number that could be stored.
+    The mean number of leaves across the trees.
     """
-    used = is_used(split_tree)
-    count = jnp.count_nonzero(used)
-    batch_size = split_tree.size // split_tree.shape[-1]
-    return count / (used.size - batch_size)
+    # a tree with k internal nodes (the nonzero entries of split_tree) has k + 1
+    # leaves; the maximum possible is split_tree.shape[-1]
+    num_internal = jnp.count_nonzero(split_tree, axis=-1)
+    return (num_internal + 1).mean()
 
 
 @partial(jit, static_argnames=('p', 'sum_batch_axis'))

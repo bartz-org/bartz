@@ -370,6 +370,8 @@ def _set(
     trace: PyTree[Array, ' T'], index: Int32[Array, ''], val: PyTree[Array, ' T']
 ) -> PyTree[Array, ' T']:
     """Do ``trace[index] = val`` but fancier."""
+    # WORKAROUND(jax<0.7.1): once we bump jax to v0.7.1 we can use mutable
+    # arrays to save the trace instead of this functional update.
     sample_axes = trace_sample_axes(trace)
 
     def at_set(

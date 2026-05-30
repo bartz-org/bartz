@@ -24,6 +24,7 @@
 
 """Test `bartz.mcmcloop`."""
 
+import io
 from dataclasses import replace
 from functools import partial
 from typing import Any
@@ -31,7 +32,16 @@ from typing import Any
 import jax
 import pytest
 from equinox import filter_jit
-from jax import NamedSharding, debug_key_reuse, device_put, jit, make_mesh, tree, vmap
+from jax import (
+    NamedSharding,
+    block_until_ready,
+    debug_key_reuse,
+    device_put,
+    jit,
+    make_mesh,
+    tree,
+    vmap,
+)
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
@@ -39,7 +49,15 @@ from jaxtyping import Array, Float32, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import split
-from bartz.mcmcloop import BurninTrace, MainTrace, evaluate_trace, run_mcmc
+from bartz.mcmcloop import (
+    BurninTrace,
+    MainTrace,
+    evaluate_trace,
+    make_tqdm_callback,
+    run_mcmc,
+)
+from bartz.mcmcloop._callback import _tqdm_advance, _tqdm_registry
+from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._state import trace_sample_axes
 from tests.util import assert_array_equal, assert_close_matrices
@@ -160,6 +178,55 @@ class TestRunMcmc:
 
         check_trace(burnin_trace)
         check_trace(main_trace)
+
+    def test_tqdm_callback(self, keys: split, initial_state: State) -> None:
+        """Check the tqdm progress bar runs to completion and is cleaned up."""
+        buf = io.StringIO()
+        kw = make_tqdm_callback(initial_state, report_every=2, file=buf, mininterval=0)
+        bar_id = kw['callback_state'].bar_id.item()
+        state = tree.map(jnp.copy, initial_state)  # donated
+        with debug_key_reuse(False):
+            # block so the (unordered, async) progress callbacks have all fired
+            block_until_ready(run_mcmc(keys.pop(), state, 4, n_burn=2, **kw))
+
+        out = buf.getvalue()
+        assert '100%' in out  # the bar reached the end
+        assert '6/6' in out  # n_burn + n_save * n_skip iterations
+        assert bar_id not in _tqdm_registry  # the bar was closed and removed
+
+    def test_tqdm_callback_cleans_up_interrupted_bar(self) -> None:
+        """A new tqdm callback closes a bar left open by an interrupted run."""
+        state = simple_init(10, 100, 20)
+        buf = io.StringIO()
+        kw = make_tqdm_callback(state, file=buf, mininterval=0)
+        bar_id = kw['callback_state'].bar_id.item()
+        # simulate an interrupted run: advance the bar partway, never finishing
+        _tqdm_advance(bar_id, 3, 10)
+        assert not _tqdm_registry[bar_id].bar.disable  # still open
+
+        make_tqdm_callback(state, file=io.StringIO())  # triggers cleanup
+        assert bar_id not in _tqdm_registry  # the stale bar was closed and dropped
+        assert buf.getvalue().endswith('\n')  # closed cleanly, not left mid-line
+
+    def test_tqdm_no_recompilation(self, keys: split) -> None:
+        """Check two MCMC runs with a tqdm callback share the compiled inner loop.
+
+        The tqdm bar lives in a module-level registry and is referenced from the
+        loop only through an integer handle carried as a traceable scalar, so the
+        loop pytree is identical across runs and `_run_mcmc_inner_loop` is not
+        retraced (verified via the `_CallCounter`, see
+        ``test_no_recompilation_inner_loop_counter`` in ``test_interface``).
+        """
+        state = simple_init(10, 100, 20)
+
+        def run() -> None:
+            kw = make_tqdm_callback(state, disable=True)
+            with debug_key_reuse(False):
+                run_mcmc(keys.pop(), tree.map(jnp.copy, state), 4, n_burn=2, **kw)
+
+        run()
+        run()
+        assert _run_mcmc_inner_loop._fun.n_calls == 0
 
     def test_predicted_double_compilation(self, keys: split) -> None:
         """Check that an error is raised under jit if the configuration would lead to double compilation."""

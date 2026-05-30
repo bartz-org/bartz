@@ -25,15 +25,54 @@
 Reference
 =========
 
-.. toctree::
-    :maxdepth: 1
+API reference for bartz. Each module page lists its public objects in a summary
+table; follow a link for the dedicated page of an object.
 
-    interface.rst
-    newinterf.rst
-    stochtree.rst
-    grove.rst
-    mcmcstep.rst
-    mcmcloop.rst
-    prepcovars.rst
-    debug.rst
-    test.rst
+High-level interface
+--------------------
+
+.. autosummary::
+    :toctree: _autogen/top
+
+    bartz.Bart
+    bartz.PredictKind
+
+R BART3-compatible interface
+----------------------------
+
+.. autosummary::
+    :toctree: _autogen/mod
+    :recursive:
+
+    bartz.BART
+
+stochtree-compatible interface
+------------------------------
+
+.. autosummary::
+    :toctree: _autogen/mod
+    :recursive:
+
+    bartz.stochtree
+
+MCMC and trees
+--------------
+
+.. autosummary::
+    :toctree: _autogen/mod
+    :recursive:
+
+    bartz.mcmcstep
+    bartz.mcmcloop
+    bartz.grove
+    bartz.prepcovars
+
+Debugging and testing
+---------------------
+
+.. autosummary::
+    :toctree: _autogen/mod
+    :recursive:
+
+    bartz.debug
+    bartz.testing

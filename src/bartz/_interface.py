@@ -294,13 +294,13 @@ class Bart(Module):
         The thinning factor for the MCMC samples, after burn-in.
     printevery
         The number of iterations (including thinned-away ones) between each log
-        line. Set to `None` to disable logging. ^C interrupts the MCMC only
-        every `printevery` iterations, so with logging disabled it's impossible
-        to kill the MCMC conveniently.
+        line. Set to `None` to disable progress reporting entirely (this ignores
+        `pbar`). ^C interrupts the MCMC only every `printevery` iterations, so
+        with reporting disabled it's impossible to kill the MCMC conveniently.
     pbar
         If `True`, show a `tqdm` progress bar instead of printing log lines. The
         bar advances every iteration and refreshes the acceptance statistics
-        every `printevery` iterations.
+        every `printevery` iterations. Ignored if `printevery` is `None`.
     num_chains
         The number of independent Markov chains to run.
 
@@ -408,7 +408,7 @@ class Bart(Module):
         n_burn: int = 1000,
         n_skip: int = 1,
         printevery: int | None = 100,
-        pbar: bool = False,
+        pbar: bool = True,
         num_chains: int | None = 4,
         num_chain_devices: int | None | Literal['auto'] = 'auto',
         num_data_devices: int | None = None,
@@ -1350,16 +1350,20 @@ def _run_mcmc(
 ) -> RunMCMCResult:
     # prepare arguments
     kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
-    if pbar:
-        kw.update(make_tqdm_callback(mcmc_state, report_every=printevery))
-    else:
-        kw.update(
-            make_print_callback(
-                mcmc_state,
-                dot_every=None if printevery is None or printevery == 1 else 1,
-                report_every=printevery,
+    # `printevery=None` disables progress reporting entirely: no callback is
+    # installed, so the loop traces without any `debug.callback` effect (a tqdm
+    # bar would otherwise advance every iteration regardless of `printevery`).
+    if printevery is not None:
+        if pbar:
+            kw.update(make_tqdm_callback(mcmc_state, report_every=printevery))
+        else:
+            kw.update(
+                make_print_callback(
+                    mcmc_state,
+                    dot_every=None if printevery == 1 else 1,
+                    report_every=printevery,
+                )
             )
-        )
     kw.update(run_mcmc_kw)
 
     return run_mcmc(key, mcmc_state, n_save, **kw)

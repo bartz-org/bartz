@@ -77,6 +77,7 @@ from bartz.grove import (
     tree_depths,
 )
 from bartz.mcmcloop import compute_varcount, evaluate_trace
+from bartz.mcmcloop._callback import _tqdm_registry
 from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes
@@ -1832,12 +1833,12 @@ def test_no_recompilation_no_tracing(bkw: BartKW) -> None:
     """Check that running the same `Bart` invocation twice does not retrace.
 
     Uses `jax.no_tracing` to detect any new jaxpr tracing in the second
-    invocation. Forces ``printevery=None`` because `debug.callback` (used by
-    `print_callback`) introduces an unordered effect that disables JAX's C++
-    pjit fastpath cache, which would make `no_tracing` raise even when no
+    invocation. Forces ``printevery=None``, which installs no callback at all,
+    because `debug.callback` introduces an unordered effect that disables JAX's
+    C++ pjit fastpath cache, which would make `no_tracing` raise even when no
     actual jaxpr re-tracing happens. Uses `OriginalBart` (not the wrapper)
-    because the wrapper's `_check_replicated_trees` creates a fresh
-    `shard_map` each call, which doesn't cache across invocations.
+    because the wrapper's `_check_replicated_trees` creates a fresh `shard_map`
+    each call, which doesn't cache across invocations.
     """
     kw = dict(bkw.kw, printevery=None)
     OriginalBart(**kw)
@@ -1868,6 +1869,7 @@ def test_print_callback_terminates_dot_line(
 ) -> None:
     """MCMC logging ends with a newline when the last iteration only prints a dot."""
     kw = bkw.kw
+    kw['pbar'] = False  # this test is about the print-callback line format
     n_iters = kw['n_burn'] + kw['n_save'] * _bart_default(kw, 'n_skip')
     printevery = _bart_default(kw, 'printevery')
     # ensure the last iteration falls outside a report boundary so it prints
@@ -1886,8 +1888,20 @@ def test_pbar(bkw: BartKW, capsys: CaptureFixture[str]) -> None:
     (e.g. variant v6). This exercises that `tqdm_callback` uses unordered debug
     callbacks, since ordered ones are unsupported with more than one device.
     """
-    block_until_ready(Bart(**dict(bkw.kw, pbar=True)))
+    # force a concrete `printevery`: some bkw variants set it to None, which now
+    # disables the bar entirely (covered by test_pbar_disabled_by_printevery_none)
+    block_until_ready(Bart(**dict(bkw.kw, pbar=True, printevery=10)))
     assert '100%' in capsys.readouterr().err  # the bar ran and reached the end
+
+
+def test_pbar_disabled_by_printevery_none(
+    bkw: BartKW, capsys: CaptureFixture[str]
+) -> None:
+    """`printevery=None` disables the bar entirely, even with `pbar=True`."""
+    n_bars_before = len(_tqdm_registry)
+    block_until_ready(Bart(**dict(bkw.kw, pbar=True, printevery=None)))
+    assert '%' not in capsys.readouterr().err  # no bar was drawn
+    assert len(_tqdm_registry) == n_bars_before  # no bar was even created
 
 
 @pytest.mark.flaky

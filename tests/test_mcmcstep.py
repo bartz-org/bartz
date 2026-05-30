@@ -1869,13 +1869,13 @@ class TestPrecomputeTerms:
             keys.pop(), prec_trees, error_cov_inv, leaf_prior_cov_inv, z_mv
         )
 
-        assert_allclose(
+        assert_close_matrices(
             result_uv.mean_factor,
             result_mv.mean_factor.squeeze((1, 2)),
             rtol=1e-6,
             atol=1e-6,
         )
-        assert_allclose(
+        assert_close_matrices(
             result_uv.centered_leaves,
             result_mv.centered_leaves.squeeze(1),
             rtol=1e-6,

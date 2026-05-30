@@ -24,14 +24,17 @@
 
 """Report obsolete `WORKAROUND(pkg<ver)` / `WORKAROUND(pkg<=ver)` markers.
 
-A marker is obsolete given the current floors in pyproject.toml.
+A marker is obsolete given the current floors in pyproject.toml plus the
+floor for `bartz` itself (= oldest version benchmarked by ASV).
 
 Marker grammar:
     WORKAROUND(<pkg><op><version>): <free-text>
 with <op> in {<, <=}. A marker is obsolete iff every supported version of
-<pkg> (i.e., versions >= the lower bound in pyproject.toml) satisfies NOT
-(version <op> <version>). Markers that do not fit the grammar are reported
-as malformed rather than silently ignored.
+<pkg> (i.e., versions >= the floor) satisfies NOT (version <op> <version>).
+The floor for dependencies and `python` comes from pyproject.toml; the floor
+for `bartz` comes from the oldest version tag benchmarked by ASV (see
+`refs_for_asv.py`). Markers that do not fit the grammar are reported as
+malformed rather than silently ignored.
 """
 
 import re
@@ -43,6 +46,7 @@ import tomli
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
+from refs_for_asv import oldest_benchmarked_version
 
 # Loose pattern: find any `WORKAROUND(...)` candidate to inspect.
 CANDIDATE_RE = re.compile(r'WORKAROUND\(([^)]*)\)')
@@ -116,9 +120,16 @@ def scan(root: Path) -> list[tuple[str, str, str]]:
     return matches
 
 
+def collect_floors(root: Path) -> dict[str, Version]:
+    """Floors for dependencies (pyproject.toml) plus `bartz` (oldest ASV tag)."""
+    floors = floors_from_pyproject(root / 'pyproject.toml')
+    floors['bartz'] = oldest_benchmarked_version(root)
+    return floors
+
+
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
-    floors = floors_from_pyproject(root / 'pyproject.toml')
+    floors = collect_floors(root)
     stale: list[str] = []
     unknown: list[str] = []
     for file, lineno, text in scan(root):
@@ -146,7 +157,7 @@ def main() -> int:
                 continue
             floor = floors.get(pkg)
             if floor is None:
-                unknown.append(f'{file}:{lineno}: {pkg!r} not pinned in pyproject.toml')
+                unknown.append(f'{file}:{lineno}: no known floor for {pkg!r}')
                 continue
             if is_obsolete(op, bound, floor):
                 stale.append(

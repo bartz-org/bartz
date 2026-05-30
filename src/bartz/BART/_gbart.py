@@ -34,10 +34,9 @@ from equinox import Module
 from jax.scipy.special import ndtr
 from jaxtyping import Array, Float, Float32, Int32, Key, Real
 
-from bartz import mcmcstep
 from bartz._interface import ArrayLike, Bart, DataFrame, FloatLike, PredictKind, Series
 from bartz.mcmcloop import BurninTrace, MainTrace
-from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes
+from bartz.mcmcstep._state import State, chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 
 
@@ -316,12 +315,17 @@ class mc_gbart(Module):
             num_chains=num_chains,
         )
 
-        # set min_points_per_leaf unless the user set it already
+        # default min_points_per_leaf to 5 (unless set by the user) to match
+        # BART3's hard-coded nl>=5 && nr>=5 birth check.
+        # min_points_per_decision_node keeps the Bart default of 10
+        # (= 2 * min_points_per_leaf): it makes the proposal efficient by not
+        # trying to grow leaves too small to split, without changing the target
+        # posterior, which thus matches BART3.
         if 'min_points_per_leaf' not in bart_kwargs.get('init_kw', {}):
-            bart_kwargs = dict(bart_kwargs)
-            init_kw = dict(bart_kwargs.get('init_kw', {}))
-            init_kw['min_points_per_leaf'] = 5
-            bart_kwargs['init_kw'] = init_kw
+            bart_kwargs = dict(
+                bart_kwargs,
+                init_kw=dict(bart_kwargs.get('init_kw', {}), min_points_per_leaf=5),
+            )
 
         # add user arguments
         kwargs.update(bart_kwargs)
@@ -363,7 +367,7 @@ class mc_gbart(Module):
         return self._bart._burnin_trace  # noqa: SLF001
 
     @property
-    def _mcmc_state(self) -> mcmcstep.State:
+    def _mcmc_state(self) -> State:
         return self._bart._mcmc_state  # noqa: SLF001
 
     @property

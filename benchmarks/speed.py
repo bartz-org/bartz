@@ -58,12 +58,13 @@ from benchmarks.latest_bartz.testing import gen_nonsense_data
 try:
     from bartz.mcmcstep import State
 except ImportError:
-    # old versions use a dictionary to store the mcmc state
+    # WORKAROUND(bartz<0.6.0): old versions use a dictionary for the mcmc state
     State: type = dict
 
 try:
     from bartz.BART import mc_gbart as gbart
 except ImportError:
+    # WORKAROUND(bartz<0.8.0): mc_gbart was introduced in 0.8.0; fall back to gbart
     from bartz.BART import gbart
 
 from bartz.mcmcstep import init, step
@@ -125,30 +126,33 @@ def simple_init(  # noqa: C901, PLR0915
     # adapt arguments for old versions
     sig = signature(init)
     if 'offset' not in sig.parameters:
+        # WORKAROUND(bartz<0.6.0): offset was added to init in 0.6.0
         kw.pop('offset')
     if 'sigma2_alpha' in sig.parameters:
-        # old version: convert error_cov_df/scale to sigma2_alpha/beta
-        # inverse gamma prior: alpha = df / 2, beta = scale / 2
+        # WORKAROUND(bartz<0.8.0): pre-0.8.0 used sigma2_alpha/beta instead of
+        # error_cov_df/scale. Inverse gamma prior: alpha = df/2, beta = scale/2.
         kw['sigma2_alpha'] = kw.pop('error_cov_df') / 2
         kw['sigma2_beta'] = kw.pop('error_cov_scale') / 2
     if 'leaf_prior_cov_inv' not in sig.parameters:
+        # WORKAROUND(bartz<0.8.0): pre-0.8.0 used sigma_mu2 (0.6.0-0.7.0) or had
+        # no equivalent (0.4.1-0.5.0)
         if 'sigma_mu2' in sig.parameters:
             kw['sigma_mu2'] = 1 / kw.pop('leaf_prior_cov_inv')
         else:
             kw.pop('leaf_prior_cov_inv')
     if 'min_points_per_decision_node' not in sig.parameters:
+        # WORKAROUND(bartz<0.7.0): use min_points_per_leaf instead
         kw.pop('min_points_per_decision_node')
         kw.update(min_points_per_leaf=5)
-    if 'suffstat_batch_size' in sig.parameters:
-        # bypass the tracing bug fixed in v0.2.1
-        kw.update(suffstat_batch_size=None)
     if 'mesh' not in sig.parameters:
+        # WORKAROUND(bartz<0.8.0): no device sharding
         if mesh is None:
             kw.pop('mesh')
         else:
             msg = 'mesh not supported.'
             raise NotImplementedError(msg)
     if 'num_chains' not in sig.parameters:
+        # WORKAROUND(bartz<0.8.0): no built-in multichain support
         if num_chains is None:
             kw.pop('num_chains')
         else:
@@ -158,6 +162,7 @@ def simple_init(  # noqa: C901, PLR0915
     match kind:
         case 'weights':
             if 'error_scale' not in sig.parameters:
+                # WORKAROUND(bartz<0.5.0): no heteroskedastic weights
                 msg = 'weights not supported'
                 raise NotImplementedError(msg)
             kw['error_scale'] = jnp.ones(n)
@@ -165,6 +170,7 @@ def simple_init(  # noqa: C901, PLR0915
         case 'binary':
             sig = signature(gbart)
             if 'type' not in sig.parameters:
+                # WORKAROUND(bartz<0.6.0): no probit-link binary regression
                 msg = 'binary not supported'
                 raise NotImplementedError(msg)
             kw['y'] = y > 0
@@ -173,10 +179,10 @@ def simple_init(  # noqa: C901, PLR0915
             kw.pop('error_cov_df', None)
             kw.pop('error_cov_scale', None)
 
-            # since bartz 0.9, binary y is float instead of bool, and the type
-            # is to be specified separately
             sig = signature(init)
             if 'outcome_type' in sig.parameters:
+                # WORKAROUND(bartz<0.9.0): from 0.9.0 binary y is float and the
+                # outcome type is passed separately via outcome_type=
                 kw['outcome_type'] = 'binary'
                 kw['y'] = kw['y'].astype(jnp.float32)
 
@@ -185,14 +191,17 @@ def simple_init(  # noqa: C901, PLR0915
                 not hasattr(mcmcstep, 'step_sparse')
                 and 'sparse_on_at' not in sig.parameters
             ):
+                # WORKAROUND(bartz<0.7.0): variable selection added in 0.7.0
                 msg = 'sparse not supported'
                 raise NotImplementedError(msg)
             kw.update(a=0.5, b=1.0, rho=float(p), sparse_on_at=999999)
             if 'sparse_on_at' not in sig.parameters:
+                # WORKAROUND(bartz<0.8.0): pre-0.8.0 sparse step was external
                 kw.pop('sparse_on_at')
 
         case 'multivariate':
             if 'leaf_prior_cov_inv' not in sig.parameters:
+                # WORKAROUND(bartz<0.8.0): multivariate outcomes added in 0.8.0
                 msg = 'multivariate not supported'
                 raise NotImplementedError(msg)
 
@@ -234,13 +243,16 @@ class StepGeneric(AutoParamNames):
 
         self.args = (keys, simple_init(**kw))
 
-        # in v0.4.1 step had signature (bart, key); from v0.5.0 it became
-        # (key, bart). Use the first parameter name to dispatch positionally,
+        # WORKAROUND(bartz<0.5.0): v0.4.1 step had signature (bart, key);
+        # v0.5.0+ uses (key, bart). Dispatch positionally on first param name,
         # since the decorator-wrapped step on modern bartz does not accept
         # `bart` as a keyword argument.
         step_bart_first = next(iter(signature(step).parameters)) == 'bart'
 
         def func(keys: list[Key[Array, '']], bart: State) -> State:
+            # WORKAROUND(bartz<0.8.0): pre-0.8.0 sparse step is done by a
+            # separate `mcmcstep.step_sparse` call; from 0.8.0 it's inside `step`
+            # via `bart.config.sparse_on_at`.
             sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
             if kind == 'sparse' and sparse_inside_step:
                 bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
@@ -249,7 +261,7 @@ class StepGeneric(AutoParamNames):
             else:
                 bart = step(keys.pop(), bart)
             if kind == 'sparse' and not sparse_inside_step:
-                bart = mcmcstep.step_sparse(keys.pop(), bart)  # ty:ignore[unresolved-attribute] in this case it's an old version that has that attribute
+                bart = mcmcstep.step_sparse(keys.pop(), bart)  # ty:ignore[unresolved-attribute]
             return bart
 
         self.jitted_func = jit(func)
@@ -320,6 +332,7 @@ class BaseGbart(AutoParamNames):
         sig = signature(gbart)
         support_multichain = 'mc_cores' in sig.parameters
         if nchains != 1 and not support_multichain:
+            # WORKAROUND(bartz<0.8.0): mc_gbart (with mc_cores) was added in 0.8.0
             msg = 'multi-chain not supported'
             raise NotImplementedError(msg)
 
@@ -387,6 +400,7 @@ def block_bart(bart: gbart) -> None:
     if isinstance(bart, Module):
         block_until_ready(bart)
     else:
+        # WORKAROUND(bartz<0.7.0): pre-0.7.0 gbart was not an equinox Module
         block_until_ready((bart._mcmc_state, bart._main_trace))
 
 
@@ -468,7 +482,7 @@ class BaseRunMcmc(AutoParamNames):
         )
         kw.update(kwargs)
 
-        # handle different callback name in v0.6.0
+        # WORKAROUND(bartz<0.7.0): v0.6.0 used `inner_callback` instead of `callback`
         params = signature(run_mcmc).parameters
         if 'callback' not in params:
             kw['inner_callback'] = kw.pop('callback')
@@ -547,12 +561,14 @@ def kill_callback(
     """
     if kill_niters is None:
         return
-    # error_cov_inv (or sigma2 in old versions) is one of the last things
-    # modified in the mcmc loop, so using it as token ensures ordering,
-    # also it does not have n in the dimensionality
+    # error_cov_inv is one of the last things modified in the mcmc loop, so
+    # using it as token ensures ordering; also it does not have n in the
+    # dimensionality.
     if isinstance(bart, dict):
+        # WORKAROUND(bartz<0.6.0): pre-0.6.0 state was a dict keyed by 'sigma2'
         token = bart['sigma2']
     elif hasattr(bart, 'sigma2'):
+        # WORKAROUND(bartz<0.8.0): State.sigma2 was renamed to error_cov_inv in 0.8.0
         token = bart.sigma2
     else:
         token = bart.error_cov_inv
@@ -562,7 +578,10 @@ def kill_callback(
 
 
 def detect_zero_division_error_bug(kw: dict) -> None:
-    """Detect a division by zero error with 0 iterations in v0.6.0."""
+    """Detect a division by zero error with 0 iterations in v0.6.0.
+
+    WORKAROUND(bartz<0.7.0): the bug only exists in v0.6.0.
+    """
     try:
         array_kw = {k: v for k, v in kw.items() if isinstance(v, jnp.ndarray)}
         nonarray_kw = {k: v for k, v in kw.items() if not isinstance(v, jnp.ndarray)}

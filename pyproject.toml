@@ -75,6 +75,7 @@ dev = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.7.0",
     "rpy2>=3.6.0",
+    "stochtree>=0.4.2",
     "sphinx>=8.1.3",
     "sphinx-autodoc-typehints>=3.0.1",
     "tomli>=2.2.1",
@@ -149,6 +150,10 @@ skip-magic-trailing-comma = true
 
 [tool.ruff.lint.isort]
 split-on-trailing-comma = false
+# `stochtree` is a third-party dependency, but a developer checkout of the
+# upstream stochtree repo at the project root makes isort auto-detect it as
+# first-party, so import sorting differs between dev machines and CI. Pin it.
+known-third-party = ["stochtree"]
 
 [tool.ruff.lint.flake8-annotations]
 allow-star-arg-any = true

@@ -60,7 +60,7 @@ from bartz._jaxext import (
 )
 from bartz._jaxext.scipy.special import ndtri as patched_ndtri
 from bartz._jaxext.scipy.stats import invgamma
-from tests.util import assert_allclose, assert_array_equal, assert_close_matrices
+from tests.util import assert_array_equal, assert_close_matrices
 
 
 class TestUnique:
@@ -317,7 +317,7 @@ class TestAutoBatch:
         result = batched_func(x, scalar)
 
         assert result.shape == (8,)
-        assert_allclose(result, expected, rtol=1e-6)
+        assert_close_matrices(result, expected, rtol=1e-6)
 
     def test_reduction_with_return_nbatches(self, keys: split) -> None:
         """Check reduce_ufunc works together with return_nbatches."""
@@ -337,7 +337,7 @@ class TestAutoBatch:
         assert jnp.issubdtype(nbatches.dtype, jnp.integer)
 
         assert result.shape == (10,)
-        assert_allclose(result, expected, rtol=1e-6)
+        assert_close_matrices(result, expected, rtol=1e-6)
 
     @pytest.mark.parametrize('batched', [True, False])
     def test_none_output_leaf(self, keys: split, batched: bool) -> None:
@@ -433,7 +433,7 @@ class TestJaxPatches:
         alpha = 3.5
         x0 = scipy_invgamma.ppf(p, alpha)
         x1 = invgamma.ppf(p, alpha)
-        assert_allclose(x1, x0, rtol=1e-6)
+        assert_close_matrices(x1, x0.astype(x1.dtype), rtol=1e-6)
 
     # WORKAROUND(jax<0.6.2): ndtri bug
     @pytest.mark.xfail(reason='Fixed in jax 0.6.2.')
@@ -449,7 +449,7 @@ class TestJaxPatches:
         with debug_infs(False):
             y1 = ndtri(x)
         y2 = patched_ndtri(x)
-        assert_allclose(y2, y1, rtol=2e-7, atol=0)  # no atol because in (-∞, ∞)
+        assert_close_matrices(y2, y1, rtol=2e-7, atol=0)  # no atol because in (-∞, ∞)
 
 
 class TestTruncatedNormalOneSided:

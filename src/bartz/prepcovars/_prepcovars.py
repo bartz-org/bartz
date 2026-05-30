@@ -28,7 +28,7 @@ from abc import abstractmethod
 from functools import partial
 from typing import Any, Protocol
 
-from equinox import AbstractVar, Module
+from equinox import AbstractVar, Module, field
 from jax import jit, random, vmap
 from jax import numpy as jnp
 from jax.scipy.sparse.linalg import cg
@@ -84,11 +84,7 @@ def _subsample(
 
     Returns
     -------
-    A matrix with `p` rows and ``min(n, max_samples)`` columns. If
-    ``n <= max_samples``, `X` is returned unchanged. Otherwise each row contains
-    `max_samples` distinct values drawn without replacement from the
-    corresponding row of `X`, with rows sampled independently. The order of
-    values within each row is unspecified.
+    A matrix with `p` rows and ``min(n, max_samples)`` columns. If ``n <= max_samples``, `X` is returned unchanged. Otherwise each row contains `max_samples` distinct values drawn without replacement from the corresponding row of `X`, with rows sampled independently. The order of values within each row is unspecified.
 
     Raises
     ------
@@ -265,10 +261,80 @@ def _uniform_splits_from_matrix(
     """
     low = jnp.min(X, axis=1)
     high = jnp.max(X, axis=1)
-    splits = jnp.linspace(low, high, num_bins + 1, axis=1)[:, 1:-1]
+    splits = _uniform_splits_from_range(low, high, num_bins)
     assert splits.shape == (X.shape[0], num_bins - 1)
     max_split = jnp.full(*splits.shape, minimal_unsigned_dtype(num_bins - 1))
     return splits, max_split
+
+
+@partial(jit, static_argnums=(2,))
+def _uniform_splits_from_range(
+    low: Real[Array, ' p'], high: Real[Array, ' p'], num_bins: int
+) -> Real[Array, 'p m']:
+    """
+    Make an evenly spaced binning grid from per-predictor ranges.
+
+    Parameters
+    ----------
+    low
+        The lower endpoint of the grid for each predictor.
+    high
+        The upper endpoint of the grid for each predictor.
+    num_bins
+        The number of bins to produce.
+
+    Returns
+    -------
+    A `(p, num_bins - 1)` matrix of cutpoints, with `low` and `high` excluded.
+    """
+    splits = jnp.linspace(low, high, num_bins + 1, axis=1)[:, 1:-1]
+    (p,) = low.shape
+    assert splits.shape == (p, num_bins - 1)
+    return splits
+
+
+@partial(jit, static_argnums=(3,))
+def _bin_predictors_uniform(
+    X: Real[Array, 'p n'],
+    low: Real[Array, ' p'],
+    high: Real[Array, ' p'],
+    num_bins: int,
+) -> UInt[Array, 'p n']:
+    """
+    Bin predictors onto an evenly spaced grid without materializing the cutpoints.
+
+    This is the arithmetic equivalent of binning with the splits from
+    `_uniform_splits_from_range`: cutpoint ``j`` is ``low + (j + 1) * step``
+    with ``step = (high - low) / num_bins``, and ``x`` falls in bin ``i`` iff
+    ``cutpoint[i - 1] < x <= cutpoint[i]``.
+
+    Parameters
+    ----------
+    X
+        A matrix with `p` predictors and `n` observations.
+    low
+        The minimum value of each predictor's grid.
+    high
+        The maximum value of each predictor's grid.
+    num_bins
+        The number of bins per predictor.
+
+    Returns
+    -------
+    `X` with each value replaced by the index of the bin it falls into.
+    """
+    step = (high - low) / num_bins
+    safe_step = jnp.where(step > 0, step, 1)
+    # bin = #{cutpoints < x}; right-closed bins make this ceil(t) - 1 (= floor(t)
+    # away from cutpoints), matching `searchsorted(..., side='left')`
+    t = (X - low[:, None]) / safe_step[:, None]
+    bins = jnp.ceil(t) - 1
+    # constant predictors (step == 0) have coincident cutpoints at `low`
+    bins = jnp.where(
+        step[:, None] > 0, bins, jnp.where(low[:, None] < X, num_bins - 1, 0)
+    )
+    bins = jnp.clip(bins, 0, num_bins - 1)
+    return bins.astype(minimal_unsigned_dtype(num_bins - 1))
 
 
 @partial(jit, static_argnames=('method',))
@@ -392,8 +458,15 @@ class RangeEvenBinner(Binner):
         Accepted for protocol uniformity; unused.
     """
 
-    _splits: Real[Array, 'p m']
-    """Cutpoints per predictor."""
+    _low: Real[Array, ' p']
+    """Minimum observed value per predictor."""
+
+    _high: Real[Array, ' p']
+    """Maximum observed value per predictor."""
+
+    # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
+    _max_bins: int = field(static=True)
+    """Number of bins per predictor."""
 
     max_split: UInt[Array, ' p']
 
@@ -405,10 +478,26 @@ class RangeEvenBinner(Binner):
         key: Key[Array, ''] | None = None,
     ) -> None:
         del key
-        self._splits, self.max_split = _uniform_splits_from_matrix(X, max_bins)
+        self._low = jnp.min(X, axis=1)
+        self._high = jnp.max(X, axis=1)
+        self._max_bins = max_bins
+        self.max_split = jnp.full(
+            X.shape[0], max_bins - 1, minimal_unsigned_dtype(max_bins - 1)
+        )
+
+    @property
+    def _splits(self) -> Real[Array, 'p m']:
+        """Materialize the cutpoints. Intended for testing only, not library use.
+
+        The cutpoints are not stored: `bin` works arithmetically from the
+        observed range, since they are evenly spaced. This property reconstructs
+        them only to expose them; the library should rely on `bin` and
+        `max_split` instead.
+        """
+        return _uniform_splits_from_range(self._low, self._high, self._max_bins)
 
     def bin(self, X: Real[Array, 'p n']) -> UInt[Array, 'p n']:
-        return _bin_predictors(X, self._splits)
+        return _bin_predictors_uniform(X, self._low, self._high, self._max_bins)
 
 
 class UniqueQuantileBinner(Binner):

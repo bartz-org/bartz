@@ -69,6 +69,16 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: check-returns-docstring
+        name: forbid multi-line non-list `Returns` docstring sections
+        # Matches a numpy-style `Returns` block whose first two non-blank lines
+        # are both at the section's base indent: i.e., multi-line prose. List-
+        # form (description on a more-indented continuation line) is skipped via
+        # `(?P=i)\S`; the trailing lookahead skips the next section's header.
+        language: pygrep
+        entry: '^(?P<i>[ \t]*)Returns[ \t]*\n(?P=i)-+[ \t]*\n(?P=i)(?!""")\S[^\n]*\n(?:[ \t]*\n)*(?P=i)(?!""")(?!\w+[ \t]*\n(?P=i)-+[ \t]*$)\S'
+        args: [--multiline]
+        types: [python]
       - id: forbid-lam-lamda
         name: forbid `lam`/`lamda` identifier (use `lambda_` per PEP 8)
         language: pygrep
@@ -88,4 +98,25 @@ repos:
         # the trailing `\(` limits matches to function calls so docstrings that
         # mention `jax.vmap` are not flagged.
         entry: '\bjax\.vmap\s*\('
+        types: [python]
+      - id: forbid-mcmc-module-absolute-import
+        name: forbid `from bartz import mcmcstep/loop (use `from bartz.mcmcstep import foo`)
+        language: pygrep
+        # Forbids `from bartz import ...mcmcstep|mcmcloop...` and `import
+        # bartz.mcmcstep|mcmcloop`, which enable the `mcmcstep.foo`/`mcmcloop.foo`
+        # qualified-access antipattern. `from bartz.mcmcstep import foo` (and
+        # any submodule path like `bartz.mcmcstep._state`) is still allowed.
+        # Excluded: `src/bartz/__init__.py` (legitimate submodule re-export
+        # in the package's own init) and `benchmarks/` (deliberately probes
+        # API surface across bartz versions via module-qualified access).
+        exclude: '^(src/bartz/__init__\.py|benchmarks/)'
+        entry: '^\s*(from\s+bartz\s+import\s+[^\n]*\b(mcmcstep|mcmcloop)\b|import\s+bartz\.(mcmcstep|mcmcloop)\b)'
+        types: [python]
+      - id: forbid-dunder-all
+        name: forbid setting `__all__` in modules
+        language: pygrep
+        # matches any module-level `__all__` statement (plain/annotated/augmented
+        # assignments, `.append`/`.extend`, `del`, etc.). The `^` anchor restricts
+        # to column 0, so references inside indented code or docstrings are ignored.
+        entry: '^__all__\b'
         types: [python]

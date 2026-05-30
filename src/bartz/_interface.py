@@ -57,7 +57,6 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz import mcmcstep
 from bartz._jaxext import equal_shards, is_key, split
 from bartz._jaxext.scipy.special import ndtri
 from bartz._jaxext.scipy.stats import invgamma
@@ -82,11 +81,13 @@ from bartz.mcmcstep import OutcomeType, make_p_nonterminal
 from bartz.mcmcstep._state import (
     ArrayLike,
     FloatLike,
+    State,
     _inv_via_chol_with_gersh,
     chain_to_axis,
     chain_vmap_axes,
     chainful_axis,
     chol_with_gersh,
+    init,
     trace_sample_axes,
 )
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
@@ -163,7 +164,8 @@ class Bart(Module):
         ``'binary'`` for binary regression with probit link. For multivariate
         regression, a scalar value applies to all components; alternatively, a
         sequence of per-component types (e.g., ``['binary', 'continuous']``)
-        specifies mixed outcome types.
+        specifies mixed outcome types. Binary components in multivariate
+        outcomes follow the multivariate probit BART formulation of [4]_.
     sparse
         Whether to activate variable selection on the predictors as done in
         [1]_.
@@ -338,12 +340,16 @@ class Bart(Module):
        Bandyopadhyay (2023). "Bayesian additive regression trees for
        multivariate skewed responses". In: Statistics in Medicine 42.3,
        pp. 246-263.
+    .. [4] Goh, Yong Chen, Wuu Kuang Soh, Andrew C. Parnell, and Keefe
+       Murphy (2024). "Joint Models for Handling Non-Ignorable Missing
+       Data using Bayesian Additive Regression Trees: Application to
+       Leaf Photosynthetic Traits Data". arXiv:2412.14946 [stat.ME].
 
     """
 
     _main_trace: MainTrace
     _burnin_trace: BurninTrace
-    _mcmc_state: mcmcstep.State
+    _mcmc_state: State
     _binner: Binner
     _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
     # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
@@ -455,7 +461,7 @@ class Bart(Module):
         max_split = jnp.array(binner_obj.max_split)
 
         # setup and run mcmc
-        initial_state = _setup_mcmc(
+        initial_state, mcmc_key = _setup_mcmc(
             x_train,
             y_train,
             outcome_type,
@@ -483,9 +489,10 @@ class Bart(Module):
             devices,
             sparse,
             n_burn,
+            keys.pop(),
         )
         result = _run_mcmc(
-            initial_state, n_save, n_burn, n_skip, printevery, keys.pop(), run_mcmc_kw
+            initial_state, n_save, n_burn, n_skip, printevery, mcmc_key, run_mcmc_kw
         )
 
         # set public attributes
@@ -718,8 +725,7 @@ class Bart(Module):
 
         Returns
         -------
-        The resolved error scale as a float32 array, or `None` if weights
-        are not applicable.
+        The resolved error scale as a float32 array, or `None` if weights are not applicable.
 
         Raises
         ------
@@ -824,8 +830,7 @@ class Bart(Module):
 
         Returns
         -------
-        An array where ``(i, j, k)`` is `True` if tree `k` is invalid at
-        iteration `j` in chain `i` but not at iteration ``j - 1``.
+        An array where ``(i, j, k)`` is `True` if tree `k` is invalid at iteration `j` in chain `i` but not at iteration ``j - 1``.
         """
         return tree_goes_bad(self._main_trace, self._mcmc_state.forest.max_split)
 
@@ -893,7 +898,7 @@ class Bart(Module):
         return depth_distr(self._main_trace)
 
     def _points_per_node_distr(
-        self, node_type: str
+        self, node_type: Literal['leaf', 'leaf-parent']
     ) -> Int32[Array, '*num_chains n_save n+1']:
         return points_per_node_distr_trace(
             self._mcmc_state.X, self._main_trace, node_type
@@ -1273,7 +1278,8 @@ def _setup_mcmc(
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
     sparse: bool,
     n_burn: int,
-) -> mcmcstep.State:
+    mcmc_key: Key[Array, ''],
+) -> tuple[State, Key[Array, '']]:
     p_nonterminal = make_p_nonterminal(maxdepth, base, power)
 
     # process device settings
@@ -1310,17 +1316,17 @@ def _setup_mcmc(
 
     kw.update(init_kw)
 
-    state = mcmcstep.init(**kw)
+    state = init(**kw)
 
-    # put state on device if requested explicitly by the user
+    # put state and mcmc key on device if requested explicitly by the user
     if device is not None:
-        state = device_put(state, device, donate=True)
+        mcmc_key, state = device_put((mcmc_key, state), device, donate=True)
 
-    return state
+    return state, mcmc_key
 
 
 def _run_mcmc(
-    mcmc_state: mcmcstep.State,
+    mcmc_state: State,
     n_save: int,
     n_burn: int,
     n_skip: int,
@@ -1460,7 +1466,7 @@ def tree_goes_bad(
 
 @jit
 def compare_resid(
-    state: mcmcstep.State, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
+    state: State, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
 ) -> tuple[
     Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
     Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
@@ -1505,7 +1511,7 @@ def depth_distr(trace: MainTrace) -> Int32[Array, '*num_chains n_save d']:
 
 @partial(jit, static_argnames='node_type')
 def points_per_node_distr_trace(
-    X: UInt[Array, 'p n'], trace: MainTrace, node_type: str
+    X: UInt[Array, 'p n'], trace: MainTrace, node_type: Literal['leaf', 'leaf-parent']
 ) -> Int32[Array, '*num_chains n_save n+1']:
     """Histogram of number of points per node, for every tree draw in the trace."""
     chain_axes = chain_vmap_axes(trace)

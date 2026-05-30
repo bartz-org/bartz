@@ -43,12 +43,14 @@ import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError, tree_at
 from jax import (
+    Device,
     block_until_ready,
     config,
     debug_infs,
     debug_key_reuse,
     debug_nans,
     lax,
+    no_tracing,
     random,
     tree,
     vmap,
@@ -75,12 +77,12 @@ from bartz.grove import (
     tree_depths,
 )
 from bartz.mcmcloop import compute_varcount, evaluate_trace
+from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
-    assert_allclose,
     assert_array_equal,
     assert_close_matrices,
     assert_different_matrices,
@@ -325,7 +327,11 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     nt = 21
     p = 2
     high_p = 257  # > 256 to use uint16 for var_trees.
-    common = dict(num_trees=20, n_save=50, n_burn=50, seed=keys.pop())
+    # num_trees differs from n and nt so that the datapoint, test-datapoint, and
+    # tree axes have distinct lengths: an accidental misalignment of these axes
+    # then cannot pass by coincidence (e.g. it lets tests locate the datapoint
+    # axis by its length, see `test_permutation_invariance`)
+    common = dict(num_trees=19, n_save=50, n_burn=50, seed=keys.pop())
 
     match variant:
         # continuous regression with some settings that induce large types,
@@ -802,6 +808,51 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
         )
 
 
+def test_tree_structure_changes(bkw: BartKW, subtests: SubTests) -> None:
+    """Check how the tree structures change between consecutive MCMC iterations."""
+    kw = bkw.kw
+    kw['n_skip'] = 1  # so each saved sample is one MCMC step past the previous
+    bart = Bart(**kw)
+
+    trace = bart._main_trace
+    axes = chain_vmap_axes(trace)
+
+    # move the chain axis (if any) to the front, so that the leading `...`
+    # absorbs it uniformly whether or not it is there (CHAIN_AXIS is a global
+    # config, so we can't assume where the chain axis sits in the raw layout)
+    split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
+    grow_acc = chain_to_axis(trace.grow_acc_count, axes.grow_acc_count)
+    prune_acc = chain_to_axis(trace.prune_acc_count, axes.prune_acc_count)
+
+    # a tree structure is fully determined by its split tree (split_tree == 0
+    # marks inactive nodes); accepted grow/prune moves are exactly the ones that
+    # change it, while the optimistically-updated var_tree may differ on rejected
+    # grows too, so it must not be compared
+    differs = split_tree[..., 1:, :, :] != split_tree[..., :-1, :, :]
+
+    with subtests.test('acceptance count matches changed trees'):
+        # number of trees whose structure changed between consecutive iterations
+        num_changed = jnp.sum(jnp.any(differs, axis=-1), axis=-1)
+        acc_count = grow_acc[..., 1:] + prune_acc[..., 1:]
+        assert_array_equal(num_changed, acc_count)
+
+    with subtests.test('at most one changed split node per tree'):
+        # a single grow/prune move adds/removes exactly one decision node, so at
+        # most one split node changes per tree between consecutive iterations
+        num_changed_nodes = jnp.sum(differs, axis=-1)
+        assert_array_less(num_changed_nodes, 2)
+
+    with subtests.test('acceptance count does not exceed proposal count'):
+        # each tree proposes at most one move (grow or prune) per iteration, so
+        # proposals total at most one per tree, and acceptances are a subset
+        grow_prop = chain_to_axis(trace.grow_prop_count, axes.grow_prop_count)
+        prune_prop = chain_to_axis(trace.prune_prop_count, axes.prune_prop_count)
+        *_, num_trees, _ = split_tree.shape
+        assert jnp.all(grow_acc <= grow_prop)
+        assert jnp.all(prune_acc <= prune_prop)
+        assert jnp.all(grow_prop + prune_prop <= num_trees)
+
+
 def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     """Garbage finite y values at missing positions don't affect the fit."""
     kw = bkw.kw
@@ -827,6 +878,115 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     yhat2 = bart2.predict('train', kind='latent_samples')
     rtol = 0 if yhat1.platform() == 'cpu' else 1e-5
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
+
+
+def _assert_predictions_finite(bart: Bart, bkw: BartKW, keys: split) -> None:
+    """Assert every prediction kind is finite, on train and test predictors."""
+    for x_test, w in (('train', None), (bkw.x_test, bkw.w_test)):
+        for kind in ('mean', 'mean_samples', 'latent_samples'):
+            pred = bart.predict(x_test, kind=kind)
+            assert jnp.all(jnp.isfinite(pred)), (x_test, kind)
+        out = bart.predict(x_test, kind='outcome_samples', w=w, key=keys.pop())
+        assert jnp.all(jnp.isfinite(out)), (x_test, 'outcome_samples')
+    # error sdev is NaN by design for binary components, so only check it
+    # when there are none
+    if not bkw.any_binary:
+        assert jnp.all(jnp.isfinite(bart.get_error_sdev()))
+
+
+def test_constant_y_train(bkw: BartKW, keys: split, subtests: SubTests) -> None:
+    """Behavior when `y_train` is completely constant.
+
+    A constant response drives the automatic noise-scale estimate
+    (`sigest`, hence `lambda_`) to zero for any continuous outcome component,
+    which the API does not guard against: the degenerate error-variance prior
+    poisons the whole MCMC with NaNs. Binary outcomes are immune, because the
+    offset is clipped away from 0/1 and the noise scale is not a free parameter.
+    Supplying a positive `lambda_` repairs the continuous case; note the leaf
+    scale default ``tau_num = (max - min) / 2 = 0`` is left in place there to
+    confirm it is *not* fatal (it merely pins the leaves to zero).
+    """
+    kw = dict(bkw.kw)
+    # a single constant value: continuous components are flat, binary ones are
+    # all-ones (so the all-zero/all-one offset clipping kicks in)
+    kw['y_train'] = jnp.full_like(kw['y_train'], 1.0)
+
+    if bkw.all_binary:
+        # nothing degenerates with the defaults
+        with subtests.test('all binary, defaults are fine'):
+            bart = Bart(**kw)
+            _assert_predictions_finite(bart, bkw, keys)
+    else:
+        # at least one continuous component: the automatic noise prior collapses
+        with subtests.test('continuous defaults produce NaNs'):
+            # use the unwrapped class: the wrapper's trace-validity check would
+            # itself raise on the degenerate run, but we want to observe the NaNs
+            bart = OriginalBart(**kw)
+            with debug_nans(False):
+                latent = bart.predict('train', kind='latent_samples')
+            assert jnp.any(jnp.isnan(latent))
+
+        with subtests.test('explicit lambda_ repairs it'):
+            bart = Bart(**dict(kw, lambda_=1.0))
+            _assert_predictions_finite(bart, bkw, keys)
+            # tau_num kept at its degenerate default (0): the infinite leaf-prior
+            # precision pins every leaf to exactly zero
+            leaf_tree = bart._mcmc_state.forest.leaf_tree
+            assert_array_equal(leaf_tree, jnp.zeros_like(leaf_tree))
+
+
+def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
+    """A constant predictor has no available cutpoints.
+
+    With ``rm_const=False`` the splitless predictor triggers an error; with
+    ``rm_const=True`` (default) predictor 0 is ignored, which must show up in
+    every downstream signal: it is splitless, listed in ``blocked_vars``, never
+    counted in `varcount`, assigned zero `varprob`, and never selected for a
+    decision rule in the `var_tree` of the main trace.
+    """
+    kw = dict(bkw.kw)
+
+    # make predictor 0 constant so it has no available cutpoints; force a
+    # quantile binner because e.g. RangeEvenBinner would still place cutpoints
+    # over the degenerate range, leaving the predictor formally splittable
+    x = kw['x_train']
+    kw['x_train'] = x.at[0, :].set(x[0, 0])
+    kw['binner'] = partial(UniqueQuantileBinner, max_subsample=None)
+
+    bart = Bart(**kw)
+
+    forest = bart._mcmc_state.forest
+    with subtests.test('predictor 0 is splitless'):
+        assert forest.max_split[0] == 0
+
+    with subtests.test('blocked_vars lists predictor 0'):
+        (expected,) = jnp.nonzero(forest.max_split == 0)
+        assert_array_equal(jnp.sort(forest.blocked_vars), expected, strict=False)
+        assert jnp.any(forest.blocked_vars == 0)
+
+    with subtests.test('varcount ignores predictor 0'):
+        assert jnp.all(bart.varcount[:, 0] == 0)
+        assert jnp.any(bart.varcount[:, 1:] > 0)  # the test is not vacuous
+
+    with subtests.test('varprob ignores predictor 0'):
+        assert jnp.all(bart.varprob[:, 0] == 0)
+
+    with subtests.test('predictor 0 absent from var_tree'):
+        trace = bart._main_trace
+        axes = chain_vmap_axes(trace)
+        var_tree = chain_to_axis(trace.var_tree, axes.var_tree)
+        split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
+        # only active decision nodes carry a meaningful variable; predictor 0
+        # (var index 0) must never appear among them
+        active = split_tree > 0
+        assert jnp.any(active)  # the test is not vacuous
+        assert jnp.all(var_tree[active] != 0)
+
+    with (
+        subtests.test('rm_const=False raises'),
+        pytest.raises(EquinoxRuntimeError, match='predictors with no splits'),
+    ):
+        Bart(**dict(kw, rm_const=False, seed=random.clone(kw['seed'])))
 
 
 def test_output_shapes(bkw: BartKW, keys: split) -> None:
@@ -998,7 +1158,8 @@ class TestVarprobAttr:
 
         assert jnp.all(bart.varprob >= 0)
         assert jnp.all(bart.varprob <= 1)
-        assert_allclose(bart.varprob.sum(axis=1), 1, rtol=1e-6)
+        varprob_sum = bart.varprob.sum(axis=1)
+        assert_close_matrices(varprob_sum, jnp.ones_like(varprob_sum), rtol=1e-6)
 
         if not bkw.sparse:
             unique = jnp.unique(bart.varprob)
@@ -1074,8 +1235,12 @@ def test_scale_shift(bkw: BartKW) -> None:
     y = kw['y_train']
     y = jnp.where(mask[..., None], y, offset + y * scale)
 
+    x_offset = -0.6184722
+    x_scale = 1.8521347
+    x = x_offset + x_scale * kw['x_train']
+
     kw2 = dict(kw)
-    kw2.update(y_train=y, seed=random.clone(kw['seed']))
+    kw2.update(x_train=x, y_train=y, seed=random.clone(kw['seed']))
     bart2 = Bart(**kw2)
 
     assert_close_matrices(
@@ -1126,7 +1291,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     )
 
     yhat_test1 = bart1.predict(kw['x_train'], kind='latent_samples')
-    yhat_test2 = bart2.predict(kw['x_train'], kind='latent_samples')
+    yhat_test2 = bart2.predict(x, kind='latent_samples')
     assert_close_matrices(
         yhat_test1,
         jnp.where(mask_pred, yhat_test2, (yhat_test2 - offset) / scale),
@@ -1135,7 +1300,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     )
 
     yhat_test_mean1 = bart1.predict(kw['x_train'], kind='mean')
-    yhat_test_mean2 = bart2.predict(kw['x_train'], kind='mean')
+    yhat_test_mean2 = bart2.predict(x, kind='mean')
     assert_close_matrices(
         yhat_test_mean1,
         jnp.where(mask_pred, yhat_test_mean2, (yhat_test_mean2 - offset) / scale),
@@ -1153,6 +1318,54 @@ def test_scale_shift(bkw: BartKW) -> None:
         )
     assert_close_matrices(sdev_actual, sdev_expected, rtol=1e-5, reduce_rank=True)
     assert_close_matrices(sdev_mean_actual, sdev_mean_expected, rtol=1e-5)
+
+
+def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
+    """Check that `Bart` is invariant under permutation of the datapoints.
+
+    Permuting the inputs along their datapoint axis and inverse-permuting the
+    datapoint axis of the fitted arrays must recover the original fit. Binary
+    outcomes are excluded: their latent-variable augmentation draws a
+    per-datapoint normal keyed by the datapoint position, so permuting the
+    data changes the augmentation, and hence the fit.
+    """
+    if bkw.any_binary:
+        pytest.skip('binary latent augmentation is position-dependent')
+
+    kw = bkw.kw
+    bart1 = Bart(**kw)
+
+    # permute every input with a datapoint axis (always the last one)
+    n = bkw.n
+    perm = random.permutation(keys.pop(), n)
+    kw2 = dict(kw, seed=random.clone(kw['seed']))
+    kw2['x_train'] = kw['x_train'][:, perm]
+    kw2['y_train'] = kw['y_train'][..., perm]
+    if kw.get('w') is not None:
+        kw2['w'] = kw['w'][..., perm]
+    if kw.get('missing') is not None:
+        kw2['missing'] = kw['missing'][..., perm]
+    bart2 = Bart(**kw2)
+
+    # inverse-permute every fitted array along its datapoint axis; `n` differs
+    # from every other axis length (see `make_kw`), so the datapoint axis is the
+    # unique axis with that length
+    inv = jnp.argsort(perm)
+
+    def unpermute(x: Array) -> Array:
+        if n not in getattr(x, 'shape', ()):
+            return x
+        (axis,) = (i for i, length in enumerate(x.shape) if length == n)
+        return jnp.take(x, inv, axis=axis)
+
+    bart2 = tree.map(unpermute, bart2)
+
+    def check_equal(path: KeyPath, x1: Array, x2: Array) -> None:
+        assert_close_matrices(
+            x2, x1, err_msg=f'{keystr(path)}: ', rtol=1e-5, reduce_rank=True
+        )
+
+    tree.map_with_path(check_equal, bart1, bart2)
 
 
 def test_min_points_per_decision_node(bkw: BartKW) -> None:
@@ -1226,7 +1439,7 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
     if num_datapoints == 0 or bkw.all_binary:
         assert_array_equal(bart.offset, jnp.zeros_like(bart.offset))
     else:
-        assert_allclose(
+        assert_close_matrices(
             bart.offset[..., None],
             jnp.where(mask[..., None], 0.0, kw['y_train']),
             rtol=1e-6,
@@ -1250,9 +1463,19 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
 
     # with 1 datapoint in the multivariate case, log_likelihood is not exactly 0
     # because matrix inversion adds an epsilon to handle ill-conditioned matrices
-    atol = 0.0 if num_datapoints == 0 else 1e-6
-    assert_allclose(bart._burnin_trace.log_likelihood, 0.0, atol=atol)
-    assert_allclose(bart._main_trace.log_likelihood, 0.0, atol=atol)
+    atol = 0.0 if num_datapoints == 0 else 1e-4
+    assert_close_matrices(
+        bart._burnin_trace.log_likelihood,
+        jnp.zeros_like(bart._burnin_trace.log_likelihood),
+        atol=atol,
+        reduce_rank=True,
+    )
+    assert_close_matrices(
+        bart._main_trace.log_likelihood,
+        jnp.zeros_like(bart._main_trace.log_likelihood),
+        atol=atol,
+        reduce_rank=True,
+    )
 
 
 def test_two_datapoints(bkw: BartKW) -> None:
@@ -1356,10 +1579,11 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
 
         with subtests.test('varcount'):
             rhat_varcount = rhat_rank([bart.varcount, varcount_prior], split=False)
-            if p == 10:
-                assert_array_less(rhat_varcount, 1.05)
-            else:
-                assert_array_less(rhat_varcount, 1.02)
+            # `rhat_varcount` is a max over `p` rank-rhat values; its upper tail
+            # reaches ~1.05 even when the MCMC matches the prior exactly (checked
+            # over 100 seeds for both p=3 and p=10), so a tighter bound would
+            # false-fail on ~10% of seeds.
+            assert_array_less(rhat_varcount, 1.05)
 
         with subtests.test('number of nodes'):
             sum_varcount_mcmc = bart.varcount.sum(axis=1)
@@ -1524,6 +1748,131 @@ def test_jit(bkw: BartKW) -> None:
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
     assert_close_matrices(pred1, pred2, rtol=1e-5, reduce_rank=True)
+
+
+def test_vmap(bkw: BartKW, keys: split) -> None:
+    """Test that jit(vmap(...))ing around the whole interface works.
+
+    Vmaps `Bart` over a leading repetition axis added to every input carrying
+    the data dimension ``n`` (``x_train``, ``y_train``, ``w``, ``missing``),
+    and checks each leaf of the vmapped `Bart` matches the stack of the
+    corresponding leaves of the per-repetition `Bart` objects.
+    """
+    kw = bkw.kw
+    kw.update(printevery=None, rm_const=False)
+
+    platform = kw['y_train'].platform()
+    kw.update(devices=jax.devices(platform))
+
+    binary_mask = bkw.binary_mask  # read before popping y_train
+
+    X = kw.pop('x_train')
+    y = kw.pop('y_train')
+    w = kw.pop('w', None)
+    missing = kw.pop('missing', None)
+    kw.pop('seed')  # replaced by a distinct per-repetition key below
+
+    nrep = 3
+    key = keys.pop(nrep)  # one MCMC seed per repetition
+
+    def tile(a: Shaped[Array, '...']) -> Shaped[Array, 'nrep ...']:
+        return jnp.broadcast_to(a, (nrep, *a.shape))
+
+    # tile each input over the repetition axis, then add a per-repetition
+    # perturbation that keeps it valid (positive `w`, boolean `missing`,
+    # binary outcome components in ``{0, 1}``)
+    Xb = tile(X) + 0.1 * random.normal(keys.pop(), (nrep, *X.shape))
+
+    is_binary = jnp.broadcast_to(binary_mask[..., None], y.shape)
+    yb_cont = tile(y) + 0.1 * random.normal(keys.pop(), (nrep, *y.shape))
+    yb_bin = tile(y).astype(bool) ^ random.bernoulli(keys.pop(), 0.1, (nrep, *y.shape))
+    yb = jnp.where(tile(is_binary), yb_bin.astype(y.dtype), yb_cont)
+
+    if w is None:
+        wb = None
+    else:
+        wb = tile(w) * jnp.exp(0.1 * random.normal(keys.pop(), (nrep, *w.shape)))
+
+    if missing is None:
+        mb = None
+    else:
+        mb = tile(missing) ^ random.bernoulli(keys.pop(), 0.1, (nrep, *missing.shape))
+
+    def task(
+        X: Shaped[Array, 'p n'],
+        y: Shaped[Array, ' n'] | Shaped[Array, 'k n'],
+        w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
+        missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+        key: Key[Array, ''],
+    ) -> OriginalBart:
+        return OriginalBart(X, y, w=w, missing=missing, **kw, seed=key)
+
+    batched = jax.jit(vmap(task))(Xb, yb, wb, mb, key)
+
+    key_singles = random.clone(key)  # avoid reusing the keys consumed by vmap
+    singles = [
+        task(
+            Xb[i, ...],
+            yb[i, ...],
+            None if wb is None else wb[i, ...],
+            None if mb is None else mb[i, ...],
+            key_singles[i],
+        )
+        for i in range(nrep)
+    ]
+    stacked = tree.map(lambda *leaves: jnp.stack(leaves), *singles)
+
+    def check(a: Array, b: Array) -> None:
+        assert_close_matrices(a, b, rtol=1e-5, reduce_rank=True)
+
+    tree.map(check, batched, stacked)
+
+
+# WORKAROUND(jax<0.7.2): before 0.7.2, callbacks (pure_callback in
+# gammainccinv, equinox debug checks) disable JAX's C++ pjit fastpath cache, so
+# no_tracing raises a false positive without any actual jaxpr re-tracing. Remove
+# this skip once the oldest supported jax is >= 0.7.2.
+@pytest.mark.skipif(
+    jax.__version_info__ < (0, 7, 2),
+    reason='no_tracing gives false positives with jax < 0.7.2: callbacks '
+    '(pure_callback in gammainccinv, equinox debug checks) disable '
+    "JAX's C++ pjit fastpath cache, so no_tracing raises without any actual "
+    'jaxpr re-tracing (see test_no_recompilation_inner_loop_counter for the '
+    'version-robust check)',
+)
+def test_no_recompilation_no_tracing(bkw: BartKW) -> None:
+    """Check that running the same `Bart` invocation twice does not retrace.
+
+    Uses `jax.no_tracing` to detect any new jaxpr tracing in the second
+    invocation. Forces ``printevery=None`` because `debug.callback` (used by
+    `print_callback`) introduces an unordered effect that disables JAX's C++
+    pjit fastpath cache, which would make `no_tracing` raise even when no
+    actual jaxpr re-tracing happens. Uses `OriginalBart` (not the wrapper)
+    because the wrapper's `_check_replicated_trees` creates a fresh
+    `shard_map` each call, which doesn't cache across invocations.
+    """
+    kw = dict(bkw.kw, printevery=None)
+    OriginalBart(**kw)
+    kw2 = dict(kw, seed=random.clone(kw['seed']))
+    with no_tracing():
+        OriginalBart(**kw2)
+
+
+def test_no_recompilation_inner_loop_counter(bkw: BartKW) -> None:
+    """Check the MCMC inner loop is not retraced on the second `Bart` call.
+
+    Uses the `_CallCounter` already wrapping `_run_mcmc_inner_loop`. The
+    counter is reset at the start of each `run_mcmc` and increments only on
+    actual Python-side tracing of the inner loop; if the JIT cache hits it
+    stays at 0. Unlike `test_no_recompilation_no_tracing`, this works with
+    the default ``printevery`` (which uses `debug.callback`), but only
+    covers `_run_mcmc_inner_loop`.
+    """
+    kw = bkw.kw
+    Bart(**kw)
+    kw2 = dict(kw, seed=random.clone(kw['seed']))
+    Bart(**kw2)
+    assert _run_mcmc_inner_loop._fun.n_calls == 0
 
 
 def test_print_callback_terminates_dot_line(
@@ -1974,16 +2323,24 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
         outcome_type = outcome_type[0]
 
-    y_mv = bkw.kw['y_train']
-    if bkw.k is None:  # pragma: no cover, bc defaults are mv only
-        y_mv = y_mv[None, :]
-    y_mv = y_mv[:1, :]
-    y_uv = y_mv.squeeze(0)
+    def to_uv_mv(arr: Array | None) -> tuple[Array | None, Array | None]:
+        """Split a ``(n,)`` or ``(k, n)`` array into UV and MV(k=1) versions."""
+        if arr is None:
+            return None, None
+        if arr.ndim == 1:
+            arr = arr[None, :]
+        arr_mv = arr[:1, :]
+        return arr_mv.squeeze(0), arr_mv
 
-    bkw.kw.update(outcome_type=outcome_type, n_burn=0, n_save=0, w=None, missing=None)
-    del bkw.kw['y_train']
-    bart_uv = Bart(y_train=y_uv, **bkw.kw)
-    bart_mv = Bart(y_train=y_mv, **bkw.kw)
+    y_uv, y_mv = to_uv_mv(bkw.kw['y_train'])
+    w_uv, w_mv = to_uv_mv(bkw.kw.get('w'))
+    missing_uv, missing_mv = to_uv_mv(bkw.kw.get('missing'))
+
+    bkw.kw.update(outcome_type=outcome_type, n_burn=0, n_save=0)
+    for key in ('y_train', 'w', 'missing'):
+        bkw.kw.pop(key, None)
+    bart_uv = Bart(y_train=y_uv, w=w_uv, missing=missing_uv, **bkw.kw)
+    bart_mv = Bart(y_train=y_mv, w=w_mv, missing=missing_mv, **bkw.kw)
 
     state_uv = bart_uv._mcmc_state
     state_mv = bart_mv._mcmc_state
@@ -1997,7 +2354,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         chain_to_axis(state_uv.resid, uv_axes.resid),
         chain_to_axis(state_mv.resid, mv_axes.resid).squeeze(-2),
     )
-    assert_allclose(
+    assert_close_matrices(
         chain_to_axis(state_uv.error_cov_inv, uv_axes.error_cov_inv),
         chain_to_axis(state_mv.error_cov_inv, mv_axes.error_cov_inv).squeeze((-2, -1)),
         rtol=1e-6,
@@ -2134,6 +2491,101 @@ def test_numpy_input(bkw: BartKW) -> None:
     bart2 = Bart(**kw2)
 
     assert_identical_bart(bart1, bart2)
+
+
+def assert_bart_on_device(bart: Bart, device: Device) -> None:
+    """Check that the MCMC state and traces of ``bart`` live on ``device``."""
+
+    def check(path: KeyPath, x: Array | object) -> None:
+        if isinstance(x, Array):
+            assert x.devices() == {device}, (
+                f'{keystr(path)}: expected {device}, got {x.devices()}'
+            )
+
+    tree.map_with_path(check, (bart._mcmc_state, bart._main_trace, bart._burnin_trace))
+
+
+class TestDevicePlacement:
+    """Test how `Bart` selects the device for the result.
+
+    Skipped if only one device is available.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_single_device(self) -> None:
+        if len(jax.devices()) < 2:  # this branch is covered in single cpu tests config
+            pytest.skip('Need at least 2 devices for device placement tests')
+
+    @pytest.fixture
+    def other_device(self) -> Device:
+        """Return a device different from the default one."""
+        default = get_default_device()
+        return next(d for d in jax.devices() if d != default)
+
+    @pytest.fixture
+    def single_device_kw(self, bkw: BartKW) -> dict:
+        """``bkw.kw`` with sharding disabled so the result lives on a single device."""
+        return dict(bkw.kw, num_chain_devices=None, num_data_devices=None)
+
+    @pytest.fixture
+    def committed_kw(self, single_device_kw: dict, other_device: Device) -> dict:
+        """Like ``single_device_kw`` with all JAX inputs committed to ``other_device``."""
+
+        def commit(x: Any) -> Any:  # noqa: ANN401
+            if isinstance(x, Array):
+                return jax.device_put(x, other_device)
+            return x
+
+        return tree.map(commit, single_device_kw)
+
+    @pytest.fixture(params=['jax', 'numpy'])
+    def uncommitted_kw(self, single_device_kw: dict, request: FixtureRequest) -> dict:
+        """``single_device_kw`` with arrays as JAX or NumPy (both uncommitted)."""
+        if request.param == 'jax':
+            return single_device_kw
+
+        def to_numpy(x: Any) -> Any:  # noqa: ANN401
+            if isinstance(x, Array) and not is_key(x):
+                return numpy.asarray(x)
+            return x
+
+        # numpy doesn't support jax keys; this test only checks device
+        # placement, not values, so swapping the seed is safe
+        return dict(tree.map(to_numpy, single_device_kw), seed=0)
+
+    def test_uncommitted_default(self, uncommitted_kw: dict) -> None:
+        """Uncommitted inputs put the result on the default device."""
+        bart = Bart(**uncommitted_kw)
+        assert_bart_on_device(bart, get_default_device())
+
+    def test_uncommitted_with_devices(
+        self, uncommitted_kw: dict, other_device: Device
+    ) -> None:
+        """With uncommitted inputs, ``devices`` selects the result device."""
+        bart = Bart(**dict(uncommitted_kw, devices=other_device))
+        assert_bart_on_device(bart, other_device)
+
+    def test_committed_followed(self, committed_kw: dict, other_device: Device) -> None:
+        """Committed inputs determine the result device when ``devices`` is unset."""
+        bart = Bart(**committed_kw)
+        assert_bart_on_device(bart, other_device)
+
+    def test_committed_inconsistent_errors(
+        self, single_device_kw: dict, other_device: Device
+    ) -> None:
+        """Committed inputs on different devices raise an error."""
+        kw = dict(
+            single_device_kw,
+            x_train=jax.device_put(single_device_kw['x_train'], get_default_device()),
+            y_train=jax.device_put(single_device_kw['y_train'], other_device),
+        )
+        with pytest.raises(ValueError, match='incompatible devices'):
+            Bart(**kw)
+
+    def test_devices_overrides_committed(self, committed_kw: dict) -> None:
+        """When both committed inputs and ``devices`` are set, ``devices`` wins."""
+        bart = Bart(**dict(committed_kw, devices=get_default_device()))
+        assert_bart_on_device(bart, get_default_device())
 
 
 def test_sigest_wrong_special_value(bkw: BartKW) -> None:

@@ -575,17 +575,20 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' 2**d']) -> Move
     -------
     The updated moves, with `partial_ratio=None` and `log_trans_prior_ratio` set.
     """
-    # can the leaves be grown?
-    left_growable = moves.affluence_tree.at[moves.left].get(
+    # can the children be grown by the proposal? This uses the count-filtered
+    # `affluence_tree`, because the grow proposal draws from the pool of leaves
+    # that pass the `min_points_per_decision_node` threshold. It enters only
+    # the transition probability.
+    left_affluent = moves.affluence_tree.at[moves.left].get(
         mode='fill', fill_value=False
     )
-    right_growable = moves.affluence_tree.at[moves.right].get(
+    right_affluent = moves.affluence_tree.at[moves.right].get(
         mode='fill', fill_value=False
     )
 
     # p_prune if grow
     other_growable_leaves = moves.num_growable >= 2
-    grow_again_allowed = other_growable_leaves | left_growable | right_growable
+    grow_again_allowed = other_growable_leaves | left_affluent | right_affluent
     grow_p_prune = jnp.where(grow_again_allowed, 0.5, 1.0)
 
     # p_prune if prune
@@ -594,9 +597,13 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' 2**d']) -> Move
     # select p_prune
     p_prune = jnp.where(moves.grow, grow_p_prune, prune_p_prune)
 
-    # prior probability of both children being terminal
-    pt_left = 1 - p_nonterminal[moves.left] * left_growable
-    pt_right = 1 - p_nonterminal[moves.right] * right_growable
+    # prior probability of both children being terminal. This uses the
+    # admissibility ignoring counts, because the standard BART prior conditions
+    # the non-terminal probability only on the existence of available decision
+    # rules, not on the count thresholds (which are a bartz proposal-efficiency
+    # device, not part of the target distribution).
+    pt_left = 1 - p_nonterminal[moves.left] * moves.left_growable
+    pt_right = 1 - p_nonterminal[moves.right] * moves.right_growable
     pt_children = pt_left * pt_right
 
     assert moves.partial_ratio is not None
@@ -1209,8 +1216,7 @@ def sum_resid(
 
     Returns
     -------
-    The per-leaf sum, with the same leading dimensions as ``scaled_resid`` and
-    a trailing axis over the leaves.
+    The per-leaf sum, with the same leading dimensions as ``scaled_resid`` and a trailing axis over the leaves.
     """
     return _scatter_add(
         scaled_resid,

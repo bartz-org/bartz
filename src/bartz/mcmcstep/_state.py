@@ -107,8 +107,7 @@ def field(  # noqa: ANN202
 
     Returns
     -------
-    A dataclass field descriptor with the axis indices in the metadata, unset
-    if `None`.
+    A dataclass field descriptor with the axis indices in the metadata, unset if `None`.
     """
     metadata = dict(kwargs.pop('metadata', {}))
     assert 'chains' not in metadata
@@ -142,11 +141,7 @@ def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
 
     Returns
     -------
-    A pytree with the same structure as `x`, with each leaf set to the chain
-    axis index declared by its owning ``field(chains=...)`` marker, normalized
-    against the leaf's ``ndim`` (so the returned indices are non-negative), or
-    `None` for unmarked leaves. If `has_chains` is `False`, every leaf is
-    `None`.
+    A pytree with the same structure as `x`, with each leaf set to the chain axis index declared by its owning ``field(chains=...)`` marker, normalized against the leaf's ``ndim`` (so the returned indices are non-negative), or `None` for unmarked leaves. If `has_chains` is `False`, every leaf is `None`.
     """
     if not get_has_chains(x):
         return _find_metadata(x, 'chains', marker_value=_none_marker)

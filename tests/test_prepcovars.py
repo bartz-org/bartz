@@ -257,6 +257,18 @@ class TestBinners:
         assert_array_equal(withk._splits, without._splits)
         assert_array_equal(withk.max_split, without.max_split)
 
+    def test_range_even_constant_predictor(self) -> None:
+        """A constant predictor splits two-ways at its value: <= -> bin 0, > -> last bin."""
+        # row 0 is constant, row 1 is not (so only one row hits the step==0 path)
+        x = jnp.array([[5.0, 5.0, 5.0, 5.0], [-1.0, 0.0, 1.0, 2.0]])
+        binner = RangeEvenBinner(x, max_bins=8)
+        x_test = jnp.array([[4.0, 5.0, 6.0, 5.0], [-1.0, 0.0, 1.0, 2.0]])
+        # arithmetic bin() must agree with searchsorted on the materialized cutpoints
+        assert_array_equal(binner.bin(x_test), _bin_predictors(x_test, binner._splits))
+        # and match the explicit expectation for the constant row: values <= 5 go
+        # to bin 0, values > 5 go to the last bin (max_bins - 1 == 7)
+        assert_array_equal(binner.bin(x_test)[0], [0, 0, 7, 0], strict=False)
+
     def test_unique_quantile_no_subsample(self) -> None:
         """With `max_subsample=None`, output matches `_quantilized_splits_from_matrix`."""
         x = jnp.tile(jnp.arange(10.0), (3, 1))

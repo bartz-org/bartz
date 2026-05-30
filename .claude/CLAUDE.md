@@ -65,17 +65,18 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
 
 - **Formatter/linter:** ruff with single quotes
 - **Imports:** generally use `from foo import bar` (relative import) instead of `import foo; foo.bar`, but for some heavily used big (sub)modules, e.g., `from jax import random; random.foo` is preferred to `from jax.random import foo, foo1, foo2, ..., foo999999`.
-- **Type annotations:**
 - **Headers** All source files carry an MIT copyright header
 - **docstrings:**
     - numpy convention
     - class attributes documented individually with string just below (not in class docstring)
     - keep docstrings short, don't fill them with implementation details
+        - related: no redundant comments, if the code is readable, it's self-documenting
     - keep private/internal docstrings short or absent if they are so already
     - keep return value description relatively short and strictly on one line, html render garbles it otherwise
 - **jax** conventions:
     - don't cast to jax arrays things which are already jax arrays (e.g., notice type hints or previous casts)
     - avoid explicit jax types if not necessary, e.g., do `jnp.ones(shape)` instead of `jnp.ones(shape, jnp.float32)`, `1.0` instead of `jnp.float32(1.0)` (unless we need a strong type to auto-cast unsanitized arrays), etc.
+        - you can also pass python scalars or numpy arrays to jax-jitted functions and they will be converted
     - try to unify code paths by clever usage of array indexing/broadcasting/axes, e.g., `x[..., i]` will work both if x is 2d or 1d, many places in the library use such tricks
     - indexing/shape conventions that improve readability and implicitly check for shape errors:
         - to get an axis length in an array, use tuple unpacking, e.g.: `_, _, k = x.shape`, `*_, l, _ = y.shape`
@@ -83,12 +84,14 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
     - use `array.item()` to cast an array to a scalar python type
 - other **python** conventions:
     - use dicts as if they were frozendicts when possible: e.g., do `d = dict(d, a=1, b=2)` to set values instead of `d['a'] = 1` or `d.update(a=1)`, safer
+        - related: prefer tuples to lists
     - type annotations:
         - do not stringify type annotations
         - jaxtyping for array shapes (`Float32[Array, 'n p']`)
             - space before single-axis annotation `Float32[Array, ' n']` because of linter bug
         - type hints in signatures, not in docstrings
             - but when returning multiple values, copy the type hints verbatim in the return values list, because the html doc render does not support multi-valued return natively
+- **WORKAROUND markers:** we support comments like `# WORKAROUND(jax<99): remove this patch when we bump jax to v99`, enforced by `make lint` checking the oldest supported version of the package, also works with python versions
 
 ## Testing
 
@@ -100,3 +103,8 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
     - use `rtol` in test comparisons, add `atol` only if necessary (comparison of values that are near zero on some relevant scale)
     - there's also `assert_different_matrices` to check things are not equal, this requires to set both atol and rtol which are +inf by default
 - in general prefer `assert_` functions from `tests.util` and `numpy.testing` to plain `assert` if appropriate
+
+## Benchmarks
+
+- in `benchmarks/`, import APIs used for scaffolding (utilities) from `benchmarks.latest_bartz` (auto-updated vendored copy), while import from `bartz` (changes version during benchmark run) only the stuff to benchmark
+- after editing benchmarks, test them with `make asv-quick ARGS='--bench <pattern>'` or equivalent

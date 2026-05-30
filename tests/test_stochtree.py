@@ -58,10 +58,29 @@ from tests.util import (
     rhat_rank,
 )
 
+# Common static settings shared across the module. jax recompiles whenever an
+# array shape or a static loop length changes, so every test that has no reason
+# to need a specific value uses these, letting jax reuse compiled code.
+N_TRAIN = 50
+N_TEST = 20
+NUM_BURNIN = 20
+NUM_MCMC = 40
+
 _GEN_KW = dict(p=4, q=2, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.5)
 # `mean_forest_params` override that disables the bartz-incompatible
 # leaf-variance sampler. All sample()-using tests start from this base.
 _MFP_BASE: Mapping = MappingProxyType({'sample_sigma2_leaf': False})
+# `BARTModel.sample` keyword bundle for the common case: the grow-from-root
+# sampler is off and the loop lengths are fixed, so the compiled code is reused
+# across tests. Tests that must deviate expand `dict(_SAMPLE_KW, ...)`.
+_SAMPLE_KW: Mapping = MappingProxyType(
+    dict(
+        num_gfr=0,
+        num_burnin=NUM_BURNIN,
+        num_mcmc=NUM_MCMC,
+        mean_forest_params=_MFP_BASE,
+    )
+)
 
 
 class _Data(NamedTuple):
@@ -70,16 +89,28 @@ class _Data(NamedTuple):
     X_test: Array  # (m, p)
 
 
-def _make_continuous(keys: split, n: int = 200, n_test: int = 60) -> _Data:
+def _make_continuous(keys: split, n: int = N_TRAIN, n_test: int = N_TEST) -> _Data:
     train = gen_data(keys.pop(), n=n, outcome_type='continuous', **_GEN_KW)
     test = gen_data(keys.pop(), n=n_test, outcome_type='continuous', **_GEN_KW)
     return _Data(X_train=train.x.T, y_train=train.y, X_test=test.x.T)
 
 
-def _make_binary(keys: split, n: int = 200, n_test: int = 60) -> _Data:
+def _make_binary(keys: split, n: int = N_TRAIN, n_test: int = N_TEST) -> _Data:
     train = gen_data(keys.pop(), n=n, outcome_type='binary', **_GEN_KW)
     test = gen_data(keys.pop(), n=n_test, outcome_type='binary', **_GEN_KW)
     return _Data(X_train=train.x.T, y_train=train.y.astype(jnp.int32), X_test=test.x.T)
+
+
+@pytest.fixture
+def continuous_data(keys: split) -> _Data:
+    """Continuous train/test data with the module's common shapes."""
+    return _make_continuous(keys)
+
+
+@pytest.fixture
+def binary_data(keys: split) -> _Data:
+    """Binary train/test data with the module's common shapes."""
+    return _make_binary(keys)
 
 
 def _rhat_two_chains(a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -94,18 +125,12 @@ def _rhat_two_chains(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return rhat_rank(stacked, split=False)
 
 
-def test_continuous_smoke(keys: split) -> None:
+def test_continuous_smoke(continuous_data: _Data) -> None:
     """Sample a small continuous model and check output shapes."""
-    data = _make_continuous(keys, n=80, n_test=20)
+    data = continuous_data
     m = bst.BARTModel()
     m.sample(
-        X_train=data.X_train,
-        y_train=data.y_train,
-        X_test=data.X_test,
-        num_gfr=0,
-        num_burnin=30,
-        num_mcmc=80,
-        mean_forest_params=_MFP_BASE,
+        X_train=data.X_train, y_train=data.y_train, X_test=data.X_test, **_SAMPLE_KW
     )
     assert m.is_sampled()
     assert m.y_hat_train.shape == (data.X_train.shape[0], m.num_samples)
@@ -114,18 +139,11 @@ def test_continuous_smoke(keys: split) -> None:
     assert m.outcome_model.outcome == 'continuous'
 
 
-def test_predict_shapes(keys: split) -> None:
+def test_predict_shapes(continuous_data: _Data) -> None:
     """Check the various combinations of `type`, `terms`, and `scale`."""
-    data = _make_continuous(keys, n=50, n_test=15)
+    data = continuous_data
     m = bst.BARTModel()
-    m.sample(
-        X_train=data.X_train,
-        y_train=data.y_train,
-        num_gfr=0,
-        num_burnin=10,
-        num_mcmc=30,
-        mean_forest_params=_MFP_BASE,
-    )
+    m.sample(X_train=data.X_train, y_train=data.y_train, **_SAMPLE_KW)
     assert m.predict(data.X_test, terms='y_hat').shape == (
         data.X_test.shape[0],
         m.num_samples,
@@ -138,21 +156,18 @@ def test_predict_shapes(keys: split) -> None:
     assert full['y_hat'].shape == (data.X_test.shape[0], m.num_samples)
 
 
-def test_binary_smoke(keys: split) -> None:
+def test_binary_smoke(binary_data: _Data) -> None:
     """Sample a probit model and check probability-scale predictions."""
-    data = _make_binary(keys, n=80, n_test=20)
+    data = binary_data
     m = bst.BARTModel()
     m.sample(
         X_train=data.X_train,
         y_train=data.y_train,
         X_test=data.X_test,
-        num_gfr=0,
-        num_burnin=30,
-        num_mcmc=80,
         general_params={
             'outcome_model': bst.OutcomeModel(outcome='binary', link='probit')
         },
-        mean_forest_params=_MFP_BASE,
+        **_SAMPLE_KW,
     )
     assert m.outcome_model.outcome == 'binary'
     prob = np.asarray(
@@ -165,20 +180,19 @@ def test_binary_smoke(keys: split) -> None:
 
 
 @pytest.mark.parametrize('terms', ['mean_forest', 'all', ['y_hat', 'mean_forest']])
-def test_class_scale_requires_single_y_hat(keys: split, terms: str | list[str]) -> None:
+def test_class_scale_requires_single_y_hat(
+    binary_data: _Data, terms: str | list[str]
+) -> None:
     """`scale='class'` matches stochtree: only a single 'y_hat' term is allowed."""
-    data = _make_binary(keys, n=40, n_test=10)
+    data = binary_data
     m = bst.BARTModel()
     m.sample(
         X_train=data.X_train,
         y_train=data.y_train,
-        num_gfr=0,
-        num_burnin=5,
-        num_mcmc=10,
         general_params={
             'outcome_model': bst.OutcomeModel(outcome='binary', link='probit')
         },
-        mean_forest_params=_MFP_BASE,
+        **_SAMPLE_KW,
     )
     with pytest.raises(ValueError, match="single 'y_hat'"):
         m.predict(data.X_test, terms=terms, scale='class')
@@ -187,209 +201,178 @@ def test_class_scale_requires_single_y_hat(keys: split, terms: str | list[str]) 
     assert np.isin(cls, (0, 1)).all()
 
 
-def test_multi_chain(keys: split) -> None:
+def test_multi_chain(continuous_data: _Data) -> None:
     """`num_chains > 1` concatenates samples across chains."""
-    data = _make_continuous(keys, n=50, n_test=10)
+    data = continuous_data
     num_chains = 3
-    num_mcmc = 40
     m = bst.BARTModel()
     m.sample(
         X_train=data.X_train,
         y_train=data.y_train,
-        num_gfr=0,
-        num_burnin=20,
-        num_mcmc=num_mcmc,
         general_params={'num_chains': num_chains},
-        mean_forest_params=_MFP_BASE,
+        **_SAMPLE_KW,
     )
-    assert m.num_samples == num_chains * num_mcmc
-    assert m.y_hat_train.shape[1] == num_chains * num_mcmc
+    assert m.num_samples == num_chains * NUM_MCMC
+    assert m.y_hat_train.shape[1] == num_chains * NUM_MCMC
 
 
-def test_not_sampled_error(keys: split) -> None:
+def test_not_sampled_error(continuous_data: _Data) -> None:
     """`predict` before `sample` raises `NotSampledError`."""
-    data = _make_continuous(keys, n=10, n_test=5)
+    data = continuous_data
     m = bst.BARTModel()
     assert not m.is_sampled()
     with pytest.raises(bst.NotSampledError):
         m.predict(data.X_test)
 
 
-def test_missing_num_gfr_raises(keys: split) -> None:
+def test_missing_num_gfr_raises(continuous_data: _Data) -> None:
     """`num_gfr` is keyword-only with no default; omitting it is a TypeError."""
-    data = _make_continuous(keys, n=10, n_test=5)
+    data = continuous_data
     m = bst.BARTModel()
     with pytest.raises(TypeError, match='num_gfr'):
         m.sample(  # type: ignore[call-arg]
             X_train=data.X_train,
             y_train=data.y_train,
-            num_burnin=2,
-            num_mcmc=2,
+            num_burnin=NUM_BURNIN,
+            num_mcmc=NUM_MCMC,
             mean_forest_params=_MFP_BASE,
         )
 
 
-def test_num_gfr_nonzero_raises(keys: split) -> None:
+def test_num_gfr_nonzero_raises(continuous_data: _Data) -> None:
     """The grow-from-root sampler is not supported."""
-    data = _make_continuous(keys, n=10, n_test=5)
+    data = continuous_data
     m = bst.BARTModel()
     with pytest.raises(NotImplementedError, match='grow-from-root'):
         m.sample(
-            X_train=data.X_train,
-            y_train=data.y_train,
-            num_gfr=1,
-            num_burnin=2,
-            num_mcmc=2,
-            mean_forest_params=_MFP_BASE,
+            X_train=data.X_train, y_train=data.y_train, **dict(_SAMPLE_KW, num_gfr=1)
         )
 
 
-def test_sample_sigma2_leaf_true_raises(keys: split) -> None:
+def test_sample_sigma2_leaf_true_raises(continuous_data: _Data) -> None:
     """Stochtree's default of `sample_sigma2_leaf=True` must be explicitly disabled."""
-    data = _make_continuous(keys, n=10, n_test=5)
+    data = continuous_data
     m = bst.BARTModel()
+    # `mean_forest_params` is intentionally omitted so the stochtree default kicks in.
     with pytest.raises(NotImplementedError, match='sample_sigma2_leaf'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
             num_gfr=0,
-            num_burnin=2,
-            num_mcmc=2,
+            num_burnin=NUM_BURNIN,
+            num_mcmc=NUM_MCMC,
         )
 
 
-def test_sigma2_init_with_proper_prior_raises(keys: split) -> None:
+def test_sigma2_init_with_proper_prior_raises(continuous_data: _Data) -> None:
     """`sigma2_init` is allowed only when the variance prior is improper."""
-    data = _make_continuous(keys, n=10, n_test=5)
+    data = continuous_data
     m = bst.BARTModel()
     with pytest.raises(NotImplementedError, match='sigma2_init'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
-            num_gfr=0,
-            num_burnin=2,
-            num_mcmc=2,
             general_params={
                 'sigma2_global_shape': 1.5,
                 'sigma2_global_scale': 0.5,
                 'sigma2_init': 1.0,
             },
-            mean_forest_params=_MFP_BASE,
+            **_SAMPLE_KW,
         )
 
 
 @pytest.mark.parametrize(('shape', 'scale'), [(1.5, 0.0), (0.0, 0.5)])
 def test_one_sided_improper_prior_raises(
-    keys: split, shape: float, scale: float
+    continuous_data: _Data, shape: float, scale: float
 ) -> None:
     """A variance prior with exactly one of shape/scale zero is refused."""
-    data = _make_continuous(keys, n=10, n_test=5)
+    data = continuous_data
     m = bst.BARTModel()
     with pytest.raises(NotImplementedError, match='one-sided improper'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
-            num_gfr=0,
-            num_burnin=2,
-            num_mcmc=2,
             general_params={'sigma2_global_shape': shape, 'sigma2_global_scale': scale},
-            mean_forest_params=_MFP_BASE,
+            **_SAMPLE_KW,
         )
 
 
-def test_unknown_dict_keys_rejected(keys: split) -> None:
+def test_unknown_dict_keys_rejected(continuous_data: _Data) -> None:
     """Unknown keys in `general_params` / `mean_forest_params` raise."""
-    data = _make_continuous(keys, n=10, n_test=5)
+    data = continuous_data
     m = bst.BARTModel()
     with pytest.raises(ValueError, match='general_params contains unsupported key'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
-            num_gfr=0,
-            num_burnin=2,
-            num_mcmc=2,
             general_params={'bogus': 1},
-            mean_forest_params=_MFP_BASE,
+            **_SAMPLE_KW,
         )
     m = bst.BARTModel()
     with pytest.raises(ValueError, match='mean_forest_params contains unsupported key'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
-            num_gfr=0,
-            num_burnin=2,
-            num_mcmc=2,
-            mean_forest_params={**_MFP_BASE, 'keep_vars': []},
+            **dict(_SAMPLE_KW, mean_forest_params={**_MFP_BASE, 'keep_vars': []}),
         )
 
 
-def test_unsupported_outcome_model_raises(keys: split) -> None:
+def test_unsupported_outcome_model_raises(binary_data: _Data) -> None:
     """Cloglog and other unsupported link functions are rejected."""
-    data = _make_binary(keys, n=20, n_test=5)
+    data = binary_data
     m = bst.BARTModel()
     with pytest.raises(NotImplementedError, match='unsupported outcome_model'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
-            num_gfr=0,
-            num_burnin=2,
-            num_mcmc=2,
             general_params={
                 'outcome_model': bst.OutcomeModel(outcome='binary', link='cloglog')
             },
-            mean_forest_params=_MFP_BASE,
+            **_SAMPLE_KW,
         )
 
 
-def test_variable_weights_validation(keys: split) -> None:
+def test_variable_weights_validation(continuous_data: _Data) -> None:
     """`variable_weights` must be strictly positive."""
-    data = _make_continuous(keys, n=40, n_test=5)
+    data = continuous_data
     p = data.X_train.shape[1]
     m = bst.BARTModel()
     with pytest.raises(EquinoxRuntimeError, match='varprob must be > 0'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
-            num_gfr=0,
-            num_burnin=2,
-            num_mcmc=5,
             general_params={'variable_weights': np.zeros(p)},
-            mean_forest_params=_MFP_BASE,
+            **_SAMPLE_KW,
         )
     m2 = bst.BARTModel()
     m2.sample(
         X_train=data.X_train,
         y_train=data.y_train,
-        num_gfr=0,
-        num_burnin=2,
-        num_mcmc=5,
         general_params={'variable_weights': np.full(p, 1e-3)},
-        mean_forest_params=_MFP_BASE,
+        **_SAMPLE_KW,
     )
     assert m2.is_sampled()
 
 
-def test_standardization_matches(keys: split) -> None:
+def test_standardization_matches(continuous_data: _Data) -> None:
     """``y_bar`` / ``y_std`` are computed identically to stochtree (modulo float32)."""
-    data = _make_continuous(keys, n=100, n_test=10)
+    data = continuous_data
+    # Shift the outcome away from a near-zero mean: y_bar is compared at
+    # rtol=1e-6, and the float32-vs-float64 relative error on the mean blows up
+    # when |mean(y_train)| is tiny (the raw DGP mean is ~-0.05). std is
+    # shift-invariant, so this only hardens the y_bar comparison.
+    y_train = data.y_train + 1.0
     st_model = stochtree.BARTModel()
     st_model.sample(
         X_train=np.asarray(data.X_train, dtype=np.float64),
-        y_train=np.asarray(data.y_train, dtype=np.float64),
+        y_train=np.asarray(y_train, dtype=np.float64),
         num_gfr=0,
-        num_burnin=5,
-        num_mcmc=10,
+        num_burnin=NUM_BURNIN,
+        num_mcmc=NUM_MCMC,
         mean_forest_params={'sample_sigma2_leaf': False},
     )
     bz_model = bst.BARTModel()
-    bz_model.sample(
-        X_train=data.X_train,
-        y_train=data.y_train,
-        num_gfr=0,
-        num_burnin=5,
-        num_mcmc=10,
-        mean_forest_params=_MFP_BASE,
-    )
+    bz_model.sample(X_train=data.X_train, y_train=y_train, **_SAMPLE_KW)
     # bartz computes the standardization in float32; stochtree in float64.
     assert_allclose(bz_model.y_bar, st_model.y_bar, rtol=1e-6)
     assert_allclose(bz_model.y_std, st_model.y_std, rtol=1e-6)
@@ -492,14 +475,14 @@ def test_compare_with_stochtree(
             assert_array_less(rhat, 1.02)
 
 
-def test_jit(keys: split) -> None:
+def test_jit(continuous_data: _Data) -> None:
     """Test that jitting around BARTModel.sample + predict works.
 
     All values that aren't used for shape / Python-level control flow are
     passed as jit arguments, so any accidentally non-traceable use of them
     surfaces as a ConcretizationTypeError.
     """
-    data = _make_continuous(keys, n=80, n_test=20)
+    data = continuous_data
     p = data.X_train.shape[1]
     args: dict = {
         'key': random.key(0),
@@ -541,8 +524,8 @@ def test_jit(keys: split) -> None:
             X_test=X_test,
             observation_weights=w,
             num_gfr=0,
-            num_burnin=5,
-            num_mcmc=10,
+            num_burnin=NUM_BURNIN,
+            num_mcmc=NUM_MCMC,
             general_params={
                 'random_seed': key,
                 'sigma2_init': sigma2_init,
@@ -667,11 +650,8 @@ class TestPreprocessing:
             X_train=X_train,
             y_train=y,
             X_test=X_test,
-            num_gfr=0,
-            num_burnin=20,
-            num_mcmc=40,
             general_params=dict(extras.pop('general_params', {}), random_seed=seed),
-            mean_forest_params=_MFP_BASE,
+            **_SAMPLE_KW,
             **extras,
         )
         return m
@@ -930,9 +910,11 @@ class TestPreprocessing:
     # ----------------------------------------------------- end-to-end integration
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
-    def test_end_to_end_numeric_matches_array(self, keys: split, flavor: str) -> None:
+    def test_end_to_end_numeric_matches_array(
+        self, continuous_data: _Data, flavor: str
+    ) -> None:
         """A numeric DataFrame produces bit-identical posteriors to the same array."""
-        data = _make_continuous(keys, n=60, n_test=15)
+        data = continuous_data
         X_arr = np.asarray(data.X_train)
         Xte_arr = np.asarray(data.X_test)
         names = [f'x{i}' for i in range(X_arr.shape[1])]
@@ -956,9 +938,11 @@ class TestPreprocessing:
         assert_close_matrices(m_arr.y_hat_test, m_df.y_hat_test)
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
-    def test_end_to_end_one_hot_matches_manual(self, keys: split, flavor: str) -> None:
+    def test_end_to_end_one_hot_matches_manual(
+        self, continuous_data: _Data, flavor: str
+    ) -> None:
         """A DataFrame with an unordered cat matches a manually-one-hot-encoded array."""
-        data = _make_continuous(keys, n=60, n_test=15)
+        data = continuous_data
         X_arr = np.asarray(data.X_train)
         Xte_arr = np.asarray(data.X_test)
         rng = np.random.default_rng(0)
@@ -1026,7 +1010,7 @@ class TestPreprocessing:
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_end_to_end_default_weights_split_like_stochtree(
-        self, keys: split, flavor: str
+        self, continuous_data: _Data, flavor: str
     ) -> None:
         """Default weights follow stochtree's split, not uniform-over-columns.
 
@@ -1038,7 +1022,7 @@ class TestPreprocessing:
         manual one-hot array fed the equivalent expanded weights. If the default
         reverted to uniform-over-expanded-columns (1/5 each) this would fail.
         """
-        data = _make_continuous(keys, n=60, n_test=15)
+        data = continuous_data
         X_arr = np.asarray(data.X_train)[:, :3]
         Xte_arr = np.asarray(data.X_test)[:, :3]
         rng = np.random.default_rng(1)
@@ -1081,10 +1065,10 @@ class TestPreprocessing:
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_predict_with_array_after_dataframe_fit_raises(
-        self, keys: split, flavor: str
+        self, continuous_data: _Data, flavor: str
     ) -> None:
         """Predicting on a raw array after a DataFrame fit raises a clear error."""
-        data = _make_continuous(keys, n=40, n_test=10)
+        data = continuous_data
         X_arr = np.asarray(data.X_train)
         names = [f'x{i}' for i in range(X_arr.shape[1])]
         df_train = self._make_df(
@@ -1100,10 +1084,10 @@ class TestPreprocessing:
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_end_to_end_unseen_category_in_predict_raises(
-        self, keys: split, flavor: str
+        self, continuous_data: _Data, flavor: str
     ) -> None:
         """`predict()` with a brand-new category value raises a clear error."""
-        data = _make_continuous(keys, n=40, n_test=10)
+        data = continuous_data
         X_arr = np.asarray(data.X_train)
         names = [f'x{i}' for i in range(X_arr.shape[1])]
         cat_train = ['a', 'b'] * (X_arr.shape[0] // 2)
@@ -1146,11 +1130,4 @@ class TestPreprocessing:
         y = np.zeros(10, dtype=np.float32)
         m = bst.BARTModel()
         with pytest.raises(ValueError, match='unsupported dtype'):
-            m.sample(
-                X_train=df,
-                y_train=y,
-                num_gfr=0,
-                num_burnin=2,
-                num_mcmc=2,
-                mean_forest_params=_MFP_BASE,
-            )
+            m.sample(X_train=df, y_train=y, **_SAMPLE_KW)

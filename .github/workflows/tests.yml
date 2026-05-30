@@ -106,7 +106,7 @@ jobs:
       matrix:
         # The list of groups lives in `Makefile` as `GROUPS`; keep this in sync.
         target: [tests, tests-single-cpu, tests-old]
-        group: [misc, v1v7, v2v3jaxext, v5heavy, v4light, v5light-v6]
+        group: [misc, iface-v5v7, iface-v6, iface-v4, bart-v1, bart-v23]
 
     steps:
       - name: Checkout repository

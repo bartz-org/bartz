@@ -91,7 +91,7 @@ class GeneralParams:
     """Whether to standardize the outcome before fitting. Ignored for probit binary."""
 
     sigma2_init: FloatLike | None = None
-    """Starting value of the global error variance. Only honored when the variance prior is improper (``sigma2_global_shape=0`` or ``sigma2_global_scale=0``); otherwise raises, since bartz cannot decouple the chain start from the prior scale. If `None` (default), uses ``var(resid_train)`` for continuous and ``1.0`` for probit, matching stochtree."""
+    """Starting value of the global error variance. Only honored when the variance prior is the improper default (``sigma2_global_shape=0`` and ``sigma2_global_scale=0``); otherwise raises, since bartz cannot decouple the chain start from the prior scale. If `None` (default), uses ``var(resid_train)`` for continuous and ``1.0`` for probit, matching stochtree."""
 
     sigma2_global_shape: FloatLike = 0
     """Shape parameter of the inverse-gamma prior on the global error variance. The default ``0`` is mapped to a near-improper prior, since bartz's scaled-inv-chi² cannot represent ``IG(0, 0)`` exactly."""
@@ -103,7 +103,9 @@ class GeneralParams:
     """Per-predictor sampling weights. Must be strictly positive; pass a small positive value to suppress a variable."""
 
     random_seed: int | Key[Array, ''] | None = None
-    """Seed for the random number generator."""
+    """Seed for the random number generator. Unlike stochtree, the default
+    `None` is deterministic (equivalent to seed ``0``) rather than drawing a
+    random seed, so repeated fits reproduce by default."""
 
     keep_every: int = 1
     """Thinning factor for retained MCMC samples."""
@@ -221,6 +223,9 @@ class BARTModel:
       forests, and warm-starting from a previous model are not supported.
     - bartz uses single-precision floats, so outputs differ from stochtree
       at the float32 precision level.
+    - ``general_params['random_seed']`` defaults to deterministic behavior
+      (seed ``0``) when unset, whereas stochtree draws a random seed. This is
+      intentional, to make repeated fits reproducible by default.
 
     References
     ----------
@@ -721,7 +726,9 @@ def resolve_variance_prior(
     Raises
     ------
     NotImplementedError
-        If `sigma2_init` is set together with a proper variance prior.
+        If `sigma2_init` is set together with a proper variance prior, or if
+        exactly one of `shape` / `scale` is zero (a one-sided improper prior
+        bartz cannot reproduce).
     """
     # IG(shape, scale) <=> scaled-inv-chi2(df=2*shape, lambda=scale/shape)
     if shape > 0 and scale > 0:
@@ -737,6 +744,16 @@ def resolve_variance_prior(
             raise NotImplementedError(msg)
         lambda_ = scale / shape
         return 2.0 * shape, lambda_, lambda_
+    if (shape > 0) != (scale > 0):
+        msg = (
+            'a one-sided improper variance prior (exactly one of'
+            ' sigma2_global_shape / sigma2_global_scale set to 0) is not'
+            ' supported: bartz cannot reproduce IG(shape>0, 0) or IG(0,'
+            ' scale>0) without a degenerate chain start or silently discarding'
+            ' the nonzero parameter. Use a proper prior (both > 0) or the'
+            ' improper default (both 0).'
+        )
+        raise NotImplementedError(msg)
     sigma2_start = sigma2_init if sigma2_init is not None else var_resid_train
     return _IMPROPER_PRIOR_SIGDF, sigma2_start, sigma2_start
 
@@ -782,6 +799,11 @@ def check_predict_args(
         if t not in ('y_hat', 'mean_forest', 'all'):
             msg = f'unknown term {t!r}; valid terms are y_hat, mean_forest, all'
             raise ValueError(msg)
+    if scale == 'class' and set(terms_tuple) != {'y_hat'}:
+        # match stochtree: 'class' converts only the single 'y_hat' term, so it
+        # rejects 'mean_forest' and 'all' (the latter also pulls in mean_forest)
+        msg = "scale='class' is only supported when requesting a single 'y_hat' term"
+        raise ValueError(msg)
     return terms_tuple
 
 

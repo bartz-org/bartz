@@ -42,8 +42,8 @@ the floor for `bartz` itself (= oldest benchmarked version).
 import datetime
 from pathlib import Path
 
-from git import Repo
-from git.exc import GitCommandError
+from git import Commit, Repo
+from git.exc import BadName, GitCommandError
 from packaging.version import Version
 
 # Configuration
@@ -77,6 +77,27 @@ def get_default_branch_name(repo: Repo) -> str:
     raise RuntimeError(msg)
 
 
+def _resolve_commit(repo: Repo, ref: str) -> Commit | None:
+    try:
+        return repo.commit(ref)
+    except (GitCommandError, BadName):
+        return None
+
+
+def default_branch_commit(repo: Repo) -> Commit:
+    """Resolve the default branch to a commit (local head or remote-tracking).
+
+    In CI the default branch is often present only as `origin/<name>` (the
+    checkout is a detached HEAD), so a bare-name lookup in `repo.refs` misses it.
+    """
+    name = get_default_branch_name(repo)
+    commit = _resolve_commit(repo, name) or _resolve_commit(repo, f'origin/{name}')
+    if commit is None:
+        msg = f'could not resolve default branch {name!r} to a commit'
+        raise RuntimeError(msg)
+    return commit
+
+
 def benchmarked_version_tags(
     repo_path: Path | str = '.',
 ) -> list[tuple[datetime.datetime, str]]:
@@ -86,11 +107,11 @@ def benchmarked_version_tags(
     branch, and points at a commit on/after `CUTOFF_DATE`. Sorted oldest first.
     """
     repo = Repo(repo_path)
-    main_branch = repo.refs[get_default_branch_name(repo)]
+    head_commit = default_branch_commit(repo)
     tags: list[tuple[datetime.datetime, str]] = []
     for tag in repo.tags:
         commit = tag.commit
-        if not repo.is_ancestor(commit, main_branch.commit):
+        if not repo.is_ancestor(commit, head_commit):
             continue
         commit_date = datetime.datetime.fromtimestamp(
             commit.committed_date, tz=datetime.timezone.utc

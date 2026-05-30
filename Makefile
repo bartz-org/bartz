@@ -37,7 +37,11 @@ OLD_DELAY_DAYS = 365
 BUMP_PYTHON_VERSION_DATE = 10-31
 NUM_SUPPORTED_PYTHON_RELEASES = 5
 OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]*\).*/\1/')
-UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --isolated
+# WORKAROUND(stochtree<=0.4.2): 0.4.2 is the oldest stochtree whose probit output
+# matches bartz, but it is newer than OLD_DATE, so the old toolchain cannot
+# resolve it. Exempt stochtree from the cutoff; drop --exclude-newer-package once
+# the stochtree floor rises above 0.4.2 (check-workarounds will flag this then).
+UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --exclude-newer-package="stochtree=0 days" --isolated
 
 .PHONY: help
 help:
@@ -113,28 +117,34 @@ clean:
 
 # Test groups: each is a chunk of pytest args (paths/nodeids + -k expression)
 # that selects a balanced slice of the suite. CI runs one group per matrix cell
-# to fit each job under ~15 minutes on the slow `tests-old` target without
-# xdist. To run a single group locally (composes with any tests target):
-#   make tests             GROUP=v4light
+# (NPROC=0, no xdist), so total wall time is the slowest cell: the groups are
+# balanced to land each cell around ~13 min on the slow `tests-old` target. To
+# run a single group locally (composes with any tests target):
+#   make tests             GROUP=iface-v4
 #   make tests-single-cpu  GROUP=misc
-#   make tests-old         GROUP=v1v7
-# Leaving GROUP unset runs the whole suite.
+#   make tests-old         GROUP=bart-v1
+# Leaving GROUP unset runs the whole suite. The matrix in
+# `.github/workflows/tests.yml` lists these same names; keep them in sync.
 #
-# The two test files with a variant fixture (test_BART.py for v1/v2/v3 and
-# test_interface.py for v4/v5/v6/v7) dominate cost: each variant re-fits the
-# CachedBart and re-triggers JIT compilations. v4 and v5 are too heavy to fit
-# in one group on their own, so they're sliced further: v4's test_equiv_sharding
-# is carved out (no class-scoped fixture), and v5's TestWithCachedBart class is
-# pulled into its own group (the cachedbart fixture, scope='class', is the bulk
-# of the cost — splitting members across groups would pay it twice).
-GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py 'tests/test_interface.py::test_equiv_sharding[v4]'
-GROUP_v1v7        := tests/test_BART.py tests/test_interface.py -k "v1 or v7 or not (v2 or v3 or v4 or v5 or v6)"
-GROUP_v2v3jaxext  := tests/test_BART.py tests/test_jaxext.py -k "v2 or v3 or jaxext"
-GROUP_v5heavy     := tests/test_interface.py::TestWithCachedBart -k v5
-GROUP_v4light     := tests/test_interface.py -k "v4 and not test_equiv_sharding"
-GROUP_v5light-v6  := tests/test_interface.py -k "(v5 and not TestWithCachedBart) or v6"
+# Cost is dominated by test_interface.py (variants v4-v7, ~2200s deduped on
+# tests-old) and test_BART.py (variants v1-v3, ~1000s): each variant re-fits a
+# class-scoped CachedBart fixture, so a given variant's tests are kept within one
+# group (splitting them would pay the fixture twice). The heavy v4/v5 variants
+# are sliced where it's free to do so: the test_equiv_sharding tests have no
+# class fixture, so they ride along in cheaper groups, and v5's TestWithCachedBart
+# class is isolated. The leftover budget in each group is topped up with the
+# cheap whole-file suites (mcmcstep, stochtree, jaxext, mcmcloop, ...). Rough
+# tests-old cost per group (deduped seconds); keep them within ~50s when editing,
+# and re-measure from the CI `--durations` logs after big test changes:
+#   misc ~700  iface-v5v7 ~705  iface-v6 ~700  iface-v4 ~720  bart-v1 ~640  bart-v23 ~710
+GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py 'tests/test_interface.py::test_equiv_sharding[v7]'
+GROUP_iface-v5v7  := tests/test_interface.py -k "(v5 and TestWithCachedBart) or (v7 and not test_equiv_sharding)"
+GROUP_iface-v6    := tests/test_interface.py -k "v6 or (v5 and not TestWithCachedBart)"
+GROUP_iface-v4    := tests/test_interface.py -k "(v4 and not test_equiv_sharding) or not (v2 or v3 or v4 or v5 or v6 or v7)"
+GROUP_bart-v1     := tests/test_BART.py tests/test_jaxext.py tests/test_stochtree.py -k "v1 or not (v2 or v3) or jaxext"
+GROUP_bart-v23    := tests/test_BART.py 'tests/test_interface.py::test_equiv_sharding[v4]' -k "v2 or v3 or v4"
 
-GROUPS := misc v1v7 v2v3jaxext v5heavy v4light v5light-v6
+GROUPS := misc iface-v5v7 iface-v6 iface-v4 bart-v1 bart-v23
 
 SELECT = $(if $(GROUP),$(GROUP_$(GROUP)))
 

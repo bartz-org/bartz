@@ -236,7 +236,6 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "stochtree" },
     { name = "tqdm" },
 ]
 
@@ -280,6 +279,7 @@ dev = [
     { name = "sphinx-autodoc-typehints", version = "3.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "sphinx-autodoc-typehints", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "sphinx-autodoc-typehints", version = "3.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "stochtree" },
     { name = "tomli" },
     { name = "virtualenv" },
 ]
@@ -293,7 +293,6 @@ requires-dist = [
     { name = "jaxtyping", specifier = ">=0.3.2" },
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "scipy", specifier = ">=1.15.3" },
-    { name = "stochtree", specifier = ">=0.4.2" },
     { name = "tqdm", specifier = ">=4.67.1" },
 ]
 provides-extras = ["cuda12", "cuda13"]
@@ -323,6 +322,7 @@ dev = [
     { name = "snakeviz", specifier = ">=2.2.2" },
     { name = "sphinx", specifier = ">=8.1.3" },
     { name = "sphinx-autodoc-typehints", specifier = ">=3.0.1" },
+    { name = "stochtree", specifier = ">=0.4.2" },
     { name = "tomli", specifier = ">=2.2.1" },
     { name = "virtualenv", specifier = ">=20.31.2" },
 ]

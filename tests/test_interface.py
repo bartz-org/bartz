@@ -27,6 +27,7 @@
 This is the main suite of tests.
 """
 
+import pickle
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass, replace
@@ -34,6 +35,7 @@ from functools import partial
 from gc import collect
 from inspect import signature
 from io import StringIO
+from pathlib import Path
 from typing import Any, Literal, NamedTuple
 from weakref import ReferenceType, ref
 
@@ -2300,6 +2302,44 @@ def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:
         kw2 = {k: v for k, v in kw.items() if k != 'num_trees'}
         bart = Bart(**kw2)
         assert bart.num_trees == 200
+
+
+def test_dump_load_roundtrip(bkw: BartKW, tmp_path: Path) -> None:
+    """`dump`/`load` preserve every array in the model, dropping only the mesh."""
+    # keep `bkw.kw` unchanged so the MCMC reuses an already-compiled shape
+    # rather than triggering a fresh (slower) compilation
+    bart = Bart(**bkw.kw)
+
+    path = tmp_path / 'bart.pkl'
+    bart.dump(path)
+    loaded = Bart.load(path)
+
+    assert isinstance(loaded, Bart)
+    # the device mesh is the only thing dropped; the reload is single-device
+    assert loaded._mcmc_state.config.mesh is None
+
+    # every array must survive identically: values are gathered to host, not
+    # recomputed. The mesh lives in the static tree structure, not in the
+    # leaves, so it does not interfere with a leaf-by-leaf comparison. We
+    # cannot use `tree.map_with_path` (as the sharding tests do) because an
+    # equinox `Module` does not round-trip its static metadata to an identical
+    # tree structure through pickle, so we compare the flattened (path, leaf)
+    # pairs instead.
+    original = tree.flatten_with_path(bart)[0]
+    restored = tree.flatten_with_path(loaded)[0]
+    assert len(original) == len(restored)
+    for (path, leaf), (rpath, rleaf) in zip(original, restored, strict=True):
+        assert path == rpath, f'structure mismatch: {keystr(path)} != {keystr(rpath)}'
+        assert_array_equal(rleaf, leaf, err_msg=f'{keystr(path)}: ')
+
+
+def test_load_wrong_type(tmp_path: Path) -> None:
+    """`load` rejects a file that does not contain a `Bart`."""
+    path = tmp_path / 'notbart.pkl'
+    with path.open('wb') as file:
+        pickle.dump([1, 2, 3], file)
+    with pytest.raises(TypeError, match='not a Bart'):
+        Bart.load(path)
 
 
 class ExampleData(NamedTuple):

@@ -25,11 +25,13 @@
 """Main high-level interface of the package."""
 
 import math
+import pickle
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from enum import Enum
 from functools import cached_property, partial
-from os import cpu_count
+from os import PathLike, cpu_count
+from pathlib import Path
 
 # WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
@@ -38,7 +40,7 @@ from warnings import warn
 
 import jax
 import jax.numpy as jnp
-from equinox import Module, error_if, field
+from equinox import Module, error_if, field, tree_at
 from jax import (
     Device,
     debug_nans,
@@ -571,6 +573,55 @@ class Bart(Module):
             self._mcmc_state.binary_y is not None,
             kind,
         )
+
+    def dump(self, path: str | PathLike) -> None:
+        """Serialize the fitted model to a file with `pickle`.
+
+        Parameters
+        ----------
+        path
+            The file to write to.
+
+        Notes
+        -----
+        Intended for short-term storage (e.g. caching across processes), not
+        long-term archival: the format depends on the versions of bartz, jax and
+        equinox. The arrays are copied to host memory and all device/sharding
+        placement is dropped; `load` reconstructs a single-device model.
+        """
+        # drop the device mesh, whose `Device` objects are not picklable, then
+        # gather any sharded arrays to host (dropping their sharding); the
+        # reload is single-device
+        config = replace(self._mcmc_state.config, mesh=None)
+        obj = tree_at(lambda b: b._mcmc_state.config, self, config)  # noqa: SLF001
+        obj = jax.device_get(obj)
+        with Path(path).open('wb') as file:
+            pickle.dump(obj, file, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @classmethod
+    def load(cls, path: str | PathLike) -> 'Bart':
+        """Load a model saved with `dump`.
+
+        Parameters
+        ----------
+        path
+            The file to read from.
+
+        Returns
+        -------
+        The deserialized model, on host memory with no device placement.
+
+        Raises
+        ------
+        TypeError
+            If the file does not contain a `Bart` instance.
+        """
+        with Path(path).open('rb') as file:
+            obj = pickle.load(file)  # noqa: S301, the user owns the file
+        if not isinstance(obj, cls):
+            msg = f'unpickled a {type(obj).__name__}, not a {cls.__name__}'
+            raise TypeError(msg)
+        return obj
 
     @property
     def offset(self) -> Float32[Array, ''] | Float32[Array, ' k']:

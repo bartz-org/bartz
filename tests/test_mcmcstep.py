@@ -1186,6 +1186,22 @@ class TestMultichain:
             check_sharding(new_state, state.config.mesh)
             check_same_structure(state, new_state)
 
+    @pytest.mark.parametrize(
+        ('num_chains', 'chains_axis', 'match'),
+        [
+            (None, 2, 'num_chains is None'),  # 'chains' axis but scalar chains
+            (3, 2, 'does not divide'),  # 2 does not divide 3 chains
+        ],
+    )
+    def test_init_rejects_inconsistent_chains_mesh(
+        self, init_kwargs: dict, num_chains: int | None, chains_axis: int, match: str
+    ) -> None:
+        """`init` rejects a 'chains' mesh axis inconsistent with `num_chains`."""
+        if get_device_count() < chains_axis:
+            pytest.skip(f'Need at least {chains_axis} devices for this mesh.')
+        with pytest.raises(ValueError, match=match):
+            init(**init_kwargs, num_chains=num_chains, mesh=dict(chains=chains_axis))
+
     def test_multichain_equiv_stack(self, init_kwargs: dict, keys: split) -> None:
         """Check that stacking multiple chains is equivalent to a multichain trace."""
         num_chains = 4

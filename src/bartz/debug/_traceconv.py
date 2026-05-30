@@ -31,6 +31,7 @@ from typing import ClassVar
 import numpy
 from equinox import Module
 from jax import numpy as jnp
+from jax.sharding import Mesh
 from jaxtyping import Array, Float32, UInt
 
 from bartz._jaxext import minimal_unsigned_dtype
@@ -151,6 +152,9 @@ class TraceWithOffset(Module):
 
     has_chains: ClassVar[bool] = False
     """No chain axis; each leading axis is just the sample axis."""
+
+    mesh: ClassVar[Mesh | None] = None
+    """No device mesh; the trees are host-built and unsharded."""
 
     @classmethod
     def from_trees_trace(

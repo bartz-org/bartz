@@ -24,24 +24,43 @@
 
 """Test `bartz.mcmcloop`."""
 
+import io
 from dataclasses import replace
 from functools import partial
 from typing import Any
 
+import jax
 import pytest
 from equinox import filter_jit
-from jax import NamedSharding, debug_key_reuse, device_put, jit, make_mesh, tree, vmap
+from jax import (
+    NamedSharding,
+    block_until_ready,
+    debug_key_reuse,
+    device_put,
+    jit,
+    make_mesh,
+    tree,
+    vmap,
+)
 from jax import numpy as jnp
-from jax.sharding import AxisType, PartitionSpec
+from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
 from jaxtyping import Array, Float32, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
-from bartz._jaxext import get_default_device, split
-from bartz.mcmcloop import BurninTrace, MainTrace, run_mcmc
+from bartz._jaxext import split
+from bartz.mcmcloop import (
+    BurninTrace,
+    MainTrace,
+    evaluate_trace,
+    make_tqdm_callback,
+    run_mcmc,
+)
+from bartz.mcmcloop._callback import _tqdm_advance, _tqdm_registry
+from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._state import trace_sample_axes
-from tests.util import assert_array_equal
+from tests.util import assert_array_equal, assert_close_matrices
 
 
 def gen_data(
@@ -81,9 +100,23 @@ def simple_init(
         error_cov_df=2,
         error_cov_scale=2 * eye,
         min_points_per_decision_node=10,
-        target_platform=get_default_device().platform,
         **kwargs,
     )
+
+
+def cat_traces(
+    trace_a: MainTrace | BurninTrace, trace_b: MainTrace | BurninTrace
+) -> MainTrace | BurninTrace:
+    """Concatenate two traces along their per-leaf sample axis."""
+    sample_axes = trace_sample_axes(trace_a)
+
+    def cat(a: Array, b: Array, axis: int | None) -> Array:
+        if axis is None:
+            assert_array_equal(a, b)
+            return a
+        return jnp.concatenate([a, b], axis=axis)
+
+    return tree.map(cat, trace_a, trace_b, sample_axes)
 
 
 class TestRunMcmc:
@@ -161,6 +194,55 @@ class TestRunMcmc:
         check_trace(burnin_trace)
         check_trace(main_trace)
 
+    def test_tqdm_callback(self, keys: split, initial_state: State) -> None:
+        """Check the tqdm progress bar runs to completion and is cleaned up."""
+        buf = io.StringIO()
+        kw = make_tqdm_callback(initial_state, report_every=2, file=buf, mininterval=0)
+        bar_id = kw['callback_state'].bar_id.item()
+        state = tree.map(jnp.copy, initial_state)  # donated
+        with debug_key_reuse(False):
+            # block so the (unordered, async) progress callbacks have all fired
+            block_until_ready(run_mcmc(keys.pop(), state, 4, n_burn=2, **kw))
+
+        out = buf.getvalue()
+        assert '100%' in out  # the bar reached the end
+        assert '6/6' in out  # n_burn + n_save * n_skip iterations
+        assert bar_id not in _tqdm_registry  # the bar was closed and removed
+
+    def test_tqdm_callback_cleans_up_interrupted_bar(self) -> None:
+        """A new tqdm callback closes a bar left open by an interrupted run."""
+        state = simple_init(10, 100, 20)
+        buf = io.StringIO()
+        kw = make_tqdm_callback(state, file=buf, mininterval=0)
+        bar_id = kw['callback_state'].bar_id.item()
+        # simulate an interrupted run: advance the bar partway, never finishing
+        _tqdm_advance(bar_id, 3, 10)
+        assert not _tqdm_registry[bar_id].bar.disable  # still open
+
+        make_tqdm_callback(state, file=io.StringIO())  # triggers cleanup
+        assert bar_id not in _tqdm_registry  # the stale bar was closed and dropped
+        assert buf.getvalue().endswith('\n')  # closed cleanly, not left mid-line
+
+    def test_tqdm_no_recompilation(self, keys: split) -> None:
+        """Check two MCMC runs with a tqdm callback share the compiled inner loop.
+
+        The tqdm bar lives in a module-level registry and is referenced from the
+        loop only through an integer handle carried as a traceable scalar, so the
+        loop pytree is identical across runs and `_run_mcmc_inner_loop` is not
+        retraced (verified via the `_CallCounter`, see
+        ``test_no_recompilation_inner_loop_counter`` in ``test_interface``).
+        """
+        state = simple_init(10, 100, 20)
+
+        def run() -> None:
+            kw = make_tqdm_callback(state, disable=True)
+            with debug_key_reuse(False):
+                run_mcmc(keys.pop(), tree.map(jnp.copy, state), 4, n_burn=2, **kw)
+
+        run()
+        run()
+        assert _run_mcmc_inner_loop._fun.n_calls == 0
+
     def test_predicted_double_compilation(self, keys: split) -> None:
         """Check that an error is raised under jit if the configuration would lead to double compilation."""
         initial_state = simple_init(10, 100, 20)
@@ -186,3 +268,176 @@ class TestRunMcmc:
             RuntimeError, match='The inner loop of `run_mcmc` was traced more than once'
         ):
             run_mcmc(keys.pop(), state, 2, inner_loop_length=1)
+
+    def test_steps_done_increments(self, keys: split, initial_state: State) -> None:
+        """Check the global step counter advances by the number of MCMC updates."""
+        n_burn, n_skip, n_save = 3, 2, 4
+        with debug_key_reuse(False):
+            final_state, *_ = run_mcmc(
+                keys.pop(),
+                tree.map(jnp.copy, initial_state),  # donated
+                n_save,
+                n_burn=n_burn,
+                n_skip=n_skip,
+            )
+        expected = initial_state.config.steps_done + n_burn + n_skip * n_save
+        assert_array_equal(final_state.config.steps_done, expected)
+
+    def test_restartable(self, keys: split, initial_state: State) -> None:
+        """Check chaining `run_mcmc` with the same key reproduces a single run.
+
+        The key is folded with the state's persistent step counter, so resuming
+        from the output state with the same key continues the exact same key
+        sequence, no matter how the total number of iterations is split.
+        """
+        key = keys.pop()
+        with debug_key_reuse(False):
+            # one run of 5 iterations
+            final_single, _, main_single = run_mcmc(
+                key, tree.map(jnp.copy, initial_state), 5, n_burn=0, n_skip=1
+            )
+            # the same 5 iterations split as 2 + 3, resuming from the output state
+            mid, _, main_a = run_mcmc(
+                key, tree.map(jnp.copy, initial_state), 2, n_burn=0, n_skip=1
+            )
+            final_split, _, main_b = run_mcmc(key, mid, 3, n_burn=0, n_skip=1)
+
+        tree.map(assert_array_equal, final_single, final_split)
+        tree.map(assert_array_equal, main_single, cat_traces(main_a, main_b))
+
+    def test_inner_loop_length_invariance(
+        self, keys: split, initial_state: State
+    ) -> None:
+        """Check the inner loop chunking does not affect the results."""
+        key = keys.pop()
+        with debug_key_reuse(False):
+            final_whole, burnin_whole, main_whole = run_mcmc(
+                key, tree.map(jnp.copy, initial_state), 4, n_burn=2, n_skip=1
+            )
+            final_chunked, burnin_chunked, main_chunked = run_mcmc(
+                key,
+                tree.map(jnp.copy, initial_state),
+                4,
+                n_burn=2,
+                n_skip=1,
+                inner_loop_length=1,
+            )
+
+        tree.map(assert_array_equal, final_whole, final_chunked)
+        tree.map(assert_array_equal, main_whole, main_chunked)
+        tree.map(assert_array_equal, burnin_whole, burnin_chunked)
+
+
+# shared test-point count, reused across cases to hit the jax compilation cache
+_N_TEST = 60
+
+
+def _eval_test_points(n_test: int = _N_TEST) -> UInt8[Array, '6 {n_test}']:
+    """Generate quantized test points compatible with `simple_init`'s data."""
+    return gen_data(6, n_test, None)[0]
+
+
+def _make_mesh(axes: dict[str, int]) -> Mesh:
+    """Build an auto-mode mesh from an ``{axis_name: size}`` mapping."""
+    return make_mesh(
+        tuple(axes.values()), tuple(axes), axis_types=(AxisType.Auto,) * len(axes)
+    )
+
+
+class TestEvaluateTrace:
+    """Test test-point batching and sharding in `mcmcloop.evaluate_trace`."""
+
+    @pytest.fixture(params=[None, 4], scope='class')
+    def num_chains(self, request: FixtureRequest) -> int | None:
+        """Return number of chains."""
+        return request.param
+
+    @pytest.fixture(params=[None, 3], scope='class')
+    def k(self, request: FixtureRequest) -> int | None:
+        """Return number of outcomes."""
+        return request.param
+
+    def _trace(
+        self, keys: split, num_chains: int | None, k: int | None, mesh: Mesh | None
+    ) -> MainTrace:
+        state = simple_init(6, 80, 8, k, num_chains=num_chains, mesh=mesh)
+        with debug_key_reuse(False):
+            return run_mcmc(keys.pop(), state, 5, n_burn=2).main_trace
+
+    def _assert_modes_match(
+        self, keys: split, num_chains: int | None, k: int | None, mesh: Mesh | None
+    ) -> None:
+        """Check the three `test_points` modes agree, and check output sharding."""
+        trace = self._trace(keys, num_chains, k, mesh)
+        X = _eval_test_points()
+
+        base = evaluate_trace(X, trace, test_points='none')
+        auto = evaluate_trace(X, trace, test_points='autobatch')
+        assert_close_matrices(auto, base, rtol=1e-5, reduce_rank=True)
+
+        if mesh is not None and 'data' in mesh.axis_names:
+            X = device_put(X, NamedSharding(mesh, PartitionSpec(None, 'data')))
+        shrd = evaluate_trace(X, trace, test_points='shard_and_autobatch')
+        assert_close_matrices(shrd, base, rtol=1e-5, reduce_rank=True)
+
+        # the output `n` axis must be sharded over 'data' when there is one;
+        # this assumes the chain axis is leading, so `n` is the last axis
+        if mesh is not None and 'data' in mesh.axis_names:
+            shard_shape = shrd.sharding.shard_shape(shrd.shape)
+            assert shard_shape[-1] == _N_TEST // mesh.shape['data']
+
+    def test_no_mesh(self, keys: split, num_chains: int | None, k: int | None) -> None:
+        """Modes agree with no mesh (autobatch with no sharding)."""
+        self._assert_modes_match(keys, num_chains, k, None)
+
+    def test_data_mesh(
+        self, keys: split, num_chains: int | None, k: int | None
+    ) -> None:
+        """Modes agree with a data-sharding mesh."""
+        if len(jax.devices()) < 2:
+            pytest.skip('need at least 2 devices')
+        self._assert_modes_match(keys, num_chains, k, _make_mesh({'data': 2}))
+
+    def test_chains_and_data_mesh(
+        self, keys: split, num_chains: int | None, k: int | None
+    ) -> None:
+        """Modes agree with a mesh sharding both chains and data."""
+        if num_chains is None:
+            pytest.skip('no chains to shard')
+        if len(jax.devices()) < 4:
+            pytest.skip('need at least 4 devices')
+        mesh = _make_mesh({'chains': 2, 'data': 2})
+        self._assert_modes_match(keys, num_chains, k, mesh)
+
+    def test_shard_fallback_without_data_axis(self, keys: split) -> None:
+        """`shard_and_autobatch` without a 'data' mesh axis falls back to batching."""
+        if len(jax.devices()) < 2:
+            pytest.skip('need at least 2 devices')
+        mesh = _make_mesh({'chains': 2})
+        trace = self._trace(keys, 4, None, mesh)
+        X = _eval_test_points()
+        base = evaluate_trace(X, trace, test_points='none')
+        shrd = evaluate_trace(X, trace, test_points='shard_and_autobatch')
+        assert_close_matrices(shrd, base, rtol=1e-5, reduce_rank=True)
+
+    @pytest.mark.parametrize('mode', ['autobatch', 'shard_and_autobatch'])
+    def test_low_budget_loops_and_warns(self, keys: split, mode: str) -> None:
+        """An absurdly low budget forces every loop to run and stays correct.
+
+        The test points cannot be reduced below one element, so the innermost
+        tree autobatch can't honor the limit and warns; catching that warning
+        checks the whole batching stack end-to-end.
+        """
+        if mode == 'shard_and_autobatch' and len(jax.devices()) < 2:
+            pytest.skip('need at least 2 devices')
+        mesh = _make_mesh({'data': 2}) if mode == 'shard_and_autobatch' else None
+
+        trace = self._trace(keys, None, None, mesh)
+        X = _eval_test_points()
+        base = evaluate_trace(X, trace, test_points='none')
+
+        if mesh is not None:
+            X = device_put(X, NamedSharding(mesh, PartitionSpec(None, 'data')))
+        with pytest.warns(UserWarning, match='max_io_nbytes'):
+            looped = evaluate_trace(X, trace, test_points=mode, max_io_nbytes=1)
+        assert_close_matrices(looped, base, rtol=1e-5)

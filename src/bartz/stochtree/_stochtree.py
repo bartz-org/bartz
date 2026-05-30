@@ -558,7 +558,12 @@ class BARTModel:
         terms: Literal['y_hat', 'mean_forest', 'all']
         | Sequence[Literal['y_hat', 'mean_forest', 'all']] = 'all',
         scale: Literal['linear', 'probability', 'class'] = 'linear',
-    ) -> Shaped[Array, '...'] | dict[str, Shaped[Array, '...']]:
+    ) -> (
+        Shaped[Array, 'm num_samples']
+        | Shaped[Array, ' m']
+        | dict[str, Shaped[Array, 'm num_samples']]
+        | dict[str, Shaped[Array, ' m']]
+    ):
         """Predict at new covariates.
 
         Parameters
@@ -580,7 +585,7 @@ class BARTModel:
 
         Returns
         -------
-        Either a single jax array (for a single requested term) or a dict keyed by term name (matching stochtree's behavior).
+        Either a single jax array (for a single requested term) or a dict keyed by term name.
 
         Raises
         ------

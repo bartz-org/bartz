@@ -25,11 +25,13 @@
 """Main high-level interface of the package."""
 
 import math
+import pickle
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from enum import Enum
 from functools import cached_property, partial
-from os import cpu_count
+from os import PathLike, cpu_count
+from pathlib import Path
 
 # WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
@@ -38,7 +40,7 @@ from warnings import warn
 
 import jax
 import jax.numpy as jnp
-from equinox import Module, error_if, field
+from equinox import Module, error_if, field, tree_at
 from jax import (
     Device,
     debug_nans,
@@ -74,7 +76,8 @@ from bartz.mcmcloop import (
     RunMCMCResult,
     compute_varcount,
     evaluate_trace,
-    make_default_callback,
+    make_print_callback,
+    make_tqdm_callback,
     run_mcmc,
 )
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
@@ -143,10 +146,10 @@ class Series(Protocol):
 
 class Bart(Module):
     R"""
-    Nonparametric regression with Bayesian Additive Regression Trees (BART) [2]_.
+    Nonparametric regression with Bayesian Additive Regression Trees (BART).
 
     Regress `y_train` on `x_train` with a latent mean function represented as
-    a sum of decision trees. The inference is carried out by sampling the
+    a sum of decision trees [2]_. The inference is carried out by sampling the
     posterior distribution of the tree ensemble with an MCMC.
 
     Parameters
@@ -293,9 +296,13 @@ class Bart(Module):
         The thinning factor for the MCMC samples, after burn-in.
     printevery
         The number of iterations (including thinned-away ones) between each log
-        line. Set to `None` to disable logging. ^C interrupts the MCMC only
-        every `printevery` iterations, so with logging disabled it's impossible
-        to kill the MCMC conveniently.
+        line. Set to `None` to disable progress reporting entirely (this ignores
+        `pbar`). ^C interrupts the MCMC only every `printevery` iterations, so
+        with reporting disabled it's impossible to kill the MCMC conveniently.
+    pbar
+        If `True`, show a `tqdm` progress bar instead of printing log lines. The
+        bar advances every iteration and refreshes the acceptance statistics
+        every `printevery` iterations. Ignored if `printevery` is `None`.
     num_chains
         The number of independent Markov chains to run.
 
@@ -403,6 +410,7 @@ class Bart(Module):
         n_burn: int = 1000,
         n_skip: int = 1,
         printevery: int | None = 100,
+        pbar: bool = True,
         num_chains: int | None = 4,
         num_chain_devices: int | None | Literal['auto'] = 'auto',
         num_data_devices: int | None = None,
@@ -492,7 +500,14 @@ class Bart(Module):
             keys.pop(),
         )
         result = _run_mcmc(
-            initial_state, n_save, n_burn, n_skip, printevery, mcmc_key, run_mcmc_kw
+            initial_state,
+            n_save,
+            n_burn,
+            n_skip,
+            printevery,
+            pbar,
+            mcmc_key,
+            run_mcmc_kw,
         )
 
         # set public attributes
@@ -571,6 +586,61 @@ class Bart(Module):
             self._mcmc_state.binary_y is not None,
             kind,
         )
+
+    def dump(self, path: str | PathLike) -> None:
+        """Serialize the fitted model to a file with `pickle`.
+
+        Parameters
+        ----------
+        path
+            The file to write to.
+
+        Notes
+        -----
+        Intended for short-term storage (e.g. caching across processes), not
+        long-term archival: the format depends on the versions of bartz, jax and
+        equinox. The arrays are copied to host memory and all device/sharding
+        placement is dropped; `load` reconstructs a single-device model.
+        """
+        # drop the device meshes (whose `Device` objects are not picklable) from
+        # the state config and both traces, then gather any sharded arrays to
+        # host (dropping their sharding); the reload is single-device
+        config = replace(self._mcmc_state.config, mesh=None)
+        main_trace = replace(self._main_trace, mesh=None)
+        burnin_trace = replace(self._burnin_trace, mesh=None)
+        obj = tree_at(
+            lambda b: (b._mcmc_state.config, b._main_trace, b._burnin_trace),  # noqa: SLF001
+            self,
+            (config, main_trace, burnin_trace),
+        )
+        obj = jax.device_get(obj)
+        with Path(path).open('wb') as file:
+            pickle.dump(obj, file, protocol=pickle.HIGHEST_PROTOCOL)
+
+    @classmethod
+    def load(cls, path: str | PathLike) -> 'Bart':
+        """Load a model saved with `dump`.
+
+        Parameters
+        ----------
+        path
+            The file to read from.
+
+        Returns
+        -------
+        The deserialized model, on host memory with no device placement.
+
+        Raises
+        ------
+        TypeError
+            If the file does not contain a `Bart` instance.
+        """
+        with Path(path).open('rb') as file:
+            obj = pickle.load(file)  # noqa: S301, the user owns the file
+        if not isinstance(obj, cls):
+            msg = f'unpickled a {type(obj).__name__}, not a {cls.__name__}'
+            raise TypeError(msg)
+        return obj
 
     @property
     def offset(self) -> Float32[Array, ''] | Float32[Array, ' k']:
@@ -1331,18 +1401,26 @@ def _run_mcmc(
     n_burn: int,
     n_skip: int,
     printevery: int | None,
+    pbar: bool,
     key: Key[Array, ''],
     run_mcmc_kw: Mapping,
 ) -> RunMCMCResult:
     # prepare arguments
     kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
-    kw.update(
-        make_default_callback(
-            mcmc_state,
-            dot_every=None if printevery is None or printevery == 1 else 1,
-            report_every=printevery,
-        )
-    )
+    # `printevery=None` disables progress reporting entirely: no callback is
+    # installed, so the loop traces without any `debug.callback` effect (a tqdm
+    # bar would otherwise advance every iteration regardless of `printevery`).
+    if printevery is not None:
+        if pbar:
+            kw.update(make_tqdm_callback(mcmc_state, report_every=printevery))
+        else:
+            kw.update(
+                make_print_callback(
+                    mcmc_state,
+                    dot_every=None if printevery == 1 else 1,
+                    report_every=printevery,
+                )
+            )
     kw.update(run_mcmc_kw)
 
     return run_mcmc(key, mcmc_state, n_save, **kw)
@@ -1527,7 +1605,6 @@ def points_per_node_distr_trace(
 class DeviceKwArgs(TypedDict):
     num_chains: int | None
     mesh: Mesh | None
-    target_platform: Literal['cpu', 'gpu'] | None
 
 
 def process_device_settings(
@@ -1540,24 +1617,12 @@ def process_device_settings(
     """Return the arguments for `mcmcstep.init` related to devices, and an optional device where to put the state."""
     platform, device, devices = _determine_devices(y_train, devices)
     num_chain_devices = _determine_num_chain_devices(
-        platform, num_chains, num_chain_devices
+        platform, num_chains, num_chain_devices, num_data_devices
     )
     mesh, device = _determine_mesh(num_chain_devices, num_data_devices, device, devices)
 
     # prepare arguments to `init`
-    settings = DeviceKwArgs(
-        num_chains=num_chains,
-        mesh=mesh,
-        target_platform=None
-        if mesh is not None or hasattr(y_train, 'platform')
-        else platform,
-        # here we don't take into account the case where the user has set both
-        # batch sizes; since the user has to be playing with `init_kw` to do
-        # that, we'll let `init` throw the error and the user set
-        # `target_platform` themselves so they have a clearer idea how the
-        # thing works (i.e.: init won't be happy to receive target_platform if
-        # it's not needed because all device-dependent defaults are overridden)
-    )
+    settings = DeviceKwArgs(num_chains=num_chains, mesh=mesh)
 
     return settings, device
 
@@ -1598,33 +1663,83 @@ def _determine_num_chain_devices(
     platform: str,
     num_chains: int | None,
     num_chain_devices: int | None | Literal['auto'],
+    num_data_devices: int | None,
 ) -> int | None:
-    """Decide the value of `num_chain_devices` when it's set to 'auto'."""
-    if num_chain_devices != 'auto':
-        return num_chain_devices
-    elif num_chains is None or num_chains == 1 or platform != 'cpu':
-        return None
-    else:
-        num_cores = cpu_count()
-        assert num_cores is not None, 'could not determine number of cpu cores'
-        num_shards = _largest_divisor_at_most(num_chains, num_cores)
+    """Resolve and validate `num_chain_devices`, returning the chain mesh axis size or `None`."""
+    if num_chain_devices == 'auto':
+        num_chain_devices = _auto_num_chain_devices(
+            platform, num_chains, num_data_devices
+        )
 
-        if num_shards > 1:
-            num_jax_cpus = device_count('cpu')
-            if num_jax_cpus < num_shards:
-                new_num_shards = _largest_divisor_at_most(num_chains, num_jax_cpus)
+    # an explicit value must be a positive divisor of the number of chains
+    if num_chain_devices is not None:
+        effective_chains = 1 if num_chains is None else num_chains
+        if num_chain_devices < 1 or effective_chains % num_chain_devices:
+            chains_desc = (
+                'a single chain (num_chains=None)'
+                if num_chains is None
+                else f'num_chains={num_chains}'
+            )
+            msg = (
+                f'num_chain_devices={num_chain_devices} must be a positive '
+                f'divisor of the number of chains ({chains_desc})'
+            )
+            raise ValueError(msg)
+
+    # there is no chain axis to shard when the chains are scalar
+    if num_chains is None:
+        return None
+    return num_chain_devices
+
+
+def _auto_num_chain_devices(
+    platform: str, num_chains: int | None, num_data_devices: int | None
+) -> int | None:
+    """Pick `num_chain_devices` automatically for multi-chain cpu runs.
+
+    `num_data_devices` reserves devices for the data axis, so the chain axis can
+    only use a fraction of them; this keeps the ``chains x data`` mesh within the
+    available devices.
+    """
+    if num_chains is None or num_chains == 1 or platform != 'cpu':
+        return None
+    data_devices = num_data_devices or 1
+    num_cores = cpu_count()
+    assert num_cores is not None, 'could not determine number of cpu cores'
+
+    # devices available for the chain axis after reserving for the data axis
+    core_budget = max(1, num_cores // data_devices)
+    num_shards = _largest_divisor_at_most(num_chains, core_budget)
+
+    if num_shards > 1:
+        jax_budget = max(1, device_count('cpu') // data_devices)
+        if jax_budget < num_shards:
+            new_num_shards = _largest_divisor_at_most(num_chains, jax_budget)
+            total = device_count('cpu')
+            if num_data_devices:
+                msg = (
+                    f'`Bart` would like to shard {num_chains} chains across '
+                    f'{num_shards} devices, but only {jax_budget} of the '
+                    f'{total} jax cpu devices are free for chains '
+                    f'(num_data_devices={num_data_devices} reserves the rest), '
+                    f'so it will use {new_num_shards} devices for chains '
+                    'instead. To enable more parallelization, increase the '
+                    'limit with '
+                    '`jax.config.update("jax_num_cpu_devices", <num_devices>)`.'
+                )
+            else:
                 msg = (
                     f'`Bart` would like to shard {num_chains} chains across '
                     f'{num_shards} virtual jax cpu devices, but jax is set up '
-                    f'with only {num_jax_cpus} cpu devices, so it will use '
+                    f'with only {total} cpu devices, so it will use '
                     f'{new_num_shards} devices instead. To enable '
                     'parallelization, please increase the limit with '
                     '`jax.config.update("jax_num_cpu_devices", <num_devices>)`.'
                 )
-                warn(msg)
-                num_shards = new_num_shards
+            warn(msg)
+            num_shards = new_num_shards
 
-        return num_shards if num_shards > 1 else None
+    return num_shards if num_shards > 1 else None
 
 
 def _determine_mesh(

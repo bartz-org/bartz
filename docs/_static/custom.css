@@ -70,6 +70,14 @@ ul.simple > li:not(:last-child) {
     margin-bottom: 0.5em;
 }
 
+/* autosummary summary tables: left-align and fill the available width
+ * (overrides docutils' table.align-default centering) */
+table.autosummary {
+    width: 100%;
+    margin-left: 0;
+    margin-right: 0;
+}
+
 /* highlight types that originate from type hints rather than the docstring */
 span.sphinx_autodoc_typehints-type > code {
     background-color: #ee9;

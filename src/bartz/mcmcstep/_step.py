@@ -26,6 +26,7 @@
 
 from dataclasses import replace
 from functools import partial
+from typing import Literal
 
 import jax
 from equinox import Module, tree_at
@@ -42,6 +43,7 @@ from bartz.mcmcstep._state import (
     CHAIN_AXIS,
     State,
     StepConfig,
+    _auto_num_batches,
     chol_with_gersh,
     field,
     get_axis_size,
@@ -469,14 +471,16 @@ def _compute_count_or_prec_tree(
         cls = Counts
         dtype = jnp.uint32
         num_batches = config.count_num_batches
+        which = 'count'
     else:
         value = prec_scale
         cls = Precs
         dtype = jnp.float32
         num_batches = config.prec_num_batches
+        which = 'prec'
 
     trees = _scatter_add(
-        value, leaf_indices, tree_size, dtype, num_batches, config.data_sharded
+        value, leaf_indices, tree_size, dtype, num_batches, which, config.data_sharded
     )
 
     # count datapoints in nodes modified by move
@@ -1033,7 +1037,7 @@ class SeqStageInAllTrees(Module):
     X: UInt[Array, 'p n']
     """The predictors."""
 
-    resid_num_batches: int | None = field(static=True)
+    resid_num_batches: int | None | Literal['auto'] = field(static=True)
     """The number of batches for computing the sum of residuals in each leaf."""
 
     data_sharded: bool = field(static=True)
@@ -1189,7 +1193,7 @@ def sum_resid(
     ),
     leaf_indices: UInt[Array, ' n'],
     tree_size: int,
-    resid_num_batches: int | None,
+    resid_num_batches: int | None | Literal['auto'],
     data_sharded: bool,
 ) -> (
     Float32[Array, ' {tree_size}']
@@ -1224,6 +1228,7 @@ def sum_resid(
         tree_size,
         jnp.float32,
         resid_num_batches,
+        'resid',
         data_sharded,
     )
 
@@ -1233,23 +1238,45 @@ def _scatter_add(
     indices: Integer[Array, ' n'],
     size: int,
     dtype: jnp.dtype,
-    batch_size: int | None,
+    batch_size: int | None | Literal['auto'],
+    which: Literal['resid', 'count', 'prec'],
     data_sharded: bool,
 ) -> Shaped[Array, '*batch_shape {size}']:
     """Indexed reduce along the last axis of `values`, with optional batching.
 
-    When `data_sharded` is True the result is psum-reduced across the
-    ``'data'`` axis of the current `shard_map` region.
+    When `batch_size` is 'auto', the number of batches is chosen per-platform at
+    run time via `lax.platform_dependent`. When `data_sharded` is True the
+    result is psum-reduced across the ``'data'`` axis of the current `shard_map`
+    region.
     """
     values = jnp.asarray(values)
     assert values.ndim == 0 or values.shape[-1:] == indices.shape
-    return _scatter_add_impl(
-        values,
-        indices,
-        size=size,
-        dtype=dtype,
-        num_batches=batch_size,
-        final_psum=data_sharded,
+
+    def impl(num_batches: int | None) -> Shaped[Array, '*batch_shape {size}']:
+        return _scatter_add_impl(
+            values,
+            indices,
+            size=size,
+            dtype=dtype,
+            num_batches=num_batches,
+            final_psum=data_sharded,
+        )
+
+    if batch_size != 'auto':
+        return impl(batch_size)
+
+    # `n` is the local shard size when data-sharded, which is exactly what the
+    # batch-count heuristic wants. Defer the cpu/gpu choice to XLA: it traces
+    # both branches but the compiler keeps only the one for the target platform.
+    (n,) = indices.shape
+    cpu_nb = _auto_num_batches('cpu', n, which)
+    gpu_nb = _auto_num_batches('gpu', n, which)
+    if cpu_nb == gpu_nb:
+        return impl(cpu_nb)
+    return lax.platform_dependent(
+        default=partial(impl, cpu_nb),
+        cuda=partial(impl, gpu_nb),
+        rocm=partial(impl, gpu_nb),
     )
 
 

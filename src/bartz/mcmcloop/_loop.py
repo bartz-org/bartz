@@ -26,7 +26,7 @@
 
 from collections.abc import Callable
 from functools import partial, update_wrapper
-from typing import Any, NamedTuple, Protocol, TypeAlias, TypeVar
+from typing import Any, NamedTuple, Protocol, TypeAlias, TypeVar, runtime_checkable
 
 from equinox import Module
 from jax import (
@@ -66,6 +66,7 @@ class RunMCMCResult(NamedTuple):
     """The trace of the main phase."""
 
 
+@runtime_checkable
 class Callback(Protocol):
     """Callback type for `run_mcmc`."""
 

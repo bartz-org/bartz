@@ -90,13 +90,13 @@ class MainTrace(BurninTrace):
     """MCMC trace with trees and diagnostic values."""
 
     leaf_tree: (
-        Float32[Array, '*chains_and_samples 2**d']
-        | Float32[Array, '*chains_and_samples k 2**d']
+        Float32[Array, '*chains_and_samples num_trees tree_size']
+        | Float32[Array, '*chains_and_samples num_trees k tree_size']
     ) = field(chains=CHAIN_AXIS, samples=0)
-    var_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(
+    var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2'] = field(
         chains=CHAIN_AXIS, samples=0
     )
-    split_tree: UInt[Array, '*chains_and_samples 2**(d-1)'] = field(
+    split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2'] = field(
         chains=CHAIN_AXIS, samples=0
     )
     offset: Float32[Array, ''] | Float32[Array, ' k']

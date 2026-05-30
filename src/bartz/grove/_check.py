@@ -24,7 +24,7 @@
 
 """Implement functions to check validity of trees."""
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from jax import jit
 from jax import numpy as jnp
@@ -36,6 +36,7 @@ from bartz.grove._grove import TreeHeaps, TreesTrace, is_actual_leaf
 CHECK_FUNCTIONS = []
 
 
+@runtime_checkable
 class CheckFunc(Protocol):
     """Protocol for functions that check whether a tree is valid."""
 
@@ -181,7 +182,10 @@ def check_rule_consistency(
 
 
 @check
-def check_num_nodes(tree: TreeHeaps, max_split: UInt[Array, ' p']) -> Bool[Array, '']:  # noqa: ARG001
+def check_num_nodes(
+    tree: TreeHeaps,
+    max_split: UInt[Array, ' p'],  # noqa: ARG001
+) -> Bool[Array, '']:
     """Check that #leaves = 1 + #(internal nodes)."""
     is_leaf = is_actual_leaf(tree.split_tree, add_bottom_level=True)
     num_leaves = jnp.count_nonzero(is_leaf)

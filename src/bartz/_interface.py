@@ -35,7 +35,7 @@ from pathlib import Path
 
 # WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
-from typing import Any, Literal, Protocol, TypedDict, overload
+from typing import Any, Literal, Protocol, TypedDict, overload, runtime_checkable
 from warnings import warn
 
 import jax
@@ -122,6 +122,7 @@ class PredictKind(Enum):
     ``(num_chains * n_save, k, m)``)."""
 
 
+@runtime_checkable
 class DataFrame(Protocol):
     """DataFrame duck-type for `Bart`."""
 
@@ -133,6 +134,7 @@ class DataFrame(Protocol):
         ...
 
 
+@runtime_checkable
 class Series(Protocol):
     """Series duck-type for `Bart`."""
 

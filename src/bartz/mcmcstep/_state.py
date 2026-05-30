@@ -55,7 +55,7 @@ from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Key, PyTree, 
 from numpy import ndarray
 from numpy.lib.array_utils import normalize_axis_index
 
-from bartz._jaxext import minimal_unsigned_dtype
+from bartz._jaxext import jaxtyping_disabled, minimal_unsigned_dtype
 from bartz.grove import tree_depths
 
 ArrayLike = Array | ndarray
@@ -124,7 +124,7 @@ def field(  # noqa: ANN202
     return eqx_field(metadata=metadata, **kwargs)
 
 
-def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
+def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
     """Determine vmapping axes for chains.
 
     This function determines the argument to the `in_axes` or `out_axes`
@@ -154,7 +154,7 @@ def _none_marker(leaf: object, raw: int) -> None:  # noqa: ARG001
     return None  # noqa: RET501
 
 
-def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
+def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
     """Determine vmapping axes for data.
 
     Parameters
@@ -176,7 +176,7 @@ def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
     )
 
 
-def trace_sample_axes(trace: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T']:
+def trace_sample_axes(trace: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
     """Determine the position of the sample axis for each leaf of a trace.
 
     Parameters
@@ -336,7 +336,7 @@ def _find_metadata(
     *,
     marker_value: Callable[[object, int], object] = _normalize_axis_for_leaf,
     default_value: object = None,
-) -> PyTree[Any, ' S']:
+) -> PyTree[Any, ' S ...']:
     """Walk `x` replacing marked subtrees with derived values.
 
     For each Module field whose metadata contains `key`, the field's subtree
@@ -365,7 +365,13 @@ def _find_metadata(
                         v, key, marker_value=marker_value, default_value=default_value
                     )
                 )
-        return x.__class__(*args)
+        # rebuild bypassing the (type-checked) __init__: the result is a
+        # same-structure pytree whose leaves are axis markers (int/None), not
+        # the arrays the field annotations require.
+        out = object.__new__(type(x))
+        for f, value in zip(fields(x), args, strict=True):
+            object.__setattr__(out, f.name, value)
+        return out
 
     def get_axes(x: object) -> PyTree:
         if _is_module(x):
@@ -381,18 +387,20 @@ class Forest(Module):
     """Represents the MCMC state of a sum of trees."""
 
     leaf_tree: (
-        Float32[Array, '*chains num_trees 2**d']
-        | Float32[Array, '*chains num_trees k 2**d']
+        Float32[Array, '*chains num_trees tree_size']
+        | Float32[Array, '*chains num_trees k tree_size']
     ) = field(chains=CHAIN_AXIS)
     """The leaf values."""
 
-    var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=CHAIN_AXIS)
+    var_tree: UInt[Array, '*chains num_trees tree_size//2'] = field(chains=CHAIN_AXIS)
     """The decision axes."""
 
-    split_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=CHAIN_AXIS)
+    split_tree: UInt[Array, '*chains num_trees tree_size//2'] = field(chains=CHAIN_AXIS)
     """The decision boundaries."""
 
-    affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=CHAIN_AXIS)
+    affluence_tree: Bool[Array, '*chains num_trees tree_size//2'] = field(
+        chains=CHAIN_AXIS
+    )
     """Marks leaves that can be grown."""
 
     max_split: UInt[Array, ' p']
@@ -403,12 +411,12 @@ class Forest(Module):
     the `i` such that ``max_split[i] == 0``, otherwise behavior is
     undefined."""
 
-    p_nonterminal: Float32[Array, ' 2**d']
+    p_nonterminal: Float32[Array, ' tree_size']
     """The prior probability of each node being nonterminal, conditional on
     its ancestors. Includes the nodes at maximum depth which should be set
     to 0."""
 
-    p_propose_grow: Float32[Array, ' 2**(d-1)']
+    p_propose_grow: Float32[Array, ' tree_size//2']
     """The unnormalized probability of picking a leaf for a grow proposal."""
 
     leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=CHAIN_AXIS, data=-1)
@@ -625,9 +633,9 @@ def _init_shape_shifting_parameters(
 ) -> tuple[
     bool,
     tuple[()] | tuple[int],
+    None | Float32[Array, ''] | Float32[Array, 'k k'],
     None | Float32[Array, ''],
-    None | Float32[Array, ''],
-    None | Float32[Array, ''],
+    None | Float32[Array, ''] | Float32[Array, 'k k'],
     None | Int32[Array, ' kb'],
 ]:
     """
@@ -705,8 +713,8 @@ def _init_shape_shifting_parameters(
     elif is_mixed or partial_missing:
         if is_mixed:
             assert error_scale is None
-        error_cov_df = jnp.asarray(error_cov_df)
-        error_cov_scale = _check_diagonal(jnp.asarray(error_cov_scale))
+        error_cov_df = jnp.asarray(error_cov_df, jnp.float32)
+        error_cov_scale = _check_diagonal(jnp.asarray(error_cov_scale, jnp.float32))
         assert error_cov_scale.shape == 2 * kshape
         error_cov_inv = _init_diag_error_cov_inv(
             error_cov_df, error_cov_scale, binary_mask if is_mixed else None
@@ -719,8 +727,8 @@ def _init_shape_shifting_parameters(
             or error_scale.shape == y.shape  # (k, n)
             or error_scale.shape == y.shape[-1:]  # (n,)
         )
-        error_cov_df = jnp.asarray(error_cov_df)
-        error_cov_scale = jnp.asarray(error_cov_scale)
+        error_cov_df = jnp.asarray(error_cov_df, jnp.float32)
+        error_cov_scale = jnp.asarray(error_cov_scale, jnp.float32)
         assert error_cov_scale.shape == 2 * kshape
 
         # Multivariate vs univariate
@@ -1102,125 +1110,139 @@ def init(
 
     tree_size = 2**max_depth
 
-    # initialize all remaining stuff and put it in an unsharded state. Every
-    # chain-bearing leaf is built as a `_LazyArray` at its core (no-chain)
-    # shape; `_add_chains` then wraps each one to broadcast in the chain axis.
-    state = State(
-        X=X,
-        binary_y=y,  # temporary to be sharded together with everything else
-        z=(
-            _LazyArray(jnp.full, y.shape, offset[..., None])
-            if is_binary
-            else _LazyArray(
-                jnp.full, (binary_indices.size, n), offset[binary_indices, None]
+    # Assemble the state, shard it, then fill in the post-shard fields. This
+    # whole region runs with type-checking disabled because the state carries
+    # deliberately wrong-typed intermediates parked in its fields for sharding:
+    # `_LazyArray` leaves (each chain-bearing leaf is built at its core no-chain
+    # shape, then `_add_chains` wraps it to broadcast in the chain axis), the raw
+    # float `y` in the bool `binary_y` slot, and the user `missing` mask and
+    # `error_scale` in the scale slots. The context ends once every field has
+    # been replaced by its final, correctly-typed array.
+    with jaxtyping_disabled():
+        state = State(
+            X=X,
+            binary_y=y,  # temporary to be sharded together with everything else
+            z=(
+                _LazyArray(jnp.full, y.shape, offset[..., None])
+                if is_binary
+                else _LazyArray(
+                    jnp.full, (binary_indices.size, n), offset[binary_indices, None]
+                )
+                if binary_indices is not None
+                else None
+            ),
+            binary_indices=binary_indices,
+            offset=offset,
+            resid=(
+                _LazyArray(jnp.zeros, y.shape)
+                if is_binary
+                else None  # resid is created later after y and offset are sharded
+            ),
+            error_cov_inv=_lazy_from_array(error_cov_inv),
+            # temporarily store user inputs in these slots so they get sharded
+            # with everything else; `_compute_scales` replaces them post-shard.
+            prec_scale=error_scale,
+            inv_sdev_scale=missing,
+            error_cov_df=error_cov_df,
+            error_cov_scale=error_cov_scale,
+            forest=Forest(
+                leaf_tree=_LazyArray(
+                    jnp.zeros, (num_trees, *kshape, tree_size), jnp.float32
+                ),
+                var_tree=_LazyArray(
+                    jnp.zeros,
+                    (num_trees, tree_size // 2),
+                    minimal_unsigned_dtype(p - 1),
+                ),
+                split_tree=_LazyArray(
+                    jnp.zeros, (num_trees, tree_size // 2), max_split.dtype
+                ),
+                affluence_tree=_LazyArray(
+                    _initial_affluence_tree,
+                    (num_trees, tree_size // 2),
+                    n,
+                    min_points_per_decision_node,
+                ),
+                blocked_vars=_get_blocked_vars(filter_splitless_vars, max_split),
+                max_split=max_split,
+                grow_prop_count=_LazyArray(jnp.zeros, (), int),
+                grow_acc_count=_LazyArray(jnp.zeros, (), int),
+                prune_prop_count=_LazyArray(jnp.zeros, (), int),
+                prune_acc_count=_LazyArray(jnp.zeros, (), int),
+                p_nonterminal=p_nonterminal[tree_depths(tree_size)],
+                p_propose_grow=p_nonterminal[tree_depths(tree_size // 2)],
+                leaf_indices=_LazyArray(
+                    jnp.ones, (num_trees, n), minimal_unsigned_dtype(tree_size - 1)
+                ),
+                min_points_per_decision_node=_asarray_or_none(
+                    min_points_per_decision_node
+                ),
+                min_points_per_leaf=_asarray_or_none(min_points_per_leaf),
+                log_trans_prior=_LazyArray(jnp.zeros, (num_trees,))
+                if save_ratios
+                else None,
+                log_likelihood=_LazyArray(jnp.zeros, (num_trees,))
+                if save_ratios
+                else None,
+                leaf_prior_cov_inv=leaf_prior_cov_inv,
+                log_s=_lazy_from_array(_asarray_or_none(log_s)),
+                theta=_lazy_from_array(_asarray_or_none(theta)),
+                rho=_asarray_or_none(rho),
+                a=_asarray_or_none(a),
+                b=_asarray_or_none(b),
+            ),
+            config=StepConfig(
+                steps_done=jnp.int32(0),
+                sparse_on_at=_asarray_or_none(sparse_on_at),
+                mesh=mesh,
+                **red_cfg,
+            ),
+        )
+
+        # add the chain axis to every chain-marked leaf at the position
+        # declared by its field metadata
+        state = _add_chains(state, num_chains)
+
+        # delete big input arrays such that they can be deleted as soon as they
+        # are sharded, only those arrays that contain an (n,) sized axis
+        del X, error_scale, missing, y
+
+        # move all arrays to the appropriate device
+        state = _shard_state(state)
+
+        # calculate initial resid in the continuous outcome case, such that y
+        # and offset are already sharded if needed
+        if state.resid is None:
+            state = _set_initial_resid(state, binary_indices, num_chains)
+
+        # calculate initial binary_y
+        if is_binary or binary_indices is not None:
+            binary_y = _LazyArray(
+                _initial_binary_y,
+                state.binary_y.shape
+                if binary_indices is None
+                else (binary_indices.size, n),
+                state.binary_y,  # this is actually y
+                binary_indices,
             )
-            if binary_indices is not None
-            else None
-        ),
-        binary_indices=binary_indices,
-        offset=offset,
-        resid=(
-            _LazyArray(jnp.zeros, y.shape)
-            if is_binary
-            else None  # resid is created later after y and offset are sharded
-        ),
-        error_cov_inv=_lazy_from_array(error_cov_inv),
-        # temporarily store user inputs in these slots so they get sharded
-        # with everything else; `_compute_scales` replaces them post-shard.
-        prec_scale=error_scale,
-        inv_sdev_scale=missing,
-        error_cov_df=error_cov_df,
-        error_cov_scale=error_cov_scale,
-        forest=Forest(
-            leaf_tree=_LazyArray(
-                jnp.zeros, (num_trees, *kshape, tree_size), jnp.float32
-            ),
-            var_tree=_LazyArray(
-                jnp.zeros, (num_trees, tree_size // 2), minimal_unsigned_dtype(p - 1)
-            ),
-            split_tree=_LazyArray(
-                jnp.zeros, (num_trees, tree_size // 2), max_split.dtype
-            ),
-            affluence_tree=_LazyArray(
-                _initial_affluence_tree,
-                (num_trees, tree_size // 2),
-                n,
-                min_points_per_decision_node,
-            ),
-            blocked_vars=_get_blocked_vars(filter_splitless_vars, max_split),
-            max_split=max_split,
-            grow_prop_count=_LazyArray(jnp.zeros, (), int),
-            grow_acc_count=_LazyArray(jnp.zeros, (), int),
-            prune_prop_count=_LazyArray(jnp.zeros, (), int),
-            prune_acc_count=_LazyArray(jnp.zeros, (), int),
-            p_nonterminal=p_nonterminal[tree_depths(tree_size)],
-            p_propose_grow=p_nonterminal[tree_depths(tree_size // 2)],
-            leaf_indices=_LazyArray(
-                jnp.ones, (num_trees, n), minimal_unsigned_dtype(tree_size - 1)
-            ),
-            min_points_per_decision_node=_asarray_or_none(min_points_per_decision_node),
-            min_points_per_leaf=_asarray_or_none(min_points_per_leaf),
-            log_trans_prior=_LazyArray(jnp.zeros, (num_trees,))
-            if save_ratios
-            else None,
-            log_likelihood=_LazyArray(jnp.zeros, (num_trees,)) if save_ratios else None,
-            leaf_prior_cov_inv=leaf_prior_cov_inv,
-            log_s=_lazy_from_array(_asarray_or_none(log_s)),
-            theta=_lazy_from_array(_asarray_or_none(theta)),
-            rho=_asarray_or_none(rho),
-            a=_asarray_or_none(a),
-            b=_asarray_or_none(b),
-        ),
-        config=StepConfig(
-            steps_done=jnp.int32(0),
-            sparse_on_at=_asarray_or_none(sparse_on_at),
-            mesh=mesh,
-            **red_cfg,
-        ),
-    )
+            binary_y = _shard_leaf(binary_y, None, -1, state.config.mesh)
+        else:
+            binary_y = None
+        state = replace(state, binary_y=binary_y)
 
-    # add the chain axis to every chain-marked leaf at the position declared
-    # by its field metadata
-    state = _add_chains(state, num_chains)
+        # calculate prec_scale and inv_sdev_scale after sharding to do the
+        # calculation on the right devices. Pre-shard, `state.prec_scale` holds
+        # the user-supplied `error_scale` and `state.inv_sdev_scale` holds the
+        # user-supplied `missing` mask.
+        if state.prec_scale is not None or state.inv_sdev_scale is not None:
+            inv_sdev_scale, prec_scale = _compute_scales(
+                state.prec_scale, state.inv_sdev_scale
+            )
+            state = replace(state, inv_sdev_scale=inv_sdev_scale, prec_scale=prec_scale)
 
-    # delete big input arrays such that they can be deleted as soon as they
-    # are sharded, only those arrays that contain an (n,) sized axis
-    del X, error_scale, missing, y
-
-    # move all arrays to the appropriate device
-    state = _shard_state(state)
-
-    # calculate initial resid in the continuous outcome case, such that y and
-    # offset are already sharded if needed
-    if state.resid is None:
-        state = _set_initial_resid(state, binary_indices, num_chains)
-
-    # calculate initial binary_y
-    if is_binary or binary_indices is not None:
-        binary_y = _LazyArray(
-            _initial_binary_y,
-            state.binary_y.shape
-            if binary_indices is None
-            else (binary_indices.size, n),
-            state.binary_y,  # this is actually y
-            binary_indices,
-        )
-        binary_y = _shard_leaf(binary_y, None, -1, state.config.mesh)
-    else:
-        binary_y = None
-    state = replace(state, binary_y=binary_y)
-
-    # calculate prec_scale and inv_sdev_scale after sharding to do the
-    # calculation on the right devices. Pre-shard, `state.prec_scale` holds
-    # the user-supplied `error_scale` and `state.inv_sdev_scale` holds the
-    # user-supplied `missing` mask.
-    if state.prec_scale is not None or state.inv_sdev_scale is not None:
-        inv_sdev_scale, prec_scale = _compute_scales(
-            state.prec_scale, state.inv_sdev_scale
-        )
-        state = replace(state, inv_sdev_scale=inv_sdev_scale, prec_scale=prec_scale)
-
-    # make all types strong to avoid unwanted recompilations
+    # all the wrong-typed intermediates have now been replaced by their final
+    # values, so type-checking can resume; make all types strong to avoid
+    # unwanted recompilations
     return _remove_weak_types(state)
 
 

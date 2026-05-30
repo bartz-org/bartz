@@ -149,12 +149,12 @@ def generate_A_separate(
 
 def generate_outcome(
     key: Key[Array, ''],
-    mu: Float[Array, 'k n'],
+    mu: Float[Array, ' n'] | Float[Array, 'k n'],
     sigma2_eps: Float[Array, ''],
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
-) -> Float[Array, 'k n']:
+) -> Float[Array, ' n'] | Float[Array, 'k n']:
     """Sample y from mu and sigma2_eps (see `Params` for binary semantics)."""
-    eps: Float[Array, 'k n'] = random.normal(key, mu.shape)
+    eps: Float[Array, ' n'] | Float[Array, 'k n'] = random.normal(key, mu.shape)
     latent = mu + eps * jnp.sqrt(sigma2_eps)
     if outcome_type is OutcomeType.continuous:
         return latent

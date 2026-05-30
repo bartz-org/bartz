@@ -42,7 +42,7 @@ from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
 from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
 from scipy import linalg, stats
 
-from bartz._jaxext import minimal_unsigned_dtype
+from bartz._jaxext import jaxtyping_disabled, minimal_unsigned_dtype  # noqa: F401
 from bartz.grove import TreesTrace, check_trace, describe_error
 
 
@@ -71,9 +71,9 @@ def manual_tree(
         jnp.concatenate([jnp.zeros(1, int), *map(jnp.array, split)]),
     )
 
-    p = jnp.max(tree.var_tree) + 1
+    p = jnp.max(tree.var_tree).item() + 1
     var_type = minimal_unsigned_dtype(p - 1)
-    split_type = minimal_unsigned_dtype(jnp.max(tree.split_tree))
+    split_type = minimal_unsigned_dtype(jnp.max(tree.split_tree).item())
     max_split = jnp.full(p, jnp.max(tree.split_tree), split_type)
     tree = replace(
         tree,

@@ -37,7 +37,7 @@ from jax import numpy as jnp
 from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, Integer, PyTree
 from tqdm.auto import tqdm
 
-from bartz.grove import forest_fill
+from bartz.grove import forest_mean_leaves
 from bartz.mcmcloop._loop import _replicate
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes, chainful_axis
@@ -300,7 +300,7 @@ def _convert_jax_arrays_in_args(func: Callable[..., T]) -> Callable[..., T]:
 
 
 def _forest_stats(bart: State) -> dict[str, Float32[Array, ''] | int | None]:
-    """Cross-chain proposal/acceptance/fill statistics shown during the MCMC."""
+    """Cross-chain proposal/acceptance/leaves statistics shown during the MCMC."""
     chain_axis = chain_vmap_axes(bart.forest).split_tree
     num_trees_axis = chainful_axis(0, chain_axis)  # (num_trees, hts)
     split_tree = chain_to_axis(bart.forest.split_tree, chain_axis)
@@ -312,7 +312,8 @@ def _forest_stats(bart: State) -> dict[str, Float32[Array, ''] | int | None]:
             bart.forest.grow_acc_count.mean() + bart.forest.prune_acc_count.mean()
         )
         / prop_total,
-        fill=forest_fill(split_tree),
+        mean_leaves=forest_mean_leaves(split_tree),
+        max_leaves=split_tree.shape[-1],
     )
 
 
@@ -329,7 +330,8 @@ def _print_report(
     num_chains: int | None,
     grow_prop: float,
     move_acc: float,
-    fill: float,
+    mean_leaves: float,
+    max_leaves: int,
 ) -> None:
     """Print the report for `print_callback`."""
     # determine prefix
@@ -352,7 +354,7 @@ def _print_report(
         f'{prefix}Iteration {it}/{n_iters}, '
         f'grow prob: {grow_prop:.0%}, '
         f'move acc: {move_acc:.0%}, '
-        f'fill: {fill:.0%}{suffix}'
+        f'leaves: {mean_leaves:.1f}/{max_leaves}{suffix}'
     )
 
 
@@ -425,7 +427,8 @@ def _tqdm_report(
     num_chains: int | None,
     grow_prop: float,
     move_acc: float,
-    fill: float,
+    mean_leaves: float,
+    **_: Any,
 ) -> None:
     """Set the bar description and acceptance-statistics postfix."""
     bar = _get_or_create_bar(bar_id, n_iters)
@@ -434,11 +437,11 @@ def _tqdm_report(
     # set_description_str (not set_description) to avoid tqdm's ': ' suffix; the
     # trailing space separates the label from the bar
     bar.set_description_str('train ', refresh=False)
-    # keep this terse so the bar stays narrow, e.g. '4ch grow 52% acc 25% fill 6%'
+    # keep this terse so the bar stays narrow, e.g. '4ch grow 52% acc 25% leaves 3.4'
     msgs = []
     if num_chains is not None:
         msgs.append(f'{num_chains}ch')
     msgs.append(f'grow {grow_prop:.0%}')
     msgs.append(f'acc {move_acc:.0%}')
-    msgs.append(f'fill {fill:.0%}')
+    msgs.append(f'leaves {mean_leaves:.1f}')
     bar.set_postfix_str(' '.join(msgs))

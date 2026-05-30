@@ -29,7 +29,17 @@ from functools import partial, update_wrapper
 from typing import Any, NamedTuple, Protocol, TypeAlias, TypeVar
 
 from equinox import Module
-from jax import NamedSharding, device_put, eval_shape, jit, lax, named_call, tree, vmap
+from jax import (
+    NamedSharding,
+    device_put,
+    eval_shape,
+    jit,
+    lax,
+    named_call,
+    random,
+    tree,
+    vmap,
+)
 from jax import numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Int32, Key, PyTree, Shaped
@@ -186,7 +196,14 @@ def run_mcmc(
     -----
     The number of MCMC updates is ``n_burn + n_skip * n_save``. The traces do
     not include the initial state, and include the final state.
+
+    Resuming is exact: passing the returned `final_state` and the same `key` to
+    a new call continues the run as if it had not stopped, so splitting a run
+    into several consecutive calls gives the same result as a single call.
     """
+    # copy the key so buffer donation does not invalidate the caller's copy
+    key = jnp.copy(key)
+
     # create empty traces
     burnin_trace = _empty_trace(n_burn, bart, BurninTrace)
     main_trace = _empty_trace(n_save, bart, MainTrace)
@@ -297,9 +314,8 @@ def _run_mcmc_inner_loop(
 
     def body(carry: _Carry) -> _Carry:
         """Update the MCMC state."""
-        # split random key
-        keys = split(carry.key, 3)
-        key = keys.pop()
+        iter_key = random.fold_in(carry.key, carry.bart.config.steps_done)
+        keys = split(iter_key, 2)
 
         # update state
         bart = step(keys.pop(), carry.bart)
@@ -330,7 +346,7 @@ def _run_mcmc_inner_loop(
         return _Carry(
             bart=bart,
             i_total=carry.i_total + 1,
-            key=key,
+            key=carry.key,
             burnin_trace=burnin_trace,
             main_trace=main_trace,
             callback_state=callback_state,

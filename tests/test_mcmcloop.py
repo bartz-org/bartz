@@ -104,6 +104,21 @@ def simple_init(
     )
 
 
+def cat_traces(
+    trace_a: MainTrace | BurninTrace, trace_b: MainTrace | BurninTrace
+) -> MainTrace | BurninTrace:
+    """Concatenate two traces along their per-leaf sample axis."""
+    sample_axes = trace_sample_axes(trace_a)
+
+    def cat(a: Array, b: Array, axis: int | None) -> Array:
+        if axis is None:
+            assert_array_equal(a, b)
+            return a
+        return jnp.concatenate([a, b], axis=axis)
+
+    return tree.map(cat, trace_a, trace_b, sample_axes)
+
+
 class TestRunMcmc:
     """Test `mcmcloop.run_mcmc`."""
 
@@ -253,6 +268,64 @@ class TestRunMcmc:
             RuntimeError, match='The inner loop of `run_mcmc` was traced more than once'
         ):
             run_mcmc(keys.pop(), state, 2, inner_loop_length=1)
+
+    def test_steps_done_increments(self, keys: split, initial_state: State) -> None:
+        """Check the global step counter advances by the number of MCMC updates."""
+        n_burn, n_skip, n_save = 3, 2, 4
+        with debug_key_reuse(False):
+            final_state, *_ = run_mcmc(
+                keys.pop(),
+                tree.map(jnp.copy, initial_state),  # donated
+                n_save,
+                n_burn=n_burn,
+                n_skip=n_skip,
+            )
+        expected = initial_state.config.steps_done + n_burn + n_skip * n_save
+        assert_array_equal(final_state.config.steps_done, expected)
+
+    def test_restartable(self, keys: split, initial_state: State) -> None:
+        """Check chaining `run_mcmc` with the same key reproduces a single run.
+
+        The key is folded with the state's persistent step counter, so resuming
+        from the output state with the same key continues the exact same key
+        sequence, no matter how the total number of iterations is split.
+        """
+        key = keys.pop()
+        with debug_key_reuse(False):
+            # one run of 5 iterations
+            final_single, _, main_single = run_mcmc(
+                key, tree.map(jnp.copy, initial_state), 5, n_burn=0, n_skip=1
+            )
+            # the same 5 iterations split as 2 + 3, resuming from the output state
+            mid, _, main_a = run_mcmc(
+                key, tree.map(jnp.copy, initial_state), 2, n_burn=0, n_skip=1
+            )
+            final_split, _, main_b = run_mcmc(key, mid, 3, n_burn=0, n_skip=1)
+
+        tree.map(assert_array_equal, final_single, final_split)
+        tree.map(assert_array_equal, main_single, cat_traces(main_a, main_b))
+
+    def test_inner_loop_length_invariance(
+        self, keys: split, initial_state: State
+    ) -> None:
+        """Check the inner loop chunking does not affect the results."""
+        key = keys.pop()
+        with debug_key_reuse(False):
+            final_whole, burnin_whole, main_whole = run_mcmc(
+                key, tree.map(jnp.copy, initial_state), 4, n_burn=2, n_skip=1
+            )
+            final_chunked, burnin_chunked, main_chunked = run_mcmc(
+                key,
+                tree.map(jnp.copy, initial_state),
+                4,
+                n_burn=2,
+                n_skip=1,
+                inner_loop_length=1,
+            )
+
+        tree.map(assert_array_equal, final_whole, final_chunked)
+        tree.map(assert_array_equal, main_whole, main_chunked)
+        tree.map(assert_array_equal, burnin_whole, burnin_chunked)
 
 
 # shared test-point count, reused across cases to hit the jax compilation cache

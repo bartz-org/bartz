@@ -602,11 +602,17 @@ class Bart(Module):
         equinox. The arrays are copied to host memory and all device/sharding
         placement is dropped; `load` reconstructs a single-device model.
         """
-        # drop the device mesh, whose `Device` objects are not picklable, then
-        # gather any sharded arrays to host (dropping their sharding); the
-        # reload is single-device
+        # drop the device meshes (whose `Device` objects are not picklable) from
+        # the state config and both traces, then gather any sharded arrays to
+        # host (dropping their sharding); the reload is single-device
         config = replace(self._mcmc_state.config, mesh=None)
-        obj = tree_at(lambda b: b._mcmc_state.config, self, config)  # noqa: SLF001
+        main_trace = replace(self._main_trace, mesh=None)
+        burnin_trace = replace(self._burnin_trace, mesh=None)
+        obj = tree_at(
+            lambda b: (b._mcmc_state.config, b._main_trace, b._burnin_trace),  # noqa: SLF001
+            self,
+            (config, main_trace, burnin_trace),
+        )
         obj = jax.device_get(obj)
         with Path(path).open('wb') as file:
             pickle.dump(obj, file, protocol=pickle.HIGHEST_PROTOCOL)

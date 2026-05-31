@@ -36,7 +36,6 @@ from jax import (
     debug_infs,
     device_put,
     devices,
-    enable_x64,
     jit,
     lax,
     make_mesh,
@@ -44,6 +43,13 @@ from jax import (
     shard_map,
     tree,
 )
+
+# WORKAROUND(jax<0.7.1): top-level `jax.enable_x64` was added later; on older jax
+# it lives in `jax.experimental` (removed in newer jax). Use whichever exists.
+try:
+    from jax import enable_x64
+except ImportError:
+    from jax.experimental import enable_x64
 from jax import numpy as jnp
 from jax.scipy.special import ndtri
 from jax.sharding import AxisType, Mesh, PartitionSpec

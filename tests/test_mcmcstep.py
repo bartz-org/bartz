@@ -73,7 +73,7 @@ from bartz.mcmcstep._state import (
     trace_sample_axes,
 )
 from bartz.mcmcstep._step import (
-    Precs,
+    PrecsScalar,
     _compute_likelihood_ratio_mv,
     _compute_likelihood_ratio_uv,
     _precompute_leaf_terms_mv,
@@ -1837,7 +1837,7 @@ class TestPrecomputeTerms:
         error_cov_inv = jnp.array([[inv_sigma2]])
         leaf_prior_cov_inv = jnp.array([[leaf_prior_cov_inv_uv]])
 
-        precs = Precs(
+        precs = PrecsScalar(
             left=jnp.array([3.0]), right=jnp.array([4.0]), total=jnp.array([7.0])
         )
 

@@ -29,7 +29,7 @@ from functools import partial
 from typing import Literal
 
 import jax
-from equinox import Module, tree_at
+from equinox import AbstractVar, Module, tree_at
 from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
@@ -40,7 +40,6 @@ from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz.grove import var_histogram
 from bartz.mcmcstep._moves import Moves, propose_moves
 from bartz.mcmcstep._state import (
-    CHAIN_AXIS,
     State,
     StepConfig,
     _auto_num_batches,
@@ -159,32 +158,43 @@ class Precs(Module):
     """Likelihood precision scale in the nodes involved in proposed moves for each tree.
 
     The "likelihood precision scale" of a tree node is the sum of the inverse
-    squared error scales of the datapoints selected by the node.
+    squared error scales of the datapoints selected by the node. It is a scalar
+    per node (`PrecsScalar`) with scalar error weights, or a ``k k`` matrix per
+    node (`PrecsMatrix`) with vector error weights.
+
+    Abstract base: it is built one tree at a time under `vmap`/`lax.map`
+    (`_compute_count_or_prec_tree`), so the ``num_trees`` axis is variadic
+    (``*num_trees``, absent per element, present once batched). The scalar and
+    matrix layouts differ in rank, so they live in two concrete subclasses with
+    union-free annotations; a single class carrying a ``... | ... k k`` union
+    would make the greedy variadic mis-bind against the ``k`` axis under the
+    runtime typechecker.
     """
 
-    # NOTE (typecheck, deferred): `Precs` never carries a chain axis, so `*chains`
-    # could be dropped. But it is built per-tree under vmap
-    # (`_compute_count_or_prec_tree`) so `num_trees` must become the variadic
-    # `*num_trees` to also match the axis-stripped per-element layout — and all
-    # three fields are `... | ... k k` unions with no union-free field to pin the
-    # variadic first, so `*num_trees` would greedily swallow the `k k` axes
-    # (leaving `k` unchecked). Resolve together with `PreLf` by adding a
-    # union-free `*num_trees`-shaped anchor field declared first, mirroring
-    # `PreLkV.log_sqrt_term`.
-    left: (
-        Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=CHAIN_AXIS)
+    left: AbstractVar[Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']]
     """Likelihood precision scale in the left child."""
 
-    right: (
-        Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=CHAIN_AXIS)
+    right: AbstractVar[Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']]
     """Likelihood precision scale in the right child."""
 
-    total: (
-        Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=CHAIN_AXIS)
+    total: AbstractVar[Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']]
     """Likelihood precision scale in the parent (``= left + right``)."""
+
+
+class PrecsScalar(Precs):
+    """`Precs` with a scalar precision per node (univariate or scalar-weight case)."""
+
+    left: Float32[Array, '*num_trees']
+    right: Float32[Array, '*num_trees']
+    total: Float32[Array, '*num_trees']
+
+
+class PrecsMatrix(Precs):
+    """`Precs` with a ``k k`` precision matrix per node (vector-weight case)."""
+
+    left: Float32[Array, '*num_trees k k']
+    right: Float32[Array, '*num_trees k k']
+    total: Float32[Array, '*num_trees k k']
 
 
 class PreLkV(Module):
@@ -246,31 +256,42 @@ class PreLf(Module):
 
     These terms can be computed in parallel across trees.
 
-    For each tree and leaf, the terms are scalars in the univariate case, and
-    matrices/vectors in the multivariate case.
+    For each tree and leaf, the terms are scalars in the univariate case
+    (`PreLfUV`), and matrices/vectors in the multivariate case (`PreLfMV`).
+
+    Abstract base: the univariate and multivariate layouts differ in rank, so
+    they live in two concrete subclasses with union-free annotations (see `Precs`
+    for the runtime-typechecker rationale). The ``num_trees`` axis is variadic so
+    the same annotations also match a per-element layout if vmapped over trees.
     """
 
-    # NOTE (typecheck, deferred): `PreLf` never carries a chain axis, so `*chains`
-    # could be dropped (and `num_trees` kept fixed, since `PreLf` is currently
-    # built with the tree axis present). But to also support vmapping over trees,
-    # `num_trees` must become `*num_trees`, and then the two fields' divergent
-    # `k`-counts (`k k` vs `k`) plus the lack of a union-free field make the
-    # variadic rank-ambiguous against `k`. Resolve together with `Precs` by adding
-    # a union-free `*num_trees`-shaped anchor field declared first, mirroring
-    # `PreLkV.log_sqrt_term`.
-    mean_factor: (
-        Float32[Array, '*chains num_trees tree_size']
-        | Float32[Array, '*chains num_trees k k tree_size']
-    ) = field(chains=CHAIN_AXIS)
+    mean_factor: AbstractVar[
+        Float32[Array, '*num_trees tree_size']
+        | Float32[Array, '*num_trees k k tree_size']
+    ]
     """The factor to be right-multiplied by the sum of the scaled residuals to
     obtain the posterior mean."""
 
-    centered_leaves: (
-        Float32[Array, '*chains num_trees tree_size']
-        | Float32[Array, '*chains num_trees k tree_size']
-    ) = field(chains=CHAIN_AXIS)
+    centered_leaves: AbstractVar[
+        Float32[Array, '*num_trees tree_size']
+        | Float32[Array, '*num_trees k tree_size']
+    ]
     """The mean-zero normal values to be added to the posterior mean to
     obtain the posterior leaf samples."""
+
+
+class PreLfUV(PreLf):
+    """`PreLf` for the univariate case."""
+
+    mean_factor: Float32[Array, '*num_trees tree_size']
+    centered_leaves: Float32[Array, '*num_trees tree_size']
+
+
+class PreLfMV(PreLf):
+    """`PreLf` for the multivariate case."""
+
+    mean_factor: Float32[Array, '*num_trees k k tree_size']
+    centered_leaves: Float32[Array, '*num_trees k tree_size']
 
 
 class ParallelStageOut(Module):
@@ -493,7 +514,9 @@ def _compute_count_or_prec_tree(
         which = 'count'
     else:
         value = prec_scale
-        cls = Precs
+        # scalar weights -> scalar precision per node; vector weights (k k n) ->
+        # k by k precision matrix per node.
+        cls = PrecsMatrix if prec_scale.ndim == 3 else PrecsScalar
         dtype = jnp.float32
         num_batches = config.prec_num_batches
         which = 'prec'
@@ -678,7 +701,7 @@ def _logdet_from_chol(L: Float32[Array, '... k k']) -> Float32[Array, '...']:
 def _precompute_likelihood_terms_uv(
     error_cov_inv: Float32[Array, ''],
     leaf_prior_cov_inv: Float32[Array, ''],
-    move_precs: Precs | Counts,
+    move_precs: PrecsScalar | Counts,
 ) -> tuple[PreLkV, PreLk]:
     sigma2 = jnp.reciprocal(error_cov_inv)
     sigma_mu2 = jnp.reciprocal(leaf_prior_cov_inv)
@@ -706,7 +729,7 @@ def compute_B(
 def _precompute_likelihood_terms_mv_het(
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
-    move_precs: Precs,
+    move_precs: PrecsMatrix,
 ) -> tuple[PreLkV, PreLk]:
     L_left: Float32[Array, 'num_trees k k'] = chol_with_gersh(
         error_cov_inv * move_precs.left + leaf_prior_cov_inv
@@ -733,7 +756,7 @@ def _precompute_likelihood_terms_mv_het(
 def _precompute_likelihood_terms_mv(
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
-    move_precs: Precs | Counts,
+    move_precs: PrecsScalar | Counts,
 ) -> tuple[PreLkV, None]:
     nL: Shaped[Array, 'num_trees 1 1'] = move_precs.left[..., None, None]
     nR: Shaped[Array, 'num_trees 1 1'] = move_precs.right[..., None, None]
@@ -812,8 +835,7 @@ def precompute_likelihood_terms(
         return _precompute_likelihood_terms_uv(
             error_cov_inv, leaf_prior_cov_inv, move_precs
         )
-    elif move_precs.left.ndim == 3:
-        assert isinstance(move_precs, Precs)
+    elif isinstance(move_precs, PrecsMatrix):
         return _precompute_likelihood_terms_mv_het(
             error_cov_inv, leaf_prior_cov_inv, move_precs
         )
@@ -829,12 +851,12 @@ def _precompute_leaf_terms_uv(
     error_cov_inv: Float32[Array, ''],
     leaf_prior_cov_inv: Float32[Array, ''],
     z: Float32[Array, 'num_trees tree_size'] | None = None,
-) -> PreLf:
+) -> PreLfUV:
     prec_lk = prec_trees * error_cov_inv
     var_post = jnp.reciprocal(prec_lk + leaf_prior_cov_inv)
     if z is None:
         z = random.normal(key, prec_trees.shape, error_cov_inv.dtype)
-    return PreLf(
+    return PreLfUV(
         mean_factor=var_post * error_cov_inv,
         # | mean = mean_lk * prec_lk * var_post
         # | resid_tree = mean_lk * prec_tree  -->
@@ -854,7 +876,7 @@ def _precompute_leaf_terms_mv(
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
     z: Float32[Array, 'num_trees tree_size k'] | None = None,
-) -> PreLf:
+) -> PreLfMV:
     num_trees, tree_size = prec_trees.shape
     k, _ = error_cov_inv.shape
     n_k: Float32[Array, 'num_trees tree_size 1 1'] = prec_trees[..., None, None]
@@ -893,7 +915,7 @@ def _precompute_leaf_terms_mv(
         centered_leaves, -1, -2
     )
 
-    return PreLf(mean_factor=mean_factor_out, centered_leaves=centered_leaves_out)
+    return PreLfMV(mean_factor=mean_factor_out, centered_leaves=centered_leaves_out)
 
 
 def _precompute_leaf_terms_mv_het(
@@ -902,7 +924,7 @@ def _precompute_leaf_terms_mv_het(
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
     z: Float32[Array, 'num_trees tree_size k'] | None = None,
-) -> PreLf:
+) -> PreLfMV:
     num_trees, k, _, tree_size = prec_trees.shape
 
     # bring the leaf axis to position 1 so chol/solve see (..., k, k)
@@ -930,7 +952,7 @@ def _precompute_leaf_terms_mv_het(
         centered_leaves, -1, -2
     )
 
-    return PreLf(mean_factor=mean_factor_out, centered_leaves=centered_leaves_out)
+    return PreLfMV(mean_factor=mean_factor_out, centered_leaves=centered_leaves_out)
 
 
 @named_call

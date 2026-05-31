@@ -145,13 +145,13 @@ def accept_moves_and_sample_leaves(
 class Counts(Module):
     """Number of datapoints in the nodes involved in proposed moves for each tree."""
 
-    left: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    left: UInt[Array, '*num_trees']
     """Number of datapoints in the left child."""
 
-    right: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    right: UInt[Array, '*num_trees']
     """Number of datapoints in the right child."""
 
-    total: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    total: UInt[Array, '*num_trees']
     """Number of datapoints in the parent (``= left + right``)."""
 
 
@@ -162,6 +162,15 @@ class Precs(Module):
     squared error scales of the datapoints selected by the node.
     """
 
+    # NOTE (typecheck, deferred): `Precs` never carries a chain axis, so `*chains`
+    # could be dropped. But it is built per-tree under vmap
+    # (`_compute_count_or_prec_tree`) so `num_trees` must become the variadic
+    # `*num_trees` to also match the axis-stripped per-element layout — and all
+    # three fields are `... | ... k k` unions with no union-free field to pin the
+    # variadic first, so `*num_trees` would greedily swallow the `k k` axes
+    # (leaving `k` unchecked). Resolve together with `PreLf` by adding a
+    # union-free `*num_trees`-shaped anchor field declared first, mirroring
+    # `PreLkV.log_sqrt_term`.
     left: (
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
     ) = field(chains=CHAIN_AXIS)
@@ -200,28 +209,22 @@ class PreLkV(Module):
     """
 
     # `log_sqrt_term` is declared before `left`/`right`/`total` so its single
-    # (union-free) annotation binds the variadic `*chains` and `num_trees` axes
-    # first; otherwise the runtime typechecker can mis-bind `*chains` against the
-    # `k` axis of the `... | ... k k` unions for a multivariate-without-chains
-    # state (the layouts are rank-ambiguous). See `bartz.mcmcstep._state.Forest`.
-    log_sqrt_term: Float32[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    # (union-free) annotation binds the variadic `*num_trees` axis first;
+    # otherwise the runtime typechecker can greedily mis-bind `*num_trees`
+    # against the `k` axis of the `... | ... k k` unions (the multivariate and
+    # univariate layouts are rank-ambiguous).
+    log_sqrt_term: Float32[Array, '*num_trees']
     """The logarithm of the square root term of the likelihood ratio."""
 
-    left: (
-        Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=CHAIN_AXIS)
+    left: Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']
     """Full conditional variance, scaled covariance, or precision cholesky, for
     the left leaf."""
 
-    right: (
-        Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=CHAIN_AXIS)
+    right: Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']
     """Full conditional variance, scaled covariance, or precision cholesky, for
     the right leaf."""
 
-    total: (
-        Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
-    ) = field(chains=CHAIN_AXIS)
+    total: Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']
     """Full conditional variance, scaled covariance, or precision cholesky, for
     the the join of the left and right leaves."""
 
@@ -229,11 +232,11 @@ class PreLkV(Module):
 class PreLk(Module):
     """Non-sequential terms of the likelihood ratio shared by all trees."""
 
-    exp_factor: Float32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
+    exp_factor: Float32[Array, ''] | None
     """The factor to multiply the likelihood ratio by, shared by all trees.
     Set only in the univariate path."""
 
-    error_cov_inv: Float32[Array, '*chains k k'] | None = field(chains=CHAIN_AXIS)
+    error_cov_inv: Float32[Array, 'k k'] | None
     """The global error precision scale. Set only in the multivariate
     heteroskedastic vector-weight case."""
 
@@ -247,6 +250,14 @@ class PreLf(Module):
     matrices/vectors in the multivariate case.
     """
 
+    # NOTE (typecheck, deferred): `PreLf` never carries a chain axis, so `*chains`
+    # could be dropped (and `num_trees` kept fixed, since `PreLf` is currently
+    # built with the tree axis present). But to also support vmapping over trees,
+    # `num_trees` must become `*num_trees`, and then the two fields' divergent
+    # `k`-counts (`k k` vs `k`) plus the lack of a union-free field make the
+    # variadic rank-ambiguous against `k`. Resolve together with `Precs` by adding
+    # a union-free `*num_trees`-shaped anchor field declared first, mirroring
+    # `PreLkV.log_sqrt_term`.
     mean_factor: (
         Float32[Array, '*chains num_trees tree_size']
         | Float32[Array, '*chains num_trees k k tree_size']
@@ -272,11 +283,14 @@ class ParallelStageOut(Module):
     """The proposed moves, with `partial_ratio` set to `None` and
     `log_trans_prior_ratio` set to its final value."""
 
+    # `num_trees` stays a fixed (non-variadic) axis: `ParallelStageOut` is always
+    # built with the tree axis present (never per tree under vmap), so the union
+    # is disambiguated by rank/dtype and needs no anchor (cf. `Precs`/`PreLf`).
     prec_trees: (
-        Float32[Array, '*chains num_trees tree_size']
-        | Int32[Array, '*chains num_trees tree_size']
-        | Float32[Array, '*chains num_trees k k tree_size']
-    ) = field(chains=CHAIN_AXIS)
+        Float32[Array, 'num_trees tree_size']
+        | Int32[Array, 'num_trees tree_size']
+        | Float32[Array, 'num_trees k k tree_size']
+    )
     """The likelihood precision scale in each potential or actual leaf node."""
 
     move_precs: Precs | Counts

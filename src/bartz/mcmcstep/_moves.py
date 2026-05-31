@@ -33,60 +33,56 @@ from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
 from bartz import grove
 from bartz._jaxext import minimal_unsigned_dtype, split, vmap_nodoc
-from bartz.mcmcstep._state import CHAIN_AXIS, Forest, field
+from bartz.mcmcstep._state import Forest
 
 
 class Moves(Module):
     """Moves proposed to modify each tree."""
 
-    allowed: Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    allowed: Bool[Array, '*num_trees']
     """Whether there is a possible move. If `False`, the other values may not
     make sense. The only case in which a move is marked as allowed but is
     then vetoed is if it does not satisfy `min_points_per_leaf`, which for
     efficiency is implemented post-hoc without changing the rest of the
     MCMC logic."""
 
-    grow: Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    grow: Bool[Array, '*num_trees']
     """Whether the move is a grow move or a prune move."""
 
-    num_growable: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    num_growable: UInt[Array, '*num_trees']
     """The number of growable leaves in the original tree."""
 
-    node: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    node: UInt[Array, '*num_trees']
     """The index of the leaf to grow or node to prune."""
 
-    left: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    left: UInt[Array, '*num_trees']
     """The index of the left child of 'node'."""
 
-    right: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    right: UInt[Array, '*num_trees']
     """The index of the right child of 'node'."""
 
-    partial_ratio: Float32[Array, '*chains num_trees'] | None = field(chains=CHAIN_AXIS)
+    partial_ratio: Float32[Array, '*num_trees'] | None
     """A factor of the Metropolis-Hastings ratio of the move. It lacks the
     likelihood ratio, the probability of proposing the prune move, and the
     probability that the children of the modified node are terminal. If the
     move is PRUNE, the ratio is inverted. `None` once
     `log_trans_prior_ratio` has been computed."""
 
-    log_trans_prior_ratio: None | Float32[Array, '*chains num_trees'] = field(
-        chains=CHAIN_AXIS
-    )
+    log_trans_prior_ratio: None | Float32[Array, '*num_trees']
     """The logarithm of the product of the transition and prior terms of the
     Metropolis-Hastings ratio for the acceptance of the proposed move.
     `None` if not yet computed. If PRUNE, the log-ratio is negated."""
 
-    grow_var: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    grow_var: UInt[Array, '*num_trees']
     """The decision axes of the new rules."""
 
-    grow_split: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    grow_split: UInt[Array, '*num_trees']
     """The decision boundaries of the new rules."""
 
-    var_tree: UInt[Array, '*chains num_trees half_tree_size'] = field(chains=CHAIN_AXIS)
+    var_tree: UInt[Array, '*num_trees half_tree_size']
     """The updated decision axes of the trees, valid whatever move."""
 
-    affluence_tree: Bool[Array, '*chains num_trees half_tree_size'] = field(
-        chains=CHAIN_AXIS
-    )
+    affluence_tree: Bool[Array, '*num_trees half_tree_size']
     """A partially updated `affluence_tree`, updated as if the chosen move
     (grow or prune) was applied: GROW marks the new leaves, PRUNE marks the
     node that becomes a leaf. This mark initially (out of `propose_moves`)
@@ -94,24 +90,24 @@ class Moves(Module):
     leaf, and whether there are enough datapoints in the node is instead
     checked later in `accept_moves_parallel_stage`."""
 
-    left_growable: Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    left_growable: Bool[Array, '*num_trees']
     """Whether the left child of `node` has available decision rules, *not*
     counting the datapoint thresholds. This is the admissibility used in the
     prior term of the Metropolis-Hastings ratio, matching the standard BART
     prior which ignores the count constraints."""
 
-    right_growable: Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    right_growable: Bool[Array, '*num_trees']
     """Whether the right child of `node` has available decision rules, *not*
     counting the datapoint thresholds. See `left_growable`."""
 
-    logu: Float32[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    logu: Float32[Array, '*num_trees']
     """The logarithm of a uniform (0, 1] random variable to be used to
     accept the move. It's in (-oo, 0]."""
 
-    acc: None | Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    acc: None | Bool[Array, '*num_trees']
     """Whether the move was accepted. `None` if not yet computed."""
 
-    to_prune: None | Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    to_prune: None | Bool[Array, '*num_trees']
     """Whether the final operation to apply the move is pruning. This indicates
     an accepted prune move or a rejected grow move. `None` if not yet
     computed."""

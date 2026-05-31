@@ -8,18 +8,7 @@ bartz (BART vectoriZed) — a fast implementation of Bayesian Additive Regressio
 
 ## Commands
 
-```bash
-make setup                        # setup dev env (Python and, more importantly, R)
-uv run pytest                     # run all tests
-make tests                        # run all tests but faster (use parallelization) + very verbose configs
-uv run pytest -k test_name        # run a single test or subset
-uv run pytest tests/test_foo.py   # run one test file
-uv run pytest --lf                # run the tests failed last time
-make lint                         # run all linters on everything
-make docs                         # build Sphinx HTML docs
-```
-
-All make targets use `uv run` under the hood.
+All our development commands are make targets. All make targets use `uv run` under the hood.
 
 ## Directory layout
 
@@ -29,11 +18,16 @@ We often use a worktree-first layout where the directory bartz/ is not a worktre
 
 To check the code you write:
 - `make lint`
-- when adding/removing/moving functions or classes:
-    - check the rst documentation in `docs/` is up-to-date
+    - cheap to run, unleashes all linters on everything
+    - don't show your work without this first!
+- when changing/writing documentation for public stuff:
     - run `make docs`
-- `make setup`
-    - this sets R up if you are in a clean worktree
+    - check the html documentation is fine
+        - the stuff that breaks most often is type hints, return ones in particular
+- `make setup` if needed
+    - this sets R up and checks python and jax work fine (incl. if jax picks up any gpu)
+    - cheap to run (cached), does not clean, idempotent
+    - use liberally if it looks like R is not working
 - run the unit tests relevant to your code changes with `uv run pytest ...`
     - not all tests right away because the full test suite takes a long time to run
     - when running multiple tests, the output may be long; pipe the output to a scratch file to be read afterwards
@@ -49,28 +43,38 @@ To check the code you write:
 |---|---|
 | `_interface.py` | `Bart` class — high-level public API |
 | `BART/` | R BART3-compatible wrappers (`mc_gbart`, `gbart`). The purpose of `mc_gbart` is to maintain a stable interface matching the R BART3 package; when modifying the library internals, adapt `mc_gbart`'s implementation to fit while preserving its external interface. |
+| `stochtree/` | stochtree-compatible wrapper `BARTModel`, stable compatibility interface like BART3 |
 | `mcmcstep/` | MCMC state (`State`, `Forest`, `StepConfig`), `init`, `step` |
-| `mcmcloop.py` | MCMC loop orchestration (`run_mcmc`, `evaluate_trace`) |
-| `grove.py` | Decision tree operations on heap arrays (leaves, splits, traversal) |
-| `prepcovars.py` | Covariate preprocessing (binning, standardization, R format parsing) |
-| `jaxext/` | JAX utility extensions (vmap, dtypes, device helpers, `scipy/` subpackage) |
+| `mcmcloop/` | MCMC loop orchestration (`run_mcmc`, `evaluate_trace`) |
+| `grove/` | Decision tree operations on heap arrays (leaves, splits, traversal) |
+| `prepcovars/` | Covariate preprocessing (binning, standardization, R format parsing) |
+| `_jaxext/` | JAX utility extensions (vmap, dtypes, device helpers, `scipy/` subpackage) |
 | `debug/` | Trace validation, prior sampling, R↔bartz tree conversion |
 | `testing/` | `DGP` and `gen_data` for synthetic datasets |
 
-**Data flow:** covariates → `prepcovars` → `mcmcstep.init` → `mcmcloop.run_mcmc` (calls `mcmcstep.step` per iteration) → `RunMCMCResult` with posterior tree samples.
+**Data flow:** covariates → `prepcovars` → `mcmcstep.init` → `mcmcloop.run_mcmc` (calls `mcmcstep.step` per iteration) → `RunMCMCResult` with posterior tree samples
 
 State objects are immutable `equinox.Module` dataclasses. Multi-device parallelism via `jax.sharding`.
+
+Interface hierarchy:
+- compatibility wrappers `mc_gbart`, `gbart`, `BARTModel`
+    - main user interface `Bart`
+        - MCMC setup `init()`, MCMC runner `run_mcmc()`
+            - MCMC step `step()`
 
 ## Code style
 
 - **Formatter/linter:** ruff with single quotes
-- **Imports:** generally use `from foo import bar` (relative import) instead of `import foo; foo.bar`, but for some heavily used big (sub)modules, e.g., `from jax import random; random.foo` is preferred to `from jax.random import foo, foo1, foo2, ..., foo999999`.
+- **Imports:** generally use `from foo import bar` (relative import) instead of `import foo; foo.bar`
+    - but for some heavily used big (sub)modules, e.g., `from jax import random; random.foo` is preferred to `from jax.random import foo, foo1, foo2, ..., foo999999`.
 - **Headers** All source files carry an MIT copyright header
 - **docstrings:**
     - numpy convention
     - class attributes documented individually with string just below (not in class docstring)
+        - but not global variables
     - keep docstrings short, don't fill them with implementation details
         - related: no redundant comments, if the code is readable, it's self-documenting
+        - docstrings and comments shall be _timeless_, not a narration of the development work
     - keep private/internal docstrings short or absent if they are so already
     - keep return value description relatively short and strictly on one line, html render garbles it otherwise
 - **jax** conventions:
@@ -81,22 +85,38 @@ State objects are immutable `equinox.Module` dataclasses. Multi-device paralleli
     - indexing/shape conventions that improve readability and implicitly check for shape errors:
         - to get an axis length in an array, use tuple unpacking, e.g.: `_, _, k = x.shape`, `*_, l, _ = y.shape`
         - to index into an array, keep all dimensions explicit, e.g.: `x[0, :]`, `y[..., :, :, 4, :]`
-    - use `array.item()` to cast an array to a scalar python type
+    - use `array.item()` to cast a size-1 array to a scalar python type
+        - also works for numpy/jax scalars, `jnp.float32(x).item()` is valid
 - other **python** conventions:
     - use dicts as if they were frozendicts when possible: e.g., do `d = dict(d, a=1, b=2)` to set values instead of `d['a'] = 1` or `d.update(a=1)`, safer
         - related: prefer tuples to lists
+        - related: make all dataclasses frozen unless you really need mutability
     - type annotations:
         - do not stringify type annotations
         - jaxtyping for array shapes (`Float32[Array, 'n p']`)
             - space before single-axis annotation `Float32[Array, ' n']` because of linter bug
+            - don't use '...' to indicate arbitrary shape in _public_ stuff that ends up in the html doc
+                - the type html renderer garbles them
+                - they are fine and convenient in non-public stuff
         - type hints in signatures, not in docstrings
-            - but when returning multiple values, copy the type hints verbatim in the return values list, because the html doc render does not support multi-valued return natively
-- **WORKAROUND markers:** we support comments like `# WORKAROUND(jax<99): remove this patch when we bump jax to v99`, enforced by `make lint` checking the oldest supported version of the package, also works with python versions
+            - but when returning multiple values, copy the type hints verbatim in the return values list, because the html doc type render does not support multi-valued return natively
+    - _src-like layout: modules only contain the public symbols, imported from an implementation submodule
+        - because of this, don't prepend redundant underscores to private functions: they stay private
+    - prefer `if ...: return; else: return` to early returns
+        - if-else block are much easier to read visually for a human, even if redundant due to returns
+        - other angle: `return` is a bit like a goto, bad habit to use mid-function
+        - of course for some cases it's obviously super-convenient to return early, should be clear when it happens
+- **WORKAROUND markers:** we support comments like `# WORKAROUND(jax<99): remove this patch when we bump jax to v99`, enforced by `make lint` checking the oldest supported version of the package
+    - also works with python versions
+    - also valid for bartz itself, in the context of benchmarking code
 
 ## Testing
 
-- Framework: pytest, we also use subtests and heavily use parametrization
+- pytest, we use parametrization and subtests a lot
 - global `keys` fixture provides deterministic per-test JAX random keys (use `keys.pop()`)
+    - always use this to produce the seeds, don't hardcode seeds
+    - to seed non-jax stuff, do `from tests.util import int_seed; int_seed(keys.pop())`
+    - inline `keys.pop()` instead of assigning it to a local---less chance of re-using the key by mistake
 - Custom pytest options: `--platform` (cpu/gpu/auto), `--num-cpu-devices` (sets up jax virtual cpu devices)
 - The subpackage `tests/rbartpackages/` contains wrappers of R BART packages, not unit tests
 - To compare vectors/matrices/tensors, use `tests.util.assert_close_matrices` instead of numpy's `assert_allclose`

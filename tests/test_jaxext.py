@@ -24,6 +24,7 @@
 
 """Test bartz._jaxext."""
 
+from contextlib import nullcontext
 from functools import partial
 from itertools import product
 from warnings import catch_warnings, simplefilter
@@ -35,6 +36,7 @@ from jax import (
     debug_infs,
     device_put,
     devices,
+    enable_x64,
     jit,
     lax,
     make_mesh,
@@ -45,6 +47,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.scipy.special import ndtri
 from jax.sharding import AxisType, Mesh, PartitionSpec
+from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Float32, Key, Shaped
 from pytest_subtests import SubTests
 from scipy.stats import anderson_ksamp, ks_1samp, truncnorm
@@ -517,18 +520,21 @@ class TestTruncatedNormalOneSided:
 class TestLoggamma:
     """Test `_jaxext.random.loggamma`."""
 
-    @pytest.fixture(params=(1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4, 1e5))
-    def alpha(self, request: pytest.FixtureRequest) -> None:
-        """Gamma shape parameter."""
-        return request.param
-
-    def test_distribution(self, keys: split, alpha: float, subtests: SubTests) -> None:
+    @pytest.mark.parametrize('dtype', [jnp.float32, jnp.float64])
+    @pytest.mark.parametrize(
+        'alpha', [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4, 1e5]
+    )
+    def test_distribution(
+        self, keys: split, alpha: float, dtype: DTypeLike, subtests: SubTests
+    ) -> None:
         """Check the samples follow log-Gamma(alpha, 1) against a cdf and a sample."""
         nsamples = 100_000  # tested up to 100M
-        sample = loggamma(keys.pop(), alpha, (nsamples,))
-
-        # no sample underflows to -inf for small alpha
-        assert jnp.all(jnp.isfinite(sample))
+        x64 = enable_x64(True) if dtype == jnp.float64 else nullcontext()
+        with x64:
+            sample = loggamma(keys.pop(), alpha, (nsamples,), dtype)
+            assert sample.dtype == jnp.dtype(dtype)
+            # no sample underflows to -inf for small alpha
+            assert jnp.all(jnp.isfinite(sample))
 
         dist = scipy_loggamma(alpha)
 
@@ -545,6 +551,25 @@ class TestLoggamma:
                 ad = anderson_ksamp([sample, reference])
             # AD floors its p-value at 0.001, so we cut on the statistic instead
             assert ad.statistic <= ad.critical_values[-1]  # 0.001 threshold
+
+    @pytest.mark.parametrize('shape', [(), (12,), (3, 4), (2, 3, 2), (1, 12, 1)])
+    def test_shape_consistency(self, keys: split, shape: tuple[int, ...]) -> None:
+        """A shaped draw equals the flat draw reshaped, given the same key."""
+        key = keys.pop()
+        alpha = 1.3
+        sample = loggamma(key, alpha, shape)
+        assert sample.shape == shape
+        flat = loggamma(random.clone(key), alpha, (sample.size,))
+        assert_array_equal(sample.reshape(sample.size), flat)
+
+    @pytest.mark.parametrize('n_uniforms', [0, 1, 2, 3, 4, 6, 8])
+    def test_n_uniforms(self, keys: split, n_uniforms: int) -> None:
+        """At high alpha the base draw dominates, so any n_uniforms matches."""
+        alpha = 100.0
+        nsamples = 100_000
+        sample = loggamma(keys.pop(), alpha, (nsamples,), n_uniforms=n_uniforms)
+        ks = ks_1samp(sample, scipy_loggamma(alpha).cdf)
+        assert ks.pvalue > 1e-3
 
 
 def test_is_key(keys: split) -> None:

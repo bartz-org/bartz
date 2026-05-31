@@ -60,6 +60,8 @@ def loggamma(
         Shape of the output. If not specified, it is `a.shape`.
     dtype
         Floating point dtype of the output. Defaults to the canonical float.
+        Internally the computation always runs in at least float32, so a narrower
+        dtype only rounds the output and yields no speedup.
     n_uniforms
         The number of boosting steps, i.e., of uniform variates used to move the
         base shape away from zero. Larger values increase accuracy at small `a`.
@@ -88,8 +90,12 @@ def loggamma(
     :math:`-\infty`.
     """
     dtype = canonicalize_dtype(float if dtype is None else dtype)
+    # compute in at least float32: a narrower dtype gives no speedup (the cost is
+    # the rng and transcendentals, which run in float32 anyway) and only costs
+    # accuracy in the random draws, so we only narrow at the very end.
+    compute_dtype = jnp.promote_types(dtype, jnp.float32)
     shape = jnp.shape(a) if shape is None else tuple(shape)
-    a = jnp.broadcast_to(jnp.asarray(a, dtype), shape)
+    a = jnp.broadcast_to(jnp.asarray(a, compute_dtype), shape)
 
     key_base, key_boost = random.split(key)
 
@@ -97,11 +103,13 @@ def loggamma(
     log_base = _loggamma_chisquare(key_base, a + n_uniforms)
 
     # boosting correction: sum_k log(U_k) / (a + k), with log(U_k) = -Exp(1)
-    k = jnp.arange(n_uniforms, dtype=dtype).reshape((n_uniforms, *len(shape) * (1,)))
-    log_u = -random.exponential(key_boost, (n_uniforms, *shape), dtype)
+    k = jnp.arange(n_uniforms, dtype=compute_dtype).reshape(
+        (n_uniforms, *len(shape) * (1,))
+    )
+    log_u = -random.exponential(key_boost, (n_uniforms, *shape), compute_dtype)
     correction = jnp.sum(log_u / (a + k), axis=0)
 
-    return log_base + correction
+    return (log_base + correction).astype(dtype)
 
 
 # Coefficients of the chi-square quantile approximation (18.37) in Johnson, Kotz

@@ -552,22 +552,28 @@ class TestLoggamma:
             # AD floors its p-value at 0.001, so we cut on the statistic instead
             assert ad.statistic <= ad.critical_values[-1]  # 0.001 threshold
 
+    @pytest.mark.parametrize('dtype', [jnp.float16, jnp.bfloat16])
     @pytest.mark.parametrize('alpha', [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1])
-    def test_distribution_float16(
-        self, keys: split, alpha: float, subtests: SubTests
+    def test_distribution_low_precision(
+        self, keys: split, dtype: DTypeLike, alpha: float, subtests: SubTests
     ) -> None:
-        """Like `test_distribution` but specialized for float16.
+        """Like `test_distribution` but for the low-precision float16/bfloat16.
 
-        Tested over the alpha range float16 can represent, truncating the left
-        tail that underflows to -inf.
+        Tested over the alpha range each dtype can represent, truncating the left
+        tail that underflows to -inf (only float16 underflows; bfloat16 has the
+        same exponent range as float32). A larger nsamples eventually resolves the
+        dtype's discretization and would fail.
         """
-        nsamples = 100_000  # broken at 1_000_000
-        sample = loggamma(keys.pop(), alpha, (nsamples,), jnp.float16)
-        assert sample.dtype == jnp.dtype(jnp.float16)
+        # bfloat16's 8-bit mantissa cannot resolve the distribution at larger alpha
+        if dtype == jnp.bfloat16 and alpha > 1e0:
+            pytest.skip('bfloat16 too coarse to resolve the distribution here')
+        nsamples = 100_000
+        sample = loggamma(keys.pop(), alpha, (nsamples,), dtype)
+        assert sample.dtype == jnp.dtype(dtype)
 
-        # the deep left tail underflows below the smallest float16; drop those
-        # samples and compare against the cdf conditioned on the representable range
-        floor = jnp.finfo(jnp.float16).min.item()
+        # the deep left tail can underflow below the smallest value of `dtype`; drop
+        # those and compare against the cdf conditioned on the representable range
+        floor = jnp.finfo(dtype).min.item()
         finite = sample[sample >= floor]
         finite = finite.astype(jnp.float32)  # cast bc KS preserves dtype internally
         assert finite.size > 0.99 * nsamples  # underflow is a rare tail event here

@@ -45,6 +45,14 @@ repos:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
+  - repo: https://github.com/DanielNoord/pydocstringformatter
+    rev: v0.7.5
+    hooks:
+      - id: pydocstringformatter
+        # config in [tool.pydocstringformatter] (pyproject.toml); the hook
+        # already passes --write --quiet. Scoped to the library, whose numpy
+        # attribute-docstring conventions this enforces; drop `files` to widen.
+        files: ^src/bartz/.*\.py$
   - repo: https://github.com/jsh9/pydoclint
     rev: 0.8.4
     hooks:

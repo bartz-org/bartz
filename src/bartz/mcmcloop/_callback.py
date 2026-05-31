@@ -189,15 +189,15 @@ def make_tqdm_callback(
     -------
     A dictionary with the arguments to pass to `run_mcmc` as keyword arguments to set up the callback.
 
-    Examples
-    --------
-    >>> run_mcmc(key, state, ..., **make_tqdm_callback(state, ...))
-
     Notes
     -----
     Works with chains sharded across multiple devices. If the run is interrupted
     (e.g. with ^C), the bar is left as-is; the next `make_tqdm_callback` call
     closes it, so a subsequent run starts from a clean line.
+
+    Examples
+    --------
+    >>> run_mcmc(key, state, ..., **make_tqdm_callback(state, ...))
     """
     _close_stale_bars()  # clean up after any previous run that was interrupted
     bar_id = next(_tqdm_bar_counter)

@@ -284,3 +284,11 @@ allow-init-docstring = false
 check-class-attributes = false
 # do not check class attributes because pydoclint only supports them being
 # documented in the class docstring while we document them individually
+
+[tool.pydocstringformatter]
+# numpydoc-only style: this leaves out the pep257 `split-summary-body`
+# formatter, which mis-splits our wrapped attribute docstrings at the first
+# physical line (and then inserts mid-sentence periods via `final-period`).
+style = ["numpydoc"]
+# keep the closing `"""` inline on attribute docstrings, as is our convention.
+closing-quotes = false

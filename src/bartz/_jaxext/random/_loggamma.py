@@ -83,6 +83,9 @@ def loggamma(
     chi-square quantile expansion is accurate, while the sum carries the small-`a`
     behavior exactly. :math:`\log U_k` is drawn as :math:`-\mathrm{Exponential}(1)`
     to avoid evaluating `log` at zero.
+
+    Samples below the smallest value representable in `dtype` underflow to
+    :math:`-\infty`.
     """
     dtype = canonicalize_dtype(float if dtype is None else dtype)
     shape = jnp.shape(a) if shape is None else tuple(shape)

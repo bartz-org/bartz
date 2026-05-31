@@ -552,6 +552,47 @@ class TestLoggamma:
             # AD floors its p-value at 0.001, so we cut on the statistic instead
             assert ad.statistic <= ad.critical_values[-1]  # 0.001 threshold
 
+    @pytest.mark.parametrize('alpha', [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1])
+    def test_distribution_float16(
+        self, keys: split, alpha: float, subtests: SubTests
+    ) -> None:
+        """Like `test_distribution` but specialized for float16.
+
+        Tested over the alpha range float16 can represent, truncating the left
+        tail that underflows to -inf.
+        """
+        nsamples = 100_000  # broken at 1_000_000
+        sample = loggamma(keys.pop(), alpha, (nsamples,), jnp.float16)
+        assert sample.dtype == jnp.dtype(jnp.float16)
+
+        # the deep left tail underflows below the smallest float16; drop those
+        # samples and compare against the cdf conditioned on the representable range
+        floor = jnp.finfo(jnp.float16).min.item()
+        finite = sample[sample >= floor]
+        finite = finite.astype(jnp.float32)  # cast bc KS preserves dtype internally
+        assert finite.size > 0.99 * nsamples  # underflow is a rare tail event here
+
+        dist = scipy_loggamma(alpha)
+        cdf_floor = dist.cdf(floor)
+
+        def truncated_cdf(x: Float[numpy.ndarray, ' _']) -> Float[numpy.ndarray, ' _']:
+            """Cdf conditioned on the value being representable (>= floor)."""
+            return (dist.cdf(x) - cdf_floor) / (1 - cdf_floor)
+
+        with subtests.test('KS'):
+            ks = ks_1samp(finite, truncated_cdf)
+            assert ks.pvalue > 1e-3
+
+        with subtests.test('AD'):
+            reference = dist.rvs(size=nsamples, random_state=int_seed(keys.pop()))
+            reference = reference[reference >= floor]  # match the sample truncation
+            with catch_warnings():
+                # AD caps/floors its reported p-value to [0.001, 0.25], warning on it
+                simplefilter('ignore')
+                ad = anderson_ksamp([finite, reference])
+            # AD floors its p-value at 0.001, so we cut on the statistic instead
+            assert ad.statistic <= ad.critical_values[-1]  # 0.001 threshold
+
     @pytest.mark.parametrize('shape', [(), (12,), (3, 4), (2, 3, 2), (1, 12, 1)])
     def test_shape_consistency(self, keys: split, shape: tuple[int, ...]) -> None:
         """A shaped draw equals the flat draw reshaped, given the same key."""

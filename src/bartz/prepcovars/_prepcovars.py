@@ -367,8 +367,8 @@ def _bin_predictors(
     @partial(autobatch, max_io_nbytes=2**29)
     @vmap
     def bin_predictors(
-        x: Real[Array, 'p n'], splits: Real[Array, 'p m']
-    ) -> UInt[Array, 'p n']:
+        x: Real[Array, ' n'], splits: Real[Array, ' m']
+    ) -> UInt[Array, ' n']:
         dtype = minimal_unsigned_dtype(splits.size)
         return jnp.searchsorted(splits, x, **kw).astype(dtype)
 

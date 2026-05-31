@@ -75,12 +75,21 @@ class TreeHeaps(Protocol):
 class TreesTrace(Module):
     """Implementation of `bartz.grove.TreeHeaps` for an MCMC trace."""
 
+    # `var_tree`/`split_tree` are declared before `leaf_tree` so their single
+    # (union-free) annotations bind the variadic `*batch_shape` axis first;
+    # otherwise the runtime typechecker (which evaluates union members in a
+    # hash-randomized order) can mis-bind it against the `k` axis of
+    # `leaf_tree`'s union for a multivariate tree (the layouts are
+    # rank-ambiguous). See `bartz.mcmcstep._state.Forest`. The leaf-bearing axis
+    # is `2*half_tree_size` rather than `tree_size`, so the half-of-leaf
+    # relationship is still checked here: `half_tree_size` is bound first by the
+    # anchors, then `leaf_tree` is checked against twice it.
+    var_tree: UInt[Array, '*batch_shape half_tree_size']
+    split_tree: UInt[Array, '*batch_shape half_tree_size']
     leaf_tree: (
-        Float32[Array, '*batch_shape tree_size']
-        | Float32[Array, '*batch_shape k tree_size']
+        Float32[Array, '*batch_shape 2*half_tree_size']
+        | Float32[Array, '*batch_shape k 2*half_tree_size']
     )
-    var_tree: UInt[Array, '*batch_shape tree_size//2']
-    split_tree: UInt[Array, '*batch_shape tree_size//2']
 
     @classmethod
     def from_dataclass(cls, obj: TreeHeaps) -> 'TreesTrace':

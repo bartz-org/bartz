@@ -1988,6 +1988,7 @@ class TestMVBartIntegration:
         scale_prior = jnp.float32(10.0)
 
         common: dict = dict(
+            _chain_anchor=jnp.zeros(()),
             X=X,
             binary_y=None,
             binary_indices=None,
@@ -2044,6 +2045,7 @@ class TestMVBartIntegration:
         df_prior = jnp.float32(20.0)
         scale_prior = jnp.float32(10.0)
         common: dict = dict(
+            _chain_anchor=jnp.zeros(()),
             X=X,
             binary_y=None,
             binary_indices=None,

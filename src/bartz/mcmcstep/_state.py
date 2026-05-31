@@ -386,6 +386,28 @@ def _find_metadata(
 class Forest(Module):
     """Represents the MCMC state of a sum of trees."""
 
+    # The move-counter diagnostics are grouped here, with `grow_prop_count`
+    # first as a runtime-typechecker anchor: its single (union-free) `*chains`
+    # annotation binds the variadic chain axis before `leaf_tree`'s
+    # `... | ... k ...` union is checked; otherwise the checker (which evaluates
+    # union members in a hash-randomized order) can mis-bind `*chains` against
+    # the `k` axis for a multivariate-without-chains forest (the layouts are
+    # rank-ambiguous). The anchor must precede `leaf_tree` and carry no
+    # `tree_size`-derived axis, so that `var_tree`/`split_tree`'s `tree_size//2`
+    # still resolves against the `tree_size` bound by `leaf_tree` (which must
+    # therefore precede them).
+    grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
+    """The number of grow proposals made during one full MCMC cycle."""
+
+    prune_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
+    """The number of prune proposals made during one full MCMC cycle."""
+
+    grow_acc_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
+    """The number of grow moves accepted during one full MCMC cycle."""
+
+    prune_acc_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
+    """The number of prune moves accepted during one full MCMC cycle."""
+
     leaf_tree: (
         Float32[Array, '*chains num_trees tree_size']
         | Float32[Array, '*chains num_trees k tree_size']
@@ -438,18 +460,6 @@ class Forest(Module):
         chains=CHAIN_AXIS
     )
     """The log likelihood ratio."""
-
-    grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
-    """The number of grow proposals made during one full MCMC cycle."""
-
-    prune_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
-    """The number of prune proposals made during one full MCMC cycle."""
-
-    grow_acc_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
-    """The number of grow moves accepted during one full MCMC cycle."""
-
-    prune_acc_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
-    """The number of prune moves accepted during one full MCMC cycle."""
 
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'] | None
     """The prior precision matrix of a leaf, conditional on the tree structure.
@@ -521,6 +531,15 @@ class StepConfig(Module):
 
 class State(Module):
     """Represents the MCMC state of BART."""
+
+    _chain_anchor: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
+    """Unused per-chain scalar, declared first as a runtime-typechecker anchor.
+    Its single (union-free) ``*chains`` annotation binds the variadic chain axis
+    before the ``... | ... k ...`` unions of `z`/`resid`/`error_cov_inv` are
+    checked; otherwise those can mis-bind ``*chains`` against the ``k`` axis for
+    a multivariate-without-chains state (the layouts are rank-ambiguous). Unlike
+    `Forest`, `State` has no genuine union-free chain field to reorder into this
+    slot, so a dummy one is carried."""
 
     X: UInt[Array, 'p n'] = field(data=-1)
     """The predictors."""
@@ -1120,6 +1139,7 @@ def init(
     # been replaced by its final, correctly-typed array.
     with jaxtyping_disabled():
         state = State(
+            _chain_anchor=_LazyArray(jnp.zeros, ()),  # typechecker chain anchor
             X=X,
             binary_y=y,  # temporary to be sharded together with everything else
             z=(

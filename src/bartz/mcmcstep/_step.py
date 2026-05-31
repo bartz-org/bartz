@@ -199,6 +199,14 @@ class PreLkV(Module):
     right, total.
     """
 
+    # `log_sqrt_term` is declared before `left`/`right`/`total` so its single
+    # (union-free) annotation binds the variadic `*chains` and `num_trees` axes
+    # first; otherwise the runtime typechecker can mis-bind `*chains` against the
+    # `k` axis of the `... | ... k k` unions for a multivariate-without-chains
+    # state (the layouts are rank-ambiguous). See `bartz.mcmcstep._state.Forest`.
+    log_sqrt_term: Float32[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    """The logarithm of the square root term of the likelihood ratio."""
+
     left: (
         Float32[Array, '*chains num_trees'] | Float32[Array, '*chains num_trees k k']
     ) = field(chains=CHAIN_AXIS)
@@ -216,9 +224,6 @@ class PreLkV(Module):
     ) = field(chains=CHAIN_AXIS)
     """Full conditional variance, scaled covariance, or precision cholesky, for
     the the join of the left and right leaves."""
-
-    log_sqrt_term: Float32[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
-    """The logarithm of the square root term of the likelihood ratio."""
 
 
 class PreLk(Module):

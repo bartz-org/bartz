@@ -78,7 +78,7 @@ import numpy as np
 from jax import debug_infs, lax
 
 
-def ndtri(p: Float[Array, '*']) -> Float[Array, '*']:
+def ndtri(p: Float[Array, '...']) -> Float[Array, '...']:
     """Compute the inverse of the CDF of the Normal distribution function.
 
     This is a patch of `jax.scipy.special.ndtri`.

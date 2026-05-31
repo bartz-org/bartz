@@ -43,13 +43,13 @@ class BurninTrace(Module):
     mesh: Mesh | None = field(static=True)
     """The device mesh the trace arrays are sharded on, or `None`."""
 
-    error_cov_inv: (
-        Float32[Array, '*chains_and_samples']
-        | Float32[Array, '*chains_and_samples k k']
-    ) = field(chains=CHAIN_AXIS, samples=0)
-    theta: Float32[Array, '*chains_and_samples'] | None = field(
-        chains=CHAIN_AXIS, samples=0
-    )
+    # The union-free count diagnostics are declared before `error_cov_inv` (and
+    # before `MainTrace.leaf_tree`) so they bind the variadic
+    # `*chains_and_samples` axis first. Otherwise the runtime typechecker,
+    # evaluating the `... | ... k k` / `... | ... k tree_size` unions in a
+    # hash-randomized order, can mis-bind `*chains_and_samples` against the `k`
+    # axis for a multivariate-without-chains trace (the layouts are
+    # rank-ambiguous).
     grow_prop_count: Int32[Array, '*chains_and_samples'] = field(
         chains=CHAIN_AXIS, samples=0
     )
@@ -60,6 +60,13 @@ class BurninTrace(Module):
         chains=CHAIN_AXIS, samples=0
     )
     prune_acc_count: Int32[Array, '*chains_and_samples'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    error_cov_inv: (
+        Float32[Array, '*chains_and_samples']
+        | Float32[Array, '*chains_and_samples k k']
+    ) = field(chains=CHAIN_AXIS, samples=0)
+    theta: Float32[Array, '*chains_and_samples'] | None = field(
         chains=CHAIN_AXIS, samples=0
     )
     log_likelihood: Float32[Array, '*chains_and_samples'] | None = field(

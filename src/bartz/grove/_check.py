@@ -278,7 +278,9 @@ def check_trace(
     A tensor of error codes for each tree.
     """
     # vectorize check_tree over all batch dimensions
-    unpack_check_tree = lambda l, v, s: check_tree(TreesTrace(l, v, s), max_split)
+    unpack_check_tree = lambda l, v, s: check_tree(
+        TreesTrace(leaf_tree=l, var_tree=v, split_tree=s), max_split
+    )
     is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
     signature = '(k,ts),(hts),(hts)->()' if is_mv else '(ts),(hts),(hts)->()'
     vec_check_tree = jnp.vectorize(unpack_check_tree, signature=signature)

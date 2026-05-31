@@ -163,6 +163,11 @@ class ConfigParams:
     )
     """JAX ``jax_memory_fitting_effort``; float in ``[-1.0, 1.0]``. ``None`` in the config resolves to the JAX default (typically ``0.0``) at load time."""
 
+    enable_pgle: bool | None = field(
+        default=jax_config.jax_enable_pgle, metadata={'jax_config': True}
+    )
+    """JAX ``jax_enable_pgle``; whether to enable Profile-Guided Latency Estimation. ``None`` in the config resolves to the JAX default (typically ``False``) at load time."""
+
     gpu_autotune_level: int | None = field(default=None, metadata={'restart': True})
     """XLA ``--xla_gpu_autotune_level`` (integer); ``None`` to leave the env var untouched."""
 

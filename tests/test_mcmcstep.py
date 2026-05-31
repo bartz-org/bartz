@@ -65,6 +65,7 @@ from bartz.mcmcstep._moves import (
     split_range,
 )
 from bartz.mcmcstep._state import (
+    Forest,
     StepConfig,
     _search_divisor,
     chain_vmap_axes,
@@ -121,6 +122,38 @@ def _minimal_step_config() -> StepConfig:
         prec_num_batches=None,
         prec_count_num_trees=None,
         mesh=None,
+    )
+
+
+def _minimal_forest() -> Forest:
+    """Self-consistent placeholder `Forest` for error-covariance sampler tests.
+
+    Those samplers never read the forest, so its contents are arbitrary.
+    """
+    return Forest(
+        grow_prop_count=jnp.int32(0),
+        prune_prop_count=jnp.int32(0),
+        grow_acc_count=jnp.int32(0),
+        prune_acc_count=jnp.int32(0),
+        leaf_tree=jnp.zeros((1, 2)),
+        var_tree=jnp.zeros((1, 1), jnp.uint8),
+        split_tree=jnp.zeros((1, 1), jnp.uint8),
+        affluence_tree=jnp.zeros((1, 1), bool),
+        max_split=jnp.zeros(1, jnp.uint8),
+        blocked_vars=None,
+        p_nonterminal=jnp.zeros(2),
+        p_propose_grow=jnp.zeros(1),
+        leaf_indices=jnp.zeros((1, 1), jnp.uint8),
+        min_points_per_decision_node=None,
+        min_points_per_leaf=None,
+        log_trans_prior=None,
+        log_likelihood=None,
+        leaf_prior_cov_inv=None,
+        log_s=None,
+        theta=None,
+        a=None,
+        b=None,
+        rho=None,
     )
 
 
@@ -1710,7 +1743,7 @@ class TestMixedBinaryContinuous:
 class MCMCStepData(NamedTuple):
     """Toy dataset for testing."""
 
-    X: Int32[Array, 'p n']
+    X: UInt32[Array, 'p n']
     y: Float32[Array, ' n']
     max_split: UInt32[Array, ' p']
 
@@ -1731,7 +1764,7 @@ def mcmcstep_data_shape(request: FixtureRequest) -> tuple[int, int]:
 def mcmcstep_data(mcmcstep_data_shape: tuple[int, int]) -> MCMCStepData:
     """Generate a toy dataset."""
     n, p = mcmcstep_data_shape
-    X = jnp.arange(n * p).reshape(p, n)
+    X = jnp.arange(n * p, dtype=jnp.uint32).reshape(p, n)
     y = jnp.linspace(-1, 1, n)
     max_split = jnp.full(p, 5, dtype=jnp.uint32)
     return MCMCStepData(X, y, max_split)
@@ -1848,6 +1881,9 @@ class TestPrecomputeTerms:
         prelkv_mv, _ = _precompute_likelihood_terms_mv(
             error_cov_inv, leaf_prior_cov_inv, precs
         )
+        # the precompute terms are batched over trees, while the ratio is
+        # computed one tree at a time; strip the singleton num_trees axis
+        prelkv_mv = tree.map(lambda x: x[0], prelkv_mv)
         likelihood_mv = _compute_likelihood_ratio_mv(
             total_resid, left_resid, right_resid, prelkv_mv
         )
@@ -1855,12 +1891,9 @@ class TestPrecomputeTerms:
         prelkv_uv, prelk_uv = _precompute_likelihood_terms_uv(
             inv_sigma2, leaf_prior_cov_inv_uv, precs
         )
+        prelkv_uv = tree.map(lambda x: x[0], prelkv_uv)
         likelihood_uv = _compute_likelihood_ratio_uv(
-            total_resid.item(),
-            left_resid.item(),
-            right_resid.item(),
-            prelkv_uv,
-            prelk_uv,
+            total_resid[0], left_resid[0], right_resid[0], prelkv_uv, prelk_uv
         )
 
         assert_allclose(
@@ -1994,15 +2027,18 @@ class TestMVBartIntegration:
             binary_indices=None,
             error_cov_df=df_prior,
             z=None,
-            offset=0.0,
+            offset=jnp.float32(0.0),
             prec_scale=None,
             inv_sdev_scale=None,
-            forest=None,
+            forest=_minimal_forest(),
             config=_minimal_step_config(),
         )
 
         st_uv = State(
-            **common, resid=resid, error_cov_scale=scale_prior, error_cov_inv=1.0
+            **common,
+            resid=resid,
+            error_cov_scale=scale_prior,
+            error_cov_inv=jnp.float32(1.0),
         )
 
         st_mv = State(
@@ -2044,21 +2080,23 @@ class TestMVBartIntegration:
 
         df_prior = jnp.float32(20.0)
         scale_prior = jnp.float32(10.0)
+        # `X` is not read by the samplers, but its `n` axis is cross-checked
+        # against `resid`, so the dropped states carry the subset `X[:, keep]`.
         common: dict = dict(
             _chain_anchor=jnp.zeros(()),
-            X=X,
             binary_y=None,
             binary_indices=None,
             error_cov_df=df_prior,
             z=None,
-            offset=0.0,
+            offset=jnp.float32(0.0),
             prec_scale=None,
-            forest=None,
+            forest=_minimal_forest(),
             config=_minimal_step_config(),
         )
 
         st_uv_with = State(
             **common,
+            X=X,
             resid=resid_1d,
             inv_sdev_scale=inv_sdev,
             error_cov_scale=scale_prior,
@@ -2066,6 +2104,7 @@ class TestMVBartIntegration:
         )
         st_uv_drop = State(
             **common,
+            X=X[:, keep],
             resid=resid_1d[keep],
             inv_sdev_scale=None,
             error_cov_scale=scale_prior,
@@ -2080,6 +2119,7 @@ class TestMVBartIntegration:
         # multivariate Wishart path (k=1) with 1-D inv_sdev_scale and zeros
         st_mv_with = State(
             **common,
+            X=X,
             resid=resid_1d[None, :],
             inv_sdev_scale=inv_sdev,
             error_cov_scale=scale_prior[None, None],
@@ -2087,6 +2127,7 @@ class TestMVBartIntegration:
         )
         st_mv_drop = State(
             **common,
+            X=X[:, keep],
             resid=resid_1d[None, keep],
             inv_sdev_scale=None,
             error_cov_scale=scale_prior[None, None],

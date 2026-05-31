@@ -69,10 +69,10 @@ class BurninTrace(Module):
     theta: Float32[Array, '*chains_and_samples'] | None = field(
         chains=CHAIN_AXIS, samples=0
     )
-    log_likelihood: Float32[Array, '*chains_and_samples'] | None = field(
+    log_likelihood: Float32[Array, '*chains_and_samples num_trees'] | None = field(
         chains=CHAIN_AXIS, samples=0
     )
-    log_trans_prior: Float32[Array, '*chains_and_samples'] | None = field(
+    log_trans_prior: Float32[Array, '*chains_and_samples num_trees'] | None = field(
         chains=CHAIN_AXIS, samples=0
     )
 

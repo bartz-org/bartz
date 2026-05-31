@@ -68,7 +68,13 @@ from pytest_subtests import SubTests
 from bartz import Bart as OriginalBart
 from bartz import PredictKind
 from bartz._interface import predict_latent
-from bartz._jaxext import get_default_device, get_device_count, is_key, split
+from bartz._jaxext import (
+    get_default_device,
+    get_device_count,
+    is_key,
+    jaxtyping_disabled,
+    split,
+)
 from bartz.debug import TraceWithOffset, sample_prior
 from bartz.grove import (
     check_trace,
@@ -406,7 +412,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     outcome_type='continuous',
                     w=w,
                     sparse=True,
-                    theta=2,
+                    theta=2.0,
                     varprob=jnp.array([0.2, 0.8]),
                     **common,
                     printevery=50,
@@ -499,7 +505,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     outcome_type=outcome_type,
                     missing=gen_missing(keys.pop(), (len(outcome_type), n)),
                     sparse=True,
-                    theta=2,
+                    theta=2.0,
                     varprob=jnp.array([0.2, 0.8]),
                     **common,
                     printevery=50,
@@ -1204,7 +1210,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
         y_train=y,
         n_burn=1000,
         sparse=True,
-        theta=peff if theta == 'fixed' else None,
+        theta=float(peff) if theta == 'fixed' else None,
         seed=keys.pop(),
     )
 
@@ -1548,7 +1554,9 @@ def test_xinfo_wrong_p() -> None:
         n_burn=0,
         binner=partial(GivenSplitsBinner, xinfo=xinfo),
     )
-    with pytest.raises(ValueError, match=r'xinfo\.shape'):
+    # `xinfo`'s p (3) deliberately mismatches `x_train`'s p (5); disable
+    # jaxtyping so the cross-axis check doesn't pre-empt the `ValueError`
+    with jaxtyping_disabled(), pytest.raises(ValueError, match=r'xinfo\.shape'):
         Bart(**kw)
 
 
@@ -1611,7 +1619,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
             assert_array_less(rhat_dd, 1.02)
 
     with subtests.test('y_test'):
-        X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1)
+        X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1, jnp.uint8)
         yhat_mcmc = predict_latent(X, bart._main_trace)
         yhat_prior = evaluate_trace(X, prior_trace)
         rhat_yhat = rhat_rank([yhat_mcmc, yhat_prior], split=False)
@@ -2195,9 +2203,14 @@ def test_no_array_gc(keys: split, bkw: BartKW) -> None:
     Kept separate from `test_debug_checks` because `debug_nans` and `debug_infs`
     force jax through a slow Python dispatch path that itself creates cycles,
     yielding spurious failures unrelated to bartz code.
+
+    Runs with `jaxtyping_disabled` because the runtime type-checking import hook
+    (on during the tests) wraps every function with `beartype`, whose closures
+    introduce reference cycles of their own; this check is about cycles in the
+    bartz code, not in the test-only instrumentation.
     """
     collect()
-    with catch_array_gc_guard():
+    with catch_array_gc_guard(), jaxtyping_disabled():
         run_bart_and_block(bkw, keys)
         collect()
 
@@ -2734,7 +2747,9 @@ def test_sigest_wrong_special_value(bkw: BartKW) -> None:
     if bkw.all_binary:
         pytest.skip('Parameter ignored with binary outcomes.')
     kw = dict(bkw.kw, sigest=value)
-    with pytest.raises(ValueError, match=value):
+    # the import-hook type checker would reject the invalid `sigest` literal
+    # before `Bart` raises its own `ValueError`, so disable it here
+    with jaxtyping_disabled(), pytest.raises(ValueError, match=value):
         Bart(**kw)
 
 

@@ -222,11 +222,11 @@ def _split_shaped(key: Key[Array, ''], shape: tuple[int, ...]) -> Key[Array, ' *
 def truncated_normal_onesided(
     key: Key[Array, ''],
     shape: Sequence[int],
-    upper: Bool[Array, '*'],
-    bound: Float32[Array, '*'],
+    upper: Bool[Array, '...'],
+    bound: Float32[Array, '...'],
     *,
     clip: bool = True,
-) -> Float32[Array, '*']:
+) -> Float32[Array, '...']:
     """
     Sample from a one-sided truncated standard normal distribution.
 

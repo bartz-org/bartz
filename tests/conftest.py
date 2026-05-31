@@ -36,6 +36,14 @@ import pytest
 # WORKAROUND(python<3.11): use stdlib tomllib instead of tomli
 import tomli
 from jax import config, random
+from jaxtyping import install_import_hook
+
+# Turn on runtime type checking of the whole library for the test suite. This is
+# done here, before the first `bartz` import, rather than via the jaxtyping
+# pytest plugin's `--jaxtyping-packages` option, because that option is not
+# honored when set through `addopts` in `pyproject.toml` (the plugin reads it
+# too early to see the ini config). The hook stays installed for the session.
+install_import_hook('bartz', 'beartype.beartype')
 
 from bartz._jaxext import get_default_device, split
 

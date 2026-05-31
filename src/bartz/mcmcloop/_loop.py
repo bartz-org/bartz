@@ -391,12 +391,17 @@ def _set(
     # arrays to save the trace instead of this functional update.
     sample_axes = trace_sample_axes(trace)
 
+    # `trace` is `(*chains, samples, *shape)` and `val` the same without the
+    # `samples` axis. The optional `chains` axis cannot share an annotation with
+    # the variadic `*shape` (two variadics are ambiguous), and a union of the
+    # with/without-`chains` layouts is rank-ambiguous under the runtime checker,
+    # so the trace/val shapes are kept independent; their relationship is
+    # enforced dynamically. The return has the trace shape.
     def at_set(
-        trace: Shaped[Array, 'chains samples *shape']
-        | Shaped[Array, ' samples *shape'],
-        val: Shaped[Array, ' chains *shape'] | Shaped[Array, '*shape'],
+        trace: Shaped[Array, '*trace_shape'],
+        val: Shaped[Array, '*val_shape'],
         sample_axis: int | None,
-    ) -> Shaped[Array, 'chains samples *shape']:
+    ) -> Shaped[Array, '*trace_shape']:
         if sample_axis is None or trace.size == 0:
             # `sample_axis is None`: fields without a `samples` marker have
             # no per-iteration slot to update.

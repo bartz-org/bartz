@@ -535,21 +535,22 @@ class State(Module):
     _chain_anchor: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """Unused per-chain scalar, declared first as a runtime-typechecker anchor.
     Its single (union-free) ``*chains`` annotation binds the variadic chain axis
-    before the ``... | ... k ...`` unions of `z`/`resid`/`error_cov_inv` are
-    checked; otherwise those can mis-bind ``*chains`` against the ``k`` axis for
-    a multivariate-without-chains state (the layouts are rank-ambiguous). Unlike
-    `Forest`, `State` has no genuine union-free chain field to reorder into this
-    slot, so a dummy one is carried."""
+    before the ``... | ... k ...`` unions of `z`/`resid`/`error_cov_inv` (z over
+    the binary-outcome ``kb`` axis) are checked; otherwise those can mis-bind
+    ``*chains`` against the outcome axis for a multivariate-without-chains state
+    (the layouts are rank-ambiguous). Unlike `Forest`, `State` has no genuine
+    union-free chain field to reorder into this slot, so a dummy one is
+    carried."""
 
     X: UInt[Array, 'p n'] = field(data=-1)
     """The predictors."""
 
-    binary_y: None | Bool[Array, ' n'] | Bool[Array, 'k n'] = field(data=-1)
+    binary_y: None | Bool[Array, ' n'] | Bool[Array, 'kb n'] = field(data=-1)
     """The response as booleans for binary regression, `None` for continuous.
     In the mixed binary-continuous case, only the binary outcome components
     are stored, with shape ``(kb, n)``."""
 
-    z: None | Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
+    z: None | Float32[Array, '*chains n'] | Float32[Array, '*chains kb n'] = field(
         chains=CHAIN_AXIS, data=-1
     )
     """The latent variable for binary regression. `None` in continuous
@@ -1589,7 +1590,7 @@ def _auto_num_batches(
         return _final_round(n, nb)
 
 
-def _final_round(n: int, num: float) -> int | None:
+def _final_round(n: int, num: int) -> int | None:
     """Bound batch size, round number of batches to a power of 2, and disable batching if there's only 1 batch."""
     # at least some elements per batch
     num = min(n // 32, num)

@@ -49,16 +49,16 @@ class Moves(Module):
     grow: Bool[Array, '*num_trees']
     """Whether the move is a grow move or a prune move."""
 
-    num_growable: UInt[Array, '*num_trees']
+    num_growable: Int32[Array, '*num_trees']
     """The number of growable leaves in the original tree."""
 
-    node: UInt[Array, '*num_trees']
+    node: Int32[Array, '*num_trees']
     """The index of the leaf to grow or node to prune."""
 
-    left: UInt[Array, '*num_trees']
+    left: Int32[Array, '*num_trees']
     """The index of the left child of 'node'."""
 
-    right: UInt[Array, '*num_trees']
+    right: Int32[Array, '*num_trees']
     """The index of the right child of 'node'."""
 
     partial_ratio: Float32[Array, '*num_trees'] | None
@@ -73,10 +73,10 @@ class Moves(Module):
     Metropolis-Hastings ratio for the acceptance of the proposed move.
     `None` if not yet computed. If PRUNE, the log-ratio is negated."""
 
-    grow_var: UInt[Array, '*num_trees']
+    grow_var: Int32[Array, '*num_trees']
     """The decision axes of the new rules."""
 
-    grow_split: UInt[Array, '*num_trees']
+    grow_split: Int32[Array, '*num_trees']
     """The decision boundaries of the new rules."""
 
     var_tree: UInt[Array, '*num_trees half_tree_size']
@@ -156,7 +156,7 @@ def _propose_moves(
     split_tree: UInt[Array, ' half_tree_size'],
     affluence_tree: Bool[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
-    blocked_vars: Int32[Array, ' k'] | None,
+    blocked_vars: UInt[Array, ' k'] | None,
     p_nonterminal: Float32[Array, ' tree_size'],
     p_propose_grow: Float32[Array, ' half_tree_size'],
     log_s: Float32[Array, ' p'] | None,
@@ -412,7 +412,7 @@ def choose_variable(
     split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
-    blocked_vars: Int32[Array, ' k'] | None,
+    blocked_vars: UInt[Array, ' k'] | None,
     log_s: Float32[Array, ' p'] | None,
 ) -> tuple[Int32[Array, ''], Int32[Array, '']]:
     """

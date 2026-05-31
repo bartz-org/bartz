@@ -34,6 +34,7 @@ from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
+from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, Shaped, UInt, UInt32
 
 from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
@@ -309,7 +310,7 @@ class ParallelStageOut(Module):
     # is disambiguated by rank/dtype and needs no anchor (cf. `Precs`/`PreLf`).
     prec_trees: (
         Float32[Array, 'num_trees tree_size']
-        | Int32[Array, 'num_trees tree_size']
+        | UInt32[Array, 'num_trees tree_size']
         | Float32[Array, 'num_trees k k tree_size']
     )
     """The likelihood precision scale in each potential or actual leaf node."""
@@ -434,8 +435,8 @@ def accept_moves_parallel_stage(
 @named_call
 @partial(vmap_nodoc, in_axes=(0, 0, None))
 def apply_grow_to_indices(
-    moves: Moves, leaf_indices: UInt[Array, 'num_trees n'], X: UInt[Array, 'p n']
-) -> UInt[Array, 'num_trees n']:
+    moves: Moves, leaf_indices: UInt[Array, ' n'], X: UInt[Array, 'p n']
+) -> UInt[Array, ' n']:
     """
     Update the leaf indices to apply a grow move.
 
@@ -555,7 +556,7 @@ def compute_count_trees(
 
     Returns
     -------
-    count_trees : Int32[Array, 'num_trees tree_size']
+    count_trees : UInt32[Array, 'num_trees tree_size']
         The number of points in each potential or actual leaf node.
     counts : Counts
         The counts of the number of points in the leaves grown or pruned by the
@@ -664,8 +665,9 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
 @named_call
 @vmap_nodoc
 def adapt_leaf_trees_to_grow_indices(
-    leaf_trees: Float32[Array, 'num_trees tree_size'], moves: Moves
-) -> Float32[Array, 'num_trees tree_size']:
+    leaf_trees: Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size'],
+    moves: Moves,
+) -> Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size']:
     """
     Modify leaves such that post-grow indices work on the original tree.
 
@@ -847,7 +849,8 @@ def precompute_likelihood_terms(
 
 def _precompute_leaf_terms_uv(
     key: Key[Array, ''],
-    prec_trees: Float32[Array, 'num_trees tree_size'],
+    prec_trees: Float32[Array, 'num_trees tree_size']
+    | UInt32[Array, 'num_trees tree_size'],
     error_cov_inv: Float32[Array, ''],
     leaf_prior_cov_inv: Float32[Array, ''],
     z: Float32[Array, 'num_trees tree_size'] | None = None,
@@ -872,7 +875,8 @@ def _precompute_leaf_terms_uv(
 
 def _precompute_leaf_terms_mv(
     key: Key[Array, ''],
-    prec_trees: Float32[Array, 'num_trees tree_size'],
+    prec_trees: Float32[Array, 'num_trees tree_size']
+    | UInt32[Array, 'num_trees tree_size'],
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
     z: Float32[Array, 'num_trees tree_size k'] | None = None,
@@ -959,6 +963,7 @@ def _precompute_leaf_terms_mv_het(
 def precompute_leaf_terms(
     key: Key[Array, ''],
     prec_trees: Float32[Array, 'num_trees tree_size']
+    | UInt32[Array, 'num_trees tree_size']
     | Float32[Array, 'num_trees k k tree_size'],
     error_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
@@ -1099,12 +1104,25 @@ class SeqStageInAllTrees(Module):
 
 
 class SeqStageInPerTree(Module):
-    """The inputs to `accept_move_and_sample_leaves` that are separate for each tree."""
+    """The inputs to `accept_move_and_sample_leaves` that are separate for each tree.
 
-    leaf_tree: Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size']
-    """The leaf values of the tree."""
+    Although consumed one tree at a time by `lax.scan`, this object is only ever
+    constructed in the stacked (batched) form fed to the scan, so `num_trees`
+    stays a fixed (non-variadic) leading axis disambiguated by rank/dtype (cf.
+    `ParallelStageOut`); the per-tree slices reach `loop` via scan, which does
+    not re-run `__init__`.
+    """
 
-    prec_tree: Float32[Array, ' tree_size'] | Float32[Array, ' k k tree_size']
+    leaf_tree: (
+        Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k tree_size']
+    )
+    """The leaf values of the trees."""
+
+    prec_tree: (
+        Float32[Array, 'num_trees tree_size']
+        | UInt32[Array, 'num_trees tree_size']
+        | Float32[Array, 'num_trees k k tree_size']
+    )
     """The likelihood precision scale in each potential or actual leaf node."""
 
     move: Moves
@@ -1113,7 +1131,7 @@ class SeqStageInPerTree(Module):
     move_precs: Precs | Counts
     """The likelihood precision scale in each node modified by the moves."""
 
-    leaf_indices: UInt[Array, ' n']
+    leaf_indices: UInt[Array, 'num_trees n']
     """The leaf indices for the largest version of the tree compatible with
     the move."""
 
@@ -1280,7 +1298,7 @@ def _scatter_add(
     values: Float32[Array, '*batch_shape n'] | int,
     indices: Integer[Array, ' n'],
     size: int,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
     batch_size: int | None | Literal['auto'],
     which: Literal['resid', 'count', 'prec'],
     data_sharded: bool,
@@ -1329,7 +1347,7 @@ def _scatter_add_impl(
     /,
     *,
     size: int,
-    dtype: jnp.dtype,
+    dtype: DTypeLike,
     num_batches: int | None,
     final_psum: bool = False,
 ) -> Shaped[Array, '*batch_shape {size}']:
@@ -1484,8 +1502,8 @@ def accept_moves_final_stage(bart: State, moves: Moves) -> State:
 @named_call
 @vmap_nodoc
 def apply_moves_to_leaf_indices(
-    leaf_indices: UInt[Array, 'num_trees n'], moves: Moves
-) -> UInt[Array, 'num_trees n']:
+    leaf_indices: UInt[Array, ' n'], moves: Moves
+) -> UInt[Array, ' n']:
     """
     Update the leaf indices to match the accepted move.
 
@@ -1513,8 +1531,8 @@ def apply_moves_to_leaf_indices(
 @named_call
 @vmap_nodoc
 def apply_moves_to_split_trees(
-    split_tree: UInt[Array, 'num_trees half_tree_size'], moves: Moves
-) -> UInt[Array, 'num_trees half_tree_size']:
+    split_tree: UInt[Array, ' half_tree_size'], moves: Moves
+) -> UInt[Array, ' half_tree_size']:
     """
     Update the split trees to match the accepted move.
 

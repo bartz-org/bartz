@@ -50,11 +50,14 @@ def expand_axes(
 
 
 def normalize_axes(
-    axes: PyTree[int | None, ' T'], tree_arg: PyTree[Array | ShapeDtypeStruct, ' T']
+    axes: PyTree[int | None, ' T'],
+    tree_arg: PyTree[Array | ShapeDtypeStruct | None, ' T'],
 ) -> PyTree[int | None, ' T']:
     """Normalize axes to be non-negative and valid for the corresponding arrays in the tree_arg."""
 
-    def normalize_axis(axis: int | None, x: Array | ShapeDtypeStruct) -> int | None:
+    def normalize_axis(
+        axis: int | None, x: Array | ShapeDtypeStruct | None
+    ) -> int | None:
         if axis is None:
             return None
         else:

@@ -35,7 +35,12 @@ from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
 
-from bartz._jaxext import autobatch, minimal_unsigned_dtype, vmap_nodoc
+from bartz._jaxext import (
+    autobatch,
+    jaxtyping_disabled,
+    minimal_unsigned_dtype,
+    vmap_nodoc,
+)
 
 
 @runtime_checkable
@@ -94,7 +99,11 @@ class TreesTrace(Module):
     @classmethod
     def from_dataclass(cls, obj: TreeHeaps) -> 'TreesTrace':
         """Create a `TreesTrace` from any `bartz.grove.TreeHeaps`."""
-        return cls(**{f.name: getattr(obj, f.name) for f in fields(cls)})
+        # `obj` may carry vmap axis specs (int/None) instead of arrays (this is
+        # used to build `in_axes` trees), and when it carries arrays they come
+        # already validated from their source, so skip the array type-check.
+        with jaxtyping_disabled():
+            return cls(**{f.name: getattr(obj, f.name) for f in fields(cls)})
 
 
 def tree_depth(tree: Shaped[Array, '*batch_shape tree_size']) -> int:
@@ -163,10 +172,10 @@ def traverse_tree(
 @partial(jnp.vectorize, excluded=(0,), signature='(hts),(hts)->(n)')
 @partial(vmap_nodoc, in_axes=(1, None, None))
 def traverse_forest(
-    X: UInt[Array, 'p n'],
-    var_trees: UInt[Array, '*forest_shape half_tree_size'],
-    split_trees: UInt[Array, '*forest_shape half_tree_size'],
-) -> UInt[Array, '*forest_shape n']:
+    X: UInt[Array, ' p'],
+    var_trees: UInt[Array, ' half_tree_size'],
+    split_trees: UInt[Array, ' half_tree_size'],
+) -> UInt[Array, '']:
     """
     Find the leaves where points falls into for each tree in a set.
 
@@ -488,7 +497,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     return '\n'.join(lines)
 
 
-def tree_actual_depth(split_tree: UInt[Array, ' half_tree_size']) -> Int32[Array, '']:
+def tree_actual_depth(split_tree: UInt[Array, ' half_tree_size']) -> UInt[Array, '']:
     """Measure the depth of the tree.
 
     Parameters
@@ -536,7 +545,7 @@ def points_per_node_distr(
     node_type: Literal['leaf', 'leaf-parent'],
     *,
     sum_batch_axis: int | tuple[int, ...] = (),
-) -> Int32[Array, '*reduced_batch_shape n+1']:
+) -> Int32[Array, '*reduced_batch_shape n_plus_1']:
     """Histogram points-per-node counts in a set of trees.
 
     Count how many nodes in a tree select each possible amount of points,
@@ -572,7 +581,7 @@ def points_per_node_distr(
     def func(
         var_tree: UInt[Array, '*batch_shape half_tree_size'],
         split_tree: UInt[Array, '*batch_shape half_tree_size'],
-    ) -> Int32[Array, '*reduced_batch_shape n+1']:
+    ) -> Int32[Array, '*reduced_batch_shape n_plus_1']:
         indices: UInt[Array, '*batch_shape n']
         indices = traverse_forest(X, var_tree, split_tree)
 
@@ -582,11 +591,11 @@ def points_per_node_distr(
             indices: UInt[Array, '*batch_shape n'],
         ) -> (
             tuple[
-                UInt[Array, '*batch_shape tree_size'],
+                Int32[Array, '*batch_shape tree_size'],
                 Bool[Array, '*batch_shape tree_size'],
             ]
             | tuple[
-                UInt[Array, '*batch_shape half_tree_size'],
+                Int32[Array, '*batch_shape half_tree_size'],
                 Bool[Array, '*batch_shape half_tree_size'],
             ]
         ):
@@ -603,9 +612,9 @@ def points_per_node_distr(
         count_tree, predicate = count_points(split_tree, indices)
 
         def count_nodes(
-            count_tree: UInt[Array, '*summed_batch_axes half_tree_size'],
+            count_tree: Int32[Array, '*summed_batch_axes half_tree_size'],
             predicate: Bool[Array, '*summed_batch_axes half_tree_size'],
-        ) -> Int32[Array, ' n+1']:
+        ) -> Int32[Array, ' n_plus_1']:
             return jnp.zeros(X.shape[1] + 1, int).at[count_tree].add(predicate)
 
         # vmap count_nodes over non-batched dims

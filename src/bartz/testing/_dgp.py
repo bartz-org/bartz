@@ -300,17 +300,17 @@ class Params(Module):
     kurtosis of the uniform distribution used by `gen_data_from_params`."""
 
     @property
-    def sigma2_pri(self) -> Float[Array, '']:
+    def sigma2_pri(self) -> Float[Array, '...']:
         """Prior variance of y."""
         return self.sigma2_pop + self.sigma2_mean
 
     @property
-    def sigma2_pop(self) -> Float[Array, '']:
+    def sigma2_pop(self) -> Float[Array, '...']:
         """Expected population variance of y."""
         return self.sigma2_lin + self.sigma2_quad + self.sigma2_eps
 
     @property
-    def sigma2_mean(self) -> Float[Array, '']:
+    def sigma2_mean(self) -> Float[Array, '...']:
         """Variance of the expected mean function."""
         return self.sigma2_quad / (self.kurt_x - 1 + self.q)
 

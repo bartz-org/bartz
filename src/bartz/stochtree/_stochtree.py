@@ -93,10 +93,10 @@ class GeneralParams:
     sigma2_init: FloatLike | None = None
     """Starting value of the global error variance. Only honored when the variance prior is the improper default (``sigma2_global_shape=0`` and ``sigma2_global_scale=0``); otherwise raises, since bartz cannot decouple the chain start from the prior scale. If `None` (default), uses ``var(resid_train)`` for continuous and ``1.0`` for probit, matching stochtree."""
 
-    sigma2_global_shape: FloatLike = 0
+    sigma2_global_shape: FloatLike = 0.0
     """Shape parameter of the inverse-gamma prior on the global error variance. The default ``0`` is mapped to a near-improper prior, since bartz's scaled-inv-chi² cannot represent ``IG(0, 0)`` exactly."""
 
-    sigma2_global_scale: FloatLike = 0
+    sigma2_global_scale: FloatLike = 0.0
     """Scale parameter of the inverse-gamma prior on the global error variance. The default ``0`` is mapped to a near-improper prior, since bartz's scaled-inv-chi² cannot represent ``IG(0, 0)`` exactly."""
 
     variable_weights: Float[ArrayLike, ' p'] | None = None
@@ -167,7 +167,7 @@ class MeanForestParams:
             raise ValueError(msg)
 
 
-def build_dataclass(cls: type[T], params: dict | None, name: str) -> T:
+def build_dataclass(cls: type[T], params: Mapping[str, Any] | None, name: str) -> T:
     """Convert a user-supplied dict to a dataclass, with friendly errors."""
     if params is None:
         params = {}
@@ -350,8 +350,8 @@ class BARTModel:
         num_gfr: int,
         num_burnin: int = 0,
         num_mcmc: int = 100,
-        general_params: dict[str, Any] | None = None,
-        mean_forest_params: dict[str, Any] | None = None,
+        general_params: Mapping[str, Any] | None = None,
+        mean_forest_params: Mapping[str, Any] | None = None,
         bart_kwargs: Mapping[str, Any] = MappingProxyType({}),
     ) -> None:
         """Fit the model.

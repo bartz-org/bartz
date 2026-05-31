@@ -59,7 +59,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz._jaxext import equal_shards, is_key, split
+from bartz._jaxext import equal_shards, is_key, jaxtyping_disabled, split
 from bartz._jaxext.scipy.special import ndtri
 from bartz._jaxext.scipy.stats import invgamma
 from bartz.grove import (
@@ -677,10 +677,10 @@ class Bart(Module):
     def get_latent_prec(
         self, only_continuous: bool = False
     ) -> (
-        Float32[Array, ' n_burn+n_save']
-        | Float32[Array, 'n_burn+n_save k k']
-        | Float32[Array, 'num_chains n_burn+n_save']
-        | Float32[Array, 'num_chains n_burn+n_save k k']
+        Float32[Array, ' nsamples']
+        | Float32[Array, 'nsamples k k']
+        | Float32[Array, 'num_chains nsamples']
+        | Float32[Array, 'num_chains nsamples k k']
     ):
         """Return the posterior samples of the latent error precision matrix.
 
@@ -852,7 +852,7 @@ class Bart(Module):
     def _process_x_test(
         self,
         x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
-        w: Float32[Array, ' m'] | None,
+        w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     ) -> UInt[Array, 'p m']:
         """Convert x_test to binned format suitable for prediction."""
         if isinstance(x_test, str):
@@ -920,7 +920,11 @@ class Bart(Module):
         state = self._mcmc_state
         mesh = state.config.mesh
         if mesh is not None and 'data' in mesh.axis_names:
-            replicated_forest = replace(state.forest, leaf_indices=None)
+            # drop the data-sharded `leaf_indices` (not replicated) before the
+            # cross-shard equality check; `None` is a deliberately off-type
+            # placeholder, so build it with jaxtyping off
+            with jaxtyping_disabled():
+                replicated_forest = replace(state.forest, leaf_indices=None)
             equal = equal_shards(
                 replicated_forest, 'data', in_specs=PartitionSpec(), mesh=mesh
             )
@@ -971,12 +975,14 @@ class Bart(Module):
 
     def _points_per_node_distr(
         self, node_type: Literal['leaf', 'leaf-parent']
-    ) -> Int32[Array, '*num_chains n_save n+1']:
+    ) -> Int32[Array, '*num_chains n_save n_plus_1']:
         return points_per_node_distr_trace(
             self._mcmc_state.X, self._main_trace, node_type
         )
 
-    def _points_per_decision_node_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
+    def _points_per_decision_node_distr(
+        self,
+    ) -> Int32[Array, '*num_chains n_save n_plus_1']:
         """Histogram of number of points belonging to parent-of-leaf nodes.
 
         Returns
@@ -985,7 +991,7 @@ class Bart(Module):
         """
         return self._points_per_node_distr('leaf-parent')
 
-    def _points_per_leaf_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
+    def _points_per_leaf_distr(self) -> Int32[Array, '*num_chains n_save n_plus_1']:
         """Histogram of number of points belonging to leaves.
 
         Returns
@@ -1479,10 +1485,10 @@ def get_latent_prec(
     *,
     only_continuous: bool = False,
 ) -> (
-    Float32[Array, ' n_burn+n_save']
-    | Float32[Array, 'n_burn+n_save k k']
-    | Float32[Array, 'num_chains n_burn+n_save']
-    | Float32[Array, 'num_chains n_burn+n_save k k']
+    Float32[Array, ' nsamples']
+    | Float32[Array, 'nsamples k k']
+    | Float32[Array, 'num_chains nsamples']
+    | Float32[Array, 'num_chains nsamples k k']
 ):
     """Latent error precision trace, burn-in + main concatenated."""
     burnin = burnin_trace.error_cov_inv
@@ -1592,12 +1598,12 @@ def depth_distr(trace: MainTrace) -> Int32[Array, '*num_chains n_save d']:
 @partial(jit, static_argnames='node_type')
 def points_per_node_distr_trace(
     X: UInt[Array, 'p n'], trace: MainTrace, node_type: Literal['leaf', 'leaf-parent']
-) -> Int32[Array, '*num_chains n_save n+1']:
+) -> Int32[Array, '*num_chains n_save n_plus_1']:
     """Histogram of number of points per node, for every tree draw in the trace."""
     chain_axes = chain_vmap_axes(trace)
     var_tree = chain_to_axis(trace.var_tree, chain_axes.var_tree)
     split_tree = chain_to_axis(trace.split_tree, chain_axes.split_tree)
-    out: Int32[Array, '*chains samples n+1']
+    out: Int32[Array, '*chains samples n_plus_1']
     out = points_per_node_distr(X, var_tree, split_tree, node_type, sum_batch_axis=-1)
     if out.ndim < 3:
         out = out[None, :, :]
@@ -1631,7 +1637,7 @@ def process_device_settings(
 
 def _determine_devices(
     y_train: Array, devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None
-) -> tuple[str, Device | None, tuple[Device, ...]]:
+) -> tuple[str, Device | None, Sequence[Device]]:
     """Determine the target platform and set of devices for the MCMC, and possibly a single target device."""
     if isinstance(devices, str):
         platform = devices

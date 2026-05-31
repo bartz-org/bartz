@@ -28,6 +28,7 @@ from collections.abc import Callable, Sequence
 from functools import wraps
 from typing import Any
 
+import numpy as np
 from jax import ShapeDtypeStruct, jit, pure_callback
 from jax import numpy as jnp
 from jax.typing import DTypeLike
@@ -41,10 +42,15 @@ def _float_type(*args: DTypeLike | Array) -> jnp.dtype:
     return jnp.sin(jnp.empty(0, t)).dtype
 
 
-def _castto(func: Callable[..., Array], dtype: DTypeLike) -> Callable[..., Array]:
+def _castto(
+    func: Callable[..., np.ndarray], dtype: DTypeLike
+) -> Callable[..., np.ndarray]:
+    # `func` is a host (numpy) routine wrapped for `jax.pure_callback`, so the
+    # callback returns a numpy value. `np.asarray` normalizes the scalar case
+    # (numpy returns a 0-d scalar, not an `ndarray`, for scalar inputs).
     @wraps(func)
-    def newfunc(*args: Any, **kw: Any) -> Array:
-        return func(*args, **kw).astype(dtype)
+    def newfunc(*args: Any, **kw: Any) -> np.ndarray:
+        return np.asarray(func(*args, **kw)).astype(dtype)
 
     return newfunc
 
@@ -74,7 +80,6 @@ def gammainccinv(a: Float[Array, '...'], y: Float[Array, '...']) -> Float[Array,
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import numpy as np
 from jax import debug_infs, lax
 
 
@@ -185,7 +190,7 @@ def _ndtri(p: Float[Array, '...']) -> Float[Array, '...']:
     shape = jnp.shape(p)
 
     def _create_polynomial(
-        var: Float[Array, '...'], coeffs: Sequence[float]
+        var: Float[Array, '...'], coeffs: Sequence[float] | Float[np.ndarray, ' _']
     ) -> Float[Array, '...']:
         """Compute n_th order polynomial via Horner's method."""
         coeffs = np.array(coeffs, dtype)

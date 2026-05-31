@@ -43,7 +43,7 @@ from numpy.typing import ArrayLike
 from pytest_subtests import SubTests
 
 import bartz.stochtree as bst
-from bartz._jaxext import split
+from bartz._jaxext import jaxtyping_disabled, split
 from bartz.stochtree._preprocess import (
     PandasPreprocessor,
     PolarsPreprocessor,
@@ -350,7 +350,13 @@ def test_unsupported_outcome_model_raises(binary_data: _Data, keys: split) -> No
     """Cloglog and other unsupported link functions are rejected."""
     data = binary_data
     m = bst.BARTModel()
-    with pytest.raises(NotImplementedError, match='unsupported outcome_model'):
+    # `link='cloglog'` is deliberately unsupported; disable jaxtyping so the
+    # import-hook Literal check doesn't pre-empt the `NotImplementedError`
+    # raised by `OutcomeModel.__post_init__` for the unsupported combination.
+    with (
+        jaxtyping_disabled(),
+        pytest.raises(NotImplementedError, match='unsupported outcome_model'),
+    ):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,

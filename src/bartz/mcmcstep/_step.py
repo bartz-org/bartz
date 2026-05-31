@@ -1372,7 +1372,8 @@ def _scatter_add_impl(
     else:
         # in the sharded case, n is the size of the local shard, not the full size
         (n,) = indices.shape
-        batch_indices = jnp.arange(n) % num_batches
+        # unsigned avoids a negative-index normalization select in the scatter
+        batch_indices = jnp.arange(n, dtype=jnp.uint32) % num_batches
         out = (
             jnp.zeros((*batch_shape, size, num_batches), dtype)
             .at[..., indices, batch_indices]

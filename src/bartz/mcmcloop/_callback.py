@@ -58,7 +58,7 @@ def make_print_callback(
     Parameters
     ----------
     state
-        The bart state to use the callback with, used to determine device
+        The MCMC state to use the callback with, used to determine device
         sharding.
     dot_every
         A dot is printed every `dot_every` MCMC iterations, `None` to disable.
@@ -100,7 +100,7 @@ class PrintCallbackState(Module):
 
 def print_callback(
     *,
-    bart: State,
+    state: State,
     burnin: Bool[Array, ''],
     i_total: Int32[Array, ''],
     n_burn: Int32[Array, ''],
@@ -134,7 +134,7 @@ def print_callback(
             burnin=burnin,
             it=it,
             n_iters=n_burn + n_save * n_skip,
-            **_forest_stats(bart),
+            **_forest_stats(state),
         )
 
     def just_dot_branch() -> None:
@@ -173,7 +173,7 @@ def make_tqdm_callback(
     Parameters
     ----------
     state
-        The bart state to use the callback with, used to determine device
+        The MCMC state to use the callback with, used to determine device
         sharding.
     update_every
         The bar position is refreshed every `update_every` MCMC iterations
@@ -189,15 +189,15 @@ def make_tqdm_callback(
     -------
     A dictionary with the arguments to pass to `run_mcmc` as keyword arguments to set up the callback.
 
-    Examples
-    --------
-    >>> run_mcmc(key, state, ..., **make_tqdm_callback(state, ...))
-
     Notes
     -----
     Works with chains sharded across multiple devices. If the run is interrupted
     (e.g. with ^C), the bar is left as-is; the next `make_tqdm_callback` call
     closes it, so a subsequent run starts from a clean line.
+
+    Examples
+    --------
+    >>> run_mcmc(key, state, ..., **make_tqdm_callback(state, ...))
     """
     _close_stale_bars()  # clean up after any previous run that was interrupted
     bar_id = next(_tqdm_bar_counter)
@@ -234,7 +234,7 @@ class TqdmCallbackState(Module):
 
 def tqdm_callback(
     *,
-    bart: State,
+    state: State,
     i_total: Int32[Array, ''],
     n_burn: Int32[Array, ''],
     n_save: Int32[Array, ''],
@@ -258,7 +258,7 @@ def tqdm_callback(
     if report_every is not None:
 
         def report_branch() -> None:
-            debug.callback(_tqdm_report, bar_id, n_iters, **_forest_stats(bart))
+            debug.callback(_tqdm_report, bar_id, n_iters, **_forest_stats(state))
 
         lax.cond((it % report_every == 0) | last, report_branch, lambda: None)
 
@@ -299,17 +299,17 @@ def _convert_jax_arrays_in_args(func: Callable[..., T]) -> Callable[..., T]:
     return new_func
 
 
-def _forest_stats(bart: State) -> dict[str, Float32[Array, ''] | int | None]:
+def _forest_stats(state: State) -> dict[str, Float32[Array, ''] | int | None]:
     """Cross-chain proposal/acceptance/leaves statistics shown during the MCMC."""
-    chain_axis = chain_vmap_axes(bart.forest).split_tree
+    chain_axis = chain_vmap_axes(state.forest).split_tree
     num_trees_axis = chainful_axis(0, chain_axis)  # (num_trees, hts)
-    split_tree = chain_to_axis(bart.forest.split_tree, chain_axis)
-    prop_total = bart.forest.split_tree.shape[num_trees_axis]
+    split_tree = chain_to_axis(state.forest.split_tree, chain_axis)
+    prop_total = state.forest.split_tree.shape[num_trees_axis]
     return dict(
-        num_chains=bart.num_chains(),
-        grow_prop=bart.forest.grow_prop_count.mean() / prop_total,
+        num_chains=state.num_chains(),
+        grow_prop=state.forest.grow_prop_count.mean() / prop_total,
         move_acc=(
-            bart.forest.grow_acc_count.mean() + bart.forest.prune_acc_count.mean()
+            state.forest.grow_acc_count.mean() + state.forest.prune_acc_count.mean()
         )
         / prop_total,
         mean_leaves=forest_mean_leaves(split_tree),

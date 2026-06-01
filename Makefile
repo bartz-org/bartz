@@ -56,6 +56,7 @@ help:
 	@echo "- docs-latest: build html documentation for latest release"
 	@echo "- covreport: build html coverage report"
 	@echo "- covcheck: check coverage is above some thresholds"
+	@echo "- diffcov: check changed-lines coverage vs DIFF_BASE (default origin/main)"
 	@echo "- update-deps: remove .venv, upgrade uv.lock, update pre-commit hooks"
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- copy-version: sync version from pyproject.toml to _version.py"
@@ -107,7 +108,7 @@ clean:
 	rm -fr dist
 	rm -fr config/jax_cache
 	rm -fr docs/_build
-	rm -fr .coverage*
+	rm -fr .coverage* coverage.xml diffcov.md
 	# `renv::clean()` only removes locks/tempdirs/unused packages, not the
 	# whole library, so wipe the gitignored renv subdirs by hand to mirror
 	# `rm -fr .venv`.
@@ -223,6 +224,22 @@ covcheck:
 	$(UV_RUN) coverage report --include='src/*'
 	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total
 	$(UV_RUN) coverage report --include='src/*' --fail-under=90 --format=total
+
+# Branch (changed-lines) coverage: fail if new/modified lines in src and tests
+# are not covered above the threshold. DIFF_BASE is the ref to diff against;
+# locally a feature branch is compared to origin/main. Writes a markdown report
+# (used by CI to populate the job summary) and prints the text report.
+DIFF_BASE ?= origin/main
+DIFFCOV_FAIL_UNDER ?= 99
+DIFFCOV_REPORT ?= diffcov.md
+
+.PHONY: diffcov
+diffcov:
+	# -i: the xml is only an input to diff-cover, which assesses just the
+	# changed files (always present in the checkout); never fail xml generation
+	# over an unrelated path missing in the combined data.
+	$(UV_RUN) coverage xml -i -o coverage.xml
+	$(UV_RUN) diff-cover coverage.xml --compare-branch=$(DIFF_BASE) --fail-under=$(DIFFCOV_FAIL_UNDER) --format report:- --format markdown:$(DIFFCOV_REPORT)
 
 
 ################# DEPENDENCIES #################

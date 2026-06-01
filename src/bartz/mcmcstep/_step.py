@@ -29,7 +29,7 @@ from functools import partial
 from typing import Literal
 
 import jax
-from equinox import AbstractVar, Module, tree_at
+from equinox import AbstractVar, Module
 from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
@@ -58,7 +58,7 @@ from bartz.mcmcstep._state import (
 @split_key_for_chains
 @shard_map_state
 @vmap_chains
-def step(key: Key[Array, ''], bart: State) -> State:
+def step(key: Key[Array, ''], state: State) -> State:
     """
     Do one MCMC step.
 
@@ -66,7 +66,7 @@ def step(key: Key[Array, ''], bart: State) -> State:
     ----------
     key
         A jax random key.
-    bart
+    state
         A BART mcmc state, as created by `init`.
 
     Returns
@@ -81,20 +81,20 @@ def step(key: Key[Array, ''], bart: State) -> State:
     """
     keys = split(key, 4)
 
-    bart = step_trees(keys.pop(), bart)
+    state = step_trees(keys.pop(), state)
 
-    if bart.z is not None:
-        bart = step_z(keys.pop(), bart)
+    if state.z is not None:
+        state = step_z(keys.pop(), state)
 
-    if bart.error_cov_df is not None:
-        bart = step_error_cov_inv(keys.pop(), bart)
+    if state.error_cov_df is not None:
+        state = step_error_cov_inv(keys.pop(), state)
 
-    bart = step_sparse(keys.pop(), bart)
-    return step_config(bart)
+    state = step_sparse(keys.pop(), state)
+    return step_config(state)
 
 
 @named_call
-def step_trees(key: Key[Array, ''], bart: State) -> State:
+def step_trees(key: Key[Array, ''], state: State) -> State:
     """
     Forest sampling step of BART MCMC.
 
@@ -102,7 +102,7 @@ def step_trees(key: Key[Array, ''], bart: State) -> State:
     ----------
     key
         A jax random key.
-    bart
+    state
         A BART mcmc state, as created by `init`.
 
     Returns
@@ -114,13 +114,13 @@ def step_trees(key: Key[Array, ''], bart: State) -> State:
     This function zeroes the proposal counters.
     """
     keys = split(key)
-    moves = propose_moves(keys.pop(), bart.forest)
-    return accept_moves_and_sample_leaves(keys.pop(), bart, moves)
+    moves = propose_moves(keys.pop(), state.forest)
+    return accept_moves_and_sample_leaves(keys.pop(), state, moves)
 
 
 @named_call
 def accept_moves_and_sample_leaves(
-    key: Key[Array, ''], bart: State, moves: Moves
+    key: Key[Array, ''], state: State, moves: Moves
 ) -> State:
     """
     Accept or reject the proposed moves and sample the new leaf values.
@@ -129,7 +129,7 @@ def accept_moves_and_sample_leaves(
     ----------
     key
         A jax random key.
-    bart
+    state
         A valid BART mcmc state.
     moves
         The proposed moves, see `propose_moves`.
@@ -138,9 +138,9 @@ def accept_moves_and_sample_leaves(
     -------
     A new (valid) BART mcmc state.
     """
-    pso = accept_moves_parallel_stage(key, bart, moves)
-    bart, moves = accept_moves_sequential_stage(pso)
-    return accept_moves_final_stage(bart, moves)
+    pso = accept_moves_parallel_stage(key, state, moves)
+    state, moves = accept_moves_sequential_stage(pso)
+    return accept_moves_final_stage(state, moves)
 
 
 class Counts(Module):
@@ -299,7 +299,7 @@ class PreLfMV(PreLf):
 class ParallelStageOut(Module):
     """The output of `accept_moves_parallel_stage`."""
 
-    bart: State
+    state: State
     """A partially updated BART mcmc state."""
 
     moves: Moves
@@ -318,7 +318,7 @@ class ParallelStageOut(Module):
 
     move_precs: Precs | Counts
     """The likelihood precision scale in each node modified by the moves. If
-    `bart.prec_scale` is not set, this is set to `move_counts`."""
+    `state.prec_scale` is not set, this is set to `move_counts`."""
 
     prelkv: PreLkV
     """Object with pre-computed terms of the likelihood ratios."""
@@ -332,7 +332,7 @@ class ParallelStageOut(Module):
 
 @named_call
 def accept_moves_parallel_stage(
-    key: Key[Array, ''], bart: State, moves: Moves
+    key: Key[Array, ''], state: State, moves: Moves
 ) -> ParallelStageOut:
     """
     Pre-compute quantities used to accept moves, in parallel across trees.
@@ -341,7 +341,7 @@ def accept_moves_parallel_stage(
     ----------
     key
         A jax random key.
-    bart
+    state
         A BART mcmc state.
     moves
         The proposed moves, see `propose_moves`.
@@ -351,64 +351,82 @@ def accept_moves_parallel_stage(
     An object with all that could be done in parallel.
     """
     # where the move is grow, modify the state like the move was accepted
-    bart = replace(
-        bart,
+    state = replace(
+        state,
         forest=replace(
-            bart.forest,
+            state.forest,
             var_tree=moves.var_tree,
-            leaf_indices=apply_grow_to_indices(moves, bart.forest.leaf_indices, bart.X),
-            leaf_tree=adapt_leaf_trees_to_grow_indices(bart.forest.leaf_tree, moves),
+            leaf_indices=apply_grow_to_indices(
+                moves, state.forest.leaf_indices, state.X
+            ),
+            leaf_tree=adapt_leaf_trees_to_grow_indices(state.forest.leaf_tree, moves),
         ),
     )
 
     # count number of datapoints per leaf
     if (
-        bart.forest.min_points_per_decision_node is not None
-        or bart.forest.min_points_per_leaf is not None
-        or bart.prec_scale is None
+        state.forest.min_points_per_decision_node is not None
+        or state.forest.min_points_per_leaf is not None
+        or state.prec_scale is None
     ):
         count_trees, move_counts = compute_count_trees(
-            bart.forest.leaf_indices, moves, bart.config
+            state.forest.leaf_indices, moves, state.config
         )
 
-    # mark which leaves & potential leaves have enough points to be grown
-    if bart.forest.min_points_per_decision_node is not None:
-        count_half_trees = count_trees[:, : bart.forest.var_tree.shape[1]]
+    # affluence of the nodes touched by each move: whether `node`/`left`/`right`,
+    # as leaves, would be growable (admissible rule + enough datapoints). The
+    # children must also lie within the heap, i.e. not be at the bottom level;
+    # `node` always does and is admissible as a leaf, so it only needs the count.
+    # These feed the transition ratio and the final `affluence_tree` update.
+    _, half = state.forest.var_tree.shape
+    left_in_heap = moves.left < half
+    right_in_heap = moves.right < half
+    if state.forest.min_points_per_decision_node is not None:
+        min_dn = state.forest.min_points_per_decision_node
         moves = replace(
             moves,
-            affluence_tree=moves.affluence_tree
-            & (count_half_trees >= bart.forest.min_points_per_decision_node),
+            node_affluent=move_counts.total >= min_dn,
+            left_affluent=left_in_heap
+            & moves.left_growable
+            & (move_counts.left >= min_dn),
+            right_affluent=right_in_heap
+            & moves.right_growable
+            & (move_counts.right >= min_dn),
+        )
+    else:
+        moves = replace(
+            moves,
+            node_affluent=jnp.ones_like(moves.grow),
+            left_affluent=left_in_heap & moves.left_growable,
+            right_affluent=right_in_heap & moves.right_growable,
         )
 
-    # copy updated affluence_tree to state
-    bart = tree_at(lambda bart: bart.forest.affluence_tree, bart, moves.affluence_tree)
-
     # veto grove move if new leaves don't have enough datapoints
-    if bart.forest.min_points_per_leaf is not None:
+    if state.forest.min_points_per_leaf is not None:
         moves = replace(
             moves,
             allowed=moves.allowed
-            & (move_counts.left >= bart.forest.min_points_per_leaf)
-            & (move_counts.right >= bart.forest.min_points_per_leaf),
+            & (move_counts.left >= state.forest.min_points_per_leaf)
+            & (move_counts.right >= state.forest.min_points_per_leaf),
         )
 
     # count number of datapoints per leaf, weighted by error precision scale
-    if bart.prec_scale is None:
+    if state.prec_scale is None:
         prec_trees = count_trees
         move_precs = move_counts
     else:
         prec_trees, move_precs = compute_prec_trees(
-            bart.prec_scale, bart.forest.leaf_indices, moves, bart.config
+            state.prec_scale, state.forest.leaf_indices, moves, state.config
         )
     assert move_precs is not None
 
     # compute some missing information about moves
-    moves = complete_ratio(moves, bart.forest.p_nonterminal)
-    save_ratios = bart.forest.log_likelihood is not None
-    bart = replace(
-        bart,
+    moves = complete_ratio(moves, state.forest.p_nonterminal)
+    save_ratios = state.forest.log_likelihood is not None
+    state = replace(
+        state,
         forest=replace(
-            bart.forest,
+            state.forest,
             grow_prop_count=jnp.sum(moves.grow),
             prune_prop_count=jnp.sum(moves.allowed & ~moves.grow),
             log_trans_prior=moves.log_trans_prior_ratio if save_ratios else None,
@@ -416,14 +434,14 @@ def accept_moves_parallel_stage(
     )
 
     prelkv, prelk = precompute_likelihood_terms(
-        bart.error_cov_inv, bart.forest.leaf_prior_cov_inv, move_precs
+        state.error_cov_inv, state.forest.leaf_prior_cov_inv, move_precs
     )
     prelf = precompute_leaf_terms(
-        key, prec_trees, bart.error_cov_inv, bart.forest.leaf_prior_cov_inv
+        key, prec_trees, state.error_cov_inv, state.forest.leaf_prior_cov_inv
     )
 
     return ParallelStageOut(
-        bart=bart,
+        state=state,
         moves=moves,
         prec_trees=prec_trees,
         move_precs=move_precs,
@@ -631,16 +649,12 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
     -------
     The updated moves, with `partial_ratio=None` and `log_trans_prior_ratio` set.
     """
-    # can the children be grown by the proposal? This uses the count-filtered
-    # `affluence_tree`, because the grow proposal draws from the pool of leaves
-    # that pass the `min_points_per_decision_node` threshold. It enters only
+    # can the children be grown by the proposal? `left_affluent`/`right_affluent`
+    # already fold in the `min_points_per_decision_node` threshold, because the
+    # grow proposal draws from the pool of leaves that pass it. This enters only
     # the transition probability.
-    left_affluent = moves.affluence_tree.at[moves.left].get(
-        mode='fill', fill_value=False
-    )
-    right_affluent = moves.affluence_tree.at[moves.right].get(
-        mode='fill', fill_value=False
-    )
+    left_affluent = moves.left_affluent
+    right_affluent = moves.right_affluent
 
     # p_prune if grow
     other_growable_leaves = moves.num_growable >= 2
@@ -1044,7 +1058,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
 
     Returns
     -------
-    bart : State
+    state : State
         A partially updated BART mcmc state.
     moves : Moves
         The accepted/rejected moves, with `acc` and `to_prune` set.
@@ -1064,11 +1078,11 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
         resid, leaf_tree, acc, to_prune, lkratio = accept_move_and_sample_leaves(
             resid,
             SeqStageInAllTrees(
-                pso.bart.X,
-                pso.bart.config.resid_num_batches,
-                pso.bart.config.data_sharded,
-                pso.bart.prec_scale,
-                pso.bart.forest.log_likelihood is not None,
+                pso.state.X,
+                pso.state.config.resid_num_batches,
+                pso.state.config.data_sharded,
+                pso.state.prec_scale,
+                pso.state.forest.log_likelihood is not None,
                 pso.prelk,
             ),
             pt,
@@ -1076,24 +1090,24 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
         return resid, (leaf_tree, acc, to_prune, lkratio)
 
     pts = SeqStageInPerTree(
-        pso.bart.forest.leaf_tree,
+        pso.state.forest.leaf_tree,
         pso.prec_trees,
         pso.moves,
         pso.move_precs,
-        pso.bart.forest.leaf_indices,
+        pso.state.forest.leaf_indices,
         pso.prelkv,
         pso.prelf,
     )
-    resid, (leaf_trees, acc, to_prune, lkratio) = lax.scan(loop, pso.bart.resid, pts)
+    resid, (leaf_trees, acc, to_prune, lkratio) = lax.scan(loop, pso.state.resid, pts)
 
-    bart = replace(
-        pso.bart,
+    state = replace(
+        pso.state,
         resid=resid,
-        forest=replace(pso.bart.forest, leaf_tree=leaf_trees, log_likelihood=lkratio),
+        forest=replace(pso.state.forest, leaf_tree=leaf_trees, log_likelihood=lkratio),
     )
     moves = replace(pso.moves, acc=acc, to_prune=to_prune)
 
-    return bart, moves
+    return state, moves
 
 
 class SeqStageInAllTrees(Module):
@@ -1373,7 +1387,8 @@ def _scatter_add_impl(
     else:
         # in the sharded case, n is the size of the local shard, not the full size
         (n,) = indices.shape
-        batch_indices = jnp.arange(n) % num_batches
+        # unsigned avoids a negative-index normalization select in the scatter
+        batch_indices = jnp.arange(n, dtype=jnp.uint32) % num_batches
         out = (
             jnp.zeros((*batch_shape, size, num_batches), dtype)
             .at[..., indices, batch_indices]
@@ -1483,7 +1498,7 @@ def compute_likelihood_ratio(
 
 
 @named_call
-def accept_moves_final_stage(bart: State, moves: Moves) -> State:
+def accept_moves_final_stage(state: State, moves: Moves) -> State:
     """
     Post-process the mcmc state after accepting/rejecting the moves.
 
@@ -1492,7 +1507,7 @@ def accept_moves_final_stage(bart: State, moves: Moves) -> State:
 
     Parameters
     ----------
-    bart
+    state
         A partially updated BART mcmc state.
     moves
         The proposed moves (see `propose_moves`) as updated by
@@ -1503,13 +1518,16 @@ def accept_moves_final_stage(bart: State, moves: Moves) -> State:
     The fully updated BART mcmc state.
     """
     return replace(
-        bart,
+        state,
         forest=replace(
-            bart.forest,
+            state.forest,
             grow_acc_count=jnp.sum(moves.acc & moves.grow),
             prune_acc_count=jnp.sum(moves.acc & ~moves.grow),
-            leaf_indices=apply_moves_to_leaf_indices(bart.forest.leaf_indices, moves),
-            split_tree=apply_moves_to_split_trees(bart.forest.split_tree, moves),
+            leaf_indices=apply_moves_to_leaf_indices(state.forest.leaf_indices, moves),
+            split_tree=apply_moves_to_split_trees(state.forest.split_tree, moves),
+            affluence_tree=apply_moves_to_affluence_trees(
+                state.forest.affluence_tree, moves
+            ),
         ),
     )
 
@@ -1586,6 +1604,59 @@ def _apply_moves_to_split_trees(
     )
 
 
+@named_call
+def apply_moves_to_affluence_trees(
+    affluence_tree: Bool[Array, 'num_trees half_tree_size'], moves: Moves
+) -> Bool[Array, 'num_trees half_tree_size']:
+    """
+    Update the affluence trees to match the accepted move.
+
+    The affluence tree marks the growable leaves; this restores that invariant
+    after the move by re-marking only the nodes it touched, starting from the
+    clean pre-move mask.
+
+    Parameters
+    ----------
+    affluence_tree
+        The mask of the growable leaves in the initial trees.
+    moves
+        The proposed moves (see `propose_moves`), as updated by
+        `accept_moves_sequential_stage`.
+
+    Returns
+    -------
+    The updated affluence trees.
+    """
+    return _apply_moves_to_affluence_trees(affluence_tree, moves)
+
+
+@vmap_nodoc
+def _apply_moves_to_affluence_trees(
+    affluence_tree: Bool[Array, ' half_tree_size'], moves: Moves
+) -> Bool[Array, ' half_tree_size']:
+    """Implement `apply_moves_to_affluence_trees`."""
+    assert moves.to_prune is not None
+    assert moves.node_affluent is not None
+    size = affluence_tree.size
+    # GROW: node becomes internal, children become leaves with their affluence.
+    # PRUNE (accepted prune or rejected grow): node becomes a leaf, children are
+    # deleted. Indices of the move not taken resolve to `size` and drop.
+    return (
+        affluence_tree.at[jnp.where(moves.grow, moves.node, size)]
+        .set(False)
+        .at[jnp.where(moves.grow, moves.left, size)]
+        .set(moves.left_affluent)
+        .at[jnp.where(moves.grow, moves.right, size)]
+        .set(moves.right_affluent)
+        .at[jnp.where(moves.to_prune, moves.node, size)]
+        .set(moves.node_affluent)
+        .at[jnp.where(moves.to_prune, moves.left, size)]
+        .set(False)
+        .at[jnp.where(moves.to_prune, moves.right, size)]
+        .set(False)
+    )
+
+
 @jax.jit
 def _sample_wishart_bartlett(
     key: Key[Array, ''], df: Float32[Array, ''], scale_inv: Float32[Array, 'k k']
@@ -1623,54 +1694,54 @@ def _sample_wishart_bartlett(
     return T @ T.T
 
 
-def _step_error_cov_inv_mv(key: Key[Array, ''], bart: State) -> State:
-    assert bart.error_cov_df is not None
-    assert bart.error_cov_scale is not None
+def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
+    assert state.error_cov_df is not None
+    assert state.error_cov_scale is not None
 
-    resid = bart.resid
-    if bart.inv_sdev_scale is None:
+    resid = state.resid
+    if state.inv_sdev_scale is None:
         _, n_eff = resid.shape
-        n_eff *= get_axis_size(bart.config.mesh, 'data')
+        n_eff *= get_axis_size(state.config.mesh, 'data')
     else:
         # 2-D inv_sdev_scale dispatches to the diagonal path, so here it is 1-D
-        n_eff = jnp.sum(bart.inv_sdev_scale != 0, axis=-1)
-        if bart.config.data_sharded:
+        n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
+        if state.config.data_sharded:
             n_eff = lax.psum(n_eff, 'data')
-        resid *= bart.inv_sdev_scale
-    df_post = bart.error_cov_df + n_eff
+        resid *= state.inv_sdev_scale
+    df_post = state.error_cov_df + n_eff
     rrt = resid @ resid.T
-    if bart.config.data_sharded:
+    if state.config.data_sharded:
         rrt = lax.psum(rrt, 'data')
-    scale_post = bart.error_cov_scale + rrt
+    scale_post = state.error_cov_scale + rrt
 
     prec = _sample_wishart_bartlett(key, df_post, scale_post)
-    return replace(bart, error_cov_inv=prec)
+    return replace(state, error_cov_inv=prec)
 
 
-def _step_error_cov_inv_diag(key: Key[Array, ''], bart: State) -> State:
+def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     """Per-component inverse-gamma update for univariate, mixed, and partial-missing paths."""
-    assert bart.error_cov_scale is not None
-    assert bart.error_cov_df is not None
+    assert state.error_cov_scale is not None
+    assert state.error_cov_df is not None
 
-    resid = bart.resid
-    if bart.inv_sdev_scale is not None:
-        resid *= bart.inv_sdev_scale
+    resid = state.resid
+    if state.inv_sdev_scale is not None:
+        resid *= state.inv_sdev_scale
 
     # alpha
-    if bart.inv_sdev_scale is None:
+    if state.inv_sdev_scale is None:
         *_, n_eff = resid.shape
-        n_eff *= get_axis_size(bart.config.mesh, 'data')
+        n_eff *= get_axis_size(state.config.mesh, 'data')
     else:
-        n_eff = jnp.sum(bart.inv_sdev_scale != 0, axis=-1)
-        if bart.config.data_sharded:
+        n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
+        if state.config.data_sharded:
             n_eff = lax.psum(n_eff, 'data')
-    alpha = bart.error_cov_df / 2 + n_eff / 2
+    alpha = state.error_cov_df / 2 + n_eff / 2
 
     # beta
     norm2 = jnp.einsum('...n,...n->...', resid, resid)
-    if bart.config.data_sharded:
+    if state.config.data_sharded:
         norm2 = lax.psum(norm2, 'data')
-    scale = bart.error_cov_scale
+    scale = state.error_cov_scale
     kshape = resid.shape[:-1]
     if kshape:
         scale = jnp.diag(scale)
@@ -1678,28 +1749,28 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], bart: State) -> State:
 
     samples = jnp.exp(loggamma(key, alpha, kshape))
     prec = samples / beta
-    if bart.binary_indices is not None:
-        prec = prec.at[bart.binary_indices].set(1.0)
+    if state.binary_indices is not None:
+        prec = prec.at[state.binary_indices].set(1.0)
     if kshape:
         prec = jnp.diag(prec)
-    return replace(bart, error_cov_inv=prec)
+    return replace(state, error_cov_inv=prec)
 
 
 @named_call
-def step_error_cov_inv(key: Key[Array, ''], bart: State) -> State:
+def step_error_cov_inv(key: Key[Array, ''], state: State) -> State:
     """MCMC-update the inverse error covariance."""
     if (
-        bart.error_cov_inv.ndim == 2
-        and bart.binary_indices is None
-        and (bart.inv_sdev_scale is None or bart.inv_sdev_scale.ndim == 1)
+        state.error_cov_inv.ndim == 2
+        and state.binary_indices is None
+        and (state.inv_sdev_scale is None or state.inv_sdev_scale.ndim == 1)
     ):
-        return _step_error_cov_inv_mv(key, bart)
+        return _step_error_cov_inv_mv(key, state)
     else:
-        return _step_error_cov_inv_diag(key, bart)
+        return _step_error_cov_inv_diag(key, state)
 
 
 @named_call
-def step_z(key: Key[Array, ''], bart: State) -> State:
+def step_z(key: Key[Array, ''], state: State) -> State:
     """
     MCMC-update the latent variable for binary regression.
 
@@ -1707,37 +1778,37 @@ def step_z(key: Key[Array, ''], bart: State) -> State:
     ----------
     key
         A jax random key.
-    bart
+    state
         A BART MCMC state.
 
     Returns
     -------
     The updated BART MCMC state.
     """
-    assert bart.z is not None
-    assert bart.binary_y is not None
+    assert state.z is not None
+    assert state.binary_y is not None
 
-    if bart.binary_indices is not None:
-        resid = bart.resid[..., bart.binary_indices, :]
+    if state.binary_indices is not None:
+        resid = state.resid[..., state.binary_indices, :]
     else:
-        resid = bart.resid
+        resid = state.resid
 
-    trees_plus_offset = bart.z - resid
-    if bart.config.data_sharded:
+    trees_plus_offset = state.z - resid
+    if state.config.data_sharded:
         # decorrelate the seed across data shards; the seed is replicated
         # because the trees and most of the algorithm are replicated
         key = random.fold_in(key, lax.axis_index('data'))
-    resid = truncated_normal_onesided(key, (), ~bart.binary_y, -trees_plus_offset)
+    resid = truncated_normal_onesided(key, (), ~state.binary_y, -trees_plus_offset)
     z = trees_plus_offset + resid
 
-    if bart.binary_indices is not None:
-        resid = bart.resid.at[..., bart.binary_indices, :].set(resid)
+    if state.binary_indices is not None:
+        resid = state.resid.at[..., state.binary_indices, :].set(resid)
 
-    return replace(bart, z=z, resid=resid)
+    return replace(state, z=z, resid=resid)
 
 
 @named_call
-def step_s(key: Key[Array, ''], bart: State) -> State:
+def step_s(key: Key[Array, ''], state: State) -> State:
     """
     Update `log_s` using Dirichlet sampling.
 
@@ -1750,7 +1821,7 @@ def step_s(key: Key[Array, ''], bart: State) -> State:
     ----------
     key
         Random key for sampling.
-    bart
+    state
         The current BART state.
 
     Returns
@@ -1762,24 +1833,24 @@ def step_s(key: Key[Array, ''], bart: State) -> State:
     This full conditional is approximated, because it does not take into account
     that there are forbidden decision rules.
     """
-    assert bart.forest.theta is not None
+    assert state.forest.theta is not None
 
     # histogram current variable usage
-    p = bart.forest.max_split.size
+    p = state.forest.max_split.size
     varcount = var_histogram(
-        p, bart.forest.var_tree, bart.forest.split_tree, sum_batch_axis=-1
+        p, state.forest.var_tree, state.forest.split_tree, sum_batch_axis=-1
     )
 
     # sample from Dirichlet posterior
-    alpha = bart.forest.theta / p + varcount
+    alpha = state.forest.theta / p + varcount
     log_s = loggamma(key, alpha)
 
     # update forest with new s
-    return replace(bart, forest=replace(bart.forest, log_s=log_s))
+    return replace(state, forest=replace(state.forest, log_s=log_s))
 
 
 @named_call
-def step_theta(key: Key[Array, ''], bart: State, *, num_grid: int = 1000) -> State:
+def step_theta(key: Key[Array, ''], state: State, *, num_grid: int = 1000) -> State:
     """
     Update `theta`.
 
@@ -1789,7 +1860,7 @@ def step_theta(key: Key[Array, ''], bart: State, *, num_grid: int = 1000) -> Sta
     ----------
     key
         Random key for sampling.
-    bart
+    state
         The current BART state.
     num_grid
         The number of points in the evenly-spaced grid used to sample
@@ -1799,26 +1870,26 @@ def step_theta(key: Key[Array, ''], bart: State, *, num_grid: int = 1000) -> Sta
     -------
     Updated BART state with re-sampled `theta`.
     """
-    assert bart.forest.log_s is not None
-    assert bart.forest.rho is not None
-    assert bart.forest.a is not None
-    assert bart.forest.b is not None
+    assert state.forest.log_s is not None
+    assert state.forest.rho is not None
+    assert state.forest.a is not None
+    assert state.forest.b is not None
 
     # the grid points are the midpoints of num_grid bins in (0, 1)
     padding = 1 / (2 * num_grid)
     lambda_grid = jnp.linspace(padding, 1 - padding, num_grid)
 
     # normalize s
-    log_s = bart.forest.log_s - logsumexp(bart.forest.log_s)
+    log_s = state.forest.log_s - logsumexp(state.forest.log_s)
 
     # sample lambda
     logp, theta_grid = _log_p_lambda(
-        lambda_grid, log_s, bart.forest.rho, bart.forest.a, bart.forest.b
+        lambda_grid, log_s, state.forest.rho, state.forest.a, state.forest.b
     )
     i = random.categorical(key, logp)
     theta = theta_grid[i]
 
-    return replace(bart, forest=replace(bart.forest, theta=theta))
+    return replace(state, forest=replace(state.forest, theta=theta))
 
 
 def _log_p_lambda(
@@ -1841,7 +1912,7 @@ def _log_p_lambda(
 
 
 @named_call
-def step_sparse(key: Key[Array, ''], bart: State) -> State:
+def step_sparse(key: Key[Array, ''], state: State) -> State:
     """
     Update the sparsity parameters.
 
@@ -1852,34 +1923,34 @@ def step_sparse(key: Key[Array, ''], bart: State) -> State:
     ----------
     key
         Random key for sampling.
-    bart
+    state
         The current BART state.
 
     Returns
     -------
     Updated BART state with re-sampled `log_s` and `theta`.
     """
-    if bart.config.sparse_on_at is not None:
-        bart = lax.cond(
-            bart.config.steps_done < bart.config.sparse_on_at,
-            lambda _key, bart: bart,
+    if state.config.sparse_on_at is not None:
+        state = lax.cond(
+            state.config.steps_done < state.config.sparse_on_at,
+            lambda _key, state: state,
             _step_sparse,
             key,
-            bart,
+            state,
         )
-    return bart
+    return state
 
 
-def _step_sparse(key: Key[Array, ''], bart: State) -> State:
+def _step_sparse(key: Key[Array, ''], state: State) -> State:
     keys = split(key)
-    bart = step_s(keys.pop(), bart)
-    if bart.forest.rho is not None:
-        bart = step_theta(keys.pop(), bart)
-    return bart
+    state = step_s(keys.pop(), state)
+    if state.forest.rho is not None:
+        state = step_theta(keys.pop(), state)
+    return state
 
 
 @named_call
-def step_config(bart: State) -> State:
-    config = bart.config
+def step_config(state: State) -> State:
+    config = state.config
     config = replace(config, steps_done=config.steps_done + 1)
-    return replace(bart, config=config)
+    return replace(state, config=config)

@@ -858,7 +858,13 @@ class _LazyArray(Module):
 DummyArray = Array | ShapeDtypeStruct | _LazyArray
 
 
-def add_dummy_axis(x: PyTree[DummyArray, 'T']) -> PyTree[ShapeDtypeStruct, 'T']:
+# WORKAROUND(jaxtyping<0.3.9): a shared structure variable
+# (PyTree[DummyArray, 'T'] -> PyTree[ShapeDtypeStruct, 'T']) is mis-bound to a
+# single leaf when the leaf type is a union containing a Module (here
+# `_LazyArray`), so the return-value check spuriously fails. Drop the structure
+# variable; `tree.map` preserves the structure anyway. Restore 'T' on both
+# annotations once the jaxtyping floor reaches 0.3.9.
+def add_dummy_axis(x: PyTree[DummyArray]) -> PyTree[ShapeDtypeStruct]:
     """Replace array-like leaves with a rank-inflated placeholder."""
 
     def replace_leaf(leaf: DummyArray) -> ShapeDtypeStruct:

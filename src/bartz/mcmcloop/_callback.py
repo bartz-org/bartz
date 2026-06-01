@@ -58,7 +58,7 @@ def make_print_callback(
     Parameters
     ----------
     state
-        The bart state to use the callback with, used to determine device
+        The MCMC state to use the callback with, used to determine device
         sharding.
     dot_every
         A dot is printed every `dot_every` MCMC iterations, `None` to disable.
@@ -100,7 +100,7 @@ class PrintCallbackState(Module):
 
 def print_callback(
     *,
-    bart: State,
+    state: State,
     burnin: Bool[Array, ''],
     i_total: Int32[Array, ''],
     n_burn: Int32[Array, ''],
@@ -134,7 +134,7 @@ def print_callback(
             burnin=burnin,
             it=it,
             n_iters=n_burn + n_save * n_skip,
-            **_forest_stats(bart),
+            **_forest_stats(state),
         )
 
     def just_dot_branch() -> None:
@@ -173,7 +173,7 @@ def make_tqdm_callback(
     Parameters
     ----------
     state
-        The bart state to use the callback with, used to determine device
+        The MCMC state to use the callback with, used to determine device
         sharding.
     update_every
         The bar position is refreshed every `update_every` MCMC iterations
@@ -189,19 +189,19 @@ def make_tqdm_callback(
     -------
     A dictionary with the arguments to pass to `run_mcmc` as keyword arguments to set up the callback.
 
-    Examples
-    --------
-    >>> run_mcmc(key, state, ..., **make_tqdm_callback(state, ...))
-
     Notes
     -----
     Works with chains sharded across multiple devices. If the run is interrupted
     (e.g. with ^C), the bar is left as-is; the next `make_tqdm_callback` call
     closes it, so a subsequent run starts from a clean line.
+
+    Examples
+    --------
+    >>> run_mcmc(key, state, ..., **make_tqdm_callback(state, ...))
     """
     _close_stale_bars()  # clean up after any previous run that was interrupted
-    bar_id = next(_tqdm_bar_counter)
-    _tqdm_registry[bar_id] = _TqdmEntry(tqdm_kwargs)
+    bar_id = next(_TQDM_BAR_COUNTER)
+    _TQDM_REGISTRY[bar_id] = _TqdmEntry(tqdm_kwargs)
 
     def as_replicated_array(val: ArrayLike) -> Array:
         return _replicate(jnp.asarray(val), state.config.mesh)
@@ -234,7 +234,7 @@ class TqdmCallbackState(Module):
 
 def tqdm_callback(
     *,
-    bart: State,
+    state: State,
     i_total: Int32[Array, ''],
     n_burn: Int32[Array, ''],
     n_save: Int32[Array, ''],
@@ -258,7 +258,7 @@ def tqdm_callback(
     if report_every is not None:
 
         def report_branch() -> None:
-            debug.callback(_tqdm_report, bar_id, n_iters, **_forest_stats(bart))
+            debug.callback(_tqdm_report, bar_id, n_iters, **_forest_stats(state))
 
         lax.cond((it % report_every == 0) | last, report_branch, lambda: None)
 
@@ -299,17 +299,17 @@ def _convert_jax_arrays_in_args(func: Callable[..., T]) -> Callable[..., T]:
     return new_func
 
 
-def _forest_stats(bart: State) -> dict[str, Float32[Array, ''] | int | None]:
+def _forest_stats(state: State) -> dict[str, Float32[Array, ''] | int | None]:
     """Cross-chain proposal/acceptance/leaves statistics shown during the MCMC."""
-    chain_axis = chain_vmap_axes(bart.forest).split_tree
+    chain_axis = chain_vmap_axes(state.forest).split_tree
     num_trees_axis = chainful_axis(0, chain_axis)  # (num_trees, hts)
-    split_tree = chain_to_axis(bart.forest.split_tree, chain_axis)
-    prop_total = bart.forest.split_tree.shape[num_trees_axis]
+    split_tree = chain_to_axis(state.forest.split_tree, chain_axis)
+    prop_total = state.forest.split_tree.shape[num_trees_axis]
     return dict(
-        num_chains=bart.num_chains(),
-        grow_prop=bart.forest.grow_prop_count.mean() / prop_total,
+        num_chains=state.num_chains(),
+        grow_prop=state.forest.grow_prop_count.mean() / prop_total,
         move_acc=(
-            bart.forest.grow_acc_count.mean() + bart.forest.prune_acc_count.mean()
+            state.forest.grow_acc_count.mean() + state.forest.prune_acc_count.mean()
         )
         / prop_total,
         mean_leaves=forest_mean_leaves(split_tree),
@@ -373,8 +373,8 @@ class _TqdmEntry:
 # kept here and referenced from the jax loop through the integer handle stored
 # in `TqdmCallbackState.bar_id` (a traceable scalar, so the loop pytree stays
 # stable across runs and is not recompiled).
-_tqdm_registry: dict[int, _TqdmEntry] = {}
-_tqdm_bar_counter = itertools.count()
+_TQDM_REGISTRY: dict[int, _TqdmEntry] = {}
+_TQDM_BAR_COUNTER = itertools.count()
 
 # tqdm's default layout, but without the ': ' that `format_meter` forces after a
 # non-empty description; the label is set as a `{desc}` ending in a space instead
@@ -386,21 +386,21 @@ _TQDM_BAR_FORMAT = (
 
 def _close_stale_bars() -> None:
     """Close and drop any bars left over from a previous (e.g. interrupted) run."""
-    for entry in _tqdm_registry.values():
+    for entry in _TQDM_REGISTRY.values():
         if entry.bar is not None:
             entry.bar.close()
-    _tqdm_registry.clear()
+    _TQDM_REGISTRY.clear()
 
 
 def _get_or_create_bar(bar_id: int, n_iters: int) -> tqdm | None:
     """Return the bar for `bar_id`, creating it on first use, `None` if finished."""
-    entry = _tqdm_registry.get(bar_id)
+    entry = _TQDM_REGISTRY.get(bar_id)
     if entry is None:
         # the bar was already closed (the loop finished, possibly out of order)
         return None
     if entry.bar is None:
         bar = tqdm(**{'total': n_iters, 'bar_format': _TQDM_BAR_FORMAT, **entry.kwargs})
-        _tqdm_registry[bar_id] = replace(entry, bar=bar)
+        _TQDM_REGISTRY[bar_id] = replace(entry, bar=bar)
         return bar
     return entry.bar
 
@@ -415,7 +415,7 @@ def _tqdm_advance(bar_id: int, it: int, n_iters: int) -> None:
     bar.update(max(0, it - bar.n))  # forward-only: callbacks may arrive out of order
     if it >= n_iters:
         bar.close()
-        del _tqdm_registry[bar_id]
+        del _TQDM_REGISTRY[bar_id]
 
 
 @_convert_jax_arrays_in_args
@@ -425,9 +425,9 @@ def _tqdm_report(
     n_iters: int,
     *,
     num_chains: int | None,
-    grow_prop: float,
     move_acc: float,
     mean_leaves: float,
+    max_leaves: int,
     **_: Any,
 ) -> None:
     """Set the bar description and acceptance-statistics postfix."""
@@ -437,11 +437,10 @@ def _tqdm_report(
     # set_description_str (not set_description) to avoid tqdm's ': ' suffix; the
     # trailing space separates the label from the bar
     bar.set_description_str('train ', refresh=False)
-    # keep this terse so the bar stays narrow, e.g. '4ch grow 52% acc 25% leaves 3.4'
+    # keep this terse so the bar stays narrow, e.g. '4ch acc 25% leaves 3.4/32'
     msgs = []
     if num_chains is not None:
         msgs.append(f'{num_chains}ch')
-    msgs.append(f'grow {grow_prop:.0%}')
     msgs.append(f'acc {move_acc:.0%}')
-    msgs.append(f'leaves {mean_leaves:.1f}')
+    msgs.append(f'leaves {mean_leaves:.1f}/{max_leaves}')
     bar.set_postfix_str(' '.join(msgs))

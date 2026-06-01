@@ -163,6 +163,11 @@ class ConfigParams:
     )
     """JAX ``jax_memory_fitting_effort``; float in ``[-1.0, 1.0]``. ``None`` in the config resolves to the JAX default (typically ``0.0``) at load time."""
 
+    enable_pgle: bool | None = field(
+        default=jax_config.jax_enable_pgle, metadata={'jax_config': True}
+    )
+    """JAX ``jax_enable_pgle``; whether to enable Profile-Guided Latency Estimation. ``None`` in the config resolves to the JAX default (typically ``False``) at load time."""
+
     gpu_autotune_level: int | None = field(default=None, metadata={'restart': True})
     """XLA ``--xla_gpu_autotune_level`` (integer); ``None`` to leave the env var untouched."""
 
@@ -481,7 +486,13 @@ class Benchmark:
         """Initialize BART state and warm up the MCMC step."""
         self.state: State = init_kwargs.init()
         self.key = random.key(2026_01_20_13_31)
-        self.task()
+        # PGLE profiles `jax_pgle_profiling_runs` executions then recompiles once
+        # (slowly); warm up past that so every timed run is at steady state.
+        n_warmup = 1
+        if jax_config.jax_enable_pgle:
+            n_warmup += jax_config.jax_pgle_profiling_runs + 1
+        for _ in range(n_warmup):
+            self.task()
 
     def task(self) -> None:
         """Run one full MCMC step."""

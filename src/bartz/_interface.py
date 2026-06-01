@@ -572,7 +572,6 @@ class Bart(Module):
             If `x_test` has a different format than `x_train`, or if `w`
             is specified when it should be `None`, or if `w` is not
             specified when it is required.
-
         """
         # parse arguments
         kind = PredictKind(kind)
@@ -698,6 +697,12 @@ class Bart(Module):
         -------
         MCMC samples of the error precision matrix.
 
+        Raises
+        ------
+        ValueError
+             If `only_continuous` is `True` but the model has only binary
+             outcomes, so there is no continuous submatrix to return.
+
         Notes
         -----
         This method is meant to check for convergence, so it returns the full
@@ -707,12 +712,6 @@ class Bart(Module):
         regression, the returned precision is the global precision parameter,
         that would have to be divided by a squared weight to get the precision
         on a given datapoint.
-
-        Raises
-        ------
-        ValueError
-             If `only_continuous` is `True` but the model has only binary
-             outcomes, so there is no continuous submatrix to return.
         """
         binary_indices = self._mcmc_state.binary_indices
         if (
@@ -808,7 +807,6 @@ class Bart(Module):
         ValueError
             If `w` is specified when it should be `None`, or missing when
             required.
-
         """
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
         has_train_weights = self._w is not None

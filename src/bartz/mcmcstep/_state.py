@@ -24,7 +24,6 @@
 
 """Module defining the BART MCMC state and initialization."""
 
-import math
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from enum import Enum
@@ -1193,7 +1192,7 @@ def _parse_reduction_configs(
     # memory of the per-tree reduction
     chains_per_device = (num_chains or 1) // get_axis_size(mesh, 'chains')
     # the datapoint-batch counts are resolved per-platform at run time (see
-    # `_auto_num_batches` and `lax.platform_dependent` in `_step`), so the
+    # `_auto_num_batches` and `lax.platform_dependent` in `_scatter`), so the
     # 'auto' sentinel is stored verbatim; only `prec_count_num_trees`, which
     # does not depend on the platform, is resolved here
     return dict(
@@ -1204,30 +1203,6 @@ def _parse_reduction_configs(
             prec_count_num_trees, num_trees, n * chains_per_device
         ),
     )
-
-
-def _auto_num_batches(
-    platform: Literal['cpu', 'gpu'], n: int, which: Literal['resid', 'count', 'prec']
-) -> int | None:
-    """Pick the number of datapoint batches for a reduction on a given platform."""
-    if platform == 'cpu':
-        return _final_round(n, 16)
-    else:
-        nb = dict(resid=1024, count=2048, prec=1024)[which]  # on an A4000
-        return _final_round(n, nb)
-
-
-def _final_round(n: int, num: float | int) -> int | None:
-    """Bound batch size, round number of batches to a power of 2, and disable batching if there's only 1 batch."""
-    # at least some elements per batch
-    num = min(n // 32, num)
-
-    # round to the nearest power of 2 because I guess XLA and the hardware
-    # will like that (not sure about this, maybe just multiple of 32?)
-    num = 2 ** round(math.log2(num)) if num else 0
-
-    # disable batching if the batch is as large as the whole dataset
-    return num if num > 1 else None
 
 
 def _parse_prec_count_num_trees(

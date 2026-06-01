@@ -35,7 +35,7 @@ import numpy
 import pytest
 from beartype import beartype
 from equinox import Module
-from jax import debug_key_reuse, make_mesh, random, tree, vmap
+from jax import debug_key_reuse, lax, make_mesh, random, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
@@ -56,8 +56,14 @@ from pytest_subtests import SubTests
 from scipy import stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
-from bartz._jaxext import get_device_count, minimal_unsigned_dtype, split
-from bartz.mcmcstep import State, init, step
+from bartz._jaxext import (
+    get_default_devices,
+    get_device_count,
+    minimal_unsigned_dtype,
+    split,
+)
+from bartz.grove import is_actual_leaf
+from bartz.mcmcstep import State, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import (
     chain_vmap_axes,
     data_vmap_axes,
@@ -86,6 +92,7 @@ from bartz.mcmcstep._step import (
     step_trees,
     step_z,
 )
+from bartz.testing import gen_nonsense_data
 from tests.util import (
     assert_allclose,
     assert_array_equal,
@@ -1361,7 +1368,7 @@ class TestMultichain:
 
     def test_normalize_spec(self) -> None:
         """Test `normalize_spec`."""
-        devices = jax.devices('cpu')[:3]
+        devices = get_default_devices()[:3]
         mesh = make_mesh(
             (len(devices), 1),
             ('ciao', 'bau'),
@@ -1506,6 +1513,59 @@ def test_z_differs_across_data_shards(keys: split) -> None:
                 atol=0,
                 err_msg=f'shards {i} and {j} produced similar z\n',
             )
+
+
+@pytest.mark.parametrize(
+    ('min_points_per_decision_node', 'min_points_per_leaf'),
+    [(None, None), (10, None), (10, 5)],
+)
+def test_affluence_tree_stays_clean(
+    keys: split,
+    min_points_per_decision_node: int | None,
+    min_points_per_leaf: int | None,
+) -> None:
+    """`affluence_tree` marks only actual growable leaves, with no dirty bits.
+
+    The MCMC keeps `affluence_tree` clean (a `True` bit only on a node that is
+    really a leaf), instead of relying on a downstream `is_actual_leaf` mask. A
+    bit left on a grown-away or pruned-away node would be a regression.
+    """
+    p, n, num_trees, num_steps = 5, 200, 20, 50
+    X, y, max_split = gen_nonsense_data(p, n, None)
+    state = init(
+        X=X,
+        y=y,
+        offset=0.0,
+        max_split=max_split,
+        num_trees=num_trees,
+        p_nonterminal=make_p_nonterminal(6),
+        leaf_prior_cov_inv=1.0,
+        error_cov_df=2.0,
+        error_cov_scale=2.0,
+        min_points_per_decision_node=min_points_per_decision_node,
+        min_points_per_leaf=min_points_per_leaf,
+    )
+
+    Trees = tuple[Bool[Array, 'trees half'], UInt8[Array, 'trees half']]
+
+    @jax.jit
+    def run_chain(
+        state: State, step_keys: Key[Array, ' steps']
+    ) -> tuple[Bool[Array, 'steps trees half'], UInt8[Array, 'steps trees half']]:
+        def body(state: State, key: Key[Array, '']) -> tuple[State, Trees]:
+            state = step(key, state)
+            return state, (state.forest.affluence_tree, state.forest.split_tree)
+
+        _, out = lax.scan(body, state, step_keys)
+        return out
+
+    affluence, split_tree = run_chain(state, keys.pop(num_steps))
+
+    # an affluent node must be an actual leaf, in every tree at every step
+    is_leaf = vmap(vmap(is_actual_leaf))(split_tree)
+    assert_array_equal(affluence & ~is_leaf, jnp.zeros_like(affluence))
+    # sanity: the mask is non-trivially populated (else the check is vacuous)
+    assert jnp.any(affluence)
 
 
 class TestMixedBinaryContinuous:
@@ -2044,7 +2104,10 @@ class TestMVBartIntegration:
         # so a 0.01 bound is only ~1.3 sigma and trips ~20% of the time; 0.05 is
         # ~6 sigma. Distribution equality is checked robustly by the KS test.
         assert jnp.abs(jnp.mean(samples_uv) - jnp.mean(samples_mv)) < 0.05
-        assert p_value > 0.01
+        # `samples_uv` and `samples_mv` are independent draws from the same
+        # distribution, so the KS gate has a per-shape false-positive rate equal
+        # to its threshold; keep it low to avoid tripping on benign realizations.
+        assert p_value > 0.001
 
     def test_error_cov_inv_missing_equals_drop(
         self, keys: split, mcmcstep_data: MCMCStepData
@@ -2195,6 +2258,13 @@ class TestMultivariate:
                 rtol=1e-6,
             )
 
+            # the full `step` resamples error_cov_inv: the diagonal (uv) and
+            # Wishart (mv, k=1) paths must agree, up to the resid difference fed
+            # into the denominator and the Gershgorin jitter of the mv Cholesky
+            assert_close_matrices(
+                uv_state.error_cov_inv.reshape(1, 1), mv_state.error_cov_inv, rtol=1e-5
+            )
+
             assert_array_equal(uv_state.forest.var_tree, mv_state.forest.var_tree)
             assert_array_equal(uv_state.forest.split_tree, mv_state.forest.split_tree)
             assert_array_equal(
@@ -2217,8 +2287,8 @@ class TestMultivariate:
                 uv_state.forest.prune_acc_count, mv_state.forest.prune_acc_count
             )
 
-            uv_state = step_trees(key, uv_state)
-            mv_state = step_trees(random.clone(key), mv_state)
+            uv_state = step(key, uv_state)
+            mv_state = step(random.clone(key), mv_state)
 
     @pytest.mark.parametrize('kind', ['binary', 'homo', 'het'])
     def test_smoke(self, keys: split, mcmcstep_data: MCMCStepData, kind: str) -> None:

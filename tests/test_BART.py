@@ -37,7 +37,7 @@ import numpy
 import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError, tree_at
-from jax import block_until_ready, debug_nans, devices, random, tree, vmap
+from jax import block_until_ready, debug_nans, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.special import logit, ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
@@ -1477,7 +1477,7 @@ class TestVarprobParam:
 
 def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
-    if len(devices()) < 2:  # this branch is covered in the single cpu test config
+    if get_device_count() < 2:  # this branch is covered in the single cpu test config
         pytest.skip('Need at least 2 devices for this test')
     if get_with_default(kw, 'type') == 'pbart':
         # Binary regression uses `step_z`, which on data sharding folds the
@@ -1525,7 +1525,7 @@ def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
         bart_data = remove_mesh(bart_data)
         tree.map_with_path(check_equal, bart, bart_data)
 
-    if len(devices()) >= 4:  # pragma: no branch
+    if get_device_count() >= 4:  # pragma: no branch
         with subtests.test('shard data and chains'):
             both_kw = tree.map(lambda x: x, baseline_kw)
             both_kw.setdefault('bart_kwargs', {}).update(

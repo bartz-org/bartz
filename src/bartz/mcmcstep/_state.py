@@ -25,20 +25,17 @@
 """Module defining the BART MCMC state and initialization."""
 
 import math
-import os
-from collections.abc import Callable, Hashable, Sequence
-from dataclasses import fields, replace
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from enum import Enum
 from functools import partial, wraps
-from typing import Any, Literal, TypedDict, TypeVar
+from typing import Literal, TypedDict, TypeVar
 
 import jax
 import numpy
 from equinox import Module, error_if, filter_jit
-from equinox import field as eqx_field
 from jax import (
     NamedSharding,
-    ShapeDtypeStruct,
     device_put,
     jit,
     lax,
@@ -53,17 +50,21 @@ from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Key, PyTree, UInt
 from numpy import ndarray
-from numpy.lib.array_utils import normalize_axis_index
 
 from bartz._jaxext import jaxtyping_disabled, minimal_unsigned_dtype
-from bartz.grove import tree_depths
+from bartz.grove import HeapArrays, tree_depths
+from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes, field
+from bartz.mcmcstep._lazy import (
+    _is_lazy_or_none,
+    _lazy_from_array,
+    _LazyArray,
+    _wrap_chain,
+    add_dummy_axis,
+)
 
 ArrayLike = Array | ndarray
 
 FloatLike = float | Float[ArrayLike, '']
-
-# Default position of the chain axis in chain-bearing leaves; see `field`.
-CHAIN_AXIS = int(os.environ.get('CHAIN_AXIS', '0'))
 
 
 class OutcomeType(Enum):
@@ -76,326 +77,39 @@ class OutcomeType(Enum):
     """Binary outcome in {0, 1} with probit link."""
 
 
-def field(  # noqa: ANN202
-    *,
-    chains: int | None = None,
-    data: int | None = None,
-    samples: int | None = None,
-    **kwargs: Any,
-):
-    """Extend `equinox.field` with chain/data/sample axis markers.
-
-    Parameters
-    ----------
-    chains
-        Index of the chain axis for the field's arrays, or `None` if the field
-        has no chain axis. Any int is accepted, including negative indices with
-        the usual numpy semantics (e.g. ``-1`` for the last axis); the index is
-        normalized per-leaf against the leaf's ``ndim`` by `chain_vmap_axes`.
-    data
-    samples
-        Indices of the data/sample axes for the field's arrays, declared in the
-        chain-less "core" layout. `None` if the field has no data/sample axis.
-        The index is normalized per-leaf against the core ``ndim`` (the leaf's
-        ``ndim`` minus 1 when a chain axis is present, else the leaf's
-        ``ndim``); the chain axis, if any, is treated as inserted after the
-        data/sample axis exists, so `data_vmap_axes`/`trace_sample_axes` shift
-        the returned sample index up by 1 when the chain position is at or
-        before the core data/sample index.
-    **kwargs
-        Other parameters passed to `equinox.field`.
-
-    Returns
-    -------
-    A dataclass field descriptor with the axis indices in the metadata, unset if `None`.
-    """
-    metadata = dict(kwargs.pop('metadata', {}))
-    assert 'chains' not in metadata
-    assert 'data' not in metadata
-    assert 'samples' not in metadata
-    for name, value in (('chains', chains), ('data', data), ('samples', samples)):
-        # bool is a subclass of int; reject it so a boolean value does not
-        # silently mean axis 0 or 1.
-        assert not isinstance(value, bool), (
-            f'{name!r} marker must be an int axis index or None, not bool'
-        )
-        if value is not None:
-            metadata[name] = value
-    return eqx_field(metadata=metadata, **kwargs)
-
-
-def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
-    """Determine vmapping axes for chains.
-
-    This function determines the argument to the `in_axes` or `out_axes`
-    parameter of `jax.vmap` to vmap over all and only the chain axes found in the
-    pytree `x`.
-
-    Parameters
-    ----------
-    x
-        A pytree. Subpytrees that are Module attributes marked with
-        ``field(chains=<int>)`` are considered to have a chain axis at that
-        index. `x` (or one of its subtrees) must define a `has_chains` property
-        (see `get_has_chains`).
-
-    Returns
-    -------
-    A pytree with the same structure as `x`, with each leaf set to the chain axis index declared by its owning ``field(chains=...)`` marker, normalized against the leaf's ``ndim`` (so the returned indices are non-negative), or `None` for unmarked leaves. If `has_chains` is `False`, every leaf is `None`.
-    """
-    if not get_has_chains(x):
-        return _find_metadata(x, 'chains', marker_value=_none_marker)
-
-    return _find_metadata(x, 'chains')
-
-
-def _none_marker(leaf: object, raw: int) -> None:  # noqa: ARG001
-    """Marker mapper that always returns `None`."""
-    return None  # noqa: RET501
-
-
-def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
-    """Determine vmapping axes for data.
-
-    Parameters
-    ----------
-    x
-        A pytree. Subpytrees that are Module attributes marked with
-        ``field(data=<int>)`` are considered to have a data axis at that
-        position in the chain-less layout. `x` (or one of its subtrees) must
-        define a `has_chains` property (see `get_has_chains`).
-
-    Returns
-    -------
-    A pytree with the same structure as `x`, with each leaf set to the data axis index (normalized and chain-shifted), or `None` for unmarked leaves.
-    """
-    chain_axes = chain_vmap_axes(x)
-    data_raw = _find_metadata(x, 'data', marker_value=_raw_marker)
-    return tree.map(
-        _compute_core_axis, x, data_raw, chain_axes, is_leaf=_is_core_axis_leaf
-    )
-
-
-def trace_sample_axes(trace: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
-    """Determine the position of the sample axis for each leaf of a trace.
-
-    Parameters
-    ----------
-    trace
-        A trace pytree (typically a `~bartz.mcmcloop.BurninTrace` or
-        `~bartz.mcmcloop.MainTrace`). `trace` (or one of its subtrees) must
-        define a `has_chains` property.
-
-    Returns
-    -------
-    A pytree with the same structure as `trace` but with sample axes in the leaves, see `field`.
-    """
-    chain_axes = chain_vmap_axes(trace)
-    sample_raw = _find_metadata(trace, 'samples', marker_value=_raw_marker)
-    return tree.map(
-        _compute_core_axis, trace, sample_raw, chain_axes, is_leaf=_is_core_axis_leaf
-    )
-
-
-def _raw_marker(leaf: object, raw: int) -> int:  # noqa: ARG001
-    """Marker mapper that returns the raw marker value."""
-    return raw
-
-
-def _is_core_axis_leaf(x: object) -> bool:
-    """Treat `None` and `_LazyArray` as leaves when resolving core-axis markers."""
-    return x is None or _is_lazy_array(x)
-
-
-def chainful_axis(core_axis: int, chain_axis: int | None) -> int:
-    """Position of a chainless-layout axis in the corresponding chainful array.
-
-    Parameters
-    ----------
-    core_axis
-        Non-negative axis position in the chainless ("core") layout.
-    chain_axis
-        Non-negative position of the chain axis in the chainful layout, or
-        `None` if there is no chain axis.
-
-    Returns
-    -------
-    The non-negative position of `core_axis` after inserting the chain axis at `chain_axis`.
-    """
-    if chain_axis is None or core_axis < chain_axis:
-        return core_axis
-    return core_axis + 1
-
-
-def chain_to_axis(arr: Array, chain_axis: int | None, target: int = 0) -> Array:
-    """Move `chain_axis` of `arr` to position `target`.
-
-    Helper for the common pattern of normalizing the chain axis position in
-    arrays derived from chain-marked Module fields. Pair it with
-    `chain_vmap_axes` to fetch the source axis from a dataclass.
-
-    Parameters
-    ----------
-    arr
-        Array to be reordered.
-    chain_axis
-        Source position of the chain axis, or `None` for arrays with no chain
-        axis (in which case `arr` is returned unchanged).
-    target
-        Destination position of the chain axis.
-
-    Returns
-    -------
-    The reordered array.
-    """
-    if chain_axis is None:
-        return arr
-    return jnp.moveaxis(arr, chain_axis, target)
-
-
-def _compute_core_axis(
-    leaf: object, raw_axis: int | None, chain_axis: int | None
-) -> int | None:
-    """Combine a raw core-layout marker and a (normalized) chain position."""
-    if raw_axis is None:
-        return None
-    has_chain = chain_axis is not None
-    core_ndim = leaf.ndim - (1 if has_chain else 0)
-    axis = normalize_axis_index(raw_axis, core_ndim)
-    return chainful_axis(axis, chain_axis)
-
-
 T = TypeVar('T')
 
 
-class _HasChainsFound(Exception):
-    """Internal control-flow signal carrying a found `has_chains` value."""
-
-    def __init__(self, value: bool) -> None:
-        self.value = value
-
-
-def get_has_chains(x: PyTree) -> bool:
-    """Return the `has_chains` flag from the first node in `x` that defines it.
-
-    Walks `x` and stops at the first node exposing a `has_chains` attribute,
-    returning its value. The walk uses `jax.tree.map` with an `is_leaf` callback
-    that raises a custom exception to short-circuit traversal.
-
-    Parameters
-    ----------
-    x
-        A pytree, possibly containing nodes that define a `has_chains`
-        attribute.
-
-    Returns
-    -------
-    The value of `has_chains` on the first matching node.
-
-    Raises
-    ------
-    ValueError
-        If no node in `x` defines a `has_chains` property.
-    """
-
-    def is_leaf(node: object) -> bool:
-        try:
-            value = node.has_chains
-        except AttributeError:
-            return False
-        raise _HasChainsFound(value)
-
-    try:
-        tree.map(lambda _: None, x, is_leaf=is_leaf)
-    except _HasChainsFound as exc:
-        return exc.value
-    msg = 'no `has_chains` property found in the pytree'
-    raise ValueError(msg)
-
-
-def _normalize_axis_for_leaf(leaf: object, raw: int) -> int:
-    """Normalize a marker axis index against `leaf.ndim`.
-
-    Raises `numpy.exceptions.AxisError` if `raw` is out of bounds for
-    `leaf.ndim`.
-    """
-    return normalize_axis_index(raw, leaf.ndim)
-
-
-def _is_lazy_array(x: object) -> bool:
-    return isinstance(x, _LazyArray)
-
-
-def _is_module(x: object) -> bool:
-    return isinstance(x, Module) and not _is_lazy_array(x)
-
-
-def _find_metadata(
-    x: PyTree[Any, ' S'],
-    key: Hashable,
-    *,
-    marker_value: Callable[[object, int], object] = _normalize_axis_for_leaf,
-    default_value: object = None,
-) -> PyTree[Any, ' S ...']:
-    """Walk `x` replacing marked subtrees with derived values.
-
-    For each Module field whose metadata contains `key`, the field's subtree
-    is replaced by mapping ``marker_value(leaf, raw)`` over its leaves, where
-    `raw` is the unnormalized metadata value; leaves outside any marked field
-    become `default_value`.
-    """
-    if _is_module(x):
-        args = []
-        for f in fields(x):
-            v = getattr(x, f.name)
-            if f.metadata.get('static', False):
-                args.append(v)
-            elif key in f.metadata:
-                raw = f.metadata[key]
-                args.append(
-                    tree.map(
-                        lambda leaf, raw=raw: marker_value(leaf, raw),
-                        v,
-                        is_leaf=_is_lazy_array,
-                    )
-                )
-            else:
-                args.append(
-                    _find_metadata(
-                        v, key, marker_value=marker_value, default_value=default_value
-                    )
-                )
-        # rebuild bypassing the (type-checked) __init__: the result is a
-        # same-structure pytree whose leaves are axis markers (int/None), not
-        # the arrays the field annotations require.
-        out = object.__new__(type(x))
-        for f, value in zip(fields(x), args, strict=True):
-            object.__setattr__(out, f.name, value)
-        return out
-
-    def get_axes(x: object) -> PyTree:
-        if _is_module(x):
-            return _find_metadata(
-                x, key, marker_value=marker_value, default_value=default_value
-            )
-        return tree.map(lambda _: default_value, x, is_leaf=_is_lazy_array)
-
-    return tree.map(get_axes, x, is_leaf=lambda x: isinstance(x, Module))
-
-
-class Forest(Module):
+class Forest(HeapArrays):
     """Represents the MCMC state of a sum of trees."""
 
-    # The move-counter diagnostics are grouped here, with `grow_prop_count`
-    # first as a runtime-typechecker anchor: its single (union-free) `*chains`
-    # annotation binds the variadic chain axis before `leaf_tree`'s
-    # `... | ... k ...` union is checked; otherwise the checker (which evaluates
-    # union members in a hash-randomized order) can mis-bind `*chains` against
-    # the `k` axis for a multivariate-without-chains forest (the layouts are
-    # rank-ambiguous). The anchor must precede `leaf_tree` and carry no
-    # `tree_size`-derived axis, so that `var_tree`/`split_tree`'s `tree_size//2`
-    # still resolves against the `tree_size` bound by `leaf_tree` (which must
-    # therefore precede them).
+    # Heap-array fields follow the `bartz.grove.TreesTrace` convention: the
+    # union-free integer trees are declared before `leaf_tree` and carry the
+    # bindable `half_tree_size` axis, while `leaf_tree` (and `p_nonterminal`) are
+    # checked against `2*half_tree_size`. Declaring a union-free `*chains` field
+    # first binds the variadic chain axis (plus `num_trees` and `half_tree_size`)
+    # before `leaf_tree`'s `... | ... k ...` union is evaluated, so the runtime
+    # typechecker can't mis-bind `*chains` against the `k` axis of a multivariate
+    # forest (the layouts are otherwise rank-ambiguous). No anchor field needed.
+    var_tree: UInt[Array, '*chains num_trees half_tree_size'] = field(chains=CHAIN_AXIS)
+    """The decision axes."""
+
+    split_tree: UInt[Array, '*chains num_trees half_tree_size'] = field(
+        chains=CHAIN_AXIS
+    )
+    """The decision boundaries."""
+
+    affluence_tree: Bool[Array, '*chains num_trees half_tree_size'] = field(
+        chains=CHAIN_AXIS
+    )
+    """Marks leaves that can be grown."""
+
+    leaf_tree: (
+        Float32[Array, '*chains num_trees 2*half_tree_size']
+        | Float32[Array, '*chains num_trees k 2*half_tree_size']
+    ) = field(chains=CHAIN_AXIS)
+    """The leaf values."""
+
     grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of grow proposals made during one full MCMC cycle."""
 
@@ -408,23 +122,6 @@ class Forest(Module):
     prune_acc_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of prune moves accepted during one full MCMC cycle."""
 
-    leaf_tree: (
-        Float32[Array, '*chains num_trees tree_size']
-        | Float32[Array, '*chains num_trees k tree_size']
-    ) = field(chains=CHAIN_AXIS)
-    """The leaf values."""
-
-    var_tree: UInt[Array, '*chains num_trees tree_size//2'] = field(chains=CHAIN_AXIS)
-    """The decision axes."""
-
-    split_tree: UInt[Array, '*chains num_trees tree_size//2'] = field(chains=CHAIN_AXIS)
-    """The decision boundaries."""
-
-    affluence_tree: Bool[Array, '*chains num_trees tree_size//2'] = field(
-        chains=CHAIN_AXIS
-    )
-    """Marks leaves that can be grown."""
-
     max_split: UInt[Array, ' p']
     """The maximum split index for each predictor."""
 
@@ -433,12 +130,12 @@ class Forest(Module):
     the `i` such that ``max_split[i] == 0``, otherwise behavior is
     undefined."""
 
-    p_nonterminal: Float32[Array, ' tree_size']
+    p_nonterminal: Float32[Array, ' 2*half_tree_size']
     """The prior probability of each node being nonterminal, conditional on
     its ancestors. Includes the nodes at maximum depth which should be set
     to 0."""
 
-    p_propose_grow: Float32[Array, ' tree_size//2']
+    p_propose_grow: Float32[Array, ' half_tree_size']
     """The unnormalized probability of picking a leaf for a grow proposal."""
 
     leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=CHAIN_AXIS, data=-1)
@@ -831,82 +528,6 @@ def make_p_nonterminal(
     assert d >= 1
     depth = jnp.arange(d - 1)
     return alpha / (1 + depth).astype(float) ** beta
-
-
-class _LazyArray(Module):
-    """Like `functools.partial` but specialized to array-creating functions like `jax.numpy.zeros`."""
-
-    array_creator: Callable
-    shape: tuple[int, ...]
-    args: tuple
-
-    def __init__(
-        self, array_creator: Callable, shape: tuple[int, ...], *args: Any
-    ) -> None:
-        self.array_creator = array_creator
-        self.shape = shape
-        self.args = args
-
-    def __call__(self, **kwargs: Any) -> T:
-        return self.array_creator(self.shape, *self.args, **kwargs)
-
-    @property
-    def ndim(self) -> int:
-        return len(self.shape)
-
-
-DummyArray = Array | ShapeDtypeStruct | _LazyArray
-
-
-# WORKAROUND(jaxtyping<0.3.9): a shared structure variable
-# (PyTree[DummyArray, 'T'] -> PyTree[ShapeDtypeStruct, 'T']) is mis-bound to a
-# single leaf when the leaf type is a union containing a Module (here
-# `_LazyArray`), so the return-value check spuriously fails. Drop the structure
-# variable; `tree.map` preserves the structure anyway. Restore 'T' on both
-# annotations once the jaxtyping floor reaches 0.3.9.
-def add_dummy_axis(x: PyTree[DummyArray]) -> PyTree[ShapeDtypeStruct]:
-    """Replace array-like leaves with a rank-inflated placeholder."""
-
-    def replace_leaf(leaf: DummyArray) -> ShapeDtypeStruct:
-        return ShapeDtypeStruct((0,) * (leaf.ndim + 1), jnp.float32)
-
-    return tree.map(replace_leaf, x, is_leaf=lambda x: isinstance(x, _LazyArray))
-
-
-def _return_array(shape: tuple[int, ...], arr: Array, **kwargs: Any) -> Array:  # noqa: ARG001
-    """`_LazyArray` factory that returns an already-built array."""
-    return arr
-
-
-def _lazy_from_array(arr: Array | None) -> _LazyArray | None:
-    """Wrap an existing array as a `_LazyArray` reporting `arr.shape`, or pass `None`."""
-    if arr is None:
-        return None
-    return _LazyArray(_return_array, arr.shape, arr)
-
-
-def _broadcast_chain(
-    shape: tuple[int, ...], inner: _LazyArray, chain_axis: int, **kwargs: Any
-) -> Array:
-    """Concretize `inner` then insert and broadcast a chain axis at `chain_axis`."""
-    arr = inner(**kwargs)
-    arr = jnp.expand_dims(arr, chain_axis)
-    return jnp.broadcast_to(arr, shape)
-
-
-def _wrap_chain(
-    inner: _LazyArray, chain_axis: int | None, num_chains: int | None
-) -> _LazyArray:
-    """Wrap `inner` so its factory inserts and broadcasts `num_chains` at `chain_axis`. No-op when `chain_axis` is `None`."""
-    if chain_axis is None:
-        return inner
-    new_shape = (*inner.shape[:chain_axis], num_chains, *inner.shape[chain_axis:])
-    return _LazyArray(_broadcast_chain, new_shape, inner, chain_axis)
-
-
-def _is_lazy_or_none(x: object) -> bool:
-    """`tree.map(is_leaf=...)` predicate that stops at `_LazyArray` or `None`."""
-    return x is None or isinstance(x, _LazyArray)
 
 
 def init(
@@ -1796,15 +1417,11 @@ def vmap_chains(
 
 
 def _get_shard_map_patch_kwargs() -> dict[str, bool]:
-    # bug 1: jax 0.6.0-0.7.0: the VMA/check_rep checker rejects
-    # random.gamma's internal while_loop when the key axis is sharded but the
-    # alpha is replicated; fixed in jax 0.7.1.
-
-    # bug 2: jax 0.8.1-0.8.2: vmap(shard_map(psum)), jax#34249; the
+    # bug: jax 0.8.1-0.8.2: vmap(shard_map(psum)), jax#34249; the
     # jax_disable_vmap_shmap_error config did not work.
 
     # WORKAROUND(jax<=0.8.2): remove this whole function when jax > 0.8.2
-    buggy = ('0.6.1', '0.6.2', '0.7.0', '0.8.1', '0.8.2')
+    buggy = ('0.8.1', '0.8.2')
     if jax.__version__ in buggy:
         return {'check_vma': False}
     return {}

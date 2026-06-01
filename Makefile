@@ -119,8 +119,9 @@ clean:
 # Test groups: each is a chunk of pytest args (paths/nodeids + -k expression)
 # that selects a balanced slice of the suite. CI runs one group per matrix cell
 # (NPROC=0, no xdist), so total wall time is the slowest cell: the groups are
-# balanced to land each cell around ~13 min on the slow `tests-old` target. To
-# run a single group locally (composes with any tests target):
+# balanced to land each cell around ~14 min on the slow `tests-old` target (the
+# iface-v4 floor, see below). To run a single group locally (composes with any
+# tests target):
 #   make tests             GROUP=iface-v4
 #   make tests-single-cpu  GROUP=misc
 #   make tests-old         GROUP=bart-v1
@@ -134,15 +135,18 @@ clean:
 # are sliced where it's free to do so: the test_equiv_sharding tests have no
 # class fixture, so they ride along in cheaper groups, and v5's TestWithCachedBart
 # class is isolated. The leftover budget in each group is topped up with the
-# cheap whole-file suites (mcmcstep, stochtree, jaxext, mcmcloop, ...). Rough
-# tests-old cost per group (deduped seconds); keep them within ~50s when editing,
-# and re-measure from the CI `--durations` logs after big test changes:
-#   misc ~700  iface-v5v7 ~705  iface-v6 ~700  iface-v4 ~720  bart-v1 ~640  bart-v23 ~710
-GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py 'tests/test_interface.py::test_equiv_sharding[v7]'
+# cheap whole-file suites (mcmcloop, stochtree, jaxext, ...); where a whole file
+# would overshoot, a single fixture-free class is peeled off instead (mcmcstep's
+# TestMultichain, ~265s, rides in bart-v1 to fill its slack). iface-v4 is the
+# irreducible floor (~850s, almost all CachedBart setup that can't be split); the
+# other groups are balanced just under it. Rough tests-old cost per group (wall
+# seconds, ~= the deduped CI `--durations` table; re-measure after big changes):
+#   misc ~755  iface-v5v7 ~730  iface-v6 ~760  iface-v4 ~850  bart-v1 ~725  bart-v23 ~670
+GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py 'tests/test_interface.py::test_equiv_sharding[v7]' -k "not TestMultichain"
 GROUP_iface-v5v7  := tests/test_interface.py -k "(v5 and TestWithCachedBart) or (v7 and not test_equiv_sharding)"
 GROUP_iface-v6    := tests/test_interface.py -k "v6 or (v5 and not TestWithCachedBart)"
 GROUP_iface-v4    := tests/test_interface.py -k "(v4 and not test_equiv_sharding) or not (v2 or v3 or v4 or v5 or v6 or v7)"
-GROUP_bart-v1     := tests/test_BART.py tests/test_jaxext.py tests/test_stochtree.py -k "v1 or not (v2 or v3) or jaxext"
+GROUP_bart-v1     := tests/test_BART.py tests/test_jaxext.py tests/test_stochtree.py 'tests/test_mcmcstep.py::TestMultichain' -k "v1 or not (v2 or v3) or jaxext"
 GROUP_bart-v23    := tests/test_BART.py 'tests/test_interface.py::test_equiv_sharding[v4]' -k "v2 or v3 or v4"
 
 GROUPS := misc iface-v5v7 iface-v6 iface-v4 bart-v1 bart-v23

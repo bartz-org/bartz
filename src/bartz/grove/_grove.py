@@ -54,25 +54,40 @@ class TreeHeaps(Protocol):
     """
 
     leaf_tree: (
-        Float32[Array, '*batch_shape tree_size']
-        | Float32[Array, '*batch_shape k tree_size']
+        Float32[Array, '*batch_shape 2*half_tree_size']
+        | Float32[Array, '*batch_shape k 2*half_tree_size']
     )
     """The values in the leaves of the trees. This array can be dirty, i.e.,
     unused nodes can have whatever value. It may have an additional axis
     for multivariate leaves."""
 
-    var_tree: UInt[Array, '*batch_shape tree_size//2']
+    var_tree: UInt[Array, '*batch_shape half_tree_size']
     """The axes along which the decision nodes operate. This array can be
     dirty but for the always unused node at index 0 which must be set to 0."""
 
-    split_tree: UInt[Array, '*batch_shape tree_size//2']
+    split_tree: UInt[Array, '*batch_shape half_tree_size']
     """The decision boundaries of the trees. The boundaries are open on the
     right, i.e., a point belongs to the left child iff x < split. Whether a
     node is a leaf is indicated by the corresponding 'split' element being
     0. Unused nodes also have split set to 0. This array can't be dirty."""
 
 
-class TreesTrace(Module):
+class HeapArrays(Module):
+    """Mixin providing shared behavior for `TreeHeaps` dataclasses.
+
+    Subclasses must declare the `leaf_tree`, `var_tree` and `split_tree` heap
+    arrays (see `TreeHeaps`); this mixin adds no fields, only the derived
+    quantities that are the same regardless of how the leading batch axes are
+    laid out.
+    """
+
+    @property
+    def is_multivariate(self) -> bool:
+        """Whether the leaves are vector-valued (an extra `k` axis on `leaf_tree`)."""
+        return self.leaf_tree.ndim > self.var_tree.ndim
+
+
+class TreesTrace(HeapArrays):
     """Implementation of `bartz.grove.TreeHeaps` for an MCMC trace."""
 
     # `var_tree`/`split_tree` are declared before `leaf_tree` so their single
@@ -240,7 +255,7 @@ def evaluate_forest(
     indices: UInt[Array, '*forest_shape n']
     indices = traverse_forest(X, trees.var_tree, trees.split_tree)
 
-    is_mv = trees.leaf_tree.ndim != trees.var_tree.ndim
+    is_mv = trees.is_multivariate
 
     bc_indices: UInt[Array, '*forest_shape n 1'] | UInt[Array, '*forest_shape 1 n 1']
     bc_indices = indices[..., None, :, None] if is_mv else indices[..., None]
@@ -449,7 +464,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     bottom = '╢'  # '┨' #
 
     *_, tree_size = tree.leaf_tree.shape
-    is_mv = tree.leaf_tree.ndim != tree.var_tree.ndim
+    is_mv = tree.is_multivariate
 
     def traverse_tree(
         lines: list[str],

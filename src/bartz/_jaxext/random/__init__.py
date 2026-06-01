@@ -1,6 +1,6 @@
-# bartz/src/bartz/debug/__init__.py
+# bartz/src/bartz/_jaxext/random/__init__.py
 #
-# Copyright (c) 2024-2026, The Bartz Contributors
+# Copyright (c) 2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -22,14 +22,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""
-Debugging utilities.
+"""Additions to :external:py:mod:`jax.random`."""
 
-  - `trees_BART_to_bartz`: convert an R package BART3 trace to a bartz trace.
-  - `sample_prior`: sample the bart prior.
-"""
-
-# ruff: noqa: F401
-
-from bartz.debug._prior import sample_prior
-from bartz.debug._traceconv import BARTTraceMeta, TraceWithOffset, trees_BART_to_bartz
+from bartz._jaxext.random._loggamma import loggamma  # noqa: F401

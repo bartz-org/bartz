@@ -59,21 +59,19 @@ from scipy.stats import chi2, ks_1samp, ks_2samp
 from bartz._jaxext import get_device_count, minimal_unsigned_dtype, split
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import State, init, make_p_nonterminal, step
+from bartz.mcmcstep._axes import (
+    chain_vmap_axes,
+    data_vmap_axes,
+    field,
+    trace_sample_axes,
+)
 from bartz.mcmcstep._moves import (
     ancestor_variables,
     randint_exclude,
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._state import (
-    Forest,
-    StepConfig,
-    _search_divisor,
-    chain_vmap_axes,
-    data_vmap_axes,
-    field,
-    trace_sample_axes,
-)
+from bartz.mcmcstep._state import Forest, StepConfig, _search_divisor
 from bartz.mcmcstep._step import (
     PrecsScalar,
     _compute_likelihood_ratio_mv,
@@ -2096,7 +2094,11 @@ class TestMVBartIntegration:
 
         _, p_value = ks_2samp(samples_uv, samples_mv)
 
-        assert jnp.abs(jnp.mean(samples_uv) - jnp.mean(samples_mv)) < 0.01
+        # The UV and MV draws are independent, so their sample means differ by
+        # Monte Carlo error. For the smallest `n` this standard error is ~0.008,
+        # so a 0.01 bound is only ~1.3 sigma and trips ~20% of the time; 0.05 is
+        # ~6 sigma. Distribution equality is checked robustly by the KS test.
+        assert jnp.abs(jnp.mean(samples_uv) - jnp.mean(samples_mv)) < 0.05
         assert p_value > 0.01
 
     def test_error_cov_inv_missing_equals_drop(

@@ -63,6 +63,7 @@ from bartz._jaxext import equal_shards, is_key, split
 from bartz._jaxext.scipy.special import ndtri
 from bartz._jaxext.scipy.stats import invgamma
 from bartz.grove import (
+    TreeHeaps,
     TreesTrace,
     check_trace,
     evaluate_forest,
@@ -81,17 +82,20 @@ from bartz.mcmcloop import (
     run_mcmc,
 )
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
+from bartz.mcmcstep._axes import (
+    chain_to_axis,
+    chain_vmap_axes,
+    chainful_axis,
+    get_has_chains,
+    trace_sample_axes,
+)
 from bartz.mcmcstep._state import (
     ArrayLike,
     FloatLike,
     State,
     _inv_via_chol_with_gersh,
-    chain_to_axis,
-    chain_vmap_axes,
-    chainful_axis,
     chol_with_gersh,
     init,
-    trace_sample_axes,
 )
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
 from bartz.prepcovars._prepcovars import _sigma2_from_cg, _sigma2_from_ols
@@ -1015,14 +1019,8 @@ class Bart(Module):
             If `True`, also print the content of unused node slots.
         """
         trace = self._main_trace
-        trees = TreesTrace.from_dataclass(trace)
-        if trace.has_chains:
-            trees_chain_axes = trees.axes_from_dataclass(chain_vmap_axes(trace))
-            # WORKAROUND(python<3.14): use operator.is_none
-            trees = tree.map(
-                chain_to_axis, trees, trees_chain_axes, is_leaf=lambda x: x is None
-            )
-        else:
+        trees = _trees_chain_first(trace)
+        if not trace.has_chains:
             i_chain = ...
         trees = tree.map(lambda x: x[i_chain, i_sample, i_tree, :], trees)
         s = format_tree(trees, print_all=print_all)
@@ -1519,18 +1517,26 @@ def varprob(
     return varprob.reshape(-1, p)
 
 
+def _trees_chain_first(obj: TreeHeaps) -> TreesTrace:
+    """Extract `obj`'s heap arrays, moving any chain axis to the front.
+
+    Returns a `TreesTrace` whose leading axis is the chain axis when `obj`
+    carries one, and the bare per-object heap arrays otherwise.
+    """
+    trees = TreesTrace.from_dataclass(obj)
+    if get_has_chains(obj):
+        axes = trees.axes_from_dataclass(chain_vmap_axes(obj))
+        # WORKAROUND(python<3.14): use operator.is_none
+        trees = tree.map(chain_to_axis, trees, axes, is_leaf=lambda x: x is None)
+    return trees
+
+
 @jit
 def check_trees(
     trace: MainTrace, max_split: UInt[Array, ' p']
 ) -> UInt[Array, 'num_chains n_save num_trees']:
     """Apply `bartz.grove.check_trace` to all the tree draws."""
-    trees = TreesTrace.from_dataclass(trace)
-    if trace.has_chains:
-        trees_chain_axes = trees.axes_from_dataclass(chain_vmap_axes(trace))
-        # WORKAROUND(python<3.14): use operator.is_none
-        trees = tree.map(
-            chain_to_axis, trees, trees_chain_axes, is_leaf=lambda x: x is None
-        )
+    trees = _trees_chain_first(trace)
     out: UInt[Array, '*chains samples num_trees']
     out = check_trace(trees, max_split)
     if out.ndim < 3:
@@ -1560,13 +1566,7 @@ def compare_resid(
     resid1 = chain_to_axis(state.resid, chain_axes.resid)
     z = chain_to_axis(state.z, chain_axes.z) if state.z is not None else None
 
-    forests = TreesTrace.from_dataclass(state.forest)
-    if state.has_chains:
-        forest_chain_axes = forests.axes_from_dataclass(chain_axes.forest)
-        # WORKAROUND(python<3.14): use operator.is_none
-        forests = tree.map(
-            chain_to_axis, forests, forest_chain_axes, is_leaf=lambda x: x is None
-        )
+    forests = _trees_chain_first(state.forest)
     trees = evaluate_forest(state.X, forests, sum_batch_axis=-1)
 
     if state.binary_indices is not None:

@@ -36,7 +36,8 @@ from jaxtyping import Array, Float, Float32, Int32, Key, Real
 
 from bartz._interface import ArrayLike, Bart, DataFrame, FloatLike, PredictKind, Series
 from bartz.mcmcloop import BurninTrace, MainTrace
-from bartz.mcmcstep._state import State, chain_to_axis, chain_vmap_axes
+from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
+from bartz.mcmcstep._state import State
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 
 

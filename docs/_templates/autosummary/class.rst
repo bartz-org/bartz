@@ -28,4 +28,5 @@
 
 .. autoclass:: {{ objname }}
    :members:
+   :inherited-members: Module, tuple
    :special-members: __call__

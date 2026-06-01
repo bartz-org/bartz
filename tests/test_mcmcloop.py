@@ -96,7 +96,7 @@ def simple_init(
         num_trees=ntree,
         p_nonterminal=make_p_nonterminal(6),
         leaf_prior_cov_inv=eye,
-        error_cov_df=2,
+        error_cov_df=2.0,
         error_cov_scale=2 * eye,
         min_points_per_decision_node=10,
         **kwargs,

@@ -24,7 +24,7 @@
 
 """Implement functions to check validity of trees."""
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from jax import jit
 from jax import numpy as jnp
@@ -36,6 +36,7 @@ from bartz.grove._grove import TreeHeaps, TreesTrace, is_actual_leaf
 CHECK_FUNCTIONS = []
 
 
+@runtime_checkable
 class CheckFunc(Protocol):
     """Protocol for functions that check whether a tree is valid."""
 
@@ -181,7 +182,10 @@ def check_rule_consistency(
 
 
 @check
-def check_num_nodes(tree: TreeHeaps, max_split: UInt[Array, ' p']) -> Bool[Array, '']:  # noqa: ARG001
+def check_num_nodes(
+    tree: TreeHeaps,
+    max_split: UInt[Array, ' p'],  # noqa: ARG001
+) -> Bool[Array, '']:
     """Check that #leaves = 1 + #(internal nodes)."""
     is_leaf = is_actual_leaf(tree.split_tree, add_bottom_level=True)
     num_leaves = jnp.count_nonzero(is_leaf)
@@ -274,7 +278,9 @@ def check_trace(
     A tensor of error codes for each tree.
     """
     # vectorize check_tree over all batch dimensions
-    unpack_check_tree = lambda l, v, s: check_tree(TreesTrace(l, v, s), max_split)
+    unpack_check_tree = lambda l, v, s: check_tree(
+        TreesTrace(leaf_tree=l, var_tree=v, split_tree=s), max_split
+    )
     is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
     signature = '(k,ts),(hts),(hts)->()' if is_mv else '(ts),(hts),(hts)->()'
     vec_check_tree = jnp.vectorize(unpack_check_tree, signature=signature)

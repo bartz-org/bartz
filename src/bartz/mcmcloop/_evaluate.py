@@ -27,7 +27,7 @@
 import math
 from collections.abc import Callable
 from functools import partial
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 from jax import ShapeDtypeStruct, jit, lax, shard_map, tree, vmap
 from jax import numpy as jnp
@@ -37,13 +37,33 @@ from numpy.lib.array_utils import normalize_axis_index
 
 from bartz._jaxext import autobatch
 from bartz.grove import TreesTrace, evaluate_forest, var_histogram
-from bartz.mcmcloop._trace import MainTrace
 from bartz.mcmcstep._state import (
     CHAIN_AXIS,
     chain_vmap_axes,
     chainful_axis,
     partition_specs,
 )
+
+
+@runtime_checkable
+class EvaluableTrace(Protocol):
+    """Structural type of the traces accepted by `evaluate_trace`.
+
+    Both `bartz.mcmcloop.MainTrace` and `bartz.debug.TraceWithOffset` satisfy
+    it. The runtime check is structural (attribute presence only, not the
+    annotated shapes), so it also matches the axis-spec trees `chain_vmap_axes`
+    derives from a trace.
+    """
+
+    leaf_tree: (
+        Float32[Array, '*chains_and_samples num_trees tree_size']
+        | Float32[Array, '*chains_and_samples num_trees k tree_size']
+    )
+    var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
+    split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
+    offset: Float32[Array, ''] | Float32[Array, ' k']
+    has_chains: bool
+    mesh: Mesh | None
 
 
 @partial(
@@ -57,7 +77,7 @@ from bartz.mcmcstep._state import (
 )
 def evaluate_trace(
     X: UInt[Array, 'p n'],
-    trace: MainTrace,
+    trace: EvaluableTrace,
     *,
     flatten_chains: bool = False,
     out_chain_axis_w_trees: int = CHAIN_AXIS,
@@ -159,7 +179,7 @@ def evaluate_trace(
 
 def _evaluate_trace(
     X: UInt[Array, 'p n'],
-    trace: MainTrace,
+    trace: EvaluableTrace,
     *,
     flatten_chains: bool,
     out_chain_axis_w_trees: int,
@@ -207,7 +227,7 @@ def _evaluate_trace(
     if trace.has_chains:
         batched_eval = vmap(
             batched_eval,
-            in_axes=(None, TreesTrace.from_dataclass(trace_chain_axes)),
+            in_axes=(None, trees.axes_from_dataclass(trace_chain_axes)),
             out_axes=out_chain_axis_w_trees,
         )
 
@@ -215,7 +235,7 @@ def _evaluate_trace(
     batched_eval = autobatch(
         batched_eval,
         max_io_nbytes,
-        in_axes=(None, TreesTrace.from_dataclass(tree_axes)),
+        in_axes=(None, trees.axes_from_dataclass(tree_axes)),
         out_axes=tree_axis,
         reduce_ufunc=jnp.add,
         reduce_vary_axes=reduce_vary_axes,
@@ -258,7 +278,7 @@ def _evaluate_trace(
     batched_eval = autobatch(
         batched_eval,
         max_io_nbytes,
-        in_axes=(None, TreesTrace.from_dataclass(sample_axes)),
+        in_axes=(None, trees.axes_from_dataclass(sample_axes)),
         out_axes=sample_axis,
         warn_on_overflow=False,  # the inner autobatch will handle it
         **({} if trace.has_chains else full_shape),
@@ -271,7 +291,7 @@ def _evaluate_trace(
         batched_eval = autobatch(
             batched_eval,
             max_io_nbytes,
-            in_axes=(None, TreesTrace.from_dataclass(trace_chain_axes)),
+            in_axes=(None, trees.axes_from_dataclass(trace_chain_axes)),
             out_axes=out_chain_axis,
             warn_on_overflow=False,  # the inner autobatch will handle it
             **full_shape,
@@ -292,7 +312,7 @@ def _evaluate_trace(
 
 
 def _output_axes(
-    trace: MainTrace, out_chain_axis_w_trees: int
+    trace: EvaluableTrace, out_chain_axis_w_trees: int
 ) -> tuple[int, int, int, int]:
     """Axis positions in the output layout, derived from array ranks only.
 
@@ -330,7 +350,7 @@ def _output_axes(
 
 
 def _output_layout(
-    trace: MainTrace, out_chain_axis_w_trees: int, flatten_chains: bool
+    trace: EvaluableTrace, out_chain_axis_w_trees: int, flatten_chains: bool
 ) -> tuple[int, int | None, int]:
     """Rank and axis positions of the `evaluate_trace` output.
 
@@ -374,8 +394,8 @@ def _output_layout(
 
 def _tree_sum_budget(
     max_io_nbytes: int,
-    trace: MainTrace,
-    chain_axes: MainTrace,
+    trace: EvaluableTrace,
+    chain_axes: EvaluableTrace,
     kshape: tuple[int, ...],
     n: int,
     num_trees: int,
@@ -405,8 +425,8 @@ def _tree_sum_budget(
 
 
 def _shard_map_eval(
-    fun: Callable[[UInt[Array, 'p n'], MainTrace], Float32[Array, '*out']],
-    trace: MainTrace,
+    fun: Callable[[UInt[Array, 'p n'], EvaluableTrace], Float32[Array, '*out']],
+    trace: EvaluableTrace,
     mesh: Mesh,
     *,
     shard_chains: bool,
@@ -415,7 +435,7 @@ def _shard_map_eval(
     n_axis: int,
     out_ndim: int,
     check_vma: bool,
-) -> Callable[[UInt[Array, 'p n'], MainTrace], Float32[Array, '*out']]:
+) -> Callable[[UInt[Array, 'p n'], EvaluableTrace], Float32[Array, '*out']]:
     """Wrap ``fun(X, trace)`` in a `shard_map` manual over ``'chains'``/``'data'``.
 
     When `shard_chains`, the trace is sharded over its chain axis and the
@@ -457,7 +477,7 @@ def _shard_map_eval(
 
 @partial(jit, static_argnames=('p', 'out_chain_axis'))
 def compute_varcount(
-    p: int, trace: MainTrace, *, out_chain_axis: int = CHAIN_AXIS
+    p: int, trace: EvaluableTrace, *, out_chain_axis: int = CHAIN_AXIS
 ) -> Int32[Array, '*trace_shape {p}']:
     """
     Count how many times each predictor is used in each MCMC state.
@@ -482,7 +502,7 @@ def compute_varcount(
     def histogram(
         var_tree: UInt[Array, 'samples trees nodes'],
         split_tree: UInt[Array, 'samples trees nodes'],
-    ) -> Int32[Array, 'samples {p}']:
+    ) -> Int32[Array, 'samples p']:
         return var_histogram(p, var_tree, split_tree, sum_batch_axis=-1)
 
     if trace.has_chains:

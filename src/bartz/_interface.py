@@ -35,7 +35,7 @@ from pathlib import Path
 
 # WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
-from typing import Any, Literal, Protocol, TypedDict, overload
+from typing import Any, Literal, Protocol, TypedDict, overload, runtime_checkable
 from warnings import warn
 
 import jax
@@ -122,6 +122,7 @@ class PredictKind(Enum):
     ``(num_chains * n_save, k, m)``)."""
 
 
+@runtime_checkable
 class DataFrame(Protocol):
     """DataFrame duck-type for `Bart`."""
 
@@ -133,6 +134,7 @@ class DataFrame(Protocol):
         ...
 
 
+@runtime_checkable
 class Series(Protocol):
     """Series duck-type for `Bart`."""
 
@@ -675,10 +677,10 @@ class Bart(Module):
     def get_latent_prec(
         self, only_continuous: bool = False
     ) -> (
-        Float32[Array, ' n_burn+n_save']
-        | Float32[Array, 'n_burn+n_save k k']
-        | Float32[Array, 'num_chains n_burn+n_save']
-        | Float32[Array, 'num_chains n_burn+n_save k k']
+        Float32[Array, ' n_burn_plus_n_save']
+        | Float32[Array, 'n_burn_plus_n_save k k']
+        | Float32[Array, 'num_chains n_burn_plus_n_save']
+        | Float32[Array, 'num_chains n_burn_plus_n_save k k']
     ):
         """Return the posterior samples of the latent error precision matrix.
 
@@ -850,7 +852,7 @@ class Bart(Module):
     def _process_x_test(
         self,
         x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
-        w: Float32[Array, ' m'] | None,
+        w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     ) -> UInt[Array, 'p m']:
         """Convert x_test to binned format suitable for prediction."""
         if isinstance(x_test, str):
@@ -918,7 +920,11 @@ class Bart(Module):
         state = self._mcmc_state
         mesh = state.config.mesh
         if mesh is not None and 'data' in mesh.axis_names:
-            replicated_forest = replace(state.forest, leaf_indices=None)
+            # drop the data-sharded `leaf_indices` (not replicated) before the
+            # cross-shard equality check; `None` is a deliberately off-type
+            # placeholder, so use `tree_at`, which (unlike `dataclasses.replace`)
+            # bypasses the `__init__` type checks
+            replicated_forest = tree_at(lambda f: f.leaf_indices, state.forest, None)
             equal = equal_shards(
                 replicated_forest, 'data', in_specs=PartitionSpec(), mesh=mesh
             )
@@ -969,12 +975,14 @@ class Bart(Module):
 
     def _points_per_node_distr(
         self, node_type: Literal['leaf', 'leaf-parent']
-    ) -> Int32[Array, '*num_chains n_save n+1']:
+    ) -> Int32[Array, '*num_chains n_save n_plus_1']:
         return points_per_node_distr_trace(
             self._mcmc_state.X, self._main_trace, node_type
         )
 
-    def _points_per_decision_node_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
+    def _points_per_decision_node_distr(
+        self,
+    ) -> Int32[Array, '*num_chains n_save n_plus_1']:
         """Histogram of number of points belonging to parent-of-leaf nodes.
 
         Returns
@@ -983,7 +991,7 @@ class Bart(Module):
         """
         return self._points_per_node_distr('leaf-parent')
 
-    def _points_per_leaf_distr(self) -> Int32[Array, '*num_chains n_save n+1']:
+    def _points_per_leaf_distr(self) -> Int32[Array, '*num_chains n_save n_plus_1']:
         """Histogram of number of points belonging to leaves.
 
         Returns
@@ -1011,7 +1019,7 @@ class Bart(Module):
         trace = self._main_trace
         trees = TreesTrace.from_dataclass(trace)
         if trace.has_chains:
-            trees_chain_axes = TreesTrace.from_dataclass(chain_vmap_axes(trace))
+            trees_chain_axes = trees.axes_from_dataclass(chain_vmap_axes(trace))
             # WORKAROUND(python<3.14): use operator.is_none
             trees = tree.map(
                 chain_to_axis, trees, trees_chain_axes, is_leaf=lambda x: x is None
@@ -1477,10 +1485,10 @@ def get_latent_prec(
     *,
     only_continuous: bool = False,
 ) -> (
-    Float32[Array, ' n_burn+n_save']
-    | Float32[Array, 'n_burn+n_save k k']
-    | Float32[Array, 'num_chains n_burn+n_save']
-    | Float32[Array, 'num_chains n_burn+n_save k k']
+    Float32[Array, ' n_burn_plus_n_save']
+    | Float32[Array, 'n_burn_plus_n_save k k']
+    | Float32[Array, 'num_chains n_burn_plus_n_save']
+    | Float32[Array, 'num_chains n_burn_plus_n_save k k']
 ):
     """Latent error precision trace, burn-in + main concatenated."""
     burnin = burnin_trace.error_cov_inv
@@ -1520,7 +1528,7 @@ def check_trees(
     """Apply `bartz.grove.check_trace` to all the tree draws."""
     trees = TreesTrace.from_dataclass(trace)
     if trace.has_chains:
-        trees_chain_axes = TreesTrace.from_dataclass(chain_vmap_axes(trace))
+        trees_chain_axes = trees.axes_from_dataclass(chain_vmap_axes(trace))
         # WORKAROUND(python<3.14): use operator.is_none
         trees = tree.map(
             chain_to_axis, trees, trees_chain_axes, is_leaf=lambda x: x is None
@@ -1556,7 +1564,7 @@ def compare_resid(
 
     forests = TreesTrace.from_dataclass(state.forest)
     if state.has_chains:
-        forest_chain_axes = TreesTrace.from_dataclass(chain_axes.forest)
+        forest_chain_axes = forests.axes_from_dataclass(chain_axes.forest)
         # WORKAROUND(python<3.14): use operator.is_none
         forests = tree.map(
             chain_to_axis, forests, forest_chain_axes, is_leaf=lambda x: x is None
@@ -1629,7 +1637,7 @@ def process_device_settings(
 
 def _determine_devices(
     y_train: Array, devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None
-) -> tuple[str, Device | None, tuple[Device, ...]]:
+) -> tuple[str, Device | None, Sequence[Device]]:
     """Determine the target platform and set of devices for the MCMC, and possibly a single target device."""
     if isinstance(devices, str):
         platform = devices

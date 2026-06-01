@@ -24,9 +24,10 @@
 
 """Test bartz._jaxext."""
 
+from contextlib import nullcontext
 from functools import partial
 from itertools import product
-from warnings import catch_warnings
+from warnings import catch_warnings, simplefilter
 
 import numpy
 import pytest
@@ -42,13 +43,22 @@ from jax import (
     shard_map,
     tree,
 )
+
+# WORKAROUND(jax<0.7.1): top-level `jax.enable_x64` was added later; on older jax
+# it lives in `jax.experimental` (removed in newer jax). Use whichever exists.
+try:
+    from jax import enable_x64
+except ImportError:
+    from jax.experimental import enable_x64
 from jax import numpy as jnp
 from jax.scipy.special import ndtri
 from jax.sharding import AxisType, Mesh, PartitionSpec
+from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Float32, Key, Shaped
 from pytest_subtests import SubTests
+from scipy.stats import anderson_ksamp, ks_1samp, truncnorm
 from scipy.stats import invgamma as scipy_invgamma
-from scipy.stats import ks_1samp, truncnorm
+from scipy.stats import loggamma as scipy_loggamma
 
 from bartz._jaxext import (
     autobatch,
@@ -58,9 +68,10 @@ from bartz._jaxext import (
     truncated_normal_onesided,
     unique,
 )
+from bartz._jaxext.random import loggamma
 from bartz._jaxext.scipy.special import ndtri as patched_ndtri
 from bartz._jaxext.scipy.stats import invgamma
-from tests.util import assert_array_equal, assert_close_matrices
+from tests.util import assert_array_equal, assert_close_matrices, int_seed
 
 
 class TestUnique:
@@ -510,6 +521,108 @@ class TestTruncatedNormalOneSided:
         for key in keys:
             vals = loop_body(key)
             assert jnp.all(jnp.isfinite(vals))
+
+
+class TestLoggamma:
+    """Test `_jaxext.random.loggamma`."""
+
+    @pytest.mark.parametrize('dtype', [jnp.float32, jnp.float64])
+    @pytest.mark.parametrize(
+        'alpha', [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4, 1e5]
+    )
+    def test_distribution(
+        self, keys: split, alpha: float, dtype: DTypeLike, subtests: SubTests
+    ) -> None:
+        """Check the samples follow log-Gamma(alpha, 1) against a cdf and a sample."""
+        nsamples = 100_000  # tested up to 100M
+        x64 = enable_x64(True) if dtype == jnp.float64 else nullcontext()
+        with x64:
+            sample = loggamma(keys.pop(), alpha, (nsamples,), dtype)
+            assert sample.dtype == jnp.dtype(dtype)
+            # no sample underflows to -inf for small alpha
+            assert jnp.all(jnp.isfinite(sample))
+
+        dist = scipy_loggamma(alpha)
+
+        with subtests.test('KS'):
+            ks = ks_1samp(sample, dist.cdf)
+            assert ks.pvalue > 1e-3
+
+        # the anderson-darling test is more sensitive in the tails
+        with subtests.test('AD'):
+            reference = dist.rvs(size=nsamples, random_state=int_seed(keys.pop()))
+            with catch_warnings():
+                # AD caps/floors its reported p-value to [0.001, 0.25], warning on it
+                simplefilter('ignore')
+                ad = anderson_ksamp([sample, reference])
+            # AD floors its p-value at 0.001, so we cut on the statistic instead
+            assert ad.statistic <= ad.critical_values[-1]  # 0.001 threshold
+
+    @pytest.mark.parametrize('dtype', [jnp.float16, jnp.bfloat16])
+    @pytest.mark.parametrize('alpha', [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1])
+    def test_distribution_low_precision(
+        self, keys: split, dtype: DTypeLike, alpha: float, subtests: SubTests
+    ) -> None:
+        """Like `test_distribution` but for the low-precision float16/bfloat16.
+
+        Tested over the alpha range each dtype can represent, truncating the left
+        tail that underflows to -inf (only float16 underflows; bfloat16 has the
+        same exponent range as float32). A larger nsamples eventually resolves the
+        dtype's discretization and would fail.
+        """
+        # bfloat16's 8-bit mantissa cannot resolve the distribution at larger alpha
+        if dtype == jnp.bfloat16 and alpha > 1e0:
+            pytest.skip('bfloat16 too coarse to resolve the distribution here')
+        nsamples = 100_000
+        sample = loggamma(keys.pop(), alpha, (nsamples,), dtype)
+        assert sample.dtype == jnp.dtype(dtype)
+
+        # the deep left tail can underflow below the smallest value of `dtype`; drop
+        # those and compare against the cdf conditioned on the representable range
+        floor = jnp.finfo(dtype).min.item()
+        finite = sample[sample >= floor]
+        finite = finite.astype(jnp.float32)  # cast bc KS preserves dtype internally
+        assert finite.size > 0.99 * nsamples  # underflow is a rare tail event here
+
+        dist = scipy_loggamma(alpha)
+        cdf_floor = dist.cdf(floor)
+
+        def truncated_cdf(x: Float[numpy.ndarray, ' _']) -> Float[numpy.ndarray, ' _']:
+            """Cdf conditioned on the value being representable (>= floor)."""
+            return (dist.cdf(x) - cdf_floor) / (1 - cdf_floor)
+
+        with subtests.test('KS'):
+            ks = ks_1samp(finite, truncated_cdf)
+            assert ks.pvalue > 1e-3
+
+        with subtests.test('AD'):
+            reference = dist.rvs(size=nsamples, random_state=int_seed(keys.pop()))
+            reference = reference[reference >= floor]  # match the sample truncation
+            with catch_warnings():
+                # AD caps/floors its reported p-value to [0.001, 0.25], warning on it
+                simplefilter('ignore')
+                ad = anderson_ksamp([finite, reference])
+            # AD floors its p-value at 0.001, so we cut on the statistic instead
+            assert ad.statistic <= ad.critical_values[-1]  # 0.001 threshold
+
+    @pytest.mark.parametrize('shape', [(), (12,), (3, 4), (2, 3, 2), (1, 12, 1)])
+    def test_shape_consistency(self, keys: split, shape: tuple[int, ...]) -> None:
+        """A shaped draw equals the flat draw reshaped, given the same key."""
+        key = keys.pop()
+        alpha = 1.3
+        sample = loggamma(key, alpha, shape)
+        assert sample.shape == shape
+        flat = loggamma(random.clone(key), alpha, (sample.size,))
+        assert_array_equal(sample.reshape(sample.size), flat)
+
+    @pytest.mark.parametrize('n_uniforms', [0, 1, 2, 3, 4, 6, 8])
+    def test_n_uniforms(self, keys: split, n_uniforms: int) -> None:
+        """At high alpha the base draw dominates, so any n_uniforms matches."""
+        alpha = 100.0
+        nsamples = 100_000
+        sample = loggamma(keys.pop(), alpha, (nsamples,), n_uniforms=n_uniforms)
+        ks = ks_1samp(sample, scipy_loggamma(alpha).cdf)
+        assert ks.pvalue > 1e-3
 
 
 def test_is_key(keys: split) -> None:

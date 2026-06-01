@@ -2041,7 +2041,11 @@ class TestMVBartIntegration:
 
         _, p_value = ks_2samp(samples_uv, samples_mv)
 
-        assert jnp.abs(jnp.mean(samples_uv) - jnp.mean(samples_mv)) < 0.01
+        # The UV and MV draws are independent, so their sample means differ by
+        # Monte Carlo error. For the smallest `n` this standard error is ~0.008,
+        # so a 0.01 bound is only ~1.3 sigma and trips ~20% of the time; 0.05 is
+        # ~6 sigma. Distribution equality is checked robustly by the KS test.
+        assert jnp.abs(jnp.mean(samples_uv) - jnp.mean(samples_mv)) < 0.05
         assert p_value > 0.01
 
     def test_error_cov_inv_missing_equals_drop(

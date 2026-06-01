@@ -82,6 +82,7 @@ from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
     clipped_logit,
+    int_seed,
     periodic_sigint,
     rhat_rank,
 )
@@ -351,7 +352,7 @@ class TestWithCachedBart:
         for arg in 'w', 'printevery':
             if arg in kw_BART and kw_BART[arg] is None:
                 kw_BART.pop(arg)
-        kw_BART['seed'] = random.randint(key, (), 0, jnp.uint32(2**31)).item()
+        kw_BART['seed'] = int_seed(key)
 
         # Set BART cutpoints manually. This means I am not checking that the
         # automatic cutpoint determination of BART is the same of my package. They

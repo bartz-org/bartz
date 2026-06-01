@@ -1,6 +1,6 @@
-# bartz/src/bartz/_jaxext/__init__.py
+# bartz/src/bartz/_jaxext/random/__init__.py
 #
-# Copyright (c) 2024-2026, The Bartz Contributors
+# Copyright (c) 2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -22,21 +22,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Additions to jax."""
+"""Additions to :external:py:mod:`jax.random`."""
 
-# ruff: noqa: F401
-
-from bartz._jaxext._autobatch import autobatch
-from bartz._jaxext._jaxext import (
-    equal_shards,
-    get_default_device,
-    get_device_count,
-    is_key,
-    jaxtyping_disabled,
-    jit_active,
-    minimal_unsigned_dtype,
-    split,
-    truncated_normal_onesided,
-    unique,
-    vmap_nodoc,
-)
+from bartz._jaxext.random._loggamma import loggamma  # noqa: F401

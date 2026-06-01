@@ -71,9 +71,6 @@ class TreeHeaps(Protocol):
     node is a leaf is indicated by the corresponding 'split' element being
     0. Unused nodes also have split set to 0. This array can't be dirty."""
 
-    is_multivariate: bool
-    """Whether the leaves are vector-valued (an extra `k` axis on `leaf_tree`)."""
-
 
 class HeapArrays(Module):
     """Mixin providing shared behavior for `TreeHeaps` dataclasses.

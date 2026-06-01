@@ -58,7 +58,6 @@ class EvaluableTrace(Protocol):
     var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
     split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
     offset: Float32[Array, ''] | Float32[Array, ' k']
-    is_multivariate: bool
     has_chains: bool
     mesh: Mesh | None
 

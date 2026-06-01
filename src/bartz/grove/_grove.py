@@ -54,18 +54,18 @@ class TreeHeaps(Protocol):
     """
 
     leaf_tree: (
-        Float32[Array, '*batch_shape tree_size']
-        | Float32[Array, '*batch_shape k tree_size']
+        Float32[Array, '*batch_shape 2*half_tree_size']
+        | Float32[Array, '*batch_shape k 2*half_tree_size']
     )
     """The values in the leaves of the trees. This array can be dirty, i.e.,
     unused nodes can have whatever value. It may have an additional axis
     for multivariate leaves."""
 
-    var_tree: UInt[Array, '*batch_shape tree_size//2']
+    var_tree: UInt[Array, '*batch_shape half_tree_size']
     """The axes along which the decision nodes operate. This array can be
     dirty but for the always unused node at index 0 which must be set to 0."""
 
-    split_tree: UInt[Array, '*batch_shape tree_size//2']
+    split_tree: UInt[Array, '*batch_shape half_tree_size']
     """The decision boundaries of the trees. The boundaries are open on the
     right, i.e., a point belongs to the left child iff x < split. Whether a
     node is a leaf is indicated by the corresponding 'split' element being
@@ -88,16 +88,6 @@ class HeapArrays(Module):
     def is_multivariate(self) -> bool:
         """Whether the leaves are vector-valued (an extra `k` axis on `leaf_tree`)."""
         return self.leaf_tree.ndim > self.var_tree.ndim
-
-    @property
-    def tree_size(self) -> int:
-        """The length of `leaf_tree` along the heap axis, i.e. ``2 ** depth``."""
-        return self.leaf_tree.shape[-1]
-
-    @property
-    def half_tree_size(self) -> int:
-        """The length of `var_tree`/`split_tree` along the heap axis."""
-        return self.var_tree.shape[-1]
 
 
 class TreesTrace(HeapArrays):

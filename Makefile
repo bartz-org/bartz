@@ -56,6 +56,7 @@ help:
 	@echo "- docs-latest: build html documentation for latest release"
 	@echo "- covreport: build html coverage report"
 	@echo "- covcheck: check coverage is above some thresholds"
+	@echo "- diffcov: check changed-lines coverage vs DIFF_BASE (default origin/main)"
 	@echo "- update-deps: remove .venv, upgrade uv.lock, update pre-commit hooks"
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- copy-version: sync version from pyproject.toml to _version.py"
@@ -107,7 +108,7 @@ clean:
 	rm -fr dist
 	rm -fr config/jax_cache
 	rm -fr docs/_build
-	rm -fr .coverage*
+	rm -fr .coverage* coverage.xml diffcov.md
 	# `renv::clean()` only removes locks/tempdirs/unused packages, not the
 	# whole library, so wipe the gitignored renv subdirs by hand to mirror
 	# `rm -fr .venv`.
@@ -141,7 +142,7 @@ clean:
 # other groups are balanced just under it. Rough tests-old cost per group (wall
 # seconds, ~= the deduped CI `--durations` table; re-measure after big changes):
 #   misc ~755  iface-v5v7 ~730  iface-v6 ~760  iface-v4 ~850  bart-v1 ~725  bart-v23 ~670
-GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py 'tests/test_interface.py::test_equiv_sharding[v7]' -k "not TestMultichain"
+GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py tests/test_naming.py 'tests/test_interface.py::test_equiv_sharding[v7]' -k "not TestMultichain"
 GROUP_iface-v5v7  := tests/test_interface.py -k "(v5 and TestWithCachedBart) or (v7 and not test_equiv_sharding)"
 GROUP_iface-v6    := tests/test_interface.py -k "v6 or (v5 and not TestWithCachedBart)"
 GROUP_iface-v4    := tests/test_interface.py -k "(v4 and not test_equiv_sharding) or not (v2 or v3 or v4 or v5 or v6 or v7)"
@@ -223,6 +224,22 @@ covcheck:
 	$(UV_RUN) coverage report --include='src/*'
 	$(UV_RUN) coverage report --include='tests/**/test_*.py' --fail-under=99 --format=total
 	$(UV_RUN) coverage report --include='src/*' --fail-under=90 --format=total
+
+# Branch (changed-lines) coverage: fail if new/modified lines in src and tests
+# are not covered above the threshold. DIFF_BASE is the ref to diff against;
+# locally a feature branch is compared to origin/main. Writes a markdown report
+# (used by CI to populate the job summary) and prints the text report.
+DIFF_BASE ?= origin/main
+DIFFCOV_FAIL_UNDER ?= 99
+DIFFCOV_REPORT ?= diffcov.md
+
+.PHONY: diffcov
+diffcov:
+	# -i: the xml is only an input to diff-cover, which assesses just the
+	# changed files (always present in the checkout); never fail xml generation
+	# over an unrelated path missing in the combined data.
+	$(UV_RUN) coverage xml -i -o coverage.xml
+	$(UV_RUN) diff-cover coverage.xml --compare-branch=$(DIFF_BASE) --fail-under=$(DIFFCOV_FAIL_UNDER) --format report:- --format markdown:$(DIFFCOV_REPORT)
 
 
 ################# DEPENDENCIES #################

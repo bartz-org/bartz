@@ -30,6 +30,7 @@ from bartz._jaxext._autobatch import autobatch
 from bartz._jaxext._jaxext import (
     equal_shards,
     get_default_device,
+    get_default_devices,
     get_device_count,
     is_key,
     jaxtyping_disabled,

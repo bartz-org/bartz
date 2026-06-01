@@ -75,7 +75,7 @@ class Callback(Protocol):
         self,
         *,
         key: Key[Array, ''],
-        bart: State,
+        state: State,
         burnin: Bool[Array, ''],
         i_total: Int32[Array, ''],
         callback_state: CallbackState,
@@ -91,7 +91,7 @@ class Callback(Protocol):
         ----------
         key
             A key for random number generation.
-        bart
+        state
             The MCMC state just after updating it.
         burnin
             Whether the last iteration was in the burn-in phase.
@@ -112,9 +112,9 @@ class Callback(Protocol):
 
         Returns
         -------
-        bart : State
+        state : State
             A possibly modified MCMC state. To avoid modifying the state,
-            return the `bart` argument passed to the callback as-is.
+            return the `state` argument passed to the callback as-is.
         callback_state : CallbackState
             The new state to be passed on the next callback invocation.
 
@@ -129,7 +129,7 @@ class Callback(Protocol):
 class _Carry(Module):
     """Carry used in the loop in `run_mcmc`."""
 
-    bart: State
+    state: State
     i_total: Int32[Array, '']
     key: Key[Array, '']
     burnin_trace: BurninTrace
@@ -139,7 +139,7 @@ class _Carry(Module):
 
 def run_mcmc(
     key: Key[Array, ''],
-    bart: State,
+    state: State,
     n_save: int,
     *,
     n_burn: int = 0,
@@ -155,7 +155,7 @@ def run_mcmc(
     ----------
     key
         A key for random number generation.
-    bart
+    state
         The initial MCMC state, as created and updated by the functions in
         `bartz.mcmcstep`. The MCMC loop uses buffer donation to avoid copies,
         so this variable is invalidated after running `run_mcmc`. Make a copy
@@ -207,8 +207,8 @@ def run_mcmc(
     key = jnp.copy(key)
 
     # create empty traces
-    burnin_trace = _empty_trace(n_burn, bart, BurninTrace)
-    main_trace = _empty_trace(n_save, bart, MainTrace)
+    burnin_trace = _empty_trace(n_burn, state, BurninTrace)
+    main_trace = _empty_trace(n_save, state, MainTrace)
 
     # determine number of iterations for inner and outer loops
     n_iters = n_burn + n_skip * n_save
@@ -230,9 +230,9 @@ def run_mcmc(
         )
         raise RuntimeError(msg)
 
-    replicate = partial(_replicate, mesh=bart.config.mesh)
+    replicate = partial(_replicate, mesh=state.config.mesh)
     carry = _Carry(
-        bart,
+        state,
         replicate(jnp.int32(0)),
         replicate(key),
         burnin_trace,
@@ -245,7 +245,7 @@ def run_mcmc(
             carry, inner_loop_length, callback, n_burn, n_save, n_skip, i_outer, n_iters
         )
 
-    return RunMCMCResult(carry.bart, carry.burnin_trace, carry.main_trace)
+    return RunMCMCResult(carry.state, carry.burnin_trace, carry.main_trace)
 
 
 def _replicate(x: Array, mesh: Mesh | None) -> Array:
@@ -256,13 +256,15 @@ def _replicate(x: Array, mesh: Mesh | None) -> Array:
 
 
 @partial(jit, static_argnums=(0, 2))
-def _empty_trace(length: int, bart: State, trace_cls: type[BurninTrace]) -> BurninTrace:
-    example_output = eval_shape(trace_cls.from_state, bart)
+def _empty_trace(
+    length: int, state: State, trace_cls: type[BurninTrace]
+) -> BurninTrace:
+    example_output = eval_shape(trace_cls.from_state, state)
     out_axes = trace_sample_axes(add_dummy_axis(example_output))
 
     return vmap(
         trace_cls.from_state, in_axes=None, out_axes=out_axes, axis_size=length
-    )(bart)
+    )(state)
 
 
 T = TypeVar('T')
@@ -316,18 +318,18 @@ def _run_mcmc_inner_loop(
 
     def body(carry: _Carry) -> _Carry:
         """Update the MCMC state."""
-        iter_key = random.fold_in(carry.key, carry.bart.config.steps_done)
+        iter_key = random.fold_in(carry.key, carry.state.config.steps_done)
         keys = split(iter_key, 2)
 
         # update state
-        bart = step(keys.pop(), carry.bart)
+        state = step(keys.pop(), carry.state)
 
         # invoke callback
         callback_state = carry.callback_state
         if callback is not None:
             rt = callback(
                 key=keys.pop(),
-                bart=bart,
+                state=state,
                 burnin=carry.i_total < n_burn,
                 i_total=carry.i_total,
                 callback_state=callback_state,
@@ -338,15 +340,15 @@ def _run_mcmc_inner_loop(
                 inner_loop_length=inner_loop_length,
             )
             if rt is not None:
-                bart, callback_state = rt
+                state, callback_state = rt
 
         # save to trace
         burnin_trace, main_trace = _save_state_to_trace(
-            carry.burnin_trace, carry.main_trace, bart, carry.i_total, n_burn, n_skip
+            carry.burnin_trace, carry.main_trace, state, carry.i_total, n_burn, n_skip
         )
 
         return _Carry(
-            bart=bart,
+            state=state,
             i_total=carry.i_total + 1,
             key=carry.key,
             burnin_trace=burnin_trace,
@@ -361,7 +363,7 @@ def _run_mcmc_inner_loop(
 def _save_state_to_trace(
     burnin_trace: BurninTrace,
     main_trace: MainTrace,
-    bart: State,
+    state: State,
     i_total: Int32[Array, ''],
     n_burn: Int32[Array, ''],
     n_skip: Int32[Array, ''],
@@ -378,8 +380,8 @@ def _save_state_to_trace(
     main_idx = jnp.where(noop_cond, noop_idx, main_idx)
 
     # prepare array index
-    burnin_trace = _set(burnin_trace, burnin_idx, BurninTrace.from_state(bart))
-    main_trace = _set(main_trace, main_idx, MainTrace.from_state(bart))
+    burnin_trace = _set(burnin_trace, burnin_idx, BurninTrace.from_state(state))
+    main_trace = _set(main_trace, main_idx, MainTrace.from_state(state))
 
     return burnin_trace, main_trace
 

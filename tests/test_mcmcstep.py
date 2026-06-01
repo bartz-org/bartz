@@ -2205,6 +2205,13 @@ class TestMultivariate:
                 rtol=1e-6,
             )
 
+            # the full `step` resamples error_cov_inv: the diagonal (uv) and
+            # Wishart (mv, k=1) paths must agree, up to the resid difference fed
+            # into the denominator and the Gershgorin jitter of the mv Cholesky
+            assert_close_matrices(
+                uv_state.error_cov_inv.reshape(1, 1), mv_state.error_cov_inv, rtol=1e-5
+            )
+
             assert_array_equal(uv_state.forest.var_tree, mv_state.forest.var_tree)
             assert_array_equal(uv_state.forest.split_tree, mv_state.forest.split_tree)
             assert_array_equal(
@@ -2227,8 +2234,8 @@ class TestMultivariate:
                 uv_state.forest.prune_acc_count, mv_state.forest.prune_acc_count
             )
 
-            uv_state = step_trees(key, uv_state)
-            mv_state = step_trees(random.clone(key), mv_state)
+            uv_state = step(key, uv_state)
+            mv_state = step(random.clone(key), mv_state)
 
     @pytest.mark.parametrize('kind', ['binary', 'homo', 'het'])
     def test_smoke(self, keys: split, mcmcstep_data: MCMCStepData, kind: str) -> None:

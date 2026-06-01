@@ -1598,12 +1598,12 @@ def depth_distr(trace: MainTrace) -> Int32[Array, '*num_chains n_save d']:
 @partial(jit, static_argnames='node_type')
 def points_per_node_distr_trace(
     X: UInt[Array, 'p n'], trace: MainTrace, node_type: Literal['leaf', 'leaf-parent']
-) -> Int32[Array, '*num_chains n_save n_plus_1']:
+) -> Int32[Array, '*num_chains n_save n+1']:
     """Histogram of number of points per node, for every tree draw in the trace."""
     chain_axes = chain_vmap_axes(trace)
     var_tree = chain_to_axis(trace.var_tree, chain_axes.var_tree)
     split_tree = chain_to_axis(trace.split_tree, chain_axes.split_tree)
-    out: Int32[Array, '*chains samples n_plus_1']
+    out: Int32[Array, '*chains samples n+1']
     out = points_per_node_distr(X, var_tree, split_tree, node_type, sum_batch_axis=-1)
     if out.ndim < 3:
         out = out[None, :, :]

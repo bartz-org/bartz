@@ -157,7 +157,7 @@ def _propose_moves(
     affluence_tree: Bool[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
     blocked_vars: UInt[Array, ' k'] | None,
-    p_nonterminal: Float32[Array, ' tree_size'],
+    p_nonterminal: Float32[Array, ' 2*half_tree_size'],
     p_propose_grow: Float32[Array, ' half_tree_size'],
     log_s: Float32[Array, ' p'] | None,
 ) -> Moves:

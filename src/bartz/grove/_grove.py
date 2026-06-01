@@ -267,7 +267,7 @@ def evaluate_forest(
 
 def is_actual_leaf(
     split_tree: UInt[Array, ' half_tree_size'], *, add_bottom_level: bool = False
-) -> Bool[Array, ' half_tree_size'] | Bool[Array, ' tree_size']:
+) -> Bool[Array, ' half_tree_size'] | Bool[Array, ' 2*half_tree_size']:
     """
     Return a mask indicating the leaf nodes in a tree.
 
@@ -560,7 +560,7 @@ def points_per_node_distr(
     node_type: Literal['leaf', 'leaf-parent'],
     *,
     sum_batch_axis: int | tuple[int, ...] = (),
-) -> Int32[Array, '*reduced_batch_shape n_plus_1']:
+) -> Int32[Array, '*reduced_batch_shape n+1']:
     """Histogram points-per-node counts in a set of trees.
 
     Count how many nodes in a tree select each possible amount of points,
@@ -606,8 +606,8 @@ def points_per_node_distr(
             indices: UInt[Array, '*batch_shape n'],
         ) -> (
             tuple[
-                Int32[Array, '*batch_shape tree_size'],
-                Bool[Array, '*batch_shape tree_size'],
+                Int32[Array, '*batch_shape 2*half_tree_size'],
+                Bool[Array, '*batch_shape 2*half_tree_size'],
             ]
             | tuple[
                 Int32[Array, '*batch_shape half_tree_size'],

@@ -2051,7 +2051,10 @@ class TestMVBartIntegration:
         # so a 0.01 bound is only ~1.3 sigma and trips ~20% of the time; 0.05 is
         # ~6 sigma. Distribution equality is checked robustly by the KS test.
         assert jnp.abs(jnp.mean(samples_uv) - jnp.mean(samples_mv)) < 0.05
-        assert p_value > 0.01
+        # `samples_uv` and `samples_mv` are independent draws from the same
+        # distribution, so the KS gate has a per-shape false-positive rate equal
+        # to its threshold; keep it low to avoid tripping on benign realizations.
+        assert p_value > 0.001
 
     def test_error_cov_inv_missing_equals_drop(
         self, keys: split, mcmcstep_data: MCMCStepData

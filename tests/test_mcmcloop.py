@@ -59,7 +59,7 @@ from bartz.mcmcloop import (
 from bartz.mcmcloop._callback import _tqdm_advance, _tqdm_registry
 from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import State, init, make_p_nonterminal
-from bartz.mcmcstep._state import trace_sample_axes
+from bartz.mcmcstep._axes import trace_sample_axes
 from tests.util import assert_array_equal, assert_close_matrices
 
 

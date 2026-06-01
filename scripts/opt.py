@@ -486,7 +486,13 @@ class Benchmark:
         """Initialize BART state and warm up the MCMC step."""
         self.state: State = init_kwargs.init()
         self.key = random.key(2026_01_20_13_31)
-        self.task()
+        # PGLE profiles `jax_pgle_profiling_runs` executions then recompiles once
+        # (slowly); warm up past that so every timed run is at steady state.
+        n_warmup = 1
+        if jax_config.jax_enable_pgle:
+            n_warmup += jax_config.jax_pgle_profiling_runs + 1
+        for _ in range(n_warmup):
+            self.task()
 
     def task(self) -> None:
         """Run one full MCMC step."""

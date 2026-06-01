@@ -51,6 +51,7 @@ from jax import (
     debug_infs,
     debug_key_reuse,
     debug_nans,
+    jit,
     lax,
     no_tracing,
     random,
@@ -1751,7 +1752,7 @@ def test_jit(bkw: BartKW) -> None:
         bart = OriginalBart(X, y, w=w, **kw, seed=key)
         return bart._mcmc_state, bart.predict('train', kind='latent_samples')
 
-    task_compiled = jax.jit(task)
+    task_compiled = jit(task)
 
     _state1, pred1 = task(X, y, w, key)
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
@@ -1816,7 +1817,7 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
     ) -> OriginalBart:
         return OriginalBart(X, y, w=w, missing=missing, **kw, seed=key)
 
-    batched = jax.jit(vmap(task))(Xb, yb, wb, mb, key)
+    batched = jit(vmap(task))(Xb, yb, wb, mb, key)
 
     key_singles = random.clone(key)  # avoid reusing the keys consumed by vmap
     singles = [

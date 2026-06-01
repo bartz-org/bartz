@@ -35,7 +35,7 @@ import numpy
 import pytest
 from beartype import beartype
 from equinox import Module
-from jax import debug_key_reuse, lax, make_mesh, random, tree, vmap
+from jax import debug_key_reuse, jit, lax, make_mesh, random, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
@@ -1548,7 +1548,7 @@ def test_affluence_tree_stays_clean(
 
     Trees = tuple[Bool[Array, 'trees half'], UInt8[Array, 'trees half']]
 
-    @jax.jit
+    @jit
     def run_chain(
         state: State, step_keys: Key[Array, ' steps']
     ) -> tuple[Bool[Array, 'steps trees half'], UInt8[Array, 'steps trees half']]:

@@ -37,7 +37,7 @@ import numpy
 import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError, tree_at
-from jax import block_until_ready, debug_nans, random, tree, vmap
+from jax import block_until_ready, debug_nans, jit, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.special import logit, ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
@@ -1259,7 +1259,7 @@ def test_jit(kw: dict[str, Any]) -> None:
         bart = mc_gbart(X, y, w=w, **kw, seed=key)
         return bart._mcmc_state, bart.yhat_train
 
-    task_compiled = jax.jit(task)
+    task_compiled = jit(task)
 
     _state1, pred1 = task(X, y, w, key)
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))

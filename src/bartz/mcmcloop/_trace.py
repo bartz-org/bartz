@@ -32,7 +32,7 @@ from jaxtyping import Array, Float32, Int32, UInt
 
 from bartz.grove import HeapArrays
 from bartz.mcmcstep import State
-from bartz.mcmcstep._state import CHAIN_AXIS, chain_vmap_axes, chainful_axis, field
+from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis, field
 
 
 class BurninTrace(Module):

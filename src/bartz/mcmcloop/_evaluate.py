@@ -37,12 +37,8 @@ from numpy.lib.array_utils import normalize_axis_index
 
 from bartz._jaxext import autobatch
 from bartz.grove import TreesTrace, evaluate_forest, var_histogram
-from bartz.mcmcstep._state import (
-    CHAIN_AXIS,
-    chain_vmap_axes,
-    chainful_axis,
-    partition_specs,
-)
+from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
+from bartz.mcmcstep._state import partition_specs
 
 
 @runtime_checkable

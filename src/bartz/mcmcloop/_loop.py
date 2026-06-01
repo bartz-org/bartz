@@ -47,7 +47,8 @@ from jaxtyping import Array, Bool, Int32, Key, PyTree, Shaped
 from bartz._jaxext import jit_active, split
 from bartz.mcmcloop._trace import BurninTrace, MainTrace
 from bartz.mcmcstep import State, step
-from bartz.mcmcstep._state import add_dummy_axis, trace_sample_axes
+from bartz.mcmcstep._axes import trace_sample_axes
+from bartz.mcmcstep._lazy import add_dummy_axis
 
 # WORKAROUND(python<3.12): use `type CallbackState = PyTree[Any, 'T']`
 CallbackState: TypeAlias = PyTree[Any, 'T']

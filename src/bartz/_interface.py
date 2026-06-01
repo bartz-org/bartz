@@ -82,18 +82,20 @@ from bartz.mcmcloop import (
     run_mcmc,
 )
 from bartz.mcmcstep import OutcomeType, make_p_nonterminal
+from bartz.mcmcstep._axes import (
+    chain_to_axis,
+    chain_vmap_axes,
+    chainful_axis,
+    get_has_chains,
+    trace_sample_axes,
+)
 from bartz.mcmcstep._state import (
     ArrayLike,
     FloatLike,
     State,
     _inv_via_chol_with_gersh,
-    chain_to_axis,
-    chain_vmap_axes,
-    chainful_axis,
     chol_with_gersh,
-    get_has_chains,
     init,
-    trace_sample_axes,
 )
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
 from bartz.prepcovars._prepcovars import _sigma2_from_cg, _sigma2_from_ols

@@ -386,16 +386,33 @@ def _find_metadata(
 class Forest(Module):
     """Represents the MCMC state of a sum of trees."""
 
-    # The move-counter diagnostics are grouped here, with `grow_prop_count`
-    # first as a runtime-typechecker anchor: its single (union-free) `*chains`
-    # annotation binds the variadic chain axis before `leaf_tree`'s
-    # `... | ... k ...` union is checked; otherwise the checker (which evaluates
-    # union members in a hash-randomized order) can mis-bind `*chains` against
-    # the `k` axis for a multivariate-without-chains forest (the layouts are
-    # rank-ambiguous). The anchor must precede `leaf_tree` and carry no
-    # `tree_size`-derived axis, so that `var_tree`/`split_tree`'s `tree_size//2`
-    # still resolves against the `tree_size` bound by `leaf_tree` (which must
-    # therefore precede them).
+    # Heap-array fields follow the `bartz.grove.TreesTrace` convention: the
+    # union-free integer trees are declared before `leaf_tree` and carry the
+    # bindable `half_tree_size` axis, while `leaf_tree` (and `p_nonterminal`) are
+    # checked against `2*half_tree_size`. Declaring a union-free `*chains` field
+    # first binds the variadic chain axis (plus `num_trees` and `half_tree_size`)
+    # before `leaf_tree`'s `... | ... k ...` union is evaluated, so the runtime
+    # typechecker can't mis-bind `*chains` against the `k` axis of a multivariate
+    # forest (the layouts are otherwise rank-ambiguous). No anchor field needed.
+    var_tree: UInt[Array, '*chains num_trees half_tree_size'] = field(chains=CHAIN_AXIS)
+    """The decision axes."""
+
+    split_tree: UInt[Array, '*chains num_trees half_tree_size'] = field(
+        chains=CHAIN_AXIS
+    )
+    """The decision boundaries."""
+
+    affluence_tree: Bool[Array, '*chains num_trees half_tree_size'] = field(
+        chains=CHAIN_AXIS
+    )
+    """Marks leaves that can be grown."""
+
+    leaf_tree: (
+        Float32[Array, '*chains num_trees 2*half_tree_size']
+        | Float32[Array, '*chains num_trees k 2*half_tree_size']
+    ) = field(chains=CHAIN_AXIS)
+    """The leaf values."""
+
     grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of grow proposals made during one full MCMC cycle."""
 
@@ -408,23 +425,6 @@ class Forest(Module):
     prune_acc_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of prune moves accepted during one full MCMC cycle."""
 
-    leaf_tree: (
-        Float32[Array, '*chains num_trees tree_size']
-        | Float32[Array, '*chains num_trees k tree_size']
-    ) = field(chains=CHAIN_AXIS)
-    """The leaf values."""
-
-    var_tree: UInt[Array, '*chains num_trees tree_size//2'] = field(chains=CHAIN_AXIS)
-    """The decision axes."""
-
-    split_tree: UInt[Array, '*chains num_trees tree_size//2'] = field(chains=CHAIN_AXIS)
-    """The decision boundaries."""
-
-    affluence_tree: Bool[Array, '*chains num_trees tree_size//2'] = field(
-        chains=CHAIN_AXIS
-    )
-    """Marks leaves that can be grown."""
-
     max_split: UInt[Array, ' p']
     """The maximum split index for each predictor."""
 
@@ -433,12 +433,12 @@ class Forest(Module):
     the `i` such that ``max_split[i] == 0``, otherwise behavior is
     undefined."""
 
-    p_nonterminal: Float32[Array, ' tree_size']
+    p_nonterminal: Float32[Array, ' 2*half_tree_size']
     """The prior probability of each node being nonterminal, conditional on
     its ancestors. Includes the nodes at maximum depth which should be set
     to 0."""
 
-    p_propose_grow: Float32[Array, ' tree_size//2']
+    p_propose_grow: Float32[Array, ' half_tree_size']
     """The unnormalized probability of picking a leaf for a grow proposal."""
 
     leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=CHAIN_AXIS, data=-1)

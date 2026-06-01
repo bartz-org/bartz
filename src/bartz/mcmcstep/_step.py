@@ -29,7 +29,7 @@ from functools import partial
 from typing import Literal
 
 import jax
-from equinox import AbstractVar, Module, tree_at
+from equinox import AbstractVar, Module
 from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
@@ -372,19 +372,33 @@ def accept_moves_parallel_stage(
             state.forest.leaf_indices, moves, state.config
         )
 
-    # mark which leaves & potential leaves have enough points to be grown
+    # affluence of the nodes touched by each move: whether `node`/`left`/`right`,
+    # as leaves, would be growable (admissible rule + enough datapoints). The
+    # children must also lie within the heap, i.e. not be at the bottom level;
+    # `node` always does and is admissible as a leaf, so it only needs the count.
+    # These feed the transition ratio and the final `affluence_tree` update.
+    _, half = state.forest.var_tree.shape
+    left_in_heap = moves.left < half
+    right_in_heap = moves.right < half
     if state.forest.min_points_per_decision_node is not None:
-        count_half_trees = count_trees[:, : state.forest.var_tree.shape[1]]
+        min_dn = state.forest.min_points_per_decision_node
         moves = replace(
             moves,
-            affluence_tree=moves.affluence_tree
-            & (count_half_trees >= state.forest.min_points_per_decision_node),
+            node_affluent=move_counts.total >= min_dn,
+            left_affluent=left_in_heap
+            & moves.left_growable
+            & (move_counts.left >= min_dn),
+            right_affluent=right_in_heap
+            & moves.right_growable
+            & (move_counts.right >= min_dn),
         )
-
-    # copy updated affluence_tree to state
-    state = tree_at(
-        lambda state: state.forest.affluence_tree, state, moves.affluence_tree
-    )
+    else:
+        moves = replace(
+            moves,
+            node_affluent=jnp.ones_like(moves.grow),
+            left_affluent=left_in_heap & moves.left_growable,
+            right_affluent=right_in_heap & moves.right_growable,
+        )
 
     # veto grove move if new leaves don't have enough datapoints
     if state.forest.min_points_per_leaf is not None:
@@ -634,16 +648,12 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
     -------
     The updated moves, with `partial_ratio=None` and `log_trans_prior_ratio` set.
     """
-    # can the children be grown by the proposal? This uses the count-filtered
-    # `affluence_tree`, because the grow proposal draws from the pool of leaves
-    # that pass the `min_points_per_decision_node` threshold. It enters only
+    # can the children be grown by the proposal? `left_affluent`/`right_affluent`
+    # already fold in the `min_points_per_decision_node` threshold, because the
+    # grow proposal draws from the pool of leaves that pass it. This enters only
     # the transition probability.
-    left_affluent = moves.affluence_tree.at[moves.left].get(
-        mode='fill', fill_value=False
-    )
-    right_affluent = moves.affluence_tree.at[moves.right].get(
-        mode='fill', fill_value=False
-    )
+    left_affluent = moves.left_affluent
+    right_affluent = moves.right_affluent
 
     # p_prune if grow
     other_growable_leaves = moves.num_growable >= 2
@@ -1514,6 +1524,9 @@ def accept_moves_final_stage(state: State, moves: Moves) -> State:
             prune_acc_count=jnp.sum(moves.acc & ~moves.grow),
             leaf_indices=apply_moves_to_leaf_indices(state.forest.leaf_indices, moves),
             split_tree=apply_moves_to_split_trees(state.forest.split_tree, moves),
+            affluence_tree=apply_moves_to_affluence_trees(
+                state.forest.affluence_tree, moves
+            ),
         ),
     )
 
@@ -1587,6 +1600,59 @@ def _apply_moves_to_split_trees(
         .set(moves.grow_split.astype(split_tree.dtype))
         .at[jnp.where(moves.to_prune, moves.node, split_tree.size)]
         .set(0)
+    )
+
+
+@named_call
+def apply_moves_to_affluence_trees(
+    affluence_tree: Bool[Array, 'num_trees half_tree_size'], moves: Moves
+) -> Bool[Array, 'num_trees half_tree_size']:
+    """
+    Update the affluence trees to match the accepted move.
+
+    The affluence tree marks the growable leaves; this restores that invariant
+    after the move by re-marking only the nodes it touched, starting from the
+    clean pre-move mask.
+
+    Parameters
+    ----------
+    affluence_tree
+        The mask of the growable leaves in the initial trees.
+    moves
+        The proposed moves (see `propose_moves`), as updated by
+        `accept_moves_sequential_stage`.
+
+    Returns
+    -------
+    The updated affluence trees.
+    """
+    return _apply_moves_to_affluence_trees(affluence_tree, moves)
+
+
+@vmap_nodoc
+def _apply_moves_to_affluence_trees(
+    affluence_tree: Bool[Array, ' half_tree_size'], moves: Moves
+) -> Bool[Array, ' half_tree_size']:
+    """Implement `apply_moves_to_affluence_trees`."""
+    assert moves.to_prune is not None
+    assert moves.node_affluent is not None
+    size = affluence_tree.size
+    # GROW: node becomes internal, children become leaves with their affluence.
+    # PRUNE (accepted prune or rejected grow): node becomes a leaf, children are
+    # deleted. Indices of the move not taken resolve to `size` and drop.
+    return (
+        affluence_tree.at[jnp.where(moves.grow, moves.node, size)]
+        .set(False)
+        .at[jnp.where(moves.grow, moves.left, size)]
+        .set(moves.left_affluent)
+        .at[jnp.where(moves.grow, moves.right, size)]
+        .set(moves.right_affluent)
+        .at[jnp.where(moves.to_prune, moves.node, size)]
+        .set(moves.node_affluent)
+        .at[jnp.where(moves.to_prune, moves.left, size)]
+        .set(False)
+        .at[jnp.where(moves.to_prune, moves.right, size)]
+        .set(False)
     )
 
 

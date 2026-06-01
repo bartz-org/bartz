@@ -82,14 +82,6 @@ class Moves(Module):
     var_tree: UInt[Array, '*num_trees half_tree_size']
     """The updated decision axes of the trees, valid whatever move."""
 
-    affluence_tree: Bool[Array, '*num_trees half_tree_size']
-    """A partially updated `affluence_tree`, updated as if the chosen move
-    (grow or prune) was applied: GROW marks the new leaves, PRUNE marks the
-    node that becomes a leaf. This mark initially (out of `propose_moves`)
-    takes into account if there would be available decision rules to grow the
-    leaf, and whether there are enough datapoints in the node is instead
-    checked later in `accept_moves_parallel_stage`."""
-
     left_growable: Bool[Array, '*num_trees']
     """Whether the left child of `node` has available decision rules, *not*
     counting the datapoint thresholds. This is the admissibility used in the
@@ -99,6 +91,20 @@ class Moves(Module):
     right_growable: Bool[Array, '*num_trees']
     """Whether the right child of `node` has available decision rules, *not*
     counting the datapoint thresholds. See `left_growable`."""
+
+    node_affluent: None | Bool[Array, '*num_trees']
+    """Whether `node`, as a leaf, would be a growable leaf, counting the
+    datapoint thresholds. Only meaningful when the move prunes or a grow is
+    rejected. `None` until set in `accept_moves_parallel_stage`."""
+
+    left_affluent: None | Bool[Array, '*num_trees']
+    """Whether the left child of `node`, as a leaf within the heap, would be a
+    growable leaf, counting the datapoint thresholds. `None` until set in
+    `accept_moves_parallel_stage`."""
+
+    right_affluent: None | Bool[Array, '*num_trees']
+    """Whether the right child of `node` would be a growable leaf. See
+    `left_affluent`."""
 
     logu: Float32[Array, '*num_trees']
     """The logarithm of a uniform (0, 1] random variable to be used to
@@ -216,10 +222,8 @@ def _propose_moves(
     leaf_to_grow, num_growable, grow_prob_choose, grow_num_prunable = choose_leaf(
         keys.pop(), split_tree, affluence_tree, p_propose_grow
     )
-    # `choose_leaf_parent` returns `affluence_tree` already marking the pruned
-    # node as a growable leaf
-    node_to_prune, prune_num_prunable, prune_prob_choose, affluence_tree = (
-        choose_leaf_parent(keys.pop(), split_tree, affluence_tree, p_propose_grow)
+    node_to_prune, prune_num_prunable, prune_prob_choose = choose_leaf_parent(
+        keys.pop(), split_tree, affluence_tree, p_propose_grow
     )
 
     # choose between grow and prune
@@ -259,15 +263,6 @@ def _propose_moves(
         [l < split_idx, split_idx + 1 < r]
     )
 
-    # mark the new GROW leaves as growable, on top of the already-marked PRUNE
-    # node. The two updates touch disjoint slots (GROW writes the children of
-    # `node`, PRUNE wrote `node_to_prune`), so a single array carries both with
-    # no `where` over the whole tree: the slot of the move not taken is dirty
-    # but never read (it is not an actual leaf, or it gets the same value it
-    # already had). PRUNE always marks the node as admissible because it was a
-    # valid decision node.
-    affluence_tree = affluence_tree.at[jnp.stack([left, right])].set(leftright_growable)
-
     # partial Metropolis-Hastings ratio; the formula is shared, treating the
     # node as the leaf being grown (for PRUNE this is the reverse grow move,
     # whose ratio is inverted later)
@@ -289,9 +284,11 @@ def _propose_moves(
         # var_tree only changes at `node` for GROW; for PRUNE this is a no-op
         # since `var` equals the existing variable there
         var_tree=var_tree.at[node].set(var.astype(var_tree.dtype)),
-        affluence_tree=affluence_tree,
         left_growable=leftright_growable[0],
         right_growable=leftright_growable[1],
+        node_affluent=None,  # set in accept_moves_parallel_stage
+        left_affluent=None,
+        right_affluent=None,
         logu=jnp.log1p(-exp1mlogu),
         acc=None,  # will be set in accept_moves_sequential_stage
         to_prune=None,  # will be set in accept_moves_sequential_stage
@@ -334,7 +331,7 @@ def choose_leaf(
         The number of leaf parents that could be pruned, after converting the
         selected leaf to a non-terminal node.
     """
-    is_growable = growable_leaves(split_tree, affluence_tree)
+    is_growable = affluence_tree  # `affluence_tree` is the clean growable mask
     num_growable = jnp.count_nonzero(is_growable)
     distr = jnp.where(is_growable, p_propose_grow, 0)
     leaf_to_grow, distr_norm = categorical(key, distr)
@@ -343,36 +340,6 @@ def choose_leaf(
     is_parent = grove.is_leaves_parent(split_tree.at[leaf_to_grow].set(1))
     num_prunable = jnp.count_nonzero(is_parent)
     return leaf_to_grow, num_growable, prob_choose, num_prunable
-
-
-def growable_leaves(
-    split_tree: UInt[Array, ' half_tree_size'],
-    affluence_tree: Bool[Array, ' half_tree_size'],
-) -> Bool[Array, ' half_tree_size']:
-    """
-    Return a mask indicating the leaf nodes that can be proposed for growth.
-
-    The condition is that a leaf is not at the bottom level, has available
-    decision rules given its ancestors, and has at least
-    `min_points_per_decision_node` points.
-
-    Parameters
-    ----------
-    split_tree
-        The splitting points of the tree.
-    affluence_tree
-        Marks leaves that can be grown.
-
-    Returns
-    -------
-    The mask indicating the leaf nodes that can be proposed to grow.
-
-    Notes
-    -----
-    This function needs `split_tree` and not just `affluence_tree` because
-    `affluence_tree` can be "dirty", i.e., mark unused nodes as `True`.
-    """
-    return grove.is_actual_leaf(split_tree) & affluence_tree
 
 
 def categorical(
@@ -754,12 +721,7 @@ def choose_leaf_parent(
     split_tree: UInt[Array, ' half_tree_size'],
     affluence_tree: Bool[Array, ' half_tree_size'],
     p_propose_grow: Float32[Array, ' half_tree_size'],
-) -> tuple[
-    Int32[Array, ''],
-    Int32[Array, ''],
-    Float32[Array, ''],
-    Bool[Array, ' half_tree_size'],
-]:
+) -> tuple[Int32[Array, ''], Int32[Array, ''], Float32[Array, '']]:
     """
     Pick a non-terminal node with leaf children to prune in a tree.
 
@@ -770,7 +732,7 @@ def choose_leaf_parent(
     split_tree
         The splitting points of the tree.
     affluence_tree
-        Whether a leaf has enough points to be grown.
+        The (clean) mask of the growable leaves.
     p_propose_grow
         The unnormalized probability of choosing a leaf to grow.
 
@@ -785,9 +747,6 @@ def choose_leaf_parent(
         The (normalized) probability that `choose_leaf` would chose
         `node_to_prune` as leaf to grow, if passed the tree where
         `node_to_prune` had been pruned.
-    affluence_tree : Bool[Array, 'num_trees half_tree_size']
-        A partially updated `affluence_tree`, marking the node to prune as
-        growable.
     """
     # sample a node to prune
     is_prunable = grove.is_leaves_parent(split_tree)
@@ -795,15 +754,19 @@ def choose_leaf_parent(
     node_to_prune = randint_masked(key, is_prunable)
     node_to_prune = jnp.where(num_prunable, node_to_prune, 2 * split_tree.size)
 
-    # compute stuff for reverse move
-    split_tree = split_tree.at[node_to_prune].set(0)
-    affluence_tree = affluence_tree.at[node_to_prune].set(True)
-    is_growable_leaf = growable_leaves(split_tree, affluence_tree)
+    # growable leaves of the tree pruned at `node_to_prune`: start from the
+    # current growable leaves, drop the two children that would be deleted, and
+    # add `node_to_prune`, which becomes a growable leaf (it was a decision node,
+    # so it has an admissible rule). Out-of-heap children indices drop harmlessly.
+    children = (node_to_prune << 1) | jnp.arange(2)
+    is_growable_leaf = (
+        affluence_tree.at[node_to_prune].set(True).at[children].set(False)
+    )
     distr_norm = jnp.sum(p_propose_grow, where=is_growable_leaf)
     prob_choose = p_propose_grow.at[node_to_prune].get(mode='fill', fill_value=0)
     prob_choose = prob_choose / jnp.where(distr_norm, distr_norm, 1)
 
-    return node_to_prune, num_prunable, prob_choose, affluence_tree
+    return node_to_prune, num_prunable, prob_choose
 
 
 def randint_masked(key: Key[Array, ''], mask: Bool[Array, ' n']) -> Int32[Array, '']:

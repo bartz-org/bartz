@@ -35,6 +35,8 @@ import pathlib
 import pkgutil
 import re
 import sys
+from dataclasses import fields as dataclass_fields
+from dataclasses import is_dataclass
 from enum import Enum
 from functools import cached_property
 from inspect import getsourcefile, getsourcelines, isclass, unwrap
@@ -285,9 +287,14 @@ def linkcode_resolve(domain: str, info: dict[str, str]) -> str | None:
 
     obj = submod
     for part in fullname.split('.'):
-        if isclass(obj) and part in obj.__annotations__:
-            # this is a class attribute and it does not make much sense to
-            # create the source link
+        if isclass(obj) and (
+            (is_dataclass(obj) and any(f.name == part for f in dataclass_fields(obj)))
+            or any(
+                part in getattr(klass, '__annotations__', {}) for klass in obj.__mro__
+            )
+        ):
+            # a class data attribute (an annotation or a dataclass/equinox
+            # field, possibly inherited); there is no source line to link to
             return None
         else:
             obj = getattr(obj, part)

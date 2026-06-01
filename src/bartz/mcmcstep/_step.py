@@ -433,10 +433,9 @@ def accept_moves_parallel_stage(
 
 
 @named_call
-@partial(vmap_nodoc, in_axes=(0, 0, None))
 def apply_grow_to_indices(
-    moves: Moves, leaf_indices: UInt[Array, ' n'], X: UInt[Array, 'p n']
-) -> UInt[Array, ' n']:
+    moves: Moves, leaf_indices: UInt[Array, 'num_trees n'], X: UInt[Array, 'p n']
+) -> UInt[Array, 'num_trees n']:
     """
     Update the leaf indices to apply a grow move.
 
@@ -453,6 +452,14 @@ def apply_grow_to_indices(
     -------
     The updated leaf indices.
     """
+    return _apply_grow_to_indices(moves, leaf_indices, X)
+
+
+@partial(vmap_nodoc, in_axes=(0, 0, None))
+def _apply_grow_to_indices(
+    moves: Moves, leaf_indices: UInt[Array, ' n'], X: UInt[Array, 'p n']
+) -> UInt[Array, ' n']:
+    """Implement `apply_grow_to_indices`."""
     left_child = moves.node.astype(leaf_indices.dtype) << 1
     x: UInt[Array, ' n'] = X[moves.grow_var, :]
     go_right = x >= moves.grow_split
@@ -663,11 +670,11 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
 
 
 @named_call
-@vmap_nodoc
 def adapt_leaf_trees_to_grow_indices(
-    leaf_trees: Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size'],
+    leaf_trees: Float32[Array, 'num_trees tree_size']
+    | Float32[Array, 'num_trees k tree_size'],
     moves: Moves,
-) -> Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size']:
+) -> Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k tree_size']:
     """
     Modify leaves such that post-grow indices work on the original tree.
 
@@ -685,6 +692,15 @@ def adapt_leaf_trees_to_grow_indices(
     -------
     The modified leaf values.
     """
+    return _adapt_leaf_trees_to_grow_indices(leaf_trees, moves)
+
+
+@vmap_nodoc
+def _adapt_leaf_trees_to_grow_indices(
+    leaf_trees: Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size'],
+    moves: Moves,
+) -> Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size']:
+    """Implement `adapt_leaf_trees_to_grow_indices`."""
     values_at_node = leaf_trees[..., moves.node]
     return (
         leaf_trees.at[..., jnp.where(moves.grow, moves.left, leaf_trees.size)]
@@ -1104,15 +1120,13 @@ class SeqStageInAllTrees(Module):
 
 
 class SeqStageInPerTree(Module):
-    """The inputs to `accept_move_and_sample_leaves` that are separate for each tree.
+    """The inputs to `accept_move_and_sample_leaves` that are separate for each tree."""
 
-    Although consumed one tree at a time by `lax.scan`, this object is only ever
-    constructed in the stacked (batched) form fed to the scan, so `num_trees`
-    stays a fixed (non-variadic) leading axis disambiguated by rank/dtype (cf.
-    `ParallelStageOut`); the per-tree slices reach `loop` via scan, which does
-    not re-run `__init__`.
-    """
-
+    # Although consumed one tree at a time by `lax.scan`, this object is only
+    # ever constructed in the stacked (batched) form fed to the scan, so
+    # `num_trees` stays a fixed (non-variadic) leading axis disambiguated by
+    # rank/dtype (cf. `ParallelStageOut`); the per-tree slices reach `loop` via
+    # scan, which does not re-run `__init__`.
     leaf_tree: (
         Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k tree_size']
     )
@@ -1500,10 +1514,9 @@ def accept_moves_final_stage(bart: State, moves: Moves) -> State:
 
 
 @named_call
-@vmap_nodoc
 def apply_moves_to_leaf_indices(
-    leaf_indices: UInt[Array, ' n'], moves: Moves
-) -> UInt[Array, ' n']:
+    leaf_indices: UInt[Array, 'num_trees n'], moves: Moves
+) -> UInt[Array, 'num_trees n']:
     """
     Update the leaf indices to match the accepted move.
 
@@ -1520,6 +1533,14 @@ def apply_moves_to_leaf_indices(
     -------
     The updated leaf indices.
     """
+    return _apply_moves_to_leaf_indices(leaf_indices, moves)
+
+
+@vmap_nodoc
+def _apply_moves_to_leaf_indices(
+    leaf_indices: UInt[Array, ' n'], moves: Moves
+) -> UInt[Array, ' n']:
+    """Implement `apply_moves_to_leaf_indices`."""
     mask = ~jnp.array(1, leaf_indices.dtype)  # ...1111111110
     is_child = (leaf_indices & mask) == moves.left
     assert moves.to_prune is not None
@@ -1529,10 +1550,9 @@ def apply_moves_to_leaf_indices(
 
 
 @named_call
-@vmap_nodoc
 def apply_moves_to_split_trees(
-    split_tree: UInt[Array, ' half_tree_size'], moves: Moves
-) -> UInt[Array, ' half_tree_size']:
+    split_tree: UInt[Array, 'num_trees half_tree_size'], moves: Moves
+) -> UInt[Array, 'num_trees half_tree_size']:
     """
     Update the split trees to match the accepted move.
 
@@ -1548,6 +1568,14 @@ def apply_moves_to_split_trees(
     -------
     The updated split trees.
     """
+    return _apply_moves_to_split_trees(split_tree, moves)
+
+
+@vmap_nodoc
+def _apply_moves_to_split_trees(
+    split_tree: UInt[Array, ' half_tree_size'], moves: Moves
+) -> UInt[Array, ' half_tree_size']:
+    """Implement `apply_moves_to_split_trees`."""
     assert moves.to_prune is not None
     return (
         split_tree.at[jnp.where(moves.grow, moves.node, split_tree.size)]

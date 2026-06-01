@@ -285,6 +285,15 @@ class Params(Module):
     sigma2_eps: Float[Array, '']
     """Variance of the additive error."""
 
+    sigma2_mean: Float[Array, '']
+    """Variance of the expected mean function."""
+
+    sigma2_pop: Float[Array, '']
+    """Expected population variance of y."""
+
+    sigma2_pri: Float[Array, '']
+    """Prior variance of y."""
+
     outcome_type: OutcomeType | tuple[OutcomeType, ...] = field(static=True)
     """Per-component outcome type, either a single `OutcomeType` applied to
     every row, or a tuple of length ``k`` for mixed outcomes. For binary
@@ -298,21 +307,6 @@ class Params(Module):
     kurt_x: float = 9 / 5  # kurtosis of uniform distribution
     """Kurtosis of the predictor distribution. Defaults to ``9 / 5``, the
     kurtosis of the uniform distribution used by `gen_data_from_params`."""
-
-    @property
-    def sigma2_pri(self) -> Float[Array, '...']:
-        """Prior variance of y."""
-        return self.sigma2_pop + self.sigma2_mean
-
-    @property
-    def sigma2_pop(self) -> Float[Array, '...']:
-        """Expected population variance of y."""
-        return self.sigma2_lin + self.sigma2_quad + self.sigma2_eps
-
-    @property
-    def sigma2_mean(self) -> Float[Array, '...']:
-        """Variance of the expected mean function."""
-        return self.sigma2_quad / (self.kurt_x - 1 + self.q)
 
 
 class DGP(Module):
@@ -510,6 +504,11 @@ def gen_params(
             keys.pop(), partition, q, sigma2_quad, Params.kurt_x
         )
 
+    # derived variances (see `Params`); cheap scalars materialized eagerly
+    sigma2_mean = sigma2_quad / (Params.kurt_x - 1 + q)
+    sigma2_pop = sigma2_lin + sigma2_quad + sigma2_eps
+    sigma2_pri = sigma2_pop + sigma2_mean
+
     return Params(
         partition=partition,
         beta_shared=beta_shared,
@@ -521,6 +520,9 @@ def gen_params(
         sigma2_lin=sigma2_lin,
         sigma2_quad=sigma2_quad,
         sigma2_eps=sigma2_eps,
+        sigma2_mean=sigma2_mean,
+        sigma2_pop=sigma2_pop,
+        sigma2_pri=sigma2_pri,
         outcome_type=outcome_type,
     )
 

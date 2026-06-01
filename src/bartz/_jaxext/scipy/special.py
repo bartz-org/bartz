@@ -50,7 +50,7 @@ def _castto(
     # (numpy returns a 0-d scalar, not an `ndarray`, for scalar inputs).
     @wraps(func)
     def newfunc(*args: Any, **kw: Any) -> np.ndarray:
-        return np.asarray(func(*args, **kw)).astype(dtype)
+        return np.asarray(func(*args, **kw), dtype)
 
     return newfunc
 

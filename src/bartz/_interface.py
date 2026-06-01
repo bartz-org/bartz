@@ -59,7 +59,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz._jaxext import equal_shards, is_key, jaxtyping_disabled, split
+from bartz._jaxext import equal_shards, is_key, split
 from bartz._jaxext.scipy.special import ndtri
 from bartz._jaxext.scipy.stats import invgamma
 from bartz.grove import (
@@ -677,10 +677,10 @@ class Bart(Module):
     def get_latent_prec(
         self, only_continuous: bool = False
     ) -> (
-        Float32[Array, ' nsamples']
-        | Float32[Array, 'nsamples k k']
-        | Float32[Array, 'num_chains nsamples']
-        | Float32[Array, 'num_chains nsamples k k']
+        Float32[Array, ' n_burn_plus_n_save']
+        | Float32[Array, 'n_burn_plus_n_save k k']
+        | Float32[Array, 'num_chains n_burn_plus_n_save']
+        | Float32[Array, 'num_chains n_burn_plus_n_save k k']
     ):
         """Return the posterior samples of the latent error precision matrix.
 
@@ -922,9 +922,9 @@ class Bart(Module):
         if mesh is not None and 'data' in mesh.axis_names:
             # drop the data-sharded `leaf_indices` (not replicated) before the
             # cross-shard equality check; `None` is a deliberately off-type
-            # placeholder, so build it with jaxtyping off
-            with jaxtyping_disabled():
-                replicated_forest = replace(state.forest, leaf_indices=None)
+            # placeholder, so use `tree_at`, which (unlike `dataclasses.replace`)
+            # bypasses the `__init__` type checks
+            replicated_forest = tree_at(lambda f: f.leaf_indices, state.forest, None)
             equal = equal_shards(
                 replicated_forest, 'data', in_specs=PartitionSpec(), mesh=mesh
             )
@@ -1019,7 +1019,7 @@ class Bart(Module):
         trace = self._main_trace
         trees = TreesTrace.from_dataclass(trace)
         if trace.has_chains:
-            trees_chain_axes = TreesTrace.from_dataclass(chain_vmap_axes(trace))
+            trees_chain_axes = trees.axes_from_dataclass(chain_vmap_axes(trace))
             # WORKAROUND(python<3.14): use operator.is_none
             trees = tree.map(
                 chain_to_axis, trees, trees_chain_axes, is_leaf=lambda x: x is None
@@ -1485,10 +1485,10 @@ def get_latent_prec(
     *,
     only_continuous: bool = False,
 ) -> (
-    Float32[Array, ' nsamples']
-    | Float32[Array, 'nsamples k k']
-    | Float32[Array, 'num_chains nsamples']
-    | Float32[Array, 'num_chains nsamples k k']
+    Float32[Array, ' n_burn_plus_n_save']
+    | Float32[Array, 'n_burn_plus_n_save k k']
+    | Float32[Array, 'num_chains n_burn_plus_n_save']
+    | Float32[Array, 'num_chains n_burn_plus_n_save k k']
 ):
     """Latent error precision trace, burn-in + main concatenated."""
     burnin = burnin_trace.error_cov_inv
@@ -1528,7 +1528,7 @@ def check_trees(
     """Apply `bartz.grove.check_trace` to all the tree draws."""
     trees = TreesTrace.from_dataclass(trace)
     if trace.has_chains:
-        trees_chain_axes = TreesTrace.from_dataclass(chain_vmap_axes(trace))
+        trees_chain_axes = trees.axes_from_dataclass(chain_vmap_axes(trace))
         # WORKAROUND(python<3.14): use operator.is_none
         trees = tree.map(
             chain_to_axis, trees, trees_chain_axes, is_leaf=lambda x: x is None
@@ -1564,7 +1564,7 @@ def compare_resid(
 
     forests = TreesTrace.from_dataclass(state.forest)
     if state.has_chains:
-        forest_chain_axes = TreesTrace.from_dataclass(chain_axes.forest)
+        forest_chain_axes = forests.axes_from_dataclass(chain_axes.forest)
         # WORKAROUND(python<3.14): use operator.is_none
         forests = tree.map(
             chain_to_axis, forests, forest_chain_axes, is_leaf=lambda x: x is None

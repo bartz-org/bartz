@@ -50,14 +50,18 @@ class EvaluableTrace(Protocol):
     """Structural type of the traces accepted by `evaluate_trace`.
 
     Both `bartz.mcmcloop.MainTrace` and `bartz.debug.TraceWithOffset` satisfy
-    it. The runtime check is structural (attribute presence only), so it also
-    matches the axis-spec trees `chain_vmap_axes` derives from a trace.
+    it. The runtime check is structural (attribute presence only, not the
+    annotated shapes), so it also matches the axis-spec trees `chain_vmap_axes`
+    derives from a trace.
     """
 
-    leaf_tree: Array
-    var_tree: Array
-    split_tree: Array
-    offset: Array
+    leaf_tree: (
+        Float32[Array, '*chains_and_samples num_trees tree_size']
+        | Float32[Array, '*chains_and_samples num_trees k tree_size']
+    )
+    var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
+    split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
+    offset: Float32[Array, ''] | Float32[Array, ' k']
     has_chains: bool
     mesh: Mesh | None
 
@@ -210,7 +214,7 @@ def _evaluate_trace(
     if trace.has_chains:
         batched_eval = vmap(
             batched_eval,
-            in_axes=(None, TreesTrace.from_dataclass(trace_chain_axes)),
+            in_axes=(None, trees.axes_from_dataclass(trace_chain_axes)),
             out_axes=out_chain_axis_w_trees,
         )
 
@@ -218,7 +222,7 @@ def _evaluate_trace(
     batched_eval = autobatch(
         batched_eval,
         max_io_nbytes,
-        in_axes=(None, TreesTrace.from_dataclass(tree_axes)),
+        in_axes=(None, trees.axes_from_dataclass(tree_axes)),
         out_axes=tree_axis,
         reduce_ufunc=jnp.add,
     )
@@ -260,7 +264,7 @@ def _evaluate_trace(
     batched_eval = autobatch(
         batched_eval,
         max_io_nbytes,
-        in_axes=(None, TreesTrace.from_dataclass(sample_axes)),
+        in_axes=(None, trees.axes_from_dataclass(sample_axes)),
         out_axes=sample_axis,
         warn_on_overflow=False,  # the inner autobatch will handle it
         **({} if trace.has_chains else full_shape),
@@ -273,7 +277,7 @@ def _evaluate_trace(
         batched_eval = autobatch(
             batched_eval,
             max_io_nbytes,
-            in_axes=(None, TreesTrace.from_dataclass(trace_chain_axes)),
+            in_axes=(None, trees.axes_from_dataclass(trace_chain_axes)),
             out_axes=out_chain_axis,
             warn_on_overflow=False,  # the inner autobatch will handle it
             **full_shape,
@@ -485,8 +489,6 @@ def compute_varcount(
         var_tree: UInt[Array, 'samples trees nodes'],
         split_tree: UInt[Array, 'samples trees nodes'],
     ) -> Int32[Array, 'samples p']:
-        # plain `p` axis (not `{p}`): `{p}` could only reference an argument of
-        # this nested function, not the enclosing `compute_varcount`'s `p`
         return var_histogram(p, var_tree, split_tree, sum_batch_axis=-1)
 
     if trace.has_chains:

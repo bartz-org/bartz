@@ -29,18 +29,13 @@ from dataclasses import fields
 from functools import partial
 from typing import Literal, Protocol, runtime_checkable
 
-from equinox import Module
+from equinox import Module, tree_at
 from jax import jit, lax, vmap
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
 
-from bartz._jaxext import (
-    autobatch,
-    jaxtyping_disabled,
-    minimal_unsigned_dtype,
-    vmap_nodoc,
-)
+from bartz._jaxext import autobatch, minimal_unsigned_dtype, vmap_nodoc
 
 
 @runtime_checkable
@@ -99,11 +94,22 @@ class TreesTrace(Module):
     @classmethod
     def from_dataclass(cls, obj: TreeHeaps) -> 'TreesTrace':
         """Create a `TreesTrace` from any `bartz.grove.TreeHeaps`."""
-        # `obj` may carry vmap axis specs (int/None) instead of arrays (this is
-        # used to build `in_axes` trees), and when it carries arrays they come
-        # already validated from their source, so skip the array type-check.
-        with jaxtyping_disabled():
-            return cls(**{f.name: getattr(obj, f.name) for f in fields(cls)})
+        return cls(**{f.name: getattr(obj, f.name) for f in fields(cls)})
+
+    def axes_from_dataclass(self, obj: TreeHeaps) -> 'TreesTrace':
+        """Project the per-field vmap axis specs of `obj` onto this template.
+
+        `self` supplies the (array) pytree; the same-named fields of `obj`
+        (axis specs, i.e. ints or `None`) replace its leaves. Built with
+        `tree_at`, which bypasses the type-checked `__init__`, so the
+        deliberately off-type axis values are allowed.
+        """
+        names = [f.name for f in fields(type(self))]
+        return tree_at(
+            lambda t: [getattr(t, name) for name in names],
+            self,
+            [getattr(obj, name) for name in names],
+        )
 
 
 def tree_depth(tree: Shaped[Array, '*batch_shape tree_size']) -> int:
@@ -169,13 +175,11 @@ def traverse_tree(
 
 
 @jit
-@partial(jnp.vectorize, excluded=(0,), signature='(hts),(hts)->(n)')
-@partial(vmap_nodoc, in_axes=(1, None, None))
 def traverse_forest(
-    X: UInt[Array, ' p'],
-    var_trees: UInt[Array, ' half_tree_size'],
-    split_trees: UInt[Array, ' half_tree_size'],
-) -> UInt[Array, '']:
+    X: UInt[Array, 'p n'],
+    var_trees: UInt[Array, '*forest_shape half_tree_size'],
+    split_trees: UInt[Array, '*forest_shape half_tree_size'],
+) -> UInt[Array, '*forest_shape n']:
     """
     Find the leaves where points falls into for each tree in a set.
 
@@ -192,6 +196,17 @@ def traverse_forest(
     -------
     The indices of the leaves.
     """
+    return _traverse_forest(X, var_trees, split_trees)
+
+
+@partial(jnp.vectorize, excluded=(0,), signature='(hts),(hts)->(n)')
+@partial(vmap_nodoc, in_axes=(1, None, None))
+def _traverse_forest(
+    X: UInt[Array, ' p'],
+    var_trees: UInt[Array, ' half_tree_size'],
+    split_trees: UInt[Array, ' half_tree_size'],
+) -> UInt[Array, '']:
+    """Implement `traverse_forest`."""
     return traverse_tree(X, var_trees, split_trees)
 
 

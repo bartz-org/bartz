@@ -398,10 +398,10 @@ def _set(
     # so the trace/val shapes are kept independent; their relationship is
     # enforced dynamically. The return has the trace shape.
     def at_set(
-        trace: Shaped[Array, '*trace_shape'],
-        val: Shaped[Array, '*val_shape'],
+        trace: Shaped[Array, '*chains_samples_core'],
+        val: Shaped[Array, '*chains_core'],
         sample_axis: int | None,
-    ) -> Shaped[Array, '*trace_shape']:
+    ) -> Shaped[Array, '*chains_samples_core']:
         if sample_axis is None or trace.size == 0:
             # `sample_axis is None`: fields without a `samples` marker have
             # no per-iteration slot to update.

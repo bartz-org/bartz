@@ -1590,7 +1590,7 @@ def _auto_num_batches(
         return _final_round(n, nb)
 
 
-def _final_round(n: int, num: int) -> int | None:
+def _final_round(n: int, num: float | int) -> int | None:
     """Bound batch size, round number of batches to a power of 2, and disable batching if there's only 1 batch."""
     # at least some elements per batch
     num = min(n // 32, num)

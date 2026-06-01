@@ -419,13 +419,11 @@ class mc_gbart(Module):
     def sigma(
         self,
     ) -> (
-        Float32[Array, ' nsamples'] | Float32[Array, 'samples_per_core mc_cores'] | None
+        Float32[Array, ' nskip_plus_ndpost']
+        | Float32[Array, 'nskip_plus_ndpost_per_core mc_cores']
+        | None
     ):
-        """The standard deviation of the error, including burn-in samples.
-
-        The flat shape is ``(nskip + ndpost,)``; with multiple chains it is
-        ``((nskip + ndpost) / mc_cores, mc_cores)``.
-        """
+        """The standard deviation of the error, including burn-in samples."""
         if self._mcmc_state.binary_y is not None:
             return None
         assert self._burnin_trace.error_cov_inv.ndim <= 2  # chains and samples

@@ -1619,6 +1619,7 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
             assert_array_less(rhat_dd, 1.02)
 
     with subtests.test('y_test'):
+        assert nsplits <= 255  # `X` is uint8, so the split count must fit a byte
         X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1, jnp.uint8)
         yhat_mcmc = predict_latent(X, bart._main_trace)
         yhat_prior = evaluate_trace(X, prior_trace)

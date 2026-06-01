@@ -38,6 +38,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, Shaped, UInt, UInt32
 
 from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
+from bartz._jaxext.random import loggamma
 from bartz.grove import var_histogram
 from bartz.mcmcstep._moves import Moves, propose_moves
 from bartz.mcmcstep._state import (
@@ -1611,7 +1612,7 @@ def _sample_wishart_bartlett(
     # chi^2(k) = Gamma(k/2, scale=2)
     k, _ = scale_inv.shape
     df_vector = df - jnp.arange(k)
-    chi2_samples = random.gamma(keys.pop(), df_vector / 2.0) * 2.0
+    chi2_samples = jnp.exp(loggamma(keys.pop(), df_vector / 2.0)) * 2.0
     diag_A = jnp.sqrt(chi2_samples)
 
     off_diag_A = random.normal(keys.pop(), (k, k))
@@ -1675,7 +1676,7 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], bart: State) -> State:
         scale = jnp.diag(scale)
     beta = scale / 2 + norm2 / 2
 
-    samples = random.gamma(key, alpha, kshape)
+    samples = jnp.exp(loggamma(key, alpha, kshape))
     prec = samples / beta
     if bart.binary_indices is not None:
         prec = prec.at[bart.binary_indices].set(1.0)
@@ -1771,7 +1772,7 @@ def step_s(key: Key[Array, ''], bart: State) -> State:
 
     # sample from Dirichlet posterior
     alpha = bart.forest.theta / p + varcount
-    log_s = random.loggamma(key, alpha)
+    log_s = loggamma(key, alpha)
 
     # update forest with new s
     return replace(bart, forest=replace(bart.forest, log_s=log_s))

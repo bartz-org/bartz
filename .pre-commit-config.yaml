@@ -113,6 +113,13 @@ repos:
         # mention `jax.vmap` are not flagged.
         entry: '\bjax\.vmap\s*\('
         types: [python]
+      - id: forbid-jax-random-qualified-call
+        name: forbid `jax.random.foo(...)` (use `from jax import random`)
+        language: pygrep
+        # the trailing `\(` limits matches to function calls so docstrings that
+        # mention `jax.random` are not flagged.
+        entry: '\bjax\.random\.\w+\s*\('
+        types: [python]
       - id: forbid-mcmc-module-absolute-import
         name: forbid `from bartz import mcmcstep/loop (use `from bartz.mcmcstep import foo`)
         language: pygrep

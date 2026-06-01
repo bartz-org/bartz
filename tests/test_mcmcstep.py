@@ -35,7 +35,7 @@ import numpy
 import pytest
 from beartype import beartype
 from equinox import Module
-from jax import debug_key_reuse, make_mesh, random, tree, vmap
+from jax import debug_key_reuse, lax, make_mesh, random, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
@@ -57,7 +57,8 @@ from scipy import stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
 from bartz._jaxext import get_device_count, minimal_unsigned_dtype, split
-from bartz.mcmcstep import State, init, step
+from bartz.grove import is_actual_leaf
+from bartz.mcmcstep import State, init, make_p_nonterminal, step
 from bartz.mcmcstep._moves import (
     ancestor_variables,
     randint_exclude,
@@ -88,6 +89,7 @@ from bartz.mcmcstep._step import (
     step_trees,
     step_z,
 )
+from bartz.testing import gen_nonsense_data
 from tests.util import (
     assert_allclose,
     assert_array_equal,
@@ -1508,6 +1510,59 @@ def test_z_differs_across_data_shards(keys: split) -> None:
                 atol=0,
                 err_msg=f'shards {i} and {j} produced similar z\n',
             )
+
+
+@pytest.mark.parametrize(
+    ('min_points_per_decision_node', 'min_points_per_leaf'),
+    [(None, None), (10, None), (10, 5)],
+)
+def test_affluence_tree_stays_clean(
+    keys: split,
+    min_points_per_decision_node: int | None,
+    min_points_per_leaf: int | None,
+) -> None:
+    """`affluence_tree` marks only actual growable leaves, with no dirty bits.
+
+    The MCMC keeps `affluence_tree` clean (a `True` bit only on a node that is
+    really a leaf), instead of relying on a downstream `is_actual_leaf` mask. A
+    bit left on a grown-away or pruned-away node would be a regression.
+    """
+    p, n, num_trees, num_steps = 5, 200, 20, 50
+    X, y, max_split = gen_nonsense_data(p, n, None)
+    state = init(
+        X=X,
+        y=y,
+        offset=0.0,
+        max_split=max_split,
+        num_trees=num_trees,
+        p_nonterminal=make_p_nonterminal(6),
+        leaf_prior_cov_inv=1.0,
+        error_cov_df=2.0,
+        error_cov_scale=2.0,
+        min_points_per_decision_node=min_points_per_decision_node,
+        min_points_per_leaf=min_points_per_leaf,
+    )
+
+    Trees = tuple[Bool[Array, 'trees half'], UInt8[Array, 'trees half']]
+
+    @jax.jit
+    def run_chain(
+        state: State, step_keys: Key[Array, ' steps']
+    ) -> tuple[Bool[Array, 'steps trees half'], UInt8[Array, 'steps trees half']]:
+        def body(state: State, key: Key[Array, '']) -> tuple[State, Trees]:
+            state = step(key, state)
+            return state, (state.forest.affluence_tree, state.forest.split_tree)
+
+        _, out = lax.scan(body, state, step_keys)
+        return out
+
+    affluence, split_tree = run_chain(state, keys.pop(num_steps))
+
+    # an affluent node must be an actual leaf, in every tree at every step
+    is_leaf = vmap(vmap(is_actual_leaf))(split_tree)
+    assert_array_equal(affluence & ~is_leaf, jnp.zeros_like(affluence))
+    # sanity: the mask is non-trivially populated (else the check is vacuous)
+    assert jnp.any(affluence)
 
 
 class TestMixedBinaryContinuous:

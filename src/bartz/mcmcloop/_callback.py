@@ -425,9 +425,9 @@ def _tqdm_report(
     n_iters: int,
     *,
     num_chains: int | None,
-    grow_prop: float,
     move_acc: float,
     mean_leaves: float,
+    max_leaves: int,
     **_: Any,
 ) -> None:
     """Set the bar description and acceptance-statistics postfix."""
@@ -437,11 +437,10 @@ def _tqdm_report(
     # set_description_str (not set_description) to avoid tqdm's ': ' suffix; the
     # trailing space separates the label from the bar
     bar.set_description_str('train ', refresh=False)
-    # keep this terse so the bar stays narrow, e.g. '4ch grow 52% acc 25% leaves 3.4'
+    # keep this terse so the bar stays narrow, e.g. '4ch acc 25% leaves 3.4/32'
     msgs = []
     if num_chains is not None:
         msgs.append(f'{num_chains}ch')
-    msgs.append(f'grow {grow_prop:.0%}')
     msgs.append(f'acc {move_acc:.0%}')
-    msgs.append(f'leaves {mean_leaves:.1f}')
+    msgs.append(f'leaves {mean_leaves:.1f}/{max_leaves}')
     bar.set_postfix_str(' '.join(msgs))

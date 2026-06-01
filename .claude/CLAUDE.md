@@ -85,6 +85,8 @@ Interface hierarchy:
     - indexing/shape conventions that improve readability and implicitly check for shape errors:
         - to get an axis length in an array, use tuple unpacking, e.g.: `_, _, k = x.shape`, `*_, l, _ = y.shape`
         - to index into an array, keep all dimensions explicit, e.g.: `x[0, :]`, `y[..., :, :, 4, :]`
+        - to remove an axis of size 1, use `x.squeeze(axis)`, not `x[0]`
+            - this implicitly asserts the axis _does_ have size 1
     - use `array.item()` to cast a size-1 array to a scalar python type
         - also works for numpy/jax scalars, `jnp.float32(x).item()` is valid
 - other **python** conventions:

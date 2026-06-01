@@ -30,10 +30,8 @@ To check the code you write:
     - use liberally if it looks like R is not working
 - run the unit tests relevant to your code changes with `uv run pytest ...`
     - not all tests right away because the full test suite takes a long time to run
-    - when running multiple tests, the output may be long; pipe the output to a scratch file to be read afterwards
-    - use `scratch_tests_output.txt` for temporary test output, that specific file name is gitignored just for you
 - at the end of debugging, run the full test suite to check everything works
-    - use the command `make tests > scratch_tests_output.txt 2>&1` _verbatim_, it's pre-authorized in your configs
+    - `make tests` will run everything with 2 workers and prints a lot of stuff, faster and more complete than `uv run pytest`
 
 ## Architecture
 

@@ -79,7 +79,7 @@ from bartz.grove import (
     tree_depths,
 )
 from bartz.mcmcloop import compute_varcount, evaluate_trace
-from bartz.mcmcloop._callback import _tqdm_registry
+from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes
@@ -1908,10 +1908,10 @@ def test_pbar_disabled_by_printevery_none(
     bkw: BartKW, capsys: CaptureFixture[str]
 ) -> None:
     """`printevery=None` disables the bar entirely, even with `pbar=True`."""
-    n_bars_before = len(_tqdm_registry)
+    n_bars_before = len(_TQDM_REGISTRY)
     block_until_ready(Bart(**dict(bkw.kw, pbar=True, printevery=None)))
     assert '%' not in capsys.readouterr().err  # no bar was drawn
-    assert len(_tqdm_registry) == n_bars_before  # no bar was even created
+    assert len(_TQDM_REGISTRY) == n_bars_before  # no bar was even created
 
 
 @pytest.mark.flaky

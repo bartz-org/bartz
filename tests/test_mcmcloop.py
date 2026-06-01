@@ -56,7 +56,7 @@ from bartz.mcmcloop import (
     make_tqdm_callback,
     run_mcmc,
 )
-from bartz.mcmcloop._callback import _tqdm_advance, _tqdm_registry
+from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._state import trace_sample_axes
@@ -207,7 +207,7 @@ class TestRunMcmc:
         out = buf.getvalue()
         assert '100%' in out  # the bar reached the end
         assert '6/6' in out  # n_burn + n_save * n_skip iterations
-        assert bar_id not in _tqdm_registry  # the bar was closed and removed
+        assert bar_id not in _TQDM_REGISTRY  # the bar was closed and removed
 
     def test_tqdm_callback_cleans_up_interrupted_bar(self) -> None:
         """A new tqdm callback closes a bar left open by an interrupted run."""
@@ -217,10 +217,10 @@ class TestRunMcmc:
         bar_id = kw['callback_state'].bar_id.item()
         # simulate an interrupted run: advance the bar partway, never finishing
         _tqdm_advance(bar_id, 3, 10)
-        assert not _tqdm_registry[bar_id].bar.disable  # still open
+        assert not _TQDM_REGISTRY[bar_id].bar.disable  # still open
 
         make_tqdm_callback(state, file=io.StringIO())  # triggers cleanup
-        assert bar_id not in _tqdm_registry  # the stale bar was closed and dropped
+        assert bar_id not in _TQDM_REGISTRY  # the stale bar was closed and dropped
         assert buf.getvalue().endswith('\n')  # closed cleanly, not left mid-line
 
     def test_tqdm_no_recompilation(self, keys: split) -> None:

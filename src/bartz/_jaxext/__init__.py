@@ -25,7 +25,8 @@
 """Additions to jax."""
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from functools import partial
 from typing import Any
 
@@ -45,10 +46,30 @@ from jax import numpy as jnp
 from jax.dtypes import prng_key
 from jax.scipy.special import ndtr
 from jax.sharding import PartitionSpec
-from jaxtyping import Array, Bool, Float32, Key, PyTree, Scalar, Shaped
+from jax.typing import DTypeLike
+from jaxtyping import Array, Bool, Float32, Integer, Key, PyTree, Scalar, Shaped
+from jaxtyping import config as jaxtyping_config
 
 from bartz._jaxext._autobatch import autobatch  # noqa: F401
 from bartz._jaxext.scipy.special import ndtri
+
+
+@contextmanager
+def jaxtyping_disabled() -> Generator[None, None, None]:
+    """Temporarily disable jaxtyping runtime type-checking.
+
+    This also disables `beartype`, because the jaxtyping import hook applies it
+    as ``jaxtyped(typechecker=beartype)`` and `jaxtyped` short-circuits to the
+    undecorated function when type-checking is disabled. Used to park
+    deliberately wrong-typed intermediates (e.g. `_LazyArray` leaves) in an
+    `equinox.Module` during construction.
+    """
+    old = jaxtyping_config.jaxtyping_disable
+    jaxtyping_config.update('jaxtyping_disable', True)
+    try:
+        yield
+    finally:
+        jaxtyping_config.update('jaxtyping_disable', old)
 
 
 def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:
@@ -64,7 +85,7 @@ def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:
     return fun
 
 
-def minimal_unsigned_dtype(value: int) -> jnp.dtype:
+def minimal_unsigned_dtype(value: int) -> DTypeLike:
     """Return the smallest unsigned integer dtype that can represent `value`."""
     if value < 2**8:
         return jnp.uint8
@@ -78,7 +99,7 @@ def minimal_unsigned_dtype(value: int) -> jnp.dtype:
 @partial(jax.jit, static_argnums=(1,))
 def unique(
     x: Shaped[Array, ' _'], size: int, fill_value: Scalar
-) -> tuple[Shaped[Array, ' {size}'], int]:
+) -> tuple[Shaped[Array, ' {size}'], int | Integer[Array, '']]:
     """
     Restricted version of `jax.numpy.unique` that uses less memory.
 
@@ -106,8 +127,8 @@ def unique(
     x = jnp.sort(x)
 
     def loop(
-        carry: tuple[Scalar, Scalar, Shaped[Array, ' {size}']], x: Scalar
-    ) -> tuple[tuple[Scalar, Scalar, Shaped[Array, ' {size}']], None]:
+        carry: tuple[Scalar, Scalar, Shaped[Array, ' size']], x: Scalar
+    ) -> tuple[tuple[Scalar, Scalar, Shaped[Array, ' size']], None]:
         i_out, last, out = carry
         i_out = jnp.where(x == last, i_out, i_out + 1)
         out = out.at[i_out].set(x)
@@ -115,7 +136,7 @@ def unique(
 
     carry = 0, x[0], jnp.full(size, fill_value, x.dtype)
 
-    def run(unroll: int) -> tuple[Shaped[Array, ' {size}'], Scalar]:
+    def run(unroll: int) -> tuple[Shaped[Array, ' size'], Scalar]:
         (actual_length, _, out), _ = lax.scan(loop, carry, x[:size], unroll=unroll)
         return out, actual_length + 1
 
@@ -153,7 +174,7 @@ class split:
     def __len__(self) -> int:
         return len(self._keys) - self._num_used
 
-    def pop(self, shape: int | tuple[int, ...] = ()) -> Key[Array, ' {shape}']:
+    def pop(self, shape: int | tuple[int, ...] = ()) -> Key[Array, ' *shape']:
         """
         Pop one or more keys from the list.
 
@@ -192,9 +213,7 @@ def _split_unpack(key: Key[Array, ''], num: int) -> tuple[Key[Array, ''], ...]:
 
 
 @partial(jit, static_argnums=(1,))
-def _split_shaped(
-    key: Key[Array, ''], shape: tuple[int, ...]
-) -> Key[Array, ' {shape}']:
+def _split_shaped(key: Key[Array, ''], shape: tuple[int, ...]) -> Key[Array, ' *shape']:
     num = math.prod(shape)
     keys = random.split(key, num)
     return keys.reshape(shape)
@@ -203,11 +222,11 @@ def _split_shaped(
 def truncated_normal_onesided(
     key: Key[Array, ''],
     shape: Sequence[int],
-    upper: Bool[Array, '*'],
-    bound: Float32[Array, '*'],
+    upper: Bool[Array, '...'],
+    bound: Float32[Array, '...'],
     *,
     clip: bool = True,
-) -> Float32[Array, '*']:
+) -> Float32[Array, '...']:
     """
     Sample from a one-sided truncated standard normal distribution.
 

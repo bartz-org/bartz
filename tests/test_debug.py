@@ -37,7 +37,7 @@ from bartz._jaxext import minimal_unsigned_dtype, split
 from bartz.debug import sample_prior
 from bartz.grove import TreesTrace, check_trace, describe_error, format_tree
 from bartz.grove._check import check_tree
-from tests.util import manual_tree
+from tests.util import jaxtyping_disabled, manual_tree
 
 
 def test_format_tree() -> None:
@@ -183,7 +183,11 @@ class TestCheckTree:
     @staticmethod
     def _describe(tree: TreesTrace, max_split: jnp.ndarray) -> list[str]:
         """Run `check_tree` and return the names of the failing checks."""
-        return describe_error(check_tree(tree, max_split))
+        # `check_tree` is a runtime validator deliberately fed malformed trees
+        # here; disable jaxtyping so it isn't pre-empted by the import-hook
+        # type-checker (which would reject the bad dtypes/shapes first).
+        with jaxtyping_disabled():
+            return describe_error(check_tree(tree, max_split))
 
     def test_types_var_dtype(self) -> None:
         """Wrong `var_tree` dtype trips `check_types`."""

@@ -238,7 +238,7 @@ class mc_gbart(Module):
         b: FloatLike = 1.0,
         rho: FloatLike | None = None,
         varprob: Float[ArrayLike, ' p'] | None = None,
-        xinfo: Float[ArrayLike, 'p n'] | None = None,
+        xinfo: Float[ArrayLike, 'p ncut'] | None = None,
         usequants: bool = False,
         rm_const: bool = True,
         sigest: FloatLike | None = None,
@@ -250,7 +250,7 @@ class mc_gbart(Module):
         lambda_: FloatLike | None = None,
         tau_num: FloatLike | None = None,
         offset: FloatLike | None = None,
-        w: Float[ArrayLike, ' n'] | None = None,
+        w: Float[ArrayLike, ' n'] | Series | None = None,
         ntree: int | None = None,
         numcut: int = 100,
         ndpost: int = 1000,
@@ -419,8 +419,8 @@ class mc_gbart(Module):
     def sigma(
         self,
     ) -> (
-        Float32[Array, ' nskip+ndpost']
-        | Float32[Array, 'nskip+ndpost/mc_cores mc_cores']
+        Float32[Array, ' nskip_plus_ndpost']
+        | Float32[Array, 'nskip_plus_ndpost_per_core mc_cores']
         | None
     ):
         """The standard deviation of the error, including burn-in samples."""
@@ -515,7 +515,7 @@ class mc_gbart(Module):
     # Public methods from Bart
 
     def predict(
-        self, x_test: Real[Array, 'p m'] | DataFrame
+        self, x_test: Real[ArrayLike, 'p m'] | DataFrame
     ) -> Float32[Array, 'ndpost m']:
         """
         Evaluate the sum-of-trees at `x_test` for each MCMC iteration.

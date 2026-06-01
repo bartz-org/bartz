@@ -62,6 +62,7 @@ class EvaluableTrace(Protocol):
     var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
     split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
     offset: Float32[Array, ''] | Float32[Array, ' k']
+    is_multivariate: bool
     has_chains: bool
     mesh: Mesh | None
 
@@ -204,7 +205,7 @@ def _evaluate_trace(
     # sizes, read from the arrays (hence per-device under the `shard_map`)
     # leaf_tree has shape (sample, tree, *k, ts)
     k_axis = chainful_axis(2, trace_chain_axes.leaf_tree)
-    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+    is_mv = trace.is_multivariate
     kshape = trace.leaf_tree.shape[k_axis : k_axis + is_mv]
     _, n = X.shape
     num_samples = trace.leaf_tree.shape[sample_axes.leaf_tree]
@@ -327,7 +328,7 @@ def _output_axes(
     out_chain_axis = sample_axis = 0
     if trace.has_chains:
         # pre-tree-reduction output ndim: chain + (sample, tree, *k, n)
-        is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+        is_mv = trace.is_multivariate
         out_chain_axis_w_trees = normalize_axis_index(out_chain_axis_w_trees, 4 + is_mv)
         tree_axis = chainful_axis(tree_axis, out_chain_axis_w_trees)
         out_chain_axis = out_chain_axis_w_trees - (out_chain_axis_w_trees > tree_axis)
@@ -362,7 +363,7 @@ def _output_layout(
     n_axis : int
         Position of the observation (``n``) axis.
     """
-    is_mv = trace.leaf_tree.ndim > trace.split_tree.ndim
+    is_mv = trace.is_multivariate
     chainless_ndim = 2 + is_mv  # (sample, *k, n)
     n_core = chainless_ndim - 1  # `n` is the last chainless axis
     if trace.has_chains and not flatten_chains:

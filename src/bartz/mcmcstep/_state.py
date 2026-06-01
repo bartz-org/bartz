@@ -56,7 +56,7 @@ from numpy import ndarray
 from numpy.lib.array_utils import normalize_axis_index
 
 from bartz._jaxext import jaxtyping_disabled, minimal_unsigned_dtype
-from bartz.grove import tree_depths
+from bartz.grove import HeapArrays, tree_depths
 
 ArrayLike = Array | ndarray
 
@@ -383,7 +383,7 @@ def _find_metadata(
     return tree.map(get_axes, x, is_leaf=lambda x: isinstance(x, Module))
 
 
-class Forest(Module):
+class Forest(HeapArrays):
     """Represents the MCMC state of a sum of trees."""
 
     # Heap-array fields follow the `bartz.grove.TreesTrace` convention: the

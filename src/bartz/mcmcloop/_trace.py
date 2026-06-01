@@ -30,6 +30,7 @@ from jax.nn import softmax
 from jax.sharding import Mesh
 from jaxtyping import Array, Float32, Int32, UInt
 
+from bartz.grove import HeapArrays
 from bartz.mcmcstep import State
 from bartz.mcmcstep._state import CHAIN_AXIS, chain_vmap_axes, chainful_axis, field
 
@@ -93,7 +94,7 @@ class BurninTrace(Module):
         )
 
 
-class MainTrace(BurninTrace):
+class MainTrace(BurninTrace, HeapArrays):
     """MCMC trace with trees and diagnostic values."""
 
     leaf_tree: (

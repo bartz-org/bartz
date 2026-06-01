@@ -71,8 +71,36 @@ class TreeHeaps(Protocol):
     node is a leaf is indicated by the corresponding 'split' element being
     0. Unused nodes also have split set to 0. This array can't be dirty."""
 
+    is_multivariate: bool
+    """Whether the leaves are vector-valued (an extra `k` axis on `leaf_tree`)."""
 
-class TreesTrace(Module):
+
+class HeapArrays(Module):
+    """Mixin providing shared behavior for `TreeHeaps` dataclasses.
+
+    Subclasses must declare the `leaf_tree`, `var_tree` and `split_tree` heap
+    arrays (see `TreeHeaps`); this mixin adds no fields, only the derived
+    quantities that are the same regardless of how the leading batch axes are
+    laid out.
+    """
+
+    @property
+    def is_multivariate(self) -> bool:
+        """Whether the leaves are vector-valued (an extra `k` axis on `leaf_tree`)."""
+        return self.leaf_tree.ndim > self.var_tree.ndim
+
+    @property
+    def tree_size(self) -> int:
+        """The length of `leaf_tree` along the heap axis, i.e. ``2 ** depth``."""
+        return self.leaf_tree.shape[-1]
+
+    @property
+    def half_tree_size(self) -> int:
+        """The length of `var_tree`/`split_tree` along the heap axis."""
+        return self.var_tree.shape[-1]
+
+
+class TreesTrace(HeapArrays):
     """Implementation of `bartz.grove.TreeHeaps` for an MCMC trace."""
 
     # `var_tree`/`split_tree` are declared before `leaf_tree` so their single
@@ -240,7 +268,7 @@ def evaluate_forest(
     indices: UInt[Array, '*forest_shape n']
     indices = traverse_forest(X, trees.var_tree, trees.split_tree)
 
-    is_mv = trees.leaf_tree.ndim != trees.var_tree.ndim
+    is_mv = trees.is_multivariate
 
     bc_indices: UInt[Array, '*forest_shape n 1'] | UInt[Array, '*forest_shape 1 n 1']
     bc_indices = indices[..., None, :, None] if is_mv else indices[..., None]
@@ -449,7 +477,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     bottom = '╢'  # '┨' #
 
     *_, tree_size = tree.leaf_tree.shape
-    is_mv = tree.leaf_tree.ndim != tree.var_tree.ndim
+    is_mv = tree.is_multivariate
 
     def traverse_tree(
         lines: list[str],

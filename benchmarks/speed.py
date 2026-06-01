@@ -487,6 +487,11 @@ class BaseRunMcmc(AutoParamNames):
         if 'callback' not in params:
             kw['inner_callback'] = kw.pop('callback')
 
+        # WORKAROUND(bartz<0.11.0): `run_mcmc`'s `bart` argument was renamed `state`
+        state_arg = 'bart' if 'bart' in params else 'state'
+        if state_arg != 'bart':
+            kw[state_arg] = kw.pop('bart')
+
         # catch bug and skip if found
         detect_zero_division_error_bug(kw)
 
@@ -519,10 +524,10 @@ class BaseRunMcmc(AutoParamNames):
             case 'warm':
                 # prepare copies of the args because of buffer donation
                 key = jnp.copy(kw['key'])
-                bart = tree.map(jnp.copy, kw['bart'])
+                bart = tree.map(jnp.copy, kw[state_arg])
                 self.time_run_mcmc()
                 # put copies in place of donated buffers
-                kw.update(key=key, bart=bart)
+                kw.update({'key': key, state_arg: bart})
             case _:
                 raise KeyError(cache)
 
@@ -550,8 +555,9 @@ def kill_callback(
     *,
     canary: str,
     kill_niters: int | None,
-    bart: State,
     i_total: Integer[Array, ''],
+    bart: State | None = None,
+    state: State | None = None,
     **_: Any,
 ) -> None:
     """Throw error `canary` after `kill_niters` in `run_mcmc`.
@@ -561,17 +567,19 @@ def kill_callback(
     """
     if kill_niters is None:
         return
+    # WORKAROUND(bartz<0.11.0): the callback's `bart` argument was renamed `state`
+    state = bart if state is None else state
     # error_cov_inv is one of the last things modified in the mcmc loop, so
     # using it as token ensures ordering; also it does not have n in the
     # dimensionality.
-    if isinstance(bart, dict):
+    if isinstance(state, dict):
         # WORKAROUND(bartz<0.6.0): pre-0.6.0 state was a dict keyed by 'sigma2'
-        token = bart['sigma2']
-    elif hasattr(bart, 'sigma2'):
+        token = state['sigma2']
+    elif hasattr(state, 'sigma2'):
         # WORKAROUND(bartz<0.8.0): State.sigma2 was renamed to error_cov_inv in 0.8.0
-        token = bart.sigma2
+        token = state.sigma2
     else:
-        token = bart.error_cov_inv
+        token = state.error_cov_inv
     stop = i_total + 1 == kill_niters  # i_total is updated after callback
     token = error_if(token, stop, canary)
     debug.callback(lambda _token: None, token)  # to avoid DCE

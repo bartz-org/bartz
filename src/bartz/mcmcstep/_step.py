@@ -34,18 +34,17 @@ from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
-from jax.typing import DTypeLike
-from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, Shaped, UInt, UInt32
+from jaxtyping import Array, Bool, Float32, Key, Shaped, UInt, UInt32
 
 from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz._jaxext.random import loggamma
 from bartz.grove import var_histogram
 from bartz.mcmcstep._axes import field
 from bartz.mcmcstep._moves import Moves, propose_moves
+from bartz.mcmcstep._scatter import _scatter_add
 from bartz.mcmcstep._state import (
     State,
     StepConfig,
-    _auto_num_batches,
     chol_with_gersh,
     get_axis_size,
     shard_map_state,
@@ -1307,83 +1306,6 @@ def sum_resid(
         'resid',
         data_sharded,
     )
-
-
-def _scatter_add(
-    values: Float32[Array, '*batch_shape n'] | int,
-    indices: Integer[Array, ' n'],
-    size: int,
-    dtype: DTypeLike,
-    batch_size: int | None | Literal['auto'],
-    which: Literal['resid', 'count', 'prec'],
-    data_sharded: bool,
-) -> Shaped[Array, '*batch_shape {size}']:
-    """Indexed reduce along the last axis of `values`, with optional batching.
-
-    When `batch_size` is 'auto', the number of batches is chosen per-platform at
-    run time via `lax.platform_dependent`. When `data_sharded` is True the
-    result is psum-reduced across the ``'data'`` axis of the current `shard_map`
-    region.
-    """
-    values = jnp.asarray(values)
-    assert values.ndim == 0 or values.shape[-1:] == indices.shape
-
-    def impl(num_batches: int | None) -> Shaped[Array, '*batch_shape size']:
-        return _scatter_add_impl(
-            values,
-            indices,
-            size=size,
-            dtype=dtype,
-            num_batches=num_batches,
-            final_psum=data_sharded,
-        )
-
-    if batch_size != 'auto':
-        return impl(batch_size)
-
-    # `n` is the local shard size when data-sharded, which is exactly what the
-    # batch-count heuristic wants. Defer the cpu/gpu choice to XLA: it traces
-    # both branches but the compiler keeps only the one for the target platform.
-    (n,) = indices.shape
-    cpu_nb = _auto_num_batches('cpu', n, which)
-    gpu_nb = _auto_num_batches('gpu', n, which)
-    if cpu_nb == gpu_nb:
-        return impl(cpu_nb)
-    return lax.platform_dependent(
-        default=partial(impl, cpu_nb),
-        cuda=partial(impl, gpu_nb),
-        rocm=partial(impl, gpu_nb),
-    )
-
-
-def _scatter_add_impl(
-    values: Float32[Array, '*batch_shape n'] | Int32[Array, ''],
-    indices: Integer[Array, ' n'],
-    /,
-    *,
-    size: int,
-    dtype: DTypeLike,
-    num_batches: int | None,
-    final_psum: bool = False,
-) -> Shaped[Array, '*batch_shape {size}']:
-    batch_shape = values.shape[:-1]
-    if num_batches is None:
-        out = jnp.zeros((*batch_shape, size), dtype).at[..., indices].add(values)
-
-    else:
-        # in the sharded case, n is the size of the local shard, not the full size
-        (n,) = indices.shape
-        batch_indices = jnp.arange(n) % num_batches
-        out = (
-            jnp.zeros((*batch_shape, size, num_batches), dtype)
-            .at[..., indices, batch_indices]
-            .add(values)
-            .sum(axis=-1)
-        )
-
-    if final_psum:
-        out = lax.psum(out, 'data')
-    return out
 
 
 def _compute_likelihood_ratio_uv(

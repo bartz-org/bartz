@@ -1,6 +1,7 @@
 [general]
 ignore = body-is-missing
 regex-style-search = true
+contrib = contrib-title-conventional-commits
 
 [title-max-length]
 line-length = 50

@@ -1600,12 +1600,11 @@ def _sample_wishart_bartlett(
     """
     keys = split(key)
 
-    # Diagonal elements: A_ii ~ sqrt(chi^2(df - i))
-    # chi^2(k) = Gamma(k/2, scale=2)
+    # Diagonal elements: A_ii ~ sqrt(chi^2(df - i)), with chi^2(k) = Gamma(k/2, scale=2).
+    # sqrt(2 * Gamma) = sqrt(2) * exp(loggamma / 2), folding the sqrt into the exp.
     k, _ = scale_inv.shape
     df_vector = df - jnp.arange(k)
-    chi2_samples = jnp.exp(loggamma(keys.pop(), df_vector / 2.0)) * 2.0
-    diag_A = jnp.sqrt(chi2_samples)
+    diag_A = jnp.sqrt(2.0) * jnp.exp(loggamma(keys.pop(), df_vector / 2.0) / 2.0)
 
     off_diag_A = random.normal(keys.pop(), (k, k))
     A = jnp.tril(off_diag_A, -1) + jnp.diag(diag_A)

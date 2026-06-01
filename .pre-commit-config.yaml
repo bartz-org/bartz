@@ -3,7 +3,7 @@
 
 exclude: '^\.asv/results/.+\.json$'
 default_stages: [pre-commit]
-default_install_hook_types: [pre-commit, commit-msg]
+default_install_hook_types: [pre-commit, commit-msg, pre-merge-commit]
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -71,6 +71,20 @@ repos:
       - id: uv-lock
   - repo: local
     hooks:
+      - id: lint-merged-tree
+        name: full lint on the merged tree
+        # Runs only at merge time (not on ordinary commits). Gates clean
+        # auto-merges, whose merge commit git writes without invoking the
+        # `pre-commit` stage: catches a merged tree that fails the hooks even
+        # though each branch passed in isolation (e.g. a stale WORKAROUND or a
+        # hook config changed on one side). `make lint` is `pre-commit run
+        # --all-files`; nesting it here is safe (this hook is not in the
+        # pre-commit stage, so --all-files does not re-trigger it).
+        entry: make lint
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-merge-commit]
       - id: check-workarounds
         name: check stale WORKAROUND markers
         entry: uv run --dev python config/check_workarounds.py

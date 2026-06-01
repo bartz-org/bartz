@@ -56,7 +56,12 @@ from pytest_subtests import SubTests
 from scipy import stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
-from bartz._jaxext import get_device_count, minimal_unsigned_dtype, split
+from bartz._jaxext import (
+    get_default_devices,
+    get_device_count,
+    minimal_unsigned_dtype,
+    split,
+)
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import State, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import (
@@ -1363,7 +1368,7 @@ class TestMultichain:
 
     def test_normalize_spec(self) -> None:
         """Test `normalize_spec`."""
-        devices = jax.devices('cpu')[:3]
+        devices = get_default_devices()[:3]
         mesh = make_mesh(
             (len(devices), 1),
             ('ciao', 'bau'),
@@ -2099,7 +2104,10 @@ class TestMVBartIntegration:
         # so a 0.01 bound is only ~1.3 sigma and trips ~20% of the time; 0.05 is
         # ~6 sigma. Distribution equality is checked robustly by the KS test.
         assert jnp.abs(jnp.mean(samples_uv) - jnp.mean(samples_mv)) < 0.05
-        assert p_value > 0.01
+        # `samples_uv` and `samples_mv` are independent draws from the same
+        # distribution, so the KS gate has a per-shape false-positive rate equal
+        # to its threshold; keep it low to avoid tripping on benign realizations.
+        assert p_value > 0.001
 
     def test_error_cov_inv_missing_equals_drop(
         self, keys: split, mcmcstep_data: MCMCStepData
@@ -2250,6 +2258,13 @@ class TestMultivariate:
                 rtol=1e-6,
             )
 
+            # the full `step` resamples error_cov_inv: the diagonal (uv) and
+            # Wishart (mv, k=1) paths must agree, up to the resid difference fed
+            # into the denominator and the Gershgorin jitter of the mv Cholesky
+            assert_close_matrices(
+                uv_state.error_cov_inv.reshape(1, 1), mv_state.error_cov_inv, rtol=1e-5
+            )
+
             assert_array_equal(uv_state.forest.var_tree, mv_state.forest.var_tree)
             assert_array_equal(uv_state.forest.split_tree, mv_state.forest.split_tree)
             assert_array_equal(
@@ -2272,8 +2287,8 @@ class TestMultivariate:
                 uv_state.forest.prune_acc_count, mv_state.forest.prune_acc_count
             )
 
-            uv_state = step_trees(key, uv_state)
-            mv_state = step_trees(random.clone(key), mv_state)
+            uv_state = step(key, uv_state)
+            mv_state = step(random.clone(key), mv_state)
 
     @pytest.mark.parametrize('kind', ['binary', 'homo', 'het'])
     def test_smoke(self, keys: split, mcmcstep_data: MCMCStepData, kind: str) -> None:

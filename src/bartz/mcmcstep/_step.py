@@ -1668,7 +1668,10 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
         scale = jnp.diag(scale)
     beta = scale / 2 + norm2 / 2
 
-    samples = jnp.exp(loggamma(key, alpha, kshape))
+    # draw the gamma from the first of a split, mirroring the Bartlett sampler
+    # in the multivariate path so the two branches coincide at k=1
+    keys = split(key)
+    samples = jnp.exp(loggamma(keys.pop(), alpha, kshape))
     prec = samples / beta
     if state.binary_indices is not None:
         prec = prec.at[state.binary_indices].set(1.0)

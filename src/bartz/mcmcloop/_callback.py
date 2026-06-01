@@ -200,8 +200,8 @@ def make_tqdm_callback(
     >>> run_mcmc(key, state, ..., **make_tqdm_callback(state, ...))
     """
     _close_stale_bars()  # clean up after any previous run that was interrupted
-    bar_id = next(_tqdm_bar_counter)
-    _tqdm_registry[bar_id] = _TqdmEntry(tqdm_kwargs)
+    bar_id = next(_TQDM_BAR_COUNTER)
+    _TQDM_REGISTRY[bar_id] = _TqdmEntry(tqdm_kwargs)
 
     def as_replicated_array(val: ArrayLike) -> Array:
         return _replicate(jnp.asarray(val), state.config.mesh)
@@ -373,8 +373,8 @@ class _TqdmEntry:
 # kept here and referenced from the jax loop through the integer handle stored
 # in `TqdmCallbackState.bar_id` (a traceable scalar, so the loop pytree stays
 # stable across runs and is not recompiled).
-_tqdm_registry: dict[int, _TqdmEntry] = {}
-_tqdm_bar_counter = itertools.count()
+_TQDM_REGISTRY: dict[int, _TqdmEntry] = {}
+_TQDM_BAR_COUNTER = itertools.count()
 
 # tqdm's default layout, but without the ': ' that `format_meter` forces after a
 # non-empty description; the label is set as a `{desc}` ending in a space instead
@@ -386,21 +386,21 @@ _TQDM_BAR_FORMAT = (
 
 def _close_stale_bars() -> None:
     """Close and drop any bars left over from a previous (e.g. interrupted) run."""
-    for entry in _tqdm_registry.values():
+    for entry in _TQDM_REGISTRY.values():
         if entry.bar is not None:
             entry.bar.close()
-    _tqdm_registry.clear()
+    _TQDM_REGISTRY.clear()
 
 
 def _get_or_create_bar(bar_id: int, n_iters: int) -> tqdm | None:
     """Return the bar for `bar_id`, creating it on first use, `None` if finished."""
-    entry = _tqdm_registry.get(bar_id)
+    entry = _TQDM_REGISTRY.get(bar_id)
     if entry is None:
         # the bar was already closed (the loop finished, possibly out of order)
         return None
     if entry.bar is None:
         bar = tqdm(**{'total': n_iters, 'bar_format': _TQDM_BAR_FORMAT, **entry.kwargs})
-        _tqdm_registry[bar_id] = replace(entry, bar=bar)
+        _TQDM_REGISTRY[bar_id] = replace(entry, bar=bar)
         return bar
     return entry.bar
 
@@ -415,7 +415,7 @@ def _tqdm_advance(bar_id: int, it: int, n_iters: int) -> None:
     bar.update(max(0, it - bar.n))  # forward-only: callbacks may arrive out of order
     if it >= n_iters:
         bar.close()
-        del _tqdm_registry[bar_id]
+        del _TQDM_REGISTRY[bar_id]
 
 
 @_convert_jax_arrays_in_args

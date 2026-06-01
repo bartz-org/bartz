@@ -24,4 +24,3 @@ benchmarks/latest_bartz/
 
 # Claude
 .claude/worktrees/
-scratch_tests_output.txt

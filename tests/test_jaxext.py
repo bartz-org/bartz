@@ -35,7 +35,6 @@ from jax import (
     NamedSharding,
     debug_infs,
     device_put,
-    devices,
     jit,
     lax,
     make_mesh,
@@ -63,6 +62,8 @@ from scipy.stats import loggamma as scipy_loggamma
 from bartz._jaxext import (
     autobatch,
     equal_shards,
+    get_default_devices,
+    get_device_count,
     is_key,
     split,
     truncated_normal_onesided,
@@ -670,10 +671,12 @@ def make_broken_replicated_array(x: Array, axis_name: str, mesh: Mesh) -> Array:
 
 def test_make_broken_replicated_array() -> None:
     """Test `make_broken_replicated_array`."""
-    nd = len(devices())
+    nd = get_device_count()
     if nd < 2:  # branch covered in single jax cpu test config
         pytest.skip('Requires at least 2 devices')
-    mesh = make_mesh((nd,), ('a',), axis_types=(AxisType.Auto,))
+    mesh = make_mesh(
+        (nd,), ('a',), axis_types=(AxisType.Auto,), devices=get_default_devices()
+    )
     x = jnp.arange(nd)
     xb = make_broken_replicated_array(x, 'a', mesh)
     for i, shard in enumerate(xb.addressable_shards):
@@ -688,12 +691,14 @@ def test_make_broken_replicated_array() -> None:
 @pytest.mark.parametrize('replicated', [True, False])
 def test_equal_shards(equal: bool, replicated: bool) -> None:
     """Test `_jaxext.equal_shards`."""
-    nd = len(devices())
+    nd = get_device_count()
     if nd < 2:  # branch covered in single jax cpu test config
         pytest.skip('Requires at least 2 devices')
 
     # define mesh
-    mesh = make_mesh((nd,), ('a',), axis_types=(AxisType.Auto,))
+    mesh = make_mesh(
+        (nd,), ('a',), axis_types=(AxisType.Auto,), devices=get_default_devices()
+    )
 
     # create dummy array
     if equal:

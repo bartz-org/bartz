@@ -131,6 +131,14 @@ def evaluate_trace(
     )
     batch_test_points = test_points in ('autobatch', 'shard_and_autobatch')
 
+    # the tree-sum reduction carry varies over whichever manual axes are active;
+    # marking its seed varying (see autobatch's `reduce_vary_axes`) lets the VMA
+    # checker pass. WORKAROUND(jax<0.7): pcast/VMA absent, fall back to disabling
+    # the checker on the `shard_map` instead
+    vary_axes = ('chains',) * shard_chains + ('data',) * shard_data
+    check_vma = hasattr(lax, 'pcast')
+    reduce_vary_axes = vary_axes if check_vma else ()
+
     # `_evaluate_trace` batches the test-point (`n`) axis itself as an inner
     # loop (see there); when sharding it runs per-device shard inside the
     # `shard_map`, so the chunk it loops over is already the per-device one
@@ -140,6 +148,7 @@ def evaluate_trace(
         out_chain_axis_w_trees=out_chain_axis_w_trees,
         batch_test_points=batch_test_points,
         max_io_nbytes=max_io_nbytes,
+        reduce_vary_axes=reduce_vary_axes,
     )
 
     # parallelize chains (and, on request, test points) across devices with a
@@ -158,6 +167,7 @@ def evaluate_trace(
             out_chain_axis=out_chain_axis,
             n_axis=n_axis,
             out_ndim=out_ndim,
+            check_vma=check_vma,
         )
 
     return fun(X, trace)
@@ -171,6 +181,7 @@ def _evaluate_trace(
     out_chain_axis_w_trees: int,
     batch_test_points: bool,
     max_io_nbytes: int,
+    reduce_vary_axes: tuple[str, ...] = (),
 ) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']:
     """Evaluate `trace` on `X` for a single device shard.
 
@@ -180,6 +191,8 @@ def _evaluate_trace(
 
     If `batch_test_points`, the ``n`` axis of `X` is also looped over (see the
     autobatch nesting below). `max_io_nbytes` bounds each batch's I/O.
+    `reduce_vary_axes` is forwarded to the tree-sum reduction so its scan carry
+    is `pcast` to vary over those manual axes (the only mesh-aware bit here).
     """
     # extract only the trees from the trace, this will be the input to `evaluate_forest`
     trees = TreesTrace.from_dataclass(trace)
@@ -221,6 +234,7 @@ def _evaluate_trace(
         in_axes=(None, trees.axes_from_dataclass(tree_axes)),
         out_axes=tree_axis,
         reduce_ufunc=jnp.add,
+        reduce_vary_axes=reduce_vary_axes,
     )
 
     # output shape after reducing trees
@@ -416,6 +430,7 @@ def _shard_map_eval(
     out_chain_axis: int | None,
     n_axis: int,
     out_ndim: int,
+    check_vma: bool,
 ) -> Callable[[UInt[Array, 'p n'], EvaluableTrace], Float32[Array, '*out']]:
     """Wrap ``fun(X, trace)`` in a `shard_map` manual over ``'chains'``/``'data'``.
 
@@ -425,6 +440,9 @@ def _shard_map_eval(
     is replicated. Mesh axes not made manual here stay automatic, so the
     corresponding output axes follow whatever sharding the computation produces
     without forcing any inter-device movement.
+
+    `check_vma` is forwarded to `shard_map`; `fun` is expected to `pcast` its
+    reduction seeds to varying (see `evaluate_trace`) so the check passes.
     """
     axis_names = set()
     x_spec = [None, None]  # (p, n)
@@ -449,11 +467,7 @@ def _shard_map_eval(
         axis_names=axis_names,
         in_specs=(PartitionSpec(*x_spec), partition_specs(trace, mesh)),
         out_specs=PartitionSpec(*out_spec),
-        # `traverse_tree`'s `lax.scan` carry starts replicated and becomes
-        # chain/data-varying, which the VMA checker rejects; the evaluation is
-        # embarrassingly parallel over chains and points, so the check adds no
-        # safety
-        check_vma=False,
+        check_vma=check_vma,
     )
 
 

@@ -26,7 +26,6 @@
 
 from dataclasses import replace
 from functools import partial
-from typing import Literal
 
 import jax
 from equinox import AbstractVar, Module
@@ -41,7 +40,7 @@ from bartz._jaxext.random import loggamma
 from bartz.grove import var_histogram
 from bartz.mcmcstep._axes import field
 from bartz.mcmcstep._moves import Moves, propose_moves
-from bartz.mcmcstep._scatter import _scatter_add
+from bartz.mcmcstep._reduction import ReductionConfig
 from bartz.mcmcstep._state import (
     State,
     StepConfig,
@@ -536,19 +535,21 @@ def _compute_count_or_prec_tree(
         value = 1
         cls = Counts
         dtype = jnp.uint32
-        num_batches = config.count_num_batches
-        which = 'count'
+        reduction_config = config.count_reduction_config
     else:
         value = prec_scale
         # scalar weights -> scalar precision per node; vector weights (k k n) ->
         # k by k precision matrix per node.
         cls = PrecsMatrix if prec_scale.ndim == 3 else PrecsScalar
         dtype = jnp.float32
-        num_batches = config.prec_num_batches
-        which = 'prec'
+        reduction_config = config.prec_reduction_config
 
-    trees = _scatter_add(
-        value, leaf_indices, tree_size, dtype, num_batches, which, config.data_sharded
+    trees = reduction_config._reduce(  # noqa: SLF001
+        value,
+        leaf_indices,
+        size=tree_size,
+        dtype=dtype,
+        data_sharded=config.data_sharded,
     )
 
     # count datapoints in nodes modified by move
@@ -1078,7 +1079,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
             resid,
             SeqStageInAllTrees(
                 pso.state.X,
-                pso.state.config.resid_num_batches,
+                pso.state.config.resid_reduction_config,
                 pso.state.config.data_sharded,
                 pso.state.prec_scale,
                 pso.state.forest.log_likelihood is not None,
@@ -1115,8 +1116,8 @@ class SeqStageInAllTrees(Module):
     X: UInt[Array, 'p n']
     """The predictors."""
 
-    resid_num_batches: int | None | Literal['auto'] = field(static=True)
-    """The number of batches for computing the sum of residuals in each leaf."""
+    resid_reduction_config: ReductionConfig
+    """How to sum the residuals in each leaf."""
 
     data_sharded: bool = field(static=True)
     """Whether the data axis is sharded across devices."""
@@ -1218,7 +1219,11 @@ def accept_move_and_sample_leaves(
     tree_size = pt.leaf_tree.shape[-1]  # 2**d
 
     resid_tree = sum_resid(
-        scaled_resid, pt.leaf_indices, tree_size, at.resid_num_batches, at.data_sharded
+        scaled_resid,
+        pt.leaf_indices,
+        tree_size,
+        at.resid_reduction_config,
+        at.data_sharded,
     )
 
     # subtract starting tree from function
@@ -1282,7 +1287,7 @@ def sum_resid(
     ),
     leaf_indices: UInt[Array, ' n'],
     tree_size: int,
-    resid_num_batches: int | None | Literal['auto'],
+    reduction_config: ReductionConfig,
     data_sharded: bool,
 ) -> (
     Float32[Array, ' {tree_size}']
@@ -1301,8 +1306,8 @@ def sum_resid(
         The leaf indices of the tree (in which leaf each data point falls into).
     tree_size
         The size of the tree array (2 ** d).
-    resid_num_batches
-        The number of batches for computing the sum of residuals in each leaf.
+    reduction_config
+        How to sum the residuals in each leaf.
     data_sharded
         Whether the data axis is sharded; if true, the result is psum-reduced
         across the ``'data'`` axis of the enclosing `shard_map`.
@@ -1311,14 +1316,12 @@ def sum_resid(
     -------
     The per-leaf sum, with the same leading dimensions as ``scaled_resid`` and a trailing axis over the leaves.
     """
-    return _scatter_add(
+    return reduction_config._reduce(  # noqa: SLF001
         scaled_resid,
         leaf_indices,
-        tree_size,
-        jnp.float32,
-        resid_num_batches,
-        'resid',
-        data_sharded,
+        size=tree_size,
+        dtype=jnp.float32,
+        data_sharded=data_sharded,
     )
 
 

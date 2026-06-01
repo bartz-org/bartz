@@ -63,7 +63,7 @@ from bartz._jaxext import (
     split,
 )
 from bartz.grove import is_actual_leaf
-from bartz.mcmcstep import State, init, make_p_nonterminal, step
+from bartz.mcmcstep import BatchedReduction, State, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import (
     chain_vmap_axes,
     data_vmap_axes,
@@ -122,9 +122,9 @@ def _minimal_step_config() -> StepConfig:
     return StepConfig(
         steps_done=jnp.int32(0),
         sparse_on_at=None,
-        resid_num_batches=None,
-        count_num_batches=None,
-        prec_num_batches=None,
+        resid_reduction_config=BatchedReduction(num_batches=None),
+        count_reduction_config=BatchedReduction(num_batches=None),
+        prec_reduction_config=BatchedReduction(num_batches=None),
         prec_count_num_trees=None,
         mesh=None,
     )
@@ -1234,9 +1234,9 @@ class TestMultichain:
             init(
                 **copy_args(),
                 num_chains=None,
-                resid_num_batches=mc_state.config.resid_num_batches,
-                count_num_batches=mc_state.config.count_num_batches,
-                prec_num_batches=mc_state.config.prec_num_batches,
+                resid_reduction_config=mc_state.config.resid_reduction_config,
+                count_reduction_config=mc_state.config.count_reduction_config,
+                prec_reduction_config=mc_state.config.prec_reduction_config,
             )
             for _ in range(num_chains)
         ]
@@ -1992,8 +1992,8 @@ class TestMVBartIntegration:
                 max_split=max_split,
                 num_trees=10,
                 p_nonterminal=p_nonterminal,
-                resid_num_batches=None,
-                count_num_batches=None,
+                resid_reduction_config=BatchedReduction(num_batches=None),
+                count_reduction_config=BatchedReduction(num_batches=None),
             ),
         )
 
@@ -2205,8 +2205,8 @@ class TestMultivariate:
                 max_split=max_split,
                 num_trees=n_trees,
                 p_nonterminal=jnp.array([0.9, 0.5]),
-                resid_num_batches=None,
-                count_num_batches=None,
+                resid_reduction_config=BatchedReduction(num_batches=None),
+                count_reduction_config=BatchedReduction(num_batches=None),
             ),
         )
 
@@ -2311,8 +2311,8 @@ class TestMultivariate:
             num_trees=5,
             p_nonterminal=jnp.array([0.9, 0.5]),
             leaf_prior_cov_inv=jnp.eye(k),
-            resid_num_batches=None,
-            count_num_batches=None,
+            resid_reduction_config=BatchedReduction(num_batches=None),
+            count_reduction_config=BatchedReduction(num_batches=None),
         )
 
         if kind == 'binary':
@@ -2374,8 +2374,8 @@ class TestMultivariate:
                 leaf_prior_cov_inv=jnp.eye(k),
                 error_cov_df=jnp.array(4.0 + k),
                 error_cov_scale=jnp.eye(k),
-                resid_num_batches=None,
-                count_num_batches=None,
+                resid_reduction_config=BatchedReduction(num_batches=None),
+                count_reduction_config=BatchedReduction(num_batches=None),
             ),
         )
 

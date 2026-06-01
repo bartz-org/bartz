@@ -247,6 +247,7 @@ def autobatch(
     *,
     return_nbatches: bool = False,
     reduce_ufunc: jnp.ufunc | None = None,
+    reduce_vary_axes: tuple[str, ...] = (),
     warn_on_overflow: bool = True,
     result_shape_dtype: PyTree[ShapeDtypeStruct] = NotDefined,
 ) -> Callable:
@@ -272,6 +273,11 @@ def autobatch(
     reduce_ufunc
         Function used to reduce the output along the batched axis (e.g.,
         `jax.numpy.add`).
+    reduce_vary_axes
+        Manual `jax.shard_map` mesh axes over which the reduction accumulator
+        varies. Under a `shard_map`, the reduction seed is `pcast` to vary over
+        these axes so its type matches the shard-varying loop body, satisfying
+        the VMA checker. Ignored unless `reduce_ufunc` is set.
     warn_on_overflow
         If True, a warning is raised if the memory limit could not be
         respected.
@@ -310,6 +316,7 @@ def autobatch(
             out_axes,
             return_nbatches,
             reduce_ufunc,
+            reduce_vary_axes,
             warn_on_overflow,
             result_shape_dtype,
             args,
@@ -325,6 +332,7 @@ def batched_func(
     out_axes: PyTree[int],
     return_nbatches: bool,
     reduce_ufunc: jnp.ufunc | None,
+    reduce_vary_axes: tuple[str, ...],
     warn_on_overflow: bool,
     result_shape_dtype: PyTree[ShapeDtypeStruct] | NotDefined,
     args: tuple[PyTree[Array], ...],
@@ -381,6 +389,13 @@ def batched_func(
             initial = None
         else:
             initial = identity(reduce_ufunc, example_result)
+            # under a `shard_map`, the loop body output varies over the manual
+            # axes while this seed is replicated; mark it varying so the scan's
+            # carry types match and the VMA checker is satisfied
+            if reduce_vary_axes:
+                initial = tree.map(
+                    lambda x: lax.pcast(x, reduce_vary_axes, to='varying'), initial
+                )
 
         # loop and invoke the function in batches
         loop = partial(

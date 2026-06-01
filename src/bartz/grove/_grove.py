@@ -30,7 +30,7 @@ from functools import partial
 from typing import Literal, Protocol
 
 from equinox import Module
-from jax import jit, lax, vmap
+from jax import jit, vmap
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
@@ -124,16 +124,12 @@ def traverse_tree(
     -------
     The index of the leaf.
     """
-    carry = (
-        jnp.zeros((), bool),
-        jnp.ones((), minimal_unsigned_dtype(2 * var_tree.size - 1)),
-    )
+    leaf_found = jnp.zeros((), bool)
+    index = jnp.ones((), minimal_unsigned_dtype(2 * var_tree.size - 1))
 
-    def loop(
-        carry: tuple[Bool[Array, ''], UInt[Array, '']], _: None
-    ) -> tuple[tuple[Bool[Array, ''], UInt[Array, '']], None]:
-        leaf_found, index = carry
-
+    # the depth is a small static integer, so a plain python loop is equivalent
+    # to (and clearer than) a fully-unrolled lax.scan
+    for _ in range(tree_depth(var_tree)):
         split = split_tree[index]
         var = var_tree[index]
 
@@ -141,10 +137,6 @@ def traverse_tree(
         child_index = (index << 1) + (x[var] >= split)
         index = jnp.where(leaf_found, index, child_index)
 
-        return (leaf_found, index), None
-
-    depth = tree_depth(var_tree)
-    (_, index), _ = lax.scan(loop, carry, None, depth, unroll=16)
     return index
 
 

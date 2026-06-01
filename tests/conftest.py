@@ -37,7 +37,7 @@ import pytest
 import tomli
 from jax import config, random
 
-from bartz._jaxext import get_default_device, split
+from bartz._jaxext import get_default_device, get_device_count, split
 
 
 def get_old_python_version() -> tuple[int, int]:
@@ -147,5 +147,5 @@ def setup_jax_platform(session: pytest.Session) -> None:
 
     with ctx:
         dd = get_default_device()
-        num_devices = len(jax.devices(dd.platform))
+        num_devices = get_device_count()
         print(f'jax default device: {dd.device_kind}, num devices: {num_devices}')

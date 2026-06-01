@@ -29,7 +29,6 @@ from dataclasses import replace
 from functools import partial
 from typing import Any
 
-import jax
 import pytest
 from equinox import filter_jit
 from jax import (
@@ -48,7 +47,7 @@ from jax.tree_util import KeyPath
 from jaxtyping import Array, Float32, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
-from bartz._jaxext import split
+from bartz._jaxext import get_default_devices, get_device_count, split
 from bartz.mcmcloop import (
     BurninTrace,
     MainTrace,
@@ -259,7 +258,9 @@ class TestRunMcmc:
         """Check that double compilation is detected."""
         state = simple_init(10, 100, 20)
 
-        mesh = make_mesh((1,), ('a',), axis_types=(AxisType.Auto,))
+        mesh = make_mesh(
+            (1,), ('a',), axis_types=(AxisType.Auto,), devices=get_default_devices()
+        )
         sharding = NamedSharding(mesh, PartitionSpec())
         resid = device_put(state.resid, sharding)
         state = replace(state, resid=resid)
@@ -340,7 +341,10 @@ def _eval_test_points(n_test: int = _N_TEST) -> UInt8[Array, '6 {n_test}']:
 def _make_mesh(axes: dict[str, int]) -> Mesh:
     """Build an auto-mode mesh from an ``{axis_name: size}`` mapping."""
     return make_mesh(
-        tuple(axes.values()), tuple(axes), axis_types=(AxisType.Auto,) * len(axes)
+        tuple(axes.values()),
+        tuple(axes),
+        axis_types=(AxisType.Auto,) * len(axes),
+        devices=get_default_devices(),
     )
 
 
@@ -394,7 +398,7 @@ class TestEvaluateTrace:
         self, keys: split, num_chains: int | None, k: int | None
     ) -> None:
         """Modes agree with a data-sharding mesh."""
-        if len(jax.devices()) < 2:
+        if get_device_count() < 2:
             pytest.skip('need at least 2 devices')
         self._assert_modes_match(keys, num_chains, k, _make_mesh({'data': 2}))
 
@@ -404,14 +408,14 @@ class TestEvaluateTrace:
         """Modes agree with a mesh sharding both chains and data."""
         if num_chains is None:
             pytest.skip('no chains to shard')
-        if len(jax.devices()) < 4:
+        if get_device_count() < 4:
             pytest.skip('need at least 4 devices')
         mesh = _make_mesh({'chains': 2, 'data': 2})
         self._assert_modes_match(keys, num_chains, k, mesh)
 
     def test_shard_fallback_without_data_axis(self, keys: split) -> None:
         """`shard_and_autobatch` without a 'data' mesh axis falls back to batching."""
-        if len(jax.devices()) < 2:
+        if get_device_count() < 2:
             pytest.skip('need at least 2 devices')
         mesh = _make_mesh({'chains': 2})
         trace = self._trace(keys, 4, None, mesh)
@@ -428,7 +432,7 @@ class TestEvaluateTrace:
         tree autobatch can't honor the limit and warns; catching that warning
         checks the whole batching stack end-to-end.
         """
-        if mode == 'shard_and_autobatch' and len(jax.devices()) < 2:
+        if mode == 'shard_and_autobatch' and get_device_count() < 2:
             pytest.skip('need at least 2 devices')
         mesh = _make_mesh({'data': 2}) if mode == 'shard_and_autobatch' else None
 

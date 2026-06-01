@@ -68,7 +68,13 @@ from pytest_subtests import SubTests
 from bartz import Bart as OriginalBart
 from bartz import PredictKind
 from bartz._interface import predict_latent
-from bartz._jaxext import get_default_device, get_device_count, is_key, split
+from bartz._jaxext import (
+    get_default_device,
+    get_default_devices,
+    get_device_count,
+    is_key,
+    split,
+)
 from bartz.debug import TraceWithOffset, sample_prior
 from bartz.grove import (
     check_trace,
@@ -2204,7 +2210,7 @@ def test_no_array_gc(keys: split, bkw: BartKW) -> None:
 
 def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     """Check that the result is the same with/without sharding."""
-    if len(jax.devices()) < 2:  # this branch is covered in single cpu tests config
+    if get_device_count() < 2:  # this branch is covered in single cpu tests config
         pytest.skip('Need at least 2 devices for this test')
     if bkw.any_binary:
         # Binary regression uses `step_z`, which on data sharding folds the
@@ -2250,7 +2256,7 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
         bart_data = remove_mesh(bart_data)
         tree.map_with_path(check_equal, bart, bart_data)
 
-    if len(jax.devices()) >= 4:  # pragma: no branch
+    if get_device_count() >= 4:  # pragma: no branch
         with subtests.test('shard data and chains'):
             both_kw = tree.map(lambda x: x, baseline_kw)
             both_kw.update(num_chain_devices=2, num_data_devices=2)
@@ -2653,14 +2659,14 @@ class TestDevicePlacement:
 
     @pytest.fixture(autouse=True)
     def _skip_if_single_device(self) -> None:
-        if len(jax.devices()) < 2:  # this branch is covered in single cpu tests config
+        if get_device_count() < 2:  # this branch is covered in single cpu tests config
             pytest.skip('Need at least 2 devices for device placement tests')
 
     @pytest.fixture
     def other_device(self) -> Device:
         """Return a device different from the default one."""
         default = get_default_device()
-        return next(d for d in jax.devices() if d != default)
+        return next(d for d in get_default_devices() if d != default)
 
     @pytest.fixture
     def single_device_kw(self, bkw: BartKW) -> dict:

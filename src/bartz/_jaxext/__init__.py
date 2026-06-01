@@ -32,7 +32,6 @@ from typing import Any
 import jax
 from jax import (
     Device,
-    device_count,
     ensure_compile_time_eval,
     jit,
     lax,
@@ -271,10 +270,14 @@ def get_default_device() -> Device:
         return jnp.empty(0).device
 
 
+def get_default_devices() -> list[Device]:
+    """Get all JAX devices on the default platform."""
+    return jax.devices(get_default_device().platform)
+
+
 def get_device_count() -> int:
     """Get the number of available devices on the default platform."""
-    device = get_default_device()
-    return device_count(device.platform)
+    return len(get_default_devices())
 
 
 def is_key(x: object) -> bool:

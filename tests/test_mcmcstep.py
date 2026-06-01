@@ -56,7 +56,12 @@ from pytest_subtests import SubTests
 from scipy import stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
-from bartz._jaxext import get_device_count, minimal_unsigned_dtype, split
+from bartz._jaxext import (
+    get_default_devices,
+    get_device_count,
+    minimal_unsigned_dtype,
+    split,
+)
 from bartz.mcmcstep import State, init, step
 from bartz.mcmcstep._moves import (
     ancestor_variables,
@@ -1349,7 +1354,7 @@ class TestMultichain:
 
     def test_normalize_spec(self) -> None:
         """Test `normalize_spec`."""
-        devices = jax.devices('cpu')[:3]
+        devices = get_default_devices()[:3]
         mesh = make_mesh(
             (len(devices), 1),
             ('ciao', 'bau'),

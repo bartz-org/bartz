@@ -46,9 +46,9 @@ def loggamma(
     r"""Sample the log of Gamma(a, 1) random values.
 
     This is a loop-free replacement for `jax.random.loggamma`. It draws a base
-    sample with a chi-square quantile expansion and corrects it with Stuart's
-    boosting identity, avoiding the nested rejection loops of the jax version
-    while preserving the log-space accuracy for small `a`.
+    sample with a chi-square quantile expansion [2]_ [3]_ and corrects it with
+    Stuart's boosting identity [1]_, avoiding the nested rejection loops of the
+    jax version while preserving the log-space accuracy for small `a`.
 
     Parameters
     ----------
@@ -75,8 +75,8 @@ def loggamma(
 
     Notes
     -----
-    The sampler relies on Stuart's theorem, which iterated `n_uniforms` times
-    gives, with :math:`U_k` independent uniforms on :math:`(0, 1)`,
+    The sampler relies on Stuart's theorem [1]_, which iterated `n_uniforms`
+    times gives, with :math:`U_k` independent uniforms on :math:`(0, 1)`,
 
     .. math::
         \log G_a = \log G_{a + n} + \sum_{k=0}^{n-1} \frac{\log U_k}{a + k}.
@@ -88,6 +88,17 @@ def loggamma(
 
     Samples below the smallest value representable in `dtype` underflow to
     :math:`-\infty`.
+
+    References
+    ----------
+    .. [1] Stuart, A. (1962). Gamma-distributed products of independent random
+       variables. Biometrika, 49(3-4), 564-565.
+       https://doi.org/10.1093/biomet/49.3-4.564
+    .. [2] Johnson, N. L., Kotz, S., & Balakrishnan, N. (1994). Continuous
+       univariate distributions (2nd ed). Wiley.
+    .. [3] Goldstein, R. B. (1973). Algorithm 451: Chi-square quantiles [G1].
+       Communications of the ACM, 16(8), 483-485.
+       https://doi.org/10.1145/355609.362319
     """
     dtype = canonicalize_dtype(float if dtype is None else dtype)
     # compute in at least float32: a narrower dtype gives no speedup (the cost is

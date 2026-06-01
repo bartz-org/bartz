@@ -81,6 +81,7 @@ dev = [
     "tomli>=2.2.1",
     "myst-nb>=1.2.0",
     "jupyterlab>=4.4.3",
+    "diff-cover>=9.3.1",
 ]
 
 # WORKAROUND(pytest<9): use [tool.pytest]

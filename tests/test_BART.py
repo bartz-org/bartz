@@ -67,7 +67,7 @@ from bartz.grove import (
 )
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import State
-from bartz.mcmcstep._state import chain_vmap_axes
+from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.prepcovars import (
     BinnerFactory,
     GivenSplitsBinner,

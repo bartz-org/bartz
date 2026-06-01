@@ -24,7 +24,7 @@
 
 """Mockup of the :external:py:mod:`scipy.stats` module."""
 
-from jaxtyping import Array, Float
+from jaxtyping import Array, ArrayLike, Float
 
 from bartz._jaxext.scipy.special import gammainccinv
 
@@ -33,6 +33,8 @@ class invgamma:
     """Class that represents the distribution InvGamma(a, 1)."""
 
     @staticmethod
-    def ppf(q: Float[Array, '*'], a: Float[Array, '*']) -> Float[Array, '*']:
+    def ppf(
+        q: Float[ArrayLike, '...'], a: Float[ArrayLike, '...']
+    ) -> Float[Array, '...']:
         """Percentile point function."""
         return 1 / gammainccinv(a, q)

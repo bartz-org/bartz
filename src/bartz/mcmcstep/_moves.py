@@ -33,58 +33,56 @@ from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
 from bartz import grove
 from bartz._jaxext import minimal_unsigned_dtype, split, vmap_nodoc
-from bartz.mcmcstep._state import CHAIN_AXIS, Forest, field
+from bartz.mcmcstep._state import Forest
 
 
 class Moves(Module):
     """Moves proposed to modify each tree."""
 
-    allowed: Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    allowed: Bool[Array, '*num_trees']
     """Whether there is a possible move. If `False`, the other values may not
     make sense. The only case in which a move is marked as allowed but is
     then vetoed is if it does not satisfy `min_points_per_leaf`, which for
     efficiency is implemented post-hoc without changing the rest of the
     MCMC logic."""
 
-    grow: Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    grow: Bool[Array, '*num_trees']
     """Whether the move is a grow move or a prune move."""
 
-    num_growable: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    num_growable: Int32[Array, '*num_trees']
     """The number of growable leaves in the original tree."""
 
-    node: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    node: Int32[Array, '*num_trees']
     """The index of the leaf to grow or node to prune."""
 
-    left: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    left: Int32[Array, '*num_trees']
     """The index of the left child of 'node'."""
 
-    right: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    right: Int32[Array, '*num_trees']
     """The index of the right child of 'node'."""
 
-    partial_ratio: Float32[Array, '*chains num_trees'] | None = field(chains=CHAIN_AXIS)
+    partial_ratio: Float32[Array, '*num_trees'] | None
     """A factor of the Metropolis-Hastings ratio of the move. It lacks the
     likelihood ratio, the probability of proposing the prune move, and the
     probability that the children of the modified node are terminal. If the
     move is PRUNE, the ratio is inverted. `None` once
     `log_trans_prior_ratio` has been computed."""
 
-    log_trans_prior_ratio: None | Float32[Array, '*chains num_trees'] = field(
-        chains=CHAIN_AXIS
-    )
+    log_trans_prior_ratio: None | Float32[Array, '*num_trees']
     """The logarithm of the product of the transition and prior terms of the
     Metropolis-Hastings ratio for the acceptance of the proposed move.
     `None` if not yet computed. If PRUNE, the log-ratio is negated."""
 
-    grow_var: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    grow_var: Int32[Array, '*num_trees']
     """The decision axes of the new rules."""
 
-    grow_split: UInt[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    grow_split: Int32[Array, '*num_trees']
     """The decision boundaries of the new rules."""
 
-    var_tree: UInt[Array, '*chains num_trees 2**(d-1)'] = field(chains=CHAIN_AXIS)
+    var_tree: UInt[Array, '*num_trees half_tree_size']
     """The updated decision axes of the trees, valid whatever move."""
 
-    affluence_tree: Bool[Array, '*chains num_trees 2**(d-1)'] = field(chains=CHAIN_AXIS)
+    affluence_tree: Bool[Array, '*num_trees half_tree_size']
     """A partially updated `affluence_tree`, updated as if the chosen move
     (grow or prune) was applied: GROW marks the new leaves, PRUNE marks the
     node that becomes a leaf. This mark initially (out of `propose_moves`)
@@ -92,24 +90,24 @@ class Moves(Module):
     leaf, and whether there are enough datapoints in the node is instead
     checked later in `accept_moves_parallel_stage`."""
 
-    left_growable: Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    left_growable: Bool[Array, '*num_trees']
     """Whether the left child of `node` has available decision rules, *not*
     counting the datapoint thresholds. This is the admissibility used in the
     prior term of the Metropolis-Hastings ratio, matching the standard BART
     prior which ignores the count constraints."""
 
-    right_growable: Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    right_growable: Bool[Array, '*num_trees']
     """Whether the right child of `node` has available decision rules, *not*
     counting the datapoint thresholds. See `left_growable`."""
 
-    logu: Float32[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    logu: Float32[Array, '*num_trees']
     """The logarithm of a uniform (0, 1] random variable to be used to
     accept the move. It's in (-oo, 0]."""
 
-    acc: None | Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    acc: None | Bool[Array, '*num_trees']
     """Whether the move was accepted. `None` if not yet computed."""
 
-    to_prune: None | Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    to_prune: None | Bool[Array, '*num_trees']
     """Whether the final operation to apply the move is pruning. This indicates
     an accepted prune move or a rejected grow move. `None` if not yet
     computed."""
@@ -154,13 +152,13 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
 @partial(vmap_nodoc, in_axes=(0, 0, 0, 0, None, None, None, None, None))
 def _propose_moves(
     key: Key[Array, ''],
-    var_tree: UInt[Array, ' 2**(d-1)'],
-    split_tree: UInt[Array, ' 2**(d-1)'],
-    affluence_tree: Bool[Array, ' 2**(d-1)'],
+    var_tree: UInt[Array, ' half_tree_size'],
+    split_tree: UInt[Array, ' half_tree_size'],
+    affluence_tree: Bool[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
-    blocked_vars: Int32[Array, ' k'] | None,
-    p_nonterminal: Float32[Array, ' 2**d'],
-    p_propose_grow: Float32[Array, ' 2**(d-1)'],
+    blocked_vars: UInt[Array, ' k'] | None,
+    p_nonterminal: Float32[Array, ' 2*half_tree_size'],
+    p_propose_grow: Float32[Array, ' half_tree_size'],
     log_s: Float32[Array, ' p'] | None,
 ) -> Moves:
     """
@@ -302,9 +300,9 @@ def _propose_moves(
 
 def choose_leaf(
     key: Key[Array, ''],
-    split_tree: UInt[Array, ' 2**(d-1)'],
-    affluence_tree: Bool[Array, ' 2**(d-1)'],
-    p_propose_grow: Float32[Array, ' 2**(d-1)'],
+    split_tree: UInt[Array, ' half_tree_size'],
+    affluence_tree: Bool[Array, ' half_tree_size'],
+    p_propose_grow: Float32[Array, ' half_tree_size'],
 ) -> tuple[Int32[Array, ''], Int32[Array, ''], Float32[Array, ''], Int32[Array, '']]:
     """
     Choose a leaf node to grow in a tree.
@@ -348,8 +346,9 @@ def choose_leaf(
 
 
 def growable_leaves(
-    split_tree: UInt[Array, ' 2**(d-1)'], affluence_tree: Bool[Array, ' 2**(d-1)']
-) -> Bool[Array, ' 2**(d-1)']:
+    split_tree: UInt[Array, ' half_tree_size'],
+    affluence_tree: Bool[Array, ' half_tree_size'],
+) -> Bool[Array, ' half_tree_size']:
     """
     Return a mask indicating the leaf nodes that can be proposed for growth.
 
@@ -409,11 +408,11 @@ def categorical(
 
 def choose_variable(
     key: Key[Array, ''],
-    var_tree: UInt[Array, ' 2**(d-1)'],
-    split_tree: UInt[Array, ' 2**(d-1)'],
+    var_tree: UInt[Array, ' half_tree_size'],
+    split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
-    blocked_vars: Int32[Array, ' k'] | None,
+    blocked_vars: UInt[Array, ' k'] | None,
     log_s: Float32[Array, ' p'] | None,
 ) -> tuple[Int32[Array, ''], Int32[Array, '']]:
     """
@@ -457,11 +456,11 @@ def choose_variable(
 
 
 def fully_used_variables(
-    var_tree: UInt[Array, ' 2**(d-1)'],
-    split_tree: UInt[Array, ' 2**(d-1)'],
+    var_tree: UInt[Array, ' half_tree_size'],
+    split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
-) -> UInt[Array, ' d-2']:
+) -> UInt[Array, ' d_minus_2']:
     """
     Find variables in the ancestors of a node that have an empty split range.
 
@@ -496,10 +495,10 @@ def fully_used_variables(
 
 
 def ancestor_variables(
-    var_tree: UInt[Array, ' 2**(d-1)'],
+    var_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
     node_index: Int32[Array, ''],
-) -> UInt[Array, ' d-2']:
+) -> UInt[Array, ' d_minus_2']:
     """
     Return the list of variables in the ancestors of a node.
 
@@ -531,11 +530,11 @@ def ancestor_variables(
 
 
 def split_range(
-    var_tree: UInt[Array, ' 2**(d-1)'],
-    split_tree: UInt[Array, ' 2**(d-1)'],
+    var_tree: UInt[Array, ' half_tree_size'],
+    split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
     node_index: Int32[Array, ''],
-    ref_var: Int32[Array, ''],
+    ref_var: Integer[Array, ''],
 ) -> tuple[Int32[Array, ''], Int32[Array, '']]:
     """
     Return the range of allowed splits for a variable at a given node.
@@ -653,8 +652,8 @@ def categorical_exclude(
 def choose_split(
     key: Key[Array, ''],
     var: Int32[Array, ''],
-    var_tree: UInt[Array, ' 2**(d-1)'],
-    split_tree: UInt[Array, ' 2**(d-1)'],
+    var_tree: UInt[Array, ' half_tree_size'],
+    split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
 ) -> tuple[Int32[Array, ''], Int32[Array, ''], Int32[Array, '']]:
@@ -697,7 +696,7 @@ def choose_split(
 def compute_partial_ratio(
     prob_choose: Float32[Array, ''],
     num_prunable: Int32[Array, ''],
-    p_nonterminal: Float32[Array, ' 2**d'],
+    p_nonterminal: Float32[Array, ' tree_size'],
     leaf_to_grow: Int32[Array, ''],
 ) -> Float32[Array, '']:
     """
@@ -752,14 +751,14 @@ def compute_partial_ratio(
 
 def choose_leaf_parent(
     key: Key[Array, ''],
-    split_tree: UInt[Array, ' 2**(d-1)'],
-    affluence_tree: Bool[Array, ' 2**(d-1)'],
-    p_propose_grow: Float32[Array, ' 2**(d-1)'],
+    split_tree: UInt[Array, ' half_tree_size'],
+    affluence_tree: Bool[Array, ' half_tree_size'],
+    p_propose_grow: Float32[Array, ' half_tree_size'],
 ) -> tuple[
     Int32[Array, ''],
     Int32[Array, ''],
     Float32[Array, ''],
-    Bool[Array, 'num_trees 2**(d-1)'],
+    Bool[Array, ' half_tree_size'],
 ]:
     """
     Pick a non-terminal node with leaf children to prune in a tree.
@@ -786,7 +785,7 @@ def choose_leaf_parent(
         The (normalized) probability that `choose_leaf` would chose
         `node_to_prune` as leaf to grow, if passed the tree where
         `node_to_prune` had been pruned.
-    affluence_tree : Bool[Array, 'num_trees 2**(d-1)']
+    affluence_tree : Bool[Array, 'num_trees half_tree_size']
         A partially updated `affluence_tree`, marking the node to prune as
         growable.
     """

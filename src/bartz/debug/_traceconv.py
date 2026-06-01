@@ -133,7 +133,7 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
 
     # determine minimal integer type for numcut
     numcut += 1  # because BART is 0-based
-    split_dtype = minimal_unsigned_dtype(numcut.max())
+    split_dtype = minimal_unsigned_dtype(numcut.max().item())
     numcut = jnp.array(numcut.astype(split_dtype))
 
     # determine minimum heap size to store the trees
@@ -145,9 +145,9 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
 class TraceWithOffset(Module):
     """A trace of trees with an offset, compatible with `bartz.mcmcloop.evaluate_trace`."""
 
-    leaf_tree: Float32[Array, 'ndpost ntree 2**d'] = field(samples=0)
-    var_tree: UInt[Array, 'ndpost ntree 2**(d-1)'] = field(samples=0)
-    split_tree: UInt[Array, 'ndpost ntree 2**(d-1)'] = field(samples=0)
+    leaf_tree: Float32[Array, 'ndpost ntree tree_size'] = field(samples=0)
+    var_tree: UInt[Array, 'ndpost ntree tree_size//2'] = field(samples=0)
+    split_tree: UInt[Array, 'ndpost ntree tree_size//2'] = field(samples=0)
     offset: Float32[Array, '']
 
     has_chains: ClassVar[bool] = False

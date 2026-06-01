@@ -50,11 +50,14 @@ def expand_axes(
 
 
 def normalize_axes(
-    axes: PyTree[int | None, ' T'], tree_arg: PyTree[Array, ' T']
+    axes: PyTree[int | None, ' T'],
+    tree_arg: PyTree[Array | ShapeDtypeStruct | None, ' T'],
 ) -> PyTree[int | None, ' T']:
     """Normalize axes to be non-negative and valid for the corresponding arrays in the tree_arg."""
 
-    def normalize_axis(axis: int | None, x: Array) -> int | None:
+    def normalize_axis(
+        axis: int | None, x: Array | ShapeDtypeStruct | None
+    ) -> int | None:
         if axis is None:
             return None
         else:
@@ -248,7 +251,7 @@ def autobatch(
     return_nbatches: bool = False,
     reduce_ufunc: jnp.ufunc | None = None,
     warn_on_overflow: bool = True,
-    result_shape_dtype: PyTree[ShapeDtypeStruct] = NotDefined,
+    result_shape_dtype: PyTree[ShapeDtypeStruct] | type[NotDefined] = NotDefined,
 ) -> Callable:
     """
     Batch a function such that each batch is smaller than a threshold.
@@ -326,9 +329,9 @@ def batched_func(
     return_nbatches: bool,
     reduce_ufunc: jnp.ufunc | None,
     warn_on_overflow: bool,
-    result_shape_dtype: PyTree[ShapeDtypeStruct] | NotDefined,
+    result_shape_dtype: PyTree[ShapeDtypeStruct] | type[NotDefined],
     args: tuple[PyTree[Array], ...],
-) -> PyTree[Array]:
+) -> PyTree[Array] | tuple[PyTree[Array], int]:
     """Implement the wrapper used in `autobatch`."""
     # determine the output structure of the function
     if result_shape_dtype is NotDefined:

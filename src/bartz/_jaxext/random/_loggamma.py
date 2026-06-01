@@ -31,18 +31,18 @@ from jax import jit, lax, random
 from jax import numpy as jnp
 from jax.dtypes import canonicalize_dtype
 from jax.typing import DTypeLike
-from jaxtyping import Array, Float32, Key
+from jaxtyping import Array, Float, Key
 
 
 @partial(jit, static_argnums=(2, 3), static_argnames=('n_uniforms',))
 def loggamma(
     key: Key[Array, ''],
-    a: Float32[Array, '*'],
+    a: Float[Array, '...'],
     shape: Sequence[int] | None = None,
     dtype: DTypeLike | None = None,
     *,
     n_uniforms: int = 4,
-) -> Float32[Array, '*']:
+) -> Float[Array, '...']:
     r"""Sample the log of Gamma(a, 1) random values.
 
     This is a loop-free replacement for `jax.random.loggamma`. It draws a base
@@ -135,8 +135,8 @@ _CHI2_QUANTILE_COEF = (
 
 
 def _loggamma_chisquare(
-    key: Key[Array, ''], a: Float32[Array, '*']
-) -> Float32[Array, '*']:
+    key: Key[Array, ''], a: Float[Array, '...']
+) -> Float[Array, '...']:
     r"""Log of a Gamma(a, 1) draw via a high-order chi-square quantile expansion.
 
     Cubes a 6th-degree polynomial in a standard normal (eq. 18.37 of Johnson,
@@ -150,7 +150,7 @@ def _loggamma_chisquare(
     u = 1 / nu
     t = x * lax.rsqrt(nu)  # since x^k nu^(-k/2) = t^k, poly is a degree-6 Horner in t
 
-    def row_coef(c: tuple[float, float, float]) -> Float32[Array, '*']:
+    def row_coef(c: tuple[float, float, float]) -> Float[Array, '...']:
         """Evaluate a coefficient row as a quadratic in 1/nu, by Horner."""
         return c[0] + u * (c[1] + u * c[2])
 

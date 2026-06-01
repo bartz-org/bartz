@@ -48,7 +48,7 @@ from bartz.prepcovars._prepcovars import (
     _subsample,
     _uniform_splits_from_matrix,
 )
-from tests.util import assert_array_equal, assert_close_matrices
+from tests.util import assert_array_equal, assert_close_matrices, jaxtyping_disabled
 
 
 class TestQuantilizer:
@@ -319,7 +319,7 @@ class TestBinners:
         """Mismatched `xinfo.shape[0]` vs `X.shape[0]` raises ValueError."""
         xinfo = jnp.array([[1.0, 2.0], [3.0, 4.0]], dtype=jnp.float32)
         x = jnp.zeros((5, 0), dtype=jnp.float32)
-        with pytest.raises(ValueError, match=r'xinfo\.shape'):
+        with pytest.raises(ValueError, match=r'xinfo\.shape'), jaxtyping_disabled():
             GivenSplitsBinner(x, xinfo=xinfo)
 
 

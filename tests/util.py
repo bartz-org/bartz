@@ -26,7 +26,6 @@
 
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
-from dataclasses import replace
 from operator import ge, le
 from os import getpid, kill
 from signal import SIGINT
@@ -43,7 +42,7 @@ from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
 from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
 from scipy import linalg, stats
 
-from bartz._jaxext import minimal_unsigned_dtype
+from bartz._jaxext import jaxtyping_disabled, minimal_unsigned_dtype  # noqa: F401
 from bartz.grove import TreesTrace, check_trace, describe_error
 
 
@@ -66,20 +65,20 @@ def manual_tree(
     check_powers_of_2(var)
     check_powers_of_2(split)
 
-    tree = TreesTrace(
-        jnp.concatenate([jnp.zeros(1), *map(jnp.array, leaf)]),
-        jnp.concatenate([jnp.zeros(1, int), *map(jnp.array, var)]),
-        jnp.concatenate([jnp.zeros(1, int), *map(jnp.array, split)]),
-    )
+    leaf_tree = jnp.concatenate([jnp.zeros(1), *map(jnp.array, leaf)])
+    var_tree = jnp.concatenate([jnp.zeros(1, int), *map(jnp.array, var)])
+    split_tree = jnp.concatenate([jnp.zeros(1, int), *map(jnp.array, split)])
 
-    p = jnp.max(tree.var_tree) + 1
+    # cast the heaps to the unsigned dtypes the annotations require before
+    # building the `TreesTrace` (its `__init__` is runtime type-checked)
+    p = jnp.max(var_tree).item() + 1
     var_type = minimal_unsigned_dtype(p - 1)
-    split_type = minimal_unsigned_dtype(jnp.max(tree.split_tree))
-    max_split = jnp.full(p, jnp.max(tree.split_tree), split_type)
-    tree = replace(
-        tree,
-        var_tree=tree.var_tree.astype(var_type),
-        split_tree=tree.split_tree.astype(split_type),
+    split_type = minimal_unsigned_dtype(jnp.max(split_tree).item())
+    max_split = jnp.full(p, jnp.max(split_tree), split_type)
+    tree = TreesTrace(
+        leaf_tree=leaf_tree,
+        var_tree=var_tree.astype(var_type),
+        split_tree=split_tree.astype(split_type),
     )
 
     error = check_trace(tree, max_split)

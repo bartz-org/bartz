@@ -48,7 +48,12 @@ from pytest_subtests import SubTests
 
 from bartz import Bart
 from bartz._interface import predict_latent
-from bartz._jaxext import get_default_device, get_device_count, split
+from bartz._jaxext import (
+    get_default_device,
+    get_device_count,
+    jaxtyping_disabled,
+    split,
+)
 from bartz.BART import gbart as original_gbart
 from bartz.BART import mc_gbart as original_mc_gbart
 from bartz.debug import TraceWithOffset, sample_prior, trees_BART_to_bartz
@@ -764,7 +769,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
         y_train=y,
         nskip=1000,
         sparse=True,
-        theta=peff if theta == 'fixed' else None,
+        theta=float(peff) if theta == 'fixed' else None,
         seed=keys.pop(),
     )
 
@@ -1000,7 +1005,9 @@ def test_xinfo_wrong_p() -> None:
     kw = dict(
         x_train=jnp.empty((5, 0)), y_train=jnp.empty(0), ndpost=0, nskip=0, xinfo=xinfo
     )
-    with pytest.raises(ValueError, match=r'xinfo\.shape'):
+    # `xinfo`'s p (3) deliberately mismatches `x_train`'s p (5); disable
+    # jaxtyping so the cross-axis check doesn't pre-empt the `ValueError`
+    with jaxtyping_disabled(), pytest.raises(ValueError, match=r'xinfo\.shape'):
         mc_gbart(**kw)
 
 
@@ -1071,7 +1078,8 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
             assert_array_less(rhat_dd, 1.02)
 
     with subtests.test('y_test'):
-        X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1)
+        assert nsplits <= 255  # `X` is uint8, so the split count must fit a byte
+        X = random.randint(keys.pop(), (p, 30), 0, nsplits + 1, jnp.uint8)
         yhat_mcmc = predict_latent(X, bart._main_trace)
         yhat_prior = evaluate_trace(X, prior_trace)
         rhat_yhat = rhat_rank([yhat_mcmc, yhat_prior], split=False)

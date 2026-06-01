@@ -32,6 +32,7 @@ from bartz._jaxext._jaxext import (
     get_default_device,
     get_device_count,
     is_key,
+    jaxtyping_disabled,
     jit_active,
     minimal_unsigned_dtype,
     split,

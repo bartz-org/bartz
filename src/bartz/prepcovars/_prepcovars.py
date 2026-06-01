@@ -26,12 +26,13 @@
 
 from abc import abstractmethod
 from functools import partial
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from equinox import AbstractVar, Module, field
 from jax import jit, random, vmap
 from jax import numpy as jnp
 from jax.scipy.sparse.linalg import cg
+from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Float32, Integer, Key, Real, Shaped, UInt
 
 from bartz._jaxext import autobatch, minimal_unsigned_dtype, unique
@@ -157,8 +158,8 @@ def _quantilized_splits_from_matrix(
 
 @partial(vmap, in_axes=(0, None))
 def _quantilized_splits_from_vector(
-    x: Real[Array, 'p n'], out_length: int
-) -> tuple[Real[Array, 'p m'], UInt[Array, ' p']]:
+    x: Real[Array, ' n'], out_length: int
+) -> tuple[Real[Array, ' m'], UInt[Array, '']]:
     # find the sorted unique values in x
     huge = _huge_value(x)
     u, actual_length = unique(x, size=x.size, fill_value=huge)
@@ -213,7 +214,7 @@ def _ensure_unsigned(x: Integer[Array, '*shape']) -> UInt[Array, '*shape']:
     return x.astype(_signed_to_unsigned(x.dtype))
 
 
-def _signed_to_unsigned(int_dtype: jnp.dtype) -> jnp.dtype:
+def _signed_to_unsigned(int_dtype: DTypeLike) -> DTypeLike:
     """
     Map a signed integer type to its unsigned counterpart.
 
@@ -366,8 +367,8 @@ def _bin_predictors(
     @partial(autobatch, max_io_nbytes=2**29)
     @vmap
     def bin_predictors(
-        x: Real[Array, 'p n'], splits: Real[Array, 'p m']
-    ) -> UInt[Array, 'p n']:
+        x: Real[Array, ' n'], splits: Real[Array, ' m']
+    ) -> UInt[Array, ' n']:
         dtype = minimal_unsigned_dtype(splits.size)
         return jnp.searchsorted(splits, x, **kw).astype(dtype)
 
@@ -424,6 +425,7 @@ class Binner(Module):
         ...
 
 
+@runtime_checkable
 class BinnerFactory(Protocol):
     """Callable that constructs a `Binner` from training predictors.
 

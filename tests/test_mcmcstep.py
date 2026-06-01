@@ -63,21 +63,19 @@ from bartz._jaxext import (
     split,
 )
 from bartz.mcmcstep import State, init, step
+from bartz.mcmcstep._axes import (
+    chain_vmap_axes,
+    data_vmap_axes,
+    field,
+    trace_sample_axes,
+)
 from bartz.mcmcstep._moves import (
     ancestor_variables,
     randint_exclude,
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._state import (
-    Forest,
-    StepConfig,
-    _search_divisor,
-    chain_vmap_axes,
-    data_vmap_axes,
-    field,
-    trace_sample_axes,
-)
+from bartz.mcmcstep._state import Forest, StepConfig, _search_divisor
 from bartz.mcmcstep._step import (
     PrecsScalar,
     _compute_likelihood_ratio_mv,

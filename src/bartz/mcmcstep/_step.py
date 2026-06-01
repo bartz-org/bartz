@@ -40,13 +40,13 @@ from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, Shaped, UInt, U
 from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz._jaxext.random import loggamma
 from bartz.grove import var_histogram
+from bartz.mcmcstep._axes import field
 from bartz.mcmcstep._moves import Moves, propose_moves
 from bartz.mcmcstep._state import (
     State,
     StepConfig,
     _auto_num_batches,
     chol_with_gersh,
-    field,
     get_axis_size,
     shard_map_state,
     split_key_for_chains,

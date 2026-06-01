@@ -40,7 +40,7 @@ from tqdm.auto import tqdm
 from bartz.grove import forest_mean_leaves
 from bartz.mcmcloop._loop import _replicate
 from bartz.mcmcstep import State
-from bartz.mcmcstep._state import chain_to_axis, chain_vmap_axes, chainful_axis
+from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes, chainful_axis
 
 
 def make_print_callback(

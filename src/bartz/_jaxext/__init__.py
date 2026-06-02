@@ -41,3 +41,4 @@ from bartz._jaxext._jaxext import (
     unique,
     vmap_nodoc,
 )
+from bartz._jaxext._jit import jit

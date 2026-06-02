@@ -33,24 +33,14 @@ from typing import Literal, TypedDict, TypeVar
 import jax
 import numpy
 from equinox import Module, error_if, filter_jit
-from jax import (
-    NamedSharding,
-    device_put,
-    jit,
-    lax,
-    make_mesh,
-    random,
-    shard_map,
-    tree,
-    vmap,
-)
+from jax import NamedSharding, device_put, lax, make_mesh, random, shard_map, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Key, PyTree, UInt
 from numpy import ndarray
 
-from bartz._jaxext import jaxtyping_disabled, minimal_unsigned_dtype
+from bartz._jaxext import jaxtyping_disabled, jit, minimal_unsigned_dtype
 from bartz.grove import HeapArrays, tree_depths
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes, field
 from bartz.mcmcstep._lazy import (
@@ -966,7 +956,7 @@ def _initial_affluence_tree(
     )
 
 
-@partial(jit, donate_argnums=(0, 1))
+@jit(donate_argnums=(0, 1))
 def _compute_scales(
     error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,

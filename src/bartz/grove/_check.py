@@ -26,11 +26,10 @@
 
 from typing import Protocol, runtime_checkable
 
-from jax import jit
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Integer, UInt
 
-from bartz._jaxext import autobatch, minimal_unsigned_dtype
+from bartz._jaxext import autobatch, jit, minimal_unsigned_dtype
 from bartz.grove._grove import TreeHeaps, TreesTrace, is_actual_leaf
 
 CHECK_FUNCTIONS = []

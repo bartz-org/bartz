@@ -29,7 +29,7 @@ import pickle
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from enum import Enum
-from functools import cached_property, partial
+from functools import cached_property
 from os import PathLike, cpu_count
 from pathlib import Path
 
@@ -46,7 +46,6 @@ from jax import (
     debug_nans,
     device_count,
     device_put,
-    jit,
     lax,
     make_mesh,
     random,
@@ -59,7 +58,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz._jaxext import equal_shards, is_key, split
+from bartz._jaxext import equal_shards, is_key, jit, split
 from bartz._jaxext.scipy.special import ndtri
 from bartz._jaxext.scipy.stats import invgamma
 from bartz.grove import (
@@ -1430,7 +1429,7 @@ def _run_mcmc(
     return run_mcmc(key, mcmc_state, n_save, **kw)
 
 
-@partial(jit, static_argnames='p')
+@jit(static_argnames='p')
 # this is jitted such that lax.collapse below does not create a copy
 def varcount(p: int, trace: MainTrace) -> Int32[Array, 'ndpost p']:
     """Histogram of predictor usage for decision rules in the trees, squashing chains."""
@@ -1439,7 +1438,7 @@ def varcount(p: int, trace: MainTrace) -> Int32[Array, 'ndpost p']:
     return lax.collapse(varcount, 0, -1)
 
 
-@partial(jit, static_argnames='mean')
+@jit(static_argnames='mean')
 def get_error_sdev(
     trace: MainTrace,
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
@@ -1473,7 +1472,7 @@ def get_error_sdev(
     return jnp.where(binary_mask, jnp.nan, sdev)
 
 
-@partial(jit, static_argnames='only_continuous')
+@jit(static_argnames='only_continuous')
 def get_latent_prec(
     burnin_trace: BurninTrace,
     main_trace: MainTrace,
@@ -1593,7 +1592,7 @@ def depth_distr(trace: MainTrace) -> Int32[Array, '*num_chains n_save d']:
     return out
 
 
-@partial(jit, static_argnames='node_type')
+@jit(static_argnames='node_type')
 def points_per_node_distr_trace(
     X: UInt[Array, 'p n'], trace: MainTrace, node_type: Literal['leaf', 'leaf-parent']
 ) -> Int32[Array, '*num_chains n_save n+1']:
@@ -1793,7 +1792,7 @@ def predict_latent(
     return evaluate_trace(x, trace, flatten_chains=True)
 
 
-@partial(jit, static_argnums=(5, 6))
+@jit(static_argnums=(5, 6))
 def predict(
     key: Key[Array, ''] | None,
     trace: MainTrace,
@@ -1835,7 +1834,7 @@ def predict(
     return mean_samples
 
 
-@partial(jit, static_argnums=(5,))
+@jit(static_argnums=(5,))
 def sample_outcome(
     key: Key[Array, ''],
     trace: MainTrace,

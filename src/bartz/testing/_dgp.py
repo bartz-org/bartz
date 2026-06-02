@@ -26,14 +26,13 @@
 """Define `gen_data` that generates simulated data for testing."""
 
 from dataclasses import replace
-from functools import partial
 
 from equinox import Module, error_if, field
-from jax import jit, random
 from jax import numpy as jnp
+from jax import random
 from jaxtyping import Array, Bool, Float, Int, Integer, Key
 
-from bartz._jaxext import split
+from bartz._jaxext import jit, split
 from bartz.mcmcstep import OutcomeType
 
 
@@ -413,7 +412,7 @@ class DGP(Module):
         return train, test
 
 
-@partial(jit, static_argnames=('p', 'k', 'outcome_type'))
+@jit(static_argnames=('p', 'k', 'outcome_type'))
 def gen_params(
     key: Key[Array, ''],
     *,
@@ -527,7 +526,7 @@ def gen_params(
     )
 
 
-@partial(jit, static_argnames=('n',))
+@jit(static_argnames=('n',))
 def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
     """Sample predictors and outcomes given fixed `params`.
 
@@ -582,7 +581,7 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
     )
 
 
-@partial(jit, static_argnames=('n', 'p', 'k', 'outcome_type'))
+@jit(static_argnames=('n', 'p', 'k', 'outcome_type'))
 def gen_data(
     key: Key[Array, ''],
     *,

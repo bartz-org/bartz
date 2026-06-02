@@ -30,12 +30,12 @@ from functools import partial
 from typing import Literal, Protocol, runtime_checkable
 
 from equinox import Module, tree_at
-from jax import jit, vmap
 from jax import numpy as jnp
+from jax import vmap
 from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
 
-from bartz._jaxext import autobatch, minimal_unsigned_dtype, vmap_nodoc
+from bartz._jaxext import autobatch, jit, minimal_unsigned_dtype, vmap_nodoc
 
 
 @runtime_checkable
@@ -217,7 +217,7 @@ def _traverse_forest(
     return traverse_tree(X, var_trees, split_trees)
 
 
-@partial(jit, static_argnames=('sum_batch_axis',))
+@jit(static_argnames=('sum_batch_axis',))
 def evaluate_forest(
     X: UInt[Array, 'p n'],
     trees: TreeHeaps,
@@ -379,7 +379,7 @@ def forest_mean_leaves(
     return (num_internal + 1).mean()
 
 
-@partial(jit, static_argnames=('p', 'sum_batch_axis'))
+@jit(static_argnames=('p', 'sum_batch_axis'))
 def var_histogram(
     p: int,
     var_tree: UInt[Array, '*batch_shape half_tree_size'],
@@ -559,7 +559,7 @@ def forest_depth_distr(
     return jnp.bincount(depths, length=depth)
 
 
-@partial(jit, static_argnames=('node_type', 'sum_batch_axis'))
+@jit(static_argnames=('node_type', 'sum_batch_axis'))
 def points_per_node_distr(
     X: UInt[Array, 'p n'],
     var_tree: UInt[Array, '*batch_shape half_tree_size'],

@@ -28,15 +28,14 @@ from dataclasses import replace
 from functools import partial
 from typing import Literal
 
-import jax
 from equinox import AbstractVar, Module
-from jax import jit, lax, named_call, random, vmap
+from jax import lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
 from jaxtyping import Array, Bool, Float32, Key, Shaped, UInt, UInt32
 
-from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
+from bartz._jaxext import jit, split, truncated_normal_onesided, vmap_nodoc
 from bartz._jaxext.random import loggamma
 from bartz.grove import var_histogram
 from bartz.mcmcstep._axes import field
@@ -53,7 +52,7 @@ from bartz.mcmcstep._state import (
 )
 
 
-@partial(jit, donate_argnums=(1,))
+@jit(donate_argnums=(1,))
 @split_key_for_chains
 @shard_map_state
 @vmap_chains
@@ -1578,7 +1577,7 @@ def _apply_moves_to_affluence_trees(
     )
 
 
-@jax.jit
+@jit
 def _sample_wishart_bartlett(
     key: Key[Array, ''], df: Float32[Array, ''], scale_inv: Float32[Array, 'k k']
 ) -> Float32[Array, 'k k']:

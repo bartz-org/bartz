@@ -30,11 +30,13 @@ from functools import partial, wraps
 from typing import Any
 from warnings import warn
 
-from jax import ShapeDtypeStruct, eval_shape, jit, lax, tree
+from jax import ShapeDtypeStruct, eval_shape, lax, tree
 from jax import numpy as jnp
 from jax.typing import DTypeLike
 from jaxtyping import Array, PyTree, Shaped
 from numpy.lib.array_utils import normalize_axis_index
+
+from bartz._jaxext._jit import jit
 
 
 def expand_axes(

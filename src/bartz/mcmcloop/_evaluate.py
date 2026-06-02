@@ -29,13 +29,13 @@ from collections.abc import Callable
 from functools import partial
 from typing import Literal, Protocol, runtime_checkable
 
-from jax import ShapeDtypeStruct, jit, lax, shard_map, tree, vmap
+from jax import ShapeDtypeStruct, lax, shard_map, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Float32, Int32, UInt
 from numpy.lib.array_utils import normalize_axis_index
 
-from bartz._jaxext import autobatch
+from bartz._jaxext import autobatch, jit
 from bartz.grove import TreesTrace, evaluate_forest, var_histogram
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
 from bartz.mcmcstep._state import partition_specs
@@ -62,14 +62,13 @@ class EvaluableTrace(Protocol):
     mesh: Mesh | None
 
 
-@partial(
-    jit,
+@jit(
     static_argnames=(
         'flatten_chains',
         'out_chain_axis_w_trees',
         'test_points',
         'max_io_nbytes',
-    ),
+    )
 )
 def evaluate_trace(
     X: UInt[Array, 'p n'],
@@ -471,7 +470,7 @@ def _shard_map_eval(
     )
 
 
-@partial(jit, static_argnames=('p', 'out_chain_axis'))
+@jit(static_argnames=('p', 'out_chain_axis'))
 def compute_varcount(
     p: int, trace: EvaluableTrace, *, out_chain_axis: int = CHAIN_AXIS
 ) -> Int32[Array, '*trace_shape {p}']:

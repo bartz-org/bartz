@@ -26,14 +26,21 @@
 
 from collections.abc import Callable
 from functools import partial, update_wrapper
-from typing import Any, NamedTuple, Protocol, TypeAlias, TypeVar, runtime_checkable
+from typing import (
+    Any,
+    Generic,
+    NamedTuple,
+    Protocol,
+    TypeAlias,
+    TypeVar,
+    runtime_checkable,
+)
 
 from equinox import Module
 from jax import (
     NamedSharding,
     device_put,
     eval_shape,
-    jit,
     lax,
     named_call,
     random,
@@ -44,7 +51,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Int32, Key, PyTree, Shaped
 
-from bartz._jaxext import jit_active, split
+from bartz._jaxext import jit, jit_active, split
 from bartz.mcmcloop._trace import BurninTrace, MainTrace
 from bartz.mcmcstep import State, step
 from bartz.mcmcstep._axes import trace_sample_axes
@@ -239,7 +246,7 @@ def run_mcmc(
         main_trace,
         callback_state,
     )
-    _run_mcmc_inner_loop._fun.reset_call_counter()  # noqa: SLF001
+    _inner_loop_counter.reset_call_counter()
     for i_outer in range(n_outer):
         carry = _run_mcmc_inner_loop(
             carry, inner_loop_length, callback, n_burn, n_save, n_skip, i_outer, n_iters
@@ -255,7 +262,7 @@ def _replicate(x: Array, mesh: Mesh | None) -> Array:
         return device_put(x, NamedSharding(mesh, PartitionSpec()))
 
 
-@partial(jit, static_argnums=(0, 2))
+@jit(static_argnums=(0, 2))
 def _empty_trace(
     length: int, state: State, trace_cls: type[BurninTrace]
 ) -> BurninTrace:
@@ -270,7 +277,7 @@ def _empty_trace(
 T = TypeVar('T')
 
 
-class _CallCounter:
+class _CallCounter(Generic[T]):
     """Wrap a callable to check it's not called more than once."""
 
     def __init__(self, func: Callable[..., T]) -> None:
@@ -297,9 +304,7 @@ class _CallCounter:
         return self.func(*args, **kwargs)
 
 
-@partial(jit, donate_argnums=(0,), static_argnums=(2,))
-@_CallCounter
-def _run_mcmc_inner_loop(
+def _run_mcmc_inner_loop_impl(
     carry: _Carry,
     inner_loop_length: Int32[Array, ''],
     callback: Callback | None,
@@ -357,6 +362,15 @@ def _run_mcmc_inner_loop(
         )
 
     return lax.while_loop(cond, body, carry)
+
+
+# Wrap the inner loop in an explicit `_CallCounter`, kept in `_inner_loop_counter`
+# so `run_mcmc` can reset it directly instead of reaching into jit internals,
+# then jit the wrapped callable.
+_inner_loop_counter: _CallCounter[_Carry] = _CallCounter(_run_mcmc_inner_loop_impl)
+_run_mcmc_inner_loop = jit(donate_argnums=(0,), static_argnums=(2,))(
+    _inner_loop_counter
+)
 
 
 @named_call

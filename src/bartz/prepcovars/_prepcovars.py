@@ -29,13 +29,13 @@ from functools import partial
 from typing import Any, Protocol, runtime_checkable
 
 from equinox import AbstractVar, Module, field
-from jax import jit, random, vmap
 from jax import numpy as jnp
+from jax import random, vmap
 from jax.scipy.sparse.linalg import cg
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Float32, Integer, Key, Real, Shaped, UInt
 
-from bartz._jaxext import autobatch, minimal_unsigned_dtype, unique
+from bartz._jaxext import autobatch, jit, minimal_unsigned_dtype, unique
 
 
 def _parse_xinfo(
@@ -68,7 +68,7 @@ def _parse_xinfo(
     return splits, max_split
 
 
-@partial(jit, static_argnums=(2,))
+@jit(static_argnums=(2,))
 def _subsample(
     key: Key[Array, ''], X: Real[Array, 'p n'], max_samples: int
 ) -> Real[Array, 'p m']:
@@ -110,7 +110,7 @@ def _subsample(
     return per_row(keys, X)
 
 
-@partial(jit, static_argnums=(1,))
+@jit(static_argnums=(1,))
 def _quantilized_splits_from_matrix(
     X: Real[Array, 'p n'], max_bins: int
 ) -> tuple[Real[Array, 'p m'], UInt[Array, ' p']]:
@@ -237,7 +237,7 @@ def _signed_to_unsigned(int_dtype: DTypeLike) -> DTypeLike:
             raise TypeError(msg)
 
 
-@partial(jit, static_argnums=(1,))
+@jit(static_argnums=(1,))
 def _uniform_splits_from_matrix(
     X: Real[Array, 'p n'], num_bins: int
 ) -> tuple[Real[Array, 'p m'], UInt[Array, ' p']]:
@@ -268,7 +268,7 @@ def _uniform_splits_from_matrix(
     return splits, max_split
 
 
-@partial(jit, static_argnums=(2,))
+@jit(static_argnums=(2,))
 def _uniform_splits_from_range(
     low: Real[Array, ' p'], high: Real[Array, ' p'], num_bins: int
 ) -> Real[Array, 'p m']:
@@ -294,7 +294,7 @@ def _uniform_splits_from_range(
     return splits
 
 
-@partial(jit, static_argnums=(3,))
+@jit(static_argnums=(3,))
 def _bin_predictors_uniform(
     X: Real[Array, 'p n'],
     low: Real[Array, ' p'],
@@ -338,7 +338,7 @@ def _bin_predictors_uniform(
     return bins.astype(minimal_unsigned_dtype(num_bins - 1))
 
 
-@partial(jit, static_argnames=('method',))
+@jit(static_argnames=('method',))
 def _bin_predictors(
     X: Real[Array, 'p n'], splits: Real[Array, 'p m'], **kw: Any
 ) -> UInt[Array, 'p n']:

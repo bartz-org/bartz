@@ -29,11 +29,13 @@ from functools import wraps
 from typing import Any
 
 import numpy as np
-from jax import ShapeDtypeStruct, jit, pure_callback
+from jax import ShapeDtypeStruct, pure_callback
 from jax import numpy as jnp
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float
 from scipy.special import gammainccinv as scipy_gammainccinv
+
+from bartz._jaxext._jit import jit
 
 
 def _float_type(*args: DTypeLike | Array) -> jnp.dtype:

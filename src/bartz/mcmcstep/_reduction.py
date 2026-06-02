@@ -87,7 +87,7 @@ class BatchedReduction(ReductionConfig):
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
 
         def impl(num_batches: int | None) -> Shaped[Array, '*batch_shape size']:
-            return _scatter_add_impl(
+            return _batched_scatter_add(
                 values,
                 indices,
                 size=size,
@@ -114,14 +114,7 @@ class BatchedReduction(ReductionConfig):
         )
 
 
-# default reduction configs for `init`; the per-reduction gpu batch targets were
-# tuned on an A4000
-DEFAULT_RESID_REDUCTION = BatchedReduction(auto_gpu_target=1024)
-DEFAULT_COUNT_REDUCTION = BatchedReduction(auto_gpu_target=2048)
-DEFAULT_PREC_REDUCTION = BatchedReduction(auto_gpu_target=1024)
-
-
-def _scatter_add_impl(
+def _batched_scatter_add(
     values: Float32[Array, '*batch_shape n'] | Int32[Array, ''],
     indices: Integer[Array, ' n'],
     /,
@@ -163,3 +156,99 @@ def _final_round(n: int, num: float | int) -> int | None:
 
     # disable batching if the batch is as large as the whole dataset
     return num if num > 1 else None
+
+
+class OneHotReduction(ReductionConfig):
+    """Dense one-hot reduction, intended for small `n`.
+
+    Materializes the membership of each datapoint in its leaf as a one-hot
+    matrix over the `size` bins and contracts it against the values. This trades
+    the scatter atomics of `BatchedReduction` for a dense ``size``-by-``n``
+    pass, which can win when `n` is not much larger than `size`, e.g. on gpu
+    with heavily data-sharded high-dimensional problems.
+    """
+
+    method: Literal[
+        'scatter_set',
+        'matmul_n_outer',
+        'matmul_n_inner',
+        'multiply_n_outer',
+        'multiply_n_inner',
+    ] = field(static=True, default='multiply_n_inner')
+    """How to contract the values against the one-hot leaf-membership matrix:
+
+    'scatter_set'
+        Scatter the values into a dense ``size``-by-``n`` buffer with unique
+        (non-atomic) writes, then sum over the datapoints.
+    'matmul_n_outer'
+        Contract the values with the ``n``-by-``size`` one-hot matrix via a dot.
+    'matmul_n_inner'
+        Same with the transposed ``size``-by-``n`` one-hot, which gets a
+        different operand layout for the dot.
+    'multiply_n_outer'
+        Elementwise-multiply by the ``n``-by-``size`` one-hot and reduce over
+        the datapoints; whether the product is fused into the reduction or
+        materialized is left to the backend.
+    'multiply_n_inner' (default)
+        Same with the ``size``-by-``n`` one-hot, reducing along its contiguous
+        axis.
+    """
+
+    def _reduce(
+        self,
+        values: Float32[Array, '*batch_shape n'] | int,
+        indices: Integer[Array, ' n'],
+        /,
+        *,
+        size: int,
+        dtype: DTypeLike,
+        data_sharded: bool,
+    ) -> Shaped[Array, '*batch_shape {size}']:
+        values = jnp.asarray(values)
+        assert values.ndim == 0 or values.shape[-1:] == indices.shape
+
+        # a scalar value (the count case) weights each datapoint by `values`
+        scalar = values.ndim == 0
+        (n,) = indices.shape
+        bins = jnp.arange(size, dtype=indices.dtype)
+
+        if self.method == 'scatter_set':
+            iota = jnp.arange(n)
+            # a scalar `values` broadcasts in the scatter, no need to expand it
+            out = (
+                jnp.zeros((*values.shape[:-1], size, n), dtype)
+                .at[..., indices, iota]
+                .set(values, unique_indices=True)
+                .sum(axis=-1)
+            )
+        elif self.method == 'matmul_n_outer':
+            onehot = (indices[:, None] == bins).astype(dtype)  # (n, size)
+            vec = jnp.broadcast_to(values.astype(dtype), (n,)) if scalar else values
+            out = jnp.einsum('...n,ns->...s', vec, onehot)
+        elif self.method == 'matmul_n_inner':
+            onehot = (bins[:, None] == indices).astype(dtype)  # (size, n)
+            vec = jnp.broadcast_to(values.astype(dtype), (n,)) if scalar else values
+            out = jnp.einsum('...n,sn->...s', vec, onehot)
+        elif self.method == 'multiply_n_outer':
+            onehot = indices[:, None] == bins  # (n, size)
+            if scalar:
+                out = values * onehot.sum(axis=-2, dtype=dtype)
+            else:
+                out = (values[..., :, None] * onehot).sum(axis=-2)
+        elif self.method == 'multiply_n_inner':
+            onehot = bins[:, None] == indices  # (size, n)
+            if scalar:
+                out = values * onehot.sum(axis=-1, dtype=dtype)
+            else:
+                out = (values[..., None, :] * onehot).sum(axis=-1)
+
+        if data_sharded:
+            out = lax.psum(out, 'data')
+        return out
+
+
+# default reduction configs for `init`; the per-reduction gpu batch targets were
+# tuned on an A4000
+DEFAULT_RESID_REDUCTION = BatchedReduction(auto_gpu_target=1024)
+DEFAULT_COUNT_REDUCTION = BatchedReduction(auto_gpu_target=2048)
+DEFAULT_PREC_REDUCTION = BatchedReduction(auto_gpu_target=1024)

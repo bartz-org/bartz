@@ -552,7 +552,7 @@ def init(
     count_num_batches: int | None | Literal['auto'] = 'auto',
     prec_num_batches: int | None | Literal['auto'] = 'auto',
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
-    sequential_unroll: int | bool = 1,
+    sequential_unroll: int | bool = 2,
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
     min_points_per_leaf: int | Integer[ArrayLike, ''] | None = None,
@@ -634,8 +634,8 @@ def init(
     sequential_unroll
         How much to unroll the sequential accept/reject loop over trees in
         `step`. See the ``unroll`` argument of `jax.lax.scan`. Unrolling may
-        speed up the MCMC at the cost of longer compilation. 1 (default) means
-        no unrolling.
+        speed up the MCMC at the cost of longer compilation. 1 means no
+        unrolling; the default is 2.
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
     filter_splitless_vars

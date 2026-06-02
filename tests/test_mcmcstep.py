@@ -34,7 +34,6 @@ import jax
 import numpy
 import pytest
 from beartype import beartype
-from equinox import Module
 from jax import debug_key_reuse, lax, make_mesh, random, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
@@ -57,6 +56,8 @@ from scipy import stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
 from bartz._jaxext import (
+    Module,
+    field,
     get_default_devices,
     get_device_count,
     minimal_unsigned_dtype,
@@ -64,12 +65,7 @@ from bartz._jaxext import (
 )
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import State, init, make_p_nonterminal, step
-from bartz.mcmcstep._axes import (
-    chain_vmap_axes,
-    data_vmap_axes,
-    field,
-    trace_sample_axes,
-)
+from bartz.mcmcstep._axes import chain_vmap_axes, data_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._moves import (
     ancestor_variables,
     randint_exclude,

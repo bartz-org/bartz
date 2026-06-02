@@ -22,11 +22,12 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Additions to jax."""
+"""Additions to jax and equinox."""
 
 # ruff: noqa: F401
 
 from bartz._jaxext._autobatch import autobatch
+from bartz._jaxext._equinox import Module, field
 from bartz._jaxext._jaxext import (
     equal_shards,
     get_default_device,

@@ -28,17 +28,23 @@ from dataclasses import replace
 from functools import partial
 from typing import Literal
 
-from equinox import AbstractVar, Module
+from equinox import AbstractVar
 from jax import lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
 from jaxtyping import Array, Bool, Float32, Key, Shaped, UInt, UInt32
 
-from bartz._jaxext import jit, split, truncated_normal_onesided, vmap_nodoc
+from bartz._jaxext import (
+    Module,
+    field,
+    jit,
+    split,
+    truncated_normal_onesided,
+    vmap_nodoc,
+)
 from bartz._jaxext.random import loggamma
 from bartz.grove import var_histogram
-from bartz.mcmcstep._axes import field
 from bartz.mcmcstep._moves import Moves, propose_moves
 from bartz.mcmcstep._scatter import _scatter_add
 from bartz.mcmcstep._state import (

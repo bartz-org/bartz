@@ -29,13 +29,13 @@ from dataclasses import fields
 from functools import partial
 from typing import Literal, Protocol, runtime_checkable
 
-from equinox import Module, tree_at
+from equinox import tree_at
 from jax import numpy as jnp
 from jax import vmap
 from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
 
-from bartz._jaxext import autobatch, jit, minimal_unsigned_dtype, vmap_nodoc
+from bartz._jaxext import Module, autobatch, jit, minimal_unsigned_dtype, vmap_nodoc
 
 
 @runtime_checkable

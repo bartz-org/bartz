@@ -34,8 +34,7 @@ from collections.abc import Callable, Hashable
 from dataclasses import fields
 from typing import Any, TypeVar
 
-from equinox import Module
-from equinox import field as eqx_field
+from equinox import Module as EquinoxModule
 from jax import numpy as jnp
 from jax import tree
 from jaxtyping import Array, PyTree
@@ -50,55 +49,7 @@ T = TypeVar('T')
 CHAIN_AXIS = int(os.environ.get('CHAIN_AXIS', '0'))
 
 
-def field(  # noqa: ANN202
-    *,
-    chains: int | None = None,
-    data: int | None = None,
-    samples: int | None = None,
-    **kwargs: Any,
-):
-    """Extend `equinox.field` with chain/data/sample axis markers.
-
-    Parameters
-    ----------
-    chains
-        Index of the chain axis for the field's arrays, or `None` if the field
-        has no chain axis. Any int is accepted, including negative indices with
-        the usual numpy semantics (e.g. ``-1`` for the last axis); the index is
-        normalized per-leaf against the leaf's ``ndim`` by `chain_vmap_axes`.
-    data
-    samples
-        Indices of the data/sample axes for the field's arrays, declared in the
-        chain-less "core" layout. `None` if the field has no data/sample axis.
-        The index is normalized per-leaf against the core ``ndim`` (the leaf's
-        ``ndim`` minus 1 when a chain axis is present, else the leaf's
-        ``ndim``); the chain axis, if any, is treated as inserted after the
-        data/sample axis exists, so `data_vmap_axes`/`trace_sample_axes` shift
-        the returned sample index up by 1 when the chain position is at or
-        before the core data/sample index.
-    **kwargs
-        Other parameters passed to `equinox.field`.
-
-    Returns
-    -------
-    A dataclass field descriptor with the axis indices in the metadata, unset if `None`.
-    """
-    metadata = dict(kwargs.pop('metadata', {}))
-    assert 'chains' not in metadata
-    assert 'data' not in metadata
-    assert 'samples' not in metadata
-    for name, value in (('chains', chains), ('data', data), ('samples', samples)):
-        # bool is a subclass of int; reject it so a boolean value does not
-        # silently mean axis 0 or 1.
-        assert not isinstance(value, bool), (
-            f'{name!r} marker must be an int axis index or None, not bool'
-        )
-        if value is not None:
-            metadata[name] = value
-    return eqx_field(metadata=metadata, **kwargs)
-
-
-def chain_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
+def chain_vmap_axes(x: PyTree[EquinoxModule | Any, 'T']) -> PyTree[int | None, 'T ...']:
     """Determine vmapping axes for chains.
 
     This function determines the argument to the `in_axes` or `out_axes`
@@ -128,7 +79,7 @@ def _none_marker(leaf: object, raw: int) -> None:  # noqa: ARG001
     return None  # noqa: RET501
 
 
-def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
+def data_vmap_axes(x: PyTree[EquinoxModule | Any, 'T']) -> PyTree[int | None, 'T ...']:
     """Determine vmapping axes for data.
 
     Parameters
@@ -150,7 +101,9 @@ def data_vmap_axes(x: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
     )
 
 
-def trace_sample_axes(trace: PyTree[Module | Any, 'T']) -> PyTree[int | None, 'T ...']:
+def trace_sample_axes(
+    trace: PyTree[EquinoxModule | Any, 'T'],
+) -> PyTree[int | None, 'T ...']:
     """Determine the position of the sample axis for each leaf of a trace.
 
     Parameters
@@ -298,7 +251,7 @@ def _is_lazy_array(x: object) -> bool:
 
 
 def _is_module(x: object) -> bool:
-    return isinstance(x, Module) and not _is_lazy_array(x)
+    return isinstance(x, EquinoxModule) and not _is_lazy_array(x)
 
 
 def _find_metadata(
@@ -351,4 +304,4 @@ def _find_metadata(
             )
         return tree.map(lambda _: default_value, x, is_leaf=_is_lazy_array)
 
-    return tree.map(get_axes, x, is_leaf=lambda x: isinstance(x, Module))
+    return tree.map(get_axes, x, is_leaf=lambda x: isinstance(x, EquinoxModule))

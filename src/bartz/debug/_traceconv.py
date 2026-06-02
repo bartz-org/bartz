@@ -29,15 +29,13 @@ from re import fullmatch
 from typing import ClassVar
 
 import numpy
-from equinox import Module
 from jax import numpy as jnp
 from jax.sharding import Mesh
 from jaxtyping import Array, Float32, UInt
 
-from bartz._jaxext import minimal_unsigned_dtype
+from bartz._jaxext import Module, field, minimal_unsigned_dtype
 from bartz.BART._gbart import FloatLike
 from bartz.grove import HeapArrays, TreeHeaps
-from bartz.mcmcstep._axes import field
 
 
 def _get_next_line(s: str, i: int) -> tuple[str, int]:

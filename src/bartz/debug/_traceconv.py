@@ -35,7 +35,7 @@ from jaxtyping import Array, Float32, UInt
 
 from bartz._jaxext import Module, field, minimal_unsigned_dtype
 from bartz.BART._gbart import FloatLike
-from bartz.grove import HeapArrays, TreeHeaps
+from bartz.grove import TreeHeaps
 
 
 def _get_next_line(s: str, i: int) -> tuple[str, int]:
@@ -140,7 +140,7 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
     return BARTTraceMeta(ndpost=ndpost, ntree=ntree, numcut=numcut, heap_size=heap_size)
 
 
-class TraceWithOffset(HeapArrays):
+class TraceWithOffset(Module):
     """A trace of trees with an offset, compatible with `bartz.mcmcloop.evaluate_trace`."""
 
     leaf_tree: Float32[Array, 'ndpost ntree tree_size'] = field(samples=0)

@@ -36,7 +36,7 @@ from jaxtyping import Array, Float32, Int32, UInt
 from numpy.lib.array_utils import normalize_axis_index
 
 from bartz._jaxext import autobatch, jit
-from bartz.grove import TreesTrace, evaluate_forest, var_histogram
+from bartz.grove import TreesTrace, evaluate_forest, is_multivariate, var_histogram
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
 from bartz.mcmcstep._state import partition_specs
 
@@ -212,7 +212,7 @@ def _evaluate_trace(
     # sizes, read from the arrays (hence per-device under the `shard_map`)
     # leaf_tree has shape (sample, tree, *k, ts)
     k_axis = chainful_axis(2, trace_chain_axes.leaf_tree)
-    is_mv = trace.is_multivariate
+    is_mv = is_multivariate(trace)
     kshape = trace.leaf_tree.shape[k_axis : k_axis + is_mv]
     _, n = X.shape
     num_samples = trace.leaf_tree.shape[sample_axes.leaf_tree]
@@ -336,7 +336,7 @@ def _output_axes(
     out_chain_axis = sample_axis = 0
     if trace.has_chains:
         # pre-tree-reduction output ndim: chain + (sample, tree, *k, n)
-        is_mv = trace.is_multivariate
+        is_mv = is_multivariate(trace)
         out_chain_axis_w_trees = normalize_axis_index(out_chain_axis_w_trees, 4 + is_mv)
         tree_axis = chainful_axis(tree_axis, out_chain_axis_w_trees)
         out_chain_axis = out_chain_axis_w_trees - (out_chain_axis_w_trees > tree_axis)
@@ -371,7 +371,7 @@ def _output_layout(
     n_axis : int
         Position of the observation (``n``) axis.
     """
-    is_mv = trace.is_multivariate
+    is_mv = is_multivariate(trace)
     chainless_ndim = 2 + is_mv  # (sample, *k, n)
     n_core = chainless_ndim - 1  # `n` is the last chainless axis
     if trace.has_chains and not flatten_chains:

@@ -72,22 +72,23 @@ class TreeHeaps(Protocol):
     0. Unused nodes also have split set to 0. This array can't be dirty."""
 
 
-class HeapArrays(Module):
-    """Mixin providing shared behavior for `TreeHeaps` dataclasses.
-
-    Subclasses must declare the `leaf_tree`, `var_tree` and `split_tree` heap
-    arrays (see `TreeHeaps`); this mixin adds no fields, only the derived
-    quantities that are the same regardless of how the leading batch axes are
-    laid out.
+def is_multivariate(trees: TreeHeaps) -> bool:
     """
+    Return whether the trees have vector-valued leaves.
 
-    @property
-    def is_multivariate(self) -> bool:
-        """Whether the leaves are vector-valued (an extra `k` axis on `leaf_tree`)."""
-        return self.leaf_tree.ndim > self.var_tree.ndim
+    Parameters
+    ----------
+    trees
+        The trees to inspect.
+
+    Returns
+    -------
+    Whether the leaves are vector-valued (an extra `k` axis on `leaf_tree`).
+    """
+    return trees.leaf_tree.ndim > trees.var_tree.ndim
 
 
-class TreesTrace(HeapArrays):
+class TreesTrace(Module):
     """Implementation of `bartz.grove.TreeHeaps` for an MCMC trace."""
 
     # `var_tree`/`split_tree` are declared before `leaf_tree` so their single
@@ -247,7 +248,7 @@ def evaluate_forest(
     indices: UInt[Array, '*forest_shape n']
     indices = traverse_forest(X, trees.var_tree, trees.split_tree)
 
-    is_mv = trees.is_multivariate
+    is_mv = is_multivariate(trees)
 
     bc_indices: UInt[Array, '*forest_shape n 1'] | UInt[Array, '*forest_shape 1 n 1']
     bc_indices = indices[..., None, :, None] if is_mv else indices[..., None]
@@ -456,7 +457,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     bottom = '╢'  # '┨' #
 
     *_, tree_size = tree.leaf_tree.shape
-    is_mv = tree.is_multivariate
+    is_mv = is_multivariate(tree)
 
     def traverse_tree(
         lines: list[str],

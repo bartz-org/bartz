@@ -28,7 +28,6 @@
 
 from bartz.grove._check import check_trace, describe_error
 from bartz.grove._grove import (
-    HeapArrays,
     TreeHeaps,
     TreesTrace,
     evaluate_forest,
@@ -37,6 +36,7 @@ from bartz.grove._grove import (
     format_tree,
     is_actual_leaf,
     is_leaves_parent,
+    is_multivariate,
     points_per_node_distr,
     traverse_forest,
     traverse_tree,

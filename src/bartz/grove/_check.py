@@ -30,7 +30,7 @@ from jax import numpy as jnp
 from jaxtyping import Array, Bool, Integer, UInt
 
 from bartz._jaxext import autobatch, jit, minimal_unsigned_dtype
-from bartz.grove._grove import TreeHeaps, TreesTrace, is_actual_leaf
+from bartz.grove._grove import TreeHeaps, TreesTrace, is_actual_leaf, is_multivariate
 
 CHECK_FUNCTIONS = []
 
@@ -280,7 +280,7 @@ def check_trace(
     unpack_check_tree = lambda l, v, s: check_tree(
         TreesTrace(leaf_tree=l, var_tree=v, split_tree=s), max_split
     )
-    is_mv = trace.is_multivariate
+    is_mv = is_multivariate(trace)
     signature = '(k,ts),(hts),(hts)->()' if is_mv else '(ts),(hts),(hts)->()'
     vec_check_tree = jnp.vectorize(unpack_check_tree, signature=signature)
 

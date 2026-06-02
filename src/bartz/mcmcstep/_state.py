@@ -41,7 +41,7 @@ from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Key, PyTree, 
 from numpy import ndarray
 
 from bartz._jaxext import Module, field, jaxtyping_disabled, jit, minimal_unsigned_dtype
-from bartz.grove import HeapArrays, tree_depths
+from bartz.grove import tree_depths
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes
 from bartz.mcmcstep._lazy import (
     _is_lazy_or_none,
@@ -70,7 +70,7 @@ class OutcomeType(Enum):
 T = TypeVar('T')
 
 
-class Forest(HeapArrays):
+class Forest(Module):
     """Represents the MCMC state of a sum of trees."""
 
     # Heap-array fields follow the `bartz.grove.TreesTrace` convention: the

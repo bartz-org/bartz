@@ -1,0 +1,35 @@
+{
+    // Tune the unroll of the per-tree accept/reject scan in `step`.
+    //
+    // num_trees is FIXED, not scanned: the scanned loop body is identical for
+    // every tree, so the per-iteration cost (hence the best unroll) does not
+    // depend on the number of trees. We only need it to be a common multiple of
+    // every unroll value below (so each setting tiles the loop with no scan
+    // remainder) and large enough to time more than one block of the largest
+    // unroll. 32 satisfies both.
+    //
+    // maxdepth is fixed at 6, the value we use in practice; it would affect the
+    // loop body (tree size = 2^depth sets the n-independent per-node work) but
+    // we never vary it.
+    //
+    // The axes that change the loop body and that we do vary are scanned: n (the
+    // O(n) residual reduction that dominates the body for large n and vanishes
+    // for small n, where loop overhead is what unroll removes), the outcome
+    // dimension k, and weights (which adds a multiply of the residual vector by
+    // the weights inside the loop). The iterations carry `resid`, so they are
+    // sequentially dependent and unroll buys overhead/scheduling, not
+    // cross-iteration parallelism. count/prec batching and num_chains act
+    // outside this loop and are left at their defaults.
+    "plot": {
+        "scan": "n",
+        "reduce": "sequential_unroll",
+    },
+    "values": {
+        "n":                  [16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576],
+        "k":                  [null, 4],
+        "maxdepth":           [6],
+        "weights":            [false, true],
+        "num_trees":          [32],
+        "sequential_unroll":  [1, 2, 4, 8, 16],
+    },
+}

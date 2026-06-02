@@ -41,10 +41,12 @@ from bartz.testing import DGP, Params, gen_data
 from bartz.testing._dgp import (
     generate_partition,
     generate_s,
+    het_normalization,
     interaction_pattern,
+    log_var_mgf,
     partitioned_interaction_pattern,
 )
-from tests.util import assert_array_equal, assert_close_matrices
+from tests.util import assert_allclose, assert_array_equal, assert_close_matrices
 
 # Test parameters
 ALPHA = 5e-7  # probability of false positive (aaaaapprox)
@@ -56,23 +58,45 @@ REPS: int = 10_000  # number of datasets
 SPARSITY: float = 2.0  # Gamma shape for the sparse-DGP fixture (mu4 = 10 / 3)
 
 
-@jit
-@partial(vmap, in_axes=(0, None, None))
+@partial(jit, static_argnames=('het_shape',))
 def generate_dgps(
-    key: Key[Array, 'REPS'], lambda_: Float[Array, ''], sparsity: float | None
+    keys: Key[Array, 'REPS'],
+    lambda_: Float[Array, ''],
+    sparsity: float | None,
+    sigma2_logscale: float | None = None,
+    het_shape: str | None = None,
 ) -> DGP:
-    """Generate one dataset per random key."""
-    return gen_data(key, lambda_=lambda_, sparsity=sparsity, **KWARGS)
+    """Generate one dataset per random key (jitted, vmapped over keys)."""
+    gen = partial(
+        gen_data,
+        lambda_=lambda_,
+        sparsity=sparsity,
+        sigma2_logscale=sigma2_logscale,
+        het_shape=het_shape,
+        **KWARGS,
+    )
+    return vmap(gen)(keys)
 
 
 @pytest.fixture
 def dgps(keys: split, request: pytest.FixtureRequest) -> DGP:
     """Generate DGP instances using vmap and jit.
 
-    Indirectly parametrizable by `sparsity` (default `None`, i.e. dense).
+    Indirectly parametrizable either by `sparsity` (default `None`, i.e. dense)
+    or by a mapping with any of ``sparsity``, ``lambda_``, ``sigma2_logscale``
+    and ``het_shape`` to also exercise heteroskedasticity.
     """
-    sparsity = getattr(request, 'param', None)
-    return generate_dgps(keys.pop(REPS), 0.5, sparsity)
+    param = getattr(request, 'param', None)
+    if isinstance(param, Mapping):
+        return generate_dgps(
+            keys.pop(REPS),
+            param.get('lambda_', 0.5),
+            param.get('sparsity'),
+            param.get('sigma2_logscale'),
+            param.get('het_shape'),
+        )
+    else:
+        return generate_dgps(keys.pop(REPS), 0.5, param)
 
 
 @pytest.fixture
@@ -324,6 +348,21 @@ WHICH_PARAMS = (
     'y',
 )
 
+# A modest log-variance budget keeps the noise-variance multiplier light-tailed
+# enough that the marginal-variance estimators below do not blow up.
+HET_LOGSCALE: float = 0.1
+
+# DGP configurations for the marginal-variance tests: homoskedastic (dense and
+# sparse) plus scalar and vector heteroskedasticity, which must leave every
+# marginal variance unchanged since ``E[error_scale ** 2] == 1``.
+VARIANCE_DGPS = (
+    None,
+    SPARSITY,
+    {'het_shape': 'scalar', 'sigma2_logscale': HET_LOGSCALE},
+    {'het_shape': 'vector', 'sigma2_logscale': HET_LOGSCALE},
+)
+VARIANCE_DGPS_IDS = ('dense', 'sparse', 'het_scalar', 'het_vector')
+
 
 def expected_pop_var(params: Params, which: str) -> Float[Array, ' REPS']:
     """Return the expected population variance of DGP attribute `which`."""
@@ -353,23 +392,24 @@ def expected_prior_var(params: Params, which: str) -> Float[Array, ' REPS']:
         raise KeyError(which)
 
 
-@pytest.mark.parametrize(
-    'dgps', [None, SPARSITY], indirect=True, ids=['dense', 'sparse']
-)
+@pytest.mark.parametrize('dgps', VARIANCE_DGPS, indirect=True, ids=VARIANCE_DGPS_IDS)
 @pytest.mark.parametrize('which', WHICH_PARAMS)
 def test_outcome_prior_variance(dgps: DGP, which: str) -> None:
     """Test that latent mean and outcome have the expected marginal variance.
 
-    The budget holds with and without sparsity. Sparsity makes the quadratic
-    term heavier-tailed, so its variance estimator spread is set from the sample
-    fourth moment instead of the Gaussian ``2 sigma^4`` (which would over-reject).
+    The budget holds with and without sparsity, and is preserved by
+    heteroskedasticity (the noise multiplier is calibrated to unit mean).
+    Sparsity and heteroskedasticity make ``y`` heavier-tailed, so the variance
+    estimator spread is then set from the sample fourth moment instead of the
+    Gaussian ``2 sigma^4`` (which would over-reject).
     """
     samples = getattr(dgps, which)  # Shape: (REPS, K?, N)
     n_reps = samples.shape[0]
 
     var = jnp.var(samples, axis=0)  # Shape: (K?, N)
     expected_var = expected_prior_var(dgps.params, which)[0].item()
-    if dgps.params.sparsity is None:
+    light_tailed = dgps.params.sparsity is None and dgps.params.het_shape is None
+    if light_tailed:
         std_of_var = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
     else:
         fourth = jnp.mean((samples - jnp.mean(samples, axis=0)) ** 4, axis=0)
@@ -379,19 +419,26 @@ def test_outcome_prior_variance(dgps: DGP, which: str) -> None:
     assert_array_less(z_scores, SIGMA_THRESHOLD)
 
 
-@pytest.mark.parametrize(
-    'dgps', [None, SPARSITY], indirect=True, ids=['dense', 'sparse']
-)
+@pytest.mark.parametrize('dgps', VARIANCE_DGPS, indirect=True, ids=VARIANCE_DGPS_IDS)
 @pytest.mark.parametrize('which', WHICH_PARAMS)
 def test_outcome_pop_variance(dgps: DGP, which: str) -> None:
-    """Test that the expected population variance is on target, with/without sparsity."""
+    """Test the expected population variance is on target.
+
+    Holds with/without sparsity and under heteroskedasticity (since
+    ``E[error_scale ** 2] == 1``). For the heteroskedastic cases the per-dataset
+    variances are heavier-tailed, so the spread of their mean is estimated
+    empirically rather than from the Gaussian ``2 sigma^4``.
+    """
     samples = getattr(dgps, which)  # Shape: (REPS, K?, N)
     n_reps = samples.shape[0]
 
-    var = jnp.var(samples, axis=-1, ddof=1)  # Shape: (REPS, K?)
-    var = jnp.mean(var, axis=0)  # Shape: (K?,)
+    per_var = jnp.var(samples, axis=-1, ddof=1)  # Shape: (REPS, K?)
+    var = jnp.mean(per_var, axis=0)  # Shape: (K?,)
     expected_var = expected_pop_var(dgps.params, which)[0].item()
-    std_of_var = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
+    if dgps.params.het_shape is None:
+        std_of_var = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
+    else:
+        std_of_var = jnp.std(per_var, axis=0) / jnp.sqrt(n_reps)
 
     z_scores = jnp.abs((var - expected_var) / std_of_var)
     assert_array_less(z_scores, SIGMA_THRESHOLD)
@@ -569,29 +616,58 @@ def test_lambda_forbidden_when_univariate(keys: split) -> None:
         gen_data(keys.pop(), lambda_=0.5, **kw)
 
 
-def test_univariate_split(keys: split) -> None:
-    """`DGP.split()` on a univariate DGP preserves `None` separate fields.
+@pytest.mark.parametrize(
+    ('k', 'het_shape'),
+    [(None, None), (None, 'scalar'), (3, None), (3, 'scalar'), (3, 'vector')],
+)
+def test_split(keys: split, k: int | None, het_shape: str | None) -> None:
+    """`DGP.split()` slices every data field (incl. `error_scale`).
 
-    Also checks that the shared/blended fields are sliced consistently.
+    Also checks the shared/blended fields are sliced consistently and that the
+    univariate `None` separate fields are preserved.
     """
-    kw = dict(KWARGS, k=None)
-    dgp = gen_data(keys.pop(), **kw)
+    lambda_ = None if k is None else 0.5
+    sigma2_logscale = None if het_shape is None else 0.2
+    kw = dict(KWARGS, k=k)
+    dgp = gen_data(
+        keys.pop(),
+        lambda_=lambda_,
+        sigma2_logscale=sigma2_logscale,
+        het_shape=het_shape,
+        **kw,
+    )
     n_train = kw['n'] // 3
     train, test = dgp.split(n_train)
 
     for part, length in ((train, n_train), (test, kw['n'] - n_train)):
-        assert part.params.partition is None
-        assert part.params.beta_separate is None
-        assert part.params.A_separate is None
-        assert part.mulin_separate is None
-        assert part.muquad_separate is None
-        assert part.y.shape == (length,)
+        assert part.x.shape == (kw['p'], length)
+        core = (length,) if k is None else (k, length)
+        assert part.y.shape == core
+        assert part.mulin.shape == core
+        assert part.muquad.shape == core
+        assert part.mu.shape == core
         assert part.mulin_shared.shape == (length,)
         assert part.muquad_shared.shape == (length,)
-        assert part.mulin.shape == (length,)
-        assert part.muquad.shape == (length,)
-        assert part.mu.shape == (length,)
-        assert part.x.shape == (kw['p'], length)
+        if k is None:
+            assert part.params.partition is None
+            assert part.params.beta_separate is None
+            assert part.params.A_separate is None
+            assert part.mulin_separate is None
+            assert part.muquad_separate is None
+        if het_shape is None:
+            assert part.error_scale is None
+        elif het_shape == 'scalar':
+            assert part.error_scale.shape == (length,)
+        else:
+            assert part.error_scale.shape == (k, length)
+
+
+def test_split_default_halves(keys: split) -> None:
+    """`DGP.split()` without `n_train` splits the observations in half."""
+    dgp = gen_data(keys.pop(), lambda_=0.5, **KWARGS)
+    train, test = dgp.split()
+    assert train.x.shape[1] == KWARGS['n'] // 2
+    assert test.x.shape[1] == KWARGS['n'] - KWARGS['n'] // 2
 
 
 class TestOutcomeType:
@@ -668,3 +744,200 @@ class TestOutcomeType:
         kw = dict(KWARGS, k=None, outcome_type=('continuous',))
         with pytest.raises(ValueError, match='tuple outcome_type requires'):
             gen_data(keys.pop(), **kw)
+
+
+def uniform_x(key: Key[Array, ''], shape: tuple[int, ...]) -> Float[Array, ' *shape']:
+    """Sample predictors from the same ``U(-sqrt3, sqrt3)`` as `generate_x`."""
+    return random.uniform(key, shape, minval=-jnp.sqrt(3.0), maxval=jnp.sqrt(3.0))
+
+
+class TestLogVarMGF:
+    """Test `log_var_mgf` in isolation."""
+
+    N: int = 8_000_000  # i.i.d. samples for the Monte Carlo estimates
+
+    def test_zero(self) -> None:
+        """The factor vanishes at ``v = 0`` (no heteroskedasticity)."""
+        assert_allclose(log_var_mgf(jnp.zeros(())), jnp.zeros(()), atol=1e-7)
+
+    def test_matches_integral(self) -> None:
+        """It matches the defining integral ``int_0^1 exp(6 v t^2) dt`` on a grid."""
+        v = jnp.linspace(0.0, 0.6, 50)
+        t = jnp.linspace(0.0, 1.0, 20_001)
+        integral = jnp.trapezoid(jnp.exp(6 * v[:, None] * t**2), t, axis=1)
+        assert_close_matrices(log_var_mgf(v), jnp.log(integral), rtol=1e-4)
+
+    @pytest.mark.parametrize('v', [0.02, 0.1, 0.3])
+    def test_matches_montecarlo(self, keys: split, v: float) -> None:
+        """It estimates ``log E[exp(2 g X)]`` for ``g ~ N(0, v)``, ``X ~ U``."""
+        g = jnp.sqrt(v) * random.normal(keys.pop(), (self.N,))
+        x = uniform_x(keys.pop(), (self.N,))
+        mc = jnp.log(jnp.mean(jnp.exp(2 * g * x)))
+        assert_allclose(log_var_mgf(jnp.asarray(v)), mc, rtol=1e-2)
+
+
+class TestHetNormalization:
+    """Test `het_normalization` in isolation."""
+
+    N: int = 8_000_000  # i.i.d. coefficient/predictor rows for the MC estimates
+
+    @pytest.mark.parametrize('batch_shape', [(), (3,), (2, 4)])
+    def test_shapes(self, keys: split, batch_shape: tuple[int, ...]) -> None:
+        """It reduces over the trailing predictor axis, keeping the batch shape."""
+        var_coef = jnp.exp(random.normal(keys.pop(), (*batch_shape, 5)))
+        offset, var_v = het_normalization(var_coef)
+        assert offset.shape == batch_shape
+        assert var_v.shape == batch_shape
+
+    def montecarlo_multiplier(
+        self, keys: split, var_coef: Float[Array, ' p'], offset: Float[Array, '']
+    ) -> Float[Array, ' N']:
+        """Draw ``W ** 2`` marginally over the coefficients ``g ~ N(0, var_coef)``."""
+        g = jnp.sqrt(var_coef) * random.normal(keys.pop(), (self.N, var_coef.size))
+        x = uniform_x(keys.pop(), (self.N, var_coef.size))
+        return jnp.exp(2 * (jnp.sum(g * x, axis=1) + offset))
+
+    def test_unit_second_moment(self, keys: split) -> None:
+        """The offset makes ``E[W ** 2] = 1`` marginally over the coefficient draw."""
+        var_coef = 0.04 * (0.5 + random.uniform(keys.pop(), (6,)))
+        offset, _ = het_normalization(var_coef)
+        w2 = self.montecarlo_multiplier(keys, var_coef, offset)
+        se = jnp.std(w2) / jnp.sqrt(self.N)
+        assert_array_less(jnp.abs(jnp.mean(w2) - 1.0) / se, SIGMA_THRESHOLD)
+
+    def test_var_v(self, keys: split) -> None:
+        """``var_v`` matches the marginal Monte Carlo variance of ``W ** 2``."""
+        var_coef = 0.04 * (0.5 + random.uniform(keys.pop(), (6,)))
+        offset, var_v = het_normalization(var_coef)
+        w2 = self.montecarlo_multiplier(keys, var_coef, offset)
+        assert_allclose(jnp.var(w2), var_v, rtol=3e-2)
+
+
+class TestHeteroskedasticity:
+    """Tests for the heteroskedasticity feature of `gen_data`."""
+
+    def test_homoskedastic_fields_are_none(self, keys: split) -> None:
+        """Without heteroskedasticity every het field (incl. `error_scale`) is None."""
+        dgp = gen_data(keys.pop(), lambda_=0.5, **KWARGS)
+        assert dgp.error_scale is None
+        assert dgp.params.gamma_shared is None
+        assert dgp.params.gamma_separate is None
+        assert dgp.params.het_offset is None
+        assert dgp.params.var_v is None
+        assert dgp.params.sigma2_logscale is None
+        assert dgp.params.het_shape is None
+
+    def test_vector_shapes_and_dtypes(self, keys: split) -> None:
+        """Vector het exposes (k, n) scales and per-component coefficients."""
+        n, p, k = KWARGS['n'], KWARGS['p'], KWARGS['k']
+        dgp = gen_data(
+            keys.pop(), lambda_=0.5, het_shape='vector', sigma2_logscale=0.2, **KWARGS
+        )
+        assert dgp.error_scale.shape == (k, n)
+        assert jnp.issubdtype(dgp.error_scale.dtype, jnp.floating)
+        assert jnp.all(dgp.error_scale > 0)
+        assert dgp.params.gamma_shared.shape == (p,)
+        assert dgp.params.gamma_separate.shape == (k, p)
+        assert dgp.params.het_offset.shape == (k,)
+        assert dgp.params.var_v.shape == (k,)
+        assert dgp.params.sigma2_logscale.shape == ()
+        assert dgp.params.het_shape == 'vector'
+
+    def test_scalar_shapes(self, keys: split) -> None:
+        """Scalar het exposes one (n,) scale and no separate coefficients."""
+        dgp = gen_data(
+            keys.pop(), lambda_=0.5, het_shape='scalar', sigma2_logscale=0.2, **KWARGS
+        )
+        assert dgp.error_scale.shape == (KWARGS['n'],)
+        assert dgp.params.gamma_separate is None
+        assert dgp.params.het_offset.shape == ()
+        assert dgp.params.var_v.shape == ()
+        assert dgp.params.het_shape == 'scalar'
+
+    def test_univariate_scalar(self, keys: split) -> None:
+        """Univariate (`k=None`) het produces an (n,) scale."""
+        kw = dict(KWARGS, k=None)
+        dgp = gen_data(keys.pop(), het_shape='scalar', sigma2_logscale=0.2, **kw)
+        assert dgp.error_scale.shape == (kw['n'],)
+        assert dgp.y.shape == (kw['n'],)
+        assert dgp.params.gamma_separate is None
+
+    @pytest.mark.parametrize('het_shape', ['scalar', 'vector'])
+    def test_marginal_noise_variance_is_one(self, keys: split, het_shape: str) -> None:
+        """``E[error_scale ** 2] == 1`` per component, preserving the noise budget."""
+        dgps = generate_dgps(keys.pop(REPS), 0.5, None, HET_LOGSCALE, het_shape)
+        v = dgps.error_scale**2  # (REPS, K?, N)
+        per_dataset = jnp.mean(v, axis=-1)  # (REPS, K?)
+        mean = jnp.mean(per_dataset, axis=0)
+        se = jnp.std(per_dataset, axis=0) / jnp.sqrt(REPS)
+        assert_array_less(jnp.abs((mean - 1.0) / se), SIGMA_THRESHOLD)
+
+    def test_offset_and_var_v_wiring(self, keys: split) -> None:
+        """`gen_params` feeds ``het_normalization`` the coefficient prior variances.
+
+        Rebuilds the prior variances from the public ``s``, ``lambda_`` and
+        ``partition`` and checks the stored ``het_offset`` / ``var_v`` match,
+        catching wiring bugs in the budget, ``lambda_`` weighting or partition.
+        """
+        tau2 = 0.2
+        p, k = KWARGS['p'], KWARGS['k']
+        dgp = gen_data(
+            keys.pop(), lambda_=0.5, het_shape='vector', sigma2_logscale=tau2, **KWARGS
+        )
+        var_shared = tau2 / p * dgp.params.s**2
+        var_separate = tau2 / (p / k) * dgp.params.s**2 * dgp.params.partition
+        var_coef = 0.5 * var_shared + 0.5 * var_separate
+        offset, var_v = het_normalization(var_coef)
+        assert_close_matrices(dgp.params.het_offset, offset, rtol=1e-6)
+        assert_close_matrices(dgp.params.var_v, var_v, rtol=1e-6)
+
+    def test_stream_invariance_with_homoskedastic(self, keys: split) -> None:
+        """Het leaves the mean/predictor streams intact and only rescales the noise."""
+        kw = dict(KWARGS, lambda_=0.5)
+        key = keys.pop()
+        homo = gen_data(key, **kw)
+        het = gen_data(random.clone(key), het_shape='vector', sigma2_logscale=0.3, **kw)
+        assert_array_equal(homo.x, het.x)
+        assert_array_equal(homo.params.beta_shared, het.params.beta_shared)
+        assert_array_equal(homo.params.A_separate, het.params.A_separate)
+        assert_array_equal(homo.params.partition, het.params.partition)
+        assert_array_equal(homo.params.s, het.params.s)
+        assert_array_equal(homo.mu, het.mu)
+        # the heteroskedastic noise is the homoskedastic noise scaled by error_scale
+        recon = het.mu + (homo.y - homo.mu) * het.error_scale
+        assert_close_matrices(het.y, recon, rtol=1e-5)
+
+    def test_scalar_and_vector_share_shared_stream(self, keys: split) -> None:
+        """``'scalar'`` and ``'vector'`` het share the ``gamma_shared`` stream."""
+        kw = dict(KWARGS, lambda_=0.5, sigma2_logscale=0.3)
+        key = keys.pop()
+        scalar = gen_data(key, het_shape='scalar', **kw)
+        vector = gen_data(random.clone(key), het_shape='vector', **kw)
+        assert_array_equal(scalar.params.gamma_shared, vector.params.gamma_shared)
+
+    def test_vector_requires_multivariate(self, keys: split) -> None:
+        """``het_shape='vector'`` with ``k=None`` raises."""
+        kw = dict(KWARGS, k=None)
+        with pytest.raises(ValueError, match="het_shape='vector' requires"):
+            gen_data(keys.pop(), het_shape='vector', sigma2_logscale=0.2, **kw)
+
+    def test_logscale_and_shape_must_agree(self, keys: split) -> None:
+        """``sigma2_logscale`` and ``het_shape`` must be both set or both None."""
+        with pytest.raises(ValueError, match='both set or both None'):
+            gen_data(keys.pop(), lambda_=0.5, sigma2_logscale=0.2, **KWARGS)
+        with pytest.raises(ValueError, match='both set or both None'):
+            gen_data(keys.pop(), lambda_=0.5, het_shape='scalar', **KWARGS)
+
+    def test_binary_thresholds_het_latent(self, keys: split) -> None:
+        """Het works for binary outcomes: `y` thresholds the heteroskedastic latent.
+
+        With a shared key the continuous and binary runs differ only by the final
+        threshold, so the binary success probability is
+        ``Phi(mu / (sqrt(sigma2_eps) * error_scale))``.
+        """
+        kw = dict(KWARGS, lambda_=0.5, het_shape='vector', sigma2_logscale=0.2)
+        key = keys.pop()
+        cont = gen_data(key, **kw)
+        binary = gen_data(random.clone(key), outcome_type='binary', **kw)
+        assert_array_equal(jnp.unique(binary.y), jnp.array([0.0, 1.0]))
+        assert_array_equal(binary.y, (cont.y > 0).astype(jnp.float32))

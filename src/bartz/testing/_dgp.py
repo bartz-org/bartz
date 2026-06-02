@@ -34,6 +34,7 @@ from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float, Int, Integer, Key
 
 from bartz._jaxext import split
+from bartz._jaxext.random import loggamma
 from bartz.mcmcstep import OutcomeType
 
 
@@ -58,22 +59,42 @@ def generate_partition(key: Key[Array, ''], p: int, k: int) -> Bool[Array, 'k p'
     return indices == assignments[:, None]
 
 
+def generate_s(
+    key: Key[Array, ''], p: int, sparsity: Float[Array, ''] | float | None
+) -> Float[Array, ' p']:
+    """Generate per-predictor importance scales with E[s_j^2] = 1.
+
+    s_j ~iid Gamma(sparsity, sqrt(sparsity (sparsity + 1))), so that E[s_j^2] = 1
+    and E[s_j^4] = (sparsity + 2)(sparsity + 3) / (sparsity (sparsity + 1)).
+    Smaller `sparsity` spreads the importances out (sparser dependence on the
+    predictors); `sparsity=None` returns all-ones scales (uniform importance).
+    """
+    if sparsity is None:
+        return jnp.ones(p)
+    else:
+        log_rate = jnp.log(sparsity * (sparsity + 1)) / 2
+        return jnp.exp(loggamma(key, sparsity, (p,)) - log_rate)
+
+
 def generate_beta_shared(
-    key: Key[Array, ''], p: int, sigma2_lin: Float[Array, '']
+    key: Key[Array, ''], p: int, sigma2_lin: Float[Array, ''], s: Float[Array, ' p']
 ) -> Float[Array, ' p']:
     """Generate shared linear coefficients for the lambda=1 case."""
     sigma2_beta = sigma2_lin / p
-    return random.normal(key, (p,)) * jnp.sqrt(sigma2_beta)
+    return random.normal(key, (p,)) * jnp.sqrt(sigma2_beta) * s
 
 
 def generate_beta_separate(
-    key: Key[Array, ''], partition: Bool[Array, 'k p'], sigma2_lin: Float[Array, '']
+    key: Key[Array, ''],
+    partition: Bool[Array, 'k p'],
+    sigma2_lin: Float[Array, ''],
+    s: Float[Array, ' p'],
 ) -> Float[Array, 'k p']:
     """Generate separate linear coefficients for the lambda=0 case."""
     k, p = partition.shape
     beta_separate: Float[Array, 'k p'] = random.normal(key, (k, p))
     sigma2_beta = sigma2_lin / (p / k)
-    return jnp.where(partition, beta_separate, 0.0) * jnp.sqrt(sigma2_beta)
+    return jnp.where(partition, beta_separate, 0.0) * jnp.sqrt(sigma2_beta) * s
 
 
 def combine_shared_separate(
@@ -99,13 +120,15 @@ def generate_A_shared(
     q: Integer[Array, ''],
     sigma2_quad: Float[Array, ''],
     kurt_x: float,
+    s: Float[Array, ' p'],
+    mu4: Float[Array, ''] | float,
 ) -> Float[Array, 'p p']:
     """Generate shared quadratic coefficients for the lambda=1 case."""
     pattern: Bool[Array, 'p p'] = interaction_pattern(p, q)
     A_shared: Float[Array, 'p p'] = random.normal(key, (p, p))
     A_shared = jnp.where(pattern, A_shared, 0.0)
-    sigma2_A = sigma2_quad / (p * (kurt_x - 1 + q))
-    return A_shared * jnp.sqrt(sigma2_A)
+    sigma2_A = sigma2_quad / (p * ((kurt_x - 1) * mu4 + q))
+    return A_shared * jnp.sqrt(sigma2_A) * s[:, None] * s[None, :]
 
 
 def partitioned_interaction_pattern(
@@ -135,6 +158,8 @@ def generate_A_separate(
     q: Integer[Array, ''],
     sigma2_quad: Float[Array, ''],
     kurt_x: float,
+    s: Float[Array, ' p'],
+    mu4: Float[Array, ''] | float,
 ) -> Float[Array, 'k p p']:
     """Generate separate quadratic coefficients for the lambda=0 case."""
     k, p = partition.shape
@@ -143,8 +168,8 @@ def generate_A_separate(
         partition, q
     )
     A_separate = jnp.where(component_pattern, A_separate, 0.0)
-    sigma2_A = sigma2_quad / (p / k * (kurt_x - 1 + q))
-    return A_separate * jnp.sqrt(sigma2_A)
+    sigma2_A = sigma2_quad / (p / k * ((kurt_x - 1) * mu4 + q))
+    return A_separate * jnp.sqrt(sigma2_A) * s[:, None] * s[None, :]
 
 
 def generate_outcome(
@@ -165,7 +190,7 @@ def generate_outcome(
 
 
 class Params(Module):
-    R"""Output of `gen_params`: all DGP quantities that do not depend on `n`.
+    R"""All quantities of the data-generating process that do not depend on `n`.
 
     The data follows a multivariate quadratic Gaussian model. With observations
     :math:`i`, predictors :math:`j, j'` and outcome components :math:`c`, the
@@ -178,21 +203,25 @@ class Params(Module):
             X_{ij} &\overset{\mathrm{i.i.d.}}\sim U(-\sqrt 3, \sqrt 3),
                 \quad i = 1, \ldots, n, \quad j, j' = 1, \ldots, p,
                 \quad c = 1, \ldots, k, \\
+            s_j &\overset{\mathrm{i.i.d.}}\sim
+                \mathrm{Gamma}(\alpha,\, \sqrt{\alpha (\alpha + 1)}), \\
+            E[s_j^2] &= 1, \\
+            E[s_j^4] &= \mu_4 = \frac{(\alpha + 2)(\alpha + 3)}{\alpha (\alpha + 1)}, \\
             \{S_c\}_{c=1}^k &= \text{a random partition of } \{1, \ldots, p\},
                 \quad \lfloor p/k \rfloor \le |S_c| \le \lceil p/k \rceil, \\
             \beta^{\mathrm{sh}}_j &\overset{\mathrm{i.i.d.}}\sim
-                N(0,\, \sigma^2_{\mathrm{lin}} / p), \\
+                s_j\, N(0,\, \sigma^2_{\mathrm{lin}} / p), \\
             \beta^{\mathrm{sep}}_{cj} &\sim
-                \mathbb 1[j \in S_c]\, N(0,\, \sigma^2_{\mathrm{lin}} / (p / k)), \\
+                s_j\, \mathbb 1[j \in S_c]\, N(0,\, \sigma^2_{\mathrm{lin}} / (p / k)), \\
             P^{\mathrm{sh}}_{jj'} &= \begin{cases}
                     1 & \min(|j - j'|,\, p - |j - j'|) \le q / 2, \\
                     0 & \text{otherwise,}
                 \end{cases}
                 \quad q \bmod 2 = 0, \quad q < p, \\
-            A^{\mathrm{sh}}_{jj'} &\sim P^{\mathrm{sh}}_{jj'}\,
-                N(0,\, \sigma^2_{\mathrm{quad}} / (p\, (\kappa_X - 1 + q))), \\
-            A^{\mathrm{sep}}_{cjj'} &\sim P^{\mathrm{sep}}_{cjj'}\,
-                N(0,\, \sigma^2_{\mathrm{quad}} / ((p / k)\, (\kappa_X - 1 + q))), \\
+            A^{\mathrm{sh}}_{jj'} &\sim s_j s_{j'}\, P^{\mathrm{sh}}_{jj'}\,
+                N(0,\, \sigma^2_{\mathrm{quad}} / (p\, ((\kappa_X - 1)\mu_4 + q))), \\
+            A^{\mathrm{sep}}_{cjj'} &\sim s_j s_{j'}\, P^{\mathrm{sep}}_{cjj'}\,
+                N(0,\, \sigma^2_{\mathrm{quad}} / ((p / k)\, ((\kappa_X - 1)\mu_4 + q))), \\
             \mu^{\mathrm L}_{ci} &= \sqrt\lambda \textstyle\sum_j
                     \beta^{\mathrm{sh}}_j X_{ij}
                 + \sqrt{1 - \lambda} \textstyle\sum_j
@@ -217,23 +246,38 @@ class Params(Module):
     :math:`|S_c|` (requiring :math:`q < \lfloor p/k \rfloor`); it is nonzero
     only for :math:`j, j' \in S_c`.
 
+    The scales :math:`s_j` (`s`, shape :math:`\alpha` = `sparsity`) make the
+    predictors differ in importance (sparsity): each down- or up-weights
+    predictor :math:`j` in every term. Because they are normalized to
+    :math:`E[s_j^2] = 1` the linear budget is untouched, and the only sparsity
+    quantity entering the variances is :math:`\mu_4 = E[s_j^4] \ge 1` (equal to
+    1 iff the :math:`s_j` are constant). They are folded into the sampled
+    coefficients :math:`\beta` and :math:`A` directly, as written above. When
+    ``sparsity`` is ``None`` all scales are 1 (:math:`\mu_4 = 1`), recovering
+    the uniform-importance model.
+
     The coupling :math:`\lambda` interpolates between independent components
     (:math:`\lambda = 0`, each uses its own coefficients on its own predictors)
     and identical ones (:math:`\lambda = 1`, all share the shared
     coefficients). The per-component variance decomposition holds for every
-    :math:`\lambda`:
+    :math:`\lambda` (the inner :math:`\operatorname{Var}` and :math:`E` are over
+    the data :math:`X` and noise at fixed coefficients, the outer over the
+    coefficients):
 
     .. math::
         :nowrap:
 
         \begin{align}
-            E[\operatorname{Var}[Y_{ci} \mid X, \beta, A]] &=
+            E[\operatorname{Var}[Y_{ci} \mid \beta, A]] &=
                 \sigma^2_{\mathrm{lin}} + \sigma^2_{\mathrm{quad}}
                 + \sigma^2_{\mathrm{eps}}
                 \quad \text{(expected population variance)}, \\
+            \operatorname{Var}[E[Y_{ci} \mid \beta, A]] &=
+                \sigma^2_{\mathrm{quad}}\, \mu_4 / ((\kappa_X - 1)\mu_4 + q)
+                \quad \text{(variance of the expected mean)}, \\
             \operatorname{Var}[Y_{ci}] &=
-                E[\operatorname{Var}[Y_{ci} \mid X, \beta, A]]
-                + \sigma^2_{\mathrm{quad}} / (\kappa_X - 1 + q)
+                E[\operatorname{Var}[Y_{ci} \mid \beta, A]]
+                + \operatorname{Var}[E[Y_{ci} \mid \beta, A]]
                 \quad \text{(prior variance)}.
         \end{align}
 
@@ -267,6 +311,22 @@ class Params(Module):
     ``lambda_ < 1``. Slice ``i`` is supported on the outer product of
     ``partition[i]`` with itself. ``None`` in univariate mode
     (``k is None``)."""
+
+    s: Float[Array, ' p']
+    """Per-predictor importance scales of shape (p,), with ``E[s_j ** 2] = 1``.
+    Already folded into ``beta_*`` and ``A_*``; equivalent to scaling predictor
+    ``j`` by ``s_j``. All ones when ``sparsity is None``."""
+
+    mu_4_s: Float[Array, '']
+    """Fourth moment ``E[s_j ** 4]`` of the importance scales, ``>= 1`` (equal
+    to 1, i.e. no sparsity, when ``sparsity is None``). Sets the quadratic
+    coefficient variance and ``sigma2_mean``."""
+
+    sparsity: Float[Array, ''] | float | None
+    """Gamma shape of the importance scales ``s``, or ``None`` for uniform
+    importance. As ``sparsity -> inf`` the scales concentrate at 1, matching
+    ``sparsity is None``; as ``sparsity -> 0`` all importance concentrates on a
+    single predictor."""
 
     q: Integer[Array, '']
     """Number of quadratic interactions per predictor (even, ``< p // k``)."""
@@ -424,6 +484,7 @@ def gen_params(
     sigma2_lin: Float[Array, ''] | float,
     sigma2_quad: Float[Array, ''] | float,
     sigma2_eps: Float[Array, ''] | float,
+    sparsity: Float[Array, ''] | float | None = None,
     outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
 ) -> Params:
     """Sample DGP coefficients and parameters (no dependence on `n`).
@@ -450,6 +511,10 @@ def gen_params(
     sigma2_quad
     sigma2_eps
         See `Params`.
+    sparsity
+        Shape of the Gamma distribution of the per-predictor importance scales
+        ``s`` (see `Params`). Smaller values make the dependence on the
+        predictors sparser; `None` (default) gives uniform importance.
     outcome_type
         ``'continuous'``, ``'binary'``, an `OutcomeType`, or a tuple of length
         ``k`` for mixed outcomes. Tuples with all elements equal are collapsed
@@ -487,10 +552,23 @@ def gen_params(
     else:
         outcome_type = OutcomeType(outcome_type)
 
-    keys = split(key, 5)
+    # E[s^4]; the scales s are normalized so that E[s^2] = 1
+    if sparsity is None:
+        mu_4_s = jnp.asarray(1.0)
+    else:
+        mu_4_s = (sparsity + 2) * (sparsity + 3) / (sparsity * (sparsity + 1))
 
-    beta_shared = generate_beta_shared(keys.pop(), p, sigma2_lin)
-    A_shared = generate_A_shared(keys.pop(), p, q, sigma2_quad, Params.kurt_x)
+    # one key per group (shared, separate, scales), so each group's sampling is
+    # the same whether or not the others are active
+    keys = split(key, 3)
+    shared_keys = split(keys.pop())
+    separate_keys = split(keys.pop(), 3)
+    s = generate_s(keys.pop(), p, sparsity)
+
+    beta_shared = generate_beta_shared(shared_keys.pop(), p, sigma2_lin, s)
+    A_shared = generate_A_shared(
+        shared_keys.pop(), p, q, sigma2_quad, Params.kurt_x, s, mu_4_s
+    )
 
     if k is None:
         partition = None
@@ -498,14 +576,16 @@ def gen_params(
         A_separate = None
     else:
         assert p >= k, 'p must be at least k'
-        partition = generate_partition(keys.pop(), p, k)
-        beta_separate = generate_beta_separate(keys.pop(), partition, sigma2_lin)
+        partition = generate_partition(separate_keys.pop(), p, k)
+        beta_separate = generate_beta_separate(
+            separate_keys.pop(), partition, sigma2_lin, s
+        )
         A_separate = generate_A_separate(
-            keys.pop(), partition, q, sigma2_quad, Params.kurt_x
+            separate_keys.pop(), partition, q, sigma2_quad, Params.kurt_x, s, mu_4_s
         )
 
     # derived variances (see `Params`); cheap scalars materialized eagerly
-    sigma2_mean = sigma2_quad / (Params.kurt_x - 1 + q)
+    sigma2_mean = sigma2_quad * mu_4_s / ((Params.kurt_x - 1) * mu_4_s + q)
     sigma2_pop = sigma2_lin + sigma2_quad + sigma2_eps
     sigma2_pri = sigma2_pop + sigma2_mean
 
@@ -515,6 +595,9 @@ def gen_params(
         beta_separate=beta_separate,
         A_shared=A_shared,
         A_separate=A_separate,
+        s=s,
+        mu_4_s=mu_4_s,
+        sparsity=sparsity,
         q=q,
         lambda_=lambda_,
         sigma2_lin=sigma2_lin,
@@ -594,6 +677,7 @@ def gen_data(
     sigma2_lin: Float[Array, ''] | float,
     sigma2_quad: Float[Array, ''] | float,
     sigma2_eps: Float[Array, ''] | float,
+    sparsity: Float[Array, ''] | float | None = None,
     outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
 ) -> DGP:
     """Generate data from a quadratic multivariate DGP.
@@ -619,6 +703,7 @@ def gen_data(
     sigma2_lin
     sigma2_quad
     sigma2_eps
+    sparsity
     outcome_type
         Forwarded to `gen_params`; see `Params`.
 
@@ -636,6 +721,7 @@ def gen_data(
         sigma2_lin=sigma2_lin,
         sigma2_quad=sigma2_quad,
         sigma2_eps=sigma2_eps,
+        sparsity=sparsity,
         outcome_type=outcome_type,
     )
     return gen_data_from_params(keys.pop(), params, n=n)

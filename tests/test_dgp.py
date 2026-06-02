@@ -37,9 +37,10 @@ from scipy.stats import norm
 
 from bartz._jaxext import split
 from bartz.mcmcstep import OutcomeType
-from bartz.testing import DGP, gen_data
+from bartz.testing import DGP, Params, gen_data
 from bartz.testing._dgp import (
     generate_partition,
+    generate_s,
     interaction_pattern,
     partitioned_interaction_pattern,
 )
@@ -52,31 +53,38 @@ KWARGS: Mapping = MappingProxyType(
     dict(n=100, p=20, k=3, q=4, sigma2_eps=0.1, sigma2_lin=0.4, sigma2_quad=0.5)
 )
 REPS: int = 10_000  # number of datasets
+SPARSITY: float = 2.0  # Gamma shape for the sparse-DGP fixture (mu4 = 10 / 3)
 
 
 @jit
-@partial(vmap, in_axes=(0, None))
-def generate_dgps(key: Key[Array, 'REPS'], lambda_: Float[Array, '']) -> DGP:
+@partial(vmap, in_axes=(0, None, None))
+def generate_dgps(
+    key: Key[Array, 'REPS'], lambda_: Float[Array, ''], sparsity: float | None
+) -> DGP:
     """Generate one dataset per random key."""
-    return gen_data(key, lambda_=lambda_, **KWARGS)
+    return gen_data(key, lambda_=lambda_, sparsity=sparsity, **KWARGS)
 
 
 @pytest.fixture
-def dgps(keys: split) -> DGP:
-    """Generate DGP instances using vmap and jit."""
-    return generate_dgps(keys.pop(REPS), 0.5)
+def dgps(keys: split, request: pytest.FixtureRequest) -> DGP:
+    """Generate DGP instances using vmap and jit.
+
+    Indirectly parametrizable by `sparsity` (default `None`, i.e. dense).
+    """
+    sparsity = getattr(request, 'param', None)
+    return generate_dgps(keys.pop(REPS), 0.5, sparsity)
 
 
 @pytest.fixture
 def dgps_lambda_zero(keys: split) -> DGP:
     """Generate DGP instances with lambda_=0."""
-    return generate_dgps(keys.pop(REPS), 0.0)
+    return generate_dgps(keys.pop(REPS), 0.0, None)
 
 
 @pytest.fixture
 def dgps_lambda_one(keys: split) -> DGP:
     """Generate DGP instances with lambda_=1."""
-    return generate_dgps(keys.pop(REPS), 1.0)
+    return generate_dgps(keys.pop(REPS), 1.0, None)
 
 
 def test_shapes_and_dtypes(keys: split) -> None:
@@ -95,6 +103,7 @@ def test_shapes_and_dtypes(keys: split) -> None:
     assert dgp.mulin.shape == (k, n)
     assert dgp.params.A_shared.shape == (p, p)
     assert dgp.params.A_separate.shape == (k, p, p)
+    assert dgp.params.s.shape == (p,)
     assert dgp.muquad_shared.shape == (n,)
     assert dgp.muquad_separate.shape == (k, n)
     assert dgp.muquad.shape == (k, n)
@@ -116,6 +125,7 @@ def test_shapes_and_dtypes(keys: split) -> None:
     assert jnp.issubdtype(dgp.mulin.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.params.A_shared.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.params.A_separate.dtype, jnp.floating)
+    assert jnp.issubdtype(dgp.params.s.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.muquad_shared.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.muquad_separate.dtype, jnp.floating)
     assert jnp.issubdtype(dgp.muquad.dtype, jnp.floating)
@@ -199,6 +209,59 @@ class TestGeneratePartition:
         assert_array_less(z_scores, SIGMA_THRESHOLD)
 
 
+def s_moment(sparsity: float, power: int) -> float:
+    """Analytic E[s ** power] for the scales drawn by `generate_s`.
+
+    With ``s = Gamma(sparsity) / sqrt(sparsity (sparsity + 1))`` one has
+    ``E[s ** m] = prod_{i<m}(sparsity + i) / (sparsity (sparsity + 1)) ** (m/2)``
+    (``power`` must be even). In particular ``s_moment(a, 2) == 1``.
+    """
+    num = 1.0
+    for i in range(power):
+        num *= sparsity + i
+    return num / (sparsity * (sparsity + 1)) ** (power // 2)
+
+
+class TestGenerateS:
+    """Test `generate_s` in isolation."""
+
+    N: int = 1_000_000  # number of i.i.d. scales for the moment estimates
+    ALPHA_S: float = 5.0  # a moderate shape, light enough tails for the z tests
+
+    def test_none_is_ones(self, keys: split) -> None:
+        """`sparsity=None` returns all-ones scales (uniform importance)."""
+        assert_array_equal(generate_s(keys.pop(), 10, None), jnp.ones(10))
+
+    def test_shape_and_dtype(self, keys: split) -> None:
+        """Scales have shape (p,) and a floating dtype."""
+        s = generate_s(keys.pop(), 7, self.ALPHA_S)
+        assert s.shape == (7,)
+        assert jnp.issubdtype(s.dtype, jnp.floating)
+
+    def test_second_moment(self, keys: split) -> None:
+        """The scales are normalized to ``E[s ** 2] == 1``."""
+        s2 = generate_s(keys.pop(), self.N, self.ALPHA_S) ** 2
+        var_s2 = s_moment(self.ALPHA_S, 4) - 1.0  # Var[s^2] = E[s^4] - E[s^2]^2
+        std_of_mean = jnp.sqrt(var_s2 / self.N)
+        z = jnp.abs((jnp.mean(s2) - 1.0) / std_of_mean)
+        assert_array_less(z, SIGMA_THRESHOLD)
+
+    def test_fourth_moment(self, keys: split) -> None:
+        """``E[s ** 4]`` matches the analytic ``mu4`` used in the normalizers."""
+        s4 = generate_s(keys.pop(), self.N, self.ALPHA_S) ** 4
+        mu4 = s_moment(self.ALPHA_S, 4)
+        var_s4 = s_moment(self.ALPHA_S, 8) - mu4**2
+        std_of_mean = jnp.sqrt(var_s4 / self.N)
+        z = jnp.abs((jnp.mean(s4) - mu4) / std_of_mean)
+        assert_array_less(z, SIGMA_THRESHOLD)
+
+    def test_dispersion_increases_with_sparsity(self, keys: split) -> None:
+        """Smaller `sparsity` spreads the importances out more (larger Var[s^2])."""
+        sparse = generate_s(keys.pop(), self.N, 1.0)
+        dense = generate_s(keys.pop(), self.N, 10.0)
+        assert jnp.var(sparse**2) > jnp.var(dense**2)
+
+
 class TestGenerateBetaShared:
     """Test the _generate_beta_shared method."""
 
@@ -250,77 +313,84 @@ class TestGenerateBetaSeparate:
         assert_array_less(z_scores, SIGMA_THRESHOLD)
 
 
-@pytest.mark.parametrize(
-    'which',
-    [
-        'mulin_shared',
-        'mulin_separate',
-        'mulin',
-        'muquad_shared',
-        'muquad_separate',
-        'muquad',
-        'mu',
-        'y',
-    ],
+WHICH_PARAMS = (
+    'mulin_shared',
+    'mulin_separate',
+    'mulin',
+    'muquad_shared',
+    'muquad_separate',
+    'muquad',
+    'mu',
+    'y',
 )
+
+
+def expected_pop_var(params: Params, which: str) -> Float[Array, ' REPS']:
+    """Return the expected population variance of DGP attribute `which`."""
+    if which.startswith('mulin'):
+        return params.sigma2_lin
+    elif which.startswith('muquad'):
+        return params.sigma2_quad
+    elif which == 'mu':
+        return params.sigma2_pop - params.sigma2_eps
+    elif which == 'y':
+        return params.sigma2_pop
+    else:  # pragma: no cover
+        raise KeyError(which)
+
+
+def expected_prior_var(params: Params, which: str) -> Float[Array, ' REPS']:
+    """Return the marginal prior variance of DGP attribute `which`."""
+    if which.startswith('mulin'):
+        return params.sigma2_lin
+    elif which.startswith('muquad'):
+        return params.sigma2_quad + params.sigma2_mean
+    elif which == 'mu':
+        return params.sigma2_pri - params.sigma2_eps
+    elif which == 'y':
+        return params.sigma2_pri
+    else:  # pragma: no cover
+        raise KeyError(which)
+
+
+@pytest.mark.parametrize(
+    'dgps', [None, SPARSITY], indirect=True, ids=['dense', 'sparse']
+)
+@pytest.mark.parametrize('which', WHICH_PARAMS)
 def test_outcome_prior_variance(dgps: DGP, which: str) -> None:
-    """Test that latent mean and outcome have the expected elementwise variance."""
+    """Test that latent mean and outcome have the expected marginal variance.
+
+    The budget holds with and without sparsity. Sparsity makes the quadratic
+    term heavier-tailed, so its variance estimator spread is set from the sample
+    fourth moment instead of the Gaussian ``2 sigma^4`` (which would over-reject).
+    """
     samples = getattr(dgps, which)  # Shape: (REPS, K?, N)
     n_reps = samples.shape[0]
 
     var = jnp.var(samples, axis=0)  # Shape: (K?, N)
-
-    if which.startswith('mulin'):
-        expected_var = dgps.params.sigma2_lin
-    elif which.startswith('muquad'):
-        expected_var = dgps.params.sigma2_quad + dgps.params.sigma2_mean
-    elif which == 'mu':
-        expected_var = dgps.params.sigma2_pri - dgps.params.sigma2_eps
-    elif which == 'y':
-        expected_var = dgps.params.sigma2_pri
-    else:  # pragma: no cover
-        raise KeyError(which)
-
-    expected_var = expected_var[0].item()
-    std_of_var = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
+    expected_var = expected_prior_var(dgps.params, which)[0].item()
+    if dgps.params.sparsity is None:
+        std_of_var = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
+    else:
+        fourth = jnp.mean((samples - jnp.mean(samples, axis=0)) ** 4, axis=0)
+        std_of_var = jnp.sqrt((fourth - var**2) / n_reps)
 
     z_scores = jnp.abs((var - expected_var) / std_of_var)
     assert_array_less(z_scores, SIGMA_THRESHOLD)
 
 
 @pytest.mark.parametrize(
-    'which',
-    [
-        'mulin_shared',
-        'mulin_separate',
-        'mulin',
-        'muquad_shared',
-        'muquad_separate',
-        'muquad',
-        'mu',
-        'y',
-    ],
+    'dgps', [None, SPARSITY], indirect=True, ids=['dense', 'sparse']
 )
+@pytest.mark.parametrize('which', WHICH_PARAMS)
 def test_outcome_pop_variance(dgps: DGP, which: str) -> None:
-    """Test that latent mean and outcome have the expected elementwise variance."""
+    """Test that the expected population variance is on target, with/without sparsity."""
     samples = getattr(dgps, which)  # Shape: (REPS, K?, N)
     n_reps = samples.shape[0]
 
     var = jnp.var(samples, axis=-1, ddof=1)  # Shape: (REPS, K?)
     var = jnp.mean(var, axis=0)  # Shape: (K?,)
-
-    if which.startswith('mulin'):
-        expected_var = dgps.params.sigma2_lin
-    elif which.startswith('muquad'):
-        expected_var = dgps.params.sigma2_quad
-    elif which == 'mu':
-        expected_var = dgps.params.sigma2_pop - dgps.params.sigma2_eps
-    elif which == 'y':
-        expected_var = dgps.params.sigma2_pop
-    else:  # pragma: no cover
-        raise KeyError(which)
-
-    expected_var = expected_var[0].item()
+    expected_var = expected_pop_var(dgps.params, which)[0].item()
     std_of_var = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
 
     z_scores = jnp.abs((var - expected_var) / std_of_var)

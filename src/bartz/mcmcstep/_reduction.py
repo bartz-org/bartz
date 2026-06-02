@@ -168,31 +168,26 @@ class OneHotReduction(ReductionConfig):
     with heavily data-sharded high-dimensional problems.
     """
 
-    method: Literal[
-        'scatter_set',
-        'matmul_n_outer',
-        'matmul_n_inner',
-        'multiply_n_outer',
-        'multiply_n_inner',
-    ] = field(static=True, default='multiply_n_inner')
+    method: Literal['scatter_set', 'matmul', 'multiply'] = field(
+        static=True, default='multiply'
+    )
     """How to contract the values against the one-hot leaf-membership matrix:
 
     'scatter_set'
-        Scatter the values into a dense ``size``-by-``n`` buffer with unique
-        (non-atomic) writes, then sum over the datapoints.
-    'matmul_n_outer'
-        Contract the values with the ``n``-by-``size`` one-hot matrix via a dot.
-    'matmul_n_inner'
-        Same with the transposed ``size``-by-``n`` one-hot, which gets a
-        different operand layout for the dot.
-    'multiply_n_outer'
-        Elementwise-multiply by the ``n``-by-``size`` one-hot and reduce over
-        the datapoints; whether the product is fused into the reduction or
-        materialized is left to the backend.
-    'multiply_n_inner' (default)
-        Same with the ``size``-by-``n`` one-hot, reducing along its contiguous
-        axis.
+        Scatter the values into a dense buffer with unique (non-atomic) writes,
+        then sum over the datapoints.
+    'matmul'
+        Contract the values with the one-hot matrix via a dot.
+    'multiply'
+        Elementwise-multiply by the one-hot matrix and reduce over the
+        datapoints; whether the ``n``-by-``size`` product is fused into the
+        reduction or materialized is left to the backend.
     """
+
+    n_inner: bool = field(static=True, default=True)
+    """Whether the datapoints sit on the one-hot's inner, contiguous axis
+    (``size``-by-``n``) or its outer axis (``n``-by-``size``); the two layouts
+    give the backend different memory access patterns."""
 
     def _reduce(
         self,
@@ -207,40 +202,49 @@ class OneHotReduction(ReductionConfig):
         values = jnp.asarray(values)
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
 
-        # a scalar value (the count case) weights each datapoint by `values`
+        # a scalar value is the count case, weighting each datapoint by `values`;
+        # it broadcasts in the scatter/multiply paths, only matmul needs a vector
         scalar = values.ndim == 0
         (n,) = indices.shape
+        batch_shape = values.shape[:-1]
         bins = jnp.arange(size, dtype=indices.dtype)
+        iota = jnp.arange(n)
 
-        if self.method == 'scatter_set':
-            iota = jnp.arange(n)
-            # a scalar `values` broadcasts in the scatter, no need to expand it
-            out = (
-                jnp.zeros((*values.shape[:-1], size, n), dtype)
-                .at[..., indices, iota]
-                .set(values, unique_indices=True)
-                .sum(axis=-1)
-            )
-        elif self.method == 'matmul_n_outer':
-            onehot = (indices[:, None] == bins).astype(dtype)  # (n, size)
-            vec = jnp.broadcast_to(values.astype(dtype), (n,)) if scalar else values
-            out = jnp.einsum('...n,ns->...s', vec, onehot)
-        elif self.method == 'matmul_n_inner':
-            onehot = (bins[:, None] == indices).astype(dtype)  # (size, n)
-            vec = jnp.broadcast_to(values.astype(dtype), (n,)) if scalar else values
-            out = jnp.einsum('...n,sn->...s', vec, onehot)
-        elif self.method == 'multiply_n_outer':
-            onehot = indices[:, None] == bins  # (n, size)
-            if scalar:
-                out = values * onehot.sum(axis=-2, dtype=dtype)
-            else:
-                out = (values[..., :, None] * onehot).sum(axis=-2)
-        elif self.method == 'multiply_n_inner':
-            onehot = bins[:, None] == indices  # (size, n)
-            if scalar:
-                out = values * onehot.sum(axis=-1, dtype=dtype)
-            else:
-                out = (values[..., None, :] * onehot).sum(axis=-1)
+        match self.method, self.n_inner:
+            case 'scatter_set', True:
+                out = (
+                    jnp.zeros((*batch_shape, size, n), dtype)
+                    .at[..., indices, iota]
+                    .set(values, unique_indices=True)
+                    .sum(axis=-1)
+                )
+            case 'scatter_set', False:
+                out = (
+                    jnp.zeros((*batch_shape, n, size), dtype)
+                    .at[..., iota, indices]
+                    .set(values, unique_indices=True)
+                    .sum(axis=-2)
+                )
+            case 'matmul', True:
+                onehot = (bins[:, None] == indices).astype(dtype)  # (size, n)
+                vec = jnp.broadcast_to(values.astype(dtype), (n,)) if scalar else values
+                out = jnp.einsum('...n,sn->...s', vec, onehot)
+            case 'matmul', False:
+                onehot = (indices[:, None] == bins).astype(dtype)  # (n, size)
+                vec = jnp.broadcast_to(values.astype(dtype), (n,)) if scalar else values
+                out = jnp.einsum('...n,ns->...s', vec, onehot)
+            case 'multiply', True:
+                onehot = bins[:, None] == indices  # (size, n)
+                if scalar:
+                    out = values * onehot.sum(axis=-1, dtype=dtype)
+                else:
+                    out = (values[..., None, :] * onehot).sum(axis=-1)
+            case 'multiply', False:
+                onehot = indices[:, None] == bins  # (n, size)
+                if scalar:
+                    out = values * onehot.sum(axis=-2, dtype=dtype)
+                else:
+                    out = (values[..., :, None] * onehot).sum(axis=-2)
 
         if data_sharded:
             out = lax.psum(out, 'data')

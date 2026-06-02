@@ -37,16 +37,20 @@ from beartype import beartype
 from equinox import Module
 from jax import debug_key_reuse, lax, make_mesh, random, tree, vmap
 from jax import numpy as jnp
+from jax.ops import segment_sum
 from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
+from jax.typing import DTypeLike
 from jaxtyping import (
     Array,
     Bool,
     Float,
     Float32,
     Int32,
+    Integer,
     Key,
     PyTree,
+    Shaped,
     UInt8,
     UInt32,
     jaxtyped,
@@ -65,8 +69,8 @@ from bartz._jaxext import (
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import (
     BatchedReduction,
+    OneHotReduction,
     PallasReduction,
-    ReductionConfig,
     State,
     init,
     make_p_nonterminal,
@@ -603,17 +607,53 @@ class TestSearchDivisor:
             _search_divisor(target, dividend, low, up)
 
 
-class TestPallasReduction:
-    """Check `PallasReduction` matches `BatchedReduction` over shapes and vmap."""
+class TestReduction:
+    """Check every `ReductionConfig` matches an unbatched segment-sum baseline.
 
-    # the reference: a plain unbatched segment-sum
-    reference = BatchedReduction(num_batches=None)
+    The test bodies only touch the abstract `_reduce` interface, so the same
+    checks apply to all subclasses and their settings.
+    """
 
     configs = (
+        # BatchedReduction: unbatched, automatic, and explicit batch counts (a
+        # divisor of `n` and a non-divisor, which leaves an uneven final batch)
+        BatchedReduction(num_batches=None),
+        BatchedReduction(num_batches='auto'),
+        BatchedReduction(num_batches=4),
+        BatchedReduction(num_batches=7),
+        # OneHotReduction: every contraction method in both memory layouts
+        OneHotReduction(method='matmul', n_inner=True),
+        OneHotReduction(method='matmul', n_inner=False),
+        OneHotReduction(method='multiply', n_inner=True),
+        OneHotReduction(method='multiply', n_inner=False),
+        OneHotReduction(method='scatter_set', n_inner=True),
+        OneHotReduction(method='scatter_set', n_inner=False),
+        # PallasReduction
         PallasReduction(),  # fully automatic
         PallasReduction(num_blocks=1, block_size=64),  # a single instance
         PallasReduction(num_blocks=8, block_size=16),  # forces the inner loop
     )
+
+    @staticmethod
+    def reference(
+        values: Float32[Array, '*batch_shape n'] | int,
+        indices: Integer[Array, ' n'],
+        /,
+        *,
+        size: int,
+        dtype: DTypeLike,
+        data_sharded: bool,
+    ) -> Shaped[Array, '*batch_shape {size}']:
+        """External baseline mirroring `_reduce` via `jax.ops.segment_sum`."""
+        assert not data_sharded  # the reductions under test are never sharded
+        values = jnp.asarray(values)
+        # `segment_sum` reduces the leading axis, `_reduce` the last one; a
+        # scalar value is the count case, weighting each datapoint equally
+        if values.ndim == 0:
+            data = jnp.broadcast_to(values.astype(dtype), indices.shape)
+        else:
+            data = jnp.moveaxis(values, -1, 0).astype(dtype)
+        return jnp.moveaxis(segment_sum(data, indices, num_segments=size), 0, -1)
 
     @pytest.mark.parametrize('batch_shape', [(), (3,), (2, 2)])
     def test_matches_reference_float(
@@ -624,13 +664,13 @@ class TestPallasReduction:
         indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
         values = random.normal(keys.pop(), (*batch_shape, n))
         kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
-        expected = self.reference._reduce(values, indices, **kw)
+        expected = self.reference(values, indices, **kw)
         for config in self.configs:
             with subtests.test(config=config):
                 got = config._reduce(values, indices, **kw)
                 assert got.shape == (*batch_shape, size)
                 assert_close_matrices(
-                    got.ravel(), expected.ravel(), rtol=1e-5, atol=1e-6
+                    got, expected, rtol=1e-5, atol=1e-6, reduce_rank=True
                 )
 
     def test_matches_reference_count(self, keys: split, subtests: SubTests) -> None:
@@ -638,7 +678,7 @@ class TestPallasReduction:
         n, size = 500, 8
         indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
         kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
-        expected = self.reference._reduce(1, indices, **kw)
+        expected = self.reference(1, indices, **kw)
         for config in self.configs:
             with subtests.test(config=config):
                 got = config._reduce(1, indices, **kw)
@@ -653,26 +693,27 @@ class TestPallasReduction:
         indices = random.randint(keys.pop(), (num_trees, n), 0, size).astype(jnp.uint32)
         values = random.normal(keys.pop(), (n,))
 
-        def reduce(config: ReductionConfig, value: object, dtype: object) -> Array:
+        def reduce(
+            reduce_fn: Callable[..., Array], value: object, dtype: object
+        ) -> Array:
             # `value` is shared across trees (captured, not mapped), `indices`
             # is batched, just as the count and residual paths invoke it
-            run = partial(
-                config._reduce, value, size=size, dtype=dtype, data_sharded=False
-            )
+            run = partial(reduce_fn, value, size=size, dtype=dtype, data_sharded=False)
             return vmap(run)(indices)
 
         for config in self.configs:
             with subtests.test(config=config):
                 assert_array_equal(  # count path: exact integer match
-                    reduce(config, 1, jnp.uint32),
+                    reduce(config._reduce, 1, jnp.uint32),
                     reduce(self.reference, 1, jnp.uint32),
                     strict=True,
                 )
                 assert_close_matrices(  # residual path
-                    reduce(config, values, jnp.float32).ravel(),
-                    reduce(self.reference, values, jnp.float32).ravel(),
+                    reduce(config._reduce, values, jnp.float32),
+                    reduce(self.reference, values, jnp.float32),
                     rtol=1e-5,
                     atol=1e-6,
+                    reduce_rank=True,
                 )
 
 

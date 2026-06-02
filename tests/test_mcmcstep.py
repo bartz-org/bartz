@@ -126,6 +126,7 @@ def _minimal_step_config() -> StepConfig:
         count_num_batches=None,
         prec_num_batches=None,
         prec_count_num_trees=None,
+        sequential_unroll=1,
         mesh=None,
     )
 

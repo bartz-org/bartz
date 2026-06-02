@@ -1097,7 +1097,9 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
         pso.prelkv,
         pso.prelf,
     )
-    resid, (leaf_trees, acc, to_prune, lkratio) = lax.scan(loop, pso.state.resid, pts)
+    resid, (leaf_trees, acc, to_prune, lkratio) = lax.scan(
+        loop, pso.state.resid, pts, unroll=pso.state.config.sequential_unroll
+    )
 
     state = replace(
         pso.state,

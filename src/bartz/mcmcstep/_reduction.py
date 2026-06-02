@@ -64,7 +64,10 @@ class ReductionConfig(Module):
 
 
 class BatchedReduction(ReductionConfig):
-    """Segment-sum with optional batching along the datapoints."""
+    """Segment-sum with optional batching along the datapoints.
+
+    The default; fastest at the usual tree sizes.
+    """
 
     num_batches: int | None | Literal['auto'] = field(static=True, default='auto')
     """The number of datapoint batches. If `None`, the reduce is unbatched. If
@@ -159,35 +162,36 @@ def _final_round(n: int, num: float | int) -> int | None:
 
 
 class OneHotReduction(ReductionConfig):
-    """Dense one-hot reduction, intended for small `n`.
+    """Dense one-hot reduction.
 
     Materializes the membership of each datapoint in its leaf as a one-hot
-    matrix over the `size` bins and contracts it against the values. This trades
-    the scatter atomics of `BatchedReduction` for a dense ``size``-by-``n``
-    pass, which can win when `n` is not much larger than `size`, e.g. on gpu
-    with heavily data-sharded high-dimensional problems.
+    matrix over the `size` bins and contracts it against the values. Beats
+    `BatchedReduction` only when `size` is very small (e.g. a single leaf pair),
+    or on gpu for multivariate residuals.
     """
 
-    method: Literal['scatter_set', 'matmul', 'multiply'] = field(
-        static=True, default='multiply'
+    method: Literal['matmul', 'multiply', 'scatter_set'] = field(
+        static=True, default='matmul'
     )
     """How to contract the values against the one-hot leaf-membership matrix:
 
-    'scatter_set'
-        Scatter the values into a dense buffer with unique (non-atomic) writes,
-        then sum over the datapoints.
     'matmul'
-        Contract the values with the one-hot matrix via a dot.
+        Contract the values with the one-hot matrix via a dot. Faster on gpu,
+        especially for multivariate residuals.
     'multiply'
         Elementwise-multiply by the one-hot matrix and reduce over the
         datapoints; whether the ``n``-by-``size`` product is fused into the
-        reduction or materialized is left to the backend.
+        reduction or materialized is left to the backend. Faster on cpu.
+    'scatter_set'
+        Scatter the values into a dense buffer with unique (non-atomic) writes,
+        then sum over the datapoints.
     """
 
     n_inner: bool = field(static=True, default=True)
     """Whether the datapoints sit on the one-hot's inner, contiguous axis
     (``size``-by-``n``) or its outer axis (``n``-by-``size``); the two layouts
-    give the backend different memory access patterns."""
+    give the backend different memory access patterns. `True` (the default)
+    fuses better on gpu."""
 
     def _reduce(
         self,

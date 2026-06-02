@@ -25,7 +25,7 @@
 """Deferred array construction used to lay out the MCMC state before sharding."""
 
 from collections.abc import Callable
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from equinox import Module
 from jax import ShapeDtypeStruct, tree
@@ -75,16 +75,26 @@ def add_dummy_axis(x: PyTree[DummyArray]) -> PyTree[ShapeDtypeStruct]:
     return tree.map(replace_leaf, x, is_leaf=lambda x: isinstance(x, _LazyArray))
 
 
+def _lazy(array_creator: Callable, shape: tuple[int, ...], *args: Any) -> Array:
+    """Build a `_LazyArray` placeholder, typed as the `Array` it stands in for.
+
+    The placeholder is parked in an array-typed state field until `init`
+    concretizes and shards it, so `cast` hides the deliberate type mismatch
+    from the static checker (the runtime check is disabled meanwhile).
+    """
+    return cast(Array, _LazyArray(array_creator, shape, *args))
+
+
 def _return_array(shape: tuple[int, ...], arr: Array, **kwargs: Any) -> Array:  # noqa: ARG001
     """`_LazyArray` factory that returns an already-built array."""
     return arr
 
 
-def _lazy_from_array(arr: Array | None) -> _LazyArray | None:
+def _lazy_from_array(arr: Array | None) -> Array | None:
     """Wrap an existing array as a `_LazyArray` reporting `arr.shape`, or pass `None`."""
     if arr is None:
         return None
-    return _LazyArray(_return_array, arr.shape, arr)
+    return _lazy(_return_array, arr.shape, arr)
 
 
 def _broadcast_chain(

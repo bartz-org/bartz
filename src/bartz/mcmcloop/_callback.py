@@ -34,6 +34,8 @@ import numpy
 from equinox import Module
 from jax import debug, lax, tree
 from jax import numpy as jnp
+from jax.nn import logmeanexp
+from jax.scipy.special import logsumexp
 from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, Integer, PyTree
 from tqdm.auto import tqdm
 
@@ -299,12 +301,43 @@ def _convert_jax_arrays_in_args(func: Callable[..., T]) -> Callable[..., T]:
     return new_func
 
 
+def _effective_predictors(log_s: Float32[Array, '*chains p']) -> Float32[Array, '']:
+    """Effective number of predictors used for splitting across all chains.
+
+    Perplexity (exponential of the Shannon entropy) of the split-variable
+    distribution ``s = softmax(log_s)`` pooled (averaged) over chains. It is 1
+    when all chains concentrate on a single shared predictor and ``p`` when the
+    pooled distribution is uniform; in general a pooled distribution spread
+    evenly over ``k`` predictors gives ``k``. Chains are pooled before taking the
+    entropy because predictions average over all chains, so a predictor used by
+    any chain counts as used.
+    """
+    *_, p = log_s.shape
+    log_prob = log_s - logsumexp(log_s, axis=-1, keepdims=True)  # normalize each chain
+    log_pool = logmeanexp(log_prob.reshape(-1, p), axis=0)  # mix over chains
+    prob = jnp.exp(log_pool)
+    # the where avoids the 0 * -inf = nan term where a probability is 0, the same
+    # guard `jax.scipy.special.entr` uses, but reusing the log we already have
+    entropy = -jnp.sum(prob * jnp.where(prob, log_pool, 1.0))
+    return jnp.exp(entropy)
+
+
 def _forest_stats(state: State) -> dict[str, Float32[Array, ''] | int | None]:
     """Cross-chain proposal/acceptance/leaves statistics shown during the MCMC."""
     chain_axis = chain_vmap_axes(state.forest).split_tree
     num_trees_axis = chainful_axis(0, chain_axis)  # (num_trees, hts)
     split_tree = chain_to_axis(state.forest.split_tree, chain_axis)
     prop_total = state.forest.split_tree.shape[num_trees_axis]
+
+    log_s = state.forest.log_s
+    if log_s is None:
+        peff = None
+        p = None
+    else:
+        log_s = chain_to_axis(log_s, chain_vmap_axes(state.forest).log_s)
+        *_, p = log_s.shape
+        peff = _effective_predictors(log_s)
+
     return dict(
         num_chains=state.num_chains(),
         grow_prop=state.forest.grow_prop_count.mean() / prop_total,
@@ -314,6 +347,8 @@ def _forest_stats(state: State) -> dict[str, Float32[Array, ''] | int | None]:
         / prop_total,
         mean_leaves=forest_mean_leaves(split_tree),
         max_leaves=split_tree.shape[-1],
+        peff=peff,
+        p=p,
     )
 
 
@@ -332,6 +367,8 @@ def _print_report(
     move_acc: float,
     mean_leaves: float,
     max_leaves: int,
+    peff: float | None,
+    p: int | None,
 ) -> None:
     """Print the report for `print_callback`."""
     # determine prefix
@@ -350,10 +387,17 @@ def _print_report(
         msgs.append('burnin')
     suffix = f' ({", ".join(msgs)})' if msgs else ''
 
+    # variable-selection concentration, only shown when it is enabled
+    if peff is None:
+        var_msg = ''
+    else:
+        var_msg = f'var: {peff:.1f}/{p}, '
+
     print(  # noqa: T201, see print_callback for why not logging
         f'{prefix}Iteration {it}/{n_iters}, '
         f'grow prob: {grow_prop:.0%}, '
         f'move acc: {move_acc:.0%}, '
+        f'{var_msg}'
         f'leaves: {mean_leaves:.1f}/{max_leaves}{suffix}'
     )
 
@@ -428,6 +472,8 @@ def _tqdm_report(
     move_acc: float,
     mean_leaves: float,
     max_leaves: int,
+    peff: float | None = None,
+    p: int | None = None,
     **_: Any,
 ) -> None:
     """Set the bar description and acceptance-statistics postfix."""
@@ -442,5 +488,7 @@ def _tqdm_report(
     if num_chains is not None:
         msgs.append(f'{num_chains}ch')
     msgs.append(f'acc {move_acc:.0%}')
+    if peff is not None:
+        msgs.append(f'var {peff:.1f}/{p}')
     msgs.append(f'leaves {mean_leaves:.1f}/{max_leaves}')
     bar.set_postfix_str(' '.join(msgs))

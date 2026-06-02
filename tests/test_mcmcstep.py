@@ -63,7 +63,15 @@ from bartz._jaxext import (
     split,
 )
 from bartz.grove import is_actual_leaf
-from bartz.mcmcstep import BatchedReduction, State, init, make_p_nonterminal, step
+from bartz.mcmcstep import (
+    BatchedReduction,
+    PallasReduction,
+    ReductionConfig,
+    State,
+    init,
+    make_p_nonterminal,
+    step,
+)
 from bartz.mcmcstep._axes import (
     chain_vmap_axes,
     data_vmap_axes,
@@ -593,6 +601,79 @@ class TestSearchDivisor:
         """Preconditions on the arguments are enforced via assertions."""
         with pytest.raises(AssertionError):
             _search_divisor(target, dividend, low, up)
+
+
+class TestPallasReduction:
+    """Check `PallasReduction` matches `BatchedReduction` over shapes and vmap."""
+
+    # the reference: a plain unbatched segment-sum
+    reference = BatchedReduction(num_batches=None)
+
+    configs = (
+        PallasReduction(),  # fully automatic
+        PallasReduction(num_blocks=1, block_size=64),  # a single instance
+        PallasReduction(num_blocks=8, block_size=16),  # forces the inner loop
+    )
+
+    @pytest.mark.parametrize('batch_shape', [(), (3,), (2, 2)])
+    def test_matches_reference_float(
+        self, batch_shape: tuple[int, ...], keys: split, subtests: SubTests
+    ) -> None:
+        """Float reductions match the reference for univariate and matrix values."""
+        n, size = 500, 8
+        indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
+        values = random.normal(keys.pop(), (*batch_shape, n))
+        kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
+        expected = self.reference._reduce(values, indices, **kw)
+        for config in self.configs:
+            with subtests.test(config=config):
+                got = config._reduce(values, indices, **kw)
+                assert got.shape == (*batch_shape, size)
+                assert_close_matrices(
+                    got.ravel(), expected.ravel(), rtol=1e-5, atol=1e-6
+                )
+
+    def test_matches_reference_count(self, keys: split, subtests: SubTests) -> None:
+        """The scalar-weight (count) case matches the reference exactly."""
+        n, size = 500, 8
+        indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
+        kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
+        expected = self.reference._reduce(1, indices, **kw)
+        for config in self.configs:
+            with subtests.test(config=config):
+                got = config._reduce(1, indices, **kw)
+                assert_array_equal(got, expected, strict=True)
+
+    def test_under_vmap_over_trees(self, keys: split, subtests: SubTests) -> None:
+        """Composes with an external `vmap` that batches only the indices.
+
+        This is the layout `step` uses to count/sum over many trees at once.
+        """
+        num_trees, n, size = 4, 500, 8
+        indices = random.randint(keys.pop(), (num_trees, n), 0, size).astype(jnp.uint32)
+        values = random.normal(keys.pop(), (n,))
+
+        def reduce(config: ReductionConfig, value: object, dtype: object) -> Array:
+            # `value` is shared across trees (captured, not mapped), `indices`
+            # is batched, just as the count and residual paths invoke it
+            run = partial(
+                config._reduce, value, size=size, dtype=dtype, data_sharded=False
+            )
+            return vmap(run)(indices)
+
+        for config in self.configs:
+            with subtests.test(config=config):
+                assert_array_equal(  # count path: exact integer match
+                    reduce(config, 1, jnp.uint32),
+                    reduce(self.reference, 1, jnp.uint32),
+                    strict=True,
+                )
+                assert_close_matrices(  # residual path
+                    reduce(config, values, jnp.float32).ravel(),
+                    reduce(self.reference, values, jnp.float32).ravel(),
+                    rtol=1e-5,
+                    atol=1e-6,
+                )
 
 
 def vmap_randint_masked(

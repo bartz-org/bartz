@@ -30,14 +30,21 @@ from functools import partial
 from typing import Literal
 
 from equinox import Module, field
-from jax import lax
+from jax import ShapeDtypeStruct, lax
 from jax import numpy as jnp
+from jax.experimental import pallas as pl
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float32, Int32, Integer, Shaped
+
+from bartz._jaxext import get_default_device
 
 # target number of datapoint batches on cpu when batching is resolved
 # automatically; unlike the gpu target it does not vary across reductions
 _AUTO_CPU_TARGET = 16
+
+# target number of elements in the per-instance one-hot tile of `PallasReduction`
+# when its block size is resolved automatically
+_AUTO_PALLAS_TILE = 2**12
 
 
 class ReductionConfig(Module):
@@ -253,6 +260,153 @@ class OneHotReduction(ReductionConfig):
         if data_sharded:
             out = lax.psum(out, 'data')
         return out
+
+
+class PallasReduction(ReductionConfig):
+    """Blocked one-hot scatter-add written as a Pallas kernel.
+
+    Splits the datapoints into blocks and, for each block, contracts the values
+    against a one-hot leaf-membership matrix held in fast memory, accumulating
+    the block partials. Unlike `OneHotReduction`, the one-hot product is
+    guaranteed to stay fused (it is never written back to main memory). Targets
+    gpu/tpu; on cpu it falls back to Pallas interpret mode, which is slow and
+    meant only for testing. Like `OneHotReduction`, it is competitive only when
+    `size` (the number of leaves) is small.
+    """
+
+    block_size: int | Literal['auto'] = field(static=True, default='auto')
+    """Datapoints contracted per kernel iteration: the width of the one-hot tile
+    in fast memory. If 'auto', chosen to keep that tile small. Should be a power
+    of 2 on gpu."""
+
+    num_blocks: int | Literal['auto'] = field(static=True, default='auto')
+    """Number of kernel instances (grid size) the datapoints are split across,
+    each looping over its share. More instances raise occupancy but enlarge the
+    partial-sum buffer. If 'auto', resolved per-platform at trace time."""
+
+    auto_gpu_target: int = field(static=True, default=1024)
+    """Cap on the number of kernel instances on gpu when `num_blocks` is 'auto'."""
+
+    interpret: bool | Literal['auto'] = field(static=True, default='auto')
+    """Whether to run the kernel in Pallas interpret mode. If 'auto', enabled on
+    cpu (which supports no other mode) and disabled elsewhere."""
+
+    def _reduce(
+        self,
+        values: Float32[Array, '*batch_shape n'] | int,
+        indices: Integer[Array, ' n'],
+        /,
+        *,
+        size: int,
+        dtype: DTypeLike,
+        data_sharded: bool,
+    ) -> Shaped[Array, '*batch_shape {size}']:
+        values = jnp.asarray(values)
+        assert values.ndim == 0 or values.shape[-1:] == indices.shape
+        (n,) = indices.shape
+        num_rows = 1 if values.ndim == 0 else math.prod(values.shape[:-1])
+
+        # the grid size, tile width and interpret flag are all static, so the
+        # 'auto' settings are resolved here against the trace-time platform
+        # rather than deferred to XLA like `BatchedReduction`'s batch count
+        cpu = get_default_device().platform == 'cpu'
+        interpret = cpu if self.interpret == 'auto' else self.interpret
+        if self.block_size == 'auto':
+            block_size = _auto_block_size(n, size, num_rows)
+        else:
+            block_size = self.block_size
+        if self.num_blocks == 'auto':
+            target = _AUTO_CPU_TARGET if cpu else self.auto_gpu_target
+            num_blocks = max(1, min(-(-n // block_size), target))
+        else:
+            num_blocks = self.num_blocks
+
+        out = _pallas_scatter_add(
+            values,
+            indices,
+            size=size,
+            dtype=dtype,
+            num_blocks=num_blocks,
+            block_size=block_size,
+            interpret=interpret,
+        )
+        if data_sharded:
+            out = lax.psum(out, 'data')
+        return out
+
+
+def _auto_block_size(n: int, size: int, num_rows: int) -> int:
+    """Power-of-2 datapoint tile keeping the kernel's one-hot working set small."""
+    area = max(1, _AUTO_PALLAS_TILE // (size * num_rows))
+    block_size = 1 << round(math.log2(area))  # nearest power of 2
+    ceil_pow2_n = 1 << (max(1, n) - 1).bit_length()  # avoid padding beyond `n`
+    return min(block_size, ceil_pow2_n)
+
+
+def _pallas_scatter_add(
+    values: Float32[Array, '*batch_shape n'] | Int32[Array, ''],
+    indices: Integer[Array, ' n'],
+    /,
+    *,
+    size: int,
+    dtype: DTypeLike,
+    num_blocks: int,
+    block_size: int,
+    interpret: bool,
+) -> Shaped[Array, '*batch_shape {size}']:
+    """Blocked one-hot indexed reduce via a Pallas kernel; see `PallasReduction`."""
+    scalar = values.ndim == 0
+    (n,) = indices.shape
+    if scalar:
+        # a scalar value (the count case) weights every datapoint equally
+        batch_shape = ()
+        rows = jnp.broadcast_to(values.astype(dtype), (1, n))
+    else:
+        batch_shape = values.shape[:-1]
+        rows = values.astype(dtype).reshape(-1, n)
+    num_rows, _ = rows.shape
+
+    # each instance scans `iters` sub-blocks of `block_size` datapoints; pad the
+    # datapoint axis so it splits evenly. The padded rows are zero, so padded
+    # datapoints contribute nothing whatever bin they fall in; the out-of-range
+    # `size` index is just a tidy default (it may wrap in a narrow index dtype).
+    iters = -(-n // (num_blocks * block_size))
+    chunk = iters * block_size
+    pad = num_blocks * chunk - n
+    indices = jnp.pad(indices, (0, pad), constant_values=size)
+    rows = jnp.pad(rows, ((0, 0), (0, pad)))
+
+    # the kernel operates on `Ref`s, not arrays, so it carries no array
+    # annotations (which would also trip runtime shape typechecking)
+    def kernel(rows_ref, indices_ref, out_ref):  # noqa: ANN001, ANN202
+        bins = jnp.arange(size, dtype=indices_ref.dtype)
+
+        def accumulate(i, acc):  # noqa: ANN001, ANN202
+            block = pl.ds(i * block_size, block_size)
+            onehot = (bins[:, None] == indices_ref[block]).astype(dtype)
+            return acc + (rows_ref[:, block][:, None, :] * onehot).sum(axis=-1)
+
+        out_ref[0] = lax.fori_loop(
+            0, iters, accumulate, jnp.zeros((num_rows, size), dtype)
+        )
+
+    out = pl.pallas_call(
+        kernel,
+        out_shape=ShapeDtypeStruct((num_blocks, num_rows, size), dtype),
+        grid=(num_blocks,),
+        in_specs=[
+            pl.BlockSpec((num_rows, chunk), lambda p: (0, p)),
+            pl.BlockSpec((chunk,), lambda p: (p,)),
+        ],
+        out_specs=pl.BlockSpec((1, num_rows, size), lambda p: (p, 0, 0)),
+        interpret=interpret,
+        name='scatter_add',
+    )(rows, indices)
+    out = out.sum(axis=0)
+
+    if scalar:
+        return out.reshape(size)
+    return out.reshape(*batch_shape, size)
 
 
 # default reduction configs for `init`; the per-reduction gpu batch targets were

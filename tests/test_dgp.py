@@ -56,6 +56,7 @@ KWARGS: Mapping = MappingProxyType(
 )
 REPS: int = 10_000  # number of datasets
 SPARSITY: float = 2.0  # Gamma shape for the sparse-DGP fixture (mu4 = 10 / 3)
+HIGH_SPARSITY: float = 1e19  # largest before sparsity (sparsity + 1) overflows float32
 
 
 @partial(jit, static_argnames=('het_shape',))
@@ -284,6 +285,21 @@ class TestGenerateS:
         sparse = generate_s(keys.pop(), self.N, 1.0)
         dense = generate_s(keys.pop(), self.N, 10.0)
         assert jnp.var(sparse**2) > jnp.var(dense**2)
+
+
+def test_high_sparsity_matches_none(keys: split) -> None:
+    """A very high `sparsity` reproduces the non-sparse (`None`) DGP.
+
+    The importance scales concentrate at 1 as ``sparsity -> inf``, so the data
+    matches the ``sparsity=None`` run under the same key. The match is
+    approximate because the ``None`` and concrete code paths differ.
+    """
+    kw = dict(KWARGS, lambda_=0.5)
+    key = keys.pop()
+    none = gen_data(key, sparsity=None, **kw)
+    high = gen_data(random.clone(key), sparsity=HIGH_SPARSITY, **kw)
+    assert_close_matrices(high.mu, none.mu, rtol=1e-5)
+    assert_close_matrices(high.y, none.y, rtol=1e-5)
 
 
 class TestGenerateBetaShared:
@@ -906,6 +922,36 @@ class TestHeteroskedasticity:
         # the heteroskedastic noise is the homoskedastic noise scaled by error_scale
         recon = het.mu + (homo.y - homo.mu) * het.error_scale
         assert_close_matrices(het.y, recon, rtol=1e-5)
+
+    @pytest.mark.parametrize('het_shape', ['scalar', 'vector'])
+    def test_zero_logscale_is_homoskedastic(self, keys: split, het_shape: str) -> None:
+        """``sigma2_logscale=0`` collapses het back to the homoskedastic model.
+
+        The log-variance coefficients and their normalization vanish, so
+        ``error_scale`` is exactly 1 and the mean is untouched; the outcome then
+        matches the ``het_shape=None`` run up to float32 reordering of the noise.
+        """
+        kw = dict(KWARGS, lambda_=0.5)
+        key = keys.pop()
+        homo = gen_data(key, **kw)
+        het = gen_data(
+            random.clone(key), het_shape=het_shape, sigma2_logscale=0.0, **kw
+        )
+
+        assert_array_equal(het.error_scale, jnp.ones_like(het.error_scale))
+        assert_array_equal(
+            het.params.gamma_shared, jnp.zeros_like(het.params.gamma_shared)
+        )
+        assert_array_equal(het.params.het_offset, jnp.zeros_like(het.params.het_offset))
+        assert_array_equal(het.params.var_v, jnp.zeros_like(het.params.var_v))
+        if het_shape == 'vector':
+            assert_array_equal(
+                het.params.gamma_separate, jnp.zeros_like(het.params.gamma_separate)
+            )
+        else:
+            assert het.params.gamma_separate is None
+        assert_array_equal(het.mu, homo.mu)
+        assert_close_matrices(het.y, homo.y, rtol=1e-5)
 
     def test_scalar_and_vector_share_shared_stream(self, keys: split) -> None:
         """``'scalar'`` and ``'vector'`` het share the ``gamma_shared`` stream."""

@@ -25,6 +25,7 @@
 """Implementation of miscellaneous jax extension utilities."""
 
 import math
+import sys
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from functools import partial
@@ -42,6 +43,11 @@ from jaxtyping import config as jaxtyping_config
 
 from bartz._jaxext._jit import jit
 from bartz._jaxext.scipy.special import ndtri
+
+if sys.version_info >= (3, 13):
+    from typing import TypeIs
+else:  # WORKAROUND(python<3.13): typing.TypeIs was added in 3.13
+    from typing_extensions import TypeIs
 
 
 @contextmanager
@@ -290,7 +296,7 @@ def get_device_count() -> int:
     return len(get_default_devices())
 
 
-def is_key(x: object) -> bool:
+def is_key(x: object) -> TypeIs[Key[Array, ' *shape']]:
     """Determine if `x` is a jax random key."""
     return isinstance(x, Array) and jnp.issubdtype(x.dtype, prng_key)
 

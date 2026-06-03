@@ -797,8 +797,8 @@ def precompute_leaf_terms(
 
 @vmap_nodoc
 def _gather_lrt(
-    leaf_values: Float32[Array, '... tree_size'], lrt_nodes: Int32[Array, ' 3']
-) -> Float32[Array, '3 ...']:
+    leaf_values: Float32[Array, '*k_k tree_size'], lrt_nodes: Int32[Array, ' 3']
+) -> Float32[Array, ' 3 *k_k']:
     """Gather per-tree leaf values at the left child, right child, and parent."""
     return jnp.moveaxis(leaf_values[..., lrt_nodes], -1, 0)
 

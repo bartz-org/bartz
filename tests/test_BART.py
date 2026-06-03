@@ -83,6 +83,7 @@ from tests.util import (
     assert_different_matrices,
     clipped_logit,
     int_seed,
+    nnone,
     periodic_sigint,
     rhat_rank,
 )
@@ -321,13 +322,13 @@ class TestWithCachedBart:
 
         if get_with_default(kw, 'type') == 'pbart':  # binary regression
             with subtests.test('prob_train'):
-                prob_train = bart.prob_train.reshape(nchains, nsamples, n)
+                prob_train = nnone(bart.prob_train).reshape(nchains, nsamples, n)
                 rhat_prob_train = rhat_rank(clipped_logit(prob_train, 1e-5), split=True)
                 assert_array_less(rhat_prob_train, 1.005)
 
         else:  # continuous regression
             with subtests.test('sigma'):
-                sigma = bart.sigma[nsamples:, :].T
+                sigma = nnone(bart.sigma)[nsamples:, :].T
                 rhat_sigma = rhat_rank(sigma, split=True)
                 assert_array_less(rhat_sigma, 1.01)
 
@@ -392,20 +393,20 @@ class TestWithCachedBart:
         Xt = bart._bart._binner.bin(kw['x_test'])
         yhat_test = evaluate_trace(Xt, trace)
         assert_close_matrices(
-            yhat_test, rbart.yhat_test.astype(numpy.float32), rtol=1e-6
+            yhat_test, nnone(rbart.yhat_test).astype(numpy.float32), rtol=1e-6
         )
 
         if get_with_default(kw, 'type') == 'pbart':
             # check prob_train
             prob_train = ndtr(yhat_train)
             assert_close_matrices(
-                prob_train, rbart.prob_train.astype(numpy.float32), rtol=1e-7
+                prob_train, nnone(rbart.prob_train).astype(numpy.float32), rtol=1e-7
             )
 
             # check prob_test
             prob_test = ndtr(yhat_test)
             assert_close_matrices(
-                prob_test, rbart.prob_test.astype(numpy.float32), rtol=1e-7
+                prob_test, nnone(rbart.prob_test).astype(numpy.float32), rtol=1e-7
             )
 
     def test_comparison_BART3(
@@ -444,14 +445,19 @@ class TestWithCachedBart:
         if get_with_default(kw, 'type') == 'pbart':  # binary regression
             with subtests.test('prob_train'):
                 rhat_prob_train = rhat_rank(
-                    clipped_logit(jnp.stack([bart.prob_train, rbart.prob_train]), 1e-5),
+                    clipped_logit(
+                        jnp.stack([nnone(bart.prob_train), nnone(rbart.prob_train)]),
+                        1e-5,
+                    ),
                     split=False,
                 )
                 assert_array_less(rhat_prob_train, 1.005)
 
             with subtests.test('prob_test'):
                 rhat_prob_test = rhat_rank(
-                    clipped_logit(jnp.stack([bart.prob_test, rbart.prob_test]), 1e-5),
+                    clipped_logit(
+                        jnp.stack([nnone(bart.prob_test), nnone(rbart.prob_test)]), 1e-5
+                    ),
                     split=False,
                 )
                 assert_array_less(rhat_prob_test, 1.005)
@@ -459,7 +465,8 @@ class TestWithCachedBart:
         else:  # continuous regression
             with subtests.test('yhat_train_mean'):
                 assert_close_matrices(
-                    bart.yhat_train_mean - rbart.yhat_train_mean.astype(numpy.float32),
+                    nnone(bart.yhat_train_mean)
+                    - nnone(rbart.yhat_train_mean).astype(numpy.float32),
                     jnp.concatenate([bart.yhat_train, rbart.yhat_train]).std(axis=0),
                     tozero=True,
                     rtol=0.3,
@@ -467,21 +474,29 @@ class TestWithCachedBart:
 
             with subtests.test('yhat_test_mean'):
                 assert_close_matrices(
-                    bart.yhat_test_mean - rbart.yhat_test_mean.astype(numpy.float32),
-                    jnp.concatenate([bart.yhat_test, rbart.yhat_test]).std(axis=0),
+                    nnone(bart.yhat_test_mean)
+                    - nnone(rbart.yhat_test_mean).astype(numpy.float32),
+                    jnp.concatenate(
+                        [nnone(bart.yhat_test), nnone(rbart.yhat_test)]
+                    ).std(axis=0),
                     tozero=True,
                     rtol=0.3,
                 )
 
             with subtests.test('sigma'):
                 rhat_sigma = rhat_rank(
-                    [bart.sigma_[-bart.ndpost :], rbart.sigma_[-rbart.ndpost :]],
+                    [
+                        nnone(bart.sigma_)[-bart.ndpost :],
+                        nnone(rbart.sigma_)[-rbart.ndpost :],
+                    ],
                     split=False,
                 )
                 assert_array_less(rhat_sigma, 1.01)
 
             with subtests.test('sigma_mean'):
-                assert_allclose(bart.sigma_mean, rbart.sigma_mean, rtol=0.1)
+                assert_allclose(
+                    nnone(bart.sigma_mean), nnone(rbart.sigma_mean), rtol=0.1
+                )
 
         with subtests.test('tree_node_count'):
             # check number of tree nodes in forest
@@ -638,10 +653,10 @@ def test_output_shapes(kw: dict[str, Any]) -> None:
     assert ndpost == bart.ndpost
     assert bart.offset.shape == ()
     if binary:
-        assert bart.prob_test.shape == (ndpost, m)
-        assert bart.prob_test_mean.shape == (m,)
-        assert bart.prob_train.shape == (ndpost, n)
-        assert bart.prob_train_mean.shape == (n,)
+        assert nnone(bart.prob_test).shape == (ndpost, m)
+        assert nnone(bart.prob_test_mean).shape == (m,)
+        assert nnone(bart.prob_train).shape == (ndpost, n)
+        assert nnone(bart.prob_train_mean).shape == (n,)
         assert bart.sigma is None
         assert bart.sigma_ is None
         assert bart.sigma_mean is None
@@ -651,25 +666,25 @@ def test_output_shapes(kw: dict[str, Any]) -> None:
         assert bart.prob_train is None
         assert bart.prob_train_mean is None
         if mc_cores == 1:
-            assert bart.sigma.shape == (nskip + ndpost,)
+            assert nnone(bart.sigma).shape == (nskip + ndpost,)
         else:
-            assert bart.sigma.shape == (nskip + ndpost // mc_cores, mc_cores)
-        assert bart.sigma_.shape == (ndpost,)
-        assert bart.sigma_mean.shape == ()
+            assert nnone(bart.sigma).shape == (nskip + ndpost // mc_cores, mc_cores)
+        assert nnone(bart.sigma_).shape == (ndpost,)
+        assert nnone(bart.sigma_mean).shape == ()
     assert bart.varcount.shape == (ndpost, p)
     assert bart.varcount_mean.shape == (p,)
     assert bart.varprob.shape == (ndpost, p)
     assert bart.varprob_mean.shape == (p,)
-    assert bart.yhat_test.shape == (ndpost, m)
+    assert nnone(bart.yhat_test).shape == (ndpost, m)
     if binary:
         assert bart.yhat_test_mean is None
     else:
-        assert bart.yhat_test_mean.shape == (m,)
+        assert nnone(bart.yhat_test_mean).shape == (m,)
     assert bart.yhat_train.shape == (ndpost, n)
     if binary:
         assert bart.yhat_train_mean is None
     else:
-        assert bart.yhat_train_mean.shape == (n,)
+        assert nnone(bart.yhat_train_mean).shape == (n,)
 
 
 def test_output_types(kw: dict[str, Any]) -> None:
@@ -681,24 +696,24 @@ def test_output_types(kw: dict[str, Any]) -> None:
     assert bart.offset.dtype == jnp.float32
     assert isinstance(bart.ndpost, int)
     if binary:
-        assert bart.prob_test.dtype == jnp.float32
-        assert bart.prob_test_mean.dtype == jnp.float32
-        assert bart.prob_train.dtype == jnp.float32
-        assert bart.prob_train_mean.dtype == jnp.float32
+        assert nnone(bart.prob_test).dtype == jnp.float32
+        assert nnone(bart.prob_test_mean).dtype == jnp.float32
+        assert nnone(bart.prob_train).dtype == jnp.float32
+        assert nnone(bart.prob_train_mean).dtype == jnp.float32
     else:
-        assert bart.sigma.dtype == jnp.float32
-        assert bart.sigma_.dtype == jnp.float32
-        assert bart.sigma_mean.dtype == jnp.float32
+        assert nnone(bart.sigma).dtype == jnp.float32
+        assert nnone(bart.sigma_).dtype == jnp.float32
+        assert nnone(bart.sigma_mean).dtype == jnp.float32
     assert bart.varcount.dtype == jnp.int32
     assert bart.varcount_mean.dtype == jnp.float32
     assert bart.varprob.dtype == jnp.float32
     assert bart.varprob_mean.dtype == jnp.float32
-    assert bart.yhat_test.dtype == jnp.float32
+    assert nnone(bart.yhat_test).dtype == jnp.float32
     if not binary:
-        assert bart.yhat_test_mean.dtype == jnp.float32
+        assert nnone(bart.yhat_test_mean).dtype == jnp.float32
     assert bart.yhat_train.dtype == jnp.float32
     if not binary:
-        assert bart.yhat_train_mean.dtype == jnp.float32
+        assert nnone(bart.yhat_train_mean).dtype == jnp.float32
 
 
 def test_predict(kw: dict[str, Any]) -> None:
@@ -803,32 +818,40 @@ def test_scale_shift(kw: dict[str, Any]) -> None:
 
     assert_allclose(bart1.offset, (bart2.offset - offset) / scale, rtol=1e-6, atol=1e-6)
     assert_allclose(
-        bart1._mcmc_state.forest.leaf_prior_cov_inv,
-        bart2._mcmc_state.forest.leaf_prior_cov_inv * scale**2,
+        nnone(bart1._mcmc_state.forest.leaf_prior_cov_inv),
+        nnone(bart2._mcmc_state.forest.leaf_prior_cov_inv) * scale**2,
         rtol=1e-6,
         atol=0,
     )
-    assert_allclose(bart1.sigest, bart2.sigest / scale, rtol=1e-6)
-    assert_array_equal(bart1._mcmc_state.error_cov_df, bart2._mcmc_state.error_cov_df)
+    assert_allclose(nnone(bart1.sigest), nnone(bart2.sigest) / scale, rtol=1e-6)
+    assert_array_equal(
+        nnone(bart1._mcmc_state.error_cov_df), nnone(bart2._mcmc_state.error_cov_df)
+    )
     assert_allclose(
-        bart1._mcmc_state.error_cov_scale,
-        bart2._mcmc_state.error_cov_scale / scale**2,
+        nnone(bart1._mcmc_state.error_cov_scale),
+        nnone(bart2._mcmc_state.error_cov_scale) / scale**2,
         rtol=1e-6,
     )
     assert_close_matrices(
         bart1.yhat_train, (bart2.yhat_train - offset) / scale, rtol=1e-5
     )
     assert_close_matrices(
-        bart1.yhat_train_mean, (bart2.yhat_train_mean - offset) / scale, rtol=1e-5
+        nnone(bart1.yhat_train_mean),
+        (nnone(bart2.yhat_train_mean) - offset) / scale,
+        rtol=1e-5,
     )
     assert_close_matrices(
-        bart1.yhat_test, (bart2.yhat_test - offset) / scale, rtol=1e-5
+        nnone(bart1.yhat_test), (nnone(bart2.yhat_test) - offset) / scale, rtol=1e-5
     )
     assert_close_matrices(
-        bart1.yhat_test_mean, (bart2.yhat_test_mean - offset) / scale, rtol=1e-5
+        nnone(bart1.yhat_test_mean),
+        (nnone(bart2.yhat_test_mean) - offset) / scale,
+        rtol=1e-5,
     )
-    assert_close_matrices(bart1.sigma, bart2.sigma / scale, rtol=1e-5)
-    assert_allclose(bart1.sigma_mean, bart2.sigma_mean / scale, rtol=1e-6, atol=1e-6)
+    assert_close_matrices(nnone(bart1.sigma), nnone(bart2.sigma) / scale, rtol=1e-5)
+    assert_allclose(
+        nnone(bart1.sigma_mean), nnone(bart2.sigma_mean) / scale, rtol=1e-6, atol=1e-6
+    )
 
 
 def test_min_points_per_decision_node(kw: dict[str, Any]) -> None:
@@ -925,14 +948,14 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
         else:
             assert bart.offset == 0
     assert_allclose(
-        bart._mcmc_state.forest.leaf_prior_cov_inv,
+        nnone(bart._mcmc_state.forest.leaf_prior_cov_inv),
         (2**2 * get_with_default(kw, 'ntree')) / tau_num**2,
         rtol=1e-6,
     )
 
     # check the likelihood ratio is always 1
-    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
-    assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
+    assert_array_equal(nnone(bart._burnin_trace.log_likelihood), 0.0, strict=False)
+    assert_array_equal(nnone(bart._main_trace.log_likelihood), 0.0, strict=False)
 
 
 def test_two_datapoints(kw: dict[str, Any]) -> None:
@@ -943,7 +966,7 @@ def test_two_datapoints(kw: dict[str, Any]) -> None:
     )
     bart = mc_gbart(**kw)
     if get_with_default(kw, 'type') != 'pbart':
-        assert_allclose(bart.sigest, kw['y_train'].std(), rtol=1e-6)
+        assert_allclose(nnone(bart.sigest), kw['y_train'].std(), rtol=1e-6)
     if get_with_default(kw, 'usequants'):
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)
@@ -1118,8 +1141,8 @@ def run_bart_like_prior(
     bart = mc_gbart(**kw)
 
     with subtests.test('likelihood ratio = 1'):
-        assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
-        assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
+        assert_array_equal(nnone(bart._burnin_trace.log_likelihood), 0.0, strict=False)
+        assert_array_equal(nnone(bart._main_trace.log_likelihood), 0.0, strict=False)
 
     return bart
 
@@ -1141,7 +1164,7 @@ def sample_prior_like(
         len(bart._mcmc_state.forest.leaf_tree),
         bart._mcmc_state.forest.max_split,
         p_nonterminal,
-        jnp.sqrt(jnp.reciprocal(bart._mcmc_state.forest.leaf_prior_cov_inv)),
+        jnp.sqrt(jnp.reciprocal(nnone(bart._mcmc_state.forest.leaf_prior_cov_inv))),
     )
 
     with subtests.test('check prior trees'):
@@ -1304,7 +1327,7 @@ def test_polars(kw: dict[str, Any]) -> None:
 
     assert_close_matrices(bart.yhat_train, bart2.yhat_train, rtol=rtol)
     if bart.sigma is not None:
-        assert_close_matrices(bart.sigma, bart2.sigma, rtol=rtol)
+        assert_close_matrices(bart.sigma, nnone(bart2.sigma), rtol=rtol)
     assert_close_matrices(pred, pred2, rtol=rtol)
 
 

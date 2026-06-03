@@ -863,9 +863,12 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     """Multivariate leaf draws must carry the full leaf-prior covariance.
 
     A strongly informative, correlated leaf prior makes the likelihood
-    negligible, so every leaf is resampled essentially from its prior
-    ``N(0, leaf_prior_cov)``. Pooling all leaves over the whole trace, their
-    empirical covariance must match ``leaf_prior_cov``.
+    negligible, so every heap node is resampled essentially from its prior
+    ``N(0, leaf_prior_cov)`` each sweep. Nodes that are not actual leaves carry
+    zero likelihood precision, hence are drawn exactly from the prior; pooling
+    every heap node (over chains, samples, trees, and positions) thus estimates
+    ``leaf_prior_cov`` with ~``tree_size`` times more draws than the actual
+    leaves alone, at no extra sampling cost.
 
     This catches sampling the leaf noise with a wrong covariance, e.g. as
     ``z / diag(L)`` instead of ``L^-T z`` (a `solve_triangular` missing
@@ -889,18 +892,14 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     )
     bart = Bart(**kw)
 
-    # pool every actual leaf over chains, samples, and trees into one m axis
-    trace = bart._main_trace
-    n_merge = (2 if trace.has_chains else 1) + 1  # (chains,) samples, and trees
-    leaf_tree = lax.collapse(trace.leaf_tree, 0, n_merge)  # (m, k, ts)
-    split_tree = lax.collapse(trace.split_tree, 0, n_merge)  # (m, ts // 2)
-    actual_leaf = partial(is_actual_leaf, add_bottom_level=True)
-    leaf_mask = vmap(actual_leaf)(split_tree)  # (m, ts)
-    leaves = jnp.moveaxis(leaf_tree, 1, -1).reshape(-1, k)  # (m * ts, k)
-    samples = leaves[leaf_mask.reshape(-1), :]  # (num_leaves, k)
-    empirical_cov = jnp.cov(samples.T)
+    # pool every heap node (each an independent prior draw) over chains, samples,
+    # trees, and positions; leaf_tree is (..., k, tree_size)
+    leaves = jnp.moveaxis(bart._main_trace.leaf_tree, -2, -1).reshape(-1, k)
+    empirical_cov = jnp.cov(leaves.T)
 
-    assert_close_matrices(empirical_cov, leaf_prior_cov, rtol=0.01)
+    # the large pool drives the 2-norm sampling error well below 0.01 (measured
+    # <0.007); the off-diagonal-zeroing bug instead deviates by ~0.4
+    assert_close_matrices(empirical_cov, leaf_prior_cov, rtol=0.02)
 
 
 def test_missing_ignored(bkw: BartKW, keys: split) -> None:

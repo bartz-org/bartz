@@ -1950,8 +1950,8 @@ class TestPrecomputeTerms:
         error_cov_inv = jnp.array([[inv_sigma2]])
         leaf_prior_cov_inv = jnp.array([[leaf_prior_cov_inv_uv]])
         prec_trees = random.uniform(keys.pop(), (num_trees, tree_size)) * 5.0
-        z_mv = random.normal(keys.pop(), (num_trees, tree_size, 1))
-        z_uv = z_mv.squeeze(axis=-1)
+        z_uv = random.normal(keys.pop(), (num_trees, tree_size))
+        z_mv = z_uv[:, None, :]  # (num_trees, k=1, tree_size), leaf axis trailing
 
         result_uv = _precompute_leaf_terms_uv(
             keys.pop(), prec_trees, inv_sigma2, leaf_prior_cov_inv_uv, z_uv

@@ -34,7 +34,7 @@ from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
-from jaxtyping import Array, Bool, Float32, Key, Shaped, UInt, UInt32
+from jaxtyping import Array, Bool, Float32, Key, UInt, UInt32
 
 from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz._jaxext.random import loggamma
@@ -763,26 +763,25 @@ def _precompute_likelihood_terms_mv_het(
     leaf_prior_cov_inv: Float32[Array, 'k k'],
     move_precs: PrecsMatrix,
 ) -> tuple[PreLkV, PreLk]:
-    L_left: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * move_precs.left + leaf_prior_cov_inv
-    )
-    L_right: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * move_precs.right + leaf_prior_cov_inv
-    )
-    L_total: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * move_precs.total + leaf_prior_cov_inv
-    )
+    logdet_prior = _logdet_from_chol(chol_with_gersh(leaf_prior_cov_inv))
 
-    log_sqrt_term: Float32[Array, ' num_trees'] = 0.5 * (
-        _logdet_from_chol(chol_with_gersh(leaf_prior_cov_inv))
-        + _logdet_from_chol(L_total)
-        - _logdet_from_chol(L_left)
-        - _logdet_from_chol(L_right)
-    )
+    @vmap
+    def per_tree(precs: PrecsMatrix) -> PreLkV:
+        # the precs of a single tree are k by k matrices
+        L_left = chol_with_gersh(error_cov_inv * precs.left + leaf_prior_cov_inv)
+        L_right = chol_with_gersh(error_cov_inv * precs.right + leaf_prior_cov_inv)
+        L_total = chol_with_gersh(error_cov_inv * precs.total + leaf_prior_cov_inv)
+        log_sqrt_term = 0.5 * (
+            logdet_prior
+            + _logdet_from_chol(L_total)
+            - _logdet_from_chol(L_left)
+            - _logdet_from_chol(L_right)
+        )
+        return PreLkV(
+            left=L_left, right=L_right, total=L_total, log_sqrt_term=log_sqrt_term
+        )
 
-    return PreLkV(
-        left=L_left, right=L_right, total=L_total, log_sqrt_term=log_sqrt_term
-    ), PreLk(exp_factor=None, error_cov_inv=error_cov_inv)
+    return per_tree(move_precs), PreLk(exp_factor=None, error_cov_inv=error_cov_inv)
 
 
 def _precompute_likelihood_terms_mv(
@@ -790,42 +789,32 @@ def _precompute_likelihood_terms_mv(
     leaf_prior_cov_inv: Float32[Array, 'k k'],
     move_precs: PrecsScalar | Counts,
 ) -> tuple[PreLkV, None]:
-    nL: Shaped[Array, 'num_trees 1 1'] = move_precs.left[..., None, None]
-    nR: Shaped[Array, 'num_trees 1 1'] = move_precs.right[..., None, None]
-    nT: Shaped[Array, 'num_trees 1 1'] = move_precs.total[..., None, None]
+    logdet_prior = _logdet_from_chol(chol_with_gersh(leaf_prior_cov_inv))
 
-    L_left: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * nL + leaf_prior_cov_inv
-    )
-    L_right: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * nR + leaf_prior_cov_inv
-    )
-    L_total: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * nT + leaf_prior_cov_inv
-    )
-
-    log_sqrt_term: Float32[Array, ' num_trees'] = 0.5 * (
-        _logdet_from_chol(chol_with_gersh(leaf_prior_cov_inv))
-        + _logdet_from_chol(L_total)
-        - _logdet_from_chol(L_left)
-        - _logdet_from_chol(L_right)
-    )
-
-    def _term_from_chol(
-        L: Float32[Array, 'num_trees k k'],
-    ) -> Float32[Array, 'num_trees k k']:
-        rhs: Float32[Array, 'num_trees k k'] = jnp.broadcast_to(error_cov_inv, L.shape)
-        Y: Float32[Array, 'num_trees k k'] = solve_triangular(L, rhs, lower=True)
+    def _term_from_chol(L: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
+        Y = solve_triangular(L, error_cov_inv, lower=True)
         return Y.mT @ Y
 
-    prelkv = PreLkV(
-        left=_term_from_chol(L_left),
-        right=_term_from_chol(L_right),
-        total=_term_from_chol(L_total),
-        log_sqrt_term=log_sqrt_term,
-    )
+    @vmap
+    def per_tree(precs: PrecsScalar | Counts) -> PreLkV:
+        # the precs of a single tree are scalars
+        L_left = chol_with_gersh(error_cov_inv * precs.left + leaf_prior_cov_inv)
+        L_right = chol_with_gersh(error_cov_inv * precs.right + leaf_prior_cov_inv)
+        L_total = chol_with_gersh(error_cov_inv * precs.total + leaf_prior_cov_inv)
+        log_sqrt_term = 0.5 * (
+            logdet_prior
+            + _logdet_from_chol(L_total)
+            - _logdet_from_chol(L_left)
+            - _logdet_from_chol(L_right)
+        )
+        return PreLkV(
+            left=_term_from_chol(L_left),
+            right=_term_from_chol(L_right),
+            total=_term_from_chol(L_total),
+            log_sqrt_term=log_sqrt_term,
+        )
 
-    return prelkv, None
+    return per_tree(move_precs), None
 
 
 @named_call
@@ -909,47 +898,27 @@ def _precompute_leaf_terms_mv(
     | UInt32[Array, 'num_trees tree_size'],
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
-    z: Float32[Array, 'num_trees tree_size k'] | None = None,
+    z: Float32[Array, 'num_trees k tree_size'] | None = None,
 ) -> PreLfMV:
     num_trees, tree_size = prec_trees.shape
     k, _ = error_cov_inv.shape
-    n_k: Float32[Array, 'num_trees tree_size 1 1'] = prec_trees[..., None, None]
-
-    # Only broadcast the inverse of error covariance matrix to satisfy JAX's
-    # batching rules for `lax.linalg.solve_triangular`, which does not support
-    # implicit broadcasting.
-    error_cov_inv_batched = jnp.broadcast_to(
-        error_cov_inv, (num_trees, tree_size, k, k)
-    )
-
-    posterior_precision: Float32[Array, 'num_trees tree_size k k'] = (
-        leaf_prior_cov_inv + n_k * error_cov_inv_batched
-    )
-
-    L_prec: Float32[Array, 'num_trees tree_size k k'] = chol_with_gersh(
-        posterior_precision
-    )
-    Y: Float32[Array, 'num_trees tree_size k k'] = solve_triangular(
-        L_prec, error_cov_inv_batched, lower=True
-    )
-    mean_factor: Float32[Array, 'num_trees tree_size k k'] = solve_triangular(
-        L_prec, Y, trans='T', lower=True
-    )
-    mean_factor = mean_factor.mT
-    mean_factor_out: Float32[Array, 'num_trees k k tree_size'] = jnp.moveaxis(
-        mean_factor, 1, -1
-    )
-
     if z is None:
-        z = random.normal(key, (num_trees, tree_size, k))
-    centered_leaves: Float32[Array, 'num_trees tree_size k'] = solve_triangular(
-        L_prec, z[..., None], trans='T', lower=True
-    ).squeeze(-1)
-    centered_leaves_out: Float32[Array, 'num_trees k tree_size'] = jnp.swapaxes(
-        centered_leaves, -1, -2
-    )
+        z = random.normal(key, (num_trees, k, tree_size))
 
-    return PreLfMV(mean_factor=mean_factor_out, centered_leaves=centered_leaves_out)
+    def per_leaf(
+        prec: Float32[Array, ''] | UInt32[Array, ''], z: Float32[Array, ' k']
+    ) -> tuple[Float32[Array, 'k k'], Float32[Array, ' k']]:
+        L_prec = chol_with_gersh(leaf_prior_cov_inv + prec * error_cov_inv)
+        Y = solve_triangular(L_prec, error_cov_inv, lower=True)
+        mean_factor = solve_triangular(L_prec, Y, trans='T', lower=True).mT
+        centered = solve_triangular(L_prec, z[:, None], trans='T', lower=True).squeeze(
+            -1
+        )
+        return mean_factor, centered
+
+    # vmap over trees then over leaves; the leaf axis is trailing in both
+    # `prec_trees`/`z` (in_axes) and the stored output (out_axes=-1)
+    return PreLfMV(*vmap(vmap(per_leaf, in_axes=(0, -1), out_axes=-1))(prec_trees, z))
 
 
 def _precompute_leaf_terms_mv_het(
@@ -957,36 +926,26 @@ def _precompute_leaf_terms_mv_het(
     prec_trees: Float32[Array, 'num_trees k k tree_size'],
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
-    z: Float32[Array, 'num_trees tree_size k'] | None = None,
+    z: Float32[Array, 'num_trees k tree_size'] | None = None,
 ) -> PreLfMV:
     num_trees, k, _, tree_size = prec_trees.shape
-
-    # bring the leaf axis to position 1 so chol/solve see (..., k, k)
-    prec: Float32[Array, 'num_trees tree_size k k'] = jnp.moveaxis(prec_trees, -1, 1)
-
-    posterior_precision: Float32[Array, 'num_trees tree_size k k'] = (
-        leaf_prior_cov_inv + error_cov_inv * prec
-    )
-
-    L_prec: Float32[Array, 'num_trees tree_size k k'] = chol_with_gersh(
-        posterior_precision
-    )
-
     if z is None:
-        z = random.normal(key, (num_trees, tree_size, k))
-    centered_leaves: Float32[Array, 'num_trees tree_size k'] = solve_triangular(
-        L_prec, z[:, :, :, None], trans='T', lower=True
-    ).squeeze(-1)
+        z = random.normal(key, (num_trees, k, tree_size))
 
-    # restore the leaf axis to the trailing position for storage
-    mean_factor_out: Float32[Array, 'num_trees k k tree_size'] = jnp.moveaxis(
-        L_prec, 1, -1
-    )
-    centered_leaves_out: Float32[Array, 'num_trees k tree_size'] = jnp.swapaxes(
-        centered_leaves, -1, -2
-    )
+    def per_leaf(
+        prec: Float32[Array, 'k k'], z: Float32[Array, ' k']
+    ) -> tuple[Float32[Array, 'k k'], Float32[Array, ' k']]:
+        # mean_factor stores the precision cholesky itself; the mean solve happens
+        # downstream in `accept_move_and_sample_leaves`
+        L_prec = chol_with_gersh(leaf_prior_cov_inv + error_cov_inv * prec)
+        centered = solve_triangular(L_prec, z[:, None], trans='T', lower=True).squeeze(
+            -1
+        )
+        return L_prec, centered
 
-    return PreLfMV(mean_factor=mean_factor_out, centered_leaves=centered_leaves_out)
+    # vmap over trees then over leaves; the leaf axis is trailing in both
+    # `prec_trees`/`z` (in_axes=-1) and the stored output (out_axes=-1)
+    return PreLfMV(*vmap(vmap(per_leaf, in_axes=(-1, -1), out_axes=-1))(prec_trees, z))
 
 
 @named_call
@@ -998,7 +957,7 @@ def precompute_leaf_terms(
     error_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     z: Float32[Array, 'num_trees tree_size']
-    | Float32[Array, 'num_trees tree_size k']
+    | Float32[Array, 'num_trees k tree_size']
     | None = None,
 ) -> PreLf:
     """

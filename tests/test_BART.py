@@ -434,12 +434,14 @@ class TestWithCachedBart:
 
         with subtests.test('yhat_train'):
             rhat_yhat_train = rhat_rank(
-                [bart.yhat_train, rbart.yhat_train], split=False
+                jnp.stack([bart.yhat_train, rbart.yhat_train]), split=False
             )
             assert_array_less(rhat_yhat_train, 1.05)
 
         with subtests.test('yhat_test'):
-            rhat_yhat_test = rhat_rank([bart.yhat_test, rbart.yhat_test], split=False)
+            rhat_yhat_test = rhat_rank(
+                jnp.stack([nnone(bart.yhat_test), nnone(rbart.yhat_test)]), split=False
+            )
             assert_array_less(rhat_yhat_test, 1.05)
 
         if get_with_default(kw, 'type') == 'pbart':  # binary regression

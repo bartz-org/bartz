@@ -108,6 +108,7 @@ def run_sim_impl(
     drop_if_missing('mc_cores')  # WORKAROUND(bartz<0.8.0): mc_gbart kwarg
 
     bart = mc_gbart(**kw)
+    assert bart.yhat_test_mean is not None
 
     return jnp.mean(jnp.square(bart.yhat_test_mean - test.mu.squeeze(0)))
 

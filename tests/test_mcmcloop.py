@@ -208,6 +208,27 @@ class TestRunMcmc:
         assert '6/6' in out  # n_burn + n_save * n_skip iterations
         assert bar_id not in _TQDM_REGISTRY  # the bar was closed and removed
 
+    def test_tqdm_callback_no_average(self, keys: split) -> None:
+        """Check the tqdm callback also runs with `average=False`.
+
+        Exercises the stats-accumulator path where the running sums are absent
+        (`average=False`), so each report shows the latest iteration only.
+        """
+        state = simple_init(10, 100, 20)
+        buf = io.StringIO()
+        kw = make_tqdm_callback(
+            state, report_every=2, file=buf, mininterval=0, average=False
+        )
+        bar_id = kw['callback_state'].bar_id.item()
+        with debug_key_reuse(False):
+            # block so the (unordered, async) progress callbacks have all fired
+            block_until_ready(run_mcmc(keys.pop(), state, 4, n_burn=2, **kw))
+
+        out = buf.getvalue()
+        assert '100%' in out  # the bar reached the end
+        assert '6/6' in out  # n_burn + n_save * n_skip iterations
+        assert bar_id not in _TQDM_REGISTRY  # the bar was closed and removed
+
     def test_tqdm_callback_cleans_up_interrupted_bar(self) -> None:
         """A new tqdm callback closes a bar left open by an interrupted run."""
         state = simple_init(10, 100, 20)

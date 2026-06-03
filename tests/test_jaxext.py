@@ -230,10 +230,11 @@ class TestAutoBatch:
         """Check that reduction produces the expected result."""
         # use an internal loop instead of pytest.mark.parametrize because there
         # are too many combinations of parameters
+        # explicit names because the ufunc type stubs lack `__name__`
         ops = [
-            (None, lambda x, **_kw: x),
-            (jnp.add, jnp.sum),
-            (jnp.logical_and, jnp.all),
+            (None, None, lambda x, **_kw: x),
+            ('add', jnp.add, jnp.sum),
+            ('logical_and', jnp.logical_and, jnp.all),
         ]
         shape_axes = [
             ((10,), 0),
@@ -253,11 +254,11 @@ class TestAutoBatch:
         for op, shape_axis, max_io_nbytes, nin, dtype in product(
             ops, shape_axes, max_io_nbytes_list, nins, dtypes
         ):
-            ufunc, reduction = op
+            ufunc_name, ufunc, reduction = op
             shape, axis = shape_axis
 
             with subtests.test(
-                ufunc=None if ufunc is None else ufunc.__name__,
+                ufunc=ufunc_name,
                 shape=shape,
                 axis=axis,
                 max_io_nbytes=max_io_nbytes,
@@ -269,6 +270,7 @@ class TestAutoBatch:
                     *args: Shaped[Array, '*shape'], nin: int = nin
                 ) -> Shaped[Array, '*shape'] | tuple[Shaped[Array, '*shape'], ...]:
                     out = sum(args)
+                    assert isinstance(out, Array)  # rule out the empty-sum 0
                     if nin == 1:
                         return out
                     else:

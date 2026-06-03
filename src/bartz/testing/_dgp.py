@@ -119,8 +119,9 @@ def het_normalization(
     :math:`v = (1 - \rho) + \rho\, \eta^2 / T` satisfy :math:`E[v] = 1`
     *marginally over the coefficient draw* (not normalized to it), so the
     marginal noise variance is preserved while the per-draw conditional variance
-    fluctuates. ``var_v`` is the marginal :math:`\operatorname{Var}_{g, X}[v]`.
-    Both reduce over the predictor axis; see `Params` for the closed forms.
+    fluctuates. ``var_v`` is :math:`\operatorname{Var}_{g, X}[v]` at the given
+    ``var_coef`` (conditional on the scales, which ``var_coef`` embeds). Both
+    reduce over the predictor axis; see `Params` for the closed forms.
     """
     energy = jnp.sum(var_coef, axis=-1)
     concentration = jnp.sum(var_coef**2, axis=-1) / energy**2
@@ -307,14 +308,34 @@ class Params(Module):
                 + \sqrt{1 - \lambda} \textstyle\sum_{jj'}
                     A^{\mathrm{sep}}_{cjj'} X_{ij} X_{ij'},
                 \quad \lambda \in [0, 1], \\
-            Y_{ci} &\sim N(\mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci},\,
-                \sigma^2_{\mathrm{eps}}),
+            \gamma^{\mathrm{sh}}_j &\overset{\mathrm{i.i.d.}}\sim
+                s_j\, N(0,\, 1 / p), \\
+            \gamma^{\mathrm{sep}}_{cj} &\sim
+                s_j\, \mathbb 1[j \in S_c]\, N(0,\, 1 / (p / k)), \\
+            \eta_{ci} &= \sqrt\lambda \textstyle\sum_j
+                    \gamma^{\mathrm{sh}}_j X_{ij}
+                + \sqrt{1 - \lambda} \textstyle\sum_j
+                    \gamma^{\mathrm{sep}}_{cj} X_{ij}, \\
+            \nu_{cj} &= \frac{s_j^2}{p}\,
+                    \big(\lambda + (1 - \lambda)\, k\, \mathbb 1[j \in S_c]\big),
+                \quad T_c = \textstyle\sum_j \nu_{cj}, \\
+            W_{ci}^2 &= \begin{cases}
+                    1 & \texttt{het\_shape}\text{ is }\texttt{None}, \\
+                    (1 - \rho) + \rho\, \eta_{ci}^2 / T_c & \text{otherwise,}
+                \end{cases}
+                \quad \rho \in [0, 1], \\
+            \mu_{ci} &= \mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci}, \\
+            Z_{ci} &\sim N\big(\mu_{ci},\, \sigma^2_{\mathrm{eps}}\, W_{ci}^2\big), \\
+            Y_{ci} &= \begin{cases}
+                    Z_{ci} & c \text{ continuous}, \\
+                    \mathbb 1[Z_{ci} > 0] & c \text{ binary}.
+                \end{cases}
         \end{align}
 
-    with binary components instead thresholded at zero, i.e. :math:`Y_{ci} =
-    \mathbb 1[\mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci} + \sigma_{\mathrm{eps}}
-    \varepsilon_{ci} > 0]`, :math:`\varepsilon_{ci} \sim N(0, 1)` (see
-    `outcome_type`). Here :math:`\kappa_X = E[X_{ij}^4] = 9/5` is the kurtosis
+    where a binary component thresholds its own latent :math:`Z_{ci}` at zero
+    (the branch is chosen per component :math:`c`; see `outcome_type`), so its
+    success probability is :math:`\Phi(\mu_{ci} / (\sigma_{\mathrm{eps}}
+    W_{ci}))`. Here :math:`\kappa_X = E[X_{ij}^4] = 9/5` is the kurtosis
     of the predictors (`kurt_x`), so :math:`\kappa_X - 1 = 4/5`. The separate
     quadratic pattern :math:`P^{\mathrm{sep}}_{cjj'}` is the same circular band
     of half-width :math:`q / 2` as :math:`P^{\mathrm{sh}}`, but built on the
@@ -337,8 +358,8 @@ class Params(Module):
     and identical ones (:math:`\lambda = 1`, all share the shared
     coefficients). The per-component variance decomposition holds for every
     :math:`\lambda`. Writing :math:`\theta` for all sampled coefficients
-    (:math:`\beta`, :math:`A`, and the heteroskedasticity coefficients :math:`g`
-    introduced below), :math:`\operatorname{Var}[\,\cdot \mid \theta]` is the
+    (:math:`\beta`, :math:`A`, :math:`\gamma`),
+    :math:`\operatorname{Var}[\,\cdot \mid \theta]` is the
     population variance of a sampled instance (inner :math:`\operatorname{Var}`
     and :math:`E` over the data :math:`X` and noise at fixed :math:`\theta`), and
     the expected population variance averages it over :math:`\theta`:
@@ -347,116 +368,57 @@ class Params(Module):
         :nowrap:
 
         \begin{align}
-            E[\operatorname{Var}[Y_{ci} \mid \theta]] &=
+            E[\operatorname{Var}[Z_{ci} \mid \theta]] &=
                 \sigma^2_{\mathrm{lin}} + \sigma^2_{\mathrm{quad}}
                 + \sigma^2_{\mathrm{eps}}
                 \quad \text{(expected population variance)}, \\
-            \operatorname{Var}[E[Y_{ci} \mid \theta]] &=
+            \operatorname{Var}[E[Z_{ci} \mid \theta]] &=
                 \sigma^2_{\mathrm{quad}}\, \mu_4 / ((\kappa_X - 1)\mu_4 + q)
                 \quad \text{(variance of the expected mean)}, \\
-            \operatorname{Var}[Y_{ci}] &=
-                E[\operatorname{Var}[Y_{ci} \mid \theta]]
-                + \operatorname{Var}[E[Y_{ci} \mid \theta]]
+            \operatorname{Var}[Z_{ci}] &=
+                E[\operatorname{Var}[Z_{ci} \mid \theta]]
+                + \operatorname{Var}[E[Z_{ci} \mid \theta]]
                 \quad \text{(prior variance)}.
         \end{align}
 
-    **Heteroskedasticity.** When ``het_shape`` is not ``None`` the homoskedastic
-    error :math:`\sigma_{\mathrm{eps}}\varepsilon_{ci}` is replaced by
-    :math:`\sigma_{\mathrm{eps}} W_{ci}\varepsilon_{ci}`, where the nonnegative
-    variance multiplier :math:`v_{ci} = W_{ci}^2` (`error_scale` is :math:`W`) is
-    a convex mix, set by the single knob :math:`\rho \in [0, 1]`
-    (`het_strength`), of a flat floor and a squared latent projection of the
-    predictors. The projection reuses the linear-mean machinery -- the same
-    importance scales :math:`s_j`, partition and coupling :math:`\lambda` -- with
-    an overall coefficient scale that cancels in the normalization (fixed to the
-    unit budget giving the variances below):
+    The tunable hyperparameters are the variance budgets
+    :math:`\sigma^2_{\mathrm{lin}}, \sigma^2_{\mathrm{quad}},
+    \sigma^2_{\mathrm{eps}}`, the interaction count :math:`q`, the coupling
+    :math:`\lambda`, the sparsity shape :math:`\alpha`, the heteroskedasticity
+    :math:`\rho` and ``het_shape``, and ``outcome_type``; every other field is
+    sampled or derived from these.
 
-    .. math::
-        :nowrap:
+    **Heteroskedasticity.** The knob :math:`\rho` (`het_strength`) tunes the
+    noise from homoskedastic (:math:`\rho = 0`, so :math:`W_{ci} \equiv 1`) to
+    maximally heterogeneous (:math:`\rho = 1`, so :math:`W_{ci}^2 = \eta_{ci}^2 /
+    T_c`); it is inactive unless ``het_shape`` is set.
 
-        \begin{align}
-            \gamma^{\mathrm{sh}}_j &\overset{\mathrm{i.i.d.}}\sim
-                s_j\, N(0,\, 1 / p), \\
-            \gamma^{\mathrm{sep}}_{cj} &\sim
-                s_j\, \mathbb 1[j \in S_c]\, N(0,\, 1 / (p / k)), \\
-            g_{cj} &= \sqrt\lambda\, \gamma^{\mathrm{sh}}_j
-                + \sqrt{1 - \lambda}\, \gamma^{\mathrm{sep}}_{cj}
-                \quad (\texttt{'vector'};\ \texttt{'scalar'}\text{ uses }
-                g_j = \gamma^{\mathrm{sh}}_j), \\
-            \nu_{cj} &= \operatorname{Var}[g_{cj}]
-                = \frac{s_j^2}{p}\,
-                    \big(\lambda + (1 - \lambda)\, k\, \mathbb 1[j \in S_c]\big), \\
-            \eta_{ci} &= \textstyle\sum_j g_{cj} X_{ij}, \\
-            T_c &= E[\eta_{ci}^2] = \textstyle\sum_j \nu_{cj}
-                \quad (\texttt{het\_energy}), \\
-            v_{ci} = W_{ci}^2 &= (1 - \rho)
-                + \rho\, \frac{\eta_{ci}^2}{T_c}, \\
-            Y_{ci} &\sim N\big(\mu_{ci},\, \sigma^2_{\mathrm{eps}}\, v_{ci}\big).
-        \end{align}
+    The projection :math:`\eta_{ci}` reuses the linear-mean construction (same
+    :math:`s`, partition and :math:`\lambda`) at unit coefficient budget,
+    normalized by :math:`T_c = E[\eta_{ci}^2]` (`het_energy`, computed from the
+    prior variances :math:`\nu_{cj}` rather than the realized coefficients) so
+    that :math:`E[W_{ci}^2] = 1`. The noise budget :math:`\sigma^2_{\mathrm{eps}}`
+    -- and with it all three variance terms above -- is therefore untouched:
+    :math:`\rho` only redistributes a fixed amount of noise across observations,
+    and equals the fraction of it carried by the heteroskedastic term.
 
-    Writing :math:`\eta_{ci}^2 = X_i^\top g_c g_c^\top X_i`, the multiplier is the
-    quadratic-in-:math:`X` form :math:`v_{ci} = c + X_i^\top G_c X_i` with
-    constant floor :math:`c = 1 - \rho` and rank-one positive-semidefinite
-    :math:`G_c = (\rho / T_c)\, g_c g_c^\top`, so :math:`v_{ci} \ge 1 - \rho \ge
-    0` is automatically a valid variance.
-
-    The normalization :math:`T_c` is the *prior* second moment
-    :math:`E[\eta_{ci}^2]` (built from the variances :math:`\nu_{cj}`, not the
-    realized :math:`g_c`), so :math:`E[v_{ci}] = 1` holds only *marginally over*
-    :math:`g_c` (conditional on :math:`s`, as for :math:`\beta`): for a sampled
-    instance :math:`\theta` the conditional :math:`E_X[v_{ci} \mid \theta] =
-    (1 - \rho) + \rho\, |g_c|^2 / T_c` fluctuates around 1, so the population
-    noise level varies from instance to instance (and the pointwise
-    :math:`\operatorname{Var}[\varepsilon \mid X]` from observation to
-    observation). With :math:`g_c` part of :math:`\theta`, the population
-    variance of an instance is
+    Conditioned on the realized scales :math:`s` and partition, the multiplier's
+    dispersion over the coefficient draw and predictors is
 
     .. math::
 
-        \operatorname{Var}[Y_{ci} \mid \theta]
-            = \operatorname{Var}_X[\mu_{ci} \mid \theta]
-            + \sigma^2_{\mathrm{eps}}\, E_X[v_{ci} \mid \theta],
-
-    with no cross term -- the mean-zero :math:`\varepsilon_{ci}` gives
-    :math:`\operatorname{Cov}[\mu_{ci}, W_{ci}\varepsilon_{ci} \mid \theta] = 0`
-    even though :math:`\mu` and :math:`W` share :math:`X`. Averaging over
-    :math:`\theta` uses :math:`E[|g_c|^2] = T_c`, i.e. :math:`E[v_{ci}] = 1`, so
-    the noise contributes exactly :math:`\sigma^2_{\mathrm{eps}}` and the
-    expected population variance :math:`E[\operatorname{Var}[Y_{ci} \mid \theta]]
-    = \sigma^2_{\mathrm{pop}}` is unchanged; the conditional mean
-    :math:`E[Y_{ci} \mid \theta] = E_X[\mu_{ci} \mid \theta]` is free of
-    :math:`g`, so :math:`\operatorname{Var}[E[Y_{ci} \mid \theta]] =
-    \sigma^2_{\mathrm{mean}}` and :math:`\operatorname{Var}[Y_{ci}] =
-    \sigma^2_{\mathrm{pri}}` are too. Thus :math:`\rho` only redistributes a
-    fixed noise budget across observations, and is exactly the fraction of the
-    (expected) noise variance carried by the heteroskedastic term. The knob
-    spans homoskedastic
-    (:math:`\rho = 0`, :math:`v_{ci} \equiv 1`) to maximally heterogeneous
-    (:math:`\rho = 1`, :math:`v_{ci} = \eta_{ci}^2 / T_c`, vanishing where
-    :math:`X_i \perp g_c`).
-
-    The marginal dispersion of :math:`v_{ci}` over the coefficients and
-    predictors follows from :math:`\operatorname{Var}[\eta_{ci}^2] = 2 T_c^2 + 3
-    (\kappa_X - 1) \sum_j \nu_{cj}^2`:
-
-    .. math::
-
-        \operatorname{Var}_{\gamma, X}[v_{ci}] = \rho^2 \Big( 2
+        \operatorname{Var}[W_{ci}^2 \mid s, \{S_c\}] = \rho^2 \Big( 2
             + 3 (\kappa_X - 1)\, \frac{\sum_j \nu_{cj}^2}{(\sum_j \nu_{cj})^2}
             \Big)
         \quad (\texttt{var\_v}),
 
-    growing with :math:`\rho` and with the predictor sparsity (the concentration
-    :math:`\sum_j \nu_{cj}^2 / (\sum_j \nu_{cj})^2` rises as importance
-    concentrates on fewer predictors).
+    growing with :math:`\rho` and with predictor sparsity.
 
-    In scalar mode (``het_shape = 'scalar'``) a single :math:`W_i`, built from
-    :math:`\gamma^{\mathrm{sh}}` alone (no :math:`\lambda` or partition), scales
-    the whole outcome vector (`error_scale` has shape :math:`(n,)`); in vector
-    mode (``het_shape = 'vector'``, multivariate only) each component has its own
-    :math:`W_{ci}` (shape :math:`(k, n)`). Binary components threshold the
-    heteroskedastic latent, giving success probability :math:`\Phi(\mu_{ci} /
-    (\sigma_{\mathrm{eps}} W_{ci}))`.
+    The shape of :math:`W` (`error_scale`) follows ``het_shape``: ``'scalar'``
+    builds one :math:`W_i` (shape :math:`(n,)`) from :math:`\gamma^{\mathrm{sh}}`
+    alone (dropping :math:`\lambda` and the partition), scaling the whole outcome
+    vector, while ``'vector'`` (multivariate only) gives each component its own
+    :math:`W_{ci}` (shape :math:`(k, n)`).
 
     For univariate outputs (``k is None``) the separate path and
     :math:`\lambda` are dropped (``partition``, ``beta_separate``,
@@ -554,9 +516,10 @@ class Params(Module):
     ``None`` when homoskedastic."""
 
     var_v: Float[Array, ''] | Float[Array, ' k'] | None
-    """Marginal dispersion ``Var[error_scale ** 2]`` of the unit-mean
-    noise-variance multiplier (over the coefficient draw and predictors), scalar
-    or shape (k,). ``None`` when homoskedastic."""
+    """Dispersion ``Var[error_scale ** 2]`` of the noise-variance multiplier over
+    the coefficient draw and predictors, conditional on the realized ``s`` and
+    ``partition`` (hence a function of them), scalar or shape (k,). ``None`` when
+    homoskedastic."""
 
     outcome_type: OutcomeType | tuple[OutcomeType, ...] = field(static=True)
     """Per-component outcome type, either a single `OutcomeType` applied to

@@ -802,17 +802,24 @@ class TestHetNormalization:
         g = jnp.sqrt(var_coef) * random.normal(keys.pop(), (self.N, var_coef.size))
         x = uniform_x(keys.pop(), (self.N, var_coef.size))
         eta = jnp.sum(g * x, axis=1)
-        return (1.0 - rho) + rho * eta**2 / jnp.sum(var_coef)
+        return (1.0 - rho) + rho * eta**2
 
-    def test_unit_second_moment(self, keys: split) -> None:
-        """The normalization makes ``E[v] = 1`` marginally over the coefficients."""
+    def test_conditional_mean(self, keys: split) -> None:
+        """``E[v | nu] = (1 - rho) + rho * energy`` (the per-instance noise level).
+
+        With marginal (not per-instance) normalization the conditional mean is
+        not 1 but tracks the realized ``energy``; it averages to 1 only over the
+        prior of ``nu`` (see `TestHeteroskedasticity`).
+        """
         var_coef = 0.5 + random.uniform(keys.pop(), (6,))
+        energy, _ = het_normalization(var_coef, self.RHO, Params.kurt_x)
         v = self.montecarlo_multiplier(keys, var_coef, self.RHO)
+        expected = (1.0 - self.RHO) + self.RHO * energy
         se = jnp.std(v) / jnp.sqrt(self.N)
-        assert_array_less(jnp.abs(jnp.mean(v) - 1.0) / se, SIGMA_THRESHOLD)
+        assert_array_less(jnp.abs(jnp.mean(v) - expected) / se, SIGMA_THRESHOLD)
 
     def test_var_v(self, keys: split) -> None:
-        """``var_v`` matches the marginal Monte Carlo variance of ``v``."""
+        """``var_v`` matches the Monte Carlo variance of ``v`` at fixed ``var_coef``."""
         var_coef = 0.5 + random.uniform(keys.pop(), (6,))
         _, var_v = het_normalization(var_coef, self.RHO, Params.kurt_x)
         v = self.montecarlo_multiplier(keys, var_coef, self.RHO)
@@ -870,7 +877,12 @@ class TestHeteroskedasticity:
 
     @pytest.mark.parametrize('het_shape', ['scalar', 'vector'])
     def test_marginal_noise_variance_is_one(self, keys: split, het_shape: str) -> None:
-        """``E[error_scale ** 2] == 1`` per component, preserving the noise budget."""
+        """``E[error_scale ** 2] == 1`` marginally per component.
+
+        The noise budget is preserved only in expectation over datasets (the
+        normalization is marginal, not per-instance), so the per-dataset mean is
+        averaged across reps before comparing to 1.
+        """
         dgps = generate_dgps(keys.pop(REPS), 0.5, None, HET_STRENGTH, het_shape)
         v = dgps.error_scale**2  # (REPS, K?, N)
         per_dataset = jnp.mean(v, axis=-1)  # (REPS, K?)

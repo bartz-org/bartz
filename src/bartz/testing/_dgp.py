@@ -110,22 +110,21 @@ def het_normalization(
     het_strength: Float[Array, ''] | float,
     kurt_x: float,
 ) -> tuple[Float[Array, '*shape'], Float[Array, '*shape']]:
-    R"""Compute the normalization and dispersion of the variance multiplier.
+    R"""Compute the energy and dispersion of the variance multiplier.
 
     Given the per-predictor coefficient variances ``var_coef`` (:math:`\nu`, one
     row per outcome component), the knob ``het_strength`` (:math:`\rho`) and the
-    predictor kurtosis ``kurt_x``, returns ``(energy, var_v)``. ``energy`` is
-    :math:`T = E[\eta^2] = \sum_j \nu_j`, the normalization making the multiplier
-    :math:`v = (1 - \rho) + \rho\, \eta^2 / T` satisfy :math:`E[v] = 1`
-    *marginally over the coefficient draw* (not normalized to it), so the
-    marginal noise variance is preserved while the per-draw conditional variance
-    fluctuates. ``var_v`` is :math:`\operatorname{Var}_{g, X}[v]` at the given
-    ``var_coef`` (conditional on the scales, which ``var_coef`` embeds). Both
-    reduce over the predictor axis; see `Params` for the closed forms.
+    predictor kurtosis ``kurt_x``, returns ``(energy, var_v)``. ``energy`` is the
+    realized second moment :math:`T = E[\eta^2 \mid \nu] = \sum_j \nu_j`; the
+    multiplier :math:`v = (1 - \rho) + \rho\, \eta^2` is *not* divided by it, so
+    :math:`E[v \mid \nu] = (1 - \rho) + \rho\, T` and the unit mean holds only
+    marginally, once :math:`\nu` is averaged over its prior. ``var_v`` is
+    :math:`\operatorname{Var}_{g, X}[v \mid \nu]`. Both reduce over the predictor
+    axis; see `Params` for the closed forms.
     """
     energy = jnp.sum(var_coef, axis=-1)
-    concentration = jnp.sum(var_coef**2, axis=-1) / energy**2
-    var_v = het_strength**2 * (2.0 + 3.0 * (kurt_x - 1.0) * concentration)
+    sum_sq = jnp.sum(var_coef**2, axis=-1)
+    var_v = het_strength**2 * (2.0 * energy**2 + 3.0 * (kurt_x - 1.0) * sum_sq)
     return energy, var_v
 
 
@@ -144,20 +143,20 @@ def generate_het(
     Float[Array, ''] | Float[Array, ' k'] | None,
     Float[Array, ''] | Float[Array, ' k'] | None,
 ]:
-    """Sample variance-multiplier coefficients and normalization for `gen_params`.
+    """Sample variance-multiplier coefficients and moments for `gen_params`.
 
     Returns ``(gamma_shared, gamma_separate, het_energy, var_v)``; all ``None``
     when ``het_shape is None``. The coefficients are drawn like the linear mean
     (``gamma_shared`` first, so ``'scalar'`` and ``'vector'`` share its stream)
-    with a unit budget that cancels in the normalization, while ``het_energy``
-    and ``var_v`` use only their *prior variances* (not the realized draw); see
-    `het_normalization`.
+    at unit budget, so ``E[eta ** 2] == 1`` marginally; ``het_energy`` and
+    ``var_v`` are computed from their *prior variances* (not the realized draw);
+    see `het_normalization`.
     """
     if het_shape is None:
         return None, None, None, None
     else:
         keys = split(key, 2)
-        budget = jnp.ones(())  # cancels in the eta ** 2 / T normalization
+        budget = jnp.ones(())  # unit budget makes E[eta ** 2] == 1 marginally
         gamma_shared = generate_beta_shared(keys.pop(), p, budget, s)
         var_shared = s**2 / p
         if het_shape == 'vector':
@@ -315,13 +314,15 @@ class Params(Module):
             \eta_{ci} &= \sqrt\lambda \textstyle\sum_j
                     \gamma^{\mathrm{sh}}_j X_{ij}
                 + \sqrt{1 - \lambda} \textstyle\sum_j
-                    \gamma^{\mathrm{sep}}_{cj} X_{ij}, \\
+                    \gamma^{\mathrm{sep}}_{cj} X_{ij},
+                \quad E[\eta_{ci}^2] = 1, \\
             \nu_{cj} &= \frac{s_j^2}{p}\,
                     \big(\lambda + (1 - \lambda)\, k\, \mathbb 1[j \in S_c]\big),
-                \quad T_c = \textstyle\sum_j \nu_{cj}, \\
+                \quad T_c = E[\eta_{ci}^2 \mid s, \{S_c\}]
+                    = \textstyle\sum_j \nu_{cj}, \\
             W_{ci}^2 &= \begin{cases}
                     1 & \texttt{het\_shape}\text{ is }\texttt{None}, \\
-                    (1 - \rho) + \rho\, \eta_{ci}^2 / T_c & \text{otherwise,}
+                    (1 - \rho) + \rho\, \eta_{ci}^2 & \text{otherwise,}
                 \end{cases}
                 \quad \rho \in [0, 1], \\
             \mu_{ci} &= \mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci}, \\
@@ -390,26 +391,28 @@ class Params(Module):
 
     **Heteroskedasticity.** The knob :math:`\rho` (`het_strength`) tunes the
     noise from homoskedastic (:math:`\rho = 0`, so :math:`W_{ci} \equiv 1`) to
-    maximally heterogeneous (:math:`\rho = 1`, so :math:`W_{ci}^2 = \eta_{ci}^2 /
-    T_c`); it is inactive unless ``het_shape`` is set.
+    maximally heterogeneous (:math:`\rho = 1`, so :math:`W_{ci}^2 = \eta_{ci}^2`);
+    it is inactive unless ``het_shape`` is set.
 
     The projection :math:`\eta_{ci}` reuses the linear-mean construction (same
-    :math:`s`, partition and :math:`\lambda`) at unit coefficient budget,
-    normalized by :math:`T_c = E[\eta_{ci}^2]` (`het_energy`, computed from the
-    prior variances :math:`\nu_{cj}` rather than the realized coefficients) so
-    that :math:`E[W_{ci}^2] = 1`. The noise budget :math:`\sigma^2_{\mathrm{eps}}`
-    -- and with it all three variance terms above -- is therefore untouched:
-    :math:`\rho` only redistributes a fixed amount of noise across observations,
-    and equals the fraction of it carried by the heteroskedastic term.
+    :math:`s`, partition and :math:`\lambda`) at unit coefficient budget, so
+    :math:`E[\eta_{ci}^2] = 1` and hence :math:`E[W_{ci}^2] = 1` *marginally*.
+    The noise budget :math:`\sigma^2_{\mathrm{eps}}` -- and with it all three
+    variance terms above -- is therefore preserved in expectation, with
+    :math:`\rho` the fraction of it carried by the heteroskedastic term. As
+    elsewhere in the model the moment is controlled only marginally: the realized
+    energy :math:`T_c = E[\eta_{ci}^2 \mid s, \{S_c\}] = \sum_j \nu_{cj}`
+    (`het_energy`) wobbles around 1, so each instance's expected noise
+    :math:`\sigma^2_{\mathrm{eps}}\,((1 - \rho) + \rho\, T_c)` wobbles around
+    :math:`\sigma^2_{\mathrm{eps}}` rather than being pinned to it.
 
     Conditioned on the realized scales :math:`s` and partition, the multiplier's
     dispersion over the coefficient draw and predictors is
 
     .. math::
 
-        \operatorname{Var}[W_{ci}^2 \mid s, \{S_c\}] = \rho^2 \Big( 2
-            + 3 (\kappa_X - 1)\, \frac{\sum_j \nu_{cj}^2}{(\sum_j \nu_{cj})^2}
-            \Big)
+        \operatorname{Var}[W_{ci}^2 \mid s, \{S_c\}] = \rho^2 \big(
+            2 T_c^2 + 3 (\kappa_X - 1) \textstyle\sum_j \nu_{cj}^2 \big)
         \quad (\texttt{var\_v}),
 
     growing with :math:`\rho` and with predictor sparsity.
@@ -503,11 +506,12 @@ class Params(Module):
     heteroskedasticity (``het_shape == 'vector'``). ``None`` otherwise."""
 
     het_energy: Float[Array, ''] | Float[Array, ' k'] | None
-    """Per-component normalization ``T_c = E[eta_c ** 2] = sum_j nu_cj`` of the
-    squared projection (the ``T`` of `Params`), scalar for ``'scalar'`` het and
-    shape (k,) for ``'vector'`` het, computed from the coefficient prior
-    variances so that ``E[error_scale ** 2] == 1`` marginally over the
-    coefficient draw. ``None`` when homoskedastic."""
+    """Per-component realized energy ``T_c = E[eta_c ** 2 | s, partition] =
+    sum_j nu_cj`` of the squared projection (the ``T_c`` of `Params`), scalar for
+    ``'scalar'`` het and shape (k,) for ``'vector'``. Not applied as a
+    normalizer: it sets the instance's expected noise multiplier
+    ``E[error_scale ** 2 | s, partition] = (1 - rho) + rho * T_c``, which wobbles
+    around 1 (``E[T_c] == 1``). ``None`` when homoskedastic."""
 
     het_strength: Float[Array, ''] | None
     """Heteroskedasticity knob ``rho`` in ``[0, 1]``: the fraction of the
@@ -868,8 +872,9 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
 
     mu = mulin + muquad
 
-    # heteroskedastic error scale W = sqrt(v), v = (1 - rho) + rho eta ** 2 / T;
-    # reuses the linear-mean machinery, with T enforcing E[v] = 1 (over gamma)
+    # heteroskedastic error scale W = sqrt(v), v = (1 - rho) + rho eta ** 2;
+    # reuses the linear-mean machinery at unit budget, so E[eta ** 2] = 1 and the
+    # noise moment is controlled only marginally (E[v] = 1 over the whole prior)
     if params.het_shape is None:
         error_scale = None
     else:
@@ -877,9 +882,7 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
         if params.het_shape == 'vector':
             eta_separate = params.gamma_separate @ x
             eta = combine_shared_separate(eta, eta_separate, params.lambda_)
-        v = (1.0 - params.het_strength) + (
-            params.het_strength * eta**2 / params.het_energy[..., None]
-        )
+        v = (1.0 - params.het_strength) + params.het_strength * eta**2
         error_scale = jnp.sqrt(v)
 
     y = generate_outcome(

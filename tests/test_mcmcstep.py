@@ -1910,13 +1910,10 @@ class TestPrecomputeTerms:
         error_cov_inv = jnp.array([[inv_sigma2]])
         leaf_prior_cov_inv = jnp.array([[leaf_prior_cov_inv_uv]])
 
-        precs = PrecsScalar(
-            left=jnp.array([3.0]), right=jnp.array([4.0]), total=jnp.array([7.0])
-        )
+        precs = PrecsScalar(lrt=jnp.array([[3.0, 4.0, 7.0]]))
 
-        total_resid = random.normal(keys.pop(), (1,))
-        left_resid = random.normal(keys.pop(), (1,))
-        right_resid = random.normal(keys.pop(), (1,))
+        # sum of scaled residuals in the left, right, and parent node; k = 1
+        resid_lrt = random.normal(keys.pop(), (1, 3))
 
         prelkv_mv, _ = _precompute_likelihood_terms_mv(
             error_cov_inv, leaf_prior_cov_inv, precs
@@ -1924,16 +1921,14 @@ class TestPrecomputeTerms:
         # the precompute terms are batched over trees, while the ratio is
         # computed one tree at a time; strip the singleton num_trees axis
         prelkv_mv = tree.map(lambda x: x.squeeze(0), prelkv_mv)
-        likelihood_mv = _compute_likelihood_ratio_mv(
-            total_resid, left_resid, right_resid, prelkv_mv
-        )
+        likelihood_mv = _compute_likelihood_ratio_mv(resid_lrt, prelkv_mv)
 
         prelkv_uv, prelk_uv = _precompute_likelihood_terms_uv(
             inv_sigma2, leaf_prior_cov_inv_uv, precs
         )
         prelkv_uv = tree.map(lambda x: x.squeeze(0), prelkv_uv)
         likelihood_uv = _compute_likelihood_ratio_uv(
-            total_resid[0], left_resid[0], right_resid[0], prelkv_uv, prelk_uv
+            resid_lrt[0, :], prelkv_uv, prelk_uv
         )
 
         assert_allclose(

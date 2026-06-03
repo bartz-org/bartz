@@ -55,11 +55,8 @@ class Moves(Module):
     node: Int32[Array, '*num_trees']
     """The index of the leaf to grow or node to prune."""
 
-    left: Int32[Array, '*num_trees']
-    """The index of the left child of 'node'."""
-
-    right: Int32[Array, '*num_trees']
-    """The index of the right child of 'node'."""
+    children: Int32[Array, '*num_trees 2']
+    """The indices of the left and right children of 'node'."""
 
     partial_ratio: Float32[Array, '*num_trees'] | None
     """A factor of the Metropolis-Hastings ratio of the move. It lacks the
@@ -82,29 +79,21 @@ class Moves(Module):
     var_tree: UInt[Array, '*num_trees half_tree_size']
     """The updated decision axes of the trees, valid whatever move."""
 
-    left_growable: Bool[Array, '*num_trees']
-    """Whether the left child of `node` has available decision rules, *not*
-    counting the datapoint thresholds. This is the admissibility used in the
-    prior term of the Metropolis-Hastings ratio, matching the standard BART
-    prior which ignores the count constraints."""
-
-    right_growable: Bool[Array, '*num_trees']
-    """Whether the right child of `node` has available decision rules, *not*
-    counting the datapoint thresholds. See `left_growable`."""
+    children_growable: Bool[Array, '*num_trees 2']
+    """Whether the left and right children of `node` have available decision
+    rules, *not* counting the datapoint thresholds. This is the admissibility
+    used in the prior term of the Metropolis-Hastings ratio, matching the
+    standard BART prior which ignores the count constraints."""
 
     node_affluent: None | Bool[Array, '*num_trees']
     """Whether `node`, as a leaf, would be a growable leaf, counting the
     datapoint thresholds. Only meaningful when the move prunes or a grow is
     rejected. `None` until set in `accept_moves_parallel_stage`."""
 
-    left_affluent: None | Bool[Array, '*num_trees']
-    """Whether the left child of `node`, as a leaf within the heap, would be a
-    growable leaf, counting the datapoint thresholds. `None` until set in
-    `accept_moves_parallel_stage`."""
-
-    right_affluent: None | Bool[Array, '*num_trees']
-    """Whether the right child of `node` would be a growable leaf. See
-    `left_affluent`."""
+    children_affluent: None | Bool[Array, '*num_trees 2']
+    """Whether the left and right children of `node`, as leaves within the
+    heap, would be growable leaves, counting the datapoint thresholds. `None`
+    until set in `accept_moves_parallel_stage`."""
 
     logu: Float32[Array, '*num_trees']
     """The logarithm of a uniform (0, 1] random variable to be used to
@@ -235,7 +224,7 @@ def _propose_moves(
 
     # merge the node the move operates on, and its children indices
     node = jnp.where(grow, leaf_to_grow, node_to_prune)
-    left, right = (node << 1) | jnp.arange(2)
+    children = (node << 1) | jnp.arange(2)
 
     # sample a decision rule for GROW; for PRUNE recover the rule already stored
     # at the node. `num_available_var` is the count of admissible variables at
@@ -259,7 +248,7 @@ def _propose_moves(
     # there is another available variable, or the used variable still has a
     # nonempty split range on the child's side. If the move is blocked these
     # values may not make sense.
-    leftright_growable = (num_available_var > 1) | jnp.stack(
+    children_growable = (num_available_var > 1) | jnp.stack(
         [l < split_idx, split_idx + 1 < r]
     )
 
@@ -275,8 +264,7 @@ def _propose_moves(
         grow=grow,
         num_growable=num_growable,
         node=node,
-        left=left,
-        right=right,
+        children=children,
         partial_ratio=ratio,
         log_trans_prior_ratio=None,  # will be set in complete_ratio
         grow_var=sampled_var,
@@ -284,11 +272,9 @@ def _propose_moves(
         # var_tree only changes at `node` for GROW; for PRUNE this is a no-op
         # since `var` equals the existing variable there
         var_tree=var_tree.at[node].set(var.astype(var_tree.dtype)),
-        left_growable=leftright_growable[0],
-        right_growable=leftright_growable[1],
+        children_growable=children_growable,
         node_affluent=None,  # set in accept_moves_parallel_stage
-        left_affluent=None,
-        right_affluent=None,
+        children_affluent=None,
         logu=jnp.log1p(-exp1mlogu),
         acc=None,  # will be set in accept_moves_sequential_stage
         to_prune=None,  # will be set in accept_moves_sequential_stage

@@ -41,11 +41,10 @@ from bartz.testing import DGP, Params, gen_data
 from bartz.testing._dgp import (
     generate_partition,
     generate_s,
-    het_normalization,
     interaction_pattern,
     partitioned_interaction_pattern,
 )
-from tests.util import assert_allclose, assert_array_equal, assert_close_matrices
+from tests.util import assert_array_equal, assert_close_matrices
 
 # Test parameters
 ALPHA = 5e-7  # probability of false positive (aaaaapprox)
@@ -474,6 +473,25 @@ def test_marginal_noise_variance_is_one(dgps: DGP) -> None:
     assert_array_less(jnp.abs((mean - 1.0) / se), SIGMA_THRESHOLD)
 
 
+@pytest.mark.parametrize('het_shape', ['scalar', 'vector'])
+@pytest.mark.parametrize('sparsity', [None, SPARSITY], ids=['dense', 'sparse'])
+def test_var_v_is_marginal_multiplier_variance(
+    keys: split, het_shape: str, sparsity: float | None
+) -> None:
+    """``var_v`` is the fully marginal ``Var[error_scale ** 2] = E[(W ** 2 - 1) ** 2]``.
+
+    Pooled over the whole run, and (for vector het) identical across components,
+    so the per-component estimate is compared to the single scalar ``var_v``.
+    """
+    dgps = generate_dgps(keys.pop(REPS), 0.5, sparsity, HET_STRENGTH, het_shape)
+    centered_sq = (dgps.error_scale**2 - 1.0) ** 2  # (REPS, K?, N), mean is var_v
+    per_dataset = jnp.mean(centered_sq, axis=-1)  # (REPS, K?)
+    estimate = jnp.mean(per_dataset, axis=0)  # (K?,) or ()
+    se = jnp.std(per_dataset, axis=0) / jnp.sqrt(REPS)
+    var_v = dgps.params.var_v[0]  # identical across datasets (hyperparameter-set)
+    assert_array_less(jnp.abs((estimate - var_v) / se), SIGMA_THRESHOLD)
+
+
 def test_variance_relationships(dgps: DGP) -> None:
     """Check some simple inequalities on variances."""
     assert jnp.all(dgps.params.sigma2_pri >= 0)
@@ -776,71 +794,6 @@ class TestOutcomeType:
             gen_data(keys.pop(), **kw)
 
 
-def uniform_x(key: Key[Array, ''], shape: tuple[int, ...]) -> Float[Array, ' *shape']:
-    """Sample predictors from the same ``U(-sqrt3, sqrt3)`` as `generate_x`."""
-    return random.uniform(key, shape, minval=-jnp.sqrt(3.0), maxval=jnp.sqrt(3.0))
-
-
-class TestHetNormalization:
-    """Test `het_normalization` in isolation."""
-
-    N: int = 8_000_000  # i.i.d. coefficient/predictor rows for the MC estimates
-    RHO: float = 0.7  # heteroskedasticity knob for the Monte Carlo checks
-
-    @pytest.mark.parametrize('batch_shape', [(), (3,), (2, 4)])
-    def test_shapes(self, keys: split, batch_shape: tuple[int, ...]) -> None:
-        """It reduces over the trailing predictor axis, keeping the batch shape."""
-        var_coef = jnp.exp(random.normal(keys.pop(), (*batch_shape, 5)))
-        energy, var_v = het_normalization(var_coef, self.RHO, Params.kurt_x)
-        assert energy.shape == batch_shape
-        assert var_v.shape == batch_shape
-
-    def test_energy_is_prior_second_moment(self, keys: split) -> None:
-        """``energy`` is the sum of the coefficient variances ``T = sum_j nu_j``."""
-        var_coef = jnp.exp(random.normal(keys.pop(), (3, 5)))
-        energy, _ = het_normalization(var_coef, self.RHO, Params.kurt_x)
-        assert_close_matrices(energy, jnp.sum(var_coef, axis=-1), rtol=1e-6)
-
-    def test_var_v_scales_with_strength_squared(self, keys: split) -> None:
-        """``var_v`` is proportional to ``het_strength ** 2`` (zero at strength 0)."""
-        var_coef = jnp.exp(random.normal(keys.pop(), (4,)))
-        _, var_v_zero = het_normalization(var_coef, 0.0, Params.kurt_x)
-        _, var_v_half = het_normalization(var_coef, self.RHO / 2, Params.kurt_x)
-        _, var_v_full = het_normalization(var_coef, self.RHO, Params.kurt_x)
-        assert_array_equal(var_v_zero, jnp.zeros(()))
-        assert_allclose(var_v_full, 4 * var_v_half, rtol=1e-6)
-
-    def montecarlo_multiplier(
-        self, keys: split, var_coef: Float[Array, ' p'], rho: float
-    ) -> Float[Array, ' N']:
-        """Draw the multiplier ``v`` over ``g ~ N(0, var_coef)``, ``X ~ U``."""
-        g = jnp.sqrt(var_coef) * random.normal(keys.pop(), (self.N, var_coef.size))
-        x = uniform_x(keys.pop(), (self.N, var_coef.size))
-        eta = jnp.sum(g * x, axis=1)
-        return (1.0 - rho) + rho * eta**2
-
-    def test_conditional_mean(self, keys: split) -> None:
-        """``E[v | nu] = (1 - rho) + rho * energy`` (the per-instance noise level).
-
-        With marginal (not per-instance) normalization the conditional mean is
-        not 1 but tracks the realized ``energy``; it averages to 1 only over the
-        prior of ``nu`` (see `TestHeteroskedasticity`).
-        """
-        var_coef = 0.5 + random.uniform(keys.pop(), (6,))
-        energy, _ = het_normalization(var_coef, self.RHO, Params.kurt_x)
-        v = self.montecarlo_multiplier(keys, var_coef, self.RHO)
-        expected = (1.0 - self.RHO) + self.RHO * energy
-        se = jnp.std(v) / jnp.sqrt(self.N)
-        assert_array_less(jnp.abs(jnp.mean(v) - expected) / se, SIGMA_THRESHOLD)
-
-    def test_var_v(self, keys: split) -> None:
-        """``var_v`` matches the Monte Carlo variance of ``v`` at fixed ``var_coef``."""
-        var_coef = 0.5 + random.uniform(keys.pop(), (6,))
-        _, var_v = het_normalization(var_coef, self.RHO, Params.kurt_x)
-        v = self.montecarlo_multiplier(keys, var_coef, self.RHO)
-        assert_allclose(jnp.var(v), var_v, rtol=3e-2)
-
-
 class TestHeteroskedasticity:
     """Tests for the heteroskedasticity feature of `gen_data`."""
 
@@ -850,7 +803,6 @@ class TestHeteroskedasticity:
         assert dgp.error_scale is None
         assert dgp.params.gamma_shared is None
         assert dgp.params.gamma_separate is None
-        assert dgp.params.het_energy is None
         assert dgp.params.var_v is None
         assert dgp.params.het_strength is None
         assert dgp.params.het_shape is None
@@ -866,8 +818,7 @@ class TestHeteroskedasticity:
         assert jnp.all(dgp.error_scale > 0)
         assert dgp.params.gamma_shared.shape == (p,)
         assert dgp.params.gamma_separate.shape == (k, p)
-        assert dgp.params.het_energy.shape == (k,)
-        assert dgp.params.var_v.shape == (k,)
+        assert dgp.params.var_v.shape == ()
         assert dgp.params.het_strength.shape == ()
         assert dgp.params.het_shape == 'vector'
 
@@ -878,7 +829,6 @@ class TestHeteroskedasticity:
         )
         assert dgp.error_scale.shape == (KWARGS['n'],)
         assert dgp.params.gamma_separate is None
-        assert dgp.params.het_energy.shape == ()
         assert dgp.params.var_v.shape == ()
         assert dgp.params.het_shape == 'scalar'
 
@@ -909,24 +859,29 @@ class TestHeteroskedasticity:
         )
         assert_array_less(spreads[:-1], spreads[1:])
 
-    def test_energy_and_var_v_wiring(self, keys: split) -> None:
-        """`gen_params` feeds ``het_normalization`` the coefficient prior variances.
+    def test_var_v_matches_closed_form(self, keys: split) -> None:
+        """``var_v`` is the marginal ``Var[W ** 2]`` closed form of `Params`.
 
-        Rebuilds the prior variances from the public ``s``, ``lambda_`` and
-        ``partition`` and checks the stored ``het_energy`` / ``var_v`` match,
-        catching wiring bugs in the budget, ``lambda_`` weighting or partition.
+        Recomputes it from the public hyperparameters (vector het, with sparsity
+        so ``mu_4_s`` and the partition factor both enter), catching wiring bugs.
         """
-        rho = 0.7
+        rho, lambda_ = 0.7, 0.5
         p, k = KWARGS['p'], KWARGS['k']
         dgp = gen_data(
-            keys.pop(), lambda_=0.5, het_shape='vector', het_strength=rho, **KWARGS
+            keys.pop(),
+            lambda_=lambda_,
+            sparsity=SPARSITY,
+            het_shape='vector',
+            het_strength=rho,
+            **KWARGS,
         )
-        var_shared = dgp.params.s**2 / p
-        var_separate = dgp.params.s**2 / (p / k) * dgp.params.partition
-        var_coef = 0.5 * var_shared + 0.5 * var_separate
-        energy, var_v = het_normalization(var_coef, rho, Params.kurt_x)
-        assert_close_matrices(dgp.params.het_energy, energy, rtol=1e-6)
-        assert_close_matrices(dgp.params.var_v, var_v, rtol=1e-6)
+        big_lambda = lambda_ * (2 - lambda_) + (1 - lambda_) ** 2 * k
+        r = p % k
+        excess = (
+            3 * (Params.kurt_x * dgp.params.mu_4_s - 1) * big_lambda / p
+            + 3 * (1 - lambda_) ** 2 * r * (k - r) / p**2
+        )
+        assert_close_matrices(dgp.params.var_v, rho**2 * (2 + excess), rtol=1e-6)
 
     def test_stream_invariance_with_homoskedastic(self, keys: split) -> None:
         """Het leaves the mean/predictor streams intact and only rescales the noise."""

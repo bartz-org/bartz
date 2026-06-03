@@ -105,70 +105,56 @@ def combine_shared_separate(
     return jnp.sqrt(1.0 - lambda_) * separate + jnp.sqrt(lambda_) * shared
 
 
-def het_normalization(
-    var_coef: Float[Array, '*shape p'],
+def het_var_v(
+    het_shape: Literal['scalar', 'vector'],
     het_strength: Float[Array, ''] | float,
     kurt_x: float,
-) -> tuple[Float[Array, '*shape'], Float[Array, '*shape']]:
-    R"""Compute the energy and dispersion of the variance multiplier.
+    mu_4: Float[Array, ''] | float,
+    p: int,
+    k: int | None,
+    lambda_: Float[Array, ''] | float | None,
+) -> Float[Array, '']:
+    R"""Marginal variance :math:`\operatorname{Var}[W^2]` of the noise multiplier.
 
-    Given the per-predictor coefficient variances ``var_coef`` (:math:`\nu`, one
-    row per outcome component), the knob ``het_strength`` (:math:`\rho`) and the
-    predictor kurtosis ``kurt_x``, returns ``(energy, var_v)``. ``energy`` is the
-    realized second moment :math:`T = E[\eta^2 \mid \nu] = \sum_j \nu_j`; the
-    multiplier :math:`v = (1 - \rho) + \rho\, \eta^2` is *not* divided by it, so
-    :math:`E[v \mid \nu] = (1 - \rho) + \rho\, T` and the unit mean holds only
-    marginally, once :math:`\nu` is averaged over its prior. ``var_v`` is
-    :math:`\operatorname{Var}_{g, X}[v \mid \nu]`. Both reduce over the predictor
-    axis; see `Params` for the closed forms.
+    The fully marginal dispersion of :math:`W^2 = (1 - \rho) + \rho\, \eta^2`
+    (over the scales, partition, coefficients and predictors): a fixed scalar set
+    by the hyperparameters, the same for every outcome component. See `Params`
+    for the closed form.
     """
-    energy = jnp.sum(var_coef, axis=-1)
-    sum_sq = jnp.sum(var_coef**2, axis=-1)
-    var_v = het_strength**2 * (2.0 * energy**2 + 3.0 * (kurt_x - 1.0) * sum_sq)
-    return energy, var_v
+    excess = 3.0 * (kurt_x * mu_4 - 1.0) / p
+    if het_shape == 'vector':
+        big_lambda = lambda_ * (2.0 - lambda_) + (1.0 - lambda_) ** 2 * k
+        r = p % k
+        excess = excess * big_lambda + 3.0 * (1.0 - lambda_) ** 2 * r * (k - r) / p**2
+    return het_strength**2 * (2.0 + excess)
 
 
 def generate_het(
     key: Key[Array, ''],
     het_shape: Literal['scalar', 'vector'] | None,
-    het_strength: Float[Array, ''] | float | None,
     p: int,
     partition: Bool[Array, 'k p'] | None,
-    lambda_: Float[Array, ''] | float | None,
     s: Float[Array, ' p'],
-    kurt_x: float,
-) -> tuple[
-    Float[Array, ' p'] | None,
-    Float[Array, 'k p'] | None,
-    Float[Array, ''] | Float[Array, ' k'] | None,
-    Float[Array, ''] | Float[Array, ' k'] | None,
-]:
-    """Sample variance-multiplier coefficients and moments for `gen_params`.
+) -> tuple[Float[Array, ' p'] | None, Float[Array, 'k p'] | None]:
+    """Sample the noise-multiplier projection coefficients for `gen_params`.
 
-    Returns ``(gamma_shared, gamma_separate, het_energy, var_v)``; all ``None``
-    when ``het_shape is None``. The coefficients are drawn like the linear mean
-    (``gamma_shared`` first, so ``'scalar'`` and ``'vector'`` share its stream)
-    at unit budget, so ``E[eta ** 2] == 1`` marginally; ``het_energy`` and
-    ``var_v`` are computed from their *prior variances* (not the realized draw);
-    see `het_normalization`.
+    Returns ``(gamma_shared, gamma_separate)``, both ``None`` when ``het_shape is
+    None``. Drawn like the linear-mean coefficients (``gamma_shared`` first, so
+    ``'scalar'`` and ``'vector'`` share its stream) at unit budget, so
+    ``E[eta ** 2] == 1`` marginally; ``gamma_separate`` is used only by
+    ``'vector'``.
     """
     if het_shape is None:
-        return None, None, None, None
+        return None, None
     else:
         keys = split(key, 2)
         budget = jnp.ones(())  # unit budget makes E[eta ** 2] == 1 marginally
         gamma_shared = generate_beta_shared(keys.pop(), p, budget, s)
-        var_shared = s**2 / p
         if het_shape == 'vector':
             gamma_separate = generate_beta_separate(keys.pop(), partition, budget, s)
-            k, _ = partition.shape
-            var_separate = s**2 / (p / k) * partition
-            var_coef = lambda_ * var_shared + (1.0 - lambda_) * var_separate
         else:
             gamma_separate = None
-            var_coef = var_shared
-        het_energy, var_v = het_normalization(var_coef, het_strength, kurt_x)
-        return gamma_shared, gamma_separate, het_energy, var_v
+        return gamma_shared, gamma_separate
 
 
 def interaction_pattern(p: int, q: Integer[Array, ''] | int) -> Bool[Array, 'p p']:
@@ -401,21 +387,29 @@ class Params(Module):
     variance terms above -- is therefore preserved in expectation, with
     :math:`\rho` the fraction of it carried by the heteroskedastic term. As
     elsewhere in the model the moment is controlled only marginally: the realized
-    energy :math:`T_c = E[\eta_{ci}^2 \mid s, \{S_c\}] = \sum_j \nu_{cj}`
-    (`het_energy`) wobbles around 1, so each instance's expected noise
+    energy :math:`T_c = E[\eta_{ci}^2 \mid s, \{S_c\}] = \sum_j \nu_{cj}` wobbles
+    around 1, so each instance's expected noise
     :math:`\sigma^2_{\mathrm{eps}}\,((1 - \rho) + \rho\, T_c)` wobbles around
-    :math:`\sigma^2_{\mathrm{eps}}` rather than being pinned to it.
+    :math:`\sigma^2_{\mathrm{eps}}` rather than being pinned to it. Per-instance
+    quantities like :math:`T_c` are recoverable from the generated data, so only
+    the marginal summary below is reported.
 
-    Conditioned on the realized scales :math:`s` and partition, the multiplier's
-    dispersion over the coefficient draw and predictors is
+    The fully marginal dispersion of the multiplier -- identical for every
+    component, hence a single scalar -- is
 
     .. math::
 
-        \operatorname{Var}[W_{ci}^2 \mid s, \{S_c\}] = \rho^2 \big(
-            2 T_c^2 + 3 (\kappa_X - 1) \textstyle\sum_j \nu_{cj}^2 \big)
+        \operatorname{Var}[W_{ci}^2] = \rho^2 \Big( 2
+            + \frac{3 (\kappa_X \mu_4 - 1)\, \Lambda}{p}
+            + \frac{3 (1 - \lambda)^2\, r (k - r)}{p^2} \Big)
         \quad (\texttt{var\_v}),
 
-    growing with :math:`\rho` and with predictor sparsity.
+    with :math:`\Lambda = 1` (``'scalar'``) or
+    :math:`\lambda (2 - \lambda) + (1 - \lambda)^2 k` (``'vector'``) and
+    :math:`r = p \bmod k`. The leading :math:`2 \rho^2` is the large-:math:`p`
+    Gaussian limit; the rest is the finite-:math:`p` excess from sparsity
+    (:math:`\mu_4`) and per-component concentration (:math:`\Lambda`, which is
+    :math:`k` at :math:`\lambda = 0`).
 
     The shape of :math:`W` (`error_scale`) follows ``het_shape``: ``'scalar'``
     builds one :math:`W_i` (shape :math:`(n,)`) from :math:`\gamma^{\mathrm{sh}}`
@@ -505,24 +499,16 @@ class Params(Module):
     """Separate projection coefficients of shape (k, p), used only for vector
     heteroskedasticity (``het_shape == 'vector'``). ``None`` otherwise."""
 
-    het_energy: Float[Array, ''] | Float[Array, ' k'] | None
-    """Per-component realized energy ``T_c = E[eta_c ** 2 | s, partition] =
-    sum_j nu_cj`` of the squared projection (the ``T_c`` of `Params`), scalar for
-    ``'scalar'`` het and shape (k,) for ``'vector'``. Not applied as a
-    normalizer: it sets the instance's expected noise multiplier
-    ``E[error_scale ** 2 | s, partition] = (1 - rho) + rho * T_c``, which wobbles
-    around 1 (``E[T_c] == 1``). ``None`` when homoskedastic."""
-
     het_strength: Float[Array, ''] | None
     """Heteroskedasticity knob ``rho`` in ``[0, 1]``: the fraction of the
     (expected) noise variance carried by the heteroskedastic term. 0 is
     homoskedastic (``error_scale == 1``), 1 is maximally heterogeneous.
     ``None`` when homoskedastic."""
 
-    var_v: Float[Array, ''] | Float[Array, ' k'] | None
-    """Dispersion ``Var[error_scale ** 2]`` of the noise-variance multiplier over
-    the coefficient draw and predictors, conditional on the realized ``s`` and
-    ``partition`` (hence a function of them), scalar or shape (k,). ``None`` when
+    var_v: Float[Array, ''] | None
+    """Fully marginal variance ``Var[error_scale ** 2]`` of the noise multiplier
+    (see `Params` for the closed form): a fixed scalar set by the
+    hyperparameters, identical for every component. ``None`` when
     homoskedastic."""
 
     outcome_type: OutcomeType | tuple[OutcomeType, ...] = field(static=True)
@@ -796,8 +782,11 @@ def gen_params(
             separate_keys.pop(), partition, q, sigma2_quad, Params.kurt_x, s, mu_4_s
         )
 
-    gamma_shared, gamma_separate, het_energy, var_v = generate_het(
-        het_key, het_shape, het_strength, p, partition, lambda_, s, Params.kurt_x
+    gamma_shared, gamma_separate = generate_het(het_key, het_shape, p, partition, s)
+    var_v = (
+        None
+        if het_shape is None
+        else het_var_v(het_shape, het_strength, Params.kurt_x, mu_4_s, p, k, lambda_)
     )
 
     # derived variances (see `Params`); cheap scalars materialized eagerly
@@ -824,7 +813,6 @@ def gen_params(
         sigma2_pri=sigma2_pri,
         gamma_shared=gamma_shared,
         gamma_separate=gamma_separate,
-        het_energy=het_energy,
         het_strength=het_strength,
         var_v=var_v,
         outcome_type=outcome_type,

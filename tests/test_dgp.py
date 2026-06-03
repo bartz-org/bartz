@@ -369,14 +369,14 @@ HET_STRENGTH: float = 0.7
 
 # DGP configurations for the marginal-variance tests: homoskedastic (dense and
 # sparse) plus scalar and vector heteroskedasticity, which must leave every
-# marginal variance unchanged since ``E[error_scale ** 2] == 1``.
-VARIANCE_DGPS = (
-    None,
-    SPARSITY,
+# marginal variance unchanged since ``E[error_scale ** 2] == 1`` marginally.
+HET_DGPS = (
     {'het_shape': 'scalar', 'het_strength': HET_STRENGTH},
     {'het_shape': 'vector', 'het_strength': HET_STRENGTH},
 )
-VARIANCE_DGPS_IDS = ('dense', 'sparse', 'het_scalar', 'het_vector')
+HET_DGPS_IDS = ('het_scalar', 'het_vector')
+VARIANCE_DGPS = (None, SPARSITY, *HET_DGPS)
+VARIANCE_DGPS_IDS = ('dense', 'sparse', *HET_DGPS_IDS)
 
 
 def expected_pop_var(params: Params, which: str) -> Float[Array, ' REPS']:
@@ -457,6 +457,21 @@ def test_outcome_pop_variance(dgps: DGP, which: str) -> None:
 
     z_scores = jnp.abs((var - expected_var) / std_of_var)
     assert_array_less(z_scores, SIGMA_THRESHOLD)
+
+
+@pytest.mark.parametrize('dgps', HET_DGPS, indirect=True, ids=HET_DGPS_IDS)
+def test_marginal_noise_variance_is_one(dgps: DGP) -> None:
+    """The noise multiplier has unit mean marginally: ``E[error_scale ** 2] == 1``.
+
+    This is the marginal relationship underlying the ``y`` cases of
+    `test_outcome_pop_variance` / `test_outcome_prior_variance`: the het
+    normalization is marginal, not per-instance, so the noise budget is preserved
+    only in expectation over datasets (each dataset's noise wobbles around it).
+    """
+    per_dataset = jnp.mean(dgps.error_scale**2, axis=-1)  # (REPS, K?)
+    mean = jnp.mean(per_dataset, axis=0)
+    se = jnp.std(per_dataset, axis=0) / jnp.sqrt(REPS)
+    assert_array_less(jnp.abs((mean - 1.0) / se), SIGMA_THRESHOLD)
 
 
 def test_variance_relationships(dgps: DGP) -> None:
@@ -874,21 +889,6 @@ class TestHeteroskedasticity:
         assert dgp.error_scale.shape == (kw['n'],)
         assert dgp.y.shape == (kw['n'],)
         assert dgp.params.gamma_separate is None
-
-    @pytest.mark.parametrize('het_shape', ['scalar', 'vector'])
-    def test_marginal_noise_variance_is_one(self, keys: split, het_shape: str) -> None:
-        """``E[error_scale ** 2] == 1`` marginally per component.
-
-        The noise budget is preserved only in expectation over datasets (the
-        normalization is marginal, not per-instance), so the per-dataset mean is
-        averaged across reps before comparing to 1.
-        """
-        dgps = generate_dgps(keys.pop(REPS), 0.5, None, HET_STRENGTH, het_shape)
-        v = dgps.error_scale**2  # (REPS, K?, N)
-        per_dataset = jnp.mean(v, axis=-1)  # (REPS, K?)
-        mean = jnp.mean(per_dataset, axis=0)
-        se = jnp.std(per_dataset, axis=0) / jnp.sqrt(REPS)
-        assert_array_less(jnp.abs((mean - 1.0) / se), SIGMA_THRESHOLD)
 
     def test_heterogeneity_grows_with_strength(self, keys: split) -> None:
         """Larger ``het_strength`` spreads the noise-variance multiplier more.

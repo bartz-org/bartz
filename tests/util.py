@@ -31,7 +31,7 @@ from os import getpid, kill
 from signal import SIGINT
 from threading import Event, Thread
 from time import monotonic
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 from jax import numpy as jnp
@@ -44,6 +44,14 @@ from scipy import linalg, stats
 
 from bartz._jaxext import jaxtyping_disabled, minimal_unsigned_dtype  # noqa: F401
 from bartz.grove import TreesTrace, check_trace, describe_error
+
+_T = TypeVar('_T')
+
+
+def nnone(x: _T | None) -> _T:
+    """Return `x`, asserting it is not None, narrowing away the `None` for typing."""
+    assert x is not None
+    return x
 
 
 def manual_tree(

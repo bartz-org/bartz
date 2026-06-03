@@ -620,11 +620,16 @@ class TestReduction:
 
     configs = (
         # BatchedReduction: unbatched, automatic, and explicit batch counts (a
-        # divisor of `n` and a non-divisor, which leaves an uneven final batch)
+        # divisor of `n` and a non-divisor, which leaves an uneven final batch),
+        # each batch axis layout, and strided vs contiguous batch assignment
         BatchedReduction(num_batches=None),
         BatchedReduction(num_batches='auto'),
         BatchedReduction(num_batches=4),
         BatchedReduction(num_batches=7),
+        BatchedReduction(num_batches=4, batches_inner=False),
+        BatchedReduction(num_batches=4, contiguous=True),
+        BatchedReduction(num_batches=7, contiguous=True),
+        BatchedReduction(num_batches=7, batches_inner=False, contiguous=True),
         # OneHotReduction: every contraction method in both memory layouts
         OneHotReduction(method='matmul', n_inner=True),
         OneHotReduction(method='matmul', n_inner=False),

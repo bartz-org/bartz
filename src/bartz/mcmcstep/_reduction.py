@@ -81,6 +81,18 @@ class BatchedReduction(ReductionConfig):
     auto_gpu_target: int = field(static=True, default=1024)
     """Target number of batches on gpu when `num_batches` is 'auto'."""
 
+    batches_inner: bool = field(static=True, default=True)
+    """Whether the batch axis sits on the scatter buffer's inner, contiguous axis
+    (``size``-by-``num_batches``) or its outer axis (``num_batches``-by-``size``);
+    the two layouts give the backend different memory access patterns. `True` (the
+    default) matches the historical layout. No effect when `num_batches` is `None`."""
+
+    contiguous: bool = field(static=True, default=False)
+    """How datapoints are assigned to batches. `False` (the default) strides them,
+    sending datapoint ``i`` to batch ``i % num_batches``; `True` splits them into
+    contiguous chunks, sending ``i`` to batch ``i // batch_size``. No effect when
+    `num_batches` is `None`."""
+
     def _reduce(
         self,
         values: Float32[Array, '*batch_shape n'] | int,
@@ -102,6 +114,8 @@ class BatchedReduction(ReductionConfig):
                 dtype=dtype,
                 num_batches=num_batches,
                 final_psum=data_sharded,
+                batches_inner=self.batches_inner,
+                contiguous=self.contiguous,
             )
 
         if self.num_batches != 'auto':
@@ -131,6 +145,8 @@ def _batched_scatter_add(
     dtype: DTypeLike,
     num_batches: int | None,
     final_psum: bool = False,
+    batches_inner: bool,
+    contiguous: bool,
 ) -> Shaped[Array, '*batch_shape {size}']:
     batch_shape = values.shape[:-1]
     if num_batches is None:
@@ -140,13 +156,26 @@ def _batched_scatter_add(
         # in the sharded case, n is the size of the local shard, not the full size
         (n,) = indices.shape
         # unsigned avoids a negative-index normalization select in the scatter
-        batch_indices = jnp.arange(n, dtype=jnp.uint32) % num_batches
-        out = (
-            jnp.zeros((*batch_shape, size, num_batches), dtype)
-            .at[..., indices, batch_indices]
-            .add(values)
-            .sum(axis=-1)
-        )
+        iota = jnp.arange(n, dtype=jnp.uint32)
+        if contiguous:
+            batch_size = -(-n // num_batches)  # ceil, so the last batch is partial
+            batch_indices = iota // batch_size
+        else:
+            batch_indices = iota % num_batches
+        if batches_inner:
+            out = (
+                jnp.zeros((*batch_shape, size, num_batches), dtype)
+                .at[..., indices, batch_indices]
+                .add(values)
+                .sum(axis=-1)
+            )
+        else:
+            out = (
+                jnp.zeros((*batch_shape, num_batches, size), dtype)
+                .at[..., batch_indices, indices]
+                .add(values)
+                .sum(axis=-2)
+            )
 
     if final_psum:
         out = lax.psum(out, 'data')

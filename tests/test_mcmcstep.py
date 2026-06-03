@@ -78,7 +78,6 @@ from bartz.mcmcstep._moves import (
 )
 from bartz.mcmcstep._state import Forest, StepConfig, _search_divisor
 from bartz.mcmcstep._step import (
-    PrecsScalar,
     _compute_likelihood_ratio_mv,
     _compute_likelihood_ratio_uv,
     _precompute_leaf_terms_mv,
@@ -1902,6 +1901,7 @@ class TestPrecomputeTerms:
         )
         assert result.mean_factor.shape == (num_trees, k, k, tree_size)
         assert result.centered_leaves.shape == (num_trees, k, tree_size)
+        assert result.logdet_prec.shape == (num_trees, tree_size)
 
     def test_likelihood_equiv(self, keys: split) -> None:
         """Check that _compute_likelihood_ratio_uv and _compute_likelihood_ratio_mv agree when k = 1."""
@@ -1910,26 +1910,33 @@ class TestPrecomputeTerms:
         error_cov_inv = jnp.array([[inv_sigma2]])
         leaf_prior_cov_inv = jnp.array([[leaf_prior_cov_inv_uv]])
 
-        precs = PrecsScalar(lrt=jnp.array([[3.0, 4.0, 7.0]]))
+        # precision of the parent node (= left + right) at heap position 1,
+        # of its left and right children at positions 2 and 3
+        prec_trees = jnp.array([[0.0, 7.0, 3.0, 4.0]])
+        lrt_nodes = jnp.array([[2, 3, 1]])
 
         # sum of scaled residuals in the left, right, and parent node; k = 1
         resid_lrt = random.normal(keys.pop(), (1, 3))
 
-        prelkv_mv, _ = _precompute_likelihood_terms_mv(
-            error_cov_inv, leaf_prior_cov_inv, precs
+        prelf_mv = _precompute_leaf_terms_mv(
+            keys.pop(), prec_trees, error_cov_inv, leaf_prior_cov_inv
+        )
+        prelkv_mv = _precompute_likelihood_terms_mv(
+            error_cov_inv, leaf_prior_cov_inv, prelf_mv, lrt_nodes
         )
         # the precompute terms are batched over trees, while the ratio is
         # computed one tree at a time; strip the singleton num_trees axis
         prelkv_mv = tree.map(lambda x: x.squeeze(0), prelkv_mv)
         likelihood_mv = _compute_likelihood_ratio_mv(resid_lrt, prelkv_mv)
 
-        prelkv_uv, prelk_uv = _precompute_likelihood_terms_uv(
-            inv_sigma2, leaf_prior_cov_inv_uv, precs
+        prelf_uv = _precompute_leaf_terms_uv(
+            keys.pop(), prec_trees, inv_sigma2, leaf_prior_cov_inv_uv
+        )
+        prelkv_uv = _precompute_likelihood_terms_uv(
+            inv_sigma2, leaf_prior_cov_inv_uv, prelf_uv, lrt_nodes
         )
         prelkv_uv = tree.map(lambda x: x.squeeze(0), prelkv_uv)
-        likelihood_uv = _compute_likelihood_ratio_uv(
-            resid_lrt[0, :], prelkv_uv, prelk_uv
-        )
+        likelihood_uv = _compute_likelihood_ratio_uv(resid_lrt[0, :], prelkv_uv)
 
         assert_allclose(
             prelkv_mv.log_sqrt_term, prelkv_uv.log_sqrt_term, rtol=1e-6, atol=1e-6
@@ -1964,6 +1971,13 @@ class TestPrecomputeTerms:
         assert_close_matrices(
             result_uv.centered_leaves,
             result_mv.centered_leaves.squeeze(1),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+        # the posterior precision is error_cov_inv / mean_factor when k = 1
+        assert_close_matrices(
+            jnp.log(inv_sigma2 / result_uv.mean_factor),
+            result_mv.logdet_prec,
             rtol=1e-6,
             atol=1e-6,
         )

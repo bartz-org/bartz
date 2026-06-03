@@ -26,7 +26,7 @@
 
 import math
 import pickle
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Hashable, Mapping, Sequence
 from dataclasses import replace
 from enum import Enum
 from functools import cached_property
@@ -129,8 +129,10 @@ class PredictKind(Enum):
 class DataFrame(Protocol):
     """DataFrame duck-type for `Bart`."""
 
-    columns: Sequence[str]
-    """The names of the columns."""
+    @property
+    def columns(self) -> Collection[str]:
+        """The names of the columns."""
+        ...
 
     def to_numpy(self) -> ndarray:
         """Convert the dataframe to a 2d numpy array with columns on the second axis."""
@@ -141,8 +143,10 @@ class DataFrame(Protocol):
 class Series(Protocol):
     """Series duck-type for `Bart`."""
 
-    name: str | None
-    """The name of the series."""
+    @property
+    def name(self) -> Hashable:
+        """The name of the series."""
+        ...
 
     def to_numpy(self) -> ndarray:
         """Convert the series to a 1d numpy array."""

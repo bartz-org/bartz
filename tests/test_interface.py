@@ -41,6 +41,7 @@ from weakref import ReferenceType, ref
 
 import jax
 import numpy
+import pandas as pd
 import polars as pl
 import pytest
 from equinox import EquinoxRuntimeError, tree_at
@@ -67,7 +68,7 @@ from pytest_subtests import SubTests
 
 from bartz import Bart as OriginalBart
 from bartz import PredictKind
-from bartz._interface import predict_latent
+from bartz._interface import DataFrame, Series, predict_latent
 from bartz._jaxext import (
     get_default_device,
     get_default_devices,
@@ -1941,6 +1942,18 @@ def test_interrupt(bkw: BartKW) -> None:
         periodic_sigint(first_after=3.0, interval=1.0),
     ):
         block_until_ready(Bart(**kw))
+
+
+def test_dataframe_series_duck_types() -> None:
+    """Check pandas and polars frames satisfy the `DataFrame`/`Series` ducks."""
+    data = numpy.zeros((3, 2))
+    for frame in pd.DataFrame(data), pl.DataFrame(data):
+        assert isinstance(frame, DataFrame)
+    for series in pd.Series(data[:, 0]), pl.Series(data[:, 0]):
+        assert isinstance(series, Series)
+    # a bare array is neither, lacking `columns`/`name`/`to_numpy`
+    assert not isinstance(data, DataFrame)
+    assert not isinstance(data, Series)
 
 
 def test_polars(bkw: BartKW) -> None:

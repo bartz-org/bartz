@@ -217,6 +217,10 @@ class StepConfig(Module):
     prec_count_num_trees: int | None = field(static=True)
     """Batch size for processing trees to compute count and prec trees."""
 
+    sequential_unroll: int | bool = field(static=True)
+    """How much to unroll the sequential accept/reject loop over trees in
+    `step`. See the ``unroll`` argument of `jax.lax.scan`."""
+
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
 
@@ -549,6 +553,7 @@ def init(
     count_reduction_config: ReductionConfig = DEFAULT_COUNT_REDUCTION,
     prec_reduction_config: ReductionConfig = DEFAULT_PREC_REDUCTION,
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
+    sequential_unroll: int | bool = 2,
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
     min_points_per_leaf: int | Integer[ArrayLike, ''] | None = None,
@@ -626,6 +631,11 @@ def init(
         computing the likelihood precision. If `None`, do all trees at once,
         which may use too much memory. If 'auto' (default), it's chosen
         automatically.
+    sequential_unroll
+        How much to unroll the sequential accept/reject loop over trees in
+        `step`. See the ``unroll`` argument of `jax.lax.scan`. Unrolling may
+        speed up the MCMC at the cost of longer compilation. 1 means no
+        unrolling; the default is 2.
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
     filter_splitless_vars
@@ -841,6 +851,7 @@ def init(
             config=StepConfig(
                 steps_done=jnp.int32(0),
                 sparse_on_at=_asarray_or_none(sparse_on_at),
+                sequential_unroll=sequential_unroll,
                 mesh=mesh,
                 **red_cfg,
             ),

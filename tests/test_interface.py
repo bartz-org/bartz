@@ -74,18 +74,20 @@ from bartz._jaxext import (
     get_device_count,
     is_key,
     jaxtyping_disabled,
+    minimal_unsigned_dtype,
     split,
 )
 from bartz.debug import TraceWithOffset, sample_prior
 from bartz.grove import (
     check_trace,
+    describe_error,
     forest_depth_distr,
     is_actual_leaf,
     tree_actual_depth,
     tree_depth,
     tree_depths,
 )
-from bartz.mcmcloop import compute_varcount, evaluate_trace
+from bartz.mcmcloop import CallbackState, compute_varcount, evaluate_trace
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import BatchedReduction, State
@@ -857,6 +859,54 @@ def test_tree_structure_changes(bkw: BartKW, subtests: SubTests) -> None:
         assert jnp.all(grow_acc <= grow_prop)
         assert jnp.all(prune_acc <= prune_prop)
         assert jnp.all(grow_prop + prune_prop <= num_trees)
+
+
+def test_check_trees_detects_corruption(bkw: BartKW) -> None:
+    """`_check_trees` flags trees corrupted mid-MCMC (guard against false negatives).
+
+    A callback injected through ``run_mcmc_kw`` rewrites every decision node to
+    split on an out-of-range variable index after each MCMC step. The corruption
+    is deliberately benign for the dynamics: JAX clips the out-of-bounds gather,
+    so each tree merely splits on the last predictor instead of the intended
+    one, the run stays finite (no NaNs/infs) and completes normally. But the
+    saved trees violate the ``check_var_in_bounds`` invariant, which
+    `_check_trees` (used by the `Bart` test wrapper's ``__init__``) must catch.
+    """
+
+    def corrupt(
+        *, state: State, callback_state: CallbackState, **_: Any
+    ) -> tuple[State, CallbackState]:
+        forest = state.forest
+        # max_split.size is the first out-of-range variable index; the var dtype
+        # is sized for indices up to max_split.size - 1, so guard that this one
+        # extra value still fits (it does whenever the count is not exactly at a
+        # dtype boundary, which holds for every variant)
+        oob_value = forest.max_split.size
+        assert minimal_unsigned_dtype(oob_value) == forest.var_tree.dtype
+        oob_var = jnp.array(oob_value, forest.var_tree.dtype)
+        var_tree = jnp.where(forest.split_tree != 0, oob_var, forest.var_tree)
+        forest = replace(forest, var_tree=var_tree)
+        return replace(state, forest=forest), callback_state
+
+    kw = dict(bkw.kw, run_mcmc_kw=dict(callback=corrupt))
+
+    # build via the unwrapped class so the (finite) run completes without the
+    # wrapper's automatic check aborting it, then inspect the corrupted trace
+    bart = OriginalBart(**kw)
+
+    bad = bart._check_trees()
+    # every decision node now points at an out-of-range variable; trees that
+    # happen to be a bare root leaf carry no decision node and stay valid
+    assert jnp.any(bad), 'corruption went undetected (false negative)'
+    for code in jnp.unique(bad[bad != 0]).tolist():
+        assert describe_error(code) == ['check_var_in_bounds']
+
+    # end-to-end: `Bart` (the wrapper used throughout the tests) runs
+    # `_check_trees(error=True)` in `__init__`, so the corrupted run must abort
+    # construction. Testing the real wrapper, not just `_check_trees`, also
+    # catches a wrapper that silently fails to invoke or propagate the check.
+    with pytest.raises(RuntimeError, match='invalid trees'):
+        Bart(**dict(kw, seed=random.clone(kw['seed'])))
 
 
 def test_missing_ignored(bkw: BartKW, keys: split) -> None:

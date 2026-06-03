@@ -42,6 +42,7 @@ The config file is a JSONC document like:
             "resid_num_batches":  [null, 1, 2, 4, 8],
             "count_num_batches":  [null],
             "prec_num_batches":   [null],
+            "sequential_unroll":  [1, 2, 4],
             "num_chains":         [null, 4]
         }
     }
@@ -139,6 +140,9 @@ class ConfigParams:
     prec_num_batches: int | None | Literal['auto'] = init_default('prec_num_batches')
     """`init`'s ``prec_num_batches`` kwarg."""
 
+    sequential_unroll: int | bool = init_default('sequential_unroll')
+    """`init`'s ``sequential_unroll`` kwarg."""
+
     num_chains: int | None = init_default('num_chains')
     """`init`'s ``num_chains`` kwarg."""
 
@@ -230,6 +234,7 @@ class ConfigParams:
             resid_num_batches=self.resid_num_batches,
             count_num_batches=self.count_num_batches,
             prec_num_batches=self.prec_num_batches,
+            sequential_unroll=self.sequential_unroll,
             num_chains=self.num_chains,
         )
 
@@ -259,6 +264,7 @@ class InitKwargs:
     resid_num_batches: int | None | Literal['auto']
     count_num_batches: int | None | Literal['auto']
     prec_num_batches: int | None | Literal['auto']
+    sequential_unroll: int | bool
     num_chains: int | None
 
     def init(self) -> State:

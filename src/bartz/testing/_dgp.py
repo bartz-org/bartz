@@ -32,7 +32,6 @@ from typing import Literal
 from equinox import Module, error_if, field
 from jax import jit, random
 from jax import numpy as jnp
-from jax.scipy.special import hyp1f1
 from jaxtyping import Array, Bool, Float, Int, Integer, Key
 
 from bartz._jaxext import split
@@ -106,79 +105,70 @@ def combine_shared_separate(
     return jnp.sqrt(1.0 - lambda_) * separate + jnp.sqrt(lambda_) * shared
 
 
-def log_var_mgf(v: Float[Array, '*shape']) -> Float[Array, '*shape']:
-    R"""Log second-moment factor of one predictor's log-variance contribution.
-
-    Returns :math:`\log E[e^{2 g X}]` for a Gaussian coefficient :math:`g \sim
-    N(0, v)` and an independent predictor :math:`X \sim U(-\sqrt 3, \sqrt 3)`,
-    i.e. the per-predictor factor of :math:`E[\text{error\_scale}^2]` after
-    marginalizing over the coefficient. The expectation has the closed form
-    :math:`\int_0^1 e^{6 v t^2}\,\mathrm dt = {}_1F_1(\tfrac12; \tfrac32; 6 v)`.
-    """
-    return jnp.log(hyp1f1(0.5, 1.5, 6.0 * v))
-
-
 def het_normalization(
     var_coef: Float[Array, '*shape p'],
+    het_strength: Float[Array, ''] | float,
+    kurt_x: float,
 ) -> tuple[Float[Array, '*shape'], Float[Array, '*shape']]:
-    R"""Centering offset and dispersion of the log-linear variance multiplier.
+    R"""Compute the normalization and dispersion of the variance multiplier.
 
-    Given the per-predictor prior variances ``var_coef`` of the log-variance
-    coefficients (one row per outcome component), returns ``(offset, var_v)``.
-    ``offset`` is the constant making the multiplier :math:`v =
-    \exp(2 (\sum_j g_j X_j + \text{offset}))` satisfy :math:`E_{g, X}[v] = 1`
+    Given the per-predictor coefficient variances ``var_coef`` (:math:`\nu`, one
+    row per outcome component), the knob ``het_strength`` (:math:`\rho`) and the
+    predictor kurtosis ``kurt_x``, returns ``(energy, var_v)``. ``energy`` is
+    :math:`T = E[\eta^2] = \sum_j \nu_j`, the normalization making the multiplier
+    :math:`v = (1 - \rho) + \rho\, \eta^2 / T` satisfy :math:`E[v] = 1`
     *marginally over the coefficient draw* (not normalized to it), so the
     marginal noise variance is preserved while the per-draw conditional variance
     fluctuates. ``var_v`` is the marginal :math:`\operatorname{Var}_{g, X}[v]`.
     Both reduce over the predictor axis; see `Params` for the closed forms.
     """
-    log_mgf = log_var_mgf(var_coef)
-    log_mgf_4 = log_var_mgf(4 * var_coef)
-    offset = -jnp.sum(log_mgf, axis=-1) / 2
-    var_v = jnp.expm1(jnp.sum(log_mgf_4 - 2 * log_mgf, axis=-1))
-    return offset, var_v
+    energy = jnp.sum(var_coef, axis=-1)
+    concentration = jnp.sum(var_coef**2, axis=-1) / energy**2
+    var_v = het_strength**2 * (2.0 + 3.0 * (kurt_x - 1.0) * concentration)
+    return energy, var_v
 
 
 def generate_het(
     key: Key[Array, ''],
     het_shape: Literal['scalar', 'vector'] | None,
-    sigma2_logscale: Float[Array, ''] | float | None,
+    het_strength: Float[Array, ''] | float | None,
     p: int,
     partition: Bool[Array, 'k p'] | None,
     lambda_: Float[Array, ''] | float | None,
     s: Float[Array, ' p'],
+    kurt_x: float,
 ) -> tuple[
     Float[Array, ' p'] | None,
     Float[Array, 'k p'] | None,
     Float[Array, ''] | Float[Array, ' k'] | None,
     Float[Array, ''] | Float[Array, ' k'] | None,
 ]:
-    """Sample log-variance coefficients and their normalization for `gen_params`.
+    """Sample variance-multiplier coefficients and normalization for `gen_params`.
 
-    Returns ``(gamma_shared, gamma_separate, het_offset, var_v)``; all ``None``
+    Returns ``(gamma_shared, gamma_separate, het_energy, var_v)``; all ``None``
     when ``het_shape is None``. The coefficients are drawn like the linear mean
-    (``gamma_shared`` first, so ``'scalar'`` and ``'vector'`` share its stream),
-    while the normalization uses only their *prior variances* (so it does not
-    condition on the realized draw); see `het_normalization`.
+    (``gamma_shared`` first, so ``'scalar'`` and ``'vector'`` share its stream)
+    with a unit budget that cancels in the normalization, while ``het_energy``
+    and ``var_v`` use only their *prior variances* (not the realized draw); see
+    `het_normalization`.
     """
     if het_shape is None:
         return None, None, None, None
     else:
         keys = split(key, 2)
-        gamma_shared = generate_beta_shared(keys.pop(), p, sigma2_logscale, s)
-        var_shared = sigma2_logscale / p * s**2
+        budget = jnp.ones(())  # cancels in the eta ** 2 / T normalization
+        gamma_shared = generate_beta_shared(keys.pop(), p, budget, s)
+        var_shared = s**2 / p
         if het_shape == 'vector':
-            gamma_separate = generate_beta_separate(
-                keys.pop(), partition, sigma2_logscale, s
-            )
+            gamma_separate = generate_beta_separate(keys.pop(), partition, budget, s)
             k, _ = partition.shape
-            var_separate = sigma2_logscale / (p / k) * s**2 * partition
+            var_separate = s**2 / (p / k) * partition
             var_coef = lambda_ * var_shared + (1.0 - lambda_) * var_separate
         else:
             gamma_separate = None
             var_coef = var_shared
-        het_offset, var_v = het_normalization(var_coef)
-        return gamma_shared, gamma_separate, het_offset, var_v
+        het_energy, var_v = het_normalization(var_coef, het_strength, kurt_x)
+        return gamma_shared, gamma_separate, het_energy, var_v
 
 
 def interaction_pattern(p: int, q: Integer[Array, ''] | int) -> Bool[Array, 'p p']:
@@ -346,74 +336,119 @@ class Params(Module):
     (:math:`\lambda = 0`, each uses its own coefficients on its own predictors)
     and identical ones (:math:`\lambda = 1`, all share the shared
     coefficients). The per-component variance decomposition holds for every
-    :math:`\lambda` (the inner :math:`\operatorname{Var}` and :math:`E` are over
-    the data :math:`X` and noise at fixed coefficients, the outer over the
-    coefficients):
+    :math:`\lambda`. Writing :math:`\theta` for all sampled coefficients
+    (:math:`\beta`, :math:`A`, and the heteroskedasticity coefficients :math:`g`
+    introduced below), :math:`\operatorname{Var}[\,\cdot \mid \theta]` is the
+    population variance of a sampled instance (inner :math:`\operatorname{Var}`
+    and :math:`E` over the data :math:`X` and noise at fixed :math:`\theta`), and
+    the expected population variance averages it over :math:`\theta`:
 
     .. math::
         :nowrap:
 
         \begin{align}
-            E[\operatorname{Var}[Y_{ci} \mid \beta, A]] &=
+            E[\operatorname{Var}[Y_{ci} \mid \theta]] &=
                 \sigma^2_{\mathrm{lin}} + \sigma^2_{\mathrm{quad}}
                 + \sigma^2_{\mathrm{eps}}
                 \quad \text{(expected population variance)}, \\
-            \operatorname{Var}[E[Y_{ci} \mid \beta, A]] &=
+            \operatorname{Var}[E[Y_{ci} \mid \theta]] &=
                 \sigma^2_{\mathrm{quad}}\, \mu_4 / ((\kappa_X - 1)\mu_4 + q)
                 \quad \text{(variance of the expected mean)}, \\
             \operatorname{Var}[Y_{ci}] &=
-                E[\operatorname{Var}[Y_{ci} \mid \beta, A]]
-                + \operatorname{Var}[E[Y_{ci} \mid \beta, A]]
+                E[\operatorname{Var}[Y_{ci} \mid \theta]]
+                + \operatorname{Var}[E[Y_{ci} \mid \theta]]
                 \quad \text{(prior variance)}.
         \end{align}
 
     **Heteroskedasticity.** When ``het_shape`` is not ``None`` the homoskedastic
     error :math:`\sigma_{\mathrm{eps}}\varepsilon_{ci}` is replaced by
-    :math:`\sigma_{\mathrm{eps}} W_{ci}\varepsilon_{ci}`, where the positive scale
-    :math:`W_{ci}` (`error_scale`) is log-linear in the predictors and shares the
-    importance scales :math:`s_j` and coupling :math:`\lambda` with the mean:
+    :math:`\sigma_{\mathrm{eps}} W_{ci}\varepsilon_{ci}`, where the nonnegative
+    variance multiplier :math:`v_{ci} = W_{ci}^2` (`error_scale` is :math:`W`) is
+    a convex mix, set by the single knob :math:`\rho \in [0, 1]`
+    (`het_strength`), of a flat floor and a squared latent projection of the
+    predictors. The projection reuses the linear-mean machinery -- the same
+    importance scales :math:`s_j`, partition and coupling :math:`\lambda` -- with
+    an overall coefficient scale that cancels in the normalization (fixed to the
+    unit budget giving the variances below):
 
     .. math::
         :nowrap:
 
         \begin{align}
             \gamma^{\mathrm{sh}}_j &\overset{\mathrm{i.i.d.}}\sim
-                s_j\, N(0,\, \tau^2 / p), \\
+                s_j\, N(0,\, 1 / p), \\
             \gamma^{\mathrm{sep}}_{cj} &\sim
-                s_j\, \mathbb 1[j \in S_c]\, N(0,\, \tau^2 / (p / k)), \\
+                s_j\, \mathbb 1[j \in S_c]\, N(0,\, 1 / (p / k)), \\
             g_{cj} &= \sqrt\lambda\, \gamma^{\mathrm{sh}}_j
                 + \sqrt{1 - \lambda}\, \gamma^{\mathrm{sep}}_{cj}
                 \quad (\texttt{'vector'};\ \texttt{'scalar'}\text{ uses }
                 g_j = \gamma^{\mathrm{sh}}_j), \\
             \nu_{cj} &= \operatorname{Var}[g_{cj}]
-                = \frac{\tau^2}{p}\, s_j^2
+                = \frac{s_j^2}{p}\,
                     \big(\lambda + (1 - \lambda)\, k\, \mathbb 1[j \in S_c]\big), \\
-            L(\nu) &= E_{g \sim N(0, \nu),\, X}[e^{2 g X}]
-                = \int_0^1 e^{6 \nu t^2}\,\mathrm dt
-                = {}_1F_1(\tfrac12;\, \tfrac32;\, 6\nu), \\
-            b_c &= -\tfrac12 \textstyle\sum_j \log L(\nu_{cj}), \\
-            W_{ci} &= \exp\Big( \textstyle\sum_j g_{cj} X_{ij} + b_c \Big), \\
-            Y_{ci} &\sim N\big(\mu_{ci},\, \sigma^2_{\mathrm{eps}}\, W_{ci}^2\big).
+            \eta_{ci} &= \textstyle\sum_j g_{cj} X_{ij}, \\
+            T_c &= E[\eta_{ci}^2] = \textstyle\sum_j \nu_{cj}
+                \quad (\texttt{het\_energy}), \\
+            v_{ci} = W_{ci}^2 &= (1 - \rho)
+                + \rho\, \frac{\eta_{ci}^2}{T_c}, \\
+            Y_{ci} &\sim N\big(\mu_{ci},\, \sigma^2_{\mathrm{eps}}\, v_{ci}\big).
         \end{align}
 
-    Crucially the offset :math:`b_c` uses only the coefficient *prior variances*
-    :math:`\nu_{cj}`, not the realized draw, so it does not normalize in-sample:
-    :math:`E_{\gamma, X}[W_{ci}^2] = 1` holds *marginally over the coefficients*
-    (conditional on :math:`s`, as for :math:`\beta`), while the per-draw
-    conditional :math:`E_X[W_{ci}^2 \mid \gamma]` fluctuates around 1 -- so the
-    overall noise level varies from dataset to dataset. Because the multiplier
-    averages to 1, every marginal variance above (``sigma2_pop``,
-    ``sigma2_pri``) is unchanged; heteroskedasticity only redistributes a fixed
-    noise budget. Its strength is :math:`\tau^2` = ``sigma2_logscale`` =
-    :math:`E[\operatorname{Var}_X[\log W_{ci}]]`, the same for every
-    :math:`\lambda` and component (like :math:`\sigma^2_{\mathrm{lin}}`). The
-    marginal dispersion of the variance multiplier :math:`v_{ci} = W_{ci}^2` is
+    Writing :math:`\eta_{ci}^2 = X_i^\top g_c g_c^\top X_i`, the multiplier is the
+    quadratic-in-:math:`X` form :math:`v_{ci} = c + X_i^\top G_c X_i` with
+    constant floor :math:`c = 1 - \rho` and rank-one positive-semidefinite
+    :math:`G_c = (\rho / T_c)\, g_c g_c^\top`, so :math:`v_{ci} \ge 1 - \rho \ge
+    0` is automatically a valid variance.
+
+    The normalization :math:`T_c` is the *prior* second moment
+    :math:`E[\eta_{ci}^2]` (built from the variances :math:`\nu_{cj}`, not the
+    realized :math:`g_c`), so :math:`E[v_{ci}] = 1` holds only *marginally over*
+    :math:`g_c` (conditional on :math:`s`, as for :math:`\beta`): for a sampled
+    instance :math:`\theta` the conditional :math:`E_X[v_{ci} \mid \theta] =
+    (1 - \rho) + \rho\, |g_c|^2 / T_c` fluctuates around 1, so the population
+    noise level varies from instance to instance (and the pointwise
+    :math:`\operatorname{Var}[\varepsilon \mid X]` from observation to
+    observation). With :math:`g_c` part of :math:`\theta`, the population
+    variance of an instance is
 
     .. math::
 
-        \operatorname{Var}_{\gamma, X}[v_{ci}] = \exp\Big( \textstyle\sum_j
-            \big( \log L(4 \nu_{cj}) - 2 \log L(\nu_{cj}) \big) \Big) - 1
-        \quad (\texttt{var\_v}).
+        \operatorname{Var}[Y_{ci} \mid \theta]
+            = \operatorname{Var}_X[\mu_{ci} \mid \theta]
+            + \sigma^2_{\mathrm{eps}}\, E_X[v_{ci} \mid \theta],
+
+    with no cross term -- the mean-zero :math:`\varepsilon_{ci}` gives
+    :math:`\operatorname{Cov}[\mu_{ci}, W_{ci}\varepsilon_{ci} \mid \theta] = 0`
+    even though :math:`\mu` and :math:`W` share :math:`X`. Averaging over
+    :math:`\theta` uses :math:`E[|g_c|^2] = T_c`, i.e. :math:`E[v_{ci}] = 1`, so
+    the noise contributes exactly :math:`\sigma^2_{\mathrm{eps}}` and the
+    expected population variance :math:`E[\operatorname{Var}[Y_{ci} \mid \theta]]
+    = \sigma^2_{\mathrm{pop}}` is unchanged; the conditional mean
+    :math:`E[Y_{ci} \mid \theta] = E_X[\mu_{ci} \mid \theta]` is free of
+    :math:`g`, so :math:`\operatorname{Var}[E[Y_{ci} \mid \theta]] =
+    \sigma^2_{\mathrm{mean}}` and :math:`\operatorname{Var}[Y_{ci}] =
+    \sigma^2_{\mathrm{pri}}` are too. Thus :math:`\rho` only redistributes a
+    fixed noise budget across observations, and is exactly the fraction of the
+    (expected) noise variance carried by the heteroskedastic term. The knob
+    spans homoskedastic
+    (:math:`\rho = 0`, :math:`v_{ci} \equiv 1`) to maximally heterogeneous
+    (:math:`\rho = 1`, :math:`v_{ci} = \eta_{ci}^2 / T_c`, vanishing where
+    :math:`X_i \perp g_c`).
+
+    The marginal dispersion of :math:`v_{ci}` over the coefficients and
+    predictors follows from :math:`\operatorname{Var}[\eta_{ci}^2] = 2 T_c^2 + 3
+    (\kappa_X - 1) \sum_j \nu_{cj}^2`:
+
+    .. math::
+
+        \operatorname{Var}_{\gamma, X}[v_{ci}] = \rho^2 \Big( 2
+            + 3 (\kappa_X - 1)\, \frac{\sum_j \nu_{cj}^2}{(\sum_j \nu_{cj})^2}
+            \Big)
+        \quad (\texttt{var\_v}),
+
+    growing with :math:`\rho` and with the predictor sparsity (the concentration
+    :math:`\sum_j \nu_{cj}^2 / (\sum_j \nu_{cj})^2` rises as importance
+    concentrates on fewer predictors).
 
     In scalar mode (``het_shape = 'scalar'``) a single :math:`W_i`, built from
     :math:`\gamma^{\mathrm{sh}}` alone (no :math:`\lambda` or partition), scales
@@ -497,23 +532,26 @@ class Params(Module):
     """Prior variance of y."""
 
     gamma_shared: Float[Array, ' p'] | None
-    """Shared log-variance coefficients of shape (p,), drawn like ``beta_shared``
-    with the ``sigma2_logscale`` budget. ``None`` when homoskedastic
-    (``het_shape is None``)."""
+    """Shared coefficients of shape (p,) of the latent projection ``eta``, drawn
+    like ``beta_shared`` with a unit budget that cancels in the normalization.
+    ``None`` when homoskedastic (``het_shape is None``)."""
 
     gamma_separate: Float[Array, 'k p'] | None
-    """Separate log-variance coefficients of shape (k, p), used only for vector
+    """Separate projection coefficients of shape (k, p), used only for vector
     heteroskedasticity (``het_shape == 'vector'``). ``None`` otherwise."""
 
-    het_offset: Float[Array, ''] | Float[Array, ' k'] | None
-    """Centering of the log-variance (the ``b`` of `Params`), scalar for
-    ``'scalar'`` het and shape (k,) for ``'vector'`` het, computed from the
-    coefficient prior variances so that ``E[error_scale ** 2] == 1`` marginally
-    over the coefficient draw. ``None`` when homoskedastic."""
+    het_energy: Float[Array, ''] | Float[Array, ' k'] | None
+    """Per-component normalization ``T_c = E[eta_c ** 2] = sum_j nu_cj`` of the
+    squared projection (the ``T`` of `Params`), scalar for ``'scalar'`` het and
+    shape (k,) for ``'vector'`` het, computed from the coefficient prior
+    variances so that ``E[error_scale ** 2] == 1`` marginally over the
+    coefficient draw. ``None`` when homoskedastic."""
 
-    sigma2_logscale: Float[Array, ''] | None
-    """Heteroskedasticity strength ``tau ** 2 = E[Var[log error_scale]]`` (the
-    log-variance budget). ``None`` when homoskedastic."""
+    het_strength: Float[Array, ''] | None
+    """Heteroskedasticity knob ``rho`` in ``[0, 1]``: the fraction of the
+    (expected) noise variance carried by the heteroskedastic term. 0 is
+    homoskedastic (``error_scale == 1``), 1 is maximally heterogeneous.
+    ``None`` when homoskedastic."""
 
     var_v: Float[Array, ''] | Float[Array, ' k'] | None
     """Marginal dispersion ``Var[error_scale ** 2]`` of the unit-mean
@@ -670,7 +708,7 @@ def gen_params(
     sigma2_eps: Float[Array, ''] | float,
     sparsity: Float[Array, ''] | float | None = None,
     outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
-    sigma2_logscale: Float[Array, ''] | float | None = None,
+    het_strength: Float[Array, ''] | float | None = None,
     het_shape: Literal['scalar', 'vector'] | None = None,
 ) -> Params:
     """Sample DGP coefficients and parameters (no dependence on `n`).
@@ -706,9 +744,10 @@ def gen_params(
         ``k`` for mixed outcomes. Tuples with all elements equal are collapsed
         to the scalar form. Tuples are not allowed when ``k is None``. See
         `Params` for the semantics.
-    sigma2_logscale
-        Heteroskedasticity strength ``tau ** 2`` (the log-variance budget); must
-        be ``None`` iff ``het_shape is None``. See `Params`.
+    het_strength
+        Heteroskedasticity knob ``rho`` in ``[0, 1]`` (0 homoskedastic, 1
+        maximally heterogeneous); must be ``None`` iff ``het_shape is None``.
+        See `Params`.
     het_shape
         Heteroskedasticity mode: ``None`` (homoskedastic), ``'scalar'`` (one
         ``error_scale`` per datapoint, scaling the whole outcome vector), or
@@ -724,7 +763,7 @@ def gen_params(
         If ``outcome_type`` is a tuple whose length does not match ``k``, or
         if a tuple ``outcome_type`` is combined with ``k=None``, or if
         ``(lambda_ is None) != (k is None)``, or if
-        ``(sigma2_logscale is None) != (het_shape is None)``, or if
+        ``(het_strength is None) != (het_shape is None)``, or if
         ``het_shape='vector'`` is combined with ``k=None``.
     """
     if (lambda_ is None) != (k is None):
@@ -735,8 +774,8 @@ def gen_params(
         )
         raise ValueError(msg)
 
-    if (sigma2_logscale is None) != (het_shape is None):
-        msg = 'sigma2_logscale and het_shape must be both set or both None'
+    if (het_strength is None) != (het_shape is None):
+        msg = 'het_strength and het_shape must be both set or both None'
         raise ValueError(msg)
     if het_shape == 'vector' and k is None:
         msg = "het_shape='vector' requires a multivariate outcome (k != None)"
@@ -790,8 +829,8 @@ def gen_params(
             separate_keys.pop(), partition, q, sigma2_quad, Params.kurt_x, s, mu_4_s
         )
 
-    gamma_shared, gamma_separate, het_offset, var_v = generate_het(
-        het_key, het_shape, sigma2_logscale, p, partition, lambda_, s
+    gamma_shared, gamma_separate, het_energy, var_v = generate_het(
+        het_key, het_shape, het_strength, p, partition, lambda_, s, Params.kurt_x
     )
 
     # derived variances (see `Params`); cheap scalars materialized eagerly
@@ -818,8 +857,8 @@ def gen_params(
         sigma2_pri=sigma2_pri,
         gamma_shared=gamma_shared,
         gamma_separate=gamma_separate,
-        het_offset=het_offset,
-        sigma2_logscale=sigma2_logscale,
+        het_energy=het_energy,
+        het_strength=het_strength,
         var_v=var_v,
         outcome_type=outcome_type,
         het_shape=het_shape,
@@ -866,8 +905,8 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
 
     mu = mulin + muquad
 
-    # heteroskedastic error scale W = exp(eta + offset); reuses the linear-mean
-    # machinery, with the offset enforcing E[W ** 2] = 1 (marginally over gamma)
+    # heteroskedastic error scale W = sqrt(v), v = (1 - rho) + rho eta ** 2 / T;
+    # reuses the linear-mean machinery, with T enforcing E[v] = 1 (over gamma)
     if params.het_shape is None:
         error_scale = None
     else:
@@ -875,7 +914,10 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
         if params.het_shape == 'vector':
             eta_separate = params.gamma_separate @ x
             eta = combine_shared_separate(eta, eta_separate, params.lambda_)
-        error_scale = jnp.exp(eta + params.het_offset[..., None])
+        v = (1.0 - params.het_strength) + (
+            params.het_strength * eta**2 / params.het_energy[..., None]
+        )
+        error_scale = jnp.sqrt(v)
 
     y = generate_outcome(
         keys.pop(), mu, params.sigma2_eps, params.outcome_type, error_scale
@@ -910,7 +952,7 @@ def gen_data(
     sigma2_eps: Float[Array, ''] | float,
     sparsity: Float[Array, ''] | float | None = None,
     outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
-    sigma2_logscale: Float[Array, ''] | float | None = None,
+    het_strength: Float[Array, ''] | float | None = None,
     het_shape: Literal['scalar', 'vector'] | None = None,
 ) -> DGP:
     """Generate data from a quadratic multivariate DGP.
@@ -938,7 +980,7 @@ def gen_data(
     sigma2_eps
     sparsity
     outcome_type
-    sigma2_logscale
+    het_strength
     het_shape
         Forwarded to `gen_params`; see `Params`.
 
@@ -958,7 +1000,7 @@ def gen_data(
         sigma2_eps=sigma2_eps,
         sparsity=sparsity,
         outcome_type=outcome_type,
-        sigma2_logscale=sigma2_logscale,
+        het_strength=het_strength,
         het_shape=het_shape,
     )
     return gen_data_from_params(keys.pop(), params, n=n)

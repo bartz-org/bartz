@@ -36,8 +36,6 @@ from jax.experimental import pallas as pl
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float32, Int32, Integer, Shaped
 
-from bartz._jaxext import get_default_device
-
 # target number of datapoint batches on cpu when batching is resolved
 # automatically; unlike the gpu target it does not vary across reductions
 _AUTO_CPU_TARGET = 16
@@ -272,6 +270,8 @@ class PallasReduction(ReductionConfig):
     gpu/tpu; on cpu it falls back to Pallas interpret mode, which is slow and
     meant only for testing. Like `OneHotReduction`, it is competitive only when
     `size` (the number of leaves) is small.
+
+    On gpu the kernel is lowered through Triton or Mosaic GPU; see `backend`.
     """
 
     block_size: int | Literal['auto'] = field(static=True, default='auto')
@@ -287,9 +287,18 @@ class PallasReduction(ReductionConfig):
     auto_gpu_target: int = field(static=True, default=1024)
     """Cap on the number of kernel instances on gpu when `num_blocks` is 'auto'."""
 
-    interpret: bool | Literal['auto'] = field(static=True, default='auto')
-    """Whether to run the kernel in Pallas interpret mode. If 'auto', enabled on
-    cpu (which supports no other mode) and disabled elsewhere."""
+    backend: Literal['triton', 'cpu', 'default'] = field(static=True, default='triton')
+    """How to lower the kernel. The run platform is not known here at trace time,
+    so it cannot be selected automatically:
+
+    'triton'
+        Pass Triton compiler params; the default, compiles on every CUDA/ROCm gpu.
+    'cpu'
+        Pallas interpret mode, the only mode that runs on cpu (slow; for testing).
+    'default'
+        Pass nothing, leaving jax to pick its own gpu backend: that is Mosaic GPU,
+        which only compiles on Hopper and newer (compute capability 9.0+).
+    """
 
     def _reduce(
         self,
@@ -306,17 +315,17 @@ class PallasReduction(ReductionConfig):
         (n,) = indices.shape
         num_rows = 1 if values.ndim == 0 else math.prod(values.shape[:-1])
 
-        # the grid size, tile width and interpret flag are all static, so the
-        # 'auto' settings are resolved here against the trace-time platform
-        # rather than deferred to XLA like `BatchedReduction`'s batch count
-        cpu = get_default_device().platform == 'cpu'
-        interpret = cpu if self.interpret == 'auto' else self.interpret
+        # the grid size, tile width and interpret flag are all static; they are
+        # resolved from `backend` (cpu vs gpu) rather than the trace-time platform,
+        # which need not match the run platform
+        interpret = self.backend == 'cpu'
+        compiler_params = _resolve_pallas_backend(self.backend)
         if self.block_size == 'auto':
             block_size = _auto_block_size(n, size, num_rows)
         else:
             block_size = self.block_size
         if self.num_blocks == 'auto':
-            target = _AUTO_CPU_TARGET if cpu else self.auto_gpu_target
+            target = _AUTO_CPU_TARGET if interpret else self.auto_gpu_target
             num_blocks = max(1, min(-(-n // block_size), target))
         else:
             num_blocks = self.num_blocks
@@ -329,10 +338,31 @@ class PallasReduction(ReductionConfig):
             num_blocks=num_blocks,
             block_size=block_size,
             interpret=interpret,
+            compiler_params=compiler_params,
         )
         if data_sharded:
             out = lax.psum(out, 'data')
         return out
+
+
+def _resolve_pallas_backend(
+    backend: Literal['triton', 'cpu', 'default'],
+) -> pl.CompilerParams | None:
+    """`compiler_params` for `pallas_call`, or `None` to use its own default.
+
+    Only 'triton' passes params (it compiles on every CUDA/ROCm gpu); 'cpu'
+    (interpret mode) and 'default' (Mosaic GPU, Hopper-only) pass nothing.
+    """
+    if backend != 'triton':
+        return None
+    # WORKAROUND(jax<0.7.0): the public Triton compiler params live at
+    # `pallas.triton.CompilerParams` since jax 0.7; older jax already defaulted
+    # its gpu Pallas backend to Triton, so passing nothing is equivalent.
+    try:
+        from jax.experimental.pallas import triton as pallas_triton  # noqa: PLC0415
+    except ImportError:
+        return None
+    return pallas_triton.CompilerParams()
 
 
 def _auto_block_size(n: int, size: int, num_rows: int) -> int:
@@ -353,6 +383,7 @@ def _pallas_scatter_add(
     num_blocks: int,
     block_size: int,
     interpret: bool,
+    compiler_params: pl.CompilerParams | None = None,
 ) -> Shaped[Array, '*batch_shape {size}']:
     """Blocked one-hot indexed reduce via a Pallas kernel; see `PallasReduction`."""
     scalar = values.ndim == 0
@@ -366,15 +397,21 @@ def _pallas_scatter_add(
         rows = values.astype(dtype).reshape(-1, n)
     num_rows, _ = rows.shape
 
+    # the Triton backend requires every array dimension to be a power of 2. `size`
+    # (the tree array size) and `block_size` already are; pad the rows axis (its
+    # length is the product of the value's batch shape, e.g. k or k*k, so any k)
+    # to a power of 2 with zero rows, whose zero output is sliced off below.
+    padded_rows = 1 << (max(1, num_rows) - 1).bit_length()
+
     # each instance scans `iters` sub-blocks of `block_size` datapoints; pad the
-    # datapoint axis so it splits evenly. The padded rows are zero, so padded
-    # datapoints contribute nothing whatever bin they fall in; the out-of-range
+    # datapoint axis so it splits evenly. The padded datapoints are zero in every
+    # row, so they contribute nothing whatever bin they fall in; the out-of-range
     # `size` index is just a tidy default (it may wrap in a narrow index dtype).
     iters = -(-n // (num_blocks * block_size))
     chunk = iters * block_size
     pad = num_blocks * chunk - n
     indices = jnp.pad(indices, (0, pad), constant_values=size)
-    rows = jnp.pad(rows, ((0, 0), (0, pad)))
+    rows = jnp.pad(rows, ((0, padded_rows - num_rows), (0, pad)))
 
     # the kernel operates on `Ref`s, not arrays, so it carries no array
     # annotations (which would also trip runtime shape typechecking)
@@ -387,22 +424,23 @@ def _pallas_scatter_add(
             return acc + (rows_ref[:, block][:, None, :] * onehot).sum(axis=-1)
 
         out_ref[0] = lax.fori_loop(
-            0, iters, accumulate, jnp.zeros((num_rows, size), dtype)
+            0, iters, accumulate, jnp.zeros((padded_rows, size), dtype)
         )
 
     out = pl.pallas_call(
         kernel,
-        out_shape=ShapeDtypeStruct((num_blocks, num_rows, size), dtype),
+        out_shape=ShapeDtypeStruct((num_blocks, padded_rows, size), dtype),
         grid=(num_blocks,),
         in_specs=[
-            pl.BlockSpec((num_rows, chunk), lambda p: (0, p)),
+            pl.BlockSpec((padded_rows, chunk), lambda p: (0, p)),
             pl.BlockSpec((chunk,), lambda p: (p,)),
         ],
-        out_specs=pl.BlockSpec((1, num_rows, size), lambda p: (p, 0, 0)),
+        out_specs=pl.BlockSpec((1, padded_rows, size), lambda p: (p, 0, 0)),
         interpret=interpret,
+        compiler_params=compiler_params,
         name='scatter_add',
     )(rows, indices)
-    out = out.sum(axis=0)
+    out = out.sum(axis=0)[:num_rows]  # drop the power-of-2 padding rows
 
     if scalar:
         return out.reshape(size)

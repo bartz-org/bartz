@@ -61,6 +61,7 @@ from scipy import stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
 from bartz._jaxext import (
+    get_default_device,
     get_default_devices,
     get_device_count,
     minimal_unsigned_dtype,
@@ -614,6 +615,8 @@ class TestReduction:
     checks apply to all subclasses and their settings.
     """
 
+    _pallas_backend = 'triton' if get_default_device().platform == 'gpu' else 'cpu'
+
     configs = (
         # BatchedReduction: unbatched, automatic, and explicit batch counts (a
         # divisor of `n` and a non-divisor, which leaves an uneven final batch)
@@ -628,10 +631,13 @@ class TestReduction:
         OneHotReduction(method='multiply', n_inner=False),
         OneHotReduction(method='scatter_set', n_inner=True),
         OneHotReduction(method='scatter_set', n_inner=False),
-        # PallasReduction
-        PallasReduction(),  # fully automatic
-        PallasReduction(num_blocks=1, block_size=64),  # a single instance
-        PallasReduction(num_blocks=8, block_size=16),  # forces the inner loop
+        # PallasReduction: Triton on gpu, interpret mode on cpu (the only mode
+        # that runs there). The suite uses the default device consistently, so
+        # the run platform is known here. 'cpu' interpret exercises the same
+        # kernel as the gpu backends.
+        PallasReduction(backend=_pallas_backend),  # fully automatic grid and tile
+        PallasReduction(backend=_pallas_backend, num_blocks=1, block_size=64),
+        PallasReduction(backend=_pallas_backend, num_blocks=8, block_size=16),
     )
 
     @staticmethod

@@ -36,6 +36,7 @@ from jaxtyping import Array, Float32, Int32, UInt
 from numpy.lib.array_utils import normalize_axis_index
 
 from bartz._jaxext import autobatch, jit
+from bartz._typing import kwdict
 from bartz.grove import TreesTrace, evaluate_forest, is_multivariate, var_histogram
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
 from bartz.mcmcstep._state import partition_specs
@@ -267,7 +268,9 @@ def _evaluate_trace(
 
     # the outermost loop is the only one whose per-call output is statically the
     # full output, so it alone can take `result_shape_dtype` (skips a trace)
-    full_shape = dict(result_shape_dtype=ShapeDtypeStruct(out_shape, jnp.float32))
+    full_shape: kwdict = dict(
+        result_shape_dtype=ShapeDtypeStruct(out_shape, jnp.float32)
+    )
 
     # batch over mcmc samples
     batched_eval = autobatch(

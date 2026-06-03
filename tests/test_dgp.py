@@ -36,6 +36,7 @@ from numpy.testing import assert_array_less
 from scipy.stats import norm
 
 from bartz._jaxext import split
+from bartz._typing import kwdict
 from bartz.mcmcstep import OutcomeType
 from bartz.testing import DGP, gen_data
 from bartz.testing._dgp import (
@@ -494,7 +495,7 @@ def test_lambda_required_when_multivariate(keys: split) -> None:
 
 def test_lambda_forbidden_when_univariate(keys: split) -> None:
     """`lambda_` not None with `k=None` raises `ValueError`."""
-    kw = dict(KWARGS, k=None)
+    kw: kwdict = dict(KWARGS, k=None)
     with pytest.raises(ValueError, match='lambda_ must be None'):
         gen_data(keys.pop(), lambda_=0.5, **kw)
 
@@ -504,7 +505,7 @@ def test_univariate_split(keys: split) -> None:
 
     Also checks that the shared/blended fields are sliced consistently.
     """
-    kw = dict(KWARGS, k=None)
+    kw: kwdict = dict(KWARGS, k=None)
     dgp = gen_data(keys.pop(), **kw)
     n_train = kw['n'] // 3
     train, test = dgp.split(n_train)
@@ -534,7 +535,7 @@ class TestOutcomeType:
 
     def test_binary_univariate(self, keys: split) -> None:
         """Binary univariate output contains only 0.0/1.0 float values."""
-        kw = dict(KWARGS, k=None, outcome_type='binary')
+        kw: kwdict = dict(KWARGS, k=None, outcome_type='binary')
         dgp = gen_data(keys.pop(), **kw)
         assert dgp.y.shape == (kw['n'],)
         assert dgp.y.dtype == jnp.float32
@@ -543,7 +544,7 @@ class TestOutcomeType:
 
     def test_binary_multivariate(self, keys: split) -> None:
         """Binary multivariate output contains only 0.0/1.0 in every row."""
-        kw = dict(KWARGS, lambda_=0.5, outcome_type='binary')
+        kw: kwdict = dict(KWARGS, lambda_=0.5, outcome_type='binary')
         dgp = gen_data(keys.pop(), **kw)
         assert dgp.y.shape == (kw['k'], kw['n'])
         assert_array_equal(jnp.unique(dgp.y), jnp.array([0.0, 1.0]))
@@ -555,7 +556,7 @@ class TestOutcomeType:
         so generating with `'continuous'` and `'binary'` under the same top
         level key must yield latents that differ only by the final threshold.
         """
-        kw = dict(KWARGS, lambda_=0.5)
+        kw: kwdict = dict(KWARGS, lambda_=0.5)
         key = keys.pop()
         dgp_cont = gen_data(key, **kw)
         dgp_bin = gen_data(random.clone(key), outcome_type='binary', **kw)
@@ -563,7 +564,7 @@ class TestOutcomeType:
 
     def test_mixed(self, keys: split) -> None:
         """Mixed outcome_type: binary rows are 0/1, continuous rows match the baseline."""
-        kw = dict(KWARGS, lambda_=0.5)
+        kw: kwdict = dict(KWARGS, lambda_=0.5)
         assert kw['k'] == 3
         key = keys.pop()
         dgp_cont = gen_data(key, **kw)
@@ -583,18 +584,20 @@ class TestOutcomeType:
 
     def test_all_same_tuple_collapses_to_scalar(self, keys: split) -> None:
         """A tuple of identical types is stored as a scalar `OutcomeType`."""
-        kw = dict(KWARGS, lambda_=0.5, outcome_type=('binary', 'binary', 'binary'))
+        kw: kwdict = dict(
+            KWARGS, lambda_=0.5, outcome_type=('binary', 'binary', 'binary')
+        )
         dgp = gen_data(keys.pop(), **kw)
         assert dgp.params.outcome_type is OutcomeType.binary
 
     def test_validation_tuple_wrong_length(self, keys: split) -> None:
         """A tuple whose length does not match `k` raises `ValueError`."""
-        kw = dict(KWARGS, lambda_=0.5, outcome_type=('continuous', 'binary'))
+        kw: kwdict = dict(KWARGS, lambda_=0.5, outcome_type=('continuous', 'binary'))
         with pytest.raises(ValueError, match='outcome_type has length'):
             gen_data(keys.pop(), **kw)
 
     def test_validation_tuple_with_univariate(self, keys: split) -> None:
         """A tuple combined with the univariate path (`k is None`) raises."""
-        kw = dict(KWARGS, k=None, outcome_type=('continuous',))
+        kw: kwdict = dict(KWARGS, k=None, outcome_type=('continuous',))
         with pytest.raises(ValueError, match='tuple outcome_type requires'):
             gen_data(keys.pop(), **kw)

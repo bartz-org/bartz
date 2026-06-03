@@ -54,6 +54,7 @@ from bartz._jaxext import (
     jaxtyping_disabled,
     split,
 )
+from bartz._typing import kwdict
 from bartz.BART import gbart as original_gbart
 from bartz.BART import mc_gbart as original_mc_gbart
 from bartz.debug import TraceWithOffset, sample_prior, trees_BART_to_bartz
@@ -1003,7 +1004,7 @@ def test_xinfo() -> None:
         xinfo = jnp.array(
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
         )
-    kw = dict(
+    kw: kwdict = dict(
         x_train=jnp.empty((3, 0)),
         y_train=jnp.empty(0),
         ndpost=0,
@@ -1027,7 +1028,7 @@ def test_xinfo_wrong_p() -> None:
         xinfo = jnp.array(
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
         )
-    kw = dict(
+    kw: kwdict = dict(
         x_train=jnp.empty((5, 0)), y_train=jnp.empty(0), ndpost=0, nskip=0, xinfo=xinfo
     )
     # `xinfo`'s p (3) deliberately mismatches `x_train`'s p (5); disable

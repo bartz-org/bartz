@@ -44,6 +44,7 @@ from pytest_subtests import SubTests
 
 import bartz.stochtree as bst
 from bartz._jaxext import jaxtyping_disabled, split
+from bartz._typing import kwdict
 from bartz.stochtree._preprocess import (
     PandasPreprocessor,
     PolarsPreprocessor,
@@ -68,7 +69,7 @@ N_TEST = 20
 NUM_BURNIN = 20
 NUM_MCMC = 40
 
-_GEN_KW = dict(p=4, q=2, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.5)
+_GEN_KW: kwdict = dict(p=4, q=2, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.5)
 # `mean_forest_params` override that disables the bartz-incompatible
 # leaf-variance sampler. All sample()-using tests start from this base.
 _MFP_BASE: Mapping = MappingProxyType({'sample_sigma2_leaf': False})
@@ -257,12 +258,13 @@ def test_num_gfr_nonzero_raises(continuous_data: _Data, keys: split) -> None:
     """The grow-from-root sampler is not supported."""
     data = continuous_data
     m = bst.BARTModel()
+    sample_kw: kwdict = dict(_SAMPLE_KW, num_gfr=1)
     with pytest.raises(NotImplementedError, match='grow-from-root'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
             general_params={'random_seed': keys.pop()},
-            **dict(_SAMPLE_KW, num_gfr=1),
+            **sample_kw,
         )
 
 
@@ -334,12 +336,15 @@ def test_unknown_dict_keys_rejected(continuous_data: _Data, keys: split) -> None
             **_SAMPLE_KW,
         )
     m = bst.BARTModel()
+    sample_kw: kwdict = dict(
+        _SAMPLE_KW, mean_forest_params={**_MFP_BASE, 'keep_vars': []}
+    )
     with pytest.raises(ValueError, match='mean_forest_params contains unsupported key'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
             general_params={'random_seed': keys.pop()},
-            **dict(_SAMPLE_KW, mean_forest_params={**_MFP_BASE, 'keep_vars': []}),
+            **sample_kw,
         )
 
 

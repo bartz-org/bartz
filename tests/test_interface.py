@@ -78,6 +78,7 @@ from bartz._jaxext import (
     minimal_unsigned_dtype,
     split,
 )
+from bartz._typing import kwdict
 from bartz.debug import TraceWithOffset, sample_prior
 from bartz.grove import (
     check_trace,
@@ -889,7 +890,7 @@ def test_check_trees_detects_corruption(bkw: BartKW) -> None:
         forest = replace(forest, var_tree=var_tree)
         return replace(state, forest=forest), callback_state
 
-    kw = dict(bkw.kw, run_mcmc_kw=dict(callback=corrupt))
+    kw: kwdict = dict(bkw.kw, run_mcmc_kw=dict(callback=corrupt))
 
     # build via the unwrapped class so the (finite) run completes without the
     # wrapper's automatic check aborting it, then inspect the corrupted trace
@@ -1911,9 +1912,9 @@ def test_no_recompilation_no_tracing(bkw: BartKW) -> None:
     because the wrapper's `_check_replicated_trees` creates a fresh `shard_map`
     each call, which doesn't cache across invocations.
     """
-    kw = dict(bkw.kw, printevery=None)
+    kw: kwdict = dict(bkw.kw, printevery=None)
     OriginalBart(**kw)
-    kw2 = dict(kw, seed=random.clone(kw['seed']))
+    kw2: kwdict = dict(kw, seed=random.clone(kw['seed']))
     with no_tracing():
         OriginalBart(**kw2)
 

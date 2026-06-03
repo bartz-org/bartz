@@ -943,7 +943,7 @@ def _precompute_leaf_terms_mv(
     if z is None:
         z = random.normal(key, (num_trees, tree_size, k))
     centered_leaves: Float32[Array, 'num_trees tree_size k'] = solve_triangular(
-        L_prec, z[..., None], trans='T'
+        L_prec, z[..., None], trans='T', lower=True
     ).squeeze(-1)
     centered_leaves_out: Float32[Array, 'num_trees k tree_size'] = jnp.swapaxes(
         centered_leaves, -1, -2
@@ -975,7 +975,7 @@ def _precompute_leaf_terms_mv_het(
     if z is None:
         z = random.normal(key, (num_trees, tree_size, k))
     centered_leaves: Float32[Array, 'num_trees tree_size k'] = solve_triangular(
-        L_prec, z[:, :, :, None], trans='T'
+        L_prec, z[:, :, :, None], trans='T', lower=True
     ).squeeze(-1)
 
     # restore the leaf axis to the trailing position for storage

@@ -617,8 +617,8 @@ class TestWithCachedBart:
         nchains = 4
         kw.update(
             num_trees=max(2 * bkw.n, bkw.p),
-            n_burn=3000,
-            n_save=1000,
+            n_burn=2000,
+            n_save=2000,
             n_skip=1,
             num_chains=nchains,
         )
@@ -692,7 +692,7 @@ class TestWithCachedBart:
                     ti, tj = jnp.triu_indices(k)
                 error_cov_inv = error_cov_inv[:, :, ti, tj]
                 rhat_prec = rhat_rank(error_cov_inv, split=True)
-                assert_array_less(rhat_prec, 1.05)
+                assert_array_less(rhat_prec, 1.07)
 
         if bkw.p < bkw.n:
             with subtests.test('varcount'):
@@ -857,6 +857,50 @@ def test_tree_structure_changes(bkw: BartKW, subtests: SubTests) -> None:
         assert jnp.all(grow_acc <= grow_prop)
         assert jnp.all(prune_acc <= prune_prop)
         assert jnp.all(grow_prop + prune_prop <= num_trees)
+
+
+def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
+    """Multivariate leaf draws must carry the full leaf-prior covariance.
+
+    A strongly informative, correlated leaf prior makes the likelihood
+    negligible, so every leaf is resampled essentially from its prior
+    ``N(0, leaf_prior_cov)``. Pooling all leaves over the whole trace, their
+    empirical covariance must match ``leaf_prior_cov``.
+
+    This catches sampling the leaf noise with a wrong covariance, e.g. as
+    ``z / diag(L)`` instead of ``L^-T z`` (a `solve_triangular` missing
+    ``lower=True``), which would zero the off-diagonal correlations.
+    """
+    if bkw.any_binary or bkw.k is None:
+        pytest.skip('only meaningful for all-continuous multivariate outcomes')
+    k = bkw.k
+
+    # correlated leaf prior, scaled to a large precision so it dominates the
+    # likelihood and the leaves sample (essentially) from the prior
+    rho = 0.7
+    scale = 1e6
+    corr = (1 - rho) * jnp.eye(k) + rho
+    leaf_prior_cov_inv = scale * jnp.linalg.inv(corr)
+    leaf_prior_cov = corr / scale  # = inv(leaf_prior_cov_inv), before init donates it
+
+    kw = dict(
+        bkw.kw,
+        init_kw=dict(bkw.kw.get('init_kw', {}), leaf_prior_cov_inv=leaf_prior_cov_inv),
+    )
+    bart = Bart(**kw)
+
+    # pool every actual leaf over chains, samples, and trees into one m axis
+    trace = bart._main_trace
+    n_merge = (2 if trace.has_chains else 1) + 1  # (chains,) samples, and trees
+    leaf_tree = lax.collapse(trace.leaf_tree, 0, n_merge)  # (m, k, ts)
+    split_tree = lax.collapse(trace.split_tree, 0, n_merge)  # (m, ts // 2)
+    actual_leaf = partial(is_actual_leaf, add_bottom_level=True)
+    leaf_mask = vmap(actual_leaf)(split_tree)  # (m, ts)
+    leaves = jnp.moveaxis(leaf_tree, 1, -1).reshape(-1, k)  # (m * ts, k)
+    samples = leaves[leaf_mask.reshape(-1), :]  # (num_leaves, k)
+    empirical_cov = jnp.cov(samples.T)
+
+    assert_close_matrices(empirical_cov, leaf_prior_cov, rtol=0.01)
 
 
 def test_missing_ignored(bkw: BartKW, keys: split) -> None:

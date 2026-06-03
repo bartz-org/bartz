@@ -56,6 +56,7 @@ from tests.util import (
     assert_close_matrices,
     clipped_logit,
     int_seed,
+    nnone,
     rhat_rank,
 )
 
@@ -139,7 +140,7 @@ def test_continuous_smoke(continuous_data: _Data, keys: split) -> None:
     )
     assert m.is_sampled()
     assert m.y_hat_train.shape == (data.X_train.shape[0], m.num_samples)
-    assert m.y_hat_test.shape == (data.X_test.shape[0], m.num_samples)
+    assert nnone(m.y_hat_test).shape == (data.X_test.shape[0], m.num_samples)
     assert m.global_var_samples.shape == (m.num_samples,)
     assert m.outcome_model.outcome == 'continuous'
 
@@ -498,7 +499,7 @@ def test_compare_with_stochtree(
         assert_array_less(rhat, 1.02)
 
     with subtests.test('rhat_y_hat_test'):
-        rhat = _rhat_two_chains(bz_model.y_hat_test, st_model.y_hat_test)
+        rhat = _rhat_two_chains(nnone(bz_model.y_hat_test), nnone(st_model.y_hat_test))
         assert_array_less(rhat, 1.02)
 
     if outcome == 'continuous':
@@ -587,7 +588,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         pred_post = m.predict(X_predict, type='posterior', terms='y_hat')
         return (
             m.y_hat_train,
-            m.y_hat_test,
+            nnone(m.y_hat_test),
             m.global_var_samples,
             m.y_bar,
             m.y_std,
@@ -980,7 +981,7 @@ class TestPreprocessing:
         m_arr = self._sample(X_arr, data.y_train, X_test=Xte_arr, key=key)
         m_df = self._sample(df_train, data.y_train, X_test=df_test, key=key)
         assert_close_matrices(m_arr.y_hat_train, m_df.y_hat_train)
-        assert_close_matrices(m_arr.y_hat_test, m_df.y_hat_test)
+        assert_close_matrices(nnone(m_arr.y_hat_test), nnone(m_df.y_hat_test))
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_end_to_end_one_hot_matches_manual(
@@ -1052,7 +1053,7 @@ class TestPreprocessing:
             general_params={'variable_weights': w_df},
         )
         assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train)
-        assert_close_matrices(m_manual.y_hat_test, m_df.y_hat_test)
+        assert_close_matrices(nnone(m_manual.y_hat_test), nnone(m_df.y_hat_test))
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_end_to_end_default_weights_split_like_stochtree(
@@ -1108,7 +1109,7 @@ class TestPreprocessing:
             general_params={'variable_weights': w_split},
         )
         assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train)
-        assert_close_matrices(m_manual.y_hat_test, m_df.y_hat_test)
+        assert_close_matrices(nnone(m_manual.y_hat_test), nnone(m_df.y_hat_test))
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_predict_with_array_after_dataframe_fit_raises(

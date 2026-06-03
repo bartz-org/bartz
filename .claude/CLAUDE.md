@@ -73,8 +73,10 @@ Interface hierarchy:
     - keep docstrings short, don't fill them with implementation details
         - related: no redundant comments, if the code is readable, it's self-documenting
         - docstrings and comments shall be _timeless_, not a narration of the development work
+        - again, BE BRIEF, humans read slower than you!
     - keep private/internal docstrings short or absent if they are so already
     - keep return value description relatively short and strictly on one line, html render garbles it otherwise
+    - do _not_ use colons `:` on the first line of a docstring, it trips napoleon
 - **jax** conventions:
     - don't cast to jax arrays things which are already jax arrays (e.g., notice type hints or previous casts)
     - avoid explicit jax types if not necessary, e.g., do `jnp.ones(shape)` instead of `jnp.ones(shape, jnp.float32)`, `1.0` instead of `jnp.float32(1.0)` (unless we need a strong type to auto-cast unsanitized arrays), etc.

@@ -550,7 +550,7 @@ class Params(Module):
     heteroskedasticity (``het_shape == 'vector'``). ``None`` otherwise."""
 
     het_strength: Float[Array, ''] | None
-    """Heteroskedasticity knob ``rho`` in ``[0, 1]``: the fraction of the
+    """Heteroskedasticity knob ``rho`` in ``[0, 1]``, the fraction of the
     (expected) noise variance carried by the heteroskedastic term. 0 is
     homoskedastic (``error_scale == 1``), 1 is maximally heterogeneous.
     ``None`` when homoskedastic."""

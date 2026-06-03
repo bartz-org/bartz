@@ -176,7 +176,8 @@ class StatsAccumulator(Module):
         log_prob = log_s - logsumexp(log_s, axis=-1, keepdims=True)
         per_chain = log_prob.reshape(-1, p)
         num_chains, _ = per_chain.shape
-        # mix over chains, i.e., logmeanexp over the chain axis
+        # mix over chains. WORKAROUND(jax<0.7.1): once we bump jax to v0.7.1
+        # this is `jax.nn.logmeanexp(per_chain, axis=0)`
         log_pool = logsumexp(per_chain, axis=0) - jnp.log(num_chains)
         prob = jnp.exp(log_pool)
         # the where avoids the 0 * -inf = nan term where a probability is 0, the

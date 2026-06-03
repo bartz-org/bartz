@@ -34,7 +34,6 @@ import numpy
 from equinox import Module, field
 from jax import debug, eval_shape, lax, tree
 from jax import numpy as jnp
-from jax.nn import logmeanexp
 from jax.scipy.special import logsumexp
 from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, Integer, PyTree
 from tqdm.auto import tqdm
@@ -175,7 +174,10 @@ class StatsAccumulator(Module):
         *_, p = log_s.shape
         # normalize each chain
         log_prob = log_s - logsumexp(log_s, axis=-1, keepdims=True)
-        log_pool = logmeanexp(log_prob.reshape(-1, p), axis=0)  # mix over chains
+        per_chain = log_prob.reshape(-1, p)
+        num_chains, _ = per_chain.shape
+        # mix over chains, i.e., logmeanexp over the chain axis
+        log_pool = logsumexp(per_chain, axis=0) - jnp.log(num_chains)
         prob = jnp.exp(log_pool)
         # the where avoids the 0 * -inf = nan term where a probability is 0, the
         # same guard `jax.scipy.special.entr` uses, but reusing the log we have

@@ -85,7 +85,8 @@ def loggamma(
     The base draw :math:`G_{a + n}` lands at shape :math:`\geq n`, where the
     chi-square quantile expansion is accurate, while the sum carries the small-`a`
     behavior exactly. :math:`\log U_k` is drawn as :math:`-\mathrm{Exponential}(1)`
-    to avoid evaluating `log` at zero.
+    to avoid evaluating `log` at zero. Per [4]_, table 2, the expansion is
+    accurate to 0.05% relative error on the quantiles for shape :math:`\geq 4`.
 
     Samples below the smallest value representable in `dtype` underflow to
     :math:`-\infty`.
@@ -100,6 +101,9 @@ def loggamma(
     .. [3] Goldstein, R. B. (1973). Algorithm 451: Chi-square quantiles [G1].
        Communications of the ACM, 16(8), 483-485.
        https://doi.org/10.1145/355609.362319
+    .. [4] Zar, J. H. (1978). Approximations for the Percentage Points of the
+       Chi-Squared Distribution. Journal of the Royal Statistical Society Series
+       C: Applied Statistics, 27(3), 280-290. https://doi.org/10.2307/2347163
     """
     dtype = canonicalize_dtype(float if dtype is None else dtype)
     # compute in at least float32: a narrower dtype gives no speedup (the cost is

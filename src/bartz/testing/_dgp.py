@@ -385,14 +385,16 @@ class Params(Module):
         :nowrap:
 
         \begin{align}
-            \operatorname{Var}[W_{ci}^2] &= \rho^2 \Big( 2
-                + \frac{3 (\kappa_X \mu_4 - 1)\, \Lambda}{p}
-                + \frac{3 (1 - \lambda)^2\, r (k - r)}{p^2} \Big), \\
-            \Lambda &= \begin{cases}
-                    1 & W \text{ scalar (with } \lambda = 1\text{)}, \\
-                    \lambda (2 - \lambda) + (1 - \lambda)^2 k
+            \operatorname{Var}[W_{ci}^2] &= \begin{cases}
+                    \rho^2 \Big( 2
+                        + \dfrac{3 (\kappa_X \mu_4 - 1)}{p} \Big)
+                        & W \text{ scalar}, \\[1ex]
+                    \rho^2 \Big( 2
+                        + \dfrac{3 (\kappa_X \mu_4 - 1)\, \Lambda}{p}
+                        + \dfrac{3 (1 - \lambda)^2\, r (k - r)}{p^2} \Big)
                         & W \text{ vector},
                 \end{cases} \\
+            \Lambda &= \lambda (2 - \lambda) + (1 - \lambda)^2 k, \\
             r &= p \bmod k.
         \end{align}
 

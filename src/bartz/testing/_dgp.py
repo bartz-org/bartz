@@ -280,6 +280,14 @@ class Params(Module):
                     0 & \text{otherwise,}
                 \end{cases}
                 \quad q \bmod 2 = 0, \quad q < p, \\
+            R_{cj} &= |\{j'' \in S_c : j'' \le j\}|
+                \quad \text{(rank of } j \text{ within } S_c\text{)}, \\
+            P^{\mathrm{sep}}_{cjj'} &= \begin{cases}
+                    1 & j, j' \in S_c \text{ and } \min(|R_{cj} - R_{cj'}|,\,
+                        |S_c| - |R_{cj} - R_{cj'}|) \le q / 2, \\
+                    0 & \text{otherwise,}
+                \end{cases}
+                \quad q < \lfloor p / k \rfloor, \\
             A^{\mathrm{sh}}_{jj'} &\sim s_j s_{j'}\, P^{\mathrm{sh}}_{jj'}\,
                 N(0,\, \sigma^2_{\mathrm{quad}} / (p\, ((\kappa_X - 1)\mu_4 + q))), \\
             A^{\mathrm{sep}}_{cjj'} &\sim s_j s_{j'}\, P^{\mathrm{sep}}_{cjj'}\,
@@ -297,19 +305,15 @@ class Params(Module):
                 s_j\, N(0,\, 1 / p), \\
             \gamma^{\mathrm{sep}}_{cj} &\sim
                 s_j\, \mathbb 1[j \in S_c]\, N(0,\, 1 / (p / k)), \\
-            \eta_{ci} &= \sqrt\lambda \textstyle\sum_j
-                    \gamma^{\mathrm{sh}}_j X_{ij}
-                + \sqrt{1 - \lambda} \textstyle\sum_j
-                    \gamma^{\mathrm{sep}}_{cj} X_{ij},
-                \quad E[\eta_{ci}^2] = 1, \\
-            \nu_{cj} &= \frac{s_j^2}{p}\,
-                    \big(\lambda + (1 - \lambda)\, k\, \mathbb 1[j \in S_c]\big),
-                \quad T_c = E[\eta_{ci}^2 \mid s, \{S_c\}]
-                    = \textstyle\sum_j \nu_{cj}, \\
-            W_{ci}^2 &= \begin{cases}
-                    1 & \texttt{het\_shape}\text{ is }\texttt{None}, \\
-                    (1 - \rho) + \rho\, \eta_{ci}^2 & \text{otherwise,}
-                \end{cases}
+            \eta_{ci} &= \begin{cases}
+                    \textstyle\sum_j \gamma^{\mathrm{sh}}_j X_{ij}
+                        & W \text{ scalar (same for every } c\text{)}, \\
+                    \sqrt\lambda \textstyle\sum_j \gamma^{\mathrm{sh}}_j X_{ij}
+                        + \sqrt{1 - \lambda} \textstyle\sum_j
+                        \gamma^{\mathrm{sep}}_{cj} X_{ij}
+                        & W \text{ vector},
+                \end{cases} \\
+            W_{ci}^2 &= (1 - \rho) + \rho\, \eta_{ci}^2,
                 \quad \rho \in [0, 1], \\
             \mu_{ci} &= \mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci}, \\
             Z_{ci} &\sim N\big(\mu_{ci},\, \sigma^2_{\mathrm{eps}}\, W_{ci}^2\big), \\
@@ -320,25 +324,20 @@ class Params(Module):
         \end{align}
 
     where a binary component thresholds its own latent :math:`Z_{ci}` at zero
-    (the branch is chosen per component :math:`c`; see `outcome_type`), so its
-    success probability is :math:`\Phi(\mu_{ci} / (\sigma_{\mathrm{eps}}
-    W_{ci}))`. Here :math:`\kappa_X = E[X_{ij}^4] = 9/5` is the kurtosis
-    of the predictors (`kurt_x`), so :math:`\kappa_X - 1 = 4/5`. The separate
-    quadratic pattern :math:`P^{\mathrm{sep}}_{cjj'}` is the same circular band
-    of half-width :math:`q / 2` as :math:`P^{\mathrm{sh}}`, but built on the
-    within-component ranks of the predictors owned by :math:`c` and wrapped at
-    :math:`|S_c|` (requiring :math:`q < \lfloor p/k \rfloor`); it is nonzero
-    only for :math:`j, j' \in S_c`.
+    (the branch is chosen per component :math:`c`), so its success probability
+    is :math:`\Phi(\mu_{ci} / (\sigma_{\mathrm{eps}} W_{ci}))`. Here
+    :math:`\kappa_X = E[X_{ij}^4] = 9/5` is the kurtosis of the predictors, so
+    :math:`\kappa_X - 1 = 4/5`.
 
-    The scales :math:`s_j` (`s`, shape :math:`\alpha` = `sparsity`) make the
-    predictors differ in importance (sparsity): each down- or up-weights
-    predictor :math:`j` in every term. Because they are normalized to
-    :math:`E[s_j^2] = 1` the linear budget is untouched, and the only sparsity
-    quantity entering the variances is :math:`\mu_4 = E[s_j^4] \ge 1` (equal to
-    1 iff the :math:`s_j` are constant). They are folded into the sampled
-    coefficients :math:`\beta` and :math:`A` directly, as written above. When
-    ``sparsity`` is ``None`` all scales are 1 (:math:`\mu_4 = 1`), recovering
-    the uniform-importance model.
+    The scales :math:`s_j` make the predictors differ in importance (sparsity):
+    each down- or up-weights predictor :math:`j` in every term. Because they
+    are normalized to :math:`E[s_j^2] = 1` the linear budget is untouched, and
+    the only sparsity quantity entering the variances is :math:`\mu_4 =
+    E[s_j^4] \ge 1` (equal to 1 iff the :math:`s_j` are constant). They are
+    folded into the sampled coefficients :math:`\beta`, :math:`A` and
+    :math:`\gamma` directly, as written above. In the limit :math:`\alpha \to
+    \infty` the scales concentrate at 1 (:math:`\mu_4 = 1`), recovering the
+    uniform-importance model.
 
     The coupling :math:`\lambda` interpolates between independent components
     (:math:`\lambda = 0`, each uses its own coefficients on its own predictors)
@@ -372,56 +371,105 @@ class Params(Module):
     :math:`\sigma^2_{\mathrm{lin}}, \sigma^2_{\mathrm{quad}},
     \sigma^2_{\mathrm{eps}}`, the interaction count :math:`q`, the coupling
     :math:`\lambda`, the sparsity shape :math:`\alpha`, the heteroskedasticity
-    :math:`\rho` and ``het_shape``, and ``outcome_type``; every other field is
-    sampled or derived from these.
+    :math:`\rho` and the scalar/vector form of :math:`W`, and the
+    per-component continuous/binary choice; every other quantity is sampled or
+    derived from these.
 
-    **Heteroskedasticity.** The knob :math:`\rho` (`het_strength`) tunes the
-    noise from homoskedastic (:math:`\rho = 0`, so :math:`W_{ci} \equiv 1`) to
-    maximally heterogeneous (:math:`\rho = 1`, so :math:`W_{ci}^2 = \eta_{ci}^2`);
-    it is inactive unless ``het_shape`` is set.
-
-    The projection :math:`\eta_{ci}` reuses the linear-mean construction (same
-    :math:`s`, partition and :math:`\lambda`) at unit coefficient budget, so
-    :math:`E[\eta_{ci}^2] = 1` and hence :math:`E[W_{ci}^2] = 1` *marginally*.
-    The noise budget :math:`\sigma^2_{\mathrm{eps}}` -- and with it all three
-    variance terms above -- is therefore preserved in expectation, with
-    :math:`\rho` the fraction of it carried by the heteroskedastic term. As
-    elsewhere in the model the moment is controlled only marginally: the realized
-    energy :math:`T_c = E[\eta_{ci}^2 \mid s, \{S_c\}] = \sum_j \nu_{cj}` wobbles
-    around 1, so each instance's expected noise
-    :math:`\sigma^2_{\mathrm{eps}}\,((1 - \rho) + \rho\, T_c)` wobbles around
-    :math:`\sigma^2_{\mathrm{eps}}` rather than being pinned to it. Per-instance
-    quantities like :math:`T_c` are recoverable from the generated data, so only
-    the marginal summary below is reported.
-
-    The fully marginal dispersion of the multiplier -- identical for every
+    **Heteroskedasticity.** The knob :math:`\rho` tunes the noise from
+    homoskedastic (:math:`\rho = 0`, so :math:`W_{ci} \equiv 1`) to maximally
+    heterogeneous (:math:`\rho = 1`, so :math:`W_{ci}^2 = \eta_{ci}^2`). The
+    fully marginal dispersion of the multiplier -- identical for every
     component, hence a single scalar -- is
 
     .. math::
+        :nowrap:
 
-        \operatorname{Var}[W_{ci}^2] = \rho^2 \Big( 2
-            + \frac{3 (\kappa_X \mu_4 - 1)\, \Lambda}{p}
-            + \frac{3 (1 - \lambda)^2\, r (k - r)}{p^2} \Big)
-        \quad (\texttt{var\_v}),
+        \begin{align}
+            \operatorname{Var}[W_{ci}^2] &= \rho^2 \Big( 2
+                + \frac{3 (\kappa_X \mu_4 - 1)\, \Lambda}{p}
+                + \frac{3 (1 - \lambda)^2\, r (k - r)}{p^2} \Big), \\
+            \Lambda &= \begin{cases}
+                    1 & W \text{ scalar (with } \lambda = 1\text{)}, \\
+                    \lambda (2 - \lambda) + (1 - \lambda)^2 k
+                        & W \text{ vector},
+                \end{cases} \\
+            r &= p \bmod k.
+        \end{align}
 
-    with :math:`\Lambda = 1` (``'scalar'``) or
-    :math:`\lambda (2 - \lambda) + (1 - \lambda)^2 k` (``'vector'``) and
-    :math:`r = p \bmod k`. The leading :math:`2 \rho^2` is the large-:math:`p`
-    Gaussian limit; the rest is the finite-:math:`p` excess from sparsity
-    (:math:`\mu_4`) and per-component concentration (:math:`\Lambda`, which is
-    :math:`k` at :math:`\lambda = 0`).
+    The leading :math:`2 \rho^2` is the large-:math:`p` Gaussian limit; the
+    rest is the finite-:math:`p` excess from sparsity (:math:`\mu_4`) and
+    per-component concentration (:math:`\Lambda`, which is :math:`k` at
+    :math:`\lambda = 0`).
 
-    The shape of :math:`W` (`error_scale`) follows ``het_shape``: ``'scalar'``
-    builds one :math:`W_i` (shape :math:`(n,)`) from :math:`\gamma^{\mathrm{sh}}`
-    alone (dropping :math:`\lambda` and the partition), scaling the whole outcome
-    vector, while ``'vector'`` (multivariate only) gives each component its own
-    :math:`W_{ci}` (shape :math:`(k, n)`).
-
-    For univariate outputs (``k is None``) the separate path and
-    :math:`\lambda` are dropped (``partition``, ``beta_separate``,
-    ``A_separate`` and ``lambda_`` are all ``None``) and :math:`\mu_i = \sum_j
+    Univariate outcomes are the :math:`k = 1`, :math:`\lambda = 1` special
+    case with the component axis dropped, so :math:`\mu_i = \sum_j
     \beta^{\mathrm{sh}}_j X_{ij} + \sum_{jj'} A^{\mathrm{sh}}_{jj'} X_{ij}
-    X_{ij'}`.
+    X_{ij'}`, and only the scalar :math:`W` is available.
+
+    The mathematical symbols and cases map to class attributes and `gen_data`
+    settings as follows:
+
+    .. list-table::
+        :header-rows: 1
+
+        * - Symbol / case
+          - Attribute / setting
+        * - :math:`s_j`
+          - `s`
+        * - :math:`\alpha`
+          - `sparsity` (``None`` for :math:`s_j \equiv 1`)
+        * - :math:`\mu_4`
+          - `mu_4_s`
+        * - :math:`\{S_c\}`
+          - `partition`
+        * - :math:`\beta^{\mathrm{sh}}`
+          - `beta_shared`
+        * - :math:`\beta^{\mathrm{sep}}`
+          - `beta_separate`
+        * - :math:`A^{\mathrm{sh}}`
+          - `A_shared`
+        * - :math:`A^{\mathrm{sep}}`
+          - `A_separate`
+        * - :math:`q`
+          - `q`
+        * - :math:`\lambda`
+          - `lambda_`
+        * - :math:`\sigma^2_{\mathrm{lin}}`
+          - `sigma2_lin`
+        * - :math:`\sigma^2_{\mathrm{quad}}`
+          - `sigma2_quad`
+        * - :math:`\sigma^2_{\mathrm{eps}}`
+          - `sigma2_eps`
+        * - :math:`\operatorname{Var}[E[Z_{ci} \mid \theta]]`
+          - `sigma2_mean`
+        * - :math:`E[\operatorname{Var}[Z_{ci} \mid \theta]]`
+          - `sigma2_pop`
+        * - :math:`\operatorname{Var}[Z_{ci}]`
+          - `sigma2_pri`
+        * - :math:`\gamma^{\mathrm{sh}}`
+          - `gamma_shared`
+        * - :math:`\gamma^{\mathrm{sep}}`
+          - `gamma_separate`
+        * - :math:`\rho`
+          - `het_strength`
+        * - :math:`\kappa_X`
+          - `kurt_x`
+        * - :math:`\operatorname{Var}[W_{ci}^2]`
+          - `var_v`
+        * - :math:`W_{ci}`
+          - `DGP.error_scale`
+        * - :math:`W` scalar
+          - ``het_shape='scalar'`` (`DGP.error_scale` of shape ``(n,)``)
+        * - :math:`W` vector
+          - ``het_shape='vector'``, multivariate only (`DGP.error_scale` of
+            shape ``(k, n)``)
+        * - :math:`W_{ci} \equiv 1` (:math:`\rho = 0`)
+          - ``het_shape=None`` (the :math:`W`-related attributes are ``None``)
+        * - :math:`c` continuous / binary
+          - `outcome_type`
+        * - univariate (:math:`k = 1`, :math:`\lambda = 1`)
+          - ``k=None`` in `gen_data` (`partition`, `beta_separate`,
+            `A_separate` and `lambda_` are ``None``)
     """
 
     partition: Bool[Array, 'k p'] | None

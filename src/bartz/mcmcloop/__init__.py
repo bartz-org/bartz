@@ -32,6 +32,8 @@ and `make_tqdm_callback`.
 
 from bartz.mcmcloop._callback import (
     PrintCallbackState,
+    StatsAccumulator,
+    StatsReport,
     TqdmCallbackState,
     make_print_callback,
     make_tqdm_callback,

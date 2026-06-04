@@ -636,7 +636,9 @@ def _sigma2_from_ols(
 
 @jit
 def _sigma2_from_cg(
-    x: Shaped[Array, 'p n'], y: Float32[Array, ' *k n'], maxiter: Integer[Array, '']
+    x: Shaped[Array, 'p n'],
+    y: Float32[Array, ' *k n'],
+    maxiter: int | Integer[Array, ''],
 ) -> Float32[Array, ' *k']:
     """Estimate the error variance using approximate OLS with cg for large-scale problems."""
     # center both variables, and rescale x. centering is equivalent to adding
@@ -664,7 +666,7 @@ def _sigma2_from_cg(
 def _cg_x_x_t(
     x: Shaped[Array, 'p n'] | Shaped[Array, 'n p'],
     rhs: Float32[Array, ' p *k'] | Float32[Array, ' n *k'],
-    maxiter: Integer[Array, ''],
+    maxiter: int | Integer[Array, ''],
 ) -> Float32[Array, ' p *k'] | Float32[Array, ' n *k']:
     """Solve (XX' + eps I) u = rhs."""
     # check x is transposed to be a short matrix, and other properties

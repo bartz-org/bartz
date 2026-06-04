@@ -448,14 +448,16 @@ class Bart(Module):
         outcome_type, binary_mask = _check_type_settings(y_train, outcome_type, w)
 
         # process sparsity settings
-        theta, a, b, rho = _process_sparsity_settings(x_train, sparse, theta, a, b, rho)
+        sparse_theta, sparse_a, sparse_b, sparse_rho = _process_sparsity_settings(
+            x_train, sparse, theta, a, b, rho
+        )
 
         # process "standardization" settings
         offset = _process_offset_settings(y_train, binary_mask, offset)
         leaf_prior_cov_inv = _process_leaf_variance_settings(
             y_train, binary_mask, k, num_trees, tau_num
         )
-        error_cov_df, error_cov_scale, sigest = _process_error_variance_settings(
+        error_cov_df, error_cov_scale, self.sigest = _process_error_variance_settings(
             x_train,
             y_train,
             outcome_type,
@@ -495,10 +497,10 @@ class Bart(Module):
             num_trees,
             init_kw,
             rm_const,
-            theta,
-            a,
-            b,
-            rho,
+            sparse_theta,
+            sparse_a,
+            sparse_b,
+            sparse_rho,
             varprob,
             num_chains,
             num_chain_devices,
@@ -518,9 +520,6 @@ class Bart(Module):
             mcmc_key,
             run_mcmc_kw,
         )
-
-        # set public attributes
-        self.sigest = sigest
 
         # set private attributes
         self._main_trace = result.main_trace
@@ -845,6 +844,7 @@ class Bart(Module):
             )
             raise ValueError(msg)
         w_test = _process_response_input(w)
+        assert self._w is not None  # implied by needs_weights
         if w_test.ndim != self._w.ndim:
             msg = (
                 f'`w` shape mismatch with training weights: got '
@@ -1242,7 +1242,7 @@ def _process_error_variance_settings(
     if lambda_ is None:
         # estimate sigest²
         sigest2 = _estimate_sigest2(x_train, y_train, sigest, binary_mask)
-        sigest = jnp.sqrt(sigest2)
+        sigest_out = jnp.sqrt(sigest2)
 
         # lambda_ from sigest²
         alpha = sigdf / 2
@@ -1256,7 +1256,7 @@ def _process_error_variance_settings(
 
     else:
         lambda_ = jnp.where(binary_mask, 0.0, lambda_)
-        sigest = None
+        sigest_out = None
 
     # params written in multivariate form
     if y_train.ndim == 2:
@@ -1268,7 +1268,7 @@ def _process_error_variance_settings(
         error_cov_df = jnp.asarray(sigdf)
         error_cov_scale = jnp.asarray(sigdf * lambda_)
 
-    return error_cov_df, error_cov_scale, sigest
+    return error_cov_df, error_cov_scale, sigest_out
 
 
 def _estimate_sigest2(
@@ -1574,11 +1574,13 @@ def compare_resid(
 
     if state.binary_indices is not None:
         # mixed binary-continuous: z has only binary rows, y has all rows
+        assert y is not None
         ref = jnp.broadcast_to(y, resid1.shape)
         ref = ref.at[..., state.binary_indices, :].set(z)
     elif z is not None:
         ref = z
     else:
+        assert y is not None
         ref = y
     resid2 = ref - (trees + state.offset[..., None])
 

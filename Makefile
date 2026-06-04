@@ -157,12 +157,24 @@ SELECT = $(if $(GROUP),$(GROUP_$(GROUP)))
 # (xdist off) because the small runners OOM under parallel test execution.
 NPROC ?= 2
 
+# On GPU, parallel workers overlap compilation (which dominates the run time),
+# but the processes share the GPU memory and OOM on small cards, so turn off
+# xdist when the GPU has less total memory than this (MiB). An explicit NPROC
+# (command line or environment) takes precedence over the detection.
+GPU_MIN_MEM = 15000
+GPU_MEM = $(shell nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1)
+ifeq ($(origin NPROC),file)
+GPU_NPROC = $(shell [ "$(GPU_MEM)" -ge $(GPU_MIN_MEM) ] 2>/dev/null && echo $(NPROC) || echo 0)
+else
+GPU_NPROC = $(NPROC)
+endif
+
 TESTS_VARS = COVERAGE_FILE=.coverage.$@$(if $(GROUP),-$(GROUP))
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
 TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=$(NPROC) $(SELECT)
 TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_PREALLOCATE=false
-TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=$(NPROC) $(SELECT)
+TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=$(GPU_NPROC) $(SELECT)
 
 .PHONY: tests
 tests:

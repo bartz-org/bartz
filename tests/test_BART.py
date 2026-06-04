@@ -931,8 +931,18 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
     )
 
     # check the likelihood ratio is always 1
-    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
-    assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
+    assert_close_matrices(
+        bart._burnin_trace.log_likelihood,
+        jnp.zeros_like(bart._burnin_trace.log_likelihood),
+        atol=1e-5,
+        reduce_rank=True,
+    )
+    assert_close_matrices(
+        bart._main_trace.log_likelihood,
+        jnp.zeros_like(bart._main_trace.log_likelihood),
+        atol=1e-5,
+        reduce_rank=True,
+    )
 
 
 def test_two_datapoints(kw: dict[str, Any]) -> None:
@@ -1118,8 +1128,18 @@ def run_bart_like_prior(
     bart = mc_gbart(**kw)
 
     with subtests.test('likelihood ratio = 1'):
-        assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
-        assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
+        assert_close_matrices(
+            bart._burnin_trace.log_likelihood,
+            jnp.zeros_like(bart._burnin_trace.log_likelihood),
+            atol=1e-5,
+            reduce_rank=True,
+        )
+        assert_close_matrices(
+            bart._main_trace.log_likelihood,
+            jnp.zeros_like(bart._main_trace.log_likelihood),
+            atol=1e-5,
+            reduce_rank=True,
+        )
 
     return bart
 

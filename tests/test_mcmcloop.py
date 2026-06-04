@@ -118,6 +118,20 @@ def cat_traces(
     return tree.map(cat, trace_a, trace_b, sample_axes)
 
 
+def assert_trace_close(actual: Array, desired: Array) -> None:
+    """Compare state/trace leaves, tolerating GPU floating-point rounding.
+
+    Integer and boolean leaves must match exactly; floating-point leaves are
+    compared up to a relative tolerance, because the order of floating-point
+    reductions on GPU is not bit-reproducible across different iteration
+    chunkings.
+    """
+    if jnp.issubdtype(actual.dtype, jnp.floating):
+        assert_close_matrices(actual, desired, rtol=1e-4, reduce_rank=True)
+    else:
+        assert_array_equal(actual, desired)
+
+
 class TestRunMcmc:
     """Test `mcmcloop.run_mcmc`."""
 
@@ -313,8 +327,8 @@ class TestRunMcmc:
             )
             final_split, _, main_b = run_mcmc(key, mid, 3, n_burn=0, n_skip=1)
 
-        tree.map(assert_array_equal, final_single, final_split)
-        tree.map(assert_array_equal, main_single, cat_traces(main_a, main_b))
+        tree.map(assert_trace_close, final_single, final_split)
+        tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
 
     def test_inner_loop_length_invariance(
         self, keys: split, initial_state: State
@@ -334,9 +348,9 @@ class TestRunMcmc:
                 inner_loop_length=1,
             )
 
-        tree.map(assert_array_equal, final_whole, final_chunked)
-        tree.map(assert_array_equal, main_whole, main_chunked)
-        tree.map(assert_array_equal, burnin_whole, burnin_chunked)
+        tree.map(assert_trace_close, final_whole, final_chunked)
+        tree.map(assert_trace_close, main_whole, main_chunked)
+        tree.map(assert_trace_close, burnin_whole, burnin_chunked)
 
 
 # shared test-point count, reused across cases to hit the jax compilation cache

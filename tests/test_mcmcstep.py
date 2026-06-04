@@ -35,10 +35,25 @@ import numpy
 import pytest
 from beartype import beartype
 from equinox import Module
-from jax import debug_key_reuse, lax, make_mesh, random, tree, vmap
+from jax import (
+    debug_key_reuse,
+    device_put,
+    lax,
+    make_mesh,
+    random,
+    shard_map,
+    tree,
+    vmap,
+)
 from jax import numpy as jnp
 from jax.ops import segment_sum
-from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
+from jax.sharding import (
+    AxisType,
+    Mesh,
+    NamedSharding,
+    PartitionSpec,
+    SingleDeviceSharding,
+)
 from jax.tree_util import KeyPath, keystr
 from jax.typing import DTypeLike
 from jaxtyping import (
@@ -89,6 +104,7 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
+from bartz.mcmcstep._reduction import _resolve_pallas_backend
 from bartz.mcmcstep._state import Forest, StepConfig, _search_divisor
 from bartz.mcmcstep._step import (
     PrecsScalar,
@@ -727,6 +743,71 @@ class TestReduction:
                     atol=1e-6,
                     reduce_rank=True,
                 )
+
+    def test_data_sharded(self, keys: split, subtests: SubTests) -> None:
+        """`data_sharded=True` sums the per-shard reductions across data shards."""
+        num_shards = min(4, get_device_count())
+        if num_shards < 2:
+            pytest.skip('need at least 2 devices for the data axis')
+
+        n, size = 512, 8
+        indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
+        values = random.normal(keys.pop(), (n,))
+        expected_resid = self.reference(
+            values, indices, size=size, dtype=jnp.float32, data_sharded=False
+        )
+        expected_count = self.reference(
+            1, indices, size=size, dtype=jnp.uint32, data_sharded=False
+        )
+
+        mesh = make_mesh(
+            (num_shards,), ('data',), devices=get_default_devices()[:num_shards]
+        )
+        data = PartitionSpec('data')
+        replicated = PartitionSpec()
+        values = device_put(values, NamedSharding(mesh, data))
+        indices = device_put(indices, NamedSharding(mesh, data))
+
+        for config in self.configs:
+            with subtests.test(config=config):
+                run = partial(
+                    config._reduce, size=size, dtype=jnp.float32, data_sharded=True
+                )
+                sharded_run = shard_map(
+                    run, mesh=mesh, in_specs=(data, data), out_specs=replicated
+                )
+                if isinstance(config, PallasReduction):
+                    with pytest.raises(NotImplementedError):
+                        sharded_run(values, indices)
+                else:
+                    got = sharded_run(values, indices)
+                    assert_close_matrices(
+                        got, expected_resid, rtol=1e-5, atol=1e-6, reduce_rank=True
+                    )
+
+                    run = partial(
+                        config._reduce,
+                        1,
+                        size=size,
+                        dtype=jnp.uint32,
+                        data_sharded=True,
+                    )
+                    got = shard_map(
+                        run, mesh=mesh, in_specs=(data,), out_specs=replicated
+                    )(indices)
+                    assert_array_equal(got, expected_count, strict=True)
+
+    def test_resolve_pallas_backend(self) -> None:
+        """Only the 'triton' backend may yield compiler params."""
+        assert _resolve_pallas_backend('cpu') is None
+        assert _resolve_pallas_backend('default') is None
+        params = _resolve_pallas_backend('triton')
+        # WORKAROUND(jax<0.7.0): drop the fallback branch when the jax floor
+        # reaches 0.7
+        if jax.__version_info__ < (0, 7, 0):
+            assert params is None
+        else:
+            assert params is not None
 
 
 def vmap_randint_masked(

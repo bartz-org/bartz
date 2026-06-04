@@ -474,10 +474,3 @@ def _pallas_scatter_add(
     if scalar:
         return out.reshape(size)
     return out.reshape(*batch_shape, size)
-
-
-# default reduction configs for `init`; the per-reduction gpu batch targets were
-# tuned on an A4000
-DEFAULT_RESID_REDUCTION = BatchedReduction(auto_gpu_target=1024)
-DEFAULT_COUNT_REDUCTION = BatchedReduction(auto_gpu_target=2048)
-DEFAULT_PREC_REDUCTION = BatchedReduction(auto_gpu_target=1024)

@@ -26,6 +26,7 @@
 
 from collections.abc import Mapping
 from functools import partial
+from operator import attrgetter
 from types import MappingProxyType
 
 import pytest
@@ -56,6 +57,36 @@ REPS: int = 10_000  # number of datasets
 SPARSITY: float = 2.0  # Gamma shape for the sparse-DGP fixture (mu4 = 10 / 3)
 HIGH_SPARSITY: float = 1e19  # largest before sparsity (sparsity + 1) overflows float32
 
+# A substantial heteroskedasticity knob to exercise the het paths; the bounded
+# quadratic multiplier keeps every marginal-variance estimator well-behaved.
+HET_STRENGTH: float = 0.7
+
+
+def assert_mean_z(
+    samples: Float[Array, 'reps ...'],
+    expected: Float[Array, ''] | float,
+    se: Float[Array, '...'] | float | None = None,
+) -> None:
+    """Check via a z-test that the mean of `samples` along axis 0 is `expected`.
+
+    The standard error is estimated from the samples unless `se` is given.
+    """
+    n_reps, *_ = samples.shape
+    if se is None:
+        se = jnp.std(samples, axis=0) / jnp.sqrt(n_reps)
+    z_scores = jnp.abs((jnp.mean(samples, axis=0) - expected) / se)
+    assert_array_less(z_scores, SIGMA_THRESHOLD)
+
+
+def assert_uncorrelated_z(
+    a: Float[Array, 'reps ...'], b: Float[Array, 'reps ...']
+) -> None:
+    """Check via a z-test that `a` and `b` have zero covariance along axis 0."""
+    n_reps, *_ = a.shape
+    cov = jnp.mean((a - jnp.mean(a, axis=0)) * (b - jnp.mean(b, axis=0)), axis=0)
+    se = jnp.std(a, axis=0) * jnp.std(b, axis=0) / jnp.sqrt(n_reps)
+    assert_array_less(jnp.abs(cov / se), SIGMA_THRESHOLD)
+
 
 @partial(jit, static_argnames=('het_shape',))
 def generate_dgps(
@@ -81,33 +112,17 @@ def generate_dgps(
 def dgps(keys: split, request: pytest.FixtureRequest) -> DGP:
     """Generate DGP instances using vmap and jit.
 
-    Indirectly parametrizable either by `sparsity` (default `None`, i.e. dense)
-    or by a mapping with any of ``sparsity``, ``lambda_``, ``het_strength``
-    and ``het_shape`` to also exercise heteroskedasticity.
+    Indirectly parametrizable by a mapping with any of ``lambda_``,
+    ``sparsity``, ``het_strength`` and ``het_shape``.
     """
-    param = getattr(request, 'param', None)
-    if isinstance(param, Mapping):
-        return generate_dgps(
-            keys.pop(REPS),
-            param.get('lambda_', 0.5),
-            param.get('sparsity'),
-            param.get('het_strength'),
-            param.get('het_shape'),
-        )
-    else:
-        return generate_dgps(keys.pop(REPS), 0.5, param)
-
-
-@pytest.fixture
-def dgps_lambda_zero(keys: split) -> DGP:
-    """Generate DGP instances with lambda_=0."""
-    return generate_dgps(keys.pop(REPS), 0.0, None)
-
-
-@pytest.fixture
-def dgps_lambda_one(keys: split) -> DGP:
-    """Generate DGP instances with lambda_=1."""
-    return generate_dgps(keys.pop(REPS), 1.0, None)
+    param: Mapping = getattr(request, 'param', None) or {}
+    return generate_dgps(
+        keys.pop(REPS),
+        param.get('lambda_', 0.5),
+        param.get('sparsity'),
+        param.get('het_strength'),
+        param.get('het_shape'),
+    )
 
 
 def test_shapes_and_dtypes(keys: split) -> None:
@@ -115,86 +130,55 @@ def test_shapes_and_dtypes(keys: split) -> None:
     dgp = gen_data(keys.pop(), lambda_=0.5, **KWARGS)
     n, p, k = KWARGS['n'], KWARGS['p'], KWARGS['k']
 
-    # Test shapes
-    assert dgp.x.shape == (p, n)
-    assert dgp.y.shape == (k, n)
-    assert dgp.params.partition.shape == (k, p)
-    assert dgp.params.beta_shared.shape == (p,)
-    assert dgp.params.beta_separate.shape == (k, p)
-    assert dgp.mulin_shared.shape == (n,)
-    assert dgp.mulin_separate.shape == (k, n)
-    assert dgp.mulin.shape == (k, n)
-    assert dgp.params.A_shared.shape == (p, p)
-    assert dgp.params.A_separate.shape == (k, p, p)
-    assert dgp.params.s.shape == (p,)
-    assert dgp.muquad_shared.shape == (n,)
-    assert dgp.muquad_separate.shape == (k, n)
-    assert dgp.muquad.shape == (k, n)
-    assert dgp.mu.shape == (k, n)
-    assert dgp.params.q.shape == ()
-    assert dgp.params.lambda_.shape == ()
-    assert dgp.params.sigma2_lin.shape == ()
-    assert dgp.params.sigma2_quad.shape == ()
-    assert dgp.params.sigma2_eps.shape == ()
+    floating_fields = {
+        'x': (p, n),
+        'y': (k, n),
+        'params.beta_shared': (p,),
+        'params.beta_separate': (k, p),
+        'mulin_shared': (n,),
+        'mulin_separate': (k, n),
+        'mulin': (k, n),
+        'params.A_shared': (p, p),
+        'params.A_separate': (k, p, p),
+        'params.s': (p,),
+        'muquad_shared': (n,),
+        'muquad_separate': (k, n),
+        'muquad': (k, n),
+        'mu': (k, n),
+        'params.lambda_': (),
+        'params.sigma2_lin': (),
+        'params.sigma2_quad': (),
+        'params.sigma2_eps': (),
+    }
+    for name, shape in floating_fields.items():
+        field = attrgetter(name)(dgp)
+        assert field.shape == shape, name
+        assert jnp.issubdtype(field.dtype, jnp.floating), name
 
-    # Test dtypes
-    assert jnp.issubdtype(dgp.x.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.y.dtype, jnp.floating)
+    assert dgp.params.partition.shape == (k, p)
     assert dgp.params.partition.dtype == jnp.bool_
-    assert jnp.issubdtype(dgp.params.beta_shared.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.params.beta_separate.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.mulin_shared.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.mulin_separate.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.mulin.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.params.A_shared.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.params.A_separate.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.params.s.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.muquad_shared.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.muquad_separate.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.muquad.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.mu.dtype, jnp.floating)
+    assert dgp.params.q.shape == ()
     assert jnp.issubdtype(dgp.params.q.dtype, jnp.integer)
-    assert jnp.issubdtype(dgp.params.lambda_.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.params.sigma2_lin.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.params.sigma2_quad.dtype, jnp.floating)
-    assert jnp.issubdtype(dgp.params.sigma2_eps.dtype, jnp.floating)
 
 
 class TestGenerateX:
-    """Test the _generate_x method."""
+    """Test the generate_x function."""
 
     def test_x_mean(self, dgps: DGP) -> None:
         """Test that x has mean close to 0."""
-        x_samples = dgps.x  # Shape: (REPS, P, N)
-        n_reps = x_samples.shape[0]
-
-        # Compute mean and std of mean for each element
-        means = jnp.mean(x_samples, axis=0)  # Shape: (P, N)
-        stds_of_mean = jnp.std(x_samples, axis=0) / jnp.sqrt(n_reps)  # Shape: (P, N)
-
-        # All means should be within SIGMA_THRESHOLD standard deviations of 0
-        z_scores = jnp.abs(means / stds_of_mean)
-        assert_array_less(z_scores, SIGMA_THRESHOLD)
+        assert_mean_z(dgps.x, 0.0)
 
     def test_x_variance(self, dgps: DGP) -> None:
         """Test that x has variance close to 1."""
-        x_samples = dgps.x  # Shape: (REPS, P, N)
-        n_reps = x_samples.shape[0]
-
-        # Compute variance for each element
-        var = jnp.var(x_samples, axis=0)  # Shape: (P, N)
-        expected_var = 1.0
-
-        # Standard deviation of sample variance for each element
-        std_of_var = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
-
-        # All variances should be within SIGMA_THRESHOLD standard deviations of 1
-        z_scores = jnp.abs((var - expected_var) / std_of_var)
+        n_reps, *_ = dgps.x.shape
+        var = jnp.var(dgps.x, axis=0)  # Shape: (P, N)
+        std_of_var = jnp.sqrt(2 / (n_reps - 1))  # Gaussian approx at variance 1
+        z_scores = jnp.abs((var - 1.0) / std_of_var)
         assert_array_less(z_scores, SIGMA_THRESHOLD)
 
 
 class TestGeneratePartition:
-    """Test the _generate_partition method."""
+    """Test the generate_partition function."""
 
     def test_partition_coverage(self, dgps: DGP) -> None:
         """Test that each predictor is assigned to exactly one component."""
@@ -219,17 +203,9 @@ class TestGeneratePartition:
     def test_partition_balance(self, dgps: DGP) -> None:
         """Test that predictors are roughly balanced across components."""
         partitions = dgps.params.partition  # Shape: (REPS, K, P)
-        n_reps, k, p = partitions.shape
-
+        _, k, p = partitions.shape
         counts = jnp.sum(partitions, axis=2)  # Shape: (REPS, K)
-
-        # Mean count per component should be P/K
-        expected_mean = p / k
-        means = jnp.mean(counts, axis=0)  # Shape: (K,)
-        stds_of_mean = jnp.std(counts, axis=0) / jnp.sqrt(n_reps)  # Shape: (K,)
-
-        z_scores = jnp.abs((means - expected_mean) / stds_of_mean)
-        assert_array_less(z_scores, SIGMA_THRESHOLD)
+        assert_mean_z(counts, p / k)
 
 
 def s_moment(sparsity: float, power: int) -> float:
@@ -257,26 +233,22 @@ class TestGenerateS:
 
     def test_shape_and_dtype(self, keys: split) -> None:
         """Scales have shape (p,) and a floating dtype."""
-        s = generate_s(keys.pop(), 7, self.ALPHA_S)
-        assert s.shape == (7,)
+        s = generate_s(keys.pop(), 10, self.ALPHA_S)
+        assert s.shape == (10,)
         assert jnp.issubdtype(s.dtype, jnp.floating)
 
     def test_second_moment(self, keys: split) -> None:
         """The scales are normalized to ``E[s ** 2] == 1``."""
         s2 = generate_s(keys.pop(), self.N, self.ALPHA_S) ** 2
         var_s2 = s_moment(self.ALPHA_S, 4) - 1.0  # Var[s^2] = E[s^4] - E[s^2]^2
-        std_of_mean = jnp.sqrt(var_s2 / self.N)
-        z = jnp.abs((jnp.mean(s2) - 1.0) / std_of_mean)
-        assert_array_less(z, SIGMA_THRESHOLD)
+        assert_mean_z(s2, 1.0, se=jnp.sqrt(var_s2 / self.N))
 
     def test_fourth_moment(self, keys: split) -> None:
         """``E[s ** 4]`` matches the analytic ``mu4`` used in the normalizers."""
         s4 = generate_s(keys.pop(), self.N, self.ALPHA_S) ** 4
         mu4 = s_moment(self.ALPHA_S, 4)
         var_s4 = s_moment(self.ALPHA_S, 8) - mu4**2
-        std_of_mean = jnp.sqrt(var_s4 / self.N)
-        z = jnp.abs((jnp.mean(s4) - mu4) / std_of_mean)
-        assert_array_less(z, SIGMA_THRESHOLD)
+        assert_mean_z(s4, mu4, se=jnp.sqrt(var_s4 / self.N))
 
     def test_dispersion_increases_with_sparsity(self, keys: split) -> None:
         """Smaller `sparsity` spreads the importances out more (larger Var[s^2])."""
@@ -300,55 +272,14 @@ def test_high_sparsity_matches_none(keys: split) -> None:
     assert_close_matrices(high.y, none.y, rtol=1e-5)
 
 
-class TestGenerateBetaShared:
-    """Test the _generate_beta_shared method."""
-
-    def test_beta_shared_mean(self, dgps: DGP) -> None:
-        """Test that beta_shared has mean close to 0."""
-        beta_samples = dgps.params.beta_shared  # Shape: (REPS, P)
-        n_reps = beta_samples.shape[0]
-
-        means = jnp.mean(beta_samples, axis=0)  # Shape: (P,)
-        stds_of_mean = jnp.std(beta_samples, axis=0) / jnp.sqrt(n_reps)  # Shape: (P,)
-
-        z_scores = jnp.abs(means / stds_of_mean)
-        assert_array_less(z_scores, SIGMA_THRESHOLD)
+def test_beta_shared_mean(dgps: DGP) -> None:
+    """Test that beta_shared has mean close to 0."""
+    assert_mean_z(dgps.params.beta_shared, 0.0)
 
 
-class TestGenerateBetaSeparate:
-    """Test the _generate_beta_separate method."""
-
-    def test_beta_separate_mean(self, dgps: DGP) -> None:
-        """Test that beta_separate has mean close to 0."""
-        beta_samples = dgps.params.beta_separate  # Shape: (REPS, K, P)
-        n_reps = beta_samples.shape[0]
-
-        means = jnp.mean(beta_samples, axis=0)  # Shape: (K, P)
-        stds_of_mean = jnp.std(beta_samples, axis=0) / jnp.sqrt(n_reps)  # Shape: (K, P)
-
-        z_scores = jnp.abs(means / stds_of_mean)
-        assert_array_less(z_scores, SIGMA_THRESHOLD)
-
-    def test_beta_separate_independence(self, dgps: DGP) -> None:
-        """Test that rows of beta_separate are independent."""
-        beta_samples = dgps.params.beta_separate  # Shape: (REPS, K, P)
-        n_reps = beta_samples.shape[0]
-
-        beta0 = beta_samples[:, 0, :]  # Shape: (REPS, P)
-        beta1 = beta_samples[:, 1, :]  # Shape: (REPS, P)
-
-        # Compute covariance for each predictor position
-        mean0 = jnp.mean(beta0, axis=0)  # Shape: (P,)
-        mean1 = jnp.mean(beta1, axis=0)  # Shape: (P,)
-        cov = jnp.mean((beta0 - mean0) * (beta1 - mean1), axis=0)  # Shape: (P,)
-
-        # Standard deviation of covariance estimate
-        std0 = jnp.std(beta0, axis=0)
-        std1 = jnp.std(beta1, axis=0)
-        std_of_cov = (std0 * std1) / jnp.sqrt(n_reps)
-
-        z_scores = jnp.abs(cov / std_of_cov)
-        assert_array_less(z_scores, SIGMA_THRESHOLD)
+def test_beta_separate_mean(dgps: DGP) -> None:
+    """Test that beta_separate has mean close to 0."""
+    assert_mean_z(dgps.params.beta_separate, 0.0)
 
 
 WHICH_PARAMS = (
@@ -362,52 +293,50 @@ WHICH_PARAMS = (
     'y',
 )
 
-# A substantial heteroskedasticity knob to exercise the het paths; the bounded
-# quadratic multiplier keeps every marginal-variance estimator below well-behaved.
-HET_STRENGTH: float = 0.7
-
-# DGP configurations for the marginal-variance tests: homoskedastic (dense and
-# sparse) plus scalar and vector heteroskedasticity, which must leave every
-# marginal variance unchanged since ``E[error_scale ** 2] == 1`` marginally.
+# Heteroskedastic DGP configurations: scalar het on the dense DGP and vector
+# het on the sparse one, covering the het x sparsity interaction without
+# additional `generate_dgps` compilations.
 HET_DGPS = (
     {'het_shape': 'scalar', 'het_strength': HET_STRENGTH},
-    {'het_shape': 'vector', 'het_strength': HET_STRENGTH},
+    {'het_shape': 'vector', 'het_strength': HET_STRENGTH, 'sparsity': SPARSITY},
 )
-HET_DGPS_IDS = ('het_scalar', 'het_vector')
-VARIANCE_DGPS = (None, SPARSITY, *HET_DGPS)
-VARIANCE_DGPS_IDS = ('dense', 'sparse', *HET_DGPS_IDS)
+HET_DGPS_IDS = ('het_scalar', 'het_vector_sparse')
+
+# Cases for the marginal-variance tests: homoskedastic (dense and sparse) over
+# every field, plus the heteroskedastic DGPs, which must leave the ``y`` budget
+# unchanged since ``E[error_scale ** 2] == 1`` marginally. Het does not enter
+# the latent mean fields at all (checked exactly by
+# `test_stream_invariance_with_homoskedastic`), so only ``y`` is tested there.
+VARIANCE_CASES = tuple(
+    pytest.param(dgp, which, id=f'{which}-{dgp_id}')
+    for dgp, dgp_id, whiches in (
+        ({}, 'dense', WHICH_PARAMS),
+        ({'sparsity': SPARSITY}, 'sparse', WHICH_PARAMS),
+        *((d, i, ('y',)) for d, i in zip(HET_DGPS, HET_DGPS_IDS, strict=True)),
+    )
+    for which in whiches
+)
 
 
-def expected_pop_var(params: Params, which: str) -> Float[Array, ' REPS']:
-    """Return the expected population variance of DGP attribute `which`."""
+def expected_variance(
+    params: Params, which: str, *, prior: bool
+) -> Float[Array, ' REPS']:
+    """Return the prior (marginal) or expected population variance of `which`."""
     if which.startswith('mulin'):
         return params.sigma2_lin
     elif which.startswith('muquad'):
-        return params.sigma2_quad
+        quad = params.sigma2_quad
+        return quad + params.sigma2_mean if prior else quad
     elif which == 'mu':
-        return params.sigma2_pop - params.sigma2_eps
+        total = params.sigma2_pri if prior else params.sigma2_pop
+        return total - params.sigma2_eps
     elif which == 'y':
-        return params.sigma2_pop
+        return params.sigma2_pri if prior else params.sigma2_pop
     else:  # pragma: no cover
         raise KeyError(which)
 
 
-def expected_prior_var(params: Params, which: str) -> Float[Array, ' REPS']:
-    """Return the marginal prior variance of DGP attribute `which`."""
-    if which.startswith('mulin'):
-        return params.sigma2_lin
-    elif which.startswith('muquad'):
-        return params.sigma2_quad + params.sigma2_mean
-    elif which == 'mu':
-        return params.sigma2_pri - params.sigma2_eps
-    elif which == 'y':
-        return params.sigma2_pri
-    else:  # pragma: no cover
-        raise KeyError(which)
-
-
-@pytest.mark.parametrize('dgps', VARIANCE_DGPS, indirect=True, ids=VARIANCE_DGPS_IDS)
-@pytest.mark.parametrize('which', WHICH_PARAMS)
+@pytest.mark.parametrize(('dgps', 'which'), VARIANCE_CASES, indirect=['dgps'])
 def test_outcome_prior_variance(dgps: DGP, which: str) -> None:
     """Test that latent mean and outcome have the expected marginal variance.
 
@@ -418,10 +347,10 @@ def test_outcome_prior_variance(dgps: DGP, which: str) -> None:
     Gaussian ``2 sigma^4`` (which would over-reject).
     """
     samples = getattr(dgps, which)  # Shape: (REPS, K?, N)
-    n_reps = samples.shape[0]
+    n_reps, *_ = samples.shape
 
     var = jnp.var(samples, axis=0)  # Shape: (K?, N)
-    expected_var = expected_prior_var(dgps.params, which)[0].item()
+    expected_var = expected_variance(dgps.params, which, prior=True)[0].item()
     light_tailed = dgps.params.sparsity is None and dgps.params.het_shape is None
     if light_tailed:
         std_of_var = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
@@ -433,8 +362,7 @@ def test_outcome_prior_variance(dgps: DGP, which: str) -> None:
     assert_array_less(z_scores, SIGMA_THRESHOLD)
 
 
-@pytest.mark.parametrize('dgps', VARIANCE_DGPS, indirect=True, ids=VARIANCE_DGPS_IDS)
-@pytest.mark.parametrize('which', WHICH_PARAMS)
+@pytest.mark.parametrize(('dgps', 'which'), VARIANCE_CASES, indirect=['dgps'])
 def test_outcome_pop_variance(dgps: DGP, which: str) -> None:
     """Test the expected population variance is on target.
 
@@ -444,52 +372,31 @@ def test_outcome_pop_variance(dgps: DGP, which: str) -> None:
     empirically rather than from the Gaussian ``2 sigma^4``.
     """
     samples = getattr(dgps, which)  # Shape: (REPS, K?, N)
-    n_reps = samples.shape[0]
+    n_reps, *_ = samples.shape
 
     per_var = jnp.var(samples, axis=-1, ddof=1)  # Shape: (REPS, K?)
-    var = jnp.mean(per_var, axis=0)  # Shape: (K?,)
-    expected_var = expected_pop_var(dgps.params, which)[0].item()
+    expected_var = expected_variance(dgps.params, which, prior=False)[0].item()
     if dgps.params.het_shape is None:
-        std_of_var = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
+        se = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
     else:
-        std_of_var = jnp.std(per_var, axis=0) / jnp.sqrt(n_reps)
-
-    z_scores = jnp.abs((var - expected_var) / std_of_var)
-    assert_array_less(z_scores, SIGMA_THRESHOLD)
+        se = None  # heavier-tailed per-dataset variances: estimate the spread
+    assert_mean_z(per_var, expected_var, se=se)
 
 
 @pytest.mark.parametrize('dgps', HET_DGPS, indirect=True, ids=HET_DGPS_IDS)
-def test_marginal_noise_variance_is_one(dgps: DGP) -> None:
-    """The noise multiplier has unit mean marginally: ``E[error_scale ** 2] == 1``.
+def test_error_scale_moments(dgps: DGP) -> None:
+    """The noise multiplier has ``E[W ** 2] == 1`` and ``Var[W ** 2] == var_v``.
 
-    This is the marginal relationship underlying the ``y`` cases of
+    The unit mean is the marginal relationship underlying the ``y`` cases of
     `test_outcome_pop_variance` / `test_outcome_prior_variance`: the het
-    normalization is marginal, not per-instance, so the noise budget is preserved
-    only in expectation over datasets (each dataset's noise wobbles around it).
+    normalization is marginal, not per-instance, so the noise budget is
+    preserved only in expectation over datasets. The dispersion matches the
+    closed-form ``var_v``, which is identical across components, so the
+    per-component estimates are compared to the single scalar.
     """
-    per_dataset = jnp.mean(dgps.error_scale**2, axis=-1)  # (REPS, K?)
-    mean = jnp.mean(per_dataset, axis=0)
-    se = jnp.std(per_dataset, axis=0) / jnp.sqrt(REPS)
-    assert_array_less(jnp.abs((mean - 1.0) / se), SIGMA_THRESHOLD)
-
-
-@pytest.mark.parametrize('het_shape', ['scalar', 'vector'])
-@pytest.mark.parametrize('sparsity', [None, SPARSITY], ids=['dense', 'sparse'])
-def test_var_v_is_marginal_multiplier_variance(
-    keys: split, het_shape: str, sparsity: float | None
-) -> None:
-    """``var_v`` is the fully marginal ``Var[error_scale ** 2] = E[(W ** 2 - 1) ** 2]``.
-
-    Pooled over the whole run, and (for vector het) identical across components,
-    so the per-component estimate is compared to the single scalar ``var_v``.
-    """
-    dgps = generate_dgps(keys.pop(REPS), 0.5, sparsity, HET_STRENGTH, het_shape)
-    centered_sq = (dgps.error_scale**2 - 1.0) ** 2  # (REPS, K?, N), mean is var_v
-    per_dataset = jnp.mean(centered_sq, axis=-1)  # (REPS, K?)
-    estimate = jnp.mean(per_dataset, axis=0)  # (K?,) or ()
-    se = jnp.std(per_dataset, axis=0) / jnp.sqrt(REPS)
-    var_v = dgps.params.var_v[0]  # identical across datasets (hyperparameter-set)
-    assert_array_less(jnp.abs((estimate - var_v) / se), SIGMA_THRESHOLD)
+    w2 = dgps.error_scale**2  # Shape: (REPS, K?, N)
+    assert_mean_z(jnp.mean(w2, axis=-1), 1.0)
+    assert_mean_z(jnp.mean((w2 - 1.0) ** 2, axis=-1), dgps.params.var_v[0])
 
 
 def test_variance_relationships(dgps: DGP) -> None:
@@ -501,10 +408,11 @@ def test_variance_relationships(dgps: DGP) -> None:
     assert jnp.all(dgps.params.sigma2_pop >= dgps.params.sigma2_eps)
 
 
+@pytest.mark.parametrize('dgps', [{'lambda_': 0.0}], indirect=True, ids=['lambda0'])
 @pytest.mark.parametrize(
     'which',
     [
-        'beta_separate',
+        'params.beta_separate',
         'mulin_separate',
         'mulin',
         'muquad_separate',
@@ -513,32 +421,21 @@ def test_variance_relationships(dgps: DGP) -> None:
         'y',
     ],
 )
-def test_rows_independent(dgps_lambda_zero: DGP, which: str) -> None:
-    """Test that rows are independent when lambda_=0."""
-    source = dgps_lambda_zero.params if which == 'beta_separate' else dgps_lambda_zero
-    samples = getattr(source, which)  # Shape: (REPS, K, N or P)
-    n_reps = samples.shape[0]
+def test_rows_independent(dgps: DGP, which: str) -> None:
+    """Test that rows are independent when lambda_=0.
 
-    samples0 = samples[:, 0, :]  # Shape: (REPS, N or P)
-    samples1 = samples[:, 1, :]  # Shape: (REPS, N or P)
-
-    # Compute covariance for each observation position
-    mean0 = jnp.mean(samples0, axis=0)
-    mean1 = jnp.mean(samples1, axis=0)
-    cov = jnp.mean((samples0 - mean0) * (samples1 - mean1), axis=0)
-
-    std0 = jnp.std(samples0, axis=0)
-    std1 = jnp.std(samples1, axis=0)
-    std_of_cov = (std0 * std1) / jnp.sqrt(n_reps)
-
-    z_scores = jnp.abs(cov / std_of_cov)
-    assert_array_less(z_scores, SIGMA_THRESHOLD)
+    ``params.beta_separate`` does not depend on ``lambda_``, so its check
+    covers every coupling.
+    """
+    samples = attrgetter(which)(dgps)  # Shape: (REPS, K, N or P)
+    assert_uncorrelated_z(samples[:, 0, :], samples[:, 1, :])
 
 
+@pytest.mark.parametrize('dgps', [{'lambda_': 1.0}], indirect=True, ids=['lambda1'])
 @pytest.mark.parametrize('which', ['mulin', 'muquad', 'mu'])
-def test_rows_identical(dgps_lambda_one: DGP, which: str) -> None:
+def test_rows_identical(dgps: DGP, which: str) -> None:
     """Test that rows are identical when lambda_=1."""
-    samples = getattr(dgps_lambda_one, which)  # Shape: (REPS, K, N)
+    samples = getattr(dgps, which)  # Shape: (REPS, K, N)
 
     # Check that all rows are identical within each sample
     diffs = jnp.max(
@@ -600,11 +497,8 @@ class TestPartitionedInteractionPattern:
     def test_diagonal_within_partition(
         self, partition: Bool[Array, 'k p'], pattern: Bool[Array, 'k p p']
     ) -> None:
-        """Test that diagonal elements within partition are True."""
-        k, _, _ = pattern.shape
-        for i in range(k):
-            diagonal = pattern[i, partition[i], partition[i]]
-            assert_array_equal(diagonal, True, strict=False)
+        """Test that the diagonal is True exactly on the partition."""
+        assert_array_equal(jnp.diagonal(pattern, axis1=1, axis2=2), partition)
 
     def test_row_sums(
         self, pattern: Bool[Array, 'k p p'], partition: Bool[Array, 'k p'], q: int
@@ -626,11 +520,8 @@ def test_univariate(keys: split) -> None:
     with the leading axis squeezed away.
     """
     key = keys.pop()
-    kw = dict(KWARGS)
-    kw.update(lambda_=1.0, k=1)
-    dgp_mv = gen_data(key, **kw)
-    kw.update(lambda_=None, k=None)
-    dgp_uv = gen_data(random.clone(key), **kw)
+    dgp_mv = gen_data(key, **dict(KWARGS, lambda_=1.0, k=1))
+    dgp_uv = gen_data(random.clone(key), **dict(KWARGS, lambda_=None, k=None))
 
     assert dgp_uv.params.partition is None
     assert dgp_uv.params.beta_separate is None
@@ -675,7 +566,7 @@ def test_split(keys: split, k: int | None, het_shape: str | None) -> None:
     univariate `None` separate fields are preserved.
     """
     lambda_ = None if k is None else 0.5
-    het_strength = None if het_shape is None else 0.7
+    het_strength = None if het_shape is None else HET_STRENGTH
     kw = dict(KWARGS, k=k)
     dgp = gen_data(
         keys.pop(),
@@ -753,7 +644,7 @@ class TestOutcomeType:
         key = keys.pop()
         dgp_cont = gen_data(key, **kw)
         dgp_bin = gen_data(random.clone(key), outcome_type='binary', **kw)
-        assert_array_equal(dgp_bin.y, (dgp_cont.y > 0).astype(jnp.float32))
+        assert_array_equal(dgp_bin.y, (dgp_cont.y > 0).astype(dgp_cont.y.dtype))
 
     def test_mixed(self, keys: split) -> None:
         """Mixed outcome_type: binary rows are 0/1, continuous rows match the baseline."""
@@ -773,7 +664,7 @@ class TestOutcomeType:
         assert_array_equal(dgp_mix.y[0], dgp_cont.y[0])
         assert_array_equal(dgp_mix.y[2], dgp_cont.y[2])
         # binary row is the threshold of the latent
-        assert_array_equal(dgp_mix.y[1], (dgp_cont.y[1] > 0).astype(jnp.float32))
+        assert_array_equal(dgp_mix.y[1], (dgp_cont.y[1] > 0).astype(dgp_cont.y.dtype))
 
     def test_all_same_tuple_collapses_to_scalar(self, keys: split) -> None:
         """A tuple of identical types is stored as a scalar `OutcomeType`."""
@@ -811,7 +702,11 @@ class TestHeteroskedasticity:
         """Vector het exposes (k, n) scales and per-component coefficients."""
         n, p, k = KWARGS['n'], KWARGS['p'], KWARGS['k']
         dgp = gen_data(
-            keys.pop(), lambda_=0.5, het_shape='vector', het_strength=0.7, **KWARGS
+            keys.pop(),
+            lambda_=0.5,
+            het_shape='vector',
+            het_strength=HET_STRENGTH,
+            **KWARGS,
         )
         assert dgp.error_scale.shape == (k, n)
         assert jnp.issubdtype(dgp.error_scale.dtype, jnp.floating)
@@ -825,7 +720,11 @@ class TestHeteroskedasticity:
     def test_scalar_shapes(self, keys: split) -> None:
         """Scalar het exposes one (n,) scale and no separate coefficients."""
         dgp = gen_data(
-            keys.pop(), lambda_=0.5, het_shape='scalar', het_strength=0.7, **KWARGS
+            keys.pop(),
+            lambda_=0.5,
+            het_shape='scalar',
+            het_strength=HET_STRENGTH,
+            **KWARGS,
         )
         assert dgp.error_scale.shape == (KWARGS['n'],)
         assert dgp.params.gamma_separate is None
@@ -835,7 +734,7 @@ class TestHeteroskedasticity:
     def test_univariate_scalar(self, keys: split) -> None:
         """Univariate (`k=None`) het produces an (n,) scale."""
         kw = dict(KWARGS, k=None)
-        dgp = gen_data(keys.pop(), het_shape='scalar', het_strength=0.7, **kw)
+        dgp = gen_data(keys.pop(), het_shape='scalar', het_strength=HET_STRENGTH, **kw)
         assert dgp.error_scale.shape == (kw['n'],)
         assert dgp.y.shape == (kw['n'],)
         assert dgp.params.gamma_separate is None
@@ -865,7 +764,7 @@ class TestHeteroskedasticity:
         Recomputes it from the public hyperparameters (vector het, with sparsity
         so ``mu_4_s`` and the partition factor both enter), catching wiring bugs.
         """
-        rho, lambda_ = 0.7, 0.5
+        rho, lambda_ = HET_STRENGTH, 0.5
         p, k = KWARGS['p'], KWARGS['k']
         dgp = gen_data(
             keys.pop(),
@@ -888,7 +787,9 @@ class TestHeteroskedasticity:
         kw = dict(KWARGS, lambda_=0.5)
         key = keys.pop()
         homo = gen_data(key, **kw)
-        het = gen_data(random.clone(key), het_shape='vector', het_strength=0.7, **kw)
+        het = gen_data(
+            random.clone(key), het_shape='vector', het_strength=HET_STRENGTH, **kw
+        )
         assert_array_equal(homo.x, het.x)
         assert_array_equal(homo.params.beta_shared, het.params.beta_shared)
         assert_array_equal(homo.params.A_separate, het.params.A_separate)
@@ -924,7 +825,7 @@ class TestHeteroskedasticity:
 
     def test_scalar_and_vector_share_shared_stream(self, keys: split) -> None:
         """``'scalar'`` and ``'vector'`` het share the ``gamma_shared`` stream."""
-        kw = dict(KWARGS, lambda_=0.5, het_strength=0.7)
+        kw = dict(KWARGS, lambda_=0.5, het_strength=HET_STRENGTH)
         key = keys.pop()
         scalar = gen_data(key, het_shape='scalar', **kw)
         vector = gen_data(random.clone(key), het_shape='vector', **kw)
@@ -934,12 +835,12 @@ class TestHeteroskedasticity:
         """``het_shape='vector'`` with ``k=None`` raises."""
         kw = dict(KWARGS, k=None)
         with pytest.raises(ValueError, match="het_shape='vector' requires"):
-            gen_data(keys.pop(), het_shape='vector', het_strength=0.7, **kw)
+            gen_data(keys.pop(), het_shape='vector', het_strength=HET_STRENGTH, **kw)
 
     def test_strength_and_shape_must_agree(self, keys: split) -> None:
         """``het_strength`` and ``het_shape`` must be both set or both None."""
         with pytest.raises(ValueError, match='both set or both None'):
-            gen_data(keys.pop(), lambda_=0.5, het_strength=0.7, **KWARGS)
+            gen_data(keys.pop(), lambda_=0.5, het_strength=HET_STRENGTH, **KWARGS)
         with pytest.raises(ValueError, match='both set or both None'):
             gen_data(keys.pop(), lambda_=0.5, het_shape='scalar', **KWARGS)
 
@@ -950,9 +851,9 @@ class TestHeteroskedasticity:
         threshold, so the binary success probability is
         ``Phi(mu / (sqrt(sigma2_eps) * error_scale))``.
         """
-        kw = dict(KWARGS, lambda_=0.5, het_shape='vector', het_strength=0.7)
+        kw = dict(KWARGS, lambda_=0.5, het_shape='vector', het_strength=HET_STRENGTH)
         key = keys.pop()
         cont = gen_data(key, **kw)
         binary = gen_data(random.clone(key), outcome_type='binary', **kw)
         assert_array_equal(jnp.unique(binary.y), jnp.array([0.0, 1.0]))
-        assert_array_equal(binary.y, (cont.y > 0).astype(jnp.float32))
+        assert_array_equal(binary.y, (cont.y > 0).astype(cont.y.dtype))

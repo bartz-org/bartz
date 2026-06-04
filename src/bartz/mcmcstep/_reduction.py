@@ -298,7 +298,8 @@ class PallasReduction(ReductionConfig):
     guaranteed to stay fused (it is never written back to main memory). Targets
     gpu/tpu; on cpu it falls back to Pallas interpret mode, which is slow and
     meant only for testing. Like `OneHotReduction`, it is competitive only when
-    `size` (the number of leaves) is small.
+    `size` (the number of leaves) is small. Does not support sharding the
+    datapoints across devices.
 
     On gpu the kernel is lowered through Triton or Mosaic GPU; see `backend`.
     """
@@ -339,6 +340,12 @@ class PallasReduction(ReductionConfig):
         dtype: DTypeLike,
         data_sharded: bool,
     ) -> Shaped[Array, '*batch_shape {size}']:
+        if data_sharded:
+            # the kernel trips the vma checks of `shard_map`, in jax-version-
+            # dependent ways, even in interpret mode
+            msg = 'PallasReduction does not support a sharded data axis'
+            raise NotImplementedError(msg)
+
         values = jnp.asarray(values)
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
         (n,) = indices.shape
@@ -359,7 +366,7 @@ class PallasReduction(ReductionConfig):
         else:
             num_blocks = self.num_blocks
 
-        out = _pallas_scatter_add(
+        return _pallas_scatter_add(
             values,
             indices,
             size=size,
@@ -369,9 +376,6 @@ class PallasReduction(ReductionConfig):
             interpret=interpret,
             compiler_params=compiler_params,
         )
-        if data_sharded:
-            out = lax.psum(out, 'data')
-        return out
 
 
 def _resolve_pallas_backend(
@@ -385,13 +389,16 @@ def _resolve_pallas_backend(
     if backend != 'triton':
         return None
     # WORKAROUND(jax<0.7.0): the public Triton compiler params live at
-    # `pallas.triton.CompilerParams` since jax 0.7; older jax already defaulted
-    # its gpu Pallas backend to Triton, so passing nothing is equivalent.
+    # `pallas.triton.CompilerParams` since jax 0.7 (earlier the class has
+    # another name); older jax already defaulted its gpu Pallas backend to
+    # Triton, so passing nothing is equivalent.
     try:
         from jax.experimental.pallas import triton as pallas_triton  # noqa: PLC0415
-    except ImportError:
+
+        cls = pallas_triton.CompilerParams
+    except (ImportError, AttributeError):
         return None
-    return pallas_triton.CompilerParams()
+    return cls()
 
 
 def _auto_block_size(n: int, size: int, num_rows: int) -> int:

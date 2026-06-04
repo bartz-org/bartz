@@ -416,7 +416,7 @@ def _apply_grow_to_indices(
     )
 
 
-def _fill_lrt_total(lrt: Shaped[Array, '... 3']) -> Shaped[Array, '... 3']:
+def _fill_lrt_total(lrt: Shaped[Array, '*k_k 3']) -> Shaped[Array, '*k_k 3']:
     """Set the total slot of stacked (left, right, total) values to left + right.
 
     The left and right slots pass through unchanged, the stale value in the

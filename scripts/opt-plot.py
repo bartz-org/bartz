@@ -39,15 +39,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
-# Sentinel-encoded columns of result files written before opt.py started
-# recording the column list in the output config under plot.sentinels.
-_LEGACY_SENTINEL_COLS = (
-    'num_chains',
-    'resid_num_batches',
-    'count_num_batches',
-    'prec_num_batches',
-)
-
 # Relative tolerance for the local optimal band: walking out from the minimum
 # time_est along the sorted reduce_col axis, the band stops at the first point
 # exceeding (1 + OPTIMAL_BAND_TOLERANCE) * min(time_est).
@@ -103,12 +94,12 @@ def load_and_prepare_data(input_dir: Path) -> Data:
     matrix_cols = tuple(plot_cfg['matrix'])
 
     df = pl.read_parquet(results_path)
-    df = df.drop(c for c in plot_cfg.get('drop', ()) if c in df.columns)
+    df = df.drop(plot_cfg['drop'])
     # Sentinels from opt.py (-1 for None, -2 for 'auto') are remapped to plot
     # positions: None -> 0.5 sits just below the smallest real batch count on a
     # log axis (continuous with the integer values); 'auto' -> -1 is deliberately
     # negative so it breaks the log scale and stands out as a categorical regime.
-    for col_name in plot_cfg.get('sentinels', _LEGACY_SENTINEL_COLS):
+    for col_name in plot_cfg['sentinels']:
         if col_name in df.columns:
             df = df.with_columns(
                 pl.col(col_name).cast(pl.Float64).replace({-1.0: 0.5, -2.0: -1.0})

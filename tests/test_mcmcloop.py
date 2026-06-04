@@ -193,10 +193,20 @@ class TestRunMcmc:
         check_trace(burnin_trace)
         check_trace(main_trace)
 
-    def test_tqdm_callback(self, keys: split, initial_state: State) -> None:
-        """Check the tqdm progress bar runs to completion and is cleaned up."""
+    @pytest.mark.parametrize('average', [True, False])
+    def test_tqdm_callback(
+        self, keys: split, initial_state: State, average: bool
+    ) -> None:
+        """Check the tqdm progress bar runs to completion and is cleaned up.
+
+        Parametrized over ``average`` to also exercise the stats-accumulator
+        path where the running sums are absent (``average=False``), so each
+        report shows the latest iteration only.
+        """
         buf = io.StringIO()
-        kw = make_tqdm_callback(initial_state, report_every=2, file=buf, mininterval=0)
+        kw = make_tqdm_callback(
+            initial_state, report_every=2, file=buf, mininterval=0, average=average
+        )
         bar_id = kw['callback_state'].bar_id.item()
         state = tree.map(jnp.copy, initial_state)  # donated
         with debug_key_reuse(False):

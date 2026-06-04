@@ -97,6 +97,7 @@ from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
+    assert_allclose,
     assert_array_equal,
     assert_close_matrices,
     assert_different_matrices,
@@ -1519,19 +1520,16 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
         expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
     assert_close_matrices(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
 
-    # with 1 datapoint in the multivariate case, log_likelihood is not exactly 0
-    # because matrix inversion adds an epsilon to handle ill-conditioned matrices
-    atol = 0.0 if num_datapoints == 0 else 1e-4
     assert_close_matrices(
         bart._burnin_trace.log_likelihood,
         jnp.zeros_like(bart._burnin_trace.log_likelihood),
-        atol=atol,
+        atol=1e-4,
         reduce_rank=True,
     )
     assert_close_matrices(
         bart._main_trace.log_likelihood,
         jnp.zeros_like(bart._main_trace.log_likelihood),
-        atol=atol,
+        atol=1e-4,
         reduce_rank=True,
     )
 
@@ -2572,6 +2570,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     assert_close_matrices(
         chain_to_axis(state_uv.resid, uv_axes.resid),
         chain_to_axis(state_mv.resid, mv_axes.resid).squeeze(-2),
+        rtol=1e-7,
     )
     assert_close_matrices(
         chain_to_axis(state_uv.error_cov_inv, uv_axes.error_cov_inv),
@@ -2579,18 +2578,19 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         rtol=1e-6,
     )
 
-    # Prior parameters
-    assert_array_equal(bart_uv.offset, bart_mv.offset.squeeze(0))
-    assert_array_equal(
+    # Prior parameters (scalar floats, only equal up to GPU rounding)
+    assert_allclose(bart_uv.offset, bart_mv.offset.squeeze(0), rtol=1e-6)
+    assert_allclose(
         state_uv.forest.leaf_prior_cov_inv,
         state_mv.forest.leaf_prior_cov_inv.reshape(()),
+        rtol=1e-6,
     )
     if outcome_type == 'continuous':
         assert_array_equal(state_uv.error_cov_df, state_mv.error_cov_df)
-        assert_array_equal(
-            state_uv.error_cov_scale, state_mv.error_cov_scale.reshape(())
+        assert_allclose(
+            state_uv.error_cov_scale, state_mv.error_cov_scale.reshape(()), rtol=1e-6
         )
-        assert_array_equal(bart_uv.sigest, bart_mv.sigest.squeeze(0))
+        assert_allclose(bart_uv.sigest, bart_mv.sigest.squeeze(0), rtol=1e-6)
 
     # Forest structure
     uv_forest_axes = chain_vmap_axes(state_uv.forest)

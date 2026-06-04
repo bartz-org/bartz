@@ -323,7 +323,8 @@ class Bart(Module):
         cpu devices.
     num_data_devices
         The number of devices to split datapoints across. Must be a divisor of
-        `n`. This is useful only with very high `n`, about > 1000_000.
+        `n`. This is useful only with very high `n`, about > 1000_000. `predict`
+        with ``x_test='train'`` parallelizes across the same devices.
 
         If both num_chain_devices and num_data_devices are specified, the total
         number of devices used is the product of the two.
@@ -579,6 +580,7 @@ class Bart(Module):
             msg = '`key` not specified'
             raise ValueError(msg)
         w = self._process_w_test(x_test, kind, w)
+        x_test_is_train = isinstance(x_test, str) and x_test == 'train'
         x_test = self._process_x_test(x_test, w)
 
         # invoke jitted implementation
@@ -590,6 +592,10 @@ class Bart(Module):
             self._mcmc_state.binary_indices,
             self._mcmc_state.binary_y is not None,
             kind,
+            # the training data is sharded over the mesh 'data' axis (when
+            # there is one), which `evaluate_trace` can't detect on its own,
+            # so declare it; the sharding of new test data is unknown
+            'shard_and_autobatch' if x_test_is_train else 'none',
         )
 
     def dump(self, path: str | PathLike) -> None:
@@ -1787,13 +1793,15 @@ def process_varprob(
 
 
 def predict_latent(
-    x: UInt[Array, 'p m'], trace: MainTrace
+    x: UInt[Array, 'p m'],
+    trace: MainTrace,
+    test_points: Literal['none', 'autobatch', 'shard_and_autobatch'] = 'none',
 ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
     """Evaluate trees on already quantized `x`, and squash chains."""
-    return evaluate_trace(x, trace, flatten_chains=True)
+    return evaluate_trace(x, trace, flatten_chains=True, test_points=test_points)
 
 
-@partial(jit, static_argnums=(5, 6))
+@partial(jit, static_argnums=(5, 6, 7))
 def predict(
     key: Key[Array, ''] | None,
     trace: MainTrace,
@@ -1802,6 +1810,7 @@ def predict(
     binary_indices: Int32[Array, ' kb'] | None,
     has_binary: bool,
     kind: PredictKind | str,
+    test_points: Literal['none', 'autobatch', 'shard_and_autobatch'],
     /,
 ) -> (
     Float32[Array, ' m']
@@ -1811,7 +1820,7 @@ def predict(
 ):
     """Implement `Bart.predict`."""
     # get latent i.e. bare sum-of-trees predictions
-    latent = predict_latent(x_test, trace)
+    latent = predict_latent(x_test, trace, test_points)
     if kind is PredictKind.latent_samples:
         return latent
 

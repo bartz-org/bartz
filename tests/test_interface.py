@@ -143,13 +143,16 @@ def f(x: Real[Array, 'p n'], s: Real[Array, ' p'], k: int) -> Float32[Array, 'k 
     return jnp.einsum('p,kpn->kn', s, jnp.cos(arg)) / norm
 
 
-def gen_missing(
-    key: Key[Array, ''], shape: int | Sequence[int], prob: float = 0.2
-) -> Bool[Array, ' {shape}']:
-    """Generate a boolean missingness mask with about ``prob`` true entries."""
-    if isinstance(shape, int):
-        shape = (shape,)
-    return random.bernoulli(key, prob, shape)
+def gen_missing(key: Key[Array, ''], shape: tuple[int, int]) -> Bool[Array, 'k n']:
+    """Generate a boolean missingness mask that is not completely at random.
+
+    The mask is the binary outcome of its own `gen_data` DGP, so the entries
+    are driven by latent predictors and correlated within a datapoint, instead
+    of i.i.d. coin flips.
+    """
+    k, n = shape
+    dgp = gen_data(key, n=n, p=k, k=k, lambda_=0.5, outcome_type='binary', **GEN_KW)
+    return dgp.y.astype(bool)
 
 
 def gen_y(

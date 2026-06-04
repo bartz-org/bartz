@@ -626,11 +626,7 @@ class TestSearchDivisor:
 
 
 class TestReduction:
-    """Check every `ReductionConfig` matches an unbatched segment-sum baseline.
-
-    The test bodies only touch the abstract `_reduce` interface, so the same
-    checks apply to all subclasses and their settings.
-    """
+    """Check every `ReductionConfig` matches an unbatched segment-sum baseline."""
 
     _pallas_backend = 'triton' if get_default_device().platform == 'gpu' else 'cpu'
 
@@ -654,9 +650,7 @@ class TestReduction:
         OneHotReduction(method='scatter_set', n_inner=True),
         OneHotReduction(method='scatter_set', n_inner=False),
         # PallasReduction: Triton on gpu, interpret mode on cpu (the only mode
-        # that runs there). The suite uses the default device consistently, so
-        # the run platform is known here. 'cpu' interpret exercises the same
-        # kernel as the gpu backends.
+        # that runs there).
         PallasReduction(backend=_pallas_backend),  # fully automatic grid and tile
         PallasReduction(backend=_pallas_backend, num_blocks=1, block_size=64),
         PallasReduction(backend=_pallas_backend, num_blocks=8, block_size=16),
@@ -673,7 +667,6 @@ class TestReduction:
         data_sharded: bool,
     ) -> Shaped[Array, '*batch_shape {size}']:
         """External baseline mirroring `_reduce` via `jax.ops.segment_sum`."""
-        assert not data_sharded  # the reductions under test are never sharded
         values = jnp.asarray(values)
         # `segment_sum` reduces the leading axis, `_reduce` the last one; a
         # scalar value is the count case, weighting each datapoint equally
@@ -681,121 +674,95 @@ class TestReduction:
             data = jnp.broadcast_to(values.astype(dtype), indices.shape)
         else:
             data = jnp.moveaxis(values, -1, 0).astype(dtype)
-        return jnp.moveaxis(segment_sum(data, indices, num_segments=size), 0, -1)
+        out = jnp.moveaxis(segment_sum(data, indices, num_segments=size), 0, -1)
+        if data_sharded:
+            out = lax.psum(out, 'data')
+        return out
 
-    @pytest.mark.parametrize('batch_shape', [(), (3,), (2, 2)])
-    def test_matches_reference_float(
-        self, batch_shape: tuple[int, ...], keys: split, subtests: SubTests
-    ) -> None:
-        """Float reductions match the reference for univariate and matrix values."""
-        n, size = 500, 8
-        indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
-        values = random.normal(keys.pop(), (*batch_shape, n))
-        kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
-        expected = self.reference(values, indices, **kw)
-        for config in self.configs:
-            with subtests.test(config=config):
-                got = config._reduce(values, indices, **kw)
-                assert got.shape == (*batch_shape, size)
-                assert_close_matrices(
-                    got, expected, rtol=1e-5, atol=1e-6, reduce_rank=True
-                )
+    def test_matches_reference(self, keys: split, subtests: SubTests) -> None:
+        """Every config matches the reference on a battery of invocations.
 
-    def test_matches_reference_count(self, keys: split, subtests: SubTests) -> None:
-        """The scalar-weight (count) case matches the reference exactly."""
-        n, size = 500, 8
-        indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
-        kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
-        expected = self.reference(1, indices, **kw)
-        for config in self.configs:
-            with subtests.test(config=config):
-                got = config._reduce(1, indices, **kw)
-                assert_array_equal(got, expected, strict=True)
-
-    def test_under_vmap_over_trees(self, keys: split, subtests: SubTests) -> None:
-        """Composes with an external `vmap` that batches only the indices.
-
-        This is the layout `step` uses to count/sum over many trees at once.
+        The cases cover scalar count weights (exact integer match), float
+        values with and without batch dimensions, composition with an external
+        `vmap` that batches only the indices (the layout `step` uses to
+        count/sum over many trees at once), and a data axis sharded with
+        `shard_map`, which `PallasReduction` must reject.
         """
-        num_trees, n, size = 4, 500, 8
-        indices = random.randint(keys.pop(), (num_trees, n), 0, size).astype(jnp.uint32)
-        values = random.normal(keys.pop(), (n,))
-
-        def reduce(
-            reduce_fn: Callable[..., Array], value: object, dtype: object
-        ) -> Array:
-            # `value` is shared across trees (captured, not mapped), `indices`
-            # is batched, just as the count and residual paths invoke it
-            run = partial(reduce_fn, value, size=size, dtype=dtype, data_sharded=False)
-            return vmap(run)(indices)
-
-        for config in self.configs:
-            with subtests.test(config=config):
-                assert_array_equal(  # count path: exact integer match
-                    reduce(config._reduce, 1, jnp.uint32),
-                    reduce(self.reference, 1, jnp.uint32),
-                    strict=True,
-                )
-                assert_close_matrices(  # residual path
-                    reduce(config._reduce, values, jnp.float32),
-                    reduce(self.reference, values, jnp.float32),
-                    rtol=1e-5,
-                    atol=1e-6,
-                    reduce_rank=True,
-                )
-
-    def test_data_sharded(self, keys: split, subtests: SubTests) -> None:
-        """`data_sharded=True` sums the per-shard reductions across data shards."""
-        num_shards = min(4, get_device_count())
-        if num_shards < 2:
-            pytest.skip('need at least 2 devices for the data axis')
-
-        n, size = 512, 8
+        n, size, num_trees = 512, 8, 4
         indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
-        values = random.normal(keys.pop(), (n,))
-        expected_resid = self.reference(
-            values, indices, size=size, dtype=jnp.float32, data_sharded=False
+        tree_indices = random.randint(keys.pop(), (num_trees, n), 0, size).astype(
+            jnp.uint32
         )
-        expected_count = self.reference(
-            1, indices, size=size, dtype=jnp.uint32, data_sharded=False
-        )
+        # float values: univariate, and with the 1d/2d batch shapes of the
+        # multivariate leaf-sum and precision paths
+        vector = random.normal(keys.pop(), (n,))
+        batched = random.normal(keys.pop(), (3, n))
+        matrix = random.normal(keys.pop(), (2, 2, n))
 
-        mesh = make_mesh(
-            (num_shards,), ('data',), devices=get_default_devices()[:num_shards]
-        )
-        data = PartitionSpec('data')
-        replicated = PartitionSpec()
-        values = device_put(values, NamedSharding(mesh, data))
-        indices = device_put(indices, NamedSharding(mesh, data))
+        count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
+        float_kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
+        exact = assert_array_equal  # the count path must match exactly
+        close = partial(assert_close_matrices, rtol=1e-5, atol=1e-6, reduce_rank=True)
+
+        # each case invokes a reduce function `f` (a config's `_reduce` or the
+        # reference) in one pattern, paired with the appropriate comparison
+        cases = {
+            'count': (lambda f: f(1, indices, **count_kw), exact),
+            'float': (lambda f: f(vector, indices, **float_kw), close),
+            'float batched': (lambda f: f(batched, indices, **float_kw), close),
+            'float matrix': (lambda f: f(matrix, indices, **float_kw), close),
+            'vmap count': (
+                lambda f: vmap(partial(f, 1, **count_kw))(tree_indices),
+                exact,
+            ),
+            'vmap float': (
+                lambda f: vmap(partial(f, vector, **float_kw))(tree_indices),
+                close,
+            ),
+        }
+
+        # `data_sharded=True` runs under `shard_map` and sums the per-shard
+        # reductions; on a single device `psum` is the identity, so a missing
+        # sum could not be caught and the sharded cases are not worth running
+        num_shards = min(4, get_device_count())
+        if num_shards >= 2:
+            mesh = make_mesh(
+                (num_shards,), ('data',), devices=get_default_devices()[:num_shards]
+            )
+            data, replicated = PartitionSpec('data'), PartitionSpec()
+            sharded_indices = device_put(indices, NamedSharding(mesh, data))
+            sharded_vector = device_put(vector, NamedSharding(mesh, data))
+            cases['sharded count'] = (
+                lambda f: shard_map(
+                    partial(f, 1, **dict(count_kw, data_sharded=True)),
+                    mesh=mesh,
+                    in_specs=(data,),
+                    out_specs=replicated,
+                )(sharded_indices),
+                exact,
+            )
+            cases['sharded float'] = (
+                lambda f: shard_map(
+                    partial(f, **dict(float_kw, data_sharded=True)),
+                    mesh=mesh,
+                    in_specs=(data, data),
+                    out_specs=replicated,
+                )(sharded_vector, sharded_indices),
+                close,
+            )
+
+        expected = {name: run(self.reference) for name, (run, _) in cases.items()}
 
         for config in self.configs:
-            with subtests.test(config=config):
-                run = partial(
-                    config._reduce, size=size, dtype=jnp.float32, data_sharded=True
-                )
-                sharded_run = shard_map(
-                    run, mesh=mesh, in_specs=(data, data), out_specs=replicated
-                )
-                if isinstance(config, PallasReduction):
-                    with pytest.raises(NotImplementedError):
-                        sharded_run(values, indices)
-                else:
-                    got = sharded_run(values, indices)
-                    assert_close_matrices(
-                        got, expected_resid, rtol=1e-5, atol=1e-6, reduce_rank=True
-                    )
-
-                    run = partial(
-                        config._reduce,
-                        1,
-                        size=size,
-                        dtype=jnp.uint32,
-                        data_sharded=True,
-                    )
-                    got = shard_map(
-                        run, mesh=mesh, in_specs=(data,), out_specs=replicated
-                    )(indices)
-                    assert_array_equal(got, expected_count, strict=True)
+            for name, (run, compare) in cases.items():
+                with subtests.test(config=config, case=name):
+                    if name.startswith('sharded') and isinstance(
+                        config, PallasReduction
+                    ):
+                        with pytest.raises(NotImplementedError):
+                            run(config._reduce)
+                    else:
+                        compare(run(config._reduce), expected[name])
 
     def test_resolve_pallas_backend(self) -> None:
         """Only the 'triton' backend may yield compiler params."""

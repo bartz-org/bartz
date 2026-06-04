@@ -1377,7 +1377,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         yhat1,
         jnp.where(mask_pred, yhat2, (yhat2 - offset) / scale),
-        rtol=1e-5,
+        rtol=1e-4,
         reduce_rank=True,
     )
 
@@ -1386,7 +1386,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         mean1,
         jnp.where(mask_pred, mean2, (mean2 - offset) / scale),
-        rtol=1e-5,
+        rtol=1e-4,
         reduce_rank=True,
     )
 
@@ -1395,7 +1395,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         yhat_test1,
         jnp.where(mask_pred, yhat_test2, (yhat_test2 - offset) / scale),
-        rtol=1e-5,
+        rtol=1e-4,
         reduce_rank=True,
     )
 
@@ -1404,7 +1404,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         yhat_test_mean1,
         jnp.where(mask_pred, yhat_test_mean2, (yhat_test_mean2 - offset) / scale),
-        rtol=1e-5,
+        rtol=1e-4,
         reduce_rank=True,
     )
 

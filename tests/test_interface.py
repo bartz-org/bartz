@@ -92,6 +92,7 @@ from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
+from bartz.testing import gen_data
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
     assert_array_equal,
@@ -110,6 +111,16 @@ class Bart(OriginalBart):
         super().__init__(*args, **kwargs)
         self._check_trees(error=True)
         self._check_replicated_trees()
+
+
+# Most test data comes from `bartz.testing.gen_data`; the local `gen_X`/`f`/
+# `gen_y` generators below cover only what it cannot express: binary predictors
+# and importance scales with exact zeros.
+
+# `gen_data` settings shared by all its call sites: enough signal that BART can
+# identify it, and enough noise that the convergence-test posteriors mix well.
+# q = 0 because the small variants have p = 2, and q must be < p.
+GEN_KW = dict(q=0, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.04)
 
 
 def gen_X(
@@ -132,15 +143,6 @@ def f(x: Real[Array, 'p n'], s: Real[Array, ' p'], k: int) -> Float32[Array, 'k 
     return jnp.einsum('p,kpn->kn', s, jnp.cos(arg)) / norm
 
 
-def gen_w(
-    key: Key[Array, ''], shape: int | Sequence[int]
-) -> Float32[Array, ' {shape}']:
-    """Generate a vector of error weights."""
-    if isinstance(shape, int):
-        shape = (shape,)
-    return jnp.exp(random.uniform(key, shape, float, -1, 1))
-
-
 def gen_missing(
     key: Key[Array, ''], shape: int | Sequence[int], prob: float = 0.2
 ) -> Bool[Array, ' {shape}']:
@@ -153,41 +155,26 @@ def gen_missing(
 def gen_y(
     key: Key[Array, ''],
     X: Real[Array, 'p n'],
-    w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
-    outcome_type: str | Sequence[str] = 'continuous',
+    outcome_type: Literal['continuous', 'binary'] = 'continuous',
     *,
     k: int | None = None,
-    s: Real[Array, ' p'] | Literal['uniform', 'random'] = 'uniform',
+    s: Real[Array, ' p'] | None = None,
 ) -> Float32[Array, 'k n'] | Float32[Array, ' n']:
     """Generate responses given predictors."""
     keys = split(key, 2)
 
     p, n = X.shape
-    if isinstance(s, Array):
-        pass
-    elif s == 'random':
-        s = jnp.exp(random.uniform(keys.pop(), (p,), float, -1, 1))
-    elif s == 'uniform':  # pragma: no branch
+    if s is None:
         s = jnp.ones(p)
 
-    # normalize outcome_type to list
-    effective_k = 1 if k is None else k
-    if isinstance(outcome_type, str):
-        outcome_type = [outcome_type] * effective_k
-    assert len(outcome_type) == effective_k
-
     # mean and noise — always (effective_k, n)
+    effective_k = 1 if k is None else k
     mu = f(X, s, effective_k)
     sigma = 0.1
-    error = sigma * random.normal(keys.pop(), (effective_k, n))
-    if w is not None:
-        error = error * w
-    y = mu + error
+    y = mu + sigma * random.normal(keys.pop(), (effective_k, n))
 
-    # binarize
-    for i, ot in enumerate(outcome_type):
-        if ot == 'binary':
-            y = y.at[i].set((y[i] > 0).astype(float))
+    if outcome_type == 'binary':
+        y = (y > 0).astype(float)
 
     # squeeze for univariate
     if k is None:
@@ -348,11 +335,13 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
         # continuous regression with some settings that induce large types,
         # sparsity with free theta
         case 1:
-            X = gen_X(keys.pop(), p, n, 'continuous')
+            train, test = gen_data(
+                keys.pop(), n=n + nt, p=p, sparsity=2.0, **GEN_KW
+            ).split(n)
             bkw = BartKW(
                 kw=dict(
-                    x_train=X,
-                    y_train=gen_y(keys.pop(), X, None, 'continuous', s='random'),
+                    x_train=train.x,
+                    y_train=train.y,
                     outcome_type='continuous',
                     sparse=True,
                     **common,
@@ -370,7 +359,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         min_points_per_leaf=5,
                     ),
                 ),
-                x_test=gen_X(keys.pop(), p, nt, 'continuous'),
+                x_test=test.x,
             )
 
         # binary regression with binary X and high p
@@ -379,7 +368,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             bkw = BartKW(
                 kw=dict(
                     x_train=X,
-                    y_train=gen_y(keys.pop(), X, None, 'binary'),
+                    y_train=gen_y(keys.pop(), X, 'binary'),
                     outcome_type='binary',
                     **common,
                     n_skip=1,  # the mc_gbart default with binary would be 10
@@ -405,14 +394,21 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
         # continuous regression with error weights and sparsity with fixed theta
         case 3:
-            X = gen_X(keys.pop(), p, n, 'continuous')
-            w = gen_w(keys.pop(), X.shape[1])
+            train, test = gen_data(
+                keys.pop(),
+                n=n + nt,
+                p=p,
+                sparsity=2.0,
+                het_strength=0.5,
+                het_shape='scalar',
+                **GEN_KW,
+            ).split(n)
             bkw = BartKW(
                 kw=dict(
-                    x_train=X,
-                    y_train=gen_y(keys.pop(), X, w, 'continuous', s='random'),
+                    x_train=train.x,
+                    y_train=train.y,
                     outcome_type='continuous',
-                    w=w,
+                    w=train.error_scale,
                     sparse=True,
                     theta=2.0,
                     varprob=jnp.array([0.2, 0.8]),
@@ -433,21 +429,30 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         min_points_per_leaf=5,
                     ),
                 ),
-                x_test=gen_X(keys.pop(), p, nt, 'continuous'),
-                w_test=gen_w(keys.pop(), nt),
+                x_test=test.x,
+                w_test=test.error_scale,
             )
 
         # multivariate continuous regression with error weights and some
         # settings that induce large types, sparsity with free theta
         case 4:
-            X = gen_X(keys.pop(), p, n, 'continuous')
-            w = gen_w(keys.pop(), X.shape[1])
+            train, test = gen_data(
+                keys.pop(),
+                n=n + nt,
+                p=p,
+                k=2,
+                lambda_=0.5,
+                sparsity=2.0,
+                het_strength=0.5,
+                het_shape='scalar',
+                **GEN_KW,
+            ).split(n)
             bkw = BartKW(
                 kw=dict(
-                    x_train=X,
-                    y_train=gen_y(keys.pop(), X, w, 'continuous', k=2, s='random'),
+                    x_train=train.x,
+                    y_train=train.y,
                     outcome_type='continuous',
-                    w=w,
+                    w=train.error_scale,
                     sparse=True,
                     **common,
                     printevery=50,
@@ -464,8 +469,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         min_points_per_leaf=5,
                     ),
                 ),
-                x_test=gen_X(keys.pop(), p, nt, 'continuous'),
-                w_test=gen_w(keys.pop(), nt),
+                x_test=test.x,
+                w_test=test.error_scale,
             )
 
         # multivariate binary regression with binary X and high p
@@ -474,7 +479,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             bkw = BartKW(
                 kw=dict(
                     x_train=X,
-                    y_train=gen_y(keys.pop(), X, None, 'binary', k=2),
+                    y_train=gen_y(keys.pop(), X, 'binary', k=2),
                     outcome_type='binary',
                     **common,
                     printevery=None,
@@ -498,17 +503,27 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
         # multivariate mixed binary-continuous regression with sparsity with
         # fixed theta and missing subunits
         case 6:
-            X = gen_X(keys.pop(), p, n, 'continuous')
-            outcome_type = ['continuous', 'binary', 'binary']
+            outcome_type = ('continuous', 'binary', 'binary')
+            # p = 3 instead of 2 because gen_data requires p >= k
+            train, test = gen_data(
+                keys.pop(),
+                n=n + nt,
+                p=3,
+                k=3,
+                lambda_=0.5,
+                sparsity=2.0,
+                outcome_type=outcome_type,
+                **GEN_KW,
+            ).split(n)
             bkw = BartKW(
                 kw=dict(
-                    x_train=X,
-                    y_train=gen_y(keys.pop(), X, None, outcome_type, s='random', k=3),
+                    x_train=train.x,
+                    y_train=train.y,
                     outcome_type=outcome_type,
                     missing=gen_missing(keys.pop(), (len(outcome_type), n)),
                     sparse=True,
                     theta=2.0,
-                    varprob=jnp.array([0.2, 0.8]),
+                    varprob=jnp.array([0.2, 0.3, 0.5]),
                     **common,
                     printevery=50,
                     binner=partial(
@@ -526,25 +541,33 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         min_points_per_leaf=5,
                     ),
                 ),
-                x_test=gen_X(keys.pop(), p, nt, 'continuous'),
+                x_test=test.x,
             )
 
         # multivariate continuous regression with vector weights
         case 7:  # pragma: no branch
-            k = 2
-            X = gen_X(keys.pop(), p, n, 'continuous')
-            w = gen_w(keys.pop(), (k, n))
+            train, test = gen_data(
+                keys.pop(),
+                n=n + nt,
+                p=p,
+                k=2,
+                lambda_=0.5,
+                sparsity=2.0,
+                het_strength=0.5,
+                het_shape='vector',
+                **GEN_KW,
+            ).split(n)
             bkw = BartKW(
                 kw=dict(
-                    x_train=X,
-                    y_train=gen_y(keys.pop(), X, w, 'continuous', k=k, s='random'),
+                    x_train=train.x,
+                    y_train=train.y,
                     outcome_type='continuous',
-                    w=w,
+                    w=train.error_scale,
                     **common,
                     num_chains=None,
                 ),
-                x_test=gen_X(keys.pop(), p, nt, 'continuous'),
-                w_test=gen_w(keys.pop(), (k, nt)),
+                x_test=test.x,
+                w_test=test.error_scale,
             )
 
         case _:  # pragma: no cover
@@ -1178,13 +1201,12 @@ class TestVarprobAttr:
 
     def test_blocked_vars(self, keys: split) -> None:
         """Check that varprob = 0 on predictors blocked a priori."""
-        X = gen_X(keys.pop(), 2, 30, 'continuous')
-        y = gen_y(keys.pop(), X, None, 'continuous')
+        dgp = gen_data(keys.pop(), n=30, p=2, **GEN_KW)
         with debug_nans(False):
             xinfo = jnp.array([[jnp.nan], [0]])
         bart = Bart(
-            x_train=X,
-            y_train=y,
+            x_train=dgp.x,
+            y_train=dgp.y,
             binner=partial(GivenSplitsBinner, xinfo=xinfo),
             seed=keys.pop(),
         )
@@ -1205,7 +1227,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
     s = mask.astype(float)
 
     X = gen_X(keys.pop(), p, n, 'continuous')
-    y = gen_y(keys.pop(), X, None, 'continuous', s=s)
+    y = gen_y(keys.pop(), X, 'continuous', s=s)
 
     bart = Bart(
         x_train=X,
@@ -1279,12 +1301,16 @@ def test_scale_shift(bkw: BartKW) -> None:
 
     mask_pred = mask[..., None]
 
+    # mixed outcomes accumulate more float32 rounding through the binary-latent
+    # step, so the MCMC-output comparisons get a looser tolerance
+    rtol = 1e-4 if bkw.is_mixed else 1e-5
+
     yhat1 = bart1.predict('train', kind='latent_samples')
     yhat2 = bart2.predict('train', kind='latent_samples')
     assert_close_matrices(
         yhat1,
         jnp.where(mask_pred, yhat2, (yhat2 - offset) / scale),
-        rtol=1e-5,
+        rtol=rtol,
         reduce_rank=True,
     )
 
@@ -1293,7 +1319,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         mean1,
         jnp.where(mask_pred, mean2, (mean2 - offset) / scale),
-        rtol=1e-5,
+        rtol=rtol,
         reduce_rank=True,
     )
 
@@ -1302,7 +1328,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         yhat_test1,
         jnp.where(mask_pred, yhat_test2, (yhat_test2 - offset) / scale),
-        rtol=1e-5,
+        rtol=rtol,
         reduce_rank=True,
     )
 
@@ -1311,7 +1337,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         yhat_test_mean1,
         jnp.where(mask_pred, yhat_test_mean2, (yhat_test_mean2 - offset) / scale),
-        rtol=1e-5,
+        rtol=rtol,
         reduce_rank=True,
     )
 
@@ -1323,8 +1349,8 @@ def test_scale_shift(bkw: BartKW) -> None:
         sdev_mean_expected = jnp.where(
             mask, 0.0, bart2.get_error_sdev(mean=True) / scale
         )
-    assert_close_matrices(sdev_actual, sdev_expected, rtol=1e-5, reduce_rank=True)
-    assert_close_matrices(sdev_mean_actual, sdev_mean_expected, rtol=1e-5)
+    assert_close_matrices(sdev_actual, sdev_expected, rtol=rtol, reduce_rank=True)
+    assert_close_matrices(sdev_mean_actual, sdev_mean_expected, rtol=rtol)
 
 
 def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
@@ -2288,12 +2314,11 @@ def test_num_chain_devices_invalid(
     num_chains: int | None, num_chain_devices: int, keys: split
 ) -> None:
     """`Bart` rejects a `num_chain_devices` that does not divide the chains."""
-    x = gen_X(keys.pop(), 2, 10, 'continuous')
-    y = gen_y(keys.pop(), x, None)
+    dgp = gen_data(keys.pop(), n=10, p=2, **GEN_KW)
     with pytest.raises(ValueError, match='must be a positive divisor'):
         Bart(
-            x,
-            y,
+            dgp.x,
+            dgp.y,
             seed=keys.pop(),
             n_save=0,
             n_burn=0,
@@ -2304,11 +2329,10 @@ def test_num_chain_devices_invalid(
 
 def test_num_chains_none_with_chain_device(keys: split) -> None:
     """`num_chains=None` ignores a harmless 1-device request (no chain axis)."""
-    x = gen_X(keys.pop(), 2, 10, 'continuous')
-    y = gen_y(keys.pop(), x, None)
+    dgp = gen_data(keys.pop(), n=10, p=2, **GEN_KW)
     bart = Bart(
-        x,
-        y,
+        dgp.x,
+        dgp.y,
         seed=keys.pop(),
         n_save=10,
         n_burn=10,
@@ -2329,11 +2353,10 @@ def test_auto_chains_fit_with_data_sharding(keys: split) -> None:
     # off to a single chain device; pre-fix this overcommitted the devices and
     # `make_mesh` raised.
     n = 12 * total  # divisible by total so num_data_devices=total is valid
-    x = gen_X(keys.pop(), 2, n, 'continuous')
-    y = gen_y(keys.pop(), x, None)
+    dgp = gen_data(keys.pop(), n=n, p=2, **GEN_KW)
     bart = Bart(
-        x,
-        y,
+        dgp.x,
+        dgp.y,
         seed=keys.pop(),
         num_trees=5,
         n_save=10,

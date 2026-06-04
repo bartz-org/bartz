@@ -74,7 +74,8 @@ from bartz.prepcovars import (
     RangeEvenBinner,
     UniqueQuantileBinner,
 )
-from tests.test_interface import BartKW, gen_X, gen_y, make_kw
+from bartz.testing import gen_data
+from tests.test_interface import GEN_KW, BartKW, gen_X, gen_y, make_kw
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
     assert_allclose,
@@ -736,11 +737,10 @@ class TestVarprobAttr:
 
     def test_blocked_vars(self, keys: split) -> None:
         """Check that varprob = 0 on predictors blocked a priori."""
-        X = gen_X(keys.pop(), 2, 30, 'continuous')
-        y = gen_y(keys.pop(), X, None, 'continuous')
+        dgp = gen_data(keys.pop(), n=30, p=2, **GEN_KW)
         with debug_nans(False):
             xinfo = jnp.array([[jnp.nan], [0]])
-        bart = mc_gbart(x_train=X, y_train=y, xinfo=xinfo, seed=keys.pop())
+        bart = mc_gbart(x_train=dgp.x, y_train=dgp.y, xinfo=xinfo, seed=keys.pop())
         assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1], strict=False)
         assert_array_equal(bart.varprob_mean, [0, 1], strict=False)
         assert jnp.all(bart.varprob_mean == bart.varprob)
@@ -761,7 +761,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
 
     # generate data
     X = gen_X(keys.pop(), p, n, 'continuous')
-    y = gen_y(keys.pop(), X, None, 'continuous', s=s)
+    y = gen_y(keys.pop(), X, 'continuous', s=s)
 
     # run bart
     bart = mc_gbart(
@@ -1343,14 +1343,13 @@ def test_automatic_integer_types(kw: dict[str, Any]) -> None:
 
 def test_gbart_multichain_error(keys: split) -> None:
     """Check that `bartz.BART.gbart` does not support `mc_cores`."""
-    X = gen_X(keys.pop(), 10, 100, 'continuous')
-    y = gen_y(keys.pop(), X, None, 'continuous')
+    dgp = gen_data(keys.pop(), n=100, p=10, **GEN_KW)
     with pytest.raises(TypeError, match=r'mc_cores'):
-        gbart(X, y, mc_cores=1)
+        gbart(dgp.x, dgp.y, mc_cores=1)
     with pytest.raises(TypeError, match=r'mc_cores'):
-        gbart(X, y, mc_cores=2)
+        gbart(dgp.x, dgp.y, mc_cores=2)
     with pytest.raises(TypeError, match=r'mc_cores'):
-        gbart(X, y, mc_cores='gatto')
+        gbart(dgp.x, dgp.y, mc_cores='gatto')
 
 
 def get_expect_sharded(kw: dict) -> bool:

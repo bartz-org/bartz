@@ -231,8 +231,10 @@ def generate_outcome(
     sigma2_eps: Float[Array, ''],
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
     error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None = None,
-) -> Float[Array, ' n'] | Float[Array, 'k n']:
-    """Sample y from mu and sigma2_eps (see `Params` for binary semantics).
+) -> tuple[
+    Float[Array, ' n'] | Float[Array, 'k n'], Float[Array, ' n'] | Float[Array, 'k n']
+]:
+    """Sample the latent z and outcome y (see `Params` for binary semantics).
 
     With ``error_scale`` set, each error is multiplied by it (broadcasting a
     scalar-per-datapoint ``(n,)`` scale over all components), giving conditional
@@ -242,13 +244,15 @@ def generate_outcome(
     scaled_eps = eps * jnp.sqrt(sigma2_eps)
     if error_scale is not None:
         scaled_eps = scaled_eps * error_scale
-    latent = mu + scaled_eps
+    z = mu + scaled_eps
     if outcome_type is OutcomeType.continuous:
-        return latent
-    if outcome_type is OutcomeType.binary:
-        return (latent > 0).astype(latent.dtype)
-    binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
-    return jnp.where(binary_mask[:, None], (latent > 0).astype(latent.dtype), latent)
+        y = z
+    elif outcome_type is OutcomeType.binary:
+        y = (z > 0).astype(z.dtype)
+    else:
+        binary_mask = jnp.array([t is OutcomeType.binary for t in outcome_type])
+        y = jnp.where(binary_mask[:, None], (z > 0).astype(z.dtype), z)
+    return z, y
 
 
 class Params(Module):
@@ -467,6 +471,10 @@ class Params(Module):
             shape ``(k, n)``)
         * - :math:`W_{ci} \equiv 1` (:math:`\rho = 0`)
           - ``het_shape=None`` (the :math:`W`-related attributes are ``None``)
+        * - :math:`Z_{ci}`
+          - `DGP.z`
+        * - :math:`Y_{ci}`
+          - `DGP.y`
         * - :math:`c` continuous / binary
           - `outcome_type`
         * - univariate (:math:`k = 1`, :math:`\lambda = 1`)
@@ -535,10 +543,10 @@ class Params(Module):
     """Variance of the expected mean function."""
 
     sigma2_pop: Float[Array, '']
-    """Expected population variance of y."""
+    """Expected population variance of the latent z."""
 
     sigma2_pri: Float[Array, '']
-    """Prior variance of y."""
+    """Prior variance of the latent z."""
 
     gamma_shared: Float[Array, ' p'] | None
     """Shared coefficients of shape (p,) of the latent projection ``eta``, drawn
@@ -599,6 +607,11 @@ class DGP(Module):
     """Noisy outcomes of shape (k, n), or (n,) if `gen_data` was called with
     ``k=None``."""
 
+    z: Float[Array, 'k n'] | Float[Array, ' n']
+    """Latent outcomes (the ``Z`` of `Params`) of shape (k, n), or (n,) if
+    `gen_data` was called with ``k=None``. `y` equals ``z`` for continuous
+    components and thresholds it at 0 for binary ones."""
+
     mulin_shared: Float[Array, ' n']
     """Shared linear mean of shape (n,)."""
 
@@ -653,6 +666,7 @@ class DGP(Module):
             self,
             x=self.x[:, :n_train],
             y=self.y[..., :n_train],
+            z=self.z[..., :n_train],
             mulin_shared=self.mulin_shared[:n_train],
             mulin_separate=(
                 None
@@ -676,6 +690,7 @@ class DGP(Module):
             self,
             x=self.x[:, n_train:],
             y=self.y[..., n_train:],
+            z=self.z[..., n_train:],
             mulin_shared=self.mulin_shared[n_train:],
             mulin_separate=(
                 None
@@ -874,8 +889,8 @@ def gen_params(
 def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
     """Sample predictors and outcomes given fixed `params`.
 
-    The output ``y`` always has shape ``(k, n)``; squeezing to ``(n,)`` for
-    univariate outputs is done by `gen_data`.
+    The outputs ``z`` and ``y`` have shape ``(k, n)``, or ``(n,)`` if `params`
+    is univariate (``params.partition is None``).
 
     Parameters
     ----------
@@ -923,13 +938,14 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
         v = (1.0 - params.het_strength) + params.het_strength * eta**2
         error_scale = jnp.sqrt(v)
 
-    y = generate_outcome(
+    z, y = generate_outcome(
         keys.pop(), mu, params.sigma2_eps, params.outcome_type, error_scale
     )
 
     return DGP(
         x=x,
         y=y,
+        z=z,
         mulin_shared=mulin_shared,
         mulin_separate=mulin_separate,
         mulin=mulin,

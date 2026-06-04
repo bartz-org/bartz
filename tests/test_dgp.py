@@ -133,6 +133,7 @@ def test_shapes_and_dtypes(keys: split) -> None:
     floating_fields = {
         'x': (p, n),
         'y': (k, n),
+        'z': (k, n),
         'params.beta_shared': (p,),
         'params.beta_separate': (k, p),
         'mulin_shared': (n,),
@@ -290,6 +291,7 @@ WHICH_PARAMS = (
     'muquad_separate',
     'muquad',
     'mu',
+    'z',
     'y',
 )
 
@@ -303,16 +305,17 @@ HET_DGPS = (
 HET_DGPS_IDS = ('het_scalar', 'het_vector_sparse')
 
 # Cases for the marginal-variance tests: homoskedastic (dense and sparse) over
-# every field, plus the heteroskedastic DGPs, which must leave the ``y`` budget
-# unchanged since ``E[error_scale ** 2] == 1`` marginally. Het does not enter
-# the latent mean fields at all (checked exactly by
-# `test_stream_invariance_with_homoskedastic`), so only ``y`` is tested there.
+# every field, plus the heteroskedastic DGPs, which must leave the ``z`` and
+# ``y`` budgets unchanged since ``E[error_scale ** 2] == 1`` marginally. Het
+# does not enter the latent mean fields at all (checked exactly by
+# `test_stream_invariance_with_homoskedastic`), so only ``z`` and ``y`` are
+# tested there.
 VARIANCE_CASES = tuple(
     pytest.param(dgp, which, id=f'{which}-{dgp_id}')
     for dgp, dgp_id, whiches in (
         ({}, 'dense', WHICH_PARAMS),
         ({'sparsity': SPARSITY}, 'sparse', WHICH_PARAMS),
-        *((d, i, ('y',)) for d, i in zip(HET_DGPS, HET_DGPS_IDS, strict=True)),
+        *((d, i, ('z', 'y')) for d, i in zip(HET_DGPS, HET_DGPS_IDS, strict=True)),
     )
     for which in whiches
 )
@@ -330,7 +333,7 @@ def expected_variance(
     elif which == 'mu':
         total = params.sigma2_pri if prior else params.sigma2_pop
         return total - params.sigma2_eps
-    elif which == 'y':
+    elif which in ('z', 'y'):
         return params.sigma2_pri if prior else params.sigma2_pop
     else:  # pragma: no cover
         raise KeyError(which)
@@ -539,6 +542,7 @@ def test_univariate(keys: split) -> None:
     assert_array_equal(dgp_uv.mulin, dgp_mv.mulin.squeeze(0))
     assert_array_equal(dgp_uv.muquad, dgp_mv.muquad.squeeze(0))
     assert_array_equal(dgp_uv.mu, dgp_mv.mu.squeeze(0))
+    assert_array_equal(dgp_uv.z, dgp_mv.z.squeeze(0))
     assert_array_equal(dgp_uv.y, dgp_mv.y.squeeze(0))
 
 
@@ -582,6 +586,7 @@ def test_split(keys: split, k: int | None, het_shape: str | None) -> None:
         assert part.x.shape == (kw['p'], length)
         core = (length,) if k is None else (k, length)
         assert part.y.shape == core
+        assert part.z.shape == core
         assert part.mulin.shape == core
         assert part.muquad.shape == core
         assert part.mu.shape == core
@@ -624,6 +629,7 @@ class TestOutcomeType:
         assert dgp.y.shape == (kw['n'],)
         assert dgp.y.dtype == jnp.float32
         assert_array_equal(jnp.unique(dgp.y), jnp.array([0.0, 1.0]))
+        assert_array_equal(dgp.y, (dgp.z > 0).astype(dgp.y.dtype))
         assert dgp.params.outcome_type is OutcomeType.binary
 
     def test_binary_multivariate(self, keys: split) -> None:
@@ -634,17 +640,20 @@ class TestOutcomeType:
         assert_array_equal(jnp.unique(dgp.y), jnp.array([0.0, 1.0]))
 
     def test_binary_threshold_matches_latent(self, keys: split) -> None:
-        """With the same key, binary `y` equals `(continuous_y > 0)`.
+        """With the same key, binary `y` thresholds the same latent `z`.
 
         The key flow in `gen_data_from_params` is independent of outcome_type,
         so generating with `'continuous'` and `'binary'` under the same top
-        level key must yield latents that differ only by the final threshold.
+        level key must yield the same latent `z`, with `y` equal to `z` or to
+        its threshold respectively.
         """
         kw = dict(KWARGS, lambda_=0.5)
         key = keys.pop()
         dgp_cont = gen_data(key, **kw)
         dgp_bin = gen_data(random.clone(key), outcome_type='binary', **kw)
-        assert_array_equal(dgp_bin.y, (dgp_cont.y > 0).astype(dgp_cont.y.dtype))
+        assert_array_equal(dgp_cont.y, dgp_cont.z)
+        assert_array_equal(dgp_bin.z, dgp_cont.z)
+        assert_array_equal(dgp_bin.y, (dgp_bin.z > 0).astype(dgp_bin.z.dtype))
 
     def test_mixed(self, keys: split) -> None:
         """Mixed outcome_type: binary rows are 0/1, continuous rows match the baseline."""
@@ -660,11 +669,13 @@ class TestOutcomeType:
             OutcomeType.binary,
             OutcomeType.continuous,
         )
+        # the latent is independent of the outcome types
+        assert_array_equal(dgp_mix.z, dgp_cont.z)
         # continuous rows unchanged
         assert_array_equal(dgp_mix.y[0], dgp_cont.y[0])
         assert_array_equal(dgp_mix.y[2], dgp_cont.y[2])
         # binary row is the threshold of the latent
-        assert_array_equal(dgp_mix.y[1], (dgp_cont.y[1] > 0).astype(dgp_cont.y.dtype))
+        assert_array_equal(dgp_mix.y[1], (dgp_mix.z[1] > 0).astype(dgp_mix.z.dtype))
 
     def test_all_same_tuple_collapses_to_scalar(self, keys: split) -> None:
         """A tuple of identical types is stored as a scalar `OutcomeType`."""
@@ -856,4 +867,5 @@ class TestHeteroskedasticity:
         cont = gen_data(key, **kw)
         binary = gen_data(random.clone(key), outcome_type='binary', **kw)
         assert_array_equal(jnp.unique(binary.y), jnp.array([0.0, 1.0]))
+        assert_array_equal(binary.z, cont.z)
         assert_array_equal(binary.y, (cont.y > 0).astype(cont.y.dtype))

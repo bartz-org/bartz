@@ -222,28 +222,36 @@ class PreLfUV(PreLf):
     """`PreLf` for the univariate case."""
 
     mean_factor: Float32[Array, '*num_trees tree_size']
+    """``error_cov_inv / prec``, where ``prec`` is the posterior precision of
+    the leaf."""
+
     centered_leaves: Float32[Array, '*num_trees tree_size']
+    """Zero-mean normal draws with the posterior variance of each leaf."""
 
 
 class PreLfMV(PreLf):
     """`PreLf` for the multivariate homoskedastic or scalar-weight case."""
 
     mean_factor: Float32[Array, '*num_trees k k tree_size']
+    """``error_cov_inv @ inv(prec)``, where ``prec`` is the posterior precision
+    of the leaf."""
+
     centered_leaves: Float32[Array, '*num_trees k tree_size']
+    """Zero-mean normal draws with the posterior covariance of each leaf."""
 
     logdet_prec: Float32[Array, '*num_trees tree_size']
     """The log-determinant of the posterior precision of each leaf."""
 
 
 class PreLfMVHet(PreLf):
-    """`PreLf` for the multivariate vector-weight case.
-
-    `mean_factor` holds the Cholesky factor of the posterior precision of each
-    leaf; the mean solve happens downstream in the sequential stage.
-    """
+    """`PreLf` for the multivariate vector-weight case."""
 
     mean_factor: Float32[Array, '*num_trees k k tree_size']
+    """The lower Cholesky factor of the posterior precision of each leaf; the
+    mean solve happens downstream in the sequential stage."""
+
     centered_leaves: Float32[Array, '*num_trees k tree_size']
+    """Zero-mean normal draws with the posterior covariance of each leaf."""
 
 
 class ParallelStageOut(Module):
@@ -706,6 +714,8 @@ def _precompute_leaf_terms_mv(
         centered = solve_triangular(L_prec, z[:, None], trans='T', lower=True).squeeze(
             -1
         )
+        # only a few leaves per tree end up using their logdet, but reducing
+        # right away is lighter on memory than storing diagonals for later
         return mean_factor, centered, _logdet_from_chol(L_prec)
 
     # vmap over trees then over leaves; the leaf axis is trailing in both

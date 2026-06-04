@@ -39,20 +39,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
 
-# Map column name -> polars expression for column-specific preprocessing.
-# Sentinels from opt.py (-1 for None, -2 for 'auto') are remapped to plot
-# positions: None -> 0.5 sits just below the smallest real batch count on a
-# log axis (continuous with the integer values); 'auto' -> -1 is deliberately
-# negative so it breaks the log scale and stands out as a categorical regime.
-_PLOT_PREPROCESSORS: dict[str, pl.Expr] = {
-    col: pl.col(col).cast(pl.Float64).replace({-1.0: 0.5, -2.0: -1.0})
-    for col in (
-        'num_chains',
-        'resid_num_batches',
-        'count_num_batches',
-        'prec_num_batches',
-    )
-}
+# Sentinel-encoded columns of result files written before opt.py started
+# recording the column list in the output config under plot.sentinels.
+_LEGACY_SENTINEL_COLS = (
+    'num_chains',
+    'resid_num_batches',
+    'count_num_batches',
+    'prec_num_batches',
+)
 
 # Relative tolerance for the local optimal band: walking out from the minimum
 # time_est along the sorted reduce_col axis, the band stops at the first point
@@ -68,6 +62,8 @@ class Data:
     optimal_df: pl.DataFrame
     scan_col: str
     reduce_col: str
+    scan_numeric: bool
+    reduce_numeric: bool
     matrix_cols: tuple[str, ...]
     fixed: dict[str, Any]
     out_dir: Path
@@ -107,9 +103,16 @@ def load_and_prepare_data(input_dir: Path) -> Data:
     matrix_cols = tuple(plot_cfg['matrix'])
 
     df = pl.read_parquet(results_path)
-    for col_name, expr in _PLOT_PREPROCESSORS.items():
+    df = df.drop(c for c in plot_cfg.get('drop', ()) if c in df.columns)
+    # Sentinels from opt.py (-1 for None, -2 for 'auto') are remapped to plot
+    # positions: None -> 0.5 sits just below the smallest real batch count on a
+    # log axis (continuous with the integer values); 'auto' -> -1 is deliberately
+    # negative so it breaks the log scale and stands out as a categorical regime.
+    for col_name in plot_cfg.get('sentinels', _LEGACY_SENTINEL_COLS):
         if col_name in df.columns:
-            df = df.with_columns(expr.alias(col_name))
+            df = df.with_columns(
+                pl.col(col_name).cast(pl.Float64).replace({-1.0: 0.5, -2.0: -1.0})
+            )
 
     time_cols = {'time_est', 'time_lo', 'time_up'}
     required_base_cols = {scan_col, reduce_col, *time_cols}
@@ -117,6 +120,11 @@ def load_and_prepare_data(input_dir: Path) -> Data:
     if missing:
         msg = f'Missing required columns in {results_path}: {sorted(missing)}'
         raise ValueError(msg)
+
+    # Non-numeric axes (e.g. a reduction slot's label column) are plotted
+    # categorically: no optimal band, no log scale.
+    scan_numeric = df.schema[scan_col].is_numeric()
+    reduce_numeric = df.schema[reduce_col].is_numeric()
 
     # Identify fixed columns (everything left after role + time columns)
     role_cols = {scan_col, reduce_col, *matrix_cols}
@@ -166,6 +174,8 @@ def load_and_prepare_data(input_dir: Path) -> Data:
         optimal_df=optimal_df,
         scan_col=scan_col,
         reduce_col=reduce_col,
+        scan_numeric=scan_numeric,
+        reduce_numeric=reduce_numeric,
         matrix_cols=matrix_cols,
         fixed=fixed,
         out_dir=input_dir,
@@ -224,6 +234,11 @@ def plot_optimal(data: Data, fig_name_prefix: str) -> None:
         hp_to_idx.append({v: i for i, v in enumerate(values)})
         dim_sizes.append(len(values))
 
+    # non-numeric reduce values are plotted at integer positions, in sort order
+    if not data.reduce_numeric:
+        categories = data.df[data.reduce_col].unique().sort().to_list()
+        positions = {value: i for i, value in enumerate(categories)}
+
     group_cols = [*data.matrix_cols, 'label']
     for group_keys, subset in data.optimal_df.group_by(group_cols, maintain_order=True):
         hp_vals = group_keys[:-1]
@@ -233,29 +248,48 @@ def plot_optimal(data: Data, fig_name_prefix: str) -> None:
 
         sorted_subset = subset.sort(data.scan_col)
         scan_values = sorted_subset[data.scan_col].to_numpy()
-        opt_values = sorted_subset[f'opt_{data.reduce_col}'].to_numpy()
-        lo_values = sorted_subset[f'lo_{data.reduce_col}'].to_numpy()
-        hi_values = sorted_subset[f'hi_{data.reduce_col}'].to_numpy()
-        ax.fill_between(
-            scan_values, lo_values, hi_values, color=color, alpha=0.2, linewidth=0
-        )
+        if data.reduce_numeric:
+            opt_values = sorted_subset[f'opt_{data.reduce_col}'].to_numpy()
+            lo_values = sorted_subset[f'lo_{data.reduce_col}'].to_numpy()
+            hi_values = sorted_subset[f'hi_{data.reduce_col}'].to_numpy()
+            ax.fill_between(
+                scan_values, lo_values, hi_values, color=color, alpha=0.2, linewidth=0
+            )
+        else:
+            opt_values = np.array(
+                [
+                    positions[v]
+                    for v in sorted_subset[f'opt_{data.reduce_col}'].to_list()
+                ]
+            )
         ax.plot(
             scan_values, opt_values, marker='o', label=label, markersize=4, color=color
         )
 
-    scan_all = data.optimal_df[data.scan_col].to_numpy().astype(float)
-    opt_all = data.optimal_df[f'opt_{data.reduce_col}'].to_numpy().astype(float)
-    lo_all = data.optimal_df[f'lo_{data.reduce_col}'].to_numpy().astype(float)
-    hi_all = data.optimal_df[f'hi_{data.reduce_col}'].to_numpy().astype(float)
-    y_all = np.concatenate([opt_all, lo_all, hi_all])
-    pct = round(OPTIMAL_BAND_TOLERANCE * 100)
+    if data.scan_numeric:
+        scan_all = data.optimal_df[data.scan_col].to_numpy().astype(float)
+        xscale = pick_scale(scan_all)
+    else:
+        xscale = 'linear'
+    title = f'Optimal {data.reduce_col} vs {data.scan_col}'
+    if data.reduce_numeric:
+        opt_all = data.optimal_df[f'opt_{data.reduce_col}'].to_numpy().astype(float)
+        lo_all = data.optimal_df[f'lo_{data.reduce_col}'].to_numpy().astype(float)
+        hi_all = data.optimal_df[f'hi_{data.reduce_col}'].to_numpy().astype(float)
+        yscale = pick_scale(np.concatenate([opt_all, lo_all, hi_all]))
+        pct = round(OPTIMAL_BAND_TOLERANCE * 100)
+        title += f' (band: time within {pct}% of min)'
+    else:
+        yscale = 'linear'
     ax.set(
-        xscale=pick_scale(scan_all),
-        yscale=pick_scale(y_all),
+        xscale=xscale,
+        yscale=yscale,
         xlabel=data.scan_col,
         ylabel=f'optimal {data.reduce_col}',
-        title=f'Optimal {data.reduce_col} vs {data.scan_col} (band: time within {pct}% of min)',
+        title=title,
     )
+    if not data.reduce_numeric:
+        ax.set_yticks(range(len(categories)), [str(c) for c in categories], fontsize=8)
     if data.matrix_cols:
         ax.legend()
     ax.grid(True, alpha=0.3)
@@ -269,6 +303,11 @@ def plot_time_vs_reduce_series(data: Data, fig_name_prefix: str) -> None:
     scan_values = (
         data.df.select(data.scan_col).unique().sort(data.scan_col).to_series().to_list()
     )
+
+    # non-numeric reduce values are plotted at integer positions, in sort order
+    if not data.reduce_numeric:
+        categories = data.df[data.reduce_col].unique().sort().to_list()
+        positions = {value: i for i, value in enumerate(categories)}
 
     for (label,), subset in data.df.group_by('label', maintain_order=True):
         fig, ax = plt.subplots(
@@ -286,7 +325,12 @@ def plot_time_vs_reduce_series(data: Data, fig_name_prefix: str) -> None:
             )
             if n_subset.height == 0:
                 continue
-            reduce_vals = n_subset[data.reduce_col].to_numpy()
+            if data.reduce_numeric:
+                reduce_vals = n_subset[data.reduce_col].to_numpy()
+            else:
+                reduce_vals = np.array(
+                    [positions[v] for v in n_subset[data.reduce_col].to_list()]
+                )
             time_est = n_subset['time_est'].to_numpy()
             min_time = time_est.min()
             time_lo = n_subset['time_lo'].to_numpy()
@@ -308,14 +352,25 @@ def plot_time_vs_reduce_series(data: Data, fig_name_prefix: str) -> None:
                 linestyle='none',
             )
 
-        reduce_all = subset[data.reduce_col].to_numpy().astype(float)
+        if data.reduce_numeric:
+            xscale = pick_scale(subset[data.reduce_col].to_numpy().astype(float))
+        else:
+            xscale = 'linear'
         ax.set(
-            xscale=pick_scale(reduce_all),
+            xscale=xscale,
             xlabel=data.reduce_col,
             ylabel='time range / min(time_est)',
             title=f'Time vs {data.reduce_col}',
             ylim=(0, None),
         )
+        if not data.reduce_numeric:
+            ax.set_xticks(
+                range(len(categories)),
+                [str(c) for c in categories],
+                rotation=30,
+                ha='right',
+                fontsize=8,
+            )
         ax.legend(title=label.replace(', ', '\n'), loc='upper right')
         ax.grid(True, alpha=0.3)
         add_fixed_textbox(ax, data.fixed)

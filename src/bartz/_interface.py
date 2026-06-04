@@ -1023,9 +1023,8 @@ class Bart(Module):
         """
         trace = self._main_trace
         trees = _trees_chain_first(trace)
-        if not trace.has_chains:
-            i_chain = ...
-        trees = tree.map(lambda x: x[i_chain, i_sample, i_tree, :], trees)
+        chain_index = i_chain if trace.has_chains else ...
+        trees = tree.map(lambda x: x[chain_index, i_sample, i_tree, :], trees)
         s = format_tree(trees, print_all=print_all)
         print(s)  # noqa: T201, this method is intended for debug
 
@@ -1033,7 +1032,7 @@ class Bart(Module):
 def _process_predictor_input(
     x: Real[ArrayLike, 'p n'] | DataFrame,
 ) -> tuple[Shaped[Array, 'p n'], Any]:
-    if hasattr(x, 'columns'):
+    if isinstance(x, DataFrame):
         fmt = dict(kind='dataframe', columns=x.columns)
         x = x.to_numpy().T
     else:
@@ -1080,9 +1079,9 @@ def _process_response_input(
         Shaped[Array, ' n'] | Shaped[Array, 'k n'],
     ]
 ):
-    if hasattr(arr, 'columns'):
+    if isinstance(arr, DataFrame):
         arr = arr.to_numpy().T
-    elif hasattr(arr, 'to_numpy'):
+    elif isinstance(arr, Series):
         arr = arr.to_numpy()
     # in normal mode: one unconditional copy, safe to donate downstream.
     # in `keep` mode: convert without copying when possible to get the

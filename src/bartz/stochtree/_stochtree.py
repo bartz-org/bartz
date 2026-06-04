@@ -811,7 +811,7 @@ def check_X(
     X: Real[ArrayLike, 'n p'] | DataFrame, *, name: str = 'X'
 ) -> Real[Array, 'n p']:
     """Convert a DataFrame/array-like to a 2-D jax array in ``(n, p)`` layout."""
-    if hasattr(X, 'columns') and hasattr(X, 'to_numpy'):
+    if isinstance(X, DataFrame):
         X = X.to_numpy()
     arr = jnp.asarray(X)
     if arr.ndim == 1:
@@ -826,7 +826,7 @@ def _coerce_response(
     y: Real[ArrayLike, ' n'] | Series, *, name: str
 ) -> Real[Array, ' n']:
     """Convert a Series/array-like response to a 1-D jax array."""
-    if hasattr(y, 'to_numpy'):
+    if isinstance(y, Series):
         y = y.to_numpy()
     arr = jnp.asarray(y)
     if arr.ndim != 1:

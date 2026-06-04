@@ -76,7 +76,7 @@ class BatchedReduction(ReductionConfig):
 
     num_batches: int | None | Literal['auto'] = field(static=True, default='auto')
     """The number of datapoint batches. If `None`, the reduce is unbatched. If
-    'auto', resolved per-platform at run time via `lax.platform_dependent`."""
+    'auto', resolved per-platform at run time via `jax.lax.platform_dependent`."""
 
     auto_gpu_target: int = field(static=True, default=1024)
     """Target number of batches on gpu when `num_batches` is 'auto'."""
@@ -304,9 +304,9 @@ class PallasReduction(ReductionConfig):
     """
 
     block_size: int | Literal['auto'] = field(static=True, default='auto')
-    """Datapoints contracted per kernel iteration: the width of the one-hot tile
-    in fast memory. If 'auto', chosen to keep that tile small. Should be a power
-    of 2 on gpu."""
+    """Datapoints contracted per kernel iteration, i.e., the width of the one-hot
+    tile in fast memory. If 'auto', chosen to keep that tile small. Should be a
+    power of 2 on gpu."""
 
     num_blocks: int | Literal['auto'] = field(static=True, default='auto')
     """Number of kernel instances (grid size) the datapoints are split across,

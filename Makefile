@@ -158,11 +158,16 @@ SELECT = $(if $(GROUP),$(GROUP_$(GROUP)))
 NPROC ?= 2
 
 # On GPU, parallel workers overlap compilation (which dominates the run time),
-# but the processes share the GPU memory and OOM on small cards, so fall back
-# to a single worker when the GPU has less total memory than this (MiB).
+# but the processes share the GPU memory and OOM on small cards, so turn off
+# xdist when the GPU has less total memory than this (MiB). An explicit NPROC
+# (command line or environment) takes precedence over the detection.
 GPU_MIN_MEM = 15000
 GPU_MEM = $(shell nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1)
-GPU_NPROC = $(shell [ "$(GPU_MEM)" -ge $(GPU_MIN_MEM) ] 2>/dev/null && echo $(NPROC) || echo 1)
+ifeq ($(origin NPROC),file)
+GPU_NPROC = $(shell [ "$(GPU_MEM)" -ge $(GPU_MIN_MEM) ] 2>/dev/null && echo $(NPROC) || echo 0)
+else
+GPU_NPROC = $(NPROC)
+endif
 
 TESTS_VARS = COVERAGE_FILE=.coverage.$@$(if $(GROUP),-$(GROUP))
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000

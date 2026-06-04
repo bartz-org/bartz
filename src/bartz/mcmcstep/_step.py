@@ -34,7 +34,7 @@ from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
-from jaxtyping import Array, Bool, Float32, Int32, Key, UInt, UInt32
+from jaxtyping import Array, Bool, Float32, Int32, Key, Shaped, UInt, UInt32
 
 from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz._jaxext.random import loggamma
@@ -324,29 +324,16 @@ def accept_moves_parallel_stage(
             state.forest.leaf_indices, moves, state.config
         )
 
-    # affluence of the nodes touched by each move: whether `node` and its
-    # children, as leaves, would be growable (admissible rule + enough
-    # datapoints). The children must also lie within the heap, i.e. not be at
-    # the bottom level; `node` always does and is admissible as a leaf, so it
-    # only needs the count. These feed the transition ratio and the final
+    # affluence of the nodes touched by each move: whether they would be
+    # growable as leaves (admissible rule + enough datapoints). The children
+    # must also lie within the heap, i.e. not be at the bottom level; the
+    # parent always does. These feed the transition ratio and the final
     # `affluence_tree` update.
     _, half = state.forest.var_tree.shape
-    children_in_heap = moves.children < half
+    lrt_affluent = (moves.lrt_nodes < half) & moves.lrt_growable
     if state.forest.min_points_per_decision_node is not None:
-        min_dn = state.forest.min_points_per_decision_node
-        moves = replace(
-            moves,
-            node_affluent=move_counts.lrt[..., 2] >= min_dn,
-            children_affluent=children_in_heap
-            & moves.children_growable
-            & (move_counts.lrt[..., :2] >= min_dn),
-        )
-    else:
-        moves = replace(
-            moves,
-            node_affluent=jnp.ones_like(moves.grow),
-            children_affluent=children_in_heap & moves.children_growable,
-        )
+        lrt_affluent &= move_counts.lrt >= state.forest.min_points_per_decision_node
+    moves = replace(moves, lrt_affluent=lrt_affluent)
 
     # veto grove move if new leaves don't have enough datapoints
     if state.forest.min_points_per_leaf is not None:
@@ -419,14 +406,24 @@ def _apply_grow_to_indices(
     moves: Moves, leaf_indices: UInt[Array, ' n'], X: UInt[Array, 'p n']
 ) -> UInt[Array, ' n']:
     """Implement `apply_grow_to_indices`."""
-    left_child = moves.node.astype(leaf_indices.dtype) << 1
+    left_child = moves.lrt_nodes[0].astype(leaf_indices.dtype)
     x: UInt[Array, ' n'] = X[moves.grow_var, :]
     go_right = x >= moves.grow_split
     tree_size = jnp.array(2 * moves.var_tree.size)
-    node_to_update = jnp.where(moves.grow, moves.node, tree_size)
+    node_to_update = jnp.where(moves.grow, moves.lrt_nodes[2], tree_size)
     return jnp.where(
         leaf_indices == node_to_update, left_child + go_right, leaf_indices
     )
+
+
+def _fill_lrt_total(lrt: Shaped[Array, '... 3']) -> Shaped[Array, '... 3']:
+    """Set the total slot of stacked (left, right, total) values to left + right.
+
+    The left and right slots pass through unchanged, the stale value in the
+    total slot is ignored. Implemented with fusable elementwise operations.
+    """
+    total = lrt[..., 0] + lrt[..., 1]
+    return jnp.where(jnp.arange(3) == 2, total[..., None], lrt)
 
 
 def _compute_count_or_prec_trees(
@@ -488,17 +485,16 @@ def _compute_count_or_prec_tree(
         value, leaf_indices, tree_size, dtype, num_batches, which, config.data_sharded
     )
 
-    # count datapoints in nodes modified by move; the weighted version is not
-    # needed because the likelihood terms are derived from the leaf terms
-    children = trees[..., moves.children]
-    total = children[..., 0] + children[..., 1]
+    # count datapoints in nodes modified by move, and write the total into the
+    # non-leaf parent node (the children slots are written back unchanged); the
+    # weighted version of the counts is not needed because the likelihood terms
+    # are derived from the leaf terms
+    lrt = _fill_lrt_total(trees[..., moves.lrt_nodes])
     if prec_scale is None:
-        counts = Counts(lrt=jnp.concatenate([children, total[..., None]], axis=-1))
+        counts = Counts(lrt=lrt)
     else:
         counts = None
-
-    # write count into non-leaf node
-    trees = trees.at[..., moves.node].set(total)
+    trees = trees.at[..., moves.lrt_nodes].set(lrt)
 
     return trees, counts
 
@@ -567,8 +563,8 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
     Complete non-likelihood MH ratio calculation.
 
     This function adds the probability of choosing a prune move over the grow
-    move in the inverse transition, and the a priori probability that the
-    children nodes are leaves.
+    move in the inverse transition, and the prior odds that the modified node
+    is nonterminal with terminal children.
 
     Parameters
     ----------
@@ -584,14 +580,16 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
     -------
     The updated moves, with `partial_ratio=None` and `log_trans_prior_ratio` set.
     """
-    # can the children be grown by the proposal? `children_affluent` already
-    # folds in the `min_points_per_decision_node` threshold, because the grow
+    assert moves.lrt_affluent is not None
+
+    # can the children be grown by the proposal? `lrt_affluent` already folds
+    # in the `min_points_per_decision_node` threshold, because the grow
     # proposal draws from the pool of leaves that pass it. This enters only the
     # transition probability.
 
     # p_prune if grow
     other_growable_leaves = moves.num_growable >= 2
-    grow_again_allowed = other_growable_leaves | jnp.any(moves.children_affluent)
+    grow_again_allowed = other_growable_leaves | jnp.any(moves.lrt_affluent[:2])
     grow_p_prune = jnp.where(grow_again_allowed, 0.5, 1.0)
 
     # p_prune if prune
@@ -600,17 +598,21 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
     # select p_prune
     p_prune = jnp.where(moves.grow, grow_p_prune, prune_p_prune)
 
-    # prior probability of both children being terminal. This uses the
+    # prior odds of the node being nonterminal, times the prior probability of
+    # both children being terminal. The children terminality uses the
     # admissibility ignoring counts, because the standard BART prior conditions
     # the non-terminal probability only on the existence of available decision
     # rules, not on the count thresholds (which are a bartz proposal-efficiency
-    # device, not part of the target distribution).
-    pt_children = jnp.prod(1 - p_nonterminal[moves.children] * moves.children_growable)
+    # device, not part of the target distribution). The fill value avoids a 0
+    # and then an inf in the log if the move is not allowed and the indices are
+    # out of bounds.
+    pnt = p_nonterminal.at[moves.lrt_nodes].get(mode='fill', fill_value=0.5)
+    prior_ratio = pnt[2] / (1 - pnt[2]) * jnp.prod(1 - pnt[:2] * moves.lrt_growable[:2])
 
     assert moves.partial_ratio is not None
     return replace(
         moves,
-        log_trans_prior_ratio=jnp.log(moves.partial_ratio * pt_children * p_prune),
+        log_trans_prior_ratio=jnp.log(moves.partial_ratio * prior_ratio * p_prune),
         partial_ratio=None,
     )
 
@@ -647,9 +649,10 @@ def _adapt_leaf_trees_to_grow_indices(
     moves: Moves,
 ) -> Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size']:
     """Implement `adapt_leaf_trees_to_grow_indices`."""
-    values_at_node = leaf_trees[..., moves.node]
+    # the parent slot is written back unchanged to share a single scatter
+    values_at_node = leaf_trees[..., moves.lrt_nodes[2]]
     return leaf_trees.at[
-        ..., jnp.where(moves.grow, moves.children, leaf_trees.size)
+        ..., jnp.where(moves.grow, moves.lrt_nodes, leaf_trees.size)
     ].set(values_at_node[..., None])
 
 
@@ -891,16 +894,17 @@ def precompute_likelihood_terms(
     -------
     Pre-computed terms of the likelihood ratio, one per tree.
     """
-    lrt_nodes = jnp.concatenate([moves.children, moves.node[..., None]], axis=-1)
     if isinstance(prelf, PreLfUV):
         return _precompute_likelihood_terms_uv(
-            error_cov_inv, leaf_prior_cov_inv, prelf, lrt_nodes
+            error_cov_inv, leaf_prior_cov_inv, prelf, moves.lrt_nodes
         )
     elif isinstance(prelf, PreLfMVHet):
-        return _precompute_likelihood_terms_mv_het(leaf_prior_cov_inv, prelf, lrt_nodes)
+        return _precompute_likelihood_terms_mv_het(
+            leaf_prior_cov_inv, prelf, moves.lrt_nodes
+        )
     else:
         return _precompute_likelihood_terms_mv(
-            error_cov_inv, leaf_prior_cov_inv, prelf, lrt_nodes
+            error_cov_inv, leaf_prior_cov_inv, prelf, moves.lrt_nodes
         )
 
 
@@ -1085,13 +1089,12 @@ def accept_move_and_sample_leaves(
     # subtract starting tree from function
     resid_tree += pt.prec_tree * pt.leaf_tree
 
-    # sum residuals in parent node modified by move and compute likelihood
-    resid_children = resid_tree[..., pt.move.children]
-    resid_total = resid_children[..., 0] + resid_children[..., 1]
-    assert pt.move.node.dtype == jnp.int32
-    resid_tree = resid_tree.at[..., pt.move.node].set(resid_total)
+    # sum residuals in parent node modified by move and compute likelihood;
+    # the children slots are written back unchanged to share a single scatter
+    assert pt.move.lrt_nodes.dtype == jnp.int32
+    resid_lrt = _fill_lrt_total(resid_tree[..., pt.move.lrt_nodes])
+    resid_tree = resid_tree.at[..., pt.move.lrt_nodes].set(resid_lrt)
 
-    resid_lrt = jnp.concatenate([resid_children, resid_total[..., None]], axis=-1)
     log_lk_ratio = compute_likelihood_ratio(resid_lrt, pt.prelkv, at.error_cov_inv)
 
     # calculate accept/reject ratio
@@ -1120,11 +1123,12 @@ def accept_move_and_sample_leaves(
         mean_post = resid_tree * pt.prelf.mean_factor
     leaf_tree = mean_post + pt.prelf.centered_leaves
 
-    # copy leaves around such that the leaf indices point to the correct leaf
+    # copy leaves around such that the leaf indices point to the correct leaf;
+    # the parent slot is written back unchanged to share a single scatter
     to_prune = acc ^ pt.move.grow
-    leaf_tree = leaf_tree.at[..., jnp.where(to_prune, pt.move.children, tree_size)].set(
-        leaf_tree[..., pt.move.node, None]
-    )
+    leaf_tree = leaf_tree.at[
+        ..., jnp.where(to_prune, pt.move.lrt_nodes, tree_size)
+    ].set(leaf_tree[..., pt.move.lrt_nodes[2], None])
     # replace old tree with new tree in function values
     resid += (pt.leaf_tree - leaf_tree)[..., pt.leaf_indices]
 
@@ -1306,10 +1310,12 @@ def _apply_moves_to_leaf_indices(
 ) -> UInt[Array, ' n']:
     """Implement `apply_moves_to_leaf_indices`."""
     mask = ~jnp.array(1, leaf_indices.dtype)  # ...1111111110
-    is_child = (leaf_indices & mask) == moves.children[0]
+    is_child = (leaf_indices & mask) == moves.lrt_nodes[0]
     assert moves.to_prune is not None
     return jnp.where(
-        is_child & moves.to_prune, moves.node.astype(leaf_indices.dtype), leaf_indices
+        is_child & moves.to_prune,
+        moves.lrt_nodes[2].astype(leaf_indices.dtype),
+        leaf_indices,
     )
 
 
@@ -1341,12 +1347,11 @@ def _apply_moves_to_split_trees(
 ) -> UInt[Array, ' half_tree_size']:
     """Implement `apply_moves_to_split_trees`."""
     assert moves.to_prune is not None
-    return (
-        split_tree.at[jnp.where(moves.grow, moves.node, split_tree.size)]
-        .set(moves.grow_split.astype(split_tree.dtype))
-        .at[jnp.where(moves.to_prune, moves.node, split_tree.size)]
-        .set(0)
-    )
+    # a single scatter serves both cases: an accepted grow writes the new
+    # cutpoint, while pruning (accepted prune or rejected grow) zeroes the node
+    return split_tree.at[
+        jnp.where(moves.grow | moves.to_prune, moves.lrt_nodes[2], split_tree.size)
+    ].set(jnp.where(moves.to_prune, 0, moves.grow_split).astype(split_tree.dtype))
 
 
 @named_call
@@ -1381,21 +1386,17 @@ def _apply_moves_to_affluence_trees(
 ) -> Bool[Array, ' half_tree_size']:
     """Implement `apply_moves_to_affluence_trees`."""
     assert moves.to_prune is not None
-    assert moves.node_affluent is not None
-    size = affluence_tree.size
+    assert moves.lrt_affluent is not None
     # GROW: node becomes internal, children become leaves with their affluence.
-    # PRUNE (accepted prune or rejected grow): node becomes a leaf, children are
-    # deleted. Indices of the move not taken resolve to `size` and drop.
-    return (
-        affluence_tree.at[jnp.where(moves.grow, moves.node, size)]
-        .set(False)
-        .at[jnp.where(moves.grow, moves.children, size)]
-        .set(moves.children_affluent)
-        .at[jnp.where(moves.to_prune, moves.node, size)]
-        .set(moves.node_affluent)
-        .at[jnp.where(moves.to_prune, moves.children, size)]
-        .set(False)
-    )
+    # PRUNE (accepted prune or rejected grow): node becomes a leaf with its
+    # affluence, children are deleted. Either way all three nodes are written:
+    # the mask keeps the affluence of the nodes that become leaves and zeroes
+    # the rest. If no move is applied (a rejected prune), the indices resolve
+    # to `size` and the writes drop.
+    becomes_leaf = moves.to_prune ^ jnp.array([True, True, False])
+    return affluence_tree.at[
+        jnp.where(moves.grow | moves.to_prune, moves.lrt_nodes, affluence_tree.size)
+    ].set(moves.lrt_affluent & becomes_leaf)
 
 
 @jax.jit

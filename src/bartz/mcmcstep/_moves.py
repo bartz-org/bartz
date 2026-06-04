@@ -52,18 +52,17 @@ class Moves(Module):
     num_growable: Int32[Array, '*num_trees']
     """The number of growable leaves in the original tree."""
 
-    node: Int32[Array, '*num_trees']
-    """The index of the leaf to grow or node to prune."""
-
-    children: Int32[Array, '*num_trees 2']
-    """The indices of the left and right children of 'node'."""
+    lrt_nodes: Int32[Array, '*num_trees 3']
+    """The indices of the left child, right child, and parent node the move
+    operates on, stacked along the trailing axis. The parent is the leaf to
+    grow or the node to prune."""
 
     partial_ratio: Float32[Array, '*num_trees'] | None
     """A factor of the Metropolis-Hastings ratio of the move. It lacks the
     likelihood ratio, the probability of proposing the prune move, and the
-    probability that the children of the modified node are terminal. If the
-    move is PRUNE, the ratio is inverted. `None` once
-    `log_trans_prior_ratio` has been computed."""
+    prior probabilities that the modified node is nonterminal and that its
+    children are terminal. If the move is PRUNE, the ratio is inverted. `None`
+    once `log_trans_prior_ratio` has been computed."""
 
     log_trans_prior_ratio: None | Float32[Array, '*num_trees']
     """The logarithm of the product of the transition and prior terms of the
@@ -79,21 +78,18 @@ class Moves(Module):
     var_tree: UInt[Array, '*num_trees half_tree_size']
     """The updated decision axes of the trees, valid whatever move."""
 
-    children_growable: Bool[Array, '*num_trees 2']
-    """Whether the left and right children of `node` have available decision
-    rules, *not* counting the datapoint thresholds. This is the admissibility
-    used in the prior term of the Metropolis-Hastings ratio, matching the
-    standard BART prior which ignores the count constraints."""
+    lrt_growable: Bool[Array, '*num_trees 3']
+    """Whether the nodes in `lrt_nodes`, as leaves, have available decision
+    rules, *not* counting the datapoint thresholds. The parent slot is `True`
+    by construction. This is the admissibility used in the prior term of the
+    Metropolis-Hastings ratio, matching the standard BART prior which ignores
+    the count constraints."""
 
-    node_affluent: None | Bool[Array, '*num_trees']
-    """Whether `node`, as a leaf, would be a growable leaf, counting the
-    datapoint thresholds. Only meaningful when the move prunes or a grow is
+    lrt_affluent: None | Bool[Array, '*num_trees 3']
+    """Whether the nodes in `lrt_nodes`, as leaves within the heap, would be
+    growable leaves, counting the datapoint thresholds. The children slots
+    matter when the move grows, the parent slot when it prunes or a grow is
     rejected. `None` until set in `accept_moves_parallel_stage`."""
-
-    children_affluent: None | Bool[Array, '*num_trees 2']
-    """Whether the left and right children of `node`, as leaves within the
-    heap, would be growable leaves, counting the datapoint thresholds. `None`
-    until set in `accept_moves_parallel_stage`."""
 
     logu: Float32[Array, '*num_trees']
     """The logarithm of a uniform (0, 1] random variable to be used to
@@ -137,14 +133,13 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
         forest.affluence_tree,
         forest.max_split,
         forest.blocked_vars,
-        forest.p_nonterminal,
         forest.p_propose_grow,
         forest.log_s,
     )
 
 
 @named_call
-@partial(vmap_nodoc, in_axes=(0, 0, 0, 0, None, None, None, None, None))
+@partial(vmap_nodoc, in_axes=(0, 0, 0, 0, None, None, None, None))
 def _propose_moves(
     key: Key[Array, ''],
     var_tree: UInt[Array, ' half_tree_size'],
@@ -152,7 +147,6 @@ def _propose_moves(
     affluence_tree: Bool[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
     blocked_vars: UInt[Array, ' k'] | None,
-    p_nonterminal: Float32[Array, ' 2*half_tree_size'],
     p_propose_grow: Float32[Array, ' half_tree_size'],
     log_s: Float32[Array, ' p'] | None,
 ) -> Moves:
@@ -184,9 +178,6 @@ def _propose_moves(
         The maximum split index for each variable.
     blocked_vars
         The indices of the variables that have no available cutpoints.
-    p_nonterminal
-        The a priori probability of a node to be nonterminal conditional on the
-        ancestors, including at the maximum depth where it should be zero.
     p_propose_grow
         The unnormalized probability of choosing a leaf to grow.
     log_s
@@ -222,9 +213,10 @@ def _propose_moves(
     p_grow = jnp.where(grow_allowed & prune_allowed, 0.5, grow_allowed)
     grow = u < p_grow  # use < instead of <= because u is in [0, 1)
 
-    # merge the node the move operates on, and its children indices
+    # merge the node the move operates on, and stack its children indices with
+    # it: [left child, right child, node]
     node = jnp.where(grow, leaf_to_grow, node_to_prune)
-    children = (node << 1) | jnp.arange(2)
+    lrt_nodes = (node << jnp.array([1, 1, 0])) | jnp.array([0, 1, 0])
 
     # sample a decision rule for GROW; for PRUNE recover the rule already stored
     # at the node. `num_available_var` is the count of admissible variables at
@@ -242,14 +234,15 @@ def _propose_moves(
     )
     split_idx = jnp.where(grow, sampled_split, existing_split)
 
-    # admissibility of the two children of `node`, ignoring counts; for GROW
-    # these are the new leaves, for PRUNE the (existing) leaves that would be
-    # deleted. The criterion is the same as for grow: a child is admissible if
-    # there is another available variable, or the used variable still has a
-    # nonempty split range on the child's side. If the move is blocked these
-    # values may not make sense.
-    children_growable = (num_available_var > 1) | jnp.stack(
-        [l < split_idx, split_idx + 1 < r]
+    # admissibility of the nodes involved in the move as leaves, ignoring
+    # counts; for GROW the children are the new leaves, for PRUNE the
+    # (existing) leaves that would be deleted, while `node` is admissible by
+    # construction whatever the move. The criterion for a child is the same as
+    # for grow: it is admissible if there is another available variable, or the
+    # used variable still has a nonempty split range on the child's side. If
+    # the move is blocked these values may not make sense.
+    lrt_growable = (num_available_var > 1) | jnp.stack(
+        [l < split_idx, split_idx + 1 < r, jnp.array(True)]
     )
 
     # partial Metropolis-Hastings ratio; the formula is shared, treating the
@@ -257,14 +250,13 @@ def _propose_moves(
     # whose ratio is inverted later)
     prob_choose = jnp.where(grow, grow_prob_choose, prune_prob_choose)
     num_prunable = jnp.where(grow, grow_num_prunable, prune_num_prunable)
-    ratio = compute_partial_ratio(prob_choose, num_prunable, p_nonterminal, node)
+    ratio = compute_partial_ratio(prob_choose, num_prunable, node)
 
     return Moves(
         allowed=grow_allowed | prune_allowed,
         grow=grow,
         num_growable=num_growable,
-        node=node,
-        children=children,
+        lrt_nodes=lrt_nodes,
         partial_ratio=ratio,
         log_trans_prior_ratio=None,  # will be set in complete_ratio
         grow_var=sampled_var,
@@ -272,9 +264,8 @@ def _propose_moves(
         # var_tree only changes at `node` for GROW; for PRUNE this is a no-op
         # since `var` equals the existing variable there
         var_tree=var_tree.at[node].set(var.astype(var_tree.dtype)),
-        children_growable=children_growable,
-        node_affluent=None,  # set in accept_moves_parallel_stage
-        children_affluent=None,
+        lrt_growable=lrt_growable,
+        lrt_affluent=None,  # set in accept_moves_parallel_stage
         logu=jnp.log1p(-exp1mlogu),
         acc=None,  # will be set in accept_moves_sequential_stage
         to_prune=None,  # will be set in accept_moves_sequential_stage
@@ -649,11 +640,10 @@ def choose_split(
 def compute_partial_ratio(
     prob_choose: Float32[Array, ''],
     num_prunable: Int32[Array, ''],
-    p_nonterminal: Float32[Array, ' tree_size'],
     leaf_to_grow: Int32[Array, ''],
 ) -> Float32[Array, '']:
     """
-    Compute the product of the transition and prior ratios of a grow move.
+    Compute the partial transition ratio of a grow move.
 
     Parameters
     ----------
@@ -663,29 +653,28 @@ def compute_partial_ratio(
     num_prunable
         The number of leaf parents that could be pruned, after converting the
         leaf to be grown to a non-terminal node.
-    p_nonterminal
-        The a priori probability of each node being nonterminal conditional on
-        its ancestors.
     leaf_to_grow
         The index of the leaf to grow.
 
     Returns
     -------
-    The partial transition ratio times the prior ratio.
+    The partial transition ratio.
 
     Notes
     -----
     The transition ratio is P(new tree => old tree) / P(old tree => new tree).
     The "partial" transition ratio returned is missing the factor P(propose
-    prune) in the numerator. The prior ratio is P(new tree) / P(old tree). The
-    "partial" prior ratio is missing the factor P(children are leaves).
+    prune) in the numerator. The prior ratio P(new tree) / P(old tree) is not
+    included either: its decision rule factors cancel against the transition
+    ratio, and its node terminality factors are applied in `complete_ratio`.
     """
-    # the two ratios also contain factors num_available_split *
-    # num_available_var * s[var], but they cancel out
+    # the transition and prior ratios also contain factors num_available_split
+    # * num_available_var * s[var], but they cancel out
 
-    # p_prune and 1 - p_nonterminal[child] * I(is the child growable) can't be
-    # computed here because they need the count trees, which are computed in the
-    # acceptance phase
+    # p_prune can't be computed here because it needs the count trees, which
+    # are computed in the acceptance phase; the prior terminality factors are
+    # computed alongside it in `complete_ratio` to share a single gather of
+    # p_nonterminal
 
     prune_allowed = leaf_to_grow != 1
     # prune allowed  <--->  the initial tree is not a root
@@ -694,12 +683,7 @@ def compute_partial_ratio(
     p_grow = jnp.where(prune_allowed, 0.5, 1)
     inv_trans_ratio = p_grow * prob_choose * num_prunable
 
-    # .at.get because if leaf_to_grow is out of bounds (move not allowed), this
-    # would produce a 0 and then an inf when `complete_ratio` takes the log
-    pnt = p_nonterminal.at[leaf_to_grow].get(mode='fill', fill_value=0.5)
-    tree_ratio = pnt / (1 - pnt)
-
-    return tree_ratio / jnp.where(inv_trans_ratio, inv_trans_ratio, 1)
+    return jnp.reciprocal(jnp.where(inv_trans_ratio, inv_trans_ratio, 1))
 
 
 def choose_leaf_parent(
@@ -742,12 +726,11 @@ def choose_leaf_parent(
 
     # growable leaves of the tree pruned at `node_to_prune`: start from the
     # current growable leaves, drop the two children that would be deleted, and
-    # add `node_to_prune`, which becomes a growable leaf (it was a decision node,
-    # so it has an admissible rule). Out-of-heap children indices drop harmlessly.
-    children = (node_to_prune << 1) | jnp.arange(2)
-    is_growable_leaf = (
-        affluence_tree.at[node_to_prune].set(True).at[children].set(False)
-    )
+    # add `node_to_prune`, which becomes a growable leaf (it was a decision
+    # node, so it has an admissible rule), with a single scatter on the stacked
+    # [left, right, node] indices. Out-of-heap indices drop harmlessly.
+    lrt_nodes = (node_to_prune << jnp.array([1, 1, 0])) | jnp.array([0, 1, 0])
+    is_growable_leaf = affluence_tree.at[lrt_nodes].set(jnp.array([False, False, True]))
     distr_norm = jnp.sum(p_propose_grow, where=is_growable_leaf)
     prob_choose = p_propose_grow.at[node_to_prune].get(mode='fill', fill_value=0)
     prob_choose = prob_choose / jnp.where(distr_norm, distr_norm, 1)

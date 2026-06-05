@@ -250,7 +250,8 @@ class OneHotReduction(ReductionConfig):
         (n,) = indices.shape
         batch_shape = values.shape[:-1]
         bins = jnp.arange(size, dtype=indices.dtype)
-        iota = jnp.arange(n)
+        # unsigned avoids a negative-index normalization select in the scatter
+        iota = jnp.arange(n, dtype=jnp.uint32)
 
         # one-hots and scatter buffers hold the values, so they are built in
         # the values' dtype; only the reduction accumulates in `dtype`. The

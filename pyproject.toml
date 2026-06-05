@@ -165,7 +165,12 @@ allow-star-arg-any = true
 
 [tool.ruff.lint.flake8-bugbear]
 # equinox modules are frozen, so they are safe to construct in argument defaults
-extend-immutable-calls = ["bartz.mcmcstep._reduction.BatchedReduction"]
+extend-immutable-calls = [
+    "bartz.mcmcstep._reduction.BatchedReduction",
+    "bartz.testing._distr.Constant",
+    "bartz.testing._distr.DiscreteUniform",
+    "bartz.testing._distr.Uniform",
+]
 
 [tool.ruff.lint]
 select = [
@@ -267,6 +272,8 @@ banned-from = ["jax.random", "jax.lax", "jax.numpy", "jax.tree", "math"]
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "jax.lax.reciprocal".msg = "Use jnp.reciprocal"
 "jax.random.PRNGKey".msg = "User jax.random.key"
+"jax.random.gamma".msg = "jax's gamma sampler bloats jitted code with rejection loops; use loggamma from bartz._jaxext.random."
+"jax.random.loggamma".msg = "jax's loggamma sampler bloats jitted code with rejection loops; use loggamma from bartz._jaxext.random."
 "jax.tree_util.tree_all".msg = "Use jax.tree.all"
 "jax.tree_util.tree_flatten".msg = "Use jax.tree.flatten"
 "jax.tree_util.tree_flatten_with_path".msg = "Use jax.tree.flatten_with_path"

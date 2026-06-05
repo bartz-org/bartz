@@ -140,7 +140,7 @@ class MeanForestParams:
     """Whether to sample the leaf-variance prior. Must be set to ``False``."""
 
     sigma2_leaf_init: FloatLike | None = None
-    """Initial leaf-variance prior (held fixed since ``sample_sigma2_leaf=False``). If `None`, matches stochtree's defaults: ``var(resid_train) / num_trees`` for continuous and ``2 / num_trees`` for probit."""
+    """Initial leaf-variance prior (held fixed since ``sample_sigma2_leaf=False``). If `None`, matches stochtree's defaults of ``var(resid_train) / num_trees`` for continuous and ``2 / num_trees`` for probit."""
 
     def __post_init__(self) -> None:
         if self.sample_sigma2_leaf:

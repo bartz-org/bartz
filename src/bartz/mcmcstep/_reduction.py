@@ -401,12 +401,16 @@ def _resolve_pallas_backend(
     return cls()
 
 
+def _ceil_pow2(n: int) -> int:
+    """Smallest power of 2 >= `n`."""
+    return 1 << max(0, n - 1).bit_length()
+
+
 def _auto_block_size(n: int, size: int, num_rows: int) -> int:
     """Power-of-2 datapoint tile keeping the kernel's one-hot working set small."""
     area = max(1, _AUTO_PALLAS_TILE // (size * num_rows))
     block_size = 1 << round(math.log2(area))  # nearest power of 2
-    ceil_pow2_n = 1 << (max(1, n) - 1).bit_length()  # avoid padding beyond `n`
-    return min(block_size, ceil_pow2_n)
+    return min(block_size, _ceil_pow2(n))  # avoid padding beyond `n`
 
 
 def _pallas_scatter_add(
@@ -437,7 +441,7 @@ def _pallas_scatter_add(
     # (the tree array size) and `block_size` already are; pad the rows axis (its
     # length is the product of the value's batch shape, e.g. k or k*k, so any k)
     # to a power of 2 with zero rows, whose zero output is sliced off below.
-    padded_rows = 1 << (max(1, num_rows) - 1).bit_length()
+    padded_rows = _ceil_pow2(num_rows)
 
     # each instance scans `iters` sub-blocks of `block_size` datapoints; pad the
     # datapoint axis so it splits evenly. The padded datapoints are zero in every

@@ -109,6 +109,7 @@ from bartz.mcmcstep import (
     make_p_nonterminal,
     step,
 )
+from bartz.mcmcstep._reduction import _ceil_pow2
 from bartz.testing import gen_nonsense_data
 
 # Rough element-count budgets used by `ConfigParams.is_valid` to skip
@@ -276,8 +277,7 @@ def _pallas_is_valid(cfg: PallasReduction, n: int) -> bool:
         if cc is None or float(cc) < 9.0:
             return False
     if isinstance(cfg.block_size, int):
-        ceil_pow2_n = 1 << max(0, n - 1).bit_length()
-        if cfg.block_size > ceil_pow2_n:
+        if cfg.block_size > _ceil_pow2(n):
             return False
         if device.platform == 'gpu' and cfg.block_size & (cfg.block_size - 1):
             return False

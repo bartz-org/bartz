@@ -28,7 +28,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from enum import Enum
 from functools import partial, wraps
-from typing import Literal, TypedDict, TypeVar
+from typing import Literal, TypedDict, TypeVar, cast
 
 import jax
 import numpy
@@ -343,8 +343,8 @@ def _init_shape_shifting_parameters(
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
 ) -> tuple[
     bool,
-    tuple[()] | tuple[int],
-    None | Float32[Array, ''] | Float32[Array, 'k k'],
+    tuple[int, ...],
+    Float32[Array, ''] | Float32[Array, 'k k'],
     None | Float32[Array, ''],
     None | Float32[Array, ''] | Float32[Array, 'k k'],
     None | Int32[Array, ' kb'],
@@ -701,6 +701,10 @@ def init(
     offset = jnp.asarray(offset)
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
     max_split = jnp.asarray(max_split)
+    if error_scale is not None:
+        error_scale = jnp.asarray(error_scale)
+    if missing is not None:
+        missing = jnp.asarray(missing)
     assert missing is None or missing.ndim <= y.ndim
 
     # normalize outcome_type to enum (or list of enums)
@@ -784,7 +788,8 @@ def init(
             resid=(
                 _lazy(jnp.zeros, y.shape)
                 if is_binary
-                else None  # resid is created later after y and offset are sharded
+                # resid is created later after y and offset are sharded
+                else cast(Array, None)
             ),
             error_cov_inv=_lazy_from_array(error_cov_inv),
             # temporarily store user inputs in these slots so they get sharded
@@ -862,6 +867,7 @@ def init(
 
         # calculate initial binary_y
         if is_binary or binary_indices is not None:
+            assert state.binary_y is not None  # holds y at this point
             binary_y = _LazyArray(
                 _initial_binary_y,
                 state.binary_y.shape
@@ -902,6 +908,7 @@ def _set_initial_resid(
     `resid` leaf has the chain-extended ``ndim`` (inflated by a placeholder
     when `num_chains` is not `None`).
     """
+    assert state.binary_y is not None  # holds y at this point
     inner = _LazyArray(
         _initial_resid,
         state.binary_y.shape,
@@ -978,7 +985,7 @@ def _compute_scales(
     copies. At least one of `error_scale` and `missing` must be non-None.
     """
     if error_scale is None:
-        inv_sdev_scale = 1.0
+        inv_sdev_scale = jnp.array(1.0)
     else:
         inv_sdev_scale = jnp.reciprocal(error_scale)
     if missing is not None:
@@ -1043,7 +1050,7 @@ def _parse_mesh(
         return None
 
     # convert dict format to actual mesh
-    if isinstance(mesh, dict):
+    if not isinstance(mesh, Mesh):
         assert set(mesh).issubset({'chains', 'data'})
         mesh = make_mesh(
             tuple(mesh.values()), tuple(mesh), axis_types=(AxisType.Auto,) * len(mesh)
@@ -1079,7 +1086,7 @@ def _remove_weak_types(x: PyTree[Array, 'T']) -> PyTree[Array, 'T']:
 
     def remove_weak(x: T) -> T:
         if isinstance(x, Array) and x.weak_type:
-            return x.astype(x.dtype)
+            return cast(T, x.astype(x.dtype))
         else:
             return x
 
@@ -1389,7 +1396,11 @@ def vmap_chains(
     return wrapped
 
 
-def _get_shard_map_patch_kwargs() -> dict[str, bool]:
+class _ShardMapPatchKwargs(TypedDict, total=False):
+    check_vma: bool
+
+
+def _get_shard_map_patch_kwargs() -> _ShardMapPatchKwargs:
     # bug: jax 0.8.1-0.8.2: vmap(shard_map(psum)), jax#34249; the
     # jax_disable_vmap_shmap_error config did not work.
 

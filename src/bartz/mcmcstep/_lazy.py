@@ -25,7 +25,7 @@
 """Deferred array construction used to lay out the MCMC state before sharding."""
 
 from collections.abc import Callable
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar, cast, overload
 
 from equinox import Module
 from jax import ShapeDtypeStruct, tree
@@ -90,6 +90,14 @@ def _return_array(shape: tuple[int, ...], arr: Array, **kwargs: Any) -> Array:  
     return arr
 
 
+@overload
+def _lazy_from_array(arr: Array) -> Array: ...
+
+
+@overload
+def _lazy_from_array(arr: None) -> None: ...
+
+
 def _lazy_from_array(arr: Array | None) -> Array | None:
     """Wrap an existing array as a `_LazyArray` reporting `arr.shape`, or pass `None`."""
     if arr is None:
@@ -112,6 +120,7 @@ def _wrap_chain(
     """Wrap `inner` so its factory inserts and broadcasts `num_chains` at `chain_axis`. No-op when `chain_axis` is `None`."""
     if chain_axis is None:
         return inner
+    assert num_chains is not None
     new_shape = (*inner.shape[:chain_axis], num_chains, *inner.shape[chain_axis:])
     return _LazyArray(_broadcast_chain, new_shape, inner, chain_axis)
 

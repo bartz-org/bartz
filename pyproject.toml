@@ -159,6 +159,14 @@ known-third-party = ["stochtree", "jax"]
 [tool.ruff.lint.flake8-annotations]
 allow-star-arg-any = true
 
+[tool.ruff.lint.flake8-bugbear]
+# the distribution families are immutable equinox Modules, valid as defaults
+extend-immutable-calls = [
+    "bartz.testing._distr.Constant",
+    "bartz.testing._distr.DiscreteUniform",
+    "bartz.testing._distr.Uniform",
+]
+
 [tool.ruff.lint]
 select = [
     "ICN",  # flake8-import-conventions

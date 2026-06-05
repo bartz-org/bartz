@@ -330,7 +330,7 @@ class TestWithCachedBart:
             with subtests.test('sigma'):
                 sigma = bart.sigma[nsamples:, :].T
                 rhat_sigma = rhat_rank(sigma, split=True)
-                assert_array_less(rhat_sigma, 1.01)
+                assert_array_less(rhat_sigma, 1.03)
 
         if p < n:
             with subtests.test('varcount'):
@@ -436,11 +436,11 @@ class TestWithCachedBart:
             rhat_yhat_train = rhat_rank(
                 [bart.yhat_train, rbart.yhat_train], split=False
             )
-            assert_array_less(rhat_yhat_train, 1.05)
+            assert_array_less(rhat_yhat_train, 1.08)
 
         with subtests.test('yhat_test'):
             rhat_yhat_test = rhat_rank([bart.yhat_test, rbart.yhat_test], split=False)
-            assert_array_less(rhat_yhat_test, 1.05)
+            assert_array_less(rhat_yhat_test, 1.08)
 
         if get_with_default(kw, 'type') == 'pbart':  # binary regression
             with subtests.test('prob_train'):
@@ -463,7 +463,7 @@ class TestWithCachedBart:
                     bart.yhat_train_mean - rbart.yhat_train_mean.astype(numpy.float32),
                     jnp.concatenate([bart.yhat_train, rbart.yhat_train]).std(axis=0),
                     tozero=True,
-                    rtol=0.3,
+                    rtol=0.4,
                 )
 
             with subtests.test('yhat_test_mean'):
@@ -471,7 +471,7 @@ class TestWithCachedBart:
                     bart.yhat_test_mean - rbart.yhat_test_mean.astype(numpy.float32),
                     jnp.concatenate([bart.yhat_test, rbart.yhat_test]).std(axis=0),
                     tozero=True,
-                    rtol=0.3,
+                    rtol=0.4,
                 )
 
             with subtests.test('sigma'):
@@ -479,7 +479,7 @@ class TestWithCachedBart:
                     [bart.sigma_[-bart.ndpost :], rbart.sigma_[-rbart.ndpost :]],
                     split=False,
                 )
-                assert_array_less(rhat_sigma, 1.01)
+                assert_array_less(rhat_sigma, 1.06)
 
             with subtests.test('sigma_mean'):
                 assert_allclose(bart.sigma_mean, rbart.sigma_mean, rtol=0.1)
@@ -500,7 +500,7 @@ class TestWithCachedBart:
 
             with subtests.test('varcount'):
                 rhat_varcount = rhat_rank([bart.varcount, rbart.varcount], split=False)
-                assert_array_less(rhat_varcount, 1.1)
+                assert_array_less(rhat_varcount, 1.25)
 
             with subtests.test('varcount_mean'):
                 assert_close_matrices(

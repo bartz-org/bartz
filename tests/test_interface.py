@@ -92,7 +92,7 @@ from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
-from bartz.testing import gen_data
+from bartz.testing import DiscreteUniform, Gamma, gen_data
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
     assert_array_equal,
@@ -309,7 +309,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
         # sparsity with free theta
         case 1:
             train, test = gen_data(
-                keys.pop(), n=n + nt, p=p, sparsity=2.0, **GEN_KW
+                keys.pop(), n=n + nt, p=p, s_distr=Gamma(2.0), **GEN_KW
             ).split(n)
             bkw = BartKW(
                 kw=dict(
@@ -341,7 +341,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 keys.pop(),
                 n=n + nt,
                 p=high_p,
-                m=2,
+                x_distr=DiscreteUniform(2),
                 outcome_type='binary',
                 **dict(GEN_KW, q=2),
             ).split(n)
@@ -378,7 +378,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 keys.pop(),
                 n=n + nt,
                 p=p,
-                sparsity=2.0,
+                s_distr=Gamma(2.0),
                 het_strength=0.5,
                 het_shape='scalar',
                 **GEN_KW,
@@ -422,7 +422,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 p=p,
                 k=2,
                 lambda_=0.5,
-                sparsity=2.0,
+                s_distr=Gamma(2.0),
                 het_strength=0.5,
                 het_shape='scalar',
                 **GEN_KW,
@@ -459,7 +459,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 keys.pop(),
                 n=n + nt,
                 p=high_p,
-                m=2,
+                x_distr=DiscreteUniform(2),
                 k=2,
                 lambda_=0.5,
                 outcome_type='binary',
@@ -500,7 +500,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 p=3,
                 k=3,
                 lambda_=0.5,
-                sparsity=2.0,
+                s_distr=Gamma(2.0),
                 outcome_type=outcome_type,
                 **GEN_KW,
             ).split(n)
@@ -541,7 +541,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 p=p,
                 k=2,
                 lambda_=0.5,
-                sparsity=2.0,
+                s_distr=Gamma(2.0),
                 het_strength=0.5,
                 het_shape='vector',
                 **GEN_KW,
@@ -1503,6 +1503,12 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
 def test_two_datapoints(bkw: BartKW) -> None:
     """Check automatic data scaling with 2 datapoints."""
     kw = set_num_datapoints(bkw.kw, 2)
+    if kw.get('missing') is not None:
+        # un-mask fully missing datapoints: with a single effective datapoint
+        # every move likelihood ratio is exactly zero (the lone point falls
+        # entirely on one side of any split and the marginal likelihood
+        # cancels), which would break the log_likelihood assertions below
+        kw['missing'] = kw['missing'] & ~jnp.all(kw['missing'], axis=0)
     init_kw = dict(kw.get('init_kw', {}))
     init_kw.update(
         save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None

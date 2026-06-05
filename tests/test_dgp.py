@@ -39,14 +39,23 @@ from scipy.stats import norm
 
 from bartz._jaxext import split
 from bartz.mcmcstep import OutcomeType
-from bartz.testing import DGP, Params, gen_data
+from bartz.testing import (
+    DGP,
+    Constant,
+    DiscreteUniform,
+    Distr,
+    Gamma,
+    Normal,
+    Params,
+    ScaleDistr,
+    SpikeSlab,
+    Uniform,
+    gen_data,
+)
 from bartz.testing._dgp import (
     generate_partition,
-    generate_s,
     interaction_pattern,
     partitioned_interaction_pattern,
-    standardize_x,
-    x_kurtosis,
 )
 from tests.util import assert_allclose, assert_array_equal, assert_close_matrices
 
@@ -56,7 +65,7 @@ SIGMA_THRESHOLD = norm.isf(ALPHA / 2)  # threshold for z tests
 KWARGS: Mapping = MappingProxyType(
     dict(n=100, p=20, k=3, q=4, sigma2_eps=0.1, sigma2_lin=0.4, sigma2_quad=0.5)
 )
-REPS: int = 10_000  # number of datasets
+REPS: int = 10_000  # number of datasets, and of i.i.d. draws in moment tests
 SPARSITY: float = 2.0  # Gamma shape for the sparse-DGP fixture (mu4 = 10 / 3)
 HIGH_SPARSITY: float = 1e19  # largest before sparsity (sparsity + 1) overflows float32
 
@@ -95,19 +104,21 @@ def assert_uncorrelated_z(
 def generate_dgps(
     keys: Key[Array, 'REPS'],
     lambda_: Float[Array, ''],
-    sparsity: float | None,
-    het_strength: float | None = None,
-    het_shape: str | None = None,
-    m: int | None = None,
+    s_distr: ScaleDistr,
+    het_strength: float | None,
+    het_shape: str | None,
+    x_distr: Distr,
+    gamma_distr: Distr,
 ) -> DGP:
     """Generate one dataset per random key (jitted, vmapped over keys)."""
     gen = partial(
         gen_data,
         lambda_=lambda_,
-        sparsity=sparsity,
+        s_distr=s_distr,
         het_strength=het_strength,
         het_shape=het_shape,
-        m=m,
+        x_distr=x_distr,
+        gamma_distr=gamma_distr,
         **KWARGS,
     )
     return vmap(gen)(keys)
@@ -118,16 +129,18 @@ def dgps(keys: split, request: pytest.FixtureRequest) -> DGP:
     """Generate DGP instances using vmap and jit.
 
     Indirectly parametrizable by a mapping with any of ``lambda_``,
-    ``sparsity``, ``het_strength``, ``het_shape`` and ``m``.
+    ``s_distr``, ``het_strength``, ``het_shape``, ``x_distr`` and
+    ``gamma_distr``.
     """
     param: Mapping = getattr(request, 'param', None) or {}
     return generate_dgps(
         keys.pop(REPS),
         param.get('lambda_', 0.5),
-        param.get('sparsity'),
+        param.get('s_distr', Constant()),
         param.get('het_strength'),
         param.get('het_shape'),
-        param.get('m'),
+        param.get('x_distr', Uniform()),
+        param.get('gamma_distr', DiscreteUniform(2)),
     )
 
 
@@ -166,53 +179,100 @@ def test_shapes_and_dtypes(keys: split) -> None:
     assert dgp.params.partition.dtype == jnp.bool_
     assert dgp.params.q.shape == ()
     assert jnp.issubdtype(dgp.params.q.dtype, jnp.integer)
+    assert isinstance(dgp.params.x_distr, Uniform)
+    assert isinstance(dgp.params.beta_distr, DiscreteUniform)
+    assert isinstance(dgp.params.A_distr, DiscreteUniform)
+    assert isinstance(dgp.params.gamma_distr, DiscreteUniform)
+    assert isinstance(dgp.params.s_distr, Constant)
 
 
-class TestGenerateX:
-    """Test the generate_x and standardize_x functions."""
+def discrete_levels(m: int) -> Float[Array, ' m']:
+    """Compute the standardized levels of `DiscreteUniform`."""
+    return (jnp.arange(m) - (m - 1) / 2) / jnp.sqrt((m * m - 1) / 12)
+
+
+class TestDistr:
+    """Test the standardized distribution families in isolation."""
+
+    @pytest.fixture(
+        params=[
+            Uniform(),
+            DiscreteUniform(2),
+            DiscreteUniform(3),
+            DiscreteUniform(5),
+            DiscreteUniform(100),
+            Normal(),
+        ],
+        ids=repr,
+    )
+    def distr(self, request: pytest.FixtureRequest) -> Distr:
+        """Yield each distribution family."""
+        return request.param
+
+    def test_moments(self, keys: split, distr: Distr) -> None:
+        """The draws have mean 0, variance 1 and fourth moment `kurtosis`."""
+        z = distr.sample(keys.pop(), (REPS,))
+        assert_mean_z(z, 0.0)
+        if distr.kurtosis == 1:
+            # degenerate z-tests: the squares are exactly constant
+            assert_array_equal(z**2, jnp.ones_like(z))
+        else:
+            assert_mean_z(z**2, 1.0)
+            assert_mean_z(z**4, distr.kurtosis)
+
+    @pytest.mark.parametrize('m', [2, 3, 5, 100])
+    def test_quantized_levels(self, keys: split, m: int) -> None:
+        """`DiscreteUniform` takes exactly the `m` standardized levels."""
+        z = DiscreteUniform(m).sample(keys.pop(), (REPS,))
+        assert jnp.issubdtype(z.dtype, jnp.floating)
+        assert_close_matrices(jnp.unique(z), discrete_levels(m), rtol=1e-6)
+
+    @pytest.mark.parametrize('m', [2, 3, 5, 100])
+    def test_levels_moments(self, m: int) -> None:
+        """The (equiprobable) levels have mean 0, variance 1 and kurtosis `kurtosis`.
+
+        Computing the moments over the levels checks the standardization and
+        the `kurtosis` closed form exactly.
+        """
+        levels = discrete_levels(m)
+        assert_allclose(jnp.mean(levels), 0.0, atol=1e-6)
+        assert_allclose(jnp.var(levels), 1.0, rtol=1e-6)
+        assert_allclose(jnp.mean(levels**4), DiscreteUniform(m).kurtosis, rtol=1e-6)
+
+    def test_binary_levels(self, keys: split) -> None:
+        """`DiscreteUniform(2)` samples exactly +-1 (squares constant, kurtosis 1)."""
+        z = DiscreteUniform(2).sample(keys.pop(), (REPS,))
+        assert_array_equal(jnp.unique(z), jnp.array([-1.0, 1.0]))
+        assert DiscreteUniform(2).kurtosis == 1.0
+
+
+class TestX:
+    """Test the predictors generated by `gen_data`."""
 
     def test_x_support(self, dgps: DGP) -> None:
-        """Test that continuous x lies in [0, 1)."""
-        assert jnp.all((dgps.x >= 0.0) & (dgps.x < 1.0))
+        """Test that continuous x lies in the standardized uniform support."""
+        assert jnp.all(jnp.abs(dgps.x) <= jnp.sqrt(3.0))
 
     def test_x_mean(self, dgps: DGP) -> None:
-        """Test that x has mean close to 1/2."""
-        assert_mean_z(dgps.x, 0.5)
+        """Test that x has mean close to 0."""
+        assert_mean_z(dgps.x, 0.0)
 
     def test_x_variance(self, dgps: DGP) -> None:
-        """Test that x has variance close to 1/12."""
+        """Test that x has variance close to 1."""
         n_reps, *_ = dgps.x.shape
         var = jnp.var(dgps.x, axis=0)  # Shape: (P, N)
-        # conservative Gaussian approx at variance 1/12
-        std_of_var = jnp.sqrt(2 / (n_reps - 1)) / 12
-        z_scores = jnp.abs((var - 1 / 12) / std_of_var)
+        # conservative Gaussian approx (uniform x is light-tailed)
+        std_of_var = jnp.sqrt(2 / (n_reps - 1))
+        z_scores = jnp.abs((var - 1.0) / std_of_var)
         assert_array_less(z_scores, SIGMA_THRESHOLD)
 
     @pytest.mark.parametrize('m', [2, 3, 5])
     def test_quantized_support(self, keys: split, m: int) -> None:
-        """Test that quantized x takes exactly the values {0, ..., m-1}."""
-        dgp = gen_data(keys.pop(), m=m, lambda_=0.5, **KWARGS)
+        """Test that quantized x takes exactly the `m` standardized levels."""
+        dgp = gen_data(keys.pop(), x_distr=DiscreteUniform(m), lambda_=0.5, **KWARGS)
         assert jnp.issubdtype(dgp.x.dtype, jnp.floating)
-        assert_array_equal(jnp.unique(dgp.x), jnp.arange(m).astype(dgp.x.dtype))
-        assert dgp.params.m.shape == ()
-        assert jnp.issubdtype(dgp.params.m.dtype, jnp.integer)
-
-    @pytest.mark.parametrize('m', [2, 3, 5, 100])
-    def test_standardized_levels(self, m: int) -> None:
-        """The standardized levels have mean 0, variance 1 and kurtosis `kurt_x`.
-
-        Computing the moments over the (equiprobable) levels checks the
-        `standardize_x` remap and the `x_kurtosis` closed form exactly.
-        """
-        levels = standardize_x(jnp.arange(m).astype(float)[None, :], m)
-        assert_allclose(jnp.mean(levels), 0.0, atol=1e-6)
-        assert_allclose(jnp.var(levels), 1.0, rtol=1e-6)
-        assert_allclose(jnp.mean(levels**4), x_kurtosis(m), rtol=1e-6)
-
-    def test_binary_levels(self) -> None:
-        """m=2 standardizes to exactly +-1 (whose squares are constant)."""
-        levels = standardize_x(jnp.arange(2).astype(float)[None, :], 2)
-        assert_array_equal(levels, jnp.array([[-1.0, 1.0]]))
+        assert_close_matrices(jnp.unique(dgp.x), discrete_levels(m), rtol=1e-6)
+        assert isinstance(dgp.params.x_distr, DiscreteUniform)
 
 
 class TestGeneratePartition:
@@ -246,66 +306,107 @@ class TestGeneratePartition:
         assert_mean_z(counts, p / k)
 
 
-def s_moment(sparsity: float, power: int) -> float:
-    """Analytic E[s ** power] for the scales drawn by `generate_s`.
+def s_moment(alpha: float, power: int) -> float:
+    """Analytic E[s ** power] for the scales drawn by `Gamma`.
 
-    With ``s = Gamma(sparsity) / sqrt(sparsity (sparsity + 1))`` one has
-    ``E[s ** m] = prod_{i<m}(sparsity + i) / (sparsity (sparsity + 1)) ** (m/2)``
+    With ``s = Gamma(alpha) / sqrt(alpha (alpha + 1))`` one has
+    ``E[s ** m] = prod_{i<m}(alpha + i) / (alpha (alpha + 1)) ** (m/2)``
     (``power`` must be even). In particular ``s_moment(a, 2) == 1``.
     """
     num = 1.0
     for i in range(power):
-        num *= sparsity + i
-    return num / (sparsity * (sparsity + 1)) ** (power // 2)
+        num *= alpha + i
+    return num / (alpha * (alpha + 1)) ** (power // 2)
 
 
-class TestGenerateS:
-    """Test `generate_s` in isolation."""
+class TestScaleDistr:
+    """Test the scale families in isolation."""
 
-    N: int = 1_000_000  # number of i.i.d. scales for the moment estimates
     ALPHA_S: float = 5.0  # a moderate shape, light enough tails for the z tests
 
-    def test_none_is_ones(self, keys: split) -> None:
-        """`sparsity=None` returns all-ones scales (uniform importance)."""
-        assert_array_equal(generate_s(keys.pop(), 10, None), jnp.ones(10))
+    def test_constant_is_ones(self, keys: split) -> None:
+        """`Constant` returns all-ones scales (uniform importance)."""
+        p = KWARGS['p']
+        assert_array_equal(Constant().sample(keys.pop(), (p,)), jnp.ones(p))
 
     def test_shape_and_dtype(self, keys: split) -> None:
         """Scales have shape (p,) and a floating dtype."""
-        s = generate_s(keys.pop(), 10, self.ALPHA_S)
-        assert s.shape == (10,)
+        p = KWARGS['p']
+        s = Gamma(self.ALPHA_S).sample(keys.pop(), (p,))
+        assert s.shape == (p,)
         assert jnp.issubdtype(s.dtype, jnp.floating)
 
     def test_second_moment(self, keys: split) -> None:
         """The scales are normalized to ``E[s ** 2] == 1``."""
-        s2 = generate_s(keys.pop(), self.N, self.ALPHA_S) ** 2
+        s2 = Gamma(self.ALPHA_S).sample(keys.pop(), (REPS,)) ** 2
         var_s2 = s_moment(self.ALPHA_S, 4) - 1.0  # Var[s^2] = E[s^4] - E[s^2]^2
-        assert_mean_z(s2, 1.0, se=jnp.sqrt(var_s2 / self.N))
+        assert_mean_z(s2, 1.0, se=jnp.sqrt(var_s2 / REPS))
 
     def test_fourth_moment(self, keys: split) -> None:
-        """``E[s ** 4]`` matches the analytic ``mu4`` used in the normalizers."""
-        s4 = generate_s(keys.pop(), self.N, self.ALPHA_S) ** 4
-        mu4 = s_moment(self.ALPHA_S, 4)
-        var_s4 = s_moment(self.ALPHA_S, 8) - mu4**2
-        assert_mean_z(s4, mu4, se=jnp.sqrt(var_s4 / self.N))
+        """``E[s ** 4]`` matches the analytic `fourth_moment` of the family."""
+        gamma = Gamma(self.ALPHA_S)
+        assert_allclose(gamma.fourth_moment, s_moment(self.ALPHA_S, 4), rtol=1e-6)
+        s4 = gamma.sample(keys.pop(), (REPS,)) ** 4
+        var_s4 = s_moment(self.ALPHA_S, 8) - gamma.fourth_moment**2
+        assert_mean_z(s4, gamma.fourth_moment, se=jnp.sqrt(var_s4 / REPS))
 
     def test_dispersion_increases_with_sparsity(self, keys: split) -> None:
-        """Smaller `sparsity` spreads the importances out more (larger Var[s^2])."""
-        sparse = generate_s(keys.pop(), self.N, 1.0)
-        dense = generate_s(keys.pop(), self.N, 10.0)
+        """A smaller Gamma shape spreads the importances out more (larger Var[s^2])."""
+        sparse = Gamma(1.0).sample(keys.pop(), (REPS,))
+        dense = Gamma(10.0).sample(keys.pop(), (REPS,))
         assert jnp.var(sparse**2) > jnp.var(dense**2)
 
 
-def test_high_sparsity_matches_none(keys: split) -> None:
-    """A very high `sparsity` reproduces the non-sparse (`None`) DGP.
+class TestSpikeSlab:
+    """Test the `SpikeSlab` scale family."""
 
-    The importance scales concentrate at 1 as ``sparsity -> inf``, so the data
-    matches the ``sparsity=None`` run under the same key. The match is
-    approximate because the ``None`` and concrete code paths differ.
+    PI: float = 0.3
+
+    def test_support_and_moments(self, keys: split) -> None:
+        """The scales take the two values 0 and 1/sqrt(pi), with the right moments."""
+        distr = SpikeSlab(self.PI)
+        s = distr.sample(keys.pop(), (REPS,))
+        assert_close_matrices(
+            jnp.unique(s), jnp.array([0.0, 1 / jnp.sqrt(self.PI)]), rtol=1e-6, atol=1e-6
+        )
+        assert_mean_z(s**2, 1.0)
+        assert_mean_z(s**4, distr.fourth_moment)
+        assert_allclose(distr.fourth_moment, 1 / self.PI, rtol=1e-6)
+
+    def test_zeroes_inert_predictors(self, keys: split) -> None:
+        """Predictors with a zero scale are exactly inert in every term."""
+        dgp = gen_data(
+            keys.pop(),
+            lambda_=0.5,
+            s_distr=SpikeSlab(0.5),
+            het_strength=HET_STRENGTH,
+            het_shape='vector',
+            **KWARGS,
+        )
+        dead = dgp.params.s == 0
+        # both outcomes near-certain at p = 20
+        assert jnp.any(dead)
+        assert not jnp.all(dead)
+        assert_array_equal(dgp.params.beta_shared[dead], 0, strict=False)
+        assert_array_equal(dgp.params.beta_separate[:, dead], 0, strict=False)
+        assert_array_equal(dgp.params.A_shared[dead, :], 0, strict=False)
+        assert_array_equal(dgp.params.A_shared[:, dead], 0, strict=False)
+        assert_array_equal(dgp.params.A_separate[:, dead, :], 0, strict=False)
+        assert_array_equal(dgp.params.gamma_shared[dead], 0, strict=False)
+        assert_array_equal(dgp.params.gamma_separate[:, dead], 0, strict=False)
+
+
+def test_high_sparsity_matches_none(keys: split) -> None:
+    """A very high Gamma shape reproduces the non-sparse (`None`) DGP.
+
+    The importance scales concentrate at 1 as the Gamma shape goes to
+    infinity, so the data matches the `Constant` run under the same key. The
+    match is approximate because the scales are close to 1 but not exact.
     """
     kw = dict(KWARGS, lambda_=0.5)
     key = keys.pop()
-    none = gen_data(key, sparsity=None, **kw)
-    high = gen_data(random.clone(key), sparsity=HIGH_SPARSITY, **kw)
+    none = gen_data(key, s_distr=Constant(), **kw)
+    high = gen_data(random.clone(key), s_distr=Gamma(HIGH_SPARSITY), **kw)
     assert_close_matrices(high.mu, none.mu, rtol=1e-5)
     assert_close_matrices(high.y, none.y, rtol=1e-5)
 
@@ -320,6 +421,24 @@ def test_beta_separate_mean(dgps: DGP) -> None:
     assert_mean_z(dgps.params.beta_separate, 0.0)
 
 
+def test_default_coefficients_have_equal_magnitude(keys: split) -> None:
+    """The default random-sign draws give every predictor exactly equal weight.
+
+    With ``s_distr=None`` and `DiscreteUniform` (m=2) coefficient families, the
+    linear coefficients all have modulus sqrt(sigma2_lin / p) and the nonzero
+    quadratic entries share a single modulus, so without scales the importance
+    profile is exactly flat.
+    """
+    dgp = gen_data(keys.pop(), lambda_=0.5, **KWARGS)
+    p = KWARGS['p']
+    expected = jnp.sqrt(dgp.params.sigma2_lin / p)
+    assert_close_matrices(
+        jnp.abs(dgp.params.beta_shared), jnp.full(p, expected), rtol=1e-6
+    )
+    a_mags = jnp.abs(dgp.params.A_shared)[dgp.params.A_shared != 0]
+    assert_close_matrices(a_mags, jnp.full_like(a_mags, a_mags[0]), rtol=1e-6)
+
+
 WHICH_PARAMS = (
     'mulin_shared',
     'mulin_separate',
@@ -332,29 +451,30 @@ WHICH_PARAMS = (
     'y',
 )
 
-# Heteroskedastic DGP configurations: scalar het on the dense DGP and vector
-# het on the sparse one, covering the het x sparsity interaction without
-# additional `generate_dgps` compilations.
+# Heteroskedastic DGP configurations: scalar het on the dense DGP, vector het
+# on the sparse one (covering the het x sparsity interaction), and vector het
+# with Normal projections (covering the kurt_gamma = 3 branch of ``var_v``).
 HET_DGPS = (
     {'het_shape': 'scalar', 'het_strength': HET_STRENGTH},
-    {'het_shape': 'vector', 'het_strength': HET_STRENGTH, 'sparsity': SPARSITY},
+    {'het_shape': 'vector', 'het_strength': HET_STRENGTH, 's_distr': Gamma(SPARSITY)},
+    {'het_shape': 'vector', 'het_strength': HET_STRENGTH, 'gamma_distr': Normal()},
 )
-HET_DGPS_IDS = ('het_scalar', 'het_vector_sparse')
+HET_DGPS_IDS = ('het_scalar', 'het_vector_sparse', 'het_vector_normal_gamma')
 
 # Cases for the marginal-variance tests: homoskedastic (dense and sparse) over
 # every field, plus the heteroskedastic DGPs, which must leave the ``z`` and
 # ``y`` budgets unchanged since ``E[error_scale ** 2] == 1`` marginally. Het
 # does not enter the latent mean fields at all (checked exactly by
 # `test_stream_invariance_with_homoskedastic`), so only ``z`` and ``y`` are
-# tested there. The binary-predictor DGP (``kurt_x == 1``: the whole quadratic
+# tested there. The binary-predictor DGP (kurtosis 1: the whole quadratic
 # budget flows through the interactions) is tested on the quadratic field and
 # the totals.
 VARIANCE_CASES = tuple(
     pytest.param(dgp, which, id=f'{which}-{dgp_id}')
     for dgp, dgp_id, whiches in (
         ({}, 'dense', WHICH_PARAMS),
-        ({'sparsity': SPARSITY}, 'sparse', WHICH_PARAMS),
-        ({'m': 2}, 'binary_x', ('muquad', 'mu', 'z')),
+        ({'s_distr': Gamma(SPARSITY)}, 'sparse', WHICH_PARAMS),
+        ({'x_distr': DiscreteUniform(2)}, 'binary_x', ('muquad', 'mu', 'z')),
         *((d, i, ('z', 'y')) for d, i in zip(HET_DGPS, HET_DGPS_IDS, strict=True)),
     )
     for which in whiches
@@ -394,7 +514,9 @@ def test_outcome_prior_variance(dgps: DGP, which: str) -> None:
 
     var = jnp.var(samples, axis=0)  # Shape: (K?, N)
     expected_var = expected_variance(dgps.params, which, prior=True)[0].item()
-    light_tailed = dgps.params.sparsity is None and dgps.params.het_shape is None
+    light_tailed = (
+        isinstance(dgps.params.s_distr, Constant) and dgps.params.het_shape is None
+    )
     if light_tailed:
         std_of_var = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
     else:
@@ -493,7 +615,7 @@ class TestInteractionPattern:
     @pytest.fixture
     def pattern(self) -> Bool[Array, 'p p']:
         """Return the predictor interaction pattern."""
-        return interaction_pattern(p=10, q=4)
+        return interaction_pattern(p=KWARGS['p'], q=KWARGS['q'])
 
     def test_symmetry(self, pattern: Bool[Array, 'p p']) -> None:
         """Test that interaction pattern is symmetric."""
@@ -506,7 +628,7 @@ class TestInteractionPattern:
     def test_row_sums(self, pattern: Bool[Array, 'p p']) -> None:
         """Test that each row sums to q+1."""
         row_sums = jnp.sum(pattern, axis=1)
-        assert_array_equal(row_sums, 4 + 1, strict=False)
+        assert_array_equal(row_sums, KWARGS['q'] + 1, strict=False)
 
 
 class TestPartitionedInteractionPattern:
@@ -515,13 +637,12 @@ class TestPartitionedInteractionPattern:
     @pytest.fixture
     def partition(self, keys: split) -> Bool[Array, 'k p']:
         """Generate a partition of predictors."""
-        p, k = 20, 3
-        return generate_partition(keys.pop(), p=p, k=k)
+        return generate_partition(keys.pop(), p=KWARGS['p'], k=KWARGS['k'])
 
     @pytest.fixture
     def q(self) -> int:
-        """Fix a value of the `q` parameter."""
-        return 2
+        """Fix a value of the `q` parameter (must be even and < p // k)."""
+        return KWARGS['q']
 
     @pytest.fixture
     def pattern(self, partition: Bool[Array, 'k p'], q: int) -> Bool[Array, 'k p p']:
@@ -600,30 +721,34 @@ def test_lambda_forbidden_when_univariate(keys: split) -> None:
 
 
 def test_m_too_small(keys: split) -> None:
-    """``m < 2`` raises.
+    """``DiscreteUniform`` with ``m < 2`` raises.
 
     The runtime `error_if` surfaces only on synchronization (hence the
     `block_until_ready`), wrapped in an exception type that depends on the
     jit dispatch path (fresh compile vs. cache hit).
     """
     with pytest.raises((JaxRuntimeError, ValueError), match='m must be >= 2'):
-        block_until_ready(gen_data(keys.pop(), m=1, lambda_=0.5, **KWARGS))
+        block_until_ready(
+            gen_data(keys.pop(), x_distr=DiscreteUniform(1), lambda_=0.5, **KWARGS)
+        )
 
 
 def test_binary_x_requires_interactions(keys: split) -> None:
-    """``m=2`` with ``q < 2`` raises: squares of binary predictors are constant.
+    """Binary x with ``q < 2`` raises: squares of binary predictors are constant.
 
     See `test_m_too_small` for the error handling details.
     """
     kw = dict(KWARGS, q=0)
     with pytest.raises((JaxRuntimeError, ValueError), match='q must be >= 2'):
-        block_until_ready(gen_data(keys.pop(), m=2, lambda_=0.5, **kw))
+        block_until_ready(
+            gen_data(keys.pop(), x_distr=DiscreteUniform(2), lambda_=0.5, **kw)
+        )
 
 
 def test_binary_x_min_interactions(keys: split) -> None:
-    """``m=2`` with ``q=2`` is accepted and the quadratic term is not constant."""
+    """Binary x with ``q=2`` is accepted and the quadratic term is not constant."""
     kw = dict(KWARGS, q=2)
-    dgp = gen_data(keys.pop(), m=2, lambda_=0.5, **kw)
+    dgp = gen_data(keys.pop(), x_distr=DiscreteUniform(2), lambda_=0.5, **kw)
     assert jnp.all(jnp.var(dgp.muquad, axis=-1) > 0)
 
 
@@ -837,28 +962,33 @@ class TestHeteroskedasticity:
         )
         assert_array_less(spreads[:-1], spreads[1:])
 
-    def test_var_v_matches_closed_form(self, keys: split) -> None:
+    @pytest.mark.parametrize('gamma_distr', [DiscreteUniform(2), Normal()])
+    def test_var_v_matches_closed_form(self, keys: split, gamma_distr: Distr) -> None:
         """``var_v`` is the marginal ``Var[W ** 2]`` closed form of `Params`.
 
         Recomputes it from the public hyperparameters (vector het, with sparsity
-        so ``mu_4_s`` and the partition factor both enter), catching wiring bugs.
+        so ``E[s ** 4]`` and the partition factor both enter, and both the
+        default and the Normal ``kappa_gamma``), catching wiring bugs.
         """
         rho, lambda_ = HET_STRENGTH, 0.5
         p, k = KWARGS['p'], KWARGS['k']
         dgp = gen_data(
             keys.pop(),
             lambda_=lambda_,
-            sparsity=SPARSITY,
+            s_distr=Gamma(SPARSITY),
+            gamma_distr=gamma_distr,
             het_shape='vector',
             het_strength=rho,
             **KWARGS,
         )
-        big_lambda = lambda_ * (2 - lambda_) + (1 - lambda_) ** 2 * k
+        kurt_x_mu_4 = dgp.params.x_distr.kurtosis * dgp.params.s_distr.fourth_moment
+        kurt_eta = dgp.params.gamma_distr.kurtosis * kurt_x_mu_4
+        big_lambda = lambda_**2 + (1 - lambda_) ** 2 * k
+        cross = 6 * lambda_ * (1 - lambda_) * (kurt_x_mu_4 - 1)
         r = p % k
-        excess = (
-            3 * (dgp.params.kurt_x * dgp.params.mu_4_s - 1) * big_lambda / p
-            + 3 * (1 - lambda_) ** 2 * r * (k - r) / p**2
-        )
+        excess = ((kurt_eta - 3) * big_lambda + cross) / p + 3 * (
+            1 - lambda_
+        ) ** 2 * r * (k - r) / p**2
         assert_close_matrices(dgp.params.var_v, rho**2 * (2 + excess), rtol=1e-6)
 
     def test_stream_invariance_with_homoskedastic(self, keys: split) -> None:

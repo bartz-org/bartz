@@ -87,6 +87,7 @@ from bartz.mcmcstep import (
     BatchedReduction,
     OneHotReduction,
     PallasReduction,
+    ReductionConfig,
     State,
     init,
     make_p_nonterminal,
@@ -628,33 +629,41 @@ class TestSearchDivisor:
 class TestReduction:
     """Check every `ReductionConfig` matches an unbatched segment-sum baseline."""
 
-    _pallas_backend = 'triton' if get_default_device().platform == 'gpu' else 'cpu'
+    @pytest.fixture
+    def configs(self) -> tuple[ReductionConfig, ...]:
+        """Configs covering every subclass and setting.
 
-    configs = (
-        # BatchedReduction: unbatched, automatic, and explicit batch counts (a
-        # divisor of `n` and a non-divisor, which leaves an uneven final batch),
-        # each batch axis layout, and strided vs contiguous batch assignment
-        BatchedReduction(num_batches=None),
-        BatchedReduction(num_batches='auto'),
-        BatchedReduction(num_batches=4),
-        BatchedReduction(num_batches=7),
-        BatchedReduction(num_batches=4, batches_inner=False),
-        BatchedReduction(num_batches=4, contiguous=True),
-        BatchedReduction(num_batches=7, contiguous=True),
-        BatchedReduction(num_batches=7, batches_inner=False, contiguous=True),
-        # OneHotReduction: every contraction method in both memory layouts
-        OneHotReduction(method='matmul', n_inner=True),
-        OneHotReduction(method='matmul', n_inner=False),
-        OneHotReduction(method='multiply', n_inner=True),
-        OneHotReduction(method='multiply', n_inner=False),
-        OneHotReduction(method='scatter_set', n_inner=True),
-        OneHotReduction(method='scatter_set', n_inner=False),
-        # PallasReduction: Triton on gpu, interpret mode on cpu (the only mode
-        # that runs there).
-        PallasReduction(backend=_pallas_backend),  # fully automatic grid and tile
-        PallasReduction(backend=_pallas_backend, num_blocks=1, block_size=64),
-        PallasReduction(backend=_pallas_backend, num_blocks=8, block_size=16),
-    )
+        Built in a fixture rather than at class-body (import) time so that
+        `get_default_device` reads the platform after jax is configured (e.g.
+        by the ``--platform`` option).
+        """
+        # PallasReduction backend: Triton on gpu, interpret mode on cpu (the
+        # only mode that runs there)
+        pallas_backend = 'triton' if get_default_device().platform == 'gpu' else 'cpu'
+        return (
+            # BatchedReduction: unbatched, automatic, and explicit batch counts (a
+            # divisor of `n` and a non-divisor, which leaves an uneven final batch),
+            # each batch axis layout, and strided vs contiguous batch assignment
+            BatchedReduction(num_batches=None),
+            BatchedReduction(num_batches='auto'),
+            BatchedReduction(num_batches=4),
+            BatchedReduction(num_batches=7),
+            BatchedReduction(num_batches=4, batches_inner=False),
+            BatchedReduction(num_batches=4, contiguous=True),
+            BatchedReduction(num_batches=7, contiguous=True),
+            BatchedReduction(num_batches=7, batches_inner=False, contiguous=True),
+            # OneHotReduction: every contraction method in both memory layouts
+            OneHotReduction(method='matmul', n_inner=True),
+            OneHotReduction(method='matmul', n_inner=False),
+            OneHotReduction(method='multiply', n_inner=True),
+            OneHotReduction(method='multiply', n_inner=False),
+            OneHotReduction(method='scatter_set', n_inner=True),
+            OneHotReduction(method='scatter_set', n_inner=False),
+            # PallasReduction: fully automatic grid and tile, then explicit ones
+            PallasReduction(backend=pallas_backend),
+            PallasReduction(backend=pallas_backend, num_blocks=1, block_size=64),
+            PallasReduction(backend=pallas_backend, num_blocks=8, block_size=16),
+        )
 
     @staticmethod
     def reference(
@@ -679,7 +688,9 @@ class TestReduction:
             out = lax.psum(out, 'data')
         return out
 
-    def test_matches_reference(self, keys: split, subtests: SubTests) -> None:
+    def test_matches_reference(
+        self, configs: tuple[ReductionConfig, ...], keys: split, subtests: SubTests
+    ) -> None:
         """Every config matches the reference on a battery of invocations.
 
         The cases cover scalar count weights (exact integer match), float
@@ -753,7 +764,7 @@ class TestReduction:
 
         expected = {name: run(self.reference) for name, (run, _) in cases.items()}
 
-        for config in self.configs:
+        for config in configs:
             for name, (run, compare) in cases.items():
                 with subtests.test(config=config, case=name):
                     if name.startswith('sharded') and isinstance(

@@ -148,7 +148,7 @@ exclude-newer = '1 week'
 # cutoff, silently blocking newer releases). The version bound is a backstop in
 # case the date passes unnoticed: raising the floor flags this comment.
 # tests-old has its own exemption in the Makefile.
-exclude-newer-package = { rbartpackages = '2026-06-06' }
+exclude-newer-package = { rbartpackages = '2026-06-06T22:00:00Z' }
 
 [tool.ruff]
 exclude = [".asv", "*.ipynb", "benchmarks/latest_bartz"]

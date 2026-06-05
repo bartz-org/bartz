@@ -409,6 +409,8 @@ def test_standardization_matches(continuous_data: _Data, keys: split) -> None:
     # shift-invariant, so this only hardens the y_bar comparison.
     y_train = data.y_train + 1.0
     st_model = stochtree.BARTModel()
+    # WORKAROUND(stochtree<0.4.3): pre-0.4.3 stochtree rejects float32 input; cast
+    # X_train/y_train to float64. Drop dtype=np.float64 once the floor reaches 0.4.3.
     st_model.sample(
         X_train=np.asarray(data.X_train, dtype=np.float64),
         y_train=np.asarray(y_train, dtype=np.float64),
@@ -452,6 +454,8 @@ def comparison(
 
     if outcome == 'continuous':
         data = _make_continuous(keys, n=50, n_test=80)
+        # WORKAROUND(stochtree<0.4.3): pre-0.4.3 stochtree rejects float32; cast to
+        # float64 (bartz downcasts). Drop dtype=np.float64 when the floor hits 0.4.3.
         y = np.asarray(data.y_train, dtype=np.float64)
         extra: dict = {}
     else:
@@ -465,6 +469,8 @@ def comparison(
     seed = int_seed(keys.pop())
 
     kwargs: dict = dict(
+        # WORKAROUND(stochtree<0.4.3): pre-0.4.3 stochtree rejects float32; cast
+        # X_train/X_test to float64 (bartz downcasts). Drop dtype=np.float64 at 0.4.3.
         X_train=np.asarray(data.X_train, dtype=np.float64),
         y_train=y,
         X_test=np.asarray(data.X_test, dtype=np.float64),

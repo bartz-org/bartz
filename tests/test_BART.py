@@ -27,7 +27,7 @@
 This is the main suite of tests.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
 from inspect import signature
 from typing import Any, Literal
@@ -1538,14 +1538,7 @@ def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
         # the mesh is static metadata on both the state config and the traces,
         # so it must be cleared everywhere to make treedefs match the unsharded
         # baseline before comparing leaves
-        config = replace(bart._mcmc_state.config, mesh=None)
-        bart = tree_at(lambda b: b._mcmc_state.config, bart, config)
-        bart = tree_at(
-            lambda b: b._main_trace, bart, replace(bart._main_trace, mesh=None)
-        )
-        return tree_at(
-            lambda b: b._burnin_trace, bart, replace(bart._burnin_trace, mesh=None)
-        )
+        return tree_at(lambda b: b._bart, bart, bart._bart._drop_device_info())
 
     with subtests.test('shard chains'):
         chains_kw = tree.map(lambda x: x, baseline_kw)

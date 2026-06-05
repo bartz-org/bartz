@@ -66,7 +66,7 @@ Unknown category values encountered during `transform` raise `ValueError`.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias
+from typing import Any, Literal, TypeAlias, overload
 
 import numpy as np
 from jaxtyping import Float32, Shaped
@@ -266,6 +266,16 @@ class _PreprocessorBase:
     def original_var_indices(self) -> tuple[int, ...]:
         """For each output column, the index of the original column it came from."""
         return tuple(self._original_var_indices)
+
+    @overload
+    def fit(
+        self, X: DataFrame, *, variable_weights: ArrayLike
+    ) -> Float32[np.ndarray, ' p']: ...
+
+    @overload
+    def fit(
+        self, X: DataFrame, *, variable_weights: None = None
+    ) -> Float32[np.ndarray, ' p'] | None: ...
 
     def fit(
         self, X: DataFrame, *, variable_weights: ArrayLike | None = None

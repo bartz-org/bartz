@@ -30,7 +30,7 @@ from functools import partial
 
 # WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TypeVar, overload
 
 from jax import numpy as jnp
 from jax.scipy.special import ndtr
@@ -549,6 +549,41 @@ class BARTModel:
         else:
             sigma = self._bart.get_error_sdev()
             self.global_var_samples = (sigma * y_std) ** 2
+
+    @overload
+    def predict(
+        self,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        type: Literal['posterior', 'mean'] = 'posterior',
+        terms: Literal['y_hat', 'mean_forest'],
+        scale: Literal['linear', 'probability', 'class'] = 'linear',
+    ) -> Shaped[Array, 'm num_samples'] | Shaped[Array, ' m']: ...
+
+    @overload
+    def predict(
+        self,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        type: Literal['posterior', 'mean'] = 'posterior',
+        terms: Literal['all'] = 'all',
+        scale: Literal['linear', 'probability', 'class'] = 'linear',
+    ) -> dict[str, Shaped[Array, 'm num_samples']] | dict[str, Shaped[Array, ' m']]: ...
+
+    @overload
+    def predict(
+        self,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        type: Literal['posterior', 'mean'] = 'posterior',
+        terms: Sequence[Literal['y_hat', 'mean_forest', 'all']],
+        scale: Literal['linear', 'probability', 'class'] = 'linear',
+    ) -> (
+        Shaped[Array, 'm num_samples']
+        | Shaped[Array, ' m']
+        | dict[str, Shaped[Array, 'm num_samples']]
+        | dict[str, Shaped[Array, ' m']]
+    ): ...
 
     def predict(
         self,

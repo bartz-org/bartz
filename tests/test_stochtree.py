@@ -26,7 +26,7 @@
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import jax
 import numpy as np
@@ -116,7 +116,7 @@ def binary_data(keys: split) -> _Data:
     return _make_binary(keys)
 
 
-def _rhat_two_chains(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def _rhat_two_chains(a: ArrayLike, b: ArrayLike) -> np.ndarray:
     """Compute rank-normalized Rhat between two ``(n, num_samples)`` matrices.
 
     Treats each of the two arrays as one MCMC chain of ``num_samples`` draws
@@ -194,7 +194,9 @@ def test_binary_smoke(binary_data: _Data, keys: split) -> None:
 
 @pytest.mark.parametrize('terms', ['mean_forest', 'all', ['y_hat', 'mean_forest']])
 def test_class_scale_requires_single_y_hat(
-    binary_data: _Data, terms: str | list[str], keys: split
+    binary_data: _Data,
+    terms: Literal['mean_forest', 'all'] | list[Literal['y_hat', 'mean_forest']],
+    keys: split,
 ) -> None:
     """`scale='class'` matches stochtree: only a single 'y_hat' term is allowed."""
     data = binary_data
@@ -244,7 +246,7 @@ def test_missing_num_gfr_raises(continuous_data: _Data, keys: split) -> None:
     data = continuous_data
     m = bst.BARTModel()
     with pytest.raises(TypeError, match='num_gfr'):
-        m.sample(  # type: ignore[call-arg]
+        m.sample(  # ty: ignore[missing-argument]
             X_train=data.X_train,
             y_train=data.y_train,
             num_burnin=NUM_BURNIN,
@@ -363,7 +365,10 @@ def test_unsupported_outcome_model_raises(binary_data: _Data, keys: split) -> No
             X_train=data.X_train,
             y_train=data.y_train,
             general_params={
-                'outcome_model': bst.OutcomeModel(outcome='binary', link='cloglog'),
+                'outcome_model': bst.OutcomeModel(
+                    outcome='binary',
+                    link='cloglog',  # ty: ignore[invalid-argument-type]
+                ),
                 'random_seed': keys.pop(),
             },
             **_SAMPLE_KW,
@@ -689,20 +694,19 @@ class TestPreprocessing:
 
     @staticmethod
     def _sample(
-        X_train: ArrayLike | pd.DataFrame | pl.DataFrame,
-        y: ArrayLike,
+        X_train: Array | np.ndarray | pd.DataFrame | pl.DataFrame,
+        y: Array | np.ndarray,
         key: Array,
-        X_test: ArrayLike | pd.DataFrame | pl.DataFrame | None = None,
-        **extras: object,
+        X_test: Array | np.ndarray | pd.DataFrame | pl.DataFrame | None = None,
+        general_params: Mapping[str, Any] | None = None,
     ) -> bst.BARTModel:
         m = bst.BARTModel()
         m.sample(
             X_train=X_train,
             y_train=y,
             X_test=X_test,
-            general_params=dict(extras.pop('general_params', {}), random_seed=key),
+            general_params=dict(general_params or {}, random_seed=key),
             **_SAMPLE_KW,
-            **extras,
         )
         return m
 
@@ -759,7 +763,7 @@ class TestPreprocessing:
         assert X.shape == (4, 3)
         assert_array_equal(X.sum(axis=1), np.ones(4, np.float32))
         # The row values 'a','b','a','c' map to columns in the categories' order
-        cats = pp._specs[0].categories
+        cats = nnone(pp._specs[0].categories)
         for i, v in enumerate(['a', 'b', 'a', 'c']):
             assert X[i, cats.index(v)] == 1.0
 

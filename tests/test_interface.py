@@ -91,7 +91,7 @@ from bartz.grove import (
 )
 from bartz.mcmcloop import CallbackState, compute_varcount, evaluate_trace
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
-from bartz.mcmcloop._loop import _run_mcmc_inner_loop
+from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
@@ -102,6 +102,7 @@ from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
     clipped_logit,
+    nnone,
     periodic_sigint,
     rhat_rank,
 )
@@ -1020,6 +1021,7 @@ def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
 
     with subtests.test('blocked_vars lists predictor 0'):
         (expected,) = jnp.nonzero(forest.max_split == 0)
+        assert forest.blocked_vars is not None
         assert_array_equal(jnp.sort(forest.blocked_vars), expected, strict=False)
         assert jnp.any(forest.blocked_vars == 0)
 
@@ -1082,7 +1084,7 @@ def test_output_shapes(bkw: BartKW, keys: split) -> None:
     if bkw.all_binary:
         assert bart.sigest is None
     else:
-        assert bart.sigest.shape == k
+        assert nnone(bart.sigest).shape == k
 
     assert bart.varcount.shape == (ndpost, bkw.p)
     assert bart.varcount_mean.shape == (bkw.p,)
@@ -1104,7 +1106,7 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     bart = Bart(**kw)
 
     if not bkw.all_binary:
-        assert bart.sigest.dtype == jnp.float32
+        assert nnone(bart.sigest).dtype == jnp.float32
     assert bart.offset.dtype == jnp.float32
     assert isinstance(bart.n_save, int)
     assert bart.predict('train', kind='mean').dtype == jnp.float32
@@ -1154,6 +1156,7 @@ def test_output_ranges(bkw: BartKW, keys: split) -> None:
     if bkw.all_binary:
         assert bart.sigest is None
     else:
+        assert bart.sigest is not None
         assert jnp.all(bart.sigest[binary_mask] == 0.0)
         assert jnp.all(bart.sigest[~binary_mask] > 0)
 
@@ -1307,10 +1310,14 @@ def test_scale_shift(bkw: BartKW) -> None:
         jnp.where(mask, bart2.offset, (bart2.offset - offset) / scale),
         rtol=1e-5,
     )
+    assert bart1.sigest is not None
+    assert bart2.sigest is not None
     assert_close_matrices(
         bart1.sigest, jnp.where(mask, bart2.sigest, bart2.sigest / scale), rtol=1e-6
     )
-    assert_array_equal(bart1._mcmc_state.error_cov_df, bart2._mcmc_state.error_cov_df)
+    assert_array_equal(
+        nnone(bart1._mcmc_state.error_cov_df), nnone(bart2._mcmc_state.error_cov_df)
+    )
 
     masked_scale = jnp.where(mask, 1.0, scale)
     if masked_scale.ndim:
@@ -1318,14 +1325,14 @@ def test_scale_shift(bkw: BartKW) -> None:
     cov_scale = masked_scale * masked_scale.T
 
     assert_close_matrices(
-        bart1._mcmc_state.forest.leaf_prior_cov_inv,
-        bart2._mcmc_state.forest.leaf_prior_cov_inv * cov_scale,
+        nnone(bart1._mcmc_state.forest.leaf_prior_cov_inv),
+        nnone(bart2._mcmc_state.forest.leaf_prior_cov_inv) * cov_scale,
         rtol=1e-6,
     )
 
     assert_close_matrices(
-        bart1._mcmc_state.error_cov_scale * cov_scale,
-        bart2._mcmc_state.error_cov_scale,
+        nnone(bart1._mcmc_state.error_cov_scale) * cov_scale,
+        nnone(bart2._mcmc_state.error_cov_scale),
         rtol=1e-6,
     )
 
@@ -1511,21 +1518,23 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
     else:
         tau_num = jnp.where(mask, 3.0, 1.0)
         expected_sigest = jnp.where(mask, 0.0, 1.0)
-        assert_array_equal(bart.sigest, expected_sigest)
+        assert_array_equal(nnone(bart.sigest), expected_sigest)
 
     # check leaf_prior_cov_inv
     expected_cov_inv = (2**2 * bkw.num_trees) / tau_num**2
-    leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv
+    leaf_prior_cov_inv = nnone(bart._mcmc_state.forest.leaf_prior_cov_inv)
     if leaf_prior_cov_inv.ndim == 2:  # pragma: no branch, always mv with defaults
         expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
     assert_close_matrices(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
 
+    assert bart._burnin_trace.log_likelihood is not None
     assert_close_matrices(
         bart._burnin_trace.log_likelihood,
         jnp.zeros_like(bart._burnin_trace.log_likelihood),
         atol=1e-4,
         reduce_rank=True,
     )
+    assert bart._main_trace.log_likelihood is not None
     assert_close_matrices(
         bart._main_trace.log_likelihood,
         jnp.zeros_like(bart._main_trace.log_likelihood),
@@ -1545,7 +1554,7 @@ def test_two_datapoints(bkw: BartKW) -> None:
     bart = Bart(**kw)
     if not bkw.all_binary:
         ref_sigest = jnp.where(bkw.binary_mask, 0.0, kw['y_train'].std(axis=-1))
-        assert_close_matrices(bart.sigest, ref_sigest, rtol=1e-6)
+        assert_close_matrices(nnone(bart.sigest), ref_sigest, rtol=1e-6)
     if bkw.uses_quantile_binner:
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)
@@ -1702,12 +1711,14 @@ def run_bart_like_prior(
     )
 
     with subtests.test('likelihood ratio = 1'):
+        assert bart._burnin_trace.log_likelihood is not None
         assert_close_matrices(
             bart._burnin_trace.log_likelihood,
             jnp.zeros_like(bart._burnin_trace.log_likelihood),
             atol=1e-5,
             reduce_rank=True,
         )
+        assert bart._main_trace.log_likelihood is not None
         assert_close_matrices(
             bart._main_trace.log_likelihood,
             jnp.zeros_like(bart._main_trace.log_likelihood),
@@ -1733,7 +1744,7 @@ def sample_prior_like(
         len(bart._mcmc_state.forest.leaf_tree),
         bart._mcmc_state.forest.max_split,
         p_nonterminal,
-        jnp.sqrt(jnp.reciprocal(bart._mcmc_state.forest.leaf_prior_cov_inv)),
+        jnp.sqrt(jnp.reciprocal(nnone(bart._mcmc_state.forest.leaf_prior_cov_inv))),
     )
 
     with subtests.test('check prior trees'):
@@ -1931,7 +1942,7 @@ def test_no_recompilation_inner_loop_counter(bkw: BartKW) -> None:
     Bart(**kw)
     kw2 = dict(kw, seed=random.clone(kw['seed']))
     Bart(**kw2)
-    assert _run_mcmc_inner_loop._fun.n_calls == 0
+    assert _inner_loop_counter.n_calls == 0
 
 
 def test_print_callback_terminates_dot_line(
@@ -2237,8 +2248,8 @@ def create_array_cycle() -> ReferenceType[Array]:
     """Create a reference cycle of two jax.Arrays."""
     n1 = jnp.ones((2, 2))
     n2 = jnp.zeros((2, 2))
-    n1.next = n2
-    n2.next = n1
+    n1.next = n2  # ty:ignore[unresolved-attribute]
+    n2.next = n1  # ty:ignore[unresolved-attribute]
     return ref(n1)
 
 
@@ -2501,12 +2512,12 @@ class TestMVBartInterface:
 
         with subtests.test('sigest'):
             bart = Bart(sigest=1.0, **kw)
-            assert bart.sigest.shape == (k,)
+            assert nnone(bart.sigest).shape == (k,)
 
         with subtests.test('lambda_'):
             bart = Bart(lambda_=1.0, **kw)
             assert bart.sigest is None
-            assert bart._mcmc_state.error_cov_scale.shape == (k, k)
+            assert nnone(bart._mcmc_state.error_cov_scale).shape == (k, k)
 
     def test_mixed_rejects_weights(self, example_data: ExampleData) -> None:
         """Mixed outcome_type + weights should raise."""
@@ -2581,16 +2592,20 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     # Prior parameters (scalar floats, only equal up to GPU rounding)
     assert_allclose(bart_uv.offset, bart_mv.offset.squeeze(0), rtol=1e-6)
     assert_allclose(
-        state_uv.forest.leaf_prior_cov_inv,
-        state_mv.forest.leaf_prior_cov_inv.reshape(()),
+        nnone(state_uv.forest.leaf_prior_cov_inv),
+        nnone(state_mv.forest.leaf_prior_cov_inv).reshape(()),
         rtol=1e-6,
     )
     if outcome_type == 'continuous':
-        assert_array_equal(state_uv.error_cov_df, state_mv.error_cov_df)
+        assert_array_equal(nnone(state_uv.error_cov_df), nnone(state_mv.error_cov_df))
         assert_allclose(
-            state_uv.error_cov_scale, state_mv.error_cov_scale.reshape(()), rtol=1e-6
+            nnone(state_uv.error_cov_scale),
+            nnone(state_mv.error_cov_scale).reshape(()),
+            rtol=1e-6,
         )
-        assert_allclose(bart_uv.sigest, bart_mv.sigest.squeeze(0), rtol=1e-6)
+        assert_allclose(
+            nnone(bart_uv.sigest), nnone(bart_mv.sigest).squeeze(0), rtol=1e-6
+        )
 
     # Forest structure
     uv_forest_axes = chain_vmap_axes(state_uv.forest)
@@ -2826,7 +2841,9 @@ def test_sigest_cg(bkw: BartKW) -> None:
     bart_ols = Bart(**dict(bkw.kw, sigest='ols-or-variance'))
     bart_cg = Bart(**dict(bkw.kw, sigest='cg'))
     mask = ~bkw.binary_mask
-    assert_close_matrices(bart_cg.sigest[mask], bart_ols.sigest[mask], rtol=1e-6)
+    assert_close_matrices(
+        nnone(bart_cg.sigest)[mask], nnone(bart_ols.sigest)[mask], rtol=1e-6
+    )
 
 
 def test_sigest_auto_cg(keys: split) -> None:
@@ -2843,5 +2860,6 @@ def test_sigest_auto_cg(keys: split) -> None:
 
     bart = Bart(x, y, seed=keys.pop(), n_save=0, n_burn=0)
     stdy = jnp.std(y)
+    assert bart.sigest is not None
     assert bart.sigest <= stdy
     assert bart.sigest >= stdy * 1e-3  # not that much regularization...

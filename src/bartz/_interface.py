@@ -54,7 +54,7 @@ from jax import (
 )
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
-from jax.sharding import AxisType, Mesh, PartitionSpec
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
@@ -94,6 +94,7 @@ from bartz.mcmcstep._state import (
     FloatLike,
     State,
     _inv_via_chol_with_gersh,
+    _leaf_partition_spec,
     chol_with_gersh,
     init,
 )
@@ -323,7 +324,9 @@ class Bart(Module):
         cpu devices.
     num_data_devices
         The number of devices to split datapoints across. Must be a divisor of
-        `n`. This is useful only with very high `n`, about > 1000_000.
+        `n`. This is useful only with very high `n`, about > 1000_000. `predict`
+        parallelizes across the same devices, splitting the test points; the
+        number of test points must be a multiple of `num_data_devices` as well.
 
         If both num_chain_devices and num_data_devices are specified, the total
         number of devices used is the product of the two.
@@ -367,6 +370,7 @@ class Bart(Module):
     _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
     # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
     _x_train_fmt: Any = field(static=True)
+    _device: Device | None = field(static=True)
 
     sigest: Float32[Array, ''] | Float32[Array, ' k'] | None = None
     """The estimated standard deviation of the error used to set `lambda_`."""
@@ -475,7 +479,7 @@ class Bart(Module):
         max_split = jnp.array(binner_obj.max_split)
 
         # setup and run mcmc
-        initial_state, mcmc_key = _setup_mcmc(
+        initial_state, mcmc_key, device = _setup_mcmc(
             x_train,
             y_train,
             outcome_type,
@@ -526,6 +530,7 @@ class Bart(Module):
         self._binner = binner_obj
         self._x_train_fmt = x_train_fmt
         self._binary_mask = binary_mask
+        self._device = device
 
     def predict(
         self,
@@ -571,7 +576,14 @@ class Bart(Module):
         ValueError
             If `x_test` has a different format than `x_train`, or if `w`
             is specified when it should be `None`, or if `w` is not
-            specified when it is required.
+            specified when it is required, or if the model splits datapoints
+            across devices (`num_data_devices`) and the number of test points
+            is not a multiple of the number of data devices.
+
+        Notes
+        -----
+        If the model splits datapoints across devices (`num_data_devices`),
+        the test points and the returned predictions are split the same way.
         """
         # parse arguments
         kind = PredictKind(kind)
@@ -579,7 +591,13 @@ class Bart(Module):
             msg = '`key` not specified'
             raise ValueError(msg)
         w = self._process_w_test(x_test, kind, w)
+        x_test_is_train = isinstance(x_test, str) and x_test == 'train'
         x_test = self._process_x_test(x_test, w)
+
+        # place new test data on the devices of the model; the training data
+        # is already in place
+        if not x_test_is_train:
+            x_test, w = self._device_put_test(x_test, w)
 
         # invoke jitted implementation
         return predict(
@@ -590,7 +608,32 @@ class Bart(Module):
             self._mcmc_state.binary_indices,
             self._mcmc_state.binary_y is not None,
             kind,
+            # the test points are sharded over the mesh 'data' axis (when
+            # there is one): the training data at `init`, new test data by
+            # `_device_put_test`. `evaluate_trace` can't detect this on its
+            # own at trace time, so declare it.
+            'shard_and_autobatch',
         )
+
+    def _drop_device_info(self) -> 'Bart':
+        """Return a copy of the model without device placement metadata.
+
+        Clear the meshes in the MCMC state config and in the traces, and the
+        explicitly requested device. Only this static metadata is dropped: the
+        arrays keep their actual placement.
+        """
+        config = replace(self._mcmc_state.config, mesh=None)
+        main_trace = replace(self._main_trace, mesh=None)
+        burnin_trace = replace(self._burnin_trace, mesh=None)
+        obj = tree_at(
+            lambda b: (b._mcmc_state.config, b._main_trace, b._burnin_trace),  # noqa: SLF001
+            self,
+            (config, main_trace, burnin_trace),
+        )
+        # `_device` is a static field, out of `tree_at`'s reach, so modify the
+        # fresh copy in place
+        object.__setattr__(obj, '_device', None)
+        return obj
 
     def dump(self, path: str | PathLike) -> None:
         """Serialize the fitted model to a file with `pickle`.
@@ -607,17 +650,10 @@ class Bart(Module):
         equinox. The arrays are copied to host memory and all device/sharding
         placement is dropped; `load` reconstructs a single-device model.
         """
-        # drop the device meshes (whose `Device` objects are not picklable) from
-        # the state config and both traces, then gather any sharded arrays to
-        # host (dropping their sharding); the reload is single-device
-        config = replace(self._mcmc_state.config, mesh=None)
-        main_trace = replace(self._main_trace, mesh=None)
-        burnin_trace = replace(self._burnin_trace, mesh=None)
-        obj = tree_at(
-            lambda b: (b._mcmc_state.config, b._main_trace, b._burnin_trace),  # noqa: SLF001
-            self,
-            (config, main_trace, burnin_trace),
-        )
+        # drop all device info (`Device` objects are not picklable), then
+        # gather any sharded arrays to host (dropping their sharding); the
+        # reload is single-device
+        obj = self._drop_device_info()
         obj = jax.device_get(obj)
         with Path(path).open('wb') as file:
             pickle.dump(obj, file, protocol=pickle.HIGHEST_PROTOCOL)
@@ -871,6 +907,34 @@ class Bart(Module):
         if w is not None:
             _check_same_length(w, x_test)
         return self._binner.bin(x_test)
+
+    def _device_put_test(
+        self,
+        x_test: UInt[Array, 'p m'],
+        w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
+    ) -> tuple[UInt[Array, 'p m'], Float32[Array, ' m'] | Float32[Array, 'k m'] | None]:
+        """Place new test data on the devices of the model.
+
+        Mirror the placement of the training data done at fit time: shard over
+        the mesh if there is one (the observation axis over 'data'), else move
+        to the device requested explicitly at construction, if any. The inputs
+        are donated, so they must not be used elsewhere.
+        """
+        mesh = self._mcmc_state.config.mesh
+        if mesh is not None:
+            put = lambda a: device_put(
+                a,
+                NamedSharding(mesh, _leaf_partition_spec(a.ndim, None, -1, mesh)),
+                donate=True,
+            )
+        elif self._device is not None:
+            put = lambda a: device_put(a, self._device, donate=True)
+        else:
+            return x_test, w
+        if w is None:
+            return put(x_test), None
+        else:
+            return put(x_test), put(w)
 
     def _check_trees(
         self, error: bool = False
@@ -1353,7 +1417,7 @@ def _setup_mcmc(
     sparse: bool,
     n_burn: int,
     mcmc_key: Key[Array, ''],
-) -> tuple[State, Key[Array, '']]:
+) -> tuple[State, Key[Array, ''], Device | None]:
     p_nonterminal = make_p_nonterminal(maxdepth, base, power)
 
     # process device settings
@@ -1396,7 +1460,7 @@ def _setup_mcmc(
     if device is not None:
         mcmc_key, state = device_put((mcmc_key, state), device, donate=True)
 
-    return state, mcmc_key
+    return state, mcmc_key, device
 
 
 def _run_mcmc(
@@ -1787,13 +1851,15 @@ def process_varprob(
 
 
 def predict_latent(
-    x: UInt[Array, 'p m'], trace: MainTrace
+    x: UInt[Array, 'p m'],
+    trace: MainTrace,
+    test_points: Literal['none', 'autobatch', 'shard_and_autobatch'] = 'none',
 ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
     """Evaluate trees on already quantized `x`, and squash chains."""
-    return evaluate_trace(x, trace, flatten_chains=True)
+    return evaluate_trace(x, trace, flatten_chains=True, test_points=test_points)
 
 
-@partial(jit, static_argnums=(5, 6))
+@partial(jit, static_argnums=(5, 6, 7))
 def predict(
     key: Key[Array, ''] | None,
     trace: MainTrace,
@@ -1802,6 +1868,7 @@ def predict(
     binary_indices: Int32[Array, ' kb'] | None,
     has_binary: bool,
     kind: PredictKind | str,
+    test_points: Literal['none', 'autobatch', 'shard_and_autobatch'],
     /,
 ) -> (
     Float32[Array, ' m']
@@ -1811,7 +1878,7 @@ def predict(
 ):
     """Implement `Bart.predict`."""
     # get latent i.e. bare sum-of-trees predictions
-    latent = predict_latent(x_test, trace)
+    latent = predict_latent(x_test, trace, test_points)
     if kind is PredictKind.latent_samples:
         return latent
 

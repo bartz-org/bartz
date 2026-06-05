@@ -798,7 +798,7 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     with subtests.test('shift burn-in'):
         rtol = (
             0
-            if bart1.predict('train', kind='latent_samples').platform() == 'cpu'
+            if bart1.predict('train', kind='latent_samples').platform() == 'cpu'  # ty: ignore[unresolved-attribute]
             else 2e-6
         )
         assert_close_matrices(
@@ -823,7 +823,7 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     with subtests.test('change thinning'):
         rtol = (
             0
-            if bart1.predict('train', kind='latent_samples').platform() == 'cpu'
+            if bart1.predict('train', kind='latent_samples').platform() == 'cpu'  # ty: ignore[unresolved-attribute]
             else 2e-6
         )
         assert_close_matrices(
@@ -990,7 +990,7 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
 
     yhat1 = bart1.predict('train', kind='latent_samples')
     yhat2 = bart2.predict('train', kind='latent_samples')
-    rtol = 0 if yhat1.platform() == 'cpu' else 1e-5
+    rtol = 0 if yhat1.platform() == 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
 
@@ -2097,7 +2097,7 @@ def test_polars(bkw: BartKW) -> None:
     x_test_pl = pl.DataFrame(numpy.array(bkw.x_test).T)
     pred2 = bart2.predict(x_test_pl, kind='latent_samples')
 
-    rtol = 0 if pred.platform() == 'cpu' else 2e-6
+    rtol = 0 if pred.platform() == 'cpu' else 2e-6  # ty: ignore[unresolved-attribute]
 
     assert_close_matrices(
         bart.predict('train', kind='latent_samples'),
@@ -2736,7 +2736,7 @@ def test_get_error_sdev_values(bkw: BartKW) -> None:
 def test_devices_platform(bkw: BartKW) -> None:
     """Check that passing `devices='cpu'/'gpu'` ends up on the expected device."""
     bart1 = Bart(**bkw.kw)
-    platform = bart1._main_trace.grow_prop_count.platform()
+    platform = bart1._main_trace.grow_prop_count.platform()  # ty: ignore[unresolved-attribute]
     kw2 = dict(bkw.kw, devices=platform)
     bart2 = Bart(**kw2)
     # `_device` records whether `devices` was passed explicitly, so it may

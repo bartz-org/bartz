@@ -301,3 +301,8 @@ check-class-attributes = false
 style = ["numpydoc"]
 # keep the closing `"""` inline on attribute docstrings, as is our convention.
 closing-quotes = false
+
+[tool.ty.rules]
+# error on stale `ty: ignore` comments, e.g., ignores for diagnostics fixed by
+# typing improvements in our dependencies
+unused-ignore-comment = "error"

@@ -615,7 +615,7 @@ def test_sequential_guarantee(kw: dict, subtests: SubTests) -> None:
     ].reshape(bart1.ndpost, n)
 
     with subtests.test('shift burn-in'):
-        rtol = 0 if bart1.yhat_train.platform() == 'cpu' else 2e-6
+        rtol = 0 if bart1.yhat_train.platform() == 'cpu' else 2e-6  # ty: ignore[unresolved-attribute]
         # on gpu typically it works fine, but in one case there was a small
         # numerical difference in one of two chains
         assert_close_matrices(bart1.yhat_train, bart2_yhat_train, rtol=rtol)
@@ -633,7 +633,7 @@ def test_sequential_guarantee(kw: dict, subtests: SubTests) -> None:
     ]
 
     with subtests.test('change thinning'):
-        rtol = 0 if bart1.yhat_train.platform() == 'cpu' else 2e-6
+        rtol = 0 if bart1.yhat_train.platform() == 'cpu' else 2e-6  # ty: ignore[unresolved-attribute]
         # on gpu typically it works fine, but in one case there was a small
         # numerical difference in one of two chains
         assert_close_matrices(
@@ -1336,7 +1336,7 @@ def test_polars(kw: dict[str, Any]) -> None:
     bart2 = mc_gbart(**kw)
     pred2 = bart2.predict(kw['x_test'])
 
-    rtol = 0 if pred.platform() == 'cpu' else 2e-6
+    rtol = 0 if pred.platform() == 'cpu' else 2e-6  # ty: ignore[unresolved-attribute]
 
     assert_close_matrices(bart.yhat_train, bart2.yhat_train, rtol=rtol)
     if bart.sigma is not None:

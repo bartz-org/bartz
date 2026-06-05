@@ -1718,7 +1718,7 @@ def _determine_devices(
         # set device=None because if the devices were not specified explicitly
         # we may be in the case where computation will follow data placement,
         # do not disturb jax as the user may be playing with vmap, jit, reshard...
-        platform = y_train.platform()
+        platform = y_train.platform()  # ty: ignore[call-non-callable]
         return platform, None, jax.devices(platform)
     else:
         msg = 'not possible to infer device from `y_train`, please set `devices`'

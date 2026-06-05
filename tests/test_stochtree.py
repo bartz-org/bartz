@@ -561,7 +561,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
     # devices can't be inferred from a jit tracer, so pre-determine the platform;
     # rm_const requires concrete max_split values, so disable it for tracing.
     bart_kwargs: dict = {
-        'devices': jax.devices(args['y'].platform()),
+        'devices': jax.devices(args['y'].platform()),  # ty: ignore[unresolved-attribute]
         'rm_const': False,
     }
 

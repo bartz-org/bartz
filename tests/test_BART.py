@@ -90,7 +90,7 @@ from tests.util import (
 try:
     from rbartpackages import BART3
 except ValueError as exc:
-    # on PR ci, R is not installed because the tests using it are skipped
+    # allow collection in environments without R installed
     if 'r_home' not in str(exc):
         raise
 

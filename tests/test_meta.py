@@ -81,7 +81,8 @@ def test_random_keys_are_consumed(
 
 
 @pytest.mark.xfail(
-    condition=not config.jax_debug_key_reuse, reason='jax_debug_key_reuse not set'
+    condition=not config.jax_debug_key_reuse,  # ty: ignore[unresolved-attribute]
+    reason='jax_debug_key_reuse not set',
 )
 def test_debug_key_reuse(keys: split) -> None:
     """Check that the jax debug_key_reuse option works."""
@@ -92,7 +93,8 @@ def test_debug_key_reuse(keys: split) -> None:
 
 
 @pytest.mark.xfail(
-    condition=not config.jax_debug_key_reuse, reason='jax_debug_key_reuse not set'
+    condition=not config.jax_debug_key_reuse,  # ty: ignore[unresolved-attribute]
+    reason='jax_debug_key_reuse not set',
 )
 def test_debug_key_reuse_within_jit(keys: split) -> None:
     """Check that the jax debug_key_reuse option works within a jitted function."""

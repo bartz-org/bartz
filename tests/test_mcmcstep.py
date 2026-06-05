@@ -124,6 +124,7 @@ from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
     manual_tree,
+    nnone,
 )
 
 
@@ -1455,7 +1456,7 @@ class TestMultichain:
             if chain_axis is None or mc_x is None:
                 return mc_x
             else:
-                return jnp.stack(sc_xs, axis=chain_axis)
+                return jnp.stack([nnone(x) for x in sc_xs], axis=chain_axis)
 
         chain_axes = chain_vmap_axes(mc_state)
         stacked_state = tree.map_with_path(
@@ -1608,13 +1609,15 @@ def check_sharding(x: PyTree, mesh: Mesh | None) -> None:
 
 def get_normal_spec(x: Array) -> PartitionSpec:
     """Get the partition spec of `x` and apply `normalize_spec`."""
-    spec = x.sharding.spec
-    mesh = x.sharding.mesh
-    return normalize_spec(spec, mesh, x.shape)
+    sharding = x.sharding
+    assert isinstance(sharding, NamedSharding)
+    mesh = sharding.mesh
+    assert isinstance(mesh, Mesh)
+    return normalize_spec(sharding.spec, mesh, x.shape)
 
 
 def normalize_spec(
-    spec: Sequence[str | None], mesh: Mesh, shape: tuple[int, ...]
+    spec: PartitionSpec | Sequence[str | None], mesh: Mesh, shape: tuple[int, ...]
 ) -> PartitionSpec:
     """Put a spec in standard form, i.e., fill with `None` until length `ndim` and put `None` on axes with mesh size 1 or if array size is 0."""
     s = list(spec)

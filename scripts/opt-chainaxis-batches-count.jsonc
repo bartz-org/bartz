@@ -1,6 +1,6 @@
 {
     "plot": {
-        "reduce": "count_num_batches",
+        "reduce": "count_reduction.num_batches",
         "scan": "num_chains",
     },
     "values": {
@@ -9,7 +9,7 @@
         "maxdepth":           [6],
         "weights":            [false],
         "num_trees":          [10],
-        "count_num_batches":  [null, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+        "count_reduction":    [{"kind": "batched", "num_batches": [null, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]}],
         "num_chains":         [null, 1, 2, 4, 6, 8, 12, 16, 20],
         "chain_axis":         [0, -1],
     },

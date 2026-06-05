@@ -667,7 +667,7 @@ class TestReduction:
 
     @staticmethod
     def reference(
-        values: Float32[Array, '*batch_shape n'] | int,
+        values: Float[Array, '*batch_shape n'] | int,
         indices: Integer[Array, ' n'],
         /,
         *,
@@ -694,7 +694,9 @@ class TestReduction:
         """Every config matches the reference on a battery of invocations.
 
         The cases cover scalar count weights (exact integer match), float
-        values with and without batch dimensions, composition with an external
+        values with and without batch dimensions, float16 values whose per-bin
+        sums overflow float16 (catching accumulation in the values' dtype
+        rather than in the requested `dtype`), composition with an external
         `vmap` that batches only the indices (the layout `step` uses to
         count/sum over many trees at once), and a data axis sharded with
         `shard_map`, which `PallasReduction` must reject.
@@ -709,6 +711,9 @@ class TestReduction:
         vector = random.normal(keys.pop(), (n,))
         batched = random.normal(keys.pop(), (3, n))
         matrix = random.normal(keys.pop(), (2, 2, n))
+        # float16 values: each per-bin sum overflows the float16 range, so a
+        # reduction accumulating in the values' dtype returns inf
+        overflowing = jnp.full(n, 4096.0, jnp.float16)
 
         count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
         float_kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
@@ -722,6 +727,7 @@ class TestReduction:
             'float': (lambda f: f(vector, indices, **float_kw), close),
             'float batched': (lambda f: f(batched, indices, **float_kw), close),
             'float matrix': (lambda f: f(matrix, indices, **float_kw), close),
+            'float16': (lambda f: f(overflowing, indices, **float_kw), close),
             'vmap count': (
                 lambda f: vmap(partial(f, 1, **count_kw))(tree_indices),
                 exact,

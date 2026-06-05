@@ -34,7 +34,7 @@ from jax import ShapeDtypeStruct, lax
 from jax import numpy as jnp
 from jax.experimental import pallas as pl
 from jax.typing import DTypeLike
-from jaxtyping import Array, Float32, Int32, Integer, Shaped
+from jaxtyping import Array, Float, Int32, Integer, Shaped
 
 # target number of datapoint batches on cpu when batching is resolved
 # automatically; unlike the gpu target it does not vary across reductions
@@ -56,7 +56,7 @@ class ReductionConfig(Module):
     @abstractmethod
     def _reduce(
         self,
-        values: Float32[Array, '*batch_shape n'] | int,
+        values: Float[Array, '*batch_shape n'] | int,
         indices: Integer[Array, ' n'],
         /,
         *,
@@ -64,7 +64,11 @@ class ReductionConfig(Module):
         dtype: DTypeLike,
         data_sharded: bool,
     ) -> Shaped[Array, '*batch_shape {size}']:
-        """Indexed reduce along the last axis of `values` into `size` bins."""
+        """Indexed reduce along the last axis of `values` into `size` bins.
+
+        The output and the accumulation are in `dtype`; the values are kept in
+        their own, possibly narrower, dtype until accumulated.
+        """
         ...
 
 
@@ -95,7 +99,7 @@ class BatchedReduction(ReductionConfig):
 
     def _reduce(
         self,
-        values: Float32[Array, '*batch_shape n'] | int,
+        values: Float[Array, '*batch_shape n'] | int,
         indices: Integer[Array, ' n'],
         /,
         *,
@@ -137,7 +141,7 @@ class BatchedReduction(ReductionConfig):
 
 
 def _batched_scatter_add(
-    values: Float32[Array, '*batch_shape n'] | Int32[Array, ''],
+    values: Float[Array, '*batch_shape n'] | Int32[Array, ''],
     indices: Integer[Array, ' n'],
     /,
     *,
@@ -229,7 +233,7 @@ class OneHotReduction(ReductionConfig):
 
     def _reduce(
         self,
-        values: Float32[Array, '*batch_shape n'] | int,
+        values: Float[Array, '*batch_shape n'] | int,
         indices: Integer[Array, ' n'],
         /,
         *,
@@ -248,29 +252,38 @@ class OneHotReduction(ReductionConfig):
         bins = jnp.arange(size, dtype=indices.dtype)
         iota = jnp.arange(n)
 
+        # one-hots and scatter buffers hold the values, so they are built in
+        # the values' dtype; only the reduction accumulates in `dtype`. The
+        # scalar count case has no input precision to preserve and uses `dtype`.
+        values_dtype = dtype if scalar else values.dtype
+
         match self.method, self.n_inner:
             case 'scatter_set', True:
                 out = (
-                    jnp.zeros((*batch_shape, size, n), dtype)
+                    jnp.zeros((*batch_shape, size, n), values_dtype)
                     .at[..., indices, iota]
                     .set(values, unique_indices=True)
-                    .sum(axis=-1)
+                    .sum(axis=-1, dtype=dtype)
                 )
             case 'scatter_set', False:
                 out = (
-                    jnp.zeros((*batch_shape, n, size), dtype)
+                    jnp.zeros((*batch_shape, n, size), values_dtype)
                     .at[..., iota, indices]
                     .set(values, unique_indices=True)
-                    .sum(axis=-2)
+                    .sum(axis=-2, dtype=dtype)
                 )
             case 'matmul', True:
-                onehot = (bins[:, None] == indices).astype(dtype)  # (size, n)
+                onehot = (bins[:, None] == indices).astype(values_dtype)  # (size, n)
                 vec = jnp.broadcast_to(values.astype(dtype), (n,)) if scalar else values
-                out = jnp.einsum('...n,sn->...s', vec, onehot)
+                out = jnp.einsum(
+                    '...n,sn->...s', vec, onehot, preferred_element_type=dtype
+                )
             case 'matmul', False:
-                onehot = (indices[:, None] == bins).astype(dtype)  # (n, size)
+                onehot = (indices[:, None] == bins).astype(values_dtype)  # (n, size)
                 vec = jnp.broadcast_to(values.astype(dtype), (n,)) if scalar else values
-                out = jnp.einsum('...n,ns->...s', vec, onehot)
+                out = jnp.einsum(
+                    '...n,ns->...s', vec, onehot, preferred_element_type=dtype
+                )
             case 'multiply', True:
                 onehot = bins[:, None] == indices  # (size, n)
                 if scalar:
@@ -332,7 +345,7 @@ class PallasReduction(ReductionConfig):
 
     def _reduce(
         self,
-        values: Float32[Array, '*batch_shape n'] | int,
+        values: Float[Array, '*batch_shape n'] | int,
         indices: Integer[Array, ' n'],
         /,
         *,
@@ -414,7 +427,7 @@ def _auto_block_size(n: int, size: int, num_rows: int) -> int:
 
 
 def _pallas_scatter_add(
-    values: Float32[Array, '*batch_shape n'] | Int32[Array, ''],
+    values: Float[Array, '*batch_shape n'] | Int32[Array, ''],
     indices: Integer[Array, ' n'],
     /,
     *,
@@ -433,8 +446,9 @@ def _pallas_scatter_add(
         batch_shape = ()
         rows = jnp.broadcast_to(values.astype(dtype), (1, n))
     else:
+        # the rows stay in the values' dtype; the kernel accumulates in `dtype`
         batch_shape = values.shape[:-1]
-        rows = values.astype(dtype).reshape(-1, n)
+        rows = values.reshape(-1, n)
     num_rows, _ = rows.shape
 
     # the Triton backend requires every array dimension to be a power of 2. `size`
@@ -460,8 +474,11 @@ def _pallas_scatter_add(
 
         def accumulate(i, acc):  # noqa: ANN001, ANN202
             block = pl.ds(i * block_size, block_size)
-            onehot = (bins[:, None] == indices_ref[block]).astype(dtype)
-            return acc + (rows_ref[:, block][:, None, :] * onehot).sum(axis=-1)
+            onehot = (bins[:, None] == indices_ref[block]).astype(rows_ref.dtype)
+            # the one-hot product is exact in the values' dtype; the block
+            # reduction accumulates in `dtype`
+            prod = rows_ref[:, block][:, None, :] * onehot
+            return acc + prod.sum(axis=-1, dtype=dtype)
 
         out_ref[0] = lax.fori_loop(
             0, iters, accumulate, jnp.zeros((padded_rows, size), dtype)

@@ -35,6 +35,9 @@ license = "MIT"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    # WORKAROUND(jax<0.6.2): jax 0.6.1 requires absl-py to import pallas,
+    # which bartz.mcmcstep imports at module level
+    "absl-py>=2.2.2",
     "equinox>=0.12.2",
     "jax>=0.6.1",
     "jaxtyping>=0.3.2",
@@ -158,6 +161,10 @@ known-third-party = ["stochtree", "jax"]
 
 [tool.ruff.lint.flake8-annotations]
 allow-star-arg-any = true
+
+[tool.ruff.lint.flake8-bugbear]
+# equinox modules are frozen, so they are safe to construct in argument defaults
+extend-immutable-calls = ["bartz.mcmcstep._reduction.BatchedReduction"]
 
 [tool.ruff.lint]
 select = [

@@ -30,8 +30,9 @@ from operator import attrgetter
 from types import MappingProxyType
 
 import pytest
-from jax import jit, random, vmap
+from jax import block_until_ready, jit, random, vmap
 from jax import numpy as jnp
+from jax.errors import JaxRuntimeError
 from jaxtyping import Array, Bool, Float, Key
 from numpy.testing import assert_array_less
 from scipy.stats import norm
@@ -44,8 +45,10 @@ from bartz.testing._dgp import (
     generate_s,
     interaction_pattern,
     partitioned_interaction_pattern,
+    standardize_x,
+    x_kurtosis,
 )
-from tests.util import assert_array_equal, assert_close_matrices
+from tests.util import assert_allclose, assert_array_equal, assert_close_matrices
 
 # Test parameters
 ALPHA = 5e-7  # probability of false positive (aaaaapprox)
@@ -95,6 +98,7 @@ def generate_dgps(
     sparsity: float | None,
     het_strength: float | None = None,
     het_shape: str | None = None,
+    m: int | None = None,
 ) -> DGP:
     """Generate one dataset per random key (jitted, vmapped over keys)."""
     gen = partial(
@@ -103,6 +107,7 @@ def generate_dgps(
         sparsity=sparsity,
         het_strength=het_strength,
         het_shape=het_shape,
+        m=m,
         **KWARGS,
     )
     return vmap(gen)(keys)
@@ -113,7 +118,7 @@ def dgps(keys: split, request: pytest.FixtureRequest) -> DGP:
     """Generate DGP instances using vmap and jit.
 
     Indirectly parametrizable by a mapping with any of ``lambda_``,
-    ``sparsity``, ``het_strength`` and ``het_shape``.
+    ``sparsity``, ``het_strength``, ``het_shape`` and ``m``.
     """
     param: Mapping = getattr(request, 'param', None) or {}
     return generate_dgps(
@@ -122,6 +127,7 @@ def dgps(keys: split, request: pytest.FixtureRequest) -> DGP:
         param.get('sparsity'),
         param.get('het_strength'),
         param.get('het_shape'),
+        param.get('m'),
     )
 
 
@@ -163,19 +169,50 @@ def test_shapes_and_dtypes(keys: split) -> None:
 
 
 class TestGenerateX:
-    """Test the generate_x function."""
+    """Test the generate_x and standardize_x functions."""
+
+    def test_x_support(self, dgps: DGP) -> None:
+        """Test that continuous x lies in [0, 1)."""
+        assert jnp.all((dgps.x >= 0.0) & (dgps.x < 1.0))
 
     def test_x_mean(self, dgps: DGP) -> None:
-        """Test that x has mean close to 0."""
-        assert_mean_z(dgps.x, 0.0)
+        """Test that x has mean close to 1/2."""
+        assert_mean_z(dgps.x, 0.5)
 
     def test_x_variance(self, dgps: DGP) -> None:
-        """Test that x has variance close to 1."""
+        """Test that x has variance close to 1/12."""
         n_reps, *_ = dgps.x.shape
         var = jnp.var(dgps.x, axis=0)  # Shape: (P, N)
-        std_of_var = jnp.sqrt(2 / (n_reps - 1))  # Gaussian approx at variance 1
-        z_scores = jnp.abs((var - 1.0) / std_of_var)
+        # conservative Gaussian approx at variance 1/12
+        std_of_var = jnp.sqrt(2 / (n_reps - 1)) / 12
+        z_scores = jnp.abs((var - 1 / 12) / std_of_var)
         assert_array_less(z_scores, SIGMA_THRESHOLD)
+
+    @pytest.mark.parametrize('m', [2, 3, 5])
+    def test_quantized_support(self, keys: split, m: int) -> None:
+        """Test that quantized x takes exactly the values {0, ..., m-1}."""
+        dgp = gen_data(keys.pop(), m=m, lambda_=0.5, **KWARGS)
+        assert jnp.issubdtype(dgp.x.dtype, jnp.floating)
+        assert_array_equal(jnp.unique(dgp.x), jnp.arange(m).astype(dgp.x.dtype))
+        assert dgp.params.m.shape == ()
+        assert jnp.issubdtype(dgp.params.m.dtype, jnp.integer)
+
+    @pytest.mark.parametrize('m', [2, 3, 5, 100])
+    def test_standardized_levels(self, m: int) -> None:
+        """The standardized levels have mean 0, variance 1 and kurtosis `kurt_x`.
+
+        Computing the moments over the (equiprobable) levels checks the
+        `standardize_x` remap and the `x_kurtosis` closed form exactly.
+        """
+        levels = standardize_x(jnp.arange(m).astype(float)[None, :], m)
+        assert_allclose(jnp.mean(levels), 0.0, atol=1e-6)
+        assert_allclose(jnp.var(levels), 1.0, rtol=1e-6)
+        assert_allclose(jnp.mean(levels**4), x_kurtosis(m), rtol=1e-6)
+
+    def test_binary_levels(self) -> None:
+        """m=2 standardizes to exactly +-1 (whose squares are constant)."""
+        levels = standardize_x(jnp.arange(2).astype(float)[None, :], 2)
+        assert_array_equal(levels, jnp.array([[-1.0, 1.0]]))
 
 
 class TestGeneratePartition:
@@ -309,12 +346,15 @@ HET_DGPS_IDS = ('het_scalar', 'het_vector_sparse')
 # ``y`` budgets unchanged since ``E[error_scale ** 2] == 1`` marginally. Het
 # does not enter the latent mean fields at all (checked exactly by
 # `test_stream_invariance_with_homoskedastic`), so only ``z`` and ``y`` are
-# tested there.
+# tested there. The binary-predictor DGP (``kurt_x == 1``: the whole quadratic
+# budget flows through the interactions) is tested on the quadratic field and
+# the totals.
 VARIANCE_CASES = tuple(
     pytest.param(dgp, which, id=f'{which}-{dgp_id}')
     for dgp, dgp_id, whiches in (
         ({}, 'dense', WHICH_PARAMS),
         ({'sparsity': SPARSITY}, 'sparse', WHICH_PARAMS),
+        ({'m': 2}, 'binary_x', ('muquad', 'mu', 'z')),
         *((d, i, ('z', 'y')) for d, i in zip(HET_DGPS, HET_DGPS_IDS, strict=True)),
     )
     for which in whiches
@@ -559,6 +599,34 @@ def test_lambda_forbidden_when_univariate(keys: split) -> None:
         gen_data(keys.pop(), lambda_=0.5, **kw)
 
 
+def test_m_too_small(keys: split) -> None:
+    """``m < 2`` raises.
+
+    The runtime `error_if` surfaces only on synchronization (hence the
+    `block_until_ready`), wrapped in an exception type that depends on the
+    jit dispatch path (fresh compile vs. cache hit).
+    """
+    with pytest.raises((JaxRuntimeError, ValueError), match='m must be >= 2'):
+        block_until_ready(gen_data(keys.pop(), m=1, lambda_=0.5, **KWARGS))
+
+
+def test_binary_x_requires_interactions(keys: split) -> None:
+    """``m=2`` with ``q < 2`` raises: squares of binary predictors are constant.
+
+    See `test_m_too_small` for the error handling details.
+    """
+    kw = dict(KWARGS, q=0)
+    with pytest.raises((JaxRuntimeError, ValueError), match='q must be >= 2'):
+        block_until_ready(gen_data(keys.pop(), m=2, lambda_=0.5, **kw))
+
+
+def test_binary_x_min_interactions(keys: split) -> None:
+    """``m=2`` with ``q=2`` is accepted and the quadratic term is not constant."""
+    kw = dict(KWARGS, q=2)
+    dgp = gen_data(keys.pop(), m=2, lambda_=0.5, **kw)
+    assert jnp.all(jnp.var(dgp.muquad, axis=-1) > 0)
+
+
 @pytest.mark.parametrize(
     ('k', 'het_shape'),
     [(None, None), (None, 'scalar'), (3, None), (3, 'scalar'), (3, 'vector')],
@@ -788,7 +856,7 @@ class TestHeteroskedasticity:
         big_lambda = lambda_ * (2 - lambda_) + (1 - lambda_) ** 2 * k
         r = p % k
         excess = (
-            3 * (Params.kurt_x * dgp.params.mu_4_s - 1) * big_lambda / p
+            3 * (dgp.params.kurt_x * dgp.params.mu_4_s - 1) * big_lambda / p
             + 3 * (1 - lambda_) ** 2 * r * (k - r) / p**2
         )
         assert_close_matrices(dgp.params.var_v, rho**2 * (2 + excess), rtol=1e-6)

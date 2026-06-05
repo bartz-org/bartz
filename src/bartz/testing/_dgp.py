@@ -39,12 +39,37 @@ from bartz._jaxext.random import loggamma
 from bartz.mcmcstep import OutcomeType
 
 
-def generate_x(key: Key[Array, ''], n: int, p: int) -> Float[Array, 'p n']:
-    """Generate predictors with mean 0 and variance 1.
+def generate_x(
+    key: Key[Array, ''], n: int, p: int, m: Integer[Array, ''] | int | None
+) -> Float[Array, 'p n']:
+    """Generate predictors, x_rj ~iid U(0, 1), or U{0, ..., m-1} if `m` is set."""
+    if m is None:
+        return random.uniform(key, (p, n))
+    else:
+        return random.randint(key, (p, n), 0, m).astype(float)
 
-    x_rj ~iid U(-√3, √3)
+
+def standardize_x(
+    x: Float[Array, 'p n'], m: Integer[Array, ''] | int | None
+) -> Float[Array, 'p n']:
+    """Remap predictors drawn by `generate_x` to mean 0 and variance 1."""
+    if m is None:
+        mean, var = 0.5, 1 / 12
+    else:
+        mean, var = (m - 1) / 2, (m * m - 1) / 12
+    return (x - mean) / jnp.sqrt(var)
+
+
+def x_kurtosis(m: Integer[Array, ''] | int | None) -> Float[Array, ''] | float:
+    """Kurtosis E[x'^4] of the standardized predictors of `generate_x`.
+
+    9/5 for the continuous uniform, 3/5 (3m^2 - 7) / (m^2 - 1) for the
+    quantized one: 1 at m=2, increasing towards 9/5 as m grows.
     """
-    return random.uniform(key, (p, n), minval=-jnp.sqrt(3.0), maxval=jnp.sqrt(3.0))
+    if m is None:
+        return 9 / 5
+    else:
+        return 3 / 5 * (3 * m * m - 7) / (m * m - 1)
 
 
 def generate_partition(key: Key[Array, ''], p: int, k: int) -> Bool[Array, 'k p']:
@@ -108,7 +133,7 @@ def combine_shared_separate(
 def het_var_v(
     het_shape: Literal['scalar', 'vector'],
     het_strength: Float[Array, ''] | float,
-    kurt_x: float,
+    kurt_x: Float[Array, ''] | float,
     mu_4: Float[Array, ''] | float,
     p: int,
     k: int | None,
@@ -172,7 +197,7 @@ def generate_A_shared(
     p: int,
     q: Integer[Array, ''],
     sigma2_quad: Float[Array, ''],
-    kurt_x: float,
+    kurt_x: Float[Array, ''] | float,
     s: Float[Array, ' p'],
     mu4: Float[Array, ''] | float,
 ) -> Float[Array, 'p p']:
@@ -210,7 +235,7 @@ def generate_A_separate(
     partition: Bool[Array, 'k p'],
     q: Integer[Array, ''],
     sigma2_quad: Float[Array, ''],
-    kurt_x: float,
+    kurt_x: Float[Array, ''] | float,
     s: Float[Array, ' p'],
     mu4: Float[Array, ''] | float,
 ) -> Float[Array, 'k p p']:
@@ -255,6 +280,26 @@ def generate_outcome(
     return z, y
 
 
+def parse_outcome_type(
+    outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...], k: int | None
+) -> OutcomeType | tuple[OutcomeType, ...]:
+    """Validate the `outcome_type` argument of `gen_params` and normalize it.
+
+    Tuples with all elements equal are collapsed to the scalar form.
+    """
+    if isinstance(outcome_type, tuple):
+        if k is None:
+            msg = 'tuple outcome_type requires a multivariate outcome (k != None)'
+            raise ValueError(msg)
+        types = tuple(OutcomeType(t) for t in outcome_type)
+        if len(types) != k:
+            msg = f'outcome_type has length {len(types)} but k={k}'
+            raise ValueError(msg)
+        return types[0] if len(set(types)) == 1 else types
+    else:
+        return OutcomeType(outcome_type)
+
+
 class Params(Module):
     R"""All quantities of the data-generating process that do not depend on `n`.
 
@@ -266,9 +311,18 @@ class Params(Module):
         :nowrap:
 
         \begin{align}
-            X_{ij} &\overset{\mathrm{i.i.d.}}\sim U(-\sqrt 3, \sqrt 3),
+            X_{ij} &\overset{\mathrm{i.i.d.}}\sim \begin{cases}
+                    U(0, 1) & m = \text{None}, \\
+                    U\{0, \ldots, m - 1\} & m \ge 2,
+                \end{cases}
                 \quad i = 1, \ldots, n, \quad j, j' = 1, \ldots, p,
                 \quad c = 1, \ldots, k, \\
+            X'_{ij} &= \frac{X_{ij} - E[X_{ij}]}
+                {\sqrt{\operatorname{Var}[X_{ij}]}}, \\
+            \kappa_X &= E[X'^4_{ij}] = \begin{cases}
+                    9/5 & m = \text{None}, \\
+                    \frac 35 \frac{3m^2 - 7}{m^2 - 1} & m \ge 2,
+                \end{cases} \\
             s_j &\overset{\mathrm{i.i.d.}}\sim
                 \mathrm{Gamma}(\alpha,\, \sqrt{\alpha (\alpha + 1)}), \\
             E[s_j^2] &= 1, \\
@@ -297,24 +351,24 @@ class Params(Module):
             A^{\mathrm{sep}}_{cjj'} &\sim s_j s_{j'}\, P^{\mathrm{sep}}_{cjj'}\,
                 N(0,\, \sigma^2_{\mathrm{quad}} / ((p / k)\, ((\kappa_X - 1)\mu_4 + q))), \\
             \mu^{\mathrm L}_{ci} &= \sqrt\lambda \textstyle\sum_j
-                    \beta^{\mathrm{sh}}_j X_{ij}
+                    \beta^{\mathrm{sh}}_j X'_{ij}
                 + \sqrt{1 - \lambda} \textstyle\sum_j
-                    \beta^{\mathrm{sep}}_{cj} X_{ij}, \\
+                    \beta^{\mathrm{sep}}_{cj} X'_{ij}, \\
             \mu^{\mathrm Q}_{ci} &= \sqrt\lambda \textstyle\sum_{jj'}
-                    A^{\mathrm{sh}}_{jj'} X_{ij} X_{ij'}
+                    A^{\mathrm{sh}}_{jj'} X'_{ij} X'_{ij'}
                 + \sqrt{1 - \lambda} \textstyle\sum_{jj'}
-                    A^{\mathrm{sep}}_{cjj'} X_{ij} X_{ij'},
+                    A^{\mathrm{sep}}_{cjj'} X'_{ij} X'_{ij'},
                 \quad \lambda \in [0, 1], \\
             \gamma^{\mathrm{sh}}_j &\overset{\mathrm{i.i.d.}}\sim
                 s_j\, N(0,\, 1 / p), \\
             \gamma^{\mathrm{sep}}_{cj} &\sim
                 s_j\, \mathbb 1[j \in S_c]\, N(0,\, 1 / (p / k)), \\
             \eta_{ci} &= \begin{cases}
-                    \textstyle\sum_j \gamma^{\mathrm{sh}}_j X_{ij}
+                    \textstyle\sum_j \gamma^{\mathrm{sh}}_j X'_{ij}
                         & W \text{ scalar (same for every } c\text{)}, \\
-                    \sqrt\lambda \textstyle\sum_j \gamma^{\mathrm{sh}}_j X_{ij}
+                    \sqrt\lambda \textstyle\sum_j \gamma^{\mathrm{sh}}_j X'_{ij}
                         + \sqrt{1 - \lambda} \textstyle\sum_j
-                        \gamma^{\mathrm{sep}}_{cj} X_{ij}
+                        \gamma^{\mathrm{sep}}_{cj} X'_{ij}
                         & W \text{ vector},
                 \end{cases} \\
             W_{ci}^2 &= (1 - \rho) + \rho\, \eta_{ci}^2,
@@ -329,9 +383,16 @@ class Params(Module):
 
     where a binary component thresholds its own latent :math:`Z_{ci}` at zero
     (the branch is chosen per component :math:`c`), so its success probability
-    is :math:`\Phi(\mu_{ci} / (\sigma_{\mathrm{eps}} W_{ci}))`. Here
-    :math:`\kappa_X = E[X_{ij}^4] = 9/5` is the kurtosis of the predictors, so
-    :math:`\kappa_X - 1 = 4/5`.
+    is :math:`\Phi(\mu_{ci} / (\sigma_{\mathrm{eps}} W_{ci}))`.
+
+    The formulas use the standardized predictors :math:`X'_{ij}`; the raw
+    :math:`X_{ij}` are either continuous uniform (:math:`m = \text{None}`) or
+    quantized on :math:`m` levels. The kurtosis excess :math:`\kappa_X - 1 =
+    \operatorname{Var}[X'^2_{ij}]` is the weight of the pure-square terms in
+    the quadratic variance budget. At :math:`m = 2` (binary) :math:`X'^2_{ij}
+    \equiv 1`, so those terms are constants and :math:`\kappa_X = 1`: the
+    quadratic variance must then come from the interactions, hence :math:`q
+    \ge 2` is required.
 
     The scales :math:`s_j` make the predictors differ in importance (sparsity):
     each down- or up-weights predictor :math:`j` in every term. Because they
@@ -373,11 +434,11 @@ class Params(Module):
 
     The tunable hyperparameters are the variance budgets
     :math:`\sigma^2_{\mathrm{lin}}, \sigma^2_{\mathrm{quad}},
-    \sigma^2_{\mathrm{eps}}`, the interaction count :math:`q`, the coupling
-    :math:`\lambda`, the sparsity shape :math:`\alpha`, the heteroskedasticity
-    :math:`\rho` and the scalar/vector form of :math:`W`, and the
-    per-component continuous/binary choice; every other quantity is sampled or
-    derived from these.
+    \sigma^2_{\mathrm{eps}}`, the predictor quantization :math:`m`, the
+    interaction count :math:`q`, the coupling :math:`\lambda`, the sparsity
+    shape :math:`\alpha`, the heteroskedasticity :math:`\rho` and the
+    scalar/vector form of :math:`W`, and the per-component continuous/binary
+    choice; every other quantity is sampled or derived from these.
 
     **Heteroskedasticity.** The knob :math:`\rho` tunes the noise from
     homoskedastic (:math:`\rho = 0`, so :math:`W_{ci} \equiv 1`) to maximally
@@ -409,8 +470,8 @@ class Params(Module):
 
     Univariate outcomes are the :math:`k = 1`, :math:`\lambda = 1` special
     case with the component axis dropped, so :math:`\mu_i = \sum_j
-    \beta^{\mathrm{sh}}_j X_{ij} + \sum_{jj'} A^{\mathrm{sh}}_{jj'} X_{ij}
-    X_{ij'}`, and only the scalar :math:`W` is available.
+    \beta^{\mathrm{sh}}_j X'_{ij} + \sum_{jj'} A^{\mathrm{sh}}_{jj'} X'_{ij}
+    X'_{ij'}`, and only the scalar :math:`W` is available.
 
     The mathematical symbols and cases map to class attributes and `gen_data`
     settings as follows:
@@ -420,6 +481,12 @@ class Params(Module):
 
         * - Symbol / case
           - Attribute / setting
+        * - :math:`X_{ij}`
+          - `DGP.x`
+        * - :math:`m`
+          - `m`
+        * - :math:`\kappa_X`
+          - `kurt_x`
         * - :math:`s_j`
           - `s`
         * - :math:`\alpha`
@@ -458,8 +525,6 @@ class Params(Module):
           - `gamma_separate`
         * - :math:`\rho`
           - `het_strength`
-        * - :math:`\kappa_X`
-          - `kurt_x`
         * - :math:`\operatorname{Var}[W_{ci}^2]`
           - `var_v`
         * - :math:`W_{ci}`
@@ -521,6 +586,16 @@ class Params(Module):
     importance. As ``sparsity -> inf`` the scales concentrate at 1, matching
     ``sparsity is None``; as ``sparsity -> 0`` all importance concentrates on a
     single predictor."""
+
+    m: Integer[Array, ''] | int | None
+    """Number of levels of the quantized uniform predictor distribution, or
+    ``None`` for the continuous uniform. ``m=2`` (binary) requires ``q >= 2``
+    because the squares of binary predictors are constant."""
+
+    kurt_x: Float[Array, ''] | float
+    """Kurtosis ``E[x'^4]`` of the standardized predictors. Equal to ``9/5``
+    when ``m is None`` and to ``3/5 (3m^2 - 7) / (m^2 - 1)`` on ``m`` levels
+    (1 at ``m=2``)."""
 
     q: Integer[Array, '']
     """Number of quadratic interactions per predictor (even, ``< p // k``)."""
@@ -585,10 +660,6 @@ class Params(Module):
     ``error_scale`` per datapoint of shape (n,) scaling the whole outcome vector;
     ``'vector'`` (multivariate only) gives per-component scales of shape (k, n)."""
 
-    kurt_x: float = 9 / 5  # kurtosis of uniform distribution
-    """Kurtosis of the predictor distribution. Defaults to ``9 / 5``, the
-    kurtosis of the uniform distribution used by `gen_data_from_params`."""
-
 
 class DGP(Module):
     """Output of `gen_data` / `gen_data_from_params`: sampled data and parameters.
@@ -601,7 +672,9 @@ class DGP(Module):
     """
 
     x: Float[Array, 'p n']
-    """Predictors of shape (p, n), marginally mean 0 and variance 1."""
+    """Predictors of shape (p, n), U(0, 1) or uniform on ``{0, ...,
+    params.m - 1}`` if quantized. The mean formulas use their standardization
+    (the :math:`X'` of `Params`), not `x` itself."""
 
     y: Float[Array, 'k n'] | Float[Array, ' n']
     """Noisy outcomes of shape (k, n), or (n,) if `gen_data` was called with
@@ -718,6 +791,7 @@ def gen_params(
     key: Key[Array, ''],
     *,
     p: int,
+    m: Integer[Array, ''] | int | None = None,
     k: int | None,
     q: Integer[Array, ''] | int,
     lambda_: Float[Array, ''] | float | None = None,
@@ -740,6 +814,10 @@ def gen_params(
         JAX random key.
     p
         Number of predictors.
+    m
+        Number of levels of the quantized uniform predictor distribution
+        (``>= 2``; ``m=2`` is binary and requires ``q >= 2``), or `None`
+        (default) for the continuous uniform. See `Params`.
     k
         Number of outcome components. If `None`, generate a univariate DGP
         and skip the separate code path: ``partition``, ``beta_separate``,
@@ -799,17 +877,16 @@ def gen_params(
         msg = "het_shape='vector' requires a multivariate outcome (k != None)"
         raise ValueError(msg)
 
-    if isinstance(outcome_type, tuple):
-        if k is None:
-            msg = 'tuple outcome_type requires a multivariate outcome (k != None)'
-            raise ValueError(msg)
-        types = tuple(OutcomeType(t) for t in outcome_type)
-        if len(types) != k:
-            msg = f'outcome_type has length {len(types)} but k={k}'
-            raise ValueError(msg)
-        outcome_type = types[0] if len(set(types)) == 1 else types
-    else:
-        outcome_type = OutcomeType(outcome_type)
+    outcome_type = parse_outcome_type(outcome_type, k)
+
+    if m is not None:
+        m = error_if(m, m < 2, 'm must be >= 2')
+        # binary predictors square to a constant (kurt_x == 1), so the
+        # quadratic budget normalization needs the interaction terms
+        q = error_if(
+            q, (m == 2) & (q < 2), 'q must be >= 2 when m == 2 (binary predictors)'
+        )
+    kurt_x = x_kurtosis(m)
 
     # E[s^4]; the scales s are normalized so that E[s^2] = 1
     if sparsity is None:
@@ -829,7 +906,7 @@ def gen_params(
     shared_keys = split(shared_key)
     beta_shared = generate_beta_shared(shared_keys.pop(), p, sigma2_lin, s)
     A_shared = generate_A_shared(
-        shared_keys.pop(), p, q, sigma2_quad, Params.kurt_x, s, mu_4_s
+        shared_keys.pop(), p, q, sigma2_quad, kurt_x, s, mu_4_s
     )
 
     if k is None:
@@ -844,18 +921,18 @@ def gen_params(
             separate_keys.pop(), partition, sigma2_lin, s
         )
         A_separate = generate_A_separate(
-            separate_keys.pop(), partition, q, sigma2_quad, Params.kurt_x, s, mu_4_s
+            separate_keys.pop(), partition, q, sigma2_quad, kurt_x, s, mu_4_s
         )
 
     gamma_shared, gamma_separate = generate_het(het_key, het_shape, p, partition, s)
     var_v = (
         None
         if het_shape is None
-        else het_var_v(het_shape, het_strength, Params.kurt_x, mu_4_s, p, k, lambda_)
+        else het_var_v(het_shape, het_strength, kurt_x, mu_4_s, p, k, lambda_)
     )
 
     # derived variances (see `Params`); cheap scalars materialized eagerly
-    sigma2_mean = sigma2_quad * mu_4_s / ((Params.kurt_x - 1) * mu_4_s + q)
+    sigma2_mean = sigma2_quad * mu_4_s / ((kurt_x - 1) * mu_4_s + q)
     sigma2_pop = sigma2_lin + sigma2_quad + sigma2_eps
     sigma2_pri = sigma2_pop + sigma2_mean
 
@@ -882,6 +959,8 @@ def gen_params(
         var_v=var_v,
         outcome_type=outcome_type,
         het_shape=het_shape,
+        m=m,
+        kurt_x=kurt_x,
     )
 
 
@@ -908,9 +987,10 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
     keys = split(key, 2)
     p = params.beta_shared.shape[0]
 
-    x = generate_x(keys.pop(), n, p)
-    mulin_shared = params.beta_shared @ x
-    muquad_shared = jnp.einsum('rs,rj,sj->j', params.A_shared, x, x)
+    x = generate_x(keys.pop(), n, p, params.m)
+    x_std = standardize_x(x, params.m)
+    mulin_shared = params.beta_shared @ x_std
+    muquad_shared = jnp.einsum('rs,rj,sj->j', params.A_shared, x_std, x_std)
 
     if params.partition is None:
         mulin_separate = None
@@ -918,8 +998,8 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
         mulin = mulin_shared
         muquad = muquad_shared
     else:
-        mulin_separate = params.beta_separate @ x
-        muquad_separate = jnp.einsum('irs,rj,sj->ij', params.A_separate, x, x)
+        mulin_separate = params.beta_separate @ x_std
+        muquad_separate = jnp.einsum('irs,rj,sj->ij', params.A_separate, x_std, x_std)
         mulin = combine_shared_separate(mulin_shared, mulin_separate, params.lambda_)
         muquad = combine_shared_separate(muquad_shared, muquad_separate, params.lambda_)
 
@@ -931,9 +1011,9 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
     if params.het_shape is None:
         error_scale = None
     else:
-        eta = params.gamma_shared @ x
+        eta = params.gamma_shared @ x_std
         if params.het_shape == 'vector':
-            eta_separate = params.gamma_separate @ x
+            eta_separate = params.gamma_separate @ x_std
             eta = combine_shared_separate(eta, eta_separate, params.lambda_)
         v = (1.0 - params.het_strength) + params.het_strength * eta**2
         error_scale = jnp.sqrt(v)
@@ -964,6 +1044,7 @@ def gen_data(
     *,
     n: int,
     p: int,
+    m: Integer[Array, ''] | int | None = None,
     k: int | None = None,
     q: Integer[Array, ''] | int,
     lambda_: Float[Array, ''] | float | None = None,
@@ -990,6 +1071,9 @@ def gen_data(
         Number of observations.
     p
         Number of predictors.
+    m
+        Number of levels of the quantized uniform predictor distribution, or
+        `None` (default) for the continuous uniform. See `gen_params`.
     k
         Number of outcome components. If `None`, produces a univariate output
         with ``y.shape == (n,)`` and skips the separate code path entirely.
@@ -1012,6 +1096,7 @@ def gen_data(
     params = gen_params(
         keys.pop(),
         p=p,
+        m=m,
         k=k,
         q=q,
         lambda_=lambda_,

@@ -38,7 +38,7 @@ from bartz._jaxext._jit import jit
 @jit(static_argnums=(2, 3), static_argnames=('n_uniforms',))
 def loggamma(
     key: Key[Array, ''],
-    a: Float[Array, '...'],
+    a: Float[Array, '...'] | float,
     shape: Sequence[int] | None = None,
     dtype: DTypeLike | None = None,
     *,

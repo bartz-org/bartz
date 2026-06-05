@@ -1432,7 +1432,9 @@ def _apply_moves_to_affluence_trees(
 
 @jit
 def _sample_wishart_bartlett(
-    key: Key[Array, ''], df: Float32[Array, ''], scale_inv: Float32[Array, 'k k']
+    key: Key[Array, ''],
+    df: Float32[Array, ''] | float,
+    scale_inv: Float32[Array, 'k k'],
 ) -> Float32[Array, 'k k']:
     """
     Sample a precision matrix W ~ Wishart(df, scale_inv^-1) using Bartlett decomposition.

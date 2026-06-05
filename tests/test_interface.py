@@ -61,7 +61,18 @@ from jax import (
 from jax import numpy as jnp
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
-from jaxtyping import Array, Bool, Float32, Int32, Key, PyTree, Real, Shaped, UInt
+from jaxtyping import (
+    Array,
+    Bool,
+    Float,
+    Float32,
+    Int32,
+    Key,
+    PyTree,
+    Real,
+    Shaped,
+    UInt,
+)
 from numpy.testing import assert_array_less
 from pytest import CaptureFixture, FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
@@ -113,9 +124,8 @@ class Bart(OriginalBart):
         self._check_replicated_trees()
 
 
-# Most test data comes from `bartz.testing.gen_data`; the local `gen_X`/`f`/
-# `gen_y` generators below cover only what it cannot express: importance
-# scales with exact zeros.
+# All test data comes from `bartz.testing.gen_data`; the wrappers below adapt
+# it for missingness masks and exact sparsity.
 
 # `gen_data` settings shared by all its call sites: enough signal that BART can
 # identify it, and enough noise that the convergence-test posteriors mix well.
@@ -124,15 +134,25 @@ class Bart(OriginalBart):
 GEN_KW = dict(q=0, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.04)
 
 
-def gen_X(key: Key[Array, ''], p: int, n: int) -> Real[Array, 'p n']:
-    """Generate a matrix of continuous predictors."""
-    return random.uniform(key, (p, n), float, -2, 2)
+def gen_sparse_data(
+    key: Key[Array, ''], *, n: int, p: int, peff: int
+) -> tuple[Float[Array, 'p n'], Float[Array, ' n'], Bool[Array, ' p']]:
+    """Generate continuous data that depends on exactly `peff` of `p` predictors.
 
-
-def f(x: Real[Array, 'p n'], s: Real[Array, ' p']) -> Float32[Array, ' n']:
-    """Conditional mean of the DGP."""
-    norm = jnp.sqrt(s @ s)
-    return s @ jnp.cos(jnp.pi * x) / norm
+    The signal is a `gen_data` DGP on `peff` predictors (binary coefficient
+    draws, so they are equally important), padded with irrelevant predictors
+    from the same family up to `p` and shuffled. Returns ``(X, y, mask)``
+    where ``mask`` flags the relevant predictors.
+    """
+    keys = split(key, 3)
+    # lower noise than GEN_KW: the relevant/irrelevant varprob contrast needs a
+    # higher signal-to-noise ratio than the convergence tests
+    dgp = gen_data(keys.pop(), n=n, p=peff, **dict(GEN_KW, sigma2_eps=0.01))
+    padding = dgp.params.x_distr.sample(keys.pop(), (p - peff, n))
+    X = jnp.concatenate([dgp.x, padding], axis=0)
+    mask = jnp.arange(p) < peff
+    perm = random.permutation(keys.pop(), p)
+    return X[perm, :], dgp.y, mask[perm]
 
 
 def gen_missing(key: Key[Array, ''], shape: tuple[int, int]) -> Bool[Array, 'k n']:
@@ -145,15 +165,6 @@ def gen_missing(key: Key[Array, ''], shape: tuple[int, int]) -> Bool[Array, 'k n
     k, n = shape
     dgp = gen_data(key, n=n, p=k, k=k, lambda_=0.5, outcome_type='binary', **GEN_KW)
     return dgp.y.astype(bool)
-
-
-def gen_y(
-    key: Key[Array, ''], X: Real[Array, 'p n'], *, s: Real[Array, ' p']
-) -> Float32[Array, ' n']:
-    """Generate continuous responses given predictors."""
-    mu = f(X, s)
-    sigma = 0.1
-    return mu + sigma * random.normal(key, mu.shape)
 
 
 def _bart_default(kw: dict[str, Any], param_name: str) -> Any:  # noqa: ANN401
@@ -1211,12 +1222,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
     peff = 5
     n = 1000
 
-    mask = jnp.zeros(p, bool).at[:peff].set(True)
-    mask = random.permutation(keys.pop(), mask)
-    s = mask.astype(float)
-
-    X = gen_X(keys.pop(), p, n)
-    y = gen_y(keys.pop(), X, s=s)
+    X, y, mask = gen_sparse_data(keys.pop(), n=n, p=p, peff=peff)
 
     bart = Bart(
         x_train=X,

@@ -75,7 +75,7 @@ from bartz.prepcovars import (
     UniqueQuantileBinner,
 )
 from bartz.testing import gen_data
-from tests.test_interface import GEN_KW, BartKW, gen_X, gen_y, make_kw
+from tests.test_interface import GEN_KW, BartKW, gen_sparse_data, make_kw
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
 from tests.util import (
     assert_allclose,
@@ -754,14 +754,8 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
     peff = 5  # number of actually used predictors
     n = 1000
 
-    # generate sparsity pattern
-    mask = jnp.zeros(p, bool).at[:peff].set(True)
-    mask = random.permutation(keys.pop(), mask)
-    s = mask.astype(float)
-
     # generate data
-    X = gen_X(keys.pop(), p, n)
-    y = gen_y(keys.pop(), X, s=s)
+    X, y, mask = gen_sparse_data(keys.pop(), n=n, p=p, peff=peff)
 
     # run bart
     bart = mc_gbart(

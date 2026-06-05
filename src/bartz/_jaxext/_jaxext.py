@@ -38,7 +38,17 @@ from jax.dtypes import prng_key
 from jax.scipy.special import ndtr
 from jax.sharding import PartitionSpec
 from jax.typing import DTypeLike
-from jaxtyping import Array, Bool, Float32, Integer, Key, PyTree, Scalar, Shaped
+from jaxtyping import (
+    Array,
+    Bool,
+    Float32,
+    Integer,
+    Key,
+    PyTree,
+    Scalar,
+    ScalarLike,
+    Shaped,
+)
 from jaxtyping import config as jaxtyping_config
 
 from bartz._jaxext._jit import jit
@@ -94,7 +104,7 @@ def minimal_unsigned_dtype(value: int) -> DTypeLike:
 
 @jit(static_argnums=(1,))
 def unique(
-    x: Shaped[Array, ' _'], size: int, fill_value: Scalar
+    x: Shaped[Array, ' _'], size: int, fill_value: ScalarLike
 ) -> tuple[Shaped[Array, ' {size}'], int | Integer[Array, '']]:
     """
     Restricted version of `jax.numpy.unique` that uses less memory.

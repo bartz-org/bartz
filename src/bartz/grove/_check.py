@@ -232,7 +232,7 @@ def check_tree(tree: TreeHeaps, max_split: UInt[Array, ' p']) -> UInt[Array, '']
     An integer where each bit indicates whether a check failed.
     """
     error_type = minimal_unsigned_dtype(2 ** len(CHECK_FUNCTIONS) - 1)
-    error = error_type(0)
+    error = jnp.zeros((), error_type)
     for i, func in enumerate(CHECK_FUNCTIONS):
         ok = func(tree, max_split)
         ok = jnp.bool_(ok)

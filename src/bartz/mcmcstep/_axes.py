@@ -40,7 +40,7 @@ from jax import tree
 from jaxtyping import Array, PyTree
 from numpy.lib.array_utils import normalize_axis_index
 
-from bartz.mcmcstep._lazy import _LazyArray
+from bartz.mcmcstep._lazy import DummyArray, _LazyArray
 
 # Structure variable for the `PyTree[..., 'T']` annotations below.
 T = TypeVar('T')
@@ -181,11 +181,12 @@ def chain_to_axis(arr: Array, chain_axis: int | None, target: int = 0) -> Array:
 
 
 def _compute_core_axis(
-    leaf: object, raw_axis: int | None, chain_axis: int | None
+    leaf: DummyArray | None, raw_axis: int | None, chain_axis: int | None
 ) -> int | None:
     """Combine a raw core-layout marker and a (normalized) chain position."""
     if raw_axis is None:
         return None
+    assert leaf is not None
     has_chain = chain_axis is not None
     core_ndim = leaf.ndim - (1 if has_chain else 0)
     axis = normalize_axis_index(raw_axis, core_ndim)
@@ -223,9 +224,8 @@ def get_has_chains(x: PyTree) -> bool:
     """
 
     def is_leaf(node: object) -> bool:
-        try:
-            value = node.has_chains
-        except AttributeError:
+        value = getattr(node, 'has_chains', None)
+        if value is None:
             return False
         raise _HasChainsFound(value)
 
@@ -237,7 +237,7 @@ def get_has_chains(x: PyTree) -> bool:
     raise ValueError(msg)
 
 
-def _normalize_axis_for_leaf(leaf: object, raw: int) -> int:
+def _normalize_axis_for_leaf(leaf: DummyArray, raw: int) -> int:
     """Normalize a marker axis index against `leaf.ndim`.
 
     Raises `numpy.exceptions.AxisError` if `raw` is out of bounds for
@@ -258,7 +258,7 @@ def _find_metadata(
     x: PyTree[Any, ' S'],
     key: Hashable,
     *,
-    marker_value: Callable[[object, int], object] = _normalize_axis_for_leaf,
+    marker_value: Callable[[DummyArray, int], object] = _normalize_axis_for_leaf,
     default_value: object = None,
 ) -> PyTree[Any, ' S ...']:
     """Walk `x` replacing marked subtrees with derived values.

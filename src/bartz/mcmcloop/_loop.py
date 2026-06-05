@@ -262,10 +262,11 @@ def _replicate(x: Array, mesh: Mesh | None) -> Array:
         return device_put(x, NamedSharding(mesh, PartitionSpec()))
 
 
+TraceT = TypeVar('TraceT', bound=BurninTrace)
+
+
 @jit(static_argnums=(0, 2))
-def _empty_trace(
-    length: int, state: State, trace_cls: type[BurninTrace]
-) -> BurninTrace:
+def _empty_trace(length: int, state: State, trace_cls: type[TraceT]) -> TraceT:
     example_output = eval_shape(trace_cls.from_state, state)
     out_axes = trace_sample_axes(add_dummy_axis(example_output))
 

@@ -32,7 +32,7 @@ from typing import Literal, Protocol, runtime_checkable
 from jax import ShapeDtypeStruct, lax, shard_map, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
-from jaxtyping import Array, Float32, Int32, UInt
+from jaxtyping import Array, Float32, Int32, PyTree, UInt
 from numpy.lib.array_utils import normalize_axis_index
 
 from bartz._jaxext import autobatch, jit
@@ -393,7 +393,7 @@ def _output_layout(
 def _tree_sum_budget(
     max_io_nbytes: int,
     trace: EvaluableTrace,
-    chain_axes: EvaluableTrace,
+    chain_axes: PyTree[int | None],
     kshape: tuple[int, ...],
     n: int,
     num_trees: int,
@@ -450,6 +450,7 @@ def _shard_map_eval(
     x_spec = [None, None]  # (p, n)
     out_spec = [None] * out_ndim
     if shard_chains:
+        assert out_chain_axis is not None
         axis_names.add('chains')
         out_spec[out_chain_axis] = 'chains'
     if shard_data:

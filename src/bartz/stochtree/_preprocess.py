@@ -378,8 +378,10 @@ class PandasPreprocessor(_PreprocessorBase):
         series: Series, spec: _ColumnSpec
     ) -> Float32[np.ndarray, 'n _']:
         if spec.kind == 'ordered_cat':
+            assert spec.categories is not None
             return _ordinal_encode(series.to_numpy(), spec.categories, spec.name)
         if spec.kind == 'unordered_cat':
+            assert spec.categories is not None
             return _one_hot_encode(series.to_numpy(), spec.categories, spec.name)
         return series.to_numpy(dtype=np.float32)[:, None]
 
@@ -421,6 +423,7 @@ class PolarsPreprocessor(_PreprocessorBase):
         import polars as pl  # noqa: PLC0415  # optional runtime dependency
 
         if spec.kind == 'unordered_cat':
+            assert spec.categories is not None
             return _polars_one_hot(pl, series, spec.categories, spec.name)
         return series.cast(pl.Float32).to_numpy()[:, None]
 

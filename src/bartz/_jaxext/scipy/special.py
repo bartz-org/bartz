@@ -32,13 +32,13 @@ import numpy as np
 from jax import ShapeDtypeStruct, pure_callback
 from jax import numpy as jnp
 from jax.typing import DTypeLike
-from jaxtyping import Array, Float
+from jaxtyping import Array, ArrayLike, Float
 from scipy.special import gammainccinv as scipy_gammainccinv
 
 from bartz._jaxext._jit import jit
 
 
-def _float_type(*args: DTypeLike | Array) -> jnp.dtype:
+def _float_type(*args: DTypeLike | ArrayLike) -> jnp.dtype:
     """Determine the jax floating point result type given operands/types."""
     t = jnp.result_type(*args)
     return jnp.sin(jnp.empty(0, t)).dtype
@@ -58,10 +58,12 @@ def _castto(
 
 
 @jit
-def gammainccinv(a: Float[Array, '...'], y: Float[Array, '...']) -> Float[Array, '...']:
+def gammainccinv(
+    a: Float[ArrayLike, '...'], y: Float[ArrayLike, '...']
+) -> Float[Array, '...']:
     """Survival function inverse of the Gamma(a, 1) distribution."""
-    shape = jnp.broadcast_shapes(a.shape, y.shape)
-    dtype = _float_type(a.dtype, y.dtype)
+    shape = jnp.broadcast_shapes(jnp.shape(a), jnp.shape(y))
+    dtype = _float_type(a, y)
     dummy = ShapeDtypeStruct(shape, dtype)
     ufunc = _castto(scipy_gammainccinv, dtype)
     return pure_callback(ufunc, dummy, a, y, vmap_method='expand_dims')

@@ -264,7 +264,7 @@ def _uniform_splits_from_matrix(
     high = jnp.max(X, axis=1)
     splits = _uniform_splits_from_range(low, high, num_bins)
     assert splits.shape == (X.shape[0], num_bins - 1)
-    max_split = jnp.full(*splits.shape, minimal_unsigned_dtype(num_bins - 1))
+    max_split = jnp.full(X.shape[0], num_bins - 1, minimal_unsigned_dtype(num_bins - 1))
     return splits, max_split
 
 
@@ -401,6 +401,9 @@ class Binner(Module):
 
     max_split: AbstractVar[UInt[Array, ' p']]
     """The number of cutpoints actually used for each of the `p` predictors."""
+
+    _splits: AbstractVar[Real[Array, 'p m']]
+    """The cutpoints for each of the `p` predictors, padded to a common length."""
 
     @abstractmethod
     def __init__(

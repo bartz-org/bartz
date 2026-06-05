@@ -651,11 +651,12 @@ def points_per_node_distr(
     # automatically batch over all batch dimensions
     max_io_nbytes = 2**27  # 128 MiB
     out_dim_shift = len(axes)
+    batched_func = func
     for i in reversed(range(batch_ndim)):
         if i in axes:
             out_dim_shift -= 1
         else:
-            func = autobatch(func, max_io_nbytes, i, i - out_dim_shift)
+            batched_func = autobatch(batched_func, max_io_nbytes, i, i - out_dim_shift)
     assert out_dim_shift == 0
 
-    return func(var_tree, split_tree)
+    return batched_func(var_tree, split_tree)

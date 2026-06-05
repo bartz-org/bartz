@@ -33,7 +33,7 @@ from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
-from jaxtyping import Array, Bool, Float32, Key, Shaped, UInt, UInt32
+from jaxtyping import Array, Bool, Float32, Int32, Key, Shaped, UInt, UInt32
 
 from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz._jaxext.random import loggamma
@@ -144,111 +144,44 @@ def accept_moves_and_sample_leaves(
 class Counts(Module):
     """Number of datapoints in the nodes involved in proposed moves for each tree."""
 
-    left: UInt[Array, '*num_trees']
-    """Number of datapoints in the left child."""
-
-    right: UInt[Array, '*num_trees']
-    """Number of datapoints in the right child."""
-
-    total: UInt[Array, '*num_trees']
-    """Number of datapoints in the parent (``= left + right``)."""
-
-
-class Precs(Module):
-    """Likelihood precision scale in the nodes involved in proposed moves for each tree.
-
-    The "likelihood precision scale" of a tree node is the sum of the inverse
-    squared error scales of the datapoints selected by the node. It is a scalar
-    per node (`PrecsScalar`) with scalar error weights, or a ``k k`` matrix per
-    node (`PrecsMatrix`) with vector error weights.
-
-    Abstract base: it is built one tree at a time under `vmap`/`lax.map`
-    (`_compute_count_or_prec_tree`), so the ``num_trees`` axis is variadic
-    (``*num_trees``, absent per element, present once batched). The scalar and
-    matrix layouts differ in rank, so they live in two concrete subclasses with
-    union-free annotations; a single class carrying a ``... | ... k k`` union
-    would make the greedy variadic mis-bind against the ``k`` axis under the
-    runtime typechecker.
-    """
-
-    left: AbstractVar[Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']]
-    """Likelihood precision scale in the left child."""
-
-    right: AbstractVar[Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']]
-    """Likelihood precision scale in the right child."""
-
-    total: AbstractVar[Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']]
-    """Likelihood precision scale in the parent (``= left + right``)."""
-
-
-class PrecsScalar(Precs):
-    """`Precs` with a scalar precision per node (univariate or scalar-weight case)."""
-
-    left: Float32[Array, '*num_trees']
-    right: Float32[Array, '*num_trees']
-    total: Float32[Array, '*num_trees']
-
-
-class PrecsMatrix(Precs):
-    """`Precs` with a ``k k`` precision matrix per node (vector-weight case)."""
-
-    left: Float32[Array, '*num_trees k k']
-    right: Float32[Array, '*num_trees k k']
-    total: Float32[Array, '*num_trees k k']
+    lrt: UInt[Array, '*num_trees 3']
+    """Number of datapoints in the left child, right child, and parent
+    (``= left + right``), stacked along the trailing axis."""
 
 
 class PreLkV(Module):
     """Non-sequential terms of the likelihood ratio for each tree.
 
-    These terms can be computed in parallel across trees. Each one of the
-    left/right/total terms is, in the univariate case, the scalar
+    These terms are derived from the leaf precompute terms (`PreLf`) gathered
+    at the nodes involved in each move. The terms for the left child, right
+    child, and their join (the parent node) are stacked along the axis right
+    after the tree axis. Each term is, in the univariate case, the scalar
 
-        ``1 / error_cov_inv + n_left/right/total / leaf_prior_cov_inv``.
+        ``error_cov_inv^2 / (leaf_prior_cov_inv + n * error_cov_inv)``.
 
     In the multivariate homoskedastic or scalar weight case, this is the matrix term
 
-        ``error_cov_inv @ inv(leaf_prior_cov_inv + n_left/right/total * error_cov_inv) @ error_cov_inv``.
+        ``error_cov_inv @ inv(leaf_prior_cov_inv + n * error_cov_inv) @ error_cov_inv``.
 
     In the multivariate vector-weight case, this is instead
 
-        ``chol(leaf_prior_cov_inv + n_left/right/total * error_cov_inv)``
+        ``chol(leaf_prior_cov_inv + n * error_cov_inv)``
 
-    ``n_left`` is the number of datapoints in the left child, or the
-    likelihood precision scale in the heteroskedastic case. Similarly for
-    right, total.
+    ``n`` is the number of datapoints in the node, or the likelihood precision
+    scale in the heteroskedastic case.
     """
 
-    # `log_sqrt_term` is declared before `left`/`right`/`total` so its single
-    # (union-free) annotation binds the variadic `*num_trees` axis first;
-    # otherwise the runtime typechecker can greedily mis-bind `*num_trees`
-    # against the `k` axis of the `... | ... k k` unions (the multivariate and
-    # univariate layouts are rank-ambiguous).
+    # `log_sqrt_term` is declared before `lrt` so its single (union-free)
+    # annotation binds the variadic `*num_trees` axis first; otherwise the
+    # runtime typechecker can greedily mis-bind `*num_trees` against the `k`
+    # axis of the `... | ... k k` union (the multivariate and univariate
+    # layouts are rank-ambiguous).
     log_sqrt_term: Float32[Array, '*num_trees']
     """The logarithm of the square root term of the likelihood ratio."""
 
-    left: Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']
-    """Full conditional variance, scaled covariance, or precision cholesky, for
-    the left leaf."""
-
-    right: Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']
-    """Full conditional variance, scaled covariance, or precision cholesky, for
-    the right leaf."""
-
-    total: Float32[Array, '*num_trees'] | Float32[Array, '*num_trees k k']
-    """Full conditional variance, scaled covariance, or precision cholesky, for
-    the the join of the left and right leaves."""
-
-
-class PreLk(Module):
-    """Non-sequential terms of the likelihood ratio shared by all trees."""
-
-    exp_factor: Float32[Array, ''] | None
-    """The factor to multiply the likelihood ratio by, shared by all trees.
-    Set only in the univariate path."""
-
-    error_cov_inv: Float32[Array, 'k k'] | None
-    """The global error precision scale. Set only in the multivariate
-    heteroskedastic vector-weight case."""
+    lrt: Float32[Array, '*num_trees 3'] | Float32[Array, '*num_trees 3 k k']
+    """Scaled full conditional variance, scaled covariance, or precision
+    cholesky, for the left child, right child, and their join."""
 
 
 class PreLf(Module):
@@ -257,12 +190,16 @@ class PreLf(Module):
     These terms can be computed in parallel across trees.
 
     For each tree and leaf, the terms are scalars in the univariate case
-    (`PreLfUV`), and matrices/vectors in the multivariate case (`PreLfMV`).
+    (`PreLfUV`), and matrices/vectors in the multivariate case (`PreLfMV`,
+    `PreLfMVHet`).
 
-    Abstract base: the univariate and multivariate layouts differ in rank, so
-    they live in two concrete subclasses with union-free annotations (see `Precs`
-    for the runtime-typechecker rationale). The ``num_trees`` axis is variadic so
-    the same annotations also match a per-element layout if vmapped over trees.
+    Abstract base: the layouts differ in rank, so they live in concrete
+    subclasses with union-free annotations; a single class carrying a shape
+    union would make the greedy variadic mis-bind against the ``k`` axes under
+    the runtime typechecker. The concrete class also tags the meaning of
+    `mean_factor`, which drives the dispatch in `precompute_likelihood_terms`
+    and in the sequential stage. The ``num_trees`` axis is variadic so the same
+    annotations also match a per-element layout if vmapped over trees.
     """
 
     mean_factor: AbstractVar[
@@ -284,14 +221,36 @@ class PreLfUV(PreLf):
     """`PreLf` for the univariate case."""
 
     mean_factor: Float32[Array, '*num_trees tree_size']
+    """``error_cov_inv / prec``, where ``prec`` is the posterior precision of
+    the leaf."""
+
     centered_leaves: Float32[Array, '*num_trees tree_size']
+    """Zero-mean normal draws with the posterior variance of each leaf."""
 
 
 class PreLfMV(PreLf):
-    """`PreLf` for the multivariate case."""
+    """`PreLf` for the multivariate homoskedastic or scalar-weight case."""
 
     mean_factor: Float32[Array, '*num_trees k k tree_size']
+    """``error_cov_inv @ inv(prec)``, where ``prec`` is the posterior precision
+    of the leaf."""
+
     centered_leaves: Float32[Array, '*num_trees k tree_size']
+    """Zero-mean normal draws with the posterior covariance of each leaf."""
+
+    logdet_prec: Float32[Array, '*num_trees tree_size']
+    """The log-determinant of the posterior precision of each leaf."""
+
+
+class PreLfMVHet(PreLf):
+    """`PreLf` for the multivariate vector-weight case."""
+
+    mean_factor: Float32[Array, '*num_trees k k tree_size']
+    """The lower Cholesky factor of the posterior precision of each leaf; the
+    mean solve happens downstream in the sequential stage."""
+
+    centered_leaves: Float32[Array, '*num_trees k tree_size']
+    """Zero-mean normal draws with the posterior covariance of each leaf."""
 
 
 class ParallelStageOut(Module):
@@ -306,7 +265,7 @@ class ParallelStageOut(Module):
 
     # `num_trees` stays a fixed (non-variadic) axis: `ParallelStageOut` is always
     # built with the tree axis present (never per tree under vmap), so the union
-    # is disambiguated by rank/dtype and needs no anchor (cf. `Precs`/`PreLf`).
+    # is disambiguated by rank/dtype and needs no anchor (cf. `PreLf`).
     prec_trees: (
         Float32[Array, 'num_trees tree_size']
         | UInt32[Array, 'num_trees tree_size']
@@ -314,14 +273,7 @@ class ParallelStageOut(Module):
     )
     """The likelihood precision scale in each potential or actual leaf node."""
 
-    move_precs: Precs | Counts
-    """The likelihood precision scale in each node modified by the moves. If
-    `state.prec_scale` is not set, this is set to `move_counts`."""
-
     prelkv: PreLkV
-    """Object with pre-computed terms of the likelihood ratios."""
-
-    prelk: PreLk | None
     """Object with pre-computed terms of the likelihood ratios."""
 
     prelf: PreLf
@@ -371,52 +323,34 @@ def accept_moves_parallel_stage(
             state.forest.leaf_indices, moves, state.config
         )
 
-    # affluence of the nodes touched by each move: whether `node`/`left`/`right`,
-    # as leaves, would be growable (admissible rule + enough datapoints). The
-    # children must also lie within the heap, i.e. not be at the bottom level;
-    # `node` always does and is admissible as a leaf, so it only needs the count.
-    # These feed the transition ratio and the final `affluence_tree` update.
+    # affluence of the nodes touched by each move: whether they would be
+    # growable as leaves (admissible rule + enough datapoints). The children
+    # must also lie within the heap, i.e. not be at the bottom level; the
+    # parent always does. These feed the transition ratio and the final
+    # `affluence_tree` update.
     _, half = state.forest.var_tree.shape
-    left_in_heap = moves.left < half
-    right_in_heap = moves.right < half
+    lrt_affluent = (moves.lrt_nodes < half) & moves.lrt_growable
     if state.forest.min_points_per_decision_node is not None:
-        min_dn = state.forest.min_points_per_decision_node
-        moves = replace(
-            moves,
-            node_affluent=move_counts.total >= min_dn,
-            left_affluent=left_in_heap
-            & moves.left_growable
-            & (move_counts.left >= min_dn),
-            right_affluent=right_in_heap
-            & moves.right_growable
-            & (move_counts.right >= min_dn),
-        )
-    else:
-        moves = replace(
-            moves,
-            node_affluent=jnp.ones_like(moves.grow),
-            left_affluent=left_in_heap & moves.left_growable,
-            right_affluent=right_in_heap & moves.right_growable,
-        )
+        lrt_affluent &= move_counts.lrt >= state.forest.min_points_per_decision_node
+    moves = replace(moves, lrt_affluent=lrt_affluent)
 
     # veto grove move if new leaves don't have enough datapoints
     if state.forest.min_points_per_leaf is not None:
         moves = replace(
             moves,
             allowed=moves.allowed
-            & (move_counts.left >= state.forest.min_points_per_leaf)
-            & (move_counts.right >= state.forest.min_points_per_leaf),
+            & jnp.all(
+                move_counts.lrt[..., :2] >= state.forest.min_points_per_leaf, axis=-1
+            ),
         )
 
     # count number of datapoints per leaf, weighted by error precision scale
     if state.prec_scale is None:
         prec_trees = count_trees
-        move_precs = move_counts
     else:
-        prec_trees, move_precs = compute_prec_trees(
+        prec_trees = compute_prec_trees(
             state.prec_scale, state.forest.leaf_indices, moves, state.config
         )
-    assert move_precs is not None
 
     # compute some missing information about moves
     moves = complete_ratio(moves, state.forest.p_nonterminal)
@@ -431,21 +365,15 @@ def accept_moves_parallel_stage(
         ),
     )
 
-    prelkv, prelk = precompute_likelihood_terms(
-        state.error_cov_inv, state.forest.leaf_prior_cov_inv, move_precs
-    )
     prelf = precompute_leaf_terms(
         key, prec_trees, state.error_cov_inv, state.forest.leaf_prior_cov_inv
     )
+    prelkv = precompute_likelihood_terms(
+        state.error_cov_inv, state.forest.leaf_prior_cov_inv, prelf, moves
+    )
 
     return ParallelStageOut(
-        state=state,
-        moves=moves,
-        prec_trees=prec_trees,
-        move_precs=move_precs,
-        prelkv=prelkv,
-        prelk=prelk,
-        prelf=prelf,
+        state=state, moves=moves, prec_trees=prec_trees, prelkv=prelkv, prelf=prelf
     )
 
 
@@ -477,14 +405,24 @@ def _apply_grow_to_indices(
     moves: Moves, leaf_indices: UInt[Array, ' n'], X: UInt[Array, 'p n']
 ) -> UInt[Array, ' n']:
     """Implement `apply_grow_to_indices`."""
-    left_child = moves.node.astype(leaf_indices.dtype) << 1
+    left_child = moves.lrt_nodes[0].astype(leaf_indices.dtype)
     x: UInt[Array, ' n'] = X[moves.grow_var, :]
     go_right = x >= moves.grow_split
     tree_size = jnp.array(2 * moves.var_tree.size)
-    node_to_update = jnp.where(moves.grow, moves.node, tree_size)
+    node_to_update = jnp.where(moves.grow, moves.lrt_nodes[2], tree_size)
     return jnp.where(
         leaf_indices == node_to_update, left_child + go_right, leaf_indices
     )
+
+
+def _fill_lrt_total(lrt: Shaped[Array, '*k_k 3']) -> Shaped[Array, '*k_k 3']:
+    """Set the total slot of stacked (left, right, total) values to left + right.
+
+    The left and right slots pass through unchanged, the stale value in the
+    total slot is ignored. Implemented with fusable elementwise operations.
+    """
+    total = lrt[..., 0] + lrt[..., 1]
+    return jnp.where(jnp.arange(3) == 2, total[..., None], lrt)
 
 
 def _compute_count_or_prec_trees(
@@ -494,8 +432,8 @@ def _compute_count_or_prec_trees(
     config: StepConfig,
 ) -> (
     tuple[UInt32[Array, 'num_trees tree_size'], Counts]
-    | tuple[Float32[Array, 'num_trees tree_size'], Precs]
-    | tuple[Float32[Array, 'num_trees k k tree_size'], Precs]
+    | tuple[Float32[Array, 'num_trees tree_size'], None]
+    | tuple[Float32[Array, 'num_trees k k tree_size'], None]
 ):
     """Implement `compute_count_trees` and `compute_prec_trees`."""
     if config.prec_count_num_trees is None:
@@ -506,8 +444,8 @@ def _compute_count_or_prec_trees(
         args: tuple[UInt[Array, ' n'], Moves],
     ) -> (
         tuple[UInt32[Array, ' tree_size'], Counts]
-        | tuple[Float32[Array, ' tree_size'], Precs]
-        | tuple[Float32[Array, 'k k tree_size'], Precs]
+        | tuple[Float32[Array, ' tree_size'], None]
+        | tuple[Float32[Array, 'k k tree_size'], None]
     ):
         leaf_indices, moves = args
         return _compute_count_or_prec_tree(prec_scale, leaf_indices, moves, config)
@@ -524,8 +462,8 @@ def _compute_count_or_prec_tree(
     config: StepConfig,
 ) -> (
     tuple[UInt32[Array, ' tree_size'], Counts]
-    | tuple[Float32[Array, ' tree_size'], Precs]
-    | tuple[Float32[Array, 'k k tree_size'], Precs]
+    | tuple[Float32[Array, ' tree_size'], None]
+    | tuple[Float32[Array, 'k k tree_size'], None]
 ):
     """Compute count or precision tree for a single tree."""
     (tree_size,) = moves.var_tree.shape
@@ -533,14 +471,10 @@ def _compute_count_or_prec_tree(
 
     if prec_scale is None:
         value = 1
-        cls = Counts
         dtype = jnp.uint32
         reduction_config = config.count_reduction_config
     else:
         value = prec_scale
-        # scalar weights -> scalar precision per node; vector weights (k k n) ->
-        # k by k precision matrix per node.
-        cls = PrecsMatrix if prec_scale.ndim == 3 else PrecsScalar
         dtype = jnp.float32
         reduction_config = config.prec_reduction_config
 
@@ -552,13 +486,16 @@ def _compute_count_or_prec_tree(
         data_sharded=config.data_sharded,
     )
 
-    # count datapoints in nodes modified by move
-    left = trees[..., moves.left]
-    right = trees[..., moves.right]
-    counts = cls(left=left, right=right, total=left + right)
-
-    # write count into non-leaf node
-    trees = trees.at[..., moves.node].set(counts.total)
+    # count datapoints in nodes modified by move, and write the total into the
+    # non-leaf parent node (the children slots are written back unchanged); the
+    # weighted version of the counts is not needed because the likelihood terms
+    # are derived from the leaf terms
+    lrt = _fill_lrt_total(trees[..., moves.lrt_nodes])
+    if prec_scale is None:
+        counts = Counts(lrt=lrt)
+    else:
+        counts = None
+    trees = trees.at[..., moves.lrt_nodes].set(lrt)
 
     return trees, counts
 
@@ -597,10 +534,7 @@ def compute_prec_trees(
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
     config: StepConfig,
-) -> tuple[
-    Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k k tree_size'],
-    Precs,
-]:
+) -> Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k k tree_size']:
     """
     Compute the likelihood precision scale in each leaf.
 
@@ -618,12 +552,10 @@ def compute_prec_trees(
 
     Returns
     -------
-    prec_trees : Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k k tree_size']
-        The likelihood precision scale in each potential or actual leaf node.
-    precs : Precs
-        The likelihood precision scale in the nodes involved in the moves.
+    The likelihood precision scale in each potential or actual leaf node.
     """
-    return _compute_count_or_prec_trees(prec_scale, leaf_indices, moves, config)
+    trees, _ = _compute_count_or_prec_trees(prec_scale, leaf_indices, moves, config)
+    return trees
 
 
 @partial(vmap_nodoc, in_axes=(0, None))
@@ -632,8 +564,8 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
     Complete non-likelihood MH ratio calculation.
 
     This function adds the probability of choosing a prune move over the grow
-    move in the inverse transition, and the a priori probability that the
-    children nodes are leaves.
+    move in the inverse transition, and the prior odds that the modified node
+    is nonterminal with terminal children.
 
     Parameters
     ----------
@@ -649,16 +581,16 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
     -------
     The updated moves, with `partial_ratio=None` and `log_trans_prior_ratio` set.
     """
-    # can the children be grown by the proposal? `left_affluent`/`right_affluent`
-    # already fold in the `min_points_per_decision_node` threshold, because the
-    # grow proposal draws from the pool of leaves that pass it. This enters only
-    # the transition probability.
-    left_affluent = moves.left_affluent
-    right_affluent = moves.right_affluent
+    assert moves.lrt_affluent is not None
+
+    # can the children be grown by the proposal? `lrt_affluent` already folds
+    # in the `min_points_per_decision_node` threshold, because the grow
+    # proposal draws from the pool of leaves that pass it. This enters only the
+    # transition probability.
 
     # p_prune if grow
     other_growable_leaves = moves.num_growable >= 2
-    grow_again_allowed = other_growable_leaves | left_affluent | right_affluent
+    grow_again_allowed = other_growable_leaves | jnp.any(moves.lrt_affluent[:2])
     grow_p_prune = jnp.where(grow_again_allowed, 0.5, 1.0)
 
     # p_prune if prune
@@ -667,19 +599,21 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
     # select p_prune
     p_prune = jnp.where(moves.grow, grow_p_prune, prune_p_prune)
 
-    # prior probability of both children being terminal. This uses the
+    # prior odds of the node being nonterminal, times the prior probability of
+    # both children being terminal. The children terminality uses the
     # admissibility ignoring counts, because the standard BART prior conditions
     # the non-terminal probability only on the existence of available decision
     # rules, not on the count thresholds (which are a bartz proposal-efficiency
-    # device, not part of the target distribution).
-    pt_left = 1 - p_nonterminal[moves.left] * moves.left_growable
-    pt_right = 1 - p_nonterminal[moves.right] * moves.right_growable
-    pt_children = pt_left * pt_right
+    # device, not part of the target distribution). The fill value avoids a 0
+    # and then an inf in the log if the move is not allowed and the indices are
+    # out of bounds.
+    pnt = p_nonterminal.at[moves.lrt_nodes].get(mode='fill', fill_value=0.5)
+    prior_ratio = pnt[2] / (1 - pnt[2]) * jnp.prod(1 - pnt[:2] * moves.lrt_growable[:2])
 
     assert moves.partial_ratio is not None
     return replace(
         moves,
-        log_trans_prior_ratio=jnp.log(moves.partial_ratio * pt_children * p_prune),
+        log_trans_prior_ratio=jnp.log(moves.partial_ratio * prior_ratio * p_prune),
         partial_ratio=None,
     )
 
@@ -716,13 +650,11 @@ def _adapt_leaf_trees_to_grow_indices(
     moves: Moves,
 ) -> Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size']:
     """Implement `adapt_leaf_trees_to_grow_indices`."""
-    values_at_node = leaf_trees[..., moves.node]
-    return (
-        leaf_trees.at[..., jnp.where(moves.grow, moves.left, leaf_trees.size)]
-        .set(values_at_node)
-        .at[..., jnp.where(moves.grow, moves.right, leaf_trees.size)]
-        .set(values_at_node)
-    )
+    # the parent slot is written back unchanged to share a single scatter
+    values_at_node = leaf_trees[..., moves.lrt_nodes[2]]
+    return leaf_trees.at[
+        ..., jnp.where(moves.grow, moves.lrt_nodes, leaf_trees.size)
+    ].set(values_at_node[..., None])
 
 
 def _logdet_from_chol(L: Float32[Array, '... k k']) -> Float32[Array, '...']:
@@ -731,151 +663,11 @@ def _logdet_from_chol(L: Float32[Array, '... k k']) -> Float32[Array, '...']:
     return 2.0 * jnp.sum(jnp.log(diags), axis=-1)
 
 
-def _precompute_likelihood_terms_uv(
-    error_cov_inv: Float32[Array, ''],
-    leaf_prior_cov_inv: Float32[Array, ''],
-    move_precs: PrecsScalar | Counts,
-) -> tuple[PreLkV, PreLk]:
-    sigma2 = jnp.reciprocal(error_cov_inv)
-    sigma_mu2 = jnp.reciprocal(leaf_prior_cov_inv)
-    left = sigma2 + move_precs.left * sigma_mu2
-    right = sigma2 + move_precs.right * sigma_mu2
-    total = sigma2 + move_precs.total * sigma_mu2
-    prelkv = PreLkV(
-        left=left,
-        right=right,
-        total=total,
-        log_sqrt_term=jnp.log(sigma2 * total / (left * right)) / 2,
-    )
-    return prelkv, PreLk(
-        exp_factor=error_cov_inv / leaf_prior_cov_inv / 2, error_cov_inv=None
-    )
-
-
 def compute_B(
     error_cov_inv: Float32[Array, 'k k'], resid: Float32[Array, 'k k *tree_size']
 ) -> Float32[Array, ' k *tree_size']:
     """Compute the leaf score from the leaf weighted sum of residuals."""
     return jnp.einsum('ab,ab...->a...', error_cov_inv, resid)
-
-
-def _precompute_likelihood_terms_mv_het(
-    error_cov_inv: Float32[Array, 'k k'],
-    leaf_prior_cov_inv: Float32[Array, 'k k'],
-    move_precs: PrecsMatrix,
-) -> tuple[PreLkV, PreLk]:
-    L_left: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * move_precs.left + leaf_prior_cov_inv
-    )
-    L_right: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * move_precs.right + leaf_prior_cov_inv
-    )
-    L_total: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * move_precs.total + leaf_prior_cov_inv
-    )
-
-    log_sqrt_term: Float32[Array, ' num_trees'] = 0.5 * (
-        _logdet_from_chol(chol_with_gersh(leaf_prior_cov_inv))
-        + _logdet_from_chol(L_total)
-        - _logdet_from_chol(L_left)
-        - _logdet_from_chol(L_right)
-    )
-
-    return PreLkV(
-        left=L_left, right=L_right, total=L_total, log_sqrt_term=log_sqrt_term
-    ), PreLk(exp_factor=None, error_cov_inv=error_cov_inv)
-
-
-def _precompute_likelihood_terms_mv(
-    error_cov_inv: Float32[Array, 'k k'],
-    leaf_prior_cov_inv: Float32[Array, 'k k'],
-    move_precs: PrecsScalar | Counts,
-) -> tuple[PreLkV, None]:
-    nL: Shaped[Array, 'num_trees 1 1'] = move_precs.left[..., None, None]
-    nR: Shaped[Array, 'num_trees 1 1'] = move_precs.right[..., None, None]
-    nT: Shaped[Array, 'num_trees 1 1'] = move_precs.total[..., None, None]
-
-    L_left: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * nL + leaf_prior_cov_inv
-    )
-    L_right: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * nR + leaf_prior_cov_inv
-    )
-    L_total: Float32[Array, 'num_trees k k'] = chol_with_gersh(
-        error_cov_inv * nT + leaf_prior_cov_inv
-    )
-
-    log_sqrt_term: Float32[Array, ' num_trees'] = 0.5 * (
-        _logdet_from_chol(chol_with_gersh(leaf_prior_cov_inv))
-        + _logdet_from_chol(L_total)
-        - _logdet_from_chol(L_left)
-        - _logdet_from_chol(L_right)
-    )
-
-    def _term_from_chol(
-        L: Float32[Array, 'num_trees k k'],
-    ) -> Float32[Array, 'num_trees k k']:
-        rhs: Float32[Array, 'num_trees k k'] = jnp.broadcast_to(error_cov_inv, L.shape)
-        Y: Float32[Array, 'num_trees k k'] = solve_triangular(L, rhs, lower=True)
-        return Y.mT @ Y
-
-    prelkv = PreLkV(
-        left=_term_from_chol(L_left),
-        right=_term_from_chol(L_right),
-        total=_term_from_chol(L_total),
-        log_sqrt_term=log_sqrt_term,
-    )
-
-    return prelkv, None
-
-
-@named_call
-def precompute_likelihood_terms(
-    error_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
-    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
-    move_precs: Precs | Counts,
-) -> tuple[PreLkV, PreLk | None]:
-    """
-    Pre-compute terms used in the likelihood ratio of the acceptance step.
-
-    Handles both univariate and multivariate cases based on the shape of the
-    input arrays. In the multivariate case, per-datapoint error precision
-    scales (if any) are isotropic across components, so they enter the
-    likelihood only through the per-leaf scalar precision sum carried by
-    `move_precs` (a `Precs` instead of a `Counts`).
-
-    Parameters
-    ----------
-    error_cov_inv
-        The inverse error variance (univariate) or the inverse of the error
-        covariance matrix (multivariate). This is the inverse global error
-        variance factor if `prec_scale` is set.
-    leaf_prior_cov_inv
-        The inverse prior variance of each leaf (univariate) or the inverse of
-        prior covariance matrix of each leaf (multivariate).
-    move_precs
-        The likelihood precision scale in the leaves grown or pruned by the
-        moves, under keys 'left', 'right', and 'total' (left + right).
-
-    Returns
-    -------
-    prelkv : PreLkV
-        Pre-computed terms of the likelihood ratio, one per tree.
-    prelk : PreLk | None
-        Pre-computed terms of the likelihood ratio, shared by all trees.
-    """
-    if error_cov_inv.ndim == 0:
-        return _precompute_likelihood_terms_uv(
-            error_cov_inv, leaf_prior_cov_inv, move_precs
-        )
-    elif isinstance(move_precs, PrecsMatrix):
-        return _precompute_likelihood_terms_mv_het(
-            error_cov_inv, leaf_prior_cov_inv, move_precs
-        )
-    else:
-        return _precompute_likelihood_terms_mv(
-            error_cov_inv, leaf_prior_cov_inv, move_precs
-        )
 
 
 def _precompute_leaf_terms_uv(
@@ -910,47 +702,29 @@ def _precompute_leaf_terms_mv(
     | UInt32[Array, 'num_trees tree_size'],
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
-    z: Float32[Array, 'num_trees tree_size k'] | None = None,
+    z: Float32[Array, 'num_trees k tree_size'] | None = None,
 ) -> PreLfMV:
     num_trees, tree_size = prec_trees.shape
     k, _ = error_cov_inv.shape
-    n_k: Float32[Array, 'num_trees tree_size 1 1'] = prec_trees[..., None, None]
-
-    # Only broadcast the inverse of error covariance matrix to satisfy JAX's
-    # batching rules for `lax.linalg.solve_triangular`, which does not support
-    # implicit broadcasting.
-    error_cov_inv_batched = jnp.broadcast_to(
-        error_cov_inv, (num_trees, tree_size, k, k)
-    )
-
-    posterior_precision: Float32[Array, 'num_trees tree_size k k'] = (
-        leaf_prior_cov_inv + n_k * error_cov_inv_batched
-    )
-
-    L_prec: Float32[Array, 'num_trees tree_size k k'] = chol_with_gersh(
-        posterior_precision
-    )
-    Y: Float32[Array, 'num_trees tree_size k k'] = solve_triangular(
-        L_prec, error_cov_inv_batched, lower=True
-    )
-    mean_factor: Float32[Array, 'num_trees tree_size k k'] = solve_triangular(
-        L_prec, Y, trans='T', lower=True
-    )
-    mean_factor = mean_factor.mT
-    mean_factor_out: Float32[Array, 'num_trees k k tree_size'] = jnp.moveaxis(
-        mean_factor, 1, -1
-    )
-
     if z is None:
-        z = random.normal(key, (num_trees, tree_size, k))
-    centered_leaves: Float32[Array, 'num_trees tree_size k'] = solve_triangular(
-        L_prec, z[..., None], trans='T'
-    ).squeeze(-1)
-    centered_leaves_out: Float32[Array, 'num_trees k tree_size'] = jnp.swapaxes(
-        centered_leaves, -1, -2
-    )
+        z = random.normal(key, (num_trees, k, tree_size))
 
-    return PreLfMV(mean_factor=mean_factor_out, centered_leaves=centered_leaves_out)
+    def per_leaf(
+        prec: Float32[Array, ''] | UInt32[Array, ''], z: Float32[Array, ' k']
+    ) -> tuple[Float32[Array, 'k k'], Float32[Array, ' k'], Float32[Array, '']]:
+        L_prec = chol_with_gersh(leaf_prior_cov_inv + prec * error_cov_inv)
+        Y = solve_triangular(L_prec, error_cov_inv, lower=True)
+        mean_factor = solve_triangular(L_prec, Y, trans='T', lower=True).mT
+        centered = solve_triangular(L_prec, z[:, None], trans='T', lower=True).squeeze(
+            -1
+        )
+        # only a few leaves per tree end up using their logdet, but reducing
+        # right away is lighter on memory than storing diagonals for later
+        return mean_factor, centered, _logdet_from_chol(L_prec)
+
+    # vmap over trees then over leaves; the leaf axis is trailing in both
+    # `prec_trees`/`z` (in_axes) and the stored output (out_axes=-1)
+    return PreLfMV(*vmap(vmap(per_leaf, in_axes=(0, -1), out_axes=-1))(prec_trees, z))
 
 
 def _precompute_leaf_terms_mv_het(
@@ -958,36 +732,28 @@ def _precompute_leaf_terms_mv_het(
     prec_trees: Float32[Array, 'num_trees k k tree_size'],
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
-    z: Float32[Array, 'num_trees tree_size k'] | None = None,
-) -> PreLfMV:
+    z: Float32[Array, 'num_trees k tree_size'] | None = None,
+) -> PreLfMVHet:
     num_trees, k, _, tree_size = prec_trees.shape
-
-    # bring the leaf axis to position 1 so chol/solve see (..., k, k)
-    prec: Float32[Array, 'num_trees tree_size k k'] = jnp.moveaxis(prec_trees, -1, 1)
-
-    posterior_precision: Float32[Array, 'num_trees tree_size k k'] = (
-        leaf_prior_cov_inv + error_cov_inv * prec
-    )
-
-    L_prec: Float32[Array, 'num_trees tree_size k k'] = chol_with_gersh(
-        posterior_precision
-    )
-
     if z is None:
-        z = random.normal(key, (num_trees, tree_size, k))
-    centered_leaves: Float32[Array, 'num_trees tree_size k'] = solve_triangular(
-        L_prec, z[:, :, :, None], trans='T'
-    ).squeeze(-1)
+        z = random.normal(key, (num_trees, k, tree_size))
 
-    # restore the leaf axis to the trailing position for storage
-    mean_factor_out: Float32[Array, 'num_trees k k tree_size'] = jnp.moveaxis(
-        L_prec, 1, -1
-    )
-    centered_leaves_out: Float32[Array, 'num_trees k tree_size'] = jnp.swapaxes(
-        centered_leaves, -1, -2
-    )
+    def per_leaf(
+        prec: Float32[Array, 'k k'], z: Float32[Array, ' k']
+    ) -> tuple[Float32[Array, 'k k'], Float32[Array, ' k']]:
+        # mean_factor stores the precision cholesky itself; the mean solve happens
+        # downstream in `accept_move_and_sample_leaves`
+        L_prec = chol_with_gersh(leaf_prior_cov_inv + error_cov_inv * prec)
+        centered = solve_triangular(L_prec, z[:, None], trans='T', lower=True).squeeze(
+            -1
+        )
+        return L_prec, centered
 
-    return PreLfMV(mean_factor=mean_factor_out, centered_leaves=centered_leaves_out)
+    # vmap over trees then over leaves; the leaf axis is trailing in both
+    # `prec_trees`/`z` (in_axes=-1) and the stored output (out_axes=-1)
+    return PreLfMVHet(
+        *vmap(vmap(per_leaf, in_axes=(-1, -1), out_axes=-1))(prec_trees, z)
+    )
 
 
 @named_call
@@ -999,7 +765,7 @@ def precompute_leaf_terms(
     error_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     z: Float32[Array, 'num_trees tree_size']
-    | Float32[Array, 'num_trees tree_size k']
+    | Float32[Array, 'num_trees k tree_size']
     | None = None,
 ) -> PreLf:
     """
@@ -1043,6 +809,106 @@ def precompute_leaf_terms(
         )
 
 
+@vmap_nodoc
+def _gather_lrt(
+    leaf_values: Float32[Array, '*k_k tree_size'], lrt_nodes: Int32[Array, ' 3']
+) -> Float32[Array, ' 3 *k_k']:
+    """Gather per-tree leaf values at the left child, right child, and parent."""
+    return jnp.moveaxis(leaf_values[..., lrt_nodes], -1, 0)
+
+
+def _precompute_likelihood_terms_uv(
+    error_cov_inv: Float32[Array, ''],
+    leaf_prior_cov_inv: Float32[Array, ''],
+    prelf: PreLfUV,
+    lrt_nodes: Int32[Array, 'num_trees 3'],
+) -> PreLkV:
+    # mean_factor is error_cov_inv / prec, complete the sandwich
+    lrt = error_cov_inv * _gather_lrt(prelf.mean_factor, lrt_nodes)
+    # the same value with the prior-only precision, computed with the same
+    # operations as in `_precompute_leaf_terms_uv` such that it matches `lrt`
+    # bitwise on empty nodes and the ratio is exactly 1 without data
+    prior_lrt = error_cov_inv * (jnp.reciprocal(leaf_prior_cov_inv) * error_cov_inv)
+    log_sqrt_term = jnp.log(lrt[..., 0] * lrt[..., 1] / (prior_lrt * lrt[..., 2])) / 2
+    return PreLkV(lrt=lrt, log_sqrt_term=log_sqrt_term)
+
+
+def _precompute_likelihood_terms_mv(
+    error_cov_inv: Float32[Array, 'k k'],
+    leaf_prior_cov_inv: Float32[Array, 'k k'],
+    prelf: PreLfMV,
+    lrt_nodes: Int32[Array, 'num_trees 3'],
+) -> PreLkV:
+    logdet_prior = _logdet_from_chol(chol_with_gersh(leaf_prior_cov_inv))
+    logdet_prec = _gather_lrt(prelf.logdet_prec, lrt_nodes)
+    log_sqrt_term = (logdet_prior + logdet_prec @ jnp.array([-1.0, -1.0, 1.0])) / 2
+
+    # mean_factor is error_cov_inv @ inv(prec), complete the sandwich
+    mean_factor = _gather_lrt(prelf.mean_factor, lrt_nodes)  # (num_trees, 3, k, k)
+    return PreLkV(lrt=mean_factor @ error_cov_inv, log_sqrt_term=log_sqrt_term)
+
+
+def _precompute_likelihood_terms_mv_het(
+    leaf_prior_cov_inv: Float32[Array, 'k k'],
+    prelf: PreLfMVHet,
+    lrt_nodes: Int32[Array, 'num_trees 3'],
+) -> PreLkV:
+    logdet_prior = _logdet_from_chol(chol_with_gersh(leaf_prior_cov_inv))
+
+    # mean_factor is the precision cholesky itself
+    L = _gather_lrt(prelf.mean_factor, lrt_nodes)  # (num_trees, 3, k, k)
+    log_sqrt_term = (
+        logdet_prior + _logdet_from_chol(L) @ jnp.array([-1.0, -1.0, 1.0])
+    ) / 2
+    return PreLkV(lrt=L, log_sqrt_term=log_sqrt_term)
+
+
+@named_call
+def precompute_likelihood_terms(
+    error_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+    prelf: PreLf,
+    moves: Moves,
+) -> PreLkV:
+    """
+    Pre-compute terms used in the likelihood ratio of the acceptance step.
+
+    The likelihood ratio terms are mostly a subset of the leaf sampling terms,
+    so they are derived from `prelf`, gathered at the nodes involved in the
+    moves.
+
+    Parameters
+    ----------
+    error_cov_inv
+        The inverse error variance (univariate) or the inverse of the error
+        covariance matrix (multivariate). This is the inverse global error
+        variance factor if `prec_scale` is set.
+    leaf_prior_cov_inv
+        The inverse prior variance of each leaf (univariate) or the inverse of
+        prior covariance matrix of each leaf (multivariate).
+    prelf
+        The pre-computed terms of the leaf sampling, see `precompute_leaf_terms`.
+    moves
+        The proposed moves, see `propose_moves`.
+
+    Returns
+    -------
+    Pre-computed terms of the likelihood ratio, one per tree.
+    """
+    if isinstance(prelf, PreLfUV):
+        return _precompute_likelihood_terms_uv(
+            error_cov_inv, leaf_prior_cov_inv, prelf, moves.lrt_nodes
+        )
+    elif isinstance(prelf, PreLfMVHet):
+        return _precompute_likelihood_terms_mv_het(
+            leaf_prior_cov_inv, prelf, moves.lrt_nodes
+        )
+    else:
+        return _precompute_likelihood_terms_mv(
+            error_cov_inv, leaf_prior_cov_inv, prelf, moves.lrt_nodes
+        )
+
+
 @named_call
 def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
     """
@@ -1083,7 +949,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
                 pso.state.config.data_sharded,
                 pso.state.prec_scale,
                 pso.state.forest.log_likelihood is not None,
-                pso.prelk,
+                pso.state.error_cov_inv if isinstance(pso.prelf, PreLfMVHet) else None,
             ),
             pt,
         )
@@ -1093,7 +959,6 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
         pso.state.forest.leaf_tree,
         pso.prec_trees,
         pso.moves,
-        pso.move_precs,
         pso.state.forest.leaf_indices,
         pso.prelkv,
         pso.prelf,
@@ -1131,9 +996,10 @@ class SeqStageInAllTrees(Module):
     save_ratios: bool = field(static=True)
     """Whether to save the acceptance ratios."""
 
-    prelk: PreLk | None
-    """The pre-computed terms of the likelihood ratio which are shared across
-    trees."""
+    error_cov_inv: Float32[Array, 'k k'] | None
+    """The global error precision scale. Set only in the multivariate
+    vector-weight case, where the sequential stage needs it to compute the
+    leaf scores."""
 
 
 class SeqStageInPerTree(Module):
@@ -1158,9 +1024,6 @@ class SeqStageInPerTree(Module):
 
     move: Moves
     """The proposed move, see `propose_moves`."""
-
-    move_precs: Precs | Counts
-    """The likelihood precision scale in each node modified by the moves."""
 
     leaf_indices: UInt[Array, 'num_trees n']
     """The leaf indices for the largest version of the tree compatible with
@@ -1231,16 +1094,13 @@ def accept_move_and_sample_leaves(
     # subtract starting tree from function
     resid_tree += pt.prec_tree * pt.leaf_tree
 
-    # sum residuals in parent node modified by move and compute likelihood
-    resid_left = resid_tree[..., pt.move.left]
-    resid_right = resid_tree[..., pt.move.right]
-    resid_total = resid_left + resid_right
-    assert pt.move.node.dtype == jnp.int32
-    resid_tree = resid_tree.at[..., pt.move.node].set(resid_total)
+    # sum residuals in parent node modified by move and compute likelihood;
+    # the children slots are written back unchanged to share a single scatter
+    assert pt.move.lrt_nodes.dtype == jnp.int32
+    resid_lrt = _fill_lrt_total(resid_tree[..., pt.move.lrt_nodes])
+    resid_tree = resid_tree.at[..., pt.move.lrt_nodes].set(resid_lrt)
 
-    log_lk_ratio = compute_likelihood_ratio(
-        resid_total, resid_left, resid_right, pt.prelkv, at.prelk
-    )
+    log_lk_ratio = compute_likelihood_ratio(resid_lrt, pt.prelkv, at.error_cov_inv)
 
     # calculate accept/reject ratio
     log_ratio = pt.move.log_trans_prior_ratio + log_lk_ratio
@@ -1252,9 +1112,9 @@ def accept_move_and_sample_leaves(
     acc = pt.move.allowed & (pt.move.logu <= log_ratio)
 
     # compute leaves posterior and sample leaves
-    if at.prelk is not None and at.prelk.error_cov_inv is not None:
+    if at.error_cov_inv is not None:
         # multivariate w/ vector weights
-        b_tree = compute_B(at.prelk.error_cov_inv, resid_tree)  # (k, 2**d)
+        b_tree = compute_B(at.error_cov_inv, resid_tree)  # (k, 2**d)
         l_lead = jnp.moveaxis(pt.prelf.mean_factor, -1, 0)  # (2**d, k, k)
         b_lead = b_tree.T[:, :, None]  # (2**d, k, 1)
         y = solve_triangular(l_lead, b_lead, lower=True)
@@ -1268,14 +1128,12 @@ def accept_move_and_sample_leaves(
         mean_post = resid_tree * pt.prelf.mean_factor
     leaf_tree = mean_post + pt.prelf.centered_leaves
 
-    # copy leaves around such that the leaf indices point to the correct leaf
+    # copy leaves around such that the leaf indices point to the correct leaf;
+    # the parent slot is written back unchanged to share a single scatter
     to_prune = acc ^ pt.move.grow
-    leaf_tree = (
-        leaf_tree.at[..., jnp.where(to_prune, pt.move.left, tree_size)]
-        .set(leaf_tree[..., pt.move.node])
-        .at[..., jnp.where(to_prune, pt.move.right, tree_size)]
-        .set(leaf_tree[..., pt.move.node])
-    )
+    leaf_tree = leaf_tree.at[
+        ..., jnp.where(to_prune, pt.move.lrt_nodes, tree_size)
+    ].set(leaf_tree[..., pt.move.lrt_nodes[2], None])
     # replace old tree with new tree in function values
     resid += (pt.leaf_tree - leaf_tree)[..., pt.leaf_indices]
 
@@ -1328,99 +1186,67 @@ def sum_resid(
 
 
 def _compute_likelihood_ratio_uv(
-    total_resid: Float32[Array, ''],
-    left_resid: Float32[Array, ''],
-    right_resid: Float32[Array, ''],
-    prelkv: PreLkV,
-    prelk: PreLk,
+    resid_lrt: Float32[Array, ' 3'], prelkv: PreLkV
 ) -> Float32[Array, '']:
-    exp_term = prelk.exp_factor * (
-        left_resid * left_resid / prelkv.left
-        + right_resid * right_resid / prelkv.right
-        - total_resid * total_resid / prelkv.total
-    )
+    # quadratic form r * v * r for each of the (left, right, total) terms
+    qf = resid_lrt * resid_lrt * prelkv.lrt
+    exp_term = 0.5 * (qf @ jnp.array([1.0, 1.0, -1.0]))
     return prelkv.log_sqrt_term + exp_term
 
 
 def _compute_likelihood_ratio_mv(
-    total_resid: Float32[Array, ' k'],
-    left_resid: Float32[Array, ' k'],
-    right_resid: Float32[Array, ' k'],
-    prelkv: PreLkV,
+    resid_lrt: Float32[Array, 'k 3'], prelkv: PreLkV
 ) -> Float32[Array, '']:
-    def _quadratic_form(
-        r: Float32[Array, ' k'], mat: Float32[Array, 'k k']
-    ) -> Float32[Array, '']:
-        return r @ mat @ r
-
-    qf_left = _quadratic_form(left_resid, prelkv.left)
-    qf_right = _quadratic_form(right_resid, prelkv.right)
-    qf_total = _quadratic_form(total_resid, prelkv.total)
-    exp_term = 0.5 * (qf_left + qf_right - qf_total)
+    # quadratic form r' M r for each of the (left, right, total) terms
+    qf = jnp.einsum('it,tij,jt->t', resid_lrt, prelkv.lrt, resid_lrt)
+    exp_term = 0.5 * (qf @ jnp.array([1.0, 1.0, -1.0]))
     return prelkv.log_sqrt_term + exp_term
 
 
 def _compute_likelihood_ratio_mv_het(
-    total_resid: Float32[Array, 'k k'],
-    left_resid: Float32[Array, 'k k'],
-    right_resid: Float32[Array, 'k k'],
+    resid_lrt: Float32[Array, 'k k 3'],
     error_cov_inv: Float32[Array, 'k k'],
     prelkv: PreLkV,
 ) -> Float32[Array, '']:
-    def quad(
-        L: Float32[Array, 'k k'], resid: Float32[Array, 'k k']
-    ) -> Float32[Array, '']:
-        b = compute_B(error_cov_inv, resid)
-        y = solve_triangular(L, b[:, None], lower=True).squeeze(-1)
-        return y @ y
-
-    qf_left = quad(prelkv.left, left_resid)
-    qf_right = quad(prelkv.right, right_resid)
-    qf_total = quad(prelkv.total, total_resid)
-    exp_term = 0.5 * (qf_left + qf_right - qf_total)
+    b = compute_B(error_cov_inv, resid_lrt)  # (k, 3)
+    y = solve_triangular(prelkv.lrt, b.T[..., None], lower=True).squeeze(-1)  # (3, k)
+    qf = jnp.einsum('ti,ti->t', y, y)
+    exp_term = 0.5 * (qf @ jnp.array([1.0, 1.0, -1.0]))
     return prelkv.log_sqrt_term + exp_term
 
 
 @named_call
 def compute_likelihood_ratio(
-    total_resid: (Float32[Array, ''] | Float32[Array, ' k'] | Float32[Array, 'k k']),
-    left_resid: (Float32[Array, ''] | Float32[Array, ' k'] | Float32[Array, 'k k']),
-    right_resid: (Float32[Array, ''] | Float32[Array, ' k'] | Float32[Array, 'k k']),
+    resid_lrt: (Float32[Array, ' 3'] | Float32[Array, 'k 3'] | Float32[Array, 'k k 3']),
     prelkv: PreLkV,
-    prelk: PreLk | None,
+    error_cov_inv: Float32[Array, 'k k'] | None,
 ) -> Float32[Array, '']:
     """
     Compute the likelihood ratio of a grow move.
 
     Parameters
     ----------
-    total_resid
-    left_resid
-    right_resid
+    resid_lrt
         The sum of the residuals (scaled by error precision scale) of the
-        datapoints falling in the nodes involved in the moves.
+        datapoints falling in the left child, right child, and parent node
+        involved in the move, stacked along the trailing axis.
     prelkv
-    prelk
         The pre-computed terms of the likelihood ratio, see
         `precompute_likelihood_terms`.
+    error_cov_inv
+        The global error precision scale. Set only in the multivariate
+        vector-weight case.
 
     Returns
     -------
     The log-likelihood ratio log P(data | new tree) - log P(data | old tree).
     """
-    if prelk is not None and prelk.error_cov_inv is not None:
-        return _compute_likelihood_ratio_mv_het(
-            total_resid, left_resid, right_resid, prelk.error_cov_inv, prelkv
-        )
-    elif total_resid.ndim > 0:
-        return _compute_likelihood_ratio_mv(
-            total_resid, left_resid, right_resid, prelkv
-        )
+    if error_cov_inv is not None:
+        return _compute_likelihood_ratio_mv_het(resid_lrt, error_cov_inv, prelkv)
+    elif resid_lrt.ndim > 1:
+        return _compute_likelihood_ratio_mv(resid_lrt, prelkv)
     else:
-        assert prelk is not None
-        return _compute_likelihood_ratio_uv(
-            total_resid, left_resid, right_resid, prelkv, prelk
-        )
+        return _compute_likelihood_ratio_uv(resid_lrt, prelkv)
 
 
 @named_call
@@ -1487,10 +1313,12 @@ def _apply_moves_to_leaf_indices(
 ) -> UInt[Array, ' n']:
     """Implement `apply_moves_to_leaf_indices`."""
     mask = ~jnp.array(1, leaf_indices.dtype)  # ...1111111110
-    is_child = (leaf_indices & mask) == moves.left
+    is_child = (leaf_indices & mask) == moves.lrt_nodes[0]
     assert moves.to_prune is not None
     return jnp.where(
-        is_child & moves.to_prune, moves.node.astype(leaf_indices.dtype), leaf_indices
+        is_child & moves.to_prune,
+        moves.lrt_nodes[2].astype(leaf_indices.dtype),
+        leaf_indices,
     )
 
 
@@ -1522,12 +1350,11 @@ def _apply_moves_to_split_trees(
 ) -> UInt[Array, ' half_tree_size']:
     """Implement `apply_moves_to_split_trees`."""
     assert moves.to_prune is not None
-    return (
-        split_tree.at[jnp.where(moves.grow, moves.node, split_tree.size)]
-        .set(moves.grow_split.astype(split_tree.dtype))
-        .at[jnp.where(moves.to_prune, moves.node, split_tree.size)]
-        .set(0)
-    )
+    # a single scatter serves both cases: an accepted grow writes the new
+    # cutpoint, while pruning (accepted prune or rejected grow) zeroes the node
+    return split_tree.at[
+        jnp.where(moves.grow | moves.to_prune, moves.lrt_nodes[2], split_tree.size)
+    ].set(jnp.where(moves.to_prune, 0, moves.grow_split).astype(split_tree.dtype))
 
 
 @named_call
@@ -1562,25 +1389,17 @@ def _apply_moves_to_affluence_trees(
 ) -> Bool[Array, ' half_tree_size']:
     """Implement `apply_moves_to_affluence_trees`."""
     assert moves.to_prune is not None
-    assert moves.node_affluent is not None
-    size = affluence_tree.size
+    assert moves.lrt_affluent is not None
     # GROW: node becomes internal, children become leaves with their affluence.
-    # PRUNE (accepted prune or rejected grow): node becomes a leaf, children are
-    # deleted. Indices of the move not taken resolve to `size` and drop.
-    return (
-        affluence_tree.at[jnp.where(moves.grow, moves.node, size)]
-        .set(False)
-        .at[jnp.where(moves.grow, moves.left, size)]
-        .set(moves.left_affluent)
-        .at[jnp.where(moves.grow, moves.right, size)]
-        .set(moves.right_affluent)
-        .at[jnp.where(moves.to_prune, moves.node, size)]
-        .set(moves.node_affluent)
-        .at[jnp.where(moves.to_prune, moves.left, size)]
-        .set(False)
-        .at[jnp.where(moves.to_prune, moves.right, size)]
-        .set(False)
-    )
+    # PRUNE (accepted prune or rejected grow): node becomes a leaf with its
+    # affluence, children are deleted. Either way all three nodes are written:
+    # the mask keeps the affluence of the nodes that become leaves and zeroes
+    # the rest. If no move is applied (a rejected prune), the indices resolve
+    # to `size` and the writes drop.
+    becomes_leaf = moves.to_prune ^ jnp.array([True, True, False])
+    return affluence_tree.at[
+        jnp.where(moves.grow | moves.to_prune, moves.lrt_nodes, affluence_tree.size)
+    ].set(moves.lrt_affluent & becomes_leaf)
 
 
 @jax.jit

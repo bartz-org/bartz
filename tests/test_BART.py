@@ -27,7 +27,7 @@
 This is the main suite of tests.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
 from inspect import signature
 from typing import Any, Literal
@@ -925,8 +925,18 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
     )
 
     # check the likelihood ratio is always 1
-    assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
-    assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
+    assert_close_matrices(
+        bart._burnin_trace.log_likelihood,
+        jnp.zeros_like(bart._burnin_trace.log_likelihood),
+        atol=1e-5,
+        reduce_rank=True,
+    )
+    assert_close_matrices(
+        bart._main_trace.log_likelihood,
+        jnp.zeros_like(bart._main_trace.log_likelihood),
+        atol=1e-5,
+        reduce_rank=True,
+    )
 
 
 def test_two_datapoints(kw: dict[str, Any]) -> None:
@@ -1112,8 +1122,18 @@ def run_bart_like_prior(
     bart = mc_gbart(**kw)
 
     with subtests.test('likelihood ratio = 1'):
-        assert_array_equal(bart._burnin_trace.log_likelihood, 0.0, strict=False)
-        assert_array_equal(bart._main_trace.log_likelihood, 0.0, strict=False)
+        assert_close_matrices(
+            bart._burnin_trace.log_likelihood,
+            jnp.zeros_like(bart._burnin_trace.log_likelihood),
+            atol=1e-5,
+            reduce_rank=True,
+        )
+        assert_close_matrices(
+            bart._main_trace.log_likelihood,
+            jnp.zeros_like(bart._main_trace.log_likelihood),
+            atol=1e-5,
+            reduce_rank=True,
+        )
 
     return bart
 
@@ -1495,14 +1515,7 @@ def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
         # the mesh is static metadata on both the state config and the traces,
         # so it must be cleared everywhere to make treedefs match the unsharded
         # baseline before comparing leaves
-        config = replace(bart._mcmc_state.config, mesh=None)
-        bart = tree_at(lambda b: b._mcmc_state.config, bart, config)
-        bart = tree_at(
-            lambda b: b._main_trace, bart, replace(bart._main_trace, mesh=None)
-        )
-        return tree_at(
-            lambda b: b._burnin_trace, bart, replace(bart._burnin_trace, mesh=None)
-        )
+        return tree_at(lambda b: b._bart, bart, bart._bart._drop_device_info())
 
     with subtests.test('shard chains'):
         chains_kw = tree.map(lambda x: x, baseline_kw)

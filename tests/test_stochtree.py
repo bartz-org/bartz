@@ -398,6 +398,8 @@ def test_standardization_matches(continuous_data: _Data, keys: split) -> None:
     # shift-invariant, so this only hardens the y_bar comparison.
     y_train = data.y_train + 1.0
     st_model = stochtree.BARTModel()
+    # WORKAROUND(stochtree<0.4.3): pre-0.4.3 stochtree rejects float32 input; cast
+    # X_train/y_train to float64. Drop dtype=np.float64 once the floor reaches 0.4.3.
     st_model.sample(
         X_train=np.asarray(data.X_train, dtype=np.float64),
         y_train=np.asarray(y_train, dtype=np.float64),
@@ -441,6 +443,8 @@ def comparison(
 
     if outcome == 'continuous':
         data = _make_continuous(keys, n=50, n_test=80)
+        # WORKAROUND(stochtree<0.4.3): pre-0.4.3 stochtree rejects float32; cast to
+        # float64 (bartz downcasts). Drop dtype=np.float64 when the floor hits 0.4.3.
         y = np.asarray(data.y_train, dtype=np.float64)
         extra: dict = {}
     else:
@@ -454,6 +458,8 @@ def comparison(
     seed = int_seed(keys.pop())
 
     kwargs: dict = dict(
+        # WORKAROUND(stochtree<0.4.3): pre-0.4.3 stochtree rejects float32; cast
+        # X_train/X_test to float64 (bartz downcasts). Drop dtype=np.float64 at 0.4.3.
         X_train=np.asarray(data.X_train, dtype=np.float64),
         y_train=y,
         X_test=np.asarray(data.X_test, dtype=np.float64),
@@ -957,7 +963,7 @@ class TestPreprocessing:
     def test_end_to_end_numeric_matches_array(
         self, continuous_data: _Data, flavor: str, keys: split
     ) -> None:
-        """A numeric DataFrame produces bit-identical posteriors to the same array."""
+        """A numeric DataFrame produces the same posteriors as the equivalent array."""
         data = continuous_data
         X_arr = np.asarray(data.X_train)
         Xte_arr = np.asarray(data.X_test)
@@ -979,8 +985,8 @@ class TestPreprocessing:
         key = keys.pop()
         m_arr = self._sample(X_arr, data.y_train, X_test=Xte_arr, key=key)
         m_df = self._sample(df_train, data.y_train, X_test=df_test, key=key)
-        assert_close_matrices(m_arr.y_hat_train, m_df.y_hat_train)
-        assert_close_matrices(m_arr.y_hat_test, m_df.y_hat_test)
+        assert_close_matrices(m_arr.y_hat_train, m_df.y_hat_train, rtol=1e-5)
+        assert_close_matrices(m_arr.y_hat_test, m_df.y_hat_test, rtol=1e-5)
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_end_to_end_one_hot_matches_manual(
@@ -1051,8 +1057,8 @@ class TestPreprocessing:
             key=key,
             general_params={'variable_weights': w_df},
         )
-        assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train)
-        assert_close_matrices(m_manual.y_hat_test, m_df.y_hat_test)
+        assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=1e-5)
+        assert_close_matrices(m_manual.y_hat_test, m_df.y_hat_test, rtol=1e-5)
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_end_to_end_default_weights_split_like_stochtree(
@@ -1107,8 +1113,8 @@ class TestPreprocessing:
             key=key,
             general_params={'variable_weights': w_split},
         )
-        assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train)
-        assert_close_matrices(m_manual.y_hat_test, m_df.y_hat_test)
+        assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=1e-5)
+        assert_close_matrices(m_manual.y_hat_test, m_df.y_hat_test, rtol=1e-5)
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_predict_with_array_after_dataframe_fit_raises(

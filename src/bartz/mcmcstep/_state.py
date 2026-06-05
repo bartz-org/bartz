@@ -60,6 +60,7 @@ from bartz.mcmcstep._lazy import (
     _wrap_chain,
     add_dummy_axis,
 )
+from bartz.mcmcstep._reduction import BatchedReduction, ReductionConfig
 
 ArrayLike = Array | ndarray
 
@@ -199,22 +200,21 @@ class StepConfig(Module):
     sparse_on_at: Int32[Array, ''] | None
     """After how many steps to turn on variable selection."""
 
-    resid_num_batches: int | None | Literal['auto'] = field(static=True)
-    """The number of batches for computing the sum of residuals. If `None`,
-    they are computed with no batching. If 'auto', resolved per-platform at run
-    time."""
+    resid_reduction_config: ReductionConfig
+    """How to sum the residuals in each leaf."""
 
-    count_num_batches: int | None | Literal['auto'] = field(static=True)
-    """The number of batches for computing counts. If `None`, they are computed
-    with no batching. If 'auto', resolved per-platform at run time."""
+    count_reduction_config: ReductionConfig
+    """How to count the datapoints in each leaf."""
 
-    prec_num_batches: int | None | Literal['auto'] = field(static=True)
-    """The number of batches for computing precision scales. If `None`, they
-    are computed with no batching. If 'auto', resolved per-platform at run
-    time."""
+    prec_reduction_config: ReductionConfig
+    """How to sum the likelihood precisions in each leaf."""
 
     prec_count_num_trees: int | None = field(static=True)
     """Batch size for processing trees to compute count and prec trees."""
+
+    sequential_unroll: int | bool = field(static=True)
+    """How much to unroll the sequential accept/reject loop over trees in
+    `step`. See the ``unroll`` argument of `jax.lax.scan`."""
 
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
@@ -544,10 +544,12 @@ def init(
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
     min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
-    resid_num_batches: int | None | Literal['auto'] = 'auto',
-    count_num_batches: int | None | Literal['auto'] = 'auto',
-    prec_num_batches: int | None | Literal['auto'] = 'auto',
+    # the gpu batch targets of the default reductions were tuned on an A4000
+    resid_reduction_config: ReductionConfig = BatchedReduction(auto_gpu_target=1024),
+    count_reduction_config: ReductionConfig = BatchedReduction(auto_gpu_target=2048),
+    prec_reduction_config: ReductionConfig = BatchedReduction(auto_gpu_target=1024),
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
+    sequential_unroll: int | bool = 2,
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
     min_points_per_leaf: int | Integer[ArrayLike, ''] | None = None,
@@ -612,20 +614,24 @@ def init(
     min_points_per_decision_node
         The minimum number of data points in a decision node. 0 if not
         specified.
-    resid_num_batches
-    count_num_batches
-    prec_num_batches
-        The number of batches, along datapoints, for summing the residuals,
-        counting the number of datapoints in each leaf, and computing the
-        likelihood precision in each leaf, respectively. `None` for no batching.
-        If 'auto' (default), it's chosen automatically based on the platform the
-        MCMC is compiled for, resolved at run time via `lax.platform_dependent`,
-        so the state need not know the platform in advance.
+    resid_reduction_config
+    count_reduction_config
+    prec_reduction_config
+        How to sum the residuals, count the datapoints, and sum the likelihood
+        precisions in each leaf, respectively. See `ReductionConfig` and its
+        subclasses. The defaults pick the batching automatically based on the
+        platform the MCMC is compiled for, resolved at run time, so the state
+        need not know the platform in advance.
     prec_count_num_trees
         The number of trees to process at a time when counting datapoints or
         computing the likelihood precision. If `None`, do all trees at once,
         which may use too much memory. If 'auto' (default), it's chosen
         automatically.
+    sequential_unroll
+        How much to unroll the sequential accept/reject loop over trees in
+        `step`. See the ``unroll`` argument of `jax.lax.scan`. Unrolling may
+        speed up the MCMC at the cost of longer compilation. 1 means no
+        unrolling; the default is 2.
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
     filter_splitless_vars
@@ -738,12 +744,12 @@ def init(
         msg = 'sparsity params (either theta or rho,a,b) and sparse_on_at must be either all None or all set'
         raise ValueError(msg)
 
-    # determine batch sizes for reductions
+    # determine settings for reductions
     mesh = _parse_mesh(num_chains, mesh)
     red_cfg = _parse_reduction_configs(
-        resid_num_batches,
-        count_num_batches,
-        prec_num_batches,
+        resid_reduction_config,
+        count_reduction_config,
+        prec_reduction_config,
         prec_count_num_trees,
         y,
         num_trees,
@@ -841,6 +847,7 @@ def init(
             config=StepConfig(
                 steps_done=jnp.int32(0),
                 sparse_on_at=_asarray_or_none(sparse_on_at),
+                sequential_unroll=sequential_unroll,
                 mesh=mesh,
                 **red_cfg,
             ),
@@ -1169,16 +1176,16 @@ def _asarray_or_none(x: object) -> Array | None:
 class _ReductionConfig(TypedDict):
     """Fields of `StepConfig` related to reductions."""
 
-    resid_num_batches: int | None | Literal['auto']
-    count_num_batches: int | None | Literal['auto']
-    prec_num_batches: int | None | Literal['auto']
+    resid_reduction_config: ReductionConfig
+    count_reduction_config: ReductionConfig
+    prec_reduction_config: ReductionConfig
     prec_count_num_trees: int | None
 
 
 def _parse_reduction_configs(
-    resid_num_batches: int | None | Literal['auto'],
-    count_num_batches: int | None | Literal['auto'],
-    prec_num_batches: int | None | Literal['auto'],
+    resid_reduction_config: ReductionConfig,
+    count_reduction_config: ReductionConfig,
+    prec_reduction_config: ReductionConfig,
     prec_count_num_trees: int | None | Literal['auto'],
     y: Float32[Array, ' n'] | Float32[Array, ' k n'] | Bool[Array, ' n'],
     num_trees: int,
@@ -1191,14 +1198,14 @@ def _parse_reduction_configs(
     # chains are vmapped together on each device, so they share the per-step
     # memory of the per-tree reduction
     chains_per_device = (num_chains or 1) // get_axis_size(mesh, 'chains')
-    # the datapoint-batch counts are resolved per-platform at run time (see
-    # `_auto_num_batches` and `lax.platform_dependent` in `_scatter`), so the
-    # 'auto' sentinel is stored verbatim; only `prec_count_num_trees`, which
-    # does not depend on the platform, is resolved here
+    # the reduction configs carry their own datapoint-batch settings (resolved
+    # per-platform at run time when 'auto', see `ReductionConfig`), so they are
+    # stored verbatim; only `prec_count_num_trees`, which does not depend on the
+    # platform, is resolved here
     return dict(
-        resid_num_batches=resid_num_batches,
-        count_num_batches=count_num_batches,
-        prec_num_batches=prec_num_batches,
+        resid_reduction_config=resid_reduction_config,
+        count_reduction_config=count_reduction_config,
+        prec_reduction_config=prec_reduction_config,
         prec_count_num_trees=_parse_prec_count_num_trees(
             prec_count_num_trees, num_trees, n * chains_per_device
         ),

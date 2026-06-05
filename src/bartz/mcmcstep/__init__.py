@@ -31,6 +31,12 @@ Functions that implement the BART posterior MCMC initialization and update step.
 
 # ruff: noqa: F401
 
+from bartz.mcmcstep._reduction import (
+    BatchedReduction,
+    OneHotReduction,
+    PallasReduction,
+    ReductionConfig,
+)
 from bartz.mcmcstep._state import (
     Forest,
     OutcomeType,

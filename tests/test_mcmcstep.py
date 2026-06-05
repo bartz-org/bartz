@@ -35,18 +35,37 @@ import numpy
 import pytest
 from beartype import beartype
 from equinox import Module
-from jax import debug_key_reuse, lax, make_mesh, random, tree, vmap
+from jax import (
+    debug_key_reuse,
+    device_put,
+    lax,
+    make_mesh,
+    random,
+    shard_map,
+    tree,
+    vmap,
+)
 from jax import numpy as jnp
-from jax.sharding import AxisType, Mesh, PartitionSpec, SingleDeviceSharding
+from jax.ops import segment_sum
+from jax.sharding import (
+    AxisType,
+    Mesh,
+    NamedSharding,
+    PartitionSpec,
+    SingleDeviceSharding,
+)
 from jax.tree_util import KeyPath, keystr
+from jax.typing import DTypeLike
 from jaxtyping import (
     Array,
     Bool,
     Float,
     Float32,
     Int32,
+    Integer,
     Key,
     PyTree,
+    Shaped,
     UInt8,
     UInt32,
     jaxtyped,
@@ -57,13 +76,23 @@ from scipy import stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
 from bartz._jaxext import (
+    get_default_device,
     get_default_devices,
     get_device_count,
     minimal_unsigned_dtype,
     split,
 )
 from bartz.grove import is_actual_leaf
-from bartz.mcmcstep import State, init, make_p_nonterminal, step
+from bartz.mcmcstep import (
+    BatchedReduction,
+    OneHotReduction,
+    PallasReduction,
+    ReductionConfig,
+    State,
+    init,
+    make_p_nonterminal,
+    step,
+)
 from bartz.mcmcstep._axes import (
     chain_vmap_axes,
     data_vmap_axes,
@@ -76,6 +105,7 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
+from bartz.mcmcstep._reduction import _resolve_pallas_backend
 from bartz.mcmcstep._state import Forest, StepConfig, _search_divisor
 from bartz.mcmcstep._step import (
     PrecsScalar,
@@ -122,9 +152,9 @@ def _minimal_step_config() -> StepConfig:
     return StepConfig(
         steps_done=jnp.int32(0),
         sparse_on_at=None,
-        resid_num_batches=None,
-        count_num_batches=None,
-        prec_num_batches=None,
+        resid_reduction_config=BatchedReduction(num_batches=None),
+        count_reduction_config=BatchedReduction(num_batches=None),
+        prec_reduction_config=BatchedReduction(num_batches=None),
         prec_count_num_trees=None,
         sequential_unroll=1,
         mesh=None,
@@ -594,6 +624,174 @@ class TestSearchDivisor:
         """Preconditions on the arguments are enforced via assertions."""
         with pytest.raises(AssertionError):
             _search_divisor(target, dividend, low, up)
+
+
+class TestReduction:
+    """Check every `ReductionConfig` matches an unbatched segment-sum baseline."""
+
+    @pytest.fixture
+    def configs(self) -> tuple[ReductionConfig, ...]:
+        """Configs covering every subclass and setting.
+
+        Built in a fixture rather than at class-body (import) time so that
+        `get_default_device` reads the platform after jax is configured (e.g.
+        by the ``--platform`` option).
+        """
+        # PallasReduction backend: Triton on gpu, interpret mode on cpu (the
+        # only mode that runs there)
+        pallas_backend = 'triton' if get_default_device().platform == 'gpu' else 'cpu'
+        return (
+            # BatchedReduction: unbatched, automatic, and explicit batch counts (a
+            # divisor of `n` and a non-divisor, which leaves an uneven final batch),
+            # each batch axis layout, and strided vs contiguous batch assignment
+            BatchedReduction(num_batches=None),
+            BatchedReduction(num_batches='auto'),
+            BatchedReduction(num_batches=4),
+            BatchedReduction(num_batches=7),
+            BatchedReduction(num_batches=4, batches_inner=False),
+            BatchedReduction(num_batches=4, contiguous=True),
+            BatchedReduction(num_batches=7, contiguous=True),
+            BatchedReduction(num_batches=7, batches_inner=False, contiguous=True),
+            # OneHotReduction: every contraction method in both memory layouts
+            OneHotReduction(method='matmul', n_inner=True),
+            OneHotReduction(method='matmul', n_inner=False),
+            OneHotReduction(method='multiply', n_inner=True),
+            OneHotReduction(method='multiply', n_inner=False),
+            OneHotReduction(method='scatter_set', n_inner=True),
+            OneHotReduction(method='scatter_set', n_inner=False),
+            # PallasReduction: fully automatic grid and tile, then explicit ones
+            PallasReduction(backend=pallas_backend),
+            PallasReduction(backend=pallas_backend, num_blocks=1, block_size=64),
+            PallasReduction(backend=pallas_backend, num_blocks=8, block_size=16),
+        )
+
+    @staticmethod
+    def reference(
+        values: Float[Array, '*batch_shape n'] | int,
+        indices: Integer[Array, ' n'],
+        /,
+        *,
+        size: int,
+        dtype: DTypeLike,
+        data_sharded: bool,
+    ) -> Shaped[Array, '*batch_shape {size}']:
+        """External baseline mirroring `_reduce` via `jax.ops.segment_sum`."""
+        values = jnp.asarray(values)
+        # `segment_sum` reduces the leading axis, `_reduce` the last one; a
+        # scalar value is the count case, weighting each datapoint equally
+        if values.ndim == 0:
+            data = jnp.broadcast_to(values.astype(dtype), indices.shape)
+        else:
+            data = jnp.moveaxis(values, -1, 0).astype(dtype)
+        out = jnp.moveaxis(segment_sum(data, indices, num_segments=size), 0, -1)
+        if data_sharded:
+            out = lax.psum(out, 'data')
+        return out
+
+    def test_matches_reference(
+        self, configs: tuple[ReductionConfig, ...], keys: split, subtests: SubTests
+    ) -> None:
+        """Every config matches the reference on a battery of invocations.
+
+        The cases cover scalar count weights (exact integer match), float
+        values with and without batch dimensions, float16 values whose per-bin
+        sums overflow float16 (catching accumulation in the values' dtype
+        rather than in the requested `dtype`), composition with an external
+        `vmap` that batches only the indices (the layout `step` uses to
+        count/sum over many trees at once), and a data axis sharded with
+        `shard_map`, which `PallasReduction` must reject.
+        """
+        n, size, num_trees = 512, 8, 4
+        indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
+        tree_indices = random.randint(keys.pop(), (num_trees, n), 0, size).astype(
+            jnp.uint32
+        )
+        # float values: univariate, and with the 1d/2d batch shapes of the
+        # multivariate leaf-sum and precision paths
+        vector = random.normal(keys.pop(), (n,))
+        batched = random.normal(keys.pop(), (3, n))
+        matrix = random.normal(keys.pop(), (2, 2, n))
+        # float16 values: each per-bin sum overflows the float16 range, so a
+        # reduction accumulating in the values' dtype returns inf
+        overflowing = jnp.full(n, 4096.0, jnp.float16)
+
+        count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
+        float_kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
+        exact = assert_array_equal  # the count path must match exactly
+        close = partial(assert_close_matrices, rtol=1e-5, atol=1e-6, reduce_rank=True)
+
+        # each case invokes a reduce function `f` (a config's `_reduce` or the
+        # reference) in one pattern, paired with the appropriate comparison
+        cases = {
+            'count': (lambda f: f(1, indices, **count_kw), exact),
+            'float': (lambda f: f(vector, indices, **float_kw), close),
+            'float batched': (lambda f: f(batched, indices, **float_kw), close),
+            'float matrix': (lambda f: f(matrix, indices, **float_kw), close),
+            'float16': (lambda f: f(overflowing, indices, **float_kw), close),
+            'vmap count': (
+                lambda f: vmap(partial(f, 1, **count_kw))(tree_indices),
+                exact,
+            ),
+            'vmap float': (
+                lambda f: vmap(partial(f, vector, **float_kw))(tree_indices),
+                close,
+            ),
+        }
+
+        # `data_sharded=True` runs under `shard_map` and sums the per-shard
+        # reductions; on a single device `psum` is the identity, so a missing
+        # sum could not be caught and the sharded cases are not worth running
+        num_shards = min(4, get_device_count())
+        if num_shards >= 2:
+            mesh = make_mesh(
+                (num_shards,), ('data',), devices=get_default_devices()[:num_shards]
+            )
+            data, replicated = PartitionSpec('data'), PartitionSpec()
+            sharded_indices = device_put(indices, NamedSharding(mesh, data))
+            sharded_vector = device_put(vector, NamedSharding(mesh, data))
+            cases['sharded count'] = (
+                lambda f: shard_map(
+                    partial(f, 1, **dict(count_kw, data_sharded=True)),
+                    mesh=mesh,
+                    in_specs=(data,),
+                    out_specs=replicated,
+                )(sharded_indices),
+                exact,
+            )
+            cases['sharded float'] = (
+                lambda f: shard_map(
+                    partial(f, **dict(float_kw, data_sharded=True)),
+                    mesh=mesh,
+                    in_specs=(data, data),
+                    out_specs=replicated,
+                )(sharded_vector, sharded_indices),
+                close,
+            )
+
+        expected = {name: run(self.reference) for name, (run, _) in cases.items()}
+
+        for config in configs:
+            for name, (run, compare) in cases.items():
+                with subtests.test(config=config, case=name):
+                    if name.startswith('sharded') and isinstance(
+                        config, PallasReduction
+                    ):
+                        with pytest.raises(NotImplementedError):
+                            run(config._reduce)
+                    else:
+                        compare(run(config._reduce), expected[name])
+
+    def test_resolve_pallas_backend(self) -> None:
+        """Only the 'triton' backend may yield compiler params."""
+        assert _resolve_pallas_backend('cpu') is None
+        assert _resolve_pallas_backend('default') is None
+        params = _resolve_pallas_backend('triton')
+        # WORKAROUND(jax<0.7.0): drop the fallback branch when the jax floor
+        # reaches 0.7
+        if jax.__version_info__ < (0, 7, 0):
+            assert params is None
+        else:
+            assert params is not None
 
 
 def vmap_randint_masked(
@@ -1235,9 +1433,9 @@ class TestMultichain:
             init(
                 **copy_args(),
                 num_chains=None,
-                resid_num_batches=mc_state.config.resid_num_batches,
-                count_num_batches=mc_state.config.count_num_batches,
-                prec_num_batches=mc_state.config.prec_num_batches,
+                resid_reduction_config=mc_state.config.resid_reduction_config,
+                count_reduction_config=mc_state.config.count_reduction_config,
+                prec_reduction_config=mc_state.config.prec_reduction_config,
             )
             for _ in range(num_chains)
         ]
@@ -1993,8 +2191,8 @@ class TestMVBartIntegration:
                 max_split=max_split,
                 num_trees=10,
                 p_nonterminal=p_nonterminal,
-                resid_num_batches=None,
-                count_num_batches=None,
+                resid_reduction_config=BatchedReduction(num_batches=None),
+                count_reduction_config=BatchedReduction(num_batches=None),
             ),
         )
 
@@ -2206,8 +2404,8 @@ class TestMultivariate:
                 max_split=max_split,
                 num_trees=n_trees,
                 p_nonterminal=jnp.array([0.9, 0.5]),
-                resid_num_batches=None,
-                count_num_batches=None,
+                resid_reduction_config=BatchedReduction(num_batches=None),
+                count_reduction_config=BatchedReduction(num_batches=None),
             ),
         )
 
@@ -2312,8 +2510,8 @@ class TestMultivariate:
             num_trees=5,
             p_nonterminal=jnp.array([0.9, 0.5]),
             leaf_prior_cov_inv=jnp.eye(k),
-            resid_num_batches=None,
-            count_num_batches=None,
+            resid_reduction_config=BatchedReduction(num_batches=None),
+            count_reduction_config=BatchedReduction(num_batches=None),
         )
 
         if kind == 'binary':
@@ -2375,8 +2573,8 @@ class TestMultivariate:
                 leaf_prior_cov_inv=jnp.eye(k),
                 error_cov_df=jnp.array(4.0 + k),
                 error_cov_scale=jnp.eye(k),
-                resid_num_batches=None,
-                count_num_batches=None,
+                resid_reduction_config=BatchedReduction(num_batches=None),
+                count_reduction_config=BatchedReduction(num_batches=None),
             ),
         )
 

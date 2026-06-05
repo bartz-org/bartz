@@ -90,7 +90,7 @@ from bartz.grove import (
 from bartz.mcmcloop import CallbackState, compute_varcount, evaluate_trace
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _run_mcmc_inner_loop
-from bartz.mcmcstep import State
+from bartz.mcmcstep import BatchedReduction, State
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
@@ -367,9 +367,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     num_chains=None,
                     maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     init_kw=dict(
-                        resid_num_batches=None,
-                        count_num_batches=None,
-                        prec_num_batches=None,
+                        resid_reduction_config=BatchedReduction(num_batches=None),
+                        count_reduction_config=BatchedReduction(num_batches=None),
+                        prec_reduction_config=BatchedReduction(num_batches=None),
                         prec_count_num_trees=5,
                         save_ratios=True,
                         min_points_per_leaf=5,
@@ -431,9 +431,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
                     init_kw=dict(
                         save_ratios=True,
-                        resid_num_batches=16,
-                        count_num_batches=16,
-                        prec_num_batches=16,
+                        resid_reduction_config=BatchedReduction(num_batches=16),
+                        count_reduction_config=BatchedReduction(num_batches=16),
+                        prec_reduction_config=BatchedReduction(num_batches=16),
                         prec_count_num_trees=7,
                         min_points_per_leaf=5,
                     ),
@@ -465,9 +465,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     # without changing placement or compilation
                     devices=get_default_device(),
                     init_kw=dict(
-                        resid_num_batches=None,
-                        count_num_batches=None,
-                        prec_num_batches=None,
+                        resid_reduction_config=BatchedReduction(num_batches=None),
+                        count_reduction_config=BatchedReduction(num_batches=None),
+                        prec_reduction_config=BatchedReduction(num_batches=None),
                         prec_count_num_trees=5,
                         save_ratios=True,
                         min_points_per_leaf=5,
@@ -528,9 +528,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
                     init_kw=dict(
                         save_ratios=True,
-                        resid_num_batches=16,
-                        count_num_batches=16,
-                        prec_num_batches=16,
+                        resid_reduction_config=BatchedReduction(num_batches=16),
+                        count_reduction_config=BatchedReduction(num_batches=16),
+                        prec_reduction_config=BatchedReduction(num_batches=16),
                         prec_count_num_trees=7,
                         min_points_per_leaf=5,
                     ),

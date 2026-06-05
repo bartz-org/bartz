@@ -35,6 +35,9 @@ license = "MIT"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    # WORKAROUND(jax<0.6.2): jax 0.6.1 requires absl-py to import pallas,
+    # which bartz.mcmcstep imports at module level
+    "absl-py>=2.2.2",
     "equinox>=0.12.2",
     "jax>=0.6.1",
     "jaxtyping>=0.3.2",
@@ -62,8 +65,6 @@ dev = [
     "rich>=14.0.0",
     "snakeviz>=2.2.2",
     "virtualenv>=20.31.2",
-    # WORKAROUND(jax<0.6.2): jax 0.6.1 requires absl-py to import pallas
-    "absl-py>=2.2.2",
     "asv>=0.6.4",
     "beartype>=0.21.0",
     "flaky>=3.8.1",

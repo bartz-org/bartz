@@ -236,6 +236,7 @@ name = "bartz"
 version = "0.10.0"
 source = { editable = "." }
 dependencies = [
+    { name = "absl-py" },
     { name = "equinox" },
     { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "jax", version = "0.10.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -260,7 +261,6 @@ cuda13 = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "absl-py" },
     { name = "appnope" },
     { name = "asv" },
     { name = "beartype" },
@@ -297,6 +297,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "absl-py", specifier = ">=2.2.2" },
     { name = "equinox", specifier = ">=0.12.2" },
     { name = "jax", specifier = ">=0.6.1" },
     { name = "jax", extras = ["cuda12"], marker = "extra == 'cuda12'", specifier = ">=0.6.1" },
@@ -310,7 +311,6 @@ provides-extras = ["cuda12", "cuda13"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "absl-py", specifier = ">=2.2.2" },
     { name = "appnope", specifier = ">=0.1.4" },
     { name = "asv", specifier = ">=0.6.4" },
     { name = "beartype", specifier = ">=0.21.0" },

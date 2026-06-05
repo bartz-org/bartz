@@ -760,8 +760,8 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
     s = mask.astype(float)
 
     # generate data
-    X = gen_X(keys.pop(), p, n, 'continuous')
-    y = gen_y(keys.pop(), X, 'continuous', s=s)
+    X = gen_X(keys.pop(), p, n)
+    y = gen_y(keys.pop(), X, s=s)
 
     # run bart
     bart = mc_gbart(

@@ -114,33 +114,25 @@ class Bart(OriginalBart):
 
 
 # Most test data comes from `bartz.testing.gen_data`; the local `gen_X`/`f`/
-# `gen_y` generators below cover only what it cannot express: binary predictors
-# and importance scales with exact zeros.
+# `gen_y` generators below cover only what it cannot express: importance
+# scales with exact zeros.
 
 # `gen_data` settings shared by all its call sites: enough signal that BART can
 # identify it, and enough noise that the convergence-test posteriors mix well.
-# q = 0 because the small variants have p = 2, and q must be < p.
+# q = 0 because the small variants have p = 2, and q must be < p; the binary-X
+# variants override it because m = 2 requires q >= 2.
 GEN_KW = dict(q=0, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.04)
 
 
-def gen_X(
-    key: Key[Array, ''], p: int, n: int, kind: Literal['continuous', 'binary']
-) -> Real[Array, 'p n']:
-    """Generate a matrix of predictors."""
-    match kind:
-        case 'continuous':
-            return random.uniform(key, (p, n), float, -2, 2)
-        case 'binary':  # pragma: no branch
-            return random.bernoulli(key, 0.5, (p, n)).astype(float)
+def gen_X(key: Key[Array, ''], p: int, n: int) -> Real[Array, 'p n']:
+    """Generate a matrix of continuous predictors."""
+    return random.uniform(key, (p, n), float, -2, 2)
 
 
-def f(x: Real[Array, 'p n'], s: Real[Array, ' p'], k: int) -> Float32[Array, 'k n']:
+def f(x: Real[Array, 'p n'], s: Real[Array, ' p']) -> Float32[Array, ' n']:
     """Conditional mean of the DGP."""
-    T = 2
-    shifts = jnp.linspace(0, T, k, endpoint=False)
-    arg = 2 * jnp.pi / T * x + shifts[:, None, None]  # (k, p, n)
     norm = jnp.sqrt(s @ s)
-    return jnp.einsum('p,kpn->kn', s, jnp.cos(arg)) / norm
+    return s @ jnp.cos(jnp.pi * x) / norm
 
 
 def gen_missing(key: Key[Array, ''], shape: tuple[int, int]) -> Bool[Array, 'k n']:
@@ -156,34 +148,12 @@ def gen_missing(key: Key[Array, ''], shape: tuple[int, int]) -> Bool[Array, 'k n
 
 
 def gen_y(
-    key: Key[Array, ''],
-    X: Real[Array, 'p n'],
-    outcome_type: Literal['continuous', 'binary'] = 'continuous',
-    *,
-    k: int | None = None,
-    s: Real[Array, ' p'] | None = None,
-) -> Float32[Array, 'k n'] | Float32[Array, ' n']:
-    """Generate responses given predictors."""
-    keys = split(key, 2)
-
-    p, n = X.shape
-    if s is None:
-        s = jnp.ones(p)
-
-    # mean and noise — always (effective_k, n)
-    effective_k = 1 if k is None else k
-    mu = f(X, s, effective_k)
+    key: Key[Array, ''], X: Real[Array, 'p n'], *, s: Real[Array, ' p']
+) -> Float32[Array, ' n']:
+    """Generate continuous responses given predictors."""
+    mu = f(X, s)
     sigma = 0.1
-    y = mu + sigma * random.normal(keys.pop(), (effective_k, n))
-
-    if outcome_type == 'binary':
-        y = (y > 0).astype(float)
-
-    # squeeze for univariate
-    if k is None:
-        y = y.squeeze(axis=0)
-
-    return y
+    return mu + sigma * random.normal(key, mu.shape)
 
 
 def _bart_default(kw: dict[str, Any], param_name: str) -> Any:  # noqa: ANN401
@@ -367,11 +337,18 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
         # binary regression with binary X and high p
         case 2:
-            X = gen_X(keys.pop(), high_p, n, 'binary')
+            train, test = gen_data(
+                keys.pop(),
+                n=n + nt,
+                p=high_p,
+                m=2,
+                outcome_type='binary',
+                **dict(GEN_KW, q=2),
+            ).split(n)
             bkw = BartKW(
                 kw=dict(
-                    x_train=X,
-                    y_train=gen_y(keys.pop(), X, 'binary'),
+                    x_train=train.x,
+                    y_train=train.y,
                     outcome_type='binary',
                     **common,
                     n_skip=1,  # the mc_gbart default with binary would be 10
@@ -392,7 +369,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         min_points_per_leaf=None,
                     ),
                 ),
-                x_test=gen_X(keys.pop(), high_p, nt, 'binary'),
+                x_test=test.x,
             )
 
         # continuous regression with error weights and sparsity with fixed theta
@@ -478,11 +455,20 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
         # multivariate binary regression with binary X and high p
         case 5:
-            X = gen_X(keys.pop(), high_p, n, 'binary')
+            train, test = gen_data(
+                keys.pop(),
+                n=n + nt,
+                p=high_p,
+                m=2,
+                k=2,
+                lambda_=0.5,
+                outcome_type='binary',
+                **dict(GEN_KW, q=2),
+            ).split(n)
             bkw = BartKW(
                 kw=dict(
-                    x_train=X,
-                    y_train=gen_y(keys.pop(), X, 'binary', k=2),
+                    x_train=train.x,
+                    y_train=train.y,
                     outcome_type='binary',
                     **common,
                     printevery=None,
@@ -500,7 +486,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         min_points_per_leaf=None,
                     ),
                 ),
-                x_test=gen_X(keys.pop(), high_p, nt, 'binary'),
+                x_test=test.x,
             )
 
         # multivariate mixed binary-continuous regression with sparsity with
@@ -1229,8 +1215,8 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
     mask = random.permutation(keys.pop(), mask)
     s = mask.astype(float)
 
-    X = gen_X(keys.pop(), p, n, 'continuous')
-    y = gen_y(keys.pop(), X, 'continuous', s=s)
+    X = gen_X(keys.pop(), p, n)
+    y = gen_y(keys.pop(), X, s=s)
 
     bart = Bart(
         x_train=X,

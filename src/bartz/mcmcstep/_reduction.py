@@ -276,13 +276,13 @@ class OneHotReduction(ReductionConfig):
                 if scalar:
                     out = values * onehot.sum(axis=-1, dtype=dtype)
                 else:
-                    out = (values[..., None, :] * onehot).sum(axis=-1)
+                    out = (values[..., None, :] * onehot).sum(axis=-1, dtype=dtype)
             case 'multiply', False:
                 onehot = indices[:, None] == bins  # (n, size)
                 if scalar:
                     out = values * onehot.sum(axis=-2, dtype=dtype)
                 else:
-                    out = (values[..., :, None] * onehot).sum(axis=-2)
+                    out = (values[..., :, None] * onehot).sum(axis=-2, dtype=dtype)
 
         if data_sharded:
             out = lax.psum(out, 'data')

@@ -39,12 +39,11 @@ from jax import (
     jit,
     make_mesh,
     tree,
-    vmap,
 )
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Float32, UInt8
+from jaxtyping import Array, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import get_default_devices, get_device_count, split
@@ -59,26 +58,8 @@ from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._loop import _run_mcmc_inner_loop
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._axes import trace_sample_axes
+from bartz.testing import gen_nonsense_data
 from tests.util import assert_array_equal, assert_close_matrices
-
-
-def gen_data(
-    p: int, n: int, k: int | None
-) -> tuple[
-    UInt8[Array, '{p} {n}'],
-    Float32[Array, ' {n}'] | Float32[Array, '{k} {n}'],
-    UInt8[Array, ' {p}'],
-]:
-    """Generate pretty nonsensical data."""
-    X = jnp.arange(p * n, dtype=jnp.uint8).reshape(p, n)
-    X = vmap(jnp.roll)(X, jnp.arange(p))
-    max_split = jnp.full(p, 255, jnp.uint8)
-    if k is None:
-        shift = 0
-    else:
-        shift = jnp.linspace(0, 2 * jnp.pi, k, endpoint=False)[:, None]
-    y = jnp.cos(jnp.linspace(0, 2 * jnp.pi / 32 * n, n) + shift)
-    return X, y, max_split
 
 
 @filter_jit
@@ -86,7 +67,7 @@ def simple_init(
     p: int, n: int, ntree: int, k: int | None = None, **kwargs: Any
 ) -> State:
     """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
-    X, y, max_split = gen_data(p, n, k)
+    X, y, max_split = gen_nonsense_data(p, n, k)
     eye = 1.0 if k is None else jnp.eye(k)
     return init(
         X=X,
@@ -359,7 +340,7 @@ _N_TEST = 60
 
 def _eval_test_points(n_test: int = _N_TEST) -> UInt8[Array, '6 {n_test}']:
     """Generate quantized test points compatible with `simple_init`'s data."""
-    return gen_data(6, n_test, None)[0]
+    return gen_nonsense_data(6, n_test, None)[0]
 
 
 def _make_mesh(axes: dict[str, int]) -> Mesh:

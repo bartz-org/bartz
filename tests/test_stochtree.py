@@ -35,7 +35,7 @@ import polars as pl
 import pytest
 import stochtree
 from equinox import EquinoxRuntimeError
-from jax import Array, random
+from jax import Array, jit, random
 from jax import numpy as jnp
 from jax.scipy.special import ndtr
 from numpy.testing import assert_array_less
@@ -604,7 +604,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
     args_cloned = dict(args, key=random.clone(args['key']))
 
     out1 = task(**args)
-    out2 = jax.jit(task)(**args_cloned)
+    out2 = jit(task)(**args_cloned)
 
     for a, b in zip(out1, out2, strict=True):
         assert_close_matrices(a, b, rtol=1e-5)

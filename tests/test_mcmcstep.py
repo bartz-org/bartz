@@ -38,6 +38,7 @@ from equinox import Module
 from jax import (
     debug_key_reuse,
     device_put,
+    jit,
     lax,
     make_mesh,
     random,
@@ -1746,7 +1747,7 @@ def test_affluence_tree_stays_clean(
 
     Trees = tuple[Bool[Array, 'trees half'], UInt8[Array, 'trees half']]
 
-    @jax.jit
+    @jit
     def run_chain(
         state: State, step_keys: Key[Array, ' steps']
     ) -> tuple[Bool[Array, 'steps trees half'], UInt8[Array, 'steps trees half']]:

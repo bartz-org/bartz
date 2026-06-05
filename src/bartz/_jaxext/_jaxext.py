@@ -94,7 +94,7 @@ def minimal_unsigned_dtype(value: int) -> DTypeLike:
     return jnp.uint64
 
 
-@partial(jax.jit, static_argnums=(1,))
+@partial(jit, static_argnums=(1,))
 def unique(
     x: Shaped[Array, ' _'], size: int, fill_value: Scalar
 ) -> tuple[Shaped[Array, ' {size}'], int | Integer[Array, '']]:

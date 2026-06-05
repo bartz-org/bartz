@@ -114,12 +114,14 @@ repos:
         # mention `_jaxext.foo` are not flagged.
         entry: '(?<!\.)\b_jaxext\.\w+\s*\('
         types: [python]
-      - id: forbid-jax-vmap-qualified-call
-        name: forbid `jax.vmap(...)` (use `from jax import vmap`)
+      - id: forbid-jax-vmap-jit-qualified-call
+        name: forbid qualified `jax.vmap`/`jax.jit` (use `from jax import vmap, jit`)
         language: pygrep
-        # the trailing `\(` limits matches to function calls so docstrings that
-        # mention `jax.vmap` are not flagged.
-        entry: '\bjax\.vmap\s*\('
+        # Matches the qualified name as a word (`\b`) so call sites (`jax.jit(`),
+        # bare decorators (`@jax.jit`), and references (`partial(jax.jit, ...)`)
+        # are all caught. The `(?!`)` negative lookahead skips docstring/comment
+        # mentions, which are wrapped in backticks (`` `jax.jit` ``).
+        entry: '\bjax\.(vmap|jit)\b(?!`)'
         types: [python]
       - id: forbid-jax-random-qualified-call
         name: forbid `jax.random.foo(...)` (use `from jax import random`)

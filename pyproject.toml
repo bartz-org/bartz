@@ -86,6 +86,9 @@ dev = [
     "myst-nb>=1.2.0",
     "jupyterlab>=4.4.3",
     "diff-cover>=9.3.1",
+    # the floor satisfies the OLD_DATE policy; lint (and hence ty) only ever
+    # runs on the latest toolchain, so the old version is installed but unused
+    "ty>=0.0.1a7",
 ]
 
 # WORKAROUND(pytest<9): use [tool.pytest]

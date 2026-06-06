@@ -1376,7 +1376,9 @@ class TestMultichain:
         if not mesh:
             mesh = None
         else:
-            targets = dict(chains=num_chains, data=self.n)
+            targets = dict(data=self.n)
+            if num_chains is not None:
+                targets = dict(targets, chains=num_chains)
             while math.prod(mesh.values()) > get_device_count():
                 for key in mesh:
                     if mesh[key] > 1:

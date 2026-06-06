@@ -91,6 +91,15 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: ty
+        name: ty check
+        # there is no official ty pre-commit hook (and an isolated hook env
+        # would not see the project venv anyway), so run the dev-pinned ty.
+        # Whole-project check: per-file checking would miss cross-file breakage.
+        entry: uv run --dev ty check
+        language: system
+        pass_filenames: false
+        types_or: [python, toml]
       - id: check-returns-docstring
         name: forbid multi-line non-list `Returns` docstring sections
         # Matches a numpy-style `Returns` block whose first two non-blank lines

@@ -25,14 +25,14 @@
 """Measure the speed of the MCMC and its interfaces."""
 
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from functools import partial
 from inspect import signature
 from io import StringIO
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from equinox import Module, error_if
 from jax import (
@@ -55,11 +55,14 @@ from bartz.mcmcloop import run_mcmc
 from benchmarks.latest_bartz._jaxext import get_device_count, split
 from benchmarks.latest_bartz.testing import gen_nonsense_data
 
-try:
+if TYPE_CHECKING:
     from bartz.mcmcstep import State
-except ImportError:
-    # WORKAROUND(bartz<0.6.0): old versions use a dictionary for the mcmc state
-    State: type = dict
+else:
+    try:
+        from bartz.mcmcstep import State
+    except ImportError:
+        # WORKAROUND(bartz<0.6.0): old versions use a dictionary for the mcmc state
+        State = dict
 
 try:
     from bartz.BART import mc_gbart as gbart
@@ -217,6 +220,11 @@ Cache = Literal['cold', 'warm']
 class AutoParamNames:
     """Superclass that automatically sets `param_names` on subclasses."""
 
+    param_names: ClassVar[tuple[str, ...]]
+
+    setup: ClassVar[Callable[..., None]]
+    """Defined by subclasses, introspected to set `param_names`."""
+
     def __init_subclass__(cls, **_: Any) -> None:
         method = cls.setup
         sig = signature(method)
@@ -257,7 +265,7 @@ class StepGeneric(AutoParamNames):
             if kind == 'sparse' and sparse_inside_step:
                 bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
             if step_bart_first:
-                bart = step(bart, keys.pop())
+                bart = step(bart, keys.pop())  # ty: ignore[invalid-argument-type]
             else:
                 bart = step(keys.pop(), bart)
             if kind == 'sparse' and not sparse_inside_step:
@@ -274,7 +282,8 @@ class StepGeneric(AutoParamNames):
         """Time compiling `step` or running it."""
         match self.mode:
             case 'compile':
-                self.jitted_func.clear_cache()
+                # jax does not type the runtime-patched `JitWrapped.clear_cache`
+                self.jitted_func.clear_cache()  # ty: ignore[unresolved-attribute]
                 self.jitted_func.lower(*self.args).compile()
             case 'run':
                 block_until_ready(self.compiled_func(*self.args))
@@ -506,7 +515,8 @@ class BaseRunMcmc(AutoParamNames):
                 f = jit(run_mcmc, static_argnames=static_argnames)
 
                 def task() -> None:
-                    f.clear_cache()
+                    # jax does not type the runtime-patched `JitWrapped.clear_cache`
+                    f.clear_cache()  # ty: ignore[unresolved-attribute]
                     f.lower(**kw).compile()
             case 'run':
 
@@ -569,12 +579,13 @@ def kill_callback(
         return
     # WORKAROUND(bartz<0.11.0): the callback's `bart` argument was renamed `state`
     state = bart if state is None else state
+    assert state is not None  # run_mcmc always passes one of bart/state
     # error_cov_inv is one of the last things modified in the mcmc loop, so
     # using it as token ensures ordering; also it does not have n in the
     # dimensionality.
     if isinstance(state, dict):
         # WORKAROUND(bartz<0.6.0): pre-0.6.0 state was a dict keyed by 'sigma2'
-        token = state['sigma2']
+        token = state['sigma2']  # ty: ignore[invalid-argument-type]
     elif hasattr(state, 'sigma2'):
         # WORKAROUND(bartz<0.8.0): State.sigma2 was renamed to error_cov_inv in 0.8.0
         token = state.sigma2

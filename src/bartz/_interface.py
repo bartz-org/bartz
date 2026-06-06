@@ -26,10 +26,10 @@
 
 import math
 import pickle
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Hashable, Mapping, Sequence
 from dataclasses import replace
 from enum import Enum
-from functools import cached_property, partial
+from functools import cached_property
 from os import PathLike, cpu_count
 from pathlib import Path
 
@@ -46,7 +46,6 @@ from jax import (
     debug_nans,
     device_count,
     device_put,
-    jit,
     lax,
     make_mesh,
     random,
@@ -59,7 +58,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz._jaxext import equal_shards, is_key, split
+from bartz._jaxext import equal_shards, is_key, jit, split
 from bartz._jaxext.scipy.special import ndtri
 from bartz._jaxext.scipy.stats import invgamma
 from bartz.grove import (
@@ -131,8 +130,10 @@ class PredictKind(Enum):
 class DataFrame(Protocol):
     """DataFrame duck-type for `Bart`."""
 
-    columns: Sequence[str]
-    """The names of the columns."""
+    @property
+    def columns(self) -> Collection[str]:
+        """The names of the columns."""
+        ...
 
     def to_numpy(self) -> ndarray:
         """Convert the dataframe to a 2d numpy array with columns on the second axis."""
@@ -143,8 +144,10 @@ class DataFrame(Protocol):
 class Series(Protocol):
     """Series duck-type for `Bart`."""
 
-    name: str | None
-    """The name of the series."""
+    @property
+    def name(self) -> Hashable:
+        """The name of the series."""
+        ...
 
     def to_numpy(self) -> ndarray:
         """Convert the series to a 1d numpy array."""
@@ -449,14 +452,16 @@ class Bart(Module):
         outcome_type, binary_mask = _check_type_settings(y_train, outcome_type, w)
 
         # process sparsity settings
-        theta, a, b, rho = _process_sparsity_settings(x_train, sparse, theta, a, b, rho)
+        sparse_theta, sparse_a, sparse_b, sparse_rho = _process_sparsity_settings(
+            x_train, sparse, theta, a, b, rho
+        )
 
         # process "standardization" settings
         offset = _process_offset_settings(y_train, binary_mask, offset)
         leaf_prior_cov_inv = _process_leaf_variance_settings(
             y_train, binary_mask, k, num_trees, tau_num
         )
-        error_cov_df, error_cov_scale, sigest = _process_error_variance_settings(
+        error_cov_df, error_cov_scale, self.sigest = _process_error_variance_settings(
             x_train,
             y_train,
             outcome_type,
@@ -496,10 +501,10 @@ class Bart(Module):
             num_trees,
             init_kw,
             rm_const,
-            theta,
-            a,
-            b,
-            rho,
+            sparse_theta,
+            sparse_a,
+            sparse_b,
+            sparse_rho,
             varprob,
             num_chains,
             num_chain_devices,
@@ -519,9 +524,6 @@ class Bart(Module):
             mcmc_key,
             run_mcmc_kw,
         )
-
-        # set public attributes
-        self.sigest = sigest
 
         # set private attributes
         self._main_trace = result.main_trace
@@ -878,6 +880,7 @@ class Bart(Module):
             )
             raise ValueError(msg)
         w_test = _process_response_input(w)
+        assert self._w is not None  # implied by needs_weights
         if w_test.ndim != self._w.ndim:
             msg = (
                 f'`w` shape mismatch with training weights: got '
@@ -1084,9 +1087,8 @@ class Bart(Module):
         """
         trace = self._main_trace
         trees = _trees_chain_first(trace)
-        if not trace.has_chains:
-            i_chain = ...
-        trees = tree.map(lambda x: x[i_chain, i_sample, i_tree, :], trees)
+        chain_index = i_chain if trace.has_chains else ...
+        trees = tree.map(lambda x: x[chain_index, i_sample, i_tree, :], trees)
         s = format_tree(trees, print_all=print_all)
         print(s)  # noqa: T201, this method is intended for debug
 
@@ -1094,7 +1096,7 @@ class Bart(Module):
 def _process_predictor_input(
     x: Real[ArrayLike, 'p n'] | DataFrame,
 ) -> tuple[Shaped[Array, 'p n'], Any]:
-    if hasattr(x, 'columns'):
+    if isinstance(x, DataFrame):
         fmt = dict(kind='dataframe', columns=x.columns)
         x = x.to_numpy().T
     else:
@@ -1141,9 +1143,9 @@ def _process_response_input(
         Shaped[Array, ' n'] | Shaped[Array, 'k n'],
     ]
 ):
-    if hasattr(arr, 'columns'):
+    if isinstance(arr, DataFrame):
         arr = arr.to_numpy().T
-    elif hasattr(arr, 'to_numpy'):
+    elif isinstance(arr, Series):
         arr = arr.to_numpy()
     # in normal mode: one unconditional copy, safe to donate downstream.
     # in `keep` mode: convert without copying when possible to get the
@@ -1303,7 +1305,7 @@ def _process_error_variance_settings(
     if lambda_ is None:
         # estimate sigest²
         sigest2 = _estimate_sigest2(x_train, y_train, sigest, binary_mask)
-        sigest = jnp.sqrt(sigest2)
+        sigest_out = jnp.sqrt(sigest2)
 
         # lambda_ from sigest²
         alpha = sigdf / 2
@@ -1317,7 +1319,7 @@ def _process_error_variance_settings(
 
     else:
         lambda_ = jnp.where(binary_mask, 0.0, lambda_)
-        sigest = None
+        sigest_out = None
 
     # params written in multivariate form
     if y_train.ndim == 2:
@@ -1329,7 +1331,7 @@ def _process_error_variance_settings(
         error_cov_df = jnp.asarray(sigdf)
         error_cov_scale = jnp.asarray(sigdf * lambda_)
 
-    return error_cov_df, error_cov_scale, sigest
+    return error_cov_df, error_cov_scale, sigest_out
 
 
 def _estimate_sigest2(
@@ -1494,7 +1496,7 @@ def _run_mcmc(
     return run_mcmc(key, mcmc_state, n_save, **kw)
 
 
-@partial(jit, static_argnames='p')
+@jit(static_argnames='p')
 # this is jitted such that lax.collapse below does not create a copy
 def varcount(p: int, trace: MainTrace) -> Int32[Array, 'ndpost p']:
     """Histogram of predictor usage for decision rules in the trees, squashing chains."""
@@ -1503,7 +1505,7 @@ def varcount(p: int, trace: MainTrace) -> Int32[Array, 'ndpost p']:
     return lax.collapse(varcount, 0, -1)
 
 
-@partial(jit, static_argnames='mean')
+@jit(static_argnames='mean')
 def get_error_sdev(
     trace: MainTrace,
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
@@ -1537,7 +1539,7 @@ def get_error_sdev(
     return jnp.where(binary_mask, jnp.nan, sdev)
 
 
-@partial(jit, static_argnames='only_continuous')
+@jit(static_argnames='only_continuous')
 def get_latent_prec(
     burnin_trace: BurninTrace,
     main_trace: MainTrace,
@@ -1635,11 +1637,13 @@ def compare_resid(
 
     if state.binary_indices is not None:
         # mixed binary-continuous: z has only binary rows, y has all rows
+        assert y is not None
         ref = jnp.broadcast_to(y, resid1.shape)
         ref = ref.at[..., state.binary_indices, :].set(z)
     elif z is not None:
         ref = z
     else:
+        assert y is not None
         ref = y
     resid2 = ref - (trees + state.offset[..., None])
 
@@ -1657,7 +1661,7 @@ def depth_distr(trace: MainTrace) -> Int32[Array, '*num_chains n_save d']:
     return out
 
 
-@partial(jit, static_argnames='node_type')
+@jit(static_argnames='node_type')
 def points_per_node_distr_trace(
     X: UInt[Array, 'p n'], trace: MainTrace, node_type: Literal['leaf', 'leaf-parent']
 ) -> Int32[Array, '*num_chains n_save n+1']:
@@ -1714,7 +1718,7 @@ def _determine_devices(
         # set device=None because if the devices were not specified explicitly
         # we may be in the case where computation will follow data placement,
         # do not disturb jax as the user may be playing with vmap, jit, reshard...
-        platform = y_train.platform()
+        platform = y_train.platform()  # ty: ignore[call-non-callable]
         return platform, None, jax.devices(platform)
     else:
         msg = 'not possible to infer device from `y_train`, please set `devices`'
@@ -1859,7 +1863,7 @@ def predict_latent(
     return evaluate_trace(x, trace, flatten_chains=True, test_points=test_points)
 
 
-@partial(jit, static_argnums=(5, 6, 7))
+@jit(static_argnums=(5, 6, 7))
 def predict(
     key: Key[Array, ''] | None,
     trace: MainTrace,
@@ -1902,7 +1906,7 @@ def predict(
     return mean_samples
 
 
-@partial(jit, static_argnums=(5,))
+@jit(static_argnums=(5,))
 def sample_outcome(
     key: Key[Array, ''],
     trace: MainTrace,

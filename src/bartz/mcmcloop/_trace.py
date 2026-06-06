@@ -24,15 +24,14 @@
 
 """Trace dataclasses returned by `run_mcmc`."""
 
-from equinox import Module
 from jax import numpy as jnp
 from jax.nn import softmax
 from jax.sharding import Mesh
 from jaxtyping import Array, Float32, Int32, UInt
 
-from bartz.grove import HeapArrays
+from bartz._jaxext import Module, field
 from bartz.mcmcstep import State
-from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis, field
+from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
 
 
 class BurninTrace(Module):
@@ -112,7 +111,7 @@ class BurninTrace(Module):
         )
 
 
-class MainTrace(BurninTrace, HeapArrays):
+class MainTrace(BurninTrace):
     """MCMC trace with trees and diagnostic values."""
 
     leaf_tree: (

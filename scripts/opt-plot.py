@@ -75,7 +75,9 @@ def pick_scale(values: np.ndarray) -> str:
 
 def save_fig(fig: plt.Figure, out_dir: Path) -> None:
     """Save figure to file with a status message."""
-    fig_name = sanitize_for_filename(fig.get_label())
+    label = fig.get_label()
+    assert isinstance(label, str)
+    fig_name = sanitize_for_filename(label)
     save_file = out_dir / f'{fig_name}.png'
     print(f'write {save_file}...')
     fig.savefig(save_file, dpi=150)

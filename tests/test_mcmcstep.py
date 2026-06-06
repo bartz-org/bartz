@@ -34,7 +34,6 @@ import jax
 import numpy
 import pytest
 from beartype import beartype
-from equinox import Module
 from jax import (
     debug_key_reuse,
     device_put,
@@ -77,6 +76,8 @@ from scipy import stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
 from bartz._jaxext import (
+    Module,
+    field,
     get_default_device,
     get_default_devices,
     get_device_count,
@@ -94,12 +95,7 @@ from bartz.mcmcstep import (
     make_p_nonterminal,
     step,
 )
-from bartz.mcmcstep._axes import (
-    chain_vmap_axes,
-    data_vmap_axes,
-    field,
-    trace_sample_axes,
-)
+from bartz.mcmcstep._axes import chain_vmap_axes, data_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._moves import (
     ancestor_variables,
     randint_exclude,
@@ -129,6 +125,7 @@ from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
     manual_tree,
+    nnone,
 )
 
 
@@ -1379,7 +1376,9 @@ class TestMultichain:
         if not mesh:
             mesh = None
         else:
-            targets = dict(chains=num_chains, data=self.n)
+            targets = dict(data=self.n)
+            if num_chains is not None:
+                targets = dict(targets, chains=num_chains)
             while math.prod(mesh.values()) > get_device_count():
                 for key in mesh:
                     if mesh[key] > 1:
@@ -1460,7 +1459,7 @@ class TestMultichain:
             if chain_axis is None or mc_x is None:
                 return mc_x
             else:
-                return jnp.stack(sc_xs, axis=chain_axis)
+                return jnp.stack([nnone(x) for x in sc_xs], axis=chain_axis)
 
         chain_axes = chain_vmap_axes(mc_state)
         stacked_state = tree.map_with_path(
@@ -1613,13 +1612,15 @@ def check_sharding(x: PyTree, mesh: Mesh | None) -> None:
 
 def get_normal_spec(x: Array) -> PartitionSpec:
     """Get the partition spec of `x` and apply `normalize_spec`."""
-    spec = x.sharding.spec
-    mesh = x.sharding.mesh
-    return normalize_spec(spec, mesh, x.shape)
+    sharding = x.sharding
+    assert isinstance(sharding, NamedSharding)
+    mesh = sharding.mesh
+    assert isinstance(mesh, Mesh)
+    return normalize_spec(sharding.spec, mesh, x.shape)
 
 
 def normalize_spec(
-    spec: Sequence[str | None], mesh: Mesh, shape: tuple[int, ...]
+    spec: PartitionSpec | Sequence[str | None], mesh: Mesh, shape: tuple[int, ...]
 ) -> PartitionSpec:
     """Put a spec in standard form, i.e., fill with `None` until length `ndim` and put `None` on axes with mesh size 1 or if array size is 0."""
     s = list(spec)

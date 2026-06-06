@@ -305,7 +305,8 @@ def linkcode_resolve(domain: str, info: dict[str, str]) -> str | None:
         obj = obj.fget
     elif isinstance(obj, Enum):
         obj = type(obj)
-    obj = unwrap(obj)
+    if callable(obj):
+        obj = unwrap(obj)
 
     fn = getsourcefile(obj)
     assert fn

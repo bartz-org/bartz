@@ -26,7 +26,7 @@
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import jax
 import numpy as np
@@ -44,6 +44,7 @@ from pytest_subtests import SubTests
 
 import bartz.stochtree as bst
 from bartz._jaxext import jaxtyping_disabled, split
+from bartz._typing import kwdict
 from bartz.stochtree._preprocess import (
     PandasPreprocessor,
     PolarsPreprocessor,
@@ -56,6 +57,7 @@ from tests.util import (
     assert_close_matrices,
     clipped_logit,
     int_seed,
+    nnone,
     rhat_rank,
 )
 
@@ -67,7 +69,7 @@ N_TEST = 20
 NUM_BURNIN = 20
 NUM_MCMC = 40
 
-_GEN_KW = dict(p=4, q=2, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.5)
+_GEN_KW: kwdict = dict(p=4, q=2, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.5)
 # `mean_forest_params` override that disables the bartz-incompatible
 # leaf-variance sampler. All sample()-using tests start from this base.
 _MFP_BASE: Mapping = MappingProxyType({'sample_sigma2_leaf': False})
@@ -114,7 +116,7 @@ def binary_data(keys: split) -> _Data:
     return _make_binary(keys)
 
 
-def _rhat_two_chains(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+def _rhat_two_chains(a: ArrayLike, b: ArrayLike) -> np.ndarray:
     """Compute rank-normalized Rhat between two ``(n, num_samples)`` matrices.
 
     Treats each of the two arrays as one MCMC chain of ``num_samples`` draws
@@ -139,7 +141,7 @@ def test_continuous_smoke(continuous_data: _Data, keys: split) -> None:
     )
     assert m.is_sampled()
     assert m.y_hat_train.shape == (data.X_train.shape[0], m.num_samples)
-    assert m.y_hat_test.shape == (data.X_test.shape[0], m.num_samples)
+    assert nnone(m.y_hat_test).shape == (data.X_test.shape[0], m.num_samples)
     assert m.global_var_samples.shape == (m.num_samples,)
     assert m.outcome_model.outcome == 'continuous'
 
@@ -192,7 +194,9 @@ def test_binary_smoke(binary_data: _Data, keys: split) -> None:
 
 @pytest.mark.parametrize('terms', ['mean_forest', 'all', ['y_hat', 'mean_forest']])
 def test_class_scale_requires_single_y_hat(
-    binary_data: _Data, terms: str | list[str], keys: split
+    binary_data: _Data,
+    terms: Literal['mean_forest', 'all'] | list[Literal['y_hat', 'mean_forest']],
+    keys: split,
 ) -> None:
     """`scale='class'` matches stochtree: only a single 'y_hat' term is allowed."""
     data = binary_data
@@ -242,7 +246,7 @@ def test_missing_num_gfr_raises(continuous_data: _Data, keys: split) -> None:
     data = continuous_data
     m = bst.BARTModel()
     with pytest.raises(TypeError, match='num_gfr'):
-        m.sample(  # type: ignore[call-arg]
+        m.sample(  # ty: ignore[missing-argument]
             X_train=data.X_train,
             y_train=data.y_train,
             num_burnin=NUM_BURNIN,
@@ -256,12 +260,13 @@ def test_num_gfr_nonzero_raises(continuous_data: _Data, keys: split) -> None:
     """The grow-from-root sampler is not supported."""
     data = continuous_data
     m = bst.BARTModel()
+    sample_kw: kwdict = dict(_SAMPLE_KW, num_gfr=1)
     with pytest.raises(NotImplementedError, match='grow-from-root'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
             general_params={'random_seed': keys.pop()},
-            **dict(_SAMPLE_KW, num_gfr=1),
+            **sample_kw,
         )
 
 
@@ -333,12 +338,15 @@ def test_unknown_dict_keys_rejected(continuous_data: _Data, keys: split) -> None
             **_SAMPLE_KW,
         )
     m = bst.BARTModel()
+    sample_kw: kwdict = dict(
+        _SAMPLE_KW, mean_forest_params={**_MFP_BASE, 'keep_vars': []}
+    )
     with pytest.raises(ValueError, match='mean_forest_params contains unsupported key'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
             general_params={'random_seed': keys.pop()},
-            **dict(_SAMPLE_KW, mean_forest_params={**_MFP_BASE, 'keep_vars': []}),
+            **sample_kw,
         )
 
 
@@ -357,7 +365,10 @@ def test_unsupported_outcome_model_raises(binary_data: _Data, keys: split) -> No
             X_train=data.X_train,
             y_train=data.y_train,
             general_params={
-                'outcome_model': bst.OutcomeModel(outcome='binary', link='cloglog'),
+                'outcome_model': bst.OutcomeModel(
+                    outcome='binary',
+                    link='cloglog',  # ty: ignore[invalid-argument-type]
+                ),
                 'random_seed': keys.pop(),
             },
             **_SAMPLE_KW,
@@ -504,7 +515,7 @@ def test_compare_with_stochtree(
         assert_array_less(rhat, 1.02)
 
     with subtests.test('rhat_y_hat_test'):
-        rhat = _rhat_two_chains(bz_model.y_hat_test, st_model.y_hat_test)
+        rhat = _rhat_two_chains(nnone(bz_model.y_hat_test), nnone(st_model.y_hat_test))
         assert_array_less(rhat, 1.02)
 
     if outcome == 'continuous':
@@ -550,7 +561,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
     # devices can't be inferred from a jit tracer, so pre-determine the platform;
     # rm_const requires concrete max_split values, so disable it for tracing.
     bart_kwargs: dict = {
-        'devices': jax.devices(args['y'].platform()),
+        'devices': jax.devices(args['y'].platform()),  # ty: ignore[unresolved-attribute]
         'rm_const': False,
     }
 
@@ -593,7 +604,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         pred_post = m.predict(X_predict, type='posterior', terms='y_hat')
         return (
             m.y_hat_train,
-            m.y_hat_test,
+            nnone(m.y_hat_test),
             m.global_var_samples,
             m.y_bar,
             m.y_std,
@@ -689,20 +700,19 @@ class TestPreprocessing:
 
     @staticmethod
     def _sample(
-        X_train: ArrayLike | pd.DataFrame | pl.DataFrame,
-        y: ArrayLike,
+        X_train: Array | np.ndarray | pd.DataFrame | pl.DataFrame,
+        y: Array | np.ndarray,
         key: Array,
-        X_test: ArrayLike | pd.DataFrame | pl.DataFrame | None = None,
-        **extras: object,
+        X_test: Array | np.ndarray | pd.DataFrame | pl.DataFrame | None = None,
+        general_params: Mapping[str, Any] | None = None,
     ) -> bst.BARTModel:
         m = bst.BARTModel()
         m.sample(
             X_train=X_train,
             y_train=y,
             X_test=X_test,
-            general_params=dict(extras.pop('general_params', {}), random_seed=key),
+            general_params=dict(general_params or {}, random_seed=key),
             **_SAMPLE_KW,
-            **extras,
         )
         return m
 
@@ -759,7 +769,7 @@ class TestPreprocessing:
         assert X.shape == (4, 3)
         assert_array_equal(X.sum(axis=1), np.ones(4, np.float32))
         # The row values 'a','b','a','c' map to columns in the categories' order
-        cats = pp._specs[0].categories
+        cats = nnone(pp._specs[0].categories)
         for i, v in enumerate(['a', 'b', 'a', 'c']):
             assert X[i, cats.index(v)] == 1.0
 
@@ -986,7 +996,9 @@ class TestPreprocessing:
         m_arr = self._sample(X_arr, data.y_train, X_test=Xte_arr, key=key)
         m_df = self._sample(df_train, data.y_train, X_test=df_test, key=key)
         assert_close_matrices(m_arr.y_hat_train, m_df.y_hat_train, rtol=1e-5)
-        assert_close_matrices(m_arr.y_hat_test, m_df.y_hat_test, rtol=1e-5)
+        assert_close_matrices(
+            nnone(m_arr.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-5
+        )
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_end_to_end_one_hot_matches_manual(
@@ -1058,7 +1070,9 @@ class TestPreprocessing:
             general_params={'variable_weights': w_df},
         )
         assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=1e-5)
-        assert_close_matrices(m_manual.y_hat_test, m_df.y_hat_test, rtol=1e-5)
+        assert_close_matrices(
+            nnone(m_manual.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-5
+        )
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_end_to_end_default_weights_split_like_stochtree(
@@ -1114,7 +1128,9 @@ class TestPreprocessing:
             general_params={'variable_weights': w_split},
         )
         assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=1e-5)
-        assert_close_matrices(m_manual.y_hat_test, m_df.y_hat_test, rtol=1e-5)
+        assert_close_matrices(
+            nnone(m_manual.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-5
+        )
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
     def test_predict_with_array_after_dataframe_fit_raises(

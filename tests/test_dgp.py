@@ -28,6 +28,7 @@ from collections.abc import Mapping
 from functools import partial
 from operator import attrgetter
 from types import MappingProxyType
+from typing import Literal
 
 import pytest
 from jax import block_until_ready, jit, random, vmap
@@ -58,7 +59,7 @@ from bartz.testing._dgp import (
     interaction_pattern,
     partitioned_interaction_pattern,
 )
-from tests.util import assert_allclose, assert_array_equal, assert_close_matrices
+from tests.util import assert_allclose, assert_array_equal, assert_close_matrices, nnone
 
 # Test parameters
 ALPHA = 5e-7  # probability of false positive (aaaaapprox)
@@ -176,8 +177,8 @@ def test_shapes_and_dtypes(keys: split) -> None:
         assert field.shape == shape, name
         assert jnp.issubdtype(field.dtype, jnp.floating), name
 
-    assert dgp.params.partition.shape == (k, p)
-    assert dgp.params.partition.dtype == jnp.bool_
+    assert nnone(dgp.params.partition).shape == (k, p)
+    assert nnone(dgp.params.partition).dtype == jnp.bool_
     assert dgp.params.q.shape == ()
     assert jnp.issubdtype(dgp.params.q.dtype, jnp.integer)
     assert isinstance(dgp.params.x_distr, Uniform)
@@ -281,7 +282,7 @@ class TestGeneratePartition:
 
     def test_partition_coverage(self, dgps: DGP) -> None:
         """Test that each predictor is assigned to exactly one component."""
-        partitions = dgps.params.partition  # Shape: (REPS, K, P)
+        partitions = nnone(dgps.params.partition)  # Shape: (REPS, K, P)
 
         # Each column should sum to 1
         col_sums = jnp.sum(partitions, axis=1)  # Shape: (N_REPS, P)
@@ -289,7 +290,7 @@ class TestGeneratePartition:
 
     def test_partition_counts(self, dgps: DGP) -> None:
         """Test that counts are either p//c or p//c + 1."""
-        partitions = dgps.params.partition  # Shape: (REPS, K, P)
+        partitions = nnone(dgps.params.partition)  # Shape: (REPS, K, P)
         p, k = partitions.shape[2], partitions.shape[1]
 
         counts = jnp.sum(partitions, axis=2)  # Shape: (REPS, K)
@@ -301,7 +302,7 @@ class TestGeneratePartition:
 
     def test_partition_balance(self, dgps: DGP) -> None:
         """Test that predictors are roughly balanced across components."""
-        partitions = dgps.params.partition  # Shape: (REPS, K, P)
+        partitions = nnone(dgps.params.partition)  # Shape: (REPS, K, P)
         _, k, p = partitions.shape
         counts = jnp.sum(partitions, axis=2)  # Shape: (REPS, K)
         assert_mean_z(counts, p / k)
@@ -389,12 +390,12 @@ class TestSpikeSlab:
         assert jnp.any(dead)
         assert not jnp.all(dead)
         assert_array_equal(dgp.params.beta_shared[dead], 0, strict=False)
-        assert_array_equal(dgp.params.beta_separate[:, dead], 0, strict=False)
+        assert_array_equal(nnone(dgp.params.beta_separate)[:, dead], 0, strict=False)
         assert_array_equal(dgp.params.A_shared[dead, :], 0, strict=False)
         assert_array_equal(dgp.params.A_shared[:, dead], 0, strict=False)
-        assert_array_equal(dgp.params.A_separate[:, dead, :], 0, strict=False)
-        assert_array_equal(dgp.params.gamma_shared[dead], 0, strict=False)
-        assert_array_equal(dgp.params.gamma_separate[:, dead], 0, strict=False)
+        assert_array_equal(nnone(dgp.params.A_separate)[:, dead, :], 0, strict=False)
+        assert_array_equal(nnone(dgp.params.gamma_shared)[dead], 0, strict=False)
+        assert_array_equal(nnone(dgp.params.gamma_separate)[:, dead], 0, strict=False)
 
 
 def test_high_sparsity_matches_none(keys: split) -> None:
@@ -404,7 +405,7 @@ def test_high_sparsity_matches_none(keys: split) -> None:
     infinity, so the data matches the `Constant` run under the same key. The
     match is approximate because the scales are close to 1 but not exact.
     """
-    kw = dict(KWARGS, lambda_=0.5)
+    kw: kwdict = dict(KWARGS, lambda_=0.5)
     key = keys.pop()
     none = gen_data(key, s_distr=Constant(), **kw)
     high = gen_data(random.clone(key), s_distr=Gamma(HIGH_SPARSITY), **kw)
@@ -419,7 +420,7 @@ def test_beta_shared_mean(dgps: DGP) -> None:
 
 def test_beta_separate_mean(dgps: DGP) -> None:
     """Test that beta_separate has mean close to 0."""
-    assert_mean_z(dgps.params.beta_separate, 0.0)
+    assert_mean_z(nnone(dgps.params.beta_separate), 0.0)
 
 
 def test_default_coefficients_have_equal_magnitude(keys: split) -> None:
@@ -560,9 +561,9 @@ def test_error_scale_moments(dgps: DGP) -> None:
     closed-form ``var_v``, which is identical across components, so the
     per-component estimates are compared to the single scalar.
     """
-    w2 = dgps.error_scale**2  # Shape: (REPS, K?, N)
+    w2 = nnone(dgps.error_scale) ** 2  # Shape: (REPS, K?, N)
     assert_mean_z(jnp.mean(w2, axis=-1), 1.0)
-    assert_mean_z(jnp.mean((w2 - 1.0) ** 2, axis=-1), dgps.params.var_v[0])
+    assert_mean_z(jnp.mean((w2 - 1.0) ** 2, axis=-1), nnone(dgps.params.var_v)[0])
 
 
 def test_variance_relationships(dgps: DGP) -> None:
@@ -685,8 +686,10 @@ def test_univariate(keys: split) -> None:
     with the leading axis squeezed away.
     """
     key = keys.pop()
-    dgp_mv = gen_data(key, **dict(KWARGS, lambda_=1.0, k=1))
-    dgp_uv = gen_data(random.clone(key), **dict(KWARGS, lambda_=None, k=None))
+    kw_mv: kwdict = dict(KWARGS, lambda_=1.0, k=1)
+    kw_uv: kwdict = dict(KWARGS, lambda_=None, k=None)
+    dgp_mv = gen_data(key, **kw_mv)
+    dgp_uv = gen_data(random.clone(key), **kw_uv)
 
     assert dgp_uv.params.partition is None
     assert dgp_uv.params.beta_separate is None
@@ -739,7 +742,7 @@ def test_binary_x_requires_interactions(keys: split) -> None:
 
     See `test_m_too_small` for the error handling details.
     """
-    kw = dict(KWARGS, q=0)
+    kw: kwdict = dict(KWARGS, q=0)
     with pytest.raises((JaxRuntimeError, ValueError), match='q must be >= 2'):
         block_until_ready(
             gen_data(keys.pop(), x_distr=DiscreteUniform(2), lambda_=0.5, **kw)
@@ -748,7 +751,7 @@ def test_binary_x_requires_interactions(keys: split) -> None:
 
 def test_binary_x_min_interactions(keys: split) -> None:
     """Binary x with ``q=2`` is accepted and the quadratic term is not constant."""
-    kw = dict(KWARGS, q=2)
+    kw: kwdict = dict(KWARGS, q=2)
     dgp = gen_data(keys.pop(), x_distr=DiscreteUniform(2), lambda_=0.5, **kw)
     assert jnp.all(jnp.var(dgp.muquad, axis=-1) > 0)
 
@@ -757,7 +760,9 @@ def test_binary_x_min_interactions(keys: split) -> None:
     ('k', 'het_shape'),
     [(None, None), (None, 'scalar'), (3, None), (3, 'scalar'), (3, 'vector')],
 )
-def test_split(keys: split, k: int | None, het_shape: str | None) -> None:
+def test_split(
+    keys: split, k: int | None, het_shape: Literal['scalar', 'vector'] | None
+) -> None:
     """`DGP.split()` slices every data field (incl. `error_scale`).
 
     Also checks the shared/blended fields are sliced consistently and that the
@@ -765,7 +770,7 @@ def test_split(keys: split, k: int | None, het_shape: str | None) -> None:
     """
     lambda_ = None if k is None else 0.5
     het_strength = None if het_shape is None else HET_STRENGTH
-    kw = dict(KWARGS, k=k)
+    kw: kwdict = dict(KWARGS, k=k)
     dgp = gen_data(
         keys.pop(),
         lambda_=lambda_,
@@ -795,9 +800,9 @@ def test_split(keys: split, k: int | None, het_shape: str | None) -> None:
         if het_shape is None:
             assert part.error_scale is None
         elif het_shape == 'scalar':
-            assert part.error_scale.shape == (length,)
+            assert nnone(part.error_scale).shape == (length,)
         else:
-            assert part.error_scale.shape == (k, length)
+            assert nnone(part.error_scale).shape == (k, length)
 
 
 def test_split_default_halves(keys: split) -> None:
@@ -915,13 +920,14 @@ class TestHeteroskedasticity:
             het_strength=HET_STRENGTH,
             **KWARGS,
         )
-        assert dgp.error_scale.shape == (k, n)
-        assert jnp.issubdtype(dgp.error_scale.dtype, jnp.floating)
-        assert jnp.all(dgp.error_scale > 0)
-        assert dgp.params.gamma_shared.shape == (p,)
-        assert dgp.params.gamma_separate.shape == (k, p)
-        assert dgp.params.var_v.shape == ()
-        assert dgp.params.het_strength.shape == ()
+        error_scale = nnone(dgp.error_scale)
+        assert error_scale.shape == (k, n)
+        assert jnp.issubdtype(error_scale.dtype, jnp.floating)
+        assert jnp.all(error_scale > 0)
+        assert nnone(dgp.params.gamma_shared).shape == (p,)
+        assert nnone(dgp.params.gamma_separate).shape == (k, p)
+        assert nnone(dgp.params.var_v).shape == ()
+        assert nnone(dgp.params.het_strength).shape == ()
         assert dgp.params.het_shape == 'vector'
 
     def test_scalar_shapes(self, keys: split) -> None:
@@ -933,16 +939,16 @@ class TestHeteroskedasticity:
             het_strength=HET_STRENGTH,
             **KWARGS,
         )
-        assert dgp.error_scale.shape == (KWARGS['n'],)
+        assert nnone(dgp.error_scale).shape == (KWARGS['n'],)
         assert dgp.params.gamma_separate is None
-        assert dgp.params.var_v.shape == ()
+        assert nnone(dgp.params.var_v).shape == ()
         assert dgp.params.het_shape == 'scalar'
 
     def test_univariate_scalar(self, keys: split) -> None:
         """Univariate (`k=None`) het produces an (n,) scale."""
-        kw = dict(KWARGS, k=None)
+        kw: kwdict = dict(KWARGS, k=None)
         dgp = gen_data(keys.pop(), het_shape='scalar', het_strength=HET_STRENGTH, **kw)
-        assert dgp.error_scale.shape == (kw['n'],)
+        assert nnone(dgp.error_scale).shape == (kw['n'],)
         assert dgp.y.shape == (kw['n'],)
         assert dgp.params.gamma_separate is None
 
@@ -954,11 +960,14 @@ class TestHeteroskedasticity:
         streams held fixed by reusing the same key).
         """
         key = keys.pop()
-        kw = dict(KWARGS, lambda_=0.5, het_shape='vector')
+        kw: kwdict = dict(KWARGS, lambda_=0.5, het_shape='vector')
         spreads = jnp.array(
             [
                 jnp.var(
-                    gen_data(random.clone(key), het_strength=rho, **kw).error_scale ** 2
+                    nnone(
+                        gen_data(random.clone(key), het_strength=rho, **kw).error_scale
+                    )
+                    ** 2
                 )
                 for rho in (0.0, 0.3, 0.6, 1.0)
             ]
@@ -992,11 +1001,11 @@ class TestHeteroskedasticity:
         excess = ((kurt_eta - 3) * big_lambda + cross) / p + 3 * (
             1 - lambda_
         ) ** 2 * r * (k - r) / p**2
-        assert_close_matrices(dgp.params.var_v, rho**2 * (2 + excess), rtol=1e-6)
+        assert_close_matrices(nnone(dgp.params.var_v), rho**2 * (2 + excess), rtol=1e-6)
 
     def test_stream_invariance_with_homoskedastic(self, keys: split) -> None:
         """Het leaves the mean/predictor streams intact and only rescales the noise."""
-        kw = dict(KWARGS, lambda_=0.5)
+        kw: kwdict = dict(KWARGS, lambda_=0.5)
         key = keys.pop()
         homo = gen_data(key, **kw)
         het = gen_data(
@@ -1004,16 +1013,18 @@ class TestHeteroskedasticity:
         )
         assert_array_equal(homo.x, het.x)
         assert_array_equal(homo.params.beta_shared, het.params.beta_shared)
-        assert_array_equal(homo.params.A_separate, het.params.A_separate)
-        assert_array_equal(homo.params.partition, het.params.partition)
+        assert_array_equal(nnone(homo.params.A_separate), nnone(het.params.A_separate))
+        assert_array_equal(nnone(homo.params.partition), nnone(het.params.partition))
         assert_array_equal(homo.params.s, het.params.s)
         assert_array_equal(homo.mu, het.mu)
         # the heteroskedastic noise is the homoskedastic noise scaled by error_scale
-        recon = het.mu + (homo.y - homo.mu) * het.error_scale
+        recon = het.mu + (homo.y - homo.mu) * nnone(het.error_scale)
         assert_close_matrices(het.y, recon, rtol=1e-5)
 
     @pytest.mark.parametrize('het_shape', ['scalar', 'vector'])
-    def test_zero_strength_is_homoskedastic(self, keys: split, het_shape: str) -> None:
+    def test_zero_strength_is_homoskedastic(
+        self, keys: split, het_shape: Literal['scalar', 'vector']
+    ) -> None:
         """``het_strength=0`` collapses het back to the homoskedastic model.
 
         The variance multiplier is the flat floor ``1 - rho = 1`` (the
@@ -1021,13 +1032,15 @@ class TestHeteroskedasticity:
         ``error_scale`` is exactly 1 and the mean is untouched; the outcome then
         matches the ``het_shape=None`` run up to float32 reordering of the noise.
         """
-        kw = dict(KWARGS, lambda_=0.5)
+        kw: kwdict = dict(KWARGS, lambda_=0.5)
         key = keys.pop()
         homo = gen_data(key, **kw)
         het = gen_data(random.clone(key), het_shape=het_shape, het_strength=0.0, **kw)
 
-        assert_array_equal(het.error_scale, jnp.ones_like(het.error_scale))
-        assert_array_equal(het.params.var_v, jnp.zeros_like(het.params.var_v))
+        error_scale = nnone(het.error_scale)
+        assert_array_equal(error_scale, jnp.ones_like(error_scale))
+        var_v = nnone(het.params.var_v)
+        assert_array_equal(var_v, jnp.zeros_like(var_v))
         if het_shape == 'vector':
             assert het.params.gamma_separate is not None
         else:
@@ -1037,15 +1050,17 @@ class TestHeteroskedasticity:
 
     def test_scalar_and_vector_share_shared_stream(self, keys: split) -> None:
         """``'scalar'`` and ``'vector'`` het share the ``gamma_shared`` stream."""
-        kw = dict(KWARGS, lambda_=0.5, het_strength=HET_STRENGTH)
+        kw: kwdict = dict(KWARGS, lambda_=0.5, het_strength=HET_STRENGTH)
         key = keys.pop()
         scalar = gen_data(key, het_shape='scalar', **kw)
         vector = gen_data(random.clone(key), het_shape='vector', **kw)
-        assert_array_equal(scalar.params.gamma_shared, vector.params.gamma_shared)
+        assert_array_equal(
+            nnone(scalar.params.gamma_shared), nnone(vector.params.gamma_shared)
+        )
 
     def test_vector_requires_multivariate(self, keys: split) -> None:
         """``het_shape='vector'`` with ``k=None`` raises."""
-        kw = dict(KWARGS, k=None)
+        kw: kwdict = dict(KWARGS, k=None)
         with pytest.raises(ValueError, match="het_shape='vector' requires"):
             gen_data(keys.pop(), het_shape='vector', het_strength=HET_STRENGTH, **kw)
 
@@ -1063,7 +1078,9 @@ class TestHeteroskedasticity:
         threshold, so the binary success probability is
         ``Phi(mu / (sqrt(sigma2_eps) * error_scale))``.
         """
-        kw = dict(KWARGS, lambda_=0.5, het_shape='vector', het_strength=HET_STRENGTH)
+        kw: kwdict = dict(
+            KWARGS, lambda_=0.5, het_shape='vector', het_strength=HET_STRENGTH
+        )
         key = keys.pop()
         cont = gen_data(key, **kw)
         binary = gen_data(random.clone(key), outcome_type='binary', **kw)

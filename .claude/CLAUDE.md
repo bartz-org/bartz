@@ -73,8 +73,10 @@ Interface hierarchy:
     - keep docstrings short, don't fill them with implementation details
         - related: no redundant comments, if the code is readable, it's self-documenting
         - docstrings and comments shall be _timeless_, not a narration of the development work
+        - again, BE BRIEF, humans read slower than you!
     - keep private/internal docstrings short or absent if they are so already
     - keep return value description relatively short and strictly on one line, html render garbles it otherwise
+    - do _not_ use colons `:` on the first line of a docstring, it trips napoleon
 - **jax** conventions:
     - don't cast to jax arrays things which are already jax arrays (e.g., notice type hints or previous casts)
     - avoid explicit jax types if not necessary, e.g., do `jnp.ones(shape)` instead of `jnp.ones(shape, jnp.float32)`, `1.0` instead of `jnp.float32(1.0)` (unless we need a strong type to auto-cast unsanitized arrays), etc.
@@ -117,11 +119,13 @@ Interface hierarchy:
     - always use this to produce the seeds, don't hardcode seeds
     - to seed non-jax stuff, do `from tests.util import int_seed; int_seed(keys.pop())`
     - inline `keys.pop()` instead of assigning it to a local---less chance of re-using the key by mistake
+    - use `keys.pop(num)` instead of `random.split(keys.pop(), num)`, shortcut
 - Custom pytest options: `--platform` (cpu/gpu/auto), `--num-cpu-devices` (sets up jax virtual cpu devices)
 - To compare vectors/matrices/tensors, use `tests.util.assert_close_matrices` instead of numpy's `assert_allclose`
     - use `rtol` in test comparisons, add `atol` only if necessary (comparison of values that are near zero on some relevant scale)
     - there's also `assert_different_matrices` to check things are not equal, this requires to set both atol and rtol which are +inf by default
 - in general prefer `assert_` functions from `tests.util` and `numpy.testing` to plain `assert` if appropriate
+- use `bartz.testing` utilities to generate data
 
 ## Benchmarks
 

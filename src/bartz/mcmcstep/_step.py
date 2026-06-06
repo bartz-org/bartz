@@ -27,7 +27,6 @@
 from dataclasses import replace
 from functools import partial
 
-import jax
 from equinox import AbstractVar, Module
 from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
@@ -1402,7 +1401,7 @@ def _apply_moves_to_affluence_trees(
     ].set(moves.lrt_affluent & becomes_leaf)
 
 
-@jax.jit
+@jit
 def _sample_wishart_bartlett(
     key: Key[Array, ''], df: Float32[Array, ''], scale_inv: Float32[Array, 'k k']
 ) -> Float32[Array, 'k k']:

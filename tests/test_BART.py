@@ -229,7 +229,7 @@ def convert_binner(binner: BinnerFactory) -> dict[str, Any]:
         return {'usequants': True, 'numcut': defaults['max_bins'] - 1}
     elif subcls is RangeEvenBinner:
         return {'usequants': False, 'numcut': defaults['max_bins'] - 1}
-    else:
+    else:  # pragma: no cover
         msg = f'Cannot convert binner of type {subcls!r}'
         raise NotImplementedError(msg)
 

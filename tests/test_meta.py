@@ -33,6 +33,13 @@ from jax.errors import KeyReuseError
 from jaxtyping import Array, Float, Key
 
 from bartz._jaxext import split
+from tests.util import assert_allclose
+
+
+def test_assert_allclose_rejects_non_scalars() -> None:
+    """Check `assert_allclose` rejects non-scalar inputs by default."""
+    with pytest.raises(AssertionError, match='requires scalar inputs'):
+        assert_allclose(jnp.zeros(2), jnp.zeros(2))
 
 
 @pytest.fixture

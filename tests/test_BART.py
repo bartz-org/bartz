@@ -118,6 +118,11 @@ class mc_gbart(original_mc_gbart):
 class gbart(mc_gbart, original_gbart):
     """Wrapper of `gbart` that enables debug checks."""
 
+    # passthrough __init__: without it, ty synthesizes a dataclass __init__
+    # from the Module fields instead of inheriting the wrappers' ones
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+
 
 def get_with_default(kw: dict, param_name: str) -> Any:  # noqa: ANN401
     """Do `kw.get(param_name, <default in mc_gbart>)`."""
@@ -225,7 +230,7 @@ def convert_binner(binner: BinnerFactory) -> dict[str, Any]:
     elif subcls is RangeEvenBinner:
         return {'usequants': False, 'numcut': defaults['max_bins'] - 1}
     else:
-        msg = f'Cannot convert binner of type {subcls.__name__}'
+        msg = f'Cannot convert binner of type {subcls!r}'
         raise NotImplementedError(msg)
 
 
@@ -312,7 +317,7 @@ class TestWithCachedBart:
     def test_convergence(self, cachedbart: CachedBart, subtests: SubTests) -> None:
         """Run multiple chains and check convergence with rhat."""
         bart = cachedbart.bart
-        nchains = bart._mcmc_state.num_chains()
+        nchains = nnone(bart._mcmc_state.num_chains())
         nsamples = bart.ndpost // nchains
         kw = cachedbart.kwargs
         p, n = kw['x_train'].shape
@@ -1399,7 +1404,7 @@ def get_expect_sharded(kw: dict) -> bool:
     )
 
 
-def check_data_sharding(x: Array | None, mesh: Mesh) -> None:
+def check_data_sharding(x: Array | None, mesh: Mesh | None) -> None:
     """Check the sharding of `x` assuming it may be sharded only along the last 'data' axis."""
     if x is None:
         return
@@ -1412,7 +1417,7 @@ def check_data_sharding(x: Array | None, mesh: Mesh) -> None:
         assert get_normal_spec(x) == normalize_spec(expected_spec, mesh, x.shape)
 
 
-def check_chain_sharding(x: Array | None, mesh: Mesh) -> None:
+def check_chain_sharding(x: Array | None, mesh: Mesh | None) -> None:
     """Check the sharding of `x` assuming it may be sharded only along the first 'chains' axis."""
     if x is None:
         return

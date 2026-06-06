@@ -2070,21 +2070,10 @@ def test_pbar_disabled_by_printevery_none(
     assert len(_TQDM_REGISTRY) == n_bars_before  # no bar was even created
 
 
-@pytest.mark.parametrize('num_chains', [None, 2])
-def test_print_tree(
-    num_chains: int | None, keys: split, capsys: CaptureFixture[str]
-) -> None:
-    """Smoke-test `Bart._print_tree` with and without a chain axis."""
-    dgp = gen_data(keys.pop(), n=10, p=2, **GEN_KW)
-    bart = Bart(
-        dgp.x,
-        dgp.y,
-        seed=keys.pop(),
-        num_trees=2,
-        n_save=1,
-        n_burn=0,
-        num_chains=num_chains,
-    )
+def test_print_tree(bkw: BartKW, capsys: CaptureFixture[str]) -> None:
+    """Smoke-test `Bart._print_tree`."""
+    bart = Bart(**bkw.kw)
+    capsys.readouterr()  # discard MCMC progress output
     bart._print_tree(0, 0, 0)
     assert capsys.readouterr().out
 

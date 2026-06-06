@@ -41,7 +41,13 @@ OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]
 # matches bartz, but it is newer than OLD_DATE, so the old toolchain cannot
 # resolve it. Exempt stochtree from the cutoff; drop --exclude-newer-package once
 # the stochtree floor rises above 0.4.2 (check-workarounds will flag this then).
-UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --exclude-newer-package="stochtree=0 days" --isolated
+# WORKAROUND(rbartpackages<0.12.0): the first release (0.1.0) was uploaded on
+# 2026-06-05, newer than OLD_DATE, so the old toolchain cannot resolve it.
+# Exempt rbartpackages from the cutoff. The exemption is unneeded once OLD_DATE
+# passes the upload date of the rbartpackages floor release; 0.12.0 is a guess
+# at the floor around that time (~June 2027). On trigger, drop
+# --exclude-newer-package if OLD_DATE has caught up, else bump the bound.
+UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --exclude-newer-package="stochtree=0 days" --exclude-newer-package="rbartpackages=0 days" --isolated
 
 .PHONY: help
 help:

@@ -21,6 +21,9 @@ resolution-markers = [
 exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P1W"
 
+[options.exclude-newer-package]
+rbartpackages = "2026-06-06T22:00:00Z"
+
 [[package]]
 name = "absl-py"
 version = "2.4.0"
@@ -282,8 +285,8 @@ dev = [
     { name = "pytest-subtests" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
+    { name = "rbartpackages", extra = ["jax", "polars"] },
     { name = "rich" },
-    { name = "rpy2" },
     { name = "snakeviz" },
     { name = "sphinx", version = "8.1.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "sphinx", version = "9.0.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
@@ -332,8 +335,8 @@ dev = [
     { name = "pytest-subtests", specifier = ">=0.14.1" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist", specifier = ">=3.7.0" },
+    { name = "rbartpackages", extras = ["jax", "polars"], specifier = ">=0.1.0" },
     { name = "rich", specifier = ">=14.0.0" },
-    { name = "rpy2", specifier = ">=3.6.0" },
     { name = "snakeviz", specifier = ">=2.2.2" },
     { name = "sphinx", specifier = ">=8.1.3" },
     { name = "sphinx-autodoc-typehints", specifier = ">=3.0.1" },
@@ -4038,6 +4041,33 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/49/0e/3f0d0d335c6b3abb9b7b723776d0b21fa7f3a6c819a0db6097059aada160/pyzmq-27.1.0-pp311-pypy311_pp73-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:53b40f8ae006f2734ee7608d59ed661419f087521edbfc2149c3932e9c14808c", size = 567747, upload-time = "2025-09-08T23:09:52.698Z" },
     { url = "https://files.pythonhosted.org/packages/a1/cf/f2b3784d536250ffd4be70e049f3b60981235d70c6e8ce7e3ef21e1adb25/pyzmq-27.1.0-pp311-pypy311_pp73-manylinux_2_26_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:f605d884e7c8be8fe1aa94e0a783bf3f591b84c24e4bc4f3e7564c82ac25e271", size = 747371, upload-time = "2025-09-08T23:09:54.563Z" },
     { url = "https://files.pythonhosted.org/packages/01/1b/5dbe84eefc86f48473947e2f41711aded97eecef1231f4558f1f02713c12/pyzmq-27.1.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:c9f7f6e13dff2e44a6afeaf2cf54cee5929ad64afaf4d40b50f93c58fc687355", size = 544862, upload-time = "2025-09-08T23:09:56.509Z" },
+]
+
+[[package]]
+name = "rbartpackages"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jaxtyping", version = "0.3.7", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "jaxtyping", version = "0.3.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "rpy2" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/01/03/751240aed7ee72d73ba8672e0b171dd0440ab93b011453e9b723b5afc58b/rbartpackages-0.1.0.tar.gz", hash = "sha256:f0425eb7d5b1a9d2ad1e6e190f9a203770335d4709f2ef0398364567302bbdda", size = 14267, upload-time = "2026-06-05T20:21:04.354Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a8/9b/a29f19167479bdefd7ec77f8fd5ab98558d0be7586e95d9ec7c18e895b7c/rbartpackages-0.1.0-py3-none-any.whl", hash = "sha256:f5d2edd6c5194b0d9eb00fa5b70394f41d37c6841f5fbd67e30c1eca12ba152f", size = 21071, upload-time = "2026-06-05T20:21:02.865Z" },
+]
+
+[package.optional-dependencies]
+jax = [
+    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "jax", version = "0.10.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+]
+polars = [
+    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "pandas", version = "3.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "polars" },
 ]
 
 [[package]]

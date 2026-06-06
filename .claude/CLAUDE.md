@@ -121,7 +121,6 @@ Interface hierarchy:
     - inline `keys.pop()` instead of assigning it to a local---less chance of re-using the key by mistake
     - use `keys.pop(num)` instead of `random.split(keys.pop(), num)`, shortcut
 - Custom pytest options: `--platform` (cpu/gpu/auto), `--num-cpu-devices` (sets up jax virtual cpu devices)
-- The subpackage `tests/rbartpackages/` contains wrappers of R BART packages, not unit tests
 - To compare vectors/matrices/tensors, use `tests.util.assert_close_matrices` instead of numpy's `assert_allclose`
     - use `rtol` in test comparisons, add `atol` only if necessary (comparison of values that are near zero on some relevant scale)
     - there's also `assert_different_matrices` to check things are not equal, this requires to set both atol and rtol which are +inf by default

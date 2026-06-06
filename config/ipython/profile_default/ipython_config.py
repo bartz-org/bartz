@@ -22,7 +22,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-c = get_config()  # noqa: F821
+c = get_config()  # noqa: F821 # ty: ignore[unresolved-reference]
 
 c.TerminalInteractiveShell.editing_mode = 'vi'
 c.TerminalInteractiveShell.emacs_bindings_in_vi_insert_mode = False

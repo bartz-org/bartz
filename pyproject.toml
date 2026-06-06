@@ -319,3 +319,7 @@ closing-quotes = false
 # error on stale `ty: ignore` comments, e.g., ignores for diagnostics fixed by
 # typing improvements in our dependencies
 unused-ignore-comment = "error"
+
+[tool.ty.src]
+# example notebooks shall stay simple and typing-free
+exclude = ["docs/examples/"]

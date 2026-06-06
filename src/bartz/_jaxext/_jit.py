@@ -25,24 +25,74 @@
 """Signature-preserving `jax.jit` wrapper."""
 
 from collections.abc import Callable, Sequence
-from typing import Any, ParamSpec, TypeVar, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ParamSpec,
+    Protocol,
+    TypeVar,
+    overload,
+    runtime_checkable,
+)
 
+from jax import ShapeDtypeStruct
 from jax import jit as _jax_jit
+from jax.stages import Lowered, Traced
+from jaxtyping import PyTree
 
 _P = ParamSpec('_P')
 _R = TypeVar('_R')
+_R_co = TypeVar('_R_co', covariant=True)
+
+
+@runtime_checkable
+class JitWrapped(Protocol[_P, _R_co]):
+    """Static type of a jitted function: the wrapped signature plus jit methods."""
+
+    def __call__(self, *args: _P.args, **kwargs: _P.kwargs) -> _R_co: ...
+
+    def clear_cache(self) -> None: ...
+
+    def eval_shape(
+        self, *args: _P.args, **kwargs: _P.kwargs
+    ) -> PyTree[ShapeDtypeStruct]: ...
+
+    def lower(self, *args: _P.args, **kwargs: _P.kwargs) -> Lowered: ...
+
+    def trace(self, *args: _P.args, **kwargs: _P.kwargs) -> Traced: ...
+
+    if not TYPE_CHECKING:
+        # WORKAROUND(beartype<99): beartype chokes on ParamSpec-subscripted
+        # generics, and the jaxtyping import hook used by the test suite makes
+        # it process the `JitWrapped[_P, _R]` hints in `jit`'s overloads. Erase
+        # the subscript at runtime so beartype sees the plain runtime-checkable
+        # protocol, which jitted functions genuinely satisfy. `99` is a
+        # placeholder for the beartype release gaining PEP 612 generics support.
+        def __class_getitem__(cls, item: object) -> type:
+            return cls
 
 
 # WORKAROUND(jax<99): `jax.jit` is typed to return `JitWrapped`, which erases the
 # wrapped function's signature, so static checkers can't validate calls to jitted
-# functions. This shim recovers the signature via `ParamSpec`. Tracked upstream at
-# jax-ml/jax#23719; the jax maintainers are blocked on migrating internal Google
-# code to a type checker that understands `ParamSpec` (jax itself has moved to
-# pyrefly). Once `jax.jit` preserves the signature natively, this whole module can
-# go and `jit` can be imported straight from jax. `99` is a placeholder for that
-# unknown future jax release.
+# functions. This shim recovers the signature via `ParamSpec`, declaring our own
+# `JitWrapped` protocol that combines it with the jit-specific methods (including
+# `clear_cache`, which jax adds to the jitted callable at runtime and omits from
+# its own static `JitWrapped` type). Tracked upstream at jax-ml/jax#23719; the
+# jax maintainers are blocked on migrating internal Google code to a type checker
+# that understands `ParamSpec` (jax itself has moved to pyrefly). Once `jax.jit`
+# preserves the signature natively, this whole module can go and `jit` can be
+# imported straight from jax. `99` is a placeholder for that unknown future jax
+# release.
 @overload
-def jit(fun: Callable[_P, _R], /) -> Callable[_P, _R]: ...
+def jit(
+    fun: Callable[_P, _R],
+    /,
+    *,
+    static_argnums: int | Sequence[int] | None = ...,
+    static_argnames: str | Sequence[str] | None = ...,
+    donate_argnums: int | Sequence[int] | None = ...,
+    **kwargs: Any,
+) -> JitWrapped[_P, _R]: ...
 
 
 @overload
@@ -54,7 +104,7 @@ def jit(
     static_argnames: str | Sequence[str] | None = ...,
     donate_argnums: int | Sequence[int] | None = ...,
     **kwargs: Any,
-) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]: ...
+) -> Callable[[Callable[_P, _R]], JitWrapped[_P, _R]]: ...
 def jit(fun: Any = None, /, **kwargs: Any) -> Any:
     """Wrap `jax.jit` preserving the wrapped function's static type signature.
 

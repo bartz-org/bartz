@@ -41,7 +41,6 @@ from jax import (
     debug,
     ensure_compile_time_eval,
     eval_shape,
-    jit,
     random,
     tree,
 )
@@ -52,7 +51,7 @@ from jaxtyping import Array, Integer, Key
 
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
-from benchmarks.latest_bartz._jaxext import get_device_count, split
+from benchmarks.latest_bartz._jaxext import get_device_count, jit, split
 from benchmarks.latest_bartz.testing import gen_nonsense_data
 
 if TYPE_CHECKING:
@@ -282,8 +281,7 @@ class StepGeneric(AutoParamNames):
         """Time compiling `step` or running it."""
         match self.mode:
             case 'compile':
-                # jax does not type the runtime-patched `JitWrapped.clear_cache`
-                self.jitted_func.clear_cache()  # ty: ignore[unresolved-attribute]
+                self.jitted_func.clear_cache()
                 self.jitted_func.lower(*self.args).compile()
             case 'run':
                 block_until_ready(self.compiled_func(*self.args))
@@ -515,8 +513,7 @@ class BaseRunMcmc(AutoParamNames):
                 f = jit(run_mcmc, static_argnames=static_argnames)
 
                 def task() -> None:
-                    # jax does not type the runtime-patched `JitWrapped.clear_cache`
-                    f.clear_cache()  # ty: ignore[unresolved-attribute]
+                    f.clear_cache()
                     f.lower(**kw).compile()
             case 'run':
 

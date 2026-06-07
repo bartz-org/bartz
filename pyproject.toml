@@ -161,7 +161,12 @@ local = [
 
 [tool.uv]
 # the version is dynamic (git-derived), so rebuild the project metadata when
-# the commit or tags change, not only when pyproject.toml changes
+# the commit or tags change, not only when pyproject.toml changes. Caveat: as
+# of uv 0.11.17 the commit key does not work in linked worktrees (uv does not
+# follow commondir, records commit=null), so in our worktree-first layout the
+# editable install's version lags behind commits; refresh it manually with
+# `uv sync --reinstall-package bartz`. Tag creation does trigger a rebuild
+# (loose refs are detected; packed ones are not).
 cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
 exclude-newer = '1 week'
 # WORKAROUND(rbartpackages<0.2.0): 0.1.0 was released inside the exclude-newer

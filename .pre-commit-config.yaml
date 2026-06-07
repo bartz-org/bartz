@@ -3,7 +3,16 @@
 
 exclude: '^\.asv/results/.+\.json$'
 default_stages: [pre-commit]
-default_install_hook_types: [pre-commit, commit-msg, pre-merge-commit]
+default_install_hook_types:
+  [
+    pre-commit,
+    commit-msg,
+    pre-merge-commit,
+    post-commit,
+    post-checkout,
+    post-merge,
+    post-rewrite,
+  ]
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -38,7 +47,6 @@ repos:
       - id: copyright
       - id: copyright-required
         files: \.(py|rst)$
-        exclude: src/bartz/_version\.py$
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.14
     hooks:
@@ -85,6 +93,19 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-merge-commit]
+      - id: refresh-editable-version
+        name: refresh the editable install's git-derived version
+        # The editable bartz's version is computed at (re)build time, and uv
+        # cannot detect new commits in linked worktrees (see the cache-keys
+        # comment in pyproject.toml), so refresh the install whenever HEAD
+        # moves. `--inexact` avoids pruning extras (e.g. cuda), `--frozen`
+        # avoids touching uv.lock mid-rebase, and the venv check skips
+        # worktrees without an environment (e.g. right after `worktree add`).
+        entry: sh -c 'test ! -d .venv || uv sync --frozen --inexact --quiet --reinstall-package bartz'
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [post-commit, post-checkout, post-merge, post-rewrite]
       - id: check-workarounds
         name: check stale WORKAROUND markers
         entry: uv run --dev python config/check_workarounds.py

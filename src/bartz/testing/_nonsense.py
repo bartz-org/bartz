@@ -25,14 +25,14 @@
 
 """Define `gen_nonsense_data`, a cheap synthetic data generator for benchmarks."""
 
-from functools import partial
-
-from jax import jit, vmap
 from jax import numpy as jnp
+from jax import vmap
 from jaxtyping import Array, Float32, UInt8
 
+from bartz._jaxext import jit
 
-@partial(jit, static_argnums=(0, 1, 2))
+
+@jit(static_argnums=(0, 1, 2))
 def gen_nonsense_data(
     p: int, n: int, k: int | None
 ) -> tuple[

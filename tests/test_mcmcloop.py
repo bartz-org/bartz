@@ -27,7 +27,7 @@
 import io
 from dataclasses import replace
 from functools import partial
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from equinox import filter_jit
@@ -55,11 +55,11 @@ from bartz.mcmcloop import (
     run_mcmc,
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
-from bartz.mcmcloop._loop import _run_mcmc_inner_loop
+from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.testing import gen_nonsense_data
-from tests.util import assert_array_equal, assert_close_matrices
+from tests.util import assert_array_equal, assert_close_matrices, nnone
 
 
 @filter_jit
@@ -221,7 +221,7 @@ class TestRunMcmc:
         bar_id = kw['callback_state'].bar_id.item()
         # simulate an interrupted run: advance the bar partway, never finishing
         _tqdm_advance(bar_id, 3, 10)
-        assert not _TQDM_REGISTRY[bar_id].bar.disable  # still open
+        assert not nnone(_TQDM_REGISTRY[bar_id].bar).disable  # still open
 
         make_tqdm_callback(state, file=io.StringIO())  # triggers cleanup
         assert bar_id not in _TQDM_REGISTRY  # the stale bar was closed and dropped
@@ -245,7 +245,7 @@ class TestRunMcmc:
 
         run()
         run()
-        assert _run_mcmc_inner_loop._fun.n_calls == 0
+        assert _inner_loop_counter.n_calls == 0
 
     def test_predicted_double_compilation(self, keys: split) -> None:
         """Check that an error is raised under jit if the configuration would lead to double compilation."""
@@ -430,7 +430,9 @@ class TestEvaluateTrace:
         assert_close_matrices(shrd, base, rtol=1e-5, reduce_rank=True)
 
     @pytest.mark.parametrize('mode', ['autobatch', 'shard_and_autobatch'])
-    def test_low_budget_loops_and_warns(self, keys: split, mode: str) -> None:
+    def test_low_budget_loops_and_warns(
+        self, keys: split, mode: Literal['autobatch', 'shard_and_autobatch']
+    ) -> None:
         """An absurdly low budget forces every loop to run and stays correct.
 
         The test points cannot be reduced below one element, so the innermost

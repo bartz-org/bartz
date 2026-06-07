@@ -29,14 +29,15 @@ from collections.abc import Callable
 from functools import partial
 from typing import Literal, Protocol, runtime_checkable
 
-from jax import ShapeDtypeStruct, jit, lax, shard_map, tree, vmap
+from jax import ShapeDtypeStruct, lax, shard_map, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
-from jaxtyping import Array, Float32, Int32, UInt
+from jaxtyping import Array, Float32, Int32, PyTree, UInt
 from numpy.lib.array_utils import normalize_axis_index
 
-from bartz._jaxext import autobatch
-from bartz.grove import TreesTrace, evaluate_forest, var_histogram
+from bartz._jaxext import autobatch, jit
+from bartz._typing import kwdict
+from bartz.grove import TreesTrace, evaluate_forest, is_multivariate, var_histogram
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
 from bartz.mcmcstep._state import partition_specs
 
@@ -62,14 +63,13 @@ class EvaluableTrace(Protocol):
     mesh: Mesh | None
 
 
-@partial(
-    jit,
+@jit(
     static_argnames=(
         'flatten_chains',
         'out_chain_axis_w_trees',
         'test_points',
         'max_io_nbytes',
-    ),
+    )
 )
 def evaluate_trace(
     X: UInt[Array, 'p n'],
@@ -213,7 +213,7 @@ def _evaluate_trace(
     # sizes, read from the arrays (hence per-device under the `shard_map`)
     # leaf_tree has shape (sample, tree, *k, ts)
     k_axis = chainful_axis(2, trace_chain_axes.leaf_tree)
-    is_mv = trace.is_multivariate
+    is_mv = is_multivariate(trace)
     kshape = trace.leaf_tree.shape[k_axis : k_axis + is_mv]
     _, n = X.shape
     num_samples = trace.leaf_tree.shape[sample_axes.leaf_tree]
@@ -268,7 +268,9 @@ def _evaluate_trace(
 
     # the outermost loop is the only one whose per-call output is statically the
     # full output, so it alone can take `result_shape_dtype` (skips a trace)
-    full_shape = dict(result_shape_dtype=ShapeDtypeStruct(out_shape, jnp.float32))
+    full_shape: kwdict = dict(
+        result_shape_dtype=ShapeDtypeStruct(out_shape, jnp.float32)
+    )
 
     # batch over mcmc samples
     batched_eval = autobatch(
@@ -337,7 +339,7 @@ def _output_axes(
     out_chain_axis = sample_axis = 0
     if trace.has_chains:
         # pre-tree-reduction output ndim: chain + (sample, tree, *k, n)
-        is_mv = trace.is_multivariate
+        is_mv = is_multivariate(trace)
         out_chain_axis_w_trees = normalize_axis_index(out_chain_axis_w_trees, 4 + is_mv)
         tree_axis = chainful_axis(tree_axis, out_chain_axis_w_trees)
         out_chain_axis = out_chain_axis_w_trees - (out_chain_axis_w_trees > tree_axis)
@@ -372,7 +374,7 @@ def _output_layout(
     n_axis : int
         Position of the observation (``n``) axis.
     """
-    is_mv = trace.is_multivariate
+    is_mv = is_multivariate(trace)
     chainless_ndim = 2 + is_mv  # (sample, *k, n)
     n_core = chainless_ndim - 1  # `n` is the last chainless axis
     if trace.has_chains and not flatten_chains:
@@ -391,7 +393,7 @@ def _output_layout(
 def _tree_sum_budget(
     max_io_nbytes: int,
     trace: EvaluableTrace,
-    chain_axes: EvaluableTrace,
+    chain_axes: PyTree[int | None],
     kshape: tuple[int, ...],
     n: int,
     num_trees: int,
@@ -448,6 +450,7 @@ def _shard_map_eval(
     x_spec = [None, None]  # (p, n)
     out_spec = [None] * out_ndim
     if shard_chains:
+        assert out_chain_axis is not None
         axis_names.add('chains')
         out_spec[out_chain_axis] = 'chains'
     if shard_data:
@@ -471,7 +474,7 @@ def _shard_map_eval(
     )
 
 
-@partial(jit, static_argnames=('p', 'out_chain_axis'))
+@jit(static_argnames=('p', 'out_chain_axis'))
 def compute_varcount(
     p: int, trace: EvaluableTrace, *, out_chain_axis: int = CHAIN_AXIS
 ) -> Int32[Array, '*trace_shape {p}']:

@@ -117,6 +117,19 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: ty
+        name: ty check
+        # there is no official ty pre-commit hook (and an isolated hook env
+        # would not see the project venv anyway), so run the dev-pinned ty.
+        # Whole-project check: per-file checking would miss cross-file breakage.
+        # Vendor latest_bartz first, else its imports in benchmarks/ do not
+        # resolve (e.g., on CI) or resolve against a stale copy.
+        entry: >
+          sh -c 'uv run --dev python benchmarks/_vendor_latest_bartz.py > /dev/null
+          && uv run --dev ty check'
+        language: system
+        pass_filenames: false
+        types_or: [python, toml]
       - id: check-returns-docstring
         name: forbid multi-line non-list `Returns` docstring sections
         # Matches a numpy-style `Returns` block whose first two non-blank lines

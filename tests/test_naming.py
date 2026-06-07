@@ -132,7 +132,7 @@ def test_name_ok_classifies_offenders() -> None:
     assert name_ok('IntList', list[int])
     assert name_ok('Kind', Literal['a', 'b'])
     assert name_ok('Anything', Any)
-    assert name_ok('KeyType', TypeVar('KeyType'))
+    assert name_ok('KeyType', TypeVar('KeyType'))  # ty: ignore[invalid-legacy-type-variable]
 
     # rejected: CapWords or lowercase names bound to plain data
     assert not name_ok('Config', {'a': 1})

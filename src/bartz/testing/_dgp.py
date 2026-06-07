@@ -26,15 +26,14 @@
 """Define `gen_data` that generates simulated data for testing."""
 
 from dataclasses import replace
-from functools import partial
-from typing import Literal
+from typing import Literal, cast
 
 from equinox import Module, error_if, field
-from jax import jit, random
 from jax import numpy as jnp
+from jax import random
 from jaxtyping import Array, Bool, Float, Int, Integer, Key
 
-from bartz._jaxext import split
+from bartz._jaxext import jit, split
 from bartz.mcmcstep import OutcomeType
 from bartz.testing._distr import Constant, DiscreteUniform, Distr, ScaleDistr, Uniform
 
@@ -56,7 +55,7 @@ def generate_beta_shared(
     key: Key[Array, ''],
     distr: Distr,
     p: int,
-    sigma2_lin: Float[Array, ''],
+    sigma2_lin: Float[Array, ''] | float,
     s: Float[Array, ' p'],
 ) -> Float[Array, ' p']:
     """Generate shared linear coefficients for the lambda=1 case."""
@@ -68,7 +67,7 @@ def generate_beta_separate(
     key: Key[Array, ''],
     distr: Distr,
     partition: Bool[Array, 'k p'],
-    sigma2_lin: Float[Array, ''],
+    sigma2_lin: Float[Array, ''] | float,
     s: Float[Array, ' p'],
 ) -> Float[Array, 'k p']:
     """Generate separate linear coefficients for the lambda=0 case."""
@@ -106,6 +105,8 @@ def het_var_v(
     # of gamma_distr enters; the literal 3's are pairing counts, family-free
     excess = (kurt_gamma * kurt_x * mu_4 - 3.0) / p
     if het_shape == 'vector':
+        assert k is not None
+        assert lambda_ is not None
         big_lambda = lambda_**2 + (1.0 - lambda_) ** 2 * k
         cross = 6.0 * lambda_ * (1.0 - lambda_) * (kurt_x * mu_4 - 1.0) / p
         r = p % k
@@ -114,7 +115,7 @@ def het_var_v(
             + cross
             + 3.0 * (1.0 - lambda_) ** 2 * r * (k - r) / p**2
         )
-    return het_strength**2 * (2.0 + excess)
+    return jnp.square(het_strength) * (2.0 + excess)
 
 
 def generate_het(
@@ -140,6 +141,7 @@ def generate_het(
         budget = jnp.ones(())  # unit budget makes E[eta ** 2] == 1 marginally
         gamma_shared = generate_beta_shared(keys.pop(), distr, p, budget, s)
         if het_shape == 'vector':
+            assert partition is not None
             gamma_separate = generate_beta_separate(
                 keys.pop(), distr, partition, budget, s
             )
@@ -162,8 +164,8 @@ def generate_A_shared(
     key: Key[Array, ''],
     distr: Distr,
     p: int,
-    q: Integer[Array, ''],
-    sigma2_quad: Float[Array, ''],
+    q: Integer[Array, ''] | int,
+    sigma2_quad: Float[Array, ''] | float,
     kurt_x: Float[Array, ''] | float,
     s: Float[Array, ' p'],
     mu4: Float[Array, ''] | float,
@@ -201,8 +203,8 @@ def generate_A_separate(
     key: Key[Array, ''],
     distr: Distr,
     partition: Bool[Array, 'k p'],
-    q: Integer[Array, ''],
-    sigma2_quad: Float[Array, ''],
+    q: Integer[Array, ''] | int,
+    sigma2_quad: Float[Array, ''] | float,
     kurt_x: Float[Array, ''] | float,
     s: Float[Array, ' p'],
     mu4: Float[Array, ''] | float,
@@ -706,7 +708,7 @@ class DGP(Module):
         return train, test
 
 
-@partial(jit, static_argnames=('p', 'k', 'outcome_type', 'het_shape'))
+@jit(static_argnames=('p', 'k', 'outcome_type', 'het_shape'))
 def gen_params(
     key: Key[Array, ''],
     *,
@@ -808,6 +810,14 @@ def gen_params(
         msg = "het_shape='vector' requires a multivariate outcome (k != None)"
         raise ValueError(msg)
 
+    # the python scalars accepted by the signature are for the caller's
+    # convenience: gen_params is jitted, so in here they are traced arrays
+    lambda_ = cast(Float[Array, ''] | None, lambda_)
+    sigma2_lin = cast(Float[Array, ''], sigma2_lin)
+    sigma2_quad = cast(Float[Array, ''], sigma2_quad)
+    sigma2_eps = cast(Float[Array, ''], sigma2_eps)
+    het_strength = cast(Float[Array, ''] | None, het_strength)
+
     outcome_type = parse_outcome_type(outcome_type, k)
 
     kurt_x = x_distr.kurtosis
@@ -853,13 +863,13 @@ def gen_params(
     gamma_shared, gamma_separate = generate_het(
         het_key, gamma_distr, het_shape, p, partition, s
     )
-    var_v = (
-        None
-        if het_shape is None
-        else het_var_v(
+    if het_shape is None:
+        var_v = None
+    else:
+        assert het_strength is not None
+        var_v = het_var_v(
             het_shape, het_strength, kurt_x, gamma_distr.kurtosis, mu_4_s, p, k, lambda_
         )
-    )
 
     # derived variances (see `Params`); cheap scalars materialized eagerly
     sigma2_mean = sigma2_quad * mu_4_s / ((kurt_x - 1) * mu_4_s + q)
@@ -895,7 +905,7 @@ def gen_params(
     )
 
 
-@partial(jit, static_argnames=('n',))
+@jit(static_argnames=('n',))
 def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
     """Sample predictors and outcomes given fixed `params`.
 
@@ -928,6 +938,9 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
         mulin = mulin_shared
         muquad = muquad_shared
     else:
+        assert params.beta_separate is not None
+        assert params.A_separate is not None
+        assert params.lambda_ is not None
         mulin_separate = params.beta_separate @ x
         muquad_separate = jnp.einsum('irs,rj,sj->ij', params.A_separate, x, x)
         mulin = combine_shared_separate(mulin_shared, mulin_separate, params.lambda_)
@@ -941,8 +954,12 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
     if params.het_shape is None:
         error_scale = None
     else:
+        assert params.gamma_shared is not None
+        assert params.het_strength is not None
         eta = params.gamma_shared @ x
         if params.het_shape == 'vector':
+            assert params.gamma_separate is not None
+            assert params.lambda_ is not None
             eta_separate = params.gamma_separate @ x
             eta = combine_shared_separate(eta, eta_separate, params.lambda_)
         v = (1.0 - params.het_strength) + params.het_strength * eta**2
@@ -968,7 +985,7 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
     )
 
 
-@partial(jit, static_argnames=('n', 'p', 'k', 'outcome_type', 'het_shape'))
+@jit(static_argnames=('n', 'p', 'k', 'outcome_type', 'het_shape'))
 def gen_data(
     key: Key[Array, ''],
     *,

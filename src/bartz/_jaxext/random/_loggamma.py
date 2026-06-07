@@ -25,19 +25,20 @@
 """Sampler for the log of gamma random variables."""
 
 from collections.abc import Sequence
-from functools import partial
 
-from jax import jit, lax, random
+from jax import lax, random
 from jax import numpy as jnp
 from jax.dtypes import canonicalize_dtype
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Key
 
+from bartz._jaxext._jit import jit
 
-@partial(jit, static_argnums=(2, 3), static_argnames=('n_uniforms',))
+
+@jit(static_argnums=(2, 3), static_argnames=('n_uniforms',))
 def loggamma(
     key: Key[Array, ''],
-    a: Float[Array, '...'],
+    a: Float[Array, '...'] | float,
     shape: Sequence[int] | None = None,
     dtype: DTypeLike | None = None,
     *,

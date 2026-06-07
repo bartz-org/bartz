@@ -44,6 +44,7 @@ dependencies = [
     "numpy>=2.2.6",
     "scipy>=1.15.3",
     "tqdm>=4.67.1",
+    "typing-extensions>=4.13.2",
 ]
 
 [project.optional-dependencies]
@@ -103,6 +104,9 @@ dev = [
     "myst-nb>=1.2.0",
     "jupyterlab>=4.4.3",
     "diff-cover>=9.3.1",
+    # the floor satisfies the OLD_DATE policy; lint (and hence ty) only ever
+    # runs on the latest toolchain, so the old version is installed but unused
+    "ty>=0.0.1a7",
 ]
 
 # WORKAROUND(pytest<9): use [tool.pytest]
@@ -338,3 +342,12 @@ check-class-attributes = false
 style = ["numpydoc"]
 # keep the closing `"""` inline on attribute docstrings, as is our convention.
 closing-quotes = false
+
+[tool.ty.rules]
+# error on stale `ty: ignore` comments, e.g., ignores for diagnostics fixed by
+# typing improvements in our dependencies
+unused-ignore-comment = "error"
+
+[tool.ty.src]
+# example notebooks shall stay simple and typing-free
+exclude = ["docs/examples/"]

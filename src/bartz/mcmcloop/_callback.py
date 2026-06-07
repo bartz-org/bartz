@@ -38,6 +38,7 @@ from jax.scipy.special import logsumexp
 from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, Integer, PyTree
 from tqdm.auto import tqdm
 
+from bartz._typing import kwdict
 from bartz.grove import forest_mean_leaves
 from bartz.mcmcloop._loop import _replicate
 from bartz.mcmcstep import State
@@ -114,7 +115,7 @@ class StatsAccumulator(Module):
     def report(self, state: State) -> StatsReport:
         """Statistics to display: the windowed average if enabled, else the latest."""
         if self.sums is None:
-            averaged = self._avg_stats(state)
+            averaged: kwdict = self._avg_stats(state)
             n_samples = None
         else:
             averaged = tree.map(lambda s: s / self.count, self.sums)

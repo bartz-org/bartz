@@ -31,19 +31,29 @@ from os import getpid, kill
 from signal import SIGINT
 from threading import Event, Thread
 from time import monotonic
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 from jax import numpy as jnp
 from jax import random
 from jax.scipy.special import logit
-from jaxtyping import Array, ArrayLike, Float
+from jaxtyping import Array, Float
+from jaxtyping import ArrayLike as JaxArrayLike
 from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
 from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
+from numpy.typing import ArrayLike
 from scipy import linalg, stats
 
 from bartz._jaxext import jaxtyping_disabled, minimal_unsigned_dtype  # noqa: F401
 from bartz.grove import TreesTrace, check_trace, describe_error
+
+_T = TypeVar('_T')
+
+
+def nnone(x: _T | None) -> _T:
+    """Return `x`, asserting it is not None, narrowing away the `None` for typing."""
+    assert x is not None
+    return x
 
 
 def manual_tree(
@@ -211,18 +221,17 @@ def assert_allclose(
     use `assert_close_matrices` for vectors/matrices/tensors. Pass
     ``allow_non_scalar=True`` to bypass this restriction.
     """
-    if not allow_non_scalar:
-        actual_arr = np.asarray(actual)
-        desired_arr = np.asarray(desired)
-        if actual_arr.size != 1 or desired_arr.size != 1:
-            msg = (
-                'assert_allclose requires scalar inputs; got shapes '
-                f'{actual_arr.shape} and {desired_arr.shape}. Use '
-                'assert_close_matrices for vectors/matrices/tensors, or '
-                'pass allow_non_scalar=True to bypass.'
-            )
-            raise AssertionError(msg)
-    _np_assert_allclose(actual, desired, rtol=rtol, atol=atol, **kwargs)
+    actual_arr = np.asarray(actual)
+    desired_arr = np.asarray(desired)
+    if not allow_non_scalar and (actual_arr.size != 1 or desired_arr.size != 1):
+        msg = (
+            'assert_allclose requires scalar inputs; got shapes '
+            f'{actual_arr.shape} and {desired_arr.shape}. Use '
+            'assert_close_matrices for vectors/matrices/tensors, or '
+            'pass allow_non_scalar=True to bypass.'
+        )
+        raise AssertionError(msg)
+    _np_assert_allclose(actual_arr, desired_arr, rtol=rtol, atol=atol, **kwargs)
 
 
 def assert_array_equal(
@@ -297,7 +306,7 @@ def periodic_sigint(
             timer.cancel()
 
 
-def clipped_logit(x: ArrayLike, eps: float) -> Array:
+def clipped_logit(x: JaxArrayLike, eps: float) -> Array:
     """Compute the logit of x, clipping x to [eps, 1-eps] to avoid infinities."""
     return logit(jnp.clip(x, eps, 1 - eps))
 

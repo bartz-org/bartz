@@ -28,33 +28,24 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from enum import Enum
 from functools import partial, wraps
-from typing import Literal, TypedDict, TypeVar
+from typing import Literal, TypedDict, TypeVar, cast
 
 import jax
 import numpy
-from equinox import Module, error_if, filter_jit
-from jax import (
-    NamedSharding,
-    device_put,
-    jit,
-    lax,
-    make_mesh,
-    random,
-    shard_map,
-    tree,
-    vmap,
-)
+from equinox import error_if, filter_jit
+from jax import NamedSharding, device_put, lax, make_mesh, random, shard_map, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Key, PyTree, UInt
 from numpy import ndarray
 
-from bartz._jaxext import jaxtyping_disabled, minimal_unsigned_dtype
-from bartz.grove import HeapArrays, tree_depths
-from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes, field
+from bartz._jaxext import Module, field, jaxtyping_disabled, jit, minimal_unsigned_dtype
+from bartz.grove import tree_depths
+from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes
 from bartz.mcmcstep._lazy import (
     _is_lazy_or_none,
+    _lazy,
     _lazy_from_array,
     _LazyArray,
     _wrap_chain,
@@ -80,7 +71,7 @@ class OutcomeType(Enum):
 T = TypeVar('T')
 
 
-class Forest(HeapArrays):
+class Forest(Module):
     """Represents the MCMC state of a sum of trees."""
 
     # Heap-array fields follow the `bartz.grove.TreesTrace` convention: the
@@ -348,8 +339,8 @@ def _init_shape_shifting_parameters(
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
 ) -> tuple[
     bool,
-    tuple[()] | tuple[int],
-    None | Float32[Array, ''] | Float32[Array, 'k k'],
+    tuple[int, ...],
+    Float32[Array, ''] | Float32[Array, 'k k'],
     None | Float32[Array, ''],
     None | Float32[Array, ''] | Float32[Array, 'k k'],
     None | Int32[Array, ' kb'],
@@ -706,6 +697,10 @@ def init(
     offset = jnp.asarray(offset)
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
     max_split = jnp.asarray(max_split)
+    if error_scale is not None:
+        error_scale = jnp.asarray(error_scale)
+    if missing is not None:
+        missing = jnp.asarray(missing)
     assert missing is None or missing.ndim <= y.ndim
 
     # normalize outcome_type to enum (or list of enums)
@@ -772,13 +767,13 @@ def init(
     # been replaced by its final, correctly-typed array.
     with jaxtyping_disabled():
         state = State(
-            _chain_anchor=_LazyArray(jnp.zeros, ()),  # typechecker chain anchor
+            _chain_anchor=_lazy(jnp.zeros, ()),  # typechecker chain anchor
             X=X,
             binary_y=y,  # temporary to be sharded together with everything else
             z=(
-                _LazyArray(jnp.full, y.shape, offset[..., None])
+                _lazy(jnp.full, y.shape, offset[..., None])
                 if is_binary
-                else _LazyArray(
+                else _lazy(
                     jnp.full, (binary_indices.size, n), offset[binary_indices, None]
                 )
                 if binary_indices is not None
@@ -787,9 +782,10 @@ def init(
             binary_indices=binary_indices,
             offset=offset,
             resid=(
-                _LazyArray(jnp.zeros, y.shape)
+                _lazy(jnp.zeros, y.shape)
                 if is_binary
-                else None  # resid is created later after y and offset are sharded
+                # resid is created later after y and offset are sharded
+                else cast(Array, None)
             ),
             error_cov_inv=_lazy_from_array(error_cov_inv),
             # temporarily store user inputs in these slots so they get sharded
@@ -799,18 +795,18 @@ def init(
             error_cov_df=error_cov_df,
             error_cov_scale=error_cov_scale,
             forest=Forest(
-                leaf_tree=_LazyArray(
+                leaf_tree=_lazy(
                     jnp.zeros, (num_trees, *kshape, tree_size), jnp.float32
                 ),
-                var_tree=_LazyArray(
+                var_tree=_lazy(
                     jnp.zeros,
                     (num_trees, tree_size // 2),
                     minimal_unsigned_dtype(p - 1),
                 ),
-                split_tree=_LazyArray(
+                split_tree=_lazy(
                     jnp.zeros, (num_trees, tree_size // 2), max_split.dtype
                 ),
-                affluence_tree=_LazyArray(
+                affluence_tree=_lazy(
                     _initial_affluence_tree,
                     (num_trees, tree_size // 2),
                     n,
@@ -818,25 +814,21 @@ def init(
                 ),
                 blocked_vars=_get_blocked_vars(filter_splitless_vars, max_split),
                 max_split=max_split,
-                grow_prop_count=_LazyArray(jnp.zeros, (), int),
-                grow_acc_count=_LazyArray(jnp.zeros, (), int),
-                prune_prop_count=_LazyArray(jnp.zeros, (), int),
-                prune_acc_count=_LazyArray(jnp.zeros, (), int),
+                grow_prop_count=_lazy(jnp.zeros, (), int),
+                grow_acc_count=_lazy(jnp.zeros, (), int),
+                prune_prop_count=_lazy(jnp.zeros, (), int),
+                prune_acc_count=_lazy(jnp.zeros, (), int),
                 p_nonterminal=p_nonterminal[tree_depths(tree_size)],
                 p_propose_grow=p_nonterminal[tree_depths(tree_size // 2)],
-                leaf_indices=_LazyArray(
+                leaf_indices=_lazy(
                     jnp.ones, (num_trees, n), minimal_unsigned_dtype(tree_size - 1)
                 ),
                 min_points_per_decision_node=_asarray_or_none(
                     min_points_per_decision_node
                 ),
                 min_points_per_leaf=_asarray_or_none(min_points_per_leaf),
-                log_trans_prior=_LazyArray(jnp.zeros, (num_trees,))
-                if save_ratios
-                else None,
-                log_likelihood=_LazyArray(jnp.zeros, (num_trees,))
-                if save_ratios
-                else None,
+                log_trans_prior=_lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
+                log_likelihood=_lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
                 leaf_prior_cov_inv=leaf_prior_cov_inv,
                 log_s=_lazy_from_array(_asarray_or_none(log_s)),
                 theta=_lazy_from_array(_asarray_or_none(theta)),
@@ -871,6 +863,7 @@ def init(
 
         # calculate initial binary_y
         if is_binary or binary_indices is not None:
+            assert state.binary_y is not None  # holds y at this point
             binary_y = _LazyArray(
                 _initial_binary_y,
                 state.binary_y.shape
@@ -911,6 +904,7 @@ def _set_initial_resid(
     `resid` leaf has the chain-extended ``ndim`` (inflated by a placeholder
     when `num_chains` is not `None`).
     """
+    assert state.binary_y is not None  # holds y at this point
     inner = _LazyArray(
         _initial_resid,
         state.binary_y.shape,
@@ -973,7 +967,7 @@ def _initial_affluence_tree(
     )
 
 
-@partial(jit, donate_argnums=(0, 1))
+@jit(donate_argnums=(0, 1))
 def _compute_scales(
     error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
@@ -987,7 +981,7 @@ def _compute_scales(
     copies. At least one of `error_scale` and `missing` must be non-None.
     """
     if error_scale is None:
-        inv_sdev_scale = 1.0
+        inv_sdev_scale = jnp.array(1.0)
     else:
         inv_sdev_scale = jnp.reciprocal(error_scale)
     if missing is not None:
@@ -1052,7 +1046,7 @@ def _parse_mesh(
         return None
 
     # convert dict format to actual mesh
-    if isinstance(mesh, dict):
+    if not isinstance(mesh, Mesh):
         assert set(mesh).issubset({'chains', 'data'})
         mesh = make_mesh(
             tuple(mesh.values()), tuple(mesh), axis_types=(AxisType.Auto,) * len(mesh)
@@ -1088,7 +1082,7 @@ def _remove_weak_types(x: PyTree[Array, 'T']) -> PyTree[Array, 'T']:
 
     def remove_weak(x: T) -> T:
         if isinstance(x, Array) and x.weak_type:
-            return x.astype(x.dtype)
+            return cast(T, x.astype(x.dtype))
         else:
             return x
 
@@ -1398,7 +1392,11 @@ def vmap_chains(
     return wrapped
 
 
-def _get_shard_map_patch_kwargs() -> dict[str, bool]:
+class _ShardMapPatchKwargs(TypedDict, total=False):
+    check_vma: bool
+
+
+def _get_shard_map_patch_kwargs() -> _ShardMapPatchKwargs:
     # bug: jax 0.8.1-0.8.2: vmap(shard_map(psum)), jax#34249; the
     # jax_disable_vmap_shmap_error config did not work.
 

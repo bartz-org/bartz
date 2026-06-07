@@ -236,7 +236,6 @@ wheels = [
 
 [[package]]
 name = "bartz"
-version = "0.10.0"
 source = { editable = "." }
 dependencies = [
     { name = "absl-py" },

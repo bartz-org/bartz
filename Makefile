@@ -86,7 +86,7 @@ help:
 	@echo
 	@echo "Release workflow:"
 	@echo "- do a PR that re-runs benchmarks"
-	@echo "- describe release in docs/changelog.md (its topmost header sets the version)"
+	@echo "- describe release in docs/changelog.md (its topmost header sets the version, follow effver https://jacobtomlinson.dev/effver)
 	@echo "- $$ make release, will not release but runs all tests, iterate and debug"
 	@echo "- merge a PR with the changes"
 	@echo "- on main: $$ make release"

@@ -1345,7 +1345,7 @@ def test_count_prec_tree_caches_valid(bkw: BartKW) -> None:
         check_cache(
             forest.prec_tree,
             state.prec_scale,
-            partial(assert_close_matrices, rtol=1e-5, atol=1e-6, reduce_rank=True),
+            partial(assert_close_matrices, rtol=1e-5, reduce_rank=True),
         )
 
 

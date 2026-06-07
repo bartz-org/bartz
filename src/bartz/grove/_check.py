@@ -26,12 +26,11 @@
 
 from typing import Protocol, runtime_checkable
 
-from jax import jit
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Integer, UInt
 
-from bartz._jaxext import autobatch, minimal_unsigned_dtype
-from bartz.grove._grove import TreeHeaps, TreesTrace, is_actual_leaf
+from bartz._jaxext import autobatch, jit, minimal_unsigned_dtype
+from bartz.grove._grove import TreeHeaps, TreesTrace, is_actual_leaf, is_multivariate
 
 CHECK_FUNCTIONS = []
 
@@ -233,7 +232,7 @@ def check_tree(tree: TreeHeaps, max_split: UInt[Array, ' p']) -> UInt[Array, '']
     An integer where each bit indicates whether a check failed.
     """
     error_type = minimal_unsigned_dtype(2 ** len(CHECK_FUNCTIONS) - 1)
-    error = error_type(0)
+    error = jnp.zeros((), error_type)
     for i, func in enumerate(CHECK_FUNCTIONS):
         ok = func(tree, max_split)
         ok = jnp.bool_(ok)
@@ -281,7 +280,7 @@ def check_trace(
     unpack_check_tree = lambda l, v, s: check_tree(
         TreesTrace(leaf_tree=l, var_tree=v, split_tree=s), max_split
     )
-    is_mv = trace.is_multivariate
+    is_mv = is_multivariate(trace)
     signature = '(k,ts),(hts),(hts)->()' if is_mv else '(ts),(hts),(hts)->()'
     vec_check_tree = jnp.vectorize(unpack_check_tree, signature=signature)
 

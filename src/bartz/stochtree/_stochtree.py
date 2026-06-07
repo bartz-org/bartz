@@ -30,7 +30,7 @@ from functools import partial
 
 # WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TypeVar, overload
 
 from jax import numpy as jnp
 from jax.scipy.special import ndtr
@@ -550,6 +550,41 @@ class BARTModel:
             sigma = self._bart.get_error_sdev()
             self.global_var_samples = (sigma * y_std) ** 2
 
+    @overload
+    def predict(
+        self,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        type: Literal['posterior', 'mean'] = 'posterior',
+        terms: Literal['y_hat', 'mean_forest'],
+        scale: Literal['linear', 'probability', 'class'] = 'linear',
+    ) -> Shaped[Array, 'm num_samples'] | Shaped[Array, ' m']: ...
+
+    @overload
+    def predict(
+        self,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        type: Literal['posterior', 'mean'] = 'posterior',
+        terms: Literal['all'] = 'all',
+        scale: Literal['linear', 'probability', 'class'] = 'linear',
+    ) -> dict[str, Shaped[Array, 'm num_samples']] | dict[str, Shaped[Array, ' m']]: ...
+
+    @overload
+    def predict(
+        self,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        type: Literal['posterior', 'mean'] = 'posterior',
+        terms: Sequence[Literal['y_hat', 'mean_forest', 'all']],
+        scale: Literal['linear', 'probability', 'class'] = 'linear',
+    ) -> (
+        Shaped[Array, 'm num_samples']
+        | Shaped[Array, ' m']
+        | dict[str, Shaped[Array, 'm num_samples']]
+        | dict[str, Shaped[Array, ' m']]
+    ): ...
+
     def predict(
         self,
         X: Real[ArrayLike, 'm p'] | DataFrame,
@@ -811,7 +846,7 @@ def check_X(
     X: Real[ArrayLike, 'n p'] | DataFrame, *, name: str = 'X'
 ) -> Real[Array, 'n p']:
     """Convert a DataFrame/array-like to a 2-D jax array in ``(n, p)`` layout."""
-    if hasattr(X, 'columns') and hasattr(X, 'to_numpy'):
+    if isinstance(X, DataFrame):
         X = X.to_numpy()
     arr = jnp.asarray(X)
     if arr.ndim == 1:
@@ -826,7 +861,7 @@ def _coerce_response(
     y: Real[ArrayLike, ' n'] | Series, *, name: str
 ) -> Real[Array, ' n']:
     """Convert a Series/array-like response to a 1-D jax array."""
-    if hasattr(y, 'to_numpy'):
+    if isinstance(y, Series):
         y = y.to_numpy()
     arr = jnp.asarray(y)
     if arr.ndim != 1:

@@ -1,6 +1,6 @@
-# bartz/src/bartz/_jaxext/__init__.py
+# bartz/src/bartz/_typing.py
 #
-# Copyright (c) 2024-2026, The Bartz Contributors
+# Copyright (c) 2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -22,24 +22,13 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Additions to jax and equinox."""
+"""Internal typing helpers."""
 
-# ruff: noqa: F401
+from typing import Any, TypeAlias
 
-from bartz._jaxext._autobatch import autobatch
-from bartz._jaxext._equinox import Module, field
-from bartz._jaxext._jaxext import (
-    equal_shards,
-    get_default_device,
-    get_default_devices,
-    get_device_count,
-    is_key,
-    jaxtyping_disabled,
-    jit_active,
-    minimal_unsigned_dtype,
-    split,
-    truncated_normal_onesided,
-    unique,
-    vmap_nodoc,
-)
-from bartz._jaxext._jit import jit
+# ty is, for the moment, too strict about dicts unpacked into calls: it infers a
+# dict's value type as the union of its values, then checks that union against
+# each target parameter, flagging correct `**kw` calls (astral-sh/ty#3263,
+# #2971). Annotate such a kwargs dict with this alias to erase the value type and
+# silence the false positive; remove the annotations once ty relaxes this.
+kwdict: TypeAlias = dict[str, Any]

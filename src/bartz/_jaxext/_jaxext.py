@@ -25,31 +25,39 @@
 """Implementation of miscellaneous jax extension utilities."""
 
 import math
+import sys
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from functools import partial
 from typing import Any
 
 import jax
-from jax import (
-    Device,
-    ensure_compile_time_eval,
-    jit,
-    lax,
-    random,
-    shard_map,
-    tree,
-    vmap,
-)
+from jax import Device, ensure_compile_time_eval, lax, random, shard_map, tree, vmap
 from jax import numpy as jnp
 from jax.dtypes import prng_key
 from jax.scipy.special import ndtr
 from jax.sharding import PartitionSpec
 from jax.typing import DTypeLike
-from jaxtyping import Array, Bool, Float32, Integer, Key, PyTree, Scalar, Shaped
+from jaxtyping import (
+    Array,
+    Bool,
+    Float32,
+    Integer,
+    Key,
+    PyTree,
+    Scalar,
+    ScalarLike,
+    Shaped,
+)
 from jaxtyping import config as jaxtyping_config
 
+from bartz._jaxext._jit import jit
 from bartz._jaxext.scipy.special import ndtri
+
+if sys.version_info >= (3, 13):
+    from typing import TypeIs
+else:  # WORKAROUND(python<3.13): typing.TypeIs was added in 3.13
+    from typing_extensions import TypeIs
 
 
 @contextmanager
@@ -94,9 +102,9 @@ def minimal_unsigned_dtype(value: int) -> DTypeLike:
     return jnp.uint64
 
 
-@partial(jit, static_argnums=(1,))
+@jit(static_argnums=(1,))
 def unique(
-    x: Shaped[Array, ' _'], size: int, fill_value: Scalar
+    x: Shaped[Array, ' _'], size: int, fill_value: ScalarLike
 ) -> tuple[Shaped[Array, ' {size}'], int | Integer[Array, '']]:
     """
     Restricted version of `jax.numpy.unique` that uses less memory.
@@ -204,13 +212,13 @@ class split:
         return key
 
 
-@partial(jit, static_argnums=(1,))
+@jit(static_argnums=(1,))
 def _split_unpack(key: Key[Array, ''], num: int) -> tuple[Key[Array, ''], ...]:
     keys = random.split(key, num)
     return tuple(keys)
 
 
-@partial(jit, static_argnums=(1,))
+@jit(static_argnums=(1,))
 def _split_shaped(key: Key[Array, ''], shape: tuple[int, ...]) -> Key[Array, ' *shape']:
     num = math.prod(shape)
     keys = random.split(key, num)
@@ -298,7 +306,7 @@ def get_device_count() -> int:
     return len(get_default_devices())
 
 
-def is_key(x: object) -> bool:
+def is_key(x: object) -> TypeIs[Key[Array, ' *shape']]:
     """Determine if `x` is a jax random key."""
     return isinstance(x, Array) and jnp.issubdtype(x.dtype, prng_key)
 

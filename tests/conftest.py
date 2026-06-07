@@ -55,6 +55,7 @@ def get_old_python_version() -> tuple[int, int]:
         data = tomli.load(f)
     spec = data['project']['requires-python'].strip()
     match = fullmatch(r'>=\s*(\d+)\.(\d+)', spec)
+    assert match is not None
     return (int(match.group(1)), int(match.group(2)))
 
 
@@ -96,6 +97,7 @@ def keys(request: pytest.FixtureRequest) -> split:
     nodeid = request.node.nodeid
     # exclude xdist_group suffixes because they are active only under xdist
     match = fullmatch(r'(.+?\.py::.+?(\[.+?\])?)(@.+)?', nodeid)
+    assert match is not None
     nodeid = match.group(1)
     seed = np.array([nodeid], np.bytes_).view(np.uint8)
     rng = np.random.default_rng(seed)

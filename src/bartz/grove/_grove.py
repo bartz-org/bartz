@@ -29,13 +29,20 @@ from dataclasses import fields
 from functools import partial
 from typing import Literal, Protocol, runtime_checkable
 
-from equinox import Module, field, tree_at
-from jax import jit, vmap
+from equinox import tree_at
 from jax import numpy as jnp
+from jax import vmap
 from jaxtyping import Array, Bool, Float, Float32, Int32, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
 
-from bartz._jaxext import autobatch, minimal_unsigned_dtype, vmap_nodoc
+from bartz._jaxext import (
+    Module,
+    autobatch,
+    field,
+    jit,
+    minimal_unsigned_dtype,
+    vmap_nodoc,
+)
 
 
 @runtime_checkable
@@ -77,22 +84,23 @@ class TreeHeaps(Protocol):
     units."""
 
 
-class HeapArrays(Module):
-    """Mixin providing shared behavior for `TreeHeaps` dataclasses.
-
-    Subclasses must declare the `leaf_tree`, `var_tree` and `split_tree` heap
-    arrays (see `TreeHeaps`); this mixin adds no fields, only the derived
-    quantities that are the same regardless of how the leading batch axes are
-    laid out.
+def is_multivariate(trees: TreeHeaps) -> bool:
     """
+    Return whether the trees have vector-valued leaves.
 
-    @property
-    def is_multivariate(self) -> bool:
-        """Whether the leaves are vector-valued (an extra `k` axis on `leaf_tree`)."""
-        return self.leaf_tree.ndim > self.var_tree.ndim
+    Parameters
+    ----------
+    trees
+        The trees to inspect.
+
+    Returns
+    -------
+    Whether the leaves are vector-valued (an extra `k` axis on `leaf_tree`).
+    """
+    return trees.leaf_tree.ndim > trees.var_tree.ndim
 
 
-class TreesTrace(HeapArrays):
+class TreesTrace(Module):
     """Implementation of `bartz.grove.TreeHeaps` for an MCMC trace."""
 
     # `var_tree`/`split_tree` are declared before `leaf_tree` so their single
@@ -225,7 +233,7 @@ def _traverse_forest(
     return traverse_tree(X, var_trees, split_trees)
 
 
-@partial(jit, static_argnames=('sum_batch_axis',))
+@jit(static_argnames=('sum_batch_axis',))
 def evaluate_forest(
     X: UInt[Array, 'p n'],
     trees: TreeHeaps,
@@ -261,7 +269,7 @@ def evaluate_forest(
     indices: UInt[Array, '*forest_shape n']
     indices = traverse_forest(X, trees.var_tree, trees.split_tree)
 
-    is_mv = trees.is_multivariate
+    is_mv = is_multivariate(trees)
 
     bc_indices: UInt[Array, '*forest_shape n 1'] | UInt[Array, '*forest_shape 1 n 1']
     bc_indices = indices[..., None, :, None] if is_mv else indices[..., None]
@@ -393,7 +401,7 @@ def forest_mean_leaves(
     return (num_internal + 1).mean()
 
 
-@partial(jit, static_argnames=('p', 'sum_batch_axis'))
+@jit(static_argnames=('p', 'sum_batch_axis'))
 def var_histogram(
     p: int,
     var_tree: UInt[Array, '*batch_shape half_tree_size'],
@@ -470,7 +478,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     bottom = '╢'  # '┨' #
 
     *_, tree_size = tree.leaf_tree.shape
-    is_mv = tree.is_multivariate
+    is_mv = is_multivariate(tree)
 
     # convert the leaves to data units for printing
     leaf_tree = tree.leaf_scale[..., None] * tree.leaf_tree
@@ -576,7 +584,7 @@ def forest_depth_distr(
     return jnp.bincount(depths, length=depth)
 
 
-@partial(jit, static_argnames=('node_type', 'sum_batch_axis'))
+@jit(static_argnames=('node_type', 'sum_batch_axis'))
 def points_per_node_distr(
     X: UInt[Array, 'p n'],
     var_tree: UInt[Array, '*batch_shape half_tree_size'],
@@ -667,11 +675,12 @@ def points_per_node_distr(
     # automatically batch over all batch dimensions
     max_io_nbytes = 2**27  # 128 MiB
     out_dim_shift = len(axes)
+    batched_func = func
     for i in reversed(range(batch_ndim)):
         if i in axes:
             out_dim_shift -= 1
         else:
-            func = autobatch(func, max_io_nbytes, i, i - out_dim_shift)
+            batched_func = autobatch(batched_func, max_io_nbytes, i, i - out_dim_shift)
     assert out_dim_shift == 0
 
-    return func(var_tree, split_tree)
+    return batched_func(var_tree, split_tree)

@@ -27,14 +27,32 @@
 import math
 from collections.abc import Callable
 from functools import partial, wraps
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 from warnings import warn
 
-from jax import ShapeDtypeStruct, eval_shape, jit, lax, tree
+from jax import ShapeDtypeStruct, eval_shape, lax, tree
 from jax import numpy as jnp
-from jax.typing import DTypeLike
+from jax.typing import ArrayLike, DTypeLike
 from jaxtyping import Array, PyTree, Shaped
 from numpy.lib.array_utils import normalize_axis_index
+
+from bartz._jaxext._jit import jit
+
+
+@runtime_checkable
+class BinaryUfunc(Protocol):
+    """Duck type of binary `jax.numpy.ufunc`s like `jnp.add`.
+
+    Mirrors the stub-only protocol `jax.numpy.BinaryUfunc`, which does not
+    exist at runtime.
+    """
+
+    @property
+    def identity(self) -> bool | int | float: ...
+
+    def __call__(self, x: ArrayLike, y: ArrayLike, /) -> Array: ...
+
+    def reduce(self, a: ArrayLike, /, *, axis: int | None = 0) -> Array: ...
 
 
 def expand_axes(
@@ -61,13 +79,14 @@ def normalize_axes(
         if axis is None:
             return None
         else:
+            assert x is not None
             return normalize_axis_index(axis, len(x.shape))
 
     return tree.map(normalize_axis, axes, tree_arg, is_leaf=lambda x: x is None)
 
 
 def remove_axis(
-    x: PyTree[ShapeDtypeStruct, ' T'], axis: PyTree[int, ' T'], ufunc: jnp.ufunc
+    x: PyTree[ShapeDtypeStruct, ' T'], axis: PyTree[int, ' T'], ufunc: BinaryUfunc
 ) -> PyTree[ShapeDtypeStruct, ' T']:
     """Remove an axis from dummy arrays and change the type to reduction type."""
 
@@ -82,7 +101,7 @@ def remove_axis(
 def extract_size(axes: PyTree[int | None], tree_arg: PyTree) -> int:
     """Get the size of each array in tree_arg at the axis in axes, check they are equal and return it."""
 
-    def get_size(x: object, axis: int | None) -> int | None:
+    def get_size(x: Array | ShapeDtypeStruct, axis: int | None) -> int | None:
         if axis is None:
             return None
         else:
@@ -182,7 +201,7 @@ def unbatch(tree_arg: PyTree[Array, ' T']) -> PyTree[Array, ' T']:
 
 
 def reduce(
-    ufunc: jnp.ufunc,
+    ufunc: BinaryUfunc,
     x: PyTree[Array, ' T'],
     axes: PyTree[int, ' T'],
     initial: PyTree[Array, ' T'] | None,
@@ -205,7 +224,7 @@ def reduce(
 
 
 def identity(
-    ufunc: jnp.ufunc, x: PyTree[ShapeDtypeStruct, ' T']
+    ufunc: BinaryUfunc, x: PyTree[ShapeDtypeStruct, ' T']
 ) -> PyTree[Array, ' T']:
     """Get the identity element for `ufunc` and each array in `x`."""
 
@@ -216,12 +235,12 @@ def identity(
     return tree.map(identity, x)
 
 
-def reduction_dtype(ufunc: jnp.ufunc, input_dtype: DTypeLike) -> DTypeLike:
+def reduction_dtype(ufunc: BinaryUfunc, input_dtype: DTypeLike) -> DTypeLike:
     """Return the output dtype for a reduction with `ufunc` on inputs of type `dtype`."""
     return ufunc.reduce(jnp.empty(1, input_dtype)).dtype
 
 
-def identity_for(ufunc: jnp.ufunc, input_dtype: DTypeLike) -> Shaped[Array, '']:
+def identity_for(ufunc: BinaryUfunc, input_dtype: DTypeLike) -> Shaped[Array, '']:
     """Return the identity for ufunc as an array scalar with the right dtype."""
     # get output type from input type, e.g., int8 is accumulated to int32
     dtype = reduction_dtype(ufunc, input_dtype)
@@ -249,7 +268,7 @@ def autobatch(
     out_axes: PyTree[int] = 0,
     *,
     return_nbatches: bool = False,
-    reduce_ufunc: jnp.ufunc | None = None,
+    reduce_ufunc: BinaryUfunc | None = None,
     reduce_vary_axes: tuple[str, ...] = (),
     warn_on_overflow: bool = True,
     result_shape_dtype: PyTree[ShapeDtypeStruct] | type[NotDefined] = NotDefined,
@@ -334,7 +353,7 @@ def batched_func(
     in_axes: PyTree[int | None],
     out_axes: PyTree[int],
     return_nbatches: bool,
-    reduce_ufunc: jnp.ufunc | None,
+    reduce_ufunc: BinaryUfunc | None,
     reduce_vary_axes: tuple[str, ...],
     warn_on_overflow: bool,
     result_shape_dtype: PyTree[ShapeDtypeStruct] | type[NotDefined],
@@ -441,7 +460,7 @@ def batching_loop(
     nonbatched_args: PyTree,
     in_axes: PyTree[int | None],
     out_axes: PyTree[int],
-    reduce_ufunc: jnp.ufunc | None,
+    reduce_ufunc: BinaryUfunc | None,
 ) -> tuple[PyTree[Array], None] | tuple[None, PyTree[Array]]:
     """Implement the batching loop in `autobatch`."""
     # evaluate the function

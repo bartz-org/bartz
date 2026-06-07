@@ -26,18 +26,25 @@
 
 from dataclasses import replace
 from functools import partial
+from typing import overload
 
-from equinox import AbstractVar, Module
-from jax import jit, lax, named_call, random, vmap
+from equinox import AbstractVar
+from jax import lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Shaped, UInt, UInt32
 
-from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
+from bartz._jaxext import (
+    Module,
+    field,
+    jit,
+    split,
+    truncated_normal_onesided,
+    vmap_nodoc,
+)
 from bartz._jaxext.random import loggamma
 from bartz.grove import var_histogram
-from bartz.mcmcstep._axes import field
 from bartz.mcmcstep._moves import Moves, propose_moves
 from bartz.mcmcstep._reduction import ReductionConfig
 from bartz.mcmcstep._state import (
@@ -51,7 +58,7 @@ from bartz.mcmcstep._state import (
 )
 
 
-@partial(jit, donate_argnums=(1,))
+@jit(donate_argnums=(1,))
 @split_key_for_chains
 @shard_map_state
 @vmap_chains
@@ -424,6 +431,27 @@ def _fill_lrt_total(lrt: Shaped[Array, '*k_k 3']) -> Shaped[Array, '*k_k 3']:
     return jnp.where(jnp.arange(3) == 2, total[..., None], lrt)
 
 
+@overload
+def _compute_count_or_prec_trees(
+    prec_scale: None,
+    leaf_indices: UInt[Array, 'num_trees n'],
+    moves: Moves,
+    config: StepConfig,
+) -> tuple[UInt32[Array, 'num_trees tree_size'], Counts]: ...
+
+
+@overload
+def _compute_count_or_prec_trees(
+    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'],
+    leaf_indices: UInt[Array, 'num_trees n'],
+    moves: Moves,
+    config: StepConfig,
+) -> (
+    tuple[Float32[Array, 'num_trees tree_size'], None]
+    | tuple[Float32[Array, 'num_trees k k tree_size'], None]
+): ...
+
+
 def _compute_count_or_prec_trees(
     prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None,
     leaf_indices: UInt[Array, 'num_trees n'],
@@ -490,13 +518,12 @@ def _compute_count_or_prec_tree(
     # weighted version of the counts is not needed because the likelihood terms
     # are derived from the leaf terms
     lrt = _fill_lrt_total(trees[..., moves.lrt_nodes])
-    if prec_scale is None:
-        counts = Counts(lrt=lrt)
-    else:
-        counts = None
     trees = trees.at[..., moves.lrt_nodes].set(lrt)
 
-    return trees, counts
+    if prec_scale is None:
+        return trees, Counts(lrt=lrt)
+    else:
+        return trees, None
 
 
 @named_call
@@ -902,6 +929,7 @@ def precompute_likelihood_terms(
             leaf_prior_cov_inv, prelf, moves.lrt_nodes
         )
     else:
+        assert isinstance(prelf, PreLfMV)
         return _precompute_likelihood_terms_mv(
             error_cov_inv, leaf_prior_cov_inv, prelf, moves.lrt_nodes
         )
@@ -1282,6 +1310,7 @@ def accept_moves_final_stage(state: State, moves: Moves) -> State:
     -------
     The fully updated BART mcmc state.
     """
+    assert moves.acc is not None
     return replace(
         state,
         forest=replace(
@@ -1417,7 +1446,9 @@ def _apply_moves_to_affluence_trees(
 
 @jit
 def _sample_wishart_bartlett(
-    key: Key[Array, ''], df: Float32[Array, ''], scale_inv: Float32[Array, 'k k']
+    key: Key[Array, ''],
+    df: Float32[Array, ''] | float,
+    scale_inv: Float32[Array, 'k k'],
 ) -> Float32[Array, 'k k']:
     """
     Sample a precision matrix W ~ Wishart(df, scale_inv^-1) using Bartlett decomposition.

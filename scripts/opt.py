@@ -81,8 +81,10 @@ import sys
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from collections.abc import Callable, Iterator
 from dataclasses import MISSING, dataclass, field, fields, replace
-from datetime import UTC, datetime
-from enum import StrEnum, auto
+
+# WORKAROUND(python<3.11): use datetime.UTC and enum.StrEnum
+from datetime import datetime, timezone
+from enum import Enum
 from gc import collect
 from itertools import product
 from pathlib import Path
@@ -127,12 +129,20 @@ def init_default(name: str) -> Any:  # noqa: ANN401
     return default
 
 
-class Logging(StrEnum):
+def read_jax_config(name: str) -> Any:  # noqa: ANN401
+    """Read a dynamically-defined `jax.config` option."""
+    return getattr(jax_config, name)
+
+
+# WORKAROUND(python<3.11): subclass StrEnum and use auto() values
+class Logging(str, Enum):
     """Logging mode for benchmark runs."""
 
-    no = auto()
-    pbar = auto()
-    results = auto()
+    no = 'no'
+    pbar = 'pbar'
+    results = 'results'
+
+    __str__ = str.__str__  # what StrEnum does, keeps argparse --help readable
 
 
 def _kind_name(cls: type[ReductionConfig]) -> str:
@@ -341,28 +351,30 @@ class ConfigParams:
     """`init`'s ``num_chains`` kwarg."""
 
     optimization_level: str | None = field(
-        default=jax_config.jax_optimization_level, metadata={'jax_config': True}
+        default=read_jax_config('jax_optimization_level'), metadata={'jax_config': True}
     )
     """JAX ``jax_optimization_level``; one of ``'O0'``..``'O3'``. ``None`` in the config resolves to the JAX default (typically ``'UNKNOWN'``) at load time."""
 
     exec_time_optimization_effort: float | None = field(
-        default=jax_config.jax_exec_time_optimization_effort,
+        default=read_jax_config('jax_exec_time_optimization_effort'),
         metadata={'jax_config': True},
     )
     """JAX ``jax_exec_time_optimization_effort``; float in ``[-1.0, 1.0]``. ``None`` in the config resolves to the JAX default (typically ``0.0``) at load time."""
 
     memory_fitting_level: str | None = field(
-        default=jax_config.jax_memory_fitting_level, metadata={'jax_config': True}
+        default=read_jax_config('jax_memory_fitting_level'),
+        metadata={'jax_config': True},
     )
     """JAX ``jax_memory_fitting_level``; one of ``'O0'``..``'O3'``. ``None`` in the config resolves to the JAX default (typically ``'O2'``) at load time."""
 
     memory_fitting_effort: float | None = field(
-        default=jax_config.jax_memory_fitting_effort, metadata={'jax_config': True}
+        default=read_jax_config('jax_memory_fitting_effort'),
+        metadata={'jax_config': True},
     )
     """JAX ``jax_memory_fitting_effort``; float in ``[-1.0, 1.0]``. ``None`` in the config resolves to the JAX default (typically ``0.0``) at load time."""
 
     enable_pgle: bool | None = field(
-        default=jax_config.jax_enable_pgle, metadata={'jax_config': True}
+        default=read_jax_config('jax_enable_pgle'), metadata={'jax_config': True}
     )
     """JAX ``jax_enable_pgle``; whether to enable Profile-Guided Latency Estimation. ``None`` in the config resolves to the JAX default (typically ``False``) at load time."""
 
@@ -737,10 +749,10 @@ class Config:
         if extra:
             msg = f'config {path}: "plot" has unknown keys: {sorted(extra)}'
             raise ValueError(msg)
-        if not isinstance(plot['scan'], str):
+        if not isinstance(plot['scan'], str):  # ty: ignore[invalid-argument-type]
             msg = f'config {path}: "plot.scan" must be a string'
             raise TypeError(msg)
-        if not isinstance(plot['reduce'], str):
+        if not isinstance(plot['reduce'], str):  # ty: ignore[invalid-argument-type]
             msg = f'config {path}: "plot.reduce" must be a string'
             raise TypeError(msg)
 
@@ -856,8 +868,8 @@ class Benchmark:
         # PGLE profiles `jax_pgle_profiling_runs` executions then recompiles once
         # (slowly); warm up past that so every timed run is at steady state.
         n_warmup = 1
-        if jax_config.jax_enable_pgle:
-            n_warmup += jax_config.jax_pgle_profiling_runs + 1
+        if read_jax_config('jax_enable_pgle'):
+            n_warmup += read_jax_config('jax_pgle_profiling_runs') + 1
         for _ in range(n_warmup):
             self.task()
 
@@ -1013,7 +1025,7 @@ def enable_compilation_cache() -> None:
 
 def make_output_dir() -> Path:
     """Create a dated output directory next to this script."""
-    stamp = datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%dT%H-%M-%S')
+    stamp = datetime.now(tz=timezone.utc).astimezone().strftime('%Y-%m-%dT%H-%M-%S')
     device = get_default_device().device_kind.replace(' ', '_')
     out_dir = Path(__file__).with_name(f'opt-{stamp}-{device}')
     out_dir.mkdir()

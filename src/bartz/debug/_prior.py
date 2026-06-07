@@ -28,11 +28,11 @@ from dataclasses import replace
 from functools import partial
 
 from equinox import Module
-from jax import jit, lax, random
+from jax import lax, random
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Key, UInt
 
-from bartz._jaxext import minimal_unsigned_dtype, vmap_nodoc
+from bartz._jaxext import jit, minimal_unsigned_dtype, vmap_nodoc
 from bartz._jaxext import split as split_key
 from bartz.grove import TreesTrace
 from bartz.mcmcstep._moves import randint_masked
@@ -373,7 +373,7 @@ def _sample_prior_forest(
     return trees.var_tree, trees.split_tree, trees.leaf_tree
 
 
-@partial(jit, static_argnums=(1, 2))
+@jit(static_argnums=(1, 2))
 def sample_prior(
     key: Key[Array, ''],
     trace_length: int,

@@ -60,8 +60,8 @@ class TestQuantilizer:
     def test_splits_fill(self, fill_value: float | int) -> None:
         """Check how predictors with less unique values are right-padded."""
         with debug_infs(not jnp.isinf(fill_value)):
-            fill_value = jnp.array(fill_value)
-            x = jnp.array([[1, 1, 3, 3], [1, 3, 3, 5], [1, 3, 5, 7]], fill_value.dtype)
+            fill = jnp.array(fill_value)
+            x = jnp.array([[1, 1, 3, 3], [1, 3, 3, 5], [1, 3, 5, 7]], fill.dtype)
             splits, _ = _quantilized_splits_from_matrix(x, 100)
         expected_splits = [[2, fill_value, fill_value], [2, 4, fill_value], [2, 4, 6]]
         assert_array_equal(splits, expected_splits, strict=False)

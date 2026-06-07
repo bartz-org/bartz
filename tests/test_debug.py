@@ -49,10 +49,31 @@ def test_format_tree() -> None:
     print(s)
     ref_s = """\
  1 ┐x4 < 15
- 2 ├── 2.0
+ 2 ├── 1.00000 * 2.00000
  3 └──┐x2 < 3
- 6    ├──╢6.0
- 7    └──╢7.0"""
+ 6    ├──╢1.00000 * 6.00000
+ 7    └──╢1.00000 * 7.00000"""
+    assert s == ref_s
+
+
+def test_format_tree_leaf_scale() -> None:
+    """Check `format_tree` renders the leaf scale and the leaf dtype precision."""
+    tree = manual_tree(
+        [[1.0], [2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], [[4], [1, 2]], [[15], [0, 3]]
+    )
+    tree = tree_at(
+        lambda t: (t.leaf_tree, t.leaf_scale),
+        tree,
+        (tree.leaf_tree.astype(jnp.float16), jnp.float32(0.5)),
+    )
+    s = format_tree(tree)
+    print(s)
+    ref_s = """\
+ 1 ┐x4 < 15
+ 2 ├── 0.500000 * 2.00
+ 3 └──┐x2 < 3
+ 6    ├──╢0.500000 * 6.00
+ 7    └──╢0.500000 * 7.00"""
     assert s == ref_s
 
 
@@ -70,10 +91,10 @@ def test_format_tree_multivariate() -> None:
     print(s)
     ref_s = """\
  1 ┐x4 < 15
- 2 ├── [2.0, -2.0]
+ 2 ├── 1.00000 * [2.00000, -2.00000]
  3 └──┐x2 < 3
- 6    ├──╢[6.0, -6.0]
- 7    └──╢[7.0, -7.0]"""
+ 6    ├──╢1.00000 * [6.00000, -6.00000]
+ 7    └──╢1.00000 * [7.00000, -7.00000]"""
     assert s == ref_s
 
 

@@ -449,15 +449,26 @@ def var_histogram(
     return scatter_add(var_tree, is_internal)
 
 
-def _format_leaf(leaf: Float[Array, ''] | Float[Array, ' k'], is_mv: bool) -> str:
-    """Format a (possibly multivariate) leaf value to 2 significant digits."""
-    if is_mv:
-        return '[' + ', '.join(f'{v:#.2g}' for v in leaf) + ']'
-    return f'{leaf:#.2g}'
+def _format_values(values: Float[Array, ''] | Float[Array, ' k']) -> str:
+    """Format a scalar or vector to the decimal precision of its dtype."""
+    ndigits = jnp.finfo(values.dtype).precision
+    if values.ndim:
+        return '[' + ', '.join(f'{v:#.{ndigits}g}' for v in values) + ']'
+    else:
+        return f'{values:#.{ndigits}g}'
+
+
+def _format_leaf(tree: TreeHeaps, index: int) -> str:
+    """Format the leaf value at `index` as ``<scale> * <leaf>``."""
+    scale = _format_values(tree.leaf_scale)
+    leaf = _format_values(tree.leaf_tree[..., index])
+    return f'{scale} * {leaf}'
 
 
 def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     """Convert a tree to a human-readable string.
+
+    Leaf values are rendered as ``<leaf_scale> * <leaf>``.
 
     Parameters
     ----------
@@ -478,10 +489,6 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     bottom = '╢'  # '┨' #
 
     *_, tree_size = tree.leaf_tree.shape
-    is_mv = is_multivariate(tree)
-
-    # convert the leaves to data units for printing
-    leaf_tree = tree.leaf_scale[..., None] * tree.leaf_tree
 
     def traverse_tree(
         lines: list[str],
@@ -509,11 +516,11 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
                 category = 'leaf'
             else:
                 category = 'decision'
-            node_str = f'{category}({var}, {split}, {leaf_tree[..., index]})'
+            node_str = f'{category}({var}, {split}, {_format_leaf(tree, index)})'
         else:
             assert not unused
             if is_leaf:
-                node_str = _format_leaf(leaf_tree[..., index], is_mv)
+                node_str = _format_leaf(tree, index)
             else:
                 node_str = f'x{var} < {split}'
 

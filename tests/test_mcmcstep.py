@@ -118,7 +118,7 @@ from bartz.mcmcstep._step import (
     step_trees,
     step_z,
 )
-from bartz.testing import gen_nonsense_data
+from bartz.testing import gen_data
 from tests.util import (
     assert_allclose,
     assert_array_equal,
@@ -1731,12 +1731,14 @@ def test_affluence_tree_stays_clean(
     bit left on a grown-away or pruned-away node would be a regression.
     """
     p, n, num_trees, num_steps = 5, 200, 20, 50
-    X, y, max_split = gen_nonsense_data(p, n, None)
+    data = gen_data(
+        keys.pop(), n=n, p=p, q=0, sigma2_lin=1.0, sigma2_quad=1.0, sigma2_eps=1.0
+    ).quantize()
     state = init(
-        X=X,
-        y=y,
+        X=data.x,
+        y=data.y,
         offset=0.0,
-        max_split=max_split,
+        max_split=data.max_split,
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(6),
         leaf_prior_cov_inv=1.0,

@@ -38,6 +38,7 @@ from jax import (
     device_put,
     jit,
     make_mesh,
+    random,
     tree,
 )
 from jax import numpy as jnp
@@ -58,8 +59,27 @@ from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._axes import trace_sample_axes
-from bartz.testing import gen_nonsense_data
+from bartz.testing import QuantizedData, gen_data
 from tests.util import assert_array_equal, assert_close_matrices, nnone
+
+
+def simple_data(p: int, n: int, k: int | None = None) -> QuantizedData:
+    """Generate quantized data for `simple_init`."""
+    data = gen_data(
+        random.key(2025_07_14),
+        n=n,
+        p=p,
+        # gen_data does not support k=0: generate one component and drop it
+        k=1 if k == 0 else k,
+        q=0,
+        lambda_=None if k is None else 0.5,
+        sigma2_lin=1.0,
+        sigma2_quad=1.0,
+        sigma2_eps=1.0,
+    ).quantize()
+    if k == 0:
+        data = replace(data, y=data.y[:0, :])
+    return data
 
 
 @filter_jit
@@ -67,13 +87,13 @@ def simple_init(
     p: int, n: int, ntree: int, k: int | None = None, **kwargs: Any
 ) -> State:
     """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
-    X, y, max_split = gen_nonsense_data(p, n, k)
+    data = simple_data(p, n, k)
     eye = 1.0 if k is None else jnp.eye(k)
     return init(
-        X=X,
-        y=y,
+        X=data.x,
+        y=data.y,
         offset=0.0 if k is None else jnp.zeros(k),
-        max_split=max_split,
+        max_split=data.max_split,
         num_trees=ntree,
         p_nonterminal=make_p_nonterminal(6),
         leaf_prior_cov_inv=eye,
@@ -340,7 +360,7 @@ _N_TEST = 60
 
 def _eval_test_points(n_test: int = _N_TEST) -> UInt8[Array, '6 {n_test}']:
     """Generate quantized test points compatible with `simple_init`'s data."""
-    return gen_nonsense_data(6, n_test, None)[0]
+    return simple_data(6, n_test).x
 
 
 def _make_mesh(axes: dict[str, int]) -> Mesh:

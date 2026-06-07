@@ -30,8 +30,10 @@ from abc import abstractmethod
 from equinox import Module, error_if
 from jax import numpy as jnp
 from jax import random
-from jaxtyping import Array, Float, Integer, Key
+from jax.scipy.special import ndtr
+from jaxtyping import Array, Float, Integer, Key, UInt
 
+from bartz._jaxext import minimal_unsigned_dtype
 from bartz._jaxext.random import loggamma
 
 # The DGP identities documented in `Params` hold for arbitrary families given
@@ -59,6 +61,33 @@ class Distr(Module):
     ) -> Float[Array, '*shape']:
         """Sample i.i.d. standardized values."""
 
+    @abstractmethod
+    def quantize(
+        self, x: Float[Array, '*shape'], max_bins: int
+    ) -> tuple[UInt[Array, '*shape'], Integer[Array, ''] | int]:
+        """Quantize values elementwise into equal-probability bins.
+
+        Parameters
+        ----------
+        x
+            Values drawn from the distribution, of any shape.
+        max_bins
+            Maximum number of levels.
+
+        Returns
+        -------
+        quantized_x : UInt[Array, '*shape']
+            The bin indices, in ``[0, m)``.
+        m : Integer[Array, ''] | int
+            The number of levels, ``<= max_bins``.
+        """
+
+
+def quantize_cdf(cdf: Float[Array, '*shape'], max_bins: int) -> UInt[Array, '*shape']:
+    """Map cdf values in [0, 1] to `max_bins` equal-probability bins."""
+    bins = jnp.clip(jnp.floor(cdf * max_bins), max=max_bins - 1)
+    return bins.astype(minimal_unsigned_dtype(max_bins - 1))
+
 
 class Uniform(Distr):
     """Continuous uniform distribution, standardized: U(-sqrt(3), sqrt(3))."""
@@ -73,6 +102,28 @@ class Uniform(Distr):
     ) -> Float[Array, '*shape']:
         """Sample i.i.d. standardized continuous uniform values."""
         return random.uniform(key, shape, minval=-math.sqrt(3), maxval=math.sqrt(3))
+
+    def quantize(
+        self, x: Float[Array, '*shape'], max_bins: int
+    ) -> tuple[UInt[Array, '*shape'], int]:
+        """Quantize values into equal-probability bins.
+
+        Parameters
+        ----------
+        x
+            Values drawn from the distribution, of any shape.
+        max_bins
+            The number of levels.
+
+        Returns
+        -------
+        quantized_x : UInt[Array, '*shape']
+            The bin indices, in ``[0, max_bins)``.
+        m : int
+            The number of levels, always `max_bins`.
+        """
+        cdf = (x / math.sqrt(3) + 1) / 2
+        return quantize_cdf(cdf, max_bins), max_bins
 
 
 class DiscreteUniform(Distr):
@@ -107,6 +158,32 @@ class DiscreteUniform(Distr):
         var = (m * m - 1) / 12
         return (levels - mean) / jnp.sqrt(var)
 
+    def quantize(
+        self, x: Float[Array, '*shape'], max_bins: int
+    ) -> tuple[UInt[Array, '*shape'], Integer[Array, '']]:
+        """Recover the levels, merged evenly if there are more than `max_bins`.
+
+        Parameters
+        ----------
+        x
+            Values drawn from the distribution, of any shape.
+        max_bins
+            Maximum number of levels.
+
+        Returns
+        -------
+        quantized_x : UInt[Array, '*shape']
+            The bin indices, in ``[0, m)``.
+        m : Integer[Array, '']
+            The number of levels, ``min(self.m, max_bins)``.
+        """
+        mean = (self.m - 1) / 2
+        var = (self.m * self.m - 1) / 12
+        levels = jnp.round(x * jnp.sqrt(var) + mean).astype(jnp.int32)
+        m = jnp.minimum(self.m, max_bins)
+        bins = levels * m // self.m
+        return bins.astype(minimal_unsigned_dtype(max_bins - 1)), m
+
 
 class Normal(Distr):
     """Standard Normal distribution."""
@@ -121,6 +198,27 @@ class Normal(Distr):
     ) -> Float[Array, '*shape']:
         """Sample i.i.d. standard Normal values."""
         return random.normal(key, shape)
+
+    def quantize(
+        self, x: Float[Array, '*shape'], max_bins: int
+    ) -> tuple[UInt[Array, '*shape'], int]:
+        """Quantize values into equal-probability bins.
+
+        Parameters
+        ----------
+        x
+            Values drawn from the distribution, of any shape.
+        max_bins
+            The number of levels.
+
+        Returns
+        -------
+        quantized_x : UInt[Array, '*shape']
+            The bin indices, in ``[0, max_bins)``.
+        m : int
+            The number of levels, always `max_bins`.
+        """
+        return quantize_cdf(ndtr(x), max_bins), max_bins
 
 
 class ScaleDistr(Module):

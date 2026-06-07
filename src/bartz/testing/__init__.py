@@ -26,7 +26,14 @@
 
 # ruff: noqa: F401
 
-from bartz.testing._dgp import DGP, Params, gen_data, gen_data_from_params, gen_params
+from bartz.testing._dgp import (
+    DGP,
+    Params,
+    QuantizedData,
+    gen_data,
+    gen_data_from_params,
+    gen_params,
+)
 from bartz.testing._distr import (
     Constant,
     DiscreteUniform,
@@ -37,4 +44,3 @@ from bartz.testing._distr import (
     SpikeSlab,
     Uniform,
 )
-from bartz.testing._nonsense import gen_nonsense_data

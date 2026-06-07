@@ -31,9 +31,9 @@ from typing import Literal, cast
 from equinox import Module, error_if, field
 from jax import numpy as jnp
 from jax import random
-from jaxtyping import Array, Bool, Float, Int, Integer, Key
+from jaxtyping import Array, Bool, Float, Int, Integer, Key, UInt
 
-from bartz._jaxext import jit, split
+from bartz._jaxext import jit, minimal_unsigned_dtype, split
 from bartz.mcmcstep import OutcomeType
 from bartz.testing._distr import Constant, DiscreteUniform, Distr, ScaleDistr, Uniform
 
@@ -584,6 +584,20 @@ class Params(Module):
     ``'vector'`` (multivariate only) gives per-component scales of shape (k, n)."""
 
 
+class QuantizedData(Module):
+    """Output of `DGP.quantize`: data in the format of `bartz.mcmcstep.init`."""
+
+    x: UInt[Array, 'p n']
+    """Quantized predictors of shape (p, n), with values in
+    ``[0, max_split[j]]`` in row ``j``."""
+
+    y: Float[Array, 'k n'] | Float[Array, ' n']
+    """Outcomes, same as `DGP.y`."""
+
+    max_split: UInt[Array, ' p']
+    """Number of allowed cutpoints per predictor."""
+
+
 class DGP(Module):
     """Output of `gen_data` / `gen_data_from_params`: sampled data and parameters.
 
@@ -706,6 +720,23 @@ class DGP(Module):
             ),
         )
         return train, test
+
+    def quantize(self, max_bins: int = 256) -> QuantizedData:
+        """Quantize the predictors into the format expected by `bartz.mcmcstep.init`.
+
+        Parameters
+        ----------
+        max_bins
+            Maximum number of levels per predictor.
+
+        Returns
+        -------
+        A `QuantizedData` with the quantized predictors, `y` and ``max_split``.
+        """
+        x, m = self.params.x_distr.quantize(self.x, max_bins)
+        p, _ = x.shape
+        max_split = jnp.full(p, m - 1, minimal_unsigned_dtype(max_bins - 1))
+        return QuantizedData(x=x, y=self.y, max_split=max_split)
 
 
 @jit(static_argnames=('p', 'k', 'outcome_type', 'het_shape'))

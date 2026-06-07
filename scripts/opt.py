@@ -112,7 +112,7 @@ from bartz.mcmcstep import (
     step,
 )
 from bartz.mcmcstep._reduction import _ceil_pow2
-from bartz.testing import gen_nonsense_data
+from bartz.testing import gen_data
 
 # Rough element-count budgets used by `ConfigParams.is_valid` to skip
 # combinations that would materialize huge intermediates.
@@ -467,13 +467,25 @@ class ConfigParams:
 
     def to_init_kwargs(self) -> 'InitKwargs':
         """Translate this combination into kwargs for `init`."""
-        X, y, max_split = gen_nonsense_data(1, self.n, self.k)
+        # gen_data requires p >= k, but the benchmarks use a single predictor:
+        # generate with p = k and keep only the first predictor
+        data = gen_data(
+            random.key(2026_06_07),
+            n=self.n,
+            p=1 if self.k is None else self.k,
+            k=self.k,
+            q=0,
+            lambda_=None if self.k is None else 0.5,
+            sigma2_lin=1.0,
+            sigma2_quad=1.0,
+            sigma2_eps=1.0,
+        ).quantize()
         eye = 1.0 if self.k is None else jnp.eye(self.k)
         return InitKwargs(
-            X=X,
-            y=y,
-            offset=jnp.zeros(y.shape[:-1]),
-            max_split=max_split,
+            X=data.x[:1, :],
+            y=data.y,
+            offset=jnp.zeros(data.y.shape[:-1]),
+            max_split=data.max_split[:1],
             num_trees=self.num_trees,
             p_nonterminal=make_p_nonterminal(self.maxdepth, 0.95, 2),
             leaf_prior_cov_inv=self.num_trees * eye,

@@ -105,8 +105,9 @@ repos:
         # the bound, and drop this hook once the CI-pinned uv reaches it.
         # `--inexact` avoids pruning extras (e.g. cuda), `--frozen` avoids
         # touching uv.lock mid-rebase, and the venv check skips worktrees
-        # without an environment (e.g. right after `worktree add`).
-        entry: sh -c 'test ! -d .venv || uv sync --frozen --inexact --quiet --reinstall-package bartz'
+        # without an environment (e.g. right after `worktree add`);
+        # UV_PROJECT_ENVIRONMENT is the only uv setting that moves the venv.
+        entry: sh -c 'test ! -d "${UV_PROJECT_ENVIRONMENT:-.venv}" || uv sync --frozen --inexact --quiet --reinstall-package bartz'
         language: system
         pass_filenames: false
         always_run: true

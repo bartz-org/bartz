@@ -158,22 +158,15 @@ class TraceWithOffset(Module):
 
     @classmethod
     def from_trees_trace(
-        cls,
-        trees: TreeHeaps,
-        offset: Float32[Array, ''],
-        leaf_scale: Float32[Array, ''] | None = None,
+        cls, trees: TreeHeaps, offset: Float32[Array, '']
     ) -> 'TraceWithOffset':
-        """Create a `TraceWithOffset` from a `TreeHeaps`.
-
-        The leaf scale is taken from `trees` unless overridden with
-        `leaf_scale`.
-        """
+        """Create a `TraceWithOffset` from a `TreeHeaps`."""
         return cls(
             leaf_tree=trees.leaf_tree,
             var_tree=trees.var_tree,
             split_tree=trees.split_tree,
             offset=offset,
-            leaf_scale=trees.leaf_scale if leaf_scale is None else leaf_scale,
+            leaf_scale=trees.leaf_scale,
         )
 
 

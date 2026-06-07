@@ -47,6 +47,9 @@ repos:
       - id: copyright
       - id: copyright-required
         files: \.(py|rst)$
+        # generated headerless file; untracked, so it only reaches hooks via
+        # an explicit `pre-commit run --files`
+        exclude: src/bartz/_version\.py$
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.14
     hooks:
@@ -95,12 +98,14 @@ repos:
         stages: [pre-merge-commit]
       - id: refresh-editable-version
         name: refresh the editable install's git-derived version
-        # The editable bartz's version is computed at (re)build time, and uv
-        # cannot detect new commits in linked worktrees (see the cache-keys
-        # comment in pyproject.toml), so refresh the install whenever HEAD
-        # moves. `--inexact` avoids pruning extras (e.g. cuda), `--frozen`
-        # avoids touching uv.lock mid-rebase, and the venv check skips
-        # worktrees without an environment (e.g. right after `worktree add`).
+        # WORKAROUND(uv<99): uv's git cache-keys cannot detect new commits in
+        # linked worktrees (see the cache-keys comment in pyproject.toml), so
+        # the editable bartz's version goes stale; refresh it whenever HEAD
+        # moves. If a uv release fixes worktree commit detection, set it as
+        # the bound, and drop this hook once the CI-pinned uv reaches it.
+        # `--inexact` avoids pruning extras (e.g. cuda), `--frozen` avoids
+        # touching uv.lock mid-rebase, and the venv check skips worktrees
+        # without an environment (e.g. right after `worktree add`).
         entry: sh -c 'test ! -d .venv || uv sync --frozen --inexact --quiet --reinstall-package bartz'
         language: system
         pass_filenames: false

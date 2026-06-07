@@ -61,15 +61,85 @@ class ReductionConfig(Module):
         /,
         *,
         size: int,
+        indices_subset: Integer[Array, ' sub_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {size}']:
-        """Indexed reduce along the last axis of `values` into `size` bins.
+        # the output's trailing axis is the number of reduced bins: the subset
+        # length, or `size` without a subset; jaxtyping renders `{...}` dims by
+        # str-formatting the argument (which garbles arrays) and forbids spaces,
+        # hence `getattr`
+    ) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
+        """Indexed reduce along the last axis of `values`.
 
-        The output and the accumulation are in `dtype`; the values are kept in
-        their own, possibly narrower, dtype until accumulated.
+        Parameters
+        ----------
+        values
+            The values to sum into bins, or a scalar `int` weighting every
+            datapoint equally (used to count the datapoints in each bin).
+        indices
+            The bin index each datapoint falls into.
+        size
+            The static excluded upper bound on the values of `indices`, and
+            the number of output bins when `indices_subset` is not given.
+        indices_subset
+            If given, reduce only into these bins, in the given order,
+            ignoring the datapoints whose index falls elsewhere. The entries
+            must not repeat, except entries ``>= size``, allowed as padding to
+            a static length, whose bins reduce to zero.
+        dtype
+            The dtype of the output and of the accumulation; the values are
+            kept in their own, possibly narrower, dtype until accumulated.
+        data_sharded
+            Whether the data axis is sharded; if true, the result is
+            psum-reduced across the ``'data'`` axis of the enclosing
+            `shard_map`.
+
+        Returns
+        -------
+        The per-bin sums, with the same leading dimensions as `values` and the bins on the trailing axis.
         """
         ...
+
+
+def _resolve_subset(
+    indices: Integer[Array, ' n'],
+    size: int,
+    indices_subset: Integer[Array, ' sub_size'] | None,
+) -> tuple[int, Integer[Array, ' n']]:
+    """Reduce the subset case to the full case for scatter-based algorithms.
+
+    Parameters
+    ----------
+    indices
+        The bin index each datapoint falls into, in ``[0, size)``.
+    size
+        The number of bins.
+    indices_subset
+        The bins to reduce into, or `None` for all of them.
+
+    Returns
+    -------
+    out_size : int
+        The number of output bins: the subset length, or `size` without a subset.
+    indices : Integer[Array, ' n']
+        The scatter indices into the output bins: unchanged without a subset,
+        else each datapoint's position in the subset, remapped through a
+        `size`-long lookup table, with misses sent to the out-of-range
+        position ``sub_size``, which scatters drop.
+    """
+    if indices_subset is None:
+        return size, indices
+    else:
+        (sub_size,) = indices_subset.shape
+        # the table holds the downstream scatter indices: unsigned avoids a
+        # negative-index normalization select in the scatter; subset entries
+        # `>= size` fall out of the table, leaving their bins at zero
+        table = (
+            jnp.full(size, sub_size, jnp.uint32)
+            .at[indices_subset]
+            .set(jnp.arange(sub_size, dtype=jnp.uint32))
+        )
+        return sub_size, table[indices]
 
 
 class BatchedReduction(ReductionConfig):
@@ -104,11 +174,13 @@ class BatchedReduction(ReductionConfig):
         /,
         *,
         size: int,
+        indices_subset: Integer[Array, ' sub_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {size}']:
+    ) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
         values = jnp.asarray(values)
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
+        size, indices = _resolve_subset(indices, size, indices_subset)
 
         def impl(num_batches: int | None) -> Shaped[Array, '*batch_shape size']:
             return _batched_scatter_add(
@@ -203,9 +275,9 @@ class OneHotReduction(ReductionConfig):
     """Dense one-hot reduction.
 
     Materializes the membership of each datapoint in its leaf as a one-hot
-    matrix over the `size` bins and contracts it against the values. Beats
-    `BatchedReduction` only when `size` is very small (e.g. a single leaf pair),
-    or on gpu for multivariate residuals.
+    matrix over the output bins and contracts it against the values. Beats
+    `BatchedReduction` only when the number of bins is very small (e.g. a
+    single leaf pair), or on gpu for multivariate residuals.
     """
 
     method: Literal['matmul', 'multiply', 'scatter_set'] = field(
@@ -238,9 +310,10 @@ class OneHotReduction(ReductionConfig):
         /,
         *,
         size: int,
+        indices_subset: Integer[Array, ' sub_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {size}']:
+    ) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
         values = jnp.asarray(values)
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
 
@@ -249,7 +322,9 @@ class OneHotReduction(ReductionConfig):
         scalar = values.ndim == 0
         (n,) = indices.shape
         batch_shape = values.shape[:-1]
-        bins = jnp.arange(size, dtype=indices.dtype)
+        size, bins, indices = _resolve_subset_bins(
+            indices, size, indices_subset, remap=self.method == 'scatter_set'
+        )
         # unsigned avoids a negative-index normalization select in the scatter
         iota = jnp.arange(n, dtype=jnp.uint32)
 
@@ -303,6 +378,29 @@ class OneHotReduction(ReductionConfig):
         return out
 
 
+def _resolve_subset_bins(
+    indices: Integer[Array, ' n'],
+    size: int,
+    indices_subset: Integer[Array, ' sub_size'] | None,
+    *,
+    remap: bool,
+) -> tuple[int, Integer[Array, ' out_size'], Integer[Array, ' n']]:
+    """Resolve the subset into output size, comparison bins, and scatter indices.
+
+    The comparison methods of `OneHotReduction` reduce against the subset bins
+    directly, while its scatter method (`remap`) indexes bins by position, so
+    the indices are remapped like in `_resolve_subset`.
+    """
+    if indices_subset is None:
+        return size, jnp.arange(size, dtype=indices.dtype), indices
+    elif remap:
+        sub_size, indices = _resolve_subset(indices, size, indices_subset)
+        return sub_size, indices_subset, indices
+    else:
+        (sub_size,) = indices_subset.shape
+        return sub_size, indices_subset, indices
+
+
 class PallasReduction(ReductionConfig):
     """Blocked one-hot scatter-add written as a Pallas kernel.
 
@@ -312,7 +410,7 @@ class PallasReduction(ReductionConfig):
     guaranteed to stay fused (it is never written back to main memory). Targets
     gpu/tpu; on cpu it falls back to Pallas interpret mode, which is slow and
     meant only for testing. Like `OneHotReduction`, it is competitive only when
-    `size` (the number of leaves) is small. Does not support sharding the
+    the number of output bins is small. Does not support sharding the
     datapoints across devices.
 
     On gpu the kernel is lowered through Triton or Mosaic GPU; see `backend`.
@@ -351,9 +449,10 @@ class PallasReduction(ReductionConfig):
         /,
         *,
         size: int,
+        indices_subset: Integer[Array, ' sub_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {size}']:
+    ) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
         if data_sharded:
             # the kernel trips the vma checks of `shard_map`, in jax-version-
             # dependent ways, even in interpret mode
@@ -364,6 +463,10 @@ class PallasReduction(ReductionConfig):
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
         (n,) = indices.shape
         num_rows = 1 if values.ndim == 0 else math.prod(values.shape[:-1])
+        if indices_subset is None:
+            out_size = size
+        else:
+            (out_size,) = indices_subset.shape
 
         # the grid size, tile width and interpret flag are all static; they are
         # resolved from `backend` (cpu vs gpu) rather than the trace-time platform,
@@ -371,7 +474,7 @@ class PallasReduction(ReductionConfig):
         interpret = self.backend == 'cpu'
         compiler_params = _resolve_pallas_backend(self.backend)
         if self.block_size == 'auto':
-            block_size = _auto_block_size(n, size, num_rows)
+            block_size = _auto_block_size(n, out_size, num_rows)
         else:
             block_size = self.block_size
         if self.num_blocks == 'auto':
@@ -384,6 +487,7 @@ class PallasReduction(ReductionConfig):
             values,
             indices,
             size=size,
+            bins=indices_subset,
             dtype=dtype,
             num_blocks=num_blocks,
             block_size=block_size,
@@ -433,13 +537,19 @@ def _pallas_scatter_add(
     /,
     *,
     size: int,
+    bins: Integer[Array, ' sub_size'] | None,
     dtype: DTypeLike,
     num_blocks: int,
     block_size: int,
     interpret: bool,
     compiler_params: pl.CompilerParams | None = None,
-) -> Shaped[Array, '*batch_shape {size}']:
-    """Blocked one-hot indexed reduce via a Pallas kernel; see `PallasReduction`."""
+) -> Shaped[Array, '*batch_shape {getattr(bins,"size",size)}']:
+    """Blocked one-hot indexed reduce via a Pallas kernel; see `PallasReduction`.
+
+    `bins` are the bin indices to reduce into, `None` meaning all of ``0, 1,
+    ..., size - 1``; the kernel compares the indices against them, so the
+    subset case costs nothing more than the full one.
+    """
     scalar = values.ndim == 0
     (n,) = indices.shape
     if scalar:
@@ -451,12 +561,22 @@ def _pallas_scatter_add(
         batch_shape = values.shape[:-1]
         rows = values.reshape(-1, n)
     num_rows, _ = rows.shape
+    if bins is None:
+        out_size = size
+    else:
+        (out_size,) = bins.shape
 
-    # the Triton backend requires every array dimension to be a power of 2. `size`
-    # (the tree array size) and `block_size` already are; pad the rows axis (its
-    # length is the product of the value's batch shape, e.g. k or k*k, so any k)
-    # to a power of 2 with zero rows, whose zero output is sliced off below.
+    # the Triton backend requires every array dimension to be a power of 2;
+    # `block_size` already is. Pad the rows axis (its length is the product of
+    # the value's batch shape, e.g. k or k*k, so any k) with zero rows and the
+    # bins axis (`size` is the tree array size, a power of 2, but a subset has
+    # any length) with the out-of-domain bin `size`; both pads are sliced off
+    # below, so even if `size` wraps in a narrow bin dtype and duplicates a real
+    # bin, it only copies that bin's sum into the discarded padding.
     padded_rows = _ceil_pow2(num_rows)
+    padded_size = _ceil_pow2(out_size)
+    if bins is not None:
+        bins = jnp.pad(bins, (0, padded_size - out_size), constant_values=size)
 
     # each instance scans `iters` sub-blocks of `block_size` datapoints; pad the
     # datapoint axis so it splits evenly. The padded datapoints are zero in every
@@ -470,36 +590,49 @@ def _pallas_scatter_add(
 
     # the kernel operates on `Ref`s, not arrays, so it carries no array
     # annotations (which would also trip runtime shape typechecking)
-    def kernel(rows_ref, indices_ref, out_ref):  # noqa: ANN001, ANN202
-        bins = jnp.arange(size, dtype=indices_ref.dtype)
+    def kernel(rows_ref, indices_ref, *refs):  # noqa: ANN001, ANN002, ANN202
+        if bins is None:
+            (out_ref,) = refs
+            kernel_bins = jnp.arange(padded_size, dtype=indices_ref.dtype)
+        else:
+            bins_ref, out_ref = refs
+            kernel_bins = bins_ref[:]
 
         def accumulate(i, acc):  # noqa: ANN001, ANN202
             block = pl.ds(i * block_size, block_size)
-            onehot = (bins[:, None] == indices_ref[block]).astype(rows_ref.dtype)
+            onehot = kernel_bins[:, None] == indices_ref[block]
             # the one-hot product is exact in the values' dtype; the block
             # reduction accumulates in `dtype`
-            prod = rows_ref[:, block][:, None, :] * onehot
+            prod = rows_ref[:, block][:, None, :] * onehot.astype(rows_ref.dtype)
             return acc + prod.sum(axis=-1, dtype=dtype)
 
         out_ref[0] = lax.fori_loop(
-            0, iters, accumulate, jnp.zeros((padded_rows, size), dtype)
+            0, iters, accumulate, jnp.zeros((padded_rows, padded_size), dtype)
         )
+
+    in_specs = [
+        pl.BlockSpec((padded_rows, chunk), lambda p: (0, p)),
+        pl.BlockSpec((chunk,), lambda p: (p,)),
+    ]
+    args = [rows, indices]
+    if bins is not None:
+        # every instance reads the whole (tiny) bins array
+        in_specs.append(pl.BlockSpec((padded_size,), lambda _p: (0,)))
+        args.append(bins)
 
     out = pl.pallas_call(
         kernel,
-        out_shape=ShapeDtypeStruct((num_blocks, padded_rows, size), dtype),
+        out_shape=ShapeDtypeStruct((num_blocks, padded_rows, padded_size), dtype),
         grid=(num_blocks,),
-        in_specs=[
-            pl.BlockSpec((padded_rows, chunk), lambda p: (0, p)),
-            pl.BlockSpec((chunk,), lambda p: (p,)),
-        ],
-        out_specs=pl.BlockSpec((1, padded_rows, size), lambda p: (p, 0, 0)),
+        in_specs=in_specs,
+        out_specs=pl.BlockSpec((1, padded_rows, padded_size), lambda p: (p, 0, 0)),
         interpret=interpret,
         compiler_params=compiler_params,
         name='scatter_add',
-    )(rows, indices)
-    out = out.sum(axis=0)[:num_rows]  # drop the power-of-2 padding rows
+    )(*args)
+    # drop the power-of-2 padding rows and bins
+    out = out.sum(axis=0)[:num_rows, :out_size]
 
     if scalar:
-        return out.reshape(size)
-    return out.reshape(*batch_shape, size)
+        return out.reshape(out_size)
+    return out.reshape(*batch_shape, out_size)

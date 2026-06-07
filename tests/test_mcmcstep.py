@@ -669,9 +669,10 @@ class TestReduction:
         /,
         *,
         size: int,
+        indices_subset: Integer[Array, ' sub_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {size}']:
+    ) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
         """External baseline mirroring `_reduce` via `jax.ops.segment_sum`."""
         values = jnp.asarray(values)
         # `segment_sum` reduces the leading axis, `_reduce` the last one; a
@@ -680,7 +681,12 @@ class TestReduction:
             data = jnp.broadcast_to(values.astype(dtype), indices.shape)
         else:
             data = jnp.moveaxis(values, -1, 0).astype(dtype)
-        out = jnp.moveaxis(segment_sum(data, indices, num_segments=size), 0, -1)
+        out = segment_sum(data, indices, num_segments=size)
+        if indices_subset is not None:
+            # select the subset bins from the full reduction; 'fill' makes
+            # out-of-domain padding bins read as zero instead of clamping
+            out = out.at[indices_subset].get(mode='fill', fill_value=0)
+        out = jnp.moveaxis(out, 0, -1)
         if data_sharded:
             out = lax.psum(out, 'data')
         return out
@@ -695,8 +701,10 @@ class TestReduction:
         sums overflow float16 (catching accumulation in the values' dtype
         rather than in the requested `dtype`), composition with an external
         `vmap` that batches only the indices (the layout `step` uses to
-        count/sum over many trees at once), and a data axis sharded with
-        `shard_map`, which `PallasReduction` must reject.
+        count/sum over many trees at once), reductions over an explicit bin
+        subset (unsorted, skipping most bins, with an odd length and a bin
+        outside the index domain), and a data axis sharded with `shard_map`,
+        which `PallasReduction` must reject.
         """
         n, size, num_trees = 512, 8, 4
         indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
@@ -711,9 +719,15 @@ class TestReduction:
         # float16 values: each per-bin sum overflows the float16 range, so a
         # reduction accumulating in the values' dtype returns inf
         overflowing = jnp.full(n, 4096.0, jnp.float16)
+        # bin subset: unsorted, skips most bins, has a non-power-of-2 length
+        # (exercising the bins padding `PallasReduction` needs for Triton), and
+        # contains an out-of-domain bin (100), allowed as static-shape padding,
+        # whose sum must come out zero
+        subset = jnp.array([5, 2, 7, 0, 100], jnp.uint32)
 
         count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
         float_kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
+        subset_kw = dict(float_kw, indices_subset=subset)
         exact = assert_array_equal  # the count path must match exactly
         close = partial(assert_close_matrices, rtol=1e-5, atol=1e-6, reduce_rank=True)
 
@@ -731,6 +745,16 @@ class TestReduction:
             ),
             'vmap float': (
                 lambda f: vmap(partial(f, vector, **float_kw))(tree_indices),
+                close,
+            ),
+            'subset count': (
+                lambda f: f(1, indices, **dict(subset_kw, dtype=jnp.uint32)),
+                exact,
+            ),
+            'subset float': (lambda f: f(vector, indices, **subset_kw), close),
+            'subset float matrix': (lambda f: f(matrix, indices, **subset_kw), close),
+            'vmap subset float': (
+                lambda f: vmap(partial(f, vector, **subset_kw))(tree_indices),
                 close,
             ),
         }
@@ -758,6 +782,16 @@ class TestReduction:
             cases['sharded float'] = (
                 lambda f: shard_map(
                     partial(f, **dict(float_kw, data_sharded=True)),
+                    mesh=mesh,
+                    in_specs=(data, data),
+                    out_specs=replicated,
+                )(sharded_vector, sharded_indices),
+                close,
+            )
+            # the bin subset is closed over, so it is replicated across shards
+            cases['sharded subset float'] = (
+                lambda f: shard_map(
+                    partial(f, **dict(subset_kw, data_sharded=True)),
                     mesh=mesh,
                     in_specs=(data, data),
                     out_specs=replicated,

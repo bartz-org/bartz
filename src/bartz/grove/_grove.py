@@ -117,7 +117,7 @@ class TreesTrace(Module):
 
         `self` supplies the (array) pytree; the same-named fields of `obj`
         (axis specs, i.e. ints or `None`) replace its leaves. Built with
-        `tree_at`, which bypasses the type-checked `__init__`, so the
+        `equinox.tree_at`, which bypasses the type-checked `__init__`, so the
         deliberately off-type axis values are allowed.
         """
         names = [f.name for f in fields(type(self))]

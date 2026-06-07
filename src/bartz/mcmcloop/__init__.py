@@ -41,6 +41,7 @@ Evaluating the trace
 
     evaluate_trace
     compute_varcount
+    EvaluableTrace
 
 Progress callbacks
 ------------------
@@ -73,6 +74,6 @@ from bartz.mcmcloop._callback import (
     print_callback,
     tqdm_callback,
 )
-from bartz.mcmcloop._evaluate import compute_varcount, evaluate_trace
+from bartz.mcmcloop._evaluate import EvaluableTrace, compute_varcount, evaluate_trace
 from bartz.mcmcloop._loop import Callback, CallbackState, RunMCMCResult, run_mcmc
 from bartz.mcmcloop._trace import BurninTrace, MainTrace

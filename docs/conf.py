@@ -226,6 +226,14 @@ autoclass_content = 'class'
 # default arguments are printed as in source instead of being evaluated
 autodoc_preserve_defaults = True
 autodoc_default_options = {'member-order': 'bysource'}
+# WORKAROUND(sphinx-autodoc-typehints<99): napoleon escapes the trailing
+# underscore of parameter names (e.g. `lambda_`) only when
+# strip_signature_backslash is on, but sphinx-autodoc-typehints always escapes
+# it when looking up the `:param:` line to attach the type to, so with the
+# default off the names never match and such parameters lose their type and
+# default in the rendered docs. Keep this on until the upstream fix (see
+# https://github.com/tox-dev/sphinx-autodoc-typehints/issues) is released.
+strip_signature_backslash = True
 
 # autosummary
 # generate the per-object stub pages at build time
@@ -249,9 +257,10 @@ napoleon_use_ivar = True
 napoleon_use_rtype = False
 
 # intersphinx
-# stochtree's docs are built with quarto/quartodoc and don't publish a Sphinx
-# objects.inv, so we point intersphinx at a vendored inventory scraped from the
-# quartodoc API reference (see docs/_inventory/make_stochtree_inventory.py).
+# stochtree's and equinox's docs (quarto/quartodoc and mkdocs/mkdocstrings,
+# respectively) don't publish a Sphinx objects.inv, so we point intersphinx at
+# vendored inventories scraped from their API references (see
+# docs/_inventory/make_inventories.py).
 intersphinx_mapping = dict(
     python=('https://docs.python.org/3', None),
     scipy=('https://docs.scipy.org/doc/scipy', None),
@@ -260,6 +269,10 @@ intersphinx_mapping = dict(
     stochtree=(
         'https://stochtree.ai',
         str(pathlib.Path(__file__).parent / '_inventory' / 'stochtree.inv'),
+    ),
+    equinox=(
+        'https://docs.kidger.site/equinox',
+        str(pathlib.Path(__file__).parent / '_inventory' / 'equinox.inv'),
     ),
 )
 

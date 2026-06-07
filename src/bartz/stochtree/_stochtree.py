@@ -80,7 +80,7 @@ class OutcomeModel:
 
 
 class NotSampledError(ValueError, AttributeError):
-    """Raised when calling a method that requires `sample` to have been called."""
+    """Raised when calling a method that requires `BARTModel.sample` to have been called."""
 
 
 @dataclass(frozen=True, kw_only=True)

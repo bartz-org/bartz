@@ -36,6 +36,8 @@ High-level interface
 
     bartz.Bart
     bartz.PredictKind
+    bartz.DataFrame
+    bartz.Series
 
 .. `OutcomeType` is re-exported at the top level, but its page is canonically
 .. under `bartz.mcmcstep`, so link it without generating a duplicate page.

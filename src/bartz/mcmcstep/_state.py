@@ -47,6 +47,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
+from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Key, PyTree, UInt
 from numpy import ndarray
 
@@ -105,10 +106,16 @@ class Forest(HeapArrays):
     """Marks leaves that can be grown."""
 
     leaf_tree: (
-        Float32[Array, '*chains num_trees 2*half_tree_size']
-        | Float32[Array, '*chains num_trees k 2*half_tree_size']
+        Float[Array, '*chains num_trees 2*half_tree_size']
+        | Float[Array, '*chains num_trees k 2*half_tree_size']
     ) = field(chains=CHAIN_AXIS)
-    """The leaf values."""
+    """The leaf values, in units of `leaf_scale`."""
+
+    leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
+    """The scale of the leaf values. The function represented by the forest is
+    ``offset + leaf_scale * (sum of leaf values)``. Set to the marginal prior
+    standard deviation of a leaf, so the stored leaves are O(1) whatever the
+    data units and do not over/underflow narrow `leaf_tree` dtypes."""
 
     grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of grow proposals made during one full MCMC cycle."""
@@ -259,7 +266,8 @@ class State(Module):
     `init` and used by `step_z` to update only the binary rows of `resid`."""
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
-    """Constant shift added to the sum of trees."""
+    """Constant shift added to the scaled sum of trees, see
+    `Forest.leaf_scale`."""
 
     resid: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
         chains=CHAIN_AXIS, data=-1
@@ -539,6 +547,7 @@ def init(
     num_trees: int,
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
     leaf_prior_cov_inv: FloatLike | Float[ArrayLike, 'k k'],
+    leaf_dtype: DTypeLike = jnp.float32,
     error_cov_df: FloatLike | None = None,
     error_cov_scale: FloatLike | Float[ArrayLike, 'k k'] | None = None,
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
@@ -593,6 +602,13 @@ def init(
         The prior covariance of the sum of trees is
         ``num_trees * leaf_prior_cov_inv^-1``. The prior mean of leaves is
         always zero.
+    leaf_dtype
+        The dtype used to store the leaf values. The leaf full conditionals
+        are always computed and sampled in float32; a narrower dtype (e.g.,
+        float16) affects only the storage, rounding each leaf once per
+        sampling. Leaves are stored in units of their marginal prior standard
+        deviation (see `Forest.leaf_scale`), so narrow dtypes do not
+        over/underflow whatever the scale of `y`.
     error_cov_df
     error_cov_scale
         The df and scale parameters of the inverse Wishart prior on the error
@@ -728,6 +744,13 @@ def init(
         )
     )
 
+    # leaves are stored in units of their marginal prior standard deviation,
+    # such that they are O(1) whatever the data units and do not
+    # over/underflow narrow leaf dtypes
+    leaf_dtype = jnp.dtype(leaf_dtype)
+    assert jnp.issubdtype(leaf_dtype, jnp.floating)
+    leaf_scale = _compute_leaf_scale(leaf_prior_cov_inv, kshape)
+
     # extract array sizes from arguments
     (max_depth,) = p_nonterminal.shape
     p, n = X.shape
@@ -800,8 +823,9 @@ def init(
             error_cov_scale=error_cov_scale,
             forest=Forest(
                 leaf_tree=_LazyArray(
-                    jnp.zeros, (num_trees, *kshape, tree_size), jnp.float32
+                    jnp.zeros, (num_trees, *kshape, tree_size), leaf_dtype
                 ),
+                leaf_scale=leaf_scale,
                 var_tree=_LazyArray(
                     jnp.zeros,
                     (num_trees, tree_size // 2),
@@ -898,6 +922,24 @@ def init(
     # values, so type-checking can resume; make all types strong to avoid
     # unwanted recompilations
     return _remove_weak_types(state)
+
+
+def _compute_leaf_scale(
+    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+    kshape: tuple[()] | tuple[int],
+) -> Float32[Array, ''] | Float32[Array, ' k']:
+    """Compute the marginal prior standard deviation of a leaf.
+
+    A degenerate prior precision (e.g., infinite, from `bartz.Bart` with
+    constant ``y``) yields a zero or non-finite scale; fall back to 1 to avoid
+    nan leaves (an infinite precision pins the leaves to zero anyway).
+    """
+    if kshape:
+        leaf_prior_cov = _inv_via_chol_with_gersh(leaf_prior_cov_inv)
+        leaf_scale = jnp.sqrt(jnp.diagonal(leaf_prior_cov))
+    else:
+        leaf_scale = jnp.sqrt(jnp.reciprocal(leaf_prior_cov_inv))
+    return jnp.where(jnp.isfinite(leaf_scale) & (leaf_scale > 0), leaf_scale, 1.0)
 
 
 def _set_initial_resid(

@@ -450,3 +450,33 @@ class TestEvaluateTrace:
         with pytest.warns(UserWarning, match='max_io_nbytes'):
             looped = evaluate_trace(X, trace, test_points=mode, max_io_nbytes=1)
         assert_close_matrices(looped, base, rtol=1e-5)
+
+
+def test_leaf_dtype_and_scale(keys: split) -> None:
+    """float16 leaves flow through the trace and evaluate in float32."""
+    p, n, num_trees = 5, 50, 10
+    X, y, max_split = gen_nonsense_data(p, n, None)
+    state = init(
+        X=jnp.copy(X),
+        y=jnp.copy(y),
+        offset=0.0,
+        max_split=max_split,
+        num_trees=num_trees,
+        p_nonterminal=make_p_nonterminal(6),
+        # a precision that makes leaf_scale != 1 to exercise the scaling
+        leaf_prior_cov_inv=4.0 * num_trees,
+        error_cov_df=2.0,
+        error_cov_scale=2.0,
+        leaf_dtype='float16',
+    )
+    final_state, _, main_trace = run_mcmc(keys.pop(), state, 4, n_burn=2)
+
+    assert main_trace.leaf_tree.dtype == jnp.float16
+    assert_array_equal(main_trace.leaf_scale, final_state.forest.leaf_scale)
+
+    yhat = evaluate_trace(X, main_trace)
+    assert yhat.dtype == jnp.float32
+
+    # the last saved sample is the final state: its predictions must match the
+    # residuals accumulated by the MCMC, at float32 rather than float16 level
+    assert_close_matrices(y - yhat[-1, :], final_state.resid, rtol=1e-5)

@@ -32,7 +32,7 @@ import numpy
 from equinox import Module
 from jax import numpy as jnp
 from jax.sharding import Mesh
-from jaxtyping import Array, Float32, UInt
+from jaxtyping import Array, Float, Float32, UInt
 
 from bartz._jaxext import minimal_unsigned_dtype
 from bartz.BART._gbart import FloatLike
@@ -145,10 +145,12 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
 class TraceWithOffset(HeapArrays):
     """A trace of trees with an offset, compatible with `bartz.mcmcloop.evaluate_trace`."""
 
-    leaf_tree: Float32[Array, 'ndpost ntree tree_size'] = field(samples=0)
+    leaf_tree: Float[Array, 'ndpost ntree tree_size'] = field(samples=0)
     var_tree: UInt[Array, 'ndpost ntree tree_size//2'] = field(samples=0)
     split_tree: UInt[Array, 'ndpost ntree tree_size//2'] = field(samples=0)
     offset: Float32[Array, '']
+    leaf_scale: Float32[Array, '']
+    """The scale of the leaf values, 1 for leaves in data units."""
 
     has_chains: ClassVar[bool] = False
     """No chain axis; each leading axis is just the sample axis."""
@@ -158,14 +160,22 @@ class TraceWithOffset(HeapArrays):
 
     @classmethod
     def from_trees_trace(
-        cls, trees: TreeHeaps, offset: Float32[Array, '']
+        cls,
+        trees: TreeHeaps,
+        offset: Float32[Array, ''],
+        leaf_scale: Float32[Array, ''] | None = None,
     ) -> 'TraceWithOffset':
-        """Create a `TraceWithOffset` from a `TreeHeaps`."""
+        """Create a `TraceWithOffset` from a `TreeHeaps`.
+
+        The leaf scale is taken from `trees` unless overridden with
+        `leaf_scale`.
+        """
         return cls(
             leaf_tree=trees.leaf_tree,
             var_tree=trees.var_tree,
             split_tree=trees.split_tree,
             offset=offset,
+            leaf_scale=trees.leaf_scale if leaf_scale is None else leaf_scale,
         )
 
 
@@ -248,4 +258,5 @@ def trees_BART_to_bartz(
         var_tree=jnp.array(var_trees),
         split_tree=jnp.array(split_trees),
         offset=jnp.float32(0.0 if offset is None else offset),
+        leaf_scale=jnp.float32(1.0),
     ), meta

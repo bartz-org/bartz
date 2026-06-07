@@ -28,7 +28,7 @@ from equinox import Module
 from jax import numpy as jnp
 from jax.nn import softmax
 from jax.sharding import Mesh
-from jaxtyping import Array, Float32, Int32, UInt
+from jaxtyping import Array, Float, Float32, Int32, UInt
 
 from bartz.grove import HeapArrays
 from bartz.mcmcstep import State
@@ -116,10 +116,10 @@ class MainTrace(BurninTrace, HeapArrays):
     """MCMC trace with trees and diagnostic values."""
 
     leaf_tree: (
-        Float32[Array, '*chains_and_samples num_trees tree_size']
-        | Float32[Array, '*chains_and_samples num_trees k tree_size']
+        Float[Array, '*chains_and_samples num_trees tree_size']
+        | Float[Array, '*chains_and_samples num_trees k tree_size']
     ) = field(chains=CHAIN_AXIS, samples=0)
-    """The leaf values."""
+    """The leaf values, in units of `leaf_scale`."""
 
     var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2'] = field(
         chains=CHAIN_AXIS, samples=0
@@ -132,7 +132,11 @@ class MainTrace(BurninTrace, HeapArrays):
     """The decision boundaries."""
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
-    """Constant shift added to the sum of trees."""
+    """Constant shift added to the scaled sum of trees."""
+
+    leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
+    """The scale of the leaf values. Predictions are
+    ``offset + leaf_scale * (sum of leaf values over trees)``."""
 
     varprob: Float32[Array, '*chains_and_samples p'] | None = field(
         chains=CHAIN_AXIS, samples=0
@@ -160,6 +164,7 @@ class MainTrace(BurninTrace, HeapArrays):
             var_tree=state.forest.var_tree,
             split_tree=state.forest.split_tree,
             offset=state.offset,
+            leaf_scale=state.forest.leaf_scale,
             varprob=varprob,
             **vars(BurninTrace.from_state(state)),
         )

@@ -28,7 +28,7 @@ from dataclasses import replace
 from functools import partial
 
 from equinox import Module
-from jax import jit, lax, random, tree
+from jax import jit, lax, random
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Key, UInt
 
@@ -347,7 +347,10 @@ def sample_prior_forest(
     -------
     An object containing the generated trees.
     """
-    return _sample_prior_forest(keys, max_split, p_nonterminal, sigma_mu)
+    var_tree, split_tree, leaf_tree = _sample_prior_forest(
+        keys, max_split, p_nonterminal, sigma_mu
+    )
+    return TreesTrace(var_tree=var_tree, split_tree=split_tree, leaf_tree=leaf_tree)
 
 
 @partial(vmap_nodoc, in_axes=(0, None, None, None))
@@ -356,9 +359,18 @@ def _sample_prior_forest(
     max_split: UInt[Array, ' p'],
     p_nonterminal: Float32[Array, ' d_minus_1'],
     sigma_mu: Float32[Array, ''],
-) -> TreesTrace:
-    """Non-vectorized implementation of `sample_prior_forest`."""
-    return sample_prior_onetree(key, max_split, p_nonterminal, sigma_mu)
+) -> tuple[
+    UInt[Array, ' half_tree_size'],
+    UInt[Array, ' half_tree_size'],
+    Float32[Array, ' 2*half_tree_size'],
+]:
+    """Implement `sample_prior_forest` for a single tree.
+
+    The heaps are returned as a bare tuple to keep the constant `leaf_scale`
+    out of the vmapped outputs.
+    """
+    trees = sample_prior_onetree(key, max_split, p_nonterminal, sigma_mu)
+    return trees.var_tree, trees.split_tree, trees.leaf_tree
 
 
 @partial(jit, static_argnums=(1, 2))
@@ -395,4 +407,9 @@ def sample_prior(
     """
     keys = random.split(key, trace_length * num_trees)
     trees = sample_prior_forest(keys, max_split, p_nonterminal, sigma_mu)
-    return tree.map(lambda x: x.reshape(trace_length, num_trees, -1), trees)
+    reshape = lambda x: x.reshape(trace_length, num_trees, -1)
+    return TreesTrace(
+        var_tree=reshape(trees.var_tree),
+        split_tree=reshape(trees.split_tree),
+        leaf_tree=reshape(trees.leaf_tree),
+    )

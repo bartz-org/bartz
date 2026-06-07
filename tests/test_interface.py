@@ -931,8 +931,11 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     bart = Bart(**kw)
 
     # pool every heap node (each an independent prior draw) over chains, samples,
-    # trees, and positions; leaf_tree is (..., k, tree_size)
-    leaves = jnp.moveaxis(bart._main_trace.leaf_tree, -2, -1).reshape(-1, k)
+    # trees, and positions; leaf_tree is (..., k, tree_size), stored in
+    # prior-sd units, so convert it to data units first
+    trace = bart._main_trace
+    leaf_tree = trace.leaf_scale[..., None] * trace.leaf_tree
+    leaves = jnp.moveaxis(leaf_tree, -2, -1).reshape(-1, k)
     empirical_cov = jnp.cov(leaves.T)
 
     # the large pool drives the 2-norm sampling error well below 0.01 (measured

@@ -32,7 +32,7 @@ from jax import jit, lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
-from jaxtyping import Array, Bool, Float32, Int32, Key, Shaped, UInt, UInt32
+from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Shaped, UInt, UInt32
 
 from bartz._jaxext import split, truncated_normal_onesided, vmap_nodoc
 from bartz._jaxext.random import loggamma
@@ -619,10 +619,10 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
 
 @named_call
 def adapt_leaf_trees_to_grow_indices(
-    leaf_trees: Float32[Array, 'num_trees tree_size']
-    | Float32[Array, 'num_trees k tree_size'],
+    leaf_trees: Float[Array, 'num_trees tree_size']
+    | Float[Array, 'num_trees k tree_size'],
     moves: Moves,
-) -> Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k tree_size']:
+) -> Float[Array, 'num_trees tree_size'] | Float[Array, 'num_trees k tree_size']:
     """
     Modify leaves such that post-grow indices work on the original tree.
 
@@ -645,9 +645,8 @@ def adapt_leaf_trees_to_grow_indices(
 
 @vmap_nodoc
 def _adapt_leaf_trees_to_grow_indices(
-    leaf_trees: Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size'],
-    moves: Moves,
-) -> Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size']:
+    leaf_trees: Float[Array, ' tree_size'] | Float[Array, ' k tree_size'], moves: Moves
+) -> Float[Array, ' tree_size'] | Float[Array, ' k tree_size']:
     """Implement `adapt_leaf_trees_to_grow_indices`."""
     # the parent slot is written back unchanged to share a single scatter
     values_at_node = leaf_trees[..., moves.lrt_nodes[2]]
@@ -934,7 +933,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
     ) -> tuple[
         Float32[Array, ' n'] | Float32[Array, ' k n'],
         tuple[
-            Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size'],
+            Float[Array, ' tree_size'] | Float[Array, ' k tree_size'],
             Bool[Array, ''],
             Bool[Array, ''],
             Float32[Array, ''] | None,
@@ -949,6 +948,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
                 pso.state.prec_scale,
                 pso.state.forest.log_likelihood is not None,
                 pso.state.error_cov_inv if isinstance(pso.prelf, PreLfMVHet) else None,
+                pso.state.forest.leaf_scale,
             ),
             pt,
         )
@@ -1000,6 +1000,9 @@ class SeqStageInAllTrees(Module):
     vector-weight case, where the sequential stage needs it to compute the
     leaf scores."""
 
+    leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
+    """The scale of the stored leaf values, see `bartz.mcmcstep.Forest.leaf_scale`."""
+
 
 class SeqStageInPerTree(Module):
     """The inputs to `accept_move_and_sample_leaves` that are separate for each tree."""
@@ -1010,7 +1013,7 @@ class SeqStageInPerTree(Module):
     # rank/dtype (cf. `ParallelStageOut`); the per-tree slices reach `loop` via
     # scan, which does not re-run `__init__`.
     leaf_tree: (
-        Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k tree_size']
+        Float[Array, 'num_trees tree_size'] | Float[Array, 'num_trees k tree_size']
     )
     """The leaf values of the trees."""
 
@@ -1042,7 +1045,7 @@ def accept_move_and_sample_leaves(
     pt: SeqStageInPerTree,
 ) -> tuple[
     Float32[Array, ' n'] | Float32[Array, ' k n'],
-    Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size'],
+    Float[Array, ' tree_size'] | Float[Array, ' k tree_size'],
     Bool[Array, ''],
     Bool[Array, ''],
     Float32[Array, ''] | None,
@@ -1063,7 +1066,7 @@ def accept_move_and_sample_leaves(
     -------
     resid : Float32[Array, 'n'] | Float32[Array, ' k n']
         The updated residuals (data minus forest value).
-    leaf_tree : Float32[Array, 'tree_size'] | Float32[Array, ' k tree_size']
+    leaf_tree : Float[Array, 'tree_size'] | Float[Array, ' k tree_size']
         The new leaf values of the tree.
     acc : Bool[Array, '']
         Whether the move was accepted.
@@ -1090,8 +1093,12 @@ def accept_move_and_sample_leaves(
         at.data_sharded,
     )
 
+    # convert the starting tree to data units; multiplying by the float32
+    # scale also takes care of upcasting narrow leaf dtypes
+    prev_leaf_tree = at.leaf_scale[..., None] * pt.leaf_tree
+
     # subtract starting tree from function
-    resid_tree += pt.prec_tree * pt.leaf_tree
+    resid_tree += pt.prec_tree * prev_leaf_tree
 
     # sum residuals in parent node modified by move and compute likelihood;
     # the children slots are written back unchanged to share a single scatter
@@ -1133,8 +1140,15 @@ def accept_move_and_sample_leaves(
     leaf_tree = leaf_tree.at[
         ..., jnp.where(to_prune, pt.move.lrt_nodes, tree_size)
     ].set(leaf_tree[..., pt.move.lrt_nodes[2], None])
+
+    # round the new leaves to the storage units and dtype; the residuals are
+    # then updated with the rounded values to stay consistent with the trees
+    leaf_tree = (leaf_tree / at.leaf_scale[..., None]).astype(pt.leaf_tree.dtype)
+
     # replace old tree with new tree in function values
-    resid += (pt.leaf_tree - leaf_tree)[..., pt.leaf_indices]
+    resid += (prev_leaf_tree - at.leaf_scale[..., None] * leaf_tree)[
+        ..., pt.leaf_indices
+    ]
 
     return resid, leaf_tree, acc, to_prune, log_lk_ratio
 

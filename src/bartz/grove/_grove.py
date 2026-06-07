@@ -29,10 +29,10 @@ from dataclasses import fields
 from functools import partial
 from typing import Literal, Protocol, runtime_checkable
 
-from equinox import Module, tree_at
+from equinox import Module, field, tree_at
 from jax import jit, vmap
 from jax import numpy as jnp
-from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
+from jaxtyping import Array, Bool, Float, Float32, Int32, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
 
 from bartz._jaxext import autobatch, minimal_unsigned_dtype, vmap_nodoc
@@ -54,12 +54,12 @@ class TreeHeaps(Protocol):
     """
 
     leaf_tree: (
-        Float32[Array, '*batch_shape 2*half_tree_size']
-        | Float32[Array, '*batch_shape k 2*half_tree_size']
+        Float[Array, '*batch_shape 2*half_tree_size']
+        | Float[Array, '*batch_shape k 2*half_tree_size']
     )
     """The values in the leaves of the trees. This array can be dirty, i.e.,
     unused nodes can have whatever value. It may have an additional axis
-    for multivariate leaves."""
+    for multivariate leaves. The dtype may be narrower than float32."""
 
     var_tree: UInt[Array, '*batch_shape half_tree_size']
     """The axes along which the decision nodes operate. This array can be
@@ -70,6 +70,11 @@ class TreeHeaps(Protocol):
     right, i.e., a point belongs to the left child iff x < split. Whether a
     node is a leaf is indicated by the corresponding 'split' element being
     0. Unused nodes also have split set to 0. This array can't be dirty."""
+
+    leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
+    """The scale of the leaf values. The leaf values in data units are
+    ``leaf_scale * leaf_tree``; 1 if the leaves are stored directly in data
+    units."""
 
 
 class HeapArrays(Module):
@@ -102,8 +107,11 @@ class TreesTrace(HeapArrays):
     var_tree: UInt[Array, '*batch_shape half_tree_size']
     split_tree: UInt[Array, '*batch_shape half_tree_size']
     leaf_tree: (
-        Float32[Array, '*batch_shape 2*half_tree_size']
-        | Float32[Array, '*batch_shape k 2*half_tree_size']
+        Float[Array, '*batch_shape 2*half_tree_size']
+        | Float[Array, '*batch_shape k 2*half_tree_size']
+    )
+    leaf_scale: Float32[Array, ''] | Float32[Array, ' k'] = field(
+        default_factory=lambda: jnp.float32(1.0)
     )
 
     @classmethod
@@ -242,7 +250,13 @@ def evaluate_forest(
 
     Returns
     -------
-    The (sum of) the values of the trees at the points in `X`.
+    The (sum of) the values of the trees at the points in `X`, in float32.
+
+    Notes
+    -----
+    The leaf values are multiplied by ``trees.leaf_scale``, so the result is in
+    data units; to get function values out of a forest or trace, only the
+    offset has to be added.
     """
     indices: UInt[Array, '*forest_shape n']
     indices = traverse_forest(X, trees.var_tree, trees.split_tree)
@@ -253,23 +267,23 @@ def evaluate_forest(
     bc_indices = indices[..., None, :, None] if is_mv else indices[..., None]
 
     bc_leaf_tree: (
-        Float32[Array, '*forest_shape 1 tree_size']
-        | Float32[Array, '*forest_shape k 1 tree_size']
+        Float[Array, '*forest_shape 1 tree_size']
+        | Float[Array, '*forest_shape k 1 tree_size']
     )
     bc_leaf_tree = (
         trees.leaf_tree[..., :, None, :] if is_mv else trees.leaf_tree[..., None, :]
     )
 
-    bc_leaves: (
-        Float32[Array, '*forest_shape n 1'] | Float32[Array, '*forest_shape k n 1']
-    )
+    bc_leaves: Float[Array, '*forest_shape n 1'] | Float[Array, '*forest_shape k n 1']
     bc_leaves = jnp.take_along_axis(bc_leaf_tree, bc_indices, -1)
 
-    leaves: Float32[Array, '*forest_shape n'] | Float32[Array, '*forest_shape k n']
+    leaves: Float[Array, '*forest_shape n'] | Float[Array, '*forest_shape k n']
     leaves = jnp.squeeze(bc_leaves, -1)
 
+    # sum in the storage dtype with a float32 accumulator, then convert to
+    # data units with the float32 scale
     axis = normalize_axis_tuple(sum_batch_axis, trees.var_tree.ndim - 1)
-    return jnp.sum(leaves, axis=axis)
+    return trees.leaf_scale[..., None] * jnp.sum(leaves, axis=axis, dtype=jnp.float32)
 
 
 def is_actual_leaf(
@@ -427,7 +441,7 @@ def var_histogram(
     return scatter_add(var_tree, is_internal)
 
 
-def _format_leaf(leaf: Float32[Array, ''] | Float32[Array, ' k'], is_mv: bool) -> str:
+def _format_leaf(leaf: Float[Array, ''] | Float[Array, ' k'], is_mv: bool) -> str:
     """Format a (possibly multivariate) leaf value to 2 significant digits."""
     if is_mv:
         return '[' + ', '.join(f'{v:#.2g}' for v in leaf) + ']'
@@ -458,6 +472,9 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     *_, tree_size = tree.leaf_tree.shape
     is_mv = tree.is_multivariate
 
+    # convert the leaves to data units for printing
+    leaf_tree = tree.leaf_scale[..., None] * tree.leaf_tree
+
     def traverse_tree(
         lines: list[str],
         index: int,
@@ -484,11 +501,11 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
                 category = 'leaf'
             else:
                 category = 'decision'
-            node_str = f'{category}({var}, {split}, {tree.leaf_tree[..., index]})'
+            node_str = f'{category}({var}, {split}, {leaf_tree[..., index]})'
         else:
             assert not unused
             if is_leaf:
-                node_str = _format_leaf(tree.leaf_tree[..., index], is_mv)
+                node_str = _format_leaf(leaf_tree[..., index], is_mv)
             else:
                 node_str = f'x{var} < {split}'
 

@@ -1086,7 +1086,12 @@ class Bart(Module):
         trees = _trees_chain_first(trace)
         if not trace.has_chains:
             i_chain = ...
-        trees = tree.map(lambda x: x[i_chain, i_sample, i_tree, :], trees)
+        # index the heap arrays, leaving the (unbatched) leaf scale alone
+        trees = tree_at(
+            lambda t: (t.var_tree, t.split_tree, t.leaf_tree),
+            trees,
+            replace_fn=lambda x: x[i_chain, i_sample, i_tree, ...],
+        )
         s = format_tree(trees, print_all=print_all)
         print(s)  # noqa: T201, this method is intended for debug
 

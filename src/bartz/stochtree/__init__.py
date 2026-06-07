@@ -22,7 +22,17 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""`stochtree`-compatible interface to bartz."""
+"""`stochtree`-compatible interface to bartz.
+
+.. autosummary::
+    :toctree:
+
+    BARTModel
+    GeneralParams
+    OutcomeModel
+    MeanForestParams
+    NotSampledError
+"""
 
 from bartz.stochtree._stochtree import (  # noqa: F401
     BARTModel,

@@ -25,8 +25,8 @@
 Reference
 =========
 
-API reference for bartz. Each module page lists its public objects in a summary
-table; follow a link for the dedicated page of an object.
+API reference for bartz. Each module page lists its public objects in summary
+tables organized by topic; follow a link for the dedicated page of an object.
 
 High-level interface
 --------------------
@@ -37,12 +37,18 @@ High-level interface
     bartz.Bart
     bartz.PredictKind
 
+.. `OutcomeType` is re-exported at the top level, but its page is canonically
+.. under `bartz.mcmcstep`, so link it without generating a duplicate page.
+
+.. autosummary::
+
+    ~bartz.mcmcstep.OutcomeType
+
 R BART3-compatible interface
 ----------------------------
 
 .. autosummary::
     :toctree: _autogen/mod
-    :recursive:
 
     bartz.BART
 
@@ -51,7 +57,6 @@ stochtree-compatible interface
 
 .. autosummary::
     :toctree: _autogen/mod
-    :recursive:
 
     bartz.stochtree
 
@@ -60,7 +65,6 @@ MCMC and trees
 
 .. autosummary::
     :toctree: _autogen/mod
-    :recursive:
 
     bartz.mcmcstep
     bartz.mcmcloop
@@ -72,7 +76,6 @@ Debugging and testing
 
 .. autosummary::
     :toctree: _autogen/mod
-    :recursive:
 
     bartz.debug
     bartz.testing

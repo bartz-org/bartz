@@ -232,9 +232,9 @@ autodoc_default_options = {'member-order': 'bysource'}
 autosummary_generate = True
 # public modules use an _src-like layout: they re-export the public API from
 # private `_*` submodules, so members' `__module__` is the private submodule,
-# not the public one. Documenting imported members is therefore required. A
-# corollary is that any foreign object leaking into a public module's namespace
-# will show up here, which is by design a module-side bug to fix.
+# not the public one. Documenting imported members is therefore required. The
+# members are listed by hand in autosummary tables in the module docstrings;
+# tests/test_docs.py checks the tables match the public namespaces.
 autosummary_imported_members = True
 
 # autodoc-typehints

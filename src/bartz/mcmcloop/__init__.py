@@ -24,8 +24,41 @@
 
 """Functions that implement the full BART posterior MCMC loop.
 
-The entry points are `run_mcmc` and the progress callbacks `make_print_callback`
-and `make_tqdm_callback`.
+Running the MCMC
+----------------
+.. autosummary::
+    :toctree:
+
+    run_mcmc
+    RunMCMCResult
+    BurninTrace
+    MainTrace
+
+Evaluating the trace
+--------------------
+.. autosummary::
+    :toctree:
+
+    evaluate_trace
+    compute_varcount
+
+Progress callbacks
+------------------
+The entry points are `make_print_callback` and `make_tqdm_callback`.
+
+.. autosummary::
+    :toctree:
+
+    make_print_callback
+    make_tqdm_callback
+    Callback
+    CallbackState
+    print_callback
+    tqdm_callback
+    PrintCallbackState
+    TqdmCallbackState
+    StatsAccumulator
+    StatsReport
 """
 
 # ruff: noqa: F401

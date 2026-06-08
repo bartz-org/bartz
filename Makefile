@@ -24,6 +24,11 @@
 
 # Makefile for running tests, prepare and upload a release.
 
+# Refuse -j: recipes manage their own parallelism (pytest-xdist, asv) and the
+# release pipeline relies on serial prerequisite order (e.g. build before
+# check-dist). Global because GNU make <4.4 can't scope .NOTPARALLEL to a target.
+.NOTPARALLEL:
+
 # define command to run python
 CUDA_VERSION = $(shell nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3)
 EXTRAS = $(if $(filter 12 13,$(CUDA_VERSION)),--extra=cuda$(CUDA_VERSION),)

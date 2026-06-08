@@ -73,7 +73,7 @@ def _read_changelog_section() -> tuple[str, str, str, str]:
 
 
 def check_changelog() -> None:
-    """Validate the topmost changelog section is for the current version and today."""
+    """Validate the topmost changelog section is parseable and dated today."""
     _read_changelog_section()
 
 

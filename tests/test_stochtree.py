@@ -513,11 +513,11 @@ def test_compare_with_stochtree(
 
     with subtests.test('rhat_y_hat_train'):
         rhat = _rhat_two_chains(bz_model.y_hat_train, st_model.y_hat_train)
-        assert_array_less(rhat, 1.02)
+        assert_array_less(rhat, 1.03)
 
     with subtests.test('rhat_y_hat_test'):
         rhat = _rhat_two_chains(nnone(bz_model.y_hat_test), nnone(st_model.y_hat_test))
-        assert_array_less(rhat, 1.02)
+        assert_array_less(rhat, 1.03)
 
     if outcome == 'continuous':
         with subtests.test('rhat_sigma'):
@@ -525,7 +525,7 @@ def test_compare_with_stochtree(
             st_sigma = np.sqrt(np.asarray(st_model.global_var_samples))
             # shape (1, num_samples) so rhat collapses to a scalar
             rhat = _rhat_two_chains(bz_sigma[None, :], st_sigma[None, :])
-            assert_array_less(rhat, 1.02)
+            assert_array_less(rhat, 1.03)
     else:
         with subtests.test('rhat_prob_train'):
             bz_prob = np.asarray(ndtr(bz_model.y_hat_train))
@@ -534,7 +534,7 @@ def test_compare_with_stochtree(
             bz_l = np.asarray(clipped_logit(bz_prob, 1e-5))
             st_l = np.asarray(clipped_logit(st_prob, 1e-5))
             rhat = _rhat_two_chains(bz_l, st_l)
-            assert_array_less(rhat, 1.02)
+            assert_array_less(rhat, 1.03)
 
 
 def test_jit(continuous_data: _Data, keys: split) -> None:

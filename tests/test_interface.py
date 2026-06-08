@@ -779,9 +779,12 @@ class TestWithCachedBart:
                 ):
                     return
                 if x is not None and chain_axis is not None:
+                    # widen first so a reduced-precision leaf (e.g. float16
+                    # leaf_tree) and its mean reference share a dtype
+                    x = x.astype(jnp.float32)
                     ref = jnp.broadcast_to(x.mean(chain_axis, keepdims=True), x.shape)
                     assert_different_matrices(
-                        x.astype(jnp.float32),
+                        x,
                         ref,
                         reduce_rank=True,
                         ord='fro' if x.ndim >= 2 else 2,

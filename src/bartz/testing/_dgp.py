@@ -358,14 +358,23 @@ class Params(Module):
     available.
 
     Writing :math:`\theta` for all the sampled coefficients and
-    :math:`\operatorname{Var}[\,\cdot \mid \theta]` for the population
-    variance of one dataset (over :math:`X` and noise at fixed
-    :math:`\theta`), the derived variances are, for every :math:`\lambda`:
+    :math:`E[\,\cdot \mid \theta]`, :math:`\operatorname{Var}[\,\cdot \mid
+    \theta]` for the population mean and variance of one dataset (over
+    :math:`X` and noise at fixed :math:`\theta`), the derived expectations and
+    variances are, for every :math:`\lambda`:
 
     .. math::
         :nowrap:
 
         \begin{align}
+            E[Z_{ci}] &= 0, \\
+            \operatorname{Cov}[\mu^{\mathrm L}_{ci}, \mu^{\mathrm Q}_{ci} \mid
+                    \theta]
+                &= \operatorname{Cov}[\mu^{\mathrm L}_{ci},
+                    \mu^{\mathrm Q}_{ci}] = 0, \\
+            \operatorname{Cov}[\mu_{ci}, \mu_{c'i} \mid \theta]
+                &= \operatorname{Cov}[\mu_{ci}, \mu_{c'i}] = 0
+                \quad (c \ne c',\ \lambda = 0), \\
             E[\operatorname{Var}[Z_{ci} \mid \theta]] &=
                 \sigma^2_{\mathrm{lin}} + \sigma^2_{\mathrm{quad}}
                 + \sigma^2_{\mathrm{eps}}

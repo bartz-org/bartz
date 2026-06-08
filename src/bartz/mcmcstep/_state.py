@@ -537,7 +537,7 @@ def init(
     num_trees: int,
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
     leaf_prior_cov_inv: FloatLike | Float[ArrayLike, 'k k'],
-    leaf_dtype: DTypeLike = jnp.float32,
+    leaf_dtype: DTypeLike = jnp.float16,
     error_cov_df: FloatLike | None = None,
     error_cov_scale: FloatLike | Float[ArrayLike, 'k k'] | None = None,
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,

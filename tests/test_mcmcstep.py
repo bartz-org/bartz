@@ -28,6 +28,7 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import fields, replace
 from functools import partial, wraps
+from inspect import signature
 from typing import NamedTuple
 
 import jax
@@ -125,6 +126,7 @@ from tests.util import (
     assert_array_equal,
     assert_close_matrices,
     assert_different_matrices,
+    condf,
     manual_tree,
     nnone,
 )
@@ -1468,6 +1470,12 @@ class TestMultichain:
         )
 
         # check the mc state is equal to the stacked state
+        # reduced-precision leaves quantize the slightly different float32
+        # reductions of the multichain vs stacked single-chain runs, so
+        # equivalence holds only to the rounding floor; the leaves and everything
+        # derived from them carry this loss
+        inexact_rtol = condf(mc_state.forest.leaf_tree, 1e-5, 1e-3)
+
         def check_equal(path: KeyPath, mc: Array, stacked: Array) -> None:
             str_path = keystr(path)
             exact = jnp.issubdtype(mc.dtype, jnp.integer)
@@ -1475,7 +1483,7 @@ class TestMultichain:
                 mc,
                 stacked,
                 err_msg=f'{str_path}: ',
-                rtol=0 if exact else 1e-5,
+                rtol=0 if exact else inexact_rtol,
                 reduce_rank=True,
             )
 
@@ -2457,20 +2465,26 @@ class TestMultivariate:
         )
 
         for key in keys.pop(3):
+            # the uv and mv (k=1) reductions round the stored leaves slightly
+            # differently, so with reduced leaf precision these continuous
+            # quantities agree only to the rounding floor
+            rtol = condf(uv_state.forest.leaf_tree, 1e-6, 1e-3)
             assert_close_matrices(
-                uv_state.resid, mv_state.resid.squeeze(0), rtol=1e-6, atol=1e-6
+                uv_state.resid, mv_state.resid.squeeze(0), rtol=rtol, atol=1e-6
             )
             assert_close_matrices(
                 uv_state.forest.leaf_tree,
                 mv_state.forest.leaf_tree.squeeze(1),
-                rtol=1e-6,
+                rtol=rtol,
             )
 
             # the full `step` resamples error_cov_inv: the diagonal (uv) and
             # Wishart (mv, k=1) paths must agree, up to the resid difference fed
             # into the denominator and the Gershgorin jitter of the mv Cholesky
             assert_close_matrices(
-                uv_state.error_cov_inv.reshape(1, 1), mv_state.error_cov_inv, rtol=1e-5
+                uv_state.error_cov_inv.reshape(1, 1),
+                mv_state.error_cov_inv,
+                rtol=condf(uv_state.forest.leaf_tree, 1e-5, 1e-3),
             )
 
             assert_array_equal(uv_state.forest.var_tree, mv_state.forest.var_tree)
@@ -2683,7 +2697,7 @@ class TestLeafDtype:
         expected_scale = self.expected_scale(init_kwargs['leaf_prior_cov_inv'])
         if leaf_dtype is None:
             state = init(**init_kwargs)
-            leaf_dtype = jnp.float32  # the default
+            leaf_dtype = signature(init).parameters['leaf_dtype'].default
         else:
             state = init(**init_kwargs, leaf_dtype=leaf_dtype)
         assert state.forest.leaf_tree.dtype == leaf_dtype

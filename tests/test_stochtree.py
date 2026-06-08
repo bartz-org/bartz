@@ -56,6 +56,7 @@ from tests.util import (
     assert_array_equal,
     assert_close_matrices,
     clipped_logit,
+    condf,
     int_seed,
     nnone,
     rhat_rank,
@@ -610,15 +611,21 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
             m.y_std,
             pred_mean,
             pred_post,
+            # trailing element: the stored leaves, used only to detect the leaf
+            # storage precision (not compared); see the loop below
+            m._bart._mcmc_state.forest.leaf_tree,
         )
 
     args_cloned = dict(args, key=random.clone(args['key']))
 
-    out1 = task(**args)
-    out2 = jit(task)(**args_cloned)
+    *out1, leaf_tree = task(**args)
+    *out2, _ = jit(task)(**args_cloned)
 
+    # predictions come from the stored leaves; with reduced leaf precision jit vs
+    # eager differ at the rounding floor
+    rtol = condf(leaf_tree, 1e-5, 1e-3)
     for a, b in zip(out1, out2, strict=True):
-        assert_close_matrices(a, b, rtol=1e-5)
+        assert_close_matrices(a, b, rtol=rtol)
 
 
 class TestPreprocessing:

@@ -85,6 +85,7 @@ from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
     clipped_logit,
+    condf,
     int_seed,
     nnone,
     periodic_sigint,
@@ -835,23 +836,26 @@ def test_scale_shift(kw: dict[str, Any]) -> None:
         nnone(bart2._mcmc_state.error_cov_scale) / scale**2,
         rtol=1e-6,
     )
+    # predictions and sigma are derived from the stored leaves, so with reduced
+    # leaf precision the rescaling equivalence holds only to the rounding floor
+    rtol = condf(bart1._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
     assert_close_matrices(
-        bart1.yhat_train, (bart2.yhat_train - offset) / scale, rtol=1e-5
+        bart1.yhat_train, (bart2.yhat_train - offset) / scale, rtol=rtol
     )
     assert_close_matrices(
         nnone(bart1.yhat_train_mean),
         (nnone(bart2.yhat_train_mean) - offset) / scale,
-        rtol=1e-5,
+        rtol=rtol,
     )
     assert_close_matrices(
-        nnone(bart1.yhat_test), (nnone(bart2.yhat_test) - offset) / scale, rtol=1e-5
+        nnone(bart1.yhat_test), (nnone(bart2.yhat_test) - offset) / scale, rtol=rtol
     )
     assert_close_matrices(
         nnone(bart1.yhat_test_mean),
         (nnone(bart2.yhat_test_mean) - offset) / scale,
-        rtol=1e-5,
+        rtol=rtol,
     )
-    assert_close_matrices(nnone(bart1.sigma), nnone(bart2.sigma) / scale, rtol=1e-5)
+    assert_close_matrices(nnone(bart1.sigma), nnone(bart2.sigma) / scale, rtol=rtol)
     assert_allclose(
         nnone(bart1.sigma_mean), nnone(bart2.sigma_mean) / scale, rtol=1e-6, atol=1e-6
     )
@@ -1297,10 +1301,13 @@ def test_jit(kw: dict[str, Any]) -> None:
 
     task_compiled = jit(task)
 
-    _state1, pred1 = task(X, y, w, key)
+    state1, pred1 = task(X, y, w, key)
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
-    assert_close_matrices(pred1, pred2, rtol=1e-5)
+    # predictions come from the stored leaves; with reduced leaf precision jit vs
+    # eager differ at the rounding floor
+    rtol = condf(state1.forest.leaf_tree, 1e-5, 1e-3)
+    assert_close_matrices(pred1, pred2, rtol=rtol)
 
 
 @pytest.mark.flaky
@@ -1528,9 +1535,14 @@ def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
     baseline_kw.update(nskip=0, ndpost=20, mc_cores=2)
     bart = mc_gbart(**baseline_kw)
 
+    # reduced-precision leaves quantize the slightly different float32 reductions
+    # of sharded vs unsharded runs, so equivalence holds only to the rounding
+    # floor; the leaves and everything derived from them carry this loss
+    rtol = condf(bart._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
+
     def check_equal(path: KeyPath, xb: Array, xs: Array) -> None:
         assert_close_matrices(
-            xs, xb, err_msg=f'{keystr(path)}: ', rtol=1e-5, reduce_rank=True
+            xs, xb, err_msg=f'{keystr(path)}: ', rtol=rtol, reduce_rank=True
         )
 
     def remove_mesh(bart: mc_gbart) -> mc_gbart:

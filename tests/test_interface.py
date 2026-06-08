@@ -116,6 +116,7 @@ from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
     clipped_logit,
+    condf,
     nnone,
     periodic_sigint,
     rhat_rank,
@@ -1417,12 +1418,17 @@ def test_scale_shift(bkw: BartKW) -> None:
 
     mask_pred = mask[..., None]
 
+    # predictions are derived from the stored leaves, so with reduced leaf
+    # precision the rescaling equivalence holds only to the rounding floor
+    leaf_tree = bart1._mcmc_state.forest.leaf_tree
+    pred_rtol = condf(leaf_tree, 1e-4, 1e-3)
+
     yhat1 = bart1.predict('train', kind='latent_samples')
     yhat2 = bart2.predict('train', kind='latent_samples')
     assert_close_matrices(
         yhat1,
         jnp.where(mask_pred, yhat2, (yhat2 - offset) / scale),
-        rtol=1e-4,
+        rtol=pred_rtol,
         reduce_rank=True,
     )
 
@@ -1431,7 +1437,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         mean1,
         jnp.where(mask_pred, mean2, (mean2 - offset) / scale),
-        rtol=1e-4,
+        rtol=pred_rtol,
         reduce_rank=True,
     )
 
@@ -1440,7 +1446,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         yhat_test1,
         jnp.where(mask_pred, yhat_test2, (yhat_test2 - offset) / scale),
-        rtol=1e-4,
+        rtol=pred_rtol,
         reduce_rank=True,
     )
 
@@ -1449,13 +1455,14 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         yhat_test_mean1,
         jnp.where(mask_pred, yhat_test_mean2, (yhat_test_mean2 - offset) / scale),
-        rtol=1e-4,
+        rtol=pred_rtol,
         reduce_rank=True,
     )
 
     # mixed outcomes accumulate more float32 rounding through the binary-latent
-    # step, so the sdev comparisons get a looser tolerance
-    rtol = 1e-4 if bkw.is_mixed else 1e-5
+    # step, so the sdev comparisons get a looser tolerance; with reduced leaf
+    # precision the rounding floor dominates instead
+    rtol = condf(leaf_tree, 1e-4 if bkw.is_mixed else 1e-5, 1e-3)
 
     # binary positions of get_error_sdev are NaN; replace with 0 to compare.
     with debug_nans(False):
@@ -1509,9 +1516,14 @@ def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
 
     bart2 = tree.map(unpermute, bart2)
 
+    # reduced-precision leaves quantize the permutation-dependent float32
+    # reductions, so invariance holds only to the rounding floor; the leaves and
+    # everything derived from them carry this loss
+    rtol = condf(bart1._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
+
     def check_equal(path: KeyPath, x1: Array, x2: Array) -> None:
         assert_close_matrices(
-            x2, x1, err_msg=f'{keystr(path)}: ', rtol=1e-5, reduce_rank=True
+            x2, x1, err_msg=f'{keystr(path)}: ', rtol=rtol, reduce_rank=True
         )
 
     tree.map_with_path(check_equal, bart1, bart2)
@@ -1981,8 +1993,13 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
     ]
     stacked = tree.map(lambda *leaves: jnp.stack(leaves), *singles)
 
+    # reduced-precision leaves quantize the slightly different float32 reductions
+    # of vmapped vs looped runs, so equivalence holds only to the rounding floor;
+    # the leaves and everything derived from them carry this loss
+    rtol = condf(singles[0]._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
+
     def check(a: Array, b: Array) -> None:
-        assert_close_matrices(a, b, rtol=1e-5, reduce_rank=True)
+        assert_close_matrices(a, b, rtol=rtol, reduce_rank=True)
 
     tree.map(check, batched, stacked)
 

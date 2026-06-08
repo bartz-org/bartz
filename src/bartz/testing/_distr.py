@@ -235,6 +235,42 @@ class ScaleDistr(Module):
     ) -> Float[Array, '*shape']:
         """Sample i.i.d. normalized scales."""
 
+    @classmethod
+    def from_peff(
+        cls, peff: Float[Array, ''] | float, p: Integer[Array, ''] | int
+    ) -> 'ScaleDistr':
+        R"""Set the scale dispersion from an effective number of active predictors.
+
+        `peff` is the participation ratio of the squared scales,
+
+        .. math::
+            p_{\mathrm{eff}} = \frac{(\sum_j s_j^2)^2}{\sum_j s_j^4}
+                \;\xrightarrow{\,p \to \infty\,}\; \frac p{E[s^4]},
+
+        an effective count that ranges in ``[1, p]``: ``p`` when all predictors
+        are equally important (`Constant`), shrinking towards 1 as the
+        importance concentrates on fewer predictors. The deterministic large-`p`
+        limit ``p / E[s ** 4]`` is the analytic target inverted here; for
+        `SpikeSlab` it equals the expected number of nonzero scales exactly.
+
+        Parameters
+        ----------
+        peff
+            Effective number of active predictors, in ``[1, p]``.
+        p
+            Total number of predictors.
+
+        Returns
+        -------
+        A member of the family with ``fourth_moment`` equal to ``p / peff``.
+        """
+        return cls._from_fourth_moment(p / peff)
+
+    @classmethod
+    @abstractmethod
+    def _from_fourth_moment(cls, m4: Float[Array, ''] | float) -> 'ScaleDistr':
+        """Build the family member whose `fourth_moment` is `m4` (``>= 1``)."""
+
 
 class Constant(ScaleDistr):
     """Scales concentrated at 1 (uniform predictor importance)."""
@@ -251,6 +287,14 @@ class Constant(ScaleDistr):
     ) -> Float[Array, '*shape']:
         """Return all-ones scales (`key` is unused)."""
         return jnp.ones(shape)
+
+    @classmethod
+    def _from_fourth_moment(cls, m4: Float[Array, ''] | float) -> 'Constant':
+        """Return `Constant`; valid only at ``m4 == 1``, i.e. ``peff == p``."""
+        if m4 != 1:
+            msg = 'Constant has peff == p only; use Gamma or SpikeSlab for peff < p'
+            raise ValueError(msg)
+        return cls()
 
 
 class Gamma(ScaleDistr):
@@ -276,6 +320,17 @@ class Gamma(ScaleDistr):
         log_rate = jnp.log(self.alpha * (self.alpha + 1)) / 2
         return jnp.exp(loggamma(key, self.alpha, shape) - log_rate)
 
+    @classmethod
+    def _from_fourth_moment(cls, m4: Float[Array, ''] | float) -> 'Gamma':
+        """Invert ``E[s ** 4] = m4`` for `alpha` (needs ``m4 > 1``, i.e. peff < p)."""
+        # m4 = (a + 2)(a + 3) / (a(a + 1)) is the larger root of
+        # (m4 - 1) a^2 + (m4 - 5) a - 6 = 0, with discriminant m4^2 + 14 m4 + 1
+        alpha = (5 - m4 + jnp.sqrt(m4 * m4 + 14 * m4 + 1)) / (2 * (m4 - 1))
+        alpha = error_if(
+            alpha, m4 <= 1, 'Gamma needs peff < p; use Constant for peff == p'
+        )
+        return cls(alpha=alpha)
+
 
 class SpikeSlab(ScaleDistr):
     """Two-point scales: 0 w.p. ``1 - pi``, ``1/sqrt(pi)`` w.p. `pi`.
@@ -297,3 +352,10 @@ class SpikeSlab(ScaleDistr):
     ) -> Float[Array, '*shape']:
         """Sample i.i.d. two-point scales."""
         return random.bernoulli(key, self.pi, shape) / jnp.sqrt(self.pi)
+
+    @classmethod
+    def _from_fourth_moment(cls, m4: Float[Array, ''] | float) -> 'SpikeSlab':
+        """Invert ``E[s ** 4] = 1 / pi = m4`` (needs ``m4 >= 1``, i.e. peff <= p)."""
+        pi = 1 / m4
+        pi = error_if(pi, pi > 1, 'SpikeSlab needs peff <= p')
+        return cls(pi=pi)

@@ -31,6 +31,7 @@ from types import MappingProxyType
 from typing import Literal
 
 import pytest
+from equinox import EquinoxRuntimeError, EquinoxTracetimeError
 from jax import block_until_ready, jit, random, vmap
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
@@ -69,6 +70,8 @@ KWARGS: Mapping = MappingProxyType(
 )
 REPS: int = 10_000  # number of datasets, and of i.i.d. draws in moment tests
 SPARSITY: float = 2.0  # Gamma shape for the sparse-DGP fixture (mu4 = 10 / 3)
+# error_if surfaces eagerly (tracetime), under jit (runtime), or as a plain check
+EQX_ERRORS = (EquinoxTracetimeError, EquinoxRuntimeError, JaxRuntimeError, ValueError)
 HIGH_SPARSITY: float = 1e19  # largest before sparsity (sparsity + 1) overflows float32
 
 # A substantial heteroskedasticity knob to exercise the het paths; the bounded
@@ -474,6 +477,63 @@ class TestSpikeSlab:
         assert_array_equal(nnone(dgp.params.A_separate)[:, dead, :], 0, strict=False)
         assert_array_equal(nnone(dgp.params.gamma_shared)[dead], 0, strict=False)
         assert_array_equal(nnone(dgp.params.gamma_separate)[:, dead], 0, strict=False)
+
+
+class TestFromPeff:
+    """Test `ScaleDistr.from_peff`, the effective-active-predictors initializer."""
+
+    P: int = 20
+
+    @pytest.mark.parametrize('family', [Gamma, SpikeSlab])
+    @pytest.mark.parametrize('peff', [1.0, 2.5, 7.0, 19.0])
+    def test_fourth_moment_roundtrip(
+        self, family: type[ScaleDistr], peff: float
+    ) -> None:
+        """`from_peff` builds the member with ``fourth_moment == p / peff``."""
+        distr = family.from_peff(peff, self.P)
+        assert_allclose(distr.fourth_moment, self.P / peff, rtol=1e-5)
+
+    @pytest.mark.parametrize('peff', [1.0, 2.5, 7.0, 20.0])
+    def test_spikeslab_pi_is_active_fraction(self, peff: float) -> None:
+        """For `SpikeSlab`, ``pi`` is the active fraction ``peff / p``."""
+        distr = SpikeSlab.from_peff(peff, self.P)
+        assert isinstance(distr, SpikeSlab)
+        assert_allclose(distr.pi, peff / self.P, rtol=1e-6)
+
+    def test_constant_requires_peff_eq_p(self) -> None:
+        """`Constant.from_peff` returns `Constant` when ``peff == p``."""
+        assert isinstance(Constant.from_peff(float(self.P), self.P), Constant)
+
+    def test_constant_rejects_peff_ne_p(self) -> None:
+        """`Constant.from_peff` errors at ``peff != p`` (it has no free parameter)."""
+        with pytest.raises(ValueError, match='Constant has peff == p only'):
+            Constant.from_peff(3.0, self.P)
+
+    @pytest.mark.parametrize('peff', [2.0, 8.0])
+    def test_spikeslab_active_count(self, keys: split, peff: float) -> None:
+        """`SpikeSlab.from_peff(peff)` activates `peff` predictors on average."""
+        p = 200
+        s = SpikeSlab.from_peff(peff, p).sample(keys.pop(), (REPS, p))
+        assert_mean_z(jnp.sum(s > 0, axis=1).astype(float), peff)
+
+    @pytest.mark.parametrize('family', [Gamma, SpikeSlab])
+    def test_participation_ratio(self, keys: split, family: type[ScaleDistr]) -> None:
+        """A large draw's participation ratio recovers the requested `peff`."""
+        p = 100_000
+        peff = p / 2
+        s2 = family.from_peff(peff, p).sample(keys.pop(), (p,)) ** 2
+        peff_hat = jnp.square(jnp.sum(s2)) / jnp.sum(jnp.square(s2))
+        assert_allclose(peff_hat, peff, rtol=0.05)
+
+    def test_gamma_rejects_peff_ge_p(self) -> None:
+        """`Gamma.from_peff` errors at ``peff >= p`` (its alpha would diverge)."""
+        with pytest.raises(EQX_ERRORS, match='Gamma needs peff'):
+            block_until_ready(Gamma.from_peff(float(self.P), self.P))
+
+    def test_spikeslab_rejects_peff_gt_p(self) -> None:
+        """`SpikeSlab.from_peff` errors at ``peff > p`` (its pi would exceed 1)."""
+        with pytest.raises(EQX_ERRORS, match='SpikeSlab needs peff'):
+            block_until_ready(SpikeSlab.from_peff(self.P + 1.0, self.P))
 
 
 def test_high_sparsity_matches_none(keys: split) -> None:

@@ -527,7 +527,8 @@ class Params(Module):
     s_distr: ScaleDistr
     """Scale family of the importance scales ``s``. More dispersed scales make
     the dependence on the predictors sparser; `Constant` is uniform importance
-    (``s_j = 1``)."""
+    (``s_j = 1``). `ScaleDistr.from_peff` parametrizes the dispersion by an
+    effective number of active predictors."""
 
     q: Integer[Array, '']
     """Number of quadratic interactions per predictor (even, ``< p // k``)."""
@@ -808,6 +809,8 @@ def gen_params(
         Scale family of the per-predictor importance scales ``s`` (e.g.
         `Gamma` or `SpikeSlab`); more dispersed scales make the dependence on
         the predictors sparser. `Constant` (default) gives uniform importance.
+        Use `ScaleDistr.from_peff` to set the dispersion via an effective
+        number of active predictors instead of the raw family parameter.
     outcome_type
         ``'continuous'``, ``'binary'``, an `OutcomeType`, or a tuple of length
         ``k`` for mixed outcomes. Tuples with all elements equal are collapsed

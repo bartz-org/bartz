@@ -568,7 +568,7 @@ class Params(Module):
     homoskedastic."""
 
     outcome_type: OutcomeType | tuple[OutcomeType, ...] = field(static=True)
-    """Per-component outcome type, either a single `OutcomeType` applied to
+    """Per-component outcome type, either a single `~bartz.mcmcstep.OutcomeType` applied to
     every row, or a tuple of length ``k`` for mixed outcomes. For binary
     components the continuous latent ``mu + eps * sqrt(sigma2_eps) * error_scale``
     is thresholded at 0, yielding 0.0/1.0 floats. Unlike the standard probit
@@ -769,7 +769,7 @@ def gen_params(
         `Gamma` or `SpikeSlab`); more dispersed scales make the dependence on
         the predictors sparser. `Constant` (default) gives uniform importance.
     outcome_type
-        ``'continuous'``, ``'binary'``, an `OutcomeType`, or a tuple of length
+        ``'continuous'``, ``'binary'``, an `~bartz.mcmcstep.OutcomeType`, or a tuple of length
         ``k`` for mixed outcomes. Tuples with all elements equal are collapsed
         to the scalar form. Tuples are not allowed when ``k is None``. See
         `Params` for the semantics.

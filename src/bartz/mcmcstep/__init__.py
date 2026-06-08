@@ -25,8 +25,36 @@
 """
 Functions that implement the BART posterior MCMC initialization and update step.
 
-  - `init`: Creates an initial `State` from data and configurations.
-  - `step`: Performs one full MCMC step on a `State`, returning a new `State`.
+Initialization and stepping
+---------------------------
+.. autosummary::
+    :toctree:
+
+    init
+    step
+    make_p_nonterminal
+    OutcomeType
+
+MCMC state
+----------
+.. autosummary::
+    :toctree:
+
+    State
+    Forest
+    StepConfig
+
+Reduction strategies
+--------------------
+Configurations for the per-leaf scatter-add reductions, to pass to `init`.
+
+.. autosummary::
+    :toctree:
+
+    ReductionConfig
+    BatchedReduction
+    OneHotReduction
+    PallasReduction
 """
 
 # ruff: noqa: F401

@@ -25,8 +25,21 @@
 """
 Debugging utilities.
 
-  - `trees_BART_to_bartz`: convert an R package BART3 trace to a bartz trace.
-  - `sample_prior`: sample the bart prior.
+Prior sampling
+--------------
+.. autosummary::
+    :toctree:
+
+    sample_prior
+
+R BART trace conversion
+-----------------------
+.. autosummary::
+    :toctree:
+
+    trees_BART_to_bartz
+    BARTTraceMeta
+    TraceWithOffset
 """
 
 # ruff: noqa: F401

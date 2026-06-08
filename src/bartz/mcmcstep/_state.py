@@ -194,16 +194,13 @@ class Forest(Module):
     distribution `s`. Required only to update `log_s`."""
 
     a: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. Required only to sample `theta`.
-    See `step_theta`."""
+    """Parameter of the prior on `theta`. Required only to sample `theta`."""
 
     b: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. Required only to sample `theta`.
-    See `step_theta`."""
+    """Parameter of the prior on `theta`. Required only to sample `theta`."""
 
     rho: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. Required only to sample `theta`.
-    See `step_theta`."""
+    """Parameter of the prior on `theta`. Required only to sample `theta`."""
 
     @property
     def has_chains(self) -> bool:
@@ -275,8 +272,7 @@ class State(Module):
 
     binary_indices: None | Int32[Array, ' kb']
     """The indices of binary outcome components in the full list of outcome
-    components. `None` when there are no binary components. Filled in by
-    `init` and used by `step_z` to update only the binary rows of `resid`."""
+    components. `None` when there are no binary components."""
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
     """Constant shift added to the sum of trees."""

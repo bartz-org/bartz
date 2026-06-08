@@ -68,7 +68,9 @@ class ReductionConfig(Module):
         # the output's trailing axis is the number of reduced bins: the range
         # length, or `size` without a subset. jaxtyping evals the `{...}` dim
         # against the arguments but forbids spaces and str-formats arrays, so
-        # this indexes a tuple by a bool instead of `... if ... else ...`
+        # this indexes a tuple by a bool instead of `... if ... else ...`. The
+        # bool reads a zero-length range as no subset, mislabeling the dim, but
+        # the only caller passes the nonempty two-element child pair.
     ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
         """Indexed reduce along the last axis of `values`.
 

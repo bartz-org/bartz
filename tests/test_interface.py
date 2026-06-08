@@ -108,7 +108,12 @@ from bartz.mcmcstep import BatchedReduction, State
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from bartz.testing import DiscreteUniform, Gamma, gen_data
-from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
+from tests.test_mcmcstep import (
+    check_sharding,
+    get_normal_spec,
+    normalize_spec,
+    reduce_reference,
+)
 from tests.util import (
     assert_allclose,
     assert_array_equal,
@@ -1291,7 +1296,7 @@ def test_predict(bkw: BartKW) -> None:
     )
 
 
-def test_count_prec_tree_caches_valid(bkw: BartKW) -> None:
+def test_count_prec_tree_caches_valid(bkw: BartKW, subtests: SubTests) -> None:
     """The cached `count_tree`/`prec_tree` stay valid at the actual leaves.
 
     `step` updates the cached per-leaf counts and precision sums only at the
@@ -1303,13 +1308,14 @@ def test_count_prec_tree_caches_valid(bkw: BartKW) -> None:
     state = bart._mcmc_state
     forest = state.forest
 
-    # which caches exist follows the configuration
-    assert (forest.count_tree is not None) == (
-        state.prec_scale is None
-        or forest.min_points_per_decision_node is not None
-        or forest.min_points_per_leaf is not None
-    )
-    assert (forest.prec_tree is not None) == (state.prec_scale is not None)
+    with subtests.test('presence'):
+        # which caches exist follows the configuration
+        assert (forest.count_tree is not None) == (
+            state.prec_scale is None
+            or forest.min_points_per_decision_node is not None
+            or forest.min_points_per_leaf is not None
+        )
+        assert (forest.prec_tree is not None) == (state.prec_scale is not None)
 
     # flatten the chain axis (if any) into the tree axis
     _, n = state.X.shape
@@ -1327,26 +1333,33 @@ def test_count_prec_tree_caches_valid(bkw: BartKW) -> None:
         values: int | Float32[Array, ' n'] | Float32[Array, 'k k n'],
         comparison: Callable[..., None],
     ) -> None:
+        # the fresh value is a from-scratch reduction over the datapoints, the
+        # same baseline `TestReduction` checks the optimized reductions against
         *_, tree_size = cache.shape
-        core = () if isinstance(values, int) else values.shape[:-1]
+        core = jnp.asarray(values).shape[:-1]
         cache = cache.reshape(-1, *core, tree_size)
-
-        def fresh_tree(li: UInt[Array, ' n']) -> Shaped[Array, '*k_k 2*half']:
-            return jnp.zeros((*core, tree_size), cache.dtype).at[..., li].add(values)
-
-        fresh = vmap(fresh_tree)(leaf_indices)
+        fresh = vmap(
+            partial(
+                reduce_reference,
+                values,
+                size=tree_size,
+                dtype=cache.dtype,
+                data_sharded=False,
+            )
+        )(leaf_indices)
         mask = leaf_mask.reshape(-1, *(1,) * len(core), tree_size)
         comparison(jnp.where(mask, cache, 0), jnp.where(mask, fresh, 0))
 
-    if forest.count_tree is not None:
-        check_cache(forest.count_tree, 1, assert_array_equal)
-    if forest.prec_tree is not None:
-        assert state.prec_scale is not None
-        check_cache(
-            forest.prec_tree,
-            state.prec_scale,
-            partial(assert_close_matrices, rtol=1e-5, reduce_rank=True),
-        )
+    with subtests.test('values'):
+        if forest.count_tree is not None:
+            check_cache(forest.count_tree, 1, assert_array_equal)
+        if forest.prec_tree is not None:
+            assert state.prec_scale is not None
+            check_cache(
+                forest.prec_tree,
+                state.prec_scale,
+                partial(assert_close_matrices, rtol=1e-5, reduce_rank=True),
+            )
 
 
 class TestVarprobAttr:

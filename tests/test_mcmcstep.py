@@ -623,6 +623,35 @@ class TestSearchDivisor:
             _search_divisor(target, dividend, low, up)
 
 
+def reduce_reference(
+    values: Float[Array, '*batch_shape n'] | int,
+    indices: Integer[Array, ' n'],
+    /,
+    *,
+    size: int,
+    indices_subset: Integer[Array, ' sub_size'] | None = None,
+    dtype: DTypeLike,
+    data_sharded: bool,
+) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
+    """External baseline mirroring `_reduce` via `jax.ops.segment_sum`."""
+    values = jnp.asarray(values)
+    # `segment_sum` reduces the leading axis, `_reduce` the last one; a
+    # scalar value is the count case, weighting each datapoint equally
+    if values.ndim == 0:
+        data = jnp.broadcast_to(values.astype(dtype), indices.shape)
+    else:
+        data = jnp.moveaxis(values, -1, 0).astype(dtype)
+    out = segment_sum(data, indices, num_segments=size)
+    if indices_subset is not None:
+        # select the subset bins from the full reduction; 'fill' makes
+        # out-of-domain padding bins read as zero instead of clamping
+        out = out.at[indices_subset].get(mode='fill', fill_value=0)
+    out = jnp.moveaxis(out, 0, -1)
+    if data_sharded:
+        out = lax.psum(out, 'data')
+    return out
+
+
 class TestReduction:
     """Check every `ReductionConfig` matches an unbatched segment-sum baseline."""
 
@@ -661,35 +690,6 @@ class TestReduction:
             PallasReduction(backend=pallas_backend, num_blocks=1, block_size=64),
             PallasReduction(backend=pallas_backend, num_blocks=8, block_size=16),
         )
-
-    @staticmethod
-    def reference(
-        values: Float[Array, '*batch_shape n'] | int,
-        indices: Integer[Array, ' n'],
-        /,
-        *,
-        size: int,
-        indices_subset: Integer[Array, ' sub_size'] | None = None,
-        dtype: DTypeLike,
-        data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
-        """External baseline mirroring `_reduce` via `jax.ops.segment_sum`."""
-        values = jnp.asarray(values)
-        # `segment_sum` reduces the leading axis, `_reduce` the last one; a
-        # scalar value is the count case, weighting each datapoint equally
-        if values.ndim == 0:
-            data = jnp.broadcast_to(values.astype(dtype), indices.shape)
-        else:
-            data = jnp.moveaxis(values, -1, 0).astype(dtype)
-        out = segment_sum(data, indices, num_segments=size)
-        if indices_subset is not None:
-            # select the subset bins from the full reduction; 'fill' makes
-            # out-of-domain padding bins read as zero instead of clamping
-            out = out.at[indices_subset].get(mode='fill', fill_value=0)
-        out = jnp.moveaxis(out, 0, -1)
-        if data_sharded:
-            out = lax.psum(out, 'data')
-        return out
 
     def test_matches_reference(
         self, configs: tuple[ReductionConfig, ...], keys: split, subtests: SubTests
@@ -799,7 +799,7 @@ class TestReduction:
                 close,
             )
 
-        expected = {name: run(self.reference) for name, (run, _) in cases.items()}
+        expected = {name: run(reduce_reference) for name, (run, _) in cases.items()}
 
         for config in configs:
             for name, (run, compare) in cases.items():

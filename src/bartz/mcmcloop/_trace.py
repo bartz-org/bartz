@@ -162,7 +162,7 @@ class MainTrace(BurninTrace):
             leaf_tree=state.forest.leaf_tree,
             var_tree=state.forest.var_tree,
             split_tree=state.forest.split_tree,
-            offset=state.offset,
+            offset=state.forest.offset,
             leaf_scale=state.forest.leaf_scale,
             varprob=varprob,
             **vars(BurninTrace.from_state(state)),

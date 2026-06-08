@@ -366,8 +366,8 @@ def _sample_prior_forest(
 ]:
     """Implement `sample_prior_forest` for a single tree.
 
-    The heaps are returned as a bare tuple to keep the constant `leaf_scale`
-    out of the vmapped outputs.
+    The heaps are returned as a bare tuple to keep the constants `leaf_scale`
+    and `offset` out of the vmapped outputs.
     """
     trees = sample_prior_onetree(key, max_split, p_nonterminal, sigma_mu)
     return trees.var_tree, trees.split_tree, trees.leaf_tree

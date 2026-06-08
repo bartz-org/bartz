@@ -147,6 +147,8 @@ class TraceWithOffset(Module):
     var_tree: UInt[Array, 'ndpost ntree tree_size//2'] = field(samples=0)
     split_tree: UInt[Array, 'ndpost ntree tree_size//2'] = field(samples=0)
     offset: Float32[Array, '']
+    """Constant shift added to the scaled sum of trees."""
+
     leaf_scale: Float32[Array, '']
     """The scale of the leaf values, 1 for leaves in data units."""
 
@@ -157,15 +159,13 @@ class TraceWithOffset(Module):
     """No device mesh; the trees are host-built and unsharded."""
 
     @classmethod
-    def from_trees_trace(
-        cls, trees: TreeHeaps, offset: Float32[Array, '']
-    ) -> 'TraceWithOffset':
+    def from_trees_trace(cls, trees: TreeHeaps) -> 'TraceWithOffset':
         """Create a `TraceWithOffset` from a `TreeHeaps`."""
         return cls(
             leaf_tree=trees.leaf_tree,
             var_tree=trees.var_tree,
             split_tree=trees.split_tree,
-            offset=offset,
+            offset=trees.offset,
             leaf_scale=trees.leaf_scale,
         )
 

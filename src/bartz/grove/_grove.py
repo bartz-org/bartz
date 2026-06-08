@@ -83,6 +83,10 @@ class TreeHeaps(Protocol):
     ``leaf_scale * leaf_tree``; 1 if the leaves are stored directly in data
     units."""
 
+    offset: Float32[Array, ''] | Float32[Array, ' k']
+    """Constant shift added to the function represented by the trees, which is
+    ``offset + leaf_scale * (sum of leaf values over trees)``; 0 if no shift."""
+
 
 def is_multivariate(trees: TreeHeaps) -> bool:
     """
@@ -120,6 +124,9 @@ class TreesTrace(Module):
     )
     leaf_scale: Float32[Array, ''] | Float32[Array, ' k'] = field(
         default_factory=lambda: jnp.float32(1.0)
+    )
+    offset: Float32[Array, ''] | Float32[Array, ' k'] = field(
+        default_factory=lambda: jnp.float32(0.0)
     )
 
     @classmethod
@@ -263,8 +270,8 @@ def evaluate_forest(
     Notes
     -----
     The leaf values are multiplied by ``trees.leaf_scale``, so the result is in
-    data units; to get function values out of a forest or trace, only the
-    offset has to be added.
+    data units. ``trees.offset`` is not added: it does not distribute over the
+    per-tree sum, so the caller adds it once to the total.
     """
     indices: UInt[Array, '*forest_shape n']
     indices = traverse_forest(X, trees.var_tree, trees.split_tree)

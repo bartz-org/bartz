@@ -1840,7 +1840,7 @@ def sample_prior_like(
         bad_count = jnp.count_nonzero(bad)
         assert bad_count == 0
 
-    return TraceWithOffset.from_trees_trace(prior_trees, bart.offset)
+    return TraceWithOffset.from_trees_trace(replace(prior_trees, offset=bart.offset))
 
 
 def count_stub_trees(

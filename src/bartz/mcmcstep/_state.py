@@ -108,6 +108,9 @@ class Forest(Module):
     standard deviation of a leaf, so the stored leaves are O(1) whatever the
     data units and do not over/underflow narrow `leaf_tree` dtypes."""
 
+    offset: Float32[Array, ''] | Float32[Array, ' k']
+    """Constant shift added to the scaled sum of trees, see `leaf_scale`."""
+
     grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of grow proposals made during one full MCMC cycle."""
 
@@ -255,10 +258,6 @@ class State(Module):
     """The indices of binary outcome components in the full list of outcome
     components. `None` when there are no binary components. Filled in by
     `init` and used by `step_z` to update only the binary rows of `resid`."""
-
-    offset: Float32[Array, ''] | Float32[Array, ' k']
-    """Constant shift added to the scaled sum of trees, see
-    `Forest.leaf_scale`."""
 
     resid: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
         chains=CHAIN_AXIS, data=-1
@@ -802,7 +801,6 @@ def init(
                 else None
             ),
             binary_indices=binary_indices,
-            offset=offset,
             resid=(
                 _lazy(jnp.zeros, y.shape)
                 if is_binary
@@ -819,6 +817,7 @@ def init(
             forest=Forest(
                 leaf_tree=_lazy(jnp.zeros, (num_trees, *kshape, tree_size), leaf_dtype),
                 leaf_scale=leaf_scale,
+                offset=offset,
                 var_tree=_lazy(
                     jnp.zeros,
                     (num_trees, tree_size // 2),
@@ -944,10 +943,10 @@ def _set_initial_resid(
 ) -> 'State':
     """Build the continuous-outcome `resid` and shard it.
 
-    Called post-shard so the captured ``state.binary_y`` and ``state.offset``
-    are already on the target devices. Sharding axes are read via
-    `chain_vmap_axes` / `data_vmap_axes` on a shape preview where the new
-    `resid` leaf has the chain-extended ``ndim`` (inflated by a placeholder
+    Called post-shard so the captured ``state.binary_y`` and
+    ``state.forest.offset`` are already on the target devices. Sharding axes are
+    read via `chain_vmap_axes` / `data_vmap_axes` on a shape preview where the
+    new `resid` leaf has the chain-extended ``ndim`` (inflated by a placeholder
     when `num_chains` is not `None`).
     """
     assert state.binary_y is not None  # holds y at this point
@@ -955,7 +954,7 @@ def _set_initial_resid(
         _initial_resid,
         state.binary_y.shape,
         state.binary_y,
-        state.offset,
+        state.forest.offset,
         binary_indices,
     )
     preview_resid = add_dummy_axis(inner) if num_chains is not None else inner

@@ -27,7 +27,7 @@
 This is the main suite of tests.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from inspect import signature
 from typing import Any, Literal
@@ -1185,7 +1185,7 @@ def sample_prior_like(
         assert bad_count == 0
 
     # pack up trees together with offset
-    return TraceWithOffset.from_trees_trace(prior_trees, bart.offset)
+    return TraceWithOffset.from_trees_trace(replace(prior_trees, offset=bart.offset))
 
 
 def count_stub_trees(

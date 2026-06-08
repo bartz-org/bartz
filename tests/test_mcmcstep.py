@@ -1495,7 +1495,6 @@ class TestMultichain:
                 '.X',
                 '.binary_y',
                 '.binary_indices',
-                '.offset',
                 '.prec_scale',
                 '.inv_sdev_scale',
                 '.error_cov_df',
@@ -2277,7 +2276,6 @@ class TestMVBartIntegration:
             binary_indices=None,
             error_cov_df=df_prior,
             z=None,
-            offset=jnp.float32(0.0),
             prec_scale=None,
             inv_sdev_scale=None,
             forest=_EmptyForest(),
@@ -2345,7 +2343,6 @@ class TestMVBartIntegration:
             binary_indices=None,
             error_cov_df=df_prior,
             z=None,
-            offset=jnp.float32(0.0),
             prec_scale=None,
             forest=_EmptyForest(),
             config=_minimal_step_config(),
@@ -2707,7 +2704,7 @@ class TestLeafDtype:
             state = step(keys.pop(), state)
         trees = evaluate_forest(state.X, state.forest, sum_batch_axis=0)
         ref = jnp.asarray(init_kwargs['y']) if state.z is None else state.z
-        resid2 = ref - (trees + state.offset[..., None])
+        resid2 = ref - (trees + state.forest.offset[..., None])
         assert_close_matrices(state.resid, resid2, rtol=1e-5, reduce_rank=True)
 
     def test_float16_close_to_float32(self, init_kwargs: dict, keys: split) -> None:

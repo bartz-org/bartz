@@ -688,7 +688,7 @@ class Bart(Module):
     @property
     def offset(self) -> Float32[Array, ''] | Float32[Array, ' k']:
         """The prior mean of the latent mean function."""
-        return self._mcmc_state.offset
+        return self._mcmc_state.forest.offset
 
     @property
     def n_save(self) -> int:
@@ -1651,7 +1651,7 @@ def compare_resid(
     else:
         assert y is not None
         ref = y
-    resid2 = ref - (trees + state.offset[..., None])
+    resid2 = ref - (trees + state.forest.offset[..., None])
 
     return resid1, resid2
 

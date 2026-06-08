@@ -94,7 +94,10 @@ def role_of(fullname: str) -> str:
 
 def page_anchors(html: str, package: str) -> list[str]:
     """List the ``package.*`` element ids documented in a reference page."""
-    return sorted(set(re.findall(rf'id="({package}(?:\.\w+)+)"', html)))
+    # element ids are Python-domain dotted paths, so we match only `.`-joined
+    # word characters; an id with any other character would be skipped, but real
+    # Python identifiers never contain one.
+    return sorted(set(re.findall(rf'id="({re.escape(package)}(?:\.\w+)+)"', html)))
 
 
 def build_stochtree_entries() -> dict[str, tuple[str, str]]:
@@ -118,7 +121,7 @@ def build_stochtree_entries() -> dict[str, tuple[str, str]]:
         'stochtree': ('module', f'{reference}/index.html')
     }
     sitemap = fetch(f'{base}/sitemap.xml')
-    pages = set(re.findall(rf'{reference}/([^<]+\.html)', sitemap))
+    pages = set(re.findall(rf'{re.escape(reference)}/([^<]+\.html)', sitemap))
     pages.discard('index.html')
     for page in sorted(pages):
         html = fetch(f'{base}/{reference}/{page}')

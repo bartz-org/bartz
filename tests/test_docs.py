@@ -30,6 +30,7 @@ the public modules. Both are written by hand, so check they stay in sync with
 the actual public names.
 """
 
+import os
 from importlib import import_module
 from inspect import ismodule
 from pathlib import Path
@@ -63,7 +64,9 @@ def autosummary_entries(text: str) -> list[str]:
         elif in_directive and (not stripped or stripped.startswith(':')):
             pass  # blank line or directive option
         elif in_directive and line[:1].isspace():
-            entries.append(stripped)
+            # drop the leading `~` (rst "show last component only") so the
+            # entry is the bare name / importable path callers expect
+            entries.append(stripped.lstrip('~'))
         else:
             in_directive = False
     return entries
@@ -100,16 +103,20 @@ def test_module_docstring_lists_public_api(module_name: str) -> None:
 
 def resolve_entry(entry: str) -> object:
     """Import the object referenced by an autosummary entry."""
-    path = entry.lstrip('~')
     try:
-        return import_module(path)
+        return import_module(entry)
     except ModuleNotFoundError:
-        module_name, _, attr = path.rpartition('.')
+        module_name, _, attr = entry.rpartition('.')
         return getattr(import_module(module_name), attr)
 
 
 def test_reference_index_lists_top_level_api() -> None:
     """Check docs/reference/index.rst covers the top-level public objects."""
+    # `resolve_entry` tells a class (e.g. `bartz.Bart`) from a same-spelled,
+    # different-case module (`bartz.BART`) by relying on case-sensitive imports.
+    # On case-insensitive filesystems CPython enforces case only when
+    # PYTHONCASEOK is unset, so guard against it.
+    assert 'PYTHONCASEOK' not in os.environ
     index = Path(__file__).parent.parent / 'docs' / 'reference' / 'index.rst'
     entries = autosummary_entries(index.read_text())
     assert len(entries) == len(set(entries)), 'duplicate autosummary entries'

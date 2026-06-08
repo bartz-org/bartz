@@ -101,11 +101,22 @@ class TreesTrace(Module):
     # relationship is still checked here: `half_tree_size` is bound first by the
     # anchors, then `leaf_tree` is checked against twice it.
     var_tree: UInt[Array, '*batch_shape half_tree_size']
+    """The axes along which the decision nodes operate. This array can be
+    dirty but for the always unused node at index 0 which must be set to 0."""
+
     split_tree: UInt[Array, '*batch_shape half_tree_size']
+    """The decision boundaries of the trees. The boundaries are open on the
+    right, i.e., a point belongs to the left child iff x < split. Whether a
+    node is a leaf is indicated by the corresponding 'split' element being
+    0. Unused nodes also have split set to 0. This array can't be dirty."""
+
     leaf_tree: (
         Float32[Array, '*batch_shape 2*half_tree_size']
         | Float32[Array, '*batch_shape k 2*half_tree_size']
     )
+    """The values in the leaves of the trees. This array can be dirty, i.e.,
+    unused nodes can have whatever value. It may have an additional axis
+    for multivariate leaves."""
 
     @classmethod
     def from_dataclass(cls, obj: TreeHeaps) -> 'TreesTrace':

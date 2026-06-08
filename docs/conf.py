@@ -157,6 +157,24 @@ def _apply_preserve_defaults_to_equinox_modules() -> None:
 _apply_preserve_defaults_to_equinox_modules()
 
 
+# Render only the implementation signature of overloaded functions/methods.
+# Otherwise autodoc emits one signature per `@overload`, and those go through a
+# text path that mangles the type hints (straight quotes become typographic
+# quotes) and merely duplicates the Parameters section below. Clearing the
+# analyzer's overload table makes autodoc fall back to the real signature.
+from sphinx.pycode import ModuleAnalyzer
+
+_orig_module_analyze = ModuleAnalyzer.analyze
+
+
+def _analyze_without_overloads(self) -> None:  # noqa: ANN001
+    _orig_module_analyze(self)
+    self.overloads = {}
+
+
+ModuleAnalyzer.analyze = _analyze_without_overloads  # ty: ignore[invalid-assignment]
+
+
 def setup(app) -> None:  # noqa: ANN001
     if sys.version_info >= (3, 14):
         # priority 501 runs after validate_config (default 500) which populates

@@ -180,9 +180,10 @@ class Gamma(ScaleDistr):
 
 
 class SpikeSlab(ScaleDistr):
-    """Two-point scales: 0 w.p. ``1 - pi``, ``1/sqrt(pi)`` w.p. `pi`.
+    """Two-point distribution over the scales 0 and ``1/sqrt(pi)``.
 
-    Hard variable selection: a fraction `pi` of the predictors is active, the
+    The scale is ``1/sqrt(pi)`` with probability `pi` and 0 otherwise. This is
+    hard variable selection: a fraction `pi` of the predictors is active, the
     others are exactly inert.
     """
 

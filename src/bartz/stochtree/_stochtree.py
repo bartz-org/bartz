@@ -114,7 +114,8 @@ class GeneralParams:
     """Number of independent MCMC chains."""
 
     outcome_model: OutcomeModel = field(default_factory=OutcomeModel)
-    """Outcome family and link specification."""
+    """Outcome family and link specification. Defaults to continuous with
+    identity link."""
 
 
 @dataclass(frozen=True, kw_only=True)

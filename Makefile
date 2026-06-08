@@ -153,7 +153,7 @@ clean:
 # other groups are balanced just under it. Rough tests-old cost per group (wall
 # seconds, ~= the deduped CI `--durations` table; re-measure after big changes):
 #   misc ~755  iface-v5v7 ~730  iface-v6 ~760  iface-v4 ~850  bart-v1 ~725  bart-v23 ~670
-GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py tests/test_naming.py 'tests/test_interface.py::test_equiv_sharding[v7]' -k "not TestMultichain"
+GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py tests/test_naming.py tests/test_docs.py 'tests/test_interface.py::test_equiv_sharding[v7]' -k "not TestMultichain"
 GROUP_iface-v5v7  := tests/test_interface.py -k "(v5 and TestWithCachedBart) or (v7 and not test_equiv_sharding)"
 GROUP_iface-v6    := tests/test_interface.py -k "v6 or (v5 and not TestWithCachedBart)"
 GROUP_iface-v4    := tests/test_interface.py -k "(v4 and not test_equiv_sharding) or not (v2 or v3 or v4 or v5 or v6 or v7)"

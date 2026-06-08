@@ -198,7 +198,7 @@ def run_mcmc(
     Raises
     ------
     RuntimeError
-        If `run_mcmc` detects it's being invoked in a `jit`-wrapped context and
+        If `run_mcmc` detects it's being invoked in a `jax.jit`-wrapped context and
         with settings that would create unrolled loops in the trace.
 
     Notes
@@ -206,7 +206,7 @@ def run_mcmc(
     The number of MCMC updates is ``n_burn + n_skip * n_save``. The traces do
     not include the initial state, and include the final state.
 
-    Resuming is exact: passing the returned `final_state` and the same `key` to
+    Resuming is exact: passing the returned `~RunMCMCResult.final_state` and the same `key` to
     a new call continues the run as if it had not stopped, so splitting a run
     into several consecutive calls gives the same result as a single call.
     """

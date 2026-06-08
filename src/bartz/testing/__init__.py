@@ -22,7 +22,44 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Testing utilities."""
+"""Testing utilities to generate synthetic datasets.
+
+Data generation
+---------------
+.. autosummary::
+    :toctree:
+
+    gen_data
+    gen_params
+    gen_data_from_params
+    Params
+    DGP
+    gen_nonsense_data
+
+Distributions
+-------------
+Standardized distributions (mean 0, variance 1) for predictors and coefficients.
+
+.. autosummary::
+    :toctree:
+
+    Distr
+    Normal
+    Uniform
+    DiscreteUniform
+
+Scale distributions
+-------------------
+Distributions of the per-predictor importance scales (unit mean square).
+
+.. autosummary::
+    :toctree:
+
+    ScaleDistr
+    Constant
+    Gamma
+    SpikeSlab
+"""
 
 # ruff: noqa: F401
 

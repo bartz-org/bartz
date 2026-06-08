@@ -110,7 +110,7 @@ def evaluate_trace(
           `X` is *not* sharded over the mesh ``'data'`` axis; batching a
           sharded axis would serialize the devices.
         - ``'shard_and_autobatch'``: shard the ``n`` axis of `X` over the mesh
-          ``'data'`` axis with a manual `shard_map` and batch the per-device
+          ``'data'`` axis with a manual `jax.shard_map` and batch the per-device
           chunk. Falls back to ``'autobatch'`` if the mesh has no ``'data'``
           axis.
     max_io_nbytes

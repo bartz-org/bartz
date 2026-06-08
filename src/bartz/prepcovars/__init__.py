@@ -22,7 +22,25 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Functions and classes to preprocess data."""
+"""Functions and classes to preprocess data.
+
+Binner interface
+----------------
+.. autosummary::
+    :toctree:
+
+    Binner
+    BinnerFactory
+
+Binners
+-------
+.. autosummary::
+    :toctree:
+
+    UniqueQuantileBinner
+    RangeEvenBinner
+    GivenSplitsBinner
+"""
 
 # ruff: noqa: F401
 

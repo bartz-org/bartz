@@ -126,6 +126,15 @@ jobs:
         with:
           r-version: "renv"
 
+      - name: Add a CRAN fallback mirror for renv
+        # setup-r points renv at Posit Package Manager (PPM) alone, via a
+        # single-URL RENV_CONFIG_REPOS_OVERRIDE. PPM intermittently times out,
+        # which hard-fails the renv bootstrap/restore below and forces a manual
+        # CI re-run. Append a plain CRAN mirror so renv falls back to it (source
+        # builds, only when PPM is unreachable). $RSPM is the PPM binary URL
+        # just exported by setup-r, so the runner's distro codename stays in sync.
+        run: echo "RENV_CONFIG_REPOS_OVERRIDE=PPM=${RSPM};CRAN=https://cloud.r-project.org" >> "$GITHUB_ENV"
+
       - name: Install R dependencies
         uses: r-lib/actions/setup-renv@a51a8012b0aab7c32ef9d19bf54da93f3254335e # v2
         env:

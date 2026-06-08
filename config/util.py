@@ -28,25 +28,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-import tomli
-
 CHANGELOG_PATH = Path('docs/changelog.md')
 
 
 def get_version() -> str:
-    """Read the bartz version from pyproject.toml."""
-    with Path('pyproject.toml').open('rb') as file:
-        return tomli.load(file)['project']['version']
-
-
-def update_version() -> None:
-    """Update the version file."""
-    version = get_version()
-    version_info = tuple(map(int, version.split('.')))
-    Path('src/bartz/_version.py').write_text(f"""\
-__version__ = {version!r}
-__version_info__ = {version_info!r}
-""")
+    """Read the release version from the topmost changelog section."""
+    for line in CHANGELOG_PATH.read_text().splitlines():
+        if line.startswith('## '):
+            version, _title, _date = _parse_changelog_header(line)
+            return version
+    msg = f'No release header found in {CHANGELOG_PATH}'
+    raise ValueError(msg)
 
 
 def _parse_changelog_header(line: str) -> tuple[str, str, str]:
@@ -62,20 +54,15 @@ def _read_changelog_section() -> tuple[str, str, str, str]:
     """Read and validate the topmost changelog section.
 
     Returns ``(version, title, date, body)``. Raises ValueError if the
-    changelog cannot be parsed, the topmost section's version does not match
-    pyproject.toml, or the date is not today.
+    changelog cannot be parsed or the date is not today.
     """
-    version = get_version()
     lines = CHANGELOG_PATH.read_text().splitlines()
     headers = [i for i, line in enumerate(lines) if line.startswith('## ')]
     if len(headers) < 2:
         msg = f'Expected at least 2 release headers in {CHANGELOG_PATH}, found {len(headers)}'
         raise ValueError(msg)
     first, second = headers[0], headers[1]
-    v, title, date = _parse_changelog_header(lines[first])
-    if v != version:
-        msg = f'Topmost changelog section is for {v!r}, expected {version!r}'
-        raise ValueError(msg)
+    version, title, date = _parse_changelog_header(lines[first])
     _parse_changelog_header(lines[second])  # validate boundary header
     today = datetime.datetime.now(tz=datetime.timezone.utc).date().isoformat()
     if date != today:
@@ -86,7 +73,7 @@ def _read_changelog_section() -> tuple[str, str, str, str]:
 
 
 def check_changelog() -> None:
-    """Validate the topmost changelog section is for the current version and today."""
+    """Validate the topmost changelog section is parseable and dated today."""
     _read_changelog_section()
 
 
@@ -116,8 +103,6 @@ def main() -> None:
     command = sys.argv[1]
     if command == 'get_version':
         print(get_version())
-    elif command == 'update_version':
-        update_version()
     elif command == 'check_changelog':
         check_changelog()
     elif command == 'gh_release':

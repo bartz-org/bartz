@@ -22,7 +22,56 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Functions to create, manipulate, and check binary decision trees."""
+"""Functions to create, manipulate, and check binary decision trees.
+
+Tree representation
+-------------------
+.. autosummary::
+    :toctree:
+
+    TreeHeaps
+    TreesTrace
+    is_multivariate
+
+Evaluation
+----------
+.. autosummary::
+    :toctree:
+
+    evaluate_forest
+    traverse_tree
+    traverse_forest
+
+Tree and node properties
+------------------------
+.. autosummary::
+    :toctree:
+
+    is_actual_leaf
+    is_leaves_parent
+    tree_depth
+    tree_actual_depth
+    tree_depths
+
+Forest summaries
+----------------
+.. autosummary::
+    :toctree:
+
+    forest_mean_leaves
+    forest_depth_distr
+    points_per_node_distr
+    var_histogram
+
+Validation and inspection
+-------------------------
+.. autosummary::
+    :toctree:
+
+    check_trace
+    describe_error
+    format_tree
+"""
 
 # ruff: noqa: F401
 

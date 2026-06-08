@@ -227,12 +227,12 @@ class Bart(Module):
             If less than two datapoints, set ``sigest=1``. If ``n > p``, use the
             OLS error standard deviation estimate (w/ intercept, w/o taking into
             account `w`), else use the standard deviation of `y_train`.
-        'gc'
+        'cg'
             Use an approximate and regularized version of the OLS residual
             standard deviation estimate.
         'auto' (default)
             Use 'ols-or-variance' if the dataset is smaller than a threshold,
-            else 'gc' for larger datasets.
+            else 'cg' for larger datasets.
     sigdf
         The degrees of freedom of the scaled inverse-chisquared prior on the
         noise variance. For multivariate regression, the Inverse-Wishart

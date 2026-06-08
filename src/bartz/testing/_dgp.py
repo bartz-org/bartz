@@ -250,6 +250,22 @@ def generate_outcome(
     return z, y
 
 
+def check_offset(offset: Float[Array, ''] | Float[Array, ' k'], k: int | None) -> None:
+    """Validate the `offset` argument of `gen_params` against `k`.
+
+    A scalar offset is always fine; a vector one requires a multivariate
+    outcome and must have length `k`.
+    """
+    if offset.ndim == 1:
+        if k is None:
+            msg = 'vector offset requires a multivariate outcome (k != None)'
+            raise ValueError(msg)
+        (offset_len,) = offset.shape
+        if offset_len != k:
+            msg = f'offset has length {offset_len} but k={k}'
+            raise ValueError(msg)
+
+
 def parse_outcome_type(
     outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...], k: int | None
 ) -> OutcomeType | tuple[OutcomeType, ...]:
@@ -338,7 +354,8 @@ class Params(Module):
                 \end{cases} \\
             W_{ci}^2 &= (1 - \rho) + \rho\, \eta_{ci}^2,
                 \quad \rho \in [0, 1], \\
-            \mu_{ci} &= \mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci}, \\
+            \mu_{ci} &= o_c + \mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci},
+                \quad o_c \in \mathbb R, \\
             Z_{ci} &\sim N\big(\mu_{ci},\, \sigma^2_{\mathrm{eps}}\, W_{ci}^2\big), \\
             Y_{ci} &= \begin{cases}
                     Z_{ci} & c \text{ continuous}, \\
@@ -367,7 +384,7 @@ class Params(Module):
         :nowrap:
 
         \begin{align}
-            E[Z_{ci}] &= 0, \\
+            E[Z_{ci}] &= o_c, \\
             \operatorname{Cov}[\mu^{\mathrm L}_{ci}, \mu^{\mathrm Q}_{ci} \mid
                     \theta]
                 &= \operatorname{Cov}[\mu^{\mathrm L}_{ci},
@@ -449,6 +466,8 @@ class Params(Module):
           - `sigma2_quad`
         * - :math:`\sigma^2_{\mathrm{eps}}`
           - `sigma2_eps`
+        * - :math:`o_c`
+          - `offset`
         * - :math:`\operatorname{Var}[E[Z_{ci} \mid \theta]]`
           - `sigma2_mean`
         * - :math:`E[\operatorname{Var}[Z_{ci} \mid \theta]]`
@@ -546,6 +565,13 @@ class Params(Module):
 
     sigma2_eps: Float[Array, '']
     """Variance of the additive error."""
+
+    offset: Float[Array, ''] | Float[Array, ' k']
+    """Constant added to the latent mean ``mu``, shifting ``E[z]`` away from 0.
+    Either a scalar (the same shift for every component) or a length-``k``
+    vector (a per-component shift, multivariate only). Applied after the linear
+    and quadratic terms, so for binary components it shifts the threshold and
+    hence the success probability; defaults to 0."""
 
     sigma2_mean: Float[Array, '']
     """Variance of the expected mean function."""
@@ -654,8 +680,8 @@ class DGP(Module):
     univariate mode (``k is None``, equal to ``muquad_shared``)."""
 
     mu: Float[Array, 'k n'] | Float[Array, ' n']
-    """Latent mean ``mulin + muquad`` of shape (k, n), or (n,) in univariate
-    mode (``k is None``)."""
+    """Latent mean ``mulin + muquad + params.offset[..., None]`` of shape
+    (k, n), or (n,) in univariate mode (``k is None``)."""
 
     error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None
     """Per-datapoint error standard-deviation scale (the ``W`` of `Params`),
@@ -760,6 +786,7 @@ def gen_params(
     sigma2_lin: Float[Array, ''] | float,
     sigma2_quad: Float[Array, ''] | float,
     sigma2_eps: Float[Array, ''] | float,
+    offset: Float[Array, ''] | Float[Array, ' k'] | float = 0.0,
     x_distr: Distr = Uniform(),
     beta_distr: Distr = DiscreteUniform(2),
     A_distr: Distr = DiscreteUniform(2),
@@ -792,6 +819,7 @@ def gen_params(
     sigma2_lin
     sigma2_quad
     sigma2_eps
+    offset
         See `Params`.
     x_distr
         Distribution family of the predictors (default `Uniform`). Binary
@@ -836,7 +864,8 @@ def gen_params(
         if a tuple ``outcome_type`` is combined with ``k=None``, or if
         ``(lambda_ is None) != (k is None)``, or if
         ``(het_strength is None) != (het_shape is None)``, or if
-        ``het_shape='vector'`` is combined with ``k=None``.
+        ``het_shape='vector'`` is combined with ``k=None``, or if a vector
+        ``offset`` is combined with ``k=None`` or has a length other than ``k``.
     """
     if (lambda_ is None) != (k is None):
         msg = (
@@ -859,7 +888,12 @@ def gen_params(
     sigma2_lin = cast(Float[Array, ''], sigma2_lin)
     sigma2_quad = cast(Float[Array, ''], sigma2_quad)
     sigma2_eps = cast(Float[Array, ''], sigma2_eps)
+    offset = cast(Float[Array, ''] | Float[Array, ' k'], offset)
     het_strength = cast(Float[Array, ''] | None, het_strength)
+
+    # offset is a scalar (shared shift) or a length-k vector (per-component); the
+    # scalar/vector split is enforced by the type, the k consistency here
+    check_offset(offset, k)
 
     outcome_type = parse_outcome_type(outcome_type, k)
 
@@ -936,6 +970,7 @@ def gen_params(
         sigma2_lin=sigma2_lin,
         sigma2_quad=sigma2_quad,
         sigma2_eps=sigma2_eps,
+        offset=offset,
         sigma2_mean=sigma2_mean,
         sigma2_pop=sigma2_pop,
         sigma2_pri=sigma2_pri,
@@ -989,7 +1024,11 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
         mulin = combine_shared_separate(mulin_shared, mulin_separate, params.lambda_)
         muquad = combine_shared_separate(muquad_shared, muquad_separate, params.lambda_)
 
-    mu = mulin + muquad
+    # the offset enters only here, at the final latent mean, so for binary
+    # components it shifts the threshold rather than the linear/quadratic terms;
+    # the trailing axis lets a (k,) per-component offset broadcast over the n
+    # datapoints, while a scalar offset broadcasts over everything
+    mu = mulin + muquad + params.offset[..., None]
 
     # heteroskedastic error scale W = sqrt(v), v = (1 - rho) + rho eta ** 2;
     # reuses the linear-mean machinery at unit budget, so E[eta ** 2] = 1 and the
@@ -1040,6 +1079,7 @@ def gen_data(
     sigma2_lin: Float[Array, ''] | float,
     sigma2_quad: Float[Array, ''] | float,
     sigma2_eps: Float[Array, ''] | float,
+    offset: Float[Array, ''] | Float[Array, ' k'] | float = 0.0,
     x_distr: Distr = Uniform(),
     beta_distr: Distr = DiscreteUniform(2),
     A_distr: Distr = DiscreteUniform(2),
@@ -1072,6 +1112,7 @@ def gen_data(
     sigma2_lin
     sigma2_quad
     sigma2_eps
+    offset
     x_distr
     beta_distr
     A_distr
@@ -1096,6 +1137,7 @@ def gen_data(
         sigma2_lin=sigma2_lin,
         sigma2_quad=sigma2_quad,
         sigma2_eps=sigma2_eps,
+        offset=offset,
         x_distr=x_distr,
         beta_distr=beta_distr,
         A_distr=A_distr,

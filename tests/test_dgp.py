@@ -174,6 +174,7 @@ def test_shapes_and_dtypes(keys: split) -> None:
         'params.sigma2_lin': (),
         'params.sigma2_quad': (),
         'params.sigma2_eps': (),
+        'params.offset': (),
     }
     for name, shape in floating_fields.items():
         field = attrgetter(name)(dgp)
@@ -1033,6 +1034,64 @@ class TestOutcomeType:
         kw: kwdict = dict(KWARGS, k=None, outcome_type=('continuous',))
         with pytest.raises(ValueError, match='tuple outcome_type requires'):
             gen_data(keys.pop(), **kw)
+
+
+class TestOffset:
+    """Tests for the `offset` parameter of `gen_data`."""
+
+    def test_default_is_zero(self, keys: split) -> None:
+        """Without `offset`, `params.offset` is 0."""
+        dgp = gen_data(keys.pop(), lambda_=0.5, **KWARGS)
+        assert dgp.params.offset == 0.0
+
+    @pytest.mark.parametrize(
+        'offset',
+        [jnp.float32(0.7), jnp.array([-1.0, 0.0, 2.0])],
+        ids=['scalar', 'vector'],
+    )
+    def test_shifts_latent_mean(
+        self, keys: split, offset: Float[Array, ' k'] | Float[Array, '']
+    ) -> None:
+        """`offset` adds a constant to `mu` (hence `z`, `y`) after the lin/quad terms.
+
+        A scalar shifts every component equally; a length-`k` vector shifts each
+        one independently. Reusing the key, the only change from the zero-offset
+        run is the shift; the linear and quadratic parts are untouched.
+        """
+        key = keys.pop()
+        base = gen_data(key, lambda_=0.5, **KWARGS)
+        shifted = gen_data(random.clone(key), lambda_=0.5, offset=offset, **KWARGS)
+        assert_array_equal(shifted.params.offset, offset)
+        assert_array_equal(shifted.mulin, base.mulin)
+        assert_array_equal(shifted.muquad, base.muquad)
+        offset = offset[..., None]  # broadcast like gen_data_from_params
+        assert_array_equal(shifted.mu, base.mu + offset)
+        assert_close_matrices(shifted.z, base.z + offset, rtol=1e-5)
+        assert_close_matrices(shifted.y, base.y + offset, rtol=1e-5)
+
+    def test_vector_requires_multivariate(self, keys: split) -> None:
+        """A vector `offset` with `k=None` raises."""
+        kw: kwdict = dict(KWARGS, k=None)
+        with pytest.raises(ValueError, match='vector offset requires'):
+            gen_data(keys.pop(), offset=jnp.zeros(3), **kw)
+
+    def test_vector_wrong_length(self, keys: split) -> None:
+        """A vector `offset` whose length is not `k` raises."""
+        assert KWARGS['k'] != 2
+        with pytest.raises(ValueError, match='offset has length 2 but k=3'):
+            gen_data(keys.pop(), lambda_=0.5, offset=jnp.zeros(2), **KWARGS)
+
+    def test_controls_binary_rate(self, keys: split) -> None:
+        """A large `offset` drives the binary success probability to 0 or 1.
+
+        This is the motivating use case: binary outcomes are thresholded, so the
+        only way to move their base rate is to shift the latent mean.
+        """
+        kw: kwdict = dict(KWARGS, lambda_=0.5, outcome_type='binary')
+        high = gen_data(keys.pop(), offset=10.0, **kw)
+        low = gen_data(keys.pop(), offset=-10.0, **kw)
+        assert jnp.mean(high.y) > 0.95
+        assert jnp.mean(low.y) < 0.05
 
 
 class TestHeteroskedasticity:

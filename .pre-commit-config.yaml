@@ -118,6 +118,13 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: check-path-headers
+        name: check the `bartz/<path>` comment matches each file's location
+        entry: uv run --dev python config/check_path_headers.py
+        language: system
+        # self-scopes to files carrying the bartz license header; `text` just
+        # keeps binaries (e.g. .inv) out of the argument list.
+        types: [text]
       - id: ty
         name: ty check
         # there is no official ty pre-commit hook (and an isolated hook env

@@ -66,6 +66,7 @@ from jaxtyping import (
     Key,
     PyTree,
     Shaped,
+    UInt,
     UInt8,
     UInt32,
     jaxtyped,
@@ -625,14 +626,15 @@ class TestSearchDivisor:
 
 def reduce_reference(
     values: Float[Array, '*batch_shape n'] | int,
-    indices: Integer[Array, ' n'],
+    indices: UInt[Array, ' n'],
     /,
     *,
     size: int,
-    indices_subset: Integer[Array, ' sub_size'] | None = None,
+    subset_start: Integer[Array, ''] | None = None,
+    subset_length: int | None = None,
     dtype: DTypeLike,
     data_sharded: bool,
-) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
+) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
     """External baseline mirroring `_reduce` via `jax.ops.segment_sum`."""
     values = jnp.asarray(values)
     # `segment_sum` reduces the leading axis, `_reduce` the last one; a
@@ -642,10 +644,14 @@ def reduce_reference(
     else:
         data = jnp.moveaxis(values, -1, 0).astype(dtype)
     out = segment_sum(data, indices, num_segments=size)
-    if indices_subset is not None:
-        # select the subset bins from the full reduction; 'fill' makes
-        # out-of-domain padding bins read as zero instead of clamping
-        out = out.at[indices_subset].get(mode='fill', fill_value=0)
+    if subset_length is not None:
+        assert subset_start is not None  # set together with subset_length
+        # select the range's bins from the full reduction; 'fill' makes
+        # out-of-domain bins read as zero instead of clamping
+        bins = subset_start.astype(jnp.uint32) + jnp.arange(
+            subset_length, dtype=jnp.uint32
+        )
+        out = out.at[bins].get(mode='fill', fill_value=0)
     out = jnp.moveaxis(out, 0, -1)
     if data_sharded:
         out = lax.psum(out, 'data')
@@ -701,10 +707,10 @@ class TestReduction:
         sums overflow float16 (catching accumulation in the values' dtype
         rather than in the requested `dtype`), composition with an external
         `vmap` that batches only the indices (the layout `step` uses to
-        count/sum over many trees at once), reductions over an explicit bin
-        subset (unsorted, skipping most bins, with an odd length and a bin
-        outside the index domain), and a data axis sharded with `shard_map`,
-        which `PallasReduction` must reject.
+        count/sum over many trees at once), reductions over a contiguous bin
+        range (with a non-power-of-2 length and running past the index domain),
+        and a data axis sharded with `shard_map`, which `PallasReduction` must
+        reject.
         """
         n, size, num_trees = 512, 8, 4
         indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
@@ -719,15 +725,13 @@ class TestReduction:
         # float16 values: each per-bin sum overflows the float16 range, so a
         # reduction accumulating in the values' dtype returns inf
         overflowing = jnp.full(n, 4096.0, jnp.float16)
-        # bin subset: unsorted, skips most bins, has a non-power-of-2 length
-        # (exercising the bins padding `PallasReduction` needs for Triton), and
-        # contains an out-of-domain bin (100), allowed as static-shape padding,
-        # whose sum must come out zero
-        subset = jnp.array([5, 2, 7, 0, 100], jnp.uint32)
-
         count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
         float_kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
-        subset_kw = dict(float_kw, indices_subset=subset)
+        # bin range: starts mid-domain, has a non-power-of-2 length (exercising
+        # the bins padding `PallasReduction` needs for Triton), and runs one
+        # past `size`, so its last bin is out of the index domain and its sum
+        # must come out zero
+        range_kw = dict(float_kw, subset_start=jnp.uint32(6), subset_length=3)
         exact = assert_array_equal  # the count path must match exactly
         close = partial(assert_close_matrices, rtol=1e-5, atol=1e-6, reduce_rank=True)
 
@@ -747,14 +751,14 @@ class TestReduction:
                 lambda f: vmap(partial(f, vector, **float_kw))(tree_indices),
                 close,
             ),
-            'subset count': (
-                lambda f: f(1, indices, **dict(subset_kw, dtype=jnp.uint32)),
+            'range count': (
+                lambda f: f(1, indices, **dict(range_kw, dtype=jnp.uint32)),
                 exact,
             ),
-            'subset float': (lambda f: f(vector, indices, **subset_kw), close),
-            'subset float matrix': (lambda f: f(matrix, indices, **subset_kw), close),
-            'vmap subset float': (
-                lambda f: vmap(partial(f, vector, **subset_kw))(tree_indices),
+            'range float': (lambda f: f(vector, indices, **range_kw), close),
+            'range float matrix': (lambda f: f(matrix, indices, **range_kw), close),
+            'vmap range float': (
+                lambda f: vmap(partial(f, vector, **range_kw))(tree_indices),
                 close,
             ),
         }
@@ -788,10 +792,10 @@ class TestReduction:
                 )(sharded_vector, sharded_indices),
                 close,
             )
-            # the bin subset is closed over, so it is replicated across shards
-            cases['sharded subset float'] = (
+            # the range bounds are closed over, so they are replicated across shards
+            cases['sharded range float'] = (
                 lambda f: shard_map(
-                    partial(f, **dict(subset_kw, data_sharded=True)),
+                    partial(f, **dict(range_kw, data_sharded=True)),
                     mesh=mesh,
                     in_specs=(data, data),
                     out_specs=replicated,

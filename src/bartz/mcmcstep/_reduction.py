@@ -34,7 +34,7 @@ from jax import ShapeDtypeStruct, lax
 from jax import numpy as jnp
 from jax.experimental import pallas as pl
 from jax.typing import DTypeLike
-from jaxtyping import Array, Float, Int32, Integer, Shaped
+from jaxtyping import Array, Float, Int32, Integer, Shaped, UInt
 
 # target number of datapoint batches on cpu when batching is resolved
 # automatically; unlike the gpu target it does not vary across reductions
@@ -57,18 +57,19 @@ class ReductionConfig(Module):
     def _reduce(
         self,
         values: Float[Array, '*batch_shape n'] | int,
-        indices: Integer[Array, ' n'],
+        indices: UInt[Array, ' n'],
         /,
         *,
         size: int,
-        indices_subset: Integer[Array, ' sub_size'] | None = None,
+        subset_start: Integer[Array, ''] | None = None,
+        subset_length: int | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-        # the output's trailing axis is the number of reduced bins: the subset
-        # length, or `size` without a subset; jaxtyping renders `{...}` dims by
-        # str-formatting the argument (which garbles arrays) and forbids spaces,
-        # hence `getattr`
-    ) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
+        # the output's trailing axis is the number of reduced bins: the range
+        # length, or `size` without a subset. jaxtyping evals the `{...}` dim
+        # against the arguments but forbids spaces and str-formats arrays, so
+        # this indexes a tuple by a bool instead of `... if ... else ...`
+    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
         """Indexed reduce along the last axis of `values`.
 
         Parameters
@@ -80,12 +81,15 @@ class ReductionConfig(Module):
             The bin index each datapoint falls into.
         size
             The static excluded upper bound on the values of `indices`, and
-            the number of output bins when `indices_subset` is not given.
-        indices_subset
-            If given, reduce only into these bins, in the given order,
-            ignoring the datapoints whose index falls elsewhere. The entries
-            must not repeat, except entries ``>= size``, allowed as padding to
-            a static length, whose bins reduce to zero.
+            the number of output bins when no subset is given.
+        subset_start
+            If given (with `subset_length`), reduce only into the contiguous
+            bin range ``[subset_start, subset_start + subset_length)``,
+            ignoring datapoints whose index falls elsewhere. The range may run
+            past `size`; those out-of-domain bins reduce to zero.
+        subset_length
+            The static length of the bin range, or `None` to reduce into all
+            `size` bins.
         dtype
             The dtype of the output and of the accumulation; the values are
             kept in their own, possibly narrower, dtype until accumulated.
@@ -101,12 +105,13 @@ class ReductionConfig(Module):
         ...
 
 
-def _resolve_subset(
-    indices: Integer[Array, ' n'],
+def _resolve_range(
+    indices: UInt[Array, ' n'],
     size: int,
-    indices_subset: Integer[Array, ' sub_size'] | None,
-) -> tuple[int, Integer[Array, ' n']]:
-    """Reduce the subset case to the full case for scatter-based algorithms.
+    subset_start: Integer[Array, ''] | None,
+    subset_length: int | None,
+) -> tuple[int, UInt[Array, ' n']]:
+    """Reduce the contiguous-range subset to the full case for scatter algorithms.
 
     Parameters
     ----------
@@ -114,32 +119,34 @@ def _resolve_subset(
         The bin index each datapoint falls into, in ``[0, size)``.
     size
         The number of bins.
-    indices_subset
-        The bins to reduce into, or `None` for all of them.
+    subset_start
+        The first bin of the range to reduce into, or `None` for all bins.
+    subset_length
+        The static number of bins in the range, or `None` for all bins.
 
     Returns
     -------
     out_size : int
-        The number of output bins: the subset length, or `size` without a subset.
-    indices : Integer[Array, ' n']
+        The number of output bins: `subset_length`, or `size` without a subset.
+    indices : UInt[Array, ' n']
         The scatter indices into the output bins: unchanged without a subset,
-        else each datapoint's position in the subset, remapped through a
-        `size`-long lookup table, with misses sent to the out-of-range
-        position ``sub_size``, which scatters drop.
+        else each datapoint's offset from `subset_start`, in the indices' own
+        unsigned dtype, so that indices outside ``[subset_start, subset_start +
+        subset_length)`` land out of bounds, where the scatter drops them.
     """
-    if indices_subset is None:
+    if subset_length is None:
         return size, indices
     else:
-        (sub_size,) = indices_subset.shape
-        # the table holds the downstream scatter indices: unsigned avoids a
-        # negative-index normalization select in the scatter; subset entries
-        # `>= size` fall out of the table, leaving their bins at zero
-        table = (
-            jnp.full(size, sub_size, jnp.uint32)
-            .at[indices_subset]
-            .set(jnp.arange(sub_size, dtype=jnp.uint32))
-        )
-        return sub_size, table[indices]
+        # the subtraction is unsigned: indices below `subset_start` underflow to
+        # a large value rather than going negative (which the scatter would read
+        # as wrap-around indexing), and together with indices ``>= subset_start +
+        # subset_length`` they fall outside the output, where scatters drop them.
+        # Exact while the range fits the index dtype (``subset_start +
+        # subset_length <= 2 ** bits``), as it does for the per-move child pair.
+        assert subset_start is not None  # set together with subset_length
+        assert jnp.issubdtype(indices.dtype, jnp.unsignedinteger)
+        offset = indices - subset_start.astype(indices.dtype)
+        return subset_length, offset
 
 
 class BatchedReduction(ReductionConfig):
@@ -170,17 +177,18 @@ class BatchedReduction(ReductionConfig):
     def _reduce(
         self,
         values: Float[Array, '*batch_shape n'] | int,
-        indices: Integer[Array, ' n'],
+        indices: UInt[Array, ' n'],
         /,
         *,
         size: int,
-        indices_subset: Integer[Array, ' sub_size'] | None = None,
+        subset_start: Integer[Array, ''] | None = None,
+        subset_length: int | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
+    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
         values = jnp.asarray(values)
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
-        size, indices = _resolve_subset(indices, size, indices_subset)
+        size, indices = _resolve_range(indices, size, subset_start, subset_length)
 
         def impl(num_batches: int | None) -> Shaped[Array, '*batch_shape size']:
             return _batched_scatter_add(
@@ -214,7 +222,7 @@ class BatchedReduction(ReductionConfig):
 
 def _batched_scatter_add(
     values: Float[Array, '*batch_shape n'] | Int32[Array, ''],
-    indices: Integer[Array, ' n'],
+    indices: UInt[Array, ' n'],
     /,
     *,
     size: int,
@@ -306,14 +314,15 @@ class OneHotReduction(ReductionConfig):
     def _reduce(
         self,
         values: Float[Array, '*batch_shape n'] | int,
-        indices: Integer[Array, ' n'],
+        indices: UInt[Array, ' n'],
         /,
         *,
         size: int,
-        indices_subset: Integer[Array, ' sub_size'] | None = None,
+        subset_start: Integer[Array, ''] | None = None,
+        subset_length: int | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
+    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
         values = jnp.asarray(values)
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
 
@@ -322,8 +331,12 @@ class OneHotReduction(ReductionConfig):
         scalar = values.ndim == 0
         (n,) = indices.shape
         batch_shape = values.shape[:-1]
-        size, bins, indices = _resolve_subset_bins(
-            indices, size, indices_subset, remap=self.method == 'scatter_set'
+        size, bins, indices = _resolve_range_bins(
+            indices,
+            size,
+            subset_start,
+            subset_length,
+            remap=self.method == 'scatter_set',
         )
         # unsigned avoids a negative-index normalization select in the scatter
         iota = jnp.arange(n, dtype=jnp.uint32)
@@ -378,27 +391,31 @@ class OneHotReduction(ReductionConfig):
         return out
 
 
-def _resolve_subset_bins(
-    indices: Integer[Array, ' n'],
+def _resolve_range_bins(
+    indices: UInt[Array, ' n'],
     size: int,
-    indices_subset: Integer[Array, ' sub_size'] | None,
+    subset_start: Integer[Array, ''] | None,
+    subset_length: int | None,
     *,
     remap: bool,
-) -> tuple[int, Integer[Array, ' out_size'], Integer[Array, ' n']]:
-    """Resolve the subset into output size, comparison bins, and scatter indices.
+) -> tuple[int, UInt[Array, ' out_size'], UInt[Array, ' n']]:
+    """Resolve the range subset into output size, comparison bins, and scatter indices.
 
-    The comparison methods of `OneHotReduction` reduce against the subset bins
+    The comparison methods of `OneHotReduction` reduce against the range's bins
     directly, while its scatter method (`remap`) indexes bins by position, so
-    the indices are remapped like in `_resolve_subset`.
+    the indices are offset like in `_resolve_range`.
     """
-    if indices_subset is None:
+    if subset_length is None:
         return size, jnp.arange(size, dtype=indices.dtype), indices
-    elif remap:
-        sub_size, indices = _resolve_subset(indices, size, indices_subset)
-        return sub_size, indices_subset, indices
+    assert subset_start is not None  # set together with subset_length
+    # uint32, not the possibly narrow `indices.dtype`, so bins past `size` do
+    # not wrap and alias a real bin in the comparison
+    bins = subset_start.astype(jnp.uint32) + jnp.arange(subset_length, dtype=jnp.uint32)
+    if remap:
+        out_size, indices = _resolve_range(indices, size, subset_start, subset_length)
+        return out_size, bins, indices
     else:
-        (sub_size,) = indices_subset.shape
-        return sub_size, indices_subset, indices
+        return subset_length, bins, indices
 
 
 class PallasReduction(ReductionConfig):
@@ -445,14 +462,15 @@ class PallasReduction(ReductionConfig):
     def _reduce(
         self,
         values: Float[Array, '*batch_shape n'] | int,
-        indices: Integer[Array, ' n'],
+        indices: UInt[Array, ' n'],
         /,
         *,
         size: int,
-        indices_subset: Integer[Array, ' sub_size'] | None = None,
+        subset_start: Integer[Array, ''] | None = None,
+        subset_length: int | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {getattr(indices_subset,"size",size)}']:
+    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
         if data_sharded:
             # the kernel trips the vma checks of `shard_map`, in jax-version-
             # dependent ways, even in interpret mode
@@ -463,10 +481,18 @@ class PallasReduction(ReductionConfig):
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
         (n,) = indices.shape
         num_rows = 1 if values.ndim == 0 else math.prod(values.shape[:-1])
-        if indices_subset is None:
+        # the kernel compares the indices against the range's bins, so the
+        # subset case costs nothing more than the full one (`bins=None`)
+        if subset_length is None:
             out_size = size
+            bins = None
         else:
-            (out_size,) = indices_subset.shape
+            assert subset_start is not None  # set together with subset_length
+            out_size = subset_length
+            # uint32 so bins past `size` do not wrap and alias a real bin
+            bins = subset_start.astype(jnp.uint32) + jnp.arange(
+                subset_length, dtype=jnp.uint32
+            )
 
         # the grid size, tile width and interpret flag are all static; they are
         # resolved from `backend` (cpu vs gpu) rather than the trace-time platform,
@@ -487,7 +513,7 @@ class PallasReduction(ReductionConfig):
             values,
             indices,
             size=size,
-            bins=indices_subset,
+            bins=bins,
             dtype=dtype,
             num_blocks=num_blocks,
             block_size=block_size,
@@ -533,7 +559,7 @@ def _auto_block_size(n: int, size: int, num_rows: int) -> int:
 
 def _pallas_scatter_add(
     values: Float[Array, '*batch_shape n'] | Int32[Array, ''],
-    indices: Integer[Array, ' n'],
+    indices: UInt[Array, ' n'],
     /,
     *,
     size: int,
@@ -569,10 +595,9 @@ def _pallas_scatter_add(
     # the Triton backend requires every array dimension to be a power of 2;
     # `block_size` already is. Pad the rows axis (its length is the product of
     # the value's batch shape, e.g. k or k*k, so any k) with zero rows and the
-    # bins axis (`size` is the tree array size, a power of 2, but a subset has
-    # any length) with the out-of-domain bin `size`; both pads are sliced off
-    # below, so even if `size` wraps in a narrow bin dtype and duplicates a real
-    # bin, it only copies that bin's sum into the discarded padding.
+    # bins axis (the full `size` is a power of 2, but a range subset has any
+    # length) with the out-of-domain bin `size`; both pads are sliced off below.
+    # `bins` is uint32, so `size` cannot wrap and alias a real bin.
     padded_rows = _ceil_pow2(num_rows)
     padded_size = _ceil_pow2(out_size)
     if bins is not None:

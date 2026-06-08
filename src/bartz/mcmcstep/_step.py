@@ -533,12 +533,14 @@ def _compute_count_or_prec_tree(
         reduction_config = config.prec_reduction_config
 
     # the cached tree is valid at the leaves, and the move only changes the
-    # values at the nodes it involves, so reduce into the move's children alone
+    # values at the nodes it involves, so reduce into the move's children alone:
+    # the contiguous pair (left, right) = (2 * node, 2 * node + 1) = lrt_nodes[:2]
     lr = reduction_config._reduce(  # noqa: SLF001
         value,
         leaf_indices,
         size=tree_size,
-        indices_subset=moves.lrt_nodes[:2],
+        subset_start=moves.lrt_nodes[0],
+        subset_length=2,
         dtype=dtype,
         data_sharded=config.data_sharded,
     )

@@ -2507,7 +2507,7 @@ def test_auto_chains_fit_with_data_sharding(keys: split) -> None:
 
 def test_auto_chains_within_explicit_devices(bkw: BartKW) -> None:
     """Auto chain sharding stays within an explicitly passed device list."""
-    if get_default_device().platform != 'cpu':
+    if get_default_device().platform != 'cpu':  # pragma: no cover
         pytest.skip('Auto chain sharding only kicks in on cpu.')
     if get_device_count() < 2:
         pytest.skip('Need >1 device to hand `Bart` fewer than it would use.')

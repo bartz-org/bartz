@@ -35,6 +35,7 @@ from functools import partial
 from gc import collect
 from inspect import signature
 from io import StringIO
+from os import cpu_count
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 from weakref import ReferenceType, ref
@@ -2502,6 +2503,32 @@ def test_auto_chains_fit_with_data_sharding(keys: split) -> None:
     mesh = bart._mcmc_state.config.mesh
     assert mesh is not None
     assert mesh.size <= total
+
+
+def test_auto_chains_within_explicit_devices(bkw: BartKW) -> None:
+    """Auto chain sharding stays within an explicitly passed device list."""
+    if get_default_device().platform != 'cpu':  # pragma: no cover
+        pytest.skip('Auto chain sharding only kicks in on cpu.')
+    if get_device_count() < 2:
+        pytest.skip('Need >1 device to hand `Bart` fewer than it would use.')
+    if (cpu_count() or 1) < 2:  # pragma: no cover
+        pytest.skip('Auto chain sharding needs >1 core to want >1 device.')
+    if bkw.num_chains is None or bkw.num_chains < 2:
+        pytest.skip('Need >1 chain for chain sharding to kick in.')
+    # Hand `Bart` a single device with auto chain sharding: it must cap the chain
+    # axis at that device, not at the full jax cpu device count (pre-fix it took
+    # the full count and `make_mesh` raised). Clearing the variants' explicit
+    # data/chain device counts lets the single device suffice once it caps.
+    kw = dict(
+        bkw.kw,
+        num_chain_devices='auto',
+        num_data_devices=None,
+        devices=get_default_device(),
+    )
+    with pytest.warns(UserWarning, match='passed in `devices`'):
+        bart = Bart(**kw)
+    mesh = bart._mcmc_state.config.mesh
+    assert mesh is None or mesh.size == 1
 
 
 def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:

@@ -24,6 +24,11 @@
 
 # Makefile for running tests, prepare and upload a release.
 
+# Refuse -j: recipes manage their own parallelism (pytest-xdist, asv) and the
+# release pipeline relies on serial prerequisite order (e.g. build before
+# check-dist). Global because GNU make <4.4 can't scope .NOTPARALLEL to a target.
+.NOTPARALLEL:
+
 # define command to run python
 CUDA_VERSION = $(shell nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3)
 EXTRAS = $(if $(filter 12 13,$(CUDA_VERSION)),--extra=cuda$(CUDA_VERSION),)
@@ -65,12 +70,13 @@ help:
 	@echo "- diffcov: check changed-lines coverage vs DIFF_BASE (default origin/main)"
 	@echo "- update-deps: remove .venv, upgrade uv.lock, update pre-commit hooks"
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
-	@echo "- copy-version: sync version from pyproject.toml to _version.py"
 	@echo "- check-committed: verify there are no uncommitted changes"
-	@echo "- check-changelog: verify the topmost changelog section matches the current version and today's date"
+	@echo "- check-changelog: verify the topmost changelog section is dated today"
 	@echo "- build: build the python wheel and sdist"
+	@echo "- check-dist: verify dist/ artifacts carry the release version"
 	@echo "- release: run tests, build, and upload to PyPI (run on main)"
-	@echo "- version-tag: create and push git tag for current version"
+	@echo "- version-tag: create local git tag for the topmost changelog version"
+	@echo "- push-tag: push the version tag to origin"
 	@echo "- upload: upload release to PyPI"
 	@echo "- upload-test: upload release to TestPyPI"
 	@echo "- gh-release: create draft GitHub release from docs/changelog.md"
@@ -86,8 +92,7 @@ help:
 	@echo
 	@echo "Release workflow:"
 	@echo "- do a PR that re-runs benchmarks"
-	@echo "- $$ uv version --bump major|minor|patch"
-	@echo "- describe release in docs/changelog.md"
+	@echo "- describe release in docs/changelog.md (its topmost header sets the version, follow effver https://jacobtomlinson.dev/effver)"
 	@echo "- $$ make release, will not release but runs all tests, iterate and debug"
 	@echo "- merge a PR with the changes"
 	@echo "- on main: $$ make release"
@@ -148,7 +153,7 @@ clean:
 # other groups are balanced just under it. Rough tests-old cost per group (wall
 # seconds, ~= the deduped CI `--durations` table; re-measure after big changes):
 #   misc ~755  iface-v5v7 ~730  iface-v6 ~760  iface-v4 ~850  bart-v1 ~725  bart-v23 ~670
-GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py tests/test_naming.py 'tests/test_interface.py::test_equiv_sharding[v7]' -k "not TestMultichain"
+GROUP_misc        := tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py tests/test_naming.py tests/test_docs.py 'tests/test_interface.py::test_equiv_sharding[v7]' -k "not TestMultichain"
 GROUP_iface-v5v7  := tests/test_interface.py -k "(v5 and TestWithCachedBart) or (v7 and not test_equiv_sharding)"
 GROUP_iface-v6    := tests/test_interface.py -k "v6 or (v5 and not TestWithCachedBart)"
 GROUP_iface-v4    := tests/test_interface.py -k "(v4 and not test_equiv_sharding) or not (v2 or v3 or v4 or v5 or v6 or v7)"
@@ -276,11 +281,6 @@ update-oldest-deps:
 
 ################# RELEASE #################
 
-.PHONY: copy-version
-copy-version: src/bartz/_version.py
-src/bartz/_version.py: pyproject.toml
-	$(UV_RUN) python config/util.py update_version
-
 .PHONY: check-committed
 check-committed:
 	git diff --quiet
@@ -292,25 +292,47 @@ check-changelog:
 
 .PHONY: build
 build:
+	# remove stale artifacts: uv publish would upload everything in dist/
+	rm -fr dist
 	uv build
 
+# The version is derived from the git tag at build time (hatch-vcs), so the
+# tag must exist before `build` (`check-dist` verifies this on the
+# artifacts). It is created locally first and pushed only after the build
+# artifacts pass `check-dist` and `smoke-test`, to avoid editing a published
+# tag if something fails in between.
 .PHONY: release
-release: check-changelog clean setup update-oldest-deps update-deps copy-version check-committed tests tests-single-cpu tests-old docs build upload gh-release
+release: check-changelog clean setup update-oldest-deps update-deps check-committed tests tests-single-cpu tests-old docs version-tag build upload gh-release
 	@echo "Done!"
 
 .PHONY: version-tag
-version-tag: copy-version check-committed
+version-tag: check-committed
 	test $(shell git rev-parse --abbrev-ref HEAD) = main
 	git fetch --tags
-	$(eval VERSION_TAG := v$(shell uv run python -c 'import bartz; print(bartz.__version__)'))
+	$(eval VERSION_TAG := v$(shell $(UV_RUN) python config/util.py get_version))
 	@if git rev-parse -q --verify refs/tags/$(VERSION_TAG) >/dev/null; then \
 		test "$$(git rev-list -n 1 $(VERSION_TAG))" = "$$(git rev-parse HEAD)" \
-			|| { echo "Tag $(VERSION_TAG) exists but points to a different commit"; exit 1; }; \
+			|| { echo "Tag $(VERSION_TAG) exists but points to a different commit;"; \
+			     echo "if it is a leftover never pushed, delete it: git tag -d $(VERSION_TAG)"; exit 1; }; \
 		echo "Tag $(VERSION_TAG) already exists on current commit"; \
 	else \
 		git tag --message=$(VERSION_TAG) $(VERSION_TAG); \
 	fi
+
+.PHONY: push-tag
+push-tag: version-tag check-dist smoke-test
 	git push origin $(VERSION_TAG)
+
+# Untagged builds carry a +g<commit> local version segment, which PyPI and
+# TestPyPI reject; this catches dist/ built before tagging, or gone stale.
+.PHONY: check-dist
+check-dist:
+	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
+	test -e "dist/bartz-$$VERSION.tar.gz" && test -e "dist/bartz-$$VERSION-py3-none-any.whl" || { \
+		echo "dist/ does not carry the release version $$VERSION:"; \
+		ls dist/ 2>/dev/null; \
+		echo "build with the tag in place: make version-tag build"; \
+		exit 1; }
 
 .PHONY: smoke-test
 smoke-test:
@@ -318,17 +340,18 @@ smoke-test:
 	uv run --isolated --no-project --with dist/*.tar.gz python -c 'import bartz'
 
 .PHONY: upload
-upload: smoke-test version-tag
+upload: push-tag
 	@echo "Enter PyPI token:"
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN && \
 	uv publish
-	@VERSION=$$(uv run python -c 'import bartz; print(bartz.__version__)') && \
+	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
 	echo "Try to install bartz $$VERSION from PyPI" && \
 	uv tool run --exclude-newer-package="bartz=0 days" --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
+# Like `upload`, but the tag stays local: TestPyPI uploads are rehearsals.
 .PHONY: upload-test
-upload-test: smoke-test check-committed
+upload-test: version-tag check-dist smoke-test
 	@echo "Enter TestPyPI token:"
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN && \
@@ -338,7 +361,7 @@ upload-test: smoke-test check-committed
 	uv tool run --exclude-newer-package="bartz=0 days" --index=https://test.pypi.org/simple/ --index-strategy=unsafe-best-match --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
 .PHONY: gh-release
-gh-release: version-tag
+gh-release: push-tag
 	$(UV_RUN) python config/util.py gh_release
 
 

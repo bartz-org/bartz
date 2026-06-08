@@ -158,7 +158,7 @@ class TraceWithOffset(Module):
     def from_trees_trace(
         cls, trees: TreeHeaps, offset: Float32[Array, '']
     ) -> 'TraceWithOffset':
-        """Create a `TraceWithOffset` from a `TreeHeaps`."""
+        """Create a `TraceWithOffset` from a `~bartz.grove.TreeHeaps`."""
         return cls(
             leaf_tree=trees.leaf_tree,
             var_tree=trees.var_tree,

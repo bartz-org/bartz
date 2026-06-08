@@ -22,6 +22,13 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Implement classes `mc_gbart` and `gbart` that mimic the R BART3 package."""
+"""Implement classes `mc_gbart` and `gbart` that mimic the R BART3 package.
+
+.. autosummary::
+    :toctree:
+
+    mc_gbart
+    gbart
+"""
 
 from bartz.BART._gbart import gbart, mc_gbart  # noqa: F401

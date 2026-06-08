@@ -22,67 +22,11 @@
  # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
  # SOFTWARE.
  #}
+{#
+ # The module docstring contains curated autosummary tables organized by topic
+ # (scipy-style), covering the whole public API; tests/test_docs.py enforces
+ # the coverage. So no automatic member listing here.
+ #}
 {{ fullname | escape | underline }}
 
 .. automodule:: {{ fullname }}
-
-{% block functions %}
-{% if functions %}
-.. rubric:: Functions
-
-.. autosummary::
-   :toctree:
-{% for item in functions %}
-   {{ item }}
-{%- endfor %}
-{% endif %}
-{% endblock %}
-
-{% block classes %}
-{% if classes %}
-.. rubric:: Classes
-
-.. autosummary::
-   :toctree:
-{% for item in classes %}
-   {{ item }}
-{%- endfor %}
-{% endif %}
-{% endblock %}
-
-{% block exceptions %}
-{% if exceptions %}
-.. rubric:: Exceptions
-
-.. autosummary::
-   :toctree:
-{% for item in exceptions %}
-   {{ item }}
-{%- endfor %}
-{% endif %}
-{% endblock %}
-
-{% block attributes %}
-{% if attributes %}
-.. rubric:: Module attributes
-
-.. autosummary::
-   :toctree:
-{% for item in attributes %}
-   {{ item }}
-{%- endfor %}
-{% endif %}
-{% endblock %}
-
-{% block modules %}
-{% if modules %}
-.. rubric:: Modules
-
-.. autosummary::
-   :toctree:
-   :recursive:
-{% for item in modules %}
-   {{ item }}
-{%- endfor %}
-{% endif %}
-{% endblock %}

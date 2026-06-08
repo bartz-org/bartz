@@ -66,6 +66,7 @@ Interface hierarchy:
 - **Imports:** generally use `from foo import bar` (relative import) instead of `import foo; foo.bar`
     - but for some heavily used big (sub)modules, e.g., `from jax import random; random.foo` is preferred to `from jax.random import foo, foo1, foo2, ..., foo999999`.
 - **Headers** All source files carry an MIT copyright header
+    - when creating a new file, use only the current year for the copyright notice
 - **docstrings:**
     - numpy convention
     - class attributes documented individually with string just below (not in class docstring)
@@ -89,6 +90,10 @@ Interface hierarchy:
             - this implicitly asserts the axis _does_ have size 1
     - use `array.item()` to cast a size-1 array to a scalar python type
         - also works for numpy/jax scalars, `jnp.float32(x).item()` is valid
+        - you often don't even need to convert to python scalars, just use jax 0d arrays directly, e.g., `if x: ...` where `x` is a 0d bool array
+    - use our custom `from bartz._jaxext import split` instead of `random.split` generally
+        - `split` is a class and you use it like this: `keys = split(key); x = random.gen(keys.pop(), ...); y = vmapped_func(keys.pop(1000), ...)`
+        - don't pass a `split` object to functions, follow the jax convention that the first argument is a single random key
 - other **python** conventions:
     - use dicts as if they were frozendicts when possible: e.g., do `d = dict(d, a=1, b=2)` to set values instead of `d['a'] = 1` or `d.update(a=1)`, safer
         - related: prefer tuples to lists
@@ -102,12 +107,13 @@ Interface hierarchy:
                 - they are fine and convenient in non-public stuff
         - type hints in signatures, not in docstrings
             - but when returning multiple values, copy the type hints verbatim in the return values list, because the html doc type render does not support multi-valued return natively
+        - separate overloads with blank lines, don't bunch them on the function
     - _src-like layout: modules only contain the public symbols, imported from an implementation submodule
-        - because of this, don't prepend redundant underscores to private functions: they stay private
+        - because of this, don't prepend redundant underscores to private functions: they stay private anyway
     - prefer `if ...: return; else: return` to early returns
         - if-else block are much easier to read visually for a human, even if redundant due to returns
         - other angle: `return` is a bit like a goto, bad habit to use mid-function
-        - of course for some cases it's obviously super-convenient to return early, should be clear when it happens
+        - of course for some cases it's obviously super-convenient to return early from a big function, should be clear when it happens
 - **WORKAROUND markers:** we support comments like `# WORKAROUND(jax<99): remove this patch when we bump jax to v99`, enforced by `make lint` checking the oldest supported version of the package
     - also works with python versions
     - also valid for bartz itself, in the context of benchmarking code
@@ -126,6 +132,12 @@ Interface hierarchy:
     - there's also `assert_different_matrices` to check things are not equal, this requires to set both atol and rtol which are +inf by default
 - in general prefer `assert_` functions from `tests.util` and `numpy.testing` to plain `assert` if appropriate
 - use `bartz.testing` utilities to generate data
+- in general we care about rng-invariance under equivalent settings, but not across versions of bartz
+    - typical case: say `f(key, baz=None)` is a fast path for `f(key, baz=0.0)`, then they should return the same result up to float precision, if `key` is the same. But the randomness can change from one commit to the other.
+- our unit tests are slow, so be mindful of their efficiency, but...
+    - test suite running time is dominated by _jax compilation_, not _running calculations_
+    - jax caches compilation based on static args and _array sizes_, thus to make a test fast, re-use helpers and magical size constants
+        - most important example: in `test_interface.py`, it's almost free to define a new test that uses the `bkw` fixture and invokes `Bart(**bkw.kw)`, even if this runs Bart a bunch of times for the parametrized variants. Instead, altering static params/sizes or rolling custom arguments will trigger a recompilation.
 
 ## Benchmarks
 

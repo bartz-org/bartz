@@ -32,4 +32,4 @@ Debugging utilities.
 # ruff: noqa: F401
 
 from bartz.debug._prior import sample_prior
-from bartz.debug._traceconv import BARTTraceMeta, TraceWithOffset, trees_BART_to_bartz
+from bartz.debug._traceconv import BARTTraceMeta, MinimalTrace, trees_BART_to_bartz

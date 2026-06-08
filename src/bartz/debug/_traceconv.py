@@ -35,7 +35,6 @@ from jaxtyping import Array, Float, Float32, UInt
 
 from bartz._jaxext import Module, field, minimal_unsigned_dtype
 from bartz.BART._gbart import FloatLike
-from bartz.grove import TreeHeaps
 
 
 def _get_next_line(s: str, i: int) -> tuple[str, int]:
@@ -140,8 +139,8 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
     return BARTTraceMeta(ndpost=ndpost, ntree=ntree, numcut=numcut, heap_size=heap_size)
 
 
-class TraceWithOffset(Module):
-    """A trace of trees with an offset, compatible with `bartz.mcmcloop.evaluate_trace`."""
+class MinimalTrace(Module):
+    """A minimal trace of trees, compatible with `bartz.mcmcloop.evaluate_trace`."""
 
     leaf_tree: Float[Array, 'ndpost ntree tree_size'] = field(samples=0)
     var_tree: UInt[Array, 'ndpost ntree tree_size//2'] = field(samples=0)
@@ -158,21 +157,10 @@ class TraceWithOffset(Module):
     mesh: ClassVar[Mesh | None] = None
     """No device mesh; the trees are host-built and unsharded."""
 
-    @classmethod
-    def from_trees_trace(cls, trees: TreeHeaps) -> 'TraceWithOffset':
-        """Create a `TraceWithOffset` from a `TreeHeaps`."""
-        return cls(
-            leaf_tree=trees.leaf_tree,
-            var_tree=trees.var_tree,
-            split_tree=trees.split_tree,
-            offset=trees.offset,
-            leaf_scale=trees.leaf_scale,
-        )
-
 
 def trees_BART_to_bartz(
     trees: str, *, min_maxdepth: int = 0, offset: FloatLike | None = None
-) -> tuple[TraceWithOffset, BARTTraceMeta]:
+) -> tuple[MinimalTrace, BARTTraceMeta]:
     """Convert trees from the R BART format to the bartz format.
 
     Parameters
@@ -192,7 +180,7 @@ def trees_BART_to_bartz(
 
     Returns
     -------
-    trace : TraceWithOffset
+    trace : MinimalTrace
         A representation of the trees compatible with the trace returned by
         `bartz.mcmcloop.run_mcmc`.
     meta : BARTTraceMeta
@@ -244,7 +232,7 @@ def trees_BART_to_bartz(
             is_internal[0] = False
             split_trees[i_iter, i_tree, ~is_internal] = 0
 
-    return TraceWithOffset(
+    return MinimalTrace(
         leaf_tree=jnp.array(leaf_trees),
         var_tree=jnp.array(var_trees),
         split_tree=jnp.array(split_trees),

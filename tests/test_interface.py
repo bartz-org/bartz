@@ -88,10 +88,11 @@ from bartz._jaxext import (
     is_key,
     jaxtyping_disabled,
     minimal_unsigned_dtype,
+    project,
     split,
 )
 from bartz._typing import kwdict
-from bartz.debug import TraceWithOffset, sample_prior
+from bartz.debug import MinimalTrace, sample_prior
 from bartz.grove import (
     check_trace,
     describe_error,
@@ -1819,7 +1820,7 @@ def run_bart_like_prior(
 
 def sample_prior_like(
     key: Key[Array, ''], bart: Bart, subtests: SubTests
-) -> TraceWithOffset:
+) -> MinimalTrace:
     """Sample from the prior with the same settings used in `bart`."""
     p_nonterminal = bart._mcmc_state.forest.p_nonterminal
     max_depth = tree_depth(p_nonterminal)
@@ -1840,7 +1841,7 @@ def sample_prior_like(
         bad_count = jnp.count_nonzero(bad)
         assert bad_count == 0
 
-    return TraceWithOffset.from_trees_trace(replace(prior_trees, offset=bart.offset))
+    return project(MinimalTrace, replace(prior_trees, offset=bart.offset))
 
 
 def count_stub_trees(

@@ -35,7 +35,7 @@ from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Float, Float32, Int32, PyTree, UInt
 from numpy.lib.array_utils import normalize_axis_index
 
-from bartz._jaxext import autobatch, jit
+from bartz._jaxext import autobatch, jit, project
 from bartz._typing import kwdict
 from bartz.grove import TreesTrace, evaluate_forest, is_multivariate, var_histogram
 from bartz.mcmcstep._axes import (
@@ -51,7 +51,7 @@ from bartz.mcmcstep._state import partition_specs
 class EvaluableTrace(Protocol):
     """Structural type of the traces accepted by `evaluate_trace`.
 
-    Both `bartz.mcmcloop.MainTrace` and `bartz.debug.TraceWithOffset` satisfy
+    Both `bartz.mcmcloop.MainTrace` and `bartz.debug.MinimalTrace` satisfy
     it. The runtime check is structural (attribute presence only, not the
     annotated shapes), so it also matches the axis-spec trees `chain_vmap_axes`
     derives from a trace. Implementations must be `equinox.Module` dataclasses
@@ -204,7 +204,7 @@ def _evaluate_trace(
     is `pcast` to vary over those manual axes (the only mesh-aware bit here).
     """
     # extract only the trees from the trace, this will be the input to `evaluate_forest`
-    trees = TreesTrace.from_dataclass(trace)
+    trees = project(TreesTrace, trace)
     batched_eval = evaluate_forest  # we will transform `batched_eval`
 
     # determine batching axes from the `samples` field markers; fields without

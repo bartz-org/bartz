@@ -129,11 +129,6 @@ class TreesTrace(Module):
         default_factory=lambda: jnp.float32(0.0)
     )
 
-    @classmethod
-    def from_dataclass(cls, obj: TreeHeaps) -> 'TreesTrace':
-        """Create a `TreesTrace` from any `bartz.grove.TreeHeaps`."""
-        return cls(**{f.name: getattr(obj, f.name) for f in fields(cls)})
-
     def axes_from_dataclass(self, obj: TreeHeaps) -> 'TreesTrace':
         """Project the per-field vmap axis specs of `obj` onto this template.
 

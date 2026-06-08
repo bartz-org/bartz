@@ -52,12 +52,13 @@ from bartz._jaxext import (
     get_default_device,
     get_device_count,
     jaxtyping_disabled,
+    project,
     split,
 )
 from bartz._typing import kwdict
 from bartz.BART import gbart as original_gbart
 from bartz.BART import mc_gbart as original_mc_gbart
-from bartz.debug import TraceWithOffset, sample_prior, trees_BART_to_bartz
+from bartz.debug import MinimalTrace, sample_prior, trees_BART_to_bartz
 from bartz.grove import (
     check_trace,
     forest_depth_distr,
@@ -1161,7 +1162,7 @@ def run_bart_like_prior(
 
 def sample_prior_like(
     key: Key[Array, ''], bart: mc_gbart, subtests: SubTests
-) -> TraceWithOffset:
+) -> MinimalTrace:
     """Sample from the prior with the same settings used in `bart`."""
     # extract p_nonterminal in original format from mcmc state
     p_nonterminal = bart._mcmc_state.forest.p_nonterminal
@@ -1185,7 +1186,7 @@ def sample_prior_like(
         assert bad_count == 0
 
     # pack up trees together with offset
-    return TraceWithOffset.from_trees_trace(replace(prior_trees, offset=bart.offset))
+    return project(MinimalTrace, replace(prior_trees, offset=bart.offset))
 
 
 def count_stub_trees(

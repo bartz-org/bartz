@@ -37,7 +37,8 @@ resolvers in `bartz.mcmcstep._axes`.
 
 import sys
 from dataclasses import field as dataclasses_field
-from typing import Any
+from dataclasses import fields
+from typing import Any, TypeVar
 
 from equinox import Module as EquinoxModule
 from equinox import field as eqx_field
@@ -110,3 +111,15 @@ class _ModuleMeta(type(EquinoxModule)):
 
 class Module(EquinoxModule, metaclass=_ModuleMeta):
     """`equinox.Module` that registers bartz's `field` as a field specifier."""
+
+
+T = TypeVar('T', bound=Module)
+
+
+def project(cls: type[T], source: object) -> T:
+    """Build a `cls` instance by copying each of its fields from `source`.
+
+    `source` only needs to expose `cls`'s field names as attributes; any extra
+    attributes (e.g. when `source` is a wider dataclass) are ignored.
+    """
+    return cls(**{f.name: getattr(source, f.name) for f in fields(cls)})

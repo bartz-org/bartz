@@ -58,7 +58,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz._jaxext import equal_shards, is_key, jit, split
+from bartz._jaxext import equal_shards, is_key, jit, project, split
 from bartz._jaxext.scipy.special import ndtri
 from bartz._jaxext.scipy.stats import invgamma
 from bartz.grove import (
@@ -1595,7 +1595,7 @@ def _trees_chain_first(obj: TreeHeaps) -> TreesTrace:
     Returns a `TreesTrace` whose leading axis is the chain axis when `obj`
     carries one, and the bare per-object heap arrays otherwise.
     """
-    trees = TreesTrace.from_dataclass(obj)
+    trees = project(TreesTrace, obj)
     if get_has_chains(obj):
         axes = trees.axes_from_dataclass(chain_vmap_axes(obj))
         # WORKAROUND(python<3.14): use operator.is_none

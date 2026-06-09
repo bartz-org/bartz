@@ -52,7 +52,6 @@ from jaxtyping import Array, Integer, Key
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
 from benchmarks.latest_bartz._jaxext import get_device_count, jit, split
-from benchmarks.latest_bartz.testing import gen_nonsense_data
 
 if TYPE_CHECKING:
     from bartz.mcmcstep import State
@@ -108,13 +107,27 @@ def simple_init(  # noqa: C901, PLR0915
         k = 2
     else:
         k = None
-    X, y, max_split = gen_nonsense_data(p, n, k)
+    # q must be even and < p (< p // k for multivariate); the step timing does
+    # not depend on the DGP, so clamp to a valid value for small p
+    q = min(2, (p - 1 if k is None else p // k - 1))
+    q -= q % 2
+    data = gen_data(
+        random.key(2026_06_07),
+        n=n,
+        p=p,
+        k=k,
+        q=q,
+        lambda_=None if k is None else 0.5,
+        sigma2_lin=1.0,
+        sigma2_quad=1.0,
+        sigma2_eps=1.0,
+    ).quantize()
 
     kw: dict = dict(
-        X=X,
-        y=y,
+        X=data.x,
+        y=data.y,
         offset=0.0 if k is None else jnp.zeros(k),
-        max_split=max_split,
+        max_split=data.max_split,
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(6, 0.95, 2),
         leaf_prior_cov_inv=jnp.float32(num_trees) * (1.0 if k is None else jnp.eye(k)),
@@ -175,7 +188,7 @@ def simple_init(  # noqa: C901, PLR0915
                 # WORKAROUND(bartz<0.6.0): no probit-link binary regression
                 msg = 'binary not supported'
                 raise NotImplementedError(msg)
-            kw['y'] = y > 0
+            kw['y'] = data.y > 0
             kw.pop('sigma2_alpha', None)
             kw.pop('sigma2_beta', None)
             kw.pop('error_cov_df', None)

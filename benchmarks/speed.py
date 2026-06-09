@@ -107,12 +107,16 @@ def simple_init(  # noqa: C901, PLR0915
         k = 2
     else:
         k = None
+    # q must be even and < p (< p // k for multivariate); the step timing does
+    # not depend on the DGP, so clamp to a valid value for small p
+    q = min(2, (p - 1 if k is None else p // k - 1))
+    q -= q % 2
     data = gen_data(
         random.key(2026_06_07),
         n=n,
         p=p,
         k=k,
-        q=2,
+        q=q,
         lambda_=None if k is None else 0.5,
         sigma2_lin=1.0,
         sigma2_quad=1.0,

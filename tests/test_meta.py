@@ -30,7 +30,7 @@ import pytest
 from jax import config, debug_nans, jit, random
 from jax import numpy as jnp
 from jax.errors import KeyReuseError
-from jaxtyping import Array, Float, Key
+from jaxtyping import Array, Float, Key, Shaped
 
 from bartz._jaxext import split
 from tests.util import assert_allclose
@@ -126,7 +126,7 @@ class TestJaxNoCopyBehavior:
             xp = x.unsafe_buffer_pointer()
 
             @partial(jit, donate_argnums=(0,))
-            def noop(x: Array) -> Array:
+            def noop(x: Shaped[Array, '*shape']) -> Shaped[Array, '*shape']:
                 return x
 
             y = noop(x)
@@ -154,7 +154,7 @@ class TestJaxNoCopyBehavior:
             yp = y.unsafe_buffer_pointer()
 
             @partial(jit, donate_argnums=(0,))
-            def array(x: Array) -> Array:
+            def array(x: Shaped[Array, '*shape']) -> Shaped[Array, '*shape']:
                 return jnp.array(x)
 
             q = array(y)

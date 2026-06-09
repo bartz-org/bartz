@@ -255,7 +255,9 @@ def run_mcmc(
     return RunMCMCResult(carry.state, carry.burnin_trace, carry.main_trace)
 
 
-def _replicate(x: Array, mesh: Mesh | None) -> Array:
+def _replicate(
+    x: Shaped[Array, '*shape'], mesh: Mesh | None
+) -> Shaped[Array, '*shape']:
     if mesh is None:
         return x
     else:

@@ -107,6 +107,7 @@ from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import BatchedReduction, State
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
+from bartz.mcmcstep._state import init
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from bartz.testing import DiscreteUniform, Gamma, gen_data
 from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
@@ -475,6 +476,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         prec_count_num_trees=5,
                         save_ratios=True,
                         min_points_per_leaf=5,
+                        leaf_dtype=jnp.float32,
                     ),
                 ),
                 x_test=test.x,
@@ -1213,6 +1215,14 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     assert bart.varcount_mean.dtype == jnp.float32
     assert bart.varprob.dtype == jnp.float32
     assert bart.varprob_mean.dtype == jnp.float32
+
+    # also test the internal leaf dtype directly, since it's not reflected in the
+    # public API anywhere
+    default_leaf_dtype = signature(init).parameters['leaf_dtype'].default
+    expected_leaf_dtype = bkw.kw.get('init_kw', {}).get(
+        'leaf_dtype', default_leaf_dtype
+    )
+    assert bart._main_trace.leaf_tree.dtype == expected_leaf_dtype
 
 
 def test_output_ranges(bkw: BartKW, keys: split) -> None:

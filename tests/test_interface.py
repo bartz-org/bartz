@@ -2543,8 +2543,18 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     bart = Bart(**baseline_kw)
 
     def check_equal(path: KeyPath, xb: Array, xs: Array) -> None:
+        # The integer trees (exact) and float32 arrays (residuals, predictions)
+        # pin the MCMC trajectory and must match across sharding. Leaves stored
+        # in a reduced-precision dtype can differ by a rounding step when data
+        # sharding reorders the per-leaf reductions, so compare them only at
+        # their storage precision.
+        reduced = jnp.issubdtype(xs.dtype, jnp.floating) and xs.dtype.itemsize < 4
         assert_close_matrices(
-            xs, xb, err_msg=f'{keystr(path)}: ', rtol=1e-5, reduce_rank=True
+            xs,
+            xb,
+            err_msg=f'{keystr(path)}: ',
+            rtol=1e-2 if reduced else 1e-5,
+            reduce_rank=True,
         )
 
     # the sharded fits go through `_drop_device_info` because the mesh is

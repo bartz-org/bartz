@@ -319,15 +319,18 @@ def accept_moves_parallel_stage(
         ),
     )
 
-    # count number of datapoints per leaf
+    # update the cached number of datapoints per leaf at the nodes involved
+    # in the moves
     if (
         state.forest.min_points_per_decision_node is not None
         or state.forest.min_points_per_leaf is not None
         or state.prec_scale is None
     ):
+        assert state.forest.count_tree is not None
         count_trees, move_counts = compute_count_trees(
-            state.forest.leaf_indices, moves, state.config
+            state.forest.count_tree, state.forest.leaf_indices, moves, state.config
         )
+        state = replace(state, forest=replace(state.forest, count_tree=count_trees))
 
     # affluence of the nodes touched by each move: whether they would be
     # growable as leaves (admissible rule + enough datapoints). The children
@@ -350,13 +353,20 @@ def accept_moves_parallel_stage(
             ),
         )
 
-    # count number of datapoints per leaf, weighted by error precision scale
+    # update the cached number of datapoints per leaf, weighted by error
+    # precision scale, at the nodes involved in the moves
     if state.prec_scale is None:
         prec_trees = count_trees
     else:
+        assert state.forest.prec_tree is not None
         prec_trees = compute_prec_trees(
-            state.prec_scale, state.forest.leaf_indices, moves, state.config
+            state.forest.prec_tree,
+            state.prec_scale,
+            state.forest.leaf_indices,
+            moves,
+            state.config,
         )
+        state = replace(state, forest=replace(state.forest, prec_tree=prec_trees))
 
     # compute some missing information about moves
     moves = complete_ratio(moves, state.forest.p_nonterminal)
@@ -434,6 +444,7 @@ def _fill_lrt_total(lrt: Shaped[Array, '*k_k 3']) -> Shaped[Array, '*k_k 3']:
 @overload
 def _compute_count_or_prec_trees(
     prec_scale: None,
+    trees: UInt32[Array, 'num_trees tree_size'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
     config: StepConfig,
@@ -443,6 +454,8 @@ def _compute_count_or_prec_trees(
 @overload
 def _compute_count_or_prec_trees(
     prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'],
+    trees: Float32[Array, 'num_trees tree_size']
+    | Float32[Array, 'num_trees k k tree_size'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
     config: StepConfig,
@@ -454,6 +467,9 @@ def _compute_count_or_prec_trees(
 
 def _compute_count_or_prec_trees(
     prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None,
+    trees: UInt32[Array, 'num_trees tree_size']
+    | Float32[Array, 'num_trees tree_size']
+    | Float32[Array, 'num_trees k k tree_size'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
     config: StepConfig,
@@ -464,26 +480,37 @@ def _compute_count_or_prec_trees(
 ):
     """Implement `compute_count_trees` and `compute_prec_trees`."""
     if config.prec_count_num_trees is None:
-        compute = vmap(_compute_count_or_prec_tree, in_axes=(None, 0, 0, None))
-        return compute(prec_scale, leaf_indices, moves, config)
+        compute = vmap(_compute_count_or_prec_tree, in_axes=(None, 0, 0, 0, None))
+        return compute(prec_scale, trees, leaf_indices, moves, config)
 
     def compute(
-        args: tuple[UInt[Array, ' n'], Moves],
+        args: tuple[
+            UInt32[Array, ' tree_size']
+            | Float32[Array, ' tree_size']
+            | Float32[Array, 'k k tree_size'],
+            UInt[Array, ' n'],
+            Moves,
+        ],
     ) -> (
         tuple[UInt32[Array, ' tree_size'], Counts]
         | tuple[Float32[Array, ' tree_size'], None]
         | tuple[Float32[Array, 'k k tree_size'], None]
     ):
-        leaf_indices, moves = args
-        return _compute_count_or_prec_tree(prec_scale, leaf_indices, moves, config)
+        tree, leaf_indices, moves = args
+        return _compute_count_or_prec_tree(
+            prec_scale, tree, leaf_indices, moves, config
+        )
 
     return lax.map(
-        compute, (leaf_indices, moves), batch_size=config.prec_count_num_trees
+        compute, (trees, leaf_indices, moves), batch_size=config.prec_count_num_trees
     )
 
 
 def _compute_count_or_prec_tree(
     prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None,
+    tree: UInt32[Array, ' tree_size']
+    | Float32[Array, ' tree_size']
+    | Float32[Array, 'k k tree_size'],
     leaf_indices: UInt[Array, ' n'],
     moves: Moves,
     config: StepConfig,
@@ -492,7 +519,7 @@ def _compute_count_or_prec_tree(
     | tuple[Float32[Array, ' tree_size'], None]
     | tuple[Float32[Array, 'k k tree_size'], None]
 ):
-    """Compute count or precision tree for a single tree."""
+    """Update the cached count or precision tree for a single tree."""
     (tree_size,) = moves.var_tree.shape
     tree_size *= 2
 
@@ -505,36 +532,48 @@ def _compute_count_or_prec_tree(
         dtype = jnp.float32
         reduction_config = config.prec_reduction_config
 
-    trees = reduction_config._reduce(  # noqa: SLF001
+    # the cached tree is valid at the leaves, and the move only changes the
+    # values at the nodes it involves, so reduce into the move's children alone:
+    # the contiguous pair (left, right) = (2 * node, 2 * node + 1) = lrt_nodes[:2]
+    lr = reduction_config._reduce(  # noqa: SLF001
         value,
         leaf_indices,
         size=tree_size,
+        subset_start=moves.lrt_nodes[0],
+        subset_length=2,
         dtype=dtype,
         data_sharded=config.data_sharded,
     )
 
-    # count datapoints in nodes modified by move, and write the total into the
-    # non-leaf parent node (the children slots are written back unchanged); the
-    # weighted version of the counts is not needed because the likelihood terms
-    # are derived from the leaf terms
-    lrt = _fill_lrt_total(trees[..., moves.lrt_nodes])
-    trees = trees.at[..., moves.lrt_nodes].set(lrt)
+    # write the children sums into the cache along with their total at the
+    # parent node (a non-leaf in the post-grow indexing the reduce runs on);
+    # the weighted version of the counts is not needed because the likelihood
+    # terms are derived from the leaf terms
+    total = lr[..., 0] + lr[..., 1]
+    lrt = jnp.concatenate([lr, total[..., None]], axis=-1)
+    tree = tree.at[..., moves.lrt_nodes].set(lrt)
 
     if prec_scale is None:
-        return trees, Counts(lrt=lrt)
+        return tree, Counts(lrt=lrt)
     else:
-        return trees, None
+        return tree, None
 
 
 @named_call
 def compute_count_trees(
-    leaf_indices: UInt[Array, 'num_trees n'], moves: Moves, config: StepConfig
+    count_trees: UInt32[Array, 'num_trees tree_size'],
+    leaf_indices: UInt[Array, 'num_trees n'],
+    moves: Moves,
+    config: StepConfig,
 ) -> tuple[UInt32[Array, 'num_trees tree_size'], Counts]:
     """
-    Count the number of datapoints in each leaf.
+    Update the cached number of datapoints per leaf at the moves' nodes.
 
     Parameters
     ----------
+    count_trees
+        The cached number of points in each leaf; valid at the leaves of the
+        pre-move trees.
     leaf_indices
         The index of the leaf each datapoint falls into, with the deeper version
         of the tree (post-GROW, pre-PRUNE).
@@ -546,26 +585,31 @@ def compute_count_trees(
     Returns
     -------
     count_trees : UInt32[Array, 'num_trees tree_size']
-        The number of points in each potential or actual leaf node.
+        The updated cache, valid in each potential or actual leaf node.
     counts : Counts
         The counts of the number of points in the leaves grown or pruned by the
         moves.
     """
-    return _compute_count_or_prec_trees(None, leaf_indices, moves, config)
+    return _compute_count_or_prec_trees(None, count_trees, leaf_indices, moves, config)
 
 
 @named_call
 def compute_prec_trees(
+    prec_trees: Float32[Array, 'num_trees tree_size']
+    | Float32[Array, 'num_trees k k tree_size'],
     prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
     config: StepConfig,
 ) -> Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k k tree_size']:
     """
-    Compute the likelihood precision scale in each leaf.
+    Update the cached per-leaf likelihood precision scale at the moves' nodes.
 
     Parameters
     ----------
+    prec_trees
+        The cached likelihood precision scale in each leaf; valid at the leaves
+        of the pre-move trees.
     prec_scale
         The scale of the precision of the error on each datapoint.
     leaf_indices
@@ -578,9 +622,11 @@ def compute_prec_trees(
 
     Returns
     -------
-    The likelihood precision scale in each potential or actual leaf node.
+    The updated cache, valid in each potential or actual leaf node.
     """
-    trees, _ = _compute_count_or_prec_trees(prec_scale, leaf_indices, moves, config)
+    trees, _ = _compute_count_or_prec_trees(
+        prec_scale, prec_trees, leaf_indices, moves, config
+    )
     return trees
 
 

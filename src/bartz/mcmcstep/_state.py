@@ -37,7 +37,18 @@ from jax import NamedSharding, device_put, lax, make_mesh, random, shard_map, tr
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
-from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Key, PyTree, UInt
+from jaxtyping import (
+    Array,
+    Bool,
+    Float,
+    Float32,
+    Int32,
+    Integer,
+    Key,
+    PyTree,
+    UInt,
+    UInt32,
+)
 from numpy import ndarray
 
 from bartz._jaxext import Module, field, jaxtyping_disabled, jit, minimal_unsigned_dtype
@@ -131,6 +142,24 @@ class Forest(Module):
 
     leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=CHAIN_AXIS, data=-1)
     """The index of the leaf each datapoints falls into, for each tree."""
+
+    count_tree: UInt32[Array, '*chains num_trees 2*half_tree_size'] | None = field(
+        chains=CHAIN_AXIS
+    )
+    """The number of datapoints per leaf. Valid at the leaves and at the nodes
+    involved in the latest moves, dirty elsewhere. `None` if the error
+    precision is weighted and there are no minimum-points-per-node
+    constraints, which makes the counts unused."""
+
+    prec_tree: (
+        Float32[Array, '*chains num_trees 2*half_tree_size']
+        | Float32[Array, '*chains num_trees k k 2*half_tree_size']
+        | None
+    ) = field(chains=CHAIN_AXIS)
+    """The likelihood precision scale summed over the datapoints in each leaf.
+    Valid at the leaves and at the nodes involved in the latest moves, dirty
+    elsewhere. `None` if the error precision is not weighted, in which case
+    `count_tree` takes its place."""
 
     min_points_per_decision_node: Int32[Array, ''] | None
     """The minimum number of data points in a decision node."""
@@ -819,6 +848,18 @@ def init(
                 leaf_indices=_lazy(
                     jnp.ones, (num_trees, n), minimal_unsigned_dtype(tree_size - 1)
                 ),
+                # the counts serve the minimum-points constraints and stand in
+                # for the precisions when the error precision is unweighted
+                # (`prec_scale` is set iff `error_scale` or `missing` is given)
+                count_tree=(
+                    _lazy(_initial_count_tree, (num_trees, tree_size), n)
+                    if min_points_per_decision_node is not None
+                    or min_points_per_leaf is not None
+                    or (error_scale is None and missing is None)
+                    else None
+                ),
+                # prec_tree is created later, it needs the sharded prec_scale
+                prec_tree=None,
                 min_points_per_decision_node=_asarray_or_none(
                     min_points_per_decision_node
                 ),
@@ -882,6 +923,9 @@ def init(
                 state.prec_scale, state.inv_sdev_scale
             )
             state = replace(state, inv_sdev_scale=inv_sdev_scale, prec_scale=prec_scale)
+
+            # calculate the initial prec_tree from the sharded prec_scale
+            state = _set_initial_prec_tree(state, num_chains, num_trees, tree_size)
 
     # all the wrong-typed intermediates have now been replaced by their final
     # values, so type-checking can resume; make all types strong to avoid
@@ -961,6 +1005,37 @@ def _initial_affluence_tree(
             else n >= min_points_per_decision_node
         )
     )
+
+
+def _initial_count_tree(shape: tuple[int, ...], n: int) -> Array:
+    """Create the initial value of `Forest.count_tree`: all datapoints in the root."""
+    return jnp.zeros(shape, jnp.uint32).at[..., 1].set(n)
+
+
+def _set_initial_prec_tree(
+    state: State, num_chains: int | None, num_trees: int, tree_size: int
+) -> State:
+    """Build the cached per-leaf precision for root-only trees and shard it.
+
+    Called post-shard so the captured ``state.prec_scale`` is already on the
+    target devices; mirrors `_set_initial_resid`.
+    """
+    assert state.prec_scale is not None
+    shape = (num_trees, *state.prec_scale.shape[:-1], tree_size)
+    inner = _LazyArray(_initial_prec_tree, shape, state.prec_scale)
+    preview_tree = add_dummy_axis(inner) if num_chains is not None else inner
+    preview = replace(state, forest=replace(state.forest, prec_tree=preview_tree))
+    chain_axis = chain_vmap_axes(preview).forest.prec_tree
+    prec_tree = _wrap_chain(inner, chain_axis, num_chains)
+    prec_tree = _shard_leaf(prec_tree, chain_axis, None, state.config.mesh)
+    return replace(state, forest=replace(state.forest, prec_tree=prec_tree))
+
+
+def _initial_prec_tree(
+    shape: tuple[int, ...], prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n']
+) -> Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k k tree_size']:
+    """Create the initial value of `Forest.prec_tree`: all datapoints in the root."""
+    return jnp.zeros(shape, jnp.float32).at[..., 1].set(prec_scale.sum(axis=-1))
 
 
 @jit(donate_argnums=(0, 1))

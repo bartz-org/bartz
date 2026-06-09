@@ -27,6 +27,7 @@
 This is the main suite of tests.
 """
 
+import math
 import pickle
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, redirect_stderr
@@ -677,7 +678,11 @@ class TestWithCachedBart:
         return CachedBart(bkw=bkw, bart=Bart(**kw))
 
     def test_residuals_accuracy(self, cachedbart: CachedBart) -> None:
-        """Check that running residuals are close to the recomputed final residuals."""
+        """Check that running residuals are close to the recomputed final residuals.
+
+        On the float16 variants this also exercises that the running residuals
+        are accumulated from the rounded stored leaves, not the exact draws.
+        """
         accum_resid, actual_resid = cachedbart.bart._compare_resid(
             y=cachedbart.bkw.kw['y_train']
         )
@@ -1225,6 +1230,36 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     assert bart._main_trace.leaf_tree.dtype == expected_leaf_dtype
 
 
+def test_leaf_scale(bkw: BartKW) -> None:
+    """`leaf_scale` is set to the marginal prior leaf standard deviation."""
+    forest = Bart(**bkw.kw)._mcmc_state.forest
+    cov_inv = nnone(forest.leaf_prior_cov_inv)
+    if cov_inv.ndim:
+        expected = jnp.sqrt(jnp.diagonal(jnp.linalg.inv(cov_inv)))
+    else:
+        expected = jnp.sqrt(jnp.reciprocal(cov_inv))
+    assert forest.leaf_scale.dtype == jnp.float32
+    assert_close_matrices(forest.leaf_scale, expected, rtol=1e-5)
+
+
+def test_float16_close_to_float32(bkw: BartKW) -> None:
+    """float16 leaf storage tracks float32 within float16 precision.
+
+    A single MCMC step is taken with the same seed for both dtypes, so the tree
+    draws are identical and the only difference is the rounding of the leaves.
+    """
+    prev_init_kw: kwdict = bkw.kw.get('init_kw', {})
+    base_kw = dict(bkw.kw, n_burn=0, n_save=1)
+    latent = {}
+    for dtype in (jnp.float16, jnp.float32):
+        init_kw = dict(prev_init_kw, leaf_dtype=dtype)
+        bart = Bart(**dict(base_kw, init_kw=init_kw))
+        latent[dtype] = bart.predict('train', kind='latent_samples')
+    assert_close_matrices(
+        latent[jnp.float16], latent[jnp.float32], rtol=1e-2, reduce_rank=True
+    )
+
+
 def test_output_ranges(bkw: BartKW, keys: split) -> None:
     """Check value constraints on Bart outputs."""
     kw = bkw.kw
@@ -1384,11 +1419,21 @@ def test_scale_shift(bkw: BartKW) -> None:
     bart1 = Bart(**kw)
     mask = bkw.binary_mask
 
-    offset = 0.4703189
-    scale = 0.5294714
+    # blow the response up far enough that the leaves would overflow float16 if
+    # they were stored in data units instead of units of leaf_scale; leaves are
+    # summed across trees, so the per-leaf magnitude is the total scale divided
+    # by ~sqrt(num_trees). Skip this for mixed outcomes: scaling only the
+    # continuous components against O(1) binary ones makes the multivariate leaf
+    # covariance too ill-conditioned for the shared Gershgorin stabilization.
+    overflow_float16_scale = (
+        1.0
+        if bkw.is_mixed
+        else math.sqrt(kw['num_trees']) * 2 * float(jnp.finfo(jnp.float16).max)
+    )
+    offset = 0.4703189 * overflow_float16_scale
+    scale = 0.5294714 * overflow_float16_scale
 
-    y = kw['y_train']
-    y = jnp.where(mask[..., None], y, offset + y * scale)
+    y = jnp.where(mask[..., None], kw['y_train'], offset + kw['y_train'] * scale)
 
     x_offset = -0.6184722
     x_scale = 1.8521347

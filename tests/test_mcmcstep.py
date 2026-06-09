@@ -28,7 +28,6 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import fields, replace
 from functools import partial, wraps
-from inspect import signature
 from typing import NamedTuple
 
 import jax
@@ -85,8 +84,7 @@ from bartz._jaxext import (
     minimal_unsigned_dtype,
     split,
 )
-from bartz._typing import kwdict
-from bartz.grove import evaluate_forest, is_actual_leaf
+from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import (
     BatchedReduction,
     OneHotReduction,
@@ -2624,114 +2622,6 @@ class TestMultivariate:
                 rtol=1e-5,
                 reduce_rank=True,
             )
-
-
-class TestLeafDtype:
-    """Test narrow leaf storage dtypes and `Forest.leaf_scale`."""
-
-    n = 100
-    p = 10
-    numcut = 10
-    num_trees = 20
-    d = 6
-
-    @pytest.fixture(params=['uv-continuous', 'mv-continuous', 'uv-binary'])
-    def init_kwargs(self, keys: split, request: FixtureRequest) -> dict:
-        """Return arguments for `init`, with deliberately off-scale continuous data."""
-        kind = request.param
-        mv = kind.startswith('mv-')
-        binary = kind.endswith('-binary')
-        k = 2
-
-        kw: kwdict = dict(
-            X=random.randint(
-                keys.pop(), (self.p, self.n), 0, self.numcut + 1, jnp.uint32
-            ),
-            max_split=jnp.full(self.p, self.numcut + 1, jnp.uint32),
-            num_trees=self.num_trees,
-            p_nonterminal=jnp.full(self.d - 1, 0.9),
-        )
-
-        if binary:
-            sigma_mu = 3.0 / math.sqrt(self.num_trees)
-            kw.update(
-                y=random.bernoulli(keys.pop(), 0.5, (self.n,)).astype(jnp.float32),
-                outcome_type='binary',
-                offset=0.0,
-                leaf_prior_cov_inv=jnp.float32(1 / sigma_mu**2),
-            )
-        else:
-            # data far from O(1) would over/underflow float16 leaves if they
-            # were stored in data units
-            yscale = 1000.0
-            yshape = (k, self.n) if mv else (self.n,)
-            y = yscale * (3.0 + random.normal(keys.pop(), yshape))
-            sigma_mu = yscale / math.sqrt(self.num_trees)
-            kw.update(
-                y=y,
-                offset=y.mean(axis=-1),
-                leaf_prior_cov_inv=jnp.eye(k) / sigma_mu**2
-                if mv
-                else jnp.float32(1 / sigma_mu**2),
-                error_cov_df=2.0,
-                error_cov_scale=2 * yscale**2 * jnp.eye(k)
-                if mv
-                else jnp.float32(2 * yscale**2),
-            )
-
-        return kw
-
-    @staticmethod
-    def expected_scale(leaf_prior_cov_inv: Array) -> Array:
-        """Compute the marginal prior standard deviation of a leaf."""
-        if leaf_prior_cov_inv.ndim:
-            return jnp.sqrt(jnp.diagonal(jnp.linalg.inv(leaf_prior_cov_inv)))
-        else:
-            return jnp.sqrt(1 / leaf_prior_cov_inv)
-
-    @pytest.mark.parametrize('leaf_dtype', [None, jnp.float32, jnp.float16])
-    def test_dtypes_and_scale(
-        self, init_kwargs: dict, leaf_dtype: DTypeLike | None
-    ) -> None:
-        """`init` honors `leaf_dtype` and sets the scale to the prior leaf sd."""
-        expected_scale = self.expected_scale(init_kwargs['leaf_prior_cov_inv'])
-        if leaf_dtype is None:
-            state = init(**init_kwargs)
-            leaf_dtype = signature(init).parameters['leaf_dtype'].default
-        else:
-            state = init(**init_kwargs, leaf_dtype=leaf_dtype)
-        assert state.forest.leaf_tree.dtype == leaf_dtype
-        assert state.forest.leaf_scale.dtype == jnp.float32
-        assert_close_matrices(state.forest.leaf_scale, expected_scale, rtol=1e-6)
-
-    @pytest.mark.parametrize('leaf_dtype', [jnp.float32, jnp.float16])
-    def test_resid_consistency(
-        self, init_kwargs: dict, leaf_dtype: DTypeLike, keys: split
-    ) -> None:
-        """Incremental residuals match recomputation from the stored leaves.
-
-        The float32-level tolerance checks that the residuals are updated with
-        the rounded stored leaf values rather than with the exact samples.
-        """
-        state = init(**copy_arrays(init_kwargs), leaf_dtype=leaf_dtype)
-        for _ in range(3):
-            state = step(keys.pop(), state)
-        trees = evaluate_forest(state.X, state.forest, sum_batch_axis=0)
-        ref = jnp.asarray(init_kwargs['y']) if state.z is None else state.z
-        resid2 = ref - (trees + state.forest.offset[..., None])
-        assert_close_matrices(state.resid, resid2, rtol=1e-5, reduce_rank=True)
-
-    def test_float16_close_to_float32(self, init_kwargs: dict, keys: split) -> None:
-        """A step with float16 storage tracks the float32 step closely."""
-        key = keys.pop()
-        evals = {}
-        for leaf_dtype in (jnp.float32, jnp.float16):
-            state = init(**copy_arrays(init_kwargs), leaf_dtype=leaf_dtype)
-            state = step(jnp.copy(key), state)
-            evals[leaf_dtype] = evaluate_forest(state.X, state.forest, sum_batch_axis=0)
-        assert_close_matrices(
-            evals[jnp.float16], evals[jnp.float32], rtol=1e-2, reduce_rank=True
-        )
 
 
 def copy_arrays(x: PyTree) -> PyTree:

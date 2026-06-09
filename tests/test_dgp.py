@@ -714,6 +714,73 @@ def test_variance_relationships(dgps: DGP) -> None:
     assert jnp.all(dgps.params.sigma2_pop >= dgps.params.sigma2_eps)
 
 
+# A fixed positive-definite correlation matrix to exercise the error copula
+# (k == 3 == KWARGS['k']); the off-diagonals are deliberately asymmetric in sign.
+ERROR_CORR = jnp.array([[1.0, 0.5, -0.3], [0.5, 1.0, 0.2], [-0.3, 0.2, 1.0]])
+
+
+@jit
+def generate_corr_dgps(
+    keys: Key[Array, ' REPS'], error_corr: Float[Array, 'k k']
+) -> DGP:
+    """Generate one dataset per key sharing a fixed across-component error correlation."""
+    gen = partial(gen_data, lambda_=0.5, error_corr=error_corr, **KWARGS)
+    return vmap(gen)(keys)
+
+
+class TestErrorCorrelation:
+    """Test the across-component error correlation (Gaussian copula)."""
+
+    def test_default_is_independent(self, keys: split) -> None:
+        """Without `error_corr` no error Cholesky factor is stored."""
+        dgp = gen_data(keys.pop(), lambda_=0.5, **KWARGS)
+        assert dgp.params.error_chol is None
+
+    def test_cholesky_factors_correlation(self, keys: split) -> None:
+        """`error_corr` yields a (k, k) lower-triangular factor with ``L Lᵀ == R``."""
+        k = KWARGS['k']
+        dgp = gen_data(keys.pop(), lambda_=0.5, error_corr=ERROR_CORR, **KWARGS)
+        chol = nnone(dgp.params.error_chol)
+        assert chol.shape == (k, k)
+        assert jnp.all(jnp.triu(chol, 1) == 0)  # lower-triangular
+        assert_close_matrices(chol @ chol.T, ERROR_CORR, rtol=1e-6)
+
+    def test_identity_matches_independent(self, keys: split) -> None:
+        """``error_corr = I`` reproduces the independent-error outcome."""
+        k = KWARGS['k']
+        key = keys.pop()
+        indep = gen_data(key, lambda_=0.5, **KWARGS)
+        ident = gen_data(
+            random.clone(key), lambda_=0.5, error_corr=jnp.eye(k), **KWARGS
+        )
+        assert_close_matrices(ident.z, indep.z, rtol=1e-6)
+        assert_close_matrices(ident.y, indep.y, rtol=1e-6)
+
+    def test_normalized_unconditionally(self, keys: split) -> None:
+        """A covariance and its correlation give the same errors (unit-diagonal norm)."""
+        scale = jnp.array([2.0, 3.0, 4.0])
+        cov = ERROR_CORR * scale[:, None] * scale[None, :]
+        key = keys.pop()
+        corr = gen_data(key, lambda_=0.5, error_corr=ERROR_CORR, **KWARGS)
+        scaled = gen_data(random.clone(key), lambda_=0.5, error_corr=cov, **KWARGS)
+        assert_close_matrices(scaled.z, corr.z, rtol=1e-5)
+
+    def test_realized_correlation(self, keys: split) -> None:
+        """The sampled error vectors have empirical correlation equal to `error_corr`."""
+        k = KWARGS['k']
+        dgps = generate_corr_dgps(keys.pop(REPS), ERROR_CORR)
+        resid = (dgps.z - dgps.mu).transpose(1, 0, 2).reshape(k, -1)  # (k, REPS*N)
+        assert_close_matrices(jnp.corrcoef(resid), ERROR_CORR, rtol=0.02)
+
+    def test_preserves_marginal_variance(self, keys: split) -> None:
+        """Correlating errors leaves each component's noise variance at ``sigma2_eps``."""
+        k = KWARGS['k']
+        dgps = generate_corr_dgps(keys.pop(REPS), ERROR_CORR)
+        resid = (dgps.z - dgps.mu).transpose(1, 0, 2).reshape(k, -1)  # (k, REPS*N)
+        var = jnp.var(resid, axis=1)
+        assert_close_matrices(var, jnp.full(k, KWARGS['sigma2_eps']), rtol=0.02)
+
+
 @pytest.mark.parametrize('dgps', [{'lambda_': 0.0}], indirect=True, ids=['lambda0'])
 @pytest.mark.parametrize(
     'which',
@@ -861,6 +928,19 @@ def test_lambda_forbidden_when_univariate(keys: split) -> None:
     kw: kwdict = dict(KWARGS, k=None)
     with pytest.raises(ValueError, match='lambda_ must be None'):
         gen_data(keys.pop(), lambda_=0.5, **kw)
+
+
+def test_error_corr_forbidden_when_univariate(keys: split) -> None:
+    """`error_corr` with `k=None` raises `ValueError`."""
+    kw: kwdict = dict(KWARGS, k=None)
+    with pytest.raises(ValueError, match='error_corr requires a multivariate'):
+        gen_data(keys.pop(), lambda_=None, error_corr=jnp.eye(2), **kw)
+
+
+def test_error_corr_wrong_shape(keys: split) -> None:
+    """`error_corr` whose shape is not `(k, k)` raises `ValueError`."""
+    with pytest.raises(ValueError, match='error_corr has shape'):
+        gen_data(keys.pop(), lambda_=0.5, error_corr=jnp.eye(2), **KWARGS)
 
 
 def test_m_too_small(keys: split) -> None:

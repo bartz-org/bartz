@@ -226,16 +226,25 @@ def generate_outcome(
     sigma2_eps: Float[Array, ''],
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
     error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None = None,
+    error_chol: Float[Array, 'k k'] | None = None,
 ) -> tuple[
     Float[Array, ' n'] | Float[Array, 'k n'], Float[Array, ' n'] | Float[Array, 'k n']
 ]:
     """Sample the latent z and outcome y (see `Params` for binary semantics).
 
-    With ``error_scale`` set, each error is multiplied by it (broadcasting a
-    scalar-per-datapoint ``(n,)`` scale over all components), giving conditional
-    variance ``sigma2_eps * error_scale ** 2``.
+    With ``error_chol`` set (multivariate only), the per-datapoint error vectors
+    are correlated across components by the Cholesky factor, so their correlation
+    matrix is ``error_chol @ error_chol.T``. With ``error_scale`` set, each error
+    is then multiplied by it (broadcasting a scalar-per-datapoint ``(n,)`` scale
+    over all components), giving conditional variance ``sigma2_eps *
+    error_scale ** 2``.
     """
     eps: Float[Array, ' n'] | Float[Array, 'k n'] = random.normal(key, mu.shape)
+    if error_chol is not None:
+        # Gaussian copula across components: correlate the latent normals before
+        # the outcome-space scaling. With these Normal marginals that is the whole
+        # copula; a non-Normal error family would map eps through ppf(Phi(.)) here.
+        eps = error_chol @ eps
     scaled_eps = eps * jnp.sqrt(sigma2_eps)
     if error_scale is not None:
         scaled_eps = scaled_eps * error_scale
@@ -264,6 +273,45 @@ def check_offset(offset: Float[Array, ''] | Float[Array, ' k'], k: int | None) -
         if offset_len != k:
             msg = f'offset has length {offset_len} but k={k}'
             raise ValueError(msg)
+
+
+def corr_cholesky(
+    error_corr: Float[Array, 'k k'] | None, k: int | None
+) -> Float[Array, 'k k'] | None:
+    """Cholesky factor of the normalized `error_corr`, or None for independent errors.
+
+    The matrix is rescaled to unit diagonal (only its correlation structure is
+    used; the noise scale is set by ``sigma2_eps``), then factored as ``L Lᵀ``.
+
+    Parameters
+    ----------
+    error_corr
+        A symmetric positive-definite matrix of shape (k, k), or None for
+        independent errors.
+    k
+        Number of outcome components, or None for a univariate outcome.
+
+    Returns
+    -------
+    Lower-triangular Cholesky factor L of shape (k, k), or None if `error_corr` is None.
+
+    Raises
+    ------
+    ValueError
+        If `error_corr` is given with ``k=None`` or does not have shape ``(k, k)``.
+    """
+    if error_corr is None:
+        return None
+    elif k is None:
+        msg = 'error_corr requires a multivariate outcome (k != None)'
+        raise ValueError(msg)
+    elif error_corr.shape != (k, k):
+        msg = f'error_corr has shape {tuple(error_corr.shape)}, expected ({k}, {k})'
+        raise ValueError(msg)
+    else:
+        d = jnp.sqrt(jnp.diagonal(error_corr))
+        corr = error_corr / d[:, None] / d[None, :]
+        return jnp.linalg.cholesky(corr)
 
 
 def parse_outcome_type(
@@ -356,7 +404,11 @@ class Params(Module):
                 \quad \rho \in [0, 1], \\
             \mu_{ci} &= o_c + \mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci},
                 \quad o_c \in \mathbb R, \\
-            Z_{ci} &\sim N\big(\mu_{ci},\, \sigma^2_{\mathrm{eps}}\, W_{ci}^2\big), \\
+            \varepsilon_{\cdot i} &\overset{\mathrm{i.i.d.}}\sim N(0, R),
+                \quad R = \operatorname{corr}(\mathtt{error\_corr}),
+                \quad R = I \text{ by default}, \\
+            Z_{ci} &= \mu_{ci} + \sigma_{\mathrm{eps}}\, W_{ci}\,
+                \varepsilon_{ci}, \\
             Y_{ci} &= \begin{cases}
                     Z_{ci} & c \text{ continuous}, \\
                     \mathbb 1[Z_{ci} > 0] & c \text{ binary}.
@@ -392,6 +444,8 @@ class Params(Module):
             \operatorname{Cov}[\mu_{ci}, \mu_{c'i} \mid \theta]
                 &= \operatorname{Cov}[\mu_{ci}, \mu_{c'i}] = 0
                 \quad (c \ne c',\ \lambda = 0), \\
+            \operatorname{Cov}[Z_{ci}, Z_{c'i} \mid \theta, X]
+                &= \sigma^2_{\mathrm{eps}}\, W_{ci} W_{c'i}\, R_{cc'}, \\
             E[\operatorname{Var}[Z_{ci} \mid \theta]] &=
                 \sigma^2_{\mathrm{lin}} + \sigma^2_{\mathrm{quad}}
                 + \sigma^2_{\mathrm{eps}}
@@ -468,6 +522,9 @@ class Params(Module):
           - `sigma2_eps`
         * - :math:`o_c`
           - `offset`
+        * - :math:`R`
+          - ``error_corr`` (normalized to unit diagonal; `error_chol` is its
+            Cholesky factor)
         * - :math:`\operatorname{Var}[E[Z_{ci} \mid \theta]]`
           - `sigma2_mean`
         * - :math:`E[\operatorname{Var}[Z_{ci} \mid \theta]]`
@@ -602,6 +659,12 @@ class Params(Module):
     (see `Params` for the closed form): a fixed scalar set by the
     hyperparameters, identical for every component. ``None`` when
     homoskedastic."""
+
+    error_chol: Float[Array, 'k k'] | None
+    """Lower-triangular Cholesky factor ``L`` of the across-component error
+    correlation matrix ``R = L @ L.T`` (the ``error_corr`` argument normalized to
+    unit diagonal). ``None`` when the errors are independent (``error_corr`` was
+    ``None``), including every univariate outcome."""
 
     outcome_type: OutcomeType | tuple[OutcomeType, ...] = field(static=True)
     """Per-component outcome type, either a single `~bartz.mcmcstep.OutcomeType` applied to
@@ -795,6 +858,7 @@ def gen_params(
     outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
     het_strength: Float[Array, ''] | float | None = None,
     het_shape: Literal['scalar', 'vector'] | None = None,
+    error_corr: Float[Array, 'k k'] | None = None,
 ) -> Params:
     """Sample DGP coefficients and parameters (no dependence on `n`).
 
@@ -852,6 +916,12 @@ def gen_params(
         Heteroskedasticity mode: ``None`` (homoskedastic), ``'scalar'`` (one
         ``error_scale`` per datapoint, scaling the whole outcome vector), or
         ``'vector'`` (per-component scales, multivariate only). See `Params`.
+    error_corr
+        Across-component error correlation. A symmetric positive-definite
+        matrix of shape ``(k, k)``, normalized to unit diagonal before use (only
+        its correlation structure matters; the noise scale is ``sigma2_eps``).
+        ``None`` (default) gives independent errors. Multivariate only. See
+        `Params`.
 
     Returns
     -------
@@ -865,7 +935,9 @@ def gen_params(
         ``(lambda_ is None) != (k is None)``, or if
         ``(het_strength is None) != (het_shape is None)``, or if
         ``het_shape='vector'`` is combined with ``k=None``, or if a vector
-        ``offset`` is combined with ``k=None`` or has a length other than ``k``.
+        ``offset`` is combined with ``k=None`` or has a length other than ``k``,
+        or if ``error_corr`` is combined with ``k=None`` or does not have shape
+        ``(k, k)``.
     """
     if (lambda_ is None) != (k is None):
         msg = (
@@ -948,6 +1020,10 @@ def gen_params(
             het_shape, het_strength, kurt_x, gamma_distr.kurtosis, mu_4_s, p, k, lambda_
         )
 
+    # across-component error correlation, stored as its Cholesky factor (the form
+    # used when sampling); None leaves the errors independent
+    error_chol = corr_cholesky(error_corr, k)
+
     # derived variances (see `Params`); cheap scalars materialized eagerly
     sigma2_mean = sigma2_quad * mu_4_s / ((kurt_x - 1) * mu_4_s + q)
     sigma2_pop = sigma2_lin + sigma2_quad + sigma2_eps
@@ -978,6 +1054,7 @@ def gen_params(
         gamma_separate=gamma_separate,
         het_strength=het_strength,
         var_v=var_v,
+        error_chol=error_chol,
         outcome_type=outcome_type,
         het_shape=het_shape,
     )
@@ -1048,7 +1125,12 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
         error_scale = jnp.sqrt(v)
 
     z, y = generate_outcome(
-        keys.pop(), mu, params.sigma2_eps, params.outcome_type, error_scale
+        keys.pop(),
+        mu,
+        params.sigma2_eps,
+        params.outcome_type,
+        error_scale,
+        params.error_chol,
     )
 
     return DGP(
@@ -1088,6 +1170,7 @@ def gen_data(
     outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
     het_strength: Float[Array, ''] | float | None = None,
     het_shape: Literal['scalar', 'vector'] | None = None,
+    error_corr: Float[Array, 'k k'] | None = None,
 ) -> DGP:
     """Generate data from a quadratic multivariate DGP.
 
@@ -1121,6 +1204,7 @@ def gen_data(
     outcome_type
     het_strength
     het_shape
+    error_corr
         Forwarded to `gen_params`; see `Params`.
 
     Returns
@@ -1146,5 +1230,6 @@ def gen_data(
         outcome_type=outcome_type,
         het_strength=het_strength,
         het_shape=het_shape,
+        error_corr=error_corr,
     )
     return gen_data_from_params(keys.pop(), params, n=n)

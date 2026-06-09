@@ -1305,13 +1305,26 @@ def chol_with_gersh(
 def _chol_with_gersh_impl(
     mat: Float32[Array, '*batch_shape k k'], absolute_eps: bool
 ) -> Float32[Array, '*batch_shape k k']:
+    # standardize to unit diagonal first, so the Gershgorin shift is relative to
+    # each component's scale instead of a single absolute value set by the
+    # largest one (which would swamp components with much smaller variance, e.g.
+    # mixing a heavily-scaled continuous outcome with O(1) binary ones).
+    # degenerate (non-positive or non-finite, e.g. infinite precision from a
+    # constant outcome) diagonals fall back to the largest finite scale, which
+    # keeps a diagonal matrix bit-identical to an unstandardized stabilization
+    # and leaves an infinite diagonal infinite (pinning that leaf to zero)
+    diag = jnp.diagonal(mat)
+    finite_pos = jnp.isfinite(diag) & (diag > 0)
+    ref = jnp.max(jnp.where(finite_pos, diag, 0.0), initial=0.0)
+    scale = jnp.sqrt(jnp.where(finite_pos, diag, jnp.where(ref > 0, ref, 1.0)))
+    mat = mat / (scale[:, None] * scale[None, :])
     rho = jnp.max(jnp.sum(jnp.abs(mat), axis=1), initial=0.0)
     eps = jnp.finfo(mat.dtype).eps
     u = mat.shape[0] * rho * eps
     if absolute_eps:
         u += eps
     mat = mat.at[jnp.diag_indices_from(mat)].add(u)
-    return jnp.linalg.cholesky(mat)
+    return scale[:, None] * jnp.linalg.cholesky(mat)
 
 
 def _inv_via_chol_with_gersh(

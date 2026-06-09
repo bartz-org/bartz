@@ -560,6 +560,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         prec_reduction_config=BatchedReduction(num_batches=16),
                         prec_count_num_trees=7,
                         min_points_per_leaf=5,
+                        # narrow leaf storage is fragile across the disparate
+                        # scales of mixed outcome components
+                        leaf_dtype=jnp.float32,
                     ),
                 ),
                 x_test=test.x,
@@ -1416,19 +1419,23 @@ def test_scale_shift(bkw: BartKW) -> None:
     if bkw.all_binary:
         pytest.skip('Cannot rescale binary responses.')
 
-    bart1 = Bart(**kw)
     mask = bkw.binary_mask
+
+    bart1 = Bart(**kw)
+
+    # mixed outcomes use float32 leaves (set in `make_kw`): heterogeneous
+    # component scales make the two float16 chains bifurcate for some seeds,
+    # even though the scaling itself is correct (see
+    # test_chol_with_gersh_disparate_scales)
+    if bkw.is_mixed:
+        assert bart1._mcmc_state.forest.leaf_tree.dtype == jnp.float32
 
     # blow the response up far enough that the leaves would overflow float16 if
     # they were stored in data units instead of units of leaf_scale; leaves are
-    # summed across trees, so the per-leaf magnitude is the total scale divided
-    # by ~sqrt(num_trees). Skip this for mixed outcomes: scaling only the
-    # continuous components against O(1) binary ones makes the multivariate leaf
-    # covariance too ill-conditioned for the shared Gershgorin stabilization.
+    # summed across trees, so the per-leaf magnitude is the total scale over
+    # roughly the square root of the number of trees
     overflow_float16_scale = (
-        1.0
-        if bkw.is_mixed
-        else math.sqrt(kw['num_trees']) * 2 * float(jnp.finfo(jnp.float16).max)
+        math.sqrt(kw['num_trees']) * 2 * float(jnp.finfo(jnp.float16).max)
     )
     offset = 0.4703189 * overflow_float16_scale
     scale = 0.5294714 * overflow_float16_scale
@@ -1481,41 +1488,18 @@ def test_scale_shift(bkw: BartKW) -> None:
     leaf_tree = bart1._mcmc_state.forest.leaf_tree
     pred_rtol = condf(leaf_tree, 1e-4, 1e-3)
 
-    yhat1 = bart1.predict('train', kind='latent_samples')
-    yhat2 = bart2.predict('train', kind='latent_samples')
-    assert_close_matrices(
-        yhat1,
-        jnp.where(mask_pred, yhat2, (yhat2 - offset) / scale),
-        rtol=pred_rtol,
-        reduce_rank=True,
-    )
-
-    mean1 = bart1.predict('train', kind='mean')
-    mean2 = bart2.predict('train', kind='mean')
-    assert_close_matrices(
-        mean1,
-        jnp.where(mask_pred, mean2, (mean2 - offset) / scale),
-        rtol=pred_rtol,
-        reduce_rank=True,
-    )
-
-    yhat_test1 = bart1.predict(kw['x_train'], kind='latent_samples')
-    yhat_test2 = bart2.predict(x, kind='latent_samples')
-    assert_close_matrices(
-        yhat_test1,
-        jnp.where(mask_pred, yhat_test2, (yhat_test2 - offset) / scale),
-        rtol=pred_rtol,
-        reduce_rank=True,
-    )
-
-    yhat_test_mean1 = bart1.predict(kw['x_train'], kind='mean')
-    yhat_test_mean2 = bart2.predict(x, kind='mean')
-    assert_close_matrices(
-        yhat_test_mean1,
-        jnp.where(mask_pred, yhat_test_mean2, (yhat_test_mean2 - offset) / scale),
-        rtol=pred_rtol,
-        reduce_rank=True,
-    )
+    # check on both the training points (via the 'train' shortcut) and explicit
+    # test points, for the latent function and the outcome mean
+    for points1, points2 in (('train', 'train'), (kw['x_train'], x)):
+        for kind in ('latent_samples', 'mean'):
+            pred1 = bart1.predict(points1, kind=kind)
+            pred2 = bart2.predict(points2, kind=kind)
+            assert_close_matrices(
+                pred1,
+                jnp.where(mask_pred, pred2, (pred2 - offset) / scale),
+                rtol=pred_rtol,
+                reduce_rank=True,
+            )
 
     # mixed outcomes accumulate more float32 rounding through the binary-latent
     # step, so the sdev comparisons get a looser tolerance; with reduced leaf

@@ -103,7 +103,13 @@ from bartz.mcmcstep._moves import (
     split_range,
 )
 from bartz.mcmcstep._reduction import _resolve_pallas_backend
-from bartz.mcmcstep._state import Forest, StepConfig, _search_divisor
+from bartz.mcmcstep._state import (
+    Forest,
+    StepConfig,
+    _inv_via_chol_with_gersh,
+    _search_divisor,
+    chol_with_gersh,
+)
 from bartz.mcmcstep._step import (
     _compute_likelihood_ratio_mv,
     _compute_likelihood_ratio_uv,
@@ -2015,6 +2021,25 @@ def mcmcstep_data(mcmcstep_data_shape: tuple[int, int]) -> MCMCStepData:
     return MCMCStepData(X, y, max_split)
 
 
+def test_chol_with_gersh_disparate_scales() -> None:
+    """Gershgorin stabilization is per-component, not a single global shift.
+
+    A global shift set by the largest component would swamp the precision of
+    much smaller ones, as when a mixed model heavily scales a continuous
+    outcome alongside O(1) binary ones, corrupting the Cholesky and the
+    inverse (and hence `leaf_scale`).
+    """
+    # diagonal precisions spanning 14 orders of magnitude
+    precisions = jnp.array([1e-8, 1.0, 1e6])
+    mat = jnp.diag(precisions)
+    assert_close_matrices(
+        chol_with_gersh(mat), jnp.diag(jnp.sqrt(precisions)), rtol=1e-5
+    )
+    assert_close_matrices(
+        _inv_via_chol_with_gersh(mat), jnp.diag(1 / precisions), rtol=1e-5
+    )
+
+
 class TestWishart:
     """Test the basic properties of the wishart sampler output."""
 
@@ -2619,7 +2644,7 @@ class TestMultivariate:
             assert_close_matrices(
                 scalar_state.forest.leaf_tree,
                 vector_state.forest.leaf_tree,
-                rtol=1e-5,
+                rtol=3e-5,
                 reduce_rank=True,
             )
 

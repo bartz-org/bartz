@@ -35,6 +35,7 @@ from jaxtyping import Array, Float, Integer, Key, UInt
 
 from bartz._jaxext import minimal_unsigned_dtype
 from bartz._jaxext.random import loggamma
+from bartz._jaxext.scipy.special import ndtri
 
 # The DGP identities documented in `Params` hold for arbitrary families given
 # independence and the normalized moments declared by the base classes:
@@ -82,6 +83,19 @@ class Distr(Module):
             The number of levels, ``<= max_bins``.
         """
 
+    @abstractmethod
+    def ppf(self, u: Float[Array, '*shape']) -> Float[Array, '*shape']:
+        """Quantile function mapping probabilities in [0, 1] to standardized values."""
+
+    def from_standard_normal(self, z: Float[Array, '*shape']) -> Float[Array, '*shape']:
+        """Map standard-Normal draws to this family, preserving their Gaussian copula.
+
+        Elementwise ``ppf(Phi(z))``: each output is marginally a draw from this
+        family (mean 0, variance 1) while the joint dependence of `z` carries over
+        as a Gaussian copula. `Normal` overrides this with the identity.
+        """
+        return self.ppf(ndtr(z))
+
 
 def quantize_cdf(cdf: Float[Array, '*shape'], max_bins: int) -> UInt[Array, '*shape']:
     """Map cdf values in [0, 1] to `max_bins` equal-probability bins."""
@@ -124,6 +138,10 @@ class Uniform(Distr):
         """
         cdf = (x / math.sqrt(3) + 1) / 2
         return quantize_cdf(cdf, max_bins), max_bins
+
+    def ppf(self, u: Float[Array, '*shape']) -> Float[Array, '*shape']:
+        """Quantile function: map probabilities in [0, 1] to U(-sqrt(3), sqrt(3))."""
+        return math.sqrt(3) * (2 * u - 1)
 
 
 class DiscreteUniform(Distr):
@@ -184,6 +202,13 @@ class DiscreteUniform(Distr):
         bins = levels * m // self.m
         return bins.astype(minimal_unsigned_dtype(max_bins - 1)), m
 
+    def ppf(self, u: Float[Array, '*shape']) -> Float[Array, '*shape']:
+        """Quantile function: map probabilities in [0, 1] to the `m` standardized levels."""
+        level = jnp.clip(jnp.floor(u * self.m), 0, self.m - 1)
+        mean = (self.m - 1) / 2
+        var = (self.m * self.m - 1) / 12
+        return (level - mean) / jnp.sqrt(var)
+
 
 class Normal(Distr):
     """Standard Normal distribution."""
@@ -219,6 +244,14 @@ class Normal(Distr):
             The number of levels, always `max_bins`.
         """
         return quantize_cdf(ndtr(x), max_bins), max_bins
+
+    def ppf(self, u: Float[Array, '*shape']) -> Float[Array, '*shape']:
+        """Quantile function: the standard-Normal inverse CDF."""
+        return ndtri(u)
+
+    def from_standard_normal(self, z: Float[Array, '*shape']) -> Float[Array, '*shape']:
+        """Return `z` unchanged: the Normal family is its own Gaussian-copula transport."""
+        return z
 
 
 class ScaleDistr(Module):

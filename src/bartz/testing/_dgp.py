@@ -35,7 +35,14 @@ from jaxtyping import Array, Bool, Float, Int, Integer, Key, UInt
 
 from bartz._jaxext import jit, minimal_unsigned_dtype, split
 from bartz.mcmcstep import OutcomeType
-from bartz.testing._distr import Constant, DiscreteUniform, Distr, ScaleDistr, Uniform
+from bartz.testing._distr import (
+    Constant,
+    DiscreteUniform,
+    Distr,
+    Normal,
+    ScaleDistr,
+    Uniform,
+)
 
 
 def generate_partition(key: Key[Array, ''], p: int, k: int) -> Bool[Array, 'k p']:
@@ -227,24 +234,27 @@ def generate_outcome(
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
     error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None = None,
     error_chol: Float[Array, 'k k'] | None = None,
+    error_distr: Distr = Normal(),
 ) -> tuple[
     Float[Array, ' n'] | Float[Array, 'k n'], Float[Array, ' n'] | Float[Array, 'k n']
 ]:
     """Sample the latent z and outcome y (see `Params` for binary semantics).
 
-    With ``error_chol`` set (multivariate only), the per-datapoint error vectors
-    are correlated across components by the Cholesky factor, so their correlation
-    matrix is ``error_chol @ error_chol.T``. With ``error_scale`` set, each error
-    is then multiplied by it (broadcasting a scalar-per-datapoint ``(n,)`` scale
-    over all components), giving conditional variance ``sigma2_eps *
+    The errors follow a Gaussian copula: latent standard normals are correlated
+    across components by ``error_chol`` (multivariate only, so their correlation
+    matrix is ``error_chol @ error_chol.T``), then mapped to the `error_distr`
+    marginals (`Normal`, the identity, by default). With ``error_scale`` set, each
+    error is then multiplied by it (broadcasting a scalar-per-datapoint ``(n,)``
+    scale over all components), giving conditional variance ``sigma2_eps *
     error_scale ** 2``.
     """
     eps: Float[Array, ' n'] | Float[Array, 'k n'] = random.normal(key, mu.shape)
     if error_chol is not None:
-        # Gaussian copula across components: correlate the latent normals before
-        # the outcome-space scaling. With these Normal marginals that is the whole
-        # copula; a non-Normal error family would map eps through ppf(Phi(.)) here.
+        # Gaussian copula across components: correlate the latent normals first
         eps = error_chol @ eps
+    # then map to the chosen error marginals (identity for the default Normal);
+    # the family is standardized, so the outcome-space variance stays sigma2_eps
+    eps = error_distr.from_standard_normal(eps)
     scaled_eps = eps * jnp.sqrt(sigma2_eps)
     if error_scale is not None:
         scaled_eps = scaled_eps * error_scale
@@ -404,9 +414,12 @@ class Params(Module):
                 \quad \rho \in [0, 1], \\
             \mu_{ci} &= o_c + \mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci},
                 \quad o_c \in \mathbb R, \\
-            \varepsilon_{\cdot i} &\overset{\mathrm{i.i.d.}}\sim N(0, R),
+            U_{\cdot i} &\overset{\mathrm{i.i.d.}}\sim N(0, R),
                 \quad R = \operatorname{corr}(\mathtt{error\_corr}),
                 \quad R = I \text{ by default}, \\
+            \varepsilon_{ci} &= F^{-1}_{\mathtt{error\_distr}}(\Phi(U_{ci}))
+                \quad (\text{Gaussian copula; } \varepsilon_{ci} = U_{ci}
+                \text{ for the default } N), \\
             Z_{ci} &= \mu_{ci} + \sigma_{\mathrm{eps}}\, W_{ci}\,
                 \varepsilon_{ci}, \\
             Y_{ci} &= \begin{cases}
@@ -415,10 +428,19 @@ class Params(Module):
                 \end{cases}
         \end{align}
 
-    A binary component thresholds its own latent :math:`Z_{ci}` at zero, so
-    its success probability is :math:`\Phi(\mu_{ci} / (\sigma_{\mathrm{eps}}
-    W_{ci}))` (the latent shares :math:`\sigma^2_{\mathrm{eps}}` with the
-    continuous components, unlike the unit-variance probit convention of
+    The errors share a Gaussian copula with latent correlation :math:`R`: each
+    :math:`\varepsilon_{ci}` is marginally `error_distr` (mean 0, variance 1,
+    so the noise variance stays :math:`\sigma^2_{\mathrm{eps}}` for any family),
+    while the components are coupled through :math:`R`. For the default `Normal`
+    the copula is exact multivariate Normal and :math:`\operatorname{Cov}[
+    \varepsilon_{ci}, \varepsilon_{c'i}] = R_{cc'}`; other families preserve the
+    marginals but realize a copula-attenuated correlation.
+
+    A binary component thresholds its own latent :math:`Z_{ci}` at zero, so its
+    success probability is :math:`F(\mu_{ci} / (\sigma_{\mathrm{eps}} W_{ci}))`,
+    with :math:`F` the (symmetric) `error_distr` CDF, the Normal :math:`\Phi` by
+    default (the latent shares :math:`\sigma^2_{\mathrm{eps}}` with the continuous
+    components, unlike the unit-variance probit convention of
     `bartz.mcmcstep.init`). Predictor families with :math:`\kappa_X = 1`
     (binary predictors, `DiscreteUniform` with ``m=2``) have constant squares,
     so they require :math:`q \ge 2` to keep the quadratic budget well defined.
@@ -445,7 +467,8 @@ class Params(Module):
                 &= \operatorname{Cov}[\mu_{ci}, \mu_{c'i}] = 0
                 \quad (c \ne c',\ \lambda = 0), \\
             \operatorname{Cov}[Z_{ci}, Z_{c'i} \mid \theta, X]
-                &= \sigma^2_{\mathrm{eps}}\, W_{ci} W_{c'i}\, R_{cc'}, \\
+                &= \sigma^2_{\mathrm{eps}}\, W_{ci} W_{c'i}\,
+                \operatorname{Cov}[\varepsilon_{ci}, \varepsilon_{c'i}], \\
             E[\operatorname{Var}[Z_{ci} \mid \theta]] &=
                 \sigma^2_{\mathrm{lin}} + \sigma^2_{\mathrm{quad}}
                 + \sigma^2_{\mathrm{eps}}
@@ -522,6 +545,8 @@ class Params(Module):
           - `sigma2_eps`
         * - :math:`o_c`
           - `offset`
+        * - :math:`\varepsilon_{ci}`
+          - `error_distr` (marginal family)
         * - :math:`R`
           - ``error_corr`` (normalized to unit diagonal; `error_chol` is its
             Cholesky factor)
@@ -599,6 +624,12 @@ class Params(Module):
     gamma_distr: Distr
     """Distribution family of the noise projection draws ``g``. Its kurtosis
     enters ``var_v``."""
+
+    error_distr: Distr
+    """Marginal distribution family of the additive errors. The errors are sampled
+    through a Gaussian copula (the ``error_corr`` dependence), so this sets each
+    component's marginal while leaving its variance at ``sigma2_eps``. `Normal`
+    (default) recovers jointly-Normal errors."""
 
     s_distr: ScaleDistr
     """Scale family of the importance scales ``s``. More dispersed scales make
@@ -854,6 +885,7 @@ def gen_params(
     beta_distr: Distr = DiscreteUniform(2),
     A_distr: Distr = DiscreteUniform(2),
     gamma_distr: Distr = DiscreteUniform(2),
+    error_distr: Distr = Normal(),
     s_distr: ScaleDistr = Constant(),
     outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
     het_strength: Float[Array, ''] | float | None = None,
@@ -897,6 +929,11 @@ def gen_params(
         `Constant` scales all predictors are equally important.
     gamma_distr
         Family of the noise projection draws; its kurtosis enters ``var_v``.
+    error_distr
+        Marginal family of the additive errors (default `Normal`), realized
+        through the `error_corr` Gaussian copula. Any standardized family keeps
+        the error variance at ``sigma2_eps``; non-Normal families attenuate the
+        realized error correlation relative to ``error_corr``. See `Params`.
     s_distr
         Scale family of the per-predictor importance scales ``s`` (e.g.
         `Gamma` or `SpikeSlab`); more dispersed scales make the dependence on
@@ -1040,6 +1077,7 @@ def gen_params(
         beta_distr=beta_distr,
         A_distr=A_distr,
         gamma_distr=gamma_distr,
+        error_distr=error_distr,
         s_distr=s_distr,
         q=q,
         lambda_=lambda_,
@@ -1131,6 +1169,7 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
         params.outcome_type,
         error_scale,
         params.error_chol,
+        params.error_distr,
     )
 
     return DGP(
@@ -1166,6 +1205,7 @@ def gen_data(
     beta_distr: Distr = DiscreteUniform(2),
     A_distr: Distr = DiscreteUniform(2),
     gamma_distr: Distr = DiscreteUniform(2),
+    error_distr: Distr = Normal(),
     s_distr: ScaleDistr = Constant(),
     outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
     het_strength: Float[Array, ''] | float | None = None,
@@ -1200,6 +1240,7 @@ def gen_data(
     beta_distr
     A_distr
     gamma_distr
+    error_distr
     s_distr
     outcome_type
     het_strength
@@ -1226,6 +1267,7 @@ def gen_data(
         beta_distr=beta_distr,
         A_distr=A_distr,
         gamma_distr=gamma_distr,
+        error_distr=error_distr,
         s_distr=s_distr,
         outcome_type=outcome_type,
         het_strength=het_strength,

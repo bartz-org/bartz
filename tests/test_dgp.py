@@ -105,6 +105,17 @@ def assert_uncorrelated_z(
     assert_array_less(jnp.abs(cov / se), SIGMA_THRESHOLD)
 
 
+def assert_standardized(z: Float[Array, ' reps'], distr: Distr) -> None:
+    """Check `z` has mean 0, variance 1 and `distr.kurtosis` as fourth moment."""
+    assert_mean_z(z, 0.0)
+    if distr.kurtosis == 1:
+        # degenerate z-tests: the squares are exactly constant
+        assert_array_equal(z**2, jnp.ones_like(z))
+    else:
+        assert_mean_z(z**2, 1.0)
+        assert_mean_z(z**4, distr.kurtosis)
+
+
 @partial(jit, static_argnames=('het_shape',))
 def generate_dgps(
     keys: Key[Array, 'REPS'],
@@ -217,14 +228,26 @@ class TestDistr:
 
     def test_moments(self, keys: split, distr: Distr) -> None:
         """The draws have mean 0, variance 1 and fourth moment `kurtosis`."""
-        z = distr.sample(keys.pop(), (REPS,))
-        assert_mean_z(z, 0.0)
-        if distr.kurtosis == 1:
-            # degenerate z-tests: the squares are exactly constant
-            assert_array_equal(z**2, jnp.ones_like(z))
-        else:
-            assert_mean_z(z**2, 1.0)
-            assert_mean_z(z**4, distr.kurtosis)
+        assert_standardized(distr.sample(keys.pop(), (REPS,)), distr)
+
+    def test_ppf_moments(self, keys: split, distr: Distr) -> None:
+        """`ppf` maps Uniform(0, 1) to standardized draws of the family."""
+        assert_standardized(distr.ppf(random.uniform(keys.pop(), (REPS,))), distr)
+
+    def test_ppf_monotone(self, keys: split, distr: Distr) -> None:
+        """`ppf` is non-decreasing."""
+        u = jnp.sort(random.uniform(keys.pop(), (REPS,)))
+        assert jnp.all(jnp.diff(distr.ppf(u)) >= 0)
+
+    def test_from_standard_normal_moments(self, keys: split, distr: Distr) -> None:
+        """`from_standard_normal` maps N(0, 1) to standardized draws of the family."""
+        z = distr.from_standard_normal(random.normal(keys.pop(), (REPS,)))
+        assert_standardized(z, distr)
+
+    def test_normal_from_standard_normal_is_identity(self, keys: split) -> None:
+        """`Normal.from_standard_normal` returns its argument unchanged."""
+        z = random.normal(keys.pop(), (REPS,))
+        assert_array_equal(Normal().from_standard_normal(z), z)
 
     @pytest.mark.parametrize('m', [2, 3, 5, 100])
     def test_quantized_levels(self, keys: split, m: int) -> None:
@@ -779,6 +802,52 @@ class TestErrorCorrelation:
         resid = (dgps.z - dgps.mu).transpose(1, 0, 2).reshape(k, -1)  # (k, REPS*N)
         var = jnp.var(resid, axis=1)
         assert_close_matrices(var, jnp.full(k, KWARGS['sigma2_eps']), rtol=0.02)
+
+
+@jit
+def generate_error_dgps(
+    keys: Key[Array, ' REPS'],
+    error_distr: Distr,
+    error_corr: Float[Array, 'k k'] | None,
+) -> DGP:
+    """Generate one dataset per key with a given error marginal and correlation."""
+    gen = partial(
+        gen_data, lambda_=0.5, error_distr=error_distr, error_corr=error_corr, **KWARGS
+    )
+    return vmap(gen)(keys)
+
+
+class TestErrorMarginal:
+    """Test the error marginal family (Gaussian copula `error_distr`)."""
+
+    def test_default_normal_matches_explicit(self, keys: split) -> None:
+        """The default `error_distr` equals an explicit `Normal()`."""
+        key = keys.pop()
+        default = gen_data(key, lambda_=0.5, **KWARGS)
+        explicit = gen_data(
+            random.clone(key), lambda_=0.5, error_distr=Normal(), **KWARGS
+        )
+        assert_array_equal(default.z, explicit.z)
+
+    def test_uniform_marginal(self, keys: split) -> None:
+        """``error_distr=Uniform`` gives bounded errors with the Uniform shape."""
+        dgps = generate_error_dgps(keys.pop(REPS), Uniform(), None)
+        resid = (dgps.z - dgps.mu).reshape(-1) / jnp.sqrt(KWARGS['sigma2_eps'])
+        assert_standardized(resid, Uniform())
+        assert jnp.all(jnp.abs(resid) <= jnp.sqrt(3.0) + 1e-5)
+
+    def test_copula_correlation_is_attenuated(self, keys: split) -> None:
+        """Uniform marginals + `error_corr` realize the copula's Pearson correlation.
+
+        For Uniform margins the Gaussian copula gives the exact Spearman relation
+        ``(6 / pi) arcsin(R / 2)``, an attenuation of `error_corr` toward 0 that
+        keeps the sign (`Normal` margins instead recover `R` exactly).
+        """
+        k = KWARGS['k']
+        dgps = generate_error_dgps(keys.pop(REPS), Uniform(), ERROR_CORR)
+        resid = (dgps.z - dgps.mu).transpose(1, 0, 2).reshape(k, -1)  # (k, REPS*N)
+        expected = 6 / jnp.pi * jnp.arcsin(ERROR_CORR / 2)
+        assert_close_matrices(jnp.corrcoef(resid), expected, rtol=0.02)
 
 
 @pytest.mark.parametrize('dgps', [{'lambda_': 0.0}], indirect=True, ids=['lambda0'])

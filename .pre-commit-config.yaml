@@ -198,3 +198,18 @@ repos:
         # to column 0, so references inside indented code or docstrings are ignored.
         entry: '^__all__\b'
         types: [python]
+      - id: forbid-bare-array-annotation
+        name: forbid bare array annotations (wrap in a jaxtyping shape hint)
+        language: pygrep
+        # Catches an array type used directly as an annotation (`x: Array`,
+        # `-> np.ndarray`, `Array | None`) instead of wrapped in a jaxtyping
+        # hint (`Float32[Array, 'n p']`). The name must follow `: `, `-> `, or
+        # `| ` at subscript depth 0: the bracket-group prefix `(?:[^][#]*\[
+        # [^][#]*\])*` keeps wrapped uses and arrays nested in other generics
+        # (`PyTree[Array]`, `Callable[..., np.ndarray]`) exempt, and excluding
+        # `#` skips comments. The trailing lookahead requires an annotation
+        # terminator, skipping docstring prose ("Array of samples"); the
+        # `^(?!\w+ =)` guard skips alias definitions (`DummyArray = Array |
+        # ...`). Relies on ruff-format spacing.
+        entry: '^(?!\w+ =)(?:[^][#]*\[[^][#]*\])*[^][#]*?[:>|] (?:(?:np|numpy|jnp|jax)\.)?(?:(?:Jax)?ArrayLike|Array|NDArray|ndarray|_LazyArray|DummyArray)\b(?=\s*(?:[,:=|)#]|$))'
+        types: [python]

@@ -1,4 +1,28 @@
 {
+    // Tune batched scatter-add for the RESIDUAL reduction (`sum_resid`): the
+    // per-leaf sum of the (scaled) residual vector, run once per tree inside the
+    // accept/reject scan.
+    //
+    // Swept knobs of `BatchedReduction`:
+    //   num_batches    primary axis (plot.reduce); the datapoint-batch count,
+    //                  including null = unbatched. Its per-device optimum is the
+    //                  heuristic we ultimately want (cpu: small or None; gpu:
+    //                  ~64-2048). null is plotted as the no-batching regime.
+    //   batches_inner  scatter-buffer layout: size-by-nb (true) vs nb-by-size.
+    //   contiguous     batch assignment: strided (false) vs contiguous chunks.
+    // batches_inner/contiguous were only ever measured at their defaults
+    // (true, false), once, on an old gpu+jax; here we sweep all four layouts to
+    // confirm or revise that. (null ignores both layout knobs, so its four
+    // entries are redundant duplicates -- harmless, min'd away in the plot.)
+    //
+    // Scanned because they change the reduction's array shape (hence possibly
+    // its optimum): n (datapoints), k (outcome dim: shape (n) -> (k, n)), and
+    // weights (with k > 1 lifts (k, n) -> (k, k, n)). num_trees is FIXED: the
+    // residual reduction runs once per tree on the same shape, so the number of
+    // trees does not change the per-call optimum (5 is just enough to time it).
+    // maxdepth is fixed at 6 (our practical value; sets the bin count 2 ** d).
+    // The other two reduction sites use default 'auto' batching (resolved
+    // per-platform) as a realistic backdrop, so they don't dominate the step.
     "plot": {
         "scan": "n",
         "reduce": "resid_reduction.num_batches",
@@ -9,8 +33,8 @@
         "maxdepth":           [6],
         "weights":            [false, true],
         "num_trees":          [5],
-        "resid_reduction":    [{"kind": "batched", "num_batches": [null, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]}],
-        "count_reduction":    [{"kind": "batched", "num_batches": null}],
-        "prec_reduction":     [{"kind": "batched", "num_batches": null}],
+        "resid_reduction":    [{"kind": "batched", "num_batches": [null, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096], "batches_inner": [true, false], "contiguous": [false, true]}],
+        "count_reduction":    [{"kind": "batched", "num_batches": "auto"}],
+        "prec_reduction":     [{"kind": "batched", "num_batches": "auto"}],
     },
 }

@@ -1,16 +1,43 @@
 {
+    // Tune batched scatter-add for the PRECISION reduction (datapoints per leaf
+    // weighted by the error-precision scale), taken on the heteroskedastic path
+    // (prec_scale is set, i.e. weights=true; with weights=false the prec tree is
+    // just the count tree and this site does not run).
+    //
+    // Swept knobs of `BatchedReduction`:
+    //   num_batches    primary axis (plot.reduce); the datapoint-batch count,
+    //                  including null = unbatched. Its per-device optimum is the
+    //                  heuristic we ultimately want (cpu: small or None; gpu:
+    //                  ~64-2048). null is plotted as the no-batching regime.
+    //   batches_inner  scatter-buffer layout: size-by-nb (true) vs nb-by-size.
+    //   contiguous     batch assignment: strided (false) vs contiguous chunks.
+    // batches_inner/contiguous were only ever measured at their defaults
+    // (true, false), once, on an old gpu+jax; here we sweep all four layouts to
+    // confirm or revise that. (null ignores both layout knobs, so its four
+    // entries are redundant duplicates -- harmless, min'd away in the plot.)
+    //
+    // The reduced value is prec_scale, shape (n) univariate or (k, k, n)
+    // multivariate, so k changes the reduction's batch shape and is scanned
+    // (k=1 dropped: shape-degenerate with null). Like count it is vmapped over a
+    // batch of trees, so num_trees is scanned too; both k and num_trees are
+    // coarse to offset the 4x layout sweep -- widen if the optimum's dependence
+    // on them needs finer resolution. weights is fixed true (this site is only
+    // taken on the heteroskedastic path). maxdepth is fixed at 6, but note the
+    // prec reduces into only the move's two children (subset_length=2), so the
+    // bin count is tiny here. resid/count reductions use default 'auto' batching
+    // (resolved per-platform) as a realistic backdrop, not dominating the step.
     "plot": {
         "scan": "n",
         "reduce": "prec_reduction.num_batches",
     },
     "values": {
         "n":                  [1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
-        "k":                  [null, 1, 2, 4],
+        "k":                  [null, 2, 4],
         "maxdepth":           [6],
         "weights":            [true],
-        "num_trees":          [1, 4, 16, 64, 256],
-        "resid_reduction":    [{"kind": "batched", "num_batches": null}],
-        "count_reduction":    [{"kind": "batched", "num_batches": null}],
-        "prec_reduction":     [{"kind": "batched", "num_batches": [null, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]}],
+        "num_trees":          [1, 16, 256],
+        "resid_reduction":    [{"kind": "batched", "num_batches": "auto"}],
+        "count_reduction":    [{"kind": "batched", "num_batches": "auto"}],
+        "prec_reduction":     [{"kind": "batched", "num_batches": [null, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096], "batches_inner": [true, false], "contiguous": [false, true]}],
     },
 }

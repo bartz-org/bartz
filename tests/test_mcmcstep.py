@@ -66,6 +66,7 @@ from jaxtyping import (
     Key,
     PyTree,
     Shaped,
+    UInt,
     UInt8,
     UInt32,
     jaxtyped,
@@ -623,6 +624,40 @@ class TestSearchDivisor:
             _search_divisor(target, dividend, low, up)
 
 
+def reduce_reference(
+    values: Float[Array, '*batch_shape n'] | int,
+    indices: UInt[Array, ' n'],
+    /,
+    *,
+    size: int,
+    subset_start: Integer[Array, ''] | None = None,
+    subset_length: int | None = None,
+    dtype: DTypeLike,
+    data_sharded: bool,
+) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+    """External baseline mirroring `_reduce` via `jax.ops.segment_sum`."""
+    values = jnp.asarray(values)
+    # `segment_sum` reduces the leading axis, `_reduce` the last one; a
+    # scalar value is the count case, weighting each datapoint equally
+    if values.ndim == 0:
+        data = jnp.broadcast_to(values.astype(dtype), indices.shape)
+    else:
+        data = jnp.moveaxis(values, -1, 0).astype(dtype)
+    out = segment_sum(data, indices, num_segments=size)
+    if subset_length is not None:
+        assert subset_start is not None  # set together with subset_length
+        # select the range's bins from the full reduction; 'fill' makes
+        # out-of-domain bins read as zero instead of clamping
+        bins = subset_start.astype(jnp.uint32) + jnp.arange(
+            subset_length, dtype=jnp.uint32
+        )
+        out = out.at[bins].get(mode='fill', fill_value=0)
+    out = jnp.moveaxis(out, 0, -1)
+    if data_sharded:
+        out = lax.psum(out, 'data')
+    return out
+
+
 class TestReduction:
     """Check every `ReductionConfig` matches an unbatched segment-sum baseline."""
 
@@ -662,29 +697,6 @@ class TestReduction:
             PallasReduction(backend=pallas_backend, num_blocks=8, block_size=16),
         )
 
-    @staticmethod
-    def reference(
-        values: Float[Array, '*batch_shape n'] | int,
-        indices: Integer[Array, ' n'],
-        /,
-        *,
-        size: int,
-        dtype: DTypeLike,
-        data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {size}']:
-        """External baseline mirroring `_reduce` via `jax.ops.segment_sum`."""
-        values = jnp.asarray(values)
-        # `segment_sum` reduces the leading axis, `_reduce` the last one; a
-        # scalar value is the count case, weighting each datapoint equally
-        if values.ndim == 0:
-            data = jnp.broadcast_to(values.astype(dtype), indices.shape)
-        else:
-            data = jnp.moveaxis(values, -1, 0).astype(dtype)
-        out = jnp.moveaxis(segment_sum(data, indices, num_segments=size), 0, -1)
-        if data_sharded:
-            out = lax.psum(out, 'data')
-        return out
-
     def test_matches_reference(
         self, configs: tuple[ReductionConfig, ...], keys: split, subtests: SubTests
     ) -> None:
@@ -695,8 +707,10 @@ class TestReduction:
         sums overflow float16 (catching accumulation in the values' dtype
         rather than in the requested `dtype`), composition with an external
         `vmap` that batches only the indices (the layout `step` uses to
-        count/sum over many trees at once), and a data axis sharded with
-        `shard_map`, which `PallasReduction` must reject.
+        count/sum over many trees at once), reductions over a contiguous bin
+        range (with a non-power-of-2 length and running past the index domain),
+        and a data axis sharded with `shard_map`, which `PallasReduction` must
+        reject.
         """
         n, size, num_trees = 512, 8, 4
         indices = random.randint(keys.pop(), (n,), 0, size).astype(jnp.uint32)
@@ -711,9 +725,13 @@ class TestReduction:
         # float16 values: each per-bin sum overflows the float16 range, so a
         # reduction accumulating in the values' dtype returns inf
         overflowing = jnp.full(n, 4096.0, jnp.float16)
-
         count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
         float_kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
+        # bin range: starts mid-domain, has a non-power-of-2 length (exercising
+        # the bins padding `PallasReduction` needs for Triton), and runs one
+        # past `size`, so its last bin is out of the index domain and its sum
+        # must come out zero
+        range_kw = dict(float_kw, subset_start=jnp.uint32(6), subset_length=3)
         exact = assert_array_equal  # the count path must match exactly
         close = partial(assert_close_matrices, rtol=1e-5, atol=1e-6, reduce_rank=True)
 
@@ -731,6 +749,16 @@ class TestReduction:
             ),
             'vmap float': (
                 lambda f: vmap(partial(f, vector, **float_kw))(tree_indices),
+                close,
+            ),
+            'range count': (
+                lambda f: f(1, indices, **dict(range_kw, dtype=jnp.uint32)),
+                exact,
+            ),
+            'range float': (lambda f: f(vector, indices, **range_kw), close),
+            'range float matrix': (lambda f: f(matrix, indices, **range_kw), close),
+            'vmap range float': (
+                lambda f: vmap(partial(f, vector, **range_kw))(tree_indices),
                 close,
             ),
         }
@@ -764,8 +792,18 @@ class TestReduction:
                 )(sharded_vector, sharded_indices),
                 close,
             )
+            # the range bounds are closed over, so they are replicated across shards
+            cases['sharded range float'] = (
+                lambda f: shard_map(
+                    partial(f, **dict(range_kw, data_sharded=True)),
+                    mesh=mesh,
+                    in_specs=(data, data),
+                    out_specs=replicated,
+                )(sharded_vector, sharded_indices),
+                close,
+            )
 
-        expected = {name: run(self.reference) for name, (run, _) in cases.items()}
+        expected = {name: run(reduce_reference) for name, (run, _) in cases.items()}
 
         for config in configs:
             for name, (run, compare) in cases.items():

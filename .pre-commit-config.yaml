@@ -98,11 +98,11 @@ repos:
         stages: [pre-merge-commit]
       - id: refresh-editable-version
         name: refresh the editable install's git-derived version
-        # WORKAROUND(uv<99): uv's git cache-keys cannot detect new commits in
-        # linked worktrees (see the cache-keys comment in pyproject.toml), so
+        # WORKAROUND(uv<0.11.20): uv's git cache-keys cannot detect new commits
+        # in linked worktrees (see the cache-keys comment in pyproject.toml), so
         # the editable bartz's version goes stale; refresh it whenever HEAD
-        # moves. If a uv release fixes worktree commit detection, set it as
-        # the bound, and drop this hook once the CI-pinned uv reaches it.
+        # moves. Fixed upstream by uv#19706 (merged after 0.11.19, so first
+        # released in 0.11.20); drop this hook once the CI-pinned uv reaches it.
         # `--inexact` avoids pruning extras (e.g. cuda), `--frozen` avoids
         # touching uv.lock mid-rebase, and the venv check skips worktrees
         # without an environment (e.g. right after `worktree add`);

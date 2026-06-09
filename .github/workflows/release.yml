@@ -43,7 +43,24 @@ jobs:
           python-version-file: ".python-version"
       - name: Update pip
         run: python -m pip install --upgrade pip
+      - name: Determine expected version
+        id: version
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        # the release event carries the tag (e.g. v1.2.3); strip the leading `v`
+        # for the PyPI version. Empty on workflow_dispatch (no release context).
+        run: echo "expected=${TAG#v}" >> "$GITHUB_OUTPUT"
       - name: Install software
-        run: python -m pip install bartz
-      - name: Try to import it
-        run: python -c 'import bartz;print(bartz.__version__)'
+        env:
+          EXPECTED: ${{ steps.version.outputs.expected }}
+        run: python -m pip install "bartz${EXPECTED:+==$EXPECTED}"
+      - name: Check the installed version
+        env:
+          EXPECTED: ${{ steps.version.outputs.expected }}
+        run: |
+          installed=$(python -c 'import bartz; print(bartz.__version__)')
+          echo "installed bartz $installed (expected ${EXPECTED:-<latest>})"
+          if [ -n "$EXPECTED" ] && [ "$installed" != "$EXPECTED" ]; then
+            echo "::error::installed $installed does not match released $EXPECTED"
+            exit 1
+          fi

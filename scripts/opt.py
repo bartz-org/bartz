@@ -39,6 +39,7 @@ The config file is a JSONC document like:
             "maxdepth":           [6],
             "weights":            [false],
             "num_trees":          [5, 50, 200],
+            "leaf_dtype":         ["float16", "float32"],
             "resid_reduction": [                    // reduction slot: one entry per kind
                 {"kind": "batched", "num_batches": [null, 1, 8, 64]},
                 {"kind": "onehot", "method": ["matmul", "multiply"]},
@@ -97,6 +98,7 @@ from jax import Array, block_until_ready, random
 from jax import config as jax_config
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
+from jax.typing import DTypeLike
 from polars import DataFrame, concat, read_parquet
 from tqdm import tqdm
 
@@ -324,6 +326,9 @@ class ConfigParams:
     num_trees: int
     """`init`'s ``num_trees`` kwarg."""
 
+    leaf_dtype: str = jnp.dtype(init_default('leaf_dtype')).name
+    """`init`'s ``leaf_dtype`` kwarg, as a dtype name (e.g. ``'float16'``, ``'float32'``)."""
+
     resid_reduction: ReductionConfig = field(
         default=init_default('resid_reduction_config'), metadata={'reduction': True}
     )
@@ -477,6 +482,7 @@ class ConfigParams:
             num_trees=self.num_trees,
             p_nonterminal=make_p_nonterminal(self.maxdepth, 0.95, 2),
             leaf_prior_cov_inv=self.num_trees * eye,
+            leaf_dtype=self.leaf_dtype,
             error_cov_df=2.0,
             error_cov_scale=2 * eye,
             error_scale=jnp.ones(self.n) if self.weights else None,
@@ -514,6 +520,7 @@ class InitKwargs:
     num_trees: int
     p_nonterminal: Array
     leaf_prior_cov_inv: float | Array
+    leaf_dtype: DTypeLike
     error_cov_df: float
     error_cov_scale: float | Array
     error_scale: Array | None

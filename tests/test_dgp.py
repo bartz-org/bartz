@@ -79,6 +79,15 @@ HIGH_SPARSITY: float = 1e19  # largest before sparsity (sparsity + 1) overflows 
 HET_STRENGTH: float = 0.7
 
 
+def assert_z(
+    statistic: Float[Array, '...'],
+    expected: Float[Array, '...'] | float,
+    se: Float[Array, '...'] | float,
+) -> None:
+    """Check via a z-test that `statistic` equals `expected` given standard error `se`."""
+    assert_array_less(jnp.abs((statistic - expected) / se), SIGMA_THRESHOLD)
+
+
 def assert_mean_z(
     samples: Float[Array, 'reps ...'],
     expected: Float[Array, ''] | float,
@@ -91,8 +100,7 @@ def assert_mean_z(
     n_reps, *_ = samples.shape
     if se is None:
         se = jnp.std(samples, axis=0) / jnp.sqrt(n_reps)
-    z_scores = jnp.abs((jnp.mean(samples, axis=0) - expected) / se)
-    assert_array_less(z_scores, SIGMA_THRESHOLD)
+    assert_z(jnp.mean(samples, axis=0), expected, se)
 
 
 def assert_uncorrelated_z(
@@ -102,7 +110,7 @@ def assert_uncorrelated_z(
     n_reps, *_ = a.shape
     cov = jnp.mean((a - jnp.mean(a, axis=0)) * (b - jnp.mean(b, axis=0)), axis=0)
     se = jnp.std(a, axis=0) * jnp.std(b, axis=0) / jnp.sqrt(n_reps)
-    assert_array_less(jnp.abs(cov / se), SIGMA_THRESHOLD)
+    assert_z(cov, 0.0, se)
 
 
 def assert_standardized(z: Float[Array, ' reps'], distr: Distr) -> None:
@@ -125,6 +133,8 @@ def generate_dgps(
     het_shape: str | None,
     x_distr: Distr,
     gamma_distr: Distr,
+    error_distr: Distr,
+    error_corr: Float[Array, 'k k'] | None,
 ) -> DGP:
     """Generate one dataset per random key (jitted, vmapped over keys)."""
     gen = partial(
@@ -135,6 +145,8 @@ def generate_dgps(
         het_shape=het_shape,
         x_distr=x_distr,
         gamma_distr=gamma_distr,
+        error_distr=error_distr,
+        error_corr=error_corr,
         **KWARGS,
     )
     return vmap(gen)(keys)
@@ -145,8 +157,8 @@ def dgps(keys: split, request: pytest.FixtureRequest) -> DGP:
     """Generate DGP instances using vmap and jit.
 
     Indirectly parametrizable by a mapping with any of ``lambda_``,
-    ``s_distr``, ``het_strength``, ``het_shape``, ``x_distr`` and
-    ``gamma_distr``.
+    ``s_distr``, ``het_strength``, ``het_shape``, ``x_distr``, ``gamma_distr``,
+    ``error_distr`` and ``error_corr``.
     """
     param: Mapping = getattr(request, 'param', None) or {}
     return generate_dgps(
@@ -157,7 +169,15 @@ def dgps(keys: split, request: pytest.FixtureRequest) -> DGP:
         param.get('het_shape'),
         param.get('x_distr', Uniform()),
         param.get('gamma_distr', DiscreteUniform(2)),
+        param.get('error_distr', Normal()),
+        param.get('error_corr'),
     )
+
+
+def residuals(dgps: DGP) -> Float[Array, 'k reps_n']:
+    """Stack the per-component error residuals ``z - mu`` across all datasets."""
+    k = KWARGS['k']
+    return (dgps.z - dgps.mu).transpose(1, 0, 2).reshape(k, -1)
 
 
 def test_shapes_and_dtypes(keys: split) -> None:
@@ -331,8 +351,7 @@ class TestX:
         var = jnp.var(dgps.x, axis=0)  # Shape: (P, N)
         # conservative Gaussian approx (uniform x is light-tailed)
         std_of_var = jnp.sqrt(2 / (n_reps - 1))
-        z_scores = jnp.abs((var - 1.0) / std_of_var)
-        assert_array_less(z_scores, SIGMA_THRESHOLD)
+        assert_z(var, 1.0, std_of_var)
 
     @pytest.mark.parametrize('m', [2, 3, 5])
     def test_quantized_support(self, keys: split, m: int) -> None:
@@ -575,14 +594,10 @@ def test_high_sparsity_matches_none(keys: split) -> None:
     assert_close_matrices(high.y, none.y, rtol=1e-5)
 
 
-def test_beta_shared_mean(dgps: DGP) -> None:
-    """Test that beta_shared has mean close to 0."""
-    assert_mean_z(dgps.params.beta_shared, 0.0)
-
-
-def test_beta_separate_mean(dgps: DGP) -> None:
-    """Test that beta_separate has mean close to 0."""
-    assert_mean_z(nnone(dgps.params.beta_separate), 0.0)
+@pytest.mark.parametrize('which', ['beta_shared', 'beta_separate'])
+def test_beta_mean(dgps: DGP, which: str) -> None:
+    """Test that the linear coefficients have mean close to 0."""
+    assert_mean_z(nnone(getattr(dgps.params, which)), 0.0)
 
 
 def test_default_coefficients_have_equal_magnitude(keys: split) -> None:
@@ -664,52 +679,38 @@ def expected_variance(
 
 
 @pytest.mark.parametrize(('dgps', 'which'), VARIANCE_CASES, indirect=['dgps'])
-def test_outcome_prior_variance(dgps: DGP, which: str) -> None:
-    """Test that latent mean and outcome have the expected marginal variance.
+def test_outcome_variance(dgps: DGP, which: str) -> None:
+    """Test the marginal (prior) and population variance of mean and outcome fields.
 
-    The budget holds with and without sparsity, and is preserved by
-    heteroskedasticity (the noise multiplier is calibrated to unit mean).
-    Sparsity and heteroskedasticity make ``y`` heavier-tailed, so the variance
-    estimator spread is then set from the sample fourth moment instead of the
-    Gaussian ``2 sigma^4`` (which would over-reject).
+    Both budgets hold with and without sparsity, and are preserved by
+    heteroskedasticity (the noise multiplier is calibrated to unit mean, so
+    ``E[error_scale ** 2] == 1``). Sparsity and heteroskedasticity make the
+    fields heavier-tailed, so the spread of the variance estimators is then set
+    from the sample fourth moment instead of the Gaussian ``2 sigma^4`` (which
+    would over-reject).
     """
     samples = getattr(dgps, which)  # Shape: (REPS, K?, N)
     n_reps, *_ = samples.shape
 
+    # marginal (prior) variance across datasets
     var = jnp.var(samples, axis=0)  # Shape: (K?, N)
-    expected_var = expected_variance(dgps.params, which, prior=True)[0].item()
+    prior_var = expected_variance(dgps.params, which, prior=True)[0].item()
     light_tailed = (
         isinstance(dgps.params.s_distr, Constant) and dgps.params.het_shape is None
     )
     if light_tailed:
-        std_of_var = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
+        std_of_var = jnp.sqrt(2 * prior_var**2 / (n_reps - 1))
     else:
         fourth = jnp.mean((samples - jnp.mean(samples, axis=0)) ** 4, axis=0)
         std_of_var = jnp.sqrt((fourth - var**2) / n_reps)
+    assert_z(var, prior_var, std_of_var)
 
-    z_scores = jnp.abs((var - expected_var) / std_of_var)
-    assert_array_less(z_scores, SIGMA_THRESHOLD)
-
-
-@pytest.mark.parametrize(('dgps', 'which'), VARIANCE_CASES, indirect=['dgps'])
-def test_outcome_pop_variance(dgps: DGP, which: str) -> None:
-    """Test the expected population variance is on target.
-
-    Holds with/without sparsity and under heteroskedasticity (since
-    ``E[error_scale ** 2] == 1``). For the heteroskedastic cases the per-dataset
-    variances are heavier-tailed, so the spread of their mean is estimated
-    empirically rather than from the Gaussian ``2 sigma^4``.
-    """
-    samples = getattr(dgps, which)  # Shape: (REPS, K?, N)
-    n_reps, *_ = samples.shape
-
+    # population variance within each dataset
     per_var = jnp.var(samples, axis=-1, ddof=1)  # Shape: (REPS, K?)
-    expected_var = expected_variance(dgps.params, which, prior=False)[0].item()
-    if dgps.params.het_shape is None:
-        se = jnp.sqrt(2 * expected_var**2 / (n_reps - 1))
-    else:
-        se = None  # heavier-tailed per-dataset variances: estimate the spread
-    assert_mean_z(per_var, expected_var, se=se)
+    pop_var = expected_variance(dgps.params, which, prior=False)[0].item()
+    # heavier-tailed per-dataset variances under het: estimate the spread instead
+    se = None if dgps.params.het_shape else jnp.sqrt(2 * pop_var**2 / (n_reps - 1))
+    assert_mean_z(per_var, pop_var, se=se)
 
 
 @pytest.mark.parametrize('dgps', HET_DGPS, indirect=True, ids=HET_DGPS_IDS)
@@ -717,8 +718,8 @@ def test_error_scale_moments(dgps: DGP) -> None:
     """The noise multiplier has ``E[W ** 2] == 1`` and ``Var[W ** 2] == var_v``.
 
     The unit mean is the marginal relationship underlying the ``y`` cases of
-    `test_outcome_pop_variance` / `test_outcome_prior_variance`: the het
-    normalization is marginal, not per-instance, so the noise budget is
+    `test_outcome_variance`: the het normalization is marginal, not
+    per-instance, so the noise budget is
     preserved only in expectation over datasets. The dispersion matches the
     closed-form ``var_v``, which is identical across components, so the
     per-component estimates are compared to the single scalar.
@@ -740,15 +741,6 @@ def test_variance_relationships(dgps: DGP) -> None:
 # A fixed positive-definite correlation matrix to exercise the error copula
 # (k == 3 == KWARGS['k']); the off-diagonals are deliberately asymmetric in sign.
 ERROR_CORR = jnp.array([[1.0, 0.5, -0.3], [0.5, 1.0, 0.2], [-0.3, 0.2, 1.0]])
-
-
-@jit
-def generate_corr_dgps(
-    keys: Key[Array, ' REPS'], error_corr: Float[Array, 'k k']
-) -> DGP:
-    """Generate one dataset per key sharing a fixed across-component error correlation."""
-    gen = partial(gen_data, lambda_=0.5, error_corr=error_corr, **KWARGS)
-    return vmap(gen)(keys)
 
 
 class TestErrorCorrelation:
@@ -788,33 +780,17 @@ class TestErrorCorrelation:
         scaled = gen_data(random.clone(key), lambda_=0.5, error_corr=cov, **KWARGS)
         assert_close_matrices(scaled.z, corr.z, rtol=1e-5)
 
-    def test_realized_correlation(self, keys: split) -> None:
-        """The sampled error vectors have empirical correlation equal to `error_corr`."""
-        k = KWARGS['k']
-        dgps = generate_corr_dgps(keys.pop(REPS), ERROR_CORR)
-        resid = (dgps.z - dgps.mu).transpose(1, 0, 2).reshape(k, -1)  # (k, REPS*N)
-        assert_close_matrices(jnp.corrcoef(resid), ERROR_CORR, rtol=0.02)
-
-    def test_preserves_marginal_variance(self, keys: split) -> None:
-        """Correlating errors leaves each component's noise variance at ``sigma2_eps``."""
-        k = KWARGS['k']
-        dgps = generate_corr_dgps(keys.pop(REPS), ERROR_CORR)
-        resid = (dgps.z - dgps.mu).transpose(1, 0, 2).reshape(k, -1)  # (k, REPS*N)
-        var = jnp.var(resid, axis=1)
-        assert_close_matrices(var, jnp.full(k, KWARGS['sigma2_eps']), rtol=0.02)
-
-
-@jit
-def generate_error_dgps(
-    keys: Key[Array, ' REPS'],
-    error_distr: Distr,
-    error_corr: Float[Array, 'k k'] | None,
-) -> DGP:
-    """Generate one dataset per key with a given error marginal and correlation."""
-    gen = partial(
-        gen_data, lambda_=0.5, error_distr=error_distr, error_corr=error_corr, **KWARGS
+    @pytest.mark.parametrize(
+        'dgps', [{'error_corr': ERROR_CORR}], indirect=True, ids=['error_corr']
     )
-    return vmap(gen)(keys)
+    def test_realized_second_moments(self, dgps: DGP) -> None:
+        """The sampled errors realize `error_corr` and keep marginal variance sigma2_eps."""
+        resid = residuals(dgps)  # (k, REPS*N)
+        assert_close_matrices(jnp.corrcoef(resid), ERROR_CORR, rtol=0.02)
+        var = jnp.var(resid, axis=1)
+        assert_close_matrices(
+            var, jnp.full(KWARGS['k'], KWARGS['sigma2_eps']), rtol=0.02
+        )
 
 
 class TestErrorMarginal:
@@ -829,23 +805,29 @@ class TestErrorMarginal:
         )
         assert_array_equal(default.z, explicit.z)
 
-    def test_uniform_marginal(self, keys: split) -> None:
+    @pytest.mark.parametrize(
+        'dgps', [{'error_distr': Uniform()}], indirect=True, ids=['uniform']
+    )
+    def test_uniform_marginal(self, dgps: DGP) -> None:
         """``error_distr=Uniform`` gives bounded errors with the Uniform shape."""
-        dgps = generate_error_dgps(keys.pop(REPS), Uniform(), None)
         resid = (dgps.z - dgps.mu).reshape(-1) / jnp.sqrt(KWARGS['sigma2_eps'])
         assert_standardized(resid, Uniform())
         assert jnp.all(jnp.abs(resid) <= jnp.sqrt(3.0) + 1e-5)
 
-    def test_copula_correlation_is_attenuated(self, keys: split) -> None:
+    @pytest.mark.parametrize(
+        'dgps',
+        [{'error_distr': Uniform(), 'error_corr': ERROR_CORR}],
+        indirect=True,
+        ids=['uniform_corr'],
+    )
+    def test_copula_correlation_is_attenuated(self, dgps: DGP) -> None:
         """Uniform marginals + `error_corr` realize the copula's Pearson correlation.
 
         For Uniform margins the Gaussian copula gives the exact Spearman relation
         ``(6 / pi) arcsin(R / 2)``, an attenuation of `error_corr` toward 0 that
         keeps the sign (`Normal` margins instead recover `R` exactly).
         """
-        k = KWARGS['k']
-        dgps = generate_error_dgps(keys.pop(REPS), Uniform(), ERROR_CORR)
-        resid = (dgps.z - dgps.mu).transpose(1, 0, 2).reshape(k, -1)  # (k, REPS*N)
+        resid = residuals(dgps)  # (k, REPS*N)
         expected = 6 / jnp.pi * jnp.arcsin(ERROR_CORR / 2)
         assert_close_matrices(jnp.corrcoef(resid), expected, rtol=0.02)
 

@@ -428,14 +428,6 @@ class Params(Module):
                 \end{cases}
         \end{align}
 
-    The errors share a Gaussian copula with latent correlation :math:`R`: each
-    :math:`\varepsilon_{ci}` is marginally `error_distr` (mean 0, variance 1,
-    so the noise variance stays :math:`\sigma^2_{\mathrm{eps}}` for any family),
-    while the components are coupled through :math:`R`. For the default `Normal`
-    the copula is exact multivariate Normal and :math:`\operatorname{Cov}[
-    \varepsilon_{ci}, \varepsilon_{c'i}] = R_{cc'}`; other families preserve the
-    marginals but realize a copula-attenuated correlation.
-
     A binary component thresholds its own latent :math:`Z_{ci}` at zero, so its
     success probability is :math:`F(\mu_{ci} / (\sigma_{\mathrm{eps}} W_{ci}))`,
     with :math:`F` the (symmetric) `error_distr` CDF, the Normal :math:`\Phi` by
@@ -468,7 +460,9 @@ class Params(Module):
                 \quad (c \ne c',\ \lambda = 0), \\
             \operatorname{Cov}[Z_{ci}, Z_{c'i} \mid \theta, X]
                 &= \sigma^2_{\mathrm{eps}}\, W_{ci} W_{c'i}\,
-                \operatorname{Cov}[\varepsilon_{ci}, \varepsilon_{c'i}], \\
+                \operatorname{Cov}[\varepsilon_{ci}, \varepsilon_{c'i}],
+                \quad |\operatorname{Cov}[\varepsilon_{ci}, \varepsilon_{c'i}]|
+                \le |R_{cc'}|\ (\text{equality for } N), \\
             E[\operatorname{Var}[Z_{ci} \mid \theta]] &=
                 \sigma^2_{\mathrm{lin}} + \sigma^2_{\mathrm{quad}}
                 + \sigma^2_{\mathrm{eps}}

@@ -32,7 +32,7 @@ from functools import partial
 from inspect import signature
 from io import StringIO
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 from equinox import Module, error_if
 from jax import (
@@ -232,14 +232,16 @@ class AutoParamNames:
         cls.param_names = tuple(params[1:])
 
 
-class StepGeneric(AutoParamNames):
-    """Benchmarks of `mcmcstep.step`."""
+class StepBase(AutoParamNames):
+    """Shared setup for benchmarks of `mcmcstep.step`."""
 
-    params: tuple[tuple[Mode, ...], tuple[Kind, ...], tuple[int | None, ...]] = (
-        ('compile', 'run'),
-        ('plain', 'binary', 'weights', 'sparse', 'multivariate'),
-        (None, 1, 2),
-    )
+    def make_state(self, **kwargs: Any) -> State:
+        """Build the initial MCMC state, allocated on device.
+
+        Subclasses that only compile (never run) `step` may override this to
+        return an abstract state.
+        """
+        return simple_init(**kwargs)
 
     def setup(self, mode: Mode, kind: Kind, chains: int | None, **kwargs: Any) -> None:
         """Create an initial MCMC state and random seed, compile & warm-up."""
@@ -248,7 +250,7 @@ class StepGeneric(AutoParamNames):
         kw: dict = dict(p=P, n=N, num_trees=NTREE, kind=kind, num_chains=chains)
         kw.update(kwargs)
 
-        self.args = (keys, simple_init(**kw))
+        self.args = (keys, self.make_state(**kw))
 
         # WORKAROUND(bartz<0.5.0): v0.4.1 step had signature (bart, key);
         # v0.5.0+ uses (key, bart). Dispatch positionally on first param name,
@@ -276,6 +278,16 @@ class StepGeneric(AutoParamNames):
         if mode == 'run':
             block_until_ready(self.compiled_func(*self.args))
         self.mode = mode
+
+
+class StepGeneric(StepBase):
+    """Time compiling or running `mcmcstep.step`."""
+
+    params: tuple[tuple[Mode, ...], tuple[Kind, ...], tuple[int | None, ...]] = (
+        ('compile', 'run'),
+        ('plain', 'binary', 'weights', 'sparse', 'multivariate'),
+        (None, 1, 2),
+    )
 
     def time_step(self, *_: Any) -> None:
         """Time compiling `step` or running it."""
@@ -314,6 +326,92 @@ class StepSharded(StepGeneric):
             num_trees=1,
             mesh=dict(data=2) if sharded else None,
         )
+
+
+MemStat = Literal['state', 'peak']
+
+
+class CompiledMemoryStats(Protocol):
+    """The fields of jax's `memory_analysis()` result used here."""
+
+    argument_size_in_bytes: int
+    output_size_in_bytes: int
+    alias_size_in_bytes: int
+    temp_size_in_bytes: int
+    peak_memory_in_bytes: int
+
+
+def standardize_memory_analysis(analysis: CompiledMemoryStats) -> dict[MemStat, int]:
+    """Map a compiled function's memory analysis to backend-independent bytes.
+
+    The raw fields of `jax.stages.Compiled.memory_analysis()` carry
+    backend-dependent meanings. Determined empirically with jax and jaxlib
+    0.10.1 on the cpu and cuda sm_86 (RTX 3060) backends:
+
+    - `argument`, `output`, `alias` and `temp` mean the same on both backends:
+      persistent inputs, outputs, donated-in-place buffers, and the
+      peak-simultaneous scratch arena. `temp` reuses freed space, so it is a
+      high-water mark, not a sum over the run.
+    - `peak_memory_in_bytes` differs: on cpu it equals `argument + output -
+      alias` and *excludes* `temp`; on gpu it is the true high-water mark, the
+      same quantity *plus* `temp` (minus small liveness overlaps).
+
+    We report `state = argument + output - alias` (persistent footprint) and
+    `peak = state + temp` (high-water mark, the gpu meaning), reading the raw
+    peak directly on gpu and reconstructing it on cpu.
+    """
+    state = (
+        analysis.argument_size_in_bytes
+        + analysis.output_size_in_bytes
+        - analysis.alias_size_in_bytes
+    )
+    if get_default_platform() == 'cpu':
+        # the cpu peak field omits temp, so reconstruct the high-water mark
+        peak = state + analysis.temp_size_in_bytes
+    else:
+        # gpu (and presumably tpu) already report the liveness-aware peak
+        peak = analysis.peak_memory_in_bytes
+    return {'state': state, 'peak': peak}
+
+
+class StepMemory(StepBase):
+    """Device memory footprint of the compiled `mcmcstep.step` at large scale.
+
+    Reports, in bytes, the persistent `state` buffers and the `peak` high-water
+    mark (normalized to a backend-independent meaning by
+    `standardize_memory_analysis`) at a scale that far exceeds device memory.
+    The state is built abstractly, so `step` is compiled and analyzed but never
+    allocated nor run.
+    """
+
+    params: tuple[tuple[Kind, ...], tuple[int | None, ...], tuple[MemStat, ...]] = (
+        ('plain', 'binary', 'weights', 'sparse', 'multivariate'),
+        (None, 1, 2),
+        ('state', 'peak'),
+    )
+
+    def make_state(self, **kwargs: Any) -> State:
+        """Build the state abstractly, to analyze a scale too large to allocate."""
+        return eval_shape(lambda: simple_init(**kwargs))
+
+    def setup(self, kind: Kind, chains: int | None, stat: MemStat) -> None:  # ty:ignore[invalid-method-override]
+        """Compile `step` at large scale and extract its memory analysis."""
+        # n=16Mi, num_trees=1Ki: only compiled, never run, so it may exceed
+        # device memory. 16Mi = 16 * 2**20.
+        super().setup('compile', kind, chains, n=16 * 1024**2, num_trees=1024)
+        analysis = self.compiled_func.memory_analysis()
+        if analysis is None:
+            # the active backend does not expose a memory analysis
+            msg = 'memory analysis not available'
+            raise NotImplementedError(msg)
+        self.memory = standardize_memory_analysis(analysis)
+        self.stat = stat
+
+    def track_memory(self, *_: Any) -> int:
+        """Report the selected standardized memory statistic of `step`."""
+        return self.memory[self.stat]
+
+    track_memory.unit = 'bytes'  # ty: ignore[unresolved-attribute]
 
 
 class BaseGbart(AutoParamNames):

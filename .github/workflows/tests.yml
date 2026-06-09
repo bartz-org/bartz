@@ -111,6 +111,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # full history with tags, so hatch-vcs can derive the version
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -192,6 +195,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # full history with tags, so hatch-vcs can derive the version
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -329,6 +335,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # full history with tags, so hatch-vcs can derive the version
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -348,6 +357,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # full history with tags, so hatch-vcs can derive the version
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
@@ -360,8 +372,8 @@ jobs:
       - name: run IPython with old toolchain
         run: RPY2_CFFI_MODE=ABI make ipython-old ARGS=config/ipython/profile_default/startup/startup.ipy
 
-      - name: Update package version
-        run: make copy-version
+      - name: Check the version is derived from git
+        run: uv run --dev python -c 'import bartz; print(bartz.__version__)' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(\.dev[0-9]+\+g[0-9a-f]+)?$'
 
       - name: Update locked dependencies
         run: make update-deps

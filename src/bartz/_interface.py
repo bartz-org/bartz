@@ -41,16 +41,7 @@ from warnings import warn
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field, tree_at
-from jax import (
-    Device,
-    debug_nans,
-    device_count,
-    device_put,
-    lax,
-    make_mesh,
-    random,
-    tree,
-)
+from jax import Device, debug_nans, device_put, lax, make_mesh, random, tree
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
@@ -236,12 +227,12 @@ class Bart(Module):
             If less than two datapoints, set ``sigest=1``. If ``n > p``, use the
             OLS error standard deviation estimate (w/ intercept, w/o taking into
             account `w`), else use the standard deviation of `y_train`.
-        'gc'
+        'cg'
             Use an approximate and regularized version of the OLS residual
             standard deviation estimate.
         'auto' (default)
             Use 'ols-or-variance' if the dataset is smaller than a threshold,
-            else 'gc' for larger datasets.
+            else 'cg' for larger datasets.
     sigdf
         The degrees of freedom of the scaled inverse-chisquared prior on the
         noise variance. For multivariate regression, the Inverse-Wishart
@@ -323,8 +314,8 @@ class Bart(Module):
         The number of devices to spread the chains across. Must be a divisor of
         `num_chains`. Each device will run a fraction of the chains. If 'auto'
         (default) and running on cpu, the number of devices is picked
-        automatically based on the number of cores and the number of virtual jax
-        cpu devices.
+        automatically based on the number of cores and the number of available
+        devices (all the virtual jax cpu devices, or the `devices` list if set).
     num_data_devices
         The number of devices to split datapoints across. Must be a divisor of
         `n`. This is useful only with very high `n`, about > 1000_000. `predict`
@@ -1695,9 +1686,17 @@ def process_device_settings(
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
 ) -> tuple[DeviceKwArgs, Device | None]:
     """Return the arguments for `mcmcstep.init` related to devices, and an optional device where to put the state."""
+    # whether the user pinned a concrete pool of devices (vs. inheriting all of
+    # the platform's devices); the auto chain sharding may not exceed that pool
+    explicit_devices = devices is not None and not isinstance(devices, str)
     platform, device, devices = _determine_devices(y_train, devices)
     num_chain_devices = _determine_num_chain_devices(
-        platform, num_chains, num_chain_devices, num_data_devices
+        platform,
+        num_chains,
+        num_chain_devices,
+        num_data_devices,
+        len(devices),
+        explicit_devices,
     )
     mesh, device = _determine_mesh(num_chain_devices, num_data_devices, device, devices)
 
@@ -1744,11 +1743,13 @@ def _determine_num_chain_devices(
     num_chains: int | None,
     num_chain_devices: int | None | Literal['auto'],
     num_data_devices: int | None,
+    num_devices: int,
+    explicit_devices: bool,
 ) -> int | None:
     """Resolve and validate `num_chain_devices`, returning the chain mesh axis size or `None`."""
     if num_chain_devices == 'auto':
         num_chain_devices = _auto_num_chain_devices(
-            platform, num_chains, num_data_devices
+            platform, num_chains, num_data_devices, num_devices, explicit_devices
         )
 
     # an explicit value must be a positive divisor of the number of chains
@@ -1773,13 +1774,17 @@ def _determine_num_chain_devices(
 
 
 def _auto_num_chain_devices(
-    platform: str, num_chains: int | None, num_data_devices: int | None
+    platform: str,
+    num_chains: int | None,
+    num_data_devices: int | None,
+    num_devices: int,
+    explicit_devices: bool,
 ) -> int | None:
     """Pick `num_chain_devices` automatically for multi-chain cpu runs.
 
     `num_data_devices` reserves devices for the data axis, so the chain axis can
     only use a fraction of them; this keeps the ``chains x data`` mesh within the
-    available devices.
+    `num_devices` available devices.
     """
     if num_chains is None or num_chains == 1 or platform != 'cpu':
         return None
@@ -1792,34 +1797,60 @@ def _auto_num_chain_devices(
     num_shards = _largest_divisor_at_most(num_chains, core_budget)
 
     if num_shards > 1:
-        jax_budget = max(1, device_count('cpu') // data_devices)
-        if jax_budget < num_shards:
-            new_num_shards = _largest_divisor_at_most(num_chains, jax_budget)
-            total = device_count('cpu')
-            if num_data_devices:
-                msg = (
-                    f'`Bart` would like to shard {num_chains} chains across '
-                    f'{num_shards} devices, but only {jax_budget} of the '
-                    f'{total} jax cpu devices are free for chains '
-                    f'(num_data_devices={num_data_devices} reserves the rest), '
-                    f'so it will use {new_num_shards} devices for chains '
-                    'instead. To enable more parallelization, increase the '
-                    'limit with '
-                    '`jax.config.update("jax_num_cpu_devices", <num_devices>)`.'
+        # the mesh draws from `num_devices` devices, whether those are all the
+        # platform's devices or an explicit subset passed by the user
+        device_budget = max(1, num_devices // data_devices)
+        if device_budget < num_shards:
+            new_num_shards = _largest_divisor_at_most(num_chains, device_budget)
+            warn(
+                _auto_chain_devices_warning(
+                    num_chains,
+                    num_shards,
+                    new_num_shards,
+                    device_budget,
+                    num_devices,
+                    num_data_devices,
+                    explicit_devices,
                 )
-            else:
-                msg = (
-                    f'`Bart` would like to shard {num_chains} chains across '
-                    f'{num_shards} virtual jax cpu devices, but jax is set up '
-                    f'with only {total} cpu devices, so it will use '
-                    f'{new_num_shards} devices instead. To enable '
-                    'parallelization, please increase the limit with '
-                    '`jax.config.update("jax_num_cpu_devices", <num_devices>)`.'
-                )
-            warn(msg)
+            )
             num_shards = new_num_shards
 
     return num_shards if num_shards > 1 else None
+
+
+def _auto_chain_devices_warning(
+    num_chains: int,
+    desired: int,
+    actual: int,
+    device_budget: int,
+    num_devices: int,
+    num_data_devices: int | None,
+    explicit_devices: bool,
+) -> str:
+    """Compose the warning shown when auto chain sharding is capped by the device count."""
+    if explicit_devices:
+        pool = f'the {num_devices} devices passed in `devices`'
+        few = f'only {num_devices} devices were passed in `devices`'
+        advice = ''
+    else:
+        pool = f'the {num_devices} jax cpu devices'
+        few = f'jax is set up with only {num_devices} cpu devices'
+        advice = (
+            ' To enable more parallelization, increase the limit with '
+            '`jax.config.update("jax_num_cpu_devices", <num_devices>)`.'
+        )
+    if num_data_devices:
+        limit = (
+            f'only {device_budget} of {pool} are free for chains '
+            f'(num_data_devices={num_data_devices} reserves the rest)'
+        )
+    else:
+        limit = few
+    return (
+        f'`Bart` would like to shard {num_chains} chains across {desired} '
+        f'devices, but {limit}, so it will use {actual} devices for chains '
+        f'instead.{advice}'
+    )
 
 
 def _determine_mesh(

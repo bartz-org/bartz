@@ -29,13 +29,14 @@ This is the main suite of tests.
 
 import math
 import pickle
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass, replace
 from functools import partial
 from gc import collect
 from inspect import signature
 from io import StringIO
+from os import cpu_count
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 from weakref import ReferenceType, ref
@@ -111,7 +112,12 @@ from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._state import init
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from bartz.testing import DiscreteUniform, Gamma, gen_data
-from tests.test_mcmcstep import check_sharding, get_normal_spec, normalize_spec
+from tests.test_mcmcstep import (
+    check_sharding,
+    get_normal_spec,
+    normalize_spec,
+    reduce_reference,
+)
 from tests.util import (
     assert_allclose,
     assert_array_equal,
@@ -1347,6 +1353,72 @@ def test_predict(bkw: BartKW) -> None:
     )
 
 
+def test_count_prec_tree_caches_valid(bkw: BartKW, subtests: SubTests) -> None:
+    """The cached `count_tree`/`prec_tree` stay valid at the actual leaves.
+
+    `step` updates the cached per-leaf counts and precision sums only at the
+    nodes involved in the moves; after the MCMC run, at every actual leaf,
+    they must match a from-scratch reduction over the datapoints (entries
+    elsewhere may be dirty).
+    """
+    bart = Bart(**bkw.kw)
+    state = bart._mcmc_state
+    forest = state.forest
+
+    with subtests.test('presence'):
+        # which caches exist follows the configuration
+        assert (forest.count_tree is not None) == (
+            state.prec_scale is None
+            or forest.min_points_per_decision_node is not None
+            or forest.min_points_per_leaf is not None
+        )
+        assert (forest.prec_tree is not None) == (state.prec_scale is not None)
+
+    # flatten the chain axis (if any) into the tree axis
+    _, n = state.X.shape
+    half = forest.split_tree.shape[-1]
+    split_tree = forest.split_tree.reshape(-1, half)
+    leaf_indices = forest.leaf_indices.reshape(-1, n)
+
+    # mask of the actual leaves over the full heap, per tree
+    leaf_mask = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
+    # sanity: the trees do grow beyond the root (else the check is vacuous)
+    assert jnp.any(leaf_mask[..., 2:])
+
+    def check_cache(
+        cache: Shaped[Array, '#chains_x_trees *k_k 2*half'],
+        values: int | Float32[Array, ' n'] | Float32[Array, 'k k n'],
+        comparison: Callable[..., None],
+    ) -> None:
+        # the fresh value is a from-scratch reduction over the datapoints, the
+        # same baseline `TestReduction` checks the optimized reductions against
+        *_, tree_size = cache.shape
+        core = jnp.asarray(values).shape[:-1]
+        cache = cache.reshape(-1, *core, tree_size)
+        fresh = vmap(
+            partial(
+                reduce_reference,
+                values,
+                size=tree_size,
+                dtype=cache.dtype,
+                data_sharded=False,
+            )
+        )(leaf_indices)
+        mask = leaf_mask.reshape(-1, *(1,) * len(core), tree_size)
+        comparison(jnp.where(mask, cache, 0), jnp.where(mask, fresh, 0))
+
+    with subtests.test('values'):
+        if forest.count_tree is not None:
+            check_cache(forest.count_tree, 1, assert_array_equal)
+        if forest.prec_tree is not None:
+            assert state.prec_scale is not None
+            check_cache(
+                forest.prec_tree,
+                state.prec_scale,
+                partial(assert_close_matrices, rtol=1e-5, reduce_rank=True),
+            )
+
+
 class TestVarprobAttr:
     """Test the `Bart.varprob` attribute."""
 
@@ -2565,6 +2637,32 @@ def test_auto_chains_fit_with_data_sharding(keys: split) -> None:
     mesh = bart._mcmc_state.config.mesh
     assert mesh is not None
     assert mesh.size <= total
+
+
+def test_auto_chains_within_explicit_devices(bkw: BartKW) -> None:
+    """Auto chain sharding stays within an explicitly passed device list."""
+    if get_default_device().platform != 'cpu':  # pragma: no cover
+        pytest.skip('Auto chain sharding only kicks in on cpu.')
+    if get_device_count() < 2:
+        pytest.skip('Need >1 device to hand `Bart` fewer than it would use.')
+    if (cpu_count() or 1) < 2:  # pragma: no cover
+        pytest.skip('Auto chain sharding needs >1 core to want >1 device.')
+    if bkw.num_chains is None or bkw.num_chains < 2:
+        pytest.skip('Need >1 chain for chain sharding to kick in.')
+    # Hand `Bart` a single device with auto chain sharding: it must cap the chain
+    # axis at that device, not at the full jax cpu device count (pre-fix it took
+    # the full count and `make_mesh` raised). Clearing the variants' explicit
+    # data/chain device counts lets the single device suffice once it caps.
+    kw = dict(
+        bkw.kw,
+        num_chain_devices='auto',
+        num_data_devices=None,
+        devices=get_default_device(),
+    )
+    with pytest.warns(UserWarning, match='passed in `devices`'):
+        bart = Bart(**kw)
+    mesh = bart._mcmc_state.config.mesh
+    assert mesh is None or mesh.size == 1
 
 
 def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:

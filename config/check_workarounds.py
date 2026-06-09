@@ -52,6 +52,8 @@ from refs_for_asv import oldest_benchmarked_version
 CANDIDATE_RE = re.compile(r'WORKAROUND\(([^)]*)\)')
 # Strict grammar applied to the inner contents.
 INNER_RE = re.compile(r'\s*([A-Za-z0-9_.\-]+)\s*(<=|<)\s*(\S+)\s*')
+# The uv version pinned in CI.
+UV_VERSION_RE = re.compile(r'^\s*UV_VERSION:\s*"([^"]+)"', re.MULTILINE)
 
 
 def floors_from_pyproject(path: Path) -> dict[str, Version]:
@@ -120,10 +122,21 @@ def scan(root: Path) -> list[tuple[str, str, str]]:
     return matches
 
 
+def uv_floor(root: Path) -> Version:
+    """Return the uv version pinned in CI, the oldest uv we support."""
+    text = (root / '.github' / 'workflows' / 'tests.yml').read_text()
+    m = UV_VERSION_RE.search(text)
+    if m is None:
+        msg = 'UV_VERSION not found in .github/workflows/tests.yml'
+        raise ValueError(msg)
+    return Version(m.group(1))
+
+
 def collect_floors(root: Path) -> dict[str, Version]:
-    """Floors for dependencies (pyproject.toml) plus `bartz` (oldest ASV tag)."""
+    """Floors for dependencies (pyproject.toml), `bartz` (oldest ASV tag), `uv` (CI pin)."""
     floors = floors_from_pyproject(root / 'pyproject.toml')
     floors['bartz'] = oldest_benchmarked_version(root)
+    floors['uv'] = uv_floor(root)
     return floors
 
 

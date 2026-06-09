@@ -117,11 +117,23 @@ class TreesTrace(Module):
     # relationship is still checked here: `half_tree_size` is bound first by the
     # anchors, then `leaf_tree` is checked against twice it.
     var_tree: UInt[Array, '*batch_shape half_tree_size']
+    """The axes along which the decision nodes operate. This array can be
+    dirty but for the always unused node at index 0 which must be set to 0."""
+
     split_tree: UInt[Array, '*batch_shape half_tree_size']
+    """The decision boundaries of the trees. The boundaries are open on the
+    right, i.e., a point belongs to the left child iff x < split. Whether a
+    node is a leaf is indicated by the corresponding 'split' element being
+    0. Unused nodes also have split set to 0. This array can't be dirty."""
+
     leaf_tree: (
         Float[Array, '*batch_shape 2*half_tree_size']
         | Float[Array, '*batch_shape k 2*half_tree_size']
     )
+    """The values in the leaves of the trees. This array can be dirty, i.e.,
+    unused nodes can have whatever value. It may have an additional axis
+    for multivariate leaves."""
+
     leaf_scale: Float32[Array, ''] | Float32[Array, ' k'] = field(
         default_factory=lambda: jnp.float32(1.0)
     )
@@ -134,7 +146,7 @@ class TreesTrace(Module):
 
         `self` supplies the (array) pytree; the same-named fields of `obj`
         (axis specs, i.e. ints or `None`) replace its leaves. Built with
-        `tree_at`, which bypasses the type-checked `__init__`, so the
+        `equinox.tree_at`, which bypasses the type-checked `__init__`, so the
         deliberately off-type axis values are allowed.
         """
         names = [f.name for f in fields(type(self))]

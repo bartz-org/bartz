@@ -42,30 +42,19 @@ from functools import cached_property
 from inspect import getsourcefile, getsourcelines, isclass, unwrap
 from os import getenv
 
-import git
 from equinox import Module
 from sphinx.ext.autodoc._dynamic._preserve_defaults import update_default_value
 
 # -- Version info ------------------------------------------------------------
-
-REPO = git.Repo(search_parent_directories=True)
-
-COMMIT = REPO.head.commit.hexsha
-UNCOMMITTED_STUFF = REPO.is_dirty()
-
-# Check if current commit has a version tag (vX.Y.Z)
-version = None
-for tag in REPO.tags:
-    if tag.commit == REPO.head.commit:
-        MATCH = re.match(r'^v(\d+\.\d+\.\d+)$', tag.name)
-        if MATCH:
-            version = MATCH.group(1)
-            break
-
-if version is None:
-    version = f'{COMMIT[:7]}{"+" if UNCOMMITTED_STUFF else ""}'
-
 import bartz
+
+# git-derived version (hatch-vcs), e.g. '0.10.1.dev309+g42e25cebd'
+version = bartz.__version__
+
+# GitHub ref for source links: the commit node from a dev version string, or the
+# release tag when building from a clean tagged commit.
+MATCH = re.search(r'\+g([0-9a-f]+)', version)
+GITHUB_REF = MATCH.group(1) if MATCH else f'v{version.partition("+")[0]}'
 
 # -- Project information -----------------------------------------------------
 
@@ -157,6 +146,24 @@ def _apply_preserve_defaults_to_equinox_modules() -> None:
 _apply_preserve_defaults_to_equinox_modules()
 
 
+# Render only the implementation signature of overloaded functions/methods.
+# Otherwise autodoc emits one signature per `@overload`, and those go through a
+# text path that mangles the type hints (straight quotes become typographic
+# quotes) and merely duplicates the Parameters section below. Clearing the
+# analyzer's overload table makes autodoc fall back to the real signature.
+from sphinx.pycode import ModuleAnalyzer
+
+_orig_module_analyze = ModuleAnalyzer.analyze
+
+
+def _analyze_without_overloads(self) -> None:  # noqa: ANN001
+    _orig_module_analyze(self)
+    self.overloads = {}
+
+
+ModuleAnalyzer.analyze = _analyze_without_overloads  # ty: ignore[invalid-assignment]
+
+
 def setup(app) -> None:  # noqa: ANN001
     if sys.version_info >= (3, 14):
         # priority 501 runs after validate_config (default 500) which populates
@@ -166,15 +173,12 @@ def setup(app) -> None:  # noqa: ANN001
         )
 
 
-# decide whether to use viewcode or linkcode extension
+# decide whether to use viewcode or linkcode extension. Link to source on GitHub
+# when building the published docs in CI (the commit is pushed there); embed the
+# source otherwise, so local builds always have working source links.
 EXT = 'viewcode'  # copy source code in static website
-if getenv('BARTZ_FORCE_LINKCODE'):
+if getenv('BARTZ_FORCE_LINKCODE') or getenv('GITHUB_ACTIONS'):
     EXT = 'linkcode'  # links to code on github
-elif not UNCOMMITTED_STUFF:
-    BRANCHES = REPO.git.branch('--remotes', '--contains', COMMIT)
-    COMMIT_ON_GITHUB = bool(BRANCHES.strip())
-    if COMMIT_ON_GITHUB:
-        EXT = 'linkcode'  # links to code on github
 extensions.append(f'sphinx.ext.{EXT}')
 
 myst_enable_extensions = [
@@ -226,15 +230,23 @@ autoclass_content = 'class'
 # default arguments are printed as in source instead of being evaluated
 autodoc_preserve_defaults = True
 autodoc_default_options = {'member-order': 'bysource'}
+# WORKAROUND(sphinx-autodoc-typehints<99): napoleon escapes the trailing
+# underscore of parameter names (e.g. `lambda_`) only when
+# strip_signature_backslash is on, but sphinx-autodoc-typehints always escapes
+# it when looking up the `:param:` line to attach the type to, so with the
+# default off the names never match and such parameters lose their type and
+# default in the rendered docs. Keep this on until the upstream fix (see
+# https://github.com/tox-dev/sphinx-autodoc-typehints/issues) is released.
+strip_signature_backslash = True
 
 # autosummary
 # generate the per-object stub pages at build time
 autosummary_generate = True
 # public modules use an _src-like layout: they re-export the public API from
 # private `_*` submodules, so members' `__module__` is the private submodule,
-# not the public one. Documenting imported members is therefore required. A
-# corollary is that any foreign object leaking into a public module's namespace
-# will show up here, which is by design a module-side bug to fix.
+# not the public one. Documenting imported members is therefore required. The
+# members are listed by hand in autosummary tables in the module docstrings;
+# tests/test_docs.py checks the tables match the public namespaces.
 autosummary_imported_members = True
 
 # autodoc-typehints
@@ -249,9 +261,10 @@ napoleon_use_ivar = True
 napoleon_use_rtype = False
 
 # intersphinx
-# stochtree's docs are built with quarto/quartodoc and don't publish a Sphinx
-# objects.inv, so we point intersphinx at a vendored inventory scraped from the
-# quartodoc API reference (see docs/_inventory/make_stochtree_inventory.py).
+# stochtree's and equinox's docs (quarto/quartodoc and mkdocs/mkdocstrings,
+# respectively) don't publish a Sphinx objects.inv, so we point intersphinx at
+# vendored inventories scraped from their API references (see
+# docs/_inventory/make_inventories.py).
 intersphinx_mapping = dict(
     python=('https://docs.python.org/3', None),
     scipy=('https://docs.scipy.org/doc/scipy', None),
@@ -260,6 +273,10 @@ intersphinx_mapping = dict(
     stochtree=(
         'https://stochtree.ai',
         str(pathlib.Path(__file__).parent / '_inventory' / 'stochtree.inv'),
+    ),
+    equinox=(
+        'https://docs.kidger.site/equinox',
+        str(pathlib.Path(__file__).parent / '_inventory' / 'equinox.inv'),
     ),
 )
 
@@ -323,4 +340,4 @@ def linkcode_resolve(domain: str, info: dict[str, str]) -> str | None:
         # assigned at module scope); no in-repo source to link to
         return None
     path = fn_path.relative_to(root).as_posix()
-    return f'{prefix}/{COMMIT}/src/bartz/{path}{linespec}'
+    return f'{prefix}/{GITHUB_REF}/src/bartz/{path}{linespec}'

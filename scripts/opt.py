@@ -879,7 +879,9 @@ class Benchmark:
 
     def teardown(self) -> None:
         """Drop state and clear compiled `step` cache."""
-        del self.state
+        # `setup` may have failed before binding `state` (e.g. an OOM in `init`)
+        if hasattr(self, 'state'):
+            del self.state
         step.clear_cache()
         # don't use jax.clear_caches() because it makes everything 3x slower
         collect()

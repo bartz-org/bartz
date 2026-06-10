@@ -107,6 +107,10 @@ dev = [
     # the floor satisfies the OLD_DATE policy; lint (and hence ty) only ever
     # runs on the latest toolchain, so the old version is installed but unused
     "ty>=0.0.1a7",
+    # vendored shellcheck for the actionlint hook: pinned here so its presence
+    # and version don't depend on a system install. `uv run` puts it on PATH,
+    # where actionlint finds it; absent it, actionlint silently skips shellcheck.
+    "shellcheck-py>=0.10.0.1",
 ]
 
 # WORKAROUND(pytest<9): use [tool.pytest]

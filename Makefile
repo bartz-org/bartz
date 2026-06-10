@@ -273,7 +273,8 @@ update-deps:
 	# Update R packages to their latest versions and rewrite renv.lock; snapshot
 	# captures the refreshed library (explicit type, from DESCRIPTION).
 	Rscript -e "renv::update(prompt = FALSE); renv::snapshot(prompt = FALSE)"
-	$(UV_RUN) pre-commit autoupdate
+	# --freeze keeps revs pinned to commit SHAs (tags are mutable)
+	$(UV_RUN) pre-commit autoupdate --freeze
 
 .PHONY: update-oldest-deps
 update-oldest-deps:

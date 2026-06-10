@@ -1,6 +1,9 @@
 # See https://pre-commit.com for more information
 # See https://pre-commit.com/hooks.html for more hooks
 
+# revs are frozen to commit SHAs (tags are mutable); update with
+# 'pre-commit autoupdate --freeze'
+
 exclude: '^\.asv/results/.+\.json$'
 default_stages: [pre-commit]
 default_install_hook_types:
@@ -16,7 +19,7 @@ default_install_hook_types:
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
     hooks:
       - id: check-added-large-files
       - id: check-ast
@@ -42,7 +45,7 @@ repos:
         exclude: '^renv/activate\.R$' # because renv edits it automatically, with trailing whitespace
       - id: no-commit-to-branch
   - repo: https://github.com/sbrunner/hooks
-    rev: 1.7.0
+    rev: ac94bb6cd9e609591b5ee9232cbc787310462b03 # frozen: 1.7.0
     hooks:
       - id: copyright
       - id: copyright-required
@@ -51,13 +54,13 @@ repos:
         # an explicit `pre-commit run --files`
         exclude: src/bartz/_version\.py$
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.15.14
+    rev: 0c7b6c989466a93942def1f84baf36ddfcd60c83 # frozen: v0.15.14
     hooks:
       - id: ruff-check
         args: [--fix]
       - id: ruff-format
   - repo: https://github.com/DanielNoord/pydocstringformatter
-    rev: v0.7.5
+    rev: d5190a85272ddf6a3d14bfd88ab327f84aa2a0a7 # frozen: v0.7.5
     hooks:
       - id: pydocstringformatter
         # config in [tool.pydocstringformatter] (pyproject.toml); the hook
@@ -65,21 +68,25 @@ repos:
         # attribute-docstring conventions this enforces; drop `files` to widen.
         files: ^src/bartz/.*\.py$
   - repo: https://github.com/jsh9/pydoclint
-    rev: 0.8.4
+    rev: 88d83c94156c5e51a09938e77019f2c58e92ab58 # frozen: 0.8.4
     hooks:
       - id: pydoclint
   - repo: https://github.com/henryiii/validate-pyproject-schema-store
-    rev: 2026.05.24
+    rev: d069d5bfa2047357e2ec32c8d23fa0885e25593b # frozen: 2026.05.24
     hooks:
       - id: validate-pyproject
   - repo: https://github.com/jorisroovers/gitlint
-    rev: v0.19.1
+    rev: acc9d9de6369b76d22cb4167029d2035e8730b98 # frozen: v0.19.1
     hooks:
       - id: gitlint # this is already defined to run in stage commit-msg
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.11.16
+    rev: f19149a31a5aad375f89df042b796688201d6840 # frozen: 0.11.16
     hooks:
       - id: uv-lock
+  - repo: https://github.com/rhysd/actionlint
+    rev: 914e7df21a07ef503a81201c76d2b11c789d3fca # frozen: v1.7.12
+    hooks:
+      - id: actionlint
   - repo: local
     hooks:
       - id: lint-merged-tree

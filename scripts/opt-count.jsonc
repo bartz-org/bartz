@@ -3,17 +3,17 @@
     // leaf), taken on the homoskedastic path (prec_scale is None, i.e.
     // weights=false; otherwise the count tree is skipped or fused with prec).
     //
-    // Swept knobs of `BatchedReduction`:
-    //   num_batches    primary axis (plot.reduce); the datapoint-batch count,
-    //                  including null = unbatched. Its per-device optimum is the
-    //                  heuristic we ultimately want (cpu: small or None; gpu:
-    //                  ~64-2048). null is plotted as the no-batching regime.
-    //   batches_inner  scatter-buffer layout: size-by-nb (true) vs nb-by-size.
-    //   contiguous     batch assignment: strided (false) vs contiguous chunks.
-    // batches_inner/contiguous were only ever measured at their defaults
-    // (true, false), once, on an old gpu+jax; here we sweep all four layouts to
-    // confirm or revise that. (null ignores both layout knobs, so its four
-    // entries are redundant duplicates -- harmless, min'd away in the plot.)
+    // Knobs of `BatchedReduction`:
+    //   num_batches    swept; primary axis (plot.reduce); the datapoint-batch
+    //                  count, including null = unbatched. Its per-device optimum
+    //                  is the heuristic we ultimately want (cpu: small or None;
+    //                  gpu: ~64-2048). null is the no-batching regime.
+    //   batches_inner  FIXED to optimal 'inner' (true).
+    //   contiguous     FIXED to optimal 'strided' (false).
+    // The 3060 sweep confirmed (inner, strided) = (true, false) is optimal across
+    // n/k/trees (contiguous=true was up to ~7-11x slower at large n), so we fix
+    // the layout to the defaults and sweep only num_batches, to map how its
+    // optimum shifts with gpu type.
     //
     // The reduced value is the scalar 1 (a pure datapoint count), so the count
     // reduction is INDEPENDENT of the outcome dimension: k is pinned to null. It
@@ -37,7 +37,7 @@
         "weights":            [false],
         "num_trees":          [1, 16, 256],
         "resid_reduction":    [{"kind": "batched", "num_batches": "auto"}],
-        "count_reduction":    [{"kind": "batched", "num_batches": [null, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096], "batches_inner": [true, false], "contiguous": [false, true]}],
+        "count_reduction":    [{"kind": "batched", "num_batches": [null, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096], "batches_inner": [true], "contiguous": [false]}],
         "prec_reduction":     [{"kind": "batched", "num_batches": "auto"}],
     },
 }

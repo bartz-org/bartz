@@ -258,39 +258,66 @@ class StepBase(AutoParamNames):
 
     def setup(self, mode: Mode, kind: Kind, chains: int | None, **kwargs: Any) -> None:
         """Create an initial MCMC state and random seed, compile & warm-up."""
-        keys = list(random.split(random.key(2025_06_24_12_07)))
+        key = random.key(2025_06_24_12_07)
 
         kw: dict = dict(p=P, n=N, num_trees=NTREE, kind=kind, num_chains=chains)
         kw.update(kwargs)
+        state = self.make_state(**kw)
 
-        self.args = (keys, self.make_state(**kw))
+        # WORKAROUND(bartz<0.9.0): from 0.9.0, `step` is itself jitted with
+        # state donation and handles variable selection internally, so it can
+        # be benchmarked directly, exercising its own compilation setup. Wrap
+        # older versions to emulate that setup: jit with state donation, plus
+        # the separate sparse step or config adjustment where needed.
+        step_handles_sparse = 'sparse_on_at' in signature(init).parameters
+        step_is_jitted = all(hasattr(step, attr) for attr in ('clear_cache', 'lower'))
+        if step_handles_sparse and step_is_jitted:
+            if kind == 'sparse':
+                # turn variable selection on from the first iteration; int32 to
+                # match the dtype set by init in the lowered signature
+                config = replace(state.config, sparse_on_at=jnp.int32(0))
+                state = replace(state, config=config)
+            self.args = (key, state)
+            self.jitted_func = step
+        else:
+            keys = list(random.split(key))
+            self.args = (keys, state)
 
-        # WORKAROUND(bartz<0.5.0): v0.4.1 step had signature (bart, key);
-        # v0.5.0+ uses (key, bart). Dispatch positionally on first param name,
-        # since the decorator-wrapped step on modern bartz does not accept
-        # `bart` as a keyword argument.
-        step_bart_first = next(iter(signature(step).parameters)) == 'bart'
+            # WORKAROUND(bartz<0.5.0): v0.4.1 step had signature (bart, key);
+            # v0.5.0+ uses (key, bart). Dispatch positionally on first param
+            # name, since the decorator-wrapped step on modern bartz does not
+            # accept `bart` as a keyword argument.
+            step_bart_first = next(iter(signature(step).parameters)) == 'bart'
 
-        def func(keys: list[Key[Array, '']], bart: State) -> State:
-            # WORKAROUND(bartz<0.8.0): pre-0.8.0 sparse step is done by a
-            # separate `mcmcstep.step_sparse` call; from 0.8.0 it's inside `step`
-            # via `bart.config.sparse_on_at`.
-            sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
-            if kind == 'sparse' and sparse_inside_step:
-                bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
-            if step_bart_first:
-                bart = step(bart, keys.pop())  # ty: ignore[invalid-argument-type]
-            else:
-                bart = step(keys.pop(), bart)
-            if kind == 'sparse' and not sparse_inside_step:
-                bart = mcmcstep.step_sparse(keys.pop(), bart)  # ty:ignore[unresolved-attribute]
-            return bart
+            def func(keys: list[Key[Array, '']], bart: State) -> State:
+                # WORKAROUND(bartz<0.8.0): pre-0.8.0 sparse step is done by a
+                # separate `mcmcstep.step_sparse` call; from 0.8.0 it's inside
+                # `step` via `bart.config.sparse_on_at`.
+                sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
+                if kind == 'sparse' and sparse_inside_step:
+                    bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
+                if step_bart_first:
+                    bart = step(bart, keys.pop())  # ty: ignore[invalid-argument-type]
+                else:
+                    bart = step(keys.pop(), bart)
+                if kind == 'sparse' and not sparse_inside_step:
+                    bart = mcmcstep.step_sparse(keys.pop(), bart)  # ty:ignore[unresolved-attribute]
+                return bart
 
-        self.jitted_func = jit(func)
-        self.compiled_func = self.jitted_func.lower(*self.args).compile()
+            self.jitted_func = jit(func, donate_argnums=(1,))
+
+        # the two dispatch branches produce different (jitted_func, args)
+        # signatures, which ty can not match up across attributes
+        self.compiled_func = self.jitted_func.lower(*self.args).compile()  # ty:ignore[invalid-argument-type]
         if mode == 'run':
-            block_until_ready(self.compiled_func(*self.args))
+            self.run_step()
         self.mode = mode
+
+    def run_step(self) -> None:
+        """Run the compiled step, swapping the donated state for its output."""
+        key, state = self.args
+        state = block_until_ready(self.compiled_func(key, state))
+        self.args = (key, state)
 
 
 class StepGeneric(StepBase):
@@ -307,9 +334,9 @@ class StepGeneric(StepBase):
         match self.mode:
             case 'compile':
                 self.jitted_func.clear_cache()
-                self.jitted_func.lower(*self.args).compile()
+                self.jitted_func.lower(*self.args).compile()  # ty:ignore[invalid-argument-type]
             case 'run':
-                block_until_ready(self.compiled_func(*self.args))
+                self.run_step()
             case _:
                 raise KeyError(self.mode)
 
@@ -365,9 +392,9 @@ def standardize_memory_analysis(analysis: CompiledMemoryStats) -> dict[MemStat, 
       persistent inputs, outputs, donated-in-place buffers, and the
       peak-simultaneous scratch arena. `temp` reuses freed space, so it is a
       high-water mark, not a sum over the run.
-    - `peak_memory_in_bytes` differs: on cpu it equals `argument + output -
-      alias` and *excludes* `temp`; on gpu it is the true high-water mark, the
-      same quantity *plus* `temp` (minus small liveness overlaps).
+    - `peak_memory_in_bytes` differs: on cpu it approximately equals `argument
+      + output - alias` and *excludes* `temp`; on gpu it is the true high-water
+      mark, the same quantity *plus* `temp` (minus small liveness overlaps).
 
     We report `state = argument + output - alias` (persistent footprint) and
     `peak = state + temp` (high-water mark, the gpu meaning), reading the raw

@@ -31,6 +31,7 @@ from typing import overload
 from equinox import AbstractVar
 from jax import lax, named_call, random, vmap
 from jax import numpy as jnp
+from jax.nn import softmax
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
 from jaxtyping import Array, Bool, Float32, Int32, Key, Shaped, UInt, UInt32
@@ -45,9 +46,10 @@ from bartz._jaxext import (
 )
 from bartz._jaxext.random import loggamma
 from bartz.grove import var_histogram
-from bartz.mcmcstep._moves import Moves, propose_moves
+from bartz.mcmcstep._moves import Moves, fully_used_variables, propose_moves
 from bartz.mcmcstep._reduction import ReductionConfig
 from bartz.mcmcstep._state import (
+    Forest,
     State,
     StepConfig,
     chol_with_gersh,
@@ -1630,6 +1632,156 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     return replace(state, z=z, resid=resid)
 
 
+def _first_occurrence_mask(
+    indices: UInt[Array, '*batch n'], fill_value: int
+) -> Bool[Array, '*batch n']:
+    """Mark the first occurrence of each value along the last axis.
+
+    Parameters
+    ----------
+    indices
+        Integer values, possibly with repeats, and with `fill_value` in unused
+        slots.
+    fill_value
+        The value marking unused slots, which is never marked.
+
+    Returns
+    -------
+    A mask, true at the first occurrence of each non-fill value.
+    """
+    *_, n = indices.shape
+    equal = indices[..., :, None] == indices[..., None, :]
+    earlier = jnp.tril(jnp.ones((n, n), bool), -1)  # earlier[i, j] = j < i
+    seen_before = jnp.any(equal & earlier, axis=-1)
+    return (indices != fill_value) & ~seen_before
+
+
+def _ineligible_weights_tree(
+    key: Key[Array, ''],
+    var_tree: UInt[Array, ' half_tree_size'],
+    split_tree: UInt[Array, ' half_tree_size'],
+    max_split: UInt[Array, ' p'],
+    s_padded: Float32[Array, ' p_plus_1'],
+) -> tuple[
+    UInt[Array, 'half_tree_size d_minus_2'], Float32[Array, 'half_tree_size d_minus_2']
+]:
+    """Per-node ineligible variables and their data-augmentation weights.
+
+    For each internal node, draw the latent total mass ``lambda / e`` of the
+    augmentation (with ``lambda`` exponential and ``e`` the eligible split
+    probability mass at the node), to be scattered onto the variables that are
+    ineligible there.
+
+    Parameters
+    ----------
+    key
+        Random key for sampling.
+    var_tree
+        The splitting axes of the tree.
+    split_tree
+        The splitting points of the tree.
+    max_split
+        The maximum split index for each variable.
+    s_padded
+        Split probabilities normalized over selectable variables, with a
+        trailing zero so the fill index `p` maps to zero mass.
+
+    Returns
+    -------
+    indices : UInt[Array, 'half_tree_size d_minus_2']
+        The ineligible variables at each node, with repeats and `p` fill.
+    weights : Float32[Array, 'half_tree_size d_minus_2']
+        The weight ``lambda / e`` to add to each ineligible variable, zero at
+        repeats, fill slots, and non-internal nodes.
+    """
+    (half_tree_size,) = split_tree.shape
+    nodes = jnp.arange(half_tree_size)
+    ineligible = vmap(fully_used_variables, in_axes=(None, None, None, 0))(
+        var_tree, split_tree, max_split, nodes
+    )
+    is_first = _first_occurrence_mask(ineligible, max_split.size)
+
+    # eligible mass = 1 - ineligible mass, since the selectable variables sum to
+    # 1; only internal nodes contribute an augmentation draw
+    ineligible_mass = jnp.sum(s_padded[ineligible] * is_first, axis=-1)
+    # the split variable is eligible, so the eligible mass is positive at internal
+    # nodes; the floor only guards against round-off zeroing it out. Non-internal
+    # nodes get a zero weight below, so their eligible mass is never used.
+    eligible_mass = 1.0 - ineligible_mass
+    eligible_mass = jnp.maximum(eligible_mass, jnp.finfo(eligible_mass.dtype).eps)
+    is_internal = split_tree.astype(bool)
+    weight = jnp.where(is_internal, random.exponential(key, nodes.shape), 0.0)
+    weight /= eligible_mass
+
+    return ineligible, is_first * weight[:, None]
+
+
+def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, ' p']:
+    r"""Sample the data-augmentation counts for the exact full conditional of `s`.
+
+    At each internal node, the variables with no available cutpoint given the
+    ancestors (plus the globally blocked ones) cannot be split on, so the plain
+    Dirichlet update for `s` is only approximate. The exact update views each
+    realized split as the last of a sequence of i.i.d. draws from `s`, the
+    earlier ones having fallen on ineligible variables and been discarded. This
+    samples, for each variable, the total number of such discarded draws over
+    the whole forest, to be added to the variable usage counts.
+
+    Parameters
+    ----------
+    key
+        Random key for sampling.
+    forest
+        The forest, providing the trees and the current `log_s`.
+
+    Returns
+    -------
+    The discarded-draws count for each variable.
+
+    Notes
+    -----
+    The per-node counts of discarded draws are negative-multinomial; summed over
+    nodes they have no simple closed form, but their Gamma-Poisson mixture does.
+    With :math:`s_j` the split probability normalized over selectable variables,
+    :math:`\mathcal{E}_b` the variables eligible at node :math:`b`, and
+    :math:`e_b = \sum_{j \in \mathcal{E}_b} s_j`, the count for variable
+    :math:`j` is
+
+    .. math::
+        A_j \mid \{\lambda_b\} \sim \operatorname{Poisson}\Big(s_j \sum_{b :\,
+        j \notin \mathcal{E}_b} \lambda_b / e_b\Big), \qquad \lambda_b \sim
+        \operatorname{Exponential}(1),
+
+    independent across :math:`j`. This draws the counts directly, without
+    iterating over the unknown number of discarded draws per node.
+
+    Unlike BART3's ``augment=True``, which adds the (approximate) expected
+    counts deterministically, this samples the exact full conditional.
+    """
+    assert forest.log_s is not None
+    keys = split(key)
+    (num_trees, _) = forest.var_tree.shape
+    p = forest.max_split.size
+
+    # split probabilities normalized over the selectable (non-blocked) variables
+    selectable = forest.max_split > 0
+    s = softmax(forest.log_s, where=selectable)
+
+    # blocked_mass[j] = sum over internal nodes where j is ineligible of
+    # lambda_b / e_b; the trailing pad slot absorbs the fill index p
+    s_padded = jnp.append(s, 0.0)
+    indices, weights = vmap(_ineligible_weights_tree, in_axes=(0, 0, 0, None, None))(
+        keys.pop(num_trees),
+        forest.var_tree,
+        forest.split_tree,
+        forest.max_split,
+        s_padded,
+    )
+    blocked_mass = jnp.zeros(p + 1).at[indices.ravel()].add(weights.ravel())
+
+    return random.poisson(keys.pop(), s * blocked_mass[:p], dtype=jnp.int32)
+
+
 @named_call
 def step_s(key: Key[Array, ''], state: State) -> State:
     """
@@ -1653,10 +1805,18 @@ def step_s(key: Key[Array, ''], state: State) -> State:
 
     Notes
     -----
-    This full conditional is approximated, because it does not take into account
-    that there are forbidden decision rules.
+    By default this full conditional is approximate, because it ignores the
+    decision rules forbidden by the ancestors of each node. If
+    ``state.config.augment`` is set, the forbidden rules are accounted for
+    exactly with the data augmentation of `sample_s_augmentation`.
     """
     assert state.forest.theta is not None
+
+    # reserve the Dirichlet draw key first and unconditionally, so it does not
+    # depend on whether augmentation is on; then the two modes draw identically
+    # when there are no forbidden rules, since the augmentation is exactly zero
+    keys = split(key)
+    log_s_key = keys.pop()
 
     # histogram current variable usage
     p = state.forest.max_split.size
@@ -1664,11 +1824,14 @@ def step_s(key: Key[Array, ''], state: State) -> State:
         p, state.forest.var_tree, state.forest.split_tree, sum_batch_axis=-1
     )
 
-    # sample from Dirichlet posterior
+    # the Dirichlet posterior concentration, optionally completed with the exact
+    # accounting of forbidden rules via data augmentation
     alpha = state.forest.theta / p + varcount
-    log_s = loggamma(key, alpha)
+    if state.config.augment:
+        alpha = alpha + sample_s_augmentation(keys.pop(), state.forest)
 
-    # update forest with new s
+    # sample from the Dirichlet posterior and update the forest with the new s
+    log_s = loggamma(log_s_key, alpha)
     return replace(state, forest=replace(state.forest, log_s=log_s))
 
 

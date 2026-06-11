@@ -196,6 +196,14 @@ class Bart(Module):
         the prior, consider setting a lower `rho` to prefer more sparsity.
         If setting `theta` directly, it should be in the ballpark of p or lower
         as well.
+    augment
+        Whether to account exactly for the decision rules forbidden by the
+        ancestors of each node when updating the variable selection
+        probabilities, using data augmentation. Only relevant if ``sparse=True``.
+        Off by default, in which case the forbidden rules are ignored, which is
+        faster but only approximate. This matters most with few predictors with
+        few cutpoints each, where the same predictor cannot be re-used down a
+        branch.
     varprob
         The probability distribution over the `p` predictors for choosing a
         predictor to split on in a decision node a priori. Must be > 0. It does
@@ -385,6 +393,7 @@ class Bart(Module):
         a: FloatLike = 0.5,
         b: FloatLike = 1.0,
         rho: FloatLike | None = None,
+        augment: bool = False,
         varprob: Float[ArrayLike, ' p'] | None = None,
         binner: BinnerFactory = UniqueQuantileBinner,
         rm_const: bool = True,
@@ -502,6 +511,7 @@ class Bart(Module):
             num_data_devices,
             devices,
             sparse,
+            augment,
             n_burn,
             keys.pop(),
         )
@@ -1408,6 +1418,7 @@ def _setup_mcmc(
     num_data_devices: int | None,
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
     sparse: bool,
+    augment: bool,
     n_burn: int,
     mcmc_key: Key[Array, ''],
 ) -> tuple[State, Key[Array, ''], Device | None]:
@@ -1438,6 +1449,7 @@ def _setup_mcmc(
         b=b,
         rho=rho,
         sparse_on_at=n_burn // 2 if sparse else None,
+        augment=augment,
         **device_kw,
     )
 

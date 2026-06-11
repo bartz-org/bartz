@@ -769,9 +769,13 @@ class TestVarprobAttr:
         assert jnp.all(bart.varprob_mean == bart.varprob)
 
 
-@pytest.mark.parametrize('theta', ['fixed', 'free'])
-def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> None:
-    """Check that variable selection works."""
+@pytest.mark.parametrize(
+    ('theta', 'augment'), [('fixed', False), ('free', False), ('free', True)]
+)
+def test_variable_selection(
+    keys: split, theta: Literal['fixed', 'free'], augment: bool
+) -> None:
+    """Check that variable selection works, with and without augmentation."""
     # data config
     p = 100  # number of predictors
     peff = 5  # number of actually used predictors
@@ -786,6 +790,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
         y_train=y,
         nskip=1000,
         sparse=True,
+        augment=augment,
         theta=float(peff) if theta == 'fixed' else None,
         seed=keys.pop(),
     )

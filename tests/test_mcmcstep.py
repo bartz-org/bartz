@@ -99,6 +99,7 @@ from bartz.mcmcstep import (
 from bartz.mcmcstep._axes import chain_vmap_axes, data_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._moves import (
     ancestor_variables,
+    fully_used_variables,
     randint_exclude,
     randint_masked,
     split_range,
@@ -115,7 +116,9 @@ from bartz.mcmcstep._step import (
     _sample_wishart_bartlett,
     _step_error_cov_inv_diag,
     _step_error_cov_inv_mv,
+    sample_s_augmentation,
     step_error_cov_inv,
+    step_s,
     step_trees,
     step_z,
 )
@@ -155,6 +158,7 @@ def _minimal_step_config() -> StepConfig:
         prec_reduction_config=BatchedReduction(num_batches=None),
         prec_count_num_trees=None,
         sequential_unroll=1,
+        augment=False,
         mesh=None,
     )
 
@@ -2657,3 +2661,192 @@ class TestMultivariate:
 def copy_arrays(x: PyTree) -> PyTree:
     """Make a copy of the arrays in `x`, intended for buffer donation."""
     return tree.map(lambda x: jnp.array(x) if isinstance(x, jnp.ndarray) else x, x)
+
+
+class TestSampleSAugmentation:
+    """Test `mcmcstep._step.sample_s_augmentation`.
+
+    The sampler draws, for each variable, the number of attempted-but-discarded
+    splits used to make the `log_s` full conditional exact in the presence of
+    forbidden decision rules.
+    """
+
+    @staticmethod
+    def _forest(
+        var_tree: UInt[Array, ' num_trees half_tree_size'],
+        split_tree: UInt[Array, ' num_trees half_tree_size'],
+        max_split: UInt[Array, ' p'],
+        log_s: Float32[Array, ' p'],
+    ) -> Forest:
+        """Build a forest exposing only the fields the sampler reads."""
+        forest = _EmptyForest()
+        object.__setattr__(forest, 'var_tree', var_tree)
+        object.__setattr__(forest, 'split_tree', split_tree)
+        object.__setattr__(forest, 'max_split', max_split)
+        object.__setattr__(forest, 'log_s', log_s)
+        return forest
+
+    @staticmethod
+    def _replicate(
+        tree_heap: UInt[Array, ' half_tree_size'], num_trees: int
+    ) -> UInt[Array, ' num_trees half_tree_size']:
+        """Stack `num_trees` identical copies of a tree heap."""
+        return jnp.broadcast_to(tree_heap, (num_trees, tree_heap.size))
+
+    def test_zero_without_forbidden_rules(self, keys: split) -> None:
+        """No node has a forbidden rule, so there is never any augmentation."""
+        # only the root is internal, so no node has ancestors to forbid rules
+        tree_heap = manual_tree([[0.0], [0.0, 0.0]], [[0]], [[3]])
+        forest = self._forest(
+            self._replicate(tree_heap.var_tree, 4),
+            self._replicate(tree_heap.split_tree, 4),
+            jnp.array([5, 5, 5], jnp.uint8),
+            jnp.zeros(3),
+        )
+        for _ in range(5):
+            counts = sample_s_augmentation(keys.pop(), forest)
+            assert_array_equal(counts, jnp.zeros(3, counts.dtype))
+
+    def test_mean_matches_closed_form(self, keys: split) -> None:
+        """A tree blocking one variable at one node gives the known Poisson mean."""
+        # the root splits variable 0 at its lowest cutpoint, so its left child
+        # can no longer split variable 0; variables 1 and 2 are never blocked
+        tree_heap = manual_tree(
+            [[0.0], [0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], [[0], [1, 1]], [[1], [5, 5]]
+        )
+        num_trees = 4
+        s = jnp.array([0.5, 0.3, 0.2])
+        forest = self._forest(
+            self._replicate(tree_heap.var_tree, num_trees),
+            self._replicate(tree_heap.split_tree, num_trees),
+            jnp.array([5, 5, 5], jnp.uint8),
+            jnp.log(s),
+        )
+        # each tree blocks variable 0 at one node with eligible mass 1 - s[0], so
+        # the augmentation count of variable 0 is Poisson with mean below
+        expected = num_trees * s[0] / (1 - s[0])
+
+        draws = jit(vmap(lambda key: sample_s_augmentation(key, forest)))(
+            keys.pop(20_000)
+        )
+        # variables 1 and 2 are never blocked, so their counts are exactly zero
+        assert_array_equal(draws[:, 1:], jnp.zeros_like(draws[:, 1:]))
+        mean = jnp.mean(draws[:, 0])
+        sem = jnp.std(draws[:, 0]) / jnp.sqrt(draws.shape[0])
+        assert abs(float(mean) - float(expected)) < 5 * float(sem)
+
+    def test_mean_matches_reference(self, keys: split) -> None:
+        """On a grown forest, the count means match E[A_j] = s_j sum_b 1 / e_b."""
+        # grow a forest with few cutpoints, so variables get blocked often
+        p, n = 5, 80
+        state = init(
+            X=random.randint(keys.pop(), (p, n), 0, 3, jnp.uint8),
+            y=random.normal(keys.pop(), (n,)),
+            offset=0.0,
+            max_split=jnp.full(p, 2, jnp.uint8),
+            num_trees=8,
+            p_nonterminal=make_p_nonterminal(5),
+            leaf_prior_cov_inv=1.0,
+            error_cov_df=3.0,
+            error_cov_scale=1.0,
+            theta=float(p),
+            a=0.5,
+            b=1.0,
+            rho=float(p),
+            sparse_on_at=0,
+            augment=True,
+        )
+        for _ in range(30):
+            state = step(keys.pop(), state)
+        forest = state.forest
+
+        # reference E[A_j], computed node by node with the eligibility helper
+        s = numpy.asarray(jax.nn.softmax(nnone(forest.log_s)))  # all selectable
+        (num_trees, half_tree_size) = forest.var_tree.shape
+        g = numpy.zeros(p)
+        for t in range(num_trees):
+            var_tree, split_tree = forest.var_tree[t], forest.split_tree[t]
+            for b in range(half_tree_size):
+                if int(split_tree[b]) == 0:  # not internal
+                    continue
+                blocked = numpy.asarray(
+                    fully_used_variables(
+                        var_tree, split_tree, forest.max_split, jnp.int32(b)
+                    )
+                )
+                blocked = numpy.unique(blocked[blocked < p])
+                g[blocked] += 1.0 / (1.0 - s[blocked].sum())
+        expected = s * g
+        assert expected.sum() > 0  # otherwise the test is vacuous
+
+        draws = numpy.asarray(
+            jit(vmap(lambda key: sample_s_augmentation(key, forest)))(keys.pop(8_000))
+        )
+        sem = draws.std(0) / numpy.sqrt(draws.shape[0])
+        assert numpy.all(numpy.abs(draws.mean(0) - expected) < 5 * sem + 1e-6)
+
+    def test_init_sets_augment_flag(self, keys: split) -> None:
+        """The `augment` flag flows into the step config and `step` runs."""
+        p, n = 4, 50
+        state = init(
+            X=random.randint(keys.pop(), (p, n), 0, 3, jnp.uint8),
+            y=random.normal(keys.pop(), (n,)),
+            offset=0.0,
+            max_split=jnp.full(p, 2, jnp.uint8),
+            num_trees=5,
+            p_nonterminal=make_p_nonterminal(4),
+            leaf_prior_cov_inv=1.0,
+            error_cov_df=3.0,
+            error_cov_scale=1.0,
+            theta=float(p),
+            a=0.5,
+            b=1.0,
+            rho=float(p),
+            sparse_on_at=0,
+            augment=True,
+        )
+        assert state.config.augment is True
+        for _ in range(3):
+            state = step(keys.pop(), state)
+        assert jnp.all(jnp.isfinite(nnone(state.forest.log_s)))
+
+    def test_augment_noop_without_forbidden_rules(self, keys: split) -> None:
+        """Without forbidden rules, `step_s` draws the same with or without it."""
+        p, n = 4, 50
+        state = init(
+            X=random.randint(keys.pop(), (p, n), 0, 5, jnp.uint8),
+            y=random.normal(keys.pop(), (n,)),
+            offset=0.0,
+            max_split=jnp.full(p, 4, jnp.uint8),
+            num_trees=6,
+            p_nonterminal=make_p_nonterminal(4),
+            leaf_prior_cov_inv=1.0,
+            error_cov_df=3.0,
+            error_cov_scale=1.0,
+            theta=float(p),
+            a=0.5,
+            b=1.0,
+            rho=float(p),
+            sparse_on_at=0,
+            augment=True,
+        )
+        # plant trees whose only internal node is the root, so no decision rule
+        # is ever forbidden, whatever the cutpoint
+        forest = state.forest
+        (num_trees, half_tree_size) = forest.var_tree.shape
+        root = jnp.zeros((num_trees, half_tree_size)).at[:, 1]
+        forest = replace(
+            forest,
+            var_tree=root.set(0).astype(forest.var_tree.dtype),
+            split_tree=root.set(2).astype(forest.split_tree.dtype),
+        )
+        state = replace(state, forest=forest)
+
+        # the augmentation is then exactly zero
+        assert jnp.all(sample_s_augmentation(keys.pop(), forest) == 0)
+
+        # so the Dirichlet draw is identical with and without augmentation
+        key = keys.pop()
+        on = step_s(key, replace(state, config=replace(state.config, augment=True)))
+        off = step_s(key, replace(state, config=replace(state.config, augment=False)))
+        assert_array_equal(nnone(on.forest.log_s), nnone(off.forest.log_s))

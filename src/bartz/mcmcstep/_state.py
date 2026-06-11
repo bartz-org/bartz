@@ -233,6 +233,10 @@ class StepConfig(Module):
     """How much to unroll the sequential accept/reject loop over trees in
     `step`. See the ``unroll`` argument of `jax.lax.scan`."""
 
+    augment: bool = field(static=True)
+    """Whether to account exactly, via data augmentation, for the decision rules
+    forbidden by the ancestors of each node when updating `log_s`."""
+
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
 
@@ -575,6 +579,7 @@ def init(
     b: FloatLike | None = None,
     rho: FloatLike | None = None,
     sparse_on_at: int | Integer[ArrayLike, ''] | None = None,
+    augment: bool = False,
     num_chains: int | None = None,
     mesh: Mesh | dict[str, int] | None = None,
 ) -> State:
@@ -676,6 +681,10 @@ def init(
         Parameters of the prior on `theta`. Required only to sample `theta`.
     sparse_on_at
         After how many MCMC steps to turn on variable selection.
+    augment
+        Whether to account exactly, via data augmentation, for the decision
+        rules forbidden by the ancestors of each node when updating `log_s`. If
+        not set, those rules are ignored, which is faster but only approximate.
     num_chains
         The number of independent MCMC chains to represent in the state. Single
         chain with scalar values if not specified.
@@ -877,6 +886,7 @@ def init(
                 steps_done=jnp.int32(0),
                 sparse_on_at=_asarray_or_none(sparse_on_at),
                 sequential_unroll=sequential_unroll,
+                augment=augment,
                 mesh=mesh,
                 **red_cfg,
             ),

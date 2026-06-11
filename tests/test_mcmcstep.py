@@ -2661,6 +2661,11 @@ class TestMultivariate:
                 error_cov_scale=jnp.eye(k),
                 resid_reduction_config=BatchedReduction(num_batches=None),
                 count_reduction_config=BatchedReduction(num_batches=None),
+                # this checks the scalar- and vector-weight code paths agree; the
+                # scalar (n,) and vector (k, k, n) prec_scale carry the same values
+                # but float16 storage perturbs the two paths' linear algebra
+                # differently, so store in float32 to test the path equivalence alone
+                prec_scale_dtype=jnp.float32,
             ),
         )
 

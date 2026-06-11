@@ -295,11 +295,14 @@ class State(Module):
     """The inverse error covariance (scalar for univariate, matrix for multivariate).
     Identity in binary regression."""
 
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None = field(data=-1)
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None = field(data=-1)
     """The scale on the error precision. `None` in binary regression. With
     scalar per-datapoint weights, shape ``(n,)`` and value
     ``1 / error_scale ** 2``. With vector per-datapoint weights, shape ``(k, k, n)``
-    and value ``1/outer(error_scale, error_scale)`` repeated over datapoints."""
+    and value ``1/outer(error_scale, error_scale)`` repeated over datapoints.
+    The error precision is ``prec_scale * error_cov_inv``, so the scale lives in
+    `error_cov_inv` and this is an O(1) relative weight; its dtype may be
+    narrower than float32 (see `init`'s ``prec_scale_dtype``)."""
 
     inv_sdev_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(data=-1)
     """The reciprocal of the per-observation error standard-deviation scale.
@@ -563,6 +566,7 @@ def init(
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
     leaf_prior_cov_inv: FloatLike | Float[ArrayLike, 'k k'],
     leaf_dtype: DTypeLike = jnp.float16,
+    prec_scale_dtype: DTypeLike = jnp.float16,
     error_cov_df: FloatLike | None = None,
     error_cov_scale: FloatLike | Float[ArrayLike, 'k k'] | None = None,
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
@@ -624,6 +628,11 @@ def init(
         sampling. Leaves are stored in units of their marginal prior standard
         deviation (see `Forest.leaf_scale`), so narrow dtypes do not
         over/underflow whatever the scale of `y`.
+    prec_scale_dtype
+        The dtype used to store the per-datapoint error precisions
+        (`State.prec_scale`); ignored without `error_scale`/`missing`. The scale
+        lives in the float32 `error_cov_inv`, so a narrow dtype (e.g. float16)
+        stores an O(1) relative weight without over/underflow.
     error_cov_df
     error_cov_scale
         The df and scale parameters of the inverse Wishart prior on the error
@@ -764,7 +773,8 @@ def init(
     # leaves are stored in units of their marginal prior standard deviation,
     # such that they are O(1) whatever the data units and do not
     # over/underflow narrow leaf dtypes
-    leaf_dtype = _parse_leaf_dtype(leaf_dtype)
+    leaf_dtype = _parse_float_dtype(leaf_dtype)
+    prec_scale_dtype = _parse_float_dtype(prec_scale_dtype)
     leaf_scale = _compute_leaf_scale(leaf_prior_cov_inv, kshape)
 
     # extract array sizes from arguments
@@ -938,7 +948,7 @@ def init(
         # user-supplied `missing` mask.
         if state.prec_scale is not None or state.inv_sdev_scale is not None:
             inv_sdev_scale, prec_scale = _compute_scales(
-                state.prec_scale, state.inv_sdev_scale
+                state.prec_scale, state.inv_sdev_scale, prec_scale_dtype
             )
             state = replace(state, inv_sdev_scale=inv_sdev_scale, prec_scale=prec_scale)
 
@@ -951,11 +961,11 @@ def init(
     return _remove_weak_types(state)
 
 
-def _parse_leaf_dtype(leaf_dtype: DTypeLike) -> jnp.dtype:
-    """Normalize `leaf_dtype` and check it is floating point."""
-    leaf_dtype = jnp.dtype(leaf_dtype)
-    assert jnp.issubdtype(leaf_dtype, jnp.floating)
-    return leaf_dtype
+def _parse_float_dtype(dtype: DTypeLike) -> jnp.dtype:
+    """Normalize a storage dtype and check it is floating point."""
+    dtype = jnp.dtype(dtype)
+    assert jnp.issubdtype(dtype, jnp.floating)
+    return dtype
 
 
 def _compute_leaf_scale(
@@ -1075,24 +1085,31 @@ def _set_initial_prec_tree(
 
 
 def _initial_prec_tree(
-    shape: tuple[int, ...], prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n']
+    shape: tuple[int, ...], prec_scale: Float[Array, ' n'] | Float[Array, 'k k n']
 ) -> Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k k tree_size']:
     """Create the initial value of `Forest.prec_tree`: all datapoints in the root."""
-    return jnp.zeros(shape, jnp.float32).at[..., 1].set(prec_scale.sum(axis=-1))
+    return (
+        jnp.zeros(shape, jnp.float32)
+        .at[..., 1]
+        .set(prec_scale.sum(axis=-1, dtype=jnp.float32))
+    )
 
 
-@jit(donate_argnums=(0, 1))
+@jit(donate_argnums=(0, 1), static_argnums=2)
 def _compute_scales(
     error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+    prec_scale_dtype: DTypeLike,
 ) -> tuple[
     Float32[Array, ' n'] | Float32[Array, 'k n'],
-    Float32[Array, ' n'] | Float32[Array, 'k k n'],
+    Float[Array, ' n'] | Float[Array, 'k k n'],
 ]:
     """Compute ``inv_sdev_scale`` and ``prec_scale``.
 
     This is a separate function to use donate_argnums to avoid intermediate
     copies. At least one of `error_scale` and `missing` must be non-None.
+    `prec_scale` is cast to `prec_scale_dtype` for storage; `inv_sdev_scale`
+    stays float32.
     """
     if error_scale is None:
         inv_sdev_scale = jnp.array(1.0)
@@ -1104,7 +1121,7 @@ def _compute_scales(
         prec_scale = jnp.square(inv_sdev_scale)
     else:
         prec_scale = jnp.einsum('an,bn->abn', inv_sdev_scale, inv_sdev_scale)
-    return inv_sdev_scale, prec_scale
+    return inv_sdev_scale, prec_scale.astype(prec_scale_dtype)
 
 
 def _get_blocked_vars(

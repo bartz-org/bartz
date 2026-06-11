@@ -862,8 +862,15 @@ def test_scale_shift(kw: dict[str, Any]) -> None:
         rtol=rtol,
     )
     assert_close_matrices(nnone(bart1.sigma), nnone(bart2.sigma) / scale, rtol=rtol)
+    # sigma_mean rescaling is otherwise near-exact, but a narrow prec_scale
+    # perturbs the per-tree likelihood and so the error-variance posterior mean
+    prec_scale = bart1._mcmc_state.prec_scale
+    sigma_mean_rtol = 1e-6 if prec_scale is None else condf(prec_scale, 1e-6, 1e-4)
     assert_allclose(
-        nnone(bart1.sigma_mean), nnone(bart2.sigma_mean) / scale, rtol=1e-6, atol=1e-6
+        nnone(bart1.sigma_mean),
+        nnone(bart2.sigma_mean) / scale,
+        rtol=sigma_mean_rtol,
+        atol=1e-6,
     )
 
 

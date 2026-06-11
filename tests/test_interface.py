@@ -192,6 +192,12 @@ def _bart_default(kw: dict[str, Any], param_name: str) -> Any:  # noqa: ANN401
     return kw.get(param_name, param.default)
 
 
+def _init_default(kw: dict[str, Any], param_name: str) -> Any:  # noqa: ANN401
+    """Do `kw['init_kw'].get(param_name, <default in init>)`."""
+    default = signature(init).parameters[param_name].default
+    return kw.get('init_kw', {}).get(param_name, default)
+
+
 class BartKW(NamedTuple):
     """Keyword arguments for `Bart` plus associated test data."""
 
@@ -484,6 +490,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         save_ratios=True,
                         min_points_per_leaf=5,
                         leaf_dtype=jnp.float32,
+                        prec_scale_dtype=jnp.float32,
                     ),
                 ),
                 x_test=test.x,
@@ -569,6 +576,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         # narrow leaf storage is fragile across the disparate
                         # scales of mixed outcome components
                         leaf_dtype=jnp.float32,
+                        prec_scale_dtype=jnp.float32,
                     ),
                 ),
                 x_test=test.x,
@@ -1232,11 +1240,12 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
 
     # also test the internal leaf dtype directly, since it's not reflected in the
     # public API anywhere
-    default_leaf_dtype = signature(init).parameters['leaf_dtype'].default
-    expected_leaf_dtype = bkw.kw.get('init_kw', {}).get(
-        'leaf_dtype', default_leaf_dtype
-    )
-    assert bart._main_trace.leaf_tree.dtype == expected_leaf_dtype
+    assert bart._main_trace.leaf_tree.dtype == _init_default(bkw.kw, 'leaf_dtype')
+
+    # likewise the internal prec_scale dtype (only set for weighted/missing data)
+    prec_scale = bart._mcmc_state.prec_scale
+    if prec_scale is not None:
+        assert prec_scale.dtype == _init_default(bkw.kw, 'prec_scale_dtype')
 
 
 def test_leaf_scale(bkw: BartKW) -> None:
@@ -2542,18 +2551,23 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     )
     bart = Bart(**baseline_kw)
 
+    # float32 arrays pin the MCMC trajectory and otherwise match exactly across
+    # sharding; a narrow prec_scale, read in the data-parallel per-leaf
+    # reductions, lets those reductions (and the error-variance trajectory they
+    # feed) diverge a bit more when data sharding reorders them
+    prec_scale = bart._mcmc_state.prec_scale
+    strict_rtol = 1e-5 if prec_scale is None else condf(prec_scale, 1e-5, 1e-3)
+
     def check_equal(path: KeyPath, xb: Array, xs: Array) -> None:
-        # The integer trees (exact) and float32 arrays (residuals, predictions)
-        # pin the MCMC trajectory and must match across sharding. Leaves stored
-        # in a reduced-precision dtype can differ by a rounding step when data
-        # sharding reorders the per-leaf reductions, so compare them only at
-        # their storage precision.
+        # Leaves stored in a reduced-precision dtype can differ by a rounding
+        # step when data sharding reorders the per-leaf reductions, so compare
+        # them only at their storage precision.
         reduced = jnp.issubdtype(xs.dtype, jnp.floating) and xs.dtype.itemsize < 4
         assert_close_matrices(
             xs,
             xb,
             err_msg=f'{keystr(path)}: ',
-            rtol=1e-2 if reduced else 1e-5,
+            rtol=1e-2 if reduced else strict_rtol,
             reduce_rank=True,
         )
 

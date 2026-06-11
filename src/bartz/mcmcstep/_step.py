@@ -453,7 +453,7 @@ def _compute_count_or_prec_trees(
 
 @overload
 def _compute_count_or_prec_trees(
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'],
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'],
     trees: Float32[Array, 'num_trees tree_size']
     | Float32[Array, 'num_trees k k tree_size'],
     leaf_indices: UInt[Array, 'num_trees n'],
@@ -466,7 +466,7 @@ def _compute_count_or_prec_trees(
 
 
 def _compute_count_or_prec_trees(
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None,
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None,
     trees: UInt32[Array, 'num_trees tree_size']
     | Float32[Array, 'num_trees tree_size']
     | Float32[Array, 'num_trees k k tree_size'],
@@ -507,7 +507,7 @@ def _compute_count_or_prec_trees(
 
 
 def _compute_count_or_prec_tree(
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None,
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None,
     tree: UInt32[Array, ' tree_size']
     | Float32[Array, ' tree_size']
     | Float32[Array, 'k k tree_size'],
@@ -597,7 +597,7 @@ def compute_count_trees(
 def compute_prec_trees(
     prec_trees: Float32[Array, 'num_trees tree_size']
     | Float32[Array, 'num_trees k k tree_size'],
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'],
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
     config: StepConfig,
@@ -1062,7 +1062,7 @@ class SeqStageInAllTrees(Module):
     data_sharded: bool = field(static=True)
     """Whether the data axis is sharded across devices."""
 
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None
     """The scale of the precision of the error on each datapoint. If None, it
     is assumed to be 1."""
 

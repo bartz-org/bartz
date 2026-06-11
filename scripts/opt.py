@@ -329,6 +329,9 @@ class ConfigParams:
     leaf_dtype: str = jnp.dtype(init_default('leaf_dtype')).name
     """`init`'s ``leaf_dtype`` kwarg, as a dtype name (e.g. ``'float16'``, ``'float32'``)."""
 
+    prec_scale_dtype: str = jnp.dtype(init_default('prec_scale_dtype')).name
+    """`init`'s ``prec_scale_dtype`` kwarg, as a dtype name; only has an effect with ``weights``."""
+
     resid_reduction: ReductionConfig = field(
         default=init_default('resid_reduction_config'), metadata={'reduction': True}
     )
@@ -495,6 +498,7 @@ class ConfigParams:
             p_nonterminal=make_p_nonterminal(self.maxdepth, 0.95, 2),
             leaf_prior_cov_inv=self.num_trees * eye,
             leaf_dtype=self.leaf_dtype,
+            prec_scale_dtype=self.prec_scale_dtype,
             error_cov_df=2.0,
             error_cov_scale=2 * eye,
             error_scale=jnp.ones(self.n) if self.weights else None,
@@ -533,6 +537,7 @@ class InitKwargs:
     p_nonterminal: Array
     leaf_prior_cov_inv: float | Array
     leaf_dtype: DTypeLike
+    prec_scale_dtype: DTypeLike
     error_cov_df: float
     error_cov_scale: float | Array
     error_scale: Array | None

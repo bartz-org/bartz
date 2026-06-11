@@ -99,7 +99,7 @@ from jax import config as jax_config
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.typing import DTypeLike
-from jaxtyping import Shaped
+from jaxtyping import Float32, Shaped
 from polars import DataFrame, concat, read_parquet
 from tqdm import tqdm
 
@@ -478,7 +478,7 @@ class ConfigParams:
         else:
             return True
 
-    def error_scale(self) -> Shaped[Array, '...'] | None:
+    def error_scale(self) -> Float32[Array, ' n'] | Float32[Array, 'k n'] | None:
         """Build `init`'s ``error_scale`` for this combination's `weights` mode."""
         if self.weights == 'none':
             return None
@@ -555,7 +555,7 @@ class InitKwargs:
     prec_scale_dtype: DTypeLike
     error_cov_df: float
     error_cov_scale: float | Shaped[Array, '...']
-    error_scale: Shaped[Array, '...'] | None
+    error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
     resid_reduction_config: ReductionConfig
     count_reduction_config: ReductionConfig
     prec_reduction_config: ReductionConfig

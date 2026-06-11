@@ -6,9 +6,9 @@
     //
     // Knobs of `BatchedReduction`:
     //   num_batches    swept; primary axis (plot.reduce); the datapoint-batch
-    //                  count, including null = unbatched. Its per-device optimum
-    //                  is the heuristic we ultimately want (cpu: small or None;
-    //                  gpu: ~64-2048). null is the no-batching regime.
+    //                  count. Focused high grid 256..16Ki, no null: null/small
+    //                  win at low n (dropped here); the optimum exceeds 4096 on
+    //                  big GPUs (A100), so this variant pins the high end.
     //   batches_inner  FIXED to optimal 'inner' (true).
     //   contiguous     FIXED to optimal 'strided' (false).
     // The 3060 sweep confirmed (inner, strided) = (true, false) is optimal across
@@ -31,13 +31,13 @@
         "reduce": "prec_reduction.num_batches",
     },
     "values": {
-        "n":                  [1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
         "k":                  [null, 2, 4],
         "maxdepth":           [6],
         "weights":            [true],
         "num_trees":          [1, 16, 64],
         "resid_reduction":    [{"kind": "batched", "num_batches": "auto"}],
         "count_reduction":    [{"kind": "batched", "num_batches": "auto"}],
-        "prec_reduction":     [{"kind": "batched", "num_batches": [null, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096], "batches_inner": [true], "contiguous": [false]}],
+        "prec_reduction":     [{"kind": "batched", "num_batches": [256, 512, 1024, 2048, 4096, 8192, 16384], "batches_inner": [true], "contiguous": [false]}],
     },
 }

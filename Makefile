@@ -68,7 +68,7 @@ help:
 	@echo "- covreport: build html coverage report"
 	@echo "- covcheck: check coverage is above some thresholds"
 	@echo "- diffcov: check changed-lines coverage vs DIFF_BASE (default origin/main)"
-	@echo "- update-deps: remove .venv, upgrade uv.lock, update pre-commit hooks"
+	@echo "- update-deps: upgrade uv.lock and renv.lock, update pre-commit hooks"
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- check-changelog: verify the topmost changelog section is dated today"
@@ -270,7 +270,11 @@ diffcov:
 .PHONY: update-deps
 update-deps:
 	uv lock --upgrade
-	$(UV_RUN) pre-commit autoupdate
+	# Update R packages to their latest versions and rewrite renv.lock; snapshot
+	# captures the refreshed library (explicit type, from DESCRIPTION).
+	Rscript -e "renv::update(prompt = FALSE); renv::snapshot(prompt = FALSE)"
+	# --freeze keeps revs pinned to commit SHAs (tags are mutable)
+	$(UV_RUN) pre-commit autoupdate --freeze
 
 .PHONY: update-oldest-deps
 update-oldest-deps:

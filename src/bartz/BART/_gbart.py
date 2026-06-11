@@ -32,7 +32,7 @@ from typing import Any, Literal
 import jax.numpy as jnp
 from equinox import Module
 from jax.scipy.special import ndtr
-from jaxtyping import Array, Float, Float32, Int32, Key, Real
+from jaxtyping import Array, Float, Float32, Int32, Key, Real, Shaped
 
 from bartz._interface import ArrayLike, Bart, DataFrame, FloatLike, PredictKind, Series
 from bartz.mcmcloop import BurninTrace, MainTrace
@@ -438,7 +438,7 @@ class mc_gbart(Module):
         assert self._burnin_trace.error_cov_inv.ndim <= 2  # chains and samples
         tc = chain_vmap_axes(self._main_trace).error_cov_inv
 
-        def arrange(arr: Array) -> Array:
+        def arrange(arr: Shaped[Array, '...']) -> Shaped[Array, '...']:
             # Public output is (nskip+ndpost, mc_cores) = (samples, chains).
             return chain_to_axis(arr, tc, target=-1)
 

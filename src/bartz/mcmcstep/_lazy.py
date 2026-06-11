@@ -30,7 +30,8 @@ from typing import Any, TypeVar, cast, overload
 from equinox import Module
 from jax import ShapeDtypeStruct, tree
 from jax import numpy as jnp
-from jaxtyping import Array, PyTree
+from jax.typing import DTypeLike
+from jaxtyping import Array, PyTree, Shaped
 
 T = TypeVar('T')
 
@@ -56,6 +57,13 @@ class _LazyArray(Module):
     def ndim(self) -> int:
         return len(self.shape)
 
+    @property
+    def dtype(self) -> DTypeLike:
+        # The concrete dtype is unknown until the array is built; report the
+        # abstract `generic` scalar type so jaxtyping's `Shaped[_LazyArray, ...]`
+        # runtime check can read `.dtype` (it ignores the dtype name anyway).
+        return jnp.generic
+
 
 DummyArray = Array | ShapeDtypeStruct | _LazyArray
 
@@ -69,13 +77,15 @@ DummyArray = Array | ShapeDtypeStruct | _LazyArray
 def add_dummy_axis(x: PyTree[DummyArray]) -> PyTree[ShapeDtypeStruct]:
     """Replace array-like leaves with a rank-inflated placeholder."""
 
-    def replace_leaf(leaf: DummyArray) -> ShapeDtypeStruct:
+    def replace_leaf(leaf: Shaped[DummyArray, '...']) -> ShapeDtypeStruct:
         return ShapeDtypeStruct((0,) * (leaf.ndim + 1), jnp.float32)
 
     return tree.map(replace_leaf, x, is_leaf=lambda x: isinstance(x, _LazyArray))
 
 
-def _lazy(array_creator: Callable, shape: tuple[int, ...], *args: Any) -> Array:
+def _lazy(
+    array_creator: Callable, shape: tuple[int, ...], *args: Any
+) -> Shaped[Array, '...']:
     """Build a `_LazyArray` placeholder, typed as the `Array` it stands in for.
 
     The placeholder is parked in an array-typed state field until `init`
@@ -85,20 +95,26 @@ def _lazy(array_creator: Callable, shape: tuple[int, ...], *args: Any) -> Array:
     return cast(Array, _LazyArray(array_creator, shape, *args))
 
 
-def _return_array(shape: tuple[int, ...], arr: Array, **kwargs: Any) -> Array:  # noqa: ARG001
+def _return_array(
+    shape: tuple[int, ...],  # noqa: ARG001
+    arr: Shaped[Array, '*shape'],
+    **kwargs: Any,  # noqa: ARG001
+) -> Shaped[Array, '*shape']:
     """`_LazyArray` factory that returns an already-built array."""
     return arr
 
 
 @overload
-def _lazy_from_array(arr: Array) -> Array: ...
+def _lazy_from_array(arr: Shaped[Array, '*shape']) -> Shaped[Array, '*shape']: ...
 
 
 @overload
 def _lazy_from_array(arr: None) -> None: ...
 
 
-def _lazy_from_array(arr: Array | None) -> Array | None:
+def _lazy_from_array(
+    arr: Shaped[Array, '*shape'] | None,
+) -> Shaped[Array, '*shape'] | None:
     """Wrap an existing array as a `_LazyArray` reporting `arr.shape`, or pass `None`."""
     if arr is None:
         return None
@@ -106,8 +122,11 @@ def _lazy_from_array(arr: Array | None) -> Array | None:
 
 
 def _broadcast_chain(
-    shape: tuple[int, ...], inner: _LazyArray, chain_axis: int, **kwargs: Any
-) -> Array:
+    shape: tuple[int, ...],
+    inner: Shaped[_LazyArray, '...'],
+    chain_axis: int,
+    **kwargs: Any,
+) -> Shaped[Array, '...']:
     """Concretize `inner` then insert and broadcast a chain axis at `chain_axis`."""
     arr = inner(**kwargs)
     arr = jnp.expand_dims(arr, chain_axis)
@@ -115,8 +134,8 @@ def _broadcast_chain(
 
 
 def _wrap_chain(
-    inner: _LazyArray, chain_axis: int | None, num_chains: int | None
-) -> _LazyArray:
+    inner: Shaped[_LazyArray, '...'], chain_axis: int | None, num_chains: int | None
+) -> Shaped[_LazyArray, '...']:
     """Wrap `inner` so its factory inserts and broadcasts `num_chains` at `chain_axis`. No-op when `chain_axis` is `None`."""
     if chain_axis is None:
         return inner

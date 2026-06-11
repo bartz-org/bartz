@@ -33,7 +33,7 @@ from jax import random
 from jax.nn import softmax
 from jax.scipy.special import xlogy
 from jax.scipy.stats import chi2
-from jaxtyping import Array, Float32, Int32
+from jaxtyping import Array, Float32, Int32, Shaped
 from scipy import stats
 from scipy.stats import ks_1samp
 
@@ -336,7 +336,7 @@ class TestCheckTree:
         )
 
     @staticmethod
-    def _describe(tree: TreesTrace, max_split: jnp.ndarray) -> list[str]:
+    def _describe(tree: TreesTrace, max_split: Shaped[jnp.ndarray, '...']) -> list[str]:
         """Run `check_tree` and return the names of the failing checks."""
         # `check_tree` is a runtime validator deliberately fed malformed trees
         # here; disable jaxtyping so it isn't pre-empted by the import-hook

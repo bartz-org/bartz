@@ -44,7 +44,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
-from jaxtyping import Array, UInt8
+from jaxtyping import Array, Shaped, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import get_default_devices, get_device_count, split
@@ -110,7 +110,9 @@ def cat_traces(
     """Concatenate two traces along their per-leaf sample axis."""
     sample_axes = trace_sample_axes(trace_a)
 
-    def cat(a: Array, b: Array, axis: int | None) -> Array:
+    def cat(
+        a: Shaped[Array, '...'], b: Shaped[Array, '...'], axis: int | None
+    ) -> Shaped[Array, '...']:
         if axis is None:
             assert_array_equal(a, b)
             return a
@@ -119,7 +121,9 @@ def cat_traces(
     return tree.map(cat, trace_a, trace_b, sample_axes)
 
 
-def assert_trace_close(actual: Array, desired: Array) -> None:
+def assert_trace_close(
+    actual: Shaped[Array, '*shape'], desired: Shaped[Array, '*shape']
+) -> None:
     """Compare state/trace leaves, tolerating GPU floating-point rounding.
 
     Integer and boolean leaves must match exactly; floating-point leaves are
@@ -161,7 +165,7 @@ class TestRunMcmc:
 
         sample_axes = trace_sample_axes(main_trace)
 
-        def last_sample(arr: Array, axis: int) -> Array:
+        def last_sample(arr: Shaped[Array, '...'], axis: int) -> Shaped[Array, '...']:
             return jnp.take(arr, -1, axis=axis)
 
         assert_array_equal(
@@ -192,7 +196,7 @@ class TestRunMcmc:
         tree.map(partial(assert_array_equal, strict=True), initial_state, final_state)
 
         def assert_empty_trace(
-            _path: KeyPath, x: Array | None, sample_axis: int | None
+            _path: KeyPath, x: Shaped[Array, '...'] | None, sample_axis: int | None
         ) -> None:
             if x is not None and sample_axis is not None:
                 assert x.shape[sample_axis] == 0

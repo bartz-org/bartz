@@ -1052,6 +1052,18 @@ def enable_compilation_cache() -> None:
     jax_config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
 
 
+def configure_gpu_preallocation(*, preallocate: bool) -> None:
+    """Set whether the JAX GPU backend preallocates device memory.
+
+    Must run before any JAX operation, since it only takes effect at backend
+    initialization. The master process initializes a backend merely to read the
+    default device, then idles while a worker subprocess does the timed work;
+    were it to preallocate it would starve the worker of GPU memory. So the
+    master disables preallocation while the worker keeps it.
+    """
+    jax_config.update('jax_pjrt_client_create_options', {'preallocate': preallocate})
+
+
 def make_output_dir() -> Path:
     """Create a dated output directory next to this script."""
     stamp = datetime.now(tz=timezone.utc).astimezone().strftime('%Y-%m-%dT%H-%M-%S')
@@ -1107,8 +1119,12 @@ def parse_args() -> Namespace:
 
 def main() -> None:
     """Entry point of the script."""
-    enable_compilation_cache()
     args = parse_args()
+    # Set GPU preallocation by role before any JAX backend init: the master
+    # initializes a backend only to read the default device and then idles
+    # while the worker subprocess runs, so it must not preallocate.
+    configure_gpu_preallocation(preallocate=args.worker is not None)
+    enable_compilation_cache()
     config = Config.load(args.config)
     if args.minimal:
         config = config.minimal()

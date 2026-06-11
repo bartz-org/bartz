@@ -658,7 +658,9 @@ def test_is_key(keys: split) -> None:
     assert not is_key(numpy.array([1, 2, 3]))
 
 
-def make_broken_replicated_array(x: Array, axis_name: str, mesh: Mesh) -> Array:
+def make_broken_replicated_array(
+    x: Shaped[Array, '*shape'], axis_name: str, mesh: Mesh
+) -> Shaped[Array, '*shape']:
     """Replicate `x` across devices, but make it different on each device across an axis."""
 
     @partial(
@@ -669,7 +671,7 @@ def make_broken_replicated_array(x: Array, axis_name: str, mesh: Mesh) -> Array:
         # this disables the check that would notice the inconsistency
         check_vma=False,
     )
-    def breaker(x: Array) -> Array:
+    def breaker(x: Shaped[Array, '*shape']) -> Shaped[Array, '*shape']:
         return x + lax.axis_index(axis_name)
 
     return breaker(x)
@@ -686,7 +688,7 @@ def test_make_broken_replicated_array() -> None:
     x = jnp.arange(nd)
     xb = make_broken_replicated_array(x, 'a', mesh)
     for i, shard in enumerate(xb.addressable_shards):
-        data: Array = shard.data
+        data: Shaped[Array, '...'] = shard.data
         if i == 0:
             assert_array_equal(data, x, strict=True)
         else:

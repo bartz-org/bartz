@@ -562,7 +562,7 @@ class TestWithCachedBart:
 
         def assert_different(x: PyTree[Array], **kwargs: Any) -> None:
             def assert_different(
-                path: KeyPath, x: Array | None, chain_axis: int | None
+                path: KeyPath, x: Shaped[Array, '...'] | None, chain_axis: int | None
             ) -> None:
                 str_path = keystr(path)
                 if str_path.endswith('.theta') and not step_theta:
@@ -1404,7 +1404,7 @@ def get_expect_sharded(kw: dict) -> bool:
     )
 
 
-def check_data_sharding(x: Array | None, mesh: Mesh | None) -> None:
+def check_data_sharding(x: Shaped[Array, '...'] | None, mesh: Mesh | None) -> None:
     """Check the sharding of `x` assuming it may be sharded only along the last 'data' axis."""
     if x is None:
         return
@@ -1417,7 +1417,7 @@ def check_data_sharding(x: Array | None, mesh: Mesh | None) -> None:
         assert get_normal_spec(x) == normalize_spec(expected_spec, mesh, x.shape)
 
 
-def check_chain_sharding(x: Array | None, mesh: Mesh | None) -> None:
+def check_chain_sharding(x: Shaped[Array, '...'] | None, mesh: Mesh | None) -> None:
     """Check the sharding of `x` assuming it may be sharded only along the first 'chains' axis."""
     if x is None:
         return
@@ -1527,7 +1527,9 @@ def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
     baseline_kw.update(nskip=0, ndpost=20, mc_cores=2)
     bart = mc_gbart(**baseline_kw)
 
-    def check_equal(path: KeyPath, xb: Array, xs: Array) -> None:
+    def check_equal(
+        path: KeyPath, xb: Shaped[Array, '*shape'], xs: Shaped[Array, '*shape']
+    ) -> None:
         assert_close_matrices(
             xs, xb, err_msg=f'{keystr(path)}: ', rtol=1e-5, reduce_rank=True
         )

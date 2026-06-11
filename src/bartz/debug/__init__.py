@@ -39,7 +39,7 @@ R BART trace conversion
 
     trees_BART_to_bartz
     BARTTraceMeta
-    TraceWithOffset
+    MinimalTrace
 """
 
 # ruff: noqa: F401

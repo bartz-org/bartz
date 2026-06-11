@@ -7,7 +7,7 @@
         "n":                  [1000, 10000, 100000],
         "k":                  [null],
         "maxdepth":           [6],
-        "weights":            [true],
+        "weights":            ["scalar"],
         "num_trees":          [10],
         "prec_reduction":     [{"kind": "batched", "num_batches": [null, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]}],
         "num_chains":         [null, 1, 2, 4, 6, 8, 12, 16, 20],

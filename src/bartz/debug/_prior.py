@@ -232,6 +232,7 @@ def sample_prior_onetree(
     max_split: UInt[Array, ' p'],
     p_nonterminal: Float32[Array, ' d_minus_1'],
     sigma_mu: Float32[Array, ''],
+    log_s: Float32[Array, ' p'] | None = None,
 ) -> TreesTrace:
     """Sample a tree from the BART prior.
 
@@ -246,6 +247,9 @@ def sample_prior_onetree(
         its ancestors and on having available decision rules, at each depth.
     sigma_mu
         The prior standard deviation of each leaf.
+    log_s
+        The logarithm of the unnormalized prior probability of splitting on each
+        variable. If `None`, variables are chosen uniformly at random.
 
     Returns
     -------
@@ -263,10 +267,15 @@ def sample_prior_onetree(
         lower = stack.lower[x.depth, :]
         upper = stack.upper[x.depth, :]
 
-        # sample a random decision rule
+        # sample a random decision rule, drawing the variable from `s`
+        # (uniformly if `log_s` is None) among those with an available cutpoint
         available: Bool[Array, ' p'] = lower < upper
         allowed = jnp.any(available)
-        var = randint_masked(keys.pop(), available)
+        if log_s is None:
+            var = randint_masked(keys.pop(), available)
+        else:
+            logits = jnp.where(available, log_s, jnp.finfo(log_s.dtype).min)
+            var = random.categorical(keys.pop(), logits)
         split = 1 + random.randint(keys.pop(), (), lower[var], upper[var])
 
         # cast to shorter integer types
@@ -327,6 +336,7 @@ def sample_prior_forest(
     max_split: UInt[Array, ' p'],
     p_nonterminal: Float32[Array, ' d_minus_1'],
     sigma_mu: Float32[Array, ''],
+    log_s: Float32[Array, ' p'] | None = None,
 ) -> TreesTrace:
     """Sample a set of independent trees from the BART prior.
 
@@ -342,23 +352,27 @@ def sample_prior_forest(
         its ancestors and on having available decision rules, at each depth.
     sigma_mu
         The prior standard deviation of each leaf.
+    log_s
+        The logarithm of the unnormalized prior probability of splitting on each
+        variable. If `None`, variables are chosen uniformly at random.
 
     Returns
     -------
     An object containing the generated trees.
     """
-    return _sample_prior_forest(keys, max_split, p_nonterminal, sigma_mu)
+    return _sample_prior_forest(keys, max_split, p_nonterminal, sigma_mu, log_s)
 
 
-@partial(vmap_nodoc, in_axes=(0, None, None, None))
+@partial(vmap_nodoc, in_axes=(0, None, None, None, None))
 def _sample_prior_forest(
     key: Key[Array, ''],
     max_split: UInt[Array, ' p'],
     p_nonterminal: Float32[Array, ' d_minus_1'],
     sigma_mu: Float32[Array, ''],
+    log_s: Float32[Array, ' p'] | None,
 ) -> TreesTrace:
     """Non-vectorized implementation of `sample_prior_forest`."""
-    return sample_prior_onetree(key, max_split, p_nonterminal, sigma_mu)
+    return sample_prior_onetree(key, max_split, p_nonterminal, sigma_mu, log_s)
 
 
 @jit(static_argnums=(1, 2))
@@ -369,6 +383,7 @@ def sample_prior(
     max_split: UInt[Array, ' p'],
     p_nonterminal: Float32[Array, ' d_minus_1'],
     sigma_mu: Float32[Array, ''],
+    log_s: Float32[Array, ' p'] | None = None,
 ) -> TreesTrace:
     """Sample independent trees from the BART prior.
 
@@ -388,11 +403,14 @@ def sample_prior(
         This determines the maximum depth of the trees.
     sigma_mu
         The prior standard deviation of each leaf.
+    log_s
+        The logarithm of the unnormalized prior probability of splitting on each
+        variable. If `None`, variables are chosen uniformly at random.
 
     Returns
     -------
     An object containing the generated trees, with batch shape (trace_length, num_trees).
     """
     keys = random.split(key, trace_length * num_trees)
-    trees = sample_prior_forest(keys, max_split, p_nonterminal, sigma_mu)
+    trees = sample_prior_forest(keys, max_split, p_nonterminal, sigma_mu, log_s)
     return tree.map(lambda x: x.reshape(trace_length, num_trees, -1), trees)

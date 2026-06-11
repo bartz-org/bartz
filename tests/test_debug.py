@@ -30,6 +30,10 @@ import pytest
 from equinox import tree_at
 from jax import numpy as jnp
 from jax import random
+from jax.nn import softmax
+from jax.scipy.special import xlogy
+from jax.scipy.stats import chi2
+from jaxtyping import Array, Float32, Int32
 from scipy import stats
 from scipy.stats import ks_1samp
 
@@ -38,6 +42,24 @@ from bartz.debug import sample_prior
 from bartz.grove import TreesTrace, check_trace, describe_error, format_tree
 from bartz.grove._check import check_tree
 from tests.util import jaxtyping_disabled, manual_tree
+
+
+def max_lr_test(
+    counts: Int32[Array, ' k'], prob: Float32[Array, ' k']
+) -> Float32[Array, '']:
+    """Return the p-value of the maximal likelihood-ratio goodness-of-fit test.
+
+    Tests the null hypothesis that `counts` is multinomial with category
+    probabilities `prob`. The statistic is twice the log-likelihood ratio of the
+    saturated model to the null, asymptotically chi-squared with ``k - 1``
+    degrees of freedom under the null. This is the G-test, equivalent to
+    ``scipy.stats.power_divergence(lambda_='log-likelihood')``, recomputed in
+    jax to keep float32 and skip scipy's sum check.
+    """
+    (k,) = counts.shape
+    expected = counts.sum() * prob
+    statistic = 2 * jnp.sum(xlogy(counts, counts / expected))
+    return chi2.sf(statistic, k - 1)
 
 
 def test_format_tree() -> None:
@@ -82,12 +104,20 @@ class TestSamplePrior:
 
     Args = namedtuple(
         'Args',
-        ['key', 'trace_length', 'num_trees', 'max_split', 'p_nonterminal', 'sigma_mu'],
+        [
+            'key',
+            'trace_length',
+            'num_trees',
+            'max_split',
+            'p_nonterminal',
+            'sigma_mu',
+            'log_s',
+        ],
     )
 
-    @pytest.fixture
-    def args(self, keys: split) -> Args:
-        """Prepare arguments for `sample_prior`."""
+    @pytest.fixture(params=['uniform', 'nonuniform'])
+    def args(self, request: pytest.FixtureRequest, keys: split) -> Args:
+        """Prepare arguments for `sample_prior`, with and without `log_s`."""
         # config
         trace_length = 1000
         num_trees = 200
@@ -102,9 +132,16 @@ class TestSamplePrior:
         p = maxdepth - 1
         max_split = jnp.full(p, jnp.array(max_split, minimal_unsigned_dtype(max_split)))
         sigma_mu = 1 / jnp.sqrt(num_trees)
+        log_s = None if request.param == 'uniform' else jnp.log(1 + jnp.arange(p))
 
         return self.Args(
-            keys.pop(), trace_length, num_trees, max_split, p_nonterminal, sigma_mu
+            keys.pop(),
+            trace_length,
+            num_trees,
+            max_split,
+            p_nonterminal,
+            sigma_mu,
+            log_s,
         )
 
     def test_valid_trees(self, args: Args) -> None:
@@ -154,6 +191,21 @@ class TestSamplePrior:
             diff_forest = jnp.diff(heap, axis=1)
             assert jnp.any(diff_trace)
             assert jnp.any(diff_forest)
+
+    def test_root_distribution(self, args: Args) -> None:
+        """Check the root split variable follows the prior split probabilities.
+
+        At the root every variable is available, so the chosen variable is
+        distributed exactly as `softmax(log_s)` (uniform when `log_s` is None).
+        The ~200k root samples make the test's power against any realistic
+        sampler bug essentially 1 (e.g. ignoring `log_s` gives p well below
+        1e-10), while the 1e-3 threshold keeps false positives rare.
+        """
+        p = args.max_split.size
+        trees = sample_prior(*args)
+        counts = jnp.bincount(trees.var_tree[:, :, 1].ravel(), length=p)
+        log_s = jnp.zeros(p) if args.log_s is None else args.log_s
+        assert max_lr_test(counts, softmax(log_s)) > 1e-3
 
 
 class TestCheckTree:

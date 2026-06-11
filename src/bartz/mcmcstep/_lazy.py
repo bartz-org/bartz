@@ -30,6 +30,7 @@ from typing import Any, TypeVar, cast, overload
 from equinox import Module
 from jax import ShapeDtypeStruct, tree
 from jax import numpy as jnp
+from jax.typing import DTypeLike
 from jaxtyping import Array, PyTree, Shaped
 
 T = TypeVar('T')
@@ -55,6 +56,13 @@ class _LazyArray(Module):
     @property
     def ndim(self) -> int:
         return len(self.shape)
+
+    @property
+    def dtype(self) -> DTypeLike:
+        # The concrete dtype is unknown until the array is built; report the
+        # abstract `generic` scalar type so jaxtyping's `Shaped[_LazyArray, ...]`
+        # runtime check can read `.dtype` (it ignores the dtype name anyway).
+        return jnp.generic
 
 
 DummyArray = Array | ShapeDtypeStruct | _LazyArray

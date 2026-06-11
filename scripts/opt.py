@@ -993,7 +993,10 @@ def inner_benchmark_loop(
         try:
             bench.setup(params.to_init_kwargs())
         except JaxRuntimeError as e:
-            if 'RESOURCE_EXHAUSTED: Out of memory while trying to allocate' in str(e):
+            # OOM surfaces with several prefixes (plain RESOURCE_EXHAUSTED, an
+            # autotuner "Failed to profile configs" wrapper, ...); match the
+            # common allocation-failure phrasing rather than one exact prefix.
+            if 'Out of memory while trying to allocate' in str(e):
                 time_est = float('nan')
                 time_lo = float('nan')
                 time_up = float('nan')

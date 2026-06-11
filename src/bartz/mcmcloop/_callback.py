@@ -35,7 +35,7 @@ from equinox import Module, field
 from jax import debug, eval_shape, lax, tree
 from jax import numpy as jnp
 from jax.scipy.special import logsumexp
-from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, Integer, PyTree
+from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, Integer, PyTree, Shaped
 from tqdm.auto import tqdm
 
 from bartz._typing import kwdict
@@ -224,7 +224,9 @@ def make_print_callback(
     >>> run_mcmc(key, state, ..., **make_print_callback(state, ...))
     """
 
-    def as_replicated_array_or_none(val: ArrayLike | None) -> None | Array:
+    def as_replicated_array_or_none(
+        val: Shaped[ArrayLike, '*shape'] | None,
+    ) -> None | Shaped[Array, '*shape']:
         return None if val is None else _replicate(jnp.asarray(val), state.config.mesh)
 
     accumulator = tree.map(
@@ -371,7 +373,9 @@ def make_tqdm_callback(
     bar_id = next(_TQDM_BAR_COUNTER)
     _TQDM_REGISTRY[bar_id] = _TqdmEntry(tqdm_kwargs)
 
-    def as_replicated_array(val: ArrayLike) -> Array:
+    def as_replicated_array(
+        val: Shaped[ArrayLike, '*shape'],
+    ) -> Shaped[Array, '*shape']:
         return _replicate(jnp.asarray(val), state.config.mesh)
 
     return dict(

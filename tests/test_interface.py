@@ -784,7 +784,7 @@ class TestWithCachedBart:
 
         def assert_different(x: PyTree[Array], **kwargs: Any) -> None:
             def assert_different(
-                path: KeyPath, x: Array | None, chain_axis: int | None
+                path: KeyPath, x: Shaped[Array, '...'] | None, chain_axis: int | None
             ) -> None:
                 str_path = keystr(path)
                 if (
@@ -1631,7 +1631,7 @@ def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
     # unique axis with that length
     inv = jnp.argsort(perm)
 
-    def unpermute(x: Array) -> Array:
+    def unpermute(x: Shaped[Array, '*shape']) -> Shaped[Array, '*shape']:
         if n not in getattr(x, 'shape', ()):
             return x
         (axis,) = (i for i, length in enumerate(x.shape) if length == n)
@@ -1644,7 +1644,9 @@ def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
     # everything derived from them carry this loss
     rtol = condf(bart1._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
 
-    def check_equal(path: KeyPath, x1: Array, x2: Array) -> None:
+    def check_equal(
+        path: KeyPath, x1: Shaped[Array, '*shape'], x2: Shaped[Array, '*shape']
+    ) -> None:
         assert_close_matrices(
             x2, x1, err_msg=f'{keystr(path)}: ', rtol=rtol, reduce_rank=True
         )
@@ -2121,7 +2123,7 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
     # the leaves and everything derived from them carry this loss
     rtol = condf(singles[0]._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
 
-    def check(a: Array, b: Array) -> None:
+    def check(a: Shaped[Array, '*shape'], b: Shaped[Array, '*shape']) -> None:
         assert_close_matrices(a, b, rtol=rtol, reduce_rank=True)
 
     tree.map(check, batched, stacked)
@@ -2260,7 +2262,7 @@ def test_polars(bkw: BartKW) -> None:
     bart = Bart(**kw)
     pred = bart.predict(bkw.x_test, kind='latent_samples')
 
-    def to_polars(a: Array | None) -> pl.Series | pl.DataFrame | None:
+    def to_polars(a: Shaped[Array, '...'] | None) -> pl.Series | pl.DataFrame | None:
         if a is None:
             return None
         arr = numpy.array(a)
@@ -2325,7 +2327,7 @@ def test_automatic_integer_types(bkw: BartKW) -> None:
 
 
 def check_chains_data_sharding(
-    x: Array, chains: bool, data: bool, mesh: Mesh | None
+    x: Shaped[Array, '...'], chains: bool, data: bool, mesh: Mesh | None
 ) -> None:
     """Check `x` is sharded as indicated by the boolean flags."""
     if mesh is None:
@@ -2558,7 +2560,9 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     prec_scale = bart._mcmc_state.prec_scale
     strict_rtol = 1e-5 if prec_scale is None else condf(prec_scale, 1e-5, 1e-3)
 
-    def check_equal(path: KeyPath, xb: Array, xs: Array) -> None:
+    def check_equal(
+        path: KeyPath, xb: Shaped[Array, '*shape'], xs: Shaped[Array, '*shape']
+    ) -> None:
         # Leaves stored in a reduced-precision dtype can differ by a rounding
         # step when data sharding reorders the per-leaf reductions, so compare
         # them only at their storage precision.
@@ -2824,7 +2828,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
         outcome_type = outcome_type[0]
 
-    def to_uv_mv(arr: Array | None) -> tuple[Array | None, Array | None]:
+    def to_uv_mv(arr: Shaped[Array, '...'] | None) -> tuple[Array | None, Array | None]:
         """Split a ``(n,)`` or ``(k, n)`` array into UV and MV(k=1) versions."""
         if arr is None:
             return None, None
@@ -2968,7 +2972,9 @@ def test_devices_platform(bkw: BartKW) -> None:
 def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
     """Check that two `Bart` objects are equal."""
 
-    def check_same(path: KeyPath, x1: Array, x2: Array) -> None:
+    def check_same(
+        path: KeyPath, x1: Shaped[Array, '*shape'], x2: Shaped[Array, '*shape']
+    ) -> None:
         assert x1.shape == x2.shape
         assert x1.dtype == x2.dtype
         assert x1.sharding.is_equivalent_to(x2.sharding, x1.ndim)
@@ -2990,7 +2996,9 @@ def test_numpy_input(bkw: BartKW) -> None:
     """Check if all numerical inputs are numpy arrays, everything works as usual."""
     bart1 = Bart(**bkw.kw)
 
-    def to_numpy_array(x: Array | object) -> numpy.ndarray | object:
+    def to_numpy_array(
+        x: Shaped[Array, '*shape'] | object,
+    ) -> Shaped[numpy.ndarray, '*shape'] | object:
         if isinstance(x, (Array, float)) and not is_key(x):
             return numpy.asarray(x)
         else:
@@ -3005,7 +3013,7 @@ def test_numpy_input(bkw: BartKW) -> None:
 def assert_bart_on_device(bart: Bart, device: Device) -> None:
     """Check that the MCMC state and traces of ``bart`` live on ``device``."""
 
-    def check(path: KeyPath, x: Array | object) -> None:
+    def check(path: KeyPath, x: Shaped[Array, '...'] | object) -> None:
         if isinstance(x, Array):
             assert x.devices() == {device}, (
                 f'{keystr(path)}: expected {device}, got {x.devices()}'

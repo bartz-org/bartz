@@ -190,10 +190,16 @@ class _HasChainsBase(Module):
 class _MarkerLeaf(_HasChainsBase):
     """Module used by `TestVmapAxesMarkers` covering all marker combinations."""
 
-    chained: Array = field(chains=0, default_factory=lambda: jnp.zeros((2, 3)))
-    datad: Array = field(data=-1, default_factory=lambda: jnp.zeros((2, 3)))
-    both: Array = field(chains=0, data=-1, default_factory=lambda: jnp.zeros((2, 3)))
-    plain: Array = field(default_factory=lambda: jnp.zeros((2, 3)))
+    chained: Shaped[Array, '...'] = field(
+        chains=0, default_factory=lambda: jnp.zeros((2, 3))
+    )
+    datad: Shaped[Array, '...'] = field(
+        data=-1, default_factory=lambda: jnp.zeros((2, 3))
+    )
+    both: Shaped[Array, '...'] = field(
+        chains=0, data=-1, default_factory=lambda: jnp.zeros((2, 3))
+    )
+    plain: Shaped[Array, '...'] = field(default_factory=lambda: jnp.zeros((2, 3)))
     static_thing: int = field(static=True, default=42)
 
 
@@ -231,9 +237,9 @@ class TestVmapAxesMarkers:
         class _NonCanonicalMarkers(_HasChainsBase):
             """Module that uses non-default integer axis indices."""
 
-            a: Array = field(chains=2)
-            b: Array = field(data=-1)
-            c: Array = field(chains=-2, data=0)
+            a: Shaped[Array, '...'] = field(chains=2)
+            b: Shaped[Array, '...'] = field(data=-1)
+            c: Shaped[Array, '...'] = field(chains=-2, data=0)
 
         arr = jnp.zeros((2, 3, 4))
         x = _NonCanonicalMarkers(a=arr, b=arr, c=arr)
@@ -247,7 +253,7 @@ class TestVmapAxesMarkers:
         """A non-trivial negative chain marker on a 3-D leaf normalizes correctly."""
 
         class _NegativeChainMarker(_HasChainsBase):
-            arr: Array = field(chains=-2)
+            arr: Shaped[Array, '...'] = field(chains=-2)
 
         x = _NegativeChainMarker(arr=jnp.zeros((2, 3, 4)))
         # chains=-2 on a 3-D leaf -> normalized to 1
@@ -257,7 +263,7 @@ class TestVmapAxesMarkers:
         """A chain marker whose absolute value exceeds the leaf ndim raises an axis error."""
 
         class _ChainScalar(_HasChainsBase):
-            scalar: Array = field(chains=0)
+            scalar: Shaped[Array, '...'] = field(chains=0)
 
         # 0-D leaf can't have axis 0; strict normalization rejects it
         x = _ChainScalar(scalar=jnp.zeros(()))
@@ -268,7 +274,9 @@ class TestVmapAxesMarkers:
         """When `has_chains` reports False, marked leaves get None even if they'd be valid."""
 
         class _NoChains(_HasChainsBase):
-            arr: Array = field(chains=0, default_factory=lambda: jnp.zeros((2, 3)))
+            arr: Shaped[Array, '...'] = field(
+                chains=0, default_factory=lambda: jnp.zeros((2, 3))
+            )
 
             @property
             def has_chains(self) -> bool:
@@ -282,12 +290,12 @@ class TestVmapAxesMarkers:
         """Recursion descends into Module-valued fields."""
 
         class _InnerMarker(_HasChainsBase):
-            chain_arr: Array = field(chains=0)
-            data_arr: Array = field(data=-1)
+            chain_arr: Shaped[Array, '...'] = field(chains=0)
+            data_arr: Shaped[Array, '...'] = field(data=-1)
 
         class _OuterMarker(_HasChainsBase):
             inner: _InnerMarker
-            outer_chain: Array = field(chains=0)
+            outer_chain: Shaped[Array, '...'] = field(chains=0)
 
         x = _OuterMarker(
             inner=_InnerMarker(chain_arr=jnp.zeros(2), data_arr=jnp.zeros(2)),
@@ -316,7 +324,7 @@ class TestVmapAxesMarkers:
         """A marked field holding None yields None (empty pytree)."""
 
         class _OptionalMarker(_HasChainsBase):
-            maybe: None | Array = field(chains=0)
+            maybe: None | Shaped[Array, '...'] = field(chains=0)
 
         x = _OptionalMarker(maybe=None)
         assert chain_vmap_axes(x).maybe is None
@@ -373,7 +381,9 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _M(Module):
-            arr: Array = field(**{kind: 0}, default_factory=lambda: jnp.zeros((5, 3)))
+            arr: Shaped[Array, '...'] = field(
+                **{kind: 0}, default_factory=lambda: jnp.zeros((5, 3))
+            )
 
             @property
             def has_chains(self) -> bool:
@@ -386,7 +396,7 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _M(_HasChainsBase):
-            arr: Array = field(
+            arr: Shaped[Array, '...'] = field(
                 chains=0, **{kind: 0}, default_factory=lambda: jnp.zeros((4, 5, 3))
             )
 
@@ -397,7 +407,7 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _M(_HasChainsBase):
-            arr: Array = field(
+            arr: Shaped[Array, '...'] = field(
                 chains=2, **{kind: 0}, default_factory=lambda: jnp.zeros((5, 3, 4))
             )
 
@@ -410,7 +420,7 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _M(_HasChainsBase):
-            arr: Array = field(
+            arr: Shaped[Array, '...'] = field(
                 chains=0, **{kind: 2}, default_factory=lambda: jnp.zeros((4, 5, 6, 7))
             )
 
@@ -423,7 +433,7 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _M(_HasChainsBase):
-            arr: Array = field(
+            arr: Shaped[Array, '...'] = field(
                 chains=0, **{kind: -1}, default_factory=lambda: jnp.zeros((4, 5, 6))
             )
 
@@ -436,7 +446,9 @@ class TestCoreAxisMarkers:
         _, fn = axis_view
 
         class _M(_HasChainsBase):
-            arr: Array = field(chains=0, default_factory=lambda: jnp.zeros((4, 5)))
+            arr: Shaped[Array, '...'] = field(
+                chains=0, default_factory=lambda: jnp.zeros((4, 5))
+            )
 
         assert fn(_M()).arr is None
 
@@ -447,7 +459,7 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _M(Module):
-            arr: Array = field(
+            arr: Shaped[Array, '...'] = field(
                 chains=0, **{kind: 0}, default_factory=lambda: jnp.zeros((5, 3))
             )
 
@@ -463,7 +475,7 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _M(_HasChainsBase):
-            maybe: None | Array = field(chains=0, **{kind: 0})
+            maybe: None | Shaped[Array, '...'] = field(chains=0, **{kind: 0})
 
         assert fn(_M(maybe=None)).maybe is None
 
@@ -472,11 +484,13 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _M(_HasChainsBase):
-            marked: Array = field(
+            marked: Shaped[Array, '...'] = field(
                 chains=0, **{kind: 0}, default_factory=lambda: jnp.zeros((4, 5, 3))
             )
-            unmarked: Array = field(default_factory=lambda: jnp.zeros((4, 3)))
-            no_chain: Array = field(
+            unmarked: Shaped[Array, '...'] = field(
+                default_factory=lambda: jnp.zeros((4, 3))
+            )
+            no_chain: Shaped[Array, '...'] = field(
                 **{kind: 0}, default_factory=lambda: jnp.zeros((5, 3))
             )
 
@@ -490,7 +504,9 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _M(_HasChainsBase):
-            arr: Array = field(**{kind: -1}, default_factory=lambda: jnp.zeros((2, 3)))
+            arr: Shaped[Array, '...'] = field(
+                **{kind: -1}, default_factory=lambda: jnp.zeros((2, 3))
+            )
 
         # No chain on this leaf -> core ndim = leaf.ndim = 2, marker=-1 -> 1.
         assert fn(_M()).arr == 1
@@ -500,7 +516,7 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _M(_HasChainsBase):
-            arr: Array = field(
+            arr: Shaped[Array, '...'] = field(
                 chains=0, **{kind: 5}, default_factory=lambda: jnp.zeros((4, 5, 3))
             )
 
@@ -513,11 +529,11 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _Inner(_HasChainsBase):
-            marked: Array = field(**{kind: -1})
+            marked: Shaped[Array, '...'] = field(**{kind: -1})
 
         class _Outer(_HasChainsBase):
             inner: _Inner
-            outer_marked: Array = field(**{kind: 0})
+            outer_marked: Shaped[Array, '...'] = field(**{kind: 0})
 
         x = _Outer(inner=_Inner(marked=jnp.zeros(2)), outer_marked=jnp.zeros((3, 4)))
         out = fn(x)
@@ -542,7 +558,9 @@ class TestCoreAxisMarkers:
         kind, fn = axis_view
 
         class _M(_HasChainsBase):
-            arr: Array = field(**{kind: -1}, default_factory=lambda: jnp.zeros((2, 3)))
+            arr: Shaped[Array, '...'] = field(
+                **{kind: -1}, default_factory=lambda: jnp.zeros((2, 3))
+            )
 
         out = fn([_M(), _M()])
         assert isinstance(out, list)
@@ -1498,9 +1516,9 @@ class TestMultichain:
         def stack_leaf(
             _path: KeyPath,
             chain_axis: int | None,
-            mc_x: Array | None,
-            *sc_xs: Array | None,
-        ) -> Array | None:
+            mc_x: Shaped[Array, '*shape'] | None,
+            *sc_xs: Shaped[Array, '...'] | None,
+        ) -> Shaped[Array, '*shape'] | None:
             if chain_axis is None or mc_x is None:
                 return mc_x
             else:
@@ -1518,7 +1536,9 @@ class TestMultichain:
         # derived from them carry this loss
         inexact_rtol = condf(mc_state.forest.leaf_tree, 1e-5, 1e-3)
 
-        def check_equal(path: KeyPath, mc: Array, stacked: Array) -> None:
+        def check_equal(
+            path: KeyPath, mc: Shaped[Array, '*shape'], stacked: Shaped[Array, '*shape']
+        ) -> None:
             str_path = keystr(path)
             exact = jnp.issubdtype(mc.dtype, jnp.integer)
             assert_close_matrices(
@@ -1540,7 +1560,9 @@ class TestMultichain:
         """
         has_chains = state.has_chains
 
-        def choose_vmap_index(path: KeyPath, leaf: Array | None) -> int | None:
+        def choose_vmap_index(
+            path: KeyPath, leaf: Shaped[Array, '...'] | None
+        ) -> int | None:
             no_vmap_attrs = (
                 '.X',
                 '.binary_y',
@@ -1578,7 +1600,9 @@ class TestMultichain:
         no axes / no marker).
         """
 
-        def choose_vmap_index(path: KeyPath, leaf: Array | None) -> int | None:
+        def choose_vmap_index(
+            path: KeyPath, leaf: Shaped[Array, '...'] | None
+        ) -> int | None:
             vmap_attrs = (
                 '.X',
                 '.binary_y',
@@ -1637,7 +1661,10 @@ def check_sharding(x: PyTree, mesh: Mesh | None) -> None:
     data_axes = data_vmap_axes(x)
 
     def check_leaf(
-        _path: KeyPath, x: Array | None, chain_axis: int | None, data_axis: int | None
+        _path: KeyPath,
+        x: Shaped[Array, '...'] | None,
+        chain_axis: int | None,
+        data_axis: int | None,
     ) -> None:
         if x is None:
             return
@@ -1660,7 +1687,7 @@ def check_sharding(x: PyTree, mesh: Mesh | None) -> None:
     )
 
 
-def get_normal_spec(x: Array) -> PartitionSpec:
+def get_normal_spec(x: Shaped[Array, '...']) -> PartitionSpec:
     """Get the partition spec of `x` and apply `normalize_spec`."""
     sharding = x.sharding
     assert isinstance(sharding, NamedSharding)
@@ -1692,7 +1719,7 @@ def normalize_spec(
 def check_strong_types(x: PyTree[Array]) -> None:
     """Check all arrays in `x` have strong types."""
 
-    def check_leaf(path: KeyPath, x: Array) -> None:
+    def check_leaf(path: KeyPath, x: Shaped[Array, '...']) -> None:
         assert not x.weak_type, f'{keystr(path)} has weak type'
 
     tree.map_with_path(check_leaf, x)
@@ -1701,7 +1728,9 @@ def check_strong_types(x: PyTree[Array]) -> None:
 def check_same_structure(x: PyTree, y: PyTree) -> None:
     """Check that two PyTrees have the same structure, incl. shape and type of the arrays."""
 
-    def check(_path: KeyPath, x: Array, y: Array) -> None:
+    def check(
+        _path: KeyPath, x: Shaped[Array, '*shape'], y: Shaped[Array, '*shape']
+    ) -> None:
         assert x.shape == y.shape
         assert x.dtype == y.dtype
         # WORKAROUND(jax<0.7): empty arrays get their sharding spec canonicalized
@@ -2019,7 +2048,11 @@ class TestMixedBinaryContinuous:
         init_kwargs.update(outcome_type=[outcome_type] * self.k)
         sequence_state = init(**copy_args())
 
-        def check_equal(path: KeyPath, scalar: Array, sequence: Array) -> None:
+        def check_equal(
+            path: KeyPath,
+            scalar: Shaped[Array, '*shape'],
+            sequence: Shaped[Array, '*shape'],
+        ) -> None:
             assert_array_equal(scalar, sequence, err_msg=f'{keystr(path)}: ')
 
         tree.map_with_path(check_equal, scalar_state, sequence_state)

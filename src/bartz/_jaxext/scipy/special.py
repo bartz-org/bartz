@@ -32,13 +32,13 @@ import numpy as np
 from jax import ShapeDtypeStruct, pure_callback
 from jax import numpy as jnp
 from jax.typing import DTypeLike
-from jaxtyping import Array, ArrayLike, Float
+from jaxtyping import Array, ArrayLike, Float, Shaped
 from scipy.special import gammainccinv as scipy_gammainccinv
 
 from bartz._jaxext._jit import jit
 
 
-def _float_type(*args: DTypeLike | ArrayLike) -> jnp.dtype:
+def _float_type(*args: DTypeLike | Shaped[ArrayLike, '...']) -> jnp.dtype:
     """Determine the jax floating point result type given operands/types."""
     t = jnp.result_type(*args)
     return jnp.sin(jnp.empty(0, t)).dtype
@@ -51,7 +51,7 @@ def _castto(
     # callback returns a numpy value. `np.asarray` normalizes the scalar case
     # (numpy returns a 0-d scalar, not an `ndarray`, for scalar inputs).
     @wraps(func)
-    def newfunc(*args: Any, **kw: Any) -> np.ndarray:
+    def newfunc(*args: Any, **kw: Any) -> Shaped[np.ndarray, '...']:
         return np.asarray(func(*args, **kw), dtype)
 
     return newfunc

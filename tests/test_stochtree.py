@@ -38,6 +38,7 @@ from equinox import EquinoxRuntimeError
 from jax import Array, jit, random
 from jax import numpy as jnp
 from jax.scipy.special import ndtr
+from jaxtyping import Shaped
 from numpy.testing import assert_array_less
 from numpy.typing import ArrayLike
 from pytest_subtests import SubTests
@@ -88,9 +89,9 @@ _SAMPLE_KW: Mapping = MappingProxyType(
 
 
 class _Data(NamedTuple):
-    X_train: Array  # (n, p)
-    y_train: Array  # (n,) for continuous, (n,) int for binary
-    X_test: Array  # (m, p)
+    X_train: Shaped[Array, '...']  # (n, p)
+    y_train: Shaped[Array, '...']  # (n,) for continuous, (n,) int for binary
+    X_test: Shaped[Array, '...']  # (m, p)
 
 
 def _make_continuous(keys: split, n: int = N_TRAIN, n_test: int = N_TEST) -> _Data:
@@ -117,7 +118,9 @@ def binary_data(keys: split) -> _Data:
     return _make_binary(keys)
 
 
-def _rhat_two_chains(a: ArrayLike, b: ArrayLike) -> np.ndarray:
+def _rhat_two_chains(
+    a: Shaped[ArrayLike, '*shape'], b: Shaped[ArrayLike, '*shape']
+) -> Shaped[np.ndarray, '...']:
     """Compute rank-normalized Rhat between two ``(n, num_samples)`` matrices.
 
     Treats each of the two arrays as one MCMC chain of ``num_samples`` draws
@@ -567,17 +570,17 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
     }
 
     def task(
-        key: Array,
-        X: Array,
-        y: Array,
-        X_test: Array,
-        X_predict: Array,
-        w: Array,
+        key: Shaped[Array, '...'],
+        X: Shaped[Array, '...'],
+        y: Shaped[Array, '...'],
+        X_test: Shaped[Array, '...'],
+        X_predict: Shaped[Array, '...'],
+        w: Shaped[Array, '...'],
         sigma2_init: float,
         alpha: float,
         beta: float,
         sigma2_leaf_init: float,
-        variable_weights: Array,
+        variable_weights: Shaped[Array, '...'],
     ) -> tuple[Array, ...]:
         m = bst.BARTModel()
         m.sample(
@@ -707,10 +710,17 @@ class TestPreprocessing:
 
     @staticmethod
     def _sample(
-        X_train: Array | np.ndarray | pd.DataFrame | pl.DataFrame,
-        y: Array | np.ndarray,
-        key: Array,
-        X_test: Array | np.ndarray | pd.DataFrame | pl.DataFrame | None = None,
+        X_train: Shaped[Array, '...']
+        | Shaped[np.ndarray, '...']
+        | pd.DataFrame
+        | pl.DataFrame,
+        y: Shaped[Array, '...'] | Shaped[np.ndarray, '...'],
+        key: Shaped[Array, '...'],
+        X_test: Shaped[Array, '...']
+        | Shaped[np.ndarray, '...']
+        | pd.DataFrame
+        | pl.DataFrame
+        | None = None,
         general_params: Mapping[str, Any] | None = None,
     ) -> bst.BARTModel:
         m = bst.BARTModel()
@@ -1108,7 +1118,9 @@ class TestPreprocessing:
         Xte_manual = np.concatenate([Xte_arr, one_hot_test], axis=1)
         names = [f'x{i}' for i in range(X_arr.shape[1])]
 
-        def _spec(arr: np.ndarray, cat: np.ndarray) -> dict:
+        def _spec(
+            arr: Shaped[np.ndarray, '...'], cat: Shaped[np.ndarray, '...']
+        ) -> dict:
             return {
                 **{
                     n: {'kind': 'numeric', 'values': arr[:, j].tolist()}

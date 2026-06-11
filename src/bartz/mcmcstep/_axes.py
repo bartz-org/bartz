@@ -37,7 +37,7 @@ from typing import Any, TypeVar
 from equinox import Module as EquinoxModule
 from jax import numpy as jnp
 from jax import tree
-from jaxtyping import Array, PyTree
+from jaxtyping import Array, PyTree, Shaped
 from numpy.lib.array_utils import normalize_axis_index
 
 from bartz.mcmcstep._lazy import DummyArray, _LazyArray
@@ -154,7 +154,9 @@ def chainful_axis(core_axis: int, chain_axis: int | None) -> int:
     return core_axis + 1
 
 
-def chain_to_axis(arr: Array, chain_axis: int | None, target: int = 0) -> Array:
+def chain_to_axis(
+    arr: Shaped[Array, '...'], chain_axis: int | None, target: int = 0
+) -> Shaped[Array, '...']:
     """Move `chain_axis` of `arr` to position `target`.
 
     Helper for the common pattern of normalizing the chain axis position in
@@ -181,7 +183,7 @@ def chain_to_axis(arr: Array, chain_axis: int | None, target: int = 0) -> Array:
 
 
 def _compute_core_axis(
-    leaf: DummyArray | None, raw_axis: int | None, chain_axis: int | None
+    leaf: Shaped[DummyArray, '...'] | None, raw_axis: int | None, chain_axis: int | None
 ) -> int | None:
     """Combine a raw core-layout marker and a (normalized) chain position."""
     if raw_axis is None:
@@ -237,7 +239,7 @@ def get_has_chains(x: PyTree) -> bool:
     raise ValueError(msg)
 
 
-def _normalize_axis_for_leaf(leaf: DummyArray, raw: int) -> int:
+def _normalize_axis_for_leaf(leaf: Shaped[DummyArray, '...'], raw: int) -> int:
     """Normalize a marker axis index against `leaf.ndim`.
 
     Raises `numpy.exceptions.AxisError` if `raw` is out of bounds for

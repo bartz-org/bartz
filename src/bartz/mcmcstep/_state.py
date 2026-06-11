@@ -47,6 +47,7 @@ from jaxtyping import (
     Integer,
     Key,
     PyTree,
+    Shaped,
     UInt,
     UInt32,
 )
@@ -1047,7 +1048,7 @@ def _initial_binary_y(
 
 def _initial_affluence_tree(
     shape: tuple[int, ...], n: int, min_points_per_decision_node: int | None
-) -> Array:
+) -> Shaped[Array, '...']:
     """Create the initial value of `Forest.affluence_tree`."""
     return (
         jnp.zeros(shape, bool)
@@ -1060,7 +1061,7 @@ def _initial_affluence_tree(
     )
 
 
-def _initial_count_tree(shape: tuple[int, ...], n: int) -> Array:
+def _initial_count_tree(shape: tuple[int, ...], n: int) -> Shaped[Array, '...']:
     """Create the initial value of `Forest.count_tree`: all datapoints in the root."""
     return jnp.zeros(shape, jnp.uint32).at[..., 1].set(n)
 
@@ -1252,11 +1253,11 @@ def _leaf_partition_spec(
 
 
 def _shard_leaf(
-    x: Array | None | _LazyArray,
+    x: Shaped[Array, '*shape'] | None | Shaped[_LazyArray, '*shape'],
     chain_axis: int | None,
     data_axis: int | None,
     mesh: Mesh | None,
-) -> Array | None:
+) -> Shaped[Array, '*shape'] | None:
     """Create `x` if it's lazy and shard it."""
     if x is None:
         return None
@@ -1279,7 +1280,9 @@ def _shard_leaf(
 # jit such that in recent jax versions the shards are created on the right
 # devices immediately instead of being created on the wrong device and then
 # copied
-def _concretize_lazy_array(x: _LazyArray, sharding: NamedSharding | None) -> Array:
+def _concretize_lazy_array(
+    x: Shaped[_LazyArray, '*shape'], sharding: NamedSharding | None
+) -> Shaped[Array, '*shape']:
     """Create an array from an abstract spec on the appropriate devices."""
     x = x()
     if sharding is not None:
@@ -1292,7 +1295,7 @@ def _all_none_or_not_none(*args: object) -> bool:
     return all(is_none) or not any(is_none)
 
 
-def _asarray_or_none(x: object) -> Array | None:
+def _asarray_or_none(x: object) -> Shaped[Array, '...'] | None:
     if x is None:
         return None
     return jnp.asarray(x)

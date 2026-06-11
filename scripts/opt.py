@@ -99,6 +99,7 @@ from jax import config as jax_config
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.typing import DTypeLike
+from jaxtyping import Shaped
 from polars import DataFrame, concat, read_parquet
 from tqdm import tqdm
 
@@ -477,7 +478,7 @@ class ConfigParams:
         else:
             return True
 
-    def error_scale(self) -> Array | None:
+    def error_scale(self) -> Shaped[Array, '...'] | None:
         """Build `init`'s ``error_scale`` for this combination's `weights` mode."""
         if self.weights == 'none':
             return None
@@ -543,18 +544,18 @@ class ConfigParams:
 class InitKwargs:
     """Keyword arguments for `bartz.mcmcstep.init`, in init's signature order."""
 
-    X: Array
-    y: Array
-    offset: Array
-    max_split: Array
+    X: Shaped[Array, '...']
+    y: Shaped[Array, '...']
+    offset: Shaped[Array, '...']
+    max_split: Shaped[Array, '...']
     num_trees: int
-    p_nonterminal: Array
-    leaf_prior_cov_inv: float | Array
+    p_nonterminal: Shaped[Array, '...']
+    leaf_prior_cov_inv: float | Shaped[Array, '...']
     leaf_dtype: DTypeLike
     prec_scale_dtype: DTypeLike
     error_cov_df: float
-    error_cov_scale: float | Array
-    error_scale: Array | None
+    error_cov_scale: float | Shaped[Array, '...']
+    error_scale: Shaped[Array, '...'] | None
     resid_reduction_config: ReductionConfig
     count_reduction_config: ReductionConfig
     prec_reduction_config: ReductionConfig

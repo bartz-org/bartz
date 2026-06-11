@@ -126,7 +126,7 @@ class DataFrame(Protocol):
         """The names of the columns."""
         ...
 
-    def to_numpy(self) -> ndarray:
+    def to_numpy(self) -> Shaped[ndarray, '*shape']:
         """Convert the dataframe to a 2d numpy array with columns on the second axis."""
         ...
 
@@ -140,7 +140,7 @@ class Series(Protocol):
         """The name of the series."""
         ...
 
-    def to_numpy(self) -> ndarray:
+    def to_numpy(self) -> Shaped[ndarray, '*shape']:
         """Convert the series to a 1d numpy array."""
         ...
 
@@ -1156,7 +1156,7 @@ def _process_response_input(
     return arr
 
 
-def _check_same_length(x1: Array, x2: Array) -> None:
+def _check_same_length(x1: Shaped[Array, '... n'], x2: Shaped[Array, '... n']) -> None:
     get_length = lambda x: x.shape[-1]
     assert get_length(x1) == get_length(x2)
 
@@ -1679,7 +1679,7 @@ class DeviceKwArgs(TypedDict):
 
 
 def process_device_settings(
-    y_train: Array,
+    y_train: Shaped[Array, '...'],
     num_chains: int | None,
     num_chain_devices: int | None | Literal['auto'],
     num_data_devices: int | None,
@@ -1707,7 +1707,8 @@ def process_device_settings(
 
 
 def _determine_devices(
-    y_train: Array, devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None
+    y_train: Shaped[Array, '...'],
+    devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
 ) -> tuple[str, Device | None, Sequence[Device]]:
     """Determine the target platform and set of devices for the MCMC, and possibly a single target device."""
     if isinstance(devices, str):

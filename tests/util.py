@@ -38,7 +38,7 @@ from jax import numpy as jnp
 from jax import random
 from jax.scipy.special import logit
 from jax.typing import DTypeLike
-from jaxtyping import Array, Float
+from jaxtyping import Array, Float, Shaped
 from jaxtyping import ArrayLike as JaxArrayLike
 from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
 from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
@@ -100,7 +100,7 @@ def manual_tree(
     return tree
 
 
-def condf(array: ArrayLike | DTypeLike, on_32: _T, on_16: _T) -> _T:
+def condf(array: Shaped[ArrayLike, '...'] | DTypeLike, on_32: _T, on_16: _T) -> _T:
     """Select a value by leaf-storage precision: `on_16` for float16, else `on_32`.
 
     Pass the array whose precision governs the comparison: usually a leaf tree,
@@ -115,8 +115,8 @@ def condf(array: ArrayLike | DTypeLike, on_32: _T, on_16: _T) -> _T:
 
 
 def assert_close_matrices(
-    actual: ArrayLike,
-    desired: ArrayLike,
+    actual: Shaped[ArrayLike, '*shape'],
+    desired: Shaped[ArrayLike, '*shape'],
     *,
     rtol: float = 0.0,
     atol: float = 0.0,
@@ -214,7 +214,9 @@ ratio = {ratio:.2g}  (rtol = {rtol:.2g})"""
         assert op(adnorm, atol + rtol * dnorm), msg
 
 
-def assert_different_matrices(*args: ArrayLike, **kwargs: Any) -> None:
+def assert_different_matrices(
+    *args: Shaped[ArrayLike, '*shape'], **kwargs: Any
+) -> None:
     """Invoke `assert_close_matrices` with negate=True and default inf tolerance."""
     default_kwargs: dict = dict(rtol=np.inf, atol=np.inf)
     default_kwargs.update(kwargs)
@@ -222,8 +224,8 @@ def assert_different_matrices(*args: ArrayLike, **kwargs: Any) -> None:
 
 
 def assert_allclose(
-    actual: ArrayLike,
-    desired: ArrayLike,
+    actual: Shaped[ArrayLike, '*shape'],
+    desired: Shaped[ArrayLike, '*shape'],
     *,
     rtol: float = 0.0,
     atol: float = 0.0,
@@ -250,7 +252,11 @@ def assert_allclose(
 
 
 def assert_array_equal(
-    actual: ArrayLike, desired: ArrayLike, *, strict: bool = True, **kwargs: Any
+    actual: Shaped[ArrayLike, '*shape'],
+    desired: Shaped[ArrayLike, '*shape'],
+    *,
+    strict: bool = True,
+    **kwargs: Any,
 ) -> None:
     """Wrap `numpy.testing.assert_array_equal` with `strict=True` default."""
     _np_assert_array_equal(actual, desired, strict=strict, **kwargs)
@@ -321,18 +327,24 @@ def periodic_sigint(
             timer.cancel()
 
 
-def clipped_logit(x: JaxArrayLike, eps: float) -> Array:
+def clipped_logit(
+    x: Shaped[JaxArrayLike, '*shape'], eps: float
+) -> Shaped[Array, '*shape']:
     """Compute the logit of x, clipping x to [eps, 1-eps] to avoid infinities."""
     return logit(jnp.clip(x, eps, 1 - eps))
 
 
-def int_seed(key: Array) -> int:
+def int_seed(key: Shaped[Array, '...']) -> int:
     """Draw an integer random seed from a JAX random key."""
     return random.randint(key, (), 0, 2**31 - 1).item()
 
 
 def rhat_rank(
-    data: ArrayLike, *, split: bool, chain_axis: int = 0, draw_axis: int = 1
+    data: Shaped[ArrayLike, '...'],
+    *,
+    split: bool,
+    chain_axis: int = 0,
+    draw_axis: int = 1,
 ) -> Float[np.ndarray, ' *leading']:
     """Elementwise rank-normalized (split-)Rhat.
 

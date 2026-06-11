@@ -2,6 +2,22 @@
 export EDITOR=vim
 env >> /etc/environment
 
+# Drop the stale system CUDA from LD_LIBRARY_PATH, permanently.
+# This box's base image puts an OLDER system CUDA toolkit on LD_LIBRARY_PATH
+# (e.g. /usr/local/cuda/lib64 -> CUDA 12.8). The dynamic loader searches
+# LD_LIBRARY_PATH before a wheel's RUNPATH, so that stale system CUDA shadows the
+# newer pip-installed nvidia-*-cu12 wheels jax bundles -- e.g. an old
+# libnvJitLink.so.12 missing __nvJitLinkGetErrorLogSize_12_9 -- and `import jax`
+# dies with "Unable to load cuSPARSE". The pip wheels are self-contained (they
+# resolve their own CUDA via RUNPATH), so strip every /usr/local/cuda* entry out
+# of LD_LIBRARY_PATH: for this shell (so `make setup` below works) and, by
+# rewriting /etc/environment (which pam_env feeds to every future ssh session),
+# for good.
+export LD_LIBRARY_PATH="$(printf '%s' "${LD_LIBRARY_PATH:-}" | tr ':' '\n' \
+    | grep -vE '^(/usr/local/cuda|[[:space:]]*$)' | paste -sd: -)"
+sed -i '/^LD_LIBRARY_PATH=/d' /etc/environment
+[ -n "$LD_LIBRARY_PATH" ] && echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH" >> /etc/environment
+
 # configure tmux
 cat >> ~/.tmux.conf << 'EOF'
 set-option -g history-limit 10000

@@ -1557,6 +1557,7 @@ class TestMultichain:
                 '.offset',
                 '.prec_scale',
                 '.inv_sdev_scale',
+                '.error_scale',
                 '.error_cov_df',
                 '.error_cov_scale',
                 '.forest.max_split',
@@ -1598,6 +1599,7 @@ class TestMultichain:
                 '.resid',
                 '.prec_scale',
                 '.inv_sdev_scale',
+                '.error_scale',
                 '.forest.leaf_indices',
             )
             if keystr(path) not in vmap_attrs or leaf is None:
@@ -2362,6 +2364,7 @@ class TestMVBartIntegration:
             offset=jnp.float32(0.0),
             prec_scale=None,
             inv_sdev_scale=None,
+            error_scale=None,
             forest=_EmptyForest(),
             config=_minimal_step_config(),
         )
@@ -2429,6 +2432,7 @@ class TestMVBartIntegration:
             z=None,
             offset=jnp.float32(0.0),
             prec_scale=None,
+            error_scale=None,
             forest=_EmptyForest(),
             config=_minimal_step_config(),
         )

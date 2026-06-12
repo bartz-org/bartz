@@ -1685,7 +1685,7 @@ def test_scale_shift(bkw: BartKW) -> None:
 
     # binary mean predictions on new test data need the (training) weights; the
     # two models share the same `w`, and continuous-only outcomes ignore it
-    mean_w = bart1._w if bkw.any_binary else None
+    mean_w = bart1._mcmc_state.error_scale if bkw.any_binary else None
     yhat_test_mean1 = bart1.predict(kw['x_train'], kind='mean', w=mean_w)
     yhat_test_mean2 = bart2.predict(x, kind='mean', w=mean_w)
     assert_close_matrices(

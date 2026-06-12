@@ -35,7 +35,7 @@ from pathlib import Path
 
 # WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
-from typing import Any, Literal, Protocol, TypedDict, overload, runtime_checkable
+from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
 from warnings import warn
 
 import jax
@@ -373,8 +373,6 @@ class Bart(Module):
     sigest: Float32[Array, ''] | Float32[Array, ' k'] | None = None
     """The estimated standard deviation of the error used to set `lambda_`."""
 
-    _w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = None
-
     def __init__(
         self,
         x_train: Real[ArrayLike, 'p n'] | DataFrame,
@@ -434,9 +432,9 @@ class Bart(Module):
         _check_same_length(x_train, y_train)
 
         if w is not None:
-            # keep=True because `w` is donated downstream but also retained
-            # as `self._w` for prediction
-            w, self._w = _process_response_input(w, keep=True)
+            # `w` is donated downstream as `init`'s `error_scale`, which keeps it
+            # (sharded) as `State.error_scale` for prediction
+            w = _process_response_input(w)
             _check_same_length(x_train, w)
 
         if missing is not None:
@@ -844,7 +842,8 @@ class Bart(Module):
             required.
         """
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
-        has_train_weights = self._w is not None
+        train_w = self._mcmc_state.error_scale
+        has_train_weights = train_w is not None
         is_binary = self._mcmc_state.binary_y is not None
         # weights enter the outcome samples of any outcome type, and also the
         # mean of binary outcomes, since P(y=1) = Phi(latent / weight)
@@ -871,7 +870,7 @@ class Bart(Module):
                     ' (training weights are used automatically)'
                 )
                 raise ValueError(msg)
-            return self._w
+            return train_w
 
         # new test data, model was fit with weights
         if w is None:
@@ -881,11 +880,11 @@ class Bart(Module):
             )
             raise ValueError(msg)
         w_test = _process_response_input(w)
-        assert self._w is not None  # implied by needs_weights
-        if w_test.ndim != self._w.ndim:
+        assert train_w is not None  # implied by needs_weights
+        if w_test.ndim != train_w.ndim:
             msg = (
                 f'`w` shape mismatch with training weights: got '
-                f'{w_test.shape=}, expected {self._w.ndim}D '
+                f'{w_test.shape=}, expected {train_w.ndim}D '
                 f'(matching the training-weight shape).'
             )
             raise ValueError(msg)
@@ -1107,56 +1106,21 @@ def _process_predictor_input(
     return x, fmt
 
 
-@overload
 def _process_response_input(
     arr: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
     /,
     *,
-    keep: Literal[False] = False,
     dtype: DTypeLike = jnp.float32,
-) -> Shaped[Array, ' n'] | Shaped[Array, 'k n']: ...
-
-
-@overload
-def _process_response_input(
-    arr: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
-    /,
-    *,
-    keep: Literal[True],
-    dtype: DTypeLike = jnp.float32,
-) -> tuple[
-    Shaped[Array, ' n'] | Shaped[Array, 'k n'],
-    Shaped[Array, ' n'] | Shaped[Array, 'k n'],
-]: ...
-
-
-def _process_response_input(
-    arr: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
-    /,
-    *,
-    keep: bool = False,
-    dtype: DTypeLike = jnp.float32,
-) -> (
-    Shaped[Array, ' n']
-    | Shaped[Array, 'k n']
-    | tuple[
-        Shaped[Array, ' n'] | Shaped[Array, 'k n'],
-        Shaped[Array, ' n'] | Shaped[Array, 'k n'],
-    ]
-):
+) -> Shaped[Array, ' n'] | Shaped[Array, 'k n']:
     if isinstance(arr, DataFrame):
         arr = arr.to_numpy().T
     elif isinstance(arr, Series):
         arr = arr.to_numpy()
-    # in normal mode: one unconditional copy, safe to donate downstream.
-    # in `keep` mode: convert without copying when possible to get the
-    # keep array, then `jnp.copy` to make a separate disposable copy.
-    arr = jnp.array(arr, dtype, copy=not keep)
+    # one unconditional copy, safe to donate downstream
+    arr = jnp.array(arr, dtype, copy=True)
     if arr.ndim < 1 or arr.ndim > 2:
         msg = f'response-like input must be 1D (n,) or 2D (k, n). Got {arr.ndim=}.'
         raise ValueError(msg)
-    if keep:
-        return jnp.copy(arr), arr
     return arr
 
 

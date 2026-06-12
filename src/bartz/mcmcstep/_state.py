@@ -289,16 +289,23 @@ class State(Module):
     """The inverse error covariance (scalar for univariate, matrix for multivariate).
     Identity in binary regression."""
 
+    error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(data=-1)
+    """The per-observation error standard-deviation scale (the `error_scale`
+    argument of `init`). `None` if fit without it. Shape ``(n,)`` for scalar
+    weights, or ``(k, n)`` for per-component vector weights. `inv_sdev_scale` and
+    `prec_scale` are derived from this and the missingness mask."""
+
     prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None = field(data=-1)
-    """The scale on the error precision. `None` if fit without weights or a
-    missingness mask. With scalar per-datapoint weights, shape ``(n,)`` and value
-    ``1 / error_scale ** 2``. With vector per-datapoint weights, shape ``(k, k, n)``
-    and value ``1/outer(error_scale, error_scale)`` repeated over datapoints."""
+    """The scale on the error precision, derived from `error_scale` and the
+    missingness mask. `None` if fit without weights or a missingness mask. With
+    scalar per-datapoint weights, shape ``(n,)`` and value ``1 / error_scale ** 2``.
+    With vector per-datapoint weights, shape ``(k, k, n)`` and value
+    ``1 / outer(error_scale, error_scale)`` repeated over datapoints."""
 
     inv_sdev_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(data=-1)
-    """The reciprocal of the per-observation error standard-deviation scale.
-    `None` if fit without weights or a missingness mask. Shape ``(n,)`` for
-    scalar weights, or ``(k, n)`` for per-component vector weights."""
+    """The reciprocal of the per-observation error scale, zeroed at masked
+    datapoints. `None` if fit without weights or a missingness mask. Shape
+    ``(n,)`` for scalar weights, or ``(k, n)`` for per-component vector weights."""
 
     error_cov_df: Float32[Array, ''] | None
     """The df parameter of the inverse Wishart prior on the noise
@@ -798,9 +805,9 @@ def init(
     # deliberately wrong-typed intermediates parked in its fields for sharding:
     # `_LazyArray` leaves (each chain-bearing leaf is built at its core no-chain
     # shape, then `_add_chains` wraps it to broadcast in the chain axis), the raw
-    # float `y` in the bool `binary_y` slot, and the user `missing` mask and
-    # `error_scale` in the scale slots. The context ends once every field has
-    # been replaced by its final, correctly-typed array.
+    # float `y` in the bool `binary_y` slot, and the user `missing` mask in the
+    # `inv_sdev_scale` slot. The context ends once every field has been replaced
+    # by its final, correctly-typed array.
     with jaxtyping_disabled():
         state = State(
             _chain_anchor=_lazy(jnp.zeros, ()),  # typechecker chain anchor
@@ -824,9 +831,11 @@ def init(
                 else cast(Array, None)
             ),
             error_cov_inv=_lazy_from_array(error_cov_inv),
-            # temporarily store user inputs in these slots so they get sharded
-            # with everything else; `_compute_scales` replaces them post-shard.
-            prec_scale=error_scale,
+            # `error_scale` goes straight to its field; `missing` is parked in the
+            # `inv_sdev_scale` slot so it gets sharded with everything else.
+            # `_compute_scales` derives `prec_scale` and `inv_sdev_scale` post-shard.
+            error_scale=error_scale,
+            prec_scale=None,
             inv_sdev_scale=missing,
             error_cov_df=error_cov_df,
             error_cov_scale=error_cov_scale,
@@ -925,13 +934,14 @@ def init(
             binary_y = None
         state = replace(state, binary_y=binary_y)
 
-        # calculate prec_scale and inv_sdev_scale after sharding to do the
-        # calculation on the right devices. Pre-shard, `state.prec_scale` holds
-        # the user-supplied `error_scale` and `state.inv_sdev_scale` holds the
-        # user-supplied `missing` mask.
-        if state.prec_scale is not None or state.inv_sdev_scale is not None:
+        # derive prec_scale and inv_sdev_scale after sharding to do the
+        # calculation on the right devices. `state.error_scale` already holds the
+        # sharded user-supplied scale and `state.inv_sdev_scale` holds the parked
+        # `missing` mask. `_compute_scales` does not donate `error_scale`, so it
+        # stays in place; the derived scales fold in the mask, the raw scale does not.
+        if state.error_scale is not None or state.inv_sdev_scale is not None:
             inv_sdev_scale, prec_scale = _compute_scales(
-                state.prec_scale, state.inv_sdev_scale
+                state.error_scale, state.inv_sdev_scale
             )
             state = replace(state, inv_sdev_scale=inv_sdev_scale, prec_scale=prec_scale)
 
@@ -1049,7 +1059,7 @@ def _initial_prec_tree(
     return jnp.zeros(shape, jnp.float32).at[..., 1].set(prec_scale.sum(axis=-1))
 
 
-@jit(donate_argnums=(0, 1))
+@jit(donate_argnums=(1,))
 def _compute_scales(
     error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
@@ -1059,8 +1069,9 @@ def _compute_scales(
 ]:
     """Compute ``inv_sdev_scale`` and ``prec_scale``.
 
-    This is a separate function to use donate_argnums to avoid intermediate
-    copies. At least one of `error_scale` and `missing` must be non-None.
+    A separate function to donate `missing` and avoid intermediate copies;
+    `error_scale` is not donated so the caller can keep it as ``State.error_scale``.
+    At least one of `error_scale` and `missing` must be non-None.
     """
     if error_scale is None:
         inv_sdev_scale = jnp.array(1.0)

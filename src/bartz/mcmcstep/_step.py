@@ -1616,11 +1616,15 @@ def step_z(key: Key[Array, ''], state: State) -> State:
         # per-component scales (2-D) are restricted to the binary components;
         # a scalar-per-datapoint scale (1-D) is shared and broadcasts as-is
         inv_sdev = state.inv_sdev_scale
+        err_scale = state.error_scale
         if inv_sdev is not None and inv_sdev.ndim > 1:
             inv_sdev = inv_sdev[state.binary_indices, :]
+        if err_scale is not None and err_scale.ndim > 1:
+            err_scale = err_scale[state.binary_indices, :]
     else:
         resid = state.resid
         inv_sdev = state.inv_sdev_scale
+        err_scale = state.error_scale
 
     trees_plus_offset = state.z - resid
     if state.config.data_sharded:
@@ -1637,8 +1641,12 @@ def step_z(key: Key[Array, ''], state: State) -> State:
         eps = truncated_normal_onesided(
             key, (), ~state.binary_y, -trees_plus_offset * inv_sdev
         )
-        # masked datapoints (inv_sdev == 0) are inert; keep their resid finite
-        scale = jnp.where(inv_sdev > 0, jnp.reciprocal(inv_sdev), 0.0)
+        # masked datapoints (inv_sdev == 0) are inert; keep their resid finite.
+        # `error_scale` is the per-datapoint scale (`1 / inv_sdev` on unmasked
+        # points); it is `None` when only a missingness mask is set, where
+        # `inv_sdev` is 0/1-valued and equals the scale directly.
+        scale = 1.0 if err_scale is None else err_scale
+        scale = jnp.where(inv_sdev > 0, scale, 0.0)
         resid = eps * scale
     z = trees_plus_offset + resid
 

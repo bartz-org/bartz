@@ -61,6 +61,7 @@ from jax import (
     vmap,
 )
 from jax import numpy as jnp
+from jax.scipy.special import ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import (
@@ -236,6 +237,24 @@ class BartKW(NamedTuple):
         else:
             mask = jnp.array([t == 'binary' for t in outcome_type])
         return jnp.broadcast_to(mask, self.kshape)
+
+    def w_for_predict(
+        self, kind: str, *, on_train: bool
+    ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
+        """Return the `w` to pass to `Bart.predict`, or `None`, given kind and target.
+
+        On new test data weights are needed for outcome samples (any outcome
+        type) and for the mean of binary outcomes; on the training data they
+        are supplied automatically, so `None` is returned.
+        """
+        if on_train:
+            return None
+        elif kind == 'outcome_samples' or (
+            self.any_binary and kind in ('mean', 'mean_samples')
+        ):
+            return self.w_test
+        else:
+            return None
 
     @property
     def p(self) -> int:
@@ -485,7 +504,10 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 w_test=test.error_scale,
             )
 
-        # multivariate binary regression with binary X and high p
+        # multivariate heteroskedastic binary regression with binary X and high
+        # p; vector weights, to exercise the all-binary 2-D latent-scale paths
+        # in `step_z` and the mean squashing of `predict` (the scalar all-binary
+        # paths are covered by `test_heteroskedastic_binary`)
         case 5:
             gen_kw: kwdict = dict(GEN_KW, q=2)
             train, test = gen_data(
@@ -496,6 +518,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 k=2,
                 lambda_=0.5,
                 outcome_type='binary',
+                het_strength=0.5,
+                het_shape='vector',
                 **gen_kw,
             ).split(n)
             bkw = BartKW(
@@ -503,6 +527,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type='binary',
+                    w=train.error_scale,
                     **common,
                     printevery=None,
                     # quantile-binned with binary X, deterministic via
@@ -520,10 +545,11 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     ),
                 ),
                 x_test=test.x,
+                w_test=test.error_scale,
             )
 
-        # multivariate mixed binary-continuous regression with sparsity with
-        # fixed theta and missing subunits
+        # multivariate heteroskedastic mixed binary-continuous regression with
+        # sparsity with fixed theta and missing subunits
         case 6:
             outcome_type = ('continuous', 'binary', 'binary')
             # p = 3 instead of 2 because gen_data requires p >= k
@@ -535,6 +561,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 lambda_=0.5,
                 s_distr=Gamma(2.0),
                 outcome_type=outcome_type,
+                het_strength=0.5,
+                het_shape='scalar',
                 **GEN_KW,
             ).split(n)
             bkw = BartKW(
@@ -542,6 +570,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type=outcome_type,
+                    w=train.error_scale,
                     missing=gen_missing(keys.pop(), (len(outcome_type), n)),
                     sparse=True,
                     theta=2.0,
@@ -564,6 +593,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     ),
                 ),
                 x_test=test.x,
+                w_test=test.error_scale,
             )
 
         # multivariate continuous regression with vector weights
@@ -1029,10 +1059,12 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
 
 def _assert_predictions_finite(bart: Bart, bkw: BartKW, keys: split) -> None:
     """Assert every prediction kind is finite, on train and test predictors."""
-    for x_test, w in (('train', None), (bkw.x_test, bkw.w_test)):
+    for x_test, on_train in (('train', True), (bkw.x_test, False)):
         for kind in ('mean', 'mean_samples', 'latent_samples'):
-            pred = bart.predict(x_test, kind=kind)
+            w = bkw.w_for_predict(kind, on_train=on_train)
+            pred = bart.predict(x_test, kind=kind, w=w)
             assert jnp.all(jnp.isfinite(pred)), (x_test, kind)
+        w = bkw.w_for_predict('outcome_samples', on_train=on_train)
         out = bart.predict(x_test, kind='outcome_samples', w=w, key=keys.pop())
         assert jnp.all(jnp.isfinite(out)), (x_test, 'outcome_samples')
     # error sdev is NaN by design for binary components, so only check it
@@ -1157,8 +1189,13 @@ def test_output_shapes(bkw: BartKW, keys: split) -> None:
         bkw.n,
     )
 
-    assert bart.predict(bkw.x_test, kind='mean_samples').shape == (ndpost, *k, m)
-    assert bart.predict(bkw.x_test, kind='mean').shape == (*k, m)
+    mean_w = bkw.w_for_predict('mean', on_train=False)
+    assert bart.predict(bkw.x_test, kind='mean_samples', w=mean_w).shape == (
+        ndpost,
+        *k,
+        m,
+    )
+    assert bart.predict(bkw.x_test, kind='mean', w=mean_w).shape == (*k, m)
     assert bart.predict(bkw.x_test, kind='latent_samples').shape == (ndpost, *k, m)
     assert bart.predict(
         bkw.x_test, kind='outcome_samples', w=bkw.w_test, key=keys.pop()
@@ -1282,6 +1319,136 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
         sdev = outcome_samples.std(0) / jnp.sqrt(outcome_samples.shape[0])
         t = jnp.abs(mean - mean_from_os) / sdev
         assert jnp.all(t < 5)
+
+
+def test_heteroskedastic_binary(keys: split, subtests: SubTests) -> None:
+    """Heteroskedasticity is supported with univariate binary (probit) outcomes."""
+    n, p = 30, 3
+    train, test = gen_data(
+        keys.pop(),
+        n=2 * n,
+        p=p,
+        outcome_type='binary',
+        het_strength=0.5,
+        het_shape='scalar',
+        **GEN_KW,
+    ).split(n)
+    w_train, w_test = train.error_scale, test.error_scale
+    assert w_train is not None
+    assert w_test is not None
+    bart = Bart(
+        x_train=train.x,
+        y_train=train.y,
+        outcome_type='binary',
+        w=w_train,
+        num_trees=20,
+        n_save=40,
+        n_burn=40,
+        seed=keys.pop(),
+        printevery=None,
+    )
+
+    # the per-datapoint latent scale is stored, but no global noise scale is
+    # sampled (probit fixes it to 1)
+    assert bart._mcmc_state.prec_scale is not None
+    assert bart._mcmc_state.error_cov_df is None
+
+    latent = bart.predict('train', kind='latent_samples')
+    mean = bart.predict('train', kind='mean')
+
+    with subtests.test('mean uses the latent scale'):
+        # P(y=1) = Phi(latent / w), so the weights enter the squashing
+        expected = ndtr(latent / w_train).mean(0)
+        assert_close_matrices(mean, expected, rtol=1e-5)
+
+    with subtests.test('outcome_samples vs mean'):
+        outcome = bart.predict('train', kind='outcome_samples', key=keys.pop())
+        sdev = outcome.std(0) / jnp.sqrt(outcome.shape[0])
+        assert jnp.all(jnp.abs(mean - outcome.mean(0)) < 5 * sdev + 1e-3)
+
+    with subtests.test('w required on new test data'):
+        msg = 'required because the model was fit with weights'
+        for kind in ('mean', 'mean_samples'):
+            with pytest.raises(ValueError, match=msg):
+                bart.predict(test.x, kind=kind)
+            pred = bart.predict(test.x, kind=kind, w=w_test)
+            assert jnp.all(jnp.isfinite(pred))
+        with pytest.raises(ValueError, match=msg):
+            bart.predict(test.x, kind='outcome_samples', key=keys.pop())
+        out = bart.predict(test.x, kind='outcome_samples', w=w_test, key=keys.pop())
+        assert jnp.all((out == 0) | (out == 1))
+
+    with subtests.test('error sdev is NaN for binary'), debug_nans(False):
+        assert jnp.all(jnp.isnan(bart.get_error_sdev()))
+
+
+# both `het_shape` values are covered to exercise the scalar (1-D weight) and
+# vector (2-D weight) code paths in `step_z` and the mean squashing of `predict`
+@pytest.mark.parametrize('het_shape', ['scalar', 'vector'])
+def test_heteroskedastic_mixed(
+    keys: split, subtests: SubTests, het_shape: Literal['scalar', 'vector']
+) -> None:
+    """Heteroskedasticity is supported with mixed binary-continuous outcomes."""
+    n, p = 40, 3
+    outcome_type = ('continuous', 'binary')
+    train, test = gen_data(
+        keys.pop(),
+        n=2 * n,
+        p=p,
+        k=2,
+        lambda_=0.5,
+        outcome_type=outcome_type,
+        het_strength=0.5,
+        het_shape=het_shape,
+        **GEN_KW,
+    ).split(n)
+    w_train, w_test = train.error_scale, test.error_scale
+    assert w_train is not None
+    assert w_test is not None
+    bart = Bart(
+        x_train=train.x,
+        y_train=train.y,
+        outcome_type=outcome_type,
+        w=w_train,
+        num_trees=20,
+        n_save=40,
+        n_burn=40,
+        seed=keys.pop(),
+        printevery=None,
+    )
+    assert bart._mcmc_state.prec_scale is not None
+    binary_indices = bart._mcmc_state.binary_indices
+    assert binary_indices is not None
+    assert_array_equal(binary_indices, jnp.array([1]))
+
+    binary_idx = jnp.array([1])  # ('continuous', 'binary')
+    # the binary row's weight: per-component for vector, shared for scalar
+    w_binary = w_train[binary_idx] if w_train.ndim == 2 else w_train
+    latent = bart.predict('train', kind='latent_samples')  # (ndpost, 2, n)
+    mean = bart.predict('train', kind='mean')  # (2, n)
+
+    with subtests.test('only binary rows are squashed and divided by w'):
+        idx = jnp.s_[:, binary_idx, :]
+        # binary row: Phi(latent / w); continuous row: untouched latent
+        squashed = latent.at[idx].set(ndtr(latent[idx] / w_binary))
+        assert_close_matrices(mean, squashed.mean(0), rtol=1e-5)
+
+    with subtests.test('outcome_samples vs mean'):
+        outcome = bart.predict('train', kind='outcome_samples', key=keys.pop())
+        sdev = outcome.std(0) / jnp.sqrt(outcome.shape[0])
+        assert jnp.all(jnp.abs(mean - outcome.mean(0)) < 5 * sdev + 1e-3)
+
+    with subtests.test('w required on new test data'):
+        msg = 'required because the model was fit with weights'
+        with pytest.raises(ValueError, match=msg):
+            bart.predict(test.x, kind='mean')
+        pred = bart.predict(test.x, kind='mean', w=w_test)
+        assert jnp.all(jnp.isfinite(pred))
+        out = bart.predict(test.x, kind='outcome_samples', w=w_test, key=keys.pop())
+        assert jnp.all(jnp.isfinite(out))
+        # the binary row is thresholded to 0/1; the continuous row is real
+        binary_out = out[:, binary_idx, :]
+        assert jnp.all((binary_out == 0) | (binary_out == 1))
 
 
 def test_predict(bkw: BartKW) -> None:
@@ -1485,12 +1652,16 @@ def test_scale_shift(bkw: BartKW) -> None:
 
     mask_pred = mask[..., None]
 
+    # use a single loose tolerance: the heteroskedastic binary-latent step
+    # accumulates float32 rounding, and 1e-3 comfortably covers all cases
+    pred_rtol = 1e-3
+
     yhat1 = bart1.predict('train', kind='latent_samples')
     yhat2 = bart2.predict('train', kind='latent_samples')
     assert_close_matrices(
         yhat1,
         jnp.where(mask_pred, yhat2, (yhat2 - offset) / scale),
-        rtol=1e-4,
+        rtol=pred_rtol,
         reduce_rank=True,
     )
 
@@ -1499,7 +1670,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         mean1,
         jnp.where(mask_pred, mean2, (mean2 - offset) / scale),
-        rtol=1e-4,
+        rtol=pred_rtol,
         reduce_rank=True,
     )
 
@@ -1508,16 +1679,19 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         yhat_test1,
         jnp.where(mask_pred, yhat_test2, (yhat_test2 - offset) / scale),
-        rtol=1e-4,
+        rtol=pred_rtol,
         reduce_rank=True,
     )
 
-    yhat_test_mean1 = bart1.predict(kw['x_train'], kind='mean')
-    yhat_test_mean2 = bart2.predict(x, kind='mean')
+    # binary mean predictions on new test data need the (training) weights; the
+    # two models share the same `w`, and continuous-only outcomes ignore it
+    mean_w = bart1._w if bkw.any_binary else None
+    yhat_test_mean1 = bart1.predict(kw['x_train'], kind='mean', w=mean_w)
+    yhat_test_mean2 = bart2.predict(x, kind='mean', w=mean_w)
     assert_close_matrices(
         yhat_test_mean1,
         jnp.where(mask_pred, yhat_test_mean2, (yhat_test_mean2 - offset) / scale),
-        rtol=1e-4,
+        rtol=pred_rtol,
         reduce_rank=True,
     )
 
@@ -2229,8 +2403,9 @@ def test_data_format_mismatch(bkw: BartKW) -> None:
         w=None if kw.get('w') is None else pl.Series(numpy.array(kw['w'])),
     )
     bart = Bart(**kw)
+    w = bkw.w_for_predict('mean', on_train=False)
     with pytest.raises(ValueError, match='format mismatch'):
-        bart.predict(numpy.array(bkw.x_test))
+        bart.predict(numpy.array(bkw.x_test), w=w)
 
 
 def test_automatic_integer_types(bkw: BartKW) -> None:
@@ -2308,16 +2483,14 @@ def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
 
     for kind in PredictKind:
         extra: dict = {'key': keys.pop()} if kind is PredictKind.outcome_samples else {}
+        # the mean collapses the chain axis; the other kinds keep it
+        chains = kind is not PredictKind.mean
         yhat_train = bart.predict('train', kind=kind, **extra)
-        if kind is PredictKind.mean:
-            check(yhat_train, chains=False, data=True)
-        else:
-            check(yhat_train, chains=True, data=True)
+        check(yhat_train, chains=chains, data=True)
 
-            if kind is PredictKind.outcome_samples:
-                extra['w'] = bkw.w_test
-            yhat_test = bart.predict(bkw.x_test, kind=kind, **extra)
-            check(yhat_test, chains=True, data=True)
+        extra['w'] = bkw.w_for_predict(kind.value, on_train=False)
+        yhat_test = bart.predict(bkw.x_test, kind=kind, **extra)
+        check(yhat_test, chains=chains, data=True)
 
     assert bart.offset.is_fully_replicated
     if bart.sigest is not None:
@@ -2369,8 +2542,14 @@ def run_bart_and_block(bkw: BartKW, keys: split) -> None:
         bart.predict('train', kind='mean_samples'),
         bart.predict('train', kind='outcome_samples', key=keys.pop()),
         bart.predict(bkw.x_test, kind='latent_samples'),
-        bart.predict(bkw.x_test, kind='mean'),
-        bart.predict(bkw.x_test, kind='mean_samples'),
+        bart.predict(
+            bkw.x_test, kind='mean', w=bkw.w_for_predict('mean', on_train=False)
+        ),
+        bart.predict(
+            bkw.x_test,
+            kind='mean_samples',
+            w=bkw.w_for_predict('mean_samples', on_train=False),
+        ),
         bart.predict(bkw.x_test, kind='outcome_samples', key=keys.pop(), w=bkw.w_test),
         bart.get_error_sdev(),
         bart.get_latent_prec(),
@@ -2705,19 +2884,6 @@ class TestMVBartInterface:
             assert bart.sigest is None
             assert nnone(bart._mcmc_state.error_cov_scale).shape == (k, k)
 
-    def test_mixed_rejects_weights(self, example_data: ExampleData) -> None:
-        """Mixed outcome_type + weights should raise."""
-        x, y, w, kw = example_data
-        k, _ = y.shape
-        with pytest.raises(ValueError, match='binary'):
-            Bart(
-                x_train=x,
-                y_train=y,
-                w=w,
-                **kw,
-                outcome_type=['binary'] + ['continuous'] * (k - 1),
-            )
-
     def test_outcome_type_length_mismatch(self, example_data: ExampleData) -> None:
         """Sequence outcome_type with wrong length should raise."""
         x, y, _, kw = example_data
@@ -3014,7 +3180,8 @@ class TestDevicePlacement:
     ) -> None:
         """`predict` places new test data on the device requested at fit time."""
         bart = Bart(**dict(single_device_kw, devices=other_device))
-        pred = bart.predict(bkw.x_test, kind='mean')
+        w = bkw.w_for_predict('mean', on_train=False)
+        pred = bart.predict(bkw.x_test, kind='mean', w=w)
         assert pred.devices() == {other_device}
 
 

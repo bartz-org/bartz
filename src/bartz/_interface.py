@@ -104,7 +104,8 @@ class PredictKind(Enum):
     mean_samples = 'mean_samples'
     """Per-sample conditional mean, shape ``(num_chains * n_save, m)``
     (or ``(num_chains * n_save, k, m)``). For binary regression, this is
-    the probit-transformed sum-of-trees."""
+    the probit-transformed sum-of-trees, divided by the error scale `w`
+    first if the model is heteroskedastic."""
 
     outcome_samples = 'outcome_samples'
     """Samples of the outcome variable, shape ``(num_chains * n_save,
@@ -278,8 +279,11 @@ class Bart(Module):
         datapoints. Note: `w` is ignored in the automatic determination of
         `sigest`, so either the weights should be O(1), or `sigest` should be
         specified by the user. Shape ``(n,)`` applies the same scalar weight
-        to every outcome component; for multivariate continuous regression,
+        to every outcome component; for multivariate regression,
         ``(k, n)`` instead supplies a per-component weight per datapoint.
+        Supported with binary (probit) outcomes, where the weight scales the
+        latent error so the success probability is ``Phi(latent / w)``,
+        including the binary components of a mixed regression.
     missing
         Boolean mask with the same shape as `y_train`; `True` marks entries
         to be ignored by the MCMC. Values of `y_train` must be finite
@@ -555,7 +559,9 @@ class Bart(Module):
         key
             Jax random key, required when ``kind='outcome_samples'``.
         w
-            Per-observation error scale for ``kind='outcome_samples'``.
+            Per-observation error scale. Used with ``kind='outcome_samples'``,
+            and also with ``kind='mean'`` or ``'mean_samples'`` for binary
+            outcomes (since the success probability is ``Phi(latent / w)``).
             Required when the model was fit with weights and ``x_test`` is
             new data. Shape matches the shape used at fitting: ``(m,)`` for
             scalar weights, ``(k, m)`` for multivariate vector weights.
@@ -840,16 +846,20 @@ class Bart(Module):
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
         has_train_weights = self._w is not None
         is_binary = self._mcmc_state.binary_y is not None
-        needs_weights = (
-            kind is PredictKind.outcome_samples and not is_binary and has_train_weights
+        # weights enter the outcome samples of any outcome type, and also the
+        # mean of binary outcomes, since P(y=1) = Phi(latent / weight)
+        needs_weights = has_train_weights and (
+            kind is PredictKind.outcome_samples
+            or (is_binary and kind in (PredictKind.mean, PredictKind.mean_samples))
         )
 
         if not needs_weights:
             if w is not None:
                 msg = (
-                    '`w` must be `None` in this configuration'
-                    " (it is used only with kind='outcome_samples',"
-                    ' continuous regression fitted with weights)'
+                    '`w` must be `None` in this configuration (weights are used'
+                    " with kind='outcome_samples', and with kind='mean' or"
+                    " 'mean_samples' for binary outcomes, and only when the"
+                    ' model was fit with weights)'
                 )
                 raise ValueError(msg)
             return None
@@ -1177,9 +1187,6 @@ def _check_type_settings(
             f' requires y_train.shape=({num_types}, n),'
             f' found {y_train.shape=}.'
         )
-        raise ValueError(msg)
-    if w is not None and outcome_type is not OutcomeType.continuous:
-        msg = 'Weights are not supported when any outcome is binary.'
         raise ValueError(msg)
     if (
         w is not None
@@ -1922,12 +1929,17 @@ def predict(
         assert key is not None
         return sample_outcome(key, trace, latent, w, binary_indices, has_binary)
 
-    # squash predictions to (0, 1) if probit
+    # squash predictions to (0, 1) if probit; with heteroskedastic weights the
+    # latent error scale is `w`, so P(y=1) = Phi(latent / w)
     if binary_indices is not None:
+        # mixed: only the binary rows are squashed (and divided by their `w`)
         indexing = jnp.s_[..., binary_indices, :]
-        mean_samples = latent.at[indexing].set(ndtr(latent[indexing]))
+        arg = latent[indexing]
+        if w is not None:
+            arg = arg / (w[indexing] if w.ndim == 2 else w)
+        mean_samples = latent.at[indexing].set(ndtr(arg))
     elif has_binary:  # self._mcmc_state.binary_y is not None:
-        mean_samples = ndtr(latent)
+        mean_samples = ndtr(latent if w is None else latent / w)
     else:
         mean_samples = latent
 
@@ -1964,12 +1976,13 @@ def sample_outcome(
         if w is not None:
             # w is (m,) or (k, m) so it always broadcasts right
             error *= w
-    elif has_binary:
-        # pure binary UV: probit has sigma = 1
+    else:  # univariate
+        # pure binary probit has unit-scale latent error; continuous scales it
+        # by `sigma`. Either way, optionally rescaled per datapoint by w.
         error = random.normal(key, latent.shape)
-    else:  # univariate continuous
-        sigma = jnp.sqrt(jnp.reciprocal(prec)).reshape(-1)
-        error = sigma[..., None] * random.normal(key, latent.shape)
+        if not has_binary:
+            sigma = jnp.sqrt(jnp.reciprocal(prec)).reshape(-1)
+            error *= sigma[..., None]
         if w is not None:
             error *= w[None, :]
 

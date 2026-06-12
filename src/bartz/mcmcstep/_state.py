@@ -289,15 +289,15 @@ class State(Module):
     Identity in binary regression."""
 
     prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None = field(data=-1)
-    """The scale on the error precision. `None` in binary regression. With
-    scalar per-datapoint weights, shape ``(n,)`` and value
+    """The scale on the error precision. `None` if fit without weights or a
+    missingness mask. With scalar per-datapoint weights, shape ``(n,)`` and value
     ``1 / error_scale ** 2``. With vector per-datapoint weights, shape ``(k, k, n)``
     and value ``1/outer(error_scale, error_scale)`` repeated over datapoints."""
 
     inv_sdev_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(data=-1)
     """The reciprocal of the per-observation error standard-deviation scale.
-    `None` in binary regression. Shape ``(n,)`` for scalar weights, or
-    ``(k, n)`` for per-component vector weights."""
+    `None` if fit without weights or a missingness mask. Shape ``(n,)`` for
+    scalar weights, or ``(k, n)`` for per-component vector weights."""
 
     error_cov_df: Float32[Array, ''] | None
     """The df parameter of the inverse Wishart prior on the noise
@@ -432,7 +432,11 @@ def _init_shape_shifting_parameters(
 
     # All-binary
     if is_binary:
-        assert error_scale is None
+        assert (
+            error_scale is None
+            or error_scale.shape == y.shape  # (k, n)
+            or error_scale.shape == y.shape[-1:]  # (n,)
+        )
         assert error_cov_df is None
         assert error_cov_scale is None
         if kshape:
@@ -443,8 +447,11 @@ def _init_shape_shifting_parameters(
     # Mixed binary-continuous, or continuous-mv with 2-D missingness:
     # diagonal error covariance, updated component-wise.
     elif is_mixed or partial_missing:
-        if is_mixed:
-            assert error_scale is None
+        assert (
+            error_scale is None
+            or error_scale.shape == y.shape  # (k, n)
+            or error_scale.shape == y.shape[-1:]  # (n,)
+        )
         error_cov_df = jnp.asarray(error_cov_df, jnp.float32)
         error_cov_scale = _check_diagonal(jnp.asarray(error_cov_scale, jnp.float32))
         assert error_cov_scale.shape == 2 * kshape
@@ -620,9 +627,12 @@ def init(
         ``error_scale[..., i]`` is a scalar, each error variance or covariance
         matrix is multiplied by ``error_scale[..., i] ** 2``. If
         ``error_scale[:, i]`` is a vector, then the covariance matrix is
-        rescaled by its outer product. Not supported for binary or mixed
-        binary-continuous regression. If not specified, defaults to 1 for all
-        points, but potentially skipping calculations.
+        rescaled by its outer product. For binary outcomes the (fixed, unit)
+        probit latent error is scaled instead, so the success probability is
+        ``Phi((sum of trees + offset) / error_scale)``; this also applies to the
+        binary components of a mixed binary-continuous regression. If not
+        specified, defaults to 1 for all points, but potentially skipping
+        calculations.
     missing
         Boolean mask, same shape as `y`; `True` marks entries to be ignored
         by the MCMC. Values of `y` must be finite everywhere, including at

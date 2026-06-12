@@ -37,7 +37,6 @@ import numpy as np
 from jax import numpy as jnp
 from jax import random
 from jax.scipy.special import logit
-from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Shaped
 from jaxtyping import ArrayLike as JaxArrayLike
 from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
@@ -100,7 +99,7 @@ def manual_tree(
     return tree
 
 
-def condf(array: Shaped[ArrayLike, '...'] | DTypeLike, on_32: _T, on_16: _T) -> _T:
+def condf(array: Float[ArrayLike, '...'], on_32: _T, on_16: _T) -> _T:
     """Select a value by leaf-storage precision: `on_16` for float16, else `on_32`.
 
     Pass the array whose precision governs the comparison: usually a leaf tree,
@@ -109,8 +108,7 @@ def condf(array: Shaped[ArrayLike, '...'] | DTypeLike, on_32: _T, on_16: _T) -> 
     derived array. This avoids baking float16-specific tolerances into the
     tests: when the leaf storage dtype reverts to float32, `on_32` is selected.
     """
-    dtype = jnp.dtype(getattr(array, 'dtype', array))
-    reduced = jnp.issubdtype(dtype, jnp.floating) and jnp.finfo(dtype).bits < 32
+    reduced = jnp.finfo(jnp.asarray(array).dtype).bits < 32
     return on_16 if reduced else on_32
 
 

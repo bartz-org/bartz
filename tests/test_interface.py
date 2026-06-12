@@ -345,7 +345,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     y_train=train.y,
                     outcome_type='continuous',
                     sparse=True,
-                    augment=True,
+                    augment=False,  # non-default; variant 3 covers the default True
                     **common,
                     printevery=50,
                     binner=partial(RangeEvenBinner, max_bins=257),
@@ -546,7 +546,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     outcome_type=outcome_type,
                     missing=gen_missing(keys.pop(), (len(outcome_type), n)),
                     sparse=True,
-                    augment=True,
+                    augment=False,  # non-default; variant 4 covers the default True
                     theta=2.0,
                     varprob=jnp.array([0.2, 0.3, 0.5]),
                     **common,

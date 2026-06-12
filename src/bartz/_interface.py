@@ -200,10 +200,10 @@ class Bart(Module):
         Whether to account exactly for the decision rules forbidden by the
         ancestors of each node when updating the variable selection
         probabilities, using data augmentation. Only relevant if ``sparse=True``.
-        Off by default, in which case the forbidden rules are ignored, which is
-        faster but only approximate. This matters most with few predictors with
-        few cutpoints each, where the same predictor cannot be re-used down a
-        branch.
+        On by default. Setting it to `False` ignores the forbidden rules, which
+        is faster but only approximate. This matters most with few predictors
+        with few cutpoints each, where the same predictor cannot be re-used down
+        a branch.
     varprob
         The probability distribution over the `p` predictors for choosing a
         predictor to split on in a decision node a priori. Must be > 0. It does
@@ -393,7 +393,7 @@ class Bart(Module):
         a: FloatLike = 0.5,
         b: FloatLike = 1.0,
         rho: FloatLike | None = None,
-        augment: bool = False,
+        augment: bool = True,
         varprob: Float[ArrayLike, ' p'] | None = None,
         binner: BinnerFactory = UniqueQuantileBinner,
         rm_const: bool = True,

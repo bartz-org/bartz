@@ -61,6 +61,7 @@ from jax import (
     vmap,
 )
 from jax import numpy as jnp
+from jax.nn import softmax
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import (
@@ -92,7 +93,7 @@ from bartz._jaxext import (
     split,
 )
 from bartz._typing import kwdict
-from bartz.debug import TraceWithOffset, sample_prior
+from bartz.debug import PriorSample, TraceWithOffset, sample_prior
 from bartz.grove import (
     check_trace,
     describe_error,
@@ -1786,12 +1787,42 @@ def test_xinfo_wrong_p() -> None:
         Bart(**kw)
 
 
-@pytest.mark.parametrize(('p', 'nsplits'), [(1, 1), (3, 2), (10, 1), (10, 255)])
-def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
+# The sparse variants check the variable-selection prior (`log_s`, and `theta`
+# when free). Their Beta(a, b) prior on theta/(theta+rho) is kept concentrated:
+# a diffuse prior (e.g. the a=0.5, b=1 default) makes the theta<->log_s Gibbs
+# loop mix too slowly to reach the prior within the burn-in budget, the more so
+# with blocked variables (nsplits=1). They use `augment=True` so the MCMC
+# samples the exact `log_s` full conditional, matching `sample_prior`. The
+# blocked low-p cases ((1, 1), (3, 2)) stress-test that augmentation: without it
+# the variable usage is badly biased there (`s` too uniform).
+@pytest.mark.parametrize(
+    ('p', 'nsplits', 'sparsity'),
+    [
+        (1, 1, None),
+        (3, 2, None),
+        (10, 1, None),
+        (10, 255, None),
+        (10, 1, 'fixed'),
+        (10, 1, 'free-narrow'),
+        (10, 1, 'free-wide'),
+        (10, 255, 'free-wide'),
+        (1, 1, 'free-wide'),
+        (3, 2, 'fixed'),
+        (3, 2, 'free-wide'),
+    ],
+)
+def test_prior(
+    keys: split, p: int, nsplits: int, sparsity: str | None, subtests: SubTests
+) -> None:
     """Check that the posterior without data is equivalent to the prior."""
-    bart = run_bart_like_prior(keys.pop(), p, nsplits, subtests)
+    # few, heavily-blocked variables make the variable-selection Gibbs loop mix
+    # slowly, so the small-p sparse cases need a longer chain to reach the prior.
+    n_burn, n_save = (6000, 2000) if sparsity is not None and p <= 3 else (3000, 1000)
+    bart = run_bart_like_prior(
+        keys.pop(), p, nsplits, subtests, sparsity, n_burn, n_save
+    )
 
-    prior_trace = sample_prior_like(keys.pop(), bart, subtests)
+    prior, prior_trace = sample_prior_like(keys.pop(), bart, subtests)
 
     with subtests.test('number of stub trees'):
         nstub_mcmc = count_stub_trees(bart._main_trace.split_tree)
@@ -1810,13 +1841,18 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
             bart._mcmc_state.forest.max_split.size, prior_trace
         )
 
-        with subtests.test('varcount'):
-            rhat_varcount = rhat_rank([bart.varcount, varcount_prior], split=False)
-            # `rhat_varcount` is a max over `p` rank-rhat values; its upper tail
-            # reaches ~1.05 even when the MCMC matches the prior exactly (checked
-            # over 100 seeds for both p=3 and p=10), so a tighter bound would
-            # false-fail on ~10% of seeds.
-            assert_array_less(rhat_varcount, 1.05)
+        if sparsity is None:
+            # under variable selection the per-variable counts are exchangeable
+            # but their labelling mixes very slowly (a sparse `s` sticks on a
+            # variable for many iterations), so this never converges; the
+            # label-invariant `effective predictors` subtest checks `s` instead.
+            with subtests.test('varcount'):
+                rhat_varcount = rhat_rank([bart.varcount, varcount_prior], split=False)
+                # `rhat_varcount` is a max over `p` rank-rhat values; its upper
+                # tail reaches ~1.05 even when the MCMC matches the prior exactly
+                # (checked over 100 seeds for both p=3 and p=10), so a tighter
+                # bound would false-fail on ~10% of seeds.
+                assert_array_less(rhat_varcount, 1.05)
 
         with subtests.test('number of nodes'):
             sum_varcount_mcmc = bart.varcount.sum(axis=1)
@@ -1852,19 +1888,75 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
         rhat_yhat = rhat_rank([yhat_mcmc, yhat_prior], split=False)
         assert_array_less(rhat_yhat, 1.01)
 
+    if sparsity is not None:
+        check_sparsity_prior(bart, prior, subtests)
+
+
+def check_sparsity_prior(bart: Bart, prior: PriorSample, subtests: SubTests) -> None:
+    """Check the MCMC matches the prior on the variable-selection parameters."""
+    # `effective predictors` is a label-invariant summary of the variable
+    # selection probabilities `s`, so unlike the per-variable counts it is immune
+    # to the slow mixing of which variables carry the mass. With p=1 it is
+    # degenerate (s is always [1], and the augmentation is a no-op), so skip it.
+    if bart._mcmc_state.forest.max_split.size > 1:
+        with subtests.test('effective predictors'):
+            eff_mcmc = effective_predictors(nnone(bart._main_trace.varprob))
+            eff_prior = effective_predictors(softmax(nnone(prior.log_s), axis=-1))
+            rhat_eff = rhat_rank([eff_mcmc, eff_prior], split=False)
+            # the bound is loose because `s` mixes slowly with few blocked
+            # variables; it still easily catches a broken augmentation, which
+            # biases the usage enough to push this rhat well past 1.3.
+            assert_array_less(rhat_eff, 1.08)
+
+    if bart._mcmc_state.forest.rho is not None:  # `theta` is sampled
+        with subtests.test('theta'):
+            rhat_theta = rhat_rank(
+                [nnone(bart._main_trace.theta), nnone(prior.theta)], split=False
+            )
+            assert_array_less(rhat_theta, 1.05)
+
+
+def sparsity_prior_params(sparsity: str | None, p: int) -> kwdict:
+    """Sparsity-prior hyperparameters shared by the MCMC and the prior draw."""
+    params = {
+        'fixed': dict(theta=float(p)),
+        'free-narrow': dict(a=50.0, b=50.0, rho=float(p)),
+        'free-wide': dict(a=20.0, b=20.0, rho=float(p)),
+    }
+    return {} if sparsity is None else params[sparsity]
+
+
+def effective_predictors(
+    varprob: Float32[Array, '*batch p'],
+) -> Float32[Array, ' *batch']:
+    """Effective number of predictors, the exp of the split-probability entropy."""
+    entropy = -jnp.sum(jnp.where(varprob > 0, varprob * jnp.log(varprob), 0.0), axis=-1)
+    return jnp.exp(entropy)
+
 
 def run_bart_like_prior(
-    key: Key[Array, ''], p: int, nsplits: int, subtests: SubTests
+    key: Key[Array, ''],
+    p: int,
+    nsplits: int,
+    subtests: SubTests,
+    sparsity: str | None,
+    n_burn: int,
+    n_save: int,
 ) -> Bart:
     """Run `Bart` without datapoints to sample the prior distribution."""
     xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
+    sparse_kw = (
+        {}
+        if sparsity is None
+        else dict(sparse=True, augment=True, **sparsity_prior_params(sparsity, p))
+    )
 
     bart = Bart(
         x_train=jnp.empty((p, 0)),
         y_train=jnp.empty(0),
         num_trees=20,
-        n_save=1000,
-        n_burn=3000,
+        n_save=n_save,
+        n_burn=n_burn,
         printevery=None,
         binner=partial(GivenSplitsBinner, xinfo=xinfo),
         seed=key,
@@ -1874,6 +1966,7 @@ def run_bart_like_prior(
             min_points_per_leaf=None,
             save_ratios=True,
         ),
+        **sparse_kw,
     )
 
     with subtests.test('likelihood ratio = 1'):
@@ -1897,28 +1990,39 @@ def run_bart_like_prior(
 
 def sample_prior_like(
     key: Key[Array, ''], bart: Bart, subtests: SubTests
-) -> TraceWithOffset:
+) -> tuple[PriorSample, TraceWithOffset]:
     """Sample from the prior with the same settings used in `bart`."""
-    p_nonterminal = bart._mcmc_state.forest.p_nonterminal
+    forest = bart._mcmc_state.forest
+    p_nonterminal = forest.p_nonterminal
     max_depth = tree_depth(p_nonterminal)
     indices = 2 ** jnp.arange(max_depth - 1)
     p_nonterminal = p_nonterminal[indices]
 
+    # mirror the variable-selection prior the MCMC used, read back from the state:
+    # free theta (a, b, rho set), fixed theta, or no variable selection
+    if forest.rho is not None:
+        sparse_kw = dict(a=forest.a, b=forest.b, rho=forest.rho)
+    elif forest.theta is not None:
+        sparse_kw = dict(theta=forest.theta)
+    else:
+        sparse_kw = {}
+
     prior_trees = sample_prior(
         key,
         bart.n_save,
-        len(bart._mcmc_state.forest.leaf_tree),
-        bart._mcmc_state.forest.max_split,
+        len(forest.leaf_tree),
+        forest.max_split,
         p_nonterminal,
-        jnp.sqrt(jnp.reciprocal(nnone(bart._mcmc_state.forest.leaf_prior_cov_inv))),
+        jnp.sqrt(jnp.reciprocal(nnone(forest.leaf_prior_cov_inv))),
+        **sparse_kw,
     )
 
     with subtests.test('check prior trees'):
-        bad = check_trace(prior_trees, bart._mcmc_state.forest.max_split)
+        bad = check_trace(prior_trees, forest.max_split)
         bad_count = jnp.count_nonzero(bad)
         assert bad_count == 0
 
-    return TraceWithOffset.from_trees_trace(prior_trees, bart.offset)
+    return prior_trees, TraceWithOffset.from_trees_trace(prior_trees, bart.offset)
 
 
 def count_stub_trees(

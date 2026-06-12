@@ -1,4 +1,4 @@
-# bartz/workflows/tests.yml
+# bartz/.github/workflows/tests.yml
 #
 # Copyright (c) 2024-2026, The Bartz Contributors
 #
@@ -73,30 +73,6 @@ jobs:
         if: steps.refs.outputs.from != ''
         run: uvx --from gitlint-core gitlint --commits=${{ steps.refs.outputs.from }}..HEAD --fail-without-commits --debug
 
-  setup-matrix:
-    runs-on: ubuntu-latest
-    outputs:
-      benchmarks-matrix: ${{ steps.set-matrix.outputs.benchmarks-matrix }}
-    steps:
-      - id: set-matrix
-        run: |
-          BENCHMARKS_BASE_MATRIX='[
-            {
-              "id": "latest",
-              "runs-on": "ubuntu-latest",
-              "vars": ""
-            },
-            {
-              "id": "single-cpu",
-              "runs-on": "ubuntu-latest",
-              "vars": "BARTZ_BENCHMARKS_SINGLE_CPU_DEVICE=1 "
-            }
-          ]'
-
-          BENCHMARKS_MATRIX=$(echo "$BENCHMARKS_BASE_MATRIX" | jq -c ".")
-
-          echo "benchmarks-matrix={\"include\":$BENCHMARKS_MATRIX}" >> $GITHUB_OUTPUT
-
   tests:
     name: ${{ matrix.target }}/${{ matrix.group }}
     runs-on: ubuntu-latest
@@ -125,6 +101,15 @@ jobs:
         uses: r-lib/actions/setup-r@a51a8012b0aab7c32ef9d19bf54da93f3254335e # v2
         with:
           r-version: "renv"
+
+      - name: Add a CRAN fallback mirror for renv
+        # setup-r points renv at Posit Package Manager (PPM) alone, via a
+        # single-URL RENV_CONFIG_REPOS_OVERRIDE. PPM intermittently times out,
+        # which hard-fails the renv bootstrap/restore below and forces a manual
+        # CI re-run. Append a plain CRAN mirror so renv falls back to it (source
+        # builds, only when PPM is unreachable). $RSPM is the PPM binary URL
+        # just exported by setup-r, so the runner's distro codename stays in sync.
+        run: echo "RENV_CONFIG_REPOS_OVERRIDE=PPM=${RSPM};CRAN=https://cloud.r-project.org" >> "$GITHUB_ENV"
 
       - name: Install R dependencies
         uses: r-lib/actions/setup-renv@a51a8012b0aab7c32ef9d19bf54da93f3254335e # v2
@@ -266,7 +251,10 @@ jobs:
 
       - name: Write report to job summary
         if: always()
-        run: test -f diffcov.md && cat diffcov.md >> "$GITHUB_STEP_SUMMARY" || true
+        run: |
+          if [ -f diffcov.md ]; then
+            cat diffcov.md >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   deploy:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
@@ -325,12 +313,18 @@ jobs:
 
   benchmarks:
     name: benchmarks-${{ matrix.id }}
-    needs: setup-matrix
     runs-on: ${{ matrix.runs-on }}
 
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.setup-matrix.outputs.benchmarks-matrix) }}
+      matrix:
+        include:
+          - id: latest
+            runs-on: ubuntu-latest
+            vars: ""
+          - id: single-cpu
+            runs-on: ubuntu-latest
+            vars: "BARTZ_BENCHMARKS_SINGLE_CPU_DEVICE=1 "
 
     steps:
       - name: Checkout repository
@@ -374,6 +368,25 @@ jobs:
 
       - name: Check the version is derived from git
         run: uv run --dev python -c 'import bartz; print(bartz.__version__)' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(\.dev[0-9]+\+g[0-9a-f]+)?$'
+
+      - name: Install R
+        uses: r-lib/actions/setup-r@a51a8012b0aab7c32ef9d19bf54da93f3254335e # v2
+        with:
+          r-version: "renv"
+
+      - name: Add a CRAN fallback mirror for renv
+        # setup-r points renv at Posit Package Manager (PPM) alone, via a
+        # single-URL RENV_CONFIG_REPOS_OVERRIDE. PPM intermittently times out,
+        # which hard-fails the renv bootstrap/restore below and forces a manual
+        # CI re-run. Append a plain CRAN mirror so renv falls back to it (source
+        # builds, only when PPM is unreachable). $RSPM is the PPM binary URL
+        # just exported by setup-r, so the runner's distro codename stays in sync.
+        run: echo "RENV_CONFIG_REPOS_OVERRIDE=PPM=${RSPM};CRAN=https://cloud.r-project.org" >> "$GITHUB_ENV"
+
+      - name: Install R dependencies
+        uses: r-lib/actions/setup-renv@a51a8012b0aab7c32ef9d19bf54da93f3254335e # v2
+        env:
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Update locked dependencies
         run: make update-deps

@@ -190,7 +190,7 @@ def _quantilized_splits_from_vector(
     return splits, max_split
 
 
-def _huge_value(x: Array) -> int | float:
+def _huge_value(x: Shaped[Array, '...']) -> int | float:
     """
     Return the maximum value that can be stored in `x`.
 

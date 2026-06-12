@@ -316,7 +316,7 @@ def jit_active() -> bool:
     return not hasattr(jnp.empty(0), 'platform')
 
 
-def _equal_shards(x: Array, axis_name: str) -> Bool[Array, '']:
+def _equal_shards(x: Shaped[Array, '...'], axis_name: str) -> Bool[Array, '']:
     """Check if all shards of `x` are equal, to be used in a `shard_map` context."""
     size = lax.axis_size(axis_name)
     perm = [(i, (i + 1) % size) for i in range(size)]

@@ -43,6 +43,8 @@ MCMC state
     State
     Forest
     StepConfig
+    Wishart
+    DiagWishart
 
 Reduction strategies
 --------------------
@@ -66,10 +68,12 @@ from bartz.mcmcstep._reduction import (
     ReductionConfig,
 )
 from bartz.mcmcstep._state import (
+    DiagWishart,
     Forest,
     OutcomeType,
     State,
     StepConfig,
+    Wishart,
     init,
     make_p_nonterminal,
 )

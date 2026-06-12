@@ -71,7 +71,7 @@ from bartz.mcmcloop import (
     make_tqdm_callback,
     run_mcmc,
 )
-from bartz.mcmcstep import OutcomeType, make_p_nonterminal
+from bartz.mcmcstep import DiagWishart, OutcomeType, Wishart, make_p_nonterminal
 from bartz.mcmcstep._axes import (
     chain_to_axis,
     chain_vmap_axes,
@@ -283,8 +283,8 @@ class Bart(Module):
     missing
         Boolean mask with the same shape as `y_train`; `True` marks entries
         to be ignored by the MCMC. Values of `y_train` must be finite
-        everywhere, including at masked positions. If 2-D,
-        ``error_cov_scale`` must be diagonal.
+        everywhere, including at masked positions. If 2-D, the error
+        covariance must be diagonal.
     num_trees
         The number of trees used to represent the latent mean function.
     n_save
@@ -1325,6 +1325,31 @@ def _process_error_variance_settings(
     return error_cov_df, error_cov_scale, sigest_out
 
 
+def make_error_cov_prior(
+    error_cov_df: FloatLike | None,
+    error_cov_scale: FloatLike | Float32[Array, 'k k'] | None,
+    outcome_type: OutcomeType | tuple[OutcomeType, ...],
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+) -> Wishart | None:
+    """Build the error precision prior, diagonal-constrained where required.
+
+    Mixed binary-continuous and partial-missing (2-D mask) regression restrict
+    the error covariance to diagonal, so they take a `DiagWishart`; the dense
+    cases take a `Wishart`. `init` re-checks this choice.
+    """
+    if error_cov_df is None:
+        return None
+    if isinstance(outcome_type, tuple):
+        binary = [t is OutcomeType.binary for t in outcome_type]
+        is_mixed = any(binary) and not all(binary)
+    else:
+        is_mixed = False
+    # a 2-D missingness mask only occurs with multivariate y (checked in `init`)
+    partial_missing = missing is not None and missing.ndim == 2
+    cls = DiagWishart if is_mixed or partial_missing else Wishart
+    return cls(nu=error_cov_df, rate=error_cov_scale)
+
+
 def _estimate_sigest2(
     x_train: Shaped[Array, 'p n'],
     y_train: Float32[Array, '*k n'],
@@ -1429,8 +1454,9 @@ def _setup_mcmc(
         num_trees=num_trees,
         p_nonterminal=p_nonterminal,
         leaf_prior_cov_inv=leaf_prior_cov_inv,
-        error_cov_df=error_cov_df,
-        error_cov_scale=error_cov_scale,
+        error_cov_inv=make_error_cov_prior(
+            error_cov_df, error_cov_scale, outcome_type, missing
+        ),
         min_points_per_decision_node=10,
         log_s=process_varprob(varprob, max_split),
         theta=theta,

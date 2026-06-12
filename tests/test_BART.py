@@ -567,9 +567,10 @@ class TestWithCachedBart:
                 str_path = keystr(path)
                 if str_path.endswith('.theta') and not step_theta:
                     return
+                # '.error_cov_inv' on the trace, '.error_cov_inv.value' on the state
                 if (
-                    str_path.endswith('.error_cov_inv')
-                    and bart._mcmc_state.error_cov_df is None
+                    str_path.endswith(('.error_cov_inv', '.error_cov_inv.value'))
+                    and bart._mcmc_state.error_cov_inv.nu is None
                 ):
                     return
                 if str_path.endswith('.forest.affluence_tree') and not check_affluence:
@@ -827,11 +828,12 @@ def test_scale_shift(kw: dict[str, Any]) -> None:
     )
     assert_allclose(nnone(bart1.sigest), nnone(bart2.sigest) / scale, rtol=1e-6)
     assert_array_equal(
-        nnone(bart1._mcmc_state.error_cov_df), nnone(bart2._mcmc_state.error_cov_df)
+        nnone(bart1._mcmc_state.error_cov_inv.nu),
+        nnone(bart2._mcmc_state.error_cov_inv.nu),
     )
     assert_allclose(
-        nnone(bart1._mcmc_state.error_cov_scale),
-        nnone(bart2._mcmc_state.error_cov_scale) / scale**2,
+        nnone(bart1._mcmc_state.error_cov_inv.rate),
+        nnone(bart2._mcmc_state.error_cov_inv.rate) / scale**2,
         rtol=1e-6,
     )
     assert_close_matrices(

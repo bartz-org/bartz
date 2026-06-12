@@ -220,6 +220,14 @@ def simple_init(  # noqa: C901, PLR0915
                 msg = 'multivariate not supported'
                 raise NotImplementedError(msg)
 
+    sig = signature(init)
+    if 'error_cov_inv' in sig.parameters and 'error_cov_df' in kw:
+        # WORKAROUND(bartz<0.11.0): pre-0.11.0 took error_cov_df/error_cov_scale
+        # directly; 0.11.0 folded them into a single `error_cov_inv` Wishart.
+        kw['error_cov_inv'] = mcmcstep.Wishart(
+            nu=kw.pop('error_cov_df'), rate=kw.pop('error_cov_scale')
+        )
+
     kw.update(kwargs)
 
     return init(**kw)
@@ -726,6 +734,9 @@ def kill_callback(
         token = state.sigma2
     else:
         token = state.error_cov_inv
+        # WORKAROUND(bartz<0.11.0): error_cov_inv became a Wishart wrapper in
+        # 0.11.0; the sampled precision moved to its `.value` attribute
+        token = getattr(token, 'value', token)
     stop = i_total + 1 == kill_niters  # i_total is updated after callback
     token = error_if(token, stop, canary)
     debug.callback(lambda _token: None, token)  # to avoid DCE

@@ -770,9 +770,10 @@ class TestWithCachedBart:
                 if (
                     (str_path.endswith('.theta') and not step_theta)
                     or (
-                        str_path.endswith('.error_cov_inv')
-                        and bart._mcmc_state.error_cov_df is None
-                        # fixed covariance matrix, all chains equal
+                        # '.error_cov_inv' on the trace, '.…value' on the state;
+                        # fixed covariance matrix means all chains are equal
+                        str_path.endswith(('.error_cov_inv', '.error_cov_inv.value'))
+                        and bart._mcmc_state.error_cov_inv.nu is None
                     )
                     or (
                         x is not None
@@ -1463,7 +1464,8 @@ def test_scale_shift(bkw: BartKW) -> None:
         bart1.sigest, jnp.where(mask, bart2.sigest, bart2.sigest / scale), rtol=1e-6
     )
     assert_array_equal(
-        nnone(bart1._mcmc_state.error_cov_df), nnone(bart2._mcmc_state.error_cov_df)
+        nnone(bart1._mcmc_state.error_cov_inv.nu),
+        nnone(bart2._mcmc_state.error_cov_inv.nu),
     )
 
     masked_scale = jnp.where(mask, 1.0, scale)
@@ -1478,8 +1480,8 @@ def test_scale_shift(bkw: BartKW) -> None:
     )
 
     assert_close_matrices(
-        nnone(bart1._mcmc_state.error_cov_scale) * cov_scale,
-        nnone(bart2._mcmc_state.error_cov_scale),
+        nnone(bart1._mcmc_state.error_cov_inv.rate) * cov_scale,
+        nnone(bart2._mcmc_state.error_cov_inv.rate),
         rtol=1e-6,
     )
 
@@ -2707,7 +2709,7 @@ class TestMVBartInterface:
         with subtests.test('lambda_'):
             bart = Bart(lambda_=1.0, **kw)
             assert bart.sigest is None
-            assert nnone(bart._mcmc_state.error_cov_scale).shape == (k, k)
+            assert nnone(bart._mcmc_state.error_cov_inv.rate).shape == (k, k)
 
     def test_mixed_rejects_weights(self, example_data: ExampleData) -> None:
         """Mixed outcome_type + weights should raise."""
@@ -2774,8 +2776,10 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         rtol=1e-7,
     )
     assert_close_matrices(
-        chain_to_axis(state_uv.error_cov_inv, uv_axes.error_cov_inv),
-        chain_to_axis(state_mv.error_cov_inv, mv_axes.error_cov_inv).squeeze((-2, -1)),
+        chain_to_axis(state_uv.error_cov_inv.value, uv_axes.error_cov_inv.value),
+        chain_to_axis(
+            state_mv.error_cov_inv.value, mv_axes.error_cov_inv.value
+        ).squeeze((-2, -1)),
         rtol=1e-6,
     )
 
@@ -2787,10 +2791,12 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         rtol=1e-6,
     )
     if outcome_type == 'continuous':
-        assert_array_equal(nnone(state_uv.error_cov_df), nnone(state_mv.error_cov_df))
+        assert_array_equal(
+            nnone(state_uv.error_cov_inv.nu), nnone(state_mv.error_cov_inv.nu)
+        )
         assert_allclose(
-            nnone(state_uv.error_cov_scale),
-            nnone(state_mv.error_cov_scale).reshape(()),
+            nnone(state_uv.error_cov_inv.rate),
+            nnone(state_mv.error_cov_inv.rate).reshape(()),
             rtol=1e-6,
         )
         assert_allclose(

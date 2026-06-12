@@ -90,7 +90,7 @@ def step(key: Key[Array, ''], state: State) -> State:
     if state.z is not None:
         state = step_z(keys.pop(), state)
 
-    if state.error_cov_df is not None:
+    if state.error_cov_inv.nu is not None:
         state = step_error_cov_inv(keys.pop(), state)
 
     state = step_sparse(keys.pop(), state)
@@ -382,10 +382,10 @@ def accept_moves_parallel_stage(
     )
 
     prelf = precompute_leaf_terms(
-        key, prec_trees, state.error_cov_inv, state.forest.leaf_prior_cov_inv
+        key, prec_trees, state.error_cov_inv.value, state.forest.leaf_prior_cov_inv
     )
     prelkv = precompute_likelihood_terms(
-        state.error_cov_inv, state.forest.leaf_prior_cov_inv, prelf, moves
+        state.error_cov_inv.value, state.forest.leaf_prior_cov_inv, prelf, moves
     )
 
     return ParallelStageOut(
@@ -1022,7 +1022,9 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
                 pso.state.config.data_sharded,
                 pso.state.prec_scale,
                 pso.state.forest.log_likelihood is not None,
-                pso.state.error_cov_inv if isinstance(pso.prelf, PreLfMVHet) else None,
+                pso.state.error_cov_inv.value
+                if isinstance(pso.prelf, PreLfMVHet)
+                else None,
             ),
             pt,
         )
@@ -1515,8 +1517,8 @@ def _sample_wishart_bartlett(
 
 
 def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
-    assert state.error_cov_df is not None
-    assert state.error_cov_scale is not None
+    assert state.error_cov_inv.nu is not None
+    assert state.error_cov_inv.rate is not None
 
     resid = state.resid
     if state.inv_sdev_scale is None:
@@ -1528,20 +1530,20 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
         if state.config.data_sharded:
             n_eff = lax.psum(n_eff, 'data')
         resid *= state.inv_sdev_scale
-    df_post = state.error_cov_df + n_eff
+    df_post = state.error_cov_inv.nu + n_eff
     rrt = resid @ resid.T
     if state.config.data_sharded:
         rrt = lax.psum(rrt, 'data')
-    scale_post = state.error_cov_scale + rrt
+    scale_post = state.error_cov_inv.rate + rrt
 
     prec = _sample_wishart_bartlett(key, df_post, scale_post)
-    return replace(state, error_cov_inv=prec)
+    return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
 def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     """Per-component inverse-gamma update for univariate, mixed, and partial-missing paths."""
-    assert state.error_cov_scale is not None
-    assert state.error_cov_df is not None
+    assert state.error_cov_inv.rate is not None
+    assert state.error_cov_inv.nu is not None
 
     resid = state.resid
     if state.inv_sdev_scale is not None:
@@ -1555,13 +1557,13 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
         n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
         if state.config.data_sharded:
             n_eff = lax.psum(n_eff, 'data')
-    alpha = state.error_cov_df / 2 + n_eff / 2
+    alpha = state.error_cov_inv.nu / 2 + n_eff / 2
 
     # beta
     norm2 = jnp.einsum('...n,...n->...', resid, resid)
     if state.config.data_sharded:
         norm2 = lax.psum(norm2, 'data')
-    scale = state.error_cov_scale
+    scale = state.error_cov_inv.rate
     kshape = resid.shape[:-1]
     if kshape:
         scale = jnp.diag(scale)
@@ -1576,14 +1578,14 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
         prec = prec.at[state.binary_indices].set(1.0)
     if kshape:
         prec = jnp.diag(prec)
-    return replace(state, error_cov_inv=prec)
+    return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
 @named_call
 def step_error_cov_inv(key: Key[Array, ''], state: State) -> State:
     """MCMC-update the inverse error covariance."""
     if (
-        state.error_cov_inv.ndim == 2
+        state.error_cov_inv.value.ndim == 2
         and state.binary_indices is None
         and (state.inv_sdev_scale is None or state.inv_sdev_scale.ndim == 1)
     ):

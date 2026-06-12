@@ -1661,7 +1661,7 @@ def _ineligible_weights_tree(
     var_tree: UInt[Array, ' half_tree_size'],
     split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
-    s_padded: Float32[Array, ' p_plus_1'],
+    s_padded: Float32[Array, ' p+1'],
 ) -> tuple[
     UInt[Array, 'half_tree_size d_minus_2'], Float32[Array, 'half_tree_size d_minus_2']
 ]:
@@ -1695,15 +1695,17 @@ def _ineligible_weights_tree(
         repeats, fill slots, and non-internal nodes.
     """
     (half_tree_size,) = split_tree.shape
+
     nodes = jnp.arange(half_tree_size)
     ineligible = vmap(fully_used_variables, in_axes=(None, None, None, 0))(
         var_tree, split_tree, max_split, nodes
-    )
+    )  # shape (half_tree_size, d_minus_2)
+
     is_first = _first_occurrence_mask(ineligible, max_split.size)
 
     # eligible mass = 1 - ineligible mass, since the selectable variables sum to
     # 1; only internal nodes contribute an augmentation draw
-    ineligible_mass = jnp.sum(s_padded[ineligible] * is_first, axis=-1)
+    ineligible_mass = jnp.sum(s_padded[ineligible] * is_first, axis=-1)  # shape (hts,)
     # the split variable is eligible, so the eligible mass is positive at internal
     # nodes; the floor only guards against round-off zeroing it out. Non-internal
     # nodes get a zero weight below, so their eligible mass is never used.
@@ -1776,7 +1778,7 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, '
         forest.split_tree,
         forest.max_split,
         s_padded,
-    )
+    )  # both shape (num_trees, hts, d-2)
     blocked_mass = jnp.zeros(p + 1).at[indices.ravel()].add(weights.ravel())
 
     return random.poisson(keys.pop(), s * blocked_mass[:p], dtype=jnp.int32)

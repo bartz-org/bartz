@@ -305,10 +305,11 @@ class State(Module):
     `error_cov_inv` and this is an O(1) relative weight; its dtype may be
     narrower than float32 (see `init`'s ``prec_scale_dtype``)."""
 
-    inv_sdev_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(data=-1)
+    inv_sdev_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None = field(data=-1)
     """The reciprocal of the per-observation error standard-deviation scale.
     `None` in binary regression. Shape ``(n,)`` for scalar weights, or
-    ``(k, n)`` for per-component vector weights."""
+    ``(k, n)`` for per-component vector weights. Like `prec_scale`, its dtype
+    may be narrower than float32 (see `init`'s ``prec_scale_dtype``)."""
 
     error_cov_df: Float32[Array, ''] | None
     """The df parameter of the inverse Wishart prior on the noise
@@ -631,9 +632,10 @@ def init(
         over/underflow whatever the scale of `y`.
     prec_scale_dtype
         The dtype used to store the per-datapoint error precisions
-        (`State.prec_scale`); ignored without `error_scale`/`missing`. The scale
-        lives in the float32 `error_cov_inv`, so a narrow dtype (e.g. float16)
-        stores an O(1) relative weight without over/underflow.
+        (`State.prec_scale`) and inverse standard deviations
+        (`State.inv_sdev_scale`); ignored without `error_scale`/`missing`. The
+        scale lives in the float32 `error_cov_inv`, so a narrow dtype (e.g.
+        float16) stores an O(1) relative weight without over/underflow.
     error_cov_df
     error_cov_scale
         The df and scale parameters of the inverse Wishart prior on the error
@@ -1102,15 +1104,14 @@ def _compute_scales(
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
     prec_scale_dtype: DTypeLike,
 ) -> tuple[
-    Float32[Array, ' n'] | Float32[Array, 'k n'],
-    Float[Array, ' n'] | Float[Array, 'k k n'],
+    Float[Array, ' n'] | Float[Array, 'k n'], Float[Array, ' n'] | Float[Array, 'k k n']
 ]:
     """Compute ``inv_sdev_scale`` and ``prec_scale``.
 
     This is a separate function to use donate_argnums to avoid intermediate
-    copies. At least one of `error_scale` and `missing` must be non-None.
-    `prec_scale` is cast to `prec_scale_dtype` for storage; `inv_sdev_scale`
-    stays float32.
+    copies. At least one of `error_scale` and `missing` must be non-None. Both
+    outputs are cast to `prec_scale_dtype` for storage; the squaring that forms
+    `prec_scale` happens in float32 first.
     """
     if error_scale is None:
         inv_sdev_scale = jnp.array(1.0)
@@ -1122,7 +1123,7 @@ def _compute_scales(
         prec_scale = jnp.square(inv_sdev_scale)
     else:
         prec_scale = jnp.einsum('an,bn->abn', inv_sdev_scale, inv_sdev_scale)
-    return inv_sdev_scale, prec_scale.astype(prec_scale_dtype)
+    return inv_sdev_scale.astype(prec_scale_dtype), prec_scale.astype(prec_scale_dtype)
 
 
 def _get_blocked_vars(

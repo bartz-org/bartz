@@ -1242,10 +1242,14 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     # public API anywhere
     assert bart._main_trace.leaf_tree.dtype == _init_default(bkw.kw, 'leaf_dtype')
 
-    # likewise the internal prec_scale dtype (only set for weighted/missing data)
+    # likewise the internal prec_scale and inv_sdev_scale dtypes, which share
+    # `prec_scale_dtype` (both only set for weighted/missing data)
     prec_scale = bart._mcmc_state.prec_scale
     if prec_scale is not None:
         assert prec_scale.dtype == _init_default(bkw.kw, 'prec_scale_dtype')
+    inv_sdev_scale = bart._mcmc_state.inv_sdev_scale
+    if inv_sdev_scale is not None:
+        assert inv_sdev_scale.dtype == _init_default(bkw.kw, 'prec_scale_dtype')
 
 
 def test_leaf_scale(bkw: BartKW) -> None:

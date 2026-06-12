@@ -81,6 +81,10 @@ if jax.__version_info__ >= (0, 8, 0):
 if jax.__version_info__ >= (0, 8, 2):
     config.update('jax_check_static_indices', True)
 
+# WORKAROUND(jax<0.9.1): jax_allow_f16_reductions config option added in 0.9.1
+if jax.__version_info__ >= (0, 9, 1):
+    config.update('jax_allow_f16_reductions', False)
+
 # enable compilation cache
 if sys.version_info[:2] > get_old_python_version():
     # enable only on latest config because `make tests-old` fails if there is a

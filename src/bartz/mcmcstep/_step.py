@@ -1003,9 +1003,9 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
     """
 
     def loop(
-        resid: Float32[Array, ' n'] | Float32[Array, ' k n'], pt: SeqStageInPerTree
+        resid: Float[Array, ' n'] | Float[Array, ' k n'], pt: SeqStageInPerTree
     ) -> tuple[
-        Float32[Array, ' n'] | Float32[Array, ' k n'],
+        Float[Array, ' n'] | Float[Array, ' k n'],
         tuple[
             Float[Array, ' tree_size'] | Float[Array, ' k tree_size'],
             Bool[Array, ''],
@@ -1023,6 +1023,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
                 pso.state.forest.log_likelihood is not None,
                 pso.state.error_cov_inv if isinstance(pso.prelf, PreLfMVHet) else None,
                 pso.state.forest.leaf_scale,
+                pso.state.resid_scale,
             ),
             pt,
         )
@@ -1077,6 +1078,9 @@ class SeqStageInAllTrees(Module):
     leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
     """The scale of the stored leaf values, see `bartz.mcmcstep.Forest.leaf_scale`."""
 
+    resid_scale: Float32[Array, ''] | Float32[Array, ' k']
+    """The scale of the stored residuals, see `bartz.mcmcstep.State.resid_scale`."""
+
 
 class SeqStageInPerTree(Module):
     """The inputs to `accept_move_and_sample_leaves` that are separate for each tree."""
@@ -1114,11 +1118,11 @@ class SeqStageInPerTree(Module):
 
 @named_call
 def accept_move_and_sample_leaves(
-    resid: Float32[Array, ' n'] | Float32[Array, ' k n'],
+    resid: Float[Array, ' n'] | Float[Array, ' k n'],
     at: SeqStageInAllTrees,
     pt: SeqStageInPerTree,
 ) -> tuple[
-    Float32[Array, ' n'] | Float32[Array, ' k n'],
+    Float[Array, ' n'] | Float[Array, ' k n'],
     Float[Array, ' tree_size'] | Float[Array, ' k tree_size'],
     Bool[Array, ''],
     Bool[Array, ''],
@@ -1130,7 +1134,10 @@ def accept_move_and_sample_leaves(
     Parameters
     ----------
     resid
-        The residuals (data minus forest value).
+        The residuals (data minus forest value), in units of `at.resid_scale`
+        and a possibly narrow dtype (see `State.resid`). The reduction over the
+        residuals runs in these units; the per-leaf sums are scaled back to data
+        units afterwards.
     at
         The inputs that are the same for all trees.
     pt
@@ -1138,8 +1145,8 @@ def accept_move_and_sample_leaves(
 
     Returns
     -------
-    resid : Float32[Array, 'n'] | Float32[Array, ' k n']
-        The updated residuals (data minus forest value).
+    resid : Float[Array, 'n'] | Float[Array, ' k n']
+        The updated residuals, in the same stored units and dtype as the input.
     leaf_tree : Float[Array, 'tree_size'] | Float[Array, ' k tree_size']
         The new leaf values of the tree.
     acc : Bool[Array, '']
@@ -1166,6 +1173,11 @@ def accept_move_and_sample_leaves(
         at.resid_reduction_config,
         at.data_sharded,
     )
+
+    # the residuals are stored and reduced in units of `resid_scale` (and a
+    # possibly narrow dtype) for bandwidth; the float32 per-leaf sums are scaled
+    # back to data units here, after the reduction and before everything else
+    resid_tree *= at.resid_scale[..., None]
 
     # convert the starting tree to data units; multiplying by the float32
     # scale also takes care of upcasting narrow leaf dtypes
@@ -1219,10 +1231,12 @@ def accept_move_and_sample_leaves(
     # then updated with the rounded values to stay consistent with the trees
     leaf_tree = (leaf_tree / at.leaf_scale[..., None]).astype(pt.leaf_tree.dtype)
 
-    # replace old tree with new tree in function values
-    resid += (prev_leaf_tree - at.leaf_scale[..., None] * leaf_tree)[
-        ..., pt.leaf_indices
-    ]
+    # replace old tree with new tree in function values; the per-leaf data-unit
+    # delta is converted back to the stored residual units and dtype *before* the
+    # scatter, so the n-sized update stays in the narrow `resid` storage
+    leaf_delta = prev_leaf_tree - at.leaf_scale[..., None] * leaf_tree
+    delta = (leaf_delta / at.resid_scale[..., None]).astype(resid.dtype)
+    resid += delta[..., pt.leaf_indices]
 
     return resid, leaf_tree, acc, to_prune, log_lk_ratio
 
@@ -1532,6 +1546,9 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
     assert state.error_cov_df is not None
     assert state.error_cov_scale is not None
 
+    # keep the residuals in their stored (narrow) dtype and resid_scale units;
+    # the reduction accumulates in float32 and its (k, k) result is rescaled to
+    # data units, so no n-sized float32 array is ever materialized
     resid = state.resid
     if state.inv_sdev_scale is None:
         _, n_eff = resid.shape
@@ -1543,7 +1560,9 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
             n_eff = lax.psum(n_eff, 'data')
         resid *= state.inv_sdev_scale
     df_post = state.error_cov_df + n_eff
-    rrt = resid @ resid.T
+    rrt = jnp.einsum(
+        'an,bn->ab', resid, resid, preferred_element_type=jnp.float32
+    ) * jnp.outer(state.resid_scale, state.resid_scale)
     if state.config.data_sharded:
         rrt = lax.psum(rrt, 'data')
     scale_post = state.error_cov_scale + rrt
@@ -1557,6 +1576,9 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     assert state.error_cov_scale is not None
     assert state.error_cov_df is not None
 
+    # keep the residuals in their stored (narrow) dtype and resid_scale units;
+    # the reduction accumulates in float32 and its small result is rescaled to
+    # data units, so no n-sized float32 array is ever materialized
     resid = state.resid
     if state.inv_sdev_scale is not None:
         resid *= state.inv_sdev_scale
@@ -1572,7 +1594,9 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     alpha = state.error_cov_df / 2 + n_eff / 2
 
     # beta
-    norm2 = jnp.einsum('...n,...n->...', resid, resid)
+    norm2 = jnp.einsum(
+        '...n,...n->...', resid, resid, preferred_element_type=jnp.float32
+    ) * jnp.square(state.resid_scale)
     if state.config.data_sharded:
         norm2 = lax.psum(norm2, 'data')
     scale = state.error_cov_scale
@@ -1626,11 +1650,13 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     assert state.binary_y is not None
 
     if state.binary_indices is not None:
-        resid = state.resid[..., state.binary_indices, :]
+        resid_scale = state.resid_scale[state.binary_indices]
+        resid = state.resid[state.binary_indices, :]
     else:
+        resid_scale = state.resid_scale
         resid = state.resid
 
-    trees_plus_offset = state.z - resid
+    trees_plus_offset = state.z - resid * resid_scale[..., None]
     if state.config.data_sharded:
         # decorrelate the seed across data shards; the seed is replicated
         # because the trees and most of the algorithm are replicated
@@ -1638,8 +1664,9 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     resid = truncated_normal_onesided(key, (), ~state.binary_y, -trees_plus_offset)
     z = trees_plus_offset + resid
 
+    resid = (resid / resid_scale[..., None]).astype(state.resid.dtype)
     if state.binary_indices is not None:
-        resid = state.resid.at[..., state.binary_indices, :].set(resid)
+        resid = state.resid.at[state.binary_indices, :].set(resid)
 
     return replace(state, z=z, resid=resid)
 

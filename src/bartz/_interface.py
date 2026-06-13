@@ -1626,7 +1626,7 @@ def compare_resid(
 ]:
     """Re-compute residuals to compare them with the updated ones."""
     chain_axes = chain_vmap_axes(state)
-    resid1 = chain_to_axis(state.resid, chain_axes.resid)
+    resid1 = chain_to_axis(state.resid * state.resid_scale[..., None], chain_axes.resid)
     z = chain_to_axis(state.z, chain_axes.z) if state.z is not None else None
 
     forests = _trees_chain_first(state.forest)

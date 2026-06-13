@@ -25,7 +25,7 @@
 """Module defining the BART MCMC state and initialization."""
 
 from collections.abc import Callable, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial, wraps
 from typing import Literal, TypedDict, TypeVar, cast
@@ -285,10 +285,19 @@ class State(Module):
     """The indices of binary outcome components in the full list of outcome
     components. `None` when there are no binary components."""
 
-    resid: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
+    resid: Float[Array, '*chains n'] | Float[Array, '*chains k n'] = field(
         chains=CHAIN_AXIS, data=-1
     )
-    """The residuals (`y` or `z` minus sum of trees)."""
+    """The residuals (`y` or `z` minus sum of trees), in units of `resid_scale`."""
+
+    resid_scale: Float32[Array, ''] | Float32[Array, ' k']
+    """The scale of the residuals. The residual in data units is
+    ``resid_scale * resid``. Set to the marginal prior standard deviation of the
+    sum of trees (`Forest.leaf_scale` times the square root of the number of
+    trees), rounded to a power of two so the conversion to and from data units
+    is exact. This keeps the stored residuals O(1) whatever the data units, so
+    they do not over/underflow narrow `resid` dtypes (see `init`'s
+    ``resid_dtype``)."""
 
     error_cov_inv: Float32[Array, '*chains'] | Float32[Array, '*chains k k'] = field(
         chains=CHAIN_AXIS
@@ -569,6 +578,7 @@ def init(
     leaf_prior_cov_inv: FloatLike | Float[ArrayLike, 'k k'],
     leaf_dtype: DTypeLike = jnp.float16,
     prec_scale_dtype: DTypeLike = jnp.float16,
+    resid_dtype: DTypeLike = jnp.float32,
     error_cov_df: FloatLike | None = None,
     error_cov_scale: FloatLike | Float[ArrayLike, 'k k'] | None = None,
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
@@ -636,6 +646,11 @@ def init(
         (`State.inv_sdev_scale`); ignored without `error_scale`/`missing`. The
         scale lives in the float32 `error_cov_inv`, so a narrow dtype (e.g.
         float16) stores an O(1) relative weight without over/underflow.
+    resid_dtype
+        The dtype used to store the residuals (`State.resid`). Like the leaves,
+        the residuals are stored in units of a float32 scale (`State.resid_scale`,
+        the marginal prior standard deviation of the sum of trees), so a narrow
+        dtype stores O(1) values without over/underflow.
     error_cov_df
     error_cov_scale
         The df and scale parameters of the inverse Wishart prior on the error
@@ -773,12 +788,9 @@ def init(
         )
     )
 
-    # leaves are stored in units of their marginal prior standard deviation,
-    # such that they are O(1) whatever the data units and do not
-    # over/underflow narrow leaf dtypes
-    leaf_dtype = _parse_float_dtype(leaf_dtype)
-    prec_scale_dtype = _parse_float_dtype(prec_scale_dtype)
-    leaf_scale = _compute_leaf_scale(leaf_prior_cov_inv, kshape)
+    storage = _storage_params(
+        leaf_dtype, prec_scale_dtype, resid_dtype, leaf_prior_cov_inv, kshape, num_trees
+    )
 
     # extract array sizes from arguments
     (max_depth,) = p_nonterminal.shape
@@ -838,11 +850,12 @@ def init(
             ),
             binary_indices=binary_indices,
             resid=(
-                _lazy(jnp.zeros, y.shape)
+                _lazy(jnp.zeros, y.shape, storage.resid_dtype)
                 if is_binary
                 # resid is created later after y and offset are sharded
                 else cast(Array, None)
             ),
+            resid_scale=storage.resid_scale,
             error_cov_inv=_lazy_from_array(error_cov_inv),
             # temporarily store user inputs in these slots so they get sharded
             # with everything else; `_compute_scales` replaces them post-shard.
@@ -851,8 +864,10 @@ def init(
             error_cov_df=error_cov_df,
             error_cov_scale=error_cov_scale,
             forest=Forest(
-                leaf_tree=_lazy(jnp.zeros, (num_trees, *kshape, tree_size), leaf_dtype),
-                leaf_scale=leaf_scale,
+                leaf_tree=_lazy(
+                    jnp.zeros, (num_trees, *kshape, tree_size), storage.leaf_dtype
+                ),
+                leaf_scale=storage.leaf_scale,
                 offset=offset,
                 var_tree=_lazy(
                     jnp.zeros,
@@ -927,7 +942,9 @@ def init(
         # calculate initial resid in the continuous outcome case, such that y
         # and offset are already sharded if needed
         if state.resid is None:
-            state = _set_initial_resid(state, binary_indices, num_chains)
+            state = _set_initial_resid(
+                state, binary_indices, num_chains, storage.resid_dtype
+            )
 
         # calculate initial binary_y
         if is_binary or binary_indices is not None:
@@ -951,7 +968,7 @@ def init(
         # user-supplied `missing` mask.
         if state.prec_scale is not None or state.inv_sdev_scale is not None:
             inv_sdev_scale, prec_scale = _compute_scales(
-                state.prec_scale, state.inv_sdev_scale, prec_scale_dtype
+                state.prec_scale, state.inv_sdev_scale, storage.prec_scale_dtype
             )
             state = replace(state, inv_sdev_scale=inv_sdev_scale, prec_scale=prec_scale)
 
@@ -989,8 +1006,49 @@ def _compute_leaf_scale(
     return jnp.where(jnp.isfinite(leaf_scale) & (leaf_scale > 0), leaf_scale, 1.0)
 
 
+@dataclass(frozen=True)
+class _StorageParams:
+    """Storage dtypes and scales for the leaves and residuals."""
+
+    leaf_dtype: jnp.dtype
+    prec_scale_dtype: jnp.dtype
+    resid_dtype: jnp.dtype
+    leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
+    resid_scale: Float32[Array, ''] | Float32[Array, ' k']
+
+
+def _storage_params(
+    leaf_dtype: DTypeLike,
+    prec_scale_dtype: DTypeLike,
+    resid_dtype: DTypeLike,
+    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+    kshape: tuple[int, ...],
+    num_trees: int,
+) -> _StorageParams:
+    """Normalize the storage dtypes and compute the leaf and residual scales.
+
+    Leaves and residuals are stored in units of their marginal prior standard
+    deviation, so they are O(1) whatever the data units and do not over/underflow
+    narrow dtypes. The residual unit reuses `leaf_scale` (times the square root of
+    the number of trees, since the sum of trees models the data) instead of a new
+    constant, and is rounded to a power of two so converting between stored and
+    data units is exact, adding no rounding to a float32 residual.
+    """
+    leaf_scale = _compute_leaf_scale(leaf_prior_cov_inv, kshape)
+    return _StorageParams(
+        leaf_dtype=_parse_float_dtype(leaf_dtype),
+        prec_scale_dtype=_parse_float_dtype(prec_scale_dtype),
+        resid_dtype=_parse_float_dtype(resid_dtype),
+        leaf_scale=leaf_scale,
+        resid_scale=jnp.exp2(jnp.round(jnp.log2(leaf_scale * num_trees**0.5))),
+    )
+
+
 def _set_initial_resid(
-    state: 'State', binary_indices: Int32[Array, ' kb'] | None, num_chains: int | None
+    state: 'State',
+    binary_indices: Int32[Array, ' kb'] | None,
+    num_chains: int | None,
+    resid_dtype: jnp.dtype,
 ) -> 'State':
     """Build the continuous-outcome `resid` and shard it.
 
@@ -1007,6 +1065,8 @@ def _set_initial_resid(
         state.binary_y,
         state.forest.offset,
         binary_indices,
+        state.resid_scale,
+        resid_dtype,
     )
     preview_resid = add_dummy_axis(inner) if num_chains is not None else inner
     preview = replace(state, resid=preview_resid)
@@ -1022,16 +1082,19 @@ def _initial_resid(
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
     binary_indices: Int32[Array, ' kb'] | None,
-) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
+    resid_scale: Float32[Array, ''] | Float32[Array, ' k'],
+    resid_dtype: jnp.dtype,
+) -> Float[Array, ' n'] | Float[Array, 'k n']:
     """Calculate the initial value for `State.resid` in the continuous outcome case.
 
-    In the mixed binary-continuous case, binary rows are zeroed out (their
-    residual starts at ``z - trees - offset = 0``).
+    The residual is stored in units of `resid_scale` and dtype `resid_dtype`. In
+    the mixed binary-continuous case, binary rows are zeroed out (their residual
+    starts at ``z - trees - offset = 0``).
     """
     resid = jnp.broadcast_to(y - offset[..., None], shape)
     if binary_indices is not None:
         resid = resid.at[..., binary_indices, :].set(0.0)
-    return resid
+    return (resid / resid_scale[..., None]).astype(resid_dtype)
 
 
 def _initial_binary_y(

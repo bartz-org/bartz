@@ -1936,11 +1936,13 @@ class TestMixedBinaryContinuous:
         assert_array_equal(state.resid[0], jnp.zeros(self.n))
         assert_array_equal(state.resid[2], jnp.zeros(self.n))
 
-        # continuous row (1) should be y[1] - offset[1]
+        # continuous row (1) should be y[1] - offset[1] in data units (resid is
+        # stored in units of resid_scale)
         y = init_kwargs['y']
         offset = init_kwargs['offset']
         expected = y[1] - offset[1]
-        assert_array_equal(state.resid[1], expected)
+        data_units = state.resid[1] * state.resid_scale[1]
+        assert_close_matrices(data_units, expected, rtol=1e-6)
 
     def test_init_z_values(self, init_kwargs: dict) -> None:
         """Check that z is initialized to offset for binary components."""
@@ -2382,6 +2384,7 @@ class TestMVBartIntegration:
             z=None,
             prec_scale=None,
             inv_sdev_scale=None,
+            resid_scale=jnp.ones(()),  # unit scale: resid is in data units
             forest=_EmptyForest(),
             config=_minimal_step_config(),
         )
@@ -2448,6 +2451,7 @@ class TestMVBartIntegration:
             error_cov_df=df_prior,
             z=None,
             prec_scale=None,
+            resid_scale=jnp.ones(()),  # unit scale: resid is in data units
             forest=_EmptyForest(),
             config=_minimal_step_config(),
         )

@@ -62,6 +62,7 @@ Interface hierarchy:
 
 ## Code style
 
+- **Commit messages:** 50/72, conventional commits
 - **Formatter/linter:** ruff with single quotes
 - **Imports:** generally use `from foo import bar` (relative import) instead of `import foo; foo.bar`
     - but for some heavily used big (sub)modules, e.g., `from jax import random; random.foo` is preferred to `from jax.random import foo, foo1, foo2, ..., foo999999`.

@@ -213,7 +213,7 @@ def _polars_one_hot(
 
 
 def _expand_variable_weights(
-    weights: ArrayLike, original_var_indices: Sequence[int], n_orig: int
+    weights: Shaped[ArrayLike, '...'], original_var_indices: Sequence[int], n_orig: int
 ) -> Float32[np.ndarray, ' p']:
     """Split each original weight evenly across its one-hot expansions."""
     w = np.asarray(weights, dtype=np.float32)
@@ -269,7 +269,7 @@ class _PreprocessorBase:
 
     @overload
     def fit(
-        self, X: DataFrame, *, variable_weights: ArrayLike
+        self, X: DataFrame, *, variable_weights: Shaped[ArrayLike, '...']
     ) -> Float32[np.ndarray, ' p']: ...
 
     @overload
@@ -278,7 +278,7 @@ class _PreprocessorBase:
     ) -> Float32[np.ndarray, ' p'] | None: ...
 
     def fit(
-        self, X: DataFrame, *, variable_weights: ArrayLike | None = None
+        self, X: DataFrame, *, variable_weights: Shaped[ArrayLike, '...'] | None = None
     ) -> Float32[np.ndarray, ' p'] | None:
         """Record the per-column encoding and return the expanded variable weights.
 

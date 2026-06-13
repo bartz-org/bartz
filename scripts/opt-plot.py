@@ -38,6 +38,7 @@ import json5
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
+from jaxtyping import Shaped
 
 # Relative tolerance for the local optimal band: walking out from the minimum
 # time_est along the sorted reduce_col axis, the band stops at the first point
@@ -65,7 +66,7 @@ def sanitize_for_filename(name: str) -> str:
     return name.replace('=', '-').replace(', ', '_').replace(' ', '_').replace('/', '_')
 
 
-def pick_scale(values: np.ndarray) -> str:
+def pick_scale(values: Shaped[np.ndarray, '...']) -> str:
     """Pick 'log' if all finite values are positive and span more than a decade."""
     finite = values[np.isfinite(values)]
     if finite.size and (finite > 0).all() and finite.max() / finite.min() > 10:

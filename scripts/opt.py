@@ -97,6 +97,7 @@ from jax import Array, block_until_ready, random
 from jax import config as jax_config
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
+from jaxtyping import Shaped
 from polars import DataFrame, concat, read_parquet
 from tqdm import tqdm
 
@@ -112,7 +113,7 @@ from bartz.mcmcstep import (
     step,
 )
 from bartz.mcmcstep._reduction import _ceil_pow2
-from bartz.testing import gen_nonsense_data
+from bartz.testing import gen_data
 
 # Rough element-count budgets used by `ConfigParams.is_valid` to skip
 # combinations that would materialize huge intermediates.
@@ -467,13 +468,25 @@ class ConfigParams:
 
     def to_init_kwargs(self) -> 'InitKwargs':
         """Translate this combination into kwargs for `init`."""
-        X, y, max_split = gen_nonsense_data(1, self.n, self.k)
+        # gen_data requires p >= k, but the benchmarks use a single predictor:
+        # generate with p = k and keep only the first predictor
+        data = gen_data(
+            random.key(2026_06_07),
+            n=self.n,
+            p=1 if self.k is None else self.k,
+            k=self.k,
+            q=0,
+            lambda_=None if self.k is None else 0.5,
+            sigma2_lin=1.0,
+            sigma2_quad=1.0,
+            sigma2_eps=1.0,
+        ).quantize()
         eye = 1.0 if self.k is None else jnp.eye(self.k)
         return InitKwargs(
-            X=X,
-            y=y,
-            offset=jnp.zeros(y.shape[:-1]),
-            max_split=max_split,
+            X=data.x[:1, :],
+            y=data.y,
+            offset=jnp.zeros(data.y.shape[:-1]),
+            max_split=data.max_split[:1],
             num_trees=self.num_trees,
             p_nonterminal=make_p_nonterminal(self.maxdepth, 0.95, 2),
             leaf_prior_cov_inv=self.num_trees * eye,
@@ -507,16 +520,16 @@ class ConfigParams:
 class InitKwargs:
     """Keyword arguments for `bartz.mcmcstep.init`, in init's signature order."""
 
-    X: Array
-    y: Array
-    offset: Array
-    max_split: Array
+    X: Shaped[Array, '...']
+    y: Shaped[Array, '...']
+    offset: Shaped[Array, '...']
+    max_split: Shaped[Array, '...']
     num_trees: int
-    p_nonterminal: Array
-    leaf_prior_cov_inv: float | Array
+    p_nonterminal: Shaped[Array, '...']
+    leaf_prior_cov_inv: float | Shaped[Array, '...']
     error_cov_df: float
-    error_cov_scale: float | Array
-    error_scale: Array | None
+    error_cov_scale: float | Shaped[Array, '...']
+    error_scale: Shaped[Array, '...'] | None
     resid_reduction_config: ReductionConfig
     count_reduction_config: ReductionConfig
     prec_reduction_config: ReductionConfig

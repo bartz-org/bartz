@@ -38,12 +38,13 @@ from jax import (
     device_put,
     jit,
     make_mesh,
+    random,
     tree,
 )
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
-from jaxtyping import Array, UInt8
+from jaxtyping import Array, Shaped, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import get_default_devices, get_device_count, split
@@ -58,8 +59,27 @@ from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import State, init, make_p_nonterminal
 from bartz.mcmcstep._axes import trace_sample_axes
-from bartz.testing import gen_nonsense_data
+from bartz.testing import QuantizedData, gen_data
 from tests.util import assert_array_equal, assert_close_matrices, nnone
+
+
+def simple_data(p: int, n: int, k: int | None = None) -> QuantizedData:
+    """Generate quantized data for `simple_init`."""
+    data = gen_data(
+        random.key(2025_07_14),
+        n=n,
+        p=p,
+        # gen_data does not support k=0: generate one component and drop it
+        k=1 if k == 0 else k,
+        q=0,
+        lambda_=None if k is None else 0.5,
+        sigma2_lin=1.0,
+        sigma2_quad=1.0,
+        sigma2_eps=1.0,
+    ).quantize()
+    if k == 0:
+        data = replace(data, y=data.y[:0, :])
+    return data
 
 
 @filter_jit
@@ -67,13 +87,13 @@ def simple_init(
     p: int, n: int, ntree: int, k: int | None = None, **kwargs: Any
 ) -> State:
     """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
-    X, y, max_split = gen_nonsense_data(p, n, k)
+    data = simple_data(p, n, k)
     eye = 1.0 if k is None else jnp.eye(k)
     return init(
-        X=X,
-        y=y,
+        X=data.x,
+        y=data.y,
         offset=0.0 if k is None else jnp.zeros(k),
-        max_split=max_split,
+        max_split=data.max_split,
         num_trees=ntree,
         p_nonterminal=make_p_nonterminal(6),
         leaf_prior_cov_inv=eye,
@@ -90,7 +110,9 @@ def cat_traces(
     """Concatenate two traces along their per-leaf sample axis."""
     sample_axes = trace_sample_axes(trace_a)
 
-    def cat(a: Array, b: Array, axis: int | None) -> Array:
+    def cat(
+        a: Shaped[Array, '...'], b: Shaped[Array, '...'], axis: int | None
+    ) -> Shaped[Array, '...']:
         if axis is None:
             assert_array_equal(a, b)
             return a
@@ -99,7 +121,9 @@ def cat_traces(
     return tree.map(cat, trace_a, trace_b, sample_axes)
 
 
-def assert_trace_close(actual: Array, desired: Array) -> None:
+def assert_trace_close(
+    actual: Shaped[Array, '*shape'], desired: Shaped[Array, '*shape']
+) -> None:
     """Compare state/trace leaves, tolerating GPU floating-point rounding.
 
     Integer and boolean leaves must match exactly; floating-point leaves are
@@ -141,7 +165,7 @@ class TestRunMcmc:
 
         sample_axes = trace_sample_axes(main_trace)
 
-        def last_sample(arr: Array, axis: int) -> Array:
+        def last_sample(arr: Shaped[Array, '...'], axis: int) -> Shaped[Array, '...']:
             return jnp.take(arr, -1, axis=axis)
 
         assert_array_equal(
@@ -172,7 +196,7 @@ class TestRunMcmc:
         tree.map(partial(assert_array_equal, strict=True), initial_state, final_state)
 
         def assert_empty_trace(
-            _path: KeyPath, x: Array | None, sample_axis: int | None
+            _path: KeyPath, x: Shaped[Array, '...'] | None, sample_axis: int | None
         ) -> None:
             if x is not None and sample_axis is not None:
                 assert x.shape[sample_axis] == 0
@@ -340,7 +364,7 @@ _N_TEST = 60
 
 def _eval_test_points(n_test: int = _N_TEST) -> UInt8[Array, '6 {n_test}']:
     """Generate quantized test points compatible with `simple_init`'s data."""
-    return gen_nonsense_data(6, n_test, None)[0]
+    return simple_data(6, n_test).x
 
 
 def _make_mesh(axes: dict[str, int]) -> Mesh:

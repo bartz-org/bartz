@@ -32,7 +32,7 @@ from functools import partial
 from inspect import signature
 from io import StringIO
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 from equinox import Module, error_if
 from jax import (
@@ -52,7 +52,6 @@ from jaxtyping import Array, Integer, Key
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
 from benchmarks.latest_bartz._jaxext import get_device_count, jit, split
-from benchmarks.latest_bartz.testing import gen_nonsense_data
 
 if TYPE_CHECKING:
     from bartz.mcmcstep import State
@@ -108,13 +107,27 @@ def simple_init(  # noqa: C901, PLR0915
         k = 2
     else:
         k = None
-    X, y, max_split = gen_nonsense_data(p, n, k)
+    # q must be even and < p (< p // k for multivariate); the step timing does
+    # not depend on the DGP, so clamp to a valid value for small p
+    q = min(2, (p - 1 if k is None else p // k - 1))
+    q -= q % 2
+    data = gen_data(
+        random.key(2026_06_07),
+        n=n,
+        p=p,
+        k=k,
+        q=q,
+        lambda_=None if k is None else 0.5,
+        sigma2_lin=1.0,
+        sigma2_quad=1.0,
+        sigma2_eps=1.0,
+    ).quantize()
 
     kw: dict = dict(
-        X=X,
-        y=y,
+        X=data.x,
+        y=data.y,
         offset=0.0 if k is None else jnp.zeros(k),
-        max_split=max_split,
+        max_split=data.max_split,
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(6, 0.95, 2),
         leaf_prior_cov_inv=jnp.float32(num_trees) * (1.0 if k is None else jnp.eye(k)),
@@ -175,7 +188,7 @@ def simple_init(  # noqa: C901, PLR0915
                 # WORKAROUND(bartz<0.6.0): no probit-link binary regression
                 msg = 'binary not supported'
                 raise NotImplementedError(msg)
-            kw['y'] = y > 0
+            kw['y'] = data.y > 0
             kw.pop('sigma2_alpha', None)
             kw.pop('sigma2_beta', None)
             kw.pop('error_cov_df', None)
@@ -232,8 +245,83 @@ class AutoParamNames:
         cls.param_names = tuple(params[1:])
 
 
-class StepGeneric(AutoParamNames):
-    """Benchmarks of `mcmcstep.step`."""
+class StepBase(AutoParamNames):
+    """Shared setup for benchmarks of `mcmcstep.step`."""
+
+    def make_state(self, **kwargs: Any) -> State:
+        """Build the initial MCMC state, allocated on device.
+
+        Subclasses that only compile (never run) `step` may override this to
+        return an abstract state.
+        """
+        return simple_init(**kwargs)
+
+    def setup(self, mode: Mode, kind: Kind, chains: int | None, **kwargs: Any) -> None:
+        """Create an initial MCMC state and random seed, compile & warm-up."""
+        key = random.key(2025_06_24_12_07)
+
+        kw: dict = dict(p=P, n=N, num_trees=NTREE, kind=kind, num_chains=chains)
+        kw.update(kwargs)
+        state = self.make_state(**kw)
+
+        # WORKAROUND(bartz<0.9.0): from 0.9.0, `step` is itself jitted with
+        # state donation and handles variable selection internally, so it can
+        # be benchmarked directly, exercising its own compilation setup. Wrap
+        # older versions to emulate that setup: jit with state donation, plus
+        # the separate sparse step or config adjustment where needed.
+        step_handles_sparse = 'sparse_on_at' in signature(init).parameters
+        step_is_jitted = all(hasattr(step, attr) for attr in ('clear_cache', 'lower'))
+        if step_handles_sparse and step_is_jitted:
+            if kind == 'sparse':
+                # turn variable selection on from the first iteration; int32 to
+                # match the dtype set by init in the lowered signature
+                config = replace(state.config, sparse_on_at=jnp.int32(0))
+                state = replace(state, config=config)
+            self.args = (key, state)
+            self.jitted_func = step
+        else:
+            keys = list(random.split(key))
+            self.args = (keys, state)
+
+            # WORKAROUND(bartz<0.5.0): v0.4.1 step had signature (bart, key);
+            # v0.5.0+ uses (key, bart). Dispatch positionally on first param
+            # name, since the decorator-wrapped step on modern bartz does not
+            # accept `bart` as a keyword argument.
+            step_bart_first = next(iter(signature(step).parameters)) == 'bart'
+
+            def func(keys: list[Key[Array, '']], bart: State) -> State:
+                # WORKAROUND(bartz<0.8.0): pre-0.8.0 sparse step is done by a
+                # separate `mcmcstep.step_sparse` call; from 0.8.0 it's inside
+                # `step` via `bart.config.sparse_on_at`.
+                sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
+                if kind == 'sparse' and sparse_inside_step:
+                    bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
+                if step_bart_first:
+                    bart = step(bart, keys.pop())  # ty: ignore[invalid-argument-type]
+                else:
+                    bart = step(keys.pop(), bart)
+                if kind == 'sparse' and not sparse_inside_step:
+                    bart = mcmcstep.step_sparse(keys.pop(), bart)  # ty:ignore[unresolved-attribute]
+                return bart
+
+            self.jitted_func = jit(func, donate_argnums=(1,))
+
+        # the two dispatch branches produce different (jitted_func, args)
+        # signatures, which ty can not match up across attributes
+        self.compiled_func = self.jitted_func.lower(*self.args).compile()  # ty:ignore[invalid-argument-type]
+        if mode == 'run':
+            self.run_step()
+        self.mode = mode
+
+    def run_step(self) -> None:
+        """Run the compiled step, swapping the donated state for its output."""
+        key, state = self.args
+        state = block_until_ready(self.compiled_func(key, state))
+        self.args = (key, state)
+
+
+class StepGeneric(StepBase):
+    """Time compiling or running `mcmcstep.step`."""
 
     params: tuple[tuple[Mode, ...], tuple[Kind, ...], tuple[int | None, ...]] = (
         ('compile', 'run'),
@@ -241,50 +329,14 @@ class StepGeneric(AutoParamNames):
         (None, 1, 2),
     )
 
-    def setup(self, mode: Mode, kind: Kind, chains: int | None, **kwargs: Any) -> None:
-        """Create an initial MCMC state and random seed, compile & warm-up."""
-        keys = list(random.split(random.key(2025_06_24_12_07)))
-
-        kw: dict = dict(p=P, n=N, num_trees=NTREE, kind=kind, num_chains=chains)
-        kw.update(kwargs)
-
-        self.args = (keys, simple_init(**kw))
-
-        # WORKAROUND(bartz<0.5.0): v0.4.1 step had signature (bart, key);
-        # v0.5.0+ uses (key, bart). Dispatch positionally on first param name,
-        # since the decorator-wrapped step on modern bartz does not accept
-        # `bart` as a keyword argument.
-        step_bart_first = next(iter(signature(step).parameters)) == 'bart'
-
-        def func(keys: list[Key[Array, '']], bart: State) -> State:
-            # WORKAROUND(bartz<0.8.0): pre-0.8.0 sparse step is done by a
-            # separate `mcmcstep.step_sparse` call; from 0.8.0 it's inside `step`
-            # via `bart.config.sparse_on_at`.
-            sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
-            if kind == 'sparse' and sparse_inside_step:
-                bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
-            if step_bart_first:
-                bart = step(bart, keys.pop())  # ty: ignore[invalid-argument-type]
-            else:
-                bart = step(keys.pop(), bart)
-            if kind == 'sparse' and not sparse_inside_step:
-                bart = mcmcstep.step_sparse(keys.pop(), bart)  # ty:ignore[unresolved-attribute]
-            return bart
-
-        self.jitted_func = jit(func)
-        self.compiled_func = self.jitted_func.lower(*self.args).compile()
-        if mode == 'run':
-            block_until_ready(self.compiled_func(*self.args))
-        self.mode = mode
-
     def time_step(self, *_: Any) -> None:
         """Time compiling `step` or running it."""
         match self.mode:
             case 'compile':
                 self.jitted_func.clear_cache()
-                self.jitted_func.lower(*self.args).compile()
+                self.jitted_func.lower(*self.args).compile()  # ty:ignore[invalid-argument-type]
             case 'run':
-                block_until_ready(self.compiled_func(*self.args))
+                self.run_step()
             case _:
                 raise KeyError(self.mode)
 
@@ -314,6 +366,92 @@ class StepSharded(StepGeneric):
             num_trees=1,
             mesh=dict(data=2) if sharded else None,
         )
+
+
+MemStat = Literal['state', 'peak']
+
+
+class CompiledMemoryStats(Protocol):
+    """The fields of jax's `memory_analysis()` result used here."""
+
+    argument_size_in_bytes: int
+    output_size_in_bytes: int
+    alias_size_in_bytes: int
+    temp_size_in_bytes: int
+    peak_memory_in_bytes: int
+
+
+def standardize_memory_analysis(analysis: CompiledMemoryStats) -> dict[MemStat, int]:
+    """Map a compiled function's memory analysis to backend-independent bytes.
+
+    The raw fields of `jax.stages.Compiled.memory_analysis()` carry
+    backend-dependent meanings. Determined empirically with jax and jaxlib
+    0.10.1 on the cpu and cuda sm_86 (RTX 3060) backends:
+
+    - `argument`, `output`, `alias` and `temp` mean the same on both backends:
+      persistent inputs, outputs, donated-in-place buffers, and the
+      peak-simultaneous scratch arena. `temp` reuses freed space, so it is a
+      high-water mark, not a sum over the run.
+    - `peak_memory_in_bytes` differs: on cpu it approximately equals `argument
+      + output - alias` and *excludes* `temp`; on gpu it is the true high-water
+      mark, the same quantity *plus* `temp` (minus small liveness overlaps).
+
+    We report `state = argument + output - alias` (persistent footprint) and
+    `peak = state + temp` (high-water mark, the gpu meaning), reading the raw
+    peak directly on gpu and reconstructing it on cpu.
+    """
+    state = (
+        analysis.argument_size_in_bytes
+        + analysis.output_size_in_bytes
+        - analysis.alias_size_in_bytes
+    )
+    if get_default_platform() == 'cpu':
+        # the cpu peak field omits temp, so reconstruct the high-water mark
+        peak = state + analysis.temp_size_in_bytes
+    else:
+        # gpu (and presumably tpu) already report the liveness-aware peak
+        peak = analysis.peak_memory_in_bytes
+    return {'state': state, 'peak': peak}
+
+
+class StepMemory(StepBase):
+    """Device memory footprint of the compiled `mcmcstep.step` at large scale.
+
+    Reports, in bytes, the persistent `state` buffers and the `peak` high-water
+    mark (normalized to a backend-independent meaning by
+    `standardize_memory_analysis`) at a scale that far exceeds device memory.
+    The state is built abstractly, so `step` is compiled and analyzed but never
+    allocated nor run.
+    """
+
+    params: tuple[tuple[Kind, ...], tuple[int | None, ...], tuple[MemStat, ...]] = (
+        ('plain', 'binary', 'weights', 'sparse', 'multivariate'),
+        (None, 1, 2),
+        ('state', 'peak'),
+    )
+
+    def make_state(self, **kwargs: Any) -> State:
+        """Build the state abstractly, to analyze a scale too large to allocate."""
+        return eval_shape(lambda: simple_init(**kwargs))
+
+    def setup(self, kind: Kind, chains: int | None, stat: MemStat) -> None:  # ty:ignore[invalid-method-override]
+        """Compile `step` at large scale and extract its memory analysis."""
+        # n=16Mi, num_trees=1Ki: only compiled, never run, so it may exceed
+        # device memory. 16Mi = 16 * 2**20.
+        super().setup('compile', kind, chains, n=16 * 1024**2, num_trees=1024)
+        analysis = self.compiled_func.memory_analysis()
+        if analysis is None:
+            # the active backend does not expose a memory analysis
+            msg = 'memory analysis not available'
+            raise NotImplementedError(msg)
+        self.memory = standardize_memory_analysis(analysis)
+        self.stat = stat
+
+    def track_memory(self, *_: Any) -> int:
+        """Report the selected standardized memory statistic of `step`."""
+        return self.memory[self.stat]
+
+    track_memory.unit = 'bytes'  # ty: ignore[unresolved-attribute]
 
 
 class BaseGbart(AutoParamNames):

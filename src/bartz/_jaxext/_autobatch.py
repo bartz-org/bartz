@@ -50,9 +50,13 @@ class BinaryUfunc(Protocol):
     @property
     def identity(self) -> bool | int | float: ...
 
-    def __call__(self, x: ArrayLike, y: ArrayLike, /) -> Array: ...
+    def __call__(
+        self, x: Shaped[ArrayLike, '...'], y: Shaped[ArrayLike, '...'], /
+    ) -> Shaped[Array, '...']: ...
 
-    def reduce(self, a: ArrayLike, /, *, axis: int | None = 0) -> Array: ...
+    def reduce(
+        self, a: Shaped[ArrayLike, '...'], /, *, axis: int | None = 0
+    ) -> Shaped[Array, '...']: ...
 
 
 def expand_axes(
@@ -74,7 +78,7 @@ def normalize_axes(
     """Normalize axes to be non-negative and valid for the corresponding arrays in the tree_arg."""
 
     def normalize_axis(
-        axis: int | None, x: Array | ShapeDtypeStruct | None
+        axis: int | None, x: Shaped[Array, '...'] | ShapeDtypeStruct | None
     ) -> int | None:
         if axis is None:
             return None
@@ -101,7 +105,9 @@ def remove_axis(
 def extract_size(axes: PyTree[int | None], tree_arg: PyTree) -> int:
     """Get the size of each array in tree_arg at the axis in axes, check they are equal and return it."""
 
-    def get_size(x: Array | ShapeDtypeStruct, axis: int | None) -> int | None:
+    def get_size(
+        x: Shaped[Array, '...'] | ShapeDtypeStruct, axis: int | None
+    ) -> int | None:
         if axis is None:
             return None
         else:
@@ -114,7 +120,7 @@ def extract_size(axes: PyTree[int | None], tree_arg: PyTree) -> int:
 
 
 def sum_nbytes(tree_arg: PyTree[Array | ShapeDtypeStruct]) -> int:
-    def nbytes(x: Array | ShapeDtypeStruct) -> int:
+    def nbytes(x: Shaped[Array, '...'] | ShapeDtypeStruct) -> int:
         return math.prod(x.shape) * x.dtype.itemsize
 
     return tree.reduce(lambda size, x: size + nbytes(x), tree_arg, 0)
@@ -169,14 +175,14 @@ def push_nonbatched(
 
 
 def move_axes_out(axes: PyTree[int], tree_arg: PyTree[Array]) -> PyTree[Array]:
-    def move_axis_out(x: Array, axis: int) -> Array:
+    def move_axis_out(x: Shaped[Array, '...'], axis: int) -> Shaped[Array, '...']:
         return jnp.moveaxis(x, axis, 0)
 
     return tree.map(move_axis_out, tree_arg, axes)
 
 
 def move_axes_in(axes: PyTree[int], tree_arg: PyTree[Array]) -> PyTree[Array]:
-    def move_axis_in(x: Array, axis: int) -> Array:
+    def move_axis_in(x: Shaped[Array, '...'], axis: int) -> Shaped[Array, '...']:
         return jnp.moveaxis(x, 0, axis)
 
     return tree.map(move_axis_in, tree_arg, axes)
@@ -185,7 +191,7 @@ def move_axes_in(axes: PyTree[int], tree_arg: PyTree[Array]) -> PyTree[Array]:
 def batch(tree_arg: PyTree[Array, ' T'], nbatches: int) -> PyTree[Array, ' T']:
     """Split the first axis into two axes, the first of size `nbatches`."""
 
-    def batch(x: Array) -> Array:
+    def batch(x: Shaped[Array, '...']) -> Shaped[Array, '...']:
         return x.reshape(nbatches, x.shape[0] // nbatches, *x.shape[1:])
 
     return tree.map(batch, tree_arg)
@@ -194,7 +200,7 @@ def batch(tree_arg: PyTree[Array, ' T'], nbatches: int) -> PyTree[Array, ' T']:
 def unbatch(tree_arg: PyTree[Array, ' T']) -> PyTree[Array, ' T']:
     """Merge the first two axes into a single axis."""
 
-    def unbatch(x: Array) -> Array:
+    def unbatch(x: Shaped[Array, '...']) -> Shaped[Array, '...']:
         return x.reshape(x.shape[0] * x.shape[1], *x.shape[2:])
 
     return tree.map(unbatch, tree_arg)
@@ -209,14 +215,16 @@ def reduce(
     """Reduce each array in `x` along the axes in `axes` starting from `initial` using `ufunc.reduce`."""
     if initial is None:
 
-        def reduce(x: Array, axis: int) -> Array:
+        def reduce(x: Shaped[Array, '...'], axis: int) -> Shaped[Array, '...']:
             return ufunc.reduce(x, axis=axis)
 
         return tree.map(reduce, x, axes)
 
     else:
 
-        def reduce(x: Array, initial: Array, axis: int) -> Array:
+        def reduce(
+            x: Shaped[Array, '...'], initial: Shaped[Array, '...'], axis: int
+        ) -> Shaped[Array, '...']:
             reduced = ufunc.reduce(x, axis=axis)
             return ufunc(initial, reduced)
 
@@ -228,7 +236,7 @@ def identity(
 ) -> PyTree[Array, ' T']:
     """Get the identity element for `ufunc` and each array in `x`."""
 
-    def identity(x: ShapeDtypeStruct) -> Array:
+    def identity(x: ShapeDtypeStruct) -> Shaped[Array, '...']:
         identity = identity_for(ufunc, x.dtype)
         return jnp.broadcast_to(identity, x.shape)
 
@@ -250,7 +258,10 @@ def identity_for(ufunc: BinaryUfunc, input_dtype: DTypeLike) -> Shaped[Array, ''
 
 
 def check_same(tree1: PyTree, tree2: PyTree) -> None:
-    def check_same(x1: Array | ShapeDtypeStruct, x2: Array | ShapeDtypeStruct) -> None:
+    def check_same(
+        x1: Shaped[Array, '*shape'] | ShapeDtypeStruct,
+        x2: Shaped[Array, '*shape'] | ShapeDtypeStruct,
+    ) -> None:
         assert x1.shape == x2.shape
         assert x1.dtype == x2.dtype
 

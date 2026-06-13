@@ -1302,6 +1302,16 @@ def test_jit(kw: dict[str, Any]) -> None:
     assert_close_matrices(pred1, pred2, rtol=1e-5)
 
 
+def test_w_with_binary_raises(kw: dict[str, Any]) -> None:
+    """Reject `w` with binary regression (heteroskedastic probit)."""
+    if get_with_default(kw, 'type') != 'pbart':
+        pytest.skip('Only relevant for binary regression.')
+    _, n = kw['x_train'].shape
+    kw['w'] = jnp.ones(n)
+    with pytest.raises(ValueError, match='not supported with binary regression'):
+        mc_gbart(**kw)
+
+
 @pytest.mark.flaky
 # it's flaky because the interrupt may be caught and converted by jax internals (#33054)
 @pytest.mark.timeout(32)

@@ -436,9 +436,8 @@ class StepMemory(StepBase):
 
     def setup(self, kind: Kind, chains: int | None, stat: MemStat) -> None:  # ty:ignore[invalid-method-override]
         """Compile `step` at large scale and extract its memory analysis."""
-        # n=16Mi, num_trees=1Ki: only compiled, never run, so it may exceed
-        # device memory. 16Mi = 16 * 2**20.
-        super().setup('compile', kind, chains, n=16 * 1024**2, num_trees=1024)
+        # n=16Mi, num_trees=p=1Ki, abstract eval so may exceed device memory
+        super().setup('compile', kind, chains, n=16 * 2**20, num_trees=1024, p=1024)
         analysis = self.compiled_func.memory_analysis()
         if analysis is None:
             # the active backend does not expose a memory analysis

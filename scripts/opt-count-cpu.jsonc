@@ -1,0 +1,45 @@
+{
+    // Tune batched scatter-add for the COUNT reduction (number of datapoints per
+    // leaf), taken on the homoskedastic path (prec_scale is None, i.e.
+    // weights=false; otherwise the count tree is skipped or fused with prec).
+    // CPU variant of opt-count.jsonc.
+    //
+    // Knobs of `BatchedReduction`:
+    //   num_batches    swept; primary axis (plot.reduce); the datapoint-batch
+    //                  count. Low grid null..32 (cpu): null/small batch counts
+    //                  win at the modest core counts of a cpu, unlike the big-GPU
+    //                  high grid (256..16Ki) this config is derived from.
+    //   batches_inner  SWEPT (true/false): the best cpu layout is unknown.
+    //   contiguous     SWEPT (true/false): the best cpu layout is unknown.
+    // The 3060 sweep found (inner, strided) = (true, false) optimal on gpu, but
+    // cpu memory access patterns differ, so we sweep the full 2x2 layout grid
+    // here (both knobs have no effect when num_batches is null, so those rows are
+    // layout-degenerate).
+    //
+    // The reduced value is the scalar 1 (a pure datapoint count), so the count
+    // reduction is INDEPENDENT of the outcome dimension: k is pinned to null. It
+    // is, however, vmapped over a batch of trees, so num_trees (which sets the
+    // effective batch via prec_count_num_trees) is scanned along with n.
+    // num_trees is coarse (small/medium/large) to offset the 4x layout sweep;
+    // widen it if the optimum's tree-batch dependence needs finer resolution.
+    // weights is fixed false (this site is only taken on the homoskedastic
+    // path). maxdepth is fixed at 6, but note the count reduces into only the
+    // move's two children (subset_length=2), so the bin count is tiny here.
+    // The other two reduction sites use default 'auto' batching (resolved
+    // per-platform) as a realistic backdrop, so they don't dominate the step.
+    // n's top value is lowered 4x vs the gpu config because cpu is slower.
+    "plot": {
+        "scan": "n",
+        "reduce": "count_reduction.num_batches",
+    },
+    "values": {
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304],
+        "k":                  [null],
+        "maxdepth":           [6],
+        "weights":            [false],
+        "num_trees":          [1, 16, 256],
+        "resid_reduction":    [{"kind": "batched", "num_batches": "auto"}],
+        "count_reduction":    [{"kind": "batched", "num_batches": [null, 2, 4, 8, 16, 32], "batches_inner": [true, false], "contiguous": [true, false]}],
+        "prec_reduction":     [{"kind": "batched", "num_batches": "auto"}],
+    },
+}

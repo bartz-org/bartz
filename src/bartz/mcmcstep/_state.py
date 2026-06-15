@@ -69,6 +69,8 @@ ArrayLike = Array | ndarray
 
 FloatLike = float | Float[ArrayLike, '']
 
+CHAIN_AXIS_AFTER_TREES = {0: 1, -1: -1}[CHAIN_AXIS]
+
 
 class OutcomeType(Enum):
     """Likelihood types for each outcome component in the regression."""
@@ -141,8 +143,14 @@ class Forest(Module):
     p_propose_grow: Float32[Array, ' half_tree_size']
     """The unnormalized probability of picking a leaf for a grow proposal."""
 
-    leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=CHAIN_AXIS, data=-1)
-    """The index of the leaf each datapoints falls into, for each tree."""
+    leaf_indices: UInt[Array, 'num_trees *chains n'] = field(
+        chains=CHAIN_AXIS_AFTER_TREES, data=-1
+    )
+    """The index of the leaf each datapoints falls into, for each tree.
+
+    The chain axis sits after `num_trees` (not leading, unlike sibling fields)
+    so the per-tree `lax.scan` in `step`, under the chain `vmap`, avoids a
+    transpose of this large array that otherwise inflates gpu peak memory."""
 
     count_tree: UInt32[Array, '*chains num_trees 2*half_tree_size'] | None = field(
         chains=CHAIN_AXIS

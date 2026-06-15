@@ -63,7 +63,7 @@ from bartz.mcmcstep._lazy import (
     _wrap_chain,
     add_dummy_axis,
 )
-from bartz.mcmcstep._reduction import BatchedReduction, ReductionConfig
+from bartz.mcmcstep._reduction import AutoBatchedReduction, ReductionConfig
 
 ArrayLike = Array | ndarray
 
@@ -561,10 +561,9 @@ def init(
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
     min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
-    # the gpu batch targets of the default reductions were tuned on an A4000
-    resid_reduction_config: ReductionConfig = BatchedReduction(auto_gpu_target=1024),
-    count_reduction_config: ReductionConfig = BatchedReduction(auto_gpu_target=2048),
-    prec_reduction_config: ReductionConfig = BatchedReduction(auto_gpu_target=1024),
+    resid_reduction_config: ReductionConfig = AutoBatchedReduction(),
+    count_reduction_config: ReductionConfig = AutoBatchedReduction(),
+    prec_reduction_config: ReductionConfig = AutoBatchedReduction(),
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
     sequential_unroll: int | bool = 2,
     save_ratios: bool = False,

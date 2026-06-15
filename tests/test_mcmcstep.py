@@ -87,6 +87,7 @@ from bartz._jaxext import (
 )
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import (
+    AutoBatchedReduction,
     BatchedReduction,
     OneHotReduction,
     PallasReduction,
@@ -691,11 +692,12 @@ class TestReduction:
         # only mode that runs there)
         pallas_backend = 'triton' if get_default_device().platform == 'gpu' else 'cpu'
         return (
-            # BatchedReduction: unbatched, automatic, and explicit batch counts (a
-            # divisor of `n` and a non-divisor, which leaves an uneven final batch),
-            # each batch axis layout, and strided vs contiguous batch assignment
+            # BatchedReduction: unbatched and explicit batch counts (a divisor of
+            # `n` and a non-divisor, which leaves an uneven final batch), each batch
+            # axis layout, strided vs contiguous batch assignment; plus the
+            # per-platform automatic count of AutoBatchedReduction
             BatchedReduction(num_batches=None),
-            BatchedReduction(num_batches='auto'),
+            AutoBatchedReduction(),
             BatchedReduction(num_batches=4),
             BatchedReduction(num_batches=7),
             BatchedReduction(num_batches=4, batches_inner=False),

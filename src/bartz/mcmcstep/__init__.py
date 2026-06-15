@@ -53,6 +53,7 @@ Configurations for the per-leaf scatter-add reductions, to pass to `init`.
 
     ReductionConfig
     BatchedReduction
+    AutoBatchedReduction
     OneHotReduction
     PallasReduction
 """
@@ -60,6 +61,7 @@ Configurations for the per-leaf scatter-add reductions, to pass to `init`.
 # ruff: noqa: F401
 
 from bartz.mcmcstep._reduction import (
+    AutoBatchedReduction,
     BatchedReduction,
     OneHotReduction,
     PallasReduction,

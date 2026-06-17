@@ -159,12 +159,8 @@ REDUCTION_KINDS: dict[str, type[ReductionConfig]] = {
 
 
 def _reduction_label(cfg: ReductionConfig) -> str:
-    """Compact label of `cfg`: kind tag plus the non-default knobs."""
-    knobs = ', '.join(
-        f'{f.name}={getattr(cfg, f.name)}'
-        for f in fields(cfg)
-        if getattr(cfg, f.name) != f.default
-    )
+    """Label of `cfg` as its kind tag plus every knob value, for plots and logs."""
+    knobs = ', '.join(f'{f.name}={getattr(cfg, f.name)}' for f in fields(cfg))
     return f'{_kind_name(type(cfg))}({knobs})'
 
 

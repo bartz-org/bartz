@@ -1,0 +1,43 @@
+{
+    // Tune `OneHotReduction` for the PRECISION reduction (datapoints per leaf
+    // weighted by the error-precision scale), taken on the heteroskedastic path
+    // (prec_scale is set, i.e. weights=true; with weights=false the prec tree is
+    // just the count tree and this site does not run). The prec reduces into only
+    // the move's two children (subset_length=2), so the bin count is tiny --
+    // exactly the regime where OneHot can beat batched scatter-add.
+    //
+    // Knobs of `OneHotReduction`, swept jointly as the full 2x2 grid that forms
+    // the reduce axis (plot.reduce = the whole slot, so the plots pick the single
+    // fastest of the 4 variants; 'scatter_set' dropped, known slow):
+    //   method   'matmul'/'multiply': how the values are contracted against the
+    //            one-hot leaf-membership matrix. 'matmul' is expected faster on gpu
+    //            (esp. multivariate), 'multiply' on cpu.
+    //   n_inner  true/false: whether the datapoints sit on the one-hot's inner
+    //            (size-by-n) or outer (n-by-size) axis; the two layouts give the
+    //            backend different memory access patterns (true fuses better on gpu).
+    //
+    // The reduced value is prec_scale, shape (n) univariate or (k, k, n)
+    // multivariate, so k changes the reduction's batch shape and is scanned
+    // (k=1 dropped: shape-degenerate with null). Like count it is vmapped over a
+    // batch of trees, so num_trees is scanned too; both k and num_trees are
+    // coarse to offset the 2x2 knob sweep -- widen if the optimum's dependence on
+    // them needs finer resolution. weights is fixed true (this site is only taken
+    // on the heteroskedastic path). maxdepth is fixed at 6, but note
+    // subset_length=2 sets the actual bin count. The other params (incl. the
+    // resid/count reductions, left to their default 'auto' batching) keep their
+    // defaults, as a realistic backdrop that does not dominate the step. High-n
+    // combos whose one-hot would exceed the size budget are skipped automatically
+    // (more so at large k and num_trees).
+    "plot": {
+        "scan": "n",
+        "reduce": "prec_reduction",
+    },
+    "values": {
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
+        "k":                  [null, 2, 4],
+        "maxdepth":           [6],
+        "weights":            [true],
+        "num_trees":          [1, 16, 64],
+        "prec_reduction":     [{"kind": "onehot", "method": ["matmul", "multiply"], "n_inner": [true, false]}],
+    },
+}

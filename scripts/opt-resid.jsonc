@@ -34,7 +34,5 @@
         "weights":            [false, true],
         "num_trees":          [5],
         "resid_reduction":    [{"kind": "batched", "num_batches": [256, 512, 1024, 2048, 4096, 8192, 16384], "batches_inner": [true], "contiguous": [false]}],
-        "count_reduction":    [{"kind": "batched", "num_batches": "auto"}],
-        "prec_reduction":     [{"kind": "batched", "num_batches": "auto"}],
     },
 }

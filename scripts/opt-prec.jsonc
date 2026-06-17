@@ -36,8 +36,6 @@
         "maxdepth":           [6],
         "weights":            [true],
         "num_trees":          [1, 16, 64],
-        "resid_reduction":    [{"kind": "batched", "num_batches": "auto"}],
-        "count_reduction":    [{"kind": "batched", "num_batches": "auto"}],
         "prec_reduction":     [{"kind": "batched", "num_batches": [256, 512, 1024, 2048, 4096, 8192, 16384], "batches_inner": [true], "contiguous": [false]}],
     },
 }

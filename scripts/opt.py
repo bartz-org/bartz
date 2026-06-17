@@ -978,7 +978,14 @@ def inner_benchmark_loop(
         try:
             bench.setup(params.to_init_kwargs())
         except JaxRuntimeError as e:
-            if 'RESOURCE_EXHAUSTED: Out of memory while trying to allocate' in str(e):
+            # An OOM means the combo does not fit this device: record NaN and move
+            # on. The message appears either directly or, on gpu, wrapped in an
+            # "Autotuning failed for HLO ..." report, so match both forms.
+            msg = str(e)
+            if (
+                'RESOURCE_EXHAUSTED' in msg
+                and 'Out of memory while trying to allocate' in msg
+            ):
                 time_est = float('nan')
                 time_lo = float('nan')
                 time_up = float('nan')

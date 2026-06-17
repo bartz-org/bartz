@@ -35,5 +35,8 @@
         "weights":            [false, true],
         "num_trees":          [5],
         "resid_reduction":    [{"kind": "onehot", "method": ["matmul", "multiply"], "n_inner": [true, false]}],
+        // disable XLA gpu autotuning: on a memory-limited gpu its kernel
+        // profiling OOMs on big combos and fails very slowly, dominating runtime.
+        "gpu_autotune_level": [0],
     },
 }

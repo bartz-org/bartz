@@ -533,6 +533,81 @@ def _resolve_range_bins(
         return subset_length, bins, indices
 
 
+class AutoOneHotReduction(ReductionConfig):
+    """`OneHotReduction` that picks `method` and `n_inner` automatically.
+
+    Resolves both knobs from trace-time information per site and platform, then
+    delegates to a plain `OneHotReduction`. Uses `matmul` only for wide-bin
+    multivariate reductions and `multiply` otherwise; lays the datapoints on the
+    outer axis except on the two small-bin sites where the opposite wins (cpu
+    precision, cuda count). Those two sites support only cpu and cuda, raising at
+    lowering elsewhere.
+
+    The site is recovered from the value: scalar is the count, a wide output the
+    residual, a narrow non-scalar output the precision.
+
+    Known limitation: the wide-bin univariate residual on cpu past ~10^6
+    datapoints prefers a layout this picks against (up to ~2x slower).
+    """
+
+    min_matmul_bins: int = field(static=True, default=8)
+    """Minimum output bins for `matmul`; below it `multiply` is always used."""
+
+    def _reduce(
+        self,
+        values: Float[Array, '*batch_shape n'] | int,
+        indices: UInt[Array, ' n'],
+        /,
+        *,
+        size: int,
+        subset_start: Integer[Array, ''] | None = None,
+        subset_length: int | None = None,
+        dtype: DTypeLike,
+        data_sharded: bool,
+    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+        out_size = size if subset_length is None else subset_length
+        m = max(1, math.prod(jnp.shape(values)[:-1]))
+        method = 'matmul' if m >= 2 and out_size >= self.min_matmul_bins else 'multiply'
+
+        if jnp.ndim(values) == 0:  # count
+            cpu_inner, cuda_inner = False, True
+        elif out_size <= 2:  # precision
+            cpu_inner, cuda_inner = True, False
+        else:  # residual
+            cpu_inner, cuda_inner = False, False
+
+        args = (values, indices)
+        kwargs: dict = dict(
+            size=size,
+            subset_start=subset_start,
+            subset_length=subset_length,
+            dtype=dtype,
+            data_sharded=data_sharded,
+        )
+        if cpu_inner == cuda_inner:
+            # the layout matches on every platform, so no platform split is
+            # needed and the reduction also runs on untested platforms (tpu/rocm)
+            return OneHotReduction(method=method, n_inner=cpu_inner)._reduce(  # noqa: SLF001
+                *args, **kwargs
+            )
+        else:
+            # defer the cpu/gpu choice to XLA: both branches are traced, but only
+            # the run platform's is lowered. With no `default`, an untested
+            # platform errors at lowering instead of silently falling back.
+            return lax.platform_dependent(
+                cpu=partial(
+                    OneHotReduction(method=method, n_inner=cpu_inner)._reduce,  # noqa: SLF001
+                    *args,
+                    **kwargs,
+                ),
+                cuda=partial(
+                    OneHotReduction(method=method, n_inner=cuda_inner)._reduce,  # noqa: SLF001
+                    *args,
+                    **kwargs,
+                ),
+            )
+
+
 class PallasReduction(ReductionConfig):
     """Blocked one-hot scatter-add written as a Pallas kernel.
 

@@ -88,6 +88,7 @@ from bartz._jaxext import (
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import (
     AutoBatchedReduction,
+    AutoOneHotReduction,
     BatchedReduction,
     OneHotReduction,
     PallasReduction,
@@ -711,6 +712,8 @@ class TestReduction:
             OneHotReduction(method='multiply', n_inner=False),
             OneHotReduction(method='scatter_set', n_inner=True),
             OneHotReduction(method='scatter_set', n_inner=False),
+            # AutoOneHotReduction: per-site, per-platform method and layout
+            AutoOneHotReduction(),
             # PallasReduction: fully automatic grid and tile, then explicit ones
             PallasReduction(backend=pallas_backend),
             PallasReduction(backend=pallas_backend, num_blocks=1, block_size=64),

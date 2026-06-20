@@ -105,7 +105,7 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._reduction import _resolve_pallas_backend
+from bartz.mcmcstep._reduction import _gpu_sm_count, _resolve_pallas_backend
 from bartz.mcmcstep._state import Forest, StepConfig, _search_divisor
 from bartz.mcmcstep._step import (
     _compute_likelihood_ratio_mv,
@@ -850,6 +850,23 @@ class TestReduction:
             assert params is None
         else:
             assert params is not None
+
+    def test_gpu_sm_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The cuda branch reads the shared SM count and rejects mixed gpus."""
+
+        class FakeDevice(NamedTuple):
+            core_count: int
+
+        monkeypatch.setattr(
+            'bartz.mcmcstep._reduction.backends', lambda: {'cuda': None}
+        )
+
+        monkeypatch.setattr(jax, 'devices', lambda _: [FakeDevice(84), FakeDevice(84)])
+        assert _gpu_sm_count() == 84
+
+        monkeypatch.setattr(jax, 'devices', lambda _: [FakeDevice(84), FakeDevice(80)])
+        with pytest.raises(ValueError, match='differing SM counts'):
+            _gpu_sm_count()
 
 
 def vmap_randint_masked(

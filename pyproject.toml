@@ -208,6 +208,7 @@ allow-star-arg-any = true
 # equinox modules are frozen, so they are safe to construct in argument defaults
 extend-immutable-calls = [
     "bartz.mcmcstep._reduction.AutoBatchedReduction",
+    "bartz.mcmcstep._reduction.AutoOneHotReduction",
     "bartz.mcmcstep._reduction.BatchedReduction",
     "bartz.testing._distr.Constant",
     "bartz.testing._distr.DiscreteUniform",

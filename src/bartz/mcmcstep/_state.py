@@ -63,7 +63,11 @@ from bartz.mcmcstep._lazy import (
     _wrap_chain,
     add_dummy_axis,
 )
-from bartz.mcmcstep._reduction import AutoBatchedReduction, ReductionConfig
+from bartz.mcmcstep._reduction import (
+    AutoBatchedReduction,
+    AutoOneHotReduction,
+    ReductionConfig,
+)
 
 ArrayLike = Array | ndarray
 
@@ -570,8 +574,8 @@ def init(
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
     min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
     resid_reduction_config: ReductionConfig = AutoBatchedReduction(),
-    count_reduction_config: ReductionConfig = AutoBatchedReduction(),
-    prec_reduction_config: ReductionConfig = AutoBatchedReduction(),
+    count_reduction_config: ReductionConfig = AutoOneHotReduction(),
+    prec_reduction_config: ReductionConfig = AutoOneHotReduction(),
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
     sequential_unroll: int | bool = 2,
     save_ratios: bool = False,
@@ -643,9 +647,7 @@ def init(
     prec_reduction_config
         How to sum the residuals, count the datapoints, and sum the likelihood
         precisions in each leaf, respectively. See `ReductionConfig` and its
-        subclasses. The defaults pick the batching automatically based on the
-        platform the MCMC is compiled for, resolved at run time, so the state
-        need not know the platform in advance.
+        subclasses.
     prec_count_num_trees
         The number of trees to process at a time when counting datapoints or
         computing the likelihood precision. If `None`, do all trees at once,

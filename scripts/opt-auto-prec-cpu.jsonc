@@ -1,0 +1,30 @@
+{
+    // Compare AutoBatchedReduction vs AutoOneHotReduction at the PRECISION
+    // reduction (datapoints per leaf weighted by the error-precision scale) on the
+    // heteroskedastic path (weights=true; with false it is just the count tree).
+    // CPU variant of opt-auto-prec.jsonc. It reduces into the move's two children
+    // (subset_length=2), the tiny-bin regime where onehot can win.
+    //
+    // plot.reduce is the reduction slot holding the two zero-knob auto configs
+    // (autobatched = the default batched scatter-add; autoonehot = one-hot
+    // contraction), so the plots show the winner vs n and both timings.
+    //
+    // The reduced value is prec_scale, shape (n) or (k, k, n), so k reshapes the
+    // reduce and is scanned (k=1 dropped: degenerate with null). Vmapped over a
+    // batch of trees, so num_trees is scanned too. weights fixed true; maxdepth
+    // fixed at 6 (subset_length=2 sets the real bin count). The other two sites
+    // keep their auto defaults as a backdrop. n's top value is lowered 4x vs the
+    // gpu config because cpu is slower.
+    "plot": {
+        "scan": "n",
+        "reduce": "prec_reduction",
+    },
+    "values": {
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304],
+        "k":                  [null, 2, 4],
+        "maxdepth":           [6],
+        "weights":            [true],
+        "num_trees":          [1, 16, 64],
+        "prec_reduction":     ["autobatched", "autoonehot"],
+    },
+}

@@ -1012,7 +1012,8 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     kw['offset'] = 0.0
     kw['tau_num'] = 2.0
     if not bkw.all_binary:
-        kw['lambda_'] = 1.0
+        kw['sigma_scale'] = 1.0
+        kw['sigma_init'] = 1.0
 
     bart1 = Bart(**kw)
 
@@ -1042,45 +1043,27 @@ def _assert_predictions_finite(bart: Bart, bkw: BartKW, keys: split) -> None:
         assert jnp.all(jnp.isfinite(bart.get_error_sdev()))
 
 
-def test_constant_y_train(bkw: BartKW, keys: split, subtests: SubTests) -> None:
+def test_constant_y_train(bkw: BartKW, keys: split) -> None:
     """Behavior when `y_train` is completely constant.
 
-    A constant response drives the automatic noise-scale estimate
-    (`sigest`, hence `lambda_`) to zero for any continuous outcome component,
-    which the API does not guard against: the degenerate error-variance prior
-    poisons the whole MCMC with NaNs. Binary outcomes are immune, because the
-    offset is clipped away from 0/1 and the noise scale is not a free parameter.
-    Supplying a positive `lambda_` repairs the continuous case; note the leaf
-    scale default ``tau_num = (max - min) / 2 = 0`` is left in place there to
-    confirm it is *not* fatal (it merely pins the leaves to zero).
+    A constant response has zero sample variance, but the error-precision prior
+    guards against it (``var(y_train)`` is replaced by 1 where zero), so the
+    defaults yield a well-behaved MCMC for any outcome type. The leaf scale
+    default ``tau_num = (max - min) / 2 = 0`` is left in place to confirm it is
+    *not* fatal: it merely pins the leaves to zero.
     """
     kw = dict(bkw.kw)
     # a single constant value: continuous components are flat, binary ones are
     # all-ones (so the all-zero/all-one offset clipping kicks in)
     kw['y_train'] = jnp.full_like(kw['y_train'], 1.0)
 
-    if bkw.all_binary:
-        # nothing degenerates with the defaults
-        with subtests.test('all binary, defaults are fine'):
-            bart = Bart(**kw)
-            _assert_predictions_finite(bart, bkw, keys)
-    else:
-        # at least one continuous component: the automatic noise prior collapses
-        with subtests.test('continuous defaults produce NaNs'):
-            # use the unwrapped class: the wrapper's trace-validity check would
-            # itself raise on the degenerate run, but we want to observe the NaNs
-            bart = OriginalBart(**kw)
-            with debug_nans(False):
-                latent = bart.predict('train', kind='latent_samples')
-            assert jnp.any(jnp.isnan(latent))
-
-        with subtests.test('explicit lambda_ repairs it'):
-            bart = Bart(**dict(kw, lambda_=1.0))
-            _assert_predictions_finite(bart, bkw, keys)
-            # tau_num kept at its degenerate default (0): the infinite leaf-prior
-            # precision pins every leaf to exactly zero
-            leaf_tree = bart._mcmc_state.forest.leaf_tree
-            assert_array_equal(leaf_tree, jnp.zeros_like(leaf_tree))
+    bart = Bart(**kw)
+    _assert_predictions_finite(bart, bkw, keys)
+    if not bkw.all_binary:
+        # tau_num kept at its degenerate default (0): the infinite leaf-prior
+        # precision pins every leaf to exactly zero
+        leaf_tree = bart._mcmc_state.forest.leaf_tree
+        assert_array_equal(leaf_tree, jnp.zeros_like(leaf_tree))
 
 
 def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
@@ -1169,11 +1152,6 @@ def test_output_shapes(bkw: BartKW, keys: split) -> None:
         assert bart.get_error_sdev().shape == (ndpost, *k)
         assert bart.get_error_sdev(mean=True).shape == k
 
-    if bkw.all_binary:
-        assert bart.sigest is None
-    else:
-        assert nnone(bart.sigest).shape == k
-
     assert bart.varcount.shape == (ndpost, bkw.p)
     assert bart.varcount_mean.shape == (bkw.p,)
     assert bart.varprob.shape == (ndpost, bkw.p)
@@ -1193,8 +1171,6 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     kw = bkw.kw
     bart = Bart(**kw)
 
-    if not bkw.all_binary:
-        assert nnone(bart.sigest).dtype == jnp.float32
     assert bart.offset.dtype == jnp.float32
     assert isinstance(bart.n_save, int)
     assert bart.predict('train', kind='mean').dtype == jnp.float32
@@ -1239,14 +1215,6 @@ def test_output_ranges(bkw: BartKW, keys: split) -> None:
         assert jnp.all(jnp.isnan(sdev_mean[binary_mask]))
         assert jnp.all(jnp.isfinite(sdev_mean[~binary_mask]))
         assert jnp.all(sdev_mean[~binary_mask] > 0)
-
-    # sigest values for mixed
-    if bkw.all_binary:
-        assert bart.sigest is None
-    else:
-        assert bart.sigest is not None
-        assert jnp.all(bart.sigest[binary_mask] == 0.0)
-        assert jnp.all(bart.sigest[~binary_mask] > 0)
 
     # get_latent_prec: symmetry and positive definiteness
     if bkw.k is not None:  # pragma: no branch, always mv with defaults
@@ -1458,11 +1426,6 @@ def test_scale_shift(bkw: BartKW) -> None:
         jnp.where(mask, bart2.offset, (bart2.offset - offset) / scale),
         rtol=1e-5,
     )
-    assert bart1.sigest is not None
-    assert bart2.sigest is not None
-    assert_close_matrices(
-        bart1.sigest, jnp.where(mask, bart2.sigest, bart2.sigest / scale), rtol=1e-6
-    )
     assert_array_equal(
         nnone(bart1._mcmc_state.error_cov_inv.nu),
         nnone(bart2._mcmc_state.error_cov_inv.nu),
@@ -1666,14 +1629,18 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
             rtol=1e-6,
         )
 
-    # check bart.sigest and set expected tau_num
+    # set expected tau_num and check the error prior default
     if bkw.all_binary:
         tau_num = 3
-        assert bart.sigest is None
     else:
         tau_num = jnp.where(mask, 3.0, 1.0)
-        expected_sigest = jnp.where(mask, 0.0, 1.0)
-        assert_array_equal(nnone(bart.sigest), expected_sigest)
+        # var(y_train) is 0 (n=1) or undefined (n=0), guarded to 1, so the
+        # default prior rate is nu for the continuous components
+        nu = nnone(bart._mcmc_state.error_cov_inv.nu)
+        rate = jnp.diag(nnone(bart._mcmc_state.error_cov_inv.rate))
+        assert_close_matrices(
+            rate[~mask], jnp.broadcast_to(nu, rate[~mask].shape), rtol=1e-6
+        )
 
     # check leaf_prior_cov_inv
     expected_cov_inv = (2**2 * bkw.num_trees) / tau_num**2
@@ -1714,8 +1681,12 @@ def test_two_datapoints(bkw: BartKW) -> None:
     kw['init_kw'] = init_kw
     bart = Bart(**kw)
     if not bkw.all_binary:
-        ref_sigest = jnp.where(bkw.binary_mask, 0.0, kw['y_train'].std(axis=-1))
-        assert_close_matrices(nnone(bart.sigest), ref_sigest, rtol=1e-6)
+        # the default prior rate is nu * var(y_train) per continuous component
+        mask = bkw.binary_mask
+        nu = nnone(bart._mcmc_state.error_cov_inv.nu)
+        vary = kw['y_train'].var(axis=-1)
+        rate = jnp.diag(nnone(bart._mcmc_state.error_cov_inv.rate))
+        assert_close_matrices(rate[~mask], nu * vary[~mask], rtol=1e-6)
     if bkw.uses_quantile_binner:
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)
@@ -2324,8 +2295,6 @@ def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
             check(yhat_test, chains=True, data=True)
 
     assert bart.offset.is_fully_replicated
-    if bart.sigest is not None:
-        assert bart.sigest.is_fully_replicated
     assert bart.varcount_mean.is_fully_replicated
     assert bart.varprob_mean.is_fully_replicated
 
@@ -2702,14 +2671,15 @@ class TestMVBartInterface:
             bart = Bart(offset=0.0, **kw)
             assert bart.offset.shape == (k,)
 
-        with subtests.test('sigest'):
-            bart = Bart(sigest=1.0, **kw)
-            assert nnone(bart.sigest).shape == (k,)
-
-        with subtests.test('lambda_'):
-            bart = Bart(lambda_=1.0, **kw)
-            assert bart.sigest is None
+        with subtests.test('sigma_scale'):
+            bart = Bart(sigma_scale=1.0, **kw)
             assert nnone(bart._mcmc_state.error_cov_inv.rate).shape == (k, k)
+
+        with subtests.test('sigma_init'):
+            # no MCMC steps (n_burn = n_save = 0), so the state holds the init:
+            # a precision of 1 / sigma_init**2 = 1 broadcast to all components
+            bart = Bart(sigma_init=1.0, **kw)
+            assert_array_equal(nnone(bart._mcmc_state.error_cov_inv.value), jnp.eye(k))
 
     def test_mixed_rejects_weights(self, example_data: ExampleData) -> None:
         """Mixed outcome_type + weights should raise."""
@@ -2798,9 +2768,6 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
             nnone(state_uv.error_cov_inv.rate),
             nnone(state_mv.error_cov_inv.rate).reshape(()),
             rtol=1e-6,
-        )
-        assert_allclose(
-            nnone(bart_uv.sigest), nnone(bart_mv.sigest).squeeze(0), rtol=1e-6
         )
 
     # Forest structure
@@ -3032,44 +2999,14 @@ class TestDevicePlacement:
         assert pred.devices() == {other_device}
 
 
-def test_sigest_wrong_special_value(bkw: BartKW) -> None:
-    """Trigger error on unrecognized `sigest` value."""
+@pytest.mark.parametrize('param', ['sigma_scale', 'sigma_init'])
+def test_sigma_wrong_special_value(bkw: BartKW, param: str) -> None:
+    """Trigger error on unrecognized `sigma_scale`/`sigma_init` value."""
     value = 'ohohoh'
     if bkw.all_binary:
         pytest.skip('Parameter ignored with binary outcomes.')
-    kw = dict(bkw.kw, sigest=value)
-    # the import-hook type checker would reject the invalid `sigest` literal
-    # before `Bart` raises its own `ValueError`, so disable it here
+    kw = dict(bkw.kw, **{param: value})
+    # the import-hook type checker would reject the invalid literal before
+    # `Bart` raises its own `ValueError`, so disable it here
     with jaxtyping_disabled(), pytest.raises(ValueError, match=value):
         Bart(**kw)
-
-
-def test_sigest_cg(bkw: BartKW) -> None:
-    """Check the `sigest='cg'` is an approximation of `sigest='ols-or-variance'`."""
-    if bkw.p >= bkw.n or bkw.all_binary:
-        pytest.skip('Requires p < n and continuous outcomes.')
-    bart_ols = Bart(**dict(bkw.kw, sigest='ols-or-variance'))
-    bart_cg = Bart(**dict(bkw.kw, sigest='cg'))
-    mask = ~bkw.binary_mask
-    assert_close_matrices(
-        nnone(bart_cg.sigest)[mask], nnone(bart_ols.sigest)[mask], rtol=1e-6
-    )
-
-
-def test_sigest_auto_cg(keys: split) -> None:
-    """Check the `sigest='auto'` branch that switches to 'cg'."""
-    n = 110
-    p = 1000
-    assert n * p * p > 10_000 * 100 * 100
-
-    x = random.normal(keys.pop(), (p, n))
-    y = random.normal(keys.pop(), (n,))
-    # y is random so we can check 'cg' is regularizing in this high-p problem:
-    # the correct answer is sigest = std(y), but since p > n ordinary linear
-    # regression would always overfit perfectly and return sigest = 0.
-
-    bart = Bart(x, y, seed=keys.pop(), n_save=0, n_burn=0)
-    stdy = jnp.std(y)
-    assert bart.sigest is not None
-    assert bart.sigest <= stdy
-    assert bart.sigest >= stdy * 1e-3  # not that much regularization...

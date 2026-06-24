@@ -355,7 +355,7 @@ class mc_gbart(Module):
     @property
     def sigest(self) -> Float32[Array, ''] | None:
         """The estimated standard deviation of the error used to set `lambda_`."""
-        return self._bart.sigest
+        return self._bart.sigest  # ty: ignore[unresolved-attribute]
 
     # Private attributes from Bart
 

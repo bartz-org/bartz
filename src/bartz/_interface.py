@@ -51,7 +51,6 @@ from numpy import ndarray
 
 from bartz._jaxext import equal_shards, is_key, jit, split
 from bartz._jaxext.scipy.special import ndtri
-from bartz._jaxext.scipy.stats import invgamma
 from bartz.grove import (
     TreeHeaps,
     TreesTrace,
@@ -89,9 +88,6 @@ from bartz.mcmcstep._state import (
     init,
 )
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
-from bartz.prepcovars._prepcovars import _sigma2_from_cg, _sigma2_from_ols
-
-CG_MAXITER = 20
 
 
 class PredictKind(Enum):
@@ -215,31 +211,23 @@ class Bart(Module):
         How to treat predictors with no associated decision rules (i.e., there
         are no available cutpoints for that predictor). If `True` (default),
         they are ignored. If `False`, an error is raised if there are any.
-    sigest
-        An estimate of the residual standard deviation on `y_train`, used to set
-        `lambda_`. Ignored if `lambda_` is specified. For multivariate regression,
-        can be a scalar (broadcast to all components) or a `(k,)` vector of
-        per-component estimates. For mixed outcome types, binary component
-        values are ignored. Can be one of the following special values to set
-        automatically based on the data:
-
-        'ols-or-variance'
-            If less than two datapoints, set ``sigest=1``. If ``n > p``, use the
-            OLS error standard deviation estimate (w/ intercept, w/o taking into
-            account `w`), else use the standard deviation of `y_train`.
-        'cg'
-            Use an approximate and regularized version of the OLS residual
-            standard deviation estimate.
-        'auto' (default)
-            Use 'ols-or-variance' if the dataset is smaller than a threshold,
-            else 'cg' for larger datasets.
-    sigdf
-        The degrees of freedom of the scaled inverse-chisquared prior on the
-        noise variance. For multivariate regression, the Inverse-Wishart
-        degrees of freedom are set to `sigdf + k - 1`.
-    sigquant
-        The quantile of the prior on the noise variance that shall match
-        `sigest` to set the scale of the prior. Ignored if `lambda_` is specified.
+    sigma_df
+        The degrees of freedom of the prior on the error precision. For
+        multivariate regression with `k` components, the Wishart degrees of
+        freedom are set to ``sigma_df + k - 1``.
+    sigma_scale
+        Sets the scale of the prior on the error precision. If 'auto' (default),
+        the prior is scaled so that the error precision equals
+        ``diag(1 / var(y_train))`` in expectation. Otherwise, ``square(sigma_scale)``
+        is the prior harmonic mean of the error variance; for multivariate
+        regression a scalar is broadcast to all components. For mixed outcome
+        types, binary components are ignored.
+    sigma_init
+        The initial value of the error standard deviation in the MCMC. If 'auto'
+        (default), the initial error precision is set to ``diag(1 / var(y_train))``.
+        Otherwise, the initial precision is ``diag(1 / square(sigma_init))``; for
+        multivariate regression a scalar is broadcast to all components. For mixed
+        outcome types, binary components are ignored.
     k
         The inverse scale of the prior standard deviation on the latent mean
         function, relative to half the observed range of `y_train`. If `y_train`
@@ -249,12 +237,6 @@ class Bart(Module):
         Parameters of the prior on tree node generation. The probability that a
         node at depth `d` (0-based) is non-terminal is ``base / (1 + d) **
         power``.
-    lambda_
-        The prior harmonic mean of the error variance. (The harmonic mean of x
-        is 1/mean(1/x).) If not specified, it is set based on `sigest` and
-        `sigquant`. For multivariate regression, can be a scalar (broadcast
-        to all components) or a `(k,)` vector. For mixed outcome types, binary
-        component values are ignored.
     tau_num
         The numerator in the expression that determines the prior standard
         deviation of leaves. If not specified, default to ``(max(y_train) -
@@ -275,11 +257,12 @@ class Bart(Module):
     w
         Coefficients that rescale the error standard deviation on each
         datapoint. Not specifying `w` is equivalent to setting it to 1 for all
-        datapoints. Note: `w` is ignored in the automatic determination of
-        `sigest`, so either the weights should be O(1), or `sigest` should be
-        specified by the user. Shape ``(n,)`` applies the same scalar weight
-        to every outcome component; for multivariate continuous regression,
-        ``(k, n)`` instead supplies a per-component weight per datapoint.
+        datapoints. Note: `w` is ignored in the automatic determination of the
+        error precision prior, so either the weights should be O(1), or
+        `sigma_scale` should be specified by the user. Shape ``(n,)`` applies the
+        same scalar weight to every outcome component; for multivariate
+        continuous regression, ``(k, n)`` instead supplies a per-component weight
+        per datapoint.
     missing
         Boolean mask with the same shape as `y_train`; `True` marks entries
         to be ignored by the MCMC. Values of `y_train` must be finite
@@ -366,9 +349,6 @@ class Bart(Module):
     _x_train_fmt: Any = field(static=True)
     _device: Device | None = field(static=True)
 
-    sigest: Float32[Array, ''] | Float32[Array, ' k'] | None = None
-    """The estimated standard deviation of the error used to set `lambda_`."""
-
     _w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = None
 
     def __init__(
@@ -388,15 +368,12 @@ class Bart(Module):
         varprob: Float[ArrayLike, ' p'] | None = None,
         binner: BinnerFactory = UniqueQuantileBinner,
         rm_const: bool = True,
-        sigest: FloatLike
-        | Float[ArrayLike, ' k']
-        | Literal['auto', 'ols-or-variance', 'cg'] = 'auto',
-        sigdf: FloatLike = 3.0,
-        sigquant: FloatLike = 0.9,
+        sigma_df: FloatLike = 3.0,
+        sigma_scale: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'] = 'auto',
+        sigma_init: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'] = 'auto',
         k: FloatLike = 2.0,
         power: FloatLike = 2.0,
         base: FloatLike = 0.95,
-        lambda_: FloatLike | Float[ArrayLike, ' k'] | None = None,
         tau_num: FloatLike | None = None,
         offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
         w: Float[ArrayLike, ' n']
@@ -452,15 +429,14 @@ class Bart(Module):
         leaf_prior_cov_inv = _process_leaf_variance_settings(
             y_train, binary_mask, k, num_trees, tau_num
         )
-        error_cov_df, error_cov_scale, self.sigest = _process_error_variance_settings(
-            x_train,
+        error_cov_inv = _process_error_variance_settings(
             y_train,
             outcome_type,
             binary_mask,
-            sigest,
-            sigdf,
-            sigquant,
-            lambda_,
+            missing,
+            sigma_df,
+            sigma_scale,
+            sigma_init,
         )
 
         # split the user-provided seed into an mcmc key and a binner key
@@ -484,8 +460,7 @@ class Bart(Module):
             missing,
             max_split,
             leaf_prior_cov_inv,
-            error_cov_df,
-            error_cov_scale,
+            error_cov_inv,
             power,
             base,
             maxdepth,
@@ -1273,75 +1248,76 @@ def _process_leaf_variance_settings(
 
 
 def _process_error_variance_settings(
-    x_train: Shaped[Array, 'p n'],
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-    sigest: FloatLike | Float[Array, ' k'] | Literal['auto', 'ols-or-variance', 'cg'],
-    sigdf: FloatLike,
-    sigquant: FloatLike,
-    lambda_: FloatLike | Float[Array, ' k'] | None,
-) -> tuple[
-    Float32[Array, ''] | None,
-    Float32[Array, ''] | Float32[Array, 'k k'] | None,
-    Float32[Array, ''] | Float32[Array, ' k'] | None,
-]:
-    """Return (error_cov_df, error_cov_scale, sigest)."""
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+    sigma_df: FloatLike,
+    sigma_scale: FloatLike | Float[Array, ' k'] | Literal['auto'],
+    sigma_init: FloatLike | Float[Array, ' k'] | Literal['auto'],
+) -> Wishart | None:
+    """Build the error precision prior from the user settings."""
     if outcome_type is OutcomeType.binary:
-        if not isinstance(sigest, str) or lambda_ is not None:
-            msg = 'Do not set `sigest` or `lambda_` for binary regression, they are ignored'
+        if not isinstance(sigma_scale, str) or not isinstance(sigma_init, str):
+            msg = (
+                'Do not set `sigma_scale` or `sigma_init` for binary regression, '
+                'they are ignored'
+            )
             raise ValueError(msg)
-        return None, None, None
+        return None
 
-    if lambda_ is None:
-        # estimate sigest²
-        sigest2 = _estimate_sigest2(x_train, y_train, sigest, binary_mask)
-        sigest_out = jnp.sqrt(sigest2)
+    *kdims, _ = y_train.shape  # () or (k,)
+    k = kdims[0] if kdims else 1
+    nu = jnp.asarray(sigma_df, jnp.float32) + (k - 1)
 
-        # lambda_ from sigest²
-        alpha = sigdf / 2
-        invchi2 = invgamma.ppf(sigquant, alpha) / 2
-        invchi2rid = invchi2 * sigdf
-        lambda_ = sigest2 / invchi2rid
+    # guarded per-component variance of y_train, used by the 'auto' defaults;
+    # the `> 0` guard also maps the empty (NaN variance) case to 1
+    vary = jnp.var(y_train, axis=-1)
+    vary = jnp.where(vary > 0, vary, 1.0)
 
-    elif not isinstance(sigest, str):
-        msg = "Do not set `sigest` if `lambda_` is specified, it's ignored"
-        raise ValueError(msg)
+    # prior rate: E[precision] = nu / rate, so rate = nu * var per component
+    rate_diag = jnp.where(
+        binary_mask, 0.0, nu * _resolve_error_variance(sigma_scale, vary)
+    )
 
-    else:
-        lambda_ = jnp.where(binary_mask, 0.0, lambda_)
-        sigest_out = None
+    # initial precision = 1 / var per component (1 for binary components)
+    init_var = _resolve_error_variance(sigma_init, vary)
+    init_diag = jnp.where(binary_mask, 1.0, jnp.reciprocal(init_var))
 
-    # params written in multivariate form
     if y_train.ndim == 2:
-        k = y_train.shape[0]
-        lambda_ = jnp.broadcast_to(lambda_, (k,))
-        error_cov_df = jnp.asarray(sigdf) + k - 1
-        error_cov_scale = jnp.diag(sigdf * lambda_)
+        rate, init = jnp.diag(rate_diag), jnp.diag(init_diag)
     else:
-        error_cov_df = jnp.asarray(sigdf)
-        error_cov_scale = jnp.asarray(sigdf * lambda_)
+        rate, init = rate_diag, init_diag
+    return make_error_cov_prior(nu, rate, init, outcome_type, missing)
 
-    return error_cov_df, error_cov_scale, sigest_out
+
+def _resolve_error_variance(
+    spec: FloatLike | Float[Array, ' k'] | Literal['auto'], vary: Float32[Array, '*k']
+) -> Float32[Array, '*k']:
+    """Per-component error variance from a scale spec ('auto' uses var(y))."""
+    if isinstance(spec, str):
+        if spec != 'auto':
+            msg = f"unrecognized value {spec!r}, expected 'auto' or a number"
+            raise ValueError(msg)
+        return vary
+    else:
+        return jnp.broadcast_to(jnp.square(jnp.asarray(spec, jnp.float32)), vary.shape)
 
 
 def make_error_cov_prior(
-    error_cov_df: FloatLike | None,
-    error_cov_scale: FloatLike | Float32[Array, 'k k'] | None,
+    nu: Float32[Array, ''],
+    rate: Float32[Array, ''] | Float32[Array, 'k k'],
+    value: Float32[Array, ''] | Float32[Array, 'k k'],
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
-) -> Wishart | None:
+) -> Wishart:
     """Build the error precision prior, diagonal-constrained where required.
 
     Mixed binary-continuous and partial-missing (2-D mask) regression restrict
     the error covariance to diagonal, so they take a `DiagWishart`; the dense
-    cases take a `Wishart`. `init` re-checks this choice. The initial value is
-    the prior mean of the precision.
+    cases take a `Wishart`. `init` re-checks this choice. `value` is the initial
+    value of the precision.
     """
-    if error_cov_df is None:
-        return None
-    nu = jnp.asarray(error_cov_df, jnp.float32)
-    rate = jnp.asarray(error_cov_scale, jnp.float32)
     if isinstance(outcome_type, tuple):
         binary = [t is OutcomeType.binary for t in outcome_type]
         is_mixed = any(binary) and not all(binary)
@@ -1350,74 +1326,9 @@ def make_error_cov_prior(
     # a 2-D missingness mask only occurs with multivariate y (checked in `init`)
     partial_missing = missing is not None and missing.ndim == 2
     if is_mixed or partial_missing:
-        # diagonal prior mean, component-wise; no-prior (rate 0) components,
-        # such as the binary ones, default to a precision of 1
-        diag = jnp.diag(rate)
-        nonzero = diag != 0
-        value = jnp.diag(jnp.where(nonzero, nu / jnp.where(nonzero, diag, 1.0), 1.0))
         return DiagWishart(nu=nu, rate=rate, value=value)
-    elif rate.ndim == 0:
-        # univariate gamma (inverse-gamma on the variance) prior mean
-        return Wishart(nu=nu, rate=rate, value=nu / rate)
     else:
-        # multivariate dense Wishart prior mean
-        return Wishart(nu=nu, rate=rate, value=nu * _inv_via_chol_with_gersh(rate))
-
-
-def _estimate_sigest2(
-    x_train: Shaped[Array, 'p n'],
-    y_train: Float32[Array, '*k n'],
-    sigest: FloatLike | Float[Array, ' k'] | Literal['auto', 'ols-or-variance', 'cg'],
-    binary_mask: Bool[Array, '*k'],
-) -> Float32[Array, '*k']:
-    if not isinstance(sigest, str):
-        sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
-        sigest2 = jnp.broadcast_to(sigest2, y_train.shape[:-1])
-    elif sigest == 'ols-or-variance':
-        sigest2 = _sigest2_ols_or_variance(x_train, y_train)
-    elif sigest == 'cg':
-        sigest2 = _sigest2_cg(x_train, y_train)
-    elif sigest == 'auto':
-        sigest2 = _sigest2_auto(x_train, y_train)
-    else:
-        msg = f'unrecognized value {sigest=}'
-        raise ValueError(msg)
-    return jnp.where(binary_mask, 0.0, sigest2)
-
-
-def _sigest2_ols_or_variance(
-    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
-) -> Float32[Array, '*k']:
-    """Implement the case `sigest='ols-or-variance'`."""
-    p, n = x_train.shape
-    if n < 2:
-        *k, _ = y_train.shape
-        return jnp.ones(k)
-    elif n <= p:
-        return jnp.var(y_train, axis=-1)
-    else:
-        return _sigma2_from_ols(x_train, y_train)
-
-
-def _sigest2_cg(
-    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
-) -> Float32[Array, '*k']:
-    """Implement the case `sigest='cg'`."""
-    p, n = x_train.shape
-    maxiter = max(1, min(n, p, CG_MAXITER))
-    return _sigma2_from_cg(x_train, y_train, maxiter)
-
-
-def _sigest2_auto(
-    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
-) -> Float32[Array, ' *k']:
-    """Implement the case `sigest='auto'`."""
-    p, n = x_train.shape
-    threshold = 10_000 * 100**2
-    if n * p * p > threshold and min(n, p) > CG_MAXITER:
-        return _sigest2_cg(x_train, y_train)
-    else:
-        return _sigest2_ols_or_variance(x_train, y_train)
+        return Wishart(nu=nu, rate=rate, value=value)
 
 
 def _setup_mcmc(
@@ -1429,8 +1340,7 @@ def _setup_mcmc(
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
     max_split: UInt[Array, ' p'],
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
-    error_cov_df: FloatLike | None,
-    error_cov_scale: FloatLike | Float32[Array, 'k k'] | None,
+    error_cov_inv: Wishart | None,
     power: FloatLike,
     base: FloatLike,
     maxdepth: int,
@@ -1468,9 +1378,7 @@ def _setup_mcmc(
         num_trees=num_trees,
         p_nonterminal=p_nonterminal,
         leaf_prior_cov_inv=leaf_prior_cov_inv,
-        error_cov_inv=make_error_cov_prior(
-            error_cov_df, error_cov_scale, outcome_type, missing
-        ),
+        error_cov_inv=error_cov_inv,
         min_points_per_decision_node=10,
         log_s=process_varprob(varprob, max_split),
         theta=theta,

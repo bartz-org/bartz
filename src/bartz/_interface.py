@@ -1253,8 +1253,8 @@ def _process_error_variance_settings(
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
     sigma_df: FloatLike,
-    sigma_scale: FloatLike | Float[Array, ' k'] | Literal['auto'],
-    sigma_init: FloatLike | Float[Array, ' k'] | Literal['auto'],
+    sigma_scale: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
+    sigma_init: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
 ) -> Wishart | None:
     """Build the error precision prior from the user settings."""
     if outcome_type is OutcomeType.binary:
@@ -1292,7 +1292,8 @@ def _process_error_variance_settings(
 
 
 def _resolve_error_variance(
-    spec: FloatLike | Float[Array, ' k'] | Literal['auto'], vary: Float32[Array, '*k']
+    spec: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
+    vary: Float32[Array, '*k'],
 ) -> Float32[Array, '*k']:
     """Per-component error variance from a scale spec ('auto' uses var(y))."""
     if isinstance(spec, str):

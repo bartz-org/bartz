@@ -107,8 +107,7 @@ class Wishart(Module):
     value: Float32[Array, '*chains k k'] | Float32[Array, '*chains'] = field(
         chains=CHAIN_AXIS
     )
-    """The precision matrix (scalar for univariate). Either set explicitly or,
-    when unset at construction, defaulted to the prior mean."""
+    """The precision matrix (scalar for univariate)."""
 
     def __init__(
         self,
@@ -116,32 +115,17 @@ class Wishart(Module):
         rate: FloatLike | Float[ArrayLike, 'k k'] | None,
         value: FloatLike
         | Float[ArrayLike, '*chains k k']
-        | Float[ArrayLike, '*chains']
-        | None = None,
+        | Float[ArrayLike, '*chains'],
     ) -> None:
-        # `value` left unset is filled with the prior mean; `init` instead passes
-        # a deferred `_LazyArray` (cast to `Array`) to route it through sharding.
+        # `init` passes a deferred `_LazyArray` (cast to `Array`) for `value` to
+        # route it through sharding.
         assert (nu is None) == (rate is None), 'set both or neither of nu and rate'
         self.nu = None if nu is None else jnp.asarray(nu, jnp.float32)
         self.rate = None if rate is None else jnp.asarray(rate, jnp.float32)
-        if value is None:
-            if self.nu is None or self.rate is None:
-                msg = 'value must be set when there is no prior (nu and rate None)'
-                raise ValueError(msg)
-            self.value = self._prior_mean()
-        elif isinstance(value, _LazyArray):
+        if isinstance(value, _LazyArray):
             self.value = cast(Array, value)
         else:
             self.value = jnp.asarray(value, jnp.float32)
-
-    def _prior_mean(self) -> Float32[Array, ''] | Float32[Array, 'k k']:
-        """Return the prior mean precision ``nu * rate^-1`` (dense inverse)."""
-        assert self.nu is not None
-        assert self.rate is not None
-        if self.rate.ndim == 0:
-            return self.nu / self.rate
-        else:
-            return self.nu * _inv_via_chol_with_gersh(self.rate)
 
 
 class DiagWishart(Wishart):
@@ -149,13 +133,11 @@ class DiagWishart(Wishart):
 
     Despite the name this is not a Wishart restricted to diagonal matrices, but
     a convenience type: a diagonal precision whose entries are mutually
-    independent, each with its own Gamma (scaled chi-square) prior. The prior
-    mean is taken component-wise, avoiding a dense matrix inverse. Only the
+    independent, each with its own Gamma (scaled chi-square) prior. Only the
     multivariate (matrix) case is supported.
 
-    To give a component no prior, set its `rate` to 0; that component's `value`
-    then defaults to a precision of 1 (as for the binary components of a mixed
-    regression), unless an explicit `value` is passed.
+    A component with `rate` 0 has no prior; its precision is held fixed at its
+    `value` (1 for the binary components of a mixed regression).
 
     Used for mixed binary-continuous regression and for continuous multivariate
     regression with per-datapoint missingness.
@@ -167,8 +149,7 @@ class DiagWishart(Wishart):
         rate: FloatLike | Float[ArrayLike, 'k k'] | None,
         value: FloatLike
         | Float[ArrayLike, '*chains k k']
-        | Float[ArrayLike, '*chains']
-        | None = None,
+        | Float[ArrayLike, '*chains'],
     ) -> None:
         # explicit (delegating) init so the static checker uses this signature
         # instead of synthesizing a stricter one from the inherited fields
@@ -176,15 +157,6 @@ class DiagWishart(Wishart):
             'DiagWishart supports only the multivariate (matrix) case'
         )
         super().__init__(nu, rate, value)
-
-    def _prior_mean(self) -> Float32[Array, 'k k']:
-        """Return the diagonal prior mean (no-prior components default to 1)."""
-        assert self.nu is not None
-        assert self.rate is not None
-        diag = jnp.diag(self.rate)
-        nonzero = diag != 0
-        prec = jnp.where(nonzero, self.nu / jnp.where(nonzero, diag, 1.0), 1.0)
-        return jnp.diag(prec)
 
 
 class Forest(Module):
@@ -534,7 +506,7 @@ def _init_shape_shifting_parameters(
             value = _check_binary_unit_precision(value, binary_mask)
         error_cov_inv = replace(error_cov_inv, rate=rate, value=value)
 
-    # All-continuous: a dense `Wishart` whose value defaults to the prior mean.
+    # All-continuous: a dense `Wishart`.
     else:
         assert (
             error_scale is None

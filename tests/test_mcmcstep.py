@@ -1391,12 +1391,20 @@ class TestMultichain:
         if mixed:
             kw.update(
                 outcome_type=['binary', 'continuous'],
-                error_cov_inv=DiagWishart(nu=2.0, rate=jnp.diag(jnp.array([0.0, 2.0]))),
+                error_cov_inv=DiagWishart(
+                    nu=2.0, rate=jnp.diag(jnp.array([0.0, 2.0])), value=jnp.eye(2)
+                ),
             )
         elif binary:
             kw.update(outcome_type='binary')
         else:
-            kw.update(error_cov_inv=Wishart(nu=2.0, rate=2 * jnp.eye(k) if mv else 2.0))
+            kw.update(
+                error_cov_inv=Wishart(
+                    nu=2.0,
+                    rate=2 * jnp.eye(k) if mv else 2.0,
+                    value=jnp.eye(k) if mv else 1.0,
+                )
+            )
 
         if vec_weights:
             kw.update(
@@ -1807,7 +1815,7 @@ def test_affluence_tree_stays_clean(
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(6),
         leaf_prior_cov_inv=1.0,
-        error_cov_inv=Wishart(nu=2.0, rate=2.0),
+        error_cov_inv=Wishart(nu=2.0, rate=2.0, value=1.0),
         min_points_per_decision_node=min_points_per_decision_node,
         min_points_per_leaf=min_points_per_leaf,
     )
@@ -1865,7 +1873,7 @@ class TestMixedBinaryContinuous:
             p_nonterminal=jnp.full(self.d - 1, 0.9),
             leaf_prior_cov_inv=jnp.eye(self.k) * self.num_trees,
             error_cov_inv=DiagWishart(
-                nu=2.0, rate=jnp.diag(jnp.array([0.0, 2.0, 0.0]))
+                nu=2.0, rate=jnp.diag(jnp.array([0.0, 2.0, 0.0])), value=jnp.eye(self.k)
             ),
         )
 
@@ -1956,9 +1964,43 @@ class TestMixedBinaryContinuous:
             init_kwargs['missing'] = jnp.zeros((self.k, self.n), jnp.bool_)
         prior = init_kwargs['error_cov_inv']
         init_kwargs['error_cov_inv'] = DiagWishart(
-            nu=prior.nu, rate=prior.rate + 0.1 * jnp.ones((self.k, self.k))
+            nu=prior.nu,
+            rate=prior.rate + 0.1 * jnp.ones((self.k, self.k)),
+            value=prior.value,
         )
         with pytest.raises(Exception, match='diagonal'):
+            _state = init(**init_kwargs)
+
+    @pytest.mark.parametrize(
+        ('outcome_type', 'with_missing'),
+        [
+            (['binary', 'continuous', 'binary'], False),
+            (['continuous', 'continuous', 'continuous'], True),
+        ],
+        ids=['mixed', 'partial_missing'],
+    )
+    def test_init_rejects_nondiagonal_value(
+        self, init_kwargs: dict, outcome_type: Sequence[str], with_missing: bool
+    ) -> None:
+        """Check that init rejects a non-diagonal initial precision value."""
+        init_kwargs['outcome_type'] = outcome_type
+        if with_missing:
+            init_kwargs['missing'] = jnp.zeros((self.k, self.n), jnp.bool_)
+        prior = init_kwargs['error_cov_inv']
+        init_kwargs['error_cov_inv'] = DiagWishart(
+            nu=prior.nu, rate=prior.rate, value=prior.value.at[0, 1].set(0.5)
+        )
+        with pytest.raises(Exception, match='diagonal'):
+            _state = init(**init_kwargs)
+
+    def test_init_rejects_binary_nonunit_value(self, init_kwargs: dict) -> None:
+        """Check that init rejects a binary initial precision other than 1."""
+        prior = init_kwargs['error_cov_inv']
+        # component 0 is binary, so its precision must stay at 1
+        init_kwargs['error_cov_inv'] = DiagWishart(
+            nu=prior.nu, rate=prior.rate, value=prior.value.at[0, 0].set(2.0)
+        )
+        with pytest.raises(Exception, match='binary error precision must be 1'):
             _state = init(**init_kwargs)
 
     def test_init_rejects_error_scale(self, init_kwargs: dict) -> None:
@@ -2023,7 +2065,9 @@ class TestMixedBinaryContinuous:
         else:
             init_kwargs.update(
                 y=random.normal(keys.pop(), (self.k, self.n)),
-                error_cov_inv=Wishart(nu=2.0, rate=2 * jnp.eye(self.k)),
+                error_cov_inv=Wishart(
+                    nu=2.0, rate=2 * jnp.eye(self.k), value=jnp.eye(self.k)
+                ),
             )
 
         copy_args = partial(copy_arrays, init_kwargs)
@@ -2287,9 +2331,11 @@ class TestMVBartIntegration:
             uv_kw.update(outcome_type='binary')
             mv_kw.update(outcome_type='binary')
         else:
-            uv_kw.update(error_cov_inv=Wishart(nu=6.0, rate=4.0))
+            uv_kw.update(error_cov_inv=Wishart(nu=6.0, rate=4.0, value=1.5))
             mv_kw.update(
-                error_cov_inv=Wishart(nu=jnp.array(6.0), rate=4.0 * jnp.eye(1))
+                error_cov_inv=Wishart(
+                    nu=jnp.array(6.0), rate=4.0 * jnp.eye(1), value=1.5 * jnp.eye(1)
+                )
             )
 
         bart_uv = init(**uv_kw, **common())
@@ -2500,8 +2546,12 @@ class TestMultivariate:
             uv_kw.update(outcome_type='binary')
             mv_kw.update(outcome_type='binary')
         else:
-            uv_kw.update(error_cov_inv=Wishart(nu=4.0, rate=2.0))
-            mv_kw.update(error_cov_inv=Wishart(nu=jnp.array(4.0), rate=2 * jnp.eye(1)))
+            uv_kw.update(error_cov_inv=Wishart(nu=4.0, rate=2.0, value=2.0))
+            mv_kw.update(
+                error_cov_inv=Wishart(
+                    nu=jnp.array(4.0), rate=2 * jnp.eye(1), value=2 * jnp.eye(1)
+                )
+            )
 
         if kind == 'het':
             w = jnp.exp(random.uniform(keys.pop(), (y.size,), float, -0.5, 0.5))
@@ -2604,7 +2654,11 @@ class TestMultivariate:
         if kind == 'binary':
             kw.update(outcome_type='binary')
         else:
-            kw.update(error_cov_inv=Wishart(nu=jnp.array(10.0), rate=jnp.eye(k)))
+            kw.update(
+                error_cov_inv=Wishart(
+                    nu=jnp.array(10.0), rate=jnp.eye(k), value=10 * jnp.eye(k)
+                )
+            )
 
         if kind == 'het':
             w = jnp.exp(random.uniform(keys.pop(), (k, n), float, -0.5, 0.5))
@@ -2658,7 +2712,9 @@ class TestMultivariate:
                 num_trees=10,
                 p_nonterminal=jnp.array([0.9, 0.5]),
                 leaf_prior_cov_inv=jnp.eye(k),
-                error_cov_inv=Wishart(nu=jnp.array(4.0 + k), rate=jnp.eye(k)),
+                error_cov_inv=Wishart(
+                    nu=jnp.array(4.0 + k), rate=jnp.eye(k), value=(4.0 + k) * jnp.eye(k)
+                ),
                 resid_reduction_config=BatchedReduction(num_batches=None),
                 count_reduction_config=BatchedReduction(num_batches=None),
             ),

@@ -223,9 +223,12 @@ def simple_init(  # noqa: C901, PLR0915
     sig = signature(init)
     if 'error_cov_inv' in sig.parameters and 'error_cov_df' in kw:
         # WORKAROUND(bartz<0.11.0): pre-0.11.0 took error_cov_df/error_cov_scale
-        # directly; 0.11.0 folded them into a single `error_cov_inv` Wishart.
+        # directly; 0.11.0 folded them into a single `error_cov_inv` Wishart. The
+        # value is the prior mean ``nu * rate^-1`` for these diagonal settings.
         kw['error_cov_inv'] = mcmcstep.Wishart(
-            nu=kw.pop('error_cov_df'), rate=kw.pop('error_cov_scale')
+            nu=kw.pop('error_cov_df'),
+            rate=kw.pop('error_cov_scale'),
+            value=1.0 if k is None else jnp.eye(k),
         )
 
     kw.update(kwargs)

@@ -1335,10 +1335,13 @@ def make_error_cov_prior(
 
     Mixed binary-continuous and partial-missing (2-D mask) regression restrict
     the error covariance to diagonal, so they take a `DiagWishart`; the dense
-    cases take a `Wishart`. `init` re-checks this choice.
+    cases take a `Wishart`. `init` re-checks this choice. The initial value is
+    the prior mean of the precision.
     """
     if error_cov_df is None:
         return None
+    nu = jnp.asarray(error_cov_df, jnp.float32)
+    rate = jnp.asarray(error_cov_scale, jnp.float32)
     if isinstance(outcome_type, tuple):
         binary = [t is OutcomeType.binary for t in outcome_type]
         is_mixed = any(binary) and not all(binary)
@@ -1346,8 +1349,19 @@ def make_error_cov_prior(
         is_mixed = False
     # a 2-D missingness mask only occurs with multivariate y (checked in `init`)
     partial_missing = missing is not None and missing.ndim == 2
-    cls = DiagWishart if is_mixed or partial_missing else Wishart
-    return cls(nu=error_cov_df, rate=error_cov_scale)
+    if is_mixed or partial_missing:
+        # diagonal prior mean, component-wise; no-prior (rate 0) components,
+        # such as the binary ones, default to a precision of 1
+        diag = jnp.diag(rate)
+        nonzero = diag != 0
+        value = jnp.diag(jnp.where(nonzero, nu / jnp.where(nonzero, diag, 1.0), 1.0))
+        return DiagWishart(nu=nu, rate=rate, value=value)
+    elif rate.ndim == 0:
+        # univariate gamma (inverse-gamma on the variance) prior mean
+        return Wishart(nu=nu, rate=rate, value=nu / rate)
+    else:
+        # multivariate dense Wishart prior mean
+        return Wishart(nu=nu, rate=rate, value=nu * _inv_via_chol_with_gersh(rate))
 
 
 def _estimate_sigest2(

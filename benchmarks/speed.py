@@ -62,6 +62,18 @@ else:
         # WORKAROUND(bartz<0.6.0): old versions use a dictionary for the mcmc state
         State = dict
 
+if TYPE_CHECKING:
+    from bartz.mcmcstep import Wishart
+else:
+    try:
+        from bartz.mcmcstep import Wishart
+    except ImportError:
+        # WORKAROUND(bartz<0.11.0): the Wishart wrapper bundling the error
+        # covariance prior was added in 0.11.0. A dict carries the parameters
+        # until simple_init unpacks them by item access for older versions;
+        # unlike a typed stand-in it errors loudly if passed to bartz by mistake.
+        Wishart = dict
+
 try:
     from bartz.BART import mc_gbart as gbart
 except ImportError:
@@ -131,8 +143,12 @@ def simple_init(  # noqa: C901, PLR0915
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(6, 0.95, 2),
         leaf_prior_cov_inv=jnp.float32(num_trees) * (1.0 if k is None else jnp.eye(k)),
-        error_cov_df=2.0,
-        error_cov_scale=2.0 * (1.0 if k is None else jnp.eye(k)),
+        error_cov_inv=Wishart(
+            nu=2.0,
+            rate=2.0 * (1.0 if k is None else jnp.eye(k)),
+            # the value is the prior mean ``nu * rate^-1`` for these settings
+            value=1.0 if k is None else jnp.eye(k),
+        ),
         min_points_per_decision_node=10,
         num_chains=num_chains,
         mesh=mesh,
@@ -143,6 +159,12 @@ def simple_init(  # noqa: C901, PLR0915
     if 'offset' not in sig.parameters:
         # WORKAROUND(bartz<0.6.0): offset was added to init in 0.6.0
         kw.pop('offset')
+    if 'error_cov_inv' not in sig.parameters:
+        # WORKAROUND(bartz<0.11.0): 0.11.0 folded error_cov_df/error_cov_scale
+        # into a single error_cov_inv Wishart; older versions take them directly.
+        wishart = kw.pop('error_cov_inv')
+        kw['error_cov_df'] = wishart['nu']
+        kw['error_cov_scale'] = wishart['rate']
     if 'sigma2_alpha' in sig.parameters:
         # WORKAROUND(bartz<0.8.0): pre-0.8.0 used sigma2_alpha/beta instead of
         # error_cov_df/scale. Inverse gamma prior: alpha = df/2, beta = scale/2.
@@ -189,10 +211,11 @@ def simple_init(  # noqa: C901, PLR0915
                 msg = 'binary not supported'
                 raise NotImplementedError(msg)
             kw['y'] = data.y > 0
-            kw.pop('sigma2_alpha', None)
-            kw.pop('sigma2_beta', None)
+            kw.pop('error_cov_inv', None)
             kw.pop('error_cov_df', None)
             kw.pop('error_cov_scale', None)
+            kw.pop('sigma2_alpha', None)
+            kw.pop('sigma2_beta', None)
 
             sig = signature(init)
             if 'outcome_type' in sig.parameters:
@@ -219,17 +242,6 @@ def simple_init(  # noqa: C901, PLR0915
                 # WORKAROUND(bartz<0.8.0): multivariate outcomes added in 0.8.0
                 msg = 'multivariate not supported'
                 raise NotImplementedError(msg)
-
-    sig = signature(init)
-    if 'error_cov_inv' in sig.parameters and 'error_cov_df' in kw:
-        # WORKAROUND(bartz<0.11.0): pre-0.11.0 took error_cov_df/error_cov_scale
-        # directly; 0.11.0 folded them into a single `error_cov_inv` Wishart. The
-        # value is the prior mean ``nu * rate^-1`` for these diagonal settings.
-        kw['error_cov_inv'] = mcmcstep.Wishart(
-            nu=kw.pop('error_cov_df'),
-            rate=kw.pop('error_cov_scale'),
-            value=1.0 if k is None else jnp.eye(k),
-        )
 
     kw.update(kwargs)
 

@@ -932,6 +932,10 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
         save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
     )
 
+    # OLS cannot estimate sigest with n <= p, so provide it explicitly
+    if get_with_default(kw, 'type') != 'pbart':
+        kw.update(sigest=2.0)
+
     # run bart
     bart = mc_gbart(**kw)
 
@@ -946,7 +950,7 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
         assert bart.offset == 0
     else:
         tau_num = 1
-        assert bart.sigest == 1
+        assert bart.sigest == 2
         if num_datapoints:
             assert bart.offset == kw['y_train'].item()
         else:
@@ -972,13 +976,25 @@ def test_two_datapoints(kw: dict[str, Any]) -> None:
     kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
         save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
     )
+    # OLS cannot estimate sigest with n <= p, so provide it explicitly
+    if get_with_default(kw, 'type') != 'pbart':
+        kw.update(sigest=2.0)
     bart = mc_gbart(**kw)
     if get_with_default(kw, 'type') != 'pbart':
-        assert_allclose(nnone(bart.sigest), kw['y_train'].std(), rtol=1e-6)
+        assert bart.sigest == 2
     if get_with_default(kw, 'usequants'):
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)
     assert not jnp.all(bart._main_trace.log_likelihood == 0.0)
+
+
+def test_sigest_ols_needs_more_data_than_predictors(kw: dict[str, Any]) -> None:
+    """Check that estimating sigest by OLS raises when n <= p."""
+    if get_with_default(kw, 'type') == 'pbart':
+        pytest.skip('sigest is not estimated for binary regression')
+    kw = set_num_datapoints(kw, 2)  # p == 2, so n <= p
+    with pytest.raises(ValueError, match='cannot estimate `sigest` by OLS'):
+        mc_gbart(**kw)
 
 
 def test_few_datapoints(kw: dict[str, Any]) -> None:
@@ -1014,6 +1030,7 @@ def test_xinfo() -> None:
         y_train=jnp.empty(0),
         ndpost=0,
         nskip=0,
+        sigest=1.0,  # OLS cannot estimate sigest without data
         # these `usequants` and `numcut` values would lead to an error, so this
         # checks they are ignored if `xinfo` is specified
         usequants=True,
@@ -1034,7 +1051,12 @@ def test_xinfo_wrong_p() -> None:
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
         )
     kw: kwdict = dict(
-        x_train=jnp.empty((5, 0)), y_train=jnp.empty(0), ndpost=0, nskip=0, xinfo=xinfo
+        x_train=jnp.empty((5, 0)),
+        y_train=jnp.empty(0),
+        ndpost=0,
+        nskip=0,
+        sigest=1.0,  # OLS cannot estimate sigest without data
+        xinfo=xinfo,
     )
     # `xinfo`'s p (3) deliberately mismatches `x_train`'s p (5); disable
     # jaxtyping so the cross-axis check doesn't pre-empt the `ValueError`
@@ -1135,6 +1157,7 @@ def run_bart_like_prior(
         xinfo=xinfo,
         seed=key,
         mc_cores=1,
+        sigest=1.0,  # OLS cannot estimate sigest without data
         bart_kwargs=dict(
             init_kw=dict(
                 # unset limits on datapoints per node because there's no data

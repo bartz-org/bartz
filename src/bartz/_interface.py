@@ -218,16 +218,18 @@ class Bart(Module):
     sigma_scale
         Sets the scale of the prior on the error precision. If 'auto' (default),
         the prior is scaled so that the error precision equals
-        ``diag(1 / var(y_train))`` in expectation. Otherwise, ``square(sigma_scale)``
-        is the prior harmonic mean of the error variance; for multivariate
-        regression a scalar is broadcast to all components. For mixed outcome
-        types, binary components are ignored.
+        ``diag(1 / var(y_train))`` in expectation, where with weights `w` the
+        variance is a precision-weighted one that estimates the unit-weight error
+        variance. Otherwise, ``square(sigma_scale)`` is the prior harmonic mean of
+        the error variance; for multivariate regression a scalar is broadcast to
+        all components. For mixed outcome types, binary components are ignored.
     sigma_init
         The initial value of the error standard deviation in the MCMC. If 'auto'
-        (default), the initial error precision is set to ``diag(1 / var(y_train))``.
-        Otherwise, the initial precision is ``diag(1 / square(sigma_init))``; for
-        multivariate regression a scalar is broadcast to all components. For mixed
-        outcome types, binary components are ignored.
+        (default), the initial error precision is set to ``diag(1 / var(y_train))``,
+        with the same precision-weighted variance as `sigma_scale` when weights are
+        given. Otherwise, the initial precision is ``diag(1 / square(sigma_init))``;
+        for multivariate regression a scalar is broadcast to all components. For
+        mixed outcome types, binary components are ignored.
     k
         The inverse scale of the prior standard deviation on the latent mean
         function, relative to half the observed range of `y_train`. If `y_train`
@@ -257,12 +259,9 @@ class Bart(Module):
     w
         Coefficients that rescale the error standard deviation on each
         datapoint. Not specifying `w` is equivalent to setting it to 1 for all
-        datapoints. Note: `w` is ignored in the automatic determination of the
-        error precision prior, so either the weights should be O(1), or
-        `sigma_scale` should be specified by the user. Shape ``(n,)`` applies the
-        same scalar weight to every outcome component; for multivariate
-        continuous regression, ``(k, n)`` instead supplies a per-component weight
-        per datapoint.
+        datapoints. Shape ``(n,)`` applies the same scalar weight to every
+        outcome component; for multivariate continuous regression, ``(k, n)``
+        instead supplies a per-component weight per datapoint.
     missing
         Boolean mask with the same shape as `y_train`; `True` marks entries
         to be ignored by the MCMC. Values of `y_train` must be finite
@@ -437,6 +436,7 @@ class Bart(Module):
             sigma_df,
             sigma_scale,
             sigma_init,
+            w,
         )
 
         # split the user-provided seed into an mcmc key and a binner key
@@ -1255,6 +1255,7 @@ def _process_error_variance_settings(
     sigma_df: FloatLike,
     sigma_scale: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
     sigma_init: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
+    w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
 ) -> Wishart | None:
     """Build the error precision prior from the user settings."""
     if outcome_type is OutcomeType.binary:
@@ -1270,18 +1271,20 @@ def _process_error_variance_settings(
     k = kdims[0] if kdims else 1
     nu = jnp.asarray(sigma_df, jnp.float32) + (k - 1)
 
-    # guarded per-component variance of y_train, used by the 'auto' defaults;
-    # the `> 0` guard also maps the empty (NaN variance) case to 1
-    vary = jnp.var(y_train, axis=-1)
-    vary = jnp.where(vary > 0, vary, 1.0)
+    # guarded per-component variance of y_train, computed only when an 'auto'
+    # spec needs it (this function is not jitted, so it would not be elided)
+    if isinstance(sigma_scale, str) or isinstance(sigma_init, str):
+        vary = _guarded_response_variance(y_train, w, missing)
+    else:
+        vary = None
 
     # prior rate: E[precision] = nu / rate, so rate = nu * var per component
     rate_diag = jnp.where(
-        binary_mask, 0.0, nu * _resolve_error_variance(sigma_scale, vary)
+        binary_mask, 0.0, nu * _resolve_error_variance(sigma_scale, vary, kdims)
     )
 
     # initial precision = 1 / var per component (1 for binary components)
-    init_var = _resolve_error_variance(sigma_init, vary)
+    init_var = _resolve_error_variance(sigma_init, vary, kdims)
     init_diag = jnp.where(binary_mask, 1.0, jnp.reciprocal(init_var))
 
     if y_train.ndim == 2:
@@ -1291,18 +1294,46 @@ def _process_error_variance_settings(
     return make_error_cov_prior(nu, rate, init, outcome_type, missing)
 
 
+@jit
+def _guarded_response_variance(
+    y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+) -> Float32[Array, '*k']:
+    """Per-component variance of `y_train`, used by the 'auto' error scale.
+
+    A precision-weighted variance (precision ``1 / w ** 2``) estimates the
+    unit-weight ``sigma ** 2``; `missing` entries are dropped. The ``> 0`` guard
+    maps the empty / all-missing (NaN variance) case to 1.
+    """
+    if w is None and missing is None:
+        vary = jnp.var(y_train, axis=-1)
+    else:
+        prec = jnp.ones(()) if w is None else jnp.reciprocal(jnp.square(w))
+        if missing is not None:
+            prec = jnp.where(missing, 0.0, prec)
+            y_train = jnp.where(missing, 0.0, y_train)
+        n_valid = jnp.count_nonzero(prec, axis=-1)
+        wmean = jnp.sum(prec * y_train, axis=-1) / jnp.sum(prec, axis=-1)
+        sqdev = prec * jnp.square(y_train - wmean[..., None])
+        vary = jnp.sum(sqdev, axis=-1) / n_valid
+    return jnp.where(vary > 0, vary, 1.0)
+
+
 def _resolve_error_variance(
     spec: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
-    vary: Float32[Array, '*k'],
+    vary: Float32[Array, '*k'] | None,
+    shape: Sequence[int],
 ) -> Float32[Array, '*k']:
     """Per-component error variance from a scale spec ('auto' uses var(y))."""
     if isinstance(spec, str):
         if spec != 'auto':
             msg = f"unrecognized value {spec!r}, expected 'auto' or a number"
             raise ValueError(msg)
+        assert vary is not None  # computed iff some spec is 'auto'
         return vary
     else:
-        return jnp.broadcast_to(jnp.square(jnp.asarray(spec, jnp.float32)), vary.shape)
+        return jnp.broadcast_to(jnp.square(jnp.asarray(spec, jnp.float32)), shape)
 
 
 def make_error_cov_prior(

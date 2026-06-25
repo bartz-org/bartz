@@ -1034,6 +1034,27 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
 
+def test_binary_rejects_sigma_settings(keys: split, subtests: SubTests) -> None:
+    """Univariate binary regression rejects `sigma_scale`/`sigma_init`."""
+    bkw = make_kw(keys.pop(), 2)  # univariate binary regression
+    for param in ('sigma_scale', 'sigma_init'):
+        with (
+            subtests.test(param=param),
+            pytest.raises(ValueError, match='Do not set `sigma_scale` or `sigma_init`'),
+        ):
+            Bart(**dict(bkw.kw, **{param: 1.0}))
+
+
+def test_univariate_outcome_samples_error_scale(keys: split) -> None:
+    """`outcome_samples` applies `error_scale` in univariate continuous regression."""
+    bkw = make_kw(keys.pop(), 3)  # univariate continuous with error weights
+    bart = Bart(**bkw.kw)
+    out = bart.predict(
+        bkw.x_test, kind='outcome_samples', error_scale=bkw.w_test, key=keys.pop()
+    )
+    assert jnp.all(jnp.isfinite(out))
+
+
 def _assert_predictions_finite(bart: Bart, bkw: BartKW, keys: split) -> None:
     """Assert every prediction kind is finite, on train and test predictors."""
     for x_test, w in (('train', None), (bkw.x_test, bkw.w_test)):

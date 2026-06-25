@@ -1006,6 +1006,37 @@ def test_sigest_ols_needs_more_data_than_predictors(kw: dict[str, Any]) -> None:
         mc_gbart(**kw)
 
 
+def test_binary_rejects_sigest_and_lambda(
+    kw: dict[str, Any], subtests: SubTests
+) -> None:
+    """Binary regression rejects `sigest`/`lambda_` (they are ignored)."""
+    if get_with_default(kw, 'type') != 'pbart':
+        pytest.skip('not binary regression')
+    for param in ('sigest', 'lambda_'):
+        call_kw: dict = dict(kw, **{param: 1.0})
+        with (
+            subtests.test(param=param),
+            pytest.raises(
+                ValueError, match='Do not set `sigest` or `lambda_` for binary'
+            ),
+        ):
+            mc_gbart(**call_kw)
+
+
+def test_lambda_explicit(kw: dict[str, Any]) -> None:
+    """An explicit `lambda_` is honored and leaves `sigest` unset."""
+    if get_with_default(kw, 'type') == 'pbart':
+        pytest.skip('sigma prior is fixed for binary regression')
+    lambda_kw: dict = dict(kw, lambda_=1.0)
+    bart = mc_gbart(**lambda_kw)
+    assert bart.sigest is None
+    both_kw: dict = dict(kw, lambda_=1.0, sigest=2.0)
+    with pytest.raises(
+        ValueError, match='Do not set `sigest` if `lambda_` is specified'
+    ):
+        mc_gbart(**both_kw)
+
+
 def test_few_datapoints(kw: dict[str, Any]) -> None:
     """Check that the trees cannot grow if there are not enough datapoints.
 

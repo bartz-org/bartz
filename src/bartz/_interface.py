@@ -1311,11 +1311,12 @@ def _guarded_response_variance(
     """Per-component variance of `y_train`, used by the 'auto' error scale.
 
     A precision-weighted variance (precision ``1 / error_scale ** 2``) estimates
-    the unit-weight ``sigma ** 2``; `missing` entries are dropped. The ``> 0``
-    guard maps the empty / all-missing (NaN variance) case to 1.
+    the unit-weight ``sigma ** 2``; `missing` entries are dropped. The variance
+    is guarded to 1 when undefined (fewer than 2 valid points) or non-positive.
     """
     if error_scale is None and missing is None:
         vary = jnp.var(y_train, axis=-1)
+        return jnp.where(vary > 0, vary, 1.0)
     else:
         prec = (
             jnp.ones(())
@@ -1329,7 +1330,10 @@ def _guarded_response_variance(
         wmean = jnp.sum(prec * y_train, axis=-1) / jnp.sum(prec, axis=-1)
         sqdev = prec * jnp.square(y_train - wmean[..., None])
         vary = jnp.sum(sqdev, axis=-1) / n_valid
-    return jnp.where(vary > 0, vary, 1.0)
+        # guard on n_valid too: with a single valid point the variance is 0 in
+        # exact arithmetic, but float rounding in wmean can leave a tiny
+        # positive vary that would slip past the `vary > 0` guard
+        return jnp.where((n_valid > 1) & (vary > 0), vary, 1.0)
 
 
 def _resolve_error_variance(

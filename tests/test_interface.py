@@ -81,7 +81,12 @@ from pytest_subtests import SubTests
 
 from bartz import Bart as OriginalBart
 from bartz import PredictKind
-from bartz._interface import DataFrame, Series, predict_latent
+from bartz._interface import (
+    DataFrame,
+    Series,
+    _guarded_response_variance,
+    predict_latent,
+)
 from bartz._jaxext import (
     get_default_device,
     get_default_devices,
@@ -1683,10 +1688,13 @@ def test_two_datapoints(bkw: BartKW) -> None:
     kw['init_kw'] = init_kw
     bart = Bart(**kw)
     if not bkw.all_binary:
-        # the default prior rate is nu * var(y_train) per continuous component
+        # the default prior rate is nu * (precision-weighted) var(y_train) per
+        # continuous component, see `_guarded_response_variance`
         mask = bkw.binary_mask
         nu = nnone(bart._mcmc_state.error_cov_inv.nu)
-        vary = kw['y_train'].var(axis=-1)
+        vary = _guarded_response_variance(
+            kw['y_train'], kw.get('error_scale'), kw.get('missing')
+        )
         rate = jnp.diag(nnone(bart._mcmc_state.error_cov_inv.rate))
         assert_close_matrices(rate[~mask], nu * vary[~mask], rtol=1e-6)
     if bkw.uses_quantile_binner:

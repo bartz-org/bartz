@@ -63,11 +63,17 @@ from bartz.mcmcstep._lazy import (
     _wrap_chain,
     add_dummy_axis,
 )
-from bartz.mcmcstep._reduction import BatchedReduction, ReductionConfig
+from bartz.mcmcstep._reduction import (
+    AutoBatchedReduction,
+    AutoOneHotReduction,
+    ReductionConfig,
+)
 
 ArrayLike = Array | ndarray
 
 FloatLike = float | Float[ArrayLike, '']
+
+CHAIN_AXIS_AFTER_TREES = {0: 1, -1: -1}[CHAIN_AXIS]
 
 
 class OutcomeType(Enum):
@@ -217,8 +223,14 @@ class Forest(Module):
     p_propose_grow: Float32[Array, ' half_tree_size']
     """The unnormalized probability of picking a leaf for a grow proposal."""
 
-    leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=CHAIN_AXIS, data=-1)
-    """The index of the leaf each datapoints falls into, for each tree."""
+    leaf_indices: UInt[Array, 'num_trees *chains n'] = field(
+        chains=CHAIN_AXIS_AFTER_TREES, data=-1
+    )
+    """The index of the leaf each datapoints falls into, for each tree.
+
+    The chain axis sits after `num_trees` (not leading, unlike sibling fields)
+    so the per-tree `lax.scan` in `step`, under the chain `vmap`, avoids a
+    transpose of this large array that otherwise inflates gpu peak memory."""
 
     count_tree: UInt32[Array, '*chains num_trees 2*half_tree_size'] | None = field(
         chains=CHAIN_AXIS
@@ -604,10 +616,9 @@ def init(
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
     min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
-    # the gpu batch targets of the default reductions were tuned on an A4000
-    resid_reduction_config: ReductionConfig = BatchedReduction(auto_gpu_target=1024),
-    count_reduction_config: ReductionConfig = BatchedReduction(auto_gpu_target=2048),
-    prec_reduction_config: ReductionConfig = BatchedReduction(auto_gpu_target=1024),
+    resid_reduction_config: ReductionConfig = AutoBatchedReduction(),
+    count_reduction_config: ReductionConfig = AutoOneHotReduction(),
+    prec_reduction_config: ReductionConfig = AutoOneHotReduction(),
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
     sequential_unroll: int | bool = 2,
     save_ratios: bool = False,
@@ -679,9 +690,7 @@ def init(
     prec_reduction_config
         How to sum the residuals, count the datapoints, and sum the likelihood
         precisions in each leaf, respectively. See `ReductionConfig` and its
-        subclasses. The defaults pick the batching automatically based on the
-        platform the MCMC is compiled for, resolved at run time, so the state
-        need not know the platform in advance.
+        subclasses.
     prec_count_num_trees
         The number of trees to process at a time when counting datapoints or
         computing the likelihood precision. If `None`, do all trees at once,

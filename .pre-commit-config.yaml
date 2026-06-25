@@ -132,19 +132,26 @@ repos:
         # self-scopes to files carrying the bartz license header; `text` just
         # keeps binaries (e.g. .inv) out of the argument list.
         types: [text]
+      - id: vendor-latest-bartz
+        name: vendor latest_bartz (for ty)
+        # ty checks files under benchmarks/ that import the vendored latest
+        # bartz; refresh it first, else those imports do not resolve (e.g. on
+        # CI) or resolve against a stale copy. Runs before ty by declaration
+        # order, on the same python trigger.
+        entry: uv run --dev python benchmarks/_vendor_latest_bartz.py
+        language: system
+        pass_filenames: false
+        types: [python]
       - id: ty
         name: ty check
         # there is no official ty pre-commit hook (and an isolated hook env
         # would not see the project venv anyway), so run the dev-pinned ty.
-        # Whole-project check: per-file checking would miss cross-file breakage.
-        # Vendor latest_bartz first, else its imports in benchmarks/ do not
-        # resolve (e.g., on CI) or resolve against a stale copy.
-        entry: >
-          sh -c 'uv run --dev python benchmarks/_vendor_latest_bartz.py > /dev/null
-          && uv run --dev ty check'
+        # pre-commit feeds it the tracked python files: only the staged ones on
+        # a commit (fast incremental check), and all of them under `--all-files`
+        # — the comprehensive gate run by `make lint` and at merge time.
+        entry: uv run --dev ty check --
         language: system
-        pass_filenames: false
-        types_or: [python, toml]
+        types: [python]
       - id: check-returns-docstring
         name: forbid multi-line non-list `Returns` docstring sections
         # Matches a numpy-style `Returns` block whose first two non-blank lines

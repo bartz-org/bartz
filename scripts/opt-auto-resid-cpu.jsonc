@@ -1,0 +1,27 @@
+{
+    // Compare AutoBatchedReduction vs AutoOneHotReduction at the RESIDUAL
+    // reduction (`sum_resid`): the per-leaf sum of the (scaled) residual, run
+    // once per tree in the accept/reject scan. CPU variant of opt-auto-resid.jsonc.
+    //
+    // plot.reduce is the reduction slot holding the two zero-knob auto configs
+    // (autobatched = the default batched scatter-add; autoonehot = one-hot
+    // contraction), so the plots show the winner vs n and both timings.
+    //
+    // n, k (shape (n) -> (k, n)) and weights (k > 1 -> (k, k, n)) are scanned:
+    // they reshape the reduce. num_trees is fixed (resid runs once per tree on
+    // the same shape; 5 just times it); maxdepth fixed at 6 (bin count 64). The
+    // other two sites keep their auto defaults as a backdrop. n's top value is
+    // lowered 4x vs the gpu config because cpu is slower.
+    "plot": {
+        "scan": "n",
+        "reduce": "resid_reduction",
+    },
+    "values": {
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304],
+        "k":                  [null, 1, 2, 4],
+        "maxdepth":           [6],
+        "weights":            [false, true],
+        "num_trees":          [5],
+        "resid_reduction":    ["autobatched", "autoonehot"],
+    },
+}

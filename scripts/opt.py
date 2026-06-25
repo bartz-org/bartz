@@ -103,6 +103,7 @@ from tqdm import tqdm
 
 from bartz._jaxext import get_default_device
 from bartz.mcmcstep import (
+    AutoOneHotReduction,
     BatchedReduction,
     OneHotReduction,
     PallasReduction,
@@ -159,12 +160,8 @@ REDUCTION_KINDS: dict[str, type[ReductionConfig]] = {
 
 
 def _reduction_label(cfg: ReductionConfig) -> str:
-    """Compact label of `cfg`: kind tag plus the non-default knobs."""
-    knobs = ', '.join(
-        f'{f.name}={getattr(cfg, f.name)}'
-        for f in fields(cfg)
-        if getattr(cfg, f.name) != f.default
-    )
+    """Label of `cfg` as its kind tag plus every knob value, for plots and logs."""
+    knobs = ', '.join(f'{f.name}={getattr(cfg, f.name)}' for f in fields(cfg))
     return f'{_kind_name(type(cfg))}({knobs})'
 
 
@@ -434,33 +431,41 @@ class ConfigParams:
         else:
             trees_at_once = self.prec_count_num_trees
 
-        # the count/prec pass materializes the leaf indices of a batch of trees
+        # the count/prec pass materializes the leaf indices of a batch of trees;
+        # this also bounds those two sites' one-hot reduce, which is at most ~2x
+        # as large (out_size 2 vs the leaf indices' 1 per row), and on gpu fuses
+        # away entirely
         if chains * trees_at_once * self.n > MAX_LEAF_INDICES_SIZE:
             return False
 
-        # rough sizings of the reduce inputs: the number of one-hot matrices
-        # (one per array of indices) and of value rows contracted against them
-        reductions = (
-            (self.resid_reduction, chains, chains * k),
-            (self.count_reduction, chains * trees_at_once, chains * trees_at_once),
-            (self.prec_reduction, chains * trees_at_once, chains * trees_at_once),
-        )
-        return all(
-            self._reduction_is_valid(cfg, idx_rows, val_rows)
-            for cfg, idx_rows, val_rows in reductions
-        )
+        # The residual one-hot (out_size 2**maxdepth, vs 2 for count/prec) is the
+        # only large reduce buffer not otherwise bounded, and only on cpu is it
+        # fully materialized: gpu fuses the multiply path and packs the matmul
+        # one-hot, and a gpu OOM is caught cleanly anyway. So guard it on cpu only.
+        resid_cfg = self.resid_reduction
+        if get_default_device().platform == 'cpu' and isinstance(
+            resid_cfg, (OneHotReduction, AutoOneHotReduction)
+        ):
+            # matmul keeps one one-hot per chain; multiply broadcasts it across the
+            # k value rows. AutoOneHot picks matmul iff m=k>=2 (the residual's
+            # out_size is well above its min_matmul_bins).
+            matmul = (
+                resid_cfg.method == 'matmul'
+                if isinstance(resid_cfg, OneHotReduction)
+                else k >= 2
+            )
+            rows = chains if matmul else chains * k
+            if rows * 2**self.maxdepth * self.n > MAX_ONEHOT_SIZE:
+                return False
 
-    def _reduction_is_valid(
-        self, cfg: ReductionConfig, idx_rows: int, val_rows: int
-    ) -> bool:
-        """Whether `cfg` is admissible for this combination of values."""
+        # num_batches / pallas-device validity, applied to every site
+        sites = (self.resid_reduction, self.count_reduction, self.prec_reduction)
+        return all(self._reduction_is_valid(cfg) for cfg in sites)
+
+    def _reduction_is_valid(self, cfg: ReductionConfig) -> bool:
+        """Whether `cfg`'s device/shape constraints hold for this combination."""
         if isinstance(cfg, BatchedReduction):
             return not (isinstance(cfg.num_batches, int) and cfg.num_batches > self.n)
-        elif isinstance(cfg, OneHotReduction):
-            # 'matmul' materializes one (size, n) one-hot per indices array; the
-            # other methods may materialize the full (rows, size, n) buffer
-            rows = idx_rows if cfg.method == 'matmul' else val_rows
-            return rows * 2**self.maxdepth * self.n <= MAX_ONEHOT_SIZE
         elif isinstance(cfg, PallasReduction):
             return _pallas_is_valid(cfg, self.n)
         else:
@@ -892,7 +897,9 @@ class Benchmark:
 
     def teardown(self) -> None:
         """Drop state and clear compiled `step` cache."""
-        del self.state
+        # `setup` may have failed before binding `state` (e.g. an OOM in `init`)
+        if hasattr(self, 'state'):
+            del self.state
         step.clear_cache()
         # don't use jax.clear_caches() because it makes everything 3x slower
         collect()
@@ -980,7 +987,14 @@ def inner_benchmark_loop(
         try:
             bench.setup(params.to_init_kwargs())
         except JaxRuntimeError as e:
-            if 'RESOURCE_EXHAUSTED: Out of memory while trying to allocate' in str(e):
+            # An OOM means the combo does not fit this device: record NaN and move
+            # on. The message appears either directly or, on gpu, wrapped in an
+            # "Autotuning failed for HLO ..." report, so match both forms.
+            msg = str(e)
+            if (
+                'RESOURCE_EXHAUSTED' in msg
+                and 'Out of memory while trying to allocate' in msg
+            ):
                 time_est = float('nan')
                 time_lo = float('nan')
                 time_up = float('nan')
@@ -1034,6 +1048,18 @@ def enable_compilation_cache() -> None:
     jax_config.update('jax_compilation_cache_dir', 'config/jax_cache')
     jax_config.update('jax_persistent_cache_min_entry_size_bytes', -1)
     jax_config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
+
+
+def configure_gpu_preallocation(*, preallocate: bool) -> None:
+    """Set whether the JAX GPU backend preallocates device memory.
+
+    Must run before any JAX operation, since it only takes effect at backend
+    initialization. The master process initializes a backend merely to read the
+    default device, then idles while a worker subprocess does the timed work;
+    were it to preallocate it would starve the worker of GPU memory. So the
+    master disables preallocation while the worker keeps it.
+    """
+    jax_config.update('jax_pjrt_client_create_options', {'preallocate': preallocate})
 
 
 def make_output_dir() -> Path:
@@ -1091,8 +1117,12 @@ def parse_args() -> Namespace:
 
 def main() -> None:
     """Entry point of the script."""
-    enable_compilation_cache()
     args = parse_args()
+    # Set GPU preallocation by role before any JAX backend init: the master
+    # initializes a backend only to read the default device and then idles
+    # while the worker subprocess runs, so it must not preallocate.
+    configure_gpu_preallocation(preallocate=args.worker is not None)
+    enable_compilation_cache()
     config = Config.load(args.config)
     if args.minimal:
         config = config.minimal()

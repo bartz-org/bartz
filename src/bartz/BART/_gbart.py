@@ -336,7 +336,7 @@ class mc_gbart(Module):
             base=base,
             tau_num=tau_num,
             offset=offset,
-            w=w,
+            error_scale=w,
             num_trees=ntree,
             n_save=n_save,
             n_burn=nskip,

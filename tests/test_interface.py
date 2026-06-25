@@ -416,7 +416,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type='continuous',
-                    w=train.error_scale,
+                    error_scale=train.error_scale,
                     sparse=True,
                     theta=2.0,
                     varprob=jnp.array([0.2, 0.8]),
@@ -460,7 +460,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type='continuous',
-                    w=train.error_scale,
+                    error_scale=train.error_scale,
                     sparse=True,
                     **common,
                     printevery=50,
@@ -584,7 +584,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type='continuous',
-                    w=train.error_scale,
+                    error_scale=train.error_scale,
                     **common,
                     num_chains=None,
                 ),
@@ -627,8 +627,8 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     kw = kw.copy()
     kw['x_train'] = kw['x_train'][:, :n]
     kw['y_train'] = kw['y_train'][..., :n]
-    if kw.get('w') is not None:
-        kw['w'] = kw['w'][..., :n]
+    if kw.get('error_scale') is not None:
+        kw['error_scale'] = kw['error_scale'][..., :n]
     if kw.get('missing') is not None:
         kw['missing'] = kw['missing'][..., :n]
     return kw
@@ -1035,7 +1035,9 @@ def _assert_predictions_finite(bart: Bart, bkw: BartKW, keys: split) -> None:
         for kind in ('mean', 'mean_samples', 'latent_samples'):
             pred = bart.predict(x_test, kind=kind)
             assert jnp.all(jnp.isfinite(pred)), (x_test, kind)
-        out = bart.predict(x_test, kind='outcome_samples', w=w, key=keys.pop())
+        out = bart.predict(
+            x_test, kind='outcome_samples', error_scale=w, key=keys.pop()
+        )
         assert jnp.all(jnp.isfinite(out)), (x_test, 'outcome_samples')
     # error sdev is NaN by design for binary components, so only check it
     # when there are none
@@ -1145,7 +1147,7 @@ def test_output_shapes(bkw: BartKW, keys: split) -> None:
     assert bart.predict(bkw.x_test, kind='mean').shape == (*k, m)
     assert bart.predict(bkw.x_test, kind='latent_samples').shape == (ndpost, *k, m)
     assert bart.predict(
-        bkw.x_test, kind='outcome_samples', w=bkw.w_test, key=keys.pop()
+        bkw.x_test, kind='outcome_samples', error_scale=bkw.w_test, key=keys.pop()
     ).shape == (ndpost, *k, m)
 
     with debug_nans(False):
@@ -1523,8 +1525,8 @@ def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
     kw2 = dict(kw, seed=random.clone(kw['seed']))
     kw2['x_train'] = kw['x_train'][:, perm]
     kw2['y_train'] = kw['y_train'][..., perm]
-    if kw.get('w') is not None:
-        kw2['w'] = kw['w'][..., perm]
+    if kw.get('error_scale') is not None:
+        kw2['error_scale'] = kw['error_scale'][..., perm]
     if kw.get('missing') is not None:
         kw2['missing'] = kw['missing'][..., perm]
     bart2 = Bart(**kw2)
@@ -1932,7 +1934,7 @@ def test_jit(bkw: BartKW) -> None:
 
     X = kw.pop('x_train')
     y = kw.pop('y_train')
-    w = kw.pop('w', None)
+    w = kw.pop('error_scale', None)
     key = kw.pop('seed')
 
     def task(
@@ -1941,7 +1943,7 @@ def test_jit(bkw: BartKW) -> None:
         w: Float32[Array, ' n'] | None,
         key: Key[Array, ''],
     ) -> tuple[State, Shaped[Array, 'ndpost n'] | Shaped[Array, 'ndpost k n']]:
-        bart = OriginalBart(X, y, w=w, **kw, seed=key)
+        bart = OriginalBart(X, y, error_scale=w, **kw, seed=key)
         return bart._mcmc_state, bart.predict('train', kind='latent_samples')
 
     task_compiled = jit(task)
@@ -1970,7 +1972,7 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
 
     X = kw.pop('x_train')
     y = kw.pop('y_train')
-    w = kw.pop('w', None)
+    w = kw.pop('error_scale', None)
     missing = kw.pop('missing', None)
     kw.pop('seed')  # replaced by a distinct per-repetition key below
 
@@ -2007,7 +2009,7 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
         missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
         key: Key[Array, ''],
     ) -> OriginalBart:
-        return OriginalBart(X, y, w=w, missing=missing, **kw, seed=key)
+        return OriginalBart(X, y, error_scale=w, missing=missing, **kw, seed=key)
 
     batched = jit(vmap(task))(Xb, yb, wb, mb, key)
 
@@ -2176,7 +2178,7 @@ def test_polars(bkw: BartKW) -> None:
         seed=random.clone(kw2['seed']),
         x_train=to_polars(kw['x_train']),
         y_train=to_polars(kw['y_train']),
-        w=to_polars(kw.get('w')),
+        error_scale=to_polars(kw.get('error_scale')),
         missing=to_polars(kw.get('missing')),
     )
     bart2 = Bart(**kw2)
@@ -2201,7 +2203,9 @@ def test_data_format_mismatch(bkw: BartKW) -> None:
     kw = bkw.kw
     kw.update(
         x_train=pl.DataFrame(numpy.array(kw['x_train']).T),
-        w=None if kw.get('w') is None else pl.Series(numpy.array(kw['w'])),
+        error_scale=None
+        if kw.get('error_scale') is None
+        else pl.Series(numpy.array(kw['error_scale'])),
     )
     bart = Bart(**kw)
     with pytest.raises(ValueError, match='format mismatch'):
@@ -2290,7 +2294,7 @@ def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
             check(yhat_train, chains=True, data=True)
 
             if kind is PredictKind.outcome_samples:
-                extra['w'] = bkw.w_test
+                extra['error_scale'] = bkw.w_test
             yhat_test = bart.predict(bkw.x_test, kind=kind, **extra)
             check(yhat_test, chains=True, data=True)
 
@@ -2344,7 +2348,9 @@ def run_bart_and_block(bkw: BartKW, keys: split) -> None:
         bart.predict(bkw.x_test, kind='latent_samples'),
         bart.predict(bkw.x_test, kind='mean'),
         bart.predict(bkw.x_test, kind='mean_samples'),
-        bart.predict(bkw.x_test, kind='outcome_samples', key=keys.pop(), w=bkw.w_test),
+        bart.predict(
+            bkw.x_test, kind='outcome_samples', key=keys.pop(), error_scale=bkw.w_test
+        ),
         bart.get_error_sdev(),
         bart.get_latent_prec(),
         bart.varcount,
@@ -2689,7 +2695,7 @@ class TestMVBartInterface:
             Bart(
                 x_train=x,
                 y_train=y,
-                w=w,
+                error_scale=w,
                 **kw,
                 outcome_type=['binary'] + ['continuous'] * (k - 1),
             )
@@ -2723,14 +2729,14 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         return arr_mv.squeeze(0), arr_mv
 
     y_uv, y_mv = to_uv_mv(bkw.kw['y_train'])
-    w_uv, w_mv = to_uv_mv(bkw.kw.get('w'))
+    w_uv, w_mv = to_uv_mv(bkw.kw.get('error_scale'))
     missing_uv, missing_mv = to_uv_mv(bkw.kw.get('missing'))
 
     bkw.kw.update(outcome_type=outcome_type, n_burn=0, n_save=0)
-    for key in ('y_train', 'w', 'missing'):
+    for key in ('y_train', 'error_scale', 'missing'):
         bkw.kw.pop(key, None)
-    bart_uv = Bart(y_train=y_uv, w=w_uv, missing=missing_uv, **bkw.kw)
-    bart_mv = Bart(y_train=y_mv, w=w_mv, missing=missing_mv, **bkw.kw)
+    bart_uv = Bart(y_train=y_uv, error_scale=w_uv, missing=missing_uv, **bkw.kw)
+    bart_mv = Bart(y_train=y_mv, error_scale=w_mv, missing=missing_mv, **bkw.kw)
 
     state_uv = bart_uv._mcmc_state
     state_mv = bart_mv._mcmc_state

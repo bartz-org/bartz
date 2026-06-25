@@ -471,7 +471,7 @@ class BARTModel:
             power=mfp.beta,
             base=mfp.alpha,
             tau_num=tau_num_arg,
-            w=observation_weights,
+            error_scale=observation_weights,
             num_trees=mfp.num_trees,
             n_save=num_mcmc,
             n_burn=num_burnin,

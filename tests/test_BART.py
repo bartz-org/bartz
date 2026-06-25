@@ -160,6 +160,9 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     outcome_type = pop('outcome_type')
     push('type', 'pbart' if outcome_type == 'binary' else 'wbart')
 
+    # error_scale -> w
+    push('w', pop('error_scale'))
+
     # num_trees -> ntree
     push('ntree', pop('num_trees'))
 

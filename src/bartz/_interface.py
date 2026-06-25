@@ -218,8 +218,8 @@ class Bart(Module):
     sigma_scale
         Sets the scale of the prior on the error precision. If 'auto' (default),
         the prior is scaled so that the error precision equals
-        ``diag(1 / var(y_train))`` in expectation, where with weights `w` the
-        variance is a precision-weighted one that estimates the unit-weight error
+        ``diag(1 / var(y_train))`` in expectation, where with weights `error_scale`
+        the variance is a precision-weighted one that estimates the unit-weight error
         variance. Otherwise, ``square(sigma_scale)`` is the prior harmonic mean of
         the error variance; for multivariate regression a scalar is broadcast to
         all components. For mixed outcome types, binary components are ignored.
@@ -256,10 +256,10 @@ class Bart(Module):
         a scalar (broadcast to all components) or a `(k,)` vector. If not
         specified, it is set to the per-component mean of `y_train`. For mixed
         outcome types, each component uses the default for its type.
-    w
+    error_scale
         Coefficients that rescale the error standard deviation on each
-        datapoint. Not specifying `w` is equivalent to setting it to 1 for all
-        datapoints. Shape ``(n,)`` applies the same scalar weight to every
+        datapoint. Not specifying `error_scale` is equivalent to setting it to 1
+        for all datapoints. Shape ``(n,)`` applies the same scalar weight to every
         outcome component; for multivariate continuous regression, ``(k, n)``
         instead supplies a per-component weight per datapoint.
     missing
@@ -348,7 +348,7 @@ class Bart(Module):
     _x_train_fmt: Any = field(static=True)
     _device: Device | None = field(static=True)
 
-    _w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = None
+    _error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = None
 
     def __init__(
         self,
@@ -375,7 +375,7 @@ class Bart(Module):
         base: FloatLike = 0.95,
         tau_num: FloatLike | None = None,
         offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
-        w: Float[ArrayLike, ' n']
+        error_scale: Float[ArrayLike, ' n']
         | Float[ArrayLike, 'k n']
         | Series
         | DataFrame
@@ -405,18 +405,22 @@ class Bart(Module):
         y_train = _process_response_input(y_train)
         _check_same_length(x_train, y_train)
 
-        if w is not None:
-            # keep=True because `w` is donated downstream but also retained
-            # as `self._w` for prediction
-            w, self._w = _process_response_input(w, keep=True)
-            _check_same_length(x_train, w)
+        if error_scale is not None:
+            # keep=True because `error_scale` is donated downstream but also
+            # retained as `self._error_scale` for prediction
+            error_scale, self._error_scale = _process_response_input(
+                error_scale, keep=True
+            )
+            _check_same_length(x_train, error_scale)
 
         if missing is not None:
             missing = _process_response_input(missing, dtype=jnp.bool_)
             _check_same_length(x_train, missing)
 
         # check data types are correct for continuous/binary/multivariate regression
-        outcome_type, binary_mask = _check_type_settings(y_train, outcome_type, w)
+        outcome_type, binary_mask = _check_type_settings(
+            y_train, outcome_type, error_scale
+        )
 
         # process sparsity settings
         sparse_theta, sparse_a, sparse_b, sparse_rho = _process_sparsity_settings(
@@ -436,7 +440,7 @@ class Bart(Module):
             sigma_df,
             sigma_scale,
             sigma_init,
-            w,
+            error_scale,
         )
 
         # split the user-provided seed into an mcmc key and a binner key
@@ -456,7 +460,7 @@ class Bart(Module):
             y_train,
             outcome_type,
             offset,
-            w,
+            error_scale,
             missing,
             max_split,
             leaf_prior_cov_inv,
@@ -506,7 +510,7 @@ class Bart(Module):
         *,
         kind: PredictKind | str = 'mean',
         key: Key[Array, ''] | None = None,
-        w: Float[ArrayLike, ' m']
+        error_scale: Float[ArrayLike, ' m']
         | Float[ArrayLike, 'k m']
         | Series
         | DataFrame
@@ -529,7 +533,7 @@ class Bart(Module):
             The kind of output. See `PredictKind` for details.
         key
             Jax random key, required when ``kind='outcome_samples'``.
-        w
+        error_scale
             Per-observation error scale for ``kind='outcome_samples'``.
             Required when the model was fit with weights and ``x_test`` is
             new data. Shape matches the shape used at fitting: ``(m,)`` for
@@ -542,8 +546,8 @@ class Bart(Module):
         Raises
         ------
         ValueError
-            If `x_test` has a different format than `x_train`, or if `w`
-            is specified when it should be `None`, or if `w` is not
+            If `x_test` has a different format than `x_train`, or if `error_scale`
+            is specified when it should be `None`, or if `error_scale` is not
             specified when it is required, or if the model splits datapoints
             across devices (`num_data_devices`) and the number of test points
             is not a multiple of the number of data devices.
@@ -558,21 +562,21 @@ class Bart(Module):
         if kind is PredictKind.outcome_samples and key is None:
             msg = '`key` not specified'
             raise ValueError(msg)
-        w = self._process_w_test(x_test, kind, w)
+        error_scale = self._process_error_scale_test(x_test, kind, error_scale)
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
-        x_test = self._process_x_test(x_test, w)
+        x_test = self._process_x_test(x_test, error_scale)
 
         # place new test data on the devices of the model; the training data
         # is already in place
         if not x_test_is_train:
-            x_test, w = self._device_put_test(x_test, w)
+            x_test, error_scale = self._device_put_test(x_test, error_scale)
 
         # invoke jitted implementation
         return predict(
             key,
             self._main_trace,
             x_test,
-            w,
+            error_scale,
             self._mcmc_state.binary_indices,
             self._mcmc_state.binary_y is not None,
             kind,
@@ -785,11 +789,15 @@ class Bart(Module):
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)
 
-    def _process_w_test(
+    def _process_error_scale_test(
         self,
         x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
         kind: PredictKind,
-        w: Float[ArrayLike, ' m'] | Float[ArrayLike, 'k m'] | Series | DataFrame | None,
+        error_scale: Float[ArrayLike, ' m']
+        | Float[ArrayLike, 'k m']
+        | Series
+        | DataFrame
+        | None,
     ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
         """Validate and resolve the error weights for prediction.
 
@@ -799,7 +807,7 @@ class Bart(Module):
             The raw (not yet processed) test predictors, or ``'train'``.
         kind
             The prediction kind.
-        w
+        error_scale
             User-provided per-observation error scale, or `None`.
 
         Returns
@@ -809,20 +817,20 @@ class Bart(Module):
         Raises
         ------
         ValueError
-            If `w` is specified when it should be `None`, or missing when
-            required.
+            If `error_scale` is specified when it should be `None`, or missing
+            when required.
         """
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
-        has_train_weights = self._w is not None
+        has_train_weights = self._error_scale is not None
         is_binary = self._mcmc_state.binary_y is not None
         needs_weights = (
             kind is PredictKind.outcome_samples and not is_binary and has_train_weights
         )
 
         if not needs_weights:
-            if w is not None:
+            if error_scale is not None:
                 msg = (
-                    '`w` must be `None` in this configuration'
+                    '`error_scale` must be `None` in this configuration'
                     " (it is used only with kind='outcome_samples',"
                     ' continuous regression fitted with weights)'
                 )
@@ -830,36 +838,36 @@ class Bart(Module):
             return None
 
         if x_test_is_train:
-            if w is not None:
+            if error_scale is not None:
                 msg = (
-                    "`w` must be `None` when x_test='train'"
+                    "`error_scale` must be `None` when x_test='train'"
                     ' (training weights are used automatically)'
                 )
                 raise ValueError(msg)
-            return self._w
+            return self._error_scale
 
         # new test data, model was fit with weights
-        if w is None:
+        if error_scale is None:
             msg = (
-                '`w` is required because the model was fit with'
+                '`error_scale` is required because the model was fit with'
                 ' weights and x_test is new data'
             )
             raise ValueError(msg)
-        w_test = _process_response_input(w)
-        assert self._w is not None  # implied by needs_weights
-        if w_test.ndim != self._w.ndim:
+        error_scale_test = _process_response_input(error_scale)
+        assert self._error_scale is not None  # implied by needs_weights
+        if error_scale_test.ndim != self._error_scale.ndim:
             msg = (
-                f'`w` shape mismatch with training weights: got '
-                f'{w_test.shape=}, expected {self._w.ndim}D '
+                f'`error_scale` shape mismatch with training weights: got '
+                f'{error_scale_test.shape=}, expected {self._error_scale.ndim}D '
                 f'(matching the training-weight shape).'
             )
             raise ValueError(msg)
-        return w_test
+        return error_scale_test
 
     def _process_x_test(
         self,
         x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
-        w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
+        error_scale: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     ) -> UInt[Array, 'p m']:
         """Convert x_test to binned format suitable for prediction."""
         if isinstance(x_test, str):
@@ -873,14 +881,14 @@ class Bart(Module):
         if x_test_fmt != self._x_train_fmt:
             msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
             raise ValueError(msg)
-        if w is not None:
-            _check_same_length(w, x_test)
+        if error_scale is not None:
+            _check_same_length(error_scale, x_test)
         return self._binner.bin(x_test)
 
     def _device_put_test(
         self,
         x_test: UInt[Array, 'p m'],
-        w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
+        error_scale: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     ) -> tuple[UInt[Array, 'p m'], Float32[Array, ' m'] | Float32[Array, 'k m'] | None]:
         """Place new test data on the devices of the model.
 
@@ -899,11 +907,11 @@ class Bart(Module):
         elif self._device is not None:
             put = lambda a: device_put(a, self._device, donate=True)
         else:
-            return x_test, w
-        if w is None:
+            return x_test, error_scale
+        if error_scale is None:
             return put(x_test), None
         else:
-            return put(x_test), put(w)
+            return put(x_test), put(error_scale)
 
     def _check_trees(
         self, error: bool = False
@@ -1133,7 +1141,7 @@ def _check_same_length(x1: Shaped[Array, '... n'], x2: Shaped[Array, '... n']) -
 def _check_type_settings(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | str | Sequence[OutcomeType | str],
-    w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
+    error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None,
 ) -> tuple[OutcomeType | tuple[OutcomeType, ...], Bool[Array, ''] | Bool[Array, ' k']]:
     # standardize outcome_type to OutcomeType or tuple[OutcomeType, ...]
     if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
@@ -1153,17 +1161,17 @@ def _check_type_settings(
             f' found {y_train.shape=}.'
         )
         raise ValueError(msg)
-    if w is not None and outcome_type is not OutcomeType.continuous:
+    if error_scale is not None and outcome_type is not OutcomeType.continuous:
         msg = 'Weights are not supported when any outcome is binary.'
         raise ValueError(msg)
     if (
-        w is not None
-        and w.ndim == 2
-        and (y_train.ndim != 2 or w.shape[0] != y_train.shape[0])
+        error_scale is not None
+        and error_scale.ndim == 2
+        and (y_train.ndim != 2 or error_scale.shape[0] != y_train.shape[0])
     ):
         msg = (
-            f'2D w (vector per-component weights) requires y_train of '
-            f'shape (k, n) with matching k; got {w.shape=}, '
+            f'2D error_scale (vector per-component weights) requires y_train of '
+            f'shape (k, n) with matching k; got {error_scale.shape=}, '
             f'{y_train.shape=}.'
         )
         raise ValueError(msg)
@@ -1255,7 +1263,7 @@ def _process_error_variance_settings(
     sigma_df: FloatLike,
     sigma_scale: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
     sigma_init: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
-    w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
+    error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
 ) -> Wishart | None:
     """Build the error precision prior from the user settings."""
     if outcome_type is OutcomeType.binary:
@@ -1274,7 +1282,7 @@ def _process_error_variance_settings(
     # guarded per-component variance of y_train, computed only when an 'auto'
     # spec needs it (this function is not jitted, so it would not be elided)
     if isinstance(sigma_scale, str) or isinstance(sigma_init, str):
-        vary = _guarded_response_variance(y_train, w, missing)
+        vary = _guarded_response_variance(y_train, error_scale, missing)
     else:
         vary = None
 
@@ -1297,19 +1305,23 @@ def _process_error_variance_settings(
 @jit
 def _guarded_response_variance(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-    w: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
+    error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
 ) -> Float32[Array, '*k']:
     """Per-component variance of `y_train`, used by the 'auto' error scale.
 
-    A precision-weighted variance (precision ``1 / w ** 2``) estimates the
-    unit-weight ``sigma ** 2``; `missing` entries are dropped. The ``> 0`` guard
-    maps the empty / all-missing (NaN variance) case to 1.
+    A precision-weighted variance (precision ``1 / error_scale ** 2``) estimates
+    the unit-weight ``sigma ** 2``; `missing` entries are dropped. The ``> 0``
+    guard maps the empty / all-missing (NaN variance) case to 1.
     """
-    if w is None and missing is None:
+    if error_scale is None and missing is None:
         vary = jnp.var(y_train, axis=-1)
     else:
-        prec = jnp.ones(()) if w is None else jnp.reciprocal(jnp.square(w))
+        prec = (
+            jnp.ones(())
+            if error_scale is None
+            else jnp.reciprocal(jnp.square(error_scale))
+        )
         if missing is not None:
             prec = jnp.where(missing, 0.0, prec)
             y_train = jnp.where(missing, 0.0, y_train)
@@ -1368,7 +1380,7 @@ def _setup_mcmc(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
-    w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
+    error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
     max_split: UInt[Array, ' p'],
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
@@ -1404,7 +1416,7 @@ def _setup_mcmc(
         y=y_train,
         outcome_type=outcome_type,
         offset=offset,
-        error_scale=w,
+        error_scale=error_scale,
         missing=missing,
         max_split=max_split,
         num_trees=num_trees,
@@ -1880,7 +1892,7 @@ def predict(
     key: Key[Array, ''] | None,
     trace: MainTrace,
     x_test: UInt[Array, 'p m'],
-    w: Float[Array, ' m'] | Float[Array, 'k m'] | None,
+    error_scale: Float[Array, ' m'] | Float[Array, 'k m'] | None,
     binary_indices: Int32[Array, ' kb'] | None,
     has_binary: bool,
     kind: PredictKind | str,
@@ -1901,7 +1913,9 @@ def predict(
     # sample posterior (uses latent directly, no probit squash needed)
     if kind is PredictKind.outcome_samples:
         assert key is not None
-        return sample_outcome(key, trace, latent, w, binary_indices, has_binary)
+        return sample_outcome(
+            key, trace, latent, error_scale, binary_indices, has_binary
+        )
 
     # squash predictions to (0, 1) if probit
     if binary_indices is not None:
@@ -1923,7 +1937,7 @@ def sample_outcome(
     key: Key[Array, ''],
     trace: MainTrace,
     latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
-    w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
+    error_scale: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     binary_indices: Int32[Array, ' kb'] | None,
     has_binary: bool,
     /,
@@ -1942,17 +1956,17 @@ def sample_outcome(
         # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
         z = random.normal(key, latent.shape)  # (ndpost, k, m)
         error = solve_triangular(L, z, trans='T', lower=True)  # (ndpost, k, m)
-        if w is not None:
-            # w is (m,) or (k, m) so it always broadcasts right
-            error *= w
+        if error_scale is not None:
+            # error_scale is (m,) or (k, m) so it always broadcasts right
+            error *= error_scale
     elif has_binary:
         # pure binary UV: probit has sigma = 1
         error = random.normal(key, latent.shape)
     else:  # univariate continuous
         sigma = jnp.sqrt(jnp.reciprocal(prec)).reshape(-1)
         error = sigma[..., None] * random.normal(key, latent.shape)
-        if w is not None:
-            error *= w[None, :]
+        if error_scale is not None:
+            error *= error_scale[None, :]
 
     outcome = latent + error
 

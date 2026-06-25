@@ -1034,9 +1034,14 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
 
-def test_binary_rejects_sigma_settings(keys: split, subtests: SubTests) -> None:
-    """Univariate binary regression rejects `sigma_scale`/`sigma_init`."""
-    bkw = make_kw(keys.pop(), 2)  # univariate binary regression
+def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
+    """Binary regression rejects `sigma_scale`/`sigma_init`.
+
+    The rejection fires only when every outcome is binary (the outcome type then
+    collapses to the scalar ``binary``); skip the variants that would not raise.
+    """
+    if not bkw.all_binary:
+        pytest.skip('rejection only fires for all-binary outcomes')
     for param in ('sigma_scale', 'sigma_init'):
         with (
             subtests.test(param=param),
@@ -1045,8 +1050,13 @@ def test_binary_rejects_sigma_settings(keys: split, subtests: SubTests) -> None:
             Bart(**dict(bkw.kw, **{param: 1.0}))
 
 
-def test_univariate_outcome_samples_error_scale(keys: split) -> None:
-    """`outcome_samples` applies `error_scale` in univariate continuous regression."""
+def test_outcome_samples_error_scale(keys: split) -> None:
+    """`outcome_samples` applies `error_scale` in univariate continuous regression.
+
+    The univariate weighted branch of `sample_outcome` is reachable only here: the
+    BART3 wrappers expose no `outcome_samples`, and the `bkw` fixture is
+    multivariate-only, so this uses the univariate variant directly.
+    """
     bkw = make_kw(keys.pop(), 3)  # univariate continuous with error weights
     bart = Bart(**bkw.kw)
     out = bart.predict(

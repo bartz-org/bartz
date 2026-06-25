@@ -209,8 +209,6 @@ class mc_gbart(Module):
     This interface imitates the function ``mc_gbart`` from the R package `BART3
     <https://github.com/rsparapa/bnptools>`_, but with these differences:
 
-    - If `x_train` and `x_test` are matrices, they have one predictor per row
-      instead of per column.
     - If ``usequants=False``, R BART3 switches to quantiles anyway if there are
       less predictor values than the required number of bins, while bartz
       always follows the specification.
@@ -243,10 +241,10 @@ class mc_gbart(Module):
 
     def __init__(
         self,
-        x_train: Real[ArrayLike, 'p n'] | DataFrame,
+        x_train: Real[ArrayLike, 'n p'] | DataFrame,
         y_train: Float32[ArrayLike, ' n'] | Series,
         *,
-        x_test: Real[ArrayLike, 'p m'] | DataFrame | None = None,
+        x_test: Real[ArrayLike, 'm p'] | DataFrame | None = None,
         type: Literal['wbart', 'pbart'] = 'wbart',  # noqa: A002
         sparse: bool = False,
         theta: FloatLike | None = None,
@@ -287,7 +285,7 @@ class mc_gbart(Module):
         # `sigest` and `Bart` share a single copy of the (memory-heavy) X matrix.
         # `Bart` records the format as plain arrays, so `predict` re-implements
         # the input-format consistency check against the original format here.
-        x_train, self._x_train_fmt = _process_predictor_input(x_train)
+        x_train, self._x_train_fmt = _process_bart3_predictor_input(x_train)
         y_train = _process_response_input(y_train)
 
         # map the BART3 error-variance settings to Bart's sigma prior, estimating
@@ -536,7 +534,7 @@ class mc_gbart(Module):
     # Public methods from Bart
 
     def predict(
-        self, x_test: Real[ArrayLike, 'p m'] | DataFrame
+        self, x_test: Real[ArrayLike, 'm p'] | DataFrame
     ) -> Float32[Array, 'ndpost m']:
         """
         Evaluate the sum-of-trees at `x_test` for each MCMC iteration.
@@ -557,7 +555,7 @@ class mc_gbart(Module):
         """
         # pre-process and check the format matches x_train; Bart only sees plain
         # arrays, so this consistency check is re-implemented here
-        x_test, x_test_fmt = _process_predictor_input(x_test)
+        x_test, x_test_fmt = _process_bart3_predictor_input(x_test)
         if x_test_fmt != self._x_train_fmt:
             msg = (
                 f'Input format mismatch: {x_test_fmt=} '
@@ -576,6 +574,20 @@ class gbart(mc_gbart):
             raise TypeError(msg)
         kwargs.update(mc_cores=1)
         super().__init__(*args, **kwargs)
+
+
+def _process_bart3_predictor_input(
+    x: Real[ArrayLike, 'n p'] | DataFrame,
+) -> tuple[Shaped[Array, 'p n'], Any]:
+    """Process BART3-style predictors (one predictor per column) to bartz layout.
+
+    Unlike `bartz.Bart`, BART3 lays out predictor matrices with one predictor
+    per column, so plain arrays are transposed to bartz's (p, n) layout.
+    Dataframes already use one column per predictor, so they are left untouched.
+    """
+    if not isinstance(x, DataFrame):
+        x = jnp.asarray(x).T
+    return _process_predictor_input(x)
 
 
 def _resolve_sigma_prior(

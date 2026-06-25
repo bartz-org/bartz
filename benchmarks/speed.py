@@ -80,6 +80,10 @@ except ImportError:
     # WORKAROUND(bartz<0.8.0): mc_gbart was introduced in 0.8.0; fall back to gbart
     from bartz.BART import gbart
 
+# WORKAROUND(bartz<0.11.0): mc_gbart switched its array predictor layout from
+# (p, n) to R BART3's (n, p) in 0.11.0. Detect it from the `x_train` annotation.
+X_N_BY_P = "'n p'" in str(signature(gbart).parameters['x_train'].annotation)
+
 from bartz.mcmcstep import init, step
 from benchmarks.latest_bartz.mcmcstep import make_p_nonterminal
 from benchmarks.latest_bartz.testing import gen_data
@@ -523,7 +527,7 @@ class BaseGbart(AutoParamNames):
 
         # arguments
         self.kw: dict = dict(
-            x_train=train.x,
+            x_train=train.x.T if X_N_BY_P else train.x,
             y_train=train.y.squeeze(0),
             ntree=NTREE,
             nskip=niters // 2,
@@ -555,7 +559,7 @@ class BaseGbart(AutoParamNames):
         """Time instantiating the class."""
         with redirect_stdout(StringIO()):
             if self.predict:
-                ypred = self.bart.predict(self.test.x)
+                ypred = self.bart.predict(self.test.x.T if X_N_BY_P else self.test.x)
                 block_until_ready(ypred)
             else:
                 bart = gbart(**self.kw)

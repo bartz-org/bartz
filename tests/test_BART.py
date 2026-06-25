@@ -204,8 +204,10 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     bart_kwargs['init_kw'] = init_kw
     kw['bart_kwargs'] = bart_kwargs
 
-    # re-add x_test
-    kw['x_test'] = bkw.x_test
+    # re-add x_test; mc_gbart follows BART3's (n, p) array layout, so transpose
+    # the (p, n) predictor matrices used internally by Bart
+    kw['x_train'] = kw['x_train'].T
+    kw['x_test'] = bkw.x_test.T
 
     return kw
 
@@ -283,7 +285,7 @@ class TestWithCachedBart:
         kw = make_gbart_kw(key, variant)
 
         # modify configs to make them appropriate for convergence checks and R
-        p, n = kw['x_train'].shape
+        n, p = kw['x_train'].shape
         nchains = 4
         kw.update(
             ntree=max(2 * n, p),
@@ -323,7 +325,7 @@ class TestWithCachedBart:
         nchains = nnone(bart._mcmc_state.num_chains())
         nsamples = bart.ndpost // nchains
         kw = cachedbart.kwargs
-        p, n = kw['x_train'].shape
+        n, p = kw['x_train'].shape
 
         with subtests.test('yhat_train'):
             yhat_train = bart.yhat_train.reshape(nchains, nsamples, n)
@@ -369,7 +371,11 @@ class TestWithCachedBart:
         # automatic cutpoint determination of BART is the same of my package. They
         # are similar but have some differences, and having exactly the same
         # cutpoints is more important for the test.
-        kw_BART['transposed'] = True  # this disables predictors pre-processing
+        # transposed=True disables predictors pre-processing, so BART3 expects
+        # the (p, n) layout; mc_gbart uses (n, p), so transpose back
+        kw_BART['transposed'] = True
+        kw_BART['x_train'] = kw['x_train'].T
+        kw_BART['x_test'] = kw['x_test'].T
         kw_BART['numcut'] = bart._mcmc_state.forest.max_split
         kw_BART['xinfo'] = bart._splits
 
@@ -399,8 +405,8 @@ class TestWithCachedBart:
             yhat_train, rbart.yhat_train.astype(numpy.float32), rtol=1e-6
         )
 
-        # check yhat_test
-        Xt = bart._bart._binner.bin(kw['x_test'])
+        # check yhat_test; the binner uses the (p, m) layout
+        Xt = bart._bart._binner.bin(kw['x_test'].T)
         yhat_test = evaluate_trace(Xt, trace)
         assert_close_matrices(
             yhat_test, nnone(rbart.yhat_test).astype(numpy.float32), rtol=1e-6
@@ -425,7 +431,7 @@ class TestWithCachedBart:
         """Check `bartz.BART` gives results similar to the R package BART3."""
         bart = cachedbart.bart
         kw = cachedbart.kwargs
-        p, n = kw['x_train'].shape
+        n, p = kw['x_train'].shape
 
         # run R bart
         kw_BART = self.kw_bartz_to_BART3(keys.pop(), kw, bart)
@@ -658,8 +664,8 @@ def test_output_shapes(kw: dict[str, Any]) -> None:
     ndpost = get_with_default(kw, 'ndpost')
     nskip = get_with_default(kw, 'nskip')
     mc_cores = get_with_default(kw, 'mc_cores')
-    p, n = kw['x_train'].shape
-    _, m = kw['x_test'].shape
+    n, p = kw['x_train'].shape
+    m, _ = kw['x_test'].shape
 
     binary = get_with_default(kw, 'type') == 'pbart'
 
@@ -767,7 +773,7 @@ class TestVarprobAttr:
         dgp = gen_data(keys.pop(), n=30, p=2, **GEN_KW)
         with debug_nans(False):
             xinfo = jnp.array([[jnp.nan], [0]])
-        bart = mc_gbart(x_train=dgp.x, y_train=dgp.y, xinfo=xinfo, seed=keys.pop())
+        bart = mc_gbart(x_train=dgp.x.T, y_train=dgp.y, xinfo=xinfo, seed=keys.pop())
         assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1], strict=False)
         assert_array_equal(bart.varprob_mean, [0, 1], strict=False)
         assert jnp.all(bart.varprob_mean == bart.varprob)
@@ -786,7 +792,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
 
     # run bart
     bart = mc_gbart(
-        x_train=X,
+        x_train=X.T,
         y_train=y,
         nskip=1000,
         sparse=True,
@@ -909,7 +915,7 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     """Set the number of datapoints in the kw dictionary."""
     assert n <= kw['y_train'].size
     kw = kw.copy()
-    kw['x_train'] = kw['x_train'][:, :n]
+    kw['x_train'] = kw['x_train'][:n, :]
     kw['y_train'] = kw['y_train'][:n]
     if kw.get('w') is not None:
         kw['w'] = kw['w'][:n]
@@ -922,7 +928,7 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
     kw = set_num_datapoints(kw, num_datapoints)
 
     if num_datapoints == 0 or get_with_default(kw, 'usequants'):
-        p, _ = kw['x_train'].shape
+        _, p = kw['x_train'].shape
         nsplits = 10
         xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
         kw.update(xinfo=xinfo)
@@ -1029,7 +1035,7 @@ def test_xinfo() -> None:
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
         )
     kw: kwdict = dict(
-        x_train=jnp.empty((3, 0)),
+        x_train=jnp.empty((0, 3)),
         y_train=jnp.empty(0),
         ndpost=0,
         nskip=0,
@@ -1054,7 +1060,7 @@ def test_xinfo_wrong_p() -> None:
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
         )
     kw: kwdict = dict(
-        x_train=jnp.empty((5, 0)),
+        x_train=jnp.empty((0, 5)),
         y_train=jnp.empty(0),
         ndpost=0,
         nskip=0,
@@ -1151,7 +1157,7 @@ def run_bart_like_prior(
 
     # configure bart to run many mcmc iterations, without data
     kw: dict = dict(
-        x_train=jnp.empty((p, 0)),
+        x_train=jnp.empty((0, p)),
         y_train=jnp.empty(0),
         ntree=20,
         ndpost=1000,
@@ -1314,7 +1320,7 @@ def test_jit(kw: dict[str, Any]) -> None:
     key = kw.pop('seed')
 
     def task(
-        X: Shaped[Array, 'p n'],
+        X: Shaped[Array, 'n p'],
         y: Shaped[Array, ' n'],
         w: Float32[Array, ' n'] | None,
         key: Key[Array, ''],
@@ -1355,8 +1361,8 @@ def test_polars(kw: dict[str, Any]) -> None:
 
     kw.update(
         seed=random.clone(kw['seed']),
-        x_train=pl.DataFrame(numpy.array(kw['x_train']).T),
-        x_test=pl.DataFrame(numpy.array(kw['x_test']).T),
+        x_train=pl.DataFrame(numpy.array(kw['x_train'])),
+        x_test=pl.DataFrame(numpy.array(kw['x_test'])),
         y_train=pl.Series(numpy.array(kw['y_train'])),
         w=None if kw.get('w') is None else pl.Series(numpy.array(kw['w'])),
     )
@@ -1374,13 +1380,13 @@ def test_polars(kw: dict[str, Any]) -> None:
 def test_data_format_mismatch(kw: dict[str, Any]) -> None:
     """Test that passing predictors with mismatched formats raises an error."""
     kw.update(
-        x_train=pl.DataFrame(numpy.array(kw['x_train']).T),
-        x_test=pl.DataFrame(numpy.array(kw['x_test']).T),
+        x_train=pl.DataFrame(numpy.array(kw['x_train'])),
+        x_test=pl.DataFrame(numpy.array(kw['x_test'])),
         w=None if kw.get('w') is None else pl.Series(numpy.array(kw['w'])),
     )
     bart = mc_gbart(**kw)
     with pytest.raises(ValueError, match='format mismatch'):
-        bart.predict(kw['x_test'].to_numpy().T)
+        bart.predict(kw['x_test'].to_numpy())
 
 
 def test_automatic_integer_types(kw: dict[str, Any]) -> None:
@@ -1395,7 +1401,7 @@ def test_automatic_integer_types(kw: dict[str, Any]) -> None:
 
     leaf_indices_type = select_type(kw.get('bart_kwargs', {}).get('maxdepth', 6) <= 8)
     split_trees_type = X_type = select_type(get_with_default(kw, 'numcut') <= 255)
-    var_trees_type = select_type(kw['x_train'].shape[0] <= 256)
+    var_trees_type = select_type(kw['x_train'].shape[1] <= 256)
 
     assert bart._mcmc_state.forest.var_tree.dtype == var_trees_type
     assert bart._mcmc_state.forest.split_tree.dtype == split_trees_type
@@ -1509,7 +1515,7 @@ class TestVarprobParam:
 
     def test_biased_predictor_choice(self, keys: split, kw: dict) -> None:
         """Check that if `varprob[i]` is high then predictor `i` is used more than others."""
-        p, _ = kw['x_train'].shape
+        _, p = kw['x_train'].shape
         i = random.randint(keys.pop(), (), 0, p)
         vp = jnp.full(p, 0.001).at[i].set(1)
         vp /= vp.sum()
@@ -1521,7 +1527,7 @@ class TestVarprobParam:
 
     def test_positive(self, kw: dict, subtests: SubTests) -> None:
         """Check that an error is raised if varprob is not > 0."""
-        p, _ = kw['x_train'].shape
+        _, p = kw['x_train'].shape
 
         with subtests.test('not negative'):
             assert p > 1

@@ -87,6 +87,8 @@ from bartz._jaxext import (
 )
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import (
+    AutoBatchedReduction,
+    AutoOneHotReduction,
     BatchedReduction,
     OneHotReduction,
     PallasReduction,
@@ -104,7 +106,7 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._reduction import _resolve_pallas_backend
+from bartz.mcmcstep._reduction import _gpu_sm_count, _resolve_pallas_backend
 from bartz.mcmcstep._state import Forest, StepConfig, _search_divisor
 from bartz.mcmcstep._step import (
     _compute_likelihood_ratio_mv,
@@ -695,11 +697,12 @@ class TestReduction:
         # only mode that runs there)
         pallas_backend = 'triton' if get_default_device().platform == 'gpu' else 'cpu'
         return (
-            # BatchedReduction: unbatched, automatic, and explicit batch counts (a
-            # divisor of `n` and a non-divisor, which leaves an uneven final batch),
-            # each batch axis layout, and strided vs contiguous batch assignment
+            # BatchedReduction: unbatched and explicit batch counts (a divisor of
+            # `n` and a non-divisor, which leaves an uneven final batch), each batch
+            # axis layout, strided vs contiguous batch assignment; plus the
+            # per-platform automatic count of AutoBatchedReduction
             BatchedReduction(num_batches=None),
-            BatchedReduction(num_batches='auto'),
+            AutoBatchedReduction(),
             BatchedReduction(num_batches=4),
             BatchedReduction(num_batches=7),
             BatchedReduction(num_batches=4, batches_inner=False),
@@ -713,6 +716,8 @@ class TestReduction:
             OneHotReduction(method='multiply', n_inner=False),
             OneHotReduction(method='scatter_set', n_inner=True),
             OneHotReduction(method='scatter_set', n_inner=False),
+            # AutoOneHotReduction: per-site, per-platform method and layout
+            AutoOneHotReduction(),
             # PallasReduction: fully automatic grid and tile, then explicit ones
             PallasReduction(backend=pallas_backend),
             PallasReduction(backend=pallas_backend, num_blocks=1, block_size=64),
@@ -849,6 +854,23 @@ class TestReduction:
             assert params is None
         else:
             assert params is not None
+
+    def test_gpu_sm_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The cuda branch reads the shared SM count and rejects mixed gpus."""
+
+        class FakeDevice(NamedTuple):
+            core_count: int
+
+        monkeypatch.setattr(
+            'bartz.mcmcstep._reduction.backends', lambda: {'cuda': None}
+        )
+
+        monkeypatch.setattr(jax, 'devices', lambda _: [FakeDevice(84), FakeDevice(84)])
+        assert _gpu_sm_count() == 84
+
+        monkeypatch.setattr(jax, 'devices', lambda _: [FakeDevice(84), FakeDevice(80)])
+        with pytest.raises(ValueError, match='differing SM counts'):
+            _gpu_sm_count()
 
 
 def vmap_randint_masked(

@@ -95,6 +95,7 @@ Interface hierarchy:
     - use our custom `from bartz._jaxext import split` instead of `random.split` generally
         - `split` is a class and you use it like this: `keys = split(key); x = random.gen(keys.pop(), ...); y = vmapped_func(keys.pop(1000), ...)`
         - don't pass a `split` object to functions, follow the jax convention that the first argument is a single random key
+    - use jnp.square(x), jnp.sqrt(x), lax.rsqrt(x), jnp.reciprocal(x) instead of x**2, x**0.5, x**-0/5, 1/x
 - other **python** conventions:
     - use dicts as if they were frozendicts when possible: e.g., do `d = dict(d, a=1, b=2)` to set values instead of `d['a'] = 1` or `d.update(a=1)`, safer
         - related: prefer tuples to lists
@@ -109,6 +110,7 @@ Interface hierarchy:
         - type hints in signatures, not in docstrings
             - but when returning multiple values, copy the type hints verbatim in the return values list, because the html doc type render does not support multi-valued return natively
         - separate overloads with blank lines, don't bunch them on the function
+        - use `kw: dict = dict(...); f(**kw)` to make ty happy when it complains about expanding kwargs in calls; the generic `: dict` type hint stops type inference on the values
     - _src-like layout: modules only contain the public symbols, imported from an implementation submodule
         - because of this, don't prepend redundant underscores to private functions: they stay private anyway
     - prefer `if ...: return; else: return` to early returns

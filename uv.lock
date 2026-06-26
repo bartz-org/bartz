@@ -304,9 +304,9 @@ dev = [
 requires-dist = [
     { name = "absl-py", specifier = ">=2.2.2" },
     { name = "equinox", specifier = ">=0.12.2" },
-    { name = "jax", specifier = ">=0.6.1" },
-    { name = "jax", extras = ["cuda12"], marker = "extra == 'cuda12'", specifier = ">=0.6.1" },
-    { name = "jax", extras = ["cuda13"], marker = "extra == 'cuda13'", specifier = ">=0.6.1" },
+    { name = "jax", specifier = ">=0.6.1,!=0.10.2" },
+    { name = "jax", extras = ["cuda12"], marker = "extra == 'cuda12'", specifier = ">=0.6.1,!=0.10.2" },
+    { name = "jax", extras = ["cuda13"], marker = "extra == 'cuda13'", specifier = ">=0.6.1,!=0.10.2" },
     { name = "jaxtyping", specifier = ">=0.3.2" },
     { name = "numpy", specifier = ">=2.2.6" },
     { name = "scipy", specifier = ">=1.15.3" },

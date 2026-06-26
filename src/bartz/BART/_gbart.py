@@ -123,9 +123,8 @@ class mc_gbart(Module):
     sigest
         An estimate of the residual standard deviation on `y_train`, used to set
         `lambda_`. If not specified, it is estimated by linear regression (with
-        intercept, and without taking into account `w`). If `y_train` has less
-        than two elements, it is set to 1. If n <= p, it is set to the standard
-        deviation of `y_train`. Ignored if `lambda_` is specified.
+        intercept, and without taking into account `w`). Ignored if `lambda_` is
+        specified.
     sigdf
         The degrees of freedom of the scaled inverse-chisquared prior on the
         noise variance.

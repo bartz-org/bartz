@@ -39,13 +39,9 @@ try:
 except ImportError:
     from bartz.BART import gbart as mc_gbart  # pre v0.8.0
 
-# WORKAROUND(bartz<0.11.0): mc_gbart switched its array predictor layout from
-# (p, n) to R BART3's (n, p) in 0.11.0. Detect it from the `x_train` annotation.
-X_N_BY_P = "'n p'" in str(signature(mc_gbart).parameters['x_train'].annotation)
-
 from benchmarks.latest_bartz._jaxext import split
 from benchmarks.latest_bartz.testing import DGP, gen_data
-from benchmarks.speed import get_default_platform
+from benchmarks.speed import X_N_BY_P, get_default_platform
 
 
 def make_data(

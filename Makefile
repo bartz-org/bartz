@@ -91,10 +91,10 @@ help:
 	@echo "- lint: run pre-commit hooks on all files"
 	@echo
 	@echo "Release workflow:"
-	@echo "- do a PR that re-runs benchmarks"
 	@echo "- describe release in docs/changelog.md (its topmost header sets the version, follow effver https://jacobtomlinson.dev/effver)"
 	@echo "- $$ make release, will not release but runs all tests, iterate and debug"
 	@echo "- merge a PR with the changes"
+	@echo "- do a PR that re-runs benchmarks"
 	@echo "- on main: $$ make release"
 	@echo "- merge fix PR and try again until make release passes"
 	@echo "- publish the draft github release created by make release (updates zenodo automatically)"

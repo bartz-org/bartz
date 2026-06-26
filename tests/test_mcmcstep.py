@@ -90,10 +90,12 @@ from bartz.mcmcstep import (
     AutoBatchedReduction,
     AutoOneHotReduction,
     BatchedReduction,
+    DiagWishart,
     OneHotReduction,
     PallasReduction,
     ReductionConfig,
     State,
+    Wishart,
     init,
     make_p_nonterminal,
     step,
@@ -1415,15 +1417,19 @@ class TestMultichain:
         if mixed:
             kw.update(
                 outcome_type=['binary', 'continuous'],
-                error_cov_df=2.0,  # keep this a weak type
-                error_cov_scale=jnp.diag(jnp.array([0.0, 2.0])),
+                error_cov_inv=DiagWishart(
+                    nu=2.0, rate=jnp.diag(jnp.array([0.0, 2.0])), value=jnp.eye(2)
+                ),
             )
         elif binary:
             kw.update(outcome_type='binary')
         else:
             kw.update(
-                error_cov_df=2.0,  # keep this a weak type
-                error_cov_scale=2 * jnp.eye(k) if mv else 2.0,
+                error_cov_inv=Wishart(
+                    nu=2.0,
+                    rate=2 * jnp.eye(k) if mv else 2.0,
+                    value=jnp.eye(k) if mv else 1.0,
+                )
             )
 
         if vec_weights:
@@ -1583,8 +1589,8 @@ class TestMultichain:
                 '.offset',
                 '.prec_scale',
                 '.inv_sdev_scale',
-                '.error_cov_df',
-                '.error_cov_scale',
+                '.error_cov_inv.nu',
+                '.error_cov_inv.rate',
                 '.forest.max_split',
                 '.forest.blocked_vars',
                 '.forest.p_nonterminal',
@@ -1835,8 +1841,7 @@ def test_affluence_tree_stays_clean(
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(6),
         leaf_prior_cov_inv=1.0,
-        error_cov_df=2.0,
-        error_cov_scale=2.0,
+        error_cov_inv=Wishart(nu=2.0, rate=2.0, value=1.0),
         min_points_per_decision_node=min_points_per_decision_node,
         min_points_per_leaf=min_points_per_leaf,
     )
@@ -1893,8 +1898,9 @@ class TestMixedBinaryContinuous:
             num_trees=self.num_trees,
             p_nonterminal=jnp.full(self.d - 1, 0.9),
             leaf_prior_cov_inv=jnp.eye(self.k) * self.num_trees,
-            error_cov_df=2.0,
-            error_cov_scale=jnp.diag(jnp.array([0.0, 2.0, 0.0])),
+            error_cov_inv=DiagWishart(
+                nu=2.0, rate=jnp.diag(jnp.array([0.0, 2.0, 0.0])), value=jnp.eye(self.k)
+            ),
         )
 
     def test_init_shapes(self, init_kwargs: dict) -> None:
@@ -1917,19 +1923,19 @@ class TestMixedBinaryContinuous:
         # resid should have all k rows
         assert state.resid.shape == (self.k, self.n)
 
-        # error_cov_inv should be a (k, k) diagonal matrix
-        assert state.error_cov_inv is not None
-        assert state.error_cov_inv.shape == (self.k, self.k)
+        # error_cov_inv.value should be a (k, k) diagonal matrix
+        value = state.error_cov_inv.value
+        assert value.shape == (self.k, self.k)
         # off-diagonal should be zero
-        assert_array_equal(state.error_cov_inv, jnp.diag(jnp.diag(state.error_cov_inv)))
+        assert_array_equal(value, jnp.diag(jnp.diag(value)))
 
         # binary diagonal entries should be 1.0
-        assert state.error_cov_inv[0, 0] == 1.0
-        assert state.error_cov_inv[2, 2] == 1.0
+        assert value[0, 0] == 1.0
+        assert value[2, 2] == 1.0
 
-        # error_cov_df and error_cov_scale should be set
-        assert state.error_cov_df is not None
-        assert state.error_cov_scale is not None
+        # the Wishart prior parameters should be set
+        assert state.error_cov_inv.nu is not None
+        assert state.error_cov_inv.rate is not None
 
     def test_init_binary_y_values(self, init_kwargs: dict) -> None:
         """Check that binary_y correctly extracts binary components from y."""
@@ -1982,8 +1988,45 @@ class TestMixedBinaryContinuous:
         init_kwargs['outcome_type'] = outcome_type
         if with_missing:
             init_kwargs['missing'] = jnp.zeros((self.k, self.n), jnp.bool_)
-        init_kwargs['error_cov_scale'] += 0.1 * jnp.ones((self.k, self.k))
+        prior = init_kwargs['error_cov_inv']
+        init_kwargs['error_cov_inv'] = DiagWishart(
+            nu=prior.nu,
+            rate=prior.rate + 0.1 * jnp.ones((self.k, self.k)),
+            value=prior.value,
+        )
         with pytest.raises(Exception, match='diagonal'):
+            _state = init(**init_kwargs)
+
+    @pytest.mark.parametrize(
+        ('outcome_type', 'with_missing'),
+        [
+            (['binary', 'continuous', 'binary'], False),
+            (['continuous', 'continuous', 'continuous'], True),
+        ],
+        ids=['mixed', 'partial_missing'],
+    )
+    def test_init_rejects_nondiagonal_value(
+        self, init_kwargs: dict, outcome_type: Sequence[str], with_missing: bool
+    ) -> None:
+        """Check that init rejects a non-diagonal initial precision value."""
+        init_kwargs['outcome_type'] = outcome_type
+        if with_missing:
+            init_kwargs['missing'] = jnp.zeros((self.k, self.n), jnp.bool_)
+        prior = init_kwargs['error_cov_inv']
+        init_kwargs['error_cov_inv'] = DiagWishart(
+            nu=prior.nu, rate=prior.rate, value=prior.value.at[0, 1].set(0.5)
+        )
+        with pytest.raises(Exception, match='diagonal'):
+            _state = init(**init_kwargs)
+
+    def test_init_rejects_binary_nonunit_value(self, init_kwargs: dict) -> None:
+        """Check that init rejects a binary initial precision other than 1."""
+        prior = init_kwargs['error_cov_inv']
+        # component 0 is binary, so its precision must stay at 1
+        init_kwargs['error_cov_inv'] = DiagWishart(
+            nu=prior.nu, rate=prior.rate, value=prior.value.at[0, 0].set(2.0)
+        )
+        with pytest.raises(Exception, match='binary error precision must be 1'):
             _state = init(**init_kwargs)
 
     def test_init_rejects_error_scale(self, init_kwargs: dict) -> None:
@@ -2014,25 +2057,24 @@ class TestMixedBinaryContinuous:
     ) -> None:
         """Check that step_error_cov_inv updates only continuous diagonal entries."""
         state = init(**init_kwargs)
-        prec = state.error_cov_inv[1, 1]
+        prec = state.error_cov_inv.value[1, 1]
 
         # replace resid because the default initial resid is 0 for binary
         # outcomes, which triggers a division by zero in step_error_cov_inv
         state = replace(state, resid=jnp.full_like(state.resid, 1.0))
 
         new_state = step_error_cov_inv(keys.pop(), state)
+        new_value = new_state.error_cov_inv.value
 
         # binary diagonal entries (indices 0, 2) should stay 1.0
-        assert new_state.error_cov_inv[0, 0] == 1.0
-        assert new_state.error_cov_inv[2, 2] == 1.0
+        assert new_value[0, 0] == 1.0
+        assert new_value[2, 2] == 1.0
 
         # continuous diagonal entry (index 1) should be updated (not the init value)
-        assert new_state.error_cov_inv[1, 1] != prec
+        assert new_value[1, 1] != prec
 
         # off-diagonal should remain zero
-        assert_array_equal(
-            new_state.error_cov_inv, jnp.diag(jnp.diag(new_state.error_cov_inv))
-        )
+        assert_array_equal(new_value, jnp.diag(jnp.diag(new_value)))
 
     @pytest.mark.parametrize('outcome_type', ['binary', 'continuous'])
     def test_all_same_outcome_sequence(
@@ -2044,14 +2086,14 @@ class TestMixedBinaryContinuous:
                 y=random.bernoulli(keys.pop(), 0.5, (self.k, self.n)).astype(
                     jnp.float32
                 ),
-                error_cov_df=None,
-                error_cov_scale=None,
+                error_cov_inv=None,
             )
         else:
             init_kwargs.update(
                 y=random.normal(keys.pop(), (self.k, self.n)),
-                error_cov_df=2.0,
-                error_cov_scale=2 * jnp.eye(self.k),
+                error_cov_inv=Wishart(
+                    nu=2.0, rate=2 * jnp.eye(self.k), value=jnp.eye(self.k)
+                ),
             )
 
         copy_args = partial(copy_arrays, init_kwargs)
@@ -2315,8 +2357,12 @@ class TestMVBartIntegration:
             uv_kw.update(outcome_type='binary')
             mv_kw.update(outcome_type='binary')
         else:
-            uv_kw.update(error_cov_df=6.0, error_cov_scale=4.0)
-            mv_kw.update(error_cov_df=jnp.array(6.0), error_cov_scale=4.0 * jnp.eye(1))
+            uv_kw.update(error_cov_inv=Wishart(nu=6.0, rate=4.0, value=1.5))
+            mv_kw.update(
+                error_cov_inv=Wishart(
+                    nu=jnp.array(6.0), rate=4.0 * jnp.eye(1), value=1.5 * jnp.eye(1)
+                )
+            )
 
         bart_uv = init(**uv_kw, **common())
         bart_mv = init(**mv_kw, **common())
@@ -2326,8 +2372,8 @@ class TestMVBartIntegration:
         assert bart_mv.resid.shape[0] == 1
         assert bart_mv.resid.shape[1] == bart_uv.resid.shape[0]
 
-        assert jnp.ndim(bart_uv.error_cov_inv) == 0
-        assert bart_mv.error_cov_inv.shape == (1, 1)
+        assert jnp.ndim(bart_uv.error_cov_inv.value) == 0
+        assert bart_mv.error_cov_inv.value.shape == (1, 1)
 
         if binary:
             assert bart_uv.binary_y is not None
@@ -2373,7 +2419,6 @@ class TestMVBartIntegration:
             X=X,
             binary_y=None,
             binary_indices=None,
-            error_cov_df=df_prior,
             z=None,
             offset=jnp.float32(0.0),
             prec_scale=None,
@@ -2385,22 +2430,24 @@ class TestMVBartIntegration:
         st_uv = State(
             **common,
             resid=resid,
-            error_cov_scale=scale_prior,
-            error_cov_inv=jnp.float32(1.0),
+            error_cov_inv=Wishart(
+                nu=df_prior, rate=scale_prior, value=jnp.float32(1.0)
+            ),
         )
 
         st_mv = State(
             **common,
             resid=resid[None, :],
-            error_cov_scale=jnp.array([[scale_prior]]),
-            error_cov_inv=jnp.eye(1),
+            error_cov_inv=Wishart(
+                nu=df_prior, rate=jnp.array([[scale_prior]]), value=jnp.eye(1)
+            ),
         )
 
         def sample_uv(k: Key[Array, '']) -> Float32[Array, '']:
-            return _step_error_cov_inv_diag(k, st_uv).error_cov_inv
+            return _step_error_cov_inv_diag(k, st_uv).error_cov_inv.value
 
         def sample_mv(k: Key[Array, '']) -> Float32[Array, '']:
-            return _step_error_cov_inv_mv(k, st_mv).error_cov_inv.reshape(())
+            return _step_error_cov_inv_mv(k, st_mv).error_cov_inv.value.reshape(())
 
         n_samples = 10000
         samples_uv = vmap(sample_uv)(keys.pop(n_samples))
@@ -2441,34 +2488,33 @@ class TestMVBartIntegration:
             _chain_anchor=jnp.zeros(()),
             binary_y=None,
             binary_indices=None,
-            error_cov_df=df_prior,
             z=None,
             offset=jnp.float32(0.0),
             prec_scale=None,
             forest=_EmptyForest(),
             config=_minimal_step_config(),
         )
+        uv_prior = Wishart(nu=df_prior, rate=scale_prior, value=jnp.float32(1.0))
+        mv_prior = Wishart(nu=df_prior, rate=scale_prior[None, None], value=jnp.eye(1))
 
         st_uv_with = State(
             **common,
             X=X,
             resid=resid_1d,
             inv_sdev_scale=inv_sdev,
-            error_cov_scale=scale_prior,
-            error_cov_inv=jnp.float32(1.0),
+            error_cov_inv=uv_prior,
         )
         st_uv_drop = State(
             **common,
             X=X[:, keep],
             resid=resid_1d[keep],
             inv_sdev_scale=None,
-            error_cov_scale=scale_prior,
-            error_cov_inv=jnp.float32(1.0),
+            error_cov_inv=uv_prior,
         )
 
         key = keys.pop()
-        sample_with = _step_error_cov_inv_diag(key, st_uv_with).error_cov_inv
-        sample_drop = _step_error_cov_inv_diag(key, st_uv_drop).error_cov_inv
+        sample_with = _step_error_cov_inv_diag(key, st_uv_with).error_cov_inv.value
+        sample_drop = _step_error_cov_inv_diag(key, st_uv_drop).error_cov_inv.value
         assert_allclose(sample_with, sample_drop, rtol=1e-6)
 
         # multivariate Wishart path (k=1) with 1-D inv_sdev_scale and zeros
@@ -2477,19 +2523,17 @@ class TestMVBartIntegration:
             X=X,
             resid=resid_1d[None, :],
             inv_sdev_scale=inv_sdev,
-            error_cov_scale=scale_prior[None, None],
-            error_cov_inv=jnp.eye(1),
+            error_cov_inv=mv_prior,
         )
         st_mv_drop = State(
             **common,
             X=X[:, keep],
             resid=resid_1d[None, keep],
             inv_sdev_scale=None,
-            error_cov_scale=scale_prior[None, None],
-            error_cov_inv=jnp.eye(1),
+            error_cov_inv=mv_prior,
         )
-        sample_mv_with = _step_error_cov_inv_mv(key, st_mv_with).error_cov_inv
-        sample_mv_drop = _step_error_cov_inv_mv(key, st_mv_drop).error_cov_inv
+        sample_mv_with = _step_error_cov_inv_mv(key, st_mv_with).error_cov_inv.value
+        sample_mv_drop = _step_error_cov_inv_mv(key, st_mv_drop).error_cov_inv.value
         assert_allclose(sample_mv_with, sample_mv_drop, rtol=1e-6)
 
 
@@ -2528,8 +2572,12 @@ class TestMultivariate:
             uv_kw.update(outcome_type='binary')
             mv_kw.update(outcome_type='binary')
         else:
-            uv_kw.update(error_cov_df=4.0, error_cov_scale=2.0)
-            mv_kw.update(error_cov_df=jnp.array(4.0), error_cov_scale=2 * jnp.eye(1))
+            uv_kw.update(error_cov_inv=Wishart(nu=4.0, rate=2.0, value=2.0))
+            mv_kw.update(
+                error_cov_inv=Wishart(
+                    nu=jnp.array(4.0), rate=2 * jnp.eye(1), value=2 * jnp.eye(1)
+                )
+            )
 
         if kind == 'het':
             w = jnp.exp(random.uniform(keys.pop(), (y.size,), float, -0.5, 0.5))
@@ -2542,7 +2590,10 @@ class TestMultivariate:
         mv_state = replace(
             mv_state,
             resid=uv_state.resid[None, :],
-            error_cov_inv=jnp.array([[uv_state.error_cov_inv]]),
+            error_cov_inv=replace(
+                mv_state.error_cov_inv,
+                value=jnp.array([[uv_state.error_cov_inv.value]]),
+            ),
             forest=replace(
                 mv_state.forest,
                 **copy_arrays(
@@ -2571,7 +2622,9 @@ class TestMultivariate:
             # Wishart (mv, k=1) paths must agree, up to the resid difference fed
             # into the denominator and the Gershgorin jitter of the mv Cholesky
             assert_close_matrices(
-                uv_state.error_cov_inv.reshape(1, 1), mv_state.error_cov_inv, rtol=1e-5
+                uv_state.error_cov_inv.value.reshape(1, 1),
+                mv_state.error_cov_inv.value,
+                rtol=1e-5,
             )
 
             assert_array_equal(uv_state.forest.var_tree, mv_state.forest.var_tree)
@@ -2627,7 +2680,11 @@ class TestMultivariate:
         if kind == 'binary':
             kw.update(outcome_type='binary')
         else:
-            kw.update(error_cov_df=jnp.array(10.0), error_cov_scale=jnp.eye(k))
+            kw.update(
+                error_cov_inv=Wishart(
+                    nu=jnp.array(10.0), rate=jnp.eye(k), value=10 * jnp.eye(k)
+                )
+            )
 
         if kind == 'het':
             w = jnp.exp(random.uniform(keys.pop(), (k, n), float, -0.5, 0.5))
@@ -2649,8 +2706,8 @@ class TestMultivariate:
 
             assert mv_state.resid.shape == y.shape
 
-            assert jnp.all(jnp.isfinite(mv_state.error_cov_inv))
-            assert mv_state.error_cov_inv.shape == (k, k)
+            assert jnp.all(jnp.isfinite(mv_state.error_cov_inv.value))
+            assert mv_state.error_cov_inv.value.shape == (k, k)
 
             if kind == 'binary':
                 assert mv_state.z is not None
@@ -2681,8 +2738,9 @@ class TestMultivariate:
                 num_trees=10,
                 p_nonterminal=jnp.array([0.9, 0.5]),
                 leaf_prior_cov_inv=jnp.eye(k),
-                error_cov_df=jnp.array(4.0 + k),
-                error_cov_scale=jnp.eye(k),
+                error_cov_inv=Wishart(
+                    nu=jnp.array(4.0 + k), rate=jnp.eye(k), value=(4.0 + k) * jnp.eye(k)
+                ),
                 resid_reduction_config=BatchedReduction(num_batches=None),
                 count_reduction_config=BatchedReduction(num_batches=None),
             ),
@@ -2802,8 +2860,7 @@ class TestSampleSAugmentation:
             num_trees=8,
             p_nonterminal=make_p_nonterminal(5),
             leaf_prior_cov_inv=1.0,
-            error_cov_df=3.0,
-            error_cov_scale=1.0,
+            error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
             a=0.5,
             b=1.0,
@@ -2851,8 +2908,7 @@ class TestSampleSAugmentation:
             num_trees=5,
             p_nonterminal=make_p_nonterminal(4),
             leaf_prior_cov_inv=1.0,
-            error_cov_df=3.0,
-            error_cov_scale=1.0,
+            error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
             a=0.5,
             b=1.0,
@@ -2876,8 +2932,7 @@ class TestSampleSAugmentation:
             num_trees=6,
             p_nonterminal=make_p_nonterminal(4),
             leaf_prior_cov_inv=1.0,
-            error_cov_df=3.0,
-            error_cov_scale=1.0,
+            error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
             a=0.5,
             b=1.0,

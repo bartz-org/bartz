@@ -109,6 +109,7 @@ from bartz.mcmcstep import (
     PallasReduction,
     ReductionConfig,
     State,
+    Wishart,
     init,
     make_p_nonterminal,
     step,
@@ -495,8 +496,7 @@ class ConfigParams:
             num_trees=self.num_trees,
             p_nonterminal=make_p_nonterminal(self.maxdepth, 0.95, 2),
             leaf_prior_cov_inv=self.num_trees * eye,
-            error_cov_df=2.0,
-            error_cov_scale=2 * eye,
+            error_cov_inv=Wishart(nu=2.0, rate=2 * eye, value=eye),
             error_scale=jnp.ones(self.n) if self.weights else None,
             resid_reduction_config=self.resid_reduction,
             count_reduction_config=self.count_reduction,
@@ -532,8 +532,7 @@ class InitKwargs:
     num_trees: int
     p_nonterminal: Shaped[Array, '...']
     leaf_prior_cov_inv: float | Shaped[Array, '...']
-    error_cov_df: float
-    error_cov_scale: float | Shaped[Array, '...']
+    error_cov_inv: Wishart
     error_scale: Shaped[Array, '...'] | None
     resid_reduction_config: ReductionConfig
     count_reduction_config: ReductionConfig

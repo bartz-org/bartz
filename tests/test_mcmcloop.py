@@ -57,7 +57,7 @@ from bartz.mcmcloop import (
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._loop import _inner_loop_counter
-from bartz.mcmcstep import State, init, make_p_nonterminal
+from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal
 from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.testing import QuantizedData, gen_data
 from tests.util import assert_array_equal, assert_close_matrices, nnone
@@ -97,8 +97,7 @@ def simple_init(
         num_trees=ntree,
         p_nonterminal=make_p_nonterminal(6),
         leaf_prior_cov_inv=eye,
-        error_cov_df=2.0,
-        error_cov_scale=2 * eye,
+        error_cov_inv=Wishart(nu=2.0, rate=2 * eye, value=eye),
         min_points_per_decision_node=10,
         **kwargs,
     )
@@ -181,7 +180,7 @@ class TestRunMcmc:
             last_sample(main_trace.split_tree, sample_axes.split_tree),
         )
         assert_array_equal(
-            final_state.error_cov_inv,
+            final_state.error_cov_inv.value,
             last_sample(main_trace.error_cov_inv, sample_axes.error_cov_inv),
         )
 

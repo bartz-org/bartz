@@ -24,21 +24,32 @@
 
 """Implement classes `mc_gbart` and `gbart` that mimic the R BART3 package."""
 
-from collections.abc import Hashable, Mapping
+from collections.abc import Mapping
 from functools import cached_property, partial
 from types import MappingProxyType
 from typing import Any, Literal
 
 import jax.numpy as jnp
-from equinox import Module
+from equinox import Module, field
 from jax.scipy.special import ndtr
 from jaxtyping import Array, Float, Float32, Int32, Key, Real, Shaped
 
-from bartz._interface import ArrayLike, Bart, DataFrame, FloatLike, PredictKind, Series
+from bartz._interface import (
+    ArrayLike,
+    Bart,
+    DataFrame,
+    FloatLike,
+    PredictKind,
+    Series,
+    _process_predictor_input,
+    _process_response_input,
+)
+from bartz._jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import BurninTrace, MainTrace
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._state import State
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
+from bartz.prepcovars._prepcovars import _sigma2_from_ols
 
 
 class mc_gbart(Module):
@@ -118,9 +129,8 @@ class mc_gbart(Module):
     sigest
         An estimate of the residual standard deviation on `y_train`, used to set
         `lambda_`. If not specified, it is estimated by linear regression (with
-        intercept, and without taking into account `w`). If `y_train` has less
-        than two elements, it is set to 1. If n <= p, it is set to the standard
-        deviation of `y_train`. Ignored if `lambda_` is specified.
+        intercept, and without taking into account `w`). Ignored if `lambda_` is
+        specified.
     sigdf
         The degrees of freedom of the scaled inverse-chisquared prior on the
         noise variance.
@@ -204,8 +214,6 @@ class mc_gbart(Module):
     This interface imitates the function ``mc_gbart`` from the R package `BART3
     <https://github.com/rsparapa/bnptools>`_, but with these differences:
 
-    - If `x_train` and `x_test` are matrices, they have one predictor per row
-      instead of per column.
     - If ``usequants=False``, R BART3 switches to quantiles anyway if there are
       less predictor values than the required number of bins, while bartz
       always follows the specification.
@@ -230,14 +238,18 @@ class mc_gbart(Module):
     """
 
     _bart: Bart
+    _x_train_fmt: Any = field(static=True, default=None)
     _yhat_test: Float32[Array, 'ndpost m'] | None = None
+
+    sigest: Float32[Array, ''] | None = None
+    """The estimated standard deviation of the error used to set `lambda_`."""
 
     def __init__(
         self,
-        x_train: Real[ArrayLike, 'p n'] | DataFrame,
+        x_train: Real[ArrayLike, 'n p'] | DataFrame,
         y_train: Float32[ArrayLike, ' n'] | Series,
         *,
-        x_test: Real[ArrayLike, 'p m'] | DataFrame | None = None,
+        x_test: Real[ArrayLike, 'm p'] | DataFrame | None = None,
         type: Literal['wbart', 'pbart'] = 'wbart',  # noqa: A002
         sparse: bool = False,
         theta: FloatLike | None = None,
@@ -275,6 +287,25 @@ class mc_gbart(Module):
         if ntree is None:
             ntree = 50 if type == 'pbart' else 200
 
+        # pre-process the data to numeric arrays once, so the OLS estimate of
+        # `sigest` and `Bart` share a single copy of the (memory-heavy) X matrix.
+        # `Bart` records the format as plain arrays, so `predict` re-implements
+        # the input-format consistency check against the original format here.
+        x_train, self._x_train_fmt = _process_bart3_predictor_input(x_train)
+        y_train = _process_response_input(y_train)
+
+        # map the BART3 error-variance settings to Bart's sigma prior, estimating
+        # `sigest` by linear regression on x_train when needed
+        sigma_kw, self.sigest = _resolve_sigma_prior(
+            x_train,
+            y_train,
+            type=type,
+            sigest=sigest,
+            sigdf=sigdf,
+            sigquant=sigquant,
+            lambda_=lambda_,
+        )
+
         # convert to per-chain n_save for Bart
         num_chains = None if mc_cores == 1 else mc_cores
         actual_num_chains = num_chains or 1
@@ -304,16 +335,13 @@ class mc_gbart(Module):
             varprob=varprob,
             binner=binner,
             rm_const=rm_const,
-            sigest='ols-or-variance' if sigest is None else sigest,
-            sigdf=sigdf,
-            sigquant=sigquant,
+            **sigma_kw,
             k=k,
             power=power,
             base=base,
-            lambda_=lambda_,
             tau_num=tau_num,
             offset=offset,
-            w=w,
+            error_scale=w,
             num_trees=ntree,
             n_save=n_save,
             n_burn=nskip,
@@ -344,9 +372,7 @@ class mc_gbart(Module):
 
         # predict at test points
         if x_test is not None:
-            self._yhat_test = self._bart.predict(
-                x_test, kind=PredictKind.latent_samples
-            )
+            self._yhat_test = self.predict(x_test)
 
     # Public attributes from Bart
 
@@ -359,11 +385,6 @@ class mc_gbart(Module):
     def offset(self) -> Float32[Array, '']:
         """The prior mean of the latent mean function."""
         return self._bart.offset
-
-    @property
-    def sigest(self) -> Float32[Array, ''] | None:
-        """The estimated standard deviation of the error used to set `lambda_`."""
-        return self._bart.sigest
 
     # Private attributes from Bart
 
@@ -382,10 +403,6 @@ class mc_gbart(Module):
     @property
     def _splits(self) -> Real[Array, 'p max_num_splits']:
         return self._bart._binner._splits  # noqa: SLF001
-
-    @property
-    def _x_train_fmt(self) -> Hashable:
-        return self._bart._x_train_fmt  # noqa: SLF001
 
     # Properties
 
@@ -524,7 +541,7 @@ class mc_gbart(Module):
     # Public methods from Bart
 
     def predict(
-        self, x_test: Real[ArrayLike, 'p m'] | DataFrame
+        self, x_test: Real[ArrayLike, 'm p'] | DataFrame
     ) -> Float32[Array, 'ndpost m']:
         """
         Evaluate the sum-of-trees at `x_test` for each MCMC iteration.
@@ -537,7 +554,21 @@ class mc_gbart(Module):
         Returns
         -------
         Posterior samples of the latent function value at `x_test`. In the continuous case, this is the conditional mean.
+
+        Raises
+        ------
+        ValueError
+            If `x_test` has a different format than `x_train`.
         """
+        # pre-process and check the format matches x_train; Bart only sees plain
+        # arrays, so this consistency check is re-implemented here
+        x_test, x_test_fmt = _process_bart3_predictor_input(x_test)
+        if x_test_fmt != self._x_train_fmt:
+            msg = (
+                f'Input format mismatch: {x_test_fmt=} '
+                f'!= x_train_fmt={self._x_train_fmt!r}'
+            )
+            raise ValueError(msg)
         return self._bart.predict(x_test, kind=PredictKind.latent_samples)
 
 
@@ -550,3 +581,77 @@ class gbart(mc_gbart):
             raise TypeError(msg)
         kwargs.update(mc_cores=1)
         super().__init__(*args, **kwargs)
+
+
+def _process_bart3_predictor_input(
+    x: Real[ArrayLike, 'n p'] | DataFrame,
+) -> tuple[Shaped[Array, 'p n'], Any]:
+    """Process BART3-style predictors (one predictor per column) to bartz layout.
+
+    Unlike `bartz.Bart`, BART3 lays out predictor matrices with one predictor
+    per column, so plain arrays are transposed to bartz's (p, n) layout.
+    Dataframes already use one column per predictor, so they are left untouched.
+    """
+    if not isinstance(x, DataFrame):
+        x = jnp.asarray(x).T
+    return _process_predictor_input(x)
+
+
+def _resolve_sigma_prior(
+    x_train: Shaped[Array, 'p n'],
+    y_train: Float32[Array, ' n'],
+    *,
+    type: Literal['wbart', 'pbart'],  # noqa: A002
+    sigest: FloatLike | None,
+    sigdf: FloatLike,
+    sigquant: FloatLike,
+    lambda_: FloatLike | None,
+) -> tuple[dict, Float32[Array, ''] | None]:
+    """Map the BART3 error-variance settings to Bart's sigma prior.
+
+    Returns (sigma_kwargs, sigest) where sigest is the error standard deviation
+    estimate, or None for binary regression or when `lambda_` is given.
+    """
+    if type == 'pbart':
+        if sigest is not None or lambda_ is not None:
+            msg = 'Do not set `sigest` or `lambda_` for binary regression, they are ignored'
+            raise ValueError(msg)
+        return {}, None
+
+    if lambda_ is None:
+        if sigest is None:
+            sigest2 = _sigest2_ols(x_train, y_train)
+        else:
+            sigest2 = jnp.square(jnp.asarray(sigest, jnp.float32))
+        sigest_out = jnp.sqrt(sigest2)
+        # lambda_ such that the sigquant quantile of the prior matches sigest²
+        invchi2 = invgamma.ppf(sigquant, sigdf / 2) / 2
+        lambda_ = sigest2 / (invchi2 * sigdf)
+    else:
+        if sigest is not None:
+            msg = "Do not set `sigest` if `lambda_` is specified, it's ignored"
+            raise ValueError(msg)
+        lambda_ = jnp.asarray(lambda_, jnp.float32)
+        sigest_out = None
+
+    # Bart's prior reduces to scaled-inv-χ²(sigma_df, sigma_scale²) on the error
+    # variance, matching BART3's scaled-inv-χ²(sigdf, lambda_); sigma_init keeps
+    # the initial precision at the prior mean nu/rate = 1 / lambda_
+    sigma_scale = jnp.sqrt(lambda_)
+    sigma_kw = dict(sigma_df=sigdf, sigma_scale=sigma_scale, sigma_init=sigma_scale)
+    return sigma_kw, sigest_out
+
+
+def _sigest2_ols(
+    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, ' n']
+) -> Float32[Array, '']:
+    """Estimate the error variance by OLS with intercept."""
+    p, n = x_train.shape
+    if n <= p:
+        msg = (
+            f'cannot estimate `sigest` by OLS with {n} datapoints and {p} '
+            'predictors (it requires more datapoints than predictors); '
+            'specify `sigest` or `lambda_` explicitly'
+        )
+        raise ValueError(msg)
+    return _sigma2_from_ols(x_train, y_train)

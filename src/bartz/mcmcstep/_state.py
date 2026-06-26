@@ -89,6 +89,82 @@ class OutcomeType(Enum):
 T = TypeVar('T')
 
 
+class Wishart(Module):
+    """A precision matrix with a Wishart prior, bundled with its current value.
+
+    Represents a random precision (inverse covariance) ``value`` drawn from a
+    Wishart prior with degrees of freedom `nu` and rate matrix `rate`. The
+    univariate case (``k = 1``) is the Gamma special case; the relationship to
+    the inverse-gamma prior on the variance is ``alpha = nu / 2``,
+    ``beta = rate / 2``. The prior mean of the precision is ``nu * rate^-1``.
+
+    Set `nu` and `rate` to `None` to represent a precision held fixed at `value`
+    with no prior (e.g. the identity in binary regression).
+    """
+
+    nu: Float32[Array, ''] | None
+    """Degrees of freedom of the Wishart prior, or `None` if there is no prior."""
+
+    rate: Float32[Array, ''] | Float32[Array, 'k k'] | None
+    """The rate matrix of the Wishart prior (scalar for univariate), or `None`
+    if there is no prior. Equal to the inverse-gamma ``scale`` in the
+    univariate case."""
+
+    value: Float32[Array, '*chains k k'] | Float32[Array, '*chains'] = field(
+        chains=CHAIN_AXIS
+    )
+    """The precision matrix (scalar for univariate)."""
+
+    def __init__(
+        self,
+        nu: FloatLike | None,
+        rate: FloatLike | Float[ArrayLike, 'k k'] | None,
+        value: FloatLike
+        | Float[ArrayLike, '*chains k k']
+        | Float[ArrayLike, '*chains'],
+    ) -> None:
+        # `init` passes a deferred `_LazyArray` (cast to `Array`) for `value` to
+        # route it through sharding.
+        assert (nu is None) == (rate is None), 'set both or neither of nu and rate'
+        self.nu = None if nu is None else jnp.asarray(nu, jnp.float32)
+        self.rate = None if rate is None else jnp.asarray(rate, jnp.float32)
+        if isinstance(value, _LazyArray):
+            self.value = cast(Array, value)
+        else:
+            self.value = jnp.asarray(value, jnp.float32)
+
+
+class DiagWishart(Wishart):
+    """A diagonal precision matrix with independent chi-square diagonal entries.
+
+    Despite the name this is not a Wishart restricted to diagonal matrices, but
+    a convenience type: a diagonal precision whose entries are mutually
+    independent, each with its own Gamma (scaled chi-square) prior. Only the
+    multivariate (matrix) case is supported.
+
+    A component with `rate` 0 has no prior; its precision is held fixed at its
+    `value` (1 for the binary components of a mixed regression).
+
+    Used for mixed binary-continuous regression and for continuous multivariate
+    regression with per-datapoint missingness.
+    """
+
+    def __init__(
+        self,
+        nu: FloatLike | None,
+        rate: FloatLike | Float[ArrayLike, 'k k'] | None,
+        value: FloatLike
+        | Float[ArrayLike, '*chains k k']
+        | Float[ArrayLike, '*chains'],
+    ) -> None:
+        # explicit (delegating) init so the static checker uses this signature
+        # instead of synthesizing a stricter one from the inherited fields
+        assert rate is None or jnp.ndim(rate) == 2, (
+            'DiagWishart supports only the multivariate (matrix) case'
+        )
+        super().__init__(nu, rate, value)
+
+
 class Forest(Module):
     """Represents the MCMC state of a sum of trees."""
 
@@ -265,8 +341,8 @@ class State(Module):
     _chain_anchor: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """Unused per-chain scalar, declared first as a runtime-typechecker anchor.
     Its single (union-free) ``*chains`` annotation binds the variadic chain axis
-    before the ``... | ... k ...`` unions of `z`/`resid`/`error_cov_inv` (z over
-    the binary-outcome ``kb`` axis) are checked; otherwise those can mis-bind
+    before the ``... | ... k ...`` unions of `z`/`resid` (z over the
+    binary-outcome ``kb`` axis) are checked; otherwise those can mis-bind
     ``*chains`` against the outcome axis for a multivariate-without-chains state
     (the layouts are rank-ambiguous). Unlike `Forest`, `State` has no genuine
     union-free chain field to reorder into this slot, so a dummy one is
@@ -299,11 +375,10 @@ class State(Module):
     )
     """The residuals (`y` or `z` minus sum of trees)."""
 
-    error_cov_inv: Float32[Array, '*chains'] | Float32[Array, '*chains k k'] = field(
-        chains=CHAIN_AXIS
-    )
-    """The inverse error covariance (scalar for univariate, matrix for multivariate).
-    Identity in binary regression."""
+    error_cov_inv: Wishart
+    """The inverse error covariance with its Wishart prior. The current value is
+    ``error_cov_inv.value`` (scalar for univariate, matrix for multivariate);
+    identity with no prior in binary regression."""
 
     prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None = field(data=-1)
     """The scale on the error precision. `None` in binary regression. With
@@ -315,18 +390,6 @@ class State(Module):
     """The reciprocal of the per-observation error standard-deviation scale.
     `None` in binary regression. Shape ``(n,)`` for scalar weights, or
     ``(k, n)`` for per-component vector weights."""
-
-    error_cov_df: Float32[Array, ''] | None
-    """The df parameter of the inverse Wishart prior on the noise
-    covariance. For the univariate case, the relationship to the inverse
-    gamma prior parameters is ``alpha = df / 2``.
-    `None` in binary regression."""
-
-    error_cov_scale: Float32[Array, ''] | Float32[Array, 'k k'] | None
-    """The scale parameter of the inverse Wishart prior on the noise
-    covariance. For the univariate case, the relationship to the inverse
-    gamma prior parameters is ``beta = scale / 2``.
-    `None` in binary regression."""
 
     forest: Forest
     """The sum of trees model."""
@@ -347,27 +410,23 @@ class State(Module):
         return self.forest.var_tree.shape[c]
 
 
-def _check_diagonal(error_cov_scale: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
-    """Raise if `error_cov_scale` is not diagonal."""
-    diag = jnp.diag(jnp.diag(error_cov_scale))
-    return error_if(
-        error_cov_scale,
-        jnp.any(error_cov_scale != diag),
-        'error_cov_scale must be diagonal',
-    )
+def _check_diagonal(rate: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
+    """Raise if the Wishart `rate` is not diagonal."""
+    diag = jnp.diag(jnp.diag(rate))
+    return error_if(rate, jnp.any(rate != diag), 'error_cov_inv.rate must be diagonal')
 
 
-def _init_diag_error_cov_inv(
-    error_cov_df: Float32[Array, ''],
-    error_cov_scale: Float32[Array, 'k k'],
-    binary_mask: Sequence[bool] | None = None,
+def _check_binary_unit_precision(
+    value: Float32[Array, 'k k'], binary_mask: Sequence[bool]
 ) -> Float32[Array, 'k k']:
-    """Initialize diagonal `error_cov_inv` from inverse-gamma mode per component."""
-    scale_diag = jnp.diag(error_cov_scale)
-    inv_diag = error_cov_df / jnp.where(scale_diag, scale_diag, 1.0)
-    if binary_mask is not None:
-        inv_diag = jnp.where(jnp.array(binary_mask), 1.0, inv_diag)
-    return jnp.diag(inv_diag)
+    """Raise if the binary diagonal entries of `value` are not fixed at 1."""
+    binary = jnp.array(binary_mask)
+    off_unit = jnp.any(binary & (jnp.diag(value) != 1.0))
+    return error_if(
+        value,
+        off_unit,
+        'binary error precision must be 1 (the default for a zero rate)',
+    )
 
 
 def _init_shape_shifting_parameters(
@@ -375,18 +434,10 @@ def _init_shape_shifting_parameters(
     outcome_type: OutcomeType | list[OutcomeType],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None,
-    error_cov_df: float | Float32[ArrayLike, ''] | None,
-    error_cov_scale: float | Float32[ArrayLike, ''] | Float32[ArrayLike, 'k k'] | None,
+    error_cov_inv: Wishart | None,
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
-) -> tuple[
-    bool,
-    tuple[int, ...],
-    Float32[Array, ''] | Float32[Array, 'k k'],
-    None | Float32[Array, ''],
-    None | Float32[Array, ''] | Float32[Array, 'k k'],
-    None | Int32[Array, ' kb'],
-]:
+) -> tuple[bool, tuple[int, ...], Wishart, None | Int32[Array, ' kb']]:
     """
     Check and initialize parameters that change array type/shape based on outcome kind.
 
@@ -401,10 +452,11 @@ def _init_shape_shifting_parameters(
         The offset to add to the predictions.
     error_scale
         Per-observation error scale (univariate only).
-    error_cov_df
-        The error covariance degrees of freedom.
-    error_cov_scale
-        The error covariance scale.
+    error_cov_inv
+        The Wishart prior on the error precision and its initial value, or
+        `None` for binary regression. The mixed and partial-missing diagonal
+        modes require a `DiagWishart`; in the mixed case the binary components
+        must have an initial precision of 1.
     leaf_prior_cov_inv
         The inverse of the leaf prior covariance.
     missing
@@ -418,11 +470,7 @@ def _init_shape_shifting_parameters(
     kshape
         The outcome shape, empty for univariate, (k,) for multivariate.
     error_cov_inv
-        The initialized error covariance inverse.
-    error_cov_df
-        The error covariance degrees of freedom (as array).
-    error_cov_scale
-        The error covariance scale (as array).
+        The Wishart prior with its initial value resolved for the outcome kind.
     binary_indices
         The indices of binary outcome components, or `None` if there are none.
     """
@@ -447,57 +495,53 @@ def _init_shape_shifting_parameters(
 
     partial_missing = missing is not None and missing.ndim == 2 and kshape
 
-    # All-binary
+    # All-binary: no prior, the precision is fixed at the identity.
     if is_binary:
         assert error_scale is None
-        assert error_cov_df is None
-        assert error_cov_scale is None
-        if kshape:
-            error_cov_inv = jnp.eye(kshape[0])
-        else:
-            error_cov_inv = jnp.array(1.0)
+        assert error_cov_inv is None, 'no error covariance prior in binary regression'
+        value = jnp.eye(kshape[0]) if kshape else jnp.array(1.0)
+        error_cov_inv = Wishart(nu=None, rate=None, value=value)
 
-    # Mixed binary-continuous, or continuous-mv with 2-D missingness:
-    # diagonal error covariance, updated component-wise.
+    # Mixed binary-continuous, or continuous-mv with 2-D missingness: diagonal
+    # error covariance, updated component-wise. The caller must supply a
+    # `DiagWishart`; in the mixed case the binary components must have unit
+    # initial precision (see `DiagWishart`).
     elif is_mixed or partial_missing:
         if is_mixed:
             assert error_scale is None
-        error_cov_df = jnp.asarray(error_cov_df, jnp.float32)
-        error_cov_scale = _check_diagonal(jnp.asarray(error_cov_scale, jnp.float32))
-        assert error_cov_scale.shape == 2 * kshape
-        error_cov_inv = _init_diag_error_cov_inv(
-            error_cov_df, error_cov_scale, binary_mask if is_mixed else None
+        assert isinstance(error_cov_inv, DiagWishart), (
+            'mixed binary-continuous or partial-missing regression requires a '
+            'DiagWishart error_cov_inv prior'
         )
+        assert error_cov_inv.rate is not None
+        assert error_cov_inv.rate.shape == 2 * kshape
+        assert error_cov_inv.value.shape == 2 * kshape
+        rate = _check_diagonal(error_cov_inv.rate)
+        value = _check_diagonal(error_cov_inv.value)
+        if is_mixed:
+            value = _check_binary_unit_precision(value, binary_mask)
+        error_cov_inv = replace(error_cov_inv, rate=rate, value=value)
 
-    # All-continuous
+    # All-continuous: a dense `Wishart`.
     else:
         assert (
             error_scale is None
             or error_scale.shape == y.shape  # (k, n)
             or error_scale.shape == y.shape[-1:]  # (n,)
         )
-        error_cov_df = jnp.asarray(error_cov_df, jnp.float32)
-        error_cov_scale = jnp.asarray(error_cov_scale, jnp.float32)
-        assert error_cov_scale.shape == 2 * kshape
-
-        # Multivariate vs univariate
-        if kshape:
-            error_cov_inv = error_cov_df * _inv_via_chol_with_gersh(error_cov_scale)
-        else:
-            # inverse gamma prior: alpha = df / 2, beta = scale / 2
-            error_cov_inv = error_cov_df / error_cov_scale
+        assert error_cov_inv is not None
+        assert type(error_cov_inv) is Wishart, (
+            'continuous regression requires a dense Wishart error_cov_inv prior'
+        )
+        rate = error_cov_inv.rate
+        assert rate is not None
+        assert rate.shape == 2 * kshape
+        assert error_cov_inv.value.shape == 2 * kshape
 
     assert y.shape[:-1] == kshape
     assert leaf_prior_cov_inv.shape == 2 * kshape
 
-    return (
-        is_binary,
-        kshape,
-        error_cov_inv,
-        error_cov_df,
-        error_cov_scale,
-        binary_indices,
-    )
+    return is_binary, kshape, error_cov_inv, binary_indices
 
 
 def _check_splitless_vars(
@@ -572,8 +616,7 @@ def init(
     num_trees: int,
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
     leaf_prior_cov_inv: FloatLike | Float[ArrayLike, 'k k'],
-    error_cov_df: FloatLike | None = None,
-    error_cov_scale: FloatLike | Float[ArrayLike, 'k k'] | None = None,
+    error_cov_inv: Wishart | None = None,
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
     min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
@@ -626,12 +669,12 @@ def init(
         The prior covariance of the sum of trees is
         ``num_trees * leaf_prior_cov_inv^-1``. The prior mean of leaves is
         always zero.
-    error_cov_df
-    error_cov_scale
-        The df and scale parameters of the inverse Wishart prior on the error
-        covariance. For the univariate case, the relationship to the inverse
-        gamma prior parameters is ``alpha = df / 2``, ``beta = scale / 2``.
-        Leave unspecified for binary regression.
+    error_cov_inv
+        The Wishart prior on the inverse error covariance, together with its
+        initial value (see `Wishart`). Leave it unspecified for binary
+        regression. The mixed binary-continuous and partial-missing diagonal
+        modes require a `DiagWishart`; in the mixed case the binary components
+        must have an initial precision of 1 (see `DiagWishart`).
     error_scale
         Each error is scaled by the corresponding factor in `error_scale`. If
         ``error_scale[..., i]`` is a scalar, each error variance or covariance
@@ -643,7 +686,7 @@ def init(
     missing
         Boolean mask, same shape as `y`; `True` marks entries to be ignored
         by the MCMC. Values of `y` must be finite everywhere, including at
-        masked positions. If 2-D, `error_cov_scale` must be diagonal.
+        masked positions. If 2-D, `error_cov_inv.rate` must be diagonal.
     min_points_per_decision_node
         The minimum number of data points in a decision node. 0 if not
         specified.
@@ -754,17 +797,8 @@ def init(
     p_nonterminal = _parse_p_nonterminal(p_nonterminal)
 
     # process arguments that change depending on outcome type
-    is_binary, kshape, error_cov_inv, error_cov_df, error_cov_scale, binary_indices = (
-        _init_shape_shifting_parameters(
-            y,
-            outcome_type,
-            offset,
-            error_scale,
-            error_cov_df,
-            error_cov_scale,
-            leaf_prior_cov_inv,
-            missing,
-        )
+    is_binary, kshape, error_cov_inv, binary_indices = _init_shape_shifting_parameters(
+        y, outcome_type, offset, error_scale, error_cov_inv, leaf_prior_cov_inv, missing
     )
 
     # extract array sizes from arguments
@@ -831,13 +865,15 @@ def init(
                 # resid is created later after y and offset are sharded
                 else cast(Array, None)
             ),
-            error_cov_inv=_lazy_from_array(error_cov_inv),
+            # only `value` carries the chain axis, so it becomes the lazy leaf;
+            # the prior params `nu`/`rate` are shared across chains
+            error_cov_inv=replace(
+                error_cov_inv, value=_lazy_from_array(error_cov_inv.value)
+            ),
             # temporarily store user inputs in these slots so they get sharded
             # with everything else; `_compute_scales` replaces them post-shard.
             prec_scale=error_scale,
             inv_sdev_scale=missing,
-            error_cov_df=error_cov_df,
-            error_cov_scale=error_cov_scale,
             forest=Forest(
                 leaf_tree=_lazy(
                     jnp.zeros, (num_trees, *kshape, tree_size), jnp.float32

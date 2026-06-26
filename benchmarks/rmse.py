@@ -41,7 +41,7 @@ except ImportError:
 
 from benchmarks.latest_bartz._jaxext import split
 from benchmarks.latest_bartz.testing import DGP, gen_data
-from benchmarks.speed import get_default_platform
+from benchmarks.speed import X_N_BY_P, get_default_platform
 
 
 def make_data(
@@ -82,9 +82,9 @@ def run_sim_impl(
     train, test = make_data(keys.pop(), n_train, n_test, p)
 
     kw: dict = dict(
-        x_train=train.x,
+        x_train=train.x.T if X_N_BY_P else train.x,
         y_train=train.y.squeeze(0),
-        x_test=test.x,
+        x_test=test.x.T if X_N_BY_P else test.x,
         nskip=1000,
         ndpost=1000,
         seed=keys.pop(),

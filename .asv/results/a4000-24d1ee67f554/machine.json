@@ -1,0 +1,9 @@
+{
+    "arch": "x86_64",
+    "cpu": "Intel(R) Xeon(R) W-2145 CPU @ 3.70GHz",
+    "machine": "a4000-24d1ee67f554",
+    "num_cpu": "16",
+    "os": "Linux 6.8.0-51-generic",
+    "ram": "131572988",
+    "version": 1
+}

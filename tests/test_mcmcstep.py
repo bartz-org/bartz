@@ -832,7 +832,7 @@ class TestReduction:
 
         for config in configs:
             for name, (run, compare) in cases.items():
-                with subtests.test(config=config, case=name):
+                with subtests.test(config=repr(config), case=name):
                     if name.startswith('sharded') and isinstance(
                         config, PallasReduction
                     ):
@@ -845,13 +845,7 @@ class TestReduction:
         """Only the 'triton' backend may yield compiler params."""
         assert _resolve_pallas_backend('cpu') is None
         assert _resolve_pallas_backend('default') is None
-        params = _resolve_pallas_backend('triton')
-        # WORKAROUND(jax<0.7.0): drop the fallback branch when the jax floor
-        # reaches 0.7
-        if jax.__version_info__ < (0, 7, 0):
-            assert params is None
-        else:
-            assert params is not None
+        assert _resolve_pallas_backend('triton') is not None
 
     def test_gpu_sm_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The cuda branch reads the shared SM count and rejects mixed gpus."""

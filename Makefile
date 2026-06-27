@@ -185,7 +185,11 @@ TESTS_VARS = COVERAGE_FILE=.coverage.$@$(if $(GROUP),-$(GROUP))
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
 TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=$(NPROC) $(SELECT)
-TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_PREALLOCATE=false
+# WORKAROUND(jax<0.10.3): jax 0.10.x exhausts/corrupts CUDA command buffers
+# over a long test session (RESOURCE_EXHAUSTED / INTERNAL "Recorded commands
+# are not empty"), so disable them for the GPU test run. Recheck whether this
+# is still needed when raising the jax floor.
+TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_FLAGS=--xla_gpu_enable_command_buffer=
 TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=$(GPU_NPROC) $(SELECT)
 
 .PHONY: tests

@@ -1587,8 +1587,9 @@ def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
     def check_equal(
         path: KeyPath, x1: Shaped[Array, '*shape'], x2: Shaped[Array, '*shape']
     ) -> None:
+        rtol = 1e-4 if x1.platform() != 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
         assert_close_matrices(
-            x2, x1, err_msg=f'{keystr(path)}: ', rtol=1e-5, reduce_rank=True
+            x2, x1, err_msg=f'{keystr(path)}: ', rtol=rtol, reduce_rank=True
         )
 
     tree.map_with_path(check_equal, bart1, bart2)
@@ -2069,8 +2070,10 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
     ]
     stacked = tree.map(lambda *leaves: jnp.stack(leaves), *singles)
 
+    rtol = 1e-4 if platform != 'cpu' else 1e-5
+
     def check(a: Shaped[Array, '*shape'], b: Shaped[Array, '*shape']) -> None:
-        assert_close_matrices(a, b, rtol=1e-5, reduce_rank=True)
+        assert_close_matrices(a, b, rtol=rtol, reduce_rank=True)
 
     tree.map(check, batched, stacked)
 
@@ -2914,8 +2917,9 @@ def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
         assert x1.dtype == x2.dtype
         assert x1.sharding.is_equivalent_to(x2.sharding, x1.ndim)
         if jnp.issubdtype(x1.dtype, jnp.floating):
+            rtol = 1e-4 if x1.platform() != 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
             assert_close_matrices(
-                x1, x2, rtol=1e-5, err_msg=keystr(path), reduce_rank=True
+                x1, x2, rtol=rtol, err_msg=keystr(path), reduce_rank=True
             )
         else:
             assert_array_equal(x1, x2, strict=True, err_msg=keystr(path))

@@ -31,17 +31,7 @@ from warnings import catch_warnings, simplefilter
 
 import numpy
 import pytest
-from jax import (
-    NamedSharding,
-    debug_infs,
-    device_put,
-    jit,
-    lax,
-    make_mesh,
-    random,
-    shard_map,
-    tree,
-)
+from jax import NamedSharding, device_put, jit, lax, make_mesh, random, shard_map, tree
 
 # WORKAROUND(jax<0.7.1): top-level `jax.enable_x64` was added later; on older jax
 # it lives in `jax.experimental` (removed in newer jax). Use whichever exists.
@@ -50,7 +40,6 @@ try:
 except ImportError:
     from jax.experimental import enable_x64  # ty: ignore[unresolved-import]
 from jax import numpy as jnp
-from jax.scipy.special import ndtri
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Float32, Key, Shaped
@@ -70,7 +59,6 @@ from bartz._jaxext import (
     unique,
 )
 from bartz._jaxext.random import loggamma
-from bartz._jaxext.scipy.special import ndtri as patched_ndtri
 from bartz._jaxext.scipy.stats import invgamma
 from tests.util import assert_array_equal, assert_close_matrices, int_seed
 
@@ -452,22 +440,6 @@ class TestJaxPatches:
         x0 = scipy_invgamma.ppf(p, alpha)
         x1 = invgamma.ppf(p, alpha)
         assert_close_matrices(x1, x0.astype(x1.dtype), rtol=1e-6)
-
-    # WORKAROUND(jax<0.6.2): ndtri bug
-    @pytest.mark.xfail(reason='Fixed in jax 0.6.2.')
-    def test_ndtri_bugged(self, keys: split) -> None:
-        """Check that `jax.scipy.special.ndtri` triggers `jax.debug_infs`."""
-        x = random.uniform(keys.pop(), (100,), float, 0.01, 0.99)
-        with debug_infs(True), pytest.raises(FloatingPointError, match=r'inf'):
-            ndtri(x)
-
-    def test_ndtri_correct(self, keys: split) -> None:
-        """Check that my copy-pasted ndtri impl is equivalent to the jax one."""
-        x = random.uniform(keys.pop(), (100,), float, 0.01, 0.99)
-        with debug_infs(False):
-            y1 = ndtri(x)
-        y2 = patched_ndtri(x)
-        assert_close_matrices(y2, y1, rtol=2e-7, atol=0)  # no atol because in (-∞, ∞)
 
 
 class TestTruncatedNormalOneSided:

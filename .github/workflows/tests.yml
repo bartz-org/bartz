@@ -38,7 +38,7 @@ on:
       - main
 
 env:
-  UV_VERSION: "0.11.16"
+  UV_VERSION: "0.11.25"
 
 jobs:
   pre-commit:
@@ -310,6 +310,14 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+        env:
+          # actions/deploy-pages derives the deployment's pages_build_version
+          # from $GITHUB_SHA, and GitHub Pages dedupes deployments by that value.
+          # A release tags an existing main commit, so the merge-to-main push and
+          # the tag push deploy the same SHA twice; Pages then short-circuits the
+          # second (correct, post-tag) build and keeps the stale pre-tag one live.
+          # Make the version unique per run so every deploy actually publishes.
+          GITHUB_SHA: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   benchmarks:
     name: benchmarks-${{ matrix.id }}

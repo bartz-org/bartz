@@ -459,6 +459,19 @@ class StepMemory(StepBase):
 
     def make_state(self, **kwargs: Any) -> State:
         """Build the state abstractly, to analyze a scale too large to allocate."""
+        # Abstract eval hides the device and the data from `init`; older versions
+        # that probe either need a nudge to stay traceable.
+        sig = signature(init)
+        if 'target_platform' in sig.parameters:
+            # WORKAROUND(bartz<0.11.0): 0.8.0-0.10.0 infer the device from `y`,
+            # which has no platform under abstract eval; name it explicitly.
+            kwargs.setdefault('target_platform', get_default_platform())
+        param = sig.parameters.get('filter_splitless_vars')
+        if param is not None and param.default:
+            # WORKAROUND(bartz<0.8.0): 0.7.0 defaulted filter_splitless_vars on,
+            # triggering a data-dependent jnp.nonzero that abstract eval rejects;
+            # disable it (newer versions already default it off).
+            kwargs.setdefault('filter_splitless_vars', 0)
         return eval_shape(lambda: simple_init(**kwargs))
 
     def setup(self, kind: Kind, chains: int | None, stat: MemStat) -> None:  # ty:ignore[invalid-method-override]

@@ -94,6 +94,7 @@ help:
 	@echo "- describe release in docs/changelog.md (its topmost header sets the version, follow effver https://jacobtomlinson.dev/effver)"
 	@echo "- $$ make release, will not release but runs all tests, iterate and debug"
 	@echo "- merge a PR with the changes"
+	@echo "- run `make tests-gpu` on a gpu
 	@echo "- do a PR that re-runs benchmarks"
 	@echo "- on main: $$ make release"
 	@echo "- merge fix PR and try again until make release passes"

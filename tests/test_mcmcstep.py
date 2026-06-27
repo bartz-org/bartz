@@ -758,7 +758,10 @@ class TestReduction:
         # must come out zero
         range_kw = dict(float_kw, subset_start=jnp.uint32(6), subset_length=3)
         exact = assert_array_equal  # the count path must match exactly
-        close = partial(assert_close_matrices, rtol=1e-5, atol=1e-6, reduce_rank=True)
+        # on gpu the matmul method contracts via tf32 (~1e-3 relative error); cpu
+        # keeps the tight tolerance, so accuracy is still fully checked there
+        rtol = 1e-3 if indices.platform() != 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
+        close = partial(assert_close_matrices, rtol=rtol, atol=1e-6, reduce_rank=True)
 
         # each case invokes a reduce function `f` (a config's `_reduce` or the
         # reference) in one pattern, paired with the appropriate comparison

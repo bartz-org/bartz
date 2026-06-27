@@ -31,6 +31,37 @@ SOFTWARE.
 # Changelog
 
 
+## 0.11.0 Our BART is eternal and will live in my disk forever (2026-06-27)
+
+* New stochtree-compatible interface `bartz.stochtree.BARTModel`
+    * incl. stochtree-like X preprocessing: one-hot encode categoricals, but preserving the a priori variable selection probability as if it was a single column, works on polars and pandas dataframes
+* Error term settings overhaul (breaking)
+    * `Bart`: `sigest`/`sigdf`/`sigquant`/`lambda_` replaced by `sigma_df`/`sigma_scale`/`sigma_init`
+        * the default error variance prior is scaled by the total variance only, no OLS
+        * the default error variance prior keeps into account missingness and heteroskedasticity
+    * `Bart` parameter `w` renamed to `error_scale` (also in `predict`), to avoid ambiguity with the common convention of using `w` to mean precision weights, and matching `mcmcstep.init()`
+    * `init` and `State`: all error-related params passed through a `Wishart` or `DiagWishart` dataclass
+* Save to disk with `Bart.dump(path)` / `Bart.load(path)`
+* MCMC logging improvements
+    * Progress bar instead of line logging
+    * Log effective number of predictors when variable selection is active
+    * More interpretable tree depth diagnostic
+    * Diagnostics are averaged over the last iterations instead of the current state only
+* `mc_gbart` / `gbart` changes
+    * `x_train`/`x_test` now have layout `(n, p)` instead of `(p, n)`, matching BART3
+    * `w` accepts a pandas `Series`
+* Performance: multiple improvements across the library in speed and memory usage
+* `run_mcmc` is chunking-invariant
+* Bug fixes
+    * Fixed bug in the MCMC that changed the prior definition, making the trees a bit shallower
+    * Fixed bug that would ignore a correlated leaf prior with multivariate outcomes
+    * Cap auto chain sharding to the device pool
+* Many improvements to the testing data generator `bartz.testing.gen_data()`
+* Fully typed library, ship `py.typed` marker such that type checkers are allowed to use its types
+* Move R packages wrappers to new package `rbartpackages` (on PyPI)
+* Exclude jax 0.10.2 (GPU perf regression)
+
+
 ## 0.10.0 What do you mean "Maybe I lost a datapoint". You don't just LOSE a datapoint. What happens is that you are an IDIOT and THEN you lose the datapoint. If you weren't IDIOT the datapoint wouldn't be lost, FACTS and LOGIC. The continued survival of this company never ceases to fuel my bewilderment as I am clearly surrounded by IDIOTS. Now listen carefully. As the good idiot you are, you go and flag this datapoint as missing. "Missing" means that you set the "missing" flag to "True". You don't set it to to "False", because evidently "missing=False" would imply we were supposed to have the actual bleeding datapoint in place instead of whatever garbage you managed to conjure in that array. Now get the foobar out of here. (2026-05-27)
 
 This release features some improvements to multivariate outcome modeling, better out-of-the-box experience with the `Bart` interface, and some optimizations.

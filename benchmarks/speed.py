@@ -34,7 +34,6 @@ from io import StringIO
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
-import jax
 from equinox import Module, error_if
 from jax import (
     block_until_ready,
@@ -284,7 +283,7 @@ def dealias_for_donation(state: State) -> State:
     seen: set[int] = set()
 
     def copy_if_shared(leaf: Shaped[Array, '...']) -> Shaped[Array, '...']:
-        if not isinstance(leaf, jax.Array):
+        if not isinstance(leaf, Array):
             return leaf
         if id(leaf) in seen:
             return jnp.copy(leaf)

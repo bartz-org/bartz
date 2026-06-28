@@ -47,7 +47,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.sharding import Mesh
-from jaxtyping import Array, Integer, Key
+from jaxtyping import Array, Integer, Key, Shaped
 
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
@@ -272,6 +272,27 @@ class AutoParamNames:
         cls.param_names = tuple(params[1:])
 
 
+def dealias_for_donation(state: State) -> State:
+    """Copy any state leaf that is the same array as an earlier leaf.
+
+    When two pytree leaves are the same array, donating the whole pytree to a
+    jitted function fails on GPU, because that buffer would be donated twice.
+    Abstract leaves (from `eval_shape`) are left untouched: they hold no buffer
+    and the function built from them is compiled but never run.
+    """
+    seen: set[int] = set()
+
+    def copy_if_shared(leaf: Shaped[Array, '...']) -> Shaped[Array, '...']:
+        if not isinstance(leaf, Array):
+            return leaf
+        if id(leaf) in seen:
+            return jnp.copy(leaf)
+        seen.add(id(leaf))
+        return leaf
+
+    return tree.map(copy_if_shared, state)
+
+
 class StepBase(AutoParamNames):
     """Shared setup for benchmarks of `mcmcstep.step`."""
 
@@ -290,6 +311,10 @@ class StepBase(AutoParamNames):
         kw: dict = dict(p=P, n=N, num_trees=NTREE, kind=kind, num_chains=chains)
         kw.update(kwargs)
         state = self.make_state(**kw)
+
+        # WORKAROUND(bartz<0.6.0): init aliased `resid` to `y` (same buffer),
+        # which can not be donated twice when the whole state is donated below.
+        state = dealias_for_donation(state)
 
         # WORKAROUND(bartz<0.9.0): from 0.9.0, `step` is itself jitted with
         # state donation and handles variable selection internally, so it can
@@ -459,6 +484,19 @@ class StepMemory(StepBase):
 
     def make_state(self, **kwargs: Any) -> State:
         """Build the state abstractly, to analyze a scale too large to allocate."""
+        # Abstract eval hides the device and the data from `init`; older versions
+        # that probe either need a nudge to stay traceable.
+        sig = signature(init)
+        if 'target_platform' in sig.parameters:
+            # WORKAROUND(bartz<0.11.0): 0.8.0-0.10.0 infer the device from `y`,
+            # which has no platform under abstract eval; name it explicitly.
+            kwargs.setdefault('target_platform', get_default_platform())
+        param = sig.parameters.get('filter_splitless_vars')
+        if param is not None and param.default:
+            # WORKAROUND(bartz<0.8.0): 0.7.0 defaulted filter_splitless_vars on,
+            # triggering a data-dependent jnp.nonzero that abstract eval rejects;
+            # disable it (newer versions already default it off).
+            kwargs.setdefault('filter_splitless_vars', 0)
         return eval_shape(lambda: simple_init(**kwargs))
 
     def setup(self, kind: Kind, chains: int | None, stat: MemStat) -> None:  # ty:ignore[invalid-method-override]

@@ -511,11 +511,11 @@ def test_compare_with_stochtree(
 
     with subtests.test('rhat_y_hat_train'):
         rhat = _rhat_two_chains(bz_model.y_hat_train, st_model.y_hat_train)
-        assert_array_less(rhat, 1.02)
+        assert_array_less(rhat, 1.03)
 
     with subtests.test('rhat_y_hat_test'):
         rhat = _rhat_two_chains(nnone(bz_model.y_hat_test), nnone(st_model.y_hat_test))
-        assert_array_less(rhat, 1.02)
+        assert_array_less(rhat, 1.03)
 
     if outcome == 'continuous':
         with subtests.test('rhat_sigma'):

@@ -41,11 +41,22 @@ import urllib.request
 from pathlib import Path
 
 import tomli
-from packaging.requirements import Requirement
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 PYPI_URL = 'https://pypi.org/pypi/{name}/json'
+
+# Rigid requirement grammar: `name[extra,...]>=version[,spec,...]`. The lower
+# bound is the only clause the script rewrites; package extras and any trailing
+# specifiers (e.g. `!=` exclusions) are captured verbatim and preserved. We do
+# not accept whitespace or other operators on purpose: anything else must fail
+# loudly rather than be silently reformatted.
+REQUIREMENT_RE = re.compile(
+    r'(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)'
+    r'(?P<extras>\[[A-Za-z0-9,._-]+\])?'
+    r'>=(?P<version>[^,\s]+)'
+    r'(?P<rest>(?:,[^,\s]+)*)'
+)
 
 
 def parse_date(s: str) -> datetime.date:
@@ -74,14 +85,25 @@ def collect_requirements(pyproject: dict) -> list[str]:
     return reqs
 
 
-def current_lower_bound(spec: SpecifierSet) -> Version | None:
-    for s in spec:
-        if s.operator in ('>=', '==', '~='):
-            try:
-                return Version(s.version)
-            except InvalidVersion:
-                return None
-    return None
+def parse_requirement(req_str: str) -> tuple[str, str, Version, str]:
+    """Parse a `name[extras]>=version[,...]` requirement, strictly.
+
+    Returns (name, bracketed extras or '', floor version, trailing clauses
+    including the leading comma or ''). Raises ValueError on any other format.
+    """
+    m = REQUIREMENT_RE.fullmatch(req_str)
+    if m is None:
+        msg = (
+            f'requirement {req_str!r} does not match the expected format '
+            'name[extras]>=version[,spec,...]'
+        )
+        raise ValueError(msg)
+    try:
+        floor = Version(m['version'])
+    except InvalidVersion as e:
+        msg = f'invalid version in requirement {req_str!r}'
+        raise ValueError(msg) from e
+    return m['name'], m['extras'] or '', floor, m['rest']
 
 
 def fetch_pypi(name: str) -> dict:
@@ -170,9 +192,8 @@ def latest_before(
     return max(candidates) if candidates else None
 
 
-def format_spec(req: Requirement, version: Version) -> str:
-    extras = f'[{",".join(sorted(req.extras))}]' if req.extras else ''
-    return f'{req.name}{extras}>={version}'
+def format_spec(name: str, extras: str, version: Version, rest: str) -> str:
+    return f'{name}{extras}>={version}{rest}'
 
 
 def replace_requirement_line(
@@ -271,26 +292,17 @@ def main() -> int:  # noqa: C901, PLR0915
     updates: list[tuple[str, str]] = []
     rows: list[tuple[str, str, str]] = []
     for req_str in reqs:
-        req = Requirement(req_str)
-        if req.url or req.marker:
-            rows.append((req.name, 'skipped', 'has url/marker'))
-            continue
-        floor = current_lower_bound(req.specifier)
+        name, extras, floor, rest = parse_requirement(req_str)
         try:
-            pypi_cand = latest_before(req.name, new_old_date, oldest_python)
+            pypi_cand = latest_before(name, new_old_date, oldest_python)
         except Exception as e:  # noqa: BLE001
-            rows.append((req.name, 'error', str(e)))
-            continue
-        if pypi_cand is None and floor is None:
-            rows.append(
-                (req.name, 'skipped', 'no eligible version and no existing floor')
-            )
+            rows.append((name, 'error', str(e)))
             continue
         chosen = max(v for v in (pypi_cand, floor) if v is not None)
-        new_req_str = format_spec(req, chosen)
+        new_req_str = format_spec(name, extras, chosen, rest)
         if new_req_str != req_str:
             updates.append((req_str, new_req_str))
-            rows.append((req.name, str(floor) if floor else '-', str(chosen)))
+            rows.append((name, str(floor), str(chosen)))
 
     print()
     if rows:

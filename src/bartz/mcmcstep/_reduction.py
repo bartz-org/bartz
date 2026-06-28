@@ -722,17 +722,10 @@ def _resolve_pallas_backend(
     """
     if backend != 'triton':
         return None
-    # WORKAROUND(jax<0.7.0): the public Triton compiler params live at
-    # `pallas.triton.CompilerParams` since jax 0.7 (earlier the class has
-    # another name); older jax already defaulted its gpu Pallas backend to
-    # Triton, so passing nothing is equivalent.
-    try:
+    else:
         from jax.experimental.pallas import triton as pallas_triton  # noqa: PLC0415
 
-        cls = pallas_triton.CompilerParams
-    except (ImportError, AttributeError):
-        return None
-    return cls()
+        return pallas_triton.CompilerParams()
 
 
 def _ceil_pow2(n: int) -> int:

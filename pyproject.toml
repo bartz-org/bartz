@@ -35,21 +35,22 @@ license = "MIT"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    # WORKAROUND(jax<0.6.2): jax 0.6.1 requires absl-py to import pallas,
-    # which bartz.mcmcstep imports at module level
-    "absl-py>=2.2.2",
     "equinox>=0.12.2",
-    "jax>=0.6.1",
+    # WORKAROUND(jax<0.10.3): jax 0.10.2 has a severe GPU scatter-add
+    # regression (high-contention scatter into a small array is up to ~2000x
+    # slower than 0.10.1), which hits the per-leaf reductions; exclude it.
+    "jax>=0.6.2,!=0.10.2",
     "jaxtyping>=0.3.2",
     "numpy>=2.2.6",
     "scipy>=1.15.3",
     "tqdm>=4.67.1",
-    "typing-extensions>=4.13.2",
+    "typing-extensions>=4.14.0",
 ]
 
 [project.optional-dependencies]
-cuda12 = ["jax[cuda12]>=0.6.1"]
-cuda13 = ["jax[cuda13]>=0.6.1"]
+# WORKAROUND(jax<0.10.3): exclude jax 0.10.2, see the core jax dependency above
+cuda12 = ["jax[cuda12]>=0.6.2,!=0.10.2"]
+cuda13 = ["jax[cuda13]>=0.6.2,!=0.10.2"]
 
 [project.urls]
 Homepage = "https://github.com/bartz-org/bartz"
@@ -77,7 +78,7 @@ only-include = ["src/bartz"]
 [dependency-groups]
 dev = [
     "appnope>=0.1.4",
-    "ipython>=8.36.0",
+    "ipython>=8.37.0",
     "matplotlib>=3.10.3",
     "matplotlib-label-lines>=0.8.1",
     "pre-commit>=4.2.0",
@@ -89,11 +90,11 @@ dev = [
     "flaky>=3.8.1",
     "gitpython>=3.1.44",
     "packaging>=25.0",
-    "polars[pandas,pyarrow]>=1.30.0",
-    "pytest>=8.3.5",
-    "pytest-cov>=6.1.1",
+    "polars[pandas,pyarrow]>=1.31.0",
+    "pytest>=8.4.1",
+    "pytest-cov>=6.2.1",
     # WORKAROUND(pytest<9): pytest 9 has built-in subtests support
-    "pytest-subtests>=0.14.1",
+    "pytest-subtests>=0.14.2",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.7.0",
     "rbartpackages[jax,polars]>=0.1.0",
@@ -103,7 +104,7 @@ dev = [
     "tomli>=2.2.1",
     "myst-nb>=1.2.0",
     "jupyterlab>=4.4.3",
-    "diff-cover>=9.3.1",
+    "diff-cover>=9.4.1",
     # the floor satisfies the OLD_DATE policy; lint (and hence ty) only ever
     # runs on the latest toolchain, so the old version is installed but unused
     "ty>=0.0.1a7",
@@ -168,14 +169,8 @@ local = [
 ]
 
 [tool.uv]
-# the version is dynamic (git-derived), so rebuild the project metadata when
-# the commit or tags change, not only when pyproject.toml changes. Caveat: as
-# of uv 0.11.17 the commit key does not work in linked worktrees (uv does not
-# follow commondir, records commit=null), so in our worktree-first layout the
-# refresh-editable-version git hook (.pre-commit-config.yaml) covers HEAD
-# moves instead; after a hookless HEAD move (e.g. `git reset`), refresh
-# manually with `uv sync --reinstall-package bartz`. Tag creation does
-# trigger a rebuild (loose refs are detected; packed ones are not).
+# rebuild the git-derived version on new commits/tags; needs uv >= 0.11.20 to
+# work in worktrees (uv#19706).
 cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
 exclude-newer = '1 week'
 # WORKAROUND(rbartpackages<0.2.0): 0.1.0 was released inside the exclude-newer

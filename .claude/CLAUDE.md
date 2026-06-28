@@ -60,9 +60,24 @@ Interface hierarchy:
         - MCMC setup `init()`, MCMC runner `run_mcmc()`
             - MCMC step `step()`
 
+## VCS style
+
+- **Commit messages**
+    - <= 50 characters wide description
+    - <= 72 characters wide body
+    - conventional commits style
+- **PR description**
+    - study the diff, don't just trust the commit messages (since stuff may have been reverted or altered over the course of development)
+    - reason about what is the main purpose of the PR and open with that
+        - understanding a description is easier if it opens with the point
+        - don't just list all changes mechanically
+    - keep it short, short, short
+    - no hard wrap, each paragraph on one physical line (github UI preserves source newlines, let it soft wrap instead)
+    - don't include a "test plan". you are not going to actually follow it anyway
+    - remember to include your "Generated with Claude..." footer
+
 ## Code style
 
-- **Commit messages:** 50/72, conventional commits
 - **Formatter/linter:** ruff with single quotes
 - **Imports:** generally use `from foo import bar` (relative import) instead of `import foo; foo.bar`
     - but for some heavily used big (sub)modules, e.g., `from jax import random; random.foo` is preferred to `from jax.random import foo, foo1, foo2, ..., foo999999`.

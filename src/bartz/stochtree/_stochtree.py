@@ -33,11 +33,10 @@ from types import MappingProxyType
 from typing import Any, Literal, TypeVar, overload
 
 from jax import numpy as jnp
-from jax.scipy.special import ndtr
+from jax.scipy.special import ndtr, ndtri
 from jaxtyping import Array, Float, Float32, Key, Real, Shaped
 
 from bartz._interface import Bart, DataFrame, PredictKind, Series
-from bartz._jaxext.scipy.special import ndtri
 from bartz.mcmcstep._state import ArrayLike, FloatLike
 from bartz.prepcovars import RangeEvenBinner
 from bartz.stochtree._preprocess import _PreprocessorBase, make_preprocessor

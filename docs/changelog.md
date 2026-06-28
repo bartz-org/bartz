@@ -31,7 +31,7 @@ SOFTWARE.
 # Changelog
 
 
-## 0.11.0 Our BART is eternal and will live in my disk forever (2026-06-27)
+## 0.11.0 Our BART is eternal and will live in my disk forever (2026-06-28)
 
 * New stochtree-compatible interface `bartz.stochtree.BARTModel`
     * incl. stochtree-like X preprocessing: one-hot encode categoricals, but preserving the a priori variable selection probability as if it was a single column, works on polars and pandas dataframes

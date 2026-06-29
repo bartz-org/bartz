@@ -1,0 +1,66 @@
+# bartz/.github/actions/build-docs/action.yml
+#
+# Copyright (c) 2026, The Bartz Contributors
+#
+# This file is part of bartz.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+name: Build documentation
+description: >-
+  Build the HTML docs (latest release + development) and benchmarks, and upload
+  them as the `docs` artifact. The repository must already be checked out with
+  full history (fetch-depth 0) so hatch-vcs and `docs-latest` see the tags.
+
+inputs:
+  uv-version:
+    description: Version of uv to install.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure main branch exists (for asv publish)
+      shell: bash
+      run: |
+        git branch main origin/main || true
+        git branch --set-upstream-to=origin/main main || true
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      with:
+        version: ${{ inputs.uv-version }}
+
+    - name: Generate benchmarks visualization
+      shell: bash
+      run: RPY2_CFFI_MODE=ABI make asv-publish
+
+    - name: Generate documentation
+      shell: bash
+      run: RPY2_CFFI_MODE=ABI make docs docs-latest
+
+    - name: Save documentation
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      with:
+        name: docs
+        path: |
+          _site/docs
+          _site/docs-dev
+          _site/benchmarks
+        if-no-files-found: error

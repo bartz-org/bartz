@@ -30,15 +30,10 @@ on:
   push:
     branches:
       - main
-    tags:
-      - v*
   workflow_dispatch:
   pull_request:
     branches:
       - main
-
-env:
-  UV_VERSION: "0.11.25"
 
 jobs:
   pre-commit:
@@ -52,9 +47,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: ${{ env.UV_VERSION }}
+        uses: ./.github/actions/setup-uv
 
       - name: Determine base ref
         id: refs
@@ -92,9 +85,8 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: ./.github/actions/setup-uv
         with:
-          version: ${{ env.UV_VERSION }}
           cache-suffix: -${{ matrix.target }}-${{ matrix.group }}
 
       - name: Install R
@@ -144,34 +136,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ startsWith(github.ref, 'refs/tags/') && 'main' || '' }}
           fetch-depth: 0 # this fetches the full history
 
-      - name: Ensure main branch exists (for asv publish)
-        run: |
-          git branch main origin/main || true
-          git branch --set-upstream-to=origin/main main || true
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: ${{ env.UV_VERSION }}
-
-      - name: Generate benchmarks visualization
-        run: RPY2_CFFI_MODE=ABI make asv-publish
-
-      - name: Generate documentation
-        run: RPY2_CFFI_MODE=ABI make docs docs-latest
-
-      - name: Save documentation
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: docs
-          path: |
-            _site/docs
-            _site/docs-dev
-            _site/benchmarks
-          if-no-files-found: error
+      - name: Build documentation
+        uses: ./.github/actions/build-docs
 
   covreport:
     runs-on: ubuntu-latest
@@ -185,9 +153,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: ${{ env.UV_VERSION }}
+        uses: ./.github/actions/setup-uv
 
       - name: Get coverage files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -236,9 +202,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: ${{ env.UV_VERSION }}
+        uses: ./.github/actions/setup-uv
 
       - name: Get coverage files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -257,7 +221,9 @@ jobs:
           fi
 
   deploy:
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # Publishes the docs for ordinary main pushes. Release republishing (so the
+    # stable docs pick up a freshly pushed tag) lives in release-docs.yml.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     needs: [docs, covreport]
 
@@ -268,56 +234,15 @@ jobs:
 
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deploy.outputs.page-url }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          fetch-depth: 0
 
-      - name: Verify tag commit is on main
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          git fetch origin main
-          git merge-base --is-ancestor HEAD origin/main \
-            || { echo "Tag commit is not on main branch"; exit 1; }
-
-      - name: Setup Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
-
-      - name: Get documentation and benchmarks
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: docs
-          path: _site
-
-      - name: Get coverage report
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: covreport
-          path: _site/coverage
-
-      - name: List files
-        run: |
-          pwd
-          ls -a
-          ls -a _site
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
-        env:
-          # actions/deploy-pages derives the deployment's pages_build_version
-          # from $GITHUB_SHA, and GitHub Pages dedupes deployments by that value.
-          # A release tags an existing main commit, so the merge-to-main push and
-          # the tag push deploy the same SHA twice; Pages then short-circuits the
-          # second (correct, post-tag) build and keeps the stale pre-tag one live.
-          # Make the version unique per run so every deploy actually publishes.
-          GITHUB_SHA: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Deploy site
+        id: deploy
+        uses: ./.github/actions/deploy-site
 
   benchmarks:
     name: benchmarks-${{ matrix.id }}
@@ -342,9 +267,8 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: ./.github/actions/setup-uv
         with:
-          version: ${{ env.UV_VERSION }}
           cache-suffix: -${{ matrix.id }}
 
       - name: Get machine information for asv
@@ -364,9 +288,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: ${{ env.UV_VERSION }}
+        uses: ./.github/actions/setup-uv
 
       - name: run IPython
         run: RPY2_CFFI_MODE=ABI make ipython ARGS=config/ipython/profile_default/startup/startup.ipy

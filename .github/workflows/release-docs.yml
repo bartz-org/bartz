@@ -47,9 +47,6 @@ on:
         type: string
         required: true
 
-env:
-  UV_VERSION: "0.11.25"
-
 jobs:
   redispatch:
     if: github.event_name == 'push'
@@ -108,8 +105,6 @@ jobs:
 
       - name: Build documentation
         uses: ./.github/actions/build-docs
-        with:
-          uv-version: ${{ env.UV_VERSION }}
 
   deploy:
     if: github.event_name == 'workflow_dispatch'

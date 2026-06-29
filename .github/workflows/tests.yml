@@ -35,9 +35,6 @@ on:
     branches:
       - main
 
-env:
-  UV_VERSION: "0.11.25"
-
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
@@ -50,9 +47,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: ${{ env.UV_VERSION }}
+        uses: ./.github/actions/setup-uv
 
       - name: Determine base ref
         id: refs
@@ -90,9 +85,8 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: ./.github/actions/setup-uv
         with:
-          version: ${{ env.UV_VERSION }}
           cache-suffix: -${{ matrix.target }}-${{ matrix.group }}
 
       - name: Install R
@@ -146,8 +140,6 @@ jobs:
 
       - name: Build documentation
         uses: ./.github/actions/build-docs
-        with:
-          uv-version: ${{ env.UV_VERSION }}
 
   covreport:
     runs-on: ubuntu-latest
@@ -161,9 +153,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: ${{ env.UV_VERSION }}
+        uses: ./.github/actions/setup-uv
 
       - name: Get coverage files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -212,9 +202,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: ${{ env.UV_VERSION }}
+        uses: ./.github/actions/setup-uv
 
       - name: Get coverage files
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -279,9 +267,8 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        uses: ./.github/actions/setup-uv
         with:
-          version: ${{ env.UV_VERSION }}
           cache-suffix: -${{ matrix.id }}
 
       - name: Get machine information for asv
@@ -301,9 +288,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: ${{ env.UV_VERSION }}
+        uses: ./.github/actions/setup-uv
 
       - name: run IPython
         run: RPY2_CFFI_MODE=ABI make ipython ARGS=config/ipython/profile_default/startup/startup.ipy

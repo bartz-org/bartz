@@ -46,7 +46,7 @@ from bartz._jaxext import (
 )
 from bartz._jaxext.random import loggamma
 from bartz.grove import var_histogram
-from bartz.mcmcstep._moves import Moves, fully_used_variables, propose_moves
+from bartz.mcmcstep._moves import Moves, propose_moves, split_range
 from bartz.mcmcstep._reduction import ReductionConfig
 from bartz.mcmcstep._state import (
     Forest,
@@ -1634,45 +1634,22 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     return replace(state, z=z, resid=resid)
 
 
-def _first_occurrence_mask(
-    indices: UInt[Array, '*batch n'], fill_value: int
-) -> Bool[Array, '*batch n']:
-    """Mark the first occurrence of each value along the last axis.
-
-    Parameters
-    ----------
-    indices
-        Integer values, possibly with repeats, and with `fill_value` in unused
-        slots.
-    fill_value
-        The value marking unused slots, which is never marked.
-
-    Returns
-    -------
-    A mask, true at the first occurrence of each non-fill value.
-    """
-    *_, n = indices.shape
-    equal = indices[..., :, None] == indices[..., None, :]
-    earlier = jnp.tril(jnp.ones((n, n), bool), -1)  # earlier[i, j] = j < i
-    seen_before = jnp.any(equal & earlier, axis=-1)
-    return (indices != fill_value) & ~seen_before
-
-
-def _ineligible_weights_tree(
+def _blocked_mass_tree(
     key: Key[Array, ''],
     var_tree: UInt[Array, ' half_tree_size'],
     split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
-    s_padded: Float32[Array, ' p+1'],
-) -> tuple[
-    UInt[Array, 'half_tree_size d_minus_2'], Float32[Array, 'half_tree_size d_minus_2']
-]:
-    """Per-node ineligible variables and their data-augmentation weights.
+    s: Float32[Array, ' p'],
+) -> Float32[Array, ' p']:
+    """Per-variable data-augmentation mass blocked by a single tree.
 
     For each internal node, draw the latent total mass ``lambda / e`` of the
     augmentation (with ``lambda`` exponential and ``e`` the eligible split
-    probability mass at the node), to be scattered onto the variables that are
-    ineligible there.
+    probability mass at the node) and add it to every variable that is
+    ineligible there. Each internal node only ever looks at the single variable
+    it splits on rather than the whole list of its ancestors: a node can block
+    at most that one variable, and the per-variable totals are recovered with
+    cheap top-down and bottom-up accumulations over the depth levels.
 
     Parameters
     ----------
@@ -1684,40 +1661,72 @@ def _ineligible_weights_tree(
         The splitting points of the tree.
     max_split
         The maximum split index for each variable.
-    s_padded
-        Split probabilities normalized over selectable variables, with a
-        trailing zero so the fill index `p` maps to zero mass.
+    s
+        Split probabilities normalized over selectable variables.
 
     Returns
     -------
-    indices : UInt[Array, 'half_tree_size d_minus_2']
-        The ineligible variables at each node, with repeats and `p` fill.
-    weights : Float32[Array, 'half_tree_size d_minus_2']
-        The weight ``lambda / e`` to add to each ineligible variable, zero at
-        repeats, fill slots, and non-internal nodes.
+    The blocked mass for each variable.
     """
     (half_tree_size,) = split_tree.shape
-
+    d_minus_1 = half_tree_size.bit_length() - 1  # number of decision-node levels
+    p = max_split.size
     nodes = jnp.arange(half_tree_size)
-    ineligible = vmap(fully_used_variables, in_axes=(None, None, None, 0))(
-        var_tree, split_tree, max_split, nodes
-    )  # shape (half_tree_size, d_minus_2)
-
-    is_first = _first_occurrence_mask(ineligible, max_split.size)
-
-    # eligible mass = 1 - ineligible mass, since the selectable variables sum to
-    # 1; only internal nodes contribute an augmentation draw
-    ineligible_mass = jnp.sum(s_padded[ineligible] * is_first, axis=-1)  # shape (hts,)
-    # the split variable is eligible, so the eligible mass is positive at internal
-    # nodes; the floor only guards against round-off zeroing it out. Non-internal
-    # nodes get a zero weight below, so their eligible mass is never used.
-    eligible_mass = 1.0 - ineligible_mass
-    eligible_mass = jnp.maximum(eligible_mass, jnp.finfo(eligible_mass.dtype).eps)
+    split = split_tree.astype(jnp.int32)
     is_internal = split_tree.astype(bool)
-    weight = jnp.where(is_internal, random.exponential(key, nodes.shape), 0.0)
+
+    # Range [lo, hi) of cutpoints still available for each node's own splitting
+    # variable, given the constraints inherited from the ancestors.
+    lo, hi = vmap(split_range, in_axes=(None, None, None, 0, 0))(
+        var_tree, split_tree, max_split, nodes, var_tree
+    )
+
+    # An internal node exhausts its own variable for a child when its cutpoint
+    # sits at the matching end of the available range, so the variable becomes
+    # ineligible throughout that child's subtree. Row 0 is the left child (low
+    # end lo), row 1 the right child (high end hi - 1).
+    blocks = is_internal & (split == jnp.stack([lo, hi - 1]))
+
+    # Ineligible mass per node: the s-mass of the variables blocked along the
+    # path from the root. Each variable is blocked at exactly one node per path,
+    # so summing the per-node increments top-down reproduces the per-node sum
+    # over distinct ineligible variables.
+    parent = nodes >> 1
+    side = nodes & 1  # 0 if the node is a left child, 1 if a right child
+    parent_blocks = blocks[side, parent]
+    # var_tree[parent] is a valid index wherever parent_blocks holds (the parent
+    # is then internal); elsewhere the clamped gather is masked away
+    ineligible_mass = jnp.where(parent_blocks, s[var_tree[parent]], 0.0)
+    for level in range(1, d_minus_1):
+        lhs, rhs = 1 << level, 1 << (level + 1)
+        parent_mass = jnp.repeat(ineligible_mass[lhs >> 1 : rhs >> 1], 2)
+        ineligible_mass = ineligible_mass.at[lhs:rhs].add(parent_mass)
+
+    # Per-node augmentation weight lambda_b / e_b, zero at non-internal nodes. The
+    # eligible mass is positive at internal nodes (the split variable is eligible);
+    # the floor only guards against round-off, and is unused where weight is zero.
+    eligible_mass = jnp.maximum(1.0 - ineligible_mass, jnp.finfo(jnp.float32).eps)
+    weight = jnp.where(is_internal, random.exponential(key, (half_tree_size,)), 0.0)
     weight /= eligible_mass
 
-    return ineligible, is_first * weight[:, None]
+    # Subtree weight: total weight of each node's internal descendants and itself,
+    # accumulated bottom-up. The children of the deepest decision level are leaves
+    # and contribute nothing.
+    subtree_weight = weight
+    for level in range(d_minus_1 - 2, -1, -1):
+        lhs, rhs = 1 << level, 1 << (level + 1)
+        children = subtree_weight[2 * lhs : 2 * rhs].reshape(-1, 2).sum(axis=1)
+        subtree_weight = subtree_weight.at[lhs:rhs].add(children)
+
+    # A variable blocked by node b at one of its children is ineligible in that
+    # whole child subtree, so it accumulates the subtree weight; scatter it onto
+    # the splitting variable. Only the upper half of nodes have internal children
+    # (the deepest decision nodes block into leaves, contributing nothing); their
+    # children are exactly subtree_weight reshaped into [left, right] pairs.
+    half = half_tree_size // 2
+    contrib = (blocks[:, :half] * subtree_weight.reshape(-1, 2).T).sum(axis=0)
+    scatter_var = jnp.where(is_internal, var_tree, p)[:half]
+    return jnp.zeros(p).at[scatter_var].add(contrib)
 
 
 def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, ' p']:
@@ -1765,25 +1774,18 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, '
     assert forest.log_s is not None
     keys = split(key)
     (num_trees, _) = forest.var_tree.shape
-    p = forest.max_split.size
 
     # split probabilities normalized over the selectable (non-blocked) variables
     selectable = forest.max_split > 0
     s = softmax(forest.log_s, where=selectable)
 
     # blocked_mass[j] = sum over internal nodes where j is ineligible of
-    # lambda_b / e_b; the trailing pad slot absorbs the fill index p
-    s_padded = jnp.append(s, 0.0)
-    indices, weights = vmap(_ineligible_weights_tree, in_axes=(0, 0, 0, None, None))(
-        keys.pop(num_trees),
-        forest.var_tree,
-        forest.split_tree,
-        forest.max_split,
-        s_padded,
-    )  # both shape (num_trees, hts, d-2)
-    blocked_mass = jnp.zeros(p + 1).at[indices.ravel()].add(weights.ravel())
+    # lambda_b / e_b
+    blocked_mass = vmap(_blocked_mass_tree, in_axes=(0, 0, 0, None, None))(
+        keys.pop(num_trees), forest.var_tree, forest.split_tree, forest.max_split, s
+    ).sum(axis=0)  # shape (p,)
 
-    return random.poisson(keys.pop(), s * blocked_mass[:p], dtype=jnp.int32)
+    return random.poisson(keys.pop(), s * blocked_mass, dtype=jnp.int32)
 
 
 @named_call

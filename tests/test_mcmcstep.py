@@ -46,6 +46,7 @@ from jax import (
     vmap,
 )
 from jax import numpy as jnp
+from jax.nn import softmax
 from jax.ops import segment_sum
 from jax.sharding import (
     AxisType,
@@ -111,6 +112,7 @@ from bartz.mcmcstep._moves import (
 from bartz.mcmcstep._reduction import _gpu_sm_count, _resolve_pallas_backend
 from bartz.mcmcstep._state import Forest, StepConfig, _search_divisor
 from bartz.mcmcstep._step import (
+    _blocked_mass_tree,
     _compute_likelihood_ratio_mv,
     _compute_likelihood_ratio_uv,
     _precompute_leaf_terms_mv,
@@ -2870,7 +2872,7 @@ class TestSampleSAugmentation:
         forest = state.forest
 
         # reference E[A_j], computed node by node with the eligibility helper
-        s = numpy.asarray(jax.nn.softmax(nnone(forest.log_s)))  # all selectable
+        s = numpy.asarray(softmax(nnone(forest.log_s)))  # all selectable
         (num_trees, half_tree_size) = forest.var_tree.shape
         g = numpy.zeros(p)
         for t in range(num_trees):
@@ -2893,6 +2895,81 @@ class TestSampleSAugmentation:
         )
         sem = draws.std(0) / numpy.sqrt(draws.shape[0])
         assert numpy.all(numpy.abs(draws.mean(0) - expected) < 5 * sem + 1e-6)
+
+    @staticmethod
+    def _reference_blocked_mass_tree(
+        key: Key[Array, ''],
+        var_tree: UInt[Array, ' half_tree_size'],
+        split_tree: UInt[Array, ' half_tree_size'],
+        max_split: UInt[Array, ' p'],
+        s: Float32[Array, ' p'],
+    ) -> Float32[Array, ' p']:
+        """Ancestor-list reference for `_blocked_mass_tree`.
+
+        This is the straightforward per-node implementation: list the ineligible
+        variables at each node, deduplicate them, and scatter the augmentation
+        weight directly. Given the same key it draws the same per-node weights as
+        `_blocked_mass_tree`, so the two must agree up to summation reassociation.
+        """
+        p = max_split.size
+        (half_tree_size,) = split_tree.shape
+        s_padded = jnp.append(s, 0.0)
+        nodes = jnp.arange(half_tree_size)
+        ineligible = vmap(fully_used_variables, in_axes=(None, None, None, 0))(
+            var_tree, split_tree, max_split, nodes
+        )
+        *_, ncol = ineligible.shape
+        equal = ineligible[:, :, None] == ineligible[:, None, :]
+        earlier = jnp.tril(jnp.ones((ncol, ncol), bool), -1)
+        seen_before = jnp.any(equal & earlier, axis=-1)
+        is_first = (ineligible != p) & ~seen_before
+        ineligible_mass = jnp.sum(s_padded[ineligible] * is_first, axis=-1)
+        eligible_mass = jnp.maximum(1.0 - ineligible_mass, jnp.finfo(jnp.float32).eps)
+        is_internal = split_tree.astype(bool)
+        weight = jnp.where(is_internal, random.exponential(key, (half_tree_size,)), 0.0)
+        weight /= eligible_mass
+        weights = is_first * weight[:, None]
+        return jnp.zeros(p + 1).at[ineligible.ravel()].add(weights.ravel())[:p]
+
+    def test_blocked_mass_matches_reference(self, keys: split) -> None:
+        """`_blocked_mass_tree` matches the ancestor-list reference to float."""
+        # Grow a forest tuned for heavy blocking: few cutpoints so variables
+        # exhaust quickly, but enough variables and a high grow probability (low
+        # beta) so the trees stay deep below the exhausted variables, which is
+        # what makes the blocked mass nonzero. This reliably blocks both child
+        # sides across seeds (checked over 40 seeds: >= 5 blocked entries each).
+        p, n = 6, 120
+        state = init(
+            X=random.randint(keys.pop(), (p, n), 0, 3, jnp.uint8),
+            y=random.normal(keys.pop(), (n,)),
+            offset=0.0,
+            max_split=jnp.full(p, 2, jnp.uint8),
+            num_trees=16,
+            p_nonterminal=make_p_nonterminal(6, alpha=0.99, beta=0.5),
+            leaf_prior_cov_inv=1.0,
+            error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
+            theta=float(p),
+            a=0.5,
+            b=1.0,
+            rho=float(p),
+            sparse_on_at=0,
+            augment=True,
+        )
+        for _ in range(40):
+            state = step(keys.pop(), state)
+        forest = state.forest
+        (num_trees, _) = forest.var_tree.shape
+
+        s = softmax(nnone(forest.log_s))  # all selectable
+        tree_keys = keys.pop(num_trees)
+        kw = dict(in_axes=(0, 0, 0, None, None))
+        args = (tree_keys, forest.var_tree, forest.split_tree, forest.max_split, s)
+        new = vmap(_blocked_mass_tree, **kw)(*args)
+        ref = vmap(self._reference_blocked_mass_tree, **kw)(*args)
+
+        # guard against a silently vacuous test: many variables must be blocked
+        assert int((new > 0).sum()) >= 5
+        assert_close_matrices(new, ref, rtol=1e-5)
 
     def test_init_sets_augment_flag(self, keys: split) -> None:
         """The `augment` flag flows into the step config and `step` runs."""

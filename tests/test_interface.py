@@ -1822,12 +1822,10 @@ def test_xinfo_wrong_p() -> None:
         (10, 1, None),
         (10, 255, None),
         (10, 1, 'fixed'),
-        (10, 1, 'free-narrow'),
-        (10, 1, 'free-wide'),
-        (10, 255, 'free-wide'),
-        (1, 1, 'free-wide'),
-        (3, 2, 'fixed'),
-        (3, 2, 'free-wide'),
+        (10, 1, 'free'),
+        (10, 255, 'free'),
+        (1, 1, 'free'),
+        (3, 2, 'free'),
     ],
 )
 def test_prior(
@@ -1937,11 +1935,7 @@ def check_sparsity_prior(bart: Bart, prior: PriorSample, subtests: SubTests) -> 
 
 def sparsity_prior_params(sparsity: str | None, p: int) -> kwdict:
     """Sparsity-prior hyperparameters shared by the MCMC and the prior draw."""
-    params = {
-        'fixed': dict(theta=float(p)),
-        'free-narrow': dict(a=50.0, b=50.0, rho=float(p)),
-        'free-wide': dict(a=20.0, b=20.0, rho=float(p)),
-    }
+    params = {'fixed': dict(theta=float(p)), 'free': dict(a=20.0, b=20.0, rho=float(p))}
     return {} if sparsity is None else params[sparsity]
 
 

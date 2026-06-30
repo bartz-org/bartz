@@ -9,18 +9,20 @@
     // variants are the two curves whose minimum is the "optimal" (augment-off)
     // baseline.
     //
-    // The augmentation work is n-independent (it scans the trees' nodes, not the
-    // data), so it shows up as a roughly constant offset that scan over n lets us
-    // read against the n-dependent rest of the step. n is kept modest for speed.
+    // The augmentation cost grows with the number of predictors p (it sums the
+    // blocked mass over the eligible variables at each node), so p is the scan
+    // axis. n is fixed and modest: the augmentation work is n-independent, and a
+    // large n would only dilute the effect under the n-dependent rest of the step.
     //
     // Everything else is plain: univariate, no weights, fixed maxdepth, default
     // reductions, single chain.
     "plot": {
-        "scan": "n",
+        "scan": "p",
         "reduce": "augment",
     },
     "values": {
-        "n":          [256, 1024, 4096, 16384],
+        "n":          [1024],
+        "p":          [1, 2, 4, 8, 16, 32, 64, 128],
         "k":          [null],
         "maxdepth":   [6],
         "weights":    [false],

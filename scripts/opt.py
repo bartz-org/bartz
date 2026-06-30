@@ -311,6 +311,9 @@ class ConfigParams:
     n: int
     """Number of data points."""
 
+    p: int
+    """Number of predictors."""
+
     k: int | None
     """Multivariate outcome dimension; ``None`` for univariate."""
 
@@ -485,12 +488,13 @@ class ConfigParams:
 
     def to_init_kwargs(self) -> 'InitKwargs':
         """Translate this combination into kwargs for `init`."""
-        # gen_data requires p >= k, but the benchmarks use a single predictor:
-        # generate with p = k and keep only the first predictor
+        # gen_data requires p >= k; if fewer predictors than outcomes are wanted,
+        # generate k of them and keep only the first p
+        k = 1 if self.k is None else self.k
         data = gen_data(
             random.key(2026_06_07),
             n=self.n,
-            p=1 if self.k is None else self.k,
+            p=max(self.p, k),
             k=self.k,
             q=0,
             lambda_=None if self.k is None else 0.5,
@@ -500,10 +504,10 @@ class ConfigParams:
         ).quantize()
         eye = 1.0 if self.k is None else jnp.eye(self.k)
         return InitKwargs(
-            X=data.x[:1, :],
+            X=data.x[: self.p, :],
             y=data.y,
             offset=jnp.zeros(data.y.shape[:-1]),
-            max_split=data.max_split[:1],
+            max_split=data.max_split[: self.p],
             num_trees=self.num_trees,
             p_nonterminal=make_p_nonterminal(self.maxdepth, 0.95, 2),
             leaf_prior_cov_inv=self.num_trees * eye,

@@ -9,10 +9,11 @@
     // variants are the two curves whose minimum is the "optimal" (augment-off)
     // baseline.
     //
-    // The augmentation cost grows with the number of predictors p (it sums the
-    // blocked mass over the eligible variables at each node), so p is the scan
-    // axis. n is fixed and modest: the augmentation work is n-independent, and a
-    // large n would only dilute the effect under the n-dependent rest of the step.
+    // The augmentation does per-variable work (it sums the blocked mass over the
+    // eligible variables at each node), so p is the scan axis, swept in powers of
+    // 4 up to a large value to see whether and where the cost scales with it. n is
+    // fixed and small: the augmentation work is n-independent, so a large n would
+    // only dilute the effect under the n-dependent rest of the step.
     //
     // Everything else is plain: univariate, no weights, fixed maxdepth, default
     // reductions, single chain.
@@ -21,8 +22,8 @@
         "reduce": "augment",
     },
     "values": {
-        "n":          [1024],
-        "p":          [1, 2, 4, 8, 16, 32, 64, 128],
+        "n":          [256],
+        "p":          [1, 4, 16, 64, 256, 1024, 4096, 16384],
         "k":          [null],
         "maxdepth":   [6],
         "weights":    [false],

@@ -349,6 +349,12 @@ class ConfigParams:
     num_chains: int | None = init_default('num_chains')
     """`init`'s ``num_chains`` kwarg."""
 
+    sparse: bool = False
+    """Whether to activate variable selection (sets `init`'s ``theta`` and ``sparse_on_at``)."""
+
+    augment: bool = init_default('augment')
+    """`init`'s ``augment`` kwarg; only has effect when ``sparse`` is set."""
+
     optimization_level: str | None = field(
         default=read_jax_config('jax_optimization_level'), metadata={'jax_config': True}
     )
@@ -416,6 +422,11 @@ class ConfigParams:
 
     def is_valid(self) -> bool:
         """Whether this combination of values is admissible."""
+        # augment only affects the sparsity step, so with sparsity off it is a
+        # no-op: skip the redundant augment=True variant.
+        if self.augment and not self.sparse:
+            return False
+
         chains = 1 if self.num_chains is None else self.num_chains
         k = 1 if self.k is None else self.k
 
@@ -503,6 +514,9 @@ class ConfigParams:
             prec_reduction_config=self.prec_reduction,
             prec_count_num_trees=self.prec_count_num_trees,
             sequential_unroll=self.sequential_unroll,
+            theta=1.0 if self.sparse else None,
+            sparse_on_at=0 if self.sparse else None,
+            augment=self.augment,
             num_chains=self.num_chains,
         )
 
@@ -539,6 +553,9 @@ class InitKwargs:
     prec_reduction_config: ReductionConfig
     prec_count_num_trees: int | None | Literal['auto']
     sequential_unroll: int | bool
+    theta: float | None
+    sparse_on_at: int | None
+    augment: bool
     num_chains: int | None
 
     def init(self) -> State:

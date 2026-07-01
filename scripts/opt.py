@@ -426,8 +426,9 @@ class ConfigParams:
     def is_valid(self) -> bool:
         """Whether this combination of values is admissible."""
         # augment only affects the sparsity step, so with sparsity off it is a
-        # no-op: skip the redundant augment=True variant.
-        if self.augment and not self.sparse:
+        # no-op: keep just the default augment variant and skip the redundant one,
+        # so configs that don't sweep augment still yield their default combo.
+        if self.augment != init_default('augment') and not self.sparse:
             return False
 
         chains = 1 if self.num_chains is None else self.num_chains

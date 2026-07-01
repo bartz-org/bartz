@@ -35,6 +35,7 @@ High-level interface
     :toctree: _autogen/top
 
     bartz.Bart
+    bartz.SparseConfig
     bartz.PredictKind
     bartz.DataFrame
     bartz.Series

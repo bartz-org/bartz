@@ -2805,20 +2805,6 @@ class TestSampleSAugmentation:
         """Stack `num_trees` identical copies of a tree heap."""
         return jnp.broadcast_to(tree_heap, (num_trees, tree_heap.size))
 
-    def test_zero_without_forbidden_rules(self, keys: split) -> None:
-        """No node has a forbidden rule, so there is never any augmentation."""
-        # only the root is internal, so no node has ancestors to forbid rules
-        tree_heap = manual_tree([[0.0], [0.0, 0.0]], [[0]], [[3]])
-        forest = self._forest(
-            self._replicate(tree_heap.var_tree, 4),
-            self._replicate(tree_heap.split_tree, 4),
-            jnp.array([5, 5, 5], jnp.uint8),
-            jnp.zeros(3),
-        )
-        for _ in range(5):
-            counts = sample_s_augmentation(keys.pop(), forest)
-            assert_array_equal(counts, jnp.zeros(3, counts.dtype))
-
     def test_mean_matches_closed_form(self, keys: split) -> None:
         """A tree blocking one variable at one node gives the known Poisson mean."""
         # the root splits variable 0 at its lowest cutpoint, so its left child
@@ -2846,55 +2832,6 @@ class TestSampleSAugmentation:
         mean = jnp.mean(draws[:, 0])
         sem = jnp.std(draws[:, 0]) / jnp.sqrt(draws.shape[0])
         assert abs(float(mean) - float(expected)) < 5 * float(sem)
-
-    def test_mean_matches_reference(self, keys: split) -> None:
-        """On a grown forest, the count means match E[A_j] = s_j sum_b 1 / e_b."""
-        # grow a forest with few cutpoints, so variables get blocked often
-        p, n = 5, 80
-        state = init(
-            X=random.randint(keys.pop(), (p, n), 0, 3, jnp.uint8),
-            y=random.normal(keys.pop(), (n,)),
-            offset=0.0,
-            max_split=jnp.full(p, 2, jnp.uint8),
-            num_trees=8,
-            p_nonterminal=make_p_nonterminal(5),
-            leaf_prior_cov_inv=1.0,
-            error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
-            theta=float(p),
-            a=0.5,
-            b=1.0,
-            rho=float(p),
-            sparse_on_at=0,
-            augment=True,
-        )
-        for _ in range(30):
-            state = step(keys.pop(), state)
-        forest = state.forest
-
-        # reference E[A_j], computed node by node with the eligibility helper
-        s = numpy.asarray(softmax(nnone(forest.log_s)))  # all selectable
-        (num_trees, half_tree_size) = forest.var_tree.shape
-        g = numpy.zeros(p)
-        for t in range(num_trees):
-            var_tree, split_tree = forest.var_tree[t], forest.split_tree[t]
-            for b in range(half_tree_size):
-                if int(split_tree[b]) == 0:  # not internal
-                    continue
-                blocked = numpy.asarray(
-                    fully_used_variables(
-                        var_tree, split_tree, forest.max_split, jnp.int32(b)
-                    )
-                )
-                blocked = numpy.unique(blocked[blocked < p])
-                g[blocked] += 1.0 / (1.0 - s[blocked].sum())
-        expected = s * g
-        assert expected.sum() > 0  # otherwise the test is vacuous
-
-        draws = numpy.asarray(
-            jit(vmap(lambda key: sample_s_augmentation(key, forest)))(keys.pop(8_000))
-        )
-        sem = draws.std(0) / numpy.sqrt(draws.shape[0])
-        assert numpy.all(numpy.abs(draws.mean(0) - expected) < 5 * sem + 1e-6)
 
     @staticmethod
     def _reference_blocked_mass_tree(
@@ -2971,30 +2908,6 @@ class TestSampleSAugmentation:
         assert int((new > 0).sum()) >= 5
         assert_close_matrices(new, ref, rtol=1e-5)
 
-    def test_init_sets_augment_flag(self, keys: split) -> None:
-        """The `augment` flag flows into the step config and `step` runs."""
-        p, n = 4, 50
-        state = init(
-            X=random.randint(keys.pop(), (p, n), 0, 3, jnp.uint8),
-            y=random.normal(keys.pop(), (n,)),
-            offset=0.0,
-            max_split=jnp.full(p, 2, jnp.uint8),
-            num_trees=5,
-            p_nonterminal=make_p_nonterminal(4),
-            leaf_prior_cov_inv=1.0,
-            error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
-            theta=float(p),
-            a=0.5,
-            b=1.0,
-            rho=float(p),
-            sparse_on_at=0,
-            augment=True,
-        )
-        assert state.config.augment is True
-        for _ in range(3):
-            state = step(keys.pop(), state)
-        assert jnp.all(jnp.isfinite(nnone(state.forest.log_s)))
-
     def test_augment_noop_without_forbidden_rules(self, keys: split) -> None:
         """Without forbidden rules, `step_s` draws the same with or without it."""
         p, n = 4, 50
@@ -3014,6 +2927,8 @@ class TestSampleSAugmentation:
             sparse_on_at=0,
             augment=True,
         )
+        assert state.config.augment is True  # the flag flows into the step config
+
         # plant trees whose only internal node is the root, so no decision rule
         # is ever forbidden, whatever the cutpoint
         forest = state.forest

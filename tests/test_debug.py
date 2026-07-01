@@ -272,6 +272,48 @@ class TestSamplePrior:
         chosen = jnp.take_along_axis(log_s, root, axis=1)
         assert chosen.mean() > log_s.mean()
 
+    def test_sparse_one_level(self, args: Args) -> None:
+        """The 1-level prior draws `log_s` from a fixed-concentration Dirichlet.
+
+        Setting `theta` alone (no `rho`, `a`, `b`) must yield a per-iteration
+        `log_s` of the right shape, broadcasting the fixed `theta` to one value
+        per iteration, and valid trees.
+        """
+        p = args.max_split.size
+        result = sample_prior(*args._replace(log_s=None), theta=float(p))
+        assert result.theta is not None
+        assert result.log_s is not None
+        assert jnp.all(result.theta == p)
+        assert result.log_s.shape == (args.trace_length, p)
+        assert jnp.all(jnp.isfinite(result.log_s))
+        bad = check_trace(result, args.max_split)
+        assert jnp.count_nonzero(bad).item() == 0
+
+    @pytest.mark.parametrize(
+        'kwargs', [dict(rho=1.0, a=0.5), dict(rho=1.0, b=1.0), dict(a=0.5, b=1.0)]
+    )
+    def test_partial_rho_a_b(self, args: Args, kwargs: dict) -> None:
+        """Setting only some of `rho`, `a`, `b` raises."""
+        with pytest.raises(ValueError, match='rho, a, b must be either'):
+            sample_prior(*args._replace(log_s=None), **kwargs)
+
+    def test_theta_with_rho_a_b(self, args: Args) -> None:
+        """Setting `theta` together with `rho`, `a`, `b` raises."""
+        with pytest.raises(ValueError, match='sampled from the prior'):
+            sample_prior(*args._replace(log_s=None), theta=1.0, a=0.5, b=1.0, rho=1.0)
+
+    def test_log_s_with_rho_a_b(self, args: Args) -> None:
+        """Setting `log_s` together with `rho`, `a`, `b` raises."""
+        log_s = jnp.zeros(args.max_split.size)
+        with pytest.raises(ValueError, match='sampled from the prior'):
+            sample_prior(*args._replace(log_s=log_s), a=0.5, b=1.0, rho=1.0)
+
+    def test_log_s_with_theta(self, args: Args) -> None:
+        """Setting `log_s` together with `theta` raises."""
+        log_s = jnp.zeros(args.max_split.size)
+        with pytest.raises(ValueError, match='sampled from the prior'):
+            sample_prior(*args._replace(log_s=log_s), theta=1.0)
+
 
 class TestSampleTheta:
     """Test `_prior.sample_theta`."""

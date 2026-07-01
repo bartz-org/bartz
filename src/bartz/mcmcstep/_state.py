@@ -634,7 +634,7 @@ def init(
     b: FloatLike | None = None,
     rho: FloatLike | None = None,
     sparse_on_at: int | Integer[ArrayLike, ''] | None = None,
-    augment: bool = False,
+    augment: bool = True,
     num_chains: int | None = None,
     mesh: Mesh | dict[str, int] | None = None,
 ) -> State:

@@ -140,6 +140,58 @@ class Series(Protocol):
         ...
 
 
+class SparseConfig(Module):
+    R"""
+    Configuration of a sparsity-inducing variable selection prior.
+
+    This is the prior of [1]_. Pass an instance to the `sparse` argument of
+    `Bart` to activate variable selection on the predictors. The prior on the
+    choice of predictor for each decision rule is
+
+    .. math::
+        (s_1, \ldots, s_p) \sim
+        \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p).
+
+    If `theta` is not specified, it's a priori distributed according to
+
+    .. math::
+        \frac{\mathtt{theta}}{\mathtt{theta} + \mathtt{rho}} \sim
+        \operatorname{Beta}(\mathtt{a}, \mathtt{b}).
+
+    References
+    ----------
+    .. [1] Linero, Antonio R. (2018). “Bayesian Regression Trees for
+       High-Dimensional Prediction and Variable Selection”. In: Journal of the
+       American Statistical Association 113.522, pp. 626-636.
+    """
+
+    theta: FloatLike | None = None
+    """Concentration of the Dirichlet prior. If not specified, it is sampled
+    from a Beta prior parametrized by `a`, `b` and `rho`. If set directly, it
+    should be in the ballpark of the predictor count p or lower."""
+
+    a: FloatLike = 0.5
+    """Shape parameter of the Beta prior on ``theta / (theta + rho)``."""
+
+    b: FloatLike = 1.0
+    """Shape parameter of the Beta prior on ``theta / (theta + rho)``."""
+
+    rho: FloatLike | None = None
+    """Scale of the Beta prior on `theta`. If not specified, set to the number
+    of predictors p. Lower values prefer more sparsity."""
+
+    augment: bool = field(static=True, default=True)
+    """Whether to account exactly for the decision rules forbidden by the
+    ancestors of each node when updating the variable selection probabilities,
+    using data augmentation. On by default. Setting it to `False` ignores the
+    forbidden rules, which is faster but only approximate. This matters most
+    with few predictors with few cutpoints each, where the same predictor
+    cannot be re-used down a branch."""
+
+    enabled: bool = field(static=True, default=True)
+    """Whether variable selection is active."""
+
+
 class Bart(Module):
     R"""
     Nonparametric regression with Bayesian Additive Regression Trees (BART).
@@ -166,45 +218,14 @@ class Bart(Module):
         specifies mixed outcome types. Binary components in multivariate
         outcomes follow the multivariate probit BART formulation of [4]_.
     sparse
-        Whether to activate variable selection on the predictors as done in
-        [1]_.
-    theta
-    a
-    b
-    rho
-        Hyperparameters of the sparsity prior used for variable selection.
-
-        The prior distribution on the choice of predictor for each decision rule
-        is
-
-        .. math::
-            (s_1, \ldots, s_p) \sim
-            \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p).
-
-        If `theta` is not specified, it's a priori distributed according to
-
-        .. math::
-            \frac{\mathtt{theta}}{\mathtt{theta} + \mathtt{rho}} \sim
-            \operatorname{Beta}(\mathtt{a}, \mathtt{b}).
-
-        If not specified, `rho` is set to the number of predictors p. To tune
-        the prior, consider setting a lower `rho` to prefer more sparsity.
-        If setting `theta` directly, it should be in the ballpark of p or lower
-        as well.
-    augment
-        Whether to account exactly for the decision rules forbidden by the
-        ancestors of each node when updating the variable selection
-        probabilities, using data augmentation. Only relevant if ``sparse=True``.
-        On by default. Setting it to `False` ignores the forbidden rules, which
-        is faster but only approximate. This matters most with few predictors
-        with few cutpoints each, where the same predictor cannot be re-used down
-        a branch.
+        A `SparseConfig` for the sparsity-inducing variable selection prior of
+        [1]_. Disabled by default; pass a `SparseConfig` to enable it.
     varprob
         The probability distribution over the `p` predictors for choosing a
         predictor to split on in a decision node a priori. Must be > 0. It does
         not need to be normalized to sum to 1. If not specified, use a uniform
-        distribution. If ``sparse=True``, this is used as initial value for the
-        MCMC.
+        distribution. If `sparse` is enabled, this is used as initial value for
+        the MCMC.
     binner
         A callable that, given the training predictors and a random key,
         returns a `~bartz.prepcovars.Binner` instance. The default is
@@ -366,12 +387,7 @@ class Bart(Module):
         | DataFrame,
         *,
         outcome_type: OutcomeType | str | Sequence[OutcomeType | str] = 'continuous',
-        sparse: bool = False,
-        theta: FloatLike | None = None,
-        a: FloatLike = 0.5,
-        b: FloatLike = 1.0,
-        rho: FloatLike | None = None,
-        augment: bool = True,
+        sparse: SparseConfig = SparseConfig(enabled=False),
         varprob: Float[ArrayLike, ' p'] | None = None,
         binner: BinnerFactory = UniqueQuantileBinner,
         rm_const: bool = True,
@@ -430,11 +446,6 @@ class Bart(Module):
             y_train, outcome_type, error_scale
         )
 
-        # process sparsity settings
-        sparse_theta, sparse_a, sparse_b, sparse_rho = _process_sparsity_settings(
-            x_train, sparse, theta, a, b, rho
-        )
-
         # process "standardization" settings
         offset = _process_offset_settings(y_train, binary_mask, offset)
         leaf_prior_cov_inv = _process_leaf_variance_settings(
@@ -479,17 +490,12 @@ class Bart(Module):
             num_trees,
             init_kw,
             rm_const,
-            sparse_theta,
-            sparse_a,
-            sparse_b,
-            sparse_rho,
+            sparse,
             varprob,
             num_chains,
             num_chain_devices,
             num_data_devices,
             devices,
-            sparse,
-            augment,
             n_burn,
             keys.pop(),
         )
@@ -1195,27 +1201,23 @@ def _check_type_settings(
 
 
 def _process_sparsity_settings(
-    x_train: Real[Array, 'p n'],
-    sparse: bool,
-    theta: FloatLike | None,
-    a: FloatLike,
-    b: FloatLike,
-    rho: FloatLike | None,
+    x_train: Real[Array, 'p n'], sparse: SparseConfig
 ) -> (
     tuple[None, None, None, None]
     | tuple[FloatLike, None, None, None]
     | tuple[None, FloatLike, FloatLike, FloatLike]
 ):
     """Return (theta, a, b, rho)."""
-    if not sparse:
+    if not sparse.enabled:
         return None, None, None, None
-    elif theta is not None:
-        return theta, None, None, None
+    elif sparse.theta is not None:
+        return sparse.theta, None, None, None
     else:
+        rho = sparse.rho
         if rho is None:
             p, _ = x_train.shape
             rho = float(p)
-        return None, a, b, rho
+        return None, sparse.a, sparse.b, rho
 
 
 def _process_offset_settings(
@@ -1404,21 +1406,19 @@ def _setup_mcmc(
     num_trees: int,
     init_kw: Mapping[str, Any],
     rm_const: bool,
-    theta: FloatLike | None,
-    a: FloatLike | None,
-    b: FloatLike | None,
-    rho: FloatLike | None,
+    sparse: SparseConfig,
     varprob: Float[ArrayLike, ' p'] | None,
     num_chains: int | None,
     num_chain_devices: int | None | Literal['auto'],
     num_data_devices: int | None,
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
-    sparse: bool,
-    augment: bool,
     n_burn: int,
     mcmc_key: Key[Array, ''],
 ) -> tuple[State, Key[Array, ''], Device | None]:
     p_nonterminal = make_p_nonterminal(maxdepth, base, power)
+
+    # resolve the sparsity prior hyperparameters
+    theta, a, b, rho = _process_sparsity_settings(x_train, sparse)
 
     # process device settings
     device_kw, device = process_device_settings(
@@ -1443,8 +1443,8 @@ def _setup_mcmc(
         a=a,
         b=b,
         rho=rho,
-        sparse_on_at=n_burn // 2 if sparse else None,
-        augment=augment,
+        sparse_on_at=n_burn // 2 if sparse.enabled else None,
+        augment=sparse.augment,
         **device_kw,
     )
 

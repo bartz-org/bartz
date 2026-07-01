@@ -41,6 +41,7 @@ from bartz._interface import (
     FloatLike,
     PredictKind,
     Series,
+    SparseConfig,
     _process_predictor_input,
     _process_response_input,
 )
@@ -326,12 +327,9 @@ class mc_gbart(Module):
             x_train=x_train,
             y_train=y_train,
             outcome_type=dict(wbart='continuous', pbart='binary')[type],
-            sparse=sparse,
-            theta=theta,
-            a=a,
-            b=b,
-            rho=rho,
-            augment=augment,
+            sparse=SparseConfig(
+                enabled=sparse, theta=theta, a=a, b=b, rho=rho, augment=augment
+            ),
             varprob=varprob,
             binner=binner,
             rm_const=rm_const,

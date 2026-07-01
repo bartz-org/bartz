@@ -81,7 +81,7 @@ from pytest import CaptureFixture, FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
 
 from bartz import Bart as OriginalBart
-from bartz import PredictKind
+from bartz import PredictKind, SparseConfig
 from bartz._interface import (
     DataFrame,
     Series,
@@ -296,8 +296,8 @@ class BartKW(NamedTuple):
 
     @property
     def sparse(self) -> bool:
-        """Value of ``kw['sparse']`` (or its `Bart` default)."""
-        return _bart_default(self.kw, 'sparse')
+        """Whether ``kw['sparse']`` (or its `Bart` default) enables sparsity."""
+        return _bart_default(self.kw, 'sparse').enabled
 
     @property
     def max_bins(self) -> int:
@@ -349,8 +349,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type='continuous',
-                    sparse=True,
-                    augment=False,  # non-default; variant 3 covers the default True
+                    # non-default augment; variant 3 covers the default True
+                    sparse=SparseConfig(augment=False),
                     **common,
                     printevery=50,
                     binner=partial(RangeEvenBinner, max_bins=257),
@@ -424,8 +424,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     y_train=train.y,
                     outcome_type='continuous',
                     error_scale=train.error_scale,
-                    sparse=True,
-                    theta=2.0,
+                    sparse=SparseConfig(theta=2.0),
                     varprob=jnp.array([0.2, 0.8]),
                     **common,
                     printevery=50,
@@ -468,7 +467,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     y_train=train.y,
                     outcome_type='continuous',
                     error_scale=train.error_scale,
-                    sparse=True,
+                    sparse=SparseConfig(),
                     **common,
                     printevery=50,
                     binner=partial(RangeEvenBinner, max_bins=257),
@@ -550,9 +549,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     y_train=train.y,
                     outcome_type=outcome_type,
                     missing=gen_missing(keys.pop(), (len(outcome_type), n)),
-                    sparse=True,
-                    augment=False,  # non-default; variant 4 covers the default True
-                    theta=2.0,
+                    # non-default augment; variant 4 covers the default True
+                    sparse=SparseConfig(theta=2.0, augment=False),
                     varprob=jnp.array([0.2, 0.3, 0.5]),
                     **common,
                     printevery=50,
@@ -1431,9 +1429,9 @@ def test_variable_selection(
         x_train=X,
         y_train=y,
         n_burn=1000,
-        sparse=True,
-        augment=augment,
-        theta=float(peff) if theta == 'fixed' else None,
+        sparse=SparseConfig(
+            augment=augment, theta=float(peff) if theta == 'fixed' else None
+        ),
         seed=keys.pop(),
     )
 
@@ -1961,7 +1959,9 @@ def run_bart_like_prior(
     sparse_kw = (
         {}
         if sparsity is None
-        else dict(sparse=True, augment=True, **sparsity_prior_params(sparsity, p))
+        else dict(
+            sparse=SparseConfig(augment=True, **sparsity_prior_params(sparsity, p))
+        )
     )
 
     bart = Bart(
@@ -2463,7 +2463,7 @@ class TestVarprobParam:
         i = random.randint(keys.pop(), (), 0, bkw.p)
         vp = jnp.full(bkw.p, 0.001).at[i].set(1)
         vp /= vp.sum()
-        kw.update(sparse=False, varprob=vp)
+        kw.update(sparse=SparseConfig(enabled=False), varprob=vp)
         bart = Bart(**kw)
         vc = bart.varcount_mean
         vc /= vc.sum()

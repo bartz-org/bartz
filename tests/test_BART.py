@@ -179,14 +179,20 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     push('nskip', pop('n_burn'))
     push('keepevery', pop('n_skip'))
 
-    # augment: deliberately not forwarded to the comparison. bartz's augment
+    # sparse: expand Bart's SparseConfig into mc_gbart's flat prior params.
+    # augment is deliberately not forwarded to the comparison: bartz's augment
     # (exact full conditional) and BART3's augment (approximate expected counts)
     # are different algorithms; worse, BART3 folds its augmentation pseudo-counts
     # into the reported varcount, so it stops matching the trees (which breaks
     # the `check_rbart` self-consistency check). So compare on the shared,
     # un-augmented baseline; augmentation is exercised directly elsewhere
     # (test_variable_selection, and the sample_s_augmentation tests).
-    pop('augment')
+    sparse = pop('sparse')
+    push('sparse', sparse.enabled)
+    push('theta', sparse.theta)
+    push('a', sparse.a)
+    push('b', sparse.b)
+    push('rho', sparse.rho)
 
     # binner -> xinfo, usequants, numcut
     binner = pop('binner')

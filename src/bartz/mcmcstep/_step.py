@@ -1643,13 +1643,9 @@ def _blocked_mass_tree(
 ) -> Float32[Array, ' p']:
     """Per-variable data-augmentation mass blocked by a single tree.
 
-    For each internal node, draw the latent total mass ``lambda / e`` of the
-    augmentation (with ``lambda`` exponential and ``e`` the eligible split
-    probability mass at the node) and add it to every variable that is
-    ineligible there. Each internal node only ever looks at the single variable
-    it splits on rather than the whole list of its ancestors: a node can block
-    at most that one variable, and the per-variable totals are recovered with
-    cheap top-down and bottom-up accumulations over the depth levels.
+    At each internal node, draws the latent augmentation weight ``lambda / e``
+    (``lambda`` exponential, ``e`` the eligible split probability mass at the
+    node) and adds it to every variable ineligible at that node.
 
     Parameters
     ----------
@@ -1686,6 +1682,10 @@ def _blocked_mass_tree(
     # ineligible throughout that child's subtree. Row 0 is the left child (low
     # end lo), row 1 the right child (high end hi - 1).
     blocks = is_internal & (split == jnp.stack([lo, hi - 1]))
+
+    # A node can block at most its own splitting variable, so the per-variable
+    # totals are recovered from these per-node blocks via top-down/bottom-up
+    # accumulation over depth levels, rather than scanning each node's ancestors.
 
     # Ineligible mass per node: the s-mass of the variables blocked along the
     # path from the root. Each variable is blocked at exactly one node per path,
@@ -1730,15 +1730,13 @@ def _blocked_mass_tree(
 
 
 def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, ' p']:
-    r"""Sample the data-augmentation counts for the exact full conditional of `s`.
+    """Sample the data-augmentation counts for the exact full conditional of `s`.
 
     At each internal node, the variables with no available cutpoint given the
     ancestors (plus the globally blocked ones) cannot be split on, so the plain
-    Dirichlet update for `s` is only approximate. The exact update views each
-    realized split as the last of a sequence of i.i.d. draws from `s`, the
-    earlier ones having fallen on ineligible variables and been discarded. This
-    samples, for each variable, the total number of such discarded draws over
-    the whole forest, to be added to the variable usage counts.
+    Dirichlet update for `s` is only approximate. This samples, for each
+    variable, the number of ineligible draws discarded before each realized
+    split, to be added to the variable usage counts.
 
     Parameters
     ----------
@@ -1750,26 +1748,6 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, '
     Returns
     -------
     The discarded-draws count for each variable.
-
-    Notes
-    -----
-    The per-node counts of discarded draws are negative-multinomial; summed over
-    nodes they have no simple closed form, but their Gamma-Poisson mixture does.
-    With :math:`s_j` the split probability normalized over selectable variables,
-    :math:`\mathcal{E}_b` the variables eligible at node :math:`b`, and
-    :math:`e_b = \sum_{j \in \mathcal{E}_b} s_j`, the count for variable
-    :math:`j` is
-
-    .. math::
-        A_j \mid \{\lambda_b\} \sim \operatorname{Poisson}\Big(s_j \sum_{b :\,
-        j \notin \mathcal{E}_b} \lambda_b / e_b\Big), \qquad \lambda_b \sim
-        \operatorname{Exponential}(1),
-
-    independent across :math:`j`. This draws the counts directly, without
-    iterating over the unknown number of discarded draws per node.
-
-    Unlike BART3's ``augment=True``, which adds the (approximate) expected
-    counts deterministically, this samples the exact full conditional.
     """
     assert forest.log_s is not None
     keys = split(key)
@@ -1780,11 +1758,14 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, '
     s = softmax(forest.log_s, where=selectable)
 
     # blocked_mass[j] = sum over internal nodes where j is ineligible of
-    # lambda_b / e_b
+    # lambda_b / e_b, with lambda_b ~ Exponential(1)
     blocked_mass = vmap(_blocked_mass_tree, in_axes=(0, 0, 0, None, None))(
         keys.pop(num_trees), forest.var_tree, forest.split_tree, forest.max_split, s
     ).sum(axis=0)  # shape (p,)
 
+    # the per-node discarded-draw counts are negative-multinomial, with no
+    # closed form when summed over nodes, but their Gamma-Poisson mixture does:
+    # A_j | {lambda_b} ~ Poisson(s_j * blocked_mass[j]), independent across j
     return random.poisson(keys.pop(), s * blocked_mass, dtype=jnp.int32)
 
 

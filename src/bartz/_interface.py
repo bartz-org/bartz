@@ -43,15 +43,13 @@ import jax.numpy as jnp
 from equinox import Module, error_if, field, tree_at
 from jax import Device, debug_nans, device_put, lax, make_mesh, random, tree
 from jax.scipy.linalg import solve_triangular
-from jax.scipy.special import ndtr
+from jax.scipy.special import ndtr, ndtri
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
 from bartz._jaxext import equal_shards, is_key, jit, split
-from bartz._jaxext.scipy.special import ndtri
-from bartz._jaxext.scipy.stats import invgamma
 from bartz.grove import (
     TreeHeaps,
     TreesTrace,
@@ -71,7 +69,7 @@ from bartz.mcmcloop import (
     make_tqdm_callback,
     run_mcmc,
 )
-from bartz.mcmcstep import OutcomeType, make_p_nonterminal
+from bartz.mcmcstep import DiagWishart, OutcomeType, Wishart, make_p_nonterminal
 from bartz.mcmcstep._axes import (
     chain_to_axis,
     chain_vmap_axes,
@@ -89,9 +87,6 @@ from bartz.mcmcstep._state import (
     init,
 )
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
-from bartz.prepcovars._prepcovars import _sigma2_from_cg, _sigma2_from_ols
-
-CG_MAXITER = 20
 
 
 class PredictKind(Enum):
@@ -146,6 +141,58 @@ class Series(Protocol):
         ...
 
 
+class SparseConfig(Module):
+    R"""
+    Configuration of a sparsity-inducing variable selection prior.
+
+    This is the prior of [1]_. Pass an instance to the `sparse` argument of
+    `Bart` to activate variable selection on the predictors. The prior on the
+    choice of predictor for each decision rule is
+
+    .. math::
+        (s_1, \ldots, s_p) \sim
+        \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p).
+
+    If `theta` is not specified, it's a priori distributed according to
+
+    .. math::
+        \frac{\mathtt{theta}}{\mathtt{theta} + \mathtt{rho}} \sim
+        \operatorname{Beta}(\mathtt{a}, \mathtt{b}).
+
+    References
+    ----------
+    .. [1] Linero, Antonio R. (2018). “Bayesian Regression Trees for
+       High-Dimensional Prediction and Variable Selection”. In: Journal of the
+       American Statistical Association 113.522, pp. 626-636.
+    """
+
+    theta: FloatLike | None = None
+    """Concentration of the Dirichlet prior. If not specified, it is sampled
+    from a Beta prior parametrized by `a`, `b` and `rho`. If set directly, it
+    should be in the ballpark of the predictor count p or lower."""
+
+    a: FloatLike = 0.5
+    """Shape parameter of the Beta prior on ``theta / (theta + rho)``."""
+
+    b: FloatLike = 1.0
+    """Shape parameter of the Beta prior on ``theta / (theta + rho)``."""
+
+    rho: FloatLike | None = None
+    """Scale of the Beta prior on `theta`. If not specified, set to the number
+    of predictors p. Lower values prefer more sparsity."""
+
+    augment: bool = field(static=True, default=True)
+    """Whether to account exactly for the decision rules forbidden by the
+    ancestors of each node when updating the variable selection probabilities,
+    using data augmentation. On by default. Setting it to `False` ignores the
+    forbidden rules, which is faster but only approximate. This matters most
+    with few predictors with few cutpoints each, where the same predictor
+    cannot be re-used down a branch."""
+
+    enabled: bool = field(static=True, default=True)
+    """Whether variable selection is active."""
+
+
 class Bart(Module):
     R"""
     Nonparametric regression with Bayesian Additive Regression Trees (BART).
@@ -172,37 +219,14 @@ class Bart(Module):
         specifies mixed outcome types. Binary components in multivariate
         outcomes follow the multivariate probit BART formulation of [4]_.
     sparse
-        Whether to activate variable selection on the predictors as done in
-        [1]_.
-    theta
-    a
-    b
-    rho
-        Hyperparameters of the sparsity prior used for variable selection.
-
-        The prior distribution on the choice of predictor for each decision rule
-        is
-
-        .. math::
-            (s_1, \ldots, s_p) \sim
-            \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p).
-
-        If `theta` is not specified, it's a priori distributed according to
-
-        .. math::
-            \frac{\mathtt{theta}}{\mathtt{theta} + \mathtt{rho}} \sim
-            \operatorname{Beta}(\mathtt{a}, \mathtt{b}).
-
-        If not specified, `rho` is set to the number of predictors p. To tune
-        the prior, consider setting a lower `rho` to prefer more sparsity.
-        If setting `theta` directly, it should be in the ballpark of p or lower
-        as well.
+        A `SparseConfig` for the sparsity-inducing variable selection prior of
+        [1]_. Disabled by default; pass a `SparseConfig` to enable it.
     varprob
         The probability distribution over the `p` predictors for choosing a
         predictor to split on in a decision node a priori. Must be > 0. It does
         not need to be normalized to sum to 1. If not specified, use a uniform
-        distribution. If ``sparse=True``, this is used as initial value for the
-        MCMC.
+        distribution. If `sparse` is enabled, this is used as initial value for
+        the MCMC.
     binner
         A callable that, given the training predictors and a random key,
         returns a `~bartz.prepcovars.Binner` instance. The default is
@@ -216,31 +240,25 @@ class Bart(Module):
         How to treat predictors with no associated decision rules (i.e., there
         are no available cutpoints for that predictor). If `True` (default),
         they are ignored. If `False`, an error is raised if there are any.
-    sigest
-        An estimate of the residual standard deviation on `y_train`, used to set
-        `lambda_`. Ignored if `lambda_` is specified. For multivariate regression,
-        can be a scalar (broadcast to all components) or a `(k,)` vector of
-        per-component estimates. For mixed outcome types, binary component
-        values are ignored. Can be one of the following special values to set
-        automatically based on the data:
-
-        'ols-or-variance'
-            If less than two datapoints, set ``sigest=1``. If ``n > p``, use the
-            OLS error standard deviation estimate (w/ intercept, w/o taking into
-            account `w`), else use the standard deviation of `y_train`.
-        'cg'
-            Use an approximate and regularized version of the OLS residual
-            standard deviation estimate.
-        'auto' (default)
-            Use 'ols-or-variance' if the dataset is smaller than a threshold,
-            else 'cg' for larger datasets.
-    sigdf
-        The degrees of freedom of the scaled inverse-chisquared prior on the
-        noise variance. For multivariate regression, the Inverse-Wishart
-        degrees of freedom are set to `sigdf + k - 1`.
-    sigquant
-        The quantile of the prior on the noise variance that shall match
-        `sigest` to set the scale of the prior. Ignored if `lambda_` is specified.
+    sigma_df
+        The degrees of freedom of the prior on the error precision. For
+        multivariate regression with `k` components, the Wishart degrees of
+        freedom are set to ``sigma_df + k - 1``.
+    sigma_scale
+        Sets the scale of the prior on the error precision. If 'auto' (default),
+        the prior is scaled so that the error precision equals
+        ``diag(1 / var(y_train))`` in expectation, where with weights `error_scale`
+        the variance is a precision-weighted one that estimates the unit-weight error
+        variance. Otherwise, ``square(sigma_scale)`` is the prior harmonic mean of
+        the error variance; for multivariate regression a scalar is broadcast to
+        all components. For mixed outcome types, binary components are ignored.
+    sigma_init
+        The initial value of the error standard deviation in the MCMC. If 'auto'
+        (default), the initial error precision is set to ``diag(1 / var(y_train))``,
+        with the same precision-weighted variance as `sigma_scale` when weights are
+        given. Otherwise, the initial precision is ``diag(1 / square(sigma_init))``;
+        for multivariate regression a scalar is broadcast to all components. For
+        mixed outcome types, binary components are ignored.
     k
         The inverse scale of the prior standard deviation on the latent mean
         function, relative to half the observed range of `y_train`. If `y_train`
@@ -250,12 +268,6 @@ class Bart(Module):
         Parameters of the prior on tree node generation. The probability that a
         node at depth `d` (0-based) is non-terminal is ``base / (1 + d) **
         power``.
-    lambda_
-        The prior harmonic mean of the error variance. (The harmonic mean of x
-        is 1/mean(1/x).) If not specified, it is set based on `sigest` and
-        `sigquant`. For multivariate regression, can be a scalar (broadcast
-        to all components) or a `(k,)` vector. For mixed outcome types, binary
-        component values are ignored.
     tau_num
         The numerator in the expression that determines the prior standard
         deviation of leaves. If not specified, default to ``(max(y_train) -
@@ -273,22 +285,20 @@ class Bart(Module):
         a scalar (broadcast to all components) or a `(k,)` vector. If not
         specified, it is set to the per-component mean of `y_train`. For mixed
         outcome types, each component uses the default for its type.
-    w
+    error_scale
         Coefficients that rescale the error standard deviation on each
-        datapoint. Not specifying `w` is equivalent to setting it to 1 for all
-        datapoints. Note: `w` is ignored in the automatic determination of
-        `sigest`, so either the weights should be O(1), or `sigest` should be
-        specified by the user. Shape ``(n,)`` applies the same scalar weight
-        to every outcome component; for multivariate regression,
-        ``(k, n)`` instead supplies a per-component weight per datapoint.
-        Supported with binary (probit) outcomes, where the weight scales the
-        latent error so the success probability is ``Phi(latent / w)``,
-        including the binary components of a mixed regression.
+        datapoint. Not specifying `error_scale` is equivalent to setting it to 1
+        for all datapoints. Shape ``(n,)`` applies the same scalar weight to every
+        outcome component; for multivariate regression, ``(k, n)`` instead
+        supplies a per-component weight per datapoint. Supported with binary
+        (probit) outcomes, where the weight scales the latent error so the
+        success probability is ``Phi(latent / error_scale)``, including the
+        binary components of a mixed regression.
     missing
         Boolean mask with the same shape as `y_train`; `True` marks entries
         to be ignored by the MCMC. Values of `y_train` must be finite
-        everywhere, including at masked positions. If 2-D,
-        ``error_cov_scale`` must be diagonal.
+        everywhere, including at masked positions. If 2-D, the error
+        covariance must be diagonal.
     num_trees
         The number of trees used to represent the latent mean function.
     n_save
@@ -370,9 +380,6 @@ class Bart(Module):
     _x_train_fmt: Any = field(static=True)
     _device: Device | None = field(static=True)
 
-    sigest: Float32[Array, ''] | Float32[Array, ' k'] | None = None
-    """The estimated standard deviation of the error used to set `lambda_`."""
-
     def __init__(
         self,
         x_train: Real[ArrayLike, 'p n'] | DataFrame,
@@ -382,26 +389,19 @@ class Bart(Module):
         | DataFrame,
         *,
         outcome_type: OutcomeType | str | Sequence[OutcomeType | str] = 'continuous',
-        sparse: bool = False,
-        theta: FloatLike | None = None,
-        a: FloatLike = 0.5,
-        b: FloatLike = 1.0,
-        rho: FloatLike | None = None,
+        sparse: SparseConfig = SparseConfig(enabled=False),
         varprob: Float[ArrayLike, ' p'] | None = None,
         binner: BinnerFactory = UniqueQuantileBinner,
         rm_const: bool = True,
-        sigest: FloatLike
-        | Float[ArrayLike, ' k']
-        | Literal['auto', 'ols-or-variance', 'cg'] = 'auto',
-        sigdf: FloatLike = 3.0,
-        sigquant: FloatLike = 0.9,
+        sigma_df: FloatLike = 3.0,
+        sigma_scale: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'] = 'auto',
+        sigma_init: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'] = 'auto',
         k: FloatLike = 2.0,
         power: FloatLike = 2.0,
         base: FloatLike = 0.95,
-        lambda_: FloatLike | Float[ArrayLike, ' k'] | None = None,
         tau_num: FloatLike | None = None,
         offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
-        w: Float[ArrayLike, ' n']
+        error_scale: Float[ArrayLike, ' n']
         | Float[ArrayLike, 'k n']
         | Series
         | DataFrame
@@ -431,22 +431,19 @@ class Bart(Module):
         y_train = _process_response_input(y_train)
         _check_same_length(x_train, y_train)
 
-        if w is not None:
-            # `w` is donated downstream as `init`'s `error_scale`, which keeps it
-            # (sharded) as `State.error_scale` for prediction
-            w = _process_response_input(w)
-            _check_same_length(x_train, w)
+        if error_scale is not None:
+            # `error_scale` is donated downstream as `init`'s `error_scale`, which
+            # keeps it (sharded) as `State.error_scale` for prediction
+            error_scale = _process_response_input(error_scale)
+            _check_same_length(x_train, error_scale)
 
         if missing is not None:
             missing = _process_response_input(missing, dtype=jnp.bool_)
             _check_same_length(x_train, missing)
 
         # check data types are correct for continuous/binary/multivariate regression
-        outcome_type, binary_mask = _check_type_settings(y_train, outcome_type, w)
-
-        # process sparsity settings
-        sparse_theta, sparse_a, sparse_b, sparse_rho = _process_sparsity_settings(
-            x_train, sparse, theta, a, b, rho
+        outcome_type, binary_mask = _check_type_settings(
+            y_train, outcome_type, error_scale
         )
 
         # process "standardization" settings
@@ -454,15 +451,15 @@ class Bart(Module):
         leaf_prior_cov_inv = _process_leaf_variance_settings(
             y_train, binary_mask, k, num_trees, tau_num
         )
-        error_cov_df, error_cov_scale, self.sigest = _process_error_variance_settings(
-            x_train,
+        error_cov_inv = _process_error_variance_settings(
             y_train,
             outcome_type,
             binary_mask,
-            sigest,
-            sigdf,
-            sigquant,
-            lambda_,
+            missing,
+            sigma_df,
+            sigma_scale,
+            sigma_init,
+            error_scale,
         )
 
         # split the user-provided seed into an mcmc key and a binner key
@@ -482,28 +479,23 @@ class Bart(Module):
             y_train,
             outcome_type,
             offset,
-            w,
+            error_scale,
             missing,
             max_split,
             leaf_prior_cov_inv,
-            error_cov_df,
-            error_cov_scale,
+            error_cov_inv,
             power,
             base,
             maxdepth,
             num_trees,
             init_kw,
             rm_const,
-            sparse_theta,
-            sparse_a,
-            sparse_b,
-            sparse_rho,
+            sparse,
             varprob,
             num_chains,
             num_chain_devices,
             num_data_devices,
             devices,
-            sparse,
             n_burn,
             keys.pop(),
         )
@@ -533,7 +525,7 @@ class Bart(Module):
         *,
         kind: PredictKind | str = 'mean',
         key: Key[Array, ''] | None = None,
-        w: Float[ArrayLike, ' m']
+        error_scale: Float[ArrayLike, ' m']
         | Float[ArrayLike, 'k m']
         | Series
         | DataFrame
@@ -556,10 +548,11 @@ class Bart(Module):
             The kind of output. See `PredictKind` for details.
         key
             Jax random key, required when ``kind='outcome_samples'``.
-        w
+        error_scale
             Per-observation error scale. Used with ``kind='outcome_samples'``,
             and also with ``kind='mean'`` or ``'mean_samples'`` for binary
-            outcomes (since the success probability is ``Phi(latent / w)``).
+            outcomes (since the success probability is
+            ``Phi(latent / error_scale)``).
             Required when the model was fit with weights and ``x_test`` is
             new data. Shape matches the shape used at fitting: ``(m,)`` for
             scalar weights, ``(k, m)`` for multivariate vector weights.
@@ -571,8 +564,8 @@ class Bart(Module):
         Raises
         ------
         ValueError
-            If `x_test` has a different format than `x_train`, or if `w`
-            is specified when it should be `None`, or if `w` is not
+            If `x_test` has a different format than `x_train`, or if `error_scale`
+            is specified when it should be `None`, or if `error_scale` is not
             specified when it is required, or if the model splits datapoints
             across devices (`num_data_devices`) and the number of test points
             is not a multiple of the number of data devices.
@@ -587,21 +580,21 @@ class Bart(Module):
         if kind is PredictKind.outcome_samples and key is None:
             msg = '`key` not specified'
             raise ValueError(msg)
-        w = self._process_w_test(x_test, kind, w)
+        error_scale = self._process_error_scale_test(x_test, kind, error_scale)
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
-        x_test = self._process_x_test(x_test, w)
+        x_test = self._process_x_test(x_test, error_scale)
 
         # place new test data on the devices of the model; the training data
         # is already in place
         if not x_test_is_train:
-            x_test, w = self._device_put_test(x_test, w)
+            x_test, error_scale = self._device_put_test(x_test, error_scale)
 
         # invoke jitted implementation
         return predict(
             key,
             self._main_trace,
             x_test,
-            w,
+            error_scale,
             self._mcmc_state.binary_indices,
             self._mcmc_state.binary_y is not None,
             kind,
@@ -814,11 +807,15 @@ class Bart(Module):
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)
 
-    def _process_w_test(
+    def _process_error_scale_test(
         self,
         x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
         kind: PredictKind,
-        w: Float[ArrayLike, ' m'] | Float[ArrayLike, 'k m'] | Series | DataFrame | None,
+        error_scale: Float[ArrayLike, ' m']
+        | Float[ArrayLike, 'k m']
+        | Series
+        | DataFrame
+        | None,
     ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
         """Validate and resolve the error weights for prediction.
 
@@ -828,7 +825,7 @@ class Bart(Module):
             The raw (not yet processed) test predictors, or ``'train'``.
         kind
             The prediction kind.
-        w
+        error_scale
             User-provided per-observation error scale, or `None`.
 
         Returns
@@ -838,12 +835,12 @@ class Bart(Module):
         Raises
         ------
         ValueError
-            If `w` is specified when it should be `None`, or missing when
-            required.
+            If `error_scale` is specified when it should be `None`, or missing
+            when required.
         """
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
-        train_w = self._mcmc_state.error_scale
-        has_train_weights = train_w is not None
+        train_error_scale = self._mcmc_state.error_scale
+        has_train_weights = train_error_scale is not None
         is_binary = self._mcmc_state.binary_y is not None
         # weights enter the outcome samples of any outcome type, and also the
         # mean of binary outcomes, since P(y=1) = Phi(latent / weight)
@@ -853,47 +850,47 @@ class Bart(Module):
         )
 
         if not needs_weights:
-            if w is not None:
+            if error_scale is not None:
                 msg = (
-                    '`w` must be `None` in this configuration (weights are used'
-                    " with kind='outcome_samples', and with kind='mean' or"
-                    " 'mean_samples' for binary outcomes, and only when the"
+                    '`error_scale` must be `None` in this configuration (weights'
+                    " are used with kind='outcome_samples', and with kind='mean'"
+                    " or 'mean_samples' for binary outcomes, and only when the"
                     ' model was fit with weights)'
                 )
                 raise ValueError(msg)
             return None
 
         if x_test_is_train:
-            if w is not None:
+            if error_scale is not None:
                 msg = (
-                    "`w` must be `None` when x_test='train'"
+                    "`error_scale` must be `None` when x_test='train'"
                     ' (training weights are used automatically)'
                 )
                 raise ValueError(msg)
-            return train_w
+            return train_error_scale
 
         # new test data, model was fit with weights
-        if w is None:
+        if error_scale is None:
             msg = (
-                '`w` is required because the model was fit with'
+                '`error_scale` is required because the model was fit with'
                 ' weights and x_test is new data'
             )
             raise ValueError(msg)
-        w_test = _process_response_input(w)
-        assert train_w is not None  # implied by needs_weights
-        if w_test.ndim != train_w.ndim:
+        error_scale_test = _process_response_input(error_scale)
+        assert train_error_scale is not None  # implied by needs_weights
+        if error_scale_test.ndim != train_error_scale.ndim:
             msg = (
-                f'`w` shape mismatch with training weights: got '
-                f'{w_test.shape=}, expected {train_w.ndim}D '
+                f'`error_scale` shape mismatch with training weights: got '
+                f'{error_scale_test.shape=}, expected {train_error_scale.ndim}D '
                 f'(matching the training-weight shape).'
             )
             raise ValueError(msg)
-        return w_test
+        return error_scale_test
 
     def _process_x_test(
         self,
         x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
-        w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
+        error_scale: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     ) -> UInt[Array, 'p m']:
         """Convert x_test to binned format suitable for prediction."""
         if isinstance(x_test, str):
@@ -907,14 +904,14 @@ class Bart(Module):
         if x_test_fmt != self._x_train_fmt:
             msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
             raise ValueError(msg)
-        if w is not None:
-            _check_same_length(w, x_test)
+        if error_scale is not None:
+            _check_same_length(error_scale, x_test)
         return self._binner.bin(x_test)
 
     def _device_put_test(
         self,
         x_test: UInt[Array, 'p m'],
-        w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
+        error_scale: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     ) -> tuple[UInt[Array, 'p m'], Float32[Array, ' m'] | Float32[Array, 'k m'] | None]:
         """Place new test data on the devices of the model.
 
@@ -933,11 +930,11 @@ class Bart(Module):
         elif self._device is not None:
             put = lambda a: device_put(a, self._device, donate=True)
         else:
-            return x_test, w
-        if w is None:
+            return x_test, error_scale
+        if error_scale is None:
             return put(x_test), None
         else:
-            return put(x_test), put(w)
+            return put(x_test), put(error_scale)
 
     def _check_trees(
         self, error: bool = False
@@ -1132,7 +1129,7 @@ def _check_same_length(x1: Shaped[Array, '... n'], x2: Shaped[Array, '... n']) -
 def _check_type_settings(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | str | Sequence[OutcomeType | str],
-    w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
+    error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None,
 ) -> tuple[OutcomeType | tuple[OutcomeType, ...], Bool[Array, ''] | Bool[Array, ' k']]:
     # standardize outcome_type to OutcomeType or tuple[OutcomeType, ...]
     if isinstance(outcome_type, Sequence) and not isinstance(outcome_type, str):
@@ -1153,13 +1150,13 @@ def _check_type_settings(
         )
         raise ValueError(msg)
     if (
-        w is not None
-        and w.ndim == 2
-        and (y_train.ndim != 2 or w.shape[0] != y_train.shape[0])
+        error_scale is not None
+        and error_scale.ndim == 2
+        and (y_train.ndim != 2 or error_scale.shape[0] != y_train.shape[0])
     ):
         msg = (
-            f'2D w (vector per-component weights) requires y_train of '
-            f'shape (k, n) with matching k; got {w.shape=}, '
+            f'2D error_scale (vector per-component weights) requires y_train of '
+            f'shape (k, n) with matching k; got {error_scale.shape=}, '
             f'{y_train.shape=}.'
         )
         raise ValueError(msg)
@@ -1174,27 +1171,23 @@ def _check_type_settings(
 
 
 def _process_sparsity_settings(
-    x_train: Real[Array, 'p n'],
-    sparse: bool,
-    theta: FloatLike | None,
-    a: FloatLike,
-    b: FloatLike,
-    rho: FloatLike | None,
+    x_train: Real[Array, 'p n'], sparse: SparseConfig
 ) -> (
     tuple[None, None, None, None]
     | tuple[FloatLike, None, None, None]
     | tuple[None, FloatLike, FloatLike, FloatLike]
 ):
     """Return (theta, a, b, rho)."""
-    if not sparse:
+    if not sparse.enabled:
         return None, None, None, None
-    elif theta is not None:
-        return theta, None, None, None
+    elif sparse.theta is not None:
+        return sparse.theta, None, None, None
     else:
+        rho = sparse.rho
         if rho is None:
             p, _ = x_train.shape
             rho = float(p)
-        return None, a, b, rho
+        return None, sparse.a, sparse.b, rho
 
 
 def _process_offset_settings(
@@ -1244,112 +1237,127 @@ def _process_leaf_variance_settings(
 
 
 def _process_error_variance_settings(
-    x_train: Shaped[Array, 'p n'],
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-    sigest: FloatLike | Float[Array, ' k'] | Literal['auto', 'ols-or-variance', 'cg'],
-    sigdf: FloatLike,
-    sigquant: FloatLike,
-    lambda_: FloatLike | Float[Array, ' k'] | None,
-) -> tuple[
-    Float32[Array, ''] | None,
-    Float32[Array, ''] | Float32[Array, 'k k'] | None,
-    Float32[Array, ''] | Float32[Array, ' k'] | None,
-]:
-    """Return (error_cov_df, error_cov_scale, sigest)."""
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+    sigma_df: FloatLike,
+    sigma_scale: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
+    sigma_init: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
+    error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
+) -> Wishart | None:
+    """Build the error precision prior from the user settings."""
     if outcome_type is OutcomeType.binary:
-        if not isinstance(sigest, str) or lambda_ is not None:
-            msg = 'Do not set `sigest` or `lambda_` for binary regression, they are ignored'
+        if not isinstance(sigma_scale, str) or not isinstance(sigma_init, str):
+            msg = (
+                'Do not set `sigma_scale` or `sigma_init` for binary regression, '
+                'they are ignored'
+            )
             raise ValueError(msg)
-        return None, None, None
+        return None
 
-    if lambda_ is None:
-        # estimate sigest²
-        sigest2 = _estimate_sigest2(x_train, y_train, sigest, binary_mask)
-        sigest_out = jnp.sqrt(sigest2)
+    *kdims, _ = y_train.shape  # () or (k,)
+    k = kdims[0] if kdims else 1
+    nu = jnp.asarray(sigma_df, jnp.float32) + (k - 1)
 
-        # lambda_ from sigest²
-        alpha = sigdf / 2
-        invchi2 = invgamma.ppf(sigquant, alpha) / 2
-        invchi2rid = invchi2 * sigdf
-        lambda_ = sigest2 / invchi2rid
-
-    elif not isinstance(sigest, str):
-        msg = "Do not set `sigest` if `lambda_` is specified, it's ignored"
-        raise ValueError(msg)
-
+    # guarded per-component variance of y_train, computed only when an 'auto'
+    # spec needs it (this function is not jitted, so it would not be elided)
+    if isinstance(sigma_scale, str) or isinstance(sigma_init, str):
+        vary = _guarded_response_variance(y_train, error_scale, missing)
     else:
-        lambda_ = jnp.where(binary_mask, 0.0, lambda_)
-        sigest_out = None
+        vary = None
 
-    # params written in multivariate form
+    # prior rate: E[precision] = nu / rate, so rate = nu * var per component
+    rate_diag = jnp.where(
+        binary_mask, 0.0, nu * _resolve_error_variance(sigma_scale, vary, kdims)
+    )
+
+    # initial precision = 1 / var per component (1 for binary components)
+    init_var = _resolve_error_variance(sigma_init, vary, kdims)
+    init_diag = jnp.where(binary_mask, 1.0, jnp.reciprocal(init_var))
+
     if y_train.ndim == 2:
-        k = y_train.shape[0]
-        lambda_ = jnp.broadcast_to(lambda_, (k,))
-        error_cov_df = jnp.asarray(sigdf) + k - 1
-        error_cov_scale = jnp.diag(sigdf * lambda_)
+        rate, init = jnp.diag(rate_diag), jnp.diag(init_diag)
     else:
-        error_cov_df = jnp.asarray(sigdf)
-        error_cov_scale = jnp.asarray(sigdf * lambda_)
-
-    return error_cov_df, error_cov_scale, sigest_out
+        rate, init = rate_diag, init_diag
+    return make_error_cov_prior(nu, rate, init, outcome_type, missing)
 
 
-def _estimate_sigest2(
-    x_train: Shaped[Array, 'p n'],
-    y_train: Float32[Array, '*k n'],
-    sigest: FloatLike | Float[Array, ' k'] | Literal['auto', 'ols-or-variance', 'cg'],
-    binary_mask: Bool[Array, '*k'],
+@jit
+def _guarded_response_variance(
+    y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
 ) -> Float32[Array, '*k']:
-    if not isinstance(sigest, str):
-        sigest2 = jnp.square(jnp.asarray(sigest, dtype=jnp.float32))
-        sigest2 = jnp.broadcast_to(sigest2, y_train.shape[:-1])
-    elif sigest == 'ols-or-variance':
-        sigest2 = _sigest2_ols_or_variance(x_train, y_train)
-    elif sigest == 'cg':
-        sigest2 = _sigest2_cg(x_train, y_train)
-    elif sigest == 'auto':
-        sigest2 = _sigest2_auto(x_train, y_train)
+    """Per-component variance of `y_train`, used by the 'auto' error scale.
+
+    A precision-weighted variance (precision ``1 / error_scale ** 2``) estimates
+    the unit-weight ``sigma ** 2``; `missing` entries are dropped. The variance
+    is guarded to 1 when undefined (fewer than 2 valid points) or non-positive.
+    """
+    if error_scale is None and missing is None:
+        vary = jnp.var(y_train, axis=-1)
+        return jnp.where(vary > 0, vary, 1.0)
     else:
-        msg = f'unrecognized value {sigest=}'
-        raise ValueError(msg)
-    return jnp.where(binary_mask, 0.0, sigest2)
+        prec = (
+            jnp.ones(())
+            if error_scale is None
+            else jnp.reciprocal(jnp.square(error_scale))
+        )
+        if missing is not None:
+            prec = jnp.where(missing, 0.0, prec)
+            y_train = jnp.where(missing, 0.0, y_train)
+        n_valid = jnp.count_nonzero(prec, axis=-1)
+        wmean = jnp.sum(prec * y_train, axis=-1) / jnp.sum(prec, axis=-1)
+        sqdev = prec * jnp.square(y_train - wmean[..., None])
+        vary = jnp.sum(sqdev, axis=-1) / n_valid
+        # guard on n_valid too: with a single valid point the variance is 0 in
+        # exact arithmetic, but float rounding in wmean can leave a tiny
+        # positive vary that would slip past the `vary > 0` guard
+        return jnp.where((n_valid > 1) & (vary > 0), vary, 1.0)
 
 
-def _sigest2_ols_or_variance(
-    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
+def _resolve_error_variance(
+    spec: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
+    vary: Float32[Array, '*k'] | None,
+    shape: Sequence[int],
 ) -> Float32[Array, '*k']:
-    """Implement the case `sigest='ols-or-variance'`."""
-    p, n = x_train.shape
-    if n < 2:
-        *k, _ = y_train.shape
-        return jnp.ones(k)
-    elif n <= p:
-        return jnp.var(y_train, axis=-1)
+    """Per-component error variance from a scale spec ('auto' uses var(y))."""
+    if isinstance(spec, str):
+        if spec != 'auto':
+            msg = f"unrecognized value {spec!r}, expected 'auto' or a number"
+            raise ValueError(msg)
+        assert vary is not None  # computed iff some spec is 'auto'
+        return vary
     else:
-        return _sigma2_from_ols(x_train, y_train)
+        return jnp.broadcast_to(jnp.square(jnp.asarray(spec, jnp.float32)), shape)
 
 
-def _sigest2_cg(
-    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
-) -> Float32[Array, '*k']:
-    """Implement the case `sigest='cg'`."""
-    p, n = x_train.shape
-    maxiter = max(1, min(n, p, CG_MAXITER))
-    return _sigma2_from_cg(x_train, y_train, maxiter)
+def make_error_cov_prior(
+    nu: Float32[Array, ''],
+    rate: Float32[Array, ''] | Float32[Array, 'k k'],
+    value: Float32[Array, ''] | Float32[Array, 'k k'],
+    outcome_type: OutcomeType | tuple[OutcomeType, ...],
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+) -> Wishart:
+    """Build the error precision prior, diagonal-constrained where required.
 
-
-def _sigest2_auto(
-    x_train: Shaped[Array, 'p n'], y_train: Float32[Array, '*k n']
-) -> Float32[Array, ' *k']:
-    """Implement the case `sigest='auto'`."""
-    p, n = x_train.shape
-    threshold = 10_000 * 100**2
-    if n * p * p > threshold and min(n, p) > CG_MAXITER:
-        return _sigest2_cg(x_train, y_train)
+    Mixed binary-continuous and partial-missing (2-D mask) regression restrict
+    the error covariance to diagonal, so they take a `DiagWishart`; the dense
+    cases take a `Wishart`. `init` re-checks this choice. `value` is the initial
+    value of the precision.
+    """
+    if isinstance(outcome_type, tuple):
+        binary = [t is OutcomeType.binary for t in outcome_type]
+        is_mixed = any(binary) and not all(binary)
     else:
-        return _sigest2_ols_or_variance(x_train, y_train)
+        is_mixed = False
+    # a 2-D missingness mask only occurs with multivariate y (checked in `init`)
+    partial_missing = missing is not None and missing.ndim == 2
+    if is_mixed or partial_missing:
+        return DiagWishart(nu=nu, rate=rate, value=value)
+    else:
+        return Wishart(nu=nu, rate=rate, value=value)
 
 
 def _setup_mcmc(
@@ -1357,32 +1365,30 @@ def _setup_mcmc(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
-    w: Float[Array, ' n'] | Float[Array, 'k n'] | None,
+    error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
     max_split: UInt[Array, ' p'],
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
-    error_cov_df: FloatLike | None,
-    error_cov_scale: FloatLike | Float32[Array, 'k k'] | None,
+    error_cov_inv: Wishart | None,
     power: FloatLike,
     base: FloatLike,
     maxdepth: int,
     num_trees: int,
     init_kw: Mapping[str, Any],
     rm_const: bool,
-    theta: FloatLike | None,
-    a: FloatLike | None,
-    b: FloatLike | None,
-    rho: FloatLike | None,
+    sparse: SparseConfig,
     varprob: Float[ArrayLike, ' p'] | None,
     num_chains: int | None,
     num_chain_devices: int | None | Literal['auto'],
     num_data_devices: int | None,
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
-    sparse: bool,
     n_burn: int,
     mcmc_key: Key[Array, ''],
 ) -> tuple[State, Key[Array, ''], Device | None]:
     p_nonterminal = make_p_nonterminal(maxdepth, base, power)
+
+    # resolve the sparsity prior hyperparameters
+    theta, a, b, rho = _process_sparsity_settings(x_train, sparse)
 
     # process device settings
     device_kw, device = process_device_settings(
@@ -1394,21 +1400,21 @@ def _setup_mcmc(
         y=y_train,
         outcome_type=outcome_type,
         offset=offset,
-        error_scale=w,
+        error_scale=error_scale,
         missing=missing,
         max_split=max_split,
         num_trees=num_trees,
         p_nonterminal=p_nonterminal,
         leaf_prior_cov_inv=leaf_prior_cov_inv,
-        error_cov_df=error_cov_df,
-        error_cov_scale=error_cov_scale,
+        error_cov_inv=error_cov_inv,
         min_points_per_decision_node=10,
         log_s=process_varprob(varprob, max_split),
         theta=theta,
         a=a,
         b=b,
         rho=rho,
-        sparse_on_at=n_burn // 2 if sparse else None,
+        sparse_on_at=n_burn // 2 if sparse.enabled else None,
+        augment=sparse.augment,
         **device_kw,
     )
 
@@ -1871,7 +1877,7 @@ def predict(
     key: Key[Array, ''] | None,
     trace: MainTrace,
     x_test: UInt[Array, 'p m'],
-    w: Float[Array, ' m'] | Float[Array, 'k m'] | None,
+    error_scale: Float[Array, ' m'] | Float[Array, 'k m'] | None,
     binary_indices: Int32[Array, ' kb'] | None,
     has_binary: bool,
     kind: PredictKind | str,
@@ -1892,19 +1898,23 @@ def predict(
     # sample posterior (uses latent directly, no probit squash needed)
     if kind is PredictKind.outcome_samples:
         assert key is not None
-        return sample_outcome(key, trace, latent, w, binary_indices, has_binary)
+        return sample_outcome(
+            key, trace, latent, error_scale, binary_indices, has_binary
+        )
 
     # squash predictions to (0, 1) if probit; with heteroskedastic weights the
-    # latent error scale is `w`, so P(y=1) = Phi(latent / w)
+    # latent error scale is `error_scale`, so P(y=1) = Phi(latent / error_scale)
     if binary_indices is not None:
-        # mixed: only the binary rows are squashed (and divided by their `w`)
+        # mixed: only the binary rows are squashed (and divided by their scale)
         indexing = jnp.s_[..., binary_indices, :]
         arg = latent[indexing]
-        if w is not None:
-            arg = arg / (w[indexing] if w.ndim == 2 else w)
+        if error_scale is not None:
+            arg = arg / (
+                error_scale[indexing] if error_scale.ndim == 2 else error_scale
+            )
         mean_samples = latent.at[indexing].set(ndtr(arg))
     elif has_binary:  # self._mcmc_state.binary_y is not None:
-        mean_samples = ndtr(latent if w is None else latent / w)
+        mean_samples = ndtr(latent if error_scale is None else latent / error_scale)
     else:
         mean_samples = latent
 
@@ -1919,7 +1929,7 @@ def sample_outcome(
     key: Key[Array, ''],
     trace: MainTrace,
     latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
-    w: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
+    error_scale: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     binary_indices: Int32[Array, ' kb'] | None,
     has_binary: bool,
     /,
@@ -1938,18 +1948,18 @@ def sample_outcome(
         # so error = L^{-T} z ~ N(0, L^{-T} L^{-1}) = N(0, Sigma)
         z = random.normal(key, latent.shape)  # (ndpost, k, m)
         error = solve_triangular(L, z, trans='T', lower=True)  # (ndpost, k, m)
-        if w is not None:
-            # w is (m,) or (k, m) so it always broadcasts right
-            error *= w
+        if error_scale is not None:
+            # error_scale is (m,) or (k, m) so it always broadcasts right
+            error *= error_scale
     else:  # univariate
         # pure binary probit has unit-scale latent error; continuous scales it
-        # by `sigma`. Either way, optionally rescaled per datapoint by w.
+        # by `sigma`. Either way, optionally rescaled per datapoint by error_scale.
         error = random.normal(key, latent.shape)
         if not has_binary:
             sigma = jnp.sqrt(jnp.reciprocal(prec)).reshape(-1)
             error *= sigma[..., None]
-        if w is not None:
-            error *= w[None, :]
+        if error_scale is not None:
+            error *= error_scale[None, :]
 
     outcome = latent + error
 

@@ -33,11 +33,10 @@ from types import MappingProxyType
 from typing import Any, Literal, TypeVar, overload
 
 from jax import numpy as jnp
-from jax.scipy.special import ndtr
+from jax.scipy.special import ndtr, ndtri
 from jaxtyping import Array, Float, Float32, Key, Real, Shaped
 
 from bartz._interface import Bart, DataFrame, PredictKind, Series
-from bartz._jaxext.scipy.special import ndtri
 from bartz.mcmcstep._state import ArrayLike, FloatLike
 from bartz.prepcovars import RangeEvenBinner
 from bartz.stochtree._preprocess import _PreprocessorBase, make_preprocessor
@@ -91,7 +90,7 @@ class GeneralParams:
     """Whether to standardize the outcome before fitting. Ignored for probit binary."""
 
     sigma2_init: FloatLike | None = None
-    """Starting value of the global error variance. Only honored when the variance prior is the improper default (``sigma2_global_shape=0`` and ``sigma2_global_scale=0``); otherwise raises, since bartz cannot decouple the chain start from the prior scale. If `None` (default), uses ``var(resid_train)`` for continuous and ``1.0`` for probit, matching stochtree."""
+    """Starting value of the global error variance. If `None` (default), uses ``var(resid_train)`` for continuous and ``1.0`` for probit."""
 
     sigma2_global_shape: FloatLike = 0.0
     """Shape parameter of the inverse-gamma prior on the global error variance. The default ``0`` is mapped to a near-improper prior, since bartz's scaled-inv-chi² cannot represent ``IG(0, 0)`` exactly."""
@@ -449,16 +448,20 @@ class BARTModel:
 
         if is_probit:
             # stochtree pins σ²=1 for probit; bartz binary branch ignores the
-            # variance prior, so we pass any valid placeholders.
-            sigdf_arg: FloatLike = 3.0
-            lambda_arg: FloatLike | None = None
+            # variance prior, so we leave the scale/init at their 'auto'
+            # defaults (bartz rejects explicit values for binary outcomes).
+            sigma_df_arg: FloatLike = 3.0
+            sigma_scale_arg: FloatLike | Literal['auto'] = 'auto'
+            sigma_init_arg: FloatLike | Literal['auto'] = 'auto'
             sigma2_init_stored: FloatLike = 1.0
         else:
-            sigdf_arg, lambda_arg, sigma2_init_stored = resolve_variance_prior(
-                gp.sigma2_global_shape,
-                gp.sigma2_global_scale,
-                gp.sigma2_init,
-                var_resid_train,
+            sigma_df_arg, sigma_scale_arg, sigma_init_arg, sigma2_init_stored = (
+                resolve_variance_prior(
+                    gp.sigma2_global_shape,
+                    gp.sigma2_global_scale,
+                    gp.sigma2_init,
+                    var_resid_train,
+                )
             )
 
         binner = partial(RangeEvenBinner, max_bins=256)
@@ -471,15 +474,14 @@ class BARTModel:
             outcome_type='binary' if is_probit else 'continuous',
             binner=binner,
             varprob=variable_weights,
-            sigest='auto',
-            sigdf=sigdf_arg,
-            sigquant=0.9,
+            sigma_df=sigma_df_arg,
+            sigma_scale=sigma_scale_arg,
+            sigma_init=sigma_init_arg,
             k=bartz_k,
             power=mfp.beta,
             base=mfp.alpha,
-            lambda_=lambda_arg,
             tau_num=tau_num_arg,
-            w=observation_weights,
+            error_scale=observation_weights,
             num_trees=mfp.num_trees,
             n_save=num_mcmc,
             n_burn=num_burnin,
@@ -727,27 +729,20 @@ def resolve_sigma2_leaf_init(
     return var_resid_train / num_trees
 
 
-# Bartz scaled-inv-chi² df used to approximate stochtree's improper IG(0,0).
-# Small enough that the prior contribution to the σ² posterior is dominated by
-# the data (the posterior is IG((sigdf+n)/2, (sigdf*lambda+sum_sq)/2) for any
-# n >= 1), large enough in case the starting MCMC value is computed with a
-# regularized inverse
-_IMPROPER_PRIOR_SIGDF = 0.01
-
-
 def resolve_variance_prior(
     shape: FloatLike,
     scale: FloatLike,
     sigma2_init: FloatLike | None,
     var_resid_train: FloatLike,
-) -> tuple[FloatLike, FloatLike, FloatLike]:
-    """Translate stochtree's IG(shape, scale) prior to bartz's scaled-inv-chi2.
+) -> tuple[Float32[Array, ''], Float32[Array, ''], Float32[Array, ''], FloatLike]:
+    """Translate stochtree's IG(shape, scale) prior to bartz's error variance prior.
 
-    Bartz initializes σ² at ``lambda_`` (it cannot decouple the prior scale
-    from the chain start). For the proper-prior path we match the prior
-    exactly and refuse a user-supplied ``sigma2_init``; for the improper-prior
-    path we pin ``lambda_`` to the desired initial value and use a tiny
-    ``sigdf`` so the prior contribution is negligible.
+    The IG(shape, scale) prior on σ² is the scaled-inverse-χ² with
+    ``sigma_df = 2*shape`` and prior harmonic mean ``square(sigma_scale) =
+    scale/shape``; the chain starts at `sigma2_init` (default
+    ``var(resid_train)``), decoupled from the prior. The mapping is branchless so
+    `shape` / `scale` may be traced; the unrepresentable IG(0, scale>0) (positive
+    rate, zero df) yields a NaN that surfaces downstream rather than an error.
 
     Parameters
     ----------
@@ -756,53 +751,30 @@ def resolve_variance_prior(
     scale
         Stochtree's ``sigma2_global_scale``.
     sigma2_init
-        Stochtree's ``sigma2_init``. Allowed only when the prior is improper.
+        Stochtree's ``sigma2_init``. If `None`, defaults to `var_resid_train`.
     var_resid_train
-        Variance of the residual used to standardize-style initialize σ² when
-        ``sigma2_init`` is unset and the prior is improper.
+        Variance of the residual, the default chain start for σ².
 
     Returns
     -------
-    sigdf : FloatLike
-        Degrees of freedom of bartz's scaled-inv-chi² variance prior.
-    lambda_ : FloatLike
-        Scale of bartz's scaled-inv-chi² variance prior.
+    sigma_df : Float32[Array, '']
+        Degrees of freedom of bartz's error variance prior.
+    sigma_scale : Float32[Array, '']
+        Scale of bartz's prior (sqrt of the prior harmonic mean of the variance).
+    sigma_init : Float32[Array, '']
+        Initial error standard deviation seeding the chain.
     sigma2_init_stored : FloatLike
-        The chain starting value, suitable for ``BARTModel.sigma2_init``.
-
-    Raises
-    ------
-    NotImplementedError
-        If `sigma2_init` is set together with a proper variance prior, or if
-        exactly one of `shape` / `scale` is zero (a one-sided improper prior
-        bartz cannot reproduce).
+        The chain starting value of σ², suitable for ``BARTModel.sigma2_init``.
     """
-    # IG(shape, scale) <=> scaled-inv-chi2(df=2*shape, lambda=scale/shape)
-    if shape > 0 and scale > 0:
-        if sigma2_init is not None:
-            msg = (
-                'sigma2_init cannot be set together with a proper variance'
-                ' prior (sigma2_global_shape > 0 and sigma2_global_scale > 0):'
-                ' bartz initializes sigma² at lambda_=scale/shape and cannot'
-                ' separately honor sigma2_init. Drop sigma2_init or use the'
-                ' default improper prior (sigma2_global_shape=0,'
-                ' sigma2_global_scale=0).'
-            )
-            raise NotImplementedError(msg)
-        lambda_ = scale / shape
-        return 2.0 * shape, lambda_, lambda_
-    if (shape > 0) != (scale > 0):
-        msg = (
-            'a one-sided improper variance prior (exactly one of'
-            ' sigma2_global_shape / sigma2_global_scale set to 0) is not'
-            ' supported: bartz cannot reproduce IG(shape>0, 0) or IG(0,'
-            ' scale>0) without a degenerate chain start or silently discarding'
-            ' the nonzero parameter. Use a proper prior (both > 0) or the'
-            ' improper default (both 0).'
-        )
-        raise NotImplementedError(msg)
+    shape = jnp.asarray(shape, jnp.float32)
+    scale = jnp.asarray(scale, jnp.float32)
     sigma2_start = sigma2_init if sigma2_init is not None else var_resid_train
-    return _IMPROPER_PRIOR_SIGDF, sigma2_start, sigma2_start
+    sigma_init = jnp.sqrt(jnp.asarray(sigma2_start, jnp.float32))
+    # IG(shape, scale) <=> scaled-inv-chi2(df=2*shape, harmonic mean=scale/shape).
+    # The `scale > 0` guard keeps IG(0, 0) at harmonic mean 0 (avoiding 0/0) while
+    # letting IG(0, scale>0) overflow to inf -> NaN rate, flagging it as invalid.
+    harmonic_mean = jnp.where(scale > 0, scale / shape, 0.0)
+    return 2.0 * shape, jnp.sqrt(harmonic_mean), sigma_init, sigma2_start
 
 
 def check_variable_weights(

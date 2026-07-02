@@ -35,7 +35,7 @@ import jax
 from jax import Device, ensure_compile_time_eval, lax, random, shard_map, tree, vmap
 from jax import numpy as jnp
 from jax.dtypes import prng_key
-from jax.scipy.special import ndtr
+from jax.scipy.special import ndtr, ndtri
 from jax.sharding import PartitionSpec
 from jax.typing import DTypeLike
 from jaxtyping import (
@@ -52,7 +52,6 @@ from jaxtyping import (
 from jaxtyping import config as jaxtyping_config
 
 from bartz._jaxext._jit import jit
-from bartz._jaxext.scipy.special import ndtri
 
 if sys.version_info >= (3, 13):
     from typing import TypeIs

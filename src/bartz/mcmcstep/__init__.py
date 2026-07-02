@@ -43,6 +43,8 @@ MCMC state
     State
     Forest
     StepConfig
+    Wishart
+    DiagWishart
 
 Reduction strategies
 --------------------
@@ -53,23 +55,29 @@ Configurations for the per-leaf scatter-add reductions, to pass to `init`.
 
     ReductionConfig
     BatchedReduction
+    AutoBatchedReduction
     OneHotReduction
+    AutoOneHotReduction
     PallasReduction
 """
 
 # ruff: noqa: F401
 
 from bartz.mcmcstep._reduction import (
+    AutoBatchedReduction,
+    AutoOneHotReduction,
     BatchedReduction,
     OneHotReduction,
     PallasReduction,
     ReductionConfig,
 )
 from bartz.mcmcstep._state import (
+    DiagWishart,
     Forest,
     OutcomeType,
     State,
     StepConfig,
+    Wishart,
     init,
     make_p_nonterminal,
 )

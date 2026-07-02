@@ -31,6 +31,7 @@ from typing import overload
 from equinox import AbstractVar
 from jax import lax, named_call, random, vmap
 from jax import numpy as jnp
+from jax.nn import softmax
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
 from jaxtyping import Array, Bool, Float32, Int32, Key, Shaped, UInt, UInt32
@@ -45,9 +46,10 @@ from bartz._jaxext import (
 )
 from bartz._jaxext.random import loggamma
 from bartz.grove import var_histogram
-from bartz.mcmcstep._moves import Moves, propose_moves
+from bartz.mcmcstep._moves import Moves, propose_moves, split_range
 from bartz.mcmcstep._reduction import ReductionConfig
 from bartz.mcmcstep._state import (
+    Forest,
     State,
     StepConfig,
     chol_with_gersh,
@@ -90,7 +92,7 @@ def step(key: Key[Array, ''], state: State) -> State:
     if state.z is not None:
         state = step_z(keys.pop(), state)
 
-    if state.error_cov_df is not None:
+    if state.error_cov_inv.nu is not None:
         state = step_error_cov_inv(keys.pop(), state)
 
     state = step_sparse(keys.pop(), state)
@@ -382,10 +384,10 @@ def accept_moves_parallel_stage(
     )
 
     prelf = precompute_leaf_terms(
-        key, prec_trees, state.error_cov_inv, state.forest.leaf_prior_cov_inv
+        key, prec_trees, state.error_cov_inv.value, state.forest.leaf_prior_cov_inv
     )
     prelkv = precompute_likelihood_terms(
-        state.error_cov_inv, state.forest.leaf_prior_cov_inv, prelf, moves
+        state.error_cov_inv.value, state.forest.leaf_prior_cov_inv, prelf, moves
     )
 
     return ParallelStageOut(
@@ -1022,7 +1024,9 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
                 pso.state.config.data_sharded,
                 pso.state.prec_scale,
                 pso.state.forest.log_likelihood is not None,
-                pso.state.error_cov_inv if isinstance(pso.prelf, PreLfMVHet) else None,
+                pso.state.error_cov_inv.value
+                if isinstance(pso.prelf, PreLfMVHet)
+                else None,
             ),
             pt,
         )
@@ -1515,8 +1519,8 @@ def _sample_wishart_bartlett(
 
 
 def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
-    assert state.error_cov_df is not None
-    assert state.error_cov_scale is not None
+    assert state.error_cov_inv.nu is not None
+    assert state.error_cov_inv.rate is not None
 
     resid = state.resid
     if state.inv_sdev_scale is None:
@@ -1528,20 +1532,20 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
         if state.config.data_sharded:
             n_eff = lax.psum(n_eff, 'data')
         resid *= state.inv_sdev_scale
-    df_post = state.error_cov_df + n_eff
+    df_post = state.error_cov_inv.nu + n_eff
     rrt = resid @ resid.T
     if state.config.data_sharded:
         rrt = lax.psum(rrt, 'data')
-    scale_post = state.error_cov_scale + rrt
+    scale_post = state.error_cov_inv.rate + rrt
 
     prec = _sample_wishart_bartlett(key, df_post, scale_post)
-    return replace(state, error_cov_inv=prec)
+    return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
 def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     """Per-component inverse-gamma update for univariate, mixed, and partial-missing paths."""
-    assert state.error_cov_scale is not None
-    assert state.error_cov_df is not None
+    assert state.error_cov_inv.rate is not None
+    assert state.error_cov_inv.nu is not None
 
     resid = state.resid
     if state.inv_sdev_scale is not None:
@@ -1555,13 +1559,13 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
         n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
         if state.config.data_sharded:
             n_eff = lax.psum(n_eff, 'data')
-    alpha = state.error_cov_df / 2 + n_eff / 2
+    alpha = state.error_cov_inv.nu / 2 + n_eff / 2
 
     # beta
     norm2 = jnp.einsum('...n,...n->...', resid, resid)
     if state.config.data_sharded:
         norm2 = lax.psum(norm2, 'data')
-    scale = state.error_cov_scale
+    scale = state.error_cov_inv.rate
     kshape = resid.shape[:-1]
     if kshape:
         scale = jnp.diag(scale)
@@ -1576,14 +1580,14 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
         prec = prec.at[state.binary_indices].set(1.0)
     if kshape:
         prec = jnp.diag(prec)
-    return replace(state, error_cov_inv=prec)
+    return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
 @named_call
 def step_error_cov_inv(key: Key[Array, ''], state: State) -> State:
     """MCMC-update the inverse error covariance."""
     if (
-        state.error_cov_inv.ndim == 2
+        state.error_cov_inv.value.ndim == 2
         and state.binary_indices is None
         and (state.inv_sdev_scale is None or state.inv_sdev_scale.ndim == 1)
     ):
@@ -1656,6 +1660,141 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     return replace(state, z=z, resid=resid)
 
 
+def _blocked_mass_tree(
+    key: Key[Array, ''],
+    var_tree: UInt[Array, ' half_tree_size'],
+    split_tree: UInt[Array, ' half_tree_size'],
+    max_split: UInt[Array, ' p'],
+    s: Float32[Array, ' p'],
+) -> Float32[Array, ' p']:
+    """Per-variable data-augmentation mass blocked by a single tree.
+
+    At each internal node, draws the latent augmentation weight ``lambda / e``
+    (``lambda`` exponential, ``e`` the eligible split probability mass at the
+    node) and adds it to every variable ineligible at that node.
+
+    Parameters
+    ----------
+    key
+        Random key for sampling.
+    var_tree
+        The splitting axes of the tree.
+    split_tree
+        The splitting points of the tree.
+    max_split
+        The maximum split index for each variable.
+    s
+        Split probabilities normalized over selectable variables.
+
+    Returns
+    -------
+    The blocked mass for each variable.
+    """
+    (half_tree_size,) = split_tree.shape
+    d_minus_1 = half_tree_size.bit_length() - 1  # number of decision-node levels
+    p = max_split.size
+    nodes = jnp.arange(half_tree_size)
+    split = split_tree.astype(jnp.int32)
+    is_internal = split_tree.astype(bool)
+
+    # Range [lo, hi) of cutpoints still available for each node's own splitting
+    # variable, given the constraints inherited from the ancestors.
+    lo, hi = vmap(split_range, in_axes=(None, None, None, 0, 0))(
+        var_tree, split_tree, max_split, nodes, var_tree
+    )
+
+    # An internal node exhausts its own variable for a child when its cutpoint
+    # sits at the matching end of the available range, so the variable becomes
+    # ineligible throughout that child's subtree. Row 0 is the left child (low
+    # end lo), row 1 the right child (high end hi - 1).
+    blocks = is_internal & (split == jnp.stack([lo, hi - 1]))
+
+    # A node can block at most its own splitting variable, so the per-variable
+    # totals are recovered from these per-node blocks via top-down/bottom-up
+    # accumulation over depth levels, rather than scanning each node's ancestors.
+
+    # Ineligible mass per node: the s-mass of the variables blocked along the
+    # path from the root. Each variable is blocked at exactly one node per path,
+    # so summing the per-node increments top-down reproduces the per-node sum
+    # over distinct ineligible variables.
+    parent = nodes >> 1
+    side = nodes & 1  # 0 if the node is a left child, 1 if a right child
+    parent_blocks = blocks[side, parent]
+    # var_tree[parent] is a valid index wherever parent_blocks holds (the parent
+    # is then internal); elsewhere the clamped gather is masked away
+    ineligible_mass = jnp.where(parent_blocks, s[var_tree[parent]], 0.0)
+    for level in range(1, d_minus_1):
+        lhs, rhs = 1 << level, 1 << (level + 1)
+        parent_mass = jnp.repeat(ineligible_mass[lhs >> 1 : rhs >> 1], 2)
+        ineligible_mass = ineligible_mass.at[lhs:rhs].add(parent_mass)
+
+    # Per-node augmentation weight lambda_b / e_b, zero at non-internal nodes. The
+    # eligible mass is positive at internal nodes (the split variable is eligible);
+    # the floor only guards against round-off, and is unused where weight is zero.
+    eligible_mass = jnp.maximum(1.0 - ineligible_mass, jnp.finfo(jnp.float32).eps)
+    weight = jnp.where(is_internal, random.exponential(key, (half_tree_size,)), 0.0)
+    weight /= eligible_mass
+
+    # Subtree weight: total weight of each node's internal descendants and itself,
+    # accumulated bottom-up. The children of the deepest decision level are leaves
+    # and contribute nothing.
+    subtree_weight = weight
+    for level in range(d_minus_1 - 2, -1, -1):
+        lhs, rhs = 1 << level, 1 << (level + 1)
+        children = subtree_weight[2 * lhs : 2 * rhs].reshape(-1, 2).sum(axis=1)
+        subtree_weight = subtree_weight.at[lhs:rhs].add(children)
+
+    # A variable blocked by node b at one of its children is ineligible in that
+    # whole child subtree, so it accumulates the subtree weight; scatter it onto
+    # the splitting variable. Only the upper half of nodes have internal children
+    # (the deepest decision nodes block into leaves, contributing nothing); their
+    # children are exactly subtree_weight reshaped into [left, right] pairs.
+    half = half_tree_size // 2
+    contrib = (blocks[:, :half] * subtree_weight.reshape(-1, 2).T).sum(axis=0)
+    scatter_var = jnp.where(is_internal, var_tree, p)[:half]
+    return jnp.zeros(p).at[scatter_var].add(contrib)
+
+
+def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, ' p']:
+    """Sample the data-augmentation counts for the exact full conditional of `s`.
+
+    At each internal node, the variables with no available cutpoint given the
+    ancestors (plus the globally blocked ones) cannot be split on, so the plain
+    Dirichlet update for `s` is only approximate. This samples, for each
+    variable, the number of ineligible draws discarded before each realized
+    split, to be added to the variable usage counts.
+
+    Parameters
+    ----------
+    key
+        Random key for sampling.
+    forest
+        The forest, providing the trees and the current `log_s`.
+
+    Returns
+    -------
+    The discarded-draws count for each variable.
+    """
+    assert forest.log_s is not None
+    keys = split(key)
+    (num_trees, _) = forest.var_tree.shape
+
+    # split probabilities normalized over the selectable (non-blocked) variables
+    selectable = forest.max_split > 0
+    s = softmax(forest.log_s, where=selectable)
+
+    # blocked_mass[j] = sum over internal nodes where j is ineligible of
+    # lambda_b / e_b, with lambda_b ~ Exponential(1)
+    blocked_mass = vmap(_blocked_mass_tree, in_axes=(0, 0, 0, None, None))(
+        keys.pop(num_trees), forest.var_tree, forest.split_tree, forest.max_split, s
+    ).sum(axis=0)  # shape (p,)
+
+    # the per-node discarded-draw counts are negative-multinomial, with no
+    # closed form when summed over nodes, but their Gamma-Poisson mixture does:
+    # A_j | {lambda_b} ~ Poisson(s_j * blocked_mass[j]), independent across j
+    return random.poisson(keys.pop(), s * blocked_mass, dtype=jnp.int32)
+
+
 @named_call
 def step_s(key: Key[Array, ''], state: State) -> State:
     """
@@ -1679,10 +1818,18 @@ def step_s(key: Key[Array, ''], state: State) -> State:
 
     Notes
     -----
-    This full conditional is approximated, because it does not take into account
-    that there are forbidden decision rules.
+    By default this full conditional is approximate, because it ignores the
+    decision rules forbidden by the ancestors of each node. If
+    ``state.config.augment`` is set, the forbidden rules are accounted for
+    exactly with the data augmentation of `sample_s_augmentation`.
     """
     assert state.forest.theta is not None
+
+    # reserve the Dirichlet draw key first and unconditionally, so it does not
+    # depend on whether augmentation is on; then the two modes draw identically
+    # when there are no forbidden rules, since the augmentation is exactly zero
+    keys = split(key)
+    log_s_key = keys.pop()
 
     # histogram current variable usage
     p = state.forest.max_split.size
@@ -1690,11 +1837,14 @@ def step_s(key: Key[Array, ''], state: State) -> State:
         p, state.forest.var_tree, state.forest.split_tree, sum_batch_axis=-1
     )
 
-    # sample from Dirichlet posterior
+    # the Dirichlet posterior concentration, optionally completed with the exact
+    # accounting of forbidden rules via data augmentation
     alpha = state.forest.theta / p + varcount
-    log_s = loggamma(key, alpha)
+    if state.config.augment:
+        alpha = alpha + sample_s_augmentation(keys.pop(), state.forest)
 
-    # update forest with new s
+    # sample from the Dirichlet posterior and update the forest with the new s
+    log_s = loggamma(log_s_key, alpha)
     return replace(state, forest=replace(state.forest, log_s=log_s))
 
 

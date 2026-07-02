@@ -1,0 +1,45 @@
+{
+    // Tune `OneHotReduction` for the COUNT reduction (number of datapoints per
+    // leaf), taken on the homoskedastic path (prec_scale is None, i.e.
+    // weights=false; otherwise the count tree is skipped or fused with prec).
+    // CPU variant of opt-onehot-count.jsonc. The count reduces into only the
+    // move's two children (subset_length=2), so the bin count is tiny -- exactly
+    // the regime where OneHot can beat batched scatter-add.
+    //
+    // Knobs of `OneHotReduction`, swept jointly as the full 2x2 grid that forms
+    // the reduce axis (plot.reduce = the whole slot, so the plots pick the single
+    // fastest of the 4 variants; 'scatter_set' dropped, known slow):
+    //   method   'matmul'/'multiply': how the values are contracted against the
+    //            one-hot leaf-membership matrix. 'matmul' is expected faster on gpu,
+    //            'multiply' on cpu.
+    //   n_inner  true/false: whether the datapoints sit on the one-hot's inner
+    //            (size-by-n) or outer (n-by-size) axis; the two layouts give the
+    //            backend different memory access patterns (true fuses better on gpu).
+    //
+    // The reduced value is the scalar 1 (a pure datapoint count), so the count
+    // reduction is INDEPENDENT of the outcome dimension: k is pinned to null. It
+    // is, however, vmapped over a batch of trees, so num_trees (which sets the
+    // effective batch via prec_count_num_trees) is scanned along with n.
+    // num_trees is coarse (small/medium/large) to offset the 2x2 knob sweep;
+    // widen it if the optimum's tree-batch dependence needs finer resolution.
+    // weights is fixed false (this site is only taken on the homoskedastic path).
+    // maxdepth is fixed at 6, but note subset_length=2 sets the actual bin count.
+    // The other params (incl. the resid/prec reductions, left to their default
+    // 'auto' batching) keep their defaults, as a realistic backdrop that does not
+    // dominate the step. High-n combos whose one-hot would exceed the size budget
+    // are skipped automatically (more so at large num_trees). n's top value is
+    // lowered 4x vs the gpu config because cpu is slower.
+    "plot": {
+        "scan": "n",
+        "reduce": "count_reduction",
+    },
+    "values": {
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304],
+        "p":                  [1],
+        "k":                  [null],
+        "maxdepth":           [6],
+        "weights":            [false],
+        "num_trees":          [1, 16, 256],
+        "count_reduction":    [{"kind": "onehot", "method": ["matmul", "multiply"], "n_inner": [true, false]}],
+    },
+}

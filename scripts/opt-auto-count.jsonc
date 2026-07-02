@@ -1,0 +1,28 @@
+{
+    // Compare AutoBatchedReduction vs AutoOneHotReduction at the COUNT reduction
+    // (datapoints per leaf) on the homoskedastic path (weights=false; otherwise
+    // count is skipped or fused with prec). It reduces into the move's two
+    // children (subset_length=2), the tiny-bin regime where onehot can win.
+    //
+    // plot.reduce is the reduction slot holding the two zero-knob auto configs
+    // (autobatched = the default batched scatter-add; autoonehot = one-hot
+    // contraction), so the plots show the winner vs n and both timings.
+    //
+    // The reduced value is a scalar count, independent of k (pinned null). It is
+    // vmapped over a batch of trees, so num_trees is scanned with n. weights fixed
+    // false; maxdepth fixed at 6 (subset_length=2 sets the real bin count). The
+    // other two sites keep their auto defaults as a backdrop.
+    "plot": {
+        "scan": "n",
+        "reduce": "count_reduction",
+    },
+    "values": {
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
+        "p":                  [1],
+        "k":                  [null],
+        "maxdepth":           [6],
+        "weights":            [false],
+        "num_trees":          [1, 16, 256],
+        "count_reduction":    ["autobatched", "autoonehot"],
+    },
+}

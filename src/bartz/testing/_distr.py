@@ -30,12 +30,11 @@ from abc import abstractmethod
 from equinox import Module, error_if
 from jax import numpy as jnp
 from jax import random
-from jax.scipy.special import ndtr
+from jax.scipy.special import ndtr, ndtri
 from jaxtyping import Array, Float, Integer, Key, UInt
 
 from bartz._jaxext import minimal_unsigned_dtype
 from bartz._jaxext.random import loggamma
-from bartz._jaxext.scipy.special import ndtri
 
 # The DGP identities documented in `Params` hold for arbitrary families given
 # independence and the normalized moments declared by the base classes:

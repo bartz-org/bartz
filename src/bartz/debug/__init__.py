@@ -31,6 +31,7 @@ Prior sampling
     :toctree:
 
     sample_prior
+    PriorSample
 
 R BART trace conversion
 -----------------------
@@ -44,5 +45,5 @@ R BART trace conversion
 
 # ruff: noqa: F401
 
-from bartz.debug._prior import sample_prior
+from bartz.debug._prior import PriorSample, sample_prior
 from bartz.debug._traceconv import BARTTraceMeta, TraceWithOffset, trees_BART_to_bartz

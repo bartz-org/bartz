@@ -160,6 +160,9 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     outcome_type = pop('outcome_type')
     push('type', 'pbart' if outcome_type == 'binary' else 'wbart')
 
+    # error_scale -> w
+    push('w', pop('error_scale'))
+
     # num_trees -> ntree
     push('ntree', pop('num_trees'))
 
@@ -175,6 +178,21 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     # n_burn -> nskip, n_skip -> keepevery
     push('nskip', pop('n_burn'))
     push('keepevery', pop('n_skip'))
+
+    # sparse: expand Bart's SparseConfig into mc_gbart's flat prior params.
+    # augment is deliberately not forwarded to the comparison: bartz's augment
+    # (exact full conditional) and BART3's augment (approximate expected counts)
+    # are different algorithms; worse, BART3 folds its augmentation pseudo-counts
+    # into the reported varcount, so it stops matching the trees (which breaks
+    # the `check_rbart` self-consistency check). So compare on the shared,
+    # un-augmented baseline; augmentation is exercised directly elsewhere
+    # (test_variable_selection, and the sample_s_augmentation tests).
+    sparse = pop('sparse')
+    push('sparse', sparse.enabled)
+    push('theta', sparse.theta)
+    push('a', sparse.a)
+    push('b', sparse.b)
+    push('rho', sparse.rho)
 
     # binner -> xinfo, usequants, numcut
     binner = pop('binner')
@@ -201,8 +219,10 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     bart_kwargs['init_kw'] = init_kw
     kw['bart_kwargs'] = bart_kwargs
 
-    # re-add x_test
-    kw['x_test'] = bkw.x_test
+    # re-add x_test; mc_gbart follows BART3's (n, p) array layout, so transpose
+    # the (p, n) predictor matrices used internally by Bart
+    kw['x_train'] = kw['x_train'].T
+    kw['x_test'] = bkw.x_test.T
 
     return kw
 
@@ -280,7 +300,7 @@ class TestWithCachedBart:
         kw = make_gbart_kw(key, variant)
 
         # modify configs to make them appropriate for convergence checks and R
-        p, n = kw['x_train'].shape
+        n, p = kw['x_train'].shape
         nchains = 4
         kw.update(
             ntree=max(2 * n, p),
@@ -320,7 +340,7 @@ class TestWithCachedBart:
         nchains = nnone(bart._mcmc_state.num_chains())
         nsamples = bart.ndpost // nchains
         kw = cachedbart.kwargs
-        p, n = kw['x_train'].shape
+        n, p = kw['x_train'].shape
 
         with subtests.test('yhat_train'):
             yhat_train = bart.yhat_train.reshape(nchains, nsamples, n)
@@ -366,7 +386,11 @@ class TestWithCachedBart:
         # automatic cutpoint determination of BART is the same of my package. They
         # are similar but have some differences, and having exactly the same
         # cutpoints is more important for the test.
-        kw_BART['transposed'] = True  # this disables predictors pre-processing
+        # transposed=True disables predictors pre-processing, so BART3 expects
+        # the (p, n) layout; mc_gbart uses (n, p), so transpose back
+        kw_BART['transposed'] = True
+        kw_BART['x_train'] = kw['x_train'].T
+        kw_BART['x_test'] = kw['x_test'].T
         kw_BART['numcut'] = bart._mcmc_state.forest.max_split
         kw_BART['xinfo'] = bart._splits
 
@@ -396,8 +420,8 @@ class TestWithCachedBart:
             yhat_train, rbart.yhat_train.astype(numpy.float32), rtol=1e-6
         )
 
-        # check yhat_test
-        Xt = bart._bart._binner.bin(kw['x_test'])
+        # check yhat_test; the binner uses the (p, m) layout
+        Xt = bart._bart._binner.bin(kw['x_test'].T)
         yhat_test = evaluate_trace(Xt, trace)
         assert_close_matrices(
             yhat_test, nnone(rbart.yhat_test).astype(numpy.float32), rtol=1e-6
@@ -422,7 +446,7 @@ class TestWithCachedBart:
         """Check `bartz.BART` gives results similar to the R package BART3."""
         bart = cachedbart.bart
         kw = cachedbart.kwargs
-        p, n = kw['x_train'].shape
+        n, p = kw['x_train'].shape
 
         # run R bart
         kw_BART = self.kw_bartz_to_BART3(keys.pop(), kw, bart)
@@ -567,9 +591,10 @@ class TestWithCachedBart:
                 str_path = keystr(path)
                 if str_path.endswith('.theta') and not step_theta:
                     return
+                # '.error_cov_inv' on the trace, '.error_cov_inv.value' on the state
                 if (
-                    str_path.endswith('.error_cov_inv')
-                    and bart._mcmc_state.error_cov_df is None
+                    str_path.endswith(('.error_cov_inv', '.error_cov_inv.value'))
+                    and bart._mcmc_state.error_cov_inv.nu is None
                 ):
                     return
                 if str_path.endswith('.forest.affluence_tree') and not check_affluence:
@@ -654,8 +679,8 @@ def test_output_shapes(kw: dict[str, Any]) -> None:
     ndpost = get_with_default(kw, 'ndpost')
     nskip = get_with_default(kw, 'nskip')
     mc_cores = get_with_default(kw, 'mc_cores')
-    p, n = kw['x_train'].shape
-    _, m = kw['x_test'].shape
+    n, p = kw['x_train'].shape
+    m, _ = kw['x_test'].shape
 
     binary = get_with_default(kw, 'type') == 'pbart'
 
@@ -763,15 +788,19 @@ class TestVarprobAttr:
         dgp = gen_data(keys.pop(), n=30, p=2, **GEN_KW)
         with debug_nans(False):
             xinfo = jnp.array([[jnp.nan], [0]])
-        bart = mc_gbart(x_train=dgp.x, y_train=dgp.y, xinfo=xinfo, seed=keys.pop())
+        bart = mc_gbart(x_train=dgp.x.T, y_train=dgp.y, xinfo=xinfo, seed=keys.pop())
         assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1], strict=False)
         assert_array_equal(bart.varprob_mean, [0, 1], strict=False)
         assert jnp.all(bart.varprob_mean == bart.varprob)
 
 
-@pytest.mark.parametrize('theta', ['fixed', 'free'])
-def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> None:
-    """Check that variable selection works."""
+@pytest.mark.parametrize(
+    ('theta', 'augment'), [('fixed', False), ('free', False), ('free', True)]
+)
+def test_variable_selection(
+    keys: split, theta: Literal['fixed', 'free'], augment: bool
+) -> None:
+    """Check that variable selection works, with and without augmentation."""
     # data config
     p = 100  # number of predictors
     peff = 5  # number of actually used predictors
@@ -782,10 +811,11 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
 
     # run bart
     bart = mc_gbart(
-        x_train=X,
+        x_train=X.T,
         y_train=y,
         nskip=1000,
         sparse=True,
+        augment=augment,
         theta=float(peff) if theta == 'fixed' else None,
         seed=keys.pop(),
     )
@@ -827,11 +857,12 @@ def test_scale_shift(kw: dict[str, Any]) -> None:
     )
     assert_allclose(nnone(bart1.sigest), nnone(bart2.sigest) / scale, rtol=1e-6)
     assert_array_equal(
-        nnone(bart1._mcmc_state.error_cov_df), nnone(bart2._mcmc_state.error_cov_df)
+        nnone(bart1._mcmc_state.error_cov_inv.nu),
+        nnone(bart2._mcmc_state.error_cov_inv.nu),
     )
     assert_allclose(
-        nnone(bart1._mcmc_state.error_cov_scale),
-        nnone(bart2._mcmc_state.error_cov_scale) / scale**2,
+        nnone(bart1._mcmc_state.error_cov_inv.rate),
+        nnone(bart2._mcmc_state.error_cov_inv.rate) / scale**2,
         rtol=1e-6,
     )
     assert_close_matrices(
@@ -904,7 +935,7 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     """Set the number of datapoints in the kw dictionary."""
     assert n <= kw['y_train'].size
     kw = kw.copy()
-    kw['x_train'] = kw['x_train'][:, :n]
+    kw['x_train'] = kw['x_train'][:n, :]
     kw['y_train'] = kw['y_train'][:n]
     if kw.get('w') is not None:
         kw['w'] = kw['w'][:n]
@@ -917,7 +948,7 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
     kw = set_num_datapoints(kw, num_datapoints)
 
     if num_datapoints == 0 or get_with_default(kw, 'usequants'):
-        p, _ = kw['x_train'].shape
+        _, p = kw['x_train'].shape
         nsplits = 10
         xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
         kw.update(xinfo=xinfo)
@@ -929,6 +960,10 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
     kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
         save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
     )
+
+    # OLS cannot estimate sigest with n <= p, so provide it explicitly
+    if get_with_default(kw, 'type') != 'pbart':
+        kw.update(sigest=2.0)
 
     # run bart
     bart = mc_gbart(**kw)
@@ -944,7 +979,7 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
         assert bart.offset == 0
     else:
         tau_num = 1
-        assert bart.sigest == 1
+        assert bart.sigest == 2
         if num_datapoints:
             assert bart.offset == kw['y_train'].item()
         else:
@@ -970,13 +1005,56 @@ def test_two_datapoints(kw: dict[str, Any]) -> None:
     kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
         save_ratios=True, min_points_per_decision_node=None, min_points_per_leaf=None
     )
+    # OLS cannot estimate sigest with n <= p, so provide it explicitly
+    if get_with_default(kw, 'type') != 'pbart':
+        kw.update(sigest=2.0)
     bart = mc_gbart(**kw)
     if get_with_default(kw, 'type') != 'pbart':
-        assert_allclose(nnone(bart.sigest), kw['y_train'].std(), rtol=1e-6)
+        assert bart.sigest == 2
     if get_with_default(kw, 'usequants'):
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)
     assert not jnp.all(bart._main_trace.log_likelihood == 0.0)
+
+
+def test_sigest_ols_needs_more_data_than_predictors(kw: dict[str, Any]) -> None:
+    """Check that estimating sigest by OLS raises when n <= p."""
+    if get_with_default(kw, 'type') == 'pbart':
+        pytest.skip('sigest is not estimated for binary regression')
+    kw = set_num_datapoints(kw, 2)  # p == 2, so n <= p
+    with pytest.raises(ValueError, match='cannot estimate `sigest` by OLS'):
+        mc_gbart(**kw)
+
+
+def test_binary_rejects_sigest_and_lambda(
+    kw: dict[str, Any], subtests: SubTests
+) -> None:
+    """Binary regression rejects `sigest`/`lambda_` (they are ignored)."""
+    if get_with_default(kw, 'type') != 'pbart':
+        pytest.skip('not binary regression')
+    for param in ('sigest', 'lambda_'):
+        call_kw: dict = dict(kw, **{param: 1.0})
+        with (
+            subtests.test(param=param),
+            pytest.raises(
+                ValueError, match='Do not set `sigest` or `lambda_` for binary'
+            ),
+        ):
+            mc_gbart(**call_kw)
+
+
+def test_lambda_explicit(kw: dict[str, Any]) -> None:
+    """An explicit `lambda_` is honored and leaves `sigest` unset."""
+    if get_with_default(kw, 'type') == 'pbart':
+        pytest.skip('sigma prior is fixed for binary regression')
+    lambda_kw: dict = dict(kw, lambda_=1.0)
+    bart = mc_gbart(**lambda_kw)
+    assert bart.sigest is None
+    both_kw: dict = dict(kw, lambda_=1.0, sigest=2.0)
+    with pytest.raises(
+        ValueError, match='Do not set `sigest` if `lambda_` is specified'
+    ):
+        mc_gbart(**both_kw)
 
 
 def test_few_datapoints(kw: dict[str, Any]) -> None:
@@ -1008,10 +1086,11 @@ def test_xinfo() -> None:
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
         )
     kw: kwdict = dict(
-        x_train=jnp.empty((3, 0)),
+        x_train=jnp.empty((0, 3)),
         y_train=jnp.empty(0),
         ndpost=0,
         nskip=0,
+        sigest=1.0,  # OLS cannot estimate sigest without data
         # these `usequants` and `numcut` values would lead to an error, so this
         # checks they are ignored if `xinfo` is specified
         usequants=True,
@@ -1032,7 +1111,12 @@ def test_xinfo_wrong_p() -> None:
             [[1.1, 2.3, jnp.nan], [-50, 10, 20], [jnp.nan, jnp.nan, jnp.nan]]
         )
     kw: kwdict = dict(
-        x_train=jnp.empty((5, 0)), y_train=jnp.empty(0), ndpost=0, nskip=0, xinfo=xinfo
+        x_train=jnp.empty((0, 5)),
+        y_train=jnp.empty(0),
+        ndpost=0,
+        nskip=0,
+        sigest=1.0,  # OLS cannot estimate sigest without data
+        xinfo=xinfo,
     )
     # `xinfo`'s p (3) deliberately mismatches `x_train`'s p (5); disable
     # jaxtyping so the cross-axis check doesn't pre-empt the `ValueError`
@@ -1124,7 +1208,7 @@ def run_bart_like_prior(
 
     # configure bart to run many mcmc iterations, without data
     kw: dict = dict(
-        x_train=jnp.empty((p, 0)),
+        x_train=jnp.empty((0, p)),
         y_train=jnp.empty(0),
         ntree=20,
         ndpost=1000,
@@ -1133,6 +1217,7 @@ def run_bart_like_prior(
         xinfo=xinfo,
         seed=key,
         mc_cores=1,
+        sigest=1.0,  # OLS cannot estimate sigest without data
         bart_kwargs=dict(
             init_kw=dict(
                 # unset limits on datapoints per node because there's no data
@@ -1286,7 +1371,7 @@ def test_jit(kw: dict[str, Any]) -> None:
     key = kw.pop('seed')
 
     def task(
-        X: Shaped[Array, 'p n'],
+        X: Shaped[Array, 'n p'],
         y: Shaped[Array, ' n'],
         w: Float32[Array, ' n'] | None,
         key: Key[Array, ''],
@@ -1306,7 +1391,7 @@ def test_w_with_binary_raises(kw: dict[str, Any]) -> None:
     """Reject `w` with binary regression (heteroskedastic probit)."""
     if get_with_default(kw, 'type') != 'pbart':
         pytest.skip('Only relevant for binary regression.')
-    _, n = kw['x_train'].shape
+    n, _ = kw['x_train'].shape
     kw['w'] = jnp.ones(n)
     with pytest.raises(ValueError, match='not supported with binary regression'):
         mc_gbart(**kw)
@@ -1337,8 +1422,8 @@ def test_polars(kw: dict[str, Any]) -> None:
 
     kw.update(
         seed=random.clone(kw['seed']),
-        x_train=pl.DataFrame(numpy.array(kw['x_train']).T),
-        x_test=pl.DataFrame(numpy.array(kw['x_test']).T),
+        x_train=pl.DataFrame(numpy.array(kw['x_train'])),
+        x_test=pl.DataFrame(numpy.array(kw['x_test'])),
         y_train=pl.Series(numpy.array(kw['y_train'])),
         w=None if kw.get('w') is None else pl.Series(numpy.array(kw['w'])),
     )
@@ -1356,13 +1441,13 @@ def test_polars(kw: dict[str, Any]) -> None:
 def test_data_format_mismatch(kw: dict[str, Any]) -> None:
     """Test that passing predictors with mismatched formats raises an error."""
     kw.update(
-        x_train=pl.DataFrame(numpy.array(kw['x_train']).T),
-        x_test=pl.DataFrame(numpy.array(kw['x_test']).T),
+        x_train=pl.DataFrame(numpy.array(kw['x_train'])),
+        x_test=pl.DataFrame(numpy.array(kw['x_test'])),
         w=None if kw.get('w') is None else pl.Series(numpy.array(kw['w'])),
     )
     bart = mc_gbart(**kw)
     with pytest.raises(ValueError, match='format mismatch'):
-        bart.predict(kw['x_test'].to_numpy().T)
+        bart.predict(kw['x_test'].to_numpy())
 
 
 def test_automatic_integer_types(kw: dict[str, Any]) -> None:
@@ -1377,7 +1462,7 @@ def test_automatic_integer_types(kw: dict[str, Any]) -> None:
 
     leaf_indices_type = select_type(kw.get('bart_kwargs', {}).get('maxdepth', 6) <= 8)
     split_trees_type = X_type = select_type(get_with_default(kw, 'numcut') <= 255)
-    var_trees_type = select_type(kw['x_train'].shape[0] <= 256)
+    var_trees_type = select_type(kw['x_train'].shape[1] <= 256)
 
     assert bart._mcmc_state.forest.var_tree.dtype == var_trees_type
     assert bart._mcmc_state.forest.split_tree.dtype == split_trees_type
@@ -1491,7 +1576,7 @@ class TestVarprobParam:
 
     def test_biased_predictor_choice(self, keys: split, kw: dict) -> None:
         """Check that if `varprob[i]` is high then predictor `i` is used more than others."""
-        p, _ = kw['x_train'].shape
+        _, p = kw['x_train'].shape
         i = random.randint(keys.pop(), (), 0, p)
         vp = jnp.full(p, 0.001).at[i].set(1)
         vp /= vp.sum()
@@ -1503,7 +1588,7 @@ class TestVarprobParam:
 
     def test_positive(self, kw: dict, subtests: SubTests) -> None:
         """Check that an error is raised if varprob is not > 0."""
-        p, _ = kw['x_train'].shape
+        _, p = kw['x_train'].shape
 
         with subtests.test('not negative'):
             assert p > 1

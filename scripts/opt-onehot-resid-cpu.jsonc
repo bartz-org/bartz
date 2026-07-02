@@ -1,0 +1,42 @@
+{
+    // Tune `OneHotReduction` for the RESIDUAL reduction (`sum_resid`): the
+    // per-leaf sum of the (scaled) residual vector, run once per tree inside the
+    // accept/reject scan. CPU variant of opt-onehot-resid.jsonc. OneHot beats
+    // batched scatter-add only when the bin count is tiny or, on gpu, for
+    // multivariate residuals; this maps where.
+    //
+    // Knobs of `OneHotReduction`, swept jointly as the full 2x2 grid that forms
+    // the reduce axis (plot.reduce = the whole slot, so the plots pick the single
+    // fastest of the 4 variants; 'scatter_set' dropped, known slow):
+    //   method   'matmul'/'multiply': how the values are contracted against the
+    //            one-hot leaf-membership matrix. 'matmul' is expected faster on gpu
+    //            (esp. multivariate), 'multiply' on cpu.
+    //   n_inner  true/false: whether the datapoints sit on the one-hot's inner
+    //            (size-by-n) or outer (n-by-size) axis; the two layouts give the
+    //            backend different memory access patterns (true fuses better on gpu).
+    //
+    // Scanned because they change the reduction's array shape (hence possibly
+    // its optimum): n (datapoints), k (outcome dim: shape (n) -> (k, n)), and
+    // weights (with k > 1 lifts (k, n) -> (k, k, n)). num_trees is FIXED: the
+    // residual reduction runs once per tree on the same shape, so the number of
+    // trees does not change the per-call optimum (5 is just enough to time it).
+    // maxdepth is fixed at 6 (our practical value; sets the bin count 2 ** d).
+    // The other params (incl. the count/prec reductions, left to their default
+    // 'auto' batching) keep their defaults, as a realistic backdrop that does not
+    // dominate the step. High-n combos whose one-hot would exceed the size budget
+    // are skipped automatically (more so for 'multiply' at large k). n's top value
+    // is lowered 4x vs the gpu config because cpu is slower.
+    "plot": {
+        "scan": "n",
+        "reduce": "resid_reduction",
+    },
+    "values": {
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304],
+        "p":                  [1],
+        "k":                  [null, 1, 2, 4],
+        "maxdepth":           [6],
+        "weights":            [false, true],
+        "num_trees":          [5],
+        "resid_reduction":    [{"kind": "onehot", "method": ["matmul", "multiply"], "n_inner": [true, false]}],
+    },
+}

@@ -322,6 +322,10 @@ class StepConfig(Module):
     """How much to unroll the sequential accept/reject loop over trees in
     `step`. See the ``unroll`` argument of `jax.lax.scan`."""
 
+    augment: bool = field(static=True)
+    """Whether to account exactly, via data augmentation, for the decision rules
+    forbidden by the ancestors of each node when updating `log_s`."""
+
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
 
@@ -630,6 +634,7 @@ def init(
     b: FloatLike | None = None,
     rho: FloatLike | None = None,
     sparse_on_at: int | Integer[ArrayLike, ''] | None = None,
+    augment: bool = True,
     num_chains: int | None = None,
     mesh: Mesh | dict[str, int] | None = None,
 ) -> State:
@@ -729,6 +734,10 @@ def init(
         Parameters of the prior on `theta`. Required only to sample `theta`.
     sparse_on_at
         After how many MCMC steps to turn on variable selection.
+    augment
+        Whether to account exactly, via data augmentation, for the decision
+        rules forbidden by the ancestors of each node when updating `log_s`. If
+        not set, those rules are ignored, which is faster but only approximate.
     num_chains
         The number of independent MCMC chains to represent in the state. Single
         chain with scalar values if not specified.
@@ -923,6 +932,7 @@ def init(
                 steps_done=jnp.int32(0),
                 sparse_on_at=_asarray_or_none(sparse_on_at),
                 sequential_unroll=sequential_unroll,
+                augment=augment,
                 mesh=mesh,
                 **red_cfg,
             ),
@@ -1519,8 +1529,13 @@ def _get_shard_map_patch_kwargs() -> _ShardMapPatchKwargs:
     # bug: jax 0.8.1-0.8.2: vmap(shard_map(psum)), jax#34249; the
     # jax_disable_vmap_shmap_error config did not work.
 
+    # bug: jax 0.6.2: `random.poisson`'s internal `while_loop` (used by
+    # `sample_s_augmentation`) does not `pvary` its initial carry, so its
+    # output type varies over 'chains' while its input does not, whenever
+    # the rate argument does.
+
     # WORKAROUND(jax<=0.8.2): remove this whole function when jax > 0.8.2
-    buggy = ('0.8.1', '0.8.2')
+    buggy = ('0.8.1', '0.8.2', '0.6.2')
     if jax.__version__ in buggy:
         return {'check_vma': False}
     return {}

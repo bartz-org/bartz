@@ -41,6 +41,7 @@ from bartz._interface import (
     FloatLike,
     PredictKind,
     Series,
+    SparseConfig,
     _process_predictor_input,
     _process_response_input,
 )
@@ -97,6 +98,12 @@ class mc_gbart(Module):
         the prior, consider setting a lower `rho` to prefer more sparsity.
         If setting `theta` directly, it should be in the ballpark of p or lower
         as well.
+    augment
+        Whether to account exactly for the decision rules forbidden by the
+        ancestors of each node when updating the variable selection
+        probabilities, using data augmentation. Only relevant if ``sparse=True``.
+        Like the ``augment`` option of R BART3, but sampling the exact full
+        conditional rather than substituting expected counts.
     varprob
         The probability distribution over the `p` predictors for choosing a
         predictor to split on in a decision node a priori. Must be > 0. It does
@@ -250,6 +257,7 @@ class mc_gbart(Module):
         a: FloatLike = 0.5,
         b: FloatLike = 1.0,
         rho: FloatLike | None = None,
+        augment: bool = False,
         varprob: Float[ArrayLike, ' p'] | None = None,
         xinfo: Float[ArrayLike, 'p ncut'] | None = None,
         usequants: bool = False,
@@ -319,11 +327,9 @@ class mc_gbart(Module):
             x_train=x_train,
             y_train=y_train,
             outcome_type=dict(wbart='continuous', pbart='binary')[type],
-            sparse=sparse,
-            theta=theta,
-            a=a,
-            b=b,
-            rho=rho,
+            sparse=SparseConfig(
+                enabled=sparse, theta=theta, a=a, b=b, rho=rho, augment=augment
+            ),
             varprob=varprob,
             binner=binner,
             rm_const=rm_const,

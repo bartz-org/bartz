@@ -1,0 +1,34 @@
+{
+    // Measure how the data-augmentation accounting of forbidden rules in the
+    // `s` update (`init`'s `augment`) changes the per-step running time.
+    //
+    // sparse is FIXED on: augment only does anything while variable selection is
+    // active, so we turn it on (with a fixed theta and sparse_on_at=0) and never
+    // vary it. theta sampling is left off (no rho/a/b) since it does not interact
+    // with the augmentation cost. augment is the reduce axis: its True/False
+    // variants are the two curves whose minimum is the "optimal" (augment-off)
+    // baseline.
+    //
+    // The augmentation does per-variable work (it sums the blocked mass over the
+    // eligible variables at each node), so p is the scan axis, swept in powers of
+    // 4 up to a large value to see whether and where the cost scales with it. n is
+    // fixed and small: the augmentation work is n-independent, so a large n would
+    // only dilute the effect under the n-dependent rest of the step.
+    //
+    // Everything else is plain: univariate, no weights, fixed maxdepth, default
+    // reductions, single chain.
+    "plot": {
+        "scan": "p",
+        "reduce": "augment",
+    },
+    "values": {
+        "n":          [256],
+        "p":          [1, 4, 16, 64, 256, 1024, 4096, 16384],
+        "k":          [null],
+        "maxdepth":   [6],
+        "weights":    [false],
+        "num_trees":  [200],
+        "sparse":     [true],
+        "augment":    [false, true],
+    },
+}

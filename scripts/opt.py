@@ -109,6 +109,7 @@ from bartz.mcmcstep import (
     PallasReduction,
     ReductionConfig,
     State,
+    Wishart,
     init,
     make_p_nonterminal,
     step,
@@ -310,6 +311,9 @@ class ConfigParams:
     n: int
     """Number of data points."""
 
+    p: int
+    """Number of predictors."""
+
     k: int | None
     """Multivariate outcome dimension; ``None`` for univariate."""
 
@@ -347,6 +351,12 @@ class ConfigParams:
 
     num_chains: int | None = init_default('num_chains')
     """`init`'s ``num_chains`` kwarg."""
+
+    sparse: bool = False
+    """Whether to activate variable selection (sets `init`'s ``theta`` and ``sparse_on_at``)."""
+
+    augment: bool = init_default('augment')
+    """`init`'s ``augment`` kwarg; only has effect when ``sparse`` is set."""
 
     optimization_level: str | None = field(
         default=read_jax_config('jax_optimization_level'), metadata={'jax_config': True}
@@ -415,6 +425,12 @@ class ConfigParams:
 
     def is_valid(self) -> bool:
         """Whether this combination of values is admissible."""
+        # augment only affects the sparsity step, so with sparsity off it is a
+        # no-op: keep just the default augment variant and skip the redundant one,
+        # so configs that don't sweep augment still yield their default combo.
+        if self.augment != init_default('augment') and not self.sparse:
+            return False
+
         chains = 1 if self.num_chains is None else self.num_chains
         k = 1 if self.k is None else self.k
 
@@ -473,12 +489,13 @@ class ConfigParams:
 
     def to_init_kwargs(self) -> 'InitKwargs':
         """Translate this combination into kwargs for `init`."""
-        # gen_data requires p >= k, but the benchmarks use a single predictor:
-        # generate with p = k and keep only the first predictor
+        # gen_data requires p >= k; if fewer predictors than outcomes are wanted,
+        # generate k of them and keep only the first p
+        k = 1 if self.k is None else self.k
         data = gen_data(
             random.key(2026_06_07),
             n=self.n,
-            p=1 if self.k is None else self.k,
+            p=max(self.p, k),
             k=self.k,
             q=0,
             lambda_=None if self.k is None else 0.5,
@@ -488,21 +505,23 @@ class ConfigParams:
         ).quantize()
         eye = 1.0 if self.k is None else jnp.eye(self.k)
         return InitKwargs(
-            X=data.x[:1, :],
+            X=data.x[: self.p, :],
             y=data.y,
             offset=jnp.zeros(data.y.shape[:-1]),
-            max_split=data.max_split[:1],
+            max_split=data.max_split[: self.p],
             num_trees=self.num_trees,
             p_nonterminal=make_p_nonterminal(self.maxdepth, 0.95, 2),
             leaf_prior_cov_inv=self.num_trees * eye,
-            error_cov_df=2.0,
-            error_cov_scale=2 * eye,
+            error_cov_inv=Wishart(nu=2.0, rate=2 * eye, value=eye),
             error_scale=jnp.ones(self.n) if self.weights else None,
             resid_reduction_config=self.resid_reduction,
             count_reduction_config=self.count_reduction,
             prec_reduction_config=self.prec_reduction,
             prec_count_num_trees=self.prec_count_num_trees,
             sequential_unroll=self.sequential_unroll,
+            theta=1.0 if self.sparse else None,
+            sparse_on_at=0 if self.sparse else None,
+            augment=self.augment,
             num_chains=self.num_chains,
         )
 
@@ -532,14 +551,16 @@ class InitKwargs:
     num_trees: int
     p_nonterminal: Shaped[Array, '...']
     leaf_prior_cov_inv: float | Shaped[Array, '...']
-    error_cov_df: float
-    error_cov_scale: float | Shaped[Array, '...']
+    error_cov_inv: Wishart
     error_scale: Shaped[Array, '...'] | None
     resid_reduction_config: ReductionConfig
     count_reduction_config: ReductionConfig
     prec_reduction_config: ReductionConfig
     prec_count_num_trees: int | None | Literal['auto']
     sequential_unroll: int | bool
+    theta: float | None
+    sparse_on_at: int | None
+    augment: bool
     num_chains: int | None
 
     def init(self) -> State:

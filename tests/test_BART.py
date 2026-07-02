@@ -179,6 +179,21 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     push('nskip', pop('n_burn'))
     push('keepevery', pop('n_skip'))
 
+    # sparse: expand Bart's SparseConfig into mc_gbart's flat prior params.
+    # augment is deliberately not forwarded to the comparison: bartz's augment
+    # (exact full conditional) and BART3's augment (approximate expected counts)
+    # are different algorithms; worse, BART3 folds its augmentation pseudo-counts
+    # into the reported varcount, so it stops matching the trees (which breaks
+    # the `check_rbart` self-consistency check). So compare on the shared,
+    # un-augmented baseline; augmentation is exercised directly elsewhere
+    # (test_variable_selection, and the sample_s_augmentation tests).
+    sparse = pop('sparse')
+    push('sparse', sparse.enabled)
+    push('theta', sparse.theta)
+    push('a', sparse.a)
+    push('b', sparse.b)
+    push('rho', sparse.rho)
+
     # binner -> xinfo, usequants, numcut
     binner = pop('binner')
     binargs = convert_binner(binner)
@@ -779,9 +794,13 @@ class TestVarprobAttr:
         assert jnp.all(bart.varprob_mean == bart.varprob)
 
 
-@pytest.mark.parametrize('theta', ['fixed', 'free'])
-def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> None:
-    """Check that variable selection works."""
+@pytest.mark.parametrize(
+    ('theta', 'augment'), [('fixed', False), ('free', False), ('free', True)]
+)
+def test_variable_selection(
+    keys: split, theta: Literal['fixed', 'free'], augment: bool
+) -> None:
+    """Check that variable selection works, with and without augmentation."""
     # data config
     p = 100  # number of predictors
     peff = 5  # number of actually used predictors
@@ -796,6 +815,7 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
         y_train=y,
         nskip=1000,
         sparse=True,
+        augment=augment,
         theta=float(peff) if theta == 'fixed' else None,
         seed=keys.pop(),
     )

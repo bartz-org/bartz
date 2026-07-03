@@ -1253,15 +1253,19 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
 
 
 def test_leaf_scale(bkw: BartKW) -> None:
-    """`leaf_scale` is set to the marginal prior leaf standard deviation."""
+    """`leaf_scale` is the marginal prior leaf standard deviation, rounded to a power of two."""
     forest = Bart(**bkw.kw)._mcmc_state.forest
     cov_inv = nnone(forest.leaf_prior_cov_inv)
     if cov_inv.ndim:
-        expected = jnp.sqrt(jnp.diagonal(jnp.linalg.inv(cov_inv)))
+        marginal_std = jnp.sqrt(jnp.diagonal(jnp.linalg.inv(cov_inv)))
     else:
-        expected = jnp.sqrt(jnp.reciprocal(cov_inv))
+        marginal_std = jnp.sqrt(jnp.reciprocal(cov_inv))
+    expected = jnp.exp2(jnp.round(jnp.log2(marginal_std)))
     assert forest.leaf_scale.dtype == jnp.float32
     assert_close_matrices(forest.leaf_scale, expected, rtol=1e-5)
+    # exactly a power of two: rounding the log2 back is a no-op
+    pow2 = jnp.exp2(jnp.round(jnp.log2(forest.leaf_scale)))
+    assert_array_equal(forest.leaf_scale, pow2)
 
 
 def test_float16_close_to_float32(bkw: BartKW) -> None:

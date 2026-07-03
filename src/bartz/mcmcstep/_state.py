@@ -117,8 +117,9 @@ class Forest(Module):
     leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
     """The scale of the leaf values. The function represented by the forest is
     ``offset + leaf_scale * (sum of leaf values)``. Set to the marginal prior
-    standard deviation of a leaf, so the stored leaves are O(1) whatever the
-    data units and do not over/underflow narrow `leaf_tree` dtypes."""
+    standard deviation of a leaf, rounded to a power of two, so the stored leaves
+    are O(1) whatever the data units and do not over/underflow narrow `leaf_tree`
+    dtypes, and converting to and from data units is exact."""
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
     """Constant shift added to the scaled sum of trees, see `leaf_scale`."""
@@ -1006,6 +1007,13 @@ def _compute_leaf_scale(
     return jnp.where(jnp.isfinite(leaf_scale) & (leaf_scale > 0), leaf_scale, 1.0)
 
 
+def _round_to_pow2(
+    x: Float32[Array, ''] | Float32[Array, ' k'],
+) -> Float32[Array, ''] | Float32[Array, ' k']:
+    """Round to the nearest power of two."""
+    return jnp.exp2(jnp.round(jnp.log2(x)))
+
+
 @dataclass(frozen=True)
 class _StorageParams:
     """Storage dtypes and scales for the leaves and residuals."""
@@ -1029,18 +1037,18 @@ def _storage_params(
 
     Leaves and residuals are stored in units of their marginal prior standard
     deviation, so they are O(1) whatever the data units and do not over/underflow
-    narrow dtypes. The residual unit reuses `leaf_scale` (times the square root of
-    the number of trees, since the sum of trees models the data) instead of a new
-    constant, and is rounded to a power of two so converting between stored and
-    data units is exact, adding no rounding to a float32 residual.
+    narrow dtypes. Both units are rounded to a power of two so converting between
+    stored and data units is exact, adding no rounding to a float32 value. The
+    residual unit reuses `leaf_scale` (times the square root of the number of
+    trees, since the sum of trees models the data) instead of a new constant.
     """
     leaf_scale = _compute_leaf_scale(leaf_prior_cov_inv, kshape)
     return _StorageParams(
         leaf_dtype=_parse_float_dtype(leaf_dtype),
         prec_scale_dtype=_parse_float_dtype(prec_scale_dtype),
         resid_dtype=_parse_float_dtype(resid_dtype),
-        leaf_scale=leaf_scale,
-        resid_scale=jnp.exp2(jnp.round(jnp.log2(leaf_scale * num_trees**0.5))),
+        leaf_scale=_round_to_pow2(leaf_scale),
+        resid_scale=_round_to_pow2(leaf_scale * num_trees**0.5),
     )
 
 

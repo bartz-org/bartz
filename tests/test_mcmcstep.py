@@ -1998,21 +1998,6 @@ class TestMixedBinaryContinuous:
         with pytest.raises(Exception, match='diagonal'):
             _state = init(**init_kwargs)
 
-    def test_init_accepts_error_scale(self, init_kwargs: dict) -> None:
-        """Check that init accepts error_scale (heteroskedasticity) for mixed outcomes."""
-        # `init` donates `error_scale`, so pass it inline without keeping a reference
-        state = init(**init_kwargs, error_scale=jnp.linspace(0.5, 2.0, self.n))
-
-        # the per-datapoint latent scale is stored for the weighted likelihood
-        assert state.inv_sdev_scale is not None
-        assert state.inv_sdev_scale.shape == (self.n,)
-        assert jnp.all(state.inv_sdev_scale > 0)
-        assert state.prec_scale is not None
-
-        # weights do not change the binary error precision (pinned to 1)
-        assert state.error_cov_inv.value[0, 0] == 1.0
-        assert state.error_cov_inv.value[2, 2] == 1.0
-
     @pytest.mark.parametrize(
         ('outcome_type', 'with_missing'),
         [

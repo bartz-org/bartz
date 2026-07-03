@@ -37,7 +37,7 @@ UV_RUN = uv run --dev $(EXTRAS)
 # define command to run python with oldest supported dependencies
 # OLD_DATE / OLD_DELAY_DAYS / BUMP_PYTHON_VERSION_DATE / NUM_SUPPORTED_PYTHON_RELEASES
 # drive the `update-oldest-deps` policy.
-OLD_DATE = 2025-05-27
+OLD_DATE = 2025-06-28
 OLD_DELAY_DAYS = 365
 BUMP_PYTHON_VERSION_DATE = 10-31
 NUM_SUPPORTED_PYTHON_RELEASES = 5
@@ -91,10 +91,11 @@ help:
 	@echo "- lint: run pre-commit hooks on all files"
 	@echo
 	@echo "Release workflow:"
-	@echo "- do a PR that re-runs benchmarks"
 	@echo "- describe release in docs/changelog.md (its topmost header sets the version, follow effver https://jacobtomlinson.dev/effver)"
 	@echo "- $$ make release, will not release but runs all tests, iterate and debug"
 	@echo "- merge a PR with the changes"
+	@echo '- run `make tests-gpu` on a gpu'
+	@echo "- do a PR that re-runs benchmarks"
 	@echo "- on main: $$ make release"
 	@echo "- merge fix PR and try again until make release passes"
 	@echo "- publish the draft github release created by make release (updates zenodo automatically)"
@@ -119,6 +120,7 @@ clean:
 	rm -fr dist
 	rm -fr config/jax_cache
 	rm -fr docs/_build
+	rm -fr docs/reference/_autogen
 	rm -fr .coverage* coverage.xml diffcov.md
 	# `renv::clean()` only removes locks/tempdirs/unused packages, not the
 	# whole library, so wipe the gitignored renv subdirs by hand to mirror
@@ -184,7 +186,11 @@ TESTS_VARS = COVERAGE_FILE=.coverage.$@$(if $(GROUP),-$(GROUP))
 TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
 TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=$(NPROC) $(SELECT)
-TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_PREALLOCATE=false
+# WORKAROUND(jax<0.10.3): jax 0.10.x exhausts/corrupts CUDA command buffers
+# over a long test session (RESOURCE_EXHAUSTED / INTERNAL "Recorded commands
+# are not empty"), so disable them for the GPU test run. Recheck whether this
+# is still needed when raising the jax floor.
+TESTS_GPU_VARS = $(TESTS_VARS) XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_FLAGS=--xla_gpu_enable_command_buffer=
 TESTS_GPU_COMMAND = $(TESTS_COMMAND) --platform=gpu --numprocesses=$(GPU_NPROC) $(SELECT)
 
 .PHONY: tests
@@ -214,6 +220,8 @@ tests-gpu-old:
 
 .PHONY: docs
 docs:
+	# wipe autosummary stubs so removed symbols don't linger as stale pages
+	rm -fr docs/reference/_autogen
 	$(UV_RUN) make -C docs html
 	test ! -d _site/docs-dev || rm -r _site/docs-dev
 	mv docs/_build/html _site/docs-dev

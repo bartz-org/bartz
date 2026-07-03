@@ -30,15 +30,37 @@ import pytest
 from equinox import tree_at
 from jax import numpy as jnp
 from jax import random
-from jaxtyping import Shaped
+from jax.nn import softmax
+from jax.scipy.special import xlogy
+from jax.scipy.stats import chi2
+from jaxtyping import Array, Float32, Int32, Shaped
 from scipy import stats
 from scipy.stats import ks_1samp
 
 from bartz._jaxext import minimal_unsigned_dtype, split
 from bartz.debug import sample_prior
+from bartz.debug._prior import sample_s, sample_theta
 from bartz.grove import TreesTrace, check_trace, describe_error, format_tree
 from bartz.grove._check import check_tree
-from tests.util import jaxtyping_disabled, manual_tree
+from tests.util import assert_array_equal, jaxtyping_disabled, manual_tree
+
+
+def max_lr_test(
+    counts: Int32[Array, ' k'], prob: Float32[Array, ' k']
+) -> Float32[Array, '']:
+    """Return the p-value of the maximal likelihood-ratio goodness-of-fit test.
+
+    Tests the null hypothesis that `counts` is multinomial with category
+    probabilities `prob`. The statistic is twice the log-likelihood ratio of the
+    saturated model to the null, asymptotically chi-squared with ``k - 1``
+    degrees of freedom under the null. This is the G-test, equivalent to
+    ``scipy.stats.power_divergence(lambda_='log-likelihood')``, recomputed in
+    jax to keep float32 and skip scipy's sum check.
+    """
+    (k,) = counts.shape
+    expected = counts.sum() * prob
+    statistic = 2 * jnp.sum(xlogy(counts, counts / expected))
+    return chi2.sf(statistic, k - 1)
 
 
 def test_format_tree() -> None:
@@ -104,12 +126,20 @@ class TestSamplePrior:
 
     Args = namedtuple(
         'Args',
-        ['key', 'trace_length', 'num_trees', 'max_split', 'p_nonterminal', 'sigma_mu'],
+        [
+            'key',
+            'trace_length',
+            'num_trees',
+            'max_split',
+            'p_nonterminal',
+            'sigma_mu',
+            'log_s',
+        ],
     )
 
-    @pytest.fixture
-    def args(self, keys: split) -> Args:
-        """Prepare arguments for `sample_prior`."""
+    @pytest.fixture(params=['uniform', 'nonuniform'])
+    def args(self, request: pytest.FixtureRequest, keys: split) -> Args:
+        """Prepare arguments for `sample_prior`, with and without `log_s`."""
         # config
         trace_length = 1000
         num_trees = 200
@@ -124,9 +154,16 @@ class TestSamplePrior:
         p = maxdepth - 1
         max_split = jnp.full(p, jnp.array(max_split, minimal_unsigned_dtype(max_split)))
         sigma_mu = 1 / jnp.sqrt(num_trees)
+        log_s = None if request.param == 'uniform' else jnp.log(1 + jnp.arange(p))
 
         return self.Args(
-            keys.pop(), trace_length, num_trees, max_split, p_nonterminal, sigma_mu
+            keys.pop(),
+            trace_length,
+            num_trees,
+            max_split,
+            p_nonterminal,
+            sigma_mu,
+            log_s,
         )
 
     def test_valid_trees(self, args: Args) -> None:
@@ -176,6 +213,165 @@ class TestSamplePrior:
             diff_forest = jnp.diff(heap, axis=1)
             assert jnp.any(diff_trace)
             assert jnp.any(diff_forest)
+
+    def test_root_distribution(self, args: Args) -> None:
+        """Check the root split variable follows the prior split probabilities.
+
+        At the root every variable is available, so the chosen variable is
+        distributed exactly as `softmax(log_s)` (uniform when `log_s` is None).
+        The ~200k root samples make the test's power against any realistic
+        sampler bug essentially 1 (e.g. ignoring `log_s` gives p well below
+        1e-10), while the 1e-3 threshold keeps false positives rare.
+        """
+        p = args.max_split.size
+        trees = sample_prior(*args)
+        counts = jnp.bincount(trees.var_tree[:, :, 1].ravel(), length=p)
+        log_s = jnp.zeros(p) if args.log_s is None else args.log_s
+        assert max_lr_test(counts, softmax(log_s)) > 1e-3
+
+    def test_log_s_broadcast_equiv(self, args: Args) -> None:
+        """A per-iteration `log_s` with equal rows matches the shared `log_s`.
+
+        Passing one `log_s` row per iteration that happens to be constant must
+        give exactly the same trees as passing that single row shared across all
+        trees, since both reduce to the same per-tree split probabilities.
+        """
+        p = args.max_split.size
+        log_s = jnp.log(1 + jnp.arange(p)).astype(jnp.float32)
+        args = args._replace(log_s=log_s)
+        shared = sample_prior(*args)
+        per_iter = sample_prior(
+            *args._replace(log_s=jnp.broadcast_to(log_s, (args.trace_length, p)))
+        )
+        for attr in ('leaf_tree', 'var_tree', 'split_tree'):
+            assert_array_equal(getattr(shared, attr), getattr(per_iter, attr))
+
+    def test_per_iteration_log_s(self, args: Args) -> None:
+        """Each iteration's root variable follows that iteration's `log_s`.
+
+        Alternate iterations between two different split-probability vectors and
+        check that, splitting the root variables by parity, each group follows
+        the `softmax` of its own `log_s`. This would fail if `sample_prior`
+        ignored the per-iteration axis or misaligned it with the trees.
+        """
+        p = args.max_split.size
+        v_even = jnp.log(1 + jnp.arange(p)).astype(jnp.float32)
+        v_odd = v_even[::-1]
+        log_s = jnp.where(
+            (jnp.arange(args.trace_length) % 2)[:, None] == 0, v_even, v_odd
+        )
+
+        trees = sample_prior(*args._replace(log_s=log_s))
+        root = trees.var_tree[:, :, 1]
+        for parity, v in ((0, v_even), (1, v_odd)):
+            counts = jnp.bincount(root[parity::2].ravel(), length=p)
+            assert max_lr_test(counts, softmax(v)) > 1e-3
+
+    def test_sparse_two_level(self, args: Args) -> None:
+        """The 2-level prior returns per-iteration latents that drive the trees.
+
+        Sampling `theta` and `s` from their priors must yield latents of the
+        right shape and valid trees, and the trees must actually use the sampled
+        `log_s`: averaged over all root splits, the chosen variable's `log_s`
+        exceeds the per-iteration mean `log_s`, since the root variable is drawn
+        with probability `softmax(log_s)`.
+        """
+        p = args.max_split.size
+        result = sample_prior(*args._replace(log_s=None), a=0.5, b=1.0, rho=float(p))
+        theta = result.theta
+        log_s = result.log_s
+        assert theta is not None
+        assert log_s is not None
+        assert theta.shape == (args.trace_length,)
+        assert log_s.shape == (args.trace_length, p)
+        assert jnp.all(theta > 0)
+        assert jnp.all(jnp.isfinite(log_s))
+        bad = check_trace(result, args.max_split)
+        assert jnp.count_nonzero(bad).item() == 0
+
+        root = result.var_tree[:, :, 1]
+        chosen = jnp.take_along_axis(log_s, root, axis=1)
+        assert chosen.mean() > log_s.mean()
+
+    def test_sparse_one_level(self, args: Args) -> None:
+        """The 1-level prior draws `log_s` from a fixed-concentration Dirichlet.
+
+        Setting `theta` alone (no `rho`, `a`, `b`) must yield a per-iteration
+        `log_s` of the right shape, broadcasting the fixed `theta` to one value
+        per iteration, and valid trees.
+        """
+        p = args.max_split.size
+        result = sample_prior(*args._replace(log_s=None), theta=float(p))
+        assert result.theta is not None
+        assert result.log_s is not None
+        assert jnp.all(result.theta == p)
+        assert result.log_s.shape == (args.trace_length, p)
+        assert jnp.all(jnp.isfinite(result.log_s))
+        bad = check_trace(result, args.max_split)
+        assert jnp.count_nonzero(bad).item() == 0
+
+    @pytest.mark.parametrize(
+        'kwargs', [dict(rho=1.0, a=0.5), dict(rho=1.0, b=1.0), dict(a=0.5, b=1.0)]
+    )
+    def test_partial_rho_a_b(self, args: Args, kwargs: dict) -> None:
+        """Setting only some of `rho`, `a`, `b` raises."""
+        with pytest.raises(ValueError, match='rho, a, b must be either'):
+            sample_prior(*args._replace(log_s=None), **kwargs)
+
+    def test_theta_with_rho_a_b(self, args: Args) -> None:
+        """Setting `theta` together with `rho`, `a`, `b` raises."""
+        with pytest.raises(ValueError, match='sampled from the prior'):
+            sample_prior(*args._replace(log_s=None), theta=1.0, a=0.5, b=1.0, rho=1.0)
+
+    def test_log_s_with_rho_a_b(self, args: Args) -> None:
+        """Setting `log_s` together with `rho`, `a`, `b` raises."""
+        log_s = jnp.zeros(args.max_split.size)
+        with pytest.raises(ValueError, match='sampled from the prior'):
+            sample_prior(*args._replace(log_s=log_s), a=0.5, b=1.0, rho=1.0)
+
+    def test_log_s_with_theta(self, args: Args) -> None:
+        """Setting `log_s` together with `theta` raises."""
+        log_s = jnp.zeros(args.max_split.size)
+        with pytest.raises(ValueError, match='sampled from the prior'):
+            sample_prior(*args._replace(log_s=log_s), theta=1.0)
+
+
+class TestSampleTheta:
+    """Test `_prior.sample_theta`."""
+
+    def test_prior_distribution(self, keys: split) -> None:
+        """``theta / (theta + rho)`` follows the ``Beta(a, b)`` prior."""
+        rho, a, b = 7.0, 0.5, 2.0
+        theta = sample_theta(keys.pop(), rho, a, b, (200_000,))
+        lambda_ = theta / (theta + rho)
+        # the ~200k draws give power ~1 against a wrong Beta, while the 1e-3
+        # threshold keeps false positives rare
+        assert ks_1samp(lambda_, stats.beta(a, b).cdf).pvalue > 1e-3
+
+    def test_scalar_shape(self, keys: split) -> None:
+        """The default shape draws a scalar `theta`."""
+        assert sample_theta(keys.pop(), 1.0, 0.5, 2.0).shape == ()
+
+
+class TestSampleS:
+    """Test `_prior.sample_s`."""
+
+    def test_prior_distribution(self, keys: split) -> None:
+        """``softmax(log_s)`` is Dirichlet, so each component is the right Beta.
+
+        For a symmetric ``Dirichlet(theta/p, ..., theta/p)`` the marginal of
+        each component is ``Beta(theta/p, theta (p-1)/p)``.
+        """
+        p, theta = 4, 3.0
+        log_s = sample_s(keys.pop(), jnp.full(200_000, theta), p)
+        s = softmax(log_s, axis=1)
+        marginal = stats.beta(theta / p, theta * (p - 1) / p)
+        for j in range(p):
+            assert ks_1samp(s[:, j], marginal.cdf).pvalue > 1e-3
+
+    def test_scalar_theta_shape(self, keys: split) -> None:
+        """A scalar `theta` yields a single ``(p,)`` `log_s` vector."""
+        assert sample_s(keys.pop(), 2.0, 5).shape == (5,)
 
 
 class TestCheckTree:

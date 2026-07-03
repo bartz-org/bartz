@@ -1,16 +1,39 @@
 {
+    // Tune batched scatter-add for the RESIDUAL reduction (`sum_resid`): the
+    // per-leaf sum of the (scaled) residual vector, run once per tree inside the
+    // accept/reject scan.
+    //
+    // Knobs of `BatchedReduction`:
+    //   num_batches    swept; primary axis (plot.reduce); the datapoint-batch
+    //                  count. Focused high grid 256..16Ki, no null: null/small
+    //                  win at low n (dropped here); the optimum exceeds 4096 on
+    //                  big GPUs (A100), so this variant pins the high end.
+    //   batches_inner  FIXED to optimal 'inner' (true).
+    //   contiguous     FIXED to optimal 'strided' (false).
+    // The 3060 sweep confirmed (inner, strided) = (true, false) is optimal across
+    // n/k/trees (contiguous=true was up to ~7-11x slower at large n), so we fix
+    // the layout to the defaults and sweep only num_batches, to map how its
+    // optimum shifts with gpu type.
+    //
+    // Scanned because they change the reduction's array shape (hence possibly
+    // its optimum): n (datapoints), k (outcome dim: shape (n) -> (k, n)), and
+    // weights (with k > 1 lifts (k, n) -> (k, k, n)). num_trees is FIXED: the
+    // residual reduction runs once per tree on the same shape, so the number of
+    // trees does not change the per-call optimum (5 is just enough to time it).
+    // maxdepth is fixed at 6 (our practical value; sets the bin count 2 ** d).
+    // The other two reduction sites use default 'auto' batching (resolved
+    // per-platform) as a realistic backdrop, so they don't dominate the step.
     "plot": {
         "scan": "n",
         "reduce": "resid_reduction.num_batches",
     },
     "values": {
-        "n":                  [1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
+        "p":                  [1],
         "k":                  [null, 1, 2, 4],
         "maxdepth":           [6],
         "weights":            ["none", "scalar"],
         "num_trees":          [5],
-        "resid_reduction":    [{"kind": "batched", "num_batches": [null, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]}],
-        "count_reduction":    [{"kind": "batched", "num_batches": null}],
-        "prec_reduction":     [{"kind": "batched", "num_batches": null}],
+        "resid_reduction":    [{"kind": "batched", "num_batches": [256, 512, 1024, 2048, 4096, 8192, 16384], "batches_inner": [true], "contiguous": [false]}],
     },
 }

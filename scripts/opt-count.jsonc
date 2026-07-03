@@ -1,16 +1,42 @@
 {
+    // Tune batched scatter-add for the COUNT reduction (number of datapoints per
+    // leaf), taken on the homoskedastic path (prec_scale is None, i.e.
+    // weights=false; otherwise the count tree is skipped or fused with prec).
+    //
+    // Knobs of `BatchedReduction`:
+    //   num_batches    swept; primary axis (plot.reduce); the datapoint-batch
+    //                  count. Focused high grid 256..16Ki, no null: null/small
+    //                  win at low n (dropped here); the optimum exceeds 4096 on
+    //                  big GPUs (A100), so this variant pins the high end.
+    //   batches_inner  FIXED to optimal 'inner' (true).
+    //   contiguous     FIXED to optimal 'strided' (false).
+    // The 3060 sweep confirmed (inner, strided) = (true, false) is optimal across
+    // n/k/trees (contiguous=true was up to ~7-11x slower at large n), so we fix
+    // the layout to the defaults and sweep only num_batches, to map how its
+    // optimum shifts with gpu type.
+    //
+    // The reduced value is the scalar 1 (a pure datapoint count), so the count
+    // reduction is INDEPENDENT of the outcome dimension: k is pinned to null. It
+    // is, however, vmapped over a batch of trees, so num_trees (which sets the
+    // effective batch via prec_count_num_trees) is scanned along with n.
+    // num_trees is coarse (small/medium/large) to offset the 4x layout sweep;
+    // widen it if the optimum's tree-batch dependence needs finer resolution.
+    // weights is fixed false (this site is only taken on the homoskedastic
+    // path). maxdepth is fixed at 6, but note the count reduces into only the
+    // move's two children (subset_length=2), so the bin count is tiny here.
+    // The other two reduction sites use default 'auto' batching (resolved
+    // per-platform) as a realistic backdrop, so they don't dominate the step.
     "plot": {
         "scan": "n",
         "reduce": "count_reduction.num_batches",
     },
     "values": {
-        "n":                  [1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
-        "k":                  [null, 1, 2, 4],
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
+        "p":                  [1],
+        "k":                  [null],
         "maxdepth":           [6],
         "weights":            ["none"],
-        "num_trees":          [1, 4, 16, 64, 256],
-        "resid_reduction":    [{"kind": "batched", "num_batches": null}],
-        "count_reduction":    [{"kind": "batched", "num_batches": [null, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]}],
-        "prec_reduction":     [{"kind": "batched", "num_batches": null}],
+        "num_trees":          [1, 16, 256],
+        "count_reduction":    [{"kind": "batched", "num_batches": [256, 512, 1024, 2048, 4096, 8192, 16384], "batches_inner": [true], "contiguous": [false]}],
     },
 }

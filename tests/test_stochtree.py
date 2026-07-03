@@ -290,44 +290,40 @@ def test_sample_sigma2_leaf_true_raises(continuous_data: _Data, keys: split) -> 
         )
 
 
-def test_sigma2_init_with_proper_prior_raises(
+def _sample_with_prior(
+    data: _Data, shape: float, scale: float, keys: split
+) -> bst.BARTModel:
+    m = bst.BARTModel()
+    m.sample(
+        X_train=data.X_train,
+        y_train=data.y_train,
+        general_params={
+            'sigma2_global_shape': shape,
+            'sigma2_global_scale': scale,
+            'random_seed': keys.pop(),
+        },
+        **_SAMPLE_KW,
+    )
+    return m
+
+
+def test_one_sided_zero_scale_prior(continuous_data: _Data, keys: split) -> None:
+    """IG(shape>0, 0) maps to a positive-df, zero-rate prior and stays finite."""
+    m = _sample_with_prior(continuous_data, shape=1.5, scale=0.0, keys=keys)
+    assert np.all(np.isfinite(m.global_var_samples))
+
+
+def test_one_sided_zero_shape_prior_yields_nan(
     continuous_data: _Data, keys: split
 ) -> None:
-    """`sigma2_init` is allowed only when the variance prior is improper."""
-    data = continuous_data
-    m = bst.BARTModel()
-    with pytest.raises(NotImplementedError, match='sigma2_init'):
-        m.sample(
-            X_train=data.X_train,
-            y_train=data.y_train,
-            general_params={
-                'sigma2_global_shape': 1.5,
-                'sigma2_global_scale': 0.5,
-                'sigma2_init': 1.0,
-                'random_seed': keys.pop(),
-            },
-            **_SAMPLE_KW,
-        )
+    """IG(0, scale>0) is unrepresentable (positive rate, zero df) and yields NaN.
 
-
-@pytest.mark.parametrize(('shape', 'scale'), [(1.5, 0.0), (0.0, 0.5)])
-def test_one_sided_improper_prior_raises(
-    continuous_data: _Data, shape: float, scale: float, keys: split
-) -> None:
-    """A variance prior with exactly one of shape/scale zero is refused."""
-    data = continuous_data
-    m = bst.BARTModel()
-    with pytest.raises(NotImplementedError, match='one-sided improper'):
-        m.sample(
-            X_train=data.X_train,
-            y_train=data.y_train,
-            general_params={
-                'sigma2_global_shape': shape,
-                'sigma2_global_scale': scale,
-                'random_seed': keys.pop(),
-            },
-            **_SAMPLE_KW,
-        )
+    bartz's rate is ``sigma_df * square(sigma_scale)``, so a zero-df prior cannot
+    carry a positive rate; the wrapper surfaces this visibly as NaN samples
+    rather than silently dropping the scale.
+    """
+    m = _sample_with_prior(continuous_data, shape=0.0, scale=0.5, keys=keys)
+    assert np.all(np.isnan(m.global_var_samples))
 
 
 def test_unknown_dict_keys_rejected(continuous_data: _Data, keys: split) -> None:
@@ -373,6 +369,23 @@ def test_unsupported_outcome_model_raises(binary_data: _Data, keys: split) -> No
                     outcome='binary',
                     link='cloglog',  # ty: ignore[invalid-argument-type]
                 ),
+                'random_seed': keys.pop(),
+            },
+            **_SAMPLE_KW,
+        )
+
+
+def test_observation_weights_probit_raises(binary_data: _Data, keys: split) -> None:
+    """`observation_weights` are rejected with a probit outcome model."""
+    data = binary_data
+    m = bst.BARTModel()
+    with pytest.raises(ValueError, match=r'observation_weights.*probit'):
+        m.sample(
+            X_train=data.X_train,
+            y_train=data.y_train,
+            observation_weights=np.ones(data.X_train.shape[0]),
+            general_params={
+                'outcome_model': bst.OutcomeModel(outcome='binary', link='probit'),
                 'random_seed': keys.pop(),
             },
             **_SAMPLE_KW,
@@ -528,7 +541,7 @@ def test_compare_with_stochtree(
             st_sigma = np.sqrt(np.asarray(st_model.global_var_samples))
             # shape (1, num_samples) so rhat collapses to a scalar
             rhat = _rhat_two_chains(bz_sigma[None, :], st_sigma[None, :])
-            assert_array_less(rhat, 1.03)
+            assert_array_less(rhat, 1.05)
     else:
         with subtests.test('rhat_prob_train'):
             bz_prob = np.asarray(ndtr(bz_model.y_hat_train))

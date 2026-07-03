@@ -5,6 +5,7 @@
     },
     "values": {
         "n": [1000, 10000],
+        "p": [1],
         "k": [null],
         "maxdepth": [6],
         "weights": ["none"],

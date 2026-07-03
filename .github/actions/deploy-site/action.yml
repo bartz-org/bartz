@@ -1,0 +1,86 @@
+# bartz/.github/actions/deploy-site/action.yml
+#
+# Copyright (c) 2026, The Bartz Contributors
+#
+# This file is part of bartz.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
+name: Deploy site to GitHub Pages
+description: >-
+  Assemble the `docs` artifact plus the coverage report into `_site` and deploy
+  it to GitHub Pages. The calling job must set the `github-pages` environment and
+  `pages: write` / `id-token: write` permissions.
+
+inputs:
+  coverage-run-id:
+    description: >-
+      Run id to fetch the `covreport` artifact from. Empty means the artifact
+      lives in the current run; a value fetches it from another run (which needs
+      `actions: read` and a token).
+    required: false
+    default: ""
+  github-token:
+    description: Token used to fetch the coverage report from another run.
+    required: false
+    default: ""
+
+outputs:
+  page-url:
+    description: URL of the deployed site.
+    value: ${{ steps.deployment.outputs.page_url }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Pages
+      uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
+
+    - name: Get documentation and benchmarks
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      with:
+        name: docs
+        path: _site
+
+    - name: Get coverage report
+      if: inputs.coverage-run-id == ''
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      with:
+        name: covreport
+        path: _site/coverage
+
+    - name: Get coverage report from another run
+      if: inputs.coverage-run-id != ''
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      with:
+        name: covreport
+        path: _site/coverage
+        run-id: ${{ inputs.coverage-run-id }}
+        github-token: ${{ inputs.github-token }}
+
+    - name: List files
+      shell: bash
+      run: ls -a _site
+
+    - name: Upload artifact
+      uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+
+    - name: Deploy to GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

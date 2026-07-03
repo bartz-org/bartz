@@ -47,7 +47,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.sharding import Mesh
-from jaxtyping import Array, Integer, Key
+from jaxtyping import Array, Integer, Key, Shaped
 
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
@@ -62,11 +62,27 @@ else:
         # WORKAROUND(bartz<0.6.0): old versions use a dictionary for the mcmc state
         State = dict
 
+if TYPE_CHECKING:
+    from bartz.mcmcstep import Wishart
+else:
+    try:
+        from bartz.mcmcstep import Wishart
+    except ImportError:
+        # WORKAROUND(bartz<0.11.0): the Wishart wrapper bundling the error
+        # covariance prior was added in 0.11.0. A dict carries the parameters
+        # until simple_init unpacks them by item access for older versions;
+        # unlike a typed stand-in it errors loudly if passed to bartz by mistake.
+        Wishart = dict
+
 try:
     from bartz.BART import mc_gbart as gbart
 except ImportError:
     # WORKAROUND(bartz<0.8.0): mc_gbart was introduced in 0.8.0; fall back to gbart
     from bartz.BART import gbart
+
+# WORKAROUND(bartz<0.11.0): mc_gbart switched its array predictor layout from
+# (p, n) to R BART3's (n, p) in 0.11.0. Detect it from the `x_train` annotation.
+X_N_BY_P = "'n p'" in str(signature(gbart).parameters['x_train'].annotation)
 
 from bartz.mcmcstep import init, step
 from benchmarks.latest_bartz.mcmcstep import make_p_nonterminal
@@ -131,8 +147,12 @@ def simple_init(  # noqa: C901, PLR0915
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(6, 0.95, 2),
         leaf_prior_cov_inv=jnp.float32(num_trees) * (1.0 if k is None else jnp.eye(k)),
-        error_cov_df=2.0,
-        error_cov_scale=2.0 * (1.0 if k is None else jnp.eye(k)),
+        error_cov_inv=Wishart(
+            nu=2.0,
+            rate=2.0 * (1.0 if k is None else jnp.eye(k)),
+            # the value is the prior mean ``nu * rate^-1`` for these settings
+            value=1.0 if k is None else jnp.eye(k),
+        ),
         min_points_per_decision_node=10,
         num_chains=num_chains,
         mesh=mesh,
@@ -143,6 +163,12 @@ def simple_init(  # noqa: C901, PLR0915
     if 'offset' not in sig.parameters:
         # WORKAROUND(bartz<0.6.0): offset was added to init in 0.6.0
         kw.pop('offset')
+    if 'error_cov_inv' not in sig.parameters:
+        # WORKAROUND(bartz<0.11.0): 0.11.0 folded error_cov_df/error_cov_scale
+        # into a single error_cov_inv Wishart; older versions take them directly.
+        wishart = kw.pop('error_cov_inv')
+        kw['error_cov_df'] = wishart['nu']
+        kw['error_cov_scale'] = wishart['rate']
     if 'sigma2_alpha' in sig.parameters:
         # WORKAROUND(bartz<0.8.0): pre-0.8.0 used sigma2_alpha/beta instead of
         # error_cov_df/scale. Inverse gamma prior: alpha = df/2, beta = scale/2.
@@ -189,10 +215,11 @@ def simple_init(  # noqa: C901, PLR0915
                 msg = 'binary not supported'
                 raise NotImplementedError(msg)
             kw['y'] = data.y > 0
-            kw.pop('sigma2_alpha', None)
-            kw.pop('sigma2_beta', None)
+            kw.pop('error_cov_inv', None)
             kw.pop('error_cov_df', None)
             kw.pop('error_cov_scale', None)
+            kw.pop('sigma2_alpha', None)
+            kw.pop('sigma2_beta', None)
 
             sig = signature(init)
             if 'outcome_type' in sig.parameters:
@@ -245,6 +272,27 @@ class AutoParamNames:
         cls.param_names = tuple(params[1:])
 
 
+def dealias_for_donation(state: State) -> State:
+    """Copy any state leaf that is the same array as an earlier leaf.
+
+    When two pytree leaves are the same array, donating the whole pytree to a
+    jitted function fails on GPU, because that buffer would be donated twice.
+    Abstract leaves (from `eval_shape`) are left untouched: they hold no buffer
+    and the function built from them is compiled but never run.
+    """
+    seen: set[int] = set()
+
+    def copy_if_shared(leaf: Shaped[Array, '...']) -> Shaped[Array, '...']:
+        if not isinstance(leaf, Array):
+            return leaf
+        if id(leaf) in seen:
+            return jnp.copy(leaf)
+        seen.add(id(leaf))
+        return leaf
+
+    return tree.map(copy_if_shared, state)
+
+
 class StepBase(AutoParamNames):
     """Shared setup for benchmarks of `mcmcstep.step`."""
 
@@ -263,6 +311,10 @@ class StepBase(AutoParamNames):
         kw: dict = dict(p=P, n=N, num_trees=NTREE, kind=kind, num_chains=chains)
         kw.update(kwargs)
         state = self.make_state(**kw)
+
+        # WORKAROUND(bartz<0.6.0): init aliased `resid` to `y` (same buffer),
+        # which can not be donated twice when the whole state is donated below.
+        state = dealias_for_donation(state)
 
         # WORKAROUND(bartz<0.9.0): from 0.9.0, `step` is itself jitted with
         # state donation and handles variable selection internally, so it can
@@ -432,13 +484,25 @@ class StepMemory(StepBase):
 
     def make_state(self, **kwargs: Any) -> State:
         """Build the state abstractly, to analyze a scale too large to allocate."""
+        # Abstract eval hides the device and the data from `init`; older versions
+        # that probe either need a nudge to stay traceable.
+        sig = signature(init)
+        if 'target_platform' in sig.parameters:
+            # WORKAROUND(bartz<0.11.0): 0.8.0-0.10.0 infer the device from `y`,
+            # which has no platform under abstract eval; name it explicitly.
+            kwargs.setdefault('target_platform', get_default_platform())
+        param = sig.parameters.get('filter_splitless_vars')
+        if param is not None and param.default:
+            # WORKAROUND(bartz<0.8.0): 0.7.0 defaulted filter_splitless_vars on,
+            # triggering a data-dependent jnp.nonzero that abstract eval rejects;
+            # disable it (newer versions already default it off).
+            kwargs.setdefault('filter_splitless_vars', 0)
         return eval_shape(lambda: simple_init(**kwargs))
 
     def setup(self, kind: Kind, chains: int | None, stat: MemStat) -> None:  # ty:ignore[invalid-method-override]
         """Compile `step` at large scale and extract its memory analysis."""
-        # n=16Mi, num_trees=1Ki: only compiled, never run, so it may exceed
-        # device memory. 16Mi = 16 * 2**20.
-        super().setup('compile', kind, chains, n=16 * 1024**2, num_trees=1024)
+        # n=16Mi, num_trees=p=1Ki, abstract eval so may exceed device memory
+        super().setup('compile', kind, chains, n=16 * 2**20, num_trees=1024, p=1024)
         analysis = self.compiled_func.memory_analysis()
         if analysis is None:
             # the active backend does not expose a memory analysis
@@ -501,7 +565,7 @@ class BaseGbart(AutoParamNames):
 
         # arguments
         self.kw: dict = dict(
-            x_train=train.x,
+            x_train=train.x.T if X_N_BY_P else train.x,
             y_train=train.y.squeeze(0),
             ntree=NTREE,
             nskip=niters // 2,
@@ -533,7 +597,7 @@ class BaseGbart(AutoParamNames):
         """Time instantiating the class."""
         with redirect_stdout(StringIO()):
             if self.predict:
-                ypred = self.bart.predict(self.test.x)
+                ypred = self.bart.predict(self.test.x.T if X_N_BY_P else self.test.x)
                 block_until_ready(ypred)
             else:
                 bart = gbart(**self.kw)
@@ -726,6 +790,9 @@ def kill_callback(
         token = state.sigma2
     else:
         token = state.error_cov_inv
+        # WORKAROUND(bartz<0.11.0): error_cov_inv became a Wishart wrapper in
+        # 0.11.0; the sampled precision moved to its `.value` attribute
+        token = getattr(token, 'value', token)
     stop = i_total + 1 == kill_niters  # i_total is updated after callback
     token = error_if(token, stop, canary)
     debug.callback(lambda _token: None, token)  # to avoid DCE

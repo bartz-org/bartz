@@ -60,9 +60,24 @@ Interface hierarchy:
         - MCMC setup `init()`, MCMC runner `run_mcmc()`
             - MCMC step `step()`
 
+## VCS style
+
+- **Commit messages**
+    - <= 50 characters wide description
+    - <= 72 characters wide body
+    - conventional commits style
+- **PR description**
+    - study the diff, don't just trust the commit messages (since stuff may have been reverted or altered over the course of development)
+    - reason about what is the main purpose of the PR and open with that
+        - understanding a description is easier if it opens with the point
+        - don't just list all changes mechanically
+    - keep it short, short, short
+    - no hard wrap, each paragraph on one physical line (github UI preserves source newlines, let it soft wrap instead)
+    - don't include a "test plan". you are not going to actually follow it anyway
+    - remember to include your "Generated with Claude..." footer
+
 ## Code style
 
-- **Commit messages:** 50/72, conventional commits
 - **Formatter/linter:** ruff with single quotes
 - **Imports:** generally use `from foo import bar` (relative import) instead of `import foo; foo.bar`
     - but for some heavily used big (sub)modules, e.g., `from jax import random; random.foo` is preferred to `from jax.random import foo, foo1, foo2, ..., foo999999`.
@@ -95,6 +110,7 @@ Interface hierarchy:
     - use our custom `from bartz._jaxext import split` instead of `random.split` generally
         - `split` is a class and you use it like this: `keys = split(key); x = random.gen(keys.pop(), ...); y = vmapped_func(keys.pop(1000), ...)`
         - don't pass a `split` object to functions, follow the jax convention that the first argument is a single random key
+    - use jnp.square(x), jnp.sqrt(x), lax.rsqrt(x), jnp.reciprocal(x) instead of x**2, x**0.5, x**-0/5, 1/x
 - other **python** conventions:
     - use dicts as if they were frozendicts when possible: e.g., do `d = dict(d, a=1, b=2)` to set values instead of `d['a'] = 1` or `d.update(a=1)`, safer
         - related: prefer tuples to lists
@@ -109,6 +125,7 @@ Interface hierarchy:
         - type hints in signatures, not in docstrings
             - but when returning multiple values, copy the type hints verbatim in the return values list, because the html doc type render does not support multi-valued return natively
         - separate overloads with blank lines, don't bunch them on the function
+        - use `kw: dict = dict(...); f(**kw)` to make ty happy when it complains about expanding kwargs in calls; the generic `: dict` type hint stops type inference on the values
     - _src-like layout: modules only contain the public symbols, imported from an implementation submodule
         - because of this, don't prepend redundant underscores to private functions: they stay private anyway
     - prefer `if ...: return; else: return` to early returns

@@ -35,5 +35,6 @@ from bartz._interface import (  # noqa: F401
     OutcomeType,
     PredictKind,
     Series,
+    SparseConfig,
 )
 from bartz._version import __version__, __version_info__  # noqa: F401

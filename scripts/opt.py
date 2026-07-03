@@ -105,11 +105,13 @@ from tqdm import tqdm
 
 from bartz._jaxext import get_default_device
 from bartz.mcmcstep import (
+    AutoOneHotReduction,
     BatchedReduction,
     OneHotReduction,
     PallasReduction,
     ReductionConfig,
     State,
+    Wishart,
     init,
     make_p_nonterminal,
     step,
@@ -161,12 +163,8 @@ REDUCTION_KINDS: dict[str, type[ReductionConfig]] = {
 
 
 def _reduction_label(cfg: ReductionConfig) -> str:
-    """Compact label of `cfg`: kind tag plus the non-default knobs."""
-    knobs = ', '.join(
-        f'{f.name}={getattr(cfg, f.name)}'
-        for f in fields(cfg)
-        if getattr(cfg, f.name) != f.default
-    )
+    """Label of `cfg` as its kind tag plus every knob value, for plots and logs."""
+    knobs = ', '.join(f'{f.name}={getattr(cfg, f.name)}' for f in fields(cfg))
     return f'{_kind_name(type(cfg))}({knobs})'
 
 
@@ -315,6 +313,9 @@ class ConfigParams:
     n: int
     """Number of data points."""
 
+    p: int
+    """Number of predictors."""
+
     k: int | None
     """Multivariate outcome dimension; ``None`` for univariate."""
 
@@ -358,6 +359,12 @@ class ConfigParams:
 
     num_chains: int | None = init_default('num_chains')
     """`init`'s ``num_chains`` kwarg."""
+
+    sparse: bool = False
+    """Whether to activate variable selection (sets `init`'s ``theta`` and ``sparse_on_at``)."""
+
+    augment: bool = init_default('augment')
+    """`init`'s ``augment`` kwarg; only has effect when ``sparse`` is set."""
 
     optimization_level: str | None = field(
         default=read_jax_config('jax_optimization_level'), metadata={'jax_config': True}
@@ -426,6 +433,12 @@ class ConfigParams:
 
     def is_valid(self) -> bool:
         """Whether this combination of values is admissible."""
+        # augment only affects the sparsity step, so with sparsity off it is a
+        # no-op: keep just the default augment variant and skip the redundant one,
+        # so configs that don't sweep augment still yield their default combo.
+        if self.augment != init_default('augment') and not self.sparse:
+            return False
+
         chains = 1 if self.num_chains is None else self.num_chains
         k = 1 if self.k is None else self.k
 
@@ -446,33 +459,41 @@ class ConfigParams:
         else:
             trees_at_once = self.prec_count_num_trees
 
-        # the count/prec pass materializes the leaf indices of a batch of trees
+        # the count/prec pass materializes the leaf indices of a batch of trees;
+        # this also bounds those two sites' one-hot reduce, which is at most ~2x
+        # as large (out_size 2 vs the leaf indices' 1 per row), and on gpu fuses
+        # away entirely
         if chains * trees_at_once * self.n > MAX_LEAF_INDICES_SIZE:
             return False
 
-        # rough sizings of the reduce inputs: the number of one-hot matrices
-        # (one per array of indices) and of value rows contracted against them
-        reductions = (
-            (self.resid_reduction, chains, chains * k),
-            (self.count_reduction, chains * trees_at_once, chains * trees_at_once),
-            (self.prec_reduction, chains * trees_at_once, chains * trees_at_once),
-        )
-        return all(
-            self._reduction_is_valid(cfg, idx_rows, val_rows)
-            for cfg, idx_rows, val_rows in reductions
-        )
+        # The residual one-hot (out_size 2**maxdepth, vs 2 for count/prec) is the
+        # only large reduce buffer not otherwise bounded, and only on cpu is it
+        # fully materialized: gpu fuses the multiply path and packs the matmul
+        # one-hot, and a gpu OOM is caught cleanly anyway. So guard it on cpu only.
+        resid_cfg = self.resid_reduction
+        if get_default_device().platform == 'cpu' and isinstance(
+            resid_cfg, (OneHotReduction, AutoOneHotReduction)
+        ):
+            # matmul keeps one one-hot per chain; multiply broadcasts it across the
+            # k value rows. AutoOneHot picks matmul iff m=k>=2 (the residual's
+            # out_size is well above its min_matmul_bins).
+            matmul = (
+                resid_cfg.method == 'matmul'
+                if isinstance(resid_cfg, OneHotReduction)
+                else k >= 2
+            )
+            rows = chains if matmul else chains * k
+            if rows * 2**self.maxdepth * self.n > MAX_ONEHOT_SIZE:
+                return False
 
-    def _reduction_is_valid(
-        self, cfg: ReductionConfig, idx_rows: int, val_rows: int
-    ) -> bool:
-        """Whether `cfg` is admissible for this combination of values."""
+        # num_batches / pallas-device validity, applied to every site
+        sites = (self.resid_reduction, self.count_reduction, self.prec_reduction)
+        return all(self._reduction_is_valid(cfg) for cfg in sites)
+
+    def _reduction_is_valid(self, cfg: ReductionConfig) -> bool:
+        """Whether `cfg`'s device/shape constraints hold for this combination."""
         if isinstance(cfg, BatchedReduction):
             return not (isinstance(cfg.num_batches, int) and cfg.num_batches > self.n)
-        elif isinstance(cfg, OneHotReduction):
-            # 'matmul' materializes one (size, n) one-hot per indices array; the
-            # other methods may materialize the full (rows, size, n) buffer
-            rows = idx_rows if cfg.method == 'matmul' else val_rows
-            return rows * 2**self.maxdepth * self.n <= MAX_ONEHOT_SIZE
         elif isinstance(cfg, PallasReduction):
             return _pallas_is_valid(cfg, self.n)
         else:
@@ -490,12 +511,13 @@ class ConfigParams:
 
     def to_init_kwargs(self) -> 'InitKwargs':
         """Translate this combination into kwargs for `init`."""
-        # gen_data requires p >= k, but the benchmarks use a single predictor:
-        # generate with p = k and keep only the first predictor
+        # gen_data requires p >= k; if fewer predictors than outcomes are wanted,
+        # generate k of them and keep only the first p
+        k = 1 if self.k is None else self.k
         data = gen_data(
             random.key(2026_06_07),
             n=self.n,
-            p=1 if self.k is None else self.k,
+            p=max(self.p, k),
             k=self.k,
             q=0,
             lambda_=None if self.k is None else 0.5,
@@ -505,23 +527,25 @@ class ConfigParams:
         ).quantize()
         eye = 1.0 if self.k is None else jnp.eye(self.k)
         return InitKwargs(
-            X=data.x[:1, :],
+            X=data.x[: self.p, :],
             y=data.y,
             offset=jnp.zeros(data.y.shape[:-1]),
-            max_split=data.max_split[:1],
+            max_split=data.max_split[: self.p],
             num_trees=self.num_trees,
             p_nonterminal=make_p_nonterminal(self.maxdepth, 0.95, 2),
             leaf_prior_cov_inv=self.num_trees * eye,
             leaf_dtype=self.leaf_dtype,
             prec_scale_dtype=self.prec_scale_dtype,
-            error_cov_df=2.0,
-            error_cov_scale=2 * eye,
+            error_cov_inv=Wishart(nu=2.0, rate=2 * eye, value=eye),
             error_scale=self.error_scale(),
             resid_reduction_config=self.resid_reduction,
             count_reduction_config=self.count_reduction,
             prec_reduction_config=self.prec_reduction,
             prec_count_num_trees=self.prec_count_num_trees,
             sequential_unroll=self.sequential_unroll,
+            theta=1.0 if self.sparse else None,
+            sparse_on_at=0 if self.sparse else None,
+            augment=self.augment,
             num_chains=self.num_chains,
         )
 
@@ -553,14 +577,16 @@ class InitKwargs:
     leaf_prior_cov_inv: float | Shaped[Array, '...']
     leaf_dtype: DTypeLike
     prec_scale_dtype: DTypeLike
-    error_cov_df: float
-    error_cov_scale: float | Shaped[Array, '...']
+    error_cov_inv: Wishart
     error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
     resid_reduction_config: ReductionConfig
     count_reduction_config: ReductionConfig
     prec_reduction_config: ReductionConfig
     prec_count_num_trees: int | None | Literal['auto']
     sequential_unroll: int | bool
+    theta: float | None
+    sparse_on_at: int | None
+    augment: bool
     num_chains: int | None
 
     def init(self) -> State:
@@ -918,7 +944,7 @@ class Benchmark:
 
     def teardown(self) -> None:
         """Drop state and clear compiled `step` cache."""
-        # setup may have aborted (e.g. OOM) before assigning state
+        # `setup` may have failed before binding `state` (e.g. an OOM in `init`)
         if hasattr(self, 'state'):
             del self.state
         step.clear_cache()
@@ -1008,9 +1034,11 @@ def inner_benchmark_loop(
         try:
             bench.setup(params.to_init_kwargs())
         except JaxRuntimeError as e:
-            # OOM surfaces with several prefixes (plain RESOURCE_EXHAUSTED, an
-            # autotuner "Failed to profile configs" wrapper, ...); match the
-            # common allocation-failure phrasing rather than one exact prefix.
+            # An OOM means the combo does not fit this device: record NaN and
+            # move on. OOM surfaces with several prefixes (plain
+            # RESOURCE_EXHAUSTED, autotuner "Failed to profile configs" or
+            # "Autotuning failed for HLO ..." wrappers, ...); match the common
+            # allocation-failure phrasing rather than one exact prefix.
             if 'Out of memory while trying to allocate' in str(e):
                 time_est = float('nan')
                 time_lo = float('nan')

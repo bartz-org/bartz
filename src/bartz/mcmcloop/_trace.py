@@ -100,7 +100,7 @@ class BurninTrace(Module):
         return cls(
             has_chains=state.has_chains,
             mesh=state.config.mesh,
-            error_cov_inv=state.error_cov_inv,
+            error_cov_inv=state.error_cov_inv.value,
             theta=state.forest.theta,
             grow_prop_count=state.forest.grow_prop_count,
             grow_acc_count=state.forest.grow_acc_count,

@@ -6,16 +6,7 @@
 
 exclude: '^\.asv/results/.+\.json$'
 default_stages: [pre-commit]
-default_install_hook_types:
-  [
-    pre-commit,
-    commit-msg,
-    pre-merge-commit,
-    post-commit,
-    post-checkout,
-    post-merge,
-    post-rewrite,
-  ]
+default_install_hook_types: [pre-commit, commit-msg, pre-merge-commit]
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -45,7 +36,7 @@ repos:
         exclude: '^renv/activate\.R$' # because renv edits it automatically, with trailing whitespace
       - id: no-commit-to-branch
   - repo: https://github.com/sbrunner/hooks
-    rev: ac94bb6cd9e609591b5ee9232cbc787310462b03 # frozen: 1.7.0
+    rev: 60041b789c098988bd01ddff70e7e3a31c1700f1  # frozen: 1.8.0
     hooks:
       - id: copyright
       - id: copyright-required
@@ -54,7 +45,7 @@ repos:
         # an explicit `pre-commit run --files`
         exclude: src/bartz/_version\.py$
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: 0c7b6c989466a93942def1f84baf36ddfcd60c83 # frozen: v0.15.14
+    rev: c59bba8fb259db0fec2bbb77ad8ba51ea7341b56  # frozen: v0.15.20
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -68,11 +59,11 @@ repos:
         # attribute-docstring conventions this enforces; drop `files` to widen.
         files: ^src/bartz/.*\.py$
   - repo: https://github.com/jsh9/pydoclint
-    rev: 88d83c94156c5e51a09938e77019f2c58e92ab58 # frozen: 0.8.4
+    rev: c30c32235c50af51cbbaffcb5dda042ba792f896  # frozen: 0.8.7
     hooks:
       - id: pydoclint
   - repo: https://github.com/henryiii/validate-pyproject-schema-store
-    rev: d069d5bfa2047357e2ec32c8d23fa0885e25593b # frozen: 2026.05.24
+    rev: 568bef55c6156897e1441c8524a17ab06ec18a73  # frozen: 2026.06.26
     hooks:
       - id: validate-pyproject
   - repo: https://github.com/jorisroovers/gitlint
@@ -80,7 +71,7 @@ repos:
     hooks:
       - id: gitlint # this is already defined to run in stage commit-msg
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: f19149a31a5aad375f89df042b796688201d6840 # frozen: 0.11.16
+    rev: fc310cf5c89c3772bdfae0073eeb2f200b6118bb  # frozen: 0.11.25
     hooks:
       - id: uv-lock
   - repo: https://github.com/rhysd/actionlint
@@ -103,22 +94,6 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-merge-commit]
-      - id: refresh-editable-version
-        name: refresh the editable install's git-derived version
-        # WORKAROUND(uv<0.11.20): uv's git cache-keys cannot detect new commits
-        # in linked worktrees (see the cache-keys comment in pyproject.toml), so
-        # the editable bartz's version goes stale; refresh it whenever HEAD
-        # moves. Fixed upstream by uv#19706 (merged after 0.11.19, so first
-        # released in 0.11.20); drop this hook once the CI-pinned uv reaches it.
-        # `--inexact` avoids pruning extras (e.g. cuda), `--frozen` avoids
-        # touching uv.lock mid-rebase, and the venv check skips worktrees
-        # without an environment (e.g. right after `worktree add`);
-        # UV_PROJECT_ENVIRONMENT is the only uv setting that moves the venv.
-        entry: sh -c 'test ! -d "${UV_PROJECT_ENVIRONMENT:-.venv}" || uv sync --frozen --inexact --quiet --reinstall-package bartz'
-        language: system
-        pass_filenames: false
-        always_run: true
-        stages: [post-commit, post-checkout, post-merge, post-rewrite]
       - id: check-workarounds
         name: check stale WORKAROUND markers
         entry: uv run --dev python config/check_workarounds.py
@@ -132,19 +107,26 @@ repos:
         # self-scopes to files carrying the bartz license header; `text` just
         # keeps binaries (e.g. .inv) out of the argument list.
         types: [text]
+      - id: vendor-latest-bartz
+        name: vendor latest_bartz (for ty)
+        # ty checks files under benchmarks/ that import the vendored latest
+        # bartz; refresh it first, else those imports do not resolve (e.g. on
+        # CI) or resolve against a stale copy. Runs before ty by declaration
+        # order, on the same python trigger.
+        entry: uv run --dev python benchmarks/_vendor_latest_bartz.py
+        language: system
+        pass_filenames: false
+        types: [python]
       - id: ty
         name: ty check
         # there is no official ty pre-commit hook (and an isolated hook env
         # would not see the project venv anyway), so run the dev-pinned ty.
-        # Whole-project check: per-file checking would miss cross-file breakage.
-        # Vendor latest_bartz first, else its imports in benchmarks/ do not
-        # resolve (e.g., on CI) or resolve against a stale copy.
-        entry: >
-          sh -c 'uv run --dev python benchmarks/_vendor_latest_bartz.py > /dev/null
-          && uv run --dev ty check'
+        # pre-commit feeds it the tracked python files: only the staged ones on
+        # a commit (fast incremental check), and all of them under `--all-files`
+        # — the comprehensive gate run by `make lint` and at merge time.
+        entry: uv run --dev ty check --
         language: system
-        pass_filenames: false
-        types_or: [python, toml]
+        types: [python]
       - id: check-returns-docstring
         name: forbid multi-line non-list `Returns` docstring sections
         # Matches a numpy-style `Returns` block whose first two non-blank lines

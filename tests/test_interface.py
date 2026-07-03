@@ -62,6 +62,8 @@ from jax import (
     vmap,
 )
 from jax import numpy as jnp
+from jax.nn import softmax
+from jax.scipy.special import ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import (
@@ -81,8 +83,13 @@ from pytest import CaptureFixture, FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
 
 from bartz import Bart as OriginalBart
-from bartz import PredictKind
-from bartz._interface import DataFrame, Series, predict_latent
+from bartz import PredictKind, SparseConfig
+from bartz._interface import (
+    DataFrame,
+    Series,
+    _guarded_response_variance,
+    predict_latent,
+)
 from bartz._jaxext import (
     get_default_device,
     get_default_devices,
@@ -94,7 +101,7 @@ from bartz._jaxext import (
     split,
 )
 from bartz._typing import kwdict
-from bartz.debug import MinimalTrace, sample_prior
+from bartz.debug import MinimalTrace, PriorSample, sample_prior
 from bartz.grove import (
     check_trace,
     describe_error,
@@ -247,6 +254,24 @@ class BartKW(NamedTuple):
             mask = jnp.array([t == 'binary' for t in outcome_type])
         return jnp.broadcast_to(mask, self.kshape)
 
+    def w_for_predict(
+        self, kind: str, *, on_train: bool
+    ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
+        """Return the `w` to pass to `Bart.predict`, or `None`, given kind and target.
+
+        On new test data weights are needed for outcome samples (any outcome
+        type) and for the mean of binary outcomes; on the training data they
+        are supplied automatically, so `None` is returned.
+        """
+        if on_train:
+            return None
+        elif kind == 'outcome_samples' or (
+            self.any_binary and kind in ('mean', 'mean_samples')
+        ):
+            return self.w_test
+        else:
+            return None
+
     @property
     def p(self) -> int:
         """Number of predictors (``kw['x_train'].shape[0]``)."""
@@ -300,8 +325,8 @@ class BartKW(NamedTuple):
 
     @property
     def sparse(self) -> bool:
-        """Value of ``kw['sparse']`` (or its `Bart` default)."""
-        return _bart_default(self.kw, 'sparse')
+        """Whether ``kw['sparse']`` (or its `Bart` default) enables sparsity."""
+        return _bart_default(self.kw, 'sparse').enabled
 
     @property
     def max_bins(self) -> int:
@@ -353,7 +378,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type='continuous',
-                    sparse=True,
+                    # non-default augment; variant 3 covers the default True
+                    sparse=SparseConfig(augment=False),
                     **common,
                     printevery=50,
                     binner=partial(RangeEvenBinner, max_bins=257),
@@ -426,9 +452,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type='continuous',
-                    w=train.error_scale,
-                    sparse=True,
-                    theta=2.0,
+                    error_scale=train.error_scale,
+                    sparse=SparseConfig(theta=2.0),
                     varprob=jnp.array([0.2, 0.8]),
                     **common,
                     printevery=50,
@@ -470,8 +495,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type='continuous',
-                    w=train.error_scale,
-                    sparse=True,
+                    error_scale=train.error_scale,
+                    sparse=SparseConfig(),
                     **common,
                     printevery=50,
                     binner=partial(RangeEvenBinner, max_bins=257),
@@ -497,7 +522,10 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 w_test=test.error_scale,
             )
 
-        # multivariate binary regression with binary X and high p
+        # multivariate heteroskedastic binary regression with binary X and high
+        # p; vector weights, to exercise the all-binary 2-D latent-scale paths
+        # in `step_z` and the mean squashing of `predict` (the scalar all-binary
+        # paths are covered by `test_heteroskedastic_probit`)
         case 5:
             gen_kw: kwdict = dict(GEN_KW, q=2)
             train, test = gen_data(
@@ -508,6 +536,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 k=2,
                 lambda_=0.5,
                 outcome_type='binary',
+                het_strength=0.5,
+                het_shape='vector',
                 **gen_kw,
             ).split(n)
             bkw = BartKW(
@@ -515,6 +545,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type='binary',
+                    error_scale=train.error_scale,
                     **common,
                     printevery=None,
                     # quantile-binned with binary X, deterministic via
@@ -532,10 +563,11 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     ),
                 ),
                 x_test=test.x,
+                w_test=test.error_scale,
             )
 
-        # multivariate mixed binary-continuous regression with sparsity with
-        # fixed theta and missing subunits
+        # multivariate heteroskedastic mixed binary-continuous regression with
+        # sparsity with fixed theta and missing subunits
         case 6:
             outcome_type = ('continuous', 'binary', 'binary')
             # p = 3 instead of 2 because gen_data requires p >= k
@@ -547,6 +579,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 lambda_=0.5,
                 s_distr=Gamma(2.0),
                 outcome_type=outcome_type,
+                het_strength=0.5,
+                het_shape='scalar',
                 **GEN_KW,
             ).split(n)
             bkw = BartKW(
@@ -554,9 +588,10 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type=outcome_type,
+                    error_scale=train.error_scale,
                     missing=gen_missing(keys.pop(), (len(outcome_type), n)),
-                    sparse=True,
-                    theta=2.0,
+                    # non-default augment; variant 4 covers the default True
+                    sparse=SparseConfig(theta=2.0, augment=False),
                     varprob=jnp.array([0.2, 0.3, 0.5]),
                     **common,
                     printevery=50,
@@ -580,6 +615,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     ),
                 ),
                 x_test=test.x,
+                w_test=test.error_scale,
             )
 
         # multivariate continuous regression with vector weights
@@ -600,7 +636,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     x_train=train.x,
                     y_train=train.y,
                     outcome_type='continuous',
-                    w=train.error_scale,
+                    error_scale=train.error_scale,
                     **common,
                     num_chains=None,
                 ),
@@ -643,8 +679,8 @@ def set_num_datapoints(kw: dict, n: int) -> dict:
     kw = kw.copy()
     kw['x_train'] = kw['x_train'][:, :n]
     kw['y_train'] = kw['y_train'][..., :n]
-    if kw.get('w') is not None:
-        kw['w'] = kw['w'][..., :n]
+    if kw.get('error_scale') is not None:
+        kw['error_scale'] = kw['error_scale'][..., :n]
     if kw.get('missing') is not None:
         kw['missing'] = kw['missing'][..., :n]
     return kw
@@ -790,9 +826,10 @@ class TestWithCachedBart:
                 if (
                     (str_path.endswith('.theta') and not step_theta)
                     or (
-                        str_path.endswith('.error_cov_inv')
-                        and bart._mcmc_state.error_cov_df is None
-                        # fixed covariance matrix, all chains equal
+                        # '.error_cov_inv' on the trace, '.…value' on the state;
+                        # fixed covariance matrix means all chains are equal
+                        str_path.endswith(('.error_cov_inv', '.error_cov_inv.value'))
+                        and bart._mcmc_state.error_cov_inv.nu is None
                     )
                     or (
                         x is not None
@@ -1037,7 +1074,8 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     kw['offset'] = 0.0
     kw['tau_num'] = 2.0
     if not bkw.all_binary:
-        kw['lambda_'] = 1.0
+        kw['sigma_scale'] = 1.0
+        kw['sigma_init'] = 1.0
 
     bart1 = Bart(**kw)
 
@@ -1053,13 +1091,48 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
 
+def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
+    """Binary regression rejects `sigma_scale`/`sigma_init`.
+
+    The rejection fires only when every outcome is binary (the outcome type then
+    collapses to the scalar ``binary``); skip the variants that would not raise.
+    """
+    if not bkw.all_binary:
+        pytest.skip('rejection only fires for all-binary outcomes')
+    for param in ('sigma_scale', 'sigma_init'):
+        with (
+            subtests.test(param=param),
+            pytest.raises(ValueError, match='Do not set `sigma_scale` or `sigma_init`'),
+        ):
+            Bart(**dict(bkw.kw, **{param: 1.0}))
+
+
+def test_outcome_samples_error_scale(keys: split) -> None:
+    """`outcome_samples` applies `error_scale` in univariate continuous regression.
+
+    The univariate weighted branch of `sample_outcome` is reachable only here: the
+    BART3 wrappers expose no `outcome_samples`, and the `bkw` fixture is
+    multivariate-only, so this uses the univariate variant directly.
+    """
+    bkw = make_kw(keys.pop(), 3)  # univariate continuous with error weights
+    bart = Bart(**bkw.kw)
+    out = bart.predict(
+        bkw.x_test, kind='outcome_samples', error_scale=bkw.w_test, key=keys.pop()
+    )
+    assert jnp.all(jnp.isfinite(out))
+
+
 def _assert_predictions_finite(bart: Bart, bkw: BartKW, keys: split) -> None:
     """Assert every prediction kind is finite, on train and test predictors."""
-    for x_test, w in (('train', None), (bkw.x_test, bkw.w_test)):
+    for x_test, on_train in (('train', True), (bkw.x_test, False)):
         for kind in ('mean', 'mean_samples', 'latent_samples'):
-            pred = bart.predict(x_test, kind=kind)
+            w = bkw.w_for_predict(kind, on_train=on_train)
+            pred = bart.predict(x_test, kind=kind, error_scale=w)
             assert jnp.all(jnp.isfinite(pred)), (x_test, kind)
-        out = bart.predict(x_test, kind='outcome_samples', w=w, key=keys.pop())
+        w = bkw.w_for_predict('outcome_samples', on_train=on_train)
+        out = bart.predict(
+            x_test, kind='outcome_samples', error_scale=w, key=keys.pop()
+        )
         assert jnp.all(jnp.isfinite(out)), (x_test, 'outcome_samples')
     # error sdev is NaN by design for binary components, so only check it
     # when there are none
@@ -1067,45 +1140,27 @@ def _assert_predictions_finite(bart: Bart, bkw: BartKW, keys: split) -> None:
         assert jnp.all(jnp.isfinite(bart.get_error_sdev()))
 
 
-def test_constant_y_train(bkw: BartKW, keys: split, subtests: SubTests) -> None:
+def test_constant_y_train(bkw: BartKW, keys: split) -> None:
     """Behavior when `y_train` is completely constant.
 
-    A constant response drives the automatic noise-scale estimate
-    (`sigest`, hence `lambda_`) to zero for any continuous outcome component,
-    which the API does not guard against: the degenerate error-variance prior
-    poisons the whole MCMC with NaNs. Binary outcomes are immune, because the
-    offset is clipped away from 0/1 and the noise scale is not a free parameter.
-    Supplying a positive `lambda_` repairs the continuous case; note the leaf
-    scale default ``tau_num = (max - min) / 2 = 0`` is left in place there to
-    confirm it is *not* fatal (it merely pins the leaves to zero).
+    A constant response has zero sample variance, but the error-precision prior
+    guards against it (``var(y_train)`` is replaced by 1 where zero), so the
+    defaults yield a well-behaved MCMC for any outcome type. The leaf scale
+    default ``tau_num = (max - min) / 2 = 0`` is left in place to confirm it is
+    *not* fatal: it merely pins the leaves to zero.
     """
     kw = dict(bkw.kw)
     # a single constant value: continuous components are flat, binary ones are
     # all-ones (so the all-zero/all-one offset clipping kicks in)
     kw['y_train'] = jnp.full_like(kw['y_train'], 1.0)
 
-    if bkw.all_binary:
-        # nothing degenerates with the defaults
-        with subtests.test('all binary, defaults are fine'):
-            bart = Bart(**kw)
-            _assert_predictions_finite(bart, bkw, keys)
-    else:
-        # at least one continuous component: the automatic noise prior collapses
-        with subtests.test('continuous defaults produce NaNs'):
-            # use the unwrapped class: the wrapper's trace-validity check would
-            # itself raise on the degenerate run, but we want to observe the NaNs
-            bart = OriginalBart(**kw)
-            with debug_nans(False):
-                latent = bart.predict('train', kind='latent_samples')
-            assert jnp.any(jnp.isnan(latent))
-
-        with subtests.test('explicit lambda_ repairs it'):
-            bart = Bart(**dict(kw, lambda_=1.0))
-            _assert_predictions_finite(bart, bkw, keys)
-            # tau_num kept at its degenerate default (0): the infinite leaf-prior
-            # precision pins every leaf to exactly zero
-            leaf_tree = bart._mcmc_state.forest.leaf_tree
-            assert_array_equal(leaf_tree, jnp.zeros_like(leaf_tree))
+    bart = Bart(**kw)
+    _assert_predictions_finite(bart, bkw, keys)
+    if not bkw.all_binary:
+        # tau_num kept at its degenerate default (0): the infinite leaf-prior
+        # precision pins every leaf to exactly zero
+        leaf_tree = bart._mcmc_state.forest.leaf_tree
+        assert_array_equal(leaf_tree, jnp.zeros_like(leaf_tree))
 
 
 def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
@@ -1183,21 +1238,21 @@ def test_output_shapes(bkw: BartKW, keys: split) -> None:
         bkw.n,
     )
 
-    assert bart.predict(bkw.x_test, kind='mean_samples').shape == (ndpost, *k, m)
-    assert bart.predict(bkw.x_test, kind='mean').shape == (*k, m)
+    mean_w = bkw.w_for_predict('mean', on_train=False)
+    assert bart.predict(bkw.x_test, kind='mean_samples', error_scale=mean_w).shape == (
+        ndpost,
+        *k,
+        m,
+    )
+    assert bart.predict(bkw.x_test, kind='mean', error_scale=mean_w).shape == (*k, m)
     assert bart.predict(bkw.x_test, kind='latent_samples').shape == (ndpost, *k, m)
     assert bart.predict(
-        bkw.x_test, kind='outcome_samples', w=bkw.w_test, key=keys.pop()
+        bkw.x_test, kind='outcome_samples', error_scale=bkw.w_test, key=keys.pop()
     ).shape == (ndpost, *k, m)
 
     with debug_nans(False):
         assert bart.get_error_sdev().shape == (ndpost, *k)
         assert bart.get_error_sdev(mean=True).shape == k
-
-    if bkw.all_binary:
-        assert bart.sigest is None
-    else:
-        assert nnone(bart.sigest).shape == k
 
     assert bart.varcount.shape == (ndpost, bkw.p)
     assert bart.varcount_mean.shape == (bkw.p,)
@@ -1218,8 +1273,6 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     kw = bkw.kw
     bart = Bart(**kw)
 
-    if not bkw.all_binary:
-        assert nnone(bart.sigest).dtype == jnp.float32
     assert bart.offset.dtype == jnp.float32
     assert isinstance(bart.n_save, int)
     assert bart.predict('train', kind='mean').dtype == jnp.float32
@@ -1312,14 +1365,6 @@ def test_output_ranges(bkw: BartKW, keys: split) -> None:
         assert jnp.all(jnp.isfinite(sdev_mean[~binary_mask]))
         assert jnp.all(sdev_mean[~binary_mask] > 0)
 
-    # sigest values for mixed
-    if bkw.all_binary:
-        assert bart.sigest is None
-    else:
-        assert bart.sigest is not None
-        assert jnp.all(bart.sigest[binary_mask] == 0.0)
-        assert jnp.all(bart.sigest[~binary_mask] > 0)
-
     # get_latent_prec: symmetry and positive definiteness
     if bkw.k is not None:  # pragma: no branch, always mv with defaults
         prec = bart.get_latent_prec()
@@ -1356,6 +1401,99 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
         t = jnp.abs(mean - mean_from_os) / sdev
         assert jnp.all(t < 5)
 
+    with subtests.test('binary mean uses the latent scale'):
+        # for binary components P(y=1) = Phi(latent / w); continuous ones are
+        # the plain latent mean (weights do not enter their mean)
+        w = bkw.kw.get('error_scale')
+        arg = latent_samples if w is None else latent_samples / w
+        expected = jnp.where(
+            bkw.binary_mask[..., None], ndtr(arg), latent_samples
+        ).mean(0)
+        assert_close_matrices(mean, expected, rtol=1e-5)
+
+
+@pytest.mark.parametrize(
+    ('outcome_type', 'k', 'het_shape'),
+    [
+        # univariate pure-binary with a scalar weight, and mixed
+        # binary-continuous with a per-component (vector) weight. Together with
+        # `bkw` variants v5 (all-binary, vector) and v6 (mixed, scalar) these
+        # complete the {pure, mixed} x {scalar, vector} weight matrix; the
+        # mixed-vector case is the only one that exercises the 2-D binary-row
+        # restriction in `step_z`.
+        pytest.param('binary', None, 'scalar', id='binary-scalar'),
+        pytest.param(('continuous', 'binary'), 2, 'vector', id='mixed-vector'),
+    ],
+)
+def test_heteroskedastic_probit(
+    keys: split,
+    subtests: SubTests,
+    outcome_type: str | tuple[str, ...],
+    k: int | None,
+    het_shape: Literal['scalar', 'vector'],
+) -> None:
+    """Weights scale the probit latent error, so P(y=1) = Phi(latent / w).
+
+    `test_predict_means` and `test_output_ranges` already cover the mean-squash
+    relationship (for the other two weight-shape combinations), the outcome
+    thresholding and the outcome-vs-mean consistency via the `bkw` fixture; this
+    adds the two combinations `bkw` lacks and the new-test-data weight checks.
+    """
+    n = 20
+    train, test = gen_data(
+        keys.pop(),
+        n=2 * n,
+        p=3,
+        k=k,
+        lambda_=None if k is None else 0.5,
+        outcome_type=outcome_type,
+        het_strength=0.5,
+        het_shape=het_shape,
+        **GEN_KW,
+    ).split(n)
+    w_train, w_test = train.error_scale, test.error_scale
+    assert w_train is not None
+    assert w_test is not None
+    bart = Bart(
+        x_train=train.x,
+        y_train=train.y,
+        outcome_type=outcome_type,
+        error_scale=w_train,
+        num_trees=19,
+        n_save=50,
+        n_burn=50,
+        seed=keys.pop(),
+        printevery=None,
+    )
+
+    latent = bart.predict('train', kind='latent_samples')
+    mean = bart.predict('train', kind='mean')
+
+    with subtests.test('binary mean uses the latent scale'):
+        # binary components: Phi(latent / w); continuous ones: untouched latent
+        if isinstance(outcome_type, tuple):
+            binary_mask = jnp.array([t == 'binary' for t in outcome_type])[:, None]
+        else:
+            binary_mask = jnp.array(True)
+        expected = jnp.where(binary_mask, ndtr(latent / w_train), latent).mean(0)
+        assert_close_matrices(mean, expected, rtol=1e-5)
+
+    with subtests.test('weights required on new test data'):
+        msg = 'required because the model was fit with weights'
+        for kind in ('mean', 'mean_samples', 'outcome_samples'):
+            extra: dict = {'key': keys.pop()} if kind == 'outcome_samples' else {}
+            with pytest.raises(ValueError, match=msg):
+                bart.predict(test.x, kind=kind, **extra)
+            pred = bart.predict(test.x, kind=kind, error_scale=w_test, **extra)
+            assert jnp.all(jnp.isfinite(pred))
+
+    if w_test.ndim == 2:
+        with subtests.test('test weights must match the component dimension'):
+            # a 2-D test weight with the wrong number of components is rejected
+            bad = jnp.ones((w_test.shape[0] + 1, w_test.shape[1]))
+            with pytest.raises(ValueError, match='shape mismatch with training'):
+                bart.predict(test.x, kind='mean', error_scale=bad)
+
 
 def test_predict(bkw: BartKW) -> None:
     """Check that predict with x_train matches predict with 'train'."""
@@ -1391,11 +1529,15 @@ def test_count_prec_tree_caches_valid(bkw: BartKW, subtests: SubTests) -> None:
         )
         assert (forest.prec_tree is not None) == (state.prec_scale is not None)
 
-    # flatten the chain axis (if any) into the tree axis
+    # flatten the chain axis (if any) into the tree axis. `leaf_indices` carries
+    # its chain axis after the tree axis (unlike `split_tree`), so move it to the
+    # front first, to match `split_tree`'s chain-leading flattening order
     _, n = state.X.shape
     half = forest.split_tree.shape[-1]
     split_tree = forest.split_tree.reshape(-1, half)
-    leaf_indices = forest.leaf_indices.reshape(-1, n)
+    leaf_indices = chain_to_axis(
+        forest.leaf_indices, chain_vmap_axes(forest).leaf_indices
+    ).reshape(-1, n)
 
     # mask of the actual leaves over the full heap, per tree
     leaf_mask = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
@@ -1473,9 +1615,13 @@ class TestVarprobAttr:
         assert jnp.all(bart.varprob_mean == bart.varprob)
 
 
-@pytest.mark.parametrize('theta', ['fixed', 'free'])
-def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> None:
-    """Check that variable selection works."""
+@pytest.mark.parametrize(
+    ('theta', 'augment'), [('fixed', False), ('free', False), ('free', True)]
+)
+def test_variable_selection(
+    keys: split, theta: Literal['fixed', 'free'], augment: bool
+) -> None:
+    """Check that variable selection works, with and without augmentation."""
     p = 100
     peff = 5
     n = 1000
@@ -1486,8 +1632,9 @@ def test_variable_selection(keys: split, theta: Literal['fixed', 'free']) -> Non
         x_train=X,
         y_train=y,
         n_burn=1000,
-        sparse=True,
-        theta=float(peff) if theta == 'fixed' else None,
+        sparse=SparseConfig(
+            augment=augment, theta=float(peff) if theta == 'fixed' else None
+        ),
         seed=keys.pop(),
     )
 
@@ -1544,13 +1691,9 @@ def test_scale_shift(bkw: BartKW) -> None:
         jnp.where(mask, bart2.offset, (bart2.offset - offset) / scale),
         rtol=1e-5,
     )
-    assert bart1.sigest is not None
-    assert bart2.sigest is not None
-    assert_close_matrices(
-        bart1.sigest, jnp.where(mask, bart2.sigest, bart2.sigest / scale), rtol=1e-6
-    )
     assert_array_equal(
-        nnone(bart1._mcmc_state.error_cov_df), nnone(bart2._mcmc_state.error_cov_df)
+        nnone(bart1._mcmc_state.error_cov_inv.nu),
+        nnone(bart2._mcmc_state.error_cov_inv.nu),
     )
 
     masked_scale = jnp.where(mask, 1.0, scale)
@@ -1565,30 +1708,57 @@ def test_scale_shift(bkw: BartKW) -> None:
     )
 
     assert_close_matrices(
-        nnone(bart1._mcmc_state.error_cov_scale) * cov_scale,
-        nnone(bart2._mcmc_state.error_cov_scale),
+        nnone(bart1._mcmc_state.error_cov_inv.rate) * cov_scale,
+        nnone(bart2._mcmc_state.error_cov_inv.rate),
         rtol=1e-6,
     )
 
     mask_pred = mask[..., None]
 
-    # predictions are derived from the stored leaves, so with reduced leaf
-    # precision the rescaling equivalence holds only to the rounding floor
+    # use a single loose tolerance: the heteroskedastic binary-latent step
+    # accumulates float32 rounding, predictions derived from reduced-precision
+    # stored leaves hold only to the rounding floor, and 1e-3 covers all cases
     leaf_tree = bart1._mcmc_state.forest.leaf_tree
-    pred_rtol = condf(leaf_tree, 1e-4, 1e-3)
+    pred_rtol = 1e-3
 
-    # check on both the training points (via the 'train' shortcut) and explicit
-    # test points, for the latent function and the outcome mean
-    for points1, points2 in (('train', 'train'), (kw['x_train'], x)):
-        for kind in ('latent_samples', 'mean'):
-            pred1 = bart1.predict(points1, kind=kind)
-            pred2 = bart2.predict(points2, kind=kind)
-            assert_close_matrices(
-                pred1,
-                jnp.where(mask_pred, pred2, (pred2 - offset) / scale),
-                rtol=pred_rtol,
-                reduce_rank=True,
-            )
+    yhat1 = bart1.predict('train', kind='latent_samples')
+    yhat2 = bart2.predict('train', kind='latent_samples')
+    assert_close_matrices(
+        yhat1,
+        jnp.where(mask_pred, yhat2, (yhat2 - offset) / scale),
+        rtol=pred_rtol,
+        reduce_rank=True,
+    )
+
+    mean1 = bart1.predict('train', kind='mean')
+    mean2 = bart2.predict('train', kind='mean')
+    assert_close_matrices(
+        mean1,
+        jnp.where(mask_pred, mean2, (mean2 - offset) / scale),
+        rtol=pred_rtol,
+        reduce_rank=True,
+    )
+
+    yhat_test1 = bart1.predict(kw['x_train'], kind='latent_samples')
+    yhat_test2 = bart2.predict(x, kind='latent_samples')
+    assert_close_matrices(
+        yhat_test1,
+        jnp.where(mask_pred, yhat_test2, (yhat_test2 - offset) / scale),
+        rtol=pred_rtol,
+        reduce_rank=True,
+    )
+
+    # binary mean predictions on new test data need the (training) weights; the
+    # two models share the same `w`, and continuous-only outcomes ignore it
+    mean_w = bart1._mcmc_state.error_scale if bkw.any_binary else None
+    yhat_test_mean1 = bart1.predict(kw['x_train'], kind='mean', error_scale=mean_w)
+    yhat_test_mean2 = bart2.predict(x, kind='mean', error_scale=mean_w)
+    assert_close_matrices(
+        yhat_test_mean1,
+        jnp.where(mask_pred, yhat_test_mean2, (yhat_test_mean2 - offset) / scale),
+        rtol=pred_rtol,
+        reduce_rank=True,
+    )
 
     # mixed outcomes accumulate more float32 rounding through the binary-latent
     # step, so the sdev comparisons get a looser tolerance; with reduced leaf
@@ -1628,8 +1798,8 @@ def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
     kw2 = dict(kw, seed=random.clone(kw['seed']))
     kw2['x_train'] = kw['x_train'][:, perm]
     kw2['y_train'] = kw['y_train'][..., perm]
-    if kw.get('w') is not None:
-        kw2['w'] = kw['w'][..., perm]
+    if kw.get('error_scale') is not None:
+        kw2['error_scale'] = kw['error_scale'][..., perm]
     if kw.get('missing') is not None:
         kw2['missing'] = kw['missing'][..., perm]
     bart2 = Bart(**kw2)
@@ -1650,11 +1820,16 @@ def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
     # reduced-precision leaves quantize the permutation-dependent float32
     # reductions, so invariance holds only to the rounding floor; the leaves and
     # everything derived from them carry this loss
-    rtol = condf(bart1._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
+    leaf_tree = bart1._mcmc_state.forest.leaf_tree
 
     def check_equal(
         path: KeyPath, x1: Shaped[Array, '*shape'], x2: Shaped[Array, '*shape']
     ) -> None:
+        rtol = condf(
+            leaf_tree,
+            1e-4 if x1.platform() != 'cpu' else 1e-5,  # ty: ignore[unresolved-attribute]
+            1e-3,
+        )
         assert_close_matrices(
             x2, x1, err_msg=f'{keystr(path)}: ', rtol=rtol, reduce_rank=True
         )
@@ -1739,14 +1914,18 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
             rtol=1e-6,
         )
 
-    # check bart.sigest and set expected tau_num
+    # set expected tau_num and check the error prior default
     if bkw.all_binary:
         tau_num = 3
-        assert bart.sigest is None
     else:
         tau_num = jnp.where(mask, 3.0, 1.0)
-        expected_sigest = jnp.where(mask, 0.0, 1.0)
-        assert_array_equal(nnone(bart.sigest), expected_sigest)
+        # var(y_train) is 0 (n=1) or undefined (n=0), guarded to 1, so the
+        # default prior rate is nu for the continuous components
+        nu = nnone(bart._mcmc_state.error_cov_inv.nu)
+        rate = jnp.diag(nnone(bart._mcmc_state.error_cov_inv.rate))
+        assert_close_matrices(
+            rate[~mask], jnp.broadcast_to(nu, rate[~mask].shape), rtol=1e-6
+        )
 
     # check leaf_prior_cov_inv
     expected_cov_inv = (2**2 * bkw.num_trees) / tau_num**2
@@ -1787,8 +1966,15 @@ def test_two_datapoints(bkw: BartKW) -> None:
     kw['init_kw'] = init_kw
     bart = Bart(**kw)
     if not bkw.all_binary:
-        ref_sigest = jnp.where(bkw.binary_mask, 0.0, kw['y_train'].std(axis=-1))
-        assert_close_matrices(nnone(bart.sigest), ref_sigest, rtol=1e-6)
+        # the default prior rate is nu * (precision-weighted) var(y_train) per
+        # continuous component, see `_guarded_response_variance`
+        mask = bkw.binary_mask
+        nu = nnone(bart._mcmc_state.error_cov_inv.nu)
+        vary = _guarded_response_variance(
+            kw['y_train'], kw.get('error_scale'), kw.get('missing')
+        )
+        rate = jnp.diag(nnone(bart._mcmc_state.error_cov_inv.rate))
+        assert_close_matrices(rate[~mask], nu * vary[~mask], rtol=1e-6)
     if bkw.uses_quantile_binner:
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)
@@ -1854,12 +2040,40 @@ def test_xinfo_wrong_p() -> None:
         Bart(**kw)
 
 
-@pytest.mark.parametrize(('p', 'nsplits'), [(1, 1), (3, 2), (10, 1), (10, 255)])
-def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
+# The sparse variants check the variable-selection prior (`log_s`, and `theta`
+# when free). Their Beta(a, b) prior on theta/(theta+rho) is kept concentrated:
+# a diffuse prior (e.g. the a=0.5, b=1 default) makes the theta<->log_s Gibbs
+# loop mix too slowly to reach the prior within the burn-in budget, the more so
+# with blocked variables (nsplits=1). They use `augment=True` so the MCMC
+# samples the exact `log_s` full conditional, matching `sample_prior`. The
+# blocked low-p cases ((1, 1), (3, 2)) stress-test that augmentation: without it
+# the variable usage is badly biased there (`s` too uniform).
+@pytest.mark.parametrize(
+    ('p', 'nsplits', 'sparsity'),
+    [
+        (1, 1, None),
+        (3, 2, None),
+        (10, 1, None),
+        (10, 255, None),
+        (10, 1, 'fixed'),
+        (10, 1, 'free'),
+        (10, 255, 'free'),
+        (1, 1, 'free'),
+        (3, 2, 'free'),
+    ],
+)
+def test_prior(
+    keys: split, p: int, nsplits: int, sparsity: str | None, subtests: SubTests
+) -> None:
     """Check that the posterior without data is equivalent to the prior."""
-    bart = run_bart_like_prior(keys.pop(), p, nsplits, subtests)
+    # few, heavily-blocked variables make the variable-selection Gibbs loop mix
+    # slowly, so the small-p sparse cases need a longer chain to reach the prior.
+    n_burn, n_save = (6000, 2000) if sparsity is not None and p <= 3 else (3000, 1000)
+    bart = run_bart_like_prior(
+        keys.pop(), p, nsplits, subtests, sparsity, n_burn, n_save
+    )
 
-    prior_trace = sample_prior_like(keys.pop(), bart, subtests)
+    prior, prior_trace = sample_prior_like(keys.pop(), bart, subtests)
 
     with subtests.test('number of stub trees'):
         nstub_mcmc = count_stub_trees(bart._main_trace.split_tree)
@@ -1878,13 +2092,18 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
             bart._mcmc_state.forest.max_split.size, prior_trace
         )
 
-        with subtests.test('varcount'):
-            rhat_varcount = rhat_rank([bart.varcount, varcount_prior], split=False)
-            # `rhat_varcount` is a max over `p` rank-rhat values; its upper tail
-            # reaches ~1.05 even when the MCMC matches the prior exactly (checked
-            # over 100 seeds for both p=3 and p=10), so a tighter bound would
-            # false-fail on ~10% of seeds.
-            assert_array_less(rhat_varcount, 1.05)
+        if sparsity is None:
+            # under variable selection the per-variable counts are exchangeable
+            # but their labelling mixes very slowly (a sparse `s` sticks on a
+            # variable for many iterations), so this never converges; the
+            # label-invariant `effective predictors` subtest checks `s` instead.
+            with subtests.test('varcount'):
+                rhat_varcount = rhat_rank([bart.varcount, varcount_prior], split=False)
+                # `rhat_varcount` is a max over `p` rank-rhat values; its upper
+                # tail reaches ~1.05 even when the MCMC matches the prior exactly
+                # (checked over 100 seeds for both p=3 and p=10), so a tighter
+                # bound would false-fail on ~10% of seeds.
+                assert_array_less(rhat_varcount, 1.05)
 
         with subtests.test('number of nodes'):
             sum_varcount_mcmc = bart.varcount.sum(axis=1)
@@ -1920,19 +2139,73 @@ def test_prior(keys: split, p: int, nsplits: int, subtests: SubTests) -> None:
         rhat_yhat = rhat_rank([yhat_mcmc, yhat_prior], split=False)
         assert_array_less(rhat_yhat, 1.01)
 
+    if sparsity is not None:
+        check_sparsity_prior(bart, prior, subtests)
+
+
+def check_sparsity_prior(bart: Bart, prior: PriorSample, subtests: SubTests) -> None:
+    """Check the MCMC matches the prior on the variable-selection parameters."""
+    # `effective predictors` is a label-invariant summary of the variable
+    # selection probabilities `s`, so unlike the per-variable counts it is immune
+    # to the slow mixing of which variables carry the mass. With p=1 it is
+    # degenerate (s is always [1], and the augmentation is a no-op), so skip it.
+    if bart._mcmc_state.forest.max_split.size > 1:
+        with subtests.test('effective predictors'):
+            eff_mcmc = effective_predictors(nnone(bart._main_trace.varprob))
+            eff_prior = effective_predictors(softmax(nnone(prior.log_s), axis=-1))
+            rhat_eff = rhat_rank([eff_mcmc, eff_prior], split=False)
+            # the bound is loose because `s` mixes slowly with few blocked
+            # variables; it still easily catches a broken augmentation, which
+            # biases the usage enough to push this rhat well past 1.3.
+            assert_array_less(rhat_eff, 1.08)
+
+    if bart._mcmc_state.forest.rho is not None:  # `theta` is sampled
+        with subtests.test('theta'):
+            rhat_theta = rhat_rank(
+                [nnone(bart._main_trace.theta), nnone(prior.theta)], split=False
+            )
+            assert_array_less(rhat_theta, 1.05)
+
+
+def sparsity_prior_params(sparsity: str | None, p: int) -> kwdict:
+    """Sparsity-prior hyperparameters shared by the MCMC and the prior draw."""
+    params = {'fixed': dict(theta=float(p)), 'free': dict(a=20.0, b=20.0, rho=float(p))}
+    return {} if sparsity is None else params[sparsity]
+
+
+def effective_predictors(
+    varprob: Float32[Array, '*batch p'],
+) -> Float32[Array, ' *batch']:
+    """Effective number of predictors, the exp of the split-probability entropy."""
+    entropy = -jnp.sum(jnp.where(varprob > 0, varprob * jnp.log(varprob), 0.0), axis=-1)
+    return jnp.exp(entropy)
+
 
 def run_bart_like_prior(
-    key: Key[Array, ''], p: int, nsplits: int, subtests: SubTests
+    key: Key[Array, ''],
+    p: int,
+    nsplits: int,
+    subtests: SubTests,
+    sparsity: str | None,
+    n_burn: int,
+    n_save: int,
 ) -> Bart:
     """Run `Bart` without datapoints to sample the prior distribution."""
     xinfo = jnp.broadcast_to(jnp.arange(nsplits, dtype=jnp.float32), (p, nsplits))
+    sparse_kw = (
+        {}
+        if sparsity is None
+        else dict(
+            sparse=SparseConfig(augment=True, **sparsity_prior_params(sparsity, p))
+        )
+    )
 
     bart = Bart(
         x_train=jnp.empty((p, 0)),
         y_train=jnp.empty(0),
         num_trees=20,
-        n_save=1000,
-        n_burn=3000,
+        n_save=n_save,
+        n_burn=n_burn,
         printevery=None,
         binner=partial(GivenSplitsBinner, xinfo=xinfo),
         seed=key,
@@ -1942,6 +2215,7 @@ def run_bart_like_prior(
             min_points_per_leaf=None,
             save_ratios=True,
         ),
+        **sparse_kw,
     )
 
     with subtests.test('likelihood ratio = 1'):
@@ -1965,28 +2239,39 @@ def run_bart_like_prior(
 
 def sample_prior_like(
     key: Key[Array, ''], bart: Bart, subtests: SubTests
-) -> MinimalTrace:
+) -> tuple[PriorSample, MinimalTrace]:
     """Sample from the prior with the same settings used in `bart`."""
-    p_nonterminal = bart._mcmc_state.forest.p_nonterminal
+    forest = bart._mcmc_state.forest
+    p_nonterminal = forest.p_nonterminal
     max_depth = tree_depth(p_nonterminal)
     indices = 2 ** jnp.arange(max_depth - 1)
     p_nonterminal = p_nonterminal[indices]
 
+    # mirror the variable-selection prior the MCMC used, read back from the state:
+    # free theta (a, b, rho set), fixed theta, or no variable selection
+    if forest.rho is not None:
+        sparse_kw = dict(a=forest.a, b=forest.b, rho=forest.rho)
+    elif forest.theta is not None:
+        sparse_kw = dict(theta=forest.theta)
+    else:
+        sparse_kw = {}
+
     prior_trees = sample_prior(
         key,
         bart.n_save,
-        len(bart._mcmc_state.forest.leaf_tree),
-        bart._mcmc_state.forest.max_split,
+        len(forest.leaf_tree),
+        forest.max_split,
         p_nonterminal,
-        jnp.sqrt(jnp.reciprocal(nnone(bart._mcmc_state.forest.leaf_prior_cov_inv))),
+        jnp.sqrt(jnp.reciprocal(nnone(forest.leaf_prior_cov_inv))),
+        **sparse_kw,
     )
 
     with subtests.test('check prior trees'):
-        bad = check_trace(prior_trees, bart._mcmc_state.forest.max_split)
+        bad = check_trace(prior_trees, forest.max_split)
         bad_count = jnp.count_nonzero(bad)
         assert bad_count == 0
 
-    return project(MinimalTrace, replace(prior_trees, offset=bart.offset))
+    return prior_trees, project(MinimalTrace, replace(prior_trees, offset=bart.offset))
 
 
 def count_stub_trees(
@@ -2034,7 +2319,7 @@ def test_jit(bkw: BartKW) -> None:
 
     X = kw.pop('x_train')
     y = kw.pop('y_train')
-    w = kw.pop('w', None)
+    w = kw.pop('error_scale', None)
     key = kw.pop('seed')
 
     def task(
@@ -2043,7 +2328,7 @@ def test_jit(bkw: BartKW) -> None:
         w: Float32[Array, ' n'] | None,
         key: Key[Array, ''],
     ) -> tuple[State, Shaped[Array, 'ndpost n'] | Shaped[Array, 'ndpost k n']]:
-        bart = OriginalBart(X, y, w=w, **kw, seed=key)
+        bart = OriginalBart(X, y, error_scale=w, **kw, seed=key)
         return bart._mcmc_state, bart.predict('train', kind='latent_samples')
 
     task_compiled = jit(task)
@@ -2072,7 +2357,7 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
 
     X = kw.pop('x_train')
     y = kw.pop('y_train')
-    w = kw.pop('w', None)
+    w = kw.pop('error_scale', None)
     missing = kw.pop('missing', None)
     kw.pop('seed')  # replaced by a distinct per-repetition key below
 
@@ -2109,7 +2394,7 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
         missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
         key: Key[Array, ''],
     ) -> OriginalBart:
-        return OriginalBart(X, y, w=w, missing=missing, **kw, seed=key)
+        return OriginalBart(X, y, error_scale=w, missing=missing, **kw, seed=key)
 
     batched = jit(vmap(task))(Xb, yb, wb, mb, key)
 
@@ -2129,7 +2414,11 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
     # reduced-precision leaves quantize the slightly different float32 reductions
     # of vmapped vs looped runs, so equivalence holds only to the rounding floor;
     # the leaves and everything derived from them carry this loss
-    rtol = condf(singles[0]._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
+    rtol = condf(
+        singles[0]._mcmc_state.forest.leaf_tree,
+        1e-4 if platform != 'cpu' else 1e-5,
+        1e-3,
+    )
 
     def check(a: Shaped[Array, '*shape'], b: Shaped[Array, '*shape']) -> None:
         assert_close_matrices(a, b, rtol=rtol, reduce_rank=True)
@@ -2283,7 +2572,7 @@ def test_polars(bkw: BartKW) -> None:
         seed=random.clone(kw2['seed']),
         x_train=to_polars(kw['x_train']),
         y_train=to_polars(kw['y_train']),
-        w=to_polars(kw.get('w')),
+        error_scale=to_polars(kw.get('error_scale')),
         missing=to_polars(kw.get('missing')),
     )
     bart2 = Bart(**kw2)
@@ -2308,11 +2597,14 @@ def test_data_format_mismatch(bkw: BartKW) -> None:
     kw = bkw.kw
     kw.update(
         x_train=pl.DataFrame(numpy.array(kw['x_train']).T),
-        w=None if kw.get('w') is None else pl.Series(numpy.array(kw['w'])),
+        error_scale=None
+        if kw.get('error_scale') is None
+        else pl.Series(numpy.array(kw['error_scale'])),
     )
     bart = Bart(**kw)
+    w = bkw.w_for_predict('mean', on_train=False)
     with pytest.raises(ValueError, match='format mismatch'):
-        bart.predict(numpy.array(bkw.x_test))
+        bart.predict(numpy.array(bkw.x_test), error_scale=w)
 
 
 def test_automatic_integer_types(bkw: BartKW) -> None:
@@ -2390,20 +2682,16 @@ def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
 
     for kind in PredictKind:
         extra: dict = {'key': keys.pop()} if kind is PredictKind.outcome_samples else {}
+        # the mean collapses the chain axis; the other kinds keep it
+        chains = kind is not PredictKind.mean
         yhat_train = bart.predict('train', kind=kind, **extra)
-        if kind is PredictKind.mean:
-            check(yhat_train, chains=False, data=True)
-        else:
-            check(yhat_train, chains=True, data=True)
+        check(yhat_train, chains=chains, data=True)
 
-            if kind is PredictKind.outcome_samples:
-                extra['w'] = bkw.w_test
-            yhat_test = bart.predict(bkw.x_test, kind=kind, **extra)
-            check(yhat_test, chains=True, data=True)
+        extra['error_scale'] = bkw.w_for_predict(kind.value, on_train=False)
+        yhat_test = bart.predict(bkw.x_test, kind=kind, **extra)
+        check(yhat_test, chains=chains, data=True)
 
     assert bart.offset.is_fully_replicated
-    if bart.sigest is not None:
-        assert bart.sigest.is_fully_replicated
     assert bart.varcount_mean.is_fully_replicated
     assert bart.varprob_mean.is_fully_replicated
 
@@ -2417,7 +2705,7 @@ class TestVarprobParam:
         i = random.randint(keys.pop(), (), 0, bkw.p)
         vp = jnp.full(bkw.p, 0.001).at[i].set(1)
         vp /= vp.sum()
-        kw.update(sparse=False, varprob=vp)
+        kw.update(sparse=SparseConfig(enabled=False), varprob=vp)
         bart = Bart(**kw)
         vc = bart.varcount_mean
         vc /= vc.sum()
@@ -2451,9 +2739,19 @@ def run_bart_and_block(bkw: BartKW, keys: split) -> None:
         bart.predict('train', kind='mean_samples'),
         bart.predict('train', kind='outcome_samples', key=keys.pop()),
         bart.predict(bkw.x_test, kind='latent_samples'),
-        bart.predict(bkw.x_test, kind='mean'),
-        bart.predict(bkw.x_test, kind='mean_samples'),
-        bart.predict(bkw.x_test, kind='outcome_samples', key=keys.pop(), w=bkw.w_test),
+        bart.predict(
+            bkw.x_test,
+            kind='mean',
+            error_scale=bkw.w_for_predict('mean', on_train=False),
+        ),
+        bart.predict(
+            bkw.x_test,
+            kind='mean_samples',
+            error_scale=bkw.w_for_predict('mean_samples', on_train=False),
+        ),
+        bart.predict(
+            bkw.x_test, kind='outcome_samples', key=keys.pop(), error_scale=bkw.w_test
+        ),
         bart.get_error_sdev(),
         bart.get_latent_prec(),
         bart.varcount,
@@ -2795,27 +3093,15 @@ class TestMVBartInterface:
             bart = Bart(offset=0.0, **kw)
             assert bart.offset.shape == (k,)
 
-        with subtests.test('sigest'):
-            bart = Bart(sigest=1.0, **kw)
-            assert nnone(bart.sigest).shape == (k,)
+        with subtests.test('sigma_scale'):
+            bart = Bart(sigma_scale=1.0, **kw)
+            assert nnone(bart._mcmc_state.error_cov_inv.rate).shape == (k, k)
 
-        with subtests.test('lambda_'):
-            bart = Bart(lambda_=1.0, **kw)
-            assert bart.sigest is None
-            assert nnone(bart._mcmc_state.error_cov_scale).shape == (k, k)
-
-    def test_mixed_rejects_weights(self, example_data: ExampleData) -> None:
-        """Mixed outcome_type + weights should raise."""
-        x, y, w, kw = example_data
-        k, _ = y.shape
-        with pytest.raises(ValueError, match='binary'):
-            Bart(
-                x_train=x,
-                y_train=y,
-                w=w,
-                **kw,
-                outcome_type=['binary'] + ['continuous'] * (k - 1),
-            )
+        with subtests.test('sigma_init'):
+            # no MCMC steps (n_burn = n_save = 0), so the state holds the init:
+            # a precision of 1 / sigma_init**2 = 1 broadcast to all components
+            bart = Bart(sigma_init=1.0, **kw)
+            assert_array_equal(nnone(bart._mcmc_state.error_cov_inv.value), jnp.eye(k))
 
     def test_outcome_type_length_mismatch(self, example_data: ExampleData) -> None:
         """Sequence outcome_type with wrong length should raise."""
@@ -2846,14 +3132,14 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         return arr_mv.squeeze(0), arr_mv
 
     y_uv, y_mv = to_uv_mv(bkw.kw['y_train'])
-    w_uv, w_mv = to_uv_mv(bkw.kw.get('w'))
+    w_uv, w_mv = to_uv_mv(bkw.kw.get('error_scale'))
     missing_uv, missing_mv = to_uv_mv(bkw.kw.get('missing'))
 
     bkw.kw.update(outcome_type=outcome_type, n_burn=0, n_save=0)
-    for key in ('y_train', 'w', 'missing'):
+    for key in ('y_train', 'error_scale', 'missing'):
         bkw.kw.pop(key, None)
-    bart_uv = Bart(y_train=y_uv, w=w_uv, missing=missing_uv, **bkw.kw)
-    bart_mv = Bart(y_train=y_mv, w=w_mv, missing=missing_mv, **bkw.kw)
+    bart_uv = Bart(y_train=y_uv, error_scale=w_uv, missing=missing_uv, **bkw.kw)
+    bart_mv = Bart(y_train=y_mv, error_scale=w_mv, missing=missing_mv, **bkw.kw)
 
     state_uv = bart_uv._mcmc_state
     state_mv = bart_mv._mcmc_state
@@ -2869,8 +3155,10 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         rtol=1e-7,
     )
     assert_close_matrices(
-        chain_to_axis(state_uv.error_cov_inv, uv_axes.error_cov_inv),
-        chain_to_axis(state_mv.error_cov_inv, mv_axes.error_cov_inv).squeeze((-2, -1)),
+        chain_to_axis(state_uv.error_cov_inv.value, uv_axes.error_cov_inv.value),
+        chain_to_axis(
+            state_mv.error_cov_inv.value, mv_axes.error_cov_inv.value
+        ).squeeze((-2, -1)),
         rtol=1e-6,
     )
 
@@ -2882,14 +3170,13 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         rtol=1e-6,
     )
     if outcome_type == 'continuous':
-        assert_array_equal(nnone(state_uv.error_cov_df), nnone(state_mv.error_cov_df))
-        assert_allclose(
-            nnone(state_uv.error_cov_scale),
-            nnone(state_mv.error_cov_scale).reshape(()),
-            rtol=1e-6,
+        assert_array_equal(
+            nnone(state_uv.error_cov_inv.nu), nnone(state_mv.error_cov_inv.nu)
         )
         assert_allclose(
-            nnone(bart_uv.sigest), nnone(bart_mv.sigest).squeeze(0), rtol=1e-6
+            nnone(state_uv.error_cov_inv.rate),
+            nnone(state_mv.error_cov_inv.rate).reshape(()),
+            rtol=1e-6,
         )
 
     # Forest structure
@@ -2987,8 +3274,9 @@ def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
         assert x1.dtype == x2.dtype
         assert x1.sharding.is_equivalent_to(x2.sharding, x1.ndim)
         if jnp.issubdtype(x1.dtype, jnp.floating):
+            rtol = 1e-4 if x1.platform() != 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
             assert_close_matrices(
-                x1, x2, rtol=1e-5, err_msg=keystr(path), reduce_rank=True
+                x1, x2, rtol=rtol, err_msg=keystr(path), reduce_rank=True
             )
         else:
             assert_array_equal(x1, x2, strict=True, err_msg=keystr(path))
@@ -3117,48 +3405,19 @@ class TestDevicePlacement:
     ) -> None:
         """`predict` places new test data on the device requested at fit time."""
         bart = Bart(**dict(single_device_kw, devices=other_device))
-        pred = bart.predict(bkw.x_test, kind='mean')
+        w = bkw.w_for_predict('mean', on_train=False)
+        pred = bart.predict(bkw.x_test, kind='mean', error_scale=w)
         assert pred.devices() == {other_device}
 
 
-def test_sigest_wrong_special_value(bkw: BartKW) -> None:
-    """Trigger error on unrecognized `sigest` value."""
+@pytest.mark.parametrize('param', ['sigma_scale', 'sigma_init'])
+def test_sigma_wrong_special_value(bkw: BartKW, param: str) -> None:
+    """Trigger error on unrecognized `sigma_scale`/`sigma_init` value."""
     value = 'ohohoh'
     if bkw.all_binary:
         pytest.skip('Parameter ignored with binary outcomes.')
-    kw = dict(bkw.kw, sigest=value)
-    # the import-hook type checker would reject the invalid `sigest` literal
-    # before `Bart` raises its own `ValueError`, so disable it here
+    kw = dict(bkw.kw, **{param: value})
+    # the import-hook type checker would reject the invalid literal before
+    # `Bart` raises its own `ValueError`, so disable it here
     with jaxtyping_disabled(), pytest.raises(ValueError, match=value):
         Bart(**kw)
-
-
-def test_sigest_cg(bkw: BartKW) -> None:
-    """Check the `sigest='cg'` is an approximation of `sigest='ols-or-variance'`."""
-    if bkw.p >= bkw.n or bkw.all_binary:
-        pytest.skip('Requires p < n and continuous outcomes.')
-    bart_ols = Bart(**dict(bkw.kw, sigest='ols-or-variance'))
-    bart_cg = Bart(**dict(bkw.kw, sigest='cg'))
-    mask = ~bkw.binary_mask
-    assert_close_matrices(
-        nnone(bart_cg.sigest)[mask], nnone(bart_ols.sigest)[mask], rtol=1e-6
-    )
-
-
-def test_sigest_auto_cg(keys: split) -> None:
-    """Check the `sigest='auto'` branch that switches to 'cg'."""
-    n = 110
-    p = 1000
-    assert n * p * p > 10_000 * 100 * 100
-
-    x = random.normal(keys.pop(), (p, n))
-    y = random.normal(keys.pop(), (n,))
-    # y is random so we can check 'cg' is regularizing in this high-p problem:
-    # the correct answer is sigest = std(y), but since p > n ordinary linear
-    # regression would always overfit perfectly and return sigest = 0.
-
-    bart = Bart(x, y, seed=keys.pop(), n_save=0, n_burn=0)
-    stdy = jnp.std(y)
-    assert bart.sigest is not None
-    assert bart.sigest <= stdy
-    assert bart.sigest >= stdy * 1e-3  # not that much regularization...

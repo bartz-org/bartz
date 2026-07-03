@@ -768,8 +768,11 @@ class TestErrorCorrelation:
         ident = gen_data(
             random.clone(key), lambda_=0.5, error_corr=jnp.eye(k), **KWARGS
         )
-        assert_close_matrices(ident.z, indep.z, rtol=1e-6)
-        assert_close_matrices(ident.y, indep.y, rtol=1e-6)
+        # on gpu the identity-correlation path goes through a matmul that the
+        # independent path skips, so the two diverge by float noise
+        rtol = 1e-4 if ident.z.platform() != 'cpu' else 1e-6  # ty: ignore[unresolved-attribute]
+        assert_close_matrices(ident.z, indep.z, rtol=rtol)
+        assert_close_matrices(ident.y, indep.y, rtol=rtol)
 
     def test_normalized_unconditionally(self, keys: split) -> None:
         """A covariance and its correlation give the same errors (unit-diagonal norm)."""

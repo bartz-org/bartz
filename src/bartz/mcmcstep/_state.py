@@ -502,13 +502,14 @@ def _init_shape_shifting_parameters(
 
     partial_missing = missing is not None and missing.ndim == 2 and kshape
 
+    assert (
+        error_scale is None
+        or error_scale.shape == y.shape  # (k, n)
+        or error_scale.shape == y.shape[-1:]  # (n,)
+    )
+
     # All-binary: no prior, the precision is fixed at the identity.
     if is_binary:
-        assert (
-            error_scale is None
-            or error_scale.shape == y.shape  # (k, n)
-            or error_scale.shape == y.shape[-1:]  # (n,)
-        )
         assert error_cov_inv is None, 'no error covariance prior in binary regression'
         value = jnp.eye(kshape[0]) if kshape else jnp.array(1.0)
         error_cov_inv = Wishart(nu=None, rate=None, value=value)
@@ -518,11 +519,6 @@ def _init_shape_shifting_parameters(
     # `DiagWishart`; in the mixed case the binary components must have unit
     # initial precision (see `DiagWishart`).
     elif is_mixed or partial_missing:
-        assert (
-            error_scale is None
-            or error_scale.shape == y.shape  # (k, n)
-            or error_scale.shape == y.shape[-1:]  # (n,)
-        )
         assert isinstance(error_cov_inv, DiagWishart), (
             'mixed binary-continuous or partial-missing regression requires a '
             'DiagWishart error_cov_inv prior'
@@ -538,11 +534,6 @@ def _init_shape_shifting_parameters(
 
     # All-continuous: a dense `Wishart`.
     else:
-        assert (
-            error_scale is None
-            or error_scale.shape == y.shape  # (k, n)
-            or error_scale.shape == y.shape[-1:]  # (n,)
-        )
         assert error_cov_inv is not None
         assert type(error_cov_inv) is Wishart, (
             'continuous regression requires a dense Wishart error_cov_inv prior'

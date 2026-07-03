@@ -878,11 +878,13 @@ class Bart(Module):
             raise ValueError(msg)
         error_scale_test = _process_response_input(error_scale)
         assert train_error_scale is not None  # implied by needs_weights
-        if error_scale_test.ndim != train_error_scale.ndim:
+        # the per-observation axis is checked separately, against x_test
+        if error_scale_test.shape[:-1] != train_error_scale.shape[:-1]:
             msg = (
                 f'`error_scale` shape mismatch with training weights: got '
-                f'{error_scale_test.shape=}, expected {train_error_scale.ndim}D '
-                f'(matching the training-weight shape).'
+                f'{error_scale_test.shape=}, but the leading dimensions must match '
+                f'the training weights {train_error_scale.shape=} (only the '
+                f'per-observation axis may differ).'
             )
             raise ValueError(msg)
         return error_scale_test
@@ -1902,19 +1904,17 @@ def predict(
             key, trace, latent, error_scale, binary_indices, has_binary
         )
 
-    # squash predictions to (0, 1) if probit; with heteroskedastic weights the
-    # latent error scale is `error_scale`, so P(y=1) = Phi(latent / error_scale)
-    if binary_indices is not None:
-        # mixed: only the binary rows are squashed (and divided by their scale)
-        indexing = jnp.s_[..., binary_indices, :]
-        arg = latent[indexing]
-        if error_scale is not None:
-            arg = arg / (
-                error_scale[indexing] if error_scale.ndim == 2 else error_scale
-            )
-        mean_samples = latent.at[indexing].set(ndtr(arg))
-    elif has_binary:  # self._mcmc_state.binary_y is not None:
-        mean_samples = ndtr(latent if error_scale is None else latent / error_scale)
+    # squash predictions to (0, 1) if probit; with heteroskedastic weights
+    # P(y=1) = Phi(latent / error_scale)
+    if has_binary:  # self._mcmc_state.binary_y is not None
+        # error_scale is (m,) or (k, m), so it broadcasts against latent
+        arg = latent if error_scale is None else latent / error_scale
+        if binary_indices is not None:
+            # mixed: squash only the binary rows, leaving continuous rows as-is
+            indexing = jnp.s_[..., binary_indices, :]
+            mean_samples = latent.at[indexing].set(ndtr(arg[indexing]))
+        else:
+            mean_samples = ndtr(arg)
     else:
         mean_samples = latent
 

@@ -1615,20 +1615,18 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     assert state.z is not None
     assert state.binary_y is not None
 
+    inv_sdev = state.inv_sdev_scale
+    err_scale = state.error_scale
     if state.binary_indices is not None:
         resid = state.resid[state.binary_indices, :]
         # per-component scales (2-D) are restricted to the binary components;
         # a scalar-per-datapoint scale (1-D) is shared and broadcasts as-is
-        inv_sdev = state.inv_sdev_scale
-        err_scale = state.error_scale
         if inv_sdev is not None and inv_sdev.ndim > 1:
             inv_sdev = inv_sdev[state.binary_indices, :]
         if err_scale is not None and err_scale.ndim > 1:
             err_scale = err_scale[state.binary_indices, :]
     else:
         resid = state.resid
-        inv_sdev = state.inv_sdev_scale
-        err_scale = state.error_scale
 
     trees_plus_offset = state.z - resid
     if state.config.data_sharded:
@@ -1636,22 +1634,20 @@ def step_z(key: Key[Array, ''], state: State) -> State:
         # because the trees and most of the algorithm are replicated
         key = random.fold_in(key, lax.axis_index('data'))
 
-    if inv_sdev is None:
-        # homoskedastic probit: the latent error has unit scale
+    if err_scale is None:
+        # homoskedastic probit: the latent error has unit scale. A missingness
+        # mask (unweighted) needs no handling here: masked points are dropped
+        # from the likelihood, so their latent is sampled like any other.
         resid = truncated_normal_onesided(key, (), ~state.binary_y, -trees_plus_offset)
     else:
         # heteroskedastic probit: the latent error has per-datapoint scale
-        # `1 / inv_sdev`, so threshold and rescale in standardized units
-        eps = truncated_normal_onesided(
+        # `err_scale`, so threshold in standardized units, then rescale.
+        assert inv_sdev is not None  # weights imply the derived scales exist
+        # masked datapoints draw garbage, but every consumer of `resid` weights
+        # it by the (zero) scale, so the value is irrelevant as long as finite.
+        resid = err_scale * truncated_normal_onesided(
             key, (), ~state.binary_y, -trees_plus_offset * inv_sdev
         )
-        # masked datapoints (inv_sdev == 0) are inert; keep their resid finite.
-        # `error_scale` is the per-datapoint scale (`1 / inv_sdev` on unmasked
-        # points); it is `None` when only a missingness mask is set, where
-        # `inv_sdev` is 0/1-valued and equals the scale directly.
-        scale = 1.0 if err_scale is None else err_scale
-        scale = jnp.where(inv_sdev > 0, scale, 0.0)
-        resid = eps * scale
     z = trees_plus_offset + resid
 
     if state.binary_indices is not None:

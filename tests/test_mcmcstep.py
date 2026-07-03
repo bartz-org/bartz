@@ -1588,6 +1588,7 @@ class TestMultichain:
                 '.offset',
                 '.prec_scale',
                 '.inv_sdev_scale',
+                '.error_scale',
                 '.error_cov_inv.nu',
                 '.error_cov_inv.rate',
                 '.forest.max_split',
@@ -1629,6 +1630,7 @@ class TestMultichain:
                 '.resid',
                 '.prec_scale',
                 '.inv_sdev_scale',
+                '.error_scale',
                 '.forest.leaf_indices',
             )
             if keystr(path) not in vmap_attrs or leaf is None:
@@ -2028,11 +2030,6 @@ class TestMixedBinaryContinuous:
         with pytest.raises(Exception, match='binary error precision must be 1'):
             _state = init(**init_kwargs)
 
-    def test_init_rejects_error_scale(self, init_kwargs: dict) -> None:
-        """Check that init rejects error_scale for mixed outcomes."""
-        with pytest.raises(AssertionError):
-            init(**init_kwargs, error_scale=jnp.ones(self.n))
-
     def test_step_z_updates_only_binary_resid(
         self, init_kwargs: dict, keys: split
     ) -> None:
@@ -2422,6 +2419,7 @@ class TestMVBartIntegration:
             offset=jnp.float32(0.0),
             prec_scale=None,
             inv_sdev_scale=None,
+            error_scale=None,
             forest=_EmptyForest(),
             config=_minimal_step_config(),
         )
@@ -2490,6 +2488,7 @@ class TestMVBartIntegration:
             z=None,
             offset=jnp.float32(0.0),
             prec_scale=None,
+            error_scale=None,
             forest=_EmptyForest(),
             config=_minimal_step_config(),
         )

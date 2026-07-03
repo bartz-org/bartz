@@ -168,7 +168,8 @@ class mc_gbart(Module):
         datapoint. Not specifying `w` is equivalent to setting it to 1 for all
         datapoints. Note: `w` is ignored in the automatic determination of
         `sigest`, so either the weights should be O(1), or `sigest` should be
-        specified by the user.
+        specified by the user. Not supported with binary regression
+        (``type='pbart'``).
     ntree
         The number of trees used to represent the latent mean function. By
         default 200 for continuous regression and 50 for binary regression.
@@ -209,6 +210,11 @@ class mc_gbart(Module):
         The seed for the random number generator.
     bart_kwargs
         Additional arguments passed to `bartz.Bart`.
+
+    Raises
+    ------
+    ValueError
+        If `w` is set with binary regression (``type='pbart'``).
 
     Notes
     -----
@@ -282,6 +288,14 @@ class mc_gbart(Module):
         seed: int | Key[Array, ''] = 0,
         bart_kwargs: Mapping = MappingProxyType({}),
     ) -> None:
+        # BART3 does not support heteroskedastic probit
+        if type == 'pbart' and w is not None:
+            msg = (
+                "w is not supported with binary regression (type='pbart');"
+                ' BART3 has no heteroskedastic probit.'
+            )
+            raise ValueError(msg)
+
         # set defaults that depend on type of regression
         if keepevery is None:
             keepevery = 10 if type == 'pbart' else 1

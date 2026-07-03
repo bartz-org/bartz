@@ -374,6 +374,23 @@ def test_unsupported_outcome_model_raises(binary_data: _Data, keys: split) -> No
         )
 
 
+def test_observation_weights_probit_raises(binary_data: _Data, keys: split) -> None:
+    """`observation_weights` are rejected with a probit outcome model."""
+    data = binary_data
+    m = bst.BARTModel()
+    with pytest.raises(ValueError, match=r'observation_weights.*probit'):
+        m.sample(
+            X_train=data.X_train,
+            y_train=data.y_train,
+            observation_weights=np.ones(data.X_train.shape[0]),
+            general_params={
+                'outcome_model': bst.OutcomeModel(outcome='binary', link='probit'),
+                'random_seed': keys.pop(),
+            },
+            **_SAMPLE_KW,
+        )
+
+
 def test_variable_weights_validation(continuous_data: _Data, keys: split) -> None:
     """`variable_weights` must be strictly positive."""
     data = continuous_data

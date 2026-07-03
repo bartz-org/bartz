@@ -35,7 +35,7 @@ from pathlib import Path
 
 # WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
-from typing import Any, Literal, Protocol, TypedDict, overload, runtime_checkable
+from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
 from warnings import warn
 
 import jax
@@ -99,7 +99,8 @@ class PredictKind(Enum):
     mean_samples = 'mean_samples'
     """Per-sample conditional mean, shape ``(num_chains * n_save, m)``
     (or ``(num_chains * n_save, k, m)``). For binary regression, this is
-    the probit-transformed sum-of-trees."""
+    the probit-transformed sum-of-trees, divided by the error scale `w`
+    first if the model is heteroskedastic."""
 
     outcome_samples = 'outcome_samples'
     """Samples of the outcome variable, shape ``(num_chains * n_save,
@@ -288,8 +289,11 @@ class Bart(Module):
         Coefficients that rescale the error standard deviation on each
         datapoint. Not specifying `error_scale` is equivalent to setting it to 1
         for all datapoints. Shape ``(n,)`` applies the same scalar weight to every
-        outcome component; for multivariate continuous regression, ``(k, n)``
-        instead supplies a per-component weight per datapoint.
+        outcome component; for multivariate regression, ``(k, n)`` instead
+        supplies a per-component weight per datapoint. Supported with binary
+        (probit) outcomes, where the weight scales the latent error so the
+        success probability is ``Phi(latent / error_scale)``, including the
+        binary components of a mixed regression.
     missing
         Boolean mask with the same shape as `y_train`; `True` marks entries
         to be ignored by the MCMC. Values of `y_train` must be finite
@@ -376,8 +380,6 @@ class Bart(Module):
     _x_train_fmt: Any = field(static=True)
     _device: Device | None = field(static=True)
 
-    _error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = None
-
     def __init__(
         self,
         x_train: Real[ArrayLike, 'p n'] | DataFrame,
@@ -430,11 +432,9 @@ class Bart(Module):
         _check_same_length(x_train, y_train)
 
         if error_scale is not None:
-            # keep=True because `error_scale` is donated downstream but also
-            # retained as `self._error_scale` for prediction
-            error_scale, self._error_scale = _process_response_input(
-                error_scale, keep=True
-            )
+            # `error_scale` is donated downstream as `init`'s `error_scale`, which
+            # keeps it (sharded) as `State.error_scale` for prediction
+            error_scale = _process_response_input(error_scale)
             _check_same_length(x_train, error_scale)
 
         if missing is not None:
@@ -549,7 +549,10 @@ class Bart(Module):
         key
             Jax random key, required when ``kind='outcome_samples'``.
         error_scale
-            Per-observation error scale for ``kind='outcome_samples'``.
+            Per-observation error scale. Used with ``kind='outcome_samples'``,
+            and also with ``kind='mean'`` or ``'mean_samples'`` for binary
+            outcomes (since the success probability is
+            ``Phi(latent / error_scale)``).
             Required when the model was fit with weights and ``x_test`` is
             new data. Shape matches the shape used at fitting: ``(m,)`` for
             scalar weights, ``(k, m)`` for multivariate vector weights.
@@ -836,18 +839,23 @@ class Bart(Module):
             when required.
         """
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
-        has_train_weights = self._error_scale is not None
+        train_error_scale = self._mcmc_state.error_scale
+        has_train_weights = train_error_scale is not None
         is_binary = self._mcmc_state.binary_y is not None
-        needs_weights = (
-            kind is PredictKind.outcome_samples and not is_binary and has_train_weights
+        # weights enter the outcome samples of any outcome type, and also the
+        # mean of binary outcomes, since P(y=1) = Phi(latent / weight)
+        needs_weights = has_train_weights and (
+            kind is PredictKind.outcome_samples
+            or (is_binary and kind in (PredictKind.mean, PredictKind.mean_samples))
         )
 
         if not needs_weights:
             if error_scale is not None:
                 msg = (
-                    '`error_scale` must be `None` in this configuration'
-                    " (it is used only with kind='outcome_samples',"
-                    ' continuous regression fitted with weights)'
+                    '`error_scale` must be `None` in this configuration (weights'
+                    " are used with kind='outcome_samples', and with kind='mean'"
+                    " or 'mean_samples' for binary outcomes, and only when the"
+                    ' model was fit with weights)'
                 )
                 raise ValueError(msg)
             return None
@@ -859,7 +867,7 @@ class Bart(Module):
                     ' (training weights are used automatically)'
                 )
                 raise ValueError(msg)
-            return self._error_scale
+            return train_error_scale
 
         # new test data, model was fit with weights
         if error_scale is None:
@@ -869,12 +877,14 @@ class Bart(Module):
             )
             raise ValueError(msg)
         error_scale_test = _process_response_input(error_scale)
-        assert self._error_scale is not None  # implied by needs_weights
-        if error_scale_test.ndim != self._error_scale.ndim:
+        assert train_error_scale is not None  # implied by needs_weights
+        # the per-observation axis is checked separately, against x_test
+        if error_scale_test.shape[:-1] != train_error_scale.shape[:-1]:
             msg = (
                 f'`error_scale` shape mismatch with training weights: got '
-                f'{error_scale_test.shape=}, expected {self._error_scale.ndim}D '
-                f'(matching the training-weight shape).'
+                f'{error_scale_test.shape=}, but the leading dimensions must match '
+                f'the training weights {train_error_scale.shape=} (only the '
+                f'per-observation axis may differ).'
             )
             raise ValueError(msg)
         return error_scale_test
@@ -1095,56 +1105,21 @@ def _process_predictor_input(
     return x, fmt
 
 
-@overload
 def _process_response_input(
     arr: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
     /,
     *,
-    keep: Literal[False] = False,
     dtype: DTypeLike = jnp.float32,
-) -> Shaped[Array, ' n'] | Shaped[Array, 'k n']: ...
-
-
-@overload
-def _process_response_input(
-    arr: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
-    /,
-    *,
-    keep: Literal[True],
-    dtype: DTypeLike = jnp.float32,
-) -> tuple[
-    Shaped[Array, ' n'] | Shaped[Array, 'k n'],
-    Shaped[Array, ' n'] | Shaped[Array, 'k n'],
-]: ...
-
-
-def _process_response_input(
-    arr: Shaped[ArrayLike, ' n'] | Shaped[ArrayLike, 'k n'] | Series | DataFrame,
-    /,
-    *,
-    keep: bool = False,
-    dtype: DTypeLike = jnp.float32,
-) -> (
-    Shaped[Array, ' n']
-    | Shaped[Array, 'k n']
-    | tuple[
-        Shaped[Array, ' n'] | Shaped[Array, 'k n'],
-        Shaped[Array, ' n'] | Shaped[Array, 'k n'],
-    ]
-):
+) -> Shaped[Array, ' n'] | Shaped[Array, 'k n']:
     if isinstance(arr, DataFrame):
         arr = arr.to_numpy().T
     elif isinstance(arr, Series):
         arr = arr.to_numpy()
-    # in normal mode: one unconditional copy, safe to donate downstream.
-    # in `keep` mode: convert without copying when possible to get the
-    # keep array, then `jnp.copy` to make a separate disposable copy.
-    arr = jnp.array(arr, dtype, copy=not keep)
+    # one unconditional copy, safe to donate downstream
+    arr = jnp.array(arr, dtype, copy=True)
     if arr.ndim < 1 or arr.ndim > 2:
         msg = f'response-like input must be 1D (n,) or 2D (k, n). Got {arr.ndim=}.'
         raise ValueError(msg)
-    if keep:
-        return jnp.copy(arr), arr
     return arr
 
 
@@ -1175,9 +1150,6 @@ def _check_type_settings(
             f' requires y_train.shape=({num_types}, n),'
             f' found {y_train.shape=}.'
         )
-        raise ValueError(msg)
-    if error_scale is not None and outcome_type is not OutcomeType.continuous:
-        msg = 'Weights are not supported when any outcome is binary.'
         raise ValueError(msg)
     if (
         error_scale is not None
@@ -1932,12 +1904,17 @@ def predict(
             key, trace, latent, error_scale, binary_indices, has_binary
         )
 
-    # squash predictions to (0, 1) if probit
-    if binary_indices is not None:
-        indexing = jnp.s_[..., binary_indices, :]
-        mean_samples = latent.at[indexing].set(ndtr(latent[indexing]))
-    elif has_binary:  # self._mcmc_state.binary_y is not None:
-        mean_samples = ndtr(latent)
+    # squash predictions to (0, 1) if probit; with heteroskedastic weights
+    # P(y=1) = Phi(latent / error_scale)
+    if has_binary:  # self._mcmc_state.binary_y is not None
+        # error_scale is (m,) or (k, m), so it broadcasts against latent
+        arg = latent if error_scale is None else latent / error_scale
+        if binary_indices is not None:
+            # mixed: squash only the binary rows, leaving continuous rows as-is
+            indexing = jnp.s_[..., binary_indices, :]
+            mean_samples = latent.at[indexing].set(ndtr(arg[indexing]))
+        else:
+            mean_samples = ndtr(arg)
     else:
         mean_samples = latent
 
@@ -1974,12 +1951,13 @@ def sample_outcome(
         if error_scale is not None:
             # error_scale is (m,) or (k, m) so it always broadcasts right
             error *= error_scale
-    elif has_binary:
-        # pure binary UV: probit has sigma = 1
+    else:  # univariate
+        # pure binary probit has unit-scale latent error; continuous scales it
+        # by `sigma`. Either way, optionally rescaled per datapoint by error_scale.
         error = random.normal(key, latent.shape)
-    else:  # univariate continuous
-        sigma = jnp.sqrt(jnp.reciprocal(prec)).reshape(-1)
-        error = sigma[..., None] * random.normal(key, latent.shape)
+        if not has_binary:
+            sigma = jnp.sqrt(jnp.reciprocal(prec)).reshape(-1)
+            error *= sigma[..., None]
         if error_scale is not None:
             error *= error_scale[None, :]
 

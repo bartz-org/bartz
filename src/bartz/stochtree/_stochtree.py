@@ -370,7 +370,8 @@ class BARTModel:
             them in `y_hat_test`.
         observation_weights
             Optional positive per-observation weights scaling the residual
-            variance (``y_i | - ~ N(mu(X_i), sigma^2 / w_i)``).
+            variance (``y_i | - ~ N(mu(X_i), sigma^2 / w_i)``). Not supported
+            with a probit outcome model.
         num_gfr
             Number of grow-from-root iterations. Must be ``0``.
         num_burnin
@@ -391,6 +392,8 @@ class BARTModel:
         ------
         NotImplementedError
             If ``num_gfr`` is non-zero.
+        ValueError
+            If `observation_weights` are set with a probit outcome model.
         """
         if num_gfr != 0:
             msg = (
@@ -405,6 +408,14 @@ class BARTModel:
         )
 
         is_probit = gp.outcome_model.outcome == 'binary'
+
+        # stochtree does not support heteroskedastic probit
+        if is_probit and observation_weights is not None:
+            msg = (
+                'observation_weights are not supported with a probit outcome'
+                ' model; stochtree does not support heteroskedastic probit.'
+            )
+            raise ValueError(msg)
 
         X_train_arr, y_train_arr, variable_weights = self._prepare_training_inputs(
             X_train, y_train, gp

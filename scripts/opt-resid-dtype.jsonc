@@ -1,23 +1,9 @@
 {
-    // Test whether storing `State.resid` as float16 speeds up the residual
-    // reduction (`sum_resid`), run once per tree inside the accept/reject scan.
+    // Test whether storing `State.resid` as float16 speeds up the per-tree
+    // residual reduction (`sum_resid`), which reads `resid` once per tree.
     //
-    // Each per-tree iteration reduces the residual vector into per-leaf sums;
-    // with weights off the reduction consumes `resid` directly, so narrowing it
-    // to float16 halves the bytes read for the whole n- (or k*n-) sized input.
-    // The gain should grow with n (the reduction is bandwidth-bound) and with k,
-    // where the O(k*n) residual reduction is a larger share of the step.
-    //
-    // resid_dtype is the reduced-over axis: at each (n, k, weights) we read off
-    // the faster of float16/float32. The matrix axes are the ones that shape the
-    // residual reduction and hence its dtype sensitivity: k (outcome dim: resid
-    // shape (n) -> (k, n)) and weights. weights dilutes the relative gain: with
-    // it set the reduction input is `resid * prec_scale`, adding an n-sized
-    // prec_scale read alongside the narrowed resid one. The reductions stay at
-    // their default batching, taken as already optimized; the optimum is broad
-    // enough that the dtype change doesn't shift it. num_trees is fixed: it
-    // scales the per-tree scan linearly without changing the per-tree
-    // multiply/reduction ratio. maxdepth is fixed at 6 (our practical value).
+    // The matrix is k x weights as usual for resid. prec_scale_dtype=float16 to measure
+    // well the interesting case "all float16" and making the timing more accurate.
     "plot": {
         "scan": "n",
         "reduce": "resid_dtype",
@@ -29,6 +15,7 @@
         "maxdepth":           [6],
         "weights":            ["none", "scalar"],
         "num_trees":          [5],
+        "prec_scale_dtype":   ["float16"],
         "resid_dtype":        ["float16", "float32"],
     },
 }

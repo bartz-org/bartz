@@ -362,10 +362,8 @@ class State(Module):
     X: UInt[Array, 'p n'] = field(data=-1)
     """The predictors."""
 
-    binary_y: None | Bool[Array, ' n'] | Bool[Array, 'kb n'] = field(data=-1)
-    """The response as booleans for binary regression, `None` for continuous.
-    In the mixed binary-continuous case, only the binary outcome components
-    are stored, with shape ``(kb, n)``."""
+    y: Float32[Array, ' n'] | Float32[Array, 'k n'] = field(data=-1)
+    """The response, in data units. Binary components are stored as 0/1."""
 
     z: None | Float32[Array, '*chains n'] | Float32[Array, '*chains kb n'] = field(
         chains=CHAIN_AXIS, data=-1
@@ -892,15 +890,14 @@ def init(
     # whole region runs with type-checking disabled because the state carries
     # deliberately wrong-typed intermediates parked in its fields for sharding:
     # `_LazyArray` leaves (each chain-bearing leaf is built at its core no-chain
-    # shape, then `_add_chains` wraps it to broadcast in the chain axis), the raw
-    # float `y` in the bool `binary_y` slot, and the user `missing` mask in the
-    # `inv_sdev_scale` slot. The context ends once every field has been replaced
-    # by its final, correctly-typed array.
+    # shape, then `_add_chains` wraps it to broadcast in the chain axis) and the
+    # user `missing` mask in the `inv_sdev_scale` slot. The context ends once
+    # every field has been replaced by its final, correctly-typed array.
     with jaxtyping_disabled():
         state = State(
             _chain_anchor=_lazy(jnp.zeros, ()),  # typechecker chain anchor
             X=X,
-            binary_y=y,  # temporary to be sharded together with everything else
+            y=y,
             z=(
                 _lazy(jnp.full, y.shape, offset[..., None])
                 if is_binary
@@ -1013,22 +1010,6 @@ def init(
                 state, binary_indices, num_chains, storage.resid_dtype
             )
 
-        # calculate initial binary_y
-        if is_binary or binary_indices is not None:
-            assert state.binary_y is not None  # holds y at this point
-            binary_y = _LazyArray(
-                _initial_binary_y,
-                state.binary_y.shape
-                if binary_indices is None
-                else (binary_indices.size, n),
-                state.binary_y,  # this is actually y
-                binary_indices,
-            )
-            binary_y = _shard_leaf(binary_y, None, -1, state.config.mesh)
-        else:
-            binary_y = None
-        state = replace(state, binary_y=binary_y)
-
         # derive prec_scale and inv_sdev_scale after sharding to do the
         # calculation on the right devices. `state.error_scale` already holds the
         # sharded user-supplied scale and `state.inv_sdev_scale` holds the parked
@@ -1127,17 +1108,16 @@ def _set_initial_resid(
 ) -> 'State':
     """Build the continuous-outcome `resid` and shard it.
 
-    Called post-shard so the captured ``state.binary_y`` and
+    Called post-shard so the captured ``state.y`` and
     ``state.forest.offset`` are already on the target devices. Sharding axes are
     read via `chain_vmap_axes` / `data_vmap_axes` on a shape preview where the
     new `resid` leaf has the chain-extended ``ndim`` (inflated by a placeholder
     when `num_chains` is not `None`).
     """
-    assert state.binary_y is not None  # holds y at this point
     inner = _LazyArray(
         _initial_resid,
-        state.binary_y.shape,
-        state.binary_y,
+        state.y.shape,
+        state.y,
         state.forest.offset,
         binary_indices,
         state.resid_scale,
@@ -1170,20 +1150,6 @@ def _initial_resid(
     if binary_indices is not None:
         resid = resid.at[..., binary_indices, :].set(0.0)
     return (resid / resid_scale[..., None]).astype(resid_dtype)
-
-
-def _initial_binary_y(
-    shape: tuple[int, ...],
-    y: Float32[Array, 'k n'] | Float32[Array, ' n'],
-    binary_indices: Int32[Array, ' kb'] | None,
-) -> Bool[Array, 'kb n'] | Bool[Array, ' n']:
-    """Extract and convert the binary outcome components from ``y``."""
-    if binary_indices is None:
-        out = y.astype(bool)
-    else:
-        out = y[binary_indices, :].astype(bool)
-    assert out.shape == shape
-    return out
 
 
 def _initial_affluence_tree(

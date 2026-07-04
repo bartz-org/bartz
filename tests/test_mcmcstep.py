@@ -1596,7 +1596,7 @@ class TestMultichain:
         ) -> int | None:
             no_vmap_attrs = (
                 '.X',
-                '.binary_y',
+                '.y',
                 '.binary_indices',
                 '.prec_scale',
                 '.inv_sdev_scale',
@@ -1637,7 +1637,7 @@ class TestMultichain:
         ) -> int | None:
             vmap_attrs = (
                 '.X',
-                '.binary_y',
+                '.y',
                 '.z',
                 '.resid',
                 '.prec_scale',
@@ -1924,10 +1924,9 @@ class TestMixedBinaryContinuous:
         assert state.binary_indices is not None
         assert_array_equal(state.binary_indices, jnp.array([0, 2], jnp.int32))
 
-        # binary_y should have only binary rows (kb=2)
-        assert state.binary_y is not None
-        assert state.binary_y.shape == (2, self.n)
-        assert state.binary_y.dtype == jnp.bool_
+        # y should hold all k rows, whatever the outcome type
+        assert state.y.shape == (self.k, self.n)
+        assert state.y.dtype == jnp.float32
 
         # z should have only binary rows (kb=2)
         assert state.z is not None
@@ -1950,20 +1949,10 @@ class TestMixedBinaryContinuous:
         assert state.error_cov_inv.nu is not None
         assert state.error_cov_inv.rate is not None
 
-    def test_init_binary_y_values(self, init_kwargs: dict) -> None:
-        """Check that binary_y correctly extracts binary components from y."""
-        y = init_kwargs['y']
-        state = init(**init_kwargs)
-
-        assert state.binary_y is not None
-        # binary_y[0] should correspond to y[0] (first binary component)
-        assert_array_equal(state.binary_y[0], y[0] != 0)
-        # binary_y[1] should correspond to y[2] (second binary component)
-        assert_array_equal(state.binary_y[1], y[2] != 0)
-
     def test_init_resid_binary_rows_zero(self, init_kwargs: dict) -> None:
         """Check that the binary rows of resid are initialized to zero."""
-        state = init(**init_kwargs)
+        # copy the inputs because init may donate them
+        state = init(**copy_arrays(init_kwargs))
 
         # binary rows (0 and 2) should be zero
         assert_array_equal(state.resid[0], jnp.zeros(self.n))
@@ -2404,12 +2393,11 @@ class TestMVBartIntegration:
         assert jnp.ndim(bart_uv.error_cov_inv.value) == 0
         assert bart_mv.error_cov_inv.value.shape == (1, 1)
 
+        assert bart_uv.y.ndim == 1
+        assert bart_mv.y.ndim == 2
+        assert_array_equal(bart_uv.y, bart_mv.y.squeeze(0))
+
         if binary:
-            assert bart_uv.binary_y is not None
-            assert bart_mv.binary_y is not None
-            assert bart_uv.binary_y.ndim == 1
-            assert bart_mv.binary_y.ndim == 2
-            assert_array_equal(bart_uv.binary_y, bart_mv.binary_y.squeeze(0))
             assert bart_uv.z is not None
             assert bart_mv.z is not None
             assert bart_uv.z.ndim == 1
@@ -2446,7 +2434,7 @@ class TestMVBartIntegration:
         common: dict = dict(
             _chain_anchor=jnp.zeros(()),
             X=X,
-            binary_y=None,
+            y=y,
             binary_indices=None,
             z=None,
             prec_scale=None,
@@ -2516,7 +2504,6 @@ class TestMVBartIntegration:
         # against `resid`, so the dropped states carry the subset `X[:, keep]`.
         common: dict = dict(
             _chain_anchor=jnp.zeros(()),
-            binary_y=None,
             binary_indices=None,
             z=None,
             prec_scale=None,
@@ -2531,6 +2518,7 @@ class TestMVBartIntegration:
         st_uv_with = State(
             **common,
             X=X,
+            y=resid_1d,
             resid=resid_1d,
             inv_sdev_scale=inv_sdev,
             error_cov_inv=uv_prior,
@@ -2538,6 +2526,7 @@ class TestMVBartIntegration:
         st_uv_drop = State(
             **common,
             X=X[:, keep],
+            y=resid_1d[keep],
             resid=resid_1d[keep],
             inv_sdev_scale=None,
             error_cov_inv=uv_prior,
@@ -2552,6 +2541,7 @@ class TestMVBartIntegration:
         st_mv_with = State(
             **common,
             X=X,
+            y=resid_1d,
             resid=resid_1d[None, :],
             inv_sdev_scale=inv_sdev,
             error_cov_inv=mv_prior,
@@ -2559,6 +2549,7 @@ class TestMVBartIntegration:
         st_mv_drop = State(
             **common,
             X=X[:, keep],
+            y=resid_1d[keep],
             resid=resid_1d[None, keep],
             inv_sdev_scale=None,
             error_cov_inv=mv_prior,

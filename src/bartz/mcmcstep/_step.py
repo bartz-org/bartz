@@ -1651,13 +1651,13 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     The updated BART MCMC state.
     """
     assert state.z is not None
-    assert state.binary_y is not None
 
     inv_sdev = state.inv_sdev_scale
     err_scale = state.error_scale
     if state.binary_indices is not None:
         resid_scale = state.resid_scale[state.binary_indices]
         resid = state.resid[state.binary_indices, :]
+        binary_y = state.y[state.binary_indices, :] != 0
         # per-component scales (2-D) are restricted to the binary components;
         # a scalar-per-datapoint scale (1-D) is shared and broadcasts as-is
         if inv_sdev is not None and inv_sdev.ndim > 1:
@@ -1667,6 +1667,7 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     else:
         resid_scale = state.resid_scale
         resid = state.resid
+        binary_y = state.y != 0
 
     trees_plus_offset = state.z - resid * resid_scale[..., None]
     if state.config.data_sharded:
@@ -1678,7 +1679,7 @@ def step_z(key: Key[Array, ''], state: State) -> State:
         # homoskedastic probit: the latent error has unit scale. A missingness
         # mask (unweighted) needs no handling here: masked points are dropped
         # from the likelihood, so their latent is sampled like any other.
-        resid = truncated_normal_onesided(key, (), ~state.binary_y, -trees_plus_offset)
+        resid = truncated_normal_onesided(key, (), ~binary_y, -trees_plus_offset)
     else:
         # heteroskedastic probit: the latent error has per-datapoint scale
         # `err_scale`, so threshold in standardized units, then rescale.
@@ -1686,7 +1687,7 @@ def step_z(key: Key[Array, ''], state: State) -> State:
         # masked datapoints draw garbage, but every consumer of `resid` weights
         # it by the (zero) scale, so the value is irrelevant as long as finite.
         resid = err_scale * truncated_normal_onesided(
-            key, (), ~state.binary_y, -trees_plus_offset * inv_sdev
+            key, (), ~binary_y, -trees_plus_offset * inv_sdev
         )
     z = trees_plus_offset + resid
 

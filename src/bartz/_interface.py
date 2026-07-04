@@ -596,7 +596,7 @@ class Bart(Module):
             x_test,
             error_scale,
             self._mcmc_state.binary_indices,
-            self._mcmc_state.binary_y is not None,
+            self._mcmc_state.z is not None,
             kind,
             # the test points are sharded over the mesh 'data' axis (when
             # there is one): the training data at `init`, new test data by
@@ -743,7 +743,7 @@ class Bart(Module):
         if (
             only_continuous
             and binary_indices is None
-            and self._mcmc_state.binary_y is not None
+            and self._mcmc_state.z is not None
         ):
             msg = 'Model has only binary outcomes, so there is no continuous submatrix to return.'
             raise ValueError(msg)
@@ -841,7 +841,7 @@ class Bart(Module):
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
         train_error_scale = self._mcmc_state.error_scale
         has_train_weights = train_error_scale is not None
-        is_binary = self._mcmc_state.binary_y is not None
+        is_binary = self._mcmc_state.z is not None
         # weights enter the outcome samples of any outcome type, and also the
         # mean of binary outcomes, since P(y=1) = Phi(latent / weight)
         needs_weights = has_train_weights and (
@@ -1912,7 +1912,7 @@ def predict(
 
     # squash predictions to (0, 1) if probit; with heteroskedastic weights
     # P(y=1) = Phi(latent / error_scale)
-    if has_binary:  # self._mcmc_state.binary_y is not None
+    if has_binary:  # self._mcmc_state.z is not None
         # error_scale is (m,) or (k, m), so it broadcasts against latent
         arg = latent if error_scale is None else latent / error_scale
         if binary_indices is not None:

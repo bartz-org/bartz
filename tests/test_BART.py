@@ -210,6 +210,11 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
         if key in kw:
             bart_kwargs[key] = kw.pop(key)
 
+    # precompute_predict_train: mc_gbart defaults it on, Bart off
+    precompute_predict_train = pop('precompute_predict_train')
+    if precompute_predict_train is not True:
+        bart_kwargs['precompute_predict_train'] = precompute_predict_train
+
     # init_kw must be present bc it contains min_points_per_leaf which has
     # different defaults
     init_kw = dict(kw.pop('init_kw'))
@@ -759,9 +764,8 @@ def test_predict(kw: dict[str, Any]) -> None:
     """Check that the public BART.gbart.predict method works."""
     bart = mc_gbart(**kw)
     yhat_train = bart.predict(kw['x_train'])
-    assert_close_matrices(bart.yhat_train, yhat_train, rtol=1e-6)
-    # the need for this approximate comparison is surprising; exact comparison
-    # fails on cpu ci on linux
+    # inexact because the train predictions may come from the residuals
+    assert_close_matrices(bart.yhat_train, yhat_train, rtol=1e-5)
 
 
 class TestVarprobAttr:
@@ -1088,6 +1092,8 @@ def test_few_datapoints(kw: dict[str, Any]) -> None:
     kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
         min_points_per_decision_node=10, min_points_per_leaf=None
     )
+    # precompute off so the constancy check is exact (tree evaluation)
+    kw.setdefault('bart_kwargs', {})['precompute_predict_train'] = False
     kw = set_num_datapoints(kw, 8)  # < 10 = 2 * 5, multiple of 2 shards
     bart = mc_gbart(**kw)
     assert jnp.all(bart.yhat_train == bart.yhat_train[:, :1])

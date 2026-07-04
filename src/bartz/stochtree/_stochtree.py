@@ -490,6 +490,7 @@ class BARTModel:
             num_chains=bart_num_chains,
             seed=seed,
             maxdepth=mfp.max_depth + 1,
+            precompute_predict_train=True,
         )
         kwargs.update(bart_kwargs)
         # match stochtree's gating: only acceptance-time veto on

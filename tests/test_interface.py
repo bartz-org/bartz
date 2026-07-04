@@ -111,7 +111,12 @@ from bartz.grove import (
     tree_depth,
     tree_depths,
 )
-from bartz.mcmcloop import CallbackState, compute_varcount, evaluate_trace
+from bartz.mcmcloop import (
+    CallbackState,
+    MainTraceWithTrainPred,
+    compute_varcount,
+    evaluate_trace,
+)
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import BatchedReduction, State
@@ -427,6 +432,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     maxdepth=6,
                     num_data_devices=min(2, get_device_count()),
                     num_chain_devices=None,  # for mc_gbart, turn autoshard off
+                    # on for some variants to cover both trace types
+                    precompute_predict_train=True,
                     init_kw=dict(
                         save_ratios=False,
                         min_points_per_decision_node=None,
@@ -507,6 +514,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     # exercise the explicit-device paths (`Bart._device`)
                     # without changing placement or compilation
                     devices=get_default_device(),
+                    precompute_predict_train=True,
                     init_kw=dict(
                         resid_reduction_config=BatchedReduction(num_batches=None),
                         count_reduction_config=BatchedReduction(num_batches=None),
@@ -601,6 +609,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     num_chains=2,
                     num_chain_devices=min(2, get_device_count()),
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
+                    precompute_predict_train=True,
                     init_kw=dict(
                         save_ratios=True,
                         resid_reduction_config=BatchedReduction(num_batches=16),
@@ -1087,8 +1096,9 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
 
     yhat1 = bart1.predict('train', kind='latent_samples')
     yhat2 = bart2.predict('train', kind='latent_samples')
-    rtol = 0 if yhat1.platform() == 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
-    assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
+    # loose because the train predictions may be precomputed (real leakage of
+    # the garbage values would instead be a ratio of order 1)
+    assert_close_matrices(yhat1, yhat2, rtol=5e-3, reduce_rank=True)
 
 
 def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
@@ -1503,9 +1513,30 @@ def test_predict(bkw: BartKW) -> None:
     assert_close_matrices(
         bart.predict('train', kind='latent_samples'),
         yhat_train,
-        rtol=1e-6,
+        rtol=1e-5,
         reduce_rank=True,
     )
+
+
+def test_precompute_predict_train(bkw: BartKW, subtests: SubTests) -> None:
+    """`precompute_predict_train` gives the same train predictions, up to rounding."""
+    bart_off = Bart(**dict(bkw.kw, precompute_predict_train=False))
+    bart_on = Bart(**dict(bkw.kw, precompute_predict_train=True))
+
+    with subtests.test('trace type'):
+        assert not isinstance(bart_off._main_trace, MainTraceWithTrainPred)
+        assert isinstance(bart_on._main_trace, MainTraceWithTrainPred)
+
+    # `outcome_samples` is left out: for binary outcomes a tiny latent difference
+    # can flip a thresholded 0/1 draw, which is not an approximate mismatch
+    for kind in ('latent_samples', 'mean', 'mean_samples'):
+        with subtests.test('predict', kind=kind):
+            assert_close_matrices(
+                bart_on.predict('train', kind=kind),
+                bart_off.predict('train', kind=kind),
+                rtol=1e-5,
+                reduce_rank=True,
+            )
 
 
 def test_count_prec_tree_caches_valid(bkw: BartKW, subtests: SubTests) -> None:
@@ -1986,7 +2017,10 @@ def test_few_datapoints(bkw: BartKW) -> None:
     kw = bkw.kw
     init_kw = dict(kw.get('init_kw', {}))
     init_kw.update(min_points_per_decision_node=10, min_points_per_leaf=None)
-    kw1 = dict(set_num_datapoints(kw, 8), init_kw=init_kw)
+    # precompute off so the constancy check is exact (tree evaluation)
+    kw1 = dict(
+        set_num_datapoints(kw, 8), init_kw=init_kw, precompute_predict_train=False
+    )
     bart = Bart(**kw1)
     yhat = bart.predict('train', kind='latent_samples')
     assert jnp.all(yhat == yhat[..., :, :1])
@@ -1994,7 +2028,10 @@ def test_few_datapoints(bkw: BartKW) -> None:
     init_kw2 = dict(kw.get('init_kw', {}))
     init_kw2.update(min_points_per_decision_node=None, min_points_per_leaf=5)
     kw2 = dict(
-        set_num_datapoints(kw, 8), init_kw=init_kw2, seed=random.clone(kw['seed'])
+        set_num_datapoints(kw, 8),
+        init_kw=init_kw2,
+        seed=random.clone(kw['seed']),
+        precompute_predict_train=False,
     )
     bart = Bart(**kw2)
     yhat = bart.predict('train', kind='latent_samples')

@@ -362,6 +362,7 @@ class mc_gbart(Module):
             seed=seed,
             maxdepth=6,
             num_chains=num_chains,
+            precompute_predict_train=True,
         )
 
         # default min_points_per_leaf to 5 (unless set by the user) to match

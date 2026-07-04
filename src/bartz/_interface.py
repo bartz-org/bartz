@@ -62,6 +62,7 @@ from bartz.grove import (
 from bartz.mcmcloop import (
     BurninTrace,
     MainTrace,
+    MainTraceWithTrainPred,
     RunMCMCResult,
     compute_varcount,
     evaluate_trace,
@@ -347,6 +348,10 @@ class Bart(Module):
     maxdepth
         The maximum depth of the trees. This is 1-based, so with the default
         ``maxdepth=6``, the depths of the levels range from 0 to 5.
+    precompute_predict_train
+        If `True`, compute the predictions at the training points during the
+        MCMC. Off by default; makes ``predict('train', ...)`` faster at the cost
+        of more memory.
     init_kw
         Additional arguments passed to `bartz.mcmcstep.init`.
     run_mcmc_kw
@@ -423,6 +428,7 @@ class Bart(Module):
         devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None = None,
         seed: int | Key[Array, ''] = 0,
         maxdepth: int = 6,
+        precompute_predict_train: bool = False,
         init_kw: Mapping = MappingProxyType({}),
         run_mcmc_kw: Mapping = MappingProxyType({}),
     ) -> None:
@@ -507,6 +513,7 @@ class Bart(Module):
             printevery,
             pbar,
             mcmc_key,
+            precompute_predict_train,
             run_mcmc_kw,
         )
 
@@ -582,6 +589,18 @@ class Bart(Module):
             raise ValueError(msg)
         error_scale = self._process_error_scale_test(x_test, kind, error_scale)
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
+
+        # use the predictions precomputed during the MCMC, if available
+        if x_test_is_train and isinstance(self._main_trace, MainTraceWithTrainPred):
+            return predict_train(
+                key,
+                self._main_trace,
+                error_scale,
+                self._mcmc_state.binary_indices,
+                self._mcmc_state.z is not None,
+                kind,
+            )
+
         x_test = self._process_x_test(x_test, error_scale)
 
         # place new test data on the devices of the model; the training data
@@ -1449,10 +1468,13 @@ def _run_mcmc(
     printevery: int | None,
     pbar: bool,
     key: Key[Array, ''],
+    precompute_predict_train: bool,
     run_mcmc_kw: Mapping,
 ) -> RunMCMCResult:
     # prepare arguments
     kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
+    if precompute_predict_train:
+        kw.update(main_trace_type=MainTraceWithTrainPred)
     # `printevery=None` disables progress reporting entirely: no callback is
     # installed, so the loop traces without any `debug.callback` effect (a tqdm
     # bar would otherwise advance every iteration regardless of `printevery`).
@@ -1897,9 +1919,55 @@ def predict(
     | Float32[Array, 'ndpost m']
     | Float32[Array, 'ndpost k m']
 ):
-    """Implement `Bart.predict`."""
+    """Implement `Bart.predict` by evaluating the trees on `x_test`."""
     # get latent i.e. bare sum-of-trees predictions
     latent = predict_latent(x_test, trace, test_points)
+    return _predict_from_latent(
+        key, trace, latent, error_scale, binary_indices, has_binary, kind
+    )
+
+
+@jit(static_argnums=(4, 5))
+def predict_train(
+    key: Key[Array, ''] | None,
+    trace: MainTraceWithTrainPred,
+    error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None,
+    binary_indices: Int32[Array, ' kb'] | None,
+    has_binary: bool,
+    kind: PredictKind | str,
+    /,
+) -> (
+    Float32[Array, ' n']
+    | Float32[Array, 'k n']
+    | Float32[Array, 'ndpost n']
+    | Float32[Array, 'ndpost k n']
+):
+    """Implement `Bart.predict('train')` from the precomputed predictions."""
+    latent = _flatten_chain_sample(
+        trace.train_pred,
+        chain_vmap_axes(trace).train_pred,
+        trace_sample_axes(trace).train_pred,
+    )
+    return _predict_from_latent(
+        key, trace, latent, error_scale, binary_indices, has_binary, kind
+    )
+
+
+def _predict_from_latent(
+    key: Key[Array, ''] | None,
+    trace: MainTrace,
+    latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
+    error_scale: Float[Array, ' m'] | Float[Array, 'k m'] | None,
+    binary_indices: Int32[Array, ' kb'] | None,
+    has_binary: bool,
+    kind: PredictKind | str,
+) -> (
+    Float32[Array, ' m']
+    | Float32[Array, 'k m']
+    | Float32[Array, 'ndpost m']
+    | Float32[Array, 'ndpost k m']
+):
+    """Turn the sum-of-trees `latent` samples into the requested prediction kind."""
     if kind is PredictKind.latent_samples:
         return latent
 
@@ -1928,6 +1996,16 @@ def predict(
     if kind is PredictKind.mean:
         return mean_samples.mean(axis=0)
     return mean_samples
+
+
+def _flatten_chain_sample(
+    arr: Float[Array, '*shape'], chain_axis: int | None, sample_axis: int
+) -> Float[Array, '*flat_shape']:
+    """Fold the chain axis into the sample axis, matching `predict_latent`'s layout."""
+    if chain_axis is None:
+        return arr
+    arr = jnp.moveaxis(arr, (chain_axis, sample_axis), (0, 1))
+    return lax.collapse(arr, 0, 2)
 
 
 @jit(static_argnums=(5,))

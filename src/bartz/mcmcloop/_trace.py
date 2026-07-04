@@ -184,3 +184,32 @@ class MainTrace(BurninTrace):
             varprob=varprob,
             **vars(BurninTrace.from_state(state)),
         )
+
+
+class MainTraceWithTrainPred(MainTrace):
+    """Main trace that also stores the latent predictions at the training points.
+
+    Computed cheaply from the running `State.resid` (as ``ref - resid *
+    resid_scale``, with ``ref`` the response `y` or the binary latent `z`), so
+    `bartz.Bart.predict` can return them without re-evaluating the trees.
+    """
+
+    train_pred: (
+        Float32[Array, '*chains_and_samples n']
+        | Float32[Array, '*chains_and_samples k n']
+    ) = field(chains=CHAIN_AXIS, samples=0, data=-1)
+    """The latent predictions at the training points: offset plus the scaled sum
+    of trees."""
+
+    @classmethod
+    def from_state(cls, state: State) -> 'MainTraceWithTrainPred':
+        """Create a single-item main trace with train predictions from a MCMC state."""
+        resid = state.resid * state.resid_scale[..., None]
+        if state.z is None:
+            ref = state.y
+        elif state.binary_indices is None:
+            ref = state.z
+        else:
+            ref = jnp.broadcast_to(state.y, resid.shape)
+            ref = ref.at[..., state.binary_indices, :].set(state.z)
+        return cls(train_pred=ref - resid, **vars(MainTrace.from_state(state)))

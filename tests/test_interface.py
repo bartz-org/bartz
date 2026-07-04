@@ -745,9 +745,7 @@ class TestWithCachedBart:
         On the float16 variants this also exercises that the running residuals
         are accumulated from the rounded stored leaves, not the exact draws.
         """
-        accum_resid, actual_resid = cachedbart.bart._compare_resid(
-            y=cachedbart.bkw.kw['y_train']
-        )
+        accum_resid, actual_resid = cachedbart.bart._compare_resid()
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4, reduce_rank=True)
 
     def test_convergence(self, cachedbart: CachedBart, subtests: SubTests) -> None:
@@ -1073,7 +1071,7 @@ def test_check_trees_detects_corruption(bkw: BartKW) -> None:
 
 
 def test_missing_ignored(bkw: BartKW, keys: split) -> None:
-    """Garbage finite y values at missing positions don't affect the fit."""
+    """Garbage y values at missing positions, even non-finite, don't affect the fit."""
     kw = bkw.kw
     y_train = kw['y_train']
     missing = gen_missing(keys.pop(), y_train.shape)
@@ -1081,7 +1079,10 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
 
     bart1 = Bart(**kw)
 
-    garbage = random.normal(keys.pop(), y_train.shape) * 1e3
+    garbage = random.normal(keys.pop(), y_train.shape) * 1e6
+    garbage = jnp.where(
+        random.bernoulli(keys.pop(), 0.5, garbage.shape), garbage, jnp.nan
+    )
     kw2 = dict(
         kw, seed=random.clone(kw['seed']), y_train=jnp.where(missing, garbage, y_train)
     )
@@ -1089,9 +1090,8 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
 
     yhat1 = bart1.predict('train', kind='latent_samples')
     yhat2 = bart2.predict('train', kind='latent_samples')
-    # loose because the train predictions may be precomputed (real leakage of
-    # the garbage values would instead be a ratio of order 1)
-    assert_close_matrices(yhat1, yhat2, rtol=5e-3, reduce_rank=True)
+    rtol = 0 if yhat1.platform() == 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
+    assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
 
 def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:

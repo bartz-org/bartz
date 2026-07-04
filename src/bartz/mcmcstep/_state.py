@@ -363,7 +363,8 @@ class State(Module):
     """The predictors."""
 
     y: Float32[Array, ' n'] | Float32[Array, 'k n'] = field(data=-1)
-    """The response, in data units. Binary components are stored as 0/1."""
+    """The response, in data units. Binary components are stored as 0/1.
+    Missing values are replaced by the offset."""
 
     z: None | Float32[Array, '*chains n'] | Float32[Array, '*chains kb n'] = field(
         chains=CHAIN_AXIS, data=-1
@@ -734,8 +735,9 @@ def init(
         calculations.
     missing
         Boolean mask, same shape as `y`; `True` marks entries to be ignored
-        by the MCMC. Values of `y` must be finite everywhere, including at
-        masked positions. If 2-D, `error_cov_inv.rate` must be diagonal.
+        by the MCMC (`State.y` stores the offset in their place, so the
+        masked values of `y` may be anything, even non-finite). If 2-D,
+        `error_cov_inv.rate` must be diagonal.
     min_points_per_decision_node
         The minimum number of data points in a decision node. 0 if not
         specified.
@@ -1003,6 +1005,13 @@ def init(
         # move all arrays to the appropriate device
         state = _shard_state(state)
 
+        # replace y at masked positions post-shard (the mask is parked in
+        # `inv_sdev_scale`), before `resid` is derived from y
+        if state.inv_sdev_scale is not None:
+            state = replace(
+                state, y=_sanitize_y(state.y, state.inv_sdev_scale, state.forest.offset)
+            )
+
         # calculate initial resid in the continuous outcome case, such that y
         # and offset are already sharded if needed
         if state.resid is None:
@@ -1200,6 +1209,22 @@ def _initial_prec_tree(
         .at[..., 1]
         .set(prec_scale.sum(axis=-1, dtype=jnp.float32))
     )
+
+
+@jit(donate_argnums=(0,))
+def _sanitize_y(
+    y: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'],
+    offset: Float32[Array, ''] | Float32[Array, ' k'],
+) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
+    """Replace `y` with `offset` at masked positions.
+
+    The MCMC ignores masked datapoints through their zeroed precision, but the
+    values parked in `y` still enter `resid`; garbage values of large magnitude
+    would degrade the accuracy of quantities derived from it, like the ``y -
+    resid`` train predictions. Donates `y` to overwrite it in place.
+    """
+    return jnp.where(missing, offset[..., None], y)
 
 
 @jit(donate_argnums=(1,), static_argnums=2)

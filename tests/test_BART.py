@@ -336,9 +336,7 @@ class TestWithCachedBart:
 
     def test_residuals_accuracy(self, cachedbart: CachedBart) -> None:
         """Check that running residuals are close to the recomputed final residuals."""
-        accum_resid, actual_resid = cachedbart.bart._bart._compare_resid(
-            y=cachedbart.kwargs['y_train']
-        )
+        accum_resid, actual_resid = cachedbart.bart._bart._compare_resid()
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4)
 
     def test_convergence(self, cachedbart: CachedBart, subtests: SubTests) -> None:

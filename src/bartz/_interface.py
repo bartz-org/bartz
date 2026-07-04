@@ -297,9 +297,9 @@ class Bart(Module):
         binary components of a mixed regression.
     missing
         Boolean mask with the same shape as `y_train`; `True` marks entries
-        to be ignored by the MCMC. Values of `y_train` must be finite
-        everywhere, including at masked positions. If 2-D, the error
-        covariance must be diagonal.
+        to be ignored by the MCMC. The values of `y_train` at masked
+        positions are ignored and may be anything, even non-finite. If 2-D,
+        the error covariance must be diagonal.
     num_trees
         The number of trees used to represent the latent mean function.
     n_save
@@ -1032,19 +1032,12 @@ class Bart(Module):
                 raise RuntimeError(msg)
 
     def _compare_resid(
-        self, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = None
+        self,
     ) -> tuple[
         Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
         Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
     ]:
         """Re-compute residuals to compare them with the updated ones.
-
-        Parameters
-        ----------
-        y
-            The response variable. Required for continuous regression (since
-            ``State`` does not store ``y`` in continuous mode). Ignored for
-            binary regression (where ``State.z`` is used instead).
 
         Returns
         -------
@@ -1053,13 +1046,7 @@ class Bart(Module):
         resid2
             The residuals computed from the final state of the trees.
         """
-        state = self._mcmc_state
-        if state.binary_indices is not None:
-            assert y is not None, 'y is required for mixed regression'
-        elif state.z is None:
-            assert y is not None, 'y is required for continuous regression'
-        y_arr = jnp.asarray(y) if y is not None else None
-        return compare_resid(state, y_arr)
+        return compare_resid(self._mcmc_state)
 
     def _depth_distr(self) -> Int32[Array, '*num_chains n_save d']:
         """Histogram of tree depths for each state of the trees.
@@ -1648,7 +1635,7 @@ def tree_goes_bad(
 
 @jit
 def compare_resid(
-    state: State, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
+    state: State,
 ) -> tuple[
     Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
     Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
@@ -1663,14 +1650,13 @@ def compare_resid(
 
     if state.binary_indices is not None:
         # mixed binary-continuous: z has only binary rows, y has all rows
-        assert y is not None
-        ref = jnp.broadcast_to(y, resid1.shape)
+        assert z is not None
+        ref = jnp.broadcast_to(state.y, resid1.shape)
         ref = ref.at[..., state.binary_indices, :].set(z)
     elif z is not None:
         ref = z
     else:
-        assert y is not None
-        ref = y
+        ref = state.y
     resid2 = ref - (trees + state.forest.offset[..., None])
 
     return resid1, resid2

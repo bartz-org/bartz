@@ -1079,10 +1079,6 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     missing = gen_missing(keys.pop(), y_train.shape)
     kw['missing'] = missing
 
-    # Pin y-dependent priors otherwise they are influenced by garbage values
-    kw['offset'] = 0.0
-    kw['tau_num'] = 2.0
-
     bart1 = Bart(**kw)
 
     garbage = random.normal(keys.pop(), y_train.shape) * 1e3
@@ -1936,11 +1932,11 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
     if num_datapoints == 0 or bkw.all_binary:
         assert_array_equal(bart.offset, jnp.zeros_like(bart.offset))
     else:
-        assert_close_matrices(
-            bart.offset[..., None],
-            jnp.where(mask[..., None], 0.0, kw['y_train']),
-            rtol=1e-6,
-        )
+        # continuous offset is the single datapoint, or 0 if it is missing
+        expected = jnp.where(mask[..., None], 0.0, kw['y_train'])
+        if kw.get('missing') is not None:
+            expected = jnp.where(kw['missing'], 0.0, expected)
+        assert_close_matrices(bart.offset[..., None], expected, rtol=1e-6)
 
     # set expected tau_num and check the error prior default
     if bkw.all_binary:

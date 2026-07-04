@@ -453,9 +453,19 @@ class Bart(Module):
         )
 
         # process "standardization" settings
-        offset = _process_offset_settings(y_train, binary_mask, offset)
+        offset = _process_offset_settings(
+            y_train,
+            binary_mask,
+            missing,
+            None if offset is None else jnp.asarray(offset, jnp.float32),
+        )
         leaf_prior_cov_inv = _process_leaf_variance_settings(
-            y_train, binary_mask, k, num_trees, tau_num
+            y_train,
+            binary_mask,
+            missing,
+            jnp.asarray(k, jnp.float32),
+            num_trees,
+            None if tau_num is None else jnp.asarray(tau_num, jnp.float32),
         )
         error_cov_inv = _process_error_variance_settings(
             y_train,
@@ -1217,38 +1227,58 @@ def _process_sparsity_settings(
         return None, sparse.a, sparse.b, rho
 
 
+@jit
 def _process_offset_settings(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-    offset: FloatLike | Float[ArrayLike, ' k'] | None,
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+    offset: Float32[Array, ''] | Float32[Array, ' k'] | None,
 ) -> Float32[Array, ''] | Float32[Array, ' k']:
-    """Return offset."""
+    """Determine and return offset."""
     if offset is not None:
-        off = jnp.asarray(offset, jnp.float32)
-        return jnp.broadcast_to(off, y_train.shape[:-1])
+        return jnp.broadcast_to(offset, y_train.shape[:-1])
     if y_train.shape[-1] < 1:
         return jnp.zeros(y_train.shape[:-1])
 
-    bound = 1 / (1 + y_train.shape[-1])
-    binary_offset = ndtri(jnp.clip((y_train != 0).mean(-1), bound, 1 - bound))
-    continuous_offset = y_train.mean(-1)
-    return jnp.where(binary_mask, binary_offset, continuous_offset)
+    if missing is None:
+        *_, n_valid = y_train.shape
+        prop = (y_train != 0).mean(-1)
+        mean = y_train.mean(-1)
+    else:
+        *_, n = y_train.shape
+        n_valid = n - jnp.count_nonzero(missing, axis=-1)
+        safe_n = jnp.maximum(n_valid, 1)
+        prop = jnp.where(missing, 0, y_train != 0).sum(-1) / safe_n
+        mean = jnp.where(missing, 0.0, y_train).sum(-1) / safe_n
+
+    bound = jnp.reciprocal(1.0 + n_valid)
+    binary_offset = ndtri(jnp.clip(prop, bound, 1 - bound))
+    offset = jnp.where(binary_mask, binary_offset, mean)
+    return jnp.where(n_valid > 0, offset, 0.0)
 
 
+@jit(static_argnums=(4,))
 def _process_leaf_variance_settings(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-    k: FloatLike,
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+    k: Float[Array, ''],
     num_trees: int,
-    tau_num: FloatLike | None,
+    tau_num: Float[Array, ''] | None,
 ) -> Float32[Array, ''] | Float32[Array, 'k k']:
     """Return `leaf_prior_cov_inv`."""
     # determine `tau_num` if not specified
+    *kshape, n = y_train.shape
     if tau_num is None:
-        if y_train.shape[-1] < 2:
-            continuous_tau = jnp.ones(y_train.shape[:-1])
-        else:
+        if n < 2:
+            continuous_tau = jnp.ones(kshape)
+        elif missing is None:
             continuous_tau = (y_train.max(-1) - y_train.min(-1)) / 2
+        else:
+            n_valid = n - jnp.count_nonzero(missing, axis=-1)
+            ymax = jnp.where(missing, -jnp.inf, y_train).max(-1)
+            ymin = jnp.where(missing, jnp.inf, y_train).min(-1)
+            continuous_tau = jnp.where(n_valid >= 2, (ymax - ymin) / 2, 1.0)
         tau_num = jnp.where(binary_mask, 3.0, continuous_tau)
 
     # leaf prior standard deviation
@@ -1257,9 +1287,7 @@ def _process_leaf_variance_settings(
     # leaf prior precision matrix
     leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu))
     if y_train.ndim == 2:
-        leaf_prior_cov_inv = jnp.diag(
-            jnp.broadcast_to(leaf_prior_cov_inv, y_train.shape[:-1])
-        )
+        leaf_prior_cov_inv = jnp.diag(jnp.broadcast_to(leaf_prior_cov_inv, kshape))
     return leaf_prior_cov_inv
 
 

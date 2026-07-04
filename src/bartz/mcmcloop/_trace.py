@@ -24,6 +24,8 @@
 
 """Trace dataclasses returned by `run_mcmc`."""
 
+from abc import abstractmethod
+
 from jax import numpy as jnp
 from jax.nn import softmax
 from jax.sharding import Mesh
@@ -34,7 +36,22 @@ from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
 
 
-class BurninTrace(Module):
+class Trace(Module):
+    """Abstract base for the per-iteration traces built by `run_mcmc`.
+
+    A concrete subclass declares the arrays to save as fields, marking the
+    per-iteration ones with `field`'s ``samples`` axis, and implements
+    `from_state`; `run_mcmc` stacks one item per iteration. See `BurninTrace`
+    and `MainTrace` for the pattern.
+    """
+
+    @classmethod
+    @abstractmethod
+    def from_state(cls, state: State) -> 'Trace':
+        """Build a single-item trace from an MCMC state."""
+
+
+class BurninTrace(Trace):
     """MCMC trace with only diagnostic values."""
 
     has_chains: bool = field(static=True)

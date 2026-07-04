@@ -52,7 +52,7 @@ from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Int32, Key, PyTree, Shaped
 
 from bartz._jaxext import jit, jit_active, split
-from bartz.mcmcloop._trace import BurninTrace, MainTrace
+from bartz.mcmcloop._trace import BurninTrace, MainTrace, Trace
 from bartz.mcmcstep import State, step
 from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.mcmcstep._lazy import add_dummy_axis
@@ -61,6 +61,11 @@ from bartz.mcmcstep._lazy import add_dummy_axis
 CallbackState: TypeAlias = PyTree[Any, 'T']
 
 
+# WORKAROUND(python<3.11): generic NamedTuple is only supported from 3.11, so
+# `burnin_trace`/`main_trace` are pinned to the default trace types. Once 3.10
+# is dropped, make this `NamedTuple, Generic[BurninTraceT, MainTraceT]` (with
+# TypeVars bound to `Trace`) and parametrize `run_mcmc` accordingly, so a custom
+# `burnin_trace_type`/`main_trace_type` flows through to the returned types.
 class RunMCMCResult(NamedTuple):
     """Return value of `run_mcmc`."""
 
@@ -139,8 +144,8 @@ class _Carry(Module):
     state: State
     i_total: Int32[Array, '']
     key: Key[Array, '']
-    burnin_trace: BurninTrace
-    main_trace: MainTrace
+    burnin_trace: Trace
+    main_trace: Trace
     callback_state: CallbackState
 
 
@@ -154,6 +159,8 @@ def run_mcmc(
     inner_loop_length: int | None = None,
     callback: Callback | None = None,
     callback_state: CallbackState = None,
+    burnin_trace_type: type[Trace] = BurninTrace,
+    main_trace_type: type[Trace] = MainTrace,
 ) -> RunMCMCResult:
     """
     Run the MCMC for the BART posterior.
@@ -190,6 +197,11 @@ def run_mcmc(
         and the callback state.
     callback_state
         The initial custom state for the callback.
+    burnin_trace_type
+    main_trace_type
+        Classes defining what is saved in the burn-in and main traces,
+        defaulting to `BurninTrace` and `MainTrace`. Customizing them is hard
+        without relying on bartz internals, so overriding is not recommended.
 
     Returns
     -------
@@ -214,8 +226,8 @@ def run_mcmc(
     key = jnp.copy(key)
 
     # create empty traces
-    burnin_trace = _empty_trace(n_burn, state, BurninTrace)
-    main_trace = _empty_trace(n_save, state, MainTrace)
+    burnin_trace = _empty_trace(n_burn, state, burnin_trace_type)
+    main_trace = _empty_trace(n_save, state, main_trace_type)
 
     # determine number of iterations for inner and outer loops
     n_iters = n_burn + n_skip * n_save
@@ -249,10 +261,19 @@ def run_mcmc(
     _inner_loop_counter.reset_call_counter()
     for i_outer in range(n_outer):
         carry = _run_mcmc_inner_loop(
-            carry, inner_loop_length, callback, n_burn, n_save, n_skip, i_outer, n_iters
+            carry,
+            inner_loop_length,
+            callback,
+            n_burn,
+            n_save,
+            n_skip,
+            i_outer,
+            n_iters,
+            burnin_trace_type,
+            main_trace_type,
         )
 
-    return RunMCMCResult(carry.state, carry.burnin_trace, carry.main_trace)
+    return RunMCMCResult(carry.state, carry.burnin_trace, carry.main_trace)  # ty: ignore[invalid-argument-type]
 
 
 def _replicate(
@@ -264,7 +285,7 @@ def _replicate(
         return device_put(x, NamedSharding(mesh, PartitionSpec()))
 
 
-TraceT = TypeVar('TraceT', bound=BurninTrace)
+TraceT = TypeVar('TraceT', bound=Trace)
 
 
 @jit(static_argnums=(0, 2))
@@ -316,6 +337,8 @@ def _run_mcmc_inner_loop_impl(
     n_skip: Int32[Array, ''],
     i_outer: Int32[Array, ''],
     n_iters: Int32[Array, ''],
+    burnin_trace_type: type[Trace],
+    main_trace_type: type[Trace],
 ) -> _Carry:
     # determine number of iterations for this loop batch
     i_upper = jnp.minimum(carry.i_total + inner_loop_length, n_iters)
@@ -352,7 +375,14 @@ def _run_mcmc_inner_loop_impl(
 
         # save to trace
         burnin_trace, main_trace = _save_state_to_trace(
-            carry.burnin_trace, carry.main_trace, state, carry.i_total, n_burn, n_skip
+            carry.burnin_trace,
+            carry.main_trace,
+            state,
+            carry.i_total,
+            n_burn,
+            n_skip,
+            burnin_trace_type,
+            main_trace_type,
         )
 
         return _Carry(
@@ -371,20 +401,22 @@ def _run_mcmc_inner_loop_impl(
 # so `run_mcmc` can reset it directly instead of reaching into jit internals,
 # then jit the wrapped callable.
 _inner_loop_counter: _CallCounter[_Carry] = _CallCounter(_run_mcmc_inner_loop_impl)
-_run_mcmc_inner_loop = jit(donate_argnums=(0,), static_argnums=(2,))(
+_run_mcmc_inner_loop = jit(donate_argnums=(0,), static_argnums=(2, 8, 9))(
     _inner_loop_counter
 )
 
 
 @named_call
 def _save_state_to_trace(
-    burnin_trace: BurninTrace,
-    main_trace: MainTrace,
+    burnin_trace: Trace,
+    main_trace: Trace,
     state: State,
     i_total: Int32[Array, ''],
     n_burn: Int32[Array, ''],
     n_skip: Int32[Array, ''],
-) -> tuple[BurninTrace, MainTrace]:
+    burnin_trace_type: type[Trace],
+    main_trace_type: type[Trace],
+) -> tuple[Trace, Trace]:
     # trace index where to save during burnin; out-of-bounds => noop after
     # burnin
     burnin_idx = i_total
@@ -396,9 +428,8 @@ def _save_state_to_trace(
     noop_cond = i_total < n_burn
     main_idx = jnp.where(noop_cond, noop_idx, main_idx)
 
-    # prepare array index
-    burnin_trace = _set(burnin_trace, burnin_idx, BurninTrace.from_state(state))
-    main_trace = _set(main_trace, main_idx, MainTrace.from_state(state))
+    burnin_trace = _set(burnin_trace, burnin_idx, burnin_trace_type.from_state(state))
+    main_trace = _set(main_trace, main_idx, main_trace_type.from_state(state))
 
     return burnin_trace, main_trace
 

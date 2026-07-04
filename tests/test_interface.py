@@ -1082,9 +1082,6 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     # Pin y-dependent priors otherwise they are influenced by garbage values
     kw['offset'] = 0.0
     kw['tau_num'] = 2.0
-    if not bkw.all_binary:
-        kw['sigma_scale'] = 1.0
-        kw['sigma_init'] = 1.0
 
     bart1 = Bart(**kw)
 

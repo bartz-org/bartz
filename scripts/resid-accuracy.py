@@ -34,6 +34,7 @@ settings. The error is normalized by the current residual magnitude because
 the float16 rounding error injected at each update is proportional to it.
 """
 
+from argparse import ArgumentParser
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -48,8 +49,7 @@ from bartz.testing import gen_data
 N = 1000
 P = 10
 N_SAVE = 10_000
-NUM_TREES = (4096, 1024, 256, 64, 16, 4)
-DTYPE = 'float32'
+NUM_TREES = (1024, 256, 64, 16, 4)
 
 
 def rms(x: Float32[Array, '... n']) -> Float32[Array, '...']:
@@ -58,7 +58,7 @@ def rms(x: Float32[Array, '... n']) -> Float32[Array, '...']:
 
 
 def relative_error(
-    key: Key[Array, ''], num_trees: int
+    key: Key[Array, ''], num_trees: int, dtype: jnp.dtype, quantization: int | None
 ) -> tuple[Float32[Array, ' n_save'], jnp.dtype]:
     """Return the per-iteration relative rms error and the residuals dtype."""
     keys = split(key)
@@ -73,8 +73,10 @@ def relative_error(
         n_save=N_SAVE,
         num_chains=None,
         seed=keys.pop(),
-        init_kw=dict(leaf_dtype=jnp.dtype(DTYPE), resid_dtype=jnp.dtype(DTYPE)),
         precompute_predict_train=True,
+        init_kw=dict(
+            leaf_dtype=dtype, resid_dtype=dtype, leaf_quantization=quantization
+        ),
     )
     pred_running = bart.predict('train', kind='latent_samples')
     pred_actual = bart.predict(dgp.x, kind='latent_samples')
@@ -84,8 +86,26 @@ def relative_error(
 
 def main() -> None:
     """Run the MCMCs, plot the errors, save the figure."""
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument(
+        '--dtype',
+        type=jnp.dtype,
+        default=jnp.dtype('float32'),
+        help='dtype of leaves and residuals (default: float32)',
+    )
+    parser.add_argument(
+        '--quantization',
+        type=lambda s: None if s.lower() == 'none' else int(s),
+        default=3,
+        help='log2 of the leaf quantization step, or "none" (default: 3)',
+    )
+    args = parser.parse_args()
+
     keys = split(random.key(202607050), len(NUM_TREES))
-    results = {nt: relative_error(keys.pop(), nt) for nt in NUM_TREES}
+    results = {
+        nt: relative_error(keys.pop(), nt, args.dtype, args.quantization)
+        for nt in NUM_TREES
+    }
     errors = {nt: err for nt, (err, _) in results.items()}
     (resid_dtype,) = {dtype for _, dtype in results.values()}
 
@@ -117,9 +137,10 @@ def main() -> None:
         ax.grid(which='minor', linestyle=':')
         ax.legend()
 
-    out = Path(__file__).with_suffix('.png')
+    out = Path(__file__)
+    out = out.parent / f'{out.name}-{args.dtype}-{args.quantization}.png'
+    print(f'write {out}...')
     fig.savefig(out, dpi=150)
-    print(f'saved {out}')
 
 
 if __name__ == '__main__':

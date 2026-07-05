@@ -1028,6 +1028,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
                 else None,
                 pso.state.forest.leaf_scale,
                 pso.state.resid_scale,
+                pso.state.config.leaf_quantization,
             ),
             pt,
         )
@@ -1084,6 +1085,9 @@ class SeqStageInAllTrees(Module):
 
     resid_scale: Float32[Array, ''] | Float32[Array, ' k']
     """The scale of the stored residuals, see `bartz.mcmcstep.State.resid_scale`."""
+
+    leaf_quantization: int | None = field(static=True)
+    """Leaf quantization setting, see `bartz.mcmcstep.StepConfig`."""
 
 
 class SeqStageInPerTree(Module):
@@ -1233,7 +1237,23 @@ def accept_move_and_sample_leaves(
 
     # round the new leaves to the storage units and dtype; the residuals are
     # then updated with the rounded values to stay consistent with the trees
-    leaf_tree = (leaf_tree / at.leaf_scale[..., None]).astype(pt.leaf_tree.dtype)
+    leaf_tree = leaf_tree / at.leaf_scale[..., None]
+    if at.leaf_quantization is not None:
+        # quantize the leaves such that the residual updates below are mostly
+        # exact. the target grid is the spacing of `resid.dtype` values of
+        # magnitude 2^leaf_quantization in resid units, so
+        # 2^(leaf_quantization - nmant) * resid_scale in data units; dividing
+        # by leaf_scale converts it to the leaf units `leaf_tree` is in here.
+        # the scales are powers of two, so the quantum is one too and the leaf
+        # storage dtype's own (coarser) rounding below preserves multiples of
+        # it. 2.0 ** n on the static exponent is an exact python float;
+        # jnp.exp2 would be off by 1 ulp (it is not correctly rounded)
+        nmant = jnp.finfo(resid.dtype).nmant
+        quantum = (at.resid_scale / at.leaf_scale) * 2.0 ** (
+            at.leaf_quantization - nmant
+        )
+        leaf_tree = jnp.round(leaf_tree / quantum[..., None]) * quantum[..., None]
+    leaf_tree = leaf_tree.astype(pt.leaf_tree.dtype)
 
     # replace old tree with new tree in function values; the per-leaf data-unit
     # delta is converted back to the stored residual units and dtype *before* the

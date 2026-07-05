@@ -340,6 +340,11 @@ class StepConfig(Module):
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
 
+    leaf_quantization: int | None = field(static=True, default=None)
+    """If set, quantize the leaves such that the running updates of
+    `State.resid` are mostly exact, assuming ``|resid| <
+    2**leaf_quantization`` in `State.resid_scale` units."""
+
     @property
     def data_sharded(self) -> bool:
         """Whether the data axis is sharded across devices."""
@@ -645,6 +650,7 @@ def init(
     leaf_dtype: DTypeLike = jnp.float16,
     prec_scale_dtype: DTypeLike = jnp.float16,
     resid_dtype: DTypeLike = jnp.float32,
+    leaf_quantization: int | None = None,
     error_cov_inv: Wishart | None = None,
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
@@ -716,6 +722,15 @@ def init(
         the residuals are stored in units of a float32 scale (`State.resid_scale`,
         the marginal prior standard deviation of the sum of trees), so a narrow
         dtype stores O(1) values without over/underflow.
+    leaf_quantization
+        If set, quantize each stored leaf to the spacing of `resid_dtype`
+        values of magnitude ``2 ** leaf_quantization`` (in
+        `State.resid_scale` units). If the residuals stay below that bound,
+        most running updates of `State.resid` are then exact, suppressing the
+        error it accumulates along the MCMC. Higher values tolerate larger
+        residuals but coarsen the leaves; leaves already coarser due to
+        `leaf_dtype` are unaffected. In practice: set this to 1 when using
+        float16 residuals.
     error_cov_inv
         The Wishart prior on the inverse error covariance, together with its
         initial value (see `Wishart`). Leave it unspecified for binary
@@ -990,6 +1005,7 @@ def init(
                 sequential_unroll=sequential_unroll,
                 augment=augment,
                 mesh=mesh,
+                leaf_quantization=leaf_quantization,
                 **red_cfg,
             ),
         )

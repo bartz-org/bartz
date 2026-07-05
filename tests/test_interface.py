@@ -1342,6 +1342,21 @@ def test_float16_close_to_float32(bkw: BartKW) -> None:
     )
 
 
+def test_leaf_quantization(bkw: BartKW) -> None:
+    """With `leaf_quantization`, leaves are stored as multiples of the quantum."""
+    bound_exponent = 3
+    prev_init_kw: kwdict = bkw.kw.get('init_kw', {})
+    init_kw = dict(prev_init_kw, leaf_quantization=bound_exponent)
+    bart = Bart(**dict(bkw.kw, init_kw=init_kw))
+    state = bart._mcmc_state
+    nmant = jnp.finfo(state.resid.dtype).nmant
+    quantum = (state.resid_scale / state.forest.leaf_scale) * 2.0 ** (
+        bound_exponent - nmant
+    )
+    leaves = bart._main_trace.leaf_tree / quantum[..., None]
+    assert_array_equal(leaves, jnp.round(leaves))
+
+
 def test_output_ranges(bkw: BartKW, keys: split) -> None:
     """Check value constraints on Bart outputs."""
     kw = bkw.kw

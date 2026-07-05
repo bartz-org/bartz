@@ -28,6 +28,7 @@ from collections.abc import Callable, Sequence
 from typing import (
     TYPE_CHECKING,
     Any,
+    Concatenate,
     ParamSpec,
     Protocol,
     TypeVar,
@@ -41,8 +42,11 @@ from jax.stages import Lowered, Traced
 from jaxtyping import PyTree
 
 _P = ParamSpec('_P')
+_P2 = ParamSpec('_P2')
 _R = TypeVar('_R')
+_R2 = TypeVar('_R2')
 _R_co = TypeVar('_R_co', covariant=True)
+_T = TypeVar('_T')
 
 
 @runtime_checkable
@@ -60,6 +64,24 @@ class JitWrapped(Protocol[_P, _R_co]):
     def lower(self, *args: _P.args, **kwargs: _P.kwargs) -> Lowered: ...
 
     def trace(self, *args: _P.args, **kwargs: _P.kwargs) -> Traced: ...
+
+    # jax's jitted callables implement the descriptor protocol, so `@jit` also
+    # works on methods; declare it so type checkers bind `self` on attribute
+    # access (the bound object proxies the jit methods through `__func__`, but
+    # their bound signatures are not remapped -- only `__call__` is)
+
+    @overload
+    def __get__(
+        self, obj: None, objtype: type | None = None, /
+    ) -> 'JitWrapped[_P, _R_co]': ...
+
+    @overload
+    def __get__(
+        self: 'JitWrapped[Concatenate[_T, _P2], _R2]',
+        obj: _T,
+        objtype: type | None = None,
+        /,
+    ) -> Callable[_P2, _R2]: ...
 
     if not TYPE_CHECKING:
         # WORKAROUND(beartype<99): beartype chokes on ParamSpec-subscripted

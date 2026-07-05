@@ -1267,9 +1267,7 @@ def accept_move_and_sample_leaves(
 
 @named_call
 def sum_resid(
-    scaled_resid: (
-        Float32[Array, ' n'] | Float32[Array, 'k n'] | Float32[Array, 'k k n']
-    ),
+    scaled_resid: Float[Array, ' n'] | Float[Array, 'k n'] | Float[Array, 'k k n'],
     leaf_indices: UInt[Array, ' n'],
     tree_size: int,
     reduction_config: ReductionConfig,

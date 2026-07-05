@@ -59,8 +59,8 @@ def rms(x: Float32[Array, '... n']) -> Float32[Array, '...']:
 
 def relative_error(
     key: Key[Array, ''], num_trees: int, dtype: jnp.dtype, quantization: int | None
-) -> tuple[Float32[Array, ' n_save'], jnp.dtype]:
-    """Return the per-iteration relative rms error and the residuals dtype."""
+) -> tuple[Float32[Array, ' n_save'], Float32[Array, ''], jnp.dtype]:
+    """Return the relative rms error, the scaled resolution, and the residuals dtype."""
     keys = split(key)
     dgp = gen_data(
         keys.pop(), n=N, p=P, q=0, sigma2_lin=1.0, sigma2_quad=1.0, sigma2_eps=1.0
@@ -80,8 +80,10 @@ def relative_error(
     )
     pred_running = bart.predict('train', kind='latent_samples')
     pred_actual = bart.predict(dgp.x, kind='latent_samples')
-    err = rms(pred_running - pred_actual) / rms(dgp.y - pred_actual)
-    return err, bart._mcmc_state.resid.dtype  # noqa: SLF001
+    resid_rms = rms(dgp.y - pred_actual)
+    err = rms(pred_running - pred_actual) / resid_rms
+    state = bart._mcmc_state  # noqa: SLF001
+    return err, state.sum_trees_eps() / resid_rms.mean(), state.resid.dtype
 
 
 def main() -> None:
@@ -90,14 +92,14 @@ def main() -> None:
     parser.add_argument(
         '--dtype',
         type=jnp.dtype,
-        default=jnp.dtype('float32'),
-        help='dtype of leaves and residuals (default: float32)',
+        default=jnp.dtype('float16'),
+        help='dtype of leaves and residuals (default: float16)',
     )
     parser.add_argument(
         '--quantization',
         type=lambda s: None if s.lower() == 'none' else int(s),
-        default=3,
-        help='log2 of the leaf quantization step, or "none" (default: 3)',
+        default=1,
+        help='log2 of the leaf quantization step, or "none" (default: 1)',
     )
     args = parser.parse_args()
 
@@ -106,8 +108,9 @@ def main() -> None:
         nt: relative_error(keys.pop(), nt, args.dtype, args.quantization)
         for nt in NUM_TREES
     }
-    errors = {nt: err for nt, (err, _) in results.items()}
-    (resid_dtype,) = {dtype for _, dtype in results.values()}
+    errors = {nt: err for nt, (err, _, _) in results.items()}
+    sum_trees_eps = {nt: eps for nt, (_, eps, _) in results.items()}
+    (resid_dtype,) = {dtype for _, _, dtype in results.values()}
 
     fig, (ax_iter, ax_steps) = plt.subplots(
         1,
@@ -132,10 +135,13 @@ def main() -> None:
     eps = jnp.finfo(resid_dtype).eps
     for ax in (ax_iter, ax_steps):
         ax.axhline(eps, color='black', linestyle='--', label=f'{resid_dtype} eps')
+        ax.plot([], [], color='black', linestyle=':', label='sum_trees_eps')
+        for i, ste in enumerate(sum_trees_eps.values()):
+            ax.axhline(ste, color=f'C{i}', linestyle=':')
         ax.set(xscale='log', yscale='log')
         ax.grid(which='major', linestyle='--')
         ax.grid(which='minor', linestyle=':')
-        ax.legend()
+        ax.legend(loc='upper left')
 
     out = Path(__file__)
     out = out.parent / f'{out.name}-{args.dtype}-{args.quantization}.png'

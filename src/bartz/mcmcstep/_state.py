@@ -442,6 +442,72 @@ class State(Module):
         c = chain_vmap_axes(self.forest).var_tree
         return self.forest.var_tree.shape[c]
 
+    @jit
+    def sum_trees_eps(self) -> Float32[Array, ''] | Float32[Array, ' k']:
+        """Estimate the absolute accuracy limit of the sum of trees (in data units).
+
+        The analogue of ``finfo(dtype).eps`` for the sum of trees: the smallest
+        variation it can resolve. Combines the static resolution of the stored
+        leaves with an estimate of the error accumulated so far by the running
+        residual updates, assuming the current residual magnitude is
+        representative of the whole run.
+        """
+        eps_leaf = jnp.finfo(self.forest.leaf_tree.dtype).eps
+        eps_resid = jnp.finfo(self.resid.dtype).eps
+
+        # rounding of the stored leaves at their typical magnitude `leaf_scale`
+        dtype_quantum = eps_leaf * self.forest.leaf_scale
+
+        if self.config.leaf_quantization is None:
+            resolution = dtype_quantum
+            exact_below = jnp.zeros(())
+        else:
+            # quantized leaves all sit on one grid closed under addition (the
+            # scales are powers of two, so leaf storage rounds within the
+            # grid even where its spacing is coarser), so the sum resolves
+            # multiples of the quantum whatever the number of trees, and the
+            # residual updates are exact while the residuals stay below
+            # 2^leaf_quantization (in `resid_scale` units)
+            q = self.config.leaf_quantization
+            managed_quantum = eps_resid * self.resid_scale * 2.0**q
+            resolution = jnp.maximum(managed_quantum, dtype_quantum)
+            exact_below = jnp.asarray(2.0**q)
+
+        # estimate accumulated random walk drift assuming the current `resid`
+        # is representative of most of the markov chain
+        resid = self.resid.astype(jnp.float32)
+        inexact = jnp.where(jnp.abs(resid) > exact_below, resid, 0.0)
+        chain_axes = range(inexact.ndim - 1 - self.resid_scale.ndim)
+        data_axis = -1
+        mean_square = jnp.mean(jnp.square(inexact), axis=(*chain_axes, data_axis))
+        *_, num_trees, _ = self.forest.var_tree.shape
+        num_updates = num_trees * self.config.steps_done.astype(jnp.float32)
+        steady = num_updates * mean_square
+
+        # estimate numerical error on the first mcmc step, separately because on the
+        # first step `resid` starts from the miscalibrated initial value
+        initial_resid = (self.y - self.forest.offset[..., None]) / self.resid_scale[
+            ..., None
+        ]
+        initial_inexact = jnp.where(
+            jnp.abs(initial_resid) > exact_below, initial_resid, 0.0
+        )
+        transient = jnp.where(
+            self.config.steps_done > 0,
+            jnp.mean(jnp.square(initial_inexact), axis=-1),
+            0.0,
+        )
+
+        # sum sources of resid numerical error and rescale to data units
+        drift = eps_resid * self.resid_scale * jnp.sqrt(steady + transient)
+
+        # the final error is the max of the leaf quantization and the resid
+        # numerical error; this may be an overestimate in corner cases where
+        # the leaf quantization is coarse, but the mcmc manages to make the sum
+        # of trees more accurate than that, presumably by modulating leaf
+        # magnitude
+        return jnp.maximum(resolution, drift)
+
 
 def _check_diagonal(rate: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
     """Raise if the Wishart `rate` is not diagonal."""

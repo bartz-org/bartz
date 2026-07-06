@@ -343,7 +343,7 @@ class StepConfig(Module):
     leaf_quantization: int | None = field(static=True, default=None)
     """If set, quantize the leaves such that the running updates of
     `State.resid` are mostly exact, assuming ``|resid| <
-    2**leaf_quantization`` in `State.resid_scale` units."""
+    2**(leaf_quantization+1)`` in `State.resid_scale` units."""
 
     @property
     def data_sharded(self) -> bool:
@@ -452,6 +452,22 @@ class State(Module):
         residual updates, assuming the current residual magnitude is
         representative of the whole run.
         """
+        resolution, drift = self._sum_trees_eps()
+
+        # the final error is the max of the leaf quantization and the resid
+        # numerical error; this may be an overestimate in corner cases where
+        # the leaf quantization is coarse, but the mcmc manages to make the sum
+        # of trees more accurate than that, presumably by modulating leaf
+        # magnitude
+        return jnp.maximum(resolution, drift)
+
+    def _sum_trees_eps(
+        self,
+    ) -> tuple[
+        Float32[Array, ''] | Float32[Array, ' k'],
+        Float32[Array, ''] | Float32[Array, ' k'],
+    ]:
+        """Return the resolution and drift terms of `sum_trees_eps` separately."""
         eps_leaf = jnp.finfo(self.forest.leaf_tree.dtype).eps
         eps_resid = jnp.finfo(self.resid.dtype).eps
 
@@ -467,11 +483,12 @@ class State(Module):
             # grid even where its spacing is coarser), so the sum resolves
             # multiples of the quantum whatever the number of trees, and the
             # residual updates are exact while the residuals stay below
-            # 2^leaf_quantization (in `resid_scale` units)
+            # 2^(leaf_quantization+1) (in `resid_scale` units), where the
+            # `resid` dtype spacing still matches the quantum
             q = self.config.leaf_quantization
             managed_quantum = eps_resid * self.resid_scale * 2.0**q
             resolution = jnp.maximum(managed_quantum, dtype_quantum)
-            exact_below = jnp.asarray(2.0**q)
+            exact_below = jnp.asarray(2.0 ** (q + 1))
 
         # estimate accumulated random walk drift assuming the current `resid`
         # is representative of most of the markov chain
@@ -501,12 +518,7 @@ class State(Module):
         # sum sources of resid numerical error and rescale to data units
         drift = eps_resid * self.resid_scale * jnp.sqrt(steady + transient)
 
-        # the final error is the max of the leaf quantization and the resid
-        # numerical error; this may be an overestimate in corner cases where
-        # the leaf quantization is coarse, but the mcmc manages to make the sum
-        # of trees more accurate than that, presumably by modulating leaf
-        # magnitude
-        return jnp.maximum(resolution, drift)
+        return resolution, drift
 
 
 def _check_diagonal(rate: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
@@ -791,7 +803,8 @@ def init(
     leaf_quantization
         If set, quantize each stored leaf to the spacing of `resid_dtype`
         values of magnitude ``2 ** leaf_quantization`` (in
-        `State.resid_scale` units). If the residuals stay below that bound,
+        `State.resid_scale` units). If the residuals stay below
+        ``2 ** (leaf_quantization + 1)``, where that spacing still holds,
         most running updates of `State.resid` are then exact, suppressing the
         error it accumulates along the MCMC. Higher values tolerate larger
         residuals but coarsen the leaves; leaves already coarser due to

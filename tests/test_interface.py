@@ -1397,6 +1397,55 @@ def test_sum_trees_eps(
     assert err <= eps <= 8 * err
 
 
+@pytest.mark.parametrize('leaf_quantization', [None, 0])
+def test_sum_trees_eps_drift(leaf_quantization: int | None, keys: split) -> None:
+    """The drift term of `State.sum_trees_eps` tracks the running residuals error.
+
+    Run on noisy data with float16 residuals and train-prediction
+    precomputation, then compare the drift term against the accumulated
+    numerical error of the running residuals, observed as the difference
+    between the precomputed train predictions and the exact ones recomputed
+    from the saved trees. Without quantization every residual update rounds,
+    so the drift term dominates and bounds the observed error; with
+    quantization most updates are exact and the drift term must not blow up
+    above the observed error.
+    """
+    dgp = gen_data(
+        keys.pop(), n=500, p=10, q=0, sigma2_lin=1.0, sigma2_quad=1.0, sigma2_eps=1.0
+    )
+    bart = Bart(
+        dgp.x,
+        dgp.y,
+        num_trees=16,
+        n_burn=0,
+        n_save=2000,
+        num_chains=None,
+        seed=keys.pop(),
+        precompute_predict_train=True,
+        init_kw=dict(
+            leaf_dtype=jnp.float16,
+            resid_dtype=jnp.float16,
+            leaf_quantization=leaf_quantization,
+        ),
+    )
+    pred_running = bart.predict('train', kind='latent_samples')
+    pred_actual = bart.predict(dgp.x, kind='latent_samples')
+    err = jnp.sqrt(jnp.mean(jnp.square(pred_running[-1, :] - pred_actual[-1, :])))
+    resolution, drift = bart._mcmc_state._sum_trees_eps()
+    # the drift estimate is conservative, but must stay within a bounded
+    # factor of the observed accumulated error
+    assert drift <= 16 * err
+    # the overall estimate must cover the observed accumulated error (the
+    # slack absorbs the slow sub-resolution error growth the snapshot-based
+    # estimate cannot track)
+    assert err <= 4 * jnp.maximum(resolution, drift)
+    if leaf_quantization is None:
+        # every residual update rounds: the drift term dominates and is an
+        # upper bound on the observed error
+        assert resolution < drift
+        assert err <= drift
+
+
 def test_output_ranges(bkw: BartKW, keys: split) -> None:
     """Check value constraints on Bart outputs."""
     kw = bkw.kw

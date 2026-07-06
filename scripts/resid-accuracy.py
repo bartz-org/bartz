@@ -28,10 +28,10 @@ Runs `Bart` with float16 residuals (to amplify the accumulation error) and
 train-prediction precomputation (to propagate the residuals error to the
 predictions), then compares the train predictions accumulated during the MCMC
 against the exact ones recomputed from the saved trees. The relative error
-``||pred_running - pred_actual|| / ||y - pred_actual||`` is plotted against the
-MCMC iteration, and against iteration * num_trees, for a series of `num_trees`
-settings. The error is normalized by the current residual magnitude because
-the float16 rounding error injected at each update is proportional to it.
+``||pred_running - pred_actual|| / ||y - pred_actual||`` is plotted against
+iteration * num_trees, for a series of `num_trees` settings. The error is
+normalized by the current residual magnitude because the float16 rounding
+error injected at each update is proportional to it.
 """
 
 from argparse import ArgumentParser
@@ -112,36 +112,27 @@ def main() -> None:
     sum_trees_eps = {nt: eps for nt, (_, eps, _) in results.items()}
     (resid_dtype,) = {dtype for _, _, dtype in results.values()}
 
-    fig, (ax_iter, ax_steps) = plt.subplots(
-        1,
-        2,
-        num='resid-accuracy',
-        figsize=(10, 4.5),
-        layout='constrained',
-        sharey=True,
-        clear=True,
+    fig, ax = plt.subplots(
+        num='resid-accuracy', figsize=(6.5, 4.5), layout='constrained', clear=True
     )
 
     iteration = 1 + jnp.arange(N_SAVE)
     for i, (nt, err) in enumerate(errors.items()):
-        ax_iter.plot(iteration, err, color=f'C{i}', label=f'{nt} trees')
-        ax_steps.plot(iteration * nt, err, color=f'C{i}', label=f'{nt} trees')
+        ax.plot(iteration * nt, err, color=f'C{i}', label=f'{nt} trees')
 
-    ax_iter.set(
-        xlabel='MCMC iteration',
+    ax.set(
+        xlabel='MCMC iteration * num_trees',
         ylabel='rms(pred_running - pred_actual) / rms(y - pred_actual)',
     )
-    ax_steps.set(xlabel='MCMC iteration * num_trees')
-    eps = jnp.finfo(resid_dtype).eps
-    for ax in (ax_iter, ax_steps):
-        ax.axhline(eps, color='black', linestyle='--', label=f'{resid_dtype} eps')
-        ax.plot([], [], color='black', linestyle=':', label='sum_trees_eps')
-        for i, ste in enumerate(sum_trees_eps.values()):
-            ax.axhline(ste, color=f'C{i}', linestyle=':')
-        ax.set(xscale='log', yscale='log')
-        ax.grid(which='major', linestyle='--')
-        ax.grid(which='minor', linestyle=':')
-        ax.legend(loc='upper left')
+    eps = jnp.finfo(resid_dtype).eps.item()
+    ax.axhline(eps, color='black', linestyle='--', label=f'{resid_dtype} eps')
+    ax.plot([], [], color='black', label='sum_trees_eps')
+    for i, ste in enumerate(sum_trees_eps.values()):
+        ax.axhline(ste.item(), color=f'C{i}')
+    ax.set(xscale='log', yscale='log')
+    ax.grid(which='major', linestyle='--')
+    ax.grid(which='minor', linestyle=':')
+    ax.legend(loc='upper left')
 
     out = Path(__file__)
     out = out.parent / f'{out.name}-{args.dtype}-{args.quantization}.png'

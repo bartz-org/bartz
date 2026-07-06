@@ -1319,11 +1319,11 @@ def test_leaf_scale(bkw: BartKW) -> None:
         marginal_std = jnp.sqrt(jnp.diagonal(jnp.linalg.inv(cov_inv)))
     else:
         marginal_std = jnp.sqrt(jnp.reciprocal(cov_inv))
-    expected = jnp.exp2(jnp.round(jnp.log2(marginal_std)))
+    expected = 2 ** jnp.round(jnp.log2(marginal_std))
     assert forest.leaf_scale.dtype == jnp.float32
     assert_close_matrices(forest.leaf_scale, expected, rtol=1e-5)
     # exactly a power of two: rounding the log2 back is a no-op
-    pow2 = jnp.exp2(jnp.round(jnp.log2(forest.leaf_scale)))
+    pow2 = 2 ** jnp.round(jnp.log2(forest.leaf_scale))
     assert_array_equal(forest.leaf_scale, pow2)
 
 

@@ -1176,7 +1176,8 @@ def _round_to_pow2(
     x: Float32[Array, ''] | Float32[Array, ' k'],
 ) -> Float32[Array, ''] | Float32[Array, ' k']:
     """Round to the nearest power of two."""
-    return jnp.exp2(jnp.round(jnp.log2(x)))
+    # note: don't use exp2, not exact. `2 ** x` checked exact on cpu & cuda.
+    return 2 ** jnp.round(jnp.log2(x))
 
 
 @dataclass(frozen=True)

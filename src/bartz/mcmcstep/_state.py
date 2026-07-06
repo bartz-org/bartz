@@ -396,6 +396,14 @@ class State(Module):
     they do not over/underflow narrow `resid` dtypes (see `init`'s
     ``resid_dtype``)."""
 
+    resid_inexact_integral: Float32[Array, '*chains'] | Float32[Array, '*chains k'] = (
+        field(chains=CHAIN_AXIS)
+    )
+    """Sum over the MCMC steps done of the mean square of the residuals (in
+    `resid_scale` units) large enough that their running updates round, taken
+    at the start of each step. Accumulated by `step`, used by `sum_trees_eps`
+    to estimate the rounding error drift."""
+
     error_cov_inv: Wishart
     """The inverse error covariance with its Wishart prior. The current value is
     ``error_cov_inv.value`` (scalar for univariate, matrix for multivariate);
@@ -448,9 +456,9 @@ class State(Module):
 
         The analogue of ``finfo(dtype).eps`` for the sum of trees: the smallest
         variation it can resolve. Combines the static resolution of the stored
-        leaves with an estimate of the error accumulated so far by the running
-        residual updates, assuming the current residual magnitude is
-        representative of the whole run.
+        leaves with an estimate of the rounding error accumulated so far by the
+        running residual updates, integrated along the MCMC (see
+        `resid_inexact_integral`).
         """
         resolution, drift = self._sum_trees_eps()
 
@@ -476,47 +484,24 @@ class State(Module):
 
         if self.config.leaf_quantization is None:
             resolution = dtype_quantum
-            exact_below = jnp.zeros(())
         else:
             # quantized leaves all sit on one grid closed under addition (the
             # scales are powers of two, so leaf storage rounds within the
             # grid even where its spacing is coarser), so the sum resolves
-            # multiples of the quantum whatever the number of trees, and the
-            # residual updates are exact while the residuals stay below
-            # 2^(leaf_quantization+1) (in `resid_scale` units), where the
-            # `resid` dtype spacing still matches the quantum
+            # multiples of the quantum whatever the number of trees
             q = self.config.leaf_quantization
             managed_quantum = eps_resid * self.resid_scale * 2.0**q
             resolution = jnp.maximum(managed_quantum, dtype_quantum)
-            exact_below = jnp.asarray(2.0 ** (q + 1))
 
-        # estimate accumulated random walk drift assuming the current `resid`
-        # is representative of most of the markov chain
-        resid = self.resid.astype(jnp.float32)
-        inexact = jnp.where(jnp.abs(resid) > exact_below, resid, 0.0)
-        chain_axes = range(inexact.ndim - 1 - self.resid_scale.ndim)
-        data_axis = -1
-        mean_square = jnp.mean(jnp.square(inexact), axis=(*chain_axes, data_axis))
+        # random walk drift of the accumulated rounding errors: each of the
+        # `num_trees` updates per step charges eps_resid * |resid| to the
+        # residuals large enough to round, whose mean square is integrated
+        # over the steps done in `resid_inexact_integral`
+        integral = self.resid_inexact_integral
+        chain_axes = range(integral.ndim - self.resid_scale.ndim)
+        integral = jnp.mean(integral, axis=tuple(chain_axes))
         *_, num_trees, _ = self.forest.var_tree.shape
-        num_updates = num_trees * self.config.steps_done.astype(jnp.float32)
-        steady = num_updates * mean_square
-
-        # estimate numerical error on the first mcmc step, separately because on the
-        # first step `resid` starts from the miscalibrated initial value
-        initial_resid = (self.y - self.forest.offset[..., None]) / self.resid_scale[
-            ..., None
-        ]
-        initial_inexact = jnp.where(
-            jnp.abs(initial_resid) > exact_below, initial_resid, 0.0
-        )
-        transient = jnp.where(
-            self.config.steps_done > 0,
-            jnp.mean(jnp.square(initial_inexact), axis=-1),
-            0.0,
-        )
-
-        # sum sources of resid numerical error and rescale to data units
-        drift = eps_resid * self.resid_scale * jnp.sqrt(steady + transient)
+        drift = eps_resid * self.resid_scale * jnp.sqrt(num_trees * integral)
 
         return resolution, drift
 
@@ -1011,6 +996,7 @@ def init(
                 else cast(Array, None)
             ),
             resid_scale=storage.resid_scale,
+            resid_inexact_integral=_lazy(jnp.zeros, kshape),
             # only `value` carries the chain axis, so it becomes the lazy leaf;
             # the prior params `nu`/`rate` are shared across chains
             error_cov_inv=replace(

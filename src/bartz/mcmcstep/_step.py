@@ -87,6 +87,7 @@ def step(key: Key[Array, ''], state: State) -> State:
     """
     keys = split(key, 4)
 
+    state = step_resid_inexact_integral(state)
     state = step_trees(keys.pop(), state)
 
     if state.z is not None:
@@ -97,6 +98,32 @@ def step(key: Key[Array, ''], state: State) -> State:
 
     state = step_sparse(keys.pop(), state)
     return step_config(state)
+
+
+@named_call
+def step_resid_inexact_integral(state: State) -> State:
+    """Accumulate the mean square of the residuals subject to rounding.
+
+    Adds to `State.resid_inexact_integral` the current mean square of the
+    residuals at or above ``2^(leaf_quantization+1)`` (in `State.resid_scale`
+    units), below which the running residual updates are exact because the
+    `State.resid` dtype spacing still matches the leaf quantum. Without
+    quantization every update rounds and all residuals count.
+    """
+    q = state.config.leaf_quantization
+    exact_below = 0.0 if q is None else 2.0 ** (q + 1)
+    # keep the residuals in their stored (narrow) dtype; the reduction
+    # accumulates in float32, so no n-sized float32 array is materialized
+    resid = state.resid
+    inexact = jnp.where(jnp.abs(resid) >= exact_below, resid, 0)
+    ms = jnp.einsum(
+        '...n,...n->...', inexact, inexact, preferred_element_type=jnp.float32
+    )
+    *_, n = resid.shape
+    ms /= n
+    if state.config.data_sharded:
+        ms = lax.pmean(ms, 'data')
+    return replace(state, resid_inexact_integral=state.resid_inexact_integral + ms)
 
 
 @named_call

@@ -838,6 +838,9 @@ class TestWithCachedBart:
                         str_path.endswith(('.error_cov_inv', '.error_cov_inv.value'))
                         and bart._mcmc_state.error_cov_inv.nu is None
                     )
+                    # a mean over datapoints and steps: concentrates, so the
+                    # chains legitimately nearly coincide
+                    or str_path.endswith('.resid_inexact_integral')
                     or (
                         x is not None
                         and jnp.issubdtype(x.dtype, jnp.integer)
@@ -1357,17 +1360,24 @@ def test_leaf_quantization(bkw: BartKW) -> None:
     assert_array_equal(leaves, jnp.round(leaves))
 
 
+# without quantization the drift charge counts every tree update, but in a
+# converged chain many updates are exact (the resampled leaves store
+# identically), so that case is graded on a wider bracket
 @pytest.mark.parametrize(
-    ('num_trees', 'leaf_quantization'), [(16, 1), (256, 1), (16, None)]
+    ('num_trees', 'leaf_quantization', 'bound'),
+    [(16, 1, 8), (256, 1, 8), (16, None, 16)],
 )
 def test_sum_trees_eps(
-    num_trees: int, leaf_quantization: int | None, keys: split
+    num_trees: int, leaf_quantization: int | None, bound: int, keys: split
 ) -> None:
     """`State.sum_trees_eps` brackets the observed accuracy of the sum of trees.
 
     Fit an exactly representable function (linear in binary covariates, split
     at 0.5) with noise low enough that the error floor set by the float16
-    storage dominates, and check the floor against the accuracy estimate.
+    storage dominates, and check the accuracy estimate against the larger of
+    that floor and the drift of the running residuals (the difference between
+    the precomputed train predictions and the exact ones recomputed from the
+    saved trees).
     """
     n, p, sigma = 300, 5, 1e-3
     x = random.bernoulli(keys.pop(), 0.5, (p, n)).astype(jnp.float32)
@@ -1383,6 +1393,7 @@ def test_sum_trees_eps(
         num_chains=None,
         seed=keys.pop(),
         sigma_scale=sigma,
+        precompute_predict_train=True,
         init_kw=dict(
             leaf_dtype=jnp.float16,
             resid_dtype=jnp.float16,
@@ -1390,11 +1401,13 @@ def test_sum_trees_eps(
         ),
     )
     pred = bart.predict(x, kind='latent_samples')
+    pred_running = bart.predict('train', kind='latent_samples')
     err = jnp.sqrt(jnp.mean(jnp.square(pred - f)))
+    err_drift = jnp.sqrt(jnp.mean(jnp.square(pred_running[-1, :] - pred[-1, :])))
     eps = bart._mcmc_state.sum_trees_eps()
     # the estimate sits at ~3x the observed rms error across configs (the eps
     # is a grid spacing, the error floor lands at ~spacing/sqrt(12))
-    assert err <= eps <= 8 * err
+    assert err <= eps <= bound * jnp.maximum(err, err_drift)
 
 
 @pytest.mark.parametrize('leaf_quantization', [None, 0])

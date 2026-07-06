@@ -456,26 +456,24 @@ class State(Module):
 
         The analogue of ``finfo(dtype).eps`` for the sum of trees: the smallest
         variation it can resolve. Combines the static resolution of the stored
-        leaves with an estimate of the rounding error accumulated so far by the
+        leaves, an estimate of the rounding error accumulated so far by the
         running residual updates, integrated along the MCMC (see
-        `resid_inexact_integral`).
+        `resid_inexact_integral`), and the responsiveness limit of quantized
+        leaf sampling (a leaf moves only when its full conditional mean crosses
+        half a quantum, so residual features smaller than
+        ``quantum / (2 * shrinkage)`` are invisible to the sampler).
         """
-        resolution, drift = self._sum_trees_eps()
-
-        # the final error is the max of the leaf quantization and the resid
-        # numerical error; this may be an overestimate in corner cases where
-        # the leaf quantization is coarse, but the mcmc manages to make the sum
-        # of trees more accurate than that, presumably by modulating leaf
-        # magnitude
-        return jnp.maximum(resolution, drift)
+        resolution, drift, snap = self._sum_trees_eps()
+        return jnp.maximum(jnp.maximum(resolution, drift), snap)
 
     def _sum_trees_eps(
         self,
     ) -> tuple[
         Float32[Array, ''] | Float32[Array, ' k'],
         Float32[Array, ''] | Float32[Array, ' k'],
+        Float32[Array, ''] | Float32[Array, ' k'],
     ]:
-        """Return the resolution and drift terms of `sum_trees_eps` separately."""
+        """Return the resolution, drift, and snap terms of `sum_trees_eps` separately."""
         eps_leaf = jnp.finfo(self.forest.leaf_tree.dtype).eps
         eps_resid = jnp.finfo(self.resid.dtype).eps
 
@@ -484,6 +482,9 @@ class State(Module):
 
         if self.config.leaf_quantization is None:
             resolution = dtype_quantum
+            # float leaf storage rounds relative to the leaf magnitude, so
+            # leaves near zero keep a fine grid and sampling is not pinned
+            snap = jnp.zeros_like(dtype_quantum)
         else:
             # quantized leaves all sit on one grid closed under addition (the
             # scales are powers of two, so leaf storage rounds within the
@@ -492,6 +493,30 @@ class State(Module):
             q = self.config.leaf_quantization
             managed_quantum = eps_resid * self.resid_scale * 2.0**q
             resolution = jnp.maximum(managed_quantum, dtype_quantum)
+
+            # a quantized leaf moves only when its full conditional mean
+            # crosses half a quantum; the mean responds to the leaf's average
+            # residual through the posterior shrinkage factor s = t / (1 + t),
+            # t = (leaf_scale / error_sdev)^2 * n_leaf, so residual features
+            # smaller than quantum / (2 s) cannot move the sampler. Typical
+            # values are used for the error variance (chain mean, datapoint
+            # mean of prec_scale) and n_leaf (datapoints over leaves per tree)
+            prec = self.error_cov_inv.value
+            if self.prec_scale is not None:
+                prec = prec * self.prec_scale.astype(jnp.float32).mean(axis=-1)
+            if self.resid_scale.ndim:
+                error_var = jnp.diagonal(
+                    _inv_via_chol_with_gersh(prec), axis1=-2, axis2=-1
+                )
+            else:
+                error_var = jnp.reciprocal(prec)
+            var_chain_axes = range(error_var.ndim - self.resid_scale.ndim)
+            error_var = jnp.mean(error_var, axis=tuple(var_chain_axes))
+            *_, n = self.resid.shape
+            leaves_per_tree = 1.0 + jnp.count_nonzero(self.forest.split_tree, axis=-1)
+            n_leaf = n / jnp.mean(leaves_per_tree)
+            t = jnp.square(self.forest.leaf_scale) * n_leaf / error_var
+            snap = managed_quantum / 2.0 * (1.0 + jnp.reciprocal(t))
 
         # random walk drift of the accumulated rounding errors: each of the
         # `num_trees` updates per step charges eps_resid * |resid| to the
@@ -503,7 +528,7 @@ class State(Module):
         *_, num_trees, _ = self.forest.var_tree.shape
         drift = eps_resid * self.resid_scale * jnp.sqrt(num_trees * integral)
 
-        return resolution, drift
+        return resolution, drift, snap
 
 
 def _check_diagonal(rate: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
@@ -793,8 +818,10 @@ def init(
         most running updates of `State.resid` are then exact, suppressing the
         error it accumulates along the MCMC. Higher values tolerate larger
         residuals but coarsen the leaves; leaves already coarser due to
-        `leaf_dtype` are unaffected. In practice: set this to 1 when using
-        float16 residuals.
+        `leaf_dtype` are unaffected. A quantum coarser than the leaf full
+        conditional distorts the posterior, up to degenerating it entirely;
+        `State.sum_trees_eps` accounts for this. In practice: set this to 1
+        when using float16 residuals.
     error_cov_inv
         The Wishart prior on the inverse error covariance, together with its
         initial value (see `Wishart`). Leave it unspecified for binary

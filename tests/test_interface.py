@@ -1444,7 +1444,7 @@ def test_sum_trees_eps_drift(leaf_quantization: int | None, keys: split) -> None
     pred_running = bart.predict('train', kind='latent_samples')
     pred_actual = bart.predict(dgp.x, kind='latent_samples')
     err = jnp.sqrt(jnp.mean(jnp.square(pred_running[-1, :] - pred_actual[-1, :])))
-    resolution, drift = bart._mcmc_state._sum_trees_eps()
+    resolution, drift, _ = bart._mcmc_state._sum_trees_eps()
     # the drift estimate is conservative, but must stay within a bounded
     # factor of the observed accumulated error
     assert drift <= 16 * err
@@ -1457,6 +1457,42 @@ def test_sum_trees_eps_drift(leaf_quantization: int | None, keys: split) -> None
         # upper bound on the observed error
         assert resolution < drift
         assert err <= drift
+
+
+def test_sum_trees_eps_snap(keys: split) -> None:
+    """The snap term of `State.sum_trees_eps` covers coarse-quantization distortion.
+
+    With many trees the leaf full conditional shrinks below the (fixed) leaf
+    quantum: leaf sampling degenerates into snapping the full conditional mean
+    to the grid, most leaves pin at zero, and the fit degrades statistically
+    while the stored sums stay numerically exact. The resolution and drift
+    terms are blind to this; check that the snap term flags it by covering
+    the observed error of the posterior mean.
+    """
+    n = 250
+    dgp = gen_data(
+        keys.pop(), n=n, p=5, q=0, sigma2_lin=1.0, sigma2_quad=1.0, sigma2_eps=1.0
+    )
+    bart = Bart(
+        dgp.x,
+        dgp.y,
+        num_trees=12800,
+        n_burn=400,
+        n_save=200,
+        num_chains=None,
+        seed=keys.pop(),
+        init_kw=dict(
+            leaf_dtype=jnp.float16, resid_dtype=jnp.float16, leaf_quantization=6
+        ),
+    )
+    post_mean = bart.predict(dgp.x, kind='latent_samples').mean(axis=0)
+    err = jnp.sqrt(jnp.mean(jnp.square(post_mean - dgp.mu)))
+    resolution, drift, snap = bart._mcmc_state._sum_trees_eps()
+    # the numerical terms alone under-report the error
+    assert jnp.maximum(resolution, drift) < err
+    # the snap term covers it, within a bounded factor
+    assert err <= snap <= 8 * err
+    assert_array_equal(bart._mcmc_state.sum_trees_eps(), snap)
 
 
 def test_output_ranges(bkw: BartKW, keys: split) -> None:

@@ -1125,7 +1125,7 @@ class SeqStageInAllTrees(Module):
     resid_eff_scale: Float32[Array, ''] | Float32[Array, ' k']
     """The measured scale of the residuals, see `bartz.mcmcstep.State.resid_eff_scale`."""
 
-    leaf_quantization: int | None = field(static=True)
+    leaf_quantization: Int32[Array, ''] | None
     """Leaf quantization setting, see `bartz.mcmcstep.StepConfig`."""
 
 

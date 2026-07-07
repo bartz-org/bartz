@@ -340,7 +340,7 @@ class StepConfig(Module):
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
 
-    leaf_quantization: int | None = field(static=True, default=None)
+    leaf_quantization: Int32[Array, ''] | None = None
     """If set, quantize the leaves such that the running updates of
     `State.resid` are mostly exact, assuming ``|resid| <
     2**(leaf_quantization+1)`` in `State.resid_eff_scale` units."""
@@ -751,7 +751,7 @@ def init(
     leaf_dtype: DTypeLike = jnp.float16,
     prec_scale_dtype: DTypeLike = jnp.float16,
     resid_dtype: DTypeLike = jnp.float32,
-    leaf_quantization: int | None = None,
+    leaf_quantization: int | Integer[ArrayLike, ''] | None = None,
     error_cov_inv: Wishart | None = None,
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
@@ -1111,7 +1111,7 @@ def init(
                 sequential_unroll=sequential_unroll,
                 augment=augment,
                 mesh=mesh,
-                leaf_quantization=leaf_quantization,
+                leaf_quantization=_asarray_or_none(leaf_quantization),
                 **red_cfg,
             ),
         )

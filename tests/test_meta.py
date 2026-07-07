@@ -163,8 +163,9 @@ class TestJaxNoCopyBehavior:
             assert qp == yp
 
 
-@pytest.mark.parametrize('dtype', [jnp.float16, jnp.float32])
-def test_exact_power_of_2(dtype: jnp.dtype) -> None:
+@pytest.mark.parametrize('dt_exp', [jnp.float16, jnp.float32, jnp.int32])
+@pytest.mark.parametrize('dt_base', [float, int])
+def test_exact_power_of_2(dt_exp: jnp.dtype, dt_base: type[int] | type[float]) -> None:
     """Check that `2 ** jax_array` is exact."""
-    x = 2 ** jnp.arange(100, dtype=dtype)
+    x = dt_base(2) ** jnp.arange(100, dtype=dt_exp)
     assert_array_equal(x, jnp.round(x))

@@ -111,6 +111,7 @@ def step_resid_inexact_integral(state: State) -> State:
     are exact because the `State.resid` dtype spacing still matches the leaf
     quantum. Without quantization every update rounds and all residuals count.
     """
+    # filter away residuals below quantization threshold
     q = state.config.leaf_quantization
     resid = state.resid
     if q is None:
@@ -124,13 +125,26 @@ def step_resid_inexact_integral(state: State) -> State:
         inexact = jnp.where(
             jnp.abs(resid) >= exact_below[..., None].astype(resid.dtype), resid, 0
         )
+
+    # mask missing datapoints if any
+    if state.inv_sdev_scale is None:
+        *_, n_eff = resid.shape
+        n_eff *= get_axis_size(state.config.mesh, 'data')
+    else:
+        inexact = jnp.where(state.inv_sdev_scale != 0, inexact, 0)
+        n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
+        if state.config.data_sharded:
+            n_eff = lax.psum(n_eff, 'data')
+
+    # compute mean square residuals above threshold
     ms = jnp.einsum(
         '...n,...n->...', inexact, inexact, preferred_element_type=jnp.float32
     )
-    *_, n = resid.shape
-    ms /= n
     if state.config.data_sharded:
-        ms = lax.pmean(ms, 'data')
+        ms = lax.psum(ms, 'data')
+    ms /= jnp.maximum(n_eff, 1)
+
+    # accumulate to the running sum
     return replace(state, resid_inexact_integral=state.resid_inexact_integral + ms)
 
 

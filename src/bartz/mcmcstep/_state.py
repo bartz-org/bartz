@@ -507,16 +507,20 @@ class State(Module):
             managed_quantum = eps_resid * eff_scale * 2.0**q
             resolution = jnp.maximum(managed_quantum, dtype_quantum)
 
-            # a quantized leaf moves only when its full conditional mean
-            # crosses half a quantum; the mean responds to the leaf's average
-            # residual through the posterior shrinkage factor s = t / (1 + t),
-            # t = (leaf_scale / error_sdev)^2 * n_leaf, so residual features
-            # smaller than quantum / (2 s) cannot move the sampler. Typical
-            # values are used for the error variance (chain mean, datapoint
-            # mean of prec_scale) and n_leaf (datapoints over leaves per tree)
+            # determine number of datapoints
+            *_, n = self.resid.shape
+            if self.inv_sdev_scale is None:
+                n_eff = n
+            else:
+                n_eff = jnp.count_nonzero(self.inv_sdev_scale, axis=-1)
+            n_eff = jnp.maximum(n_eff, 1)
+
+            # determine average error precision
             prec = self.error_cov_inv.value
             if self.prec_scale is not None:
-                prec = prec * self.prec_scale.astype(jnp.float32).mean(axis=-1)
+                prec *= self.prec_scale.sum(axis=-1, dtype=jnp.float32) / n_eff
+
+            # convert precision to variance and average it over chains
             if self.resid_scale.ndim:
                 error_var = jnp.diagonal(
                     _inv_via_chol_with_gersh(prec), axis1=-2, axis2=-1
@@ -525,9 +529,16 @@ class State(Module):
                 error_var = jnp.reciprocal(prec)
             var_chain_axes = range(error_var.ndim - self.resid_scale.ndim)
             error_var = jnp.mean(error_var, axis=tuple(var_chain_axes))
-            *_, n = self.resid.shape
+
+            # a quantized leaf moves only when its full conditional mean
+            # crosses half a quantum; the mean responds to the leaf's average
+            # residual through the posterior shrinkage factor s = t / (1 + t),
+            # t = (leaf_scale / error_sdev)^2 * n_leaf, so residual features
+            # smaller than quantum / (2 s) cannot move the sampler. Typical
+            # values are used for the error variance (chain mean, datapoint
+            # mean of prec_scale) and n_leaf (datapoints over leaves per tree).
             leaves_per_tree = 1.0 + jnp.count_nonzero(self.forest.split_tree, axis=-1)
-            n_leaf = n / jnp.mean(leaves_per_tree)
+            n_leaf = n_eff / jnp.mean(leaves_per_tree)
             t = jnp.square(self.forest.leaf_scale) * n_leaf / error_var
             snap = managed_quantum / 2.0 * (1.0 + jnp.reciprocal(t))
 
@@ -1282,9 +1293,15 @@ def _charge_initial_resid_rounding(state: State) -> State:
         resid = state.resid
         ms = jnp.einsum(
             '...n,...n->...', resid, resid, preferred_element_type=jnp.float32
-        )
+        )  # missing values are set to 0 at this stage, so we don't have to drop them
+
+        # determine effective number of datapoints; at this stage, state.inv_sdev_scale
+        # is actually `missing`
         *_, n = resid.shape
-        ms /= n
+        missing = state.inv_sdev_scale
+        n_eff = n if missing is None else n - jnp.count_nonzero(missing, axis=-1)
+
+        ms /= jnp.maximum(n_eff, 1)
         *_, num_trees, _ = state.forest.var_tree.shape
         return replace(state, resid_inexact_integral=ms / num_trees)
 

@@ -1099,6 +1099,12 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     rtol = 0 if yhat1.platform() == 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
+    # the garbage must not reach the residual-roundoff accounting either (masked
+    # datapoints are dropped from the drift charge)
+    eps1 = bart1._mcmc_state.resid_inexact_integral
+    eps2 = bart2._mcmc_state.resid_inexact_integral
+    assert_close_matrices(eps1, eps2, rtol=rtol, reduce_rank=True)
+
 
 def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
     """Binary regression rejects `sigma_scale`/`sigma_init`.

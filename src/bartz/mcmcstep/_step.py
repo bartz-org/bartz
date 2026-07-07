@@ -1619,7 +1619,7 @@ def _sample_wishart_bartlett(
 def step_resid_eff_scale(
     state: State,
     norm2: Float32[Array, ''] | Float32[Array, ' k'],
-    n_eff: Int32[Array, ''] | Int32[Array, ' k'] | int,
+    wsum: Float32[Array, ''] | Float32[Array, ' k'] | int,
 ) -> State:
     """Update `State.resid_eff_scale` with the measured scale of the residuals.
 
@@ -1629,14 +1629,15 @@ def step_resid_eff_scale(
         A BART MCMC state.
     norm2
         The squared (weighted, masked) norm of the residuals in data units.
-    n_eff
-        The number of unmasked datapoints.
+    wsum
+        The sum of the precision weights (unmasked-datapoint count without
+        weights), matching the weighting of `norm2`.
 
     Returns
     -------
     The state with `resid_eff_scale` set to the residual rms rounded to a power of two.
     """
-    scale = _round_to_pow2(jnp.sqrt(norm2 / n_eff))
+    scale = _round_to_pow2(jnp.sqrt(norm2 / wsum))
     # keep the previous scale if the residuals vanish
     scale = jnp.where(scale == 0, state.resid_eff_scale, scale)
     return replace(state, resid_eff_scale=scale)
@@ -1653,11 +1654,19 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
     if state.inv_sdev_scale is None:
         _, n_eff = resid.shape
         n_eff *= get_axis_size(state.config.mesh, 'data')
+        wsum = n_eff
     else:
         # 2-D inv_sdev_scale dispatches to the diagonal path, so here it is 1-D
         n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
+        wsum = jnp.einsum(
+            'n,n->',
+            state.inv_sdev_scale,
+            state.inv_sdev_scale,
+            preferred_element_type=jnp.float32,
+        )
         if state.config.data_sharded:
             n_eff = lax.psum(n_eff, 'data')
+            wsum = lax.psum(wsum, 'data')
         resid *= state.inv_sdev_scale
     df_post = state.error_cov_inv.nu + n_eff
     rrt = jnp.einsum(
@@ -1668,7 +1677,7 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
     scale_post = state.error_cov_inv.rate + rrt
 
     prec = _sample_wishart_bartlett(key, df_post, scale_post)
-    state = step_resid_eff_scale(state, jnp.diagonal(rrt), n_eff)
+    state = step_resid_eff_scale(state, jnp.diagonal(rrt), wsum)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
@@ -1688,10 +1697,18 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     if state.inv_sdev_scale is None:
         *_, n_eff = resid.shape
         n_eff *= get_axis_size(state.config.mesh, 'data')
+        wsum = n_eff
     else:
         n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
+        wsum = jnp.einsum(
+            '...n,...n->...',
+            state.inv_sdev_scale,
+            state.inv_sdev_scale,
+            preferred_element_type=jnp.float32,
+        )
         if state.config.data_sharded:
             n_eff = lax.psum(n_eff, 'data')
+            wsum = lax.psum(wsum, 'data')
     alpha = state.error_cov_inv.nu / 2 + n_eff / 2
 
     # beta
@@ -1715,7 +1732,7 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
         prec = prec.at[state.binary_indices].set(1.0)
     if kshape:
         prec = jnp.diag(prec)
-    state = step_resid_eff_scale(state, norm2, n_eff)
+    state = step_resid_eff_scale(state, norm2, wsum)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 

@@ -443,6 +443,15 @@ class State(Module):
     Like `prec_scale`, its dtype may be narrower than float32 (see `init`'s
     ``prec_scale_dtype``)."""
 
+    n_non_missing: Int32[Array, ''] | Int32[Array, ' k']
+    """The number of non-missing datapoints, ``(k,)`` per outcome component when
+    the weights are vectors, else scalar. Constant along the MCMC."""
+
+    sum_diag_prec_scale: Float32[Array, ''] | Float32[Array, ' k']
+    """The sum of the precision scales over non-missing datapoints (their count
+    when unweighted), matching the shape of `n_non_missing`. Constant along the
+    MCMC."""
+
     forest: Forest
     """The sum of trees model."""
 
@@ -507,16 +516,9 @@ class State(Module):
             managed_quantum = eps_resid * eff_scale * 2.0**q
             resolution = jnp.maximum(managed_quantum, dtype_quantum)
 
-            # determine number of datapoints
-            *_, n = self.resid.shape
-            if self.inv_sdev_scale is None:
-                n_eff = n
-            else:
-                n_eff = jnp.count_nonzero(self.inv_sdev_scale, axis=-1)
-            n_eff = jnp.maximum(n_eff, 1)
-
             # determine average error precision
             prec = self.error_cov_inv.value
+            n_eff = jnp.maximum(self.n_non_missing, 1)
             if self.prec_scale is not None:
                 prec *= self.prec_scale.sum(axis=-1, dtype=jnp.float32) / n_eff
 
@@ -1060,6 +1062,10 @@ def init(
             error_scale=error_scale,
             prec_scale=None,
             inv_sdev_scale=missing,
+            # invalid placeholders; the true values are set post-shard, once
+            # `inv_sdev_scale` is computed, by `_count_datapoints`
+            n_non_missing=cast(Array, None),
+            sum_diag_prec_scale=cast(Array, None),
             forest=Forest(
                 leaf_tree=_lazy(
                     jnp.zeros, (num_trees, *kshape, tree_size), storage.leaf_dtype
@@ -1135,7 +1141,7 @@ def init(
         # are sharded, only those arrays that contain an (n,) sized axis
         del X, error_scale, missing, y
 
-        # move all arrays to the appropriate device
+        # move all arrays to the appropriate device and instantiate lazy arrays
         state = _shard_state(state)
 
         # replace y at masked positions post-shard (the mask is parked in
@@ -1144,15 +1150,6 @@ def init(
             state = replace(
                 state, y=_sanitize_y(state.y, state.inv_sdev_scale, state.forest.offset)
             )
-
-        # calculate initial resid in the continuous outcome case, such that y
-        # and offset are already sharded if needed
-        if state.resid is None:
-            state = _set_initial_resid(
-                state, binary_indices, num_chains, storage.resid_dtype
-            )
-            # charge the one-time rounding of the initial residuals into storage
-            state = _charge_initial_resid_rounding(state)
 
         # derive prec_scale and inv_sdev_scale after sharding to do the
         # calculation on the right devices. `state.error_scale` already holds the
@@ -1165,7 +1162,31 @@ def init(
             )
             state = replace(state, inv_sdev_scale=inv_sdev_scale, prec_scale=prec_scale)
 
-            # calculate the initial prec_tree from the sharded prec_scale
+        # count non-missing datapoints and sum their precision scales once, from
+        # the final `inv_sdev_scale`; these are constant along the MCMC
+        n_non_missing, sum_diag_prec_scale = _count_datapoints(state.inv_sdev_scale, n)
+        state = replace(
+            state, n_non_missing=n_non_missing, sum_diag_prec_scale=sum_diag_prec_scale
+        )
+
+        # calculate initial resid in the continuous outcome case, such that y
+        # and offset are already sharded if needed
+        if state.resid is None:
+            state = _set_initial_resid(
+                state, binary_indices, num_chains, storage.resid_dtype
+            )
+            # charge the one-time rounding of the initial residuals into storage
+            # when it uses a dtype narrower than y (else the cast is exact)
+            if jnp.finfo(storage.resid_dtype).nmant < jnp.finfo(state.y.dtype).nmant:
+                state = replace(
+                    state,
+                    resid_inexact_integral=_initial_resid_inexact_integral(
+                        state.resid, state.n_non_missing, num_trees
+                    ),
+                )
+
+        # calculate the initial prec_tree from the sharded prec_scale
+        if state.prec_scale is not None:
             state = _set_initial_prec_tree(state, num_chains, num_trees, tree_size)
 
     # all the wrong-typed intermediates have now been replaced by their final
@@ -1277,33 +1298,23 @@ def _set_initial_resid(
     return replace(state, resid=resid)
 
 
-def _charge_initial_resid_rounding(state: State) -> State:
-    """Seed `State.resid_inexact_integral` with the initial storage rounding.
+@jit
+def _initial_resid_inexact_integral(
+    resid: Float[Array, '*chains n'] | Float[Array, '*chains k n'],
+    n_non_missing: Int32[Array, ''] | Int32[Array, ' k'],
+    num_trees: int,
+) -> Float32[Array, '*chains'] | Float32[Array, '*chains k']:
+    """Seed value for `State.resid_inexact_integral` from the initial rounding.
 
     Casting the initial residuals to a storage dtype narrower than `y` rounds
     them once, and the running updates never fix this offset (they either round
     again, which the per-step accounting covers, or preserve it exactly), so it
-    is charged upfront as one tree-update's worth of rounding. A float32 resid
-    stores ``y - offset`` exactly (`resid_scale` is a power of two), so this is
-    a no-op for it.
+    is charged upfront as one tree-update's worth of rounding.
     """
-    if jnp.finfo(state.resid.dtype).nmant >= jnp.finfo(state.y.dtype).nmant:
-        return state
-    else:
-        resid = state.resid
-        ms = jnp.einsum(
-            '...n,...n->...', resid, resid, preferred_element_type=jnp.float32
-        )  # missing values are set to 0 at this stage, so we don't have to drop them
-
-        # determine effective number of datapoints; at this stage, state.inv_sdev_scale
-        # is actually `missing`
-        *_, n = resid.shape
-        missing = state.inv_sdev_scale
-        n_eff = n if missing is None else n - jnp.count_nonzero(missing, axis=-1)
-
-        ms /= jnp.maximum(n_eff, 1)
-        *_, num_trees, _ = state.forest.var_tree.shape
-        return replace(state, resid_inexact_integral=ms / num_trees)
+    # masked residuals are set to 0 at this stage, so they drop out of the sum
+    ms = jnp.einsum('...n,...n->...', resid, resid, preferred_element_type=jnp.float32)
+    ms /= jnp.maximum(n_non_missing, 1)
+    return ms / num_trees
 
 
 def _initial_resid(
@@ -1419,6 +1430,27 @@ def _compute_scales(
     else:
         prec_scale = jnp.einsum('an,bn->abn', inv_sdev_scale, inv_sdev_scale)
     return inv_sdev_scale.astype(prec_scale_dtype), prec_scale.astype(prec_scale_dtype)
+
+
+@jit
+def _count_datapoints(
+    inv_sdev_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None, n: int
+) -> tuple[
+    Int32[Array, ''] | Int32[Array, ' k'], Float32[Array, ''] | Float32[Array, ' k']
+]:
+    """Count non-missing datapoints and sum their precision scales."""
+    if inv_sdev_scale is None:
+        n_non_missing = jnp.full((), n)
+        sum_diag_prec_scale = n_non_missing.astype(jnp.float32)
+    else:
+        n_non_missing = jnp.sum(inv_sdev_scale != 0, axis=-1)
+        sum_diag_prec_scale = jnp.einsum(
+            '...n,...n->...',
+            inv_sdev_scale,
+            inv_sdev_scale,
+            preferred_element_type=jnp.float32,
+        )
+    return n_non_missing, sum_diag_prec_scale
 
 
 def _get_blocked_vars(

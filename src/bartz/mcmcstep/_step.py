@@ -54,7 +54,6 @@ from bartz.mcmcstep._state import (
     StepConfig,
     _round_to_pow2,
     chol_with_gersh,
-    get_axis_size,
     shard_map_state,
     split_key_for_chains,
     vmap_chains,
@@ -127,14 +126,8 @@ def step_resid_inexact_integral(state: State) -> State:
         )
 
     # mask missing datapoints if any
-    if state.inv_sdev_scale is None:
-        *_, n_eff = resid.shape
-        n_eff *= get_axis_size(state.config.mesh, 'data')
-    else:
+    if state.inv_sdev_scale is not None:
         inexact = jnp.where(state.inv_sdev_scale != 0, inexact, 0)
-        n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
-        if state.config.data_sharded:
-            n_eff = lax.psum(n_eff, 'data')
 
     # compute mean square residuals above threshold
     ms = jnp.einsum(
@@ -142,7 +135,7 @@ def step_resid_inexact_integral(state: State) -> State:
     )
     if state.config.data_sharded:
         ms = lax.psum(ms, 'data')
-    ms /= jnp.maximum(n_eff, 1)
+    ms /= jnp.maximum(state.n_non_missing, 1)
 
     # accumulate to the running sum
     return replace(state, resid_inexact_integral=state.resid_inexact_integral + ms)
@@ -1619,7 +1612,7 @@ def _sample_wishart_bartlett(
 def step_resid_eff_scale(
     state: State,
     norm2: Float32[Array, ''] | Float32[Array, ' k'],
-    wsum: Float32[Array, ''] | Float32[Array, ' k'] | int,
+    wsum: Float32[Array, ''] | Float32[Array, ' k'],
 ) -> State:
     """Update `State.resid_eff_scale` with the measured scale of the residuals.
 
@@ -1651,24 +1644,10 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
     # the reduction accumulates in float32 and its (k, k) result is rescaled to
     # data units, so no n-sized float32 array is ever materialized
     resid = state.resid
-    if state.inv_sdev_scale is None:
-        _, n_eff = resid.shape
-        n_eff *= get_axis_size(state.config.mesh, 'data')
-        wsum = n_eff
-    else:
+    if state.inv_sdev_scale is not None:
         # 2-D inv_sdev_scale dispatches to the diagonal path, so here it is 1-D
-        n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
-        wsum = jnp.einsum(
-            'n,n->',
-            state.inv_sdev_scale,
-            state.inv_sdev_scale,
-            preferred_element_type=jnp.float32,
-        )
-        if state.config.data_sharded:
-            n_eff = lax.psum(n_eff, 'data')
-            wsum = lax.psum(wsum, 'data')
         resid *= state.inv_sdev_scale
-    df_post = state.error_cov_inv.nu + n_eff
+    df_post = state.error_cov_inv.nu + state.n_non_missing
     rrt = jnp.einsum(
         'an,bn->ab', resid, resid, preferred_element_type=jnp.float32
     ) * jnp.outer(state.resid_scale, state.resid_scale)
@@ -1677,7 +1656,7 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
     scale_post = state.error_cov_inv.rate + rrt
 
     prec = _sample_wishart_bartlett(key, df_post, scale_post)
-    state = step_resid_eff_scale(state, jnp.diagonal(rrt), wsum)
+    state = step_resid_eff_scale(state, jnp.diagonal(rrt), state.sum_diag_prec_scale)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
@@ -1694,22 +1673,7 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
         resid *= state.inv_sdev_scale
 
     # alpha
-    if state.inv_sdev_scale is None:
-        *_, n_eff = resid.shape
-        n_eff *= get_axis_size(state.config.mesh, 'data')
-        wsum = n_eff
-    else:
-        n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
-        wsum = jnp.einsum(
-            '...n,...n->...',
-            state.inv_sdev_scale,
-            state.inv_sdev_scale,
-            preferred_element_type=jnp.float32,
-        )
-        if state.config.data_sharded:
-            n_eff = lax.psum(n_eff, 'data')
-            wsum = lax.psum(wsum, 'data')
-    alpha = state.error_cov_inv.nu / 2 + n_eff / 2
+    alpha = state.error_cov_inv.nu / 2 + state.n_non_missing / 2
 
     # beta
     norm2 = jnp.einsum(
@@ -1732,7 +1696,7 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
         prec = prec.at[state.binary_indices].set(1.0)
     if kshape:
         prec = jnp.diag(prec)
-    state = step_resid_eff_scale(state, norm2, wsum)
+    state = step_resid_eff_scale(state, norm2, state.sum_diag_prec_scale)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 

@@ -2443,6 +2443,8 @@ class TestMVBartIntegration:
             resid_eff_scale=jnp.ones(()),
             resid_inexact_integral=jnp.zeros(()),
             error_scale=None,
+            n_non_missing=jnp.asarray(y.size),
+            sum_diag_prec_scale=jnp.asarray(float(y.size)),
             forest=_EmptyForest(),
             config=_minimal_step_config(),
         )
@@ -2504,6 +2506,9 @@ class TestMVBartIntegration:
         scale_prior = jnp.float32(10.0)
         # `X` is not read by the samplers, but its `n` axis is cross-checked
         # against `resid`, so the dropped states carry the subset `X[:, keep]`.
+        # both the masked and dropped states see the same kept-point count and
+        # (unweighted) precision sum
+        n_kept = jnp.sum(keep)
         common: dict = dict(
             _chain_anchor=jnp.zeros(()),
             binary_indices=None,
@@ -2513,6 +2518,8 @@ class TestMVBartIntegration:
             resid_eff_scale=jnp.ones(()),
             resid_inexact_integral=jnp.zeros(()),
             error_scale=None,
+            n_non_missing=n_kept,
+            sum_diag_prec_scale=n_kept.astype(jnp.float32),
             forest=_EmptyForest(),
             config=_minimal_step_config(),
         )

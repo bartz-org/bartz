@@ -2440,6 +2440,7 @@ class TestMVBartIntegration:
             prec_scale=None,
             inv_sdev_scale=None,
             resid_scale=jnp.ones(()),  # unit scale: resid is in data units
+            resid_eff_scale=jnp.ones(()),
             resid_inexact_integral=jnp.zeros(()),
             error_scale=None,
             forest=_EmptyForest(),
@@ -2509,6 +2510,7 @@ class TestMVBartIntegration:
             z=None,
             prec_scale=None,
             resid_scale=jnp.ones(()),  # unit scale: resid is in data units
+            resid_eff_scale=jnp.ones(()),
             resid_inexact_integral=jnp.zeros(()),
             error_scale=None,
             forest=_EmptyForest(),

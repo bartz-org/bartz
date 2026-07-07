@@ -33,7 +33,7 @@ from jax.errors import KeyReuseError
 from jaxtyping import Array, Float, Key, Shaped
 
 from bartz._jaxext import split
-from tests.util import assert_allclose
+from tests.util import assert_allclose, assert_array_equal
 
 
 def test_assert_allclose_rejects_non_scalars() -> None:
@@ -161,3 +161,10 @@ class TestJaxNoCopyBehavior:
             qp = q.unsafe_buffer_pointer()
 
             assert qp == yp
+
+
+@pytest.mark.parametrize('dtype', [jnp.float16, jnp.float32])
+def test_exact_power_of_2(dtype: jnp.dtype) -> None:
+    """Check that `2 ** jax_array` is exact."""
+    x = 2 ** jnp.arange(100, dtype=dtype)
+    assert_array_equal(x, jnp.round(x))

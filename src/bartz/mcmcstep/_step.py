@@ -52,6 +52,7 @@ from bartz.mcmcstep._state import (
     Forest,
     State,
     StepConfig,
+    _round_to_pow2,
     chol_with_gersh,
     get_axis_size,
     shard_map_state,
@@ -105,17 +106,24 @@ def step_resid_inexact_integral(state: State) -> State:
     """Accumulate the mean square of the residuals subject to rounding.
 
     Adds to `State.resid_inexact_integral` the current mean square of the
-    residuals at or above ``2^(leaf_quantization+1)`` (in `State.resid_scale`
-    units), below which the running residual updates are exact because the
-    `State.resid` dtype spacing still matches the leaf quantum. Without
-    quantization every update rounds and all residuals count.
+    residuals at or above ``2^(leaf_quantization+1)`` (in
+    `State.resid_eff_scale` units), below which the running residual updates
+    are exact because the `State.resid` dtype spacing still matches the leaf
+    quantum. Without quantization every update rounds and all residuals count.
     """
     q = state.config.leaf_quantization
-    exact_below = 0.0 if q is None else 2.0 ** (q + 1)
-    # keep the residuals in their stored (narrow) dtype; the reduction
-    # accumulates in float32, so no n-sized float32 array is materialized
     resid = state.resid
-    inexact = jnp.where(jnp.abs(resid) >= exact_below, resid, 0)
+    if q is None:
+        inexact = resid
+    else:
+        # the quantization grid follows `resid_eff_scale` while `resid` stays
+        # in `resid_scale` units, so the threshold carries their (power of
+        # two, hence exact) ratio; it is cast to the resid dtype to keep the
+        # comparison from widening the n-sized array
+        exact_below = 2.0 ** (q + 1) * state.resid_eff_scale / state.resid_scale
+        inexact = jnp.where(
+            jnp.abs(resid) >= exact_below[..., None].astype(resid.dtype), resid, 0
+        )
     ms = jnp.einsum(
         '...n,...n->...', inexact, inexact, preferred_element_type=jnp.float32
     )
@@ -1055,6 +1063,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
                 else None,
                 pso.state.forest.leaf_scale,
                 pso.state.resid_scale,
+                pso.state.resid_eff_scale,
                 pso.state.config.leaf_quantization,
             ),
             pt,
@@ -1112,6 +1121,9 @@ class SeqStageInAllTrees(Module):
 
     resid_scale: Float32[Array, ''] | Float32[Array, ' k']
     """The scale of the stored residuals, see `bartz.mcmcstep.State.resid_scale`."""
+
+    resid_eff_scale: Float32[Array, ''] | Float32[Array, ' k']
+    """The measured scale of the residuals, see `bartz.mcmcstep.State.resid_eff_scale`."""
 
     leaf_quantization: int | None = field(static=True)
     """Leaf quantization setting, see `bartz.mcmcstep.StepConfig`."""
@@ -1268,15 +1280,14 @@ def accept_move_and_sample_leaves(
     if at.leaf_quantization is not None:
         # quantize the leaves such that the residual updates below are mostly
         # exact. the target grid is the spacing of `resid.dtype` values of
-        # magnitude 2^leaf_quantization in resid units, so
-        # 2^(leaf_quantization - nmant) * resid_scale in data units; dividing
-        # by leaf_scale converts it to the leaf units `leaf_tree` is in here.
-        # the scales are powers of two, so the quantum is one too and the leaf
-        # storage dtype's own (coarser) rounding below preserves multiples of
-        # it. 2.0 ** n on the static exponent is an exact python float;
-        # jnp.exp2 would be off by 1 ulp (it is not correctly rounded)
+        # magnitude 2^leaf_quantization in units of the measured residual
+        # scale, so 2^(leaf_quantization - nmant) * resid_eff_scale in data
+        # units; dividing by leaf_scale converts it to the leaf units
+        # `leaf_tree` is in here. the scales are powers of two, so the quantum
+        # is one too and the leaf storage dtype's own (coarser) rounding below
+        # preserves multiples of it.
         nmant = jnp.finfo(resid.dtype).nmant
-        quantum = (at.resid_scale / at.leaf_scale) * 2.0 ** (
+        quantum = (at.resid_eff_scale / at.leaf_scale) * 2.0 ** (
             at.leaf_quantization - nmant
         )
         leaf_tree = jnp.round(leaf_tree / quantum[..., None]) * quantum[..., None]
@@ -1591,6 +1602,32 @@ def _sample_wishart_bartlett(
     return T @ T.T
 
 
+def step_resid_eff_scale(
+    state: State,
+    norm2: Float32[Array, ''] | Float32[Array, ' k'],
+    n_eff: Int32[Array, ''] | Int32[Array, ' k'] | int,
+) -> State:
+    """Update `State.resid_eff_scale` with the measured scale of the residuals.
+
+    Parameters
+    ----------
+    state
+        A BART MCMC state.
+    norm2
+        The squared (weighted, masked) norm of the residuals in data units.
+    n_eff
+        The number of unmasked datapoints.
+
+    Returns
+    -------
+    The state with `resid_eff_scale` set to the residual rms rounded to a power of two.
+    """
+    scale = _round_to_pow2(jnp.sqrt(norm2 / n_eff))
+    # keep the previous scale if the residuals vanish
+    scale = jnp.where(scale == 0, state.resid_eff_scale, scale)
+    return replace(state, resid_eff_scale=scale)
+
+
 def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
     assert state.error_cov_inv.nu is not None
     assert state.error_cov_inv.rate is not None
@@ -1617,6 +1654,7 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
     scale_post = state.error_cov_inv.rate + rrt
 
     prec = _sample_wishart_bartlett(key, df_post, scale_post)
+    state = step_resid_eff_scale(state, jnp.diagonal(rrt), n_eff)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
@@ -1663,6 +1701,7 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
         prec = prec.at[state.binary_indices].set(1.0)
     if kshape:
         prec = jnp.diag(prec)
+    state = step_resid_eff_scale(state, norm2, n_eff)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 

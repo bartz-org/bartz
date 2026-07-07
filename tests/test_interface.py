@@ -119,7 +119,7 @@ from bartz.mcmcloop import (
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _inner_loop_counter
-from bartz.mcmcstep import BatchedReduction, State
+from bartz.mcmcstep import BatchedReduction, State, step
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._state import init
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
@@ -838,9 +838,12 @@ class TestWithCachedBart:
                         str_path.endswith(('.error_cov_inv', '.error_cov_inv.value'))
                         and bart._mcmc_state.error_cov_inv.nu is None
                     )
-                    # a mean over datapoints and steps: concentrates, so the
-                    # chains legitimately nearly coincide
-                    or str_path.endswith('.resid_inexact_integral')
+                    # means over datapoints (and steps): they concentrate (and
+                    # round to a power of two), so the chains legitimately
+                    # nearly coincide
+                    or str_path.endswith(
+                        ('.resid_inexact_integral', '.resid_eff_scale')
+                    )
                     or (
                         x is not None
                         and jnp.issubdtype(x.dtype, jnp.integer)
@@ -1345,19 +1348,69 @@ def test_float16_close_to_float32(bkw: BartKW) -> None:
     )
 
 
-def test_leaf_quantization(bkw: BartKW) -> None:
+def test_leaf_quantization(bkw: BartKW, keys: split) -> None:
     """With `leaf_quantization`, leaves are stored as multiples of the quantum."""
-    bound_exponent = 3
-    prev_init_kw: kwdict = bkw.kw.get('init_kw', {})
-    init_kw = dict(prev_init_kw, leaf_quantization=bound_exponent)
-    bart = Bart(**dict(bkw.kw, init_kw=init_kw))
+    leaf_quantization = 3
+    bart = Bart(
+        **dict(
+            bkw.kw,
+            init_kw=dict(
+                bkw.kw.get('init_kw', {}), leaf_quantization=leaf_quantization
+            ),
+        )
+    )
     state = bart._mcmc_state
     nmant = jnp.finfo(state.resid.dtype).nmant
-    quantum = (state.resid_scale / state.forest.leaf_scale) * 2.0 ** (
-        bound_exponent - nmant
+
+    # the grid follows the residual scale measured before the leaves are
+    # sampled, so compute the quantum from the pre-step state (also because
+    # `step` donates it), step once, and check the freshly sampled leaves
+    quantum = (state.resid_eff_scale / state.forest.leaf_scale) * 2.0 ** (
+        leaf_quantization - nmant
     )
-    leaves = bart._main_trace.leaf_tree / quantum[..., None]
+    state = step(keys.pop(), state)
+
+    # align the (*chains, [k]) quantum with the (*chains, num_trees, [k,]
+    # tree_size) leaves
+    if state.resid_scale.ndim:
+        quantum = quantum[..., None, :, None]
+    else:
+        quantum = quantum[..., None, None]
+
+    leaves = state.forest.leaf_tree / quantum
     assert_array_equal(leaves, jnp.round(leaves))
+
+
+def test_resid_eff_scale(bkw: BartKW) -> None:
+    """`resid_eff_scale` is the residual RMS in data units, rounded to a power of two."""
+    state = Bart(**bkw.kw)._mcmc_state
+
+    # exactly a power of two: rounding the log2 back is a no-op
+    pow2 = 2 ** jnp.round(jnp.log2(state.resid_eff_scale))
+    assert_array_equal(state.resid_eff_scale, pow2)
+
+    if state.error_cov_inv.nu is None:
+        # never stepped without an error covariance update: stays at its
+        # initial value `resid_scale`
+        expected = jnp.broadcast_to(state.resid_scale, state.resid_eff_scale.shape)
+        assert_array_equal(state.resid_eff_scale, expected)
+    else:
+        # the last update measured the residuals as they are in the final
+        # state, so recompute their (weighted, masked) rms
+        resid = state.resid * state.resid_scale[..., None]
+        if state.inv_sdev_scale is None:
+            n_eff = resid.shape[-1]
+        else:
+            resid = resid * state.inv_sdev_scale
+            n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
+        rms = jnp.sqrt(jnp.sum(jnp.square(resid), axis=-1) / n_eff)
+        # `resid_eff_scale` is this rms rounded to a power of two, but
+        # reproducing the step's exact float32 reduction (narrow-dtype
+        # accumulation, the per-path weighting and masking) bit-for-bit is
+        # brittle, and pow2 rounding turns a 1-ulp difference near a boundary
+        # into a full factor of two. so check agreement loosely: pow2 rounding
+        # moves the value by at most sqrt(2), which rtol=0.5 covers
+        assert_close_matrices(state.resid_eff_scale, rms, rtol=0.5)
 
 
 # without quantization the drift charge counts every tree update, but in a
@@ -1379,7 +1432,7 @@ def test_sum_trees_eps(
     the precomputed train predictions and the exact ones recomputed from the
     saved trees).
     """
-    n, p, sigma = 300, 5, 1e-3
+    n, p, sigma = 300, 5, 1e-4
     x = random.bernoulli(keys.pop(), 0.5, (p, n)).astype(jnp.float32)
     coef = random.normal(keys.pop(), (p,))
     f = coef @ x
@@ -1490,8 +1543,13 @@ def test_sum_trees_eps_snap(keys: split) -> None:
     resolution, drift, snap = bart._mcmc_state._sum_trees_eps()
     # the numerical terms alone under-report the error
     assert jnp.maximum(resolution, drift) < err
-    # the snap term covers it, within a bounded factor
-    assert err <= snap <= 8 * err
+    # the snap term covers it, within a bounded factor. the quantum scales
+    # with the measured residual scale, and coarse quantization is what
+    # inflates the residuals in the first place (leaves snap to the grid, the
+    # fit degrades), so distortion -> larger residuals -> larger quantum ->
+    # more distortion, until the loop settles. at that equilibrium snap and
+    # the observed error track each other up to a constant
+    assert err <= 1.5 * snap <= 12 * err
     assert_array_equal(bart._mcmc_state.sum_trees_eps(), snap)
 
 

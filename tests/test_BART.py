@@ -611,6 +611,10 @@ class TestWithCachedBart:
                     # a mean over datapoints and steps: concentrates, so the
                     # chains legitimately nearly coincide
                     return
+                if str_path.endswith('.resid_eff_scale'):
+                    # a mean over datapoints rounded to a power of two: the
+                    # chains legitimately coincide
+                    return
                 if x is not None and chain_axis is not None:
                     # widen first so a reduced-precision leaf (e.g. float16
                     # leaf_tree) and its mean reference share a dtype

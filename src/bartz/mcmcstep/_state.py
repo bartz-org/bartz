@@ -343,7 +343,7 @@ class StepConfig(Module):
     leaf_quantization: int | None = field(static=True, default=None)
     """If set, quantize the leaves such that the running updates of
     `State.resid` are mostly exact, assuming ``|resid| <
-    2**(leaf_quantization+1)`` in `State.resid_scale` units."""
+    2**(leaf_quantization+1)`` in `State.resid_eff_scale` units."""
 
     @property
     def data_sharded(self) -> bool:
@@ -396,13 +396,24 @@ class State(Module):
     they do not over/underflow narrow `resid` dtypes (see `init`'s
     ``resid_dtype``)."""
 
+    resid_eff_scale: Float32[Array, '*chains'] | Float32[Array, '*chains k'] = field(
+        chains=CHAIN_AXIS
+    )
+    """The measured scale of the residuals, in data units: the (weighted,
+    masked) root mean square of ``resid_scale * resid``, rounded to a power of
+    two. Initialized to `resid_scale`, updated by `step_error_cov_inv`. Sets
+    the leaf quantization grid (see `StepConfig.leaf_quantization`), while the
+    storage units of `resid` stay fixed at `resid_scale`."""
+
     resid_inexact_integral: Float32[Array, '*chains'] | Float32[Array, '*chains k'] = (
         field(chains=CHAIN_AXIS)
     )
     """Sum over the MCMC steps done of the mean square of the residuals (in
     `resid_scale` units) large enough that their running updates round, taken
-    at the start of each step. Accumulated by `step`, used by `sum_trees_eps`
-    to estimate the rounding error drift."""
+    at the start of each step. Seeded by `init` with one tree-update's worth
+    of the initial residuals (their one-time storage rounding persists when
+    the later updates are exact), used by `sum_trees_eps` to estimate the
+    rounding error drift."""
 
     error_cov_inv: Wishart
     """The inverse error covariance with its Wishart prior. The current value is
@@ -491,7 +502,9 @@ class State(Module):
             # grid even where its spacing is coarser), so the sum resolves
             # multiples of the quantum whatever the number of trees
             q = self.config.leaf_quantization
-            managed_quantum = eps_resid * self.resid_scale * 2.0**q
+            scale_chain_axes = range(self.resid_eff_scale.ndim - self.resid_scale.ndim)
+            eff_scale = jnp.mean(self.resid_eff_scale, axis=tuple(scale_chain_axes))
+            managed_quantum = eps_resid * eff_scale * 2.0**q
             resolution = jnp.maximum(managed_quantum, dtype_quantum)
 
             # a quantized leaf moves only when its full conditional mean
@@ -812,9 +825,9 @@ def init(
         dtype stores O(1) values without over/underflow.
     leaf_quantization
         If set, quantize each stored leaf to the spacing of `resid_dtype`
-        values of magnitude ``2 ** leaf_quantization`` (in
-        `State.resid_scale` units). If the residuals stay below
-        ``2 ** (leaf_quantization + 1)``, where that spacing still holds,
+        values of magnitude ``2 ** leaf_quantization`` (in units of the
+        measured residual scale, `State.resid_eff_scale`). If the residuals
+        stay below ``2 ** (leaf_quantization + 1)``, where that spacing holds,
         most running updates of `State.resid` are then exact, suppressing the
         error it accumulates along the MCMC. Higher values tolerate larger
         residuals but coarsen the leaves; leaves already coarser due to
@@ -1023,6 +1036,7 @@ def init(
                 else cast(Array, None)
             ),
             resid_scale=storage.resid_scale,
+            resid_eff_scale=_lazy(jnp.full, kshape, storage.resid_scale),
             resid_inexact_integral=_lazy(jnp.zeros, kshape),
             # only `value` carries the chain axis, so it becomes the lazy leaf;
             # the prior params `nu`/`rate` are shared across chains
@@ -1126,6 +1140,8 @@ def init(
             state = _set_initial_resid(
                 state, binary_indices, num_chains, storage.resid_dtype
             )
+            # charge the one-time rounding of the initial residuals into storage
+            state = _charge_initial_resid_rounding(state)
 
         # derive prec_scale and inv_sdev_scale after sharding to do the
         # calculation on the right devices. `state.error_scale` already holds the
@@ -1248,6 +1264,29 @@ def _set_initial_resid(
     resid = _wrap_chain(inner, chain_axis, num_chains)
     resid = _shard_leaf(resid, chain_axis, data_axis, state.config.mesh)
     return replace(state, resid=resid)
+
+
+def _charge_initial_resid_rounding(state: State) -> State:
+    """Seed `State.resid_inexact_integral` with the initial storage rounding.
+
+    Casting the initial residuals to a storage dtype narrower than `y` rounds
+    them once, and the running updates never fix this offset (they either round
+    again, which the per-step accounting covers, or preserve it exactly), so it
+    is charged upfront as one tree-update's worth of rounding. A float32 resid
+    stores ``y - offset`` exactly (`resid_scale` is a power of two), so this is
+    a no-op for it.
+    """
+    if jnp.finfo(state.resid.dtype).nmant >= jnp.finfo(state.y.dtype).nmant:
+        return state
+    else:
+        resid = state.resid
+        ms = jnp.einsum(
+            '...n,...n->...', resid, resid, preferred_element_type=jnp.float32
+        )
+        *_, n = resid.shape
+        ms /= n
+        *_, num_trees, _ = state.forest.var_tree.shape
+        return replace(state, resid_inexact_integral=ms / num_trees)
 
 
 def _initial_resid(

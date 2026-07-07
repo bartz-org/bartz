@@ -1077,33 +1077,63 @@ def test_check_trees_detects_corruption(bkw: BartKW) -> None:
 
 
 def test_missing_ignored(bkw: BartKW, keys: split) -> None:
-    """Garbage y values at missing positions, even non-finite, don't affect the fit."""
+    """Check masked datapoints do not affect the mcmc."""
+    # unconditionally set missingness
     kw = bkw.kw
     y_train = kw['y_train']
     missing = gen_missing(keys.pop(), y_train.shape)
     kw['missing'] = missing
 
+    # run bart with clean data in the slots marked as missing
     bart1 = Bart(**kw)
 
+    def inject_garbage(
+        *, key: Key[Array, ''], state: State, callback_state: CallbackState, **_: Any
+    ) -> tuple[State, CallbackState]:
+        """Refill the masked positions of the state with noise after each step."""
+        ks = split(key)
+
+        def noisy(
+            x: Float[Array, ' *shape'], mask: Bool[Array, ' *mask_shape']
+        ) -> Float[Array, ' *shape']:
+            # note: don't use nan, and steer clear of overflow, because some masking is
+            # done via multiplication by 0
+            scale = jnp.finfo(x.dtype).max / 128.0
+            noise = scale * random.normal(ks.pop(), x.shape, x.dtype)
+            return jnp.where(mask, noise, x)
+
+        return replace(
+            state, y=noisy(state.y, missing), resid=noisy(state.resid, missing)
+        ), callback_state
+
+    # prepare huge/NaN garbage to inject at the missing data locations
     garbage = random.normal(keys.pop(), y_train.shape) * 1e6
     garbage = jnp.where(
         random.bernoulli(keys.pop(), 0.5, garbage.shape), garbage, jnp.nan
     )
+
+    # run bart with garbage at missing locations
     kw2 = dict(
-        kw, seed=random.clone(kw['seed']), y_train=jnp.where(missing, garbage, y_train)
+        kw,
+        seed=random.clone(kw['seed']),
+        y_train=jnp.where(missing, garbage, y_train),
+        run_mcmc_kw=dict(callback=inject_garbage, callback_state=None),
     )
     bart2 = Bart(**kw2)
 
-    yhat1 = bart1.predict('train', kind='latent_samples')
-    yhat2 = bart2.predict('train', kind='latent_samples')
+    # note: don't use predict('train') because that may rely on `resid` being clean
+    yhat1 = bart1.predict(kw['x_train'], kind='latent_samples')
+    yhat2 = bart2.predict(kw['x_train'], kind='latent_samples')
     rtol = 0 if yhat1.platform() == 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
-    # the garbage must not reach the residual-roundoff accounting either (masked
-    # datapoints are dropped from the drift charge)
-    eps1 = bart1._mcmc_state.resid_inexact_integral
-    eps2 = bart2._mcmc_state.resid_inexact_integral
-    assert_close_matrices(eps1, eps2, rtol=rtol, reduce_rank=True)
+    # check resid_inexact_integral separately because it's not upstream of anything
+    assert_close_matrices(
+        bart1._mcmc_state.resid_inexact_integral,
+        bart2._mcmc_state.resid_inexact_integral,
+        rtol=rtol,
+        reduce_rank=True,
+    )
 
 
 def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:

@@ -1416,11 +1416,11 @@ def test_leaf_quantization(bkw: BartKW, keys: split) -> None:
     leaves = state.forest.leaf_tree / quantum
     assert_array_equal(leaves, jnp.round(leaves))
 
-    # the quantized accuracy estimate exercises the weighted, multivariate
-    # branches of `sum_trees_eps` (the default `bkw` variants are all mv +
-    # weighted); it is a grid spacing, so finite and strictly positive
+    # minimal check of sum_trees_eps()
     eps = state.sum_trees_eps()
-    assert jnp.all(jnp.isfinite(eps) & (eps > 0))
+    assert eps.shape == bkw.kshape
+    assert jnp.all(jnp.isfinite(eps))
+    assert_array_less(0, eps)
 
 
 def test_resid_eff_scale(bkw: BartKW) -> None:

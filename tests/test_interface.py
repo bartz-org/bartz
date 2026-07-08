@@ -1356,7 +1356,7 @@ def test_leaf_scale(bkw: BartKW) -> None:
     cov_inv = nnone(forest.leaf_prior_cov_inv)
     if cov_inv.ndim:
         marginal_std = jnp.sqrt(jnp.diagonal(jnp.linalg.inv(cov_inv)))
-    else:
+    else:  # pragma: no cover, always mv with defaults
         marginal_std = jnp.sqrt(jnp.reciprocal(cov_inv))
     expected = 2 ** jnp.round(jnp.log2(marginal_std))
     assert forest.leaf_scale.dtype == jnp.float32
@@ -1410,11 +1410,17 @@ def test_leaf_quantization(bkw: BartKW, keys: split) -> None:
     # tree_size) leaves
     if state.resid_scale.ndim:
         quantum = quantum[..., None, :, None]
-    else:
+    else:  # pragma: no cover, always mv with defaults
         quantum = quantum[..., None, None]
 
     leaves = state.forest.leaf_tree / quantum
     assert_array_equal(leaves, jnp.round(leaves))
+
+    # the quantized accuracy estimate exercises the weighted, multivariate
+    # branches of `sum_trees_eps` (the default `bkw` variants are all mv +
+    # weighted); it is a grid spacing, so finite and strictly positive
+    eps = state.sum_trees_eps()
+    assert jnp.all(jnp.isfinite(eps) & (eps > 0))
 
 
 def test_resid_eff_scale(bkw: BartKW) -> None:
@@ -1434,7 +1440,7 @@ def test_resid_eff_scale(bkw: BartKW) -> None:
         # the last update measured the residuals as they are in the final
         # state, so recompute their (weighted, masked) rms
         resid = state.resid * state.resid_scale[..., None]
-        if state.inv_sdev_scale is None:
+        if state.inv_sdev_scale is None:  # pragma: no cover, weighted by default
             n_eff = resid.shape[-1]
         else:
             resid = resid * state.inv_sdev_scale

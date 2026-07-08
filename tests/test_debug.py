@@ -100,6 +100,24 @@ def test_format_tree_leaf_scale() -> None:
     assert s == ref_s
 
 
+def test_format_tree_print_all() -> None:
+    """Check `format_tree` renders every heap node when ``print_all`` is set."""
+    tree = manual_tree(
+        [[1.0], [2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], [[4], [1, 2]], [[15], [0, 3]]
+    )
+    s = format_tree(tree, print_all=True)
+    print(s)
+    ref_s = """\
+ 1 ┐decision(4, 15, 1.00000 * 1.00000)
+ 2 ├──┐leaf(1, 0, 1.00000 * 2.00000)
+ 4 │  ├── unused(0, 0, 1.00000 * 4.00000)
+ 5 │  └── unused(0, 0, 1.00000 * 5.00000)
+ 3 └──┐decision(2, 3, 1.00000 * 3.00000)
+ 6    ├── leaf(0, 0, 1.00000 * 6.00000)
+ 7    └── leaf(0, 0, 1.00000 * 7.00000)"""
+    assert s == ref_s
+
+
 def test_format_tree_multivariate() -> None:
     """Check the output of `format_tree` on a tree with multivariate leaves."""
     tree = manual_tree(

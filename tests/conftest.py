@@ -60,7 +60,7 @@ def get_old_python_version() -> tuple[int, int]:
 
 
 INVASIVE_DEBUG_CHECKS = False
-if INVASIVE_DEBUG_CHECKS:
+if INVASIVE_DEBUG_CHECKS:  # pragma: no cover, opt-in debug checks
     # these make the tests 10% slower, disable buffer donation, and yield some
     # false positive, so we don't keep them on by default
     config.update('jax_debug_key_reuse', True)

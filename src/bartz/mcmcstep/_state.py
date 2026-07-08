@@ -474,14 +474,11 @@ class State(Module):
     def sum_trees_eps(self) -> Float32[Array, ''] | Float32[Array, ' k']:
         """Estimate the absolute accuracy limit of the sum of trees (in data units).
 
-        The analogue of ``finfo(dtype).eps`` for the sum of trees: the smallest
-        variation it can resolve. Combines the static resolution of the stored
-        leaves, an estimate of the rounding error accumulated so far by the
-        running residual updates, integrated along the MCMC (see
-        `resid_inexact_integral`), and the responsiveness limit of quantized
-        leaf sampling (a leaf moves only when its full conditional mean crosses
-        half a quantum, so residual features smaller than
-        ``quantum / (2 * shrinkage)`` are invisible to the sampler).
+        The analogue of ``finfo(dtype).eps`` for the sum of trees. This combines three
+        terms: floating point resolution, random walk accumulation of numerical error
+        on running residuals, and if leaf quantization is active, breakdown of the
+        mcmc due to the quantization being too coarse. The latter term is currently
+        broken actually, sorry about that.
         """
         resolution, drift, snap = self._sum_trees_eps()
         return jnp.maximum(jnp.maximum(resolution, drift), snap)

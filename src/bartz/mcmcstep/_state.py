@@ -816,35 +816,26 @@ def init(
         ``num_trees * leaf_prior_cov_inv^-1``. The prior mean of leaves is
         always zero.
     leaf_dtype
-        The dtype used to store the leaf values. The leaf full conditionals
-        are always computed and sampled in float32; a narrower dtype (e.g.,
-        float16) affects only the storage, rounding each leaf once per
-        sampling. Leaves are stored in units of their marginal prior standard
-        deviation (see `Forest.leaf_scale`), so narrow dtypes do not
-        over/underflow whatever the scale of `y`.
+        Dtype used to store leaves. The full conditional is always computed and
+        sampled in float32 first. Leaves are stored in scaled units to avoid
+        under/overflow with short types.
     prec_scale_dtype
-        The dtype used to store the per-datapoint error precisions
-        (`State.prec_scale`) and inverse standard deviations
-        (`State.inv_sdev_scale`); ignored without `error_scale`/`missing`. The
-        scale lives in the float32 `error_cov_inv`, so a narrow dtype (e.g.
-        float16) stores an O(1) relative weight without over/underflow.
+        Dtype used to store quantities derived from error weights,
+        `State.prec_scale` and `State.inv_sdev_scale`. Note `State.error_scale`
+        is always float32 instead.
     resid_dtype
-        The dtype used to store the residuals (`State.resid`). Like the leaves,
-        the residuals are stored in units of a float32 scale (`State.resid_scale`,
-        the marginal prior standard deviation of the sum of trees), so a narrow
-        dtype stores O(1) values without over/underflow.
+        Dtype used to store the running residuals (`State.resid`). The
+        residuals are stored in scaled units to avoid under/overflow with short
+        types. Using short types for residuals may easily break the mcmc; this
+        is an experimental setting.
     leaf_quantization
-        If set, quantize each stored leaf to the spacing of `resid_dtype`
-        values of magnitude ``2 ** leaf_quantization`` (in units of the
-        measured residual scale, `State.resid_eff_scale`). If the residuals
-        stay below ``2 ** (leaf_quantization + 1)``, where that spacing holds,
-        most running updates of `State.resid` are then exact, suppressing the
-        error it accumulates along the MCMC. Higher values tolerate larger
-        residuals but coarsen the leaves; leaves already coarser due to
-        `leaf_dtype` are unaffected. A quantum coarser than the leaf full
-        conditional distorts the posterior, up to degenerating it entirely;
-        `State.sum_trees_eps` accounts for this. In practice: set this to 1
-        when using float16 residuals.
+        If set, leaves are quantized to units `float_eps * 2 **
+        leaf_quantization` in the scale of the RMS of residuals. The sensible
+        settings are 0 and 1. This quantization (almost) stops the random walk
+        numerical drift of the running residuals, but with enough datapoints or
+        trees the mcmc breaks down because the variation of the leaves becomes
+        smaller than the quantization. Use this with float16 residuals, but the
+        mcmc may just take fire at some n > 100_000.
     error_cov_inv
         The Wishart prior on the inverse error covariance, together with its
         initial value (see `Wishart`). Leave it unspecified for binary

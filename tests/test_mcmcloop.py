@@ -68,6 +68,10 @@ from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.testing import QuantizedData, gen_data
 from tests.util import assert_array_equal, assert_close_matrices, nnone
 
+# shared data dimensions for `simple_init`/`simple_data`, reused across tests to
+# hit the jax compilation cache
+P, N, NTREE = 10, 100, 20
+
 
 def simple_data(p: int, n: int, k: int | None = None) -> QuantizedData:
     """Generate quantized data for `simple_init`."""
@@ -90,7 +94,7 @@ def simple_data(p: int, n: int, k: int | None = None) -> QuantizedData:
 
 @filter_jit
 def simple_init(
-    p: int, n: int, ntree: int, k: int | None = None, **kwargs: Any
+    p: int = P, n: int = N, ntree: int = NTREE, k: int | None = None, **kwargs: Any
 ) -> State:
     """Simplified version of `bartz.mcmcstep.init` with data pre-filled."""
     data = simple_data(p, n, k)
@@ -158,7 +162,7 @@ class TestRunMcmc:
     @pytest.fixture(scope='class')
     def initial_state(self, num_chains: int | None, k: int | None) -> State:
         """Prepare state for tests."""
-        return simple_init(10, 100, 20, k, num_chains=num_chains)
+        return simple_init(k=k, num_chains=num_chains)
 
     def test_final_state_overflow(self, keys: split, initial_state: State) -> None:
         """Check that the final state is the one in the trace even if there's overflow."""
@@ -246,7 +250,7 @@ class TestRunMcmc:
 
     def test_tqdm_callback_cleans_up_interrupted_bar(self) -> None:
         """A new tqdm callback closes a bar left open by an interrupted run."""
-        state = simple_init(10, 100, 20)
+        state = simple_init()
         buf = io.StringIO()
         callback = make_tqdm_callback(state, file=buf, mininterval=0)
         bar_id = callback.bar_id.item()
@@ -267,7 +271,7 @@ class TestRunMcmc:
         retraced (verified via the `_CallCounter`, see
         ``test_no_recompilation_inner_loop_counter`` in ``test_interface``).
         """
-        state = simple_init(10, 100, 20)
+        state = simple_init()
 
         def run() -> None:
             callback = make_tqdm_callback(state, disable=True)
@@ -286,7 +290,7 @@ class TestRunMcmc:
 
     def test_predicted_double_compilation(self, keys: split) -> None:
         """Check that an error is raised under jit if the configuration would lead to double compilation."""
-        initial_state = simple_init(10, 100, 20)
+        initial_state = simple_init()
 
         compiled_run_mcmc = jit(
             run_mcmc, static_argnames=('n_save', 'inner_loop_length')
@@ -298,7 +302,7 @@ class TestRunMcmc:
 
     def test_detected_double_compilation(self, keys: split) -> None:
         """Check that double compilation is detected."""
-        state = simple_init(10, 100, 20)
+        state = simple_init()
 
         mesh = make_mesh(
             (1,), ('a',), axis_types=(AxisType.Auto,), devices=get_default_devices()
@@ -379,7 +383,7 @@ def test_check_platform_callback(keys: split, matches: bool) -> None:
     callback = CheckPlatformCallback(run_platform if matches else other_platform)
 
     def run() -> None:
-        state = simple_init(10, 100, 20)
+        state = simple_init()
         block_until_ready(run_mcmc(keys.pop(), state, 1, callback=callback))
 
     if matches:
@@ -393,9 +397,9 @@ def test_check_platform_callback(keys: split, matches: bool) -> None:
 _N_TEST = 60
 
 
-def _eval_test_points(n_test: int = _N_TEST) -> UInt8[Array, '6 {n_test}']:
+def _eval_test_points(n_test: int = _N_TEST) -> UInt8[Array, 'p {n_test}']:
     """Generate quantized test points compatible with `simple_init`'s data."""
-    return simple_data(6, n_test).x
+    return simple_data(P, n_test).x
 
 
 def _make_mesh(axes: dict[str, int]) -> Mesh:
@@ -424,7 +428,7 @@ class TestEvaluateTrace:
     def _trace(
         self, keys: split, num_chains: int | None, k: int | None, mesh: Mesh | None
     ) -> MainTrace:
-        state = simple_init(6, 80, 8, k, num_chains=num_chains, mesh=mesh)
+        state = simple_init(k=k, num_chains=num_chains, mesh=mesh)
         with debug_key_reuse(False):
             return run_mcmc(keys.pop(), state, 5, n_burn=2).main_trace
 

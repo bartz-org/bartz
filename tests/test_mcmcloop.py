@@ -222,14 +222,16 @@ class TestRunMcmc:
         report shows the latest iteration only.
         """
         buf = io.StringIO()
-        kw = make_tqdm_callback(
+        callback = make_tqdm_callback(
             initial_state, report_every=2, file=buf, mininterval=0, average=average
         )
-        bar_id = kw['callback_state'].bar_id.item()
+        bar_id = callback.bar_id.item()
         state = tree.map(jnp.copy, initial_state)  # donated
         with debug_key_reuse(False):
             # block so the (unordered, async) progress callbacks have all fired
-            block_until_ready(run_mcmc(keys.pop(), state, 4, n_burn=2, **kw))
+            block_until_ready(
+                run_mcmc(keys.pop(), state, 4, n_burn=2, callback=callback)
+            )
 
         out = buf.getvalue()
         assert '100%' in out  # the bar reached the end
@@ -240,8 +242,8 @@ class TestRunMcmc:
         """A new tqdm callback closes a bar left open by an interrupted run."""
         state = simple_init(10, 100, 20)
         buf = io.StringIO()
-        kw = make_tqdm_callback(state, file=buf, mininterval=0)
-        bar_id = kw['callback_state'].bar_id.item()
+        callback = make_tqdm_callback(state, file=buf, mininterval=0)
+        bar_id = callback.bar_id.item()
         # simulate an interrupted run: advance the bar partway, never finishing
         _tqdm_advance(bar_id, 3, 10)
         assert not nnone(_TQDM_REGISTRY[bar_id].bar).disable  # still open
@@ -262,9 +264,15 @@ class TestRunMcmc:
         state = simple_init(10, 100, 20)
 
         def run() -> None:
-            kw = make_tqdm_callback(state, disable=True)
+            callback = make_tqdm_callback(state, disable=True)
             with debug_key_reuse(False):
-                run_mcmc(keys.pop(), tree.map(jnp.copy, state), 4, n_burn=2, **kw)
+                run_mcmc(
+                    keys.pop(),
+                    tree.map(jnp.copy, state),
+                    4,
+                    n_burn=2,
+                    callback=callback,
+                )
 
         run()
         run()

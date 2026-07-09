@@ -1485,11 +1485,13 @@ def _run_mcmc(
         kw = dict(**kw, main_trace_type=MainTraceWithTrainPred)
     if printevery is not None:
         if pbar:
-            kw = dict(**kw, **make_tqdm_callback(mcmc_state, report_every=printevery))
+            kw = dict(
+                **kw, callback=make_tqdm_callback(mcmc_state, report_every=printevery)
+            )
         else:
             kw = dict(
                 **kw,
-                **make_print_callback(
+                callback=make_print_callback(
                     mcmc_state,
                     dot_every=None if printevery == 1 else 1,
                     report_every=printevery,

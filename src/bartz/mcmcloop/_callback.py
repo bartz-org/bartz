@@ -40,7 +40,7 @@ from tqdm.auto import tqdm
 
 from bartz._typing import kwdict
 from bartz.grove import forest_mean_leaves
-from bartz.mcmcloop._loop import _replicate
+from bartz.mcmcloop._loop import Callback, _replicate
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes, chainful_axis
 
@@ -193,7 +193,7 @@ def make_print_callback(
     dot_every: int | Integer[Array, ''] | None = 1,
     report_every: int | Integer[Array, ''] | None = 100,
     average: bool = True,
-) -> dict[str, Any]:
+) -> 'PrintCallback':
     """
     Prepare a progress-printing callback for `run_mcmc`.
 
@@ -217,11 +217,11 @@ def make_print_callback(
 
     Returns
     -------
-    A dictionary with the arguments to pass to `run_mcmc` as keyword arguments to set up the callback.
+    A `PrintCallback` to pass as the `callback` argument of `run_mcmc`.
 
     Examples
     --------
-    >>> run_mcmc(key, state, ..., **make_print_callback(state, ...))
+    >>> run_mcmc(key, state, ..., callback=make_print_callback(state, ...))
     """
 
     def as_replicated_array_or_none(
@@ -234,18 +234,15 @@ def make_print_callback(
         StatsAccumulator.initial(state, enabled=average and report_every is not None),
     )
 
-    return dict(
-        callback=print_callback,
-        callback_state=PrintCallbackState(
-            as_replicated_array_or_none(dot_every),
-            as_replicated_array_or_none(report_every),
-            accumulator,
-        ),
+    return PrintCallback(
+        as_replicated_array_or_none(dot_every),
+        as_replicated_array_or_none(report_every),
+        accumulator,
     )
 
 
-class PrintCallbackState(Module):
-    """State for `print_callback`."""
+class PrintCallback(Callback):
+    """Progress-printing callback for `run_mcmc`, see `make_print_callback`."""
 
     dot_every: Int32[Array, ''] | None
     """A dot is printed every `dot_every` MCMC iterations, `None` to disable."""
@@ -257,69 +254,68 @@ class PrintCallbackState(Module):
     accumulator: StatsAccumulator
     """Running average of the reported statistics, inert unless averaging."""
 
+    def __call__(
+        self,
+        *,
+        state: State,
+        burnin: Bool[Array, ''],
+        i_total: Int32[Array, ''],
+        n_burn: Int32[Array, ''],
+        n_save: Int32[Array, ''],
+        n_skip: Int32[Array, ''],
+        **_: Any,
+    ) -> tuple[State, 'PrintCallback']:
+        """Print a dot and/or a report periodically during the MCMC."""
+        report_every = self.report_every
+        dot_every = self.dot_every
+        it = i_total + 1
 
-def print_callback(
-    *,
-    state: State,
-    burnin: Bool[Array, ''],
-    i_total: Int32[Array, ''],
-    n_burn: Int32[Array, ''],
-    n_save: Int32[Array, ''],
-    n_skip: Int32[Array, ''],
-    callback_state: PrintCallbackState,
-    **_: Any,
-) -> tuple[State, PrintCallbackState]:
-    """Print a dot and/or a report periodically during the MCMC."""
-    report_every = callback_state.report_every
-    dot_every = callback_state.dot_every
-    it = i_total + 1
+        accumulator = self.accumulator.update(state)
 
-    accumulator = callback_state.accumulator.update(state)
+        def get_cond(every: Int32[Array, ''] | None) -> bool | Bool[Array, '']:
+            return False if every is None else it % every == 0
 
-    def get_cond(every: Int32[Array, ''] | None) -> bool | Bool[Array, '']:
-        return False if every is None else it % every == 0
+        report_cond = get_cond(report_every)
+        dot_cond = get_cond(dot_every)
 
-    report_cond = get_cond(report_every)
-    dot_cond = get_cond(dot_every)
+        def line_report_branch() -> None:
+            if report_every is None:
+                return
+            if dot_every is None:
+                print_newline = False
+            else:
+                print_newline = it % report_every > it % dot_every
+            debug.callback(
+                _print_report,
+                accumulator.report(state),
+                print_dot=dot_cond,
+                print_newline=print_newline,
+                burnin=burnin,
+                it=it,
+                n_iters=n_burn + n_save * n_skip,
+            )
 
-    def line_report_branch() -> None:
-        if report_every is None:
-            return
-        if dot_every is None:
-            print_newline = False
-        else:
-            print_newline = it % report_every > it % dot_every
-        debug.callback(
-            _print_report,
-            accumulator.report(state),
-            print_dot=dot_cond,
-            print_newline=print_newline,
-            burnin=burnin,
-            it=it,
-            n_iters=n_burn + n_save * n_skip,
-        )
+        def just_dot_branch() -> None:
+            if dot_every is None:
+                return
+            # terminate the dot line on the final iteration so subsequent output
+            # doesn't continue on the same line as the dots
+            last_iter = it == n_burn + n_save * n_skip
+            lax.cond(
+                last_iter,
+                lambda: debug.callback(lambda: print('.', flush=True)),  # noqa: T201
+                lambda: debug.callback(lambda: print('.', end='', flush=True)),  # noqa: T201
+            )
+            # logging can't do in-line printing so we use print
 
-    def just_dot_branch() -> None:
-        if dot_every is None:
-            return
-        # terminate the dot line on the final iteration so subsequent output
-        # doesn't continue on the same line as the dots
-        last_iter = it == n_burn + n_save * n_skip
         lax.cond(
-            last_iter,
-            lambda: debug.callback(lambda: print('.', flush=True)),  # noqa: T201
-            lambda: debug.callback(lambda: print('.', end='', flush=True)),  # noqa: T201
+            report_cond,
+            line_report_branch,
+            lambda: lax.cond(dot_cond, just_dot_branch, lambda: None),
         )
-        # logging can't do in-line printing so we use print
 
-    lax.cond(
-        report_cond,
-        line_report_branch,
-        lambda: lax.cond(dot_cond, just_dot_branch, lambda: None),
-    )
-
-    accumulator = accumulator.reset_if(report_cond)
-    return state, replace(callback_state, accumulator=accumulator)
+        accumulator = accumulator.reset_if(report_cond)
+        return state, replace(self, accumulator=accumulator)
 
 
 def make_tqdm_callback(
@@ -329,7 +325,7 @@ def make_tqdm_callback(
     report_every: int | None = 100,
     average: bool = True,
     **tqdm_kwargs: Any,
-) -> dict[str, Any]:
+) -> 'TqdmCallback':
     """
     Prepare a `tqdm` progress-bar callback for `run_mcmc`.
 
@@ -357,7 +353,7 @@ def make_tqdm_callback(
 
     Returns
     -------
-    A dictionary with the arguments to pass to `run_mcmc` as keyword arguments to set up the callback.
+    A `TqdmCallback` to pass as the `callback` argument of `run_mcmc`.
 
     Notes
     -----
@@ -367,7 +363,7 @@ def make_tqdm_callback(
 
     Examples
     --------
-    >>> run_mcmc(key, state, ..., **make_tqdm_callback(state, ...))
+    >>> run_mcmc(key, state, ..., callback=make_tqdm_callback(state, ...))
     """
     _close_stale_bars()  # clean up after any previous run that was interrupted
     bar_id = next(_TQDM_BAR_COUNTER)
@@ -378,26 +374,23 @@ def make_tqdm_callback(
     ) -> Shaped[Array, '*shape']:
         return _replicate(jnp.asarray(val), state.config.mesh)
 
-    return dict(
-        callback=tqdm_callback,
-        callback_state=TqdmCallbackState(
-            bar_id=as_replicated_array(jnp.int32(bar_id)),
-            update_every=as_replicated_array(jnp.int32(update_every)),
-            report_every=None
-            if report_every is None
-            else as_replicated_array(jnp.int32(report_every)),
-            accumulator=tree.map(
-                partial(_replicate, mesh=state.config.mesh),
-                StatsAccumulator.initial(
-                    state, enabled=average and report_every is not None
-                ),
+    return TqdmCallback(
+        bar_id=as_replicated_array(jnp.int32(bar_id)),
+        update_every=as_replicated_array(jnp.int32(update_every)),
+        report_every=None
+        if report_every is None
+        else as_replicated_array(jnp.int32(report_every)),
+        accumulator=tree.map(
+            partial(_replicate, mesh=state.config.mesh),
+            StatsAccumulator.initial(
+                state, enabled=average and report_every is not None
             ),
         ),
     )
 
 
-class TqdmCallbackState(Module):
-    """State for `tqdm_callback`."""
+class TqdmCallback(Callback):
+    """`tqdm` progress-bar callback for `run_mcmc`, see `make_tqdm_callback`."""
 
     bar_id: Int32[Array, '']
     """Handle identifying the bar in the module-level `tqdm` bar registry."""
@@ -412,48 +405,48 @@ class TqdmCallbackState(Module):
     accumulator: StatsAccumulator
     """Running average of the reported statistics, inert unless averaging."""
 
+    def __call__(
+        self,
+        *,
+        state: State,
+        i_total: Int32[Array, ''],
+        n_burn: Int32[Array, ''],
+        n_save: Int32[Array, ''],
+        n_skip: Int32[Array, ''],
+        **_: Any,
+    ) -> tuple[State, 'TqdmCallback']:
+        """Advance a `tqdm` progress bar during the MCMC."""
+        it = i_total + 1
+        n_iters = n_burn + n_save * n_skip
+        bar_id = self.bar_id
+        last = it == n_iters
 
-def tqdm_callback(
-    *,
-    state: State,
-    i_total: Int32[Array, ''],
-    n_burn: Int32[Array, ''],
-    n_save: Int32[Array, ''],
-    n_skip: Int32[Array, ''],
-    callback_state: TqdmCallbackState,
-    **_: Any,
-) -> tuple[State, TqdmCallbackState]:
-    """Advance a `tqdm` progress bar during the MCMC."""
-    it = i_total + 1
-    n_iters = n_burn + n_save * n_skip
-    bar_id = callback_state.bar_id
-    last = it == n_iters
+        accumulator = self.accumulator.update(state)
 
-    accumulator = callback_state.accumulator.update(state)
+        # The callbacks are unordered: `ordered=True` is unsupported with more
+        # than one device, and we need this to work with chains sharded across
+        # devices. `_tqdm_advance` is therefore robust to out-of-order
+        # invocations.
 
-    # The callbacks are unordered: `ordered=True` is unsupported with more than
-    # one device, and we need this to work with chains sharded across devices.
-    # `_tqdm_advance` is therefore robust to out-of-order invocations.
+        # refresh the statistics first so they tend to be visible by the time
+        # the bar is advanced
+        report_every = self.report_every
+        if report_every is not None:
+            report_cond = (it % report_every == 0) | last
 
-    # refresh the statistics first so they tend to be visible by the time the
-    # bar is advanced
-    report_every = callback_state.report_every
-    if report_every is not None:
-        report_cond = (it % report_every == 0) | last
+            def report_branch() -> None:
+                debug.callback(_tqdm_report, accumulator.report(state), bar_id, n_iters)
 
-        def report_branch() -> None:
-            debug.callback(_tqdm_report, accumulator.report(state), bar_id, n_iters)
+            lax.cond(report_cond, report_branch, lambda: None)
+            accumulator = accumulator.reset_if(report_cond)
 
-        lax.cond(report_cond, report_branch, lambda: None)
-        accumulator = accumulator.reset_if(report_cond)
+        lax.cond(
+            (it % self.update_every == 0) | last,
+            lambda: debug.callback(_tqdm_advance, bar_id, it, n_iters),
+            lambda: None,
+        )
 
-    lax.cond(
-        (it % callback_state.update_every == 0) | last,
-        lambda: debug.callback(_tqdm_advance, bar_id, it, n_iters),
-        lambda: None,
-    )
-
-    return state, replace(callback_state, accumulator=accumulator)
+        return state, replace(self, accumulator=accumulator)
 
 
 T = TypeVar('T')
@@ -498,7 +491,7 @@ def _print_report(
     it: int,
     n_iters: int,
 ) -> None:
-    """Print the report for `print_callback`."""
+    """Print the report for `PrintCallback`."""
     # determine prefix
     if print_dot:
         prefix = '.\n'
@@ -526,7 +519,7 @@ def _print_report(
     else:
         var_msg = f'var: {report.peff:.1f}/{report.p}, '
 
-    print(  # noqa: T201, see print_callback for why not logging
+    print(  # noqa: T201, see PrintCallback for why not logging
         f'{prefix}Iteration {it}/{n_iters}, '
         f'grow prob: {report.grow_prop:.0%}, '
         f'move acc: {report.move_acc:.0%}, '
@@ -548,7 +541,7 @@ class _TqdmEntry:
 
 # tqdm carries Python state that cannot live in a jax pytree, so the bars are
 # kept here and referenced from the jax loop through the integer handle stored
-# in `TqdmCallbackState.bar_id` (a traceable scalar, so the loop pytree stays
+# in `TqdmCallback.bar_id` (a traceable scalar, so the loop pytree stays
 # stable across runs and is not recompiled).
 _TQDM_REGISTRY: dict[int, _TqdmEntry] = {}
 _TQDM_BAR_COUNTER = itertools.count()

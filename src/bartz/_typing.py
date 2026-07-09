@@ -31,4 +31,5 @@ from typing import Any, TypeAlias
 # each target parameter, flagging correct `**kw` calls (astral-sh/ty#3263,
 # #2971). Annotate such a kwargs dict with this alias to erase the value type and
 # silence the false positive; remove the annotations once ty relaxes this.
+# WORKAROUND(python<3.12): use `type kwdict = dict[str, Any]` (PEP 695)
 kwdict: TypeAlias = dict[str, Any]

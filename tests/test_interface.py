@@ -112,7 +112,7 @@ from bartz.grove import (
     tree_depths,
 )
 from bartz.mcmcloop import (
-    CallbackState,
+    Callback,
     MainTraceWithTrainPred,
     compute_varcount,
     evaluate_trace,
@@ -1040,22 +1040,21 @@ def test_check_trees_detects_corruption(bkw: BartKW) -> None:
     `_check_trees` (used by the `Bart` test wrapper's ``__init__``) must catch.
     """
 
-    def corrupt(
-        *, state: State, callback_state: CallbackState, **_: Any
-    ) -> tuple[State, CallbackState]:
-        forest = state.forest
-        # max_split.size is the first out-of-range variable index; the var dtype
-        # is sized for indices up to max_split.size - 1, so guard that this one
-        # extra value still fits (it does whenever the count is not exactly at a
-        # dtype boundary, which holds for every variant)
-        oob_value = forest.max_split.size
-        assert minimal_unsigned_dtype(oob_value) == forest.var_tree.dtype
-        oob_var = jnp.array(oob_value, forest.var_tree.dtype)
-        var_tree = jnp.where(forest.split_tree != 0, oob_var, forest.var_tree)
-        forest = replace(forest, var_tree=var_tree)
-        return replace(state, forest=forest), callback_state
+    class Corrupt(Callback):
+        def __call__(self, *, state: State, **_: Any) -> tuple[State, 'Corrupt']:
+            forest = state.forest
+            # max_split.size is the first out-of-range variable index; the var
+            # dtype is sized for indices up to max_split.size - 1, so guard that
+            # this one extra value still fits (it does whenever the count is not
+            # exactly at a dtype boundary, which holds for every variant)
+            oob_value = forest.max_split.size
+            assert minimal_unsigned_dtype(oob_value) == forest.var_tree.dtype
+            oob_var = jnp.array(oob_value, forest.var_tree.dtype)
+            var_tree = jnp.where(forest.split_tree != 0, oob_var, forest.var_tree)
+            forest = replace(forest, var_tree=var_tree)
+            return replace(state, forest=forest), self
 
-    kw: kwdict = dict(bkw.kw, run_mcmc_kw=dict(callback=corrupt))
+    kw: kwdict = dict(bkw.kw, run_mcmc_kw=dict(callback=Corrupt()))
 
     # build via the unwrapped class so the (finite) run completes without the
     # wrapper's automatic check aborting it, then inspect the corrupted trace
@@ -1087,24 +1086,25 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     # run bart with clean data in the slots marked as missing
     bart1 = Bart(**kw)
 
-    def inject_garbage(
-        *, key: Key[Array, ''], state: State, callback_state: CallbackState, **_: Any
-    ) -> tuple[State, CallbackState]:
-        """Refill the masked positions of the state with noise after each step."""
-        ks = split(key)
+    class InjectGarbage(Callback):
+        def __call__(
+            self, *, key: Key[Array, ''], state: State, **_: Any
+        ) -> tuple[State, 'InjectGarbage']:
+            """Refill the masked positions of the state with noise after each step."""
+            ks = split(key)
 
-        def noisy(
-            x: Float[Array, ' *shape'], mask: Bool[Array, ' *mask_shape']
-        ) -> Float[Array, ' *shape']:
-            # note: don't use nan, and steer clear of overflow, because some masking is
-            # done via multiplication by 0
-            scale = jnp.finfo(x.dtype).max / 128.0
-            noise = scale * random.normal(ks.pop(), x.shape, x.dtype)
-            return jnp.where(mask, noise, x)
+            def noisy(
+                x: Float[Array, ' *shape'], mask: Bool[Array, ' *mask_shape']
+            ) -> Float[Array, ' *shape']:
+                # note: don't use nan, and steer clear of overflow, because some
+                # masking is done via multiplication by 0
+                scale = jnp.finfo(x.dtype).max / 128.0
+                noise = scale * random.normal(ks.pop(), x.shape, x.dtype)
+                return jnp.where(mask, noise, x)
 
-        return replace(
-            state, y=noisy(state.y, missing), resid=noisy(state.resid, missing)
-        ), callback_state
+            return replace(
+                state, y=noisy(state.y, missing), resid=noisy(state.resid, missing)
+            ), self
 
     # prepare huge/NaN garbage to inject at the missing data locations
     garbage = random.normal(keys.pop(), y_train.shape) * 1e6
@@ -1117,7 +1117,7 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
         kw,
         seed=random.clone(kw['seed']),
         y_train=jnp.where(missing, garbage, y_train),
-        run_mcmc_kw=dict(callback=inject_garbage, callback_state=None),
+        run_mcmc_kw=dict(callback=InjectGarbage()),
     )
     bart2 = Bart(**kw2)
 
@@ -2777,7 +2777,7 @@ def test_pbar(bkw: BartKW, capsys: CaptureFixture[str]) -> None:
     """The `pbar=True` progress bar runs to completion across configurations.
 
     Parametrized over `bkw`, so it also covers chains sharded across devices
-    (e.g. variant v6). This exercises that `tqdm_callback` uses unordered debug
+    (e.g. variant v6). This exercises that `TqdmCallback` uses unordered debug
     callbacks, since ordered ones are unsupported with more than one device.
     """
     # force a concrete `printevery`: some bkw variants set it to None, which now

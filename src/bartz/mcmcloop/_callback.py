@@ -45,6 +45,29 @@ from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes, chainful_axis
 
 
+class CallbackTuple(Callback):
+    """Callback that runs a sequence of callbacks in order.
+
+    Each callback receives the state as (possibly) updated by the preceding
+    ones, so their effects compose left to right.
+    """
+
+    callbacks: tuple[Callback, ...]
+    """The callbacks to run, in order."""
+
+    def __call__(self, *, state: State, **kwargs: Any) -> tuple[State, 'CallbackTuple']:
+        """Invoke each callback in turn, threading the state through them."""
+        new_callbacks = []
+        for callback in self.callbacks:
+            rt = callback(state=state, **kwargs)
+            if rt is None:
+                new_callbacks.append(callback)
+            else:
+                state, new_callback = rt
+                new_callbacks.append(new_callback)
+        return state, replace(self, callbacks=tuple(new_callbacks))
+
+
 class StatsReport(Module):
     """Forest diagnostics produced by `StatsAccumulator.report` for one report."""
 

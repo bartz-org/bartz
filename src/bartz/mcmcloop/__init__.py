@@ -54,6 +54,7 @@ The entry points are `make_print_callback` and `make_tqdm_callback`.
     make_print_callback
     make_tqdm_callback
     Callback
+    CallbackTuple
     PrintCallback
     TqdmCallback
     StatsAccumulator
@@ -63,6 +64,7 @@ The entry points are `make_print_callback` and `make_tqdm_callback`.
 # ruff: noqa: F401
 
 from bartz.mcmcloop._callback import (
+    CallbackTuple,
     PrintCallback,
     StatsAccumulator,
     StatsReport,

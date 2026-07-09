@@ -47,9 +47,15 @@ from jax.tree_util import KeyPath
 from jaxtyping import Array, Shaped, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
-from bartz._jaxext import get_default_devices, get_device_count, split
+from bartz._jaxext import (
+    get_default_device,
+    get_default_devices,
+    get_device_count,
+    split,
+)
 from bartz.mcmcloop import (
     BurninTrace,
+    CheckPlatformCallback,
     MainTrace,
     evaluate_trace,
     make_tqdm_callback,
@@ -363,6 +369,24 @@ class TestRunMcmc:
         tree.map(assert_trace_close, final_whole, final_chunked)
         tree.map(assert_trace_close, main_whole, main_chunked)
         tree.map(assert_trace_close, burnin_whole, burnin_chunked)
+
+
+@pytest.mark.parametrize('matches', [True, False])
+def test_check_platform_callback(keys: split, matches: bool) -> None:
+    """`CheckPlatformCallback` passes on the run platform and raises otherwise."""
+    run_platform = get_default_device().platform
+    other_platform = 'gpu' if run_platform == 'cpu' else 'cpu'
+    callback = CheckPlatformCallback(run_platform if matches else other_platform)
+
+    def run() -> None:
+        state = simple_init(10, 100, 20)
+        block_until_ready(run_mcmc(keys.pop(), state, 1, callback=callback))
+
+    if matches:
+        run()  # no error
+    else:
+        with pytest.raises(Exception, match='deduced the platform'):
+            run()
 
 
 # shared test-point count, reused across cases to hit the jax compilation cache

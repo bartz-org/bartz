@@ -28,7 +28,7 @@ import itertools
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial, wraps
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 import numpy
 from equinox import Module, field
@@ -632,3 +632,38 @@ def _tqdm_report(report: StatsReport, bar_id: int, n_iters: int) -> None:
         msgs.append(f'var {report.peff:.1f}/{report.p}')
     msgs.append(f'leaves {report.mean_leaves:.1f}/{report.max_leaves}')
     bar.set_postfix_str(' '.join(msgs))
+
+
+class CheckPlatformCallback(Callback):
+    """Check the given platform matches the actual platform at runtime."""
+
+    platform: Literal['cpu', 'gpu'] = field(static=True)
+    """The expected platform."""
+
+    def __call__(self, *, i_total: Int32[Array, ''], **_: Any) -> None:
+        """Check the platform on the first iteration, raise on mismatch."""
+
+        def check() -> None:
+            lax.platform_dependent(
+                cpu=partial(_check_platform, 'cpu', self.platform),
+                cuda=partial(_check_platform, 'gpu', self.platform),
+            )
+
+        lax.cond(i_total == 0, check, lambda: None)
+
+
+def _check_platform(actual_platform: str, expected_platform: str) -> None:
+    """Raise from a debug callback if the platform differs from expected."""
+
+    def raise_if_mismatch() -> None:
+        if actual_platform != expected_platform:
+            msg = (
+                f'`Bart` deduced the platform as {expected_platform!r}, '
+                'but the MCMC is running on '
+                f'{actual_platform!r}, so the automatic deduction was wrong; please '
+                'tell `Bart` what the correct platform is by setting the `devices` '
+                'argument.'
+            )
+            raise RuntimeError(msg)
+
+    debug.callback(raise_if_mismatch)

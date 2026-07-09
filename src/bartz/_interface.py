@@ -61,6 +61,8 @@ from bartz.grove import (
 )
 from bartz.mcmcloop import (
     BurninTrace,
+    CallbackTuple,
+    CheckPlatformCallback,
     MainTrace,
     MainTraceWithTrainPred,
     RunMCMCResult,
@@ -490,7 +492,7 @@ class Bart(Module):
         max_split = jnp.array(binner_obj.max_split)
 
         # setup and run mcmc
-        initial_state, mcmc_key, device = _setup_mcmc(
+        initial_state, mcmc_key, device, check_platform = _setup_mcmc(
             x_train,
             y_train,
             outcome_type,
@@ -525,6 +527,7 @@ class Bart(Module):
             mcmc_key,
             precompute_predict_train,
             run_mcmc_kw,
+            check_platform,
         )
 
         # set private attributes
@@ -1426,10 +1429,10 @@ def _setup_mcmc(
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
     n_burn: int,
     mcmc_key: Key[Array, ''],
-) -> tuple[State, Key[Array, ''], Device | None]:
+) -> tuple[State, Key[Array, ''], Device | None, Literal['cpu', 'gpu'] | None]:
     theta, a, b, rho = _process_sparsity_settings(x_train, sparse)
 
-    device_kw, device = process_device_settings(
+    device_kw, device, check_platform = process_device_settings(
         y_train, num_chains, num_chain_devices, num_data_devices, devices
     )
 
@@ -1465,7 +1468,7 @@ def _setup_mcmc(
     if device is not None:
         mcmc_key, state = device_put((mcmc_key, state), device, donate=True)
 
-    return state, mcmc_key, device
+    return state, mcmc_key, device, check_platform
 
 
 def _run_mcmc(
@@ -1478,25 +1481,33 @@ def _run_mcmc(
     key: Key[Array, ''],
     precompute_predict_train: bool,
     run_mcmc_kw: Mapping,
+    check_platform: Literal['cpu', 'gpu'] | None,
 ) -> RunMCMCResult:
-    # prepare arguments
-    kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
-    if precompute_predict_train:
-        kw = dict(**kw, main_trace_type=MainTraceWithTrainPred)
+    # fill list of callbacks
+    callbacks = ()
     if printevery is not None:
         if pbar:
-            kw = dict(
-                **kw, callback=make_tqdm_callback(mcmc_state, report_every=printevery)
-            )
+            callbacks += (make_tqdm_callback(mcmc_state, report_every=printevery),)
         else:
-            kw = dict(
-                **kw,
-                callback=make_print_callback(
+            callbacks += (
+                make_print_callback(
                     mcmc_state,
                     dot_every=None if printevery == 1 else 1,
                     report_every=printevery,
                 ),
             )
+    if check_platform is not None:
+        callbacks += (CheckPlatformCallback(check_platform),)
+
+    # prepare arguments
+    kw: dict = dict(
+        n_burn=n_burn,
+        n_skip=n_skip,
+        inner_loop_length=printevery,
+        callback=CallbackTuple(callbacks),
+    )
+    if precompute_predict_train:
+        kw = dict(**kw, main_trace_type=MainTraceWithTrainPred)
     kw = dict(kw, **run_mcmc_kw)
 
     return run_mcmc(key, mcmc_state, n_save, **kw)
@@ -1694,12 +1705,18 @@ def process_device_settings(
     num_chain_devices: int | None | Literal['auto'],
     num_data_devices: int | None,
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
-) -> tuple[DeviceKwArgs, Device | None]:
-    """Return the arguments for `mcmcstep.init` related to devices, and an optional device where to put the state."""
+) -> tuple[DeviceKwArgs, Device | None, Literal['cpu', 'gpu'] | None]:
+    """Return the arguments for `mcmcstep.init` related to devices, an optional device where to put the state, and the platform to check at runtime iff it was deduced."""
     # whether the user pinned a concrete pool of devices (vs. inheriting all of
     # the platform's devices); the auto chain sharding may not exceed that pool
     explicit_devices = devices is not None and not isinstance(devices, str)
+
+    # the platform is deduced (rather than fixed by the user) only when neither a
+    # device pool nor a platform string is passed
+    platform_deduced = devices is None
+
     platform, device, devices = _determine_devices(y_train, devices)
+    check_platform = platform if platform_deduced else None
     num_chain_devices = _determine_num_chain_devices(
         platform,
         num_chains,
@@ -1716,16 +1733,16 @@ def process_device_settings(
         num_chains=num_chains, mesh=mesh, leaf_dtype=dtype, prec_scale_dtype=dtype
     )
 
-    return settings, device
+    return settings, device, check_platform
 
 
 def _determine_devices(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
-) -> tuple[str, Device | None, Sequence[Device]]:
+) -> tuple[Literal['cpu', 'gpu'], Device | None, Sequence[Device]]:
     """Determine the target platform and set of devices for the MCMC, and possibly a single target device."""
     if isinstance(devices, str):
-        platform = devices
+        platform: Literal['cpu', 'gpu'] = devices  # ty:ignore[invalid-assignment]
         devices = jax.devices(platform)
         return platform, devices[0], devices
     elif devices is not None:

@@ -758,14 +758,15 @@ def init(
     num_trees: int,
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
     leaf_prior_cov_inv: FloatLike | Float[ArrayLike, 'k k'],
-    leaf_dtype: DTypeLike = jnp.float16,
-    prec_scale_dtype: DTypeLike = jnp.float16,
+    leaf_dtype: DTypeLike = jnp.float32,
+    prec_scale_dtype: DTypeLike = jnp.float32,
     resid_dtype: DTypeLike = jnp.float32,
     leaf_quantization: int | Integer[ArrayLike, ''] | None = None,
     error_cov_inv: Wishart | None = None,
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None = None,
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None = None,
     min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
+    min_points_per_leaf: int | Integer[ArrayLike, ''] | None = None,
     resid_reduction_config: ReductionConfig = AutoBatchedReduction(),
     count_reduction_config: ReductionConfig = AutoOneHotReduction(),
     prec_reduction_config: ReductionConfig = AutoOneHotReduction(),
@@ -773,7 +774,6 @@ def init(
     sequential_unroll: int | bool = 2,
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
-    min_points_per_leaf: int | Integer[ArrayLike, ''] | None = None,
     log_s: Float32[ArrayLike, ' p'] | None = None,
     theta: FloatLike | None = None,
     a: FloatLike | None = None,
@@ -861,6 +861,13 @@ def init(
     min_points_per_decision_node
         The minimum number of data points in a decision node. 0 if not
         specified.
+    min_points_per_leaf
+        The minimum number of datapoints in a leaf node. 0 if not specified.
+        Unlike `min_points_per_decision_node`, this constraint is not taken
+        into account in the proposal distribution because it would be expensive
+        to. This parameter is independent of `min_points_per_decision_node` and
+        there is no check that they are coherent. It makes sense to set
+        ``min_points_per_decision_node >= 2 * min_points_per_leaf``.
     resid_reduction_config
     count_reduction_config
     prec_reduction_config
@@ -882,14 +889,6 @@ def init(
     filter_splitless_vars
         The maximum number of variables without splits that can be ignored. If
         there are more, `init` raises an exception.
-    min_points_per_leaf
-        The minimum number of datapoints in a leaf node. 0 if not specified.
-        Unlike `min_points_per_decision_node`, this constraint is not taken into
-        account in the Metropolis-Hastings ratio because it would be expensive
-        to compute. Grow moves that would violate this constraint are vetoed.
-        This parameter is independent of `min_points_per_decision_node` and
-        there is no check that they are coherent. It makes sense to set
-        ``min_points_per_decision_node >= 2 * min_points_per_leaf``.
     log_s
         The logarithm of the prior probability for choosing a variable to split
         along in a decision rule, conditional on the ancestors. Not normalized.

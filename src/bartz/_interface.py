@@ -1427,12 +1427,8 @@ def _setup_mcmc(
     n_burn: int,
     mcmc_key: Key[Array, ''],
 ) -> tuple[State, Key[Array, ''], Device | None]:
-    p_nonterminal = make_p_nonterminal(maxdepth, base, power)
-
-    # resolve the sparsity prior hyperparameters
     theta, a, b, rho = _process_sparsity_settings(x_train, sparse)
 
-    # process device settings
     device_kw, device = process_device_settings(
         y_train, num_chains, num_chain_devices, num_data_devices, devices
     )
@@ -1446,10 +1442,11 @@ def _setup_mcmc(
         missing=missing,
         max_split=max_split,
         num_trees=num_trees,
-        p_nonterminal=p_nonterminal,
+        p_nonterminal=make_p_nonterminal(maxdepth, base, power),
         leaf_prior_cov_inv=leaf_prior_cov_inv,
         error_cov_inv=error_cov_inv,
         min_points_per_decision_node=10,
+        filter_splitless_vars=jnp.sum(max_split == 0).item() if rm_const else 0,
         log_s=process_varprob(varprob, max_split),
         theta=theta,
         a=a,
@@ -1460,11 +1457,7 @@ def _setup_mcmc(
         **device_kw,
     )
 
-    if rm_const:
-        n_empty = jnp.sum(max_split == 0).item()
-        kw.update(filter_splitless_vars=n_empty)
-
-    kw.update(init_kw)
+    kw = dict(kw, **init_kw)
 
     state = init(**kw)
 
@@ -1489,22 +1482,20 @@ def _run_mcmc(
     # prepare arguments
     kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
     if precompute_predict_train:
-        kw.update(main_trace_type=MainTraceWithTrainPred)
-    # `printevery=None` disables progress reporting entirely: no callback is
-    # installed, so the loop traces without any `debug.callback` effect (a tqdm
-    # bar would otherwise advance every iteration regardless of `printevery`).
+        kw = dict(**kw, main_trace_type=MainTraceWithTrainPred)
     if printevery is not None:
         if pbar:
-            kw.update(make_tqdm_callback(mcmc_state, report_every=printevery))
+            kw = dict(**kw, **make_tqdm_callback(mcmc_state, report_every=printevery))
         else:
-            kw.update(
-                make_print_callback(
+            kw = dict(
+                **kw,
+                **make_print_callback(
                     mcmc_state,
                     dot_every=None if printevery == 1 else 1,
                     report_every=printevery,
-                )
+                ),
             )
-    kw.update(run_mcmc_kw)
+    kw = dict(kw, **run_mcmc_kw)
 
     return run_mcmc(key, mcmc_state, n_save, **kw)
 
@@ -1691,10 +1682,12 @@ def points_per_node_distr_trace(
 class DeviceKwArgs(TypedDict):
     num_chains: int | None
     mesh: Mesh | None
+    leaf_dtype: DTypeLike
+    prec_scale_dtype: DTypeLike
 
 
 def process_device_settings(
-    y_train: Shaped[Array, '...'],
+    y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     num_chains: int | None,
     num_chain_devices: int | None | Literal['auto'],
     num_data_devices: int | None,
@@ -1716,13 +1709,16 @@ def process_device_settings(
     mesh, device = _determine_mesh(num_chain_devices, num_data_devices, device, devices)
 
     # prepare arguments to `init`
-    settings = DeviceKwArgs(num_chains=num_chains, mesh=mesh)
+    dtype = jnp.float16 if platform == 'gpu' else jnp.float32
+    settings = DeviceKwArgs(
+        num_chains=num_chains, mesh=mesh, leaf_dtype=dtype, prec_scale_dtype=dtype
+    )
 
     return settings, device
 
 
 def _determine_devices(
-    y_train: Shaped[Array, '...'],
+    y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
 ) -> tuple[str, Device | None, Sequence[Device]]:
     """Determine the target platform and set of devices for the MCMC, and possibly a single target device."""
@@ -1874,12 +1870,12 @@ def _determine_mesh(
     num_data_devices: int | None,
     device: Device | None,
     devices: Sequence[Device],
-) -> tuple[Mesh | None, Device | None]:
+) -> tuple[Mesh, None] | tuple[None, Device | None]:
     """Create a jax device mesh for `mcmcstep.init()`."""
     if num_chain_devices is None and num_data_devices is None:
         return None, device
     else:
-        mesh = dict()
+        mesh = {}
         if num_chain_devices is not None:
             mesh.update(chains=num_chain_devices)
         if num_data_devices is not None:

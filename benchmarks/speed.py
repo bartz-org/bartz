@@ -32,9 +32,9 @@ from functools import partial
 from inspect import signature
 from io import StringIO
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, TypeAlias
 
-from equinox import Module, error_if
+from equinox import Module, error_if, field
 from jax import (
     block_until_ready,
     clear_caches,
@@ -73,6 +73,18 @@ else:
         # until simple_init unpacks them by item access for older versions;
         # unlike a typed stand-in it errors loudly if passed to bartz by mistake.
         Wishart = dict
+
+# WORKAROUND(bartz<0.12.0): the `Callback` Module base class was added in
+# 0.12.0; before, `Callback` was missing (<0.7.0) or a `typing.Protocol`
+# (0.7.0-0.11.x) that can't be used as a concrete base. Those versions accept
+# any callable, so a `Module` subclass defining `__call__` works with them.
+try:
+    from bartz.mcmcloop import Callback
+except ImportError:
+    Callback: TypeAlias = Module
+else:
+    if not issubclass(Callback, Module):
+        Callback: TypeAlias = Module
 
 try:
     from bartz.BART import mc_gbart as gbart
@@ -685,9 +697,7 @@ class BaseRunMcmc(AutoParamNames):
             n_save=NITERS,
             n_burn=0,
             n_skip=1,
-            callback=partial(
-                kill_callback, canary=self.kill_canary, kill_niters=kill_niters
-            ),
+            callback=KillCallback(self.kill_canary, kill_niters),
         )
         kw.update(kwargs)
 
@@ -760,42 +770,43 @@ class BaseRunMcmc(AutoParamNames):
                 raise RuntimeError(msg)
 
 
-def kill_callback(
-    *,
-    canary: str,
-    kill_niters: int | None,
-    i_total: Integer[Array, ''],
-    bart: State | None = None,
-    state: State | None = None,
-    **_: Any,
-) -> None:
-    """Throw error `canary` after `kill_niters` in `run_mcmc`.
+class KillCallback(Callback):
+    """Throw error `canary` after `kill_niters` in `run_mcmc`."""
 
-    Partially evaluate `kill_callback` on the first two arguments before
-    passing it to `run_mcmc`.
-    """
-    if kill_niters is None:
-        return
-    # WORKAROUND(bartz<0.11.0): the callback's `bart` argument was renamed `state`
-    state = bart if state is None else state
-    assert state is not None  # run_mcmc always passes one of bart/state
-    # error_cov_inv is one of the last things modified in the mcmc loop, so
-    # using it as token ensures ordering; also it does not have n in the
-    # dimensionality.
-    if isinstance(state, dict):
-        # WORKAROUND(bartz<0.6.0): pre-0.6.0 state was a dict keyed by 'sigma2'
-        token = state['sigma2']  # ty: ignore[invalid-argument-type]
-    elif hasattr(state, 'sigma2'):
-        # WORKAROUND(bartz<0.8.0): State.sigma2 was renamed to error_cov_inv in 0.8.0
-        token = state.sigma2
-    else:
-        token = state.error_cov_inv
-        # WORKAROUND(bartz<0.11.0): error_cov_inv became a Wishart wrapper in
-        # 0.11.0; the sampled precision moved to its `.value` attribute
-        token = getattr(token, 'value', token)
-    stop = i_total + 1 == kill_niters  # i_total is updated after callback
-    token = error_if(token, stop, canary)
-    debug.callback(lambda _token: None, token)  # to avoid DCE
+    canary: str = field(static=True)
+    kill_niters: int | None = field(static=True)
+
+    def __call__(
+        self,
+        *,
+        i_total: Integer[Array, ''],
+        bart: State | None = None,
+        state: State | None = None,
+        **_: Any,
+    ) -> None:
+        """Inject the error into the MCMC iteration."""
+        if self.kill_niters is None:
+            return
+        # WORKAROUND(bartz<0.11.0): the callback's `bart` argument was renamed `state`
+        state = bart if state is None else state
+        assert state is not None  # run_mcmc always passes one of bart/state
+        # error_cov_inv is one of the last things modified in the mcmc loop, so
+        # using it as token ensures ordering; also it does not have n in the
+        # dimensionality.
+        if isinstance(state, dict):
+            # WORKAROUND(bartz<0.6.0): pre-0.6.0 state was a dict keyed by 'sigma2'
+            token = state['sigma2']  # ty: ignore[invalid-argument-type]
+        elif hasattr(state, 'sigma2'):
+            # WORKAROUND(bartz<0.8.0): State.sigma2 was renamed to error_cov_inv in 0.8.0
+            token = state.sigma2
+        else:
+            token = state.error_cov_inv
+            # WORKAROUND(bartz<0.11.0): error_cov_inv became a Wishart wrapper in
+            # 0.11.0; the sampled precision moved to its `.value` attribute
+            token = getattr(token, 'value', token)
+        stop = i_total + 1 == self.kill_niters  # i_total is updated after callback
+        token = error_if(token, stop, self.canary)
+        debug.callback(lambda _token: None, token)  # to avoid DCE
 
 
 def detect_zero_division_error_bug(kw: dict) -> None:

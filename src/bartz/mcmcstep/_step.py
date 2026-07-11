@@ -53,6 +53,7 @@ from bartz.mcmcstep._state import (
     State,
     StepConfig,
     _round_to_pow2,
+    _scaled_error_cov_inv,
     chol_with_gersh,
     shard_map_state,
     split_key_for_chains,
@@ -425,11 +426,15 @@ def accept_moves_parallel_stage(
         ),
     )
 
+    # `prec_trees` and the per-leaf residual sums are in stored `prec_scale`
+    # units, so their common `inv_sdev_unit ** 2` factor is folded into the
+    # error precision once here instead
+    error_cov_inv = _scaled_error_cov_inv(state)
     prelf = precompute_leaf_terms(
-        key, prec_trees, state.error_cov_inv.value, state.forest.leaf_prior_cov_inv
+        key, prec_trees, error_cov_inv, state.forest.leaf_prior_cov_inv
     )
     prelkv = precompute_likelihood_terms(
-        state.error_cov_inv.value, state.forest.leaf_prior_cov_inv, prelf, moves
+        error_cov_inv, state.forest.leaf_prior_cov_inv, prelf, moves
     )
 
     return ParallelStageOut(
@@ -897,8 +902,9 @@ def precompute_leaf_terms(
         The likelihood precision scale in each potential or actual leaf node.
     error_cov_inv
         The inverse error variance (univariate) or the inverse of error
-        covariance matrix (multivariate). For univariate case, this is the
-        inverse global error variance factor if `prec_scale` is set.
+        covariance matrix (multivariate). If `prec_scale` is set, this is the
+        global error precision factor, with the squared weight unit folded in
+        (see `bartz.mcmcstep.State.inv_sdev_unit`).
     leaf_prior_cov_inv
         The inverse prior variance of each leaf (univariate) or the inverse of
         prior covariance matrix of each leaf (multivariate).
@@ -996,8 +1002,9 @@ def precompute_likelihood_terms(
     ----------
     error_cov_inv
         The inverse error variance (univariate) or the inverse of the error
-        covariance matrix (multivariate). This is the inverse global error
-        variance factor if `prec_scale` is set.
+        covariance matrix (multivariate). If `prec_scale` is set, this is the
+        global error precision factor, with the squared weight unit folded in
+        (see `bartz.mcmcstep.State.inv_sdev_unit`).
     leaf_prior_cov_inv
         The inverse prior variance of each leaf (univariate) or the inverse of
         prior covariance matrix of each leaf (multivariate).
@@ -1065,7 +1072,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
                 pso.state.config.data_sharded,
                 pso.state.prec_scale,
                 pso.state.forest.log_likelihood is not None,
-                pso.state.error_cov_inv.value
+                _scaled_error_cov_inv(pso.state)
                 if isinstance(pso.prelf, PreLfMVHet)
                 else None,
                 pso.state.forest.leaf_scale,
@@ -1119,9 +1126,10 @@ class SeqStageInAllTrees(Module):
     """Whether to save the acceptance ratios."""
 
     error_cov_inv: Float32[Array, 'k k'] | None
-    """The global error precision scale. Set only in the multivariate
-    vector-weight case, where the sequential stage needs it to compute the
-    leaf scores."""
+    """The global error precision scale, with the squared weight unit folded
+    in (see `bartz.mcmcstep.State.inv_sdev_unit`). Set only in the
+    multivariate vector-weight case, where the sequential stage needs it to
+    compute the leaf scores."""
 
     leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
     """The scale of the stored leaf values, see `bartz.mcmcstep.Forest.leaf_scale`."""
@@ -1230,7 +1238,9 @@ def accept_move_and_sample_leaves(
 
     # the residuals are stored and reduced in units of `resid_scale` (and a
     # possibly narrow dtype) for bandwidth; the float32 per-leaf sums are scaled
-    # back to data units here, after the reduction and before everything else
+    # back to data units here, after the reduction and before everything else.
+    # when weighted, the sums keep the stored `prec_scale` units, whose
+    # `inv_sdev_unit ** 2` factor is folded into the error precision instead
     resid_tree *= at.resid_scale[..., None]
 
     # convert the starting tree to data units; multiplying by the float32
@@ -1402,8 +1412,9 @@ def compute_likelihood_ratio(
         The pre-computed terms of the likelihood ratio, see
         `precompute_likelihood_terms`.
     error_cov_inv
-        The global error precision scale. Set only in the multivariate
-        vector-weight case.
+        The global error precision scale, with the squared weight unit folded
+        in (see `bartz.mcmcstep.State.inv_sdev_unit`). Set only in the
+        multivariate vector-weight case.
 
     Returns
     -------
@@ -1648,9 +1659,13 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
         # 2-D inv_sdev_scale dispatches to the diagonal path, so here it is 1-D
         resid *= state.inv_sdev_scale
     df_post = state.error_cov_inv.nu + state.n_non_missing
+    # scale of the stored weighted residuals: `resid` is in `resid_scale`
+    # units and `inv_sdev_scale` in `inv_sdev_unit` units (a scalar here,
+    # matching the 1-D `inv_sdev_scale`; 1 without weights)
+    scale = state.resid_scale * state.inv_sdev_unit
     rrt = jnp.einsum(
         'an,bn->ab', resid, resid, preferred_element_type=jnp.float32
-    ) * jnp.outer(state.resid_scale, state.resid_scale)
+    ) * jnp.outer(scale, scale)
     if state.config.data_sharded:
         rrt = lax.psum(rrt, 'data')
     scale_post = state.error_cov_inv.rate + rrt
@@ -1675,10 +1690,11 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     # alpha
     alpha = state.error_cov_inv.nu / 2 + state.n_non_missing / 2
 
-    # beta
+    # beta; `resid` is stored in `resid_scale` units and `inv_sdev_scale` in
+    # `inv_sdev_unit` units (1 without weights)
     norm2 = jnp.einsum(
         '...n,...n->...', resid, resid, preferred_element_type=jnp.float32
-    ) * jnp.square(state.resid_scale)
+    ) * jnp.square(state.resid_scale * state.inv_sdev_unit)
     if state.config.data_sharded:
         norm2 = lax.psum(norm2, 'data')
     scale = state.error_cov_inv.rate
@@ -1732,6 +1748,7 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     assert state.z is not None
 
     inv_sdev = state.inv_sdev_scale
+    inv_sdev_unit = state.inv_sdev_unit
     err_scale = state.error_scale
     if state.binary_indices is not None:
         resid_scale = state.resid_scale[state.binary_indices]
@@ -1741,6 +1758,7 @@ def step_z(key: Key[Array, ''], state: State) -> State:
         # a scalar-per-datapoint scale (1-D) is shared and broadcasts as-is
         if inv_sdev is not None and inv_sdev.ndim > 1:
             inv_sdev = inv_sdev[state.binary_indices, :]
+            inv_sdev_unit = inv_sdev_unit[state.binary_indices]
         if err_scale is not None and err_scale.ndim > 1:
             err_scale = err_scale[state.binary_indices, :]
     else:
@@ -1765,8 +1783,9 @@ def step_z(key: Key[Array, ''], state: State) -> State:
         assert inv_sdev is not None  # weights imply the derived scales exist
         # masked datapoints draw garbage, but every consumer of `resid` weights
         # it by the (zero) scale, so the value is irrelevant as long as finite.
+        # `inv_sdev` is stored in units of `inv_sdev_unit`
         resid = err_scale * truncated_normal_onesided(
-            key, (), ~binary_y, -trees_plus_offset * inv_sdev
+            key, (), ~binary_y, -trees_plus_offset * inv_sdev * inv_sdev_unit[..., None]
         )
     z = trees_plus_offset + resid
 

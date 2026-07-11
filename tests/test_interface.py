@@ -1366,6 +1366,51 @@ def test_leaf_scale(bkw: BartKW) -> None:
     assert_array_equal(forest.leaf_scale, pow2)
 
 
+def test_inv_sdev_unit(bkw: BartKW) -> None:
+    """`inv_sdev_unit` is the rms of the reciprocal weights, rounded to a power of two."""
+    state = Bart(**bkw.kw)._mcmc_state
+
+    assert state.inv_sdev_unit.dtype == jnp.float32
+
+    # exactly a power of two: rounding the log2 back is a no-op
+    pow2 = 2 ** jnp.round(jnp.log2(state.inv_sdev_unit))
+    assert_array_equal(state.inv_sdev_unit, pow2)
+
+    if state.inv_sdev_scale is None:
+        assert_array_equal(state.inv_sdev_unit, jnp.ones(()))
+    else:
+        stored = state.inv_sdev_scale.astype(jnp.float32)
+        rtol = condf(state.inv_sdev_scale, 1e-6, 1e-3)
+
+        # the unit times the stored values reconstructs the reciprocal weights,
+        # zeroed at masked datapoints
+        inv_sdev = state.inv_sdev_unit[..., None] * stored
+        scale = jnp.ones(()) if state.error_scale is None else state.error_scale
+        expected = jnp.where(stored != 0, jnp.reciprocal(scale), 0.0)
+        expected = jnp.broadcast_to(expected, inv_sdev.shape)
+        assert_close_matrices(inv_sdev, expected, rtol=rtol, reduce_rank=True)
+
+        # the unit is the rms of the reciprocal weights over non-missing
+        # datapoints, so the stored mean square lands within the pow2 bracket
+        ms = jnp.sum(jnp.square(stored), axis=-1)
+        ms = ms / jnp.maximum(jnp.sum(stored != 0, axis=-1), 1)
+        assert jnp.all((ms > 0.5 * (1 - 1e-3)) & (ms < 2.0 * (1 + 1e-3)))
+
+        # prec_scale is the square (per-component outer product) of the stored
+        # reciprocal weights, in the same units
+        prec_scale = nnone(state.prec_scale).astype(jnp.float32)
+        if prec_scale.ndim == stored.ndim:
+            expected_prec = jnp.square(stored)
+        else:
+            expected_prec = jnp.einsum('an,bn->abn', stored, stored)
+        assert_close_matrices(
+            prec_scale,
+            expected_prec,
+            rtol=condf(prec_scale, 1e-6, 1e-3),
+            reduce_rank=True,
+        )
+
+
 def test_float16_close_to_float32(bkw: BartKW) -> None:
     """float16 leaf storage tracks float32 within float16 precision.
 
@@ -1443,7 +1488,8 @@ def test_resid_eff_scale(bkw: BartKW) -> None:
         if state.inv_sdev_scale is None:  # pragma: no cover, weighted by default
             n_eff = resid.shape[-1]
         else:
-            resid = resid * state.inv_sdev_scale
+            # `inv_sdev_scale` is stored in units of `inv_sdev_unit`
+            resid = resid * state.inv_sdev_scale * state.inv_sdev_unit[..., None]
             n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
         rms = jnp.sqrt(jnp.sum(jnp.square(resid), axis=-1) / n_eff)
         # `resid_eff_scale` is this rms rounded to a power of two, but

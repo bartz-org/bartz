@@ -28,7 +28,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial, wraps
-from typing import Literal, TypedDict, TypeVar, cast
+from typing import Literal, NamedTuple, TypedDict, TypeVar, cast
 
 import jax
 import numpy
@@ -256,10 +256,11 @@ class Forest(Module):
         | Float32[Array, '*chains num_trees k k 2*half_tree_size']
         | None
     ) = field(chains=CHAIN_AXIS)
-    """The likelihood precision scale summed over the datapoints in each leaf.
-    Valid at the leaves and at the nodes involved in the latest moves, dirty
-    elsewhere. `None` if the error precision is not weighted, in which case
-    `count_tree` takes its place."""
+    """The likelihood precision scale summed over the datapoints in each leaf,
+    in the stored units of `State.prec_scale` (i.e., ``State.inv_sdev_unit **
+    2``). Valid at the leaves and at the nodes involved in the latest moves,
+    dirty elsewhere. `None` if the error precision is not weighted, in which
+    case `count_tree` takes its place."""
 
     min_points_per_decision_node: Int32[Array, ''] | None
     """The minimum number of data points in a decision node."""
@@ -429,19 +430,27 @@ class State(Module):
     prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None = field(data=-1)
     """The scale on the error precision, derived from `error_scale` and the
     missingness mask. `None` if fit without weights or a missingness mask. With
-    scalar per-datapoint weights, shape ``(n,)`` and value ``1 / error_scale ** 2``.
-    With vector per-datapoint weights, shape ``(k, k, n)`` and value
-    ``1 / outer(error_scale, error_scale)`` repeated over datapoints.
-    The error precision is ``prec_scale * error_cov_inv``, so the scale lives in
-    `error_cov_inv` and this is an O(1) relative weight; its dtype may be
-    narrower than float32 (see `init`'s ``prec_scale_dtype``)."""
+    scalar per-datapoint weights, shape ``(n,)``; with vector per-datapoint
+    weights, shape ``(k, k, n)``. Stored in units of ``inv_sdev_unit ** 2``
+    (elementwise ``outer(inv_sdev_unit, inv_sdev_unit)`` in the vector case),
+    which makes it O(1) on average whatever the magnitude of `error_scale`, so
+    it does not over/underflow the narrow dtypes allowed by `init`'s
+    ``prec_scale_dtype``. The error precision in data units is
+    ``inv_sdev_unit ** 2 * prec_scale * error_cov_inv``."""
 
     inv_sdev_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None = field(data=-1)
-    """The reciprocal of the per-observation error scale, zeroed at masked
-    datapoints. `None` if fit without weights or a missingness mask. Shape
-    ``(n,)`` for scalar weights, or ``(k, n)`` for per-component vector weights.
-    Like `prec_scale`, its dtype may be narrower than float32 (see `init`'s
-    ``prec_scale_dtype``)."""
+    """The reciprocal of the per-observation error scale in units of
+    `inv_sdev_unit`, zeroed at masked datapoints. `None` if fit without weights
+    or a missingness mask. Shape ``(n,)`` for scalar weights, or ``(k, n)`` for
+    per-component vector weights. Like `prec_scale`, its dtype may be narrower
+    than float32 (see `init`'s ``prec_scale_dtype``)."""
+
+    inv_sdev_unit: Float32[Array, ''] | Float32[Array, ' k']
+    """The scale of `inv_sdev_scale`: the reciprocal error scale in data units
+    is ``inv_sdev_unit * inv_sdev_scale``. Set to the root mean square of
+    ``1 / error_scale`` over non-missing datapoints (per component for vector
+    weights), rounded to a power of two so the conversion to and from data
+    units is exact; 1 if fit without weights. Constant along the MCMC."""
 
     n_non_missing: Int32[Array, ''] | Int32[Array, ' k']
     """The number of non-missing datapoints, ``(k,)`` per outcome component when
@@ -513,8 +522,9 @@ class State(Module):
             managed_quantum = eps_resid * eff_scale * 2.0**q
             resolution = jnp.maximum(managed_quantum, dtype_quantum)
 
-            # determine average error precision
-            prec = self.error_cov_inv.value
+            # determine average error precision; the folded weight unit puts
+            # the stored `prec_scale` mean in data units
+            prec = _scaled_error_cov_inv(self)
             n_eff = jnp.maximum(self.n_non_missing, 1)
             if self.prec_scale is not None:
                 prec *= self.prec_scale.sum(axis=-1, dtype=jnp.float32) / n_eff
@@ -822,7 +832,11 @@ def init(
     prec_scale_dtype
         Dtype used to store quantities derived from error weights,
         `State.prec_scale` and `State.inv_sdev_scale`. Note `State.error_scale`
-        is always float32 instead.
+        is always float32 instead. The stored values are normalized by the
+        root mean square of ``1 / error_scale`` (see `State.inv_sdev_unit`),
+        so the overall magnitude of `error_scale` cannot over/underflow a
+        narrow dtype; a very large dynamic range of the weights (beyond a few
+        orders of magnitude in float16) still can.
     resid_dtype
         Dtype used to store the running residuals (`State.resid`). The
         residuals are stored in scaled units to avoid under/overflow with short
@@ -1045,12 +1059,13 @@ def init(
             ),
             # `error_scale` goes straight to its field; `missing` is parked in the
             # `inv_sdev_scale` slot so it gets sharded with everything else.
-            # `_compute_scales` derives `prec_scale` and `inv_sdev_scale` post-shard.
+            # `_compute_weights` derives `prec_scale` and `inv_sdev_scale` post-shard.
             error_scale=error_scale,
             prec_scale=None,
             inv_sdev_scale=missing,
-            # invalid placeholders; the true values are set post-shard, once
-            # `inv_sdev_scale` is computed, by `_count_datapoints`
+            # invalid placeholders; the true values are set post-shard by
+            # `_compute_weights`
+            inv_sdev_unit=cast(Array, None),
             n_non_missing=cast(Array, None),
             sum_diag_prec_scale=cast(Array, None),
             forest=Forest(
@@ -1138,22 +1153,22 @@ def init(
                 state, y=_sanitize_y(state.y, state.inv_sdev_scale, state.forest.offset)
             )
 
-        # derive prec_scale and inv_sdev_scale after sharding to do the
-        # calculation on the right devices. `state.error_scale` already holds the
-        # sharded user-supplied scale and `state.inv_sdev_scale` holds the parked
-        # `missing` mask. `_compute_scales` does not donate `error_scale`, so it
-        # stays in place; the derived scales fold in the mask, the raw scale does not.
-        if state.error_scale is not None or state.inv_sdev_scale is not None:
-            inv_sdev_scale, prec_scale = _compute_scales(
-                state.error_scale, state.inv_sdev_scale, storage.prec_scale_dtype
-            )
-            state = replace(state, inv_sdev_scale=inv_sdev_scale, prec_scale=prec_scale)
-
-        # count non-missing datapoints and sum their precision scales once, from
-        # the final `inv_sdev_scale`; these are constant along the MCMC
-        n_non_missing, sum_diag_prec_scale = _count_datapoints(state.inv_sdev_scale, n)
+        # derive the weight arrays and their constant summaries after sharding
+        # to do the calculation on the right devices. `state.error_scale`
+        # already holds the sharded user-supplied scale and
+        # `state.inv_sdev_scale` holds the parked `missing` mask.
+        # `_compute_weights` does not donate `error_scale`, so it stays in
+        # place; the derived scales fold in the mask, the raw scale does not.
+        weights = _compute_weights(
+            state.error_scale, state.inv_sdev_scale, storage.prec_scale_dtype, n
+        )
         state = replace(
-            state, n_non_missing=n_non_missing, sum_diag_prec_scale=sum_diag_prec_scale
+            state,
+            prec_scale=weights.prec_scale,
+            inv_sdev_scale=weights.inv_sdev_scale,
+            inv_sdev_unit=weights.inv_sdev_unit,
+            n_non_missing=weights.n_non_missing,
+            sum_diag_prec_scale=weights.sum_diag_prec_scale,
         )
 
         # calculate initial resid in the continuous outcome case, such that y
@@ -1213,6 +1228,27 @@ def _round_to_pow2(
     """Round to the nearest power of two."""
     # note: don't use exp2, not exact. `2 ** x` checked exact on cpu & cuda.
     return 2 ** jnp.round(jnp.log2(x))
+
+
+def _scaled_error_cov_inv(
+    state: 'State',
+) -> Float32[Array, '*chains'] | Float32[Array, '*chains k k']:
+    """Return the error precision with the squared weight unit folded in.
+
+    `State.prec_scale` and everything summed from it (`Forest.prec_tree`, the
+    per-leaf weighted residual sums) are stored in units of
+    ``State.inv_sdev_unit ** 2``, so their products with this scaled precision
+    are in data units. Returns ``error_cov_inv.value`` as-is when there are no
+    weights.
+    """
+    value = state.error_cov_inv.value
+    unit = state.inv_sdev_unit
+    if state.prec_scale is None:
+        return value
+    elif unit.ndim:
+        return value * (unit[:, None] * unit[None, :])
+    else:
+        return value * jnp.square(unit)
 
 
 @dataclass(frozen=True)
@@ -1390,54 +1426,74 @@ def _sanitize_y(
     return jnp.where(missing, offset[..., None], y)
 
 
-@jit(donate_argnums=(1,), static_argnums=2)
-def _compute_scales(
+class _Weights(NamedTuple):
+    """Output of `_compute_weights`."""
+
+    inv_sdev_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None
+    inv_sdev_unit: Float32[Array, ''] | Float32[Array, ' k']
+    n_non_missing: Int32[Array, ''] | Int32[Array, ' k']
+    sum_diag_prec_scale: Float32[Array, ''] | Float32[Array, ' k']
+
+
+@jit(donate_argnums=(1,), static_argnums=(2, 3))
+def _compute_weights(
     error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
     prec_scale_dtype: DTypeLike,
-) -> tuple[
-    Float[Array, ' n'] | Float[Array, 'k n'], Float[Array, ' n'] | Float[Array, 'k k n']
-]:
-    """Compute ``inv_sdev_scale`` and ``prec_scale``.
+    n: int,
+) -> _Weights:
+    """Compute the stored weight arrays and their constant summaries.
 
-    A separate function to donate `missing` and avoid intermediate copies;
-    `error_scale` is not donated so the caller can keep it as ``State.error_scale``.
-    At least one of `error_scale` and `missing` must be non-None. Both outputs
-    are cast to `prec_scale_dtype` for storage; the squaring that forms
-    `prec_scale` happens in float32 first.
+    The reciprocal error scale is computed in float32 and masked to zero at
+    missing datapoints; its root mean square over non-missing datapoints,
+    rounded to a power of two, is factored out as `State.inv_sdev_unit` before
+    casting the normalized values to `prec_scale_dtype` for storage, so
+    ``inv_sdev_scale`` and ``prec_scale`` are O(1) on average whatever the
+    magnitude of `error_scale`. `missing` is donated to avoid intermediate
+    copies; `error_scale` is not, so the caller can keep it as
+    ``State.error_scale``.
     """
+    if error_scale is None and missing is None:
+        n_non_missing = jnp.full((), n)
+        return _Weights(
+            inv_sdev_scale=None,
+            prec_scale=None,
+            inv_sdev_unit=jnp.float32(1.0),
+            n_non_missing=n_non_missing,
+            sum_diag_prec_scale=n_non_missing.astype(jnp.float32),
+        )
+
     if error_scale is None:
         inv_sdev_scale = jnp.array(1.0)
     else:
         inv_sdev_scale = jnp.reciprocal(error_scale)
     if missing is not None:
         inv_sdev_scale = jnp.where(missing, 0.0, inv_sdev_scale)
+
+    # summaries of the values in data units, constant along the MCMC
+    n_non_missing = jnp.sum(inv_sdev_scale != 0, axis=-1)
+    sum_diag_prec_scale = jnp.einsum('...n,...n->...', inv_sdev_scale, inv_sdev_scale)
+
+    # factor out the rms as the storage unit, exactly since it's a power of
+    # two; degenerate weights (all masked, or zero/non-finite scales) leave
+    # the unit at 1
+    unit = _round_to_pow2(jnp.sqrt(sum_diag_prec_scale / jnp.maximum(n_non_missing, 1)))
+    unit = jnp.where(jnp.isfinite(unit) & (unit > 0), unit, 1.0)
+    inv_sdev_scale = inv_sdev_scale / unit[..., None]
+
+    # the squaring that forms prec_scale happens in float32, before the cast
     if inv_sdev_scale.ndim == 1:
         prec_scale = jnp.square(inv_sdev_scale)
     else:
         prec_scale = jnp.einsum('an,bn->abn', inv_sdev_scale, inv_sdev_scale)
-    return inv_sdev_scale.astype(prec_scale_dtype), prec_scale.astype(prec_scale_dtype)
-
-
-@jit
-def _count_datapoints(
-    inv_sdev_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None, n: int
-) -> tuple[
-    Int32[Array, ''] | Int32[Array, ' k'], Float32[Array, ''] | Float32[Array, ' k']
-]:
-    """Count non-missing datapoints and sum their precision scales."""
-    if inv_sdev_scale is None:
-        n_non_missing = jnp.full((), n)
-        sum_diag_prec_scale = n_non_missing.astype(jnp.float32)
-    else:
-        n_non_missing = jnp.sum(inv_sdev_scale != 0, axis=-1)
-        sum_diag_prec_scale = jnp.einsum(
-            '...n,...n->...',
-            inv_sdev_scale,
-            inv_sdev_scale,
-            preferred_element_type=jnp.float32,
-        )
-    return n_non_missing, sum_diag_prec_scale
+    return _Weights(
+        inv_sdev_scale=inv_sdev_scale.astype(prec_scale_dtype),
+        prec_scale=prec_scale.astype(prec_scale_dtype),
+        inv_sdev_unit=unit,
+        n_non_missing=n_non_missing,
+        sum_diag_prec_scale=sum_diag_prec_scale,
+    )
 
 
 def _get_blocked_vars(

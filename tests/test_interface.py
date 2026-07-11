@@ -2731,14 +2731,8 @@ def test_no_recompilation_no_tracing(bkw: BartKW) -> None:
     kw: kwdict = dict(
         bkw.kw,
         # no callback because all our callbacks use `jax.debug.callback` which
-        # blocks the jit fast path which `no_tracing` counts as tracing;
-        # a single inner loop invocation because with sharded (mesh) states,
-        # iterating the inner loop misses the C++ pjit fastpath cache once on
-        # the first fastpath-produced carry (a jax quirk), which `no_tracing`
-        # counts as tracing even though the trace cache hits
-        run_mcmc_kw=dict(
-            bkw.kw.get('run_mcmc_kw', {}), callback=None, inner_loop_length=None
-        ),
+        # blocks the jit fast path which `no_tracing` counts as tracing
+        run_mcmc_kw=dict(bkw.kw.get('run_mcmc_kw', {}), callback=None),
     )
 
     # use OriginalBart because the test wrapper's `_check_replicated_trees`

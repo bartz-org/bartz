@@ -25,7 +25,7 @@
 """Implement `run_mcmc`, the MCMC loop driver."""
 
 from abc import abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Hashable
 from functools import partial, update_wrapper
 from typing import Any, Generic, NamedTuple, TypeVar
 
@@ -42,7 +42,7 @@ from jax import (
 )
 from jax import numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
-from jaxtyping import Array, Bool, Int32, Key, PyTree, Shaped
+from jaxtyping import Array, Bool, Int32, Key, PyTree, Shaped, UInt32
 
 from bartz._jaxext import jit, jit_active, split
 from bartz.mcmcloop._trace import BurninTrace, MainTrace, Trace
@@ -132,7 +132,7 @@ class _Carry(Module):
 
     state: State
     i_total: Int32[Array, '']
-    key: Key[Array, '']
+    key_data: UInt32[Array, ' key_size']
     burnin_trace: Trace
     main_trace: Trace
     callback: Callback | None
@@ -206,8 +206,10 @@ def run_mcmc(
     a new call continues the run as if it had not stopped, so splitting a run
     into several consecutive calls gives the same result as a single call.
     """
-    # copy the key so buffer donation does not invalidate the caller's copy
-    key = jnp.copy(key)
+    # unwrap key to work around jax issue #39089
+    # WORKAROUND(jax<0.11): we guess this bug may be fixed before the 0.11 release
+    key_impl = random.key_impl(key)
+    key_data = jnp.copy(random.key_data(key))
 
     # create empty traces
     burnin_trace = _empty_trace(n_burn, state, burnin_trace_type)
@@ -237,7 +239,7 @@ def run_mcmc(
     carry = _Carry(
         state,
         replicate(jnp.int32(0)),
-        replicate(key),
+        replicate(key_data),
         burnin_trace,
         main_trace,
         callback,
@@ -254,6 +256,7 @@ def run_mcmc(
             n_iters,
             burnin_trace_type,
             main_trace_type,
+            key_impl,
         )
 
     return RunMCMCResult(carry.state, carry.burnin_trace, carry.main_trace)  # ty: ignore[invalid-argument-type]
@@ -321,6 +324,7 @@ def _run_mcmc_inner_loop_impl(
     n_iters: Int32[Array, ''],
     burnin_trace_type: type[Trace],
     main_trace_type: type[Trace],
+    key_impl: Hashable,
 ) -> _Carry:
     # determine number of iterations for this loop batch
     i_upper = jnp.minimum(carry.i_total + inner_loop_length, n_iters)
@@ -331,7 +335,8 @@ def _run_mcmc_inner_loop_impl(
 
     def body(carry: _Carry) -> _Carry:
         """Update the MCMC state."""
-        iter_key = random.fold_in(carry.key, carry.state.config.steps_done)
+        key = random.wrap_key_data(carry.key_data, impl=key_impl)
+        iter_key = random.fold_in(key, carry.state.config.steps_done)
         keys = split(iter_key, 2)
 
         # update state
@@ -369,7 +374,7 @@ def _run_mcmc_inner_loop_impl(
         return _Carry(
             state=state,
             i_total=carry.i_total + 1,
-            key=carry.key,
+            key_data=carry.key_data,
             burnin_trace=burnin_trace,
             main_trace=main_trace,
             callback=callback,
@@ -382,7 +387,7 @@ def _run_mcmc_inner_loop_impl(
 # so `run_mcmc` can reset it directly instead of reaching into jit internals,
 # then jit the wrapped callable.
 _inner_loop_counter: _CallCounter[_Carry] = _CallCounter(_run_mcmc_inner_loop_impl)
-_run_mcmc_inner_loop = jit(donate_argnums=(0,), static_argnums=(7, 8))(
+_run_mcmc_inner_loop = jit(donate_argnums=(0,), static_argnums=(7, 8, 9))(
     _inner_loop_counter
 )
 

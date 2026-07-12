@@ -135,7 +135,7 @@ class MainTrace(BurninTrace):
         Float[Array, '*chains_and_samples num_trees tree_size']
         | Float[Array, '*chains_and_samples num_trees k tree_size']
     ) = field(chains=CHAIN_AXIS, samples=0)
-    """The leaf values, in units of `leaf_scale`."""
+    """The leaf values, in units of `leaf_unit`."""
 
     var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2'] = field(
         chains=CHAIN_AXIS, samples=0
@@ -150,9 +150,9 @@ class MainTrace(BurninTrace):
     offset: Float32[Array, ''] | Float32[Array, ' k']
     """Constant shift added to the scaled sum of trees."""
 
-    leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
-    """The scale of the leaf values. Predictions are
-    ``offset + leaf_scale * (sum of leaf values over trees)``."""
+    leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
+    """The storage unit of the leaf values. Predictions are
+    ``offset + leaf_unit * (sum of leaf values over trees)``."""
 
     varprob: Float32[Array, '*chains_and_samples p'] | None = field(
         chains=CHAIN_AXIS, samples=0
@@ -180,7 +180,7 @@ class MainTrace(BurninTrace):
             var_tree=state.forest.var_tree,
             split_tree=state.forest.split_tree,
             offset=state.forest.offset,
-            leaf_scale=state.forest.leaf_scale,
+            leaf_unit=state.forest.leaf_unit,
             varprob=varprob,
             **vars(BurninTrace.from_state(state)),
         )
@@ -190,7 +190,7 @@ class MainTraceWithTrainPred(MainTrace):
     """Main trace that also stores the latent predictions at the training points.
 
     Computed cheaply from the running `State.resid` (as ``ref - resid *
-    resid_scale``, with ``ref`` the response `y` or the binary latent `z`), so
+    resid_unit``, with ``ref`` the response `y` or the binary latent `z`), so
     `bartz.Bart.predict` can return them without re-evaluating the trees.
     """
 
@@ -204,7 +204,7 @@ class MainTraceWithTrainPred(MainTrace):
     @classmethod
     def from_state(cls, state: State) -> 'MainTraceWithTrainPred':
         """Create a single-item main trace with train predictions from a MCMC state."""
-        resid = state.resid * state.resid_scale[..., None]
+        resid = state.resid * state.resid_unit[..., None]
         if state.z is None:
             ref = state.y
         elif state.binary_indices is None:

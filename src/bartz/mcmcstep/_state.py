@@ -194,17 +194,17 @@ class Forest(Module):
         Float[Array, '*chains num_trees 2*half_tree_size']
         | Float[Array, '*chains num_trees k 2*half_tree_size']
     ) = field(chains=CHAIN_AXIS)
-    """The leaf values, in units of `leaf_scale`."""
+    """The leaf values, in units of `leaf_unit`."""
 
-    leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
-    """The scale of the leaf values. The function represented by the forest is
-    ``offset + leaf_scale * (sum of leaf values)``. Set to the marginal prior
+    leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
+    """The storage unit of the leaf values. The function represented by the forest is
+    ``offset + leaf_unit * (sum of leaf values)``. Set to the marginal prior
     standard deviation of a leaf, rounded to a power of two, so the stored leaves
     are O(1) whatever the data units and do not over/underflow narrow `leaf_tree`
     dtypes, and converting to and from data units is exact."""
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
-    """Constant shift added to the scaled sum of trees, see `leaf_scale`."""
+    """Constant shift added to the scaled sum of trees, see `leaf_unit`."""
 
     grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of grow proposals made during one full MCMC cycle."""
@@ -247,9 +247,9 @@ class Forest(Module):
         chains=CHAIN_AXIS
     )
     """The number of datapoints per leaf. Valid at the leaves and at the nodes
-    involved in the latest moves, dirty elsewhere. `None` if the error
-    precision is weighted and there are no minimum-points-per-node
-    constraints, which makes the counts unused."""
+    involved in the latest moves, dirty elsewhere. `None` if there are
+    per-datapoint error scales and no minimum-points-per-node constraints,
+    which makes the counts unused."""
 
     prec_tree: (
         Float32[Array, '*chains num_trees 2*half_tree_size']
@@ -259,8 +259,8 @@ class Forest(Module):
     """The likelihood precision scale summed over the datapoints in each leaf,
     in the stored units of `State.prec_scale` (i.e., ``State.inv_sdev_unit **
     2``). Valid at the leaves and at the nodes involved in the latest moves,
-    dirty elsewhere. `None` if the error precision is not weighted, in which
-    case `count_tree` takes its place."""
+    dirty elsewhere. `None` if there are no per-datapoint error scales, in
+    which case `count_tree` takes its place."""
 
     min_points_per_decision_node: Int32[Array, ''] | None
     """The minimum number of data points in a decision node."""
@@ -386,12 +386,12 @@ class State(Module):
     resid: Float[Array, '*chains n'] | Float[Array, '*chains k n'] = field(
         chains=CHAIN_AXIS, data=-1
     )
-    """The residuals (`y` or `z` minus sum of trees), in units of `resid_scale`."""
+    """The residuals (`y` or `z` minus sum of trees), in units of `resid_unit`."""
 
-    resid_scale: Float32[Array, ''] | Float32[Array, ' k']
-    """The scale of the residuals. The residual in data units is
-    ``resid_scale * resid``. Set to the marginal prior standard deviation of the
-    sum of trees (`Forest.leaf_scale` times the square root of the number of
+    resid_unit: Float32[Array, ''] | Float32[Array, ' k']
+    """The storage unit of the residuals. The residual in data units is
+    ``resid_unit * resid``. Set to the marginal prior standard deviation of the
+    sum of trees (`Forest.leaf_unit` times the square root of the number of
     trees), rounded to a power of two so the conversion to and from data units
     is exact. This keeps the stored residuals O(1) whatever the data units, so
     they do not over/underflow narrow `resid` dtypes (see `init`'s
@@ -400,17 +400,18 @@ class State(Module):
     resid_eff_scale: Float32[Array, '*chains'] | Float32[Array, '*chains k'] = field(
         chains=CHAIN_AXIS
     )
-    """The measured scale of the residuals, in data units: the (weighted,
-    masked) root mean square of ``resid_scale * resid``, rounded to a power of
-    two. Initialized to `resid_scale`, updated by `step_error_cov_inv`. Sets
-    the leaf quantization grid (see `StepConfig.leaf_quantization`), while the
-    storage units of `resid` stay fixed at `resid_scale`."""
+    """The measured scale of the residuals, in data units: the
+    (precision-scaled, masked) root mean square of ``resid_unit * resid``,
+    rounded to a power of two. Initialized to `resid_unit`, updated by
+    `step_error_cov_inv`. Sets the leaf quantization grid (see
+    `StepConfig.leaf_quantization`), while the storage units of `resid` stay
+    fixed at `resid_unit`."""
 
     resid_inexact_integral: Float32[Array, '*chains'] | Float32[Array, '*chains k'] = (
         field(chains=CHAIN_AXIS)
     )
     """Sum over the MCMC steps done of the mean square of the residuals (in
-    `resid_scale` units) large enough that their running updates round, taken
+    `resid_unit` units) large enough that their running updates round, taken
     at the start of each step. Seeded by `init` with one tree-update's worth
     of the initial residuals (their one-time storage rounding persists when
     the later updates are exact), used by `sum_trees_eps` to estimate the
@@ -423,15 +424,16 @@ class State(Module):
 
     error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(data=-1)
     """The per-observation error standard-deviation scale (the `error_scale`
-    argument of `init`). `None` if fit without it. Shape ``(n,)`` for scalar
-    weights, or ``(k, n)`` for per-component vector weights. `inv_sdev_scale` and
-    `prec_scale` are derived from this and the missingness mask."""
+    argument of `init`). `None` if fit without it. Shape ``(n,)`` for a scalar
+    scale per datapoint, or ``(k, n)`` for a per-component scale per datapoint.
+    `inv_sdev_scale` and `prec_scale` are derived from this and the missingness
+    mask."""
 
     prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None = field(data=-1)
     """The scale on the error precision, derived from `error_scale` and the
-    missingness mask. `None` if fit without weights or a missingness mask. With
-    scalar per-datapoint weights, shape ``(n,)``; with vector per-datapoint
-    weights, shape ``(k, k, n)``. Stored in units of ``inv_sdev_unit ** 2``
+    missingness mask. `None` if fit without error scales or a missingness mask.
+    With scalar per-datapoint error scales, shape ``(n,)``; with per-component
+    error scales, shape ``(k, k, n)``. Stored in units of ``inv_sdev_unit ** 2``
     (elementwise ``outer(inv_sdev_unit, inv_sdev_unit)`` in the vector case),
     which makes it O(1) on average whatever the magnitude of `error_scale`, so
     it does not over/underflow the narrow dtypes allowed by `init`'s
@@ -440,26 +442,28 @@ class State(Module):
 
     inv_sdev_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None = field(data=-1)
     """The reciprocal of the per-observation error scale in units of
-    `inv_sdev_unit`, zeroed at masked datapoints. `None` if fit without weights
-    or a missingness mask. Shape ``(n,)`` for scalar weights, or ``(k, n)`` for
-    per-component vector weights. Like `prec_scale`, its dtype may be narrower
-    than float32 (see `init`'s ``prec_scale_dtype``)."""
+    `inv_sdev_unit`, zeroed at masked datapoints. `None` if fit without error
+    scales or a missingness mask. Shape ``(n,)`` for scalar per-datapoint error
+    scales, or ``(k, n)`` for per-component error scales. Like `prec_scale`,
+    its dtype may be narrower than float32 (see `init`'s
+    ``prec_scale_dtype``)."""
 
     inv_sdev_unit: Float32[Array, ''] | Float32[Array, ' k']
-    """The scale of `inv_sdev_scale`: the reciprocal error scale in data units
-    is ``inv_sdev_unit * inv_sdev_scale``. Set to the root mean square of
-    ``1 / error_scale`` over non-missing datapoints (per component for vector
-    weights), rounded to a power of two so the conversion to and from data
-    units is exact; 1 if fit without weights. Constant along the MCMC."""
+    """The storage unit of `inv_sdev_scale`: the reciprocal error scale in
+    data units is ``inv_sdev_unit * inv_sdev_scale``. Set to the root mean
+    square of ``1 / error_scale`` over non-missing datapoints (per component
+    for per-component error scales), rounded to a power of two so the
+    conversion to and from data units is exact; 1 if fit without error scales.
+    Constant along the MCMC."""
 
     n_non_missing: Int32[Array, ''] | Int32[Array, ' k']
-    """The number of non-missing datapoints, ``(k,)`` per outcome component when
-    the weights are vectors, else scalar. Constant along the MCMC."""
+    """The number of non-missing datapoints, ``(k,)`` per outcome component
+    with per-component error scales, else scalar. Constant along the MCMC."""
 
     sum_diag_prec_scale: Float32[Array, ''] | Float32[Array, ' k']
-    """The sum of the precision scales over non-missing datapoints (their count
-    when unweighted), matching the shape of `n_non_missing`. Constant along the
-    MCMC."""
+    """The sum of the precision scales over non-missing datapoints (their
+    count if fit without error scales), matching the shape of `n_non_missing`.
+    Constant along the MCMC."""
 
     forest: Forest
     """The sum of trees model."""
@@ -503,8 +507,8 @@ class State(Module):
         eps_leaf = jnp.finfo(self.forest.leaf_tree.dtype).eps
         eps_resid = jnp.finfo(self.resid.dtype).eps
 
-        # rounding of the stored leaves at their typical magnitude `leaf_scale`
-        dtype_quantum = eps_leaf * self.forest.leaf_scale
+        # rounding of the stored leaves at their typical magnitude `leaf_unit`
+        dtype_quantum = eps_leaf * self.forest.leaf_unit
 
         if self.config.leaf_quantization is None:
             resolution = dtype_quantum
@@ -517,38 +521,38 @@ class State(Module):
             # grid even where its spacing is coarser), so the sum resolves
             # multiples of the quantum whatever the number of trees
             q = self.config.leaf_quantization
-            scale_chain_axes = range(self.resid_eff_scale.ndim - self.resid_scale.ndim)
+            scale_chain_axes = range(self.resid_eff_scale.ndim - self.resid_unit.ndim)
             eff_scale = jnp.mean(self.resid_eff_scale, axis=tuple(scale_chain_axes))
             managed_quantum = eps_resid * eff_scale * 2.0**q
             resolution = jnp.maximum(managed_quantum, dtype_quantum)
 
-            # determine average error precision; the folded weight unit puts
-            # the stored `prec_scale` mean in data units
+            # determine average error precision; the folded `inv_sdev_unit`
+            # puts the stored `prec_scale` mean in data units
             prec = _scaled_error_cov_inv(self)
             n_eff = jnp.maximum(self.n_non_missing, 1)
             if self.prec_scale is not None:
                 prec *= self.prec_scale.sum(axis=-1, dtype=jnp.float32) / n_eff
 
             # convert precision to variance and average it over chains
-            if self.resid_scale.ndim:
+            if self.resid_unit.ndim:
                 error_var = jnp.diagonal(
                     _inv_via_chol_with_gersh(prec), axis1=-2, axis2=-1
                 )
             else:
                 error_var = jnp.reciprocal(prec)
-            var_chain_axes = range(error_var.ndim - self.resid_scale.ndim)
+            var_chain_axes = range(error_var.ndim - self.resid_unit.ndim)
             error_var = jnp.mean(error_var, axis=tuple(var_chain_axes))
 
             # a quantized leaf moves only when its full conditional mean
             # crosses half a quantum; the mean responds to the leaf's average
             # residual through the posterior shrinkage factor s = t / (1 + t),
-            # t = (leaf_scale / error_sdev)^2 * n_leaf, so residual features
+            # t = (leaf_unit / error_sdev)^2 * n_leaf, so residual features
             # smaller than quantum / (2 s) cannot move the sampler. Typical
             # values are used for the error variance (chain mean, datapoint
             # mean of prec_scale) and n_leaf (datapoints over leaves per tree).
             leaves_per_tree = 1.0 + jnp.count_nonzero(self.forest.split_tree, axis=-1)
             n_leaf = n_eff / jnp.mean(leaves_per_tree)
-            t = jnp.square(self.forest.leaf_scale) * n_leaf / error_var
+            t = jnp.square(self.forest.leaf_unit) * n_leaf / error_var
             snap = managed_quantum / 2.0 * (1.0 + jnp.reciprocal(t))
 
         # random walk drift of the accumulated rounding errors: each of the
@@ -556,10 +560,10 @@ class State(Module):
         # residuals large enough to round, whose mean square is integrated
         # over the steps done in `resid_inexact_integral`
         integral = self.resid_inexact_integral
-        chain_axes = range(integral.ndim - self.resid_scale.ndim)
+        chain_axes = range(integral.ndim - self.resid_unit.ndim)
         integral = jnp.mean(integral, axis=tuple(chain_axes))
         *_, num_trees, _ = self.forest.var_tree.shape
-        drift = eps_resid * self.resid_scale * jnp.sqrt(num_trees * integral)
+        drift = eps_resid * self.resid_unit * jnp.sqrt(num_trees * integral)
 
         return resolution, drift, snap
 
@@ -830,13 +834,13 @@ def init(
         sampled in float32 first. Leaves are stored in scaled units to avoid
         under/overflow with short types.
     prec_scale_dtype
-        Dtype used to store quantities derived from error weights,
+        Dtype used to store the quantities derived from the error scales,
         `State.prec_scale` and `State.inv_sdev_scale`. Note `State.error_scale`
         is always float32 instead. The stored values are normalized by the
         root mean square of ``1 / error_scale`` (see `State.inv_sdev_unit`),
         so the overall magnitude of `error_scale` cannot over/underflow a
-        narrow dtype; a very large dynamic range of the weights (beyond a few
-        orders of magnitude in float16) still can.
+        narrow dtype; a very large dynamic range of the error scales (beyond a
+        few orders of magnitude in float16) still can.
     resid_dtype
         Dtype used to store the running residuals (`State.resid`). The
         residuals are stored in scaled units to avoid under/overflow with short
@@ -866,7 +870,8 @@ def init(
         ``Phi((sum of trees + offset) / error_scale)``; this also applies to the
         binary components of a mixed binary-continuous regression. If not
         specified, defaults to 1 for all points, but potentially skipping
-        calculations.
+        calculations. These are the case weights of other BART
+        implementations, e.g., ``w`` in R BART.
     missing
         Boolean mask, same shape as `y`; `True` marks entries to be ignored
         by the MCMC (`State.y` stores the offset in their place, so the
@@ -1049,22 +1054,23 @@ def init(
                 # resid is created later after y and offset are sharded
                 else cast(Array, None)
             ),
-            resid_scale=storage.resid_scale,
-            resid_eff_scale=_lazy(jnp.full, kshape, storage.resid_scale),
+            resid_unit=storage.resid_unit,
+            resid_eff_scale=_lazy(jnp.full, kshape, storage.resid_unit),
             resid_inexact_integral=_lazy(jnp.zeros, kshape),
             # only `value` carries the chain axis, so it becomes the lazy leaf;
             # the prior params `nu`/`rate` are shared across chains
             error_cov_inv=replace(
                 error_cov_inv, value=_lazy_from_array(error_cov_inv.value)
             ),
-            # `error_scale` goes straight to its field; `missing` is parked in the
-            # `inv_sdev_scale` slot so it gets sharded with everything else.
-            # `_compute_weights` derives `prec_scale` and `inv_sdev_scale` post-shard.
+            # `error_scale` goes straight to its field; `missing` is parked in
+            # the `inv_sdev_scale` slot so it gets sharded with everything
+            # else. `_compute_scale_related_attrs` derives `prec_scale` and
+            # `inv_sdev_scale` post-shard.
             error_scale=error_scale,
             prec_scale=None,
             inv_sdev_scale=missing,
             # invalid placeholders; the true values are set post-shard by
-            # `_compute_weights`
+            # `_compute_scale_related_attrs`
             inv_sdev_unit=cast(Array, None),
             n_non_missing=cast(Array, None),
             sum_diag_prec_scale=cast(Array, None),
@@ -1072,7 +1078,7 @@ def init(
                 leaf_tree=_lazy(
                     jnp.zeros, (num_trees, *kshape, tree_size), storage.leaf_dtype
                 ),
-                leaf_scale=storage.leaf_scale,
+                leaf_unit=storage.leaf_unit,
                 offset=offset,
                 var_tree=_lazy(
                     jnp.zeros,
@@ -1100,7 +1106,7 @@ def init(
                     jnp.ones, (num_trees, n), minimal_unsigned_dtype(tree_size - 1)
                 ),
                 # the counts serve the minimum-points constraints and stand in
-                # for the precisions when the error precision is unweighted
+                # for the precisions when there are no per-datapoint scales
                 # (`prec_scale` is set iff `error_scale` or `missing` is given)
                 count_tree=(
                     _lazy(_initial_count_tree, (num_trees, tree_size), n)
@@ -1153,22 +1159,23 @@ def init(
                 state, y=_sanitize_y(state.y, state.inv_sdev_scale, state.forest.offset)
             )
 
-        # derive the weight arrays and their constant summaries after sharding
+        # derive the scale arrays and their constant summaries after sharding
         # to do the calculation on the right devices. `state.error_scale`
         # already holds the sharded user-supplied scale and
         # `state.inv_sdev_scale` holds the parked `missing` mask.
-        # `_compute_weights` does not donate `error_scale`, so it stays in
-        # place; the derived scales fold in the mask, the raw scale does not.
-        weights = _compute_weights(
+        # `_compute_scale_related_attrs` does not donate `error_scale`, so it
+        # stays in place; the derived scales fold in the mask, the raw scale
+        # does not.
+        attrs = _compute_scale_related_attrs(
             state.error_scale, state.inv_sdev_scale, storage.prec_scale_dtype, n
         )
         state = replace(
             state,
-            prec_scale=weights.prec_scale,
-            inv_sdev_scale=weights.inv_sdev_scale,
-            inv_sdev_unit=weights.inv_sdev_unit,
-            n_non_missing=weights.n_non_missing,
-            sum_diag_prec_scale=weights.sum_diag_prec_scale,
+            prec_scale=attrs.prec_scale,
+            inv_sdev_scale=attrs.inv_sdev_scale,
+            inv_sdev_unit=attrs.inv_sdev_unit,
+            n_non_missing=attrs.n_non_missing,
+            sum_diag_prec_scale=attrs.sum_diag_prec_scale,
         )
 
         # calculate initial resid in the continuous outcome case, such that y
@@ -1204,7 +1211,7 @@ def _parse_float_dtype(dtype: DTypeLike) -> jnp.dtype:
     return dtype
 
 
-def _compute_leaf_scale(
+def _compute_leaf_unit(
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     kshape: tuple[int, ...],
 ) -> Float32[Array, ''] | Float32[Array, ' k']:
@@ -1216,10 +1223,10 @@ def _compute_leaf_scale(
     """
     if kshape:
         leaf_prior_cov = _inv_via_chol_with_gersh(leaf_prior_cov_inv)
-        leaf_scale = jnp.sqrt(jnp.diagonal(leaf_prior_cov))
+        leaf_unit = jnp.sqrt(jnp.diagonal(leaf_prior_cov))
     else:
-        leaf_scale = jnp.sqrt(jnp.reciprocal(leaf_prior_cov_inv))
-    return jnp.where(jnp.isfinite(leaf_scale) & (leaf_scale > 0), leaf_scale, 1.0)
+        leaf_unit = jnp.sqrt(jnp.reciprocal(leaf_prior_cov_inv))
+    return jnp.where(jnp.isfinite(leaf_unit) & (leaf_unit > 0), leaf_unit, 1.0)
 
 
 def _round_to_pow2(
@@ -1233,13 +1240,13 @@ def _round_to_pow2(
 def _scaled_error_cov_inv(
     state: 'State',
 ) -> Float32[Array, '*chains'] | Float32[Array, '*chains k k']:
-    """Return the error precision with the squared weight unit folded in.
+    """Return the error precision with ``inv_sdev_unit ** 2`` folded in.
 
     `State.prec_scale` and everything summed from it (`Forest.prec_tree`, the
-    per-leaf weighted residual sums) are stored in units of
+    per-leaf precision-scaled residual sums) are stored in units of
     ``State.inv_sdev_unit ** 2``, so their products with this scaled precision
     are in data units. Returns ``error_cov_inv.value`` as-is when there are no
-    weights.
+    per-datapoint error scales.
     """
     value = state.error_cov_inv.value
     unit = state.inv_sdev_unit
@@ -1253,13 +1260,13 @@ def _scaled_error_cov_inv(
 
 @dataclass(frozen=True)
 class _StorageParams:
-    """Storage dtypes and scales for the leaves and residuals."""
+    """Storage dtypes and units for the leaves and residuals."""
 
     leaf_dtype: jnp.dtype
     prec_scale_dtype: jnp.dtype
     resid_dtype: jnp.dtype
-    leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
-    resid_scale: Float32[Array, ''] | Float32[Array, ' k']
+    leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
+    resid_unit: Float32[Array, ''] | Float32[Array, ' k']
 
 
 def _storage_params(
@@ -1270,22 +1277,22 @@ def _storage_params(
     kshape: tuple[int, ...],
     num_trees: int,
 ) -> _StorageParams:
-    """Normalize the storage dtypes and compute the leaf and residual scales.
+    """Normalize the storage dtypes and compute the leaf and residual units.
 
     Leaves and residuals are stored in units of their marginal prior standard
     deviation, so they are O(1) whatever the data units and do not over/underflow
     narrow dtypes. Both units are rounded to a power of two so converting between
     stored and data units is exact, adding no rounding to a float32 value. The
-    residual unit reuses `leaf_scale` (times the square root of the number of
+    residual unit reuses `leaf_unit` (times the square root of the number of
     trees, since the sum of trees models the data) instead of a new constant.
     """
-    leaf_scale = _compute_leaf_scale(leaf_prior_cov_inv, kshape)
+    leaf_unit = _compute_leaf_unit(leaf_prior_cov_inv, kshape)
     return _StorageParams(
         leaf_dtype=_parse_float_dtype(leaf_dtype),
         prec_scale_dtype=_parse_float_dtype(prec_scale_dtype),
         resid_dtype=_parse_float_dtype(resid_dtype),
-        leaf_scale=_round_to_pow2(leaf_scale),
-        resid_scale=_round_to_pow2(leaf_scale * num_trees**0.5),
+        leaf_unit=_round_to_pow2(leaf_unit),
+        resid_unit=_round_to_pow2(leaf_unit * num_trees**0.5),
     )
 
 
@@ -1309,7 +1316,7 @@ def _set_initial_resid(
         state.y,
         state.forest.offset,
         binary_indices,
-        state.resid_scale,
+        state.resid_unit,
         resid_dtype,
     )
     preview_resid = add_dummy_axis(inner) if num_chains is not None else inner
@@ -1345,19 +1352,19 @@ def _initial_resid(
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
     binary_indices: Int32[Array, ' kb'] | None,
-    resid_scale: Float32[Array, ''] | Float32[Array, ' k'],
+    resid_unit: Float32[Array, ''] | Float32[Array, ' k'],
     resid_dtype: jnp.dtype,
 ) -> Float[Array, ' n'] | Float[Array, 'k n']:
     """Calculate the initial value for `State.resid` in the continuous outcome case.
 
-    The residual is stored in units of `resid_scale` and dtype `resid_dtype`. In
+    The residual is stored in units of `resid_unit` and dtype `resid_dtype`. In
     the mixed binary-continuous case, binary rows are zeroed out (their residual
     starts at ``z - trees - offset = 0``).
     """
     resid = jnp.broadcast_to(y - offset[..., None], shape)
     if binary_indices is not None:
         resid = resid.at[..., binary_indices, :].set(0.0)
-    return (resid / resid_scale[..., None]).astype(resid_dtype)
+    return (resid / resid_unit[..., None]).astype(resid_dtype)
 
 
 def _initial_affluence_tree(
@@ -1426,8 +1433,8 @@ def _sanitize_y(
     return jnp.where(missing, offset[..., None], y)
 
 
-class _Weights(NamedTuple):
-    """Output of `_compute_weights`."""
+class _ScaleRelatedAttrs(NamedTuple):
+    """Output of `_compute_scale_related_attrs`."""
 
     inv_sdev_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None
     prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None
@@ -1437,13 +1444,13 @@ class _Weights(NamedTuple):
 
 
 @jit(donate_argnums=(1,), static_argnums=(2, 3))
-def _compute_weights(
+def _compute_scale_related_attrs(
     error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
     prec_scale_dtype: DTypeLike,
     n: int,
-) -> _Weights:
-    """Compute the stored weight arrays and their constant summaries.
+) -> _ScaleRelatedAttrs:
+    """Compute the stored error-scale arrays and their constant summaries.
 
     The reciprocal error scale is computed in float32 and masked to zero at
     missing datapoints; its root mean square over non-missing datapoints,
@@ -1456,7 +1463,7 @@ def _compute_weights(
     """
     if error_scale is None and missing is None:
         n_non_missing = jnp.full((), n)
-        return _Weights(
+        return _ScaleRelatedAttrs(
             inv_sdev_scale=None,
             prec_scale=None,
             inv_sdev_unit=jnp.float32(1.0),
@@ -1476,7 +1483,7 @@ def _compute_weights(
     sum_diag_prec_scale = jnp.einsum('...n,...n->...', inv_sdev_scale, inv_sdev_scale)
 
     # factor out the rms as the storage unit, exactly since it's a power of
-    # two; degenerate weights (all masked, or zero/non-finite scales) leave
+    # two; degenerate cases (all masked, or zero/non-finite scales) leave
     # the unit at 1
     unit = _round_to_pow2(jnp.sqrt(sum_diag_prec_scale / jnp.maximum(n_non_missing, 1)))
     unit = jnp.where(jnp.isfinite(unit) & (unit > 0), unit, 1.0)
@@ -1487,7 +1494,7 @@ def _compute_weights(
         prec_scale = jnp.square(inv_sdev_scale)
     else:
         prec_scale = jnp.einsum('an,bn->abn', inv_sdev_scale, inv_sdev_scale)
-    return _Weights(
+    return _ScaleRelatedAttrs(
         inv_sdev_scale=inv_sdev_scale.astype(prec_scale_dtype),
         prec_scale=prec_scale.astype(prec_scale_dtype),
         inv_sdev_unit=unit,

@@ -248,20 +248,22 @@ class Bart(Module):
         multivariate regression with `k` components, the Wishart degrees of
         freedom are set to ``sigma_df + k - 1``.
     sigma_scale
-        Sets the scale of the prior on the error precision. If 'auto' (default),
-        the prior is scaled so that the error precision equals
-        ``diag(1 / var(y_train))`` in expectation, where with weights `error_scale`
-        the variance is a precision-weighted one that estimates the unit-weight error
-        variance. Otherwise, ``square(sigma_scale)`` is the prior harmonic mean of
-        the error variance; for multivariate regression a scalar is broadcast to
-        all components. For mixed outcome types, binary components are ignored.
+        Sets the scale of the prior on the error precision. If 'auto'
+        (default), the prior is scaled so that the error precision equals
+        ``diag(1 / var(y_train))`` in expectation, where with `error_scale` the
+        variance is a precision-weighted one that estimates the error variance
+        at unit error scale. Otherwise, ``square(sigma_scale)`` is the prior
+        harmonic mean of the error variance; for multivariate regression a
+        scalar is broadcast to all components. For mixed outcome types, binary
+        components are ignored.
     sigma_init
-        The initial value of the error standard deviation in the MCMC. If 'auto'
-        (default), the initial error precision is set to ``diag(1 / var(y_train))``,
-        with the same precision-weighted variance as `sigma_scale` when weights are
-        given. Otherwise, the initial precision is ``diag(1 / square(sigma_init))``;
-        for multivariate regression a scalar is broadcast to all components. For
-        mixed outcome types, binary components are ignored.
+        The initial value of the error standard deviation in the MCMC. If
+        'auto' (default), the initial error precision is set to ``diag(1 /
+        var(y_train))``, with the same precision-weighted variance as
+        `sigma_scale` when `error_scale` is given. Otherwise, the initial
+        precision is ``diag(1 / square(sigma_init))``; for multivariate
+        regression a scalar is broadcast to all components. For mixed outcome
+        types, binary components are ignored.
     k
         The inverse scale of the prior standard deviation on the latent mean
         function, relative to half the observed range of `y_train`. If `y_train`
@@ -290,13 +292,13 @@ class Bart(Module):
         outcome types, each component uses the default for its type.
     error_scale
         Coefficients that rescale the error standard deviation on each
-        datapoint. Not specifying `error_scale` is equivalent to setting it to 1
-        for all datapoints. Shape ``(n,)`` applies the same scalar weight to every
-        outcome component; for multivariate regression, ``(k, n)`` instead
-        supplies a per-component weight per datapoint. Supported with binary
-        (probit) outcomes, where the weight scales the latent error so the
-        success probability is ``Phi(latent / error_scale)``, including the
-        binary components of a mixed regression.
+        datapoint ("w" in BART3). Not specifying `error_scale` is equivalent to
+        setting it to 1 for all datapoints. Shape ``(n,)`` applies the same
+        scalar scale to every outcome component; for multivariate regression,
+        ``(k, n)`` instead supplies a per-component scale per datapoint.
+        Supported with binary (probit) outcomes, where it scales the latent
+        error so the success probability is ``Phi(latent / error_scale)``,
+        including the binary components of a mixed regression.
     missing
         Boolean mask with the same shape as `y_train`; `True` marks entries
         to be ignored by the MCMC. The values of `y_train` at masked
@@ -571,11 +573,11 @@ class Bart(Module):
         error_scale
             Per-observation error scale. Used with ``kind='outcome_samples'``,
             and also with ``kind='mean'`` or ``'mean_samples'`` for binary
-            outcomes (since the success probability is
-            ``Phi(latent / error_scale)``).
-            Required when the model was fit with weights and ``x_test`` is
-            new data. Shape matches the shape used at fitting: ``(m,)`` for
-            scalar weights, ``(k, m)`` for multivariate vector weights.
+            outcomes (since the success probability is ``Phi(latent /
+            error_scale)``). Required when the model was fit with `error_scale`
+            and ``x_test`` is new data. Shape matches the shape used at
+            fitting: ``(m,)`` for scalar scales, ``(k, m)`` for multivariate
+            per-component scales.
 
         Returns
         -------
@@ -768,8 +770,8 @@ class Bart(Module):
         regression, this returns the precision of the latent error term, not
         the Bernoulli precision for the binary outcome. For heteroskedastic
         regression, the returned precision is the global precision parameter,
-        that would have to be divided by a squared weight to get the precision
-        on a given datapoint.
+        that would have to be divided by a squared error scale to get the
+        precision on a given datapoint.
         """
         binary_indices = self._mcmc_state.binary_indices
         if (
@@ -849,7 +851,7 @@ class Bart(Module):
         | DataFrame
         | None,
     ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
-        """Validate and resolve the error weights for prediction.
+        """Validate and resolve the error scales for prediction.
 
         Parameters
         ----------
@@ -862,7 +864,7 @@ class Bart(Module):
 
         Returns
         -------
-        The resolved error scale as a float32 array, or `None` if weights are not applicable.
+        The resolved error scale as a float32 array, or `None` if not applicable.
 
         Raises
         ------
@@ -872,22 +874,22 @@ class Bart(Module):
         """
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
         train_error_scale = self._mcmc_state.error_scale
-        has_train_weights = train_error_scale is not None
+        has_train_error_scale = train_error_scale is not None
         is_binary = self._mcmc_state.z is not None
-        # weights enter the outcome samples of any outcome type, and also the
-        # mean of binary outcomes, since P(y=1) = Phi(latent / weight)
-        needs_weights = has_train_weights and (
+        # the error scales enter the outcome samples of any outcome type, and
+        # also the mean of binary outcomes, since P(y=1) = Phi(latent / scale)
+        needs_error_scale = has_train_error_scale and (
             kind is PredictKind.outcome_samples
             or (is_binary and kind in (PredictKind.mean, PredictKind.mean_samples))
         )
 
-        if not needs_weights:
+        if not needs_error_scale:
             if error_scale is not None:
                 msg = (
-                    '`error_scale` must be `None` in this configuration (weights'
-                    " are used with kind='outcome_samples', and with kind='mean'"
-                    " or 'mean_samples' for binary outcomes, and only when the"
-                    ' model was fit with weights)'
+                    '`error_scale` must be `None` in this configuration (error'
+                    " scales are used with kind='outcome_samples', and with"
+                    " kind='mean' or 'mean_samples' for binary outcomes, and"
+                    ' only when the model was fit with `error_scale`)'
                 )
                 raise ValueError(msg)
             return None
@@ -896,26 +898,26 @@ class Bart(Module):
             if error_scale is not None:
                 msg = (
                     "`error_scale` must be `None` when x_test='train'"
-                    ' (training weights are used automatically)'
+                    ' (the training error scales are used automatically)'
                 )
                 raise ValueError(msg)
             return train_error_scale
 
-        # new test data, model was fit with weights
+        # new test data, model was fit with error scales
         if error_scale is None:
             msg = (
                 '`error_scale` is required because the model was fit with'
-                ' weights and x_test is new data'
+                ' `error_scale` and x_test is new data'
             )
             raise ValueError(msg)
         error_scale_test = _process_response_input(error_scale)
-        assert train_error_scale is not None  # implied by needs_weights
+        assert train_error_scale is not None  # implied by needs_error_scale
         # the per-observation axis is checked separately, against x_test
         if error_scale_test.shape[:-1] != train_error_scale.shape[:-1]:
             msg = (
-                f'`error_scale` shape mismatch with training weights: got '
-                f'{error_scale_test.shape=}, but the leading dimensions must match '
-                f'the training weights {train_error_scale.shape=} (only the '
+                f'`error_scale` shape mismatch with the training error scales: '
+                f'got {error_scale_test.shape=}, but the leading dimensions must '
+                f'match the training {train_error_scale.shape=} (only the '
                 f'per-observation axis may differ).'
             )
             raise ValueError(msg)
@@ -1182,7 +1184,7 @@ def _check_type_settings(
         and (y_train.ndim != 2 or error_scale.shape[0] != y_train.shape[0])
     ):
         msg = (
-            f'2D error_scale (vector per-component weights) requires y_train of '
+            f'2D error_scale (per-component scales) requires y_train of '
             f'shape (k, n) with matching k; got {error_scale.shape=}, '
             f'{y_train.shape=}.'
         )
@@ -1337,8 +1339,9 @@ def _guarded_response_variance(
     """Per-component variance of `y_train`, used by the 'auto' error scale.
 
     A precision-weighted variance (precision ``1 / error_scale ** 2``) estimates
-    the unit-weight ``sigma ** 2``; `missing` entries are dropped. The variance
-    is guarded to 1 when undefined (fewer than 2 valid points) or non-positive.
+    ``sigma ** 2`` at unit error scale; `missing` entries are dropped. The
+    variance is guarded to 1 when undefined (fewer than 2 valid points) or
+    non-positive.
     """
     if error_scale is None and missing is None:
         vary = jnp.var(y_train, axis=-1)
@@ -1646,7 +1649,7 @@ def compare_resid(
 ]:
     """Re-compute residuals to compare them with the updated ones."""
     chain_axes = chain_vmap_axes(state)
-    resid1 = chain_to_axis(state.resid * state.resid_scale[..., None], chain_axes.resid)
+    resid1 = chain_to_axis(state.resid * state.resid_unit[..., None], chain_axes.resid)
     z = chain_to_axis(state.z, chain_axes.z) if state.z is not None else None
 
     forests = _trees_chain_first(state.forest)
@@ -2007,7 +2010,7 @@ def _predict_from_latent(
             key, trace, latent, error_scale, binary_indices, has_binary
         )
 
-    # squash predictions to (0, 1) if probit; with heteroskedastic weights
+    # squash predictions to (0, 1) if probit; with heteroskedastic error scales
     # P(y=1) = Phi(latent / error_scale)
     if has_binary:  # self._mcmc_state.z is not None
         # error_scale is (m,) or (k, m), so it broadcasts against latent

@@ -148,8 +148,8 @@ class MinimalTrace(Module):
     offset: Float32[Array, '']
     """Constant shift added to the scaled sum of trees."""
 
-    leaf_scale: Float32[Array, '']
-    """The scale of the leaf values, 1 for leaves in data units."""
+    leaf_unit: Float32[Array, '']
+    """The storage unit of the leaf values, 1 for leaves in data units."""
 
     has_chains: ClassVar[bool] = False
     """No chain axis; each leading axis is just the sample axis."""
@@ -237,5 +237,5 @@ def trees_BART_to_bartz(
         var_tree=jnp.array(var_trees),
         split_tree=jnp.array(split_trees),
         offset=jnp.float32(0.0 if offset is None else offset),
-        leaf_scale=jnp.float32(1.0),
+        leaf_unit=jnp.float32(1.0),
     ), meta

@@ -78,14 +78,13 @@ class TreeHeaps(Protocol):
     node is a leaf is indicated by the corresponding 'split' element being
     0. Unused nodes also have split set to 0. This array can't be dirty."""
 
-    leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
-    """The scale of the leaf values. The leaf values in data units are
-    ``leaf_scale * leaf_tree``; 1 if the leaves are stored directly in data
-    units."""
+    leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
+    """The storage unit of the leaf values. The leaf values in data units are
+    ``leaf_unit * leaf_tree``."""
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
     """Constant shift added to the function represented by the trees, which is
-    ``offset + leaf_scale * (sum of leaf values over trees)``; 0 if no shift."""
+    ``offset + leaf_unit * (sum of leaf values over trees)``."""
 
 
 def is_multivariate(trees: TreeHeaps) -> bool:
@@ -134,7 +133,7 @@ class TreesTrace(Module):
     unused nodes can have whatever value. It may have an additional axis
     for multivariate leaves."""
 
-    leaf_scale: Float32[Array, ''] | Float32[Array, ' k'] = field(
+    leaf_unit: Float32[Array, ''] | Float32[Array, ' k'] = field(
         default_factory=lambda: jnp.float32(1.0)
     )
     offset: Float32[Array, ''] | Float32[Array, ' k'] = field(
@@ -276,7 +275,7 @@ def evaluate_forest(
 
     Notes
     -----
-    The leaf values are multiplied by ``trees.leaf_scale``, so the result is in
+    The leaf values are multiplied by ``trees.leaf_unit``, so the result is in
     data units. ``trees.offset`` is not added: it does not distribute over the
     per-tree sum, so the caller adds it once to the total.
     """
@@ -305,7 +304,7 @@ def evaluate_forest(
     # sum in the storage dtype with a float32 accumulator, then convert to
     # data units with the float32 scale
     axis = normalize_axis_tuple(sum_batch_axis, trees.var_tree.ndim - 1)
-    return trees.leaf_scale[..., None] * jnp.sum(leaves, axis=axis, dtype=jnp.float32)
+    return trees.leaf_unit[..., None] * jnp.sum(leaves, axis=axis, dtype=jnp.float32)
 
 
 def is_actual_leaf(
@@ -474,15 +473,13 @@ def _format_values(values: Float[Array, ''] | Float[Array, ' k']) -> str:
 
 def _format_leaf(tree: TreeHeaps, index: int) -> str:
     """Format the leaf value at `index` as ``<scale> * <leaf>``."""
-    scale = _format_values(tree.leaf_scale)
+    unit = _format_values(tree.leaf_unit)
     leaf = _format_values(tree.leaf_tree[..., index])
-    return f'{scale} * {leaf}'
+    return f'{unit} * {leaf}'
 
 
 def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     """Convert a tree to a human-readable string.
-
-    Leaf values are rendered as ``<leaf_scale> * <leaf>``.
 
     Parameters
     ----------

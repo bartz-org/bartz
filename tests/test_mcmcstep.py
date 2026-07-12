@@ -1367,7 +1367,7 @@ class TestMultichain:
             'uv-continuous',
             'mv-binary',
             'mv-continuous',
-            'mv-continuous-vec-weights',
+            'mv-continuous-vec-scales',
             'mv-mixed',
         ]
     )
@@ -1377,7 +1377,7 @@ class TestMultichain:
         mv = kind.startswith('mv-')
         binary = kind.endswith('-binary')
         mixed = kind == 'mv-mixed'
-        vec_weights = kind == 'mv-continuous-vec-weights'
+        vec_scales = kind == 'mv-continuous-vec-scales'
 
         p = 10
         k = 2
@@ -1438,7 +1438,7 @@ class TestMultichain:
                 )
             )
 
-        if vec_weights:
+        if vec_scales:
             kw.update(
                 error_scale=jnp.exp(
                     random.uniform(keys.pop(), (k, self.n), float, -0.5, 0.5)
@@ -1959,11 +1959,11 @@ class TestMixedBinaryContinuous:
         assert_array_equal(state.resid[2], jnp.zeros(self.n))
 
         # continuous row (1) should be y[1] - offset[1] in data units (resid is
-        # stored in units of resid_scale)
+        # stored in units of resid_unit)
         y = init_kwargs['y']
         offset = init_kwargs['offset']
         expected = y[1] - offset[1]
-        data_units = state.resid[1] * state.resid_scale[1]
+        data_units = state.resid[1] * state.resid_unit[1]
         assert_close_matrices(data_units, expected, rtol=1e-6)
 
     def test_init_z_values(self, init_kwargs: dict) -> None:
@@ -2155,7 +2155,7 @@ def test_chol_with_gersh_disparate_scales() -> None:
     A global shift set by the largest component would swamp the precision of
     much smaller ones, as when a mixed model heavily scales a continuous
     outcome alongside O(1) binary ones, corrupting the Cholesky and the
-    inverse (and hence `leaf_scale`).
+    inverse (and hence `leaf_unit`).
     """
     # diagonal precisions spanning 14 orders of magnitude
     precisions = jnp.array([1e-8, 1.0, 1e6])
@@ -2168,16 +2168,18 @@ def test_chol_with_gersh_disparate_scales() -> None:
     )
 
 
-def test_weights_scale_invariance(keys: split, mcmcstep_data: MCMCStepData) -> None:
+def test_error_scale_magnitude_invariance(
+    keys: split, mcmcstep_data: MCMCStepData
+) -> None:
     """Rescaling `error_scale` by a constant only rescales the error variance.
 
-    Rescaling all the weights by ``c`` is equivalent to rescaling the error
-    variance by ``c ** 2``, so with the error precision prior and initial
-    value adjusted accordingly, and ``c`` a power of two, the two MCMCs
-    coincide exactly. This exercises the `State.inv_sdev_unit` normalization
-    end-to-end: with float16 weight storage, an unnormalized
-    ``1 / error_scale ** 2`` would overflow (small ``c``) or underflow (large
-    ``c``) and the runs would diverge.
+    Rescaling all the error scales by ``c`` is equivalent to rescaling the
+    error variance by ``c ** 2``, so with the error precision prior and
+    initial value adjusted accordingly, and ``c`` a power of two, the two
+    MCMCs coincide exactly. This exercises the `State.inv_sdev_unit`
+    normalization end-to-end: with float16 `prec_scale` storage, an
+    unnormalized ``1 / error_scale ** 2`` would overflow (small ``c``) or
+    underflow (large ``c``) and the runs would diverge.
     """
     X, y, max_split = mcmcstep_data
     (n,) = y.shape
@@ -2210,7 +2212,7 @@ def test_weights_scale_invariance(keys: split, mcmcstep_data: MCMCStepData) -> N
         state_scaled = make_state(c)
 
         # the unit absorbs the rescaling exactly, being a power of two, so the
-        # stored weights are identical and O(1) in both runs
+        # stored arrays are identical and O(1) in both runs
         assert state_scaled.prec_scale is not None
         assert state_scaled.prec_scale.dtype == jnp.float16
         assert jnp.all(jnp.isfinite(state_scaled.prec_scale))
@@ -2510,7 +2512,7 @@ class TestMVBartIntegration:
             prec_scale=None,
             inv_sdev_scale=None,
             inv_sdev_unit=jnp.ones(()),
-            resid_scale=jnp.ones(()),  # unit scale: resid is in data units
+            resid_unit=jnp.ones(()),  # unit scale: resid is in data units
             resid_eff_scale=jnp.ones(()),
             resid_inexact_integral=jnp.zeros(()),
             error_scale=None,
@@ -2578,7 +2580,7 @@ class TestMVBartIntegration:
         # `X` is not read by the samplers, but its `n` axis is cross-checked
         # against `resid`, so the dropped states carry the subset `X[:, keep]`.
         # both the masked and dropped states see the same kept-point count and
-        # (unweighted) precision sum
+        # (unscaled) precision sum
         n_kept = jnp.sum(keep)
         common: dict = dict(
             _chain_anchor=jnp.zeros(()),
@@ -2586,7 +2588,7 @@ class TestMVBartIntegration:
             z=None,
             prec_scale=None,
             inv_sdev_unit=jnp.ones(()),
-            resid_scale=jnp.ones(()),  # unit scale: resid is in data units
+            resid_unit=jnp.ones(()),  # unit scale: resid is in data units
             resid_eff_scale=jnp.ones(()),
             resid_inexact_integral=jnp.zeros(()),
             error_scale=None,
@@ -2827,7 +2829,7 @@ class TestMultivariate:
     def test_mv_het_vector_equiv_scalar(
         self, keys: split, mcmcstep_data: MCMCStepData, k: int
     ) -> None:
-        """Constant vector weights equal scalar weights."""
+        """Constant per-component error scales equal scalar error scales."""
         X, y_uv, max_split = mcmcstep_data
         n = y_uv.size
 
@@ -2852,7 +2854,7 @@ class TestMultivariate:
                 ),
                 resid_reduction_config=BatchedReduction(num_batches=None),
                 count_reduction_config=BatchedReduction(num_batches=None),
-                # this checks the scalar- and vector-weight code paths agree; the
+                # this checks the scalar- and vector-scale code paths agree; the
                 # scalar (n,) and vector (k, k, n) prec_scale carry the same values
                 # but float16 storage perturbs the two paths' linear algebra
                 # differently, so store in float32 to test the path equivalence alone
@@ -2868,8 +2870,8 @@ class TestMultivariate:
         assert vector_state.prec_scale is not None
         assert vector_state.prec_scale.shape == (k, k, n)
 
-        # scalar weights produce 1-D ``inv_sdev_scale`` (Wishart error cov update)
-        # while vector weights produce 2-D ``inv_sdev_scale`` (diagonal update),
+        # scalar error scales produce 1-D ``inv_sdev_scale`` (Wishart error cov
+        # update) while per-component ones produce 2-D ``inv_sdev_scale`` (diagonal update),
         # so the error_cov_inv updates are not equivalent, we can't use the full `step`.
         for _ in range(3):
             key = keys.pop()

@@ -403,7 +403,7 @@ def sample_prior_forest(
 class PriorSample(TreesTrace):
     """Output of `sample_prior`."""
 
-    # defaults because the inherited `leaf_scale`/`offset` fields have them
+    # defaults because the inherited `leaf_unit`/`offset` fields have them
     log_s: Float32[Array, 'trace_length p'] | None = None
     """The per-iteration log unnormalized pmf for choosing variables to split on,
     `None` means uniform distribution."""

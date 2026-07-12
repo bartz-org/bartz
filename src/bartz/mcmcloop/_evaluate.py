@@ -67,7 +67,7 @@ class EvaluableTrace(Protocol):
     var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
     split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
     offset: Float32[Array, ''] | Float32[Array, ' k']
-    leaf_scale: Float32[Array, ''] | Float32[Array, ' k']
+    leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
     has_chains: bool
     mesh: Mesh | None
 
@@ -208,7 +208,7 @@ def _evaluate_trace(
     batched_eval = evaluate_forest  # we will transform `batched_eval`
 
     # determine batching axes from the `samples` field markers; fields without
-    # a sample axis (e.g., `leaf_scale`) get `None` and are broadcast rather
+    # a sample axis (e.g., `leaf_unit`) get `None` and are broadcast rather
     # than batched
     trace_chain_axes = chain_vmap_axes(trace)
     sample_axes = trace_sample_axes(trace)

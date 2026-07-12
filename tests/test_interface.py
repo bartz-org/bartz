@@ -264,9 +264,9 @@ class BartKW(NamedTuple):
     ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
         """Return the `w` to pass to `Bart.predict`, or `None`, given kind and target.
 
-        On new test data weights are needed for outcome samples (any outcome
-        type) and for the mean of binary outcomes; on the training data they
-        are supplied automatically, so `None` is returned.
+        On new test data error scales are needed for outcome samples (any
+        outcome type) and for the mean of binary outcomes; on the training data
+        they are supplied automatically, so `None` is returned.
         """
         if on_train:
             return None
@@ -443,7 +443,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 x_test=test.x,
             )
 
-        # continuous regression with error weights and sparsity with fixed theta
+        # continuous regression with error scales and sparsity with fixed theta
         case 3:
             train, test = gen_data(
                 keys.pop(),
@@ -483,7 +483,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 w_test=test.error_scale,
             )
 
-        # multivariate continuous regression with error weights and some
+        # multivariate continuous regression with error scales and some
         # settings that induce large types, sparsity with free theta
         case 4:
             train, test = gen_data(
@@ -531,7 +531,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # multivariate heteroskedastic binary regression with binary X and high
-        # p; vector weights, to exercise the all-binary 2-D latent-scale paths
+        # p; per-component error scales, to exercise the all-binary 2-D latent-scale paths
         # in `step_z` and the mean squashing of `predict` (the scalar all-binary
         # paths are covered by `test_heteroskedastic_probit`)
         case 5:
@@ -627,7 +627,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                 w_test=test.error_scale,
             )
 
-        # multivariate continuous regression with vector weights
+        # multivariate continuous regression with per-component error scales
         case 7:  # pragma: no branch
             train, test = gen_data(
                 keys.pop(),
@@ -1019,7 +1019,7 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     # trees, and positions; leaf_tree is (..., k, tree_size), stored in
     # prior-sd units, so convert it to data units first
     trace = bart._main_trace
-    leaf_tree = trace.leaf_scale[..., None] * trace.leaf_tree
+    leaf_tree = trace.leaf_unit[..., None] * trace.leaf_tree
     leaves = jnp.moveaxis(leaf_tree, -2, -1).reshape(-1, k)
     empirical_cov = jnp.cov(leaves.T)
 
@@ -1155,11 +1155,11 @@ def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
 def test_outcome_samples_error_scale(keys: split) -> None:
     """`outcome_samples` applies `error_scale` in univariate continuous regression.
 
-    The univariate weighted branch of `sample_outcome` is reachable only here: the
-    BART3 wrappers expose no `outcome_samples`, and the `bkw` fixture is
-    multivariate-only, so this uses the univariate variant directly.
+    The univariate error-scaled branch of `sample_outcome` is reachable only
+    here: the BART3 wrappers expose no `outcome_samples`, and the `bkw` fixture
+    is multivariate-only, so this uses the univariate variant directly.
     """
-    bkw = make_kw(keys.pop(), 3)  # univariate continuous with error weights
+    bkw = make_kw(keys.pop(), 3)  # univariate continuous with error scales
     bart = Bart(**bkw.kw)
     out = bart.predict(
         bkw.x_test, kind='outcome_samples', error_scale=bkw.w_test, key=keys.pop()
@@ -1341,7 +1341,7 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     assert bart._main_trace.leaf_tree.dtype == _init_default(bkw.kw, 'leaf_dtype')
 
     # likewise the internal prec_scale and inv_sdev_scale dtypes, which share
-    # `prec_scale_dtype` (both only set for weighted/missing data)
+    # `prec_scale_dtype` (both only set for error-scaled/missing data)
     prec_scale = bart._mcmc_state.prec_scale
     if prec_scale is not None:
         assert prec_scale.dtype == _init_default(bkw.kw, 'prec_scale_dtype')
@@ -1350,8 +1350,8 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
         assert inv_sdev_scale.dtype == _init_default(bkw.kw, 'prec_scale_dtype')
 
 
-def test_leaf_scale(bkw: BartKW) -> None:
-    """`leaf_scale` is the marginal prior leaf standard deviation, rounded to a power of two."""
+def test_leaf_unit(bkw: BartKW) -> None:
+    """`leaf_unit` is the marginal prior leaf standard deviation, rounded to a power of two."""
     forest = Bart(**bkw.kw)._mcmc_state.forest
     cov_inv = nnone(forest.leaf_prior_cov_inv)
     if cov_inv.ndim:
@@ -1359,15 +1359,15 @@ def test_leaf_scale(bkw: BartKW) -> None:
     else:  # pragma: no cover, always mv with defaults
         marginal_std = jnp.sqrt(jnp.reciprocal(cov_inv))
     expected = 2 ** jnp.round(jnp.log2(marginal_std))
-    assert forest.leaf_scale.dtype == jnp.float32
-    assert_close_matrices(forest.leaf_scale, expected, rtol=1e-5)
+    assert forest.leaf_unit.dtype == jnp.float32
+    assert_close_matrices(forest.leaf_unit, expected, rtol=1e-5)
     # exactly a power of two: rounding the log2 back is a no-op
-    pow2 = 2 ** jnp.round(jnp.log2(forest.leaf_scale))
-    assert_array_equal(forest.leaf_scale, pow2)
+    pow2 = 2 ** jnp.round(jnp.log2(forest.leaf_unit))
+    assert_array_equal(forest.leaf_unit, pow2)
 
 
 def test_inv_sdev_unit(bkw: BartKW) -> None:
-    """`inv_sdev_unit` is the rms of the reciprocal weights, rounded to a power of two."""
+    """`inv_sdev_unit` is the rms of the reciprocal error scales, rounded to a power of two."""
     state = Bart(**bkw.kw)._mcmc_state
 
     assert state.inv_sdev_unit.dtype == jnp.float32
@@ -1382,7 +1382,7 @@ def test_inv_sdev_unit(bkw: BartKW) -> None:
         stored = state.inv_sdev_scale.astype(jnp.float32)
         rtol = condf(state.inv_sdev_scale, 1e-6, 1e-3)
 
-        # the unit times the stored values reconstructs the reciprocal weights,
+        # the unit times the stored values reconstructs the reciprocal error scales,
         # zeroed at masked datapoints
         inv_sdev = state.inv_sdev_unit[..., None] * stored
         scale = jnp.ones(()) if state.error_scale is None else state.error_scale
@@ -1390,14 +1390,14 @@ def test_inv_sdev_unit(bkw: BartKW) -> None:
         expected = jnp.broadcast_to(expected, inv_sdev.shape)
         assert_close_matrices(inv_sdev, expected, rtol=rtol, reduce_rank=True)
 
-        # the unit is the rms of the reciprocal weights over non-missing
+        # the unit is the rms of the reciprocal error scales over non-missing
         # datapoints, so the stored mean square lands within the pow2 bracket
         ms = jnp.sum(jnp.square(stored), axis=-1)
         ms = ms / jnp.maximum(jnp.sum(stored != 0, axis=-1), 1)
         assert jnp.all((ms > 0.5 * (1 - 1e-3)) & (ms < 2.0 * (1 + 1e-3)))
 
         # prec_scale is the square (per-component outer product) of the stored
-        # reciprocal weights, in the same units
+        # reciprocal error scales, in the same units
         prec_scale = nnone(state.prec_scale).astype(jnp.float32)
         if prec_scale.ndim == stored.ndim:
             expected_prec = jnp.square(stored)
@@ -1446,14 +1446,14 @@ def test_leaf_quantization(bkw: BartKW, keys: split) -> None:
     # the grid follows the residual scale measured before the leaves are
     # sampled, so compute the quantum from the pre-step state (also because
     # `step` donates it), step once, and check the freshly sampled leaves
-    quantum = (state.resid_eff_scale / state.forest.leaf_scale) * 2.0 ** (
+    quantum = (state.resid_eff_scale / state.forest.leaf_unit) * 2.0 ** (
         leaf_quantization - nmant
     )
     state = step(keys.pop(), state)
 
     # align the (*chains, [k]) quantum with the (*chains, num_trees, [k,]
     # tree_size) leaves
-    if state.resid_scale.ndim:
+    if state.resid_unit.ndim:
         quantum = quantum[..., None, :, None]
     else:  # pragma: no cover, always mv with defaults
         quantum = quantum[..., None, None]
@@ -1478,14 +1478,14 @@ def test_resid_eff_scale(bkw: BartKW) -> None:
 
     if state.error_cov_inv.nu is None:
         # never stepped without an error covariance update: stays at its
-        # initial value `resid_scale`
-        expected = jnp.broadcast_to(state.resid_scale, state.resid_eff_scale.shape)
+        # initial value `resid_unit`
+        expected = jnp.broadcast_to(state.resid_unit, state.resid_eff_scale.shape)
         assert_array_equal(state.resid_eff_scale, expected)
     else:
         # the last update measured the residuals as they are in the final
-        # state, so recompute their (weighted, masked) rms
-        resid = state.resid * state.resid_scale[..., None]
-        if state.inv_sdev_scale is None:  # pragma: no cover, weighted by default
+        # state, so recompute their (precision-scaled, masked) rms
+        resid = state.resid * state.resid_unit[..., None]
+        if state.inv_sdev_scale is None:  # pragma: no cover, error-scaled by default
             n_eff = resid.shape[-1]
         else:
             # `inv_sdev_scale` is stored in units of `inv_sdev_unit`
@@ -1494,7 +1494,7 @@ def test_resid_eff_scale(bkw: BartKW) -> None:
         rms = jnp.sqrt(jnp.sum(jnp.square(resid), axis=-1) / n_eff)
         # `resid_eff_scale` is this rms rounded to a power of two, but
         # reproducing the step's exact float32 reduction (narrow-dtype
-        # accumulation, the per-path weighting and masking) bit-for-bit is
+        # accumulation, the per-path scaling and masking) bit-for-bit is
         # brittle, and pow2 rounding turns a 1-ulp difference near a boundary
         # into a full factor of two. so check agreement loosely: pow2 rounding
         # moves the value by at most sqrt(2), which rtol=0.5 covers
@@ -1705,7 +1705,7 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
 
     with subtests.test('binary mean uses the latent scale'):
         # for binary components P(y=1) = Phi(latent / w); continuous ones are
-        # the plain latent mean (weights do not enter their mean)
+        # the plain latent mean (error scales do not enter their mean)
         w = bkw.kw.get('error_scale')
         arg = latent_samples if w is None else latent_samples / w
         expected = jnp.where(
@@ -1717,10 +1717,10 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
 @pytest.mark.parametrize(
     ('outcome_type', 'k', 'het_shape'),
     [
-        # univariate pure-binary with a scalar weight, and mixed
-        # binary-continuous with a per-component (vector) weight. Together with
+        # univariate pure-binary with a scalar error scale, and mixed
+        # binary-continuous with a per-component error scale. Together with
         # `bkw` variants v5 (all-binary, vector) and v6 (mixed, scalar) these
-        # complete the {pure, mixed} x {scalar, vector} weight matrix; the
+        # complete the {pure, mixed} x {scalar, vector} shape matrix; the
         # mixed-vector case is the only one that exercises the 2-D binary-row
         # restriction in `step_z`.
         pytest.param('binary', None, 'scalar', id='binary-scalar'),
@@ -1734,12 +1734,13 @@ def test_heteroskedastic_probit(
     k: int | None,
     het_shape: Literal['scalar', 'vector'],
 ) -> None:
-    """Weights scale the probit latent error, so P(y=1) = Phi(latent / w).
+    """`error_scale` scales the probit latent error, so P(y=1) = Phi(latent / w).
 
     `test_predict_means` and `test_output_ranges` already cover the mean-squash
-    relationship (for the other two weight-shape combinations), the outcome
+    relationship (for the other two error-scale-shape combinations), the outcome
     thresholding and the outcome-vs-mean consistency via the `bkw` fixture; this
-    adds the two combinations `bkw` lacks and the new-test-data weight checks.
+    adds the two combinations `bkw` lacks and the new-test-data error-scale
+    checks.
     """
     n = 20
     train, test = gen_data(
@@ -1780,8 +1781,8 @@ def test_heteroskedastic_probit(
         expected = jnp.where(binary_mask, ndtr(latent / w_train), latent).mean(0)
         assert_close_matrices(mean, expected, rtol=1e-5)
 
-    with subtests.test('weights required on new test data'):
-        msg = 'required because the model was fit with weights'
+    with subtests.test('error scales required on new test data'):
+        msg = 'required because the model was fit with'
         for kind in ('mean', 'mean_samples', 'outcome_samples'):
             extra: dict = {'key': keys.pop()} if kind == 'outcome_samples' else {}
             with pytest.raises(ValueError, match=msg):
@@ -1790,10 +1791,12 @@ def test_heteroskedastic_probit(
             assert jnp.all(jnp.isfinite(pred))
 
     if w_test.ndim == 2:
-        with subtests.test('test weights must match the component dimension'):
-            # a 2-D test weight with the wrong number of components is rejected
+        with subtests.test('test error scales must match the component dimension'):
+            # a 2-D test error scale with the wrong number of components is rejected
             bad = jnp.ones((w_test.shape[0] + 1, w_test.shape[1]))
-            with pytest.raises(ValueError, match='shape mismatch with training'):
+            with pytest.raises(
+                ValueError, match='shape mismatch with the training error scales'
+            ):
                 bart.predict(test.x, kind='mean', error_scale=bad)
 
 
@@ -1990,7 +1993,7 @@ def test_scale_shift(bkw: BartKW) -> None:
         assert bart1._mcmc_state.forest.leaf_tree.dtype == jnp.float32
 
     # blow the response up far enough that the leaves would overflow float16 if
-    # they were stored in data units instead of units of leaf_scale; leaves are
+    # they were stored in data units instead of units of leaf_unit; leaves are
     # summed across trees, so the per-leaf magnitude is the total scale over
     # roughly the square root of the number of trees
     overflow_float16_scale = (
@@ -2071,8 +2074,9 @@ def test_scale_shift(bkw: BartKW) -> None:
         reduce_rank=True,
     )
 
-    # binary mean predictions on new test data need the (training) weights; the
-    # two models share the same `w`, and continuous-only outcomes ignore it
+    # binary mean predictions on new test data need the (training) error
+    # scales; the two models share the same `w`, and continuous-only outcomes
+    # ignore it
     mean_w = bart1._mcmc_state.error_scale if bkw.any_binary else None
     yhat_test_mean1 = bart1.predict(kw['x_train'], kind='mean', error_scale=mean_w)
     yhat_test_mean2 = bart2.predict(x, kind='mean', error_scale=mean_w)

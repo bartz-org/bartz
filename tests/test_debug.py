@@ -79,13 +79,13 @@ def test_format_tree() -> None:
     assert s == ref_s
 
 
-def test_format_tree_leaf_scale() -> None:
+def test_format_tree_leaf_unit() -> None:
     """Check `format_tree` renders the leaf scale and the leaf dtype precision."""
     tree = manual_tree(
         [[1.0], [2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], [[4], [1, 2]], [[15], [0, 3]]
     )
     tree = tree_at(
-        lambda t: (t.leaf_tree, t.leaf_scale),
+        lambda t: (t.leaf_tree, t.leaf_unit),
         tree,
         (tree.leaf_tree.astype(jnp.float16), jnp.float32(0.5)),
     )

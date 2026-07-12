@@ -1366,8 +1366,8 @@ def test_leaf_unit(bkw: BartKW) -> None:
     assert_array_equal(forest.leaf_unit, pow2)
 
 
-def test_inv_sdev_unit(bkw: BartKW) -> None:
-    """`inv_sdev_unit` is the rms of the reciprocal error scales, rounded to a power of two."""
+def test_inv_sdev_scale(bkw: BartKW) -> None:
+    """Check `State.inv_sdev_scale` and `State.inv_sdev_unit`."""
     state = Bart(**bkw.kw)._mcmc_state
 
     assert state.inv_sdev_unit.dtype == jnp.float32
@@ -1379,30 +1379,32 @@ def test_inv_sdev_unit(bkw: BartKW) -> None:
     if state.inv_sdev_scale is None:
         assert_array_equal(state.inv_sdev_unit, jnp.ones(()))
     else:
-        stored = state.inv_sdev_scale.astype(jnp.float32)
+        inv_sdev_scale = state.inv_sdev_scale.astype(jnp.float32)
         rtol = condf(state.inv_sdev_scale, 1e-6, 1e-3)
 
         # the unit times the stored values reconstructs the reciprocal error scales,
         # zeroed at masked datapoints
-        inv_sdev = state.inv_sdev_unit[..., None] * stored
-        scale = jnp.ones(()) if state.error_scale is None else state.error_scale
-        expected = jnp.where(stored != 0, jnp.reciprocal(scale), 0.0)
-        expected = jnp.broadcast_to(expected, inv_sdev.shape)
-        assert_close_matrices(inv_sdev, expected, rtol=rtol, reduce_rank=True)
+        inv_sdev_data_units = state.inv_sdev_unit[..., None] * inv_sdev_scale
+        error_scale = jnp.ones(()) if state.error_scale is None else state.error_scale
+        expected = jnp.where(inv_sdev_scale != 0, jnp.reciprocal(error_scale), 0.0)
+        expected = jnp.broadcast_to(expected, inv_sdev_data_units.shape)
+        assert_close_matrices(
+            inv_sdev_data_units, expected, rtol=rtol, reduce_rank=True
+        )
 
         # the unit is the rms of the reciprocal error scales over non-missing
         # datapoints, so the stored mean square lands within the pow2 bracket
-        ms = jnp.sum(jnp.square(stored), axis=-1)
-        ms = ms / jnp.maximum(jnp.sum(stored != 0, axis=-1), 1)
+        ms = jnp.sum(jnp.square(inv_sdev_scale), axis=-1)
+        ms = ms / jnp.maximum(jnp.sum(inv_sdev_scale != 0, axis=-1), 1)
         assert jnp.all((ms > 0.5 * (1 - 1e-3)) & (ms < 2.0 * (1 + 1e-3)))
 
         # prec_scale is the square (per-component outer product) of the stored
         # reciprocal error scales, in the same units
         prec_scale = nnone(state.prec_scale).astype(jnp.float32)
-        if prec_scale.ndim == stored.ndim:
-            expected_prec = jnp.square(stored)
+        if prec_scale.ndim == inv_sdev_scale.ndim:
+            expected_prec = jnp.square(inv_sdev_scale)
         else:
-            expected_prec = jnp.einsum('an,bn->abn', stored, stored)
+            expected_prec = jnp.einsum('an,bn->abn', inv_sdev_scale, inv_sdev_scale)
         assert_close_matrices(
             prec_scale,
             expected_prec,

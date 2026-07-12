@@ -52,9 +52,9 @@ from bartz.mcmcstep._state import (
     Forest,
     State,
     StepConfig,
-    _round_to_pow2,
     _scaled_error_cov_inv,
     chol_with_gersh,
+    round_to_pow2,
     shard_map_state,
     split_key_for_chains,
     vmap_chains,
@@ -1641,7 +1641,7 @@ def step_resid_eff_scale(
     -------
     The state with `resid_eff_scale` set to the residual rms rounded to a power of two.
     """
-    scale = _round_to_pow2(jnp.sqrt(norm2 / prec_sum))
+    scale = round_to_pow2(jnp.sqrt(norm2 / prec_sum))
     # keep the previous scale if the residuals vanish
     scale = jnp.where(scale == 0, state.resid_eff_scale, scale)
     return replace(state, resid_eff_scale=scale)

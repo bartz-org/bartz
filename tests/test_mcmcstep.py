@@ -113,9 +113,9 @@ from bartz.mcmcstep._reduction import _gpu_sm_count, _resolve_pallas_backend
 from bartz.mcmcstep._state import (
     Forest,
     StepConfig,
-    _inv_via_chol_with_gersh,
-    _search_divisor,
     chol_with_gersh,
+    inv_via_chol_with_gersh,
+    search_divisor,
 )
 from bartz.mcmcstep._step import (
     _blocked_mass_tree,
@@ -581,66 +581,66 @@ class TestCoreAxisMarkers:
 
 
 class TestSearchDivisor:
-    """Test `_search_divisor`."""
+    """Test `search_divisor`."""
 
     def test_target_already_divides(self) -> None:
         """If `target_divisor` divides `dividend`, return it unchanged via the fast path."""
-        assert _search_divisor(5, 100, 1, 100) == 5
+        assert search_divisor(5, 100, 1, 100) == 5
         # target_divisor outside [low, up] is still returned when it divides
-        assert _search_divisor(10, 100, 50, 80) == 10
-        assert _search_divisor(1, 10, 5, 5) == 1
+        assert search_divisor(10, 100, 50, 80) == 10
+        assert search_divisor(1, 10, 5, 5) == 1
 
     def test_no_divisors_in_range_returns_target(self) -> None:
         """Fall back to `target_divisor` when no value in `[low, up]` divides `dividend`."""
         # 11 is prime; range [2, 10] contains no divisors of 11
-        assert _search_divisor(3, 11, 2, 10) == 3
+        assert search_divisor(3, 11, 2, 10) == 3
         # 17 is prime; range [2, 16] contains no divisors of 17
-        assert _search_divisor(7, 17, 2, 16) == 7
+        assert search_divisor(7, 17, 2, 16) == 7
 
     def test_finds_closest_divisor(self) -> None:
         """Return the divisor in `[low, up]` closest to `target_divisor`."""
         # divisors of 24: 1, 2, 3, 4, 6, 8, 12, 24
         # target=5 -> 4 and 6 tie at distance 1; argmin tie-break picks 4
-        assert _search_divisor(5, 24, 1, 24) == 4
+        assert search_divisor(5, 24, 1, 24) == 4
         # target=10 -> 8 and 12 tie at distance 2; tie-break picks 8
-        assert _search_divisor(10, 24, 1, 24) == 8
+        assert search_divisor(10, 24, 1, 24) == 8
         # target=20 -> 24 closer than 12
-        assert _search_divisor(20, 24, 1, 24) == 24
+        assert search_divisor(20, 24, 1, 24) == 24
 
     def test_range_restricts_candidates(self) -> None:
         """Only divisors within `[low, up]` are considered."""
         # divisors of 24 in [5, 7] -> only 6
-        assert _search_divisor(10, 24, 5, 7) == 6
+        assert search_divisor(10, 24, 5, 7) == 6
         # divisors of 24 in [7, 11] -> only 8
-        assert _search_divisor(10, 24, 7, 11) == 8
+        assert search_divisor(10, 24, 7, 11) == 8
 
     def test_single_point_range(self) -> None:
         """A `low == up` range either yields that value or the fallback."""
         # 6 divides 24
-        assert _search_divisor(10, 24, 6, 6) == 6
+        assert search_divisor(10, 24, 6, 6) == 6
         # 5 does not divide 24; no other candidates -> fallback to target
-        assert _search_divisor(10, 24, 5, 5) == 10
+        assert search_divisor(10, 24, 5, 5) == 10
 
     def test_target_equals_one(self) -> None:
         """`target_divisor == 1` always divides any dividend."""
-        assert _search_divisor(1, 7, 2, 7) == 1
-        assert _search_divisor(1, 100, 1, 100) == 1
+        assert search_divisor(1, 7, 2, 7) == 1
+        assert search_divisor(1, 100, 1, 100) == 1
 
     def test_target_equals_dividend(self) -> None:
         """`target_divisor == dividend` divides exactly."""
-        assert _search_divisor(7, 7, 1, 7) == 7
+        assert search_divisor(7, 7, 1, 7) == 7
 
     def test_ties_pick_lower(self) -> None:
         """Equidistant divisors are broken by picking the lower one (argmin convention)."""
         # divisors of 12 in [1, 12]: 1, 2, 3, 4, 6, 12
         # target=5 -> 4 and 6 tie at distance 1; tie-break picks 4
-        assert _search_divisor(5, 12, 1, 12) == 4
+        assert search_divisor(5, 12, 1, 12) == 4
 
     def test_return_type_is_python_int(self) -> None:
         """Returned values are Python ints, not numpy scalars."""
-        assert isinstance(_search_divisor(5, 100, 1, 100), int)
-        assert isinstance(_search_divisor(5, 24, 1, 24), int)
-        assert isinstance(_search_divisor(3, 11, 2, 10), int)
+        assert isinstance(search_divisor(5, 100, 1, 100), int)
+        assert isinstance(search_divisor(5, 24, 1, 24), int)
+        assert isinstance(search_divisor(3, 11, 2, 10), int)
 
     @pytest.mark.parametrize(
         ('target', 'dividend', 'low', 'up'),
@@ -656,7 +656,7 @@ class TestSearchDivisor:
     ) -> None:
         """Preconditions on the arguments are enforced via assertions."""
         with pytest.raises(AssertionError):
-            _search_divisor(target, dividend, low, up)
+            search_divisor(target, dividend, low, up)
 
 
 def reduce_reference(
@@ -2164,7 +2164,7 @@ def test_chol_with_gersh_disparate_scales() -> None:
         chol_with_gersh(mat), jnp.diag(jnp.sqrt(precisions)), rtol=1e-5
     )
     assert_close_matrices(
-        _inv_via_chol_with_gersh(mat), jnp.diag(1 / precisions), rtol=1e-5
+        inv_via_chol_with_gersh(mat), jnp.diag(1 / precisions), rtol=1e-5
     )
 
 

@@ -58,11 +58,11 @@ from bartz.grove import tree_depths
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes
 from bartz.mcmcstep._lazy import (
     _is_lazy_or_none,
-    _lazy,
     _lazy_from_array,
     _LazyArray,
     _wrap_chain,
     add_dummy_axis,
+    lazy,
 )
 from bartz.mcmcstep._reduction import (
     AutoBatchedReduction,
@@ -536,7 +536,7 @@ class State(Module):
             # convert precision to variance and average it over chains
             if self.resid_unit.ndim:
                 error_var = jnp.diagonal(
-                    _inv_via_chol_with_gersh(prec), axis1=-2, axis2=-1
+                    inv_via_chol_with_gersh(prec), axis1=-2, axis2=-1
                 )
             else:
                 error_var = jnp.reciprocal(prec)
@@ -568,13 +568,13 @@ class State(Module):
         return resolution, drift, snap
 
 
-def _check_diagonal(rate: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
+def check_diagonal(rate: Float32[Array, 'k k']) -> Float32[Array, 'k k']:
     """Raise if the Wishart `rate` is not diagonal."""
     diag = jnp.diag(jnp.diag(rate))
     return error_if(rate, jnp.any(rate != diag), 'error_cov_inv.rate must be diagonal')
 
 
-def _check_binary_unit_precision(
+def check_binary_unit_precision(
     value: Float32[Array, 'k k'], binary_mask: Sequence[bool]
 ) -> Float32[Array, 'k k']:
     """Raise if the binary diagonal entries of `value` are not fixed at 1."""
@@ -587,7 +587,7 @@ def _check_binary_unit_precision(
     )
 
 
-def _init_shape_shifting_parameters(
+def init_shape_shifting_parameters(
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | list[OutcomeType],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
@@ -677,10 +677,10 @@ def _init_shape_shifting_parameters(
         assert error_cov_inv.rate is not None
         assert error_cov_inv.rate.shape == 2 * kshape
         assert error_cov_inv.value.shape == 2 * kshape
-        rate = _check_diagonal(error_cov_inv.rate)
-        value = _check_diagonal(error_cov_inv.value)
+        rate = check_diagonal(error_cov_inv.rate)
+        value = check_diagonal(error_cov_inv.value)
         if is_mixed:
-            value = _check_binary_unit_precision(value, binary_mask)
+            value = check_binary_unit_precision(value, binary_mask)
         error_cov_inv = replace(error_cov_inv, rate=rate, value=value)
 
     # All-continuous: a dense `Wishart`.
@@ -700,7 +700,7 @@ def _init_shape_shifting_parameters(
     return is_binary, kshape, error_cov_inv, binary_indices
 
 
-def _check_splitless_vars(
+def check_splitless_vars(
     filter_splitless_vars: int,
     max_split: UInt[Array, ' p'],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
@@ -713,7 +713,7 @@ def _check_splitless_vars(
     return error_if(offset, jnp.sum(max_split == 0) > filter_splitless_vars, msg)
 
 
-def _parse_outcome_type(
+def parse_outcome_type(
     outcome_type: 'OutcomeType | str | Sequence[OutcomeType | str]',
 ) -> 'OutcomeType | list[OutcomeType]':
     """Normalize outcome_type to enum (or list of enums)."""
@@ -723,7 +723,7 @@ def _parse_outcome_type(
         return OutcomeType(outcome_type)
 
 
-def _parse_p_nonterminal(
+def parse_p_nonterminal(
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
 ) -> Float32[Array, ' d_minus_1+1']:
     """Check it's in (0, 1) and pad with a 0 at the end."""
@@ -836,11 +836,9 @@ def init(
     prec_scale_dtype
         Dtype used to store the quantities derived from the error scales,
         `State.prec_scale` and `State.inv_sdev_scale`. Note `State.error_scale`
-        is always float32 instead. The stored values are normalized by the
-        root mean square of ``1 / error_scale`` (see `State.inv_sdev_unit`),
-        so the overall magnitude of `error_scale` cannot over/underflow a
-        narrow dtype; a very large dynamic range of the error scales (beyond a
-        few orders of magnitude in float16) still can.
+        is always float32 instead. These quantities are stored in scaled units,
+        but it's still possible to yield over/underflow in float16 if the
+        dynamic range is high enough.
     resid_dtype
         Dtype used to store the running residuals (`State.resid`). The
         residuals are stored in scaled units to avoid under/overflow with short
@@ -973,22 +971,22 @@ def init(
     offset = jnp.asarray(offset)
     leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
     max_split = jnp.asarray(max_split)
-    error_scale = _asarray_or_none(error_scale)
-    missing = _asarray_or_none(missing)
+    error_scale = asarray_or_none(error_scale)
+    missing = asarray_or_none(missing)
     assert missing is None or missing.ndim <= y.ndim
 
     # normalize outcome_type to enum (or list of enums)
-    outcome_type = _parse_outcome_type(outcome_type)
+    outcome_type = parse_outcome_type(outcome_type)
 
     # check p_nonterminal and pad it with a 0 at the end (still not final shape)
-    p_nonterminal = _parse_p_nonterminal(p_nonterminal)
+    p_nonterminal = parse_p_nonterminal(p_nonterminal)
 
     # process arguments that change depending on outcome type
-    is_binary, kshape, error_cov_inv, binary_indices = _init_shape_shifting_parameters(
+    is_binary, kshape, error_cov_inv, binary_indices = init_shape_shifting_parameters(
         y, outcome_type, offset, error_scale, error_cov_inv, leaf_prior_cov_inv, missing
     )
 
-    storage = _storage_params(
+    storage = determine_storage_params(
         leaf_dtype, prec_scale_dtype, resid_dtype, leaf_prior_cov_inv, kshape, num_trees
     )
 
@@ -997,20 +995,20 @@ def init(
     p, n = X.shape
 
     # check and initialize sparsity parameters
-    if not _all_none_or_not_none(rho, a, b):
+    if not all_none_or_not_none(rho, a, b):
         msg = 'rho, a, b are not either all `None` or all set'
         raise ValueError(msg)
     if theta is None and rho is not None:
         theta = rho
     if log_s is None and theta is not None:
         log_s = jnp.zeros(max_split.size)
-    if not _all_none_or_not_none(theta, sparse_on_at):
+    if not all_none_or_not_none(theta, sparse_on_at):
         msg = 'sparsity params (either theta or rho,a,b) and sparse_on_at must be either all None or all set'
         raise ValueError(msg)
 
     # determine settings for reductions
-    mesh = _parse_mesh(num_chains, mesh)
-    red_cfg = _parse_reduction_configs(
+    mesh = parse_mesh(num_chains, mesh)
+    red_cfg = parse_reduction_configs(
         resid_reduction_config,
         count_reduction_config,
         prec_reduction_config,
@@ -1022,7 +1020,7 @@ def init(
     )
 
     # check there aren't too many deactivated predictors
-    offset = _check_splitless_vars(filter_splitless_vars, max_split, offset)
+    offset = check_splitless_vars(filter_splitless_vars, max_split, offset)
 
     tree_size = 2**max_depth
 
@@ -1030,18 +1028,18 @@ def init(
     # whole region runs with type-checking disabled because the state carries
     # deliberately wrong-typed intermediates parked in its fields for sharding:
     # `_LazyArray` leaves (each chain-bearing leaf is built at its core no-chain
-    # shape, then `_add_chains` wraps it to broadcast in the chain axis) and the
+    # shape, then `add_chains` wraps it to broadcast in the chain axis) and the
     # user `missing` mask in the `inv_sdev_scale` slot. The context ends once
     # every field has been replaced by its final, correctly-typed array.
     with jaxtyping_disabled():
         state = State(
-            _chain_anchor=_lazy(jnp.zeros, ()),  # typechecker chain anchor
+            _chain_anchor=lazy(jnp.zeros, ()),  # typechecker chain anchor
             X=X,
             y=y,
             z=(
-                _lazy(jnp.full, y.shape, offset[..., None])
+                lazy(jnp.full, y.shape, offset[..., None])
                 if is_binary
-                else _lazy(
+                else lazy(
                     jnp.full, (binary_indices.size, n), offset[binary_indices, None]
                 )
                 if binary_indices is not None
@@ -1049,14 +1047,14 @@ def init(
             ),
             binary_indices=binary_indices,
             resid=(
-                _lazy(jnp.zeros, y.shape, storage.resid_dtype)
+                lazy(jnp.zeros, y.shape, storage.resid_dtype)
                 if is_binary
                 # resid is created later after y and offset are sharded
                 else cast(Array, None)
             ),
             resid_unit=storage.resid_unit,
-            resid_eff_scale=_lazy(jnp.full, kshape, storage.resid_unit),
-            resid_inexact_integral=_lazy(jnp.zeros, kshape),
+            resid_eff_scale=lazy(jnp.full, kshape, storage.resid_unit),
+            resid_inexact_integral=lazy(jnp.zeros, kshape),
             # only `value` carries the chain axis, so it becomes the lazy leaf;
             # the prior params `nu`/`rate` are shared across chains
             error_cov_inv=replace(
@@ -1064,52 +1062,52 @@ def init(
             ),
             # `error_scale` goes straight to its field; `missing` is parked in
             # the `inv_sdev_scale` slot so it gets sharded with everything
-            # else. `_compute_scale_related_attrs` derives `prec_scale` and
+            # else. `compute_scale_related_attrs` derives `prec_scale` and
             # `inv_sdev_scale` post-shard.
             error_scale=error_scale,
             prec_scale=None,
             inv_sdev_scale=missing,
             # invalid placeholders; the true values are set post-shard by
-            # `_compute_scale_related_attrs`
+            # `compute_scale_related_attrs`
             inv_sdev_unit=cast(Array, None),
             n_non_missing=cast(Array, None),
             sum_diag_prec_scale=cast(Array, None),
             forest=Forest(
-                leaf_tree=_lazy(
+                leaf_tree=lazy(
                     jnp.zeros, (num_trees, *kshape, tree_size), storage.leaf_dtype
                 ),
                 leaf_unit=storage.leaf_unit,
                 offset=offset,
-                var_tree=_lazy(
+                var_tree=lazy(
                     jnp.zeros,
                     (num_trees, tree_size // 2),
                     minimal_unsigned_dtype(p - 1),
                 ),
-                split_tree=_lazy(
+                split_tree=lazy(
                     jnp.zeros, (num_trees, tree_size // 2), max_split.dtype
                 ),
-                affluence_tree=_lazy(
+                affluence_tree=lazy(
                     _initial_affluence_tree,
                     (num_trees, tree_size // 2),
                     n,
                     min_points_per_decision_node,
                 ),
-                blocked_vars=_get_blocked_vars(filter_splitless_vars, max_split),
+                blocked_vars=get_blocked_vars(filter_splitless_vars, max_split),
                 max_split=max_split,
-                grow_prop_count=_lazy(jnp.zeros, (), int),
-                grow_acc_count=_lazy(jnp.zeros, (), int),
-                prune_prop_count=_lazy(jnp.zeros, (), int),
-                prune_acc_count=_lazy(jnp.zeros, (), int),
+                grow_prop_count=lazy(jnp.zeros, (), int),
+                grow_acc_count=lazy(jnp.zeros, (), int),
+                prune_prop_count=lazy(jnp.zeros, (), int),
+                prune_acc_count=lazy(jnp.zeros, (), int),
                 p_nonterminal=p_nonterminal[tree_depths(tree_size)],
                 p_propose_grow=p_nonterminal[tree_depths(tree_size // 2)],
-                leaf_indices=_lazy(
+                leaf_indices=lazy(
                     jnp.ones, (num_trees, n), minimal_unsigned_dtype(tree_size - 1)
                 ),
                 # the counts serve the minimum-points constraints and stand in
                 # for the precisions when there are no per-datapoint scales
                 # (`prec_scale` is set iff `error_scale` or `missing` is given)
                 count_tree=(
-                    _lazy(_initial_count_tree, (num_trees, tree_size), n)
+                    lazy(_initial_count_tree, (num_trees, tree_size), n)
                     if min_points_per_decision_node is not None
                     or min_points_per_leaf is not None
                     or (error_scale is None and missing is None)
@@ -1117,40 +1115,40 @@ def init(
                 ),
                 # prec_tree is created later, it needs the sharded prec_scale
                 prec_tree=None,
-                min_points_per_decision_node=_asarray_or_none(
+                min_points_per_decision_node=asarray_or_none(
                     min_points_per_decision_node
                 ),
-                min_points_per_leaf=_asarray_or_none(min_points_per_leaf),
-                log_trans_prior=_lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
-                log_likelihood=_lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
+                min_points_per_leaf=asarray_or_none(min_points_per_leaf),
+                log_trans_prior=lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
+                log_likelihood=lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
                 leaf_prior_cov_inv=leaf_prior_cov_inv,
-                log_s=_lazy_from_array(_asarray_or_none(log_s)),
-                theta=_lazy_from_array(_asarray_or_none(theta)),
-                rho=_asarray_or_none(rho),
-                a=_asarray_or_none(a),
-                b=_asarray_or_none(b),
+                log_s=_lazy_from_array(asarray_or_none(log_s)),
+                theta=_lazy_from_array(asarray_or_none(theta)),
+                rho=asarray_or_none(rho),
+                a=asarray_or_none(a),
+                b=asarray_or_none(b),
             ),
             config=StepConfig(
                 steps_done=jnp.int32(0),
-                sparse_on_at=_asarray_or_none(sparse_on_at),
+                sparse_on_at=asarray_or_none(sparse_on_at),
                 sequential_unroll=sequential_unroll,
                 augment=augment,
                 mesh=mesh,
-                leaf_quantization=_asarray_or_none(leaf_quantization),
+                leaf_quantization=asarray_or_none(leaf_quantization),
                 **red_cfg,
             ),
         )
 
         # add the chain axis to every chain-marked leaf at the position
         # declared by its field metadata
-        state = _add_chains(state, num_chains)
+        state = add_chains(state, num_chains)
 
         # delete big input arrays such that they can be deleted as soon as they
         # are sharded, only those arrays that contain an (n,) sized axis
         del X, error_scale, missing, y
 
         # move all arrays to the appropriate device and instantiate lazy arrays
-        state = _shard_state(state)
+        state = shard_state(state)
 
         # replace y at masked positions post-shard (the mask is parked in
         # `inv_sdev_scale`), before `resid` is derived from y
@@ -1163,10 +1161,10 @@ def init(
         # to do the calculation on the right devices. `state.error_scale`
         # already holds the sharded user-supplied scale and
         # `state.inv_sdev_scale` holds the parked `missing` mask.
-        # `_compute_scale_related_attrs` does not donate `error_scale`, so it
+        # `compute_scale_related_attrs` does not donate `error_scale`, so it
         # stays in place; the derived scales fold in the mask, the raw scale
         # does not.
-        attrs = _compute_scale_related_attrs(
+        attrs = compute_scale_related_attrs(
             state.error_scale, state.inv_sdev_scale, storage.prec_scale_dtype, n
         )
         state = replace(
@@ -1181,7 +1179,7 @@ def init(
         # calculate initial resid in the continuous outcome case, such that y
         # and offset are already sharded if needed
         if state.resid is None:
-            state = _set_initial_resid(
+            state = set_initial_resid(
                 state, binary_indices, num_chains, storage.resid_dtype
             )
             # charge the one-time rounding of the initial residuals into storage
@@ -1189,29 +1187,29 @@ def init(
             if jnp.finfo(storage.resid_dtype).nmant < jnp.finfo(state.y.dtype).nmant:
                 state = replace(
                     state,
-                    resid_inexact_integral=_initial_resid_inexact_integral(
+                    resid_inexact_integral=initial_resid_inexact_integral(
                         state.resid, state.n_non_missing, num_trees
                     ),
                 )
 
         # calculate the initial prec_tree from the sharded prec_scale
         if state.prec_scale is not None:
-            state = _set_initial_prec_tree(state, num_chains, num_trees, tree_size)
+            state = set_initial_prec_tree(state, num_chains, num_trees, tree_size)
 
     # all the wrong-typed intermediates have now been replaced by their final
     # values, so type-checking can resume; make all types strong to avoid
     # unwanted recompilations
-    return _remove_weak_types(state)
+    return remove_weak_types(state)
 
 
-def _parse_float_dtype(dtype: DTypeLike) -> jnp.dtype:
+def parse_float_dtype(dtype: DTypeLike) -> jnp.dtype:
     """Normalize a storage dtype and check it is floating point."""
     dtype = jnp.dtype(dtype)
     assert jnp.issubdtype(dtype, jnp.floating)
     return dtype
 
 
-def _compute_leaf_unit(
+def compute_leaf_unit(
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     kshape: tuple[int, ...],
 ) -> Float32[Array, ''] | Float32[Array, ' k']:
@@ -1222,14 +1220,14 @@ def _compute_leaf_unit(
     nan leaves (an infinite precision pins the leaves to zero anyway).
     """
     if kshape:
-        leaf_prior_cov = _inv_via_chol_with_gersh(leaf_prior_cov_inv)
+        leaf_prior_cov = inv_via_chol_with_gersh(leaf_prior_cov_inv)
         leaf_unit = jnp.sqrt(jnp.diagonal(leaf_prior_cov))
     else:
         leaf_unit = jnp.sqrt(jnp.reciprocal(leaf_prior_cov_inv))
     return jnp.where(jnp.isfinite(leaf_unit) & (leaf_unit > 0), leaf_unit, 1.0)
 
 
-def _round_to_pow2(
+def round_to_pow2(
     x: Float32[Array, ''] | Float32[Array, ' k'],
 ) -> Float32[Array, ''] | Float32[Array, ' k']:
     """Round to the nearest power of two."""
@@ -1238,7 +1236,7 @@ def _round_to_pow2(
 
 
 def _scaled_error_cov_inv(
-    state: 'State',
+    state: State,
 ) -> Float32[Array, '*chains'] | Float32[Array, '*chains k k']:
     """Return the error precision with ``inv_sdev_unit ** 2`` folded in.
 
@@ -1259,7 +1257,7 @@ def _scaled_error_cov_inv(
 
 
 @dataclass(frozen=True)
-class _StorageParams:
+class StorageParams:
     """Storage dtypes and units for the leaves and residuals."""
 
     leaf_dtype: jnp.dtype
@@ -1269,34 +1267,26 @@ class _StorageParams:
     resid_unit: Float32[Array, ''] | Float32[Array, ' k']
 
 
-def _storage_params(
+def determine_storage_params(
     leaf_dtype: DTypeLike,
     prec_scale_dtype: DTypeLike,
     resid_dtype: DTypeLike,
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     kshape: tuple[int, ...],
     num_trees: int,
-) -> _StorageParams:
-    """Normalize the storage dtypes and compute the leaf and residual units.
-
-    Leaves and residuals are stored in units of their marginal prior standard
-    deviation, so they are O(1) whatever the data units and do not over/underflow
-    narrow dtypes. Both units are rounded to a power of two so converting between
-    stored and data units is exact, adding no rounding to a float32 value. The
-    residual unit reuses `leaf_unit` (times the square root of the number of
-    trees, since the sum of trees models the data) instead of a new constant.
-    """
-    leaf_unit = _compute_leaf_unit(leaf_prior_cov_inv, kshape)
-    return _StorageParams(
-        leaf_dtype=_parse_float_dtype(leaf_dtype),
-        prec_scale_dtype=_parse_float_dtype(prec_scale_dtype),
-        resid_dtype=_parse_float_dtype(resid_dtype),
-        leaf_unit=_round_to_pow2(leaf_unit),
-        resid_unit=_round_to_pow2(leaf_unit * num_trees**0.5),
+) -> StorageParams:
+    """Normalize the storage dtypes and compute the leaf and residual units."""
+    leaf_unit = compute_leaf_unit(leaf_prior_cov_inv, kshape)
+    return StorageParams(
+        leaf_dtype=parse_float_dtype(leaf_dtype),
+        prec_scale_dtype=parse_float_dtype(prec_scale_dtype),
+        resid_dtype=parse_float_dtype(resid_dtype),
+        leaf_unit=round_to_pow2(leaf_unit),
+        resid_unit=round_to_pow2(leaf_unit * num_trees**0.5),
     )
 
 
-def _set_initial_resid(
+def set_initial_resid(
     state: 'State',
     binary_indices: Int32[Array, ' kb'] | None,
     num_chains: int | None,
@@ -1324,12 +1314,12 @@ def _set_initial_resid(
     chain_axis = chain_vmap_axes(preview).resid
     data_axis = data_vmap_axes(preview).resid
     resid = _wrap_chain(inner, chain_axis, num_chains)
-    resid = _shard_leaf(resid, chain_axis, data_axis, state.config.mesh)
+    resid = shard_leaf(resid, chain_axis, data_axis, state.config.mesh)
     return replace(state, resid=resid)
 
 
 @jit
-def _initial_resid_inexact_integral(
+def initial_resid_inexact_integral(
     resid: Float[Array, '*chains n'] | Float[Array, '*chains k n'],
     n_non_missing: Int32[Array, ''] | Int32[Array, ' k'],
     num_trees: int,
@@ -1387,13 +1377,13 @@ def _initial_count_tree(shape: tuple[int, ...], n: int) -> Shaped[Array, '...']:
     return jnp.zeros(shape, jnp.uint32).at[..., 1].set(n)
 
 
-def _set_initial_prec_tree(
+def set_initial_prec_tree(
     state: State, num_chains: int | None, num_trees: int, tree_size: int
 ) -> State:
     """Build the cached per-leaf precision for root-only trees and shard it.
 
     Called post-shard so the captured ``state.prec_scale`` is already on the
-    target devices; mirrors `_set_initial_resid`.
+    target devices; mirrors `set_initial_resid`.
     """
     assert state.prec_scale is not None
     shape = (num_trees, *state.prec_scale.shape[:-1], tree_size)
@@ -1402,7 +1392,7 @@ def _set_initial_prec_tree(
     preview = replace(state, forest=replace(state.forest, prec_tree=preview_tree))
     chain_axis = chain_vmap_axes(preview).forest.prec_tree
     prec_tree = _wrap_chain(inner, chain_axis, num_chains)
-    prec_tree = _shard_leaf(prec_tree, chain_axis, None, state.config.mesh)
+    prec_tree = shard_leaf(prec_tree, chain_axis, None, state.config.mesh)
     return replace(state, forest=replace(state.forest, prec_tree=prec_tree))
 
 
@@ -1433,8 +1423,8 @@ def _sanitize_y(
     return jnp.where(missing, offset[..., None], y)
 
 
-class _ScaleRelatedAttrs(NamedTuple):
-    """Output of `_compute_scale_related_attrs`."""
+class ScaleRelatedAttrs(NamedTuple):
+    """Output of `compute_scale_related_attrs`."""
 
     inv_sdev_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None
     prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None
@@ -1444,26 +1434,16 @@ class _ScaleRelatedAttrs(NamedTuple):
 
 
 @jit(donate_argnums=(1,), static_argnums=(2, 3))
-def _compute_scale_related_attrs(
+def compute_scale_related_attrs(
     error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
-    prec_scale_dtype: DTypeLike,
+    prec_scale_dtype: jnp.dtype,
     n: int,
-) -> _ScaleRelatedAttrs:
-    """Compute the stored error-scale arrays and their constant summaries.
-
-    The reciprocal error scale is computed in float32 and masked to zero at
-    missing datapoints; its root mean square over non-missing datapoints,
-    rounded to a power of two, is factored out as `State.inv_sdev_unit` before
-    casting the normalized values to `prec_scale_dtype` for storage, so
-    ``inv_sdev_scale`` and ``prec_scale`` are O(1) on average whatever the
-    magnitude of `error_scale`. `missing` is donated to avoid intermediate
-    copies; `error_scale` is not, so the caller can keep it as
-    ``State.error_scale``.
-    """
+) -> ScaleRelatedAttrs:
+    """Compute all the fixed quantities derived from `error_scale` and `missing`."""
     if error_scale is None and missing is None:
         n_non_missing = jnp.full((), n)
-        return _ScaleRelatedAttrs(
+        return ScaleRelatedAttrs(
             inv_sdev_scale=None,
             prec_scale=None,
             inv_sdev_unit=jnp.float32(1.0),
@@ -1471,39 +1451,41 @@ def _compute_scale_related_attrs(
             sum_diag_prec_scale=n_non_missing.astype(jnp.float32),
         )
 
+    # compute inv_sdev_scale
     if error_scale is None:
-        inv_sdev_scale = jnp.array(1.0)
+        inv_sdev_scale = jnp.array(1.0)  # becomes a vector with the `where` below
     else:
         inv_sdev_scale = jnp.reciprocal(error_scale)
     if missing is not None:
         inv_sdev_scale = jnp.where(missing, 0.0, inv_sdev_scale)
 
-    # summaries of the values in data units, constant along the MCMC
+    # count non-missing points, and the equivalent error-scaled quantity
     n_non_missing = jnp.sum(inv_sdev_scale != 0, axis=-1)
     sum_diag_prec_scale = jnp.einsum('...n,...n->...', inv_sdev_scale, inv_sdev_scale)
 
-    # factor out the rms as the storage unit, exactly since it's a power of
-    # two; degenerate cases (all masked, or zero/non-finite scales) leave
-    # the unit at 1
-    unit = _round_to_pow2(jnp.sqrt(sum_diag_prec_scale / jnp.maximum(n_non_missing, 1)))
-    unit = jnp.where(jnp.isfinite(unit) & (unit > 0), unit, 1.0)
-    inv_sdev_scale = inv_sdev_scale / unit[..., None]
+    # compute inv_sdev_unit and factor it out of inv_sdev_scale
+    inv_sdev_unit = round_to_pow2(
+        jnp.sqrt(sum_diag_prec_scale / jnp.maximum(n_non_missing, 1))
+    )
+    inv_sdev_unit = jnp.where(inv_sdev_unit, inv_sdev_unit, 1.0)
+    inv_sdev_scale = inv_sdev_scale / inv_sdev_unit[..., None]
 
-    # the squaring that forms prec_scale happens in float32, before the cast
+    # compute prec_scale
     if inv_sdev_scale.ndim == 1:
         prec_scale = jnp.square(inv_sdev_scale)
     else:
         prec_scale = jnp.einsum('an,bn->abn', inv_sdev_scale, inv_sdev_scale)
-    return _ScaleRelatedAttrs(
+
+    return ScaleRelatedAttrs(
         inv_sdev_scale=inv_sdev_scale.astype(prec_scale_dtype),
         prec_scale=prec_scale.astype(prec_scale_dtype),
-        inv_sdev_unit=unit,
+        inv_sdev_unit=inv_sdev_unit,
         n_non_missing=n_non_missing,
         sum_diag_prec_scale=sum_diag_prec_scale,
     )
 
 
-def _get_blocked_vars(
+def get_blocked_vars(
     filter_splitless_vars: int, max_split: UInt[Array, ' p']
 ) -> None | UInt[Array, ' q']:
     """Initialize the `blocked_vars` field."""
@@ -1518,7 +1500,7 @@ def _get_blocked_vars(
         return None
 
 
-def _add_chains(state: 'State', num_chains: int | None) -> 'State':
+def add_chains(state: 'State', num_chains: int | None) -> 'State':
     """Extend chain-marked `_LazyArray` leaves to include a chain axis of size `num_chains`.
 
     Walks `state`, asks `chain_vmap_axes` where each leaf's chain axis lives,
@@ -1530,7 +1512,7 @@ def _add_chains(state: 'State', num_chains: int | None) -> 'State':
 
     Chain-marked leaves are required to be `_LazyArray` (or `None`); eager
     arrays at chain-marked positions are rejected so that all chain insertion
-    happens at concretization time inside `_shard_state`.
+    happens at concretization time inside `shard_state`.
     """
     if num_chains is None:
         return state
@@ -1548,7 +1530,7 @@ def _add_chains(state: 'State', num_chains: int | None) -> 'State':
     return tree.map(wrap, state, chain_axes, is_leaf=_is_lazy_or_none)
 
 
-def _parse_mesh(
+def parse_mesh(
     num_chains: int | None, mesh: Mesh | dict[str, int] | None
 ) -> Mesh | None:
     """Parse the `mesh` argument."""
@@ -1584,7 +1566,7 @@ def _parse_mesh(
 
 @partial(filter_jit, donate='all')
 # jit and donate because otherwise type conversion would create copies
-def _remove_weak_types(x: PyTree[Array, 'T']) -> PyTree[Array, 'T']:
+def remove_weak_types(x: PyTree[Array, 'T']) -> PyTree[Array, 'T']:
     """Make all types strong.
 
     This is to avoid recompilation in `run_mcmc` or `step`.
@@ -1599,12 +1581,12 @@ def _remove_weak_types(x: PyTree[Array, 'T']) -> PyTree[Array, 'T']:
     return tree.map(remove_weak, x)
 
 
-def _shard_state(state: State) -> State:
+def shard_state(state: State) -> State:
     """Place all arrays on the appropriate devices, and instantiate lazily defined arrays."""
     mesh = state.config.mesh
-    shard_leaf = partial(_shard_leaf, mesh=mesh)
+    shard_leaf_mesh = partial(shard_leaf, mesh=mesh)
     return tree.map(
-        shard_leaf,
+        shard_leaf_mesh,
         state,
         chain_vmap_axes(state),
         data_vmap_axes(state),
@@ -1612,7 +1594,7 @@ def _shard_state(state: State) -> State:
     )
 
 
-def _leaf_partition_spec(
+def leaf_partition_spec(
     ndim: int, chain_axis: int | None, data_axis: int | None, mesh: Mesh
 ) -> PartitionSpec:
     """Build a `PartitionSpec` for a leaf with the given chain/data axes."""
@@ -1630,7 +1612,7 @@ def _leaf_partition_spec(
     return PartitionSpec(*spec)
 
 
-def _shard_leaf(
+def shard_leaf(
     x: Shaped[Array, '*shape'] | None | Shaped[_LazyArray, '*shape'],
     chain_axis: int | None,
     data_axis: int | None,
@@ -1643,11 +1625,11 @@ def _shard_leaf(
     if mesh is None:
         sharding = None
     else:
-        spec = _leaf_partition_spec(x.ndim, chain_axis, data_axis, mesh)
+        spec = leaf_partition_spec(x.ndim, chain_axis, data_axis, mesh)
         sharding = NamedSharding(mesh, spec)
 
     if isinstance(x, _LazyArray):
-        x = _concretize_lazy_array(x, sharding)
+        x = concretize_lazy_array(x, sharding)
     elif sharding is not None:
         x = device_put(x, sharding, donate=True)
 
@@ -1658,7 +1640,7 @@ def _shard_leaf(
 # jit such that in recent jax versions the shards are created on the right
 # devices immediately instead of being created on the wrong device and then
 # copied
-def _concretize_lazy_array(
+def concretize_lazy_array(
     x: Shaped[_LazyArray, '*shape'], sharding: NamedSharding | None
 ) -> Shaped[Array, '*shape']:
     """Create an array from an abstract spec on the appropriate devices."""
@@ -1668,18 +1650,18 @@ def _concretize_lazy_array(
     return x
 
 
-def _all_none_or_not_none(*args: object) -> bool:
+def all_none_or_not_none(*args: object) -> bool:
     is_none = [x is None for x in args]
     return all(is_none) or not any(is_none)
 
 
-def _asarray_or_none(x: object) -> Shaped[Array, '...'] | None:
+def asarray_or_none(x: object) -> Shaped[Array, '...'] | None:
     if x is None:
         return None
     return jnp.asarray(x)
 
 
-class _ReductionConfig(TypedDict):
+class ReductionConfigs(TypedDict):
     """Fields of `StepConfig` related to reductions."""
 
     resid_reduction_config: ReductionConfig
@@ -1688,7 +1670,7 @@ class _ReductionConfig(TypedDict):
     prec_count_num_trees: int | None
 
 
-def _parse_reduction_configs(
+def parse_reduction_configs(
     resid_reduction_config: ReductionConfig,
     count_reduction_config: ReductionConfig,
     prec_reduction_config: ReductionConfig,
@@ -1697,13 +1679,15 @@ def _parse_reduction_configs(
     num_trees: int,
     num_chains: int | None,
     mesh: Mesh | None,
-) -> _ReductionConfig:
+) -> ReductionConfigs:
     """Determine settings for indexed reduces."""
     n = y.shape[-1]
     n //= get_axis_size(mesh, 'data')  # per-device datapoints
+
     # chains are vmapped together on each device, so they share the per-step
     # memory of the per-tree reduction
     chains_per_device = (num_chains or 1) // get_axis_size(mesh, 'chains')
+
     # the reduction configs carry their own datapoint-batch settings (resolved
     # per-platform at run time when 'auto', see `ReductionConfig`), so they are
     # stored verbatim; only `prec_count_num_trees`, which does not depend on the
@@ -1712,13 +1696,13 @@ def _parse_reduction_configs(
         resid_reduction_config=resid_reduction_config,
         count_reduction_config=count_reduction_config,
         prec_reduction_config=prec_reduction_config,
-        prec_count_num_trees=_parse_prec_count_num_trees(
+        prec_count_num_trees=parse_prec_count_num_trees(
             prec_count_num_trees, num_trees, n * chains_per_device
         ),
     )
 
 
-def _parse_prec_count_num_trees(
+def parse_prec_count_num_trees(
     prec_count_num_trees: int | None | Literal['auto'], num_trees: int, n: int
 ) -> int | None:
     """Return the number of trees to process at a time or determine it automatically."""
@@ -1728,7 +1712,7 @@ def _parse_prec_count_num_trees(
     pcnt = max_n_by_ntree // max(1, n)
     pcnt = min(num_trees, pcnt)
     pcnt = max(1, pcnt)
-    pcnt = _search_divisor(
+    pcnt = search_divisor(
         pcnt, num_trees, max(1, pcnt // 2), max(1, min(num_trees, pcnt * 2))
     )
     if pcnt >= num_trees:
@@ -1736,7 +1720,7 @@ def _parse_prec_count_num_trees(
     return pcnt
 
 
-def _search_divisor(target_divisor: int, dividend: int, low: int, up: int) -> int:
+def search_divisor(target_divisor: int, dividend: int, low: int, up: int) -> int:
     """Find the divisor closest to `target_divisor` in [low, up] if `target_divisor` is not already.
 
     If there is none, give up and return `target_divisor`.
@@ -1794,7 +1778,7 @@ def _chol_with_gersh_impl(
     return scale[:, None] * jnp.linalg.cholesky(mat)
 
 
-def _inv_via_chol_with_gersh(
+def inv_via_chol_with_gersh(
     mat: Float32[Array, '*batch_shape k k'],
 ) -> Float32[Array, '*batch_shape k k']:
     """Compute matrix inverse via Cholesky with Gershgorin stabilization.
@@ -1850,7 +1834,7 @@ def partition_specs(x: PyTree, mesh: Mesh) -> PyTree[PartitionSpec]:
     A pytree matching `x` with a `PartitionSpec` in place of each array leaf.
     """
     return tree.map(
-        lambda leaf, ca, da: _leaf_partition_spec(leaf.ndim, ca, da, mesh),
+        lambda leaf, ca, da: leaf_partition_spec(leaf.ndim, ca, da, mesh),
         x,
         chain_vmap_axes(x),
         data_vmap_axes(x),
@@ -1887,7 +1871,7 @@ def shard_map_state(
             mesh=mesh,
             in_specs=(key_spec, state_specs),
             out_specs=state_specs,
-            **_get_shard_map_patch_kwargs(),
+            **get_shard_map_patch_kwargs(),
         )
         return mapped(key, state)
 
@@ -1917,11 +1901,11 @@ def vmap_chains(
     return wrapped
 
 
-class _ShardMapPatchKwargs(TypedDict, total=False):
+class ShardMapPatchKwargs(TypedDict, total=False):
     check_vma: bool
 
 
-def _get_shard_map_patch_kwargs() -> _ShardMapPatchKwargs:
+def get_shard_map_patch_kwargs() -> ShardMapPatchKwargs:
     # bug: jax 0.8.1-0.8.2: vmap(shard_map(psum)), jax#34249; the
     # jax_disable_vmap_shmap_error config did not work.
 

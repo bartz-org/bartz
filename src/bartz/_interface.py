@@ -84,10 +84,10 @@ from bartz.mcmcstep._state import (
     ArrayLike,
     FloatLike,
     State,
-    _inv_via_chol_with_gersh,
-    _leaf_partition_spec,
     chol_with_gersh,
     init,
+    inv_via_chol_with_gersh,
+    leaf_partition_spec,
 )
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
 
@@ -960,7 +960,7 @@ class Bart(Module):
         if mesh is not None:
             put = lambda a: device_put(
                 a,
-                NamedSharding(mesh, _leaf_partition_spec(a.ndim, None, -1, mesh)),
+                NamedSharding(mesh, leaf_partition_spec(a.ndim, None, -1, mesh)),
                 donate=True,
             )
         elif self._device is not None:
@@ -1549,7 +1549,7 @@ def get_error_sdev(
         prec = prec[..., None, None]
 
     # invert precision to covariance, then take diagonal variance
-    cov = _inv_via_chol_with_gersh(prec)
+    cov = inv_via_chol_with_gersh(prec)
     var = jnp.diagonal(cov, axis1=-2, axis2=-1)
     if mean:
         var = var.mean(0)

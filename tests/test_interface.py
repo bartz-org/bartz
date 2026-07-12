@@ -1028,6 +1028,62 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     assert_close_matrices(empirical_cov, leaf_prior_cov, rtol=0.02)
 
 
+def test_error_scale_magnitude_invariance(bkw: BartKW) -> None:
+    """Rescaling `error_scale` by a constant only rescales the error variance.
+
+    With the 'auto' `sigma_scale` and `sigma_init` settings, rescaling all the
+    error scales by a power of two ``c`` rescales the error precision prior and
+    initial value by ``c ** -2`` exactly, so the two MCMCs coincide exactly.
+    This exercises the `State.inv_sdev_unit` normalization end-to-end through
+    the interface: with float16 `prec_scale` storage, an unnormalized ``1 /
+    error_scale ** 2`` would overflow (small ``c``) or underflow (large ``c``)
+    and the runs would diverge.
+    """
+    if bkw.any_binary:
+        pytest.skip(
+            'binary components have a fixed latent error variance, so'
+            ' rescaling `error_scale` changes the model'
+        )
+
+    def run(c: float) -> State:
+        kw = bkw.kw
+        bart = Bart(
+            **dict(
+                kw,
+                seed=random.clone(kw['seed']),
+                error_scale=c * kw['error_scale'],
+                init_kw=dict(kw.get('init_kw', {}), prec_scale_dtype=jnp.float16),
+            )
+        )
+        return bart._mcmc_state
+
+    state_ref = run(1.0)
+
+    for c in (2.0**-9, 2.0**9):
+        state_scaled = run(c)
+
+        # the unit absorbs the rescaling exactly, being a power of two, so the
+        # stored arrays are identical and O(1) in both runs
+        prec_scale = nnone(state_scaled.prec_scale)
+        assert prec_scale.dtype == jnp.float16
+        assert jnp.all(jnp.isfinite(prec_scale))
+        assert jnp.all(prec_scale > 0)
+        assert_array_equal(nnone(state_ref.prec_scale), prec_scale)
+        assert_array_equal(
+            nnone(state_ref.inv_sdev_scale), nnone(state_scaled.inv_sdev_scale)
+        )
+        assert_array_equal(state_scaled.inv_sdev_unit, state_ref.inv_sdev_unit / c)
+
+        assert_array_equal(state_ref.forest.split_tree, state_scaled.forest.split_tree)
+        assert_array_equal(state_ref.forest.var_tree, state_scaled.forest.var_tree)
+        assert_array_equal(state_ref.forest.leaf_tree, state_scaled.forest.leaf_tree)
+        assert_array_equal(state_ref.resid, state_scaled.resid)
+        assert_array_equal(
+            nnone(state_scaled.error_cov_inv).value,
+            c**2 * nnone(state_ref.error_cov_inv).value,
+        )
+
+
 def test_check_trees_detects_corruption(bkw: BartKW) -> None:
     """`_check_trees` flags trees corrupted mid-MCMC (guard against false negatives).
 

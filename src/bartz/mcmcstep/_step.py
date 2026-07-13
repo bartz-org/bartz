@@ -52,9 +52,9 @@ from bartz.mcmcstep._state import (
     Forest,
     State,
     StepConfig,
-    _scaled_error_cov_inv,
     chol_with_gersh,
     round_to_pow2,
+    scaled_error_cov_inv,
     shard_map_state,
     split_key_for_chains,
     vmap_chains,
@@ -429,7 +429,7 @@ def accept_moves_parallel_stage(
     # `prec_trees` and the per-leaf residual sums are in stored `prec_scale`
     # units, so their common `inv_sdev_unit ** 2` factor is folded into the
     # error precision once here instead
-    error_cov_inv = _scaled_error_cov_inv(state)
+    error_cov_inv = scaled_error_cov_inv(state)
     prelf = precompute_leaf_terms(
         key, prec_trees, error_cov_inv, state.forest.leaf_prior_cov_inv
     )
@@ -1072,7 +1072,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
                 pso.state.config.data_sharded,
                 pso.state.prec_scale,
                 pso.state.forest.log_likelihood is not None,
-                _scaled_error_cov_inv(pso.state)
+                scaled_error_cov_inv(pso.state)
                 if isinstance(pso.prelf, PreLfMVHet)
                 else None,
                 pso.state.forest.leaf_unit,

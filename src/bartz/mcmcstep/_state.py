@@ -169,21 +169,24 @@ class DiagWishart(Wishart):
 class Forest(Module):
     """Represents the MCMC state of a sum of trees."""
 
-    # Heap-array fields follow the `bartz.grove.TreesTrace` convention: the
-    # union-free integer trees are declared before `leaf_tree` and carry the
-    # bindable `half_tree_size` axis, while `leaf_tree` (and `p_nonterminal`) are
-    # checked against `2*half_tree_size`. Declaring a union-free `*chains` field
-    # first binds the variadic chain axis (plus `num_trees` and `half_tree_size`)
-    # before `leaf_tree`'s `... | ... k ...` union is evaluated, so the runtime
-    # typechecker can't mis-bind `*chains` against the `k` axis of a multivariate
-    # forest (the layouts are otherwise rank-ambiguous). No anchor field needed.
+    # Implementation note related to runtime type checking: Heap-array fields
+    # follow the `bartz.grove.TreesTrace` convention: the union-free integer
+    # trees are declared before `leaf_tree` and carry the bindable
+    # `half_tree_size` axis, while `leaf_tree` (and `p_nonterminal`) are
+    # checked against `2*half_tree_size`. Declaring a union-free `*chains`
+    # field first binds the variadic chain axis (plus `num_trees` and
+    # `half_tree_size`) before `leaf_tree`'s `... | ... k ...` union is
+    # evaluated, so the runtime typechecker can't mis-bind `*chains` against
+    # the `k` axis of a multivariate forest (the layouts are otherwise
+    # rank-ambiguous). No dummy anchor field needed.
+
     var_tree: UInt[Array, '*chains num_trees half_tree_size'] = field(chains=CHAIN_AXIS)
-    """The decision axes."""
+    """Variables/predictors/axes of decision rules."""
 
     split_tree: UInt[Array, '*chains num_trees half_tree_size'] = field(
         chains=CHAIN_AXIS
     )
-    """The decision boundaries."""
+    """Cutpoints/boundaries of decision rules."""
 
     affluence_tree: Bool[Array, '*chains num_trees half_tree_size'] = field(
         chains=CHAIN_AXIS
@@ -194,42 +197,42 @@ class Forest(Module):
         Float[Array, '*chains num_trees 2*half_tree_size']
         | Float[Array, '*chains num_trees k 2*half_tree_size']
     ) = field(chains=CHAIN_AXIS)
-    """The leaf values, in units of `leaf_unit`."""
+    """The leaf values, in units of `leaf_unit`. The function computed by the
+    forest is ``offset + leaf_unit * (sum of leaves)``."""
 
     leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
-    """The storage unit of the leaf values. The function represented by the forest is
-    ``offset + leaf_unit * (sum of leaf values)``. Set to the marginal prior
-    standard deviation of a leaf, rounded to a power of two, so the stored leaves
-    are O(1) whatever the data units and do not over/underflow narrow `leaf_tree`
-    dtypes, and converting to and from data units is exact."""
+    """The storage unit of the leaves. Keeps the stored values O(1) whatever
+    the data units, so they do not under/overflow narrow `leaf_tree` dtypes.
+    Set to the marginal prior standard deviation of a leaf, rounded to a power
+    of two so converting to and from data units is exact."""
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
-    """Constant shift added to the scaled sum of trees, see `leaf_unit`."""
+    """Constant shift added to the scaled sum of trees, see `leaf_tree`."""
 
     grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
-    """The number of grow proposals made during one full MCMC cycle."""
+    """The number of grow proposals made during the last MCMC step."""
 
     prune_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
-    """The number of prune proposals made during one full MCMC cycle."""
+    """The number of prune proposals made during the last MCMC step."""
 
     grow_acc_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
-    """The number of grow moves accepted during one full MCMC cycle."""
+    """The number of grow moves accepted during the last MCMC step."""
 
     prune_acc_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
-    """The number of prune moves accepted during one full MCMC cycle."""
+    """The number of prune moves accepted during the last MCMC step."""
 
     max_split: UInt[Array, ' p']
     """The maximum split index for each predictor."""
 
     blocked_vars: UInt[Array, ' q'] | None
-    """Indices of variables that are not used. This shall include at least
-    the `i` such that ``max_split[i] == 0``, otherwise behavior is
+    """Indices of not to be used variables/predictors. This shall include at
+    least all the `i`  that yield ``max_split[i] == 0``, otherwise behavior is
     undefined."""
 
     p_nonterminal: Float32[Array, ' 2*half_tree_size']
-    """The prior probability of each node being nonterminal, conditional on
-    its ancestors. Includes the nodes at maximum depth which should be set
-    to 0."""
+    """The prior probability of each node being nonterminal (conditional on its
+    ancestors leaving at least one available decision rule). Includes the nodes
+    at maximum depth which shall be set to 0."""
 
     p_propose_grow: Float32[Array, ' half_tree_size']
     """The unnormalized probability of picking a leaf for a grow proposal."""
@@ -237,11 +240,12 @@ class Forest(Module):
     leaf_indices: UInt[Array, 'num_trees *chains n'] = field(
         chains=CHAIN_AXIS_AFTER_TREES, data=-1
     )
-    """The index of the leaf each datapoints falls into, for each tree.
+    """The index of the leaf each datapoint falls into, for each tree.
 
     The chain axis sits after `num_trees` (not leading, unlike sibling fields)
-    so the per-tree `lax.scan` in `step`, under the chain `vmap`, avoids a
-    transpose of this large array that otherwise inflates gpu peak memory."""
+    so the per-tree `jax.lax.scan` in `step`, under the chain `jax.vmap`,
+    avoids a transpose of this large array that otherwise inflates gpu peak
+    memory."""
 
     count_tree: UInt32[Array, '*chains num_trees 2*half_tree_size'] | None = field(
         chains=CHAIN_AXIS
@@ -256,11 +260,9 @@ class Forest(Module):
         | Float32[Array, '*chains num_trees k k 2*half_tree_size']
         | None
     ) = field(chains=CHAIN_AXIS)
-    """The likelihood precision scale summed over the datapoints in each leaf,
-    in the stored units of `State.prec_scale` (i.e., ``State.inv_sdev_unit **
-    2``). Valid at the leaves and at the nodes involved in the latest moves,
-    dirty elsewhere. `None` if there are no per-datapoint error scales, in
-    which case `count_tree` takes its place."""
+    """The sum of `State.prec_scale` over the datapoints in each leaf, in the
+    same units; valid/dirty like `count_tree`. `None` if there are no
+    per-datapoint error scales, in which case `count_tree` takes its place."""
 
     min_points_per_decision_node: Int32[Array, ''] | None
     """The minimum number of data points in a decision node."""
@@ -271,8 +273,8 @@ class Forest(Module):
     log_trans_prior: Float32[Array, '*chains num_trees'] | None = field(
         chains=CHAIN_AXIS
     )
-    """The log transition and prior Metropolis-Hastings ratio for the
-    proposed move on each tree."""
+    """The log transition and prior Metropolis-Hastings ratio for the proposed
+    move on each tree."""
 
     log_likelihood: Float32[Array, '*chains num_trees'] | None = field(
         chains=CHAIN_AXIS
@@ -280,32 +282,33 @@ class Forest(Module):
     """The log likelihood ratio."""
 
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'] | None
-    """The prior precision matrix of a leaf, conditional on the tree structure.
-    For the univariate case (k=1), this is a scalar (the inverse variance).
-    The prior covariance of the sum of trees is
-    ``num_trees * leaf_prior_cov_inv^-1``."""
+    """The prior precision matrix of a leaf, conditional on the tree structure
+    (a scalar inverse variance for univariate). The prior mean of a leaf is
+    zero; the prior covariance of the sum of trees is ``num_trees *
+    leaf_prior_cov_inv^-1``."""
 
     log_s: Float32[Array, '*chains p'] | None = field(chains=CHAIN_AXIS)
     """The logarithm of the prior probability for choosing a variable to split
-    along in a decision rule, conditional on the ancestors. Not normalized.
-    If `None`, use a uniform distribution."""
+    along in a decision rule. Not normalized. Variables that do not have any
+    available decision rule at a given node are masked away. If `None`, use a
+    uniform distribution."""
 
     theta: Float32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
     """The concentration parameter for the Dirichlet prior on the variable
-    distribution `s`. Required only to update `log_s`."""
+    distribution `s`. If not set, `log_s` is left constant."""
 
     a: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. Required only to sample `theta`."""
+    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
 
     b: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. Required only to sample `theta`."""
+    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
 
     rho: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. Required only to sample `theta`."""
+    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
 
     @property
     def has_chains(self) -> bool:
-        """Whether this forest carries an explicit chain axis."""
+        """Whether non-constant attributes in the forest carry an explicit chain axis."""
         return self.var_tree.ndim > 2
 
 
@@ -316,7 +319,8 @@ class StepConfig(Module):
     """The number of MCMC steps completed so far."""
 
     sparse_on_at: Int32[Array, ''] | None
-    """After how many steps to turn on variable selection."""
+    """After how many steps to turn on variable selection. If `None`, variable
+    selection is disabled."""
 
     resid_reduction_config: ReductionConfig
     """How to sum the residuals in each leaf."""
@@ -335,16 +339,24 @@ class StepConfig(Module):
     `step`. See the ``unroll`` argument of `jax.lax.scan`."""
 
     augment: bool = field(static=True)
-    """Whether to account exactly, via data augmentation, for the decision rules
-    forbidden by the ancestors of each node when updating `log_s`."""
+    """Whether to account exactly, via data augmentation, for the decision
+    rules forbidden by the ancestors of each node when updating
+    `Forest.log_s`."""
 
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
 
     leaf_quantization: Int32[Array, ''] | None = None
-    """If set, quantize the leaves such that the running updates of
-    `State.resid` are mostly exact, assuming ``|resid| <
-    2**(leaf_quantization+1)`` in `State.resid_eff_scale` units."""
+    """If set, quantize the leaves to multiples of ``eps(resid dtype) * 2 **
+    leaf_quantization`` in `State.resid_eff_scale` units, which makes the
+    running updates of `State.resid` mostly exact, (almost) stopping their
+    random-walk rounding drift, assuming ``|resid| < 2 ** (leaf_quantization +
+    1)`` holds (in the same units) for most datapoints most of the time.
+    Intended mostly for use with float16 residuals. Sensible settings are 0 and
+    1, with 0 leaving some drift, 1 practically no drift, and no setting above
+    1 justifying the reduced accuracy. With enough datapoints or trees the
+    MCMC breaks down because the sampled leaf variation becomes smaller than
+    the quantum, so this setting can not be used liberally."""
 
     @property
     def data_sharded(self) -> bool:
@@ -357,12 +369,12 @@ class State(Module):
 
     _chain_anchor: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """Unused per-chain scalar, declared first as a runtime-typechecker anchor.
-    Its single (union-free) ``*chains`` annotation binds the variadic chain axis
-    before the ``... | ... k ...`` unions of `z`/`resid` (z over the
+    Its single (union-free) ``*chains`` annotation binds the variadic chain
+    axis before the ``... | ... k ...`` unions of `z`/`resid` (z over the
     binary-outcome ``kb`` axis) are checked; otherwise those can mis-bind
-    ``*chains`` against the outcome axis for a multivariate-without-chains state
-    (the layouts are rank-ambiguous). Unlike `Forest`, `State` has no genuine
-    union-free chain field to reorder into this slot, so a dummy one is
+    ``*chains`` against the outcome axis for a multivariate-without-chains
+    state (the layouts are rank-ambiguous). Unlike `Forest`, `State` has no
+    genuine union-free chain field to reorder into this slot, so a dummy one is
     carried."""
 
     X: UInt[Array, 'p n'] = field(data=-1)
@@ -370,14 +382,14 @@ class State(Module):
 
     y: Float32[Array, ' n'] | Float32[Array, 'k n'] = field(data=-1)
     """The response, in data units. Binary components are stored as 0/1.
-    Missing values are replaced by the offset."""
+    Missing values are replaced by `Forest.offset`."""
 
     z: None | Float32[Array, '*chains n'] | Float32[Array, '*chains kb n'] = field(
         chains=CHAIN_AXIS, data=-1
     )
-    """The latent variable for binary regression. `None` in continuous
+    """The latent outcomes for binary regression. `None` in continuous
     regression. In the mixed binary-continuous case, only the binary outcome
-    components are stored, with shape ``(*chains, kb, n)``."""
+    components are stored."""
 
     binary_indices: None | Int32[Array, ' kb']
     """The indices of binary outcome components in the full list of outcome
@@ -386,84 +398,66 @@ class State(Module):
     resid: Float[Array, '*chains n'] | Float[Array, '*chains k n'] = field(
         chains=CHAIN_AXIS, data=-1
     )
-    """The residuals (`y` or `z` minus sum of trees), in units of `resid_unit`."""
+    """The residuals, ``resid_unit * resid = (y or z) - sum of trees``."""
 
     resid_unit: Float32[Array, ''] | Float32[Array, ' k']
-    """The storage unit of the residuals. The residual in data units is
-    ``resid_unit * resid``. Set to the marginal prior standard deviation of the
-    sum of trees (`Forest.leaf_unit` times the square root of the number of
-    trees), rounded to a power of two so the conversion to and from data units
-    is exact. This keeps the stored residuals O(1) whatever the data units, so
-    they do not over/underflow narrow `resid` dtypes (see `init`'s
-    ``resid_dtype``)."""
+    """The storage unit of `resid` (see `init`'s ``resid_dtype``), same scheme
+    as `Forest.leaf_unit`. Equal to ``leaf_unit * sqrt(num_trees)`` (the
+    marginal prior standard deviation of the sum of trees) rounded to a power
+    of two."""
 
     resid_eff_scale: Float32[Array, '*chains'] | Float32[Array, '*chains k'] = field(
         chains=CHAIN_AXIS
     )
-    """The measured scale of the residuals, in data units: the
-    (precision-scaled, masked) root mean square of ``resid_unit * resid``,
-    rounded to a power of two. Initialized to `resid_unit`, updated by
-    `step_error_cov_inv`. Sets the leaf quantization grid (see
-    `StepConfig.leaf_quantization`), while the storage units of `resid` stay
-    fixed at `resid_unit`."""
+    """The measured scale of the residuals (their precision-weighted root mean
+    square in data units), rounded to a power of two. Sets the leaf
+    quantization grid (see `StepConfig.leaf_quantization`). Initialized to
+    `resid_unit`, then tracks the MCMC (while the storage unit of `resid` stays
+    fixed at `resid_unit`)."""
 
     resid_inexact_integral: Float32[Array, '*chains'] | Float32[Array, '*chains k'] = (
         field(chains=CHAIN_AXIS)
     )
     """Sum over the MCMC steps done of the mean square of the residuals (in
-    `resid_unit` units) large enough that their running updates round, taken
-    at the start of each step. Seeded by `init` with one tree-update's worth
-    of the initial residuals (their one-time storage rounding persists when
-    the later updates are exact), used by `sum_trees_eps` to estimate the
-    rounding error drift."""
+    `resid_unit` units) large enough that their running updates round. Used by
+    `sum_trees_eps` to estimate the accumulated rounding drift."""
 
     error_cov_inv: Wishart
-    """The inverse error covariance with its Wishart prior. The current value is
-    ``error_cov_inv.value`` (scalar for univariate, matrix for multivariate);
-    identity with no prior in binary regression."""
+    """The inverse error covariance (``error_cov_inv.value``, scalar for
+    univariate) with its Wishart prior. Fixed at the identity with no prior in
+    binary regression."""
 
     error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(data=-1)
-    """The per-observation error standard-deviation scale (the `error_scale`
-    argument of `init`). `None` if fit without it. Shape ``(n,)`` for a scalar
-    scale per datapoint, or ``(k, n)`` for a per-component scale per datapoint.
-    `inv_sdev_scale` and `prec_scale` are derived from this and the missingness
-    mask."""
+    """The per-datapoint error scales (the ``error_scale`` argument of `init`).
+    The error precision on a datapoint is ``error_cov_inv.value /
+    outer(error_scale, error_scale)``. For binary components the (fixed, unit)
+    probit latent error is scaled instead, so the success probability is
+    ``Phi(sum of trees / error_scale)``. `inv_sdev_scale` and `prec_scale` are
+    derived from this and the missingness mask."""
 
     prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None = field(data=-1)
-    """The scale on the error precision, derived from `error_scale` and the
-    missingness mask. `None` if fit without error scales or a missingness mask.
-    With scalar per-datapoint error scales, shape ``(n,)``; with per-component
-    error scales, shape ``(k, k, n)``. Stored in units of ``inv_sdev_unit ** 2``
-    (elementwise ``outer(inv_sdev_unit, inv_sdev_unit)`` in the vector case),
-    which makes it O(1) on average whatever the magnitude of `error_scale`, so
-    it does not over/underflow the narrow dtypes allowed by `init`'s
-    ``prec_scale_dtype``. The error precision in data units is
-    ``inv_sdev_unit ** 2 * prec_scale * error_cov_inv``."""
+    """The scale on the error precision, ``prec_scale = outer(inv_sdev_scale,
+    inv_sdev_scale)`` per datapoint (``inv_sdev_scale ** 2`` for scalar
+    scales), so it's in units of ``inv_sdev_unit ** 2``. Stored, like
+    `inv_sdev_scale`, in `init`'s ``prec_scale_dtype``."""
 
     inv_sdev_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None = field(data=-1)
-    """The reciprocal of the per-observation error scale in units of
-    `inv_sdev_unit`, zeroed at masked datapoints. `None` if fit without error
-    scales or a missingness mask. Shape ``(n,)`` for scalar per-datapoint error
-    scales, or ``(k, n)`` for per-component error scales. Like `prec_scale`,
-    its dtype may be narrower than float32 (see `init`'s
-    ``prec_scale_dtype``)."""
+    """``inv_sdev_scale * inv_sdev_unit = 1 / error_scale``, zeroed at missing
+    datapoints. Not `None` when ``missing`` is set even if fit without error
+    scales."""
 
     inv_sdev_unit: Float32[Array, ''] | Float32[Array, ' k']
-    """The storage unit of `inv_sdev_scale`: the reciprocal error scale in
-    data units is ``inv_sdev_unit * inv_sdev_scale``. Set to the root mean
-    square of ``1 / error_scale`` over non-missing datapoints (per component
-    for per-component error scales), rounded to a power of two so the
-    conversion to and from data units is exact; 1 if fit without error scales.
-    Constant along the MCMC."""
+    """The storage unit of `inv_sdev_scale`, to avoid under/overflow with short
+    dtypes; same scheme as `Forest.leaf_unit`. Set to the root mean square of
+    ``1 / error_scale`` over non-missing datapoints, rounded to a power of two;
+    1 if fit without error scales. Constant along the MCMC."""
 
     n_non_missing: Int32[Array, ''] | Int32[Array, ' k']
-    """The number of non-missing datapoints, ``(k,)`` per outcome component
-    with per-component error scales, else scalar. Constant along the MCMC."""
+    """The number of non-missing datapoints."""
 
     sum_diag_prec_scale: Float32[Array, ''] | Float32[Array, ' k']
-    """The sum of the precision scales over non-missing datapoints (their
-    count if fit without error scales), matching the shape of `n_non_missing`.
-    Constant along the MCMC."""
+    """``sum(1 / error_scale ** 2)`` over non-missing datapoints; equal to
+    `n_non_missing` if fit without error scales."""
 
     forest: Forest
     """The sum of trees model."""
@@ -473,7 +467,7 @@ class State(Module):
 
     @property
     def has_chains(self) -> bool:
-        """Whether this state carries an explicit chain axis."""
+        """Whether non-constant attributes in the state carry an explicit chain axis."""
         return self.forest.has_chains
 
     def num_chains(self) -> int | None:
@@ -528,7 +522,7 @@ class State(Module):
 
             # determine average error precision; the folded `inv_sdev_unit`
             # puts the stored `prec_scale` mean in data units
-            prec = _scaled_error_cov_inv(self)
+            prec = scaled_error_cov_inv(self)
             n_eff = jnp.maximum(self.n_non_missing, 1)
             if self.prec_scale is not None:
                 prec *= self.prec_scale.sum(axis=-1, dtype=jnp.float32) / n_eff
@@ -824,67 +818,43 @@ def init(
         of trees is fixed by the length of this array. Use `make_p_nonterminal`
         to set it with the conventional formula.
     leaf_prior_cov_inv
-        The prior precision matrix of a leaf, conditional on the tree structure.
-        For the univariate case (k=1), this is a scalar (the inverse variance).
-        The prior covariance of the sum of trees is
-        ``num_trees * leaf_prior_cov_inv^-1``. The prior mean of leaves is
-        always zero.
+        The prior precision matrix of a leaf, see `Forest.leaf_prior_cov_inv`.
     leaf_dtype
-        Dtype used to store leaves. The full conditional is always computed and
-        sampled in float32 first. Leaves are stored in scaled units to avoid
-        under/overflow with short types.
     prec_scale_dtype
-        Dtype used to store the quantities derived from the error scales,
-        `State.prec_scale` and `State.inv_sdev_scale`. Note `State.error_scale`
-        is always float32 instead. These quantities are stored in scaled units,
-        but it's still possible to yield over/underflow in float16 if the
-        dynamic range is high enough.
     resid_dtype
-        Dtype used to store the running residuals (`State.resid`). The
-        residuals are stored in scaled units to avoid under/overflow with short
-        types. Using short types for residuals may easily break the mcmc; this
-        is an experimental setting.
+        Storage dtypes for, respectively: leaves (`Forest.leaf_tree`), derived
+        error scales (`State.prec_scale` and `State.inv_sdev_scale`; the raw
+        `State.error_scale` stays float32), and running residuals
+        (`State.resid`). These quantities are stored in scaled units so that
+        narrow dtypes do not under/overflow (see `Forest.leaf_unit`), though
+        float16 error scales may still overflow if their dynamic range is high
+        enough. Leaf full conditionals are always computed and sampled in
+        float32. Narrow residual dtypes may easily break the MCMC,
+        `resid_dtype` is an experimental setting.
     leaf_quantization
-        If set, leaves are quantized to units `float_eps * 2 **
-        leaf_quantization` in the scale of the RMS of residuals. The sensible
-        settings are 0 and 1. This quantization (almost) stops the random walk
-        numerical drift of the running residuals, but with enough datapoints or
-        trees the mcmc breaks down because the variation of the leaves becomes
-        smaller than the quantization. Use this with float16 residuals, but the
-        mcmc may just take fire at some n > 100_000.
+        Quantize the leaves to (almost) stop the numerical drift of the running
+        residuals, see `StepConfig.leaf_quantization`.
     error_cov_inv
-        The Wishart prior on the inverse error covariance, together with its
-        initial value (see `Wishart`). Leave it unspecified for binary
-        regression. The mixed binary-continuous and partial-missing diagonal
-        modes require a `DiagWishart`; in the mixed case the binary components
-        must have an initial precision of 1 (see `DiagWishart`).
+        The prior and initial value of the error term precision matrix (see
+        `Wishart`). Leave it unspecified for binary regression. Mixed
+        binary-continuous and per-outcome-component missingness require a
+        `DiagWishart`.
     error_scale
-        Each error is scaled by the corresponding factor in `error_scale`. If
-        ``error_scale[..., i]`` is a scalar, each error variance or covariance
-        matrix is multiplied by ``error_scale[..., i] ** 2``. If
-        ``error_scale[:, i]`` is a vector, then the covariance matrix is
-        rescaled by its outer product. For binary outcomes the (fixed, unit)
-        probit latent error is scaled instead, so the success probability is
-        ``Phi((sum of trees + offset) / error_scale)``; this also applies to the
-        binary components of a mixed binary-continuous regression. If not
-        specified, defaults to 1 for all points, but potentially skipping
-        calculations. These are the case weights of other BART
-        implementations, e.g., ``w`` in R BART.
+        Per-datapoint error scales (called ``w`` in the R package BART3); see
+        `State.error_scale`. An unspecified `error_scale` is equivalent to
+        ``error_scale = 1`` for all datapoints.
     missing
-        Boolean mask, same shape as `y`; `True` marks entries to be ignored
-        by the MCMC (`State.y` stores the offset in their place, so the
-        masked values of `y` may be anything, even non-finite). If 2-D,
-        `error_cov_inv.rate` must be diagonal.
+        Boolean mask indicating which datapoints are missing. `True` marks
+        entries to be ignored by the MCMC. The masked values of `y` may be
+        anything, even non-finite. If `missing` is 2-D, `error_cov_inv` must
+        be a `DiagWishart`.
     min_points_per_decision_node
-        The minimum number of data points in a decision node. 0 if not
-        specified.
     min_points_per_leaf
-        The minimum number of datapoints in a leaf node. 0 if not specified.
-        Unlike `min_points_per_decision_node`, this constraint is not taken
-        into account in the proposal distribution because it would be expensive
-        to. This parameter is independent of `min_points_per_decision_node` and
-        there is no check that they are coherent. It makes sense to set
-        ``min_points_per_decision_node >= 2 * min_points_per_leaf``.
+        The minimum number of datapoints in a decision node and in a leaf,
+        respectively; 0 if not specified. The leaf constraint is not taken into
+        account in the proposal distribution because that would be expensive.
+        The two are independent and not checked for coherence; it makes sense
+        to set ``min_points_per_decision_node >= 2 * min_points_per_leaf``.
     resid_reduction_config
     count_reduction_config
     prec_reduction_config
@@ -894,40 +864,34 @@ def init(
     prec_count_num_trees
         The number of trees to process at a time when counting datapoints or
         computing the likelihood precision. If `None`, do all trees at once,
-        which may use too much memory. If 'auto' (default), it's chosen
+        which may use too much memory on cpu. If 'auto' (default), it's chosen
         automatically.
     sequential_unroll
-        How much to unroll the sequential accept/reject loop over trees in
-        `step`. See the ``unroll`` argument of `jax.lax.scan`. Unrolling may
-        speed up the MCMC at the cost of longer compilation. 1 means no
-        unrolling; the default is 2.
+        See `StepConfig.sequential_unroll`. Unrolling may speed up the MCMC at
+        the cost of longer compilation; 1 means no unrolling.
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
     filter_splitless_vars
         The maximum number of variables without splits that can be ignored. If
         there are more, `init` raises an exception.
     log_s
-        The logarithm of the prior probability for choosing a variable to split
-        along in a decision rule, conditional on the ancestors. Not normalized.
-        If not specified, use a uniform distribution. If not specified and
-        `theta` or `rho`, `a`, `b` are, it's initialized automatically.
     theta
-        The concentration parameter for the Dirichlet prior on `s`. Required
-        only to update `log_s`. If not specified, and `rho`, `a`, `b` are
-        specified, it's initialized automatically.
     a
     b
     rho
-        Parameters of the prior on `theta`. Required only to sample `theta`.
+        Sparsity (variable selection) parameters, see `Forest.log_s` and
+        `Forest.theta`. If `rho`, `a`, `b` are set, an unspecified `theta` is
+        initialized to `rho`; if `theta` is set, an unspecified `log_s` is
+        initialized to uniform.
     sparse_on_at
         After how many MCMC steps to turn on variable selection.
     augment
-        Whether to account exactly, via data augmentation, for the decision
-        rules forbidden by the ancestors of each node when updating `log_s`. If
-        not set, those rules are ignored, which is faster but only approximate.
+        See `StepConfig.augment`. If disabled, forbidden decision rules are
+        ignored when counting variable usage, which may be faster but is
+        an approximation.
     num_chains
-        The number of independent MCMC chains to represent in the state. Single
-        chain with scalar values if not specified.
+        The number of independent MCMC chains. Single chain with scalar values
+        if not specified.
     mesh
         A jax mesh used to shard data and computation across multiple devices.
         If it has a 'chains' axis, that axis is used to shard the chains. If it
@@ -936,8 +900,8 @@ def init(
         As a shorthand, if a dictionary mapping axis names to axis size is
         passed, the corresponding mesh is created, e.g., ``dict(chains=4,
         data=2)`` will let jax pick 8 devices to split chains (which must be a
-        multiple of 4) across 4 pairs of devices, where in each pair the data is
-        split in two.
+        multiple of 4) across 4 pairs of devices, where in each pair the data
+        is split in two.
 
         Note: if a mesh is passed, the arrays are always sharded according to
         it. In particular even if the mesh has no 'chains' or 'data' axis, the
@@ -1087,7 +1051,7 @@ def init(
                     jnp.zeros, (num_trees, tree_size // 2), max_split.dtype
                 ),
                 affluence_tree=lazy(
-                    _initial_affluence_tree,
+                    initial_affluence_tree,
                     (num_trees, tree_size // 2),
                     n,
                     min_points_per_decision_node,
@@ -1107,7 +1071,7 @@ def init(
                 # for the precisions when there are no per-datapoint scales
                 # (`prec_scale` is set iff `error_scale` or `missing` is given)
                 count_tree=(
-                    lazy(_initial_count_tree, (num_trees, tree_size), n)
+                    lazy(initial_count_tree, (num_trees, tree_size), n)
                     if min_points_per_decision_node is not None
                     or min_points_per_leaf is not None
                     or (error_scale is None and missing is None)
@@ -1154,7 +1118,7 @@ def init(
         # `inv_sdev_scale`), before `resid` is derived from y
         if state.inv_sdev_scale is not None:
             state = replace(
-                state, y=_sanitize_y(state.y, state.inv_sdev_scale, state.forest.offset)
+                state, y=sanitize_y(state.y, state.inv_sdev_scale, state.forest.offset)
             )
 
         # derive the scale arrays and their constant summaries after sharding
@@ -1235,7 +1199,7 @@ def round_to_pow2(
     return 2 ** jnp.round(jnp.log2(x))
 
 
-def _scaled_error_cov_inv(
+def scaled_error_cov_inv(
     state: State,
 ) -> Float32[Array, '*chains'] | Float32[Array, '*chains k k']:
     """Return the error precision with ``inv_sdev_unit ** 2`` folded in.
@@ -1301,7 +1265,7 @@ def set_initial_resid(
     when `num_chains` is not `None`).
     """
     inner = _LazyArray(
-        _initial_resid,
+        initial_resid,
         state.y.shape,
         state.y,
         state.forest.offset,
@@ -1337,7 +1301,7 @@ def initial_resid_inexact_integral(
     return ms / num_trees
 
 
-def _initial_resid(
+def initial_resid(
     shape: tuple[int, ...],
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
@@ -1357,7 +1321,7 @@ def _initial_resid(
     return (resid / resid_unit[..., None]).astype(resid_dtype)
 
 
-def _initial_affluence_tree(
+def initial_affluence_tree(
     shape: tuple[int, ...], n: int, min_points_per_decision_node: int | None
 ) -> Shaped[Array, '...']:
     """Create the initial value of `Forest.affluence_tree`."""
@@ -1372,7 +1336,7 @@ def _initial_affluence_tree(
     )
 
 
-def _initial_count_tree(shape: tuple[int, ...], n: int) -> Shaped[Array, '...']:
+def initial_count_tree(shape: tuple[int, ...], n: int) -> Shaped[Array, '...']:
     """Create the initial value of `Forest.count_tree`: all datapoints in the root."""
     return jnp.zeros(shape, jnp.uint32).at[..., 1].set(n)
 
@@ -1387,7 +1351,7 @@ def set_initial_prec_tree(
     """
     assert state.prec_scale is not None
     shape = (num_trees, *state.prec_scale.shape[:-1], tree_size)
-    inner = _LazyArray(_initial_prec_tree, shape, state.prec_scale)
+    inner = _LazyArray(initial_prec_tree, shape, state.prec_scale)
     preview_tree = add_dummy_axis(inner) if num_chains is not None else inner
     preview = replace(state, forest=replace(state.forest, prec_tree=preview_tree))
     chain_axis = chain_vmap_axes(preview).forest.prec_tree
@@ -1396,7 +1360,7 @@ def set_initial_prec_tree(
     return replace(state, forest=replace(state.forest, prec_tree=prec_tree))
 
 
-def _initial_prec_tree(
+def initial_prec_tree(
     shape: tuple[int, ...], prec_scale: Float[Array, ' n'] | Float[Array, 'k k n']
 ) -> Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k k tree_size']:
     """Create the initial value of `Forest.prec_tree`: all datapoints in the root."""
@@ -1408,7 +1372,7 @@ def _initial_prec_tree(
 
 
 @jit(donate_argnums=(0,))
-def _sanitize_y(
+def sanitize_y(
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'],
     offset: Float32[Array, ''] | Float32[Array, ' k'],

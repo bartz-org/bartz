@@ -361,6 +361,13 @@ class Bart(Module):
     run_mcmc_kw
         Additional arguments passed to `bartz.mcmcloop.run_mcmc`.
 
+    Notes
+    -----
+    On gpu, the leaves of the trees are stored in float16 (see the
+    ``leaf_dtype`` argument of `bartz.mcmcstep.init`), which limits the
+    signal-to-noise ratio of the fit to less than about 1000, a limit that
+    should always hold in realistic usage.
+
     References
     ----------
     .. [1] Linero, Antonio R. (2018). “Bayesian Regression Trees for

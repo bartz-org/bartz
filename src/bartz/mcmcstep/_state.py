@@ -226,7 +226,7 @@ class Forest(Module):
 
     blocked_vars: UInt[Array, ' q'] | None
     """Indices of not to be used variables/predictors. This shall include at
-    least all the `i`  that yield ``max_split[i] == 0``, otherwise behavior is
+    least all the `i` that yield ``max_split[i] == 0``, otherwise behavior is
     undefined."""
 
     p_nonterminal: Float32[Array, ' 2*half_tree_size']
@@ -413,7 +413,8 @@ class State(Module):
     square in data units), rounded to a power of two. Sets the leaf
     quantization grid (see `StepConfig.leaf_quantization`). Initialized to
     `resid_unit`, then tracks the MCMC (while the storage unit of `resid` stays
-    fixed at `resid_unit`)."""
+    fixed at `resid_unit`). Not updated in purely binary regression, where the
+    scale of the latent residuals should be stable."""
 
     resid_inexact_integral: Float32[Array, '*chains'] | Float32[Array, '*chains k'] = (
         field(chains=CHAIN_AXIS)

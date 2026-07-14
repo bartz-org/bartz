@@ -32,7 +32,7 @@ from typing import Any, Literal, TypeVar
 
 import numpy
 from equinox import Module, field
-from jax import debug, eval_shape, lax, tree
+from jax import debug, eval_shape, lax, random, tree
 from jax import numpy as jnp
 from jax.scipy.special import logsumexp
 from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, Integer, PyTree, Shaped
@@ -58,8 +58,11 @@ class CallbackTuple(Callback):
     def __call__(self, *, state: State, **kwargs: Any) -> tuple[State, 'CallbackTuple']:
         """Invoke each callback in turn, threading the state through them."""
         new_callbacks = []
-        for callback in self.callbacks:
-            rt = callback(state=state, **kwargs)
+        for i, callback in enumerate(self.callbacks):
+            # decorrelate the keys by position, so a callback keeps its key if
+            # other callbacks are appended after it
+            kw = dict(kwargs, key=random.fold_in(kwargs['key'], i))
+            rt = callback(state=state, **kw)
             if rt is None:
                 new_callbacks.append(callback)
             else:

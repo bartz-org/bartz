@@ -24,17 +24,34 @@
 
 """Trace dataclasses returned by `run_mcmc`."""
 
+from abc import abstractmethod
+
 from jax import numpy as jnp
 from jax.nn import softmax
 from jax.sharding import Mesh
-from jaxtyping import Array, Float32, Int32, UInt
+from jaxtyping import Array, Float, Float32, Int32, UInt
 
 from bartz._jaxext import Module, field
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
 
 
-class BurninTrace(Module):
+class Trace(Module):
+    """Abstract base for the per-iteration traces built by `run_mcmc`.
+
+    A concrete subclass declares the arrays to save as fields, marking the
+    per-iteration ones with `field`'s ``samples`` axis, and implements
+    `from_state`; `run_mcmc` stacks one item per iteration. See `BurninTrace`
+    and `MainTrace` for the pattern.
+    """
+
+    @classmethod
+    @abstractmethod
+    def from_state(cls, state: State) -> 'Trace':
+        """Build a single-item trace from an MCMC state."""
+
+
+class BurninTrace(Trace):
     """MCMC trace with only diagnostic values."""
 
     has_chains: bool = field(static=True)
@@ -115,10 +132,10 @@ class MainTrace(BurninTrace):
     """MCMC trace with trees and diagnostic values."""
 
     leaf_tree: (
-        Float32[Array, '*chains_and_samples num_trees tree_size']
-        | Float32[Array, '*chains_and_samples num_trees k tree_size']
+        Float[Array, '*chains_and_samples num_trees tree_size']
+        | Float[Array, '*chains_and_samples num_trees k tree_size']
     ) = field(chains=CHAIN_AXIS, samples=0)
-    """The leaf values."""
+    """The leaf values, in units of `leaf_unit`."""
 
     var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2'] = field(
         chains=CHAIN_AXIS, samples=0
@@ -131,7 +148,11 @@ class MainTrace(BurninTrace):
     """The decision boundaries."""
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
-    """Constant shift added to the sum of trees."""
+    """Constant shift added to the scaled sum of trees."""
+
+    leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
+    """The storage unit of the leaf values. Predictions are
+    ``offset + leaf_unit * (sum of leaf values over trees)``."""
 
     varprob: Float32[Array, '*chains_and_samples p'] | None = field(
         chains=CHAIN_AXIS, samples=0
@@ -158,7 +179,37 @@ class MainTrace(BurninTrace):
             leaf_tree=state.forest.leaf_tree,
             var_tree=state.forest.var_tree,
             split_tree=state.forest.split_tree,
-            offset=state.offset,
+            offset=state.forest.offset,
+            leaf_unit=state.forest.leaf_unit,
             varprob=varprob,
             **vars(BurninTrace.from_state(state)),
         )
+
+
+class MainTraceWithTrainPred(MainTrace):
+    """Main trace that also stores the latent predictions at the training points.
+
+    Computed cheaply from the running `State.resid` (as ``ref - resid *
+    resid_unit``, with ``ref`` the response `y` or the binary latent `z`), so
+    `bartz.Bart.predict` can return them without re-evaluating the trees.
+    """
+
+    train_pred: (
+        Float32[Array, '*chains_and_samples n']
+        | Float32[Array, '*chains_and_samples k n']
+    ) = field(chains=CHAIN_AXIS, samples=0, data=-1)
+    """The latent predictions at the training points: offset plus the scaled sum
+    of trees."""
+
+    @classmethod
+    def from_state(cls, state: State) -> 'MainTraceWithTrainPred':
+        """Create a single-item main trace with train predictions from a MCMC state."""
+        resid = state.resid * state.resid_unit[..., None]
+        if state.z is None:
+            ref = state.y
+        elif state.binary_indices is None:
+            ref = state.z
+        else:
+            ref = jnp.broadcast_to(state.y, resid.shape)
+            ref = ref.at[..., state.binary_indices, :].set(state.z)
+        return cls(train_pred=ref - resid, **vars(MainTrace.from_state(state)))

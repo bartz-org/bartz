@@ -301,6 +301,8 @@ ban-relative-imports = "all"
 banned-from = ["jax.random", "jax.lax", "jax.numpy", "jax.tree", "math"]
 
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
+"jax.numpy.exp2".msg = "Use `2 ** x` because `exp2(<integer>)` is not exact"
+"jax.lax.exp2".msg = "Use `2 ** x` because `exp2(<integer>)` is not exact"
 "jax.lax.reciprocal".msg = "Use jnp.reciprocal"
 "jax.random.PRNGKey".msg = "User jax.random.key"
 "jax.random.gamma".msg = "jax's gamma sampler bloats jitted code with rejection loops; use loggamma from bartz._jaxext.random."

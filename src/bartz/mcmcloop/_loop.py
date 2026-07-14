@@ -24,17 +24,10 @@
 
 """Implement `run_mcmc`, the MCMC loop driver."""
 
-from collections.abc import Callable
+from abc import abstractmethod
+from collections.abc import Callable, Hashable
 from functools import partial, update_wrapper
-from typing import (
-    Any,
-    Generic,
-    NamedTuple,
-    Protocol,
-    TypeAlias,
-    TypeVar,
-    runtime_checkable,
-)
+from typing import Any, Generic, NamedTuple, TypeVar
 
 from equinox import Module
 from jax import (
@@ -49,18 +42,20 @@ from jax import (
 )
 from jax import numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
-from jaxtyping import Array, Bool, Int32, Key, PyTree, Shaped
+from jaxtyping import Array, Bool, Int32, Key, PyTree, Shaped, UInt32
 
 from bartz._jaxext import jit, jit_active, split
-from bartz.mcmcloop._trace import BurninTrace, MainTrace
+from bartz.mcmcloop._trace import BurninTrace, MainTrace, Trace
 from bartz.mcmcstep import State, step
 from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.mcmcstep._lazy import add_dummy_axis
 
-# WORKAROUND(python<3.12): use `type CallbackState = PyTree[Any, 'T']`
-CallbackState: TypeAlias = PyTree[Any, 'T']
 
-
+# WORKAROUND(python<3.11): generic NamedTuple is only supported from 3.11, so
+# `burnin_trace`/`main_trace` are pinned to the default trace types. Once 3.10
+# is dropped, make this `NamedTuple, Generic[BurninTraceT, MainTraceT]` (with
+# TypeVars bound to `Trace`) and parametrize `run_mcmc` accordingly, so a custom
+# `burnin_trace_type`/`main_trace_type` flows through to the returned types.
 class RunMCMCResult(NamedTuple):
     """Return value of `run_mcmc`."""
 
@@ -74,10 +69,14 @@ class RunMCMCResult(NamedTuple):
     """The trace of the main phase."""
 
 
-@runtime_checkable
-class Callback(Protocol):
-    """Callback type for `run_mcmc`."""
+class Callback(Module):
+    """Base class for `run_mcmc` callbacks.
 
+    To subclass: define any state as attributes (this is a dataclass), and override
+    `__call__`.
+    """
+
+    @abstractmethod
     def __call__(
         self,
         *,
@@ -85,13 +84,12 @@ class Callback(Protocol):
         state: State,
         burnin: Bool[Array, ''],
         i_total: Int32[Array, ''],
-        callback_state: CallbackState,
         n_burn: Int32[Array, ''],
         n_save: Int32[Array, ''],
         n_skip: Int32[Array, ''],
         i_outer: Int32[Array, ''],
         inner_loop_length: Int32[Array, ''],
-    ) -> tuple[State, CallbackState] | None:
+    ) -> tuple[State, 'Callback'] | None:
         """Do an arbitrary action after an iteration of the MCMC.
 
         Parameters
@@ -104,10 +102,6 @@ class Callback(Protocol):
             Whether the last iteration was in the burn-in phase.
         i_total
             The index of the last MCMC iteration (0-based).
-        callback_state
-            The callback state, initially set to the argument passed to
-            `run_mcmc`, afterwards to the value returned by the last invocation
-            of the callback.
         n_burn
         n_save
         n_skip
@@ -122,13 +116,13 @@ class Callback(Protocol):
         state : State
             A possibly modified MCMC state. To avoid modifying the state,
             return the `state` argument passed to the callback as-is.
-        callback_state : CallbackState
-            The new state to be passed on the next callback invocation.
+        callback : Callback
+            The updated callback to be used on the next invocation; use this return
+            value to update any state the callback may need to update.
 
         Notes
         -----
-        For convenience, the callback may return `None`, and the states won't
-        be updated.
+        For convenience, the callback may return `None`, and neither the state nor the callback will be updated.
         """
         ...
 
@@ -138,10 +132,10 @@ class _Carry(Module):
 
     state: State
     i_total: Int32[Array, '']
-    key: Key[Array, '']
-    burnin_trace: BurninTrace
-    main_trace: MainTrace
-    callback_state: CallbackState
+    key_data: UInt32[Array, ' key_size']
+    burnin_trace: Trace
+    main_trace: Trace
+    callback: Callback | None
 
 
 def run_mcmc(
@@ -153,7 +147,8 @@ def run_mcmc(
     n_skip: int = 1,
     inner_loop_length: int | None = None,
     callback: Callback | None = None,
-    callback_state: CallbackState = None,
+    burnin_trace_type: type[Trace] = BurninTrace,
+    main_trace_type: type[Trace] = MainTrace,
 ) -> RunMCMCResult:
     """
     Run the MCMC for the BART posterior.
@@ -182,14 +177,15 @@ def run_mcmc(
         with all iterations done in a single inner loop run. The inner stride is
         unrelated to the stride used for saving the trace.
     callback
-        An arbitrary function run during the loop after updating the state. For
-        the signature, see `Callback`. The callback is called under the jax jit,
-        so the argument values are not available at the time the Python code is
-        executed. Use the utilities in `jax.debug` to access the values at
-        actual runtime. The callback may return new values for the MCMC state
-        and the callback state.
-    callback_state
-        The initial custom state for the callback.
+        A `Callback` subclass instance invoked at each iteration just after
+        updating the state. This runs under the jax jit, so the argument values
+        are not available at the time the Python code is executed; use the
+        utilities in `jax.debug` to access the values at actual runtime.
+    burnin_trace_type
+    main_trace_type
+        Classes defining what is saved in the burn-in and main traces,
+        defaulting to `BurninTrace` and `MainTrace`. Customizing them is hard
+        without relying on bartz internals, so overriding is not recommended.
 
     Returns
     -------
@@ -210,12 +206,14 @@ def run_mcmc(
     a new call continues the run as if it had not stopped, so splitting a run
     into several consecutive calls gives the same result as a single call.
     """
-    # copy the key so buffer donation does not invalidate the caller's copy
-    key = jnp.copy(key)
+    # unwrap key to work around jax issue #39089
+    # WORKAROUND(jax<0.11): we guess this bug may be fixed before the 0.11 release
+    key_impl = random.key_impl(key)
+    key_data = jnp.copy(random.key_data(key))
 
     # create empty traces
-    burnin_trace = _empty_trace(n_burn, state, BurninTrace)
-    main_trace = _empty_trace(n_save, state, MainTrace)
+    burnin_trace = _empty_trace(n_burn, state, burnin_trace_type)
+    main_trace = _empty_trace(n_save, state, main_trace_type)
 
     # determine number of iterations for inner and outer loops
     n_iters = n_burn + n_skip * n_save
@@ -241,18 +239,27 @@ def run_mcmc(
     carry = _Carry(
         state,
         replicate(jnp.int32(0)),
-        replicate(key),
+        replicate(key_data),
         burnin_trace,
         main_trace,
-        callback_state,
+        callback,
     )
     _inner_loop_counter.reset_call_counter()
     for i_outer in range(n_outer):
         carry = _run_mcmc_inner_loop(
-            carry, inner_loop_length, callback, n_burn, n_save, n_skip, i_outer, n_iters
+            carry,
+            inner_loop_length,
+            n_burn,
+            n_save,
+            n_skip,
+            i_outer,
+            n_iters,
+            burnin_trace_type,
+            main_trace_type,
+            key_impl,
         )
 
-    return RunMCMCResult(carry.state, carry.burnin_trace, carry.main_trace)
+    return RunMCMCResult(carry.state, carry.burnin_trace, carry.main_trace)  # ty: ignore[invalid-argument-type]
 
 
 def _replicate(
@@ -264,7 +271,7 @@ def _replicate(
         return device_put(x, NamedSharding(mesh, PartitionSpec()))
 
 
-TraceT = TypeVar('TraceT', bound=BurninTrace)
+TraceT = TypeVar('TraceT', bound=Trace)
 
 
 @jit(static_argnums=(0, 2))
@@ -310,12 +317,14 @@ class _CallCounter(Generic[T]):
 def _run_mcmc_inner_loop_impl(
     carry: _Carry,
     inner_loop_length: Int32[Array, ''],
-    callback: Callback | None,
     n_burn: Int32[Array, ''],
     n_save: Int32[Array, ''],
     n_skip: Int32[Array, ''],
     i_outer: Int32[Array, ''],
     n_iters: Int32[Array, ''],
+    burnin_trace_type: type[Trace],
+    main_trace_type: type[Trace],
+    key_impl: Hashable,
 ) -> _Carry:
     # determine number of iterations for this loop batch
     i_upper = jnp.minimum(carry.i_total + inner_loop_length, n_iters)
@@ -326,21 +335,21 @@ def _run_mcmc_inner_loop_impl(
 
     def body(carry: _Carry) -> _Carry:
         """Update the MCMC state."""
-        iter_key = random.fold_in(carry.key, carry.state.config.steps_done)
+        key = random.wrap_key_data(carry.key_data, impl=key_impl)
+        iter_key = random.fold_in(key, carry.state.config.steps_done)
         keys = split(iter_key, 2)
 
         # update state
         state = step(keys.pop(), carry.state)
 
         # invoke callback
-        callback_state = carry.callback_state
+        callback = carry.callback
         if callback is not None:
             rt = callback(
                 key=keys.pop(),
                 state=state,
                 burnin=carry.i_total < n_burn,
                 i_total=carry.i_total,
-                callback_state=callback_state,
                 n_burn=n_burn,
                 n_save=n_save,
                 n_skip=n_skip,
@@ -348,20 +357,27 @@ def _run_mcmc_inner_loop_impl(
                 inner_loop_length=inner_loop_length,
             )
             if rt is not None:
-                state, callback_state = rt
+                state, callback = rt
 
         # save to trace
         burnin_trace, main_trace = _save_state_to_trace(
-            carry.burnin_trace, carry.main_trace, state, carry.i_total, n_burn, n_skip
+            carry.burnin_trace,
+            carry.main_trace,
+            state,
+            carry.i_total,
+            n_burn,
+            n_skip,
+            burnin_trace_type,
+            main_trace_type,
         )
 
         return _Carry(
             state=state,
             i_total=carry.i_total + 1,
-            key=carry.key,
+            key_data=carry.key_data,
             burnin_trace=burnin_trace,
             main_trace=main_trace,
-            callback_state=callback_state,
+            callback=callback,
         )
 
     return lax.while_loop(cond, body, carry)
@@ -371,20 +387,22 @@ def _run_mcmc_inner_loop_impl(
 # so `run_mcmc` can reset it directly instead of reaching into jit internals,
 # then jit the wrapped callable.
 _inner_loop_counter: _CallCounter[_Carry] = _CallCounter(_run_mcmc_inner_loop_impl)
-_run_mcmc_inner_loop = jit(donate_argnums=(0,), static_argnums=(2,))(
+_run_mcmc_inner_loop = jit(donate_argnums=(0,), static_argnums=(7, 8, 9))(
     _inner_loop_counter
 )
 
 
 @named_call
 def _save_state_to_trace(
-    burnin_trace: BurninTrace,
-    main_trace: MainTrace,
+    burnin_trace: Trace,
+    main_trace: Trace,
     state: State,
     i_total: Int32[Array, ''],
     n_burn: Int32[Array, ''],
     n_skip: Int32[Array, ''],
-) -> tuple[BurninTrace, MainTrace]:
+    burnin_trace_type: type[Trace],
+    main_trace_type: type[Trace],
+) -> tuple[Trace, Trace]:
     # trace index where to save during burnin; out-of-bounds => noop after
     # burnin
     burnin_idx = i_total
@@ -396,9 +414,8 @@ def _save_state_to_trace(
     noop_cond = i_total < n_burn
     main_idx = jnp.where(noop_cond, noop_idx, main_idx)
 
-    # prepare array index
-    burnin_trace = _set(burnin_trace, burnin_idx, BurninTrace.from_state(state))
-    main_trace = _set(main_trace, main_idx, MainTrace.from_state(state))
+    burnin_trace = _set(burnin_trace, burnin_idx, burnin_trace_type.from_state(state))
+    main_trace = _set(main_trace, main_idx, main_trace_type.from_state(state))
 
     return burnin_trace, main_trace
 

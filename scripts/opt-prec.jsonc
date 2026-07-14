@@ -35,7 +35,7 @@
         "p":                  [1],
         "k":                  [null, 2, 4],
         "maxdepth":           [6],
-        "weights":            [true],
+        "weights":            ["scalar"],
         "num_trees":          [1, 16, 64],
         "prec_reduction":     [{"kind": "batched", "num_batches": [256, 512, 1024, 2048, 4096, 8192, 16384], "batches_inner": [true], "contiguous": [false]}],
     },

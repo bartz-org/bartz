@@ -83,7 +83,7 @@ def add_dummy_axis(x: PyTree[DummyArray]) -> PyTree[ShapeDtypeStruct]:
     return tree.map(replace_leaf, x, is_leaf=lambda x: isinstance(x, _LazyArray))
 
 
-def _lazy(
+def lazy(
     array_creator: Callable, shape: tuple[int, ...], *args: Any
 ) -> Shaped[Array, '...']:
     """Build a `_LazyArray` placeholder, typed as the `Array` it stands in for.
@@ -118,7 +118,7 @@ def _lazy_from_array(
     """Wrap an existing array as a `_LazyArray` reporting `arr.shape`, or pass `None`."""
     if arr is None:
         return None
-    return _lazy(_return_array, arr.shape, arr)
+    return lazy(_return_array, arr.shape, arr)
 
 
 def _broadcast_chain(

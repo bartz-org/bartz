@@ -49,7 +49,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz._jaxext import equal_shards, is_key, jit, split
+from bartz._jaxext import equal_shards, is_key, jit, project, split
 from bartz.grove import (
     TreeHeaps,
     TreesTrace,
@@ -61,7 +61,10 @@ from bartz.grove import (
 )
 from bartz.mcmcloop import (
     BurninTrace,
+    CallbackTuple,
+    CheckPlatformCallback,
     MainTrace,
+    MainTraceWithTrainPred,
     RunMCMCResult,
     compute_varcount,
     evaluate_trace,
@@ -81,10 +84,10 @@ from bartz.mcmcstep._state import (
     ArrayLike,
     FloatLike,
     State,
-    _inv_via_chol_with_gersh,
-    _leaf_partition_spec,
     chol_with_gersh,
     init,
+    inv_via_chol_with_gersh,
+    leaf_partition_spec,
 )
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
 
@@ -245,20 +248,22 @@ class Bart(Module):
         multivariate regression with `k` components, the Wishart degrees of
         freedom are set to ``sigma_df + k - 1``.
     sigma_scale
-        Sets the scale of the prior on the error precision. If 'auto' (default),
-        the prior is scaled so that the error precision equals
-        ``diag(1 / var(y_train))`` in expectation, where with weights `error_scale`
-        the variance is a precision-weighted one that estimates the unit-weight error
-        variance. Otherwise, ``square(sigma_scale)`` is the prior harmonic mean of
-        the error variance; for multivariate regression a scalar is broadcast to
-        all components. For mixed outcome types, binary components are ignored.
+        Sets the scale of the prior on the error precision. If 'auto'
+        (default), the prior is scaled so that the error precision equals
+        ``diag(1 / var(y_train))`` in expectation, where with `error_scale` the
+        variance is a precision-weighted one that estimates the error variance
+        at unit error scale. Otherwise, ``square(sigma_scale)`` is the prior
+        harmonic mean of the error variance; for multivariate regression a
+        scalar is broadcast to all components. For mixed outcome types, binary
+        components are ignored.
     sigma_init
-        The initial value of the error standard deviation in the MCMC. If 'auto'
-        (default), the initial error precision is set to ``diag(1 / var(y_train))``,
-        with the same precision-weighted variance as `sigma_scale` when weights are
-        given. Otherwise, the initial precision is ``diag(1 / square(sigma_init))``;
-        for multivariate regression a scalar is broadcast to all components. For
-        mixed outcome types, binary components are ignored.
+        The initial value of the error standard deviation in the MCMC. If
+        'auto' (default), the initial error precision is set to ``diag(1 /
+        var(y_train))``, with the same precision-weighted variance as
+        `sigma_scale` when `error_scale` is given. Otherwise, the initial
+        precision is ``diag(1 / square(sigma_init))``; for multivariate
+        regression a scalar is broadcast to all components. For mixed outcome
+        types, binary components are ignored.
     k
         The inverse scale of the prior standard deviation on the latent mean
         function, relative to half the observed range of `y_train`. If `y_train`
@@ -287,18 +292,18 @@ class Bart(Module):
         outcome types, each component uses the default for its type.
     error_scale
         Coefficients that rescale the error standard deviation on each
-        datapoint. Not specifying `error_scale` is equivalent to setting it to 1
-        for all datapoints. Shape ``(n,)`` applies the same scalar weight to every
-        outcome component; for multivariate regression, ``(k, n)`` instead
-        supplies a per-component weight per datapoint. Supported with binary
-        (probit) outcomes, where the weight scales the latent error so the
-        success probability is ``Phi(latent / error_scale)``, including the
-        binary components of a mixed regression.
+        datapoint ("w" in BART3). Not specifying `error_scale` is equivalent to
+        setting it to 1 for all datapoints. Shape ``(n,)`` applies the same
+        scalar scale to every outcome component; for multivariate regression,
+        ``(k, n)`` instead supplies a per-component scale per datapoint.
+        Supported with binary (probit) outcomes, where it scales the latent
+        error so the success probability is ``Phi(latent / error_scale)``,
+        including the binary components of a mixed regression.
     missing
         Boolean mask with the same shape as `y_train`; `True` marks entries
-        to be ignored by the MCMC. Values of `y_train` must be finite
-        everywhere, including at masked positions. If 2-D, the error
-        covariance must be diagonal.
+        to be ignored by the MCMC. The values of `y_train` at masked
+        positions are ignored and may be anything, even non-finite. If 2-D,
+        the error covariance must be diagonal.
     num_trees
         The number of trees used to represent the latent mean function.
     n_save
@@ -347,10 +352,21 @@ class Bart(Module):
     maxdepth
         The maximum depth of the trees. This is 1-based, so with the default
         ``maxdepth=6``, the depths of the levels range from 0 to 5.
+    precompute_predict_train
+        If `True`, compute the predictions at the training points during the
+        MCMC. Off by default; makes ``predict('train', ...)`` faster at the cost
+        of more memory.
     init_kw
         Additional arguments passed to `bartz.mcmcstep.init`.
     run_mcmc_kw
         Additional arguments passed to `bartz.mcmcloop.run_mcmc`.
+
+    Notes
+    -----
+    On gpu, the leaves of the trees are stored in float16 (see the
+    ``leaf_dtype`` argument of `bartz.mcmcstep.init`), which limits the
+    signal-to-noise ratio of the fit to less than about 1000, a limit that
+    should always hold in realistic usage.
 
     References
     ----------
@@ -423,6 +439,7 @@ class Bart(Module):
         devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None = None,
         seed: int | Key[Array, ''] = 0,
         maxdepth: int = 6,
+        precompute_predict_train: bool = False,
         init_kw: Mapping = MappingProxyType({}),
         run_mcmc_kw: Mapping = MappingProxyType({}),
     ) -> None:
@@ -447,9 +464,19 @@ class Bart(Module):
         )
 
         # process "standardization" settings
-        offset = _process_offset_settings(y_train, binary_mask, offset)
+        offset = _process_offset_settings(
+            y_train,
+            binary_mask,
+            missing,
+            None if offset is None else jnp.asarray(offset, jnp.float32),
+        )
         leaf_prior_cov_inv = _process_leaf_variance_settings(
-            y_train, binary_mask, k, num_trees, tau_num
+            y_train,
+            binary_mask,
+            missing,
+            jnp.asarray(k, jnp.float32),
+            num_trees,
+            None if tau_num is None else jnp.asarray(tau_num, jnp.float32),
         )
         error_cov_inv = _process_error_variance_settings(
             y_train,
@@ -474,7 +501,7 @@ class Bart(Module):
         max_split = jnp.array(binner_obj.max_split)
 
         # setup and run mcmc
-        initial_state, mcmc_key, device = _setup_mcmc(
+        initial_state, mcmc_key, device, check_platform = _setup_mcmc(
             x_train,
             y_train,
             outcome_type,
@@ -507,7 +534,9 @@ class Bart(Module):
             printevery,
             pbar,
             mcmc_key,
+            precompute_predict_train,
             run_mcmc_kw,
+            check_platform,
         )
 
         # set private attributes
@@ -551,11 +580,11 @@ class Bart(Module):
         error_scale
             Per-observation error scale. Used with ``kind='outcome_samples'``,
             and also with ``kind='mean'`` or ``'mean_samples'`` for binary
-            outcomes (since the success probability is
-            ``Phi(latent / error_scale)``).
-            Required when the model was fit with weights and ``x_test`` is
-            new data. Shape matches the shape used at fitting: ``(m,)`` for
-            scalar weights, ``(k, m)`` for multivariate vector weights.
+            outcomes (since the success probability is ``Phi(latent /
+            error_scale)``). Required when the model was fit with `error_scale`
+            and ``x_test`` is new data. Shape matches the shape used at
+            fitting: ``(m,)`` for scalar scales, ``(k, m)`` for multivariate
+            per-component scales.
 
         Returns
         -------
@@ -582,6 +611,18 @@ class Bart(Module):
             raise ValueError(msg)
         error_scale = self._process_error_scale_test(x_test, kind, error_scale)
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
+
+        # use the predictions precomputed during the MCMC, if available
+        if x_test_is_train and isinstance(self._main_trace, MainTraceWithTrainPred):
+            return predict_train(
+                key,
+                self._main_trace,
+                error_scale,
+                self._mcmc_state.binary_indices,
+                self._mcmc_state.z is not None,
+                kind,
+            )
+
         x_test = self._process_x_test(x_test, error_scale)
 
         # place new test data on the devices of the model; the training data
@@ -596,7 +637,7 @@ class Bart(Module):
             x_test,
             error_scale,
             self._mcmc_state.binary_indices,
-            self._mcmc_state.binary_y is not None,
+            self._mcmc_state.z is not None,
             kind,
             # the test points are sharded over the mesh 'data' axis (when
             # there is one): the training data at `init`, new test data by
@@ -676,7 +717,7 @@ class Bart(Module):
     @property
     def offset(self) -> Float32[Array, ''] | Float32[Array, ' k']:
         """The prior mean of the latent mean function."""
-        return self._mcmc_state.offset
+        return self._mcmc_state.forest.offset
 
     @property
     def n_save(self) -> int:
@@ -736,14 +777,14 @@ class Bart(Module):
         regression, this returns the precision of the latent error term, not
         the Bernoulli precision for the binary outcome. For heteroskedastic
         regression, the returned precision is the global precision parameter,
-        that would have to be divided by a squared weight to get the precision
-        on a given datapoint.
+        that would have to be divided by a squared error scale to get the
+        precision on a given datapoint.
         """
         binary_indices = self._mcmc_state.binary_indices
         if (
             only_continuous
             and binary_indices is None
-            and self._mcmc_state.binary_y is not None
+            and self._mcmc_state.z is not None
         ):
             msg = 'Model has only binary outcomes, so there is no continuous submatrix to return.'
             raise ValueError(msg)
@@ -817,7 +858,7 @@ class Bart(Module):
         | DataFrame
         | None,
     ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
-        """Validate and resolve the error weights for prediction.
+        """Validate and resolve the error scales for prediction.
 
         Parameters
         ----------
@@ -830,7 +871,7 @@ class Bart(Module):
 
         Returns
         -------
-        The resolved error scale as a float32 array, or `None` if weights are not applicable.
+        The resolved error scale as a float32 array, or `None` if not applicable.
 
         Raises
         ------
@@ -840,22 +881,22 @@ class Bart(Module):
         """
         x_test_is_train = isinstance(x_test, str) and x_test == 'train'
         train_error_scale = self._mcmc_state.error_scale
-        has_train_weights = train_error_scale is not None
-        is_binary = self._mcmc_state.binary_y is not None
-        # weights enter the outcome samples of any outcome type, and also the
-        # mean of binary outcomes, since P(y=1) = Phi(latent / weight)
-        needs_weights = has_train_weights and (
+        has_train_error_scale = train_error_scale is not None
+        is_binary = self._mcmc_state.z is not None
+        # the error scales enter the outcome samples of any outcome type, and
+        # also the mean of binary outcomes, since P(y=1) = Phi(latent / scale)
+        needs_error_scale = has_train_error_scale and (
             kind is PredictKind.outcome_samples
             or (is_binary and kind in (PredictKind.mean, PredictKind.mean_samples))
         )
 
-        if not needs_weights:
+        if not needs_error_scale:
             if error_scale is not None:
                 msg = (
-                    '`error_scale` must be `None` in this configuration (weights'
-                    " are used with kind='outcome_samples', and with kind='mean'"
-                    " or 'mean_samples' for binary outcomes, and only when the"
-                    ' model was fit with weights)'
+                    '`error_scale` must be `None` in this configuration (error'
+                    " scales are used with kind='outcome_samples', and with"
+                    " kind='mean' or 'mean_samples' for binary outcomes, and"
+                    ' only when the model was fit with `error_scale`)'
                 )
                 raise ValueError(msg)
             return None
@@ -864,26 +905,26 @@ class Bart(Module):
             if error_scale is not None:
                 msg = (
                     "`error_scale` must be `None` when x_test='train'"
-                    ' (training weights are used automatically)'
+                    ' (the training error scales are used automatically)'
                 )
                 raise ValueError(msg)
             return train_error_scale
 
-        # new test data, model was fit with weights
+        # new test data, model was fit with error scales
         if error_scale is None:
             msg = (
                 '`error_scale` is required because the model was fit with'
-                ' weights and x_test is new data'
+                ' `error_scale` and x_test is new data'
             )
             raise ValueError(msg)
         error_scale_test = _process_response_input(error_scale)
-        assert train_error_scale is not None  # implied by needs_weights
+        assert train_error_scale is not None  # implied by needs_error_scale
         # the per-observation axis is checked separately, against x_test
         if error_scale_test.shape[:-1] != train_error_scale.shape[:-1]:
             msg = (
-                f'`error_scale` shape mismatch with training weights: got '
-                f'{error_scale_test.shape=}, but the leading dimensions must match '
-                f'the training weights {train_error_scale.shape=} (only the '
+                f'`error_scale` shape mismatch with the training error scales: '
+                f'got {error_scale_test.shape=}, but the leading dimensions must '
+                f'match the training {train_error_scale.shape=} (only the '
                 f'per-observation axis may differ).'
             )
             raise ValueError(msg)
@@ -926,7 +967,7 @@ class Bart(Module):
         if mesh is not None:
             put = lambda a: device_put(
                 a,
-                NamedSharding(mesh, _leaf_partition_spec(a.ndim, None, -1, mesh)),
+                NamedSharding(mesh, leaf_partition_spec(a.ndim, None, -1, mesh)),
                 donate=True,
             )
         elif self._device is not None:
@@ -1003,19 +1044,12 @@ class Bart(Module):
                 raise RuntimeError(msg)
 
     def _compare_resid(
-        self, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = None
+        self,
     ) -> tuple[
         Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
         Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
     ]:
         """Re-compute residuals to compare them with the updated ones.
-
-        Parameters
-        ----------
-        y
-            The response variable. Required for continuous regression (since
-            ``State`` does not store ``y`` in continuous mode). Ignored for
-            binary regression (where ``State.z`` is used instead).
 
         Returns
         -------
@@ -1024,13 +1058,7 @@ class Bart(Module):
         resid2
             The residuals computed from the final state of the trees.
         """
-        state = self._mcmc_state
-        if state.binary_indices is not None:
-            assert y is not None, 'y is required for mixed regression'
-        elif state.z is None:
-            assert y is not None, 'y is required for continuous regression'
-        y_arr = jnp.asarray(y) if y is not None else None
-        return compare_resid(state, y_arr)
+        return compare_resid(self._mcmc_state)
 
     def _depth_distr(self) -> Int32[Array, '*num_chains n_save d']:
         """Histogram of tree depths for each state of the trees.
@@ -1086,8 +1114,14 @@ class Bart(Module):
         """
         trace = self._main_trace
         trees = _trees_chain_first(trace)
-        chain_index = i_chain if trace.has_chains else ...
-        trees = tree.map(lambda x: x[chain_index, i_sample, i_tree, :], trees)
+        index = (i_chain, i_sample, i_tree) if trace.has_chains else (i_sample, i_tree)
+        # index the heap arrays, leaving the (unbatched) leaf scale alone; the
+        # trailing ellipsis covers the extra `k` axis of multivariate leaves
+        trees = tree_at(
+            lambda t: (t.var_tree, t.split_tree, t.leaf_tree),
+            trees,
+            replace_fn=lambda x: x[(*index, ...)],
+        )
         s = format_tree(trees, print_all=print_all)
         print(s)  # noqa: T201, this method is intended for debug
 
@@ -1157,7 +1191,7 @@ def _check_type_settings(
         and (y_train.ndim != 2 or error_scale.shape[0] != y_train.shape[0])
     ):
         msg = (
-            f'2D error_scale (vector per-component weights) requires y_train of '
+            f'2D error_scale (per-component scales) requires y_train of '
             f'shape (k, n) with matching k; got {error_scale.shape=}, '
             f'{y_train.shape=}.'
         )
@@ -1192,38 +1226,58 @@ def _process_sparsity_settings(
         return None, sparse.a, sparse.b, rho
 
 
+@jit
 def _process_offset_settings(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-    offset: FloatLike | Float[ArrayLike, ' k'] | None,
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+    offset: Float32[Array, ''] | Float32[Array, ' k'] | None,
 ) -> Float32[Array, ''] | Float32[Array, ' k']:
-    """Return offset."""
+    """Determine and return offset."""
     if offset is not None:
-        off = jnp.asarray(offset, jnp.float32)
-        return jnp.broadcast_to(off, y_train.shape[:-1])
+        return jnp.broadcast_to(offset, y_train.shape[:-1])
     if y_train.shape[-1] < 1:
         return jnp.zeros(y_train.shape[:-1])
 
-    bound = 1 / (1 + y_train.shape[-1])
-    binary_offset = ndtri(jnp.clip((y_train != 0).mean(-1), bound, 1 - bound))
-    continuous_offset = y_train.mean(-1)
-    return jnp.where(binary_mask, binary_offset, continuous_offset)
+    if missing is None:
+        *_, n_valid = y_train.shape
+        prop = (y_train != 0).mean(-1)
+        mean = y_train.mean(-1)
+    else:
+        *_, n = y_train.shape
+        n_valid = n - jnp.count_nonzero(missing, axis=-1)
+        safe_n = jnp.maximum(n_valid, 1)
+        prop = jnp.where(missing, 0, y_train != 0).sum(-1) / safe_n
+        mean = jnp.where(missing, 0.0, y_train).sum(-1) / safe_n
+
+    bound = jnp.reciprocal(1.0 + n_valid)
+    binary_offset = ndtri(jnp.clip(prop, bound, 1 - bound))
+    offset = jnp.where(binary_mask, binary_offset, mean)
+    return jnp.where(n_valid > 0, offset, 0.0)
 
 
+@jit(static_argnums=(4,))
 def _process_leaf_variance_settings(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
-    k: FloatLike,
+    missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+    k: Float[Array, ''],
     num_trees: int,
-    tau_num: FloatLike | None,
+    tau_num: Float[Array, ''] | None,
 ) -> Float32[Array, ''] | Float32[Array, 'k k']:
     """Return `leaf_prior_cov_inv`."""
     # determine `tau_num` if not specified
+    *kshape, n = y_train.shape
     if tau_num is None:
-        if y_train.shape[-1] < 2:
-            continuous_tau = jnp.ones(y_train.shape[:-1])
-        else:
+        if n < 2:
+            continuous_tau = jnp.ones(kshape)
+        elif missing is None:
             continuous_tau = (y_train.max(-1) - y_train.min(-1)) / 2
+        else:
+            n_valid = n - jnp.count_nonzero(missing, axis=-1)
+            ymax = jnp.where(missing, -jnp.inf, y_train).max(-1)
+            ymin = jnp.where(missing, jnp.inf, y_train).min(-1)
+            continuous_tau = jnp.where(n_valid >= 2, (ymax - ymin) / 2, 1.0)
         tau_num = jnp.where(binary_mask, 3.0, continuous_tau)
 
     # leaf prior standard deviation
@@ -1232,9 +1286,7 @@ def _process_leaf_variance_settings(
     # leaf prior precision matrix
     leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu))
     if y_train.ndim == 2:
-        leaf_prior_cov_inv = jnp.diag(
-            jnp.broadcast_to(leaf_prior_cov_inv, y_train.shape[:-1])
-        )
+        leaf_prior_cov_inv = jnp.diag(jnp.broadcast_to(leaf_prior_cov_inv, kshape))
     return leaf_prior_cov_inv
 
 
@@ -1294,8 +1346,9 @@ def _guarded_response_variance(
     """Per-component variance of `y_train`, used by the 'auto' error scale.
 
     A precision-weighted variance (precision ``1 / error_scale ** 2``) estimates
-    the unit-weight ``sigma ** 2``; `missing` entries are dropped. The variance
-    is guarded to 1 when undefined (fewer than 2 valid points) or non-positive.
+    ``sigma ** 2`` at unit error scale; `missing` entries are dropped. The
+    variance is guarded to 1 when undefined (fewer than 2 valid points) or
+    non-positive.
     """
     if error_scale is None and missing is None:
         vary = jnp.var(y_train, axis=-1)
@@ -1386,14 +1439,10 @@ def _setup_mcmc(
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
     n_burn: int,
     mcmc_key: Key[Array, ''],
-) -> tuple[State, Key[Array, ''], Device | None]:
-    p_nonterminal = make_p_nonterminal(maxdepth, base, power)
-
-    # resolve the sparsity prior hyperparameters
+) -> tuple[State, Key[Array, ''], Device | None, Literal['cpu', 'gpu'] | None]:
     theta, a, b, rho = _process_sparsity_settings(x_train, sparse)
 
-    # process device settings
-    device_kw, device = process_device_settings(
+    device_kw, device, check_platform = process_device_settings(
         y_train, num_chains, num_chain_devices, num_data_devices, devices
     )
 
@@ -1406,10 +1455,11 @@ def _setup_mcmc(
         missing=missing,
         max_split=max_split,
         num_trees=num_trees,
-        p_nonterminal=p_nonterminal,
+        p_nonterminal=make_p_nonterminal(maxdepth, base, power),
         leaf_prior_cov_inv=leaf_prior_cov_inv,
         error_cov_inv=error_cov_inv,
         min_points_per_decision_node=10,
+        filter_splitless_vars=jnp.sum(max_split == 0).item() if rm_const else 0,
         log_s=process_varprob(varprob, max_split),
         theta=theta,
         a=a,
@@ -1420,11 +1470,7 @@ def _setup_mcmc(
         **device_kw,
     )
 
-    if rm_const:
-        n_empty = jnp.sum(max_split == 0).item()
-        kw.update(filter_splitless_vars=n_empty)
-
-    kw.update(init_kw)
+    kw = dict(kw, **init_kw)
 
     state = init(**kw)
 
@@ -1432,7 +1478,7 @@ def _setup_mcmc(
     if device is not None:
         mcmc_key, state = device_put((mcmc_key, state), device, donate=True)
 
-    return state, mcmc_key, device
+    return state, mcmc_key, device, check_platform
 
 
 def _run_mcmc(
@@ -1443,25 +1489,36 @@ def _run_mcmc(
     printevery: int | None,
     pbar: bool,
     key: Key[Array, ''],
+    precompute_predict_train: bool,
     run_mcmc_kw: Mapping,
+    check_platform: Literal['cpu', 'gpu'] | None,
 ) -> RunMCMCResult:
-    # prepare arguments
-    kw: dict = dict(n_burn=n_burn, n_skip=n_skip, inner_loop_length=printevery)
-    # `printevery=None` disables progress reporting entirely: no callback is
-    # installed, so the loop traces without any `debug.callback` effect (a tqdm
-    # bar would otherwise advance every iteration regardless of `printevery`).
+    # fill list of callbacks
+    callbacks = ()
     if printevery is not None:
         if pbar:
-            kw.update(make_tqdm_callback(mcmc_state, report_every=printevery))
+            callbacks += (make_tqdm_callback(mcmc_state, report_every=printevery),)
         else:
-            kw.update(
+            callbacks += (
                 make_print_callback(
                     mcmc_state,
                     dot_every=None if printevery == 1 else 1,
                     report_every=printevery,
-                )
+                ),
             )
-    kw.update(run_mcmc_kw)
+    if check_platform is not None:
+        callbacks += (CheckPlatformCallback(check_platform),)
+
+    # prepare arguments
+    kw: dict = dict(
+        n_burn=n_burn,
+        n_skip=n_skip,
+        inner_loop_length=printevery,
+        callback=CallbackTuple(callbacks),
+    )
+    if precompute_predict_train:
+        kw = dict(**kw, main_trace_type=MainTraceWithTrainPred)
+    kw = dict(kw, **run_mcmc_kw)
 
     return run_mcmc(key, mcmc_state, n_save, **kw)
 
@@ -1499,7 +1556,7 @@ def get_error_sdev(
         prec = prec[..., None, None]
 
     # invert precision to covariance, then take diagonal variance
-    cov = _inv_via_chol_with_gersh(prec)
+    cov = inv_via_chol_with_gersh(prec)
     var = jnp.diagonal(cov, axis1=-2, axis2=-1)
     if mean:
         var = var.mean(0)
@@ -1559,7 +1616,7 @@ def _trees_chain_first(obj: TreeHeaps) -> TreesTrace:
     Returns a `TreesTrace` whose leading axis is the chain axis when `obj`
     carries one, and the bare per-object heap arrays otherwise.
     """
-    trees = TreesTrace.from_dataclass(obj)
+    trees = project(TreesTrace, obj)
     if get_has_chains(obj):
         axes = trees.axes_from_dataclass(chain_vmap_axes(obj))
         # WORKAROUND(python<3.14): use operator.is_none
@@ -1592,14 +1649,14 @@ def tree_goes_bad(
 
 @jit
 def compare_resid(
-    state: State, y: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
+    state: State,
 ) -> tuple[
     Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
     Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
 ]:
     """Re-compute residuals to compare them with the updated ones."""
     chain_axes = chain_vmap_axes(state)
-    resid1 = chain_to_axis(state.resid, chain_axes.resid)
+    resid1 = chain_to_axis(state.resid * state.resid_unit[..., None], chain_axes.resid)
     z = chain_to_axis(state.z, chain_axes.z) if state.z is not None else None
 
     forests = _trees_chain_first(state.forest)
@@ -1607,15 +1664,14 @@ def compare_resid(
 
     if state.binary_indices is not None:
         # mixed binary-continuous: z has only binary rows, y has all rows
-        assert y is not None
-        ref = jnp.broadcast_to(y, resid1.shape)
+        assert z is not None
+        ref = jnp.broadcast_to(state.y, resid1.shape)
         ref = ref.at[..., state.binary_indices, :].set(z)
     elif z is not None:
         ref = z
     else:
-        assert y is not None
-        ref = y
-    resid2 = ref - (trees + state.offset[..., None])
+        ref = state.y
+    resid2 = ref - (trees + state.forest.offset[..., None])
 
     return resid1, resid2
 
@@ -1649,20 +1705,28 @@ def points_per_node_distr_trace(
 class DeviceKwArgs(TypedDict):
     num_chains: int | None
     mesh: Mesh | None
+    leaf_dtype: DTypeLike
+    prec_scale_dtype: DTypeLike
 
 
 def process_device_settings(
-    y_train: Shaped[Array, '...'],
+    y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     num_chains: int | None,
     num_chain_devices: int | None | Literal['auto'],
     num_data_devices: int | None,
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
-) -> tuple[DeviceKwArgs, Device | None]:
-    """Return the arguments for `mcmcstep.init` related to devices, and an optional device where to put the state."""
+) -> tuple[DeviceKwArgs, Device | None, Literal['cpu', 'gpu'] | None]:
+    """Return the arguments for `mcmcstep.init` related to devices, an optional device where to put the state, and the platform to check at runtime iff it was deduced."""
     # whether the user pinned a concrete pool of devices (vs. inheriting all of
     # the platform's devices); the auto chain sharding may not exceed that pool
     explicit_devices = devices is not None and not isinstance(devices, str)
+
+    # the platform is deduced (rather than fixed by the user) only when neither a
+    # device pool nor a platform string is passed
+    platform_deduced = devices is None
+
     platform, device, devices = _determine_devices(y_train, devices)
+    check_platform = platform if platform_deduced else None
     num_chain_devices = _determine_num_chain_devices(
         platform,
         num_chains,
@@ -1674,18 +1738,21 @@ def process_device_settings(
     mesh, device = _determine_mesh(num_chain_devices, num_data_devices, device, devices)
 
     # prepare arguments to `init`
-    settings = DeviceKwArgs(num_chains=num_chains, mesh=mesh)
+    dtype = jnp.float16 if platform == 'gpu' else jnp.float32
+    settings = DeviceKwArgs(
+        num_chains=num_chains, mesh=mesh, leaf_dtype=dtype, prec_scale_dtype=dtype
+    )
 
-    return settings, device
+    return settings, device, check_platform
 
 
 def _determine_devices(
-    y_train: Shaped[Array, '...'],
+    y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
-) -> tuple[str, Device | None, Sequence[Device]]:
+) -> tuple[Literal['cpu', 'gpu'], Device | None, Sequence[Device]]:
     """Determine the target platform and set of devices for the MCMC, and possibly a single target device."""
     if isinstance(devices, str):
-        platform = devices
+        platform: Literal['cpu', 'gpu'] = devices  # ty:ignore[invalid-assignment]
         devices = jax.devices(platform)
         return platform, devices[0], devices
     elif devices is not None:
@@ -1832,12 +1899,12 @@ def _determine_mesh(
     num_data_devices: int | None,
     device: Device | None,
     devices: Sequence[Device],
-) -> tuple[Mesh | None, Device | None]:
+) -> tuple[Mesh, None] | tuple[None, Device | None]:
     """Create a jax device mesh for `mcmcstep.init()`."""
     if num_chain_devices is None and num_data_devices is None:
         return None, device
     else:
-        mesh = dict()
+        mesh = {}
         if num_chain_devices is not None:
             mesh.update(chains=num_chain_devices)
         if num_data_devices is not None:
@@ -1891,9 +1958,55 @@ def predict(
     | Float32[Array, 'ndpost m']
     | Float32[Array, 'ndpost k m']
 ):
-    """Implement `Bart.predict`."""
+    """Implement `Bart.predict` by evaluating the trees on `x_test`."""
     # get latent i.e. bare sum-of-trees predictions
     latent = predict_latent(x_test, trace, test_points)
+    return _predict_from_latent(
+        key, trace, latent, error_scale, binary_indices, has_binary, kind
+    )
+
+
+@jit(static_argnums=(4, 5))
+def predict_train(
+    key: Key[Array, ''] | None,
+    trace: MainTraceWithTrainPred,
+    error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None,
+    binary_indices: Int32[Array, ' kb'] | None,
+    has_binary: bool,
+    kind: PredictKind | str,
+    /,
+) -> (
+    Float32[Array, ' n']
+    | Float32[Array, 'k n']
+    | Float32[Array, 'ndpost n']
+    | Float32[Array, 'ndpost k n']
+):
+    """Implement `Bart.predict('train')` from the precomputed predictions."""
+    latent = _flatten_chain_sample(
+        trace.train_pred,
+        chain_vmap_axes(trace).train_pred,
+        trace_sample_axes(trace).train_pred,
+    )
+    return _predict_from_latent(
+        key, trace, latent, error_scale, binary_indices, has_binary, kind
+    )
+
+
+def _predict_from_latent(
+    key: Key[Array, ''] | None,
+    trace: MainTrace,
+    latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
+    error_scale: Float[Array, ' m'] | Float[Array, 'k m'] | None,
+    binary_indices: Int32[Array, ' kb'] | None,
+    has_binary: bool,
+    kind: PredictKind | str,
+) -> (
+    Float32[Array, ' m']
+    | Float32[Array, 'k m']
+    | Float32[Array, 'ndpost m']
+    | Float32[Array, 'ndpost k m']
+):
+    """Turn the sum-of-trees `latent` samples into the requested prediction kind."""
     if kind is PredictKind.latent_samples:
         return latent
 
@@ -1904,9 +2017,9 @@ def predict(
             key, trace, latent, error_scale, binary_indices, has_binary
         )
 
-    # squash predictions to (0, 1) if probit; with heteroskedastic weights
+    # squash predictions to (0, 1) if probit; with heteroskedastic error scales
     # P(y=1) = Phi(latent / error_scale)
-    if has_binary:  # self._mcmc_state.binary_y is not None
+    if has_binary:  # self._mcmc_state.z is not None
         # error_scale is (m,) or (k, m), so it broadcasts against latent
         arg = latent if error_scale is None else latent / error_scale
         if binary_indices is not None:
@@ -1922,6 +2035,16 @@ def predict(
     if kind is PredictKind.mean:
         return mean_samples.mean(axis=0)
     return mean_samples
+
+
+def _flatten_chain_sample(
+    arr: Float[Array, '*shape'], chain_axis: int | None, sample_axis: int
+) -> Float[Array, '*flat_shape']:
+    """Fold the chain axis into the sample axis, matching `predict_latent`'s layout."""
+    if chain_axis is None:
+        return arr
+    arr = jnp.moveaxis(arr, (chain_axis, sample_axis), (0, 1))
+    return lax.collapse(arr, 0, 2)
 
 
 @jit(static_argnums=(5,))

@@ -99,6 +99,19 @@ def manual_tree(
     return tree
 
 
+def condf(array: Float[ArrayLike, '...'], on_32: _T, on_16: _T) -> _T:
+    """Select a value by leaf-storage precision: `on_16` for float16, else `on_32`.
+
+    Pass the array whose precision governs the comparison: usually a leaf tree,
+    or---for a float32 quantity that carries reduced precision because it derives
+    from the leaves (e.g. a prediction)---the leaf tree itself rather than the
+    derived array. This avoids baking float16-specific tolerances into the
+    tests: when the leaf storage dtype reverts to float32, `on_32` is selected.
+    """
+    reduced = jnp.finfo(jnp.asarray(array).dtype).bits < 32
+    return on_16 if reduced else on_32
+
+
 def assert_close_matrices(
     actual: Shaped[ArrayLike, '*shape'],
     desired: Shaped[ArrayLike, '*shape'],
@@ -150,7 +163,8 @@ def assert_close_matrices(
 
     Notes
     -----
-    Boolean values are converted to uint8.
+    Inputs are upcast to float64 before computing the norm, so reduced-precision
+    dtypes (e.g. float16, which the norm rejects) and booleans are supported.
     """
     actual = np.asarray(actual)
     desired = np.asarray(desired)
@@ -158,9 +172,8 @@ def assert_close_matrices(
     assert actual.shape == desired.shape
     assert actual.dtype == desired.dtype
 
-    if actual.dtype == bool:
-        actual = actual.astype(np.uint8)
-        desired = desired.astype(np.uint8)
+    actual = np.asarray(actual, dtype=np.float64)
+    desired = np.asarray(desired, dtype=np.float64)
 
     if actual.size > 0:
         actual = np.atleast_1d(actual)

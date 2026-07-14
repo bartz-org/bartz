@@ -39,7 +39,7 @@
         "p":                  [1],
         "k":                  [null, 2, 4],
         "maxdepth":           [6],
-        "weights":            [true],
+        "weights":            ["scalar"],
         "num_trees":          [1, 16, 64],
         "prec_reduction":     [{"kind": "onehot", "method": ["matmul", "multiply"], "n_inner": [true, false]}],
     },

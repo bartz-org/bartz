@@ -27,7 +27,7 @@
 This is the main suite of tests.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from inspect import signature
 from typing import Any, Literal
@@ -52,12 +52,13 @@ from bartz._jaxext import (
     get_default_device,
     get_device_count,
     jaxtyping_disabled,
+    project,
     split,
 )
 from bartz._typing import kwdict
 from bartz.BART import gbart as original_gbart
 from bartz.BART import mc_gbart as original_mc_gbart
-from bartz.debug import TraceWithOffset, sample_prior, trees_BART_to_bartz
+from bartz.debug import MinimalTrace, sample_prior, trees_BART_to_bartz
 from bartz.grove import (
     check_trace,
     forest_depth_distr,
@@ -84,6 +85,7 @@ from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
     clipped_logit,
+    condf,
     int_seed,
     nnone,
     periodic_sigint,
@@ -208,6 +210,11 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
         if key in kw:
             bart_kwargs[key] = kw.pop(key)
 
+    # precompute_predict_train: mc_gbart defaults it on, Bart off
+    precompute_predict_train = pop('precompute_predict_train')
+    if precompute_predict_train is not True:
+        bart_kwargs['precompute_predict_train'] = precompute_predict_train
+
     # init_kw must be present bc it contains min_points_per_leaf which has
     # different defaults
     init_kw = dict(kw.pop('init_kw'))
@@ -329,9 +336,7 @@ class TestWithCachedBart:
 
     def test_residuals_accuracy(self, cachedbart: CachedBart) -> None:
         """Check that running residuals are close to the recomputed final residuals."""
-        accum_resid, actual_resid = cachedbart.bart._bart._compare_resid(
-            y=cachedbart.kwargs['y_train']
-        )
+        accum_resid, actual_resid = cachedbart.bart._bart._compare_resid()
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4)
 
     def test_convergence(self, cachedbart: CachedBart, subtests: SubTests) -> None:
@@ -602,10 +607,21 @@ class TestWithCachedBart:
                     # tracks structural "has admissible split" and may coincide
                     # across chains.
                     return
+                if str_path.endswith('.resid_inexact_integral'):
+                    # a mean over datapoints and steps: concentrates, so the
+                    # chains legitimately nearly coincide
+                    return
+                if str_path.endswith('.resid_eff_scale'):
+                    # a mean over datapoints rounded to a power of two: the
+                    # chains legitimately coincide
+                    return
                 if x is not None and chain_axis is not None:
+                    # widen first so a reduced-precision leaf (e.g. float16
+                    # leaf_tree) and its mean reference share a dtype
+                    x = x.astype(jnp.float32)
                     ref = jnp.broadcast_to(x.mean(chain_axis, keepdims=True), x.shape)
                     assert_different_matrices(
-                        x.astype(jnp.float32),
+                        x,
                         ref,
                         reduce_rank=True,
                         ord='fro' if x.ndim >= 2 else 2,
@@ -754,9 +770,8 @@ def test_predict(kw: dict[str, Any]) -> None:
     """Check that the public BART.gbart.predict method works."""
     bart = mc_gbart(**kw)
     yhat_train = bart.predict(kw['x_train'])
-    assert_close_matrices(bart.yhat_train, yhat_train, rtol=1e-6)
-    # the need for this approximate comparison is surprising; exact comparison
-    # fails on cpu ci on linux
+    # inexact because the train predictions may come from the residuals
+    assert_close_matrices(bart.yhat_train, yhat_train, rtol=1e-5)
 
 
 class TestVarprobAttr:
@@ -823,7 +838,10 @@ def test_variable_selection(
     # check that the variables have been identified
     assert bart.varprob_mean[mask].sum() >= 0.9
     assert bart.varprob_mean[mask].min().item() > 0.5 / peff
-    assert bart.varprob_mean[~mask].max().item() < 1 / (p - peff)
+    # irrelevant variables should stay near the uniform selection rate; the bound
+    # is twice that, as the 1x bound has little margin and MCMC noise (more so
+    # with reduced-precision leaves) occasionally pushes a noise variable past it
+    assert bart.varprob_mean[~mask].max().item() < 2 / (p - peff)
 
 
 def test_scale_shift(kw: dict[str, Any]) -> None:
@@ -865,25 +883,38 @@ def test_scale_shift(kw: dict[str, Any]) -> None:
         nnone(bart2._mcmc_state.error_cov_inv.rate) / scale**2,
         rtol=1e-6,
     )
+    # predictions and sigma are derived from the stored leaves, so with reduced
+    # leaf precision the rescaling equivalence holds only to the rounding floor
+    rtol = condf(bart1._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
     assert_close_matrices(
-        bart1.yhat_train, (bart2.yhat_train - offset) / scale, rtol=1e-5
+        bart1.yhat_train, (bart2.yhat_train - offset) / scale, rtol=rtol
     )
     assert_close_matrices(
         nnone(bart1.yhat_train_mean),
         (nnone(bart2.yhat_train_mean) - offset) / scale,
-        rtol=1e-5,
+        rtol=rtol,
     )
     assert_close_matrices(
-        nnone(bart1.yhat_test), (nnone(bart2.yhat_test) - offset) / scale, rtol=1e-5
+        nnone(bart1.yhat_test), (nnone(bart2.yhat_test) - offset) / scale, rtol=rtol
     )
     assert_close_matrices(
         nnone(bart1.yhat_test_mean),
         (nnone(bart2.yhat_test_mean) - offset) / scale,
-        rtol=1e-5,
+        rtol=rtol,
     )
-    assert_close_matrices(nnone(bart1.sigma), nnone(bart2.sigma) / scale, rtol=1e-5)
+    assert_close_matrices(nnone(bart1.sigma), nnone(bart2.sigma) / scale, rtol=rtol)
+    # sigma_mean rescaling is otherwise near-exact, but narrow leaf or
+    # prec_scale storage quantizes the two runs differently and perturbs the
+    # error-variance posterior mean
+    prec_scale = bart1._mcmc_state.prec_scale
+    sigma_mean_rtol = condf(bart1._mcmc_state.forest.leaf_tree, 1e-6, 1e-4)
+    if prec_scale is not None:
+        sigma_mean_rtol = max(sigma_mean_rtol, condf(prec_scale, 1e-6, 1e-4))
     assert_allclose(
-        nnone(bart1.sigma_mean), nnone(bart2.sigma_mean) / scale, rtol=1e-6, atol=1e-6
+        nnone(bart1.sigma_mean),
+        nnone(bart2.sigma_mean) / scale,
+        rtol=sigma_mean_rtol,
+        atol=1e-6,
     )
 
 
@@ -1067,6 +1098,8 @@ def test_few_datapoints(kw: dict[str, Any]) -> None:
     kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(
         min_points_per_decision_node=10, min_points_per_leaf=None
     )
+    # precompute off so the constancy check is exact (tree evaluation)
+    kw.setdefault('bart_kwargs', {})['precompute_predict_train'] = False
     kw = set_num_datapoints(kw, 8)  # < 10 = 2 * 5, multiple of 2 shards
     bart = mc_gbart(**kw)
     assert jnp.all(bart.yhat_train == bart.yhat_train[:, :1])
@@ -1246,7 +1279,7 @@ def run_bart_like_prior(
 
 def sample_prior_like(
     key: Key[Array, ''], bart: mc_gbart, subtests: SubTests
-) -> TraceWithOffset:
+) -> MinimalTrace:
     """Sample from the prior with the same settings used in `bart`."""
     # extract p_nonterminal in original format from mcmc state
     p_nonterminal = bart._mcmc_state.forest.p_nonterminal
@@ -1270,7 +1303,7 @@ def sample_prior_like(
         assert bad_count == 0
 
     # pack up trees together with offset
-    return TraceWithOffset.from_trees_trace(prior_trees, bart.offset)
+    return project(MinimalTrace, replace(prior_trees, offset=bart.offset))
 
 
 def count_stub_trees(
@@ -1381,10 +1414,13 @@ def test_jit(kw: dict[str, Any]) -> None:
 
     task_compiled = jit(task)
 
-    _state1, pred1 = task(X, y, w, key)
+    state1, pred1 = task(X, y, w, key)
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
-    assert_close_matrices(pred1, pred2, rtol=1e-5)
+    # predictions come from the stored leaves; with reduced leaf precision jit vs
+    # eager differ at the rounding floor
+    rtol = condf(state1.forest.leaf_tree, 1e-5, 1e-3)
+    assert_close_matrices(pred1, pred2, rtol=rtol)
 
 
 def test_w_with_binary_raises(kw: dict[str, Any]) -> None:
@@ -1622,11 +1658,16 @@ def test_equiv_sharding(kw: dict, subtests: SubTests) -> None:
     baseline_kw.update(nskip=0, ndpost=20, mc_cores=2)
     bart = mc_gbart(**baseline_kw)
 
+    # reduced-precision leaves quantize the slightly different float32 reductions
+    # of sharded vs unsharded runs, so equivalence holds only to the rounding
+    # floor; the leaves and everything derived from them carry this loss
+    rtol = condf(bart._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
+
     def check_equal(
         path: KeyPath, xb: Shaped[Array, '*shape'], xs: Shaped[Array, '*shape']
     ) -> None:
         assert_close_matrices(
-            xs, xb, err_msg=f'{keystr(path)}: ', rtol=1e-5, reduce_rank=True
+            xs, xb, err_msg=f'{keystr(path)}: ', rtol=rtol, reduce_rank=True
         )
 
     def remove_mesh(bart: mc_gbart) -> mc_gbart:

@@ -33,6 +33,7 @@ Running the MCMC
     RunMCMCResult
     BurninTrace
     MainTrace
+    MainTraceWithTrainPred
 
 Evaluating the trace
 --------------------
@@ -53,11 +54,10 @@ The entry points are `make_print_callback` and `make_tqdm_callback`.
     make_print_callback
     make_tqdm_callback
     Callback
-    CallbackState
-    print_callback
-    tqdm_callback
-    PrintCallbackState
-    TqdmCallbackState
+    CallbackTuple
+    CheckPlatformCallback
+    PrintCallback
+    TqdmCallback
     StatsAccumulator
     StatsReport
 """
@@ -65,15 +65,15 @@ The entry points are `make_print_callback` and `make_tqdm_callback`.
 # ruff: noqa: F401
 
 from bartz.mcmcloop._callback import (
-    PrintCallbackState,
+    CallbackTuple,
+    CheckPlatformCallback,
+    PrintCallback,
     StatsAccumulator,
     StatsReport,
-    TqdmCallbackState,
+    TqdmCallback,
     make_print_callback,
     make_tqdm_callback,
-    print_callback,
-    tqdm_callback,
 )
 from bartz.mcmcloop._evaluate import EvaluableTrace, compute_varcount, evaluate_trace
-from bartz.mcmcloop._loop import Callback, CallbackState, RunMCMCResult, run_mcmc
-from bartz.mcmcloop._trace import BurninTrace, MainTrace
+from bartz.mcmcloop._loop import Callback, RunMCMCResult, run_mcmc
+from bartz.mcmcloop._trace import BurninTrace, MainTrace, MainTraceWithTrainPred

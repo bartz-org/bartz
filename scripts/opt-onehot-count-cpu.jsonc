@@ -38,7 +38,7 @@
         "p":                  [1],
         "k":                  [null],
         "maxdepth":           [6],
-        "weights":            [false],
+        "weights":            ["none"],
         "num_trees":          [1, 16, 256],
         "count_reduction":    [{"kind": "onehot", "method": ["matmul", "multiply"], "n_inner": [true, false]}],
     },

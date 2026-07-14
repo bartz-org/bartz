@@ -32,13 +32,18 @@ from typing import Literal, Protocol, runtime_checkable
 from jax import ShapeDtypeStruct, lax, shard_map, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
-from jaxtyping import Array, Float32, Int32, PyTree, UInt
+from jaxtyping import Array, Float, Float32, Int32, PyTree, UInt
 from numpy.lib.array_utils import normalize_axis_index
 
-from bartz._jaxext import autobatch, jit
+from bartz._jaxext import autobatch, jit, project
 from bartz._typing import kwdict
 from bartz.grove import TreesTrace, evaluate_forest, is_multivariate, var_histogram
-from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
+from bartz.mcmcstep._axes import (
+    CHAIN_AXIS,
+    chain_vmap_axes,
+    chainful_axis,
+    trace_sample_axes,
+)
 from bartz.mcmcstep._state import partition_specs
 
 
@@ -46,19 +51,23 @@ from bartz.mcmcstep._state import partition_specs
 class EvaluableTrace(Protocol):
     """Structural type of the traces accepted by `evaluate_trace`.
 
-    Both `bartz.mcmcloop.MainTrace` and `bartz.debug.TraceWithOffset` satisfy
+    Both `bartz.mcmcloop.MainTrace` and `bartz.debug.MinimalTrace` satisfy
     it. The runtime check is structural (attribute presence only, not the
     annotated shapes), so it also matches the axis-spec trees `chain_vmap_axes`
-    derives from a trace.
+    derives from a trace. Implementations must be `equinox.Module` dataclasses
+    whose per-sample fields carry ``samples`` axis markers (see
+    `bartz.mcmcstep._axes.field`), read by `evaluate_trace` to locate the
+    sample axis.
     """
 
     leaf_tree: (
-        Float32[Array, '*chains_and_samples num_trees tree_size']
-        | Float32[Array, '*chains_and_samples num_trees k tree_size']
+        Float[Array, '*chains_and_samples num_trees tree_size']
+        | Float[Array, '*chains_and_samples num_trees k tree_size']
     )
     var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
     split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
     offset: Float32[Array, ''] | Float32[Array, ' k']
+    leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
     has_chains: bool
     mesh: Mesh | None
 
@@ -195,15 +204,25 @@ def _evaluate_trace(
     is `pcast` to vary over those manual axes (the only mesh-aware bit here).
     """
     # extract only the trees from the trace, this will be the input to `evaluate_forest`
-    trees = TreesTrace.from_dataclass(trace)
+    trees = project(TreesTrace, trace)
     batched_eval = evaluate_forest  # we will transform `batched_eval`
 
-    # determine batching axes
+    # determine batching axes from the `samples` field markers; fields without
+    # a sample axis (e.g., `leaf_unit`) get `None` and are broadcast rather
+    # than batched
     trace_chain_axes = chain_vmap_axes(trace)
+    sample_axes = trace_sample_axes(trace)
     # WORKAROUND(python<3.14): use operator.is_none
     is_none = lambda x: x is None
-    sample_axes = tree.map(partial(chainful_axis, 0), trace_chain_axes, is_leaf=is_none)
-    tree_axes = tree.map(partial(chainful_axis, 1), trace_chain_axes, is_leaf=is_none)
+    tree_axes = tree.map(
+        # the tree axis follows the sample axis in the chainless layout
+        lambda sample_axis, chain_axis: (
+            None if sample_axis is None else chainful_axis(1, chain_axis)
+        ),
+        sample_axes,
+        trace_chain_axes,
+        is_leaf=is_none,
+    )
 
     # output axis positions (size-invariant)
     out_chain_axis_w_trees, tree_axis, out_chain_axis, sample_axis = _output_axes(
@@ -301,7 +320,7 @@ def _evaluate_trace(
     if trace.has_chains:
         offset = jnp.expand_dims(offset, out_chain_axis)
 
-    # evaluate trees
+    # evaluate trees; `evaluate_forest` applies the leaf scale itself
     y = batched_eval(X, trees) + offset
     if flatten_chains and trace.has_chains:
         y = jnp.moveaxis(y, out_chain_axis, 0)

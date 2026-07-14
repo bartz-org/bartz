@@ -26,7 +26,7 @@
         "p":          [1, 4, 16, 64, 256, 1024, 4096, 16384],
         "k":          [null],
         "maxdepth":   [6],
-        "weights":    [false],
+        "weights":    ["none"],
         "num_trees":  [200],
         "sparse":     [true],
         "augment":    [false, true],

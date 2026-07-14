@@ -33,7 +33,7 @@
         "p":                  [1],
         "k":                  [null, 1, 2, 4],
         "maxdepth":           [6],
-        "weights":            [false, true],
+        "weights":            ["none", "scalar"],
         "num_trees":          [5],
         "resid_reduction":    [{"kind": "batched", "num_batches": [null, 2, 4, 8, 16, 32], "batches_inner": [true, false], "contiguous": [true, false]}],
     },

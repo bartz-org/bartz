@@ -362,6 +362,7 @@ class mc_gbart(Module):
             seed=seed,
             maxdepth=6,
             num_chains=num_chains,
+            precompute_predict_train=True,
         )
 
         # default min_points_per_leaf to 5 (unless set by the user) to match
@@ -426,7 +427,7 @@ class mc_gbart(Module):
     @cached_property
     def prob_test(self) -> Float32[Array, 'ndpost m'] | None:
         """The posterior probability of y being True at `x_test` for each MCMC iteration."""
-        if self._yhat_test is None or self._mcmc_state.binary_y is None:
+        if self._yhat_test is None or self._mcmc_state.z is None:
             return None
         return ndtr(self._yhat_test)
 
@@ -440,7 +441,7 @@ class mc_gbart(Module):
     @cached_property
     def prob_train(self) -> Float32[Array, 'ndpost n'] | None:
         """The posterior probability of y being True at `x_train` for each MCMC iteration."""
-        if self._mcmc_state.binary_y is not None:
+        if self._mcmc_state.z is not None:
             return ndtr(self.yhat_train)
         else:
             return None
@@ -462,7 +463,7 @@ class mc_gbart(Module):
         | None
     ):
         """The standard deviation of the error, including burn-in samples."""
-        if self._mcmc_state.binary_y is not None:
+        if self._mcmc_state.z is not None:
             return None
         assert self._burnin_trace.error_cov_inv.ndim <= 2  # chains and samples
         tc = chain_vmap_axes(self._main_trace).error_cov_inv
@@ -486,7 +487,7 @@ class mc_gbart(Module):
     @cached_property
     def sigma_(self) -> Float32[Array, 'ndpost'] | None:
         """The standard deviation of the error, only over the post-burnin samples and flattened."""
-        if self._mcmc_state.binary_y is not None:
+        if self._mcmc_state.z is not None:
             return None
         assert self._main_trace.error_cov_inv.ndim <= 2  # chains and samples
         arr = chain_to_axis(
@@ -529,7 +530,7 @@ class mc_gbart(Module):
         Not defined with binary regression because it's error-prone, typically
         the right thing to consider would be `prob_test_mean`.
         """
-        if self._yhat_test is None or self._mcmc_state.binary_y is not None:
+        if self._yhat_test is None or self._mcmc_state.z is not None:
             return None
         return self._yhat_test.mean(axis=0)
 
@@ -545,7 +546,7 @@ class mc_gbart(Module):
         Not defined with binary regression because it's error-prone, typically
         the right thing to consider would be `prob_train_mean`.
         """
-        if self._mcmc_state.binary_y is not None:
+        if self._mcmc_state.z is not None:
             return None
         else:
             return self.yhat_train.mean(axis=0)

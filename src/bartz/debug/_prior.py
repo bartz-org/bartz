@@ -403,11 +403,12 @@ def sample_prior_forest(
 class PriorSample(TreesTrace):
     """Output of `sample_prior`."""
 
-    log_s: Float32[Array, 'trace_length p'] | None
+    # defaults because the inherited `leaf_unit`/`offset` fields have them
+    log_s: Float32[Array, 'trace_length p'] | None = None
     """The per-iteration log unnormalized pmf for choosing variables to split on,
     `None` means uniform distribution."""
 
-    theta: Float32[Array, ' trace_length'] | None
+    theta: Float32[Array, ' trace_length'] | None = None
     """The per-iteration Dirichlet concentration, `None` if `s` is not drawn from
     a Dirichlet prior."""
 

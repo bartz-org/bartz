@@ -27,6 +27,7 @@
 This is the main suite of tests.
 """
 
+import math
 import pickle
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, redirect_stderr
@@ -96,10 +97,11 @@ from bartz._jaxext import (
     is_key,
     jaxtyping_disabled,
     minimal_unsigned_dtype,
+    project,
     split,
 )
 from bartz._typing import kwdict
-from bartz.debug import PriorSample, TraceWithOffset, sample_prior
+from bartz.debug import MinimalTrace, PriorSample, sample_prior
 from bartz.grove import (
     check_trace,
     describe_error,
@@ -109,10 +111,15 @@ from bartz.grove import (
     tree_depth,
     tree_depths,
 )
-from bartz.mcmcloop import CallbackState, compute_varcount, evaluate_trace
+from bartz.mcmcloop import (
+    Callback,
+    MainTraceWithTrainPred,
+    compute_varcount,
+    evaluate_trace,
+)
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _inner_loop_counter
-from bartz.mcmcstep import BatchedReduction, State
+from bartz.mcmcstep import BatchedReduction, State, step
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from bartz.testing import DiscreteUniform, Gamma, gen_data
@@ -128,6 +135,7 @@ from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
     clipped_logit,
+    condf,
     nnone,
     periodic_sigint,
     rhat_rank,
@@ -249,9 +257,9 @@ class BartKW(NamedTuple):
     ) -> Float32[Array, ' m'] | Float32[Array, 'k m'] | None:
         """Return the `w` to pass to `Bart.predict`, or `None`, given kind and target.
 
-        On new test data weights are needed for outcome samples (any outcome
-        type) and for the mean of binary outcomes; on the training data they
-        are supplied automatically, so `None` is returned.
+        On new test data error scales are needed for outcome samples (any
+        outcome type) and for the mean of binary outcomes; on the training data
+        they are supplied automatically, so `None` is returned.
         """
         if on_train:
             return None
@@ -417,16 +425,21 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     maxdepth=6,
                     num_data_devices=min(2, get_device_count()),
                     num_chain_devices=None,  # for mc_gbart, turn autoshard off
+                    # on for some variants to cover both trace types
+                    precompute_predict_train=True,
                     init_kw=dict(
                         save_ratios=False,
                         min_points_per_decision_node=None,
                         min_points_per_leaf=None,
+                        # explicit float16 to exercise it on cpu too, where the
+                        # `Bart` default is float32
+                        leaf_dtype=jnp.float16,
                     ),
                 ),
                 x_test=test.x,
             )
 
-        # continuous regression with error weights and sparsity with fixed theta
+        # continuous regression with error scales and sparsity with fixed theta
         case 3:
             train, test = gen_data(
                 keys.pop(),
@@ -460,13 +473,17 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         prec_reduction_config=BatchedReduction(num_batches=16),
                         prec_count_num_trees=7,
                         min_points_per_leaf=5,
+                        # explicit float32 to exercise it on gpu too, where the
+                        # `Bart` default is float16
+                        leaf_dtype=jnp.float32,
+                        prec_scale_dtype=jnp.float32,
                     ),
                 ),
                 x_test=test.x,
                 w_test=test.error_scale,
             )
 
-        # multivariate continuous regression with error weights and some
+        # multivariate continuous regression with error scales and some
         # settings that induce large types, sparsity with free theta
         case 4:
             train, test = gen_data(
@@ -497,6 +514,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     # exercise the explicit-device paths (`Bart._device`)
                     # without changing placement or compilation
                     devices=get_default_device(),
+                    precompute_predict_train=True,
                     init_kw=dict(
                         resid_reduction_config=BatchedReduction(num_batches=None),
                         count_reduction_config=BatchedReduction(num_batches=None),
@@ -504,6 +522,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         prec_count_num_trees=5,
                         save_ratios=True,
                         min_points_per_leaf=5,
+                        leaf_dtype=jnp.float32,
+                        prec_scale_dtype=jnp.float32,
                     ),
                 ),
                 x_test=test.x,
@@ -511,7 +531,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
             )
 
         # multivariate heteroskedastic binary regression with binary X and high
-        # p; vector weights, to exercise the all-binary 2-D latent-scale paths
+        # p; per-component error scales, to exercise the all-binary 2-D latent-scale paths
         # in `step_z` and the mean squashing of `predict` (the scalar all-binary
         # paths are covered by `test_heteroskedastic_probit`)
         case 5:
@@ -548,6 +568,10 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         save_ratios=False,
                         min_points_per_decision_node=None,
                         min_points_per_leaf=None,
+                        # explicit float16 to exercise it on cpu too, where the
+                        # `Bart` default is float32
+                        leaf_dtype=jnp.float16,
+                        prec_scale_dtype=jnp.float16,
                     ),
                 ),
                 x_test=test.x,
@@ -589,6 +613,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     num_chains=2,
                     num_chain_devices=min(2, get_device_count()),
                     maxdepth=8,  # 8 to check if leaf_indices changes type too soon
+                    precompute_predict_train=True,
                     init_kw=dict(
                         save_ratios=True,
                         resid_reduction_config=BatchedReduction(num_batches=16),
@@ -596,13 +621,17 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         prec_reduction_config=BatchedReduction(num_batches=16),
                         prec_count_num_trees=7,
                         min_points_per_leaf=5,
+                        # narrow leaf storage is fragile across the disparate
+                        # scales of mixed outcome components
+                        leaf_dtype=jnp.float32,
+                        prec_scale_dtype=jnp.float32,
                     ),
                 ),
                 x_test=test.x,
                 w_test=test.error_scale,
             )
 
-        # multivariate continuous regression with vector weights
+        # multivariate continuous regression with per-component error scales
         case 7:  # pragma: no branch
             train, test = gen_data(
                 keys.pop(),
@@ -715,10 +744,12 @@ class TestWithCachedBart:
         return CachedBart(bkw=bkw, bart=Bart(**kw))
 
     def test_residuals_accuracy(self, cachedbart: CachedBart) -> None:
-        """Check that running residuals are close to the recomputed final residuals."""
-        accum_resid, actual_resid = cachedbart.bart._compare_resid(
-            y=cachedbart.bkw.kw['y_train']
-        )
+        """Check that running residuals are close to the recomputed final residuals.
+
+        On the float16 variants this also exercises that the running residuals
+        are accumulated from the rounded stored leaves, not the exact draws.
+        """
+        accum_resid, actual_resid = cachedbart.bart._compare_resid()
         assert_close_matrices(accum_resid, actual_resid, rtol=1e-4, reduce_rank=True)
 
     def test_convergence(self, cachedbart: CachedBart, subtests: SubTests) -> None:
@@ -811,6 +842,12 @@ class TestWithCachedBart:
                         str_path.endswith(('.error_cov_inv', '.error_cov_inv.value'))
                         and bart._mcmc_state.error_cov_inv.nu is None
                     )
+                    # means over datapoints (and steps): they concentrate (and
+                    # round to a power of two), so the chains legitimately
+                    # nearly coincide
+                    or str_path.endswith(
+                        ('.resid_inexact_integral', '.resid_eff_scale')
+                    )
                     or (
                         x is not None
                         and jnp.issubdtype(x.dtype, jnp.integer)
@@ -820,9 +857,12 @@ class TestWithCachedBart:
                 ):
                     return
                 if x is not None and chain_axis is not None:
+                    # widen first so a reduced-precision leaf (e.g. float16
+                    # leaf_tree) and its mean reference share a dtype
+                    x = x.astype(jnp.float32)
                     ref = jnp.broadcast_to(x.mean(chain_axis, keepdims=True), x.shape)
                     assert_different_matrices(
-                        x.astype(jnp.float32),
+                        x,
                         ref,
                         reduce_rank=True,
                         ord='fro' if x.ndim >= 2 else 2,
@@ -980,13 +1020,72 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     bart = Bart(**kw)
 
     # pool every heap node (each an independent prior draw) over chains, samples,
-    # trees, and positions; leaf_tree is (..., k, tree_size)
-    leaves = jnp.moveaxis(bart._main_trace.leaf_tree, -2, -1).reshape(-1, k)
+    # trees, and positions; leaf_tree is (..., k, tree_size), stored in
+    # prior-sd units, so convert it to data units first
+    trace = bart._main_trace
+    leaf_tree = trace.leaf_unit[..., None] * trace.leaf_tree
+    leaves = jnp.moveaxis(leaf_tree, -2, -1).reshape(-1, k)
     empirical_cov = jnp.cov(leaves.T)
 
     # the large pool drives the 2-norm sampling error well below 0.01 (measured
     # <0.007); the off-diagonal-zeroing bug instead deviates by ~0.4
     assert_close_matrices(empirical_cov, leaf_prior_cov, rtol=0.02)
+
+
+def test_error_scale_magnitude_invariance(bkw: BartKW) -> None:
+    """Rescaling `error_scale` by a constant only rescales the error variance.
+
+    With the 'auto' `sigma_scale` and `sigma_init` settings, rescaling all the
+    error scales by a power of two ``c`` rescales the error precision prior and
+    initial value by ``c ** -2`` exactly, so the two MCMCs coincide exactly.
+    This exercises the `State.inv_sdev_unit` normalization end-to-end through
+    the interface: with float16 `prec_scale` storage, an unnormalized ``1 /
+    error_scale ** 2`` would overflow (small ``c``) or underflow (large ``c``)
+    and the runs would diverge.
+    """
+    if bkw.any_binary:
+        pytest.skip(
+            'binary components have a fixed latent error variance, so'
+            ' rescaling `error_scale` changes the model'
+        )
+
+    def run(c: float) -> State:
+        kw = bkw.kw
+        bart = Bart(
+            **dict(
+                kw,
+                seed=random.clone(kw['seed']),
+                error_scale=c * kw['error_scale'],
+                init_kw=dict(kw.get('init_kw', {}), prec_scale_dtype=jnp.float16),
+            )
+        )
+        return bart._mcmc_state
+
+    state_ref = run(1.0)
+
+    for c in (2.0**-9, 2.0**9):
+        state_scaled = run(c)
+
+        # the unit absorbs the rescaling exactly, being a power of two, so the
+        # stored arrays are identical and O(1) in both runs
+        prec_scale = nnone(state_scaled.prec_scale)
+        assert prec_scale.dtype == jnp.float16
+        assert jnp.all(jnp.isfinite(prec_scale))
+        assert jnp.all(prec_scale > 0)
+        assert_array_equal(nnone(state_ref.prec_scale), prec_scale)
+        assert_array_equal(
+            nnone(state_ref.inv_sdev_scale), nnone(state_scaled.inv_sdev_scale)
+        )
+        assert_array_equal(state_scaled.inv_sdev_unit, state_ref.inv_sdev_unit / c)
+
+        assert_array_equal(state_ref.forest.split_tree, state_scaled.forest.split_tree)
+        assert_array_equal(state_ref.forest.var_tree, state_scaled.forest.var_tree)
+        assert_array_equal(state_ref.forest.leaf_tree, state_scaled.forest.leaf_tree)
+        assert_array_equal(state_ref.resid, state_scaled.resid)
+        assert_array_equal(
+            nnone(state_scaled.error_cov_inv).value,
+            c**2 * nnone(state_ref.error_cov_inv).value,
+        )
 
 
 def test_check_trees_detects_corruption(bkw: BartKW) -> None:
@@ -1001,22 +1100,21 @@ def test_check_trees_detects_corruption(bkw: BartKW) -> None:
     `_check_trees` (used by the `Bart` test wrapper's ``__init__``) must catch.
     """
 
-    def corrupt(
-        *, state: State, callback_state: CallbackState, **_: Any
-    ) -> tuple[State, CallbackState]:
-        forest = state.forest
-        # max_split.size is the first out-of-range variable index; the var dtype
-        # is sized for indices up to max_split.size - 1, so guard that this one
-        # extra value still fits (it does whenever the count is not exactly at a
-        # dtype boundary, which holds for every variant)
-        oob_value = forest.max_split.size
-        assert minimal_unsigned_dtype(oob_value) == forest.var_tree.dtype
-        oob_var = jnp.array(oob_value, forest.var_tree.dtype)
-        var_tree = jnp.where(forest.split_tree != 0, oob_var, forest.var_tree)
-        forest = replace(forest, var_tree=var_tree)
-        return replace(state, forest=forest), callback_state
+    class Corrupt(Callback):
+        def __call__(self, *, state: State, **_: Any) -> tuple[State, 'Corrupt']:
+            forest = state.forest
+            # max_split.size is the first out-of-range variable index; the var
+            # dtype is sized for indices up to max_split.size - 1, so guard that
+            # this one extra value still fits (it does whenever the count is not
+            # exactly at a dtype boundary, which holds for every variant)
+            oob_value = forest.max_split.size
+            assert minimal_unsigned_dtype(oob_value) == forest.var_tree.dtype
+            oob_var = jnp.array(oob_value, forest.var_tree.dtype)
+            var_tree = jnp.where(forest.split_tree != 0, oob_var, forest.var_tree)
+            forest = replace(forest, var_tree=var_tree)
+            return replace(state, forest=forest), self
 
-    kw: kwdict = dict(bkw.kw, run_mcmc_kw=dict(callback=corrupt))
+    kw: kwdict = dict(bkw.kw, run_mcmc_kw=dict(callback=Corrupt()))
 
     # build via the unwrapped class so the (finite) run completes without the
     # wrapper's automatic check aborting it, then inspect the corrupted trace
@@ -1038,31 +1136,64 @@ def test_check_trees_detects_corruption(bkw: BartKW) -> None:
 
 
 def test_missing_ignored(bkw: BartKW, keys: split) -> None:
-    """Garbage finite y values at missing positions don't affect the fit."""
+    """Check masked datapoints do not affect the mcmc."""
+    # unconditionally set missingness
     kw = bkw.kw
     y_train = kw['y_train']
     missing = gen_missing(keys.pop(), y_train.shape)
     kw['missing'] = missing
 
-    # Pin y-dependent priors otherwise they are influenced by garbage values
-    kw['offset'] = 0.0
-    kw['tau_num'] = 2.0
-    if not bkw.all_binary:
-        kw['sigma_scale'] = 1.0
-        kw['sigma_init'] = 1.0
-
+    # run bart with clean data in the slots marked as missing
     bart1 = Bart(**kw)
 
-    garbage = random.normal(keys.pop(), y_train.shape) * 1e3
+    class InjectGarbage(Callback):
+        def __call__(
+            self, *, key: Key[Array, ''], state: State, **_: Any
+        ) -> tuple[State, 'InjectGarbage']:
+            """Refill the masked positions of the state with noise after each step."""
+            ks = split(key)
+
+            def noisy(
+                x: Float[Array, ' *shape'], mask: Bool[Array, ' *mask_shape']
+            ) -> Float[Array, ' *shape']:
+                # note: don't use nan, and steer clear of overflow, because some
+                # masking is done via multiplication by 0
+                scale = jnp.finfo(x.dtype).max / 128.0
+                noise = scale * random.normal(ks.pop(), x.shape, x.dtype)
+                return jnp.where(mask, noise, x)
+
+            return replace(
+                state, y=noisy(state.y, missing), resid=noisy(state.resid, missing)
+            ), self
+
+    # prepare huge/NaN garbage to inject at the missing data locations
+    garbage = random.normal(keys.pop(), y_train.shape) * 1e6
+    garbage = jnp.where(
+        random.bernoulli(keys.pop(), 0.5, garbage.shape), garbage, jnp.nan
+    )
+
+    # run bart with garbage at missing locations
     kw2 = dict(
-        kw, seed=random.clone(kw['seed']), y_train=jnp.where(missing, garbage, y_train)
+        kw,
+        seed=random.clone(kw['seed']),
+        y_train=jnp.where(missing, garbage, y_train),
+        run_mcmc_kw=dict(callback=InjectGarbage()),
     )
     bart2 = Bart(**kw2)
 
-    yhat1 = bart1.predict('train', kind='latent_samples')
-    yhat2 = bart2.predict('train', kind='latent_samples')
+    # note: don't use predict('train') because that may rely on `resid` being clean
+    yhat1 = bart1.predict(kw['x_train'], kind='latent_samples')
+    yhat2 = bart2.predict(kw['x_train'], kind='latent_samples')
     rtol = 0 if yhat1.platform() == 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
+
+    # check resid_inexact_integral separately because it's not upstream of anything
+    assert_close_matrices(
+        bart1._mcmc_state.resid_inexact_integral,
+        bart2._mcmc_state.resid_inexact_integral,
+        rtol=rtol,
+        reduce_rank=True,
+    )
 
 
 def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
@@ -1084,11 +1215,11 @@ def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
 def test_outcome_samples_error_scale(keys: split) -> None:
     """`outcome_samples` applies `error_scale` in univariate continuous regression.
 
-    The univariate weighted branch of `sample_outcome` is reachable only here: the
-    BART3 wrappers expose no `outcome_samples`, and the `bkw` fixture is
-    multivariate-only, so this uses the univariate variant directly.
+    The univariate error-scaled branch of `sample_outcome` is reachable only
+    here: the BART3 wrappers expose no `outcome_samples`, and the `bkw` fixture
+    is multivariate-only, so this uses the univariate variant directly.
     """
-    bkw = make_kw(keys.pop(), 3)  # univariate continuous with error weights
+    bkw = make_kw(keys.pop(), 3)  # univariate continuous with error scales
     bart = Bart(**bkw.kw)
     out = bart.predict(
         bkw.x_test, kind='outcome_samples', error_scale=bkw.w_test, key=keys.pop()
@@ -1265,6 +1396,318 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     assert bart.varprob.dtype == jnp.float32
     assert bart.varprob_mean.dtype == jnp.float32
 
+    # also test the internal leaf dtype directly, since it's not reflected in
+    # the public API anywhere. `Bart` overrides the `init` defaults with
+    # platform-dependent ones (see `process_device_settings`).
+    init_kw = kw.get('init_kw', {})
+    default_dtype = (
+        jnp.float16 if get_default_device().platform == 'gpu' else jnp.float32
+    )
+    assert bart._main_trace.leaf_tree.dtype == init_kw.get('leaf_dtype', default_dtype)
+
+    # likewise the internal prec_scale and inv_sdev_scale dtypes, which share
+    # `prec_scale_dtype` (both only set for error-scaled/missing data)
+    prec_scale_dtype = init_kw.get('prec_scale_dtype', default_dtype)
+    prec_scale = bart._mcmc_state.prec_scale
+    if prec_scale is not None:
+        assert prec_scale.dtype == prec_scale_dtype
+    inv_sdev_scale = bart._mcmc_state.inv_sdev_scale
+    if inv_sdev_scale is not None:
+        assert inv_sdev_scale.dtype == prec_scale_dtype
+
+
+def test_leaf_unit(bkw: BartKW) -> None:
+    """`leaf_unit` is the marginal prior leaf standard deviation, rounded to a power of two."""
+    forest = Bart(**bkw.kw)._mcmc_state.forest
+    cov_inv = nnone(forest.leaf_prior_cov_inv)
+    if cov_inv.ndim:
+        marginal_std = jnp.sqrt(jnp.diagonal(jnp.linalg.inv(cov_inv)))
+    else:  # pragma: no cover, always mv with defaults
+        marginal_std = jnp.sqrt(jnp.reciprocal(cov_inv))
+    expected = 2 ** jnp.round(jnp.log2(marginal_std))
+    assert forest.leaf_unit.dtype == jnp.float32
+    assert_close_matrices(forest.leaf_unit, expected, rtol=1e-5)
+    # exactly a power of two: rounding the log2 back is a no-op
+    pow2 = 2 ** jnp.round(jnp.log2(forest.leaf_unit))
+    assert_array_equal(forest.leaf_unit, pow2)
+
+
+def test_inv_sdev_scale(bkw: BartKW) -> None:
+    """Check `State.inv_sdev_scale` and `State.inv_sdev_unit`."""
+    state = Bart(**bkw.kw)._mcmc_state
+
+    assert state.inv_sdev_unit.dtype == jnp.float32
+
+    # exactly a power of two: rounding the log2 back is a no-op
+    pow2 = 2 ** jnp.round(jnp.log2(state.inv_sdev_unit))
+    assert_array_equal(state.inv_sdev_unit, pow2)
+
+    if state.inv_sdev_scale is None:
+        assert_array_equal(state.inv_sdev_unit, jnp.ones(()))
+    else:
+        inv_sdev_scale = state.inv_sdev_scale.astype(jnp.float32)
+        rtol = condf(state.inv_sdev_scale, 1e-6, 1e-3)
+
+        # the unit times the stored values reconstructs the reciprocal error scales,
+        # zeroed at masked datapoints
+        inv_sdev_data_units = state.inv_sdev_unit[..., None] * inv_sdev_scale
+        error_scale = jnp.ones(()) if state.error_scale is None else state.error_scale
+        expected = jnp.where(inv_sdev_scale != 0, jnp.reciprocal(error_scale), 0.0)
+        expected = jnp.broadcast_to(expected, inv_sdev_data_units.shape)
+        assert_close_matrices(
+            inv_sdev_data_units, expected, rtol=rtol, reduce_rank=True
+        )
+
+        # the unit is the rms of the reciprocal error scales over non-missing
+        # datapoints, so the stored mean square lands within the pow2 bracket
+        ms = jnp.sum(jnp.square(inv_sdev_scale), axis=-1)
+        ms = ms / jnp.maximum(jnp.sum(inv_sdev_scale != 0, axis=-1), 1)
+        assert jnp.all((ms > 0.5 * (1 - 1e-3)) & (ms < 2.0 * (1 + 1e-3)))
+
+        # prec_scale is the square (per-component outer product) of the stored
+        # reciprocal error scales, in the same units
+        prec_scale = nnone(state.prec_scale).astype(jnp.float32)
+        if prec_scale.ndim == inv_sdev_scale.ndim:
+            expected_prec = jnp.square(inv_sdev_scale)
+        else:
+            expected_prec = jnp.einsum('an,bn->abn', inv_sdev_scale, inv_sdev_scale)
+        assert_close_matrices(
+            prec_scale,
+            expected_prec,
+            rtol=condf(nnone(state.prec_scale), 1e-6, 1e-3),
+            reduce_rank=True,
+        )
+
+
+def test_float16_close_to_float32(bkw: BartKW) -> None:
+    """float16 leaf storage tracks float32 within float16 precision.
+
+    A single MCMC step is taken with the same seed for both dtypes, so the tree
+    draws are identical and the only difference is the rounding of the leaves.
+    """
+    prev_init_kw: kwdict = bkw.kw.get('init_kw', {})
+    base_kw = dict(bkw.kw, n_burn=0, n_save=1)
+    latent = {}
+    for dtype in (jnp.float16, jnp.float32):
+        init_kw = dict(prev_init_kw, leaf_dtype=dtype)
+        bart = Bart(**dict(base_kw, init_kw=init_kw))
+        latent[dtype] = bart.predict('train', kind='latent_samples')
+    assert_close_matrices(
+        latent[jnp.float16], latent[jnp.float32], rtol=1e-2, reduce_rank=True
+    )
+
+
+def test_leaf_quantization(bkw: BartKW, keys: split) -> None:
+    """With `leaf_quantization`, leaves are stored as multiples of the quantum."""
+    leaf_quantization = 3
+    bart = Bart(
+        **dict(
+            bkw.kw,
+            init_kw=dict(
+                bkw.kw.get('init_kw', {}), leaf_quantization=leaf_quantization
+            ),
+        )
+    )
+    state = bart._mcmc_state
+    nmant = jnp.finfo(state.resid.dtype).nmant
+
+    # the grid follows the residual scale measured before the leaves are
+    # sampled, so compute the quantum from the pre-step state (also because
+    # `step` donates it), step once, and check the freshly sampled leaves
+    quantum = (state.resid_eff_scale / state.forest.leaf_unit) * 2.0 ** (
+        leaf_quantization - nmant
+    )
+    state = step(keys.pop(), state)
+
+    # align the (*chains, [k]) quantum with the (*chains, num_trees, [k,]
+    # tree_size) leaves
+    if state.resid_unit.ndim:
+        quantum = quantum[..., None, :, None]
+    else:  # pragma: no cover, always mv with defaults
+        quantum = quantum[..., None, None]
+
+    leaves = state.forest.leaf_tree / quantum
+    assert_array_equal(leaves, jnp.round(leaves))
+
+    # minimal check of sum_trees_eps()
+    eps = state.sum_trees_eps()
+    assert eps.shape == bkw.kshape
+    assert jnp.all(jnp.isfinite(eps))
+    assert_array_less(0, eps)
+
+
+def test_resid_eff_scale(bkw: BartKW) -> None:
+    """`resid_eff_scale` is the residual RMS in data units, rounded to a power of two."""
+    state = Bart(**bkw.kw)._mcmc_state
+
+    # exactly a power of two: rounding the log2 back is a no-op
+    pow2 = 2 ** jnp.round(jnp.log2(state.resid_eff_scale))
+    assert_array_equal(state.resid_eff_scale, pow2)
+
+    if state.error_cov_inv.nu is None:
+        # never stepped without an error covariance update: stays at its
+        # initial value `resid_unit`
+        expected = jnp.broadcast_to(state.resid_unit, state.resid_eff_scale.shape)
+        assert_array_equal(state.resid_eff_scale, expected)
+    else:
+        # the last update measured the residuals as they are in the final
+        # state, so recompute their (precision-scaled, masked) rms
+        resid = state.resid * state.resid_unit[..., None]
+        if state.inv_sdev_scale is None:  # pragma: no cover, error-scaled by default
+            n_eff = resid.shape[-1]
+        else:
+            # `inv_sdev_scale` is stored in units of `inv_sdev_unit`
+            resid = resid * state.inv_sdev_scale * state.inv_sdev_unit[..., None]
+            n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
+        rms = jnp.sqrt(jnp.sum(jnp.square(resid), axis=-1) / n_eff)
+        # `resid_eff_scale` is this rms rounded to a power of two, but
+        # reproducing the step's exact float32 reduction (narrow-dtype
+        # accumulation, the per-path scaling and masking) bit-for-bit is
+        # brittle, and pow2 rounding turns a 1-ulp difference near a boundary
+        # into a full factor of two. so check agreement loosely: pow2 rounding
+        # moves the value by at most sqrt(2), which rtol=0.5 covers
+        assert_close_matrices(state.resid_eff_scale, rms, rtol=0.5)
+
+
+# without quantization the drift charge counts every tree update, but in a
+# converged chain many updates are exact (the resampled leaves store
+# identically), so that case is graded on a wider bracket
+@pytest.mark.parametrize(
+    ('num_trees', 'leaf_quantization', 'bound'),
+    [(16, 1, 8), (256, 1, 8), (16, None, 16)],
+)
+def test_sum_trees_eps(
+    num_trees: int, leaf_quantization: int | None, bound: int, keys: split
+) -> None:
+    """`State.sum_trees_eps` brackets the observed accuracy of the sum of trees.
+
+    Fit an exactly representable function (linear in binary covariates, split
+    at 0.5) with noise low enough that the error floor set by the float16
+    storage dominates, and check the accuracy estimate against the larger of
+    that floor and the drift of the running residuals (the difference between
+    the precomputed train predictions and the exact ones recomputed from the
+    saved trees).
+    """
+    n, p, sigma = 300, 5, 1e-4
+    x = random.bernoulli(keys.pop(), 0.5, (p, n)).astype(jnp.float32)
+    coef = random.normal(keys.pop(), (p,))
+    f = coef @ x
+    y = f + sigma * random.normal(keys.pop(), (n,))
+    bart = Bart(
+        x,
+        y,
+        num_trees=num_trees,
+        n_burn=2000,
+        n_save=100,
+        num_chains=None,
+        seed=keys.pop(),
+        sigma_scale=sigma,
+        precompute_predict_train=True,
+        init_kw=dict(
+            leaf_dtype=jnp.float16,
+            resid_dtype=jnp.float16,
+            leaf_quantization=leaf_quantization,
+        ),
+    )
+    pred = bart.predict(x, kind='latent_samples')
+    pred_running = bart.predict('train', kind='latent_samples')
+    err = jnp.sqrt(jnp.mean(jnp.square(pred - f)))
+    err_drift = jnp.sqrt(jnp.mean(jnp.square(pred_running[-1, :] - pred[-1, :])))
+    eps = bart._mcmc_state.sum_trees_eps()
+    # the estimate sits at ~3x the observed rms error across configs (the eps
+    # is a grid spacing, the error floor lands at ~spacing/sqrt(12))
+    assert err <= eps <= bound * jnp.maximum(err, err_drift)
+
+
+@pytest.mark.parametrize('leaf_quantization', [None, 0])
+def test_sum_trees_eps_drift(leaf_quantization: int | None, keys: split) -> None:
+    """The drift term of `State.sum_trees_eps` tracks the running residuals error.
+
+    Run on noisy data with float16 residuals and train-prediction
+    precomputation, then compare the drift term against the accumulated
+    numerical error of the running residuals, observed as the difference
+    between the precomputed train predictions and the exact ones recomputed
+    from the saved trees. Without quantization every residual update rounds,
+    so the drift term dominates and bounds the observed error; with
+    quantization most updates are exact and the drift term must not blow up
+    above the observed error.
+    """
+    dgp = gen_data(
+        keys.pop(), n=500, p=10, q=0, sigma2_lin=1.0, sigma2_quad=1.0, sigma2_eps=1.0
+    )
+    bart = Bart(
+        dgp.x,
+        dgp.y,
+        num_trees=16,
+        n_burn=0,
+        n_save=2000,
+        num_chains=None,
+        seed=keys.pop(),
+        precompute_predict_train=True,
+        init_kw=dict(
+            leaf_dtype=jnp.float16,
+            resid_dtype=jnp.float16,
+            leaf_quantization=leaf_quantization,
+        ),
+    )
+    pred_running = bart.predict('train', kind='latent_samples')
+    pred_actual = bart.predict(dgp.x, kind='latent_samples')
+    err = jnp.sqrt(jnp.mean(jnp.square(pred_running[-1, :] - pred_actual[-1, :])))
+    resolution, drift, _ = bart._mcmc_state._sum_trees_eps()
+    # the drift estimate is conservative, but must stay within a bounded
+    # factor of the observed accumulated error
+    assert drift <= 16 * err
+    # the overall estimate must cover the observed accumulated error (the
+    # slack absorbs the slow sub-resolution error growth the snapshot-based
+    # estimate cannot track)
+    assert err <= 4 * jnp.maximum(resolution, drift)
+    if leaf_quantization is None:
+        # every residual update rounds: the drift term dominates and is an
+        # upper bound on the observed error
+        assert resolution < drift
+        assert err <= drift
+
+
+def test_sum_trees_eps_snap(keys: split) -> None:
+    """The snap term of `State.sum_trees_eps` covers coarse-quantization distortion.
+
+    With many trees the leaf full conditional shrinks below the (fixed) leaf
+    quantum: leaf sampling degenerates into snapping the full conditional mean
+    to the grid, most leaves pin at zero, and the fit degrades statistically
+    while the stored sums stay numerically exact. The resolution and drift
+    terms are blind to this; check that the snap term flags it by covering
+    the observed error of the posterior mean.
+    """
+    n = 250
+    dgp = gen_data(
+        keys.pop(), n=n, p=5, q=0, sigma2_lin=1.0, sigma2_quad=1.0, sigma2_eps=1.0
+    )
+    bart = Bart(
+        dgp.x,
+        dgp.y,
+        num_trees=12800,
+        n_burn=400,
+        n_save=200,
+        num_chains=None,
+        seed=keys.pop(),
+        init_kw=dict(
+            leaf_dtype=jnp.float16, resid_dtype=jnp.float16, leaf_quantization=6
+        ),
+    )
+    post_mean = bart.predict(dgp.x, kind='latent_samples').mean(axis=0)
+    err = jnp.sqrt(jnp.mean(jnp.square(post_mean - dgp.mu)))
+    resolution, drift, snap = bart._mcmc_state._sum_trees_eps()
+    # the numerical terms alone under-report the error
+    assert jnp.maximum(resolution, drift) < err
+    # the snap term covers it, within a bounded factor. the quantum scales
+    # with the measured residual scale, and coarse quantization is what
+    # inflates the residuals in the first place (leaves snap to the grid, the
+    # fit degrades), so distortion -> larger residuals -> larger quantum ->
+    # more distortion, until the loop settles. at that equilibrium snap and
+    # the observed error track each other up to a constant
+    assert err <= 1.5 * snap <= 12 * err
+    assert_array_equal(bart._mcmc_state.sum_trees_eps(), snap)
+
 
 def test_output_ranges(bkw: BartKW, keys: split) -> None:
     """Check value constraints on Bart outputs."""
@@ -1330,7 +1773,7 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
 
     with subtests.test('binary mean uses the latent scale'):
         # for binary components P(y=1) = Phi(latent / w); continuous ones are
-        # the plain latent mean (weights do not enter their mean)
+        # the plain latent mean (error scales do not enter their mean)
         w = bkw.kw.get('error_scale')
         arg = latent_samples if w is None else latent_samples / w
         expected = jnp.where(
@@ -1342,10 +1785,10 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
 @pytest.mark.parametrize(
     ('outcome_type', 'k', 'het_shape'),
     [
-        # univariate pure-binary with a scalar weight, and mixed
-        # binary-continuous with a per-component (vector) weight. Together with
+        # univariate pure-binary with a scalar error scale, and mixed
+        # binary-continuous with a per-component error scale. Together with
         # `bkw` variants v5 (all-binary, vector) and v6 (mixed, scalar) these
-        # complete the {pure, mixed} x {scalar, vector} weight matrix; the
+        # complete the {pure, mixed} x {scalar, vector} shape matrix; the
         # mixed-vector case is the only one that exercises the 2-D binary-row
         # restriction in `step_z`.
         pytest.param('binary', None, 'scalar', id='binary-scalar'),
@@ -1359,12 +1802,13 @@ def test_heteroskedastic_probit(
     k: int | None,
     het_shape: Literal['scalar', 'vector'],
 ) -> None:
-    """Weights scale the probit latent error, so P(y=1) = Phi(latent / w).
+    """`error_scale` scales the probit latent error, so P(y=1) = Phi(latent / w).
 
     `test_predict_means` and `test_output_ranges` already cover the mean-squash
-    relationship (for the other two weight-shape combinations), the outcome
+    relationship (for the other two error-scale-shape combinations), the outcome
     thresholding and the outcome-vs-mean consistency via the `bkw` fixture; this
-    adds the two combinations `bkw` lacks and the new-test-data weight checks.
+    adds the two combinations `bkw` lacks and the new-test-data error-scale
+    checks.
     """
     n = 20
     train, test = gen_data(
@@ -1405,8 +1849,8 @@ def test_heteroskedastic_probit(
         expected = jnp.where(binary_mask, ndtr(latent / w_train), latent).mean(0)
         assert_close_matrices(mean, expected, rtol=1e-5)
 
-    with subtests.test('weights required on new test data'):
-        msg = 'required because the model was fit with weights'
+    with subtests.test('error scales required on new test data'):
+        msg = 'required because the model was fit with'
         for kind in ('mean', 'mean_samples', 'outcome_samples'):
             extra: dict = {'key': keys.pop()} if kind == 'outcome_samples' else {}
             with pytest.raises(ValueError, match=msg):
@@ -1415,10 +1859,12 @@ def test_heteroskedastic_probit(
             assert jnp.all(jnp.isfinite(pred))
 
     if w_test.ndim == 2:
-        with subtests.test('test weights must match the component dimension'):
-            # a 2-D test weight with the wrong number of components is rejected
+        with subtests.test('test error scales must match the component dimension'):
+            # a 2-D test error scale with the wrong number of components is rejected
             bad = jnp.ones((w_test.shape[0] + 1, w_test.shape[1]))
-            with pytest.raises(ValueError, match='shape mismatch with training'):
+            with pytest.raises(
+                ValueError, match='shape mismatch with the training error scales'
+            ):
                 bart.predict(test.x, kind='mean', error_scale=bad)
 
 
@@ -1430,9 +1876,30 @@ def test_predict(bkw: BartKW) -> None:
     assert_close_matrices(
         bart.predict('train', kind='latent_samples'),
         yhat_train,
-        rtol=1e-6,
+        rtol=1e-5,
         reduce_rank=True,
     )
+
+
+def test_precompute_predict_train(bkw: BartKW, subtests: SubTests) -> None:
+    """`precompute_predict_train` gives the same train predictions, up to rounding."""
+    bart_off = Bart(**dict(bkw.kw, precompute_predict_train=False))
+    bart_on = Bart(**dict(bkw.kw, precompute_predict_train=True))
+
+    with subtests.test('trace type'):
+        assert not isinstance(bart_off._main_trace, MainTraceWithTrainPred)
+        assert isinstance(bart_on._main_trace, MainTraceWithTrainPred)
+
+    # `outcome_samples` is left out: for binary outcomes a tiny latent difference
+    # can flip a thresholded 0/1 draw, which is not an approximate mismatch
+    for kind in ('latent_samples', 'mean', 'mean_samples'):
+        with subtests.test('predict', kind=kind):
+            assert_close_matrices(
+                bart_on.predict('train', kind=kind),
+                bart_off.predict('train', kind=kind),
+                rtol=1e-5,
+                reduce_rank=True,
+            )
 
 
 def test_count_prec_tree_caches_valid(bkw: BartKW, subtests: SubTests) -> None:
@@ -1582,14 +2049,28 @@ def test_scale_shift(bkw: BartKW) -> None:
     if bkw.all_binary:
         pytest.skip('Cannot rescale binary responses.')
 
-    bart1 = Bart(**kw)
     mask = bkw.binary_mask
 
-    offset = 0.4703189
-    scale = 0.5294714
+    bart1 = Bart(**kw)
 
-    y = kw['y_train']
-    y = jnp.where(mask[..., None], y, offset + y * scale)
+    # mixed outcomes use float32 leaves (set in `make_kw`): heterogeneous
+    # component scales make the two float16 chains bifurcate for some seeds,
+    # even though the scaling itself is correct (see
+    # test_chol_with_gersh_disparate_scales)
+    if bkw.is_mixed:
+        assert bart1._mcmc_state.forest.leaf_tree.dtype == jnp.float32
+
+    # blow the response up far enough that the leaves would overflow float16 if
+    # they were stored in data units instead of units of leaf_unit; leaves are
+    # summed across trees, so the per-leaf magnitude is the total scale over
+    # roughly the square root of the number of trees
+    overflow_float16_scale = (
+        math.sqrt(kw['num_trees']) * 2 * float(jnp.finfo(jnp.float16).max)
+    )
+    offset = 0.4703189 * overflow_float16_scale
+    scale = 0.5294714 * overflow_float16_scale
+
+    y = jnp.where(mask[..., None], kw['y_train'], offset + kw['y_train'] * scale)
 
     x_offset = -0.6184722
     x_scale = 1.8521347
@@ -1629,7 +2110,9 @@ def test_scale_shift(bkw: BartKW) -> None:
     mask_pred = mask[..., None]
 
     # use a single loose tolerance: the heteroskedastic binary-latent step
-    # accumulates float32 rounding, and 1e-3 comfortably covers all cases
+    # accumulates float32 rounding, predictions derived from reduced-precision
+    # stored leaves hold only to the rounding floor, and 1e-3 covers all cases
+    leaf_tree = bart1._mcmc_state.forest.leaf_tree
     pred_rtol = 1e-3
 
     yhat1 = bart1.predict('train', kind='latent_samples')
@@ -1659,8 +2142,9 @@ def test_scale_shift(bkw: BartKW) -> None:
         reduce_rank=True,
     )
 
-    # binary mean predictions on new test data need the (training) weights; the
-    # two models share the same `w`, and continuous-only outcomes ignore it
+    # binary mean predictions on new test data need the (training) error
+    # scales; the two models share the same `w`, and continuous-only outcomes
+    # ignore it
     mean_w = bart1._mcmc_state.error_scale if bkw.any_binary else None
     yhat_test_mean1 = bart1.predict(kw['x_train'], kind='mean', error_scale=mean_w)
     yhat_test_mean2 = bart2.predict(x, kind='mean', error_scale=mean_w)
@@ -1672,8 +2156,9 @@ def test_scale_shift(bkw: BartKW) -> None:
     )
 
     # mixed outcomes accumulate more float32 rounding through the binary-latent
-    # step, so the sdev comparisons get a looser tolerance
-    rtol = 1e-4 if bkw.is_mixed else 1e-5
+    # step, so the sdev comparisons get a looser tolerance; with reduced leaf
+    # precision the rounding floor dominates instead
+    rtol = condf(leaf_tree, 1e-4 if bkw.is_mixed else 1e-5, 1e-3)
 
     # binary positions of get_error_sdev are NaN; replace with 0 to compare.
     with debug_nans(False):
@@ -1727,10 +2212,19 @@ def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
 
     bart2 = tree.map(unpermute, bart2)
 
+    # reduced-precision leaves quantize the permutation-dependent float32
+    # reductions, so invariance holds only to the rounding floor; the leaves and
+    # everything derived from them carry this loss
+    leaf_tree = bart1._mcmc_state.forest.leaf_tree
+
     def check_equal(
         path: KeyPath, x1: Shaped[Array, '*shape'], x2: Shaped[Array, '*shape']
     ) -> None:
-        rtol = 1e-4 if x1.platform() != 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
+        rtol = condf(
+            leaf_tree,
+            1e-4 if x1.platform() != 'cpu' else 1e-5,  # ty: ignore[unresolved-attribute]
+            1e-3,
+        )
         assert_close_matrices(
             x2, x1, err_msg=f'{keystr(path)}: ', rtol=rtol, reduce_rank=True
         )
@@ -1809,11 +2303,11 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
     if num_datapoints == 0 or bkw.all_binary:
         assert_array_equal(bart.offset, jnp.zeros_like(bart.offset))
     else:
-        assert_close_matrices(
-            bart.offset[..., None],
-            jnp.where(mask[..., None], 0.0, kw['y_train']),
-            rtol=1e-6,
-        )
+        # continuous offset is the single datapoint, or 0 if it is missing
+        expected = jnp.where(mask[..., None], 0.0, kw['y_train'])
+        if kw.get('missing') is not None:
+            expected = jnp.where(kw['missing'], 0.0, expected)
+        assert_close_matrices(bart.offset[..., None], expected, rtol=1e-6)
 
     # set expected tau_num and check the error prior default
     if bkw.all_binary:
@@ -1887,7 +2381,10 @@ def test_few_datapoints(bkw: BartKW) -> None:
     kw = bkw.kw
     init_kw = dict(kw.get('init_kw', {}))
     init_kw.update(min_points_per_decision_node=10, min_points_per_leaf=None)
-    kw1 = dict(set_num_datapoints(kw, 8), init_kw=init_kw)
+    # precompute off so the constancy check is exact (tree evaluation)
+    kw1 = dict(
+        set_num_datapoints(kw, 8), init_kw=init_kw, precompute_predict_train=False
+    )
     bart = Bart(**kw1)
     yhat = bart.predict('train', kind='latent_samples')
     assert jnp.all(yhat == yhat[..., :, :1])
@@ -1895,7 +2392,10 @@ def test_few_datapoints(bkw: BartKW) -> None:
     init_kw2 = dict(kw.get('init_kw', {}))
     init_kw2.update(min_points_per_decision_node=None, min_points_per_leaf=5)
     kw2 = dict(
-        set_num_datapoints(kw, 8), init_kw=init_kw2, seed=random.clone(kw['seed'])
+        set_num_datapoints(kw, 8),
+        init_kw=init_kw2,
+        seed=random.clone(kw['seed']),
+        precompute_predict_train=False,
     )
     bart = Bart(**kw2)
     yhat = bart.predict('train', kind='latent_samples')
@@ -2140,7 +2640,7 @@ def run_bart_like_prior(
 
 def sample_prior_like(
     key: Key[Array, ''], bart: Bart, subtests: SubTests
-) -> tuple[PriorSample, TraceWithOffset]:
+) -> tuple[PriorSample, MinimalTrace]:
     """Sample from the prior with the same settings used in `bart`."""
     forest = bart._mcmc_state.forest
     p_nonterminal = forest.p_nonterminal
@@ -2172,7 +2672,7 @@ def sample_prior_like(
         bad_count = jnp.count_nonzero(bad)
         assert bad_count == 0
 
-    return prior_trees, TraceWithOffset.from_trees_trace(prior_trees, bart.offset)
+    return prior_trees, project(MinimalTrace, replace(prior_trees, offset=bart.offset))
 
 
 def count_stub_trees(
@@ -2312,7 +2812,14 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
     ]
     stacked = tree.map(lambda *leaves: jnp.stack(leaves), *singles)
 
-    rtol = 1e-4 if platform != 'cpu' else 1e-5
+    # reduced-precision leaves quantize the slightly different float32 reductions
+    # of vmapped vs looped runs, so equivalence holds only to the rounding floor;
+    # the leaves and everything derived from them carry this loss
+    rtol = condf(
+        singles[0]._mcmc_state.forest.leaf_tree,
+        1e-4 if platform != 'cpu' else 1e-5,
+        1e-3,
+    )
 
     def check(a: Shaped[Array, '*shape'], b: Shaped[Array, '*shape']) -> None:
         assert_close_matrices(a, b, rtol=rtol, reduce_rank=True)
@@ -2335,16 +2842,21 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
 def test_no_recompilation_no_tracing(bkw: BartKW) -> None:
     """Check that running the same `Bart` invocation twice does not retrace.
 
-    Uses `jax.no_tracing` to detect any new jaxpr tracing in the second
-    invocation. Forces ``printevery=None``, which installs no callback at all,
-    because `debug.callback` introduces an unordered effect that disables JAX's
-    C++ pjit fastpath cache, which would make `no_tracing` raise even when no
-    actual jaxpr re-tracing happens. Uses `OriginalBart` (not the wrapper)
-    because the wrapper's `_check_replicated_trees` creates a fresh `shard_map`
-    each call, which doesn't cache across invocations.
+    `jax.no_tracing` has various false positives, so this test has a few
+    workarounds that reduce coverage, which is compensated by
+    `test_no_recompilation_inner_loop_counter`.
     """
-    kw: kwdict = dict(bkw.kw, printevery=None)
+    kw: kwdict = dict(
+        bkw.kw,
+        # no callback because all our callbacks use `jax.debug.callback` which
+        # blocks the jit fast path which `no_tracing` counts as tracing
+        run_mcmc_kw=dict(bkw.kw.get('run_mcmc_kw', {}), callback=None),
+    )
+
+    # use OriginalBart because the test wrapper's `_check_replicated_trees`
+    # always retraces due to its `shard_map`
     OriginalBart(**kw)
+
     kw2: kwdict = dict(kw, seed=random.clone(kw['seed']))
     with no_tracing():
         OriginalBart(**kw2)
@@ -2388,7 +2900,7 @@ def test_pbar(bkw: BartKW, capsys: CaptureFixture[str]) -> None:
     """The `pbar=True` progress bar runs to completion across configurations.
 
     Parametrized over `bkw`, so it also covers chains sharded across devices
-    (e.g. variant v6). This exercises that `tqdm_callback` uses unordered debug
+    (e.g. variant v6). This exercises that `TqdmCallback` uses unordered debug
     callbacks, since ordered ones are unsupported with more than one device.
     """
     # force a concrete `printevery`: some bkw variants set it to None, which now
@@ -2753,11 +3265,26 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     )
     bart = Bart(**baseline_kw)
 
+    # float32 arrays pin the MCMC trajectory and otherwise match exactly across
+    # sharding; a narrow prec_scale, read in the data-parallel per-leaf
+    # reductions, lets those reductions (and the error-variance trajectory they
+    # feed) diverge a bit more when data sharding reorders them
+    prec_scale = bart._mcmc_state.prec_scale
+    strict_rtol = 1e-5 if prec_scale is None else condf(prec_scale, 1e-5, 1e-3)
+
     def check_equal(
         path: KeyPath, xb: Shaped[Array, '*shape'], xs: Shaped[Array, '*shape']
     ) -> None:
+        # Leaves stored in a reduced-precision dtype can differ by a rounding
+        # step when data sharding reorders the per-leaf reductions, so compare
+        # them only at their storage precision.
+        reduced = jnp.issubdtype(xs.dtype, jnp.floating) and xs.dtype.itemsize < 4
         assert_close_matrices(
-            xs, xb, err_msg=f'{keystr(path)}: ', rtol=1e-5, reduce_rank=True
+            xs,
+            xb,
+            err_msg=f'{keystr(path)}: ',
+            rtol=1e-2 if reduced else strict_rtol,
+            reduce_rank=True,
         )
 
     # the sharded fits go through `_drop_device_info` because the mesh is

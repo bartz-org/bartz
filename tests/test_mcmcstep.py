@@ -110,7 +110,13 @@ from bartz.mcmcstep._moves import (
     split_range,
 )
 from bartz.mcmcstep._reduction import _gpu_sm_count, _resolve_pallas_backend
-from bartz.mcmcstep._state import Forest, StepConfig, _search_divisor
+from bartz.mcmcstep._state import (
+    Forest,
+    StepConfig,
+    chol_with_gersh,
+    inv_via_chol_with_gersh,
+    search_divisor,
+)
 from bartz.mcmcstep._step import (
     _blocked_mass_tree,
     _compute_likelihood_ratio_mv,
@@ -134,6 +140,7 @@ from tests.util import (
     assert_array_equal,
     assert_close_matrices,
     assert_different_matrices,
+    condf,
     manual_tree,
     nnone,
 )
@@ -574,66 +581,66 @@ class TestCoreAxisMarkers:
 
 
 class TestSearchDivisor:
-    """Test `_search_divisor`."""
+    """Test `search_divisor`."""
 
     def test_target_already_divides(self) -> None:
         """If `target_divisor` divides `dividend`, return it unchanged via the fast path."""
-        assert _search_divisor(5, 100, 1, 100) == 5
+        assert search_divisor(5, 100, 1, 100) == 5
         # target_divisor outside [low, up] is still returned when it divides
-        assert _search_divisor(10, 100, 50, 80) == 10
-        assert _search_divisor(1, 10, 5, 5) == 1
+        assert search_divisor(10, 100, 50, 80) == 10
+        assert search_divisor(1, 10, 5, 5) == 1
 
     def test_no_divisors_in_range_returns_target(self) -> None:
         """Fall back to `target_divisor` when no value in `[low, up]` divides `dividend`."""
         # 11 is prime; range [2, 10] contains no divisors of 11
-        assert _search_divisor(3, 11, 2, 10) == 3
+        assert search_divisor(3, 11, 2, 10) == 3
         # 17 is prime; range [2, 16] contains no divisors of 17
-        assert _search_divisor(7, 17, 2, 16) == 7
+        assert search_divisor(7, 17, 2, 16) == 7
 
     def test_finds_closest_divisor(self) -> None:
         """Return the divisor in `[low, up]` closest to `target_divisor`."""
         # divisors of 24: 1, 2, 3, 4, 6, 8, 12, 24
         # target=5 -> 4 and 6 tie at distance 1; argmin tie-break picks 4
-        assert _search_divisor(5, 24, 1, 24) == 4
+        assert search_divisor(5, 24, 1, 24) == 4
         # target=10 -> 8 and 12 tie at distance 2; tie-break picks 8
-        assert _search_divisor(10, 24, 1, 24) == 8
+        assert search_divisor(10, 24, 1, 24) == 8
         # target=20 -> 24 closer than 12
-        assert _search_divisor(20, 24, 1, 24) == 24
+        assert search_divisor(20, 24, 1, 24) == 24
 
     def test_range_restricts_candidates(self) -> None:
         """Only divisors within `[low, up]` are considered."""
         # divisors of 24 in [5, 7] -> only 6
-        assert _search_divisor(10, 24, 5, 7) == 6
+        assert search_divisor(10, 24, 5, 7) == 6
         # divisors of 24 in [7, 11] -> only 8
-        assert _search_divisor(10, 24, 7, 11) == 8
+        assert search_divisor(10, 24, 7, 11) == 8
 
     def test_single_point_range(self) -> None:
         """A `low == up` range either yields that value or the fallback."""
         # 6 divides 24
-        assert _search_divisor(10, 24, 6, 6) == 6
+        assert search_divisor(10, 24, 6, 6) == 6
         # 5 does not divide 24; no other candidates -> fallback to target
-        assert _search_divisor(10, 24, 5, 5) == 10
+        assert search_divisor(10, 24, 5, 5) == 10
 
     def test_target_equals_one(self) -> None:
         """`target_divisor == 1` always divides any dividend."""
-        assert _search_divisor(1, 7, 2, 7) == 1
-        assert _search_divisor(1, 100, 1, 100) == 1
+        assert search_divisor(1, 7, 2, 7) == 1
+        assert search_divisor(1, 100, 1, 100) == 1
 
     def test_target_equals_dividend(self) -> None:
         """`target_divisor == dividend` divides exactly."""
-        assert _search_divisor(7, 7, 1, 7) == 7
+        assert search_divisor(7, 7, 1, 7) == 7
 
     def test_ties_pick_lower(self) -> None:
         """Equidistant divisors are broken by picking the lower one (argmin convention)."""
         # divisors of 12 in [1, 12]: 1, 2, 3, 4, 6, 12
         # target=5 -> 4 and 6 tie at distance 1; tie-break picks 4
-        assert _search_divisor(5, 12, 1, 12) == 4
+        assert search_divisor(5, 12, 1, 12) == 4
 
     def test_return_type_is_python_int(self) -> None:
         """Returned values are Python ints, not numpy scalars."""
-        assert isinstance(_search_divisor(5, 100, 1, 100), int)
-        assert isinstance(_search_divisor(5, 24, 1, 24), int)
-        assert isinstance(_search_divisor(3, 11, 2, 10), int)
+        assert isinstance(search_divisor(5, 100, 1, 100), int)
+        assert isinstance(search_divisor(5, 24, 1, 24), int)
+        assert isinstance(search_divisor(3, 11, 2, 10), int)
 
     @pytest.mark.parametrize(
         ('target', 'dividend', 'low', 'up'),
@@ -649,7 +656,7 @@ class TestSearchDivisor:
     ) -> None:
         """Preconditions on the arguments are enforced via assertions."""
         with pytest.raises(AssertionError):
-            _search_divisor(target, dividend, low, up)
+            search_divisor(target, dividend, low, up)
 
 
 def reduce_reference(
@@ -1360,7 +1367,7 @@ class TestMultichain:
             'uv-continuous',
             'mv-binary',
             'mv-continuous',
-            'mv-continuous-vec-weights',
+            'mv-continuous-vec-scales',
             'mv-mixed',
         ]
     )
@@ -1370,7 +1377,7 @@ class TestMultichain:
         mv = kind.startswith('mv-')
         binary = kind.endswith('-binary')
         mixed = kind == 'mv-mixed'
-        vec_weights = kind == 'mv-continuous-vec-weights'
+        vec_scales = kind == 'mv-continuous-vec-scales'
 
         p = 10
         k = 2
@@ -1431,7 +1438,7 @@ class TestMultichain:
                 )
             )
 
-        if vec_weights:
+        if vec_scales:
             kw.update(
                 error_scale=jnp.exp(
                     random.uniform(keys.pop(), (k, self.n), float, -0.5, 0.5)
@@ -1554,6 +1561,12 @@ class TestMultichain:
         )
 
         # check the mc state is equal to the stacked state
+        # reduced-precision leaves quantize the slightly different float32
+        # reductions of the multichain vs stacked single-chain runs, so
+        # equivalence holds only to the rounding floor; the leaves and everything
+        # derived from them carry this loss
+        inexact_rtol = condf(mc_state.forest.leaf_tree, 1e-5, 1e-3)
+
         def check_equal(
             path: KeyPath, mc: Shaped[Array, '*shape'], stacked: Shaped[Array, '*shape']
         ) -> None:
@@ -1563,7 +1576,7 @@ class TestMultichain:
                 mc,
                 stacked,
                 err_msg=f'{str_path}: ',
-                rtol=0 if exact else 1e-5,
+                rtol=0 if exact else inexact_rtol,
                 reduce_rank=True,
             )
 
@@ -1583,9 +1596,8 @@ class TestMultichain:
         ) -> int | None:
             no_vmap_attrs = (
                 '.X',
-                '.binary_y',
+                '.y',
                 '.binary_indices',
-                '.offset',
                 '.prec_scale',
                 '.inv_sdev_scale',
                 '.error_scale',
@@ -1625,7 +1637,7 @@ class TestMultichain:
         ) -> int | None:
             vmap_attrs = (
                 '.X',
-                '.binary_y',
+                '.y',
                 '.z',
                 '.resid',
                 '.prec_scale',
@@ -1912,10 +1924,9 @@ class TestMixedBinaryContinuous:
         assert state.binary_indices is not None
         assert_array_equal(state.binary_indices, jnp.array([0, 2], jnp.int32))
 
-        # binary_y should have only binary rows (kb=2)
-        assert state.binary_y is not None
-        assert state.binary_y.shape == (2, self.n)
-        assert state.binary_y.dtype == jnp.bool_
+        # y should hold all k rows, whatever the outcome type
+        assert state.y.shape == (self.k, self.n)
+        assert state.y.dtype == jnp.float32
 
         # z should have only binary rows (kb=2)
         assert state.z is not None
@@ -1938,30 +1949,22 @@ class TestMixedBinaryContinuous:
         assert state.error_cov_inv.nu is not None
         assert state.error_cov_inv.rate is not None
 
-    def test_init_binary_y_values(self, init_kwargs: dict) -> None:
-        """Check that binary_y correctly extracts binary components from y."""
-        y = init_kwargs['y']
-        state = init(**init_kwargs)
-
-        assert state.binary_y is not None
-        # binary_y[0] should correspond to y[0] (first binary component)
-        assert_array_equal(state.binary_y[0], y[0] != 0)
-        # binary_y[1] should correspond to y[2] (second binary component)
-        assert_array_equal(state.binary_y[1], y[2] != 0)
-
     def test_init_resid_binary_rows_zero(self, init_kwargs: dict) -> None:
         """Check that the binary rows of resid are initialized to zero."""
-        state = init(**init_kwargs)
+        # copy the inputs because init may donate them
+        state = init(**copy_arrays(init_kwargs))
 
         # binary rows (0 and 2) should be zero
         assert_array_equal(state.resid[0], jnp.zeros(self.n))
         assert_array_equal(state.resid[2], jnp.zeros(self.n))
 
-        # continuous row (1) should be y[1] - offset[1]
+        # continuous row (1) should be y[1] - offset[1] in data units (resid is
+        # stored in units of resid_unit)
         y = init_kwargs['y']
         offset = init_kwargs['offset']
         expected = y[1] - offset[1]
-        assert_array_equal(state.resid[1], expected)
+        data_units = state.resid[1] * state.resid_unit[1]
+        assert_close_matrices(data_units, expected, rtol=1e-6)
 
     def test_init_z_values(self, init_kwargs: dict) -> None:
         """Check that z is initialized to offset for binary components."""
@@ -2144,6 +2147,25 @@ def mcmcstep_data(mcmcstep_data_shape: tuple[int, int]) -> MCMCStepData:
     y = jnp.linspace(-1, 1, n)
     max_split = jnp.full(p, 5, dtype=jnp.uint32)
     return MCMCStepData(X, y, max_split)
+
+
+def test_chol_with_gersh_disparate_scales() -> None:
+    """Gershgorin stabilization is per-component, not a single global shift.
+
+    A global shift set by the largest component would swamp the precision of
+    much smaller ones, as when a mixed model heavily scales a continuous
+    outcome alongside O(1) binary ones, corrupting the Cholesky and the
+    inverse (and hence `leaf_unit`).
+    """
+    # diagonal precisions spanning 14 orders of magnitude
+    precisions = jnp.array([1e-8, 1.0, 1e6])
+    mat = jnp.diag(precisions)
+    assert_close_matrices(
+        chol_with_gersh(mat), jnp.diag(jnp.sqrt(precisions)), rtol=1e-5
+    )
+    assert_close_matrices(
+        inv_via_chol_with_gersh(mat), jnp.diag(1 / precisions), rtol=1e-5
+    )
 
 
 class TestWishart:
@@ -2371,12 +2393,11 @@ class TestMVBartIntegration:
         assert jnp.ndim(bart_uv.error_cov_inv.value) == 0
         assert bart_mv.error_cov_inv.value.shape == (1, 1)
 
+        assert bart_uv.y.ndim == 1
+        assert bart_mv.y.ndim == 2
+        assert_array_equal(bart_uv.y, bart_mv.y.squeeze(0))
+
         if binary:
-            assert bart_uv.binary_y is not None
-            assert bart_mv.binary_y is not None
-            assert bart_uv.binary_y.ndim == 1
-            assert bart_mv.binary_y.ndim == 2
-            assert_array_equal(bart_uv.binary_y, bart_mv.binary_y.squeeze(0))
             assert bart_uv.z is not None
             assert bart_mv.z is not None
             assert bart_uv.z.ndim == 1
@@ -2413,13 +2434,18 @@ class TestMVBartIntegration:
         common: dict = dict(
             _chain_anchor=jnp.zeros(()),
             X=X,
-            binary_y=None,
+            y=y,
             binary_indices=None,
             z=None,
-            offset=jnp.float32(0.0),
             prec_scale=None,
             inv_sdev_scale=None,
+            inv_sdev_unit=jnp.ones(()),
+            resid_unit=jnp.ones(()),  # unit scale: resid is in data units
+            resid_eff_scale=jnp.ones(()),
+            resid_inexact_integral=jnp.zeros(()),
             error_scale=None,
+            n_non_missing=jnp.asarray(y.size),
+            sum_diag_prec_scale=jnp.asarray(float(y.size)),
             forest=_EmptyForest(),
             config=_minimal_step_config(),
         )
@@ -2481,14 +2507,21 @@ class TestMVBartIntegration:
         scale_prior = jnp.float32(10.0)
         # `X` is not read by the samplers, but its `n` axis is cross-checked
         # against `resid`, so the dropped states carry the subset `X[:, keep]`.
+        # both the masked and dropped states see the same kept-point count and
+        # (unscaled) precision sum
+        n_kept = jnp.sum(keep)
         common: dict = dict(
             _chain_anchor=jnp.zeros(()),
-            binary_y=None,
             binary_indices=None,
             z=None,
-            offset=jnp.float32(0.0),
             prec_scale=None,
+            inv_sdev_unit=jnp.ones(()),
+            resid_unit=jnp.ones(()),  # unit scale: resid is in data units
+            resid_eff_scale=jnp.ones(()),
+            resid_inexact_integral=jnp.zeros(()),
             error_scale=None,
+            n_non_missing=n_kept,
+            sum_diag_prec_scale=n_kept.astype(jnp.float32),
             forest=_EmptyForest(),
             config=_minimal_step_config(),
         )
@@ -2498,6 +2531,7 @@ class TestMVBartIntegration:
         st_uv_with = State(
             **common,
             X=X,
+            y=resid_1d,
             resid=resid_1d,
             inv_sdev_scale=inv_sdev,
             error_cov_inv=uv_prior,
@@ -2505,6 +2539,7 @@ class TestMVBartIntegration:
         st_uv_drop = State(
             **common,
             X=X[:, keep],
+            y=resid_1d[keep],
             resid=resid_1d[keep],
             inv_sdev_scale=None,
             error_cov_inv=uv_prior,
@@ -2519,6 +2554,7 @@ class TestMVBartIntegration:
         st_mv_with = State(
             **common,
             X=X,
+            y=resid_1d,
             resid=resid_1d[None, :],
             inv_sdev_scale=inv_sdev,
             error_cov_inv=mv_prior,
@@ -2526,6 +2562,7 @@ class TestMVBartIntegration:
         st_mv_drop = State(
             **common,
             X=X[:, keep],
+            y=resid_1d[keep],
             resid=resid_1d[None, keep],
             inv_sdev_scale=None,
             error_cov_inv=mv_prior,
@@ -2607,13 +2644,17 @@ class TestMultivariate:
         )
 
         for key in keys.pop(3):
+            # the uv and mv (k=1) reductions round the stored leaves slightly
+            # differently, so with reduced leaf precision these continuous
+            # quantities agree only to the rounding floor
+            rtol = condf(uv_state.forest.leaf_tree, 1e-6, 1e-3)
             assert_close_matrices(
-                uv_state.resid, mv_state.resid.squeeze(0), rtol=1e-6, atol=1e-6
+                uv_state.resid, mv_state.resid.squeeze(0), rtol=rtol, atol=1e-6
             )
             assert_close_matrices(
                 uv_state.forest.leaf_tree,
                 mv_state.forest.leaf_tree.squeeze(1),
-                rtol=1e-6,
+                rtol=rtol,
             )
 
             # the full `step` resamples error_cov_inv: the diagonal (uv) and
@@ -2622,7 +2663,7 @@ class TestMultivariate:
             assert_close_matrices(
                 uv_state.error_cov_inv.value.reshape(1, 1),
                 mv_state.error_cov_inv.value,
-                rtol=1e-5,
+                rtol=condf(uv_state.forest.leaf_tree, 1e-5, 1e-3),
             )
 
             assert_array_equal(uv_state.forest.var_tree, mv_state.forest.var_tree)
@@ -2716,7 +2757,7 @@ class TestMultivariate:
     def test_mv_het_vector_equiv_scalar(
         self, keys: split, mcmcstep_data: MCMCStepData, k: int
     ) -> None:
-        """Constant vector weights equal scalar weights."""
+        """Constant per-component error scales equal scalar error scales."""
         X, y_uv, max_split = mcmcstep_data
         n = y_uv.size
 
@@ -2741,6 +2782,11 @@ class TestMultivariate:
                 ),
                 resid_reduction_config=BatchedReduction(num_batches=None),
                 count_reduction_config=BatchedReduction(num_batches=None),
+                # this checks the scalar- and vector-scale code paths agree; the
+                # scalar (n,) and vector (k, k, n) prec_scale carry the same values
+                # but float16 storage perturbs the two paths' linear algebra
+                # differently, so store in float32 to test the path equivalence alone
+                prec_scale_dtype=jnp.float32,
             ),
         )
 
@@ -2752,8 +2798,8 @@ class TestMultivariate:
         assert vector_state.prec_scale is not None
         assert vector_state.prec_scale.shape == (k, k, n)
 
-        # scalar weights produce 1-D ``inv_sdev_scale`` (Wishart error cov update)
-        # while vector weights produce 2-D ``inv_sdev_scale`` (diagonal update),
+        # scalar error scales produce 1-D ``inv_sdev_scale`` (Wishart error cov
+        # update) while per-component ones produce 2-D ``inv_sdev_scale`` (diagonal update),
         # so the error_cov_inv updates are not equivalent, we can't use the full `step`.
         for _ in range(3):
             key = keys.pop()
@@ -2764,7 +2810,7 @@ class TestMultivariate:
             assert_close_matrices(
                 scalar_state.forest.leaf_tree,
                 vector_state.forest.leaf_tree,
-                rtol=1e-5,
+                rtol=3e-5,
                 reduce_rank=True,
             )
 

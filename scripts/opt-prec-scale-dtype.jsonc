@@ -1,0 +1,29 @@
+{
+    // Test whether storing `State.prec_scale` as float16 speeds up the residual
+    // reduction when per-datapoint weights are set.
+    //
+    // With `error_scale` set (weights=true), each per-tree iteration computes
+    // `scaled_resid = resid * prec_scale` before summing residuals into leaves.
+    // Narrowing `prec_scale` to float16 halves the bytes read for that multiply;
+    // the gain should grow with n (bandwidth-bound) and with k, where the O(k*n)
+    // residual reduction is a larger share of the step.
+    //
+    // prec_scale_dtype is the reduced-over axis: at each (n, k) we read off the
+    // faster of float16/float32. weights is fixed true because prec_scale is
+    // `None` without it (dtype then inert). The reductions stay at their default
+    // batching, taken as already optimized; the optimum is broad enough that the
+    // dtype change doesn't shift it. num_trees is fixed: it scales the per-tree
+    // scan linearly without changing the per-tree multiply/reduction ratio.
+    "plot": {
+        "scan": "n",
+        "reduce": "prec_scale_dtype",
+    },
+    "values": {
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
+        "k":                  [null, 1, 2, 4, 8, 16],
+        "maxdepth":           [6],
+        "weights":            ["vector"],
+        "num_trees":          [5],
+        "prec_scale_dtype":   ["float16", "float32"],
+    },
+}

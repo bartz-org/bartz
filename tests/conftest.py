@@ -60,22 +60,30 @@ def get_old_python_version() -> tuple[int, int]:
 
 
 INVASIVE_DEBUG_CHECKS = False
-if INVASIVE_DEBUG_CHECKS:
-    # they make the tests 10% slower, disable buffer donation, and yield some
+if INVASIVE_DEBUG_CHECKS:  # pragma: no cover, opt-in debug checks
+    # these make the tests 10% slower, disable buffer donation, and yield some
     # false positive, so we don't keep them on by default
     config.update('jax_debug_key_reuse', True)
     config.update('jax_debug_nans', True)
     config.update('jax_debug_infs', True)
+
+    # enable logging arrays destroyed by the gc, generates a LOT of noise because type
+    # checking creates reference loops
+    config.update('jax_array_garbage_collection_guard', 'log')
+
 config.update('jax_legacy_prng_key', 'error')
+
 # WORKAROUND(jax<0.8.0): jax_explicit_x64_dtypes config option added in 0.8.0
 if jax.__version_info__ >= (0, 8, 0):
     config.update('jax_explicit_x64_dtypes', 'error')
+
 # WORKAROUND(jax<0.8.2): jax_check_static_indices config option added in 0.8.2
 if jax.__version_info__ >= (0, 8, 2):
     config.update('jax_check_static_indices', True)
 
-# enable logging arrays destroyed by the gc
-config.update('jax_array_garbage_collection_guard', 'log')
+# WORKAROUND(jax<0.9.1): jax_allow_f16_reductions config option added in 0.9.1
+if jax.__version_info__ >= (0, 9, 1):
+    config.update('jax_allow_f16_reductions', False)
 
 # enable compilation cache
 if sys.version_info[:2] > get_old_python_version():

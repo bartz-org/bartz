@@ -34,7 +34,7 @@ from jax import numpy as jnp
 from jax.nn import softmax
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
-from jaxtyping import Array, Bool, Float32, Int32, Key, Shaped, UInt, UInt32
+from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Shaped, UInt, UInt32
 
 from bartz._jaxext import (
     Module,
@@ -53,7 +53,8 @@ from bartz.mcmcstep._state import (
     State,
     StepConfig,
     chol_with_gersh,
-    get_axis_size,
+    round_to_pow2,
+    scaled_error_cov_inv,
     shard_map_state,
     split_key_for_chains,
     vmap_chains,
@@ -87,6 +88,7 @@ def step(key: Key[Array, ''], state: State) -> State:
     """
     keys = split(key, 4)
 
+    state = step_resid_inexact_integral(state)
     state = step_trees(keys.pop(), state)
 
     if state.z is not None:
@@ -97,6 +99,47 @@ def step(key: Key[Array, ''], state: State) -> State:
 
     state = step_sparse(keys.pop(), state)
     return step_config(state)
+
+
+@named_call
+def step_resid_inexact_integral(state: State) -> State:
+    """Accumulate the mean square of the residuals subject to rounding.
+
+    Adds to `State.resid_inexact_integral` the current mean square of the
+    residuals at or above ``2^(leaf_quantization+1)`` (in
+    `State.resid_eff_scale` units), below which the running residual updates
+    are exact because the `State.resid` dtype spacing still matches the leaf
+    quantum. Without quantization every update rounds and all residuals count.
+    """
+    # filter away residuals below quantization threshold
+    q = state.config.leaf_quantization
+    resid = state.resid
+    if q is None:
+        inexact = resid
+    else:
+        # the quantization grid follows `resid_eff_scale` while `resid` stays
+        # in `resid_unit` units, so the threshold carries their (power of
+        # two, hence exact) ratio; it is cast to the resid dtype to keep the
+        # comparison from widening the n-sized array
+        exact_below = 2.0 ** (q + 1) * state.resid_eff_scale / state.resid_unit
+        inexact = jnp.where(
+            jnp.abs(resid) >= exact_below[..., None].astype(resid.dtype), resid, 0
+        )
+
+    # mask missing datapoints if any
+    if state.inv_sdev_scale is not None:
+        inexact = jnp.where(state.inv_sdev_scale != 0, inexact, 0)
+
+    # compute mean square residuals above threshold
+    ms = jnp.einsum(
+        '...n,...n->...', inexact, inexact, preferred_element_type=jnp.float32
+    )
+    if state.config.data_sharded:
+        ms = lax.psum(ms, 'data')
+    ms /= jnp.maximum(state.n_non_missing, 1)
+
+    # accumulate to the running sum
+    return replace(state, resid_inexact_integral=state.resid_inexact_integral + ms)
 
 
 @named_call
@@ -167,11 +210,11 @@ class PreLkV(Module):
 
         ``error_cov_inv^2 / (leaf_prior_cov_inv + n * error_cov_inv)``.
 
-    In the multivariate homoskedastic or scalar weight case, this is the matrix term
+    In the multivariate homoskedastic or scalar-error-scale case, this is the matrix term
 
         ``error_cov_inv @ inv(leaf_prior_cov_inv + n * error_cov_inv) @ error_cov_inv``.
 
-    In the multivariate vector-weight case, this is instead
+    In the multivariate case with per-component error scales, this is instead
 
         ``chol(leaf_prior_cov_inv + n * error_cov_inv)``
 
@@ -237,7 +280,7 @@ class PreLfUV(PreLf):
 
 
 class PreLfMV(PreLf):
-    """`PreLf` for the multivariate homoskedastic or scalar-weight case."""
+    """`PreLf` for the multivariate homoskedastic or scalar-error-scale case."""
 
     mean_factor: Float32[Array, '*num_trees k k tree_size']
     """``error_cov_inv @ inv(prec)``, where ``prec`` is the posterior precision
@@ -251,7 +294,7 @@ class PreLfMV(PreLf):
 
 
 class PreLfMVHet(PreLf):
-    """`PreLf` for the multivariate vector-weight case."""
+    """`PreLf` for the multivariate case with per-component error scales."""
 
     mean_factor: Float32[Array, '*num_trees k k tree_size']
     """The lower Cholesky factor of the posterior precision of each leaf; the
@@ -383,11 +426,15 @@ def accept_moves_parallel_stage(
         ),
     )
 
+    # `prec_trees` and the per-leaf residual sums are in stored `prec_scale`
+    # units, so their common `inv_sdev_unit ** 2` factor is folded into the
+    # error precision once here instead
+    error_cov_inv = scaled_error_cov_inv(state)
     prelf = precompute_leaf_terms(
-        key, prec_trees, state.error_cov_inv.value, state.forest.leaf_prior_cov_inv
+        key, prec_trees, error_cov_inv, state.forest.leaf_prior_cov_inv
     )
     prelkv = precompute_likelihood_terms(
-        state.error_cov_inv.value, state.forest.leaf_prior_cov_inv, prelf, moves
+        error_cov_inv, state.forest.leaf_prior_cov_inv, prelf, moves
     )
 
     return ParallelStageOut(
@@ -455,7 +502,7 @@ def _compute_count_or_prec_trees(
 
 @overload
 def _compute_count_or_prec_trees(
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'],
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'],
     trees: Float32[Array, 'num_trees tree_size']
     | Float32[Array, 'num_trees k k tree_size'],
     leaf_indices: UInt[Array, 'num_trees n'],
@@ -468,7 +515,7 @@ def _compute_count_or_prec_trees(
 
 
 def _compute_count_or_prec_trees(
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None,
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None,
     trees: UInt32[Array, 'num_trees tree_size']
     | Float32[Array, 'num_trees tree_size']
     | Float32[Array, 'num_trees k k tree_size'],
@@ -509,7 +556,7 @@ def _compute_count_or_prec_trees(
 
 
 def _compute_count_or_prec_tree(
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None,
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None,
     tree: UInt32[Array, ' tree_size']
     | Float32[Array, ' tree_size']
     | Float32[Array, 'k k tree_size'],
@@ -549,7 +596,7 @@ def _compute_count_or_prec_tree(
 
     # write the children sums into the cache along with their total at the
     # parent node (a non-leaf in the post-grow indexing the reduce runs on);
-    # the weighted version of the counts is not needed because the likelihood
+    # the precision-scaled version of the counts is not needed because the likelihood
     # terms are derived from the leaf terms
     total = lr[..., 0] + lr[..., 1]
     lrt = jnp.concatenate([lr, total[..., None]], axis=-1)
@@ -599,7 +646,7 @@ def compute_count_trees(
 def compute_prec_trees(
     prec_trees: Float32[Array, 'num_trees tree_size']
     | Float32[Array, 'num_trees k k tree_size'],
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'],
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
     config: StepConfig,
@@ -694,10 +741,10 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
 
 @named_call
 def adapt_leaf_trees_to_grow_indices(
-    leaf_trees: Float32[Array, 'num_trees tree_size']
-    | Float32[Array, 'num_trees k tree_size'],
+    leaf_trees: Float[Array, 'num_trees tree_size']
+    | Float[Array, 'num_trees k tree_size'],
     moves: Moves,
-) -> Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k tree_size']:
+) -> Float[Array, 'num_trees tree_size'] | Float[Array, 'num_trees k tree_size']:
     """
     Modify leaves such that post-grow indices work on the original tree.
 
@@ -720,9 +767,8 @@ def adapt_leaf_trees_to_grow_indices(
 
 @vmap_nodoc
 def _adapt_leaf_trees_to_grow_indices(
-    leaf_trees: Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size'],
-    moves: Moves,
-) -> Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size']:
+    leaf_trees: Float[Array, ' tree_size'] | Float[Array, ' k tree_size'], moves: Moves
+) -> Float[Array, ' tree_size'] | Float[Array, ' k tree_size']:
     """Implement `adapt_leaf_trees_to_grow_indices`."""
     # the parent slot is written back unchanged to share a single scatter
     values_at_node = leaf_trees[..., moves.lrt_nodes[2]]
@@ -740,7 +786,7 @@ def _logdet_from_chol(L: Float32[Array, '... k k']) -> Float32[Array, '...']:
 def compute_B(
     error_cov_inv: Float32[Array, 'k k'], resid: Float32[Array, 'k k *tree_size']
 ) -> Float32[Array, ' k *tree_size']:
-    """Compute the leaf score from the leaf weighted sum of residuals."""
+    """Compute the leaf score from the leaf precision-scaled sum of residuals."""
     return jnp.einsum('ab,ab...->a...', error_cov_inv, resid)
 
 
@@ -856,8 +902,9 @@ def precompute_leaf_terms(
         The likelihood precision scale in each potential or actual leaf node.
     error_cov_inv
         The inverse error variance (univariate) or the inverse of error
-        covariance matrix (multivariate). For univariate case, this is the
-        inverse global error variance factor if `prec_scale` is set.
+        covariance matrix (multivariate). If `prec_scale` is set, this is the
+        global error precision factor, with the squared `inv_sdev_unit` folded in
+        (see `bartz.mcmcstep.State.inv_sdev_unit`).
     leaf_prior_cov_inv
         The inverse prior variance of each leaf (univariate) or the inverse of
         prior covariance matrix of each leaf (multivariate).
@@ -955,8 +1002,9 @@ def precompute_likelihood_terms(
     ----------
     error_cov_inv
         The inverse error variance (univariate) or the inverse of the error
-        covariance matrix (multivariate). This is the inverse global error
-        variance factor if `prec_scale` is set.
+        covariance matrix (multivariate). If `prec_scale` is set, this is the
+        global error precision factor, with the squared `inv_sdev_unit` folded in
+        (see `bartz.mcmcstep.State.inv_sdev_unit`).
     leaf_prior_cov_inv
         The inverse prior variance of each leaf (univariate) or the inverse of
         prior covariance matrix of each leaf (multivariate).
@@ -1006,11 +1054,11 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
     """
 
     def loop(
-        resid: Float32[Array, ' n'] | Float32[Array, ' k n'], pt: SeqStageInPerTree
+        resid: Float[Array, ' n'] | Float[Array, ' k n'], pt: SeqStageInPerTree
     ) -> tuple[
-        Float32[Array, ' n'] | Float32[Array, ' k n'],
+        Float[Array, ' n'] | Float[Array, ' k n'],
         tuple[
-            Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size'],
+            Float[Array, ' tree_size'] | Float[Array, ' k tree_size'],
             Bool[Array, ''],
             Bool[Array, ''],
             Float32[Array, ''] | None,
@@ -1024,9 +1072,13 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
                 pso.state.config.data_sharded,
                 pso.state.prec_scale,
                 pso.state.forest.log_likelihood is not None,
-                pso.state.error_cov_inv.value
+                scaled_error_cov_inv(pso.state)
                 if isinstance(pso.prelf, PreLfMVHet)
                 else None,
+                pso.state.forest.leaf_unit,
+                pso.state.resid_unit,
+                pso.state.resid_eff_scale,
+                pso.state.config.leaf_quantization,
             ),
             pt,
         )
@@ -1066,7 +1118,7 @@ class SeqStageInAllTrees(Module):
     data_sharded: bool = field(static=True)
     """Whether the data axis is sharded across devices."""
 
-    prec_scale: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None
+    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None
     """The scale of the precision of the error on each datapoint. If None, it
     is assumed to be 1."""
 
@@ -1074,9 +1126,22 @@ class SeqStageInAllTrees(Module):
     """Whether to save the acceptance ratios."""
 
     error_cov_inv: Float32[Array, 'k k'] | None
-    """The global error precision scale. Set only in the multivariate
-    vector-weight case, where the sequential stage needs it to compute the
-    leaf scores."""
+    """The global error precision scale, with the squared `inv_sdev_unit` folded
+    in (see `bartz.mcmcstep.State.inv_sdev_unit`). Set only in the
+    multivariate case with per-component error scales, where the sequential
+    stage needs it to compute the leaf scores."""
+
+    leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
+    """The storage unit of the leaf values, see `bartz.mcmcstep.Forest.leaf_unit`."""
+
+    resid_unit: Float32[Array, ''] | Float32[Array, ' k']
+    """The storage unit of the residuals, see `bartz.mcmcstep.State.resid_unit`."""
+
+    resid_eff_scale: Float32[Array, ''] | Float32[Array, ' k']
+    """The measured scale of the residuals, see `bartz.mcmcstep.State.resid_eff_scale`."""
+
+    leaf_quantization: Int32[Array, ''] | None
+    """Leaf quantization setting, see `bartz.mcmcstep.StepConfig`."""
 
 
 class SeqStageInPerTree(Module):
@@ -1088,7 +1153,7 @@ class SeqStageInPerTree(Module):
     # rank/dtype (cf. `ParallelStageOut`); the per-tree slices reach `loop` via
     # scan, which does not re-run `__init__`.
     leaf_tree: (
-        Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k tree_size']
+        Float[Array, 'num_trees tree_size'] | Float[Array, 'num_trees k tree_size']
     )
     """The leaf values of the trees."""
 
@@ -1115,12 +1180,12 @@ class SeqStageInPerTree(Module):
 
 @named_call
 def accept_move_and_sample_leaves(
-    resid: Float32[Array, ' n'] | Float32[Array, ' k n'],
+    resid: Float[Array, ' n'] | Float[Array, ' k n'],
     at: SeqStageInAllTrees,
     pt: SeqStageInPerTree,
 ) -> tuple[
-    Float32[Array, ' n'] | Float32[Array, ' k n'],
-    Float32[Array, ' tree_size'] | Float32[Array, ' k tree_size'],
+    Float[Array, ' n'] | Float[Array, ' k n'],
+    Float[Array, ' tree_size'] | Float[Array, ' k tree_size'],
     Bool[Array, ''],
     Bool[Array, ''],
     Float32[Array, ''] | None,
@@ -1131,7 +1196,10 @@ def accept_move_and_sample_leaves(
     Parameters
     ----------
     resid
-        The residuals (data minus forest value).
+        The residuals (data minus forest value), in units of `at.resid_unit`
+        and a possibly narrow dtype (see `State.resid`). The reduction over the
+        residuals runs in these units; the per-leaf sums are scaled back to data
+        units afterwards.
     at
         The inputs that are the same for all trees.
     pt
@@ -1139,9 +1207,9 @@ def accept_move_and_sample_leaves(
 
     Returns
     -------
-    resid : Float32[Array, 'n'] | Float32[Array, ' k n']
-        The updated residuals (data minus forest value).
-    leaf_tree : Float32[Array, 'tree_size'] | Float32[Array, ' k tree_size']
+    resid : Float[Array, 'n'] | Float[Array, ' k n']
+        The updated residuals, in the same stored units and dtype as the input.
+    leaf_tree : Float[Array, 'tree_size'] | Float[Array, ' k tree_size']
         The new leaf values of the tree.
     acc : Bool[Array, '']
         Whether the move was accepted.
@@ -1168,8 +1236,19 @@ def accept_move_and_sample_leaves(
         at.data_sharded,
     )
 
+    # the residuals are stored and reduced in units of `resid_unit` (and a
+    # possibly narrow dtype) for bandwidth; the float32 per-leaf sums are scaled
+    # back to data units here, after the reduction and before everything else.
+    # with error scales, the sums keep the stored `prec_scale` units, whose
+    # `inv_sdev_unit ** 2` factor is folded into the error precision instead
+    resid_tree *= at.resid_unit[..., None]
+
+    # convert the starting tree to data units; multiplying by the float32
+    # scale also takes care of upcasting narrow leaf dtypes
+    prev_leaf_tree = at.leaf_unit[..., None] * pt.leaf_tree
+
     # subtract starting tree from function
-    resid_tree += pt.prec_tree * pt.leaf_tree
+    resid_tree += pt.prec_tree * prev_leaf_tree
 
     # sum residuals in parent node modified by move and compute likelihood;
     # the children slots are written back unchanged to share a single scatter
@@ -1190,7 +1269,7 @@ def accept_move_and_sample_leaves(
 
     # compute leaves posterior and sample leaves
     if at.error_cov_inv is not None:
-        # multivariate w/ vector weights
+        # multivariate w/ per-component error scales
         b_tree = compute_B(at.error_cov_inv, resid_tree)  # (k, 2**d)
         l_lead = jnp.moveaxis(pt.prelf.mean_factor, -1, 0)  # (2**d, k, k)
         b_lead = b_tree.T[:, :, None]  # (2**d, k, 1)
@@ -1198,7 +1277,7 @@ def accept_move_and_sample_leaves(
         mu = solve_triangular(l_lead, y, lower=True, trans='T').squeeze(-1)
         mean_post = mu.T  # (k, 2**d)
     elif resid.ndim > 1:
-        # multivariate homoskedastic or scalar weights
+        # multivariate homoskedastic or scalar error scales
         mean_post = jnp.einsum('kil,kl->il', pt.prelf.mean_factor, resid_tree)
     else:
         # univariate
@@ -1211,17 +1290,39 @@ def accept_move_and_sample_leaves(
     leaf_tree = leaf_tree.at[
         ..., jnp.where(to_prune, pt.move.lrt_nodes, tree_size)
     ].set(leaf_tree[..., pt.move.lrt_nodes[2], None])
-    # replace old tree with new tree in function values
-    resid += (pt.leaf_tree - leaf_tree)[..., pt.leaf_indices]
+
+    # round the new leaves to the storage units and dtype; the residuals are
+    # then updated with the rounded values to stay consistent with the trees
+    leaf_tree = leaf_tree / at.leaf_unit[..., None]
+    if at.leaf_quantization is not None:
+        # quantize the leaves such that the residual updates below are mostly
+        # exact. the target grid is the spacing of `resid.dtype` values of
+        # magnitude 2^leaf_quantization in units of the measured residual
+        # scale, so 2^(leaf_quantization - nmant) * resid_eff_scale in data
+        # units; dividing by leaf_unit converts it to the leaf units
+        # `leaf_tree` is in here. the scales are powers of two, so the quantum
+        # is one too and the leaf storage dtype's own (coarser) rounding below
+        # preserves multiples of it.
+        nmant = jnp.finfo(resid.dtype).nmant
+        quantum = (at.resid_eff_scale / at.leaf_unit) * 2.0 ** (
+            at.leaf_quantization - nmant
+        )
+        leaf_tree = jnp.round(leaf_tree / quantum[..., None]) * quantum[..., None]
+    leaf_tree = leaf_tree.astype(pt.leaf_tree.dtype)
+
+    # replace old tree with new tree in function values; the per-leaf data-unit
+    # delta is converted back to the stored residual units and dtype *before* the
+    # scatter, so the n-sized update stays in the narrow `resid` storage
+    leaf_delta = prev_leaf_tree - at.leaf_unit[..., None] * leaf_tree
+    delta = (leaf_delta / at.resid_unit[..., None]).astype(resid.dtype)
+    resid += delta[..., pt.leaf_indices]
 
     return resid, leaf_tree, acc, to_prune, log_lk_ratio
 
 
 @named_call
 def sum_resid(
-    scaled_resid: (
-        Float32[Array, ' n'] | Float32[Array, 'k n'] | Float32[Array, 'k k n']
-    ),
+    scaled_resid: Float[Array, ' n'] | Float[Array, 'k n'] | Float[Array, 'k k n'],
     leaf_indices: UInt[Array, ' n'],
     tree_size: int,
     reduction_config: ReductionConfig,
@@ -1311,8 +1412,9 @@ def compute_likelihood_ratio(
         The pre-computed terms of the likelihood ratio, see
         `precompute_likelihood_terms`.
     error_cov_inv
-        The global error precision scale. Set only in the multivariate
-        vector-weight case.
+        The global error precision scale, with the squared `inv_sdev_unit` folded
+        in (see `bartz.mcmcstep.State.inv_sdev_unit`). Set only in the
+        multivariate case with per-component error scales.
 
     Returns
     -------
@@ -1518,27 +1620,58 @@ def _sample_wishart_bartlett(
     return T @ T.T
 
 
+def step_resid_eff_scale(
+    state: State,
+    norm2: Float32[Array, ''] | Float32[Array, ' k'],
+    prec_sum: Float32[Array, ''] | Float32[Array, ' k'],
+) -> State:
+    """Update `State.resid_eff_scale` with the measured scale of the residuals.
+
+    Parameters
+    ----------
+    state
+        A BART MCMC state.
+    norm2
+        The squared (precision-scaled, masked) norm of the residuals in data units.
+    prec_sum
+        The sum of the precision scales (unmasked-datapoint count without
+        error scales), matching the scaling of `norm2`.
+
+    Returns
+    -------
+    The state with `resid_eff_scale` set to the residual rms rounded to a power of two.
+    """
+    scale = round_to_pow2(jnp.sqrt(norm2 / prec_sum))
+    # keep the previous scale if the residuals vanish
+    scale = jnp.where(scale == 0, state.resid_eff_scale, scale)
+    return replace(state, resid_eff_scale=scale)
+
+
 def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
     assert state.error_cov_inv.nu is not None
     assert state.error_cov_inv.rate is not None
 
+    # keep the residuals in their stored (narrow) dtype and resid_unit units;
+    # the reduction accumulates in float32 and its (k, k) result is rescaled to
+    # data units, so no n-sized float32 array is ever materialized
     resid = state.resid
-    if state.inv_sdev_scale is None:
-        _, n_eff = resid.shape
-        n_eff *= get_axis_size(state.config.mesh, 'data')
-    else:
+    if state.inv_sdev_scale is not None:
         # 2-D inv_sdev_scale dispatches to the diagonal path, so here it is 1-D
-        n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
-        if state.config.data_sharded:
-            n_eff = lax.psum(n_eff, 'data')
         resid *= state.inv_sdev_scale
-    df_post = state.error_cov_inv.nu + n_eff
-    rrt = resid @ resid.T
+    df_post = state.error_cov_inv.nu + state.n_non_missing
+    # unit of the stored precision-scaled residuals: `resid` is in `resid_unit`
+    # units and `inv_sdev_scale` in `inv_sdev_unit` units (a scalar here,
+    # matching the 1-D `inv_sdev_scale`; 1 without error scales)
+    scale = state.resid_unit * state.inv_sdev_unit
+    rrt = jnp.einsum(
+        'an,bn->ab', resid, resid, preferred_element_type=jnp.float32
+    ) * jnp.outer(scale, scale)
     if state.config.data_sharded:
         rrt = lax.psum(rrt, 'data')
     scale_post = state.error_cov_inv.rate + rrt
 
     prec = _sample_wishart_bartlett(key, df_post, scale_post)
+    state = step_resid_eff_scale(state, jnp.diagonal(rrt), state.sum_diag_prec_scale)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
@@ -1547,22 +1680,21 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     assert state.error_cov_inv.rate is not None
     assert state.error_cov_inv.nu is not None
 
+    # keep the residuals in their stored (narrow) dtype and resid_unit units;
+    # the reduction accumulates in float32 and its small result is rescaled to
+    # data units, so no n-sized float32 array is ever materialized
     resid = state.resid
     if state.inv_sdev_scale is not None:
         resid *= state.inv_sdev_scale
 
     # alpha
-    if state.inv_sdev_scale is None:
-        *_, n_eff = resid.shape
-        n_eff *= get_axis_size(state.config.mesh, 'data')
-    else:
-        n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
-        if state.config.data_sharded:
-            n_eff = lax.psum(n_eff, 'data')
-    alpha = state.error_cov_inv.nu / 2 + n_eff / 2
+    alpha = state.error_cov_inv.nu / 2 + state.n_non_missing / 2
 
-    # beta
-    norm2 = jnp.einsum('...n,...n->...', resid, resid)
+    # beta; `resid` is stored in `resid_unit` units and `inv_sdev_scale` in
+    # `inv_sdev_unit` units (1 without error scales)
+    norm2 = jnp.einsum(
+        '...n,...n->...', resid, resid, preferred_element_type=jnp.float32
+    ) * jnp.square(state.resid_unit * state.inv_sdev_unit)
     if state.config.data_sharded:
         norm2 = lax.psum(norm2, 'data')
     scale = state.error_cov_inv.rate
@@ -1580,6 +1712,7 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
         prec = prec.at[state.binary_indices].set(1.0)
     if kshape:
         prec = jnp.diag(prec)
+    state = step_resid_eff_scale(state, norm2, state.sum_diag_prec_scale)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
@@ -1613,22 +1746,27 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     The updated BART MCMC state.
     """
     assert state.z is not None
-    assert state.binary_y is not None
 
     inv_sdev = state.inv_sdev_scale
+    inv_sdev_unit = state.inv_sdev_unit
     err_scale = state.error_scale
     if state.binary_indices is not None:
+        resid_unit = state.resid_unit[state.binary_indices]
         resid = state.resid[state.binary_indices, :]
+        binary_y = state.y[state.binary_indices, :] != 0
         # per-component scales (2-D) are restricted to the binary components;
         # a scalar-per-datapoint scale (1-D) is shared and broadcasts as-is
         if inv_sdev is not None and inv_sdev.ndim > 1:
             inv_sdev = inv_sdev[state.binary_indices, :]
+            inv_sdev_unit = inv_sdev_unit[state.binary_indices]
         if err_scale is not None and err_scale.ndim > 1:
             err_scale = err_scale[state.binary_indices, :]
     else:
+        resid_unit = state.resid_unit
         resid = state.resid
+        binary_y = state.y != 0
 
-    trees_plus_offset = state.z - resid
+    trees_plus_offset = state.z - resid * resid_unit[..., None]
     if state.config.data_sharded:
         # decorrelate the seed across data shards; the seed is replicated
         # because the trees and most of the algorithm are replicated
@@ -1636,20 +1774,21 @@ def step_z(key: Key[Array, ''], state: State) -> State:
 
     if err_scale is None:
         # homoskedastic probit: the latent error has unit scale. A missingness
-        # mask (unweighted) needs no handling here: masked points are dropped
-        # from the likelihood, so their latent is sampled like any other.
-        resid = truncated_normal_onesided(key, (), ~state.binary_y, -trees_plus_offset)
+        # mask (without error scales) needs no handling here: masked points are
+        # dropped from the likelihood, so their latent is sampled like any other.
+        resid = truncated_normal_onesided(key, (), ~binary_y, -trees_plus_offset)
     else:
         # heteroskedastic probit: the latent error has per-datapoint scale
         # `err_scale`, so threshold in standardized units, then rescale.
-        assert inv_sdev is not None  # weights imply the derived scales exist
-        # masked datapoints draw garbage, but every consumer of `resid` weights
-        # it by the (zero) scale, so the value is irrelevant as long as finite.
+        assert inv_sdev is not None
+        # masked datapoints draw garbage, but every consumer of `resid` scales
+        # it by the (zero) `inv_sdev`, so the value is irrelevant as long as finite
         resid = err_scale * truncated_normal_onesided(
-            key, (), ~state.binary_y, -trees_plus_offset * inv_sdev
+            key, (), ~binary_y, -trees_plus_offset * inv_sdev * inv_sdev_unit[..., None]
         )
     z = trees_plus_offset + resid
 
+    resid = (resid / resid_unit[..., None]).astype(state.resid.dtype)
     if state.binary_indices is not None:
         resid = state.resid.at[state.binary_indices, :].set(resid)
 

@@ -21,7 +21,7 @@
         "p":                  [1],
         "k":                  [null, 1, 2, 4],
         "maxdepth":           [6],
-        "weights":            [false, true],
+        "weights":            ["none", "scalar"],
         "num_trees":          [5],
         "resid_reduction":    ["autobatched", "autoonehot"],
     },

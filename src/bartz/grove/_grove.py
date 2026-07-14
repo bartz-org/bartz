@@ -32,10 +32,17 @@ from typing import Literal, Protocol, runtime_checkable
 from equinox import tree_at
 from jax import numpy as jnp
 from jax import vmap
-from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt
+from jaxtyping import Array, Bool, Float, Float32, Int32, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
 
-from bartz._jaxext import Module, autobatch, jit, minimal_unsigned_dtype, vmap_nodoc
+from bartz._jaxext import (
+    Module,
+    autobatch,
+    field,
+    jit,
+    minimal_unsigned_dtype,
+    vmap_nodoc,
+)
 
 
 @runtime_checkable
@@ -54,12 +61,12 @@ class TreeHeaps(Protocol):
     """
 
     leaf_tree: (
-        Float32[Array, '*batch_shape 2*half_tree_size']
-        | Float32[Array, '*batch_shape k 2*half_tree_size']
+        Float[Array, '*batch_shape 2*half_tree_size']
+        | Float[Array, '*batch_shape k 2*half_tree_size']
     )
     """The values in the leaves of the trees. This array can be dirty, i.e.,
     unused nodes can have whatever value. It may have an additional axis
-    for multivariate leaves."""
+    for multivariate leaves. The dtype may be narrower than float32."""
 
     var_tree: UInt[Array, '*batch_shape half_tree_size']
     """The axes along which the decision nodes operate. This array can be
@@ -70,6 +77,14 @@ class TreeHeaps(Protocol):
     right, i.e., a point belongs to the left child iff x < split. Whether a
     node is a leaf is indicated by the corresponding 'split' element being
     0. Unused nodes also have split set to 0. This array can't be dirty."""
+
+    leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
+    """The storage unit of the leaf values. The leaf values in data units are
+    ``leaf_unit * leaf_tree``."""
+
+    offset: Float32[Array, ''] | Float32[Array, ' k']
+    """Constant shift added to the function represented by the trees, which is
+    ``offset + leaf_unit * (sum of leaf values over trees)``."""
 
 
 def is_multivariate(trees: TreeHeaps) -> bool:
@@ -111,17 +126,19 @@ class TreesTrace(Module):
     0. Unused nodes also have split set to 0. This array can't be dirty."""
 
     leaf_tree: (
-        Float32[Array, '*batch_shape 2*half_tree_size']
-        | Float32[Array, '*batch_shape k 2*half_tree_size']
+        Float[Array, '*batch_shape 2*half_tree_size']
+        | Float[Array, '*batch_shape k 2*half_tree_size']
     )
     """The values in the leaves of the trees. This array can be dirty, i.e.,
     unused nodes can have whatever value. It may have an additional axis
     for multivariate leaves."""
 
-    @classmethod
-    def from_dataclass(cls, obj: TreeHeaps) -> 'TreesTrace':
-        """Create a `TreesTrace` from any `bartz.grove.TreeHeaps`."""
-        return cls(**{f.name: getattr(obj, f.name) for f in fields(cls)})
+    leaf_unit: Float32[Array, ''] | Float32[Array, ' k'] = field(
+        default_factory=lambda: jnp.float32(1.0)
+    )
+    offset: Float32[Array, ''] | Float32[Array, ' k'] = field(
+        default_factory=lambda: jnp.float32(0.0)
+    )
 
     def axes_from_dataclass(self, obj: TreeHeaps) -> 'TreesTrace':
         """Project the per-field vmap axis specs of `obj` onto this template.
@@ -254,7 +271,13 @@ def evaluate_forest(
 
     Returns
     -------
-    The (sum of) the values of the trees at the points in `X`.
+    The (sum of) the values of the trees at the points in `X`, in float32.
+
+    Notes
+    -----
+    The leaf values are multiplied by ``trees.leaf_unit``, so the result is in
+    data units. ``trees.offset`` is not added: it does not distribute over the
+    per-tree sum, so the caller adds it once to the total.
     """
     indices: UInt[Array, '*forest_shape n']
     indices = traverse_forest(X, trees.var_tree, trees.split_tree)
@@ -265,23 +288,23 @@ def evaluate_forest(
     bc_indices = indices[..., None, :, None] if is_mv else indices[..., None]
 
     bc_leaf_tree: (
-        Float32[Array, '*forest_shape 1 tree_size']
-        | Float32[Array, '*forest_shape k 1 tree_size']
+        Float[Array, '*forest_shape 1 tree_size']
+        | Float[Array, '*forest_shape k 1 tree_size']
     )
     bc_leaf_tree = (
         trees.leaf_tree[..., :, None, :] if is_mv else trees.leaf_tree[..., None, :]
     )
 
-    bc_leaves: (
-        Float32[Array, '*forest_shape n 1'] | Float32[Array, '*forest_shape k n 1']
-    )
+    bc_leaves: Float[Array, '*forest_shape n 1'] | Float[Array, '*forest_shape k n 1']
     bc_leaves = jnp.take_along_axis(bc_leaf_tree, bc_indices, -1)
 
-    leaves: Float32[Array, '*forest_shape n'] | Float32[Array, '*forest_shape k n']
+    leaves: Float[Array, '*forest_shape n'] | Float[Array, '*forest_shape k n']
     leaves = jnp.squeeze(bc_leaves, -1)
 
+    # sum in the storage dtype with a float32 accumulator, then convert to
+    # data units with the float32 scale
     axis = normalize_axis_tuple(sum_batch_axis, trees.var_tree.ndim - 1)
-    return jnp.sum(leaves, axis=axis)
+    return trees.leaf_unit[..., None] * jnp.sum(leaves, axis=axis, dtype=jnp.float32)
 
 
 def is_actual_leaf(
@@ -439,11 +462,20 @@ def var_histogram(
     return scatter_add(var_tree, is_internal)
 
 
-def _format_leaf(leaf: Float32[Array, ''] | Float32[Array, ' k'], is_mv: bool) -> str:
-    """Format a (possibly multivariate) leaf value to 2 significant digits."""
-    if is_mv:
-        return '[' + ', '.join(f'{v:#.2g}' for v in leaf) + ']'
-    return f'{leaf:#.2g}'
+def _format_values(values: Float[Array, ''] | Float[Array, ' k']) -> str:
+    """Format a scalar or vector to the decimal precision of its dtype."""
+    ndigits = jnp.finfo(values.dtype).precision
+    if values.ndim:
+        return '[' + ', '.join(f'{v:#.{ndigits}g}' for v in values) + ']'
+    else:
+        return f'{values:#.{ndigits}g}'
+
+
+def _format_leaf(tree: TreeHeaps, index: int) -> str:
+    """Format the leaf value at `index` as ``<scale> * <leaf>``."""
+    unit = _format_values(tree.leaf_unit)
+    leaf = _format_values(tree.leaf_tree[..., index])
+    return f'{unit} * {leaf}'
 
 
 def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
@@ -468,7 +500,6 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     bottom = '╢'  # '┨' #
 
     *_, tree_size = tree.leaf_tree.shape
-    is_mv = is_multivariate(tree)
 
     def traverse_tree(
         lines: list[str],
@@ -496,11 +527,11 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
                 category = 'leaf'
             else:
                 category = 'decision'
-            node_str = f'{category}({var}, {split}, {tree.leaf_tree[..., index]})'
+            node_str = f'{category}({var}, {split}, {_format_leaf(tree, index)})'
         else:
             assert not unused
             if is_leaf:
-                node_str = _format_leaf(tree.leaf_tree[..., index], is_mv)
+                node_str = _format_leaf(tree, index)
             else:
                 node_str = f'x{var} < {split}'
 

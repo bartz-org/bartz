@@ -37,8 +37,9 @@ The config file is a JSONC document like:
             "n":                  [1024, 4096, 16384],
             "k":                  [null, 2],
             "maxdepth":           [6],
-            "weights":            [false],
+            "weights":            ["none"],
             "num_trees":          [5, 50, 200],
+            "leaf_dtype":         ["float16", "float32"],
             "resid_reduction": [                    // reduction slot: one entry per kind
                 {"kind": "batched", "num_batches": [null, 1, 8, 64]},
                 {"kind": "onehot", "method": ["matmul", "multiply"]},
@@ -97,7 +98,8 @@ from jax import Array, block_until_ready, random
 from jax import config as jax_config
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
-from jaxtyping import Shaped
+from jax.typing import DTypeLike
+from jaxtyping import Float32, Shaped
 from polars import DataFrame, concat, read_parquet
 from tqdm import tqdm
 
@@ -320,11 +322,20 @@ class ConfigParams:
     maxdepth: int
     """Maximum tree depth; passed through `make_p_nonterminal`."""
 
-    weights: bool
-    """Whether to set `init`'s ``error_scale`` to ``jnp.ones(n)``."""
+    weights: Literal['none', 'scalar', 'vector']
+    """`init`'s ``error_scale`` mode: ``'none'`` (unset), ``'scalar'`` (shape ``(n,)``), or ``'vector'`` (shape ``(k, n)``, multivariate heteroskedasticity; requires ``k``)."""
 
     num_trees: int
     """`init`'s ``num_trees`` kwarg."""
+
+    leaf_dtype: str = jnp.dtype(init_default('leaf_dtype')).name
+    """`init`'s ``leaf_dtype`` kwarg, as a dtype name (e.g. ``'float16'``, ``'float32'``)."""
+
+    prec_scale_dtype: str = jnp.dtype(init_default('prec_scale_dtype')).name
+    """`init`'s ``prec_scale_dtype`` kwarg, as a dtype name; only has an effect when ``weights`` is not ``'none'``."""
+
+    resid_dtype: str = jnp.dtype(init_default('resid_dtype')).name
+    """`init`'s ``resid_dtype`` kwarg, as a dtype name (e.g. ``'float16'``, ``'float32'``)."""
 
     resid_reduction: ReductionConfig = field(
         default=init_default('resid_reduction_config'), metadata={'reduction': True}
@@ -434,6 +445,10 @@ class ConfigParams:
         chains = 1 if self.num_chains is None else self.num_chains
         k = 1 if self.k is None else self.k
 
+        # vector heteroskedasticity needs a multivariate outcome
+        if self.weights == 'vector' and self.k is None:
+            return False
+
         # number of trees processed at once in the count/prec pass
         if self.prec_count_num_trees == 'auto':
             # mirrors the self-limiting budget of `init`'s auto resolution
@@ -487,6 +502,16 @@ class ConfigParams:
         else:
             return True
 
+    def error_scale(self) -> Float32[Array, ' n'] | Float32[Array, 'k n'] | None:
+        """Build `init`'s ``error_scale`` for this combination's `weights` mode."""
+        if self.weights == 'none':
+            return None
+        elif self.weights == 'scalar':
+            return jnp.ones(self.n)
+        else:  # 'vector': multivariate heteroskedasticity, shape (k, n)
+            assert self.k is not None  # guaranteed by `is_valid`
+            return jnp.ones((self.k, self.n))
+
     def to_init_kwargs(self) -> 'InitKwargs':
         """Translate this combination into kwargs for `init`."""
         # gen_data requires p >= k; if fewer predictors than outcomes are wanted,
@@ -512,8 +537,11 @@ class ConfigParams:
             num_trees=self.num_trees,
             p_nonterminal=make_p_nonterminal(self.maxdepth, 0.95, 2),
             leaf_prior_cov_inv=self.num_trees * eye,
+            leaf_dtype=self.leaf_dtype,
+            prec_scale_dtype=self.prec_scale_dtype,
+            resid_dtype=self.resid_dtype,
             error_cov_inv=Wishart(nu=2.0, rate=2 * eye, value=eye),
-            error_scale=jnp.ones(self.n) if self.weights else None,
+            error_scale=self.error_scale(),
             resid_reduction_config=self.resid_reduction,
             count_reduction_config=self.count_reduction,
             prec_reduction_config=self.prec_reduction,
@@ -551,8 +579,11 @@ class InitKwargs:
     num_trees: int
     p_nonterminal: Shaped[Array, '...']
     leaf_prior_cov_inv: float | Shaped[Array, '...']
+    leaf_dtype: DTypeLike
+    prec_scale_dtype: DTypeLike
+    resid_dtype: DTypeLike
     error_cov_inv: Wishart
-    error_scale: Shaped[Array, '...'] | None
+    error_scale: Float32[Array, ' n'] | Float32[Array, 'k n'] | None
     resid_reduction_config: ReductionConfig
     count_reduction_config: ReductionConfig
     prec_reduction_config: ReductionConfig
@@ -1008,14 +1039,12 @@ def inner_benchmark_loop(
         try:
             bench.setup(params.to_init_kwargs())
         except JaxRuntimeError as e:
-            # An OOM means the combo does not fit this device: record NaN and move
-            # on. The message appears either directly or, on gpu, wrapped in an
-            # "Autotuning failed for HLO ..." report, so match both forms.
-            msg = str(e)
-            if (
-                'RESOURCE_EXHAUSTED' in msg
-                and 'Out of memory while trying to allocate' in msg
-            ):
+            # An OOM means the combo does not fit this device: record NaN and
+            # move on. OOM surfaces with several prefixes (plain
+            # RESOURCE_EXHAUSTED, autotuner "Failed to profile configs" or
+            # "Autotuning failed for HLO ..." wrappers, ...); match the common
+            # allocation-failure phrasing rather than one exact prefix.
+            if 'Out of memory while trying to allocate' in str(e):
                 time_est = float('nan')
                 time_lo = float('nan')
                 time_up = float('nan')

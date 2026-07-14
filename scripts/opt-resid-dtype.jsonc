@@ -1,0 +1,21 @@
+{
+    // Test whether storing `State.resid` as float16 speeds up the per-tree
+    // residual reduction (`sum_resid`), which reads `resid` once per tree.
+    //
+    // The matrix is k x weights as usual for resid. prec_scale_dtype=float16 to measure
+    // well the interesting case "all float16" and making the timing more accurate.
+    "plot": {
+        "scan": "n",
+        "reduce": "resid_dtype",
+    },
+    "values": {
+        "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
+        "p":                  [1],
+        "k":                  [null, 1, 2, 4, 8, 16],
+        "maxdepth":           [6],
+        "weights":            ["none", "scalar"],
+        "num_trees":          [5],
+        "prec_scale_dtype":   ["float16"],
+        "resid_dtype":        ["float16", "float32"],
+    },
+}

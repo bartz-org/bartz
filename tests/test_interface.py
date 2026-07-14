@@ -121,7 +121,6 @@ from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import BatchedReduction, State, step
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
-from bartz.mcmcstep._state import init
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from bartz.testing import DiscreteUniform, Gamma, gen_data
 from tests.test_mcmcstep import (
@@ -202,12 +201,6 @@ def _bart_default(kw: dict[str, Any], param_name: str) -> Any:  # noqa: ANN401
     if param.default is param.empty:
         return kw[param_name]
     return kw.get(param_name, param.default)
-
-
-def _init_default(kw: dict[str, Any], param_name: str) -> Any:  # noqa: ANN401
-    """Do `kw['init_kw'].get(param_name, <default in init>)`."""
-    default = signature(init).parameters[param_name].default
-    return kw.get('init_kw', {}).get(param_name, default)
 
 
 class BartKW(NamedTuple):
@@ -438,6 +431,9 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         save_ratios=False,
                         min_points_per_decision_node=None,
                         min_points_per_leaf=None,
+                        # explicit float16 to exercise it on cpu too, where the
+                        # `Bart` default is float32
+                        leaf_dtype=jnp.float16,
                     ),
                 ),
                 x_test=test.x,
@@ -477,6 +473,10 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         prec_reduction_config=BatchedReduction(num_batches=16),
                         prec_count_num_trees=7,
                         min_points_per_leaf=5,
+                        # explicit float32 to exercise it on gpu too, where the
+                        # `Bart` default is float16
+                        leaf_dtype=jnp.float32,
+                        prec_scale_dtype=jnp.float32,
                     ),
                 ),
                 x_test=test.x,
@@ -568,6 +568,10 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         save_ratios=False,
                         min_points_per_decision_node=None,
                         min_points_per_leaf=None,
+                        # explicit float16 to exercise it on cpu too, where the
+                        # `Bart` default is float32
+                        leaf_dtype=jnp.float16,
+                        prec_scale_dtype=jnp.float16,
                     ),
                 ),
                 x_test=test.x,
@@ -1392,18 +1396,24 @@ def test_output_types(bkw: BartKW, keys: split) -> None:
     assert bart.varprob.dtype == jnp.float32
     assert bart.varprob_mean.dtype == jnp.float32
 
-    # also test the internal leaf dtype directly, since it's not reflected in the
-    # public API anywhere
-    assert bart._main_trace.leaf_tree.dtype == _init_default(bkw.kw, 'leaf_dtype')
+    # also test the internal leaf dtype directly, since it's not reflected in
+    # the public API anywhere. `Bart` overrides the `init` defaults with
+    # platform-dependent ones (see `process_device_settings`).
+    init_kw = kw.get('init_kw', {})
+    default_dtype = (
+        jnp.float16 if get_default_device().platform == 'gpu' else jnp.float32
+    )
+    assert bart._main_trace.leaf_tree.dtype == init_kw.get('leaf_dtype', default_dtype)
 
     # likewise the internal prec_scale and inv_sdev_scale dtypes, which share
     # `prec_scale_dtype` (both only set for error-scaled/missing data)
+    prec_scale_dtype = init_kw.get('prec_scale_dtype', default_dtype)
     prec_scale = bart._mcmc_state.prec_scale
     if prec_scale is not None:
-        assert prec_scale.dtype == _init_default(bkw.kw, 'prec_scale_dtype')
+        assert prec_scale.dtype == prec_scale_dtype
     inv_sdev_scale = bart._mcmc_state.inv_sdev_scale
     if inv_sdev_scale is not None:
-        assert inv_sdev_scale.dtype == _init_default(bkw.kw, 'prec_scale_dtype')
+        assert inv_sdev_scale.dtype == prec_scale_dtype
 
 
 def test_leaf_unit(bkw: BartKW) -> None:
@@ -1464,7 +1474,7 @@ def test_inv_sdev_scale(bkw: BartKW) -> None:
         assert_close_matrices(
             prec_scale,
             expected_prec,
-            rtol=condf(prec_scale, 1e-6, 1e-3),
+            rtol=condf(nnone(state.prec_scale), 1e-6, 1e-3),
             reduce_rank=True,
         )
 

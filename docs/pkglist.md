@@ -26,6 +26,8 @@ SOFTWARE.
 
 # Other BART packages
 
+Some of the R-only BART packages are wrapped for Python in [rbartpackages](https://github.com/bartz-org/rbartpackages).
+
 - [stochtree](https://github.com/StochasticTree/stochtree) C++ library with R and Python interfaces
 - [bnptools](https://github.com/rsparapa/bnptools) Feature-rich R packages for BART and some variants
 - [vdorie](https://github.com/vdorie)'s repositories (dbarts, bartCause, stan4bart)

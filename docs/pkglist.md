@@ -35,8 +35,7 @@ SOFTWARE.
 - [skdeshpande91](https://github.com/skdeshpande91)'s repositories (flexBART, flexBCF, VCBART)
 - [JingyuHe](https://github.com/JingyuHe)'s repositories (XBART & related)
 - [BayesTree](https://cran.r-project.org/package=BayesTree) R package, original BART implementation
-- [OpenBT](https://bitbucket.org/mpratola/openbt) Heteroskedastic BART, rotate & perturb proposals, C++ library with R interface
-- [OpenBT](https://github.com/jcyannotty/OpenBT) fork of the above
+- [OpenBT](https://github.com/bandframework/OpenBT) Heteroskedastic BART, rotate & perturb proposals, C++ library with R and Python interfaces
 - [lsqfitgp](https://github.com/Gattocrucco/lsqfitgp) Infinite trees limit of BART
 - [mBART](https://github.com/remcc/mBART_shlib)
 - [SequentialBART](https://github.com/mjdaniels/SequentialBART)
@@ -63,3 +62,5 @@ SOFTWARE.
 - [missBART](https://github.com/yongchengoh/missBART) BART for missing outcome data
 - [mvbcf](https://github.com/Nathan-McJames/mvbcf) Multivariate BCF
 - [rBART](https://github.com/andrewcparnell/rBART) Slow version of BART in R
+- [BASTION](https://github.com/rayisaacalan/BASTION) Spanning tree partitions instead of axis-aligned splits, for spatial data on complex domains
+- [ztluostat](https://github.com/ztluostat)'s repositories (BAST, BAMDT)

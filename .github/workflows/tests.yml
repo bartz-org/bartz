@@ -51,7 +51,13 @@ jobs:
 
       - name: Determine base ref
         id: refs
-        run: echo "from=${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (startsWith(github.ref, 'refs/heads/') && github.event.before) || '' }}" >> "$GITHUB_OUTPUT"
+        run: |
+          from='${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (startsWith(github.ref, 'refs/heads/') && github.event.before) || '' }}'
+          # The first push to a branch reports the all-zeros SHA as `before`:
+          # there is no prior commit to diff against, so blank it out and let
+          # the "all files" run below provide coverage.
+          if [ "$from" = '0000000000000000000000000000000000000000' ]; then from=''; fi
+          echo "from=$from" >> "$GITHUB_OUTPUT"
 
       - name: Run pre-commit on changed files
         # even if we run it on all files below, it's convenient to see if something fails in new changes first

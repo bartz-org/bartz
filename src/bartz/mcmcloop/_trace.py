@@ -198,7 +198,7 @@ class MainTraceWithTrainPred(MainTrace):
         Float32[Array, '*chains_and_samples n']
         | Float32[Array, '*chains_and_samples k n']
     ) = field(chains=CHAIN_AXIS, samples=0, data=-1)
-    """The latent predictions at the training points: offset plus the scaled sum
+    """The latent predictions at the training points, offset plus the scaled sum
     of trees."""
 
     @classmethod

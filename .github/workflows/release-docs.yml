@@ -82,9 +82,12 @@ jobs:
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
 
       - name: Wait for it to finish so its coverage artifact exists
+        # --exit-status fails this job if the merge run failed, as if docs and
+        # tests were jobs of one run; recover by re-running this job, or
+        # dispatch release-docs.yml manually with the coverage run id.
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run watch --repo "$GITHUB_REPOSITORY" "${{ steps.source.outputs.run_id }}" || true
+        run: gh run watch --exit-status --repo "$GITHUB_REPOSITORY" "${{ steps.source.outputs.run_id }}"
 
       - name: Re-trigger as a workflow_dispatch to deploy
         env:

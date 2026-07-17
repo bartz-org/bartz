@@ -145,13 +145,14 @@ repos:
         # first line, so the match runs from the opening `"""` to the first newline
         # or the closing `"""` (whichever comes first), one-line and multi-line
         # docstrings alike. Matches an attribute assignment or annotation line (one
-        # not ending in `:`, i.e. not a def/class header) followed by a same-indent
+        # not ending in `:`, i.e. not a def/class header, possibly just a bare `)`
+        # closing a multi-line assignment) followed by a same-indent
         # `"""` whose first line holds a lone `:` (not `::`) outside any ``code``
         # span or :role:`target`, with real text after it (a colon at end of line
         # is harmless: napoleon then keeps it in the description). Reword to drop
         # the colon.
         language: pygrep
-        entry: '^(?P<i>[ \t]+)\S[^\n]*[^\n:\s]\n(?P=i)"""(?:``[^`]*``|:[A-Za-z0-9_+.:-]+:`[^`\n]+`|`[^`\n]+`|(?!""")[^:`\n])*:(?!:)(?![A-Za-z0-9_+.:-]+:`)[ \t]*(?!""")\S'
+        entry: '^(?P<i>[ \t]+)\S(?:[^\n]*[^\n:\s])?\n(?P=i)"""(?:``[^`]*``|:[A-Za-z0-9_+.:-]+:`[^`\n]+`|`[^`\n]+`|(?!""")[^:`\n])*:(?!:)(?![A-Za-z0-9_+.:-]+:`)[ \t]*(?!""")\S'
         args: [--multiline]
         types: [python]
       - id: forbid-lam-lamda

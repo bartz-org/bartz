@@ -242,11 +242,11 @@ class AutoBatchedReduction(ReductionConfig):
     """
 
     min_batch_size: float = field(static=True, default=128.0)
-    """Minimum datapoints per batch on gpu: caps the batch count at
+    """Minimum datapoints per batch on gpu; caps the batch count at
     ``n / min_batch_size``."""
 
     beta_sm: float = field(static=True, default=48.0)
-    """Batches per streaming multiprocessor on gpu: the batch count saturates at
+    """Batches per streaming multiprocessor on gpu; the batch count saturates at
     ``beta_sm * n_sms * m ** -gamma``, with `n_sms` the gpu's SM count and ``m``
     the multivariate work per datapoint."""
 

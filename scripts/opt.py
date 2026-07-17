@@ -323,7 +323,7 @@ class ConfigParams:
     """Maximum tree depth; passed through `make_p_nonterminal`."""
 
     weights: Literal['none', 'scalar', 'vector']
-    """`init`'s ``error_scale`` mode: ``'none'`` (unset), ``'scalar'`` (shape ``(n,)``), or ``'vector'`` (shape ``(k, n)``, multivariate heteroskedasticity; requires ``k``)."""
+    """`init`'s ``error_scale`` mode, ``'none'`` (unset), ``'scalar'`` (shape ``(n,)``), or ``'vector'`` (shape ``(k, n)``, multivariate heteroskedasticity; requires ``k``)."""
 
     num_trees: int
     """`init`'s ``num_trees`` kwarg."""

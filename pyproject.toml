@@ -36,10 +36,8 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "equinox>=0.12.2",
-    # WORKAROUND(jax<0.10.3): jax 0.10.2 has a severe GPU scatter-add
-    # regression (high-contention scatter into a small array is up to ~2000x
-    # slower than 0.10.1), which hits the per-leaf reductions; exclude it.
-    "jax>=0.6.2,!=0.10.2",
+    # WORKAROUND(jax<0.12): see https://github.com/jax-ml/jax/issues/38806
+    "jax>=0.6.2,!=0.10.2,!=0.11.0",
     "jaxtyping>=0.3.2",
     "numpy>=2.2.6",
     "scipy>=1.15.3",
@@ -48,9 +46,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# WORKAROUND(jax<0.10.3): exclude jax 0.10.2, see the core jax dependency above
-cuda12 = ["jax[cuda12]>=0.6.2,!=0.10.2"]
-cuda13 = ["jax[cuda13]>=0.6.2,!=0.10.2"]
+# WORKAROUND(jax<0.12): see https://github.com/jax-ml/jax/issues/38806
+cuda12 = ["jax[cuda12]>=0.6.2,!=0.10.2,!=0.11.0"]
+cuda13 = ["jax[cuda13]>=0.6.2,!=0.10.2,!=0.11.0"]
 
 [project.urls]
 Homepage = "https://github.com/bartz-org/bartz"

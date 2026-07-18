@@ -369,7 +369,10 @@ class TestAutoBatch:
             return x * 2
 
         x = random.uniform(keys.pop(), (10,))
-        with pytest.raises(ValueError, match='Expected None'):
+        # the message wording depends on the jax version and on which pytree
+        # prefix check trips first
+        match = 'Expected None|different types at key path'
+        with pytest.raises(ValueError, match=match):
             autobatch(func, 32, 0, None)(x)
 
 

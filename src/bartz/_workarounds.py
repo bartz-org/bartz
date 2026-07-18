@@ -32,7 +32,6 @@ import re
 from importlib.util import find_spec
 
 import jax
-from jax._src.lib import xla_client
 
 FTZ_ATOMICS_OPTION = '-nvptx-allow-ftz-atomics'
 
@@ -68,6 +67,10 @@ def option_in_parsed_flags(option: str) -> bool:
     this function right after modifying ``XLA_FLAGS`` both locks the change in
     (if XLA had not read the variable yet) and reports whether it was read.
     """
+    # import locally so that a future jaxlib dropping this internal module
+    # can not break `import bartz` on jax versions that don't need the fix
+    from jaxlib import xla_client  # noqa: PLC0415
+
     serialized = xla_client.CompileOptions().SerializeAsString()
     return option.encode() in serialized
 

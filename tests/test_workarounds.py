@@ -63,12 +63,30 @@ def test_add_backend_extra_option() -> None:
 
 def test_cuda_detection() -> None:
     """Check the cuda detection helpers against the test platform."""
-    if get_default_device().platform == 'gpu':
+    if get_default_device().platform == 'gpu':  # pragma: no cover, needs gpu
         assert _workarounds.cuda_plugin_installed()
         assert _workarounds.cuda_devices_available()
-    elif _workarounds.cuda_devices_available():
+    elif _workarounds.cuda_devices_available():  # pragma: no cover, needs gpu
         # tests forced to cpu on a gpu machine: the plugin must still be there
         assert _workarounds.cuda_plugin_installed()
+
+
+def test_cuda_devices_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check gpu detection with a stubbed `jax.devices`."""
+    monkeypatch.setattr(jax, 'devices', lambda _backend: ['gpu0'])
+    assert _workarounds.cuda_devices_available()
+
+    def no_cuda(_backend: str) -> list:
+        msg = 'Unknown backend'
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(jax, 'devices', no_cuda)
+    assert not _workarounds.cuda_devices_available()
+
+
+def test_option_in_parsed_flags() -> None:
+    """Check a probe option is not found in the flags XLA parsed at startup."""
+    assert not _workarounds.option_in_parsed_flags('-definitely-not-a-real-option')
 
 
 def test_raises_when_too_late(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -80,6 +98,19 @@ def test_raises_when_too_late(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('XLA_FLAGS', '')
     with pytest.raises(RuntimeError, match='38806'):
         _workarounds.fix_gpu_scatter_performance()
+
+
+def test_user_already_set_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Check the workaround defers to user-provided XLA flags."""
+    monkeypatch.setattr(jax, '__version__', '0.11.0')
+    monkeypatch.setattr(_workarounds, 'cuda_plugin_installed', lambda: True)
+    for flags in (
+        f'--xla_backend_extra_options={_workarounds.FTZ_ATOMICS_OPTION}',
+        '--XLA_GPU_FTZ=true',
+    ):
+        monkeypatch.setenv('XLA_FLAGS', flags)
+        _workarounds.fix_gpu_scatter_performance()
+        assert os.environ['XLA_FLAGS'] == flags
 
 
 def test_skip_env_var(monkeypatch: pytest.MonkeyPatch) -> None:

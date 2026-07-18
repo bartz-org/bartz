@@ -770,7 +770,7 @@ class TestErrorCorrelation:
         )
         # on gpu the identity-correlation path goes through a matmul that the
         # independent path skips, so the two diverge by float noise
-        rtol = 1e-4 if ident.z.platform() != 'cpu' else 1e-6  # ty: ignore[unresolved-attribute]
+        rtol = 1e-4 if ident.z.platform() != 'cpu' else 1e-6
         assert_close_matrices(ident.z, indep.z, rtol=rtol)
         assert_close_matrices(ident.y, indep.y, rtol=rtol)
 

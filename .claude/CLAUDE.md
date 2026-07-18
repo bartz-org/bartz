@@ -31,7 +31,9 @@ To check the code you write:
 - run the unit tests relevant to your code changes with `uv run pytest ...`
     - not all tests right away because the full test suite takes a long time to run
 - at the end of debugging, run the full test suite to check everything works
-    - `make tests` will run everything with 2 workers and prints a lot of stuff, faster and more complete than `uv run pytest`
+    - use `uv run pytest`; we have a `make tests`, but its config is pretty heavy on a laptop and blocks other agents/people working in parallel
+    - skip this if you think the focused tests were sufficient for a surgical change
+- do not update changelog, we write it before release
 
 ## Architecture
 
@@ -111,8 +113,11 @@ Interface hierarchy:
         - `split` is a class and you use it like this: `keys = split(key); x = random.gen(keys.pop(), ...); y = vmapped_func(keys.pop(1000), ...)`
         - don't pass a `split` object to functions, follow the jax convention that the first argument is a single random key
     - use jnp.square(x), jnp.sqrt(x), lax.rsqrt(x), jnp.reciprocal(x) instead of x**2, x**0.5, x**-0/5, 1/x
+    - jax supports in-place operators (which actually create new arrays), use them
+        - for example, do `x += ...`, not `x = x + ...` where `x` is a jax array
 - other **python** conventions:
     - use dicts as if they were frozendicts when possible: e.g., do `d = dict(d, a=1, b=2)` to set values instead of `d['a'] = 1` or `d.update(a=1)`, safer
+        - other useful pattern: `d = dict(**d, a=1, b=2)` to check the keys are not already present
         - related: prefer tuples to lists
         - related: make all dataclasses frozen unless you really need mutability
     - type annotations:

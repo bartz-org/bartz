@@ -1924,9 +1924,7 @@ def test_count_prec_tree_caches_valid(bkw: BartKW, subtests: SubTests) -> None:
         )
         assert (forest.prec_tree is not None) == (state.prec_scale is not None)
 
-    # flatten the chain axis (if any) into the tree axis. `leaf_indices` carries
-    # its chain axis after the tree axis (unlike `split_tree`), so move it to the
-    # front first, to match `split_tree`'s chain-leading flattening order
+    # flatten the chain axis (if any) into the tree axis
     _, n = state.X.shape
     half = forest.split_tree.shape[-1]
     split_tree = forest.split_tree.reshape(-1, half)

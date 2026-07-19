@@ -40,6 +40,7 @@ from bartz._jaxext import (
     Module,
     field,
     jit,
+    minimal_unsigned_dtype,
     split,
     truncated_normal_onesided,
     vmap_nodoc,
@@ -1092,6 +1093,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
             resid,
             SeqStageInAllTrees(
                 pso.state.X,
+                pso.state.forest.leaf_indices,
                 pso.state.config.resid_reduction_config,
                 pso.state.config.data_sharded,
                 pso.state.prec_scale,
@@ -1108,11 +1110,12 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
         )
         return resid, (leaf_tree, acc, to_prune, lkratio)
 
+    num_trees, _ = pso.state.forest.leaf_indices.shape
     pts = SeqStageInPerTree(
         pso.state.forest.leaf_tree,
         pso.prec_trees,
         pso.moves,
-        pso.state.forest.leaf_indices,
+        jnp.arange(num_trees, dtype=minimal_unsigned_dtype(num_trees - 1)),
         pso.prelkv,
         pso.prelf,
     )
@@ -1135,6 +1138,14 @@ class SeqStageInAllTrees(Module):
 
     X: UInt[Array, 'p n']
     """The predictors."""
+
+    leaf_indices: UInt[Array, 'num_trees n']
+    """The leaf indices for the largest version of each tree compatible with
+    the move. Kept whole here and sliced per tree with
+    `SeqStageInPerTree.tree_index`, instead of consumed as scan xs, because
+    the scan batching rules move the chain axis of closed-over values to the
+    front, matching the storage layout, while the xs rule would transpose it
+    to after the tree axis."""
 
     resid_reduction_config: ReductionConfig
     """How to sum the residuals in each leaf."""
@@ -1191,9 +1202,8 @@ class SeqStageInPerTree(Module):
     move: Moves
     """The proposed move, see `propose_moves`."""
 
-    leaf_indices: UInt[Array, 'num_trees n']
-    """The leaf indices for the largest version of the tree compatible with
-    the move."""
+    tree_index: UInt[Array, ' num_trees']
+    """The index of the tree, used to slice `SeqStageInAllTrees.leaf_indices`."""
 
     prelkv: PreLkV
     """The pre-computed terms of the likelihood ratio which are specific to the tree."""
@@ -1244,6 +1254,8 @@ def accept_move_and_sample_leaves(
         The logarithm of the likelihood ratio for the move. `None` if not to be
         saved.
     """
+    leaf_indices = at.leaf_indices[pt.tree_index, :]
+
     # sum residuals in each leaf, in tree proposed by grow move
     if at.prec_scale is None:
         scaled_resid = resid
@@ -1254,7 +1266,7 @@ def accept_move_and_sample_leaves(
 
     resid_tree = sum_resid(
         scaled_resid,
-        pt.leaf_indices,
+        leaf_indices,
         tree_size,
         at.resid_reduction_config,
         at.data_sharded,
@@ -1341,7 +1353,7 @@ def accept_move_and_sample_leaves(
     # scatter, so the n-sized update stays in the narrow `resid` storage
     leaf_delta = prev_leaf_tree - at.leaf_unit[..., None] * leaf_tree
     delta = (leaf_delta / at.resid_unit[..., None]).astype(resid.dtype)
-    resid += delta[..., pt.leaf_indices]
+    resid += delta[..., leaf_indices]
 
     return resid, leaf_tree, acc, to_prune, log_lk_ratio
 

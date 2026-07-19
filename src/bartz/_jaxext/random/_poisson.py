@@ -78,6 +78,11 @@ def poisson(
     -------
     Array of Poisson(lambda_) samples.
 
+    Raises
+    ------
+    ValueError
+        If `lambda_` does not broadcast to `shape`.
+
     Notes
     -----
     Below a mean of 7 the pmf is truncated and inverted directly; above, the
@@ -102,7 +107,10 @@ def poisson(
     dtype = canonicalize_dtype(dtype)
     compute_dtype = jnp.promote_types(jnp.result_type(lambda_), jnp.float32)
     shape = jnp.shape(lambda_) if shape is None else tuple(shape)
-    lambda_ = jnp.broadcast_to(jnp.asarray(lambda_, compute_dtype), shape)
+    if jnp.broadcast_shapes(shape, jnp.shape(lambda_)) != shape:
+        msg = f'lambda_ shape {jnp.shape(lambda_)} does not broadcast to {shape}'
+        raise ValueError(msg)
+    lambda_ = jnp.asarray(lambda_, compute_dtype)
 
     z = random.normal(key, shape, compute_dtype)
     return poisson_from_normal(z, lambda_).astype(dtype)
@@ -110,7 +118,7 @@ def poisson(
 
 @custom_jvp
 def poisson_from_normal(
-    z: Float[Array, '*shape'], lambda_: Float[Array, '*shape']
+    z: Float[Array, '*shape'], lambda_: Float[Array, '...']
 ) -> Float[Array, '*shape']:
     """Map a standard normal variate to a Poisson(lambda_) variate."""
     small = poisson_cdf_inversion(ndtr(z), lambda_)
@@ -120,8 +128,8 @@ def poisson_from_normal(
 
 @poisson_from_normal.defjvp
 def poisson_from_normal_jvp(
-    primals: tuple[Float[Array, '*shape'], Float[Array, '*shape']],
-    tangents: tuple[Float[Array, '*shape'], Float[Array, '*shape']],
+    primals: tuple[Float[Array, '*shape'], Float[Array, '...']],
+    tangents: tuple[Float[Array, '*shape'], Float[Array, '...']],
 ) -> tuple[Float[Array, '*shape'], Float[Array, '*shape']]:
     """Implicit differentiation of the Peizer-Pratt relaxation.
 
@@ -147,25 +155,25 @@ def poisson_from_normal_jvp(
 
 
 def poisson_cdf_inversion(
-    u: Float[Array, '*shape'], lambda_: Float[Array, '*shape']
+    u: Float[Array, '*shape'], lambda_: Float[Array, '...']
 ) -> Float[Array, '*shape']:
     """Invert the cdf truncated to the first `NUM_TERMS` values."""
-    k = jnp.arange(NUM_TERMS, dtype=lambda_.dtype).reshape(
-        (NUM_TERMS, *lambda_.ndim * (1,))
-    )
-    logpmf = xlogy(k, lambda_) - lambda_ - gammaln(k + 1)
-    cdf = jnp.cumsum(jnp.exp(logpmf), axis=0)
-    # scale u by the top cdf value: this makes the comparison immune to the
-    # roundoff of the cdf normalization when u saturates to 1, and piles the
-    # truncated tail mass on the last value of the table
-    u *= cdf[-1, ...]
-    # the sum counts bools, which is exact in any dtype; produce it directly as
-    # float to match the other branch
-    return jnp.sum(cdf < u, axis=0, dtype=u.dtype)
+    k = jnp.arange(NUM_TERMS, dtype=lambda_.dtype)
+
+    # this is normalized later, but keep it normalized anyway (lambda_ term)
+    # to avoid overflows in the intermediate jnp.exp(logpmf)
+    logpmf = xlogy(k, lambda_[..., None]) - lambda_[..., None] - gammaln(k + 1)
+
+    cdf = jnp.cumsum(jnp.exp(logpmf), axis=-1)
+
+    # re-normalize because of truncation and float rounding
+    u *= cdf[..., -1]
+
+    return jnp.sum(cdf < u[..., None], axis=-1).astype(u.dtype)
 
 
 def poisson_peizer_pratt(
-    z: Float[Array, '*shape'], lambda_: Float[Array, '*shape']
+    z: Float[Array, '*shape'], lambda_: Float[Array, '...']
 ) -> Float[Array, '*shape']:
     """Invert the Peizer-Pratt cdf approximation Pr[X <= x] ~ Phi(z(x)).
 
@@ -191,7 +199,7 @@ def poisson_peizer_pratt(
 
 
 def peizer_pratt_root(
-    z: Float[Array, '*shape'], lambda_: Float[Array, '*shape']
+    z: Float[Array, '*shape'], lambda_: Float[Array, '...']
 ) -> Float[Array, '*shape']:
     """Cornish-Fisher approximation of the root of `peizer_pratt_z(x, .) = z`."""
     s = jnp.sqrt(lambda_)
@@ -201,7 +209,7 @@ def peizer_pratt_root(
 
 
 def peizer_pratt_z(
-    x: Float[Array, '*shape'], lambda_: Float[Array, '*shape']
+    x: Float[Array, '*shape'], lambda_: Float[Array, '...']
 ) -> Float[Array, '*shape']:
     """Peizer-Pratt z(x) such that Pr[X <= x] ~ Phi(z(x)), for x > -1/2."""
     y = (x + 0.5) / lambda_

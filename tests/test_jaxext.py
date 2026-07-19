@@ -31,7 +31,17 @@ from warnings import catch_warnings, simplefilter
 
 import numpy
 import pytest
-from jax import NamedSharding, device_put, jvp, lax, make_mesh, random, shard_map, tree
+from jax import (
+    NamedSharding,
+    device_put,
+    grad,
+    jvp,
+    lax,
+    make_mesh,
+    random,
+    shard_map,
+    tree,
+)
 
 # WORKAROUND(jax<0.7.1): top-level `jax.enable_x64` was added later; on older jax
 # it lives in `jax.experimental` (removed in newer jax). Use whichever exists.
@@ -687,6 +697,37 @@ class TestPoisson:
         assert sample.shape == shape
         flat = poisson(random.clone(key), lambda_, (sample.size,))
         assert_array_equal(sample.reshape(sample.size), flat)
+
+    @pytest.mark.parametrize('lambda_', [4.5, 8.5])
+    @pytest.mark.parametrize('lambda_shape', [(), (4,), (1, 4)])
+    def test_lambda_broadcast(
+        self, keys: split, lambda_: float, lambda_shape: tuple[int, ...]
+    ) -> None:
+        """A draw with unbroadcasted lambda_ equals the pre-broadcasted draw."""
+        shape = (3, 4)
+        key = keys.pop()
+        sample = poisson(key, jnp.full(lambda_shape, lambda_), shape)
+        assert sample.shape == shape
+        expected = poisson(random.clone(key), jnp.full(shape, lambda_), shape)
+        assert_array_equal(sample, expected)
+
+    def test_lambda_broadcast_grad(self, keys: split) -> None:
+        """Reverse mode w.r.t. an unbroadcasted lambda_ sums over the broadcast."""
+        lambda_ = jnp.array([2.0, 20.0])
+        key = keys.pop()
+
+        def f(lambda_: Float[Array, ' 2']) -> Float[Array, '5 2']:
+            return poisson(key, lambda_, (5, 2), dtype=float)
+
+        _, tangent = jvp(f, (lambda_,), (jnp.ones_like(lambda_),))
+        gradient = grad(lambda lambda_: f(lambda_).sum())(lambda_)
+        assert_close_matrices(gradient, tangent.sum(axis=0), rtol=1e-6)
+
+    @pytest.mark.parametrize('shape', [(3,), ()])
+    def test_lambda_shape_mismatch(self, keys: split, shape: tuple[int, ...]) -> None:
+        """A lambda_ that does not broadcast to shape is an error."""
+        with pytest.raises(ValueError, match='broadcast'):
+            poisson(keys.pop(), jnp.ones(5), shape)
 
     @pytest.mark.parametrize('lambda_', [2.0, 5.0, 20.0, 1e3])
     def test_derivative(self, keys: split, lambda_: float, subtests: SubTests) -> None:

@@ -532,9 +532,17 @@ def _compute_count_or_prec_trees(
     | tuple[Float32[Array, 'num_trees k k tree_size'], None]
 ):
     """Implement `compute_count_trees` and `compute_prec_trees`."""
-    if config.prec_count_num_trees is None:
+
+    def all_trees() -> (
+        tuple[UInt32[Array, 'num_trees tree_size'], Counts]
+        | tuple[Float32[Array, 'num_trees tree_size'], None]
+        | tuple[Float32[Array, 'num_trees k k tree_size'], None]
+    ):
         compute = vmap(_compute_count_or_prec_tree, in_axes=(None, 0, 0, 0, None))
         return compute(prec_scale, trees, leaf_indices, moves, config)
+
+    if config.prec_count_num_trees is None:
+        return all_trees()
 
     def compute(
         args: tuple[
@@ -554,9 +562,21 @@ def _compute_count_or_prec_trees(
             prec_scale, tree, leaf_indices, moves, config
         )
 
-    return lax.map(
-        compute, (trees, leaf_indices, moves), batch_size=config.prec_count_num_trees
-    )
+    def tree_batches() -> (
+        tuple[UInt32[Array, 'num_trees tree_size'], Counts]
+        | tuple[Float32[Array, 'num_trees tree_size'], None]
+        | tuple[Float32[Array, 'num_trees k k tree_size'], None]
+    ):
+        return lax.map(
+            compute,
+            (trees, leaf_indices, moves),
+            batch_size=config.prec_count_num_trees,
+        )
+
+    # the tree batching bounds the reduction temporaries on cpu; on gpu those
+    # fuse anyway, while under the chain vmap lax.map's reshape of the tree
+    # axis becomes a transpose of `leaf_indices` that xla materializes in full
+    return lax.platform_dependent(cpu=tree_batches, cuda=all_trees)
 
 
 def _compute_count_or_prec_tree(

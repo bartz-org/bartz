@@ -29,7 +29,7 @@ from collections.abc import Sequence
 from jax import custom_jvp, jvp, random
 from jax import numpy as jnp
 from jax.dtypes import canonicalize_dtype
-from jax.scipy.special import gammaln, ndtr, xlogy
+from jax.scipy.special import ndtr
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Integer, Key
 
@@ -158,18 +158,24 @@ def poisson_cdf_inversion(
     u: Float[Array, '*shape'], lambda_: Float[Array, '...']
 ) -> Float[Array, '*shape']:
     """Invert the cdf truncated to the first `NUM_TERMS` values."""
-    k = jnp.arange(NUM_TERMS, dtype=lambda_.dtype)
-
-    # this is normalized later, but keep it normalized anyway (lambda_ term)
-    # to avoid overflows in the intermediate jnp.exp(logpmf)
-    logpmf = xlogy(k, lambda_[..., None]) - lambda_[..., None] - gammaln(k + 1)
-
-    cdf = jnp.cumsum(jnp.exp(logpmf), axis=-1)
+    # unrolled pmf recurrence instead of cumsum(exp(logpmf(arange))): keeps
+    # every op elementwise at the broadcast shape, so xla fuses the inversion
+    # into one kernel instead of materializing shape x NUM_TERMS intermediates
+    pmf = jnp.exp(-lambda_)
+    cdf = pmf
+    cdfs = [cdf]
+    for k in range(1, NUM_TERMS):
+        pmf *= lambda_ / k
+        cdf += pmf
+        cdfs.append(cdf)
 
     # re-normalize because of truncation and float rounding
-    u *= cdf[..., -1]
+    u *= cdf
 
-    return jnp.sum(cdf < u[..., None], axis=-1).astype(u.dtype)
+    count = jnp.zeros_like(u)
+    for cdf in cdfs:
+        count += cdf < u
+    return count
 
 
 def poisson_peizer_pratt(

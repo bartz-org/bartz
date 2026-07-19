@@ -1874,13 +1874,8 @@ def get_shard_map_patch_kwargs() -> ShardMapPatchKwargs:
     # bug: jax 0.8.1-0.8.2: vmap(shard_map(psum)), jax#34249; the
     # jax_disable_vmap_shmap_error config did not work.
 
-    # bug: jax 0.6.2: `random.poisson`'s internal `while_loop` (used by
-    # `sample_s_augmentation`) does not `pvary` its initial carry, so its
-    # output type varies over 'chains' while its input does not, whenever
-    # the rate argument does.
-
     # WORKAROUND(jax<=0.8.2): remove this whole function when jax > 0.8.2
-    buggy = ('0.8.1', '0.8.2', '0.6.2')
+    buggy = ('0.8.1', '0.8.2')
     if jax.__version__ in buggy:
         return {'check_vma': False}
     return {}

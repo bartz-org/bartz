@@ -44,7 +44,7 @@ from bartz._jaxext import (
     truncated_normal_onesided,
     vmap_nodoc,
 )
-from bartz._jaxext.random import loggamma
+from bartz._jaxext.random import loggamma, poisson
 from bartz.grove import var_histogram
 from bartz.mcmcstep._moves import Moves, propose_moves, split_range
 from bartz.mcmcstep._reduction import ReductionConfig
@@ -1927,7 +1927,7 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, '
     # the per-node discarded-draw counts are negative-multinomial, with no
     # closed form when summed over nodes, but their Gamma-Poisson mixture does:
     # A_j | {lambda_b} ~ Poisson(s_j * blocked_mass[j]), independent across j
-    return random.poisson(keys.pop(), s * blocked_mass, dtype=jnp.int32)
+    return poisson(keys.pop(), s * blocked_mass, dtype=jnp.int32)
 
 
 @named_call

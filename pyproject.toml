@@ -303,6 +303,7 @@ banned-from = ["jax.random", "jax.lax", "jax.numpy", "jax.tree", "math"]
 "jax.random.PRNGKey".msg = "User jax.random.key"
 "jax.random.gamma".msg = "jax's gamma sampler bloats jitted code with rejection loops; use loggamma from bartz._jaxext.random."
 "jax.random.loggamma".msg = "jax's loggamma sampler bloats jitted code with rejection loops; use loggamma from bartz._jaxext.random."
+"jax.random.poisson".msg = "jax's poisson sampler bloats jitted code with rejection loops; use poisson from bartz._jaxext.random."
 "jax.tree_util.tree_all".msg = "Use jax.tree.all"
 "jax.tree_util.tree_flatten".msg = "Use jax.tree.flatten"
 "jax.tree_util.tree_flatten_with_path".msg = "Use jax.tree.flatten_with_path"

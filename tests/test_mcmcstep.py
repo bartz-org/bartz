@@ -773,7 +773,7 @@ class TestReduction:
         exact = assert_array_equal  # the count path must match exactly
         # on gpu the matmul method contracts via tf32 (~1e-3 relative error); cpu
         # keeps the tight tolerance, so accuracy is still fully checked there
-        rtol = 1e-3 if indices.platform() != 'cpu' else 1e-5  # ty: ignore[unresolved-attribute]
+        rtol = 1e-3 if indices.platform() != 'cpu' else 1e-5
         close = partial(assert_close_matrices, rtol=rtol, atol=1e-6, reduce_rank=True)
 
         # each case invokes a reduce function `f` (a config's `_reduce` or the

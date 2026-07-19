@@ -90,6 +90,65 @@ def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:
     return fun
 
 
+def sliced_map(
+    f: Callable[[PyTree[Array, ' I']], PyTree[Array, ' O']],
+    xs: PyTree[Array, ' I'],
+    *,
+    batch_size: int,
+) -> PyTree[Array, ' O']:
+    """
+    Like `jax.lax.map` with `batch_size`, but read `xs` by slicing.
+
+    The scan body slices each batch out of the closed-over `xs` with
+    `lax.dynamic_slice_in_dim` instead of consuming `xs` reshaped into scan xs.
+    Under `vmap`, the batching rule for values closed over by a scan moves the
+    batch axes to the front, so leading batch axes in the leaves of `xs` are
+    consumed in place, while `lax.map` would transpose them to sit after the
+    scanned and `batch_size` axes.
+
+    Parameters
+    ----------
+    f
+        The function to apply elementwise, taking and returning pytrees of
+        arrays.
+    xs
+        A pytree of arrays to map over along their first axes.
+    batch_size
+        The number of elements to process at a time, vectorized. The remainder
+        of the division of the number of elements by `batch_size` is processed
+        as one additional smaller batch.
+
+    Returns
+    -------
+    A pytree of stacked outputs of `f`, like `jax.lax.map`.
+    """
+    (num_el,) = {x.shape[0] for x in tree.leaves(xs)}
+
+    # shortcut if no batching needed
+    if batch_size >= num_el:
+        return vmap(f)(xs)
+
+    num_batches, remainder = divmod(num_el, batch_size)
+
+    def apply_batch(start: Integer[Array, ''] | int, size: int) -> PyTree[Array, ' O']:
+        def slice_batch(
+            x: Shaped[Array, ' num_el *shape'],
+        ) -> Shaped[Array, ' size *shape']:
+            return lax.dynamic_slice_in_dim(x, start, size, axis=0)
+
+        return vmap(f)(tree.map(slice_batch, xs))
+
+    def loop(_: None, start: Integer[Array, '']) -> tuple[None, PyTree[Array, ' O']]:
+        return None, apply_batch(start, batch_size)
+
+    _, out = lax.scan(loop, None, batch_size * jnp.arange(num_batches))
+    out = tree.map(lambda x: x.reshape(num_batches * batch_size, *x.shape[2:]), out)
+    if remainder:
+        rest = apply_batch(num_batches * batch_size, remainder)
+        out = tree.map(lambda x, y: jnp.concatenate([x, y], axis=0), out, rest)
+    return out
+
+
 def minimal_unsigned_dtype(value: int) -> DTypeLike:
     """Return the smallest unsigned integer dtype that can represent `value`."""
     if value < 2**8:

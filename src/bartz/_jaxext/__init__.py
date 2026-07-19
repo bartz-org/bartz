@@ -37,6 +37,7 @@ from bartz._jaxext._jaxext import (
     jaxtyping_disabled,
     jit_active,
     minimal_unsigned_dtype,
+    sliced_map,
     split,
     truncated_normal_onesided,
     unique,

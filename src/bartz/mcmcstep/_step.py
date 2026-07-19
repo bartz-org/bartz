@@ -41,6 +41,7 @@ from bartz._jaxext import (
     field,
     jit,
     minimal_unsigned_dtype,
+    sliced_map,
     split,
     truncated_normal_onesided,
     vmap_nodoc,
@@ -545,6 +546,8 @@ def _compute_count_or_prec_trees(
     if config.prec_count_num_trees is None:
         return all_trees()
 
+    batch_size = config.prec_count_num_trees
+
     def compute(
         args: tuple[
             UInt32[Array, ' tree_size']
@@ -568,15 +571,13 @@ def _compute_count_or_prec_trees(
         | tuple[Float32[Array, 'num_trees tree_size'], None]
         | tuple[Float32[Array, 'num_trees k k tree_size'], None]
     ):
-        return lax.map(
-            compute,
-            (trees, leaf_indices, moves),
-            batch_size=config.prec_count_num_trees,
-        )
+        # sliced_map instead of lax.map because under the chain vmap lax.map's
+        # reshape of the tree axis becomes a transpose of `leaf_indices` that
+        # xla materializes in full (cf. `SeqStageInAllTrees.leaf_indices`)
+        return sliced_map(compute, (trees, leaf_indices, moves), batch_size=batch_size)
 
     # the tree batching bounds the reduction temporaries on cpu; on gpu those
-    # fuse anyway, while under the chain vmap lax.map's reshape of the tree
-    # axis becomes a transpose of `leaf_indices` that xla materializes in full
+    # fuse anyway
     return lax.platform_dependent(cpu=tree_batches, cuda=all_trees)
 
 

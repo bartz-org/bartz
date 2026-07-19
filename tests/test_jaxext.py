@@ -31,7 +31,17 @@ from warnings import catch_warnings, simplefilter
 
 import numpy
 import pytest
-from jax import NamedSharding, device_put, jit, lax, make_mesh, random, shard_map, tree
+from jax import (
+    NamedSharding,
+    device_put,
+    jit,
+    lax,
+    make_mesh,
+    random,
+    shard_map,
+    tree,
+    vmap,
+)
 
 # WORKAROUND(jax<0.7.1): top-level `jax.enable_x64` was added later; on older jax
 # it lives in `jax.experimental` (removed in newer jax). Use whichever exists.
@@ -54,6 +64,7 @@ from bartz._jaxext import (
     get_default_devices,
     get_device_count,
     is_key,
+    sliced_map,
     split,
     truncated_normal_onesided,
     unique,
@@ -374,6 +385,62 @@ class TestAutoBatch:
         match = 'Expected None|different types at key path'
         with pytest.raises(ValueError, match=match):
             autobatch(func, 32, 0, None)(x)
+
+
+class TestSlicedMap:
+    """Test _jaxext.sliced_map."""
+
+    @staticmethod
+    def f(
+        args: tuple[Float[Array, ''], dict[str, Float[Array, ' m']]],
+    ) -> tuple[Float[Array, ''], tuple[Float[Array, ''], None]]:
+        """Do something; example first argument for `lax.map`."""
+        x, d = args
+        return x * d['w'].sum(), (x + 1, None)
+
+    def xs(
+        self, key: Key[Array, ''], shape: tuple[int, ...] = (10,)
+    ) -> tuple[Float[Array, '*batch n'], dict[str, Float[Array, '*batch n m']]]:
+        """Return example second argument for `lax.map`."""
+        keys = split(key)
+        x = random.uniform(keys.pop(), shape)
+        w = random.uniform(keys.pop(), (*shape, 3))
+        return x, dict(w=w)
+
+    @pytest.mark.parametrize('batch_size', [1, 3, 5, 10, 12])
+    # 3: remainder batch, 5: exact division, 10 and 12: single-batch shortcut
+    def test_matches_lax_map(self, keys: split, batch_size: int) -> None:
+        """Check the output is identical to `lax.map` with `batch_size`."""
+        xs = self.xs(keys.pop())
+        out = sliced_map(self.f, xs, batch_size=batch_size)
+        expected = lax.map(self.f, xs, batch_size=batch_size)
+        assert out[1][1] is None
+        tree.map(assert_array_equal, out, expected)
+
+    @pytest.mark.parametrize('batch_size', [3, 5])
+    def test_under_vmap(self, keys: split, batch_size: int) -> None:
+        """Check consistency with `lax.map` when the inputs are closed-over batched values."""
+        x, d = self.xs(keys.pop(), (2, 10))
+
+        def with_sliced_map(
+            x: Float[Array, ' n'], w: Float[Array, 'n m']
+        ) -> tuple[Float[Array, ' n'], tuple[Float[Array, ' n'], None]]:
+            return sliced_map(self.f, (x, dict(w=w)), batch_size=batch_size)
+
+        def with_lax_map(
+            x: Float[Array, ' n'], w: Float[Array, 'n m']
+        ) -> tuple[Float[Array, ' n'], tuple[Float[Array, ' n'], None]]:
+            return lax.map(self.f, (x, dict(w=w)), batch_size=batch_size)
+
+        out = vmap(with_sliced_map)(x, d['w'])
+        expected = vmap(with_lax_map)(x, d['w'])
+        tree.map(assert_array_equal, out, expected)
+
+    def test_mismatched_leading_axes(self, keys: split) -> None:
+        """Check that leaves with different leading axis sizes are an error."""
+        x, d = self.xs(keys.pop())
+        with pytest.raises(ValueError, match='values to unpack'):
+            sliced_map(self.f, (x[:5], d), batch_size=3)
 
 
 def different_keys(keya: Key[Array, ''], keyb: Key[Array, '']) -> bool:

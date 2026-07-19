@@ -240,12 +240,27 @@ class Forest(Module):
     leaf_indices: UInt[Array, 'num_trees *chains n'] = field(
         chains=CHAIN_AXIS_AFTER_TREES, data=-1
     )
-    """The index of the leaf each datapoint falls into, for each tree.
+    """The index of the leaf each datapoint falls into, for each tree, in the
+    largest version of the tree compatible with the last moves.
+
+    A pending prune (accepted prune or rejected grow, marked per-tree by
+    `to_prune`) is not yet applied to the indices; `step` folds it in at the
+    beginning of the next iteration. Evaluating the trees at these indices is
+    correct anyway because `leaf_tree` mirrors the value of a pruned node onto
+    its dangling children.
 
     The chain axis sits after `num_trees` (not leading, unlike sibling fields)
     so the per-tree `jax.lax.scan` in `step`, under the chain `jax.vmap`,
     avoids a transpose of this large array that otherwise inflates gpu peak
     memory."""
+
+    to_prune: Bool[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    """Whether the last move on each tree ended in a prune (accepted prune or
+    rejected grow) whose application to `leaf_indices` is still pending."""
+
+    move_node: Int32[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    """The node the last move on each tree operated on (the leaf to grow or
+    the node to prune). Meaningful only where `to_prune` is set."""
 
     count_tree: UInt32[Array, '*chains num_trees 2*half_tree_size'] | None = field(
         chains=CHAIN_AXIS
@@ -1068,6 +1083,10 @@ def init(
                 leaf_indices=lazy(
                     jnp.ones, (num_trees, n), minimal_unsigned_dtype(tree_size - 1)
                 ),
+                # no pending prune: `step` starts by applying the pending
+                # prunes to `leaf_indices`, which shall be a no-op on init
+                to_prune=lazy(jnp.zeros, (num_trees,), bool),
+                move_node=lazy(jnp.zeros, (num_trees,), jnp.int32),
                 # the counts serve the minimum-points constraints and stand in
                 # for the precisions when there are no per-datapoint scales
                 # (`prec_scale` is set iff `error_scale` or `missing` is given)

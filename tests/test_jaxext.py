@@ -645,7 +645,9 @@ class TestPoisson:
     nsamples = 200_000  # the tests below pass unchanged up to 10M samples
 
     @pytest.mark.parametrize('x64', [False, True])
-    @pytest.mark.parametrize('lambda_', [0.05, 0.5, 5.0, 7.0, 20.0, 1e3, 1e5])
+    # 2**24 is the float32 integer limit: beyond it the samples land on the
+    # coarser float lattice, so it is the largest lambda_ with an exact pmf
+    @pytest.mark.parametrize('lambda_', [0.05, 0.5, 5.0, 7.0, 20.0, 1e3, 1e5, 2.0**24])
     def test_distribution(
         self, keys: split, lambda_: float, x64: bool, subtests: SubTests
     ) -> None:
@@ -729,7 +731,7 @@ class TestPoisson:
         with pytest.raises(ValueError, match='broadcast'):
             poisson(keys.pop(), jnp.ones(5), shape)
 
-    @pytest.mark.parametrize('lambda_', [2.0, 5.0, 20.0, 1e3])
+    @pytest.mark.parametrize('lambda_', [2.0, 5.0, 20.0, 1e3, 2.0**24])
     def test_derivative(self, keys: split, lambda_: float, subtests: SubTests) -> None:
         """Averaged sample derivatives estimate derivatives of moments.
 
@@ -744,11 +746,18 @@ class TestPoisson:
         sample, tangent = _poisson_sample_and_tangent(keys.pop(), lambda_, nsamples)
         assert jnp.all(jnp.isfinite(tangent))
 
+        # average in float64: at lambda_ = 2**24 the float32 reduction error
+        # on the second moment would be comparable to the 1% tolerance
+        sample = numpy.asarray(sample, numpy.float64)
+        tangent = numpy.asarray(tangent, numpy.float64)
+
         with subtests.test('mean'):
-            assert_allclose(jnp.mean(tangent), 1.0, rtol=0.01)
+            assert_allclose(numpy.mean(tangent), 1.0, rtol=0.01)
 
         with subtests.test('second moment'):
-            assert_allclose(jnp.mean(2 * sample * tangent), 2 * lambda_ + 1, rtol=0.01)
+            assert_allclose(
+                numpy.mean(2 * sample * tangent), 2 * lambda_ + 1, rtol=0.01
+            )
 
     @pytest.mark.parametrize(
         ('lambda_', 'bound'),
@@ -761,6 +770,8 @@ class TestPoisson:
             (10.0, 1e-4),
             (20.0, 1e-5),
             (50.0, 1e-5),
+            (1e6, 1e-4),
+            (1.6e7, 1e-4),  # just below 2**24, pmf not available above
         ],
     )
     def test_total_variation(self, lambda_: float, bound: float) -> None:
@@ -773,27 +784,30 @@ class TestPoisson:
         by the Peizer-Pratt approximation error just above it; the bounds are
         the observed values rounded up to a power of ten (or two).
         """
-        num_values = int(scipy_poisson.isf(1e-12, lambda_)) + 3
-        k = jnp.arange(num_values, dtype=jnp.float32)
-        lambda_vec = jnp.full((num_values,), lambda_, jnp.float32)
+        # enumerate a window covering all but ~1e-12 of both pmfs; k0 - 1 is
+        # included as the base of the cdf differences (never sampled, so its
+        # implied cdf bisects to ~0 when k0 = 0)
+        k0 = max(int(scipy_poisson.ppf(1e-12, lambda_)) - 2, 0)
+        k1 = int(scipy_poisson.isf(1e-12, lambda_)) + 2
+        k = k0 - 1 + jnp.arange(k1 - k0 + 2, dtype=jnp.float32)
 
         # invariant: sampler(lo) <= k < sampler(hi), z jump locations in between
-        lo = jnp.full((num_values,), -7.0, jnp.float32)
-        hi = jnp.full((num_values,), 7.0, jnp.float32)
+        lo = jnp.full(k.shape, -8.0, jnp.float32)
+        hi = jnp.full(k.shape, 8.0, jnp.float32)
         for _ in range(60):
             mid = (lo + hi) / 2
-            below = poisson_from_normal(mid, lambda_vec) <= k
+            below = poisson_from_normal(mid, jnp.float32(lambda_)) <= k
             lo = jnp.where(below, mid, lo)
             hi = jnp.where(below, hi, mid)
 
         implied_cdf = scipy_ndtr(numpy.asarray(lo, numpy.float64))
-        implied_pmf = numpy.diff(numpy.concatenate([[0.0], implied_cdf]))
-        exact_pmf = scipy_poisson.pmf(numpy.arange(num_values), lambda_)
+        implied_pmf = numpy.diff(implied_cdf)
+        exact_pmf = scipy_poisson.pmf(numpy.arange(k0, k1 + 1), lambda_)
 
         tv = 0.5 * numpy.abs(implied_pmf - exact_pmf).sum()
-        tv += 0.5 * abs(
-            (1 - implied_cdf[-1]) - scipy_poisson.sf(num_values - 1, lambda_)
-        )
+        # out-of-window mass of both pmfs bounds its TV contribution
+        tv += 0.5 * (implied_cdf[0] + scipy_poisson.cdf(k0 - 1, lambda_))
+        tv += 0.5 * ((1 - implied_cdf[-1]) + scipy_poisson.sf(k1, lambda_))
         assert tv < bound
 
 

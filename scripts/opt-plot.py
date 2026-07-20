@@ -341,7 +341,7 @@ def plot_time_vs_reduce_series(data: Data, fig_name_prefix: str) -> None:
                 color=str(gray),
                 label=f'{data.scan_col}={scan_val}',
             )
-            min_idx = time_est.argmin()
+            min_idx = np.argmin(time_est)
             ax.plot(
                 reduce_vals[min_idx],
                 time_est[min_idx] / min_time,

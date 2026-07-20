@@ -30,6 +30,7 @@ from jax import custom_jvp, jvp, random
 from jax import numpy as jnp
 from jax.dtypes import canonicalize_dtype
 from jax.scipy.special import ndtr
+from jax.scipy.stats import norm
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Integer, Key
 
@@ -90,10 +91,10 @@ def poisson(
     the cdf by Peizer and Pratt [1]_, as presented in [2]_.
 
     The samples carry an approximate derivative w.r.t. `lambda_`, defined by
-    implicit differentiation of the Peizer-Pratt relaxation before rounding:
-    single-sample derivatives are biased, but averaged over samples they
-    estimate derivatives of expected values. The integer cast blocks them, so
-    they only flow with a float `dtype`.
+    implicit differentiation of a continuous relaxation of the cdf before
+    rounding: single-sample derivatives are biased, but averaged over samples
+    they estimate derivatives of expected values, at any ``lambda_ > 0``. The
+    integer cast blocks them, so they only flow with a float `dtype`.
 
     References
     ----------
@@ -128,20 +129,73 @@ def poisson_from_normal(
 
 @poisson_from_normal.defjvp
 def poisson_from_normal_jvp(
-    primals: tuple[Float[Array, '*shape'], Float[Array, '...']],
-    tangents: tuple[Float[Array, '*shape'], Float[Array, '...']],
+    primals: tuple[Float[Array, '*shape'], Float[Array, '*lambda_shape']],
+    tangents: tuple[Float[Array, '*shape'], Float[Array, '*lambda_shape']],
 ) -> tuple[Float[Array, '*shape'], Float[Array, '*shape']]:
-    """Implicit differentiation of the Peizer-Pratt relaxation.
+    """Implicit differentiation of a continuous relaxation of the sampler.
 
-    The continuous root x(z, lambda_) of `peizer_pratt_z(x, lambda_) = z`
-    satisfies, by the implicit function theorem,
-    `dx = (dz - dz/dlambda_ dlambda_) / (dz/dx)`. The partials are evaluated at
-    the root guess, which also stands in for the root below `THETA_SPLIT`.
+    Each branch applies the implicit function theorem to the relaxed root of
+    its own cdf representation: the linearly interpolated truncated cdf below
+    `THETA_SPLIT`, the Peizer-Pratt approximation above.
     """
     z, lambda_ = primals
     z_dot, lambda_dot = tangents
     sample = poisson_from_normal(z, lambda_)
+    small = poisson_cdf_inversion_jvp(z, lambda_, sample, z_dot, lambda_dot)
+    large = poisson_peizer_pratt_jvp(z, lambda_, z_dot, lambda_dot)
+    return sample, jnp.where(lambda_ < THETA_SPLIT, small, large)
 
+
+def poisson_cdf_inversion_jvp(
+    z: Float[Array, '*shape'],
+    lambda_: Float[Array, '*lambda_shape'],
+    k: Float[Array, '*shape'],
+    z_dot: Float[Array, '*shape'],
+    lambda_dot: Float[Array, '*lambda_shape'],
+) -> Float[Array, '*shape']:
+    """Tangent of the root of the linearly interpolated truncated cdf.
+
+    In the cell x in (k - 1, k] the relaxed cdf is F(k - 1) + frac pmf(k),
+    frac = x - (k - 1), and the relaxed root solves
+    F(x, lambda_) = ndtr(z) F(K), K = NUM_TERMS - 1; the implicit function
+    theorem with d F(j)/dlambda_ = -pmf(j) and pmf(k - 1)/pmf(k) = k/lambda_
+    then gives dx elementwise.
+    """
+    # re-run the pmf recurrence, gathering the terms at the sampled value
+    pmf = jnp.exp(-lambda_)
+    cdf = pmf
+    pmf_k = jnp.where(k == 0, pmf, 0.0)
+    cdf_km1 = jnp.zeros_like(k)
+    for j in range(1, NUM_TERMS):
+        cdf_km1 = jnp.where(k == j, cdf, cdf_km1)
+        pmf *= lambda_ / j
+        pmf_k = jnp.where(k == j, pmf, pmf_k)
+        cdf += pmf
+
+    # now cdf and pmf are at K; clip frac against tail cancellation errors
+    u = ndtr(z) * cdf
+    frac = jnp.clip((u - cdf_km1) / pmf_k, 0.0, 1.0)
+
+    dx_z = norm.pdf(z) * cdf / pmf_k
+    # guard k/lambda_ to keep the k = 0 term zero also at lambda_ = 0
+    k_over_lambda = jnp.where(k == 0, 0.0, k / lambda_)
+    dx_lambda = frac + (1 - frac) * k_over_lambda - ndtr(z) * pmf / pmf_k
+    return dx_z * z_dot + dx_lambda * lambda_dot
+
+
+def poisson_peizer_pratt_jvp(
+    z: Float[Array, '*shape'],
+    lambda_: Float[Array, '*lambda_shape'],
+    z_dot: Float[Array, '*shape'],
+    lambda_dot: Float[Array, '*lambda_shape'],
+) -> Float[Array, '*shape']:
+    """Tangent of the root of the Peizer-Pratt relaxation.
+
+    The continuous root x(z, lambda_) of `peizer_pratt_z(x, lambda_) = z`
+    satisfies, by the implicit function theorem,
+    `dx = (dz - dz/dlambda_ dlambda_) / (dz/dx)`. The partials are evaluated at
+    the root guess.
+    """
     # keep the evaluation point inside the domain x > -1/2 of z(x); beyond the
     # bound the sample is pinned at 0 anyway
     x = jnp.maximum(peizer_pratt_root(z, lambda_), -0.4)
@@ -151,7 +205,7 @@ def poisson_from_normal_jvp(
     _, dz_lambda = jvp(lambda ell: peizer_pratt_z(x, ell), (lambda_,), (lambda_dot,))
     _, dz_x = jvp(lambda x: peizer_pratt_z(x, lambda_), (x,), (jnp.ones_like(x),))
 
-    return sample, (z_dot - dz_lambda) / dz_x
+    return (z_dot - dz_lambda) / dz_x
 
 
 def poisson_cdf_inversion(

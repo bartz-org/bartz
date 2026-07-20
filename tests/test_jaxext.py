@@ -731,18 +731,20 @@ class TestPoisson:
         with pytest.raises(ValueError, match='broadcast'):
             poisson(keys.pop(), jnp.ones(5), shape)
 
-    @pytest.mark.parametrize('lambda_', [2.0, 5.0, 20.0, 1e3, 2.0**24])
+    @pytest.mark.parametrize('lambda_', [0.1, 0.5, 2.0, 5.0, 20.0, 1e3, 2.0**24])
     def test_derivative(self, keys: split, lambda_: float, subtests: SubTests) -> None:
         """Averaged sample derivatives estimate derivatives of moments.
 
         Single-sample derivatives of a discrete variable are meaningless; the
         implicit-reparameterization tangent is defined to estimate derivatives
         of expectations when averaged. Check the first two moments, whose
-        derivatives w.r.t. lambda_ are 1 and 2 lambda_ + 1. The 1% tolerance is
-        the tightest power of ten: it is set by the relaxation bias at
-        lambda_ = 2 (~ +0.6%), which does not shrink with more samples.
+        derivatives w.r.t. lambda_ are 1 and 2 lambda_ + 1; below the branch
+        split the estimates are exactly unbiased. The 1% tolerance is the
+        tightest power of ten: it is set by the sampling noise at the smallest
+        lambda_, where the tangent variance ~ 1/(3 lambda_) peaks.
         """
-        nsamples = self.nsamples
+        # more samples at small lambda_ to beat the 1/(3 lambda_) variance
+        nsamples = self.nsamples * (16 if lambda_ < 1 else 1)
         sample, tangent = _poisson_sample_and_tangent(keys.pop(), lambda_, nsamples)
         assert jnp.all(jnp.isfinite(tangent))
 

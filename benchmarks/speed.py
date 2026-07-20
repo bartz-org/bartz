@@ -24,6 +24,7 @@
 
 """Measure the speed of the MCMC and its interfaces."""
 
+import math
 import sys
 from collections.abc import Callable, Mapping
 from contextlib import redirect_stderr, redirect_stdout
@@ -279,7 +280,11 @@ class AutoParamNames:
     def __init_subclass__(cls, **_: Any) -> None:
         method = cls.setup
         sig = signature(method)
-        params = list(sig.parameters)
+        params = [
+            name
+            for name, param in sig.parameters.items()
+            if param.kind not in (param.VAR_POSITIONAL, param.VAR_KEYWORD)
+        ]
         assert params[0] == 'self'
         cls.param_names = tuple(params[1:])
 
@@ -511,10 +516,14 @@ class StepMemory(StepBase):
             kwargs.setdefault('filter_splitless_vars', 0)
         return eval_shape(lambda: simple_init(**kwargs))
 
-    def setup(self, kind: Kind, chains: int | None, stat: MemStat) -> None:  # ty:ignore[invalid-method-override]
+    def setup(  # ty:ignore[invalid-method-override]
+        self, kind: Kind, chains: int | None, stat: MemStat, **kwargs: Any
+    ) -> None:
         """Compile `step` at large scale and extract its memory analysis."""
         # n=16Mi, num_trees=p=1Ki, abstract eval so may exceed device memory
-        super().setup('compile', kind, chains, n=16 * 2**20, num_trees=1024, p=1024)
+        super().setup(
+            'compile', kind, chains, n=16 * 2**20, num_trees=1024, p=1024, **kwargs
+        )
         analysis = self.compiled_func.memory_analysis()
         if analysis is None:
             # the active backend does not expose a memory analysis
@@ -528,6 +537,51 @@ class StepMemory(StepBase):
         return self.memory[self.stat]
 
     track_memory.unit = 'bytes'  # ty: ignore[unresolved-attribute]
+
+
+Shards = int | None
+
+
+class StepMemorySharded(StepMemory):
+    """Per-device memory footprint of `mcmcstep.step` on a sharded state.
+
+    Same abstract-scale analysis as `StepMemory`, on a state sharded over a
+    device mesh. `data_shards` and `chain_shards` set the sizes of the 'data'
+    and 'chains' mesh axes; `None` leaves an axis out of the mesh. The state
+    is single-chain when `chain_shards` is None and 2 chains otherwise, so a
+    size-1 mesh axis isolates the overhead of the sharding machinery from the
+    memory scaling, and the no-mesh corner matches `StepMemory`. The
+    per-device statistics are rescaled by the mesh size to report the total
+    over all devices: ideally sharding leaves the total unchanged, and
+    replicated buffers show up as excess over the unsharded case.
+    """
+
+    params: tuple[tuple[Shards, ...], tuple[Shards, ...], tuple[MemStat, ...]] = (
+        (None, 1, 2),
+        (None, 1, 2),
+        ('state', 'peak'),
+    )
+
+    def setup(  # ty:ignore[invalid-method-override]
+        self, data_shards: Shards, chain_shards: Shards, stat: MemStat
+    ) -> None:
+        """Compile `step` on a sharded state and extract its memory analysis."""
+        mesh = {}
+        if chain_shards is not None:
+            mesh['chains'] = chain_shards
+        if data_shards is not None:
+            mesh['data'] = data_shards
+
+        num_devices = math.prod(mesh.values())
+        if get_device_count() < num_devices:
+            msg = (
+                f'{num_devices} devices needed to shard, {get_device_count()} available'
+            )
+            raise NotImplementedError(msg)
+
+        chains = None if chain_shards is None else 2
+        super().setup('plain', chains, stat, mesh=mesh or None)
+        self.memory = {k: v * num_devices for k, v in self.memory.items()}
 
 
 class BaseGbart(AutoParamNames):

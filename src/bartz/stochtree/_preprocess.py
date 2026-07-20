@@ -70,7 +70,10 @@ from typing import Any, Literal, TypeAlias, overload
 
 import numpy as np
 from jaxtyping import Float32, Shaped
-from numpy.typing import ArrayLike
+
+# Not `numpy.typing.ArrayLike`: that is a PEP 695 type alias since numpy 2.5,
+# which jaxtyping cannot subscript.
+from bartz.mcmcstep._state import ArrayLike
 
 # Duck-typed stand-ins for the optional dataframe libraries. bartz does not
 # depend on pandas or polars at runtime, so we cannot reference their real

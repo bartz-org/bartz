@@ -34,7 +34,8 @@ import pytest
 from jax import (
     NamedSharding,
     device_put,
-    jit,
+    grad,
+    jvp,
     lax,
     make_mesh,
     random,
@@ -54,9 +55,12 @@ from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Float32, Key, Shaped
 from pytest_subtests import SubTests
+from scipy.special import ndtr as scipy_ndtr
 from scipy.stats import anderson_ksamp, ks_1samp, truncnorm
 from scipy.stats import invgamma as scipy_invgamma
 from scipy.stats import loggamma as scipy_loggamma
+from scipy.stats import poisson as scipy_poisson
+from scipy.stats import uniform as scipy_uniform
 
 from bartz._jaxext import (
     autobatch,
@@ -64,14 +68,21 @@ from bartz._jaxext import (
     get_default_devices,
     get_device_count,
     is_key,
+    jit,
     sliced_map,
     split,
     truncated_normal_onesided,
     unique,
 )
-from bartz._jaxext.random import loggamma
+from bartz._jaxext.random import loggamma, poisson
+from bartz._jaxext.random._poisson import poisson_from_normal
 from bartz._jaxext.scipy.stats import invgamma
-from tests.util import assert_array_equal, assert_close_matrices, int_seed
+from tests.util import (
+    assert_allclose,
+    assert_array_equal,
+    assert_close_matrices,
+    int_seed,
+)
 
 
 class TestUnique:
@@ -672,6 +683,192 @@ class TestLoggamma:
         sample = loggamma(keys.pop(), alpha, (nsamples,), n_uniforms=n_uniforms)
         ks = ks_1samp(sample, scipy_loggamma(alpha).cdf)
         assert ks.pvalue > 1e-3
+
+
+@partial(jit, static_argnums=(2,))
+def _poisson_sample_and_tangent(
+    key: Key[Array, ''], lambda_: Float[Array, ''], nsamples: int
+) -> tuple[Float[Array, ' nsamples'], Float[Array, ' nsamples']]:
+    """Sample Poisson(lambda_) values and their derivative w.r.t. lambda_."""
+
+    def f(lambda_: Float[Array, '']) -> Float[Array, ' nsamples']:
+        return poisson(key, jnp.full((nsamples,), lambda_), dtype=float)
+
+    return jvp(f, (lambda_,), (jnp.ones_like(lambda_),))
+
+
+class TestPoisson:
+    """Test `_jaxext.random.poisson`."""
+
+    nsamples = 200_000  # the tests below pass unchanged up to 10M samples
+
+    @pytest.mark.parametrize('x64', [False, True])
+    # 2**24 is the float32 integer limit: beyond it the samples land on the
+    # coarser float lattice, so it is the largest lambda_ with an exact pmf
+    @pytest.mark.parametrize('lambda_', [0.05, 0.5, 5.0, 7.0, 20.0, 1e3, 1e5, 2.0**24])
+    def test_distribution(
+        self, keys: split, lambda_: float, x64: bool, subtests: SubTests
+    ) -> None:
+        """Check the samples follow Poisson(lambda_) against the cdf and a sample."""
+        nsamples = self.nsamples
+        ctx = enable_x64(True) if x64 else nullcontext()
+        with ctx:
+            sample = poisson(keys.pop(), lambda_, (nsamples,))
+            assert jnp.issubdtype(sample.dtype, jnp.integer)
+            assert jnp.all(sample >= 0)
+        sample = numpy.asarray(sample)
+
+        dist = scipy_poisson(lambda_)
+
+        # the plain KS test breaks on a discrete cdf, so map the sample to
+        # exactly uniform under H0 with the randomized probability integral
+        # transform: U = F(X - 1) + V pmf(X), V ~ uniform
+        with subtests.test('KS'):
+            rng = numpy.random.default_rng(int_seed(keys.pop()))
+            v = rng.uniform(size=sample.shape)
+            u = dist.cdf(sample - 1) + v * dist.pmf(sample)
+            ks = ks_1samp(u, scipy_uniform.cdf)
+            assert ks.pvalue > 1e-3
+
+        # the anderson-darling test is more sensitive in the tails; its midrank
+        # correction handles the heavily tied discrete samples
+        with subtests.test('AD'):
+            reference = dist.rvs(size=nsamples, random_state=int_seed(keys.pop()))
+            with catch_warnings():
+                # AD caps/floors its reported p-value to [0.001, 0.25], warning on it
+                simplefilter('ignore')
+                ad = anderson_ksamp([sample, reference])
+            # AD floors its p-value at 0.001, so we cut on the statistic instead
+            assert ad.statistic <= ad.critical_values[-1]  # 0.001 threshold
+
+    def test_zero(self, keys: split) -> None:
+        """Check lambda_ = 0 yields all zeros."""
+        sample = poisson(keys.pop(), 0.0, (self.nsamples,))
+        assert_array_equal(sample, jnp.zeros(sample.shape, sample.dtype))
+
+    @pytest.mark.parametrize('lambda_', [4.5, 8.5])
+    @pytest.mark.parametrize('shape', [(), (12,), (3, 4), (2, 3, 2), (1, 12, 1)])
+    def test_shape_consistency(
+        self, keys: split, lambda_: float, shape: tuple[int, ...]
+    ) -> None:
+        """A shaped draw equals the flat draw reshaped, given the same key."""
+        key = keys.pop()
+        sample = poisson(key, lambda_, shape)
+        assert sample.shape == shape
+        flat = poisson(random.clone(key), lambda_, (sample.size,))
+        assert_array_equal(sample.reshape(sample.size), flat)
+
+    @pytest.mark.parametrize('lambda_', [4.5, 8.5])
+    @pytest.mark.parametrize('lambda_shape', [(), (4,), (1, 4)])
+    def test_lambda_broadcast(
+        self, keys: split, lambda_: float, lambda_shape: tuple[int, ...]
+    ) -> None:
+        """A draw with unbroadcasted lambda_ equals the pre-broadcasted draw."""
+        shape = (3, 4)
+        key = keys.pop()
+        sample = poisson(key, jnp.full(lambda_shape, lambda_), shape)
+        assert sample.shape == shape
+        expected = poisson(random.clone(key), jnp.full(shape, lambda_), shape)
+        assert_array_equal(sample, expected)
+
+    def test_lambda_broadcast_grad(self, keys: split) -> None:
+        """Reverse mode w.r.t. an unbroadcasted lambda_ sums over the broadcast."""
+        lambda_ = jnp.array([2.0, 20.0])
+        key = keys.pop()
+
+        def f(lambda_: Float[Array, ' 2']) -> Float[Array, '5 2']:
+            return poisson(key, lambda_, (5, 2), dtype=float)
+
+        _, tangent = jvp(f, (lambda_,), (jnp.ones_like(lambda_),))
+        gradient = grad(lambda lambda_: f(lambda_).sum())(lambda_)
+        assert_close_matrices(gradient, tangent.sum(axis=0), rtol=1e-6)
+
+    @pytest.mark.parametrize('shape', [(3,), ()])
+    def test_lambda_shape_mismatch(self, keys: split, shape: tuple[int, ...]) -> None:
+        """A lambda_ that does not broadcast to shape is an error."""
+        with pytest.raises(ValueError, match='broadcast'):
+            poisson(keys.pop(), jnp.ones(5), shape)
+
+    @pytest.mark.parametrize('lambda_', [0.1, 0.5, 2.0, 5.0, 20.0, 1e3, 2.0**24])
+    def test_derivative(self, keys: split, lambda_: float, subtests: SubTests) -> None:
+        """Averaged sample derivatives estimate derivatives of moments.
+
+        Single-sample derivatives of a discrete variable are meaningless; the
+        implicit-reparameterization tangent is defined to estimate derivatives
+        of expectations when averaged. Check the first two moments, whose
+        derivatives w.r.t. lambda_ are 1 and 2 lambda_ + 1; below the branch
+        split the estimates are exactly unbiased. The 1% tolerance is the
+        tightest power of ten: it is set by the sampling noise at the smallest
+        lambda_, where the tangent variance ~ 1/(3 lambda_) peaks.
+        """
+        # more samples at small lambda_ to beat the 1/(3 lambda_) variance
+        nsamples = self.nsamples * (16 if lambda_ < 1 else 1)
+        sample, tangent = _poisson_sample_and_tangent(keys.pop(), lambda_, nsamples)
+        assert jnp.all(jnp.isfinite(tangent))
+
+        # average in float64: at lambda_ = 2**24 the float32 reduction error
+        # on the second moment would be comparable to the 1% tolerance
+        sample = numpy.asarray(sample, numpy.float64)
+        tangent = numpy.asarray(tangent, numpy.float64)
+
+        with subtests.test('mean'):
+            assert_allclose(numpy.mean(tangent), 1.0, rtol=0.01)
+
+        with subtests.test('second moment'):
+            assert_allclose(
+                numpy.mean(2 * sample * tangent), 2 * lambda_ + 1, rtol=0.01
+            )
+
+    @pytest.mark.parametrize(
+        ('lambda_', 'bound'),
+        [
+            (0.1, 1e-6),
+            (1.0, 1e-6),
+            (5.0, 1e-5),
+            (6.9, 1e-5),
+            (7.0, 1e-4),
+            (10.0, 1e-4),
+            (20.0, 1e-5),
+            (50.0, 1e-5),
+            (1e6, 1e-4),
+            (1.6e7, 1e-4),  # just below 2**24, pmf not available above
+        ],
+    )
+    def test_total_variation(self, lambda_: float, bound: float) -> None:
+        """Bound the exact total variation error of the sampler.
+
+        The sampler maps a normal variate monotonically to an integer, so its
+        implied pmf can be computed exactly (no sampling) by locating the jumps
+        of the map with bisection. The total variation distance to the true
+        Poisson pmf is dominated by float roundoff below the branch split and
+        by the Peizer-Pratt approximation error just above it; the bounds are
+        the observed values rounded up to a power of ten (or two).
+        """
+        # enumerate a window covering all but ~1e-12 of both pmfs; k0 - 1 is
+        # included as the base of the cdf differences (never sampled, so its
+        # implied cdf bisects to ~0 when k0 = 0)
+        k0 = max(int(scipy_poisson.ppf(1e-12, lambda_)) - 2, 0)
+        k1 = int(scipy_poisson.isf(1e-12, lambda_)) + 2
+        k = k0 - 1 + jnp.arange(k1 - k0 + 2, dtype=jnp.float32)
+
+        # invariant: sampler(lo) <= k < sampler(hi), z jump locations in between
+        lo = jnp.full(k.shape, -8.0, jnp.float32)
+        hi = jnp.full(k.shape, 8.0, jnp.float32)
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            below = poisson_from_normal(mid, jnp.float32(lambda_)) <= k
+            lo = jnp.where(below, mid, lo)
+            hi = jnp.where(below, hi, mid)
+
+        implied_cdf = scipy_ndtr(numpy.asarray(lo, numpy.float64))
+        implied_pmf = numpy.diff(implied_cdf)
+        exact_pmf = scipy_poisson.pmf(numpy.arange(k0, k1 + 1), lambda_)
+
+        tv = 0.5 * numpy.abs(implied_pmf - exact_pmf).sum()
+        # out-of-window mass of both pmfs bounds its TV contribution
+        tv += 0.5 * (implied_cdf[0] + scipy_poisson.cdf(k0 - 1, lambda_))
+        tv += 0.5 * ((1 - implied_cdf[-1]) + scipy_poisson.sf(k1, lambda_))
+        assert tv < bound
 
 
 def test_is_key(keys: split) -> None:

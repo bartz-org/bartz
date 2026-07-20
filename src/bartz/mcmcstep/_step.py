@@ -40,6 +40,8 @@ from bartz._jaxext import (
     Module,
     field,
     jit,
+    minimal_unsigned_dtype,
+    sliced_map,
     split,
     truncated_normal_onesided,
     vmap_nodoc,
@@ -351,15 +353,18 @@ def accept_moves_parallel_stage(
     -------
     An object with all that could be done in parallel.
     """
-    # where the move is grow, modify the state like the move was accepted
+    # apply the prunes pending from the previous step to the leaf indices,
+    # then, where the new move is grow, modify the state like the move was
+    # accepted.
+    leaf_indices = apply_moves_to_leaf_indices(
+        state.forest.leaf_indices, state.forest.to_prune, state.forest.move_node
+    )
     state = replace(
         state,
         forest=replace(
             state.forest,
             var_tree=moves.var_tree,
-            leaf_indices=apply_grow_to_indices(
-                moves, state.forest.leaf_indices, state.X
-            ),
+            leaf_indices=apply_grow_to_indices(moves, leaf_indices, state.X),
             leaf_tree=adapt_leaf_trees_to_grow_indices(state.forest.leaf_tree, moves),
         ),
     )
@@ -454,7 +459,8 @@ def apply_grow_to_indices(
     moves
         The proposed moves, see `propose_moves`.
     leaf_indices
-        The index of the leaf each datapoint falls into.
+        The index of the leaf each datapoint falls into, with the prunes
+        pending from the previous step already applied.
     X
         The predictors matrix.
 
@@ -528,9 +534,19 @@ def _compute_count_or_prec_trees(
     | tuple[Float32[Array, 'num_trees k k tree_size'], None]
 ):
     """Implement `compute_count_trees` and `compute_prec_trees`."""
-    if config.prec_count_num_trees is None:
+
+    def all_trees() -> (
+        tuple[UInt32[Array, 'num_trees tree_size'], Counts]
+        | tuple[Float32[Array, 'num_trees tree_size'], None]
+        | tuple[Float32[Array, 'num_trees k k tree_size'], None]
+    ):
         compute = vmap(_compute_count_or_prec_tree, in_axes=(None, 0, 0, 0, None))
         return compute(prec_scale, trees, leaf_indices, moves, config)
+
+    if config.prec_count_num_trees is None:
+        return all_trees()
+
+    batch_size = config.prec_count_num_trees
 
     def compute(
         args: tuple[
@@ -550,9 +566,19 @@ def _compute_count_or_prec_trees(
             prec_scale, tree, leaf_indices, moves, config
         )
 
-    return lax.map(
-        compute, (trees, leaf_indices, moves), batch_size=config.prec_count_num_trees
-    )
+    def tree_batches() -> (
+        tuple[UInt32[Array, 'num_trees tree_size'], Counts]
+        | tuple[Float32[Array, 'num_trees tree_size'], None]
+        | tuple[Float32[Array, 'num_trees k k tree_size'], None]
+    ):
+        # sliced_map instead of lax.map because under the chain vmap lax.map's
+        # reshape of the tree axis becomes a transpose of `leaf_indices` that
+        # xla materializes in full (cf. `SeqStageInAllTrees.leaf_indices`)
+        return sliced_map(compute, (trees, leaf_indices, moves), batch_size=batch_size)
+
+    # the tree batching bounds the reduction temporaries on cpu; on gpu those
+    # fuse anyway
+    return lax.platform_dependent(cpu=tree_batches, cuda=all_trees)
 
 
 def _compute_count_or_prec_tree(
@@ -1068,6 +1094,7 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
             resid,
             SeqStageInAllTrees(
                 pso.state.X,
+                pso.state.forest.leaf_indices,
                 pso.state.config.resid_reduction_config,
                 pso.state.config.data_sharded,
                 pso.state.prec_scale,
@@ -1084,11 +1111,12 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
         )
         return resid, (leaf_tree, acc, to_prune, lkratio)
 
+    num_trees, _ = pso.state.forest.leaf_indices.shape
     pts = SeqStageInPerTree(
         pso.state.forest.leaf_tree,
         pso.prec_trees,
         pso.moves,
-        pso.state.forest.leaf_indices,
+        jnp.arange(num_trees, dtype=minimal_unsigned_dtype(num_trees - 1)),
         pso.prelkv,
         pso.prelf,
     )
@@ -1111,6 +1139,14 @@ class SeqStageInAllTrees(Module):
 
     X: UInt[Array, 'p n']
     """The predictors."""
+
+    leaf_indices: UInt[Array, 'num_trees n']
+    """The leaf indices for the largest version of each tree compatible with
+    the move. Kept whole here and sliced per tree with
+    `SeqStageInPerTree.tree_index`, instead of consumed as scan xs, because
+    the scan batching rules move the chain axis of closed-over values to the
+    front, matching the storage layout, while the xs rule would transpose it
+    to after the tree axis."""
 
     resid_reduction_config: ReductionConfig
     """How to sum the residuals in each leaf."""
@@ -1167,9 +1203,8 @@ class SeqStageInPerTree(Module):
     move: Moves
     """The proposed move, see `propose_moves`."""
 
-    leaf_indices: UInt[Array, 'num_trees n']
-    """The leaf indices for the largest version of the tree compatible with
-    the move."""
+    tree_index: UInt[Array, ' num_trees']
+    """The index of the tree, used to slice `SeqStageInAllTrees.leaf_indices`."""
 
     prelkv: PreLkV
     """The pre-computed terms of the likelihood ratio which are specific to the tree."""
@@ -1220,6 +1255,8 @@ def accept_move_and_sample_leaves(
         The logarithm of the likelihood ratio for the move. `None` if not to be
         saved.
     """
+    leaf_indices = at.leaf_indices[pt.tree_index, :]
+
     # sum residuals in each leaf, in tree proposed by grow move
     if at.prec_scale is None:
         scaled_resid = resid
@@ -1230,7 +1267,7 @@ def accept_move_and_sample_leaves(
 
     resid_tree = sum_resid(
         scaled_resid,
-        pt.leaf_indices,
+        leaf_indices,
         tree_size,
         at.resid_reduction_config,
         at.data_sharded,
@@ -1285,7 +1322,9 @@ def accept_move_and_sample_leaves(
     leaf_tree = mean_post + pt.prelf.centered_leaves
 
     # copy leaves around such that the leaf indices point to the correct leaf;
-    # the parent slot is written back unchanged to share a single scatter
+    # the parent slot is written back unchanged to share a single scatter.
+    # this mirroring persists into the output state, where it keeps the
+    # not-yet-pruned `leaf_indices` valid to evaluate the trees
     to_prune = acc ^ pt.move.grow
     leaf_tree = leaf_tree.at[
         ..., jnp.where(to_prune, pt.move.lrt_nodes, tree_size)
@@ -1315,7 +1354,7 @@ def accept_move_and_sample_leaves(
     # scatter, so the n-sized update stays in the narrow `resid` storage
     leaf_delta = prev_leaf_tree - at.leaf_unit[..., None] * leaf_tree
     delta = (leaf_delta / at.resid_unit[..., None]).astype(resid.dtype)
-    resid += delta[..., pt.leaf_indices]
+    resid += delta[..., leaf_indices]
 
     return resid, leaf_tree, acc, to_prune, log_lk_ratio
 
@@ -1436,6 +1475,10 @@ def accept_moves_final_stage(state: State, moves: Moves) -> State:
     This function is separate from `accept_moves_sequential_stage` to signal it
     can work in parallel across trees.
 
+    The prunes are not applied to `bartz.mcmcstep.Forest.leaf_indices` here;
+    they are recorded in `to_prune`/`move_node` and applied at the beginning of
+    the next step.
+
     Parameters
     ----------
     state
@@ -1449,13 +1492,15 @@ def accept_moves_final_stage(state: State, moves: Moves) -> State:
     The fully updated BART mcmc state.
     """
     assert moves.acc is not None
+    assert moves.to_prune is not None
     return replace(
         state,
         forest=replace(
             state.forest,
             grow_acc_count=jnp.sum(moves.acc & moves.grow),
             prune_acc_count=jnp.sum(moves.acc & ~moves.grow),
-            leaf_indices=apply_moves_to_leaf_indices(state.forest.leaf_indices, moves),
+            to_prune=moves.to_prune,
+            move_node=moves.lrt_nodes[..., 2],
             split_tree=apply_moves_to_split_trees(state.forest.split_tree, moves),
             affluence_tree=apply_moves_to_affluence_trees(
                 state.forest.affluence_tree, moves
@@ -1466,39 +1511,42 @@ def accept_moves_final_stage(state: State, moves: Moves) -> State:
 
 @named_call
 def apply_moves_to_leaf_indices(
-    leaf_indices: UInt[Array, 'num_trees n'], moves: Moves
+    leaf_indices: UInt[Array, 'num_trees n'],
+    to_prune: Bool[Array, ' num_trees'],
+    move_node: Int32[Array, ' num_trees'],
 ) -> UInt[Array, 'num_trees n']:
     """
-    Update the leaf indices to match the accepted move.
+    Apply the prunes pending from the previous step to the leaf indices.
 
     Parameters
     ----------
     leaf_indices
-        The index of the leaf each datapoint falls into, if the grow move was
-        accepted.
-    moves
-        The proposed moves (see `propose_moves`), as updated by
-        `accept_moves_sequential_stage`.
+        The index of the leaf each datapoint falls into, in the largest version
+        of each tree compatible with the last moves (see
+        `Forest.leaf_indices`).
+    to_prune
+        Whether the last move on each tree ended in a prune yet to be applied.
+    move_node
+        The node the last move on each tree operated on.
 
     Returns
     -------
     The updated leaf indices.
     """
-    return _apply_moves_to_leaf_indices(leaf_indices, moves)
+    return _apply_moves_to_leaf_indices(leaf_indices, to_prune, move_node)
 
 
 @vmap_nodoc
 def _apply_moves_to_leaf_indices(
-    leaf_indices: UInt[Array, ' n'], moves: Moves
+    leaf_indices: UInt[Array, ' n'],
+    to_prune: Bool[Array, ''],
+    move_node: Int32[Array, ''],
 ) -> UInt[Array, ' n']:
     """Implement `apply_moves_to_leaf_indices`."""
     mask = ~jnp.array(1, leaf_indices.dtype)  # ...1111111110
-    is_child = (leaf_indices & mask) == moves.lrt_nodes[0]
-    assert moves.to_prune is not None
+    is_child = (leaf_indices & mask) == (move_node << 1)
     return jnp.where(
-        is_child & moves.to_prune,
-        moves.lrt_nodes[2].astype(leaf_indices.dtype),
-        leaf_indices,
+        is_child & to_prune, move_node.astype(leaf_indices.dtype), leaf_indices
     )
 
 

@@ -286,8 +286,11 @@ PRECOMMIT_PINNED = https://github.com/henryiii/validate-pyproject-schema-store
 update-deps:
 	uv lock --upgrade
 	# Update R packages to their latest versions and rewrite renv.lock; snapshot
-	# captures the refreshed library (explicit type, from DESCRIPTION).
-	Rscript -e "renv::update(prompt = FALSE); renv::snapshot(prompt = FALSE)"
+	# captures the refreshed library (explicit type, from DESCRIPTION). renv's
+	# installer reports build failures without raising an R error, so re-check:
+	# update(check = TRUE) returns TRUE only when nothing is left to update,
+	# and status() that the library and lockfile agree.
+	Rscript -e 'renv::update(prompt = FALSE); renv::snapshot(prompt = FALSE); stopifnot(isTRUE(renv::update(check = TRUE)), renv::status()$$synchronized)'
 	# --freeze keeps revs pinned to commit SHAs (tags are mutable); autoupdate
 	# has no exclude flag, so repos in PRECOMMIT_PINNED are kept back by
 	# passing every other remote repo with --repo

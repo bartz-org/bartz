@@ -24,13 +24,8 @@
 
 """Trace dataclasses returned by `run_mcmc`."""
 
-import sys
 from abc import abstractmethod
-
-if sys.version_info >= (3, 11):
-    from typing import Self
-else:  # WORKAROUND(python<3.11): typing.Self was added in 3.11
-    from typing_extensions import Self
+from typing import TypeVar
 
 from jax import numpy as jnp
 from jax.nn import softmax
@@ -40,6 +35,12 @@ from jaxtyping import Array, Float, Float32, Int32, UInt
 from bartz._jaxext import Module, field
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
+
+# `Trace.from_state` returns a cls-bound TypeVar instead of the equivalent
+# `typing.Self` because the jaxtyping import hook used in the tests decorates
+# methods individually, and beartype rejects `Self` outside of a class-level
+# decoration.
+TraceT = TypeVar('TraceT', bound='Trace')
 
 
 class Trace(Module):
@@ -53,7 +54,7 @@ class Trace(Module):
 
     @classmethod
     @abstractmethod
-    def from_state(cls, state: State) -> Self:
+    def from_state(cls: type[TraceT], state: State) -> TraceT:
         """Build a single-item trace from an MCMC state."""
 
 
@@ -118,7 +119,7 @@ class BurninTrace(Trace):
     move on each tree, or `None`."""
 
     @classmethod
-    def from_state(cls, state: State) -> Self:
+    def from_state(cls, state: State) -> 'BurninTrace':
         """Create a single-item burn-in trace from a MCMC state."""
         return cls(
             has_chains=state.has_chains,
@@ -167,7 +168,7 @@ class MainTrace(BurninTrace):
     normalized over variables, or `None` when variable selection is off."""
 
     @classmethod
-    def from_state(cls, state: State) -> Self:
+    def from_state(cls, state: State) -> 'MainTrace':
         """Create a single-item main trace from a MCMC state."""
         # compute varprob
         log_s = state.forest.log_s
@@ -208,7 +209,7 @@ class MainTraceWithTrainPred(MainTrace):
     of trees."""
 
     @classmethod
-    def from_state(cls, state: State) -> Self:
+    def from_state(cls, state: State) -> 'MainTraceWithTrainPred':
         """Create a single-item main trace with train predictions from a MCMC state."""
         resid = state.resid * state.resid_unit[..., None]
         if state.z is None:

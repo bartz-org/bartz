@@ -11,11 +11,11 @@
   "Packages": {
     "BART3": {
       "Package": "BART3",
-      "Version": "5.6",
+      "Version": "5.7",
       "Source": "GitHub",
       "Type": "Package",
       "Title": "Bayesian Additive Regression Trees",
-      "Date": "2025-03-14",
+      "Date": "2026-06-11",
       "Authors@R": "c(person('Robert', 'McCulloch', role='aut'), person('Rodney', 'Sparapani', role=c('aut', 'cre'),  email='rsparapa@mcw.edu'), person('Charles', 'Spanbauer', role='aut'), person('Robert', 'Gramacy', role='ctb'), person('Matthew', 'Pratola', role='ctb'), person('Martyn', 'Plummer', role='ctb'),  person('Nicky', 'Best', role='ctb'), person('Kate', 'Cowles', role='ctb'),  person('Karen', 'Vines', role='ctb'))",
       "Author": "Robert McCulloch [aut], Rodney Sparapani [aut, cre],  Charles Spanbauer [aut], Robert Gramacy [ctb], Matthew Pratola [ctb], Martyn Plummer [ctb], Nicky Best [ctb], Kate Cowles [ctb], Karen Vines [ctb]",
       "Maintainer": "Rodney Sparapani <rsparapa@mcw.edu>",
@@ -42,12 +42,12 @@
       "VignetteBuilder": "knitr",
       "NeedsCompilation": "yes",
       "RemoteType": "github",
-      "RemoteHost": "api.github.com",
       "RemoteUsername": "rsparapa",
       "RemoteRepo": "bnptools",
       "RemoteSubdir": "BART3",
       "RemoteRef": "master",
-      "RemoteSha": "101a4159c89a225e8b918d5db0c6a69c4b01acd4"
+      "RemoteSha": "c8c86789a3e4ba0351fcaadbde4bc602a2eca42b",
+      "RemoteHost": "api.github.com"
     },
     "Matrix": {
       "Package": "Matrix",
@@ -96,10 +96,10 @@
     },
     "Rcpp": {
       "Package": "Rcpp",
-      "Version": "1.1.1-1.1",
+      "Version": "1.1.2",
       "Source": "Repository",
       "Title": "Seamless R and C++ Integration",
-      "Date": "2026-04-19",
+      "Date": "2026-07-01",
       "Authors@R": "c(person(\"Dirk\", \"Eddelbuettel\", role = c(\"aut\", \"cre\"), email = \"edd@debian.org\", comment = c(ORCID = \"0000-0001-6419-907X\")), person(\"Romain\", \"Francois\", role = \"aut\", comment = c(ORCID = \"0000-0002-2444-4226\")), person(\"JJ\", \"Allaire\", role = \"aut\", comment = c(ORCID = \"0000-0003-0174-9868\")), person(\"Kevin\", \"Ushey\", role = \"aut\", comment = c(ORCID = \"0000-0003-2880-7407\")), person(\"Qiang\", \"Kou\", role = \"aut\", comment = c(ORCID = \"0000-0001-6786-5453\")), person(\"Nathan\", \"Russell\", role = \"aut\"), person(\"Iñaki\", \"Ucar\", role = \"aut\", comment = c(ORCID = \"0000-0001-6403-5550\")), person(\"Doug\", \"Bates\", role = \"aut\", comment = c(ORCID = \"0000-0001-8316-9503\")), person(\"John\", \"Chambers\", role = \"aut\"))",
       "Description": "The 'Rcpp' package provides R functions as well as C++ classes which offer a seamless integration of R and C++. Many R data types and objects can be mapped back and forth to C++ equivalents which facilitates both writing of new code as well as easier integration of third-party libraries. Documentation about 'Rcpp' is provided by several vignettes included in this package, via the 'Rcpp Gallery' site at <https://gallery.rcpp.org>, the paper by Eddelbuettel and Francois (2011, <doi:10.18637/jss.v040.i08>), the book by Eddelbuettel (2013, <doi:10.1007/978-1-4614-6868-4>) and the paper by Eddelbuettel and Balamuta (2018, <doi:10.1080/00031305.2017.1375990>); see 'citation(\"Rcpp\")' for details.",
       "Depends": [
@@ -118,7 +118,6 @@
       "URL": "https://www.rcpp.org, https://dirk.eddelbuettel.com/code/rcpp.html, https://github.com/RcppCore/Rcpp",
       "License": "GPL (>= 2)",
       "BugReports": "https://github.com/RcppCore/Rcpp/issues",
-      "MailingList": "rcpp-devel@lists.r-forge.r-project.org",
       "RoxygenNote": "6.1.1",
       "Encoding": "UTF-8",
       "VignetteBuilder": "Rcpp",
@@ -169,9 +168,9 @@
     },
     "nlme": {
       "Package": "nlme",
-      "Version": "3.1-169",
+      "Version": "3.1-170",
       "Source": "Repository",
-      "Date": "2026-03-27",
+      "Date": "2026-07-15",
       "Priority": "recommended",
       "Title": "Linear and Nonlinear Mixed Effects Models",
       "Authors@R": "c(person(\"José\", \"Pinheiro\", role = \"aut\", comment = \"S version\"), person(\"Douglas\", \"Bates\", role = \"aut\", comment = \"up to 2007\"), person(\"Saikat\", \"DebRoy\", role = \"ctb\", comment = \"up to 2002\"), person(\"Deepayan\", \"Sarkar\", role = \"ctb\", comment = \"up to 2005\"), person(\"EISPACK authors\", role = \"ctb\", comment = \"src/rs.f\"), person(\"Siem\", \"Heisterkamp\", role = \"ctb\", comment = \"Author fixed sigma\"), person(\"Bert\", \"Van Willigen\",role = \"ctb\", comment = \"Programmer fixed sigma\"), person(\"Johannes\", \"Ranke\", role = \"ctb\", comment = \"varConstProp()\"), person(\"R Core Team\", email = \"R-core@R-project.org\", role = c(\"aut\", \"cre\"), comment = c(ROR = \"02zz1nj61\")))",
@@ -187,8 +186,7 @@
         "lattice"
       ],
       "Suggests": [
-        "MASS",
-        "SASmixed"
+        "MASS"
       ],
       "LazyData": "yes",
       "Encoding": "UTF-8",
@@ -283,13 +281,13 @@
     },
     "survival": {
       "Package": "survival",
-      "Version": "3.8-6",
+      "Version": "3.8-9",
       "Source": "Repository",
       "Title": "Survival Analysis",
       "Priority": "recommended",
-      "Date": "2026-01-09",
+      "Date": "2026-07-07",
       "Depends": [
-        "R (>= 3.5.0)"
+        "R (>= 4.1.0)"
       ],
       "Imports": [
         "graphics",
@@ -302,13 +300,13 @@
       "LazyData": "Yes",
       "LazyDataCompression": "xz",
       "ByteCompile": "Yes",
-      "Authors@R": "c(person(c(\"Terry\", \"M\"), \"Therneau\", email=\"therneau.terry@mayo.edu\", role=c(\"aut\", \"cre\")), person(\"Thomas\", \"Lumley\", role=c(\"ctb\", \"trl\"), comment=\"original S->R port and R maintainer until 2009\"), person(\"Atkinson\", \"Elizabeth\", role=\"ctb\"), person(\"Crowson\", \"Cynthia\", role=\"ctb\"))",
+      "Authors@R": "c(person(c(\"Terry\", \"M\"), \"Therneau\", email=\"terry.therneau@proton.me\", role=c(\"aut\", \"cre\")), person(\"Thomas\", \"Lumley\", role=c(\"ctb\", \"trl\"), comment=\"original S->R port and R maintainer until 2009\"), person(\"Atkinson\", \"Elizabeth\", role=\"ctb\"), person(\"Crowson\", \"Cynthia\", role=\"ctb\"))",
       "Description": "Contains the core survival analysis routines, including definition of Surv objects,  Kaplan-Meier and Aalen-Johansen (multi-state) curves, Cox models, and parametric accelerated failure time models.",
       "License": "LGPL (>= 2)",
       "URL": "https://github.com/therneau/survival",
       "NeedsCompilation": "yes",
       "Author": "Terry M Therneau [aut, cre], Thomas Lumley [ctb, trl] (original S->R port and R maintainer until 2009), Atkinson Elizabeth [ctb], Crowson Cynthia [ctb]",
-      "Maintainer": "Terry M Therneau <therneau.terry@mayo.edu>",
+      "Maintainer": "Terry M Therneau <terry.therneau@proton.me>",
       "Repository": "CRAN",
       "Encoding": "UTF-8"
     }

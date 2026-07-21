@@ -68,8 +68,12 @@ class EvaluableTrace(Protocol):
     split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
     offset: Float32[Array, ''] | Float32[Array, ' k']
     leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
-    has_chains: bool
-    mesh: Mesh | None
+
+    @property
+    def has_chains(self) -> bool: ...
+
+    @property
+    def mesh(self) -> Mesh | None: ...
 
 
 @jit(

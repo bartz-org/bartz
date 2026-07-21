@@ -198,7 +198,7 @@ def unique(
         out = out.at[i_out].set(x)
         return (i_out, x, out), None
 
-    carry = 0, x[0], jnp.full(size, fill_value, x.dtype)
+    carry = jnp.array(0), x[0], jnp.full(size, fill_value, x.dtype)
 
     def run(unroll: int) -> tuple[Shaped[Array, ' size'], Scalar]:
         (actual_length, _, out), _ = lax.scan(loop, carry, x[:size], unroll=unroll)

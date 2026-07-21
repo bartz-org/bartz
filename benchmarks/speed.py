@@ -824,7 +824,8 @@ class BaseRunMcmc(AutoParamNames):
                 raise RuntimeError(msg)
 
 
-class KillCallback(Callback):
+# the base is a cross-version union for ty (see the WORKAROUND at the import)
+class KillCallback(Callback):  # ty: ignore[unsupported-base]
     """Throw error `canary` after `kill_niters` in `run_mcmc`."""
 
     canary: str = field(static=True)

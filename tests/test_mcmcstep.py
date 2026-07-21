@@ -2944,7 +2944,7 @@ class TestSampleSAugmentation:
 
         s = softmax(nnone(forest.log_s))  # all selectable
         tree_keys = keys.pop(num_trees)
-        kw = dict(in_axes=(0, 0, 0, None, None))
+        kw: dict = dict(in_axes=(0, 0, 0, None, None))
         args = (tree_keys, forest.var_tree, forest.split_tree, forest.max_split, s)
         new = vmap(_blocked_mass_tree, **kw)(*args)
         ref = vmap(self._reference_blocked_mass_tree, **kw)(*args)

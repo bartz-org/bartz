@@ -435,6 +435,7 @@ def accept_moves_parallel_stage(
     # units, so their common `inv_sdev_unit ** 2` factor is folded into the
     # error precision once here instead
     error_cov_inv = scaled_error_cov_inv(state)
+    assert state.forest.leaf_prior_cov_inv is not None
     prelf = precompute_leaf_terms(
         key, prec_trees, error_cov_inv, state.forest.leaf_prior_cov_inv
     )
@@ -1295,7 +1296,8 @@ def accept_move_and_sample_leaves(
 
     log_lk_ratio = compute_likelihood_ratio(resid_lrt, pt.prelkv, at.error_cov_inv)
 
-    # calculate accept/reject ratio
+    # calculate accept/reject ratio; the ratio is filled in by `complete_ratio`
+    assert pt.move.log_trans_prior_ratio is not None
     log_ratio = pt.move.log_trans_prior_ratio + log_lk_ratio
     log_ratio = jnp.where(pt.move.grow, log_ratio, -log_ratio)
     if not at.save_ratios:

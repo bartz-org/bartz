@@ -1349,6 +1349,12 @@ def accept_move_and_sample_leaves(
             at.leaf_quantization - nmant
         )
         leaf_tree = jnp.round(leaf_tree / quantum[..., None]) * quantum[..., None]
+    # round to the storage dtype explicitly before converting: xla's
+    # excess-precision optimization (on by default) may otherwise elide the
+    # narrowing conversion in the `leaf_delta` computation below, updating the
+    # residuals with unrounded leaves while the trees store rounded ones
+    finfo = jnp.finfo(pt.leaf_tree.dtype)
+    leaf_tree = lax.reduce_precision(leaf_tree, finfo.nexp, finfo.nmant)
     leaf_tree = leaf_tree.astype(pt.leaf_tree.dtype)
 
     # replace old tree with new tree in function values; the per-leaf data-unit

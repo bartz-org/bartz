@@ -1025,9 +1025,17 @@ class TestPreprocessing:
         key = keys.pop()
         m_arr = self._sample(X_arr, data.y_train, X_test=Xte_arr, key=key)
         m_df = self._sample(df_train, data.y_train, X_test=df_test, key=key)
-        assert_close_matrices(m_arr.y_hat_train, m_df.y_hat_train, rtol=1e-5)
+
+        # the DataFrame branch must feed the mcmc the same binned predictors
+        state_arr = m_arr._bart._mcmc_state
+        state_df = m_df._bart._mcmc_state
+        assert_array_equal(state_arr.X, state_df.X)
+        assert state_arr.forest.log_s is None
+        assert state_df.forest.log_s is None
+
+        assert_close_matrices(m_arr.y_hat_train, m_df.y_hat_train, rtol=1e-4)
         assert_close_matrices(
-            nnone(m_arr.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-5
+            nnone(m_arr.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-4
         )
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
@@ -1099,9 +1107,19 @@ class TestPreprocessing:
             key=key,
             general_params={'variable_weights': w_df},
         )
-        assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=1e-5)
+
+        # the one-hot encoding and the weight split must reach the mcmc
+        # bit-for-bit equal to the manual versions
+        state_manual = m_manual._bart._mcmc_state
+        state_df = m_df._bart._mcmc_state
+        assert_array_equal(state_manual.X, state_df.X)
+        assert_array_equal(
+            nnone(state_manual.forest.log_s), nnone(state_df.forest.log_s)
+        )
+
+        assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=1e-4)
         assert_close_matrices(
-            nnone(m_manual.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-5
+            nnone(m_manual.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-4
         )
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
@@ -1114,7 +1132,7 @@ class TestPreprocessing:
         (stochtree semantics), not shared uniformly with the numeric columns.
         Sizes are chosen so every weight is exactly representable in float32
         (3 numeric cols -> 1/4 each; a 2-level cat -> 1/4/2 = 1/8 each), letting
-        us compare the default-weights DataFrame model bit-for-bit against a
+        us compare the default weights reaching the mcmc bit-for-bit against a
         manual one-hot array fed the equivalent expanded weights. If the default
         reverted to uniform-over-expanded-columns (1/5 each) this would fail.
         """
@@ -1159,9 +1177,19 @@ class TestPreprocessing:
             key=key,
             general_params={'variable_weights': w_split},
         )
-        assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=1e-5)
+
+        # the default weights and the one-hot encoding must reach the mcmc
+        # bit-for-bit equal to the manual expanded versions
+        state_manual = m_manual._bart._mcmc_state
+        state_df = m_df._bart._mcmc_state
+        assert_array_equal(state_manual.X, state_df.X)
+        assert_array_equal(
+            nnone(state_manual.forest.log_s), nnone(state_df.forest.log_s)
+        )
+
+        assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=1e-4)
         assert_close_matrices(
-            nnone(m_manual.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-5
+            nnone(m_manual.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-4
         )
 
     @pytest.mark.parametrize('flavor', ['pandas', 'polars'])

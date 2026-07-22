@@ -61,6 +61,7 @@ def get_default_branch_name(repo: Repo) -> str:
     # was never set locally (e.g. origin added after the initial clone).
     try:
         output = repo.git.ls_remote('--symref', 'origin', 'HEAD')
+        assert isinstance(output, str)  # type narrowing
     except GitCommandError:
         output = ''
     for line in output.splitlines():

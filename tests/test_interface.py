@@ -906,12 +906,12 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
         .reshape(num_chains * bkw.n_save, *y_shape)
     )
 
+    if bart1.predict('train', kind='latent_samples').platform() == 'cpu':
+        rtol = 0
+    else:  # pragma: no cover, gpu-only
+        rtol = condf(bart1._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
+
     with subtests.test('shift burn-in'):
-        rtol = (
-            0
-            if bart1.predict('train', kind='latent_samples').platform() == 'cpu'
-            else 2e-6
-        )
         assert_close_matrices(
             bart1.predict('train', kind='latent_samples'),
             bart2_yhat_train,
@@ -932,11 +932,6 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
     )[:, : bart1_yhat_train.shape[1], :, ...]
 
     with subtests.test('change thinning'):
-        rtol = (
-            0
-            if bart1.predict('train', kind='latent_samples').platform() == 'cpu'
-            else 2e-6
-        )
         assert_close_matrices(
             bart1_yhat_train, bart3_yhat_train, rtol=rtol, reduce_rank=True
         )
@@ -1038,7 +1033,8 @@ def test_error_scale_magnitude_invariance(bkw: BartKW) -> None:
 
     With the 'auto' `sigma_scale` and `sigma_init` settings, rescaling all the
     error scales by a power of two ``c`` rescales the error precision prior and
-    initial value by ``c ** -2`` exactly, so the two MCMCs coincide exactly.
+    initial value by ``c ** -2`` exactly, so the two MCMCs coincide exactly (up
+    to gpu run-to-run nondeterminism from atomic scatter-add ordering).
     This exercises the `State.inv_sdev_unit` normalization end-to-end through
     the interface: with float16 `prec_scale` storage, an unnormalized ``1 /
     error_scale ** 2`` would overflow (small ``c``) or underflow (large ``c``)
@@ -1064,6 +1060,9 @@ def test_error_scale_magnitude_invariance(bkw: BartKW) -> None:
 
     state_ref = run(1.0)
 
+    leaf_tree = state_ref.forest.leaf_tree
+    rtol = 0.0 if leaf_tree.platform() == 'cpu' else condf(leaf_tree, 1e-5, 1e-3)
+
     for c in (2.0**-9, 2.0**9):
         state_scaled = run(c)
 
@@ -1081,11 +1080,20 @@ def test_error_scale_magnitude_invariance(bkw: BartKW) -> None:
 
         assert_array_equal(state_ref.forest.split_tree, state_scaled.forest.split_tree)
         assert_array_equal(state_ref.forest.var_tree, state_scaled.forest.var_tree)
-        assert_array_equal(state_ref.forest.leaf_tree, state_scaled.forest.leaf_tree)
-        assert_array_equal(state_ref.resid, state_scaled.resid)
-        assert_array_equal(
+        assert_close_matrices(
+            state_scaled.forest.leaf_tree,
+            state_ref.forest.leaf_tree,
+            rtol=rtol,
+            reduce_rank=True,
+        )
+        assert_close_matrices(
+            state_scaled.resid, state_ref.resid, rtol=rtol, reduce_rank=True
+        )
+        assert_close_matrices(
             nnone(state_scaled.error_cov_inv).value,
             c**2 * nnone(state_ref.error_cov_inv).value,
+            rtol=rtol,
+            reduce_rank=True,
         )
 
 
@@ -2734,10 +2742,14 @@ def test_jit(bkw: BartKW) -> None:
 
     task_compiled = jit(task)
 
-    _state1, pred1 = task(X, y, w, key)
+    state1, pred1 = task(X, y, w, key)
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
-    assert_close_matrices(pred1, pred2, rtol=1e-5, reduce_rank=True)
+    if pred1.platform() == 'cpu':
+        rtol = 1e-5
+    else:  # pragma: no cover, gpu-only
+        rtol = condf(state1.forest.leaf_tree, 1e-5, 1e-3)
+    assert_close_matrices(pred1, pred2, rtol=rtol, reduce_rank=True)
 
 
 def test_vmap(bkw: BartKW, keys: split) -> None:
@@ -2981,7 +2993,10 @@ def test_polars(bkw: BartKW) -> None:
     x_test_pl = pl.DataFrame(numpy.array(bkw.x_test).T)
     pred2 = bart2.predict(x_test_pl, kind='latent_samples')
 
-    rtol = 0 if pred.platform() == 'cpu' else 2e-6
+    if pred.platform() == 'cpu':
+        rtol = 0
+    else:  # pragma: no cover, gpu-only
+        rtol = condf(bart._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
 
     assert_close_matrices(
         bart.predict('train', kind='latent_samples'),
@@ -3676,7 +3691,10 @@ def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
         assert x1.dtype == x2.dtype
         assert x1.sharding.is_equivalent_to(x2.sharding, x1.ndim)
         if jnp.issubdtype(x1.dtype, jnp.floating):
-            rtol = 1e-4 if x1.platform() != 'cpu' else 1e-5
+            if x1.platform() == 'cpu':
+                rtol = 1e-5
+            else:  # pragma: no cover, gpu-only
+                rtol = condf(x1, 1e-4, 1e-3)
             assert_close_matrices(
                 x1, x2, rtol=rtol, err_msg=keystr(path), reduce_rank=True
             )

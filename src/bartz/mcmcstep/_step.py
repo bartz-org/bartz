@@ -39,6 +39,7 @@ from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Shaped, UInt, UIn
 from bartz._jaxext import (
     Module,
     field,
+    float32_matmuls,
     jit,
     minimal_unsigned_dtype,
     sliced_map,
@@ -67,6 +68,7 @@ from bartz.mcmcstep._state import (
 @split_key_for_chains
 @shard_map_state
 @vmap_chains
+@float32_matmuls
 def step(key: Key[Array, ''], state: State) -> State:
     """
     Do one MCMC step.
@@ -435,6 +437,7 @@ def accept_moves_parallel_stage(
     # units, so their common `inv_sdev_unit ** 2` factor is folded into the
     # error precision once here instead
     error_cov_inv = scaled_error_cov_inv(state)
+    assert state.forest.leaf_prior_cov_inv is not None
     prelf = precompute_leaf_terms(
         key, prec_trees, error_cov_inv, state.forest.leaf_prior_cov_inv
     )
@@ -1295,7 +1298,8 @@ def accept_move_and_sample_leaves(
 
     log_lk_ratio = compute_likelihood_ratio(resid_lrt, pt.prelkv, at.error_cov_inv)
 
-    # calculate accept/reject ratio
+    # calculate accept/reject ratio; the ratio is filled in by `complete_ratio`
+    assert pt.move.log_trans_prior_ratio is not None
     log_ratio = pt.move.log_trans_prior_ratio + log_lk_ratio
     log_ratio = jnp.where(pt.move.grow, log_ratio, -log_ratio)
     if not at.save_ratios:
@@ -1347,6 +1351,12 @@ def accept_move_and_sample_leaves(
             at.leaf_quantization - nmant
         )
         leaf_tree = jnp.round(leaf_tree / quantum[..., None]) * quantum[..., None]
+    # round to the storage dtype explicitly before converting: xla's
+    # excess-precision optimization (on by default) may otherwise elide the
+    # narrowing conversion in the `leaf_delta` computation below, updating the
+    # residuals with unrounded leaves while the trees store rounded ones
+    finfo = jnp.finfo(pt.leaf_tree.dtype)
+    leaf_tree = lax.reduce_precision(leaf_tree, finfo.nexp, finfo.nmant)
     leaf_tree = leaf_tree.astype(pt.leaf_tree.dtype)
 
     # replace old tree with new tree in function values; the per-leaf data-unit

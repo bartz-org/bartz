@@ -161,7 +161,7 @@ def _analyze_without_overloads(self) -> None:  # noqa: ANN001
     self.overloads = {}
 
 
-ModuleAnalyzer.analyze = _analyze_without_overloads  # ty: ignore[invalid-assignment]
+ModuleAnalyzer.analyze = _analyze_without_overloads
 
 
 def setup(app) -> None:  # noqa: ANN001

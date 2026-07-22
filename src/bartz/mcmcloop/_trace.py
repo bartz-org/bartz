@@ -25,6 +25,7 @@
 """Trace dataclasses returned by `run_mcmc`."""
 
 from abc import abstractmethod
+from typing import TypeVar
 
 from jax import numpy as jnp
 from jax.nn import softmax
@@ -34,6 +35,12 @@ from jaxtyping import Array, Float, Float32, Int32, UInt
 from bartz._jaxext import Module, field
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
+
+# `Trace.from_state` returns a cls-bound TypeVar instead of the equivalent
+# `typing.Self` because the jaxtyping import hook used in the tests decorates
+# methods individually, and beartype rejects `Self` outside of a class-level
+# decoration.
+TraceT = TypeVar('TraceT', bound='Trace')
 
 
 class Trace(Module):
@@ -47,7 +54,7 @@ class Trace(Module):
 
     @classmethod
     @abstractmethod
-    def from_state(cls, state: State) -> 'Trace':
+    def from_state(cls: type[TraceT], state: State) -> TraceT:
         """Build a single-item trace from an MCMC state."""
 
 

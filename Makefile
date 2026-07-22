@@ -37,7 +37,7 @@ UV_RUN = uv run --dev $(EXTRAS)
 # define command to run python with oldest supported dependencies
 # OLD_DATE / OLD_DELAY_DAYS / BUMP_PYTHON_VERSION_DATE / NUM_SUPPORTED_PYTHON_RELEASES
 # drive the `update-oldest-deps` policy.
-OLD_DATE = 2025-06-28
+OLD_DATE = 2025-07-21
 OLD_DELAY_DAYS = 365
 BUMP_PYTHON_VERSION_DATE = 10-31
 NUM_SUPPORTED_PYTHON_RELEASES = 5
@@ -278,14 +278,23 @@ diffcov:
 
 ################# DEPENDENCIES #################
 
+# pre-commit repos excluded from `update-deps` autoupdate; each pinned rev in
+# .pre-commit-config.yaml carries a comment with the reason and unpin condition
+PRECOMMIT_PINNED = https://github.com/henryiii/validate-pyproject-schema-store
+
 .PHONY: update-deps
 update-deps:
 	uv lock --upgrade
 	# Update R packages to their latest versions and rewrite renv.lock; snapshot
-	# captures the refreshed library (explicit type, from DESCRIPTION).
-	Rscript -e "renv::update(prompt = FALSE); renv::snapshot(prompt = FALSE)"
-	# --freeze keeps revs pinned to commit SHAs (tags are mutable)
-	$(UV_RUN) pre-commit autoupdate --freeze
+	# captures the refreshed library (explicit type, from DESCRIPTION). renv's
+	# installer reports build failures without raising an R error, so re-check:
+	# update(check = TRUE) returns TRUE only when nothing is left to update,
+	# and status() that the library and lockfile agree.
+	Rscript -e 'renv::update(prompt = FALSE); renv::snapshot(prompt = FALSE); stopifnot(isTRUE(renv::update(check = TRUE)), renv::status()$$synchronized)'
+	# --freeze keeps revs pinned to commit SHAs (tags are mutable); autoupdate
+	# has no exclude flag, so repos in PRECOMMIT_PINNED are kept back by
+	# passing every other remote repo with --repo
+	$(UV_RUN) pre-commit autoupdate --freeze $$($(UV_RUN) python -c "import sys, yaml; print(' '.join('--repo ' + r['repo'] for r in yaml.safe_load(open('.pre-commit-config.yaml'))['repos'] if r['repo'] not in ('local', 'meta', *sys.argv[1:])))" $(PRECOMMIT_PINNED))
 
 .PHONY: update-oldest-deps
 update-oldest-deps:

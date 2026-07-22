@@ -803,7 +803,9 @@ class TestPoisson:
         """
         # more samples at small lambda_ to beat the 1/(3 lambda_) variance
         nsamples = self.nsamples * (16 if lambda_ < 1 else 1)
-        sample, tangent = _poisson_sample_and_tangent(keys.pop(), lambda_, nsamples)
+        sample, tangent = _poisson_sample_and_tangent(
+            keys.pop(), jnp.array(lambda_), nsamples
+        )
         assert jnp.all(jnp.isfinite(tangent))
 
         # average in float64: at lambda_ = 2**24 the float32 reduction error

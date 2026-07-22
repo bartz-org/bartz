@@ -53,7 +53,14 @@ from jaxtyping import (
 )
 from numpy import ndarray
 
-from bartz._jaxext import Module, field, jaxtyping_disabled, jit, minimal_unsigned_dtype
+from bartz._jaxext import (
+    Module,
+    field,
+    float32_matmuls,
+    jaxtyping_disabled,
+    jit,
+    minimal_unsigned_dtype,
+)
 from bartz.grove import tree_depths
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes
 from bartz.mcmcstep._lazy import (
@@ -763,6 +770,7 @@ def make_p_nonterminal(
     return alpha / (1 + depth).astype(float) ** beta
 
 
+@float32_matmuls
 def init(
     *,
     X: UInt[ArrayLike, 'p n'],

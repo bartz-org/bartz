@@ -39,6 +39,7 @@ from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Shaped, UInt, UIn
 from bartz._jaxext import (
     Module,
     field,
+    float32_matmuls,
     jit,
     minimal_unsigned_dtype,
     sliced_map,
@@ -67,6 +68,7 @@ from bartz.mcmcstep._state import (
 @split_key_for_chains
 @shard_map_state
 @vmap_chains
+@float32_matmuls
 def step(key: Key[Array, ''], state: State) -> State:
     """
     Do one MCMC step.

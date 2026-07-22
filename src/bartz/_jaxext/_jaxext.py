@@ -28,8 +28,8 @@ import math
 import sys
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
-from functools import partial
-from typing import Any
+from functools import partial, wraps
+from typing import Any, ParamSpec, TypeVar
 
 import jax
 from jax import Device, ensure_compile_time_eval, lax, random, shard_map, tree, vmap
@@ -58,6 +58,9 @@ if sys.version_info >= (3, 13):
 else:  # WORKAROUND(python<3.13): typing.TypeIs was added in 3.13
     from typing_extensions import TypeIs
 
+_P = ParamSpec('_P')
+_R = TypeVar('_R')
+
 
 @contextmanager
 def jaxtyping_disabled() -> Generator[None, None, None]:
@@ -75,6 +78,17 @@ def jaxtyping_disabled() -> Generator[None, None, None]:
         yield
     finally:
         jaxtyping_config.update('jaxtyping_disable', old)
+
+
+def float32_matmuls(fun: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Run/trace `fun` under full-float32 matmul precision."""
+
+    @wraps(fun)
+    def wrapper(*args: _P.args, **kw: _P.kwargs) -> _R:
+        with jax.default_matmul_precision('float32'):
+            return fun(*args, **kw)
+
+    return wrapper
 
 
 def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:

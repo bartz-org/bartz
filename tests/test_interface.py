@@ -908,7 +908,7 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
 
     if bart1.predict('train', kind='latent_samples').platform() == 'cpu':
         rtol = 0
-    else:
+    else:  # pragma: no cover, gpu-only
         rtol = condf(bart1._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
 
     with subtests.test('shift burn-in'):
@@ -2747,7 +2747,7 @@ def test_jit(bkw: BartKW) -> None:
 
     if pred1.platform() == 'cpu':
         rtol = 1e-5
-    else:
+    else:  # pragma: no cover, gpu-only
         rtol = condf(state1.forest.leaf_tree, 1e-5, 1e-3)
     assert_close_matrices(pred1, pred2, rtol=rtol, reduce_rank=True)
 
@@ -2995,7 +2995,7 @@ def test_polars(bkw: BartKW) -> None:
 
     if pred.platform() == 'cpu':
         rtol = 0
-    else:
+    else:  # pragma: no cover, gpu-only
         rtol = condf(bart._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
 
     assert_close_matrices(
@@ -3693,7 +3693,7 @@ def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
         if jnp.issubdtype(x1.dtype, jnp.floating):
             if x1.platform() == 'cpu':
                 rtol = 1e-5
-            else:
+            else:  # pragma: no cover, gpu-only
                 rtol = condf(x1, 1e-4, 1e-3)
             assert_close_matrices(
                 x1, x2, rtol=rtol, err_msg=keystr(path), reduce_rank=True

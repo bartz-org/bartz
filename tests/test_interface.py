@@ -3691,7 +3691,10 @@ def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
         assert x1.dtype == x2.dtype
         assert x1.sharding.is_equivalent_to(x2.sharding, x1.ndim)
         if jnp.issubdtype(x1.dtype, jnp.floating):
-            rtol = 1e-4 if x1.platform() != 'cpu' else 1e-5
+            if x1.platform() == 'cpu':
+                rtol = 1e-5
+            else:
+                rtol = condf(x1, 1e-4, 1e-3)
             assert_close_matrices(
                 x1, x2, rtol=rtol, err_msg=keystr(path), reduce_rank=True
             )

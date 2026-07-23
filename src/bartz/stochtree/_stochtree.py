@@ -168,7 +168,11 @@ class MeanForestParams:
             raise ValueError(msg)
 
 
-T = TypeVar('T', bound='DataclassInstance')
+if TYPE_CHECKING:
+    # static only, beartype does not support type[DataclassInstance]
+    T = TypeVar('T', bound='DataclassInstance')
+else:
+    T = TypeVar('T')
 
 
 def build_dataclass(cls: type[T], params: Mapping[str, Any] | None, name: str) -> T:

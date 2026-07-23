@@ -172,7 +172,12 @@ def poisson_cdf_inversion_jvp(
         pmf_k = jnp.where(k == j, pmf, pmf_k)
         cdf += pmf
 
-    # now cdf and pmf are at K; clip frac against tail cancellation errors
+    # now cdf and pmf are at K; clip frac against tail cancellation errors.
+    # guard pmf_k == 0: above THETA_SPLIT the sampled k can exceed the
+    # truncation so no gather fires; the caller discards this branch, but inf
+    # coefficients would still poison reverse mode through the select transpose
+    # (inf * 0 = nan)
+    pmf_k = jnp.where(pmf_k == 0.0, 1.0, pmf_k)
     u = ndtr(z) * cdf
     frac = jnp.clip((u - cdf_km1) / pmf_k, 0.0, 1.0)
 

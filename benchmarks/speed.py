@@ -504,9 +504,10 @@ class StepMemory(StepBase):
         # Abstract eval hides the device and the data from `init`; older versions
         # that probe either need a nudge to stay traceable.
         sig = signature(init)
-        if 'target_platform' in sig.parameters:
+        if 'target_platform' in sig.parameters and not kwargs.get('mesh'):
             # WORKAROUND(bartz<0.11.0): 0.8.0-0.10.0 infer the device from `y`,
-            # which has no platform under abstract eval; name it explicitly.
+            # which has no platform under abstract eval; name it explicitly. A
+            # mesh already pins the platform and is mutually exclusive with it.
             kwargs.setdefault('target_platform', get_default_platform())
         param = sig.parameters.get('filter_splitless_vars')
         if param is not None and param.default:

@@ -30,7 +30,7 @@
         "warmup_time": 0.0
     },
     "speed.BaseRunMcmc.time_run_mcmc": {
-        "code": "class BaseRunMcmc:\n    def time_run_mcmc(self, *_: Any) -> None:\n        \"\"\"Time running or compiling the function.\"\"\"\n        # capture stderr to suppress equinox's noisy traceback when the\n        # kill-canary error is raised as expected\n        captured = StringIO()\n        try:\n            with redirect_stderr(captured):\n                self.task()\n        except JaxRuntimeError as e:\n            is_expected = self.kill_canary in str(e)\n            if not is_expected:\n                sys.stderr.write(captured.getvalue())\n                raise\n        else:\n            sys.stderr.write(captured.getvalue())\n            if self.kill_niters is not None:\n                msg = 'expected JaxRuntimeError with canary not raised'\n                raise RuntimeError(msg)\n\n    def setup(\n        self,\n        kill_niters: int | None = None,\n        mode: Mode = 'run',\n        cache: Cache = 'warm',\n        kwargs: Mapping[str, Any] = MappingProxyType({}),\n        n: int = N,\n    ) -> None:\n        \"\"\"Prepare the arguments, compile the function, and run to warm-up.\"\"\"\n        kw: dict = dict(\n            key=random.key(2025_04_25_15_57),\n            bart=simple_init(P, n, NTREE),\n            n_save=NITERS,\n            n_burn=0,\n            n_skip=1,\n            callback=partial(\n                kill_callback, canary=self.kill_canary, kill_niters=kill_niters\n            ),\n        )\n        kw.update(kwargs)\n    \n        # WORKAROUND(bartz<0.7.0): v0.6.0 used `inner_callback` instead of `callback`\n        params = signature(run_mcmc).parameters\n        if 'callback' not in params:\n            kw['inner_callback'] = kw.pop('callback')\n    \n        # WORKAROUND(bartz<0.11.0): `run_mcmc`'s `bart` argument was renamed `state`\n        state_arg = 'bart' if 'bart' in params else 'state'\n        if state_arg != 'bart':\n            kw[state_arg] = kw.pop('bart')\n    \n        # catch bug and skip if found\n        detect_zero_division_error_bug(kw)\n    \n        # prepare task to run in benchmark\n        match mode:\n            case 'compile':\n                static_argnames = ('n_save', 'n_skip', 'n_burn')\n                if 'callback' in params:\n                    static_argnames += ('callback',)\n                else:\n                    static_argnames += ('inner_callback',)\n                f = jit(run_mcmc, static_argnames=static_argnames)\n    \n                def task() -> None:\n                    f.clear_cache()\n                    f.lower(**kw).compile()\n            case 'run':\n    \n                def task() -> None:\n                    block_until_ready(run_mcmc(**kw))\n            case _:\n                raise KeyError(mode)\n        self.task = task\n        self.kill_niters = kill_niters\n    \n        # decide how much to cold-start\n        match cache:\n            case 'cold':\n                clear_caches()\n            case 'warm':\n                # prepare copies of the args because of buffer donation\n                key = jnp.copy(kw['key'])\n                bart = tree.map(jnp.copy, kw[state_arg])\n                self.time_run_mcmc()\n                # put copies in place of donated buffers\n                kw.update({'key': key, state_arg: bart})\n            case _:\n                raise KeyError(cache)",
+        "code": "class BaseRunMcmc:\n    def time_run_mcmc(self, *_: Any) -> None:\n        \"\"\"Time running or compiling the function.\"\"\"\n        # capture stderr to suppress equinox's noisy traceback when the\n        # kill-canary error is raised as expected\n        captured = StringIO()\n        try:\n            with redirect_stderr(captured):\n                self.task()\n        except JaxRuntimeError as e:\n            is_expected = self.kill_canary in str(e)\n            if not is_expected:\n                sys.stderr.write(captured.getvalue())\n                raise\n        else:\n            sys.stderr.write(captured.getvalue())\n            if self.kill_niters is not None:\n                msg = 'expected JaxRuntimeError with canary not raised'\n                raise RuntimeError(msg)\n\n    def setup(\n        self,\n        kill_niters: int | None = None,\n        mode: Mode = 'run',\n        cache: Cache = 'warm',\n        kwargs: Mapping[str, Any] = MappingProxyType({}),\n        n: int = N,\n    ) -> None:\n        \"\"\"Prepare the arguments, compile the function, and run to warm-up.\"\"\"\n        kw: dict = dict(\n            key=random.key(2025_04_25_15_57),\n            bart=simple_init(P, n, NTREE),\n            n_save=NITERS,\n            n_burn=0,\n            n_skip=1,\n            callback=KillCallback(self.kill_canary, kill_niters),\n        )\n        kw.update(kwargs)\n    \n        # WORKAROUND(bartz<0.7.0): v0.6.0 used `inner_callback` instead of `callback`\n        params = signature(run_mcmc).parameters\n        if 'callback' not in params:\n            kw['inner_callback'] = kw.pop('callback')\n    \n        # WORKAROUND(bartz<0.11.0): `run_mcmc`'s `bart` argument was renamed `state`\n        state_arg = 'bart' if 'bart' in params else 'state'\n        if state_arg != 'bart':\n            kw[state_arg] = kw.pop('bart')\n    \n        # catch bug and skip if found\n        detect_zero_division_error_bug(kw)\n    \n        # prepare task to run in benchmark\n        match mode:\n            case 'compile':\n                static_argnames = ('n_save', 'n_skip', 'n_burn')\n                if 'callback' in params:\n                    static_argnames += ('callback',)\n                else:\n                    static_argnames += ('inner_callback',)\n                f = jit(run_mcmc, static_argnames=static_argnames)\n    \n                def task() -> None:\n                    f.clear_cache()\n                    f.lower(**kw).compile()\n            case 'run':\n    \n                def task() -> None:\n                    block_until_ready(run_mcmc(**kw))\n            case _:\n                raise KeyError(mode)\n        self.task = task\n        self.kill_niters = kill_niters\n    \n        # decide how much to cold-start\n        match cache:\n            case 'cold':\n                clear_caches()\n            case 'warm':\n                # prepare copies of the args because of buffer donation\n                key = jnp.copy(kw['key'])\n                bart = tree.map(jnp.copy, kw[state_arg])\n                self.time_run_mcmc()\n                # put copies in place of donated buffers\n                kw.update({'key': key, state_arg: bart})\n            case _:\n                raise KeyError(cache)",
         "min_run_count": 2,
         "name": "speed.BaseRunMcmc.time_run_mcmc",
         "number": 1,
@@ -46,7 +46,7 @@
         "timeout": 120.0,
         "type": "time",
         "unit": "seconds",
-        "version": "094fc9ad2b1abffa2ee89ca4868fb7b7c028aeea16d1d7821ec81d5308266eba",
+        "version": "dabca34c3a42457ad5f6a5952c0f061f08e24e3d9c093abb4c2095116304bb46",
         "warmup_time": 0.0
     },
     "speed.GbartChains.time_gbart": {
@@ -244,7 +244,7 @@
         "warmup_time": -1
     },
     "speed.StepMemory.track_memory": {
-        "code": "class StepMemory:\n    def track_memory(self, *_: Any) -> int:\n        \"\"\"Report the selected standardized memory statistic of `step`.\"\"\"\n        return self.memory[self.stat]\n\n    def setup(self, kind: Kind, chains: int | None, stat: MemStat) -> None:  # ty:ignore[invalid-method-override]\n        \"\"\"Compile `step` at large scale and extract its memory analysis.\"\"\"\n        # n=16Mi, num_trees=p=1Ki, abstract eval so may exceed device memory\n        super().setup('compile', kind, chains, n=16 * 2**20, num_trees=1024, p=1024)\n        analysis = self.compiled_func.memory_analysis()\n        if analysis is None:\n            # the active backend does not expose a memory analysis\n            msg = 'memory analysis not available'\n            raise NotImplementedError(msg)\n        self.memory = standardize_memory_analysis(analysis)\n        self.stat = stat",
+        "code": "class StepMemory:\n    def track_memory(self, *_: Any) -> int:\n        \"\"\"Report the selected standardized memory statistic of `step`.\"\"\"\n        return self.memory[self.stat]\n\n    def setup(  # ty:ignore[invalid-method-override]\n        self, kind: Kind, chains: int | None, stat: MemStat, **kwargs: Any\n    ) -> None:\n        \"\"\"Compile `step` at large scale and extract its memory analysis.\"\"\"\n        # n=16Mi, num_trees=p=1Ki, abstract eval so may exceed device memory\n        super().setup(\n            'compile', kind, chains, n=16 * 2**20, num_trees=1024, p=1024, **kwargs\n        )\n        analysis = self.compiled_func.memory_analysis()\n        if analysis is None:\n            # the active backend does not expose a memory analysis\n            msg = 'memory analysis not available'\n            raise NotImplementedError(msg)\n        self.memory = standardize_memory_analysis(analysis)\n        self.stat = stat",
         "name": "speed.StepMemory.track_memory",
         "param_names": [
             "kind",
@@ -272,7 +272,36 @@
         "timeout": 120.0,
         "type": "track",
         "unit": "bytes",
-        "version": "ec9c4d3625c414a5052adfbf338b092a62d460e216e38a4b8547537d55ffbf65"
+        "version": "82f68a2c18e4e217dd071c5b092f3ec5513c5aa93c1ccbab3422dc10e4c9f7bb"
+    },
+    "speed.StepMemorySharded.track_memory": {
+        "code": "class StepMemory:\n    def track_memory(self, *_: Any) -> int:\n        \"\"\"Report the selected standardized memory statistic of `step`.\"\"\"\n        return self.memory[self.stat]\n\nclass StepMemorySharded:\n    def setup(  # ty:ignore[invalid-method-override]\n        self, data_shards: Shards, chain_shards: Shards, stat: MemStat\n    ) -> None:\n        \"\"\"Compile `step` on a sharded state and extract its memory analysis.\"\"\"\n        mesh = {}\n        if chain_shards is not None:\n            mesh['chains'] = chain_shards\n        if data_shards is not None:\n            mesh['data'] = data_shards\n    \n        num_devices = math.prod(mesh.values())\n        if get_device_count() < num_devices:\n            msg = (\n                f'{num_devices} devices needed to shard, {get_device_count()} available'\n            )\n            raise NotImplementedError(msg)\n    \n        chains = None if chain_shards is None else 2\n        super().setup('plain', chains, stat, mesh=mesh or None)\n        self.memory = {k: v * num_devices for k, v in self.memory.items()}",
+        "name": "speed.StepMemorySharded.track_memory",
+        "param_names": [
+            "data_shards",
+            "chain_shards",
+            "stat"
+        ],
+        "params": [
+            [
+                "None",
+                "1",
+                "2"
+            ],
+            [
+                "None",
+                "1",
+                "2"
+            ],
+            [
+                "'state'",
+                "'peak'"
+            ]
+        ],
+        "timeout": 120.0,
+        "type": "track",
+        "unit": "bytes",
+        "version": "8dbd6aa2156ab534a4a71edb200146e29ac29c750ead93172ae522976891e100"
     },
     "speed.StepSharded.time_step": {
         "code": "class StepGeneric:\n    def time_step(self, *_: Any) -> None:\n        \"\"\"Time compiling `step` or running it.\"\"\"\n        match self.mode:\n            case 'compile':\n                self.jitted_func.clear_cache()\n                self.jitted_func.lower(*self.args).compile()  # ty:ignore[invalid-argument-type]\n            case 'run':\n                self.run_step()\n            case _:\n                raise KeyError(self.mode)\n\nclass StepSharded:\n    def setup(self, sharded: bool) -> None:  # ty:ignore[invalid-method-override]\n        \"\"\"Set up with settings that make the effect of sharding salient.\"\"\"\n        sig = signature(init)\n        if 'mesh' not in sig.parameters:\n            msg = 'data sharding not supported'\n            raise NotImplementedError(msg)\n    \n        if get_device_count() < 2:\n            msg = 'Only one device, can not shard'\n            raise NotImplementedError(msg)\n    \n        super().setup(\n            'run',\n            'plain',\n            None,\n            p=1,\n            n=2000_000,\n            num_trees=1,\n            mesh=dict(data=2) if sharded else None,\n        )",

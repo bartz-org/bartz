@@ -95,10 +95,9 @@ help:
 	@echo "- $$ make release, will not release but runs all tests, iterate and debug"
 	@echo '- run `make tests-gpu` on a gpu'
 	@echo "- merge a PR with the changes and fixes"
-	@echo "- do a PR that re-runs benchmarks on cpu & gpu, fix performance regressions"
-	@echo '- open the README colab link, run `%pip install git+https://github.com/bartz-org/bartz@main` in a scratch cell, then run all'
-	@echo '- iterate until example notebook works on colab with main'
-	@echo '- save notebook locally and commit it'
+	@echo "- re-run benchmarks on cpu & gpu, fix performance regressions"
+	@echo '- open the README colab link, run `%pip install git+https://github.com/bartz-org/bartz@main` in a scratch cell, then run all, fix problems'
+	@echo '- save notebook locally and commit it, merge PR'
 	@echo "- on main: $$ make release"
 	@echo "- merge fix PR and try again until make release passes"
 	@echo "- publish the draft github release created by make release (updates zenodo automatically)"

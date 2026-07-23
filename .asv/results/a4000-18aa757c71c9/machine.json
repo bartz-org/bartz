@@ -1,9 +1,0 @@
-{
-    "arch": "x86_64",
-    "cpu": "AMD Ryzen 5 5600X 6-Core Processor",
-    "machine": "a4000-18aa757c71c9",
-    "num_cpu": "12",
-    "os": "Linux 6.8.0-47-generic",
-    "ram": "49248528",
-    "version": 1
-}

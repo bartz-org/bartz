@@ -280,7 +280,10 @@ def _empty_trace(length: int, state: State, trace_cls: type[TraceT]) -> TraceT:
     out_axes = trace_sample_axes(add_dummy_axis(example_output))
 
     return vmap(
-        trace_cls.from_state, in_axes=None, out_axes=out_axes, axis_size=length
+        trace_cls.from_state,  # ty: ignore[invalid-argument-type]
+        in_axes=None,
+        out_axes=out_axes,
+        axis_size=length,
     )(state)
 
 

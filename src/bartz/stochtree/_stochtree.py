@@ -30,7 +30,7 @@ from functools import partial
 
 # WORKAROUND(python<3.15): use frozendict instead of MappingProxyType
 from types import MappingProxyType
-from typing import Any, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from jax import numpy as jnp
 from jax.scipy.special import ndtr, ndtri
@@ -41,7 +41,8 @@ from bartz.mcmcstep._state import ArrayLike, FloatLike
 from bartz.prepcovars import RangeEvenBinner
 from bartz.stochtree._preprocess import _PreprocessorBase, make_preprocessor
 
-T = TypeVar('T')
+if TYPE_CHECKING:
+    from _typeshed import DataclassInstance
 
 _MAX_DEPTH_LIMIT = 16
 
@@ -165,6 +166,13 @@ class MeanForestParams:
                 ' grows exponentially with depth.'
             )
             raise ValueError(msg)
+
+
+if TYPE_CHECKING:
+    # static only, beartype does not support type[DataclassInstance]
+    T = TypeVar('T', bound='DataclassInstance')
+else:
+    T = TypeVar('T')
 
 
 def build_dataclass(cls: type[T], params: Mapping[str, Any] | None, name: str) -> T:

@@ -75,7 +75,7 @@ from bartz._jaxext import (
     unique,
 )
 from bartz._jaxext.random import loggamma, poisson
-from bartz._jaxext.random._poisson import poisson_from_normal
+from bartz._jaxext.random._poisson import NUM_TERMS, poisson_from_normal
 from bartz._jaxext.scipy.stats import invgamma
 from tests.util import (
     assert_allclose,
@@ -782,6 +782,19 @@ class TestPoisson:
         _, tangent = jvp(f, (lambda_,), (jnp.ones_like(lambda_),))
         gradient = grad(lambda lambda_: f(lambda_).sum())(lambda_)
         assert_close_matrices(gradient, tangent.sum(axis=0), rtol=1e-6)
+
+    def test_grad_above_split_finite(self, keys: split) -> None:
+        """Reverse mode is finite when samples exceed the pmf truncation."""
+        key = keys.pop()
+        lambda_ = jnp.array(20.0)
+
+        def total(lambda_: Float[Array, '']) -> Float[Array, '']:
+            return poisson(key, jnp.full((1000,), lambda_), dtype=float).sum()
+
+        # a count >= NUM_TERMS overflows the truncation, the regression trigger
+        sample = poisson(random.clone(key), jnp.full((1000,), lambda_))
+        assert sample.max() >= NUM_TERMS
+        assert jnp.isfinite(grad(total)(lambda_))
 
     @pytest.mark.parametrize('shape', [(3,), ()])
     def test_lambda_shape_mismatch(self, keys: split, shape: tuple[int, ...]) -> None:

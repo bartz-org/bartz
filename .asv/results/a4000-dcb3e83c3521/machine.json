@@ -1,0 +1,9 @@
+{
+    "arch": "x86_64",
+    "cpu": "AMD Ryzen 7 5800X 8-Core Processor",
+    "machine": "a4000-dcb3e83c3521",
+    "num_cpu": "16",
+    "os": "Linux 5.15.0-100-generic",
+    "ram": "50428387328",
+    "version": 1
+}

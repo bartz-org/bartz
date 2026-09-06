@@ -158,6 +158,14 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     resid_val = temp_mu_state.resid  # updated global residual R
     latest_error_cov_inv = temp_mu_state.error_cov_inv
 
+    # `resid` is stored scaled: ``resid_unit * resid = data residual``, whereas
+    # `tau_0`, `tau_X`, `b0`, `b1`, `sigma2` and `tau_0_prior_var` are on the
+    # data scale (matching `_bcf.predict`). Convert `resid` in and out of data
+    # units so the scalar Gibbs updates below are unit-consistent for any
+    # `resid_unit` (no-op when it is 1). Copy it out because the tau `step`
+    # below donates the state that shares this buffer.
+    resid_unit = jnp.copy(temp_mu_state.resid_unit)
+
     # 2. Update tau_0 intercept
     trt_val = jnp.copy(state.trt)
     tau_0 = state.tau_0
@@ -166,8 +174,8 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # Adaptive coding basis
     b_z = jnp.where(trt_val == 1, state.b1, state.b0)
 
-    # partial residual removing current tau_0 effect
-    partial = resid_val + tau_0 * b_z
+    # partial residual removing current tau_0 effect, on the data scale
+    partial = resid_val * resid_unit + tau_0 * b_z
 
     prec = jnp.sum(jnp.square(b_z)) / sigma2 + 1.0 / state.tau_0_prior_var
     mean = jnp.sum(b_z * partial) / sigma2 / prec
@@ -179,8 +187,8 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         state.sample_intercept, sample_tau_0_fn, lambda: jnp.zeros_like(mean)
     )
 
-    # Update R to reflect new tau_0
-    resid_val = resid_val - b_z * (tau_0_new - tau_0)
+    # Update R to reflect new tau_0 (back into scaled storage units)
+    resid_val = resid_val - b_z * (tau_0_new - tau_0) / resid_unit
 
     # 3. Update treatment effect forest (tau)
     # Target for tau is (Y - mu - b_z * tau_0) / b_z.
@@ -246,8 +254,8 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         lambda s: s.forest.leaf_prior_cov_inv, temp_tau_state, leaf_prior_cov_inv_tau
     )
 
-    # Update tau_X!
-    tau_X_new = state.tau_X + initial_resid_tau - temp_tau_state.resid
+    # Update tau_X! (the residual difference is scaled, bring it to data units)
+    tau_X_new = state.tau_X + (initial_resid_tau - temp_tau_state.resid) * resid_unit
 
     resid_val = jnp.where(
         jnp.abs(b_z) < 1e-10, resid_val, temp_tau_state.resid * b_z_safe
@@ -256,7 +264,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # 4. Update adaptive coding weights (b0, b1)
     def sample_b0_b1_fn() -> tuple[jax.Array, jax.Array, jax.Array]:
         tau_full = tau_0_new + tau_X_new
-        resid_partial = resid_val + tau_full * b_z
+        resid_partial = resid_val * resid_unit + tau_full * b_z
 
         b0_prec = jnp.sum(jnp.square(tau_full) * (trt_val == 0)) / sigma2 + 2.0
         b0_mean = jnp.sum(tau_full * resid_partial * (trt_val == 0)) / sigma2 / b0_prec
@@ -271,7 +279,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         ) * jax.lax.rsqrt(b1_prec)
 
         b_z_new = jnp.where(trt_val == 1, b1_new_val, b0_new_val)
-        resid_val_new = resid_partial - tau_full * b_z_new
+        resid_val_new = (resid_partial - tau_full * b_z_new) / resid_unit
 
         return b0_new_val, b1_new_val, resid_val_new
 

@@ -346,7 +346,7 @@ class TestBcf:
         model_st.sample(
             X_train=x_train,
             Z_train=z_train,
-            y_train=y_train,
+            y_train=y_train.astype(np.float64),
             propensity_train=pi.astype(np.float32),
             num_mcmc=ndpost,
             num_gfr=0,
@@ -391,10 +391,10 @@ class TestBcf:
         sigma2_st = model_st.global_var_samples
 
         mean_tau_jax = np.mean(preds_matched_tau_scaled, axis=1)
-        mean_tau_st = np.mean(model_st.tau_hat_train, axis=1)
+        mean_tau_st = np.mean(model_st.tau_hat_train, axis=0)
 
         mean_mu_jax = np.mean(preds_matched_mu_scaled, axis=1)
-        mean_mu_st = np.mean(model_st.mu_hat_train, axis=1)
+        mean_mu_st = np.mean(model_st.mu_hat_train, axis=0)
 
         rhat_sigma2 = _rhat_two_chains(sigma2_jax[:, None], sigma2_st[:, None])[0]
         rhat_mean_tau = _rhat_two_chains(mean_tau_jax[:, None], mean_tau_st[:, None])[0]
@@ -526,6 +526,10 @@ class TestBcf:
             ),
         )
 
+        # `resid` is stored scaled; copy `resid_unit` out before the step, which
+        # donates the buffer that the returned state shares.
+        resid_unit = jnp.copy(init_state.resid_unit)
+
         new_state = bcf_step(random.key(2), init_state)
 
         mu_fit_raw = evaluate_forest(new_state.X, new_state.forest).sum(axis=0)
@@ -545,8 +549,12 @@ class TestBcf:
             - b_z * (new_state.tau_0 + tau_fit_raw)
         )
 
+        # `resid` is stored scaled (``resid_unit * resid = data residual``)
         assert_allclose(
-            new_state.resid, expected_resid, atol=1e-5, allow_non_scalar=True
+            new_state.resid * resid_unit,
+            expected_resid,
+            atol=1e-5,
+            allow_non_scalar=True,
         )
 
     def test_bcf_unsplittable_x_reduction(self) -> None:
@@ -637,7 +645,7 @@ class TestBcf:
         model_st.sample(
             X_train=x_train,
             Z_train=z_train,
-            y_train=y_train,
+            y_train=y_train.astype(np.float64),
             propensity_train=pi.astype(np.float32),
             num_mcmc=ndpost,
             num_gfr=0,
@@ -770,10 +778,10 @@ class TestBcf:
             nskip=nskip,
             sample_sigma2_leaf_mu=True,
             sample_sigma2_leaf_tau=True,
-            sigma2_leaf_shape_mu=1.5,
-            sigma2_leaf_shape_tau=1.5,
-            sigma2_leaf_scale_mu=2.0 / 200.0,
-            sigma2_leaf_scale_tau=0.5 / 50.0,
+            sigma2_leaf_shape_mu=3.0,
+            sigma2_leaf_shape_tau=3.0,
+            sigma2_leaf_scale_mu=4.0 / 200.0,
+            sigma2_leaf_scale_tau=1.0 / 50.0,
             sigma_df=0.0,
             sigma_scale=0.0,
             adaptive_coding=False,
@@ -786,7 +794,7 @@ class TestBcf:
         model_st.sample(
             X_train=x_train,
             Z_train=z_train,
-            y_train=y_train,
+            y_train=y_train.astype(np.float64),
             propensity_train=pi.astype(np.float32),
             num_mcmc=ndpost,
             num_gfr=0,

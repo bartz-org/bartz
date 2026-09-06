@@ -267,11 +267,11 @@ class TestBcf:
                 bcf.load_npz(npz_path)
 
     def test_bcf_statistical_convergence(self) -> None:
-        """Consolidated statistical tests for BCF evaluating 3 core MCMC behaviors.
+        """Internal reproducibility (jax vs jax) and out-of-sample DGP recovery.
 
-        1. Internal stability (JAX vs JAX) of pointwise isolated treatment effects.
-        2. Total observable prediction (Y_hat) identifiability.
-        3. Structural alignment with C++ StochTree on global/macro parameters.
+        Two independent bartz chains must agree (Rhat near 1), and a
+        prior-matched model must recover the known treatment and prognostic
+        effects on held-out data.
         """
         n = 100
         p = 5
@@ -287,6 +287,16 @@ class TestBcf:
         y_mean = np.mean(y_train)
         y_std = np.std(y_train)
         y_scaled = (y_train - y_mean) / y_std
+
+        # held-out test set from the same DGP for out-of-sample recovery
+        x_test, pi_test, _, _, mu_test, tau_test, _ = self._generate_bcf_data(
+            n=300,
+            p=p,
+            mu_coefs=(1.0, 0.5),
+            tau_coefs=(1.0, 0.5),
+            noise_scale=0.2,
+            seed=303,
+        )
 
         ndpost = 2500
         nskip = 1500
@@ -342,76 +352,28 @@ class TestBcf:
             seed=random.key(999),
         )
 
-        model_st = stochtree.BCFModel()
-        model_st.sample(
-            X_train=x_train,
-            Z_train=z_train,
-            y_train=y_train.astype(np.float64),
-            propensity_train=pi.astype(np.float32),
-            num_mcmc=ndpost,
-            num_gfr=0,
-            num_burnin=nskip,
-            prognostic_forest_params={
-                'num_trees': 50,
-                'sample_sigma2_leaf': False,
-                'min_samples_leaf': 1,
-                'sigma2_leaf_init': 0.02,
-            },
-            treatment_effect_forest_params={
-                'num_trees': 20,
-                'sample_sigma2_leaf': False,
-                'sample_intercept': True,
-                'min_samples_leaf': 1,
-            },
-            general_params={'adaptive_coding': False, 'random_seed': 42},
-        )
-
         preds_a = model_jax_a.predict(x_test=x_train, pihat_test=pi.astype(np.float32))
         preds_b = model_jax_b.predict(x_test=x_train, pihat_test=pi.astype(np.float32))
-        preds_matched = model_jax_matched.predict(
-            x_test=x_train, pihat_test=pi.astype(np.float32)
-        )
 
-        # --- Calculations ---
-        # 1. JAX vs JAX Internal Stability (Default Priors)
+        # 1. Internal reproducibility: two independent bartz chains agree.
         yhat_a = preds_a['mu'] + preds_a['tau'] * z_train
         yhat_b = preds_b['mu'] + preds_b['tau'] * z_train
         rhat_yhat = _rhat_two_chains(yhat_a, yhat_b)
-
         stacked_tau = np.stack([preds_a['tau'], preds_b['tau']], axis=0)
         rhat_tau_jax = rhat_rank(stacked_tau, split=True)
-
-        # 2. JAX vs StochTree Ground Truth Validation (StochTree Priors)
-        preds_matched_tau_scaled = preds_matched['tau'] * y_std
-        preds_matched_mu_scaled = preds_matched['mu'] * y_std + y_mean
-
-        sigma2_jax = (1.0 / model_jax_matched._main_trace['mu'].error_cov_inv) * (
-            y_std**2
-        )
-        sigma2_st = model_st.global_var_samples
-
-        mean_tau_jax = np.mean(preds_matched_tau_scaled, axis=1)
-        mean_tau_st = np.mean(model_st.tau_hat_train, axis=0)
-
-        mean_mu_jax = np.mean(preds_matched_mu_scaled, axis=1)
-        mean_mu_st = np.mean(model_st.mu_hat_train, axis=0)
-
-        rhat_sigma2 = _rhat_two_chains(sigma2_jax[:, None], sigma2_st[:, None])[0]
-        rhat_mean_tau = _rhat_two_chains(mean_tau_jax[:, None], mean_tau_st[:, None])[0]
-        rhat_mean_mu = _rhat_two_chains(mean_mu_jax[:, None], mean_mu_st[:, None])[0]
-
-        print(f'max yhat rhat: {np.max(rhat_yhat):.4f}')
-        print(f'95th perc tau rhat: {np.percentile(rhat_tau_jax, 95):.4f}')
-        print(f'sigma2 rhat: {rhat_sigma2:.4f}')
-        print(f'mean_tau rhat: {rhat_mean_tau:.4f}')
-        print(f'mean_mu rhat: {rhat_mean_mu:.4f}')
-
-        # --- Assertions ---
         assert np.max(rhat_yhat) < 1.06
         assert np.percentile(rhat_tau_jax, 95) < 1.10
 
-        assert rhat_mean_tau < 1.15
-        assert rhat_mean_mu < 1.15
+        # 2. Out-of-sample recovery of the known DGP, on held-out data. RMSE
+        # (not correlation) catches magnitude/offset errors; a constant tau
+        # predictor scores ~0.47, so this requires capturing the heterogeneity.
+        preds = model_jax_matched.predict(
+            x_test=x_test, pihat_test=pi_test.astype(np.float32)
+        )
+        tau_hat = np.mean(np.array(preds['tau']) * y_std, axis=0)
+        mu_hat = np.mean(np.array(preds['mu']) * y_std + y_mean, axis=0)
+        assert np.sqrt(np.mean((tau_hat - tau_test) ** 2)) < 0.35
+        assert np.sqrt(np.mean((mu_hat - mu_test) ** 2)) < 0.45
 
     def test_bcf_null_treatment_effect(self) -> None:
         """Verifies that BCF does not find a treatment effect when tau=0."""
@@ -602,7 +564,7 @@ class TestBcf:
         assert np.isclose(np.mean(tau_mcmc), slope, atol=2.50)
 
     def test_bcf_adaptive_coding(self) -> None:
-        """Verifies adaptive coding aligns structurally with C++ StochTree."""
+        """Adaptive coding recovers the known treatment effect out of sample."""
         n = 100
         p = 5
         x_train, pi, z_train, y_train, _, _, _ = self._generate_bcf_data(
@@ -617,6 +579,16 @@ class TestBcf:
         y_mean = np.mean(y_train)
         y_std = np.std(y_train)
         y_scaled = (y_train - y_mean) / y_std
+
+        # held-out test set from the same DGP for out-of-sample recovery
+        x_test, pi_test, _, _, mu_test, tau_test, _ = self._generate_bcf_data(
+            n=300,
+            p=p,
+            mu_coefs=(1.0, 0.5),
+            tau_coefs=(1.0, 0.5),
+            noise_scale=0.2,
+            seed=404,
+        )
 
         ndpost = 1000
         nskip = 500
@@ -641,58 +613,11 @@ class TestBcf:
             seed=random.key(123),
         )
 
-        model_st = stochtree.BCFModel()
-        model_st.sample(
-            X_train=x_train,
-            Z_train=z_train,
-            y_train=y_train.astype(np.float64),
-            propensity_train=pi.astype(np.float32),
-            num_mcmc=ndpost,
-            num_gfr=0,
-            num_burnin=nskip,
-            prognostic_forest_params={
-                'num_trees': 50,
-                'sample_sigma2_leaf': False,
-                'min_samples_leaf': 1,
-                'sigma2_leaf_init': 1.0 / leaf_prior_cov_inv_mu,
-            },
-            treatment_effect_forest_params={
-                'num_trees': 20,
-                'sample_sigma2_leaf': False,
-                'sigma2_leaf_init': 1.0 / leaf_prior_cov_inv_tau,
-                'sample_intercept': True,
-                'min_samples_leaf': 1,
-            },
-            general_params={'adaptive_coding': True, 'random_seed': 42},
-        )
-
-        b0_jax = np.array(model_jax._b0_trace)
-        b1_jax = np.array(model_jax._b1_trace)
-        b0_st = model_st.b0_samples
-        b1_st = model_st.b1_samples
-
-        rhat_b0 = _rhat_two_chains(b0_jax[:, None], b0_st[:, None])[0]
-        rhat_b1 = _rhat_two_chains(b1_jax[:, None], b1_st[:, None])[0]
-
-        preds_jax = model_jax.predict(x_test=x_train, pihat_test=pi.astype(np.float32))
-        b_z_jax = np.where(z_train[:, None] == 1, b1_jax[None, :], b0_jax[None, :]).T
-        yhat_jax = (preds_jax['mu'] * y_std + y_mean) + (
-            preds_jax['tau'] * y_std
-        ) * b_z_jax
-
-        yhat_st = model_st.y_hat_train.T
-
-        rhat_mean_yhat = _rhat_two_chains(yhat_jax, yhat_st)
-
-        print(
-            '95th perc mean yhat rhat (adaptive):'
-            f' {np.percentile(rhat_mean_yhat, 95):.4f}'
-        )
-        print(f'b0 rhat (adaptive): {rhat_b0:.4f}')
-        print(f'b1 rhat (adaptive): {rhat_b1:.4f}')
-        # Identifiable targets should have structurally consistent samples
-        # across chains.
-        assert np.percentile(rhat_mean_yhat, 95) < 1.15
+        preds = model_jax.predict(x_test=x_test, pihat_test=pi_test.astype(np.float32))
+        cate_hat = np.mean(np.array(preds['tau']) * y_std, axis=0)
+        mu_hat = np.mean(np.array(preds['mu']) * y_std + y_mean, axis=0)
+        assert np.sqrt(np.mean((cate_hat - tau_test) ** 2)) < 0.4
+        assert np.sqrt(np.mean((mu_hat - mu_test) ** 2)) < 0.4
 
     def test_bcf_leaf_variance_prior_inactive(self) -> None:
         """Verifies that sample_sigma2_leaf=False keeps the prior variance fixed."""
@@ -748,7 +673,7 @@ class TestBcf:
         assert np.var(tau_prior_vars_active, axis=0).mean() > 1e-4
 
     def test_bcf_leaf_variance_prior_active_equivalence(self) -> None:
-        """Verifies adaptive leaf variance aligns structurally with C++ StochTree."""
+        """Adaptive leaf variance matches StochTree's scale and recovers the DGP."""
         n = 500
         p = 5
         x_train, pi, z_train, y_train, _, _, _ = self._generate_bcf_data(
@@ -763,6 +688,16 @@ class TestBcf:
         y_mean = np.mean(y_train)
         y_std = np.std(y_train)
         y_scaled = (y_train - y_mean) / y_std
+
+        # held-out test set from the same DGP for out-of-sample recovery
+        x_test, pi_test, _, _, mu_test, tau_test, _ = self._generate_bcf_data(
+            n=300,
+            p=p,
+            mu_coefs=(1.0, 0.5),
+            tau_coefs=(1.0, 0.5),
+            noise_scale=0.2,
+            seed=202,
+        )
 
         ndpost = 1500
         nskip = 1000
@@ -822,84 +757,24 @@ class TestBcf:
             },
         )
 
-        bartz_sigma2 = float(1.0 / model_jax._mcmc_state.error_cov_inv.value)
-        st_sigma2 = float(np.mean(model_st.global_var_samples) / (y_std**2))
-        bartz_sigma2_leaf_mu = float(
-            1.0 / model_jax._mcmc_state.forest.leaf_prior_cov_inv
-        )
-        st_sigma2_leaf_mu = float(np.mean(model_st.leaf_scale_mu_samples))
-        print(
-            'StochTree num leaves prog default: '
-            f'{model_st.forest_container_mu.num_forest_leaves(len(model_st.global_var_samples) - 1)}'
-        )
-        print(
-            'StochTree sum sq prog default: '
-            f'{model_st.forest_container_mu.sum_leaves_squared(len(model_st.global_var_samples) - 1)}'
-        )
-        print(f'Bartz sigma2_error mean: {bartz_sigma2:.4f}')
-        print(f'StochTree sigma2_error mean: {st_sigma2:.4f}')
-        print(f'Bartz sigma2_leaf_mu mean: {bartz_sigma2_leaf_mu:.4f}')
-        print(f'StochTree sigma2_leaf_mu mean: {st_sigma2_leaf_mu:.4f}')
-
-        preds_jax = model_jax.predict(x_test=x_train, pihat_test=pi.astype(np.float32))
-        b_z_jax = np.where(
-            z_train[:, None] == 1,
-            np.array(model_jax._b1_trace)[None, :],
-            np.array(model_jax._b0_trace)[None, :],
-        ).T
-        yhat_jax = (preds_jax['mu'] * y_std + y_mean) + (
-            preds_jax['tau'] * y_std
-        ) * b_z_jax
-        yhat_st = model_st.y_hat_train.T
-        rhat_mean_yhat = _rhat_two_chains(yhat_jax, yhat_st)
-
-        bartz_tau = preds_jax['tau'] * y_std
-        stoch_tau = model_st.tau_hat_train.T
-        rhat_tau = _rhat_two_chains(bartz_tau, stoch_tau)
-
         y_var = np.var(y_train)
-        arr_jax = (
-            1.0 / np.array(model_jax._leaf_prior_cov_inv_mu_trace)[:, None]
-        ) * y_var
-        arr_st = model_st.leaf_scale_mu_samples[:, None] * y_var
 
-        print(
-            f'Bartz leaf variance mu mean (scaled): {arr_jax.mean()}, var:'
-            f' {arr_jax.var()}'
+        leaf_var_mu_jax = (
+            np.mean(1.0 / np.array(model_jax._leaf_prior_cov_inv_mu_trace)) * y_var
         )
-        print(f'Stochtree leaf scale mu mean: {arr_st.mean()}, var: {arr_st.var()}')
-
-        rhat_leaf_mu = _rhat_two_chains(arr_jax, arr_st)[0]
-
-        arr_jax_tau = (
-            1.0 / np.array(model_jax._leaf_prior_cov_inv_tau_trace)[:, None]
-        ) * y_var
-        arr_st_tau = model_st.leaf_scale_tau_samples[:, None] * y_var
-
-        print(
-            f'Bartz leaf variance tau mean (scaled): {arr_jax_tau.mean()}, var:'
-            f' {arr_jax_tau.var()}'
+        leaf_var_mu_st = np.mean(model_st.leaf_scale_mu_samples) * y_var
+        leaf_var_tau_jax = (
+            np.mean(1.0 / np.array(model_jax._leaf_prior_cov_inv_tau_trace)) * y_var
         )
-        print(
-            f'Stochtree leaf scale tau mean: {arr_st_tau.mean()}, var:'
-            f' {arr_st_tau.var()}'
-        )
+        leaf_var_tau_st = np.mean(model_st.leaf_scale_tau_samples) * y_var
+        assert_allclose(leaf_var_mu_jax, leaf_var_mu_st, rtol=0.3)
+        assert_allclose(leaf_var_tau_jax, leaf_var_tau_st, rtol=0.3)
 
-        rhat_leaf_tau = _rhat_two_chains(arr_jax_tau, arr_st_tau)[0]
-
-        print(f'rhat leaf mu: {rhat_leaf_mu:.4f}')
-        print(f'rhat leaf tau: {rhat_leaf_tau:.4f}')
-
-        print(
-            '95th perc mean yhat rhat (adaptive leaf variance):'
-            f' {np.percentile(rhat_mean_yhat, 95):.4f}'
-        )
-        print(
-            '95th perc tau rhat (adaptive leaf variance):'
-            f' {np.percentile(rhat_tau, 95):.4f}'
-        )
-        assert np.percentile(rhat_mean_yhat, 95) < 1.10
-        assert np.percentile(rhat_tau, 95) < 1.15
+        preds = model_jax.predict(x_test=x_test, pihat_test=pi_test.astype(np.float32))
+        tau_hat = np.mean(np.array(preds['tau']) * y_std, axis=0)
+        mu_hat = np.mean(np.array(preds['mu']) * y_std + y_mean, axis=0)
+        assert np.sqrt(np.mean((tau_hat - tau_test) ** 2)) < 0.15
+        assert np.sqrt(np.mean((mu_hat - mu_test) ** 2)) < 0.15
 
     def test_predict_potential_outcomes(self) -> None:
         """Tests posterior predictive potential outcome sampling in BCF."""

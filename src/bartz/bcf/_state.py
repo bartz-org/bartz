@@ -57,7 +57,6 @@ class BCFState(State):
       prec_scale_tau: Scale on the error precision for the tau forest.
       inv_sdev_scale_tau: Reciprocal of standard deviation scale for the tau
         forest.
-      leaf_prior_cov_inv_tau: Prior precision for tau leaf values.
       tau_0: Global intercept for the treatment effect.
       tau_0_prior_var: Prior variance of tau_0.
     """
@@ -78,7 +77,6 @@ class BCFState(State):
     b0: Float32[Array, '*chains']
     b1: Float32[Array, '*chains']
 
-    leaf_prior_cov_inv_tau: Float32[Array, ''] | Float32[Array, 'k k']
     tau_0_prior_var: Float32[Array, '']
     sigma2_leaf_shape_mu: Float32[Array, '']
     sigma2_leaf_scale_mu: Float32[Array, '']
@@ -307,7 +305,6 @@ def init_bcf(
         b0=jnp.array(b0_init, dtype=jnp.float32),
         b1=jnp.array(b1_init, dtype=jnp.float32),
         tau_0_prior_var=tau_0_prior_var_val,
-        leaf_prior_cov_inv_tau=state_tau.forest.leaf_prior_cov_inv,
         sample_intercept=sample_intercept,
         adaptive_coding=adaptive_coding,
         sample_sigma2_leaf_mu=sample_sigma2_leaf_mu,

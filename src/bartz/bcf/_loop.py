@@ -302,8 +302,6 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         b1_new = state.b1
 
     # 5. Reconstruct and return the updated BCFState
-    # the leaf prior is optional in `Forest`, but BCF always sets it
-    assert temp_tau_state.forest.leaf_prior_cov_inv is not None
     return BCFState(
         _chain_anchor=temp_tau_state._chain_anchor,  # pylint: disable=protected-access # noqa: SLF001
         X=temp_tau_state.X,
@@ -333,7 +331,6 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         b0=b0_new,
         b1=b1_new,
         tau_0_prior_var=state.tau_0_prior_var,
-        leaf_prior_cov_inv_tau=temp_tau_state.forest.leaf_prior_cov_inv,
         sample_intercept=state.sample_intercept,
         adaptive_coding=state.adaptive_coding,
         sample_sigma2_leaf_mu=state.sample_sigma2_leaf_mu,

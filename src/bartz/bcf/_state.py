@@ -62,7 +62,7 @@ class BCFState(State):
       tau_0_prior_var: Prior variance of tau_0.
     """
 
-    forest_tau: Forest = field()
+    forest_tau: Forest
     trt: Float32[Array, ' n'] = field(data=-1)
     resid_tau: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
         chains=CHAIN_AXIS, data=-1
@@ -74,12 +74,12 @@ class BCFState(State):
         data=-1
     )
     tau_X: Float32[Array, ' n'] = field(data=-1)
-    leaf_prior_cov_inv_tau: Float32[Array, ''] | Float32[Array, 'k k'] = field()
-    tau_0_prior_var: Float32[Array, ''] = field()
-    sigma2_leaf_shape_mu: Float32[Array, ''] = field()
-    sigma2_leaf_scale_mu: Float32[Array, ''] = field()
-    sigma2_leaf_shape_tau: Float32[Array, ''] = field()
-    sigma2_leaf_scale_tau: Float32[Array, ''] = field()
+    leaf_prior_cov_inv_tau: Float32[Array, ''] | Float32[Array, 'k k']
+    tau_0_prior_var: Float32[Array, '']
+    sigma2_leaf_shape_mu: Float32[Array, '']
+    sigma2_leaf_scale_mu: Float32[Array, '']
+    sigma2_leaf_shape_tau: Float32[Array, '']
+    sigma2_leaf_scale_tau: Float32[Array, '']
 
     # Defaults at the end
     tau_0: Float32[Array, '*chains'] = field(default=0.0)

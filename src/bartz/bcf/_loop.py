@@ -90,7 +90,7 @@ def _compute_leaf_prior_stats(
 
 
 @jax.named_call
-def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
+def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:  # noqa: PLR0915
     """
     Do one BCF MCMC step.
 
@@ -135,7 +135,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     temp_mu_state = step(keys[0], temp_mu_state)
 
-    def sample_leaf_prior_cov_inv_mu() -> Float32[Array, '...']:
+    if state.sample_sigma2_leaf_mu:
         num_active, sum_sq = _compute_leaf_prior_stats(
             temp_mu_state.forest.split_tree, temp_mu_state.forest.leaf_tree
         )
@@ -146,17 +146,11 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             state.sigma2_leaf_scale_mu
             + sum_sq * jnp.square(temp_mu_state.forest.leaf_unit) / 2.0
         )
-        return jnp.exp(loggamma(keys[5], a)) / b
-
-    leaf_prior_cov_inv_mu = jax.lax.cond(
-        state.sample_sigma2_leaf_mu,
-        sample_leaf_prior_cov_inv_mu,
-        lambda: temp_mu_state.forest.leaf_prior_cov_inv,
-    )
-
-    temp_mu_state = eqx.tree_at(
-        lambda s: s.forest.leaf_prior_cov_inv, temp_mu_state, leaf_prior_cov_inv_mu
-    )
+        temp_mu_state = eqx.tree_at(
+            lambda s: s.forest.leaf_prior_cov_inv,
+            temp_mu_state,
+            jnp.exp(loggamma(keys[5], a)) / b,
+        )
 
     resid_val = temp_mu_state.resid  # updated global residual R
     latest_error_cov_inv = temp_mu_state.error_cov_inv
@@ -177,18 +171,18 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # Adaptive coding basis
     b_z = jnp.where(trt_val == 1, state.b1, state.b0)
 
-    # partial residual removing current tau_0 effect, on the data scale
-    partial = resid_val * resid_unit + tau_0 * b_z
+    if state.sample_intercept:
+        # partial residual removing current tau_0 effect, on the data scale
+        partial = resid_val * resid_unit + tau_0 * b_z
 
-    prec = jnp.sum(jnp.square(b_z)) / sigma2 + 1.0 / state.tau_0_prior_var
-    mean = jnp.sum(b_z * partial) / sigma2 / prec
+        prec = jnp.sum(jnp.square(b_z)) / sigma2 + 1.0 / state.tau_0_prior_var
+        mean = jnp.sum(b_z * partial) / sigma2 / prec
 
-    def sample_tau_0_fn() -> Float32[Array, '']:
-        return mean + random.normal(keys[1], shape=mean.shape) * jax.lax.rsqrt(prec)
-
-    tau_0_new = jax.lax.cond(
-        state.sample_intercept, sample_tau_0_fn, lambda: jnp.zeros_like(mean)
-    )
+        tau_0_new = mean + random.normal(keys[1], shape=mean.shape) * jax.lax.rsqrt(
+            prec
+        )
+    else:
+        tau_0_new = jnp.zeros_like(tau_0)
 
     # Update R to reflect new tau_0 (back into scaled storage units)
     resid_val = resid_val - b_z * (tau_0_new - tau_0) / resid_unit
@@ -237,7 +231,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     temp_tau_state = step(keys[2], temp_tau_state)
 
-    def sample_leaf_prior_cov_inv_tau() -> Float32[Array, '...']:
+    if state.sample_sigma2_leaf_tau:
         num_active, sum_sq = _compute_leaf_prior_stats(
             temp_tau_state.forest.split_tree, temp_tau_state.forest.leaf_tree
         )
@@ -248,17 +242,11 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             state.sigma2_leaf_scale_tau
             + sum_sq * jnp.square(temp_tau_state.forest.leaf_unit) / 2.0
         )
-        return jnp.exp(loggamma(keys[6], a)) / b
-
-    leaf_prior_cov_inv_tau = jax.lax.cond(
-        state.sample_sigma2_leaf_tau,
-        sample_leaf_prior_cov_inv_tau,
-        lambda: temp_tau_state.forest.leaf_prior_cov_inv,
-    )
-
-    temp_tau_state = eqx.tree_at(
-        lambda s: s.forest.leaf_prior_cov_inv, temp_tau_state, leaf_prior_cov_inv_tau
-    )
+        temp_tau_state = eqx.tree_at(
+            lambda s: s.forest.leaf_prior_cov_inv,
+            temp_tau_state,
+            jnp.exp(loggamma(keys[6], a)) / b,
+        )
 
     # Update tau_X! (the residual difference is scaled, bring it to data units)
     tau_X_new = state.tau_X + (initial_resid_tau - temp_tau_state.resid) * resid_unit
@@ -268,32 +256,31 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     )
 
     # 4. Update adaptive coding weights (b0, b1)
-    def sample_b0_b1_fn() -> tuple[jax.Array, jax.Array, jax.Array]:
+    if state.adaptive_coding:
         tau_full = tau_0_new + tau_X_new
         resid_partial = resid_val * resid_unit + tau_full * b_z
 
         b0_prec = jnp.sum(jnp.square(tau_full) * (trt_val == 0)) / sigma2 + 2.0
         b0_mean = jnp.sum(tau_full * resid_partial * (trt_val == 0)) / sigma2 / b0_prec
-        b0_new_val = b0_mean + random.normal(
-            keys[3], shape=b0_mean.shape
-        ) * jax.lax.rsqrt(b0_prec)
+        b0_new = b0_mean + random.normal(keys[3], shape=b0_mean.shape) * jax.lax.rsqrt(
+            b0_prec
+        )
 
         b1_prec = jnp.sum(jnp.square(tau_full) * (trt_val == 1)) / sigma2 + 2.0
         b1_mean = jnp.sum(tau_full * resid_partial * (trt_val == 1)) / sigma2 / b1_prec
-        b1_new_val = b1_mean + random.normal(
-            keys[4], shape=b1_mean.shape
-        ) * jax.lax.rsqrt(b1_prec)
+        b1_new = b1_mean + random.normal(keys[4], shape=b1_mean.shape) * jax.lax.rsqrt(
+            b1_prec
+        )
 
-        b_z_new = jnp.where(trt_val == 1, b1_new_val, b0_new_val)
-        resid_val_new = (resid_partial - tau_full * b_z_new) / resid_unit
-
-        return b0_new_val, b1_new_val, resid_val_new
-
-    b0_new, b1_new, resid_val = jax.lax.cond(
-        state.adaptive_coding, sample_b0_b1_fn, lambda: (state.b0, state.b1, resid_val)
-    )
+        b_z_new = jnp.where(trt_val == 1, b1_new, b0_new)
+        resid_val = (resid_partial - tau_full * b_z_new) / resid_unit
+    else:
+        b0_new = state.b0
+        b1_new = state.b1
 
     # 5. Reconstruct and return the updated BCFState
+    # the leaf prior is optional in `Forest`, but BCF always sets it
+    assert temp_tau_state.forest.leaf_prior_cov_inv is not None
     return BCFState(
         _chain_anchor=temp_tau_state._chain_anchor,  # pylint: disable=protected-access # noqa: SLF001
         X=temp_tau_state.X,

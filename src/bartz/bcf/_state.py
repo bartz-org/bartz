@@ -49,45 +49,61 @@ from bartz.mcmcstep._state import (
 class BCFState(State):
     """The full MCMC state for a Bayesian Causal Forest.
 
-    Attributes
-    ----------
-      forest_tau: The treatment forest (tau).
-      trt: The treatment variable.
-      resid_tau: The residuals of the tau forest.
-      prec_scale_tau: Scale on the error precision for the tau forest.
-      inv_sdev_scale_tau: Reciprocal of standard deviation scale for the tau
-        forest.
-      tau_0: Global intercept for the treatment effect.
-      tau_0_prior_var: Prior variance of tau_0, `None` to hold tau_0 at zero.
-      sigma2_leaf_shape_mu: Shape of the Gamma prior on the mu leaf precision.
-        Set it and the scale to `None` to leave the precision constant.
-      sigma2_leaf_scale_mu: Scale of the Gamma prior on the mu leaf precision.
-      sigma2_leaf_shape_tau: As the mu one, for the tau forest.
-      sigma2_leaf_scale_tau: As the mu one, for the tau forest.
+    The fields inherited from `State` refer to the prognostic (mu) forest.
     """
 
     forest_tau: Forest
+    """The treatment forest (tau)."""
+
     trt: Float32[Array, ' n'] = field(data=-1)
+    """The treatment variable."""
+
     resid_tau: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
         chains=CHAIN_AXIS, data=-1
     )
+    """The residuals of the tau forest."""
+
     prec_scale_tau: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None = field(
         data=-1
     )
+    """Scale on the error precision for the tau forest."""
+
     inv_sdev_scale_tau: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(
         data=-1
     )
+    """Reciprocal of standard deviation scale for the tau forest."""
+
     tau_X: Float32[Array, ' n'] = field(data=-1)
+    """The treatment effect predicted by the tau forest at each datapoint."""
+
     tau_0: Float32[Array, '*chains']
+    """Global intercept for the treatment effect."""
+
     b0: Float32[Array, '*chains']
+    """Adaptive coding weight for untreated units."""
+
     b1: Float32[Array, '*chains']
+    """Adaptive coding weight for treated units."""
 
     tau_0_prior_var: Float32[Array, ''] | None
+    """Prior variance of `tau_0`, `None` to hold `tau_0` at zero."""
+
     sigma2_leaf_shape_mu: Float32[Array, ''] | None
+    """Shape of the Gamma prior on the mu leaf precision. Set it and the scale
+    to `None` to leave the precision constant."""
+
     sigma2_leaf_scale_mu: Float32[Array, ''] | None
+    """Scale of the Gamma prior on the mu leaf precision."""
+
     sigma2_leaf_shape_tau: Float32[Array, ''] | None
+    """Shape of the Gamma prior on the tau leaf precision. Set it and the scale
+    to `None` to leave the precision constant."""
+
     sigma2_leaf_scale_tau: Float32[Array, ''] | None
+    """Scale of the Gamma prior on the tau leaf precision."""
+
     adaptive_coding: bool = field(static=True)
+    """Whether `b0` and `b1` are sampled instead of held at 0 and 1."""
 
     @property
     def has_chains(self) -> bool:

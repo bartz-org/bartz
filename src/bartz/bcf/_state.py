@@ -58,7 +58,12 @@ class BCFState(State):
       inv_sdev_scale_tau: Reciprocal of standard deviation scale for the tau
         forest.
       tau_0: Global intercept for the treatment effect.
-      tau_0_prior_var: Prior variance of tau_0.
+      tau_0_prior_var: Prior variance of tau_0, `None` to hold tau_0 at zero.
+      sigma2_leaf_shape_mu: Shape of the Gamma prior on the mu leaf precision.
+        Set it and the scale to `None` to leave the precision constant.
+      sigma2_leaf_scale_mu: Scale of the Gamma prior on the mu leaf precision.
+      sigma2_leaf_shape_tau: As the mu one, for the tau forest.
+      sigma2_leaf_scale_tau: As the mu one, for the tau forest.
     """
 
     forest_tau: Forest
@@ -77,15 +82,12 @@ class BCFState(State):
     b0: Float32[Array, '*chains']
     b1: Float32[Array, '*chains']
 
-    tau_0_prior_var: Float32[Array, '']
-    sigma2_leaf_shape_mu: Float32[Array, '']
-    sigma2_leaf_scale_mu: Float32[Array, '']
-    sigma2_leaf_shape_tau: Float32[Array, '']
-    sigma2_leaf_scale_tau: Float32[Array, '']
-    sample_intercept: bool = field(static=True)
+    tau_0_prior_var: Float32[Array, ''] | None
+    sigma2_leaf_shape_mu: Float32[Array, ''] | None
+    sigma2_leaf_scale_mu: Float32[Array, ''] | None
+    sigma2_leaf_shape_tau: Float32[Array, ''] | None
+    sigma2_leaf_scale_tau: Float32[Array, ''] | None
     adaptive_coding: bool = field(static=True)
-    sample_sigma2_leaf_mu: bool = field(static=True)
-    sample_sigma2_leaf_tau: bool = field(static=True)
 
     @property
     def has_chains(self) -> bool:
@@ -200,13 +202,28 @@ def init_bcf(
         user_filter_splitless, int(jnp.sum(max_split_tau == 0))
     )
 
-    if tau_0_prior_var is None:
-        if outcome_type == 'binary':
-            tau_0_prior_var_val = jnp.asarray(1.0, jnp.float32)
-        else:
-            tau_0_prior_var_val = jnp.var(jnp.asarray(y, jnp.float32))
-    else:
+    if not sample_intercept:
+        tau_0_prior_var_val = None
+    elif tau_0_prior_var is not None:
         tau_0_prior_var_val = jnp.asarray(tau_0_prior_var, jnp.float32)
+    elif outcome_type == 'binary':
+        tau_0_prior_var_val = jnp.asarray(1.0, jnp.float32)
+    else:
+        tau_0_prior_var_val = jnp.var(jnp.asarray(y, jnp.float32))
+
+    if sample_sigma2_leaf_mu:
+        shape_mu = jnp.asarray(sigma2_leaf_shape_mu, jnp.float32)
+        scale_mu = jnp.asarray(sigma2_leaf_scale_mu, jnp.float32)
+    else:
+        shape_mu = None
+        scale_mu = None
+
+    if sample_sigma2_leaf_tau:
+        shape_tau = jnp.asarray(sigma2_leaf_shape_tau, jnp.float32)
+        scale_tau = jnp.asarray(sigma2_leaf_scale_tau, jnp.float32)
+    else:
+        shape_tau = None
+        scale_tau = None
 
     y_mu = jnp.copy(y)
     kwargs_mu = jax.tree.map(
@@ -305,12 +322,9 @@ def init_bcf(
         b0=jnp.array(b0_init, dtype=jnp.float32),
         b1=jnp.array(b1_init, dtype=jnp.float32),
         tau_0_prior_var=tau_0_prior_var_val,
-        sample_intercept=sample_intercept,
         adaptive_coding=adaptive_coding,
-        sample_sigma2_leaf_mu=sample_sigma2_leaf_mu,
-        sigma2_leaf_shape_mu=jnp.asarray(sigma2_leaf_shape_mu, jnp.float32),
-        sigma2_leaf_scale_mu=jnp.asarray(sigma2_leaf_scale_mu, jnp.float32),
-        sample_sigma2_leaf_tau=sample_sigma2_leaf_tau,
-        sigma2_leaf_shape_tau=jnp.asarray(sigma2_leaf_shape_tau, jnp.float32),
-        sigma2_leaf_scale_tau=jnp.asarray(sigma2_leaf_scale_tau, jnp.float32),
+        sigma2_leaf_shape_mu=shape_mu,
+        sigma2_leaf_scale_mu=scale_mu,
+        sigma2_leaf_shape_tau=shape_tau,
+        sigma2_leaf_scale_tau=scale_tau,
     )

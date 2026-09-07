@@ -168,7 +168,8 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     temp_mu_state = step(keys[0], temp_mu_state)
 
-    if state.sample_sigma2_leaf_mu:
+    if state.sigma2_leaf_shape_mu is not None:
+        assert state.sigma2_leaf_scale_mu is not None
         temp_mu_state = eqx.tree_at(
             lambda s: s.forest.leaf_prior_cov_inv,
             temp_mu_state,
@@ -199,7 +200,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # Adaptive coding basis
     b_z = jnp.where(trt_val == 1, state.b1, state.b0)
 
-    if state.sample_intercept:
+    if state.tau_0_prior_var is not None:
         # partial residual removing current tau_0 effect, on the data scale
         partial = resid_val * resid_unit + tau_0 * b_z
 
@@ -259,7 +260,8 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     temp_tau_state = step(keys[2], temp_tau_state)
 
-    if state.sample_sigma2_leaf_tau:
+    if state.sigma2_leaf_shape_tau is not None:
+        assert state.sigma2_leaf_scale_tau is not None
         temp_tau_state = eqx.tree_at(
             lambda s: s.forest.leaf_prior_cov_inv,
             temp_tau_state,
@@ -331,12 +333,9 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         b0=b0_new,
         b1=b1_new,
         tau_0_prior_var=state.tau_0_prior_var,
-        sample_intercept=state.sample_intercept,
         adaptive_coding=state.adaptive_coding,
-        sample_sigma2_leaf_mu=state.sample_sigma2_leaf_mu,
         sigma2_leaf_shape_mu=state.sigma2_leaf_shape_mu,
         sigma2_leaf_scale_mu=state.sigma2_leaf_scale_mu,
-        sample_sigma2_leaf_tau=state.sample_sigma2_leaf_tau,
         sigma2_leaf_shape_tau=state.sigma2_leaf_shape_tau,
         sigma2_leaf_scale_tau=state.sigma2_leaf_scale_tau,
     )

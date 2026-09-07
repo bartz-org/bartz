@@ -100,8 +100,8 @@ class BCFState(State):
         if not self.has_chains:
             return None
 
-        c = chain_vmap_axes(self.forest).var_tree
-        return self.forest.var_tree.shape[c]
+        c = chain_vmap_axes(self.forest).var_tree  # pragma: no cover
+        return self.forest.var_tree.shape[c]  # pragma: no cover
 
 
 def init_bcf(

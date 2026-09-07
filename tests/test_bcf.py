@@ -29,6 +29,7 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
+import pandas as pd
 import pytest
 import stochtree
 from jax import random
@@ -849,6 +850,15 @@ class TestBcf:
         with pytest.raises(ValueError, match='rho must be in'):
             model.predict_potential_outcomes(x_test=x_test, rho=1.5)
 
+        # 6. key=None (default RNG) and integer-seed keys are both accepted
+        res_key_none = model.predict_potential_outcomes(
+            x_test=x_test, pihat_test=pihat_test, key=None
+        )
+        res_key_int = model.predict_potential_outcomes(
+            x_test=x_test, pihat_test=pihat_test, key=7
+        )
+        assert res_key_none['y0'].shape == res_key_int['y0'].shape
+
     def test_bcf_binary_model(self) -> None:
         """Tests binary BCF end-to-end: initialization, offset, and predictions."""
         # Generate data with non-trivial positive rate (~70% positive)
@@ -890,3 +900,85 @@ class TestBcf:
         # Check that raw probabilities are within [0, 1]
         assert np.all((preds['p0'] >= 0.0) & (preds['p0'] <= 1.0))
         assert np.all((preds['p1'] >= 0.0) & (preds['p1'] <= 1.0))
+
+        # Sub-test 3: potential outcomes on a binary model return 0/1 labels
+        po = model.predict_potential_outcomes(x_train, pihat_test=pihat, key=0)
+        assert np.isin(np.array(po['y0']), (0.0, 1.0)).all()
+        assert np.isin(np.array(po['y1']), (0.0, 1.0)).all()
+
+    def test_bcf_binary_requires_0_1(self) -> None:
+        """Binary BCF rejects outcomes that are not 0/1."""
+        x_train, pihat, z_train, _, _, _, _ = self._generate_bcf_data(n=20, seed=0)
+        with pytest.raises(ValueError, match='strictly 0 or 1'):
+            bcf(
+                x_train=x_train,
+                y_train=np.full(20, 2.0, np.float32),
+                z_train=z_train,
+                pihat_train=pihat,
+                outcome_type='binary',
+                num_trees_mu=2,
+                num_trees_tau=2,
+                ndpost=1,
+                nskip=0,
+                seed=42,
+            )
+
+    def test_bcf_constructor_options(self) -> None:
+        """Constructor x_test/z_test, pihat toggle, explicit tau_0 prior, sigma_trace."""
+        x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
+            n=30, seed=0
+        )
+        x_test, pihat_test, z_test, _, _, _, _ = self._generate_bcf_data(n=15, seed=1)
+        ndpost = 3
+        model = bcf(
+            x_train=x_train,
+            y_train=y_train,
+            z_train=z_train,
+            pihat_train=pihat,
+            x_test=x_test,
+            z_test=z_test,
+            pihat_test=pihat_test,
+            include_pihat_in_mu=False,
+            tau_0_prior_var=0.5,
+            standardize=False,
+            num_trees_mu=2,
+            num_trees_tau=2,
+            ndpost=ndpost,
+            nskip=1,
+            seed=42,
+        )
+        assert model._mcmc_state.num_chains() is None
+        assert model.sigma_trace.shape == (ndpost,)
+
+    def test_bcf_x_test_format_mismatch(self) -> None:
+        """x_test format must match x_train, at construction and at predict."""
+        x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
+            n=30, seed=0
+        )
+        x_test_df = pd.DataFrame(np.asarray(x_train)[:15])
+        with pytest.raises(ValueError, match='does not match x_train'):
+            bcf(
+                x_train=x_train,
+                y_train=y_train,
+                z_train=z_train,
+                pihat_train=pihat,
+                x_test=x_test_df,
+                num_trees_mu=2,
+                num_trees_tau=2,
+                ndpost=2,
+                nskip=1,
+                seed=42,
+            )
+        model = bcf(
+            x_train=x_train,
+            y_train=y_train,
+            z_train=z_train,
+            pihat_train=pihat,
+            num_trees_mu=2,
+            num_trees_tau=2,
+            ndpost=2,
+            nskip=1,
+            seed=42,
+        )
+        with pytest.raises(ValueError, match='does not match x_train'):
+            model.predict(x_test_df)

@@ -74,21 +74,20 @@ class BCFState(State):
         data=-1
     )
     tau_X: Float32[Array, ' n'] = field(data=-1)
+    tau_0: Float32[Array, '*chains']
+    b0: Float32[Array, '*chains']
+    b1: Float32[Array, '*chains']
+
     leaf_prior_cov_inv_tau: Float32[Array, ''] | Float32[Array, 'k k']
     tau_0_prior_var: Float32[Array, '']
     sigma2_leaf_shape_mu: Float32[Array, '']
     sigma2_leaf_scale_mu: Float32[Array, '']
     sigma2_leaf_shape_tau: Float32[Array, '']
     sigma2_leaf_scale_tau: Float32[Array, '']
-
-    # Defaults at the end
-    tau_0: Float32[Array, '*chains'] = field(default=0.0)
-    b0: Float32[Array, '*chains'] = field(default=0.0)
-    b1: Float32[Array, '*chains'] = field(default=1.0)
-    sample_intercept: bool = field(static=True, default=True)
-    adaptive_coding: bool = field(static=True, default=False)
-    sample_sigma2_leaf_mu: bool = field(static=True, default=True)
-    sample_sigma2_leaf_tau: bool = field(static=True, default=False)
+    sample_intercept: bool = field(static=True)
+    adaptive_coding: bool = field(static=True)
+    sample_sigma2_leaf_mu: bool = field(static=True)
+    sample_sigma2_leaf_tau: bool = field(static=True)
 
     @property
     def has_chains(self) -> bool:

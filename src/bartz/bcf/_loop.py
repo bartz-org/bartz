@@ -89,8 +89,41 @@ def _compute_leaf_prior_stats(
     return num_active, sum_sq
 
 
+def _sample_leaf_prior_cov_inv(
+    key: Key[Array, ''],
+    state: State,
+    shape: Float32[Array, ''],
+    scale: Float32[Array, ''],
+) -> Float32[Array, ''] | Float32[Array, 'k k']:
+    """
+    Draw the leaf prior precision of a forest from its Gamma conditional.
+
+    Parameters
+    ----------
+    key
+        A JAX PRNG key.
+    state
+        The state holding the forest, with the leaves already updated.
+    shape
+    scale
+        The parameters of the Gamma prior on the precision.
+
+    Returns
+    -------
+    The sampled leaf prior precision.
+    """
+    num_active, sum_sq = _compute_leaf_prior_stats(
+        state.forest.split_tree, state.forest.leaf_tree
+    )
+    a = shape + num_active / 2.0
+    # leaves are stored in `leaf_unit` units; convert their sum of squares to
+    # data units so the Gamma update matches the data-scale prior scale
+    b = scale + sum_sq * jnp.square(state.forest.leaf_unit) / 2.0
+    return jnp.exp(loggamma(key, a)) / b
+
+
 @jax.named_call
-def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:  # noqa: PLR0915
+def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     """
     Do one BCF MCMC step.
 
@@ -136,20 +169,15 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:  # noqa: PLR0915
     temp_mu_state = step(keys[0], temp_mu_state)
 
     if state.sample_sigma2_leaf_mu:
-        num_active, sum_sq = _compute_leaf_prior_stats(
-            temp_mu_state.forest.split_tree, temp_mu_state.forest.leaf_tree
-        )
-        a = state.sigma2_leaf_shape_mu + num_active / 2.0
-        # leaves are stored in `leaf_unit` units; convert their sum of squares to
-        # data units so the Gamma update matches the data-scale prior scale
-        b = (
-            state.sigma2_leaf_scale_mu
-            + sum_sq * jnp.square(temp_mu_state.forest.leaf_unit) / 2.0
-        )
         temp_mu_state = eqx.tree_at(
             lambda s: s.forest.leaf_prior_cov_inv,
             temp_mu_state,
-            jnp.exp(loggamma(keys[5], a)) / b,
+            _sample_leaf_prior_cov_inv(
+                keys[5],
+                temp_mu_state,
+                state.sigma2_leaf_shape_mu,
+                state.sigma2_leaf_scale_mu,
+            ),
         )
 
     resid_val = temp_mu_state.resid  # updated global residual R
@@ -232,20 +260,15 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:  # noqa: PLR0915
     temp_tau_state = step(keys[2], temp_tau_state)
 
     if state.sample_sigma2_leaf_tau:
-        num_active, sum_sq = _compute_leaf_prior_stats(
-            temp_tau_state.forest.split_tree, temp_tau_state.forest.leaf_tree
-        )
-        a = state.sigma2_leaf_shape_tau + num_active / 2.0
-        # leaves are stored in `leaf_unit` units; convert their sum of squares to
-        # data units so the Gamma update matches the data-scale prior scale
-        b = (
-            state.sigma2_leaf_scale_tau
-            + sum_sq * jnp.square(temp_tau_state.forest.leaf_unit) / 2.0
-        )
         temp_tau_state = eqx.tree_at(
             lambda s: s.forest.leaf_prior_cov_inv,
             temp_tau_state,
-            jnp.exp(loggamma(keys[6], a)) / b,
+            _sample_leaf_prior_cov_inv(
+                keys[6],
+                temp_tau_state,
+                state.sigma2_leaf_shape_tau,
+                state.sigma2_leaf_scale_tau,
+            ),
         )
 
     # Update tau_X! (the residual difference is scaled, bring it to data units)

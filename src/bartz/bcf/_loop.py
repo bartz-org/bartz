@@ -26,6 +26,9 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from typing import cast
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -142,47 +145,24 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     keys = random.split(key, 7)
 
     # 1. Update prognostic forest (mu)
-    # Construct a temporary standard State for the mu step.
-    # This prevents JAX from donating and deleting the BCF-specific fields in
-    # 'state'.
-    temp_mu_state = State(
-        _chain_anchor=state._chain_anchor,  # pylint: disable=protected-access # noqa: SLF001
-        X=state.X,
-        y=state.y,
-        z=state.z,
-        binary_indices=state.binary_indices,
-        resid=state.resid,  # mu residuals
-        resid_unit=state.resid_unit,
-        resid_eff_scale=state.resid_eff_scale,
-        resid_inexact_integral=state.resid_inexact_integral,
-        error_cov_inv=state.error_cov_inv,
-        error_scale=state.error_scale,
-        prec_scale=state.prec_scale,
-        inv_sdev_scale=state.inv_sdev_scale,
-        inv_sdev_unit=state.inv_sdev_unit,
-        n_non_missing=state.n_non_missing,
-        sum_diag_prec_scale=state.sum_diag_prec_scale,
-        forest=state.forest,  # mu forest
-        config=state.config,
-    )
-
-    temp_mu_state = step(keys[0], temp_mu_state)
+    # `step` rebuilds the state with `replace`, so it preserves the subclass.
+    # WORKAROUND(python<3.12): type `step` as generic over the state subclass
+    # (PEP 695) instead of casting here, since a TypeVar renders badly in the
+    # html documentation.
+    state = cast(BCFState, step(keys[0], state))
 
     if state.sigma2_leaf_shape_mu is not None:
         assert state.sigma2_leaf_scale_mu is not None
-        temp_mu_state = eqx.tree_at(
+        state = eqx.tree_at(
             lambda s: s.forest.leaf_prior_cov_inv,
-            temp_mu_state,
+            state,
             _sample_leaf_prior_cov_inv(
-                keys[5],
-                temp_mu_state,
-                state.sigma2_leaf_shape_mu,
-                state.sigma2_leaf_scale_mu,
+                keys[5], state, state.sigma2_leaf_shape_mu, state.sigma2_leaf_scale_mu
             ),
         )
 
-    resid_val = temp_mu_state.resid  # updated global residual R
-    latest_error_cov_inv = temp_mu_state.error_cov_inv
+    resid_val = state.resid  # updated global residual R
+    latest_error_cov_inv = state.error_cov_inv
 
     # `resid` is stored scaled: ``resid_unit * resid = data residual``, whereas
     # `tau_0`, `tau_X`, `b0`, `b1`, `sigma2` and `tau_0_prior_var` are on the
@@ -190,7 +170,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # units so the scalar Gibbs updates below are unit-consistent for any
     # `resid_unit` (no-op when it is 1). Copy it out because the tau `step`
     # below donates the state that shares this buffer.
-    resid_unit = jnp.copy(temp_mu_state.resid_unit)
+    resid_unit = jnp.copy(state.resid_unit)
 
     # 2. Update tau_0 intercept
     trt_val = jnp.copy(state.trt)
@@ -236,49 +216,39 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         is_leaf=lambda x: x is None,
     )
 
-    # Construct a temporary standard State for the tau step
-    temp_tau_state = State(
-        _chain_anchor=temp_mu_state._chain_anchor,  # pylint: disable=protected-access # noqa: SLF001
-        X=temp_mu_state.X,
-        y=temp_mu_state.y,
+    # Swap the tau forest into the forest slot so `step` runs on it; the mu
+    # forest rides along in `forest_tau` and is swapped back afterwards. Keep
+    # the mu-phase state to restore the fields overwritten by the swap.
+    mu_state = state
+    state = replace(
+        state,
+        forest=state.forest_tau,
+        forest_tau=state.forest,
         z=None,
         binary_indices=None,
         resid=jnp.copy(initial_resid_tau),
-        resid_unit=temp_mu_state.resid_unit,
-        resid_eff_scale=temp_mu_state.resid_eff_scale,
-        resid_inexact_integral=temp_mu_state.resid_inexact_integral,
         error_cov_inv=fixed_error_cov_inv,
         error_scale=None,
         prec_scale=jnp.square(inv_sdev_scale_tau),
         inv_sdev_scale=inv_sdev_scale_tau,
-        inv_sdev_unit=temp_mu_state.inv_sdev_unit,
-        n_non_missing=temp_mu_state.n_non_missing,
-        sum_diag_prec_scale=temp_mu_state.sum_diag_prec_scale,
-        forest=state.forest_tau,
-        config=temp_mu_state.config,
     )
 
-    temp_tau_state = step(keys[2], temp_tau_state)
+    state = cast(BCFState, step(keys[2], state))
 
     if state.sigma2_leaf_shape_tau is not None:
         assert state.sigma2_leaf_scale_tau is not None
-        temp_tau_state = eqx.tree_at(
+        state = eqx.tree_at(
             lambda s: s.forest.leaf_prior_cov_inv,
-            temp_tau_state,
+            state,
             _sample_leaf_prior_cov_inv(
-                keys[6],
-                temp_tau_state,
-                state.sigma2_leaf_shape_tau,
-                state.sigma2_leaf_scale_tau,
+                keys[6], state, state.sigma2_leaf_shape_tau, state.sigma2_leaf_scale_tau
             ),
         )
 
     # Update tau_X! (the residual difference is scaled, bring it to data units)
-    tau_X_new = state.tau_X + (initial_resid_tau - temp_tau_state.resid) * resid_unit
+    tau_X_new = state.tau_X + (initial_resid_tau - state.resid) * resid_unit
 
-    resid_val = jnp.where(
-        jnp.abs(b_z) < 1e-10, resid_val, temp_tau_state.resid * b_z_safe
-    )
+    resid_val = jnp.where(jnp.abs(b_z) < 1e-10, resid_val, state.resid * b_z_safe)
 
     # 4. Update adaptive coding weights (b0, b1)
     if state.adaptive_coding:
@@ -303,41 +273,40 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         b0_new = state.b0
         b1_new = state.b1
 
-    # 5. Reconstruct and return the updated BCFState
-    return BCFState(
-        _chain_anchor=temp_tau_state._chain_anchor,  # pylint: disable=protected-access # noqa: SLF001
-        X=temp_tau_state.X,
-        y=temp_mu_state.y,
-        z=temp_mu_state.z,
-        binary_indices=temp_mu_state.binary_indices,
+    # 5. Swap the forests back and restore the mu-side fields
+    return replace(
+        state,
+        forest=state.forest_tau,
+        forest_tau=state.forest,
+        z=mu_state.z,
+        binary_indices=mu_state.binary_indices,
         resid=resid_val,  # updated global residual R
-        resid_unit=temp_mu_state.resid_unit,
-        resid_eff_scale=temp_mu_state.resid_eff_scale,
-        resid_inexact_integral=temp_mu_state.resid_inexact_integral,
+        resid_eff_scale=mu_state.resid_eff_scale,
+        resid_inexact_integral=mu_state.resid_inexact_integral,
         error_cov_inv=latest_error_cov_inv,
-        error_scale=temp_mu_state.error_scale,
-        prec_scale=temp_mu_state.prec_scale,
-        inv_sdev_scale=temp_mu_state.inv_sdev_scale,
-        inv_sdev_unit=temp_mu_state.inv_sdev_unit,
-        n_non_missing=temp_mu_state.n_non_missing,
-        sum_diag_prec_scale=temp_mu_state.sum_diag_prec_scale,
-        forest=temp_mu_state.forest,
-        config=temp_tau_state.config,
-        forest_tau=temp_tau_state.forest,
-        resid_tau=temp_tau_state.resid,
-        prec_scale_tau=temp_tau_state.prec_scale,
-        inv_sdev_scale_tau=temp_tau_state.inv_sdev_scale,
+        error_scale=mu_state.error_scale,
+        prec_scale=mu_state.prec_scale,
+        inv_sdev_scale=mu_state.inv_sdev_scale,
+        resid_tau=state.resid,
+        prec_scale_tau=state.prec_scale,
+        inv_sdev_scale_tau=state.inv_sdev_scale,
         tau_X=tau_X_new,
         trt=trt_val,
         tau_0=tau_0_new,
         b0=b0_new,
         b1=b1_new,
-        tau_0_prior_var=state.tau_0_prior_var,
-        adaptive_coding=state.adaptive_coding,
-        sigma2_leaf_shape_mu=state.sigma2_leaf_shape_mu,
-        sigma2_leaf_scale_mu=state.sigma2_leaf_scale_mu,
-        sigma2_leaf_shape_tau=state.sigma2_leaf_shape_tau,
-        sigma2_leaf_scale_tau=state.sigma2_leaf_scale_tau,
+    )
+
+
+def _tau_view(state: BCFState) -> BCFState:
+    """Return the state with the tau forest and its residuals in the mu slots."""
+    return replace(
+        state,
+        forest=state.forest_tau,
+        forest_tau=state.forest,
+        resid=state.resid_tau,
+        prec_scale=state.prec_scale_tau,
+        inv_sdev_scale=state.inv_sdev_scale_tau,
     )
 
 
@@ -369,34 +338,14 @@ def run_bcf_mcmc(
     """
     step_fn = bcf_step
 
-    # Helper to represent standard State for tau trace pre-allocation
-    temp_tau_state = State(
-        _chain_anchor=state._chain_anchor,  # pylint: disable=protected-access # noqa: SLF001
-        X=state.X,
-        y=state.y,
-        z=state.z,
-        binary_indices=state.binary_indices,
-        resid=state.resid_tau,
-        resid_unit=state.resid_unit,
-        resid_eff_scale=state.resid_eff_scale,
-        resid_inexact_integral=state.resid_inexact_integral,
-        error_cov_inv=state.error_cov_inv,
-        error_scale=state.error_scale,
-        prec_scale=state.prec_scale_tau,
-        inv_sdev_scale=state.inv_sdev_scale_tau,
-        inv_sdev_unit=state.inv_sdev_unit,
-        n_non_missing=state.n_non_missing,
-        sum_diag_prec_scale=state.sum_diag_prec_scale,
-        forest=state.forest_tau,
-        config=state.config,
-    )
+    tau_state = _tau_view(state)
 
     # Pre-allocate empty traces
     mu_b_empty = _empty_trace(n_burn, state, BurninTrace)
-    tau_b_empty = _empty_trace(n_burn, temp_tau_state, BurninTrace)
+    tau_b_empty = _empty_trace(n_burn, tau_state, BurninTrace)
 
     mu_m_empty = _empty_trace(n_save, state, MainTrace)
-    tau_m_empty = _empty_trace(n_save, temp_tau_state, MainTrace)
+    tau_m_empty = _empty_trace(n_save, tau_state, MainTrace)
 
     tau_0_m_empty = jnp.zeros((n_save,))
     b0_m_empty = jnp.zeros((n_save,))
@@ -448,30 +397,11 @@ def run_bcf_mcmc(
         # Convert state to trace representations
         mu_b = BurninTrace.from_state(new_state)
 
-        temp_tau_state_new = State(
-            _chain_anchor=new_state._chain_anchor,  # pylint: disable=protected-access # noqa: SLF001
-            X=new_state.X,
-            y=new_state.y,
-            z=new_state.z,
-            binary_indices=new_state.binary_indices,
-            resid=new_state.resid_tau,
-            resid_unit=new_state.resid_unit,
-            resid_eff_scale=new_state.resid_eff_scale,
-            resid_inexact_integral=new_state.resid_inexact_integral,
-            error_cov_inv=new_state.error_cov_inv,
-            error_scale=new_state.error_scale,
-            prec_scale=new_state.prec_scale_tau,
-            inv_sdev_scale=new_state.inv_sdev_scale_tau,
-            inv_sdev_unit=new_state.inv_sdev_unit,
-            n_non_missing=new_state.n_non_missing,
-            sum_diag_prec_scale=new_state.sum_diag_prec_scale,
-            forest=new_state.forest_tau,
-            config=new_state.config,
-        )
-        tau_b = BurninTrace.from_state(temp_tau_state_new)
+        tau_state_new = _tau_view(new_state)
+        tau_b = BurninTrace.from_state(tau_state_new)
 
         mu_m = MainTrace.from_state(new_state)
-        tau_m = MainTrace.from_state(temp_tau_state_new)
+        tau_m = MainTrace.from_state(tau_state_new)
 
         # Write trace data using mode='drop'
         new_mu_b_trace = _set(carry.mu_burnin_trace, burnin_idx, mu_b)

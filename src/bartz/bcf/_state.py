@@ -41,7 +41,6 @@ from bartz.mcmcstep._state import (
     Forest,
     State,
     Wishart,
-    chain_vmap_axes,
     init,
 )
 
@@ -104,19 +103,6 @@ class BCFState(State):
 
     adaptive_coding: bool = field(static=True)
     """Whether `b0` and `b1` are sampled instead of held at 0 and 1."""
-
-    @property
-    def has_chains(self) -> bool:
-        """Whether the state is multichain (i.e. has a chain axis)."""
-        return self.forest.has_chains
-
-    def num_chains(self) -> int | None:
-        """Return the number of chains, or `None` if the state is single-chain."""
-        if not self.has_chains:
-            return None
-
-        c = chain_vmap_axes(self.forest).var_tree  # pragma: no cover
-        return self.forest.var_tree.shape[c]  # pragma: no cover
 
 
 def init_bcf(

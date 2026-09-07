@@ -1,6 +1,6 @@
-# bartz/src/bartz/__init__.py
+# bartz/src/bartz/bcf/__init__.py
 #
-# Copyright (c) 2024-2026, The Bartz Contributors
+# Copyright (c) 2026, The Bartz Contributors
 #
 # This file is part of bartz.
 #
@@ -22,32 +22,12 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+"""Implement class `bcf` for Bayesian Causal Forests.
+
+.. autosummary::
+    :toctree:
+
+    bcf
 """
-Super-fast BART (Bayesian Additive Regression Trees) in Python.
 
-See the manual at https://bartz-org.github.io/bartz/docs
-"""
-
-from bartz import _workarounds
-
-# apply before importing anything that could initialize a jax backend
-_workarounds.apply_workarounds()
-
-from bartz import (  # noqa: F401
-    BART,
-    bcf,
-    grove,
-    mcmcloop,
-    mcmcstep,
-    prepcovars,
-    stochtree,
-)
-from bartz._interface import (  # noqa: F401
-    Bart,
-    DataFrame,
-    OutcomeType,
-    PredictKind,
-    Series,
-    SparseConfig,
-)
-from bartz._version import __version__, __version_info__  # noqa: F401
+from bartz.bcf._bcf import bcf  # noqa: F401

@@ -63,6 +63,14 @@ stochtree-compatible interface
 
     bartz.stochtree
 
+Bayesian Causal Forests interface
+---------------------------------
+
+.. autosummary::
+    :toctree: _autogen/mod
+
+    bartz.bcf
+
 MCMC and trees
 --------------
 

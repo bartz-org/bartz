@@ -43,6 +43,7 @@ import bartz
 
 PUBLIC_MODULES = (
     'bartz.BART',
+    'bartz.bcf',
     'bartz.debug',
     'bartz.grove',
     'bartz.mcmcloop',

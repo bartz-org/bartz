@@ -75,20 +75,20 @@ class BCFState(State):
     )
     tau_X: Float32[Array, ' n'] = field(data=-1)
     leaf_prior_cov_inv_tau: Float32[Array, ''] | Float32[Array, 'k k'] = field()
+    tau_0_prior_var: Float32[Array, ''] = field()
+    sigma2_leaf_shape_mu: Float32[Array, ''] = field()
+    sigma2_leaf_scale_mu: Float32[Array, ''] = field()
+    sigma2_leaf_shape_tau: Float32[Array, ''] = field()
+    sigma2_leaf_scale_tau: Float32[Array, ''] = field()
 
     # Defaults at the end
     tau_0: Float32[Array, '*chains'] = field(default=0.0)
     b0: Float32[Array, '*chains'] = field(default=0.0)
     b1: Float32[Array, '*chains'] = field(default=1.0)
-    tau_0_prior_var: FloatLike = field(static=True, default=1.0)
     sample_intercept: bool = field(static=True, default=True)
     adaptive_coding: bool = field(static=True, default=False)
     sample_sigma2_leaf_mu: bool = field(static=True, default=True)
-    sigma2_leaf_shape_mu: FloatLike = field(static=True, default=3.0)
-    sigma2_leaf_scale_mu: FloatLike = field(static=True, default=1.0)
     sample_sigma2_leaf_tau: bool = field(static=True, default=False)
-    sigma2_leaf_shape_tau: FloatLike = field(static=True, default=3.0)
-    sigma2_leaf_scale_tau: FloatLike = field(static=True, default=1.0)
 
     @property
     def has_chains(self) -> bool:
@@ -121,15 +121,15 @@ def init_bcf(
     leaf_prior_cov_inv_tau: FloatLike | Float[ArrayLike, 'k k'],
     min_points_per_leaf_mu: int = 10,
     min_points_per_leaf_tau: int = 10,
-    tau_0_prior_var: float | None = None,
+    tau_0_prior_var: FloatLike | None = None,
     sample_intercept: bool = True,
     adaptive_coding: bool = False,
     sample_sigma2_leaf_mu: bool = True,
-    sigma2_leaf_shape_mu: float = 3.0,
-    sigma2_leaf_scale_mu: float = 1.0,
+    sigma2_leaf_shape_mu: FloatLike = 3.0,
+    sigma2_leaf_scale_mu: FloatLike = 1.0,
     sample_sigma2_leaf_tau: bool = False,
-    sigma2_leaf_shape_tau: float = 3.0,
-    sigma2_leaf_scale_tau: float = 1.0,
+    sigma2_leaf_shape_tau: FloatLike = 3.0,
+    sigma2_leaf_scale_tau: FloatLike = 1.0,
     **kwargs: Any,
 ) -> BCFState:
     """
@@ -205,11 +205,11 @@ def init_bcf(
 
     if tau_0_prior_var is None:
         if outcome_type == 'binary':
-            tau_0_prior_var_val = 1.0
+            tau_0_prior_var_val = jnp.asarray(1.0, jnp.float32)
         else:
-            tau_0_prior_var_val = float(jnp.var(jnp.asarray(y)))
+            tau_0_prior_var_val = jnp.var(jnp.asarray(y, jnp.float32))
     else:
-        tau_0_prior_var_val = float(tau_0_prior_var)
+        tau_0_prior_var_val = jnp.asarray(tau_0_prior_var, jnp.float32)
 
     y_mu = jnp.copy(y)
     kwargs_mu = jax.tree.map(
@@ -312,9 +312,9 @@ def init_bcf(
         sample_intercept=sample_intercept,
         adaptive_coding=adaptive_coding,
         sample_sigma2_leaf_mu=sample_sigma2_leaf_mu,
-        sigma2_leaf_shape_mu=sigma2_leaf_shape_mu,
-        sigma2_leaf_scale_mu=sigma2_leaf_scale_mu,
+        sigma2_leaf_shape_mu=jnp.asarray(sigma2_leaf_shape_mu, jnp.float32),
+        sigma2_leaf_scale_mu=jnp.asarray(sigma2_leaf_scale_mu, jnp.float32),
         sample_sigma2_leaf_tau=sample_sigma2_leaf_tau,
-        sigma2_leaf_shape_tau=sigma2_leaf_shape_tau,
-        sigma2_leaf_scale_tau=sigma2_leaf_scale_tau,
+        sigma2_leaf_shape_tau=jnp.asarray(sigma2_leaf_shape_tau, jnp.float32),
+        sigma2_leaf_scale_tau=jnp.asarray(sigma2_leaf_scale_tau, jnp.float32),
     )

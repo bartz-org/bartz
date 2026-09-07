@@ -139,15 +139,12 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         num_active, sum_sq = _compute_leaf_prior_stats(
             temp_mu_state.forest.split_tree, temp_mu_state.forest.leaf_tree
         )
-        a = jnp.asarray(
-            state.sigma2_leaf_shape_mu + num_active / 2.0, dtype=jnp.float32
-        )
+        a = state.sigma2_leaf_shape_mu + num_active / 2.0
         # leaves are stored in `leaf_unit` units; convert their sum of squares to
         # data units so the Gamma update matches the data-scale prior scale
-        b = jnp.asarray(
+        b = (
             state.sigma2_leaf_scale_mu
-            + sum_sq * jnp.square(temp_mu_state.forest.leaf_unit) / 2.0,
-            dtype=jnp.float32,
+            + sum_sq * jnp.square(temp_mu_state.forest.leaf_unit) / 2.0
         )
         return jnp.exp(loggamma(keys[5], a)) / b
 
@@ -244,15 +241,12 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         num_active, sum_sq = _compute_leaf_prior_stats(
             temp_tau_state.forest.split_tree, temp_tau_state.forest.leaf_tree
         )
-        a = jnp.asarray(
-            state.sigma2_leaf_shape_tau + num_active / 2.0, dtype=jnp.float32
-        )
+        a = state.sigma2_leaf_shape_tau + num_active / 2.0
         # leaves are stored in `leaf_unit` units; convert their sum of squares to
         # data units so the Gamma update matches the data-scale prior scale
-        b = jnp.asarray(
+        b = (
             state.sigma2_leaf_scale_tau
-            + sum_sq * jnp.square(temp_tau_state.forest.leaf_unit) / 2.0,
-            dtype=jnp.float32,
+            + sum_sq * jnp.square(temp_tau_state.forest.leaf_unit) / 2.0
         )
         return jnp.exp(loggamma(keys[6], a)) / b
 

@@ -366,13 +366,13 @@ class bcf(eqx.Module):
 
         if leaf_prior_cov_inv_mu is None:
             if outcome_type == 'binary':
-                leaf_prior_cov_inv_mu = jnp.array(num_trees_mu / 1.0, dtype=jnp.float32)
+                leaf_prior_cov_inv_mu = jnp.array(num_trees_mu, jnp.float32)
             else:
                 leaf_prior_cov_inv_mu = _process_leaf_variance_settings(
                     y_train_internal,
                     binary_mask,
                     missing=None,
-                    k=jnp.asarray(k_mu, dtype=jnp.float32),
+                    k=jnp.array(k_mu),
                     num_trees=num_trees_mu,
                     tau_num=None,
                 )
@@ -382,13 +382,13 @@ class bcf(eqx.Module):
                 q_quantile = special.ndtri((p_val + 1) / 2.0)
                 phi_0 = 1.0 / jnp.sqrt(2 * jnp.pi)
                 sigma2_tau = ((delta_max / (q_quantile * phi_0)) ** 2) / num_trees_tau
-                leaf_prior_cov_inv_tau = jnp.array(1.0 / sigma2_tau, dtype=jnp.float32)
+                leaf_prior_cov_inv_tau = jnp.reciprocal(sigma2_tau)
             else:
                 leaf_prior_cov_inv_tau = _process_leaf_variance_settings(
                     y_train_internal,
                     binary_mask,
                     missing=None,
-                    k=jnp.asarray(k_tau, dtype=jnp.float32),
+                    k=jnp.array(k_tau),
                     num_trees=num_trees_tau,
                     tau_num=None,
                 )
@@ -418,8 +418,9 @@ class bcf(eqx.Module):
 
         binner = UniqueQuantileBinner(x_train_unified, key=keys.pop())
         x_train_binned = binner.bin(x_train_unified)
-        max_split_mu = jnp.array(binner.max_split)
-        max_split_tau = jnp.array(binner.max_split)
+        # copies because `init_bcf` may donate them
+        max_split_mu = jnp.copy(binner.max_split)
+        max_split_tau = jnp.copy(binner.max_split)
 
         if pihat_index is not None:
             if not include_pihat_in_mu:
@@ -565,10 +566,10 @@ class bcf(eqx.Module):
         )
         object.__setattr__(model, '_x_train_fmt', x_train_fmt)
         object.__setattr__(model, '_standardize', standardize)
-        object.__setattr__(model, '_y_mean', jnp.asarray(y_mean, dtype=jnp.float32))
-        object.__setattr__(model, '_y_std', jnp.asarray(y_std, dtype=jnp.float32))
+        object.__setattr__(model, '_y_mean', jnp.asarray(y_mean))
+        object.__setattr__(model, '_y_std', jnp.asarray(y_std))
         object.__setattr__(model, '_outcome_type', outcome_type)
-        object.__setattr__(model, '_offset', jnp.asarray(offset, dtype=jnp.float32))
+        object.__setattr__(model, '_offset', jnp.asarray(offset))
         return model
 
     def save_npz(self, path: str | Path) -> None:

@@ -172,7 +172,7 @@ def init_bcf(
     BCFState
         The initialized BCFState.
     """
-    trt_array = jnp.asarray(trt, bool)
+    trt_array = jnp.asarray(trt)
 
     user_filter_splitless = kwargs.pop('filter_splitless_vars', 0)
     filter_splitless_vars_mu = max(
@@ -187,9 +187,9 @@ def init_bcf(
     elif tau_0_prior_var is not None:
         tau_0_prior_cov_inv = jnp.reciprocal(jnp.asarray(tau_0_prior_var, jnp.float32))
     elif outcome_type == 'binary':
-        tau_0_prior_cov_inv = jnp.asarray(1.0, jnp.float32)
+        tau_0_prior_cov_inv = jnp.array(1.0, jnp.float32)
     else:
-        tau_0_prior_cov_inv = jnp.reciprocal(jnp.var(jnp.asarray(y, jnp.float32)))
+        tau_0_prior_cov_inv = jnp.reciprocal(jnp.var(jnp.asarray(y)))
 
     if sample_leaf_prior_cov_inv_mu:
         shape_mu = jnp.asarray(leaf_prior_cov_inv_shape_mu, jnp.float32)
@@ -259,7 +259,7 @@ def init_bcf(
     if adaptive_coding:
         b0_init = -0.5
         b1_init = 0.5
-        b_prior_cov_inv = jnp.array(2.0)
+        b_prior_cov_inv = jnp.array(2.0, jnp.float32)
     else:
         b0_init = 0.0
         b1_init = 1.0
@@ -291,8 +291,8 @@ def init_bcf(
         trt=trt_array,
         tau_X=jnp.zeros(len(trt_array), dtype=jnp.float32) if adaptive_coding else None,
         tau_0=jnp.zeros((), dtype=jnp.float32),
-        b0=jnp.array(b0_init, dtype=jnp.float32),
-        b1=jnp.array(b1_init, dtype=jnp.float32),
+        b0=jnp.array(b0_init, jnp.float32),
+        b1=jnp.array(b1_init, jnp.float32),
         tau_0_prior_cov_inv=tau_0_prior_cov_inv,
         b_prior_cov_inv=b_prior_cov_inv,
         leaf_prior_cov_inv_shape_mu=shape_mu,

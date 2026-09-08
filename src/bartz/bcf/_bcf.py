@@ -24,8 +24,6 @@
 
 """Bayesian Causal Forests (BCF) interface."""
 
-from __future__ import annotations
-
 import dataclasses
 import json
 from pathlib import Path
@@ -509,7 +507,7 @@ class bcf(eqx.Module):
         y_std: Float32[ArrayLike, ''] | float = 1.0,
         outcome_type: str = 'continuous',
         offset: Float32[ArrayLike, ''] | float = 0.0,
-    ) -> bcf:
+    ) -> 'bcf':
         """
         Private factory constructor to initialize bcf instance from restored state.
 
@@ -633,7 +631,7 @@ class bcf(eqx.Module):
         np.savez_compressed(path, allow_pickle=True, **state)
 
     @classmethod
-    def load_npz(cls, path: str | Path) -> bcf:
+    def load_npz(cls, path: str | Path) -> 'bcf':
         """
         Load BCF traces from an NPZ archive, bypassing __init__ MCMC.
 

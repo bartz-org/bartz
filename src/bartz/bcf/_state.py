@@ -24,8 +24,6 @@
 
 """Module defining the BCF State and initialization."""
 
-from __future__ import annotations
-
 from dataclasses import replace
 from typing import Any, Literal
 

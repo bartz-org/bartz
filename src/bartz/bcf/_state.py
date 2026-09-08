@@ -22,7 +22,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Module defining the BCF State and initialization."""
+"""Define `BCFState` and `init_bcf`."""
 
 from dataclasses import replace
 from typing import Literal

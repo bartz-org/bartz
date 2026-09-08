@@ -114,10 +114,6 @@ def _serialize_binner(binner: Any, max_split: Any = None) -> dict[str, Any]:  # 
             raise RuntimeError(msg) from exc
     binner_dict['max_split'] = np.asarray(max_split)
 
-    # Pylint protected-access (W0212) is explicitly bypassed here because
-    # _serialize_binner serves as a dedicated external adapter extracting
-    # private trace arrays for NPZ persistence.
-    # pylint: disable=protected-access
     if hasattr(binner, '_splits'):
         binner_dict['_splits'] = np.asarray(binner._splits)  # noqa: SLF001
 
@@ -125,7 +121,6 @@ def _serialize_binner(binner: Any, max_split: Any = None) -> dict[str, Any]:  # 
         binner_dict['_low'] = np.asarray(binner._low)  # noqa: SLF001
         binner_dict['_high'] = np.asarray(binner._high)  # noqa: SLF001
         binner_dict['_max_bins'] = np.asarray(binner._max_bins)  # noqa: SLF001
-    # pylint: enable=protected-access
 
     return binner_dict
 
@@ -158,7 +153,7 @@ def _deserialize_binner(data: Any) -> Any:  # noqa: ANN401
     return binner
 
 
-class bcf(eqx.Module):  # pylint: disable=invalid-name
+class bcf(eqx.Module):
     R"""
     Bayesian Causal Forests (BCF).
 

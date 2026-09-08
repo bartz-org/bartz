@@ -265,7 +265,7 @@ def init_bcf(
     # Assemble everything into the BCFState subclass
     return BCFState(
         # Inherited fields from State (populated from state_mu)
-        _chain_anchor=state_mu._chain_anchor,  # pylint: disable=protected-access # noqa: SLF001
+        _chain_anchor=state_mu._chain_anchor,  # noqa: SLF001
         X=state_mu.X,
         y=state_mu.y,
         z=state_mu.z,

@@ -67,7 +67,6 @@ def _rhat_two_chains(
     return rhat_rank(stacked, split=False)
 
 
-# pylint: disable=protected-access
 class TestBcf:
     """Tests for the BCF wrapper module."""
 

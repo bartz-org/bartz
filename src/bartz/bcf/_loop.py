@@ -287,9 +287,6 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         error_scale=mu_state.error_scale,
         prec_scale=mu_state.prec_scale,
         inv_sdev_scale=mu_state.inv_sdev_scale,
-        resid_tau=state.resid,
-        prec_scale_tau=state.prec_scale,
-        inv_sdev_scale_tau=state.inv_sdev_scale,
         tau_X=tau_X_new,
         trt=trt_val,
         tau_0=tau_0_new,
@@ -299,15 +296,8 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
 
 
 def _tau_view(state: BCFState) -> BCFState:
-    """Return the state with the tau forest and its residuals in the mu slots."""
-    return replace(
-        state,
-        forest=state.forest_tau,
-        forest_tau=state.forest,
-        resid=state.resid_tau,
-        prec_scale=state.prec_scale_tau,
-        inv_sdev_scale=state.inv_sdev_scale_tau,
-    )
+    """Return the state with the tau forest in the mu forest slot."""
+    return replace(state, forest=state.forest_tau, forest_tau=state.forest)
 
 
 def run_bcf_mcmc(

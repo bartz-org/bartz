@@ -34,15 +34,7 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float, Float32, UInt
 
 from bartz._jaxext import field
-from bartz.mcmcstep._state import (
-    CHAIN_AXIS,
-    ArrayLike,
-    FloatLike,
-    Forest,
-    State,
-    Wishart,
-    init,
-)
+from bartz.mcmcstep._state import ArrayLike, FloatLike, Forest, State, Wishart, init
 
 
 class BCFState(State):
@@ -56,21 +48,6 @@ class BCFState(State):
 
     trt: Float32[Array, ' n'] = field(data=-1)
     """The treatment variable."""
-
-    resid_tau: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
-        chains=CHAIN_AXIS, data=-1
-    )
-    """The residuals of the tau forest."""
-
-    prec_scale_tau: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None = field(
-        data=-1
-    )
-    """Scale on the error precision for the tau forest."""
-
-    inv_sdev_scale_tau: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(
-        data=-1
-    )
-    """Reciprocal of standard deviation scale for the tau forest."""
 
     tau_X: Float32[Array, ' n'] = field(data=-1)
     """The treatment effect predicted by the tau forest at each datapoint."""
@@ -315,9 +292,6 @@ def init_bcf(
         config=state_mu.config,
         # Subclass additions
         forest_tau=state_tau.forest,  # tau forest
-        resid_tau=state_tau.resid,  # tau residuals
-        prec_scale_tau=state_tau.prec_scale,
-        inv_sdev_scale_tau=state_tau.inv_sdev_scale,
         trt=trt_array,
         tau_X=jnp.zeros(len(trt_array), dtype=jnp.float32),
         tau_0=jnp.zeros((), dtype=jnp.float32),

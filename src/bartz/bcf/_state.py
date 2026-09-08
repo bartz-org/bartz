@@ -51,7 +51,7 @@ class BCFState(State):
 
     tau_X: Float32[Array, ' n'] | None = field(data=-1)
     """The treatment effect predicted by the tau forest at each datapoint,
-    `None` if not needed because `adaptive_coding` is off."""
+    `None` if not needed because `b_prior_cov_inv` is `None`."""
 
     tau_0: Float32[Array, '*chains']
     """Global intercept for the treatment effect."""
@@ -61,6 +61,9 @@ class BCFState(State):
 
     b1: Float32[Array, '*chains']
     """Adaptive coding weight for treated units."""
+
+    b_prior_cov_inv: Float32[Array, ''] | None
+    """Prior precision of `b0` and `b1`, `None` to leave them unchanged."""
 
     tau_0_prior_var: Float32[Array, ''] | None
     """Prior variance of `tau_0`, `None` to hold `tau_0` at zero."""
@@ -78,9 +81,6 @@ class BCFState(State):
 
     sigma2_leaf_scale_tau: Float32[Array, ''] | None
     """Scale of the Gamma prior on the tau leaf precision."""
-
-    adaptive_coding: bool = field(static=True)
-    """Whether `b0` and `b1` are sampled instead of held at 0 and 1."""
 
 
 def init_bcf(
@@ -266,9 +266,11 @@ def init_bcf(
     if adaptive_coding:
         b0_init = -0.5
         b1_init = 0.5
+        b_prior_cov_inv = jnp.array(2.0)
     else:
         b0_init = 0.0
         b1_init = 1.0
+        b_prior_cov_inv = None
 
     # Assemble everything into the BCFState subclass
     return BCFState(
@@ -299,7 +301,7 @@ def init_bcf(
         b0=jnp.array(b0_init, dtype=jnp.float32),
         b1=jnp.array(b1_init, dtype=jnp.float32),
         tau_0_prior_var=tau_0_prior_var_val,
-        adaptive_coding=adaptive_coding,
+        b_prior_cov_inv=b_prior_cov_inv,
         sigma2_leaf_shape_mu=shape_mu,
         sigma2_leaf_scale_mu=scale_mu,
         sigma2_leaf_shape_tau=shape_tau,

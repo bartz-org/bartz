@@ -181,7 +181,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     sigma2 = 1.0 / latest_error_cov_inv.value
 
     # Adaptive coding basis
-    b_z = jnp.where(trt_val == 1, state.b1, state.b0)
+    b_z = jnp.where(trt_val, state.b1, state.b0)
 
     if state.tau_0_prior_cov_inv is not None:
         # partial residual removing current tau_0 effect, on the data scale
@@ -267,24 +267,22 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         resid_partial = resid_val * resid_unit + tau_full * b_z
 
         b0_prec = (
-            jnp.sum(jnp.square(tau_full) * (trt_val == 0)) / sigma2
-            + state.b_prior_cov_inv
+            jnp.sum(jnp.square(tau_full) * ~trt_val) / sigma2 + state.b_prior_cov_inv
         )
-        b0_mean = jnp.sum(tau_full * resid_partial * (trt_val == 0)) / sigma2 / b0_prec
+        b0_mean = jnp.sum(tau_full * resid_partial * ~trt_val) / sigma2 / b0_prec
         b0_new = b0_mean + random.normal(keys[3], shape=b0_mean.shape) * jax.lax.rsqrt(
             b0_prec
         )
 
         b1_prec = (
-            jnp.sum(jnp.square(tau_full) * (trt_val == 1)) / sigma2
-            + state.b_prior_cov_inv
+            jnp.sum(jnp.square(tau_full) * trt_val) / sigma2 + state.b_prior_cov_inv
         )
-        b1_mean = jnp.sum(tau_full * resid_partial * (trt_val == 1)) / sigma2 / b1_prec
+        b1_mean = jnp.sum(tau_full * resid_partial * trt_val) / sigma2 / b1_prec
         b1_new = b1_mean + random.normal(keys[4], shape=b1_mean.shape) * jax.lax.rsqrt(
             b1_prec
         )
 
-        b_z_new = jnp.where(trt_val == 1, b1_new, b0_new)
+        b_z_new = jnp.where(trt_val, b1_new, b0_new)
         resid_val = (resid_partial - tau_full * b_z_new) / resid_unit
     else:
         b0_new = state.b0

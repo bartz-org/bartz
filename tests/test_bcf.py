@@ -32,6 +32,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import stochtree
+from equinox import EquinoxRuntimeError
 from jax import random
 from jaxtyping import ArrayLike, Shaped
 from scipy import stats
@@ -471,7 +472,7 @@ class TestBcf:
 
         init_state = init_bcf(
             X_unified=x_binned,
-            trt=z_train,
+            trt=z_train.astype(bool),
             y=y_train,
             offset=0.0,
             max_split_mu=jnp.array(max_split),
@@ -916,6 +917,22 @@ class TestBcf:
                 z_train=z_train,
                 pihat_train=pihat,
                 outcome_type='binary',
+                num_trees_mu=2,
+                num_trees_tau=2,
+                ndpost=1,
+                nskip=0,
+                seed=42,
+            )
+
+    def test_bcf_treatment_requires_0_1(self) -> None:
+        """BCF rejects treatments that are not 0/1."""
+        x_train, pihat, _, y_train, _, _, _ = self._generate_bcf_data(n=20, seed=0)
+        with pytest.raises(EquinoxRuntimeError, match='must be 0 or 1'):
+            bcf(
+                x_train=x_train,
+                y_train=y_train,
+                z_train=np.full(20, 0.5, np.float32),
+                pihat_train=pihat,
                 num_trees_mu=2,
                 num_trees_tau=2,
                 ndpost=1,

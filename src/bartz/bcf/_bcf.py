@@ -172,7 +172,7 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
     y_train
         The training responses.
     z_train
-        The treatment assignment (binary or continuous).
+        The binary treatment assignment (0 or 1).
     pihat_train
         The estimated propensity scores. If provided, appended to `x_train`.
     x_test
@@ -305,6 +305,11 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
         x_train, self._x_train_fmt = _process_bcf_predictor_input(x_train)
         y_train = _process_response_input(y_train)
         z_train = _process_response_input(z_train)
+        z_train = eqx.error_if(
+            z_train,
+            jnp.any((z_train != 0) & (z_train != 1)),
+            'Values in `z_train` must be 0 or 1.',
+        ).astype(bool)
 
         self._outcome_type = outcome_type
 

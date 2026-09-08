@@ -30,7 +30,7 @@ from typing import Any, Literal
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Float32, UInt
+from jaxtyping import Array, Bool, Float, Float32, UInt
 
 from bartz._jaxext import field
 from bartz.mcmcstep._state import ArrayLike, FloatLike, Forest, State, Wishart, init
@@ -45,8 +45,8 @@ class BCFState(State):
     forest_tau: Forest
     """The treatment forest (tau)."""
 
-    trt: Float32[Array, ' n'] = field(data=-1)
-    """The treatment variable."""
+    trt: Bool[Array, ' n'] = field(data=-1)
+    """Whether each unit is treated."""
 
     tau_X: Float32[Array, ' n'] | None = field(data=-1)
     """The treatment effect predicted by the tau forest at each datapoint,
@@ -87,7 +87,7 @@ class BCFState(State):
 def init_bcf(
     *,
     X_unified: UInt[ArrayLike, 'p n'],
-    trt: Float32[ArrayLike, ' n'],
+    trt: Bool[ArrayLike, ' n'],
     y: Float32[ArrayLike, ' n'] | Float32[ArrayLike, ' k n'],
     outcome_type: Literal['continuous', 'binary'] = 'continuous',
     offset: FloatLike | Float[ArrayLike, ' k'],
@@ -120,7 +120,7 @@ def init_bcf(
     X_unified
         The unified binned predictors matrix [X, pihat].
     trt
-        The treatment assignment array.
+        The binary treatment assignment.
     y
         The response array.
     outcome_type
@@ -173,7 +173,7 @@ def init_bcf(
     BCFState
         The initialized BCFState.
     """
-    trt_array = jnp.asarray(trt, jnp.float32)
+    trt_array = jnp.asarray(trt, bool)
 
     user_filter_splitless = kwargs.pop('filter_splitless_vars', 0)
     filter_splitless_vars_mu = max(
@@ -229,11 +229,9 @@ def init_bcf(
         **kwargs_mu,
     )
 
-    # 2. Initialize treatment state (used to extract tau components, e.g. weights)
-    safe_trt = jnp.where(trt_array == 0, 1.0, trt_array)
-    error_scale = 1.0 / jnp.abs(safe_trt)
-    missing = trt_array == 0
-
+    # 2. Initialize treatment state, only its forest is kept
+    # Marking controls as missing gives the forest the per-leaf precision cache
+    # `bcf_step` needs, initialized for the default coding b_z = trt.
     # The tau init runs as continuous regression, which requires an error
     # precision prior; its output precision is discarded, only the forest is kept.
     kwargs_tau: dict = kwargs
@@ -249,8 +247,7 @@ def init_bcf(
         num_trees=num_trees_tau,
         p_nonterminal=p_nonterminal_tau,
         leaf_prior_cov_inv=leaf_prior_cov_inv_tau,
-        error_scale=error_scale,
-        missing=missing,
+        missing=~trt_array,
         filter_splitless_vars=filter_splitless_vars_tau,
         min_points_per_leaf=min_points_per_leaf_tau,
         **kwargs_tau,

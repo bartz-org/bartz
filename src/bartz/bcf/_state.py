@@ -32,6 +32,7 @@ import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float32, UInt
 
 from bartz._jaxext import field
+from bartz.mcmcstep._axes import CHAIN_AXIS
 from bartz.mcmcstep._state import ArrayLike, FloatLike, Forest, State, Wishart, init
 
 
@@ -47,17 +48,17 @@ class BCFState(State):
     trt: Bool[Array, ' n'] = field(data=-1)
     """Whether each unit is treated."""
 
-    tau_X: Float32[Array, ' n'] | None = field(data=-1)
+    tau_X: Float32[Array, '*chains n'] | None = field(chains=CHAIN_AXIS, data=-1)
     """The treatment effect predicted by the tau forest at each datapoint,
     `None` if not needed because `b_prior_cov_inv` is `None`."""
 
-    tau_0: Float32[Array, '*chains']
+    tau_0: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """Global intercept for the treatment effect."""
 
-    b0: Float32[Array, '*chains']
+    b0: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """Adaptive coding weight for untreated units."""
 
-    b1: Float32[Array, '*chains']
+    b1: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """Adaptive coding weight for treated units."""
 
     b_prior_cov_inv: Float32[Array, ''] | None

@@ -96,7 +96,7 @@ def _sample_leaf_prior_cov_inv(
     key: Key[Array, ''],
     state: State,
     shape: Float32[Array, ''],
-    scale: Float32[Array, ''],
+    rate: Float32[Array, ''],
 ) -> Float32[Array, ''] | Float32[Array, 'k k']:
     """
     Draw the leaf prior precision of a forest from its Gamma conditional.
@@ -108,7 +108,7 @@ def _sample_leaf_prior_cov_inv(
     state
         The state holding the forest, with the leaves already updated.
     shape
-    scale
+    rate
         The parameters of the Gamma prior on the precision.
 
     Returns
@@ -120,8 +120,8 @@ def _sample_leaf_prior_cov_inv(
     )
     a = shape + num_active / 2.0
     # leaves are stored in `leaf_unit` units; convert their sum of squares to
-    # data units so the Gamma update matches the data-scale prior scale
-    b = scale + sum_sq * jnp.square(state.forest.leaf_unit) / 2.0
+    # data units so the Gamma update matches the data-scale prior rate
+    b = rate + sum_sq * jnp.square(state.forest.leaf_unit) / 2.0
     return jnp.exp(loggamma(key, a)) / b
 
 
@@ -151,13 +151,16 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # html documentation.
     state = cast(BCFState, step(keys[0], state))
 
-    if state.sigma2_leaf_shape_mu is not None:
-        assert state.sigma2_leaf_scale_mu is not None
+    if state.leaf_prior_cov_inv_shape_mu is not None:
+        assert state.leaf_prior_cov_inv_rate_mu is not None
         state = eqx.tree_at(
             lambda s: s.forest.leaf_prior_cov_inv,
             state,
             _sample_leaf_prior_cov_inv(
-                keys[5], state, state.sigma2_leaf_shape_mu, state.sigma2_leaf_scale_mu
+                keys[5],
+                state,
+                state.leaf_prior_cov_inv_shape_mu,
+                state.leaf_prior_cov_inv_rate_mu,
             ),
         )
 
@@ -165,7 +168,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     latest_error_cov_inv = state.error_cov_inv
 
     # `resid` is stored scaled: ``resid_unit * resid = data residual``, whereas
-    # `tau_0`, `tau_X`, `b0`, `b1`, `sigma2` and `tau_0_prior_var` are on the
+    # `tau_0`, `tau_X`, `b0`, `b1`, `sigma2` and `tau_0_prior_cov_inv` are on the
     # data scale (matching `_bcf.predict`). Convert `resid` in and out of data
     # units so the scalar Gibbs updates below are unit-consistent for any
     # `resid_unit` (no-op when it is 1). Copy it out because the tau `step`
@@ -180,11 +183,11 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # Adaptive coding basis
     b_z = jnp.where(trt_val == 1, state.b1, state.b0)
 
-    if state.tau_0_prior_var is not None:
+    if state.tau_0_prior_cov_inv is not None:
         # partial residual removing current tau_0 effect, on the data scale
         partial = resid_val * resid_unit + tau_0 * b_z
 
-        prec = jnp.sum(jnp.square(b_z)) / sigma2 + 1.0 / state.tau_0_prior_var
+        prec = jnp.sum(jnp.square(b_z)) / sigma2 + state.tau_0_prior_cov_inv
         mean = jnp.sum(b_z * partial) / sigma2 / prec
 
         tau_0_new = mean + random.normal(keys[1], shape=mean.shape) * jax.lax.rsqrt(
@@ -235,13 +238,16 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     state = cast(BCFState, step(keys[2], state))
 
-    if state.sigma2_leaf_shape_tau is not None:
-        assert state.sigma2_leaf_scale_tau is not None
+    if state.leaf_prior_cov_inv_shape_tau is not None:
+        assert state.leaf_prior_cov_inv_rate_tau is not None
         state = eqx.tree_at(
             lambda s: s.forest.leaf_prior_cov_inv,
             state,
             _sample_leaf_prior_cov_inv(
-                keys[6], state, state.sigma2_leaf_shape_tau, state.sigma2_leaf_scale_tau
+                keys[6],
+                state,
+                state.leaf_prior_cov_inv_shape_tau,
+                state.leaf_prior_cov_inv_rate_tau,
             ),
         )
 

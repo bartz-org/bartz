@@ -449,12 +449,12 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
             tau_0_prior_var=tau_0_prior_var,
             sample_intercept=sample_intercept,
             adaptive_coding=adaptive_coding,
-            sample_sigma2_leaf_mu=sample_sigma2_leaf_mu,
-            sigma2_leaf_shape_mu=sigma2_leaf_shape_mu,
-            sigma2_leaf_scale_mu=sigma2_leaf_scale_mu,
-            sample_sigma2_leaf_tau=sample_sigma2_leaf_tau,
-            sigma2_leaf_shape_tau=sigma2_leaf_shape_tau,
-            sigma2_leaf_scale_tau=sigma2_leaf_scale_tau,
+            sample_leaf_prior_cov_inv_mu=sample_sigma2_leaf_mu,
+            leaf_prior_cov_inv_shape_mu=sigma2_leaf_shape_mu,
+            leaf_prior_cov_inv_rate_mu=sigma2_leaf_scale_mu,
+            sample_leaf_prior_cov_inv_tau=sample_sigma2_leaf_tau,
+            leaf_prior_cov_inv_shape_tau=sigma2_leaf_shape_tau,
+            leaf_prior_cov_inv_rate_tau=sigma2_leaf_scale_tau,
             error_cov_inv=error_cov_inv,
         )
 

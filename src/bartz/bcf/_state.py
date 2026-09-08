@@ -65,22 +65,24 @@ class BCFState(State):
     b_prior_cov_inv: Float32[Array, ''] | None
     """Prior precision of `b0` and `b1`, `None` to leave them unchanged."""
 
-    tau_0_prior_var: Float32[Array, ''] | None
-    """Prior variance of `tau_0`, `None` to hold `tau_0` at zero."""
+    tau_0_prior_cov_inv: Float32[Array, ''] | None
+    """Prior precision of `tau_0`, `None` to hold `tau_0` at zero."""
 
-    sigma2_leaf_shape_mu: Float32[Array, ''] | None
-    """Shape of the Gamma prior on the mu leaf precision. Set it and the scale
-    to `None` to leave the precision constant."""
+    leaf_prior_cov_inv_shape_mu: Float32[Array, ''] | None
+    """Shape of the Gamma prior on the mu leaf precision
+    `forest.leaf_prior_cov_inv`. Set it and the rate to `None` to hold the
+    precision fixed."""
 
-    sigma2_leaf_scale_mu: Float32[Array, ''] | None
-    """Scale of the Gamma prior on the mu leaf precision."""
+    leaf_prior_cov_inv_rate_mu: Float32[Array, ''] | None
+    """Rate of the Gamma prior on the mu leaf precision."""
 
-    sigma2_leaf_shape_tau: Float32[Array, ''] | None
-    """Shape of the Gamma prior on the tau leaf precision. Set it and the scale
-    to `None` to leave the precision constant."""
+    leaf_prior_cov_inv_shape_tau: Float32[Array, ''] | None
+    """Shape of the Gamma prior on the tau leaf precision
+    `forest_tau.leaf_prior_cov_inv`. Set it and the rate to `None` to hold the
+    precision fixed."""
 
-    sigma2_leaf_scale_tau: Float32[Array, ''] | None
-    """Scale of the Gamma prior on the tau leaf precision."""
+    leaf_prior_cov_inv_rate_tau: Float32[Array, ''] | None
+    """Rate of the Gamma prior on the tau leaf precision."""
 
 
 def init_bcf(
@@ -103,12 +105,12 @@ def init_bcf(
     tau_0_prior_var: FloatLike | None = None,
     sample_intercept: bool = True,
     adaptive_coding: bool = False,
-    sample_sigma2_leaf_mu: bool = True,
-    sigma2_leaf_shape_mu: FloatLike = 3.0,
-    sigma2_leaf_scale_mu: FloatLike = 1.0,
-    sample_sigma2_leaf_tau: bool = False,
-    sigma2_leaf_shape_tau: FloatLike = 3.0,
-    sigma2_leaf_scale_tau: FloatLike = 1.0,
+    sample_leaf_prior_cov_inv_mu: bool = True,
+    leaf_prior_cov_inv_shape_mu: FloatLike = 3.0,
+    leaf_prior_cov_inv_rate_mu: FloatLike = 1.0,
+    sample_leaf_prior_cov_inv_tau: bool = False,
+    leaf_prior_cov_inv_shape_tau: FloatLike = 3.0,
+    leaf_prior_cov_inv_rate_tau: FloatLike = 1.0,
     **kwargs: Any,
 ) -> BCFState:
     """
@@ -139,9 +141,9 @@ def init_bcf(
     p_nonterminal_tau
         Split prior for treatment.
     leaf_prior_cov_inv_mu
-        Leaf variance prior for prognostic.
+        Leaf prior precision of the prognostic forest.
     leaf_prior_cov_inv_tau
-        Leaf variance prior for treatment.
+        Leaf prior precision of the treatment forest.
     min_points_per_leaf_mu
         Minimum data points per leaf for prognostic forest.
     min_points_per_leaf_tau
@@ -152,18 +154,18 @@ def init_bcf(
         Whether to sample a global treatment intercept `tau_0`.
     adaptive_coding
         Whether to use adaptive coding for the treatment effect.
-    sample_sigma2_leaf_mu
-        Whether to sample leaf variance for prognostic forest.
-    sigma2_leaf_shape_mu
-        Shape parameter for prior on leaf variance of prognostic forest.
-    sigma2_leaf_scale_mu
-        Scale parameter for prior on leaf variance of prognostic forest.
-    sample_sigma2_leaf_tau
-        Whether to sample leaf variance for treatment forest.
-    sigma2_leaf_shape_tau
-        Shape parameter for prior on leaf variance of treatment forest.
-    sigma2_leaf_scale_tau
-        Scale parameter for prior on leaf variance of treatment forest.
+    sample_leaf_prior_cov_inv_mu
+        Whether to sample the leaf prior precision of the prognostic forest.
+    leaf_prior_cov_inv_shape_mu
+        Shape of the Gamma prior on the prognostic leaf precision.
+    leaf_prior_cov_inv_rate_mu
+        Rate of the Gamma prior on the prognostic leaf precision.
+    sample_leaf_prior_cov_inv_tau
+        Whether to sample the leaf prior precision of the treatment forest.
+    leaf_prior_cov_inv_shape_tau
+        Shape of the Gamma prior on the treatment leaf precision.
+    leaf_prior_cov_inv_rate_tau
+        Rate of the Gamma prior on the treatment leaf precision.
     **kwargs
         Additional kwargs for the base BART initializer.
 
@@ -183,27 +185,27 @@ def init_bcf(
     )
 
     if not sample_intercept:
-        tau_0_prior_var_val = None
+        tau_0_prior_cov_inv = None
     elif tau_0_prior_var is not None:
-        tau_0_prior_var_val = jnp.asarray(tau_0_prior_var, jnp.float32)
+        tau_0_prior_cov_inv = jnp.reciprocal(jnp.asarray(tau_0_prior_var, jnp.float32))
     elif outcome_type == 'binary':
-        tau_0_prior_var_val = jnp.asarray(1.0, jnp.float32)
+        tau_0_prior_cov_inv = jnp.asarray(1.0, jnp.float32)
     else:
-        tau_0_prior_var_val = jnp.var(jnp.asarray(y, jnp.float32))
+        tau_0_prior_cov_inv = jnp.reciprocal(jnp.var(jnp.asarray(y, jnp.float32)))
 
-    if sample_sigma2_leaf_mu:
-        shape_mu = jnp.asarray(sigma2_leaf_shape_mu, jnp.float32)
-        scale_mu = jnp.asarray(sigma2_leaf_scale_mu, jnp.float32)
+    if sample_leaf_prior_cov_inv_mu:
+        shape_mu = jnp.asarray(leaf_prior_cov_inv_shape_mu, jnp.float32)
+        rate_mu = jnp.asarray(leaf_prior_cov_inv_rate_mu, jnp.float32)
     else:
         shape_mu = None
-        scale_mu = None
+        rate_mu = None
 
-    if sample_sigma2_leaf_tau:
-        shape_tau = jnp.asarray(sigma2_leaf_shape_tau, jnp.float32)
-        scale_tau = jnp.asarray(sigma2_leaf_scale_tau, jnp.float32)
+    if sample_leaf_prior_cov_inv_tau:
+        shape_tau = jnp.asarray(leaf_prior_cov_inv_shape_tau, jnp.float32)
+        rate_tau = jnp.asarray(leaf_prior_cov_inv_rate_tau, jnp.float32)
     else:
         shape_tau = None
-        scale_tau = None
+        rate_tau = None
 
     y_mu = jnp.copy(y)
     kwargs_mu = jax.tree.map(
@@ -300,10 +302,10 @@ def init_bcf(
         tau_0=jnp.zeros((), dtype=jnp.float32),
         b0=jnp.array(b0_init, dtype=jnp.float32),
         b1=jnp.array(b1_init, dtype=jnp.float32),
-        tau_0_prior_var=tau_0_prior_var_val,
+        tau_0_prior_cov_inv=tau_0_prior_cov_inv,
         b_prior_cov_inv=b_prior_cov_inv,
-        sigma2_leaf_shape_mu=shape_mu,
-        sigma2_leaf_scale_mu=scale_mu,
-        sigma2_leaf_shape_tau=shape_tau,
-        sigma2_leaf_scale_tau=scale_tau,
+        leaf_prior_cov_inv_shape_mu=shape_mu,
+        leaf_prior_cov_inv_rate_mu=rate_mu,
+        leaf_prior_cov_inv_shape_tau=shape_tau,
+        leaf_prior_cov_inv_rate_tau=rate_tau,
     )

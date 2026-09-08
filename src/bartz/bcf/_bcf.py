@@ -429,7 +429,7 @@ class bcf(eqx.Module):
                 # Block splits on propensity score for tau
                 max_split_tau = max_split_tau.at[pihat_index].set(0)
 
-        # 4. Initialize BCFState (single subclass)
+        # 4. Initialize BCFState
         initial_state = init_bcf(
             X_unified=x_train_binned,
             trt=z_train,
@@ -446,6 +446,9 @@ class bcf(eqx.Module):
             leaf_prior_cov_inv_tau=leaf_prior_cov_inv_tau,
             min_points_per_leaf_mu=min_points_per_leaf_mu,
             min_points_per_leaf_tau=min_points_per_leaf_tau,
+            # ignore all predictors without splits, like `Bart(..., rm_const=True)`
+            filter_splitless_vars_mu=jnp.sum(max_split_mu == 0).item(),
+            filter_splitless_vars_tau=jnp.sum(max_split_tau == 0).item(),
             tau_0_prior_var=tau_0_prior_var,
             sample_intercept=sample_intercept,
             adaptive_coding=adaptive_coding,

@@ -100,6 +100,8 @@ def init_bcf(
     leaf_prior_cov_inv_tau: FloatLike,
     min_points_per_leaf_mu: int = 10,
     min_points_per_leaf_tau: int = 10,
+    filter_splitless_vars_mu: int = 0,
+    filter_splitless_vars_tau: int = 0,
     tau_0_prior_var: FloatLike | None = None,
     sample_intercept: bool = True,
     adaptive_coding: bool = False,
@@ -146,6 +148,10 @@ def init_bcf(
         Minimum data points per leaf for prognostic forest.
     min_points_per_leaf_tau
         Minimum data points per leaf for treatment forest.
+    filter_splitless_vars_mu
+    filter_splitless_vars_tau
+        The maximum number of predictors without splits that each forest can
+        ignore, see `bartz.mcmcstep.init`. Must be known at trace time.
     tau_0_prior_var
         Prior variance for the global treatment intercept `tau_0`.
     sample_intercept
@@ -173,14 +179,6 @@ def init_bcf(
         The initialized BCFState.
     """
     trt_array = jnp.asarray(trt)
-
-    user_filter_splitless = kwargs.pop('filter_splitless_vars', 0)
-    filter_splitless_vars_mu = max(
-        user_filter_splitless, int(jnp.sum(max_split_mu == 0))
-    )
-    filter_splitless_vars_tau = max(
-        user_filter_splitless, int(jnp.sum(max_split_tau == 0))
-    )
 
     if not sample_intercept:
         tau_0_prior_cov_inv = None

@@ -25,9 +25,8 @@
 """Module defining the BCF State and initialization."""
 
 from dataclasses import replace
-from typing import Any, Literal
+from typing import Literal
 
-import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float32, UInt
 
@@ -112,7 +111,7 @@ def init_bcf(
     sample_leaf_prior_cov_inv_tau: bool = False,
     leaf_prior_cov_inv_shape_tau: FloatLike = 3.0,
     leaf_prior_cov_inv_rate_tau: FloatLike = 1.0,
-    **kwargs: Any,
+    error_cov_inv: Wishart | None = None,
 ) -> BCFState:
     """
     Initialize a BCFState as a subclass of State.
@@ -171,8 +170,9 @@ def init_bcf(
         Shape of the Gamma prior on the treatment leaf precision.
     leaf_prior_cov_inv_rate_tau
         Rate of the Gamma prior on the treatment leaf precision.
-    **kwargs
-        Additional kwargs for the base BART initializer.
+    error_cov_inv
+        The Wishart prior on the error precision and its initial value, `None`
+        for binary outcomes. See `bartz.mcmcstep.init`.
 
     Returns
     -------
@@ -204,11 +204,6 @@ def init_bcf(
         shape_tau = None
         rate_tau = None
 
-    # the mu init donates the arrays in `kwargs`, so the tau init gets a copy
-    kwargs_tau: dict = jax.tree.map(
-        lambda x: jnp.copy(x) if isinstance(x, jax.Array) else x, kwargs
-    )
-
     # 1. Initialize prognostic state (contains base variables, X, offset, resid)
     state_mu = init(
         X=X_unified,
@@ -221,15 +216,10 @@ def init_bcf(
         leaf_prior_cov_inv=leaf_prior_cov_inv_mu,
         filter_splitless_vars=filter_splitless_vars_mu,
         min_points_per_leaf=min_points_per_leaf_mu,
-        **kwargs,
+        error_cov_inv=error_cov_inv,
     )
 
     # 2. Initialize treatment state, only its forest is kept
-    if outcome_type == 'binary':
-        # tau is pretend-initialized as continuous outcome, so pass dummy error_cov_inv
-        kwargs_tau = dict(
-            kwargs_tau, error_cov_inv=Wishart(nu=0.0, rate=0.0, value=1.0)
-        )
     assert state_mu.resid.dtype == jnp.float32  # to use it as `error_scale`
     state_tau = init(
         X=state_mu.X,
@@ -247,7 +237,8 @@ def init_bcf(
         leaf_prior_cov_inv=leaf_prior_cov_inv_tau,
         filter_splitless_vars=filter_splitless_vars_tau,
         min_points_per_leaf=min_points_per_leaf_tau,
-        **kwargs_tau,
+        # tau is pretend-initialized as continuous outcome, so pass a dummy error_cov_inv
+        error_cov_inv=Wishart(nu=0.0, rate=0.0, value=1.0),
     )
 
     # reclaim the mu buffers that rode through the tau init untouched

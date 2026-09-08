@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Literal
 
 import jax
@@ -206,18 +207,15 @@ def init_bcf(
         shape_tau = None
         rate_tau = None
 
-    y_mu = jnp.copy(y)
-    kwargs_mu = jax.tree.map(
+    # the mu init donates the arrays in `kwargs`, so the tau init gets a copy
+    kwargs_tau: dict = jax.tree.map(
         lambda x: jnp.copy(x) if isinstance(x, jax.Array) else x, kwargs
     )
 
-    # We copy X_unified because the first init() call will donate and delete it.
-    x_unified_copy = jnp.copy(X_unified)
-
     # 1. Initialize prognostic state (contains base variables, X, offset, resid)
     state_mu = init(
-        X=x_unified_copy,
-        y=y_mu,
+        X=X_unified,
+        y=y,
         outcome_type=outcome_type,
         offset=offset,
         max_split=max_split_mu,
@@ -226,31 +224,38 @@ def init_bcf(
         leaf_prior_cov_inv=leaf_prior_cov_inv_mu,
         filter_splitless_vars=filter_splitless_vars_mu,
         min_points_per_leaf=min_points_per_leaf_mu,
-        **kwargs_mu,
+        **kwargs,
     )
 
     # 2. Initialize treatment state, only its forest is kept
-    # Marking controls as missing gives the forest the per-leaf precision cache
-    # `bcf_step` needs, initialized for the default coding b_z = trt.
-    # The tau init runs as continuous regression, which requires an error
-    # precision prior; its output precision is discarded, only the forest is kept.
-    kwargs_tau: dict = kwargs
     if outcome_type == 'binary':
-        kwargs_tau = dict(kwargs, error_cov_inv=Wishart(nu=0.0, rate=0.0, value=1.0))
-
+        # tau is pretend-initialized as continuous outcome, so pass dummy error_cov_inv
+        kwargs_tau = dict(
+            kwargs_tau, error_cov_inv=Wishart(nu=0.0, rate=0.0, value=1.0)
+        )
+    assert state_mu.resid.dtype == jnp.float32  # to use it as `error_scale`
     state_tau = init(
-        X=X_unified,
-        y=y,
+        X=state_mu.X,
+        y=state_mu.y,
+        error_scale=state_mu.resid,
+        # `error_scale` is stored unchanged by init(), and the bcf step does
+        # not need any initial precision scale value to be correct, so we pass
+        # `resid` through to to make `init` set up heteroskedasticity without
+        # allocating a new buffer
         outcome_type='continuous',
         offset=0.0,
         max_split=max_split_tau,
         num_trees=num_trees_tau,
         p_nonterminal=p_nonterminal_tau,
         leaf_prior_cov_inv=leaf_prior_cov_inv_tau,
-        missing=~trt_array,
         filter_splitless_vars=filter_splitless_vars_tau,
         min_points_per_leaf=min_points_per_leaf_tau,
         **kwargs_tau,
+    )
+
+    # reclaim the mu buffers that rode through the tau init untouched
+    state_mu = replace(
+        state_mu, X=state_tau.X, y=state_tau.y, resid=state_tau.error_scale
     )
 
     if adaptive_coding:

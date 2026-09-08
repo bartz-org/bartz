@@ -205,9 +205,9 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
     sigma_init
         Initial value for error variance.
     leaf_prior_cov_inv_mu
-        Custom inverse covariance matrix for the prognostic forest leaf prior.
+        Custom leaf prior precision for the prognostic forest.
     leaf_prior_cov_inv_tau
-        Custom inverse covariance matrix for the treatment effect forest leaf prior.
+        Custom leaf prior precision for the treatment effect forest.
     min_points_per_leaf_mu
         Minimum data points per leaf for prognostic forest.
     min_points_per_leaf_tau
@@ -283,8 +283,8 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
         sigma_df: float = 3.0,
         sigma_scale: float | Literal['auto'] = 'auto',
         sigma_init: float | Literal['auto'] = 'auto',
-        leaf_prior_cov_inv_mu: FloatLike | Float32[ArrayLike, '*shape'] | None = None,
-        leaf_prior_cov_inv_tau: FloatLike | Float32[ArrayLike, '*shape'] | None = None,
+        leaf_prior_cov_inv_mu: FloatLike | None = None,
+        leaf_prior_cov_inv_tau: FloatLike | None = None,
         min_points_per_leaf_mu: int = 5,
         min_points_per_leaf_tau: int = 5,
         tau_0_prior_var: float | None = None,

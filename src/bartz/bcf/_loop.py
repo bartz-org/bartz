@@ -60,8 +60,8 @@ class _BCFCarry(eqx.Module):
     tau_0_main_trace: Float32[Array, ' n_save']
     b0_main_trace: Float32[Array, ' n_save']
     b1_main_trace: Float32[Array, ' n_save']
-    leaf_prior_cov_inv_mu_main_trace: Float32[Array, '...']
-    leaf_prior_cov_inv_tau_main_trace: Float32[Array, '...']
+    leaf_prior_cov_inv_mu_main_trace: Float32[Array, ' n_save']
+    leaf_prior_cov_inv_tau_main_trace: Float32[Array, ' n_save']
 
 
 def _compute_leaf_prior_stats(
@@ -98,7 +98,7 @@ def _sample_leaf_prior_cov_inv(
     state: State,
     shape: Float32[Array, ''],
     rate: Float32[Array, ''],
-) -> Float32[Array, ''] | Float32[Array, 'k k']:
+) -> Float32[Array, '']:
     """
     Draw the leaf prior precision of a forest from its Gamma conditional.
 
@@ -356,18 +356,8 @@ def run_bcf_mcmc(
     tau_0_m_empty = jnp.zeros((n_save,))
     b0_m_empty = jnp.zeros((n_save,))
     b1_m_empty = jnp.zeros((n_save,))
-    leaf_prior_cov_inv_mu_shape = (
-        state.forest.leaf_prior_cov_inv.shape
-        if state.forest.leaf_prior_cov_inv is not None
-        else ()
-    )
-    leaf_prior_cov_inv_mu_m_empty = jnp.zeros((n_save, *leaf_prior_cov_inv_mu_shape))
-    leaf_prior_cov_inv_tau_shape = (
-        state.forest_tau.leaf_prior_cov_inv.shape
-        if state.forest_tau.leaf_prior_cov_inv is not None
-        else ()
-    )
-    leaf_prior_cov_inv_tau_m_empty = jnp.zeros((n_save, *leaf_prior_cov_inv_tau_shape))
+    leaf_prior_cov_inv_mu_m_empty = jnp.zeros((n_save,))
+    leaf_prior_cov_inv_tau_m_empty = jnp.zeros((n_save,))
 
     carry = _BCFCarry(
         state=state,

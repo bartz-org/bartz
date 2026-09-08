@@ -30,7 +30,7 @@ from typing import Any, Literal
 
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float, Float32, UInt
+from jaxtyping import Array, Bool, Float32, UInt
 
 from bartz._jaxext import field
 from bartz.mcmcstep._state import ArrayLike, FloatLike, Forest, State, Wishart, init
@@ -88,17 +88,17 @@ def init_bcf(
     *,
     X_unified: UInt[ArrayLike, 'p n'],
     trt: Bool[ArrayLike, ' n'],
-    y: Float32[ArrayLike, ' n'] | Float32[ArrayLike, ' k n'],
+    y: Float32[ArrayLike, ' n'],
     outcome_type: Literal['continuous', 'binary'] = 'continuous',
-    offset: FloatLike | Float[ArrayLike, ' k'],
+    offset: FloatLike,
     max_split_mu: UInt[ArrayLike, ' p'],
     max_split_tau: UInt[ArrayLike, ' p'],
     num_trees_mu: int,
     num_trees_tau: int,
     p_nonterminal_mu: Float32[ArrayLike, ' d_mu_minus_1'],
     p_nonterminal_tau: Float32[ArrayLike, ' d_tau_minus_1'],
-    leaf_prior_cov_inv_mu: FloatLike | Float[ArrayLike, 'k k'],
-    leaf_prior_cov_inv_tau: FloatLike | Float[ArrayLike, 'k k'],
+    leaf_prior_cov_inv_mu: FloatLike,
+    leaf_prior_cov_inv_tau: FloatLike,
     min_points_per_leaf_mu: int = 10,
     min_points_per_leaf_tau: int = 10,
     tau_0_prior_var: FloatLike | None = None,

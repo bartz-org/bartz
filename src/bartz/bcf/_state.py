@@ -28,7 +28,6 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Float32, UInt
@@ -235,11 +234,11 @@ def init_bcf(
     error_scale = 1.0 / jnp.abs(safe_trt)
     missing = trt_array == 0
 
-    kwargs_tau = dict(kwargs)
-    if outcome_type == 'binary' and kwargs_tau.get('error_cov_inv') is None:
-        kwargs_tau['error_cov_inv'] = Wishart(
-            nu=0.0, rate=0.0, value=jnp.array(1.0, dtype=jnp.float32)
-        )
+    # The tau init runs as continuous regression, which requires an error
+    # precision prior; its output precision is discarded, only the forest is kept.
+    kwargs_tau: dict = kwargs
+    if outcome_type == 'binary':
+        kwargs_tau = dict(kwargs, error_cov_inv=Wishart(nu=0.0, rate=0.0, value=1.0))
 
     state_tau = init(
         X=X_unified,
@@ -256,14 +255,6 @@ def init_bcf(
         min_points_per_leaf=min_points_per_leaf_tau,
         **kwargs_tau,
     )
-
-    fixed_error_cov_inv = eqx.tree_at(
-        lambda w: (w.nu, w.rate),
-        state_tau.error_cov_inv,
-        (None, None),
-        is_leaf=lambda x: x is None,
-    )
-    state_tau = eqx.tree_at(lambda s: s.error_cov_inv, state_tau, fixed_error_cov_inv)
 
     if adaptive_coding:
         b0_init = -0.5

@@ -49,8 +49,9 @@ class BCFState(State):
     trt: Float32[Array, ' n'] = field(data=-1)
     """The treatment variable."""
 
-    tau_X: Float32[Array, ' n'] = field(data=-1)
-    """The treatment effect predicted by the tau forest at each datapoint."""
+    tau_X: Float32[Array, ' n'] | None = field(data=-1)
+    """The treatment effect predicted by the tau forest at each datapoint,
+    `None` if not needed because `adaptive_coding` is off."""
 
     tau_0: Float32[Array, '*chains']
     """Global intercept for the treatment effect."""
@@ -293,7 +294,7 @@ def init_bcf(
         # Subclass additions
         forest_tau=state_tau.forest,  # tau forest
         trt=trt_array,
-        tau_X=jnp.zeros(len(trt_array), dtype=jnp.float32),
+        tau_X=jnp.zeros(len(trt_array), dtype=jnp.float32) if adaptive_coding else None,
         tau_0=jnp.zeros((), dtype=jnp.float32),
         b0=jnp.array(b0_init, dtype=jnp.float32),
         b1=jnp.array(b1_init, dtype=jnp.float32),

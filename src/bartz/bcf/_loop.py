@@ -246,12 +246,17 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         )
 
     # Update tau_X! (the residual difference is scaled, bring it to data units)
-    tau_X_new = state.tau_X + (initial_resid_tau - state.resid) * resid_unit
+    tau_X_new = (
+        None
+        if state.tau_X is None
+        else state.tau_X + (initial_resid_tau - state.resid) * resid_unit
+    )
 
     resid_val = jnp.where(jnp.abs(b_z) < 1e-10, resid_val, state.resid * b_z_safe)
 
     # 4. Update adaptive coding weights (b0, b1)
     if state.adaptive_coding:
+        assert tau_X_new is not None
         tau_full = tau_0_new + tau_X_new
         resid_partial = resid_val * resid_unit + tau_full * b_z
 

@@ -106,10 +106,10 @@ def init_bcf(
     sample_intercept: bool = True,
     adaptive_coding: bool = False,
     sample_leaf_prior_cov_inv_mu: bool = True,
-    leaf_prior_cov_inv_shape_mu: FloatLike = 3.0,
-    leaf_prior_cov_inv_rate_mu: FloatLike = 1.0,
     sample_leaf_prior_cov_inv_tau: bool = False,
+    leaf_prior_cov_inv_shape_mu: FloatLike = 3.0,
     leaf_prior_cov_inv_shape_tau: FloatLike = 3.0,
+    leaf_prior_cov_inv_rate_mu: FloatLike = 1.0,
     leaf_prior_cov_inv_rate_tau: FloatLike = 1.0,
     error_cov_inv: Wishart | None = None,
 ) -> BCFState:
@@ -129,25 +129,20 @@ def init_bcf(
     offset
         The response offset.
     max_split_mu
-        Maximum splits for prognostic forest.
     max_split_tau
-        Maximum splits for treatment forest.
+        Maximum splits for the prognostic and treatment forests.
     num_trees_mu
-        Number of trees in prognostic forest.
     num_trees_tau
-        Number of trees in treatment forest.
+        Number of trees in the prognostic and treatment forests.
     p_nonterminal_mu
-        Split prior for prognostic.
     p_nonterminal_tau
-        Split prior for treatment.
+        Split priors for the prognostic and treatment forests.
     leaf_prior_cov_inv_mu
-        Leaf prior precision of the prognostic forest.
     leaf_prior_cov_inv_tau
-        Leaf prior precision of the treatment forest.
+        Leaf prior precisions of the prognostic and treatment forests.
     min_points_per_leaf_mu
-        Minimum data points per leaf for prognostic forest.
     min_points_per_leaf_tau
-        Minimum data points per leaf for treatment forest.
+        Minimum data points per leaf for the prognostic and treatment forests.
     filter_splitless_vars_mu
     filter_splitless_vars_tau
         The maximum number of predictors without splits that each forest can
@@ -159,17 +154,17 @@ def init_bcf(
     adaptive_coding
         Whether to use adaptive coding for the treatment effect.
     sample_leaf_prior_cov_inv_mu
-        Whether to sample the leaf prior precision of the prognostic forest.
-    leaf_prior_cov_inv_shape_mu
-        Shape of the Gamma prior on the prognostic leaf precision.
-    leaf_prior_cov_inv_rate_mu
-        Rate of the Gamma prior on the prognostic leaf precision.
     sample_leaf_prior_cov_inv_tau
-        Whether to sample the leaf prior precision of the treatment forest.
+        Whether to sample the leaf prior precisions of the prognostic and
+        treatment forests.
+    leaf_prior_cov_inv_shape_mu
     leaf_prior_cov_inv_shape_tau
-        Shape of the Gamma prior on the treatment leaf precision.
+        Shapes of the Gamma priors on the prognostic and treatment leaf
+        precisions.
+    leaf_prior_cov_inv_rate_mu
     leaf_prior_cov_inv_rate_tau
-        Rate of the Gamma prior on the treatment leaf precision.
+        Rates of the Gamma priors on the prognostic and treatment leaf
+        precisions.
     error_cov_inv
         The Wishart prior on the error precision and its initial value, `None`
         for binary outcomes. See `bartz.mcmcstep.init`.

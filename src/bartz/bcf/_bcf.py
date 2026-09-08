@@ -51,6 +51,7 @@ from bartz._interface import (
     _process_response_input,
     predict_latent,
 )
+from bartz._jaxext import split
 from bartz.bcf._loop import run_bcf_mcmc
 from bartz.bcf._state import init_bcf
 from bartz.mcmcloop import MainTrace
@@ -420,9 +421,9 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
 
         # 3.5 Bin the unified data
         rng = random.key(seed) if not isinstance(seed, jax.Array) else seed
-        rng, key_binner = random.split(rng)
+        keys = split(rng)
 
-        binner = UniqueQuantileBinner(x_train_unified, key=key_binner)
+        binner = UniqueQuantileBinner(x_train_unified, key=keys.pop())
         x_train_binned = binner.bin(x_train_unified)
         max_split_mu = jnp.array(binner.max_split)
         max_split_tau = jnp.array(binner.max_split)
@@ -464,10 +465,8 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
         )
 
         # 5. Run the MCMC loop
-        rng, loop_key = random.split(rng)
-
         final_state, final_carry = run_bcf_mcmc(
-            key=loop_key, state=initial_state, n_save=ndpost, n_burn=nskip, n_skip=0
+            key=keys.pop(), state=initial_state, n_save=ndpost, n_burn=nskip, n_skip=0
         )
         self._mcmc_state = final_state
         self._binner = binner
@@ -878,9 +877,9 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
 
         sigma = self.sigma_trace[:, jnp.newaxis]
 
-        k0, k1 = random.split(key)
-        u0 = random.normal(k0, shape=(ndpost, m), dtype=jnp.float32)
-        u1 = random.normal(k1, shape=(ndpost, m), dtype=jnp.float32)
+        keys = split(key)
+        u0 = random.normal(keys.pop(), shape=(ndpost, m), dtype=jnp.float32)
+        u1 = random.normal(keys.pop(), shape=(ndpost, m), dtype=jnp.float32)
 
         rho_f = jnp.float32(rho)
         eps0 = sigma * u0

@@ -35,6 +35,7 @@ import jax.numpy as jnp
 from jax import random, vmap
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, UInt
 
+from bartz._jaxext import split
 from bartz._jaxext.random import loggamma
 from bartz.bcf._state import BCFState
 from bartz.grove._grove import is_actual_leaf
@@ -142,14 +143,14 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     BCFState
         The updated BCF state after a single Gibbs sweep across parameters.
     """
-    keys = random.split(key, 7)
+    keys = split(key, 7)
 
     # 1. Update prognostic forest (mu)
     # `step` rebuilds the state with `replace`, so it preserves the subclass.
     # WORKAROUND(python<3.12): type `step` as generic over the state subclass
     # (PEP 695) instead of casting here, since a TypeVar renders badly in the
     # html documentation.
-    state = cast(BCFState, step(keys[0], state))
+    state = cast(BCFState, step(keys.pop(), state))
 
     if state.leaf_prior_cov_inv_shape_mu is not None:
         assert state.leaf_prior_cov_inv_rate_mu is not None
@@ -157,7 +158,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             lambda s: s.forest.leaf_prior_cov_inv,
             state,
             _sample_leaf_prior_cov_inv(
-                keys[5],
+                keys.pop(),
                 state,
                 state.leaf_prior_cov_inv_shape_mu,
                 state.leaf_prior_cov_inv_rate_mu,
@@ -190,7 +191,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         prec = jnp.sum(jnp.square(b_z)) / sigma2 + state.tau_0_prior_cov_inv
         mean = jnp.sum(b_z * partial) / sigma2 / prec
 
-        tau_0_new = mean + random.normal(keys[1], shape=mean.shape) * jax.lax.rsqrt(
+        tau_0_new = mean + random.normal(keys.pop(), shape=mean.shape) * jax.lax.rsqrt(
             prec
         )
     else:
@@ -236,7 +237,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         inv_sdev_scale=inv_sdev_scale_tau,
     )
 
-    state = cast(BCFState, step(keys[2], state))
+    state = cast(BCFState, step(keys.pop(), state))
 
     if state.leaf_prior_cov_inv_shape_tau is not None:
         assert state.leaf_prior_cov_inv_rate_tau is not None
@@ -244,7 +245,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             lambda s: s.forest.leaf_prior_cov_inv,
             state,
             _sample_leaf_prior_cov_inv(
-                keys[6],
+                keys.pop(),
                 state,
                 state.leaf_prior_cov_inv_shape_tau,
                 state.leaf_prior_cov_inv_rate_tau,
@@ -270,17 +271,17 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             jnp.sum(jnp.square(tau_full) * ~trt_val) / sigma2 + state.b_prior_cov_inv
         )
         b0_mean = jnp.sum(tau_full * resid_partial * ~trt_val) / sigma2 / b0_prec
-        b0_new = b0_mean + random.normal(keys[3], shape=b0_mean.shape) * jax.lax.rsqrt(
-            b0_prec
-        )
+        b0_new = b0_mean + random.normal(
+            keys.pop(), shape=b0_mean.shape
+        ) * jax.lax.rsqrt(b0_prec)
 
         b1_prec = (
             jnp.sum(jnp.square(tau_full) * trt_val) / sigma2 + state.b_prior_cov_inv
         )
         b1_mean = jnp.sum(tau_full * resid_partial * trt_val) / sigma2 / b1_prec
-        b1_new = b1_mean + random.normal(keys[4], shape=b1_mean.shape) * jax.lax.rsqrt(
-            b1_prec
-        )
+        b1_new = b1_mean + random.normal(
+            keys.pop(), shape=b1_mean.shape
+        ) * jax.lax.rsqrt(b1_prec)
 
         b_z_new = jnp.where(trt_val, b1_new, b0_new)
         resid_val = (resid_partial - tau_full * b_z_new) / resid_unit
@@ -389,9 +390,9 @@ def run_bcf_mcmc(
         return carry.i_total < n_iters
 
     def body_fn(carry: _BCFCarry) -> _BCFCarry:
-        key, step_key = random.split(carry.key)
+        keys = split(carry.key)
 
-        new_state = step_fn(step_key, carry.state)
+        new_state = step_fn(keys.pop(), carry.state)
         i = carry.i_total
 
         # Calculate trace update indices
@@ -429,7 +430,7 @@ def run_bcf_mcmc(
 
         return _BCFCarry(
             state=new_state,
-            key=key,
+            key=keys.pop(),
             i_total=i + 1,
             mu_burnin_trace=new_mu_b_trace,
             tau_burnin_trace=new_tau_b_trace,

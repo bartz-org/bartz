@@ -364,8 +364,9 @@ def make_tqdm_callback(
         The MCMC state to use the callback with, used to determine device
         sharding.
     update_every
-        The bar position is refreshed every `update_every` MCMC iterations
-        (`tqdm` further throttles the actual redraw rate on its own).
+        The bar position is refreshed every `update_every` MCMC iterations,
+        and at the first one (`tqdm` further throttles the actual redraw rate
+        on its own).
     report_every
         The acceptance statistics shown next to the bar are refreshed every
         `report_every` MCMC iterations, `None` to omit them.
@@ -467,7 +468,7 @@ class TqdmCallback(Callback):
             accumulator = accumulator.reset_if(report_cond)
 
         lax.cond(
-            (it % self.update_every == 0) | last,
+            (it == 1) | (it % self.update_every == 0) | last,
             lambda: debug.callback(_tqdm_advance, bar_id, it, n_iters),
             lambda: None,
         )

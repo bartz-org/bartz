@@ -1,0 +1,489 @@
+%=============================================================================
+\chapter{Vanilla BART}
+\label{ch:vanilla}
+
+This chapter derives the original BART of Chipman, George \& McCulloch (2010)
+as a special case of the model in \autoref{ch:full}: univariate outcome,
+homoskedastic Gaussian noise.
+
+%-----------------------------------------------------------------------------
+\section{Substitutions}
+\label{sec:subst}
+
+The specialisation is
+\begin{equation}
+	\label{eq:subst}
+	k = 1,
+	\qquad
+	\va_i \equiv 1,
+	\qquad
+	\mLam = 1/\sigsq,
+	\qquad
+	\mLamm = 1/\smsq,
+	\qquad
+	\Psi = \nu\lambda .
+\end{equation}
+All $k \times k$ matrices become scalars, and the dictionary between the two
+chapters is:
+\begin{center}
+	\begin{tabular}{lll}
+		\toprule
+		quantity                & Chapter~\ref{ch:full}                                           & this chapter                                           \\
+		\midrule
+		outcome                 & $\vy_i \in \R^k$                                                & $y_i \in \R$                                           \\
+		leaf parameter          & $\vmu_\ell \in \R^k$                                            & $\mu_\ell \in \R$                                      \\
+		leaf prior              & $\N_k(\mathbf{0}, \mLamm^{-1})$                                 & $\N(0, \smsq)$                                         \\
+		error precision\ at $i$ & $\mA_i\,\mLam\,\mA_i = \mLam\odot\tilde\mA_i$                   & $1/\sigsq$                                             \\
+		error prec.\ prior      & $\W(\nu, \Psi)$                                                 & $\Gamma(\nu/2,\nu\lambda/2)$                           \\
+		per-leaf count          & $\mN_\ell = \sum_{i\in I_\ell}\tilde\mA_i$                      & $n_\ell$                                               \\
+		per-leaf score          & $S_\ell = \sum_{i\in I_\ell}\tilde\mA_i\odot(\Ind_k\vr_i^\top)$ & $S_\ell = \sum_{i\in I_\ell} r_i$                      \\
+		precision sum           & $\mP_\ell = \mLam\odot\mN_\ell$                                 & $n_\ell/\sigsq$                                        \\
+		score vector            & $\vB_\ell = (\mLam\odot S_\ell)\,\Ind_k$                        & $S_\ell/\sigsq$                                        \\
+		leaf posterior          & $\N_k\!\bigl(V_\ell\vB_\ell, V_\ell\bigr)$                      & $\N(S_\ell V_\ell/\sigsq, V_\ell)$                     \\
+		~ post.\ precision      & $\mLamm + \mP_\ell$                                             & $n_\ell/\sigsq + 1/\smsq$                              \\
+		log-det term            & $\frac{1}{2}\log|\mLamm| - \frac{1}{2}\log|\mLamm+\mP_\ell|$  & $\frac{1}{2}\log\!\frac{\sigsq}{n_\ell\smsq+\sigsq}$ \\
+		quadratic term          & $\frac{1}{2}\vB_\ell^\top(\mLamm+\mP_\ell)^{-1}\vB_\ell$       & $\frac{\smsq S_\ell^2}{2\sigsq(n_\ell\smsq+\sigsq)}$  \\
+		$\mLam$ post.\ rate     & $\Psi + \sum_i (\va_i\odot\veps_i)(\va_i\odot\veps_i)^\top$     & $\nu\lambda + \sum_i \veps_i^2$                        \\
+		\bottomrule
+	\end{tabular}
+\end{center}
+All tree-prior and proposal-kernel factors are unchanged.
+
+%-----------------------------------------------------------------------------
+\section{Notation and data}
+\label{sec:notation}
+
+We observe $n$ pairs $(\vx_i, y_i)_{i=1}^n$ with $\vx_i \in \R^p$ and
+$y_i \in \R$. Stack the responses into $\vy = (y_1, \dots, y_n)^\top$ and the
+covariates into $X \in \R^{n \times p}$ as in \S\ref{sec:mv-notation}. The
+precision scales are all $\va_i = 1$ and are dropped from the notation.
+
+Trees $T$, leaves $\ell \in L(T)$, and the assignment $\ell(\vx; T)$ are
+defined exactly as in \S\ref{sec:mv-notation}. The leaf array is now a set
+of scalars,
+\[
+	\vM = \{ \mu_\ell : \ell \in L(T) \} \subset \R,
+\]
+with regression function and sum of trees
+\begin{equation}
+	\label{eq:sum-of-trees}
+	g(\vx; T, \vM) = \sum_{\ell \in L(T)} \mu_\ell\, \Ind[\ell(\vx; T) = \ell],
+	\qquad
+	f(\vx) = \sum_{t=1}^m g(\vx;\, T_t, \vM_t).
+\end{equation}
+
+%-----------------------------------------------------------------------------
+\section{The generative model}
+\label{sec:model}
+
+\subsection{Conditional outcome distribution}
+
+With $k = 1$ and $\mA_i = 1$, the precision $\mA_i\mLam\mA_i$ in
+\eqref{eq:mv-lik} is $1/\sigsq$ for every $i$, so
+\begin{equation}
+	\label{eq:lik}
+	y_i \mid T_{1:m}, \vM_{1:m}, \sigsq \stackrel{\text{ind}}{\sim}
+	\N\!\left(f(\vx_i), \sigsq\right),
+	\qquad i = 1, \dots, n.
+\end{equation}
+
+\subsection{Tree-structure prior}
+
+Unchanged from \S\ref{sec:mv-tree-prior}: a node at depth $d$ is internal
+with probability $p_{\mathrm{NT}}(d) = \alpha(1+d)^{-\beta}$ of
+\eqref{eq:pnt}, truncated at $d_{\max}$, and given that it is internal its
+splitting rule $(v, c)$ is uniform on the admissible variable/cutpoint pairs.
+
+\subsection{Leaf prior}
+
+Equation \eqref{eq:mv-leaf-prior} with $\mLamm = 1/\smsq$ is
+\begin{equation}
+	\label{eq:leaf-prior}
+	\mu_\ell \mid T_t \stackrel{\text{i.i.d.}}{\sim}
+	\N\!\left(0, \smsq\right),
+	\qquad \ell \in L(T_t).
+\end{equation}
+The variance $\smsq$ is calibrated so that the prior on the sum of trees
+$f(\vx)$ has standard deviation $\sqrt{m}\,\sm$ controlled by the user. Bartz
+exposes the inverse, $1/\smsq$, via the field
+\texttt{Forest.leaf\_prior\_cov\_inv}; stochtree's
+\texttt{GaussianConstantLeafModel} stores $\tau \equiv \smsq$.
+
+\subsection{Error variance prior}
+\label{sec:sigma-prior}
+
+For $k = 1$ the Wishart prior \eqref{eq:mv-iw-prior} on the scalar
+precision $\mLam = 1/\sigsq$ has density proportional to
+$\mLam^{(\nu - 2)/2}\exp(-\Psi\mLam/2)$, which is the gamma distribution
+$\Gamma(\nu/2,\, \Psi/2)$ in the shape--rate parametrisation. Equivalently,
+the variance follows the conjugate inverse-gamma prior
+\begin{equation}
+	\label{eq:sigma-prior}
+	\sigsq \sim \IG\!\left(\frac{\nu}{2}, \frac{\nu\lambda}{2}\right),
+	\qquad \Psi = \nu\lambda,
+\end{equation}
+which in \texttt{bartz} is the \texttt{Wishart} object passed as
+\texttt{error\_cov\_inv} to \texttt{mcmcstep.init}, with
+\texttt{nu}~$=\nu$ and \texttt{rate}~$=\nu\lambda$. The user-facing
+\texttt{sigma\_df} and \texttt{sigma\_scale} arguments of \texttt{bartz.Bart}
+set $\nu$ and $\lambda = \texttt{sigma\_scale}^2$.
+
+\subsection{Bayesian network}
+\label{sec:bn}
+
+The joint density \eqref{eq:mv-joint} reads
+\begin{equation}
+	\label{eq:joint}
+	p(\vy, T_{1:m}, \vM_{1:m}, \sigsq)
+	= p(\sigsq) \prod_{t=1}^m p(T_t)\, p(\vM_t \mid T_t)
+	\cdot \prod_{i=1}^n p(y_i \mid T_{1:m}, \vM_{1:m}, \sigsq),
+\end{equation}
+with $p(\vM_t \mid T_t) = \prod_{\ell \in L(T_t)} \N(\mu_\ell;\, 0, \smsq)$.
+The graphical model is that of \S\ref{sec:mv-bn} without the $\va_i$ input
+node:
+\begin{center}
+	\begin{tikzpicture}[node distance=0.9cm and 1.6cm,
+			every node/.style={font=\footnotesize}]
+		% Top row: hyperparameters
+		\node[const]                       (alpha) {$\alpha,\beta$};
+		\node[const, right=2.2cm of alpha] (sm)    {$\smsq$};
+		\node[const, right=2.2cm of sm]    (nu)    {$\nu,\lambda$};
+		% Middle row: latent variables
+		\node[latent, below=of alpha] (T)  {$T_t$};
+		\node[latent, below=of sm]    (mu) {$\mu_\ell^{(t)}$};
+		\node[latent, below=of nu]    (s2) {$\sigsq$};
+		% Bottom row: data
+		\node[obs, below=1.6cm of mu] (y) {$y_i$};
+		\node[const, left=of y]       (x) {$\vx_i$};
+
+		\edge {alpha} {T};
+		\edge {sm}    {mu};
+		\edge {nu}    {s2};
+		\edge {T}     {mu};
+		\edge {mu}    {y};
+		\edge {s2}    {y};
+		\edge {x}     {y};
+		\draw[->, >={triangle 45}] (T) to[bend right=25] (y);
+
+		\plate {leaves} {(mu)}        {$\ell \in L(T_t)$};
+		\plate {trees}  {(T)(leaves)} {$t = 1,\dots,m$};
+		\plate {data}   {(x)(y)}      {$i = 1,\dots,n$};
+	\end{tikzpicture}
+\end{center}
+
+%-----------------------------------------------------------------------------
+\section{Single-tree decomposition and partial residuals}
+\label{sec:partial-resid}
+
+The backfitting decomposition of \S\ref{sec:mv-partial-resid} applies with
+scalar partial residuals
+\begin{equation}
+	\label{eq:partial-resid}
+	r_i^{(t)} \coloneqq y_i - \sum_{k \ne t} g(\vx_i;\, T_k, \vM_k),
+	\qquad
+	r_i^{(t)} \mid T_t, \vM_t, \sigsq \stackrel{\text{ind}}{\sim}
+	\N\!\left(g(\vx_i;\, T_t, \vM_t),\, \sigsq\right).
+\end{equation}
+As before we fix $t$ and write $r_i = r_i^{(t)}$, $\vr = \vr^{(t)}$,
+$T = T_t$, $\vM = \vM_t$.
+
+With $\va_i \equiv 1$ the outer product $\tilde\mA_i = \va_i\va_i^\top$ of
+\eqref{eq:mv-Atilde} is the scalar $1$, so the matrix sufficient statistics
+\eqref{eq:mv-suffstats-N}--\eqref{eq:mv-suffstats-S} collapse to a count and
+a sum. For each leaf $\ell \in L(T)$,
+\begin{equation}
+	\label{eq:suffstats}
+	I_\ell = \{\, i : \ell(\vx_i; T) = \ell \,\},
+	\qquad
+	\mN_\ell = n_\ell = |I_\ell|,
+	\qquad
+	S_\ell = \sum_{i \in I_\ell} r_i,
+	\qquad
+	Q_\ell = \sum_{i \in I_\ell} r_i^{2},
+\end{equation}
+where $Q_\ell$ is introduced only to write the full marginal density
+explicitly. The $\mLam$-dependent quantities
+\eqref{eq:mv-Pi}--\eqref{eq:mv-suffstats-B} become
+\begin{equation}
+	\label{eq:suffstats-lam}
+	\mP_i = \frac{1}{\sigsq},
+	\qquad
+	\mP_\ell = \frac{n_\ell}{\sigsq},
+	\qquad
+	\vB_\ell = \frac{S_\ell}{\sigsq}.
+\end{equation}
+
+The bartz code accumulates $S_\ell$ and $n_\ell$ in
+\texttt{sum\_resid} / \texttt{compute\_count\_trees}; stochtree calls them
+\texttt{sum\_yw} (with weight $1$) and \texttt{n} in
+\texttt{GaussianConstantSuffStat}.
+
+%-----------------------------------------------------------------------------
+\section{Full conditional of the leaves}
+\label{sec:full-cond}
+
+\begin{prop}[Leaf full conditional, univariate homoskedastic]
+	\label{prop:leaf}
+	For each $\ell \in L(T)$,
+	\begin{equation}
+		\label{eq:leaf-fc}
+		\mu_\ell \mid T, \sigsq, \vr \sim
+		\N\!\left(
+		\underbrace{\frac{S_\ell/\sigsq}{n_\ell/\sigsq + 1/\smsq}}_{=\,\hat\mu_\ell}
+		,\,
+		\underbrace{\frac{1}{n_\ell/\sigsq + 1/\smsq}}_{=\,V_\ell}
+		\right),
+	\end{equation}
+	and the leaves are conditionally independent across $\ell$.
+\end{prop}
+
+\begin{proof}
+	Substitute \eqref{eq:suffstats-lam} and $\mLamm = 1/\smsq$ into
+	Proposition~\ref{prop:mv-leaf}: the posterior precision is
+	$\mLamm + \mP_\ell = 1/\smsq + n_\ell/\sigsq$, so
+	$V_\ell = (\mLamm + \mP_\ell)^{-1}$ and
+	$\hat\mu_\ell = V_\ell\vB_\ell = V_\ell\,S_\ell/\sigsq$ are as stated.
+\end{proof}
+
+\paragraph{Equivalent form.}
+Multiplying numerator and denominator of $\hat\mu_\ell$ by $\sigsq\smsq$ we
+recover the closed form used in stochtree's
+\texttt{PosteriorParameterMean} / \texttt{PosteriorParameterVariance}:
+\begin{equation}
+	\label{eq:leaf-fc-tau}
+	\hat\mu_\ell = \frac{\smsq\, S_\ell}{n_\ell\,\smsq + \sigsq},
+	\qquad
+	V_\ell = \frac{\smsq\,\sigsq}{n_\ell\,\smsq + \sigsq}.
+\end{equation}
+The bartz code uses the precision form: in
+\texttt{\_precompute\_leaf\_terms\_uv} it computes
+\texttt{var\_post}~$= V_\ell$ and \texttt{mean\_factor}~$= V_\ell / \sigsq$,
+then samples $\mu_\ell = \texttt{mean\_factor} \cdot S_\ell + \sqrt{V_\ell}\, Z$
+with $Z \sim \N(0,1)$ (the draw $\sqrt{V_\ell} Z$ is precomputed as
+\texttt{centered\_leaves}, the product with $S_\ell$ happens in
+\texttt{accept\_move\_and\_sample\_leaves}).
+
+%-----------------------------------------------------------------------------
+\section{Marginal density with leaves integrated out}
+\label{sec:marg-lik}
+
+Write $\vr_\ell = (r_i)_{i \in I_\ell}$ for the vector of partial residuals
+falling in leaf $\ell$ (the $k = 1$ case of $\mR_\ell$ in
+\eqref{eq:mv-Rell}). Conditional on $T$ and $\sigsq$,
+\[
+	\vr_\ell \mid T, \sigsq \sim
+	\N_{n_\ell}\!\left(\mathbf{0},\, \sigsq I_{n_\ell} + \smsq\,\Ind\Ind^\top\right),
+\]
+the leaves being independent across $\ell$.
+
+\begin{prop}[Per-leaf marginal density, univariate homoskedastic]
+	\label{prop:marglik}
+	For each leaf $\ell$,
+	\begin{equation}
+		\label{eq:marglik-full}
+		\log p(\vr_\ell \mid T, \sigsq)
+		= -\frac{n_\ell}{2}\log(2\pi)
+		- \frac{n_\ell}{2}\log\sigsq
+		+ \frac{1}{2}\log\frac{\sigsq}{n_\ell\,\smsq + \sigsq}
+		- \frac{Q_\ell}{2\sigsq}
+		+ \frac{\smsq\, S_\ell^{2}}{2\sigsq\,(n_\ell\,\smsq + \sigsq)},
+	\end{equation}
+	and the joint log marginal of the tree is
+	\(
+	\log p(\vr \mid T, \sigsq) = \sum_{\ell \in L(T)} \log p(\vr_\ell \mid T, \sigsq).
+	\)
+\end{prop}
+
+\begin{proof}
+	Specialise the three lines of Proposition~\ref{prop:mv-marglik} in turn.
+	Line \eqref{eq:mv-marglik-a}: with $k = 1$ and
+	$|\mA_i\mLam\mA_i| = 1/\sigsq$,
+	\[
+		-\frac{n_\ell}{2}\log(2\pi)
+		+ \frac{1}{2}\sum_{i \in I_\ell}\log\frac{1}{\sigsq}
+		= -\frac{n_\ell}{2}\log(2\pi) - \frac{n_\ell}{2}\log\sigsq .
+	\]
+	Line \eqref{eq:mv-marglik-b}: with $\mLamm = 1/\smsq$ and
+	$\mLamm + \mP_\ell = 1/\smsq + n_\ell/\sigsq
+		= (n_\ell\,\smsq + \sigsq)/(\sigsq\smsq)$,
+	\[
+		\frac{1}{2}\log\frac{1}{\smsq}
+		- \frac{1}{2}\log\frac{n_\ell\,\smsq + \sigsq}{\sigsq\smsq}
+		= \frac{1}{2}\log\frac{\sigsq}{n_\ell\,\smsq + \sigsq} .
+	\]
+	Line \eqref{eq:mv-marglik-c}: with $\mP_i = 1/\sigsq$ and
+	$\vB_\ell = S_\ell/\sigsq$,
+	\[
+		-\frac{1}{2}\sum_{i \in I_\ell}\frac{r_i^2}{\sigsq}
+		+ \frac{1}{2}\,\frac{S_\ell^2}{\sigma^4}\,
+		\frac{\sigsq\smsq}{n_\ell\,\smsq + \sigsq}
+		= -\frac{Q_\ell}{2\sigsq}
+		+ \frac{\smsq\, S_\ell^{2}}{2\sigsq\,(n_\ell\,\smsq + \sigsq)} .
+	\]
+	Adding the three lines gives \eqref{eq:marglik-full}.
+\end{proof}
+
+\paragraph{Reduced form for tree-structure moves.}
+The terms $-\frac{n_\ell}{2}\log(2\pi)$, $-\frac{n_\ell}{2}\log\sigsq$ and
+$-Q_\ell/(2\sigsq)$ are the specialisation of the additive terms singled out
+in \S\ref{sec:mv-marg-lik}: they cancel when a node $\eta$ is compared
+against its split $(\eta_L, \eta_R)$, and only the data-dependent
+log-determinant and quadratic-form terms remain:
+\begin{equation}
+	\label{eq:reduced-marglik}
+	\log p(\vr_\ell \mid T, \sigsq) =
+	\underbrace{\frac{1}{2}\log\frac{\sigsq}{n_\ell\,\smsq + \sigsq}}_{\text{log-det term}}
+	+ \underbrace{\frac{\smsq\, S_\ell^{2}}{2\sigsq\,(n_\ell\,\smsq + \sigsq)}}_{\text{quadratic term}}
+	+ (\text{cancels in splits / prunes}).
+\end{equation}
+This is exactly the quantity returned by
+\texttt{GaussianConstantLeafModel::SplitLogMarginalLikelihood} and
+\texttt{NoSplitLogMarginalLikelihood} in stochtree, with $\tau = \smsq$ and
+\texttt{global\_variance} $= \sigsq$.
+
+%-----------------------------------------------------------------------------
+\section{Acceptance ratios for GROW and PRUNE}
+\label{sec:lkratios}
+
+\subsection{The GROW move}
+\label{sec:grow}
+
+The GROW proposal and its acceptance ratio
+\begin{equation}
+	\label{eq:mh}
+	\mathrm{MH}_{\mathrm{grow}}
+	= \frac{q(T \mid T')}{q(T' \mid T)}
+	\cdot \frac{p(T')}{p(T)}
+	\cdot \frac{p(\vr \mid T', \sigsq)}{p(\vr \mid T, \sigsq)}
+\end{equation}
+are those of \S\ref{sec:mv-grow}. The non-likelihood factor (transition
+ratio times prior ratio) does not touch the leaf or noise model, so it is
+\eqref{eq:mv-nonlk-grow} verbatim:
+\begin{equation}
+	\label{eq:nonlk-grow}
+	\frac{q(T \mid T')\,p(T')}{q(T' \mid T)\,p(T)}
+	= \frac{P_{\mathrm{prune}}(T')}{P_{\mathrm{grow}}(T)} \cdot
+	\frac{|G(T)|}{|P(T')|} \cdot
+	\frac{p_{d_\eta}}{1 - p_{d_\eta}} \cdot
+	(1 - p_{d_\eta+1})^{2},
+\end{equation}
+with the same convention for non-growable children.
+
+\paragraph{Marginal density ratio.}
+Substituting \eqref{eq:suffstats-lam} into \eqref{eq:mv-lkratio-grow}, the
+four log-determinants combine as in the proof of
+Proposition~\ref{prop:marglik} and the three quadratic forms become
+$\smsq S_*^2/[\sigsq(n_*\smsq + \sigsq)]$, giving
+\begin{align}
+	\label{eq:lkratio-grow}
+	\log\frac{p(\vr \mid T', \sigsq)}{p(\vr \mid T, \sigsq)}
+	 & = \frac{1}{2}\log\frac{\sigsq\,(n_\eta\,\smsq + \sigsq)}
+	                    {(n_{\eta_L}\,\smsq + \sigsq)\,(n_{\eta_R}\,\smsq + \sigsq)}
+	\notag                                                                              \\
+	 & \quad + \frac{\smsq}{2\sigsq}\left[
+		                                \frac{S_{\eta_L}^{2}}{n_{\eta_L}\,\smsq + \sigsq}
+		                                + \frac{S_{\eta_R}^{2}}{n_{\eta_R}\,\smsq + \sigsq}
+		                                - \frac{S_\eta^{2}}{n_\eta\,\smsq + \sigsq}
+		                                \right].
+\end{align}
+Recall $n_\eta = n_{\eta_L} + n_{\eta_R}$ and $S_\eta = S_{\eta_L} + S_{\eta_R}$.
+
+This is exactly what \texttt{bartz} computes in
+\texttt{\_compute\_likelihood\_ratio\_uv}, from the quantities precomputed by
+\texttt{\_precompute\_likelihood\_terms\_uv} for the three nodes
+$* \in \{\eta_L, \eta_R, \eta\}$:
+\begin{align*}
+	\texttt{prelkv.lrt}_*       & = \frac{\texttt{mean\_factor}_*}{\sigsq}
+	= \frac{\sigma^{-4}}{n_*/\sigsq + 1/\smsq}
+	= \frac{\smsq}{\sigsq (n_* \smsq + \sigsq)},                                    \\
+	\texttt{prelkv.log\_sqrt\_term} & = \frac{1}{2} \log\frac{\texttt{lrt}_{\eta_L} \cdot \texttt{lrt}_{\eta_R}}{\texttt{lrt}_0 \cdot \texttt{lrt}_\eta},
+	\qquad \texttt{lrt}_0 = \frac{\smsq}{\sigma^4} \text{ (the value at $n = 0$)},
+\end{align*}
+so that \eqref{eq:lkratio-grow} equals
+$\texttt{log\_sqrt\_term} + \frac{1}{2}\left(
+	S_{\eta_L}^2 \cdot \texttt{lrt}_{\eta_L}
+	+ S_{\eta_R}^2 \cdot \texttt{lrt}_{\eta_R}
+	- S_\eta^2 \cdot \texttt{lrt}_\eta\right)$.
+It is also algebraically identical to
+\texttt{SplitLogMarginalLikelihood} $-$ \texttt{NoSplitLogMarginalLikelihood}
+in stochtree (after substituting $\tau = \smsq$ and \texttt{sum\_w}~$= n_\ell$,
+\texttt{sum\_yw}~$= S_\ell$).
+
+\subsection{The PRUNE move}
+\label{sec:prune}
+
+As in \S\ref{sec:mv-prune}, the PRUNE acceptance ratio is the reciprocal of
+the GROW ratio for the inverse move, so its log marginal-density part is the
+negative of \eqref{eq:lkratio-grow} evaluated with
+$(n_{\eta_L}, S_{\eta_L}, n_{\eta_R}, S_{\eta_R})$ read off the
+to-be-deleted children, and its non-likelihood part is the reciprocal of
+\eqref{eq:nonlk-grow} for the inverse move.
+
+\subsection{Sampling the leaves after acceptance}
+
+Once the structure update is finalised, the leaves of $T$ are resampled from
+\eqref{eq:leaf-fc} and the running residuals refreshed as in
+\S\ref{sec:mv-sample-leaves}.
+
+%-----------------------------------------------------------------------------
+\section{Updating the error variance}
+\label{sec:sigma-update}
+
+After all $m$ trees have been updated, Proposition~\ref{prop:mv-Sigma}(i) with
+$\tilde{\bm{\veps}}_i = \veps_i = y_i - f(\vx_i)$ and $\Psi = \nu\lambda$
+gives
+\[
+	\frac{1}{\sigsq} \mid \cdots \sim
+	\W\!\left(\nu + n,\; \nu\lambda + \sum_{i=1}^n \veps_i^2\right)
+	= \Gamma\!\left(\frac{\nu + n}{2},\; \frac{\nu\lambda + \sum_i \veps_i^2}{2}\right),
+\]
+by the same $k = 1$ identification as in \S\ref{sec:sigma-prior}. In terms
+of the variance,
+\begin{equation}
+	\label{eq:sigma-fc}
+	\sigsq \mid \cdots \sim
+	\IG\!\left(
+	\frac{\nu + n}{2},\;
+	\frac{\nu\lambda + \sum_{i=1}^n (y_i - f(\vx_i))^2}{2}
+	\right),
+\end{equation}
+which is the standard conjugate update for a Gaussian sample with known
+mean and an inverse-gamma prior on the variance. Bartz draws it in
+\texttt{\_step\_error\_cov\_inv\_diag} as a gamma variate for $1/\sigsq$
+with shape $(\nu + n)/2$ and rate $(\nu\lambda + \sum_i \veps_i^2)/2$.
+
+%-----------------------------------------------------------------------------
+\section{Implementation pointers}
+\label{sec:impl-vanilla}
+
+\begin{description}
+	\item[bartz]
+	      \begin{itemize}
+		      \item \texttt{src/bartz/mcmcstep/\_state.py}: state and priors.
+		      \item \texttt{src/bartz/mcmcstep/\_moves.py}: GROW/PRUNE
+		            proposals, \texttt{compute\_partial\_ratio}.
+		      \item \texttt{src/bartz/mcmcstep/\_step.py}:
+		            \texttt{complete\_ratio},
+		            \texttt{\_precompute\_leaf\_terms\_uv},
+		            \texttt{\_precompute\_likelihood\_terms\_uv},
+		            \texttt{\_compute\_likelihood\_ratio\_uv},
+		            \texttt{\_step\_error\_cov\_inv\_diag}. The univariate
+		            case is dispatched to these by
+		            \texttt{precompute\_leaf\_terms},
+		            \texttt{precompute\_likelihood\_terms},
+		            \texttt{compute\_likelihood\_ratio}, and
+		            \texttt{step\_error\_cov\_inv}.
+	      \end{itemize}
+	\item[stochtree]
+	      \begin{itemize}
+		      \item \texttt{include/stochtree/leaf\_model.h}: closed-form
+		            derivations in the doxygen header.
+		      \item \texttt{src/leaf\_model.cpp}:
+		            \texttt{GaussianConstantLeafModel::SplitLogMarginalLikelihood},
+		            \texttt{NoSplitLogMarginalLikelihood},
+		            \texttt{PosteriorParameterMean},
+		            \texttt{PosteriorParameterVariance},
+		            \texttt{SampleLeafParameters}.
+		      \item \texttt{src/sampler.cpp}: acceptance / rejection logic.
+	      \end{itemize}
+\end{description}

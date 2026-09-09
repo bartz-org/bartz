@@ -42,7 +42,7 @@ from bartz.bcf._loop import bcf_step
 from bartz.bcf._state import init_bcf
 from bartz.grove import evaluate_forest
 from bartz.mcmcstep import Wishart
-from tests.util import assert_allclose, rhat_rank
+from tests.util import assert_allclose, assert_array_equal, rhat_rank
 
 
 def _rhat_two_chains(
@@ -940,8 +940,9 @@ class TestBcf:
                 seed=42,
             )
 
-    def test_bcf_constructor_options(self) -> None:
-        """Constructor x_test/z_test, pihat toggle, explicit tau_0 prior, sigma_trace."""
+    @pytest.mark.parametrize('sample_intercept', [True, False])
+    def test_bcf_constructor_options(self, sample_intercept: bool) -> None:
+        """Constructor x_test/z_test, pihat toggle, tau_0 prior/toggle, sigma_trace."""
         x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
             n=30, seed=0
         )
@@ -957,6 +958,7 @@ class TestBcf:
             pihat_test=pihat_test,
             include_pihat_in_mu=False,
             tau_0_prior_var=0.5,
+            sample_intercept=sample_intercept,
             standardize=False,
             num_trees_mu=2,
             num_trees_tau=2,
@@ -966,6 +968,9 @@ class TestBcf:
         )
         assert model._mcmc_state.num_chains() is None
         assert model.sigma_trace.shape == (ndpost,)
+        assert model._tau_0_trace.shape == (ndpost,)
+        tau_0_is_zero = model._tau_0_trace == 0
+        assert_array_equal(tau_0_is_zero, jnp.full(ndpost, not sample_intercept))
 
     def test_bcf_x_test_format_mismatch(self) -> None:
         """x_test format must match x_train, at construction and at predict."""

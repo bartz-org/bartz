@@ -279,8 +279,8 @@ def init_bcf(
         # Subclass additions
         forest_tau=state_tau.forest,  # tau forest
         trt=trt_array,
-        tau_X=jnp.zeros(len(trt_array), dtype=jnp.float32) if adaptive_coding else None,
-        tau_0=jnp.zeros((), dtype=jnp.float32),
+        tau_X=jnp.zeros(len(trt_array)) if adaptive_coding else None,
+        tau_0=jnp.zeros(()),
         b0=jnp.array(b0_init, jnp.float32),
         b1=jnp.array(b1_init, jnp.float32),
         tau_0_prior_cov_inv=tau_0_prior_cov_inv,

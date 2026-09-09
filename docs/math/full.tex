@@ -14,8 +14,10 @@ most general model treated in this document:
 	      global $k \times k$ error precision;
 	\item $\mLam$ has a Wishart conjugate prior;
 	\item trees follow the Chipman--George--McCulloch (CGM) prior and are
-	      updated by GROW/PRUNE moves only; there is no variable-selection
-	      prior.
+	      updated by GROW/PRUNE moves only;
+	\item the split variable of each decision rule is drawn from a
+	      probability vector $\vs$ with a Dirichlet prior, whose concentration
+	      has a Beta hyperprior (the variable-selection prior of Linero).
 \end{itemize}
 Working in the multivariate setting it is more convenient to deal with
 precision matrices than with covariance matrices, so throughout this chapter
@@ -164,10 +166,24 @@ depth $d_{\max}$, enforced by setting $p_{\mathrm{NT}}(d_{\max}) = 0$ (in
 \eqref{eq:pnt} at depths $0, \dots, d_{\max} - 1$ and \texttt{init} appends
 the final $0$ through \texttt{parse\_p\_nonterminal}).
 
-Conditionally on a node being internal, its splitting rule is drawn from
+Conditionally on a node $\eta$ being internal, its splitting rule is drawn
+from
 \begin{itemize}
-	\item a uniform distribution on the variables $v$ that still admit at
-	      least one valid cutpoint at that node, and
+	\item the distribution on the variables $v$ that still admit at least
+	      one valid cutpoint at $\eta$ (the \emph{eligible} set $E(\eta)$)
+	      with probabilities proportional to a global probability vector
+	      $\vs = (s_1, \dots, s_p)$,
+	      \begin{equation}
+		      \label{eq:mv-var-prior}
+		      p(v \mid \eta, \vs) =
+		      \begin{cases}
+			      \dfrac{s_v}{e_\eta} & v \in E(\eta), \\[1ex]
+			      0                   & \text{otherwise},
+		      \end{cases}
+		      \qquad
+		      e_\eta \coloneqq \sum_{u \in E(\eta)} s_u,
+	      \end{equation}
+	      and
 	\item a uniform distribution on the cutpoints $c$ that are compatible with
 	      the ancestor splits along the path to the root.
 \end{itemize}
@@ -178,11 +194,36 @@ that the cutpoint lies strictly between the inherited lower and upper bounds
 imposed by the ancestor splits on variable $v$ along the path to the root.
 In \texttt{bartz} the allowed cutpoints are pre-binned and live in the
 integer range $[1,\, \texttt{max\_split}_v]$ (see the
-\texttt{bartz.prepcovars} module);
-the prior on the rule is uniform on the available $(v,c)$ pairs.
+\texttt{bartz.prepcovars} module). We assume every variable has at least one
+cutpoint globally, so $E(\eta)$ only shrinks because of ancestor splits.
+bartz allows variables with none (\texttt{max\_split}$_v = 0$) by
+renormalising $\vs$ over the other variables, which is what the rule prior
+depends on; by the aggregation property of the Dirichlet, this leaves the
+derivations of this chapter unchanged on the renormalised subvector.
 
-We write $p(T_t)$ for the marginal probability of the tree structure
+We write $p(T_t \mid \vs)$ for the probability of the tree structure
 (including the splitting rules) under this prior.
+
+\subsection{Variable selection prior}
+\label{sec:mv-sparse-prior}
+
+The split-variable probabilities follow the sparsity-inducing prior of
+Linero (2018),
+\begin{equation}
+	\label{eq:mv-s-prior}
+	\vs \mid \theta \sim \Dir\!\left(\frac{\theta}{p}, \dots, \frac{\theta}{p}\right),
+\end{equation}
+shared by all trees. Small concentrations $\theta$ put most of the mass of
+$\vs$ on a few variables. The concentration is either fixed or given the
+hyperprior
+\begin{equation}
+	\label{eq:mv-theta-prior}
+	\xi \coloneqq \frac{\theta}{\theta + \rho} \sim \Betad(a_\theta, b_\theta),
+\end{equation}
+with fixed $\rho > 0$ (by default $\rho = p$) and shapes
+$a_\theta, b_\theta > 0$ (\texttt{a}, \texttt{b} in bartz). This chapter
+covers the hyperprior; fixing $\theta$ amounts to skipping its update in
+\S\ref{sec:mv-sparse}.
 
 \subsection{Leaf prior}
 
@@ -214,12 +255,14 @@ proportional to $|\mLam|^{(\nu - k - 1)/2}\exp\!\left(-\frac{1}{2}
 \label{sec:mv-bn}
 
 Putting the pieces together, the joint density factorises as
-\begin{equation}
+\begin{multline}
 	\label{eq:mv-joint}
-	p(Y, T_{1:m}, M_{1:m}, \mLam)
-	= p(\mLam) \prod_{t=1}^m p(T_t)\, p(M_t \mid T_t)
+	p(Y, T_{1:m}, M_{1:m}, \mLam, \vs, \theta)
+	= p(\theta)\, p(\vs \mid \theta)\, p(\mLam)
+	\prod_{t=1}^m p(T_t \mid \vs)\, p(M_t \mid T_t)
+	\\
 	\cdot \prod_{i=1}^n p(\vy_i \mid T_{1:m}, M_{1:m}, \mLam),
-\end{equation}
+\end{multline}
 with $p(M_t \mid T_t) = \prod_{\ell \in L(T_t)} \N_k(\vmu_\ell;\,
 	\mathbf{0}, \mLamm^{-1})$.
 
@@ -232,14 +275,20 @@ Graphically:
 		\node[const, right=2.2cm of alpha] (sm)    {$\mLamm$};
 		\node[const, right=2.2cm of sm]    (nu)    {$\nu,\Psi$};
 		% Middle row: latent variables
-		\node[latent, below=of alpha] (T)  {$T_t$};
-		\node[latent, below=of sm]    (mu) {$\vmu_\ell^{(t)}$};
-		\node[latent, below=of nu]    (S)  {$\mLam$};
+		\node[latent, below=of alpha] (T)     {$T_t$};
+		\node[latent, left=2.2cm of T] (s)     {$\vs$};
+		\node[latent, left=of s]      (theta) {$\theta$};
+		\node[latent, below=of sm]    (mu)    {$\vmu_\ell^{(t)}$};
+		\node[latent, below=of nu]    (S)     {$\mLam$};
+		\node[const, above=of theta]  (abrho) {$a_\theta,b_\theta,\rho$};
 		% Bottom row: data
 		\node[obs, below=1.6cm of mu] (y) {$\vy_i$};
 		\node[const, left=of y]       (x) {$\vx_i$};
 		\node[const, right=of y]      (w) {$\va_i$};
 
+		\edge {abrho} {theta};
+		\edge {theta} {s};
+		\edge {s}     {T};
 		\edge {alpha} {T};
 		\edge {sm}    {mu};
 		\edge {nu}    {S};
@@ -629,11 +678,11 @@ leaves). Writing $p_d \coloneqq p_{\mathrm{NT}}(d)$ for brevity,
 	\frac{p(T')}{p(T)}
 	= \underbrace{\frac{p_{d_\eta}}{1 - p_{d_\eta}}}_{\eta \text{ now internal}}
 	\cdot \underbrace{(1 - p_{d_\eta + 1})^{2}}_{\eta_L,\eta_R \text{ are leaves}}
-	\cdot \underbrace{\frac{1}{n_{\mathrm{var}}(\eta)} \cdot \frac{1}{n_{\mathrm{cut}}(\eta, v)}}_{\text{rule prior at } \eta},
+	\cdot \underbrace{\frac{s_v}{e_\eta} \cdot \frac{1}{n_{\mathrm{cut}}(\eta, v)}}_{\text{rule prior at } \eta},
 \end{equation}
-where $n_{\mathrm{var}}(\eta)$ is the number of variables that admit at least
-one valid cutpoint at $\eta$ and $n_{\mathrm{cut}}(\eta, v)$ is the number of
-valid cutpoints for the chosen variable $v$. (If a child $\eta_L$ or
+where $s_v / e_\eta$ is the variable prior \eqref{eq:mv-var-prior} at
+$\eta$ and $n_{\mathrm{cut}}(\eta, v)$ is the number of valid cutpoints for
+the chosen variable $v$. (If a child $\eta_L$ or
 $\eta_R$ would have no further admissible split, its $1 - p_{d_\eta+1}$
 factor is replaced by $1$, since the prior assigns it leaf status with
 probability $1$. In the bartz code, this is encoded by the children
@@ -642,13 +691,13 @@ entries of \texttt{Moves.lrt\_growable}, used in \texttt{complete\_ratio}.)
 \paragraph{Transition ratio.}
 The forward kernel at $T$ chooses GROW with probability $1/2$ (or $1$ if
 PRUNE is impossible, i.e., $T$ is the root), then picks $\eta$ uniformly from
-the growable leaves, then a variable uniformly from the
-$n_{\mathrm{var}}(\eta)$ admissible ones, then a cutpoint uniformly from the
-$n_{\mathrm{cut}}(\eta, v)$ admissible ones:
+the growable leaves, then a variable from the eligible ones with the prior
+probabilities $s_v / e_\eta$ of \eqref{eq:mv-var-prior}, then a cutpoint
+uniformly from the $n_{\mathrm{cut}}(\eta, v)$ admissible ones:
 \[
 	q(T' \mid T) = \frac{1}{2(\text{or }1)} \cdot
 	\frac{1}{|G(T)|} \cdot
-	\frac{1}{n_{\mathrm{var}}(\eta)} \cdot
+	\frac{s_v}{e_\eta} \cdot
 	\frac{1}{n_{\mathrm{cut}}(\eta, v)},
 \]
 where $G(T)$ is the set of growable leaves. The reverse kernel at $T'$
@@ -665,15 +714,18 @@ Hence
 	\frac{q(T \mid T')}{q(T' \mid T)}
 	= \frac{P_{\mathrm{prune}}(T')}{P_{\mathrm{grow}}(T)} \cdot
 	\frac{|G(T)|}{|P(T')|} \cdot
-	n_{\mathrm{var}}(\eta) \cdot n_{\mathrm{cut}}(\eta, v),
+	\frac{e_\eta}{s_v} \cdot n_{\mathrm{cut}}(\eta, v),
 \end{equation}
 with $P_{\mathrm{grow}}, P_{\mathrm{prune}} \in \{\frac{1}{2}, 1\}$ as just
-described.
+described. In bartz the variable is drawn by \texttt{choose\_variable} in
+\texttt{mcmcstep/\_moves.py}, a categorical draw on \texttt{Forest.log\_s}
+with the ineligible variables masked out (\texttt{categorical\_exclude}).
 
 \paragraph{Combined.}
 Multiplying \eqref{eq:mv-prior-ratio-grow} and
-\eqref{eq:mv-trans-ratio-grow}, the factors $1/n_{\mathrm{var}}(\eta)$ and
-$1/n_{\mathrm{cut}}(\eta, v)$ cancel, leaving the standard CGM form:
+\eqref{eq:mv-trans-ratio-grow}, the rule factors $s_v / e_\eta$ and
+$1/n_{\mathrm{cut}}(\eta, v)$ cancel, since the proposal draws the rule from
+its prior, leaving the standard CGM form:
 \begin{equation}
 	\label{eq:mv-nonlk-grow}
 	\boxed{
@@ -685,7 +737,7 @@ $1/n_{\mathrm{cut}}(\eta, v)$ cancel, leaving the standard CGM form:
 	}
 \end{equation}
 This non-likelihood factor depends only on the tree topology and the CGM
-prior, not on the leaf or noise model. It is precisely
+prior, not on the leaf or noise model nor on $\vs$. It is precisely
 \texttt{Moves.log\_trans\_prior\_ratio}: \texttt{compute\_partial\_ratio} in
 \texttt{mcmcstep/\_moves.py} computes
 $|G(T)| / (P_{\mathrm{grow}}(T) |P(T')|)$ (the variable / cutpoint
@@ -733,8 +785,8 @@ accepted or rejected), the leaves of $T$ are resampled from
 \eqref{eq:mv-leaf-fc}. In the sum-of-trees setting, the residuals of every
 other tree are then refreshed by subtracting the new
 $g(\cdot;\, T_t, M_t)$ from the running sum, and the cycle moves to the
-next tree. After all $m$ trees have been updated, $\mLam$ is drawn from its
-full conditional, derived next.
+next tree. After all $m$ trees have been updated, $\mLam$, $\vs$ and
+$\theta$ are drawn from their full conditionals, derived next.
 
 %-----------------------------------------------------------------------------
 \section{Updating the error precision}
@@ -846,6 +898,144 @@ components, $\psi_j = \Psi_{jj}$); \texttt{init} requires it when the
 \texttt{missing} mask is per component.
 
 %-----------------------------------------------------------------------------
+\section{Updating the variable selection probabilities}
+\label{sec:mv-sparse}
+
+Let $B$ be the set of internal nodes across all $m$ trees, $v_\eta$ the
+split variable of $\eta \in B$, and
+\begin{equation}
+	\label{eq:mv-varcount}
+	c_v \coloneqq |\{\eta \in B : v_\eta = v\}|
+\end{equation}
+the number of times variable $v$ is used in the forest. The trees enter the
+full conditional of $\vs$ only through the variable factors
+\eqref{eq:mv-var-prior} of their rules, since the cutpoint factors do not
+involve $\vs$. By \eqref{eq:mv-joint} and \eqref{eq:mv-s-prior},
+\begin{equation}
+	\label{eq:mv-s-fc}
+	p(\vs \mid T_{1:m}, \theta)
+	\propto \prod_{v=1}^p s_v^{\theta/p - 1}
+	\prod_{\eta \in B} \frac{s_{v_\eta}}{e_\eta}
+	= \prod_{v=1}^p s_v^{\theta/p + c_v - 1}
+	\prod_{\eta \in B} e_\eta^{-1}.
+\end{equation}
+
+\paragraph{Approximate update.}
+If every variable were eligible at every node, $e_\eta \equiv 1$ and
+\eqref{eq:mv-s-fc} would be the kernel of
+$\Dir(\theta/p + c_1, \dots, \theta/p + c_p)$: the Dirichlet is conjugate
+to the categorical rule draws. This is exact
+when no variable can be exhausted, as with continuous cutpoints; with binned
+cutpoints it ignores the denominators, and bartz uses it as an approximation
+when \texttt{augment} is off. The approximation is worst with few variables
+with few cutpoints each, where ancestor splits often exhaust a variable.
+
+\paragraph{Exact update by data augmentation.}
+The denominators are removed by augmenting each internal node with an
+exponential weight and each variable with a Poisson count.
+
+\begin{prop}[Variable probabilities full conditional]
+	\label{prop:mv-s}
+	Conditional on $\vs$, draw independently
+	\begin{align}
+		\label{eq:mv-s-aug-w}
+		w_\eta \mid \vs
+		 & \sim \Expd(e_\eta),
+		\qquad \eta \in B,
+		\\
+		\label{eq:mv-s-aug}
+		\tilde c_v \mid \vs, w
+		 & \sim \Pois(s_v\, \omega_v),
+		\qquad
+		\omega_v \coloneqq \sum_{\eta \in B :\, v \notin E(\eta)} w_\eta,
+		\qquad v = 1, \dots, p,
+	\end{align}
+	with $\Expd(e_\eta)$ the exponential of rate $e_\eta$. Then
+	\begin{equation}
+		\label{eq:mv-s-fc-aug}
+		\vs \mid T_{1:m}, \theta, \tilde c_{1:p} \sim
+		\Dir\!\left(\frac{\theta}{p} + c_1 + \tilde c_1, \dots,
+		\frac{\theta}{p} + c_p + \tilde c_p\right),
+	\end{equation}
+	and marginalising $(w, \tilde c)$ out of the joint of
+	$(\vs, w, \tilde c)$ recovers \eqref{eq:mv-s-fc}.
+\end{prop}
+
+\begin{proof}
+	For each $\eta \in B$, using $1 - e_\eta = \sum_{u \notin E(\eta)} s_u$,
+	\begin{equation}
+		\frac{1}{e_\eta}
+		= \int_0^\infty \mathrm{d}w\, e^{-w e_\eta}
+		= \int_0^\infty \mathrm{d}w\, e^{-w} \prod_{u \notin E(\eta)} e^{w s_u}
+		= \int_0^\infty \mathrm{d}w\, e^{-w} \prod_{u \notin E(\eta)}
+		\sum_{c = 0}^\infty \frac{(w s_u)^c}{c!}.
+	\end{equation}
+	Substituting into \eqref{eq:mv-s-fc}, the integrand and summand define
+	the joint density of $\vs$, the weights $w = (w_\eta)_{\eta \in B}$ and
+	the per-node counts $c_{\eta,u}$, $u \notin E(\eta)$,
+	\begin{equation}
+		\label{eq:mv-s-aug-joint}
+		p(\vs, w, c \mid T_{1:m}, \theta)
+		\propto \prod_{v=1}^p s_v^{\theta/p + c_v - 1}
+		\prod_{\eta \in B} e^{-w_\eta}
+		\prod_{u \notin E(\eta)} \frac{(w_\eta s_u)^{c_{\eta,u}}}{c_{\eta,u}!},
+	\end{equation}
+	whose marginal over $(w, c)$ is \eqref{eq:mv-s-fc} by construction.
+	Conditional on $\vs$, the nodes are independent; summing
+	\eqref{eq:mv-s-aug-joint} over the counts of node $\eta$ gives
+	$e^{-w_\eta} e^{w_\eta (1 - e_\eta)} = e^{-w_\eta e_\eta}$, i.e.\
+	$w_\eta \sim \Expd(e_\eta)$, and conditional on $w_\eta$ the counts are
+	independent $c_{\eta,u} \sim \Pois(w_\eta s_u)$. Collecting the powers of
+	$s_v$ in \eqref{eq:mv-s-aug-joint}, only the totals
+	$\tilde c_v = \sum_{\eta : v \notin E(\eta)} c_{\eta,v}$ matter, and
+	they are $\Pois(s_v \omega_v)$ as sums of independent Poissons. Conditional
+	on the counts, \eqref{eq:mv-s-aug-joint} is the kernel of
+	\eqref{eq:mv-s-fc-aug}.
+\end{proof}
+
+The counts have a sampling interpretation: drawing $v$ from $\vs$ until it
+lands in $E(\eta)$ is a rejection sampler for \eqref{eq:mv-var-prior}, and
+$c_{\eta,u}$ is the number of rejected draws of $u$. This augmentation is
+also how Linero (2018) accounts for the ineligible variables. At a single
+node the counts are negative multinomial, but their sum across nodes has no
+closed form, whence the exponential mixing that turns them into Poissons,
+with a fixed amount of work per node and per variable.
+
+In bartz, \texttt{sample\_s\_augmentation} in \texttt{mcmcstep/\_step.py}
+draws $w_\eta$ as a standard exponential divided by $e_\eta$ and accumulates
+$\omega_v$ tree by tree in \texttt{\_blocked\_mass\_tree}, using the fact
+that a node can exhaust only its own split variable, and only at one node
+along any root-to-leaf path, so that both $1 - e_\eta$ and $\omega_v$ are
+level-by-level accumulations over the tree heap. \texttt{step\_s} adds the Poisson draws to $c_v$ from
+\texttt{var\_histogram} and draws \eqref{eq:mv-s-fc-aug} as independent
+log-gamma variates, stored unnormalised in \texttt{Forest.log\_s}.
+
+\paragraph{Updating the concentration.}
+Under \eqref{eq:mv-theta-prior}, $\theta = \rho\,\xi / (1 - \xi)$ and
+$\theta$ depends on the rest of the model only through $\vs$. Multiplying the
+Beta density of $\xi$ by \eqref{eq:mv-s-prior} as a function of $\theta$,
+\begin{equation}
+	\label{eq:mv-theta-fc}
+	p(\xi \mid \vs) \propto
+	\xi^{a_\theta - 1} (1 - \xi)^{b_\theta - 1}\,
+	\frac{\Gamma(\theta)}{\Gamma(\theta/p)^p}
+	\prod_{v=1}^p s_v^{\theta/p},
+	\qquad \theta = \frac{\rho\,\xi}{1 - \xi},
+\end{equation}
+where the factor $\prod_v s_v^{-1}$ of the Dirichlet density has been
+dropped as constant in $\theta$. No Jacobian appears because $\xi$ itself is
+the sampled variable. This is not a standard density; \texttt{step\_theta}
+samples $\xi$ from \eqref{eq:mv-theta-fc} discretised on the midpoints of
+$1000$ equal bins of $(0, 1)$, then sets $\theta$.
+
+\paragraph{Schedule.}
+bartz enables these two updates only from step
+\texttt{StepConfig.sparse\_on\_at} onwards (by default, half of the burn-in),
+keeping $\vs$ and $\theta$ at their initial values before; by default the
+initial $\vs$ is uniform, so the early sampler is the uniform-rule model of
+Chapter~\ref{ch:vanilla}.
+
+%-----------------------------------------------------------------------------
 \section{Implementation pointers}
 \label{sec:impl-full}
 
@@ -867,12 +1057,20 @@ are all in
 		      \item \texttt{State.inv\_sdev\_scale} is $\va_i$ and
 		            \texttt{State.prec\_scale} is $\tilde\mA_i$ (both stored
 		            up to a power-of-two unit);
-		      \item \texttt{Forest.prec\_tree} holds $\mN_\ell$.
+		      \item \texttt{Forest.prec\_tree} holds $\mN_\ell$;
+		      \item \texttt{Forest.log\_s} is $\log \vs$ up to a constant,
+		            \texttt{Forest.theta} is $\theta$, and
+		            \texttt{Forest.a}, \texttt{b}, \texttt{rho} are
+		            $a_\theta, b_\theta, \rho$;
+		      \item \texttt{StepConfig.sparse\_on\_at} and
+		            \texttt{StepConfig.augment} select the schedule and the
+		            exact update of \S\ref{sec:mv-sparse}.
 	      \end{itemize}
 	\item[\texttt{\_moves.py}] GROW/PRUNE proposals and
 	      \texttt{compute\_partial\_ratio}. These implement
 	      \S\ref{sec:mv-grow}--\ref{sec:mv-prune} and do not depend on the
-	      leaf model.
+	      leaf model; \texttt{choose\_variable} draws the split variable
+	      from \eqref{eq:mv-var-prior}.
 	\item[\texttt{\_step.py}] The leaf and noise model:
 	      \begin{itemize}
 		      \item \texttt{complete\_ratio} finishes \eqref{eq:mv-nonlk-grow};
@@ -887,15 +1085,17 @@ are all in
 		            \texttt{\_sample\_wishart\_bartlett} draw from
 		            \eqref{eq:mv-Sigma-fc};
 		      \item \texttt{\_step\_error\_cov\_inv\_diag} draws from
-		            \eqref{eq:mv-Sigma-fc-diag}.
+		            \eqref{eq:mv-Sigma-fc-diag};
+		      \item \texttt{step\_s} and \texttt{sample\_s\_augmentation}
+		            draw from \eqref{eq:mv-s-fc-aug}, and
+		            \texttt{step\_theta} from \eqref{eq:mv-theta-fc}.
 	      \end{itemize}
 	      When $\mP_\ell \propto \mLam$ (homoskedastic, or scalar scale per
 	      datapoint) the same steps are dispatched to the cheaper
 	      \texttt{\_mv} variants of these functions, with $n_\ell$ from
 	      \texttt{Forest.count\_tree}.
 \end{description}
-The Dirichlet prior on the split variable (\texttt{Forest.log\_s}) and
-probit outcomes are not covered here.
+Probit outcomes are not covered here.
 The tree-topology parts (tree prior, proposal kernel, non-likelihood ratio
 \eqref{eq:mv-nonlk-grow}) are shared verbatim with the univariate code of
 Chapter~\ref{ch:vanilla}.

@@ -173,6 +173,11 @@ def init_bcf(
     -------
     BCFState
         The initialized BCFState.
+
+    Notes
+    -----
+    The arrays passed to this function as arguments may be donated,
+    invalidating them, see `bartz.mcmcstep.init`.
     """
     trt_array = jnp.asarray(trt)
 

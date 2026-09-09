@@ -61,7 +61,7 @@ from bartz.mcmcloop import (
     make_tqdm_callback,
     run_mcmc,
 )
-from bartz.mcmcloop._callback import _TQDM_REGISTRY, _close_stale_bars, _tqdm_advance
+from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal
 from bartz.mcmcstep._axes import trace_sample_axes
@@ -256,7 +256,6 @@ class TestRunMcmc:
         bar_id = callback.bar_id.item()
         _tqdm_advance(bar_id, 1, 10)
         assert buf.getvalue().lstrip('\r').startswith('train ')
-        _close_stale_bars()
 
     def test_tqdm_callback_custom_desc(self) -> None:
         """A user-supplied ``desc`` overrides the default ``train`` label."""
@@ -265,7 +264,6 @@ class TestRunMcmc:
         callback = make_tqdm_callback(state, file=buf, mininterval=0, desc='custom ')
         _tqdm_advance(callback.bar_id.item(), 1, 10)
         assert buf.getvalue().lstrip('\r').startswith('custom ')
-        _close_stale_bars()
 
     def test_tqdm_callback_cleans_up_interrupted_bar(self) -> None:
         """A new tqdm callback closes a bar left open by an interrupted run."""

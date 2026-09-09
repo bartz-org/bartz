@@ -220,15 +220,10 @@ def init_bcf(
     )
 
     # 2. Initialize treatment state, only its forest is kept
-    assert state_mu.resid.dtype == jnp.float32  # to use it as `error_scale`
     state_tau = init(
         X=state_mu.X,
-        y=state_mu.y,
-        error_scale=state_mu.resid,
-        # `error_scale` is stored unchanged by init(), and the bcf step does
-        # not need any initial precision scale value to be correct, so we pass
-        # `resid` through to to make `init` set up heteroskedasticity without
-        # allocating a new buffer
+        y=jnp.copy(state_mu.y),
+        missing=~trt_array,
         outcome_type='continuous',
         offset=0.0,
         max_split=max_split_tau,
@@ -241,10 +236,8 @@ def init_bcf(
         error_cov_inv=Wishart(nu=0.0, rate=0.0, value=1.0),
     )
 
-    # reclaim the mu buffers that rode through the tau init untouched
-    state_mu = replace(
-        state_mu, X=state_tau.X, y=state_tau.y, resid=state_tau.error_scale
-    )
+    # reclaim X, which rode through the tau init untouched
+    state_mu = replace(state_mu, X=state_tau.X)
 
     if adaptive_coding:
         b0_init = -0.5

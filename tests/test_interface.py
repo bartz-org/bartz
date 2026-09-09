@@ -113,6 +113,7 @@ from bartz.grove import (
 )
 from bartz.mcmcloop import (
     Callback,
+    MainTrace,
     MainTraceWithTrainPred,
     compute_varcount,
     evaluate_trace,
@@ -1096,6 +1097,41 @@ def test_error_scale_magnitude_invariance(bkw: BartKW) -> None:
             rtol=rtol,
             reduce_rank=True,
         )
+
+
+def test_error_scale_2d_dense_error_cov(bkw: BartKW) -> None:
+    """A per-component `error_scale` keeps the error precision dense.
+
+    Without missing values the full conditional of the error precision is
+    Wishart whatever the per-datapoint scales, so a ``(k, n)`` `error_scale`
+    must not restrict the sampled precision to the diagonal. A 1-D scale
+    broadcast to ``(k, n)`` is the same model and must reproduce the chain.
+    """
+    if bkw.any_binary or bkw.k is None:
+        pytest.skip('only meaningful for all-continuous multivariate outcomes')
+    kw = bkw.kw
+
+    def run(error_scale: Float[Array, ' n'] | Float[Array, 'k n']) -> MainTrace:
+        bart = Bart(**dict(kw, seed=random.clone(kw['seed']), error_scale=error_scale))
+        return bart._main_trace
+
+    error_scale = kw['error_scale']
+    trace = run(error_scale)
+    offdiag = ~jnp.eye(bkw.k, dtype=bool)
+    assert jnp.all(trace.error_cov_inv[..., offdiag] != 0)
+
+    if error_scale.ndim == 1:
+        trace_2d = run(jnp.broadcast_to(error_scale, kw['y_train'].shape))
+        # the scalar and per-component precision scales take different code
+        # paths, so the chains agree only up to float rounding
+        rtol = 1e-5 if trace.leaf_tree.platform() == 'cpu' else 1e-3
+        assert_close_matrices(
+            trace_2d.error_cov_inv, trace.error_cov_inv, rtol=rtol, reduce_rank=True
+        )
+        assert_close_matrices(
+            trace_2d.leaf_tree, trace.leaf_tree, rtol=rtol, reduce_rank=True
+        )
+        assert_array_equal(trace_2d.split_tree, trace.split_tree)
 
 
 def test_check_trees_detects_corruption(bkw: BartKW) -> None:

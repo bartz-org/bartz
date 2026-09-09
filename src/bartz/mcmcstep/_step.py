@@ -52,6 +52,7 @@ from bartz.grove import var_histogram
 from bartz.mcmcstep._moves import Moves, propose_moves, split_range
 from bartz.mcmcstep._reduction import ReductionConfig
 from bartz.mcmcstep._state import (
+    DiagWishart,
     Forest,
     State,
     StepConfig,
@@ -1714,13 +1715,17 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
     # data units, so no n-sized float32 array is ever materialized
     resid = state.resid
     if state.inv_sdev_scale is not None:
-        # 2-D inv_sdev_scale dispatches to the diagonal path, so here it is 1-D
         resid *= state.inv_sdev_scale
-    df_post = state.error_cov_inv.nu + state.n_non_missing
+
+    # we take the max as a way to take any of the in this case equal values in
+    # n_non_missing
+    df_post = state.error_cov_inv.nu + jnp.max(state.n_non_missing)
+
     # unit of the stored precision-scaled residuals: `resid` is in `resid_unit`
-    # units and `inv_sdev_scale` in `inv_sdev_unit` units (a scalar here,
-    # matching the 1-D `inv_sdev_scale`; 1 without error scales)
+    # units and `inv_sdev_scale` in `inv_sdev_unit` units (1 without error
+    # scales, per-component with 2-D `inv_sdev_scale`)
     scale = state.resid_unit * state.inv_sdev_unit
+
     rrt = jnp.einsum(
         'an,bn->ab', resid, resid, preferred_element_type=jnp.float32
     ) * jnp.outer(scale, scale)
@@ -1777,10 +1782,8 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
 @named_call
 def step_error_cov_inv(key: Key[Array, ''], state: State) -> State:
     """MCMC-update the inverse error covariance."""
-    if (
-        state.error_cov_inv.value.ndim == 2
-        and state.binary_indices is None
-        and (state.inv_sdev_scale is None or state.inv_sdev_scale.ndim == 1)
+    if state.error_cov_inv.value.ndim == 2 and not isinstance(
+        state.error_cov_inv, DiagWishart
     ):
         return _step_error_cov_inv_mv(key, state)
     else:

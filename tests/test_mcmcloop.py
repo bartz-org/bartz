@@ -247,15 +247,9 @@ class TestRunMcmc:
         assert '100%' in out  # the bar reached the end
         assert '6/6' in out  # n_burn + n_save * n_skip iterations
         assert bar_id not in _TQDM_REGISTRY  # the bar was closed and removed
-
-    def test_tqdm_callback_label_before_report(self) -> None:
-        """The ``train`` label is shown from the start, before any stats report."""
-        state = simple_init()
-        buf = io.StringIO()
-        callback = make_tqdm_callback(state, file=buf, mininterval=0)
-        bar_id = callback.bar_id.item()
-        _tqdm_advance(bar_id, 1, 10)
-        assert buf.getvalue().lstrip('\r').startswith('train ')
+        # the label survives the reports, which redraw the bar
+        frames = [f for f in out.split('\r') if f.strip()]
+        assert all(f.startswith('train ') for f in frames)
 
     def test_tqdm_callback_custom_desc(self) -> None:
         """A user-supplied ``desc`` overrides the default ``train`` label."""

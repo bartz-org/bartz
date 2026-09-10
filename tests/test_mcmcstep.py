@@ -2666,6 +2666,58 @@ class TestMVBartIntegration:
         sample_mv_drop = _step_error_cov_inv_mv(key, st_mv_drop).error_cov_inv.value
         assert_allclose(sample_mv_with, sample_mv_drop, rtol=1e-6)
 
+    def test_error_cov_inv_2d_scale_units(
+        self, keys: split, mcmcstep_data: MCMCStepData
+    ) -> None:
+        """The dense sampler applies per-component `inv_sdev_unit` to 2-D scales.
+
+        A 2-D `inv_sdev_scale` stored in distinct per-component units must draw
+        the same precision as the same scales with the units multiplied in.
+        """
+        X, y, _ = mcmcstep_data
+        k = 2
+        n = y.size
+        resid = random.normal(keys.pop(), (k, n))
+        # powers of two so that factoring the units out is exact
+        inv_sdev_unit = jnp.array([0.5, 4.0])
+        inv_sdev_scale = 2.0 ** random.randint(keys.pop(), (k, n), -2, 3)
+
+        common: dict = dict(
+            _chain_anchor=jnp.zeros(()),
+            X=X,
+            y=resid,
+            resid=resid,
+            binary_indices=None,
+            z=None,
+            prec_scale=None,
+            resid_unit=jnp.ones(k),  # unit scale: resid is in data units
+            resid_eff_scale=jnp.ones(k),
+            resid_inexact_integral=jnp.zeros(k),
+            error_scale=None,
+            n_non_missing=jnp.full(k, n),
+            sum_diag_prec_scale=jnp.sum(
+                jnp.square(inv_sdev_scale * inv_sdev_unit[:, None]), axis=-1
+            ),
+            forest=_EmptyForest(),
+            config=_minimal_step_config(),
+            error_cov_inv=Wishart(nu=20.0, rate=jnp.eye(k), value=jnp.eye(k)),
+        )
+        st_units = State(
+            **common, inv_sdev_scale=inv_sdev_scale, inv_sdev_unit=inv_sdev_unit
+        )
+        st_plain = State(
+            **common,
+            inv_sdev_scale=inv_sdev_scale * inv_sdev_unit[:, None],
+            inv_sdev_unit=jnp.ones(k),
+        )
+
+        key = keys.pop()
+        prec_units = step_error_cov_inv(key, st_units).error_cov_inv.value
+        prec_plain = step_error_cov_inv(key, st_plain).error_cov_inv.value
+        # the 2-D scales must keep the dense path
+        assert jnp.all(prec_units[~jnp.eye(k, dtype=bool)] != 0)
+        assert_close_matrices(prec_units, prec_plain, rtol=1e-6)
+
 
 class TestMultivariate:
     """Test for multivariate outcomes specifically."""

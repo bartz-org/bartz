@@ -24,8 +24,6 @@
 
 """Bayesian Causal Forests (BCF) interface."""
 
-from __future__ import annotations
-
 import dataclasses
 import json
 from pathlib import Path
@@ -51,6 +49,7 @@ from bartz._interface import (
     _process_response_input,
     predict_latent,
 )
+from bartz._jaxext import split
 from bartz.bcf._loop import run_bcf_mcmc
 from bartz.bcf._state import init_bcf
 from bartz.mcmcloop import MainTrace
@@ -113,10 +112,6 @@ def _serialize_binner(binner: Any, max_split: Any = None) -> dict[str, Any]:  # 
             raise RuntimeError(msg) from exc
     binner_dict['max_split'] = np.asarray(max_split)
 
-    # Pylint protected-access (W0212) is explicitly bypassed here because
-    # _serialize_binner serves as a dedicated external adapter extracting
-    # private trace arrays for NPZ persistence.
-    # pylint: disable=protected-access
     if hasattr(binner, '_splits'):
         binner_dict['_splits'] = np.asarray(binner._splits)  # noqa: SLF001
 
@@ -124,7 +119,6 @@ def _serialize_binner(binner: Any, max_split: Any = None) -> dict[str, Any]:  # 
         binner_dict['_low'] = np.asarray(binner._low)  # noqa: SLF001
         binner_dict['_high'] = np.asarray(binner._high)  # noqa: SLF001
         binner_dict['_max_bins'] = np.asarray(binner._max_bins)  # noqa: SLF001
-    # pylint: enable=protected-access
 
     return binner_dict
 
@@ -157,7 +151,7 @@ def _deserialize_binner(data: Any) -> Any:  # noqa: ANN401
     return binner
 
 
-class bcf(eqx.Module):  # pylint: disable=invalid-name
+class bcf(eqx.Module):
     R"""
     Bayesian Causal Forests (BCF).
 
@@ -172,7 +166,7 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
     y_train
         The training responses.
     z_train
-        The treatment assignment (binary or continuous).
+        The binary treatment assignment (0 or 1).
     pihat_train
         The estimated propensity scores. If provided, appended to `x_train`.
     x_test
@@ -204,9 +198,9 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
     sigma_init
         Initial value for error variance.
     leaf_prior_cov_inv_mu
-        Custom inverse covariance matrix for the prognostic forest leaf prior.
+        Custom leaf prior precision for the prognostic forest.
     leaf_prior_cov_inv_tau
-        Custom inverse covariance matrix for the treatment effect forest leaf prior.
+        Custom leaf prior precision for the treatment effect forest.
     min_points_per_leaf_mu
         Minimum data points per leaf for prognostic forest.
     min_points_per_leaf_tau
@@ -282,8 +276,8 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
         sigma_df: float = 3.0,
         sigma_scale: float | Literal['auto'] = 'auto',
         sigma_init: float | Literal['auto'] = 'auto',
-        leaf_prior_cov_inv_mu: FloatLike | Float32[ArrayLike, '*shape'] | None = None,
-        leaf_prior_cov_inv_tau: FloatLike | Float32[ArrayLike, '*shape'] | None = None,
+        leaf_prior_cov_inv_mu: FloatLike | None = None,
+        leaf_prior_cov_inv_tau: FloatLike | None = None,
         min_points_per_leaf_mu: int = 5,
         min_points_per_leaf_tau: int = 5,
         tau_0_prior_var: float | None = None,
@@ -305,6 +299,11 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
         x_train, self._x_train_fmt = _process_bcf_predictor_input(x_train)
         y_train = _process_response_input(y_train)
         z_train = _process_response_input(z_train)
+        z_train = eqx.error_if(
+            z_train,
+            jnp.any((z_train != 0) & (z_train != 1)),
+            'Values in `z_train` must be 0 or 1.',
+        ).astype(bool)
 
         self._outcome_type = outcome_type
 
@@ -367,13 +366,13 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
 
         if leaf_prior_cov_inv_mu is None:
             if outcome_type == 'binary':
-                leaf_prior_cov_inv_mu = jnp.array(num_trees_mu / 1.0, dtype=jnp.float32)
+                leaf_prior_cov_inv_mu = jnp.array(num_trees_mu, jnp.float32)
             else:
                 leaf_prior_cov_inv_mu = _process_leaf_variance_settings(
                     y_train_internal,
                     binary_mask,
                     missing=None,
-                    k=jnp.asarray(k_mu, dtype=jnp.float32),
+                    k=jnp.array(k_mu),
                     num_trees=num_trees_mu,
                     tau_num=None,
                 )
@@ -383,13 +382,13 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
                 q_quantile = special.ndtri((p_val + 1) / 2.0)
                 phi_0 = 1.0 / jnp.sqrt(2 * jnp.pi)
                 sigma2_tau = ((delta_max / (q_quantile * phi_0)) ** 2) / num_trees_tau
-                leaf_prior_cov_inv_tau = jnp.array(1.0 / sigma2_tau, dtype=jnp.float32)
+                leaf_prior_cov_inv_tau = jnp.reciprocal(sigma2_tau)
             else:
                 leaf_prior_cov_inv_tau = _process_leaf_variance_settings(
                     y_train_internal,
                     binary_mask,
                     missing=None,
-                    k=jnp.asarray(k_tau, dtype=jnp.float32),
+                    k=jnp.array(k_tau),
                     num_trees=num_trees_tau,
                     tau_num=None,
                 )
@@ -415,12 +414,13 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
 
         # 3.5 Bin the unified data
         rng = random.key(seed) if not isinstance(seed, jax.Array) else seed
-        rng, key_binner = random.split(rng)
+        keys = split(rng)
 
-        binner = UniqueQuantileBinner(x_train_unified, key=key_binner)
+        binner = UniqueQuantileBinner(x_train_unified, key=keys.pop())
         x_train_binned = binner.bin(x_train_unified)
-        max_split_mu = jnp.array(binner.max_split)
-        max_split_tau = jnp.array(binner.max_split)
+        # copies because `init_bcf` may donate them
+        max_split_mu = jnp.copy(binner.max_split)
+        max_split_tau = jnp.copy(binner.max_split)
 
         if pihat_index is not None:
             if not include_pihat_in_mu:
@@ -429,7 +429,7 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
                 # Block splits on propensity score for tau
                 max_split_tau = max_split_tau.at[pihat_index].set(0)
 
-        # 4. Initialize BCFState (single subclass)
+        # 4. Initialize BCFState
         initial_state = init_bcf(
             X_unified=x_train_binned,
             trt=z_train,
@@ -446,23 +446,24 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
             leaf_prior_cov_inv_tau=leaf_prior_cov_inv_tau,
             min_points_per_leaf_mu=min_points_per_leaf_mu,
             min_points_per_leaf_tau=min_points_per_leaf_tau,
+            # ignore all predictors without splits, like `Bart(..., rm_const=True)`
+            filter_splitless_vars_mu=jnp.sum(max_split_mu == 0).item(),
+            filter_splitless_vars_tau=jnp.sum(max_split_tau == 0).item(),
             tau_0_prior_var=tau_0_prior_var,
             sample_intercept=sample_intercept,
             adaptive_coding=adaptive_coding,
-            sample_sigma2_leaf_mu=sample_sigma2_leaf_mu,
-            sigma2_leaf_shape_mu=sigma2_leaf_shape_mu,
-            sigma2_leaf_scale_mu=sigma2_leaf_scale_mu,
-            sample_sigma2_leaf_tau=sample_sigma2_leaf_tau,
-            sigma2_leaf_shape_tau=sigma2_leaf_shape_tau,
-            sigma2_leaf_scale_tau=sigma2_leaf_scale_tau,
+            sample_leaf_prior_cov_inv_mu=sample_sigma2_leaf_mu,
+            leaf_prior_cov_inv_shape_mu=sigma2_leaf_shape_mu,
+            leaf_prior_cov_inv_rate_mu=sigma2_leaf_scale_mu,
+            sample_leaf_prior_cov_inv_tau=sample_sigma2_leaf_tau,
+            leaf_prior_cov_inv_shape_tau=sigma2_leaf_shape_tau,
+            leaf_prior_cov_inv_rate_tau=sigma2_leaf_scale_tau,
             error_cov_inv=error_cov_inv,
         )
 
         # 5. Run the MCMC loop
-        rng, loop_key = random.split(rng)
-
         final_state, final_carry = run_bcf_mcmc(
-            key=loop_key, state=initial_state, n_save=ndpost, n_burn=nskip, n_skip=0
+            key=keys.pop(), state=initial_state, n_save=ndpost, n_burn=nskip, n_skip=0
         )
         self._mcmc_state = final_state
         self._binner = binner
@@ -510,7 +511,7 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
         y_std: Float32[ArrayLike, ''] | float = 1.0,
         outcome_type: str = 'continuous',
         offset: Float32[ArrayLike, ''] | float = 0.0,
-    ) -> bcf:
+    ) -> 'bcf':
         """
         Private factory constructor to initialize bcf instance from restored state.
 
@@ -568,10 +569,10 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
         )
         object.__setattr__(model, '_x_train_fmt', x_train_fmt)
         object.__setattr__(model, '_standardize', standardize)
-        object.__setattr__(model, '_y_mean', jnp.asarray(y_mean, dtype=jnp.float32))
-        object.__setattr__(model, '_y_std', jnp.asarray(y_std, dtype=jnp.float32))
+        object.__setattr__(model, '_y_mean', jnp.asarray(y_mean))
+        object.__setattr__(model, '_y_std', jnp.asarray(y_std))
         object.__setattr__(model, '_outcome_type', outcome_type)
-        object.__setattr__(model, '_offset', jnp.asarray(offset, dtype=jnp.float32))
+        object.__setattr__(model, '_offset', jnp.asarray(offset))
         return model
 
     def save_npz(self, path: str | Path) -> None:
@@ -634,7 +635,7 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
         np.savez_compressed(path, allow_pickle=True, **state)
 
     @classmethod
-    def load_npz(cls, path: str | Path) -> bcf:
+    def load_npz(cls, path: str | Path) -> 'bcf':
         """
         Load BCF traces from an NPZ archive, bypassing __init__ MCMC.
 
@@ -873,9 +874,9 @@ class bcf(eqx.Module):  # pylint: disable=invalid-name
 
         sigma = self.sigma_trace[:, jnp.newaxis]
 
-        k0, k1 = random.split(key)
-        u0 = random.normal(k0, shape=(ndpost, m), dtype=jnp.float32)
-        u1 = random.normal(k1, shape=(ndpost, m), dtype=jnp.float32)
+        keys = split(key)
+        u0 = random.normal(keys.pop(), shape=(ndpost, m), dtype=jnp.float32)
+        u1 = random.normal(keys.pop(), shape=(ndpost, m), dtype=jnp.float32)
 
         rho_f = jnp.float32(rho)
         eps0 = sigma * u0

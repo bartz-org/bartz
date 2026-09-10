@@ -22,115 +22,96 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Module defining the BCF State and initialization."""
+"""Define `BCFState` and `init_bcf`."""
 
-from __future__ import annotations
+from dataclasses import replace
+from typing import Literal
 
-from typing import Any, Literal
-
-import equinox as eqx
-import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Float32, UInt
+from jaxtyping import Array, Bool, Float32, UInt
 
 from bartz._jaxext import field
-from bartz.mcmcstep._state import (
-    CHAIN_AXIS,
-    ArrayLike,
-    FloatLike,
-    Forest,
-    State,
-    Wishart,
-    chain_vmap_axes,
-    init,
-)
+from bartz.mcmcstep._axes import CHAIN_AXIS
+from bartz.mcmcstep._state import ArrayLike, FloatLike, Forest, State, Wishart, init
 
 
 class BCFState(State):
     """The full MCMC state for a Bayesian Causal Forest.
 
-    Attributes
-    ----------
-      forest_tau: The treatment forest (tau).
-      trt: The treatment variable.
-      resid_tau: The residuals of the tau forest.
-      prec_scale_tau: Scale on the error precision for the tau forest.
-      inv_sdev_scale_tau: Reciprocal of standard deviation scale for the tau
-        forest.
-      leaf_prior_cov_inv_tau: Prior precision for tau leaf values.
-      tau_0: Global intercept for the treatment effect.
-      tau_0_prior_var: Prior variance of tau_0.
+    The fields inherited from `State` refer to the prognostic (mu) forest.
     """
 
-    forest_tau: Forest = field()
-    trt: Float32[Array, ' n'] = field(data=-1)
-    resid_tau: Float32[Array, '*chains n'] | Float32[Array, '*chains k n'] = field(
-        chains=CHAIN_AXIS, data=-1
-    )
-    prec_scale_tau: Float32[Array, ' n'] | Float32[Array, 'k k n'] | None = field(
-        data=-1
-    )
-    inv_sdev_scale_tau: Float32[Array, ' n'] | Float32[Array, 'k n'] | None = field(
-        data=-1
-    )
-    tau_X: Float32[Array, ' n'] = field(data=-1)
-    leaf_prior_cov_inv_tau: Float32[Array, ''] | Float32[Array, 'k k'] = field()
+    forest_tau: Forest
+    """The treatment forest (tau)."""
 
-    # Defaults at the end
-    tau_0: Float32[Array, '*chains'] = field(default=0.0)
-    b0: Float32[Array, '*chains'] = field(default=0.0)
-    b1: Float32[Array, '*chains'] = field(default=1.0)
-    tau_0_prior_var: FloatLike = field(static=True, default=1.0)
-    sample_intercept: bool = field(static=True, default=True)
-    adaptive_coding: bool = field(static=True, default=False)
-    sample_sigma2_leaf_mu: bool = field(static=True, default=True)
-    sigma2_leaf_shape_mu: FloatLike = field(static=True, default=3.0)
-    sigma2_leaf_scale_mu: FloatLike = field(static=True, default=1.0)
-    sample_sigma2_leaf_tau: bool = field(static=True, default=False)
-    sigma2_leaf_shape_tau: FloatLike = field(static=True, default=3.0)
-    sigma2_leaf_scale_tau: FloatLike = field(static=True, default=1.0)
+    trt: Bool[Array, ' n'] = field(data=-1)
+    """Whether each unit is treated."""
 
-    @property
-    def has_chains(self) -> bool:
-        """Whether the state is multichain (i.e. has a chain axis)."""
-        return self.forest.has_chains
+    tau_X: Float32[Array, '*chains n'] | None = field(chains=CHAIN_AXIS, data=-1)
+    """The treatment effect predicted by the tau forest at each datapoint,
+    `None` if not needed because `b_prior_cov_inv` is `None`."""
 
-    def num_chains(self) -> int | None:
-        """Return the number of chains, or `None` if the state is single-chain."""
-        if not self.has_chains:
-            return None
+    tau_0: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
+    """Global intercept for the treatment effect."""
 
-        c = chain_vmap_axes(self.forest).var_tree  # pragma: no cover
-        return self.forest.var_tree.shape[c]  # pragma: no cover
+    b0: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
+    """Adaptive coding weight for untreated units."""
+
+    b1: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
+    """Adaptive coding weight for treated units."""
+
+    b_prior_cov_inv: Float32[Array, ''] | None
+    """Prior precision of `b0` and `b1`, `None` to leave them unchanged."""
+
+    tau_0_prior_cov_inv: Float32[Array, ''] | None
+    """Prior precision of `tau_0`, `None` to hold `tau_0` at zero."""
+
+    leaf_prior_cov_inv_shape_mu: Float32[Array, ''] | None
+    """Shape of the Gamma prior on the mu leaf precision
+    `forest.leaf_prior_cov_inv`. Set it and the rate to `None` to hold the
+    precision fixed."""
+
+    leaf_prior_cov_inv_rate_mu: Float32[Array, ''] | None
+    """Rate of the Gamma prior on the mu leaf precision."""
+
+    leaf_prior_cov_inv_shape_tau: Float32[Array, ''] | None
+    """Shape of the Gamma prior on the tau leaf precision
+    `forest_tau.leaf_prior_cov_inv`. Set it and the rate to `None` to hold the
+    precision fixed."""
+
+    leaf_prior_cov_inv_rate_tau: Float32[Array, ''] | None
+    """Rate of the Gamma prior on the tau leaf precision."""
 
 
 def init_bcf(
     *,
     X_unified: UInt[ArrayLike, 'p n'],
-    trt: Float32[ArrayLike, ' n'],
-    y: Float32[ArrayLike, ' n'] | Float32[ArrayLike, ' k n'],
+    trt: Bool[ArrayLike, ' n'],
+    y: Float32[ArrayLike, ' n'],
     outcome_type: Literal['continuous', 'binary'] = 'continuous',
-    offset: FloatLike | Float[ArrayLike, ' k'],
+    offset: FloatLike,
     max_split_mu: UInt[ArrayLike, ' p'],
     max_split_tau: UInt[ArrayLike, ' p'],
     num_trees_mu: int,
     num_trees_tau: int,
     p_nonterminal_mu: Float32[ArrayLike, ' d_mu_minus_1'],
     p_nonterminal_tau: Float32[ArrayLike, ' d_tau_minus_1'],
-    leaf_prior_cov_inv_mu: FloatLike | Float[ArrayLike, 'k k'],
-    leaf_prior_cov_inv_tau: FloatLike | Float[ArrayLike, 'k k'],
+    leaf_prior_cov_inv_mu: FloatLike,
+    leaf_prior_cov_inv_tau: FloatLike,
     min_points_per_leaf_mu: int = 10,
     min_points_per_leaf_tau: int = 10,
-    tau_0_prior_var: float | None = None,
+    filter_splitless_vars_mu: int = 0,
+    filter_splitless_vars_tau: int = 0,
+    tau_0_prior_var: FloatLike | None = None,
     sample_intercept: bool = True,
     adaptive_coding: bool = False,
-    sample_sigma2_leaf_mu: bool = True,
-    sigma2_leaf_shape_mu: float = 3.0,
-    sigma2_leaf_scale_mu: float = 1.0,
-    sample_sigma2_leaf_tau: bool = False,
-    sigma2_leaf_shape_tau: float = 3.0,
-    sigma2_leaf_scale_tau: float = 1.0,
-    **kwargs: Any,
+    sample_leaf_prior_cov_inv_mu: bool = True,
+    sample_leaf_prior_cov_inv_tau: bool = False,
+    leaf_prior_cov_inv_shape_mu: FloatLike = 3.0,
+    leaf_prior_cov_inv_shape_tau: FloatLike = 3.0,
+    leaf_prior_cov_inv_rate_mu: FloatLike = 1.0,
+    leaf_prior_cov_inv_rate_tau: FloatLike = 1.0,
+    error_cov_inv: Wishart | None = None,
 ) -> BCFState:
     """
     Initialize a BCFState as a subclass of State.
@@ -140,7 +121,7 @@ def init_bcf(
     X_unified
         The unified binned predictors matrix [X, pihat].
     trt
-        The treatment assignment array.
+        The binary treatment assignment.
     y
         The response array.
     outcome_type
@@ -148,81 +129,85 @@ def init_bcf(
     offset
         The response offset.
     max_split_mu
-        Maximum splits for prognostic forest.
     max_split_tau
-        Maximum splits for treatment forest.
+        Maximum splits for the prognostic and treatment forests.
     num_trees_mu
-        Number of trees in prognostic forest.
     num_trees_tau
-        Number of trees in treatment forest.
+        Number of trees in the prognostic and treatment forests.
     p_nonterminal_mu
-        Split prior for prognostic.
     p_nonterminal_tau
-        Split prior for treatment.
+        Split priors for the prognostic and treatment forests.
     leaf_prior_cov_inv_mu
-        Leaf variance prior for prognostic.
     leaf_prior_cov_inv_tau
-        Leaf variance prior for treatment.
+        Leaf prior precisions of the prognostic and treatment forests.
     min_points_per_leaf_mu
-        Minimum data points per leaf for prognostic forest.
     min_points_per_leaf_tau
-        Minimum data points per leaf for treatment forest.
+        Minimum data points per leaf for the prognostic and treatment forests.
+    filter_splitless_vars_mu
+    filter_splitless_vars_tau
+        The maximum number of predictors without splits that each forest can
+        ignore, see `bartz.mcmcstep.init`. Must be known at trace time.
     tau_0_prior_var
         Prior variance for the global treatment intercept `tau_0`.
     sample_intercept
         Whether to sample a global treatment intercept `tau_0`.
     adaptive_coding
         Whether to use adaptive coding for the treatment effect.
-    sample_sigma2_leaf_mu
-        Whether to sample leaf variance for prognostic forest.
-    sigma2_leaf_shape_mu
-        Shape parameter for prior on leaf variance of prognostic forest.
-    sigma2_leaf_scale_mu
-        Scale parameter for prior on leaf variance of prognostic forest.
-    sample_sigma2_leaf_tau
-        Whether to sample leaf variance for treatment forest.
-    sigma2_leaf_shape_tau
-        Shape parameter for prior on leaf variance of treatment forest.
-    sigma2_leaf_scale_tau
-        Scale parameter for prior on leaf variance of treatment forest.
-    **kwargs
-        Additional kwargs for the base BART initializer.
+    sample_leaf_prior_cov_inv_mu
+    sample_leaf_prior_cov_inv_tau
+        Whether to sample the leaf prior precisions of the prognostic and
+        treatment forests.
+    leaf_prior_cov_inv_shape_mu
+    leaf_prior_cov_inv_shape_tau
+        Shapes of the Gamma priors on the prognostic and treatment leaf
+        precisions.
+    leaf_prior_cov_inv_rate_mu
+    leaf_prior_cov_inv_rate_tau
+        Rates of the Gamma priors on the prognostic and treatment leaf
+        precisions.
+    error_cov_inv
+        The Wishart prior on the error precision and its initial value, `None`
+        for binary outcomes. See `bartz.mcmcstep.init`.
 
     Returns
     -------
     BCFState
         The initialized BCFState.
+
+    Notes
+    -----
+    The arrays passed to this function as arguments may be donated,
+    invalidating them, see `bartz.mcmcstep.init`.
     """
-    trt_array = jnp.asarray(trt, jnp.float32)
+    trt_array = jnp.asarray(trt)
 
-    user_filter_splitless = kwargs.pop('filter_splitless_vars', 0)
-    filter_splitless_vars_mu = max(
-        user_filter_splitless, int(jnp.sum(max_split_mu == 0))
-    )
-    filter_splitless_vars_tau = max(
-        user_filter_splitless, int(jnp.sum(max_split_tau == 0))
-    )
-
-    if tau_0_prior_var is None:
-        if outcome_type == 'binary':
-            tau_0_prior_var_val = 1.0
-        else:
-            tau_0_prior_var_val = float(jnp.var(jnp.asarray(y)))
+    if not sample_intercept:
+        tau_0_prior_cov_inv = None
+    elif tau_0_prior_var is not None:
+        tau_0_prior_cov_inv = jnp.reciprocal(jnp.asarray(tau_0_prior_var, jnp.float32))
+    elif outcome_type == 'binary':
+        tau_0_prior_cov_inv = jnp.array(1.0, jnp.float32)
     else:
-        tau_0_prior_var_val = float(tau_0_prior_var)
+        tau_0_prior_cov_inv = jnp.reciprocal(jnp.var(jnp.asarray(y)))
 
-    y_mu = jnp.copy(y)
-    kwargs_mu = jax.tree.map(
-        lambda x: jnp.copy(x) if isinstance(x, jax.Array) else x, kwargs
-    )
+    if sample_leaf_prior_cov_inv_mu:
+        shape_mu = jnp.asarray(leaf_prior_cov_inv_shape_mu, jnp.float32)
+        rate_mu = jnp.asarray(leaf_prior_cov_inv_rate_mu, jnp.float32)
+    else:
+        shape_mu = None
+        rate_mu = None
 
-    # We copy X_unified because the first init() call will donate and delete it.
-    x_unified_copy = jnp.copy(X_unified)
+    if sample_leaf_prior_cov_inv_tau:
+        shape_tau = jnp.asarray(leaf_prior_cov_inv_shape_tau, jnp.float32)
+        rate_tau = jnp.asarray(leaf_prior_cov_inv_rate_tau, jnp.float32)
+    else:
+        shape_tau = None
+        rate_tau = None
 
     # 1. Initialize prognostic state (contains base variables, X, offset, resid)
     state_mu = init(
-        X=x_unified_copy,
-        y=y_mu,
+        X=X_unified,
+        y=y,
         outcome_type=outcome_type,
         offset=offset,
         max_split=max_split_mu,
@@ -231,55 +216,42 @@ def init_bcf(
         leaf_prior_cov_inv=leaf_prior_cov_inv_mu,
         filter_splitless_vars=filter_splitless_vars_mu,
         min_points_per_leaf=min_points_per_leaf_mu,
-        **kwargs_mu,
+        error_cov_inv=error_cov_inv,
     )
 
-    # 2. Initialize treatment state (used to extract tau components, e.g. weights)
-    safe_trt = jnp.where(trt_array == 0, 1.0, trt_array)
-    error_scale = 1.0 / jnp.abs(safe_trt)
-    missing = trt_array == 0
-
-    kwargs_tau = dict(kwargs)
-    if outcome_type == 'binary' and kwargs_tau.get('error_cov_inv') is None:
-        kwargs_tau['error_cov_inv'] = Wishart(
-            nu=0.0, rate=0.0, value=jnp.array(1.0, dtype=jnp.float32)
-        )
-
+    # 2. Initialize treatment state, only its forest is kept
     state_tau = init(
-        X=X_unified,
-        y=y,
+        X=state_mu.X,
+        y=jnp.copy(state_mu.y),
+        missing=~trt_array,
         outcome_type='continuous',
         offset=0.0,
         max_split=max_split_tau,
         num_trees=num_trees_tau,
         p_nonterminal=p_nonterminal_tau,
         leaf_prior_cov_inv=leaf_prior_cov_inv_tau,
-        error_scale=error_scale,
-        missing=missing,
         filter_splitless_vars=filter_splitless_vars_tau,
         min_points_per_leaf=min_points_per_leaf_tau,
-        **kwargs_tau,
+        # tau is pretend-initialized as continuous outcome, so pass a dummy error_cov_inv
+        error_cov_inv=Wishart(nu=0.0, rate=0.0, value=1.0),
     )
 
-    fixed_error_cov_inv = eqx.tree_at(
-        lambda w: (w.nu, w.rate),
-        state_tau.error_cov_inv,
-        (None, None),
-        is_leaf=lambda x: x is None,
-    )
-    state_tau = eqx.tree_at(lambda s: s.error_cov_inv, state_tau, fixed_error_cov_inv)
+    # reclaim X, which rode through the tau init untouched
+    state_mu = replace(state_mu, X=state_tau.X)
 
     if adaptive_coding:
         b0_init = -0.5
         b1_init = 0.5
+        b_prior_cov_inv = jnp.array(2.0, jnp.float32)
     else:
         b0_init = 0.0
         b1_init = 1.0
+        b_prior_cov_inv = None
 
     # Assemble everything into the BCFState subclass
     return BCFState(
         # Inherited fields from State (populated from state_mu)
-        _chain_anchor=state_mu._chain_anchor,  # pylint: disable=protected-access # noqa: SLF001
+        _chain_anchor=state_mu._chain_anchor,  # noqa: SLF001
         X=state_mu.X,
         y=state_mu.y,
         z=state_mu.z,
@@ -299,22 +271,15 @@ def init_bcf(
         config=state_mu.config,
         # Subclass additions
         forest_tau=state_tau.forest,  # tau forest
-        resid_tau=state_tau.resid,  # tau residuals
-        prec_scale_tau=state_tau.prec_scale,
-        inv_sdev_scale_tau=state_tau.inv_sdev_scale,
         trt=trt_array,
-        tau_X=jnp.zeros(len(trt_array), dtype=jnp.float32),
-        tau_0=jnp.zeros((), dtype=jnp.float32),
-        b0=jnp.array(b0_init, dtype=jnp.float32),
-        b1=jnp.array(b1_init, dtype=jnp.float32),
-        tau_0_prior_var=tau_0_prior_var_val,
-        leaf_prior_cov_inv_tau=state_tau.forest.leaf_prior_cov_inv,
-        sample_intercept=sample_intercept,
-        adaptive_coding=adaptive_coding,
-        sample_sigma2_leaf_mu=sample_sigma2_leaf_mu,
-        sigma2_leaf_shape_mu=sigma2_leaf_shape_mu,
-        sigma2_leaf_scale_mu=sigma2_leaf_scale_mu,
-        sample_sigma2_leaf_tau=sample_sigma2_leaf_tau,
-        sigma2_leaf_shape_tau=sigma2_leaf_shape_tau,
-        sigma2_leaf_scale_tau=sigma2_leaf_scale_tau,
+        tau_X=jnp.zeros(len(trt_array)) if adaptive_coding else None,
+        tau_0=jnp.zeros(()),
+        b0=jnp.array(b0_init, jnp.float32),
+        b1=jnp.array(b1_init, jnp.float32),
+        tau_0_prior_cov_inv=tau_0_prior_cov_inv,
+        b_prior_cov_inv=b_prior_cov_inv,
+        leaf_prior_cov_inv_shape_mu=shape_mu,
+        leaf_prior_cov_inv_rate_mu=rate_mu,
+        leaf_prior_cov_inv_shape_tau=shape_tau,
+        leaf_prior_cov_inv_rate_tau=rate_tau,
     )

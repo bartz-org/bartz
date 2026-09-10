@@ -28,7 +28,7 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import fields, replace
 from functools import partial, wraps
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax
 import numpy
@@ -190,6 +190,33 @@ class _EmptyForest(Forest):
     def __init__(self) -> None:
         for f in fields(Forest):
             object.__setattr__(self, f.name, None)
+
+
+def _bare_state_kw(
+    kshape: tuple[int, ...], n_non_missing: int | Integer[Array, '*k'], **kw: Any
+) -> dict:
+    """`State` fields with unit scales, no error scales, and no binary components.
+
+    The error-covariance samplers read only these, `resid`, `inv_sdev_scale`,
+    `inv_sdev_unit`, and `error_cov_inv`; `kw` adds or overrides fields.
+    """
+    base = dict(
+        _chain_anchor=jnp.zeros(()),
+        binary_indices=None,
+        z=None,
+        prec_scale=None,
+        inv_sdev_scale=None,
+        inv_sdev_unit=jnp.ones(kshape),
+        resid_unit=jnp.ones(kshape),  # unit scale: resid is in data units
+        resid_eff_scale=jnp.ones(kshape),
+        resid_inexact_integral=jnp.zeros(kshape),
+        error_scale=None,
+        n_non_missing=jnp.asarray(n_non_missing),
+        sum_diag_prec_scale=jnp.asarray(n_non_missing, jnp.float32),
+        forest=_EmptyForest(),
+        config=_minimal_step_config(),
+    )
+    return dict(base, **kw)
 
 
 class _HasChainsBase(Module):
@@ -2460,24 +2487,7 @@ class TestMVBartIntegration:
         df_prior = jnp.float32(20.0)
         scale_prior = jnp.float32(10.0)
 
-        common: dict = dict(
-            _chain_anchor=jnp.zeros(()),
-            X=X,
-            y=y,
-            binary_indices=None,
-            z=None,
-            prec_scale=None,
-            inv_sdev_scale=None,
-            inv_sdev_unit=jnp.ones(()),
-            resid_unit=jnp.ones(()),  # unit scale: resid is in data units
-            resid_eff_scale=jnp.ones(()),
-            resid_inexact_integral=jnp.zeros(()),
-            error_scale=None,
-            n_non_missing=jnp.asarray(y.size),
-            sum_diag_prec_scale=jnp.asarray(float(y.size)),
-            forest=_EmptyForest(),
-            config=_minimal_step_config(),
-        )
+        common = _bare_state_kw((), y.size, X=X, y=y)
 
         st_uv = State(
             **common,
@@ -2533,25 +2543,7 @@ class TestMVBartIntegration:
         df_prior = jnp.float32(20.0)
         rate_prior = jnp.diag(jnp.array([10.0, 5.0]))
 
-        common: dict = dict(
-            _chain_anchor=jnp.zeros(()),
-            X=X,
-            y=resid,
-            resid=resid,
-            binary_indices=None,
-            z=None,
-            prec_scale=None,
-            inv_sdev_scale=None,
-            inv_sdev_unit=jnp.ones(k),
-            resid_unit=jnp.ones(k),  # unit scale: resid is in data units
-            resid_eff_scale=jnp.ones(k),
-            resid_inexact_integral=jnp.zeros(k),
-            error_scale=None,
-            n_non_missing=jnp.asarray(y.size),
-            sum_diag_prec_scale=jnp.asarray(float(y.size)),
-            forest=_EmptyForest(),
-            config=_minimal_step_config(),
-        )
+        common = _bare_state_kw((k,), y.size, X=X, y=resid, resid=resid)
 
         st_dense = State(
             **common,
@@ -2605,39 +2597,30 @@ class TestMVBartIntegration:
         # both the masked and dropped states see the same kept-point count and
         # (unscaled) precision sum
         n_kept = jnp.sum(keep)
-        common: dict = dict(
-            _chain_anchor=jnp.zeros(()),
-            binary_indices=None,
-            z=None,
-            prec_scale=None,
-            inv_sdev_unit=jnp.ones(()),
-            resid_unit=jnp.ones(()),  # unit scale: resid is in data units
-            resid_eff_scale=jnp.ones(()),
-            resid_inexact_integral=jnp.zeros(()),
-            error_scale=None,
-            n_non_missing=n_kept,
-            sum_diag_prec_scale=n_kept.astype(jnp.float32),
-            forest=_EmptyForest(),
-            config=_minimal_step_config(),
-        )
         uv_prior = Wishart(nu=df_prior, rate=scale_prior, value=jnp.float32(1.0))
         mv_prior = Wishart(nu=df_prior, rate=scale_prior[None, None], value=jnp.eye(1))
 
         st_uv_with = State(
-            **common,
-            X=X,
-            y=resid_1d,
-            resid=resid_1d,
-            inv_sdev_scale=inv_sdev,
-            error_cov_inv=uv_prior,
+            **_bare_state_kw(
+                (),
+                n_kept,
+                X=X,
+                y=resid_1d,
+                resid=resid_1d,
+                inv_sdev_scale=inv_sdev,
+                error_cov_inv=uv_prior,
+            )
         )
         st_uv_drop = State(
-            **common,
-            X=X[:, keep],
-            y=resid_1d[keep],
-            resid=resid_1d[keep],
-            inv_sdev_scale=None,
-            error_cov_inv=uv_prior,
+            **_bare_state_kw(
+                (),
+                n_kept,
+                X=X[:, keep],
+                y=resid_1d[keep],
+                resid=resid_1d[keep],
+                inv_sdev_scale=None,
+                error_cov_inv=uv_prior,
+            )
         )
 
         key = keys.pop()
@@ -2647,20 +2630,26 @@ class TestMVBartIntegration:
 
         # multivariate Wishart path (k=1) with 1-D inv_sdev_scale and zeros
         st_mv_with = State(
-            **common,
-            X=X,
-            y=resid_1d,
-            resid=resid_1d[None, :],
-            inv_sdev_scale=inv_sdev,
-            error_cov_inv=mv_prior,
+            **_bare_state_kw(
+                (),
+                n_kept,
+                X=X,
+                y=resid_1d,
+                resid=resid_1d[None, :],
+                inv_sdev_scale=inv_sdev,
+                error_cov_inv=mv_prior,
+            )
         )
         st_mv_drop = State(
-            **common,
-            X=X[:, keep],
-            y=resid_1d[keep],
-            resid=resid_1d[None, keep],
-            inv_sdev_scale=None,
-            error_cov_inv=mv_prior,
+            **_bare_state_kw(
+                (),
+                n_kept,
+                X=X[:, keep],
+                y=resid_1d[keep],
+                resid=resid_1d[None, keep],
+                inv_sdev_scale=None,
+                error_cov_inv=mv_prior,
+            )
         )
         sample_mv_with = _step_error_cov_inv_mv(key, st_mv_with).error_cov_inv.value
         sample_mv_drop = _step_error_cov_inv_mv(key, st_mv_drop).error_cov_inv.value
@@ -2682,34 +2671,27 @@ class TestMVBartIntegration:
         inv_sdev_unit = jnp.array([0.5, 4.0])
         inv_sdev_scale = 2.0 ** random.randint(keys.pop(), (k, n), -2, 3)
 
-        common: dict = dict(
-            _chain_anchor=jnp.zeros(()),
-            X=X,
-            y=resid,
-            resid=resid,
-            binary_indices=None,
-            z=None,
-            prec_scale=None,
-            resid_unit=jnp.ones(k),  # unit scale: resid is in data units
-            resid_eff_scale=jnp.ones(k),
-            resid_inexact_integral=jnp.zeros(k),
-            error_scale=None,
-            n_non_missing=jnp.full(k, n),
-            sum_diag_prec_scale=jnp.sum(
-                jnp.square(inv_sdev_scale * inv_sdev_unit[:, None]), axis=-1
-            ),
-            forest=_EmptyForest(),
-            config=_minimal_step_config(),
-            error_cov_inv=Wishart(nu=20.0, rate=jnp.eye(k), value=jnp.eye(k)),
-        )
-        st_units = State(
-            **common, inv_sdev_scale=inv_sdev_scale, inv_sdev_unit=inv_sdev_unit
-        )
-        st_plain = State(
-            **common,
-            inv_sdev_scale=inv_sdev_scale * inv_sdev_unit[:, None],
-            inv_sdev_unit=jnp.ones(k),
-        )
+        def make_state(
+            inv_sdev_scale: Float32[Array, 'k n'], inv_sdev_unit: Float32[Array, ' k']
+        ) -> State:
+            return State(
+                **_bare_state_kw(
+                    (k,),
+                    jnp.full(k, n),
+                    X=X,
+                    y=resid,
+                    resid=resid,
+                    inv_sdev_scale=inv_sdev_scale,
+                    inv_sdev_unit=inv_sdev_unit,
+                    sum_diag_prec_scale=jnp.sum(
+                        jnp.square(inv_sdev_scale * inv_sdev_unit[:, None]), axis=-1
+                    ),
+                    error_cov_inv=Wishart(nu=20.0, rate=jnp.eye(k), value=jnp.eye(k)),
+                )
+            )
+
+        st_units = make_state(inv_sdev_scale, inv_sdev_unit)
+        st_plain = make_state(inv_sdev_scale * inv_sdev_unit[:, None], jnp.ones(k))
 
         key = keys.pop()
         prec_units = step_error_cov_inv(key, st_units).error_cov_inv.value

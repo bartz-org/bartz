@@ -661,7 +661,8 @@ def init_shape_shifting_parameters(
     offset
         The offset to add to the predictions.
     error_scale
-        Per-observation error scale (univariate only).
+        Per-datapoint error scales, ``(n,)`` or ``(k, n)`` (used only for
+        shape checks).
     error_cov_inv
         The Wishart prior on the error precision and its initial value, or
         `None` for binary regression. The mixed and partial-missing diagonal

@@ -1741,7 +1741,6 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
 def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     """Per-component inverse-gamma update for univariate, mixed, and partial-missing paths."""
     assert state.error_cov_inv.rate is not None
-    assert state.error_cov_inv.nu is not None
 
     # keep the residuals in their stored (narrow) dtype and resid_unit units;
     # the reduction accumulates in float32 and its small result is rescaled to
@@ -1750,8 +1749,10 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     if state.inv_sdev_scale is not None:
         resid *= state.inv_sdev_scale
 
-    # alpha
-    alpha = state.error_cov_inv.nu / 2 + state.n_non_missing / 2
+    # alpha; the variance df matches the inverse wishart marginals
+    variance_nu = state.error_cov_inv.variance_nu
+    assert variance_nu is not None
+    alpha = variance_nu / 2 + state.n_non_missing / 2
 
     # beta; `resid` is stored in `resid_unit` units and `inv_sdev_scale` in
     # `inv_sdev_unit` units (1 without error scales)

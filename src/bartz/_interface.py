@@ -246,7 +246,9 @@ class Bart(Module):
     sigma_df
         The degrees of freedom of the prior on the error precision. For
         multivariate regression with `k` components, the Wishart degrees of
-        freedom are set to ``sigma_df + k - 1``.
+        freedom are set to ``sigma_df + k - 1``, such that each marginal error
+        variance keeps ``sigma_df`` degrees of freedom; the same holds when the
+        error covariance is restricted to diagonal.
     sigma_scale
         Sets the scale of the prior on the error precision. If 'auto'
         (default), the prior is scaled so that the error precision equals

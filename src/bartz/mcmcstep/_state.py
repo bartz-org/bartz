@@ -103,6 +103,8 @@ class Wishart(Module):
     univariate case (``k = 1``) is the Gamma special case; the relationship to
     the inverse-gamma prior on the variance is ``alpha = nu / 2``,
     ``beta = rate / 2``. The prior mean of the precision is ``nu * rate^-1``.
+    Each marginal error variance (diagonal of the inverse) is inverse-gamma
+    with ``alpha = variance_nu / 2``, ``beta = rate_ii / 2``.
 
     Set `nu` and `rate` to `None` to represent a precision held fixed at `value`
     with no prior (e.g. the identity in binary regression).
@@ -139,6 +141,18 @@ class Wishart(Module):
         else:
             self.value = jnp.asarray(value, jnp.float32)
 
+    @property
+    def variance_nu(self) -> Float32[Array, ''] | None:
+        """Degrees of freedom of the inverse-gamma prior on each marginal variance.
+
+        Equal to ``nu - k + 1``, or `None` if there is no prior.
+        """
+        if self.nu is None or self.rate is None or self.rate.ndim == 0:
+            return self.nu
+        else:
+            k, _ = self.rate.shape
+            return self.nu - (k - 1)
+
 
 class DiagWishart(Wishart):
     """A diagonal precision matrix with independent chi-square diagonal entries.
@@ -147,6 +161,10 @@ class DiagWishart(Wishart):
     a convenience type: a diagonal precision whose entries are mutually
     independent, each with its own Gamma (scaled chi-square) prior. Only the
     multivariate (matrix) case is supported.
+
+    With the same `nu` and `rate`, each component's variance has the same prior
+    as the corresponding marginal variance under the dense `Wishart`: the gamma
+    shape of each precision entry is ``variance_nu / 2``, not ``nu / 2``.
 
     A component with `rate` 0 has no prior; its precision is held fixed at its
     `value` (1 for the binary components of a mixed regression).

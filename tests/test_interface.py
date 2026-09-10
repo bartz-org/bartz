@@ -2374,7 +2374,7 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
         tau_num = jnp.where(mask, 3.0, 1.0)
         # var(y_train) is 0 (n=1) or undefined (n=0), guarded to 1, so the
         # default prior rate is sigma_df for the continuous components
-        sigma_df = nnone(bart._mcmc_state.error_cov_inv.variance_nu)
+        sigma_df = nnone(bart._mcmc_state.error_cov_inv.inv_wishart_marginal_nu)
         rate = jnp.diag(nnone(bart._mcmc_state.error_cov_inv.rate))
         assert_close_matrices(
             rate[~mask], jnp.broadcast_to(sigma_df, rate[~mask].shape), rtol=1e-6
@@ -2422,7 +2422,7 @@ def test_two_datapoints(bkw: BartKW) -> None:
         # the default prior rate is sigma_df * (precision-weighted) var(y_train)
         # per continuous component, see `_guarded_response_variance`
         mask = bkw.binary_mask
-        sigma_df = nnone(bart._mcmc_state.error_cov_inv.variance_nu)
+        sigma_df = nnone(bart._mcmc_state.error_cov_inv.inv_wishart_marginal_nu)
         vary = _guarded_response_variance(
             kw['y_train'], kw.get('error_scale'), kw.get('missing')
         )

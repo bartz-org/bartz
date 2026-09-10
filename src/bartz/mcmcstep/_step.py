@@ -1750,9 +1750,9 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
         resid *= state.inv_sdev_scale
 
     # alpha; the variance df matches the inverse wishart marginals
-    variance_nu = state.error_cov_inv.variance_nu
-    assert variance_nu is not None
-    alpha = variance_nu / 2 + state.n_non_missing / 2
+    marginal_nu = state.error_cov_inv.inv_wishart_marginal_nu
+    assert marginal_nu is not None
+    alpha = marginal_nu / 2 + state.n_non_missing / 2
 
     # beta; `resid` is stored in `resid_unit` units and `inv_sdev_scale` in
     # `inv_sdev_unit` units (1 without error scales)

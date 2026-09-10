@@ -1329,9 +1329,7 @@ def _process_error_variance_settings(
         return None
 
     *kdims, _ = y_train.shape  # () or (k,)
-    k = kdims[0] if kdims else 1
     sigma_df = jnp.asarray(sigma_df, jnp.float32)
-    nu = sigma_df + (k - 1)
 
     # guarded per-component variance of y_train, computed only when an 'auto'
     # spec needs it (this function is not jitted, so it would not be elided)
@@ -1355,7 +1353,7 @@ def _process_error_variance_settings(
         rate, init = jnp.diag(rate_diag), jnp.diag(init_diag)
     else:
         rate, init = rate_diag, init_diag
-    return make_error_cov_prior(nu, rate, init, outcome_type, missing)
+    return make_error_cov_prior(sigma_df, rate, init, outcome_type, missing)
 
 
 @jit
@@ -1410,7 +1408,7 @@ def _resolve_error_variance(
 
 
 def make_error_cov_prior(
-    nu: Float32[Array, ''],
+    marginal_nu: Float32[Array, ''],
     rate: Float32[Array, ''] | Float32[Array, 'k k'],
     value: Float32[Array, ''] | Float32[Array, 'k k'],
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
@@ -1420,8 +1418,9 @@ def make_error_cov_prior(
 
     Mixed binary-continuous and partial-missing (2-D mask) regression restrict
     the error covariance to diagonal, so they take a `DiagWishart`; the dense
-    cases take a `Wishart`. `init` re-checks this choice. `value` is the initial
-    value of the precision.
+    cases take a `Wishart`. `init` re-checks this choice. `marginal_nu` is the
+    degrees of freedom of each marginal variance, `value` the initial value of
+    the precision.
     """
     if isinstance(outcome_type, tuple):
         binary = [t is OutcomeType.binary for t in outcome_type]
@@ -1430,10 +1429,8 @@ def make_error_cov_prior(
         is_mixed = False
     # a 2-D missingness mask only occurs with multivariate y (checked in `init`)
     partial_missing = missing is not None and missing.ndim == 2
-    if is_mixed or partial_missing:
-        return DiagWishart(nu=nu, rate=rate, value=value)
-    else:
-        return Wishart(nu=nu, rate=rate, value=value)
+    cls = DiagWishart if is_mixed or partial_missing else Wishart
+    return cls.from_inv_wishart_marginal_nu(marginal_nu, rate, value)
 
 
 def _setup_mcmc(

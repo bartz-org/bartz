@@ -104,7 +104,7 @@ class Wishart(Module):
     the inverse-gamma prior on the variance is ``alpha = nu / 2``,
     ``beta = rate / 2``. The prior mean of the precision is ``nu * rate^-1``.
     Each marginal error variance (diagonal of the inverse) is inverse-gamma
-    with ``alpha = variance_nu / 2``, ``beta = rate_ii / 2``.
+    with ``alpha = inv_wishart_marginal_nu / 2``, ``beta = rate_ii / 2``.
 
     Set `nu` and `rate` to `None` to represent a precision held fixed at `value`
     with no prior (e.g. the identity in binary regression).
@@ -141,17 +141,42 @@ class Wishart(Module):
         else:
             self.value = jnp.asarray(value, jnp.float32)
 
+    @classmethod
+    def from_inv_wishart_marginal_nu(
+        cls,
+        marginal_nu: FloatLike,
+        rate: FloatLike | Float[ArrayLike, 'k k'],
+        value: FloatLike
+        | Float[ArrayLike, '*chains k k']
+        | Float[ArrayLike, '*chains'],
+    ) -> 'Wishart':
+        """Build the prior from the degrees of freedom of each marginal variance.
+
+        Sets ``nu = marginal_nu + k - 1``, the inverse of
+        `inv_wishart_marginal_nu`.
+        """
+        if jnp.ndim(rate) == 0:
+            nu = marginal_nu
+        else:
+            k, _ = jnp.shape(rate)
+            nu = marginal_nu + (k - 1)
+        return cls(nu=nu, rate=rate, value=value)
+
     @property
-    def variance_nu(self) -> Float32[Array, ''] | None:
-        """Degrees of freedom of the inverse-gamma prior on each marginal variance.
+    def inv_wishart_marginal_nu(self) -> Float32[Array, ''] | None:
+        """Degrees of freedom of the inverse-gamma marginal of each variance.
 
         Equal to ``nu - k + 1``, or `None` if there is no prior.
         """
-        if self.nu is None or self.rate is None or self.rate.ndim == 0:
-            return self.nu
+        if self.nu is None:
+            return None
         else:
-            k, _ = self.rate.shape
-            return self.nu - (k - 1)
+            assert self.rate is not None
+            if self.rate.ndim == 0:
+                return self.nu
+            else:
+                k, _ = self.rate.shape
+                return self.nu - (k - 1)
 
 
 class DiagWishart(Wishart):
@@ -164,7 +189,8 @@ class DiagWishart(Wishart):
 
     With the same `nu` and `rate`, each component's variance has the same prior
     as the corresponding marginal variance under the dense `Wishart`: the gamma
-    shape of each precision entry is ``variance_nu / 2``, not ``nu / 2``.
+    shape of each precision entry is ``inv_wishart_marginal_nu / 2``, not
+    ``nu / 2``.
 
     A component with `rate` 0 has no prior; its precision is held fixed at its
     `value` (1 for the binary components of a mixed regression).

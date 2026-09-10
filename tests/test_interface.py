@@ -2373,11 +2373,11 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
     else:
         tau_num = jnp.where(mask, 3.0, 1.0)
         # var(y_train) is 0 (n=1) or undefined (n=0), guarded to 1, so the
-        # default prior rate is nu for the continuous components
-        nu = nnone(bart._mcmc_state.error_cov_inv.nu)
+        # default prior rate is sigma_df for the continuous components
+        sigma_df = nnone(bart._mcmc_state.error_cov_inv.variance_nu)
         rate = jnp.diag(nnone(bart._mcmc_state.error_cov_inv.rate))
         assert_close_matrices(
-            rate[~mask], jnp.broadcast_to(nu, rate[~mask].shape), rtol=1e-6
+            rate[~mask], jnp.broadcast_to(sigma_df, rate[~mask].shape), rtol=1e-6
         )
 
     # check leaf_prior_cov_inv
@@ -2419,15 +2419,15 @@ def test_two_datapoints(bkw: BartKW) -> None:
     kw['init_kw'] = init_kw
     bart = Bart(**kw)
     if not bkw.all_binary:
-        # the default prior rate is nu * (precision-weighted) var(y_train) per
-        # continuous component, see `_guarded_response_variance`
+        # the default prior rate is sigma_df * (precision-weighted) var(y_train)
+        # per continuous component, see `_guarded_response_variance`
         mask = bkw.binary_mask
-        nu = nnone(bart._mcmc_state.error_cov_inv.nu)
+        sigma_df = nnone(bart._mcmc_state.error_cov_inv.variance_nu)
         vary = _guarded_response_variance(
             kw['y_train'], kw.get('error_scale'), kw.get('missing')
         )
         rate = jnp.diag(nnone(bart._mcmc_state.error_cov_inv.rate))
-        assert_close_matrices(rate[~mask], nu * vary[~mask], rtol=1e-6)
+        assert_close_matrices(rate[~mask], sigma_df * vary[~mask], rtol=1e-6)
     if bkw.uses_quantile_binner:
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
     assert not jnp.all(bart._burnin_trace.log_likelihood == 0.0)

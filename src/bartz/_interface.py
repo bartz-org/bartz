@@ -251,13 +251,14 @@ class Bart(Module):
         error covariance is restricted to diagonal.
     sigma_scale
         Sets the scale of the prior on the error precision. If 'auto'
-        (default), the prior is scaled so that the error precision equals
-        ``diag(1 / var(y_train))`` in expectation, where with `error_scale` the
+        (default), the prior is scaled so that the prior harmonic mean of the
+        error variance is ``var(y_train)``, where with `error_scale` the
         variance is a precision-weighted one that estimates the error variance
         at unit error scale. Otherwise, ``square(sigma_scale)`` is the prior
-        harmonic mean of the error variance; for multivariate regression a
-        scalar is broadcast to all components. For mixed outcome types, binary
-        components are ignored.
+        harmonic mean of the error variance. For multivariate regression this
+        applies to the marginal variance of each component, whatever `k`, and
+        a scalar is broadcast to all components. For mixed outcome types,
+        binary components are ignored.
     sigma_init
         The initial value of the error standard deviation in the MCMC. If
         'auto' (default), the initial error precision is set to ``diag(1 /
@@ -1329,7 +1330,8 @@ def _process_error_variance_settings(
 
     *kdims, _ = y_train.shape  # () or (k,)
     k = kdims[0] if kdims else 1
-    nu = jnp.asarray(sigma_df, jnp.float32) + (k - 1)
+    sigma_df = jnp.asarray(sigma_df, jnp.float32)
+    nu = sigma_df + (k - 1)
 
     # guarded per-component variance of y_train, computed only when an 'auto'
     # spec needs it (this function is not jitted, so it would not be elided)
@@ -1338,9 +1340,11 @@ def _process_error_variance_settings(
     else:
         vary = None
 
-    # prior rate: E[precision] = nu / rate, so rate = nu * var per component
+    # prior rate: each marginal variance is inverse-gamma with alpha =
+    # sigma_df / 2 and beta = rate_ii / 2, so rate_ii = sigma_df * var makes var
+    # its harmonic mean for any k
     rate_diag = jnp.where(
-        binary_mask, 0.0, nu * _resolve_error_variance(sigma_scale, vary, kdims)
+        binary_mask, 0.0, sigma_df * _resolve_error_variance(sigma_scale, vary, kdims)
     )
 
     # initial precision = 1 / var per component (1 for binary components)

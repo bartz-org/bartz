@@ -364,8 +364,9 @@ def make_tqdm_callback(
         The MCMC state to use the callback with, used to determine device
         sharding.
     update_every
-        The bar position is refreshed every `update_every` MCMC iterations
-        (`tqdm` further throttles the actual redraw rate on its own).
+        The bar position is refreshed every `update_every` MCMC iterations,
+        and at the first one (`tqdm` further throttles the actual redraw rate
+        on its own).
     report_every
         The acceptance statistics shown next to the bar are refreshed every
         `report_every` MCMC iterations, `None` to omit them.
@@ -467,7 +468,7 @@ class TqdmCallback(Callback):
             accumulator = accumulator.reset_if(report_cond)
 
         lax.cond(
-            (it % self.update_every == 0) | last,
+            (it == 1) | (it % self.update_every == 0) | last,
             lambda: debug.callback(_tqdm_advance, bar_id, it, n_iters),
             lambda: None,
         )
@@ -595,7 +596,14 @@ def _get_or_create_bar(bar_id: int, n_iters: int) -> tqdm | None:
         # the bar was already closed (the loop finished, possibly out of order)
         return None
     if entry.bar is None:
-        bar = tqdm(**{'total': n_iters, 'bar_format': _TQDM_BAR_FORMAT, **entry.kwargs})
+        bar = tqdm(
+            **{
+                'total': n_iters,
+                'bar_format': _TQDM_BAR_FORMAT,
+                'desc': 'train ',
+                **entry.kwargs,
+            }
+        )
         _TQDM_REGISTRY[bar_id] = replace(entry, bar=bar)
         return bar
     return entry.bar
@@ -617,13 +625,10 @@ def _tqdm_advance(bar_id: int, it: int, n_iters: int) -> None:
 @_convert_jax_arrays_in_args
 # convert all jax arrays in arguments, see _print_report for why
 def _tqdm_report(report: StatsReport, bar_id: int, n_iters: int) -> None:
-    """Set the bar description and acceptance-statistics postfix."""
+    """Set the acceptance-statistics postfix of the bar."""
     bar = _get_or_create_bar(bar_id, n_iters)
     if bar is None:
         return
-    # set_description_str (not set_description) to avoid tqdm's ': ' suffix; the
-    # trailing space separates the label from the bar
-    bar.set_description_str('train ', refresh=False)
     # keep this terse so the bar stays narrow, e.g. '4ch 100sa acc 25% leaves 3.4/32'
     msgs = []
     if report.num_chains is not None:

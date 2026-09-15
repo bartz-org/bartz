@@ -30,17 +30,17 @@ from typing import cast
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jax import random, vmap
+from jax import lax, random, vmap
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, UInt
 
-from bartz._jaxext import split
+from bartz._jaxext import sliced_map, split
 from bartz._jaxext.random import loggamma
 from bartz.bcf._state import BCFState
 from bartz.grove._grove import is_actual_leaf
 from bartz.mcmcloop._loop import _empty_trace, _set
 from bartz.mcmcloop._trace import BurninTrace, MainTrace
-from bartz.mcmcstep._state import State
-from bartz.mcmcstep._step import step
+from bartz.mcmcstep._state import Forest, State, StepConfig
+from bartz.mcmcstep._step import step, sum_resid
 
 
 class _BCFCarry(eqx.Module):
@@ -122,6 +122,66 @@ def _sample_leaf_prior_cov_inv(
     # data units so the Gamma update matches the data-scale prior rate
     b = rate + sum_sq * jnp.square(state.forest.leaf_unit) / 2.0
     return jnp.exp(loggamma(key, a)) / b
+
+
+def recompute_prec_trees(
+    forest: Forest, prec_scale: Float[Array, ' n'], config: StepConfig
+) -> Float32[Array, 'num_trees tree_size']:
+    """
+    Rebuild `Forest.prec_tree` from scratch for a new `prec_scale`.
+
+    Like the incremental update in `step`, the result is valid at the leaves of
+    the largest version of each tree and at the node of the last move.
+
+    Parameters
+    ----------
+    forest
+        The forest whose per-leaf precision cache is stale.
+    prec_scale
+        The new per-datapoint precision scale.
+    config
+        The MCMC configuration, for the reduction settings.
+
+    Returns
+    -------
+    The per-leaf sums of `prec_scale`.
+    """
+    _, tree_size = forest.leaf_tree.shape
+
+    def one_tree(
+        args: tuple[UInt[Array, ' n'], Int32[Array, '']],
+    ) -> Float32[Array, ' tree_size']:
+        leaf_indices, move_node = args
+        # the sum over all bins has the shape of the residual reduction, so use
+        # its settings rather than the ones tuned for the two-bin `prec_tree` update
+        tree = sum_resid(
+            prec_scale,
+            leaf_indices,
+            tree_size,
+            config.resid_reduction_config,
+            config.data_sharded,
+        )
+        children = 2 * move_node + jnp.arange(2)
+        return tree.at[move_node].set(tree[children].sum())
+
+    xs = (forest.leaf_indices, forest.move_node)
+
+    def all_trees() -> Float32[Array, 'num_trees tree_size']:
+        return vmap(one_tree)(xs)
+
+    if config.prec_count_num_trees is None:
+        return all_trees()
+
+    else:
+
+        def tree_batches(
+            batch_size: int = config.prec_count_num_trees,
+        ) -> Float32[Array, 'num_trees tree_size']:
+            return sliced_map(one_tree, xs, batch_size=batch_size)
+
+        # like `compute_prec_trees`, batch the trees on cpu to bound the reduction
+        # temporaries
+        return lax.platform_dependent(cpu=tree_batches, cuda=all_trees)
 
 
 @jax.named_call
@@ -283,6 +343,15 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
 
         b_z_new = jnp.where(trt_val, b1_new, b0_new)
         resid_val = (resid_partial - tau_full * b_z_new) / resid_unit
+
+        # the tau precision scale b_z^2 changed on every datapoint, so the
+        # incrementally maintained per-leaf cache of the tau forest (still in
+        # the `forest` slot here) is stale everywhere
+        state = eqx.tree_at(
+            lambda s: s.forest.prec_tree,
+            state,
+            recompute_prec_trees(state.forest, jnp.square(b_z_new), state.config),
+        )
     else:
         b0_new = state.b0
         b1_new = state.b1

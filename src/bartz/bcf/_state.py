@@ -32,7 +32,15 @@ from jaxtyping import Array, Bool, Float32, UInt
 
 from bartz._jaxext import field
 from bartz.mcmcstep._axes import CHAIN_AXIS
-from bartz.mcmcstep._state import ArrayLike, FloatLike, Forest, State, Wishart, init
+from bartz.mcmcstep._state import (
+    ArrayLike,
+    FloatLike,
+    Forest,
+    State,
+    Wishart,
+    init,
+    initial_prec_tree,
+)
 
 
 class BCFState(State):
@@ -248,6 +256,17 @@ def init_bcf(
         b1_init = 1.0
         b_prior_cov_inv = None
 
+    # the tau likelihood precision of each datapoint is b_z^2 (see `bcf_step`),
+    # so seed the tau forest's per-leaf precision cache from the coding weights
+    # rather than from the missingness mask used by the tau init
+    forest_tau = state_tau.forest
+    assert forest_tau.prec_tree is not None
+    b_z = jnp.where(trt_array, b1_init, b0_init)
+    forest_tau = replace(
+        forest_tau,
+        prec_tree=initial_prec_tree(forest_tau.prec_tree.shape, jnp.square(b_z)),
+    )
+
     # Assemble everything into the BCFState subclass
     return BCFState(
         # Inherited fields from State (populated from state_mu)
@@ -270,7 +289,7 @@ def init_bcf(
         forest=state_mu.forest,  # mu forest
         config=state_mu.config,
         # Subclass additions
-        forest_tau=state_tau.forest,  # tau forest
+        forest_tau=forest_tau,
         trt=trt_array,
         tau_X=jnp.zeros(len(trt_array)) if adaptive_coding else None,
         tau_0=jnp.zeros(()),

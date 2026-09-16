@@ -512,10 +512,6 @@ class TestBcf:
             ),
         )
 
-        # `resid` is stored scaled; copy `resid_unit` out before the step, which
-        # donates the buffer that the returned state shares.
-        resid_unit = jnp.copy(init_state.resid_unit)
-
         new_state = bcf_step(random.key(2), init_state)
 
         mu_fit_raw = evaluate_forest(new_state.X, new_state.forest).sum(axis=0)
@@ -537,7 +533,7 @@ class TestBcf:
 
         # `resid` is stored scaled (``resid_unit * resid = data residual``)
         assert_allclose(
-            new_state.resid * resid_unit,
+            new_state.resid * new_state.resid_unit,
             expected_resid,
             atol=1e-5,
             allow_non_scalar=True,

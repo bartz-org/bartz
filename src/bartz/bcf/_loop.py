@@ -230,21 +230,17 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # `tau_0`, `tau_X`, `b0`, `b1`, `sigma2` and `tau_0_prior_cov_inv` are on the
     # data scale (matching `_bcf.predict`). Convert `resid` in and out of data
     # units so the scalar Gibbs updates below are unit-consistent for any
-    # `resid_unit` (no-op when it is 1). Copy it out because the tau `step`
-    # below donates the state that shares this buffer.
-    resid_unit = jnp.copy(state.resid_unit)
-
+    # `resid_unit` (no-op when it is 1).
+    #
     # 2. Update tau_0 intercept
-    trt_val = jnp.copy(state.trt)
-    tau_0 = state.tau_0
     sigma2 = 1.0 / state.error_cov_inv.value
 
     # Adaptive coding basis
-    b_z = jnp.where(trt_val, state.b1, state.b0)
+    b_z = jnp.where(state.trt, state.b1, state.b0)
 
     if state.tau_0_prior_cov_inv is not None:
         # partial residual removing current tau_0 effect, on the data scale
-        partial = resid_val * resid_unit + tau_0 * b_z
+        partial = resid_val * state.resid_unit + state.tau_0 * b_z
 
         prec = jnp.sum(jnp.square(b_z)) / sigma2 + state.tau_0_prior_cov_inv
         mean = jnp.sum(b_z * partial) / sigma2 / prec
@@ -253,10 +249,10 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             prec
         )
     else:
-        tau_0_new = jnp.zeros_like(tau_0)
+        tau_0_new = jnp.zeros_like(state.tau_0)
 
     # Update R to reflect new tau_0 (back into scaled storage units)
-    resid_val = resid_val - b_z * (tau_0_new - tau_0) / resid_unit
+    resid_val = resid_val - b_z * (tau_0_new - state.tau_0) / state.resid_unit
 
     # 3. Update treatment effect forest (tau)
     # Target for tau is (Y - mu - b_z * tau_0) / b_z.
@@ -274,7 +270,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         state,
         forest=state.forest_tau,
         forest_tau=state.forest,
-        resid=jnp.copy(initial_resid_tau),
+        resid=initial_resid_tau,
         prec_scale=prec_scale_tau,
     )
 
@@ -297,7 +293,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     tau_X_new = (
         None
         if state.tau_X is None
-        else state.tau_X + (initial_resid_tau - state.resid) * resid_unit
+        else state.tau_X + (initial_resid_tau - state.resid) * state.resid_unit
     )
 
     resid_val = jnp.where(jnp.abs(b_z) < 1e-10, resid_val, state.resid * b_z_safe)
@@ -306,26 +302,26 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     if state.b_prior_cov_inv is not None:
         assert tau_X_new is not None
         tau_full = tau_0_new + tau_X_new
-        resid_partial = resid_val * resid_unit + tau_full * b_z
+        resid_partial = resid_val * state.resid_unit + tau_full * b_z
 
         b0_prec = (
-            jnp.sum(jnp.square(tau_full) * ~trt_val) / sigma2 + state.b_prior_cov_inv
+            jnp.sum(jnp.square(tau_full) * ~state.trt) / sigma2 + state.b_prior_cov_inv
         )
-        b0_mean = jnp.sum(tau_full * resid_partial * ~trt_val) / sigma2 / b0_prec
+        b0_mean = jnp.sum(tau_full * resid_partial * ~state.trt) / sigma2 / b0_prec
         b0_new = b0_mean + random.normal(
             keys.pop(), shape=b0_mean.shape
         ) * jax.lax.rsqrt(b0_prec)
 
         b1_prec = (
-            jnp.sum(jnp.square(tau_full) * trt_val) / sigma2 + state.b_prior_cov_inv
+            jnp.sum(jnp.square(tau_full) * state.trt) / sigma2 + state.b_prior_cov_inv
         )
-        b1_mean = jnp.sum(tau_full * resid_partial * trt_val) / sigma2 / b1_prec
+        b1_mean = jnp.sum(tau_full * resid_partial * state.trt) / sigma2 / b1_prec
         b1_new = b1_mean + random.normal(
             keys.pop(), shape=b1_mean.shape
         ) * jax.lax.rsqrt(b1_prec)
 
-        b_z_new = jnp.where(trt_val, b1_new, b0_new)
-        resid_val = (resid_partial - tau_full * b_z_new) / resid_unit
+        b_z_new = jnp.where(state.trt, b1_new, b0_new)
+        resid_val = (resid_partial - tau_full * b_z_new) / state.resid_unit
 
         # the tau precision scale b_z^2 changed on every datapoint, so the
         # incrementally maintained per-leaf cache of the tau forest (still in
@@ -347,7 +343,6 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         resid=resid_val,  # updated global residual R
         prec_scale=mu_prec_scale,
         tau_X=tau_X_new,
-        trt=trt_val,
         tau_0=tau_0_new,
         b0=b0_new,
         b1=b1_new,

@@ -34,7 +34,7 @@ import pandas as pd
 import pytest
 import stochtree
 from equinox import EquinoxRuntimeError
-from jax import jit, random, vmap
+from jax import random, vmap
 from jaxtyping import ArrayLike, Shaped
 from scipy import stats
 
@@ -600,11 +600,8 @@ class TestBcf:
 
         check_tau_prec_tree(state, 'at init: ')
 
-        # jit the step so it does not consume its input (see worklist item 4)
-        step_fn = jit(bcf_step)
-
         for i in range(4):
-            state = step_fn(keys.pop(), state)
+            state = bcf_step(keys.pop(), state)
             check_tau_prec_tree(state, f'after step {i + 1}: ')
 
     def test_bcf_unsplittable_x_reduction(self) -> None:

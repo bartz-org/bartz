@@ -33,7 +33,7 @@ import jax.numpy as jnp
 from jax import lax, random, vmap
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, UInt
 
-from bartz._jaxext import sliced_map, split
+from bartz._jaxext import jit, sliced_map, split
 from bartz._jaxext.random import loggamma
 from bartz.bcf._state import BCFState
 from bartz.grove._grove import is_actual_leaf
@@ -184,7 +184,7 @@ def recompute_prec_trees(
         return lax.platform_dependent(cpu=tree_batches, cuda=all_trees)
 
 
-@jax.named_call
+@jit(donate_argnums=(1,))
 def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     """
     Do one BCF MCMC step.

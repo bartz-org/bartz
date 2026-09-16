@@ -231,14 +231,12 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     resid_val = state.resid  # updated global residual R
 
     # `resid` is stored scaled: ``resid_unit * resid = data residual``, whereas
-    # `tau_0`, `tau_X`, `b0`, `b1`, `sigma2` and `tau_0_prior_cov_inv` are on the
-    # data scale (matching `_bcf.predict`). Convert `resid` in and out of data
+    # `tau_0`, `tau_X`, `b0`, `b1`, `error_cov_inv` and `tau_0_prior_cov_inv` are
+    # on the data scale (matching `_bcf.predict`). Convert `resid` in and out of data
     # units so the scalar Gibbs updates below are unit-consistent for any
     # `resid_unit` (no-op when it is 1).
     #
     # 2. Update tau_0 intercept
-    sigma2 = jnp.reciprocal(state.error_cov_inv.value)
-
     # Adaptive coding basis
     b_z = jnp.where(state.trt, state.b1, state.b0)
 
@@ -246,8 +244,11 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         # partial residual removing current tau_0 effect, on the data scale
         partial = resid_val * state.resid_unit + state.tau_0 * b_z
 
-        prec = jnp.sum(jnp.square(b_z)) / sigma2 + state.tau_0_prior_cov_inv
-        mean = jnp.sum(b_z * partial) / sigma2 / prec
+        prec = (
+            jnp.sum(jnp.square(b_z)) * state.error_cov_inv.value
+            + state.tau_0_prior_cov_inv
+        )
+        mean = jnp.sum(b_z * partial) * state.error_cov_inv.value / prec
 
         tau_0_new = mean + random.normal(keys.pop()) * lax.rsqrt(prec)
     else:
@@ -308,15 +309,25 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         resid_partial = resid_val * state.resid_unit + tau_full * b_z
 
         b0_prec = (
-            jnp.sum(jnp.square(tau_full) * ~state.trt) / sigma2 + state.b_prior_cov_inv
+            jnp.sum(jnp.square(tau_full) * ~state.trt) * state.error_cov_inv.value
+            + state.b_prior_cov_inv
         )
-        b0_mean = jnp.sum(tau_full * resid_partial * ~state.trt) / sigma2 / b0_prec
+        b0_mean = (
+            jnp.sum(tau_full * resid_partial * ~state.trt)
+            * state.error_cov_inv.value
+            / b0_prec
+        )
         b0_new = b0_mean + random.normal(keys.pop()) * lax.rsqrt(b0_prec)
 
         b1_prec = (
-            jnp.sum(jnp.square(tau_full) * state.trt) / sigma2 + state.b_prior_cov_inv
+            jnp.sum(jnp.square(tau_full) * state.trt) * state.error_cov_inv.value
+            + state.b_prior_cov_inv
         )
-        b1_mean = jnp.sum(tau_full * resid_partial * state.trt) / sigma2 / b1_prec
+        b1_mean = (
+            jnp.sum(tau_full * resid_partial * state.trt)
+            * state.error_cov_inv.value
+            / b1_prec
+        )
         b1_new = b1_mean + random.normal(keys.pop()) * lax.rsqrt(b1_prec)
 
         b_z_new = jnp.where(state.trt, b1_new, b0_new)

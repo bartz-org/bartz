@@ -251,11 +251,11 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         mean = jnp.sum(b_z * partial) * state.error_cov_inv.value / prec
 
         tau_0_new = mean + random.normal(keys.pop()) * lax.rsqrt(prec)
-    else:
-        tau_0_new = jnp.zeros_like(state.tau_0)
 
-    # Update R to reflect new tau_0 (back into scaled storage units)
-    resid_val -= b_z * (tau_0_new - state.tau_0) / state.resid_unit
+        # Update R to reflect new tau_0 (back into scaled storage units)
+        resid_val -= b_z * (tau_0_new - state.tau_0) / state.resid_unit
+
+        state = replace(state, tau_0=tau_0_new)
 
     # 3. Update treatment effect forest (tau)
     # Target for tau is (Y - mu - b_z * tau_0) / b_z.
@@ -305,7 +305,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # 4. Update adaptive coding weights (b0, b1)
     if state.b_prior_cov_inv is not None:
         assert tau_X_new is not None
-        tau_full = tau_0_new + tau_X_new
+        tau_full = state.tau_0 + tau_X_new
         resid_partial = resid_val * state.resid_unit + tau_full * b_z
 
         # one Gibbs update per group, control (b0) and treated (b1)
@@ -344,7 +344,6 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         resid=resid_val,  # updated global residual R
         prec_scale=mu_prec_scale,
         tau_X=tau_X_new,
-        tau_0=tau_0_new,
         b0=b0_new,
         b1=b1_new,
     )

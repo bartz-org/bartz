@@ -206,7 +206,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     state can not be used any more after calling `bcf_step`. All this applies
     outside of `jax.jit`.
     """
-    keys = split(key, 7)
+    keys = split(key, 6)
 
     # 1. Update prognostic forest (mu)
     # `step` rebuilds the state with `replace`, so it preserves the subclass.
@@ -308,27 +308,18 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         tau_full = tau_0_new + tau_X_new
         resid_partial = resid_val * state.resid_unit + tau_full * b_z
 
-        b0_prec = (
-            jnp.sum(jnp.square(tau_full) * ~state.trt) * state.error_cov_inv.value
+        # one Gibbs update per group, control (b0) and treated (b1)
+        groups = jnp.stack([~state.trt, state.trt])
+        b_prec = (
+            jnp.sum(jnp.square(tau_full) * groups, axis=1) * state.error_cov_inv.value
             + state.b_prior_cov_inv
         )
-        b0_mean = (
-            jnp.sum(tau_full * resid_partial * ~state.trt)
+        b_mean = (
+            jnp.sum(tau_full * resid_partial * groups, axis=1)
             * state.error_cov_inv.value
-            / b0_prec
+            / b_prec
         )
-        b0_new = b0_mean + random.normal(keys.pop()) * lax.rsqrt(b0_prec)
-
-        b1_prec = (
-            jnp.sum(jnp.square(tau_full) * state.trt) * state.error_cov_inv.value
-            + state.b_prior_cov_inv
-        )
-        b1_mean = (
-            jnp.sum(tau_full * resid_partial * state.trt)
-            * state.error_cov_inv.value
-            / b1_prec
-        )
-        b1_new = b1_mean + random.normal(keys.pop()) * lax.rsqrt(b1_prec)
+        b0_new, b1_new = b_mean + random.normal(keys.pop(), (2,)) * lax.rsqrt(b_prec)
 
         b_z_new = jnp.where(state.trt, b1_new, b0_new)
         resid_val = (resid_partial - tau_full * b_z_new) / state.resid_unit

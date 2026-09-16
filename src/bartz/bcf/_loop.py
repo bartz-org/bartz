@@ -263,7 +263,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     b_z_zero = jnp.abs(b_z) < 1e-10
     b_z_safe = jnp.where(b_z_zero, 1.0, b_z)
     initial_resid_tau = jnp.where(b_z_zero, 0.0, resid_val / b_z_safe)
-    prec_scale_tau = jnp.where(b_z_zero, 0.0, jnp.square(b_z))
+    prec_scale_tau = jnp.square(b_z)
 
     # Swap the tau forest into the forest slot and run only the tree step on
     # it; the mu forest rides along in `forest_tau` and is swapped back

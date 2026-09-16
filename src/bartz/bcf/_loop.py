@@ -259,9 +259,10 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # 3. Update treatment effect forest (tau)
     # Target for tau is (Y - mu - b_z * tau_0) / b_z.
     # Its residual is target - tau = (Y - mu - b_z*tau_0 - b_z*tau) / b_z
-    b_z_safe = jnp.where(jnp.abs(b_z) < 1e-10, 1.0, b_z)
-    initial_resid_tau = jnp.where(jnp.abs(b_z) < 1e-10, 0.0, resid_val / b_z_safe)
-    prec_scale_tau = jnp.where(jnp.abs(b_z) < 1e-10, 0.0, jnp.square(b_z))
+    b_z_zero = jnp.abs(b_z) < 1e-10
+    b_z_safe = jnp.where(b_z_zero, 1.0, b_z)
+    initial_resid_tau = jnp.where(b_z_zero, 0.0, resid_val / b_z_safe)
+    prec_scale_tau = jnp.where(b_z_zero, 0.0, jnp.square(b_z))
 
     # Swap the tau forest into the forest slot and run only the tree step on
     # it; the mu forest rides along in `forest_tau` and is swapped back
@@ -298,7 +299,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         else state.tau_X + (initial_resid_tau - state.resid) * state.resid_unit
     )
 
-    resid_val = jnp.where(jnp.abs(b_z) < 1e-10, resid_val, state.resid * b_z_safe)
+    resid_val = jnp.where(b_z_zero, resid_val, state.resid * b_z_safe)
 
     # 4. Update adaptive coding weights (b0, b1)
     if state.b_prior_cov_inv is not None:

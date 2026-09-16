@@ -192,14 +192,19 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     Parameters
     ----------
     key
-        A JAX PRNG key to ensure deterministic sampling.
+        A jax random key.
     state
-        The current iteration's BCF state.
+        A BCF mcmc state, as created by `init_bcf`.
 
     Returns
     -------
-    BCFState
-        The updated BCF state after a single Gibbs sweep across parameters.
+    The new BCF mcmc state.
+
+    Notes
+    -----
+    The memory of the input state is re-used for the output state, so the input
+    state can not be used any more after calling `bcf_step`. All this applies
+    outside of `jax.jit`.
     """
     keys = split(key, 7)
 

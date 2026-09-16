@@ -33,14 +33,14 @@ import jax.numpy as jnp
 from jax import lax, random, vmap
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, UInt
 
-from bartz._jaxext import jit, sliced_map, split
+from bartz._jaxext import float32_matmuls, jit, sliced_map, split
 from bartz._jaxext.random import loggamma
 from bartz.bcf._state import BCFState
 from bartz.grove._grove import is_actual_leaf
 from bartz.mcmcloop._loop import _empty_trace, _set
 from bartz.mcmcloop._trace import BurninTrace, MainTrace
 from bartz.mcmcstep._state import Forest, State, StepConfig
-from bartz.mcmcstep._step import step, sum_resid
+from bartz.mcmcstep._step import step, step_trees, sum_resid
 
 
 class _BCFCarry(eqx.Module):
@@ -185,6 +185,7 @@ def recompute_prec_trees(
 
 
 @jit(donate_argnums=(1,))
+@float32_matmuls
 def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     """
     Do one BCF MCMC step.
@@ -224,7 +225,6 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         )
 
     resid_val = state.resid  # updated global residual R
-    latest_error_cov_inv = state.error_cov_inv
 
     # `resid` is stored scaled: ``resid_unit * resid = data residual``, whereas
     # `tau_0`, `tau_X`, `b0`, `b1`, `sigma2` and `tau_0_prior_cov_inv` are on the
@@ -237,7 +237,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # 2. Update tau_0 intercept
     trt_val = jnp.copy(state.trt)
     tau_0 = state.tau_0
-    sigma2 = 1.0 / latest_error_cov_inv.value
+    sigma2 = 1.0 / state.error_cov_inv.value
 
     # Adaptive coding basis
     b_z = jnp.where(trt_val, state.b1, state.b0)
@@ -261,41 +261,24 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # 3. Update treatment effect forest (tau)
     # Target for tau is (Y - mu - b_z * tau_0) / b_z.
     # Its residual is target - tau = (Y - mu - b_z*tau_0 - b_z*tau) / b_z
-    # We disable sampling of the error variance in the tau step
-    # by setting nu=None (the variance was already sampled in the mu step).
-    # We copy latest_error_cov_inv.value because the tau step will donate and delete it.
     b_z_safe = jnp.where(jnp.abs(b_z) < 1e-10, 1.0, b_z)
     initial_resid_tau = jnp.where(jnp.abs(b_z) < 1e-10, 0.0, resid_val / b_z_safe)
-    inv_sdev_scale_tau = jnp.where(jnp.abs(b_z) < 1e-10, 0.0, jnp.abs(b_z_safe))
+    prec_scale_tau = jnp.where(jnp.abs(b_z) < 1e-10, 0.0, jnp.square(b_z))
 
-    fixed_error_cov_inv = eqx.tree_at(
-        lambda w: w.value, latest_error_cov_inv, jnp.copy(latest_error_cov_inv.value)
-    )
-    fixed_error_cov_inv = eqx.tree_at(
-        lambda w: (w.nu, w.rate),
-        fixed_error_cov_inv,
-        (None, None),
-        is_leaf=lambda x: x is None,
-    )
-
-    # Swap the tau forest into the forest slot so `step` runs on it; the mu
-    # forest rides along in `forest_tau` and is swapped back afterwards. Keep
-    # the mu-phase state to restore the fields overwritten by the swap.
-    mu_state = state
+    # Swap the tau forest into the forest slot and run only the tree step on
+    # it; the mu forest rides along in `forest_tau` and is swapped back
+    # afterwards. The other sub-steps of `step` (latent outcome, error
+    # precision, sparsity, step counter) belong to the mu phase alone.
+    mu_prec_scale = state.prec_scale
     state = replace(
         state,
         forest=state.forest_tau,
         forest_tau=state.forest,
-        z=None,
-        binary_indices=None,
         resid=jnp.copy(initial_resid_tau),
-        error_cov_inv=fixed_error_cov_inv,
-        error_scale=None,
-        prec_scale=jnp.square(inv_sdev_scale_tau),
-        inv_sdev_scale=inv_sdev_scale_tau,
+        prec_scale=prec_scale_tau,
     )
 
-    state = cast(BCFState, step(keys.pop(), state))
+    state = cast(BCFState, step_trees(keys.pop(), state))
 
     if state.leaf_prior_cov_inv_shape_tau is not None:
         assert state.leaf_prior_cov_inv_rate_tau is not None
@@ -361,15 +344,8 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         state,
         forest=state.forest_tau,
         forest_tau=state.forest,
-        z=mu_state.z,
-        binary_indices=mu_state.binary_indices,
         resid=resid_val,  # updated global residual R
-        resid_eff_scale=mu_state.resid_eff_scale,
-        resid_inexact_integral=mu_state.resid_inexact_integral,
-        error_cov_inv=latest_error_cov_inv,
-        error_scale=mu_state.error_scale,
-        prec_scale=mu_state.prec_scale,
-        inv_sdev_scale=mu_state.inv_sdev_scale,
+        prec_scale=mu_prec_scale,
         tau_X=tau_X_new,
         trt=trt_val,
         tau_0=tau_0_new,

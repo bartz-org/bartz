@@ -235,7 +235,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # on the data scale (matching `_bcf.predict`). Convert `resid` in and out of data
     # units so the scalar Gibbs updates below are unit-consistent for any
     # `resid_unit` (no-op when it is 1).
-    #
+
     # 2. Update tau_0 intercept
     # Adaptive coding basis
     b_z = jnp.where(state.trt, state.b1, state.b0)

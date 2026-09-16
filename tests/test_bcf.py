@@ -25,6 +25,7 @@
 """Tests for Bayesian Causal Forests (BCF)."""
 
 import tempfile
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 
@@ -539,16 +540,20 @@ class TestBcf:
             allow_non_scalar=True,
         )
 
-    @pytest.mark.parametrize('adaptive_coding', [False, True])
+    @pytest.mark.parametrize(
+        ('adaptive_coding', 'prec_count_num_trees'),
+        [(False, None), (True, None), (True, 1)],
+    )
     def test_bcf_step_tau_prec_tree_cache(
-        self, keys: split, adaptive_coding: bool
+        self, keys: split, adaptive_coding: bool, prec_count_num_trees: int | None
     ) -> None:
         """
         Check `bcf_step` keeps the tau forest's `prec_tree` cache consistent.
 
         The tau likelihood precision of each datapoint is ``b_z**2``, so after a
         step that resamples the coding weights, the cached per-leaf sums must
-        match the new weights.
+        match the new weights. Setting `prec_count_num_trees` exercises the
+        batched rebuild of the cache.
         """
         x_train, _, z_train, y_train, _, _, _ = self._generate_bcf_data(n=100, seed=42)
 
@@ -577,6 +582,10 @@ class TestBcf:
                 rate=jnp.array(1.0, dtype=jnp.float32),
                 value=jnp.array(1.0, dtype=jnp.float32),
             ),
+        )
+        state = replace(
+            state,
+            config=replace(state.config, prec_count_num_trees=prec_count_num_trees),
         )
 
         def check_tau_prec_tree(state: BCFState, err_msg: str) -> None:

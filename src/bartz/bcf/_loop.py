@@ -27,9 +27,8 @@
 from dataclasses import replace
 from typing import cast
 
-import equinox as eqx
-import jax
 import jax.numpy as jnp
+from equinox import Module, tree_at
 from jax import lax, random, vmap
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, UInt
 
@@ -43,7 +42,7 @@ from bartz.mcmcstep._state import Forest, State, StepConfig
 from bartz.mcmcstep._step import step, step_trees, sum_resid
 
 
-class _BCFCarry(eqx.Module):
+class _BCFCarry(Module):
     """Carry used in the BCF loop."""
 
     state: BCFState
@@ -213,7 +212,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     if state.leaf_prior_cov_inv_shape_mu is not None:
         assert state.leaf_prior_cov_inv_rate_mu is not None
-        state = eqx.tree_at(
+        state = tree_at(
             lambda s: s.forest.leaf_prior_cov_inv,
             state,
             _sample_leaf_prior_cov_inv(
@@ -233,7 +232,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     # `resid_unit` (no-op when it is 1).
     #
     # 2. Update tau_0 intercept
-    sigma2 = 1.0 / state.error_cov_inv.value
+    sigma2 = jnp.reciprocal(state.error_cov_inv.value)
 
     # Adaptive coding basis
     b_z = jnp.where(state.trt, state.b1, state.b0)
@@ -245,14 +244,12 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         prec = jnp.sum(jnp.square(b_z)) / sigma2 + state.tau_0_prior_cov_inv
         mean = jnp.sum(b_z * partial) / sigma2 / prec
 
-        tau_0_new = mean + random.normal(keys.pop(), shape=mean.shape) * jax.lax.rsqrt(
-            prec
-        )
+        tau_0_new = mean + random.normal(keys.pop()) * lax.rsqrt(prec)
     else:
         tau_0_new = jnp.zeros_like(state.tau_0)
 
     # Update R to reflect new tau_0 (back into scaled storage units)
-    resid_val = resid_val - b_z * (tau_0_new - state.tau_0) / state.resid_unit
+    resid_val -= b_z * (tau_0_new - state.tau_0) / state.resid_unit
 
     # 3. Update treatment effect forest (tau)
     # Target for tau is (Y - mu - b_z * tau_0) / b_z.
@@ -278,7 +275,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     if state.leaf_prior_cov_inv_shape_tau is not None:
         assert state.leaf_prior_cov_inv_rate_tau is not None
-        state = eqx.tree_at(
+        state = tree_at(
             lambda s: s.forest.leaf_prior_cov_inv,
             state,
             _sample_leaf_prior_cov_inv(
@@ -308,17 +305,13 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             jnp.sum(jnp.square(tau_full) * ~state.trt) / sigma2 + state.b_prior_cov_inv
         )
         b0_mean = jnp.sum(tau_full * resid_partial * ~state.trt) / sigma2 / b0_prec
-        b0_new = b0_mean + random.normal(
-            keys.pop(), shape=b0_mean.shape
-        ) * jax.lax.rsqrt(b0_prec)
+        b0_new = b0_mean + random.normal(keys.pop()) * lax.rsqrt(b0_prec)
 
         b1_prec = (
             jnp.sum(jnp.square(tau_full) * state.trt) / sigma2 + state.b_prior_cov_inv
         )
         b1_mean = jnp.sum(tau_full * resid_partial * state.trt) / sigma2 / b1_prec
-        b1_new = b1_mean + random.normal(
-            keys.pop(), shape=b1_mean.shape
-        ) * jax.lax.rsqrt(b1_prec)
+        b1_new = b1_mean + random.normal(keys.pop()) * lax.rsqrt(b1_prec)
 
         b_z_new = jnp.where(state.trt, b1_new, b0_new)
         resid_val = (resid_partial - tau_full * b_z_new) / state.resid_unit
@@ -326,7 +319,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         # the tau precision scale b_z^2 changed on every datapoint, so the
         # incrementally maintained per-leaf cache of the tau forest (still in
         # the `forest` slot here) is stale everywhere
-        state = eqx.tree_at(
+        state = tree_at(
             lambda s: s.forest.prec_tree,
             state,
             recompute_prec_trees(state.forest, jnp.square(b_z_new), state.config),
@@ -471,5 +464,5 @@ def run_bcf_mcmc(
             leaf_prior_cov_inv_tau_main_trace=new_leaf_prior_cov_inv_tau_m_trace,
         )
 
-    final_carry = jax.lax.while_loop(cond_fn, body_fn, carry)
+    final_carry = lax.while_loop(cond_fn, body_fn, carry)
     return final_carry.state, final_carry

@@ -182,32 +182,10 @@ def recompute_prec_trees(
         return lax.platform_dependent(cpu=tree_batches, cuda=all_trees)
 
 
-@jit(donate_argnums=(1,))
-@float32_matmuls
-def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
-    """
-    Do one BCF MCMC step.
+def bcf_step_mu(key: Key[Array, ''], state: BCFState) -> BCFState:
+    """Update the prognostic forest and its leaf prior precision."""
+    keys = split(key, 2)
 
-    Parameters
-    ----------
-    key
-        A jax random key.
-    state
-        A BCF mcmc state, as created by `init_bcf`.
-
-    Returns
-    -------
-    The new BCF mcmc state.
-
-    Notes
-    -----
-    The memory of the input state is re-used for the output state, so the input
-    state can not be used any more after calling `bcf_step`. All this applies
-    outside of `jax.jit`.
-    """
-    keys = split(key, 6)
-
-    # 1. Update prognostic forest (mu)
     # `step` rebuilds the state with `replace`, so it preserves the subclass.
     # WORKAROUND(python<3.12): type `step` as generic over the state subclass
     # (PEP 695) instead of casting here, since a TypeVar renders badly in the
@@ -227,18 +205,24 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             ),
         )
 
+    return state
+
+
+def bcf_step_tau_0(key: Key[Array, ''], state: BCFState) -> BCFState:
+    """Update the treatment effect intercept."""
     # `resid` is stored scaled: ``resid_unit * resid = data residual``, whereas
     # `tau_0`, `tau_X`, `b`, `error_cov_inv` and `tau_0_prior_cov_inv` are
     # on the data scale (matching `_bcf.predict`). Convert `resid` in and out of data
-    # units so the scalar Gibbs updates below are unit-consistent for any
-    # `resid_unit` (no-op when it is 1).
+    # units so the scalar Gibbs updates here and in `bcf_step_b` are
+    # unit-consistent for any `resid_unit` (no-op when it is 1).
 
-    # 2. Update tau_0 intercept
+    if state.tau_0_prior_cov_inv is None:
+        return state
 
-    # get coding basis, possibly adaptive so not just 0 and 1
-    b_z = state.b[state.trt.astype(int)]
+    else:
+        # get coding basis, possibly adaptive so not just 0 and 1
+        b_z = state.b[state.trt.astype(int)]
 
-    if state.tau_0_prior_cov_inv is not None:
         # partial residual removing current tau_0 effect, on the data scale
         partial_resid = state.resid * state.resid_unit + state.tau_0 * b_z
 
@@ -250,16 +234,23 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         mean = jnp.sum(b_z * partial_resid) * state.error_cov_inv.value / prec
 
         # sample tau_0 from full conditional
-        tau_0_new = mean + random.normal(keys.pop()) * lax.rsqrt(prec)
+        tau_0_new = mean + random.normal(key) * lax.rsqrt(prec)
 
         # update state to reflect new tau_0
-        state = replace(
+        return replace(
             state,
             tau_0=tau_0_new,
             resid=state.resid - b_z * (tau_0_new - state.tau_0) / state.resid_unit,
         )
 
-    # 3. Update treatment effect forest (tau)
+
+def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
+    """Update the treatment effect forest and its leaf prior precision."""
+    keys = split(key, 2)
+
+    # get coding basis, possibly adaptive so not just 0 and 1
+    b_z = state.b[state.trt.astype(int)]
+
     # Target for tau is (Y - mu - b_z * tau_0) / b_z.
     # Its residual is target - tau = (Y - mu - b_z*tau_0 - b_z*tau) / b_z
     b_z_zero = jnp.abs(b_z) < 1e-10
@@ -269,8 +260,8 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     # Swap the tau forest into the forest slot and run only the tree step on
     # it; the mu forest rides along in `forest_tau` and is swapped back at the
-    # end of this section. The other sub-steps of `step` (latent outcome,
-    # error precision, sparsity, step counter) belong to the mu phase alone.
+    # end. The other sub-steps of `step` (latent outcome, error precision,
+    # sparsity, step counter) belong to the mu phase alone.
     mu_prec_scale = state.prec_scale
     state = replace(
         state,
@@ -303,7 +294,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         )
 
     # Swap the forests back and restore the mu-side fields
-    state = replace(
+    return replace(
         state,
         forest=state.forest_tau,
         forest_tau=state.forest,
@@ -311,9 +302,20 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         prec_scale=mu_prec_scale,
     )
 
-    # 4. Update adaptive coding weights b
-    if state.b_prior_cov_inv is not None:
+
+def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
+    """Update the adaptive coding weights."""
+    if state.b_prior_cov_inv is None:
+        return state
+
+    else:
         assert state.tau_X is not None
+
+        # get coding basis
+        b_z = state.b[state.trt.astype(int)]
+
+        # partial residual removing current b effect, on the data scale (see
+        # `bcf_step_tau_0` about units)
         tau_full = state.tau_0 + state.tau_X
         resid_partial = state.resid * state.resid_unit + tau_full * b_z
 
@@ -328,9 +330,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             * state.error_cov_inv.value
             / b_prec
         )
-        state = replace(
-            state, b=b_mean + random.normal(keys.pop(), (2,)) * lax.rsqrt(b_prec)
-        )
+        state = replace(state, b=b_mean + random.normal(key, (2,)) * lax.rsqrt(b_prec))
 
         b_z = state.b[state.trt.astype(int)]
         state = replace(
@@ -340,13 +340,41 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         # the tau precision scale b_z^2 changed on every datapoint, so the
         # incrementally maintained per-leaf cache of the tau forest is stale
         # everywhere
-        state = tree_at(
+        return tree_at(
             lambda s: s.forest_tau.prec_tree,
             state,
             recompute_prec_trees(state.forest_tau, jnp.square(b_z), state.config),
         )
 
-    return state
+
+@jit(donate_argnums=(1,))
+@float32_matmuls
+def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
+    """
+    Do one BCF MCMC step.
+
+    Parameters
+    ----------
+    key
+        A jax random key.
+    state
+        A BCF mcmc state, as created by `init_bcf`.
+
+    Returns
+    -------
+    The new BCF mcmc state.
+
+    Notes
+    -----
+    The memory of the input state is re-used for the output state, so the input
+    state can not be used any more after calling `bcf_step`. All this applies
+    outside of `jax.jit`.
+    """
+    keys = split(key, 4)
+    state = bcf_step_mu(keys.pop(), state)
+    state = bcf_step_tau_0(keys.pop(), state)
+    state = bcf_step_tau(keys.pop(), state)
+    return bcf_step_b(keys.pop(), state)
 
 
 def _tau_view(state: BCFState) -> BCFState:

@@ -62,14 +62,11 @@ class BCFState(State):
     tau_0: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """Global intercept for the treatment effect."""
 
-    b0: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
-    """Adaptive coding weight for untreated units."""
-
-    b1: Float32[Array, '*chains'] = field(chains=CHAIN_AXIS)
-    """Adaptive coding weight for treated units."""
+    b: Float32[Array, '*chains 2'] = field(chains=CHAIN_AXIS)
+    """Adaptive coding weights for untreated and treated units."""
 
     b_prior_cov_inv: Float32[Array, ''] | None
-    """Prior precision of `b0` and `b1`, `None` to leave them unchanged."""
+    """Prior precision of `b`, `None` to leave it unchanged."""
 
     tau_0_prior_cov_inv: Float32[Array, ''] | None
     """Prior precision of `tau_0`, `None` to hold `tau_0` at zero."""
@@ -248,12 +245,10 @@ def init_bcf(
     state_mu = replace(state_mu, X=state_tau.X)
 
     if adaptive_coding:
-        b0_init = -0.5
-        b1_init = 0.5
+        b_init = jnp.array([-0.5, 0.5])
         b_prior_cov_inv = jnp.array(2.0, jnp.float32)
     else:
-        b0_init = 0.0
-        b1_init = 1.0
+        b_init = jnp.array([0.0, 1.0])
         b_prior_cov_inv = None
 
     # the tau likelihood precision of each datapoint is b_z^2 (see `bcf_step`),
@@ -261,7 +256,7 @@ def init_bcf(
     # rather than from the missingness mask used by the tau init
     forest_tau = state_tau.forest
     assert forest_tau.prec_tree is not None
-    b_z = jnp.where(trt_array, b1_init, b0_init)
+    b_z = b_init[trt_array.astype(int)]
     forest_tau = replace(
         forest_tau,
         prec_tree=initial_prec_tree(forest_tau.prec_tree.shape, jnp.square(b_z)),
@@ -293,8 +288,7 @@ def init_bcf(
         trt=trt_array,
         tau_X=jnp.zeros(len(trt_array)) if adaptive_coding else None,
         tau_0=jnp.zeros(()),
-        b0=jnp.array(b0_init, jnp.float32),
-        b1=jnp.array(b1_init, jnp.float32),
+        b=b_init,
         tau_0_prior_cov_inv=tau_0_prior_cov_inv,
         b_prior_cov_inv=b_prior_cov_inv,
         leaf_prior_cov_inv_shape_mu=shape_mu,

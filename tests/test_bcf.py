@@ -524,7 +524,7 @@ class TestBcf:
 
         tau_fit_raw = evaluate_forest(new_state.X, new_state.forest_tau).sum(axis=0)
 
-        b_z = jnp.where(z_train == 1, new_state.b1, new_state.b0)
+        b_z = new_state.b[z_train.astype(int)]
         expected_resid = (
             y_train
             - new_state.forest.offset
@@ -591,7 +591,7 @@ class TestBcf:
         def check_tau_prec_tree(state: BCFState, err_msg: str) -> None:
             forest = state.forest_tau
             assert forest.prec_tree is not None
-            b_z = jnp.where(state.trt, state.b1, state.b0)
+            b_z = state.b[state.trt.astype(int)]
             expected = _prec_tree_from_scratch(forest, jnp.square(b_z))
             is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(
                 forest.split_tree

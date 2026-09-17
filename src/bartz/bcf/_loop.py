@@ -55,8 +55,7 @@ class _BCFCarry(Module):
     tau_main_trace: MainTrace
 
     tau_0_main_trace: Float32[Array, ' n_save']
-    b0_main_trace: Float32[Array, ' n_save']
-    b1_main_trace: Float32[Array, ' n_save']
+    b_main_trace: Float32[Array, 'n_save 2']
     leaf_prior_cov_inv_mu_main_trace: Float32[Array, ' n_save']
     leaf_prior_cov_inv_tau_main_trace: Float32[Array, ' n_save']
 
@@ -231,14 +230,14 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     resid_val = state.resid  # updated global residual R
 
     # `resid` is stored scaled: ``resid_unit * resid = data residual``, whereas
-    # `tau_0`, `tau_X`, `b0`, `b1`, `error_cov_inv` and `tau_0_prior_cov_inv` are
+    # `tau_0`, `tau_X`, `b`, `error_cov_inv` and `tau_0_prior_cov_inv` are
     # on the data scale (matching `_bcf.predict`). Convert `resid` in and out of data
     # units so the scalar Gibbs updates below are unit-consistent for any
     # `resid_unit` (no-op when it is 1).
 
     # 2. Update tau_0 intercept
     # Adaptive coding basis
-    b_z = jnp.where(state.trt, state.b1, state.b0)
+    b_z = state.b[state.trt.astype(int)]
 
     if state.tau_0_prior_cov_inv is not None:
         # partial residual removing current tau_0 effect, on the data scale
@@ -302,7 +301,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     resid_val = jnp.where(b_z_zero, resid_val, state.resid * b_z_safe)
 
-    # 4. Update adaptive coding weights (b0, b1)
+    # 4. Update adaptive coding weights b
     if state.b_prior_cov_inv is not None:
         assert tau_X_new is not None
         tau_full = state.tau_0 + tau_X_new
@@ -319,9 +318,9 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             * state.error_cov_inv.value
             / b_prec
         )
-        b0_new, b1_new = b_mean + random.normal(keys.pop(), (2,)) * lax.rsqrt(b_prec)
+        b_new = b_mean + random.normal(keys.pop(), (2,)) * lax.rsqrt(b_prec)
 
-        b_z_new = jnp.where(state.trt, b1_new, b0_new)
+        b_z_new = b_new[state.trt.astype(int)]
         resid_val = (resid_partial - tau_full * b_z_new) / state.resid_unit
 
         # the tau precision scale b_z^2 changed on every datapoint, so the
@@ -333,8 +332,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             recompute_prec_trees(state.forest, jnp.square(b_z_new), state.config),
         )
     else:
-        b0_new = state.b0
-        b1_new = state.b1
+        b_new = state.b
 
     # 5. Swap the forests back and restore the mu-side fields
     return replace(
@@ -344,8 +342,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         resid=resid_val,  # updated global residual R
         prec_scale=mu_prec_scale,
         tau_X=tau_X_new,
-        b0=b0_new,
-        b1=b1_new,
+        b=b_new,
     )
 
 
@@ -392,8 +389,7 @@ def run_bcf_mcmc(
     tau_m_empty = _empty_trace(n_save, tau_state, MainTrace)
 
     tau_0_m_empty = jnp.zeros((n_save,))
-    b0_m_empty = jnp.zeros((n_save,))
-    b1_m_empty = jnp.zeros((n_save,))
+    b_m_empty = jnp.zeros((n_save, 2))
     leaf_prior_cov_inv_mu_m_empty = jnp.zeros((n_save,))
     leaf_prior_cov_inv_tau_m_empty = jnp.zeros((n_save,))
 
@@ -406,8 +402,7 @@ def run_bcf_mcmc(
         mu_main_trace=mu_m_empty,
         tau_main_trace=tau_m_empty,
         tau_0_main_trace=tau_0_m_empty,
-        b0_main_trace=b0_m_empty,
-        b1_main_trace=b1_m_empty,
+        b_main_trace=b_m_empty,
         leaf_prior_cov_inv_mu_main_trace=leaf_prior_cov_inv_mu_m_empty,
         leaf_prior_cov_inv_tau_main_trace=leaf_prior_cov_inv_tau_m_empty,
     )
@@ -447,8 +442,7 @@ def run_bcf_mcmc(
         new_tau_0_m_trace = carry.tau_0_main_trace.at[main_idx].set(
             new_state.tau_0, mode='drop'
         )
-        new_b0_m_trace = carry.b0_main_trace.at[main_idx].set(new_state.b0, mode='drop')
-        new_b1_m_trace = carry.b1_main_trace.at[main_idx].set(new_state.b1, mode='drop')
+        new_b_m_trace = carry.b_main_trace.at[main_idx, :].set(new_state.b, mode='drop')
         new_leaf_prior_cov_inv_mu_m_trace = carry.leaf_prior_cov_inv_mu_main_trace.at[
             main_idx
         ].set(new_state.forest.leaf_prior_cov_inv, mode='drop')
@@ -465,8 +459,7 @@ def run_bcf_mcmc(
             mu_main_trace=new_mu_m_trace,
             tau_main_trace=new_tau_m_trace,
             tau_0_main_trace=new_tau_0_m_trace,
-            b0_main_trace=new_b0_m_trace,
-            b1_main_trace=new_b1_m_trace,
+            b_main_trace=new_b_m_trace,
             leaf_prior_cov_inv_mu_main_trace=new_leaf_prior_cov_inv_mu_m_trace,
             leaf_prior_cov_inv_tau_main_trace=new_leaf_prior_cov_inv_tau_m_trace,
         )

@@ -268,9 +268,9 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     initial_resid_tau = jnp.where(b_z_zero, 0.0, mu_resid / b_z_safe)
 
     # Swap the tau forest into the forest slot and run only the tree step on
-    # it; the mu forest rides along in `forest_tau` and is swapped back
-    # afterwards. The other sub-steps of `step` (latent outcome, error
-    # precision, sparsity, step counter) belong to the mu phase alone.
+    # it; the mu forest rides along in `forest_tau` and is swapped back at the
+    # end of this section. The other sub-steps of `step` (latent outcome,
+    # error precision, sparsity, step counter) belong to the mu phase alone.
     mu_prec_scale = state.prec_scale
     state = replace(
         state,
@@ -302,8 +302,14 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
             tau_X=state.tau_X + (initial_resid_tau - state.resid) * state.resid_unit,
         )
 
-    # bring the residual back to the mu scale
-    state = replace(state, resid=jnp.where(b_z_zero, mu_resid, state.resid * b_z_safe))
+    # Swap the forests back and restore the mu-side fields
+    state = replace(
+        state,
+        forest=state.forest_tau,
+        forest_tau=state.forest,
+        resid=jnp.where(b_z_zero, mu_resid, state.resid * b_z_safe),
+        prec_scale=mu_prec_scale,
+    )
 
     # 4. Update adaptive coding weights b
     if state.b_prior_cov_inv is not None:
@@ -332,21 +338,15 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
         )
 
         # the tau precision scale b_z^2 changed on every datapoint, so the
-        # incrementally maintained per-leaf cache of the tau forest (still in
-        # the `forest` slot here) is stale everywhere
+        # incrementally maintained per-leaf cache of the tau forest is stale
+        # everywhere
         state = tree_at(
-            lambda s: s.forest.prec_tree,
+            lambda s: s.forest_tau.prec_tree,
             state,
-            recompute_prec_trees(state.forest, jnp.square(b_z), state.config),
+            recompute_prec_trees(state.forest_tau, jnp.square(b_z), state.config),
         )
 
-    # 5. Swap the forests back and restore the mu-side fields
-    return replace(
-        state,
-        forest=state.forest_tau,
-        forest_tau=state.forest,
-        prec_scale=mu_prec_scale,
-    )
+    return state
 
 
 def _tau_view(state: BCFState) -> BCFState:

@@ -25,6 +25,8 @@
 """Tests for Bayesian Causal Forests (BCF)."""
 
 import tempfile
+from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import jax.numpy as jnp
@@ -33,16 +35,23 @@ import pandas as pd
 import pytest
 import stochtree
 from equinox import EquinoxRuntimeError
-from jax import random
+from jax import random, vmap
 from jaxtyping import ArrayLike, Shaped
 from scipy import stats
 
+from bartz._jaxext import split
 from bartz.bcf._bcf import UniqueQuantileBinner, bcf
 from bartz.bcf._loop import bcf_step
-from bartz.bcf._state import init_bcf
-from bartz.grove import evaluate_forest
-from bartz.mcmcstep import Wishart
-from tests.util import assert_allclose, assert_array_equal, rhat_rank
+from bartz.bcf._state import BCFState, init_bcf
+from bartz.grove import evaluate_forest, is_actual_leaf
+from bartz.mcmcstep import Forest, Wishart
+from bartz.mcmcstep._step import apply_moves_to_leaf_indices
+from tests.util import (
+    assert_allclose,
+    assert_array_equal,
+    assert_close_matrices,
+    rhat_rank,
+)
 
 
 def _rhat_two_chains(
@@ -65,6 +74,21 @@ def _rhat_two_chains(
     """
     stacked = np.stack([a, b], axis=0)  # shape (2, num_samples, n)
     return rhat_rank(stacked, split=False)
+
+
+def _prec_tree_from_scratch(
+    forest: Forest, prec_scale: Shaped[ArrayLike, ' n']
+) -> Shaped[ArrayLike, 'num_trees 2*half_tree_size']:
+    """Sum `prec_scale` over the datapoints in each leaf of each tree."""
+    leaf_indices = apply_moves_to_leaf_indices(
+        forest.leaf_indices, forest.to_prune, forest.move_node
+    )
+    _, tree_size = forest.leaf_tree.shape
+
+    def scatter(idx: Shaped[ArrayLike, ' n']) -> Shaped[ArrayLike, ' 2*half_tree_size']:
+        return jnp.zeros(tree_size).at[idx].add(prec_scale)
+
+    return vmap(scatter)(leaf_indices)
 
 
 class TestBcf:
@@ -489,10 +513,6 @@ class TestBcf:
             ),
         )
 
-        # `resid` is stored scaled; copy `resid_unit` out before the step, which
-        # donates the buffer that the returned state shares.
-        resid_unit = jnp.copy(init_state.resid_unit)
-
         new_state = bcf_step(random.key(2), init_state)
 
         mu_fit_raw = evaluate_forest(new_state.X, new_state.forest).sum(axis=0)
@@ -504,7 +524,7 @@ class TestBcf:
 
         tau_fit_raw = evaluate_forest(new_state.X, new_state.forest_tau).sum(axis=0)
 
-        b_z = jnp.where(z_train == 1, new_state.b1, new_state.b0)
+        b_z = new_state.b[z_train.astype(int)]
         expected_resid = (
             y_train
             - new_state.forest.offset
@@ -514,11 +534,80 @@ class TestBcf:
 
         # `resid` is stored scaled (``resid_unit * resid = data residual``)
         assert_allclose(
-            new_state.resid * resid_unit,
+            new_state.resid * new_state.resid_unit,
             expected_resid,
             atol=1e-5,
             allow_non_scalar=True,
         )
+
+    @pytest.mark.parametrize(
+        ('adaptive_coding', 'prec_count_num_trees'),
+        [(False, None), (True, None), (True, 1)],
+    )
+    def test_bcf_step_tau_prec_tree_cache(
+        self, keys: split, adaptive_coding: bool, prec_count_num_trees: int | None
+    ) -> None:
+        """
+        Check `bcf_step` keeps the tau forest's `prec_tree` cache consistent.
+
+        The tau likelihood precision of each datapoint is ``b_z**2``, so after a
+        step that resamples the coding weights, the cached per-leaf sums must
+        match the new weights. Setting `prec_count_num_trees` exercises the
+        batched rebuild of the cache.
+        """
+        x_train, _, z_train, y_train, _, _, _ = self._generate_bcf_data(n=100, seed=42)
+
+        x_train_t = jnp.asarray(x_train.T)
+        binner = UniqueQuantileBinner(x_train_t, key=keys.pop())
+        x_binned = binner.bin(x_train_t)
+        max_split = binner.max_split
+
+        state = init_bcf(
+            X_unified=x_binned,
+            trt=z_train.astype(bool),
+            y=y_train,
+            offset=0.0,
+            max_split_mu=jnp.array(max_split),
+            max_split_tau=jnp.array(max_split),
+            num_trees_mu=2,
+            num_trees_tau=3,
+            p_nonterminal_mu=np.ones(4, dtype=np.float32) * 0.95,
+            p_nonterminal_tau=np.ones(4, dtype=np.float32) * 0.95,
+            min_points_per_leaf_tau=1,
+            leaf_prior_cov_inv_mu=1.0,
+            leaf_prior_cov_inv_tau=1.0,
+            adaptive_coding=adaptive_coding,
+            error_cov_inv=Wishart(
+                nu=jnp.float32(1.0),
+                rate=jnp.array(1.0, dtype=jnp.float32),
+                value=jnp.array(1.0, dtype=jnp.float32),
+            ),
+        )
+        state = replace(
+            state,
+            config=replace(state.config, prec_count_num_trees=prec_count_num_trees),
+        )
+
+        def check_tau_prec_tree(state: BCFState, err_msg: str) -> None:
+            forest = state.forest_tau
+            assert forest.prec_tree is not None
+            b_z = state.b[state.trt.astype(int)]
+            expected = _prec_tree_from_scratch(forest, jnp.square(b_z))
+            is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(
+                forest.split_tree
+            )
+            assert_close_matrices(
+                jnp.where(is_leaf, forest.prec_tree, 0.0),
+                jnp.where(is_leaf, expected, 0.0),
+                rtol=1e-5,
+                err_msg=err_msg,
+            )
+
+        check_tau_prec_tree(state, 'at init: ')
+
+        for i in range(4):
+            state = bcf_step(keys.pop(), state)
+            check_tau_prec_tree(state, f'after step {i + 1}: ')
 
     def test_bcf_unsplittable_x_reduction(self) -> None:
         """Verifies BCF degenerates to Bayesian linear regression when max_split is 0."""
@@ -760,16 +849,16 @@ class TestBcf:
 
         y_var = np.var(y_train)
 
-        leaf_var_mu_jax = (
-            np.mean(1.0 / np.array(model_jax._leaf_prior_cov_inv_mu_trace)) * y_var
-        )
+        leaf_var_mu_jax = np.mean(1.0 / model_jax._leaf_prior_cov_inv_mu_trace) * y_var
         leaf_var_mu_st = np.mean(model_st.leaf_scale_mu_samples) * y_var
+        assert_allclose(leaf_var_mu_jax, leaf_var_mu_st, rtol=0.3)
+
         leaf_var_tau_jax = (
-            np.mean(1.0 / np.array(model_jax._leaf_prior_cov_inv_tau_trace)) * y_var
+            np.mean(1.0 / model_jax._leaf_prior_cov_inv_tau_trace) * y_var
         )
         leaf_var_tau_st = np.mean(model_st.leaf_scale_tau_samples) * y_var
-        assert_allclose(leaf_var_mu_jax, leaf_var_mu_st, rtol=0.3)
-        # this tolerance is suspiciously high, we should investigate why
+        # single-chain estimates of the tau leaf variance vary by a factor >2
+        # across MCMC seeds in both implementations, hence the loose tolerance
         assert_allclose(leaf_var_tau_jax, leaf_var_tau_st, rtol=1.5)
 
         preds = model_jax.predict(x_test=x_test, pihat_test=pi_test.astype(np.float32))

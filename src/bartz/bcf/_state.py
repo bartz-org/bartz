@@ -69,7 +69,7 @@ class BCFState(State):
     """Prior precision of `b`, `None` to leave it unchanged."""
 
     tau_0_prior_cov_inv: Float32[Array, ''] | None
-    """Prior precision of `tau_0`, `None` to hold `tau_0` at zero."""
+    """Prior precision of `tau_0`, `None` to leave it unchanged."""
 
     leaf_prior_cov_inv_shape_mu: Float32[Array, ''] | None
     """Shape of the Gamma prior on the mu leaf precision

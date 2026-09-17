@@ -317,24 +317,29 @@ def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
         # partial residual removing current b effect, on the data scale (see
         # `bcf_step_tau_0` about units)
         tau_full = state.tau_0 + state.tau_X
-        resid_partial = state.resid * state.resid_unit + tau_full * b_z
+        partial_resid = state.resid * state.resid_unit + tau_full * b_z
 
-        # one Gibbs update per group, control (b0) and treated (b1)
+        # determine full conditional of b, one Gibbs update per treatment group
         groups = jnp.stack([~state.trt, state.trt])
-        b_prec = (
+        prec = (
             jnp.sum(jnp.square(tau_full) * groups, axis=1) * state.error_cov_inv.value
             + state.b_prior_cov_inv
         )
-        b_mean = (
-            jnp.sum(tau_full * resid_partial * groups, axis=1)
+        mean = (
+            jnp.sum(tau_full * partial_resid * groups, axis=1)
             * state.error_cov_inv.value
-            / b_prec
+            / prec
         )
-        state = replace(state, b=b_mean + random.normal(key, (2,)) * lax.rsqrt(b_prec))
 
-        b_z = state.b[state.trt.astype(int)]
+        # sample b from full conditional
+        b_new = mean + random.normal(key, (2,)) * lax.rsqrt(prec)
+        b_z_new = b_new[state.trt.astype(int)]
+
+        # update state to reflect new b
         state = replace(
-            state, resid=(resid_partial - tau_full * b_z) / state.resid_unit
+            state,
+            b=b_new,
+            resid=state.resid - tau_full * (b_z_new - b_z) / state.resid_unit,
         )
 
         # the tau precision scale b_z^2 changed on every datapoint, so the
@@ -343,7 +348,7 @@ def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
         return tree_at(
             lambda s: s.forest_tau.prec_tree,
             state,
-            recompute_prec_trees(state.forest_tau, jnp.square(b_z), state.config),
+            recompute_prec_trees(state.forest_tau, jnp.square(b_z_new), state.config),
         )
 
 

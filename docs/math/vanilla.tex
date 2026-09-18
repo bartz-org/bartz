@@ -15,7 +15,8 @@ The specialisation is
 	\label{eq:subst}
 	\begin{alignedat}{4}
 		\setB &= \emptyset,  & \qquad k     &= 1,             & \qquad w     &\equiv 1,      & \qquad \vs  &= (1/p, \dots, 1/p), \\
-		\va_i &\equiv 1,     & \qquad \mLam &= 1/\sigsq,      & \qquad \mLamm &= 1/\smsq,    & \qquad \Psi &= \nu\lambda .
+		\va_i &\equiv 1,     & \qquad \mLam &= 1/\sigsq,      & \qquad \mLamm &= 1/\smsq,    & \qquad \Psi &= \nu\lambda, \\
+		\nmindn &= 0,        & \qquad \nminleaf &= 5 .
 	\end{alignedat}
 \end{equation}
 All $k \times k$ matrices become scalars, there are no latent outcomes
@@ -45,8 +46,9 @@ no role), and the dictionary between the two chapters is:
 	\end{tabular}
 \end{center}
 All tree-prior and proposal-kernel factors are unchanged, but for the
-uniform variable choice $\vs \equiv 1/p$ and the uniform leaf choice
-$w \equiv 1$.
+uniform variable choice $\vs \equiv 1/p$, the uniform leaf choice
+$w \equiv 1$, and the count thresholds: no decision-node threshold, and the
+CGM requirement of at least five training points per leaf.
 
 %-----------------------------------------------------------------------------
 \section{Notation and data}
@@ -96,7 +98,12 @@ drawn in two stages, the variable $v$ uniformly over the eligible set
 $E(\eta)$ by \eqref{eq:mv-var-prior}, then the cutpoint $c$ uniformly over
 the cutpoints of $v$ compatible with the ancestor splits. Since the number
 of compatible cutpoints varies with $v$, this is not uniform over the
-admissible $(v, c)$ pairs.
+admissible $(v, c)$ pairs. The support is restricted to trees with at least
+$\nminleaf = 5$ training points in every leaf, the constraint of CGM (2010);
+there is no decision-node threshold, $\nmindn = 0$. bartz's \texttt{gbart}
+sets $\nminleaf = 5$ but keeps $\nmindn = 10$: with
+$\nmindn = 2\nminleaf$ the leaf threshold already implies the decision-node
+one, so the support, hence the target, is the same.
 
 \subsection{Leaf prior}
 
@@ -373,7 +380,11 @@ ratio times prior ratio) does not touch the leaf or noise model, so it is
 	\frac{p_{d_\eta}}{1 - p_{d_\eta}} \cdot
 	(1 - p_{d_\eta+1})^{2},
 \end{equation}
-with the same convention for non-growable children.
+with the same convention for non-growable children. Since $\nmindn = 0$,
+$G(T)$ is count-free: every leaf with an admissible split above the depth
+limit is growable. The leaf threshold enters only through the veto of
+\S\ref{sec:mv-grow}: a GROW whose children would have fewer than five points
+is rejected.
 
 \paragraph{Marginal density ratio.}
 Substituting \eqref{eq:suffstats-lam} into \eqref{eq:mv-lkratio-grow}, the

@@ -752,12 +752,11 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
 
     # prior odds of the node being nonterminal, times the prior probability of
     # both children being terminal. The children terminality uses the
-    # admissibility ignoring counts, because the standard BART prior conditions
-    # the non-terminal probability only on the existence of available decision
-    # rules, not on the count thresholds (which are a bartz proposal-efficiency
-    # device, not part of the target distribution). The fill value avoids a 0
-    # and then an inf in the log if the move is not allowed and the indices are
-    # out of bounds.
+    # admissibility ignoring counts, because the count thresholds restrict the
+    # support of the prior rather than the conditional non-terminal
+    # probabilities, so they cancel in the prior ratio between two trees in
+    # the support. The fill value avoids a 0 and then an inf in the log if the
+    # move is not allowed and the indices are out of bounds.
     pnt = p_nonterminal.at[moves.lrt_nodes].get(mode='fill', fill_value=0.5)
     prior_ratio = pnt[2] / (1 - pnt[2]) * jnp.prod(1 - pnt[:2] * moves.lrt_growable[:2])
 

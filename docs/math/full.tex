@@ -242,6 +242,23 @@ derivations of this chapter unchanged on the renormalised subvector.
 We write $p(T_t \mid \vs)$ for the probability of the tree structure
 (including the splitting rules) under this prior.
 
+\paragraph{Minimum-count constraints.}
+For any node $\eta$ of a tree, let $n_\eta$ be the number of training
+points routed through $\eta$, i.e., the sum of the leaf counts $n_\ell$ of
+\eqref{eq:mv-Iell} over the leaves below $\eta$. bartz optionally restricts
+the support of the prior to the trees in which every decision node has
+$n_\eta \ge \nmindn$ and every leaf has $n_\eta \ge \nminleaf$
+(\texttt{min\_points\_per\_decision\_node} and
+\texttt{min\_points\_per\_leaf}; unset means $0$, i.e., no constraint), and
+renormalises it on that support. The two thresholds are independent; the
+natural pairing is $\nmindn = 2\nminleaf$, since a decision node whose two
+leaf children meet the leaf threshold meets it automatically. Like the
+requirement of CGM (2010) of at least five observations per leaf, this makes
+the prior depend on the training covariates. The derivations below use the
+unrestricted prior: the sampler never leaves the support
+(\S\ref{sec:mv-grow}), and within it the support indicator and its
+normalising constant cancel in every prior ratio $p(T')/p(T)$.
+
 \subsection{Variable selection prior}
 \label{sec:mv-sparse-prior}
 
@@ -772,15 +789,21 @@ leaves). Writing $p_d \coloneqq p_{\mathrm{NT}}(d)$ for brevity,
 \end{equation}
 where $s_v / e_\eta$ is the variable prior \eqref{eq:mv-var-prior} at
 $\eta$ and $n_{\mathrm{cut}}(\eta, v)$ is the number of valid cutpoints for
-the chosen variable $v$. (If a child $\eta_L$ or
-$\eta_R$ would have no further admissible split, its $1 - p_{d_\eta+1}$
-factor is replaced by $1$, since the prior assigns it leaf status with
-probability $1$. In the bartz code, this is encoded by the children
-entries of \texttt{Moves.lrt\_growable}, used in \texttt{complete\_ratio}.)
+the chosen variable $v$.
+
+If a child $\eta_L$ or $\eta_R$ would have no further admissible split, its
+$1 - p_{d_\eta+1}$ factor is replaced by $1$, since the prior assigns it
+leaf status with probability $1$. The count thresholds of
+\S\ref{sec:mv-tree-prior} play no role here: they restrict the support, not
+the conditional probabilities \eqref{eq:pnt}. In the bartz code, the
+children factors are encoded by the children entries of
+\texttt{Moves.lrt\_growable}, which ignore the counts, used in
+\texttt{complete\_ratio}.
 
 \paragraph{Transition ratio.}
 Let $G(T)$ be the set of \emph{growable} leaves of $T$: those with
-$E(\eta) \ne \emptyset$ and $d_\eta < d_{\max}$. The forward kernel at $T$
+$E(\eta) \ne \emptyset$, $d_\eta < d_{\max}$, and $n_\eta \ge \nmindn$. The
+forward kernel at $T$
 chooses GROW with probability $1/2$ (or $1$ if PRUNE is impossible, i.e.,
 $T$ is the root), then picks $\eta \in G(T)$ with probability proportional
 to a fixed positive weight $w_\eta$ attached to each node position, then a
@@ -820,6 +843,22 @@ described. In bartz the leaf is drawn by \texttt{choose\_leaf} in
 categorical draw on \texttt{Forest.log\_s} with the ineligible variables
 masked out (\texttt{categorical\_exclude}).
 
+The decision-node threshold is thus built into the proposal: a GROW at
+$\eta \in G(T)$ creates a decision node with $n_\eta \ge \nmindn$ points, and
+a PRUNE only removes decision nodes, so the chain never leaves the support
+of \S\ref{sec:mv-tree-prior} on this account. The leaf threshold is not:
+enforcing it in the proposal would require the counts of both prospective
+children for every candidate rule, so the proposal ignores it and the move
+is instead rejected outright when $n_{\eta_L} < \nminleaf$ or
+$n_{\eta_R} < \nminleaf$, which is just the MH acceptance of a proposal
+landing outside the support. This veto never fires on a PRUNE from a tree in
+the support, since the two leaves it merges already meet the threshold. In
+bartz, \texttt{Forest.affluence\_tree} is the mask of $G(T)$,
+\texttt{Moves.lrt\_affluent} holds its would-be entries at
+$\eta_L, \eta_R, \eta$ after the move, and
+\texttt{accept\_moves\_parallel\_stage} in \texttt{mcmcstep/\_step.py}
+applies the veto by clearing \texttt{Moves.allowed}.
+
 \paragraph{Combined.}
 Multiplying \eqref{eq:mv-prior-ratio-grow} and
 \eqref{eq:mv-trans-ratio-grow}, the rule factors $s_v / e_\eta$ and
@@ -848,7 +887,9 @@ they cancel out''), and \texttt{complete\_ratio} in
 \texttt{mcmcstep/\_step.py} multiplies in $P_{\mathrm{prune}}(T')$ and the
 two prior factors. The count $|G(T)|$ (\texttt{Moves.num\_growable}) enters
 only through $P_{\mathrm{prune}}(T')$, which is $1/2$ iff $T'$ has a growable
-leaf.
+leaf; \texttt{complete\_ratio} checks this with the count-aware
+\texttt{Moves.lrt\_affluent} for the children and \texttt{num\_growable}
+for the other leaves.
 
 \subsection{The PRUNE move}
 \label{sec:mv-prune}
@@ -1265,12 +1306,21 @@ variable uniformly at random.
 			                  $\mLamm$.
 			            \item \texttt{Forest.p\_propose\_grow} is the leaf
 			                  weight $w$ of \S\ref{sec:mv-grow}.
+			            \item \texttt{Forest.min\_points\_per\_decision\_node}
+			                  and \texttt{min\_points\_per\_leaf} are
+			                  $\nmindn$ and $\nminleaf$ of
+			                  \S\ref{sec:mv-tree-prior};
+			                  \texttt{Forest.affluence\_tree} is the mask of
+			                  $G(T)$. \texttt{Bart} sets $\nmindn = 10$, and
+			                  \texttt{gbart} adds $\nminleaf = 5$.
 			            \item \texttt{Forest.prec\_tree} holds $\mN_\ell$
 			                  (its scalar reduction $\sum_{i \in I_\ell}
 			                  a_i^2$ in the \texttt{\_mv} and \texttt{\_uv}
-			                  paths); when \texttt{State.prec\_scale} is
-			                  unset, \texttt{Forest.count\_tree} holds
-			                  $n_\ell$ in its place.
+			                  paths). \texttt{Forest.count\_tree} holds
+			                  $n_\ell$ when a count threshold is set or
+			                  \texttt{State.prec\_scale} is unset, in which
+			                  case it also stands in for
+			                  \texttt{prec\_tree}.
 			            \item \texttt{Forest.log\_s} is $\log \vs$ up to a
 			                  constant, \texttt{Forest.theta} is $\theta$,
 			                  and \texttt{Forest.a}, \texttt{b},
@@ -1297,7 +1347,11 @@ variable uniformly at random.
 		            \begin{itemize}
 			            \item Trees:
 			                  \begin{itemize}
-				                  \item \texttt{complete\_ratio} finishes
+				                  \item \texttt{accept\_moves\_parallel\_stage}
+					                        counts the points in
+					                        $\eta_L, \eta_R$ and vetoes the
+					                        move under $\nminleaf$;
+					                  \item \texttt{complete\_ratio} finishes
 				                        \eqref{eq:mv-nonlk-grow};
 				                  \item \texttt{sum\_resid} accumulates
 				                        $S_\ell$ and \texttt{compute\_B}

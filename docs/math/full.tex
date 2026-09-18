@@ -564,8 +564,10 @@ $\vB_\ell$ is formed by \texttt{compute\_B} from the per-leaf sum of
 $\tilde\mA_i \odot (\Ind_k\vr_i^\top)$ returned by \texttt{sum\_resid}. When
 $\va_i \equiv \Ind_k$ (or $\va_i = a_i\Ind_k$ with a scalar scale per
 datapoint), $\mP_\ell = n_\ell \mLam$ (resp.\ $\sum_{i\in I_\ell} a_i^2 \mLam$)
-and the cheaper \texttt{\_precompute\_leaf\_terms\_mv} is used instead, with
-the count from \texttt{Forest.count\_tree}.
+and the cheaper \texttt{\_precompute\_leaf\_terms\_mv} is used instead. The
+scalar per-leaf sum is still read from \texttt{Forest.prec\_tree}, except when
+\texttt{State.prec\_scale} is unset (all $\va_i \equiv \Ind_k$), in which case
+the count in \texttt{Forest.count\_tree} is used in its place.
 
 %-----------------------------------------------------------------------------
 \section{Marginal density with leaves integrated out}
@@ -1263,10 +1265,12 @@ variable uniformly at random.
 			                  $\mLamm$.
 			            \item \texttt{Forest.p\_propose\_grow} is the leaf
 			                  weight $w$ of \S\ref{sec:mv-grow}.
-			            \item \texttt{Forest.prec\_tree} holds $\mN_\ell$;
-			                  in the \texttt{\_mv} and \texttt{\_uv} paths
-			                  \texttt{Forest.count\_tree} holds $n_\ell$ in
-			                  its place.
+			            \item \texttt{Forest.prec\_tree} holds $\mN_\ell$
+			                  (its scalar reduction $\sum_{i \in I_\ell}
+			                  a_i^2$ in the \texttt{\_mv} and \texttt{\_uv}
+			                  paths); when \texttt{State.prec\_scale} is
+			                  unset, \texttt{Forest.count\_tree} holds
+			                  $n_\ell$ in its place.
 			            \item \texttt{Forest.log\_s} is $\log \vs$ up to a
 			                  constant, \texttt{Forest.theta} is $\theta$,
 			                  and \texttt{Forest.a}, \texttt{b},

@@ -1017,8 +1017,11 @@ power of $|\mLam|$, so even the likelihood \eqref{eq:mv-lik-diag} would not
 be conjugate to the Wishart prior for a dense $\mLam$, and the actual
 marginal likelihood \eqref{eq:mv-lik-obs} involves the Schur complements
 $[(\mLam^{-1})_{O_iO_i}]^{-1}$ on top of that. For $k = 1$, (i) and (ii)
-coincide, and give the univariate update of \S\ref{sec:sigma-update} with
-$n$ replaced by the number of observed outcomes.
+coincide: $\lambda = 1/\sigsq$ has a $\mathrm{Gamma}(\nu/2, \psi/2)$ prior,
+i.e.\ $\sigsq \sim \IG(\nu/2, \psi/2)$, and the update is
+$\sigsq \mid \cdots \sim \IG\bigl((\nu + n)/2, (\psi + \sum_i a_i^2
+	\veps_i^2)/2\bigr)$, with $n$ replaced by the number of observed
+outcomes.
 
 Note that the heteroskedasticity is handled \emph{exactly} by the residual
 rescaling $\bm{\veps}_i \mapsto \va_i \odot \bm{\veps}_i$: no auxiliary
@@ -1172,85 +1175,140 @@ $1000$ equal bins of $(0, 1)$, then sets $\theta$.
 bartz enables these two updates only from step
 \texttt{StepConfig.sparse\_on\_at} onwards (by default, half of the burn-in),
 keeping $\vs$ and $\theta$ at their initial values before; by default the
-initial $\vs$ is uniform, so the early sampler is the uniform-rule model of
-Chapter~\ref{ch:vanilla}.
+initial $\vs$ is uniform, $s_v = 1/p$, so the early sampler draws the split
+variable uniformly at random.
 
 %-----------------------------------------------------------------------------
 \section{Implementation pointers}
 \label{sec:impl-full}
 
-Bartz implements this chapter in \texttt{src/bartz/mcmcstep}. The form of
-$\mLam$ is selected by \texttt{mcmcstep.init} from its arguments: the dense
-form \eqref{eq:mv-iw-prior} (a \texttt{Wishart} prior) when
-\texttt{outcome\_type} is continuous for all components and \texttt{missing}
-is at most a per-datapoint mask, the diagonal form \eqref{eq:mv-gamma-prior}
-(a \texttt{DiagWishart} prior) when some component is binary or
-\texttt{missing} is a $k \times n$ mask; when all components are binary,
-$\mLam$ is the identity with no prior (a \texttt{Wishart} with
-\texttt{nu} $=$ \texttt{rate} $=$ \texttt{None}). The per-component scales
-$1/\va_i$ are a $k \times n$ \texttt{error\_scale}, and a $k \times n$
-\texttt{missing} mask sets the corresponding $a_{i,j} = 0$. The relevant
-files are:
 \begin{description}
-	\item[\texttt{\_state.py}] The \texttt{State} and \texttt{Forest} classes
-	      (state and priors):
+	\item[bartz] \texttt{src/bartz/mcmcstep}. Three code paths share the
+	      tree-topology code and differ in the leaf and noise model:
+	      \texttt{\_mv\_het} for the general $\mP_\ell$ of
+	      \eqref{eq:mv-precision-sum}, \texttt{\_mv} when $\mP_\ell \propto \mLam$
+	      (homoskedastic, or scalar scale per datapoint), and \texttt{\_uv}
+	      when $k = 1$, where all the arrays are stored without the $k$
+	      axes. The dispatchers named below pick the variant from the shapes
+	      and types of their arguments.
+	      \begin{description}
+		      \item[\texttt{\_state.py}] State and priors.
+		            \begin{itemize}
+			            \item \texttt{init} selects the form of $\mLam$ from
+			                  its arguments: the dense prior
+			                  \eqref{eq:mv-iw-prior} (a \texttt{Wishart}) when
+			                  \texttt{outcome\_type} is continuous for all
+			                  components and \texttt{missing} is at most a
+			                  per-datapoint mask; the diagonal prior
+			                  \eqref{eq:mv-gamma-prior} (a
+			                  \texttt{DiagWishart}) when some component is
+			                  binary or \texttt{missing} is a $k \times n$
+			                  mask; the identity with no prior (a
+			                  \texttt{Wishart} with \texttt{nu} $=$
+			                  \texttt{rate} $=$ \texttt{None}) when all
+			                  components are binary. The per-component
+			                  scales $1/\va_i$ are a $k \times n$
+			                  \texttt{error\_scale}, and a $k \times n$
+			                  \texttt{missing} mask sets the corresponding
+			                  $a_{i,j} = 0$.
+			            \item \texttt{State.error\_cov\_inv} is $\mLam$
+			                  with its prior: for a \texttt{Wishart},
+			                  \texttt{nu} $= \nu$ and \texttt{rate} $= \Psi$;
+			                  for a \texttt{DiagWishart},
+			                  $\nu_j = \texttt{nu} - k + 1$ and
+			                  $\psi_j = \texttt{rate}_{jj}$ as in
+			                  \eqref{eq:mv-gamma-match}, with
+			                  $\texttt{rate}_{jj} = 0$ for the fixed binary
+			                  components; for $k = 1$ it is the scalar
+			                  $\lambda = 1/\sigsq$.
+			            \item \texttt{State.y} is $\vy_i$; \texttt{State.z}
+			                  holds the binary rows $z_{i,j}$, $j \in \setB$,
+			                  of $\vyt_i$, at the indices
+			                  \texttt{State.binary\_indices};
+			                  \texttt{State.resid} is $\vyt_i - f(\vx_i)$.
+			            \item \texttt{State.inv\_sdev\_scale} is $\va_i$
+			                  and \texttt{State.prec\_scale} is
+			                  $\tilde\mA_i$ (both stored up to a
+			                  power-of-two unit).
+			            \item \texttt{Forest.leaf\_tree} holds $\vmu_\ell$
+			                  and \texttt{Forest.leaf\_prior\_cov\_inv} is
+			                  $\mLamm$.
+			            \item \texttt{Forest.prec\_tree} holds $\mN_\ell$;
+			                  in the \texttt{\_mv} and \texttt{\_uv} paths
+			                  \texttt{Forest.count\_tree} holds $n_\ell$ in
+			                  its place.
+			            \item \texttt{Forest.log\_s} is $\log \vs$ up to a
+			                  constant, \texttt{Forest.theta} is $\theta$,
+			                  and \texttt{Forest.a}, \texttt{b},
+			                  \texttt{rho} are $a_\theta, b_\theta, \rho$.
+			            \item \texttt{StepConfig.sparse\_on\_at} and
+			                  \texttt{StepConfig.augment} select the
+			                  schedule and the exact update of
+			                  \S\ref{sec:mv-sparse}.
+		            \end{itemize}
+		      \item[\texttt{\_moves.py}] Tree topology, independent of the
+		            leaf model.
+		            \begin{itemize}
+			            \item \texttt{propose\_moves} draws the GROW/PRUNE
+			                  proposals of \S\ref{sec:mv-grow}--\ref{sec:mv-prune};
+			                  \texttt{choose\_variable} draws the split
+			                  variable from \eqref{eq:mv-var-prior}.
+			            \item \texttt{compute\_partial\_ratio} starts the
+			                  non-likelihood ratio \eqref{eq:mv-nonlk-grow}.
+		            \end{itemize}
+		      \item[\texttt{\_step.py}] The Gibbs sweep, leaf model, and
+		            noise model. \texttt{step} updates in order the trees,
+		            the latent outcomes, the error precision, and the
+		            variable selection parameters.
+		            \begin{itemize}
+			            \item Trees:
+			                  \begin{itemize}
+				                  \item \texttt{complete\_ratio} finishes
+				                        \eqref{eq:mv-nonlk-grow};
+				                  \item \texttt{sum\_resid} accumulates
+				                        $S_\ell$ and \texttt{compute\_B}
+				                        forms $\vB_\ell$;
+				                  \item \texttt{precompute\_leaf\_terms}
+				                        computes \eqref{eq:mv-leaf-fc};
+				                  \item \texttt{precompute\_likelihood\_terms}
+				                        and \texttt{compute\_likelihood\_ratio}
+				                        compute \eqref{eq:mv-lkratio-grow}.
+			                  \end{itemize}
+			            \item Latent outcomes: \texttt{step\_z} draws from
+			                  \eqref{eq:mv-z-fc}.
+			            \item Error precision: \texttt{step\_error\_cov\_inv}
+			                  dispatches on the type of
+			                  \texttt{State.error\_cov\_inv} to
+			                  \begin{itemize}
+				                  \item \texttt{\_step\_error\_cov\_inv\_mv},
+				                        which draws from
+				                        \eqref{eq:mv-Sigma-fc} by
+				                        \texttt{\_sample\_wishart\_bartlett};
+				                  \item \texttt{\_step\_error\_cov\_inv\_diag},
+				                        which draws from
+				                        \eqref{eq:mv-Sigma-fc-diag}, and
+				                        for $k = 1$ is the univariate
+				                        inverse-gamma update.
+			                  \end{itemize}
+			            \item Variable selection: \texttt{step\_s} and
+			                  \texttt{sample\_s\_augmentation} draw from
+			                  \eqref{eq:mv-s-fc-aug}, \texttt{step\_theta}
+			                  from \eqref{eq:mv-theta-fc}.
+		            \end{itemize}
+	      \end{description}
+	\item[stochtree] Implements the univariate homoskedastic case with
+	      uniform split-variable prior.
 	      \begin{itemize}
-		      \item \texttt{State.error\_cov\_inv} is $\mLam$ with its
-		            prior: for a \texttt{Wishart}, \texttt{nu} $= \nu$ and
-		            \texttt{rate} $= \Psi$; for a \texttt{DiagWishart},
-		            $\nu_j = \texttt{nu} - k + 1$ and $\psi_j =
-			            \texttt{rate}_{jj}$ as in \eqref{eq:mv-gamma-match},
-		            with $\texttt{rate}_{jj} = 0$ for the fixed binary
-		            components;
-		      \item \texttt{State.y} is $\vy_i$; \texttt{State.z} holds the
-		            binary rows $z_{i,j}$, $j \in \setB$, of $\vyt_i$, at the
-		            indices \texttt{State.binary\_indices}; the residuals
-		            \texttt{State.resid} are $\vyt_i - f(\vx_i)$;
-		      \item \texttt{Forest.leaf\_prior\_cov\_inv} is $\mLamm$;
-		      \item \texttt{State.inv\_sdev\_scale} is $\va_i$ and
-		            \texttt{State.prec\_scale} is $\tilde\mA_i$ (both stored
-		            up to a power-of-two unit);
-		      \item \texttt{Forest.prec\_tree} holds $\mN_\ell$;
-		      \item \texttt{Forest.log\_s} is $\log \vs$ up to a constant,
-		            \texttt{Forest.theta} is $\theta$, and
-		            \texttt{Forest.a}, \texttt{b}, \texttt{rho} are
-		            $a_\theta, b_\theta, \rho$;
-		      \item \texttt{StepConfig.sparse\_on\_at} and
-		            \texttt{StepConfig.augment} select the schedule and the
-		            exact update of \S\ref{sec:mv-sparse}.
+		      \item \texttt{include/stochtree/leaf\_model.h}: closed-form
+		            derivations in the doxygen header.
+		      \item \texttt{src/leaf\_model.cpp}:
+		            \texttt{GaussianConstantLeafModel::SplitLogMarginalLikelihood}
+		            and \texttt{NoSplitLogMarginalLikelihood} are the two
+		            sides of \eqref{eq:mv-lkratio-grow};
+		            \texttt{PosteriorParameterMean},
+		            \texttt{PosteriorParameterVariance}, and
+		            \texttt{SampleLeafParameters} implement
+		            \eqref{eq:mv-leaf-fc}.
+		      \item \texttt{src/sampler.cpp}: acceptance / rejection logic.
 	      \end{itemize}
-	\item[\texttt{\_moves.py}] GROW/PRUNE proposals and
-	      \texttt{compute\_partial\_ratio}. These implement
-	      \S\ref{sec:mv-grow}--\ref{sec:mv-prune} and do not depend on the
-	      leaf model; \texttt{choose\_variable} draws the split variable
-	      from \eqref{eq:mv-var-prior}.
-	\item[\texttt{\_step.py}] The Gibbs sweep and the leaf and noise model.
-	      \texttt{step} updates in order the trees, the latent outcomes, the
-	      error precision, and the variable selection parameters:
-	      \begin{itemize}
-		      \item \texttt{complete\_ratio} finishes \eqref{eq:mv-nonlk-grow};
-		      \item \texttt{sum\_resid} accumulates $S_\ell$ and
-		            \texttt{compute\_B} forms $\vB_\ell$;
-		      \item \texttt{\_precompute\_leaf\_terms\_mv\_het} computes
-		            \eqref{eq:mv-leaf-fc};
-		      \item \texttt{\_precompute\_likelihood\_terms\_mv\_het} and
-		            \texttt{\_compute\_likelihood\_ratio\_mv\_het} compute
-		            \eqref{eq:mv-lkratio-grow};
-		      \item \texttt{step\_z} draws from \eqref{eq:mv-z-fc};
-		      \item \texttt{\_step\_error\_cov\_inv\_mv} and
-		            \texttt{\_sample\_wishart\_bartlett} draw from
-		            \eqref{eq:mv-Sigma-fc};
-		      \item \texttt{\_step\_error\_cov\_inv\_diag} draws from
-		            \eqref{eq:mv-Sigma-fc-diag};
-		      \item \texttt{step\_s} and \texttt{sample\_s\_augmentation}
-		            draw from \eqref{eq:mv-s-fc-aug}, and
-		            \texttt{step\_theta} from \eqref{eq:mv-theta-fc}.
-	      \end{itemize}
-	      When $\mP_\ell \propto \mLam$ (homoskedastic, or scalar scale per
-	      datapoint) the same steps are dispatched to the cheaper
-	      \texttt{\_mv} variants of these functions, with $n_\ell$ from
-	      \texttt{Forest.count\_tree}.
 \end{description}
-The tree-topology parts (tree prior, proposal kernel, non-likelihood ratio
-\eqref{eq:mv-nonlk-grow}) are shared verbatim with the univariate code of
-Chapter~\ref{ch:vanilla}.

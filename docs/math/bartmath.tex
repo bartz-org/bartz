@@ -2,10 +2,11 @@
 % A self-contained derivation of the math of BART, as a development
 % reference: the general model comes first, the vanilla model is derived
 % from it as a special case.
-% Chapter 1 (full.tex):    multivariate continuous outcomes with
-%            heteroskedastic errors of precision A_i Lambda A_i, leaf prior
-%            precision Lambda_mu, Wishart prior on Lambda, Dirichlet prior on
-%            the split variable with Beta hyperprior on its concentration.
+% Chapter 1 (full.tex):    multivariate continuous or binary (probit)
+%            outcomes with heteroskedastic errors of precision A_i Lambda A_i,
+%            leaf prior precision Lambda_mu, Wishart prior on Lambda (or
+%            independent gammas when it is diagonal), Dirichlet prior on the
+%            split variable with Beta hyperprior on its concentration.
 % Chapter 2 (vanilla.tex): univariate continuous, homoskedastic, uniform
 %            split-variable prior, obtained by substitution into Chapter 1.
 
@@ -43,6 +44,9 @@
 \newcommand{\vM}{\mathbf{M}}
 \newcommand{\vB}{\mathbf{B}}
 \newcommand{\vs}{\mathbf{s}}
+\newcommand{\vyt}{\tilde{\mathbf{y}}}
+\newcommand{\setB}{\mathcal{B}}
+\newcommand{\setC}{\mathcal{C}}
 \newcommand{\Dir}{\mathrm{Dirichlet}}
 \newcommand{\Betad}{\mathrm{Beta}}
 \newcommand{\Expd}{\mathrm{Exp}}
@@ -77,8 +81,7 @@
 \begin{abstract}
    This a reference for the implementation of BART in \texttt{bartz}.
    Chapter~\ref{ch:full} is a self-contained model definition and MCMC
-   derivation for a generalized version of BART. Compared to bartz, it
-   currently lacks probit outcomes.
+   derivation for a generalized version of BART.
    Chapter~\ref{ch:vanilla} shows the original vanilla BART model as a special
    case of the generalized one.
 \end{abstract}

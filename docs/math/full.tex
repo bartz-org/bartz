@@ -5,14 +5,18 @@
 This chapter derives, from scratch, every step of the BART sampler for the
 most general model treated in this document:
 \begin{itemize}
-	\item each outcome $\vy_i$ is a $k$-vector;
+	\item each outcome $\vy_i$ is a $k$-vector, whose components are each
+	      either continuous or binary; binary components are modelled with a
+	      probit link, through a latent Gaussian outcome;
 	\item each leaf parameter $\vmu_\ell$ is a $k$-vector, with a centred
 	      multivariate-Gaussian prior of precision $\mLamm$;
-	\item the noise on $\vy_i$ has precision $\mA_i\,\mLam\,\mA_i$ where
-	      $\mA_i = \diag\va_i$ is a fixed (known) diagonal matrix of
+	\item the noise on the (latent) outcome has precision $\mA_i \mLam \mA_i$
+	      where $\mA_i = \diag\va_i$ is a fixed (known) diagonal matrix of
 	      nonnegative datapoint-specific precision scales, and $\mLam$ is a
 	      global $k \times k$ error precision;
-	\item $\mLam$ has a Wishart conjugate prior;
+	\item $\mLam$ has a Wishart conjugate prior, or, when it is restricted to
+	      be diagonal, independent gamma priors on its entries, with the
+	      entries of the binary components fixed;
 	\item trees follow the Chipman--George--McCulloch (CGM) prior and are
 	      updated by GROW/PRUNE moves only;
 	\item the split variable of each decision rule is drawn from a
@@ -22,20 +26,24 @@ most general model treated in this document:
 Working in the multivariate setting it is more convenient to deal with
 precision matrices than with covariance matrices, so throughout this chapter
 $\mLam$ and $\mLamm$ are the primary parameters: all Gaussian distributions
-are written in precision form $\N_k(\cdot,\, \mLam^{-1})$ and the conjugate
+are written in precision form $\N_k(\cdot, \mLam^{-1})$ and the conjugate
 prior on $\mLam$ is a Wishart (rather than an inverse-Wishart on the
 covariance $\mLam^{-1}$). Using precision scales $\va_i$ in place of weights
 also relaxes positivity: $a_{i,j} = 0$ is admissible and corresponds to a
 missing $j$-th component of $\vy_i$ (infinite noise on that coordinate).
-Following bartz, when some components can be missing, $\mLam$ is restricted
-to be diagonal (\S\ref{sec:mv-model}).
+Following bartz, when some component can be missing or is binary, $\mLam$ is
+restricted to be diagonal (\S\ref{sec:mv-model}).
 
 %-----------------------------------------------------------------------------
 \section{Notation and data}
 \label{sec:mv-notation}
 
 We observe $n$ pairs $(\vx_i, \vy_i)_{i=1}^n$ with $\vx_i \in \R^p$ and
-$\vy_i \in \R^k$. Stack the responses as rows into the matrix
+$\vy_i \in \R^k$. Each component $j$ of the outcome has a fixed type,
+continuous or binary; let $\setB \subseteq \{1, \dots, k\}$ be the set of
+binary components and $\setC$ its complement, the continuous ones, so that
+$y_{i,j} \in \R$ for $j \in \setC$ and $y_{i,j} \in \{0, 1\}$ for
+$j \in \setB$. Stack the responses as rows into the matrix
 $Y \in \R^{n \times k}$ and the covariates row-by-row into the design matrix
 $X = (\vx_1, \dots, \vx_n)^\top \in \R^{n \times p}$. In addition, each
 datapoint comes with a vector of nonnegative precision scales
@@ -50,18 +58,18 @@ the root. We write $L(T)$ for the set of leaves of $T$ and
 $|L(T)|$ for their number. To each tree we attach a vector-valued leaf array
 \begin{equation}
 	\label{eq:mv-leaf-array}
-	M = \{\, \vmu_\ell : \ell \in L(T) \,\} \subset \R^k,
+	M = \{ \vmu_\ell : \ell \in L(T) \} \subset \R^k,
 \end{equation}
 and define the corresponding $k$-dimensional regression function
 \begin{equation}
 	\label{eq:mv-g}
-	g(\vx; T, M) = \sum_{\ell \in L(T)} \vmu_\ell\, \Ind[\ell(\vx; T) = \ell]
+	g(\vx; T, M) = \sum_{\ell \in L(T)} \vmu_\ell \Ind[\ell(\vx; T) = \ell]
 	\in \R^k.
 \end{equation}
 A BART model uses a sum of $m$ such trees,
 \begin{equation}
 	\label{eq:mv-sum-of-trees}
-	f(\vx) = \sum_{t=1}^m g(\vx;\, T_t, M_t) \in \R^k.
+	f(\vx) = \sum_{t=1}^m g(\vx; T_t, M_t) \in \R^k.
 \end{equation}
 
 %-----------------------------------------------------------------------------
@@ -70,22 +78,45 @@ A BART model uses a sum of $m$ such trees,
 
 \subsection{Conditional outcome distribution}
 
-Conditional on the trees and the noise precision, the outcomes are
+Each binary component is modelled through a latent continuous outcome
+$z_{i,j}$ that is observed only through its sign, the probit data
+augmentation of Albert and Chib (1993). Define the \emph{working outcome}
+$\vyt_i \in \R^k$ by
+\begin{equation}
+	\label{eq:mv-working}
+	\tilde y_{i,j} =
+	\begin{cases}
+		y_{i,j} & j \in \setC, \\
+		z_{i,j} & j \in \setB,
+	\end{cases}
+\end{equation}
+so that $\vyt_i = \vy_i$ when all components are continuous. Conditional on
+the trees and the noise precision, the working outcomes are
 \begin{equation}
 	\label{eq:mv-lik}
-	\vy_i \mid T_{1:m}, M_{1:m}, \mLam \stackrel{\text{ind}}{\sim}
-	\N_k\!\left(f(\vx_i),\; (\mA_i\,\mLam\,\mA_i)^{-1}\right),
-	\qquad i = 1,\dots,n.
+	\vyt_i \mid T_{1:m}, M_{1:m}, \mLam \stackrel{\text{ind}}{\sim}
+	\N_k\left(f(\vx_i), (\mA_i \mLam \mA_i)^{-1}\right),
+	\qquad
+	y_{i,j} = \Ind[z_{i,j} > 0], \quad j \in \setB,
 \end{equation}
-Equivalently, in terms of rescaled residuals,
-$\va_i \odot (\vy_i - f(\vx_i)) \sim \N_k(\mathbf{0}, \mLam^{-1})$. We will
-use this form repeatedly.
+for $i = 1, \dots, n$. Equivalently, in terms of rescaled residuals,
+$\va_i \odot (\vyt_i - f(\vx_i)) \sim \N_k(\mathbf{0}, \mLam^{-1})$. We will
+use this form repeatedly. For a binary component, since $\mLam$ is diagonal
+with $\Lambda_{jj} = 1$ for $j \in \setB$ (\S\ref{sec:mv-Lam-prior}), the
+link is
+\begin{equation}
+	\label{eq:mv-probit}
+	P(y_{i,j} = 1 \mid T_{1:m}, M_{1:m}) = \Phi\left(a_{i,j} f_j(\vx_i)\right),
+	\qquad j \in \setB,
+\end{equation}
+with $\Phi$ the standard normal distribution function: the precision scale
+acts as the inverse scale of the latent outcome.
 
-Viewed as a function of the parameters $(T_{1:m}, M_{1:m}, \mLam)$ with
-$Y$ fixed, the product over $i$ is the \emph{likelihood} of the model. We
-will use the word ``likelihood'' only in this strict sense, and only in
-contexts where the parameters (or some marginal thereof) are the free
-variables.
+Viewed as a function of the parameters $(T_{1:m}, M_{1:m}, \mLam)$ and of the
+latent outcomes with $Y$ fixed, the product over $i$ of \eqref{eq:mv-lik}
+(including the indicators) is the \emph{likelihood} of the model. We will use
+the word ``likelihood'' only in this strict sense, and only in contexts where
+the parameters (or some marginal thereof) are the free variables.
 
 \paragraph{Missing components.}
 
@@ -99,19 +130,18 @@ its other components. Let
 	k_i \coloneqq |O_i|,
 \end{equation}
 be the observed components of $\vy_i$ and their number, and $\bar O_i$ the
-missing ones. Marginalising \eqref{eq:mv-lik} over $\vy_{i,\bar O_i}$, the
-covariance of $\vy_{i,O_i}$ is the $O_i$ block of
+missing ones. Marginalising \eqref{eq:mv-lik} over $\vyt_{i,\bar O_i}$, the
+covariance of $\vyt_{i,O_i}$ is the $O_i$ block of
 $\mA_i^{-1}\mLam^{-1}\mA_i^{-1}$, so
-\begin{equation}
+\begin{align}
 	\label{eq:mv-lik-obs}
-	\begin{gathered}
-		\vy_{i,O_i} \mid T_{1:m}, M_{1:m}, \mLam \stackrel{\text{ind}}{\sim}
-		\N_{k_i}\left(f(\vx_i)_{O_i},
-		\left(\mA_{i,O_i}\left[(\mLam^{-1})_{O_iO_i}\right]^{-1}\mA_{i,O_i}\right)^{-1}\right),
-		\\
-		\mA_{i,O_i} \coloneqq \diag\va_{i,O_i},
-	\end{gathered}
-\end{equation}
+	\vyt_{i,O_i} \mid T_{1:m}, M_{1:m}, \mLam & \stackrel{\text{ind}}{\sim}
+	\N_{k_i}\left(f(\vx_i)_{O_i},
+	\left(\mA_{i,O_i}\left[(\mLam^{-1})_{O_iO_i}\right]^{-1}\mA_{i,O_i}\right)^{-1}\right),
+	\\
+	\mA_{i,O_i}                              & \coloneqq \diag\va_{i,O_i},
+	\notag
+\end{align}
 where $[(\mLam^{-1})_{O_iO_i}]^{-1} = \mLam_{O_iO_i} -
 	\mLam_{O_i\bar O_i}\mLam_{\bar O_i\bar O_i}^{-1}\mLam_{\bar O_iO_i}$ is the
 Schur complement of $\mLam_{\bar O_i\bar O_i}$ in $\mLam$. This does not
@@ -122,24 +152,27 @@ $i$ in a way that does not factor as $\mLam$ times a data-only matrix, which
 would break the sufficient statistics of \S\ref{sec:mv-partial-resid} and the
 conjugacy of \S\ref{sec:mv-Sigma}. For this reason, following bartz,
 \emph{whenever some component can be missing we restrict $\mLam$ to be
-	diagonal}. Then $[(\mLam^{-1})_{O_iO_i}]^{-1} = \mLam_{O_iO_i}$, and
-\eqref{eq:mv-lik-obs} becomes the Gaussian whose precision is
-$\mA_i\mLam\mA_i$ restricted to the observed rows and columns,
-\begin{equation}
+	diagonal}; the binary components require the same restriction, for a
+different reason explained in \S\ref{sec:mv-Lam-prior}. Then
+$[(\mLam^{-1})_{O_iO_i}]^{-1} = \mLam_{O_iO_i}$, and \eqref{eq:mv-lik-obs}
+becomes the Gaussian whose precision is $\mA_i\mLam\mA_i$ restricted to the
+observed rows and columns,
+\begin{align}
 	\label{eq:mv-lik-diag}
-	\begin{gathered}
-		\vy_{i,O_i} \mid T_{1:m}, M_{1:m}, \mLam \stackrel{\text{ind}}{\sim}
-		\N_{k_i}\left(f(\vx_i)_{O_i},
-		[\mA_i \mLam \mA_i]_{O_iO_i}^{-1}\right),
-		\\
-		[\va_i \odot (\vy_i - f(\vx_i))]_{O_i} \sim
-		\N_{k_i}(\mathbf{0}, \mLam_{O_iO_i}^{-1}).
-	\end{gathered}
-\end{equation}
-The missing entries of $\vy_i$ may be set to any value, since they are
-always multiplied by $a_{i,j} = 0$. In what follows, formulas written with
-the full $k \times k$ precision $\mA_i\mLam\mA_i$, whose missing rows and
-columns vanish, are to be read as \eqref{eq:mv-lik-diag}.
+	\vyt_{i,O_i} \mid T_{1:m}, M_{1:m}, \mLam & \stackrel{\text{ind}}{\sim}
+	\N_{k_i}\left(f(\vx_i)_{O_i},
+	[\mA_i \mLam \mA_i]_{O_iO_i}^{-1}\right),
+	\\
+	[\va_i \odot (\vyt_i - f(\vx_i))]_{O_i}  & \sim
+	\N_{k_i}(\mathbf{0}, \mLam_{O_iO_i}^{-1}).
+	\notag
+\end{align}
+The missing entries of $\vyt_i$ may be set to any value, since they are
+always multiplied by $a_{i,j} = 0$; in particular the latent outcome of a
+missing binary component is unconstrained by the data and drops out of the
+model. In what follows, formulas written with the full $k \times k$
+precision $\mA_i\mLam\mA_i$, whose missing rows and columns vanish, are to be
+read as \eqref{eq:mv-lik-diag}.
 
 Many formulas written without taking into account that $a$ can be 0 continue to
 be correct in the missing data case, with the null components of $\mathbf a_i$
@@ -157,7 +190,7 @@ $0$) is, conditionally on existing, internal (i.e., nonterminal) with
 probability
 \begin{equation}
 	\label{eq:pnt}
-	p_{\mathrm{NT}}(d) = \alpha\,(1 + d)^{-\beta},
+	p_{\mathrm{NT}}(d) = \alpha (1 + d)^{-\beta},
 	\qquad \alpha \in (0,1),\ \beta > 0,
 \end{equation}
 and otherwise a leaf. The implementation truncates the recursion at a maximum
@@ -193,7 +226,7 @@ values $X_{\cdot,v}$ observed in the training set). ``Compatible'' means
 that the cutpoint lies strictly between the inherited lower and upper bounds
 imposed by the ancestor splits on variable $v$ along the path to the root.
 In \texttt{bartz} the allowed cutpoints are pre-binned and live in the
-integer range $[1,\, \texttt{max\_split}_v]$ (see the
+integer range $[1, \texttt{max\_split}_v]$ (see the
 \texttt{bartz.prepcovars} module). We assume every variable has at least one
 cutpoint globally, so $E(\eta)$ only shrinks because of ancestor splits.
 bartz allows variables with none (\texttt{max\_split}$_v = 0$) by
@@ -211,7 +244,7 @@ The split-variable probabilities follow the sparsity-inducing prior of
 Linero (2018),
 \begin{equation}
 	\label{eq:mv-s-prior}
-	\vs \mid \theta \sim \Dir\!\left(\frac{\theta}{p}, \dots, \frac{\theta}{p}\right),
+	\vs \mid \theta \sim \Dir\left(\frac{\theta}{p}, \dots, \frac{\theta}{p}\right),
 \end{equation}
 shared by all trees. Small concentrations $\theta$ put most of the mass of
 $\vs$ on a few variables. The concentration is either fixed or given the
@@ -232,39 +265,92 @@ Gaussian in precision form:
 \begin{equation}
 	\label{eq:mv-leaf-prior}
 	\vmu_\ell \mid T_t \stackrel{\text{i.i.d.}}{\sim}
-	\N_k\!\left(\mathbf{0},\, \mLamm^{-1}\right),
+	\N_k\left(\mathbf{0}, \mLamm^{-1}\right),
 	\qquad \ell \in L(T_t).
 \end{equation}
 The precision $\mLamm$ is calibrated so that the prior on the sum of trees,
-$f(\vx) \sim \N_k(\mathbf{0}, m\,\mLamm^{-1})$, has user-controlled
+$f(\vx) \sim \N_k(\mathbf{0}, m \mLamm^{-1})$, has user-controlled
 variability.
 
 \subsection{Error precision prior}
+\label{sec:mv-Lam-prior}
 
-The global noise precision follows the conjugate Wishart prior
+The global noise precision $\mLam$ takes one of two forms.
+
+\paragraph{Dense.}
+When all components are continuous ($\setB = \emptyset$) and none can be
+missing, $\mLam$ follows the conjugate Wishart prior
 \begin{equation}
 	\label{eq:mv-iw-prior}
-	\mLam \sim \W(\nu,\, \Psi),
+	\mLam \sim \W(\nu, \Psi),
 \end{equation}
 parametrised so that $\Psi \in \R^{k \times k}$ is the prior inverse-scale
 (rate) matrix and $\nu > k - 1$ the degrees of freedom; the prior density is
-proportional to $|\mLam|^{(\nu - k - 1)/2}\exp\!\left(-\frac{1}{2}
-	\tr(\Psi\,\mLam)\right)$.
+proportional to $|\mLam|^{(\nu - k - 1)/2}\exp\left(-\frac{1}{2}
+	\tr(\Psi \mLam)\right)$.
+
+\paragraph{Diagonal.}
+When some component is binary or can be missing,
+$\mLam = \diag(\lambda_1, \dots, \lambda_k)$ with independent entries,
+\begin{equation}
+	\label{eq:mv-gamma-prior}
+	\lambda_j \sim
+	\begin{cases}
+		\Gamma\left(\dfrac{\nu_j}{2}, \dfrac{\psi_j}{2}\right) & j \in \setC, \\[2ex]
+		\delta_1                                               & j \in \setB,
+	\end{cases}
+\end{equation}
+with $\Gamma(\alpha, \beta)$ the shape--rate gamma and $\delta_1$ the point
+mass at $1$. The entries of the binary components are fixed because the
+indicator in \eqref{eq:mv-lik} is invariant under a common rescaling of
+$z_{i,j}$ and $f_j(\vx_i)$, so their scale is not identified; the unit choice
+gives the probit link \eqref{eq:mv-probit}.
+
+The two forms are calibrated to agree marginally: under \eqref{eq:mv-iw-prior}
+each variance $(\mLam^{-1})_{jj}$ is a priori
+$\IG((\nu - k + 1)/2, \Psi_{jj}/2)$, which is the prior of $1/\lambda_j$
+under \eqref{eq:mv-gamma-prior} with
+\begin{equation}
+	\label{eq:mv-gamma-match}
+	\nu_j = \nu - k + 1,
+	\qquad
+	\psi_j = \Psi_{jj}.
+\end{equation}
+For $k = 1$ and a continuous outcome the two forms coincide. This is the
+calibration used by bartz, where the user sets the degrees of freedom
+$\nu_j$ of the marginal variances (\texttt{sigma\_df}), whatever the form
+of $\mLam$.
+
+The binary components require the diagonal form for a reason unrelated to
+missingness. With a dense $\mLam$, the latent outcomes of a datapoint would be
+correlated across components: their update (\S\ref{sec:mv-z}) would become
+a draw from a multivariate truncated normal, and the off-diagonal entries of
+$\mLam$ involving binary components would need a constrained prior to be
+identified, as in multivariate probit regression. The diagonal form
+sidesteps both, and the components remain coupled only through the shared
+trees.
 
 \subsection{Bayesian network}
 \label{sec:mv-bn}
 
-Putting the pieces together, the joint density factorises as
-\begin{multline}
+Let $Z$ be the latent outcomes of the observed binary components,
+$\{z_{i,j} : j \in \setB \cap O_i\}$; those of the missing ones are dropped
+from the model along with the missing continuous components. Putting the
+pieces together, the joint density factorises as
+\begin{align}
 	\label{eq:mv-joint}
-	p(Y, T_{1:m}, M_{1:m}, \mLam, \vs, \theta)
-	= p(\theta)\, p(\vs \mid \theta)\, p(\mLam)
-	\prod_{t=1}^m p(T_t \mid \vs)\, p(M_t \mid T_t)
+	p(Y, Z, T_{1:m}, M_{1:m}, \mLam, \vs, \theta)
+	 & = p(\theta) p(\vs \mid \theta) p(\mLam)
+	\prod_{t=1}^m p(T_t \mid \vs) p(M_t \mid T_t)
 	\\
-	\cdot \prod_{i=1}^n p(\vy_i \mid T_{1:m}, M_{1:m}, \mLam),
-\end{multline}
-with $p(M_t \mid T_t) = \prod_{\ell \in L(T_t)} \N_k(\vmu_\ell;\,
-	\mathbf{0}, \mLamm^{-1})$.
+	 & \quad \cdot \prod_{i=1}^n p(\vyt_{i,O_i} \mid T_{1:m}, M_{1:m}, \mLam)
+	\prod_{j \in \setB \cap O_i} p(y_{i,j} \mid z_{i,j}),
+	\notag
+\end{align}
+with $p(M_t \mid T_t) = \prod_{\ell \in L(T_t)} \N_k(\vmu_\ell;
+	\mathbf{0}, \mLamm^{-1})$, $p(\vyt_{i,O_i} \mid \cdots)$ the Gaussian of
+\eqref{eq:mv-lik-diag} (or of \eqref{eq:mv-lik} in the dense case), and
+$p(y_{i,j} \mid z_{i,j}) = \Ind[y_{i,j} = \Ind[z_{i,j} > 0]]$.
 
 Graphically:
 \begin{center}
@@ -281,10 +367,11 @@ Graphically:
 		\node[latent, below=of sm]    (mu)    {$\vmu_\ell^{(t)}$};
 		\node[latent, below=of nu]    (S)     {$\mLam$};
 		\node[const, above=of theta]  (abrho) {$a_\theta,b_\theta,\rho$};
-		% Bottom row: data
-		\node[obs, below=1.6cm of mu] (y) {$\vy_i$};
-		\node[const, left=of y]       (x) {$\vx_i$};
-		\node[const, right=of y]      (w) {$\va_i$};
+		% Bottom rows: working outcome and data
+		\node[latent, below=1.6cm of mu] (yt) {$\vyt_i$};
+		\node[const, left=of yt]         (x)  {$\vx_i$};
+		\node[const, right=of yt]        (w)  {$\va_i$};
+		\node[obs, below=of yt]          (y)  {$\vy_i$};
 
 		\edge {abrho} {theta};
 		\edge {theta} {s};
@@ -293,21 +380,23 @@ Graphically:
 		\edge {sm}    {mu};
 		\edge {nu}    {S};
 		\edge {T}     {mu};
-		\edge {mu}    {y};
-		\edge {S}     {y};
-		\edge {x}     {y};
-		\edge {w}     {y};
-		\draw[->, >={triangle 45}] (T) to[bend right=25] (y);
+		\edge {mu}    {yt};
+		\edge {S}     {yt};
+		\edge {x}     {yt};
+		\edge {w}     {yt};
+		\edge {yt}    {y};
+		\draw[->, >={triangle 45}] (T) to[bend right=25] (yt);
 
-		\plate {leaves} {(mu)}        {$\ell \in L(T_t)$};
-		\plate {trees}  {(T)(leaves)} {$t = 1,\dots,m$};
-		\plate {data}   {(x)(y)(w)}   {$i = 1,\dots,n$};
+		\plate {leaves} {(mu)}          {$\ell \in L(T_t)$};
+		\plate {trees}  {(T)(leaves)}   {$t = 1,\dots,m$};
+		\plate {data}   {(x)(yt)(w)(y)} {$i = 1,\dots,n$};
 	\end{tikzpicture}
 \end{center}
-The dependence of $\vy_i$ on the tree variables is mediated by the assignment
+The dependence of $\vyt_i$ on the tree variables is mediated by the assignment
 $\ell(\vx_i; T_t)$, which is a deterministic function of $\vx_i$ and $T_t$.
 The precision scales $\va_i$ enter as fixed, observed inputs alongside
-$\vx_i$.
+$\vx_i$. The edge from $\vyt_i$ to $\vy_i$ is the identity on the continuous
+components and the sign on the binary ones.
 
 %-----------------------------------------------------------------------------
 \section{Single-tree decomposition and partial residuals}
@@ -318,14 +407,15 @@ at a time, holding the others fixed. Define the \emph{partial residual} for
 tree $t$ by removing every other tree's contribution:
 \begin{equation}
 	\label{eq:mv-partial-resid}
-	\vr_i^{(t)} \coloneqq \vy_i - \sum_{k \ne t} g(\vx_i;\, T_k, M_k)
+	\vr_i^{(t)} \coloneqq \vyt_i - \sum_{k \ne t} g(\vx_i; T_k, M_k)
 	\in \R^k.
 \end{equation}
-By \eqref{eq:mv-lik},
+With the latent outcomes held fixed at their current values, by
+\eqref{eq:mv-lik},
 \begin{equation}
 	\label{eq:mv-partial-lik}
 	\vr_i^{(t)} \mid T_t, M_t, \mLam \stackrel{\text{ind}}{\sim}
-	\N_k\!\left(g(\vx_i;\, T_t, M_t),\; (\mA_i\,\mLam\,\mA_i)^{-1}\right),
+	\N_k\left(g(\vx_i;  T_t, M_t),  (\mA_i \mLam \mA_i)^{-1}\right),
 \end{equation}
 restricted to the observed components as in \eqref{eq:mv-lik-diag}, so the
 conditional update of $(T_t, M_t)$ is identical to a single-tree
@@ -336,7 +426,7 @@ $\vr_i = \vr_i^{(t)}$, $T = T_t$, $M = M_t$. For each leaf $\ell \in L(T)$
 define the index set and count
 \begin{equation}
 	\label{eq:mv-Iell}
-	I_\ell = \{\, i : \ell(\vx_i; T) = \ell \,\},
+	I_\ell = \{  i : \ell(\vx_i; T) = \ell  \},
 	\qquad
 	n_\ell = |I_\ell|.
 \end{equation}
@@ -347,18 +437,18 @@ The per-datapoint precision matrix factors as a Hadamard product with an
 outer product. Define
 \begin{equation}
 	\label{eq:mv-Atilde}
-	\tilde\mA_i \;\coloneqq\; \va_i\va_i^\top \;\in\;\R^{k\times k};
+	\tilde\mA_i  \coloneqq  \va_i\va_i^\top  \in \R^{k\times k};
 \end{equation}
 then
 \begin{equation}
 	\label{eq:mv-Pi}
-	\mP_i \;\coloneqq\; \mA_i\,\mLam\,\mA_i
+	\mP_i  \coloneqq  \mA_i \mLam \mA_i
 	= \mLam \odot \tilde\mA_i
-	\;\in\;\R^{k\times k},
+	 \in \R^{k\times k},
 \end{equation}
 with $\odot$ the Hadamard (entrywise) product, since
 $[\mA_i\mLam\mA_i]_{ab} = a_{i,a}\Lambda_{ab}a_{i,b}
-	= \Lambda_{ab}\,[\tilde\mA_i]_{ab}$.
+	= \Lambda_{ab} [\tilde\mA_i]_{ab}$.
 
 Because the per-datapoint precision varies with $i$, the per-leaf sufficient
 statistics are not scalars but $k\times k$ matrices. Define the
@@ -368,23 +458,23 @@ $\mLam$-dependent posterior precision contribution and score by
 	\mP_\ell & \coloneqq \sum_{i \in I_\ell}\mP_i
 	= \sum_{i \in I_\ell}\mLam \odot \tilde\mA_i
 	= \mLam \odot \mN_\ell
-	\;\in\;\R^{k\times k},
+	 \in \R^{k\times k},
 	\\
 	\label{eq:mv-suffstats-B}
-	\vB_\ell & \coloneqq \sum_{i \in I_\ell}\mP_i\,\vr_i
-	= (\mLam \odot S_\ell)\,\Ind_k
-	\;\in\;\R^{k},
+	\vB_\ell & \coloneqq \sum_{i \in I_\ell}\mP_i \vr_i
+	= (\mLam \odot S_\ell) \Ind_k
+	 \in \R^{k},
 \end{align}
 where $\Ind_k$ is the all-ones $k$-vector and the data-only sufficient
 statistics are
 \begin{align}
 	\label{eq:mv-suffstats-N}
 	\mN_\ell & \coloneqq \sum_{i \in I_\ell}\tilde\mA_i
-	\;\in\;\R^{k\times k},
+	 \in \R^{k\times k},
 	\\
 	\label{eq:mv-suffstats-S}
-	S_\ell   & \coloneqq \sum_{i \in I_\ell}\tilde\mA_i \odot (\Ind_k\,\vr_i^\top)
-	\;\in\;\R^{k\times k}.
+	S_\ell   & \coloneqq \sum_{i \in I_\ell}\tilde\mA_i \odot (\Ind_k \vr_i^\top)
+	 \in \R^{k\times k}.
 \end{align}
 Both $\mN_\ell, S_\ell$ depend only on the data (not on $\mLam$) and
 accumulate additively across any partition of the index set. $\mN_\ell$ is
@@ -393,8 +483,8 @@ $\mLam$ only and are computable from the $O(k^2)$ data-only statistics
 $(\mN_\ell, S_\ell)$.
 
 In the homoskedastic special case $\va_i \equiv \Ind_k$,
-$\mN_\ell = n_\ell\,\Ind_k\Ind_k^\top$, the $a$-th row of $S_\ell$ equals
-$\sum_{i \in I_\ell}\vr_i^\top$, $\mP_\ell = n_\ell\,\mLam$, and
+$\mN_\ell = n_\ell \Ind_k\Ind_k^\top$, the $a$-th row of $S_\ell$ equals
+$\sum_{i \in I_\ell}\vr_i^\top$, $\mP_\ell = n_\ell \mLam$, and
 $\vB_\ell = \mLam\sum_{i \in I_\ell}\vr_i$.
 
 %-----------------------------------------------------------------------------
@@ -418,10 +508,9 @@ Gaussian--Gaussian conjugate update with heterogeneous data precisions.
 	\begin{equation}
 		\label{eq:mv-leaf-fc}
 		\vmu_\ell \mid T, \mLam, \vr_{1:n} \sim
-		\N_k\!\left(
-		\underbrace{\left(\mLamm + \mP_\ell\right)^{-1} \vB_\ell}_{=\,\hat\vmu_\ell},
-		\;
-		\underbrace{\left(\mLamm + \mP_\ell\right)^{-1}}_{=\,V_\ell}
+		\N_k\left(
+		\underbrace{\left(\mLamm + \mP_\ell\right)^{-1} \vB_\ell}_{= \hat\vmu_\ell},
+		\underbrace{\left(\mLamm + \mP_\ell\right)^{-1}}_{= V_\ell}
 		\right),
 	\end{equation}
 	independently across $\ell$.
@@ -435,12 +524,12 @@ Gaussian--Gaussian conjugate update with heterogeneous data precisions.
 		+ \log p(\vmu_\ell \mid \mLamm)                          \\
 		 & = -\frac{1}{2}\sum_{i\in I_\ell}
 		(\vr_i - \vmu_\ell)^\top \mP_i (\vr_i - \vmu_\ell)
-		-\frac{1}{2}\vmu_\ell^\top \mLamm\, \vmu_\ell + \text{const.}
+		-\frac{1}{2}\vmu_\ell^\top \mLamm  \vmu_\ell + \text{const.}
 	\end{align}
 	Expanding the quadratic form in $\vmu_\ell$,
 	\begin{equation}
 		(\vr_i - \vmu_\ell)^\top \mP_i (\vr_i - \vmu_\ell)
-		= \vr_i^\top \mP_i \vr_i - 2\,\vmu_\ell^\top \mP_i \vr_i
+		= \vr_i^\top \mP_i \vr_i - 2 \vmu_\ell^\top \mP_i \vr_i
 		+ \vmu_\ell^\top \mP_i \vmu_\ell,
 	\end{equation}
 	and summing over $i \in I_\ell$, the $\vmu_\ell$-dependent terms collect,
@@ -482,7 +571,7 @@ obtain a collapsed target on tree structure alone. Stack the residuals
 belonging to leaf $\ell$ row-by-row into the matrix
 \begin{equation}
 	\label{eq:mv-Rell}
-	\mR_\ell \coloneqq \{\,\vr_i^\top : i \in I_\ell\,\} \in \R^{n_\ell \times k}.
+	\mR_\ell \coloneqq \{ \vr_i^\top : i \in I_\ell \} \in \R^{n_\ell \times k}.
 \end{equation}
 Conditional on $T$ and $\mLam$, the blocks $\mR_\ell$ are independent across
 $\ell$ (the leaves partition the data), so the marginal density of the whole
@@ -498,11 +587,11 @@ residual set factorises over leaves.
 		\label{eq:mv-marglik-a}            \\
 		 & \quad
 		+ \frac{1}{2}\log|\mLamm|
-		- \frac{1}{2}\log\bigl|\mLamm + \mP_\ell\bigr|
+		- \frac{1}{2}\log\left|\mLamm + \mP_\ell\right|
 		\label{eq:mv-marglik-b}            \\
 		 & \quad
 		- \frac{1}{2}\sum_{i \in I_\ell} \vr_i^\top \mP_i \vr_i
-		+ \frac{1}{2}\,\vB_\ell^\top \bigl(\mLamm + \mP_\ell\bigr)^{-1}
+		+ \frac{1}{2} \vB_\ell^\top \left(\mLamm + \mP_\ell\right)^{-1}
 		\vB_\ell,
 		\label{eq:mv-marglik-c}
 	\end{align}
@@ -515,8 +604,8 @@ residual set factorises over leaves.
 	By marginalisation over $\vmu_\ell$,
 	\begin{equation}
 		p(\mR_\ell \mid T, \mLam)
-		= \int_{\R^k} p(\mR_\ell \mid \vmu_\ell, \mLam)\,
-		p(\vmu_\ell \mid \mLamm)\, d\vmu_\ell.
+		= \int_{\R^k} p(\mR_\ell \mid \vmu_\ell, \mLam)
+		p(\vmu_\ell \mid \mLamm)  d\vmu_\ell.
 	\end{equation}
 	Substituting the explicit Gaussian densities (the data factor in the
 	precision form \eqref{eq:mv-lik-diag}; its quadratic form can be taken
@@ -526,10 +615,10 @@ residual set factorises over leaves.
 		p(\mR_\ell \mid \vmu_\ell, \mLam)
 		 & = \prod_{i \in I_\ell}(2\pi)^{-k_i/2}
 		\left|[\mA_i\mLam\mA_i]_{O_iO_i}\right|^{1/2}
-		\exp\!\left(-\frac{1}{2}(\vr_i - \vmu_\ell)^\top\mP_i(\vr_i - \vmu_\ell)\right), \\
+		\exp\left(-\frac{1}{2}(\vr_i - \vmu_\ell)^\top\mP_i(\vr_i - \vmu_\ell)\right), \\
 		p(\vmu_\ell \mid \mLamm)
 		 & = (2\pi)^{-k/2}|\mLamm|^{1/2}
-		\exp\!\left(-\frac{1}{2}\vmu_\ell^\top\mLamm\vmu_\ell\right).
+		\exp\left(-\frac{1}{2}\vmu_\ell^\top\mLamm\vmu_\ell\right).
 	\end{align}
 	Expanding $(\vr_i - \vmu_\ell)^\top\mP_i(\vr_i - \vmu_\ell)
 		= \vr_i^\top\mP_i\vr_i - 2\vmu_\ell^\top\mP_i\vr_i
@@ -550,10 +639,10 @@ residual set factorises over leaves.
 	\end{equation}
 	and the Gaussian integral over $\R^k$ evaluates to
 	\begin{align}
-		\int_{\R^k}\exp\!\left(-\frac{1}{2}(\vmu_\ell - \hat\vmu_\ell)^\top
+		\int_{\R^k}\exp\left(-\frac{1}{2}(\vmu_\ell - \hat\vmu_\ell)^\top
 		V_\ell^{-1}(\vmu_\ell - \hat\vmu_\ell)\right) d\vmu_\ell
 		 & = (2\pi)^{k/2}|V_\ell|^{1/2}                        \\
-		 & = (2\pi)^{k/2}\bigl|\mLamm + \mP_\ell\bigr|^{-1/2}.
+		 & = (2\pi)^{k/2}\left|\mLamm + \mP_\ell\right|^{-1/2}.
 	\end{align}
 	Collecting all prefactors,
 	\begin{align}
@@ -561,8 +650,8 @@ residual set factorises over leaves.
 		 & = \prod_{i\in I_\ell}\left[(2\pi)^{-k_i/2}
 		\left|[\mA_i\mLam\mA_i]_{O_iO_i}\right|^{1/2}\right]
 		\cdot (2\pi)^{-k/2}|\mLamm|^{1/2}                                           \\
-		 & \quad \cdot (2\pi)^{k/2}\,\bigl|\mLamm + \mP_\ell\bigr|^{-1/2}           \\
-		 & \quad \cdot \exp\!\left(-\frac{1}{2}\sum_{i\in I_\ell}
+		 & \quad \cdot (2\pi)^{k/2} \left|\mLamm + \mP_\ell\right|^{-1/2}           \\
+		 & \quad \cdot \exp\left(-\frac{1}{2}\sum_{i\in I_\ell}
 		\vr_i^\top\mP_i\vr_i + \frac{1}{2}\vB_\ell^\top V_\ell\vB_\ell\right).
 	\end{align}
 	The $(2\pi)$ factors combine to $(2\pi)^{-\sum_{i\in I_\ell}k_i/2}$;
@@ -578,16 +667,17 @@ fixed index set is the same. In particular, when comparing a leaf $\eta$
 against its split $\eta \to (\eta_L, \eta_R)$ with $I_{\eta_L} \sqcup
 	I_{\eta_R} = I_\eta$, those terms cancel exactly, and only the
 log-determinant and quadratic-form pieces remain:
-\begin{multline}
+\begin{align}
 	\label{eq:mv-reduced-marglik}
-	\log p(\mR_\ell \mid T, \mLam) =
+	\log p(\mR_\ell \mid T, \mLam) & =
 	\underbrace{\frac{1}{2}\log|\mLamm|
-		- \frac{1}{2}\log\bigl|\mLamm + \mP_\ell\bigr|}_{\text{log-det term}}
+		- \frac{1}{2}\log\left|\mLamm + \mP_\ell\right|}_{\text{log-det term}}
 	\\
-	+ \underbrace{\frac{1}{2}\,\vB_\ell^\top\bigl(\mLamm + \mP_\ell
-		\bigr)^{-1}\vB_\ell}_{\text{quadratic term}}
+	 & \quad + \underbrace{\frac{1}{2}\vB_\ell^\top\left(\mLamm + \mP_\ell
+		\right)^{-1}\vB_\ell}_{\text{quadratic term}}
 	+ (\text{cancels in splits / prunes}).
-\end{multline}
+	\notag
+\end{align}
 In bartz these two terms are assembled in \texttt{mcmcstep/\_step.py} by
 \texttt{\_precompute\_likelihood\_terms\_mv\_het} for general $\va_i$, and by
 \texttt{\_precompute\_likelihood\_terms\_mv} when $\va_i \equiv \Ind_k$ or
@@ -634,22 +724,15 @@ sufficient statistics in $T$ and $T'$. Using the reduced form
 \eqref{eq:mv-reduced-marglik},
 \begin{align}
 	\log\frac{p(\vr_{1:n} \mid T', \mLam)}{p(\vr_{1:n} \mid T, \mLam)}
-	 & = \frac{1}{2}\Bigl[
-		                \log|\mLamm|
-		                + \log\bigl|\mLamm + \mP_\eta\bigr|
-		                \label{eq:mv-lkratio-grow-a}                                        \\
-		                & \qquad\;\;
-		                - \log\bigl|\mLamm + \mP_{\eta_L}\bigr|
-		                - \log\bigl|\mLamm + \mP_{\eta_R}\bigr|
-		                \Bigr]
-	\label{eq:mv-lkratio-grow-b}                                                                \\
-	 & \quad + \frac{1}{2}\Bigl[
-		                      \vB_{\eta_L}^\top\bigl(\mLamm + \mP_{\eta_L}\bigr)^{-1}\vB_{\eta_L}
-		                      + \vB_{\eta_R}^\top\bigl(\mLamm + \mP_{\eta_R}\bigr)^{-1}\vB_{\eta_R}
-		                      \label{eq:mv-lkratio-grow-c}                                        \\
-		                      & \qquad\;\;
-		                      - \vB_\eta^\top\bigl(\mLamm + \mP_\eta\bigr)^{-1}\vB_\eta
-		                      \Bigr],
+	 & = \frac{1}{2}\log|\mLamm|
+	+ \frac{1}{2}\log\left|\mLamm + \mP_\eta\right|
+	- \frac{1}{2}\log\left|\mLamm + \mP_{\eta_L}\right|
+	- \frac{1}{2}\log\left|\mLamm + \mP_{\eta_R}\right|
+	\notag \\
+	 & \quad + \frac{1}{2}\vB_{\eta_L}^\top\left(\mLamm + \mP_{\eta_L}\right)^{-1}\vB_{\eta_L}
+	+ \frac{1}{2}\vB_{\eta_R}^\top\left(\mLamm + \mP_{\eta_R}\right)^{-1}\vB_{\eta_R}
+	\notag \\
+	 & \quad - \frac{1}{2}\vB_\eta^\top\left(\mLamm + \mP_\eta\right)^{-1}\vB_\eta,
 	\label{eq:mv-lkratio-grow}
 \end{align}
 with $\mN_\eta = \mN_{\eta_L} + \mN_{\eta_R}$, $S_\eta = S_{\eta_L} + S_{\eta_R}$,
@@ -729,7 +812,7 @@ its prior, leaving the standard CGM form:
 \begin{equation}
 	\label{eq:mv-nonlk-grow}
 	\boxed{
-		\frac{q(T \mid T')\,p(T')}{q(T' \mid T)\,p(T)}
+		\frac{q(T \mid T') p(T')}{q(T' \mid T) p(T)}
 		= \frac{P_{\mathrm{prune}}(T')}{P_{\mathrm{grow}}(T)} \cdot
 		\frac{|G(T)|}{|P(T')|} \cdot
 		\frac{p_{d_\eta}}{1 - p_{d_\eta}} \cdot
@@ -757,7 +840,7 @@ GROW ratio for the move $T' \to T$:
 \begin{equation}
 	\label{eq:mv-mh-prune}
 	\mathrm{MH}_{\mathrm{prune}}
-	= \mathrm{MH}_{\mathrm{grow}}^{\,-1}(T' \to T).
+	= \mathrm{MH}_{\mathrm{grow}}^{ -1}(T' \to T).
 \end{equation}
 In particular, the log marginal-density ratio is the negative of
 \eqref{eq:mv-lkratio-grow}, with the sufficient statistics
@@ -784,18 +867,71 @@ Whenever the structure update is finalised (whether the proposal was
 accepted or rejected), the leaves of $T$ are resampled from
 \eqref{eq:mv-leaf-fc}. In the sum-of-trees setting, the residuals of every
 other tree are then refreshed by subtracting the new
-$g(\cdot;\, T_t, M_t)$ from the running sum, and the cycle moves to the
-next tree. After all $m$ trees have been updated, $\mLam$, $\vs$ and
-$\theta$ are drawn from their full conditionals, derived next.
+$g(\cdot;  T_t, M_t)$ from the running sum, and the cycle moves to the
+next tree. After all $m$ trees have been updated, the latent outcomes,
+$\mLam$, $\vs$ and $\theta$ are drawn from their full conditionals,
+derived next.
+
+%-----------------------------------------------------------------------------
+\section{Updating the latent outcomes}
+\label{sec:mv-z}
+
+After all $m$ trees have been updated, the latent outcomes of the observed
+binary components are drawn from their full conditional. Under the diagonal
+form of $\mLam$ with $\lambda_j = 1$ for $j \in \setB$, the components of
+$\vyt_i$ in \eqref{eq:mv-lik-diag} are independent given the trees, so
+$z_{i,j}$ depends on the rest of the model only through $f_j(\vx_i)$,
+$a_{i,j}$ and $y_{i,j}$.
+
+\begin{prop}[Latent outcome full conditional]
+	\label{prop:mv-z}
+	For each $j \in \setB$ and each $i$ with $a_{i,j} > 0$,
+	\begin{equation}
+		\label{eq:mv-z-fc}
+		z_{i,j} \mid T_{1:m}, M_{1:m}, y_{i,j} \sim
+		\N\left(f_j(\vx_i), a_{i,j}^{-2}\right)
+		\text{ truncated to }
+		\begin{cases}
+			(0, \infty)   & y_{i,j} = 1, \\
+			(-\infty, 0] & y_{i,j} = 0,
+		\end{cases}
+	\end{equation}
+	independently across $i$ and $j$.
+\end{prop}
+
+\begin{proof}
+	By \eqref{eq:mv-joint}, the factors involving $z_{i,j}$ are
+	$p(\vyt_{i,O_i} \mid T_{1:m}, M_{1:m}, \mLam)$ and
+	$p(y_{i,j} \mid z_{i,j})$. Since $\mLam$ is diagonal, the former
+	factorises over the components of $\vyt_{i,O_i}$, and its $j$-th factor is
+	the density of $\N(f_j(\vx_i), (a_{i,j}^2 \lambda_j)^{-1})$ at $z_{i,j}$,
+	with $\lambda_j = 1$. Multiplying by the indicator
+	$\Ind[y_{i,j} = \Ind[z_{i,j} > 0]]$ restricts it to the half-line
+	\eqref{eq:mv-z-fc}. The factorisation over $i$ and $j$ gives the
+	independence.
+\end{proof}
+
+In standardised units, $a_{i,j}(z_{i,j} - f_j(\vx_i))$ is a standard normal
+truncated below at $-a_{i,j} f_j(\vx_i)$ if $y_{i,j} = 1$, and above it
+otherwise. This is how \texttt{step\_z} in \texttt{mcmcstep/\_step.py}
+draws it: it forms the threshold from the trees and from $a_{i,j}$, stored in
+\texttt{State.inv\_sdev\_scale}, draws the standardised variate with
+\texttt{truncated\_normal\_onesided}, and multiplies it by
+\texttt{State.error\_scale} $= 1/a_{i,j}$. Since the trees are held fixed,
+the result is stored directly as the new residual $z_{i,j} - f_j(\vx_i)$ of
+component $j$. \texttt{State.z} stores only the binary rows of $\vyt_i$,
+selected by \texttt{State.binary\_indices}; the latent outcomes of missing
+binary components are drawn and ignored, which is harmless because every
+consumer of the residuals multiplies them by $a_{i,j} = 0$.
 
 %-----------------------------------------------------------------------------
 \section{Updating the error precision}
 \label{sec:mv-Sigma}
 
-After all $m$ trees have been updated, the global precision $\mLam$ is drawn
-from its full conditional. Let
-$\bm{\veps}_i \coloneqq \vy_i - f(\vx_i)$ be the residual of the full forest,
-and let
+After all $m$ trees and the latent outcomes have been updated, the global
+precision $\mLam$ is drawn from its full conditional. Let
+$\bm{\veps}_i \coloneqq \vyt_i - f(\vx_i)$ be the residual of the full
+forest, and let
 \begin{equation}
 	\label{eq:mv-eps-tilde}
 	\tilde{\bm{\veps}}_i \coloneqq \mA_i \bm{\veps}_i
@@ -810,31 +946,33 @@ independently across $i$. Write
 	\Psi' \coloneqq \Psi + \sum_{i=1}^n \tilde{\bm{\veps}}_i \tilde{\bm{\veps}}_i^\top
 	= \Psi + \sum_{i=1}^n \tilde\mA_i \odot (\bm{\veps}_i \bm{\veps}_i^\top)
 \end{equation}
-for the posterior rate matrix.
+for the posterior rate matrix of the dense form, and
+\begin{equation}
+	\label{eq:mv-nj}
+	n_j \coloneqq |\{i : j \in O_i\}|
+\end{equation}
+for the number of observed values of component $j$.
 
 \begin{prop}[Error precision full conditional]
 	\label{prop:mv-Sigma}
-	Let $\Psi'$ be the posterior rate matrix \eqref{eq:mv-Sigma-rate}.
 	\begin{enumerate}[label=(\roman*)]
-		\item Without missing values ($O_i = \{1,\dots,k\}$ for all $i$),
+		\item Under the dense prior \eqref{eq:mv-iw-prior} (so that
+		      $O_i = \{1,\dots,k\}$ for all $i$),
 		      \begin{equation}
 			      \label{eq:mv-Sigma-fc}
 			      \mLam \mid \cdots \sim \W\left(\nu + n, \Psi'\right).
 		      \end{equation}
-		\item If $\mLam = \diag(\lambda_1, \dots, \lambda_k)$ is diagonal, with
-		      independent shape--rate gamma priors
-		      $\lambda_j \sim \Gamma(\nu_j/2, \psi_j/2)$ in place of
-		      \eqref{eq:mv-iw-prior}, the components stay independent a
-		      posteriori,
+		\item Under the diagonal prior \eqref{eq:mv-gamma-prior}, the
+		      components stay independent a posteriori,
 		      \begin{equation}
 			      \label{eq:mv-Sigma-fc-diag}
 			      \lambda_j \mid \cdots \sim
 			      \Gamma\left(\frac{\nu_j + n_j}{2},
 			      \frac{\psi_j + \sum_{i=1}^n a_{i,j}^2 \veps_{i,j}^2}{2}\right),
-			      \qquad
-			      n_j \coloneqq |\{i : j \in O_i\}|,
+			      \qquad j \in \setC,
 		      \end{equation}
-		      whatever the pattern of missing values.
+		      whatever the pattern of missing values, while $\lambda_j = 1$
+		      for $j \in \setB$ stays fixed.
 	\end{enumerate}
 \end{prop}
 
@@ -846,10 +984,7 @@ for the posterior rate matrix.
 		 & = \sum_{i=1}^n \left[
 		\frac{1}{2}\log\left|\mLam_{O_iO_i}\right|
 		- \frac{1}{2}\tilde{\bm{\veps}}_i^\top \mLam \tilde{\bm{\veps}}_i
-		\right]        \\
-		 & \quad
-		+ \frac{\nu - k - 1}{2}\log|\mLam|
-		- \frac{1}{2}\tr(\Psi \mLam) + \text{const},
+		\right] + \log p(\mLam) + \text{const},
 	\end{align}
 	where the quadratic form is taken over all $k$ components because
 	$\tilde{\bm{\veps}}_i$ vanishes off $O_i$. Writing
@@ -857,29 +992,33 @@ for the posterior rate matrix.
 		\tr(\tilde{\bm{\veps}}_i\tilde{\bm{\veps}}_i^\top \mLam)$ and collecting
 	the trace terms into $\Psi'$, this is
 	\begin{equation}
-		\frac{\nu - k - 1}{2}\log|\mLam|
-		+ \frac{1}{2}\sum_{i=1}^n \log\left|\mLam_{O_iO_i}\right|
-		- \frac{1}{2}\tr(\Psi' \mLam) + \text{const}.
+		\frac{1}{2}\sum_{i=1}^n \log\left|\mLam_{O_iO_i}\right|
+		- \frac{1}{2}\tr(\Psi' \mLam) + \frac{1}{2}\tr(\Psi \mLam)
+		+ \log p(\mLam) + \text{const}.
 	\end{equation}
-	For (i), $|\mLam_{O_iO_i}| = |\mLam|$ for every $i$, so the exponent of
-	$|\mLam|$ is $(\nu + n - k - 1)/2$, the kernel of $\W(\nu + n, \Psi')$.
-	For (ii), the prior term is replaced by
-	$\sum_j [(\nu_j/2 - 1)\log\lambda_j - \psi_j\lambda_j/2]$,
+	For (i), $\log p(\mLam) = \frac{\nu - k - 1}{2}\log|\mLam| -
+		\frac{1}{2}\tr(\Psi \mLam) + \text{const}$ and
+	$|\mLam_{O_iO_i}| = |\mLam|$ for every $i$, so the exponent of
+	$|\mLam|$ is $(\nu + n - k - 1)/2$ and the density is the kernel of
+	$\W(\nu + n, \Psi')$.
+	For (ii), $\log p(\mLam) = \sum_{j \in \setC} [(\nu_j/2 - 1)\log\lambda_j
+			- \psi_j\lambda_j/2] + \text{const}$ on the support
+	$\lambda_j = 1$, $j \in \setB$;
 	$|\mLam_{O_iO_i}| = \prod_{j \in O_i}\lambda_j$, and
-	$\tr(\Psi'\mLam) = \sum_j \Psi'_{jj}\lambda_j$ with
-	$\Psi'_{jj} = \psi_j + \sum_i a_{i,j}^2\veps_{i,j}^2$, so the density
-	factorises over $j$ as
-	$\prod_j \lambda_j^{(\nu_j + n_j)/2 - 1}\exp(-\Psi'_{jj}\lambda_j/2)$.
+	$\tr((\Psi' - \Psi)\mLam) = \sum_j \lambda_j \sum_i a_{i,j}^2
+		\veps_{i,j}^2$, so the density factorises over $j \in \setC$ as
+	$\prod_j \lambda_j^{(\nu_j + n_j)/2 - 1}
+		\exp(-(\psi_j + \sum_i a_{i,j}^2\veps_{i,j}^2)\lambda_j/2)$.
 \end{proof}
 
 The proof also shows why the diagonal restriction of \S\ref{sec:mv-model}
-is needed: with missing values, $\prod_i |\mLam_{O_iO_i}|^{1/2}$ is not a
+is needed with missing values: $\prod_i |\mLam_{O_iO_i}|^{1/2}$ is not a
 power of $|\mLam|$, so even the likelihood \eqref{eq:mv-lik-diag} would not
 be conjugate to the Wishart prior for a dense $\mLam$, and the actual
 marginal likelihood \eqref{eq:mv-lik-obs} involves the Schur complements
-$[(\mLam^{-1})_{O_iO_i}]^{-1}$ on top of that. For $k = 1$, (ii) is the
-univariate update of \S\ref{sec:sigma-update} with $n$ replaced by the
-number of observed outcomes.
+$[(\mLam^{-1})_{O_iO_i}]^{-1}$ on top of that. For $k = 1$, (i) and (ii)
+coincide, and give the univariate update of \S\ref{sec:sigma-update} with
+$n$ replaced by the number of observed outcomes.
 
 Note that the heteroskedasticity is handled \emph{exactly} by the residual
 rescaling $\bm{\veps}_i \mapsto \va_i \odot \bm{\veps}_i$: no auxiliary
@@ -893,9 +1032,10 @@ the latter rescaling the residuals by \texttt{State.inv\_sdev\_scale}
 $= \va_i$ before forming $\Psi' = \Psi + \tilde R^\top \tilde R$, with
 $\tilde R$ the row-rescaled residual matrix. The diagonal update
 \eqref{eq:mv-Sigma-fc-diag} is \texttt{\_step\_error\_cov\_inv\_diag}, with
-the prior represented by \texttt{DiagWishart} ($\nu_j = \nu$ common to all
-components, $\psi_j = \Psi_{jj}$); \texttt{init} requires it when the
-\texttt{missing} mask is per component.
+the prior represented by \texttt{DiagWishart}, whose \texttt{nu} and
+\texttt{rate} map to $\nu_j$ and $\psi_j$ through
+\eqref{eq:mv-gamma-match}; a zero diagonal entry of \texttt{rate} marks a
+fixed component, which the update resets to $1$.
 
 %-----------------------------------------------------------------------------
 \section{Updating the variable selection probabilities}
@@ -945,16 +1085,16 @@ exponential weight and each variable with a Poisson count.
 		\\
 		\label{eq:mv-s-aug}
 		\tilde c_v \mid \vs, w
-		 & \sim \Pois(s_v\, \omega_v),
+		 & \sim \Pois(s_v  \omega_v),
 		\qquad
-		\omega_v \coloneqq \sum_{\eta \in B :\, v \notin E(\eta)} w_\eta,
+		\omega_v \coloneqq \sum_{\eta \in B :  v \notin E(\eta)} w_\eta,
 		\qquad v = 1, \dots, p,
 	\end{align}
 	with $\Expd(e_\eta)$ the exponential of rate $e_\eta$. Then
 	\begin{equation}
 		\label{eq:mv-s-fc-aug}
 		\vs \mid T_{1:m}, \theta, \tilde c_{1:p} \sim
-		\Dir\!\left(\frac{\theta}{p} + c_1 + \tilde c_1, \dots,
+		\Dir\left(\frac{\theta}{p} + c_1 + \tilde c_1, \dots,
 		\frac{\theta}{p} + c_p + \tilde c_p\right),
 	\end{equation}
 	and marginalising $(w, \tilde c)$ out of the joint of
@@ -965,9 +1105,9 @@ exponential weight and each variable with a Poisson count.
 	For each $\eta \in B$, using $1 - e_\eta = \sum_{u \notin E(\eta)} s_u$,
 	\begin{equation}
 		\frac{1}{e_\eta}
-		= \int_0^\infty \mathrm{d}w\, e^{-w e_\eta}
-		= \int_0^\infty \mathrm{d}w\, e^{-w} \prod_{u \notin E(\eta)} e^{w s_u}
-		= \int_0^\infty \mathrm{d}w\, e^{-w} \prod_{u \notin E(\eta)}
+		= \int_0^\infty \mathrm{d}w  e^{-w e_\eta}
+		= \int_0^\infty \mathrm{d}w  e^{-w} \prod_{u \notin E(\eta)} e^{w s_u}
+		= \int_0^\infty \mathrm{d}w  e^{-w} \prod_{u \notin E(\eta)}
 		\sum_{c = 0}^\infty \frac{(w s_u)^c}{c!}.
 	\end{equation}
 	Substituting into \eqref{eq:mv-s-fc}, the integrand and summand define
@@ -1011,16 +1151,16 @@ level-by-level accumulations over the tree heap. \texttt{step\_s} adds the Poiss
 log-gamma variates, stored unnormalised in \texttt{Forest.log\_s}.
 
 \paragraph{Updating the concentration.}
-Under \eqref{eq:mv-theta-prior}, $\theta = \rho\,\xi / (1 - \xi)$ and
+Under \eqref{eq:mv-theta-prior}, $\theta = \rho \xi / (1 - \xi)$ and
 $\theta$ depends on the rest of the model only through $\vs$. Multiplying the
 Beta density of $\xi$ by \eqref{eq:mv-s-prior} as a function of $\theta$,
 \begin{equation}
 	\label{eq:mv-theta-fc}
 	p(\xi \mid \vs) \propto
-	\xi^{a_\theta - 1} (1 - \xi)^{b_\theta - 1}\,
+	\xi^{a_\theta - 1} (1 - \xi)^{b_\theta - 1}
 	\frac{\Gamma(\theta)}{\Gamma(\theta/p)^p}
 	\prod_{v=1}^p s_v^{\theta/p},
-	\qquad \theta = \frac{\rho\,\xi}{1 - \xi},
+	\qquad \theta = \frac{\rho \xi}{1 - \xi},
 \end{equation}
 where the factor $\prod_v s_v^{-1}$ of the Dirichlet density has been
 dropped as constant in $\theta$. No Jacobian appears because $\xi$ itself is
@@ -1039,20 +1179,33 @@ Chapter~\ref{ch:vanilla}.
 \section{Implementation pointers}
 \label{sec:impl-full}
 
-Bartz implements this chapter as the path selected by
-\texttt{mcmcstep.init} when \texttt{error\_scale} is a $k \times n$ array of
-per-component scales $1/\va_i$ (a $k \times n$ \texttt{missing} mask sets
-the corresponding $a_{i,j} = 0$ and, as in \S\ref{sec:mv-model}, requires a
-diagonal $\mLam$, i.e.\ a \texttt{DiagWishart} prior). The relevant files
-are all in
-\texttt{src/bartz/mcmcstep}.
+Bartz implements this chapter in \texttt{src/bartz/mcmcstep}. The form of
+$\mLam$ is selected by \texttt{mcmcstep.init} from its arguments: the dense
+form \eqref{eq:mv-iw-prior} (a \texttt{Wishart} prior) when
+\texttt{outcome\_type} is continuous for all components and \texttt{missing}
+is at most a per-datapoint mask, the diagonal form \eqref{eq:mv-gamma-prior}
+(a \texttt{DiagWishart} prior) when some component is binary or
+\texttt{missing} is a $k \times n$ mask; when all components are binary,
+$\mLam$ is the identity with no prior (a \texttt{Wishart} with
+\texttt{nu} $=$ \texttt{rate} $=$ \texttt{None}). The per-component scales
+$1/\va_i$ are a $k \times n$ \texttt{error\_scale}, and a $k \times n$
+\texttt{missing} mask sets the corresponding $a_{i,j} = 0$. The relevant
+files are:
 \begin{description}
 	\item[\texttt{\_state.py}] The \texttt{State} and \texttt{Forest} classes
 	      (state and priors):
 	      \begin{itemize}
 		      \item \texttt{State.error\_cov\_inv} is $\mLam$ with its
-		            \texttt{Wishart} prior (\texttt{nu} $= \nu$, \texttt{rate}
-		            $= \Psi$);
+		            prior: for a \texttt{Wishart}, \texttt{nu} $= \nu$ and
+		            \texttt{rate} $= \Psi$; for a \texttt{DiagWishart},
+		            $\nu_j = \texttt{nu} - k + 1$ and $\psi_j =
+			            \texttt{rate}_{jj}$ as in \eqref{eq:mv-gamma-match},
+		            with $\texttt{rate}_{jj} = 0$ for the fixed binary
+		            components;
+		      \item \texttt{State.y} is $\vy_i$; \texttt{State.z} holds the
+		            binary rows $z_{i,j}$, $j \in \setB$, of $\vyt_i$, at the
+		            indices \texttt{State.binary\_indices}; the residuals
+		            \texttt{State.resid} are $\vyt_i - f(\vx_i)$;
 		      \item \texttt{Forest.leaf\_prior\_cov\_inv} is $\mLamm$;
 		      \item \texttt{State.inv\_sdev\_scale} is $\va_i$ and
 		            \texttt{State.prec\_scale} is $\tilde\mA_i$ (both stored
@@ -1071,7 +1224,9 @@ are all in
 	      \S\ref{sec:mv-grow}--\ref{sec:mv-prune} and do not depend on the
 	      leaf model; \texttt{choose\_variable} draws the split variable
 	      from \eqref{eq:mv-var-prior}.
-	\item[\texttt{\_step.py}] The leaf and noise model:
+	\item[\texttt{\_step.py}] The Gibbs sweep and the leaf and noise model.
+	      \texttt{step} updates in order the trees, the latent outcomes, the
+	      error precision, and the variable selection parameters:
 	      \begin{itemize}
 		      \item \texttt{complete\_ratio} finishes \eqref{eq:mv-nonlk-grow};
 		      \item \texttt{sum\_resid} accumulates $S_\ell$ and
@@ -1081,6 +1236,7 @@ are all in
 		      \item \texttt{\_precompute\_likelihood\_terms\_mv\_het} and
 		            \texttt{\_compute\_likelihood\_ratio\_mv\_het} compute
 		            \eqref{eq:mv-lkratio-grow};
+		      \item \texttt{step\_z} draws from \eqref{eq:mv-z-fc};
 		      \item \texttt{\_step\_error\_cov\_inv\_mv} and
 		            \texttt{\_sample\_wishart\_bartlett} draw from
 		            \eqref{eq:mv-Sigma-fc};
@@ -1095,7 +1251,6 @@ are all in
 	      \texttt{\_mv} variants of these functions, with $n_\ell$ from
 	      \texttt{Forest.count\_tree}.
 \end{description}
-Probit outcomes are not covered here.
 The tree-topology parts (tree prior, proposal kernel, non-likelihood ratio
 \eqref{eq:mv-nonlk-grow}) are shared verbatim with the univariate code of
 Chapter~\ref{ch:vanilla}.

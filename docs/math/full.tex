@@ -31,8 +31,8 @@ prior on $\mLam$ is a Wishart (rather than an inverse-Wishart on the
 covariance $\mLam^{-1}$). Using precision scales $\va_i$ in place of weights
 also relaxes positivity: $a_{i,j} = 0$ is admissible and corresponds to a
 missing $j$-th component of $\vy_i$ (infinite noise on that coordinate).
-Following bartz, when some component can be missing or is binary, $\mLam$ is
-restricted to be diagonal (\S\ref{sec:mv-model}).
+Following bartz, when some component can be missing on its own or is binary,
+$\mLam$ is restricted to be diagonal (\S\ref{sec:mv-model}).
 
 %-----------------------------------------------------------------------------
 \section{Notation and data}
@@ -151,9 +151,14 @@ $j \in \bar O_i$, of the complete model. The precision in
 $i$ in a way that does not factor as $\mLam$ times a data-only matrix, which
 would break the sufficient statistics of \S\ref{sec:mv-partial-resid} and the
 conjugacy of \S\ref{sec:mv-Sigma}. For this reason, following bartz,
-\emph{whenever some component can be missing we restrict $\mLam$ to be
-	diagonal}; the binary components require the same restriction, for a
-different reason explained in \S\ref{sec:mv-Lam-prior}. Then
+\emph{whenever some component can be missing while others of the same
+	datapoint are observed we restrict $\mLam$ to be diagonal}; the binary
+components require the same restriction, for a different reason explained in
+\S\ref{sec:mv-Lam-prior}. Missingness of whole datapoints ($O_i = \emptyset$
+or $O_i = \{1, \dots, k\}$ for every $i$) needs no restriction: such an $i$
+merely drops out of every sum over datapoints, so all that follows holds with
+$n$ read as the number of datapoints that are present. Under the
+restriction,
 $[(\mLam^{-1})_{O_iO_i}]^{-1} = \mLam_{O_iO_i}$, and \eqref{eq:mv-lik-obs}
 becomes the Gaussian whose precision is $\mA_i\mLam\mA_i$ restricted to the
 observed rows and columns,
@@ -278,8 +283,8 @@ variability.
 The global noise precision $\mLam$ takes one of two forms.
 
 \paragraph{Dense.}
-When all components are continuous ($\setB = \emptyset$) and none can be
-missing, $\mLam$ follows the conjugate Wishart prior
+When all components are continuous ($\setB = \emptyset$) and missingness, if
+any, is by whole datapoint, $\mLam$ follows the conjugate Wishart prior
 \begin{equation}
 	\label{eq:mv-iw-prior}
 	\mLam \sim \W(\nu, \Psi),
@@ -290,7 +295,7 @@ proportional to $|\mLam|^{(\nu - k - 1)/2}\exp\left(-\frac{1}{2}
 	\tr(\Psi \mLam)\right)$.
 
 \paragraph{Diagonal.}
-When some component is binary or can be missing,
+When some component is binary or can be missing on its own,
 $\mLam = \diag(\lambda_1, \dots, \lambda_k)$ with independent entries,
 \begin{equation}
 	\label{eq:mv-gamma-prior}
@@ -1030,7 +1035,12 @@ is needed with missing values: $\prod_i |\mLam_{O_iO_i}|^{1/2}$ is not a
 power of $|\mLam|$, so even the likelihood \eqref{eq:mv-lik-diag} would not
 be conjugate to the Wishart prior for a dense $\mLam$, and the actual
 marginal likelihood \eqref{eq:mv-lik-obs} involves the Schur complements
-$[(\mLam^{-1})_{O_iO_i}]^{-1}$ on top of that. For $k = 1$, (i) and (ii)
+$[(\mLam^{-1})_{O_iO_i}]^{-1}$ on top of that. Whole missing datapoints
+contribute nothing to either the sum of log determinants or $\Psi'$, so (i)
+holds with $n$ the number of present datapoints; this is the case bartz
+keeps dense, with \texttt{df\_post} $= \nu + n$ computed in
+\texttt{\_step\_error\_cov\_inv\_mv} from \texttt{State.n\_non\_missing}.
+For $k = 1$, (i) and (ii)
 coincide: $\lambda = 1/\sigsq$ has a $\mathrm{Gamma}(\nu/2, \psi/2)$ prior,
 i.e.\ $\sigsq \sim \IG(\nu/2, \psi/2)$, and the update is
 $\sigsq \mid \cdots \sim \IG\bigl((\nu + n)/2, (\psi + \sum_i a_i^2

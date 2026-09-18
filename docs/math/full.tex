@@ -412,7 +412,7 @@ at a time, holding the others fixed. Define the \emph{partial residual} for
 tree $t$ by removing every other tree's contribution:
 \begin{equation}
 	\label{eq:mv-partial-resid}
-	\vr_i^{(t)} \coloneqq \vyt_i - \sum_{k \ne t} g(\vx_i; T_k, M_k)
+	\vr_i^{(t)} \coloneqq \vyt_i - \sum_{t' \ne t} g(\vx_i; T_{t'}, M_{t'})
 	\in \R^k.
 \end{equation}
 With the latent outcomes held fixed at their current values, by

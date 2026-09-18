@@ -185,7 +185,7 @@ The backfitting decomposition of \S\ref{sec:mv-partial-resid} applies with
 scalar partial residuals
 \begin{equation}
 	\label{eq:partial-resid}
-	r_i^{(t)} \coloneqq y_i - \sum_{k \ne t} g(\vx_i;\, T_k, \vM_k),
+	r_i^{(t)} \coloneqq y_i - \sum_{t' \ne t} g(\vx_i;\, T_{t'}, \vM_{t'}),
 	\qquad
 	r_i^{(t)} \mid T_t, \vM_t, \sigsq \stackrel{\text{ind}}{\sim}
 	\N\!\left(g(\vx_i;\, T_t, \vM_t),\, \sigsq\right).

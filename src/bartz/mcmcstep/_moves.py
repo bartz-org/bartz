@@ -173,7 +173,7 @@ def _propose_moves(
     split_tree
         The splitting points of the tree.
     affluence_tree
-        Whether each leaf has enough points to be grown.
+        Marks the leaves that can be grown.
     max_split
         The maximum split index for each variable.
     blocked_vars
@@ -288,8 +288,7 @@ def choose_leaf(
     split_tree
         The splitting points of the tree.
     affluence_tree
-        Whether a leaf has enough points that it could be split into two leaves
-        satisfying the `min_points_per_decision_node` requirement.
+        Marks the leaves that can be grown.
     p_propose_grow
         The unnormalized probability of choosing a leaf to grow.
 
@@ -299,8 +298,7 @@ def choose_leaf(
         The index of the leaf to grow. If ``num_growable == 0``, return
         ``2 ** d``.
     num_growable : Int32[Array, '']
-        The number of leaf nodes that can be grown, i.e., are nonterminal
-        and have at least twice `min_points_per_decision_node`.
+        The number of growable leaves in the tree.
     prob_choose : Float32[Array, '']
         The (normalized) probability that this function had to choose that
         specific leaf, given the arguments.
@@ -702,7 +700,7 @@ def choose_leaf_parent(
     split_tree
         The splitting points of the tree.
     affluence_tree
-        The (clean) mask of the growable leaves.
+        Marks the leaves that can be grown.
     p_propose_grow
         The unnormalized probability of choosing a leaf to grow.
 

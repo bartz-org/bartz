@@ -26,15 +26,11 @@
 
 import sys
 from contextlib import nullcontext
-from pathlib import Path
 from re import fullmatch
 
 import jax
 import numpy as np
 import pytest
-
-# WORKAROUND(python<3.11): use stdlib tomllib instead of tomli
-import tomli
 from jax import config, random
 from jaxtyping import install_import_hook
 
@@ -46,18 +42,6 @@ from jaxtyping import install_import_hook
 install_import_hook('bartz', 'beartype.beartype')
 
 from bartz._jaxext import get_default_device, get_device_count, split
-
-
-def get_old_python_version() -> tuple[int, int]:
-    """Return the minimum Python version required by pyproject.toml as (major, minor)."""
-    pyproject = Path(__file__).parent.parent / 'pyproject.toml'
-    with pyproject.open('rb') as f:
-        data = tomli.load(f)
-    spec = data['project']['requires-python'].strip()
-    match = fullmatch(r'>=\s*(\d+)\.(\d+)', spec)
-    assert match is not None
-    return (int(match.group(1)), int(match.group(2)))
-
 
 INVASIVE_DEBUG_CHECKS = False
 if INVASIVE_DEBUG_CHECKS:  # pragma: no cover, opt-in debug checks
@@ -85,13 +69,15 @@ if jax.__version_info__ >= (0, 8, 2):
 if jax.__version_info__ >= (0, 9, 1):
     config.update('jax_allow_f16_reductions', False)
 
-# enable compilation cache
-if sys.version_info[:2] > get_old_python_version():
-    # enable only on latest config because `make tests-old` fails if there is a
-    # cache created with a newer jax version
-    config.update('jax_compilation_cache_dir', 'config/jax_cache')
-    config.update('jax_persistent_cache_min_entry_size_bytes', -1)
-    config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
+# enable compilation cache, in a directory specific to the python and jax
+# versions because jax chokes on a cache written by a different version
+major, minor, *_ = sys.version_info
+config.update(
+    'jax_compilation_cache_dir',
+    f'config/jax_cache/py{major}.{minor}-jax{jax.__version__}',
+)
+config.update('jax_persistent_cache_min_entry_size_bytes', -1)
+config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
 
 
 @pytest.fixture

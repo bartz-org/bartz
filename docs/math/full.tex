@@ -1061,8 +1061,12 @@ $\tilde R$ the row-rescaled residual matrix. The diagonal update
 \eqref{eq:mv-Sigma-fc-diag} is \texttt{\_step\_error\_cov\_inv\_diag}, with
 the prior represented by \texttt{DiagWishart}, whose \texttt{nu} and
 \texttt{rate} map to $\nu_j$ and $\psi_j$ through
-\eqref{eq:mv-gamma-match}; a zero diagonal entry of \texttt{rate} marks a
-fixed component, which the update resets to $1$.
+\eqref{eq:mv-gamma-match}. The fixed components are those listed in
+\texttt{State.binary\_indices}: the update draws all $k$ entries and then
+overwrites those with $1$, without consulting the prior. \texttt{Bart}
+accordingly fills the corresponding diagonal entries
+of the initial precision with $1$; it also sets the corresponding \texttt{rate} entries to zero,
+but this is not semantic.
 
 %-----------------------------------------------------------------------------
 \section{Updating the variable selection probabilities}

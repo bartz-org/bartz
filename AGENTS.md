@@ -4,7 +4,7 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## Project
 
-bartz (BART vectoriZed) — a fast implementation of Bayesian Additive Regression Trees (BART) in JAX. Trees are stored as heap arrays for efficient vectorized operations via `jit`/`vmap`/`lax.scan`.
+bartz (BART vectoriZed) — a fast implementation of Bayesian Additive Regression Trees (BART) in JAX. Trees are stored as heap arrays for efficient vectorized operations via `jit`/`vmap`/`lax.scan`. See `docs/math/full.tex` for a math reference.
 
 ## Commands
 

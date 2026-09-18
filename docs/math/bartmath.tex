@@ -1,0 +1,96 @@
+% bartmath.tex
+% A self-contained derivation of the math of BART, as a development
+% reference: the general model comes first, the vanilla model is derived
+% from it as a special case.
+% Chapter 1 (full.tex):    multivariate continuous or binary (probit)
+%            outcomes with heteroskedastic errors of precision A_i Lambda A_i,
+%            leaf prior precision Lambda_mu, Wishart prior on Lambda (or
+%            independent gammas when it is diagonal), Dirichlet prior on the
+%            split variable with Beta hyperprior on its concentration.
+% Chapter 2 (vanilla.tex): univariate continuous, homoskedastic, uniform
+%            split-variable prior, obtained by substitution into Chapter 1.
+
+\documentclass[a4paper]{report}
+
+\usepackage{amsmath, amssymb, amsthm, mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usetikzlibrary{bayesnet, fit, positioning}
+
+% font
+\usepackage[tt=false]{libertine}
+\usepackage{libertinust1math}
+\usepackage[font={sf}]{caption} % caption font
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathcal{N}}
+\newcommand{\IW}{\mathcal{IW}}
+\newcommand{\W}{\mathcal{W}}
+\newcommand{\IG}{\mathrm{InvGamma}}
+\newcommand{\Ind}{\mathbf{1}}
+\newcommand{\sm}{\sigma_\mu}
+\newcommand{\sigsq}{\sigma^{2}}
+\newcommand{\smsq}{\sigma_\mu^{2}}
+\newcommand{\veps}{\varepsilon}
+\newcommand{\vx}{\mathbf{x}}
+\newcommand{\vy}{\mathbf{y}}
+\newcommand{\vr}{\mathbf{r}}
+\newcommand{\vw}{\mathbf{w}}
+\newcommand{\vmu}{\bm{\mu}}
+\newcommand{\vM}{\mathbf{M}}
+\newcommand{\vB}{\mathbf{B}}
+\newcommand{\vs}{\mathbf{s}}
+\newcommand{\vyt}{\tilde{\mathbf{y}}}
+\newcommand{\setB}{\mathcal{B}}
+\newcommand{\setC}{\mathcal{C}}
+\newcommand{\Dir}{\mathrm{Dirichlet}}
+\newcommand{\Betad}{\mathrm{Beta}}
+\newcommand{\Expd}{\mathrm{Exp}}
+\newcommand{\Pois}{\mathrm{Poisson}}
+\newcommand{\mN}{N}
+\newcommand{\mP}{P}
+\newcommand{\mR}{R}
+\newcommand{\mW}{W}
+\newcommand{\mA}{A}
+\newcommand{\va}{\mathbf{a}}
+\newcommand{\mS}{\Sigma}
+\newcommand{\mSm}{\Sigma_{\mu}}
+\newcommand{\mLam}{\Lambda}
+\newcommand{\mLamm}{\Lambda_{\mu}}
+\newcommand{\tr}{\operatorname{tr}}
+\newcommand{\nmindn}{n^{\min}_{\mathrm{dn}}}
+\newcommand{\nminleaf}{n^{\min}_{\mathrm{leaf}}}
+\DeclareMathOperator{\diag}{diag}
+
+% allow line breaks after underscores in code identifiers
+\let\origtextunderscore\_
+\renewcommand{\_}{\origtextunderscore\allowbreak}
+
+\newtheorem{prop}{Proposition}[chapter]
+\numberwithin{equation}{chapter}
+
+\title{BART reference as implemented in \texttt{bartz}}
+\author{Claude Opus 4.7 \and Claude Fable 5.1 \and Giacomo Petrillo}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+   This is a reference for the implementation of BART in \texttt{bartz}.
+   Chapter~\ref{ch:full} is a self-contained model definition and MCMC
+   derivation for a generalized version of BART.
+   Chapter~\ref{ch:vanilla} shows the original vanilla BART model as a special
+   case of the generalized one.
+\end{abstract}
+
+\tableofcontents
+
+\input{full}
+\input{vanilla}
+
+\end{document}

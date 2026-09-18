@@ -114,6 +114,42 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=10,
         help='Number of virtual jax cpu devices to create (default: 10)',
     )
+    parser.addoption(
+        '--clear-caches-every',
+        type=int,
+        default=50,
+        help='Number of tests between calls to `jax.clear_caches()`, 0 to never '
+        'call it (default: 50)',
+    )
+
+
+class CacheClearer:
+    """Drop jax's compilation caches every `period` tests.
+
+    Each compiled program jax keeps cached holds on to its xla metadata, about
+    1.4 MB, and the suite compiles tens of thousands of them, so without this
+    the session accumulates more than 10 GB. If the on-disk compilation cache
+    is active, resetting the in-memory cache costs little in running time.
+    """
+
+    def __init__(self, period: int) -> None:
+        self.period = period
+        self.count = 0
+
+    @pytest.hookimpl(trylast=True)  # after the fixtures have been finalized
+    def pytest_runtest_teardown(self) -> None:
+        """Count the test and clear the caches when the period has elapsed."""
+        self.count += 1
+        if self.count >= self.period:
+            self.count = 0
+            jax.clear_caches()
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Set up the periodic clearing of the jax caches."""
+    period = config.getoption('--clear-caches-every')
+    if period:
+        config.pluginmanager.register(CacheClearer(period))
 
 
 def pytest_sessionstart(session: pytest.Session) -> None:

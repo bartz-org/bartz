@@ -14,12 +14,14 @@ The specialisation is
 \begin{equation}
 	\label{eq:subst}
 	\begin{alignedat}{4}
-		\setB &= \emptyset,  & \qquad k      &= 1,        & \qquad \va_i &\equiv 1,       & \qquad w &\equiv 1, \\
-		\mLam &= 1/\sigsq,   & \qquad \mLamm &= 1/\smsq,  & \qquad \Psi  &= \nu\lambda .
+		\setB &= \emptyset,  & \qquad k     &= 1,             & \qquad w     &\equiv 1,      & \qquad \vs  &= (1/p, \dots, 1/p), \\
+		\va_i &\equiv 1,     & \qquad \mLam &= 1/\sigsq,      & \qquad \mLamm &= 1/\smsq,    & \qquad \Psi &= \nu\lambda .
 	\end{alignedat}
 \end{equation}
 All $k \times k$ matrices become scalars, there are no latent outcomes
-($\vyt_i = \vy_i$), and the dictionary between the two chapters is:
+($\vyt_i = \vy_i$), the split-variable probabilities $\vs$ are fixed rather
+than drawn from \eqref{eq:mv-s-prior} (so $\theta$ and its hyperprior play
+no role), and the dictionary between the two chapters is:
 \begin{center}
 	\begin{tabular}{lll}
 		\toprule
@@ -43,7 +45,8 @@ All $k \times k$ matrices become scalars, there are no latent outcomes
 	\end{tabular}
 \end{center}
 All tree-prior and proposal-kernel factors are unchanged, but for the
-uniform leaf choice $w \equiv 1$.
+uniform variable choice $\vs \equiv 1/p$ and the uniform leaf choice
+$w \equiv 1$.
 
 %-----------------------------------------------------------------------------
 \section{Notation and data}
@@ -85,10 +88,15 @@ With $k = 1$ and $\mA_i = 1$, the precision $\mA_i\mLam\mA_i$ in
 
 \subsection{Tree-structure prior}
 
-Unchanged from \S\ref{sec:mv-tree-prior}: a node at depth $d$ is internal
-with probability $p_{\mathrm{NT}}(d) = \alpha(1+d)^{-\beta}$ of
-\eqref{eq:pnt}, truncated at $d_{\max}$, and given that it is internal its
-splitting rule $(v, c)$ is uniform on the admissible variable/cutpoint pairs.
+As in \S\ref{sec:mv-tree-prior}, with $\vs$ fixed at $(1/p, \dots, 1/p)$: a
+node at depth $d$ is internal with probability
+$p_{\mathrm{NT}}(d) = \alpha(1+d)^{-\beta}$ of \eqref{eq:pnt}, truncated at
+$d_{\max}$, and given that it is internal its splitting rule $(v, c)$ is
+drawn in two stages, the variable $v$ uniformly over the eligible set
+$E(\eta)$ by \eqref{eq:mv-var-prior}, then the cutpoint $c$ uniformly over
+the cutpoints of $v$ compatible with the ancestor splits. Since the number
+of compatible cutpoints varies with $v$, this is not uniform over the
+admissible $(v, c)$ pairs.
 
 \subsection{Leaf prior}
 
@@ -127,7 +135,9 @@ set $\nu$ and $\lambda = \texttt{sigma\_scale}^2$.
 \subsection{Bayesian network}
 \label{sec:bn}
 
-The joint density \eqref{eq:mv-joint} reads
+With $\vs$ fixed, the factors $p(\theta)\,p(\vs \mid \theta)$ of
+\eqref{eq:mv-joint} disappear and $p(T_t \mid \vs)$ becomes a fixed tree
+prior $p(T_t)$, so the joint density reads
 \begin{equation}
 	\label{eq:joint}
 	p(\vy, T_{1:m}, \vM_{1:m}, \sigsq)
@@ -135,8 +145,8 @@ The joint density \eqref{eq:mv-joint} reads
 	\cdot \prod_{i=1}^n p(y_i \mid T_{1:m}, \vM_{1:m}, \sigsq),
 \end{equation}
 with $p(\vM_t \mid T_t) = \prod_{\ell \in L(T_t)} \N(\mu_\ell;\, 0, \smsq)$.
-The graphical model is that of \S\ref{sec:mv-bn} without the $\va_i$ input
-node:
+The graphical model is that of \S\ref{sec:mv-bn} without the $\theta$ and
+$\vs$ nodes and without the $\va_i$ input node:
 \begin{center}
 	\begin{tikzpicture}[node distance=0.9cm and 1.6cm,
 			every node/.style={font=\footnotesize}]

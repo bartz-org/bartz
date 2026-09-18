@@ -13,17 +13,10 @@ homoskedastic Gaussian noise.
 The specialisation is
 \begin{equation}
 	\label{eq:subst}
-	\setB = \emptyset,
-	\qquad
-	k = 1,
-	\qquad
-	\va_i \equiv 1,
-	\qquad
-	\mLam = 1/\sigsq,
-	\qquad
-	\mLamm = 1/\smsq,
-	\qquad
-	\Psi = \nu\lambda .
+	\begin{alignedat}{4}
+		\setB &= \emptyset,  & \qquad k      &= 1,        & \qquad \va_i &\equiv 1,       & \qquad w &\equiv 1, \\
+		\mLam &= 1/\sigsq,   & \qquad \mLamm &= 1/\smsq,  & \qquad \Psi  &= \nu\lambda .
+	\end{alignedat}
 \end{equation}
 All $k \times k$ matrices become scalars, there are no latent outcomes
 ($\vyt_i = \vy_i$), and the dictionary between the two chapters is:
@@ -49,7 +42,8 @@ All $k \times k$ matrices become scalars, there are no latent outcomes
 		\bottomrule
 	\end{tabular}
 \end{center}
-All tree-prior and proposal-kernel factors are unchanged.
+All tree-prior and proposal-kernel factors are unchanged, but for the
+uniform leaf choice $w \equiv 1$.
 
 %-----------------------------------------------------------------------------
 \section{Notation and data}
@@ -360,7 +354,7 @@ The GROW proposal and its acceptance ratio
 \end{equation}
 are those of \S\ref{sec:mv-grow}. The non-likelihood factor (transition
 ratio times prior ratio) does not touch the leaf or noise model, so it is
-\eqref{eq:mv-nonlk-grow} verbatim:
+\eqref{eq:mv-nonlk-grow} with the uniform leaf choice $w \equiv 1$:
 \begin{equation}
 	\label{eq:nonlk-grow}
 	\frac{q(T \mid T')\,p(T')}{q(T' \mid T)\,p(T)}

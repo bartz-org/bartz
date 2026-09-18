@@ -772,22 +772,29 @@ probability $1$. In the bartz code, this is encoded by the children
 entries of \texttt{Moves.lrt\_growable}, used in \texttt{complete\_ratio}.)
 
 \paragraph{Transition ratio.}
-The forward kernel at $T$ chooses GROW with probability $1/2$ (or $1$ if
-PRUNE is impossible, i.e., $T$ is the root), then picks $\eta$ uniformly from
-the growable leaves, then a variable from the eligible ones with the prior
-probabilities $s_v / e_\eta$ of \eqref{eq:mv-var-prior}, then a cutpoint
-uniformly from the $n_{\mathrm{cut}}(\eta, v)$ admissible ones:
+Let $G(T)$ be the set of \emph{growable} leaves of $T$: those with
+$E(\eta) \ne \emptyset$ and $d_\eta < d_{\max}$. The forward kernel at $T$
+chooses GROW with probability $1/2$ (or $1$ if PRUNE is impossible, i.e.,
+$T$ is the root), then picks $\eta \in G(T)$ with probability proportional
+to a fixed positive weight $w_\eta$ attached to each node position, then a
+variable from the eligible ones with the prior probabilities $s_v / e_\eta$
+of \eqref{eq:mv-var-prior}, then a cutpoint uniformly from the
+$n_{\mathrm{cut}}(\eta, v)$ admissible ones:
 \[
 	q(T' \mid T) = \frac{1}{2(\text{or }1)} \cdot
-	\frac{1}{|G(T)|} \cdot
+	\frac{w_\eta}{W(T)} \cdot
 	\frac{s_v}{e_\eta} \cdot
 	\frac{1}{n_{\mathrm{cut}}(\eta, v)},
+	\qquad
+	W(T) \coloneqq \sum_{\nu \in G(T)} w_\nu.
 \]
-where $G(T)$ is the set of growable leaves. The reverse kernel at $T'$
-chooses PRUNE with probability $1/2$ (or $1$ if $T'$ has no growable leaves
-left), then picks the prunable internal node uniformly from the
-$|P(T')|$ candidates ($P(T')$ being the set of internal nodes whose two
-children are both leaves):
+CGM take $w \equiv 1$, a uniform choice among the growable leaves; bartz
+keeps $w$ in \texttt{Forest.p\_propose\_grow} and sets $w_\eta = p_{d_\eta}$
+by default, favouring shallow leaves. The reverse kernel at $T'$ chooses
+PRUNE with probability $1/2$ (or $1$ if $T'$ has no growable leaves left),
+then picks the prunable internal node uniformly from the $|P(T')|$
+candidates ($P(T')$ being the set of internal nodes whose two children are
+both leaves):
 \[
 	q(T \mid T') = \frac{1}{2(\text{or }1)} \cdot \frac{1}{|P(T')|}.
 \]
@@ -796,38 +803,45 @@ Hence
 	\label{eq:mv-trans-ratio-grow}
 	\frac{q(T \mid T')}{q(T' \mid T)}
 	= \frac{P_{\mathrm{prune}}(T')}{P_{\mathrm{grow}}(T)} \cdot
-	\frac{|G(T)|}{|P(T')|} \cdot
+	\frac{W(T)}{w_\eta\,|P(T')|} \cdot
 	\frac{e_\eta}{s_v} \cdot n_{\mathrm{cut}}(\eta, v),
 \end{equation}
 with $P_{\mathrm{grow}}, P_{\mathrm{prune}} \in \{\frac{1}{2}, 1\}$ as just
-described. In bartz the variable is drawn by \texttt{choose\_variable} in
-\texttt{mcmcstep/\_moves.py}, a categorical draw on \texttt{Forest.log\_s}
-with the ineligible variables masked out (\texttt{categorical\_exclude}).
+described. In bartz the leaf is drawn by \texttt{choose\_leaf} in
+\texttt{mcmcstep/\_moves.py}, which returns $w_\eta / W(T)$ as
+\texttt{prob\_choose}, and the variable by \texttt{choose\_variable}, a
+categorical draw on \texttt{Forest.log\_s} with the ineligible variables
+masked out (\texttt{categorical\_exclude}).
 
 \paragraph{Combined.}
 Multiplying \eqref{eq:mv-prior-ratio-grow} and
 \eqref{eq:mv-trans-ratio-grow}, the rule factors $s_v / e_\eta$ and
 $1/n_{\mathrm{cut}}(\eta, v)$ cancel, since the proposal draws the rule from
-its prior, leaving the standard CGM form:
+its prior:
 \begin{equation}
 	\label{eq:mv-nonlk-grow}
 	\boxed{
 		\frac{q(T \mid T') p(T')}{q(T' \mid T) p(T)}
 		= \frac{P_{\mathrm{prune}}(T')}{P_{\mathrm{grow}}(T)} \cdot
-		\frac{|G(T)|}{|P(T')|} \cdot
+		\frac{W(T)}{w_\eta\,|P(T')|} \cdot
 		\frac{p_{d_\eta}}{1 - p_{d_\eta}} \cdot
 		(1 - p_{d_\eta+1})^{2}.
 	}
 \end{equation}
-This non-likelihood factor depends only on the tree topology and the CGM
-prior, not on the leaf or noise model nor on $\vs$. It is precisely
+This non-likelihood factor depends only on the tree topology, the CGM prior,
+and the leaf weights, not on the leaf or noise model nor on $\vs$. With
+$w \equiv 1$ it is the standard CGM form, $W(T) / w_\eta = |G(T)|$; with the
+bartz default $w_\eta = p_{d_\eta}$ the $p_{d_\eta}$ cancels. It is precisely
 \texttt{Moves.log\_trans\_prior\_ratio}: \texttt{compute\_partial\_ratio} in
 \texttt{mcmcstep/\_moves.py} computes
-$|G(T)| / (P_{\mathrm{grow}}(T) |P(T')|)$ (the variable / cutpoint
-cancellation is the comment ``the transition and prior ratios also contain
-factors num\_available\_split * num\_available\_var * s[var], but they cancel
-out''), and \texttt{complete\_ratio} in \texttt{mcmcstep/\_step.py}
-multiplies in $P_{\mathrm{prune}}(T')$ and the two prior factors.
+$1 / (P_{\mathrm{grow}}(T)\,\texttt{prob\_choose}\,|P(T')|)$ (the variable /
+cutpoint cancellation is the comment ``the transition and prior ratios also
+contain factors num\_available\_split * num\_available\_var * s[var], but
+they cancel out''), and \texttt{complete\_ratio} in
+\texttt{mcmcstep/\_step.py} multiplies in $P_{\mathrm{prune}}(T')$ and the
+two prior factors. The count $|G(T)|$ (\texttt{Moves.num\_growable}) enters
+only through $P_{\mathrm{prune}}(T')$, which is $1/2$ iff $T'$ has a growable
+leaf.
 
 \subsection{The PRUNE move}
 \label{sec:mv-prune}
@@ -1233,6 +1247,8 @@ variable uniformly at random.
 			            \item \texttt{Forest.leaf\_tree} holds $\vmu_\ell$
 			                  and \texttt{Forest.leaf\_prior\_cov\_inv} is
 			                  $\mLamm$.
+			            \item \texttt{Forest.p\_propose\_grow} is the leaf
+			                  weight $w$ of \S\ref{sec:mv-grow}.
 			            \item \texttt{Forest.prec\_tree} holds $\mN_\ell$;
 			                  in the \texttt{\_mv} and \texttt{\_uv} paths
 			                  \texttt{Forest.count\_tree} holds $n_\ell$ in

@@ -854,8 +854,8 @@ $n_{\eta_R} < \nminleaf$, which is just the MH acceptance of a proposal
 landing outside the support. This veto never fires on a PRUNE from a tree in
 the support, since the two leaves it merges already meet the threshold. In
 bartz, \texttt{Forest.affluence\_tree} is the mask of $G(T)$,
-\texttt{Moves.lrt\_affluent} holds its would-be entries at
-$\eta_L, \eta_R, \eta$ after the move, and
+\texttt{Moves.lrt\_affluent} holds the values the mask would take at
+$\eta_L, \eta_R, \eta$ were each of them a leaf, and
 \texttt{accept\_moves\_parallel\_stage} in \texttt{mcmcstep/\_step.py}
 applies the veto by clearing \texttt{Moves.allowed}.
 
@@ -885,9 +885,10 @@ cutpoint cancellation is the comment ``the transition and prior ratios also
 contain factors num\_available\_split * num\_available\_var * s[var], but
 they cancel out''), and \texttt{complete\_ratio} in
 \texttt{mcmcstep/\_step.py} multiplies in $P_{\mathrm{prune}}(T')$ and the
-two prior factors. The count $|G(T)|$ (\texttt{Moves.num\_growable}) enters
-only through $P_{\mathrm{prune}}(T')$, which is $1/2$ iff $T'$ has a growable
-leaf; \texttt{complete\_ratio} checks this with the count-aware
+two prior factors. $W(T)$ is folded into \texttt{prob\_choose}, so the
+count $|G(T)|$ (\texttt{Moves.num\_growable}) enters the code only through
+$P_{\mathrm{prune}}(T')$, which is $1/2$ iff $T'$ has a growable leaf;
+\texttt{complete\_ratio} checks this with the count-aware
 \texttt{Moves.lrt\_affluent} for the children and \texttt{num\_growable}
 for the other leaves.
 

@@ -130,6 +130,7 @@ timeout_method = "thread"  # when jax hangs, signals do not work
 [tool.coverage.run]
 branch = true
 source_pkgs = ["bartz", "tests"]
+omit = ["tests/_memtrace.py"]
 
 [tool.coverage.report]
 show_missing = true

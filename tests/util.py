@@ -24,8 +24,10 @@
 
 """Functions intended to be shared across the test suite."""
 
+import math
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
+from functools import partial
 from operator import ge, le
 from os import getpid, kill
 from signal import SIGINT
@@ -34,10 +36,10 @@ from time import monotonic
 from typing import Any, TypeVar
 
 import numpy as np
+from jax import jit, random
 from jax import numpy as jnp
-from jax import random
 from jax.scipy.special import logit
-from jaxtyping import Array, Float, Shaped
+from jaxtyping import Array, Float, Float32, Shaped
 from jaxtyping import ArrayLike as JaxArrayLike
 from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
 from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
@@ -125,6 +127,42 @@ def rerun_on_gpu(*_: object) -> bool:
     return get_default_device().platform == 'gpu'
 
 
+@partial(jit, static_argnums=1)
+def chain_deviation_norms(
+    x: Shaped[Array, '*shape'], chain_axis: int
+) -> tuple[Float32[Array, ''], Float32[Array, '']]:
+    """Return the norms needed to check that the chains in `x` differ.
+
+    The comparison term is the mean over the chains, broadcast back to the shape
+    of `x`. The norms are computed on device and without materializing the
+    broadcast because the trace leaves reach ~1 GB, and copying them around to
+    reduce them to two scalars costs several times as much.
+
+    Parameters
+    ----------
+    x
+        An array with a chain axis.
+    chain_axis
+        The index of the chain axis.
+
+    Returns
+    -------
+    dev_norm : Float32[Array, '']
+        The norm of the deviation of `x` from its mean over the chains.
+    ref_norm : Float32[Array, '']
+        The norm of the broadcast mean.
+    """
+    # widen so a reduced-precision leaf (e.g. float16 leaf_tree) and its mean
+    # share a dtype
+    x = x.astype(jnp.float32)
+    mean = x.mean(chain_axis, keepdims=True)
+    dev_norm = jnp.linalg.norm(x - mean)
+    # broadcasting the mean over the chain axis repeats it, which multiplies the
+    # sum of squares by the number of chains
+    ref_norm = math.sqrt(x.shape[chain_axis]) * jnp.linalg.norm(mean)
+    return dev_norm, ref_norm
+
+
 def assert_close_matrices(
     actual: Shaped[ArrayLike, '*shape'],
     desired: Shaped[ArrayLike, '*shape'],
@@ -197,32 +235,82 @@ def assert_close_matrices(
             actual = actual.reshape(-1, n)
             desired = desired.reshape(-1, n)
 
-        if tozero:
-            expr = 'actual'
-            ref = 'zero'
-        else:
-            expr = 'actual - desired'
-            ref = 'desired'
-
-        if negate:
-            cond = 'different'
-            op = ge
-        else:
-            cond = 'close'
-            op = le
-
+        expr = 'actual' if tozero else 'actual - desired'
         dnorm = linalg.norm(desired, ord)
         adnorm = linalg.norm(eval(expr), ord)  # noqa: S307, expr is a literal
-        ratio = adnorm / dnorm if dnorm else np.nan
 
-        msg = f"""{err_msg}\
+        assert_close_matrices_given_norms(
+            adnorm,
+            dnorm,
+            shape=desired.shape,
+            rtol=rtol,
+            atol=atol,
+            tozero=tozero,
+            negate=negate,
+            ord=ord,
+            err_msg=err_msg,
+        )
+
+
+def assert_close_matrices_given_norms(
+    adnorm: float,
+    dnorm: float,
+    *,
+    shape: tuple[int, ...],
+    rtol: float = 0.0,
+    atol: float = 0.0,
+    tozero: bool = False,
+    negate: bool = False,
+    ord: int | float | str | None = 2,  # noqa: A002
+    err_msg: str = '',
+) -> None:
+    """
+    Check the norms of two matrices satisfy the `assert_close_matrices` condition.
+
+    Use this instead of `assert_close_matrices` when computing the norms as it
+    does would use too much memory, e.g., on multi-GB arrays, where materializing
+    the difference and upcasting it to float64 costs many times the input.
+
+    Parameters
+    ----------
+    adnorm
+        The norm of ``actual - desired``, or of ``actual`` if `tozero`.
+    dnorm
+        The norm of ``desired``.
+    shape
+        The shape of the compared matrices, used in the error message.
+    rtol
+    atol
+    tozero
+    negate
+    ord
+    err_msg
+        See `assert_close_matrices`.
+    """
+    if tozero:
+        expr = 'actual'
+        ref = 'zero'
+    else:
+        expr = 'actual - desired'
+        ref = 'desired'
+
+    if negate:
+        cond = 'different'
+        op = ge
+    else:
+        cond = 'close'
+        op = le
+
+    ratio = adnorm / dnorm if dnorm else np.nan
+
+    msg = f"""{err_msg}\
 matrices actual and {ref} are not {cond} enough in {ord}-norm
-matrix shape: {desired.shape}
+matrix shape: {shape}
 norm(desired) = {dnorm:.2g}
 norm({expr}) = {adnorm:.2g}  (atol = {atol:.2g})
 ratio = {ratio:.2g}  (rtol = {rtol:.2g})"""
 
-        assert op(adnorm, atol + rtol * dnorm), msg
+    assert op(adnorm, atol + rtol * dnorm), msg
 
 
 def assert_different_matrices(

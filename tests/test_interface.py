@@ -135,7 +135,8 @@ from tests.util import (
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
-    assert_different_matrices,
+    assert_close_matrices_given_norms,
+    chain_deviation_norms,
     clipped_logit,
     condf,
     nnone,
@@ -859,15 +860,18 @@ class TestWithCachedBart:
                     )
                 ):
                     return
-                if x is not None and chain_axis is not None:
-                    # widen first so a reduced-precision leaf (e.g. float16
-                    # leaf_tree) and its mean reference share a dtype
-                    x = x.astype(jnp.float32)
-                    ref = jnp.broadcast_to(x.mean(chain_axis, keepdims=True), x.shape)
-                    assert_different_matrices(
-                        x,
-                        ref,
-                        reduce_rank=True,
+                if x is not None and chain_axis is not None and x.size:
+                    dev_norm, ref_norm = chain_deviation_norms(x, chain_axis)
+                    # the shape `assert_close_matrices` would report after
+                    # collapsing the leading axes
+                    shape = (
+                        (x.size // x.shape[-1], x.shape[-1]) if x.ndim > 2 else x.shape
+                    )
+                    assert_close_matrices_given_norms(
+                        dev_norm.item(),
+                        ref_norm.item(),
+                        shape=shape,
+                        negate=True,
                         ord='fro' if x.ndim >= 2 else 2,
                         atol=0,
                         err_msg=f'chain samples are not different for {str_path}\n',

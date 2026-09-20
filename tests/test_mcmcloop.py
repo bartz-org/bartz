@@ -30,7 +30,7 @@ from functools import partial
 from typing import Any, Literal
 
 import pytest
-from equinox import filter_jit
+from equinox import filter_jit, tree_at
 from jax import (
     NamedSharding,
     block_until_ready,
@@ -44,7 +44,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Shaped, UInt8
+from jaxtyping import Array, Key, Shaped, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import (
@@ -63,7 +63,7 @@ from bartz.mcmcloop import (
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._loop import _inner_loop_counter
-from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal
+from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.testing import QuantizedData, gen_data
 from tests.util import assert_array_equal, assert_close_matrices, nnone
@@ -384,6 +384,23 @@ class TestRunMcmc:
         tree.map(assert_trace_close, final_whole, final_chunked)
         tree.map(assert_trace_close, main_whole, main_chunked)
         tree.map(assert_trace_close, burnin_whole, burnin_chunked)
+
+
+def test_custom_step(keys: split) -> None:
+    """Check `run_mcmc` drives a user-provided step function."""
+
+    def double_counting_step(key: Key[Array, ''], state: State) -> State:
+        state = step(key, state)
+        return tree_at(
+            lambda s: s.config.steps_done, state, state.config.steps_done + 1
+        )
+
+    n_burn, n_save = 2, 3
+    with debug_key_reuse(False):
+        final_state, *_ = run_mcmc(
+            keys.pop(), simple_init(), n_save, n_burn=n_burn, step=double_counting_step
+        )
+    assert_array_equal(final_state.config.steps_done, jnp.int32(2 * (n_burn + n_save)))
 
 
 @pytest.mark.parametrize('matches', [True, False])

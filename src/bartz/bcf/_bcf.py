@@ -244,8 +244,7 @@ class bcf(eqx.Module):
     _main_trace: Any
     _burnin_trace: Any
     _tau_0_trace: Any
-    _b0_trace: Any
-    _b1_trace: Any
+    _b_trace: Any
     _leaf_prior_cov_inv_mu_trace: Any
     _leaf_prior_cov_inv_tau_trace: Any
     _x_train_fmt: Any = eqx.field(static=True, default=None)
@@ -468,8 +467,7 @@ class bcf(eqx.Module):
         self._mcmc_state = final_state
         self._binner = binner
         self._tau_0_trace = final_carry.tau_0_main_trace
-        self._b0_trace = final_carry.b0_main_trace
-        self._b1_trace = final_carry.b1_main_trace
+        self._b_trace = final_carry.b_main_trace
         self._leaf_prior_cov_inv_mu_trace = final_carry.leaf_prior_cov_inv_mu_main_trace
         self._leaf_prior_cov_inv_tau_trace = (
             final_carry.leaf_prior_cov_inv_tau_main_trace
@@ -498,8 +496,7 @@ class bcf(eqx.Module):
         cls,
         binner: Any,  # noqa: ANN401
         tau_0_trace: Any,  # noqa: ANN401
-        b0_trace: Any,  # noqa: ANN401
-        b1_trace: Any,  # noqa: ANN401
+        b_trace: Any,  # noqa: ANN401
         main_trace: Any,  # noqa: ANN401
         burnin_trace: Any = None,  # noqa: ANN401
         mcmc_state: Any = None,  # noqa: ANN401
@@ -521,10 +518,8 @@ class bcf(eqx.Module):
             The binner instance for continuous predictor transforms.
         tau_0_trace
             Posterior trace of the tau_0 intercept.
-        b0_trace
-            Posterior trace of the b0 control scaling factor.
-        b1_trace
-            Posterior trace of the b1 treatment scaling factor.
+        b_trace
+            Posterior trace of the adaptive coding weights, columns b0 and b1.
         main_trace
             Posterior traces for mu and tau forests.
         burnin_trace
@@ -559,8 +554,7 @@ class bcf(eqx.Module):
         object.__setattr__(model, '_main_trace', main_trace)
         object.__setattr__(model, '_burnin_trace', burnin_trace)
         object.__setattr__(model, '_tau_0_trace', tau_0_trace)
-        object.__setattr__(model, '_b0_trace', b0_trace)
-        object.__setattr__(model, '_b1_trace', b1_trace)
+        object.__setattr__(model, '_b_trace', b_trace)
         object.__setattr__(
             model, '_leaf_prior_cov_inv_mu_trace', leaf_prior_cov_inv_mu_trace
         )
@@ -605,8 +599,8 @@ class bcf(eqx.Module):
 
         # Save scalar traces
         state['tau_0_trace'] = np.asarray(self._tau_0_trace)
-        state['b0_trace'] = np.asarray(self._b0_trace)
-        state['b1_trace'] = np.asarray(self._b1_trace)
+        state['b0_trace'] = np.asarray(self._b_trace[:, 0])
+        state['b1_trace'] = np.asarray(self._b_trace[:, 1])
 
         # Save standardization metadata
         state['standardize'] = np.array(self._standardize)
@@ -666,8 +660,7 @@ class bcf(eqx.Module):
 
             # Scalar traces
             tau_0_trace = jnp.asarray(data['tau_0_trace'])
-            b0_trace = jnp.asarray(data['b0_trace'])
-            b1_trace = jnp.asarray(data['b1_trace'])
+            b_trace = jnp.stack([data['b0_trace'], data['b1_trace']], axis=1)
 
             # Standardization metadata
             standardize = bool(data.get('standardize', False))
@@ -708,8 +701,7 @@ class bcf(eqx.Module):
             model = cls._from_saved_state(
                 binner=binner,
                 tau_0_trace=tau_0_trace,
-                b0_trace=b0_trace,
-                b1_trace=b1_trace,
+                b_trace=b_trace,
                 main_trace=main_trace,
                 x_train_fmt=x_train_fmt,
                 standardize=standardize,
@@ -781,8 +773,8 @@ class bcf(eqx.Module):
         # Add the global tau_0 intercept
         tau_latent = tau_latent + self._tau_0_trace[:, jnp.newaxis]
 
-        b0_expanded = self._b0_trace[:, jnp.newaxis]
-        b1_expanded = self._b1_trace[:, jnp.newaxis]
+        b0_expanded = self._b_trace[:, 0, jnp.newaxis]
+        b1_expanded = self._b_trace[:, 1, jnp.newaxis]
         # Control mean: mu(X) + b_0 * (tau(X) + tau_0)
         mu_adjusted = mu_latent + b0_expanded * tau_latent
         # Compute CATE via adaptive coding difference

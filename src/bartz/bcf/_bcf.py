@@ -170,11 +170,13 @@ class bcf(eqx.Module):
     pihat_train
         The estimated propensity scores. If provided, appended to `x_train`.
     x_test
-        The test predictors.
+        The test predictors. If provided, predictions at these points are
+        computed and stored in `mu_test` and `tau_test`.
     z_test
-        The test treatment assignment.
+        The test treatment assignment (0 or 1). If provided together with
+        `x_test`, the outcome prediction is stored in `yhat_test`.
     pihat_test
-        The test propensity scores.
+        The test propensity scores. Required if `pihat_train` is used.
     include_pihat_in_mu
         Whether to include propensity scores in the prognostic forest.
     include_pihat_in_tau
@@ -237,6 +239,9 @@ class bcf(eqx.Module):
     ValueError
         If binary outcome is specified but `y_train` contains values other than 0 or 1.
         If the format of `x_test` does not match `x_train` format.
+        If `z_test` or `pihat_test` is passed without `x_test`.
+        If `pihat_train` is used but `pihat_test` is missing.
+        If `z_test` or `pihat_test` does not match the length of `x_test`.
     """
 
     _mcmc_state: Any
@@ -253,6 +258,9 @@ class bcf(eqx.Module):
     _y_std: Float32[ArrayLike, ''] | float = eqx.field(default=1.0)
     _outcome_type: str = eqx.field(static=True, default='continuous')
     _offset: Float32[ArrayLike, ''] | float = eqx.field(default=0.0)
+    _mu_test: Float32[Array, 'ndpost m'] | None = eqx.field(default=None)
+    _tau_test: Float32[Array, 'ndpost m'] | None = eqx.field(default=None)
+    _yhat_test: Float32[Array, 'ndpost m'] | None = eqx.field(default=None)
 
     def __init__(  # noqa: C901, PLR0915
         self,
@@ -329,18 +337,42 @@ class bcf(eqx.Module):
         if pihat_train is not None:
             pihat_train = _process_response_input(pihat_train)
 
-        if x_test is not None:
-            x_test, x_test_fmt = _process_bcf_predictor_input(x_test)
+        if x_test is None:
+            if z_test is not None or pihat_test is not None:
+                msg = '`z_test` and `pihat_test` require `x_test`.'
+                raise ValueError(msg)
+        else:
+            x_test_binned_fmt, x_test_fmt = _process_bcf_predictor_input(x_test)
             if x_test_fmt != self._x_train_fmt:
                 msg = (
                     f'Format of x_test {x_test_fmt} does not match x_train'
                     f' {self._x_train_fmt}'
                 )
                 raise ValueError(msg)
+            if pihat_train is not None and pihat_test is None:
+                msg = '`pihat_test` is required because `pihat_train` was passed.'
+                raise ValueError(msg)
+            _, m = x_test_binned_fmt.shape
             if z_test is not None:
                 z_test = _process_response_input(z_test)
+                (len_z,) = z_test.shape
+                if len_z != m:
+                    msg = f'`z_test` has length {len_z}, but `x_test` has {m} rows.'
+                    raise ValueError(msg)
+                z_test = eqx.error_if(
+                    z_test,
+                    jnp.any((z_test != 0) & (z_test != 1)),
+                    'Values in `z_test` must be 0 or 1.',
+                ).astype(bool)
             if pihat_test is not None:
                 pihat_test = _process_response_input(pihat_test)
+                (len_pihat,) = pihat_test.shape
+                if len_pihat != m:
+                    msg = (
+                        f'`pihat_test` has length {len_pihat}, but `x_test` has'
+                        f' {m} rows.'
+                    )
+                    raise ValueError(msg)
 
         # 2. Append pihat to X to create unified predictor matrix
         x_train_unified = x_train
@@ -490,6 +522,19 @@ class bcf(eqx.Module):
             'mu': final_carry.mu_burnin_trace,
             'tau': final_carry.tau_burnin_trace,
         }
+
+        # 6. Predict at the test points, now that the traces are available
+        if x_test is not None:
+            test_pred = self.predict(x_test, pihat_test=pihat_test)
+            self._mu_test = test_pred['mu']
+            self._tau_test = test_pred['tau']
+            if z_test is not None:
+                if outcome_type == 'binary':
+                    self._yhat_test = jnp.where(
+                        z_test, test_pred['p1'], test_pred['p0']
+                    )
+                else:
+                    self._yhat_test = self._mu_test + z_test * self._tau_test
 
     @classmethod
     def _from_saved_state(
@@ -806,6 +851,24 @@ class bcf(eqx.Module):
         if self._standardize:
             return sigma_internal * self._y_std
         return sigma_internal
+
+    @property
+    def mu_test(self) -> Float32[Array, 'ndpost m'] | None:
+        """The control mean at `x_test` for each MCMC iteration."""
+        return self._mu_test
+
+    @property
+    def tau_test(self) -> Float32[Array, 'ndpost m'] | None:
+        """The treatment effect at `x_test` for each MCMC iteration."""
+        return self._tau_test
+
+    @property
+    def yhat_test(self) -> Float32[Array, 'ndpost m'] | None:
+        """The outcome at `x_test` under `z_test` for each MCMC iteration.
+
+        For binary outcomes this is the probability of y being True.
+        """
+        return self._yhat_test
 
     def predict_potential_outcomes(
         self,

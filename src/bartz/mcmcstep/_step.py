@@ -48,7 +48,7 @@ from bartz._jaxext import (
     vmap_nodoc,
 )
 from bartz._jaxext.random import loggamma, poisson
-from bartz.grove import var_histogram
+from bartz.grove import is_actual_leaf, var_histogram
 from bartz.mcmcstep._moves import Moves, propose_moves, split_range
 from bartz.mcmcstep._reduction import ReductionConfig
 from bartz.mcmcstep._state import (
@@ -92,10 +92,13 @@ def step(key: Key[Array, ''], state: State) -> State:
     state can not be used any more after calling `step`. All this applies
     outside of `jax.jit`.
     """
-    keys = split(key, 4)
+    keys = split(key, 5)
 
     state = step_resid_inexact_integral(state)
     state = step_trees(keys.pop(), state)
+
+    if state.forest.leaf_prior_cov_inv.nu is not None:
+        state = step_leaf_prior_cov_inv(keys.pop(), state)
 
     if state.z is not None:
         state = step_z(keys.pop(), state)
@@ -439,12 +442,10 @@ def accept_moves_parallel_stage(
     # units, so their common `inv_sdev_unit ** 2` factor is folded into the
     # error precision once here instead
     error_cov_inv = scaled_error_cov_inv(state)
-    assert state.forest.leaf_prior_cov_inv is not None
-    prelf = precompute_leaf_terms(
-        key, prec_trees, error_cov_inv, state.forest.leaf_prior_cov_inv
-    )
+    leaf_prior_cov_inv = state.forest.leaf_prior_cov_inv.value
+    prelf = precompute_leaf_terms(key, prec_trees, error_cov_inv, leaf_prior_cov_inv)
     prelkv = precompute_likelihood_terms(
-        error_cov_inv, state.forest.leaf_prior_cov_inv, prelf, moves
+        error_cov_inv, leaf_prior_cov_inv, prelf, moves
     )
 
     return ParallelStageOut(
@@ -1823,6 +1824,65 @@ def step_error_cov_inv(key: Key[Array, ''], state: State) -> State:
         return _step_error_cov_inv_mv(key, state)
     else:
         return _step_error_cov_inv_diag(key, state)
+
+
+def leaf_scatter(
+    forest: Forest,
+) -> tuple[Int32[Array, ''], Float32[Array, ''] | Float32[Array, 'k k']]:
+    """Count the leaves of the forest and sum their outer products.
+
+    Parameters
+    ----------
+    forest
+        The forest, with no chain axis.
+
+    Returns
+    -------
+    count : Int32[Array, '']
+        The total number of leaves over all trees.
+    scatter : Float32[Array, ''] | Float32[Array, 'k k']
+        The sum over the leaves of the outer product of the values, in data units.
+    """
+    # the values on the dangling children of pruned nodes mirror the parent's,
+    # so mask on the actual leaves only
+    is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(forest.split_tree)
+    count = jnp.sum(is_leaf)
+    leaf_tree = forest.leaf_tree
+    if leaf_tree.ndim == 3:
+        scatter = jnp.einsum(
+            'tan,tbn,tn->ab',
+            leaf_tree,
+            leaf_tree,
+            is_leaf,
+            preferred_element_type=jnp.float32,
+        )
+        scatter *= jnp.outer(forest.leaf_unit, forest.leaf_unit)
+    else:
+        scatter = jnp.einsum(
+            'tn,tn,tn->',
+            leaf_tree,
+            leaf_tree,
+            is_leaf,
+            preferred_element_type=jnp.float32,
+        )
+        scatter *= jnp.square(forest.leaf_unit)
+    return count, scatter
+
+
+@named_call
+def step_leaf_prior_cov_inv(key: Key[Array, ''], state: State) -> State:
+    """MCMC-update the leaf prior precision from its conjugate posterior."""
+    count, scatter = leaf_scatter(state.forest)
+    prec = sample_wishart_posterior(
+        key, state.forest.leaf_prior_cov_inv, count, scatter
+    )
+    return replace(
+        state,
+        forest=replace(
+            state.forest,
+            leaf_prior_cov_inv=replace(state.forest.leaf_prior_cov_inv, value=prec),
+        ),
+    )
 
 
 @named_call

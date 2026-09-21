@@ -603,6 +603,11 @@ class TestWithCachedBart:
                     and bart._mcmc_state.error_cov_inv.nu is None
                 ):
                     return
+                if (
+                    str_path.endswith('.forest.leaf_prior_cov_inv.value')
+                    and bart._mcmc_state.forest.leaf_prior_cov_inv.nu is None
+                ):
+                    return
                 if str_path.endswith('.forest.affluence_tree') and not check_affluence:
                     # without min_points_per_decision_node, affluence_tree only
                     # tracks structural "has admissible split" and may coincide
@@ -877,8 +882,8 @@ def test_scale_shift(kw: dict[str, Any]) -> None:
 
     assert_allclose(bart1.offset, (bart2.offset - offset) / scale, rtol=1e-6, atol=1e-6)
     assert_allclose(
-        nnone(bart1._mcmc_state.forest.leaf_prior_cov_inv),
-        nnone(bart2._mcmc_state.forest.leaf_prior_cov_inv) * scale**2,
+        bart1._mcmc_state.forest.leaf_prior_cov_inv.value,
+        bart2._mcmc_state.forest.leaf_prior_cov_inv.value * scale**2,
         rtol=1e-6,
         atol=0,
     )
@@ -1025,7 +1030,7 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
         else:
             assert bart.offset == 0
     assert_allclose(
-        nnone(bart._mcmc_state.forest.leaf_prior_cov_inv),
+        bart._mcmc_state.forest.leaf_prior_cov_inv.value,
         (2**2 * get_with_default(kw, 'ntree')) / tau_num**2,
         rtol=1e-6,
     )
@@ -1303,7 +1308,7 @@ def sample_prior_like(
         len(bart._mcmc_state.forest.leaf_tree),
         bart._mcmc_state.forest.max_split,
         p_nonterminal,
-        jnp.sqrt(jnp.reciprocal(nnone(bart._mcmc_state.forest.leaf_prior_cov_inv))),
+        jnp.sqrt(jnp.reciprocal(bart._mcmc_state.forest.leaf_prior_cov_inv.value)),
     )
 
     with subtests.test('check prior trees'):

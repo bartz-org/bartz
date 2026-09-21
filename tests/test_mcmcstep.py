@@ -126,8 +126,11 @@ from bartz.mcmcstep._step import (
     _sample_wishart_bartlett,
     _step_error_cov_inv_diag,
     _step_error_cov_inv_mv,
+    leaf_scatter,
     sample_s_augmentation,
+    sample_wishart_posterior,
     step_error_cov_inv,
+    step_leaf_prior_cov_inv,
     step_s,
     step_trees,
     step_z,
@@ -1612,7 +1615,8 @@ class TestMultichain:
                 '.forest.p_propose_grow',
                 '.forest.min_points_per_decision_node',
                 '.forest.min_points_per_leaf',
-                '.forest.leaf_prior_cov_inv',
+                '.forest.leaf_prior_cov_inv.nu',
+                '.forest.leaf_prior_cov_inv.rate',
                 '.forest.a',
                 '.forest.b',
                 '.forest.rho',
@@ -2154,6 +2158,90 @@ def mcmcstep_data(mcmcstep_data_shape: tuple[int, int]) -> MCMCStepData:
     y = jnp.linspace(-1, 1, n)
     max_split = jnp.full(p, numcut, jnp.uint32)
     return MCMCStepData(X, y, max_split)
+
+
+class TestStepLeafPriorCovInv:
+    """Test the Gibbs update of the leaf prior precision."""
+
+    @pytest.fixture(params=['uv', 'mv'])
+    def init_kwargs(self, request: FixtureRequest, mcmcstep_data: MCMCStepData) -> dict:
+        """Arguments to `init` for a univariate or bivariate regression."""
+        X, y, max_split = mcmcstep_data
+        kw: dict = dict(
+            X=X,
+            max_split=max_split,
+            num_trees=NUM_TREES,
+            p_nonterminal=jnp.array([0.9, 0.5]),
+        )
+        # a precision of 4 gives a leaf unit of 1/2, which exercises the
+        # conversion of the leaves to data units
+        if request.param == 'mv':
+            k = 2
+            eye = jnp.eye(k)
+            return dict(
+                kw,
+                y=jnp.stack([y, -y]),
+                offset=jnp.zeros(k),
+                leaf_prior_cov_inv=4.0 * eye,
+                error_cov_inv=Wishart(nu=2.0, rate=2.0 * eye, value=eye),
+            )
+        else:
+            return dict(
+                kw,
+                y=y,
+                offset=0.0,
+                leaf_prior_cov_inv=4.0,
+                error_cov_inv=Wishart(nu=2.0, rate=2.0, value=1.0),
+            )
+
+    def test_closed_form(self, keys: split, init_kwargs: dict) -> None:
+        """The update on a hand-built forest matches the conjugate formula."""
+        state = init(**init_kwargs)
+
+        # tree 0: root split, leaves 2, 3
+        # tree 2: nodes 1 and 2 split, leaves 3, 4, 5 (4, 5 at the bottom level)
+        # other trees: root leaf
+        split_tree = jnp.zeros_like(state.forest.split_tree)
+        split_tree = split_tree.at[0, 1].set(1)
+        split_tree = split_tree.at[2, 1:3].set(1)
+        leaves = [(0, 2), (0, 3), (1, 1), (2, 3), (2, 4), (2, 5), (3, 1), (4, 1)]
+
+        # fill all nodes, non-leaves included, to check they are masked out
+        leaf_tree = random.normal(keys.pop(), state.forest.leaf_tree.shape)
+
+        # put a Wishart prior on the (fixed) leaf precision, keeping its value
+        rate = 0.5 * jnp.asarray(init_kwargs['leaf_prior_cov_inv'])
+        prior = replace(
+            state.forest.leaf_prior_cov_inv, nu=jnp.float32(3.0 + rate.ndim), rate=rate
+        )
+
+        state = replace(
+            state,
+            forest=replace(
+                state.forest,
+                split_tree=split_tree,
+                leaf_tree=leaf_tree,
+                leaf_prior_cov_inv=prior,
+            ),
+        )
+
+        values = jnp.stack([leaf_tree[t, ..., i] for t, i in leaves])
+        values *= state.forest.leaf_unit
+        if values.ndim == 2:
+            expected_scatter = values.T @ values
+        else:
+            expected_scatter = jnp.sum(jnp.square(values))
+
+        count, scatter = leaf_scatter(state.forest)
+        assert count == len(leaves)
+        assert_close_matrices(scatter, expected_scatter, rtol=1e-6)
+
+        key = keys.pop()
+        actual = step_leaf_prior_cov_inv(key, state).forest.leaf_prior_cov_inv.value
+        expected = sample_wishart_posterior(
+            random.clone(key), prior, jnp.int32(len(leaves)), expected_scatter
+        )
+        assert_close_matrices(actual, expected, rtol=1e-6)
 
 
 @pytest.mark.parametrize('offset', [-30.0, 30.0])

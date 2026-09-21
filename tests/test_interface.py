@@ -846,6 +846,10 @@ class TestWithCachedBart:
                         str_path.endswith(('.error_cov_inv', '.error_cov_inv.value'))
                         and bart._mcmc_state.error_cov_inv.nu is None
                     )
+                    or (
+                        str_path.endswith('.forest.leaf_prior_cov_inv.value')
+                        and bart._mcmc_state.forest.leaf_prior_cov_inv.nu is None
+                    )
                     # means over datapoints (and steps): they concentrate (and
                     # round to a power of two), so the chains legitimately
                     # nearly coincide
@@ -1482,7 +1486,10 @@ def test_accept(bkw: BartKW) -> None:
 def test_leaf_unit(bkw: BartKW) -> None:
     """`leaf_unit` is the marginal prior leaf standard deviation, rounded to a power of two."""
     forest = Bart(**bkw.kw)._mcmc_state.forest
-    cov_inv = nnone(forest.leaf_prior_cov_inv)
+    cov_inv = forest.leaf_prior_cov_inv.value
+    if forest.has_chains:
+        # the prior is fixed, so the value is the same across chains
+        cov_inv = cov_inv[0, ...]
     if cov_inv.ndim:
         marginal_std = jnp.sqrt(jnp.diagonal(jnp.linalg.inv(cov_inv)))
     else:  # pragma: no cover, always mv with defaults
@@ -2162,8 +2169,8 @@ def test_scale_shift(bkw: BartKW) -> None:
     cov_scale = masked_scale * masked_scale.T
 
     assert_close_matrices(
-        nnone(bart1._mcmc_state.forest.leaf_prior_cov_inv),
-        nnone(bart2._mcmc_state.forest.leaf_prior_cov_inv) * cov_scale,
+        bart1._mcmc_state.forest.leaf_prior_cov_inv.value,
+        bart2._mcmc_state.forest.leaf_prior_cov_inv.value * cov_scale,
         rtol=1e-6,
     )
 
@@ -2386,7 +2393,7 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
 
     # check leaf_prior_cov_inv
     expected_cov_inv = (2**2 * bkw.num_trees) / tau_num**2
-    leaf_prior_cov_inv = nnone(bart._mcmc_state.forest.leaf_prior_cov_inv)
+    leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv.value
     if leaf_prior_cov_inv.ndim == 2:  # pragma: no branch, always mv with defaults
         expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
     assert_close_matrices(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
@@ -2725,7 +2732,7 @@ def sample_prior_like(
         len(forest.leaf_tree),
         forest.max_split,
         p_nonterminal,
-        jnp.sqrt(jnp.reciprocal(nnone(forest.leaf_prior_cov_inv))),
+        jnp.sqrt(jnp.reciprocal(forest.leaf_prior_cov_inv.value)),
         **sparse_kw,
     )
 
@@ -3635,9 +3642,15 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
 
     # Prior parameters (scalar floats, only equal up to GPU rounding)
     assert_allclose(bart_uv.offset, bart_mv.offset.squeeze(0), rtol=1e-6)
-    assert_allclose(
-        nnone(state_uv.forest.leaf_prior_cov_inv),
-        nnone(state_mv.forest.leaf_prior_cov_inv).reshape(()),
+    assert_close_matrices(
+        chain_to_axis(
+            state_uv.forest.leaf_prior_cov_inv.value,
+            uv_axes.forest.leaf_prior_cov_inv.value,
+        ),
+        chain_to_axis(
+            state_mv.forest.leaf_prior_cov_inv.value,
+            mv_axes.forest.leaf_prior_cov_inv.value,
+        ).squeeze((-2, -1)),
         rtol=1e-6,
     )
     if outcome_type == 'continuous':

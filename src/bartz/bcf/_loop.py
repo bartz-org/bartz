@@ -153,7 +153,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     if state.leaf_prior_cov_inv_shape_mu is not None:
         assert state.leaf_prior_cov_inv_rate_mu is not None
         state = eqx.tree_at(
-            lambda s: s.forest.leaf_prior_cov_inv,
+            lambda s: s.forest.leaf_prior_cov_inv.value,
             state,
             _sample_leaf_prior_cov_inv(
                 keys.pop(),
@@ -240,7 +240,7 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     if state.leaf_prior_cov_inv_shape_tau is not None:
         assert state.leaf_prior_cov_inv_rate_tau is not None
         state = eqx.tree_at(
-            lambda s: s.forest.leaf_prior_cov_inv,
+            lambda s: s.forest.leaf_prior_cov_inv.value,
             state,
             _sample_leaf_prior_cov_inv(
                 keys.pop(),
@@ -411,10 +411,10 @@ def run_bcf_mcmc(
         new_b1_m_trace = carry.b1_main_trace.at[main_idx].set(new_state.b1, mode='drop')
         new_leaf_prior_cov_inv_mu_m_trace = carry.leaf_prior_cov_inv_mu_main_trace.at[
             main_idx
-        ].set(new_state.forest.leaf_prior_cov_inv, mode='drop')
+        ].set(new_state.forest.leaf_prior_cov_inv.value, mode='drop')
         new_leaf_prior_cov_inv_tau_m_trace = carry.leaf_prior_cov_inv_tau_main_trace.at[
             main_idx
-        ].set(new_state.forest_tau.leaf_prior_cov_inv, mode='drop')
+        ].set(new_state.forest_tau.leaf_prior_cov_inv.value, mode='drop')
 
         return _BCFCarry(
             state=new_state,

@@ -56,6 +56,7 @@ from bartz.mcmcstep._state import (
     Forest,
     State,
     StepConfig,
+    Wishart,
     chol_with_gersh,
     round_to_pow2,
     scaled_error_cov_inv,
@@ -1678,6 +1679,59 @@ def _sample_wishart_bartlett(
     return T @ T.T
 
 
+def sample_wishart_posterior(
+    key: Key[Array, ''],
+    prior: Wishart,
+    count: Int32[Array, ''] | Int32[Array, ' k'],
+    scatter: Float32[Array, ''] | Float32[Array, ' k'] | Float32[Array, 'k k'],
+) -> Float32[Array, ''] | Float32[Array, 'k k']:
+    """Draw a precision matrix from its conjugate posterior.
+
+    Parameters
+    ----------
+    key
+        A jax random key.
+    prior
+        The prior on the precision; `Wishart.nu` and `Wishart.rate` must be set.
+    count
+        The number of observations. It can vary per component only with a
+        `DiagWishart` prior. Fractional counts are not supported.
+    scatter
+        The sum of the outer products of the observations: the full matrix with
+        a dense `Wishart` prior, only its diagonal with a `DiagWishart`, a
+        scalar sum of squares in the univariate case.
+
+    Returns
+    -------
+    A draw from the posterior, with the same shape as `Wishart.rate`.
+    """
+    assert prior.nu is not None
+    assert prior.rate is not None
+
+    if prior.rate.ndim == 2 and not isinstance(prior, DiagWishart):
+        assert scatter.shape == prior.rate.shape
+        return _sample_wishart_bartlett(key, prior.nu + count, prior.rate + scatter)
+    else:
+        # independent gamma per component; the variance df matches the inverse
+        # wishart marginals
+        marginal_nu = prior.inv_wishart_marginal_nu
+        assert marginal_nu is not None
+        alpha = marginal_nu / 2 + count / 2
+
+        kshape = prior.rate.shape[:1]
+        assert scatter.shape == kshape
+        rate = jnp.diagonal(prior.rate) if kshape else prior.rate
+        beta = rate / 2 + scatter / 2
+
+        # draw the gamma from the first of a split, mirroring the Bartlett
+        # sampler in the dense path so the two branches coincide at k=1
+        keys = split(key)
+        prec = jnp.exp(loggamma(keys.pop(), alpha, kshape)) / beta
+        if kshape:
+            prec = jnp.diag(prec)
+        return prec
+
+
 def step_resid_eff_scale(
     state: State,
     norm2: Float32[Array, ''] | Float32[Array, ' k'],
@@ -1706,19 +1760,12 @@ def step_resid_eff_scale(
 
 
 def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
-    assert state.error_cov_inv.nu is not None
-    assert state.error_cov_inv.rate is not None
-
     # keep the residuals in their stored (narrow) dtype and resid_unit units;
     # the reduction accumulates in float32 and its (k, k) result is rescaled to
     # data units, so no n-sized float32 array is ever materialized
     resid = state.resid
     if state.inv_sdev_scale is not None:
         resid *= state.inv_sdev_scale
-
-    # we take the max as a way to take any of the in this case equal values in
-    # n_non_missing
-    df_post = state.error_cov_inv.nu + jnp.max(state.n_non_missing)
 
     # unit of the stored precision-scaled residuals: `resid` is in `resid_unit`
     # units and `inv_sdev_scale` in `inv_sdev_unit` units (1 without error
@@ -1730,17 +1777,18 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
     ) * jnp.outer(scale, scale)
     if state.config.data_sharded:
         rrt = lax.psum(rrt, 'data')
-    scale_post = state.error_cov_inv.rate + rrt
 
-    prec = _sample_wishart_bartlett(key, df_post, scale_post)
+    # we take the max as a way to take any of the in this case equal values in
+    # n_non_missing
+    count = jnp.max(state.n_non_missing)
+
+    prec = sample_wishart_posterior(key, state.error_cov_inv, count, rrt)
     state = step_resid_eff_scale(state, jnp.diagonal(rrt), state.sum_diag_prec_scale)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
 def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     """Per-component inverse-gamma update for univariate, mixed, and partial-missing paths."""
-    assert state.error_cov_inv.rate is not None
-
     # keep the residuals in their stored (narrow) dtype and resid_unit units;
     # the reduction accumulates in float32 and its small result is rescaled to
     # data units, so no n-sized float32 array is ever materialized
@@ -1748,33 +1796,20 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     if state.inv_sdev_scale is not None:
         resid *= state.inv_sdev_scale
 
-    # alpha; the variance df matches the inverse wishart marginals
-    marginal_nu = state.error_cov_inv.inv_wishart_marginal_nu
-    assert marginal_nu is not None
-    alpha = marginal_nu / 2 + state.n_non_missing / 2
-
-    # beta; `resid` is stored in `resid_unit` units and `inv_sdev_scale` in
+    # `resid` is stored in `resid_unit` units and `inv_sdev_scale` in
     # `inv_sdev_unit` units (1 without error scales)
     norm2 = jnp.einsum(
         '...n,...n->...', resid, resid, preferred_element_type=jnp.float32
     ) * jnp.square(state.resid_unit * state.inv_sdev_unit)
     if state.config.data_sharded:
         norm2 = lax.psum(norm2, 'data')
-    scale = state.error_cov_inv.rate
-    kshape = resid.shape[:-1]
-    if kshape:
-        scale = jnp.diag(scale)
-    beta = scale / 2 + norm2 / 2
 
-    # draw the gamma from the first of a split, mirroring the Bartlett sampler
-    # in the multivariate path so the two branches coincide at k=1
-    keys = split(key)
-    samples = jnp.exp(loggamma(keys.pop(), alpha, kshape))
-    prec = samples / beta
+    prec = sample_wishart_posterior(
+        key, state.error_cov_inv, state.n_non_missing, norm2
+    )
     if state.binary_indices is not None:
-        prec = prec.at[state.binary_indices].set(1.0)
-    if kshape:
-        prec = jnp.diag(prec)
+        # the binary components have unit error variance, they have no prior
+        prec = prec.at[state.binary_indices, state.binary_indices].set(1.0)
     state = step_resid_eff_scale(state, norm2, state.sum_diag_prec_scale)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 

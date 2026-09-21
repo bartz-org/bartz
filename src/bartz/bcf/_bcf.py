@@ -529,12 +529,7 @@ class bcf(eqx.Module):
             self._mu_test = test_pred['mu']
             self._tau_test = test_pred['tau']
             if z_test is not None:
-                if outcome_type == 'binary':
-                    self._yhat_test = jnp.where(
-                        z_test, test_pred['p1'], test_pred['p0']
-                    )
-                else:
-                    self._yhat_test = self._mu_test + z_test * self._tau_test
+                self._yhat_test = self._mu_test + z_test * self._tau_test
 
     @classmethod
     def _from_saved_state(
@@ -618,6 +613,8 @@ class bcf(eqx.Module):
         """
         Save the loaded BCF traces to an NPZ archive.
 
+        The test predictions are not saved; recompute them with `predict`.
+
         Parameters
         ----------
         path
@@ -677,6 +674,8 @@ class bcf(eqx.Module):
     def load_npz(cls, path: str | Path) -> 'bcf':
         """
         Load BCF traces from an NPZ archive, bypassing __init__ MCMC.
+
+        `mu_test`, `tau_test` and `yhat_test` are `None` on the loaded model.
 
         Parameters
         ----------
@@ -854,21 +853,37 @@ class bcf(eqx.Module):
 
     @property
     def mu_test(self) -> Float32[Array, 'ndpost m'] | None:
-        """The control mean at `x_test` for each MCMC iteration."""
+        """The control mean at `x_test` for each MCMC iteration.
+
+        On the latent probit scale for binary outcomes.
+        """
         return self._mu_test
 
     @property
     def tau_test(self) -> Float32[Array, 'ndpost m'] | None:
-        """The treatment effect at `x_test` for each MCMC iteration."""
+        """The treatment effect at `x_test` for each MCMC iteration.
+
+        On the latent probit scale for binary outcomes.
+        """
         return self._tau_test
 
     @property
     def yhat_test(self) -> Float32[Array, 'ndpost m'] | None:
         """The outcome at `x_test` under `z_test` for each MCMC iteration.
 
-        For binary outcomes this is the probability of y being True.
+        On the latent probit scale for binary outcomes; see `prob_test`.
         """
         return self._yhat_test
+
+    @property
+    def prob_test(self) -> Float32[Array, 'ndpost m'] | None:
+        """The probability of y being True at `x_test` under `z_test`.
+
+        `None` unless the outcome is binary.
+        """
+        if self._yhat_test is None or self._outcome_type != 'binary':
+            return None
+        return special.ndtr(self._yhat_test)
 
     def predict_potential_outcomes(
         self,

@@ -176,7 +176,7 @@ class bcf(eqx.Module):
         The test treatment assignment (0 or 1). If provided together with
         `x_test`, the outcome prediction is stored in `yhat_test`.
     pihat_test
-        The test propensity scores. Required if `pihat_train` is used.
+        The test propensity scores. Must be passed together with `pihat_train`.
     include_pihat_in_mu
         Whether to include propensity scores in the prognostic forest.
     include_pihat_in_tau
@@ -240,7 +240,7 @@ class bcf(eqx.Module):
         If binary outcome is specified but `y_train` contains values other than 0 or 1.
         If the format of `x_test` does not match `x_train` format.
         If `z_test` or `pihat_test` is passed without `x_test`.
-        If `pihat_train` is used but `pihat_test` is missing.
+        If only one of `pihat_train` and `pihat_test` is passed.
         If `z_test` or `pihat_test` does not match the length of `x_test`.
     """
 
@@ -349,8 +349,8 @@ class bcf(eqx.Module):
                     f' {self._x_train_fmt}'
                 )
                 raise ValueError(msg)
-            if pihat_train is not None and pihat_test is None:
-                msg = '`pihat_test` is required because `pihat_train` was passed.'
+            if (pihat_train is None) != (pihat_test is None):
+                msg = '`pihat_train` and `pihat_test` must be passed together.'
                 raise ValueError(msg)
             _, m = x_test_binned_fmt.shape
             if z_test is not None:

@@ -403,6 +403,23 @@ def test_custom_step(keys: split) -> None:
     assert_array_equal(final_state.config.steps_done, jnp.int32(2 * (n_burn + n_save)))
 
 
+@pytest.mark.parametrize('sharded', [False, True])
+def test_step_must_advance_steps_done(keys: split, sharded: bool) -> None:
+    """Check `run_mcmc` errors out if `step` leaves the step counter in place."""
+    if sharded and get_device_count() < 2:
+        pytest.skip('need at least 2 devices')
+
+    def frozen_step(key: Key[Array, ''], state: State) -> State:
+        new_state = step(key, state)
+        return tree_at(
+            lambda s: s.config.steps_done, new_state, state.config.steps_done
+        )
+
+    kw: dict = dict(num_chains=2, mesh=_make_mesh({'chains': 2})) if sharded else {}
+    with debug_key_reuse(False), pytest.raises(RuntimeError, match='did not increase'):
+        run_mcmc(keys.pop(), simple_init(**kw), 4, n_burn=2, step=frozen_step)
+
+
 @pytest.mark.parametrize('matches', [True, False])
 def test_check_platform_callback(keys: split, matches: bool) -> None:
     """`CheckPlatformCallback` passes on the run platform and raises otherwise."""

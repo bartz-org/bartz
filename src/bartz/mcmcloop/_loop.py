@@ -29,7 +29,7 @@ from collections.abc import Callable, Hashable
 from functools import partial, update_wrapper
 from typing import Any, Generic, NamedTuple, TypeVar
 
-from equinox import Module
+from equinox import Module, error_if, tree_at
 from jax import (
     NamedSharding,
     device_put,
@@ -132,6 +132,9 @@ class _Carry(Module):
 
     state: State
     i_total: Int32[Array, '']
+    steps_done_monotone: Bool[Array, '']
+    """Whether `step` has advanced `State.config.steps_done` at each iteration."""
+
     key_data: UInt32[Array, ' key_size']
     burnin_trace: Trace
     main_trace: Trace
@@ -249,6 +252,7 @@ def run_mcmc(
     carry = _Carry(
         state,
         replicate(jnp.int32(0)),
+        replicate(jnp.bool_(True)),
         replicate(key_data),
         burnin_trace,
         main_trace,
@@ -270,7 +274,27 @@ def run_mcmc(
             step,
         )
 
-    return RunMCMCResult(carry.state, carry.burnin_trace, carry.main_trace)  # ty: ignore[invalid-argument-type]
+    # the per-iteration key is derived from `steps_done`, so a `step` that does
+    # not advance it would silently repeat the same draw over and over
+    msg = (
+        '`step` did not increase `state.config.steps_done` at every iteration. '
+        '`run_mcmc` derives the random key of each iteration from `steps_done`, '
+        'so the samples just produced are invalid. Make sure `step` invokes '
+        '`bartz.mcmcstep.step_config`.'
+    )
+    if jit_active():
+        # under jit the check can only happen at runtime; `error_if` deadlocks
+        # instead of raising if the computation is sharded, so it's a last resort
+        steps_done = error_if(
+            carry.state.config.steps_done, ~carry.steps_done_monotone, msg
+        )
+        final_state = tree_at(lambda s: s.config.steps_done, carry.state, steps_done)
+    else:
+        if not carry.steps_done_monotone:
+            raise RuntimeError(msg)
+        final_state = carry.state
+
+    return RunMCMCResult(final_state, carry.burnin_trace, carry.main_trace)  # ty: ignore[invalid-argument-type]
 
 
 def _replicate(
@@ -389,6 +413,8 @@ def _run_mcmc_inner_loop_impl(
         return _Carry(
             state=state,
             i_total=carry.i_total + 1,
+            steps_done_monotone=carry.steps_done_monotone
+            & (state.config.steps_done > carry.state.config.steps_done),
             key_data=carry.key_data,
             burnin_trace=burnin_trace,
             main_trace=main_trace,

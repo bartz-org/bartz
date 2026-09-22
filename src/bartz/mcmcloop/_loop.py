@@ -29,7 +29,7 @@ from collections.abc import Callable, Hashable
 from functools import partial, update_wrapper
 from typing import Any, Generic, NamedTuple, TypeVar
 
-from equinox import Module
+from equinox import Module, tree_at
 from jax import (
     NamedSharding,
     device_put,
@@ -195,7 +195,9 @@ def run_mcmc(
         The function that does one MCMC iteration, called as ``step(key,
         state)`` and returning the updated state. Override it, together with
         the trace types, to run a different sampler, which may also use a
-        subclass of `State` instead of `State` itself.
+        subclass of `State` instead of `State` itself. `run_mcmc` takes over
+        `~bartz.mcmcstep.StepConfig.steps_done`, so `step` need not maintain
+        it; use a field of a `State` subclass for any other counter.
 
     Returns
     -------
@@ -373,6 +375,12 @@ def _run_mcmc_inner_loop_impl(
             )
             if rt is not None:
                 state, callback = rt
+
+        # the loop owns `steps_done` because it seeds each iteration from it;
+        # overwrite whatever `step` and the callback did to it
+        state = tree_at(
+            lambda s: s.config.steps_done, state, carry.state.config.steps_done + 1
+        )
 
         # save to trace
         burnin_trace, main_trace = _save_state_to_trace(

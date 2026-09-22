@@ -400,7 +400,44 @@ def test_custom_step(keys: split) -> None:
         final_state, *_ = run_mcmc(
             keys.pop(), simple_init(), n_save, n_burn=n_burn, step=double_counting_step
         )
-    assert_array_equal(final_state.config.steps_done, jnp.int32(2 * (n_burn + n_save)))
+    # `run_mcmc` owns `steps_done`, so the extra increment is discarded
+    assert_array_equal(final_state.config.steps_done, jnp.int32(n_burn + n_save))
+
+
+def frozen_step(key: Key[Array, ''], state: State) -> State:
+    """Like `step`, but leaves `State.config.steps_done` in place."""
+    new_state = step(key, state)
+    return tree_at(lambda s: s.config.steps_done, new_state, state.config.steps_done)
+
+
+def test_step_need_not_advance_steps_done(keys: split) -> None:
+    """Check the loop seeds itself even if `step` does not touch the counter."""
+    key = keys.pop()
+
+    default_state, _, default_main = run_mcmc(key, simple_init(), 4, n_burn=1)
+    frozen_state, _, frozen_main = run_mcmc(
+        random.clone(key), simple_init(), 4, n_burn=1, step=frozen_step
+    )
+
+    tree.map(assert_trace_close, default_main, frozen_main)
+    tree.map(assert_trace_close, default_state, frozen_state)
+
+
+def test_restartable_with_frozen_step(keys: split) -> None:
+    """Check the loop does not seed itself from a call-local counter.
+
+    Splitting a run must stay exact even if `step` leaves `steps_done` in
+    place.
+    """
+    key = keys.pop()
+    kw: dict = dict(n_burn=0, n_skip=1, step=frozen_step)
+
+    final_single, _, main_single = run_mcmc(key, simple_init(), 5, **kw)
+    mid, _, main_a = run_mcmc(random.clone(key), simple_init(), 2, **kw)
+    final_split, _, main_b = run_mcmc(random.clone(key), mid, 3, **kw)
+
+    tree.map(assert_trace_close, final_single, final_split)
+    tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
 
 
 @pytest.mark.parametrize('matches', [True, False])

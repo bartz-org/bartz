@@ -32,11 +32,16 @@ from functools import partial
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
+from jax import lax
 from jax import numpy as jnp
 from jax.scipy.special import ndtr, ndtri
 from jaxtyping import Array, Float, Float32, Key, Real, Shaped
 
 from bartz._interface import Bart, DataFrame, PredictKind, Series
+from bartz._jaxext import jit
+from bartz.mcmcloop import MainTrace
+from bartz.mcmcstep import Wishart
+from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._state import ArrayLike, FloatLike
 from bartz.prepcovars import RangeEvenBinner
 from bartz.stochtree._preprocess import _PreprocessorBase, make_preprocessor
@@ -138,19 +143,18 @@ class MeanForestParams:
     """Maximum tree depth. Must be a non-negative integer at most ``16``."""
 
     sample_sigma2_leaf: bool = True
-    """Whether to sample the leaf-variance prior. Must be set to ``False``."""
+    """Whether to sample the leaf variance with an inverse-gamma prior, or hold it fixed at `sigma2_leaf_init`."""
 
     sigma2_leaf_init: FloatLike | None = None
-    """Initial leaf-variance prior (held fixed since ``sample_sigma2_leaf=False``). If `None`, matches stochtree's defaults of ``var(resid_train) / num_trees`` for continuous and ``2 / num_trees`` for probit."""
+    """Initial leaf variance. If `None`, matches stochtree's defaults of ``var(resid_train) / num_trees`` for continuous and ``2 / num_trees`` for probit."""
+
+    sigma2_leaf_shape: FloatLike = 3.0
+    """Twice the shape parameter of the inverse-gamma prior on the leaf variance, i.e., the prior is ``IG(sigma2_leaf_shape / 2, sigma2_leaf_scale / 2)``."""
+
+    sigma2_leaf_scale: FloatLike | None = None
+    """Twice the scale parameter of the inverse-gamma prior on the leaf variance. If `None`, defaults to ``var(resid_train) / num_trees`` for continuous and ``1 / num_trees`` for probit."""
 
     def __post_init__(self) -> None:
-        if self.sample_sigma2_leaf:
-            msg = (
-                'sample_sigma2_leaf=True is not supported (bartz uses a fixed'
-                " leaf-variance prior); pass mean_forest_params={'sample_sigma2_leaf':"
-                ' False} to acknowledge this.'
-            )
-            raise NotImplementedError(msg)
         if self.max_depth < 0:
             msg = (
                 f'max_depth={self.max_depth} is not supported; bartz stores trees'
@@ -202,11 +206,7 @@ class BARTModel:
     Use the same idiomatic pattern as `stochtree.BARTModel`::
 
         m = BARTModel()
-        m.sample(
-            X_train=X, y_train=y, X_test=X_test,
-            num_gfr=0, num_mcmc=200,
-            mean_forest_params={'sample_sigma2_leaf': False},
-        )
+        m.sample(X_train=X, y_train=y, X_test=X_test, num_gfr=0, num_mcmc=200)
         yhat = m.predict(X_new, terms='y_hat', type='mean')
 
     See `GeneralParams` and `MeanForestParams` for the supported keys in the
@@ -217,7 +217,6 @@ class BARTModel:
     Differences from `stochtree`, by design:
 
     - ``num_gfr`` has no default and must be set explicitly to ``0``.
-    - ``mean_forest_params['sample_sigma2_leaf']`` must be ``False``.
     - ``mean_forest_params['max_depth']`` must be a non-negative integer at
       most ``16``; stochtree's ``-1`` (unbounded depth) sentinel is not
       accepted.
@@ -295,6 +294,12 @@ class BARTModel:
 
     global_var_samples: Float32[Array, ' num_samples']
     """Posterior samples of the global error variance. For probit binary regression, an array of ones."""
+
+    sample_sigma2_leaf: bool
+    """Whether the leaf variance is sampled."""
+
+    leaf_scale_samples: Float32[Array, ' num_samples'] | None
+    """Posterior samples of the leaf variance, in the standardized outcome scale, or `None` if not sampled."""
 
     y_hat_test: Float32[Array, 'm num_samples'] | None
     """Posterior predictions at `X_test` if it was supplied to `sample`, else `None`."""
@@ -389,8 +394,7 @@ class BARTModel:
         general_params
             Optional override for the keys of `GeneralParams`.
         mean_forest_params
-            Override for the keys of `MeanForestParams`. Must explicitly
-            disable ``sample_sigma2_leaf``.
+            Optional override for the keys of `MeanForestParams`.
         bart_kwargs
             Additional arguments forwarded to `bartz.Bart`. Use this to set
             ``devices`` and ``rm_const=False`` when wrapping `sample` in
@@ -454,6 +458,20 @@ class BARTModel:
         )
         tau_num_arg = bartz_k * jnp.sqrt(mfp.num_trees * sigma2_leaf_init)
 
+        if mfp.sample_sigma2_leaf:
+            leaf_init_kw: dict = {
+                'leaf_prior_cov_inv': resolve_leaf_variance_prior(
+                    mfp.sigma2_leaf_shape,
+                    mfp.sigma2_leaf_scale,
+                    sigma2_leaf_init,
+                    mfp.num_trees,
+                    is_probit,
+                    var_resid_train,
+                )
+            }
+        else:
+            leaf_init_kw = {}
+
         if is_probit:
             # stochtree pins σ²=1 for probit; bartz binary branch ignores the
             # variance prior, so we leave the scale/init at their 'auto'
@@ -503,14 +521,17 @@ class BARTModel:
         kwargs.update(bart_kwargs)
         # match stochtree's gating: only acceptance-time veto on
         # min_samples_leaf, no per-leaf affluence filter (stochtree picks
-        # leaves uniformly over all of them). User-supplied init_kw values
-        # win on conflicts.
+        # leaves uniformly over all of them). The leaf variance prior goes
+        # through init_kw because Bart's sigma_mu_df ties the prior scale to
+        # the initial value, while stochtree sets them independently.
+        # User-supplied init_kw values win on conflicts.
         kwargs = dict(
             kwargs,
             init_kw=dict(
                 {
                     'min_points_per_leaf': mfp.min_samples_leaf,
                     'min_points_per_decision_node': None,
+                    **leaf_init_kw,
                 },
                 **kwargs.get('init_kw', {}),
             ),
@@ -521,6 +542,7 @@ class BARTModel:
             num_burnin=num_burnin,
             num_mcmc=num_mcmc,
             num_chains=gp.num_chains,
+            sample_sigma2_leaf=mfp.sample_sigma2_leaf,
             sigma2_init=sigma2_init_stored,
             y_bar=y_bar,
             y_std=y_std,
@@ -535,6 +557,7 @@ class BARTModel:
         num_burnin: int,
         num_mcmc: int,
         num_chains: int,
+        sample_sigma2_leaf: bool,
         sigma2_init: FloatLike,
         y_bar: Float32[Array, ''],
         y_std: Float32[Array, ''],
@@ -546,6 +569,7 @@ class BARTModel:
         self.sampled = True
         self.standardize = standardize
         self.sample_sigma2_global = True
+        self.sample_sigma2_leaf = sample_sigma2_leaf
         self.probit_outcome_model = is_probit
         self.outcome_model = outcome_model
         self.num_gfr = 0
@@ -572,6 +596,13 @@ class BARTModel:
         else:
             sigma = self._bart.get_error_sdev()
             self.global_var_samples = (sigma * y_std) ** 2
+
+        if sample_sigma2_leaf:
+            self.leaf_scale_samples = get_leaf_scale_samples(
+                self._bart._main_trace  # noqa: SLF001
+            )
+        else:
+            self.leaf_scale_samples = None
 
     @overload
     def predict(
@@ -736,6 +767,36 @@ def resolve_sigma2_leaf_init(
     if is_probit:
         return 2.0 / num_trees
     return var_resid_train / num_trees
+
+
+def resolve_leaf_variance_prior(
+    shape: FloatLike,
+    scale: FloatLike | None,
+    sigma2_leaf_init: FloatLike,
+    num_trees: int,
+    is_probit: bool,
+    var_resid_train: FloatLike,
+) -> Wishart:
+    """Translate stochtree's leaf variance prior to a `Wishart` on the leaf precision.
+
+    Despite the documented ``IG(shape, scale)``, stochtree's sampler uses the
+    posterior ``IG(shape / 2 + L / 2, scale / 2 + S / 2)``, i.e., the prior is
+    ``IG(shape / 2, scale / 2)``, which is `Wishart` with ``nu = shape`` and
+    ``rate = scale``.
+    """
+    if scale is None:
+        scale = 1.0 / num_trees if is_probit else var_resid_train / num_trees
+    return Wishart(nu=shape, rate=scale, value=jnp.reciprocal(sigma2_leaf_init))
+
+
+@jit
+def get_leaf_scale_samples(trace: MainTrace) -> Float32[Array, ' num_samples']:
+    """Return the leaf variance samples, chains concatenated."""
+    prec = trace.leaf_prior_cov_inv
+    if trace.has_chains:
+        prec = chain_to_axis(prec, chain_vmap_axes(trace).leaf_prior_cov_inv)
+        prec = lax.collapse(prec, 0, 2)
+    return jnp.reciprocal(prec)
 
 
 def resolve_variance_prior(

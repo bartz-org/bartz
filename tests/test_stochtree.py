@@ -72,19 +72,11 @@ NUM_BURNIN = 20
 NUM_MCMC = 40
 
 _GEN_KW: kwdict = dict(p=4, q=2, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.5)
-# `mean_forest_params` override that disables the bartz-incompatible
-# leaf-variance sampler. All sample()-using tests start from this base.
-_MFP_BASE: Mapping = MappingProxyType({'sample_sigma2_leaf': False})
 # `BARTModel.sample` keyword bundle for the common case: the grow-from-root
 # sampler is off and the loop lengths are fixed, so the compiled code is reused
 # across tests. Tests that must deviate expand `dict(_SAMPLE_KW, ...)`.
 _SAMPLE_KW: Mapping = MappingProxyType(
-    dict(
-        num_gfr=0,
-        num_burnin=NUM_BURNIN,
-        num_mcmc=NUM_MCMC,
-        mean_forest_params=_MFP_BASE,
-    )
+    dict(num_gfr=0, num_burnin=NUM_BURNIN, num_mcmc=NUM_MCMC)
 )
 
 
@@ -255,7 +247,6 @@ def test_missing_num_gfr_raises(continuous_data: _Data, keys: split) -> None:
             y_train=data.y_train,
             num_burnin=NUM_BURNIN,
             num_mcmc=NUM_MCMC,
-            mean_forest_params=_MFP_BASE,
             general_params={'random_seed': keys.pop()},
         )
 
@@ -274,20 +265,98 @@ def test_num_gfr_nonzero_raises(continuous_data: _Data, keys: split) -> None:
         )
 
 
-def test_sample_sigma2_leaf_true_raises(continuous_data: _Data, keys: split) -> None:
-    """Stochtree's default of `sample_sigma2_leaf=True` must be explicitly disabled."""
-    data = continuous_data
+@pytest.mark.parametrize('num_chains', [1, 2])
+@pytest.mark.parametrize('outcome', ['continuous', 'binary'])
+def test_sample_sigma2_leaf(
+    outcome: Literal['continuous', 'binary'],
+    num_chains: int,
+    keys: split,
+    subtests: SubTests,
+) -> None:
+    """Stochtree's default `sample_sigma2_leaf=True` samples the leaf variance."""
+    is_probit = outcome == 'binary'
+    data = _make_binary(keys) if is_probit else _make_continuous(keys)
+    num_trees = 20
+    shape = 5.0
+    scale = 0.3
+    sigma2_leaf_init = 0.7
     m = bst.BARTModel()
-    # `mean_forest_params` is intentionally omitted so the stochtree default kicks in.
-    with pytest.raises(NotImplementedError, match='sample_sigma2_leaf'):
+    # `sample_sigma2_leaf` is intentionally omitted so the stochtree default kicks in.
+    m.sample(
+        X_train=data.X_train,
+        y_train=data.y_train,
+        num_gfr=0,
+        num_burnin=NUM_BURNIN,
+        num_mcmc=NUM_MCMC,
+        general_params={
+            'random_seed': keys.pop(),
+            'num_chains': num_chains,
+            'outcome_model': bst.OutcomeModel(outcome),
+        },
+        mean_forest_params={
+            'num_trees': num_trees,
+            'sigma2_leaf_shape': shape,
+            'sigma2_leaf_scale': scale,
+            'sigma2_leaf_init': sigma2_leaf_init,
+        },
+    )
+
+    with subtests.test('prior'):
+        # stochtree's IG(shape / 2, scale / 2) is Wishart(nu=shape, rate=scale)
+        prior = m._bart._mcmc_state.forest.leaf_prior_cov_inv
+        assert_allclose(nnone(prior.nu), shape, rtol=1e-6)
+        assert_allclose(nnone(prior.rate), scale, rtol=1e-6)
+        # the trace starts after the first step, so check the start value
+        # on the helper that builds the prior
+        prior = bst._stochtree.resolve_leaf_variance_prior(
+            shape, scale, sigma2_leaf_init, num_trees, is_probit, 1.0
+        )
+        assert_allclose(prior.value, 1 / sigma2_leaf_init, rtol=1e-6)
+
+    with subtests.test('samples'):
+        assert m.sample_sigma2_leaf
+        samples = nnone(m.leaf_scale_samples)
+        assert samples.shape == (m.num_samples,)
+        assert_array_less(0, samples)
+        assert samples.std() > 0
+
+    with subtests.test('default_scale'):
+        # default scale is var(resid) / num_trees (continuous) or 1 / num_trees
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
             num_gfr=0,
             num_burnin=NUM_BURNIN,
             num_mcmc=NUM_MCMC,
-            general_params={'random_seed': keys.pop()},
+            general_params={
+                'random_seed': keys.pop(),
+                'num_chains': num_chains,
+                'outcome_model': bst.OutcomeModel(outcome),
+            },
+            mean_forest_params={'num_trees': num_trees},
         )
+        prior = m._bart._mcmc_state.forest.leaf_prior_cov_inv
+        assert_allclose(nnone(prior.nu), 3.0, rtol=1e-6)
+        assert_allclose(nnone(prior.rate), 1.0 / num_trees, rtol=1e-6)
+
+
+def test_sample_sigma2_leaf_false(continuous_data: _Data, keys: split) -> None:
+    """With `sample_sigma2_leaf=False` the leaf variance stays fixed."""
+    data = continuous_data
+    m = bst.BARTModel()
+    sample_kw: dict = dict(_SAMPLE_KW, mean_forest_params={'sample_sigma2_leaf': False})
+    m.sample(
+        X_train=data.X_train,
+        y_train=data.y_train,
+        general_params={'random_seed': keys.pop()},
+        **sample_kw,
+    )
+    assert not m.sample_sigma2_leaf
+    assert m.leaf_scale_samples is None
+    prior = m._bart._mcmc_state.forest.leaf_prior_cov_inv
+    assert prior.nu is None
+    prec = m._bart._main_trace.leaf_prior_cov_inv
+    assert_array_equal(prec, jnp.full(prec.shape, prec[0]))
 
 
 def _sample_with_prior(
@@ -338,9 +407,7 @@ def test_unknown_dict_keys_rejected(continuous_data: _Data, keys: split) -> None
             **_SAMPLE_KW,
         )
     m = bst.BARTModel()
-    sample_kw: kwdict = dict(
-        _SAMPLE_KW, mean_forest_params={**_MFP_BASE, 'keep_vars': []}
-    )
+    sample_kw: kwdict = dict(_SAMPLE_KW, mean_forest_params={'keep_vars': []})
     with pytest.raises(ValueError, match='mean_forest_params contains unsupported key'):
         m.sample(
             X_train=data.X_train,
@@ -455,17 +522,19 @@ def comparison(
 ) -> tuple[str, stochtree.BARTModel, bst.BARTModel]:
     """Sample matching models from stochtree and bartz.stochtree.
 
-    Parametrized indirectly on the outcome type ('continuous' or 'binary').
-    Returns the outcome type alongside the two fitted models.
+    Parametrized indirectly on the outcome type ('continuous' or 'binary'),
+    with 'continuous-leaf' also sampling the leaf variance. Returns the
+    outcome type alongside the two fitted models.
 
     The *same* keyword-argument dict is fed to both `stochtree.BARTModel` and
     `bartz.stochtree.BARTModel`, exercising the interface compatibility: the
-    inputs are float64 (which bartz silently downcasts); `num_gfr=0` and
-    `sample_sigma2_leaf=False` are set explicitly because bartz rejects their
-    stochtree defaults while stochtree happily accepts the overrides; and a
-    single `OutcomeModel` instance is duck-typed identically by both packages.
+    inputs are float64 (which bartz silently downcasts); `num_gfr=0` is set
+    explicitly because bartz rejects the stochtree default while stochtree
+    happily accepts the override; and a single `OutcomeModel` instance is
+    duck-typed identically by both packages.
     """
-    outcome = request.param
+    outcome, _, leaf = request.param.partition('-')
+    sample_leaf = leaf == 'leaf'
     num_burnin = 1000
     num_mcmc = 1000
 
@@ -495,7 +564,7 @@ def comparison(
         num_burnin=num_burnin,
         num_mcmc=num_mcmc,
         general_params={'random_seed': seed, 'num_chains': 2, **extra},
-        mean_forest_params={**_MFP_BASE, 'num_trees': 50},
+        mean_forest_params={'sample_sigma2_leaf': sample_leaf, 'num_trees': 50},
     )
 
     st_model = stochtree.BARTModel()
@@ -505,7 +574,9 @@ def comparison(
     return outcome, st_model, bz_model
 
 
-@pytest.mark.parametrize('comparison', ['continuous', 'binary'], indirect=True)
+@pytest.mark.parametrize(
+    'comparison', ['continuous', 'binary', 'continuous-leaf'], indirect=True
+)
 def test_compare_with_stochtree(
     comparison: tuple[str, stochtree.BARTModel, bst.BARTModel], subtests: SubTests
 ) -> None:
@@ -542,6 +613,16 @@ def test_compare_with_stochtree(
             # shape (1, num_samples) so rhat collapses to a scalar
             rhat = _rhat_two_chains(bz_sigma[None, :], st_sigma[None, :])
             assert_array_less(rhat, 1.05)
+        if bz_model.sample_sigma2_leaf:
+            with subtests.test('rhat_sigma2_leaf'):
+                bz_leaf = np.asarray(bz_model.leaf_scale_samples)
+                st_leaf = np.asarray(st_model.leaf_scale_samples)
+                rhat = _rhat_two_chains(bz_leaf[None, :], st_leaf[None, :])
+                # 1.1 is a bit high. The leaf variance is autocorrelated
+                # (lag-1 ~0.94), and there are known systematic bartz/stochtree
+                # discrepancies in setup/mcmc outputs (split grid vs data
+                # points, a few % more leaves in bartz) not investigated further.
+                assert_array_less(rhat, 1.1)
     else:
         with subtests.test('rhat_prob_train'):
             bz_prob = np.asarray(ndtr(bz_model.y_hat_train))
@@ -610,7 +691,6 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
                 'variable_weights': variable_weights,
             },
             mean_forest_params={
-                **_MFP_BASE,
                 'alpha': alpha,
                 'beta': beta,
                 'sigma2_leaf_init': sigma2_leaf_init,

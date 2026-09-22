@@ -196,8 +196,9 @@ def run_mcmc(
         state)`` and returning the updated state. Override it, together with
         the trace types, to run a different sampler, which may also use a
         subclass of `State` instead of `State` itself. `run_mcmc` takes over
-        `~bartz.mcmcstep.StepConfig.steps_done`, so `step` need not maintain
-        it; use a field of a `State` subclass for any other counter.
+        `~bartz.mcmcstep.StepConfig.steps_done`, overwriting whatever `step`
+        and `callback` set it to, so `step` need not maintain it; use a field
+        of a `State` subclass for any other counter.
 
     Returns
     -------

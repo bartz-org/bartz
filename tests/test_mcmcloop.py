@@ -388,18 +388,33 @@ class TestRunMcmc:
 
 def test_custom_step(keys: split) -> None:
     """Check `run_mcmc` drives a user-provided step function."""
+    marker = 0.125
 
-    def double_counting_step(key: Key[Array, ''], state: State) -> State:
+    def marking_double_counting_step(key: Key[Array, ''], state: State) -> State:
         state = step(key, state)
+        # the marker is a value the default `step` would not produce, to detect
+        # which step ran
         return tree_at(
-            lambda s: s.config.steps_done, state, state.config.steps_done + 1
+            lambda s: (s.error_cov_inv.value, s.config.steps_done),
+            state,
+            (
+                jnp.full_like(state.error_cov_inv.value, marker),
+                state.config.steps_done + 1,
+            ),
         )
 
     n_burn, n_save = 2, 3
     with debug_key_reuse(False):
-        final_state, *_ = run_mcmc(
-            keys.pop(), simple_init(), n_save, n_burn=n_burn, step=double_counting_step
+        final_state, burnin_trace, main_trace = run_mcmc(
+            keys.pop(),
+            simple_init(),
+            n_save,
+            n_burn=n_burn,
+            step=marking_double_counting_step,
         )
+    assert_array_equal(final_state.error_cov_inv.value, jnp.float32(marker))
+    assert_array_equal(nnone(burnin_trace.error_cov_inv), jnp.full(n_burn, marker))
+    assert_array_equal(nnone(main_trace.error_cov_inv), jnp.full(n_save, marker))
     # `run_mcmc` owns `steps_done`, so the extra increment is discarded
     assert_array_equal(final_state.config.steps_done, jnp.int32(n_burn + n_save))
 

@@ -1400,23 +1400,23 @@ class TestMultichain:
             )
             y = y.at[1].set(random.normal(keys.pop(), (self.n,)))
             offset = random.normal(keys.pop(), (k,))
-            leaf_prior_cov_inv = jnp.eye(k) * NUM_TREES
+            leaf_prior_cov_inv = Wishart(None, None, jnp.eye(k) * NUM_TREES)
         else:
             if mv:
                 y_shape = (k, self.n)
                 offset = random.normal(keys.pop(), (k,))
-                leaf_prior_cov_inv = jnp.eye(k) * NUM_TREES
+                leaf_prior_cov_inv = Wishart(None, None, jnp.eye(k) * NUM_TREES)
             else:
                 y_shape = (self.n,)
                 offset = random.normal(keys.pop(), ())
-                leaf_prior_cov_inv = jnp.float32(NUM_TREES)
+                leaf_prior_cov_inv = Wishart(None, None, jnp.float32(NUM_TREES))
 
             if binary:
                 y = random.bernoulli(keys.pop(), 0.5, y_shape).astype(jnp.float32)
             else:
                 y = random.normal(keys.pop(), y_shape)
 
-        kw = dict(
+        kw: dict = dict(
             X=X,
             y=y,
             offset=offset,
@@ -1814,7 +1814,7 @@ def test_z_differs_across_data_shards(keys: split) -> None:
         max_split=max_split,
         num_trees=NUM_TREES,
         p_nonterminal=jnp.full(5, 0.9),
-        leaf_prior_cov_inv=jnp.float32(NUM_TREES),
+        leaf_prior_cov_inv=Wishart(None, None, jnp.float32(NUM_TREES)),
         mesh={'data': num_data_shards},
     )
 
@@ -1859,7 +1859,7 @@ def test_affluence_tree_stays_clean(
         max_split=data.max_split,
         num_trees=NUM_TREES,
         p_nonterminal=make_p_nonterminal(6),
-        leaf_prior_cov_inv=1.0,
+        leaf_prior_cov_inv=Wishart(None, None, 1.0),
         error_cov_inv=Wishart(nu=2.0, rate=2.0, value=1.0),
         min_points_per_decision_node=min_points_per_decision_node,
         min_points_per_leaf=min_points_per_leaf,
@@ -1915,7 +1915,7 @@ class TestMixedBinaryContinuous:
             max_split=max_split,
             num_trees=NUM_TREES,
             p_nonterminal=jnp.full(self.d - 1, 0.9),
-            leaf_prior_cov_inv=jnp.eye(self.k) * NUM_TREES,
+            leaf_prior_cov_inv=Wishart(None, None, jnp.eye(self.k) * NUM_TREES),
             error_cov_inv=DiagWishart(
                 nu=2.0, rate=jnp.diag(jnp.array([0.0, 2.0, 0.0])), value=jnp.eye(self.k)
             ),
@@ -2182,7 +2182,7 @@ class TestStepLeafPriorCovInv:
                 kw,
                 y=jnp.stack([y, -y]),
                 offset=jnp.zeros(k),
-                leaf_prior_cov_inv=4.0 * eye,
+                leaf_prior_cov_inv=Wishart(None, None, 4.0 * eye),
                 error_cov_inv=Wishart(nu=2.0, rate=2.0 * eye, value=eye),
             )
         else:
@@ -2190,13 +2190,54 @@ class TestStepLeafPriorCovInv:
                 kw,
                 y=y,
                 offset=0.0,
-                leaf_prior_cov_inv=4.0,
+                leaf_prior_cov_inv=Wishart(None, None, 4.0),
                 error_cov_inv=Wishart(nu=2.0, rate=2.0, value=1.0),
             )
 
-    def test_closed_form(self, keys: split, init_kwargs: dict) -> None:
-        """The update on a hand-built forest matches the conjugate formula."""
+    @pytest.fixture
+    def prior(self, init_kwargs: dict) -> Wishart:
+        """Put a Wishart prior on the leaf precision, centered on the fixed value."""
+        value = init_kwargs['leaf_prior_cov_inv'].value
+        return Wishart(nu=3.0 + value.ndim, rate=0.5 * value, value=value)
+
+    def test_fixed(self, keys: split, init_kwargs: dict) -> None:
+        """Without a prior, `step` leaves the precision untouched."""
         state = init(**init_kwargs)
+        value = jnp.copy(state.forest.leaf_prior_cov_inv.value)  # `step` donates
+        new_state = step(keys.pop(), state)
+        assert_close_matrices(new_state.forest.leaf_prior_cov_inv.value, value)
+
+    def test_sampled(self, keys: split, init_kwargs: dict, prior: Wishart) -> None:
+        """With a prior, `step` updates the precision."""
+        kw: dict = dict(init_kwargs, leaf_prior_cov_inv=prior)
+        state = init(**kw)
+        value = jnp.copy(state.forest.leaf_prior_cov_inv.value)  # `step` donates
+        new_state = step(keys.pop(), state)
+        assert_different_matrices(
+            new_state.forest.leaf_prior_cov_inv.value, value, rtol=1e-3, atol=0
+        )
+
+    def test_reject_diag_wishart(self, init_kwargs: dict, prior: Wishart) -> None:
+        """`DiagWishart` is not allowed as leaf prior."""
+        if prior.value.ndim == 0:
+            pytest.skip('DiagWishart is multivariate only')
+        diag = DiagWishart(nu=prior.nu, rate=prior.rate, value=prior.value)
+        kw: dict = dict(init_kwargs, leaf_prior_cov_inv=diag)
+        with pytest.raises(AssertionError, match='dense Wishart'):
+            init(**kw)
+
+    def test_reject_shape_mismatch(self, init_kwargs: dict, prior: Wishart) -> None:
+        """The prior rate must match the outcome shape."""
+        bad = Wishart(nu=prior.nu, rate=jnp.ones((3, 3)), value=prior.value)
+        kw: dict = dict(init_kwargs, leaf_prior_cov_inv=bad)
+        with pytest.raises(AssertionError):
+            init(**kw)
+
+    def test_closed_form(self, keys: split, init_kwargs: dict, prior: Wishart) -> None:
+        """The update on a hand-built forest matches the conjugate formula."""
+        kw: dict = dict(init_kwargs, leaf_prior_cov_inv=prior)
+        state = init(**kw)
+        prior = state.forest.leaf_prior_cov_inv  # `init` donates the input
 
         # tree 0: root split, leaves 2, 3
         # tree 2: nodes 1 and 2 split, leaves 3, 4, 5 (4, 5 at the bottom level)
@@ -2209,20 +2250,9 @@ class TestStepLeafPriorCovInv:
         # fill all nodes, non-leaves included, to check they are masked out
         leaf_tree = random.normal(keys.pop(), state.forest.leaf_tree.shape)
 
-        # put a Wishart prior on the (fixed) leaf precision, keeping its value
-        rate = 0.5 * jnp.asarray(init_kwargs['leaf_prior_cov_inv'])
-        prior = replace(
-            state.forest.leaf_prior_cov_inv, nu=jnp.float32(3.0 + rate.ndim), rate=rate
-        )
-
         state = replace(
             state,
-            forest=replace(
-                state.forest,
-                split_tree=split_tree,
-                leaf_tree=leaf_tree,
-                leaf_prior_cov_inv=prior,
-            ),
+            forest=replace(state.forest, split_tree=split_tree, leaf_tree=leaf_tree),
         )
 
         values = jnp.stack([leaf_tree[t, ..., i] for t, i in leaves])
@@ -2263,7 +2293,7 @@ def test_z_valid_with_confident_misclassification(
         max_split=max_split,
         num_trees=NUM_TREES,
         p_nonterminal=jnp.array([0.9, 0.5]),
-        leaf_prior_cov_inv=1.0,
+        leaf_prior_cov_inv=Wishart(None, None, 1.0),
     )
 
     # `step_z` and not `step` because `step` is jitted, and whether xla flushes
@@ -2510,9 +2540,11 @@ class TestMVBartIntegration:
             ),
         )
 
-        uv_kw: dict = dict(y=y, offset=0.0, leaf_prior_cov_inv=1.0)
+        uv_kw: dict = dict(y=y, offset=0.0, leaf_prior_cov_inv=Wishart(None, None, 1.0))
         mv_kw: dict = dict(
-            y=y[None, :], offset=jnp.zeros(1), leaf_prior_cov_inv=jnp.array([[1.0]])
+            y=y[None, :],
+            offset=jnp.zeros(1),
+            leaf_prior_cov_inv=Wishart(None, None, jnp.array([[1.0]])),
         )
 
         if binary:
@@ -2814,9 +2846,15 @@ class TestMultivariate:
             ),
         )
 
-        uv_kw: dict = dict(y=y, offset=0.0, leaf_prior_cov_inv=jnp.float32(NUM_TREES))
+        uv_kw: dict = dict(
+            y=y,
+            offset=0.0,
+            leaf_prior_cov_inv=Wishart(None, None, jnp.float32(NUM_TREES)),
+        )
         mv_kw: dict = dict(
-            y=y[None, :], offset=jnp.zeros(1), leaf_prior_cov_inv=NUM_TREES * jnp.eye(1)
+            y=y[None, :],
+            offset=jnp.zeros(1),
+            leaf_prior_cov_inv=Wishart(None, None, NUM_TREES * jnp.eye(1)),
         )
 
         if kind == 'binary':
@@ -2927,7 +2965,7 @@ class TestMultivariate:
             max_split=max_split,
             num_trees=NUM_TREES,
             p_nonterminal=jnp.array([0.9, 0.5]),
-            leaf_prior_cov_inv=jnp.eye(k),
+            leaf_prior_cov_inv=Wishart(None, None, jnp.eye(k)),
             resid_reduction_config=BatchedReduction(num_batches=None),
             count_reduction_config=BatchedReduction(num_batches=None),
         )
@@ -2992,7 +3030,7 @@ class TestMultivariate:
                 max_split=max_split,
                 num_trees=NUM_TREES,
                 p_nonterminal=jnp.array([0.9, 0.5]),
-                leaf_prior_cov_inv=jnp.eye(k),
+                leaf_prior_cov_inv=Wishart(None, None, jnp.eye(k)),
                 error_cov_inv=Wishart(
                     nu=jnp.array(4.0 + k), rate=jnp.eye(k), value=(4.0 + k) * jnp.eye(k)
                 ),
@@ -3144,7 +3182,7 @@ class TestSampleSAugmentation:
             max_split=jnp.full(p, 2, jnp.uint8),
             num_trees=16,
             p_nonterminal=make_p_nonterminal(6, alpha=0.99, beta=0.5),
-            leaf_prior_cov_inv=1.0,
+            leaf_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
             a=0.5,
@@ -3179,7 +3217,7 @@ class TestSampleSAugmentation:
             max_split=jnp.full(p, 4, jnp.uint8),
             num_trees=NUM_TREES,
             p_nonterminal=make_p_nonterminal(4),
-            leaf_prior_cov_inv=1.0,
+            leaf_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
             a=0.5,

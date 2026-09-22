@@ -194,6 +194,12 @@ def simple_init(  # noqa: C901, PLR0915
             kw['sigma_mu2'] = 1 / kw.pop('leaf_prior_cov_inv')
         else:
             kw.pop('leaf_prior_cov_inv')
+    elif sig.parameters['leaf_prior_cov_inv'].annotation is Wishart:
+        # WORKAROUND(bartz<0.13.0): 0.13.0 made leaf_prior_cov_inv a Wishart with
+        # nu = rate = None for a fixed value; older versions take the array.
+        kw['leaf_prior_cov_inv'] = Wishart(
+            nu=None, rate=None, value=kw['leaf_prior_cov_inv']
+        )
     if 'min_points_per_decision_node' not in sig.parameters:
         # WORKAROUND(bartz<0.7.0): use min_points_per_leaf instead
         kw.pop('min_points_per_decision_node')

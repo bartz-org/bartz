@@ -120,7 +120,7 @@ from bartz.mcmcloop import (
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _inner_loop_counter
-from bartz.mcmcstep import BatchedReduction, State, step
+from bartz.mcmcstep import BatchedReduction, State, Wishart, step
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
@@ -1021,7 +1021,10 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
 
     kw = dict(
         bkw.kw,
-        init_kw=dict(bkw.kw.get('init_kw', {}), leaf_prior_cov_inv=leaf_prior_cov_inv),
+        init_kw=dict(
+            bkw.kw.get('init_kw', {}),
+            leaf_prior_cov_inv=Wishart(nu=None, rate=None, value=leaf_prior_cov_inv),
+        ),
     )
     bart = Bart(**kw)
 

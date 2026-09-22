@@ -106,7 +106,7 @@ def simple_init(
         max_split=data.max_split,
         num_trees=ntree,
         p_nonterminal=make_p_nonterminal(6),
-        leaf_prior_cov_inv=eye,
+        leaf_prior_cov_inv=Wishart(nu=None, rate=None, value=eye),
         error_cov_inv=Wishart(nu=2.0, rate=2 * eye, value=eye),
         min_points_per_decision_node=10,
         **kwargs,

@@ -1474,7 +1474,7 @@ def _setup_mcmc(
         max_split=max_split,
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(maxdepth, base, power),
-        leaf_prior_cov_inv=leaf_prior_cov_inv,
+        leaf_prior_cov_inv=Wishart(nu=None, rate=None, value=leaf_prior_cov_inv),
         error_cov_inv=error_cov_inv,
         min_points_per_decision_node=10,
         filter_splitless_vars=jnp.sum(max_split == 0).item() if rm_const else 0,

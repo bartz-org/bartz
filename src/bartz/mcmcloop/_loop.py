@@ -97,7 +97,9 @@ class Callback(Module):
         key
             A key for random number generation.
         state
-            The MCMC state just after updating it.
+            The MCMC state just after updating it, with
+            `~bartz.mcmcstep.StepConfig.steps_done` already advanced by the
+            loop.
         burnin
             Whether the last iteration was in the burn-in phase.
         i_total
@@ -360,6 +362,15 @@ def _run_mcmc_inner_loop_impl(
         # update state
         state = step(keys.pop(), carry.state)
 
+        # the loop owns `steps_done` because it seeds each iteration from it;
+        # overwrite whatever `step` and the callback did to it
+        set_steps_done = partial(
+            tree_at,
+            lambda s: s.config.steps_done,
+            replace=carry.state.config.steps_done + 1,
+        )
+        state = set_steps_done(state)
+
         # invoke callback
         callback = carry.callback
         if callback is not None:
@@ -376,12 +387,7 @@ def _run_mcmc_inner_loop_impl(
             )
             if rt is not None:
                 state, callback = rt
-
-        # the loop owns `steps_done` because it seeds each iteration from it;
-        # overwrite whatever `step` and the callback did to it
-        state = tree_at(
-            lambda s: s.config.steps_done, state, carry.state.config.steps_done + 1
-        )
+                state = set_steps_done(state)
 
         # save to trace
         burnin_trace, main_trace = _save_state_to_trace(

@@ -44,7 +44,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Key, Shaped, UInt8
+from jaxtyping import Array, Int32, Key, Shaped, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import (
@@ -55,6 +55,7 @@ from bartz._jaxext import (
 )
 from bartz.mcmcloop import (
     BurninTrace,
+    Callback,
     CheckPlatformCallback,
     MainTrace,
     evaluate_trace,
@@ -453,6 +454,35 @@ def test_restartable_with_frozen_step(keys: split) -> None:
 
     tree.map(assert_trace_close, final_single, final_split)
     tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
+
+
+class RecordStepsDoneCallback(Callback):
+    """Store ``steps_done - i_total`` in the state, to check it in the trace."""
+
+    def __call__(
+        self, *, state: State, i_total: Int32[Array, ''], **_: Any
+    ) -> tuple[State, Callback]:
+        """Overwrite the error covariance with the counter offset."""
+        delta = state.config.steps_done - i_total
+        state = tree_at(
+            lambda s: s.error_cov_inv.value,
+            state,
+            jnp.full_like(state.error_cov_inv.value, delta),
+        )
+        return state, self
+
+
+def test_callback_sees_advanced_steps_done(keys: split) -> None:
+    """Check the counter the callback sees does not depend on `step`."""
+    n_burn, n_save = 2, 3
+    kw: dict = dict(n_burn=n_burn, callback=RecordStepsDoneCallback())
+
+    for step_func in (step, frozen_step):
+        _, burnin_trace, main_trace = run_mcmc(
+            keys.pop(), simple_init(), n_save, step=step_func, **kw
+        )
+        assert_array_equal(nnone(burnin_trace.error_cov_inv), jnp.ones(n_burn))
+        assert_array_equal(nnone(main_trace.error_cov_inv), jnp.ones(n_save))
 
 
 @pytest.mark.parametrize('matches', [True, False])

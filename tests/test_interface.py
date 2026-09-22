@@ -847,7 +847,9 @@ class TestWithCachedBart:
                         and bart._mcmc_state.error_cov_inv.nu is None
                     )
                     or (
-                        str_path.endswith('.forest.leaf_prior_cov_inv.value')
+                        str_path.endswith(
+                            ('.leaf_prior_cov_inv', '.leaf_prior_cov_inv.value')
+                        )
                         and bart._mcmc_state.forest.leaf_prior_cov_inv.nu is None
                     )
                     # means over datapoints (and steps): they concentrate (and

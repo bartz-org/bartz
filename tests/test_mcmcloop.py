@@ -193,6 +193,10 @@ class TestRunMcmc:
             final_state.error_cov_inv.value,
             last_sample(main_trace.error_cov_inv, sample_axes.error_cov_inv),
         )
+        assert_array_equal(
+            final_state.forest.leaf_prior_cov_inv.value,
+            last_sample(main_trace.leaf_prior_cov_inv, sample_axes.leaf_prior_cov_inv),
+        )
 
     def test_zero_iterations(self, keys: split, initial_state: State) -> None:
         """Check 0 iterations produces a noop."""

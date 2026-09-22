@@ -604,7 +604,9 @@ class TestWithCachedBart:
                 ):
                     return
                 if (
-                    str_path.endswith('.forest.leaf_prior_cov_inv.value')
+                    str_path.endswith(
+                        ('.leaf_prior_cov_inv', '.leaf_prior_cov_inv.value')
+                    )
                     and bart._mcmc_state.forest.leaf_prior_cov_inv.nu is None
                 ):
                     return

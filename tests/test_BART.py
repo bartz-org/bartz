@@ -883,11 +883,10 @@ def test_scale_shift(kw: dict[str, Any]) -> None:
     bart2 = mc_gbart(**kw)
 
     assert_allclose(bart1.offset, (bart2.offset - offset) / scale, rtol=1e-6, atol=1e-6)
-    assert_allclose(
+    assert_close_matrices(
         bart1._mcmc_state.forest.leaf_prior_cov_inv.value,
         bart2._mcmc_state.forest.leaf_prior_cov_inv.value * scale**2,
         rtol=1e-6,
-        atol=0,
     )
     assert_allclose(nnone(bart1.sigest), nnone(bart2.sigest) / scale, rtol=1e-6)
     assert_array_equal(
@@ -1031,9 +1030,12 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
             assert bart.offset == kw['y_train'].item()
         else:
             assert bart.offset == 0
-    assert_allclose(
-        bart._mcmc_state.forest.leaf_prior_cov_inv.value,
-        (2**2 * get_with_default(kw, 'ntree')) / tau_num**2,
+    leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv.value
+    assert_close_matrices(
+        leaf_prior_cov_inv,
+        jnp.full_like(
+            leaf_prior_cov_inv, (2**2 * get_with_default(kw, 'ntree')) / tau_num**2
+        ),
         rtol=1e-6,
     )
 

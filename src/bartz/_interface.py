@@ -285,12 +285,13 @@ class Bart(Module):
         types, each component uses the default for its type.
     sigma_mu_df
         If specified, the prior precision of the leaves is sampled in the MCMC
-        instead of being held fixed. The prior is Gamma (Wishart for
-        multivariate regression, with degrees of freedom ``sigma_mu_df + k -
-        1`` like `sigma_df`) with `sigma_mu_df` degrees of freedom, scaled
-        such that the prior harmonic mean of each marginal leaf variance is
-        the fixed value determined by `k` and `tau_num`, which is also the
-        initial value.
+        instead of being held fixed. The prior is Wishart (Gamma in the
+        univariate case) with ``sigma_mu_df + k - 1`` degrees of freedom for
+        `k` outcome components, such that each marginal leaf variance keeps
+        ``sigma_mu_df`` degrees of freedom, like `sigma_df`. The prior harmonic
+        mean of each marginal leaf variance, which is also its initial value,
+        is the fixed value otherwise set by `tau_num` and the `k` argument (the
+        leaf scale, not the number of components).
     offset
         The prior mean of the latent mean function. If not specified, it is set
         to the mean of `y_train` for continuous regression, and to

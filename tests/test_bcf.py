@@ -1015,9 +1015,7 @@ class TestBcf:
         prob_test = model.prob_test
         assert prob_test is not None
         assert_close_matrices(
-            prob_test,
-            np.where(np.asarray(z_train, bool), preds['p1'], preds['p0']),
-            rtol=1e-5,
+            prob_test, np.where(z_train, preds['p1'], preds['p0']), rtol=1e-5
         )
         assert np.all((prob_test >= 0.0) & (prob_test <= 1.0))
 
@@ -1110,7 +1108,7 @@ class TestBcf:
             pihat_train=pihat,
             num_trees_mu=2,
             num_trees_tau=2,
-            ndpost=2,
+            ndpost=3,
             nskip=1,
             seed=0,
         )

@@ -237,11 +237,12 @@ class bcf(eqx.Module):
     Raises
     ------
     ValueError
-        If binary outcome is specified but `y_train` contains values other than 0 or 1.
-        If the format of `x_test` does not match `x_train` format.
-        If `z_test` or `pihat_test` is passed without `x_test`.
-        If only one of `pihat_train` and `pihat_test` is passed.
-        If `z_test` or `pihat_test` does not match the length of `x_test`.
+        - If binary outcome is specified but `y_train` contains values other
+          than 0 or 1.
+        - If the format of `x_test` does not match `x_train` format.
+        - If `z_test` or `pihat_test` is passed without `x_test`.
+        - If only one of `pihat_train` and `pihat_test` is passed.
+        - If `z_test` or `pihat_test` does not match the length of `x_test`.
     """
 
     _mcmc_state: Any
@@ -342,7 +343,9 @@ class bcf(eqx.Module):
                 msg = '`z_test` and `pihat_test` require `x_test`.'
                 raise ValueError(msg)
         else:
-            x_test_binned_fmt, x_test_fmt = _process_bcf_predictor_input(x_test)
+            x_test_preprocessed, x_test_fmt = _process_bcf_predictor_input(x_test)
+            _, m = x_test_preprocessed.shape
+            del x_test_preprocessed
             if x_test_fmt != self._x_train_fmt:
                 msg = (
                     f'Format of x_test {x_test_fmt} does not match x_train'
@@ -352,7 +355,6 @@ class bcf(eqx.Module):
             if (pihat_train is None) != (pihat_test is None):
                 msg = '`pihat_train` and `pihat_test` must be passed together.'
                 raise ValueError(msg)
-            _, m = x_test_binned_fmt.shape
             if z_test is not None:
                 z_test = _process_response_input(z_test)
                 (len_z,) = z_test.shape
@@ -879,7 +881,8 @@ class bcf(eqx.Module):
     def prob_test(self) -> Float32[Array, 'ndpost m'] | None:
         """The probability of y being True at `x_test` under `z_test`.
 
-        `None` unless the outcome is binary.
+        `None` unless the outcome is binary and `x_test` and `z_test` were
+        passed to the constructor.
         """
         if self._yhat_test is None or self._outcome_type != 'binary':
             return None

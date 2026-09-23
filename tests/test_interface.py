@@ -78,7 +78,7 @@ from jaxtyping import (
     Shaped,
     UInt,
 )
-from numpy.testing import assert_array_less
+from numpy.testing import assert_array_less, assert_array_max_ulp
 from pytest import CaptureFixture, FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
 
@@ -1861,7 +1861,8 @@ def test_sum_trees_eps_snap(keys: split) -> None:
     # more distortion, until the loop settles. at that equilibrium snap and
     # the observed error track each other up to a constant
     assert err <= 1.5 * snap <= 12 * err
-    assert_array_equal(bart._mcmc_state.sum_trees_eps(), snap)
+    # jit may round the snap term differently than eager evaluation
+    assert_array_max_ulp(bart._mcmc_state.sum_trees_eps(), snap, maxulp=1)
 
 
 def test_output_ranges(bkw: BartKW, keys: split) -> None:

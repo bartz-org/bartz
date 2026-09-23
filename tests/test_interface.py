@@ -1071,6 +1071,32 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     assert_close_matrices(empirical_cov, leaf_prior_cov, rtol=0.02)
 
 
+def test_leaf_prior_strong_limit(bkw: BartKW, subtests: SubTests) -> None:
+    """A leaf precision prior with huge `sigma_mu_df` behaves like a fixed one."""
+    kw = bkw.kw
+    bart_fixed = Bart(**dict(kw, sigma_mu_df=None))
+    bart_strong = Bart(**dict(kw, sigma_mu_df=1e14, seed=random.clone(kw['seed'])))
+
+    fixed_value = initial_leaf_prior_cov_inv(bart_fixed._mcmc_state.forest)
+    leaf_prec_fixed = bart_fixed._main_trace.leaf_prior_cov_inv
+    leaf_prec_strong = bart_strong._main_trace.leaf_prior_cov_inv
+    expected = jnp.broadcast_to(fixed_value, leaf_prec_fixed.shape)
+
+    with subtests.test('fixed prior is constant'):
+        assert_array_equal(leaf_prec_fixed, expected)
+
+    with subtests.test('strong prior is concentrated'):
+        assert_close_matrices(leaf_prec_strong, expected, rtol=1e-5, reduce_rank=True)
+
+    with subtests.test('same predictions'):
+        assert_close_matrices(
+            bart_strong.predict('train', kind='latent_samples'),
+            bart_fixed.predict('train', kind='latent_samples'),
+            rtol=condf(bart_fixed._mcmc_state.forest.leaf_tree, 1e-5, 1e-3),
+            reduce_rank=True,
+        )
+
+
 def test_error_scale_magnitude_invariance(bkw: BartKW) -> None:
     """Rescaling `error_scale` by a constant only rescales the error variance.
 

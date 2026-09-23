@@ -1182,7 +1182,7 @@ class TestBcf:
             pihat_train=pihat,
             num_trees_mu=2,
             num_trees_tau=2,
-            ndpost=2,
+            ndpost=3,
             nskip=1,
             seed=42,
         )

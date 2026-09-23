@@ -1024,6 +1024,31 @@ reads $\smsq \mid \cdots \sim \IG\bigl((\nu_\mu + L)/2, (\psi_\mu +
 	\sum_t \sum_\ell \mu_\ell^2)/2\bigr)$. Keeping $\mLamm$ fixed amounts to
 skipping this update.
 
+\paragraph{Implementation.}
+In bartz, $\mLamm$ is called \texttt{leaf\_prior\_cov\_inv},
+both in \texttt{Forest} and in the MCMC trace. In \texttt{Forest} it is a
+\texttt{Wishart}, which bundles the current value with the prior parameters
+\texttt{nu} $= \nu_\mu$ and \texttt{rate} $= \Psi_\mu$; these are
+\texttt{None} if $\mLamm$ is fixed.
+
+The update is \texttt{step\_leaf\_prior\_cov\_inv} in
+\texttt{mcmcstep/\_step.py}, called right after the trees, and skipped if
+$\mLamm$ is fixed. It proceeds in two steps:
+\begin{enumerate}
+	\item \texttt{leaf\_scatter} computes $L$ and $\Psi_\mu' - \Psi_\mu$,
+	      counting only the actual leaves, since the tree heap keeps stale
+	      values below them;
+	\item \texttt{sample\_wishart\_posterior}, shared with the error precision
+	      update of \S\ref{sec:mv-Sigma}, adds the prior and draws from
+	      \eqref{eq:mv-Lamm-fc}.
+\end{enumerate}
+
+\texttt{Bart} keeps $\mLamm$ fixed by default. The option
+\texttt{sigma\_mu\_df} makes it random, and sets the degrees of freedom
+$\nu_\mu - k + 1$ of each marginal leaf variance, as \texttt{sigma\_df} does
+for $\mLam$ (\S\ref{sec:mv-Lam-prior}). $\Psi_\mu$ is diagonal and chosen so
+that the prior harmonic mean of each marginal variance is the initial value.
+
 %-----------------------------------------------------------------------------
 \section{Updating the latent outcomes}
 \label{sec:mv-z}
@@ -1171,8 +1196,8 @@ marginal likelihood \eqref{eq:mv-lik-obs} involves the Schur complements
 $[(\mLam^{-1})_{O_iO_i}]^{-1}$ on top of that. Whole missing datapoints
 contribute nothing to either the sum of log determinants or $\Psi'$, so (i)
 holds with $n$ the number of present datapoints; this is the case bartz
-keeps dense, with \texttt{df\_post} $= \nu + n$ computed in
-\texttt{\_step\_error\_cov\_inv\_mv} from \texttt{State.n\_non\_missing}.
+keeps dense, with \texttt{\_step\_error\_cov\_inv\_mv} reading $n$ from
+\texttt{State.n\_non\_missing}.
 For $k = 1$, (i) and (ii)
 coincide: $\lambda = 1/\sigsq$ has a $\mathrm{Gamma}(\nu/2, \psi/2)$ prior,
 i.e.\ $\sigsq \sim \IG(\nu/2, \psi/2)$, and the update is
@@ -1186,13 +1211,16 @@ sampler or block update is required.
 
 \paragraph{Sampling.} A draw from $\W(\nu', \Psi')$ is obtained directly,
 e.g.\ by a Bartlett decomposition of the Cholesky factor of $(\Psi')^{-1}$;
-this is what \texttt{\_sample\_wishart\_bartlett} and
-\texttt{\_step\_error\_cov\_inv\_mv} do in bartz (\texttt{mcmcstep/\_step.py}),
-the latter rescaling the residuals by \texttt{State.inv\_sdev\_scale}
-$= \va_i$ before forming $\Psi' = \Psi + \tilde R^\top \tilde R$, with
-$\tilde R$ the row-rescaled residual matrix. The diagonal update
-\eqref{eq:mv-Sigma-fc-diag} is \texttt{\_step\_error\_cov\_inv\_diag}, with
-the prior represented by \texttt{DiagWishart}, whose \texttt{nu} and
+this is what \texttt{\_sample\_wishart\_bartlett} does in bartz
+(\texttt{mcmcstep/\_step.py}). \texttt{\_step\_error\_cov\_inv\_mv} rescales
+the residuals by \texttt{State.inv\_sdev\_scale} $= \va_i$, forms
+$\Psi' - \Psi = \tilde R^\top \tilde R$, with $\tilde R$ the row-rescaled
+residual matrix, and passes it with $n$ to
+\texttt{sample\_wishart\_posterior}, which adds the prior and draws. The
+diagonal update \eqref{eq:mv-Sigma-fc-diag} is
+\texttt{\_step\_error\_cov\_inv\_diag}, which passes the per-component sums
+of squares and counts $n_j$ to the same function, with the prior
+represented by \texttt{DiagWishart}, whose \texttt{nu} and
 \texttt{rate} map to $\nu_j$ and $\psi_j$ through
 \eqref{eq:mv-gamma-match}. The fixed components are those listed in
 \texttt{State.binary\_indices}: the update draws all $k$ entries and then
@@ -1392,8 +1420,13 @@ variable uniformly at random.
 			                  $\tilde\mA_i$ (both stored up to a
 			                  power-of-two unit).
 			            \item \texttt{Forest.leaf\_tree} holds $\vmu_\ell$
-			                  and \texttt{Forest.leaf\_prior\_cov\_inv} is
-			                  $\mLamm$.
+			                  in units of \texttt{Forest.leaf\_unit}.
+			            \item \texttt{Forest.leaf\_prior\_cov\_inv} is
+			                  $\mLamm$ with its prior, a \texttt{Wishart}
+			                  with \texttt{nu} $= \nu_\mu$ and \texttt{rate}
+			                  $= \Psi_\mu$, or \texttt{nu} $=$ \texttt{rate}
+			                  $=$ \texttt{None} if $\mLamm$ is fixed; for
+			                  $k = 1$ it is the scalar $1/\smsq$.
 			            \item \texttt{Forest.p\_propose\_grow} is the leaf
 			                  weight $w$ of \S\ref{sec:mv-grow}.
 			            \item \texttt{Forest.min\_points\_per\_decision\_node}
@@ -1432,8 +1465,8 @@ variable uniformly at random.
 		            \end{itemize}
 		      \item[\texttt{\_step.py}] The Gibbs sweep, leaf model, and
 		            noise model. \texttt{step} updates in order the trees,
-		            the latent outcomes, the error precision, and the
-		            variable selection parameters.
+		            the leaf precision, the latent outcomes, the error
+		            precision, and the variable selection parameters.
 		            \begin{itemize}
 			            \item Trees:
 			                  \begin{itemize}
@@ -1452,6 +1485,10 @@ variable uniformly at random.
 				                        and \texttt{compute\_likelihood\_ratio}
 				                        compute \eqref{eq:mv-lkratio-grow}.
 			                  \end{itemize}
+			            \item Leaf precision:
+			                  \texttt{step\_leaf\_prior\_cov\_inv} draws
+			                  from \eqref{eq:mv-Lamm-fc}, with $L$ and the
+			                  leaf scatter from \texttt{leaf\_scatter}.
 			            \item Latent outcomes: \texttt{step\_z} draws from
 			                  \eqref{eq:mv-z-fc}.
 			            \item Error precision: \texttt{step\_error\_cov\_inv}
@@ -1460,14 +1497,18 @@ variable uniformly at random.
 			                  \begin{itemize}
 				                  \item \texttt{\_step\_error\_cov\_inv\_mv},
 				                        which draws from
-				                        \eqref{eq:mv-Sigma-fc} by
-				                        \texttt{\_sample\_wishart\_bartlett};
+				                        \eqref{eq:mv-Sigma-fc};
 				                  \item \texttt{\_step\_error\_cov\_inv\_diag},
 				                        which draws from
 				                        \eqref{eq:mv-Sigma-fc-diag}, and
 				                        for $k = 1$ is the univariate
 				                        inverse-gamma update.
 			                  \end{itemize}
+			            \item \texttt{sample\_wishart\_posterior} does the
+			                  conjugate draw for both precisions: by
+			                  \texttt{\_sample\_wishart\_bartlett} for a dense
+			                  \texttt{Wishart} prior, as independent gammas
+			                  for a \texttt{DiagWishart} prior or $k = 1$.
 			            \item Variable selection: \texttt{step\_s} and
 			                  \texttt{sample\_s\_augmentation} draw from
 			                  \eqref{eq:mv-s-fc-aug}, \texttt{step\_theta}
@@ -1488,5 +1529,12 @@ variable uniformly at random.
 		            \texttt{SampleLeafParameters} implement
 		            \eqref{eq:mv-leaf-fc}.
 		      \item \texttt{src/sampler.cpp}: acceptance / rejection logic.
+		      \item \texttt{include/stochtree/variance\_model.h}:
+		            \texttt{LeafNodeHomoskedasticVarianceModel} draws $\smsq$
+		            from the $k = 1$ case of \eqref{eq:mv-Lamm-fc}, with
+		            \texttt{sigma2\_leaf\_shape} $= \nu_\mu$ and
+		            \texttt{sigma2\_leaf\_scale} $= \psi_\mu$, despite the
+		            documentation reading them as the shape and scale of the
+		            inverse gamma prior.
 	      \end{itemize}
 \end{description}

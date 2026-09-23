@@ -1772,7 +1772,7 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     samples = jnp.exp(loggamma(keys.pop(), alpha, kshape))
     prec = samples / beta
     if state.binary_indices is not None:
-        prec = prec.at[state.binary_indices].set(1.0)
+        prec = prec.at[state.binary_indices].set(1.0, unique_indices=True)
     if kshape:
         prec = jnp.diag(prec)
     state = step_resid_eff_scale(state, norm2, state.sum_diag_prec_scale)
@@ -1851,7 +1851,7 @@ def step_z(key: Key[Array, ''], state: State) -> State:
 
     resid = (resid / resid_unit[..., None]).astype(state.resid.dtype)
     if state.binary_indices is not None:
-        resid = state.resid.at[state.binary_indices, :].set(resid)
+        resid = state.resid.at[state.binary_indices, :].set(resid, unique_indices=True)
 
     return replace(state, z=z, resid=resid)
 

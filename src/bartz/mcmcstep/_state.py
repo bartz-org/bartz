@@ -1381,7 +1381,7 @@ def initial_resid(
     """
     resid = jnp.broadcast_to(y - offset[..., None], shape)
     if binary_indices is not None:
-        resid = resid.at[..., binary_indices, :].set(0.0)
+        resid = resid.at[..., binary_indices, :].set(0.0, unique_indices=True)
     return (resid / resid_unit[..., None]).astype(resid_dtype)
 
 

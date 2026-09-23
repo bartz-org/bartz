@@ -101,6 +101,13 @@ class BurninTrace(Trace):
     """The inverse error covariance (scalar for univariate, matrix for
     multivariate). Identity in binary regression."""
 
+    leaf_prior_cov_inv: (
+        Float32[Array, '*chains_and_samples']
+        | Float32[Array, '*chains_and_samples k k']
+    ) = field(chains=CHAIN_AXIS, samples=0)
+    """The inverse prior covariance of the leaf values (scalar for univariate,
+    matrix for multivariate). Constant if the leaf prior is fixed."""
+
     theta: Float32[Array, '*chains_and_samples'] | None = field(
         chains=CHAIN_AXIS, samples=0
     )
@@ -125,6 +132,7 @@ class BurninTrace(Trace):
             has_chains=state.has_chains,
             mesh=state.config.mesh,
             error_cov_inv=state.error_cov_inv.value,
+            leaf_prior_cov_inv=state.forest.leaf_prior_cov_inv.value,
             theta=state.forest.theta,
             grow_prop_count=state.forest.grow_prop_count,
             grow_acc_count=state.forest.grow_acc_count,

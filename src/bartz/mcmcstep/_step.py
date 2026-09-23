@@ -97,8 +97,7 @@ def step(key: Key[Array, ''], state: State) -> State:
     state = step_resid_inexact_integral(state)
     state = step_trees(keys.pop(), state)
 
-    if state.forest.leaf_prior_cov_inv.nu is not None:
-        state = step_leaf_prior_cov_inv(keys.pop(), state)
+    state = step_leaf_prior_cov_inv(keys.pop(), state)
 
     if state.z is not None:
         state = step_z(keys.pop(), state)
@@ -1871,18 +1870,17 @@ def leaf_scatter(
 
 @named_call
 def step_leaf_prior_cov_inv(key: Key[Array, ''], state: State) -> State:
-    """MCMC-update the leaf prior precision from its conjugate posterior."""
-    count, scatter = leaf_scatter(state.forest)
-    prec = sample_wishart_posterior(
-        key, state.forest.leaf_prior_cov_inv, count, scatter
-    )
-    return replace(
-        state,
-        forest=replace(
-            state.forest,
-            leaf_prior_cov_inv=replace(state.forest.leaf_prior_cov_inv, value=prec),
-        ),
-    )
+    """MCMC-update the leaf prior precision from its conjugate posterior, if it has a prior."""
+    prior = state.forest.leaf_prior_cov_inv
+    if prior.nu is None:
+        return state
+    else:
+        count, scatter = leaf_scatter(state.forest)
+        prec = sample_wishart_posterior(key, prior, count, scatter)
+        return replace(
+            state,
+            forest=replace(state.forest, leaf_prior_cov_inv=replace(prior, value=prec)),
+        )
 
 
 @named_call

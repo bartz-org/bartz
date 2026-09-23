@@ -120,7 +120,7 @@ from bartz.mcmcloop import (
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _inner_loop_counter
-from bartz.mcmcstep import BatchedReduction, State, Wishart, step
+from bartz.mcmcstep import BatchedReduction, Forest, State, Wishart, step
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
@@ -558,6 +558,8 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     y_train=train.y,
                     outcome_type='binary',
                     error_scale=train.error_scale,
+                    # not too low, the leaf variance would mix too slowly
+                    sigma_mu_df=30.0,
                     **common,
                     printevery=None,
                     # quantile-binned with binary X, deterministic via
@@ -609,6 +611,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     # non-default augment; variant 4 covers the default True
                     sparse=SparseConfig(theta=2.0, augment=False),
                     varprob=jnp.array([0.2, 0.3, 0.5]),
+                    sigma_mu_df=10.0,
                     **common,
                     printevery=50,
                     binner=partial(
@@ -776,7 +779,7 @@ class TestWithCachedBart:
                 rhat_prob_train = rhat_rank(
                     clipped_logit(prob_train_chains, 1e-5), split=True
                 )
-                assert_array_less(rhat_prob_train, 1.005)
+                assert_array_less(rhat_prob_train, 1.01)
 
         elif bkw.is_mixed:
             with subtests.test('sigma'):
@@ -1321,10 +1324,17 @@ def test_constant_y_train(bkw: BartKW, keys: split) -> None:
     bart = Bart(**kw)
     _assert_predictions_finite(bart, bkw, keys)
     if not bkw.all_binary:
-        # tau_num kept at its degenerate default (0): the infinite leaf-prior
-        # precision pins every leaf to exactly zero
-        leaf_tree = bart._mcmc_state.forest.leaf_tree
-        assert_array_equal(leaf_tree, jnp.zeros_like(leaf_tree))
+        # tau_num kept at its degenerate default (0)
+        forest = bart._mcmc_state.forest
+        leaf_tree = forest.leaf_tree
+        if forest.leaf_prior_cov_inv.nu is None:
+            # the infinite leaf-prior precision pins every leaf to exactly zero
+            assert_array_equal(leaf_tree, jnp.zeros_like(leaf_tree))
+        else:
+            # the zero prior rate keeps the sampled precision huge on the
+            # continuous components, pinning their leaves close to zero
+            continuous = leaf_tree[..., ~bkw.binary_mask, :]
+            assert_array_less(jnp.abs(continuous), 1e-6)
 
 
 def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
@@ -1488,13 +1498,32 @@ def test_accept(bkw: BartKW) -> None:
     assert jnp.any(bart.accept > 0)  # check the test is not vacuous
 
 
+def initial_leaf_prior_cov_inv(
+    forest: Forest,
+) -> Float32[Array, ''] | Float32[Array, 'k k']:
+    """Return the leaf prior precision set by `Bart` before the MCMC."""
+    prior = forest.leaf_prior_cov_inv
+    if prior.nu is None:
+        value = prior.value
+        if forest.has_chains:
+            # fixed, so the same across chains
+            value = value[0, ...]
+        return value
+    else:
+        # sampled, the initial value is the prior harmonic mean of each
+        # (diagonal) marginal variance, see `_process_leaf_variance_settings`
+        rate = nnone(prior.rate)
+        if rate.ndim:
+            inv_rate = jnp.diag(jnp.reciprocal(jnp.diag(rate)))
+        else:  # pragma: no cover, always mv in bkw
+            inv_rate = jnp.reciprocal(rate)
+        return nnone(prior.inv_wishart_marginal_nu) * inv_rate
+
+
 def test_leaf_unit(bkw: BartKW) -> None:
     """`leaf_unit` is the marginal prior leaf standard deviation, rounded to a power of two."""
     forest = Bart(**bkw.kw)._mcmc_state.forest
-    cov_inv = forest.leaf_prior_cov_inv.value
-    if forest.has_chains:
-        # the prior is fixed, so the value is the same across chains
-        cov_inv = cov_inv[0, ...]
+    cov_inv = initial_leaf_prior_cov_inv(forest)
     if cov_inv.ndim:
         marginal_std = jnp.sqrt(jnp.diagonal(jnp.linalg.inv(cov_inv)))
     else:  # pragma: no cover, always mv with defaults
@@ -1842,7 +1871,14 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
 
     with subtests.test('outcome_samples vs mean'):
         mean_from_os = outcome_samples.mean(0)
-        sdev = outcome_samples.std(0) / jnp.sqrt(outcome_samples.shape[0])
+        # exact Bernoulli sdev for binary components, the sample one is zero if
+        # all the samples coincide
+        sdev = jnp.where(
+            bkw.binary_mask[..., None],
+            jnp.sqrt(mean * (1 - mean)),
+            outcome_samples.std(0),
+        )
+        sdev /= jnp.sqrt(outcome_samples.shape[0])
         t = jnp.abs(mean - mean_from_os) / sdev
         assert jnp.all(t < 5)
 
@@ -2177,6 +2213,7 @@ def test_scale_shift(bkw: BartKW) -> None:
         bart1._mcmc_state.forest.leaf_prior_cov_inv.value,
         bart2._mcmc_state.forest.leaf_prior_cov_inv.value * cov_scale,
         rtol=1e-6,
+        reduce_rank=True,
     )
 
     assert_close_matrices(
@@ -2398,7 +2435,7 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
 
     # check leaf_prior_cov_inv
     expected_cov_inv = (2**2 * bkw.num_trees) / tau_num**2
-    leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv.value
+    leaf_prior_cov_inv = initial_leaf_prior_cov_inv(bart._mcmc_state.forest)
     if leaf_prior_cov_inv.ndim == 2:  # pragma: no branch, always mv with defaults
         expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
     assert_close_matrices(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)

@@ -36,22 +36,24 @@ from time import monotonic
 from typing import Any, TypeVar
 
 import numpy as np
-from jax import jit, random
+from jax import jit, lax, random, vmap
 from jax import numpy as jnp
 from jax.scipy.special import logit
-from jaxtyping import Array, Float, Float32, Shaped
+from jaxtyping import Array, Float, Float32, Shaped, UInt
 from jaxtyping import ArrayLike as JaxArrayLike
 from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
 from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
 from numpy.typing import ArrayLike
 from scipy import linalg, stats
 
+from bartz import Bart
 from bartz._jaxext import (  # noqa: F401
     get_default_device,
     jaxtyping_disabled,
     minimal_unsigned_dtype,
 )
-from bartz.grove import TreesTrace, check_trace, describe_error
+from bartz.grove import TreesTrace, check_trace, describe_error, is_actual_leaf
+from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 
 _T = TypeVar('_T')
 
@@ -522,3 +524,51 @@ def _rhat_v(
     between = n * chain_mean.var(axis=-1, ddof=1)
     within = chain_var.mean(axis=-1)
     return np.sqrt((between / within + n - 1) / n)
+
+
+def leaf_prior_cov_inv_conditional_mean(
+    bart: Bart,
+) -> tuple[
+    Float32[Array, ' samples'] | Float32[Array, 'samples k k'],
+    Float32[Array, ' samples'] | Float32[Array, 'samples k k'],
+]:
+    """Return the sampled leaf prior precision and the mean of its full conditional.
+
+    Each saved precision is drawn from ``Wishart(nu + L, (R + S)^-1)``, with
+    ``L`` and ``S`` the count and scatter of the leaves saved with it, so its
+    conditional mean is ``(nu + L) (R + S)^-1``. Chains and samples are
+    flattened into a single axis.
+    """
+    forest = bart._mcmc_state.forest
+    prior = forest.leaf_prior_cov_inv
+    kshape = forest.leaf_unit.shape
+
+    trace = bart._main_trace
+    axes = chain_vmap_axes(trace)
+    leaf_prec = chain_to_axis(trace.leaf_prior_cov_inv, axes.leaf_prior_cov_inv)
+    split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
+    leaf_tree = chain_to_axis(trace.leaf_tree, axes.leaf_tree)
+    *_, num_trees, half = split_tree.shape
+
+    def conditional_mean(
+        split_tree: UInt[Array, 'num_trees tree_size//2'],
+        leaf_tree: Float[Array, 'num_trees k tree_size'],
+    ) -> Float32[Array, 'k k']:
+        is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
+        leaves = forest.leaf_unit.reshape(-1, 1) * leaf_tree
+        scatter = jnp.einsum('tan,tbn,tn->ab', leaves, leaves, is_leaf)
+        rate = nnone(prior.rate).reshape(scatter.shape)
+        return (nnone(prior.nu) + is_leaf.sum()) * jnp.linalg.inv(rate + scatter)
+
+    # batched to avoid materializing the float32 leaves of the whole trace
+    cond_mean = lax.map(
+        lambda args: conditional_mean(*args),
+        (
+            split_tree.reshape(-1, num_trees, half),
+            leaf_tree.reshape(-1, num_trees, math.prod(kshape), 2 * half),
+        ),
+        batch_size=100,
+    )
+
+    shape = (-1, *kshape, *kshape)
+    return leaf_prec.reshape(shape), cond_mean.reshape(shape)

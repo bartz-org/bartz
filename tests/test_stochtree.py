@@ -59,6 +59,7 @@ from tests.util import (
     clipped_logit,
     condf,
     int_seed,
+    leaf_prior_cov_inv_conditional_mean,
     nnone,
     rhat_rank,
 )
@@ -613,6 +614,7 @@ def test_compare_with_stochtree(
             # shape (1, num_samples) so rhat collapses to a scalar
             rhat = _rhat_two_chains(bz_sigma[None, :], st_sigma[None, :])
             assert_array_less(rhat, 1.05)
+
         if bz_model.sample_sigma2_leaf:
             with subtests.test('rhat_sigma2_leaf'):
                 bz_leaf = np.asarray(bz_model.leaf_scale_samples)
@@ -623,6 +625,12 @@ def test_compare_with_stochtree(
                 # discrepancies in setup/mcmc outputs (split grid vs data
                 # points, a few % more leaves in bartz) not investigated further.
                 assert_array_less(rhat, 1.1)
+
+            with subtests.test('leaf_prec_conditional_mean'):
+                leaf_prec, cond_mean = leaf_prior_cov_inv_conditional_mean(
+                    bz_model._bart
+                )
+                assert_close_matrices(leaf_prec.mean(), cond_mean.mean(), rtol=0.02)
     else:
         with subtests.test('rhat_prob_train'):
             bz_prob = np.asarray(ndtr(bz_model.y_hat_train))

@@ -550,6 +550,9 @@ class bcf(eqx.Module):
         y_std: Float32[ArrayLike, ''] | float = 1.0,
         outcome_type: str = 'continuous',
         offset: Float32[ArrayLike, ''] | float = 0.0,
+        mu_test: Float32[Array, 'ndpost m'] | None = None,
+        tau_test: Float32[Array, 'ndpost m'] | None = None,
+        yhat_test: Float32[Array, 'ndpost m'] | None = None,
     ) -> 'bcf':
         """
         Private factory constructor to initialize bcf instance from restored state.
@@ -584,6 +587,12 @@ class bcf(eqx.Module):
             The regression target type ('continuous' or 'binary').
         offset
             Probit latent scale offset (0.0 for continuous).
+        mu_test
+            Optional control mean at the test points.
+        tau_test
+            Optional treatment effect at the test points.
+        yhat_test
+            Optional outcome at the test points.
 
         Returns
         -------
@@ -609,13 +618,14 @@ class bcf(eqx.Module):
         object.__setattr__(model, '_y_std', jnp.asarray(y_std))
         object.__setattr__(model, '_outcome_type', outcome_type)
         object.__setattr__(model, '_offset', jnp.asarray(offset))
+        object.__setattr__(model, '_mu_test', mu_test)
+        object.__setattr__(model, '_tau_test', tau_test)
+        object.__setattr__(model, '_yhat_test', yhat_test)
         return model
 
     def save_npz(self, path: str | Path) -> None:
         """
         Save the loaded BCF traces to an NPZ archive.
-
-        The test predictions are not saved; recompute them with `predict`.
 
         Parameters
         ----------
@@ -670,14 +680,18 @@ class bcf(eqx.Module):
         if self._x_train_fmt is not None:
             state['x_train_fmt'] = json.dumps(self._x_train_fmt)
 
+        # Save test predictions, present only if `x_test` was passed
+        for key in ('_mu_test', '_tau_test', '_yhat_test'):
+            val = getattr(self, key)
+            if val is not None:
+                state[key] = np.asarray(val)
+
         np.savez_compressed(path, allow_pickle=True, **state)
 
     @classmethod
     def load_npz(cls, path: str | Path) -> 'bcf':
         """
         Load BCF traces from an NPZ archive, bypassing __init__ MCMC.
-
-        `mu_test`, `tau_test` and `yhat_test` are `None` on the loaded model.
 
         Parameters
         ----------
@@ -744,6 +758,11 @@ class bcf(eqx.Module):
             fmt_str = str(data.get('x_train_fmt', 'None'))
             x_train_fmt = None if fmt_str == 'None' else json.loads(fmt_str)
 
+            mu_test, tau_test, yhat_test = (
+                jnp.asarray(data[key]) if key in data else None
+                for key in ('_mu_test', '_tau_test', '_yhat_test')
+            )
+
             model = cls._from_saved_state(
                 binner=binner,
                 tau_0_trace=tau_0_trace,
@@ -755,6 +774,9 @@ class bcf(eqx.Module):
                 y_std=y_std,
                 outcome_type=outcome_type,
                 offset=offset,
+                mu_test=mu_test,
+                tau_test=tau_test,
+                yhat_test=yhat_test,
             )
 
             # Push loaded dictionary of arrays back into accelerator memory

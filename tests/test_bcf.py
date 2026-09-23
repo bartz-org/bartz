@@ -185,6 +185,11 @@ class TestBcf:
                 preds_loaded['tau'], preds_orig['tau'], allow_non_scalar=True
             )
 
+            # no x_test at construction, so no test predictions to restore
+            assert loaded_model.mu_test is None
+            assert loaded_model.tau_test is None
+            assert loaded_model.yhat_test is None
+
     def test_bcf_save_load_npz_standardized(self) -> None:
         """Tests that saving and loading an auto-standardized model preserves scale metadata and unscaling."""
         x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
@@ -228,13 +233,14 @@ class TestBcf:
             )
 
             # the outcome scale carries into the stored test predictions, which
-            # are not saved, so the loaded model has none
+            # round-trip through the archive
             assert_array_equal(model.mu_test, preds_orig['mu'])
             assert_array_equal(
                 model.yhat_test, preds_orig['mu'] + z_train * preds_orig['tau']
             )
-            assert loaded_model.mu_test is None
-            assert loaded_model.yhat_test is None
+            assert_array_equal(loaded_model.mu_test, model.mu_test)
+            assert_array_equal(loaded_model.tau_test, model.tau_test)
+            assert_array_equal(loaded_model.yhat_test, model.yhat_test)
             assert loaded_model.prob_test is None
 
     def test_bcf_standardization_equivalence(self) -> None:
@@ -1018,6 +1024,12 @@ class TestBcf:
             prob_test, np.where(z_train, preds['p1'], preds['p0']), rtol=1e-5
         )
         assert np.all((prob_test >= 0.0) & (prob_test <= 1.0))
+
+        # prob_test survives a save/load round-trip
+        with tempfile.TemporaryDirectory() as tmpdir:
+            npz_path = Path(tmpdir) / 'test_bcf_binary.npz'
+            model.save_npz(npz_path)
+            assert_array_equal(bcf.load_npz(npz_path).prob_test, prob_test)
 
         # Sub-test 4: potential outcomes on a binary model return 0/1 labels
         po = model.predict_potential_outcomes(x_train, pihat_test=pihat, key=0)

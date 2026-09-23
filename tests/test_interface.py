@@ -830,6 +830,59 @@ class TestWithCachedBart:
                     rhat_varprob = rhat_rank(varprob_vals[:, :, 1:], split=True)
                     assert_array_less(rhat_varprob, 1.6)
 
+    def test_leaf_prior_cov_inv(
+        self, cachedbart: CachedBart, subtests: SubTests
+    ) -> None:
+        """Check the sampled leaf prior precision converges and fits its full conditional.
+
+        Each saved precision is drawn from ``Wishart(nu + L, (R + S)^-1)``,
+        with ``L`` and ``S`` the count and scatter of the leaves saved with it,
+        so its trace average estimates the average of ``(nu + L) (R + S)^-1``.
+        """
+        bart = cachedbart.bart
+        forest = bart._mcmc_state.forest
+        prior = forest.leaf_prior_cov_inv
+        if prior.nu is None:
+            pytest.skip('fixed leaf prior')
+
+        trace = bart._main_trace
+        axes = chain_vmap_axes(trace)
+        leaf_prec = chain_to_axis(trace.leaf_prior_cov_inv, axes.leaf_prior_cov_inv)
+        split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
+        leaf_tree = chain_to_axis(trace.leaf_tree, axes.leaf_tree)
+        *_, num_trees, k, tree_size = leaf_tree.shape
+
+        with subtests.test('convergence'):
+            ti, tj = jnp.triu_indices(k)
+            rhat = rhat_rank(leaf_prec[:, :, ti, tj], split=True)
+            assert_array_less(rhat, 1.05)
+
+        def conditional_mean(
+            split_tree: UInt[Array, 'num_trees tree_size//2'],
+            leaf_tree: Float[Array, 'num_trees k tree_size'],
+        ) -> Float32[Array, 'k k']:
+            is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
+            leaves = forest.leaf_unit[:, None] * leaf_tree
+            scatter = jnp.einsum('tan,tbn,tn->ab', leaves, leaves, is_leaf)
+            return (nnone(prior.nu) + is_leaf.sum()) * jnp.linalg.inv(
+                nnone(prior.rate) + scatter
+            )
+
+        # batched to avoid materializing the float32 leaves of the whole trace
+        cond_mean = lax.map(
+            lambda args: conditional_mean(*args),
+            (
+                split_tree.reshape(-1, num_trees, tree_size // 2),
+                leaf_tree.reshape(-1, num_trees, k, tree_size),
+            ),
+            batch_size=100,
+        )
+
+        with subtests.test('conditional mean'):
+            assert_close_matrices(
+                leaf_prec.reshape(-1, k, k).mean(0), cond_mean.mean(0), rtol=0.01
+            )
+
     def test_different_chains(self, cachedbart: CachedBart) -> None:
         """Check that different chains give different results."""
         bart = cachedbart.bart

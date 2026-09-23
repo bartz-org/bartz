@@ -338,11 +338,12 @@ class Forest(Module):
     )
     """The log likelihood ratio."""
 
-    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'] | None
+    leaf_prior_cov_inv: Wishart
     """The prior precision matrix of a leaf, conditional on the tree structure
-    (a scalar inverse variance for univariate). The prior mean of a leaf is
-    zero; the prior covariance of the sum of trees is ``num_trees *
-    leaf_prior_cov_inv^-1``."""
+    (a scalar inverse variance for univariate), with its Wishart prior. The
+    prior mean of a leaf is zero; the prior covariance of the sum of trees is
+    ``num_trees * leaf_prior_cov_inv.value^-1``. If `Wishart.nu` is `None`,
+    the precision is held fixed."""
 
     log_s: Float32[Array, '*chains p'] | None = field(chains=CHAIN_AXIS)
     """The logarithm of the prior probability for choosing a variable to split
@@ -645,7 +646,7 @@ def init_shape_shifting_parameters(
     offset: Float32[Array, ''] | Float32[Array, ' k'],
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None,
     error_cov_inv: Wishart | None,
-    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+    leaf_prior_cov_inv: Wishart,
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
 ) -> tuple[bool, tuple[int, ...], Wishart, None | Int32[Array, ' kb']]:
     """
@@ -669,7 +670,8 @@ def init_shape_shifting_parameters(
         modes require a `DiagWishart`; in the mixed case the binary components
         must have an initial precision of 1.
     leaf_prior_cov_inv
-        The inverse of the leaf prior covariance.
+        The Wishart prior on the leaf precision and its initial value (used
+        only for shape and type checks).
     missing
         The per-datapoint missingness mask, used to detect partial missingness
         (2-D mask) so that diagonal-mode initialization is selected.
@@ -748,7 +750,13 @@ def init_shape_shifting_parameters(
         assert error_cov_inv.value.shape == 2 * kshape
 
     assert y.shape[:-1] == kshape
-    assert leaf_prior_cov_inv.shape == 2 * kshape
+
+    assert type(leaf_prior_cov_inv) is Wishart, (
+        'leaf_prior_cov_inv must be a dense Wishart'
+    )
+    assert leaf_prior_cov_inv.value.shape == 2 * kshape
+    if leaf_prior_cov_inv.rate is not None:
+        assert leaf_prior_cov_inv.rate.shape == 2 * kshape
 
     return is_binary, kshape, error_cov_inv, binary_indices
 
@@ -825,7 +833,7 @@ def init(
     max_split: UInt[ArrayLike, ' p'],
     num_trees: int,
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
-    leaf_prior_cov_inv: FloatLike | Float[ArrayLike, 'k k'],
+    leaf_prior_cov_inv: Wishart,
     leaf_dtype: DTypeLike = jnp.float32,
     prec_scale_dtype: DTypeLike = jnp.float32,
     resid_dtype: DTypeLike = jnp.float32,
@@ -878,7 +886,10 @@ def init(
         of trees is fixed by the length of this array. Use `make_p_nonterminal`
         to set it with the conventional formula.
     leaf_prior_cov_inv
-        The prior precision matrix of a leaf, see `Forest.leaf_prior_cov_inv`.
+        The Wishart prior on the leaf precision (a scalar inverse variance for
+        univariate) and its initial value; see `Forest.leaf_prior_cov_inv`.
+        Set `Wishart.nu` and `Wishart.rate` to `None` to hold the precision
+        fixed. Must be a dense `Wishart`, not a `DiagWishart`.
     leaf_dtype
     prec_scale_dtype
     resid_dtype
@@ -993,7 +1004,6 @@ def init(
     y = jnp.asarray(y)
     assert y.dtype == jnp.float32
     offset = jnp.asarray(offset)
-    leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
     max_split = jnp.asarray(max_split)
     error_scale = asarray_or_none(error_scale)
     missing = asarray_or_none(missing)
@@ -1011,7 +1021,12 @@ def init(
     )
 
     storage = determine_storage_params(
-        leaf_dtype, prec_scale_dtype, resid_dtype, leaf_prior_cov_inv, kshape, num_trees
+        leaf_dtype,
+        prec_scale_dtype,
+        resid_dtype,
+        leaf_prior_cov_inv.value,
+        kshape,
+        num_trees,
     )
 
     # extract array sizes from arguments
@@ -1149,7 +1164,10 @@ def init(
                 min_points_per_leaf=asarray_or_none(min_points_per_leaf),
                 log_trans_prior=lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
                 log_likelihood=lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
-                leaf_prior_cov_inv=leaf_prior_cov_inv,
+                # only `value` carries the chain axis, see `error_cov_inv`
+                leaf_prior_cov_inv=replace(
+                    leaf_prior_cov_inv, value=_lazy_from_array(leaf_prior_cov_inv.value)
+                ),
                 log_s=_lazy_from_array(asarray_or_none(log_s)),
                 theta=_lazy_from_array(asarray_or_none(theta)),
                 rho=asarray_or_none(rho),

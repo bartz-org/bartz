@@ -218,7 +218,7 @@ def init_bcf(
         max_split=max_split_mu,
         num_trees=num_trees_mu,
         p_nonterminal=p_nonterminal_mu,
-        leaf_prior_cov_inv=leaf_prior_cov_inv_mu,
+        leaf_prior_cov_inv=Wishart(nu=None, rate=None, value=leaf_prior_cov_inv_mu),
         filter_splitless_vars=filter_splitless_vars_mu,
         min_points_per_leaf=min_points_per_leaf_mu,
         error_cov_inv=error_cov_inv,
@@ -234,7 +234,7 @@ def init_bcf(
         max_split=max_split_tau,
         num_trees=num_trees_tau,
         p_nonterminal=p_nonterminal_tau,
-        leaf_prior_cov_inv=leaf_prior_cov_inv_tau,
+        leaf_prior_cov_inv=Wishart(nu=None, rate=None, value=leaf_prior_cov_inv_tau),
         filter_splitless_vars=filter_splitless_vars_tau,
         min_points_per_leaf=min_points_per_leaf_tau,
         # tau is pretend-initialized as continuous outcome, so pass a dummy error_cov_inv

@@ -152,6 +152,7 @@ def simple_init(  # noqa: C901, PLR0915
         sigma2_eps=1.0,
     ).quantize()
 
+    leaf_prior_cov_inv = jnp.float32(num_trees) * (1.0 if k is None else jnp.eye(k))
     kw: dict = dict(
         X=data.x,
         y=data.y,
@@ -159,7 +160,7 @@ def simple_init(  # noqa: C901, PLR0915
         max_split=data.max_split,
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(6, 0.95, 2),
-        leaf_prior_cov_inv=jnp.float32(num_trees) * (1.0 if k is None else jnp.eye(k)),
+        leaf_prior_cov_inv=Wishart(nu=None, rate=None, value=leaf_prior_cov_inv),
         error_cov_inv=Wishart(
             nu=2.0,
             rate=2.0 * (1.0 if k is None else jnp.eye(k)),
@@ -187,7 +188,12 @@ def simple_init(  # noqa: C901, PLR0915
         # error_cov_df/scale. Inverse gamma prior: alpha = df/2, beta = scale/2.
         kw['sigma2_alpha'] = kw.pop('error_cov_df') / 2
         kw['sigma2_beta'] = kw.pop('error_cov_scale') / 2
-    if 'leaf_prior_cov_inv' not in sig.parameters:
+    leaf_param = sig.parameters.get('leaf_prior_cov_inv')
+    if leaf_param is None or leaf_param.annotation is not Wishart:
+        # WORKAROUND(bartz<0.13.0): 0.13.0 made leaf_prior_cov_inv a Wishart with
+        # nu = rate = None for a fixed value; older versions take the array.
+        kw['leaf_prior_cov_inv'] = leaf_prior_cov_inv
+    if leaf_param is None:
         # WORKAROUND(bartz<0.8.0): pre-0.8.0 used sigma_mu2 (0.6.0-0.7.0) or had
         # no equivalent (0.4.1-0.5.0)
         if 'sigma_mu2' in sig.parameters:

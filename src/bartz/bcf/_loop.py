@@ -177,7 +177,7 @@ def bcf_step_mu(key: Key[Array, ''], state: BCFState) -> BCFState:
     if state.leaf_prior_cov_inv_shape_mu is not None:
         assert state.leaf_prior_cov_inv_rate_mu is not None
         state = tree_at(
-            lambda s: s.forest.leaf_prior_cov_inv,
+            lambda s: s.forest.leaf_prior_cov_inv.value,
             state,
             _sample_leaf_prior_cov_inv(
                 keys.pop(),
@@ -258,7 +258,7 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     if state.leaf_prior_cov_inv_shape_tau is not None:
         assert state.leaf_prior_cov_inv_rate_tau is not None
         state = tree_at(
-            lambda s: s.forest.leaf_prior_cov_inv,
+            lambda s: s.forest.leaf_prior_cov_inv.value,
             state,
             _sample_leaf_prior_cov_inv(
                 keys.pop(),
@@ -384,25 +384,15 @@ class BCFBurninTrace(Trace):
     b: Float32[Array, '*chains_and_samples 2'] = field(chains=CHAIN_AXIS, samples=0)
     """The adaptive coding weights for untreated and treated units."""
 
-    leaf_prior_cov_inv_mu: Float32[Array, '*samples'] = field(samples=0)
-    """The leaf prior precision of the prognostic forest."""
-
-    leaf_prior_cov_inv_tau: Float32[Array, '*samples'] = field(samples=0)
-    """The leaf prior precision of the treatment forest."""
-
     @classmethod
     def from_state(cls, state: State) -> 'BCFBurninTrace':
         """Create a single-item burn-in trace from a BCF state."""
         assert isinstance(state, BCFState)
-        assert state.forest.leaf_prior_cov_inv is not None
-        assert state.forest_tau.leaf_prior_cov_inv is not None
         return cls(
             mu=BurninTrace.from_state(state),
             tau=BurninTrace.from_state(_tau_view(state)),
             tau_0=state.tau_0,
             b=state.b,
-            leaf_prior_cov_inv_mu=state.forest.leaf_prior_cov_inv,
-            leaf_prior_cov_inv_tau=state.forest_tau.leaf_prior_cov_inv,
         )
 
 

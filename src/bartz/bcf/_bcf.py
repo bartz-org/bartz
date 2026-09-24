@@ -374,7 +374,8 @@ class bcf(eqx.Module):
                     k=jnp.array(k_mu),
                     num_trees=num_trees_mu,
                     tau_num=None,
-                )
+                    sigma_mu_df=None,
+                ).value
         if leaf_prior_cov_inv_tau is None:
             if outcome_type == 'binary':
                 p_val = 0.6827
@@ -390,7 +391,8 @@ class bcf(eqx.Module):
                     k=jnp.array(k_tau),
                     num_trees=num_trees_tau,
                     tau_num=None,
-                )
+                    sigma_mu_df=None,
+                ).value
 
         error_cov_inv = _process_error_variance_settings(
             y_train_internal,
@@ -479,8 +481,8 @@ class bcf(eqx.Module):
         self._binner = binner
         self._tau_0_trace = main_trace.tau_0
         self._b_trace = main_trace.b
-        self._leaf_prior_cov_inv_mu_trace = main_trace.leaf_prior_cov_inv_mu
-        self._leaf_prior_cov_inv_tau_trace = main_trace.leaf_prior_cov_inv_tau
+        self._leaf_prior_cov_inv_mu_trace = main_trace.mu.leaf_prior_cov_inv
+        self._leaf_prior_cov_inv_tau_trace = main_trace.tau.leaf_prior_cov_inv
         self._main_trace = {'mu': main_trace.mu, 'tau': main_trace.tau}
         self._burnin_trace = {'mu': burnin_trace.mu, 'tau': burnin_trace.tau}
 

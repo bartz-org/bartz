@@ -237,12 +237,11 @@ class bcf(eqx.Module):
     Raises
     ------
     ValueError
-        - If binary outcome is specified but `y_train` contains values other
-          than 0 or 1.
-        - If the format of `x_test` does not match `x_train` format.
-        - If `z_test` or `pihat_test` is passed without `x_test`.
-        - If only one of `pihat_train` and `pihat_test` is passed.
-        - If `z_test` or `pihat_test` does not match the length of `x_test`.
+        If binary outcome is specified but `y_train` contains values other
+        than 0 or 1, or if the format of `x_test` does not match `x_train`
+        format, or if `z_test` or `pihat_test` is passed without `x_test`, or
+        if only one of `pihat_train` and `pihat_test` is passed, or if
+        `z_test` or `pihat_test` does not match the length of `x_test`.
     """
 
     _mcmc_state: Any

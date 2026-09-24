@@ -64,6 +64,7 @@ from bartz.mcmcloop import (
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._loop import _inner_loop_counter
+from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.testing import QuantizedData, gen_data
@@ -114,9 +115,7 @@ def simple_init(
     )
 
 
-def cat_traces(
-    trace_a: MainTrace | BurninTrace, trace_b: MainTrace | BurninTrace
-) -> MainTrace | BurninTrace:
+def cat_traces(trace_a: Trace, trace_b: Trace) -> Trace:
     """Concatenate two traces along their per-leaf sample axis."""
     sample_axes = trace_sample_axes(trace_a)
 

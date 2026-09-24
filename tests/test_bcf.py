@@ -35,17 +35,19 @@ import pandas as pd
 import pytest
 import stochtree
 from equinox import EquinoxRuntimeError
-from jax import random, vmap
+from jax import random, tree, vmap
 from jaxtyping import ArrayLike, Shaped
 from scipy import stats
 
 from bartz._jaxext import split
 from bartz.bcf._bcf import UniqueQuantileBinner, bcf
-from bartz.bcf._loop import bcf_step
+from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import BCFState, init_bcf
 from bartz.grove import evaluate_forest, is_actual_leaf
+from bartz.mcmcloop import run_mcmc
 from bartz.mcmcstep import Forest, Wishart
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
+from tests.test_mcmcloop import assert_trace_close, cat_traces
 from tests.util import (
     assert_allclose,
     assert_array_equal,
@@ -608,6 +610,63 @@ class TestBcf:
         for i in range(4):
             state = bcf_step(keys.pop(), state)
             check_tau_prec_tree(state, f'after step {i + 1}: ')
+
+    def test_bcf_run_mcmc_restartable(self, keys: split) -> None:
+        """Check splitting a BCF `run_mcmc` run and chunking it do not matter."""
+        x_train, _, z_train, y_train, _, _, _ = self._generate_bcf_data(n=100, seed=42)
+
+        x_train_t = jnp.asarray(x_train.T)
+        binner = UniqueQuantileBinner(x_train_t, key=keys.pop())
+        x_binned = binner.bin(x_train_t)
+
+        state = init_bcf(
+            X_unified=x_binned,
+            trt=z_train.astype(bool),
+            y=y_train,
+            offset=0.0,
+            max_split_mu=binner.max_split,
+            # `init_bcf` may donate its arguments, so don't pass the same array twice
+            max_split_tau=jnp.copy(binner.max_split),
+            num_trees_mu=2,
+            num_trees_tau=3,
+            p_nonterminal_mu=jnp.full(4, 0.95),
+            p_nonterminal_tau=jnp.full(4, 0.95),
+            leaf_prior_cov_inv_mu=1.0,
+            leaf_prior_cov_inv_tau=1.0,
+            adaptive_coding=True,
+            error_cov_inv=Wishart(
+                nu=jnp.array(1.0), rate=jnp.array(1.0), value=jnp.array(1.0)
+            ),
+        )
+
+        key = keys.pop()
+        kw: dict = dict(
+            step=bcf_step,
+            burnin_trace_type=BCFBurninTrace,
+            main_trace_type=BCFMainTrace,
+        )
+
+        # one run of 2 burn-in + 3 saved iterations; `run_mcmc` donates the
+        # state, so pass a copy
+        final_single, burnin_single, main_single = run_mcmc(
+            key, tree.map(jnp.copy, state), 3, n_burn=2, **kw
+        )
+        # the same run split as 2 + 1 and 0 + 2, in inner loops of 2 iterations
+        mid, burnin_a, main_a = run_mcmc(
+            random.clone(key),
+            tree.map(jnp.copy, state),
+            1,
+            n_burn=2,
+            inner_loop_length=2,
+            **kw,
+        )
+        final_split, _, main_b = run_mcmc(
+            random.clone(key), mid, 2, n_burn=0, inner_loop_length=2, **kw
+        )
+
+        tree.map(assert_trace_close, final_single, final_split)
+        tree.map(assert_trace_close, burnin_single, burnin_a)
+        tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
 
     def test_bcf_unsplittable_x_reduction(self) -> None:
         """Verifies BCF degenerates to Bayesian linear regression when max_split is 0."""

@@ -1365,6 +1365,12 @@ def accept_move_and_sample_leaves(
     # scatter, so the n-sized update stays in the narrow `resid` storage
     leaf_delta = prev_leaf_tree - at.leaf_unit[..., None] * leaf_tree
     delta = (leaf_delta / at.resid_unit[..., None]).astype(resid.dtype)
+    # on cpu, materialize the per-leaf delta, else xla fuses its computation
+    # into the gather and repeats it for each datapoint; on gpu that is cheaper
+    # than the extra kernel launch
+    delta = lax.platform_dependent(
+        delta, cpu=lax.optimization_barrier, default=lambda x: x
+    )
     resid += delta[..., leaf_indices]
 
     return resid, leaf_tree, acc, to_prune, log_lk_ratio

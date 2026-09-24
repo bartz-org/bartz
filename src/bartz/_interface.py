@@ -283,6 +283,15 @@ class Bart(Module):
         continuous regression, and 3 for binary regression. For multivariate
         regression, the range is computed per component. For mixed outcome
         types, each component uses the default for its type.
+    sigma_mu_df
+        If specified, the prior precision of the leaves is sampled in the MCMC
+        instead of being held fixed. The prior is Wishart (Gamma in the
+        univariate case) with ``sigma_mu_df + k - 1`` degrees of freedom for
+        `k` outcome components, such that each marginal leaf variance keeps
+        ``sigma_mu_df`` degrees of freedom, like `sigma_df`. The prior harmonic
+        mean of each marginal leaf variance, which is also its initial value,
+        is the fixed value otherwise set by `tau_num` and the `k` argument (the
+        leaf scale, not the number of components).
     offset
         The prior mean of the latent mean function. If not specified, it is set
         to the mean of `y_train` for continuous regression, and to
@@ -419,6 +428,7 @@ class Bart(Module):
         power: FloatLike = 2.0,
         base: FloatLike = 0.95,
         tau_num: FloatLike | None = None,
+        sigma_mu_df: FloatLike | None = None,
         offset: FloatLike | Float[ArrayLike, ' k'] | None = None,
         error_scale: Float[ArrayLike, ' n']
         | Float[ArrayLike, 'k n']
@@ -480,6 +490,7 @@ class Bart(Module):
             jnp.asarray(k, jnp.float32),
             num_trees,
             None if tau_num is None else jnp.asarray(tau_num, jnp.float32),
+            None if sigma_mu_df is None else jnp.asarray(sigma_mu_df, jnp.float32),
         )
         error_cov_inv = _process_error_variance_settings(
             y_train,
@@ -1282,8 +1293,9 @@ def _process_leaf_variance_settings(
     k: Float[Array, ''],
     num_trees: int,
     tau_num: Float[Array, ''] | None,
-) -> Float32[Array, ''] | Float32[Array, 'k k']:
-    """Return `leaf_prior_cov_inv`."""
+    sigma_mu_df: Float[Array, ''] | None,
+) -> Wishart:
+    """Return `leaf_prior_cov_inv`, with a prior iff `sigma_mu_df` is set."""
     # determine `tau_num` if not specified
     *kshape, n = y_train.shape
     if tau_num is None:
@@ -1302,10 +1314,23 @@ def _process_leaf_variance_settings(
     sigma_mu = tau_num / (k * math.sqrt(num_trees))
 
     # leaf prior precision matrix
-    leaf_prior_cov_inv = jnp.reciprocal(jnp.square(sigma_mu))
+    sigma2_mu = jnp.broadcast_to(jnp.square(sigma_mu), kshape)
+    leaf_prior_cov_inv = jnp.reciprocal(sigma2_mu)
     if y_train.ndim == 2:
-        leaf_prior_cov_inv = jnp.diag(jnp.broadcast_to(leaf_prior_cov_inv, kshape))
-    return leaf_prior_cov_inv
+        leaf_prior_cov_inv = jnp.diag(leaf_prior_cov_inv)
+
+    if sigma_mu_df is None:
+        return Wishart(nu=None, rate=None, value=leaf_prior_cov_inv)
+    else:
+        # each marginal variance is inverse-gamma with alpha = sigma_mu_df / 2
+        # and beta = rate_ii / 2, so rate_ii = sigma_mu_df * sigma2_mu makes
+        # sigma2_mu its harmonic mean for any k
+        rate = sigma_mu_df * sigma2_mu
+        if y_train.ndim == 2:
+            rate = jnp.diag(rate)
+        return Wishart.from_inv_wishart_marginal_nu(
+            sigma_mu_df, rate, leaf_prior_cov_inv
+        )
 
 
 def _process_error_variance_settings(
@@ -1441,7 +1466,7 @@ def _setup_mcmc(
     error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
     max_split: UInt[Array, ' p'],
-    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+    leaf_prior_cov_inv: Wishart,
     error_cov_inv: Wishart | None,
     power: FloatLike,
     base: FloatLike,

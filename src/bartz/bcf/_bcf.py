@@ -407,7 +407,8 @@ class bcf(eqx.Module):
                     k=jnp.array(k_mu),
                     num_trees=num_trees_mu,
                     tau_num=None,
-                )
+                    sigma_mu_df=None,
+                ).value
         if leaf_prior_cov_inv_tau is None:
             if outcome_type == 'binary':
                 p_val = 0.6827
@@ -423,7 +424,8 @@ class bcf(eqx.Module):
                     k=jnp.array(k_tau),
                     num_trees=num_trees_tau,
                     tau_num=None,
-                )
+                    sigma_mu_df=None,
+                ).value
 
         error_cov_inv = _process_error_variance_settings(
             y_train_internal,

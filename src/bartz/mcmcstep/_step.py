@@ -48,7 +48,7 @@ from bartz._jaxext import (
     vmap_nodoc,
 )
 from bartz._jaxext.random import loggamma, poisson
-from bartz.grove import var_histogram
+from bartz.grove import is_actual_leaf, var_histogram
 from bartz.mcmcstep._moves import Moves, propose_moves, split_range
 from bartz.mcmcstep._reduction import ReductionConfig
 from bartz.mcmcstep._state import (
@@ -56,6 +56,7 @@ from bartz.mcmcstep._state import (
     Forest,
     State,
     StepConfig,
+    Wishart,
     chol_with_gersh,
     round_to_pow2,
     scaled_error_cov_inv,
@@ -91,10 +92,12 @@ def step(key: Key[Array, ''], state: State) -> State:
     state can not be used any more after calling `step`. All this applies
     outside of `jax.jit`.
     """
-    keys = split(key, 4)
+    keys = split(key, 5)
 
     state = step_resid_inexact_integral(state)
     state = step_trees(keys.pop(), state)
+
+    state = step_leaf_prior_cov_inv(keys.pop(), state)
 
     if state.z is not None:
         state = step_z(keys.pop(), state)
@@ -438,12 +441,10 @@ def accept_moves_parallel_stage(
     # units, so their common `inv_sdev_unit ** 2` factor is folded into the
     # error precision once here instead
     error_cov_inv = scaled_error_cov_inv(state)
-    assert state.forest.leaf_prior_cov_inv is not None
-    prelf = precompute_leaf_terms(
-        key, prec_trees, error_cov_inv, state.forest.leaf_prior_cov_inv
-    )
+    leaf_prior_cov_inv = state.forest.leaf_prior_cov_inv.value
+    prelf = precompute_leaf_terms(key, prec_trees, error_cov_inv, leaf_prior_cov_inv)
     prelkv = precompute_likelihood_terms(
-        error_cov_inv, state.forest.leaf_prior_cov_inv, prelf, moves
+        error_cov_inv, leaf_prior_cov_inv, prelf, moves
     )
 
     return ParallelStageOut(
@@ -1364,6 +1365,12 @@ def accept_move_and_sample_leaves(
     # scatter, so the n-sized update stays in the narrow `resid` storage
     leaf_delta = prev_leaf_tree - at.leaf_unit[..., None] * leaf_tree
     delta = (leaf_delta / at.resid_unit[..., None]).astype(resid.dtype)
+    # on cpu, materialize the per-leaf delta, else xla fuses its computation
+    # into the gather and repeats it for each datapoint; on gpu that is cheaper
+    # than the extra kernel launch
+    delta = lax.platform_dependent(
+        delta, cpu=lax.optimization_barrier, default=lambda x: x
+    )
     resid += delta[..., leaf_indices]
 
     return resid, leaf_tree, acc, to_prune, log_lk_ratio
@@ -1678,6 +1685,59 @@ def _sample_wishart_bartlett(
     return T @ T.T
 
 
+def sample_wishart_posterior(
+    key: Key[Array, ''],
+    prior: Wishart,
+    count: Int32[Array, ''] | Int32[Array, ' k'],
+    scatter: Float32[Array, ''] | Float32[Array, ' k'] | Float32[Array, 'k k'],
+) -> Float32[Array, ''] | Float32[Array, 'k k']:
+    """Draw a precision matrix from its conjugate posterior.
+
+    Parameters
+    ----------
+    key
+        A jax random key.
+    prior
+        The prior on the precision; `Wishart.nu` and `Wishart.rate` must be set.
+    count
+        The number of observations. It can vary per component only with a
+        `DiagWishart` prior. Fractional counts are not supported.
+    scatter
+        The sum of the outer products of the observations: the full matrix with
+        a dense `Wishart` prior, only its diagonal with a `DiagWishart`, a
+        scalar sum of squares in the univariate case.
+
+    Returns
+    -------
+    A draw from the posterior, with the same shape as `Wishart.rate`.
+    """
+    assert prior.nu is not None
+    assert prior.rate is not None
+
+    if prior.rate.ndim == 2 and not isinstance(prior, DiagWishart):
+        assert scatter.shape == prior.rate.shape
+        return _sample_wishart_bartlett(key, prior.nu + count, prior.rate + scatter)
+    else:
+        # independent gamma per component; the variance df matches the inverse
+        # wishart marginals
+        marginal_nu = prior.inv_wishart_marginal_nu
+        assert marginal_nu is not None
+        alpha = marginal_nu / 2 + count / 2
+
+        kshape = prior.rate.shape[:1]
+        assert scatter.shape == kshape
+        rate = jnp.diagonal(prior.rate) if kshape else prior.rate
+        beta = rate / 2 + scatter / 2
+
+        # draw the gamma from the first of a split, mirroring the Bartlett
+        # sampler in the dense path so the two branches coincide at k=1
+        keys = split(key)
+        prec = jnp.exp(loggamma(keys.pop(), alpha, kshape)) / beta
+        if kshape:
+            prec = jnp.diag(prec)
+        return prec
+
+
 def step_resid_eff_scale(
     state: State,
     norm2: Float32[Array, ''] | Float32[Array, ' k'],
@@ -1706,19 +1766,12 @@ def step_resid_eff_scale(
 
 
 def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
-    assert state.error_cov_inv.nu is not None
-    assert state.error_cov_inv.rate is not None
-
     # keep the residuals in their stored (narrow) dtype and resid_unit units;
     # the reduction accumulates in float32 and its (k, k) result is rescaled to
     # data units, so no n-sized float32 array is ever materialized
     resid = state.resid
     if state.inv_sdev_scale is not None:
         resid *= state.inv_sdev_scale
-
-    # we take the max as a way to take any of the in this case equal values in
-    # n_non_missing
-    df_post = state.error_cov_inv.nu + jnp.max(state.n_non_missing)
 
     # unit of the stored precision-scaled residuals: `resid` is in `resid_unit`
     # units and `inv_sdev_scale` in `inv_sdev_unit` units (1 without error
@@ -1730,17 +1783,18 @@ def _step_error_cov_inv_mv(key: Key[Array, ''], state: State) -> State:
     ) * jnp.outer(scale, scale)
     if state.config.data_sharded:
         rrt = lax.psum(rrt, 'data')
-    scale_post = state.error_cov_inv.rate + rrt
 
-    prec = _sample_wishart_bartlett(key, df_post, scale_post)
+    # we take the max as a way to take any of the in this case equal values in
+    # n_non_missing
+    count = jnp.max(state.n_non_missing)
+
+    prec = sample_wishart_posterior(key, state.error_cov_inv, count, rrt)
     state = step_resid_eff_scale(state, jnp.diagonal(rrt), state.sum_diag_prec_scale)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
 def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     """Per-component inverse-gamma update for univariate, mixed, and partial-missing paths."""
-    assert state.error_cov_inv.rate is not None
-
     # keep the residuals in their stored (narrow) dtype and resid_unit units;
     # the reduction accumulates in float32 and its small result is rescaled to
     # data units, so no n-sized float32 array is ever materialized
@@ -1748,33 +1802,20 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     if state.inv_sdev_scale is not None:
         resid *= state.inv_sdev_scale
 
-    # alpha; the variance df matches the inverse wishart marginals
-    marginal_nu = state.error_cov_inv.inv_wishart_marginal_nu
-    assert marginal_nu is not None
-    alpha = marginal_nu / 2 + state.n_non_missing / 2
-
-    # beta; `resid` is stored in `resid_unit` units and `inv_sdev_scale` in
+    # `resid` is stored in `resid_unit` units and `inv_sdev_scale` in
     # `inv_sdev_unit` units (1 without error scales)
     norm2 = jnp.einsum(
         '...n,...n->...', resid, resid, preferred_element_type=jnp.float32
     ) * jnp.square(state.resid_unit * state.inv_sdev_unit)
     if state.config.data_sharded:
         norm2 = lax.psum(norm2, 'data')
-    scale = state.error_cov_inv.rate
-    kshape = resid.shape[:-1]
-    if kshape:
-        scale = jnp.diag(scale)
-    beta = scale / 2 + norm2 / 2
 
-    # draw the gamma from the first of a split, mirroring the Bartlett sampler
-    # in the multivariate path so the two branches coincide at k=1
-    keys = split(key)
-    samples = jnp.exp(loggamma(keys.pop(), alpha, kshape))
-    prec = samples / beta
+    prec = sample_wishart_posterior(
+        key, state.error_cov_inv, state.n_non_missing, norm2
+    )
     if state.binary_indices is not None:
-        prec = prec.at[state.binary_indices].set(1.0)
-    if kshape:
-        prec = jnp.diag(prec)
+        # the binary components have unit error variance, they have no prior
+        prec = prec.at[state.binary_indices, state.binary_indices].set(1.0)
     state = step_resid_eff_scale(state, norm2, state.sum_diag_prec_scale)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
@@ -1788,6 +1829,64 @@ def step_error_cov_inv(key: Key[Array, ''], state: State) -> State:
         return _step_error_cov_inv_mv(key, state)
     else:
         return _step_error_cov_inv_diag(key, state)
+
+
+def leaf_scatter(
+    forest: Forest,
+) -> tuple[Int32[Array, ''], Float32[Array, ''] | Float32[Array, 'k k']]:
+    """Count the leaves of the forest and sum their outer products.
+
+    Parameters
+    ----------
+    forest
+        The forest, with no chain axis.
+
+    Returns
+    -------
+    count : Int32[Array, '']
+        The total number of leaves over all trees.
+    scatter : Float32[Array, ''] | Float32[Array, 'k k']
+        The sum over the leaves of the outer product of the values, in data units.
+    """
+    # the values on the dangling children of pruned nodes mirror the parent's,
+    # so mask on the actual leaves only
+    is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(forest.split_tree)
+    count = jnp.sum(is_leaf)
+    leaf_tree = forest.leaf_tree
+    if leaf_tree.ndim == 3:
+        scatter = jnp.einsum(
+            'tan,tbn,tn->ab',
+            leaf_tree,
+            leaf_tree,
+            is_leaf,
+            preferred_element_type=jnp.float32,
+        )
+        scatter *= jnp.outer(forest.leaf_unit, forest.leaf_unit)
+    else:
+        scatter = jnp.einsum(
+            'tn,tn,tn->',
+            leaf_tree,
+            leaf_tree,
+            is_leaf,
+            preferred_element_type=jnp.float32,
+        )
+        scatter *= jnp.square(forest.leaf_unit)
+    return count, scatter
+
+
+@named_call
+def step_leaf_prior_cov_inv(key: Key[Array, ''], state: State) -> State:
+    """MCMC-update the leaf prior precision from its conjugate posterior, if it has a prior."""
+    prior = state.forest.leaf_prior_cov_inv
+    if prior.nu is None:
+        return state
+    else:
+        count, scatter = leaf_scatter(state.forest)
+        prec = sample_wishart_posterior(key, prior, count, scatter)
+        return replace(
+            state,
+            forest=replace(state.forest, leaf_prior_cov_inv=replace(prior, value=prec)),
+        )
 
 
 @named_call

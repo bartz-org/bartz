@@ -52,6 +52,7 @@ from tests.util import (
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
+    jaxtyping_disabled,
     rhat_rank,
 )
 
@@ -186,6 +187,11 @@ class TestBcf:
                 preds_loaded['tau'], preds_orig['tau'], allow_non_scalar=True
             )
 
+            # no x_test at construction, so no test predictions to restore
+            assert loaded_model.mu_test is None
+            assert loaded_model.tau_test is None
+            assert loaded_model.yhat_test is None
+
     def test_bcf_save_load_npz_standardized(self) -> None:
         """Tests that saving and loading an auto-standardized model preserves scale metadata and unscaling."""
         x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
@@ -197,6 +203,9 @@ class TestBcf:
             y_train=y_train,
             z_train=z_train,
             pihat_train=pihat,
+            x_test=x_train,
+            z_test=z_train,
+            pihat_test=pihat,
             num_trees_mu=2,
             num_trees_tau=2,
             ndpost=3,
@@ -224,6 +233,17 @@ class TestBcf:
             assert_allclose(
                 preds_loaded['tau'], preds_orig['tau'], allow_non_scalar=True
             )
+
+            # the outcome scale carries into the stored test predictions, which
+            # round-trip through the archive
+            assert_array_equal(model.mu_test, preds_orig['mu'])
+            assert_array_equal(
+                model.yhat_test, preds_orig['mu'] + z_train * preds_orig['tau']
+            )
+            assert_array_equal(loaded_model.mu_test, model.mu_test)
+            assert_array_equal(loaded_model.tau_test, model.tau_test)
+            assert_array_equal(loaded_model.yhat_test, model.yhat_test)
+            assert loaded_model.prob_test is None
 
     def test_bcf_standardization_equivalence(self) -> None:
         """Tests that automatic standardization is numerically equivalent to manual pre-scaling."""
@@ -1021,6 +1041,9 @@ class TestBcf:
             y_train=y_train,
             z_train=z_train,
             pihat_train=pihat,
+            x_test=x_train,
+            z_test=z_train,
+            pihat_test=pihat,
             num_trees_mu=5,
             num_trees_tau=5,
             ndpost=10,
@@ -1050,7 +1073,24 @@ class TestBcf:
         assert np.all((preds['p0'] >= 0.0) & (preds['p0'] <= 1.0))
         assert np.all((preds['p1'] >= 0.0) & (preds['p1'] <= 1.0))
 
-        # Sub-test 3: potential outcomes on a binary model return 0/1 labels
+        # Sub-test 3: Constructor test predictions are on the latent scale,
+        # with prob_test carrying the probability
+        assert_array_equal(model.mu_test, preds['mu'])
+        assert_array_equal(model.tau_test, preds['tau'])
+        prob_test = model.prob_test
+        assert prob_test is not None
+        assert_close_matrices(
+            prob_test, np.where(z_train, preds['p1'], preds['p0']), rtol=1e-5
+        )
+        assert np.all((prob_test >= 0.0) & (prob_test <= 1.0))
+
+        # prob_test survives a save/load round-trip
+        with tempfile.TemporaryDirectory() as tmpdir:
+            npz_path = Path(tmpdir) / 'test_bcf_binary.npz'
+            model.save_npz(npz_path)
+            assert_array_equal(bcf.load_npz(npz_path).prob_test, prob_test)
+
+        # Sub-test 4: potential outcomes on a binary model return 0/1 labels
         po = model.predict_potential_outcomes(x_train, pihat_test=pihat, key=0)
         assert np.isin(np.array(po['y0']), (0.0, 1.0)).all()
         assert np.isin(np.array(po['y1']), (0.0, 1.0)).all()
@@ -1120,6 +1160,73 @@ class TestBcf:
         tau_0_is_zero = model._tau_0_trace == 0
         assert_array_equal(tau_0_is_zero, jnp.full(ndpost, not sample_intercept))
 
+        # test predictions computed at construction match predict()
+        preds = model.predict(x_test, pihat_test=pihat_test)
+        assert_array_equal(model.mu_test, preds['mu'])
+        assert_array_equal(model.tau_test, preds['tau'])
+        assert_array_equal(model.yhat_test, preds['mu'] + z_test * preds['tau'])
+        assert model.prob_test is None
+
+    def test_bcf_test_predictions_absent(self) -> None:
+        """Without x_test, the test prediction attributes stay None."""
+        x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
+            n=30, seed=0
+        )
+        model = bcf(
+            x_train=x_train,
+            y_train=y_train,
+            z_train=z_train,
+            pihat_train=pihat,
+            num_trees_mu=2,
+            num_trees_tau=2,
+            ndpost=3,
+            nskip=1,
+            seed=0,
+        )
+        assert model.mu_test is None
+        assert model.tau_test is None
+        assert model.yhat_test is None
+        assert model.prob_test is None
+
+    def test_bcf_test_input_errors(self) -> None:
+        """Inconsistent test inputs are rejected before running the MCMC."""
+        x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
+            n=30, seed=0
+        )
+        x_test, pihat_test, z_test, _, _, _, _ = self._generate_bcf_data(n=15, seed=1)
+        kwargs: dict = dict(
+            x_train=x_train,
+            y_train=y_train,
+            z_train=z_train,
+            num_trees_mu=2,
+            num_trees_tau=2,
+            ndpost=2,
+            nskip=1,
+            seed=0,
+        )
+        with pytest.raises(ValueError, match='require `x_test`'):
+            bcf(**kwargs, z_test=z_test)
+        with pytest.raises(ValueError, match='require `x_test`'):
+            bcf(**kwargs, pihat_test=pihat_test)
+        with pytest.raises(ValueError, match='must be passed together'):
+            bcf(**kwargs, pihat_train=pihat, x_test=x_test)
+        with pytest.raises(ValueError, match='must be passed together'):
+            bcf(**kwargs, x_test=x_test, pihat_test=pihat_test)
+        # jaxtyping binds `m` across x_test/z_test/pihat_test, so disable it to
+        # reach the explicit length checks (users run without the import hook)
+        with (
+            jaxtyping_disabled(),
+            pytest.raises(ValueError, match='`z_test` has length'),
+        ):
+            bcf(**kwargs, x_test=x_test, z_test=z_train)
+        with (
+            jaxtyping_disabled(),
+            pytest.raises(ValueError, match='`pihat_test` has length'),
+        ):
+            bcf(**kwargs, pihat_train=pihat, x_test=x_test, pihat_test=pihat)
+        with pytest.raises(EquinoxRuntimeError, match='must be 0 or 1'):
+            bcf(**kwargs, x_test=x_test, z_test=np.full(15, 2.0, np.float32))
+
     def test_bcf_x_test_format_mismatch(self) -> None:
         """x_test format must match x_train, at construction and at predict."""
         x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
@@ -1146,7 +1253,7 @@ class TestBcf:
             pihat_train=pihat,
             num_trees_mu=2,
             num_trees_tau=2,
-            ndpost=2,
+            ndpost=3,
             nskip=1,
             seed=42,
         )

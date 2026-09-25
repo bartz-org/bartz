@@ -36,6 +36,7 @@ import pytest
 import stochtree
 from equinox import EquinoxRuntimeError
 from jax import random, tree, vmap
+from jax.tree_util import keystr
 from jaxtyping import ArrayLike, Shaped
 from scipy import stats
 
@@ -46,6 +47,7 @@ from bartz.bcf._state import BCFState, init_bcf
 from bartz.grove import evaluate_forest, is_actual_leaf
 from bartz.mcmcloop import run_mcmc
 from bartz.mcmcstep import Forest, Wishart
+from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from tests.test_mcmcloop import assert_trace_close, cat_traces
 from tests.util import (
@@ -630,6 +632,64 @@ class TestBcf:
         for i in range(4):
             state = bcf_step(keys.pop(), state)
             check_tau_prec_tree(state, f'after step {i + 1}: ')
+
+    def test_init_bcf_multichain(self, keys: split) -> None:
+        """Check each chain of a multichain `init_bcf` matches the single-chain init."""
+        # this test is intended to be temporary and to be changed or merged
+        # into an end-to-end test with the `bcf` class once multichain is
+        # finished
+        x_train, _, z_train, y_train, _, _, _ = self._generate_bcf_data(n=100, seed=42)
+
+        x_train_t = jnp.asarray(x_train.T)
+        binner = UniqueQuantileBinner(x_train_t, key=keys.pop())
+        x_binned = binner.bin(x_train_t)
+
+        def make_state(num_chains: int | None) -> BCFState:
+            # `init_bcf` may donate its arguments, so pass fresh copies
+            return init_bcf(
+                X_unified=jnp.copy(x_binned),
+                trt=z_train.astype(bool),
+                y=y_train,
+                offset=0.0,
+                max_split_mu=jnp.copy(binner.max_split),
+                max_split_tau=jnp.copy(binner.max_split),
+                num_trees_mu=2,
+                num_trees_tau=3,
+                p_nonterminal_mu=jnp.full(4, 0.95),
+                p_nonterminal_tau=jnp.full(4, 0.95),
+                leaf_prior_cov_inv_mu=1.0,
+                leaf_prior_cov_inv_tau=1.0,
+                adaptive_coding=True,
+                error_cov_inv=Wishart(
+                    nu=jnp.array(1.0), rate=jnp.array(1.0), value=jnp.array(1.0)
+                ),
+                num_chains=num_chains,
+            )
+
+        num_chains = 3
+        single = make_state(None)
+        multi = make_state(num_chains)
+        assert single.num_chains() is None
+        assert multi.num_chains() == num_chains
+
+        # the reduction configs depend on `num_chains`, so the tree structures
+        # may differ in static fields; compare the flattened leaves instead
+        def is_leaf(x: object) -> bool:
+            return x is None
+
+        paths_and_multi = tree.leaves_with_path(multi, is_leaf=is_leaf)
+        single_leaves = tree.leaves(single, is_leaf=is_leaf)
+        chain_axes = tree.leaves(chain_vmap_axes(multi), is_leaf=is_leaf)
+        for (path, m), s, chain_axis in zip(
+            paths_and_multi, single_leaves, chain_axes, strict=True
+        ):
+            if m is None:
+                assert s is None
+            elif chain_axis is None:
+                assert_array_equal(m, s, err_msg=keystr(path))
+            else:
+                expected = jnp.broadcast_to(jnp.expand_dims(s, chain_axis), m.shape)
+                assert_array_equal(m, expected, err_msg=keystr(path))
 
     def test_bcf_run_mcmc_restartable(self, keys: split) -> None:
         """Check splitting a BCF `run_mcmc` run and chunking it do not matter."""

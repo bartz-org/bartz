@@ -25,6 +25,7 @@
 """Tests for Bayesian Causal Forests (BCF)."""
 
 import tempfile
+from collections.abc import Sequence
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -36,8 +37,8 @@ import pytest
 import stochtree
 from equinox import EquinoxRuntimeError
 from jax import random, tree, vmap
-from jax.tree_util import keystr
-from jaxtyping import ArrayLike, Shaped
+from jax.tree_util import KeyPath, keystr
+from jaxtyping import Array, ArrayLike, Shaped
 from scipy import stats
 
 from bartz._jaxext import split
@@ -94,6 +95,32 @@ def _prec_tree_from_scratch(
         return jnp.zeros(tree_size).at[idx].add(prec_scale)
 
     return vmap(scatter)(leaf_indices)
+
+
+def _check_chains_match(
+    multi: BCFState, singles: Sequence[BCFState], err_msg: str
+) -> None:
+    """Check each chain of `multi` matches the corresponding single-chain state."""
+
+    def check_leaf(
+        path: KeyPath,
+        chain_axis: int | None,
+        m: Shaped[Array, '*shape'] | None,
+        *singles: Shaped[Array, '...'] | None,
+    ) -> None:
+        if m is None:
+            return
+        for i, s in enumerate(singles):
+            mi = m if chain_axis is None else jnp.take(m, i, axis=chain_axis)
+            msg = f'{err_msg}{keystr(path)}, chain {i}: '
+            if jnp.issubdtype(m.dtype, jnp.inexact):
+                assert_close_matrices(mi, s, rtol=1e-5, err_msg=msg, reduce_rank=True)
+            else:
+                assert_array_equal(mi, s, err_msg=msg)
+
+    tree.map_with_path(
+        check_leaf, chain_vmap_axes(multi), multi, *singles, is_leaf=lambda x: x is None
+    )
 
 
 class TestBcf:
@@ -633,8 +660,8 @@ class TestBcf:
             state = bcf_step(keys.pop(), state)
             check_tau_prec_tree(state, f'after step {i + 1}: ')
 
-    def test_init_bcf_multichain(self, keys: split) -> None:
-        """Check each chain of a multichain `init_bcf` matches the single-chain init."""
+    def test_bcf_multichain(self, keys: split) -> None:
+        """Check each chain of a multichain BCF matches a single-chain one."""
         # this test is intended to be temporary and to be changed or merged
         # into an end-to-end test with the `bcf` class once multichain is
         # finished
@@ -660,6 +687,7 @@ class TestBcf:
                 leaf_prior_cov_inv_mu=1.0,
                 leaf_prior_cov_inv_tau=1.0,
                 adaptive_coding=True,
+                sample_leaf_prior_cov_inv_tau=True,
                 error_cov_inv=Wishart(
                     nu=jnp.array(1.0), rate=jnp.array(1.0), value=jnp.array(1.0)
                 ),
@@ -667,29 +695,28 @@ class TestBcf:
             )
 
         num_chains = 3
-        single = make_state(None)
         multi = make_state(num_chains)
-        assert single.num_chains() is None
         assert multi.num_chains() == num_chains
 
-        # the reduction configs depend on `num_chains`, so the tree structures
-        # may differ in static fields; compare the flattened leaves instead
-        def is_leaf(x: object) -> bool:
-            return x is None
+        # the reduction configs depend on `num_chains`, share them to get the
+        # same sums
+        singles = [
+            replace(make_state(None), config=tree.map(jnp.copy, multi.config))
+            for _ in range(num_chains)
+        ]
+        assert singles[0].num_chains() is None
+        _check_chains_match(multi, singles, 'init: ')
 
-        paths_and_multi = tree.leaves_with_path(multi, is_leaf=is_leaf)
-        single_leaves = tree.leaves(single, is_leaf=is_leaf)
-        chain_axes = tree.leaves(chain_vmap_axes(multi), is_leaf=is_leaf)
-        for (path, m), s, chain_axis in zip(
-            paths_and_multi, single_leaves, chain_axes, strict=True
-        ):
-            if m is None:
-                assert s is None
-            elif chain_axis is None:
-                assert_array_equal(m, s, err_msg=keystr(path))
-            else:
-                expected = jnp.broadcast_to(jnp.expand_dims(s, chain_axis), m.shape)
-                assert_array_equal(m, expected, err_msg=keystr(path))
+        # step the multichain state and the single-chain ones with the same
+        # per-chain keys
+        for i in range(3):
+            key = keys.pop()
+            multi = bcf_step(key, multi)
+            single_keys = random.split(random.clone(key), num_chains)
+            singles = [
+                bcf_step(k, s) for k, s in zip(single_keys, singles, strict=True)
+            ]
+            _check_chains_match(multi, singles, f'step {i + 1}: ')
 
     def test_bcf_run_mcmc_restartable(self, keys: split) -> None:
         """Check splitting a BCF `run_mcmc` run and chunking it do not matter."""

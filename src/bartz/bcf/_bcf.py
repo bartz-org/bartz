@@ -27,7 +27,7 @@
 import dataclasses
 import json
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import equinox as eqx
 import jax
@@ -50,9 +50,9 @@ from bartz._interface import (
     predict_latent,
 )
 from bartz._jaxext import split
-from bartz.bcf._loop import run_bcf_mcmc
+from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import init_bcf
-from bartz.mcmcloop import MainTrace
+from bartz.mcmcloop import MainTrace, run_mcmc
 from bartz.mcmcstep import OutcomeType
 from bartz.mcmcstep._state import make_p_nonterminal
 from bartz.prepcovars import RangeEvenBinner, UniqueQuantileBinner
@@ -496,35 +496,28 @@ class bcf(eqx.Module):
         )
 
         # 5. Run the MCMC loop
-        final_state, final_carry = run_bcf_mcmc(
-            key=keys.pop(), state=initial_state, n_save=ndpost, n_burn=nskip, n_skip=0
+        # WORKAROUND(python<3.12): once `run_mcmc` is generic over the state
+        # subclass (PEP 695), `bcf_step` will type-check as its `step` and the
+        # traces will come out typed, dropping the ignore and the casts.
+        final_state, burnin_trace, main_trace = run_mcmc(
+            keys.pop(),
+            initial_state,
+            ndpost,
+            n_burn=nskip,
+            step=bcf_step,  # ty: ignore[invalid-argument-type]
+            burnin_trace_type=BCFBurninTrace,
+            main_trace_type=BCFMainTrace,
         )
+        burnin_trace = cast(BCFBurninTrace, burnin_trace)
+        main_trace = cast(BCFMainTrace, main_trace)
         self._mcmc_state = final_state
         self._binner = binner
-        self._tau_0_trace = final_carry.tau_0_main_trace
-        self._b_trace = final_carry.b_main_trace
-        self._leaf_prior_cov_inv_mu_trace = final_carry.leaf_prior_cov_inv_mu_main_trace
-        self._leaf_prior_cov_inv_tau_trace = (
-            final_carry.leaf_prior_cov_inv_tau_main_trace
-        )
-
-        main_trace_mu = final_carry.mu_main_trace
-        main_trace_mu = eqx.tree_at(
-            lambda t: t.offset, main_trace_mu, initial_state.forest.offset
-        )
-
-        main_trace_tau = final_carry.tau_main_trace
-        main_trace_tau = eqx.tree_at(
-            lambda t: t.offset,
-            main_trace_tau,
-            jnp.zeros_like(initial_state.forest.offset),
-        )
-
-        self._main_trace = {'mu': main_trace_mu, 'tau': main_trace_tau}
-        self._burnin_trace = {
-            'mu': final_carry.mu_burnin_trace,
-            'tau': final_carry.tau_burnin_trace,
-        }
+        self._tau_0_trace = main_trace.tau_0
+        self._b_trace = main_trace.b
+        self._leaf_prior_cov_inv_mu_trace = main_trace.mu.leaf_prior_cov_inv
+        self._leaf_prior_cov_inv_tau_trace = main_trace.tau.leaf_prior_cov_inv
+        self._main_trace = {'mu': main_trace.mu, 'tau': main_trace.tau}
+        self._burnin_trace = {'mu': burnin_trace.mu, 'tau': burnin_trace.tau}
 
         # 6. Predict at the test points, now that the traces are available
         if x_test is not None:

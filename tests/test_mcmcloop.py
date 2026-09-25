@@ -30,7 +30,7 @@ from functools import partial
 from typing import Any, Literal
 
 import pytest
-from equinox import filter_jit
+from equinox import filter_jit, tree_at
 from jax import (
     NamedSharding,
     block_until_ready,
@@ -44,7 +44,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Shaped, UInt8
+from jaxtyping import Array, Int32, Key, Shaped, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import (
@@ -55,6 +55,7 @@ from bartz._jaxext import (
 )
 from bartz.mcmcloop import (
     BurninTrace,
+    Callback,
     CheckPlatformCallback,
     MainTrace,
     evaluate_trace,
@@ -63,7 +64,8 @@ from bartz.mcmcloop import (
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._loop import _inner_loop_counter
-from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal
+from bartz.mcmcloop._trace import Trace
+from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.testing import QuantizedData, gen_data
 from tests.util import assert_array_equal, assert_close_matrices, nnone
@@ -113,9 +115,7 @@ def simple_init(
     )
 
 
-def cat_traces(
-    trace_a: MainTrace | BurninTrace, trace_b: MainTrace | BurninTrace
-) -> MainTrace | BurninTrace:
+def cat_traces(trace_a: Trace, trace_b: Trace) -> Trace:
     """Concatenate two traces along their per-leaf sample axis."""
     sample_axes = trace_sample_axes(trace_a)
 
@@ -388,6 +388,104 @@ class TestRunMcmc:
         tree.map(assert_trace_close, final_whole, final_chunked)
         tree.map(assert_trace_close, main_whole, main_chunked)
         tree.map(assert_trace_close, burnin_whole, burnin_chunked)
+
+
+def test_custom_step(keys: split) -> None:
+    """Check `run_mcmc` drives a user-provided step function."""
+    marker = 0.125
+
+    def marking_double_counting_step(key: Key[Array, ''], state: State) -> State:
+        state = step(key, state)
+        # the marker is a value the default `step` would not produce, to detect
+        # which step ran
+        return tree_at(
+            lambda s: (s.error_cov_inv.value, s.config.steps_done),
+            state,
+            (
+                jnp.full_like(state.error_cov_inv.value, marker),
+                state.config.steps_done + 1,
+            ),
+        )
+
+    n_burn, n_save = 2, 3
+    with debug_key_reuse(False):
+        final_state, burnin_trace, main_trace = run_mcmc(
+            keys.pop(),
+            simple_init(),
+            n_save,
+            n_burn=n_burn,
+            step=marking_double_counting_step,
+        )
+    assert_array_equal(final_state.error_cov_inv.value, jnp.float32(marker))
+    assert_array_equal(nnone(burnin_trace.error_cov_inv), jnp.full(n_burn, marker))
+    assert_array_equal(nnone(main_trace.error_cov_inv), jnp.full(n_save, marker))
+    # `run_mcmc` owns `steps_done`, so the extra increment is discarded
+    assert_array_equal(final_state.config.steps_done, jnp.int32(n_burn + n_save))
+
+
+def frozen_step(key: Key[Array, ''], state: State) -> State:
+    """Like `step`, but leaves `State.config.steps_done` in place."""
+    new_state = step(key, state)
+    return tree_at(lambda s: s.config.steps_done, new_state, state.config.steps_done)
+
+
+def test_step_need_not_advance_steps_done(keys: split) -> None:
+    """Check the loop seeds itself even if `step` does not touch the counter."""
+    key = keys.pop()
+
+    default_state, _, default_main = run_mcmc(key, simple_init(), 4, n_burn=1)
+    frozen_state, _, frozen_main = run_mcmc(
+        random.clone(key), simple_init(), 4, n_burn=1, step=frozen_step
+    )
+
+    tree.map(assert_trace_close, default_main, frozen_main)
+    tree.map(assert_trace_close, default_state, frozen_state)
+
+
+def test_restartable_with_frozen_step(keys: split) -> None:
+    """Check the loop does not seed itself from a call-local counter.
+
+    Splitting a run must stay exact even if `step` leaves `steps_done` in
+    place.
+    """
+    key = keys.pop()
+    kw: dict = dict(n_burn=0, n_skip=1, step=frozen_step)
+
+    final_single, _, main_single = run_mcmc(key, simple_init(), 5, **kw)
+    mid, _, main_a = run_mcmc(random.clone(key), simple_init(), 2, **kw)
+    final_split, _, main_b = run_mcmc(random.clone(key), mid, 3, **kw)
+
+    tree.map(assert_trace_close, final_single, final_split)
+    tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
+
+
+class RecordStepsDoneCallback(Callback):
+    """Store ``steps_done - i_total`` in the state, to check it in the trace."""
+
+    def __call__(
+        self, *, state: State, i_total: Int32[Array, ''], **_: Any
+    ) -> tuple[State, Callback]:
+        """Overwrite the error covariance with the counter offset."""
+        delta = state.config.steps_done - i_total
+        state = tree_at(
+            lambda s: s.error_cov_inv.value,
+            state,
+            jnp.full_like(state.error_cov_inv.value, delta),
+        )
+        return state, self
+
+
+def test_callback_sees_advanced_steps_done(keys: split) -> None:
+    """Check the counter the callback sees does not depend on `step`."""
+    n_burn, n_save = 2, 3
+    kw: dict = dict(n_burn=n_burn, callback=RecordStepsDoneCallback())
+
+    for step_func in (step, frozen_step):
+        _, burnin_trace, main_trace = run_mcmc(
+            keys.pop(), simple_init(), n_save, step=step_func, **kw
+        )
+        assert_array_equal(nnone(burnin_trace.error_cov_inv), jnp.ones(n_burn))
+        assert_array_equal(nnone(main_trace.error_cov_inv), jnp.ones(n_save))
 
 
 @pytest.mark.parametrize('matches', [True, False])

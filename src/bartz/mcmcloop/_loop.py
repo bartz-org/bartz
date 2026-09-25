@@ -29,7 +29,7 @@ from collections.abc import Callable, Hashable
 from functools import partial, update_wrapper
 from typing import Any, Generic, NamedTuple, TypeVar
 
-from equinox import Module
+from equinox import Module, tree_at
 from jax import (
     NamedSharding,
     device_put,
@@ -97,7 +97,9 @@ class Callback(Module):
         key
             A key for random number generation.
         state
-            The MCMC state just after updating it.
+            The MCMC state just after updating it, with
+            `~bartz.mcmcstep.StepConfig.steps_done` already advanced by the
+            loop.
         burnin
             Whether the last iteration was in the burn-in phase.
         i_total
@@ -149,6 +151,11 @@ def run_mcmc(
     callback: Callback | None = None,
     burnin_trace_type: type[Trace] = BurninTrace,
     main_trace_type: type[Trace] = MainTrace,
+    # WORKAROUND(python<3.12): make this `Callable[[Key, S], S]` with `S` bound
+    # to `State` (PEP 695), shared with the `state` parameter, once
+    # `bartz.mcmcstep.step` is generic too (its `State -> State` signature does
+    # not fit as the default) and `RunMCMCResult` can be generic as well.
+    step: Callable[[Key[Array, ''], State], State] = step,
 ) -> RunMCMCResult:
     """
     Run the MCMC for the BART posterior.
@@ -186,6 +193,14 @@ def run_mcmc(
         Classes defining what is saved in the burn-in and main traces,
         defaulting to `BurninTrace` and `MainTrace`. Customizing them is hard
         without relying on bartz internals, so overriding is not recommended.
+    step
+        The function that does one MCMC iteration, called as ``step(key,
+        state)`` and returning the updated state. Override it, together with
+        the trace types, to run a different sampler, which may also use a
+        subclass of `State` instead of `State` itself. `run_mcmc` takes over
+        `~bartz.mcmcstep.StepConfig.steps_done`, overwriting whatever `step`
+        and `callback` set it to, so `step` need not maintain it; use a field
+        of a `State` subclass for any other counter.
 
     Returns
     -------
@@ -257,6 +272,7 @@ def run_mcmc(
             burnin_trace_type,
             main_trace_type,
             key_impl,
+            step,
         )
 
     return RunMCMCResult(carry.state, carry.burnin_trace, carry.main_trace)  # ty: ignore[invalid-argument-type]
@@ -328,6 +344,7 @@ def _run_mcmc_inner_loop_impl(
     burnin_trace_type: type[Trace],
     main_trace_type: type[Trace],
     key_impl: Hashable,
+    step: Callable[[Key[Array, ''], State], State],
 ) -> _Carry:
     # determine number of iterations for this loop batch
     i_upper = jnp.minimum(carry.i_total + inner_loop_length, n_iters)
@@ -345,6 +362,15 @@ def _run_mcmc_inner_loop_impl(
         # update state
         state = step(keys.pop(), carry.state)
 
+        # the loop owns `steps_done` because it seeds each iteration from it;
+        # overwrite whatever `step` and the callback did to it
+        set_steps_done = partial(
+            tree_at,
+            lambda s: s.config.steps_done,
+            replace=carry.state.config.steps_done + 1,
+        )
+        state = set_steps_done(state)
+
         # invoke callback
         callback = carry.callback
         if callback is not None:
@@ -361,6 +387,7 @@ def _run_mcmc_inner_loop_impl(
             )
             if rt is not None:
                 state, callback = rt
+                state = set_steps_done(state)
 
         # save to trace
         burnin_trace, main_trace = _save_state_to_trace(
@@ -390,7 +417,7 @@ def _run_mcmc_inner_loop_impl(
 # so `run_mcmc` can reset it directly instead of reaching into jit internals,
 # then jit the wrapped callable.
 _inner_loop_counter: _CallCounter[_Carry] = _CallCounter(_run_mcmc_inner_loop_impl)
-_run_mcmc_inner_loop = jit(donate_argnums=(0,), static_argnums=(7, 8, 9))(
+_run_mcmc_inner_loop = jit(donate_argnums=(0,), static_argnums=(7, 8, 9, 10))(
     _inner_loop_counter
 )
 

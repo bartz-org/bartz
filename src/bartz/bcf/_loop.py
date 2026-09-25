@@ -22,42 +22,24 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Module implementing the BCF MCMC loop."""
+"""Implement the BCF MCMC step and traces, to be run with `run_mcmc`."""
 
 from dataclasses import replace
 from typing import cast
 
 import jax.numpy as jnp
-from equinox import Module, tree_at
+from equinox import tree_at
 from jax import lax, random, vmap
-from jaxtyping import Array, Bool, Float, Float32, Int32, Key, UInt
+from jaxtyping import Array, Float, Float32, Int32, Key, UInt
 
-from bartz._jaxext import float32_matmuls, jit, sliced_map, split
+from bartz._jaxext import field, float32_matmuls, jit, sliced_map, split
 from bartz._jaxext.random import loggamma
 from bartz.bcf._state import BCFState
 from bartz.grove._grove import is_actual_leaf
-from bartz.mcmcloop._loop import _empty_trace, _set
-from bartz.mcmcloop._trace import BurninTrace, MainTrace
+from bartz.mcmcloop._trace import BurninTrace, MainTrace, Trace
+from bartz.mcmcstep._axes import CHAIN_AXIS
 from bartz.mcmcstep._state import Forest, State, StepConfig
 from bartz.mcmcstep._step import step, step_trees, sum_resid
-
-
-class _BCFCarry(Module):
-    """Carry used in the BCF loop."""
-
-    state: BCFState
-    key: Key[Array, '']
-    i_total: Int32[Array, '']
-
-    mu_burnin_trace: BurninTrace
-    tau_burnin_trace: BurninTrace
-    mu_main_trace: MainTrace
-    tau_main_trace: MainTrace
-
-    tau_0_main_trace: Float32[Array, ' n_save']
-    b_main_trace: Float32[Array, 'n_save 2']
-    leaf_prior_cov_inv_mu_main_trace: Float32[Array, ' n_save']
-    leaf_prior_cov_inv_tau_main_trace: Float32[Array, ' n_save']
 
 
 def _compute_leaf_prior_stats(
@@ -387,118 +369,49 @@ def _tau_view(state: BCFState) -> BCFState:
     return replace(state, forest=state.forest_tau, forest_tau=state.forest)
 
 
-def run_bcf_mcmc(
-    key: Key[Array, ''], state: BCFState, n_save: int, n_burn: int, n_skip: int
-) -> tuple[BCFState, _BCFCarry]:
-    """
-    Run the BCF MCMC loop.
+class BCFBurninTrace(Trace):
+    """Burn-in trace of the BCF MCMC, the per-forest diagnostics and the scalar parameters."""
 
-    Parameters
-    ----------
-    key
-        The PRNG key for the loop.
-    state
-        The initial BCF state.
-    n_save
-        The number of iterations to save.
-    n_burn
-        The number of iterations to discard as burn-in.
-    n_skip
-        The number of iterations to skip between saves.
+    mu: BurninTrace
+    """The trace of the prognostic forest."""
 
-    Returns
-    -------
-    final_state
-        The state at the final iteration.
-    final_carry
-        The final _BCFCarry containing the populated traces.
-    """
-    step_fn = bcf_step
+    tau: BurninTrace
+    """The trace of the treatment forest."""
 
-    tau_state = _tau_view(state)
+    tau_0: Float32[Array, '*chains_and_samples'] = field(chains=CHAIN_AXIS, samples=0)
+    """The treatment effect intercept."""
 
-    # Pre-allocate empty traces
-    mu_b_empty = _empty_trace(n_burn, state, BurninTrace)
-    tau_b_empty = _empty_trace(n_burn, tau_state, BurninTrace)
+    b: Float32[Array, '*chains_and_samples 2'] = field(chains=CHAIN_AXIS, samples=0)
+    """The adaptive coding weights for untreated and treated units."""
 
-    mu_m_empty = _empty_trace(n_save, state, MainTrace)
-    tau_m_empty = _empty_trace(n_save, tau_state, MainTrace)
-
-    tau_0_m_empty = jnp.zeros((n_save,))
-    b_m_empty = jnp.zeros((n_save, 2))
-    leaf_prior_cov_inv_mu_m_empty = jnp.zeros((n_save,))
-    leaf_prior_cov_inv_tau_m_empty = jnp.zeros((n_save,))
-
-    carry = _BCFCarry(
-        state=state,
-        key=key,
-        i_total=jnp.int32(0),
-        mu_burnin_trace=mu_b_empty,
-        tau_burnin_trace=tau_b_empty,
-        mu_main_trace=mu_m_empty,
-        tau_main_trace=tau_m_empty,
-        tau_0_main_trace=tau_0_m_empty,
-        b_main_trace=b_m_empty,
-        leaf_prior_cov_inv_mu_main_trace=leaf_prior_cov_inv_mu_m_empty,
-        leaf_prior_cov_inv_tau_main_trace=leaf_prior_cov_inv_tau_m_empty,
-    )
-
-    n_iters = n_burn + (1 + n_skip) * n_save
-
-    def cond_fn(carry: _BCFCarry) -> Bool[Array, '']:
-        return carry.i_total < n_iters
-
-    def body_fn(carry: _BCFCarry) -> _BCFCarry:
-        keys = split(carry.key)
-
-        new_state = step_fn(keys.pop(), carry.state)
-        i = carry.i_total
-
-        # Calculate trace update indices
-        noop_idx = jnp.iinfo(jnp.int32).max
-        burnin_idx = jnp.where(i < n_burn, i, noop_idx)
-        main_idx = jnp.where(i >= n_burn, (i - n_burn) // (1 + n_skip), noop_idx)
-
-        # Convert state to trace representations
-        mu_b = BurninTrace.from_state(new_state)
-
-        tau_state_new = _tau_view(new_state)
-        tau_b = BurninTrace.from_state(tau_state_new)
-
-        mu_m = MainTrace.from_state(new_state)
-        tau_m = MainTrace.from_state(tau_state_new)
-
-        # Write trace data using mode='drop'
-        new_mu_b_trace = _set(carry.mu_burnin_trace, burnin_idx, mu_b)
-        new_tau_b_trace = _set(carry.tau_burnin_trace, burnin_idx, tau_b)
-
-        new_mu_m_trace = _set(carry.mu_main_trace, main_idx, mu_m)
-        new_tau_m_trace = _set(carry.tau_main_trace, main_idx, tau_m)
-
-        new_tau_0_m_trace = carry.tau_0_main_trace.at[main_idx].set(
-            new_state.tau_0, mode='drop'
-        )
-        new_b_m_trace = carry.b_main_trace.at[main_idx, :].set(new_state.b, mode='drop')
-        new_leaf_prior_cov_inv_mu_m_trace = carry.leaf_prior_cov_inv_mu_main_trace.at[
-            main_idx
-        ].set(new_state.forest.leaf_prior_cov_inv.value, mode='drop')
-        new_leaf_prior_cov_inv_tau_m_trace = carry.leaf_prior_cov_inv_tau_main_trace.at[
-            main_idx
-        ].set(new_state.forest_tau.leaf_prior_cov_inv.value, mode='drop')
-
-        return _BCFCarry(
-            state=new_state,
-            key=keys.pop(),
-            i_total=i + 1,
-            mu_burnin_trace=new_mu_b_trace,
-            tau_burnin_trace=new_tau_b_trace,
-            mu_main_trace=new_mu_m_trace,
-            tau_main_trace=new_tau_m_trace,
-            tau_0_main_trace=new_tau_0_m_trace,
-            b_main_trace=new_b_m_trace,
-            leaf_prior_cov_inv_mu_main_trace=new_leaf_prior_cov_inv_mu_m_trace,
-            leaf_prior_cov_inv_tau_main_trace=new_leaf_prior_cov_inv_tau_m_trace,
+    @classmethod
+    def from_state(cls, state: State) -> 'BCFBurninTrace':
+        """Create a single-item burn-in trace from a BCF state."""
+        assert isinstance(state, BCFState)
+        return cls(
+            mu=BurninTrace.from_state(state),
+            tau=BurninTrace.from_state(_tau_view(state)),
+            tau_0=state.tau_0,
+            b=state.b,
         )
 
-    final_carry = lax.while_loop(cond_fn, body_fn, carry)
-    return final_carry.state, final_carry
+
+class BCFMainTrace(BCFBurninTrace):
+    """Main trace of the BCF MCMC, with the trees of both forests."""
+
+    mu: MainTrace
+    """The trace of the prognostic forest."""
+
+    tau: MainTrace
+    """The trace of the treatment forest."""
+
+    @classmethod
+    def from_state(cls, state: State) -> 'BCFMainTrace':
+        """Create a single-item main trace from a BCF state."""
+        assert isinstance(state, BCFState)
+        kw: dict = dict(
+            vars(BCFBurninTrace.from_state(state)),
+            mu=MainTrace.from_state(state),
+            tau=MainTrace.from_state(_tau_view(state)),
+        )
+        return cls(**kw)

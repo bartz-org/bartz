@@ -29,6 +29,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+from typing import cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -39,6 +40,7 @@ from equinox import EquinoxRuntimeError
 from jax import random, tree, vmap
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, ArrayLike, Shaped
+from pytest_subtests import SubTests
 from scipy import stats
 
 from bartz._jaxext import split
@@ -718,7 +720,10 @@ class TestBcf:
             ]
             _check_chains_match(multi, singles, f'step {i + 1}: ')
 
-    def test_bcf_run_mcmc_restartable(self, keys: split) -> None:
+    @pytest.mark.parametrize('num_chains', [None, 2])
+    def test_bcf_run_mcmc_restartable(
+        self, keys: split, subtests: SubTests, num_chains: int | None
+    ) -> None:
         """Check splitting a BCF `run_mcmc` run and chunking it do not matter."""
         x_train, _, z_train, y_train, _, _, _ = self._generate_bcf_data(n=100, seed=42)
 
@@ -744,6 +749,7 @@ class TestBcf:
             error_cov_inv=Wishart(
                 nu=jnp.array(1.0), rate=jnp.array(1.0), value=jnp.array(1.0)
             ),
+            num_chains=num_chains,
         )
 
         key = keys.pop()
@@ -774,6 +780,25 @@ class TestBcf:
         tree.map(assert_trace_close, final_single, final_split)
         tree.map(assert_trace_close, burnin_single, burnin_a)
         tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
+
+        # piggyback on the runs above to check the trace layout, and that the
+        # last sample is the final state
+        final_single = cast(BCFState, final_single)
+        burnin_single = cast(BCFBurninTrace, burnin_single)
+        main_single = cast(BCFMainTrace, main_single)
+        with subtests.test('trace layout'):
+            chain_shape = () if num_chains is None else (num_chains,)
+            assert burnin_single.tau_0.shape == (*chain_shape, 2)
+            assert main_single.tau_0.shape == (*chain_shape, 3)
+            assert main_single.b.shape == (*chain_shape, 3, 2)
+            assert main_single.mu.var_tree.shape[:-1] == (*chain_shape, 3, 2)
+            assert main_single.tau.var_tree.shape[:-1] == (*chain_shape, 3, 3)
+            assert_array_equal(main_single.tau_0[..., -1], final_single.tau_0)
+            assert_array_equal(main_single.b[..., -1, :], final_single.b)
+            assert_array_equal(
+                main_single.tau.leaf_tree[..., -1, :, :],
+                final_single.forest_tau.leaf_tree,
+            )
 
     def test_bcf_unsplittable_x_reduction(self) -> None:
         """Verifies BCF degenerates to Bayesian linear regression when max_split is 0."""

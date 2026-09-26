@@ -602,39 +602,50 @@ def _compute_count_or_prec_tree(
     (tree_size,) = moves.var_tree.shape
     tree_size *= 2
 
-    if prec_scale is None:
-        value = 1
-        dtype = jnp.uint32
-        reduction_config = config.count_reduction_config
-    else:
-        value = prec_scale
-        dtype = jnp.float32
-        reduction_config = config.prec_reduction_config
-
     # the cached tree is valid at the leaves, and the move only changes the
-    # values at the nodes it involves, so reduce into the move's children alone:
-    # the contiguous pair (left, right) = (2 * node, 2 * node + 1) = lrt_nodes[:2]
-    lr = reduction_config._reduce(  # noqa: SLF001
-        value,
-        leaf_indices,
-        size=tree_size,
-        subset_start=moves.lrt_nodes[0],
-        subset_length=2,
-        dtype=dtype,
-        data_sharded=config.data_sharded,
-    )
-
-    # write the children sums into the cache along with their total at the
-    # parent node (a non-leaf in the post-grow indexing the reduce runs on);
-    # the precision-scaled version of the counts is not needed because the likelihood
-    # terms are derived from the leaf terms
-    total = lr[..., 0] + lr[..., 1]
-    lrt = jnp.concatenate([lr, total[..., None]], axis=-1)
-    tree = tree.at[..., moves.lrt_nodes].set(lrt)
+    # values at the nodes it involves, so update them alone
 
     if prec_scale is None:
+        # the total count is cached, at the parent if the move grows it, at the
+        # children if the move prunes it, so count only the left child and
+        # derive the right one. This is exact in integers, and the one-bin
+        # reduction fuses better than a two-bin one.
+        left = config.count_reduction_config._reduce(  # noqa: SLF001
+            1,
+            leaf_indices,
+            size=tree_size,
+            subset_start=moves.lrt_nodes[0],
+            subset_length=1,
+            dtype=jnp.uint32,
+            data_sharded=config.data_sharded,
+        ).squeeze(-1)
+        cached = tree.at[moves.lrt_nodes].get(mode='fill', fill_value=0)
+        total = jnp.where(moves.grow, cached[2], cached[0] + cached[1])
+        lrt = jnp.stack([left, total - left, total])
+        tree = tree.at[moves.lrt_nodes].set(lrt)
         return tree, Counts(lrt=lrt)
     else:
+        # reduce into the move's children, the contiguous pair (left, right) =
+        # (2 * node, 2 * node + 1) = lrt_nodes[:2]; the right child is not
+        # derived by difference like the counts because in floating point it
+        # would lose precision on a small leaf next to a large one
+        lr = config.prec_reduction_config._reduce(  # noqa: SLF001
+            prec_scale,
+            leaf_indices,
+            size=tree_size,
+            subset_start=moves.lrt_nodes[0],
+            subset_length=2,
+            dtype=jnp.float32,
+            data_sharded=config.data_sharded,
+        )
+
+        # write the children sums into the cache along with their total at the
+        # parent node (a non-leaf in the post-grow indexing the reduce runs on);
+        # the precision-scaled version of the counts is not needed because the
+        # likelihood terms are derived from the leaf terms
+        total = lr[..., 0] + lr[..., 1]
+        lrt = jnp.concatenate([lr, total[..., None]], axis=-1)
+        tree = tree.at[..., moves.lrt_nodes].set(lrt)
         return tree, None
 
 

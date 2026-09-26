@@ -35,40 +35,16 @@ from jaxtyping import Array, Float, Float32, Int32, Key, UInt
 from bartz._jaxext import field, float32_matmuls, jit, sliced_map, split
 from bartz._jaxext.random import loggamma
 from bartz.bcf._state import BCFState
-from bartz.grove._grove import is_actual_leaf
 from bartz.mcmcloop._trace import BurninTrace, MainTrace, Trace
 from bartz.mcmcstep._axes import CHAIN_AXIS
-from bartz.mcmcstep._state import Forest, State, StepConfig
-from bartz.mcmcstep._step import step, step_trees, sum_resid
-
-
-def _compute_leaf_prior_stats(
-    st: UInt[Array, '*chains num_trees half_tree_size'],
-    lt: Float[Array, '*chains num_trees 2*half_tree_size'],
-) -> tuple[Int32[Array, '*chains'], Float[Array, '*chains']]:
-    """
-    Compute the number of active leaves and their sum of squares.
-
-    Parameters
-    ----------
-    st
-        The split tree array of shape (*chains, num_trees, half_tree_size).
-    lt
-        The leaf tree array of shape (*chains, num_trees, 2*half_tree_size).
-
-    Returns
-    -------
-    num_active
-        The number of active leaves of shape (*chains,).
-    sum_sq
-        The sum of squares of leaf values of shape (*chains,).
-    """
-    st_flat = st.reshape(-1, st.shape[-1])
-    is_leaf_flat = vmap(lambda s: is_actual_leaf(s, add_bottom_level=True))(st_flat)
-    is_leaf = is_leaf_flat.reshape((*st.shape[:-1], is_leaf_flat.shape[-1]))
-    num_active = jnp.sum(is_leaf, axis=(-2, -1))
-    sum_sq = jnp.sum(jnp.square(lt) * is_leaf, axis=(-2, -1))
-    return num_active, sum_sq
+from bartz.mcmcstep._state import (
+    Forest,
+    State,
+    StepConfig,
+    split_key_for_chains,
+    vmap_chains,
+)
+from bartz.mcmcstep._step import leaf_scatter, step, step_trees, sum_resid
 
 
 def _sample_leaf_prior_cov_inv(
@@ -94,13 +70,9 @@ def _sample_leaf_prior_cov_inv(
     -------
     The sampled leaf prior precision.
     """
-    num_active, sum_sq = _compute_leaf_prior_stats(
-        state.forest.split_tree, state.forest.leaf_tree
-    )
+    num_active, sum_sq = leaf_scatter(state.forest)
     a = shape + num_active / 2.0
-    # leaves are stored in `leaf_unit` units; convert their sum of squares to
-    # data units so the Gamma update matches the data-scale prior rate
-    b = rate + sum_sq * jnp.square(state.forest.leaf_unit) / 2.0
+    b = rate + sum_sq / 2.0
     return jnp.exp(loggamma(key, a)) / b
 
 
@@ -335,6 +307,8 @@ def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
 
 
 @jit(donate_argnums=(1,))
+@split_key_for_chains
+@vmap_chains
 @float32_matmuls
 def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     """

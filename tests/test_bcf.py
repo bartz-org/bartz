@@ -24,6 +24,7 @@
 
 """Tests for Bayesian Causal Forests (BCF)."""
 
+import math
 import tempfile
 from collections.abc import Sequence
 from dataclasses import replace
@@ -1240,9 +1241,13 @@ class TestBcf:
                 seed=42,
             )
 
-    @pytest.mark.parametrize('sample_intercept', [True, False])
-    def test_bcf_constructor_options(self, sample_intercept: bool) -> None:
-        """Constructor x_test/z_test, pihat toggle, tau_0 prior/toggle, sigma_trace."""
+    @pytest.mark.parametrize(
+        ('sample_intercept', 'num_chains'), [(True, None), (False, 2)]
+    )
+    def test_bcf_constructor_options(
+        self, sample_intercept: bool, num_chains: int | None
+    ) -> None:
+        """Constructor x_test/z_test, pihat toggle, tau_0 prior/toggle, chains, sigma_trace."""
         x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
             n=30, seed=0
         )
@@ -1264,13 +1269,25 @@ class TestBcf:
             num_trees_tau=2,
             ndpost=ndpost,
             nskip=1,
+            num_chains=num_chains,
             seed=42,
         )
-        assert model._mcmc_state.num_chains() is None
-        assert model.sigma_trace.shape == (ndpost,)
-        assert model._tau_0_trace.shape == (ndpost,)
+        assert model._mcmc_state.num_chains() == num_chains
+        chain_shape = () if num_chains is None else (num_chains,)
+        num_samples = math.prod(chain_shape) * ndpost
+        assert model._tau_0_trace.shape == (num_samples,)
+        assert model._b_trace.shape == (num_samples, 2)
+        assert model.mu_test is not None
+        assert model.mu_test.shape == (num_samples, len(x_test))
         tau_0_is_zero = model._tau_0_trace == 0
-        assert_array_equal(tau_0_is_zero, jnp.full(ndpost, not sample_intercept))
+        assert_array_equal(tau_0_is_zero, jnp.full(num_samples, not sample_intercept))
+
+        # the chains are concatenated one after the other
+        error_cov_inv = model._main_trace['mu'].error_cov_inv
+        assert error_cov_inv.shape == (*chain_shape, ndpost)
+        assert_array_equal(
+            model.sigma_trace, jnp.reciprocal(jnp.sqrt(error_cov_inv)).reshape(-1)
+        )
 
         # test predictions computed at construction match predict()
         preds = model.predict(x_test, pihat_test=pihat_test)

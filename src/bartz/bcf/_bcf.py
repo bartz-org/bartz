@@ -26,6 +26,7 @@
 
 import dataclasses
 import json
+from operator import attrgetter
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -42,6 +43,7 @@ from bartz._interface import (
     DataFrame,
     FloatLike,
     Series,
+    _flatten_chain_sample,
     _process_error_variance_settings,
     _process_leaf_variance_settings,
     _process_offset_settings,
@@ -53,7 +55,9 @@ from bartz._jaxext import split
 from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import init_bcf
 from bartz.mcmcloop import MainTrace, run_mcmc
-from bartz.mcmcstep import OutcomeType
+from bartz.mcmcloop._trace import Trace
+from bartz.mcmcstep import OutcomeType, Wishart
+from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._state import make_p_nonterminal
 from bartz.prepcovars import RangeEvenBinner, UniqueQuantileBinner
 
@@ -78,6 +82,14 @@ def _process_bcf_predictor_input(
     if not isinstance(x, DataFrame):
         x = jnp.asarray(x).T
     return _process_predictor_input(x)
+
+
+def _fold_chains(trace: Trace, path: str) -> Float32[Array, 'num_samples ...']:
+    """Fold the chain axis of a trace field into its sample axis, like `predict_latent`."""
+    get = attrgetter(path)
+    return _flatten_chain_sample(
+        get(trace), get(chain_vmap_axes(trace)), get(trace_sample_axes(trace))
+    )
 
 
 def _serialize_binner(binner: Any, max_split: Any = None) -> dict[str, Any]:  # noqa: ANN401
@@ -151,6 +163,16 @@ def _deserialize_binner(data: Any) -> Any:  # noqa: ANN401
     return binner
 
 
+def make_leaf_prior_cov_inv(
+    value: FloatLike, sample: bool, shape: FloatLike, scale: FloatLike
+) -> Wishart:
+    """Build the leaf precision prior from the inverse-gamma prior on the variance."""
+    if sample:
+        return Wishart(nu=2 * shape, rate=2 * scale, value=value)
+    else:
+        return Wishart(nu=None, rate=None, value=value)
+
+
 class bcf(eqx.Module):
     R"""
     Bayesian Causal Forests (BCF).
@@ -186,9 +208,14 @@ class bcf(eqx.Module):
     num_trees_tau
         The number of trees used for the treatment effect forest `tau`.
     ndpost
-        The number of MCMC samples to save, after burn-in.
+        The number of MCMC samples to save, after burn-in, per chain. The
+        posterior samples of all chains are concatenated, for a total of
+        ``num_chains * ndpost``.
     nskip
-        The number of initial MCMC samples to discard as burn-in.
+        The number of initial MCMC samples to discard as burn-in, per chain.
+    num_chains
+        The number of independent MCMC chains. `None` for a single chain
+        without an explicit chain axis, which is equivalent to 1.
     k_mu
         Prior parameter k for prognostic forest.
     k_tau
@@ -258,9 +285,9 @@ class bcf(eqx.Module):
     _y_std: Float32[ArrayLike, ''] | float = eqx.field(default=1.0)
     _outcome_type: str = eqx.field(static=True, default='continuous')
     _offset: Float32[ArrayLike, ''] | float = eqx.field(default=0.0)
-    _mu_test: Float32[Array, 'ndpost m'] | None = eqx.field(default=None)
-    _tau_test: Float32[Array, 'ndpost m'] | None = eqx.field(default=None)
-    _yhat_test: Float32[Array, 'ndpost m'] | None = eqx.field(default=None)
+    _mu_test: Float32[Array, 'num_samples m'] | None = eqx.field(default=None)
+    _tau_test: Float32[Array, 'num_samples m'] | None = eqx.field(default=None)
+    _yhat_test: Float32[Array, 'num_samples m'] | None = eqx.field(default=None)
 
     def __init__(  # noqa: C901, PLR0915
         self,
@@ -278,6 +305,7 @@ class bcf(eqx.Module):
         num_trees_tau: int = 100,
         ndpost: int = 1000,
         nskip: int = 100,
+        num_chains: int | None = None,
         k_mu: float = 2.0,
         k_tau: float = 10.0,
         sigma_df: float = 3.0,
@@ -476,8 +504,18 @@ class bcf(eqx.Module):
             num_trees_tau=num_trees_tau,
             p_nonterminal_mu=p_nonterminal_mu,
             p_nonterminal_tau=p_nonterminal_tau,
-            leaf_prior_cov_inv_mu=leaf_prior_cov_inv_mu,
-            leaf_prior_cov_inv_tau=leaf_prior_cov_inv_tau,
+            leaf_prior_cov_inv_mu=make_leaf_prior_cov_inv(
+                leaf_prior_cov_inv_mu,
+                sample_sigma2_leaf_mu,
+                sigma2_leaf_shape_mu,
+                sigma2_leaf_scale_mu,
+            ),
+            leaf_prior_cov_inv_tau=make_leaf_prior_cov_inv(
+                leaf_prior_cov_inv_tau,
+                sample_sigma2_leaf_tau,
+                sigma2_leaf_shape_tau,
+                sigma2_leaf_scale_tau,
+            ),
             min_points_per_leaf_mu=min_points_per_leaf_mu,
             min_points_per_leaf_tau=min_points_per_leaf_tau,
             # ignore all predictors without splits, like `Bart(..., rm_const=True)`
@@ -486,13 +524,8 @@ class bcf(eqx.Module):
             tau_0_prior_var=tau_0_prior_var,
             sample_intercept=sample_intercept,
             adaptive_coding=adaptive_coding,
-            sample_leaf_prior_cov_inv_mu=sample_sigma2_leaf_mu,
-            leaf_prior_cov_inv_shape_mu=sigma2_leaf_shape_mu,
-            leaf_prior_cov_inv_rate_mu=sigma2_leaf_scale_mu,
-            sample_leaf_prior_cov_inv_tau=sample_sigma2_leaf_tau,
-            leaf_prior_cov_inv_shape_tau=sigma2_leaf_shape_tau,
-            leaf_prior_cov_inv_rate_tau=sigma2_leaf_scale_tau,
             error_cov_inv=error_cov_inv,
+            num_chains=num_chains,
         )
 
         # 5. Run the MCMC loop
@@ -512,10 +545,15 @@ class bcf(eqx.Module):
         main_trace = cast(BCFMainTrace, main_trace)
         self._mcmc_state = final_state
         self._binner = binner
-        self._tau_0_trace = main_trace.tau_0
-        self._b_trace = main_trace.b
-        self._leaf_prior_cov_inv_mu_trace = main_trace.mu.leaf_prior_cov_inv
-        self._leaf_prior_cov_inv_tau_trace = main_trace.tau.leaf_prior_cov_inv
+        # fold the chains like `predict_latent` does to align the samples
+        self._tau_0_trace = _fold_chains(main_trace, 'tau_0')
+        self._b_trace = _fold_chains(main_trace, 'b')
+        self._leaf_prior_cov_inv_mu_trace = _fold_chains(
+            main_trace, 'mu.leaf_prior_cov_inv'
+        )
+        self._leaf_prior_cov_inv_tau_trace = _fold_chains(
+            main_trace, 'tau.leaf_prior_cov_inv'
+        )
         self._main_trace = {'mu': main_trace.mu, 'tau': main_trace.tau}
         self._burnin_trace = {'mu': burnin_trace.mu, 'tau': burnin_trace.tau}
 
@@ -544,9 +582,9 @@ class bcf(eqx.Module):
         y_std: Float32[ArrayLike, ''] | float = 1.0,
         outcome_type: str = 'continuous',
         offset: Float32[ArrayLike, ''] | float = 0.0,
-        mu_test: Float32[Array, 'ndpost m'] | None = None,
-        tau_test: Float32[Array, 'ndpost m'] | None = None,
-        yhat_test: Float32[Array, 'ndpost m'] | None = None,
+        mu_test: Float32[Array, 'num_samples m'] | None = None,
+        tau_test: Float32[Array, 'num_samples m'] | None = None,
+        yhat_test: Float32[Array, 'num_samples m'] | None = None,
     ) -> 'bcf':
         """
         Private factory constructor to initialize bcf instance from restored state.
@@ -783,7 +821,7 @@ class bcf(eqx.Module):
         pihat_test: Float32[ArrayLike, ' m'] | Series | None = None,
         include_pihat_in_mu: bool = True,  # noqa: ARG002
         include_pihat_in_tau: bool = False,  # noqa: ARG002
-    ) -> dict[str, Float32[Array, 'ndpost m']]:
+    ) -> dict[str, Float32[Array, 'num_samples m']]:
         """
         Compute predictions for both mu and tau forests at `x_test`.
 
@@ -802,7 +840,8 @@ class bcf(eqx.Module):
         -------
         dict
             A dictionary with "mu" and "tau" containing the posterior samples
-            of the respective forests evaluated at x_test. Shapes are (ndpost, m).
+            of the respective forests evaluated at x_test. Shapes are
+            (num_chains * ndpost, m).
 
         Raises
         ------
@@ -861,16 +900,16 @@ class bcf(eqx.Module):
         return {'mu': mu_adjusted, 'tau': cate}
 
     @property
-    def sigma_trace(self) -> Float32[Array, ' ndpost']:
-        """The posterior trace of residual standard deviation on the outcome scale."""
-        error_cov_inv = self._main_trace['mu'].error_cov_inv
+    def sigma_trace(self) -> Float32[Array, ' num_samples']:
+        """The posterior trace of residual standard deviation on the outcome scale, chains concatenated."""
+        error_cov_inv = _fold_chains(self._main_trace['mu'], 'error_cov_inv')
         sigma_internal = 1.0 / jnp.sqrt(error_cov_inv)
         if self._standardize:
             return sigma_internal * self._y_std
         return sigma_internal
 
     @property
-    def mu_test(self) -> Float32[Array, 'ndpost m'] | None:
+    def mu_test(self) -> Float32[Array, 'num_samples m'] | None:
         """The control mean at `x_test` for each MCMC iteration.
 
         On the latent probit scale for binary outcomes.
@@ -878,7 +917,7 @@ class bcf(eqx.Module):
         return self._mu_test
 
     @property
-    def tau_test(self) -> Float32[Array, 'ndpost m'] | None:
+    def tau_test(self) -> Float32[Array, 'num_samples m'] | None:
         """The treatment effect at `x_test` for each MCMC iteration.
 
         On the latent probit scale for binary outcomes.
@@ -886,7 +925,7 @@ class bcf(eqx.Module):
         return self._tau_test
 
     @property
-    def yhat_test(self) -> Float32[Array, 'ndpost m'] | None:
+    def yhat_test(self) -> Float32[Array, 'num_samples m'] | None:
         """The outcome at `x_test` under `z_test` for each MCMC iteration.
 
         On the latent probit scale for binary outcomes; see `prob_test`.
@@ -894,7 +933,7 @@ class bcf(eqx.Module):
         return self._yhat_test
 
     @property
-    def prob_test(self) -> Float32[Array, 'ndpost m'] | None:
+    def prob_test(self) -> Float32[Array, 'num_samples m'] | None:
         """The probability of y being True at `x_test` under `z_test`.
 
         `None` unless the outcome is binary and `x_test` and `z_test` were
@@ -913,7 +952,7 @@ class bcf(eqx.Module):
         key: Key[Array, ''] | int | None = None,
         include_pihat_in_mu: bool = True,
         include_pihat_in_tau: bool = False,
-    ) -> dict[str, Float32[Array, 'ndpost m']]:
+    ) -> dict[str, Float32[Array, 'num_samples m']]:
         """
         Sample joint posterior predictive potential outcomes Y(0), Y(1), and lift.
 
@@ -959,13 +998,13 @@ class bcf(eqx.Module):
         )
         mu = preds['mu']
         tau = preds['tau']
-        ndpost, m = mu.shape
+        num_samples, m = mu.shape
 
         sigma = self.sigma_trace[:, jnp.newaxis]
 
         keys = split(key)
-        u0 = random.normal(keys.pop(), shape=(ndpost, m), dtype=jnp.float32)
-        u1 = random.normal(keys.pop(), shape=(ndpost, m), dtype=jnp.float32)
+        u0 = random.normal(keys.pop(), shape=(num_samples, m), dtype=jnp.float32)
+        u1 = random.normal(keys.pop(), shape=(num_samples, m), dtype=jnp.float32)
 
         rho_f = jnp.float32(rho)
         eps0 = sigma * u0

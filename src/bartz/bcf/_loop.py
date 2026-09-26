@@ -33,75 +33,17 @@ from jax import lax, random, vmap
 from jaxtyping import Array, Float, Float32, Int32, Key, UInt
 
 from bartz._jaxext import field, float32_matmuls, jit, sliced_map, split
-from bartz._jaxext.random import loggamma
 from bartz.bcf._state import BCFState
-from bartz.grove._grove import is_actual_leaf
 from bartz.mcmcloop._trace import BurninTrace, MainTrace, Trace
 from bartz.mcmcstep._axes import CHAIN_AXIS
-from bartz.mcmcstep._state import Forest, State, StepConfig
-from bartz.mcmcstep._step import step, step_trees, sum_resid
-
-
-def _compute_leaf_prior_stats(
-    st: UInt[Array, '*chains num_trees half_tree_size'],
-    lt: Float[Array, '*chains num_trees 2*half_tree_size'],
-) -> tuple[Int32[Array, '*chains'], Float[Array, '*chains']]:
-    """
-    Compute the number of active leaves and their sum of squares.
-
-    Parameters
-    ----------
-    st
-        The split tree array of shape (*chains, num_trees, half_tree_size).
-    lt
-        The leaf tree array of shape (*chains, num_trees, 2*half_tree_size).
-
-    Returns
-    -------
-    num_active
-        The number of active leaves of shape (*chains,).
-    sum_sq
-        The sum of squares of leaf values of shape (*chains,).
-    """
-    st_flat = st.reshape(-1, st.shape[-1])
-    is_leaf_flat = vmap(lambda s: is_actual_leaf(s, add_bottom_level=True))(st_flat)
-    is_leaf = is_leaf_flat.reshape((*st.shape[:-1], is_leaf_flat.shape[-1]))
-    num_active = jnp.sum(is_leaf, axis=(-2, -1))
-    sum_sq = jnp.sum(jnp.square(lt) * is_leaf, axis=(-2, -1))
-    return num_active, sum_sq
-
-
-def _sample_leaf_prior_cov_inv(
-    key: Key[Array, ''],
-    state: State,
-    shape: Float32[Array, ''],
-    rate: Float32[Array, ''],
-) -> Float32[Array, '']:
-    """
-    Draw the leaf prior precision of a forest from its Gamma conditional.
-
-    Parameters
-    ----------
-    key
-        A JAX PRNG key.
-    state
-        The state holding the forest, with the leaves already updated.
-    shape
-    rate
-        The parameters of the Gamma prior on the precision.
-
-    Returns
-    -------
-    The sampled leaf prior precision.
-    """
-    num_active, sum_sq = _compute_leaf_prior_stats(
-        state.forest.split_tree, state.forest.leaf_tree
-    )
-    a = shape + num_active / 2.0
-    # leaves are stored in `leaf_unit` units; convert their sum of squares to
-    # data units so the Gamma update matches the data-scale prior rate
-    b = rate + sum_sq * jnp.square(state.forest.leaf_unit) / 2.0
-    return jnp.exp(loggamma(key, a)) / b
+from bartz.mcmcstep._state import (
+    Forest,
+    State,
+    StepConfig,
+    split_key_for_chains,
+    vmap_chains,
+)
+from bartz.mcmcstep._step import step, step_leaf_prior_cov_inv, step_trees, sum_resid
 
 
 def recompute_prec_trees(
@@ -166,28 +108,11 @@ def recompute_prec_trees(
 
 def bcf_step_mu(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the prognostic forest and its leaf prior precision."""
-    keys = split(key, 2)
-
     # `step` rebuilds the state with `replace`, so it preserves the subclass.
     # WORKAROUND(python<3.12): type `step` as generic over the state subclass
     # (PEP 695) instead of casting here, since a TypeVar renders badly in the
     # html documentation.
-    state = cast(BCFState, step(keys.pop(), state))
-
-    if state.leaf_prior_cov_inv_shape_mu is not None:
-        assert state.leaf_prior_cov_inv_rate_mu is not None
-        state = tree_at(
-            lambda s: s.forest.leaf_prior_cov_inv.value,
-            state,
-            _sample_leaf_prior_cov_inv(
-                keys.pop(),
-                state,
-                state.leaf_prior_cov_inv_shape_mu,
-                state.leaf_prior_cov_inv_rate_mu,
-            ),
-        )
-
-    return state
+    return cast(BCFState, step(key, state))
 
 
 def bcf_step_tau_0(key: Key[Array, ''], state: BCFState) -> BCFState:
@@ -240,10 +165,11 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     mu_resid = state.resid
     initial_resid_tau = jnp.where(b_z_zero, 0.0, mu_resid / b_z_safe)
 
-    # Swap the tau forest into the forest slot and run only the tree step on
-    # it; the mu forest rides along in `forest_tau` and is swapped back at the
-    # end. The other sub-steps of `step` (latent outcome, error precision,
-    # sparsity, step counter) belong to the mu phase alone.
+    # Swap the tau forest into the forest slot and run only the tree and leaf
+    # prior precision steps on it; the mu forest rides along in `forest_tau`
+    # and is swapped back at the end. The other sub-steps of `step` (latent
+    # outcome, error precision, sparsity, step counter) belong to the mu phase
+    # alone.
     mu_prec_scale = state.prec_scale
     state = replace(
         state,
@@ -254,19 +180,7 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     )
 
     state = cast(BCFState, step_trees(keys.pop(), state))
-
-    if state.leaf_prior_cov_inv_shape_tau is not None:
-        assert state.leaf_prior_cov_inv_rate_tau is not None
-        state = tree_at(
-            lambda s: s.forest.leaf_prior_cov_inv.value,
-            state,
-            _sample_leaf_prior_cov_inv(
-                keys.pop(),
-                state,
-                state.leaf_prior_cov_inv_shape_tau,
-                state.leaf_prior_cov_inv_rate_tau,
-            ),
-        )
+    state = cast(BCFState, step_leaf_prior_cov_inv(keys.pop(), state))
 
     # Update tau_X! (the residual difference is scaled, bring it to data units)
     if state.tau_X is not None:
@@ -335,6 +249,8 @@ def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
 
 
 @jit(donate_argnums=(1,))
+@split_key_for_chains
+@vmap_chains
 @float32_matmuls
 def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     """

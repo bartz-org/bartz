@@ -165,10 +165,11 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     mu_resid = state.resid
     initial_resid_tau = jnp.where(b_z_zero, 0.0, mu_resid / b_z_safe)
 
-    # Swap the tau forest into the forest slot and run only the tree step on
-    # it; the mu forest rides along in `forest_tau` and is swapped back at the
-    # end. The other sub-steps of `step` (latent outcome, error precision,
-    # sparsity, step counter) belong to the mu phase alone.
+    # Swap the tau forest into the forest slot and run only the tree and leaf
+    # prior precision steps on it; the mu forest rides along in `forest_tau`
+    # and is swapped back at the end. The other sub-steps of `step` (latent
+    # outcome, error precision, sparsity, step counter) belong to the mu phase
+    # alone.
     mu_prec_scale = state.prec_scale
     state = replace(
         state,

@@ -182,7 +182,7 @@ class TestBcf:
         return x_train, pi.astype(np.float32), z_train, y_train, mu, tau, rng
 
     def test_bcf_save_load_npz(self) -> None:
-        """Tests saving and loading a BCF model via NPZ preserves prediction equality."""
+        """Tests saving and loading a multichain BCF model via NPZ preserves prediction equality."""
         x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
             n=200, p=5, seed=0
         )
@@ -196,6 +196,7 @@ class TestBcf:
             num_trees_tau=2,
             ndpost=3,
             nskip=2,
+            num_chains=2,
             standardize=False,
             seed=42,
         )
@@ -218,6 +219,7 @@ class TestBcf:
             assert_allclose(
                 preds_loaded['tau'], preds_orig['tau'], allow_non_scalar=True
             )
+            assert_array_equal(loaded_model.sigma_trace, model.sigma_trace)
 
             # no x_test at construction, so no test predictions to restore
             assert loaded_model.mu_test is None

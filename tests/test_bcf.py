@@ -1003,6 +1003,8 @@ class TestBcf:
             seed=random.key(123),
         )
 
+        # stochtree's sampler uses IG(shape / 2, scale / 2) instead of the
+        # documented IG(shape, scale), so double its parameters to match
         model_st = stochtree.BCFModel()
         model_st.sample(
             X_train=x_train,
@@ -1015,15 +1017,15 @@ class TestBcf:
             prognostic_forest_params={
                 'num_trees': 200,
                 'sample_sigma2_leaf': True,
-                'sigma2_leaf_shape': 3.0,
-                'sigma2_leaf_scale': 4.0 / 200.0,
+                'sigma2_leaf_shape': 2 * 3.0,
+                'sigma2_leaf_scale': 2 * 4.0 / 200.0,
                 'min_samples_leaf': 3,
             },
             treatment_effect_forest_params={
                 'num_trees': 50,
                 'sample_sigma2_leaf': True,
-                'sigma2_leaf_shape': 3.0,
-                'sigma2_leaf_scale': 1.0 / 50.0,
+                'sigma2_leaf_shape': 2 * 3.0,
+                'sigma2_leaf_scale': 2 * 1.0 / 50.0,
                 'sample_intercept': True,
                 'min_samples_leaf': 3,
             },

@@ -163,7 +163,7 @@ def _deserialize_binner(data: Any) -> Any:  # noqa: ANN401
     return binner
 
 
-def _leaf_prior_cov_inv(
+def make_leaf_prior_cov_inv(
     value: FloatLike, sample: bool, shape: FloatLike, scale: FloatLike
 ) -> Wishart:
     """Build the leaf precision prior from the inverse-gamma prior on the variance."""
@@ -504,13 +504,13 @@ class bcf(eqx.Module):
             num_trees_tau=num_trees_tau,
             p_nonterminal_mu=p_nonterminal_mu,
             p_nonterminal_tau=p_nonterminal_tau,
-            leaf_prior_cov_inv_mu=_leaf_prior_cov_inv(
+            leaf_prior_cov_inv_mu=make_leaf_prior_cov_inv(
                 leaf_prior_cov_inv_mu,
                 sample_sigma2_leaf_mu,
                 sigma2_leaf_shape_mu,
                 sigma2_leaf_scale_mu,
             ),
-            leaf_prior_cov_inv_tau=_leaf_prior_cov_inv(
+            leaf_prior_cov_inv_tau=make_leaf_prior_cov_inv(
                 leaf_prior_cov_inv_tau,
                 sample_sigma2_leaf_tau,
                 sigma2_leaf_shape_tau,

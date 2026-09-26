@@ -558,8 +558,8 @@ class TestBcf:
             num_trees_tau=5,
             p_nonterminal_mu=np.ones(5, dtype=np.float32) * 0.95,
             p_nonterminal_tau=np.ones(5, dtype=np.float32) * 0.95,
-            leaf_prior_cov_inv_mu=1.0,
-            leaf_prior_cov_inv_tau=1.0,
+            leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
+            leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
             error_cov_inv=Wishart(
                 nu=jnp.float32(1.0),
                 rate=jnp.array(1.0, dtype=jnp.float32),
@@ -628,8 +628,8 @@ class TestBcf:
             p_nonterminal_mu=np.ones(4, dtype=np.float32) * 0.95,
             p_nonterminal_tau=np.ones(4, dtype=np.float32) * 0.95,
             min_points_per_leaf_tau=1,
-            leaf_prior_cov_inv_mu=1.0,
-            leaf_prior_cov_inv_tau=1.0,
+            leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
+            leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
             adaptive_coding=adaptive_coding,
             error_cov_inv=Wishart(
                 nu=jnp.float32(1.0),
@@ -684,10 +684,9 @@ class TestBcf:
                 num_trees_tau=3,
                 p_nonterminal_mu=jnp.full(4, 0.95),
                 p_nonterminal_tau=jnp.full(4, 0.95),
-                leaf_prior_cov_inv_mu=1.0,
-                leaf_prior_cov_inv_tau=1.0,
+                leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
+                leaf_prior_cov_inv_tau=Wishart(nu=6.0, rate=2.0, value=1.0),
                 adaptive_coding=True,
-                sample_leaf_prior_cov_inv_tau=True,
                 error_cov_inv=Wishart(
                     nu=jnp.array(1.0), rate=jnp.array(1.0), value=jnp.array(1.0)
                 ),
@@ -741,8 +740,8 @@ class TestBcf:
             num_trees_tau=3,
             p_nonterminal_mu=jnp.full(4, 0.95),
             p_nonterminal_tau=jnp.full(4, 0.95),
-            leaf_prior_cov_inv_mu=1.0,
-            leaf_prior_cov_inv_tau=1.0,
+            leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
+            leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
             adaptive_coding=True,
             error_cov_inv=Wishart(
                 nu=jnp.array(1.0), rate=jnp.array(1.0), value=jnp.array(1.0)

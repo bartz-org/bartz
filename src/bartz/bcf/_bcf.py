@@ -56,7 +56,7 @@ from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import init_bcf
 from bartz.mcmcloop import MainTrace, run_mcmc
 from bartz.mcmcloop._trace import Trace
-from bartz.mcmcstep import OutcomeType
+from bartz.mcmcstep import OutcomeType, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._state import make_p_nonterminal
 from bartz.prepcovars import RangeEvenBinner, UniqueQuantileBinner
@@ -161,6 +161,16 @@ def _deserialize_binner(data: Any) -> Any:  # noqa: ANN401
         object.__setattr__(binner, '_max_bins', int(data['binner._max_bins']))
         object.__setattr__(binner, 'max_split', jnp.asarray(data['binner.max_split']))
     return binner
+
+
+def _leaf_prior_cov_inv(
+    value: FloatLike, sample: bool, shape: FloatLike, scale: FloatLike
+) -> Wishart:
+    """Build the leaf precision prior from the inverse-gamma prior on the variance."""
+    if sample:
+        return Wishart(nu=2 * shape, rate=2 * scale, value=value)
+    else:
+        return Wishart(nu=None, rate=None, value=value)
 
 
 class bcf(eqx.Module):
@@ -494,8 +504,18 @@ class bcf(eqx.Module):
             num_trees_tau=num_trees_tau,
             p_nonterminal_mu=p_nonterminal_mu,
             p_nonterminal_tau=p_nonterminal_tau,
-            leaf_prior_cov_inv_mu=leaf_prior_cov_inv_mu,
-            leaf_prior_cov_inv_tau=leaf_prior_cov_inv_tau,
+            leaf_prior_cov_inv_mu=_leaf_prior_cov_inv(
+                leaf_prior_cov_inv_mu,
+                sample_sigma2_leaf_mu,
+                sigma2_leaf_shape_mu,
+                sigma2_leaf_scale_mu,
+            ),
+            leaf_prior_cov_inv_tau=_leaf_prior_cov_inv(
+                leaf_prior_cov_inv_tau,
+                sample_sigma2_leaf_tau,
+                sigma2_leaf_shape_tau,
+                sigma2_leaf_scale_tau,
+            ),
             min_points_per_leaf_mu=min_points_per_leaf_mu,
             min_points_per_leaf_tau=min_points_per_leaf_tau,
             # ignore all predictors without splits, like `Bart(..., rm_const=True)`
@@ -504,12 +524,6 @@ class bcf(eqx.Module):
             tau_0_prior_var=tau_0_prior_var,
             sample_intercept=sample_intercept,
             adaptive_coding=adaptive_coding,
-            sample_leaf_prior_cov_inv_mu=sample_sigma2_leaf_mu,
-            leaf_prior_cov_inv_shape_mu=sigma2_leaf_shape_mu,
-            leaf_prior_cov_inv_rate_mu=sigma2_leaf_scale_mu,
-            sample_leaf_prior_cov_inv_tau=sample_sigma2_leaf_tau,
-            leaf_prior_cov_inv_shape_tau=sigma2_leaf_shape_tau,
-            leaf_prior_cov_inv_rate_tau=sigma2_leaf_scale_tau,
             error_cov_inv=error_cov_inv,
             num_chains=num_chains,
         )

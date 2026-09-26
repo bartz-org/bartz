@@ -58,31 +58,10 @@ from tests.util import (
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
+    assert_different_matrices,
     jaxtyping_disabled,
     rhat_rank,
 )
-
-
-def _rhat_two_chains(
-    a: Shaped[ArrayLike, '*shape'], b: Shaped[ArrayLike, '*shape']
-) -> Shaped[np.ndarray, '...']:
-    """
-    Compute rank-normalized Rhat between two (num_samples, n) matrices.
-
-    Parameters
-    ----------
-    a
-        First MCMC chain samples of shape (num_samples, n).
-    b
-        Second MCMC chain samples of shape (num_samples, n).
-
-    Returns
-    -------
-    Shaped[np.ndarray, '...']
-        An array of Rhat values for each of the n outputs.
-    """
-    stacked = np.stack([a, b], axis=0)  # shape (2, num_samples, n)
-    return rhat_rank(stacked, split=False)
 
 
 def _prec_tree_from_scratch(
@@ -124,6 +103,33 @@ def _check_chains_match(
     tree.map_with_path(
         check_leaf, chain_vmap_axes(multi), multi, *singles, is_leaf=lambda x: x is None
     )
+
+
+def _assert_chains_differ(model: bcf) -> None:
+    """Check the chains of a two-chain `bcf` differ in all the traced values that vary."""
+
+    def check(
+        path: KeyPath, x: Shaped[Array, '*shape'] | None, chain_axis: int | None
+    ) -> None:
+        if x is None or chain_axis is None:
+            return
+        chains = np.moveaxis(np.asarray(x), chain_axis, 0)
+        # skip the values held fixed, e.g., unsampled leaf prior precisions
+        if np.all(chains == chains.flat[0]):
+            return
+        # flatten to compare with the vector norm, the matrix 2-norm would
+        # need an expensive svd on the big tree arrays
+        assert_different_matrices(
+            chains[0, ...].reshape(-1),
+            chains[1, ...].reshape(-1),
+            rtol=1e-3,
+            atol=0,
+            err_msg=f'{keystr(path)}: ',
+        )
+
+    traces = dict(model._main_trace, tau_0=model._tau_0_trace.reshape(2, -1))
+    axes = dict({k: chain_vmap_axes(v) for k, v in model._main_trace.items()}, tau_0=0)
+    tree.map_with_path(check, traces, axes, is_leaf=lambda x: x is None)
 
 
 class TestBcf:
@@ -347,10 +353,10 @@ class TestBcf:
             with pytest.raises(ValueError, match='Unsupported schema version: 999'):
                 bcf.load_npz(npz_path)
 
-    def test_bcf_statistical_convergence(self) -> None:
-        """Internal reproducibility (jax vs jax) and out-of-sample DGP recovery.
+    def test_bcf_statistical_convergence(self, subtests: SubTests) -> None:
+        """Multichain convergence and out-of-sample DGP recovery.
 
-        Two independent bartz chains must agree (Rhat near 1), and a
+        Two chains must agree (Rhat near 1) without being identical, and a
         prior-matched model must recover the known treatment and prognostic
         effects on held-out data.
         """
@@ -382,8 +388,9 @@ class TestBcf:
         ndpost = 2500
         nskip = 1500
 
-        # 1. Internal Stability Models (JAX defaults)
-        model_jax_a = bcf(
+        # 1. Internal Stability Model (JAX defaults), with two chains
+        num_chains = 2
+        model_jax = bcf(
             x_train=x_train,
             y_train=y_scaled,
             z_train=z_train,
@@ -392,23 +399,10 @@ class TestBcf:
             num_trees_tau=20,
             ndpost=ndpost,
             nskip=nskip,
+            num_chains=num_chains,
             sample_sigma2_leaf_mu=False,
             sample_sigma2_leaf_tau=False,
             seed=random.key(42),
-        )
-
-        model_jax_b = bcf(
-            x_train=x_train,
-            y_train=y_scaled,
-            z_train=z_train,
-            pihat_train=pi.astype(np.float32),
-            num_trees_mu=50,
-            num_trees_tau=20,
-            ndpost=ndpost,
-            nskip=nskip,
-            sample_sigma2_leaf_mu=False,
-            sample_sigma2_leaf_tau=False,
-            seed=random.key(123),
         )
 
         # 2. Structural Alignment Models (Forced Prior Matching)
@@ -433,17 +427,21 @@ class TestBcf:
             seed=random.key(999),
         )
 
-        preds_a = model_jax_a.predict(x_test=x_train, pihat_test=pi.astype(np.float32))
-        preds_b = model_jax_b.predict(x_test=x_train, pihat_test=pi.astype(np.float32))
+        # 1. Internal reproducibility: the two chains agree, but not trivially
+        with subtests.test('chains agree'):
+            preds_train = model_jax.predict(
+                x_test=x_train, pihat_test=pi.astype(np.float32)
+            )
+            # the chains are concatenated along the sample axis
+            yhat = preds_train['mu'] + preds_train['tau'] * z_train
+            rhat_yhat = rhat_rank(yhat.reshape(num_chains, ndpost, n), split=False)
+            tau = preds_train['tau'].reshape(num_chains, ndpost, n)
+            rhat_tau_jax = rhat_rank(tau, split=True)
+            assert np.max(rhat_yhat) < 1.06
+            assert np.percentile(rhat_tau_jax, 95) < 1.10
 
-        # 1. Internal reproducibility: two independent bartz chains agree.
-        yhat_a = preds_a['mu'] + preds_a['tau'] * z_train
-        yhat_b = preds_b['mu'] + preds_b['tau'] * z_train
-        rhat_yhat = _rhat_two_chains(yhat_a, yhat_b)
-        stacked_tau = np.stack([preds_a['tau'], preds_b['tau']], axis=0)
-        rhat_tau_jax = rhat_rank(stacked_tau, split=True)
-        assert np.max(rhat_yhat) < 1.06
-        assert np.percentile(rhat_tau_jax, 95) < 1.10
+        with subtests.test('chains differ'):
+            _assert_chains_differ(model_jax)
 
         # 2. Out-of-sample recovery of the known DGP, on held-out data. RMSE
         # (not correlation) catches magnitude/offset errors; a constant tau
@@ -667,9 +665,6 @@ class TestBcf:
 
     def test_bcf_multichain(self, keys: split) -> None:
         """Check each chain of a multichain BCF matches a single-chain one."""
-        # this test is intended to be temporary and to be changed or merged
-        # into an end-to-end test with the `bcf` class once multichain is
-        # finished
         x_train, _, z_train, y_train, _, _, _ = self._generate_bcf_data(n=100, seed=42)
 
         x_train_t = jnp.asarray(x_train.T)

@@ -1840,9 +1840,16 @@ def inv_via_chol_with_gersh(
     return solve_triangular(L, Ltinv.mT, trans='T', lower=True)
 
 
+# The chain decorators below are generic over the state type, so that they
+# preserve `State` subclasses.
+# WORKAROUND(python<3.12): replace with PEP 695 type parameters on the
+# decorators, e.g. `def vmap_chains[S: State](...)`.
+StateT = TypeVar('StateT', bound=State)
+
+
 def split_key_for_chains(
-    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State],
-) -> Callable[[Key[Array, ''], State], State]:
+    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], StateT], StateT],
+) -> Callable[[Key[Array, ''], StateT], StateT]:
     """Split a single PRNG key into per-chain keys before calling `fun`.
 
     When the state is multichain, the input key is split into
@@ -1851,7 +1858,7 @@ def split_key_for_chains(
     """
 
     @wraps(fun)
-    def wrapped(key: Key[Array, ''], state: State) -> State:
+    def wrapped(key: Key[Array, ''], state: StateT) -> StateT:
         num_chains = state.num_chains()
         if num_chains is None:
             return fun(key, state)
@@ -1888,8 +1895,8 @@ def partition_specs(x: PyTree, mesh: Mesh) -> PyTree[PartitionSpec]:
 
 
 def shard_map_state(
-    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State],
-) -> Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State]:
+    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], StateT], StateT],
+) -> Callable[[Key[Array, ''] | Key[Array, ' num_chains'], StateT], StateT]:
     """Wrap a ``(keys, state) -> state`` function in a manual `jax.shard_map`.
 
     Uses `state.config.mesh` (static). No-op when the mesh is `None`. The keys
@@ -1900,7 +1907,9 @@ def shard_map_state(
     """
 
     @wraps(fun)
-    def wrapped(key: Key[Array, ''] | Key[Array, ' num_chains'], state: State) -> State:
+    def wrapped(
+        key: Key[Array, ''] | Key[Array, ' num_chains'], state: StateT
+    ) -> StateT:
         mesh = state.config.mesh
         if mesh is None:
             return fun(key, state)
@@ -1925,8 +1934,8 @@ def shard_map_state(
 
 
 def vmap_chains(
-    fun: Callable[[Key[Array, ''], State], State],
-) -> Callable[[Key[Array, ' num_chains'] | Key[Array, ''], State], State]:
+    fun: Callable[[Key[Array, ''], StateT], StateT],
+) -> Callable[[Key[Array, ' num_chains'] | Key[Array, ''], StateT], StateT]:
     """Vmap a ``(key, state) -> state`` function over chain axes.
 
     When the state is multichain, `keys` must have a leading chain axis and
@@ -1936,8 +1945,8 @@ def vmap_chains(
 
     @wraps(fun)
     def wrapped(
-        keys: Key[Array, ' num_chains'] | Key[Array, ''], state: State
-    ) -> State:
+        keys: Key[Array, ' num_chains'] | Key[Array, ''], state: StateT
+    ) -> StateT:
         if not state.has_chains:
             return fun(keys, state)
         state_axes = chain_vmap_axes(state)

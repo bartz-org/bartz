@@ -24,10 +24,13 @@
 
 """Tests for Bayesian Causal Forests (BCF)."""
 
+import math
 import tempfile
+from collections.abc import Sequence
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
+from typing import cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -36,7 +39,9 @@ import pytest
 import stochtree
 from equinox import EquinoxRuntimeError
 from jax import random, tree, vmap
-from jaxtyping import ArrayLike, Shaped
+from jax.tree_util import KeyPath, keystr
+from jaxtyping import Array, ArrayLike, Shaped
+from pytest_subtests import SubTests
 from scipy import stats
 
 from bartz._jaxext import split
@@ -46,37 +51,17 @@ from bartz.bcf._state import BCFState, init_bcf
 from bartz.grove import evaluate_forest, is_actual_leaf
 from bartz.mcmcloop import run_mcmc
 from bartz.mcmcstep import Forest, Wishart
+from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from tests.test_mcmcloop import assert_trace_close, cat_traces
 from tests.util import (
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
+    assert_different_matrices,
     jaxtyping_disabled,
     rhat_rank,
 )
-
-
-def _rhat_two_chains(
-    a: Shaped[ArrayLike, '*shape'], b: Shaped[ArrayLike, '*shape']
-) -> Shaped[np.ndarray, '...']:
-    """
-    Compute rank-normalized Rhat between two (num_samples, n) matrices.
-
-    Parameters
-    ----------
-    a
-        First MCMC chain samples of shape (num_samples, n).
-    b
-        Second MCMC chain samples of shape (num_samples, n).
-
-    Returns
-    -------
-    Shaped[np.ndarray, '...']
-        An array of Rhat values for each of the n outputs.
-    """
-    stacked = np.stack([a, b], axis=0)  # shape (2, num_samples, n)
-    return rhat_rank(stacked, split=False)
 
 
 def _prec_tree_from_scratch(
@@ -92,6 +77,59 @@ def _prec_tree_from_scratch(
         return jnp.zeros(tree_size).at[idx].add(prec_scale)
 
     return vmap(scatter)(leaf_indices)
+
+
+def _check_chains_match(
+    multi: BCFState, singles: Sequence[BCFState], err_msg: str
+) -> None:
+    """Check each chain of `multi` matches the corresponding single-chain state."""
+
+    def check_leaf(
+        path: KeyPath,
+        chain_axis: int | None,
+        m: Shaped[Array, '*shape'] | None,
+        *singles: Shaped[Array, '...'] | None,
+    ) -> None:
+        if m is None:
+            return
+        for i, s in enumerate(singles):
+            mi = m if chain_axis is None else jnp.take(m, i, axis=chain_axis)
+            msg = f'{err_msg}{keystr(path)}, chain {i}: '
+            if jnp.issubdtype(m.dtype, jnp.inexact):
+                assert_close_matrices(mi, s, rtol=1e-5, err_msg=msg, reduce_rank=True)
+            else:
+                assert_array_equal(mi, s, err_msg=msg)
+
+    tree.map_with_path(
+        check_leaf, chain_vmap_axes(multi), multi, *singles, is_leaf=lambda x: x is None
+    )
+
+
+def _assert_chains_differ(model: bcf) -> None:
+    """Check the chains of a two-chain `bcf` differ in all the traced values that vary."""
+
+    def check(
+        path: KeyPath, x: Shaped[Array, '*shape'] | None, chain_axis: int | None
+    ) -> None:
+        if x is None or chain_axis is None:
+            return
+        chains = np.moveaxis(np.asarray(x), chain_axis, 0)
+        # skip the values held fixed, e.g., unsampled leaf prior precisions
+        if np.all(chains == chains.flat[0]):
+            return
+        # flatten to compare with the vector norm, the matrix 2-norm would
+        # need an expensive svd on the big tree arrays
+        assert_different_matrices(
+            chains[0, ...].reshape(-1),
+            chains[1, ...].reshape(-1),
+            rtol=1e-3,
+            atol=0,
+            err_msg=f'{keystr(path)}: ',
+        )
+
+    traces = dict(model._main_trace, tau_0=model._tau_0_trace.reshape(2, -1))
+    axes = dict({k: chain_vmap_axes(v) for k, v in model._main_trace.items()}, tau_0=0)
+    tree.map_with_path(check, traces, axes, is_leaf=lambda x: x is None)
 
 
 class TestBcf:
@@ -150,7 +188,7 @@ class TestBcf:
         return x_train, pi.astype(np.float32), z_train, y_train, mu, tau, rng
 
     def test_bcf_save_load_npz(self) -> None:
-        """Tests saving and loading a BCF model via NPZ preserves prediction equality."""
+        """Tests saving and loading a multichain BCF model via NPZ preserves prediction equality."""
         x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
             n=200, p=5, seed=0
         )
@@ -164,6 +202,7 @@ class TestBcf:
             num_trees_tau=2,
             ndpost=3,
             nskip=2,
+            num_chains=2,
             standardize=False,
             seed=42,
         )
@@ -186,6 +225,7 @@ class TestBcf:
             assert_allclose(
                 preds_loaded['tau'], preds_orig['tau'], allow_non_scalar=True
             )
+            assert_array_equal(loaded_model.sigma_trace, model.sigma_trace)
 
             # no x_test at construction, so no test predictions to restore
             assert loaded_model.mu_test is None
@@ -313,10 +353,10 @@ class TestBcf:
             with pytest.raises(ValueError, match='Unsupported schema version: 999'):
                 bcf.load_npz(npz_path)
 
-    def test_bcf_statistical_convergence(self) -> None:
-        """Internal reproducibility (jax vs jax) and out-of-sample DGP recovery.
+    def test_bcf_statistical_convergence(self, subtests: SubTests) -> None:
+        """Multichain convergence and out-of-sample DGP recovery.
 
-        Two independent bartz chains must agree (Rhat near 1), and a
+        Two chains must agree (Rhat near 1) without being identical, and a
         prior-matched model must recover the known treatment and prognostic
         effects on held-out data.
         """
@@ -348,8 +388,9 @@ class TestBcf:
         ndpost = 2500
         nskip = 1500
 
-        # 1. Internal Stability Models (JAX defaults)
-        model_jax_a = bcf(
+        # 1. Internal Stability Model (JAX defaults), with two chains
+        num_chains = 2
+        model_jax = bcf(
             x_train=x_train,
             y_train=y_scaled,
             z_train=z_train,
@@ -358,23 +399,10 @@ class TestBcf:
             num_trees_tau=20,
             ndpost=ndpost,
             nskip=nskip,
+            num_chains=num_chains,
             sample_sigma2_leaf_mu=False,
             sample_sigma2_leaf_tau=False,
             seed=random.key(42),
-        )
-
-        model_jax_b = bcf(
-            x_train=x_train,
-            y_train=y_scaled,
-            z_train=z_train,
-            pihat_train=pi.astype(np.float32),
-            num_trees_mu=50,
-            num_trees_tau=20,
-            ndpost=ndpost,
-            nskip=nskip,
-            sample_sigma2_leaf_mu=False,
-            sample_sigma2_leaf_tau=False,
-            seed=random.key(123),
         )
 
         # 2. Structural Alignment Models (Forced Prior Matching)
@@ -399,17 +427,21 @@ class TestBcf:
             seed=random.key(999),
         )
 
-        preds_a = model_jax_a.predict(x_test=x_train, pihat_test=pi.astype(np.float32))
-        preds_b = model_jax_b.predict(x_test=x_train, pihat_test=pi.astype(np.float32))
+        # 1. Internal reproducibility: the two chains agree, but not trivially
+        with subtests.test('chains agree'):
+            preds_train = model_jax.predict(
+                x_test=x_train, pihat_test=pi.astype(np.float32)
+            )
+            # the chains are concatenated along the sample axis
+            yhat = preds_train['mu'] + preds_train['tau'] * z_train
+            rhat_yhat = rhat_rank(yhat.reshape(num_chains, ndpost, n), split=False)
+            tau = preds_train['tau'].reshape(num_chains, ndpost, n)
+            rhat_tau_jax = rhat_rank(tau, split=True)
+            assert np.max(rhat_yhat) < 1.06
+            assert np.percentile(rhat_tau_jax, 95) < 1.10
 
-        # 1. Internal reproducibility: two independent bartz chains agree.
-        yhat_a = preds_a['mu'] + preds_a['tau'] * z_train
-        yhat_b = preds_b['mu'] + preds_b['tau'] * z_train
-        rhat_yhat = _rhat_two_chains(yhat_a, yhat_b)
-        stacked_tau = np.stack([preds_a['tau'], preds_b['tau']], axis=0)
-        rhat_tau_jax = rhat_rank(stacked_tau, split=True)
-        assert np.max(rhat_yhat) < 1.06
-        assert np.percentile(rhat_tau_jax, 95) < 1.10
+        with subtests.test('chains differ'):
+            _assert_chains_differ(model_jax)
 
         # 2. Out-of-sample recovery of the known DGP, on held-out data. RMSE
         # (not correlation) catches magnitude/offset errors; a constant tau
@@ -631,7 +663,65 @@ class TestBcf:
             state = bcf_step(keys.pop(), state)
             check_tau_prec_tree(state, f'after step {i + 1}: ')
 
-    def test_bcf_run_mcmc_restartable(self, keys: split) -> None:
+    def test_bcf_multichain(self, keys: split) -> None:
+        """Check each chain of a multichain BCF matches a single-chain one."""
+        x_train, _, z_train, y_train, _, _, _ = self._generate_bcf_data(n=100, seed=42)
+
+        x_train_t = jnp.asarray(x_train.T)
+        binner = UniqueQuantileBinner(x_train_t, key=keys.pop())
+        x_binned = binner.bin(x_train_t)
+
+        def make_state(num_chains: int | None) -> BCFState:
+            # `init_bcf` may donate its arguments, so pass fresh copies
+            return init_bcf(
+                X_unified=jnp.copy(x_binned),
+                trt=z_train.astype(bool),
+                y=y_train,
+                offset=0.0,
+                max_split_mu=jnp.copy(binner.max_split),
+                max_split_tau=jnp.copy(binner.max_split),
+                num_trees_mu=2,
+                num_trees_tau=3,
+                p_nonterminal_mu=jnp.full(4, 0.95),
+                p_nonterminal_tau=jnp.full(4, 0.95),
+                leaf_prior_cov_inv_mu=1.0,
+                leaf_prior_cov_inv_tau=1.0,
+                adaptive_coding=True,
+                sample_leaf_prior_cov_inv_tau=True,
+                error_cov_inv=Wishart(
+                    nu=jnp.array(1.0), rate=jnp.array(1.0), value=jnp.array(1.0)
+                ),
+                num_chains=num_chains,
+            )
+
+        num_chains = 3
+        multi = make_state(num_chains)
+        assert multi.num_chains() == num_chains
+
+        # the reduction configs depend on `num_chains`, share them to get the
+        # same sums
+        singles = [
+            replace(make_state(None), config=tree.map(jnp.copy, multi.config))
+            for _ in range(num_chains)
+        ]
+        assert singles[0].num_chains() is None
+        _check_chains_match(multi, singles, 'init: ')
+
+        # step the multichain state and the single-chain ones with the same
+        # per-chain keys
+        for i in range(3):
+            key = keys.pop()
+            multi = bcf_step(key, multi)
+            single_keys = random.split(random.clone(key), num_chains)
+            singles = [
+                bcf_step(k, s) for k, s in zip(single_keys, singles, strict=True)
+            ]
+            _check_chains_match(multi, singles, f'step {i + 1}: ')
+
+    @pytest.mark.parametrize('num_chains', [None, 2])
+    def test_bcf_run_mcmc_restartable(
+        self, keys: split, subtests: SubTests, num_chains: int | None
+    ) -> None:
         """Check splitting a BCF `run_mcmc` run and chunking it do not matter."""
         x_train, _, z_train, y_train, _, _, _ = self._generate_bcf_data(n=100, seed=42)
 
@@ -657,6 +747,7 @@ class TestBcf:
             error_cov_inv=Wishart(
                 nu=jnp.array(1.0), rate=jnp.array(1.0), value=jnp.array(1.0)
             ),
+            num_chains=num_chains,
         )
 
         key = keys.pop()
@@ -687,6 +778,25 @@ class TestBcf:
         tree.map(assert_trace_close, final_single, final_split)
         tree.map(assert_trace_close, burnin_single, burnin_a)
         tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
+
+        # piggyback on the runs above to check the trace layout, and that the
+        # last sample is the final state
+        final_single = cast(BCFState, final_single)
+        burnin_single = cast(BCFBurninTrace, burnin_single)
+        main_single = cast(BCFMainTrace, main_single)
+        with subtests.test('trace layout'):
+            chain_shape = () if num_chains is None else (num_chains,)
+            assert burnin_single.tau_0.shape == (*chain_shape, 2)
+            assert main_single.tau_0.shape == (*chain_shape, 3)
+            assert main_single.b.shape == (*chain_shape, 3, 2)
+            assert main_single.mu.var_tree.shape[:-1] == (*chain_shape, 3, 2)
+            assert main_single.tau.var_tree.shape[:-1] == (*chain_shape, 3, 3)
+            assert_array_equal(main_single.tau_0[..., -1], final_single.tau_0)
+            assert_array_equal(main_single.b[..., -1, :], final_single.b)
+            assert_array_equal(
+                main_single.tau.leaf_tree[..., -1, :, :],
+                final_single.forest_tau.leaf_tree,
+            )
 
     def test_bcf_unsplittable_x_reduction(self) -> None:
         """Verifies BCF degenerates to Bayesian linear regression when max_split is 0."""
@@ -1128,9 +1238,13 @@ class TestBcf:
                 seed=42,
             )
 
-    @pytest.mark.parametrize('sample_intercept', [True, False])
-    def test_bcf_constructor_options(self, sample_intercept: bool) -> None:
-        """Constructor x_test/z_test, pihat toggle, tau_0 prior/toggle, sigma_trace."""
+    @pytest.mark.parametrize(
+        ('sample_intercept', 'num_chains'), [(True, None), (False, 2)]
+    )
+    def test_bcf_constructor_options(
+        self, sample_intercept: bool, num_chains: int | None
+    ) -> None:
+        """Constructor x_test/z_test, pihat toggle, tau_0 prior/toggle, chains, sigma_trace."""
         x_train, pihat, z_train, y_train, _, _, _ = self._generate_bcf_data(
             n=30, seed=0
         )
@@ -1152,13 +1266,25 @@ class TestBcf:
             num_trees_tau=2,
             ndpost=ndpost,
             nskip=1,
+            num_chains=num_chains,
             seed=42,
         )
-        assert model._mcmc_state.num_chains() is None
-        assert model.sigma_trace.shape == (ndpost,)
-        assert model._tau_0_trace.shape == (ndpost,)
+        assert model._mcmc_state.num_chains() == num_chains
+        chain_shape = () if num_chains is None else (num_chains,)
+        num_samples = math.prod(chain_shape) * ndpost
+        assert model._tau_0_trace.shape == (num_samples,)
+        assert model._b_trace.shape == (num_samples, 2)
+        assert model.mu_test is not None
+        assert model.mu_test.shape == (num_samples, len(x_test))
         tau_0_is_zero = model._tau_0_trace == 0
-        assert_array_equal(tau_0_is_zero, jnp.full(ndpost, not sample_intercept))
+        assert_array_equal(tau_0_is_zero, jnp.full(num_samples, not sample_intercept))
+
+        # the chains are concatenated one after the other
+        error_cov_inv = model._main_trace['mu'].error_cov_inv
+        assert error_cov_inv.shape == (*chain_shape, ndpost)
+        assert_array_equal(
+            model.sigma_trace, jnp.reciprocal(jnp.sqrt(error_cov_inv)).reshape(-1)
+        )
 
         # test predictions computed at construction match predict()
         preds = model.predict(x_test, pihat_test=pihat_test)

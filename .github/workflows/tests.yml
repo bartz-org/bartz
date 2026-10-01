@@ -110,7 +110,7 @@ jobs:
         run: echo "RENV_CONFIG_REPOS_OVERRIDE=PPM=${RSPM};CRAN=https://cloud.r-project.org" >> "$GITHUB_ENV"
 
       - name: Install R dependencies
-        uses: r-lib/actions/setup-renv@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
+        uses: r-lib/actions/setup-renv@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
         env:
           GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
@@ -320,7 +320,7 @@ jobs:
         run: echo "RENV_CONFIG_REPOS_OVERRIDE=PPM=${RSPM};CRAN=https://cloud.r-project.org" >> "$GITHUB_ENV"
 
       - name: Install R dependencies
-        uses: r-lib/actions/setup-renv@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
+        uses: r-lib/actions/setup-renv@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
         env:
           GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 

@@ -109,6 +109,7 @@ help:
 	@echo
 	@echo "Release workflow:"
 	@echo "- describe release in docs/changelog.md (its topmost header sets the version, follow effver https://jacobtomlinson.dev/effver)"
+	@echo "- $$ make setup"
 	@echo "- $$ make update-deps"
 	@echo "- $$ make release, will not release but runs all tests, iterate and debug"
 	@echo '- run `make tests-gpu` on a gpu'

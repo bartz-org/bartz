@@ -45,7 +45,7 @@ repos:
         # an explicit `pre-commit run --files`
         exclude: src/bartz/_version\.py$
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: aab412d509121cb5f7533134b7e67f9fab59c682  # frozen: v0.16.4
+    rev: f12be1ebaa5351c1fc76472de98db2c3446c8253  # frozen: v0.16.10
     hooks:
       - id: ruff-check
         args: [--fix]
@@ -59,11 +59,11 @@ repos:
         # attribute-docstring conventions this enforces; drop `files` to widen.
         files: ^src/bartz/.*\.py$
   - repo: https://github.com/jsh9/pydoclint
-    rev: cf8f4d0b81f933ebc5414acadcf7acdab705baa1  # frozen: 0.9.1
+    rev: 24412c5f73ad438a08146132ea86a9a72c8bd5ad  # frozen: 0.11.0
     hooks:
       - id: pydoclint
   - repo: https://github.com/henryiii/validate-pyproject-schema-store
-    rev: a011ac2729a668fd92c470a44476f340ad234404  # frozen: 2026.08.15
+    rev: 562b381732c1d2bec9a3a66cc89f63e16d486470  # frozen: 2026.09.30
     hooks:
       - id: validate-pyproject
   - repo: https://github.com/jorisroovers/gitlint
@@ -76,7 +76,7 @@ repos:
   # the one that reads it on ci cannot drift apart. Both parse the comment on
   # the line right below the repo, keep it there.
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: b84c4a0a90bd58c7d82ae8f0d4d5e77b1ddd3ce6  # frozen: 0.12.5
+    rev: 0f4b65a503cc866b9b5e62dda2020f7943b01a65  # frozen: 0.12.22
     hooks:
       - id: uv-lock
   - repo: https://github.com/rhysd/actionlint

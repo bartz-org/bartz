@@ -37,7 +37,7 @@ import pandas as pd
 import pytest
 import stochtree
 from equinox import EquinoxRuntimeError, Module
-from jax import random, tree, vmap
+from jax import lax, random, tree, vmap
 from jax.scipy.special import ndtr
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, ArrayLike, Float32, Key, Shaped
@@ -225,7 +225,7 @@ class TestBcf:
         # Verify schema_version is present in archive
         with np.load(npz_path) as archive:
             assert 'schema_version' in archive
-            assert int(archive['schema_version']) == 1
+            assert archive['schema_version'].item() == 1
 
         loaded_model = bcf.load_npz(npz_path)
 
@@ -268,7 +268,7 @@ class TestBcf:
 
         with np.load(npz_path) as archive:
             assert 'standardize' in archive
-            assert bool(archive['standardize'])
+            assert archive['standardize']
             assert '_y_mean' in archive
             assert '_y_std' in archive
 
@@ -421,10 +421,10 @@ class TestBcf:
         # (not correlation) catches magnitude/offset errors; a constant tau
         # predictor scores ~0.5, so this requires capturing the heterogeneity.
         preds = model_jax_matched.predict(x_test=test.x, pihat_test=test.pihat)
-        tau_hat = np.mean(np.array(preds['tau']) * y_std, axis=0)
-        mu_hat = np.mean(np.array(preds['mu']) * y_std + y_mean, axis=0)
-        assert np.sqrt(np.mean((tau_hat - test.tau) ** 2)) < 0.35
-        assert np.sqrt(np.mean((mu_hat - test.mu) ** 2)) < 0.45
+        tau_hat = np.mean(preds['tau'] * y_std, axis=0)
+        mu_hat = np.mean(preds['mu'] * y_std + y_mean, axis=0)
+        assert np.sqrt(np.mean(np.square(tau_hat - test.tau))) < 0.35
+        assert np.sqrt(np.mean(np.square(mu_hat - test.mu))) < 0.45
 
     def test_bcf_null_treatment_effect(self, keys: split) -> None:
         """Verifies that BCF does not find a treatment effect when tau=0."""
@@ -482,10 +482,9 @@ class TestBcf:
             seed=keys.pop(),
         )
 
-        # Recovered noise variance is (1.0 / precision) * y_std^2
-        recovered_sigma2 = (1.0 / model._main_trace['mu'].error_cov_inv) * (
-            model._y_std**2
-        )
+        recovered_sigma2 = jnp.reciprocal(
+            model._main_trace['mu'].error_cov_inv
+        ) * jnp.square(model._y_std)
         posterior_mean_sigma2 = np.mean(recovered_sigma2)
 
         assert_allclose(posterior_mean_sigma2, np.square(noise_scale), rtol=0.4)
@@ -497,7 +496,6 @@ class TestBcf:
         x_train_t = train.x.T
         binner = UniqueQuantileBinner(x_train_t, key=keys.pop())
         x_binned = binner.bin(x_train_t)
-        max_split = binner.max_split
 
         init_state = init_bcf(
             X_unified=x_binned,
@@ -505,19 +503,16 @@ class TestBcf:
             # `init_bcf` may donate its arguments
             y=jnp.copy(train.y),
             offset=0.0,
-            max_split_mu=jnp.array(max_split),
-            max_split_tau=jnp.array(max_split),
+            max_split_mu=binner.max_split,
+            # `init_bcf` may donate its arguments, so don't pass the same array twice
+            max_split_tau=jnp.copy(binner.max_split),
             num_trees_mu=5,
             num_trees_tau=5,
-            p_nonterminal_mu=np.ones(5, dtype=np.float32) * 0.95,
-            p_nonterminal_tau=np.ones(5, dtype=np.float32) * 0.95,
+            p_nonterminal_mu=jnp.full(5, 0.95),
+            p_nonterminal_tau=jnp.full(5, 0.95),
             leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
             leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
-            error_cov_inv=Wishart(
-                nu=jnp.float32(1.0),
-                rate=jnp.array(1.0, dtype=jnp.float32),
-                value=jnp.array(1.0, dtype=jnp.float32),
-            ),
+            error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
         )
 
         new_state = bcf_step(keys.pop(), init_state)
@@ -564,28 +559,24 @@ class TestBcf:
         x_train_t = train.x.T
         binner = UniqueQuantileBinner(x_train_t, key=keys.pop())
         x_binned = binner.bin(x_train_t)
-        max_split = binner.max_split
 
         state = init_bcf(
             X_unified=x_binned,
             trt=train.z.astype(bool),
             y=train.y,
             offset=0.0,
-            max_split_mu=jnp.array(max_split),
-            max_split_tau=jnp.array(max_split),
+            max_split_mu=binner.max_split,
+            # `init_bcf` may donate its arguments, so don't pass the same array twice
+            max_split_tau=jnp.copy(binner.max_split),
             num_trees_mu=2,
             num_trees_tau=3,
-            p_nonterminal_mu=np.ones(4, dtype=np.float32) * 0.95,
-            p_nonterminal_tau=np.ones(4, dtype=np.float32) * 0.95,
+            p_nonterminal_mu=jnp.full(4, 0.95),
+            p_nonterminal_tau=jnp.full(4, 0.95),
             min_points_per_leaf_tau=1,
             leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
             leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
             adaptive_coding=adaptive_coding,
-            error_cov_inv=Wishart(
-                nu=jnp.float32(1.0),
-                rate=jnp.array(1.0, dtype=jnp.float32),
-                value=jnp.array(1.0, dtype=jnp.float32),
-            ),
+            error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
         )
         state = replace(
             state,
@@ -637,9 +628,7 @@ class TestBcf:
                 leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
                 leaf_prior_cov_inv_tau=Wishart(nu=6.0, rate=2.0, value=1.0),
                 adaptive_coding=True,
-                error_cov_inv=Wishart(
-                    nu=jnp.array(1.0), rate=jnp.array(1.0), value=jnp.array(1.0)
-                ),
+                error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
                 num_chains=num_chains,
             )
 
@@ -693,9 +682,7 @@ class TestBcf:
             leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
             leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
             adaptive_coding=True,
-            error_cov_inv=Wishart(
-                nu=jnp.array(1.0), rate=jnp.array(1.0), value=jnp.array(1.0)
-            ),
+            error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
             num_chains=num_chains,
         )
 
@@ -752,22 +739,20 @@ class TestBcf:
         rng = np.random.default_rng(int_seed(keys.pop()))
         n = 300
         p = 1
-        x_train = np.ones((n, p), dtype=np.float32)
+        x_train = jnp.ones((n, p))
 
         pi = 0.5
         z_train = rng.binomial(1, pi, size=n).astype(np.float32)
 
         mu_true = 5.0
         tau_true = -3.0
-        y_train = (mu_true + tau_true * z_train + rng.normal(size=n) * 1.0).astype(
-            np.float32
-        )
+        y_train = (mu_true + tau_true * z_train + rng.normal(size=n)).astype(np.float32)
 
         model = bcf(
             x_train=x_train,
             y_train=y_train,
             z_train=z_train,
-            pihat_train=np.zeros(n, dtype=np.float32),
+            pihat_train=jnp.zeros(n),
             num_trees_mu=1,
             num_trees_tau=1,
             ndpost=1000,
@@ -779,12 +764,9 @@ class TestBcf:
             seed=keys.pop(),
         )
 
-        preds = model.predict(
-            x_test=np.ones((1, p), dtype=np.float32),
-            pihat_test=np.zeros(1, dtype=np.float32),
-        )
-        mu_mcmc = preds['mu'][:, 0]
-        tau_mcmc = preds['tau'][:, 0]
+        preds = model.predict(x_test=jnp.ones((1, p)), pihat_test=jnp.zeros(1))
+        mu_mcmc = preds['mu'].squeeze(1)
+        tau_mcmc = preds['tau'].squeeze(1)
 
         slope, intercept, _, _, _ = stats.linregress(z_train, y_train)
 
@@ -824,10 +806,10 @@ class TestBcf:
         )
 
         preds = model_jax.predict(x_test=test.x, pihat_test=test.pihat)
-        cate_hat = np.mean(np.array(preds['tau']) * y_std, axis=0)
-        mu_hat = np.mean(np.array(preds['mu']) * y_std + y_mean, axis=0)
-        assert np.sqrt(np.mean((cate_hat - test.tau) ** 2)) < 0.4
-        assert np.sqrt(np.mean((mu_hat - test.mu) ** 2)) < 0.4
+        cate_hat = np.mean(preds['tau'] * y_std, axis=0)
+        mu_hat = np.mean(preds['mu'] * y_std + y_mean, axis=0)
+        assert np.sqrt(np.mean(np.square(cate_hat - test.tau))) < 0.4
+        assert np.sqrt(np.mean(np.square(mu_hat - test.mu))) < 0.4
 
     def test_bcf_leaf_variance_prior_inactive(self, keys: split) -> None:
         """Verifies that sample_sigma2_leaf=False keeps the prior variance fixed."""
@@ -873,8 +855,8 @@ class TestBcf:
             seed=keys.pop(),
         )
 
-        mu_prior_vars_active = np.array(model_active._leaf_prior_cov_inv_mu_trace)
-        tau_prior_vars_active = np.array(model_active._leaf_prior_cov_inv_tau_trace)
+        mu_prior_vars_active = model_active._leaf_prior_cov_inv_mu_trace
+        tau_prior_vars_active = model_active._leaf_prior_cov_inv_tau_trace
 
         assert np.var(mu_prior_vars_active, axis=0).mean() > 1e-4
         assert np.var(tau_prior_vars_active, axis=0).mean() > 1e-4
@@ -950,12 +932,14 @@ class TestBcf:
 
         y_var = np.var(train.y)
 
-        leaf_var_mu_jax = np.mean(1.0 / model_jax._leaf_prior_cov_inv_mu_trace) * y_var
+        leaf_var_mu_jax = (
+            np.mean(np.reciprocal(model_jax._leaf_prior_cov_inv_mu_trace)) * y_var
+        )
         leaf_var_mu_st = np.mean(model_st.leaf_scale_mu_samples) * y_var
         assert_allclose(leaf_var_mu_jax, leaf_var_mu_st, rtol=0.3)
 
         leaf_var_tau_jax = (
-            np.mean(1.0 / model_jax._leaf_prior_cov_inv_tau_trace) * y_var
+            np.mean(np.reciprocal(model_jax._leaf_prior_cov_inv_tau_trace)) * y_var
         )
         leaf_var_tau_st = np.mean(model_st.leaf_scale_tau_samples) * y_var
         # single-chain estimates of the tau leaf variance vary by a factor >2
@@ -963,10 +947,10 @@ class TestBcf:
         assert_allclose(leaf_var_tau_jax, leaf_var_tau_st, rtol=1.5)
 
         preds = model_jax.predict(x_test=test.x, pihat_test=test.pihat)
-        tau_hat = np.mean(np.array(preds['tau']) * y_std, axis=0)
-        mu_hat = np.mean(np.array(preds['mu']) * y_std + y_mean, axis=0)
-        assert np.sqrt(np.mean((tau_hat - test.tau) ** 2)) < 0.15
-        assert np.sqrt(np.mean((mu_hat - test.mu) ** 2)) < 0.15
+        tau_hat = np.mean(preds['tau'] * y_std, axis=0)
+        mu_hat = np.mean(preds['mu'] * y_std + y_mean, axis=0)
+        assert np.sqrt(np.mean(np.square(tau_hat - test.tau))) < 0.15
+        assert np.sqrt(np.mean(np.square(mu_hat - test.mu))) < 0.15
 
     def test_predict_potential_outcomes(self, keys: split, subtests: SubTests) -> None:
         """Tests posterior predictive potential outcome sampling in BCF."""
@@ -988,9 +972,9 @@ class TestBcf:
         with subtests.test('sigma_trace'):
             sigma = model.sigma_trace
             assert sigma.shape == (20,)
-            assert bool(jnp.all(sigma > 0.0))
+            assert jnp.all(sigma > 0.0)
 
-        x_test = train.x[:30]
+        x_test = train.x[:30, :]
         pihat_test = train.pihat[:30]
 
         with subtests.test('shapes and delta'):
@@ -1095,8 +1079,8 @@ class TestBcf:
             po = model.predict_potential_outcomes(
                 train.x, pihat_test=train.pihat, key=keys.pop()
             )
-            assert np.isin(np.array(po['y0']), (0.0, 1.0)).all()
-            assert np.isin(np.array(po['y1']), (0.0, 1.0)).all()
+            assert np.isin(po['y0'], (0.0, 1.0)).all()
+            assert np.isin(po['y1'], (0.0, 1.0)).all()
 
     def test_bcf_binary_requires_0_1(self, keys: split) -> None:
         """Binary BCF rejects outcomes that are not 0/1."""
@@ -1104,7 +1088,7 @@ class TestBcf:
         with pytest.raises(ValueError, match='strictly 0 or 1'):
             bcf(
                 x_train=train.x,
-                y_train=np.full(20, 2.0, np.float32),
+                y_train=jnp.full(20, 2.0),
                 z_train=train.z,
                 pihat_train=train.pihat,
                 outcome_type='binary',
@@ -1122,7 +1106,7 @@ class TestBcf:
             bcf(
                 x_train=train.x,
                 y_train=train.y,
-                z_train=np.full(20, 0.5, np.float32),
+                z_train=jnp.full(20, 0.5),
                 pihat_train=train.pihat,
                 num_trees_mu=2,
                 num_trees_tau=2,
@@ -1165,15 +1149,16 @@ class TestBcf:
         assert model._tau_0_trace.shape == (num_samples,)
         assert model._b_trace.shape == (num_samples, 2)
         assert model.mu_test is not None
-        assert model.mu_test.shape == (num_samples, len(test.x))
+        n_test, _ = test.x.shape
+        assert model.mu_test.shape == (num_samples, n_test)
         tau_0_is_zero = model._tau_0_trace == 0
         assert_array_equal(tau_0_is_zero, jnp.full(num_samples, not sample_intercept))
 
         # the chains are concatenated one after the other
         error_cov_inv = model._main_trace['mu'].error_cov_inv
         assert error_cov_inv.shape == (*chain_shape, ndpost)
-        assert_array_equal(
-            model.sigma_trace, jnp.reciprocal(jnp.sqrt(error_cov_inv)).reshape(-1)
+        assert_close_matrices(
+            model.sigma_trace, lax.rsqrt(error_cov_inv).reshape(-1), rtol=1e-6
         )
 
         # test predictions computed at construction match predict()
@@ -1238,12 +1223,12 @@ class TestBcf:
                 **kwargs, pihat_train=train.pihat, x_test=test.x, pihat_test=train.pihat
             )
         with pytest.raises(EquinoxRuntimeError, match='must be 0 or 1'):
-            bcf(**kwargs, x_test=test.x, z_test=np.full(15, 2.0, np.float32))
+            bcf(**kwargs, x_test=test.x, z_test=jnp.full(15, 2.0))
 
     def test_bcf_x_test_format_mismatch(self, keys: split) -> None:
         """x_test format must match x_train, at construction and at predict."""
         train = gen_bcf_data(keys.pop(), n=30)
-        x_test_df = pd.DataFrame(np.asarray(train.x)[:15])
+        x_test_df = pd.DataFrame(np.asarray(train.x[:15, :]))
         with pytest.raises(ValueError, match='does not match x_train'):
             bcf(
                 x_train=train.x,

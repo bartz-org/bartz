@@ -25,7 +25,6 @@
 """Tests for Bayesian Causal Forests (BCF)."""
 
 import math
-import tempfile
 from collections.abc import Sequence
 from dataclasses import replace
 from functools import partial
@@ -202,7 +201,7 @@ def split_bcf_data(data: BCFData, n_train: int) -> tuple[BCFData, BCFData]:
 class TestBcf:
     """Tests for the BCF wrapper module."""
 
-    def test_bcf_save_load_npz(self, keys: split) -> None:
+    def test_bcf_save_load_npz(self, keys: split, tmp_path: Path) -> None:
         """Tests saving and loading a multichain BCF model via NPZ preserves prediction equality."""
         train = gen_bcf_data(keys.pop(), n=200)
 
@@ -220,30 +219,29 @@ class TestBcf:
             seed=keys.pop(),
         )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            npz_path = Path(tmpdir) / 'test_bcf.npz'
-            model.save_npz(npz_path)
+        npz_path = tmp_path / 'test_bcf.npz'
+        model.save_npz(npz_path)
 
-            # Verify schema_version is present in archive
-            with np.load(npz_path) as archive:
-                assert 'schema_version' in archive
-                assert int(archive['schema_version']) == 1
+        # Verify schema_version is present in archive
+        with np.load(npz_path) as archive:
+            assert 'schema_version' in archive
+            assert int(archive['schema_version']) == 1
 
-            loaded_model = bcf.load_npz(npz_path)
+        loaded_model = bcf.load_npz(npz_path)
 
-            preds_orig = model.predict(train.x, pihat_test=train.pihat)
-            preds_loaded = loaded_model.predict(train.x, pihat_test=train.pihat)
+        preds_orig = model.predict(train.x, pihat_test=train.pihat)
+        preds_loaded = loaded_model.predict(train.x, pihat_test=train.pihat)
 
-            assert_array_equal(preds_loaded['mu'], preds_orig['mu'])
-            assert_array_equal(preds_loaded['tau'], preds_orig['tau'])
-            assert_array_equal(loaded_model.sigma_trace, model.sigma_trace)
+        assert_array_equal(preds_loaded['mu'], preds_orig['mu'])
+        assert_array_equal(preds_loaded['tau'], preds_orig['tau'])
+        assert_array_equal(loaded_model.sigma_trace, model.sigma_trace)
 
-            # no x_test at construction, so no test predictions to restore
-            assert loaded_model.mu_test is None
-            assert loaded_model.tau_test is None
-            assert loaded_model.yhat_test is None
+        # no x_test at construction, so no test predictions to restore
+        assert loaded_model.mu_test is None
+        assert loaded_model.tau_test is None
+        assert loaded_model.yhat_test is None
 
-    def test_bcf_save_load_npz_standardized(self, keys: split) -> None:
+    def test_bcf_save_load_npz_standardized(self, keys: split, tmp_path: Path) -> None:
         """Tests that saving and loading an auto-standardized model preserves scale metadata and unscaling."""
         train = gen_bcf_data(
             keys.pop(), n=200, mu_loc=10.0, mu_scale=10.0, tau_loc=4.0, tau_scale=2.0
@@ -265,34 +263,33 @@ class TestBcf:
             seed=keys.pop(),
         )
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            npz_path = Path(tmpdir) / 'test_bcf_std.npz'
-            model.save_npz(npz_path)
+        npz_path = tmp_path / 'test_bcf_std.npz'
+        model.save_npz(npz_path)
 
-            with np.load(npz_path) as archive:
-                assert 'standardize' in archive
-                assert bool(archive['standardize'])
-                assert '_y_mean' in archive
-                assert '_y_std' in archive
+        with np.load(npz_path) as archive:
+            assert 'standardize' in archive
+            assert bool(archive['standardize'])
+            assert '_y_mean' in archive
+            assert '_y_std' in archive
 
-            loaded_model = bcf.load_npz(npz_path)
+        loaded_model = bcf.load_npz(npz_path)
 
-            preds_orig = model.predict(train.x, pihat_test=train.pihat)
-            preds_loaded = loaded_model.predict(train.x, pihat_test=train.pihat)
+        preds_orig = model.predict(train.x, pihat_test=train.pihat)
+        preds_loaded = loaded_model.predict(train.x, pihat_test=train.pihat)
 
-            assert_array_equal(preds_loaded['mu'], preds_orig['mu'])
-            assert_array_equal(preds_loaded['tau'], preds_orig['tau'])
+        assert_array_equal(preds_loaded['mu'], preds_orig['mu'])
+        assert_array_equal(preds_loaded['tau'], preds_orig['tau'])
 
-            # the outcome scale carries into the stored test predictions, which
-            # round-trip through the archive
-            assert_array_equal(model.mu_test, preds_orig['mu'])
-            assert_array_equal(
-                model.yhat_test, preds_orig['mu'] + train.z * preds_orig['tau']
-            )
-            assert_array_equal(loaded_model.mu_test, model.mu_test)
-            assert_array_equal(loaded_model.tau_test, model.tau_test)
-            assert_array_equal(loaded_model.yhat_test, model.yhat_test)
-            assert loaded_model.prob_test is None
+        # the outcome scale carries into the stored test predictions, which
+        # round-trip through the archive
+        assert_array_equal(model.mu_test, preds_orig['mu'])
+        assert_array_equal(
+            model.yhat_test, preds_orig['mu'] + train.z * preds_orig['tau']
+        )
+        assert_array_equal(loaded_model.mu_test, model.mu_test)
+        assert_array_equal(loaded_model.tau_test, model.tau_test)
+        assert_array_equal(loaded_model.yhat_test, model.yhat_test)
+        assert loaded_model.prob_test is None
 
     def test_bcf_standardization_equivalence(self, keys: split) -> None:
         """Tests that automatic standardization is numerically equivalent to manual pre-scaling."""
@@ -343,13 +340,12 @@ class TestBcf:
         assert_close_matrices(preds_auto['mu'], manual_mu_unscaled, rtol=1e-4)
         assert_close_matrices(preds_auto['tau'], manual_tau_unscaled, rtol=1e-4)
 
-    def test_bcf_load_npz_unsupported_schema_version(self) -> None:
+    def test_bcf_load_npz_unsupported_schema_version(self, tmp_path: Path) -> None:
         """Tests that loading an NPZ file with a future schema version raises ValueError."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            npz_path = Path(tmpdir) / 'invalid_schema.npz'
-            np.savez(npz_path, schema_version=999)
-            with pytest.raises(ValueError, match='Unsupported schema version: 999'):
-                bcf.load_npz(npz_path)
+        npz_path = tmp_path / 'invalid_schema.npz'
+        np.savez(npz_path, schema_version=999)
+        with pytest.raises(ValueError, match='Unsupported schema version: 999'):
+            bcf.load_npz(npz_path)
 
     def test_bcf_statistical_convergence(self, keys: split, subtests: SubTests) -> None:
         """Multichain convergence and out-of-sample DGP recovery.
@@ -1036,7 +1032,9 @@ class TestBcf:
             )
             assert res_key_none['y0'].shape == res_key_int['y0'].shape
 
-    def test_bcf_binary_model(self, keys: split, subtests: SubTests) -> None:
+    def test_bcf_binary_model(
+        self, keys: split, subtests: SubTests, tmp_path: Path
+    ) -> None:
         """Tests binary BCF end-to-end: initialization, offset, and predictions."""
         # Generate data with non-trivial positive rate (~70% positive)
         train = gen_bcf_data(keys.pop(), n=200)
@@ -1088,10 +1086,9 @@ class TestBcf:
             assert np.all((prob_test >= 0.0) & (prob_test <= 1.0))
 
             # prob_test survives a save/load round-trip
-            with tempfile.TemporaryDirectory() as tmpdir:
-                npz_path = Path(tmpdir) / 'test_bcf_binary.npz'
-                model.save_npz(npz_path)
-                assert_array_equal(bcf.load_npz(npz_path).prob_test, prob_test)
+            npz_path = tmp_path / 'test_bcf_binary.npz'
+            model.save_npz(npz_path)
+            assert_array_equal(bcf.load_npz(npz_path).prob_test, prob_test)
 
         with subtests.test('potential outcomes'):
             # 0/1 labels on a binary model

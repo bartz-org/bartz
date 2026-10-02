@@ -234,10 +234,8 @@ class TestBcf:
             preds_orig = model.predict(train.x, pihat_test=train.pihat)
             preds_loaded = loaded_model.predict(train.x, pihat_test=train.pihat)
 
-            assert_allclose(preds_loaded['mu'], preds_orig['mu'], allow_non_scalar=True)
-            assert_allclose(
-                preds_loaded['tau'], preds_orig['tau'], allow_non_scalar=True
-            )
+            assert_array_equal(preds_loaded['mu'], preds_orig['mu'])
+            assert_array_equal(preds_loaded['tau'], preds_orig['tau'])
             assert_array_equal(loaded_model.sigma_trace, model.sigma_trace)
 
             # no x_test at construction, so no test predictions to restore
@@ -282,10 +280,8 @@ class TestBcf:
             preds_orig = model.predict(train.x, pihat_test=train.pihat)
             preds_loaded = loaded_model.predict(train.x, pihat_test=train.pihat)
 
-            assert_allclose(preds_loaded['mu'], preds_orig['mu'], allow_non_scalar=True)
-            assert_allclose(
-                preds_loaded['tau'], preds_orig['tau'], allow_non_scalar=True
-            )
+            assert_array_equal(preds_loaded['mu'], preds_orig['mu'])
+            assert_array_equal(preds_loaded['tau'], preds_orig['tau'])
 
             # the outcome scale carries into the stored test predictions, which
             # round-trip through the archive
@@ -344,20 +340,8 @@ class TestBcf:
         manual_mu_unscaled = preds_manual['mu'] * y_std + y_mean
         manual_tau_unscaled = preds_manual['tau'] * y_std
 
-        assert_allclose(
-            preds_auto['mu'],
-            manual_mu_unscaled,
-            rtol=1e-4,
-            atol=1e-4,
-            allow_non_scalar=True,
-        )
-        assert_allclose(
-            preds_auto['tau'],
-            manual_tau_unscaled,
-            rtol=1e-4,
-            atol=1e-4,
-            allow_non_scalar=True,
-        )
+        assert_close_matrices(preds_auto['mu'], manual_mu_unscaled, rtol=1e-4)
+        assert_close_matrices(preds_auto['tau'], manual_tau_unscaled, rtol=1e-4)
 
     def test_bcf_load_npz_unsupported_schema_version(self) -> None:
         """Tests that loading an NPZ file with a future schema version raises ValueError."""
@@ -508,7 +492,7 @@ class TestBcf:
         )
         posterior_mean_sigma2 = np.mean(recovered_sigma2)
 
-        assert np.isclose(posterior_mean_sigma2, np.square(noise_scale), atol=0.10)
+        assert_allclose(posterior_mean_sigma2, np.square(noise_scale), rtol=0.4)
 
     def test_bcf_one_step_residual_invariant(self, keys: split) -> None:
         """Verifies that R == y - offset - mu_fit - (tau_0 + tau_fit) * Z."""
@@ -560,11 +544,8 @@ class TestBcf:
         )
 
         # `resid` is stored scaled (``resid_unit * resid = data residual``)
-        assert_allclose(
-            new_state.resid * new_state.resid_unit,
-            expected_resid,
-            atol=1e-5,
-            allow_non_scalar=True,
+        assert_close_matrices(
+            new_state.resid * new_state.resid_unit, expected_resid, rtol=1e-5
         )
 
     @pytest.mark.parametrize(
@@ -811,8 +792,8 @@ class TestBcf:
 
         slope, intercept, _, _, _ = stats.linregress(z_train, y_train)
 
-        assert np.isclose(np.mean(mu_mcmc), intercept, atol=2.50)
-        assert np.isclose(np.mean(tau_mcmc), slope, atol=2.50)
+        assert_allclose(np.mean(mu_mcmc), intercept, rtol=0.03)
+        assert_allclose(np.mean(tau_mcmc), slope, rtol=0.03)
 
     def test_bcf_adaptive_coding(self, keys: split) -> None:
         """Adaptive coding recovers the known treatment effect out of sample."""
@@ -874,13 +855,12 @@ class TestBcf:
             seed=keys.pop(),
         )
 
-        # Check that trace variances are constant
-        mu_prior_vars = np.array(model._leaf_prior_cov_inv_mu_trace)
-        tau_prior_vars = np.array(model._leaf_prior_cov_inv_tau_trace)
-
-        # Assert variance across the chain (axis 0) is 0
-        assert_allclose(np.var(mu_prior_vars, axis=0), 0.0, atol=1e-7)
-        assert_allclose(np.var(tau_prior_vars, axis=0), 0.0, atol=1e-7)
+        # the leaf prior precisions stay at their initial value
+        for trace in (
+            model._leaf_prior_cov_inv_mu_trace,
+            model._leaf_prior_cov_inv_tau_trace,
+        ):
+            assert_array_equal(trace, jnp.full_like(trace, trace[0]))
 
         # Compare to active
         model_active = bcf(
@@ -1027,34 +1007,21 @@ class TestBcf:
             assert key in res
             assert res[key].shape == (20, 30)
 
-        assert_allclose(
-            np.array(res['delta']),
-            np.array(res['y1'] - res['y0']),
-            rtol=1e-5,
-            atol=1e-5,
-            allow_non_scalar=True,
-        )
+        assert_close_matrices(res['delta'], res['y1'] - res['y0'], rtol=1e-5)
 
         # 3. Test rho = 1.0 (Rank preservation -> delta == tau)
         # with self.subTest(name='rank_preservation_rho_1'):
         res_rho1 = model.predict_potential_outcomes(
             x_test=x_test, pihat_test=pihat_test, rho=1.0, key=keys.pop()
         )
-        assert_allclose(
-            np.array(res_rho1['delta']),
-            np.array(res_rho1['tau']),
-            rtol=1e-5,
-            atol=1e-5,
-            allow_non_scalar=True,
-        )
+        assert_close_matrices(res_rho1['delta'], res_rho1['tau'], rtol=1e-5)
 
         # 4. Test rho = 0.0 (Independent shocks -> delta != tau)
         # with self.subTest(name='independent_shocks_rho_0'):
         res_rho0 = model.predict_potential_outcomes(
             x_test=x_test, pihat_test=pihat_test, rho=0.0, key=keys.pop()
         )
-        diff = np.abs(np.array(res_rho0['delta'] - res_rho0['tau']))
-        assert np.any(diff > 1e-3)
+        assert_different_matrices(res_rho0['delta'], res_rho0['tau'], rtol=1e-3, atol=0)
 
         # 5. Test invalid rho validation
         # with self.subTest(name='invalid_rho_validation'):
@@ -1100,7 +1067,7 @@ class TestBcf:
         assert model._y_std == 1.0
         assert model._y_mean == 0.0
         expected_offset = stats.norm.ppf(np.mean(y_train))
-        assert np.isclose(model._offset, expected_offset, atol=0.0001)
+        assert_allclose(model._offset, expected_offset, rtol=1e-4)
 
         # Sub-test 2: Verify prediction keys and valid probability bounds
         # with self.subTest(name='prediction_probabilities'):

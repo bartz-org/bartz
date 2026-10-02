@@ -35,7 +35,9 @@ from threading import Event, Thread
 from time import monotonic
 from typing import Any, TypeVar
 
+import jax
 import numpy as np
+import pytest
 from jax import jit, lax, random, vmap
 from jax import numpy as jnp
 from jax.scipy.special import logit
@@ -62,6 +64,14 @@ def nnone(x: _T | None) -> _T:
     """Return `x`, asserting it is not None, narrowing away the `None` for typing."""
     assert x is not None
     return x
+
+
+def skip_empty_shard_map_bug(condition: object) -> None:
+    """Skip if `condition`, which means a zero-size input reaches a `shard_map`."""
+    # WORKAROUND(jax<=0.11.2): jax 0.11.2 segfaults compiling a shard_map with
+    # a zero-size input
+    if jax.__version_info__ == (0, 11, 2) and condition:
+        pytest.skip('jax 0.11.2 segfaults on shard_map with zero-size inputs')
 
 
 def manual_tree(

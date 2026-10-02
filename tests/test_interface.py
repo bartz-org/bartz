@@ -144,6 +144,7 @@ from tests.util import (
     periodic_sigint,
     rerun_on_gpu,
     rhat_rank,
+    skip_empty_shard_map_bug,
 )
 
 
@@ -2446,6 +2447,12 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
         kw.update(binner=partial(GivenSplitsBinner, xinfo=xinfo))
 
     kw.update(num_data_devices=None)
+
+    skip_empty_shard_map_bug(
+        num_datapoints == 0
+        and kw.get('num_chains') is not None
+        and kw.get('num_chain_devices', 'auto') is not None
+    )
 
     init_kw = dict(kw.get('init_kw', {}))
     init_kw.update(

@@ -144,6 +144,7 @@ from tests.util import (
     condf,
     manual_tree,
     nnone,
+    skip_empty_shard_map_bug,
 )
 
 # Forest size shared across the module. jax recompiles whenever an array shape
@@ -1495,6 +1496,7 @@ class TestMultichain:
             check_sharding(state, state.config.mesh)
 
         with subtests.test('step'):
+            skip_empty_shard_map_bug(num_chains == 0 and mesh is not None)
             with debug_key_reuse(False):
                 # key reuse checks trigger with empty key array apparently
                 new_state = typechecking_step(keys.pop(), state)

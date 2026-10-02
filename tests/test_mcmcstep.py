@@ -80,6 +80,7 @@ from scipy.stats import chi2, ks_1samp, ks_2samp
 from bartz._jaxext import (
     Module,
     field,
+    float32_matmuls,
     get_default_devices,
     get_device_count,
     minimal_unsigned_dtype,
@@ -2235,6 +2236,8 @@ class TestStepLeafPriorCovInv:
         with pytest.raises(AssertionError):
             init(**kw)
 
+    # `step` runs under float32 matmuls; without it, gpu contracts via tf32
+    @float32_matmuls
     def test_closed_form(self, keys: split, init_kwargs: dict, prior: Wishart) -> None:
         """The update on a hand-built forest matches the conjugate formula."""
         kw: dict = dict(init_kwargs, leaf_prior_cov_inv=prior)

@@ -78,7 +78,7 @@ from jaxtyping import (
     Shaped,
     UInt,
 )
-from numpy.testing import assert_array_less, assert_array_max_ulp
+from numpy.testing import assert_array_less
 from pytest import CaptureFixture, FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
 
@@ -1852,7 +1852,8 @@ def test_sum_trees_eps_snap(keys: split) -> None:
     )
     post_mean = bart.predict(dgp.x, kind='latent_samples').mean(axis=0)
     err = jnp.sqrt(jnp.mean(jnp.square(post_mean - dgp.mu)))
-    resolution, drift, snap = bart._mcmc_state._sum_trees_eps()
+    # jitted like `sum_trees_eps`, since eager evaluation may round differently
+    resolution, drift, snap = jit(lambda s: s._sum_trees_eps())(bart._mcmc_state)
     # the numerical terms alone under-report the error
     assert jnp.maximum(resolution, drift) < err
     # the snap term covers it, within a bounded factor. the quantum scales
@@ -1862,8 +1863,7 @@ def test_sum_trees_eps_snap(keys: split) -> None:
     # more distortion, until the loop settles. at that equilibrium snap and
     # the observed error track each other up to a constant
     assert err <= 1.5 * snap <= 12 * err
-    # jit may round the snap term differently than eager evaluation
-    assert_array_max_ulp(bart._mcmc_state.sum_trees_eps(), snap, maxulp=1)
+    assert_array_equal(bart._mcmc_state.sum_trees_eps(), snap)
 
 
 def test_output_ranges(bkw: BartKW, keys: split) -> None:
@@ -2914,6 +2914,8 @@ def test_jit(bkw: BartKW) -> None:
     assert_close_matrices(pred1, pred2, rtol=rtol, reduce_rank=True)
 
 
+@pytest.mark.flaky(max_runs=5, rerun_filter=rerun_on_gpu)
+# on gpu the vmapped and looped mcmc can diverge, see `assert_identical_bart`
 def test_vmap(bkw: BartKW, keys: split) -> None:
     """Test that jit(vmap(...))ing around the whole interface works.
 
@@ -3859,6 +3861,9 @@ def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
     using this comparison function, consider marking the test as
     `flaky(rerun_filter=rerun_on_gpu)`.
     """
+    # reduced-precision leaves amplify the nondeterministic float32 rounding,
+    # and everything derived from them carries the loss
+    leaf_tree = bart1._mcmc_state.forest.leaf_tree
 
     def check_same(
         path: KeyPath, x1: Shaped[Array, '*shape'], x2: Shaped[Array, '*shape']
@@ -3870,7 +3875,7 @@ def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
             if x1.platform() == 'cpu':
                 rtol = 1e-5
             else:  # pragma: no cover, gpu-only
-                rtol = condf(x1, 1e-4, 1e-3)
+                rtol = condf(leaf_tree, 1e-4, 1e-3)
             assert_close_matrices(
                 x1, x2, rtol=rtol, err_msg=keystr(path), reduce_rank=True
             )

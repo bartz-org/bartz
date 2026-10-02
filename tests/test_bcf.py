@@ -972,7 +972,7 @@ class TestBcf:
         assert np.sqrt(np.mean((tau_hat - test.tau) ** 2)) < 0.15
         assert np.sqrt(np.mean((mu_hat - test.mu) ** 2)) < 0.15
 
-    def test_predict_potential_outcomes(self, keys: split) -> None:
+    def test_predict_potential_outcomes(self, keys: split, subtests: SubTests) -> None:
         """Tests posterior predictive potential outcome sampling in BCF."""
         train = gen_bcf_data(keys.pop(), n=150)
 
@@ -989,57 +989,54 @@ class TestBcf:
             seed=keys.pop(),
         )
 
-        # 1. Verify sigma_trace
-        # with self.subTest(name='sigma_trace'):
-        sigma = model.sigma_trace
-        assert sigma.shape == (20,)
-        assert bool(jnp.all(sigma > 0.0))
+        with subtests.test('sigma_trace'):
+            sigma = model.sigma_trace
+            assert sigma.shape == (20,)
+            assert bool(jnp.all(sigma > 0.0))
 
         x_test = train.x[:30]
         pihat_test = train.pihat[:30]
 
-        # 2. Test shapes, keys, and realized lift consistency
-        # with self.subTest(name='shapes_and_lift_consistency'):
-        res = model.predict_potential_outcomes(
-            x_test=x_test, pihat_test=pihat_test, rho=0.5, key=keys.pop()
-        )
-        for key in ['y0', 'y1', 'delta', 'mu', 'tau']:
-            assert key in res
-            assert res[key].shape == (20, 30)
+        with subtests.test('shapes and delta'):
+            res = model.predict_potential_outcomes(
+                x_test=x_test, pihat_test=pihat_test, rho=0.5, key=keys.pop()
+            )
+            for key in ['y0', 'y1', 'delta', 'mu', 'tau']:
+                assert key in res
+                assert res[key].shape == (20, 30)
+            assert_close_matrices(res['delta'], res['y1'] - res['y0'], rtol=1e-5)
 
-        assert_close_matrices(res['delta'], res['y1'] - res['y0'], rtol=1e-5)
+        with subtests.test('rho=1'):
+            # rank preservation, so delta == tau
+            res = model.predict_potential_outcomes(
+                x_test=x_test, pihat_test=pihat_test, rho=1.0, key=keys.pop()
+            )
+            assert_close_matrices(res['delta'], res['tau'], rtol=1e-5)
 
-        # 3. Test rho = 1.0 (Rank preservation -> delta == tau)
-        # with self.subTest(name='rank_preservation_rho_1'):
-        res_rho1 = model.predict_potential_outcomes(
-            x_test=x_test, pihat_test=pihat_test, rho=1.0, key=keys.pop()
-        )
-        assert_close_matrices(res_rho1['delta'], res_rho1['tau'], rtol=1e-5)
+        with subtests.test('rho=0'):
+            # independent shocks, so delta != tau
+            res = model.predict_potential_outcomes(
+                x_test=x_test, pihat_test=pihat_test, rho=0.0, key=keys.pop()
+            )
+            assert_different_matrices(res['delta'], res['tau'], rtol=1e-3, atol=0)
 
-        # 4. Test rho = 0.0 (Independent shocks -> delta != tau)
-        # with self.subTest(name='independent_shocks_rho_0'):
-        res_rho0 = model.predict_potential_outcomes(
-            x_test=x_test, pihat_test=pihat_test, rho=0.0, key=keys.pop()
-        )
-        assert_different_matrices(res_rho0['delta'], res_rho0['tau'], rtol=1e-3, atol=0)
+        with subtests.test('invalid rho'):
+            with pytest.raises(ValueError, match='rho must be in'):
+                model.predict_potential_outcomes(x_test=x_test, rho=-0.1)
+            with pytest.raises(ValueError, match='rho must be in'):
+                model.predict_potential_outcomes(x_test=x_test, rho=1.5)
 
-        # 5. Test invalid rho validation
-        # with self.subTest(name='invalid_rho_validation'):
-        with pytest.raises(ValueError, match='rho must be in'):
-            model.predict_potential_outcomes(x_test=x_test, rho=-0.1)
-        with pytest.raises(ValueError, match='rho must be in'):
-            model.predict_potential_outcomes(x_test=x_test, rho=1.5)
+        with subtests.test('key types'):
+            # key=None (default RNG) and integer-seed keys are both accepted
+            res_key_none = model.predict_potential_outcomes(
+                x_test=x_test, pihat_test=pihat_test, key=None
+            )
+            res_key_int = model.predict_potential_outcomes(
+                x_test=x_test, pihat_test=pihat_test, key=int_seed(keys.pop())
+            )
+            assert res_key_none['y0'].shape == res_key_int['y0'].shape
 
-        # 6. key=None (default RNG) and integer-seed keys are both accepted
-        res_key_none = model.predict_potential_outcomes(
-            x_test=x_test, pihat_test=pihat_test, key=None
-        )
-        res_key_int = model.predict_potential_outcomes(
-            x_test=x_test, pihat_test=pihat_test, key=int_seed(keys.pop())
-        )
-        assert res_key_none['y0'].shape == res_key_int['y0'].shape
-
-    def test_bcf_binary_model(self, keys: split) -> None:
+    def test_bcf_binary_model(self, keys: split, subtests: SubTests) -> None:
         """Tests binary BCF end-to-end: initialization, offset, and predictions."""
         # Generate data with non-trivial positive rate (~70% positive)
         train = gen_bcf_data(keys.pop(), n=200)
@@ -1062,49 +1059,47 @@ class TestBcf:
             seed=keys.pop(),
         )
 
-        # Sub-test 1: Verify initialization and offset correctness
-        # with self.subTest(name='offset_and_scaling_invariants'):
-        assert model._y_std == 1.0
-        assert model._y_mean == 0.0
-        expected_offset = stats.norm.ppf(np.mean(y_train))
-        assert_allclose(model._offset, expected_offset, rtol=1e-4)
+        with subtests.test('offset'):
+            assert model._y_std == 1.0
+            assert model._y_mean == 0.0
+            expected_offset = stats.norm.ppf(np.mean(y_train))
+            assert_allclose(model._offset, expected_offset, rtol=1e-4)
 
-        # Sub-test 2: Verify prediction keys and valid probability bounds
-        # with self.subTest(name='prediction_probabilities'):
         preds = model.predict(train.x, pihat_test=train.pihat)
-        assert 'mu' in preds
-        assert 'tau' in preds
-        assert 'tau_prob' in preds
-        assert 'p1' in preds
-        assert 'p0' in preds
 
-        # Check that raw probabilities are within [0, 1]
-        assert np.all((preds['p0'] >= 0.0) & (preds['p0'] <= 1.0))
-        assert np.all((preds['p1'] >= 0.0) & (preds['p1'] <= 1.0))
+        with subtests.test('predict'):
+            assert 'mu' in preds
+            assert 'tau' in preds
+            assert 'tau_prob' in preds
+            assert 'p1' in preds
+            assert 'p0' in preds
+            assert np.all((preds['p0'] >= 0.0) & (preds['p0'] <= 1.0))
+            assert np.all((preds['p1'] >= 0.0) & (preds['p1'] <= 1.0))
 
-        # Sub-test 3: Constructor test predictions are on the latent scale,
-        # with prob_test carrying the probability
-        assert_array_equal(model.mu_test, preds['mu'])
-        assert_array_equal(model.tau_test, preds['tau'])
-        prob_test = model.prob_test
-        assert prob_test is not None
-        assert_close_matrices(
-            prob_test, np.where(train.z, preds['p1'], preds['p0']), rtol=1e-5
-        )
-        assert np.all((prob_test >= 0.0) & (prob_test <= 1.0))
+        with subtests.test('test predictions'):
+            # on the latent scale, with prob_test carrying the probability
+            assert_array_equal(model.mu_test, preds['mu'])
+            assert_array_equal(model.tau_test, preds['tau'])
+            prob_test = model.prob_test
+            assert prob_test is not None
+            assert_close_matrices(
+                prob_test, np.where(train.z, preds['p1'], preds['p0']), rtol=1e-5
+            )
+            assert np.all((prob_test >= 0.0) & (prob_test <= 1.0))
 
-        # prob_test survives a save/load round-trip
-        with tempfile.TemporaryDirectory() as tmpdir:
-            npz_path = Path(tmpdir) / 'test_bcf_binary.npz'
-            model.save_npz(npz_path)
-            assert_array_equal(bcf.load_npz(npz_path).prob_test, prob_test)
+            # prob_test survives a save/load round-trip
+            with tempfile.TemporaryDirectory() as tmpdir:
+                npz_path = Path(tmpdir) / 'test_bcf_binary.npz'
+                model.save_npz(npz_path)
+                assert_array_equal(bcf.load_npz(npz_path).prob_test, prob_test)
 
-        # Sub-test 4: potential outcomes on a binary model return 0/1 labels
-        po = model.predict_potential_outcomes(
-            train.x, pihat_test=train.pihat, key=keys.pop()
-        )
-        assert np.isin(np.array(po['y0']), (0.0, 1.0)).all()
-        assert np.isin(np.array(po['y1']), (0.0, 1.0)).all()
+        with subtests.test('potential outcomes'):
+            # 0/1 labels on a binary model
+            po = model.predict_potential_outcomes(
+                train.x, pihat_test=train.pihat, key=keys.pop()
+            )
+            assert np.isin(np.array(po['y0']), (0.0, 1.0)).all()
+            assert np.isin(np.array(po['y1']), (0.0, 1.0)).all()
 
     def test_bcf_binary_requires_0_1(self, keys: split) -> None:
         """Binary BCF rejects outcomes that are not 0/1."""

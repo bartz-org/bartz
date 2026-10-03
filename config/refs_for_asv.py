@@ -26,7 +26,7 @@
 Print a git rev-list range spec for ASV benchmarking.
 
 The output covers:
-1. All version tags on the default branch with commit dates after CUTOFF_DATE
+1. A fixed number of version tags on the default branch, see `select_tags`
 2. The HEAD of the default branch
 
 The output is one space-separated line, prefixed with `--no-walk`, suitable
@@ -47,7 +47,11 @@ from git.exc import BadName, GitCommandError
 from packaging.version import Version
 
 # Configuration
-CUTOFF_DATE = datetime.datetime(2025, 1, 1, tzinfo=datetime.timezone.utc)
+MIN_VERSION = Version('0.4.1')  # oldest version supported by the benchmarks
+MIN_AGE = datetime.timedelta(days=365)
+MIN_RELEASES_BACK = 11
+NUM_LAST = 3
+NUM_SPREAD = 3
 
 
 def get_default_branch_name(repo: Repo) -> str:
@@ -99,28 +103,64 @@ def default_branch_commit(repo: Repo) -> Commit:
     return commit
 
 
+def select_tags(
+    tags: list[tuple[datetime.datetime, str]], today: datetime.datetime
+) -> list[tuple[datetime.datetime, str]]:
+    """Select the tags to benchmark.
+
+    The selection comprises:
+    - the oldest tag, i.e., the older of the first tag in the last `MIN_AGE`
+      and the `MIN_RELEASES_BACK`-th to last tag
+    - `NUM_SPREAD` tags evenly spaced in time between the oldest and the
+      `NUM_LAST` last tags
+    - the `NUM_LAST` last tags
+    """
+    tags = sorted(tags)
+    if len(tags) <= 1 + NUM_SPREAD + NUM_LAST:
+        return tags
+
+    in_window = [i for i, (date, _) in enumerate(tags) if date >= today - MIN_AGE]
+    first = min((*in_window[:1], max(0, len(tags) - MIN_RELEASES_BACK)))
+    oldest = tags[first]
+    last = tags[-NUM_LAST:]
+    candidates = tags[first + 1 : -NUM_LAST]
+
+    end = last[0][0]
+    step = (end - oldest[0]) / (NUM_SPREAD + 1)
+    spread = []
+    for k in range(1, NUM_SPREAD + 1):
+        target = oldest[0] + k * step
+        unused = [tag for tag in candidates if tag not in spread]
+        spread.append(min(unused, key=lambda tag: abs(tag[0] - target)))
+
+    return sorted((oldest, *spread, *last))
+
+
 def benchmarked_version_tags(
     repo_path: Path | str = '.',
 ) -> list[tuple[datetime.datetime, str]]:
     """Return `[(commit_date, tag_name), ...]` of tags benchmarked by ASV.
 
-    A tag is included iff it starts with `v`, is reachable from the default
-    branch, and points at a commit on/after `CUTOFF_DATE`. Sorted oldest first.
+    Considers tags that start with `v`, are reachable from the default
+    branch, and are at least `MIN_VERSION`, selected by `select_tags`.
+    Sorted oldest first.
     """
     repo = Repo(repo_path)
     head_commit = default_branch_commit(repo)
     tags: list[tuple[datetime.datetime, str]] = []
     for tag in repo.tags:
         commit = tag.commit
-        if not repo.is_ancestor(commit, head_commit):
+        if (
+            not tag.name.startswith('v')
+            or Version(tag.name) < MIN_VERSION
+            or not repo.is_ancestor(commit, head_commit)
+        ):
             continue
         commit_date = datetime.datetime.fromtimestamp(
             commit.committed_date, tz=datetime.timezone.utc
         )
-        if commit_date >= CUTOFF_DATE and tag.name.startswith('v'):
-            tags.append((commit_date, tag.name))
-    tags.sort()
-    return tags
+        tags.append((commit_date, tag.name))
+    return select_tags(tags, datetime.datetime.now(datetime.timezone.utc))
 
 
 def oldest_benchmarked_version(repo_path: Path | str = '.') -> Version:

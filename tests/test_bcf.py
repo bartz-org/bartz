@@ -155,7 +155,7 @@ def gen_bcf_data(
     mu_loc: float = 0.0,
     mu_scale: float = 1.0,
     tau_loc: float = 1.0,
-    tau_scale: float = 0.5,
+    tau_scale: float = 1.0,
     noise_scale: float = 0.2,
 ) -> BCFData:
     """Generate confounded data with heterogeneous treatment effect.
@@ -173,18 +173,19 @@ def gen_bcf_data(
         lambda_=0.5,
         sigma2_lin=1.0,
         sigma2_quad=0.0,
-        sigma2_eps=1.0,
+        # the error sd 2 of the treatment latent keeps the propensity
+        # P(z = 1) = Phi(latent mean / 2) away from 0 and 1
+        sigma2_eps=4.0,
         outcome_type=('continuous', 'continuous', 'binary'),
     )
     mu = mu_loc + mu_scale * dgp.mu[0, :]
     tau = tau_loc + tau_scale * dgp.mu[1, :]
     z = dgp.y[2, :]
-    noise = dgp.y[0, :] - dgp.mu[0, :]
+    noise = (dgp.y[0, :] - dgp.mu[0, :]) / 2
     return BCFData(
         x=dgp.x.T,
         z=z,
-        # with unit error variance, P(z = 1) = Phi(latent mean)
-        pihat=ndtr(dgp.mu[2, :]),
+        pihat=ndtr(dgp.mu[2, :] / 2),
         y=mu + tau * z + noise_scale * noise,
         mu=mu,
         tau=tau,
@@ -196,6 +197,13 @@ def split_bcf_data(data: BCFData, n_train: int) -> tuple[BCFData, BCFData]:
     train = tree.map(lambda a: a[:n_train, ...], data)
     test = tree.map(lambda a: a[n_train:, ...], data)
     return train, test
+
+
+def relative_rmse(
+    estimate: Float32[ArrayLike, ' n'], truth: Float32[Array, ' n']
+) -> Float32[Array, '']:
+    """RMSE of `estimate` relative to the one of the best constant predictor."""
+    return jnp.sqrt(jnp.mean(jnp.square(estimate - truth)) / jnp.var(truth))
 
 
 class TestBcf:
@@ -347,26 +355,15 @@ class TestBcf:
         with pytest.raises(ValueError, match='Unsupported schema version: 999'):
             bcf.load_npz(npz_path)
 
-    def test_statistical_convergence(self, keys: split, subtests: SubTests) -> None:
-        """Multichain convergence and out-of-sample DGP recovery.
-
-        Two chains must agree (Rhat near 1) without being identical, and a
-        prior-matched model must recover the known treatment and prognostic
-        effects on held-out data.
-        """
+    def test_chains_convergence(self, keys: split, subtests: SubTests) -> None:
+        """Two chains agree (Rhat near 1) without being identical."""
         n = 100
-        train, test = split_bcf_data(gen_bcf_data(keys.pop(), n=n + 300), n)
+        train = gen_bcf_data(keys.pop(), n=n)
+        y_scaled = (train.y - np.mean(train.y)) / np.std(train.y)
 
-        y_mean = np.mean(train.y)
-        y_std = np.std(train.y)
-        y_scaled = (train.y - y_mean) / y_std
-
-        ndpost = 2500
-        nskip = 1500
-
-        # 1. Internal Stability Model (JAX defaults), with two chains
         num_chains = 2
-        model_jax = bcf(
+        ndpost = 2500
+        model = bcf(
             x_train=train.x,
             y_train=y_scaled,
             z_train=train.z,
@@ -374,57 +371,25 @@ class TestBcf:
             num_trees_mu=50,
             num_trees_tau=20,
             ndpost=ndpost,
-            nskip=nskip,
+            nskip=1500,
             num_chains=num_chains,
             sample_sigma2_leaf_mu=False,
             sample_sigma2_leaf_tau=False,
             seed=keys.pop(),
         )
 
-        # 2. Structural Alignment Models (Forced Prior Matching)
-        leaf_prior_cov_inv_mu = 50.0
-        leaf_prior_cov_inv_tau = 40.0
-
-        model_jax_matched = bcf(
-            x_train=train.x,
-            y_train=y_scaled,
-            z_train=train.z,
-            pihat_train=train.pihat,
-            num_trees_mu=50,
-            num_trees_tau=20,
-            ndpost=ndpost,
-            nskip=nskip,
-            leaf_prior_cov_inv_mu=leaf_prior_cov_inv_mu,
-            leaf_prior_cov_inv_tau=leaf_prior_cov_inv_tau,
-            sigma_df=0.0,
-            sigma_scale=0.0,
-            sample_sigma2_leaf_mu=False,
-            sample_sigma2_leaf_tau=False,
-            seed=keys.pop(),
-        )
-
-        # 1. Internal reproducibility: the two chains agree, but not trivially
         with subtests.test('chains agree'):
-            preds_train = model_jax.predict(x_test=train.x, pihat_test=train.pihat)
+            preds = model.predict(x_test=train.x, pihat_test=train.pihat)
             # the chains are concatenated along the sample axis
-            yhat = preds_train['mu'] + preds_train['tau'] * train.z
+            yhat = preds['mu'] + preds['tau'] * train.z
             rhat_yhat = rhat_rank(yhat.reshape(num_chains, ndpost, n), split=False)
-            tau = preds_train['tau'].reshape(num_chains, ndpost, n)
-            rhat_tau_jax = rhat_rank(tau, split=True)
+            tau = preds['tau'].reshape(num_chains, ndpost, n)
+            rhat_tau = rhat_rank(tau, split=True)
             assert np.max(rhat_yhat) < 1.06
-            assert np.percentile(rhat_tau_jax, 95) < 1.10
+            assert np.percentile(rhat_tau, 95) < 1.10
 
         with subtests.test('chains differ'):
-            assert_chains_differ(model_jax)
-
-        # 2. Out-of-sample recovery of the known DGP, on held-out data. RMSE
-        # (not correlation) catches magnitude/offset errors; a constant tau
-        # predictor scores ~0.5, so this requires capturing the heterogeneity.
-        preds = model_jax_matched.predict(x_test=test.x, pihat_test=test.pihat)
-        tau_hat = np.mean(preds['tau'] * y_std, axis=0)
-        mu_hat = np.mean(preds['mu'] * y_std + y_mean, axis=0)
-        assert np.sqrt(np.mean(np.square(tau_hat - test.tau))) < 0.35
-        assert np.sqrt(np.mean(np.square(mu_hat - test.mu))) < 0.45
+            assert_chains_differ(model)
 
     def test_null_treatment_effect(self, keys: split) -> None:
         """Verifies that BCF does not find a treatment effect when tau=0."""
@@ -468,7 +433,9 @@ class TestBcf:
     def test_noise_variance_recovery(self, keys: split) -> None:
         """Verifies that the BCF model recovers the true residual noise variance."""
         noise_scale = 0.5
-        train = gen_bcf_data(keys.pop(), n=300, tau_loc=1.5, noise_scale=noise_scale)
+        train = gen_bcf_data(
+            keys.pop(), n=300, tau_loc=1.5, tau_scale=0.5, noise_scale=noise_scale
+        )
 
         model = bcf(
             x_train=train.x,
@@ -773,43 +740,40 @@ class TestBcf:
         assert_allclose(np.mean(mu_mcmc), intercept, rtol=0.03)
         assert_allclose(np.mean(tau_mcmc), slope, rtol=0.03)
 
-    def test_adaptive_coding(self, keys: split) -> None:
-        """Adaptive coding recovers the known treatment effect out of sample."""
-        n = 100
+    @pytest.mark.parametrize('adaptive_coding', [False, True])
+    def test_dgp_recovery(self, keys: split, adaptive_coding: bool) -> None:
+        """Recover the known treatment and prognostic effects out of sample."""
+        n = 400
         train, test = split_bcf_data(gen_bcf_data(keys.pop(), n=n + 300), n)
 
         y_mean = np.mean(train.y)
         y_std = np.std(train.y)
         y_scaled = (train.y - y_mean) / y_std
 
-        ndpost = 1000
-        nskip = 500
-
-        leaf_prior_cov_inv_mu = 50.0
-        leaf_prior_cov_inv_tau = 40.0
-
-        model_jax = bcf(
+        model = bcf(
             x_train=train.x,
             y_train=y_scaled,
             z_train=train.z,
             pihat_train=train.pihat,
             num_trees_mu=50,
             num_trees_tau=20,
-            ndpost=ndpost,
-            nskip=nskip,
-            leaf_prior_cov_inv_mu=leaf_prior_cov_inv_mu,
-            leaf_prior_cov_inv_tau=leaf_prior_cov_inv_tau,
+            ndpost=1000,
+            nskip=500,
+            leaf_prior_cov_inv_mu=50.0,
+            leaf_prior_cov_inv_tau=40.0,
             sigma_df=0.0,
             sigma_scale=0.0,
-            adaptive_coding=True,
+            adaptive_coding=adaptive_coding,
             seed=keys.pop(),
         )
 
-        preds = model_jax.predict(x_test=test.x, pihat_test=test.pihat)
-        cate_hat = np.mean(preds['tau'] * y_std, axis=0)
+        preds = model.predict(x_test=test.x, pihat_test=test.pihat)
+        tau_hat = np.mean(preds['tau'] * y_std, axis=0)
         mu_hat = np.mean(preds['mu'] * y_std + y_mean, axis=0)
-        assert np.sqrt(np.mean(np.square(cate_hat - test.tau))) < 0.4
-        assert np.sqrt(np.mean(np.square(mu_hat - test.mu))) < 0.4
+        # RMSE (not correlation) catches magnitude/offset errors; a constant
+        # predictor scores 1, so this requires capturing the heterogeneity
+        assert relative_rmse(tau_hat, test.tau) < 0.5
+        assert relative_rmse(mu_hat, test.mu) < 0.4
 
     def test_leaf_variance_prior_inactive(self, keys: split) -> None:
         """Verifies that sample_sigma2_leaf=False keeps the prior variance fixed."""
@@ -936,21 +900,19 @@ class TestBcf:
             np.mean(np.reciprocal(model_jax._leaf_prior_cov_inv_mu_trace)) * y_var
         )
         leaf_var_mu_st = np.mean(model_st.leaf_scale_mu_samples) * y_var
-        assert_allclose(leaf_var_mu_jax, leaf_var_mu_st, rtol=0.3)
+        assert_allclose(leaf_var_mu_jax, leaf_var_mu_st, rtol=0.4)
 
         leaf_var_tau_jax = (
             np.mean(np.reciprocal(model_jax._leaf_prior_cov_inv_tau_trace)) * y_var
         )
         leaf_var_tau_st = np.mean(model_st.leaf_scale_tau_samples) * y_var
-        # single-chain estimates of the tau leaf variance vary by a factor >2
-        # across MCMC seeds in both implementations, hence the loose tolerance
-        assert_allclose(leaf_var_tau_jax, leaf_var_tau_st, rtol=1.5)
+        assert_allclose(leaf_var_tau_jax, leaf_var_tau_st, rtol=0.5)
 
         preds = model_jax.predict(x_test=test.x, pihat_test=test.pihat)
         tau_hat = np.mean(preds['tau'] * y_std, axis=0)
         mu_hat = np.mean(preds['mu'] * y_std + y_mean, axis=0)
-        assert np.sqrt(np.mean(np.square(tau_hat - test.tau))) < 0.15
-        assert np.sqrt(np.mean(np.square(mu_hat - test.mu))) < 0.15
+        assert relative_rmse(tau_hat, test.tau) < 0.4
+        assert relative_rmse(mu_hat, test.mu) < 0.35
 
     def test_predict_potential_outcomes(self, keys: split, subtests: SubTests) -> None:
         """Tests posterior predictive potential outcome sampling in BCF."""

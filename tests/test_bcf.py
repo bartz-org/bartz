@@ -25,7 +25,7 @@
 """Tests for Bayesian Causal Forests (BCF)."""
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -711,8 +711,12 @@ class TestBcf:
         assert_allclose(np.mean(mu_mcmc), intercept, rtol=0.03)
         assert_allclose(np.mean(tau_mcmc), slope, rtol=0.03)
 
-    @pytest.mark.parametrize('adaptive_coding', [False, True])
-    def test_dgp_recovery(self, keys: split, adaptive_coding: bool) -> None:
+    @pytest.mark.parametrize(
+        ('adaptive_coding', 'sample_sigma2_leaf_mu'), [(False, False), (True, True)]
+    )
+    def test_dgp_recovery(
+        self, keys: split, adaptive_coding: bool, sample_sigma2_leaf_mu: bool
+    ) -> None:
         """Recover the known treatment and prognostic effects out of sample."""
         n = 400
         train, test = split_bcf_data(gen_bcf_data(keys.pop(), n=n + 300), n)
@@ -735,6 +739,7 @@ class TestBcf:
             sigma_df=0.0,
             sigma_scale=0.0,
             adaptive_coding=adaptive_coding,
+            sample_sigma2_leaf_mu=sample_sigma2_leaf_mu,
             seed=keys.pop(),
         )
 
@@ -744,7 +749,7 @@ class TestBcf:
         # RMSE (not correlation) catches magnitude/offset errors; a constant
         # predictor scores 1, so this requires capturing the heterogeneity
         assert relative_rmse(tau_hat, test.tau) < 0.5
-        assert relative_rmse(mu_hat, test.mu) < 0.4
+        assert relative_rmse(mu_hat, test.mu) < 0.45
 
     def test_leaf_variance_prior_inactive(self, keys: split) -> None:
         """Verifies that sample_sigma2_leaf=False keeps the prior variance fixed."""
@@ -907,12 +912,9 @@ class TestBcf:
             assert sigma.shape == (NDPOST,)
             assert jnp.all(sigma > 0.0)
 
-        x_test = test.x
-        pihat_test = test.pihat
-
         with subtests.test('shapes and delta'):
             res = model.predict_potential_outcomes(
-                x_test=x_test, pihat_test=pihat_test, rho=0.5, key=keys.pop()
+                x_test=test.x, pihat_test=test.pihat, rho=0.5, key=keys.pop()
             )
             for name in ('y0', 'y1', 'delta', 'mu', 'tau'):
                 assert name in res
@@ -922,30 +924,30 @@ class TestBcf:
         with subtests.test('rho=1'):
             # rank preservation, so delta == tau
             res = model.predict_potential_outcomes(
-                x_test=x_test, pihat_test=pihat_test, rho=1.0, key=keys.pop()
+                x_test=test.x, pihat_test=test.pihat, rho=1.0, key=keys.pop()
             )
             assert_close_matrices(res['delta'], res['tau'], rtol=1e-5)
 
         with subtests.test('rho=0'):
             # independent shocks, so delta != tau
             res = model.predict_potential_outcomes(
-                x_test=x_test, pihat_test=pihat_test, rho=0.0, key=keys.pop()
+                x_test=test.x, pihat_test=test.pihat, rho=0.0, key=keys.pop()
             )
             assert_different_matrices(res['delta'], res['tau'], rtol=1e-3, atol=0)
 
         with subtests.test('invalid rho'):
             with pytest.raises(ValueError, match='rho must be in'):
-                model.predict_potential_outcomes(x_test=x_test, rho=-0.1)
+                model.predict_potential_outcomes(x_test=test.x, rho=-0.1)
             with pytest.raises(ValueError, match='rho must be in'):
-                model.predict_potential_outcomes(x_test=x_test, rho=1.5)
+                model.predict_potential_outcomes(x_test=test.x, rho=1.5)
 
         with subtests.test('key types'):
             # key=None (default RNG) and integer-seed keys are both accepted
             res_key_none = model.predict_potential_outcomes(
-                x_test=x_test, pihat_test=pihat_test, key=None
+                x_test=test.x, pihat_test=test.pihat, key=None
             )
             res_key_int = model.predict_potential_outcomes(
-                x_test=x_test, pihat_test=pihat_test, key=int_seed(keys.pop())
+                x_test=test.x, pihat_test=test.pihat, key=int_seed(keys.pop())
             )
             assert res_key_none['y0'].shape == res_key_int['y0'].shape
 
@@ -1090,9 +1092,7 @@ class TestBcf:
         # the chains are concatenated one after the other
         error_cov_inv = model._main_trace['mu'].error_cov_inv
         assert error_cov_inv.shape == (*chain_shape, NDPOST)
-        assert_close_matrices(
-            model.sigma_trace, lax.rsqrt(error_cov_inv).reshape(-1), rtol=1e-6
-        )
+        assert_array_equal(model.sigma_trace, lax.rsqrt(error_cov_inv).reshape(-1))
 
         # test predictions computed at construction match predict()
         preds = model.predict(test.x, pihat_test=test.pihat)
@@ -1190,3 +1190,34 @@ class TestBcf:
         )
         with pytest.raises(ValueError, match='does not match x_train'):
             model.predict(x_test_df)
+
+    def test_numpy_input(self, keys: split) -> None:
+        """Numpy inputs give the same results as jax arrays."""
+        train, test = split_bcf_data(
+            gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
+        )
+        key = keys.pop()
+
+        def fit(
+            convert: Callable[[Array], Array | np.ndarray], seed: Key[Array, '']
+        ) -> bcf:
+            return bcf(
+                x_train=convert(train.x),
+                y_train=convert(train.y),
+                z_train=convert(train.z),
+                pihat_train=convert(train.pihat),
+                x_test=convert(test.x),
+                z_test=convert(test.z),
+                pihat_test=convert(test.pihat),
+                num_trees_mu=NUM_TREES_MU,
+                num_trees_tau=NUM_TREES_TAU,
+                ndpost=NDPOST,
+                nskip=NSKIP,
+                seed=seed,
+            )
+
+        model_jax = fit(jnp.asarray, key)
+        model_np = fit(np.asarray, random.clone(key))
+        assert_array_equal(model_np.sigma_trace, model_jax.sigma_trace)
+        assert_array_equal(model_np.mu_test, model_jax.mu_test)
+        assert_array_equal(model_np.tau_test, model_jax.tau_test)

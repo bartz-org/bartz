@@ -114,6 +114,7 @@ dev = [
 [tool.pytest.ini_options]
 cache_dir = "config/pytest_cache"
 testpaths = ["tests"]
+pythonpath = ["."]  # to import config/ scripts
 addopts = [
     "-r xXfE",
     "--pdbcls=IPython.terminal.debugger:TerminalPdb",

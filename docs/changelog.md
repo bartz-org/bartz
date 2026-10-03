@@ -31,6 +31,24 @@ SOFTWARE.
 # Changelog
 
 
+## 0.13.0 Mom, all my friends got a bayesian causal forest for their v0.13, why can't I have one? (2026-10-02)
+
+* New features
+    * Bayesian Causal Forests in the submodule `bartz.bcf` (thanks Miaoqing Yu)
+    * Sample leaf precision matrix
+        * default off in `Bart`, set `Bart(..., sigma_mu_df=...)` to turn it on
+        * default on in `bartz.stochtree.BARTModel`
+        * low-level `init(leaf_prior_cov_inv=...)` takes a `Wishart` instead of an array
+* Multivariate outcomes: fix per-component error scales constraining the error covariance matrix to diagonal
+* Multivariate outcomes: fix configuration of prior on error precision matrix in `Bart`
+    * After the fix, user knobs consistently match the marginal prior on each variance
+    * Each marginal variance has prior IG(sigma_df/2, sigma_scale^2 sigma_df/2) in all cases
+    * New `Wishart.from_inv_wishart_marginal_nu()` and `Wishart.inv_wishart_marginal_nu` to help respect the convention
+* `run_mcmc` accepts a custom `step` function and custom `State` subclass
+* MCMC step 7-15% faster on cpu (TO BE CONFIRMED BY BENCHMARKS)
+* Reference documentation for how BART is defined and implemented in bartz (LaTeX source in `docs/math/` in the repository)
+
+
 ## 0.12.1 I won't judge you, but I will silently keep track of which trees you accept in your MCMC (2026-08-25)
 
 * New attribute `Bart.accept` and `mc_gbart.accept`: fraction of trees with an accepted move per iteration

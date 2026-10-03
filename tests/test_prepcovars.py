@@ -235,7 +235,7 @@ class TestBinners:
         """The base `Binner` class cannot be instantiated directly."""
         x = jnp.arange(8.0).reshape(2, 4)
         with pytest.raises(TypeError, match='abstract'):
-            Binner(x)  # type: ignore[abstract]
+            Binner(x)  # ty: ignore[call-non-callable]
 
     def test_range_even_matches_underlying(self) -> None:
         """`RangeEvenBinner` is consistent with `_uniform_splits_from_matrix`."""

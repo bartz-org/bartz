@@ -91,6 +91,7 @@ from tests.util import (
     nnone,
     periodic_sigint,
     rhat_rank,
+    skip_empty_shard_map_bug,
 )
 
 try:
@@ -1001,6 +1002,8 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
 
     # disable data sharding
     kw.setdefault('bart_kwargs', {}).update(num_data_devices=None)
+
+    skip_empty_shard_map_bug(num_datapoints == 0 and get_expect_sharded(kw))
 
     # enable saving the likelihood ratio to check it's always 1
     kw.setdefault('bart_kwargs', {}).setdefault('init_kw', {}).update(

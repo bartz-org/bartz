@@ -80,6 +80,7 @@ from scipy.stats import chi2, ks_1samp, ks_2samp
 from bartz._jaxext import (
     Module,
     field,
+    float32_matmuls,
     get_default_devices,
     get_device_count,
     minimal_unsigned_dtype,
@@ -144,6 +145,7 @@ from tests.util import (
     condf,
     manual_tree,
     nnone,
+    skip_empty_shard_map_bug,
 )
 
 # Forest size shared across the module. jax recompiles whenever an array shape
@@ -1495,6 +1497,7 @@ class TestMultichain:
             check_sharding(state, state.config.mesh)
 
         with subtests.test('step'):
+            skip_empty_shard_map_bug(num_chains == 0 and mesh is not None)
             with debug_key_reuse(False):
                 # key reuse checks trigger with empty key array apparently
                 new_state = typechecking_step(keys.pop(), state)
@@ -2233,6 +2236,8 @@ class TestStepLeafPriorCovInv:
         with pytest.raises(AssertionError):
             init(**kw)
 
+    # `step` runs under float32 matmuls; without it, gpu contracts via tf32
+    @float32_matmuls
     def test_closed_form(self, keys: split, init_kwargs: dict, prior: Wishart) -> None:
         """The update on a hand-built forest matches the conjugate formula."""
         kw: dict = dict(init_kwargs, leaf_prior_cov_inv=prior)

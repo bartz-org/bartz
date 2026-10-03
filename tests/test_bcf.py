@@ -29,7 +29,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -206,6 +206,29 @@ def split_bcf_data(data: BCFData, n_train: int) -> tuple[BCFData, BCFData]:
     train = tree.map(lambda a: a[:n_train, ...], data)
     test = tree.map(lambda a: a[n_train:, ...], data)
     return train, test
+
+
+def init_bcf_state(key: Key[Array, ''], data: BCFData, **kwargs: Any) -> BCFState:
+    """Bin `data` and call `init_bcf` with small defaults, overridden by `kwargs`."""
+    x = data.x.T
+    binner = UniqueQuantileBinner(x, key=key)
+    # `init_bcf` may donate its arguments, so copy those used elsewhere
+    defaults: dict = dict(
+        X_unified=binner.bin(x),
+        trt=data.z.astype(bool),
+        y=jnp.copy(data.y),
+        offset=0.0,
+        max_split_mu=binner.max_split,
+        max_split_tau=jnp.copy(binner.max_split),
+        num_trees_mu=NUM_TREES_MU,
+        num_trees_tau=NUM_TREES_TAU,
+        p_nonterminal_mu=jnp.full(MAX_DEPTH, 0.95),
+        p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
+        leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
+        leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
+        error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
+    )
+    return init_bcf(**dict(defaults, **kwargs))
 
 
 def relative_rmse(
@@ -473,28 +496,7 @@ class TestBcf:
     def test_one_step_residual_invariant(self, keys: split) -> None:
         """Verifies that R == y - offset - mu_fit - (tau_0 + tau_fit) * Z."""
         train = gen_bcf_data(keys.pop(), n=100)
-
-        x_train_t = train.x.T
-        binner = UniqueQuantileBinner(x_train_t, key=keys.pop())
-        x_binned = binner.bin(x_train_t)
-
-        init_state = init_bcf(
-            X_unified=x_binned,
-            trt=train.z.astype(bool),
-            # `init_bcf` may donate its arguments
-            y=jnp.copy(train.y),
-            offset=0.0,
-            max_split_mu=binner.max_split,
-            # `init_bcf` may donate its arguments, so don't pass the same array twice
-            max_split_tau=jnp.copy(binner.max_split),
-            num_trees_mu=NUM_TREES_MU,
-            num_trees_tau=NUM_TREES_TAU,
-            p_nonterminal_mu=jnp.full(MAX_DEPTH, 0.95),
-            p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
-            leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
-            leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
-            error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
-        )
+        init_state = init_bcf_state(keys.pop(), train)
 
         new_state = bcf_step(keys.pop(), init_state)
 
@@ -536,28 +538,11 @@ class TestBcf:
         batched rebuild of the cache.
         """
         train = gen_bcf_data(keys.pop(), n=100)
-
-        x_train_t = train.x.T
-        binner = UniqueQuantileBinner(x_train_t, key=keys.pop())
-        x_binned = binner.bin(x_train_t)
-
-        state = init_bcf(
-            X_unified=x_binned,
-            trt=train.z.astype(bool),
-            y=train.y,
-            offset=0.0,
-            max_split_mu=binner.max_split,
-            # `init_bcf` may donate its arguments, so don't pass the same array twice
-            max_split_tau=jnp.copy(binner.max_split),
-            num_trees_mu=NUM_TREES_MU,
-            num_trees_tau=NUM_TREES_TAU,
-            p_nonterminal_mu=jnp.full(MAX_DEPTH, 0.95),
-            p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
+        state = init_bcf_state(
+            keys.pop(),
+            train,
             min_points_per_leaf_tau=1,
-            leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
-            leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
             adaptive_coding=adaptive_coding,
-            error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
         )
         state = replace(
             state,
@@ -588,28 +573,15 @@ class TestBcf:
     def test_multichain(self, keys: split) -> None:
         """Check each chain of a multichain BCF matches a single-chain one."""
         train = gen_bcf_data(keys.pop(), n=100)
-
-        x_train_t = train.x.T
-        binner = UniqueQuantileBinner(x_train_t, key=keys.pop())
-        x_binned = binner.bin(x_train_t)
+        binner_key = keys.pop()
 
         def make_state(num_chains: int | None) -> BCFState:
-            # `init_bcf` may donate its arguments, so pass fresh copies
-            return init_bcf(
-                X_unified=jnp.copy(x_binned),
-                trt=train.z.astype(bool),
-                y=jnp.copy(train.y),
-                offset=0.0,
-                max_split_mu=jnp.copy(binner.max_split),
-                max_split_tau=jnp.copy(binner.max_split),
-                num_trees_mu=NUM_TREES_MU,
-                num_trees_tau=NUM_TREES_TAU,
-                p_nonterminal_mu=jnp.full(MAX_DEPTH, 0.95),
-                p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
-                leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
+            # the same key gives the same binning in all the states
+            return init_bcf_state(
+                random.clone(binner_key),
+                train,
                 leaf_prior_cov_inv_tau=Wishart(nu=6.0, rate=2.0, value=1.0),
                 adaptive_coding=True,
-                error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
                 num_chains=num_chains,
             )
 
@@ -643,28 +615,8 @@ class TestBcf:
     ) -> None:
         """Check splitting a BCF `run_mcmc` run and chunking it do not matter."""
         train = gen_bcf_data(keys.pop(), n=100)
-
-        x_train_t = train.x.T
-        binner = UniqueQuantileBinner(x_train_t, key=keys.pop())
-        x_binned = binner.bin(x_train_t)
-
-        state = init_bcf(
-            X_unified=x_binned,
-            trt=train.z.astype(bool),
-            y=train.y,
-            offset=0.0,
-            max_split_mu=binner.max_split,
-            # `init_bcf` may donate its arguments, so don't pass the same array twice
-            max_split_tau=jnp.copy(binner.max_split),
-            num_trees_mu=NUM_TREES_MU,
-            num_trees_tau=NUM_TREES_TAU,
-            p_nonterminal_mu=jnp.full(MAX_DEPTH, 0.95),
-            p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
-            leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
-            leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
-            adaptive_coding=True,
-            error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
-            num_chains=num_chains,
+        state = init_bcf_state(
+            keys.pop(), train, adaptive_coding=True, num_chains=num_chains
         )
 
         key = keys.pop()

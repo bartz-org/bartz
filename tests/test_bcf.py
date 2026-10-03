@@ -45,7 +45,8 @@ from pytest_subtests import SubTests
 from scipy import stats
 
 from bartz._jaxext import split
-from bartz.bcf._bcf import UniqueQuantileBinner, bcf
+from bartz.bcf import bcf
+from bartz.bcf._bcf import UniqueQuantileBinner
 from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import BCFState, init_bcf
 from bartz.grove import evaluate_forest, is_actual_leaf
@@ -66,7 +67,7 @@ from tests.util import (
 )
 
 
-def _prec_tree_from_scratch(
+def prec_tree_from_scratch(
     forest: Forest, prec_scale: Shaped[ArrayLike, ' n']
 ) -> Shaped[ArrayLike, 'num_trees 2*half_tree_size']:
     """Sum `prec_scale` over the datapoints in each leaf of each tree."""
@@ -81,7 +82,7 @@ def _prec_tree_from_scratch(
     return vmap(scatter)(leaf_indices)
 
 
-def _check_chains_match(
+def check_chains_match(
     multi: BCFState, singles: Sequence[BCFState], err_msg: str
 ) -> None:
     """Check each chain of `multi` matches the corresponding single-chain state."""
@@ -92,42 +93,41 @@ def _check_chains_match(
         m: Shaped[Array, '*shape'] | None,
         *singles: Shaped[Array, '...'] | None,
     ) -> None:
-        if m is None:
-            return
-        for i, s in enumerate(singles):
-            mi = m if chain_axis is None else jnp.take(m, i, axis=chain_axis)
-            msg = f'{err_msg}{keystr(path)}, chain {i}: '
-            if jnp.issubdtype(m.dtype, jnp.inexact):
-                assert_close_matrices(mi, s, rtol=1e-5, err_msg=msg, reduce_rank=True)
-            else:
-                assert_array_equal(mi, s, err_msg=msg)
+        if m is not None:
+            for i, s in enumerate(singles):
+                mi = m if chain_axis is None else jnp.take(m, i, axis=chain_axis)
+                msg = f'{err_msg}{keystr(path)}, chain {i}: '
+                if jnp.issubdtype(m.dtype, jnp.inexact):
+                    assert_close_matrices(
+                        mi, s, rtol=1e-5, err_msg=msg, reduce_rank=True
+                    )
+                else:
+                    assert_array_equal(mi, s, err_msg=msg)
 
     tree.map_with_path(
         check_leaf, chain_vmap_axes(multi), multi, *singles, is_leaf=lambda x: x is None
     )
 
 
-def _assert_chains_differ(model: bcf) -> None:
+def assert_chains_differ(model: bcf) -> None:
     """Check the chains of a two-chain `bcf` differ in all the traced values that vary."""
 
     def check(
         path: KeyPath, x: Shaped[Array, '*shape'] | None, chain_axis: int | None
     ) -> None:
-        if x is None or chain_axis is None:
-            return
-        chains = np.moveaxis(np.asarray(x), chain_axis, 0)
-        # skip the values held fixed, e.g., unsampled leaf prior precisions
-        if np.all(chains == chains.flat[0]):
-            return
-        # flatten to compare with the vector norm, the matrix 2-norm would
-        # need an expensive svd on the big tree arrays
-        assert_different_matrices(
-            chains[0, ...].reshape(-1),
-            chains[1, ...].reshape(-1),
-            rtol=1e-3,
-            atol=0,
-            err_msg=f'{keystr(path)}: ',
-        )
+        if x is not None and chain_axis is not None:
+            chains = np.moveaxis(np.asarray(x), chain_axis, 0)
+            # skip the values held fixed, e.g., unsampled leaf prior precisions
+            if not np.all(chains == chains.flat[0]):
+                # flatten to compare with the vector norm, the matrix 2-norm
+                # would need an expensive svd on the big tree arrays
+                assert_different_matrices(
+                    chains[0, ...].reshape(-1),
+                    chains[1, ...].reshape(-1),
+                    rtol=1e-3,
+                    atol=0,
+                    err_msg=f'{keystr(path)}: ',
+                )
 
     traces = dict(model._main_trace, tau_0=model._tau_0_trace.reshape(2, -1))
     axes = dict({k: chain_vmap_axes(v) for k, v in model._main_trace.items()}, tau_0=0)
@@ -201,7 +201,7 @@ def split_bcf_data(data: BCFData, n_train: int) -> tuple[BCFData, BCFData]:
 class TestBcf:
     """Tests for the BCF wrapper module."""
 
-    def test_bcf_save_load_npz(self, keys: split, tmp_path: Path) -> None:
+    def test_save_load_npz(self, keys: split, tmp_path: Path) -> None:
         """Tests saving and loading a multichain BCF model via NPZ preserves prediction equality."""
         train = gen_bcf_data(keys.pop(), n=200)
 
@@ -241,7 +241,7 @@ class TestBcf:
         assert loaded_model.tau_test is None
         assert loaded_model.yhat_test is None
 
-    def test_bcf_save_load_npz_standardized(self, keys: split, tmp_path: Path) -> None:
+    def test_save_load_npz_standardized(self, keys: split, tmp_path: Path) -> None:
         """Tests that saving and loading an auto-standardized model preserves scale metadata and unscaling."""
         train = gen_bcf_data(
             keys.pop(), n=200, mu_loc=10.0, mu_scale=10.0, tau_loc=4.0, tau_scale=2.0
@@ -291,7 +291,7 @@ class TestBcf:
         assert_array_equal(loaded_model.yhat_test, model.yhat_test)
         assert loaded_model.prob_test is None
 
-    def test_bcf_standardization_equivalence(self, keys: split) -> None:
+    def test_standardization_equivalence(self, keys: split) -> None:
         """Tests that automatic standardization is numerically equivalent to manual pre-scaling."""
         train = gen_bcf_data(
             keys.pop(), n=150, p=4, mu_loc=5.0, mu_scale=5.0, tau_loc=2.0, tau_scale=1.0
@@ -340,14 +340,14 @@ class TestBcf:
         assert_close_matrices(preds_auto['mu'], manual_mu_unscaled, rtol=1e-4)
         assert_close_matrices(preds_auto['tau'], manual_tau_unscaled, rtol=1e-4)
 
-    def test_bcf_load_npz_unsupported_schema_version(self, tmp_path: Path) -> None:
+    def test_load_npz_unsupported_schema_version(self, tmp_path: Path) -> None:
         """Tests that loading an NPZ file with a future schema version raises ValueError."""
         npz_path = tmp_path / 'invalid_schema.npz'
         np.savez(npz_path, schema_version=999)
         with pytest.raises(ValueError, match='Unsupported schema version: 999'):
             bcf.load_npz(npz_path)
 
-    def test_bcf_statistical_convergence(self, keys: split, subtests: SubTests) -> None:
+    def test_statistical_convergence(self, keys: split, subtests: SubTests) -> None:
         """Multichain convergence and out-of-sample DGP recovery.
 
         Two chains must agree (Rhat near 1) without being identical, and a
@@ -415,7 +415,7 @@ class TestBcf:
             assert np.percentile(rhat_tau_jax, 95) < 1.10
 
         with subtests.test('chains differ'):
-            _assert_chains_differ(model_jax)
+            assert_chains_differ(model_jax)
 
         # 2. Out-of-sample recovery of the known DGP, on held-out data. RMSE
         # (not correlation) catches magnitude/offset errors; a constant tau
@@ -426,7 +426,7 @@ class TestBcf:
         assert np.sqrt(np.mean(np.square(tau_hat - test.tau))) < 0.35
         assert np.sqrt(np.mean(np.square(mu_hat - test.mu))) < 0.45
 
-    def test_bcf_null_treatment_effect(self, keys: split) -> None:
+    def test_null_treatment_effect(self, keys: split) -> None:
         """Verifies that BCF does not find a treatment effect when tau=0."""
         data = gen_bcf_data(
             keys.pop(), n=220, tau_loc=0.0, tau_scale=0.0, noise_scale=0.5
@@ -465,7 +465,7 @@ class TestBcf:
         contains_zero = (lower_bounds <= 0.0) & (upper_bounds >= 0.0)
         assert np.mean(contains_zero) >= 0.90
 
-    def test_bcf_noise_variance_recovery(self, keys: split) -> None:
+    def test_noise_variance_recovery(self, keys: split) -> None:
         """Verifies that the BCF model recovers the true residual noise variance."""
         noise_scale = 0.5
         train = gen_bcf_data(keys.pop(), n=300, tau_loc=1.5, noise_scale=noise_scale)
@@ -489,7 +489,7 @@ class TestBcf:
 
         assert_allclose(posterior_mean_sigma2, np.square(noise_scale), rtol=0.4)
 
-    def test_bcf_one_step_residual_invariant(self, keys: split) -> None:
+    def test_one_step_residual_invariant(self, keys: split) -> None:
         """Verifies that R == y - offset - mu_fit - (tau_0 + tau_fit) * Z."""
         train = gen_bcf_data(keys.pop(), n=100)
 
@@ -587,7 +587,7 @@ class TestBcf:
             forest = state.forest_tau
             assert forest.prec_tree is not None
             b_z = state.b[state.trt.astype(int)]
-            expected = _prec_tree_from_scratch(forest, jnp.square(b_z))
+            expected = prec_tree_from_scratch(forest, jnp.square(b_z))
             is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(
                 forest.split_tree
             )
@@ -604,7 +604,7 @@ class TestBcf:
             state = bcf_step(keys.pop(), state)
             check_tau_prec_tree(state, f'after step {i + 1}: ')
 
-    def test_bcf_multichain(self, keys: split) -> None:
+    def test_multichain(self, keys: split) -> None:
         """Check each chain of a multichain BCF matches a single-chain one."""
         train = gen_bcf_data(keys.pop(), n=100)
 
@@ -643,7 +643,7 @@ class TestBcf:
             for _ in range(num_chains)
         ]
         assert singles[0].num_chains() is None
-        _check_chains_match(multi, singles, 'init: ')
+        check_chains_match(multi, singles, 'init: ')
 
         # step the multichain state and the single-chain ones with the same
         # per-chain keys
@@ -654,10 +654,10 @@ class TestBcf:
             singles = [
                 bcf_step(k, s) for k, s in zip(single_keys, singles, strict=True)
             ]
-            _check_chains_match(multi, singles, f'step {i + 1}: ')
+            check_chains_match(multi, singles, f'step {i + 1}: ')
 
     @pytest.mark.parametrize('num_chains', [None, 2])
-    def test_bcf_run_mcmc_restartable(
+    def test_run_mcmc_restartable(
         self, keys: split, subtests: SubTests, num_chains: int | None
     ) -> None:
         """Check splitting a BCF `run_mcmc` run and chunking it do not matter."""
@@ -734,7 +734,7 @@ class TestBcf:
                 final_single.forest_tau.leaf_tree,
             )
 
-    def test_bcf_unsplittable_x_reduction(self, keys: split) -> None:
+    def test_unsplittable_x_reduction(self, keys: split) -> None:
         """Verifies BCF degenerates to Bayesian linear regression when max_split is 0."""
         rng = np.random.default_rng(int_seed(keys.pop()))
         n = 300
@@ -773,7 +773,7 @@ class TestBcf:
         assert_allclose(np.mean(mu_mcmc), intercept, rtol=0.03)
         assert_allclose(np.mean(tau_mcmc), slope, rtol=0.03)
 
-    def test_bcf_adaptive_coding(self, keys: split) -> None:
+    def test_adaptive_coding(self, keys: split) -> None:
         """Adaptive coding recovers the known treatment effect out of sample."""
         n = 100
         train, test = split_bcf_data(gen_bcf_data(keys.pop(), n=n + 300), n)
@@ -811,7 +811,7 @@ class TestBcf:
         assert np.sqrt(np.mean(np.square(cate_hat - test.tau))) < 0.4
         assert np.sqrt(np.mean(np.square(mu_hat - test.mu))) < 0.4
 
-    def test_bcf_leaf_variance_prior_inactive(self, keys: split) -> None:
+    def test_leaf_variance_prior_inactive(self, keys: split) -> None:
         """Verifies that sample_sigma2_leaf=False keeps the prior variance fixed."""
         n = 50
         p = 3
@@ -861,7 +861,7 @@ class TestBcf:
         assert np.var(mu_prior_vars_active, axis=0).mean() > 1e-4
         assert np.var(tau_prior_vars_active, axis=0).mean() > 1e-4
 
-    def test_bcf_leaf_variance_prior_active_equivalence(self, keys: split) -> None:
+    def test_leaf_variance_prior_active_equivalence(self, keys: split) -> None:
         """Adaptive leaf variance matches StochTree's scale and recovers the DGP."""
         n = 500
         train, test = split_bcf_data(gen_bcf_data(keys.pop(), n=n + 300), n)
@@ -981,9 +981,9 @@ class TestBcf:
             res = model.predict_potential_outcomes(
                 x_test=x_test, pihat_test=pihat_test, rho=0.5, key=keys.pop()
             )
-            for key in ['y0', 'y1', 'delta', 'mu', 'tau']:
-                assert key in res
-                assert res[key].shape == (20, 30)
+            for name in ('y0', 'y1', 'delta', 'mu', 'tau'):
+                assert name in res
+                assert res[name].shape == (20, 30)
             assert_close_matrices(res['delta'], res['y1'] - res['y0'], rtol=1e-5)
 
         with subtests.test('rho=1'):
@@ -1016,7 +1016,7 @@ class TestBcf:
             )
             assert res_key_none['y0'].shape == res_key_int['y0'].shape
 
-    def test_bcf_binary_model(
+    def test_binary_model(
         self, keys: split, subtests: SubTests, tmp_path: Path
     ) -> None:
         """Tests binary BCF end-to-end: initialization, offset, and predictions."""
@@ -1082,7 +1082,7 @@ class TestBcf:
             assert np.isin(po['y0'], (0.0, 1.0)).all()
             assert np.isin(po['y1'], (0.0, 1.0)).all()
 
-    def test_bcf_binary_requires_0_1(self, keys: split) -> None:
+    def test_binary_requires_0_1(self, keys: split) -> None:
         """Binary BCF rejects outcomes that are not 0/1."""
         train = gen_bcf_data(keys.pop(), n=20)
         with pytest.raises(ValueError, match='strictly 0 or 1'):
@@ -1099,7 +1099,7 @@ class TestBcf:
                 seed=keys.pop(),
             )
 
-    def test_bcf_treatment_requires_0_1(self, keys: split) -> None:
+    def test_treatment_requires_0_1(self, keys: split) -> None:
         """BCF rejects treatments that are not 0/1."""
         train = gen_bcf_data(keys.pop(), n=20)
         with pytest.raises(EquinoxRuntimeError, match='must be 0 or 1'):
@@ -1118,7 +1118,7 @@ class TestBcf:
     @pytest.mark.parametrize(
         ('sample_intercept', 'num_chains'), [(True, None), (False, 2)]
     )
-    def test_bcf_constructor_options(
+    def test_constructor_options(
         self, keys: split, sample_intercept: bool, num_chains: int | None
     ) -> None:
         """Constructor x_test/z_test, pihat toggle, tau_0 prior/toggle, chains, sigma_trace."""
@@ -1168,7 +1168,7 @@ class TestBcf:
         assert_array_equal(model.yhat_test, preds['mu'] + test.z * preds['tau'])
         assert model.prob_test is None
 
-    def test_bcf_test_predictions_absent(self, keys: split) -> None:
+    def test_no_test_predictions(self, keys: split) -> None:
         """Without x_test, the test prediction attributes stay None."""
         train = gen_bcf_data(keys.pop(), n=30)
         model = bcf(
@@ -1187,7 +1187,7 @@ class TestBcf:
         assert model.yhat_test is None
         assert model.prob_test is None
 
-    def test_bcf_test_input_errors(self, keys: split) -> None:
+    def test_invalid_test_inputs(self, keys: split) -> None:
         """Inconsistent test inputs are rejected before running the MCMC."""
         train, test = split_bcf_data(gen_bcf_data(keys.pop(), n=45), 30)
         kwargs: dict = dict(
@@ -1225,7 +1225,7 @@ class TestBcf:
         with pytest.raises(EquinoxRuntimeError, match='must be 0 or 1'):
             bcf(**kwargs, x_test=test.x, z_test=jnp.full(15, 2.0))
 
-    def test_bcf_x_test_format_mismatch(self, keys: split) -> None:
+    def test_x_test_format_mismatch(self, keys: split) -> None:
         """x_test format must match x_train, at construction and at predict."""
         train = gen_bcf_data(keys.pop(), n=30)
         x_test_df = pd.DataFrame(np.asarray(train.x[:15, :]))

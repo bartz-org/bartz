@@ -171,7 +171,8 @@ def gen_bcf_data(
 
     The prognostic function, the treatment effect and the treatment latent
     are the three components of a `gen_data` DGP with partially shared
-    predictors. Each is linear with unit variance before rescaling.
+    predictors. Each is linear with unit variance (on average over the DGP
+    draws) before rescaling.
     """
     dgp = gen_data(
         key,
@@ -239,7 +240,7 @@ def relative_rmse(
 
 
 class TestBcf:
-    """Tests for the BCF wrapper module."""
+    """Tests for the BCF wrapper module and its MCMC internals."""
 
     def test_save_load_npz(self, keys: split, tmp_path: Path) -> None:
         """Tests saving and loading a multichain BCF model via NPZ preserves prediction equality."""
@@ -494,7 +495,7 @@ class TestBcf:
         assert_allclose(posterior_mean_sigma2, np.square(noise_scale), rtol=0.4)
 
     def test_one_step_residual_invariant(self, keys: split) -> None:
-        """Verifies that R == y - offset - mu_fit - (tau_0 + tau_fit) * Z."""
+        """Verifies that R == y - offset - mu_fit - b_z * (tau_0 + tau_fit)."""
         train = gen_bcf_data(keys.pop(), n=100)
         init_state = init_bcf_state(keys.pop(), train)
 
@@ -794,7 +795,7 @@ class TestBcf:
         assert np.var(tau_prior_vars_active, axis=0).mean() > 1e-4
 
     def test_leaf_variance_prior_active_equivalence(self, keys: split) -> None:
-        """Adaptive leaf variance matches StochTree's scale and recovers the DGP."""
+        """Sampled leaf variance matches StochTree's scale and recovers the DGP."""
         n = 500
         train, test = split_bcf_data(gen_bcf_data(keys.pop(), n=n + 300), n)
 
@@ -951,7 +952,7 @@ class TestBcf:
     def test_binary_model(
         self, keys: split, subtests: SubTests, tmp_path: Path
     ) -> None:
-        """Tests binary BCF end-to-end: initialization, offset, and predictions."""
+        """Tests binary BCF end-to-end (initialization, offset, and predictions)."""
         # Generate data with non-trivial positive rate (~70% positive)
         train = gen_bcf_data(keys.pop(), n=N_TRAIN)
         y_train = (train.y > np.percentile(train.y, 30)).astype(np.float32)

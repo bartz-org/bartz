@@ -34,7 +34,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
-from jax import device_put, random, tree
+from jax import device_put, lax, random, tree
 from jax.scipy import special
 from jaxtyping import Array, Float32, Key, Real, Shaped
 
@@ -903,7 +903,7 @@ class bcf(eqx.Module):
     def sigma_trace(self) -> Float32[Array, ' num_samples']:
         """The posterior trace of residual standard deviation on the outcome scale, chains concatenated."""
         error_cov_inv = _fold_chains(self._main_trace['mu'], 'error_cov_inv')
-        sigma_internal = 1.0 / jnp.sqrt(error_cov_inv)
+        sigma_internal = lax.rsqrt(error_cov_inv)
         if self._standardize:
             return sigma_internal * self._y_std
         return sigma_internal

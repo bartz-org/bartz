@@ -66,6 +66,15 @@ from tests.util import (
     rhat_rank,
 )
 
+# sizes of the quick runs that only check the plumbing
+N_TRAIN = 30
+N_TEST = 15
+NUM_TREES_MU = 2
+NUM_TREES_TAU = 3
+MAX_DEPTH = 4
+NDPOST = 3
+NSKIP = 2
+
 
 def prec_tree_from_scratch(
     forest: Forest, prec_scale: Shaped[ArrayLike, ' n']
@@ -211,17 +220,17 @@ class TestBcf:
 
     def test_save_load_npz(self, keys: split, tmp_path: Path) -> None:
         """Tests saving and loading a multichain BCF model via NPZ preserves prediction equality."""
-        train = gen_bcf_data(keys.pop(), n=200)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
 
         model = bcf(
             x_train=train.x,
             y_train=train.y,
             z_train=train.z,
             pihat_train=train.pihat,
-            num_trees_mu=2,
-            num_trees_tau=2,
-            ndpost=3,
-            nskip=2,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             num_chains=2,
             standardize=False,
             seed=keys.pop(),
@@ -252,7 +261,12 @@ class TestBcf:
     def test_save_load_npz_standardized(self, keys: split, tmp_path: Path) -> None:
         """Tests that saving and loading an auto-standardized model preserves scale metadata and unscaling."""
         train = gen_bcf_data(
-            keys.pop(), n=200, mu_loc=10.0, mu_scale=10.0, tau_loc=4.0, tau_scale=2.0
+            keys.pop(),
+            n=N_TRAIN,
+            mu_loc=10.0,
+            mu_scale=10.0,
+            tau_loc=4.0,
+            tau_scale=2.0,
         )
 
         model = bcf(
@@ -263,10 +277,10 @@ class TestBcf:
             x_test=train.x,
             z_test=train.z,
             pihat_test=train.pihat,
-            num_trees_mu=2,
-            num_trees_tau=2,
-            ndpost=3,
-            nskip=2,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             standardize=True,
             seed=keys.pop(),
         )
@@ -302,7 +316,7 @@ class TestBcf:
     def test_standardization_equivalence(self, keys: split) -> None:
         """Tests that automatic standardization is numerically equivalent to manual pre-scaling."""
         train = gen_bcf_data(
-            keys.pop(), n=150, p=4, mu_loc=5.0, mu_scale=5.0, tau_loc=2.0, tau_scale=1.0
+            keys.pop(), n=N_TRAIN, mu_loc=5.0, mu_scale=5.0, tau_loc=2.0, tau_scale=1.0
         )
 
         y_mean = np.mean(train.y)
@@ -316,10 +330,10 @@ class TestBcf:
             y_train=train.y,
             z_train=train.z,
             pihat_train=train.pihat,
-            num_trees_mu=5,
-            num_trees_tau=5,
-            ndpost=10,
-            nskip=5,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             standardize=True,
             seed=key,
         )
@@ -330,10 +344,10 @@ class TestBcf:
             y_train=y_scaled,
             z_train=train.z,
             pihat_train=train.pihat,
-            num_trees_mu=5,
-            num_trees_tau=5,
-            ndpost=10,
-            nskip=5,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             standardize=False,
             seed=random.clone(key),
         )
@@ -473,10 +487,10 @@ class TestBcf:
             max_split_mu=binner.max_split,
             # `init_bcf` may donate its arguments, so don't pass the same array twice
             max_split_tau=jnp.copy(binner.max_split),
-            num_trees_mu=5,
-            num_trees_tau=5,
-            p_nonterminal_mu=jnp.full(5, 0.95),
-            p_nonterminal_tau=jnp.full(5, 0.95),
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            p_nonterminal_mu=jnp.full(MAX_DEPTH, 0.95),
+            p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
             leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
             leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
             error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
@@ -535,10 +549,10 @@ class TestBcf:
             max_split_mu=binner.max_split,
             # `init_bcf` may donate its arguments, so don't pass the same array twice
             max_split_tau=jnp.copy(binner.max_split),
-            num_trees_mu=2,
-            num_trees_tau=3,
-            p_nonterminal_mu=jnp.full(4, 0.95),
-            p_nonterminal_tau=jnp.full(4, 0.95),
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            p_nonterminal_mu=jnp.full(MAX_DEPTH, 0.95),
+            p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
             min_points_per_leaf_tau=1,
             leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
             leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
@@ -588,10 +602,10 @@ class TestBcf:
                 offset=0.0,
                 max_split_mu=jnp.copy(binner.max_split),
                 max_split_tau=jnp.copy(binner.max_split),
-                num_trees_mu=2,
-                num_trees_tau=3,
-                p_nonterminal_mu=jnp.full(4, 0.95),
-                p_nonterminal_tau=jnp.full(4, 0.95),
+                num_trees_mu=NUM_TREES_MU,
+                num_trees_tau=NUM_TREES_TAU,
+                p_nonterminal_mu=jnp.full(MAX_DEPTH, 0.95),
+                p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
                 leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
                 leaf_prior_cov_inv_tau=Wishart(nu=6.0, rate=2.0, value=1.0),
                 adaptive_coding=True,
@@ -642,10 +656,10 @@ class TestBcf:
             max_split_mu=binner.max_split,
             # `init_bcf` may donate its arguments, so don't pass the same array twice
             max_split_tau=jnp.copy(binner.max_split),
-            num_trees_mu=2,
-            num_trees_tau=3,
-            p_nonterminal_mu=jnp.full(4, 0.95),
-            p_nonterminal_tau=jnp.full(4, 0.95),
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            p_nonterminal_mu=jnp.full(MAX_DEPTH, 0.95),
+            p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
             leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
             leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
             adaptive_coding=True,
@@ -692,8 +706,12 @@ class TestBcf:
             assert burnin_single.tau_0.shape == (*chain_shape, 2)
             assert main_single.tau_0.shape == (*chain_shape, 3)
             assert main_single.b.shape == (*chain_shape, 3, 2)
-            assert main_single.mu.var_tree.shape[:-1] == (*chain_shape, 3, 2)
-            assert main_single.tau.var_tree.shape[:-1] == (*chain_shape, 3, 3)
+            assert main_single.mu.var_tree.shape[:-1] == (*chain_shape, 3, NUM_TREES_MU)
+            assert main_single.tau.var_tree.shape[:-1] == (
+                *chain_shape,
+                3,
+                NUM_TREES_TAU,
+            )
             assert_array_equal(main_single.tau_0[..., -1], final_single.tau_0)
             assert_array_equal(main_single.b[..., -1, :], final_single.b)
             assert_array_equal(
@@ -777,9 +795,7 @@ class TestBcf:
 
     def test_leaf_variance_prior_inactive(self, keys: split) -> None:
         """Verifies that sample_sigma2_leaf=False keeps the prior variance fixed."""
-        n = 50
-        p = 3
-        train = gen_bcf_data(keys.pop(), n=n, p=p)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
 
         y_scaled = (train.y - np.mean(train.y)) / np.std(train.y)
 
@@ -788,10 +804,10 @@ class TestBcf:
             y_train=y_scaled,
             z_train=train.z,
             pihat_train=train.pihat,
-            num_trees_mu=10,
-            num_trees_tau=5,
-            ndpost=10,
-            nskip=0,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             sample_sigma2_leaf_mu=False,
             sample_sigma2_leaf_tau=False,
             seed=keys.pop(),
@@ -810,10 +826,10 @@ class TestBcf:
             y_train=y_scaled,
             z_train=train.z,
             pihat_train=train.pihat,
-            num_trees_mu=10,
-            num_trees_tau=5,
-            ndpost=10,
-            nskip=0,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             sample_sigma2_leaf_mu=True,
             sample_sigma2_leaf_tau=True,
             seed=keys.pop(),
@@ -916,28 +932,30 @@ class TestBcf:
 
     def test_predict_potential_outcomes(self, keys: split, subtests: SubTests) -> None:
         """Tests posterior predictive potential outcome sampling in BCF."""
-        train = gen_bcf_data(keys.pop(), n=150)
+        train, test = split_bcf_data(
+            gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
+        )
 
         model = bcf(
             x_train=train.x,
             y_train=train.y,
             z_train=train.z,
             pihat_train=train.pihat,
-            num_trees_mu=5,
-            num_trees_tau=5,
-            ndpost=20,
-            nskip=10,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             standardize=True,
             seed=keys.pop(),
         )
 
         with subtests.test('sigma_trace'):
             sigma = model.sigma_trace
-            assert sigma.shape == (20,)
+            assert sigma.shape == (NDPOST,)
             assert jnp.all(sigma > 0.0)
 
-        x_test = train.x[:30, :]
-        pihat_test = train.pihat[:30]
+        x_test = test.x
+        pihat_test = test.pihat
 
         with subtests.test('shapes and delta'):
             res = model.predict_potential_outcomes(
@@ -945,7 +963,7 @@ class TestBcf:
             )
             for name in ('y0', 'y1', 'delta', 'mu', 'tau'):
                 assert name in res
-                assert res[name].shape == (20, 30)
+                assert res[name].shape == (NDPOST, N_TEST)
             assert_close_matrices(res['delta'], res['y1'] - res['y0'], rtol=1e-5)
 
         with subtests.test('rho=1'):
@@ -983,7 +1001,7 @@ class TestBcf:
     ) -> None:
         """Tests binary BCF end-to-end: initialization, offset, and predictions."""
         # Generate data with non-trivial positive rate (~70% positive)
-        train = gen_bcf_data(keys.pop(), n=200)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
         y_train = (train.y > np.percentile(train.y, 30)).astype(np.float32)
 
         model = bcf(
@@ -994,10 +1012,10 @@ class TestBcf:
             x_test=train.x,
             z_test=train.z,
             pihat_test=train.pihat,
-            num_trees_mu=5,
-            num_trees_tau=5,
-            ndpost=10,
-            nskip=5,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             outcome_type='binary',
             delta_max=0.9,
             seed=keys.pop(),
@@ -1046,34 +1064,34 @@ class TestBcf:
 
     def test_binary_requires_0_1(self, keys: split) -> None:
         """Binary BCF rejects outcomes that are not 0/1."""
-        train = gen_bcf_data(keys.pop(), n=20)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
         with pytest.raises(ValueError, match='strictly 0 or 1'):
             bcf(
                 x_train=train.x,
-                y_train=jnp.full(20, 2.0),
+                y_train=jnp.full(N_TRAIN, 2.0),
                 z_train=train.z,
                 pihat_train=train.pihat,
                 outcome_type='binary',
-                num_trees_mu=2,
-                num_trees_tau=2,
-                ndpost=1,
-                nskip=0,
+                num_trees_mu=NUM_TREES_MU,
+                num_trees_tau=NUM_TREES_TAU,
+                ndpost=NDPOST,
+                nskip=NSKIP,
                 seed=keys.pop(),
             )
 
     def test_treatment_requires_0_1(self, keys: split) -> None:
         """BCF rejects treatments that are not 0/1."""
-        train = gen_bcf_data(keys.pop(), n=20)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
         with pytest.raises(EquinoxRuntimeError, match='must be 0 or 1'):
             bcf(
                 x_train=train.x,
                 y_train=train.y,
-                z_train=jnp.full(20, 0.5),
+                z_train=jnp.full(N_TRAIN, 0.5),
                 pihat_train=train.pihat,
-                num_trees_mu=2,
-                num_trees_tau=2,
-                ndpost=1,
-                nskip=0,
+                num_trees_mu=NUM_TREES_MU,
+                num_trees_tau=NUM_TREES_TAU,
+                ndpost=NDPOST,
+                nskip=NSKIP,
                 seed=keys.pop(),
             )
 
@@ -1084,8 +1102,9 @@ class TestBcf:
         self, keys: split, sample_intercept: bool, num_chains: int | None
     ) -> None:
         """Constructor x_test/z_test, pihat toggle, tau_0 prior/toggle, chains, sigma_trace."""
-        train, test = split_bcf_data(gen_bcf_data(keys.pop(), n=45), 30)
-        ndpost = 3
+        train, test = split_bcf_data(
+            gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
+        )
         model = bcf(
             x_train=train.x,
             y_train=train.y,
@@ -1098,27 +1117,26 @@ class TestBcf:
             tau_0_prior_var=0.5,
             sample_intercept=sample_intercept,
             standardize=False,
-            num_trees_mu=2,
-            num_trees_tau=2,
-            ndpost=ndpost,
-            nskip=1,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             num_chains=num_chains,
             seed=keys.pop(),
         )
         assert model._mcmc_state.num_chains() == num_chains
         chain_shape = () if num_chains is None else (num_chains,)
-        num_samples = math.prod(chain_shape) * ndpost
+        num_samples = math.prod(chain_shape) * NDPOST
         assert model._tau_0_trace.shape == (num_samples,)
         assert model._b_trace.shape == (num_samples, 2)
         assert model.mu_test is not None
-        n_test, _ = test.x.shape
-        assert model.mu_test.shape == (num_samples, n_test)
+        assert model.mu_test.shape == (num_samples, N_TEST)
         tau_0_is_zero = model._tau_0_trace == 0
         assert_array_equal(tau_0_is_zero, jnp.full(num_samples, not sample_intercept))
 
         # the chains are concatenated one after the other
         error_cov_inv = model._main_trace['mu'].error_cov_inv
-        assert error_cov_inv.shape == (*chain_shape, ndpost)
+        assert error_cov_inv.shape == (*chain_shape, NDPOST)
         assert_close_matrices(
             model.sigma_trace, lax.rsqrt(error_cov_inv).reshape(-1), rtol=1e-6
         )
@@ -1132,16 +1150,16 @@ class TestBcf:
 
     def test_no_test_predictions(self, keys: split) -> None:
         """Without x_test, the test prediction attributes stay None."""
-        train = gen_bcf_data(keys.pop(), n=30)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
         model = bcf(
             x_train=train.x,
             y_train=train.y,
             z_train=train.z,
             pihat_train=train.pihat,
-            num_trees_mu=2,
-            num_trees_tau=2,
-            ndpost=3,
-            nskip=1,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             seed=int_seed(keys.pop()),  # covers integer seeds
         )
         assert model.mu_test is None
@@ -1151,15 +1169,17 @@ class TestBcf:
 
     def test_invalid_test_inputs(self, keys: split) -> None:
         """Inconsistent test inputs are rejected before running the MCMC."""
-        train, test = split_bcf_data(gen_bcf_data(keys.pop(), n=45), 30)
+        train, test = split_bcf_data(
+            gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
+        )
         kwargs: dict = dict(
             x_train=train.x,
             y_train=train.y,
             z_train=train.z,
-            num_trees_mu=2,
-            num_trees_tau=2,
-            ndpost=2,
-            nskip=1,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             seed=keys.pop(),
         )
         with pytest.raises(ValueError, match='require `x_test`'):
@@ -1185,11 +1205,11 @@ class TestBcf:
                 **kwargs, pihat_train=train.pihat, x_test=test.x, pihat_test=train.pihat
             )
         with pytest.raises(EquinoxRuntimeError, match='must be 0 or 1'):
-            bcf(**kwargs, x_test=test.x, z_test=jnp.full(15, 2.0))
+            bcf(**kwargs, x_test=test.x, z_test=jnp.full(N_TEST, 2.0))
 
     def test_x_test_format_mismatch(self, keys: split) -> None:
         """x_test format must match x_train, at construction and at predict."""
-        train = gen_bcf_data(keys.pop(), n=30)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
         x_test_df = pd.DataFrame(np.asarray(train.x[:15, :]))
         with pytest.raises(ValueError, match='does not match x_train'):
             bcf(
@@ -1198,10 +1218,10 @@ class TestBcf:
                 z_train=train.z,
                 pihat_train=train.pihat,
                 x_test=x_test_df,
-                num_trees_mu=2,
-                num_trees_tau=2,
-                ndpost=2,
-                nskip=1,
+                num_trees_mu=NUM_TREES_MU,
+                num_trees_tau=NUM_TREES_TAU,
+                ndpost=NDPOST,
+                nskip=NSKIP,
                 seed=keys.pop(),
             )
         model = bcf(
@@ -1209,10 +1229,10 @@ class TestBcf:
             y_train=train.y,
             z_train=train.z,
             pihat_train=train.pihat,
-            num_trees_mu=2,
-            num_trees_tau=2,
-            ndpost=3,
-            nskip=1,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
             seed=keys.pop(),
         )
         with pytest.raises(ValueError, match='does not match x_train'):

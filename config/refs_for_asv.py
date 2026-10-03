@@ -40,6 +40,8 @@ the floor for `bartz` itself (= oldest benchmarked version).
 """
 
 import datetime
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from git import Commit, Repo
@@ -52,6 +54,22 @@ MIN_AGE = datetime.timedelta(days=365)
 MIN_RELEASES_BACK = 11
 NUM_LAST = 3
 NUM_SPREAD = 3
+
+
+@dataclass(frozen=True, order=True)
+class Tag:
+    """A version tag, ordered by date."""
+
+    date: datetime.datetime
+    """Commit date of the tagged commit."""
+
+    name: str
+    """Tag name, e.g., `v0.1.0`."""
+
+    @property
+    def version(self) -> Version:
+        """The version parsed from the tag name."""
+        return Version(self.name)
 
 
 def get_default_branch_name(repo: Repo) -> str:
@@ -103,9 +121,7 @@ def default_branch_commit(repo: Repo) -> Commit:
     return commit
 
 
-def select_tags(
-    tags: list[tuple[datetime.datetime, str]], today: datetime.datetime
-) -> list[tuple[datetime.datetime, str]]:
+def select_tags(tags: Sequence[Tag], today: datetime.datetime) -> tuple[Tag, ...]:
     """Select the tags to benchmark.
 
     The selection comprises:
@@ -115,65 +131,59 @@ def select_tags(
       `NUM_LAST` last tags
     - the `NUM_LAST` last tags
     """
-    tags = sorted(tags)
+    tags = tuple(sorted(tags))
     if len(tags) <= 1 + NUM_SPREAD + NUM_LAST:
         return tags
 
-    in_window = [i for i, (date, _) in enumerate(tags) if date >= today - MIN_AGE]
+    in_window = tuple(i for i, tag in enumerate(tags) if tag.date >= today - MIN_AGE)
     first = min((*in_window[:1], max(0, len(tags) - MIN_RELEASES_BACK)))
     oldest = tags[first]
     last = tags[-NUM_LAST:]
     candidates = tags[first + 1 : -NUM_LAST]
 
-    end = last[0][0]
-    step = (end - oldest[0]) / (NUM_SPREAD + 1)
-    spread = []
+    step = (last[0].date - oldest.date) / (NUM_SPREAD + 1)
+    spread: tuple[Tag, ...] = ()
     for k in range(1, NUM_SPREAD + 1):
-        target = oldest[0] + k * step
-        unused = [tag for tag in candidates if tag not in spread]
-        spread.append(min(unused, key=lambda tag: abs(tag[0] - target)))
+        target = oldest.date + k * step
+        unused = tuple(tag for tag in candidates if tag not in spread)
+        spread += (min(unused, key=lambda tag: abs(tag.date - target)),)
 
-    return sorted((oldest, *spread, *last))
+    return tuple(sorted((oldest, *spread, *last)))
 
 
-def benchmarked_version_tags(
-    repo_path: Path | str = '.',
-) -> list[tuple[datetime.datetime, str]]:
-    """Return `[(commit_date, tag_name), ...]` of tags benchmarked by ASV.
+def benchmarked_version_tags(repo_path: Path | str = '.') -> tuple[Tag, ...]:
+    """Return the tags benchmarked by ASV, sorted oldest first.
 
     Considers tags that start with `v`, are reachable from the default
     branch, and are at least `MIN_VERSION`, selected by `select_tags`.
-    Sorted oldest first.
     """
     repo = Repo(repo_path)
     head_commit = default_branch_commit(repo)
-    tags: list[tuple[datetime.datetime, str]] = []
-    for tag in repo.tags:
-        commit = tag.commit
-        if (
-            not tag.name.startswith('v')
-            or Version(tag.name) < MIN_VERSION
-            or not repo.is_ancestor(commit, head_commit)
-        ):
-            continue
-        commit_date = datetime.datetime.fromtimestamp(
-            commit.committed_date, tz=datetime.timezone.utc
+    tags = (
+        Tag(
+            date=datetime.datetime.fromtimestamp(
+                tag.commit.committed_date, tz=datetime.timezone.utc
+            ),
+            name=tag.name,
         )
-        tags.append((commit_date, tag.name))
-    return select_tags(tags, datetime.datetime.now(datetime.timezone.utc))
+        for tag in repo.tags
+        if tag.name.startswith('v')
+        and Version(tag.name) >= MIN_VERSION
+        and repo.is_ancestor(tag.commit, head_commit)
+    )
+    return select_tags(tuple(tags), datetime.datetime.now(datetime.timezone.utc))
 
 
 def oldest_benchmarked_version(repo_path: Path | str = '.') -> Version:
     """Return the oldest bartz version benchmarked by ASV."""
-    return Version(benchmarked_version_tags(repo_path)[0][1])
+    return benchmarked_version_tags(repo_path)[0].version
 
 
 def main() -> None:
     repo = Repo('.')
     default_branch_name = get_default_branch_name(repo)
-    refs = [tag_name for _, tag_name in benchmarked_version_tags('.')]
-    refs.append(default_branch_name)
-    print('--no-walk', *refs)
+    tags = benchmarked_version_tags('.')
+    print('--no-walk', *(tag.name for tag in tags), default_branch_name)
 
 
 if __name__ == '__main__':

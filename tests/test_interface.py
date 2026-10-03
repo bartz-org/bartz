@@ -2448,11 +2448,7 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
 
     kw.update(num_data_devices=None)
 
-    skip_empty_shard_map_bug(
-        num_datapoints == 0
-        and kw.get('num_chains') is not None
-        and kw.get('num_chain_devices', 'auto') is not None
-    )
+    skip_empty_shard_map_bug(num_datapoints == 0 and get_expect_sharded(kw))
 
     init_kw = dict(kw.get('init_kw', {}))
     init_kw.update(

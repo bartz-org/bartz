@@ -31,7 +31,7 @@ SOFTWARE.
 # Changelog
 
 
-## 0.13.0 Mom, all my friends got a bayesian causal forest for their v0.13, why can't I have one? (2026-10-02)
+## 0.13.0 Mom, all my friends got a bayesian causal forest for their v0.13, why can't I have one? (2026-10-04)
 
 * New features
     * Bayesian Causal Forests in the submodule `bartz.bcf` (thanks Miaoqing Yu)

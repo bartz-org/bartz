@@ -31,7 +31,7 @@ SOFTWARE.
 # Changelog
 
 
-## 0.13.0 Mom, all my friends got a bayesian causal forest for their v0.13, why can't I have one? (2026-10-02)
+## 0.13.0 Mom, all my friends got a bayesian causal forest for their v0.13, why can't I have one? (2026-10-04)
 
 * New features
     * Bayesian Causal Forests in the submodule `bartz.bcf` (thanks Miaoqing Yu)
@@ -45,7 +45,6 @@ SOFTWARE.
     * Each marginal variance has prior IG(sigma_df/2, sigma_scale^2 sigma_df/2) in all cases
     * New `Wishart.from_inv_wishart_marginal_nu()` and `Wishart.inv_wishart_marginal_nu` to help respect the convention
 * `run_mcmc` accepts a custom `step` function and custom `State` subclass
-* MCMC step 7-15% faster on cpu (TO BE CONFIRMED BY BENCHMARKS)
 * Reference documentation for how BART is defined and implemented in bartz (LaTeX source in `docs/math/` in the repository)
 
 

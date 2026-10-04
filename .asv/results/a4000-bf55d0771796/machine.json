@@ -1,0 +1,9 @@
+{
+    "arch": "x86_64",
+    "cpu": "AMD EPYC 7452 32-Core Processor",
+    "machine": "a4000-bf55d0771796",
+    "num_cpu": "64",
+    "os": "Linux 5.15.0-191-generic",
+    "ram": "151724113920",
+    "version": 1
+}

@@ -35,6 +35,7 @@ from jax.sharding import Mesh
 from jaxtyping import Array, Float, Float32, Int32, UInt
 
 from bartz._jaxext import Module, field, jit
+from bartz._npz import serializable
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
@@ -66,6 +67,7 @@ class Trace(Module):
         return self
 
 
+@serializable
 class BurninTrace(Trace):
     """MCMC trace with only diagnostic values."""
 
@@ -151,6 +153,7 @@ class BurninTrace(Trace):
         )
 
 
+@serializable
 class MainTrace(BurninTrace):
     """MCMC trace with trees and diagnostic values."""
 
@@ -219,6 +222,7 @@ class MainTrace(BurninTrace):
         return replace(self, leaf_tree=jnp.where(is_leaf, self.leaf_tree, 0))
 
 
+@serializable
 class MainTraceWithTrainPred(MainTrace):
     """Main trace that also stores the latent predictions at the training points.
 

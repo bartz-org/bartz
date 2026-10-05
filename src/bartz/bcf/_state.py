@@ -31,6 +31,7 @@ import jax.numpy as jnp
 from jaxtyping import Array, Bool, Float32, UInt
 
 from bartz._jaxext import field
+from bartz._npz import serializable
 from bartz.mcmcstep._axes import CHAIN_AXIS
 from bartz.mcmcstep._state import (
     ArrayLike,
@@ -43,6 +44,7 @@ from bartz.mcmcstep._state import (
 )
 
 
+@serializable
 class BCFState(State):
     """The full MCMC state for a Bayesian Causal Forest.
 

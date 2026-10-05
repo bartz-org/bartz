@@ -35,6 +35,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Float32, Integer, Key, Real, Shaped, UInt
 
 from bartz._jaxext import autobatch, jit, minimal_unsigned_dtype, unique
+from bartz._npz import serializable
 
 
 def _parse_xinfo(
@@ -443,6 +444,7 @@ class BinnerFactory(Protocol):
         ...
 
 
+@serializable
 class RangeEvenBinner(Binner):
     """Binner with cutpoints evenly spaced over the observed range.
 
@@ -504,6 +506,7 @@ class RangeEvenBinner(Binner):
         return _bin_predictors_uniform(X, self._low, self._high, self._max_bins)
 
 
+@serializable
 class UniqueQuantileBinner(Binner):
     """Binner with quantile-based cutpoints from observed unique values.
 
@@ -571,6 +574,7 @@ class UniqueQuantileBinner(Binner):
         return _bin_predictors(X, self._splits)
 
 
+@serializable
 class GivenSplitsBinner(Binner):
     """Binner with cutpoints supplied directly in R BART `xinfo` format.
 

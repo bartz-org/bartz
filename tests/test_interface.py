@@ -3604,17 +3604,28 @@ def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:
         assert bart.num_trees == 200
 
 
-def test_dump_load_roundtrip(bkw: BartKW, tmp_path: Path) -> None:
-    """`dump`/`load` preserve every array in the model, dropping only the mesh."""
+@pytest.mark.parametrize('fmt', ['npz', 'pickle'])
+def test_save_load_roundtrip(
+    bkw: BartKW, tmp_path: Path, fmt: Literal['npz', 'pickle']
+) -> None:
+    """Saving and loading preserve every array in the model, dropping only the mesh."""
     # keep `bkw.kw` unchanged so the MCMC reuses an already-compiled shape
-    # rather than triggering a fresh (slower) compilation
-    bart = Bart(**bkw.kw)
+    # rather than triggering a fresh (slower) compilation. Use `OriginalBart`
+    # because npz archives accept only the registered class, not subclasses.
+    bart = OriginalBart(**bkw.kw)
 
-    path = tmp_path / 'bart.pkl'
-    bart.dump(path)
-    loaded = Bart.load(path)
+    if fmt == 'npz':
+        path = tmp_path / 'bart.npz'
+        bart.save_npz(path)
+        loaded = OriginalBart.load_npz(path)
+    else:
+        path = tmp_path / 'bart.pkl'
+        with pytest.deprecated_call():
+            bart.dump(path)
+        with pytest.deprecated_call():
+            loaded = OriginalBart.load(path)
 
-    assert isinstance(loaded, Bart)
+    assert isinstance(loaded, OriginalBart)
     # the device mesh and the explicit device are the only things dropped; the
     # reload is single-device
     assert loaded._mcmc_state.config.mesh is None
@@ -3640,7 +3651,7 @@ def test_load_wrong_type(tmp_path: Path) -> None:
     path = tmp_path / 'notbart.pkl'
     with path.open('wb') as file:
         pickle.dump([1, 2, 3], file)
-    with pytest.raises(TypeError, match='not a Bart'):
+    with pytest.raises(TypeError, match='not a Bart'), pytest.deprecated_call():
         Bart.load(path)
 
 

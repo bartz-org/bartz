@@ -35,7 +35,9 @@ import json
 from collections.abc import Mapping
 from dataclasses import fields
 from os import PathLike
+from pathlib import Path
 from typing import Any, TypeAlias, TypeVar
+from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
@@ -143,14 +145,28 @@ def save_npz(path: str | PathLike, obj: object, *, compresslevel: int = 3) -> No
     root = encode(obj, '', arrays)
     meta = dict(format_version=FORMAT_VERSION, bartz_version=__version__, root=root)
 
-    with ZipFile(
-        path, 'w', compression=ZIP_DEFLATED, compresslevel=compresslevel
-    ) as zf:
-        zf.writestr(META_KEY, json.dumps(meta, indent=1))
-        for key, value in arrays.items():
-            with zf.open(f'{key}.npy', 'w', force_zip64=True) as file:
-                # `asarray` does not copy on cpu
-                np.lib.format.write_array(file, np.asarray(value), allow_pickle=False)
+    # write to a temporary file and then rename it, so a failure does not
+    # destroy an existing file at `path`
+    path = Path(path)
+    tmp = path.with_name(f'.{path.name}.{uuid4().hex}.tmp')
+    try:
+        with (
+            tmp.open('xb') as file,
+            ZipFile(
+                file, 'w', compression=ZIP_DEFLATED, compresslevel=compresslevel
+            ) as zf,
+        ):
+            zf.writestr(META_KEY, json.dumps(meta, indent=1))
+            for key, value in arrays.items():
+                with zf.open(f'{key}.npy', 'w', force_zip64=True) as member:
+                    # `asarray` does not copy on cpu
+                    np.lib.format.write_array(
+                        member, np.asarray(value), allow_pickle=False
+                    )
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def load_npz(path: str | PathLike) -> object:

@@ -191,6 +191,18 @@ def test_path_as_given(tmp_path: Path) -> None:
     assert load_npz(path) == Box(None)
 
 
+def test_failed_save_keeps_file(tmp_path: Path) -> None:
+    """Check a save failing midway leaves an existing archive untouched."""
+    path = tmp_path / 'box.npz'
+    save_npz(path, Box(1))
+    deleted = jnp.zeros(3)
+    deleted.delete()
+    with pytest.raises(RuntimeError, match='deleted'):
+        save_npz(path, Box(deleted))
+    assert load_npz(path) == Box(1)
+    assert list(tmp_path.iterdir()) == [path]
+
+
 class Unregistered(Module):
     """Module not registered for npz archives."""
 

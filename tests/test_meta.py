@@ -27,6 +27,7 @@
 from functools import partial
 from types import SimpleNamespace
 
+import numpy
 import pytest
 from jax import config, debug_nans, jit, random
 from jax import numpy as jnp
@@ -172,6 +173,14 @@ class TestJaxNoCopyBehavior:
             qp = q.unsafe_buffer_pointer()
 
             assert qp == yp
+
+    def test_numpy_conversion_no_copy(self) -> None:
+        """Check `numpy.asanyarray` views the buffer of a jax array on cpu."""
+        x = jnp.arange(100)
+        if x.platform() != 'cpu':  # pragma: no cover, gpu-only
+            pytest.skip('a non-cpu array must be copied to host memory')
+        y = numpy.asanyarray(x)
+        assert y.ctypes.data == x.unsafe_buffer_pointer()
 
 
 @pytest.mark.parametrize('dt_exp', [jnp.float16, jnp.float32, jnp.int32])

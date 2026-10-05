@@ -29,6 +29,7 @@ import json
 from operator import attrgetter
 from pathlib import Path
 from typing import Any, Literal, cast
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import equinox as eqx
 import jax
@@ -162,6 +163,21 @@ def _deserialize_binner(data: Any) -> Any:  # noqa: ANN401
         object.__setattr__(binner, '_max_bins', int(data['binner._max_bins']))
         object.__setattr__(binner, 'max_split', jnp.asarray(data['binner.max_split']))
     return binner
+
+
+def savez_deflate(path: str | Path, arrays: dict[str, Any], compresslevel: int) -> None:
+    """Like `numpy.savez_compressed`, but with a configurable compression level."""
+    path = Path(path)
+    if path.suffix != '.npz':
+        path = path.with_name(f'{path.name}.npz')
+    with ZipFile(
+        path, 'w', compression=ZIP_DEFLATED, compresslevel=compresslevel
+    ) as zf:
+        for name, value in arrays.items():
+            with zf.open(f'{name}.npy', 'w', force_zip64=True) as file:
+                np.lib.format.write_array(
+                    file, np.asanyarray(value), allow_pickle=False
+                )
 
 
 def make_leaf_prior_cov_inv(
@@ -731,7 +747,7 @@ class bcf(eqx.Module):
             if val is not None:
                 state[key] = np.asarray(val)
 
-        np.savez_compressed(path, allow_pickle=True, **state)
+        savez_deflate(path, state, compresslevel=3)
 
     @classmethod
     def load_npz(cls, path: str | Path) -> 'bcf':

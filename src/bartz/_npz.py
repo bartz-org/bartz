@@ -57,10 +57,29 @@ Json: TypeAlias = Any
 C = TypeVar('C', bound=type)
 
 
+def qualified_name(cls: type) -> str:
+    """Return the name of `cls` including its module."""
+    return f'{cls.__module__}.{cls.__qualname__}'
+
+
+def is_registered(cls: type) -> bool:
+    """Check if `cls` is registered, allowing for its module being reloaded."""
+    registered = _REGISTRY.get(cls.__name__)
+    return registered is not None and qualified_name(registered) == qualified_name(cls)
+
+
 def serializable(cls: C) -> C:
-    """Register a dataclass as allowed in npz archives, under its name."""
+    """Register a dataclass as allowed in npz archives, under its name.
+
+    Registering again the same class, e.g., after reloading its module,
+    replaces it.
+    """
     tag = cls.__name__
-    assert tag not in _REGISTRY, f'class name {tag!r} already registered'
+    if tag in _REGISTRY and not is_registered(cls):
+        msg = (
+            f'class name {tag!r} already registered by {qualified_name(_REGISTRY[tag])}'
+        )
+        raise ValueError(msg)
     _REGISTRY[tag] = cls
     return cls
 
@@ -90,7 +109,7 @@ def encode(obj: object, path: str, arrays: dict[str, Array]) -> Json:
             raise TypeError(msg)
         arrays[path] = obj
         return dict(type='array', key=path)
-    elif _REGISTRY.get(type(obj).__name__) is type(obj):
+    elif is_registered(type(obj)):
         values = {
             f.name: encode(getattr(obj, f.name), join(path, f.name), arrays)
             for f in fields(obj)  # ty: ignore[invalid-argument-type]

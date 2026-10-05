@@ -203,6 +203,32 @@ def test_failed_save_keeps_file(tmp_path: Path) -> None:
     assert list(tmp_path.iterdir()) == [path]
 
 
+def make_reloadable() -> type[Module]:
+    """Define a new class each time with the same name, like a module reload."""
+
+    @serializable
+    class Reloadable(Module):
+        value: Any
+
+    return Reloadable
+
+
+def test_reregister(tmp_path: Path) -> None:
+    """Check registering again a class replaces it, and a homonym raises."""
+    old = make_reloadable()
+    new = make_reloadable()
+    assert old is not new
+    path = tmp_path / 'reloadable.npz'
+    save_npz(path, old(1))  # ty: ignore[too-many-positional-arguments]
+    assert type(load_npz(path)) is new
+
+    with pytest.raises(ValueError, match="'Box' already registered by"):
+
+        @serializable
+        class Box(Module):
+            pass
+
+
 class Unregistered(Module):
     """Module not registered for npz archives."""
 

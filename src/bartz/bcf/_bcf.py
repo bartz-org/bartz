@@ -182,6 +182,9 @@ class bcf(eqx.Module):
     mean functions represented as sums of decision trees:
     Y = mu(X, pihat) + tau(X, pihat) * Z + error
 
+    The hyperparameters with units are on the scale of the standardized
+    response, see `standardize`. The outputs are on the scale of `y_train`.
+
     Parameters
     ----------
     x_train
@@ -224,9 +227,9 @@ class bcf(eqx.Module):
     sigma_df
         Prior degrees of freedom for error variance.
     sigma_scale
-        Prior scale for error variance.
+        Prior scale of the error standard deviation.
     sigma_init
-        Initial value for error variance.
+        Initial value of the error standard deviation.
     leaf_prior_cov_inv_mu
         Custom leaf prior precision for the prognostic forest.
     leaf_prior_cov_inv_tau
@@ -254,7 +257,11 @@ class bcf(eqx.Module):
     sigma2_leaf_scale_tau
         The scale parameter for the Inverse-Gamma prior on the treatment effect forest leaf variance.
     standardize
-        Whether to standardize the response `y_train` internally during model training.
+        Whether to standardize `y_train` internally, ignored for binary
+        outcomes. If `False`, the hyperparameters with units (`sigma_scale`,
+        `sigma_init`, `leaf_prior_cov_inv_*`, `tau_0_prior_var`,
+        `sigma2_leaf_scale_*`) are on the scale of `y_train` instead of the
+        standardized one.
     outcome_type
         Either 'continuous' or 'binary' (probit link).
     delta_max
@@ -352,8 +359,8 @@ class bcf(eqx.Module):
         if standardize:
             y_mean = jnp.mean(y_train)
             y_std = jnp.std(y_train)
-            y_std_safe = jnp.where(y_std == 0, 1.0, y_std)
-            y_train_internal = (y_train - y_mean) / y_std_safe
+            y_std = jnp.where(y_std == 0, 1.0, y_std)
+            y_train_internal = (y_train - y_mean) / y_std
         else:
             y_mean = jnp.float32(0.0)
             y_std = jnp.float32(1.0)

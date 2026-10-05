@@ -1159,7 +1159,7 @@ def _process_predictor_input(
     x: Real[ArrayLike, 'p n'] | DataFrame,
 ) -> tuple[Shaped[Array, 'p n'], Any]:
     if isinstance(x, DataFrame):
-        fmt = dict(kind='dataframe', columns=x.columns)
+        fmt = dict(kind='dataframe', columns=list(x.columns))
         x = x.to_numpy().T
     else:
         fmt = dict(kind='array', num_covar=x.shape[0])

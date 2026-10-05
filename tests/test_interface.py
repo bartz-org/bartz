@@ -3184,6 +3184,18 @@ def test_data_format_mismatch(bkw: BartKW) -> None:
         bart.predict(numpy.array(bkw.x_test), error_scale=w)
 
 
+def test_pandas_columns(bkw: BartKW) -> None:
+    """Test predicting on a pandas frame other than the training one."""
+    p, _ = bkw.x_test.shape
+    columns = [f'x{i}' for i in range(p)]
+    x_train = pd.DataFrame(numpy.array(bkw.kw['x_train']).T, columns=columns)
+    bart = Bart(**dict(bkw.kw, x_train=x_train))
+    x_test = pd.DataFrame(numpy.array(bkw.x_test).T, columns=columns)
+    bart.predict(x_test, kind='latent_samples')
+    with pytest.raises(ValueError, match='format mismatch'):
+        bart.predict(x_test[columns[::-1]], kind='latent_samples')
+
+
 def test_automatic_integer_types(bkw: BartKW) -> None:
     """Test that integer variables in the MCMC state have the correct type."""
     kw = bkw.kw

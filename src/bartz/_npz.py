@@ -55,6 +55,7 @@ _REGISTRY: dict[str, type] = {}
 Json: TypeAlias = Any
 
 C = TypeVar('C', bound=type)
+T = TypeVar('T')
 
 
 def qualified_name(cls: type) -> str:
@@ -186,6 +187,14 @@ def save_npz(path: str | PathLike, obj: object, *, compresslevel: int = 3) -> No
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def check_class(obj: object, cls: type[T], path: str | PathLike) -> T:
+    """Check the object loaded from `path` is an instance of `cls`."""
+    if not isinstance(obj, cls):
+        msg = f'{path} contains a {type(obj).__name__}, not a {cls.__name__}'
+        raise TypeError(msg)
+    return obj
 
 
 def load_npz(path: str | PathLike) -> object:

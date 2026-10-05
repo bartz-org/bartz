@@ -50,7 +50,7 @@ from bartz._interface import (
     predict_latent,
 )
 from bartz._jaxext import split
-from bartz._npz import load_npz, save_npz, serializable
+from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import init_bcf
 from bartz.mcmcloop import run_mcmc
@@ -531,17 +531,8 @@ class bcf(eqx.Module):
         -------
         bcf
             The loaded model, on the default device.
-
-        Raises
-        ------
-        TypeError
-            If the file does not contain a `bcf` instance.
         """
-        obj = load_npz(path)
-        if not isinstance(obj, cls):
-            msg = f'{path} contains a {type(obj).__name__}, not a {cls.__name__}'
-            raise TypeError(msg)
-        return obj
+        return check_class(load_npz(path), cls, path)
 
     def predict(
         self,

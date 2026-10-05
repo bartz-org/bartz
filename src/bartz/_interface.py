@@ -50,7 +50,7 @@ from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UIn
 from numpy import ndarray
 
 from bartz._jaxext import equal_shards, is_key, jit, project, split
-from bartz._npz import load_npz, save_npz, serializable
+from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.grove import (
     TreeHeaps,
     TreesTrace,
@@ -710,17 +710,8 @@ class Bart(Module):
         Returns
         -------
         The loaded model, on the default device.
-
-        Raises
-        ------
-        TypeError
-            If the file does not contain a `Bart` instance.
         """
-        obj = load_npz(path)
-        if not isinstance(obj, cls):
-            msg = f'{path} contains a {type(obj).__name__}, not a {cls.__name__}'
-            raise TypeError(msg)
-        return obj
+        return check_class(load_npz(path), cls, path)
 
     def dump(self, path: str | PathLike) -> None:
         """Serialize the fitted model to a file with `pickle`.

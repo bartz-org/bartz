@@ -1030,9 +1030,10 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     negligible, so every heap node is resampled essentially from its prior
     ``N(0, leaf_prior_cov)`` each sweep. Nodes that are not actual leaves carry
     zero likelihood precision, hence are drawn exactly from the prior; pooling
-    every heap node (over chains, samples, trees, and positions) thus estimates
-    ``leaf_prior_cov`` with ~``tree_size`` times more draws than the actual
-    leaves alone, at no extra sampling cost.
+    every heap node of the final state (over chains, trees, and positions) thus
+    estimates ``leaf_prior_cov`` with ~``tree_size`` times more draws than the
+    actual leaves alone, at no extra sampling cost. The trace can not be used
+    because it zeroes the nodes that are not leaves.
 
     This catches sampling the leaf noise with a wrong covariance, e.g. as
     ``z / diag(L)`` instead of ``L^-T z`` (a `solve_triangular` missing
@@ -1059,17 +1060,17 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     )
     bart = Bart(**kw)
 
-    # pool every heap node (each an independent prior draw) over chains, samples,
-    # trees, and positions; leaf_tree is (..., k, tree_size), stored in
-    # prior-sd units, so convert it to data units first
-    trace = bart._main_trace
-    leaf_tree = trace.leaf_unit[..., None] * trace.leaf_tree
+    # pool every heap node (each an independent prior draw) over chains, trees,
+    # and positions; leaf_tree is (..., k, tree_size), stored in prior-sd units,
+    # so convert it to data units first
+    forest = bart._mcmc_state.forest
+    leaf_tree = forest.leaf_unit[..., None] * forest.leaf_tree
     leaves = jnp.moveaxis(leaf_tree, -2, -1).reshape(-1, k)
     empirical_cov = jnp.cov(leaves.T)
 
-    # the large pool drives the 2-norm sampling error well below 0.01 (measured
-    # <0.007); the off-diagonal-zeroing bug instead deviates by ~0.4
-    assert_close_matrices(empirical_cov, leaf_prior_cov, rtol=0.02)
+    # the 2-norm sampling error is below 0.07 (measured over 8 seeds with ~1000
+    # draws); the off-diagonal-zeroing bug instead deviates by ~0.4
+    assert_close_matrices(empirical_cov, leaf_prior_cov, rtol=0.15)
 
 
 def test_leaf_prior_strong_limit(bkw: BartKW, subtests: SubTests) -> None:

@@ -55,7 +55,7 @@ from bartz.mcmcstep import Forest, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from bartz.testing import gen_data
-from tests.test_mcmcloop import assert_trace_close, cat_traces
+from tests.test_mcmcloop import assert_trace_close, cat_traces, zero_non_leaves
 from tests.util import (
     assert_allclose,
     assert_array_equal,
@@ -762,9 +762,10 @@ class TestBcf:
             )
             assert_array_equal(main_single.tau_0[..., -1], final_single.tau_0)
             assert_array_equal(main_single.b[..., -1, :], final_single.b)
+            forest_tau = final_single.forest_tau
             assert_array_equal(
                 main_single.tau.leaf_tree[..., -1, :, :],
-                final_single.forest_tau.leaf_tree,
+                zero_non_leaves(forest_tau.leaf_tree, forest_tau.split_tree),
             )
 
     def test_unsplittable_x_reduction(self, keys: split) -> None:

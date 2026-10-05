@@ -44,6 +44,7 @@ from bartz._interface import (
     FloatLike,
     Series,
     _flatten_chain_sample,
+    _guarded_response_variance,
     _process_error_variance_settings,
     _process_leaf_variance_settings,
     _process_offset_settings,
@@ -320,10 +321,10 @@ class bcf(eqx.Module):
         adaptive_coding: bool = False,
         sample_sigma2_leaf_mu: bool = True,
         sigma2_leaf_shape_mu: float = 3.0,
-        sigma2_leaf_scale_mu: float | None = None,
+        sigma2_leaf_scale_mu: FloatLike | None = None,
         sample_sigma2_leaf_tau: bool = False,
         sigma2_leaf_shape_tau: float = 3.0,
-        sigma2_leaf_scale_tau: float | None = None,
+        sigma2_leaf_scale_tau: FloatLike | None = None,
         standardize: bool = True,
         outcome_type: Literal['continuous', 'binary'] = 'continuous',
         delta_max: float = 0.9,
@@ -469,10 +470,14 @@ class bcf(eqx.Module):
         p_nonterminal_mu = make_p_nonterminal(d=10, alpha=0.95, beta=2.0)
         p_nonterminal_tau = make_p_nonterminal(d=5, alpha=0.25, beta=3.0)
 
+        if outcome_type == 'binary':
+            var_y = 1.0
+        else:
+            var_y = _guarded_response_variance(y_train_internal, None, None)
         if sigma2_leaf_scale_mu is None:
-            sigma2_leaf_scale_mu = 1.0 / num_trees_mu
+            sigma2_leaf_scale_mu = var_y / num_trees_mu
         if sigma2_leaf_scale_tau is None:
-            sigma2_leaf_scale_tau = 0.5 / num_trees_tau
+            sigma2_leaf_scale_tau = 0.5 * var_y / num_trees_tau
 
         # 3.5 Bin the unified data
         rng = random.key(seed) if not isinstance(seed, jax.Array) else seed

@@ -182,8 +182,9 @@ class bcf(eqx.Module):
     mean functions represented as sums of decision trees:
     Y = mu(X, pihat) + tau(X, pihat) * Z + error
 
-    The hyperparameters with units are on the scale of the standardized
-    response, see `standardize`. The outputs are on the scale of `y_train`.
+    For continuous outcomes, the hyperparameters with units are on the scale
+    of the standardized response, see `standardize`, while the outputs are on
+    the scale of `y_train`.
 
     Parameters
     ----------

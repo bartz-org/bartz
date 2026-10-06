@@ -403,8 +403,8 @@ class bcf(eqx.Module):
             None,
         )
 
-        p_nonterminal_mu = make_p_nonterminal(d=10, alpha=0.95, beta=2.0)
-        p_nonterminal_tau = make_p_nonterminal(d=5, alpha=0.25, beta=3.0)
+        p_nonterminal_mu = make_p_nonterminal(d=6, alpha=0.95, beta=2.0)
+        p_nonterminal_tau = make_p_nonterminal(d=6, alpha=0.25, beta=3.0)
 
         if outcome_type == 'binary':
             var_y = 1.0

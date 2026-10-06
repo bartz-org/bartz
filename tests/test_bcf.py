@@ -951,6 +951,8 @@ class TestBcf:
             np.mean(np.reciprocal(model_jax._leaf_prior_cov_inv_mu_trace)) * y_var
         )
         leaf_var_mu_st = np.mean(model_st.leaf_scale_mu_samples) * y_var
+        # WORKAROUND(stochtree<=0.4.5): its trees are too small (fixed in
+        # stochtree#426), overstating the leaf variance by ~10%; lower rtol to 0.3
         assert_allclose(leaf_var_mu_jax, leaf_var_mu_st, rtol=0.4)
 
         leaf_var_tau_jax = (

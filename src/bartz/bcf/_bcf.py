@@ -147,13 +147,10 @@ class BCFPotentialOutcomes(BCFPrediction):
     """The individual treatment effect ``y1 - y0``."""
 
 
-@jit(static_argnums=(7,))
+@jit(static_argnums=(4,))
 def predict(
     x_test: UInt[Array, 'p_or_p_plus_1 m'],
-    mu_trace: MainTrace,
-    tau_trace: MainTrace,
-    tau_0_trace: Float32[Array, ' num_samples'],
-    b_trace: Float32[Array, 'num_samples 2'],
+    trace: BCFMainTrace,
     y_mean: Float32[Array, ''],
     y_std: Float32[Array, ''],
     probabilities: bool,
@@ -164,12 +161,14 @@ def predict(
     Return the probit outputs of binary models only if `probabilities`.
     """
     # Evaluate the sum-of-trees (both forests walk the same unified test matrix)
-    mu_latent = predict_latent(x_test, mu_trace, 'none')
-    tau_latent = predict_latent(x_test, tau_trace, 'none')
-    tau_latent += tau_0_trace[:, None]
+    mu_latent = predict_latent(x_test, trace.mu, 'none')
+    tau_latent = predict_latent(x_test, trace.tau, 'none')
+    # fold the chains like `predict_latent` does to align the samples
+    tau_latent += _fold_chains(trace, 'tau_0')[:, None]
 
-    b0_expanded = b_trace[:, 0, None]
-    b1_expanded = b_trace[:, 1, None]
+    b = _fold_chains(trace, 'b')
+    b0_expanded = b[:, 0, None]
+    b1_expanded = b[:, 1, None]
     # Control mean: mu(X) + b_0 * (tau(X) + tau_0)
     mu_adjusted = mu_latent + b0_expanded * tau_latent
     # Compute CATE via adaptive coding difference
@@ -352,12 +351,8 @@ class bcf(eqx.Module):
 
     _mcmc_state: Any
     _binner: Any
-    _main_trace: Any
-    _burnin_trace: Any
-    _tau_0_trace: Any
-    _b_trace: Any
-    _leaf_prior_cov_inv_mu_trace: Any
-    _leaf_prior_cov_inv_tau_trace: Any
+    _main_trace: BCFMainTrace
+    _burnin_trace: BCFBurninTrace
     _x_train_fmt: Any = eqx.field(static=True)
     _has_pihat: bool = eqx.field(static=True)
     _y_mean: Float32[Array, '']
@@ -616,21 +611,10 @@ class bcf(eqx.Module):
             ),
             check_platform=None,
         )
-        burnin_trace = cast(BCFBurninTrace, burnin_trace)
-        main_trace = cast(BCFMainTrace, main_trace)
         self._mcmc_state = final_state
         self._binner = binner
-        # fold the chains like `predict_latent` does to align the samples
-        self._tau_0_trace = _fold_chains(main_trace, 'tau_0')
-        self._b_trace = _fold_chains(main_trace, 'b')
-        self._leaf_prior_cov_inv_mu_trace = _fold_chains(
-            main_trace, 'mu.leaf_prior_cov_inv'
-        )
-        self._leaf_prior_cov_inv_tau_trace = _fold_chains(
-            main_trace, 'tau.leaf_prior_cov_inv'
-        )
-        self._main_trace = {'mu': main_trace.mu, 'tau': main_trace.tau}
-        self._burnin_trace = {'mu': burnin_trace.mu, 'tau': burnin_trace.tau}
+        self._main_trace = cast(BCFMainTrace, main_trace)
+        self._burnin_trace = cast(BCFBurninTrace, burnin_trace)
 
         # 6. Predict at the test points, now that the traces are available
         if x_test is not None:
@@ -732,10 +716,7 @@ class bcf(eqx.Module):
         """Implement `predict` on the test predictors stacked with pihat."""
         return predict(
             self._binner.bin(x_test_unified),
-            self._main_trace['mu'],
-            self._main_trace['tau'],
-            self._tau_0_trace,
-            self._b_trace,
+            self._main_trace,
             self._y_mean,
             self._y_std,
             probabilities,
@@ -753,7 +734,7 @@ class bcf(eqx.Module):
     @property
     def sigma_trace(self) -> Float32[Array, ' num_samples']:
         """The posterior trace of residual standard deviation on the outcome scale, chains concatenated."""
-        return sigma_trace(self._main_trace['mu'], self._y_std)
+        return sigma_trace(self._main_trace.mu, self._y_std)
 
     @property
     def mu_test(self) -> Float32[Array, 'num_samples m'] | None:

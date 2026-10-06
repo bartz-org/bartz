@@ -126,9 +126,12 @@ def assert_chains_differ(model: bcf) -> None:
         path: KeyPath, x: Shaped[Array, '*shape'] | None, chain_axis: int | None
     ) -> None:
         if x is not None and chain_axis is not None:
+            # chains, samples, ...
             chains = np.moveaxis(np.asarray(x), chain_axis, 0)
-            # skip the values held fixed, e.g., unsampled leaf prior precisions
-            if not np.all(chains == chains.flat[0]):
+            # skip the values held fixed, i.e., equal across chains and samples,
+            # e.g., unsampled leaf prior precisions, or the coding weights
+            # without adaptive coding
+            if not np.all(chains == chains[:1, :1, ...]):
                 # flatten to compare with the vector norm, the matrix 2-norm
                 # would need an expensive svd on the big tree arrays
                 assert_different_matrices(
@@ -139,9 +142,10 @@ def assert_chains_differ(model: bcf) -> None:
                     err_msg=f'{keystr(path)}: ',
                 )
 
-    traces = dict(model._main_trace, tau_0=model._tau_0_trace.reshape(2, -1))
-    axes = dict({k: chain_vmap_axes(v) for k, v in model._main_trace.items()}, tau_0=0)
-    tree.map_with_path(check, traces, axes, is_leaf=lambda x: x is None)
+    trace = model._main_trace
+    tree.map_with_path(
+        check, trace, chain_vmap_axes(trace), is_leaf=lambda x: x is None
+    )
 
 
 class BCFData(Module):
@@ -567,7 +571,7 @@ class TestBcf:
         )
 
         recovered_sigma2 = jnp.reciprocal(
-            model._main_trace['mu'].error_cov_inv
+            model._main_trace.mu.error_cov_inv
         ) * jnp.square(model._y_std)
         posterior_mean_sigma2 = np.mean(recovered_sigma2)
 
@@ -853,8 +857,8 @@ class TestBcf:
 
         # the leaf prior precisions stay at their initial value
         for trace in (
-            model._leaf_prior_cov_inv_mu_trace,
-            model._leaf_prior_cov_inv_tau_trace,
+            model._main_trace.mu.leaf_prior_cov_inv,
+            model._main_trace.tau.leaf_prior_cov_inv,
         ):
             assert_array_equal(trace, jnp.full_like(trace, trace[0]))
 
@@ -873,8 +877,8 @@ class TestBcf:
             seed=keys.pop(),
         )
 
-        mu_prior_vars_active = model_active._leaf_prior_cov_inv_mu_trace
-        tau_prior_vars_active = model_active._leaf_prior_cov_inv_tau_trace
+        mu_prior_vars_active = model_active._main_trace.mu.leaf_prior_cov_inv
+        tau_prior_vars_active = model_active._main_trace.tau.leaf_prior_cov_inv
 
         assert np.var(mu_prior_vars_active, axis=0).mean() > 1e-4
         assert np.var(tau_prior_vars_active, axis=0).mean() > 1e-4
@@ -951,7 +955,7 @@ class TestBcf:
         y_var = np.var(train.y)
 
         leaf_var_mu_jax = (
-            np.mean(np.reciprocal(model_jax._leaf_prior_cov_inv_mu_trace)) * y_var
+            np.mean(np.reciprocal(model_jax._main_trace.mu.leaf_prior_cov_inv)) * y_var
         )
         leaf_var_mu_st = np.mean(model_st.leaf_scale_mu_samples) * y_var
         # WORKAROUND(stochtree<=0.4.5): its trees are too small (fixed in
@@ -959,7 +963,7 @@ class TestBcf:
         assert_allclose(leaf_var_mu_jax, leaf_var_mu_st, rtol=0.4)
 
         leaf_var_tau_jax = (
-            np.mean(np.reciprocal(model_jax._leaf_prior_cov_inv_tau_trace)) * y_var
+            np.mean(np.reciprocal(model_jax._main_trace.tau.leaf_prior_cov_inv)) * y_var
         )
         leaf_var_tau_st = np.mean(model_st.leaf_scale_tau_samples) * y_var
         assert_allclose(leaf_var_tau_jax, leaf_var_tau_st, rtol=0.5)
@@ -1176,15 +1180,17 @@ class TestBcf:
         assert model._mcmc_state.num_chains() == num_chains
         chain_shape = () if num_chains is None else (num_chains,)
         num_samples = math.prod(chain_shape) * NDPOST
-        assert model._tau_0_trace.shape == (num_samples,)
-        assert model._b_trace.shape == (num_samples, 2)
+        assert model._main_trace.tau_0.shape == (*chain_shape, NDPOST)
+        assert model._main_trace.b.shape == (*chain_shape, NDPOST, 2)
         assert model.mu_test is not None
         assert model.mu_test.shape == (num_samples, N_TEST)
-        tau_0_is_zero = model._tau_0_trace == 0
-        assert_array_equal(tau_0_is_zero, jnp.full(num_samples, not sample_intercept))
+        tau_0_is_zero = model._main_trace.tau_0 == 0
+        assert_array_equal(
+            tau_0_is_zero, jnp.full((*chain_shape, NDPOST), not sample_intercept)
+        )
 
         # the chains are concatenated one after the other
-        error_cov_inv = model._main_trace['mu'].error_cov_inv
+        error_cov_inv = model._main_trace.mu.error_cov_inv
         assert error_cov_inv.shape == (*chain_shape, NDPOST)
         assert_array_equal(model.sigma_trace, lax.rsqrt(error_cov_inv).reshape(-1))
 

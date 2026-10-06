@@ -29,12 +29,14 @@ from dataclasses import replace
 from jaxtyping import Array, Float32
 
 from bartz._jaxext import field
+from bartz._npz import serializable
 from bartz.bcf._state import BCFState, swap_mu_tau_forests
 from bartz.mcmcloop._trace import BurninTrace, MainTrace, Trace
 from bartz.mcmcstep._axes import CHAIN_AXIS
 from bartz.mcmcstep._state import State
 
 
+@serializable
 class BCFBurninTrace(Trace):
     """Burn-in trace of the BCF MCMC, the per-forest diagnostics and the scalar parameters."""
 
@@ -66,6 +68,7 @@ class BCFBurninTrace(Trace):
         return replace(self, mu=self.mu.finalize(), tau=self.tau.finalize())
 
 
+@serializable
 class BCFMainTrace(BCFBurninTrace):
     """Main trace of the BCF MCMC, with the trees of both forests."""
 

@@ -99,6 +99,11 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
             },
         )
 
+    # unfold the chains out of the samples of the scalar parameters
+    shape = old['main_trace.mu.grow_prop_count'].shape
+    tau_0 = old['tau_0_trace']
+    b = np.stack([old['b0_trace'], old['b1_trace']], axis=-1)
+
     # bartz 0.13 can not save models fit on a dataframe
     x_train_fmt = json.loads(old['x_train_fmt'].item())
     root = module(
@@ -109,16 +114,14 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
             _splits=array(arrays, '_binner/_splits', old['binner._splits']),
             max_split=array(arrays, '_binner/max_split', old['binner.max_split']),
         ),
-        _main_trace=dict(
-            type='dict', items=dict(mu=main_trace('mu'), tau=main_trace('tau'))
+        _main_trace=module(
+            'BCFMainTrace',
+            mu=main_trace('mu'),
+            tau=main_trace('tau'),
+            tau_0=array(arrays, '_main_trace/tau_0', tau_0.reshape(shape)),
+            b=array(arrays, '_main_trace/b', b.reshape(*shape, 2)),
         ),
         _burnin_trace=None,
-        _tau_0_trace=array(arrays, '_tau_0_trace', old['tau_0_trace']),
-        _b_trace=array(
-            arrays, '_b_trace', np.stack([old['b0_trace'], old['b1_trace']], axis=1)
-        ),
-        _leaf_prior_cov_inv_mu_trace=None,
-        _leaf_prior_cov_inv_tau_trace=None,
         _x_train_fmt=dict(type='dict', items=x_train_fmt),
         _has_pihat=old['binner.max_split'].size == x_train_fmt['num_covar'] + 1,
         _y_mean=array(arrays, '_y_mean', old['_y_mean']),

@@ -222,7 +222,7 @@ def init_bcf(
     forest_tau = state_tau.forest
     assert forest_tau.prec_tree is not None
     *_, tree_size = forest_tau.prec_tree.shape
-    b_z = b_init[trt_array.astype(int)]
+    b_z = coding_basis(b_init, trt_array)
     prec_tree = initial_prec_tree((num_trees_tau, tree_size), jnp.square(b_z))
     forest_tau = replace(
         forest_tau,
@@ -264,3 +264,10 @@ def init_bcf(
 def swap_mu_tau_forests(state: BCFState) -> BCFState:
     """Swap the prognostic and treatment forests."""
     return replace(state, forest=state.forest_tau, forest_tau=state.forest)
+
+
+def coding_basis(
+    b: Float32[Array, ' 2'], trt: Bool[Array, ' n']
+) -> Float32[Array, ' n']:
+    """Return the coding weight of each unit, ``b[trt]``."""
+    return b[trt.astype(int)]

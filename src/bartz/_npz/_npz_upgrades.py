@@ -87,6 +87,8 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
             },
         )
 
+    # bartz 0.13 can not save models fit on a dataframe
+    x_train_fmt = json.loads(old['x_train_fmt'].item())
     root = module(
         'bcf',
         _mcmc_state=None,
@@ -105,7 +107,8 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
         ),
         _leaf_prior_cov_inv_mu_trace=None,
         _leaf_prior_cov_inv_tau_trace=None,
-        _x_train_fmt=dict(type='dict', items=json.loads(old['x_train_fmt'].item())),
+        _x_train_fmt=dict(type='dict', items=x_train_fmt),
+        _has_pihat=old['binner.max_split'].size == x_train_fmt['num_covar'] + 1,
         _standardize=old['standardize'].item(),
         _y_mean=array(arrays, '_y_mean', old['_y_mean']),
         _y_std=array(arrays, '_y_std', old['_y_std']),

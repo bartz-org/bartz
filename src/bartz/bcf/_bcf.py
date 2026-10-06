@@ -74,20 +74,7 @@ else:
 def process_bcf_predictor_input(
     x: Real[ArrayLike, 'n p'] | DataFrame,
 ) -> tuple[Shaped[Array, 'p n'], Any]:
-    """
-    Process predictors (one predictor per column) to bartz layout (p, n).
-
-    Parameters
-    ----------
-    x
-        The predictor data.
-
-    Returns
-    -------
-    tuple[Shaped[Array, "p n"], Any]
-        A tuple containing the predictors transposed to (p, n) shape and their
-        original format metadata.
-    """
+    """Transpose predictors with one per column to the (p, n) layout, and get their format."""
     if not isinstance(x, DataFrame):
         x = jnp.asarray(x).T
     return _process_predictor_input(x)
@@ -661,8 +648,7 @@ class bcf(eqx.Module):
 
         Returns
         -------
-        bcf
-            The loaded model, on the default device.
+        The loaded model, on the default device.
         """
         return check_class(load_npz(path), cls, path)
 

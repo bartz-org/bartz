@@ -149,8 +149,7 @@ def init_bcf(
 
     Returns
     -------
-    BCFState
-        The initialized BCFState.
+    The initial BCF MCMC state.
 
     Notes
     -----

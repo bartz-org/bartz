@@ -623,7 +623,7 @@ class bcf(eqx.Module):
             return jnp.concatenate([x_test, pihat_test[None, :]], axis=0)
 
     def _predict_unified(
-        self, x_test_unified: Shaped[Array, 'p m'] | Shaped[Array, 'p+1 m']
+        self, x_test_unified: Shaped[Array, 'p_or_p_plus_1 m']
     ) -> BCFPrediction:
         """Implement `predict` on the test predictors stacked with pihat."""
         x_test_binned = self._binner.bin(x_test_unified)

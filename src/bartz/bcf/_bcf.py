@@ -27,7 +27,7 @@
 import sys
 from operator import attrgetter
 from os import PathLike
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, cast
 
 import equinox as eqx
 import jax.numpy as jnp
@@ -63,9 +63,11 @@ from bartz.mcmcstep._state import make_p_nonterminal
 from bartz.prepcovars import UniqueQuantileBinner
 
 if sys.version_info >= (3, 11):
-    from typing import NotRequired
-else:  # WORKAROUND(python<3.11): typing.NotRequired was added in 3.11
-    from typing_extensions import NotRequired
+    from typing import NotRequired, TypedDict
+else:
+    # WORKAROUND(python<3.11): typing.NotRequired was added in 3.11, and
+    # before then typing.TypedDict ignores typing_extensions.NotRequired
+    from typing_extensions import NotRequired, TypedDict
 
 
 def _process_bcf_predictor_input(

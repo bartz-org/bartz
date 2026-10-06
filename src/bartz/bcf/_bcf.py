@@ -260,6 +260,7 @@ class bcf(eqx.Module):
     _leaf_prior_cov_inv_mu_trace: Any
     _leaf_prior_cov_inv_tau_trace: Any
     _x_train_fmt: Any = eqx.field(static=True, default=None)
+    _has_pihat: bool = eqx.field(static=True, default=False)
     _standardize: bool = eqx.field(static=True, default=False)
     _y_mean: Float32[ArrayLike, ''] | float = eqx.field(default=0.0)
     _y_std: Float32[ArrayLike, ''] | float = eqx.field(default=1.0)
@@ -344,24 +345,15 @@ class bcf(eqx.Module):
 
         if pihat_train is not None:
             pihat_train = _process_response_input(pihat_train)
+        self._has_pihat = pihat_train is not None
 
         if x_test is None:
             if z_test is not None or pihat_test is not None:
                 msg = '`z_test` and `pihat_test` require `x_test`.'
                 raise ValueError(msg)
         else:
-            x_test_preprocessed, x_test_fmt = _process_bcf_predictor_input(x_test)
-            _, m = x_test_preprocessed.shape
-            del x_test_preprocessed
-            if x_test_fmt != self._x_train_fmt:
-                msg = (
-                    f'Format of x_test {x_test_fmt} does not match x_train'
-                    f' {self._x_train_fmt}'
-                )
-                raise ValueError(msg)
-            if (pihat_train is None) != (pihat_test is None):
-                msg = '`pihat_train` and `pihat_test` must be passed together.'
-                raise ValueError(msg)
+            x_test = self._process_x_test(x_test, pihat_test)
+            _, m = x_test.shape
             if z_test is not None:
                 z_test = _process_response_input(z_test)
                 (len_z,) = z_test.shape
@@ -373,15 +365,6 @@ class bcf(eqx.Module):
                     jnp.any((z_test != 0) & (z_test != 1)),
                     'Values in `z_test` must be 0 or 1.',
                 ).astype(bool)
-            if pihat_test is not None:
-                pihat_test = _process_response_input(pihat_test)
-                (len_pihat,) = pihat_test.shape
-                if len_pihat != m:
-                    msg = (
-                        f'`pihat_test` has length {len_pihat}, but `x_test` has'
-                        f' {m} rows.'
-                    )
-                    raise ValueError(msg)
 
         # 2. Append pihat to X to create unified predictor matrix
         x_train_unified = x_train
@@ -550,7 +533,7 @@ class bcf(eqx.Module):
 
         # 6. Predict at the test points, now that the traces are available
         if x_test is not None:
-            test_pred = self.predict(x_test, pihat_test=pihat_test)
+            test_pred = self._predict_unified(x_test)
             self._mu_test = test_pred['mu']
             self._tau_test = test_pred['tau']
             if z_test is not None:
@@ -598,17 +581,21 @@ class bcf(eqx.Module):
         x_test
             The test predictors.
         pihat_test
-            The test propensity scores.
+            The test propensity scores, required iff the model was fit with
+            `pihat_train`.
 
         Returns
         -------
         The posterior samples at `x_test`.
-
-        Raises
-        ------
-        ValueError
-            If the format of `x_test` does not match `x_train` format.
         """
+        return self._predict_unified(self._process_x_test(x_test, pihat_test))
+
+    def _process_x_test(
+        self,
+        x_test: Real[ArrayLike, 'm p'] | DataFrame,
+        pihat_test: Float32[ArrayLike, ' m'] | Series | None,
+    ) -> Shaped[Array, 'p m'] | Shaped[Array, 'p+1 m']:
+        """Check the test inputs against the training ones and stack them."""
         x_test, x_test_fmt = _process_bcf_predictor_input(x_test)
         if x_test_fmt != self._x_train_fmt:
             msg = (
@@ -617,14 +604,29 @@ class bcf(eqx.Module):
             )
             raise ValueError(msg)
 
-        if pihat_test is not None:
+        if self._has_pihat and pihat_test is None:
+            msg = '`pihat_test` is required, the model was fit with `pihat_train`.'
+            raise ValueError(msg)
+        elif not self._has_pihat and pihat_test is not None:
+            msg = (
+                '`pihat_test` is not allowed, the model was fit without `pihat_train`.'
+            )
+            raise ValueError(msg)
+        elif pihat_test is None:
+            return x_test
+        else:
             pihat_test = _process_response_input(pihat_test)
+            _, m = x_test.shape
+            (len_pihat,) = pihat_test.shape
+            if len_pihat != m:
+                msg = f'`pihat_test` has length {len_pihat}, but `x_test` has {m} rows.'
+                raise ValueError(msg)
+            return jnp.concatenate([x_test, pihat_test[None, :]], axis=0)
 
-        x_test_unified = x_test
-        if pihat_test is not None:
-            pihat_row = pihat_test[jnp.newaxis, :]
-            x_test_unified = jnp.concatenate([x_test_unified, pihat_row], axis=0)
-
+    def _predict_unified(
+        self, x_test_unified: Shaped[Array, 'p m'] | Shaped[Array, 'p+1 m']
+    ) -> BCFPrediction:
+        """Implement `predict` on the test predictors stacked with pihat."""
         # Bin the test data
         x_test_binned = self._binner.bin(x_test_unified)
 
@@ -716,7 +718,8 @@ class bcf(eqx.Module):
         x_test
             The test predictors.
         pihat_test
-            Optional test propensity scores.
+            The test propensity scores, required iff the model was fit with
+            `pihat_train`.
         rho
             The correlation in [-1, 1] between the errors of `y0` and `y1`.
             The data carry no information on it, see [1]_. It affects only

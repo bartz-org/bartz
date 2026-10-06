@@ -1226,9 +1226,9 @@ class TestBcf:
             bcf(**kwargs, z_test=test.z)
         with pytest.raises(ValueError, match='require `x_test`'):
             bcf(**kwargs, pihat_test=test.pihat)
-        with pytest.raises(ValueError, match='must be passed together'):
+        with pytest.raises(ValueError, match='`pihat_test` is required'):
             bcf(**kwargs, pihat_train=train.pihat, x_test=test.x)
-        with pytest.raises(ValueError, match='must be passed together'):
+        with pytest.raises(ValueError, match='fit without `pihat_train`'):
             bcf(**kwargs, x_test=test.x, pihat_test=test.pihat)
         # jaxtyping binds `m` across x_test/z_test/pihat_test, so disable it to
         # reach the explicit length checks (users run without the import hook)
@@ -1277,6 +1277,38 @@ class TestBcf:
         )
         with pytest.raises(ValueError, match='does not match x_train'):
             model.predict(x_test_df)
+
+    def test_predict_invalid_pihat(self, keys: split) -> None:
+        """Prediction checks `pihat_test` against how the model was fit."""
+        train, test = split_bcf_data(
+            gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
+        )
+        kwargs: dict = dict(
+            x_train=train.x,
+            y_train=train.y,
+            z_train=train.z,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
+        )
+
+        model = bcf(**kwargs, pihat_train=train.pihat, seed=keys.pop())
+        with pytest.raises(ValueError, match='`pihat_test` is required'):
+            model.predict(test.x)
+        with pytest.raises(ValueError, match='`pihat_test` is required'):
+            model.predict_potential_outcomes(test.x)
+        # jaxtyping binds `m` across x_test/pihat_test, so disable it to reach
+        # the explicit length check
+        with (
+            jaxtyping_disabled(),
+            pytest.raises(ValueError, match='`pihat_test` has length'),
+        ):
+            model.predict(test.x, pihat_test=train.pihat)
+
+        model = bcf(**kwargs, seed=keys.pop())
+        with pytest.raises(ValueError, match='fit without `pihat_train`'):
+            model.predict(test.x, pihat_test=test.pihat)
 
     def test_numpy_input(self, keys: split) -> None:
         """Numpy inputs give the same results as jax arrays."""

@@ -194,6 +194,47 @@ def expected_outcome(
         return yhat
 
 
+@jit
+def sigma_trace(
+    trace: MainTrace, y_std: Float32[Array, ''], /
+) -> Float32[Array, ' num_samples']:
+    """Implement `bcf.sigma_trace`, jitted such that folding the chains does not copy."""
+    # y_std is exactly 1 if the response is not standardized
+    return lax.rsqrt(_fold_chains(trace, 'error_cov_inv')) * y_std
+
+
+@jit(static_argnums=(5,))
+def sample_potential_outcomes(
+    key: Key[Array, ''],
+    mu: Float32[Array, 'num_samples m'],
+    tau: Float32[Array, 'num_samples m'],
+    sigma: Float32[Array, ' num_samples'],
+    rho: Float32[Array, ''],
+    binary: bool,
+    /,
+) -> tuple[
+    Float32[Array, 'num_samples m'],
+    Float32[Array, 'num_samples m'],
+    Float32[Array, 'num_samples m'],
+]:
+    """Implement the sampling of `bcf.predict_potential_outcomes`."""
+    u0, u1 = random.normal(key, (2, *mu.shape))
+
+    eps0 = sigma[:, None] * u0
+    # factored for accuracy at |rho| ~ 1
+    eps1 = sigma[:, None] * (rho * u0 + jnp.sqrt((1 - rho) * (1 + rho)) * u1)
+
+    y0 = mu + eps0
+    y1 = mu + tau + eps1
+    if binary:
+        y0 = (y0 > 0.0).astype(jnp.float32)
+        y1 = (y1 > 0.0).astype(jnp.float32)
+        delta = y1 - y0
+    else:
+        delta = tau + (eps1 - eps0)
+    return y0, y1, delta
+
+
 @serializable
 class bcf(eqx.Module):
     R"""
@@ -312,7 +353,6 @@ class bcf(eqx.Module):
     _leaf_prior_cov_inv_tau_trace: Any
     _x_train_fmt: Any = eqx.field(static=True)
     _has_pihat: bool = eqx.field(static=True)
-    _standardize: bool = eqx.field(static=True)
     _y_mean: Float32[Array, '']
     _y_std: Float32[Array, '']
     _outcome_type: str = eqx.field(static=True)
@@ -390,7 +430,6 @@ class bcf(eqx.Module):
             y_std = jnp.float32(1.0)
             y_train_internal = y_train
 
-        self._standardize = standardize
         self._y_mean = y_mean
         self._y_std = y_std
 
@@ -697,12 +736,7 @@ class bcf(eqx.Module):
     @property
     def sigma_trace(self) -> Float32[Array, ' num_samples']:
         """The posterior trace of residual standard deviation on the outcome scale, chains concatenated."""
-        error_cov_inv = _fold_chains(self._main_trace['mu'], 'error_cov_inv')
-        sigma_internal = lax.rsqrt(error_cov_inv)
-        if self._standardize:
-            return sigma_internal * self._y_std
-        else:
-            return sigma_internal
+        return sigma_trace(self._main_trace['mu'], self._y_std)
 
     @property
     def mu_test(self) -> Float32[Array, 'num_samples m'] | None:
@@ -790,28 +824,12 @@ class bcf(eqx.Module):
             key = random.key(key)
 
         preds = self.predict(x_test=x_test, pihat_test=pihat_test)
-        mu = preds['mu']
-        tau = preds['tau']
-        num_samples, m = mu.shape
-
-        sigma = self.sigma_trace[:, None]
-
-        keys = split(key)
-        u0 = random.normal(keys.pop(), (num_samples, m))
-        u1 = random.normal(keys.pop(), (num_samples, m))
-
-        eps0 = sigma * u0
-        # factored for accuracy at |rho| ~ 1
-        eps1 = sigma * (rho * u0 + jnp.sqrt((1 - rho) * (1 + rho)) * u1)
-
-        y0_latent = mu + eps0
-        y1_latent = mu + tau + eps1
-
-        if self._outcome_type == 'binary':
-            y0 = (y0_latent > 0.0).astype(jnp.float32)
-            y1 = (y1_latent > 0.0).astype(jnp.float32)
-        else:
-            y0 = y0_latent
-            y1 = y1_latent
-
-        return BCFPotentialOutcomes(**preds, y0=y0, y1=y1, delta=y1 - y0)
+        y0, y1, delta = sample_potential_outcomes(
+            key,
+            preds['mu'],
+            preds['tau'],
+            self.sigma_trace,
+            rho,
+            self._outcome_type == 'binary',
+        )
+        return BCFPotentialOutcomes(**preds, y0=y0, y1=y1, delta=delta)

@@ -51,7 +51,7 @@ from bartz._interface import (
     _run_mcmc,
     predict_latent,
 )
-from bartz._jaxext import is_key, jit, split
+from bartz._jaxext import is_key, jit, jit_active, split
 from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.bcf._state import init_bcf
 from bartz.bcf._step import bcf_step
@@ -99,6 +99,20 @@ def _fold_chains(trace: Trace, path: str) -> Float32[Array, 'num_samples ...']:
     return _flatten_chain_sample(
         get(trace), get(chain_vmap_axes(trace)), get(trace_sample_axes(trace))
     )
+
+
+@jit
+def any_not_binary(x: Float32[Array, ' n']) -> Bool[Array, '']:
+    """Check whether any value of `x` is neither 0 nor 1."""
+    return jnp.any((x != 0) & (x != 1))
+
+
+def check_binary(x: Float32[Array, ' n'], name: str) -> Float32[Array, ' n']:
+    """Check that the values of the variable `name` are all 0 or 1, outside of jit."""
+    if not jit_active() and any_not_binary(x):
+        msg = f'Values in `{name}` must be 0 or 1.'
+        raise ValueError(msg)
+    return x
 
 
 def make_leaf_prior_cov_inv(
@@ -341,12 +355,12 @@ class bcf(eqx.Module):
     Raises
     ------
     ValueError
-        If binary outcome is specified but `y_train` contains values other
-        than 0 or 1, or if the format of `x_test` does not match `x_train`
-        format, or if `z_test` or `pihat_test` is passed without `x_test`, or
-        if only one of `pihat_train` and `pihat_test` is passed, or if
-        `z_test` or `pihat_test` does not match the length of `x_test`, or if
-        `pihat_train` is passed but excluded from both forests.
+        If `z_train`, `z_test`, or `y_train` for binary outcomes, has values
+        other than 0 or 1, or if the format of `x_test` does not match
+        `x_train` format, or if `z_test` or `pihat_test` is passed without
+        `x_test`, or if only one of `pihat_train` and `pihat_test` is passed,
+        or if `z_test` or `pihat_test` does not match the length of `x_test`,
+        or if `pihat_train` is passed but excluded from both forests.
     """
 
     _mcmc_state: Any
@@ -406,19 +420,12 @@ class bcf(eqx.Module):
         # 1. Pre-process the data (convert to arrays and transpose X to (p, n))
         x_train, self._x_train_fmt = _process_bcf_predictor_input(x_train)
         y_train = _process_response_input(y_train)
-        z_train = _process_response_input(z_train)
-        z_train = eqx.error_if(
-            z_train,
-            jnp.any((z_train != 0) & (z_train != 1)),
-            'Values in `z_train` must be 0 or 1.',
-        ).astype(bool)
+        z_train = check_binary(_process_response_input(z_train), 'z_train').astype(bool)
 
         self._outcome_type = outcome_type
 
         if outcome_type == 'binary':
-            if not jnp.all((y_train == 0) | (y_train == 1)):
-                msg = 'Values in `y_train` must be strictly 0 or 1 for binary outcomes.'
-                raise ValueError(msg)
+            y_train = check_binary(y_train, 'y_train')
             standardize = False
 
         if standardize:
@@ -457,11 +464,7 @@ class bcf(eqx.Module):
                 if len_z != m:
                     msg = f'`z_test` has length {len_z}, but `x_test` has {m} rows.'
                     raise ValueError(msg)
-                z_test = error_if(
-                    z_test,
-                    jnp.any((z_test != 0) & (z_test != 1)),
-                    'Values in `z_test` must be 0 or 1.',
-                ).astype(bool)
+                z_test = check_binary(z_test, 'z_test').astype(bool)
 
         # 2. Append pihat to X to create unified predictor matrix
         x_train_unified = x_train

@@ -1117,7 +1117,7 @@ class TestBcf:
     def test_binary_requires_0_1(self, keys: split) -> None:
         """Binary BCF rejects outcomes that are not 0/1."""
         train = gen_bcf_data(keys.pop(), n=N_TRAIN)
-        with pytest.raises(ValueError, match='strictly 0 or 1'):
+        with pytest.raises(ValueError, match='must be 0 or 1'):
             bcf(
                 x_train=train.x,
                 y_train=jnp.full(N_TRAIN, 2.0),
@@ -1134,7 +1134,7 @@ class TestBcf:
     def test_treatment_requires_0_1(self, keys: split) -> None:
         """BCF rejects treatments that are not 0/1."""
         train = gen_bcf_data(keys.pop(), n=N_TRAIN)
-        with pytest.raises(EquinoxRuntimeError, match='must be 0 or 1'):
+        with pytest.raises(ValueError, match='must be 0 or 1'):
             bcf(
                 x_train=train.x,
                 y_train=train.y,
@@ -1259,7 +1259,7 @@ class TestBcf:
             bcf(
                 **kwargs, pihat_train=train.pihat, x_test=test.x, pihat_test=train.pihat
             )
-        with pytest.raises(EquinoxRuntimeError, match='must be 0 or 1'):
+        with pytest.raises(ValueError, match='must be 0 or 1'):
             bcf(**kwargs, x_test=test.x, z_test=jnp.full(N_TEST, 2.0))
 
     def test_x_test_format_mismatch(self, keys: split) -> None:

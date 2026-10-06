@@ -30,7 +30,6 @@ from os import PathLike
 from typing import Any, Literal, TypedDict, cast
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
 from equinox import error_if
 from jax import lax, random
@@ -52,7 +51,7 @@ from bartz._interface import (
     _run_mcmc,
     predict_latent,
 )
-from bartz._jaxext import split
+from bartz._jaxext import is_key, split
 from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import init_bcf
@@ -442,7 +441,7 @@ class bcf(eqx.Module):
             sigma2_leaf_scale_tau = 0.5 * var_y / num_trees_tau
 
         # 3.5 Bin the unified data
-        rng = random.key(seed) if not isinstance(seed, jax.Array) else seed
+        rng = seed if is_key(seed) else random.key(seed)
         keys = split(rng)
 
         binner = UniqueQuantileBinner(x_train_unified, key=keys.pop())
@@ -706,9 +705,9 @@ class bcf(eqx.Module):
         self,
         x_test: Real[ArrayLike, 'm p'] | DataFrame,
         *,
+        key: int | Key[Array, ''],
         pihat_test: Float32[ArrayLike, ' m'] | Series | None = None,
         rho: FloatLike = 0.0,
-        key: Key[Array, ''] | int | None = None,
     ) -> BCFPotentialOutcomes:
         """
         Sample joint posterior predictive potential outcomes Y(0), Y(1), and lift.
@@ -717,6 +716,8 @@ class bcf(eqx.Module):
         ----------
         x_test
             The test predictors.
+        key
+            A jax random key or an integer seed for sampling the errors.
         pihat_test
             The test propensity scores, required iff the model was fit with
             `pihat_train`.
@@ -724,8 +725,6 @@ class bcf(eqx.Module):
             The correlation in [-1, 1] between the errors of `y0` and `y1`.
             The data carry no information on it, see [1]_. It affects only
             `delta` in `BCFPotentialOutcomes`, widening it as `rho` decreases.
-        key
-            JAX PRNG key or integer seed for stochastic noise sampling.
 
         Returns
         -------
@@ -741,9 +740,7 @@ class bcf(eqx.Module):
         # written to also catch nan
         rho = error_if(rho, ~(jnp.abs(rho) <= 1), 'rho must be in [-1, 1]')
 
-        if key is None:
-            key = random.key(0)
-        elif isinstance(key, int):
+        if not is_key(key):
             key = random.key(key)
 
         preds = self.predict(x_test=x_test, pihat_test=pihat_test)

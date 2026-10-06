@@ -1012,11 +1012,21 @@ class TestBcf:
             )
             assert_different_matrices(res['delta'], res['tau'], rtol=1e-3, atol=0)
 
+        with subtests.test('rho=-1'):
+            # antithetic shocks, so they cancel in y0 + y1
+            res = model.predict_potential_outcomes(
+                x_test=test.x, pihat_test=test.pihat, rho=-1.0, key=keys.pop()
+            )
+            assert_close_matrices(
+                res['y0'] + res['y1'], 2 * res['mu'] + res['tau'], rtol=1e-5
+            )
+
         with subtests.test('invalid rho'):
-            with pytest.raises(ValueError, match='rho must be in'):
-                model.predict_potential_outcomes(x_test=test.x, rho=-0.1)
-            with pytest.raises(ValueError, match='rho must be in'):
-                model.predict_potential_outcomes(x_test=test.x, rho=1.5)
+            for rho in (-1.5, 1.5, jnp.nan):
+                with pytest.raises(EquinoxRuntimeError, match='rho must be in'):
+                    model.predict_potential_outcomes(
+                        x_test=test.x, pihat_test=test.pihat, rho=rho
+                    )
 
         with subtests.test('key types'):
             # key=None (default RNG) and integer-seed keys are both accepted

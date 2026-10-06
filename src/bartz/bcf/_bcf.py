@@ -363,7 +363,6 @@ class bcf(eqx.Module):
     _y_mean: Float32[Array, '']
     _y_std: Float32[Array, '']
     _outcome_type: str = eqx.field(static=True)
-    _offset: Float32[Array, '']
     _mu_test: Float32[Array, 'num_samples m'] | None = None
     _tau_test: Float32[Array, 'num_samples m'] | None = None
     _z_test: Bool[Array, ' m'] | None = None
@@ -487,8 +486,7 @@ class bcf(eqx.Module):
             else jnp.zeros((), dtype=bool)
         )
 
-        offset_val = _process_offset_settings(y_train_internal, binary_mask, None, None)
-        self._offset = offset_val
+        offset = _process_offset_settings(y_train_internal, binary_mask, None, None)
 
         if leaf_prior_cov_inv_mu is None:
             if outcome_type == 'binary':
@@ -567,7 +565,7 @@ class bcf(eqx.Module):
             trt=z_train,
             y=y_train_internal,
             outcome_type=outcome_type,
-            offset=offset_val,
+            offset=offset,
             max_split_mu=max_split_mu,
             max_split_tau=max_split_tau,
             num_trees_mu=num_trees_mu,
@@ -742,6 +740,15 @@ class bcf(eqx.Module):
             self._y_std,
             probabilities,
         )
+
+    @property
+    def offset(self) -> Float32[Array, '']:
+        """The prior mean of the prognostic function.
+
+        On the latent probit scale for binary outcomes.
+        """
+        # y_mean and y_std are exactly 0 and 1 if the response is not standardized
+        return self._mcmc_state.forest.offset * self._y_std + self._y_mean
 
     @property
     def sigma_trace(self) -> Float32[Array, ' num_samples']:

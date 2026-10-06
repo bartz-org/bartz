@@ -1,4 +1,4 @@
-# bartz/src/bartz/bcf/_loop.py
+# bartz/src/bartz/bcf/_step.py
 #
 # Copyright (c) 2026, The Bartz Contributors
 #
@@ -22,7 +22,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Implement the BCF MCMC step and traces, to be run with `run_mcmc`."""
+"""Implement `bcf_step`."""
 
 from dataclasses import replace
 from typing import cast
@@ -32,17 +32,9 @@ from equinox import tree_at
 from jax import lax, random, vmap
 from jaxtyping import Array, Float, Float32, Int32, Key, UInt
 
-from bartz._jaxext import field, float32_matmuls, jit, sliced_map, split
+from bartz._jaxext import float32_matmuls, jit, sliced_map, split
 from bartz.bcf._state import BCFState
-from bartz.mcmcloop._trace import BurninTrace, MainTrace, Trace
-from bartz.mcmcstep._axes import CHAIN_AXIS
-from bartz.mcmcstep._state import (
-    Forest,
-    State,
-    StepConfig,
-    split_key_for_chains,
-    vmap_chains,
-)
+from bartz.mcmcstep._state import Forest, StepConfig, split_key_for_chains, vmap_chains
 from bartz.mcmcstep._step import step, step_leaf_prior_cov_inv, step_trees, sum_resid
 
 
@@ -278,60 +270,3 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     state = bcf_step_tau_0(keys.pop(), state)
     state = bcf_step_tau(keys.pop(), state)
     return bcf_step_b(keys.pop(), state)
-
-
-def _tau_view(state: BCFState) -> BCFState:
-    """Return the state with the tau forest in the mu forest slot."""
-    return replace(state, forest=state.forest_tau, forest_tau=state.forest)
-
-
-class BCFBurninTrace(Trace):
-    """Burn-in trace of the BCF MCMC, the per-forest diagnostics and the scalar parameters."""
-
-    mu: BurninTrace
-    """The trace of the prognostic forest."""
-
-    tau: BurninTrace
-    """The trace of the treatment forest."""
-
-    tau_0: Float32[Array, '*chains_and_samples'] = field(chains=CHAIN_AXIS, samples=0)
-    """The treatment effect intercept."""
-
-    b: Float32[Array, '*chains_and_samples 2'] = field(chains=CHAIN_AXIS, samples=0)
-    """The adaptive coding weights for untreated and treated units."""
-
-    @classmethod
-    def from_state(cls, state: State) -> 'BCFBurninTrace':
-        """Create a single-item burn-in trace from a BCF state."""
-        assert isinstance(state, BCFState)
-        return cls(
-            mu=BurninTrace.from_state(state),
-            tau=BurninTrace.from_state(_tau_view(state)),
-            tau_0=state.tau_0,
-            b=state.b,
-        )
-
-    def finalize(self) -> 'BCFBurninTrace':
-        """Finalize the traces of the two forests."""
-        return replace(self, mu=self.mu.finalize(), tau=self.tau.finalize())
-
-
-class BCFMainTrace(BCFBurninTrace):
-    """Main trace of the BCF MCMC, with the trees of both forests."""
-
-    mu: MainTrace
-    """The trace of the prognostic forest."""
-
-    tau: MainTrace
-    """The trace of the treatment forest."""
-
-    @classmethod
-    def from_state(cls, state: State) -> 'BCFMainTrace':
-        """Create a single-item main trace from a BCF state."""
-        assert isinstance(state, BCFState)
-        kw: dict = dict(
-            vars(BCFBurninTrace.from_state(state)),
-            mu=MainTrace.from_state(state),
-            tau=MainTrace.from_state(_tau_view(state)),
-        )
-        return cls(**kw)

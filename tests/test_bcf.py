@@ -47,8 +47,9 @@ from scipy import stats
 from bartz._jaxext import split
 from bartz.bcf import BCFPrediction, bcf
 from bartz.bcf._bcf import UniqueQuantileBinner
-from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import BCFState, init_bcf
+from bartz.bcf._step import bcf_step
+from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
 from bartz.grove import evaluate_forest, is_actual_leaf
 from bartz.mcmcloop import run_mcmc
 from bartz.mcmcstep import Forest, Wishart

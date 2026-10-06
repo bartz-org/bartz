@@ -147,7 +147,7 @@ def bcf_step_tau_0(key: Key[Array, ''], state: BCFState) -> BCFState:
 @named_call
 def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the treatment effect forest and its leaf prior precision."""
-    keys = split(key, 2)
+    keys = split(key)
 
     b_z = coding_basis(state.b, state.trt)
 

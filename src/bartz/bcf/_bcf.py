@@ -546,8 +546,6 @@ class bcf(eqx.Module):
         x_test: Real[ArrayLike, 'm p'] | DataFrame,
         *,
         pihat_test: Float32[ArrayLike, ' m'] | Series | None = None,
-        include_pihat_in_mu: bool = True,  # noqa: ARG002
-        include_pihat_in_tau: bool = False,  # noqa: ARG002
     ) -> dict[str, Float32[Array, 'num_samples m']]:
         """
         Compute predictions for both mu and tau forests at `x_test`.
@@ -558,10 +556,6 @@ class bcf(eqx.Module):
             The test predictors.
         pihat_test
             The test propensity scores.
-        include_pihat_in_mu
-            Whether to include propensity scores in prognostic forest prediction.
-        include_pihat_in_tau
-            Whether to include propensity scores in treatment effect forest prediction.
 
         Returns
         -------
@@ -677,8 +671,6 @@ class bcf(eqx.Module):
         pihat_test: Float32[ArrayLike, ' m'] | Series | None = None,
         rho: float = 0.5,
         key: Key[Array, ''] | int | None = None,
-        include_pihat_in_mu: bool = True,
-        include_pihat_in_tau: bool = False,
     ) -> dict[str, Float32[Array, 'num_samples m']]:
         """
         Sample joint posterior predictive potential outcomes Y(0), Y(1), and lift.
@@ -693,10 +685,6 @@ class bcf(eqx.Module):
             Cross-world counterfactual noise correlation in [0, 1].
         key
             JAX PRNG key or integer seed for stochastic noise sampling.
-        include_pihat_in_mu
-            Whether to include propensity scores in prognostic forest prediction.
-        include_pihat_in_tau
-            Whether to include propensity scores in treatment effect forest prediction.
 
         Returns
         -------
@@ -717,12 +705,7 @@ class bcf(eqx.Module):
         elif isinstance(key, int):
             key = random.key(key)
 
-        preds = self.predict(
-            x_test=x_test,
-            pihat_test=pihat_test,
-            include_pihat_in_mu=include_pihat_in_mu,
-            include_pihat_in_tau=include_pihat_in_tau,
-        )
+        preds = self.predict(x_test=x_test, pihat_test=pihat_test)
         mu = preds['mu']
         tau = preds['tau']
         num_samples, m = mu.shape

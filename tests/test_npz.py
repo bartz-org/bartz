@@ -57,6 +57,7 @@ from bartz._npz._npz import (
     save_npz,
     serializable,
 )
+from bartz._npz._npz_upgrades import z_test
 from bartz.bcf import bcf
 from tests.util import assert_array_equal, assert_close_matrices
 
@@ -258,6 +259,17 @@ def test_archive_outputs(archive: str, tmp_path: Path) -> None:
             )
 
 
+def test_bartz_0_13_test_predictions() -> None:
+    """Check the `bcf` archive of bartz 0.13 keeps the predictions at `x_test`."""
+    path = ARCHIVE_DIR / 'bcf_v0.npz'
+    model = bcf.load_npz(path)
+    with np.load(path, allow_pickle=False) as data:
+        for name in 'mu_test', 'tau_test', 'yhat_test':
+            assert_close_matrices(
+                getattr(model, name), data[f'_{name}'], rtol=1e-6, err_msg=name
+            )
+
+
 def unfrozen_archives() -> Iterator[str]:
     """Yield the committed archives and outputs that are not in `FROZEN`."""
     for archive in ARCHIVES:
@@ -436,6 +448,35 @@ def test_invalid_archive(
     edit_meta(path, edit)
     with pytest.raises(ValueError, match=match):
         load_npz(path)
+
+
+@pytest.mark.parametrize(
+    ('tau', 'z', 'recovered'),
+    [
+        # tau is absorbed by mu = 1 in all samples but the first
+        ([6.0e-8, 5.9e-8, 5.9e-8], True, True),
+        # tau is absorbed in all samples, z can not be recovered
+        ([5.9e-8, 5.9e-8, 5.9e-8], True, False),
+        # 0 * nan and 0 * inf are nan
+        ([1.0, np.nan, 2.0], False, False),
+        ([1.0, np.inf, 2.0], False, False),
+        ([1.0, np.nan, 2.0], True, True),
+        ([1.0, -np.inf, 2.0], True, True),
+    ],
+)
+def test_bartz_0_13_z_test(tau: list[float], z: bool, recovered: bool) -> None:
+    """Check the treatment at the test points is recovered from `_yhat_test`.
+
+    Where it can not be recovered, check it reproduces `_yhat_test` anyway.
+    """
+    mu = np.ones((3, 1), np.float32)
+    tau_array = np.array(tau, np.float32)[:, None]
+    with np.errstate(invalid='ignore'):  # 0 * inf
+        yhat = mu + z * tau_array
+        z_recovered = z_test(dict(_mu_test=mu, _tau_test=tau_array, _yhat_test=yhat))
+        assert z_recovered is not None
+        assert_array_equal(z_recovered, [recovered])
+        assert_array_equal(mu + z_recovered * tau_array, yhat)
 
 
 @pytest.mark.parametrize(('cls', 'other'), [(Bart, 'bcf'), (bcf, 'bart')])

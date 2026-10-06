@@ -28,6 +28,8 @@
     :toctree:
 
     bcf
+    BCFPrediction
+    BCFPotentialOutcomes
 """
 
-from bartz.bcf._bcf import bcf  # noqa: F401
+from bartz.bcf._bcf import BCFPotentialOutcomes, BCFPrediction, bcf  # noqa: F401

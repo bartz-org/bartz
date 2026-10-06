@@ -24,9 +24,10 @@
 
 """Bayesian Causal Forests (BCF) interface."""
 
+import sys
 from operator import attrgetter
 from os import PathLike
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypedDict, cast
 
 import equinox as eqx
 import jax
@@ -59,6 +60,11 @@ from bartz.mcmcstep import OutcomeType, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._state import make_p_nonterminal
 from bartz.prepcovars import UniqueQuantileBinner
+
+if sys.version_info >= (3, 11):
+    from typing import NotRequired
+else:  # WORKAROUND(python<3.11): typing.NotRequired was added in 3.11
+    from typing_extensions import NotRequired
 
 
 def _process_bcf_predictor_input(
@@ -99,6 +105,42 @@ def make_leaf_prior_cov_inv(
         return Wishart(nu=2 * shape, rate=2 * scale, value=value)
     else:
         return Wishart(nu=None, rate=None, value=value)
+
+
+class BCFPrediction(TypedDict):
+    """The posterior samples returned by `bcf.predict`, chains concatenated."""
+
+    mu: Float32[Array, 'num_samples m']
+    """The control mean, on the latent probit scale for binary outcomes."""
+
+    tau: Float32[Array, 'num_samples m']
+    """The treatment effect, on the latent probit scale for binary outcomes."""
+
+    tau_prob: NotRequired[Float32[Array, 'num_samples m']]
+    """The treatment effect on the probability scale, only for binary outcomes."""
+
+    p1: NotRequired[Float32[Array, 'num_samples m']]
+    """The probability of y being True if treated, only for binary outcomes."""
+
+    p0: NotRequired[Float32[Array, 'num_samples m']]
+    """The probability of y being True if untreated, only for binary outcomes."""
+
+
+class BCFPotentialOutcomes(BCFPrediction):
+    """
+    The posterior predictive samples returned by `bcf.predict_potential_outcomes`.
+
+    Also has all the fields of `BCFPrediction`.
+    """
+
+    y0: Float32[Array, 'num_samples m']
+    """The outcome if untreated."""
+
+    y1: Float32[Array, 'num_samples m']
+    """The outcome if treated."""
+
+    delta: Float32[Array, 'num_samples m']
+    """The individual treatment effect ``y1 - y0``."""
 
 
 @serializable
@@ -546,7 +588,7 @@ class bcf(eqx.Module):
         x_test: Real[ArrayLike, 'm p'] | DataFrame,
         *,
         pihat_test: Float32[ArrayLike, ' m'] | Series | None = None,
-    ) -> dict[str, Float32[Array, 'num_samples m']]:
+    ) -> BCFPrediction:
         """
         Compute predictions for both mu and tau forests at `x_test`.
 
@@ -559,10 +601,7 @@ class bcf(eqx.Module):
 
         Returns
         -------
-        dict
-            A dictionary with "mu" and "tau" containing the posterior samples
-            of the respective forests evaluated at x_test. Shapes are
-            (num_chains * ndpost, m).
+        The posterior samples at `x_test`.
 
         Raises
         ------
@@ -606,19 +645,15 @@ class bcf(eqx.Module):
             p1 = special.ndtr(mu_latent + tau_latent * b1_expanded)
             p0 = special.ndtr(mu_latent + tau_latent * b0_expanded)
             cate_prob = p1 - p0
-            return {
-                'mu': mu_adjusted,
-                'tau': cate,
-                'tau_prob': cate_prob,
-                'p1': p1,
-                'p0': p0,
-            }
+            return BCFPrediction(
+                mu=mu_adjusted, tau=cate, tau_prob=cate_prob, p1=p1, p0=p0
+            )
 
         if self._standardize:
             mu_adjusted = mu_adjusted * self._y_std + self._y_mean
             cate = cate * self._y_std
 
-        return {'mu': mu_adjusted, 'tau': cate}
+        return BCFPrediction(mu=mu_adjusted, tau=cate)
 
     @property
     def sigma_trace(self) -> Float32[Array, ' num_samples']:
@@ -671,7 +706,7 @@ class bcf(eqx.Module):
         pihat_test: Float32[ArrayLike, ' m'] | Series | None = None,
         rho: float = 0.5,
         key: Key[Array, ''] | int | None = None,
-    ) -> dict[str, Float32[Array, 'num_samples m']]:
+    ) -> BCFPotentialOutcomes:
         """
         Sample joint posterior predictive potential outcomes Y(0), Y(1), and lift.
 
@@ -688,8 +723,7 @@ class bcf(eqx.Module):
 
         Returns
         -------
-        dict
-            A dictionary mapping outcome names to posterior predictive arrays.
+        The posterior predictive samples at `x_test`.
 
         Raises
         ------
@@ -726,20 +760,8 @@ class bcf(eqx.Module):
         if getattr(self, '_outcome_type', 'continuous') == 'binary':
             y0 = (y0_latent > 0.0).astype(jnp.float32)
             y1 = (y1_latent > 0.0).astype(jnp.float32)
-            delta = y1 - y0
-            return {
-                'y0': y0,
-                'y1': y1,
-                'delta': delta,
-                'mu': mu,
-                'tau': tau,
-                'p0': preds['p0'],
-                'p1': preds['p1'],
-                'tau_prob': preds['tau_prob'],
-            }
+        else:
+            y0 = y0_latent
+            y1 = y1_latent
 
-        y0 = y0_latent
-        y1 = y1_latent
-        delta = y1 - y0
-
-        return {'y0': y0, 'y1': y1, 'delta': delta, 'mu': mu, 'tau': tau}
+        return BCFPotentialOutcomes(**preds, y0=y0, y1=y1, delta=y1 - y0)

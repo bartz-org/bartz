@@ -29,7 +29,7 @@ from typing import cast
 
 import jax.numpy as jnp
 from equinox import tree_at
-from jax import lax, random, vmap
+from jax import lax, named_call, random, vmap
 from jaxtyping import Array, Float, Float32, Int32, Key, UInt
 
 from bartz._jaxext import float32_matmuls, jit, sliced_map, split
@@ -98,6 +98,7 @@ def recompute_prec_trees(
         return lax.platform_dependent(cpu=tree_batches, cuda=all_trees)
 
 
+@named_call
 def bcf_step_mu(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the prognostic forest and its leaf prior precision."""
     # `step` rebuilds the state with `replace`, so it preserves the subclass.
@@ -107,6 +108,7 @@ def bcf_step_mu(key: Key[Array, ''], state: BCFState) -> BCFState:
     return cast(BCFState, step(key, state))
 
 
+@named_call
 def bcf_step_tau_0(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the treatment effect intercept."""
     # `resid` is stored scaled: ``resid_unit * resid = data residual``, whereas
@@ -142,6 +144,7 @@ def bcf_step_tau_0(key: Key[Array, ''], state: BCFState) -> BCFState:
         )
 
 
+@named_call
 def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the treatment effect forest and its leaf prior precision."""
     keys = split(key, 2)
@@ -183,6 +186,7 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     )
 
 
+@named_call
 def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the adaptive coding weights."""
     if state.b_prior_cov_inv is None:

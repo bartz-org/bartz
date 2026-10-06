@@ -183,8 +183,8 @@ def predict(
     Return the probit outputs of binary models only if `probabilities`.
     """
     # Evaluate the sum-of-trees (both forests walk the same unified test matrix)
-    mu_latent = predict_latent(x_test, trace.mu, 'none')
-    tau_latent = predict_latent(x_test, trace.tau, 'none')
+    mu_latent = predict_latent(x_test, trace.mu)
+    tau_latent = predict_latent(x_test, trace.tau)
     # fold the chains like `predict_latent` does to align the samples
     tau_latent += fold_chains(trace, 'tau_0')[:, None]
 

@@ -46,7 +46,6 @@ from scipy import stats
 
 from bartz._jaxext import split
 from bartz.bcf import BCFPrediction, bcf
-from bartz.bcf._bcf import UniqueQuantileBinner
 from bartz.bcf._state import BCFState, init_bcf
 from bartz.bcf._step import bcf_step
 from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
@@ -55,6 +54,7 @@ from bartz.mcmcloop import run_mcmc
 from bartz.mcmcstep import Forest, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
+from bartz.prepcovars import UniqueQuantileBinner
 from bartz.testing import gen_data
 from tests.test_mcmcloop import assert_trace_close, cat_traces, zero_non_leaves
 from tests.util import (

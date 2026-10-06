@@ -32,16 +32,9 @@ from jaxtyping import Array, Bool, Float32, UInt
 
 from bartz._jaxext import field
 from bartz._npz import serializable
+from bartz.mcmcstep import Forest, State, Wishart, init
 from bartz.mcmcstep._axes import CHAIN_AXIS
-from bartz.mcmcstep._state import (
-    ArrayLike,
-    FloatLike,
-    Forest,
-    State,
-    Wishart,
-    init,
-    initial_prec_tree,
-)
+from bartz.mcmcstep._state import ArrayLike, FloatLike, initial_prec_tree
 
 
 @serializable

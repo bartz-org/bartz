@@ -29,9 +29,8 @@ from operator import attrgetter
 from os import PathLike
 from typing import Any, Literal, cast
 
-import equinox as eqx
 import jax.numpy as jnp
-from equinox import error_if
+from equinox import Module, error_if, field
 from jax import lax, random
 from jax.scipy.special import ndtr, ndtri
 from jaxtyping import Array, Bool, Float32, Key, Real, Shaped, UInt
@@ -265,7 +264,7 @@ def sample_potential_outcomes(
 
 
 @serializable
-class bcf(eqx.Module):
+class bcf(Module):
     R"""
     Bayesian Causal Forests (BCF).
 
@@ -378,11 +377,12 @@ class bcf(eqx.Module):
     _binner: Any
     _main_trace: BCFMainTrace
     _burnin_trace: BCFBurninTrace
-    _x_train_fmt: Any = eqx.field(static=True)
-    _has_pihat: bool = eqx.field(static=True)
+    # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
+    _x_train_fmt: Any = field(static=True)
+    _has_pihat: bool = field(static=True)
+    _outcome_type: str = field(static=True)
     _y_mean: Float32[Array, '']
     _y_std: Float32[Array, '']
-    _outcome_type: str = eqx.field(static=True)
     _mu_test: Float32[Array, 'num_samples m'] | None = None
     _tau_test: Float32[Array, 'num_samples m'] | None = None
     _z_test: Bool[Array, ' m'] | None = None

@@ -32,6 +32,7 @@ from typing import Any, Literal, TypedDict, cast
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+from equinox import error_if
 from jax import lax, random
 from jax.scipy import special
 from jaxtyping import Array, Float32, Key, Real, Shaped
@@ -704,7 +705,7 @@ class bcf(eqx.Module):
         x_test: Real[ArrayLike, 'm p'] | DataFrame,
         *,
         pihat_test: Float32[ArrayLike, ' m'] | Series | None = None,
-        rho: float = 0.5,
+        rho: FloatLike = 0.0,
         key: Key[Array, ''] | int | None = None,
     ) -> BCFPotentialOutcomes:
         """
@@ -717,7 +718,9 @@ class bcf(eqx.Module):
         pihat_test
             Optional test propensity scores.
         rho
-            Cross-world counterfactual noise correlation in [0, 1].
+            The correlation in [-1, 1] between the errors of `y0` and `y1`.
+            The data carry no information on it, see [1]_. It affects only
+            `delta` in `BCFPotentialOutcomes`, widening it as `rho` decreases.
         key
             JAX PRNG key or integer seed for stochastic noise sampling.
 
@@ -725,14 +728,15 @@ class bcf(eqx.Module):
         -------
         The posterior predictive samples at `x_test`.
 
-        Raises
-        ------
-        ValueError
-            If rho is not within [0, 1].
+        References
+        ----------
+        .. [1] Imbens, Guido W., and Donald B. Rubin (2015). "Causal Inference
+           for Statistics, Social, and Biomedical Sciences: An Introduction".
+           Cambridge University Press, section 8.6.
         """
-        if not 0.0 <= rho <= 1.0:
-            msg = f'rho must be in [0, 1], got {rho}'
-            raise ValueError(msg)
+        rho = jnp.asarray(rho)
+        # written to also catch nan
+        rho = error_if(rho, ~(jnp.abs(rho) <= 1), 'rho must be in [-1, 1]')
 
         if key is None:
             key = random.key(0)
@@ -750,9 +754,9 @@ class bcf(eqx.Module):
         u0 = random.normal(keys.pop(), shape=(num_samples, m), dtype=jnp.float32)
         u1 = random.normal(keys.pop(), shape=(num_samples, m), dtype=jnp.float32)
 
-        rho_f = jnp.float32(rho)
         eps0 = sigma * u0
-        eps1 = sigma * (rho_f * u0 + jnp.sqrt(jnp.maximum(0.0, 1.0 - rho_f**2)) * u1)
+        # factored for accuracy at |rho| ~ 1
+        eps1 = sigma * (rho * u0 + jnp.sqrt((1 - rho) * (1 + rho)) * u1)
 
         y0_latent = mu + eps0
         y1_latent = mu + tau + eps1

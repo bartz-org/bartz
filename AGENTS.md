@@ -115,6 +115,7 @@ Interface hierarchy:
     - use jnp.square(x), jnp.sqrt(x), lax.rsqrt(x), jnp.reciprocal(x) instead of x**2, x**0.5, x**-0/5, 1/x
     - jax supports in-place operators (which actually create new arrays), use them
         - for example, do `x += ...`, not `x = x + ...` where `x` is a jax array
+    - use `None` instead of `jnp.newaxis`
 - other **python** conventions:
     - use dicts as if they were frozendicts when possible: e.g., do `d = dict(d, a=1, b=2)` to set values instead of `d['a'] = 1` or `d.update(a=1)`, safer
         - other useful pattern: `d = dict(**d, a=1, b=2)` to check the keys are not already present

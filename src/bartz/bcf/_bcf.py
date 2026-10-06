@@ -32,7 +32,7 @@ from typing import Any, Literal, cast
 import jax.numpy as jnp
 from equinox import Module, error_if, field
 from jax import lax, random
-from jax.scipy.special import ndtr, ndtri
+from jax.scipy.special import ndtr
 from jaxtyping import Array, Bool, Float32, Key, Real, Shaped, UInt
 
 from bartz._interface import (
@@ -500,11 +500,13 @@ class bcf(Module):
                 ).value
         if leaf_prior_cov_inv_tau is None:
             if outcome_type == 'binary':
-                p_val = 0.6827
-                q_quantile = ndtri((p_val + 1) / 2.0)
-                phi_0 = 1.0 / jnp.sqrt(2 * jnp.pi)
-                sigma2_tau = ((delta_max / (q_quantile * phi_0)) ** 2) / num_trees_tau
-                leaf_prior_cov_inv_tau = jnp.reciprocal(sigma2_tau)
+                # give the treatment effect the prior sd delta_max / phi(0) on
+                # the latent scale, the effect that moves the probability by
+                # delta_max from 1/2 under the linear approximation of the
+                # probit there
+                leaf_prior_cov_inv_tau = num_trees_tau / (
+                    2 * jnp.pi * jnp.square(delta_max)
+                )
             else:
                 leaf_prior_cov_inv_tau = _process_leaf_variance_settings(
                     y_train_internal,

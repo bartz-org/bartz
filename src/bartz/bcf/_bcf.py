@@ -71,7 +71,7 @@ else:
     from typing_extensions import NotRequired, TypedDict
 
 
-def _process_bcf_predictor_input(
+def process_bcf_predictor_input(
     x: Real[ArrayLike, 'n p'] | DataFrame,
 ) -> tuple[Shaped[Array, 'p n'], Any]:
     """
@@ -93,7 +93,7 @@ def _process_bcf_predictor_input(
     return _process_predictor_input(x)
 
 
-def _fold_chains(trace: Trace, path: str) -> Float32[Array, 'num_samples ...']:
+def fold_chains(trace: Trace, path: str) -> Float32[Array, 'num_samples ...']:
     """Fold the chain axis of a trace field into its sample axis, like `predict_latent`."""
     get = attrgetter(path)
     return _flatten_chain_sample(
@@ -200,9 +200,9 @@ def predict(
     mu_latent = predict_latent(x_test, trace.mu, 'none')
     tau_latent = predict_latent(x_test, trace.tau, 'none')
     # fold the chains like `predict_latent` does to align the samples
-    tau_latent += _fold_chains(trace, 'tau_0')[:, None]
+    tau_latent += fold_chains(trace, 'tau_0')[:, None]
 
-    b = _fold_chains(trace, 'b')
+    b = fold_chains(trace, 'b')
     b0_expanded = b[:, 0, None]
     b1_expanded = b[:, 1, None]
     # Control mean: mu(X) + b_0 * (tau(X) + tau_0)
@@ -242,7 +242,7 @@ def sigma_trace(
 ) -> Float32[Array, ' num_samples']:
     """Implement `bcf.sigma_trace`, jitted such that folding the chains does not copy."""
     # y_std is exactly 1 if the response is not standardized
-    return lax.rsqrt(_fold_chains(trace, 'error_cov_inv')) * y_std
+    return lax.rsqrt(fold_chains(trace, 'error_cov_inv')) * y_std
 
 
 @jit(static_argnums=(5,))
@@ -442,7 +442,7 @@ class bcf(eqx.Module):
     ) -> None:
 
         # 1. Pre-process the data (convert to arrays and transpose X to (p, n))
-        x_train, self._x_train_fmt = _process_bcf_predictor_input(x_train)
+        x_train, self._x_train_fmt = process_bcf_predictor_input(x_train)
         y_train = _process_response_input(y_train)
         check_length(y_train, 'y_train', x_train, 'x_train')
         z_train = _process_response_input(z_train)
@@ -698,7 +698,7 @@ class bcf(eqx.Module):
         pihat_test: Float32[ArrayLike, ' m'] | Series | None,
     ) -> Shaped[Array, 'p m'] | Shaped[Array, 'p+1 m']:
         """Check the test inputs against the training ones and stack them."""
-        x_test, x_test_fmt = _process_bcf_predictor_input(x_test)
+        x_test, x_test_fmt = process_bcf_predictor_input(x_test)
         if x_test_fmt != self._x_train_fmt:
             msg = (
                 f'Format of x_test {x_test_fmt} does not match x_train'

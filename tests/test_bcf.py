@@ -228,6 +228,8 @@ def init_bcf_state(key: Key[Array, ''], data: BCFData, **kwargs: Any) -> BCFStat
         p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
         leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
         leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
+        min_points_per_leaf_mu=10,
+        min_points_per_leaf_tau=10,
         error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
     )
     return init_bcf(**dict(defaults, **kwargs))

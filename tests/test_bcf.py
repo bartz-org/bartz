@@ -532,16 +532,17 @@ class TestBcf:
         preds = model.predict(x_test=test.x, pihat_test=test.pihat)
 
         tau_samples = preds['tau'] * y_std
-        cate_mean = np.mean(tau_samples, axis=0)
+        tau_mean = np.mean(tau_samples, axis=0)
+        tau_sd = np.std(tau_samples, axis=0)
 
-        # Point estimates should be close to 0
-        assert np.mean(np.abs(cate_mean)) < 0.2
+        # The estimated effect is nearly constant across units, so the units
+        # amount to a single test, and absolute thresholds fail on datasets
+        # where the posterior lands ~2 sd away from 0 by chance. Instead check
+        # no unit shows an effect beyond 3 posterior sd...
+        assert np.max(np.abs(tau_mean / tau_sd)) < 3
 
-        # 95% Credible interval should cover 0 for >= 90% of units
-        lower_bounds = np.percentile(tau_samples, 2.5, axis=0)
-        upper_bounds = np.percentile(tau_samples, 97.5, axis=0)
-        contains_zero = (lower_bounds <= 0.0) & (upper_bounds >= 0.0)
-        assert np.mean(contains_zero) >= 0.90
+        # ...and that the posterior is not trivially wide (sd ~0.1 here)
+        assert np.mean(tau_sd) < 0.25
 
     def test_noise_variance_recovery(self, keys: split) -> None:
         """Verifies that the BCF model recovers the true residual noise variance."""

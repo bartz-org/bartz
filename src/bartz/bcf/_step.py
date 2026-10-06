@@ -33,7 +33,7 @@ from jax import lax, random, vmap
 from jaxtyping import Array, Float, Float32, Int32, Key, UInt
 
 from bartz._jaxext import float32_matmuls, jit, sliced_map, split
-from bartz.bcf._state import BCFState, swap_mu_tau_forests
+from bartz.bcf._state import BCFState, coding_basis, swap_mu_tau_forests
 from bartz.mcmcstep._state import Forest, StepConfig, split_key_for_chains, vmap_chains
 from bartz.mcmcstep._step import step, step_leaf_prior_cov_inv, step_trees, sum_resid
 
@@ -119,8 +119,7 @@ def bcf_step_tau_0(key: Key[Array, ''], state: BCFState) -> BCFState:
         return state
 
     else:
-        # get coding basis, possibly adaptive so not just 0 and 1
-        b_z = state.b[state.trt.astype(int)]
+        b_z = coding_basis(state.b, state.trt)
 
         # partial residual removing current tau_0 effect, on the data scale
         partial_resid = state.resid * state.resid_unit + state.tau_0 * b_z
@@ -147,8 +146,7 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the treatment effect forest and its leaf prior precision."""
     keys = split(key, 2)
 
-    # get coding basis, possibly adaptive so not just 0 and 1
-    b_z = state.b[state.trt.astype(int)]
+    b_z = coding_basis(state.b, state.trt)
 
     # Target for tau is (Y - mu - b_z * tau_0) / b_z.
     # Its residual is target - tau = (Y - mu - b_z*tau_0 - b_z*tau) / b_z
@@ -193,8 +191,7 @@ def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
     else:
         assert state.tau_X is not None
 
-        # get coding basis
-        b_z = state.b[state.trt.astype(int)]
+        b_z = coding_basis(state.b, state.trt)
 
         # partial residual removing current b effect, on the data scale (see
         # `bcf_step_tau_0` about units)
@@ -215,7 +212,7 @@ def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
 
         # sample b from full conditional
         b_new = mean + random.normal(key, (2,)) * lax.rsqrt(prec)
-        b_z_new = b_new[state.trt.astype(int)]
+        b_z_new = coding_basis(b_new, state.trt)
 
         # update state to reflect new b
         state = replace(

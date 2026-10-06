@@ -52,7 +52,7 @@ from bartz._interface import (
 )
 from bartz._jaxext import is_key, jit, jit_active, split
 from bartz._npz import check_class, load_npz, save_npz, serializable
-from bartz.bcf._state import init_bcf
+from bartz.bcf._state import BCFState, init_bcf
 from bartz.bcf._step import bcf_step
 from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
 from bartz.mcmcloop import MainTrace
@@ -373,8 +373,8 @@ class bcf(Module):
         forests.
     """
 
-    _mcmc_state: Any
-    _binner: Any
+    _mcmc_state: BCFState
+    _binner: UniqueQuantileBinner
     _main_trace: BCFMainTrace
     _burnin_trace: BCFBurninTrace
     # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
@@ -597,8 +597,8 @@ class bcf(Module):
 
         # 5. Run the MCMC loop
         # WORKAROUND(python<3.12): once `run_mcmc` is generic over the state
-        # subclass (PEP 695), the traces will come out typed, dropping the
-        # casts.
+        # subclass (PEP 695), the state and the traces will come out typed,
+        # dropping the casts.
         final_state, burnin_trace, main_trace = _run_mcmc(
             mcmc_state=initial_state,
             n_save=ndpost,
@@ -615,7 +615,7 @@ class bcf(Module):
             ),
             check_platform=None,
         )
-        self._mcmc_state = final_state
+        self._mcmc_state = cast(BCFState, final_state)
         self._binner = binner
         self._main_trace = cast(BCFMainTrace, main_trace)
         self._burnin_trace = cast(BCFBurninTrace, burnin_trace)

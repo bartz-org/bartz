@@ -1262,6 +1262,36 @@ class TestBcf:
         with pytest.raises(ValueError, match='must be 0 or 1'):
             bcf(**kwargs, x_test=test.x, z_test=jnp.full(N_TEST, 2.0))
 
+    def test_invalid_train_lengths(self, keys: split) -> None:
+        """Training inputs with a length different from `x_train` are rejected."""
+        train, test = split_bcf_data(
+            gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
+        )
+        kwargs: dict = dict(
+            x_train=train.x,
+            y_train=train.y,
+            z_train=train.z,
+            pihat_train=train.pihat,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
+            seed=keys.pop(),
+        )
+        # jaxtyping binds `n` across the training inputs, so disable it to reach
+        # the explicit length checks
+        for name, value in (
+            ('y_train', test.y),
+            ('z_train', test.z),
+            ('pihat_train', test.pihat),
+        ):
+            kw: dict = dict(kwargs, **{name: value})
+            with (
+                jaxtyping_disabled(),
+                pytest.raises(ValueError, match=f'`{name}` has length'),
+            ):
+                bcf(**kw)
+
     def test_x_test_format_mismatch(self, keys: split) -> None:
         """x_test format must match x_train, at construction and at predict."""
         train = gen_bcf_data(keys.pop(), n=N_TRAIN)

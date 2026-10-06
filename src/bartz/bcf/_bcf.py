@@ -381,8 +381,10 @@ class bcf(eqx.Module):
         other than 0 or 1, or if the format of `x_test` does not match
         `x_train` format, or if `z_test` or `pihat_test` is passed without
         `x_test`, or if only one of `pihat_train` and `pihat_test` is passed,
-        or if `z_test` or `pihat_test` does not match the length of `x_test`,
-        or if `pihat_train` is passed but excluded from both forests.
+        or if the length of `y_train`, `z_train` or `pihat_train` does not
+        match `x_train`, or the length of `z_test` or `pihat_test` does not
+        match `x_test`, or if `pihat_train` is passed but excluded from both
+        forests.
     """
 
     _mcmc_state: Any
@@ -442,7 +444,10 @@ class bcf(eqx.Module):
         # 1. Pre-process the data (convert to arrays and transpose X to (p, n))
         x_train, self._x_train_fmt = _process_bcf_predictor_input(x_train)
         y_train = _process_response_input(y_train)
-        z_train = check_binary(_process_response_input(z_train), 'z_train').astype(bool)
+        check_length(y_train, 'y_train', x_train, 'x_train')
+        z_train = _process_response_input(z_train)
+        check_length(z_train, 'z_train', x_train, 'x_train')
+        z_train = check_binary(z_train, 'z_train').astype(bool)
 
         self._outcome_type = outcome_type
 
@@ -479,13 +484,9 @@ class bcf(eqx.Module):
                 raise ValueError(msg)
         else:
             x_test = self._process_x_test(x_test, pihat_test)
-            _, m = x_test.shape
             if z_test is not None:
                 z_test = _process_response_input(z_test)
-                (len_z,) = z_test.shape
-                if len_z != m:
-                    msg = f'`z_test` has length {len_z}, but `x_test` has {m} rows.'
-                    raise ValueError(msg)
+                check_length(z_test, 'z_test', x_test, 'x_test')
                 z_test = check_binary(z_test, 'z_test').astype(bool)
 
         # 3. Resolve priors for both mu and tau forests

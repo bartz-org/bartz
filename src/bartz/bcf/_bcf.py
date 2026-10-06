@@ -34,7 +34,7 @@ import jax.numpy as jnp
 from equinox import error_if
 from jax import lax, random
 from jax.scipy.special import ndtr, ndtri
-from jaxtyping import Array, Float32, Key, Real, Shaped
+from jaxtyping import Array, Float32, Key, Real, Shaped, UInt
 
 from bartz._interface import (
     ArrayLike,
@@ -51,10 +51,11 @@ from bartz._interface import (
     _run_mcmc,
     predict_latent,
 )
-from bartz._jaxext import is_key, split
+from bartz._jaxext import is_key, jit, split
 from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import init_bcf
+from bartz.mcmcloop import MainTrace
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import OutcomeType, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
@@ -141,6 +142,40 @@ class BCFPotentialOutcomes(BCFPrediction):
 
     delta: Float32[Array, 'num_samples m']
     """The individual treatment effect ``y1 - y0``."""
+
+
+@jit(static_argnums=(7,))
+def predict(
+    x_test: UInt[Array, 'p_or_p_plus_1 m'],
+    mu_trace: MainTrace,
+    tau_trace: MainTrace,
+    tau_0_trace: Float32[Array, ' num_samples'],
+    b_trace: Float32[Array, 'num_samples 2'],
+    y_mean: FloatLike,
+    y_std: FloatLike,
+    binary: bool,
+    /,
+) -> BCFPrediction:
+    """Implement `bcf.predict` on the binned test predictors."""
+    # Evaluate the sum-of-trees (both forests walk the same unified test matrix)
+    mu_latent = predict_latent(x_test, mu_trace, 'none')
+    tau_latent = predict_latent(x_test, tau_trace, 'none')
+    tau_latent += tau_0_trace[:, None]
+
+    b0_expanded = b_trace[:, 0, None]
+    b1_expanded = b_trace[:, 1, None]
+    # Control mean: mu(X) + b_0 * (tau(X) + tau_0)
+    mu_adjusted = mu_latent + b0_expanded * tau_latent
+    # Compute CATE via adaptive coding difference
+    cate = (b1_expanded - b0_expanded) * tau_latent
+
+    if binary:
+        p1 = ndtr(mu_latent + tau_latent * b1_expanded)
+        p0 = ndtr(mu_latent + tau_latent * b0_expanded)
+        return BCFPrediction(mu=mu_adjusted, tau=cate, tau_prob=p1 - p0, p1=p1, p0=p0)
+    else:
+        # y_mean and y_std are exactly 0 and 1 if the response is not standardized
+        return BCFPrediction(mu=mu_adjusted * y_std + y_mean, tau=cate * y_std)
 
 
 @serializable
@@ -626,32 +661,16 @@ class bcf(eqx.Module):
         self, x_test_unified: Shaped[Array, 'p_or_p_plus_1 m']
     ) -> BCFPrediction:
         """Implement `predict` on the test predictors stacked with pihat."""
-        x_test_binned = self._binner.bin(x_test_unified)
-
-        # Evaluate the sum-of-trees (both forests walk the same unified test matrix)
-        mu_latent = predict_latent(x_test_binned, self._main_trace['mu'], 'none')
-        tau_latent = predict_latent(x_test_binned, self._main_trace['tau'], 'none')
-        tau_latent += self._tau_0_trace[:, None]
-
-        b0_expanded = self._b_trace[:, 0, None]
-        b1_expanded = self._b_trace[:, 1, None]
-        # Control mean: mu(X) + b_0 * (tau(X) + tau_0)
-        mu_adjusted = mu_latent + b0_expanded * tau_latent
-        # Compute CATE via adaptive coding difference
-        cate = (b1_expanded - b0_expanded) * tau_latent
-
-        if self._outcome_type == 'binary':
-            p1 = ndtr(mu_latent + tau_latent * b1_expanded)
-            p0 = ndtr(mu_latent + tau_latent * b0_expanded)
-            return BCFPrediction(
-                mu=mu_adjusted, tau=cate, tau_prob=p1 - p0, p1=p1, p0=p0
-            )
-        elif self._standardize:
-            return BCFPrediction(
-                mu=mu_adjusted * self._y_std + self._y_mean, tau=cate * self._y_std
-            )
-        else:
-            return BCFPrediction(mu=mu_adjusted, tau=cate)
+        return predict(
+            self._binner.bin(x_test_unified),
+            self._main_trace['mu'],
+            self._main_trace['tau'],
+            self._tau_0_trace,
+            self._b_trace,
+            self._y_mean,
+            self._y_std,
+            self._outcome_type == 'binary',
+        )
 
     @property
     def sigma_trace(self) -> Float32[Array, ' num_samples']:

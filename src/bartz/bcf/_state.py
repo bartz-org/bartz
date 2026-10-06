@@ -259,3 +259,8 @@ def init_bcf(
         tau_0_prior_cov_inv=tau_0_prior_cov_inv,
         b_prior_cov_inv=b_prior_cov_inv,
     )
+
+
+def swap_mu_tau_forests(state: BCFState) -> BCFState:
+    """Swap the prognostic and treatment forests."""
+    return replace(state, forest=state.forest_tau, forest_tau=state.forest)

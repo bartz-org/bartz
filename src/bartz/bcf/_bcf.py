@@ -53,8 +53,9 @@ from bartz._interface import (
 )
 from bartz._jaxext import is_key, jit, split
 from bartz._npz import check_class, load_npz, save_npz, serializable
-from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import init_bcf
+from bartz.bcf._step import bcf_step
+from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
 from bartz.mcmcloop import MainTrace
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import OutcomeType, Wishart

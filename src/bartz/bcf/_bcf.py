@@ -573,7 +573,7 @@ class bcf(eqx.Module):
         pihat_test: Float32[ArrayLike, ' m'] | Series | None = None,
     ) -> BCFPrediction:
         """
-        Compute predictions for both mu and tau forests at `x_test`.
+        Compute the control mean and the treatment effect at `x_test`.
 
         Parameters
         ----------
@@ -684,7 +684,7 @@ class bcf(eqx.Module):
 
     @property
     def yhat_test(self) -> Float32[Array, 'num_samples m'] | None:
-        """The outcome at `x_test` under `z_test` for each MCMC iteration.
+        """The expected outcome at `x_test` under `z_test` for each MCMC iteration.
 
         On the latent probit scale for binary outcomes; see `prob_test`.
         """
@@ -710,7 +710,7 @@ class bcf(eqx.Module):
         rho: FloatLike = 0.0,
     ) -> BCFPotentialOutcomes:
         """
-        Sample joint posterior predictive potential outcomes Y(0), Y(1), and lift.
+        Sample joint posterior predictive potential outcomes Y(0), Y(1), and "lift" Y(1) - Y(0).
 
         Parameters
         ----------

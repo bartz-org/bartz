@@ -168,6 +168,7 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
         swap_mu_tau_forests(state), resid=initial_resid_tau, prec_scale=jnp.square(b_z)
     )
 
+    # WORKAROUND(python<3.12): drop the casts like in `bcf_step_mu`
     state = cast(BCFState, step_trees(keys.pop(), state))
     state = cast(BCFState, step_leaf_prior_cov_inv(keys.pop(), state))
 

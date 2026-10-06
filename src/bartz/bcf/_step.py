@@ -33,7 +33,7 @@ from jax import lax, random, vmap
 from jaxtyping import Array, Float, Float32, Int32, Key, UInt
 
 from bartz._jaxext import float32_matmuls, jit, sliced_map, split
-from bartz.bcf._state import BCFState
+from bartz.bcf._state import BCFState, swap_mu_tau_forests
 from bartz.mcmcstep._state import Forest, StepConfig, split_key_for_chains, vmap_chains
 from bartz.mcmcstep._step import step, step_leaf_prior_cov_inv, step_trees, sum_resid
 
@@ -164,11 +164,7 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     # alone.
     mu_prec_scale = state.prec_scale
     state = replace(
-        state,
-        forest=state.forest_tau,
-        forest_tau=state.forest,
-        resid=initial_resid_tau,
-        prec_scale=jnp.square(b_z),
+        swap_mu_tau_forests(state), resid=initial_resid_tau, prec_scale=jnp.square(b_z)
     )
 
     state = cast(BCFState, step_trees(keys.pop(), state))
@@ -183,9 +179,7 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     # Swap the forests back and restore the mu-side fields
     return replace(
-        state,
-        forest=state.forest_tau,
-        forest_tau=state.forest,
+        swap_mu_tau_forests(state),
         resid=jnp.where(b_z_zero, mu_resid, state.resid * b_z_safe),
         prec_scale=mu_prec_scale,
     )

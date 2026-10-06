@@ -151,8 +151,8 @@ def predict(
     tau_trace: MainTrace,
     tau_0_trace: Float32[Array, ' num_samples'],
     b_trace: Float32[Array, 'num_samples 2'],
-    y_mean: FloatLike,
-    y_std: FloatLike,
+    y_mean: Float32[Array, ''],
+    y_std: Float32[Array, ''],
     binary: bool,
     /,
 ) -> BCFPrediction:
@@ -293,16 +293,16 @@ class bcf(eqx.Module):
     _b_trace: Any
     _leaf_prior_cov_inv_mu_trace: Any
     _leaf_prior_cov_inv_tau_trace: Any
-    _x_train_fmt: Any = eqx.field(static=True, default=None)
-    _has_pihat: bool = eqx.field(static=True, default=False)
-    _standardize: bool = eqx.field(static=True, default=False)
-    _y_mean: Float32[ArrayLike, ''] | float = eqx.field(default=0.0)
-    _y_std: Float32[ArrayLike, ''] | float = eqx.field(default=1.0)
-    _outcome_type: str = eqx.field(static=True, default='continuous')
-    _offset: Float32[ArrayLike, ''] | float = eqx.field(default=0.0)
-    _mu_test: Float32[Array, 'num_samples m'] | None = eqx.field(default=None)
-    _tau_test: Float32[Array, 'num_samples m'] | None = eqx.field(default=None)
-    _yhat_test: Float32[Array, 'num_samples m'] | None = eqx.field(default=None)
+    _x_train_fmt: Any = eqx.field(static=True)
+    _has_pihat: bool = eqx.field(static=True)
+    _standardize: bool = eqx.field(static=True)
+    _y_mean: Float32[Array, '']
+    _y_std: Float32[Array, '']
+    _outcome_type: str = eqx.field(static=True)
+    _offset: Float32[Array, '']
+    _mu_test: Float32[Array, 'num_samples m'] | None = None
+    _tau_test: Float32[Array, 'num_samples m'] | None = None
+    _yhat_test: Float32[Array, 'num_samples m'] | None = None
 
     def __init__(  # noqa: C901, PLR0915
         self,

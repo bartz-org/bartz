@@ -155,10 +155,13 @@ def predict(
     b_trace: Float32[Array, 'num_samples 2'],
     y_mean: Float32[Array, ''],
     y_std: Float32[Array, ''],
-    binary: bool,
+    probabilities: bool,
     /,
 ) -> BCFPrediction:
-    """Implement `bcf.predict` on the binned test predictors."""
+    """Implement `bcf.predict` on the binned test predictors.
+
+    Return the probit outputs of binary models only if `probabilities`.
+    """
     # Evaluate the sum-of-trees (both forests walk the same unified test matrix)
     mu_latent = predict_latent(x_test, mu_trace, 'none')
     tau_latent = predict_latent(x_test, tau_trace, 'none')
@@ -171,12 +174,13 @@ def predict(
     # Compute CATE via adaptive coding difference
     cate = (b1_expanded - b0_expanded) * tau_latent
 
-    if binary:
+    if probabilities:
         p1 = ndtr(mu_latent + tau_latent * b1_expanded)
         p0 = ndtr(mu_latent + tau_latent * b0_expanded)
         return BCFPrediction(mu=mu_adjusted, tau=cate, tau_prob=p1 - p0, p1=p1, p0=p0)
     else:
-        # y_mean and y_std are exactly 0 and 1 if the response is not standardized
+        # y_mean and y_std are exactly 0 and 1 if the response is not
+        # standardized, which is always the case for binary outcomes
         return BCFPrediction(mu=mu_adjusted * y_std + y_mean, tau=cate * y_std)
 
 
@@ -631,7 +635,7 @@ class bcf(eqx.Module):
 
         # 6. Predict at the test points, now that the traces are available
         if x_test is not None:
-            test_pred = self._predict_unified(x_test)
+            test_pred = self._predict_unified(x_test, probabilities=False)
             self._mu_test = test_pred['mu']
             self._tau_test = test_pred['tau']
             self._z_test = z_test
@@ -685,7 +689,10 @@ class bcf(eqx.Module):
         -------
         The posterior samples at `x_test`.
         """
-        return self._predict_unified(self._process_x_test(x_test, pihat_test))
+        return self._predict_unified(
+            self._process_x_test(x_test, pihat_test),
+            probabilities=self._outcome_type == 'binary',
+        )
 
     def _process_x_test(
         self,
@@ -721,7 +728,7 @@ class bcf(eqx.Module):
             return jnp.concatenate([x_test, pihat_test[None, :]], axis=0)
 
     def _predict_unified(
-        self, x_test_unified: Shaped[Array, 'p_or_p_plus_1 m']
+        self, x_test_unified: Shaped[Array, 'p_or_p_plus_1 m'], *, probabilities: bool
     ) -> BCFPrediction:
         """Implement `predict` on the test predictors stacked with pihat."""
         return predict(
@@ -732,7 +739,7 @@ class bcf(eqx.Module):
             self._b_trace,
             self._y_mean,
             self._y_std,
-            self._outcome_type == 'binary',
+            probabilities,
         )
 
     @property

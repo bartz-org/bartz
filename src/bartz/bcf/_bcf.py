@@ -44,6 +44,7 @@ from bartz._interface import (
     FloatLike,
     Series,
     _flatten_chain_sample,
+    _guarded_response_variance,
     _process_error_variance_settings,
     _process_leaf_variance_settings,
     _process_offset_settings,
@@ -181,6 +182,10 @@ class bcf(eqx.Module):
     mean functions represented as sums of decision trees:
     Y = mu(X, pihat) + tau(X, pihat) * Z + error
 
+    For continuous outcomes, the hyperparameters with units are on the scale
+    of the standardized response, see `standardize`, while the outputs are on
+    the scale of `y_train`.
+
     Parameters
     ----------
     x_train
@@ -223,9 +228,9 @@ class bcf(eqx.Module):
     sigma_df
         Prior degrees of freedom for error variance.
     sigma_scale
-        Prior scale for error variance.
+        Prior scale of the error standard deviation.
     sigma_init
-        Initial value for error variance.
+        Initial value of the error standard deviation.
     leaf_prior_cov_inv_mu
         Custom leaf prior precision for the prognostic forest.
     leaf_prior_cov_inv_tau
@@ -253,7 +258,11 @@ class bcf(eqx.Module):
     sigma2_leaf_scale_tau
         The scale parameter for the Inverse-Gamma prior on the treatment effect forest leaf variance.
     standardize
-        Whether to standardize the response `y_train` internally during model training.
+        Whether to standardize `y_train` internally, ignored for binary
+        outcomes. If `False`, the hyperparameters with units (`sigma_scale`,
+        `sigma_init`, `leaf_prior_cov_inv_*`, `tau_0_prior_var`,
+        `sigma2_leaf_scale_*`) are on the scale of `y_train` instead of the
+        standardized one.
     outcome_type
         Either 'continuous' or 'binary' (probit link).
     delta_max
@@ -320,10 +329,10 @@ class bcf(eqx.Module):
         adaptive_coding: bool = False,
         sample_sigma2_leaf_mu: bool = True,
         sigma2_leaf_shape_mu: float = 3.0,
-        sigma2_leaf_scale_mu: float | None = None,
+        sigma2_leaf_scale_mu: FloatLike | None = None,
         sample_sigma2_leaf_tau: bool = False,
         sigma2_leaf_shape_tau: float = 3.0,
-        sigma2_leaf_scale_tau: float | None = None,
+        sigma2_leaf_scale_tau: FloatLike | None = None,
         standardize: bool = True,
         outcome_type: Literal['continuous', 'binary'] = 'continuous',
         delta_max: float = 0.9,
@@ -351,8 +360,8 @@ class bcf(eqx.Module):
         if standardize:
             y_mean = jnp.mean(y_train)
             y_std = jnp.std(y_train)
-            y_std_safe = jnp.where(y_std == 0, 1.0, y_std)
-            y_train_internal = (y_train - y_mean) / y_std_safe
+            y_std = jnp.where(y_std == 0, 1.0, y_std)
+            y_train_internal = (y_train - y_mean) / y_std
         else:
             y_mean = jnp.float32(0.0)
             y_std = jnp.float32(1.0)
@@ -469,10 +478,14 @@ class bcf(eqx.Module):
         p_nonterminal_mu = make_p_nonterminal(d=10, alpha=0.95, beta=2.0)
         p_nonterminal_tau = make_p_nonterminal(d=5, alpha=0.25, beta=3.0)
 
+        if outcome_type == 'binary':
+            var_y = 1.0
+        else:
+            var_y = _guarded_response_variance(y_train_internal, None, None)
         if sigma2_leaf_scale_mu is None:
-            sigma2_leaf_scale_mu = 1.0 / num_trees_mu
+            sigma2_leaf_scale_mu = var_y / num_trees_mu
         if sigma2_leaf_scale_tau is None:
-            sigma2_leaf_scale_tau = 0.5 / num_trees_tau
+            sigma2_leaf_scale_tau = 0.5 * var_y / num_trees_tau
 
         # 3.5 Bin the unified data
         rng = random.key(seed) if not isinstance(seed, jax.Array) else seed

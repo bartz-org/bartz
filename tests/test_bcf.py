@@ -386,6 +386,101 @@ class TestBcf:
         assert_close_matrices(preds_auto['mu'], manual_mu_unscaled, rtol=1e-4)
         assert_close_matrices(preds_auto['tau'], manual_tau_unscaled, rtol=1e-4)
 
+    def test_scale_shift(self, keys: split, subtests: SubTests) -> None:
+        """Check that an affine map of the inputs maps the outputs accordingly.
+
+        All the default priors are calibrated on the data, so the model is
+        equivariant under rescaling `y_train` without standardization, and
+        standardization does not change it.
+        """
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
+        kw: dict = dict(
+            z_train=train.z,
+            pihat_train=train.pihat,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
+            adaptive_coding=True,
+            sample_sigma2_leaf_mu=True,
+            sample_sigma2_leaf_tau=True,
+        )
+        key = keys.pop()
+        model1 = bcf(
+            x_train=train.x,
+            y_train=train.y,
+            standardize=False,
+            seed=random.clone(key),
+            **kw,
+        )
+        preds1 = model1.predict(train.x, pihat_test=train.pihat)
+
+        offset = -470.3189
+        scale = 529.4714
+        x_offset = -0.6184722
+        x_scale = 1.8521347
+        x2 = x_offset + x_scale * train.x
+
+        for standardize in (False, True):
+            with subtests.test(standardize=standardize):
+                model2 = bcf(
+                    x_train=x2,
+                    y_train=offset + scale * train.y,
+                    standardize=standardize,
+                    seed=random.clone(key),
+                    **kw,
+                )
+                preds2 = model2.predict(x2, pihat_test=train.pihat)
+                assert_close_matrices(
+                    preds1['mu'], (preds2['mu'] - offset) / scale, rtol=1e-3
+                )
+                assert_close_matrices(preds1['tau'], preds2['tau'] / scale, rtol=1e-3)
+                assert_close_matrices(
+                    model1.sigma_trace, model2.sigma_trace / scale, rtol=1e-3
+                )
+
+    def test_standardize_hyperparameter_units(self, keys: split) -> None:
+        """Check `standardize` sets the units of all the hyperparameters."""
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
+        y = -470.3189 + 529.4714 * train.y
+        s = jnp.std(y).item()
+        kw: dict = dict(
+            x_train=train.x,
+            y_train=y,
+            z_train=train.z,
+            pihat_train=train.pihat,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
+            adaptive_coding=True,
+            sample_sigma2_leaf_mu=True,
+            sample_sigma2_leaf_tau=True,
+        )
+        # hyperparameters in units of the standardized response
+        sdev: dict = dict(sigma_scale=0.3, sigma_init=0.5)
+        var: dict = dict(
+            tau_0_prior_var=2.0, sigma2_leaf_scale_mu=0.2, sigma2_leaf_scale_tau=0.1
+        )
+        prec: dict = dict(leaf_prior_cov_inv_mu=4.0, leaf_prior_cov_inv_tau=9.0)
+        key = keys.pop()
+        model_std = bcf(
+            **kw, **sdev, **var, **prec, standardize=True, seed=random.clone(key)
+        )
+        model_raw = bcf(
+            **kw,
+            **{k: v * s for k, v in sdev.items()},
+            **{k: v * s**2 for k, v in var.items()},
+            **{k: v / s**2 for k, v in prec.items()},
+            standardize=False,
+            seed=random.clone(key),
+        )
+        preds_std = model_std.predict(train.x, pihat_test=train.pihat)
+        preds_raw = model_raw.predict(train.x, pihat_test=train.pihat)
+        assert_close_matrices(preds_std['mu'], preds_raw['mu'], rtol=1e-3)
+        assert_close_matrices(preds_std['tau'], preds_raw['tau'], rtol=1e-3)
+        assert_close_matrices(model_std.sigma_trace, model_raw.sigma_trace, rtol=1e-3)
+
     def test_load_npz_unsupported_schema_version(self, tmp_path: Path) -> None:
         """Tests that loading an NPZ file with a future schema version raises ValueError."""
         npz_path = tmp_path / 'invalid_schema.npz'

@@ -229,28 +229,8 @@ def init_bcf(
         prec_tree=jnp.broadcast_to(prec_tree, (*chain_shape, *prec_tree.shape)),
     )
 
-    # Assemble everything into the BCFState subclass
     return BCFState(
-        # Inherited fields from State (populated from state_mu)
-        _chain_anchor=state_mu._chain_anchor,  # noqa: SLF001
-        X=state_mu.X,
-        y=state_mu.y,
-        z=state_mu.z,
-        binary_indices=state_mu.binary_indices,
-        resid=state_mu.resid,  # mu residuals
-        resid_unit=state_mu.resid_unit,
-        resid_eff_scale=state_mu.resid_eff_scale,
-        resid_inexact_integral=state_mu.resid_inexact_integral,
-        error_cov_inv=state_mu.error_cov_inv,
-        error_scale=state_mu.error_scale,
-        prec_scale=state_mu.prec_scale,
-        inv_sdev_scale=state_mu.inv_sdev_scale,
-        inv_sdev_unit=state_mu.inv_sdev_unit,
-        n_non_missing=state_mu.n_non_missing,
-        sum_diag_prec_scale=state_mu.sum_diag_prec_scale,
-        forest=state_mu.forest,  # mu forest
-        config=state_mu.config,
-        # Subclass additions
+        **vars(state_mu),
         forest_tau=forest_tau,
         trt=trt_array,
         tau_X=jnp.zeros((*chain_shape, n)) if adaptive_coding else None,

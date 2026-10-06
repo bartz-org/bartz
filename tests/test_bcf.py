@@ -1157,6 +1157,7 @@ class TestBcf:
             z_test=test.z,
             pihat_test=test.pihat,
             include_pihat_in_mu=False,
+            include_pihat_in_tau=True,
             tau_0_prior_var=0.5,
             sample_intercept=sample_intercept,
             standardize=False,
@@ -1231,6 +1232,8 @@ class TestBcf:
             bcf(**kwargs, pihat_train=train.pihat, x_test=test.x)
         with pytest.raises(ValueError, match='fit without `pihat_train`'):
             bcf(**kwargs, x_test=test.x, pihat_test=test.pihat)
+        with pytest.raises(ValueError, match='`pihat_train` is unused'):
+            bcf(**kwargs, pihat_train=train.pihat, include_pihat_in_mu=False)
         # jaxtyping binds `m` across x_test/z_test/pihat_test, so disable it to
         # reach the explicit length checks (users run without the import hook)
         with (

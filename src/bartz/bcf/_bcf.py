@@ -282,7 +282,8 @@ class bcf(eqx.Module):
         than 0 or 1, or if the format of `x_test` does not match `x_train`
         format, or if `z_test` or `pihat_test` is passed without `x_test`, or
         if only one of `pihat_train` and `pihat_test` is passed, or if
-        `z_test` or `pihat_test` does not match the length of `x_test`.
+        `z_test` or `pihat_test` does not match the length of `x_test`, or if
+        `pihat_train` is passed but excluded from both forests.
     """
 
     _mcmc_state: Any
@@ -378,6 +379,12 @@ class bcf(eqx.Module):
         self._y_std = y_std
 
         if pihat_train is not None:
+            if not include_pihat_in_mu and not include_pihat_in_tau:
+                msg = (
+                    '`pihat_train` is unused if `include_pihat_in_mu` and'
+                    ' `include_pihat_in_tau` are both False.'
+                )
+                raise ValueError(msg)
             pihat_train = _process_response_input(pihat_train)
         self._has_pihat = pihat_train is not None
 

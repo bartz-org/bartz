@@ -34,7 +34,7 @@ import jax.numpy as jnp
 from equinox import error_if
 from jax import lax, random
 from jax.scipy.special import ndtr, ndtri
-from jaxtyping import Array, Float32, Key, Real, Shaped, UInt
+from jaxtyping import Array, Bool, Float32, Key, Real, Shaped, UInt
 
 from bartz._interface import (
     ArrayLike,
@@ -178,6 +178,22 @@ def predict(
         return BCFPrediction(mu=mu_adjusted * y_std + y_mean, tau=cate * y_std)
 
 
+@jit(static_argnums=(3,))
+def expected_outcome(
+    mu: Float32[Array, 'num_samples m'],
+    tau: Float32[Array, 'num_samples m'],
+    z: Bool[Array, ' m'],
+    probability: bool,
+    /,
+) -> Float32[Array, 'num_samples m']:
+    """Implement `bcf.yhat_test`, or `bcf.prob_test` if `probability`."""
+    yhat = mu + z * tau
+    if probability:
+        return ndtr(yhat)
+    else:
+        return yhat
+
+
 @serializable
 class bcf(eqx.Module):
     R"""
@@ -303,7 +319,7 @@ class bcf(eqx.Module):
     _offset: Float32[Array, '']
     _mu_test: Float32[Array, 'num_samples m'] | None = None
     _tau_test: Float32[Array, 'num_samples m'] | None = None
-    _yhat_test: Float32[Array, 'num_samples m'] | None = None
+    _z_test: Bool[Array, ' m'] | None = None
 
     def __init__(  # noqa: C901, PLR0915
         self,
@@ -577,8 +593,7 @@ class bcf(eqx.Module):
             test_pred = self._predict_unified(x_test)
             self._mu_test = test_pred['mu']
             self._tau_test = test_pred['tau']
-            if z_test is not None:
-                self._yhat_test = self._mu_test + z_test * self._tau_test
+            self._z_test = z_test
 
     def save_npz(self, path: str | PathLike) -> None:
         """
@@ -711,7 +726,12 @@ class bcf(eqx.Module):
 
         On the latent probit scale for binary outcomes; see `prob_test`.
         """
-        return self._yhat_test
+        if self._z_test is None:
+            return None
+        else:
+            assert self._mu_test is not None
+            assert self._tau_test is not None
+            return expected_outcome(self._mu_test, self._tau_test, self._z_test, False)
 
     @property
     def prob_test(self) -> Float32[Array, 'num_samples m'] | None:
@@ -720,10 +740,12 @@ class bcf(eqx.Module):
         `None` unless the outcome is binary and `x_test` and `z_test` were
         passed to the constructor.
         """
-        if self._yhat_test is None or self._outcome_type != 'binary':
+        if self._z_test is None or self._outcome_type != 'binary':
             return None
         else:
-            return ndtr(self._yhat_test)
+            assert self._mu_test is not None
+            assert self._tau_test is not None
+            return expected_outcome(self._mu_test, self._tau_test, self._z_test, True)
 
     def predict_potential_outcomes(
         self,

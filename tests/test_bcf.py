@@ -1073,7 +1073,7 @@ class TestBcf:
             assert model._y_std == 1.0
             assert model._y_mean == 0.0
             expected_offset = stats.norm.ppf(np.mean(y_train))
-            assert_allclose(model._offset, expected_offset, rtol=1e-4)
+            assert_allclose(model.offset, expected_offset, rtol=1e-4)
 
         preds = model.predict(train.x, pihat_test=train.pihat)
 

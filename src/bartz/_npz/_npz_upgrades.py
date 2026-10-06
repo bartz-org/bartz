@@ -124,7 +124,6 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
         _y_mean=array(arrays, '_y_mean', old['_y_mean']),
         _y_std=array(arrays, '_y_std', old['_y_std']),
         _outcome_type=old['_outcome_type'].item(),
-        _offset=array(arrays, '_offset', old['_offset']),
         _mu_test=array(arrays, '_mu_test', old.get('_mu_test')),
         _tau_test=array(arrays, '_tau_test', old.get('_tau_test')),
         _z_test=array(arrays, '_z_test', z_test(old)),

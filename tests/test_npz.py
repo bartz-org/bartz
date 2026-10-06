@@ -259,8 +259,8 @@ def test_archive_outputs(archive: str, tmp_path: Path) -> None:
             )
 
 
-def test_bartz_0_13_test_predictions() -> None:
-    """Check the `bcf` archive of bartz 0.13 keeps the predictions at `x_test`."""
+def test_bartz_0_13_stored_values() -> None:
+    """Check the `bcf` archive of bartz 0.13 keeps the values it stores directly."""
     path = ARCHIVE_DIR / 'bcf_v0.npz'
     model = bcf.load_npz(path)
     with np.load(path, allow_pickle=False) as data:
@@ -268,6 +268,8 @@ def test_bartz_0_13_test_predictions() -> None:
             assert_close_matrices(
                 getattr(model, name), data[f'_{name}'], rtol=1e-6, err_msg=name
             )
+        offset = data['_offset'] * data['_y_std'] + data['_y_mean']
+        assert_close_matrices(model.offset, offset, rtol=1e-6)
 
 
 def unfrozen_archives() -> Iterator[str]:

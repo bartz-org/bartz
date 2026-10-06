@@ -57,9 +57,8 @@ from bartz.bcf._step import bcf_step
 from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
 from bartz.mcmcloop import MainTrace
 from bartz.mcmcloop._trace import Trace
-from bartz.mcmcstep import OutcomeType, Wishart
+from bartz.mcmcstep import OutcomeType, Wishart, make_p_nonterminal
 from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
-from bartz.mcmcstep._state import make_p_nonterminal
 from bartz.prepcovars import UniqueQuantileBinner
 
 if sys.version_info >= (3, 11):

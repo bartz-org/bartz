@@ -31,9 +31,10 @@ from jaxtyping import Array, Float32
 from bartz._jaxext import field
 from bartz._npz import serializable
 from bartz.bcf._state import BCFState, swap_mu_tau_forests
-from bartz.mcmcloop._trace import BurninTrace, MainTrace, Trace
+from bartz.mcmcloop import BurninTrace, MainTrace
+from bartz.mcmcloop._trace import Trace
+from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import CHAIN_AXIS
-from bartz.mcmcstep._state import State
 
 
 @serializable

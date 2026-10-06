@@ -34,8 +34,9 @@ from jaxtyping import Array, Float, Float32, Int32, Key, UInt
 
 from bartz._jaxext import float32_matmuls, jit, sliced_map, split
 from bartz.bcf._state import BCFState, coding_basis, swap_mu_tau_forests
-from bartz.mcmcstep._state import Forest, StepConfig, split_key_for_chains, vmap_chains
-from bartz.mcmcstep._step import step, step_leaf_prior_cov_inv, step_trees, sum_resid
+from bartz.mcmcstep import Forest, StepConfig, step
+from bartz.mcmcstep._state import split_key_for_chains, vmap_chains
+from bartz.mcmcstep._step import step_leaf_prior_cov_inv, step_trees, sum_resid
 
 
 def recompute_prec_trees(

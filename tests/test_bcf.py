@@ -1179,6 +1179,7 @@ class TestBcf:
             num_chains=num_chains,
             seed=keys.pop(),
         )
+        assert model._mcmc_state is not None
         assert model._mcmc_state.num_chains() == num_chains
         chain_shape = () if num_chains is None else (num_chains,)
         num_samples = math.prod(chain_shape) * NDPOST

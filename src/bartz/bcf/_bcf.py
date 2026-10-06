@@ -33,7 +33,7 @@ import equinox as eqx
 import jax.numpy as jnp
 from equinox import error_if
 from jax import lax, random
-from jax.scipy import special
+from jax.scipy.special import ndtr, ndtri
 from jaxtyping import Array, Float32, Key, Real, Shaped
 
 from bartz._interface import (
@@ -359,7 +359,7 @@ class bcf(eqx.Module):
                 if len_z != m:
                     msg = f'`z_test` has length {len_z}, but `x_test` has {m} rows.'
                     raise ValueError(msg)
-                z_test = eqx.error_if(
+                z_test = error_if(
                     z_test,
                     jnp.any((z_test != 0) & (z_test != 1)),
                     'Values in `z_test` must be 0 or 1.',
@@ -402,7 +402,7 @@ class bcf(eqx.Module):
         if leaf_prior_cov_inv_tau is None:
             if outcome_type == 'binary':
                 p_val = 0.6827
-                q_quantile = special.ndtri((p_val + 1) / 2.0)
+                q_quantile = ndtri((p_val + 1) / 2.0)
                 phi_0 = 1.0 / jnp.sqrt(2 * jnp.pi)
                 sigma2_tau = ((delta_max / (q_quantile * phi_0)) ** 2) / num_trees_tau
                 leaf_prior_cov_inv_tau = jnp.reciprocal(sigma2_tau)
@@ -626,36 +626,32 @@ class bcf(eqx.Module):
         self, x_test_unified: Shaped[Array, 'p m'] | Shaped[Array, 'p+1 m']
     ) -> BCFPrediction:
         """Implement `predict` on the test predictors stacked with pihat."""
-        # Bin the test data
         x_test_binned = self._binner.bin(x_test_unified)
 
         # Evaluate the sum-of-trees (both forests walk the same unified test matrix)
         mu_latent = predict_latent(x_test_binned, self._main_trace['mu'], 'none')
         tau_latent = predict_latent(x_test_binned, self._main_trace['tau'], 'none')
+        tau_latent += self._tau_0_trace[:, None]
 
-        # Add the global tau_0 intercept
-        tau_latent = tau_latent + self._tau_0_trace[:, jnp.newaxis]
-
-        b0_expanded = self._b_trace[:, 0, jnp.newaxis]
-        b1_expanded = self._b_trace[:, 1, jnp.newaxis]
+        b0_expanded = self._b_trace[:, 0, None]
+        b1_expanded = self._b_trace[:, 1, None]
         # Control mean: mu(X) + b_0 * (tau(X) + tau_0)
         mu_adjusted = mu_latent + b0_expanded * tau_latent
         # Compute CATE via adaptive coding difference
         cate = (b1_expanded - b0_expanded) * tau_latent
 
-        if getattr(self, '_outcome_type', 'continuous') == 'binary':
-            p1 = special.ndtr(mu_latent + tau_latent * b1_expanded)
-            p0 = special.ndtr(mu_latent + tau_latent * b0_expanded)
-            cate_prob = p1 - p0
+        if self._outcome_type == 'binary':
+            p1 = ndtr(mu_latent + tau_latent * b1_expanded)
+            p0 = ndtr(mu_latent + tau_latent * b0_expanded)
             return BCFPrediction(
-                mu=mu_adjusted, tau=cate, tau_prob=cate_prob, p1=p1, p0=p0
+                mu=mu_adjusted, tau=cate, tau_prob=p1 - p0, p1=p1, p0=p0
             )
-
-        if self._standardize:
-            mu_adjusted = mu_adjusted * self._y_std + self._y_mean
-            cate = cate * self._y_std
-
-        return BCFPrediction(mu=mu_adjusted, tau=cate)
+        elif self._standardize:
+            return BCFPrediction(
+                mu=mu_adjusted * self._y_std + self._y_mean, tau=cate * self._y_std
+            )
+        else:
+            return BCFPrediction(mu=mu_adjusted, tau=cate)
 
     @property
     def sigma_trace(self) -> Float32[Array, ' num_samples']:
@@ -664,7 +660,8 @@ class bcf(eqx.Module):
         sigma_internal = lax.rsqrt(error_cov_inv)
         if self._standardize:
             return sigma_internal * self._y_std
-        return sigma_internal
+        else:
+            return sigma_internal
 
     @property
     def mu_test(self) -> Float32[Array, 'num_samples m'] | None:
@@ -699,7 +696,8 @@ class bcf(eqx.Module):
         """
         if self._yhat_test is None or self._outcome_type != 'binary':
             return None
-        return special.ndtr(self._yhat_test)
+        else:
+            return ndtr(self._yhat_test)
 
     def predict_potential_outcomes(
         self,
@@ -748,11 +746,11 @@ class bcf(eqx.Module):
         tau = preds['tau']
         num_samples, m = mu.shape
 
-        sigma = self.sigma_trace[:, jnp.newaxis]
+        sigma = self.sigma_trace[:, None]
 
         keys = split(key)
-        u0 = random.normal(keys.pop(), shape=(num_samples, m), dtype=jnp.float32)
-        u1 = random.normal(keys.pop(), shape=(num_samples, m), dtype=jnp.float32)
+        u0 = random.normal(keys.pop(), (num_samples, m))
+        u1 = random.normal(keys.pop(), (num_samples, m))
 
         eps0 = sigma * u0
         # factored for accuracy at |rho| ~ 1
@@ -761,7 +759,7 @@ class bcf(eqx.Module):
         y0_latent = mu + eps0
         y1_latent = mu + tau + eps1
 
-        if getattr(self, '_outcome_type', 'continuous') == 'binary':
+        if self._outcome_type == 'binary':
             y0 = (y0_latent > 0.0).astype(jnp.float32)
             y1 = (y1_latent > 0.0).astype(jnp.float32)
         else:

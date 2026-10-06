@@ -115,6 +115,28 @@ def check_binary(x: Float32[Array, ' n'], name: str) -> Float32[Array, ' n']:
     return x
 
 
+def check_length(
+    a: Shaped[Array, ' n'], a_name: str, x: Shaped[Array, 'p m'], x_name: str
+) -> None:
+    """Check that `a`, named `a_name`, has a value per row of `x`, named `x_name`."""
+    (n,) = a.shape
+    _, m = x.shape
+    if n != m:
+        msg = f'`{a_name}` has length {n}, but `{x_name}` has {m} rows.'
+        raise ValueError(msg)
+
+
+def stack_pihat(
+    x: Shaped[Array, 'p n'],
+    pihat: Float32[ArrayLike, ' n'] | Series,
+    which: Literal['train', 'test'],
+) -> Shaped[Array, 'p_plus_1 n']:
+    """Append `pihat_train` or `pihat_test` to the predictors as the last one."""
+    pihat = _process_response_input(pihat)
+    check_length(pihat, f'pihat_{which}', x, f'x_{which}')
+    return jnp.concatenate((x, pihat[None, :]))
+
+
 def make_leaf_prior_cov_inv(
     value: FloatLike, sample: bool, shape: FloatLike, scale: FloatLike
 ) -> Wishart:
@@ -448,7 +470,7 @@ class bcf(eqx.Module):
                     ' `include_pihat_in_tau` are both False.'
                 )
                 raise ValueError(msg)
-            pihat_train = _process_response_input(pihat_train)
+            x_train = stack_pihat(x_train, pihat_train, 'train')
         self._has_pihat = pihat_train is not None
 
         if x_test is None:
@@ -465,17 +487,6 @@ class bcf(eqx.Module):
                     msg = f'`z_test` has length {len_z}, but `x_test` has {m} rows.'
                     raise ValueError(msg)
                 z_test = check_binary(z_test, 'z_test').astype(bool)
-
-        # 2. Append pihat to X to create unified predictor matrix
-        x_train_unified = x_train
-        pihat_index = None
-
-        if pihat_train is not None:
-            # x_train is (p, n), pihat_train is (n,). Add a channel dim to pihat to
-            # make it (1, n)
-            pihat_row = pihat_train[jnp.newaxis, :]
-            x_train_unified = jnp.concatenate([x_train_unified, pihat_row], axis=0)
-            pihat_index = x_train_unified.shape[0] - 1
 
         # 3. Resolve priors for both mu and tau forests
         binary_mask = (
@@ -544,18 +555,18 @@ class bcf(eqx.Module):
         rng = seed if is_key(seed) else random.key(seed)
         keys = split(rng)
 
-        binner = UniqueQuantileBinner(x_train_unified, key=keys.pop())
-        x_train_binned = binner.bin(x_train_unified)
+        binner = UniqueQuantileBinner(x_train, key=keys.pop())
+        x_train_binned = binner.bin(x_train)
         # copies because `init_bcf` may donate them
         max_split_mu = jnp.copy(binner.max_split)
         max_split_tau = jnp.copy(binner.max_split)
 
-        if pihat_index is not None:
+        # pihat is the last predictor
+        if self._has_pihat:
             if not include_pihat_in_mu:
-                max_split_mu = max_split_mu.at[pihat_index].set(0)
+                max_split_mu = max_split_mu.at[-1].set(0)
             if not include_pihat_in_tau:
-                # Block splits on propensity score for tau
-                max_split_tau = max_split_tau.at[pihat_index].set(0)
+                max_split_tau = max_split_tau.at[-1].set(0)
 
         # 4. Initialize BCFState
         initial_state = init_bcf(
@@ -705,13 +716,7 @@ class bcf(eqx.Module):
         elif pihat_test is None:
             return x_test
         else:
-            pihat_test = _process_response_input(pihat_test)
-            _, m = x_test.shape
-            (len_pihat,) = pihat_test.shape
-            if len_pihat != m:
-                msg = f'`pihat_test` has length {len_pihat}, but `x_test` has {m} rows.'
-                raise ValueError(msg)
-            return jnp.concatenate([x_test, pihat_test[None, :]], axis=0)
+            return stack_pihat(x_test, pihat_test, 'test')
 
     def _predict_unified(
         self, x_test_unified: Shaped[Array, 'p_or_p_plus_1 m'], *, probabilities: bool

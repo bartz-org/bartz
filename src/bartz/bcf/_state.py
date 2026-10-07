@@ -61,7 +61,8 @@ class BCFState(State):
     """Adaptive coding weights for untreated and treated units."""
 
     b_prior_cov_inv: Float32[Array, ''] | None
-    """Prior precision of `b`, `None` to leave it unchanged."""
+    """Prior precision of `b`, `None` to leave it unchanged. The zero-mean
+    normal prior excludes ``|b| < 0.01``."""
 
     tau_0_prior_cov_inv: Float32[Array, ''] | None
     """Prior precision of `tau_0`, `None` to leave it unchanged."""
@@ -133,7 +134,8 @@ def init_bcf(
     sample_intercept
         Whether to sample a global treatment intercept `tau_0`.
     adaptive_coding
-        Whether to use adaptive coding for the treatment effect.
+        Whether to use adaptive coding for the treatment effect, see
+        `bartz.bcf.bcf`.
     error_cov_inv
         The Wishart prior on the error precision and its initial value, `None`
         for binary outcomes. See `bartz.mcmcstep.init`.

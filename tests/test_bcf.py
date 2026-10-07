@@ -40,14 +40,15 @@ from equinox import EquinoxRuntimeError, Module
 from jax import lax, random, tree, vmap
 from jax.scipy.special import ndtr
 from jax.tree_util import KeyPath, keystr
-from jaxtyping import Array, ArrayLike, Float32, Key, Shaped
+from jaxtyping import Array, ArrayLike, Float, Float32, Key, Shaped
 from pytest_subtests import SubTests
-from scipy import stats
+from scipy import special, stats
+from scipy.stats import ks_1samp
 
 from bartz._jaxext import split
 from bartz.bcf import BCFPrediction, bcf
 from bartz.bcf._state import BCFState, init_bcf
-from bartz.bcf._step import bcf_step
+from bartz.bcf._step import bcf_step, sample_gapped_normal
 from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
 from bartz.grove import evaluate_forest, is_actual_leaf
 from bartz.mcmcloop import run_mcmc
@@ -619,13 +620,59 @@ class TestBcf:
         for _ in range(2):
             state = bcf_step(keys.pop(), state)
 
+        # the error of `tau_X` scales with the residuals, while the tau forest
+        # may happen to be close to 0, so compare it to the data scale
         tau_fit = evaluate_forest(state.X, state.forest_tau, sum_batch_axis=0)
-        assert_close_matrices(state.tau_X, tau_fit, rtol=1e-3)
+        assert state.tau_X is not None
+        assert_close_matrices(state.tau_X - tau_fit, train.y, rtol=1e-3, tozero=True)
         assert_close_matrices(
             state.resid * state.resid_unit,
             resid_from_scratch(state, train.y),
             rtol=1e-3,
         )
+
+    @pytest.mark.parametrize(
+        ('mean', 'sd'),
+        [
+            # mass on both sides
+            (0.3, 0.5),
+            (0.0, 0.02),
+            # mean in the gap
+            (-0.005, 0.003),
+            # far tails, still sampled exactly
+            (0.0, 0.0008),
+            # the left side is negligible
+            (0.02, 0.001),
+        ],
+    )
+    def test_sample_gapped_normal(self, keys: split, mean: float, sd: float) -> None:
+        """Check the draws of `b` follow the normal truncated away from 0."""
+        gap = 0.01
+        n = 10_000
+        x = sample_gapped_normal(
+            keys.pop(), jnp.full(n, mean), jnp.full(n, 1 / sd**2), gap
+        )
+        assert np.all(np.abs(x) >= gap * (1 - 1e-6))
+
+        # exact distribution: mixture of the two truncated sides
+        lo = (-gap - mean) / sd
+        hi = (gap - mean) / sd
+        weight_right = 1 / (1 + np.exp(special.log_ndtr(lo) - special.log_ndtr(-hi)))
+        left = stats.truncnorm(-np.inf, lo, loc=mean, scale=sd)
+        right = stats.truncnorm(hi, np.inf, loc=mean, scale=sd)
+
+        def cdf(t: Float[np.ndarray, ' n']) -> Float[np.ndarray, ' n']:
+            return (1 - weight_right) * left.cdf(t) + weight_right * right.cdf(t)
+
+        assert ks_1samp(np.asarray(x, np.float64), cdf).pvalue > 1e-3
+
+    def test_sample_gapped_normal_concentrated(self, keys: split) -> None:
+        """Check the draws of `b` stick to the gap edges if the normal is inside it."""
+        gap = 0.01
+        n = 10_000
+        x = sample_gapped_normal(keys.pop(), jnp.zeros(n), jnp.full(n, 1e12), gap)
+        assert_close_matrices(jnp.abs(x), jnp.full(n, gap), rtol=1e-5)
+        assert_allclose(np.mean(x > 0), 0.5, atol=0.03)
 
     @pytest.mark.parametrize(
         ('adaptive_coding', 'prec_count_num_trees'),

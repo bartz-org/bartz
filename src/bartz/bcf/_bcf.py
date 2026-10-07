@@ -323,7 +323,10 @@ class bcf(Module):
     sample_intercept
         Whether to sample a global treatment intercept `tau_0`.
     adaptive_coding
-        Whether to use adaptive coding for the treatment effect.
+        Whether to use adaptive coding for the treatment effect, i.e., to
+        sample the coding weights of untreated and treated units. Their
+        priors are independent N(0, 1/2), truncated to ``|b| >= 0.01`` for
+        numerical accuracy.
     sample_sigma2_leaf_mu
         Whether to sample the leaf parameter variance for the prognostic forest.
     sigma2_leaf_shape_mu

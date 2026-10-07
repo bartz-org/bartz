@@ -49,7 +49,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz._jaxext import equal_shards, is_key, jit, project, split
+from bartz._jaxext import equal_shards, is_key, jit, jit_active, project, split
 from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.grove import (
     TreeHeaps,
@@ -209,7 +209,8 @@ class Bart(Module):
     Parameters
     ----------
     x_train
-        The training predictors.
+        The training predictors. Missing values are not supported: NaN raises
+        an error.
     y_train
         The training responses. For univariate regression, a 1D array of shape
         `(n,)`. For multivariate regression, a 2D array of shape `(k, n)` where
@@ -588,7 +589,8 @@ class Bart(Module):
         ----------
         x_test
             The test predictors, or the string ``'train'`` to compute
-            predictions on the training data.
+            predictions on the training data. Missing values are not supported:
+            NaN raises an error.
         kind
             The kind of output. See `PredictKind` for details.
         key
@@ -609,11 +611,11 @@ class Bart(Module):
         Raises
         ------
         ValueError
-            If `x_test` has a different format than `x_train`, or if `error_scale`
-            is specified when it should be `None`, or if `error_scale` is not
-            specified when it is required, or if the model splits datapoints
-            across devices (`num_data_devices`) and the number of test points
-            is not a multiple of the number of data devices.
+            If `x_test` contains NaN or has a different format than `x_train`,
+            or if `error_scale` is specified when it should be `None`, or if
+            `error_scale` is not specified when it is required, or if the model
+            splits datapoints across devices (`num_data_devices`) and the number
+            of test points is not a multiple of the number of data devices.
 
         Notes
         -----
@@ -1214,7 +1216,19 @@ def _process_predictor_input(
         fmt = dict(kind='array', num_covar=x.shape[0])
     x = jnp.asarray(x)
     assert x.ndim == 2
+    if jnp.issubdtype(x.dtype, jnp.floating) and not jit_active() and any_nan(x):
+        msg = 'predictors contain NaN; missing predictor values are not supported'
+        raise ValueError(msg)
     return x, fmt
+
+
+@jit
+def any_nan(x: Float[Array, '*shape']) -> Bool[Array, '']:
+    # A sum of non-negative terms is nan iff a term is nan, provided the
+    # accumulator has inf to overflow to, hence float32 (some float8 types lack
+    # inf). Unlike isnan or min/max, this fuses with the reduction and reliably
+    # propagates nan on cpu.
+    return jnp.isnan(jnp.sum(jnp.abs(x), dtype=jnp.float32))
 
 
 def _process_response_input(

@@ -47,7 +47,7 @@ from scipy.stats import ks_1samp
 
 from bartz._jaxext import split
 from bartz.bcf import BCFPrediction, bcf
-from bartz.bcf._state import BCFState, init_bcf
+from bartz.bcf._state import BCFState, init_bcf, swap_mu_tau_forests
 from bartz.bcf._step import bcf_step, sample_gapped_normal
 from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
 from bartz.grove import evaluate_forest, is_actual_leaf
@@ -686,7 +686,7 @@ class TestBcf:
 
         The tau likelihood precision of each datapoint is ``b_z**2``, so after a
         step that resamples the coding weights, the cached per-leaf sums must
-        match the new weights. Setting `prec_count_num_trees` exercises the
+        match the new weights. Setting `prec_count_num_trees_tau` exercises the
         batched rebuild of the cache.
         """
         train = gen_bcf_data(keys.pop(), n=N_TRAIN)
@@ -696,10 +696,7 @@ class TestBcf:
             min_points_per_leaf_tau=1,
             adaptive_coding=adaptive_coding,
         )
-        state = replace(
-            state,
-            config=replace(state.config, prec_count_num_trees=prec_count_num_trees),
-        )
+        state = replace(state, prec_count_num_trees_tau=prec_count_num_trees)
 
         def check_tau_prec_tree(state: BCFState, err_msg: str) -> None:
             forest = state.forest_tau
@@ -721,6 +718,25 @@ class TestBcf:
         for i in range(4):
             state = bcf_step(keys.pop(), state)
             check_tau_prec_tree(state, f'after step {i + 1}: ')
+
+    def test_swap_mu_tau_forests(self, keys: split) -> None:
+        """Check the forests are swapped together with their tree batch sizes."""
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
+        state = init_bcf_state(keys.pop(), train)
+        state = replace(
+            state,
+            config=replace(state.config, prec_count_num_trees=1),
+            prec_count_num_trees_tau=2,
+        )
+
+        swapped = swap_mu_tau_forests(state)
+        assert swapped.forest is state.forest_tau
+        assert swapped.forest_tau is state.forest
+        assert swapped.config.prec_count_num_trees == 2
+        assert swapped.prec_count_num_trees_tau == 1
+
+        back = swap_mu_tau_forests(swapped)
+        assert tree.structure(back) == tree.structure(state)
 
     def test_multichain(self, keys: split) -> None:
         """Check each chain of a multichain BCF matches a single-chain one."""
@@ -744,7 +760,11 @@ class TestBcf:
         # the reduction configs depend on `num_chains`, share them to get the
         # same sums
         singles = [
-            replace(make_state(None), config=tree.map(jnp.copy, multi.config))
+            replace(
+                make_state(None),
+                config=tree.map(jnp.copy, multi.config),
+                prec_count_num_trees_tau=multi.prec_count_num_trees_tau,
+            )
             for _ in range(num_chains)
         ]
         assert singles[0].num_chains() is None

@@ -269,10 +269,11 @@ def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
         # the tau precision scale b_z^2 changed on every datapoint, so the
         # incrementally maintained per-leaf cache of the tau forest is stale
         # everywhere
+        tau_side = swap_mu_tau_forests(state)
         return tree_at(
             lambda s: s.forest_tau.prec_tree,
             state,
-            recompute_prec_trees(state.forest_tau, jnp.square(b_z_new), state.config),
+            recompute_prec_trees(tau_side.forest, jnp.square(b_z_new), tau_side.config),
         )
 
 

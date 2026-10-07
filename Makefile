@@ -181,7 +181,7 @@ GROUP_iface-v5v7  := tests/test_interface.py -k "(v5 and TestWithCachedBart) or 
 GROUP_iface-v6    := tests/test_interface.py -k "v6 or (v5 and not TestWithCachedBart)"
 GROUP_iface-v4    := tests/test_interface.py -k "(v4 and not test_equiv_sharding) or not (v2 or v3 or v4 or v5 or v6 or v7)"
 GROUP_bart-v1     := tests/test_BART.py tests/test_jaxext.py tests/test_stochtree.py 'tests/test_mcmcstep.py::TestMultichain' -k "v1 or not (v2 or v3) or jaxext"
-GROUP_bart-v23    := tests/test_BART.py 'tests/test_interface.py::test_equiv_sharding[v4]' -k "v2 or v3 or v4"
+GROUP_bart-v23    := tests/test_BART.py tests/test_npz.py 'tests/test_interface.py::test_equiv_sharding[v4]' -k "v2 or v3 or v4 or test_npz"
 
 GROUPS := misc iface-v5v7 iface-v6 iface-v4 bart-v1 bart-v23
 

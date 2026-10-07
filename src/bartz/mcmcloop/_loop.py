@@ -275,7 +275,11 @@ def run_mcmc(
             step,
         )
 
-    return RunMCMCResult(carry.state, carry.burnin_trace, carry.main_trace)  # ty: ignore[invalid-argument-type]
+    return RunMCMCResult(
+        carry.state,
+        carry.burnin_trace.finalize(),  # ty: ignore[invalid-argument-type]
+        carry.main_trace.finalize(),  # ty: ignore[invalid-argument-type]
+    )
 
 
 def _replicate(

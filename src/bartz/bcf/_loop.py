@@ -311,6 +311,10 @@ class BCFBurninTrace(Trace):
             b=state.b,
         )
 
+    def finalize(self) -> 'BCFBurninTrace':
+        """Finalize the traces of the two forests."""
+        return replace(self, mu=self.mu.finalize(), tau=self.tau.finalize())
+
 
 class BCFMainTrace(BCFBurninTrace):
     """Main trace of the BCF MCMC, with the trees of both forests."""

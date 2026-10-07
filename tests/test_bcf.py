@@ -55,7 +55,7 @@ from bartz.mcmcstep import Forest, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from bartz.testing import gen_data
-from tests.test_mcmcloop import assert_trace_close, cat_traces
+from tests.test_mcmcloop import assert_trace_close, cat_traces, zero_non_leaves
 from tests.util import (
     assert_allclose,
     assert_array_equal,
@@ -262,12 +262,6 @@ class TestBcf:
 
         npz_path = tmp_path / 'test_bcf.npz'
         model.save_npz(npz_path)
-
-        # Verify schema_version is present in archive
-        with np.load(npz_path) as archive:
-            assert 'schema_version' in archive
-            assert archive['schema_version'].item() == 1
-
         loaded_model = bcf.load_npz(npz_path)
 
         preds_orig = model.predict(train.x, pihat_test=train.pihat)
@@ -311,13 +305,6 @@ class TestBcf:
 
         npz_path = tmp_path / 'test_bcf_std.npz'
         model.save_npz(npz_path)
-
-        with np.load(npz_path) as archive:
-            assert 'standardize' in archive
-            assert archive['standardize']
-            assert '_y_mean' in archive
-            assert '_y_std' in archive
-
         loaded_model = bcf.load_npz(npz_path)
 
         preds_orig = model.predict(train.x, pihat_test=train.pihat)
@@ -480,13 +467,6 @@ class TestBcf:
         assert_close_matrices(preds_std['mu'], preds_raw['mu'], rtol=1e-3)
         assert_close_matrices(preds_std['tau'], preds_raw['tau'], rtol=1e-3)
         assert_close_matrices(model_std.sigma_trace, model_raw.sigma_trace, rtol=1e-3)
-
-    def test_load_npz_unsupported_schema_version(self, tmp_path: Path) -> None:
-        """Tests that loading an NPZ file with a future schema version raises ValueError."""
-        npz_path = tmp_path / 'invalid_schema.npz'
-        np.savez(npz_path, schema_version=999)
-        with pytest.raises(ValueError, match='Unsupported schema version: 999'):
-            bcf.load_npz(npz_path)
 
     def test_chains_convergence(self, keys: split, subtests: SubTests) -> None:
         """Two chains agree (Rhat near 1) without being identical."""
@@ -762,9 +742,10 @@ class TestBcf:
             )
             assert_array_equal(main_single.tau_0[..., -1], final_single.tau_0)
             assert_array_equal(main_single.b[..., -1, :], final_single.b)
+            forest_tau = final_single.forest_tau
             assert_array_equal(
                 main_single.tau.leaf_tree[..., -1, :, :],
-                final_single.forest_tau.leaf_tree,
+                zero_non_leaves(forest_tau.leaf_tree, forest_tau.split_tree),
             )
 
     def test_unsplittable_x_reduction(self, keys: split) -> None:

@@ -1031,9 +1031,10 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     negligible, so every heap node is resampled essentially from its prior
     ``N(0, leaf_prior_cov)`` each sweep. Nodes that are not actual leaves carry
     zero likelihood precision, hence are drawn exactly from the prior; pooling
-    every heap node (over chains, samples, trees, and positions) thus estimates
-    ``leaf_prior_cov`` with ~``tree_size`` times more draws than the actual
-    leaves alone, at no extra sampling cost.
+    every heap node of the final state (over chains, trees, and positions) thus
+    estimates ``leaf_prior_cov`` with ~``tree_size`` times more draws than the
+    actual leaves alone, at no extra sampling cost. The trace can not be used
+    because it zeroes the nodes that are not leaves.
 
     This catches sampling the leaf noise with a wrong covariance, e.g. as
     ``z / diag(L)`` instead of ``L^-T z`` (a `solve_triangular` missing
@@ -1060,17 +1061,17 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     )
     bart = Bart(**kw)
 
-    # pool every heap node (each an independent prior draw) over chains, samples,
-    # trees, and positions; leaf_tree is (..., k, tree_size), stored in
-    # prior-sd units, so convert it to data units first
-    trace = bart._main_trace
-    leaf_tree = trace.leaf_unit[..., None] * trace.leaf_tree
+    # pool every heap node (each an independent prior draw) over chains, trees,
+    # and positions; leaf_tree is (..., k, tree_size), stored in prior-sd units,
+    # so convert it to data units first
+    forest = bart._mcmc_state.forest
+    leaf_tree = forest.leaf_unit[..., None] * forest.leaf_tree
     leaves = jnp.moveaxis(leaf_tree, -2, -1).reshape(-1, k)
     empirical_cov = jnp.cov(leaves.T)
 
-    # the large pool drives the 2-norm sampling error well below 0.01 (measured
-    # <0.007); the off-diagonal-zeroing bug instead deviates by ~0.4
-    assert_close_matrices(empirical_cov, leaf_prior_cov, rtol=0.02)
+    # the 2-norm sampling error is below 0.07 (measured over 8 seeds with ~1000
+    # draws); the off-diagonal-zeroing bug instead deviates by ~0.4
+    assert_close_matrices(empirical_cov, leaf_prior_cov, rtol=0.15)
 
 
 def test_leaf_prior_strong_limit(bkw: BartKW, subtests: SubTests) -> None:
@@ -3185,6 +3186,18 @@ def test_data_format_mismatch(bkw: BartKW) -> None:
         bart.predict(numpy.array(bkw.x_test), error_scale=w)
 
 
+def test_pandas_columns(bkw: BartKW) -> None:
+    """Test predicting on a pandas frame other than the training one."""
+    p, _ = bkw.x_test.shape
+    columns = [f'x{i}' for i in range(p)]
+    x_train = pd.DataFrame(numpy.array(bkw.kw['x_train']).T, columns=columns)
+    bart = Bart(**dict(bkw.kw, x_train=x_train))
+    x_test = pd.DataFrame(numpy.array(bkw.x_test).T, columns=columns)
+    bart.predict(x_test, kind='latent_samples')
+    with pytest.raises(ValueError, match='format mismatch'):
+        bart.predict(x_test[columns[::-1]], kind='latent_samples')
+
+
 @pytest.mark.parametrize(
     'dtype',
     [
@@ -3634,17 +3647,28 @@ def test_num_trees(bkw: BartKW, subtests: SubTests) -> None:
         assert bart.num_trees == 200
 
 
-def test_dump_load_roundtrip(bkw: BartKW, tmp_path: Path) -> None:
-    """`dump`/`load` preserve every array in the model, dropping only the mesh."""
+@pytest.mark.parametrize('fmt', ['npz', 'pickle'])
+def test_save_load_roundtrip(
+    bkw: BartKW, tmp_path: Path, fmt: Literal['npz', 'pickle']
+) -> None:
+    """Saving and loading preserve every array in the model, dropping only the mesh."""
     # keep `bkw.kw` unchanged so the MCMC reuses an already-compiled shape
-    # rather than triggering a fresh (slower) compilation
-    bart = Bart(**bkw.kw)
+    # rather than triggering a fresh (slower) compilation. Use `OriginalBart`
+    # because npz archives accept only the registered class, not subclasses.
+    bart = OriginalBart(**bkw.kw)
 
-    path = tmp_path / 'bart.pkl'
-    bart.dump(path)
-    loaded = Bart.load(path)
+    if fmt == 'npz':
+        path = tmp_path / 'bart.npz'
+        bart.save_npz(path)
+        loaded = OriginalBart.load_npz(path)
+    else:
+        path = tmp_path / 'bart.pkl'
+        with pytest.deprecated_call():
+            bart.dump(path)
+        with pytest.deprecated_call():
+            loaded = OriginalBart.load(path)
 
-    assert isinstance(loaded, Bart)
+    assert isinstance(loaded, OriginalBart)
     # the device mesh and the explicit device are the only things dropped; the
     # reload is single-device
     assert loaded._mcmc_state.config.mesh is None
@@ -3670,7 +3694,7 @@ def test_load_wrong_type(tmp_path: Path) -> None:
     path = tmp_path / 'notbart.pkl'
     with path.open('wb') as file:
         pickle.dump([1, 2, 3], file)
-    with pytest.raises(TypeError, match='not a Bart'):
+    with pytest.raises(TypeError, match='not a Bart'), pytest.deprecated_call():
         Bart.load(path)
 
 

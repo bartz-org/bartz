@@ -50,6 +50,7 @@ from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UIn
 from numpy import ndarray
 
 from bartz._jaxext import equal_shards, is_key, jit, jit_active, project, split
+from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.grove import (
     TreeHeaps,
     TreesTrace,
@@ -196,6 +197,7 @@ class SparseConfig(Module):
     """Whether variable selection is active."""
 
 
+@serializable
 class Bart(Module):
     R"""
     Nonparametric regression with Bayesian Additive Regression Trees (BART).
@@ -682,8 +684,42 @@ class Bart(Module):
         object.__setattr__(obj, '_device', None)
         return obj
 
+    def save_npz(self, path: str | PathLike) -> None:
+        """Save the fitted model to a compressed npz archive.
+
+        Parameters
+        ----------
+        path
+            The file to write to.
+
+        Notes
+        -----
+        The archive holds the whole model, readable without pickle. The arrays
+        are copied to host memory and all device/sharding placement is
+        dropped; `load_npz` reconstructs a single-device model.
+        """
+        save_npz(path, self._drop_device_info())
+
+    @classmethod
+    def load_npz(cls, path: str | PathLike) -> 'Bart':
+        """Load a model saved with `save_npz`.
+
+        Parameters
+        ----------
+        path
+            The file to read from.
+
+        Returns
+        -------
+        The loaded model, on the default device.
+        """
+        return check_class(load_npz(path), cls, path)
+
     def dump(self, path: str | PathLike) -> None:
         """Serialize the fitted model to a file with `pickle`.
+
+        .. deprecated:: 0.14.0
+            Use `save_npz` instead.
 
         Parameters
         ----------
@@ -697,6 +733,11 @@ class Bart(Module):
         equinox. The arrays are copied to host memory and all device/sharding
         placement is dropped; `load` reconstructs a single-device model.
         """
+        warn(
+            '`Bart.dump` is deprecated, use `Bart.save_npz`',
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # drop all device info (`Device` objects are not picklable), then
         # gather any sharded arrays to host (dropping their sharding); the
         # reload is single-device
@@ -708,6 +749,9 @@ class Bart(Module):
     @classmethod
     def load(cls, path: str | PathLike) -> 'Bart':
         """Load a model saved with `dump`.
+
+        .. deprecated:: 0.14.0
+            Use `load_npz` instead.
 
         Parameters
         ----------
@@ -723,6 +767,11 @@ class Bart(Module):
         TypeError
             If the file does not contain a `Bart` instance.
         """
+        warn(
+            '`Bart.load` is deprecated, use `Bart.load_npz`',
+            DeprecationWarning,
+            stacklevel=2,
+        )
         with Path(path).open('rb') as file:
             obj = pickle.load(file)  # noqa: S301, the user owns the file
         if not isinstance(obj, cls):
@@ -1161,7 +1210,7 @@ def _process_predictor_input(
     x: Real[ArrayLike, 'p n'] | DataFrame,
 ) -> tuple[Shaped[Array, 'p n'], Any]:
     if isinstance(x, DataFrame):
-        fmt = dict(kind='dataframe', columns=x.columns)
+        fmt = dict(kind='dataframe', columns=list(x.columns))
         x = x.to_numpy().T
     else:
         fmt = dict(kind='array', num_covar=x.shape[0])

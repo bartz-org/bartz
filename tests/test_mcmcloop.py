@@ -44,7 +44,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Int32, Key, Shaped, UInt8
+from jaxtyping import Array, Float, Int32, Key, Shaped, UInt, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import (
@@ -53,6 +53,7 @@ from bartz._jaxext import (
     get_device_count,
     split,
 )
+from bartz.grove import is_actual_leaf
 from bartz.mcmcloop import (
     BurninTrace,
     Callback,
@@ -146,6 +147,18 @@ def assert_trace_close(
         assert_array_equal(actual, desired)
 
 
+def zero_non_leaves(
+    leaf_tree: Float[Array, '...'], split_tree: UInt[Array, '...']
+) -> Float[Array, '...']:
+    """Zero the values on nodes that are not leaves, as `MainTrace` does."""
+    is_leaf = jnp.vectorize(
+        partial(is_actual_leaf, add_bottom_level=True), signature='(h)->(t)'
+    )(split_tree)
+    if leaf_tree.ndim > is_leaf.ndim:  # multivariate
+        is_leaf = is_leaf[..., None, :]
+    return jnp.where(is_leaf, leaf_tree, 0)
+
+
 class TestRunMcmc:
     """Test `mcmcloop.run_mcmc`."""
 
@@ -178,7 +191,9 @@ class TestRunMcmc:
             return jnp.take(arr, -1, axis=axis)
 
         assert_array_equal(
-            final_state.forest.leaf_tree,
+            zero_non_leaves(
+                final_state.forest.leaf_tree, final_state.forest.split_tree
+            ),
             last_sample(main_trace.leaf_tree, sample_axes.leaf_tree),
         )
         assert_array_equal(

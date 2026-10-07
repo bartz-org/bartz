@@ -34,7 +34,7 @@ To check the code you write:
         - run `tests/test_npz.py` as well
         - this will err out if the serialization format changed
             - if the version format was never bumped since last release: bump it
-            - if the version format was already bumped since last release: just regenerate the reference files with `uv run python -m tests.test_npz`
+            - if the version format was already bumped since last release: just regenerate the reference files with `uv run python -m tests.test_npz [bcf] [bart]`
 - at the end of debugging, run the full test suite to check everything works
     - use `uv run pytest`; we have a `make tests`, but its config is pretty heavy on a laptop and blocks other agents/people working in parallel
     - skip this if you think the focused tests were sufficient for a surgical change

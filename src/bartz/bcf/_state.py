@@ -32,16 +32,9 @@ from jaxtyping import Array, Bool, Float32, UInt
 
 from bartz._jaxext import field
 from bartz._npz import serializable
+from bartz.mcmcstep import Forest, State, Wishart, init
 from bartz.mcmcstep._axes import CHAIN_AXIS
-from bartz.mcmcstep._state import (
-    ArrayLike,
-    FloatLike,
-    Forest,
-    State,
-    Wishart,
-    init,
-    initial_prec_tree,
-)
+from bartz.mcmcstep._state import ArrayLike, FloatLike, initial_prec_tree
 
 
 @serializable
@@ -89,8 +82,8 @@ def init_bcf(
     p_nonterminal_tau: Float32[ArrayLike, ' d_tau_minus_1'],
     leaf_prior_cov_inv_mu: Wishart,
     leaf_prior_cov_inv_tau: Wishart,
-    min_points_per_leaf_mu: int = 10,
-    min_points_per_leaf_tau: int = 10,
+    min_points_per_leaf_mu: int,
+    min_points_per_leaf_tau: int,
     filter_splitless_vars_mu: int = 0,
     filter_splitless_vars_tau: int = 0,
     tau_0_prior_var: FloatLike | None = None,
@@ -130,6 +123,7 @@ def init_bcf(
     min_points_per_leaf_mu
     min_points_per_leaf_tau
         Minimum data points per leaf for the prognostic and treatment forests.
+        Nodes with less than twice as many points are not proposed for growth.
     filter_splitless_vars_mu
     filter_splitless_vars_tau
         The maximum number of predictors without splits that each forest can
@@ -149,8 +143,7 @@ def init_bcf(
 
     Returns
     -------
-    BCFState
-        The initialized BCFState.
+    The initial BCF MCMC state.
 
     Notes
     -----
@@ -180,6 +173,7 @@ def init_bcf(
         leaf_prior_cov_inv=leaf_prior_cov_inv_mu,
         filter_splitless_vars=filter_splitless_vars_mu,
         min_points_per_leaf=min_points_per_leaf_mu,
+        min_points_per_decision_node=2 * min_points_per_leaf_mu,
         error_cov_inv=error_cov_inv,
         num_chains=num_chains,
     )
@@ -197,6 +191,7 @@ def init_bcf(
         leaf_prior_cov_inv=leaf_prior_cov_inv_tau,
         filter_splitless_vars=filter_splitless_vars_tau,
         min_points_per_leaf=min_points_per_leaf_tau,
+        min_points_per_decision_node=2 * min_points_per_leaf_tau,
         # tau is pretend-initialized as continuous outcome, so pass a dummy error_cov_inv
         error_cov_inv=Wishart(nu=0.0, rate=0.0, value=1.0),
         num_chains=num_chains,
@@ -222,35 +217,15 @@ def init_bcf(
     forest_tau = state_tau.forest
     assert forest_tau.prec_tree is not None
     *_, tree_size = forest_tau.prec_tree.shape
-    b_z = b_init[trt_array.astype(int)]
+    b_z = coding_basis(b_init, trt_array)
     prec_tree = initial_prec_tree((num_trees_tau, tree_size), jnp.square(b_z))
     forest_tau = replace(
         forest_tau,
         prec_tree=jnp.broadcast_to(prec_tree, (*chain_shape, *prec_tree.shape)),
     )
 
-    # Assemble everything into the BCFState subclass
     return BCFState(
-        # Inherited fields from State (populated from state_mu)
-        _chain_anchor=state_mu._chain_anchor,  # noqa: SLF001
-        X=state_mu.X,
-        y=state_mu.y,
-        z=state_mu.z,
-        binary_indices=state_mu.binary_indices,
-        resid=state_mu.resid,  # mu residuals
-        resid_unit=state_mu.resid_unit,
-        resid_eff_scale=state_mu.resid_eff_scale,
-        resid_inexact_integral=state_mu.resid_inexact_integral,
-        error_cov_inv=state_mu.error_cov_inv,
-        error_scale=state_mu.error_scale,
-        prec_scale=state_mu.prec_scale,
-        inv_sdev_scale=state_mu.inv_sdev_scale,
-        inv_sdev_unit=state_mu.inv_sdev_unit,
-        n_non_missing=state_mu.n_non_missing,
-        sum_diag_prec_scale=state_mu.sum_diag_prec_scale,
-        forest=state_mu.forest,  # mu forest
-        config=state_mu.config,
-        # Subclass additions
+        **vars(state_mu),
         forest_tau=forest_tau,
         trt=trt_array,
         tau_X=jnp.zeros((*chain_shape, n)) if adaptive_coding else None,
@@ -259,3 +234,15 @@ def init_bcf(
         tau_0_prior_cov_inv=tau_0_prior_cov_inv,
         b_prior_cov_inv=b_prior_cov_inv,
     )
+
+
+def swap_mu_tau_forests(state: BCFState) -> BCFState:
+    """Swap the prognostic and treatment forests."""
+    return replace(state, forest=state.forest_tau, forest_tau=state.forest)
+
+
+def coding_basis(
+    b: Float32[Array, ' 2'], trt: Bool[Array, ' n']
+) -> Float32[Array, ' n']:
+    """Return the coding weight of each unit, ``b[trt]``."""
+    return b[trt.astype(int)]

@@ -25,11 +25,12 @@
 """Test the npz archives written by `Bart.save_npz` and `bcf.save_npz`.
 
 The archives of the current format version committed in ``tests/npz/`` pin
-the format. Regenerate them with ``python -m tests.test_npz`` after bumping
-`bartz._npz.FORMAT_VERSION`.
+the format. Regenerate them with ``python -m tests.test_npz [bart] [bcf]``
+after changing the format, listing the models to regenerate (all if none).
 """
 
 import json
+from argparse import ArgumentParser
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -315,7 +316,20 @@ def test_bartz_0_13_bcf_archive(tmp_path: Path) -> None:
         bcf.load_npz(path)
 
 
-if __name__ == '__main__':
+if __name__ == '__main__':  # pragma: no cover, regeneration script
+    parser = ArgumentParser(description='Regenerate the reference npz archives.')
+    # WORKAROUND(python<3.12): use `choices=MODELS`, which rejects an empty list
+    # before 3.12
+    parser.add_argument(
+        'models',
+        nargs='*',
+        metavar='model',
+        help=f'any of {", ".join(MODELS)}, default all',
+    )
+    args = parser.parse_args()
+    if unknown := set(args.models) - set(MODELS):
+        parser.error(f'unknown models {unknown}')
     ARCHIVE_DIR.mkdir(exist_ok=True)
-    for name, (_, make) in MODELS.items():
+    for name in args.models or MODELS:
+        _, make = MODELS[name]
         make().save_npz(archive_path(name))

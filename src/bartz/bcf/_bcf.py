@@ -48,6 +48,7 @@ from bartz._interface import (
     _process_predictor_input,
     _process_response_input,
     _run_mcmc,
+    check_length,
     predict_latent,
 )
 from bartz._jaxext import is_key, jit, jit_active, split
@@ -98,17 +99,6 @@ def check_binary(x: Float32[Array, ' n'], name: str) -> Float32[Array, ' n']:
         msg = f'Values in `{name}` must be 0 or 1.'
         raise ValueError(msg)
     return x
-
-
-def check_length(
-    a: Shaped[Array, ' n'], a_name: str, x: Shaped[Array, 'p m'], x_name: str
-) -> None:
-    """Check that `a`, named `a_name`, has a value per row of `x`, named `x_name`."""
-    (n,) = a.shape
-    _, m = x.shape
-    if n != m:
-        msg = f'`{a_name}` has length {n}, but `{x_name}` has {m} rows.'
-        raise ValueError(msg)
 
 
 def stack_pihat(

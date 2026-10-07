@@ -1249,12 +1249,12 @@ class TestBcf:
         # reach the explicit length checks (users run without the import hook)
         with (
             jaxtyping_disabled(),
-            pytest.raises(ValueError, match='`z_test` has length'),
+            pytest.raises(ValueError, match=r'`z_test` has \d+ datapoints'),
         ):
             bcf(**kwargs, x_test=test.x, z_test=train.z)
         with (
             jaxtyping_disabled(),
-            pytest.raises(ValueError, match='`pihat_test` has length'),
+            pytest.raises(ValueError, match=r'`pihat_test` has \d+ datapoints'),
         ):
             bcf(
                 **kwargs, pihat_train=train.pihat, x_test=test.x, pihat_test=train.pihat
@@ -1288,7 +1288,7 @@ class TestBcf:
             kw: dict = dict(kwargs, **{name: value})
             with (
                 jaxtyping_disabled(),
-                pytest.raises(ValueError, match=f'`{name}` has length'),
+                pytest.raises(ValueError, match=rf'`{name}` has \d+ datapoints'),
             ):
                 bcf(**kw)
 
@@ -1371,7 +1371,7 @@ class TestBcf:
         # the explicit length check
         with (
             jaxtyping_disabled(),
-            pytest.raises(ValueError, match='`pihat_test` has length'),
+            pytest.raises(ValueError, match=r'`pihat_test` has \d+ datapoints'),
         ):
             model.predict(test.x, pihat_test=train.pihat)
 

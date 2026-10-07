@@ -462,17 +462,17 @@ class Bart(Module):
         # check data and put it in the right format
         x_train, x_train_fmt = _process_predictor_input(x_train)
         y_train = _process_response_input(y_train)
-        _check_same_length(x_train, y_train)
+        check_length(y_train, 'y_train', x_train, 'x_train')
 
         if error_scale is not None:
             # `error_scale` is donated downstream as `init`'s `error_scale`, which
             # keeps it (sharded) as `State.error_scale` for prediction
             error_scale = _process_response_input(error_scale)
-            _check_same_length(x_train, error_scale)
+            check_length(error_scale, 'error_scale', x_train, 'x_train')
 
         if missing is not None:
             missing = _process_response_input(missing, dtype=jnp.bool_)
-            _check_same_length(x_train, missing)
+            check_length(missing, 'missing', x_train, 'x_train')
 
         # check data types are correct for continuous/binary/multivariate regression
         outcome_type, binary_mask = _check_type_settings(
@@ -613,9 +613,11 @@ class Bart(Module):
         ValueError
             If `x_test` contains NaN or has a different format than `x_train`,
             or if `error_scale` is specified when it should be `None`, or if
-            `error_scale` is not specified when it is required, or if the model
-            splits datapoints across devices (`num_data_devices`) and the number
-            of test points is not a multiple of the number of data devices.
+            `error_scale` is not specified when it is required, or if
+            `error_scale` does not match the datapoints of `x_test`, or if the
+            model splits datapoints across devices (`num_data_devices`) and the
+            number of test points is not a multiple of the number of data
+            devices.
 
         Notes
         -----
@@ -1028,7 +1030,7 @@ class Bart(Module):
             msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
             raise ValueError(msg)
         if error_scale is not None:
-            _check_same_length(error_scale, x_test)
+            check_length(error_scale, 'error_scale', x_test, 'x_test')
         return self._binner.bin(x_test)
 
     def _device_put_test(
@@ -1249,9 +1251,15 @@ def _process_response_input(
     return arr
 
 
-def _check_same_length(x1: Shaped[Array, '... n'], x2: Shaped[Array, '... n']) -> None:
-    get_length = lambda x: x.shape[-1]
-    assert get_length(x1) == get_length(x2)
+def check_length(
+    a: Shaped[Array, '*k n'], a_name: str, x: Shaped[Array, 'p m'], x_name: str
+) -> None:
+    """Check that `a`, named `a_name`, has a datapoint per column of `x`, named `x_name`."""
+    *_, n = a.shape
+    _, m = x.shape
+    if n != m:
+        msg = f'`{a_name}` has {n} datapoints, but `{x_name}` has {m}.'
+        raise ValueError(msg)
 
 
 def _check_type_settings(

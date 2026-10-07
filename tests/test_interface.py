@@ -3186,6 +3186,17 @@ def test_data_format_mismatch(bkw: BartKW) -> None:
         bart.predict(numpy.array(bkw.x_test), error_scale=w)
 
 
+def test_train_length_mismatch(bkw: BartKW) -> None:
+    """Test that a `y_train` not matching `x_train` raises an error."""
+    kw: dict = dict(bkw.kw, y_train=numpy.asarray(bkw.kw['y_train'])[..., :-1])
+    # jaxtyping binds `n` across the inputs, so disable it to reach the check
+    with (
+        jaxtyping_disabled(),
+        pytest.raises(ValueError, match=r'`y_train` has \d+ datapoints'),
+    ):
+        Bart(**kw)
+
+
 def test_pandas_columns(bkw: BartKW) -> None:
     """Test predicting on a pandas frame other than the training one."""
     p, _ = bkw.x_test.shape

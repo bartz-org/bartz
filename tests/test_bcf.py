@@ -1447,6 +1447,29 @@ class TestBcf:
         with pytest.raises(ValueError, match='fit without `pihat_train`'):
             model.predict(test.x, pihat_test=test.pihat)
 
+    def test_nan_pihat(self, keys: split) -> None:
+        """NaN in the propensity scores is rejected, like in the predictors."""
+        train, test = split_bcf_data(
+            gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
+        )
+        kwargs: dict = dict(
+            x_train=train.x,
+            y_train=train.y,
+            z_train=train.z,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
+            seed=keys.pop(),
+        )
+
+        with pytest.raises(ValueError, match='`pihat_train` contains NaN'):
+            bcf(**kwargs, pihat_train=train.pihat.at[0].set(jnp.nan))
+
+        model = bcf(**kwargs, pihat_train=train.pihat)
+        with pytest.raises(ValueError, match='`pihat_test` contains NaN'):
+            model.predict(test.x, pihat_test=test.pihat.at[0].set(jnp.nan))
+
     def test_numpy_input(self, keys: split) -> None:
         """Numpy inputs give the same results as jax arrays."""
         train, test = split_bcf_data(

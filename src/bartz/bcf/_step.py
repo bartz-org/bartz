@@ -30,9 +30,17 @@ from typing import cast
 import jax.numpy as jnp
 from equinox import tree_at
 from jax import lax, named_call, random, vmap
+from jax.nn import sigmoid
+from jax.scipy.special import log_ndtr
 from jaxtyping import Array, Float, Float32, Int32, Key, UInt
 
-from bartz._jaxext import float32_matmuls, jit, sliced_map, split
+from bartz._jaxext import (
+    float32_matmuls,
+    jit,
+    sliced_map,
+    split,
+    truncated_normal_onesided,
+)
 from bartz.bcf._state import BCFState, coding_basis, swap_mu_tau_forests
 from bartz.mcmcstep import Forest, StepConfig, step
 from bartz.mcmcstep._state import split_key_for_chains, vmap_chains
@@ -188,6 +196,37 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     )
 
 
+# The prior on the adaptive coding weights excludes |b| < B_GAP. Near b = 0 the
+# tau forest's working residual ``resid / b_z`` is large, and the running
+# update of `BCFState.tau_X` loses precision as 1 / |b|.
+B_GAP = 0.01
+
+
+def sample_gapped_normal(
+    key: Key[Array, ''],
+    mean: Float32[Array, ' k'],
+    prec: Float32[Array, ' k'],
+    gap: float,
+) -> Float32[Array, ' k']:
+    """Sample N(mean, 1 / prec) conditional on |x| >= gap, elementwise."""
+    keys = split(key)
+    sd = lax.rsqrt(prec)
+
+    # standardized edges of the gap
+    lo = (-gap - mean) / sd
+    hi = (gap - mean) / sd
+
+    # pick a side with probability proportional to its mass. The log masses
+    # cancel if both sides are far tails, so the choice degrades for sd < 1e-3 gap
+    log_mass_left = log_ndtr(lo)
+    log_mass_right = log_ndtr(-hi)
+    right = random.bernoulli(keys.pop(), sigmoid(log_mass_right - log_mass_left))
+
+    # sample within the side
+    z = truncated_normal_onesided(keys.pop(), (), ~right, jnp.where(right, hi, lo))
+    return mean + sd * z
+
+
 @named_call
 def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the adaptive coding weights."""
@@ -216,8 +255,8 @@ def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
             / prec
         )
 
-        # sample b from full conditional
-        b_new = mean + random.normal(key, (2,)) * lax.rsqrt(prec)
+        # sample b from full conditional, truncated away from 0
+        b_new = sample_gapped_normal(key, mean, prec, B_GAP)
         b_z_new = coding_basis(b_new, state.trt)
 
         # update state to reflect new b

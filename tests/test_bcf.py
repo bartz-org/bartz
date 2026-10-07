@@ -29,7 +29,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import jax.numpy as jnp
 import numpy as np
@@ -37,7 +37,7 @@ import pandas as pd
 import pytest
 import stochtree
 from equinox import EquinoxRuntimeError, Module
-from jax import lax, random, tree, vmap
+from jax import jit, lax, random, tree, vmap
 from jax.scipy.special import ndtr
 from jax.tree_util import KeyPath, keystr
 from jaxtyping import Array, ArrayLike, Float, Float32, Key, Shaped
@@ -48,7 +48,7 @@ from scipy.stats import ks_1samp
 from bartz._jaxext import split
 from bartz.bcf import BCFPrediction, bcf
 from bartz.bcf._state import BCFState, init_bcf, swap_mu_tau_forests
-from bartz.bcf._step import bcf_step, sample_gapped_normal
+from bartz.bcf._step import B_GAP, bcf_step, sample_gapped_normal
 from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
 from bartz.grove import evaluate_forest, is_actual_leaf
 from bartz.mcmcloop import run_mcmc
@@ -240,14 +240,48 @@ def init_bcf_state(key: Key[Array, ''], data: BCFData, **kwargs: Any) -> BCFStat
     return init_bcf(**dict(defaults, **kwargs))
 
 
+def linear_predictor(state: BCFState) -> Float32[Array, ' n']:
+    """Compute the mean of the outcome (latent if binary) from the forests of `state`."""
+    mu_fit = evaluate_forest(state.X, state.forest, sum_batch_axis=0)
+    tau_fit = evaluate_forest(state.X, state.forest_tau, sum_batch_axis=0)
+    b_z = state.b[state.trt.astype(int)]
+    return state.forest.offset + mu_fit + b_z * (state.tau_0 + tau_fit)
+
+
 def resid_from_scratch(
     state: BCFState, y: Float32[Array, ' n']
 ) -> Float32[Array, ' n']:
     """Compute the residuals of `state` from its forests, in data units."""
-    mu_fit = evaluate_forest(state.X, state.forest, sum_batch_axis=0)
-    tau_fit = evaluate_forest(state.X, state.forest_tau, sum_batch_axis=0)
-    b_z = state.b[state.trt.astype(int)]
-    return y - state.forest.offset - mu_fit - b_z * (state.tau_0 + tau_fit)
+    return y - linear_predictor(state)
+
+
+def resample_data(key: Key[Array, ''], state: BCFState) -> BCFState:
+    """Draw new data from the model given the parameters in `state`.
+
+    `resid` is updated incrementally rather than recomputed, such that errors
+    in its bookkeeping by `bcf_step` persist.
+    """
+    eta = linear_predictor(state)
+    eps = random.normal(key, eta.shape)
+    if state.z is None:
+        y = eta + eps * lax.rsqrt(state.error_cov_inv.value)
+        resid = state.resid + (y - state.y) / state.resid_unit
+        return replace(state, y=y, resid=resid)
+    else:
+        z = eta + eps
+        resid = state.resid + (z - state.z) / state.resid_unit
+        return replace(state, y=(z > 0).astype(state.y.dtype), z=z, resid=resid)
+
+
+def gapped_normal_cdf(
+    x: Float[np.ndarray, ' n'], sd: float, gap: float
+) -> Float[np.ndarray, ' n']:
+    """Compute the cdf of N(0, sd^2) conditional on |x| >= gap."""
+    side_mass = stats.norm.cdf(-gap / sd)
+    cdf = stats.norm.cdf(x / sd)
+    return (np.minimum(cdf, side_mass) + np.maximum(cdf - (1 - side_mass), 0)) / (
+        2 * side_mass
+    )
 
 
 def relative_rmse(
@@ -255,6 +289,74 @@ def relative_rmse(
 ) -> Float32[Array, '']:
     """RMSE of `estimate` relative to the one of the best constant predictor."""
     return jnp.sqrt(jnp.mean(jnp.square(estimate - truth)) / jnp.var(truth))
+
+
+# settings of `TestBcf.test_joint_distribution`
+GEWEKE_NUM_CHAINS = 10_000
+GEWEKE_NUM_STEPS = 100
+GEWEKE_P_NONTERMINAL_MU = (0.6, 0.5)
+GEWEKE_P_NONTERMINAL_TAU = (0.5, 0.6)
+GEWEKE_TAU_0_PRIOR_VAR = 1.0
+GEWEKE_NU = 6.0
+GEWEKE_RATE = 6.0
+
+
+def run_geweke(
+    key: Key[Array, ''],
+    outcome_type: Literal['continuous', 'binary'],
+    adaptive_coding: bool,
+) -> BCFState:
+    """Alternate `bcf_step` and `resample_data` in many independent chains.
+
+    The model has one predictor with two cutpoints, trees of depth 3, and 4
+    datapoints per predictor value, half of them treated.
+    """
+
+    def wishart() -> Wishart:
+        # a fresh one each time because `init_bcf` may donate it
+        return Wishart(nu=GEWEKE_NU, rate=GEWEKE_RATE, value=1.0)
+
+    n = 12
+    num_trees = 2
+    state = init_bcf(
+        X_unified=jnp.repeat(jnp.arange(3, dtype=jnp.uint8), n // 3)[None, :],
+        trt=jnp.arange(n) % 2 == 1,
+        y=jnp.zeros(n),
+        outcome_type=outcome_type,
+        offset=0.0,
+        max_split_mu=jnp.full(1, 2, jnp.uint8),
+        max_split_tau=jnp.full(1, 2, jnp.uint8),
+        num_trees_mu=num_trees,
+        num_trees_tau=num_trees,
+        p_nonterminal_mu=jnp.array(GEWEKE_P_NONTERMINAL_MU),
+        p_nonterminal_tau=jnp.array(GEWEKE_P_NONTERMINAL_TAU),
+        leaf_prior_cov_inv_mu=wishart(),
+        leaf_prior_cov_inv_tau=wishart(),
+        min_points_per_leaf_mu=1,
+        min_points_per_leaf_tau=1,
+        tau_0_prior_var=GEWEKE_TAU_0_PRIOR_VAR,
+        adaptive_coding=adaptive_coding,
+        error_cov_inv=wishart() if outcome_type == 'continuous' else None,
+    )
+
+    # independent chains, each with its own data
+    states = tree.map(
+        lambda x: jnp.array(jnp.broadcast_to(x, (GEWEKE_NUM_CHAINS, *x.shape))), state
+    )
+
+    def geweke_step(key: Key[Array, ''], state: BCFState) -> BCFState:
+        keys = split(key)
+        return bcf_step(keys.pop(), resample_data(keys.pop(), state))
+
+    @jit
+    def run(key: Key[Array, ''], states: BCFState) -> BCFState:
+        def body(i: int, states: BCFState) -> BCFState:
+            chain_keys = split(random.fold_in(key, i)).pop(GEWEKE_NUM_CHAINS)
+            return vmap(geweke_step)(chain_keys, states)
+
+        return lax.fori_loop(0, GEWEKE_NUM_STEPS, body, states)
+
+    return run(key, states)
 
 
 class TestBcf:
@@ -673,6 +775,85 @@ class TestBcf:
         x = sample_gapped_normal(keys.pop(), jnp.zeros(n), jnp.full(n, 1e12), gap)
         assert_close_matrices(jnp.abs(x), jnp.full(n, gap), rtol=1e-5)
         assert_allclose(np.mean(x > 0), 0.5, atol=0.03)
+
+    @pytest.mark.parametrize(
+        ('outcome_type', 'adaptive_coding'),
+        # the continuous case covers the coding weights, the binary one the
+        # probit latent and the untreated units with zero weight on tau
+        [('continuous', True), ('binary', False)],
+    )
+    def test_joint_distribution(
+        self,
+        keys: split,
+        subtests: SubTests,
+        outcome_type: Literal['continuous', 'binary'],
+        adaptive_coding: bool,
+    ) -> None:
+        """Check `bcf_step` keeps parameters and data jointly distributed as the model.
+
+        Alternate `bcf_step` with drawing new data given the parameters, in many
+        independent chains (Geweke 2004). If `bcf_step` leaves the posterior
+        invariant, the parameters stay distributed as their prior, which is
+        easy to write down with one predictor with two cutpoints and trees of
+        depth 3. The chains start from fixed values, and need some steps to
+        reach the prior.
+        """
+        final = run_geweke(keys.pop(), outcome_type, adaptive_coding)
+
+        # there are about 10 checks, keep their joint false alarm rate low
+        threshold = 1e-4
+        gamma_cdf = stats.gamma(GEWEKE_NU / 2, scale=2 / GEWEKE_RATE).cdf
+
+        def check_ks(name: str, x: Shaped[ArrayLike, '...'], cdf: Callable) -> None:
+            with subtests.test(name):
+                x = np.asarray(x, np.float64).ravel()
+                assert ks_1samp(x, cdf).pvalue > threshold
+
+        # data and parameters after a step are jointly distributed as in the
+        # model, so the standardized errors are iid standard normal
+        eta = vmap(linear_predictor)(final)
+        if outcome_type == 'binary':
+            assert final.z is not None
+            errors = final.z - eta
+        else:
+            errors = (final.y - eta) * jnp.sqrt(final.error_cov_inv.value)[:, None]
+            check_ks('error precision', final.error_cov_inv.value, gamma_cdf)
+        check_ks('errors', errors, stats.norm.cdf)
+
+        check_ks(
+            'tau_0',
+            final.tau_0,
+            stats.norm(scale=math.sqrt(GEWEKE_TAU_0_PRIOR_VAR)).cdf,
+        )
+        if adaptive_coding:
+            assert final.b_prior_cov_inv is not None
+            sd = math.sqrt(1 / final.b_prior_cov_inv[0].item())
+            check_ks('b', final.b, partial(gapped_normal_cdf, sd=sd, gap=B_GAP))
+
+        for name, forest, p_nonterminal in (
+            ('mu', final.forest, GEWEKE_P_NONTERMINAL_MU),
+            ('tau', final.forest_tau, GEWEKE_P_NONTERMINAL_TAU),
+        ):
+            # each tree has 0 splits, or 1, or 2 if the child with an available
+            # cutpoint splits as well
+            with subtests.test(f'{name} tree shapes'):
+                a0, a1 = p_nonterminal
+                prob = np.array([1 - a0, a0 * (1 - a1), a0 * a1])
+                num_splits = np.count_nonzero(forest.split_tree, axis=-1).ravel()
+                observed = np.bincount(num_splits, minlength=prob.size)
+                expected = prob * num_splits.size
+                assert stats.chisquare(observed, expected).pvalue > threshold
+
+            leaf_prec = forest.leaf_prior_cov_inv.value
+            check_ks(f'{name} leaf precision', leaf_prec, gamma_cdf)
+
+            # the leaves are iid N(0, 1 / leaf_prec) given leaf_prec
+            is_leaf = vmap(vmap(partial(is_actual_leaf, add_bottom_level=True)))(
+                forest.split_tree
+            )
+            scale = forest.leaf_unit * jnp.sqrt(leaf_prec)
+            leaves = forest.leaf_tree * scale[:, None, None]
+            check_ks(f'{name} leaves', leaves[is_leaf], stats.norm.cdf)
 
     @pytest.mark.parametrize(
         ('adaptive_coding', 'prec_count_num_trees'),

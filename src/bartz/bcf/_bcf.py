@@ -47,13 +47,13 @@ from bartz._interface import (
     _process_offset_settings,
     _process_predictor_input,
     _process_response_input,
+    _run_mcmc,
     predict_latent,
 )
 from bartz._jaxext import split
 from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import init_bcf
-from bartz.mcmcloop import run_mcmc
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import OutcomeType, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
@@ -403,8 +403,8 @@ class bcf(eqx.Module):
             None,
         )
 
-        p_nonterminal_mu = make_p_nonterminal(d=10, alpha=0.95, beta=2.0)
-        p_nonterminal_tau = make_p_nonterminal(d=5, alpha=0.25, beta=3.0)
+        p_nonterminal_mu = make_p_nonterminal(d=6, alpha=0.95, beta=2.0)
+        p_nonterminal_tau = make_p_nonterminal(d=6, alpha=0.25, beta=3.0)
 
         if outcome_type == 'binary':
             var_y = 1.0
@@ -471,16 +471,23 @@ class bcf(eqx.Module):
 
         # 5. Run the MCMC loop
         # WORKAROUND(python<3.12): once `run_mcmc` is generic over the state
-        # subclass (PEP 695), `bcf_step` will type-check as its `step` and the
-        # traces will come out typed, dropping the ignore and the casts.
-        final_state, burnin_trace, main_trace = run_mcmc(
-            keys.pop(),
-            initial_state,
-            ndpost,
+        # subclass (PEP 695), the traces will come out typed, dropping the
+        # casts.
+        final_state, burnin_trace, main_trace = _run_mcmc(
+            mcmc_state=initial_state,
+            n_save=ndpost,
             n_burn=nskip,
-            step=bcf_step,  # ty: ignore[invalid-argument-type]
-            burnin_trace_type=BCFBurninTrace,
-            main_trace_type=BCFMainTrace,
+            n_skip=1,
+            printevery=100,
+            pbar=True,
+            key=keys.pop(),
+            precompute_predict_train=False,
+            run_mcmc_kw=dict(
+                step=bcf_step,
+                burnin_trace_type=BCFBurninTrace,
+                main_trace_type=BCFMainTrace,
+            ),
+            check_platform=None,
         )
         burnin_trace = cast(BCFBurninTrace, burnin_trace)
         main_trace = cast(BCFMainTrace, main_trace)

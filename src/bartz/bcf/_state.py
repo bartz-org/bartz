@@ -123,6 +123,7 @@ def init_bcf(
     min_points_per_leaf_mu
     min_points_per_leaf_tau
         Minimum data points per leaf for the prognostic and treatment forests.
+        Nodes with less than twice as many points are not proposed for growth.
     filter_splitless_vars_mu
     filter_splitless_vars_tau
         The maximum number of predictors without splits that each forest can
@@ -172,6 +173,7 @@ def init_bcf(
         leaf_prior_cov_inv=leaf_prior_cov_inv_mu,
         filter_splitless_vars=filter_splitless_vars_mu,
         min_points_per_leaf=min_points_per_leaf_mu,
+        min_points_per_decision_node=2 * min_points_per_leaf_mu,
         error_cov_inv=error_cov_inv,
         num_chains=num_chains,
     )
@@ -189,6 +191,7 @@ def init_bcf(
         leaf_prior_cov_inv=leaf_prior_cov_inv_tau,
         filter_splitless_vars=filter_splitless_vars_tau,
         min_points_per_leaf=min_points_per_leaf_tau,
+        min_points_per_decision_node=2 * min_points_per_leaf_tau,
         # tau is pretend-initialized as continuous outcome, so pass a dummy error_cov_inv
         error_cov_inv=Wishart(nu=0.0, rate=0.0, value=1.0),
         num_chains=num_chains,

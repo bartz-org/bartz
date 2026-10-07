@@ -45,7 +45,7 @@ from pytest_subtests import SubTests
 from scipy import stats
 
 from bartz._jaxext import split
-from bartz.bcf import bcf
+from bartz.bcf import BCFPrediction, bcf
 from bartz.bcf._bcf import UniqueQuantileBinner
 from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import BCFState, init_bcf
@@ -1012,21 +1012,32 @@ class TestBcf:
             )
             assert_different_matrices(res['delta'], res['tau'], rtol=1e-3, atol=0)
 
-        with subtests.test('invalid rho'):
-            with pytest.raises(ValueError, match='rho must be in'):
-                model.predict_potential_outcomes(x_test=test.x, rho=-0.1)
-            with pytest.raises(ValueError, match='rho must be in'):
-                model.predict_potential_outcomes(x_test=test.x, rho=1.5)
+        with subtests.test('rho=-1'):
+            # antithetic shocks, so they cancel in y0 + y1
+            res = model.predict_potential_outcomes(
+                x_test=test.x, pihat_test=test.pihat, rho=-1.0, key=keys.pop()
+            )
+            assert_close_matrices(
+                res['y0'] + res['y1'], 2 * res['mu'] + res['tau'], rtol=1e-5
+            )
 
-        with subtests.test('key types'):
-            # key=None (default RNG) and integer-seed keys are both accepted
-            res_key_none = model.predict_potential_outcomes(
-                x_test=test.x, pihat_test=test.pihat, key=None
+        with subtests.test('integer seed'):
+            # equivalent to the key it seeds
+            seed = int_seed(keys.pop())
+            res_int = model.predict_potential_outcomes(
+                x_test=test.x, pihat_test=test.pihat, key=seed
             )
-            res_key_int = model.predict_potential_outcomes(
-                x_test=test.x, pihat_test=test.pihat, key=int_seed(keys.pop())
+            res_key = model.predict_potential_outcomes(
+                x_test=test.x, pihat_test=test.pihat, key=random.key(seed)
             )
-            assert res_key_none['y0'].shape == res_key_int['y0'].shape
+            assert_array_equal(res_int['delta'], res_key['delta'])
+
+        with subtests.test('invalid rho'):
+            for rho in (-1.5, 1.5, jnp.nan):
+                with pytest.raises(EquinoxRuntimeError, match='rho must be in'):
+                    model.predict_potential_outcomes(
+                        x_test=test.x, pihat_test=test.pihat, rho=rho, key=keys.pop()
+                    )
 
     def test_binary_model(
         self, keys: split, subtests: SubTests, tmp_path: Path
@@ -1146,6 +1157,7 @@ class TestBcf:
             z_test=test.z,
             pihat_test=test.pihat,
             include_pihat_in_mu=False,
+            include_pihat_in_tau=True,
             tau_0_prior_var=0.5,
             sample_intercept=sample_intercept,
             standardize=False,
@@ -1216,10 +1228,12 @@ class TestBcf:
             bcf(**kwargs, z_test=test.z)
         with pytest.raises(ValueError, match='require `x_test`'):
             bcf(**kwargs, pihat_test=test.pihat)
-        with pytest.raises(ValueError, match='must be passed together'):
+        with pytest.raises(ValueError, match='`pihat_test` is required'):
             bcf(**kwargs, pihat_train=train.pihat, x_test=test.x)
-        with pytest.raises(ValueError, match='must be passed together'):
+        with pytest.raises(ValueError, match='fit without `pihat_train`'):
             bcf(**kwargs, x_test=test.x, pihat_test=test.pihat)
+        with pytest.raises(ValueError, match='`pihat_train` is unused'):
+            bcf(**kwargs, pihat_train=train.pihat, include_pihat_in_mu=False)
         # jaxtyping binds `m` across x_test/z_test/pihat_test, so disable it to
         # reach the explicit length checks (users run without the import hook)
         with (
@@ -1267,6 +1281,62 @@ class TestBcf:
         )
         with pytest.raises(ValueError, match='does not match x_train'):
             model.predict(x_test_df)
+
+    def test_seed_types(self, keys: split) -> None:
+        """An integer seed is equivalent to its key."""
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
+        seed = int_seed(keys.pop())
+
+        def fit(seed: int | Key[Array, '']) -> BCFPrediction:
+            model = bcf(
+                x_train=train.x,
+                y_train=train.y,
+                z_train=train.z,
+                pihat_train=train.pihat,
+                num_trees_mu=NUM_TREES_MU,
+                num_trees_tau=NUM_TREES_TAU,
+                ndpost=NDPOST,
+                nskip=NSKIP,
+                seed=seed,
+            )
+            return model.predict(train.x, pihat_test=train.pihat)
+
+        pred_int = fit(seed)
+        pred_key = fit(random.key(seed))
+        assert_array_equal(pred_int['mu'], pred_key['mu'])
+        assert_array_equal(pred_int['tau'], pred_key['tau'])
+
+    def test_predict_invalid_pihat(self, keys: split) -> None:
+        """Prediction checks `pihat_test` against how the model was fit."""
+        train, test = split_bcf_data(
+            gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
+        )
+        kwargs: dict = dict(
+            x_train=train.x,
+            y_train=train.y,
+            z_train=train.z,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
+        )
+
+        model = bcf(**kwargs, pihat_train=train.pihat, seed=keys.pop())
+        with pytest.raises(ValueError, match='`pihat_test` is required'):
+            model.predict(test.x)
+        with pytest.raises(ValueError, match='`pihat_test` is required'):
+            model.predict_potential_outcomes(test.x, key=keys.pop())
+        # jaxtyping binds `m` across x_test/pihat_test, so disable it to reach
+        # the explicit length check
+        with (
+            jaxtyping_disabled(),
+            pytest.raises(ValueError, match='`pihat_test` has length'),
+        ):
+            model.predict(test.x, pihat_test=train.pihat)
+
+        model = bcf(**kwargs, seed=keys.pop())
+        with pytest.raises(ValueError, match='fit without `pihat_train`'):
+            model.predict(test.x, pihat_test=test.pihat)
 
     def test_numpy_input(self, keys: split) -> None:
         """Numpy inputs give the same results as jax arrays."""

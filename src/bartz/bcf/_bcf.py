@@ -24,16 +24,17 @@
 
 """Bayesian Causal Forests (BCF) interface."""
 
+import sys
 from operator import attrgetter
 from os import PathLike
 from typing import Any, Literal, cast
 
 import equinox as eqx
-import jax
 import jax.numpy as jnp
+from equinox import error_if
 from jax import lax, random
-from jax.scipy import special
-from jaxtyping import Array, Float32, Key, Real, Shaped
+from jax.scipy.special import ndtr, ndtri
+from jaxtyping import Array, Bool, Float32, Key, Real, Shaped, UInt
 
 from bartz._interface import (
     ArrayLike,
@@ -50,15 +51,23 @@ from bartz._interface import (
     _run_mcmc,
     predict_latent,
 )
-from bartz._jaxext import split
+from bartz._jaxext import is_key, jit, split
 from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import init_bcf
+from bartz.mcmcloop import MainTrace
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import OutcomeType, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._state import make_p_nonterminal
 from bartz.prepcovars import UniqueQuantileBinner
+
+if sys.version_info >= (3, 11):
+    from typing import NotRequired, TypedDict
+else:
+    # WORKAROUND(python<3.11): typing.NotRequired was added in 3.11, and
+    # before then typing.TypedDict ignores typing_extensions.NotRequired
+    from typing_extensions import NotRequired, TypedDict
 
 
 def _process_bcf_predictor_input(
@@ -99,6 +108,137 @@ def make_leaf_prior_cov_inv(
         return Wishart(nu=2 * shape, rate=2 * scale, value=value)
     else:
         return Wishart(nu=None, rate=None, value=value)
+
+
+class BCFPrediction(TypedDict):
+    """The posterior samples returned by `bcf.predict`, chains concatenated."""
+
+    mu: Float32[Array, 'num_samples m']
+    """The control mean, on the latent probit scale for binary outcomes."""
+
+    tau: Float32[Array, 'num_samples m']
+    """The treatment effect, on the latent probit scale for binary outcomes."""
+
+    tau_prob: NotRequired[Float32[Array, 'num_samples m']]
+    """The treatment effect on the probability scale, only for binary outcomes."""
+
+    p1: NotRequired[Float32[Array, 'num_samples m']]
+    """The probability of y being True if treated, only for binary outcomes."""
+
+    p0: NotRequired[Float32[Array, 'num_samples m']]
+    """The probability of y being True if untreated, only for binary outcomes."""
+
+
+class BCFPotentialOutcomes(BCFPrediction):
+    """
+    The posterior predictive samples returned by `bcf.predict_potential_outcomes`.
+
+    Also has all the fields of `BCFPrediction`.
+    """
+
+    y0: Float32[Array, 'num_samples m']
+    """The outcome if untreated."""
+
+    y1: Float32[Array, 'num_samples m']
+    """The outcome if treated."""
+
+    delta: Float32[Array, 'num_samples m']
+    """The individual treatment effect ``y1 - y0``."""
+
+
+@jit(static_argnums=(7,))
+def predict(
+    x_test: UInt[Array, 'p_or_p_plus_1 m'],
+    mu_trace: MainTrace,
+    tau_trace: MainTrace,
+    tau_0_trace: Float32[Array, ' num_samples'],
+    b_trace: Float32[Array, 'num_samples 2'],
+    y_mean: Float32[Array, ''],
+    y_std: Float32[Array, ''],
+    probabilities: bool,
+    /,
+) -> BCFPrediction:
+    """Implement `bcf.predict` on the binned test predictors.
+
+    Return the probit outputs of binary models only if `probabilities`.
+    """
+    # Evaluate the sum-of-trees (both forests walk the same unified test matrix)
+    mu_latent = predict_latent(x_test, mu_trace, 'none')
+    tau_latent = predict_latent(x_test, tau_trace, 'none')
+    tau_latent += tau_0_trace[:, None]
+
+    b0_expanded = b_trace[:, 0, None]
+    b1_expanded = b_trace[:, 1, None]
+    # Control mean: mu(X) + b_0 * (tau(X) + tau_0)
+    mu_adjusted = mu_latent + b0_expanded * tau_latent
+    # Compute CATE via adaptive coding difference
+    cate = (b1_expanded - b0_expanded) * tau_latent
+
+    if probabilities:
+        p1 = ndtr(mu_latent + tau_latent * b1_expanded)
+        p0 = ndtr(mu_latent + tau_latent * b0_expanded)
+        return BCFPrediction(mu=mu_adjusted, tau=cate, tau_prob=p1 - p0, p1=p1, p0=p0)
+    else:
+        # y_mean and y_std are exactly 0 and 1 if the response is not
+        # standardized, which is always the case for binary outcomes
+        return BCFPrediction(mu=mu_adjusted * y_std + y_mean, tau=cate * y_std)
+
+
+@jit(static_argnums=(3,))
+def expected_outcome(
+    mu: Float32[Array, 'num_samples m'],
+    tau: Float32[Array, 'num_samples m'],
+    z: Bool[Array, ' m'],
+    probability: bool,
+    /,
+) -> Float32[Array, 'num_samples m']:
+    """Implement `bcf.yhat_test`, or `bcf.prob_test` if `probability`."""
+    yhat = mu + z * tau
+    if probability:
+        return ndtr(yhat)
+    else:
+        return yhat
+
+
+@jit
+def sigma_trace(
+    trace: MainTrace, y_std: Float32[Array, ''], /
+) -> Float32[Array, ' num_samples']:
+    """Implement `bcf.sigma_trace`, jitted such that folding the chains does not copy."""
+    # y_std is exactly 1 if the response is not standardized
+    return lax.rsqrt(_fold_chains(trace, 'error_cov_inv')) * y_std
+
+
+@jit(static_argnums=(5,))
+def sample_potential_outcomes(
+    key: Key[Array, ''],
+    mu: Float32[Array, 'num_samples m'],
+    tau: Float32[Array, 'num_samples m'],
+    sigma: Float32[Array, ' num_samples'],
+    rho: Float32[Array, ''],
+    binary: bool,
+    /,
+) -> tuple[
+    Float32[Array, 'num_samples m'],
+    Float32[Array, 'num_samples m'],
+    Float32[Array, 'num_samples m'],
+]:
+    """Implement the sampling of `bcf.predict_potential_outcomes`."""
+    u0, u1 = random.normal(key, (2, *mu.shape))
+
+    eps0 = sigma[:, None] * u0
+    # factored for accuracy at |rho| ~ 1
+    eps1 = sigma[:, None] * (rho * u0 + jnp.sqrt((1 - rho) * (1 + rho)) * u1)
+
+    y0 = mu + eps0
+    y1 = mu + tau + eps1
+    if binary:
+        y0 = (y0 > 0.0).astype(jnp.float32)
+        y1 = (y1 > 0.0).astype(jnp.float32)
+        delta = y1 - y0
+    else:
+        delta = tau + (eps1 - eps0)
+    return y0, y1, delta
 
 
 @serializable
@@ -205,7 +345,8 @@ class bcf(eqx.Module):
         than 0 or 1, or if the format of `x_test` does not match `x_train`
         format, or if `z_test` or `pihat_test` is passed without `x_test`, or
         if only one of `pihat_train` and `pihat_test` is passed, or if
-        `z_test` or `pihat_test` does not match the length of `x_test`.
+        `z_test` or `pihat_test` does not match the length of `x_test`, or if
+        `pihat_train` is passed but excluded from both forests.
     """
 
     _mcmc_state: Any
@@ -216,15 +357,15 @@ class bcf(eqx.Module):
     _b_trace: Any
     _leaf_prior_cov_inv_mu_trace: Any
     _leaf_prior_cov_inv_tau_trace: Any
-    _x_train_fmt: Any = eqx.field(static=True, default=None)
-    _standardize: bool = eqx.field(static=True, default=False)
-    _y_mean: Float32[ArrayLike, ''] | float = eqx.field(default=0.0)
-    _y_std: Float32[ArrayLike, ''] | float = eqx.field(default=1.0)
-    _outcome_type: str = eqx.field(static=True, default='continuous')
-    _offset: Float32[ArrayLike, ''] | float = eqx.field(default=0.0)
-    _mu_test: Float32[Array, 'num_samples m'] | None = eqx.field(default=None)
-    _tau_test: Float32[Array, 'num_samples m'] | None = eqx.field(default=None)
-    _yhat_test: Float32[Array, 'num_samples m'] | None = eqx.field(default=None)
+    _x_train_fmt: Any = eqx.field(static=True)
+    _has_pihat: bool = eqx.field(static=True)
+    _y_mean: Float32[Array, '']
+    _y_std: Float32[Array, '']
+    _outcome_type: str = eqx.field(static=True)
+    _offset: Float32[Array, '']
+    _mu_test: Float32[Array, 'num_samples m'] | None = None
+    _tau_test: Float32[Array, 'num_samples m'] | None = None
+    _z_test: Bool[Array, ' m'] | None = None
 
     def __init__(  # noqa: C901, PLR0915
         self,
@@ -295,50 +436,37 @@ class bcf(eqx.Module):
             y_std = jnp.float32(1.0)
             y_train_internal = y_train
 
-        self._standardize = standardize
         self._y_mean = y_mean
         self._y_std = y_std
 
         if pihat_train is not None:
+            if not include_pihat_in_mu and not include_pihat_in_tau:
+                msg = (
+                    '`pihat_train` is unused if `include_pihat_in_mu` and'
+                    ' `include_pihat_in_tau` are both False.'
+                )
+                raise ValueError(msg)
             pihat_train = _process_response_input(pihat_train)
+        self._has_pihat = pihat_train is not None
 
         if x_test is None:
             if z_test is not None or pihat_test is not None:
                 msg = '`z_test` and `pihat_test` require `x_test`.'
                 raise ValueError(msg)
         else:
-            x_test_preprocessed, x_test_fmt = _process_bcf_predictor_input(x_test)
-            _, m = x_test_preprocessed.shape
-            del x_test_preprocessed
-            if x_test_fmt != self._x_train_fmt:
-                msg = (
-                    f'Format of x_test {x_test_fmt} does not match x_train'
-                    f' {self._x_train_fmt}'
-                )
-                raise ValueError(msg)
-            if (pihat_train is None) != (pihat_test is None):
-                msg = '`pihat_train` and `pihat_test` must be passed together.'
-                raise ValueError(msg)
+            x_test = self._process_x_test(x_test, pihat_test)
+            _, m = x_test.shape
             if z_test is not None:
                 z_test = _process_response_input(z_test)
                 (len_z,) = z_test.shape
                 if len_z != m:
                     msg = f'`z_test` has length {len_z}, but `x_test` has {m} rows.'
                     raise ValueError(msg)
-                z_test = eqx.error_if(
+                z_test = error_if(
                     z_test,
                     jnp.any((z_test != 0) & (z_test != 1)),
                     'Values in `z_test` must be 0 or 1.',
                 ).astype(bool)
-            if pihat_test is not None:
-                pihat_test = _process_response_input(pihat_test)
-                (len_pihat,) = pihat_test.shape
-                if len_pihat != m:
-                    msg = (
-                        f'`pihat_test` has length {len_pihat}, but `x_test` has'
-                        f' {m} rows.'
-                    )
-                    raise ValueError(msg)
 
         # 2. Append pihat to X to create unified predictor matrix
         x_train_unified = x_train
@@ -377,7 +505,7 @@ class bcf(eqx.Module):
         if leaf_prior_cov_inv_tau is None:
             if outcome_type == 'binary':
                 p_val = 0.6827
-                q_quantile = special.ndtri((p_val + 1) / 2.0)
+                q_quantile = ndtri((p_val + 1) / 2.0)
                 phi_0 = 1.0 / jnp.sqrt(2 * jnp.pi)
                 sigma2_tau = ((delta_max / (q_quantile * phi_0)) ** 2) / num_trees_tau
                 leaf_prior_cov_inv_tau = jnp.reciprocal(sigma2_tau)
@@ -416,7 +544,7 @@ class bcf(eqx.Module):
             sigma2_leaf_scale_tau = 0.5 * var_y / num_trees_tau
 
         # 3.5 Bin the unified data
-        rng = random.key(seed) if not isinstance(seed, jax.Array) else seed
+        rng = seed if is_key(seed) else random.key(seed)
         keys = split(rng)
 
         binner = UniqueQuantileBinner(x_train_unified, key=keys.pop())
@@ -507,11 +635,10 @@ class bcf(eqx.Module):
 
         # 6. Predict at the test points, now that the traces are available
         if x_test is not None:
-            test_pred = self.predict(x_test, pihat_test=pihat_test)
+            test_pred = self._predict_unified(x_test, probabilities=False)
             self._mu_test = test_pred['mu']
             self._tau_test = test_pred['tau']
-            if z_test is not None:
-                self._yhat_test = self._mu_test + z_test * self._tau_test
+            self._z_test = z_test
 
     def save_npz(self, path: str | PathLike) -> None:
         """
@@ -546,35 +673,33 @@ class bcf(eqx.Module):
         x_test: Real[ArrayLike, 'm p'] | DataFrame,
         *,
         pihat_test: Float32[ArrayLike, ' m'] | Series | None = None,
-        include_pihat_in_mu: bool = True,  # noqa: ARG002
-        include_pihat_in_tau: bool = False,  # noqa: ARG002
-    ) -> dict[str, Float32[Array, 'num_samples m']]:
+    ) -> BCFPrediction:
         """
-        Compute predictions for both mu and tau forests at `x_test`.
+        Compute the control mean and the treatment effect at `x_test`.
 
         Parameters
         ----------
         x_test
             The test predictors.
         pihat_test
-            The test propensity scores.
-        include_pihat_in_mu
-            Whether to include propensity scores in prognostic forest prediction.
-        include_pihat_in_tau
-            Whether to include propensity scores in treatment effect forest prediction.
+            The test propensity scores, required iff the model was fit with
+            `pihat_train`.
 
         Returns
         -------
-        dict
-            A dictionary with "mu" and "tau" containing the posterior samples
-            of the respective forests evaluated at x_test. Shapes are
-            (num_chains * ndpost, m).
-
-        Raises
-        ------
-        ValueError
-            If the format of `x_test` does not match `x_train` format.
+        The posterior samples at `x_test`.
         """
+        return self._predict_unified(
+            self._process_x_test(x_test, pihat_test),
+            probabilities=self._outcome_type == 'binary',
+        )
+
+    def _process_x_test(
+        self,
+        x_test: Real[ArrayLike, 'm p'] | DataFrame,
+        pihat_test: Float32[ArrayLike, ' m'] | Series | None,
+    ) -> Shaped[Array, 'p m'] | Shaped[Array, 'p+1 m']:
+        """Check the test inputs against the training ones and stack them."""
         x_test, x_test_fmt = _process_bcf_predictor_input(x_test)
         if x_test_fmt != self._x_train_fmt:
             msg = (
@@ -583,57 +708,44 @@ class bcf(eqx.Module):
             )
             raise ValueError(msg)
 
-        if pihat_test is not None:
+        if self._has_pihat and pihat_test is None:
+            msg = '`pihat_test` is required, the model was fit with `pihat_train`.'
+            raise ValueError(msg)
+        elif not self._has_pihat and pihat_test is not None:
+            msg = (
+                '`pihat_test` is not allowed, the model was fit without `pihat_train`.'
+            )
+            raise ValueError(msg)
+        elif pihat_test is None:
+            return x_test
+        else:
             pihat_test = _process_response_input(pihat_test)
+            _, m = x_test.shape
+            (len_pihat,) = pihat_test.shape
+            if len_pihat != m:
+                msg = f'`pihat_test` has length {len_pihat}, but `x_test` has {m} rows.'
+                raise ValueError(msg)
+            return jnp.concatenate([x_test, pihat_test[None, :]], axis=0)
 
-        x_test_unified = x_test
-        if pihat_test is not None:
-            pihat_row = pihat_test[jnp.newaxis, :]
-            x_test_unified = jnp.concatenate([x_test_unified, pihat_row], axis=0)
-
-        # Bin the test data
-        x_test_binned = self._binner.bin(x_test_unified)
-
-        # Evaluate the sum-of-trees (both forests walk the same unified test matrix)
-        mu_latent = predict_latent(x_test_binned, self._main_trace['mu'], 'none')
-        tau_latent = predict_latent(x_test_binned, self._main_trace['tau'], 'none')
-
-        # Add the global tau_0 intercept
-        tau_latent = tau_latent + self._tau_0_trace[:, jnp.newaxis]
-
-        b0_expanded = self._b_trace[:, 0, jnp.newaxis]
-        b1_expanded = self._b_trace[:, 1, jnp.newaxis]
-        # Control mean: mu(X) + b_0 * (tau(X) + tau_0)
-        mu_adjusted = mu_latent + b0_expanded * tau_latent
-        # Compute CATE via adaptive coding difference
-        cate = (b1_expanded - b0_expanded) * tau_latent
-
-        if getattr(self, '_outcome_type', 'continuous') == 'binary':
-            p1 = special.ndtr(mu_latent + tau_latent * b1_expanded)
-            p0 = special.ndtr(mu_latent + tau_latent * b0_expanded)
-            cate_prob = p1 - p0
-            return {
-                'mu': mu_adjusted,
-                'tau': cate,
-                'tau_prob': cate_prob,
-                'p1': p1,
-                'p0': p0,
-            }
-
-        if self._standardize:
-            mu_adjusted = mu_adjusted * self._y_std + self._y_mean
-            cate = cate * self._y_std
-
-        return {'mu': mu_adjusted, 'tau': cate}
+    def _predict_unified(
+        self, x_test_unified: Shaped[Array, 'p_or_p_plus_1 m'], *, probabilities: bool
+    ) -> BCFPrediction:
+        """Implement `predict` on the test predictors stacked with pihat."""
+        return predict(
+            self._binner.bin(x_test_unified),
+            self._main_trace['mu'],
+            self._main_trace['tau'],
+            self._tau_0_trace,
+            self._b_trace,
+            self._y_mean,
+            self._y_std,
+            probabilities,
+        )
 
     @property
     def sigma_trace(self) -> Float32[Array, ' num_samples']:
         """The posterior trace of residual standard deviation on the outcome scale, chains concatenated."""
-        error_cov_inv = _fold_chains(self._main_trace['mu'], 'error_cov_inv')
-        sigma_internal = lax.rsqrt(error_cov_inv)
-        if self._standardize:
-            return sigma_internal * self._y_std
-        return sigma_internal
+        return sigma_trace(self._main_trace['mu'], self._y_std)
 
     @property
     def mu_test(self) -> Float32[Array, 'num_samples m'] | None:
@@ -653,11 +765,16 @@ class bcf(eqx.Module):
 
     @property
     def yhat_test(self) -> Float32[Array, 'num_samples m'] | None:
-        """The outcome at `x_test` under `z_test` for each MCMC iteration.
+        """The expected outcome at `x_test` under `z_test` for each MCMC iteration.
 
         On the latent probit scale for binary outcomes; see `prob_test`.
         """
-        return self._yhat_test
+        if self._z_test is None:
+            return None
+        else:
+            assert self._mu_test is not None
+            assert self._tau_test is not None
+            return expected_outcome(self._mu_test, self._tau_test, self._z_test, False)
 
     @property
     def prob_test(self) -> Float32[Array, 'num_samples m'] | None:
@@ -666,97 +783,62 @@ class bcf(eqx.Module):
         `None` unless the outcome is binary and `x_test` and `z_test` were
         passed to the constructor.
         """
-        if self._yhat_test is None or self._outcome_type != 'binary':
+        if self._z_test is None or self._outcome_type != 'binary':
             return None
-        return special.ndtr(self._yhat_test)
+        else:
+            assert self._mu_test is not None
+            assert self._tau_test is not None
+            return expected_outcome(self._mu_test, self._tau_test, self._z_test, True)
 
     def predict_potential_outcomes(
         self,
         x_test: Real[ArrayLike, 'm p'] | DataFrame,
         *,
+        key: int | Key[Array, ''],
         pihat_test: Float32[ArrayLike, ' m'] | Series | None = None,
-        rho: float = 0.5,
-        key: Key[Array, ''] | int | None = None,
-        include_pihat_in_mu: bool = True,
-        include_pihat_in_tau: bool = False,
-    ) -> dict[str, Float32[Array, 'num_samples m']]:
+        rho: FloatLike = 0.0,
+    ) -> BCFPotentialOutcomes:
         """
-        Sample joint posterior predictive potential outcomes Y(0), Y(1), and lift.
+        Sample joint posterior predictive potential outcomes Y(0), Y(1), and "lift" Y(1) - Y(0).
 
         Parameters
         ----------
         x_test
             The test predictors.
-        pihat_test
-            Optional test propensity scores.
-        rho
-            Cross-world counterfactual noise correlation in [0, 1].
         key
-            JAX PRNG key or integer seed for stochastic noise sampling.
-        include_pihat_in_mu
-            Whether to include propensity scores in prognostic forest prediction.
-        include_pihat_in_tau
-            Whether to include propensity scores in treatment effect forest prediction.
+            A jax random key or an integer seed for sampling the errors.
+        pihat_test
+            The test propensity scores, required iff the model was fit with
+            `pihat_train`.
+        rho
+            The correlation in [-1, 1] between the errors of `y0` and `y1`.
+            The data carry no information on it, see [1]_. It affects only
+            `delta` in `BCFPotentialOutcomes`, widening it as `rho` decreases.
 
         Returns
         -------
-        dict
-            A dictionary mapping outcome names to posterior predictive arrays.
+        The posterior predictive samples at `x_test`.
 
-        Raises
-        ------
-        ValueError
-            If rho is not within [0, 1].
+        References
+        ----------
+        .. [1] Imbens, Guido W., and Donald B. Rubin (2015). "Causal Inference
+           for Statistics, Social, and Biomedical Sciences: An Introduction".
+           Cambridge University Press, section 8.6.
         """
-        if not 0.0 <= rho <= 1.0:
-            msg = f'rho must be in [0, 1], got {rho}'
-            raise ValueError(msg)
+        rho = jnp.asarray(rho)
+        # written to also catch nan
+        rho = error_if(rho, ~(jnp.abs(rho) <= 1), 'rho must be in [-1, 1]')
 
-        if key is None:
-            key = random.key(0)
-        elif isinstance(key, int):
+        if not is_key(key):
             key = random.key(key)
 
-        preds = self.predict(
-            x_test=x_test,
-            pihat_test=pihat_test,
-            include_pihat_in_mu=include_pihat_in_mu,
-            include_pihat_in_tau=include_pihat_in_tau,
+        preds = self.predict(x_test=x_test, pihat_test=pihat_test)
+        y0, y1, delta = sample_potential_outcomes(
+            key,
+            preds['mu'],
+            preds['tau'],
+            self.sigma_trace,
+            rho,
+            self._outcome_type == 'binary',
         )
-        mu = preds['mu']
-        tau = preds['tau']
-        num_samples, m = mu.shape
-
-        sigma = self.sigma_trace[:, jnp.newaxis]
-
-        keys = split(key)
-        u0 = random.normal(keys.pop(), shape=(num_samples, m), dtype=jnp.float32)
-        u1 = random.normal(keys.pop(), shape=(num_samples, m), dtype=jnp.float32)
-
-        rho_f = jnp.float32(rho)
-        eps0 = sigma * u0
-        eps1 = sigma * (rho_f * u0 + jnp.sqrt(jnp.maximum(0.0, 1.0 - rho_f**2)) * u1)
-
-        y0_latent = mu + eps0
-        y1_latent = mu + tau + eps1
-
-        if getattr(self, '_outcome_type', 'continuous') == 'binary':
-            y0 = (y0_latent > 0.0).astype(jnp.float32)
-            y1 = (y1_latent > 0.0).astype(jnp.float32)
-            delta = y1 - y0
-            return {
-                'y0': y0,
-                'y1': y1,
-                'delta': delta,
-                'mu': mu,
-                'tau': tau,
-                'p0': preds['p0'],
-                'p1': preds['p1'],
-                'tau_prob': preds['tau_prob'],
-            }
-
-        y0 = y0_latent
-        y1 = y1_latent
-        delta = y1 - y0
-
-        return {'y0': y0, 'y1': y1, 'delta': delta, 'mu': mu, 'tau': tau}
+        return BCFPotentialOutcomes(**preds, y0=y0, y1=y1, delta=delta)

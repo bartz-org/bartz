@@ -48,6 +48,7 @@ from bartz._interface import (
     _process_predictor_input,
     _process_response_input,
     _run_mcmc,
+    any_nan,
     check_length,
     predict_latent,
 )
@@ -109,6 +110,9 @@ def stack_pihat(
     """Append `pihat_train` or `pihat_test` to the predictors as the last one."""
     pihat = _process_response_input(pihat)
     check_length(pihat, f'pihat_{which}', x, f'x_{which}')
+    if not jit_active() and any_nan(pihat):
+        msg = f'`pihat_{which}` contains NaN; missing values are not supported'
+        raise ValueError(msg)
     return jnp.concatenate((x, pihat[None, :]))
 
 
@@ -323,7 +327,10 @@ class bcf(Module):
     sample_intercept
         Whether to sample a global treatment intercept `tau_0`.
     adaptive_coding
-        Whether to use adaptive coding for the treatment effect.
+        Whether to use adaptive coding for the treatment effect, i.e., to
+        sample the coding weights of untreated and treated units. Their
+        priors are independent N(0, 1/2), truncated to ``|b| >= 0.01`` for
+        numerical accuracy.
     sample_sigma2_leaf_mu
         Whether to sample the leaf parameter variance for the prognostic forest.
     sigma2_leaf_shape_mu
@@ -359,7 +366,8 @@ class bcf(Module):
         or if the length of `y_train`, `z_train` or `pihat_train` does not
         match `x_train`, or the length of `z_test` or `pihat_test` does not
         match `x_test`, or if `pihat_train` is passed but excluded from both
-        forests.
+        forests, or if `x_train`, `x_test`, `pihat_train` or `pihat_test`
+        contains NaN.
     """
 
     _mcmc_state: BCFState

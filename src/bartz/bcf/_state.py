@@ -61,10 +61,15 @@ class BCFState(State):
     """Adaptive coding weights for untreated and treated units."""
 
     b_prior_cov_inv: Float32[Array, ''] | None
-    """Prior precision of `b`, `None` to leave it unchanged."""
+    """Prior precision of `b`, `None` to leave it unchanged. The zero-mean
+    normal prior excludes ``|b| < 0.01``."""
 
     tau_0_prior_cov_inv: Float32[Array, ''] | None
     """Prior precision of `tau_0`, `None` to leave it unchanged."""
+
+    prec_count_num_trees_tau: int | None = field(static=True)
+    """The `StepConfig.prec_count_num_trees` of the treatment forest, swapped
+    into `State.config` with the forests by `swap_mu_tau_forests`."""
 
 
 def init_bcf(
@@ -133,7 +138,8 @@ def init_bcf(
     sample_intercept
         Whether to sample a global treatment intercept `tau_0`.
     adaptive_coding
-        Whether to use adaptive coding for the treatment effect.
+        Whether to use adaptive coding for the treatment effect, see
+        `bartz.bcf.bcf`.
     error_cov_inv
         The Wishart prior on the error precision and its initial value, `None`
         for binary outcomes. See `bartz.mcmcstep.init`.
@@ -233,12 +239,21 @@ def init_bcf(
         b=jnp.broadcast_to(b_init, (*chain_shape, 2)),
         tau_0_prior_cov_inv=tau_0_prior_cov_inv,
         b_prior_cov_inv=b_prior_cov_inv,
+        prec_count_num_trees_tau=state_tau.config.prec_count_num_trees,
     )
 
 
 def swap_mu_tau_forests(state: BCFState) -> BCFState:
-    """Swap the prognostic and treatment forests."""
-    return replace(state, forest=state.forest_tau, forest_tau=state.forest)
+    """Swap the prognostic and treatment forests, with their tree batch sizes."""
+    return replace(
+        state,
+        forest=state.forest_tau,
+        forest_tau=state.forest,
+        config=replace(
+            state.config, prec_count_num_trees=state.prec_count_num_trees_tau
+        ),
+        prec_count_num_trees_tau=state.config.prec_count_num_trees,
+    )
 
 
 def coding_basis(

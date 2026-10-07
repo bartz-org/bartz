@@ -3185,13 +3185,24 @@ def test_data_format_mismatch(bkw: BartKW) -> None:
         bart.predict(numpy.array(bkw.x_test), error_scale=w)
 
 
-@pytest.mark.parametrize('dtype', [jnp.float16, jnp.bfloat16, jnp.float32])
+@pytest.mark.parametrize(
+    'dtype',
+    [
+        jnp.float8_e4m3fn,  # no inf
+        jnp.float8_e5m2,
+        jnp.float16,
+        jnp.bfloat16,
+        jnp.float32,
+    ],
+)
 @pytest.mark.parametrize('shape', [(1000,), (257, 20), (20, 257), (3, 7, 11)])
 def test_any_nan(dtype: jnp.dtype, shape: tuple[int, ...]) -> None:
     """Check `any_nan` detects a single nan anywhere, without false positives."""
     fi = jnp.finfo(dtype)
+    has_inf = numpy.isinf(numpy.array(numpy.inf).astype(dtype))
+    inf = numpy.inf if has_inf else fi.max
     x = jnp.zeros(shape, dtype).ravel()
-    x = x.at[::3].set(jnp.inf).at[1::3].set(-jnp.inf)
+    x = x.at[::3].set(inf).at[1::3].set(-inf)
     x = x.at[2::5].set(fi.max).at[3::7].set(-fi.max)
     x = x.at[4::11].set(fi.tiny).at[5::13].set(fi.smallest_subnormal)
     assert not any_nan(x.reshape(shape))

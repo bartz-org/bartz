@@ -239,6 +239,16 @@ def init_bcf_state(key: Key[Array, ''], data: BCFData, **kwargs: Any) -> BCFStat
     return init_bcf(**dict(defaults, **kwargs))
 
 
+def resid_from_scratch(
+    state: BCFState, y: Float32[Array, ' n']
+) -> Float32[Array, ' n']:
+    """Compute the residuals of `state` from its forests, in data units."""
+    mu_fit = evaluate_forest(state.X, state.forest, sum_batch_axis=0)
+    tau_fit = evaluate_forest(state.X, state.forest_tau, sum_batch_axis=0)
+    b_z = state.b[state.trt.astype(int)]
+    return y - state.forest.offset - mu_fit - b_z * (state.tau_0 + tau_fit)
+
+
 def relative_rmse(
     estimate: Float32[ArrayLike, ' n'], truth: Float32[Array, ' n']
 ) -> Float32[Array, '']:
@@ -584,26 +594,37 @@ class TestBcf:
 
         new_state = bcf_step(keys.pop(), init_state)
 
-        mu_fit_raw = evaluate_forest(new_state.X, new_state.forest).sum(axis=0)
-        mu_fit = (
-            mu_fit_raw
-            if new_state.inv_sdev_scale is None
-            else mu_fit_raw / new_state.inv_sdev_scale
-        )
-
-        tau_fit_raw = evaluate_forest(new_state.X, new_state.forest_tau).sum(axis=0)
-
-        b_z = new_state.b[train.z.astype(int)]
-        expected_resid = (
-            train.y
-            - new_state.forest.offset
-            - mu_fit
-            - b_z * (new_state.tau_0 + tau_fit_raw)
-        )
-
         # `resid` is stored scaled (``resid_unit * resid = data residual``)
         assert_close_matrices(
-            new_state.resid * new_state.resid_unit, expected_resid, rtol=1e-5
+            new_state.resid * new_state.resid_unit,
+            resid_from_scratch(new_state, train.y),
+            rtol=1e-5,
+        )
+
+    def test_running_values_accurate_near_b_zero(self, keys: split) -> None:
+        """Check `tau_X` and `resid` stay accurate after `b` passes near 0.
+
+        A tight prior on `b` pins it near 0, where the tau forest's working
+        residual ``resid / b_z`` is large compared to the tau leaves. Then the
+        prior is relaxed, such that `b` moves away and an error in `tau_X`
+        leaks into `resid`.
+        """
+        train = gen_bcf_data(keys.pop(), n=100)
+        state = init_bcf_state(keys.pop(), train, adaptive_coding=True)
+
+        state = replace(state, b_prior_cov_inv=jnp.float32(1e12))
+        for _ in range(3):
+            state = bcf_step(keys.pop(), state)
+        state = replace(state, b_prior_cov_inv=jnp.float32(2.0))
+        for _ in range(2):
+            state = bcf_step(keys.pop(), state)
+
+        tau_fit = evaluate_forest(state.X, state.forest_tau, sum_batch_axis=0)
+        assert_close_matrices(state.tau_X, tau_fit, rtol=1e-3)
+        assert_close_matrices(
+            state.resid * state.resid_unit,
+            resid_from_scratch(state, train.y),
+            rtol=1e-3,
         )
 
     @pytest.mark.parametrize(

@@ -327,7 +327,8 @@ class bcf(Module):
     min_points_per_leaf_mu
         Minimum data points per leaf for prognostic forest.
     min_points_per_leaf_tau
-        Minimum data points per leaf for treatment forest.
+        Minimum data points per leaf for treatment forest, counting untreated
+        units too.
     maxdepth_mu
     maxdepth_tau
         The maximum depth of the trees in the prognostic/treatment effect

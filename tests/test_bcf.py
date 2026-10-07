@@ -69,7 +69,7 @@ from tests.util import (
 )
 
 # sizes of the quick runs that only check the plumbing
-N_TRAIN = 30
+N_TRAIN = 100
 N_TEST = 15
 NUM_TREES_MU = 2
 NUM_TREES_TAU = 3
@@ -590,7 +590,7 @@ class TestBcf:
 
     def test_one_step_residual_invariant(self, keys: split) -> None:
         """Verifies that R == y - offset - mu_fit - b_z * (tau_0 + tau_fit)."""
-        train = gen_bcf_data(keys.pop(), n=100)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
         init_state = init_bcf_state(keys.pop(), train)
 
         new_state = bcf_step(keys.pop(), init_state)
@@ -610,7 +610,7 @@ class TestBcf:
         prior is relaxed, such that `b` moves away and an error in `tau_X`
         leaks into `resid`.
         """
-        train = gen_bcf_data(keys.pop(), n=100)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
         state = init_bcf_state(keys.pop(), train, adaptive_coding=True)
 
         state = replace(state, b_prior_cov_inv=jnp.float32(1e12))
@@ -689,7 +689,7 @@ class TestBcf:
         match the new weights. Setting `prec_count_num_trees` exercises the
         batched rebuild of the cache.
         """
-        train = gen_bcf_data(keys.pop(), n=100)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
         state = init_bcf_state(
             keys.pop(),
             train,
@@ -724,7 +724,7 @@ class TestBcf:
 
     def test_multichain(self, keys: split) -> None:
         """Check each chain of a multichain BCF matches a single-chain one."""
-        train = gen_bcf_data(keys.pop(), n=100)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
         binner_key = keys.pop()
 
         def make_state(num_chains: int | None) -> BCFState:
@@ -766,7 +766,7 @@ class TestBcf:
         self, keys: split, subtests: SubTests, num_chains: int | None
     ) -> None:
         """Check splitting a BCF `run_mcmc` run and chunking it do not matter."""
-        train = gen_bcf_data(keys.pop(), n=100)
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
         state = init_bcf_state(
             keys.pop(), train, adaptive_coding=True, num_chains=num_chains
         )

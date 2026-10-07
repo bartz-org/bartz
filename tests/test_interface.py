@@ -88,6 +88,7 @@ from bartz._interface import (
     DataFrame,
     Series,
     _guarded_response_variance,
+    any_nan,
     predict_latent,
 )
 from bartz._jaxext import (
@@ -3182,6 +3183,37 @@ def test_data_format_mismatch(bkw: BartKW) -> None:
     w = bkw.w_for_predict('mean', on_train=False)
     with pytest.raises(ValueError, match='format mismatch'):
         bart.predict(numpy.array(bkw.x_test), error_scale=w)
+
+
+@pytest.mark.parametrize('dtype', [jnp.float16, jnp.bfloat16, jnp.float32])
+@pytest.mark.parametrize('shape', [(1000,), (257, 20), (20, 257), (3, 7, 11)])
+def test_any_nan(dtype: jnp.dtype, shape: tuple[int, ...]) -> None:
+    """Check `any_nan` detects a single nan anywhere, without false positives."""
+    fi = jnp.finfo(dtype)
+    x = jnp.zeros(shape, dtype).ravel()
+    x = x.at[::3].set(jnp.inf).at[1::3].set(-jnp.inf)
+    x = x.at[2::5].set(fi.max).at[3::7].set(-fi.max)
+    x = x.at[4::11].set(fi.tiny).at[5::13].set(fi.smallest_subnormal)
+    assert not any_nan(x.reshape(shape))
+    with debug_nans(False):
+        for i in (0, 1, 2, x.size // 2, x.size - 2, x.size - 1):
+            assert any_nan(x.at[i].set(jnp.nan).reshape(shape))
+
+
+def test_nan_predictors(bkw: BartKW) -> None:
+    """Check that NaN in the predictors raises an error."""
+    kw = bkw.kw
+    w = bkw.w_for_predict('mean', on_train=False)
+    match = 'predictors contain NaN'
+
+    x_train = kw['x_train'].at[0, 0].set(jnp.nan)
+    with pytest.raises(ValueError, match=match):
+        Bart(**dict(kw, x_train=x_train))
+
+    bart = Bart(**kw)
+    x_test = bkw.x_test.at[-1, -1].set(jnp.nan)
+    with pytest.raises(ValueError, match=match):
+        bart.predict(x_test, error_scale=w)
 
 
 def test_automatic_integer_types(bkw: BartKW) -> None:

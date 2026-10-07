@@ -49,7 +49,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz._jaxext import equal_shards, is_key, jit, project, split
+from bartz._jaxext import equal_shards, is_key, jit, jit_active, project, split
 from bartz.grove import (
     TreeHeaps,
     TreesTrace,
@@ -1165,7 +1165,18 @@ def _process_predictor_input(
         fmt = dict(kind='array', num_covar=x.shape[0])
     x = jnp.asarray(x)
     assert x.ndim == 2
+    if jnp.issubdtype(x.dtype, jnp.floating) and not jit_active() and any_nan(x):
+        msg = 'predictors contain NaN; missing predictor values are not supported'
+        raise ValueError(msg)
     return x, fmt
+
+
+@jit
+def any_nan(x: Float[Array, '*shape']) -> Bool[Array, '']:
+    # Map non-nan values to [0, 1] with arithmetic, which propagates nan, so the
+    # sum is nan iff x contains nan. Unlike isnan or min/max, this fuses with the
+    # reduction and reliably propagates nan on cpu.
+    return jnp.isnan(jnp.sum(jnp.reciprocal(1 + jnp.square(x))))
 
 
 def _process_response_input(

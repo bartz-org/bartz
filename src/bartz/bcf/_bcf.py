@@ -167,6 +167,11 @@ class bcf(eqx.Module):
         Minimum data points per leaf for prognostic forest.
     min_points_per_leaf_tau
         Minimum data points per leaf for treatment forest.
+    maxdepth_mu
+    maxdepth_tau
+        The maximum depth of the trees in the prognostic/treatment effect
+        forest. This is 1-based, so with the default ``maxdepth_mu/tau=6``, the
+        depths of the levels range from 0 to 5.
     tau_0_prior_var
         Prior variance for global intercept tau_0.
     sample_intercept
@@ -254,6 +259,8 @@ class bcf(eqx.Module):
         leaf_prior_cov_inv_tau: FloatLike | None = None,
         min_points_per_leaf_mu: int = 5,
         min_points_per_leaf_tau: int = 5,
+        maxdepth_mu: int = 6,
+        maxdepth_tau: int = 6,
         tau_0_prior_var: float | None = None,
         sample_intercept: bool = True,
         adaptive_coding: bool = False,
@@ -405,8 +412,8 @@ class bcf(eqx.Module):
             error_scale=None,
         )
 
-        p_nonterminal_mu = make_p_nonterminal(d=6, alpha=0.95, beta=2.0)
-        p_nonterminal_tau = make_p_nonterminal(d=6, alpha=0.25, beta=3.0)
+        p_nonterminal_mu = make_p_nonterminal(d=maxdepth_mu, alpha=0.95, beta=2.0)
+        p_nonterminal_tau = make_p_nonterminal(d=maxdepth_tau, alpha=0.25, beta=3.0)
 
         if outcome_type == 'binary':
             var_y = 1.0

@@ -1133,7 +1133,7 @@ class TestBcf:
     def test_constructor_options(
         self, keys: split, sample_intercept: bool, num_chains: int | None
     ) -> None:
-        """Constructor x_test/z_test, pihat toggle, tau_0 prior/toggle, chains, sigma_trace."""
+        """Constructor x_test/z_test, pihat toggle, tau_0 prior/toggle, chains, sigma_trace, maxdepth."""
         train, test = split_bcf_data(
             gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
         )
@@ -1149,6 +1149,8 @@ class TestBcf:
             tau_0_prior_var=0.5,
             sample_intercept=sample_intercept,
             standardize=False,
+            maxdepth_mu=5,
+            maxdepth_tau=4,
             num_trees_mu=NUM_TREES_MU,
             num_trees_tau=NUM_TREES_TAU,
             ndpost=NDPOST,
@@ -1165,6 +1167,10 @@ class TestBcf:
         assert model.mu_test.shape == (num_samples, N_TEST)
         tau_0_is_zero = model._tau_0_trace == 0
         assert_array_equal(tau_0_is_zero, jnp.full(num_samples, not sample_intercept))
+
+        # the heap size is set by the maximum depth
+        assert model._main_trace['mu'].split_tree.shape[-1] == 2**4
+        assert model._main_trace['tau'].split_tree.shape[-1] == 2**3
 
         # the chains are concatenated one after the other
         error_cov_inv = model._main_trace['mu'].error_cov_inv

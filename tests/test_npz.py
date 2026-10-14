@@ -441,7 +441,7 @@ def test_not_bartz_archive(tmp_path: Path) -> None:
         load_npz(path)
 
 
-def write_archives() -> None:
+def write_archives() -> None:  # pragma: no cover, regeneration script
     """Write the archives of the current format, if not frozen."""
     for name, spec in MODELS.items():
         path = archive_path(name)
@@ -454,7 +454,7 @@ def write_archives() -> None:
         np.savez(outputs_path(path), **arrays)
 
 
-def check_frozen() -> None:
+def check_frozen() -> None:  # pragma: no cover, release script
     """Exit with an error if some archive is not frozen, printing its hash."""
     unfrozen = list(unfrozen_archives())
     if unfrozen:
@@ -467,7 +467,7 @@ def check_frozen() -> None:
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == '__main__':  # pragma: no cover, regeneration script
     parser = ArgumentParser(description='Write the archives of the current format.')
     parser.add_argument(
         '--check-frozen',

@@ -98,7 +98,7 @@ help:
 	@echo "- push-tag: push the version tag to origin"
 	@echo "- upload: upload release to PyPI"
 	@echo "- upload-test: upload release to TestPyPI"
-	@echo "- gh-release: create draft GitHub release from docs/changelog.md"
+	@echo "- gh-release: publish GitHub release from docs/changelog.md"
 	@echo "- asv-machine: initialize ~/.asv-machine.json with a human-readable id"
 	@echo "- asv-run: run benchmarks on all unbenchmarked tagged releases and main"
 	@echo "- asv-publish: create html benchmark report"
@@ -121,7 +121,6 @@ help:
 	@echo '- save notebook locally and commit it, merge PR'
 	@echo "- on main: $$ make release"
 	@echo "- merge fix PR and try again until make release passes"
-	@echo "- publish the draft github release created by make release (updates zenodo automatically)"
 	@echo "- if the online docs are not up-to-date, merge another PR to trigger a new merge CI"
 
 

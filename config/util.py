@@ -79,7 +79,7 @@ def check_changelog(today: datetime.date) -> None:
 
 
 def gh_release(today: datetime.date) -> None:
-    """Create a draft GitHub release from the topmost changelog section."""
+    """Publish a GitHub release from the topmost changelog section."""
     version, title, _date, body = _read_changelog_section(today)
     subprocess.run(  # noqa: S603
         [  # noqa: S607
@@ -87,7 +87,6 @@ def gh_release(today: datetime.date) -> None:
             'release',
             'create',
             f'v{version}',
-            '--draft',
             '--verify-tag',
             '--title',
             title,

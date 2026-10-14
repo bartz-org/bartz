@@ -174,13 +174,25 @@ repos:
         entry: '(?<!\.)\b_jaxext\.\w+\s*\('
         types: [python]
       - id: forbid-jax-vmap-jit-qualified-call
-        name: forbid qualified `jax.vmap`/`jax.jit` (use `from jax import vmap, jit`)
+        name: forbid qualified `jax.vmap`/`jax.jit` (import them by name)
         language: pygrep
         # Matches the qualified name as a word (`\b`) so call sites (`jax.jit(`),
         # bare decorators (`@jax.jit`), and references (`partial(jax.jit, ...)`)
         # are all caught. The `(?!`)` negative lookahead skips docstring/comment
         # mentions, which are wrapped in backticks (`` `jax.jit` ``).
         entry: '\bjax\.(vmap|jit)\b(?!`)'
+        types: [python]
+      - id: forbid-jax-jit-import-in-library
+        name: forbid `from jax import jit` in the library (use `from bartz._jaxext import jit`)
+        language: pygrep
+        # `bartz._jaxext.jit` preserves the jitted signature for type checkers.
+        # Not a ruff banned-api entry because per-file ignores of TID251 would
+        # lift all the other bans too. Matches single-line and parenthesized
+        # multi-line imports.
+        files: '^src/'
+        exclude: '^src/bartz/_jaxext/_jit\.py$'
+        entry: '^[ \t]*from[ \t]+jax[ \t]+import[ \t]+(\([^)]*|[^\n(]*)\bjit\b'
+        args: [--multiline]
         types: [python]
       - id: forbid-jax-random-qualified-call
         name: forbid `jax.random.foo(...)` (use `from jax import random`)

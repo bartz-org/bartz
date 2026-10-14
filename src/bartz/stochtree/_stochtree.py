@@ -464,9 +464,9 @@ class BARTModel:
                     mfp.sigma2_leaf_shape,
                     mfp.sigma2_leaf_scale,
                     sigma2_leaf_init,
-                    mfp.num_trees,
-                    is_probit,
-                    var_resid_train,
+                    num_trees=mfp.num_trees,
+                    is_probit=is_probit,
+                    var_resid_train=var_resid_train,
                 )
             }
         else:
@@ -773,6 +773,7 @@ def resolve_leaf_variance_prior(
     shape: FloatLike,
     scale: FloatLike | None,
     sigma2_leaf_init: FloatLike,
+    *,
     num_trees: int,
     is_probit: bool,
     var_resid_train: FloatLike,

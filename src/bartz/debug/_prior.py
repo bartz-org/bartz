@@ -413,11 +413,12 @@ class PriorSample(TreesTrace):
     a Dirichlet prior."""
 
 
-@jit(static_argnums=(1, 2))
+@jit(static_argnames=('trace_length', 'num_trees'))
 def sample_prior(
     key: Key[Array, ''],
     trace_length: int,
     num_trees: int,
+    *,
     max_split: UInt[Array, ' p'],
     p_nonterminal: Float32[Array, ' d_minus_1'],
     sigma_mu: Float32[Array, ''],
@@ -467,7 +468,9 @@ def sample_prior(
     keys = split_key(key)
     p = max_split.size
 
-    log_s, theta = sample_sparsity(keys.pop(), trace_length, p, log_s, theta, a, b, rho)
+    log_s, theta = sample_sparsity(
+        keys.pop(), trace_length, p, log_s=log_s, theta=theta, a=a, b=b, rho=rho
+    )
 
     tree_keys = random.split(keys.pop(), trace_length * num_trees)
     tree_keys = tree_keys.reshape(trace_length, num_trees)
@@ -486,6 +489,7 @@ def sample_sparsity(
     key: Key[Array, ''],
     trace_length: int,
     p: int,
+    *,
     log_s: Float32[Array, ' p'] | Float32[Array, 'trace_length p'] | None,
     theta: FloatLike | None,
     a: FloatLike | None,

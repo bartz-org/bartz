@@ -262,7 +262,6 @@ ignore = [
     "PIE790",  # Unnecessary ... or pass. Ignored because sometimes I use ... as sentinel to tell the rest of ruff and pyright that an implementation is a stub.
     "PLR0912", # Too many branches; ignore bc C901 already handles this
     "PLR0913", # Too many arguments in function definition. Maybe I should do something about this?
-    "PLR0917", # Too many positional arguments. Fixing means keyword-only signatures everywhere, a big mechanical change; deferred.
     "PLR2004", # Magic value used in comparison, consider replacing `*` with a constant variable
     "RET505",  # Unnecessary `{branch}` after `return` statement. I ignore this because I like to keep branches for readability.
     "RET506",  # Unnecessary `else` after `raise` statement. I ignore this because I like to keep branches for readability.

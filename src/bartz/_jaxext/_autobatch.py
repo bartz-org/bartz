@@ -344,15 +344,15 @@ def autobatch(
     def autobatch_wrapper(*args: PyTree) -> PyTree:
         return batched_func(
             func,
-            max_io_nbytes,
-            in_axes,
-            out_axes,
-            return_nbatches,
-            reduce_ufunc,
-            reduce_vary_axes,
-            warn_on_overflow,
-            result_shape_dtype,
             args,
+            max_io_nbytes=max_io_nbytes,
+            in_axes=in_axes,
+            out_axes=out_axes,
+            return_nbatches=return_nbatches,
+            reduce_ufunc=reduce_ufunc,
+            reduce_vary_axes=reduce_vary_axes,
+            warn_on_overflow=warn_on_overflow,
+            result_shape_dtype=result_shape_dtype,
         )
 
     return autobatch_wrapper
@@ -360,6 +360,8 @@ def autobatch(
 
 def batched_func(
     func: Callable,
+    args: tuple[PyTree[Array], ...],
+    *,
     max_io_nbytes: int,
     in_axes: PyTree[int | None],
     out_axes: PyTree[int],
@@ -368,7 +370,6 @@ def batched_func(
     reduce_vary_axes: tuple[str, ...],
     warn_on_overflow: bool,
     result_shape_dtype: PyTree[ShapeDtypeStruct] | type[NotDefined],
-    args: tuple[PyTree[Array], ...],
 ) -> PyTree[Array] | tuple[PyTree[Array], int]:
     """Implement the wrapper used in `autobatch`."""
     # determine the output structure of the function

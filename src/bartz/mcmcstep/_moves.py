@@ -32,7 +32,7 @@ from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
 from bartz import grove
-from bartz._jaxext import minimal_unsigned_dtype, split, vmap_nodoc
+from bartz._jaxext import minimal_unsigned_dtype, split
 from bartz.mcmcstep._state import Forest
 
 
@@ -126,32 +126,32 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
     """
     num_trees = forest.leaf_tree.shape[0]
     keys = split(key)
-    return _propose_moves(
-        keys.pop(num_trees),
-        forest.var_tree,
-        forest.split_tree,
-        forest.affluence_tree,
-        forest.max_split,
-        forest.blocked_vars,
-        forest.p_propose_grow,
-        forest.log_s,
+    propose = partial(
+        _propose_moves,
+        max_split=forest.max_split,
+        blocked_vars=forest.blocked_vars,
+        p_propose_grow=forest.p_propose_grow,
+        log_s=forest.log_s,
+    )
+    return vmap(propose)(
+        keys.pop(num_trees), forest.var_tree, forest.split_tree, forest.affluence_tree
     )
 
 
 @named_call
-@partial(vmap_nodoc, in_axes=(0, 0, 0, 0, None, None, None, None))
 def _propose_moves(
     key: Key[Array, ''],
     var_tree: UInt[Array, ' half_tree_size'],
     split_tree: UInt[Array, ' half_tree_size'],
     affluence_tree: Bool[Array, ' half_tree_size'],
+    *,
     max_split: UInt[Array, ' p'],
     blocked_vars: UInt[Array, ' k'] | None,
     p_propose_grow: Float32[Array, ' half_tree_size'],
     log_s: Float32[Array, ' p'] | None,
 ) -> Moves:
     """
-    Propose a GROW or PRUNE move for each tree.
+    Propose a GROW or PRUNE move for a tree.
 
     A GROW move picks a leaf node and converts it to a non-terminal node with
     two leaf children. A PRUNE move picks a non-terminal node with two leaf
@@ -222,12 +222,18 @@ def _propose_moves(
     # at the node. `num_available_var` is the count of admissible variables at
     # the node, which is the same quantity needed for either move.
     sampled_var, num_available_var = choose_variable(
-        keys.pop(), var_tree, split_tree, max_split, node, blocked_vars, log_s
+        keys.pop(),
+        var_tree,
+        split_tree,
+        max_split,
+        node,
+        blocked_vars=blocked_vars,
+        log_s=log_s,
     )
     existing_var = var_tree.at[node].get(mode='fill', fill_value=0).astype(jnp.int32)
     var = jnp.where(grow, sampled_var, existing_var)
     sampled_split, l, r = choose_split(
-        keys.pop(), var, var_tree, split_tree, max_split, node
+        keys.pop(), var_tree, split_tree, max_split, node, var=var
     )
     existing_split = (
         split_tree.at[node].get(mode='fill', fill_value=0).astype(jnp.int32)
@@ -354,6 +360,7 @@ def choose_variable(
     split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
+    *,
     blocked_vars: UInt[Array, ' k'] | None,
     log_s: Float32[Array, ' p'] | None,
 ) -> tuple[Int32[Array, ''], Int32[Array, '']]:
@@ -593,11 +600,12 @@ def categorical_exclude(
 
 def choose_split(
     key: Key[Array, ''],
-    var: Int32[Array, ''],
     var_tree: UInt[Array, ' half_tree_size'],
     split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
+    *,
+    var: Int32[Array, ''],
 ) -> tuple[Int32[Array, ''], Int32[Array, ''], Int32[Array, '']]:
     """
     Choose a split point for a new non-terminal node.
@@ -606,8 +614,6 @@ def choose_split(
     ----------
     key
         A jax random key.
-    var
-        The variable to split on.
     var_tree
         The splitting axes of the tree. Does not need to already contain `var`
         at `leaf_index`.
@@ -617,6 +623,8 @@ def choose_split(
         The maximum split index for each variable.
     leaf_index
         The index of the leaf to grow.
+    var
+        The variable to split on.
 
     Returns
     -------

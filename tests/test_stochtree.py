@@ -310,7 +310,12 @@ def test_sample_sigma2_leaf(
         # the trace starts after the first step, so check the start value
         # on the helper that builds the prior
         prior = bst._stochtree.resolve_leaf_variance_prior(
-            shape, scale, sigma2_leaf_init, num_trees, is_probit, 1.0
+            shape,
+            scale,
+            sigma2_leaf_init,
+            num_trees=num_trees,
+            is_probit=is_probit,
+            var_resid_train=1.0,
         )
         assert_allclose(prior.value, 1 / sigma2_leaf_init, rtol=1e-6)
 
@@ -672,6 +677,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
     }
 
     def task(
+        *,
         key: Shaped[Array, '...'],
         X: Shaped[Array, '...'],
         y: Shaped[Array, '...'],

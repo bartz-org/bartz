@@ -2638,7 +2638,13 @@ def test_prior(
     # slowly, so the small-p sparse cases need a longer chain to reach the prior.
     n_burn, n_save = (6000, 2000) if sparsity is not None and p <= 3 else (3000, 1000)
     bart = run_bart_like_prior(
-        keys.pop(), p, nsplits, subtests, sparsity, n_burn, n_save
+        keys.pop(),
+        p,
+        nsplits,
+        subtests,
+        sparsity=sparsity,
+        n_burn=n_burn,
+        n_save=n_save,
     )
 
     prior, prior_trace = sample_prior_like(keys.pop(), bart, subtests)
@@ -2754,6 +2760,7 @@ def run_bart_like_prior(
     p: int,
     nsplits: int,
     subtests: SubTests,
+    *,
     sparsity: str | None,
     n_burn: int,
     n_save: int,
@@ -2828,9 +2835,9 @@ def sample_prior_like(
         key,
         bart.n_save,
         len(forest.leaf_tree),
-        forest.max_split,
-        p_nonterminal,
-        jnp.sqrt(jnp.reciprocal(forest.leaf_prior_cov_inv.value)),
+        max_split=forest.max_split,
+        p_nonterminal=p_nonterminal,
+        sigma_mu=jnp.sqrt(jnp.reciprocal(forest.leaf_prior_cov_inv.value)),
         **sparse_kw,
     )
 

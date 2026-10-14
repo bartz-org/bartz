@@ -504,10 +504,10 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     def traverse_tree(
         lines: list[str],
         index: int,
-        depth: int,
         indent: str,
         first_indent: str,
         next_indent: str,
+        *,
         unused: bool,
     ) -> None:
         if index >= tree_size:
@@ -554,11 +554,11 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         if unused and not print_all:
             return
 
-        traverse_tree(lines, left_child, depth + 1, indent, tee, join, unused)
-        traverse_tree(lines, right_child, depth + 1, indent, corner, space, unused)
+        traverse_tree(lines, left_child, indent, tee, join, unused=unused)
+        traverse_tree(lines, right_child, indent, corner, space, unused=unused)
 
     lines = []
-    traverse_tree(lines, 1, 0, '', '', '', False)
+    traverse_tree(lines, 1, '', '', '', unused=False)
     return '\n'.join(lines)
 
 

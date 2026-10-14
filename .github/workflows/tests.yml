@@ -35,6 +35,12 @@ on:
     branches:
       - main
 
+# A new push to a PR supersedes its running CI. Other events get a unique group
+# so main pushes never cancel each other: release-docs.yml needs them to finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
@@ -75,9 +81,10 @@ jobs:
   tests:
     name: ${{ matrix.target }}/${{ matrix.group }}
     runs-on: ubuntu-latest
+    # queued behind pre-commit, so cheap lint failures surface first
+    needs: [pre-commit]
 
     strategy:
-      fail-fast: false
       matrix:
         # The list of groups lives in `Makefile` as `GROUPS`; keep this in sync.
         target: [tests, tests-single-cpu, tests-old]
@@ -253,9 +260,9 @@ jobs:
   benchmarks:
     name: benchmarks-${{ matrix.id }}
     runs-on: ${{ matrix.runs-on }}
+    needs: [pre-commit]
 
     strategy:
-      fail-fast: false
       matrix:
         include:
           - id: latest

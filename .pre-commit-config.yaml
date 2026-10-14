@@ -99,6 +99,18 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-merge-commit]
+      - id: pinact
+        name: update GitHub Actions and pin them to commit SHAs
+        # manual-only, run by `make update-other-deps`, which sets the cooldown
+        # (PINACT_MIN_AGE) and GITHUB_TOKEN. Not covered by `pre-commit
+        # autoupdate`: bump the pinact commit below by hand.
+        entry: pinact run --update
+        language: golang
+        additional_dependencies:
+          - github.com/suzuki-shunsuke/pinact/v5/cmd/pinact@a4f45e095b184794ac1f82b6b07cc35b0b8cfe7b # v5.0.0
+        pass_filenames: false
+        always_run: true
+        stages: [manual]
       - id: check-workarounds
         name: check stale WORKAROUND markers
         entry: uv run --dev python -m config.check_workarounds

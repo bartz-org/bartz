@@ -41,7 +41,7 @@ from uuid import uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
-from jax import Array, device_put
+from jax import Array, device_get, device_put
 from numpy.lib.npyio import NpzFile
 
 from bartz._npz._npz_upgrades import UPGRADES
@@ -180,12 +180,11 @@ def save_npz(path: str | PathLike, obj: object, *, compresslevel: int = 3) -> No
             ) as zf,
         ):
             zf.writestr(META_KEY, json.dumps(meta, indent=1))
-            for key, value in arrays.items():
+            # `device_get` copies all the arrays to the host in parallel, and
+            # does not copy on cpu
+            for key, value in device_get(arrays).items():
                 with zf.open(f'{key}.npy', 'w', force_zip64=True) as member:
-                    # `asarray` does not copy on cpu
-                    np.lib.format.write_array(
-                        member, np.asarray(value), allow_pickle=False
-                    )
+                    np.lib.format.write_array(member, value, allow_pickle=False)
         tmp.replace(path)
     except BaseException:
         tmp.unlink(missing_ok=True)

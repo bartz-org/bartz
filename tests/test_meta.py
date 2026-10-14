@@ -29,7 +29,7 @@ from types import SimpleNamespace
 
 import numpy
 import pytest
-from jax import config, debug_nans, default_backend, device_put, jit, random
+from jax import config, debug_nans, default_backend, device_get, device_put, jit, random
 from jax import numpy as jnp
 from jax.errors import KeyReuseError
 from jaxtyping import Array, Float, Key, Shaped
@@ -180,6 +180,14 @@ class TestJaxNoCopyBehavior:
         if x.platform() != 'cpu':  # pragma: no cover, gpu-only
             pytest.skip('a non-cpu array must be copied to host memory')
         y = numpy.asanyarray(x)
+        assert y.ctypes.data == x.unsafe_buffer_pointer()
+
+    def test_device_get_no_copy(self) -> None:
+        """Check `jax.device_get` views the buffers of a tree of jax arrays on cpu."""
+        x = jnp.arange(100)
+        if x.platform() != 'cpu':  # pragma: no cover, gpu-only
+            pytest.skip('a non-cpu array must be copied to host memory')
+        y = device_get(dict(x=x))['x']
         assert y.ctypes.data == x.unsafe_buffer_pointer()
 
     def test_device_put_no_copy(self) -> None:

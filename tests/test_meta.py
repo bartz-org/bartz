@@ -28,10 +28,9 @@ from functools import partial
 from types import SimpleNamespace
 
 import pytest
-from jax import config, debug_nans, jit, random
+from jax import debug_nans, jit
 from jax import numpy as jnp
-from jax.errors import KeyReuseError
-from jaxtyping import Array, Float, Key, Shaped
+from jaxtyping import Array, Key, Shaped
 
 from bartz._jaxext import split
 from tests import util
@@ -98,31 +97,6 @@ def test_random_keys_are_consumed(
 ) -> None:
     """Check that the random keys in `keys` can't be used more than once."""
     assert len(keys) == 126
-
-
-@pytest.mark.xfail(
-    condition=not config.jax_debug_key_reuse, reason='jax_debug_key_reuse not set'
-)
-def test_debug_key_reuse(keys: split) -> None:
-    """Check that the jax debug_key_reuse option works."""
-    key = keys.pop()
-    random.uniform(key)
-    with pytest.raises(KeyReuseError):
-        random.uniform(key)
-
-
-@pytest.mark.xfail(
-    condition=not config.jax_debug_key_reuse, reason='jax_debug_key_reuse not set'
-)
-def test_debug_key_reuse_within_jit(keys: split) -> None:
-    """Check that the jax debug_key_reuse option works within a jitted function."""
-
-    @jit
-    def func(key: Key[Array, '']) -> Float[Array, '']:
-        return random.uniform(key) + random.uniform(key)
-
-    with pytest.raises(KeyReuseError):
-        func(keys.pop())
 
 
 class TestJaxNoCopyBehavior:

@@ -19,6 +19,7 @@ We often use a worktree-first layout where the directory bartz/ is not a worktre
 To check the code you write:
 - `make lint`
     - cheap to run, unleashes all linters on everything
+    - stage new files before running it, untracked files are skipped
     - don't show your work without this first!
 - when changing/writing documentation for public stuff:
     - run `make docs`

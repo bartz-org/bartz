@@ -28,16 +28,9 @@ import re
 import subprocess
 from pathlib import Path
 
+from config._common import parse_datetime
+
 CHANGELOG_PATH = Path('docs/changelog.md')
-
-
-def parse_datetime(s: str) -> datetime.datetime:
-    """Parse an RFC 3339 timestamp, requiring an explicit timezone offset."""
-    dt = datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
-    if dt.tzinfo is None:
-        msg = f'timestamp {s!r} must include a timezone offset'
-        raise argparse.ArgumentTypeError(msg)
-    return dt
 
 
 def get_version() -> str:

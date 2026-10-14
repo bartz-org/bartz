@@ -307,7 +307,7 @@ update-deps: update-python-deps update-other-deps
 
 .PHONY: update-python-deps
 update-python-deps:
-	$(UV_RUN) python config/update_cooldown.py --today=$(TODAY) --cooldown-days=$(COOLDOWN_DAYS)
+	$(UV_RUN) python -m config.update_cooldown --today=$(TODAY) --cooldown-days=$(COOLDOWN_DAYS)
 	uv lock --upgrade
 
 .PHONY: update-other-deps
@@ -323,8 +323,8 @@ update-other-deps:
 
 .PHONY: update-oldest-deps
 update-oldest-deps:
-	$(UV_RUN) python config/update_python_version.py --bump-date=$(BUMP_PYTHON_VERSION_DATE) --num-supported=$(NUM_SUPPORTED_PYTHON_RELEASES) --today=$(TODAY)
-	$(UV_RUN) python config/update_oldest_deps.py --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS) --today=$(TODAY)
+	$(UV_RUN) python -m config.update_python_version --bump-date=$(BUMP_PYTHON_VERSION_DATE) --num-supported=$(NUM_SUPPORTED_PYTHON_RELEASES) --today=$(TODAY)
+	$(UV_RUN) python -m config.update_oldest_deps --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS) --today=$(TODAY)
 	uv lock
 
 
@@ -337,7 +337,7 @@ check-committed:
 
 .PHONY: check-changelog
 check-changelog:
-	$(UV_RUN) python config/util.py check_changelog --today=$(TODAY)
+	$(UV_RUN) python -m config.util check_changelog --today=$(TODAY)
 
 .PHONY: build
 build:
@@ -358,7 +358,7 @@ release: check-changelog clean setup update-oldest-deps update-python-deps check
 version-tag: check-committed
 	test $(shell git rev-parse --abbrev-ref HEAD) = main
 	git fetch --tags
-	$(eval VERSION_TAG := v$(shell $(UV_RUN) python config/util.py get_version))
+	$(eval VERSION_TAG := v$(shell $(UV_RUN) python -m config.util get_version))
 	@if git rev-parse -q --verify refs/tags/$(VERSION_TAG) >/dev/null; then \
 		test "$$(git rev-list -n 1 $(VERSION_TAG))" = "$$(git rev-parse HEAD)" \
 			|| { echo "Tag $(VERSION_TAG) exists but points to a different commit;"; \
@@ -376,7 +376,7 @@ push-tag: version-tag check-dist smoke-test
 # TestPyPI reject; this catches dist/ built before tagging, or gone stale.
 .PHONY: check-dist
 check-dist:
-	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
+	@VERSION=$$($(UV_RUN) python -m config.util get_version) && \
 	test -e "dist/bartz-$$VERSION.tar.gz" && test -e "dist/bartz-$$VERSION-py3-none-any.whl" || { \
 		echo "dist/ does not carry the release version $$VERSION:"; \
 		ls dist/ 2>/dev/null; \
@@ -394,7 +394,7 @@ upload: push-tag
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN && \
 	uv publish
-	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
+	@VERSION=$$($(UV_RUN) python -m config.util get_version) && \
 	echo "Try to install bartz $$VERSION from PyPI" && \
 	uv tool run --exclude-newer-package="bartz=0 days" --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
@@ -405,13 +405,13 @@ upload-test: version-tag check-dist smoke-test
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN && \
 	uv publish --check-url=https://test.pypi.org/simple/ --publish-url=https://test.pypi.org/legacy/
-	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
+	@VERSION=$$($(UV_RUN) python -m config.util get_version) && \
 	echo "Try to install bartz $$VERSION from TestPyPI" && \
 	uv tool run --exclude-newer-package="bartz=0 days" --index=https://test.pypi.org/simple/ --index-strategy=unsafe-best-match --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
 .PHONY: gh-release
 gh-release: push-tag
-	$(UV_RUN) python config/util.py gh_release --today=$(TODAY)
+	$(UV_RUN) python -m config.util gh_release --today=$(TODAY)
 
 
 ################# BENCHMARKS #################
@@ -420,10 +420,10 @@ ASV = $(UV_RUN) python -m asv
 
 .PHONY: asv-machine
 asv-machine:
-	$(UV_RUN) python config/asv_machine.py
+	$(UV_RUN) python -m config.asv_machine
 
 .PHONY: asv-run
-asv-run: ASV_REFS = $(shell $(UV_RUN) python config/refs_for_asv.py)
+asv-run: ASV_REFS = $(shell $(UV_RUN) python -m config.refs_for_asv)
 asv-run: asv-machine
 	$(ASV) run --durations=all --skip-existing-successful --show-stderr "$(ASV_REFS)" $(ARGS)
 

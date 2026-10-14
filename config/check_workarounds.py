@@ -46,7 +46,9 @@ import tomli
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
-from refs_for_asv import oldest_benchmarked_version
+
+from config._common import lower_bound
+from config.refs_for_asv import oldest_benchmarked_version
 
 # Loose pattern: find any `WORKAROUND(...)` candidate to inspect.
 CANDIDATE_RE = re.compile(r'WORKAROUND\(([^)]*)\)')
@@ -60,36 +62,22 @@ UV_REV_RE = re.compile(r'astral-sh/uv-pre-commit\s*\n.*#\s*frozen:\s*v?(\S+)')
 def floors_from_pyproject(path: Path) -> dict[str, Version]:
     """Return {normalized_pkg_name: lower_bound_version} from pyproject.toml."""
     data = tomli.loads(path.read_text())
-    project = data.get('project', {})
-    reqs: list[str] = list(project.get('dependencies', []))
+    project = data['project']
+    # skip optional-dependencies: a floor raised by an extra does not apply to
+    # installs without it, so taking the max below would be wrong
+    reqs: list[str] = list(project['dependencies'])
     for group in data.get('dependency-groups', {}).values():
         reqs.extend(group)
     floors: dict[str, Version] = {}
     for r in reqs:
         req = Requirement(r)
-        lb = _lower_bound(req.specifier)
-        if lb is None:
-            continue
+        lb = lower_bound(req.specifier)
         name = req.name.lower()
         # Take the max: later constraints (e.g. dev-group) only tighten the floor.
         if name not in floors or lb > floors[name]:
             floors[name] = lb
-    requires_python = project.get('requires-python')
-    if requires_python is not None:
-        lb = _lower_bound(SpecifierSet(requires_python))
-        if lb is not None:
-            floors['python'] = lb
+    floors['python'] = lower_bound(SpecifierSet(project['requires-python']))
     return floors
-
-
-def _lower_bound(spec: SpecifierSet) -> Version | None:
-    for s in spec:
-        if s.operator in ('>=', '==', '~='):
-            try:
-                return Version(s.version)
-            except InvalidVersion:
-                return None
-    return None
 
 
 def is_obsolete(op: str, bound: Version, floor: Version) -> bool:

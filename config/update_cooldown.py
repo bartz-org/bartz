@@ -37,19 +37,7 @@ import re
 import sys
 from pathlib import Path
 
-
-def parse_datetime(s: str) -> datetime.datetime:
-    """Parse an RFC 3339 timestamp, requiring an explicit timezone offset."""
-    dt = datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
-    if dt.tzinfo is None:
-        msg = f'timestamp {s!r} must include a timezone offset'
-        raise argparse.ArgumentTypeError(msg)
-    return dt
-
-
-def format_utc(dt: datetime.datetime) -> str:
-    """Format an instant as an RFC 3339 UTC timestamp with a trailing `Z`."""
-    return dt.astimezone(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+from config._common import format_utc, parse_datetime
 
 
 def pin_exclude_newer(pyproject_path: Path, cutoff: datetime.datetime) -> bool:

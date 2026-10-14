@@ -89,6 +89,7 @@ help:
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- check-changelog: verify the topmost changelog section is dated today"
+	@echo "- check-npz-frozen: verify the test archives of the file format are frozen"
 	@echo "- build: build the python wheel and sdist"
 	@echo "- check-dist: verify dist/ artifacts carry the release version"
 	@echo "- release: run tests, build, and upload to PyPI (run on main)"
@@ -339,6 +340,10 @@ check-committed:
 check-changelog:
 	$(UV_RUN) python config/util.py check_changelog --today=$(TODAY)
 
+.PHONY: check-npz-frozen
+check-npz-frozen:
+	$(UV_RUN) python -m tests.test_npz --check-frozen
+
 .PHONY: build
 build:
 	# remove stale artifacts: uv publish would upload everything in dist/
@@ -351,7 +356,7 @@ build:
 # artifacts pass `check-dist` and `smoke-test`, to avoid editing a published
 # tag if something fails in between.
 .PHONY: release
-release: check-changelog clean setup update-oldest-deps update-python-deps check-committed tests tests-single-cpu tests-old docs version-tag build upload gh-release
+release: check-changelog check-npz-frozen clean setup update-oldest-deps update-python-deps check-committed tests tests-single-cpu tests-old docs version-tag build upload gh-release
 	@echo "Done!"
 
 .PHONY: version-tag

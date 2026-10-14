@@ -1,4 +1,4 @@
-# bartz/src/bartz/_npz.py
+# bartz/src/bartz/_npz/_npz.py
 #
 # Copyright (c) 2026, The Bartz Contributors
 #
@@ -42,10 +42,12 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 import numpy as np
 from jax import Array, device_put
+from numpy.lib.npyio import NpzFile
 
+from bartz._npz._npz_upgrades import UPGRADES
 from bartz._version import __version__
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = len(UPGRADES)
 
 META_KEY = 'meta.json'
 
@@ -73,7 +75,8 @@ def serializable(cls: C) -> C:
     """Register a dataclass as allowed in npz archives, under its name.
 
     Registering again the same class, e.g., after reloading its module,
-    replaces it.
+    replaces it. The fields of registered classes are the archive format,
+    check changes with ``tests/test_npz.py``.
     """
     tag = cls.__name__
     if tag in _REGISTRY and not is_registered(cls):
@@ -197,23 +200,38 @@ def check_class(obj: object, cls: type[T], path: str | PathLike) -> T:
     return obj
 
 
-def load_npz(path: str | PathLike) -> object:
-    """Load an object saved with `save_npz`."""
-    with np.load(path, allow_pickle=False) as data:
-        if META_KEY not in data.files:
-            msg = f'{path} is not an archive written by bartz>0.13'
-            raise ValueError(msg)
+def read_meta(path: str | PathLike, data: NpzFile) -> tuple[int, Json]:
+    """Return the format version and skeleton of the archive `data` read from `path`."""
+    if META_KEY in data.files:
         meta = json.loads(data[META_KEY])
         version = meta['format_version']
-        if version != FORMAT_VERSION:
+        if version > FORMAT_VERSION:
             msg = (
-                f'{path} has format version {version} (written by bartz '
-                f'{meta["bartz_version"]}), this bartz reads version {FORMAT_VERSION}'
+                f'{path} has format version {version}, written by bartz '
+                f'{meta["bartz_version"]}, this bartz reads up to version '
+                f'{FORMAT_VERSION}: upgrade bartz'
             )
             raise ValueError(msg)
+        return version, meta['root']
+    elif 'schema_version' in data.files:  # `bcf` archive written by bartz 0.13
+        return 0, None
+    else:
+        msg = f'{path} is not an archive written by bartz'
+        raise ValueError(msg)
+
+
+def load_npz(path: str | PathLike) -> object:
+    """Load an object saved with `save_npz`, or with an older format."""
+    with np.load(path, allow_pickle=False) as data:
+        version, root = read_meta(path, data)
+        arrays: Mapping[str, np.ndarray] = data
+        if version < FORMAT_VERSION:
+            arrays = {k: data[k] for k in data.files}
+            for upgrade in UPGRADES[version:]:
+                root, arrays = upgrade(root, arrays)
         used: set[str] = set()
-        obj = decode(meta['root'], data, used)
-        unused = set(data.files) - used - {META_KEY}
+        obj = decode(root, arrays, used)
+        unused = set(arrays) - used - {META_KEY}
         if unused:
             msg = f'{path} contains unused arrays {sorted(unused)}'
             raise ValueError(msg)

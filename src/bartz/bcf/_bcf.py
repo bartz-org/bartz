@@ -208,6 +208,8 @@ class bcf(eqx.Module):
         `z_test` or `pihat_test` does not match the length of `x_test`.
     """
 
+    # `_mcmc_state`, `_burnin_trace` and `_leaf_prior_cov_inv_*_trace` are `None`
+    # in models loaded from prediction-only archives
     _mcmc_state: Any
     _binner: Any
     _main_trace: Any
@@ -514,6 +516,11 @@ class bcf(eqx.Module):
         ----------
         path
             The file to write to.
+
+        Notes
+        -----
+        Files written by a bartz release can be loaded by later releases, but
+        not by earlier ones; files written by development versions may not be.
         """
         save_npz(path, self)
 
@@ -521,6 +528,9 @@ class bcf(eqx.Module):
     def load_npz(cls, path: str | PathLike) -> 'bcf':
         """
         Load a model saved with `save_npz`.
+
+        Archives written by `save_npz` in bartz 0.13 load as models that
+        can only predict.
 
         Parameters
         ----------

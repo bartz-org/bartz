@@ -29,6 +29,7 @@ To check the code you write:
     - cheap to run (cached), does not clean, idempotent
     - use liberally if it looks like R is not working
 - run the unit tests relevant to your code changes with `uv run pytest ...`
+    - if you change the fields of a `@serializable` class, run `tests/test_npz.py`
     - not all tests right away because the full test suite takes a long time to run
 - at the end of debugging, run the full test suite to check everything works
     - use `uv run pytest`; we have a `make tests`, but its config is pretty heavy on a laptop and blocks other agents/people working in parallel

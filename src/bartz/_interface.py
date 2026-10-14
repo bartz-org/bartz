@@ -697,6 +697,9 @@ class Bart(Module):
         The archive holds the whole model, readable without pickle. The arrays
         are copied to host memory and all device/sharding placement is
         dropped; `load_npz` reconstructs a single-device model.
+
+        Files written by a bartz release can be loaded by later releases, but
+        not by earlier ones; files written by development versions may not be.
         """
         save_npz(path, self._drop_device_info())
 

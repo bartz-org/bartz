@@ -519,9 +519,10 @@ class BARTModel:
             precompute_predict_train=True,
         )
         kwargs.update(bart_kwargs)
-        # match stochtree's gating: only acceptance-time veto on
-        # min_samples_leaf, no per-leaf affluence filter (stochtree picks
-        # leaves uniformly over all of them). The leaf variance prior goes
+        # min_samples_leaf maps to bartz's acceptance-time veto.
+        # min_points_per_decision_node = 2 * min_samples_leaf makes the
+        # proposal skip leaves too small to split, without changing the target
+        # posterior, which thus matches stochtree. The leaf variance prior goes
         # through init_kw because Bart's sigma_mu_df ties the prior scale to
         # the initial value, while stochtree sets them independently.
         # User-supplied init_kw values win on conflicts.
@@ -530,7 +531,7 @@ class BARTModel:
             init_kw=dict(
                 {
                     'min_points_per_leaf': mfp.min_samples_leaf,
-                    'min_points_per_decision_node': None,
+                    'min_points_per_decision_node': 2 * mfp.min_samples_leaf,
                     **leaf_init_kw,
                 },
                 **kwargs.get('init_kw', {}),

@@ -42,12 +42,14 @@ UV_RUN = uv run --dev $(EXTRAS)
 # invocation.
 TODAY := $(shell date -u +%Y-%m-%dT00:00:00Z)
 
-# Dependency cooldown: `update-python-deps` pins pyproject's `[tool.uv]
-# exclude-newer` to TODAY minus this many days, so releases skip just-published
-# versions. It is pinned to an absolute instant (not uv's relative `1 week` span)
-# so the release lock and the uv-lock hook resolve the same cutoff and
-# don't churn uv.lock.
-COOLDOWN_DAYS = 7
+# Dependency cooldown in days, read from `[update] cooldown_days` in prek.toml,
+# where it also applies to a bare `prek update`. `update-python-deps` pins
+# pyproject's `[tool.uv] exclude-newer` to TODAY minus this many days, so
+# releases skip just-published versions. It is pinned to an absolute instant
+# (not uv's relative `1 week` span) so the release lock and the uv-lock hook
+# resolve the same cutoff and don't churn uv.lock. Lazy (`=`), so only the
+# targets that use it pay for reading it; tomllib needs python>=3.11.
+COOLDOWN_DAYS = $(or $(shell uv run --no-project --python='>=3.11' python -c 'import tomllib; print(tomllib.load(open("prek.toml", "rb"))["update"]["cooldown_days"])'),$(error cannot read [update] cooldown_days from prek.toml))
 
 # define command to run python with oldest supported dependencies
 # OLD_DATE / OLD_DELAY_DAYS / BUMP_PYTHON_VERSION_DATE / NUM_SUPPORTED_PYTHON_RELEASES
@@ -319,8 +321,7 @@ update-other-deps:
 	# update(check = TRUE) returns TRUE only when nothing is left to update,
 	# and status() that the library and lockfile agree.
 	Rscript -e 'renv::update(prompt = FALSE); renv::snapshot(prompt = FALSE); stopifnot(isTRUE(renv::update(check = TRUE)), renv::status()$$synchronized)'
-	# --freeze pins revs to commit SHAs (tags are mutable)
-	$(UV_RUN) prek update --freeze --cooldown-days=$(COOLDOWN_DAYS)
+	$(UV_RUN) prek update
 	# Update GitHub Actions, skipping releases newer than the cooldown. prek
 	# fails a hook that modifies files, so a second run checks it now passes.
 	$(PINACT) || $(PINACT)

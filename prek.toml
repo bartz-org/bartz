@@ -3,35 +3,66 @@
 # revs are frozen to commit SHAs (tags are mutable); update with
 # `make update-other-deps`
 
+minimum_prek_version = "0.5.3"
 exclude = '^\.asv/results/.+\.json$'
 default_stages = ["pre-commit"]
 default_install_hook_types = ["pre-commit", "commit-msg", "pre-merge-commit"]
 
+# Hooks without a priority run one at a time, in declaration order. Hooks with
+# the `checks` priority run after all of them, concurrently with each other:
+# give it only to hooks that never modify files.
+[priorities]
+checks = 1000
+
+# cooldown_days is the dependency cooldown for the whole repo: the Makefile
+# reads it to also hold back python deps and GitHub Actions.
+[update]
+cooldown_days = 7
+freeze = true
+
+[[repos]]
+repo = "builtin"
+hooks = [
+    { id = "check-added-large-files", priority = "checks" },
+    { id = "check-case-conflict", priority = "checks" },
+    { id = "check-executables-have-shebangs", priority = "checks" },
+    { id = "check-illegal-windows-names", priority = "checks" },
+    { id = "check-merge-conflict", priority = "checks" },
+    { id = "check-shebang-scripts-are-executable", priority = "checks" },
+    { id = "check-symlinks", priority = "checks" },
+    { id = "check-toml", priority = "checks" },
+    { id = "check-yaml", priority = "checks" },
+    { id = "destroyed-symlinks", priority = "checks" },
+    { id = "detect-private-key", priority = "checks" },
+    { id = "end-of-file-fixer" },
+    { id = "mixed-line-ending", args = ["--fix=lf"] },
+    # renv edits renv/activate.R automatically, with trailing whitespace
+    { id = "trailing-whitespace", exclude = '^renv/activate\.R$' },
+    { id = "no-commit-to-branch", priority = "checks" },
+]
+
+# the hooks without a builtin implementation
 [[repos]]
 repo = "https://github.com/pre-commit/pre-commit-hooks"
 rev = "3e8a8703264a2f4a69428a0aa4dcb512790b2c8c"  # frozen: v6.0.0
-hooks = [
-    { id = "check-added-large-files" },
-    { id = "check-ast" },
-    { id = "check-case-conflict" },
-    { id = "check-docstring-first" },
-    { id = "check-executables-have-shebangs" },
-    { id = "check-illegal-windows-names" },
-    { id = "check-merge-conflict" },
-    { id = "check-shebang-scripts-are-executable" },
-    { id = "check-symlinks" },
-    { id = "check-toml" },
-    { id = "check-yaml" },
-    { id = "destroyed-symlinks" },
-    { id = "detect-private-key" },
-    { id = "end-of-file-fixer" },
-    { id = "forbid-submodules" },
-    { id = "mixed-line-ending", args = ["--fix=lf"] },
-    { id = "name-tests-test", args = ["--pytest-test-first"], exclude = 'tests/(util\.py|_.+\.py)$' },
-    # renv edits renv/activate.R automatically, with trailing whitespace
-    { id = "trailing-whitespace", exclude = '^renv/activate\.R$' },
-    { id = "no-commit-to-branch" },
-]
+
+[[repos.hooks]]
+id = "check-ast"
+priority = "checks"
+
+[[repos.hooks]]
+id = "check-docstring-first"
+priority = "checks"
+
+[[repos.hooks]]
+id = "forbid-submodules"
+priority = "checks"
+
+[[repos.hooks]]
+id = "name-tests-test"
+args = ["--pytest-test-first"]
+exclude = 'tests/(util\.py|_.+\.py)$'
+priority = "checks"
 
 [[repos]]
 repo = "https://github.com/sbrunner/hooks"
@@ -64,12 +95,12 @@ hooks = [
 [[repos]]
 repo = "https://github.com/jsh9/pydoclint"
 rev = "24412c5f73ad438a08146132ea86a9a72c8bd5ad"  # frozen: 0.11.0
-hooks = [{ id = "pydoclint" }]
+hooks = [{ id = "pydoclint", priority = "checks" }]
 
 [[repos]]
 repo = "https://github.com/henryiii/validate-pyproject-schema-store"
 rev = "562b381732c1d2bec9a3a66cc89f63e16d486470"  # frozen: 2026.09.30
-hooks = [{ id = "validate-pyproject" }]
+hooks = [{ id = "validate-pyproject", priority = "checks" }]
 
 [[repos]]
 repo = "https://github.com/jorisroovers/gitlint"
@@ -89,7 +120,7 @@ hooks = [{ id = "uv-lock" }]
 [[repos]]
 repo = "https://github.com/rhysd/actionlint"
 rev = "914e7df21a07ef503a81201c76d2b11c789d3fca"  # frozen: v1.7.12
-hooks = [{ id = "actionlint" }]
+hooks = [{ id = "actionlint", priority = "checks" }]
 
 [[repos]]
 repo = "local"
@@ -127,6 +158,7 @@ stages = ["manual"]
 [[repos.hooks]]
 id = "check-workarounds"
 name = "check stale WORKAROUND markers"
+priority = "checks"
 entry = "uv run --dev python -m config.check_workarounds"
 language = "system"
 pass_filenames = false
@@ -135,6 +167,7 @@ always_run = true
 [[repos.hooks]]
 id = "check-path-headers"
 name = "check the `bartz/<path>` comment matches each file's location"
+priority = "checks"
 entry = "uv run --dev python -m config.check_path_headers"
 language = "system"
 # self-scopes to files carrying the bartz license header; `text` just keeps
@@ -146,8 +179,8 @@ id = "vendor-latest-bartz"
 name = "vendor latest_bartz (for ty)"
 # ty checks files under benchmarks/ that import the vendored latest bartz;
 # refresh it first, else those imports do not resolve (e.g. on CI) or resolve
-# against a stale copy. Runs before ty by declaration order, on the same python
-# trigger.
+# against a stale copy. Runs before ty, which has the later `checks` priority,
+# on the same python trigger.
 entry = "uv run --dev python benchmarks/_vendor_latest_bartz.py"
 language = "system"
 pass_filenames = false
@@ -156,6 +189,7 @@ types = ["python"]
 [[repos.hooks]]
 id = "ty"
 name = "ty check"
+priority = "checks"
 # there is no official ty hook (and an isolated hook env would not see the
 # project venv anyway), so run the dev-pinned ty. prek feeds it the tracked
 # python files: only the staged ones on a commit (fast incremental check), and
@@ -168,6 +202,7 @@ types = ["python"]
 [[repos.hooks]]
 id = "check-returns-docstring"
 name = "forbid multi-line non-list `Returns` docstring sections"
+priority = "checks"
 # Matches a numpy-style `Returns` block whose first two non-blank lines are
 # both at the section's base indent: i.e., multi-line prose. List-form
 # (description on a more-indented continuation line) is skipped via
@@ -180,6 +215,7 @@ types = ["python"]
 [[repos.hooks]]
 id = "forbid-napoleon-type-colon"
 name = "forbid stray colon in first line of attribute docstrings"
+priority = "checks"
 # A lone colon in the first line of an attribute docstring makes sphinx
 # napoleon split it into a `:type:` field, leaking a stray "Type: <text before
 # the colon>" into the html. Napoleon only inspects the docstring's first line,
@@ -199,6 +235,7 @@ types = ["python"]
 [[repos.hooks]]
 id = "forbid-lam-lamda"
 name = "forbid `lam`/`lamda` identifier (use `lambda_` per PEP 8)"
+priority = "checks"
 language = "pygrep"
 entry = '\blam(da)?\b'
 types = ["python"]
@@ -206,6 +243,7 @@ types = ["python"]
 [[repos.hooks]]
 id = "forbid-jaxext-qualified-call"
 name = "forbid `_jaxext.foo(...)` (use `from bartz._jaxext import foo`)"
+priority = "checks"
 language = "pygrep"
 # lookbehind `(?<!\.)` allows module paths like `bartz._jaxext.foo`; the
 # trailing `\(` limits matches to function calls so docstrings that mention
@@ -216,6 +254,7 @@ types = ["python"]
 [[repos.hooks]]
 id = "forbid-jax-vmap-jit-qualified-call"
 name = "forbid qualified `jax.vmap`/`jax.jit` (import them by name)"
+priority = "checks"
 language = "pygrep"
 # Matches the qualified name as a word (`\b`) so call sites (`jax.jit(`), bare
 # decorators (`@jax.jit`), and references (`partial(jax.jit, ...)`) are all
@@ -227,6 +266,7 @@ types = ["python"]
 [[repos.hooks]]
 id = "forbid-jax-jit-import-in-library"
 name = "forbid `from jax import jit` in the library (use `from bartz._jaxext import jit`)"
+priority = "checks"
 language = "pygrep"
 # `bartz._jaxext.jit` preserves the jitted signature for type checkers. Not a
 # ruff banned-api entry because per-file ignores of TID251 would lift all the
@@ -240,6 +280,7 @@ types = ["python"]
 [[repos.hooks]]
 id = "forbid-jax-random-qualified-call"
 name = "forbid `jax.random.foo(...)` (use `from jax import random`)"
+priority = "checks"
 language = "pygrep"
 # the trailing `\(` limits matches to function calls so docstrings that mention
 # `jax.random` are not flagged.
@@ -249,6 +290,7 @@ types = ["python"]
 [[repos.hooks]]
 id = "forbid-mcmc-module-absolute-import"
 name = "forbid `from bartz import mcmcstep/loop (use `from bartz.mcmcstep import foo`)"
+priority = "checks"
 language = "pygrep"
 # Forbids `from bartz import ...mcmcstep|mcmcloop...` and `import
 # bartz.mcmcstep|mcmcloop`, which enable the `mcmcstep.foo`/`mcmcloop.foo`
@@ -264,6 +306,7 @@ types = ["python"]
 [[repos.hooks]]
 id = "forbid-dunder-all"
 name = "forbid setting `__all__` in modules"
+priority = "checks"
 language = "pygrep"
 # matches any module-level `__all__` statement (plain/annotated/augmented
 # assignments, `.append`/`.extend`, `del`, etc.). The `^` anchor restricts to
@@ -274,6 +317,7 @@ types = ["python"]
 [[repos.hooks]]
 id = "forbid-bare-array-annotation"
 name = "forbid bare array annotations (wrap in a jaxtyping shape hint)"
+priority = "checks"
 language = "pygrep"
 # Catches an array type used directly as an annotation (`x: Array`, `->
 # np.ndarray`, `Array | None`) instead of wrapped in a jaxtyping hint

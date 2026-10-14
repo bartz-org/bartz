@@ -56,7 +56,7 @@ CANDIDATE_RE = re.compile(r'WORKAROUND\(([^)]*)\)')
 INNER_RE = re.compile(r'\s*([A-Za-z0-9_.\-]+)\s*(<=|<)\s*(\S+)\s*')
 # The uv version, in the `# frozen: <version>` comment on the rev line right
 # below the uv-pre-commit repo line; also the uv installed by CI.
-UV_REV_RE = re.compile(r'astral-sh/uv-pre-commit\s*\n.*#\s*frozen:\s*v?(\S+)')
+UV_REV_RE = re.compile(r'astral-sh/uv-pre-commit"\s*\n.*#\s*frozen:\s*v?(\S+)')
 
 
 def floors_from_pyproject(path: Path) -> dict[str, Version]:
@@ -113,10 +113,10 @@ def scan(root: Path) -> list[tuple[str, str, str]]:
 
 def uv_floor(root: Path) -> Version:
     """Return the uv version pinned by the uv-lock hook, the only uv we support."""
-    text = (root / '.pre-commit-config.yaml').read_text()
+    text = (root / 'prek.toml').read_text()
     match = UV_REV_RE.search(text)
     if match is None:
-        msg = 'cannot find the frozen uv-pre-commit rev in .pre-commit-config.yaml'
+        msg = 'cannot find the frozen uv-pre-commit rev in prek.toml'
         raise ValueError(msg)
     return Version(match[1])
 

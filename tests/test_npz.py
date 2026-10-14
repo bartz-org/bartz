@@ -283,6 +283,19 @@ def test_frozen() -> None:
         assert int(match['version']) == FORMAT_VERSION, f'{name} is not in FROZEN'
 
 
+def test_bartz_0_13_without_test_points(tmp_path: Path) -> None:
+    """Check a `bcf` archive of bartz 0.13 fit without `x_test` loads."""
+    test_keys = '_mu_test', '_tau_test', '_yhat_test'
+    with np.load(ARCHIVE_DIR / 'bcf_v0.npz', allow_pickle=False) as data:
+        arrays: dict = {k: data[k] for k in data.files if k not in test_keys}
+    path = tmp_path / 'old.npz'
+    np.savez(path, **arrays)
+    model = bcf.load_npz(path)
+    assert model.mu_test is None
+    assert model.tau_test is None
+    assert model.yhat_test is None
+
+
 @serializable
 class Box(Module):
     """Holder for test values."""

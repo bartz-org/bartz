@@ -112,7 +112,7 @@ def scan(root: Path) -> list[tuple[str, str, str]]:
 
 
 def uv_floor(root: Path) -> Version:
-    """Return the uv version pinned by pre-commit, the only uv we support."""
+    """Return the uv version pinned by the uv-lock hook, the only uv we support."""
     text = (root / '.pre-commit-config.yaml').read_text()
     match = UV_REV_RE.search(text)
     if match is None:
@@ -122,7 +122,7 @@ def uv_floor(root: Path) -> Version:
 
 
 def collect_floors(root: Path) -> dict[str, Version]:
-    """Floors for dependencies (pyproject.toml), `bartz` (oldest ASV tag), `uv` (pre-commit pin)."""
+    """Floors for dependencies (pyproject.toml), `bartz` (oldest ASV tag), `uv` (uv-lock hook pin)."""
     floors = floors_from_pyproject(root / 'pyproject.toml')
     floors['bartz'] = oldest_benchmarked_version(root)
     floors['uv'] = uv_floor(root)

@@ -26,7 +26,7 @@
 
 uv's `[tool.uv] exclude-newer` accepts a relative span (e.g. `1 week`), but a
 span re-resolves against wall-clock time, so `make release` and the uv-lock
-pre-commit hook would compute different cutoffs and churn the lockfile. Pin it
+hook would compute different cutoffs and churn the lockfile. Pin it
 to `today - cooldown_days` as an RFC 3339 UTC instant instead: an absolute
 value both agree on, anchored to the UTC day so same-day runs are reproducible.
 """

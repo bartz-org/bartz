@@ -45,7 +45,7 @@ TODAY := $(shell date -u +%Y-%m-%dT00:00:00Z)
 # Dependency cooldown: `update-python-deps` pins pyproject's `[tool.uv]
 # exclude-newer` to TODAY minus this many days, so releases skip just-published
 # versions. It is pinned to an absolute instant (not uv's relative `1 week` span)
-# so the release lock and the uv-lock pre-commit hook resolve the same cutoff and
+# so the release lock and the uv-lock hook resolve the same cutoff and
 # don't churn uv.lock.
 COOLDOWN_DAYS = 7
 
@@ -85,7 +85,7 @@ help:
 	@echo "- diffcov: check changed-lines coverage vs DIFF_BASE (default origin/main)"
 	@echo "- update-deps: update-python-deps + update-other-deps"
 	@echo "- update-python-deps: pin the dep cooldown, then upgrade uv.lock to the latest allowed deps"
-	@echo "- update-other-deps: upgrade renv.lock, pre-commit hooks, and GitHub Actions (not date-pinned)"
+	@echo "- update-other-deps: upgrade renv.lock, prek hooks, and GitHub Actions (not date-pinned)"
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- check-changelog: verify the topmost changelog section is dated today"
@@ -105,7 +105,7 @@ help:
 	@echo "- asv-quick: run quick benchmarks on current code, no saving"
 	@echo "- ipython: start an ipython shell with stuff pre-imported"
 	@echo "- ipython-old: start an ipython shell with oldest supported python and dependencies"
-	@echo "- lint: run pre-commit hooks on all files"
+	@echo "- lint: run prek hooks on all files"
 	@echo
 	@echo "Release workflow:"
 	@echo "- describe release in docs/changelog.md (its topmost header sets the version, follow effver https://jacobtomlinson.dev/effver)"
@@ -128,12 +128,12 @@ help:
 .PHONY: setup
 setup:
 	Rscript -e "renv::restore()"
-	$(UV_RUN) pre-commit install --install-hooks
+	$(UV_RUN) prek install --prepare-hooks
 	$(if $(filter 12 13,$(CUDA_VERSION)),JAX_PLATFORMS=cuda) $(UV_RUN) python -c 'import jax; jax.numpy.empty(0)'
 
 .PHONY: lint
 lint:
-	$(UV_RUN) pre-commit run $(if $(ARGS),$(ARGS),--all-files)
+	$(UV_RUN) prek run $(if $(ARGS),$(ARGS),--all-files)
 
 .PHONY: clean
 clean:
@@ -296,13 +296,13 @@ diffcov:
 
 ################# DEPENDENCIES #################
 
-# `update-deps` = latest python deps (uv) + everything else (renv, pre-commit,
+# `update-deps` = latest python deps (uv) + everything else (renv, prek hooks,
 # GitHub Actions). Only `update-python-deps` runs inside `release`: it pins
 # pyproject's exclude-newer to a fixed instant before locking, so repeated
 # same-day release runs (and the uv-lock hook) resolve identically and don't
 # churn. The others have no fixed-date knob, so they're bumped once by hand via
 # `make update-deps` at the start of the release, outside the release loop.
-PINACT = PINACT_MIN_AGE=$(COOLDOWN_DAYS) GITHUB_TOKEN=$${GITHUB_TOKEN:-$$(gh auth token)} $(UV_RUN) pre-commit run pinact --hook-stage manual --all-files
+PINACT = PINACT_MIN_AGE=$(COOLDOWN_DAYS) GITHUB_TOKEN=$${GITHUB_TOKEN:-$$(gh auth token)} $(UV_RUN) prek run pinact --stage manual --all-files
 .PHONY: update-deps
 update-deps: update-python-deps update-other-deps
 
@@ -320,8 +320,8 @@ update-other-deps:
 	# and status() that the library and lockfile agree.
 	Rscript -e 'renv::update(prompt = FALSE); renv::snapshot(prompt = FALSE); stopifnot(isTRUE(renv::update(check = TRUE)), renv::status()$$synchronized)'
 	# --freeze pins revs to commit SHAs (tags are mutable)
-	$(UV_RUN) pre-commit autoupdate --freeze
-	# Update GitHub Actions, skipping releases newer than the cooldown. pre-commit
+	$(UV_RUN) prek update --freeze --cooldown-days=$(COOLDOWN_DAYS)
+	# Update GitHub Actions, skipping releases newer than the cooldown. prek
 	# fails a hook that modifies files, so a second run checks it now passes.
 	$(PINACT) || $(PINACT)
 

@@ -77,7 +77,7 @@ dev = [
     "ipython>=8.37.0",
     "matplotlib>=3.10.6",
     "matplotlib-label-lines>=0.8.1",
-    "pre-commit>=4.3.0",
+    "prek>=0.2.3",
     "rich>=14.1.0",
     "snakeviz>=2.2.2",
     "virtualenv>=20.34.0",
@@ -172,7 +172,7 @@ local = [
 cache-keys = [{ file = "pyproject.toml" }, { git = { commit = true, tags = true } }]
 # dependency cooldown: exclude versions newer than this from resolution.
 # `make update-python-deps` pins it to an absolute UTC instant (see
-# config/update_cooldown.py) so the release lock and the uv-lock pre-commit hook
+# config/update_cooldown.py) so the release lock and the uv-lock hook
 # resolve the same cutoff and don't churn uv.lock; don't edit the value by hand.
 exclude-newer = '2026-09-27T00:00:00Z'
 

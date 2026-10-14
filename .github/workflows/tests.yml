@@ -42,7 +42,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pre-commit:
+  lint:
     runs-on: ubuntu-latest
     env:
       SKIP: no-commit-to-branch
@@ -65,13 +65,13 @@ jobs:
           if [ "$from" = '0000000000000000000000000000000000000000' ]; then from=''; fi
           echo "from=$from" >> "$GITHUB_OUTPUT"
 
-      - name: Run pre-commit on changed files
+      - name: Run prek on changed files
         # even if we run it on all files below, it's convenient to see if something fails in new changes first
         if: steps.refs.outputs.from != ''
         run: make lint ARGS='--verbose --show-diff-on-failure --from-ref=${{ steps.refs.outputs.from }} --to-ref=HEAD'
 
-      - name: Run pre-commit on all files
-        # this is for when pre-commit itself is changed, which may affect unchanged files
+      - name: Run prek on all files
+        # this is for when the hook config is changed, which may affect unchanged files
         run: make lint ARGS='--verbose --all-files'
 
       - name: Run gitlint on new commits
@@ -81,8 +81,8 @@ jobs:
   tests:
     name: ${{ matrix.target }}/${{ matrix.group }}
     runs-on: ubuntu-latest
-    # queued behind pre-commit, so cheap lint failures surface first
-    needs: [pre-commit]
+    # queued behind lint, so cheap lint failures surface first
+    needs: [lint]
 
     strategy:
       matrix:
@@ -260,7 +260,7 @@ jobs:
   benchmarks:
     name: benchmarks-${{ matrix.id }}
     runs-on: ${{ matrix.runs-on }}
-    needs: [pre-commit]
+    needs: [lint]
 
     strategy:
       matrix:
@@ -340,7 +340,7 @@ jobs:
   required-dummy:
     runs-on: ubuntu-latest
     needs:
-      - pre-commit
+      - lint
       - tests
       - docs
       - covreport

@@ -1,8 +1,7 @@
-# See https://pre-commit.com for more information
-# See https://pre-commit.com/hooks.html for more hooks
+# Run by prek (https://prek.j178.dev), a pre-commit-compatible hook runner.
 
 # revs are frozen to commit SHAs (tags are mutable); update with
-# 'pre-commit autoupdate --freeze'
+# `make update-other-deps`
 
 exclude: '^\.asv/results/.+\.json$'
 default_stages: [pre-commit]
@@ -42,7 +41,7 @@ repos:
       - id: copyright-required
         files: \.(py|rst)$
         # generated headerless file; untracked, so it only reaches hooks via
-        # an explicit `pre-commit run --files`
+        # an explicit `prek run --files`
         exclude: src/bartz/_version\.py$
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: f12be1ebaa5351c1fc76472de98db2c3446c8253  # frozen: v0.16.10
@@ -91,7 +90,7 @@ repos:
         # auto-merges, whose merge commit git writes without invoking the
         # `pre-commit` stage: catches a merged tree that fails the hooks even
         # though each branch passed in isolation (e.g. a stale WORKAROUND or a
-        # hook config changed on one side). `make lint` is `pre-commit run
+        # hook config changed on one side). `make lint` is `prek run
         # --all-files`; nesting it here is safe (this hook is not in the
         # pre-commit stage, so --all-files does not re-trigger it).
         entry: make lint
@@ -102,8 +101,8 @@ repos:
       - id: pinact
         name: update GitHub Actions and pin them to commit SHAs
         # manual-only, run by `make update-other-deps`, which sets the cooldown
-        # (PINACT_MIN_AGE) and GITHUB_TOKEN. Not covered by `pre-commit
-        # autoupdate`: bump the pinact commit below by hand.
+        # (PINACT_MIN_AGE) and GITHUB_TOKEN. Not covered by `prek
+        # update`: bump the pinact commit below by hand.
         entry: pinact run --update
         language: golang
         additional_dependencies:
@@ -136,9 +135,9 @@ repos:
         types: [python]
       - id: ty
         name: ty check
-        # there is no official ty pre-commit hook (and an isolated hook env
+        # there is no official ty hook (and an isolated hook env
         # would not see the project venv anyway), so run the dev-pinned ty.
-        # pre-commit feeds it the tracked python files: only the staged ones on
+        # prek feeds it the tracked python files: only the staged ones on
         # a commit (fast incremental check), and all of them under `--all-files`
         # — the comprehensive gate run by `make lint` and at merge time.
         entry: uv run --dev ty check --

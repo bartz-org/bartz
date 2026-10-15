@@ -148,6 +148,8 @@ name = "update GitHub Actions and pin them to commit SHAs"
 # pinact commit below by hand.
 entry = "pinact run --update"
 language = "golang"
+# pinact's go.mod minimum; prek downloads Go if the system one is older
+language_version = ">=1.27.1"
 additional_dependencies = [
     "github.com/suzuki-shunsuke/pinact/v5/cmd/pinact@a4f45e095b184794ac1f82b6b07cc35b0b8cfe7b",  # v5.0.0
 ]

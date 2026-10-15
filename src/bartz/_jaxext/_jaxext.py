@@ -410,6 +410,7 @@ def _equal_shards(x: Shaped[Array, '...'], axis_name: str) -> Bool[Array, '']:
     return jnp.logical_not(lax.psum(diff, axis_name))
 
 
+@jit(static_argnames=('axis_name', 'in_specs', 'mesh', 'axis_names', 'check_vma'))
 def equal_shards(
     x: PyTree[Array, ' S'], axis_name: str, **shard_map_kwargs: Any
 ) -> PyTree[Bool[Array, ''], ' S']:

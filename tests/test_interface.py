@@ -39,6 +39,7 @@ from io import StringIO
 from os import cpu_count
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
+from warnings import catch_warnings, simplefilter
 from weakref import ReferenceType, ref
 
 import jax
@@ -3237,13 +3238,20 @@ def test_nan_predictors(bkw: BartKW) -> None:
 def test_automatic_integer_types(bkw: BartKW) -> None:
     """Test that integer variables in the MCMC state have the correct type."""
     kw = bkw.kw
-    bart = Bart(**kw)
+    with catch_warnings(record=True) as warnings:
+        simplefilter('always')
+        bart = Bart(**kw)
+    messages = [str(w.message) for w in warnings]
 
     def select_type(cond: bool) -> type:
         return jnp.uint8 if cond else jnp.uint16
 
     leaf_indices_type = select_type(bkw.maxdepth <= 8)
     split_trees_type = X_type = select_type(bkw.max_bins <= 256)
+
+    # warn when exceeding one byte, except for `p`, which is not a setting
+    assert any('cutpoints' in m for m in messages) == (bkw.max_bins > 256)
+    assert any('maxdepth' in m for m in messages) == (bkw.maxdepth > 8)
     var_trees_type = select_type(bkw.p <= 256)
 
     assert bart._mcmc_state.forest.var_tree.dtype == var_trees_type

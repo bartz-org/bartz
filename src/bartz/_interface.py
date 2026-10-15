@@ -517,6 +517,8 @@ class Bart(Module):
         # copy max_split because `mcmcstep.init` donates it
         max_split = jnp.array(binner_obj.max_split)
 
+        warn_byte_boundaries(x_train, max_split, maxdepth)
+
         # setup and run mcmc
         initial_state, mcmc_key, device, check_platform = _setup_mcmc(
             keys.pop(),
@@ -1205,6 +1207,27 @@ def _process_response_input(
 def _check_same_length(x1: Shaped[Array, '... n'], x2: Shaped[Array, '... n']) -> None:
     get_length = lambda x: x.shape[-1]
     assert get_length(x1) == get_length(x2)
+
+
+def warn_byte_boundaries(
+    x_train: UInt[Array, 'p n'], max_split: UInt[Array, ' p'], maxdepth: int
+) -> None:
+    """Warn if settings make arrays wider than one byte per element."""
+    itemsize = max(x_train.dtype.itemsize, max_split.dtype.itemsize)
+    if itemsize > 1:
+        msg = (
+            'More than 255 cutpoints per predictor make the binned predictors '
+            f'and split points {8 * itemsize}-bit instead of 8-bit, increasing '
+            'memory usage and running time. Consider using at most 255 cutpoints.'
+        )
+        warn(msg)
+    if maxdepth > 8:
+        msg = (
+            f'maxdepth={maxdepth} > 8 makes the leaf indices 16-bit instead of '
+            '8-bit, increasing memory usage and running time. Consider using '
+            'maxdepth <= 8.'
+        )
+        warn(msg)
 
 
 def _check_type_settings(

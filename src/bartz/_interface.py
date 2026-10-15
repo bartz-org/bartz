@@ -1225,7 +1225,8 @@ def warn_byte_boundaries(
         msg = (
             f'maxdepth={maxdepth} > 8 makes the leaf indices 16-bit instead of '
             '8-bit, increasing memory usage and running time. Consider using '
-            'maxdepth <= 8.'
+            'maxdepth <= 8. Through bartz.stochtree.BARTModel, the equivalent '
+            'is mean_forest_params=dict(max_depth=7) in sample().'
         )
         warn(msg)
 

@@ -2504,20 +2504,20 @@ class TestPrecomputeTerms:
             result_uv.mean_factor,
             result_mv.mean_factor.squeeze((1, 2)),
             rtol=1e-6,
-            atol=1e-6,
+            atol=1e-7,
         )
         assert_close_matrices(
             result_uv.centered_leaves,
             result_mv.centered_leaves.squeeze(1),
             rtol=1e-6,
-            atol=1e-6,
+            atol=1e-7,
         )
         # the posterior precision is error_cov_inv / mean_factor when k = 1
         assert_close_matrices(
             jnp.log(inv_sigma2 / result_uv.mean_factor),
             result_mv.logdet_prec,
             rtol=1e-6,
-            atol=1e-6,
+            atol=1e-7,
         )
 
 

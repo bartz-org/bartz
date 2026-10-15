@@ -495,7 +495,7 @@ class TestSpikeSlab:
         distr = SpikeSlab(self.PI)
         s = distr.sample(keys.pop(), (REPS,))
         assert_close_matrices(
-            jnp.unique(s), jnp.array([0.0, 1 / jnp.sqrt(self.PI)]), rtol=1e-6, atol=1e-6
+            jnp.unique(s), jnp.array([0.0, 1 / jnp.sqrt(self.PI)]), rtol=1e-6, atol=1e-7
         )
         assert_mean_z(s**2, 1.0)
         assert_mean_z(s**4, distr.fourth_moment)
@@ -870,7 +870,7 @@ def test_rows_identical(dgps: DGP, which: str) -> None:
     diffs = jnp.max(
         jnp.abs(samples[:, 0:1, :] - samples), axis=(1, 2)
     )  # Shape: (REPS,)
-    assert_close_matrices(diffs, jnp.zeros_like(diffs), atol=1e-5)
+    assert_close_matrices(diffs, jnp.zeros_like(diffs), atol=1e-7)
 
 
 class TestInteractionPattern:

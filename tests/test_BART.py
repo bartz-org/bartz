@@ -561,7 +561,7 @@ class TestWithCachedBart:
                     bart.varcount_mean,
                     rbart.varcount_mean.astype(numpy.float32),
                     rtol=0.7,
-                    atol=9,
+                    atol=6.3,
                 )
 
             if kw.get('sparse', False):  # pragma: no branch
@@ -579,7 +579,7 @@ class TestWithCachedBart:
                     assert_close_matrices(
                         logit(bart.varprob_mean[1:]),
                         logit(rbart.varprob_mean[1:]),
-                        atol=2.1 * (p - 1) ** 0.5,
+                        atol=2.1,
                     )
 
     def test_different_chains(self, cachedbart: CachedBart) -> None:
@@ -1289,10 +1289,10 @@ def run_bart_like_prior(
         burnin_ll = nnone(bart._burnin_trace.log_likelihood)
         main_ll = nnone(bart._main_trace.log_likelihood)
         assert_close_matrices(
-            burnin_ll, jnp.zeros_like(burnin_ll), atol=1e-5, reduce_rank=True
+            burnin_ll, jnp.zeros_like(burnin_ll), atol=1e-8, reduce_rank=True
         )
         assert_close_matrices(
-            main_ll, jnp.zeros_like(main_ll), atol=1e-5, reduce_rank=True
+            main_ll, jnp.zeros_like(main_ll), atol=1e-8, reduce_rank=True
         )
 
     return bart

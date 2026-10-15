@@ -375,7 +375,7 @@ class TestSigma2Estimates:
         y = random.normal(keys.pop(), (k, n))
         batched = _sigma2_from_ols(x, y)
         per_row = jnp.stack([_sigma2_from_ols(x, y[i]) for i in range(k)])
-        assert_close_matrices(batched, per_row, rtol=1e-3, atol=1e-10)
+        assert_close_matrices(batched, per_row, rtol=1e-3, atol=1e-11)
 
     @pytest.mark.parametrize('k', [(), (3,)])
     def test_oracle_comparison(self, keys: split, k: tuple[int, ...]) -> None:

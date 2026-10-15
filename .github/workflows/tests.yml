@@ -333,6 +333,10 @@ jobs:
 
       - name: Update locked dependencies
         run: make update-deps
+        env:
+          # authenticated GitHub API calls by renv (GITHUB_PAT) and pinact
+          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Bump oldest supported dependencies
         run: make update-oldest-deps

@@ -39,6 +39,7 @@ from io import StringIO
 from os import cpu_count
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
+from warnings import catch_warnings, simplefilter
 from weakref import ReferenceType, ref
 
 import jax
@@ -2638,7 +2639,13 @@ def test_prior(
     # slowly, so the small-p sparse cases need a longer chain to reach the prior.
     n_burn, n_save = (6000, 2000) if sparsity is not None and p <= 3 else (3000, 1000)
     bart = run_bart_like_prior(
-        keys.pop(), p, nsplits, subtests, sparsity, n_burn, n_save
+        keys.pop(),
+        p,
+        nsplits,
+        subtests,
+        sparsity=sparsity,
+        n_burn=n_burn,
+        n_save=n_save,
     )
 
     prior, prior_trace = sample_prior_like(keys.pop(), bart, subtests)
@@ -2754,6 +2761,7 @@ def run_bart_like_prior(
     p: int,
     nsplits: int,
     subtests: SubTests,
+    *,
     sparsity: str | None,
     n_burn: int,
     n_save: int,
@@ -2828,9 +2836,9 @@ def sample_prior_like(
         key,
         bart.n_save,
         len(forest.leaf_tree),
-        forest.max_split,
-        p_nonterminal,
-        jnp.sqrt(jnp.reciprocal(forest.leaf_prior_cov_inv.value)),
+        max_split=forest.max_split,
+        p_nonterminal=p_nonterminal,
+        sigma_mu=jnp.sqrt(jnp.reciprocal(forest.leaf_prior_cov_inv.value)),
         **sparse_kw,
     )
 
@@ -3230,13 +3238,20 @@ def test_nan_predictors(bkw: BartKW) -> None:
 def test_automatic_integer_types(bkw: BartKW) -> None:
     """Test that integer variables in the MCMC state have the correct type."""
     kw = bkw.kw
-    bart = Bart(**kw)
+    with catch_warnings(record=True) as warnings:
+        simplefilter('always')
+        bart = Bart(**kw)
+    messages = [str(w.message) for w in warnings]
 
     def select_type(cond: bool) -> type:
         return jnp.uint8 if cond else jnp.uint16
 
     leaf_indices_type = select_type(bkw.maxdepth <= 8)
     split_trees_type = X_type = select_type(bkw.max_bins <= 256)
+
+    # warn when exceeding one byte, except for `p`, which is not a setting
+    assert any('cutpoints' in m for m in messages) == (bkw.max_bins > 256)
+    assert any('maxdepth' in m for m in messages) == (bkw.maxdepth > 8)
     var_trees_type = select_type(bkw.p <= 256)
 
     assert bart._mcmc_state.forest.var_tree.dtype == var_trees_type

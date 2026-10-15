@@ -42,12 +42,14 @@ UV_RUN = uv run --dev $(EXTRAS)
 # invocation.
 TODAY := $(shell date -u +%Y-%m-%dT00:00:00Z)
 
-# Dependency cooldown: `update-python-deps` pins pyproject's `[tool.uv]
-# exclude-newer` to TODAY minus this many days, so releases skip just-published
-# versions. It is pinned to an absolute instant (not uv's relative `1 week` span)
-# so the release lock and the uv-lock pre-commit hook resolve the same cutoff and
-# don't churn uv.lock.
-COOLDOWN_DAYS = 7
+# Dependency cooldown in days, read from `[update] cooldown_days` in prek.toml,
+# where it also applies to a bare `prek update`. `update-python-deps` pins
+# pyproject's `[tool.uv] exclude-newer` to TODAY minus this many days, so
+# releases skip just-published versions. It is pinned to an absolute instant
+# (not uv's relative `1 week` span) so the release lock and the uv-lock hook
+# resolve the same cutoff and don't churn uv.lock. Lazy (`=`), so only the
+# targets that use it pay for reading it; tomllib needs python>=3.11.
+COOLDOWN_DAYS = $(or $(shell uv run --no-project --python='>=3.11' python -c 'import tomllib; print(tomllib.load(open("prek.toml", "rb"))["update"]["cooldown_days"])'),$(error cannot read [update] cooldown_days from prek.toml))
 
 # define command to run python with oldest supported dependencies
 # OLD_DATE / OLD_DELAY_DAYS / BUMP_PYTHON_VERSION_DATE / NUM_SUPPORTED_PYTHON_RELEASES
@@ -85,7 +87,7 @@ help:
 	@echo "- diffcov: check changed-lines coverage vs DIFF_BASE (default origin/main)"
 	@echo "- update-deps: update-python-deps + update-other-deps"
 	@echo "- update-python-deps: pin the dep cooldown, then upgrade uv.lock to the latest allowed deps"
-	@echo "- update-other-deps: upgrade renv.lock and pre-commit hooks (not date-pinned)"
+	@echo "- update-other-deps: upgrade renv.lock, prek hooks, and GitHub Actions (not date-pinned)"
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- check-changelog: verify the topmost changelog section is dated today"
@@ -96,7 +98,7 @@ help:
 	@echo "- push-tag: push the version tag to origin"
 	@echo "- upload: upload release to PyPI"
 	@echo "- upload-test: upload release to TestPyPI"
-	@echo "- gh-release: create draft GitHub release from docs/changelog.md"
+	@echo "- gh-release: publish GitHub release from docs/changelog.md"
 	@echo "- asv-machine: initialize ~/.asv-machine.json with a human-readable id"
 	@echo "- asv-run: run benchmarks on all unbenchmarked tagged releases and main"
 	@echo "- asv-publish: create html benchmark report"
@@ -105,7 +107,7 @@ help:
 	@echo "- asv-quick: run quick benchmarks on current code, no saving"
 	@echo "- ipython: start an ipython shell with stuff pre-imported"
 	@echo "- ipython-old: start an ipython shell with oldest supported python and dependencies"
-	@echo "- lint: run pre-commit hooks on all files"
+	@echo "- lint: run prek hooks on all files"
 	@echo
 	@echo "Release workflow:"
 	@echo "- describe release in docs/changelog.md (its topmost header sets the version, follow effver https://jacobtomlinson.dev/effver)"
@@ -119,7 +121,6 @@ help:
 	@echo '- save notebook locally and commit it, merge PR'
 	@echo "- on main: $$ make release"
 	@echo "- merge fix PR and try again until make release passes"
-	@echo "- publish the draft github release created by make release (updates zenodo automatically)"
 	@echo "- if the online docs are not up-to-date, merge another PR to trigger a new merge CI"
 
 
@@ -128,12 +129,12 @@ help:
 .PHONY: setup
 setup:
 	Rscript -e "renv::restore()"
-	$(UV_RUN) pre-commit install --install-hooks
+	$(UV_RUN) prek install --prepare-hooks
 	$(if $(filter 12 13,$(CUDA_VERSION)),JAX_PLATFORMS=cuda) $(UV_RUN) python -c 'import jax; jax.numpy.empty(0)'
 
 .PHONY: lint
 lint:
-	$(UV_RUN) pre-commit run $(if $(ARGS),$(ARGS),--all-files)
+	$(UV_RUN) prek run $(if $(ARGS),$(ARGS),--all-files)
 
 .PHONY: clean
 clean:
@@ -296,18 +297,19 @@ diffcov:
 
 ################# DEPENDENCIES #################
 
-# `update-deps` = latest python deps (uv) + everything else (renv, pre-commit).
-# Only `update-python-deps` runs inside `release`: it pins pyproject's
-# exclude-newer to a fixed instant before locking, so repeated same-day release
-# runs (and the uv-lock hook) resolve identically and don't churn. renv and
-# pre-commit have no date knob, so they're bumped once by hand via
+# `update-deps` = latest python deps (uv) + everything else (renv, prek hooks,
+# GitHub Actions). Only `update-python-deps` runs inside `release`: it pins
+# pyproject's exclude-newer to a fixed instant before locking, so repeated
+# same-day release runs (and the uv-lock hook) resolve identically and don't
+# churn. The others have no fixed-date knob, so they're bumped once by hand via
 # `make update-deps` at the start of the release, outside the release loop.
+PINACT = PINACT_MIN_AGE=$(COOLDOWN_DAYS) GITHUB_TOKEN=$${GITHUB_TOKEN:-$$(gh auth token)} $(UV_RUN) prek run pinact --stage manual --all-files
 .PHONY: update-deps
 update-deps: update-python-deps update-other-deps
 
 .PHONY: update-python-deps
 update-python-deps:
-	$(UV_RUN) python config/update_cooldown.py --today=$(TODAY) --cooldown-days=$(COOLDOWN_DAYS)
+	$(UV_RUN) python -m config.update_cooldown --today=$(TODAY) --cooldown-days=$(COOLDOWN_DAYS)
 	uv lock --upgrade
 
 .PHONY: update-other-deps
@@ -318,13 +320,15 @@ update-other-deps:
 	# update(check = TRUE) returns TRUE only when nothing is left to update,
 	# and status() that the library and lockfile agree.
 	Rscript -e 'renv::update(prompt = FALSE); renv::snapshot(prompt = FALSE); stopifnot(isTRUE(renv::update(check = TRUE)), renv::status()$$synchronized)'
-	# --freeze pins revs to commit SHAs (tags are mutable)
-	$(UV_RUN) pre-commit autoupdate --freeze
+	$(UV_RUN) prek update
+	# Update GitHub Actions, skipping releases newer than the cooldown. prek
+	# fails a hook that modifies files, so a second run checks it now passes.
+	$(PINACT) || $(PINACT)
 
 .PHONY: update-oldest-deps
 update-oldest-deps:
-	$(UV_RUN) python config/update_python_version.py --bump-date=$(BUMP_PYTHON_VERSION_DATE) --num-supported=$(NUM_SUPPORTED_PYTHON_RELEASES) --today=$(TODAY)
-	$(UV_RUN) python config/update_oldest_deps.py --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS) --today=$(TODAY)
+	$(UV_RUN) python -m config.update_python_version --bump-date=$(BUMP_PYTHON_VERSION_DATE) --num-supported=$(NUM_SUPPORTED_PYTHON_RELEASES) --today=$(TODAY)
+	$(UV_RUN) python -m config.update_oldest_deps --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS) --today=$(TODAY)
 	uv lock
 
 
@@ -337,7 +341,7 @@ check-committed:
 
 .PHONY: check-changelog
 check-changelog:
-	$(UV_RUN) python config/util.py check_changelog --today=$(TODAY)
+	$(UV_RUN) python -m config.util check_changelog --today=$(TODAY)
 
 .PHONY: build
 build:
@@ -358,7 +362,7 @@ release: check-changelog clean setup update-oldest-deps update-python-deps check
 version-tag: check-committed
 	test $(shell git rev-parse --abbrev-ref HEAD) = main
 	git fetch --tags
-	$(eval VERSION_TAG := v$(shell $(UV_RUN) python config/util.py get_version))
+	$(eval VERSION_TAG := v$(shell $(UV_RUN) python -m config.util get_version))
 	@if git rev-parse -q --verify refs/tags/$(VERSION_TAG) >/dev/null; then \
 		test "$$(git rev-list -n 1 $(VERSION_TAG))" = "$$(git rev-parse HEAD)" \
 			|| { echo "Tag $(VERSION_TAG) exists but points to a different commit;"; \
@@ -376,7 +380,7 @@ push-tag: version-tag check-dist smoke-test
 # TestPyPI reject; this catches dist/ built before tagging, or gone stale.
 .PHONY: check-dist
 check-dist:
-	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
+	@VERSION=$$($(UV_RUN) python -m config.util get_version) && \
 	test -e "dist/bartz-$$VERSION.tar.gz" && test -e "dist/bartz-$$VERSION-py3-none-any.whl" || { \
 		echo "dist/ does not carry the release version $$VERSION:"; \
 		ls dist/ 2>/dev/null; \
@@ -394,7 +398,7 @@ upload: push-tag
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN && \
 	uv publish
-	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
+	@VERSION=$$($(UV_RUN) python -m config.util get_version) && \
 	echo "Try to install bartz $$VERSION from PyPI" && \
 	uv tool run --exclude-newer-package="bartz=0 days" --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
@@ -405,13 +409,13 @@ upload-test: version-tag check-dist smoke-test
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN && \
 	uv publish --check-url=https://test.pypi.org/simple/ --publish-url=https://test.pypi.org/legacy/
-	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
+	@VERSION=$$($(UV_RUN) python -m config.util get_version) && \
 	echo "Try to install bartz $$VERSION from TestPyPI" && \
 	uv tool run --exclude-newer-package="bartz=0 days" --index=https://test.pypi.org/simple/ --index-strategy=unsafe-best-match --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
 .PHONY: gh-release
 gh-release: push-tag
-	$(UV_RUN) python config/util.py gh_release --today=$(TODAY)
+	$(UV_RUN) python -m config.util gh_release --today=$(TODAY)
 
 
 ################# BENCHMARKS #################
@@ -420,10 +424,10 @@ ASV = $(UV_RUN) python -m asv
 
 .PHONY: asv-machine
 asv-machine:
-	$(UV_RUN) python config/asv_machine.py
+	$(UV_RUN) python -m config.asv_machine
 
 .PHONY: asv-run
-asv-run: ASV_REFS = $(shell $(UV_RUN) python config/refs_for_asv.py)
+asv-run: ASV_REFS = $(shell $(UV_RUN) python -m config.refs_for_asv)
 asv-run: asv-machine
 	$(ASV) run --durations=all --skip-existing-successful --show-stderr "$(ASV_REFS)" $(ARGS)
 

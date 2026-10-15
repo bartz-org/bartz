@@ -24,9 +24,9 @@
 
 name: Install uv
 description: >-
-  Install uv at the version of the uv-pre-commit hook in .pre-commit-config.yaml,
-  the single pin for all the workflows and for the uv that rewrites uv.lock. The
-  repository must already be checked out.
+  Install uv at the version of the uv-pre-commit hook in prek.toml, the single
+  pin for all the workflows and for the uv that rewrites uv.lock. The repository
+  must already be checked out.
 
 inputs:
   cache-suffix:
@@ -41,15 +41,15 @@ runs:
       id: pin
       shell: bash
       # the version is in the `# frozen: <version>` comment on the rev line
-      # right below the repo line (see the header of .pre-commit-config.yaml)
+      # right below the repo line (see the comment above it in prek.toml)
       run: |
-        config="$GITHUB_WORKSPACE/.pre-commit-config.yaml"
-        version=$(grep -A1 'repo: https://github.com/astral-sh/uv-pre-commit' "$config" | sed -n 's/.*# *frozen: *v\{0,1\}//p')
+        config="$GITHUB_WORKSPACE/prek.toml"
+        version=$(grep -A1 'repo = "https://github.com/astral-sh/uv-pre-commit"' "$config" | sed -n 's/.*# *frozen: *v\{0,1\}//p')
         test -n "$version" || { echo "no frozen uv-pre-commit rev in $config" >&2; exit 1; }
         echo "version=$version" >> "$GITHUB_OUTPUT"
 
     - name: Install uv
-      uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       with:
         version: ${{ steps.pin.outputs.version }}
         cache-suffix: ${{ inputs.cache-suffix }}

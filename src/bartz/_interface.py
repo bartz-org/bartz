@@ -488,20 +488,22 @@ class Bart(Module):
             y_train,
             binary_mask,
             missing,
-            jnp.asarray(k, jnp.float32),
-            num_trees,
-            None if tau_num is None else jnp.asarray(tau_num, jnp.float32),
-            None if sigma_mu_df is None else jnp.asarray(sigma_mu_df, jnp.float32),
+            k=jnp.asarray(k, jnp.float32),
+            num_trees=num_trees,
+            tau_num=None if tau_num is None else jnp.asarray(tau_num, jnp.float32),
+            sigma_mu_df=None
+            if sigma_mu_df is None
+            else jnp.asarray(sigma_mu_df, jnp.float32),
         )
         error_cov_inv = _process_error_variance_settings(
             y_train,
-            outcome_type,
             binary_mask,
             missing,
-            sigma_df,
-            sigma_scale,
-            sigma_init,
-            error_scale,
+            outcome_type=outcome_type,
+            sigma_df=sigma_df,
+            sigma_scale=sigma_scale,
+            sigma_init=sigma_init,
+            error_scale=error_scale,
         )
 
         # split the user-provided seed into an mcmc key and a binner key
@@ -515,43 +517,45 @@ class Bart(Module):
         # copy max_split because `mcmcstep.init` donates it
         max_split = jnp.array(binner_obj.max_split)
 
+        warn_byte_boundaries(x_train, max_split, maxdepth)
+
         # setup and run mcmc
         initial_state, mcmc_key, device, check_platform = _setup_mcmc(
+            keys.pop(),
             x_train,
             y_train,
-            outcome_type,
-            offset,
-            error_scale,
-            missing,
-            max_split,
-            leaf_prior_cov_inv,
-            error_cov_inv,
-            power,
-            base,
-            maxdepth,
-            num_trees,
-            init_kw,
-            rm_const,
-            sparse,
-            varprob,
-            num_chains,
-            num_chain_devices,
-            num_data_devices,
-            devices,
-            n_burn,
-            keys.pop(),
+            outcome_type=outcome_type,
+            offset=offset,
+            error_scale=error_scale,
+            missing=missing,
+            max_split=max_split,
+            leaf_prior_cov_inv=leaf_prior_cov_inv,
+            error_cov_inv=error_cov_inv,
+            power=power,
+            base=base,
+            maxdepth=maxdepth,
+            num_trees=num_trees,
+            init_kw=init_kw,
+            rm_const=rm_const,
+            sparse=sparse,
+            varprob=varprob,
+            num_chains=num_chains,
+            num_chain_devices=num_chain_devices,
+            num_data_devices=num_data_devices,
+            devices=devices,
+            n_burn=n_burn,
         )
         result = _run_mcmc(
+            mcmc_key,
             initial_state,
             n_save,
-            n_burn,
-            n_skip,
-            printevery,
-            pbar,
-            mcmc_key,
-            precompute_predict_train,
-            run_mcmc_kw,
-            check_platform,
+            n_burn=n_burn,
+            n_skip=n_skip,
+            printevery=printevery,
+            pbar=pbar,
+            precompute_predict_train=precompute_predict_train,
+            run_mcmc_kw=run_mcmc_kw,
+            check_platform=check_platform,
         )
 
         # set private attributes
@@ -633,10 +637,10 @@ class Bart(Module):
             return predict_train(
                 key,
                 self._main_trace,
-                error_scale,
-                self._mcmc_state.binary_indices,
-                self._mcmc_state.z is not None,
-                kind,
+                error_scale=error_scale,
+                binary_indices=self._mcmc_state.binary_indices,
+                has_binary=self._mcmc_state.z is not None,
+                kind=kind,
             )
 
         x_test = self._process_x_test(x_test, error_scale)
@@ -651,15 +655,15 @@ class Bart(Module):
             key,
             self._main_trace,
             x_test,
-            error_scale,
-            self._mcmc_state.binary_indices,
-            self._mcmc_state.z is not None,
-            kind,
+            error_scale=error_scale,
+            binary_indices=self._mcmc_state.binary_indices,
+            has_binary=self._mcmc_state.z is not None,
+            kind=kind,
             # the test points are sharded over the mesh 'data' axis (when
             # there is one): the training data at `init`, new test data by
             # `_device_put_test`. `evaluate_trace` can't detect this on its
             # own at trace time, so declare it.
-            'shard_and_autobatch',
+            test_points='shard_and_autobatch',
         )
 
     def _drop_device_info(self) -> 'Bart':
@@ -1205,6 +1209,28 @@ def _check_same_length(x1: Shaped[Array, '... n'], x2: Shaped[Array, '... n']) -
     assert get_length(x1) == get_length(x2)
 
 
+def warn_byte_boundaries(
+    x_train: UInt[Array, 'p n'], max_split: UInt[Array, ' p'], maxdepth: int
+) -> None:
+    """Warn if settings make arrays wider than one byte per element."""
+    itemsize = max(x_train.dtype.itemsize, max_split.dtype.itemsize)
+    if itemsize > 1:
+        msg = (
+            'More than 255 cutpoints per predictor make the binned predictors '
+            f'and split points {8 * itemsize}-bit instead of 8-bit, increasing '
+            'memory usage and running time. Consider using at most 255 cutpoints.'
+        )
+        warn(msg)
+    if maxdepth > 8:
+        msg = (
+            f'maxdepth={maxdepth} > 8 makes the leaf indices 16-bit instead of '
+            '8-bit, increasing memory usage and running time. Consider using '
+            'maxdepth <= 8. Through bartz.stochtree.BARTModel, the equivalent '
+            'is mean_forest_params=dict(max_depth=7) in sample().'
+        )
+        warn(msg)
+
+
 def _check_type_settings(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | str | Sequence[OutcomeType | str],
@@ -1299,11 +1325,12 @@ def _process_offset_settings(
     return jnp.where(n_valid > 0, offset, 0.0)
 
 
-@jit(static_argnums=(4,))
+@jit(static_argnames='num_trees')
 def _process_leaf_variance_settings(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+    *,
     k: Float[Array, ''],
     num_trees: int,
     tau_num: Float[Array, ''] | None,
@@ -1349,9 +1376,10 @@ def _process_leaf_variance_settings(
 
 def _process_error_variance_settings(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
-    outcome_type: OutcomeType | tuple[OutcomeType, ...],
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
+    *,
+    outcome_type: OutcomeType | tuple[OutcomeType, ...],
     sigma_df: FloatLike,
     sigma_scale: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
     sigma_init: FloatLike | Float[ArrayLike, ' k'] | Literal['auto'],
@@ -1473,8 +1501,10 @@ def make_error_cov_prior(
 
 
 def _setup_mcmc(
+    mcmc_key: Key[Array, ''],
     x_train: Real[Array, 'p n'],
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
+    *,
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
     error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None,
@@ -1495,7 +1525,6 @@ def _setup_mcmc(
     num_data_devices: int | None,
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
     n_burn: int,
-    mcmc_key: Key[Array, ''],
 ) -> tuple[State, Key[Array, ''], Device | None, Literal['cpu', 'gpu'] | None]:
     theta, a, b, rho = _process_sparsity_settings(x_train, sparse)
 
@@ -1539,13 +1568,14 @@ def _setup_mcmc(
 
 
 def _run_mcmc(
+    key: Key[Array, ''],
     mcmc_state: State,
     n_save: int,
+    *,
     n_burn: int,
     n_skip: int,
     printevery: int | None,
     pbar: bool,
-    key: Key[Array, ''],
     precompute_predict_train: bool,
     run_mcmc_kw: Mapping,
     check_platform: Literal['cpu', 'gpu'] | None,
@@ -1808,9 +1838,9 @@ def process_device_settings(
         platform,
         num_chains,
         num_chain_devices,
-        num_data_devices,
-        len(devices),
-        explicit_devices,
+        num_data_devices=num_data_devices,
+        num_devices=len(devices),
+        explicit_devices=explicit_devices,
     )
     mesh, device = _determine_mesh(num_chain_devices, num_data_devices, device, devices)
 
@@ -1860,6 +1890,7 @@ def _determine_num_chain_devices(
     platform: str,
     num_chains: int | None,
     num_chain_devices: int | None | Literal['auto'],
+    *,
     num_data_devices: int | None,
     num_devices: int,
     explicit_devices: bool,
@@ -1922,13 +1953,13 @@ def _auto_num_chain_devices(
             new_num_shards = _largest_divisor_at_most(num_chains, device_budget)
             warn(
                 _auto_chain_devices_warning(
-                    num_chains,
-                    num_shards,
-                    new_num_shards,
-                    device_budget,
-                    num_devices,
-                    num_data_devices,
-                    explicit_devices,
+                    num_chains=num_chains,
+                    desired=num_shards,
+                    actual=new_num_shards,
+                    device_budget=device_budget,
+                    num_devices=num_devices,
+                    num_data_devices=num_data_devices,
+                    explicit_devices=explicit_devices,
                 )
             )
             num_shards = new_num_shards
@@ -1937,6 +1968,7 @@ def _auto_num_chain_devices(
 
 
 def _auto_chain_devices_warning(
+    *,
     num_chains: int,
     desired: int,
     actual: int,
@@ -2018,17 +2050,17 @@ def predict_latent(
     return evaluate_trace(x, trace, flatten_chains=True, test_points=test_points)
 
 
-@jit(static_argnums=(5, 6, 7))
+@jit(static_argnames=('has_binary', 'kind', 'test_points'))
 def predict(
     key: Key[Array, ''] | None,
     trace: MainTrace,
     x_test: UInt[Array, 'p m'],
+    *,
     error_scale: Float[Array, ' m'] | Float[Array, 'k m'] | None,
     binary_indices: Int32[Array, ' kb'] | None,
     has_binary: bool,
     kind: PredictKind | str,
     test_points: Literal['none', 'autobatch', 'shard_and_autobatch'],
-    /,
 ) -> (
     Float32[Array, ' m']
     | Float32[Array, 'k m']
@@ -2039,19 +2071,25 @@ def predict(
     # get latent i.e. bare sum-of-trees predictions
     latent = predict_latent(x_test, trace, test_points)
     return _predict_from_latent(
-        key, trace, latent, error_scale, binary_indices, has_binary, kind
+        key,
+        trace,
+        latent,
+        error_scale=error_scale,
+        binary_indices=binary_indices,
+        has_binary=has_binary,
+        kind=kind,
     )
 
 
-@jit(static_argnums=(4, 5))
+@jit(static_argnames=('has_binary', 'kind'))
 def predict_train(
     key: Key[Array, ''] | None,
     trace: MainTraceWithTrainPred,
+    *,
     error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None,
     binary_indices: Int32[Array, ' kb'] | None,
     has_binary: bool,
     kind: PredictKind | str,
-    /,
 ) -> (
     Float32[Array, ' n']
     | Float32[Array, 'k n']
@@ -2065,7 +2103,13 @@ def predict_train(
         trace_sample_axes(trace).train_pred,
     )
     return _predict_from_latent(
-        key, trace, latent, error_scale, binary_indices, has_binary, kind
+        key,
+        trace,
+        latent,
+        error_scale=error_scale,
+        binary_indices=binary_indices,
+        has_binary=has_binary,
+        kind=kind,
     )
 
 
@@ -2073,6 +2117,7 @@ def _predict_from_latent(
     key: Key[Array, ''] | None,
     trace: MainTrace,
     latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
+    *,
     error_scale: Float[Array, ' m'] | Float[Array, 'k m'] | None,
     binary_indices: Int32[Array, ' kb'] | None,
     has_binary: bool,
@@ -2091,7 +2136,12 @@ def _predict_from_latent(
     if kind is PredictKind.outcome_samples:
         assert key is not None
         return sample_outcome(
-            key, trace, latent, error_scale, binary_indices, has_binary
+            key,
+            trace,
+            latent,
+            error_scale=error_scale,
+            binary_indices=binary_indices,
+            has_binary=has_binary,
         )
 
     # squash predictions to (0, 1) if probit; with heteroskedastic error scales
@@ -2124,15 +2174,15 @@ def _flatten_chain_sample(
     return lax.collapse(arr, 0, 2)
 
 
-@jit(static_argnums=(5,))
+@jit(static_argnames='has_binary')
 def sample_outcome(
     key: Key[Array, ''],
     trace: MainTrace,
     latent: Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m'],
+    *,
     error_scale: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
     binary_indices: Int32[Array, ' kb'] | None,
     has_binary: bool,
-    /,
 ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
     """Sample from the posterior predictive distribution."""
     # move error_cov_inv chain axis to 0

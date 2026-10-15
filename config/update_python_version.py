@@ -47,6 +47,8 @@ import tomli
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
+from config._common import lower_bound, parse_datetime
+
 ANCHOR_YEAR = 2026
 ANCHOR_LATEST_MINOR = 14  # latest Python = 3.14 in 2026 before the bump date
 
@@ -61,15 +63,6 @@ def parse_bump_date(s: str) -> tuple[int, int]:
     return month, day
 
 
-def parse_datetime(s: str) -> datetime.datetime:
-    """Parse an RFC 3339 timestamp, requiring an explicit timezone offset."""
-    dt = datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
-    if dt.tzinfo is None:
-        msg = f'timestamp {s!r} must include a timezone offset'
-        raise argparse.ArgumentTypeError(msg)
-    return dt
-
-
 def compute_latest_minor(
     today: datetime.datetime,
     bump: tuple[int, int],
@@ -80,17 +73,6 @@ def compute_latest_minor(
     if (today.month, today.day) >= bump:
         bumps += 1
     return anchor_latest + bumps
-
-
-def read_requires_python_floor(pyproject: dict) -> Version | None:
-    spec_str = pyproject.get('project', {}).get('requires-python')
-    if not spec_str:
-        return None
-    spec = SpecifierSet(spec_str)
-    for s in spec:
-        if s.operator in ('>=', '==', '~='):
-            return Version(s.version)
-    return None
 
 
 def read_pinned_python(path: Path) -> Version | None:
@@ -164,12 +146,12 @@ def main() -> int:
 
     with args.pyproject.open('rb') as f:
         pyproject = tomli.load(f)
-    current_floor = read_requires_python_floor(pyproject)
+    current_floor = lower_bound(SpecifierSet(pyproject['project']['requires-python']))
     current_pinned = read_pinned_python(args.python_version_file)
 
     computed_floor = Version(f'3.{oldest_minor}')
     computed_latest = Version(f'3.{latest_minor}')
-    new_floor = max(computed_floor, current_floor) if current_floor else computed_floor
+    new_floor = max(computed_floor, current_floor)
     new_latest = (
         max(computed_latest, current_pinned) if current_pinned else computed_latest
     )

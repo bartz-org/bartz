@@ -44,6 +44,8 @@ import tomli
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
+from config._common import format_utc, lower_bound, parse_datetime
+
 PYPI_URL = 'https://pypi.org/pypi/{name}/json'
 
 # Rigid requirement grammar: `name[extra,...]>=version[,spec,...]`. The lower
@@ -57,20 +59,6 @@ REQUIREMENT_RE = re.compile(
     r'>=(?P<version>[^,\s]+)'
     r'(?P<rest>(?:,[^,\s]+)*)'
 )
-
-
-def parse_datetime(s: str) -> datetime.datetime:
-    """Parse an RFC 3339 timestamp, requiring an explicit timezone offset."""
-    dt = datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
-    if dt.tzinfo is None:
-        msg = f'timestamp {s!r} must include a timezone offset'
-        raise argparse.ArgumentTypeError(msg)
-    return dt
-
-
-def format_utc(dt: datetime.datetime) -> str:
-    """Format an instant as an RFC 3339 UTC timestamp with a trailing `Z`."""
-    return dt.astimezone(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
 def compute_old_date(
@@ -249,7 +237,7 @@ def update_makefile_old_date(makefile_path: Path, new_date: datetime.datetime) -
     return True
 
 
-def main() -> int:  # noqa: C901, PLR0915
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         '--min-old-date',
@@ -277,17 +265,7 @@ def main() -> int:  # noqa: C901, PLR0915
     with args.pyproject.open('rb') as f:
         pyproject = tomli.load(f)
 
-    requires_python = pyproject.get('project', {}).get('requires-python')
-    if not requires_python:
-        msg = 'project.requires-python missing from pyproject.toml'
-        raise RuntimeError(msg)
-    rp_spec = SpecifierSet(requires_python)
-    oldest_python = next(
-        (Version(s.version) for s in rp_spec if s.operator in ('>=', '==', '~=')), None
-    )
-    if oldest_python is None:
-        msg = f'cannot derive oldest Python from requires-python={requires_python!r}'
-        raise RuntimeError(msg)
+    oldest_python = lower_bound(SpecifierSet(pyproject['project']['requires-python']))
     print(f'oldest supported Python: {oldest_python}')
 
     raw_reqs = collect_requirements(pyproject)

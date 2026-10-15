@@ -30,7 +30,7 @@ or none inside an HTML comment); only the path is checked. This catches a header
 left stale after a file is moved or renamed.
 
 Files without the bartz license header are out of scope and skipped. Pass the
-files to check as command-line arguments, as pre-commit does.
+files to check as command-line arguments, as prek does.
 """
 
 import re

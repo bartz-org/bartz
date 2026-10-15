@@ -95,10 +95,10 @@ def step(key: Key[Array, ''], state: State) -> State:
     keys = split(key, 5)
 
     state = step_resid_inexact_integral(state)
+    state = step_z(keys.pop(), state)
     state = step_trees(keys.pop(), state)
 
     state = step_leaf_prior_cov_inv(keys.pop(), state)
-    state = step_z(keys.pop(), state)
     state = step_error_cov_inv(keys.pop(), state)
     state = step_sparse(keys.pop(), state)
     return step_config(state)

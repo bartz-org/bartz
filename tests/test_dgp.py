@@ -1348,7 +1348,7 @@ class TestHeteroskedasticity:
         excess = ((kurt_eta - 3) * big_lambda + cross) / p + 3 * (
             1 - lambda_
         ) ** 2 * r * (k - r) / p**2
-        assert_close_matrices(nnone(dgp.params.var_v), rho**2 * (2 + excess), rtol=1e-6)
+        assert_allclose(nnone(dgp.params.var_v), rho**2 * (2 + excess), rtol=1e-6)
 
     def test_stream_invariance_with_homoskedastic(self, keys: split) -> None:
         """Het leaves the mean/predictor streams intact and only rescales the noise."""

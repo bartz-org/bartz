@@ -635,7 +635,7 @@ def test_compare_with_stochtree(
                 leaf_prec, cond_mean = leaf_prior_cov_inv_conditional_mean(
                     bz_model._bart
                 )
-                assert_close_matrices(leaf_prec.mean(), cond_mean.mean(), rtol=0.02)
+                assert_allclose(leaf_prec.mean(), cond_mean.mean(), rtol=0.02)
     else:
         with subtests.test('rhat_prob_train'):
             bz_prob = np.asarray(ndtr(bz_model.y_hat_train))

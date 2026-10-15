@@ -77,7 +77,7 @@ config.update(
     f'config/jax_cache/py{major}.{minor}-jax{jax.__version__}',
 )
 config.update('jax_persistent_cache_min_entry_size_bytes', -1)
-config.update('jax_persistent_cache_min_compile_time_secs', 0.1)
+config.update('jax_persistent_cache_min_compile_time_secs', 0)
 
 
 @pytest.fixture

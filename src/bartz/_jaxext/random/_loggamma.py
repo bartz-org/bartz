@@ -35,6 +35,8 @@ from jaxtyping import Array, Float, Key
 from bartz._jaxext._jit import jit
 
 
+# WORKAROUND(jax<0.11.1): replace with `random.loggamma(...,
+# method='approximate')` and lift the ban on it in pyproject.toml
 @jit(static_argnums=(2, 3), static_argnames=('n_uniforms',))
 def loggamma(
     key: Key[Array, ''],

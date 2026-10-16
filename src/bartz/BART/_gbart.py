@@ -413,10 +413,6 @@ class mc_gbart(Module):
     def _mcmc_state(self) -> State:
         return self._bart._mcmc_state  # noqa: SLF001
 
-    @property
-    def _splits(self) -> Real[Array, 'p max_num_splits']:
-        return self._bart._binner._splits  # noqa: SLF001
-
     # Properties
 
     @property

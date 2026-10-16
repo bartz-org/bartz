@@ -1328,6 +1328,67 @@ def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
             Bart(**dict(bkw.kw, **{param: 1.0}))
 
 
+@pytest.mark.parametrize('param', ['sigma_scale', 'sigma_init'])
+def test_sigma_wrong_special_value(bkw: BartKW, param: str) -> None:
+    """Trigger error on unrecognized `sigma_scale`/`sigma_init` value."""
+    if bkw.all_binary:
+        pytest.skip('Parameter ignored with binary outcomes.')
+    value = 'ohohoh'
+    kw = dict(bkw.kw, **{param: value})
+    # the import-hook type checker would reject the invalid literal before
+    # `Bart` raises its own `ValueError`, so disable it here
+    with jaxtyping_disabled(), pytest.raises(ValueError, match=value):
+        Bart(**kw)
+
+
+def test_explicit_offset_and_sigma(
+    bkw: BartKW, keys: split, subtests: SubTests
+) -> None:
+    """Explicit `offset`, `sigma_scale`, `sigma_init` set the prior and initial state.
+
+    Scalars are broadcast to all outcome components. Binary components have no
+    error prior and initial precision 1.
+    """
+    # do not run any mcmc step, such that the stored state is the initial one
+    kw = dict(bkw.kw, n_burn=0, n_save=0)
+
+    values = dict(
+        scalar=0.7,
+        vector=random.uniform(keys.pop(), bkw.kshape, minval=0.5, maxval=2.0),
+    )
+    for shape, value in values.items():
+        vec_value = jnp.broadcast_to(value, bkw.kshape)
+
+        with subtests.test('offset', shape=shape):
+            bart = Bart(**dict(kw, offset=value))
+            assert_array_equal(bart.offset, vec_value)
+
+        if bkw.all_binary:
+            # sigma settings are rejected, see `test_binary_rejects_sigma_settings`
+            continue
+
+        diag = jnp.diag if bkw.kshape else lambda x: x
+
+        with subtests.test('sigma_scale', shape=shape):
+            bart = Bart(**dict(kw, sigma_scale=value))
+            rate = nnone(bart._mcmc_state.error_cov_inv.rate)
+            expected_rate = jnp.where(
+                ~bkw.binary_mask,
+                _bart_default(bkw.kw, 'sigma_df') * jnp.square(vec_value),
+                0.0,
+            )
+            assert_close_matrices(rate, diag(expected_rate), rtol=1e-6)
+
+        with subtests.test('sigma_init', shape=shape):
+            bart = Bart(**dict(kw, sigma_init=value))
+            prec = bart._mcmc_state.error_cov_inv.value
+            expected_prec = jnp.where(
+                ~bkw.binary_mask, jnp.reciprocal(jnp.square(vec_value)), 1.0
+            )
+            expected_prec = jnp.broadcast_to(diag(expected_prec), prec.shape)
+            assert_close_matrices(prec, expected_prec, rtol=1e-6, reduce_rank=True)
+
+
 def test_outcome_samples_error_scale(keys: split) -> None:
     """`outcome_samples` applies `error_scale` in univariate continuous regression.
 
@@ -3193,6 +3254,47 @@ def test_data_format_mismatch(bkw: BartKW) -> None:
         bart.predict(numpy.array(bkw.x_test), error_scale=w)
 
 
+def test_outcome_shape_mismatch(bkw: BartKW, subtests: SubTests) -> None:
+    """`outcome_type` or 2D `error_scale` inconsistent with `y_train` raise."""
+    if bkw.k is None:  # pragma: no cover, bc defaults are mv only
+        pytest.skip('UV variant')
+
+    y = bkw.kw['y_train']
+    k, n = y.shape
+    outcome_type = bkw.kw['outcome_type']
+    if not isinstance(outcome_type, str):
+        outcome_type, *_ = outcome_type
+    uv_kw = dict(bkw.kw, y_train=y[0, :], error_scale=None, missing=None)
+
+    cases = {
+        'outcome_type too long': (
+            dict(bkw.kw, outcome_type=(outcome_type,) * (k + 1)),
+            rf'y_train\.shape=\({k + 1}, n\)',
+        ),
+        'outcome_type with 1D y_train': (
+            dict(uv_kw, outcome_type=(outcome_type,)),
+            r'y_train\.shape=\(1, n\)',
+        ),
+        'error_scale with wrong k': (
+            dict(bkw.kw, error_scale=jnp.ones((k + 1, n))),
+            '2D error_scale',
+        ),
+        'error_scale with 1D y_train': (
+            dict(uv_kw, outcome_type=outcome_type, error_scale=jnp.ones((k, n))),
+            '2D error_scale',
+        ),
+    }
+    for name, (kw, match) in cases.items():
+        # the import-hook type checker would catch some mismatches before `Bart`
+        # raises its own `ValueError`, so disable it here
+        with (
+            subtests.test(name),
+            jaxtyping_disabled(),
+            pytest.raises(ValueError, match=match),
+        ):
+            Bart(**kw)
+
+
 @pytest.mark.parametrize(
     'dtype',
     [
@@ -3689,68 +3791,6 @@ def test_load_wrong_type(tmp_path: Path) -> None:
         Bart.load(path)
 
 
-class ExampleData(NamedTuple):
-    """Small nonsense MV dataset for TestMVBartInterface."""
-
-    x: Float32[Array, 'p n']
-    y: Float32[Array, 'k n']
-    w: Float32[Array, ' n']
-    kwargs: dict[str, Any]
-
-
-class TestMVBartInterface:
-    """Some specific multivariate tests with their own data in and parametrization."""
-
-    @pytest.fixture
-    def example_data(self, keys: split) -> ExampleData:
-        """Return a small nonsense MV dataset (x, y, w)."""
-        return ExampleData(
-            x=random.normal(keys.pop(), (2, 5)),
-            y=random.normal(keys.pop(), (3, 5)),
-            w=random.normal(keys.pop(), (5,)),
-            kwargs=dict(num_trees=5, n_save=0, n_burn=0, num_chains=None),
-        )
-
-    @pytest.mark.parametrize('outcome_mode', ['continuous', 'mixed'])
-    def test_scalar_params(
-        self, example_data: ExampleData, subtests: SubTests, outcome_mode: str
-    ) -> None:
-        """Test that scalar configuration params are broadcasted."""
-        x, y, _, kw = example_data
-        k, _ = y.shape
-        if outcome_mode == 'mixed':
-            outcome_type = ['binary'] + ['continuous'] * (k - 1)
-        else:
-            outcome_type = 'continuous'
-        kw.update(x_train=x, y_train=y, outcome_type=outcome_type)
-
-        with subtests.test('offset'):
-            bart = Bart(offset=0.0, **kw)
-            assert bart.offset.shape == (k,)
-
-        with subtests.test('sigma_scale'):
-            bart = Bart(sigma_scale=1.0, **kw)
-            assert nnone(bart._mcmc_state.error_cov_inv.rate).shape == (k, k)
-
-        with subtests.test('sigma_init'):
-            # no MCMC steps (n_burn = n_save = 0), so the state holds the init:
-            # a precision of 1 / sigma_init**2 = 1 broadcast to all components
-            bart = Bart(sigma_init=1.0, **kw)
-            assert_array_equal(nnone(bart._mcmc_state.error_cov_inv.value), jnp.eye(k))
-
-    def test_outcome_type_length_mismatch(self, example_data: ExampleData) -> None:
-        """Sequence outcome_type with wrong length should raise."""
-        x, y, _, kw = example_data
-        with pytest.raises(ValueError, match='length'):
-            Bart(x_train=x, y_train=y, **kw, outcome_type=['continuous', 'continuous'])
-
-    def test_sequence_outcome_type_requires_2d(self, example_data: ExampleData) -> None:
-        """Sequence outcome_type with 1D y should raise."""
-        x, y, _, kw = example_data
-        with pytest.raises(ValueError, match=r'y_train\.shape=\(1, n\)'):
-            Bart(x_train=x, y_train=y[0, :], **kw, outcome_type=['continuous'])
-
-
 def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     """Test that Bart initializes equivalent states for UV and MV(k=1)."""
     outcome_type = bkw.kw['outcome_type']
@@ -4065,16 +4105,3 @@ class TestDevicePlacement:
         w = bkw.w_for_predict('mean', on_train=False)
         pred = bart.predict(bkw.x_test, kind='mean', error_scale=w)
         assert pred.devices() == {other_device}
-
-
-@pytest.mark.parametrize('param', ['sigma_scale', 'sigma_init'])
-def test_sigma_wrong_special_value(bkw: BartKW, param: str) -> None:
-    """Trigger error on unrecognized `sigma_scale`/`sigma_init` value."""
-    value = 'ohohoh'
-    if bkw.all_binary:
-        pytest.skip('Parameter ignored with binary outcomes.')
-    kw = dict(bkw.kw, **{param: value})
-    # the import-hook type checker would reject the invalid literal before
-    # `Bart` raises its own `ValueError`, so disable it here
-    with jaxtyping_disabled(), pytest.raises(ValueError, match=value):
-        Bart(**kw)

@@ -676,10 +676,10 @@ def _sigest2_ols(
 ) -> Float32[Array, '']:
     """Estimate the error variance by OLS with intercept."""
     p, n = x_train.shape
-    if n <= p:
+    if n <= p + 1:
         msg = (
             f'cannot estimate `sigest` by OLS with {n} datapoints and {p} '
-            'predictors (it requires more datapoints than predictors); '
+            'predictors (it requires more datapoints than predictors plus one); '
             'specify `sigest` or `lambda_` explicitly'
         )
         raise ValueError(msg)

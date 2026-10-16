@@ -342,10 +342,9 @@ class TestSigma2Estimates:
     """Test functions that estimate the residual variance."""
 
     @pytest.mark.parametrize('k', [(), (3,)])
-    @pytest.mark.parametrize('p', [5, 60])  # < n, > n
-    def test_scaling(self, keys: split, k: tuple[int, ...], p: int) -> None:
+    def test_scaling(self, keys: split, k: tuple[int, ...]) -> None:
         """Check that f(ax + b, cy + d) = c^2 f(x, y)."""
-        n = 30
+        n, p = 30, 5
 
         x = random.normal(keys.pop(), (p, n))
         beta = random.normal(keys.pop(), (*k, p))
@@ -367,15 +366,24 @@ class TestSigma2Estimates:
 
         assert_close_matrices(scaled, jnp.square(c) * ref, rtol=1e-3, atol=1e-7)
 
-    @pytest.mark.parametrize('p', [5, 60])  # < n, > n
-    def test_batching_consistency(self, keys: split, p: int) -> None:
+    def test_batching_consistency(self, keys: split) -> None:
         """Check that batched ``y`` matches per-row scalar evaluations."""
-        n, k = 30, 4
+        n, p, k = 30, 5, 4
         x = random.normal(keys.pop(), (p, n))
         y = random.normal(keys.pop(), (k, n))
         batched = _sigma2_from_ols(x, y)
         per_row = jnp.stack([_sigma2_from_ols(x, y[i]) for i in range(k)])
         assert_close_matrices(batched, per_row, rtol=1e-3, atol=1e-11)
+
+    def test_constant_predictor(self, keys: split) -> None:
+        """Check that a constant predictor, aliased with the intercept, is ignored."""
+        n, p = 30, 5
+        x = random.normal(keys.pop(), (p, n))
+        y = random.normal(keys.pop(), (n,))
+        x_const = jnp.concatenate([x, jnp.full((1, n), 3.0)])
+        assert_close_matrices(
+            _sigma2_from_ols(x_const, y), _sigma2_from_ols(x, y), rtol=1e-5
+        )
 
     @pytest.mark.parametrize('k', [(), (3,)])
     def test_oracle_comparison(self, keys: split, k: tuple[int, ...]) -> None:

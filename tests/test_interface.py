@@ -191,15 +191,26 @@ def gen_sparse_data(
     return X[perm, :], dgp.y, mask[perm]
 
 
-def gen_missing(key: Key[Array, ''], shape: tuple[int, int]) -> Bool[Array, 'k n']:
+def gen_missing(
+    key: Key[Array, ''], shape: tuple[int] | tuple[int, int]
+) -> Bool[Array, ' n'] | Bool[Array, 'k n']:
     """Generate a boolean missingness mask that is not completely at random.
 
     The mask is the binary outcome of its own `gen_data` DGP, so the entries
     are driven by latent predictors and correlated within a datapoint, instead
     of i.i.d. coin flips.
     """
-    k, n = shape
-    dgp = gen_data(key, n=n, p=k, k=k, lambda_=0.5, outcome_type='binary', **GEN_KW)
+    *kshape, n = shape
+    (k,) = kshape or (None,)
+    dgp = gen_data(
+        key,
+        n=n,
+        p=k or 1,
+        k=k,
+        lambda_=None if k is None else 0.5,
+        outcome_type='binary',
+        **GEN_KW,
+    )
     return dgp.y.astype(bool)
 
 
@@ -374,7 +385,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
 
     match variant:
         # continuous regression with some settings that induce large types,
-        # sparsity with free theta
+        # sparsity with free theta, sampled leaf variance
         case 1:
             train, test = gen_data(
                 keys.pop(), n=n + nt, p=p, s_distr=Gamma(2.0), **GEN_KW
@@ -386,6 +397,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     outcome_type='continuous',
                     # non-default augment; variant 3 covers the default True
                     sparse=SparseConfig(augment=False),
+                    sigma_mu_df=10.0,
                     **common,
                     printevery=50,
                     binner=partial(RangeEvenBinner, max_bins=257),
@@ -675,10 +687,11 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
     return bkw
 
 
-# test only the multivariate variants, because the other ones are tested in
-# test_BART.py
 @pytest.fixture(
     params=(
+        pytest.param(1, id='v1'),
+        pytest.param(2, id='v2'),
+        pytest.param(3, id='v3'),
         pytest.param(4, id='v4'),
         pytest.param(5, id='v5'),
         pytest.param(6, id='v6'),
@@ -810,7 +823,7 @@ class TestWithCachedBart:
                     bart._main_trace.error_cov_inv,
                     chain_vmap_axes(bart._main_trace).error_cov_inv,
                 )
-                if error_cov_inv.ndim == 2:  # pragma: no cover, only mv by default
+                if error_cov_inv.ndim == 2:
                     error_cov_inv = error_cov_inv[:, :, None, None]
                 _, _, k, _ = error_cov_inv.shape
                 inv_sdev = bart._mcmc_state.inv_sdev_scale
@@ -843,7 +856,10 @@ class TestWithCachedBart:
             pytest.skip('fixed leaf prior')
 
         leaf_prec, cond_mean = leaf_prior_cov_inv_conditional_mean(bart)
-        _, k, _ = leaf_prec.shape
+        # univariate as 1x1 matrices
+        k = cachedbart.bkw.k or 1
+        leaf_prec = leaf_prec.reshape(-1, k, k)
+        cond_mean = cond_mean.reshape(-1, k, k)
 
         with subtests.test('convergence'):
             ti, tj = jnp.triu_indices(k)
@@ -1117,6 +1133,8 @@ def test_error_scale_magnitude_invariance(bkw: BartKW) -> None:
             'binary components have a fixed latent error variance, so'
             ' rescaling `error_scale` changes the model'
         )
+    if 'error_scale' not in bkw.kw:
+        pytest.skip('no `error_scale` to rescale')
 
     def run(c: float) -> State:
         kw = bkw.kw
@@ -1630,7 +1648,7 @@ def initial_leaf_prior_cov_inv(
         rate = nnone(prior.rate)
         if rate.ndim:
             inv_rate = jnp.diag(jnp.reciprocal(jnp.diag(rate)))
-        else:  # pragma: no cover, always mv in bkw
+        else:
             inv_rate = jnp.reciprocal(rate)
         return nnone(prior.inv_wishart_marginal_nu) * inv_rate
 
@@ -1641,7 +1659,7 @@ def test_leaf_unit(bkw: BartKW) -> None:
     cov_inv = initial_leaf_prior_cov_inv(forest)
     if cov_inv.ndim:
         marginal_std = jnp.sqrt(jnp.diagonal(jnp.linalg.inv(cov_inv)))
-    else:  # pragma: no cover, always mv with defaults
+    else:
         marginal_std = jnp.sqrt(jnp.reciprocal(cov_inv))
     expected = 2 ** jnp.round(jnp.log2(marginal_std))
     assert forest.leaf_unit.dtype == jnp.float32
@@ -1742,7 +1760,7 @@ def test_leaf_quantization(bkw: BartKW, keys: split) -> None:
     # tree_size) leaves
     if state.resid_unit.ndim:
         quantum = quantum[..., None, :, None]
-    else:  # pragma: no cover, always mv with defaults
+    else:
         quantum = quantum[..., None, None]
 
     leaves = state.forest.leaf_tree / quantum
@@ -1772,7 +1790,7 @@ def test_resid_eff_scale(bkw: BartKW) -> None:
         # the last update measured the residuals as they are in the final
         # state, so recompute their (precision-scaled, masked) rms
         resid = state.resid * state.resid_unit[..., None]
-        if state.inv_sdev_scale is None:  # pragma: no cover, error-scaled by default
+        if state.inv_sdev_scale is None:
             n_eff = resid.shape[-1]
         else:
             # `inv_sdev_scale` is stored in units of `inv_sdev_unit`
@@ -1956,7 +1974,7 @@ def test_output_ranges(bkw: BartKW, keys: split) -> None:
         assert jnp.all(sdev_mean[~binary_mask] > 0)
 
     # get_latent_prec: symmetry and positive definiteness
-    if bkw.k is not None:  # pragma: no branch, always mv with defaults
+    if bkw.k is not None:
         prec = bart.get_latent_prec()
         assert_close_matrices(prec, prec.mT, rtol=1e-6, reduce_rank=True)
         eigvals = jnp.linalg.eigvalsh(prec)
@@ -2539,14 +2557,14 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
         assert_close_matrices(bart.offset[..., None], expected, rtol=1e-6)
 
     # set expected tau_num and check the error prior default
-    if bkw.all_binary:
-        tau_num = 3
-    else:
-        tau_num = jnp.where(mask, 3.0, 1.0)
+    tau_num = jnp.where(mask, 3.0, 1.0)
+    if not bkw.all_binary:
         # var(y_train) is 0 (n=1) or undefined (n=0), guarded to 1, so the
         # default prior rate is sigma_df for the continuous components
         sigma_df = nnone(bart._mcmc_state.error_cov_inv.inv_wishart_marginal_nu)
-        rate = jnp.diag(nnone(bart._mcmc_state.error_cov_inv.rate))
+        rate = nnone(bart._mcmc_state.error_cov_inv.rate)
+        if rate.ndim:
+            rate = jnp.diag(rate)
         assert_close_matrices(
             rate[~mask], jnp.broadcast_to(sigma_df, rate[~mask].shape), rtol=1e-6
         )
@@ -2554,7 +2572,7 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
     # check leaf_prior_cov_inv
     expected_cov_inv = (2**2 * bkw.num_trees) / tau_num**2
     leaf_prior_cov_inv = initial_leaf_prior_cov_inv(bart._mcmc_state.forest)
-    if leaf_prior_cov_inv.ndim == 2:  # pragma: no branch, always mv with defaults
+    if leaf_prior_cov_inv.ndim == 2:
         expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
     assert_close_matrices(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
 
@@ -2597,7 +2615,9 @@ def test_two_datapoints(bkw: BartKW) -> None:
         vary = _guarded_response_variance(
             kw['y_train'], kw.get('error_scale'), kw.get('missing')
         )
-        rate = jnp.diag(nnone(bart._mcmc_state.error_cov_inv.rate))
+        rate = nnone(bart._mcmc_state.error_cov_inv.rate)
+        if rate.ndim:
+            rate = jnp.diag(rate)
         assert_close_matrices(rate[~mask], sigma_df * vary[~mask], rtol=1e-6)
     if bkw.uses_quantile_binner:
         assert jnp.all(bart._mcmc_state.forest.max_split <= 1)
@@ -3256,7 +3276,7 @@ def test_data_format_mismatch(bkw: BartKW) -> None:
 
 def test_outcome_shape_mismatch(bkw: BartKW, subtests: SubTests) -> None:
     """`outcome_type` or 2D `error_scale` inconsistent with `y_train` raise."""
-    if bkw.k is None:  # pragma: no cover, bc defaults are mv only
+    if bkw.k is None:
         pytest.skip('UV variant')
 
     y = bkw.kw['y_train']
@@ -3884,7 +3904,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
 def test_get_latent_prec_only_continuous(bkw: BartKW) -> None:
     """get_latent_prec(only_continuous=True) removes binary components."""
     kw = bkw.kw
-    if bkw.k is None:  # pragma: no cover, bc defaults are mv only
+    if bkw.k is None:
         pytest.skip('UV variant')
 
     bart = Bart(**kw)
@@ -3913,12 +3933,12 @@ def test_get_error_sdev_values(bkw: BartKW) -> None:
 
     with debug_nans(False):
         sdev = bart.get_error_sdev()
-        if sdev.ndim == 1:  # pragma: no cover, bc defaults are mv only
+        if sdev.ndim == 1:
             sdev = sdev[:, None]  # reshape as vector of length 1
 
     # manual: invert each precision matrix, take sqrt of diagonal
     prec = bart.get_latent_prec()
-    if prec.ndim < 3:  # pragma: no cover, bc defaults are mv only
+    if prec.ndim < 3:
         prec = prec[..., :, None, None]  # reshape as 1x1 matrix
     prec = prec[..., n_burn:, :, :]  # skip burnin
     prec = lax.collapse(prec, 0, -2)  # flatten chains

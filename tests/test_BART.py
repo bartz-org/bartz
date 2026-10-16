@@ -208,7 +208,7 @@ def bart_kw_to_mc_gbart(bkw: BartKW) -> dict[str, Any]:
     bart_kwargs: dict[str, Any] = {}
 
     # move Bart-only keys that mc_gbart does not change the default of
-    for key in ('num_chain_devices', 'num_data_devices', 'maxdepth'):
+    for key in ('num_chain_devices', 'num_data_devices', 'maxdepth', 'sigma_mu_df'):
         if key in kw:
             bart_kwargs[key] = kw.pop(key)
 
@@ -1033,14 +1033,16 @@ def test_zero_or_one_datapoint(kw: dict[str, Any], num_datapoints: int) -> None:
             assert bart.offset == kw['y_train'].item()
         else:
             assert bart.offset == 0
-    leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv.value
-    assert_close_matrices(
-        leaf_prior_cov_inv,
-        jnp.full_like(
-            leaf_prior_cov_inv, (2**2 * get_with_default(kw, 'ntree')) / tau_num**2
-        ),
-        rtol=1e-6,
-    )
+    leaf_prior_cov_inv = bart._mcmc_state.forest.leaf_prior_cov_inv
+    if leaf_prior_cov_inv.nu is None:  # if sampled, the value has moved
+        assert_close_matrices(
+            leaf_prior_cov_inv.value,
+            jnp.full_like(
+                leaf_prior_cov_inv.value,
+                (2**2 * get_with_default(kw, 'ntree')) / tau_num**2,
+            ),
+            rtol=1e-6,
+        )
 
     # check the likelihood ratio is always 1
     burnin_ll = nnone(bart._burnin_trace.log_likelihood)

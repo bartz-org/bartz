@@ -28,7 +28,7 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import fields, replace
 from functools import partial, wraps
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import jax
 import numpy
@@ -86,7 +86,16 @@ from bartz._jaxext import (
     minimal_unsigned_dtype,
     split,
 )
-from bartz.grove import is_actual_leaf
+from bartz._typing import kwdict
+from bartz.debug import sample_prior
+from bartz.grove import (
+    TreeHeaps,
+    evaluate_forest,
+    is_actual_leaf,
+    tree_actual_depth,
+    tree_depths,
+    var_histogram,
+)
 from bartz.mcmcstep import (
     AutoBatchedReduction,
     AutoOneHotReduction,
@@ -1888,6 +1897,245 @@ def test_affluence_tree_stays_clean(
     assert_array_equal(affluence & ~is_leaf, jnp.zeros_like(affluence))
     # sanity: the mask is non-trivially populated (else the check is vacuous)
     assert jnp.any(affluence)
+
+
+# settings of `test_joint_distribution`
+GEWEKE_NUM_CHAINS = 4000
+GEWEKE_NUM_STEPS = 100
+GEWEKE_NUM_TREES = 20
+GEWEKE_N = 20
+GEWEKE_NUM_TEST = 3
+GEWEKE_MAXDEPTH = 6
+GEWEKE_NU = 10.0
+GEWEKE_RATE = 10.0
+
+
+def geweke_sparse_kw(sparsity: Literal['fixed', 'free'] | None, p: int) -> kwdict:
+    """Sparsity-prior hyperparameters shared by `init` and `sample_prior`."""
+    # the Beta prior on theta/(theta+rho) is kept concentrated, because the
+    # augmentation of `log_s` is biased when a diffuse one makes `s` very sparse
+    params = {'fixed': dict(theta=float(p)), 'free': dict(a=20.0, b=20.0, rho=float(p))}
+    return {} if sparsity is None else params[sparsity]
+
+
+def forest_fit(state: State) -> Float32[Array, ' n']:
+    """Compute the mean of the outcome from the forest of `state`."""
+    fit = evaluate_forest(state.X, state.forest, sum_batch_axis=-1)
+    return state.forest.offset + fit
+
+
+def resample_data(key: Key[Array, ''], state: State) -> State:
+    """Draw new data from the model given the parameters in `state`.
+
+    `resid` is updated incrementally rather than recomputed, such that errors
+    in its bookkeeping by `step` persist.
+    """
+    eta = forest_fit(state)
+    eps = random.normal(key, eta.shape)
+    y = eta + eps * lax.rsqrt(state.error_cov_inv.value)
+    resid = state.resid + (y - state.y) / state.resid_unit
+    return replace(state, y=y, resid=resid)
+
+
+def run_geweke(
+    key: Key[Array, ''],
+    X: UInt8[Array, 'p n'],
+    nsplits: int,
+    sparsity: Literal['fixed', 'free'] | None,
+) -> State:
+    """Alternate `step` and `resample_data` in many independent chains.
+
+    The chains start from stumps, and from prior draws of the sparsity
+    parameters, which otherwise take long to reach their prior.
+    """
+    keys = split(key)
+    p, n = X.shape
+    sparse_kw = geweke_sparse_kw(sparsity, p)
+    init_sparse_kw: dict = (
+        {} if sparsity is None else dict(**sparse_kw, sparse_on_at=0, augment=True)
+    )
+    state = init(
+        X=X,
+        y=jnp.zeros(n),
+        offset=0.0,
+        max_split=jnp.full(p, nsplits, jnp.uint8),
+        num_trees=GEWEKE_NUM_TREES,
+        p_nonterminal=make_p_nonterminal(GEWEKE_MAXDEPTH),
+        leaf_prior_cov_inv=Wishart(None, None, float(GEWEKE_NUM_TREES)),
+        error_cov_inv=Wishart(nu=GEWEKE_NU, rate=GEWEKE_RATE, value=1.0),
+        **init_sparse_kw,
+    )
+
+    # independent chains, each with its own data
+    states = tree.map(
+        lambda x: jnp.broadcast_to(x, (GEWEKE_NUM_CHAINS, *x.shape)), state
+    )
+    if sparsity is not None:
+        prior = sample_prior(
+            keys.pop(),
+            GEWEKE_NUM_CHAINS,
+            1,
+            max_split=state.forest.max_split,
+            p_nonterminal=make_p_nonterminal(GEWEKE_MAXDEPTH),
+            sigma_mu=jnp.float32(1.0),
+            **sparse_kw,
+        )
+
+        def set_sparsity(
+            state: State, log_s: Float32[Array, ' p'], theta: Float32[Array, '']
+        ) -> State:
+            forest = replace(state.forest, log_s=log_s, theta=theta)
+            return replace(state, forest=forest)
+
+        states = vmap(set_sparsity)(states, nnone(prior.log_s), nnone(prior.theta))
+
+    return run_geweke_chains(keys.pop(GEWEKE_NUM_STEPS), states)
+
+
+def geweke_step(key: Key[Array, ''], state: State) -> State:
+    """Draw new data given the parameters, then the parameters given the data."""
+    keys = split(key)
+    return step(keys.pop(), resample_data(keys.pop(), state))
+
+
+@jit
+def run_geweke_chains(step_keys: Key[Array, ' steps'], states: State) -> State:
+    """Iterate `geweke_step` on a batch of independent chains."""
+
+    def body(states: State, key: Key[Array, '']) -> tuple[State, None]:
+        chain_keys = split(key).pop(GEWEKE_NUM_CHAINS)
+        return vmap(geweke_step)(chain_keys, states), None
+
+    states, _ = lax.scan(body, states, step_keys)
+    return states
+
+
+def forest_summaries(
+    trees: TreeHeaps, p: int, X_test: UInt8[Array, 'p m']
+) -> dict[str, Shaped[Array, ' forests']]:
+    """Compute scalar summaries of each forest in a batch of forests."""
+    var_tree = trees.var_tree
+    split_tree = trees.split_tree
+    _, m = X_test.shape
+    num_splits = jnp.count_nonzero(split_tree, axis=-1)
+    varcount = var_histogram(p, var_tree, split_tree, sum_batch_axis=-1)
+    yhat = evaluate_forest(X_test, trees, sum_batch_axis=-1)
+    return {
+        'number of stub trees': jnp.count_nonzero(num_splits == 0, axis=-1),
+        'number of simple trees': jnp.count_nonzero(num_splits == 1, axis=-1),
+        'number of nodes': num_splits.sum(axis=-1),
+        'imbalance index': avg_imbalance_index(split_tree),
+        'average max tree depth': avg_max_tree_depth(split_tree),
+        **{f'varcount[{i}]': varcount[:, i] for i in range(p)},
+        **{f'y_test[{i}]': yhat[:, i] for i in range(m)},
+    }
+
+
+def effective_predictors(
+    varprob: Float32[Array, '*batch p'],
+) -> Float32[Array, ' *batch']:
+    """Effective number of predictors, the exp of the split-probability entropy."""
+    entropy = -jnp.sum(jnp.where(varprob > 0, varprob * jnp.log(varprob), 0.0), axis=-1)
+    return jnp.exp(entropy)
+
+
+@partial(jnp.vectorize, signature='(n,m)->()')
+def avg_imbalance_index(
+    split_tree: UInt[Array, '*batch_shape ntree 2**(d-1)'],
+) -> Float32[Array, '*batch_shape']:
+    """Measure average tree imbalance in the forest."""
+    is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
+    depths = tree_depths(is_leaf.shape[-1])
+    depths = jnp.broadcast_to(depths, is_leaf.shape)
+    index = jnp.std(depths, where=is_leaf, axis=-1)
+    return index.mean(-1)
+
+
+@partial(jnp.vectorize, signature='(n,m)->()')
+def avg_max_tree_depth(
+    split_tree: UInt[Array, '*batch_shape ntree 2**(d-1)'],
+) -> Float32[Array, '*batch_shape']:
+    """Measure average maximum tree depth in the forest."""
+    depth = vmap(tree_actual_depth)(split_tree)
+    return depth.mean(-1)
+
+
+@pytest.mark.parametrize(
+    ('p', 'nsplits', 'sparsity'),
+    [
+        (1, 1, None),
+        (3, 2, None),
+        (10, 1, None),
+        (10, 255, None),
+        (10, 1, 'fixed'),
+        (10, 1, 'free'),
+        (10, 255, 'free'),
+        (1, 1, 'free'),
+        (3, 2, 'free'),
+    ],
+)
+def test_joint_distribution(
+    keys: split,
+    p: int,
+    nsplits: int,
+    sparsity: Literal['fixed', 'free'] | None,
+    subtests: SubTests,
+) -> None:
+    """Check `step` keeps parameters and data jointly distributed as the model.
+
+    Alternate `step` with drawing new data given the parameters, in many
+    independent chains (Geweke 2004). If `step` leaves the posterior invariant,
+    the parameters stay distributed as their prior, which is compared against
+    `sample_prior`. The blocked low-p cases with variable selection stress-test
+    the augmentation of `log_s`.
+    """
+    X = random.randint(keys.pop(), (p, GEWEKE_N), 0, nsplits + 1, jnp.uint8)
+    final = run_geweke(keys.pop(), X, nsplits, sparsity)
+
+    prior = sample_prior(
+        keys.pop(),
+        GEWEKE_NUM_CHAINS,
+        GEWEKE_NUM_TREES,
+        max_split=jnp.full(p, nsplits, jnp.uint8),
+        p_nonterminal=make_p_nonterminal(GEWEKE_MAXDEPTH),
+        sigma_mu=lax.rsqrt(jnp.float32(GEWEKE_NUM_TREES)),
+        **geweke_sparse_kw(sparsity, p),
+    )
+
+    # compare the parameters after a step with independent prior draws
+    X_test = random.randint(keys.pop(), (p, GEWEKE_NUM_TEST), 0, nsplits + 1, jnp.uint8)
+    mcmc = forest_summaries(final.forest, p, X_test)
+    ref = forest_summaries(prior, p, X_test)
+    if p > 1 and sparsity is not None:
+        # with p=1, s is always [1]
+        mcmc['effective predictors'] = effective_predictors(
+            softmax(nnone(final.forest.log_s), axis=-1)
+        )
+        ref['effective predictors'] = effective_predictors(
+            softmax(nnone(prior.log_s), axis=-1)
+        )
+    if sparsity == 'free':
+        mcmc['theta'] = nnone(final.forest.theta)
+        ref['theta'] = nnone(prior.theta)
+
+    # data and parameters after a step are jointly distributed as in the
+    # model, so the standardized errors are iid standard normal
+    prec = final.error_cov_inv.value
+    errors = (final.y - vmap(forest_fit)(final)) * jnp.sqrt(prec)[:, None]
+    gamma_cdf = stats.gamma(GEWEKE_NU / 2, scale=2 / GEWEKE_RATE).cdf
+
+    # keep the joint false alarm rate low
+    threshold = 1e-3 / (len(mcmc) + 2)
+
+    for name, x in mcmc.items():
+        with subtests.test(name):
+            assert ks_2samp(x, ref[name]).pvalue > threshold
+
+    with subtests.test('error precision'):
+        assert ks_1samp(prec, gamma_cdf).pvalue > threshold
+
+    with subtests.test('errors'):
+        assert ks_1samp(errors.ravel(), stats.norm.cdf).pvalue > threshold
 
 
 class TestMixedBinaryContinuous:

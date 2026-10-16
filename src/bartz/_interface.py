@@ -55,7 +55,6 @@ from bartz.grove import (
     TreesTrace,
     check_trace,
     evaluate_forest,
-    forest_depth_distr,
     format_tree,
     points_per_node_distr,
 )
@@ -1095,15 +1094,6 @@ class Bart(Module):
         """
         return compare_resid(self._mcmc_state)
 
-    def _depth_distr(self) -> Int32[Array, '*num_chains n_save d']:
-        """Histogram of tree depths for each state of the trees.
-
-        Returns
-        -------
-        A matrix where each row contains a histogram of tree depths.
-        """
-        return depth_distr(self._main_trace)
-
     def _points_per_node_distr(
         self, node_type: Literal['leaf', 'leaf-parent']
     ) -> Int32[Array, '*num_chains n_save n_plus_1']:
@@ -1781,17 +1771,6 @@ def compare_resid(
     resid2 = ref - (trees + state.forest.offset[..., None])
 
     return resid1, resid2
-
-
-@jit
-def depth_distr(trace: MainTrace) -> Int32[Array, '*num_chains n_save d']:
-    """Histogram of tree depths for each state of the trees."""
-    split_tree = chain_to_axis(trace.split_tree, chain_vmap_axes(trace).split_tree)
-    out: Int32[Array, '*chains samples d']
-    out = forest_depth_distr(split_tree)
-    if out.ndim < 3:
-        out = out[None, :, :]
-    return out
 
 
 @jit(static_argnames='node_type')

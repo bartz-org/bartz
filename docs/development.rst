@@ -35,19 +35,15 @@ Initial setup
     git clone git@github.com:YourGithubUserName/bartz.git
     cd bartz
 
-Install `R <https://cran.r-project.org>`_ and `uv <https://docs.astral.sh/uv/getting-started/installation/>`_ (for example, with `Homebrew <https://brew.sh>`_ do :literal:`brew install r uv`). Then run
+Install `uv <https://docs.astral.sh/uv/getting-started/installation/>`_ (for example, with `Homebrew <https://brew.sh>`_ do :literal:`brew install uv`). Then run
 
 .. code-block:: shell
 
     make setup
 
-to set up the Python and R environments. (Note: at the time of writing, the `R installation instructions for ubuntu <https://cran.r-project.org/bin/linux/ubuntu>`_ miss a :code:`sudo apt install r-base-dev` at the end.)
+to set up the Python environment.
 
 The Python environment is managed by uv. To run commands that involve the Python installation, do :literal:`uv run <command>`. For example, to start an IPython shell, do :literal:`uv run ipython`. Alternatively, do :literal:`source .venv/bin/activate` to activate the virtual environment in the current shell.
-
-The R environment is automatically active when you use :literal:`R` in the project directory.
-
-We don't support using conda's R, though it might work.
 
 Contributing
 ------------

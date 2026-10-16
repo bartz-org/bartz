@@ -262,7 +262,6 @@ dev = [
     { name = "pytest-subtests" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
-    { name = "rbartpackages", extra = ["jax", "polars"] },
     { name = "rich" },
     { name = "shellcheck-py" },
     { name = "snakeviz" },
@@ -313,7 +312,6 @@ dev = [
     { name = "pytest-subtests", specifier = ">=0.14.2" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "rbartpackages", extras = ["jax", "polars"], specifier = ">=0.1.0" },
     { name = "rich", specifier = ">=14.1.0" },
     { name = "shellcheck-py", specifier = ">=0.11.0.1" },
     { name = "snakeviz", specifier = ">=2.2.2" },
@@ -4728,36 +4726,6 @@ wheels = [
 ]
 
 [[package]]
-name = "rbartpackages"
-version = "0.3.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "jaxtyping", version = "0.3.7", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "jaxtyping", version = "0.3.11", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "pandas", version = "3.0.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "rpy2" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/44/8b/d68510c1685671f76de5b8429709e50d89db4bd88ebf281e2abe0a256122/rbartpackages-0.3.0.tar.gz", hash = "sha256:a951415d2f1aea666cabdee818aa2ec8fc3141fdb5e7ee5c2e15cc6777e2722a", size = 49309, upload-time = "2026-08-31T14:56:24.881Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1c/89/a74631bb1c1b919811e9de42d5ae37b5fab36fd01ea73519b19d4a31f9ca/rbartpackages-0.3.0-py3-none-any.whl", hash = "sha256:a452fd37baa55fd7b0434bcb4198801d317c6c11eeb08f808fa8130fe9b68548", size = 67470, upload-time = "2026-08-31T14:56:23.745Z" },
-]
-
-[package.optional-dependencies]
-jax = [
-    { name = "jax", version = "0.6.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "jax", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "jax", version = "0.11.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-]
-polars = [
-    { name = "polars", extra = ["pyarrow"] },
-]
-
-[[package]]
 name = "referencing"
 version = "0.37.0"
 source = { registry = "https://pypi.org/simple" }
@@ -5103,56 +5071,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/9c/97/0043896fdd7828ce09a1d9a8b06433714d0960fc4ff3fc4aa72b666b764e/rpds_py-2026.6.3-pp311-pypy311_pp73-musllinux_1_2_aarch64.whl", hash = "sha256:2bfd04c19ddbd6640de0b51894d764bd2758854d5b75bd102d2ef10cb9c293a9", size = 558118, upload-time = "2026-06-30T07:17:47.759Z" },
     { url = "https://files.pythonhosted.org/packages/f6/40/02355f0e134f783a8f9814c4680a1bd311d37671577a5964ea838573ff37/rpds_py-2026.6.3-pp311-pypy311_pp73-musllinux_1_2_i686.whl", hash = "sha256:ca6546b66be9dc4738b1b043d5ebd5488c66c578c5ff0fd0e8065313fe3afb76", size = 623138, upload-time = "2026-06-30T07:17:49.355Z" },
     { url = "https://files.pythonhosted.org/packages/10/85/48f0abdcef5cce4e034c7a5b0ceeceba0b01bf0d942824f4bb720afe2dec/rpds_py-2026.6.3-pp311-pypy311_pp73-musllinux_1_2_x86_64.whl", hash = "sha256:8e65860d238379ed982fd9ba690579b5e95af2f4840f99c772816dbe573cb826", size = 586486, upload-time = "2026-06-30T07:17:51.141Z" },
-]
-
-[[package]]
-name = "rpy2"
-version = "3.6.8"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "packaging", marker = "sys_platform == 'win32'" },
-    { name = "rpy2-rinterface" },
-    { name = "rpy2-robjects" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/84/12/1421ef1bba72dcfc1237a8a528409d1e9a407d2a75239d407cd4462ae0af/rpy2-3.6.8.tar.gz", hash = "sha256:a923cf17d8c92370e62b661fd7770899a2521f89e0b7299ea03cf61a9f29cec2", size = 54174, upload-time = "2026-09-20T14:38:28.696Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1f/54/abdf71be6135519db7a01902f3b035d1b22a942051189e7a8c7c9da8cf1e/rpy2-3.6.8-py3-none-any.whl", hash = "sha256:1c02e196603d0309842f95faca5ec14f8b6c9b5e9023529147c53e2a83f56f3d", size = 9911, upload-time = "2026-09-20T14:38:27.775Z" },
-]
-
-[[package]]
-name = "rpy2-rinterface"
-version = "3.6.7"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "cffi" },
-    { name = "packaging", marker = "sys_platform == 'win32'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/21/18/c667ef09738d1ede5402f2c042d228adcf0ea00ca9d3042942d2af906660/rpy2_rinterface-3.6.7.tar.gz", hash = "sha256:3aee0b44b9204d96c2eb2503b2f9b03f6d9c9e525f9a2d1a2e194b3a789856c1", size = 82089, upload-time = "2026-09-20T14:37:16.913Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/71/98/8db90b831837f0da39a41069e68a4d36d0671ab5fe68f276f28d5308c372/rpy2_rinterface-3.6.7-cp310-cp310-macosx_10_9_universal2.whl", hash = "sha256:39207797220be6be94c11c62e6506b651e2e56466570753403fc26e51601af23", size = 172855, upload-time = "2026-09-20T14:37:02.506Z" },
-    { url = "https://files.pythonhosted.org/packages/b5/cc/8a57ece915f6cff46f1f926990a655b97e0d0b9e95ae3a26962725853efb/rpy2_rinterface-3.6.7-cp310-cp310-win_amd64.whl", hash = "sha256:e1dd1457dddccc3c3c239e5accee07decdb6c01ed50ae1a2fbba6e5130d41494", size = 174985, upload-time = "2026-09-20T14:37:03.751Z" },
-    { url = "https://files.pythonhosted.org/packages/c6/5c/eebb45c7ded90529acf28fda42644e250cf946b7725ea9d34df9c6ae038e/rpy2_rinterface-3.6.7-cp311-cp311-macosx_10_9_universal2.whl", hash = "sha256:79f34aa94837d1362cfae7cac4160f5343305e1d3258e0529f0ff8a434ea76a9", size = 172860, upload-time = "2026-09-20T14:37:04.87Z" },
-    { url = "https://files.pythonhosted.org/packages/8b/df/d7577e0f2d8f78b1b8bda6951c91299f9410f6b1b04f05c7f3dc1b02574c/rpy2_rinterface-3.6.7-cp311-cp311-win_amd64.whl", hash = "sha256:c791b0ca566abfecbc1a699319de66058ff11dde00733bc55e4ad9526cc06f24", size = 174980, upload-time = "2026-09-20T14:37:06.163Z" },
-    { url = "https://files.pythonhosted.org/packages/85/cf/fefee2038b4b32dc2f89dc2048a21d81d603458c050242e6403e98ab6e3c/rpy2_rinterface-3.6.7-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:85b9e82bb46c26c373d0952b57169f5244bd9076c452e47c5fa95a700f9f0b8e", size = 173163, upload-time = "2026-09-20T14:37:07.553Z" },
-    { url = "https://files.pythonhosted.org/packages/42/c8/596572a547a7c450226a34f731c23e343683410a3dfe5ad28bf088a19f79/rpy2_rinterface-3.6.7-cp312-cp312-win_amd64.whl", hash = "sha256:a715aa7423787419bada6ab731bc19fc1527b673bbc048285f7e1c5f76f5e320", size = 175278, upload-time = "2026-09-20T14:37:08.651Z" },
-    { url = "https://files.pythonhosted.org/packages/f3/3d/7eb3ac2e9524f87fda01bf8483baece11d1d385bc67f1f00a7e5bf19e117/rpy2_rinterface-3.6.7-cp313-cp313-macosx_10_13_universal2.whl", hash = "sha256:0507a88f86b6ff54d862a3f5e74e6e2c52e197d68187c3c1c856157800250e78", size = 173155, upload-time = "2026-09-20T14:37:10.079Z" },
-    { url = "https://files.pythonhosted.org/packages/ee/ee/44e099065de6c0bd38a1313f6339ea8b0e3ed51a5b260c8e469999432ec5/rpy2_rinterface-3.6.7-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:b7262e9df9dceb3cc90c21d0b59efbbf3a9b6dba0b84b35e579b8176fbe7670b", size = 173774, upload-time = "2026-09-20T14:37:11.101Z" },
-    { url = "https://files.pythonhosted.org/packages/48/5a/85c3bbbfb8df856b3557133c0ebae2e568ebc40d7c50d5fc8f390ee67f71/rpy2_rinterface-3.6.7-cp314-cp314-win_amd64.whl", hash = "sha256:f9a331657a61cbb962f760cefd4c33d93e4d22afda09ef2647f78f469795a914", size = 177933, upload-time = "2026-09-20T14:37:13.191Z" },
-]
-
-[[package]]
-name = "rpy2-robjects"
-version = "3.6.5"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "jinja2" },
-    { name = "packaging", marker = "sys_platform == 'win32'" },
-    { name = "rpy2-rinterface" },
-    { name = "tzlocal" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/87/cc/b3ad354fde3ae52241155896584c5fe759d0e204f8b7d43a347629123301/rpy2_robjects-3.6.5.tar.gz", hash = "sha256:03d099f436a01a8b51fb8f8bf602420a99c7cdda8c3fce0e3a0f532e36b4afe4", size = 105816, upload-time = "2026-03-27T13:34:48.625Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/87/0b/07c47175f6aeab70e946c68bfbe32d7e7e9044322915ade70ec5bc8a3988/rpy2_robjects-3.6.5-py3-none-any.whl", hash = "sha256:4c430e842a36a2011884910c28e4a7ddf72256e3101bcfd50cb0ec961e66bd7b", size = 125822, upload-time = "2026-03-27T13:34:47.389Z" },
 ]
 
 [[package]]
@@ -6170,18 +6088,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/e4/31/3d74fa778a63b98b7374323befcc0be5ab3bd94afd4096a0124e7379152c/tzdata-2026.4.tar.gz", hash = "sha256:f1b8bd365d8d210c55353f4d7f8d6d8561c0ba50d704b700d195a9424bba0d79", size = 199350, upload-time = "2026-09-12T12:56:03.251Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f9/bc/8737e8d54cf51106118039b83f485a4783112fab49ea9d044b234978a46e/tzdata-2026.4-py2.py3-none-any.whl", hash = "sha256:c2169a8b0a7a5e9674da5a135ccdfb2b3e671b333ed9fed17b41f73c34476e81", size = 347494, upload-time = "2026-09-12T12:56:01.67Z" },
-]
-
-[[package]]
-name = "tzlocal"
-version = "5.4.4"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "tzdata", marker = "sys_platform == 'win32'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/81/5b/879b2f932adfa7a053c360d50bc896c977fa6426109185f7c12ebdd0cb9d/tzlocal-5.4.4.tar.gz", hash = "sha256:8dbb8660838688a7b6ba4fed31d18dedf842afb4d47ca050d6d891c2c15f3be4", size = 31170, upload-time = "2026-06-29T08:03:40.026Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9e/a4/017a7a6cbe387d961a688ec31364ae60a5c4e22c96ae9921b79a947c855d/tzlocal-5.4.4-py3-none-any.whl", hash = "sha256:aae09f0126a8a86fa736be266eb4a471380d26a0de3bc14844e7821fee3e2a15", size = 18115, upload-time = "2026-06-29T08:03:38.666Z" },
 ]
 
 [[package]]

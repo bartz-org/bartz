@@ -63,18 +63,12 @@ OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]
 # matches bartz, but it is newer than OLD_DATE, so the old toolchain cannot
 # resolve it. Exempt stochtree from the cutoff; drop --exclude-newer-package once
 # the stochtree floor rises above 0.4.2 (check-workarounds will flag this then).
-# WORKAROUND(rbartpackages<0.12.0): the first release (0.1.0) was uploaded on
-# 2026-06-05, newer than OLD_DATE, so the old toolchain cannot resolve it.
-# Exempt rbartpackages from the cutoff. The exemption is unneeded once OLD_DATE
-# passes the upload date of the rbartpackages floor release; 0.12.0 is a guess
-# at the floor around that time (~June 2027). On trigger, drop
-# --exclude-newer-package if OLD_DATE has caught up, else bump the bound.
-UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --exclude-newer-package="stochtree=0 days" --exclude-newer-package="rbartpackages=0 days" --isolated
+UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --exclude-newer-package="stochtree=0 days" --isolated
 
 .PHONY: help
 help:
 	@echo "Available targets:"
-	@echo "- setup: create R and Python environments for development"
+	@echo "- setup: create the Python environment for development"
 	@echo "- tests: run unit tests on cpu, saving coverage information"
 	@echo "- tests-single-cpu: like \`tests\` but with a single jax cpu device"
 	@echo "- tests-old: run unit tests on cpu with oldest supported python and dependencies"
@@ -87,7 +81,7 @@ help:
 	@echo "- diffcov: check changed-lines coverage vs DIFF_BASE (default origin/main)"
 	@echo "- update-deps: update-python-deps + update-other-deps"
 	@echo "- update-python-deps: pin the dep cooldown, then upgrade uv.lock to the latest allowed deps"
-	@echo "- update-other-deps: upgrade renv.lock, prek hooks, and GitHub Actions (not date-pinned)"
+	@echo "- update-other-deps: upgrade prek hooks and GitHub Actions (not date-pinned)"
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- check-changelog: verify the topmost changelog section is dated today"
@@ -128,7 +122,6 @@ help:
 
 .PHONY: setup
 setup:
-	Rscript -e "renv::restore()"
 	$(UV_RUN) prek install --prepare-hooks
 	$(if $(filter 12 13,$(CUDA_VERSION)),JAX_PLATFORMS=cuda) $(UV_RUN) python -c 'import jax; jax.numpy.empty(0)'
 
@@ -144,10 +137,6 @@ clean:
 	rm -fr docs/_build
 	rm -fr docs/reference/_autogen
 	rm -fr .coverage* coverage.xml diffcov.md
-	# `renv::clean()` only removes locks/tempdirs/unused packages, not the
-	# whole library, so wipe the gitignored renv subdirs by hand to mirror
-	# `rm -fr .venv`.
-	rm -fr renv/library renv/staging renv/local renv/cellar renv/lock renv/python renv/sandbox
 
 ################# TESTS #################
 
@@ -297,8 +286,8 @@ diffcov:
 
 ################# DEPENDENCIES #################
 
-# `update-deps` = latest python deps (uv) + everything else (renv, prek hooks,
-# GitHub Actions). Only `update-python-deps` runs inside `release`: it pins
+# `update-deps` = latest python deps (uv) + everything else (prek hooks, GitHub
+# Actions). Only `update-python-deps` runs inside `release`: it pins
 # pyproject's exclude-newer to a fixed instant before locking, so repeated
 # same-day release runs (and the uv-lock hook) resolve identically and don't
 # churn. The others have no fixed-date knob, so they're bumped once by hand via
@@ -314,12 +303,6 @@ update-python-deps:
 
 .PHONY: update-other-deps
 update-other-deps:
-	# Update R packages to their latest versions and rewrite renv.lock; snapshot
-	# captures the refreshed library (explicit type, from DESCRIPTION). renv's
-	# installer reports build failures without raising an R error, so re-check:
-	# update(check = TRUE) returns TRUE only when nothing is left to update,
-	# and status() that the library and lockfile agree.
-	Rscript -e 'renv::update(prompt = FALSE); renv::snapshot(prompt = FALSE); stopifnot(isTRUE(renv::update(check = TRUE)), renv::status()$$synchronized)'
 	$(UV_RUN) prek update
 	# Update GitHub Actions, skipping releases newer than the cooldown. prek
 	# fails a hook that modifies files, so a second run checks it now passes.

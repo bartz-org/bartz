@@ -3899,6 +3899,18 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         chain_to_axis(state_uv.forest.leaf_indices, uv_forest_axes.leaf_indices),
         chain_to_axis(state_mv.forest.leaf_indices, mv_forest_axes.leaf_indices),
     )
+    assert_array_equal(
+        chain_to_axis(state_uv.forest.affluence_tree, uv_forest_axes.affluence_tree),
+        chain_to_axis(state_mv.forest.affluence_tree, mv_forest_axes.affluence_tree),
+    )
+
+    # Latent variables of binary outcomes
+    if outcome_type == 'binary':
+        assert_close_matrices(
+            chain_to_axis(nnone(state_uv.z), uv_axes.z),
+            chain_to_axis(nnone(state_mv.z), mv_axes.z).squeeze(-2),
+            rtol=1e-6,
+        )
 
 
 def test_get_latent_prec_only_continuous(bkw: BartKW) -> None:

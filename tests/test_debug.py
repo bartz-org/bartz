@@ -25,7 +25,10 @@
 """Test `bartz.debug`."""
 
 from collections import namedtuple
+from pathlib import Path
+from typing import NamedTuple
 
+import numpy
 import pytest
 from equinox import tree_at
 from jax import numpy as jnp
@@ -38,11 +41,18 @@ from scipy import stats
 from scipy.stats import ks_1samp
 
 from bartz._jaxext import minimal_unsigned_dtype, split
-from bartz.debug import sample_prior
+from bartz.debug import BARTTraceMeta, MinimalTrace, sample_prior, trees_BART_to_bartz
 from bartz.debug._prior import sample_s, sample_theta
 from bartz.grove import TreesTrace, check_trace, describe_error, format_tree
 from bartz.grove._check import check_tree
-from tests.util import assert_array_equal, jaxtyping_disabled, manual_tree
+from bartz.mcmcloop import compute_varcount, evaluate_trace
+from bartz.prepcovars import GivenSplitsBinner
+from tests.util import (
+    assert_array_equal,
+    assert_close_matrices,
+    jaxtyping_disabled,
+    manual_tree,
+)
 
 
 def max_lr_test(
@@ -552,3 +562,100 @@ class TestCheckTree:
     def test_valid_tree_passes(self) -> None:
         """Sanity: the base all-zeros tree triggers no checks."""
         assert self._describe(self._zeros_tree(), self._MS) == []
+
+
+BART3_DATA = Path(__file__).parent / 'data' / 'bart3'
+
+
+class BART3Fit(NamedTuple):
+    """A fit of R BART3 saved by ``data/bart3/generate.R``."""
+
+    trees: str
+    x_train: Float32[Array, 'p n']
+    xinfo: Float32[Array, 'p m']
+    offset: float
+    yhat_train: Float32[Array, 'ndpost n']
+    varcount: Int32[Array, 'ndpost p']
+
+
+@pytest.fixture(scope='module')
+def bart3_fit() -> BART3Fit:
+    """Load the saved R BART3 fit."""
+
+    def load(name: str, dtype: type = numpy.float32) -> Shaped[Array, '...']:
+        return jnp.asarray(
+            numpy.loadtxt(BART3_DATA / f'{name}.txt', dtype=dtype, ndmin=2)
+        )
+
+    return BART3Fit(
+        trees=(BART3_DATA / 'trees.txt').read_text(),
+        x_train=load('x_train'),
+        xinfo=load('xinfo'),
+        offset=load('offset').item(),
+        yhat_train=load('yhat_train'),
+        varcount=load('varcount', numpy.int32),
+    )
+
+
+class TestTreesBARTToBartz:
+    """Test `trees_BART_to_bartz` against a trace saved from R BART3."""
+
+    def check(self, fit: BART3Fit, trace: MinimalTrace, meta: BARTTraceMeta) -> None:
+        """Check the converted trace reproduces the R BART3 outputs."""
+        ndpost, _ = fit.yhat_train.shape
+        p, m = fit.xinfo.shape
+        assert meta.ndpost == ndpost
+        assert meta.numcut.shape == (p,)
+        assert jnp.all(meta.numcut <= m)
+
+        bad = check_trace(trace, meta.numcut)
+        assert_array_equal(bad, jnp.zeros_like(bad))
+
+        varcount = compute_varcount(p, trace)
+        assert_array_equal(varcount, fit.varcount)
+
+        binner = GivenSplitsBinner(fit.x_train, xinfo=fit.xinfo)
+        yhat_train = evaluate_trace(binner.bin(fit.x_train), trace)
+        assert_close_matrices(yhat_train, fit.yhat_train, rtol=1e-6)
+
+    @pytest.mark.parametrize('trailing_newline', [True, False])
+    def test_convert(self, bart3_fit: BART3Fit, trailing_newline: bool) -> None:
+        """Check the conversion of the trace."""
+        trees = bart3_fit.trees
+        assert trees.endswith('\n')
+        if not trailing_newline:
+            trees = trees.removesuffix('\n')
+        trace, meta = trees_BART_to_bartz(trees, offset=bart3_fit.offset)
+        self.check(bart3_fit, trace, meta)
+
+    def test_min_maxdepth(self, bart3_fit: BART3Fit) -> None:
+        """Check `min_maxdepth` enlarges the heap without changing the trees."""
+        maxdepth = 10
+        trace, meta = trees_BART_to_bartz(
+            bart3_fit.trees, offset=bart3_fit.offset, min_maxdepth=maxdepth
+        )
+        assert meta.heap_size < 2**maxdepth
+        *_, heap_size = trace.leaf_tree.shape
+        assert heap_size == 2**maxdepth
+        self.check(bart3_fit, trace, meta)
+
+    @pytest.mark.parametrize(
+        ('line', 'replacement', 'match'),
+        [
+            (0, '20 10', 'Malformed header'),
+            (1, 'five', 'Malformed tree header'),
+            (2, '1 1 4', 'Malformed node definition'),
+            (None, 'leftover', 'Leftover'),
+        ],
+    )
+    def test_malformed(
+        self, bart3_fit: BART3Fit, line: int | None, replacement: str, match: str
+    ) -> None:
+        """Check malformed traces are rejected."""
+        lines = bart3_fit.trees.split('\n')
+        if line is None:
+            lines.append(replacement)
+        else:
+            lines[line] = replacement
+        with pytest.raises(ValueError, match=match):
+            trees_BART_to_bartz('\n'.join(lines))

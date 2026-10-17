@@ -45,15 +45,16 @@ from pytest_subtests import SubTests
 from scipy import stats
 
 from bartz._jaxext import split
-from bartz.bcf import bcf
-from bartz.bcf._bcf import UniqueQuantileBinner
-from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
+from bartz.bcf import BCFPrediction, bcf
 from bartz.bcf._state import BCFState, init_bcf
+from bartz.bcf._step import bcf_step
+from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
 from bartz.grove import evaluate_forest, is_actual_leaf
 from bartz.mcmcloop import run_mcmc
 from bartz.mcmcstep import Forest, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
+from bartz.prepcovars import UniqueQuantileBinner
 from bartz.testing import gen_data
 from tests.test_mcmcloop import assert_trace_close, cat_traces, zero_non_leaves
 from tests.util import (
@@ -125,9 +126,12 @@ def assert_chains_differ(model: bcf) -> None:
         path: KeyPath, x: Shaped[Array, '*shape'] | None, chain_axis: int | None
     ) -> None:
         if x is not None and chain_axis is not None:
+            # chains, samples, ...
             chains = np.moveaxis(np.asarray(x), chain_axis, 0)
-            # skip the values held fixed, e.g., unsampled leaf prior precisions
-            if not np.all(chains == chains.flat[0]):
+            # skip the values held fixed, i.e., equal across chains and samples,
+            # e.g., unsampled leaf prior precisions, or the coding weights
+            # without adaptive coding
+            if not np.all(chains == chains[:1, :1, ...]):
                 # flatten to compare with the vector norm, the matrix 2-norm
                 # would need an expensive svd on the big tree arrays
                 assert_different_matrices(
@@ -138,9 +142,10 @@ def assert_chains_differ(model: bcf) -> None:
                     err_msg=f'{keystr(path)}: ',
                 )
 
-    traces = dict(model._main_trace, tau_0=model._tau_0_trace.reshape(2, -1))
-    axes = dict({k: chain_vmap_axes(v) for k, v in model._main_trace.items()}, tau_0=0)
-    tree.map_with_path(check, traces, axes, is_leaf=lambda x: x is None)
+    trace = model._main_trace
+    tree.map_with_path(
+        check, trace, chain_vmap_axes(trace), is_leaf=lambda x: x is None
+    )
 
 
 class BCFData(Module):
@@ -227,6 +232,8 @@ def init_bcf_state(key: Key[Array, ''], data: BCFData, **kwargs: Any) -> BCFStat
         p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
         leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
         leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
+        min_points_per_leaf_mu=10,
+        min_points_per_leaf_tau=10,
         error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
     )
     return init_bcf(**dict(defaults, **kwargs))
@@ -564,7 +571,7 @@ class TestBcf:
         )
 
         recovered_sigma2 = jnp.reciprocal(
-            model._main_trace['mu'].error_cov_inv
+            model._main_trace.mu.error_cov_inv
         ) * jnp.square(model._y_std)
         posterior_mean_sigma2 = np.mean(recovered_sigma2)
 
@@ -850,8 +857,8 @@ class TestBcf:
 
         # the leaf prior precisions stay at their initial value
         for trace in (
-            model._leaf_prior_cov_inv_mu_trace,
-            model._leaf_prior_cov_inv_tau_trace,
+            model._main_trace.mu.leaf_prior_cov_inv,
+            model._main_trace.tau.leaf_prior_cov_inv,
         ):
             assert_array_equal(trace, jnp.full_like(trace, trace[0]))
 
@@ -870,8 +877,8 @@ class TestBcf:
             seed=keys.pop(),
         )
 
-        mu_prior_vars_active = model_active._leaf_prior_cov_inv_mu_trace
-        tau_prior_vars_active = model_active._leaf_prior_cov_inv_tau_trace
+        mu_prior_vars_active = model_active._main_trace.mu.leaf_prior_cov_inv
+        tau_prior_vars_active = model_active._main_trace.tau.leaf_prior_cov_inv
 
         assert np.var(mu_prior_vars_active, axis=0).mean() > 1e-4
         assert np.var(tau_prior_vars_active, axis=0).mean() > 1e-4
@@ -948,13 +955,15 @@ class TestBcf:
         y_var = np.var(train.y)
 
         leaf_var_mu_jax = (
-            np.mean(np.reciprocal(model_jax._leaf_prior_cov_inv_mu_trace)) * y_var
+            np.mean(np.reciprocal(model_jax._main_trace.mu.leaf_prior_cov_inv)) * y_var
         )
         leaf_var_mu_st = np.mean(model_st.leaf_scale_mu_samples) * y_var
+        # WORKAROUND(stochtree<=0.4.5): its trees are too small (fixed in
+        # stochtree#426), overstating the leaf variance by ~10%; lower rtol to 0.3
         assert_allclose(leaf_var_mu_jax, leaf_var_mu_st, rtol=0.4)
 
         leaf_var_tau_jax = (
-            np.mean(np.reciprocal(model_jax._leaf_prior_cov_inv_tau_trace)) * y_var
+            np.mean(np.reciprocal(model_jax._main_trace.tau.leaf_prior_cov_inv)) * y_var
         )
         leaf_var_tau_st = np.mean(model_st.leaf_scale_tau_samples) * y_var
         assert_allclose(leaf_var_tau_jax, leaf_var_tau_st, rtol=0.5)
@@ -1012,21 +1021,32 @@ class TestBcf:
             )
             assert_different_matrices(res['delta'], res['tau'], rtol=1e-3, atol=0)
 
-        with subtests.test('invalid rho'):
-            with pytest.raises(ValueError, match='rho must be in'):
-                model.predict_potential_outcomes(x_test=test.x, rho=-0.1)
-            with pytest.raises(ValueError, match='rho must be in'):
-                model.predict_potential_outcomes(x_test=test.x, rho=1.5)
+        with subtests.test('rho=-1'):
+            # antithetic shocks, so they cancel in y0 + y1
+            res = model.predict_potential_outcomes(
+                x_test=test.x, pihat_test=test.pihat, rho=-1.0, key=keys.pop()
+            )
+            assert_close_matrices(
+                res['y0'] + res['y1'], 2 * res['mu'] + res['tau'], rtol=1e-5
+            )
 
-        with subtests.test('key types'):
-            # key=None (default RNG) and integer-seed keys are both accepted
-            res_key_none = model.predict_potential_outcomes(
-                x_test=test.x, pihat_test=test.pihat, key=None
+        with subtests.test('integer seed'):
+            # equivalent to the key it seeds
+            seed = int_seed(keys.pop())
+            res_int = model.predict_potential_outcomes(
+                x_test=test.x, pihat_test=test.pihat, key=seed
             )
-            res_key_int = model.predict_potential_outcomes(
-                x_test=test.x, pihat_test=test.pihat, key=int_seed(keys.pop())
+            res_key = model.predict_potential_outcomes(
+                x_test=test.x, pihat_test=test.pihat, key=random.key(seed)
             )
-            assert res_key_none['y0'].shape == res_key_int['y0'].shape
+            assert_array_equal(res_int['delta'], res_key['delta'])
+
+        with subtests.test('invalid rho'):
+            for rho in (-1.5, 1.5, jnp.nan):
+                with pytest.raises(EquinoxRuntimeError, match='rho must be in'):
+                    model.predict_potential_outcomes(
+                        x_test=test.x, pihat_test=test.pihat, rho=rho, key=keys.pop()
+                    )
 
     def test_binary_model(
         self, keys: split, subtests: SubTests, tmp_path: Path
@@ -1057,7 +1077,7 @@ class TestBcf:
             assert model._y_std == 1.0
             assert model._y_mean == 0.0
             expected_offset = stats.norm.ppf(np.mean(y_train))
-            assert_allclose(model._offset, expected_offset, rtol=1e-4)
+            assert_allclose(model.offset, expected_offset, rtol=1e-4)
 
         preds = model.predict(train.x, pihat_test=train.pihat)
 
@@ -1097,7 +1117,7 @@ class TestBcf:
     def test_binary_requires_0_1(self, keys: split) -> None:
         """Binary BCF rejects outcomes that are not 0/1."""
         train = gen_bcf_data(keys.pop(), n=N_TRAIN)
-        with pytest.raises(ValueError, match='strictly 0 or 1'):
+        with pytest.raises(ValueError, match='must be 0 or 1'):
             bcf(
                 x_train=train.x,
                 y_train=jnp.full(N_TRAIN, 2.0),
@@ -1114,7 +1134,7 @@ class TestBcf:
     def test_treatment_requires_0_1(self, keys: split) -> None:
         """BCF rejects treatments that are not 0/1."""
         train = gen_bcf_data(keys.pop(), n=N_TRAIN)
-        with pytest.raises(EquinoxRuntimeError, match='must be 0 or 1'):
+        with pytest.raises(ValueError, match='must be 0 or 1'):
             bcf(
                 x_train=train.x,
                 y_train=train.y,
@@ -1146,6 +1166,7 @@ class TestBcf:
             z_test=test.z,
             pihat_test=test.pihat,
             include_pihat_in_mu=False,
+            include_pihat_in_tau=True,
             tau_0_prior_var=0.5,
             sample_intercept=sample_intercept,
             standardize=False,
@@ -1158,22 +1179,25 @@ class TestBcf:
             num_chains=num_chains,
             seed=keys.pop(),
         )
+        assert model._mcmc_state is not None
         assert model._mcmc_state.num_chains() == num_chains
         chain_shape = () if num_chains is None else (num_chains,)
         num_samples = math.prod(chain_shape) * NDPOST
-        assert model._tau_0_trace.shape == (num_samples,)
-        assert model._b_trace.shape == (num_samples, 2)
+        assert model._main_trace.tau_0.shape == (*chain_shape, NDPOST)
+        assert model._main_trace.b.shape == (*chain_shape, NDPOST, 2)
         assert model.mu_test is not None
         assert model.mu_test.shape == (num_samples, N_TEST)
-        tau_0_is_zero = model._tau_0_trace == 0
-        assert_array_equal(tau_0_is_zero, jnp.full(num_samples, not sample_intercept))
+        tau_0_is_zero = model._main_trace.tau_0 == 0
+        assert_array_equal(
+            tau_0_is_zero, jnp.full((*chain_shape, NDPOST), not sample_intercept)
+        )
 
         # the heap size is set by the maximum depth
-        assert model._main_trace['mu'].split_tree.shape[-1] == 2**4
-        assert model._main_trace['tau'].split_tree.shape[-1] == 2**3
+        assert model._main_trace.mu.split_tree.shape[-1] == 2**4
+        assert model._main_trace.tau.split_tree.shape[-1] == 2**3
 
         # the chains are concatenated one after the other
-        error_cov_inv = model._main_trace['mu'].error_cov_inv
+        error_cov_inv = model._main_trace.mu.error_cov_inv
         assert error_cov_inv.shape == (*chain_shape, NDPOST)
         assert_array_equal(model.sigma_trace, lax.rsqrt(error_cov_inv).reshape(-1))
 
@@ -1222,26 +1246,58 @@ class TestBcf:
             bcf(**kwargs, z_test=test.z)
         with pytest.raises(ValueError, match='require `x_test`'):
             bcf(**kwargs, pihat_test=test.pihat)
-        with pytest.raises(ValueError, match='must be passed together'):
+        with pytest.raises(ValueError, match='`pihat_test` is required'):
             bcf(**kwargs, pihat_train=train.pihat, x_test=test.x)
-        with pytest.raises(ValueError, match='must be passed together'):
+        with pytest.raises(ValueError, match='fit without `pihat_train`'):
             bcf(**kwargs, x_test=test.x, pihat_test=test.pihat)
+        with pytest.raises(ValueError, match='`pihat_train` is unused'):
+            bcf(**kwargs, pihat_train=train.pihat, include_pihat_in_mu=False)
         # jaxtyping binds `m` across x_test/z_test/pihat_test, so disable it to
         # reach the explicit length checks (users run without the import hook)
         with (
             jaxtyping_disabled(),
-            pytest.raises(ValueError, match='`z_test` has length'),
+            pytest.raises(ValueError, match=r'`z_test` has \d+ datapoints'),
         ):
             bcf(**kwargs, x_test=test.x, z_test=train.z)
         with (
             jaxtyping_disabled(),
-            pytest.raises(ValueError, match='`pihat_test` has length'),
+            pytest.raises(ValueError, match=r'`pihat_test` has \d+ datapoints'),
         ):
             bcf(
                 **kwargs, pihat_train=train.pihat, x_test=test.x, pihat_test=train.pihat
             )
-        with pytest.raises(EquinoxRuntimeError, match='must be 0 or 1'):
+        with pytest.raises(ValueError, match='must be 0 or 1'):
             bcf(**kwargs, x_test=test.x, z_test=jnp.full(N_TEST, 2.0))
+
+    def test_invalid_train_lengths(self, keys: split) -> None:
+        """Training inputs with a length different from `x_train` are rejected."""
+        train, test = split_bcf_data(
+            gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
+        )
+        kwargs: dict = dict(
+            x_train=train.x,
+            y_train=train.y,
+            z_train=train.z,
+            pihat_train=train.pihat,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
+            seed=keys.pop(),
+        )
+        # jaxtyping binds `n` across the training inputs, so disable it to reach
+        # the explicit length checks
+        for name, value in (
+            ('y_train', test.y),
+            ('z_train', test.z),
+            ('pihat_train', test.pihat),
+        ):
+            kw: dict = dict(kwargs, **{name: value})
+            with (
+                jaxtyping_disabled(),
+                pytest.raises(ValueError, match=rf'`{name}` has \d+ datapoints'),
+            ):
+                bcf(**kw)
 
     def test_x_test_format_mismatch(self, keys: split) -> None:
         """x_test format must match x_train, at construction and at predict."""
@@ -1273,6 +1329,62 @@ class TestBcf:
         )
         with pytest.raises(ValueError, match='does not match x_train'):
             model.predict(x_test_df)
+
+    def test_seed_types(self, keys: split) -> None:
+        """An integer seed is equivalent to its key."""
+        train = gen_bcf_data(keys.pop(), n=N_TRAIN)
+        seed = int_seed(keys.pop())
+
+        def fit(seed: int | Key[Array, '']) -> BCFPrediction:
+            model = bcf(
+                x_train=train.x,
+                y_train=train.y,
+                z_train=train.z,
+                pihat_train=train.pihat,
+                num_trees_mu=NUM_TREES_MU,
+                num_trees_tau=NUM_TREES_TAU,
+                ndpost=NDPOST,
+                nskip=NSKIP,
+                seed=seed,
+            )
+            return model.predict(train.x, pihat_test=train.pihat)
+
+        pred_int = fit(seed)
+        pred_key = fit(random.key(seed))
+        assert_array_equal(pred_int['mu'], pred_key['mu'])
+        assert_array_equal(pred_int['tau'], pred_key['tau'])
+
+    def test_predict_invalid_pihat(self, keys: split) -> None:
+        """Prediction checks `pihat_test` against how the model was fit."""
+        train, test = split_bcf_data(
+            gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
+        )
+        kwargs: dict = dict(
+            x_train=train.x,
+            y_train=train.y,
+            z_train=train.z,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
+        )
+
+        model = bcf(**kwargs, pihat_train=train.pihat, seed=keys.pop())
+        with pytest.raises(ValueError, match='`pihat_test` is required'):
+            model.predict(test.x)
+        with pytest.raises(ValueError, match='`pihat_test` is required'):
+            model.predict_potential_outcomes(test.x, key=keys.pop())
+        # jaxtyping binds `m` across x_test/pihat_test, so disable it to reach
+        # the explicit length check
+        with (
+            jaxtyping_disabled(),
+            pytest.raises(ValueError, match=r'`pihat_test` has \d+ datapoints'),
+        ):
+            model.predict(test.x, pihat_test=train.pihat)
+
+        model = bcf(**kwargs, seed=keys.pop())
+        with pytest.raises(ValueError, match='fit without `pihat_train`'):
+            model.predict(test.x, pihat_test=test.pihat)
 
     def test_numpy_input(self, keys: split) -> None:
         """Numpy inputs give the same results as jax arrays."""

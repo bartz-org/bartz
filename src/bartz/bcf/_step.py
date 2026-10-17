@@ -1,4 +1,4 @@
-# bartz/src/bartz/bcf/_loop.py
+# bartz/src/bartz/bcf/_step.py
 #
 # Copyright (c) 2026, The Bartz Contributors
 #
@@ -22,28 +22,21 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Implement the BCF MCMC step and traces, to be run with `run_mcmc`."""
+"""Implement `bcf_step`."""
 
 from dataclasses import replace
 from typing import cast
 
 import jax.numpy as jnp
 from equinox import tree_at
-from jax import lax, random, vmap
+from jax import lax, named_call, random, vmap
 from jaxtyping import Array, Float, Float32, Int32, Key, UInt
 
-from bartz._jaxext import field, float32_matmuls, jit, sliced_map, split
-from bartz.bcf._state import BCFState
-from bartz.mcmcloop._trace import BurninTrace, MainTrace, Trace
-from bartz.mcmcstep._axes import CHAIN_AXIS
-from bartz.mcmcstep._state import (
-    Forest,
-    State,
-    StepConfig,
-    split_key_for_chains,
-    vmap_chains,
-)
-from bartz.mcmcstep._step import step, step_leaf_prior_cov_inv, step_trees, sum_resid
+from bartz._jaxext import float32_matmuls, jit, sliced_map, split
+from bartz.bcf._state import BCFState, coding_basis, swap_mu_tau_forests
+from bartz.mcmcstep import Forest, StepConfig, step
+from bartz.mcmcstep._state import split_key_for_chains, vmap_chains
+from bartz.mcmcstep._step import step_leaf_prior_cov_inv, step_trees, sum_resid
 
 
 def recompute_prec_trees(
@@ -106,6 +99,7 @@ def recompute_prec_trees(
         return lax.platform_dependent(cpu=tree_batches, cuda=all_trees)
 
 
+@named_call
 def bcf_step_mu(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the prognostic forest and its leaf prior precision."""
     # `step` rebuilds the state with `replace`, so it preserves the subclass.
@@ -115,6 +109,7 @@ def bcf_step_mu(key: Key[Array, ''], state: BCFState) -> BCFState:
     return cast(BCFState, step(key, state))
 
 
+@named_call
 def bcf_step_tau_0(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the treatment effect intercept."""
     # `resid` is stored scaled: ``resid_unit * resid = data residual``, whereas
@@ -127,8 +122,7 @@ def bcf_step_tau_0(key: Key[Array, ''], state: BCFState) -> BCFState:
         return state
 
     else:
-        # get coding basis, possibly adaptive so not just 0 and 1
-        b_z = state.b[state.trt.astype(int)]
+        b_z = coding_basis(state.b, state.trt)
 
         # partial residual removing current tau_0 effect, on the data scale
         partial_resid = state.resid * state.resid_unit + state.tau_0 * b_z
@@ -151,12 +145,12 @@ def bcf_step_tau_0(key: Key[Array, ''], state: BCFState) -> BCFState:
         )
 
 
+@named_call
 def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the treatment effect forest and its leaf prior precision."""
-    keys = split(key, 2)
+    keys = split(key)
 
-    # get coding basis, possibly adaptive so not just 0 and 1
-    b_z = state.b[state.trt.astype(int)]
+    b_z = coding_basis(state.b, state.trt)
 
     # Target for tau is (Y - mu - b_z * tau_0) / b_z.
     # Its residual is target - tau = (Y - mu - b_z*tau_0 - b_z*tau) / b_z
@@ -172,13 +166,10 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
     # alone.
     mu_prec_scale = state.prec_scale
     state = replace(
-        state,
-        forest=state.forest_tau,
-        forest_tau=state.forest,
-        resid=initial_resid_tau,
-        prec_scale=jnp.square(b_z),
+        swap_mu_tau_forests(state), resid=initial_resid_tau, prec_scale=jnp.square(b_z)
     )
 
+    # WORKAROUND(python<3.12): drop the casts like in `bcf_step_mu`
     state = cast(BCFState, step_trees(keys.pop(), state))
     state = cast(BCFState, step_leaf_prior_cov_inv(keys.pop(), state))
 
@@ -191,14 +182,13 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     # Swap the forests back and restore the mu-side fields
     return replace(
-        state,
-        forest=state.forest_tau,
-        forest_tau=state.forest,
+        swap_mu_tau_forests(state),
         resid=jnp.where(b_z_zero, mu_resid, state.resid * b_z_safe),
         prec_scale=mu_prec_scale,
     )
 
 
+@named_call
 def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
     """Update the adaptive coding weights."""
     if state.b_prior_cov_inv is None:
@@ -207,8 +197,7 @@ def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
     else:
         assert state.tau_X is not None
 
-        # get coding basis
-        b_z = state.b[state.trt.astype(int)]
+        b_z = coding_basis(state.b, state.trt)
 
         # partial residual removing current b effect, on the data scale (see
         # `bcf_step_tau_0` about units)
@@ -229,7 +218,7 @@ def bcf_step_b(key: Key[Array, ''], state: BCFState) -> BCFState:
 
         # sample b from full conditional
         b_new = mean + random.normal(key, (2,)) * lax.rsqrt(prec)
-        b_z_new = b_new[state.trt.astype(int)]
+        b_z_new = coding_basis(b_new, state.trt)
 
         # update state to reflect new b
         state = replace(
@@ -278,60 +267,3 @@ def bcf_step(key: Key[Array, ''], state: BCFState) -> BCFState:
     state = bcf_step_tau_0(keys.pop(), state)
     state = bcf_step_tau(keys.pop(), state)
     return bcf_step_b(keys.pop(), state)
-
-
-def _tau_view(state: BCFState) -> BCFState:
-    """Return the state with the tau forest in the mu forest slot."""
-    return replace(state, forest=state.forest_tau, forest_tau=state.forest)
-
-
-class BCFBurninTrace(Trace):
-    """Burn-in trace of the BCF MCMC, the per-forest diagnostics and the scalar parameters."""
-
-    mu: BurninTrace
-    """The trace of the prognostic forest."""
-
-    tau: BurninTrace
-    """The trace of the treatment forest."""
-
-    tau_0: Float32[Array, '*chains_and_samples'] = field(chains=CHAIN_AXIS, samples=0)
-    """The treatment effect intercept."""
-
-    b: Float32[Array, '*chains_and_samples 2'] = field(chains=CHAIN_AXIS, samples=0)
-    """The adaptive coding weights for untreated and treated units."""
-
-    @classmethod
-    def from_state(cls, state: State) -> 'BCFBurninTrace':
-        """Create a single-item burn-in trace from a BCF state."""
-        assert isinstance(state, BCFState)
-        return cls(
-            mu=BurninTrace.from_state(state),
-            tau=BurninTrace.from_state(_tau_view(state)),
-            tau_0=state.tau_0,
-            b=state.b,
-        )
-
-    def finalize(self) -> 'BCFBurninTrace':
-        """Finalize the traces of the two forests."""
-        return replace(self, mu=self.mu.finalize(), tau=self.tau.finalize())
-
-
-class BCFMainTrace(BCFBurninTrace):
-    """Main trace of the BCF MCMC, with the trees of both forests."""
-
-    mu: MainTrace
-    """The trace of the prognostic forest."""
-
-    tau: MainTrace
-    """The trace of the treatment forest."""
-
-    @classmethod
-    def from_state(cls, state: State) -> 'BCFMainTrace':
-        """Create a single-item main trace from a BCF state."""
-        assert isinstance(state, BCFState)
-        kw: dict = dict(
-            vars(BCFBurninTrace.from_state(state)),
-            mu=MainTrace.from_state(state),
-            tau=MainTrace.from_state(_tau_view(state)),
-        )
-        return cls(**kw)

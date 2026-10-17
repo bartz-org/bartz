@@ -25,15 +25,16 @@
 """Test the npz archives written by `Bart.save_npz` and `bcf.save_npz`.
 
 ``tests/npz/`` holds an archive per model and format version, written by
-``python -m tests.test_npz`` for the current format, together with the
-predictions of the model that wrote it. See `test_schema_matches_archive`.
+``python -m tests.test_npz [bart] [bcf]`` for the current format, together
+with the predictions of the model that wrote it. See
+`test_schema_matches_archive`.
 """
 
 import json
 import re
 import sys
 from argparse import ArgumentParser
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -57,6 +58,7 @@ from bartz._npz._npz import (
     save_npz,
     serializable,
 )
+from bartz._npz._npz_upgrades import z_test
 from bartz.bcf import bcf
 from tests.util import assert_array_equal, assert_close_matrices
 
@@ -200,7 +202,7 @@ def test_schema_matches_archive(name: str, tmp_path: Path) -> None:
     If this fails, the file format changed:
 
     - if the current archives are not in `FROZEN` (format unreleased),
-      regenerate them with ``python -m tests.test_npz``
+      regenerate them with ``python -m tests.test_npz <model>``
     - else add a step to `bartz._npz._npz_upgrades.UPGRADES` (this bumps the format
       version) and regenerate
 
@@ -256,6 +258,19 @@ def test_archive_outputs(archive: str, tmp_path: Path) -> None:
                 rtol=1e-6,
                 err_msg=f'{key}, if the format changed see test_schema_matches_archive',
             )
+
+
+def test_bartz_0_13_stored_values() -> None:
+    """Check the `bcf` archive of bartz 0.13 keeps the values it stores directly."""
+    path = ARCHIVE_DIR / 'bcf_v0.npz'
+    model = bcf.load_npz(path)
+    with np.load(path, allow_pickle=False) as data:
+        for name in 'mu_test', 'tau_test', 'yhat_test':
+            assert_close_matrices(
+                getattr(model, name), data[f'_{name}'], rtol=1e-6, err_msg=name
+            )
+        offset = data['_offset'] * data['_y_std'] + data['_y_mean']
+        assert_close_matrices(model.offset, offset, rtol=1e-6)
 
 
 def unfrozen_archives() -> Iterator[str]:
@@ -438,6 +453,35 @@ def test_invalid_archive(
         load_npz(path)
 
 
+@pytest.mark.parametrize(
+    ('tau', 'z', 'recovered'),
+    [
+        # tau is absorbed by mu = 1 in all samples but the first
+        ([6.0e-8, 5.9e-8, 5.9e-8], True, True),
+        # tau is absorbed in all samples, z can not be recovered
+        ([5.9e-8, 5.9e-8, 5.9e-8], True, False),
+        # 0 * nan and 0 * inf are nan
+        ([1.0, np.nan, 2.0], False, False),
+        ([1.0, np.inf, 2.0], False, False),
+        ([1.0, np.nan, 2.0], True, True),
+        ([1.0, -np.inf, 2.0], True, True),
+    ],
+)
+def test_bartz_0_13_z_test(tau: list[float], z: bool, recovered: bool) -> None:
+    """Check the treatment at the test points is recovered from `_yhat_test`.
+
+    Where it can not be recovered, check it reproduces `_yhat_test` anyway.
+    """
+    mu = np.ones((3, 1), np.float32)
+    tau_array = np.array(tau, np.float32)[:, None]
+    with np.errstate(invalid='ignore'):  # 0 * inf
+        yhat = mu + z * tau_array
+        z_recovered = z_test(dict(_mu_test=mu, _tau_test=tau_array, _yhat_test=yhat))
+        assert z_recovered is not None
+        assert_array_equal(z_recovered, [recovered])
+        assert_array_equal(mu + z_recovered * tau_array, yhat)
+
+
 @pytest.mark.parametrize(('cls', 'other'), [(Bart, 'bcf'), (bcf, 'bart')])
 def test_wrong_class(cls: type[Bart] | type[bcf], other: str) -> None:
     """Check loading an archive of a different model fails."""
@@ -454,9 +498,10 @@ def test_not_bartz_archive(tmp_path: Path) -> None:
         load_npz(path)
 
 
-def write_archives() -> None:  # pragma: no cover, regeneration script
-    """Write the archives of the current format, if not frozen."""
-    for name, spec in MODELS.items():
+def write_archives(models: Iterable[str]) -> None:  # pragma: no cover
+    """Write the archives of the current format of `models`, if not frozen."""
+    for name in models:
+        spec = MODELS[name]
         path = archive_path(name)
         if path.name in FROZEN:
             msg = f'{path.name} is frozen, see test_schema_matches_archive'
@@ -482,12 +527,23 @@ def check_frozen() -> None:  # pragma: no cover, release script
 
 if __name__ == '__main__':  # pragma: no cover, regeneration script
     parser = ArgumentParser(description='Write the archives of the current format.')
+    # WORKAROUND(python<3.12): use `choices=MODELS`, which rejects an empty list
+    # before 3.12
+    parser.add_argument(
+        'models',
+        nargs='*',
+        metavar='model',
+        help=f'any of {", ".join(MODELS)}, default all',
+    )
     parser.add_argument(
         '--check-frozen',
         action='store_true',
         help='instead, check all archives are frozen, before a release',
     )
-    if parser.parse_args().check_frozen:
+    args = parser.parse_args()
+    if unknown := set(args.models) - set(MODELS):
+        parser.error(f'unknown models {unknown}')
+    if args.check_frozen:
         check_frozen()
     else:
-        write_archives()
+        write_archives(args.models or MODELS)

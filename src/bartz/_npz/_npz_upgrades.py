@@ -29,7 +29,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from jaxtyping import Shaped
+from jaxtyping import Bool, Shaped
 
 # the skeleton of an archive (see `bartz._npz._npz`), and the arrays it references
 Skeleton = Any
@@ -50,6 +50,18 @@ def array(
     else:
         arrays[key] = value
         return dict(type='array', key=key)
+
+
+def z_test(old: Arrays) -> Bool[np.ndarray, ' m'] | None:
+    """Recover the treatment at the test points from `_yhat_test`.
+
+    `_yhat_test` is ``mu + z * tau``, which is exactly ``mu`` or nan if z = 0.
+    """
+    if '_yhat_test' in old:
+        yhat = old['_yhat_test']
+        return np.any((yhat != old['_mu_test']) & ~np.isnan(yhat), axis=0)
+    else:
+        return None
 
 
 def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
@@ -87,6 +99,13 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
             },
         )
 
+    # unfold the chains out of the samples of the scalar parameters
+    shape = old['main_trace.mu.grow_prop_count'].shape
+    tau_0 = old['tau_0_trace']
+    b = np.stack([old['b0_trace'], old['b1_trace']], axis=-1)
+
+    # bartz 0.13 can not save models fit on a dataframe
+    x_train_fmt = json.loads(old['x_train_fmt'].item())
     root = module(
         'bcf',
         _mcmc_state=None,
@@ -95,26 +114,22 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
             _splits=array(arrays, '_binner/_splits', old['binner._splits']),
             max_split=array(arrays, '_binner/max_split', old['binner.max_split']),
         ),
-        _main_trace=dict(
-            type='dict', items=dict(mu=main_trace('mu'), tau=main_trace('tau'))
+        _main_trace=module(
+            'BCFMainTrace',
+            mu=main_trace('mu'),
+            tau=main_trace('tau'),
+            tau_0=array(arrays, '_main_trace/tau_0', tau_0.reshape(shape)),
+            b=array(arrays, '_main_trace/b', b.reshape(*shape, 2)),
         ),
         _burnin_trace=None,
-        _tau_0_trace=array(arrays, '_tau_0_trace', old['tau_0_trace']),
-        _b_trace=array(
-            arrays, '_b_trace', np.stack([old['b0_trace'], old['b1_trace']], axis=1)
-        ),
-        _leaf_prior_cov_inv_mu_trace=None,
-        _leaf_prior_cov_inv_tau_trace=None,
-        _x_train_fmt=dict(type='dict', items=json.loads(old['x_train_fmt'].item())),
-        _standardize=old['standardize'].item(),
+        _x_train_fmt=dict(type='dict', items=x_train_fmt),
+        _has_pihat=old['binner.max_split'].size == x_train_fmt['num_covar'] + 1,
         _y_mean=array(arrays, '_y_mean', old['_y_mean']),
         _y_std=array(arrays, '_y_std', old['_y_std']),
         _outcome_type=old['_outcome_type'].item(),
-        _offset=array(arrays, '_offset', old['_offset']),
-        **{
-            key: array(arrays, key, old.get(key))
-            for key in ('_mu_test', '_tau_test', '_yhat_test')
-        },
+        _mu_test=array(arrays, '_mu_test', old.get('_mu_test')),
+        _tau_test=array(arrays, '_tau_test', old.get('_tau_test')),
+        _z_test=array(arrays, '_z_test', z_test(old)),
     )
     return root, arrays
 

@@ -396,13 +396,13 @@ class bcf(eqx.Module):
 
         error_cov_inv = _process_error_variance_settings(
             y_train_internal,
-            OutcomeType(outcome_type),
             binary_mask,
             None,
-            sigma_df,
-            sigma_scale,
-            sigma_init,
-            None,
+            outcome_type=OutcomeType(outcome_type),
+            sigma_df=sigma_df,
+            sigma_scale=sigma_scale,
+            sigma_init=sigma_init,
+            error_scale=None,
         )
 
         p_nonterminal_mu = make_p_nonterminal(d=10, alpha=0.95, beta=2.0)

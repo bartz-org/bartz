@@ -647,6 +647,7 @@ def check_binary_unit_precision(
 
 
 def init_shape_shifting_parameters(
+    *,
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | list[OutcomeType],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
@@ -1023,16 +1024,22 @@ def init(
 
     # process arguments that change depending on outcome type
     is_binary, kshape, error_cov_inv, binary_indices = init_shape_shifting_parameters(
-        y, outcome_type, offset, error_scale, error_cov_inv, leaf_prior_cov_inv, missing
+        y=y,
+        outcome_type=outcome_type,
+        offset=offset,
+        error_scale=error_scale,
+        error_cov_inv=error_cov_inv,
+        leaf_prior_cov_inv=leaf_prior_cov_inv,
+        missing=missing,
     )
 
     storage = determine_storage_params(
-        leaf_dtype,
-        prec_scale_dtype,
-        resid_dtype,
-        leaf_prior_cov_inv.value,
-        kshape,
-        num_trees,
+        leaf_dtype=leaf_dtype,
+        prec_scale_dtype=prec_scale_dtype,
+        resid_dtype=resid_dtype,
+        leaf_prior_cov_inv=leaf_prior_cov_inv.value,
+        kshape=kshape,
+        num_trees=num_trees,
     )
 
     # extract array sizes from arguments
@@ -1054,14 +1061,14 @@ def init(
     # determine settings for reductions
     mesh = parse_mesh(num_chains, mesh)
     red_cfg = parse_reduction_configs(
-        resid_reduction_config,
-        count_reduction_config,
-        prec_reduction_config,
-        prec_count_num_trees,
-        y,
-        num_trees,
-        num_chains,
-        mesh,
+        resid_reduction_config=resid_reduction_config,
+        count_reduction_config=count_reduction_config,
+        prec_reduction_config=prec_reduction_config,
+        prec_count_num_trees=prec_count_num_trees,
+        y=y,
+        num_trees=num_trees,
+        num_chains=num_chains,
+        mesh=mesh,
     )
 
     # check there aren't too many deactivated predictors
@@ -1320,6 +1327,7 @@ class StorageParams:
 
 
 def determine_storage_params(
+    *,
     leaf_dtype: DTypeLike,
     prec_scale_dtype: DTypeLike,
     resid_dtype: DTypeLike,
@@ -1389,7 +1397,7 @@ def initial_resid_inexact_integral(
     return ms / num_trees
 
 
-def initial_resid(
+def initial_resid(  # noqa: PLR0917, `_LazyArray` passes arguments by position
     shape: tuple[int, ...],
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
@@ -1723,6 +1731,7 @@ class ReductionConfigs(TypedDict):
 
 
 def parse_reduction_configs(
+    *,
     resid_reduction_config: ReductionConfig,
     count_reduction_config: ReductionConfig,
     prec_reduction_config: ReductionConfig,

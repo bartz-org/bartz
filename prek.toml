@@ -1,0 +1,334 @@
+# Hook config for prek (https://prek.j178.dev)
+
+# revs are frozen to commit SHAs (tags are mutable); update with
+# `make update-other-deps`
+
+minimum_prek_version = "0.5.3"
+exclude = '^\.asv/results/.+\.json$'
+default_stages = ["pre-commit"]
+default_install_hook_types = ["pre-commit", "commit-msg", "pre-merge-commit"]
+
+# Hooks without a priority run one at a time, in declaration order. Hooks with
+# the `checks` priority run after all of them, concurrently with each other:
+# give it only to hooks that never modify files.
+[priorities]
+checks = 1000
+
+# cooldown_days is the dependency cooldown for the whole repo: the Makefile
+# reads it to also hold back python deps and GitHub Actions.
+[update]
+cooldown_days = 7
+freeze = true
+
+[[repos]]
+repo = "builtin"
+hooks = [
+    { id = "check-added-large-files", priority = "checks" },
+    { id = "check-case-conflict", priority = "checks" },
+    { id = "check-executables-have-shebangs", priority = "checks" },
+    { id = "check-illegal-windows-names", priority = "checks" },
+    { id = "check-merge-conflict", priority = "checks" },
+    { id = "check-shebang-scripts-are-executable", priority = "checks" },
+    { id = "check-symlinks", priority = "checks" },
+    { id = "check-toml", priority = "checks" },
+    { id = "check-yaml", priority = "checks" },
+    { id = "destroyed-symlinks", priority = "checks" },
+    { id = "detect-private-key", priority = "checks" },
+    { id = "end-of-file-fixer" },
+    { id = "mixed-line-ending", args = ["--fix=lf"] },
+    # renv edits renv/activate.R automatically, with trailing whitespace
+    { id = "trailing-whitespace", exclude = '^renv/activate\.R$' },
+    { id = "no-commit-to-branch", priority = "checks" },
+]
+
+# the hooks without a builtin implementation
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "3e8a8703264a2f4a69428a0aa4dcb512790b2c8c"  # frozen: v6.0.0
+
+[[repos.hooks]]
+id = "check-ast"
+priority = "checks"
+
+[[repos.hooks]]
+id = "check-docstring-first"
+priority = "checks"
+
+[[repos.hooks]]
+id = "forbid-submodules"
+priority = "checks"
+
+[[repos.hooks]]
+id = "name-tests-test"
+args = ["--pytest-test-first"]
+exclude = 'tests/(util\.py|_.+\.py)$'
+priority = "checks"
+
+[[repos]]
+repo = "https://github.com/sbrunner/hooks"
+rev = "60041b789c098988bd01ddff70e7e3a31c1700f1"  # frozen: 1.8.0
+hooks = [
+    { id = "copyright" },
+    # generated headerless file; untracked, so it only reaches hooks via an
+    # explicit `prek run --files`
+    { id = "copyright-required", files = '\.(py|rst)$', exclude = 'src/bartz/_version\.py$' },
+]
+
+[[repos]]
+repo = "https://github.com/astral-sh/ruff-pre-commit"
+rev = "f12be1ebaa5351c1fc76472de98db2c3446c8253"  # frozen: v0.16.10
+hooks = [
+    { id = "ruff-check", args = ["--fix"] },
+    { id = "ruff-format" },
+]
+
+[[repos]]
+repo = "https://github.com/DanielNoord/pydocstringformatter"
+rev = "b658f517409a0864b20fa9d9aa3d178a37fb7f22"  # frozen: v1.0.0
+hooks = [
+    # config in [tool.pydocstringformatter] (pyproject.toml); the hook already
+    # passes --write --quiet. Scoped to the library, whose numpy
+    # attribute-docstring conventions this enforces; drop `files` to widen.
+    { id = "pydocstringformatter", files = '^src/bartz/.*\.py$' },
+]
+
+[[repos]]
+repo = "https://github.com/jsh9/pydoclint"
+rev = "24412c5f73ad438a08146132ea86a9a72c8bd5ad"  # frozen: 0.11.0
+hooks = [{ id = "pydoclint", priority = "checks" }]
+
+[[repos]]
+repo = "https://github.com/henryiii/validate-pyproject-schema-store"
+rev = "562b381732c1d2bec9a3a66cc89f63e16d486470"  # frozen: 2026.09.30
+hooks = [{ id = "validate-pyproject", priority = "checks" }]
+
+[[repos]]
+repo = "https://github.com/jorisroovers/gitlint"
+rev = "acc9d9de6369b76d22cb4167029d2035e8730b98"  # frozen: v0.19.1
+hooks = [{ id = "gitlint" }]  # already defined to run in stage commit-msg
+
+# this rev is the single uv pin: .github/actions/setup-uv installs the version
+# in its `frozen` comment in every workflow, and config/check_workarounds.py
+# reads it as the oldest supported uv, so the uv that writes uv.lock here and
+# the one that reads it on ci cannot drift apart. Both parse the comment on the
+# `rev` line right below the `repo` line, keep it there.
+[[repos]]
+repo = "https://github.com/astral-sh/uv-pre-commit"
+rev = "0f4b65a503cc866b9b5e62dda2020f7943b01a65"  # frozen: 0.12.22
+hooks = [{ id = "uv-lock" }]
+
+[[repos]]
+repo = "https://github.com/rhysd/actionlint"
+rev = "914e7df21a07ef503a81201c76d2b11c789d3fca"  # frozen: v1.7.12
+hooks = [{ id = "actionlint", priority = "checks" }]
+
+[[repos]]
+repo = "local"
+
+[[repos.hooks]]
+id = "lint-merged-tree"
+name = "full lint on the merged tree"
+# Runs only at merge time (not on ordinary commits). Gates clean auto-merges,
+# whose merge commit git writes without invoking the `pre-commit` stage:
+# catches a merged tree that fails the hooks even though each branch passed in
+# isolation (e.g. a stale WORKAROUND or a hook config changed on one side).
+# `make lint` is `prek run --all-files`; nesting it here is safe (this hook is
+# not in the pre-commit stage, so --all-files does not re-trigger it).
+entry = "make lint"
+language = "system"
+pass_filenames = false
+always_run = true
+stages = ["pre-merge-commit"]
+
+[[repos.hooks]]
+id = "pinact"
+name = "update GitHub Actions and pin them to commit SHAs"
+# manual-only, run by `make update-other-deps`, which sets the cooldown
+# (PINACT_MIN_AGE) and GITHUB_TOKEN. Not covered by `prek update`: bump the
+# pinact commit below by hand.
+entry = "pinact run --update"
+language = "golang"
+# pinact's go.mod minimum; prek downloads Go if the system one is older
+language_version = ">=1.27.1"
+additional_dependencies = [
+    "github.com/suzuki-shunsuke/pinact/v5/cmd/pinact@a4f45e095b184794ac1f82b6b07cc35b0b8cfe7b",  # v5.0.0
+]
+pass_filenames = false
+always_run = true
+stages = ["manual"]
+
+[[repos.hooks]]
+id = "check-workarounds"
+name = "check stale WORKAROUND markers"
+priority = "checks"
+entry = "uv run --dev python -m config.check_workarounds"
+language = "system"
+pass_filenames = false
+always_run = true
+
+[[repos.hooks]]
+id = "check-path-headers"
+name = "check the `bartz/<path>` comment matches each file's location"
+priority = "checks"
+entry = "uv run --dev python -m config.check_path_headers"
+language = "system"
+# self-scopes to files carrying the bartz license header; `text` just keeps
+# binaries (e.g. .inv) out of the argument list.
+types = ["text"]
+
+[[repos.hooks]]
+id = "vendor-latest-bartz"
+name = "vendor latest_bartz (for ty)"
+# ty checks files under benchmarks/ that import the vendored latest bartz;
+# refresh it first, else those imports do not resolve (e.g. on CI) or resolve
+# against a stale copy. Runs before ty, which has the later `checks` priority,
+# on the same python trigger.
+entry = "uv run --dev python benchmarks/_vendor_latest_bartz.py"
+language = "system"
+pass_filenames = false
+types = ["python"]
+
+[[repos.hooks]]
+id = "ty"
+name = "ty check"
+priority = "checks"
+# there is no official ty hook (and an isolated hook env would not see the
+# project venv anyway), so run the dev-pinned ty. prek feeds it the tracked
+# python files: only the staged ones on a commit (fast incremental check), and
+# all of them under `--all-files` — the comprehensive gate run by `make lint`
+# and at merge time.
+entry = "uv run --dev ty check --"
+language = "system"
+types = ["python"]
+
+[[repos.hooks]]
+id = "check-returns-docstring"
+name = "forbid multi-line non-list `Returns` docstring sections"
+priority = "checks"
+# Matches a numpy-style `Returns` block whose first two non-blank lines are
+# both at the section's base indent: i.e., multi-line prose. List-form
+# (description on a more-indented continuation line) is skipped via
+# `(?P=i)\S`; the trailing lookahead skips the next section's header.
+language = "pygrep"
+entry = '^(?P<i>[ \t]*)Returns[ \t]*\n(?P=i)-+[ \t]*\n(?P=i)(?!""")\S[^\n]*\n(?:[ \t]*\n)*(?P=i)(?!""")(?!\w+[ \t]*\n(?P=i)-+[ \t]*$)\S'
+args = ["--multiline"]
+types = ["python"]
+
+[[repos.hooks]]
+id = "forbid-napoleon-type-colon"
+name = "forbid stray colon in first line of attribute docstrings"
+priority = "checks"
+# A lone colon in the first line of an attribute docstring makes sphinx
+# napoleon split it into a `:type:` field, leaking a stray "Type: <text before
+# the colon>" into the html. Napoleon only inspects the docstring's first line,
+# so the match runs from the opening `"""` to the first newline or the closing
+# `"""` (whichever comes first), one-line and multi-line docstrings alike.
+# Matches an attribute assignment or annotation line (one not ending in `:`,
+# i.e. not a def/class header, possibly just a bare `)` closing a multi-line
+# assignment) followed by a same-indent `"""` whose first line holds a lone `:`
+# (not `::`) outside any ``code`` span or :role:`target`, with real text after
+# it (a colon at end of line is harmless: napoleon then keeps it in the
+# description). Reword to drop the colon.
+language = "pygrep"
+entry = '^(?P<i>[ \t]+)\S(?:[^\n]*[^\n:\s])?\n(?P=i)"""(?:``[^`]*``|:[A-Za-z0-9_+.:-]+:`[^`\n]+`|`[^`\n]+`|(?!""")[^:`\n])*:(?!:)(?![A-Za-z0-9_+.:-]+:`)[ \t]*(?!""")\S'
+args = ["--multiline"]
+types = ["python"]
+
+[[repos.hooks]]
+id = "forbid-lam-lamda"
+name = "forbid `lam`/`lamda` identifier (use `lambda_` per PEP 8)"
+priority = "checks"
+language = "pygrep"
+entry = '\blam(da)?\b'
+types = ["python"]
+
+[[repos.hooks]]
+id = "forbid-jaxext-qualified-call"
+name = "forbid `_jaxext.foo(...)` (use `from bartz._jaxext import foo`)"
+priority = "checks"
+language = "pygrep"
+# lookbehind `(?<!\.)` allows module paths like `bartz._jaxext.foo`; the
+# trailing `\(` limits matches to function calls so docstrings that mention
+# `_jaxext.foo` are not flagged.
+entry = '(?<!\.)\b_jaxext\.\w+\s*\('
+types = ["python"]
+
+[[repos.hooks]]
+id = "forbid-jax-vmap-jit-qualified-call"
+name = "forbid qualified `jax.vmap`/`jax.jit` (import them by name)"
+priority = "checks"
+language = "pygrep"
+# Matches the qualified name as a word (`\b`) so call sites (`jax.jit(`), bare
+# decorators (`@jax.jit`), and references (`partial(jax.jit, ...)`) are all
+# caught. The `(?!`)` negative lookahead skips docstring/comment mentions,
+# which are wrapped in backticks (`` `jax.jit` ``).
+entry = '\bjax\.(vmap|jit)\b(?!`)'
+types = ["python"]
+
+[[repos.hooks]]
+id = "forbid-jax-jit-import-in-library"
+name = "forbid `from jax import jit` in the library (use `from bartz._jaxext import jit`)"
+priority = "checks"
+language = "pygrep"
+# `bartz._jaxext.jit` preserves the jitted signature for type checkers. Not a
+# ruff banned-api entry because per-file ignores of TID251 would lift all the
+# other bans too. Matches single-line and parenthesized multi-line imports.
+files = '^src/'
+exclude = '^src/bartz/_jaxext/_jit\.py$'
+entry = '^[ \t]*from[ \t]+jax[ \t]+import[ \t]+(\([^)]*|[^\n(]*)\bjit\b'
+args = ["--multiline"]
+types = ["python"]
+
+[[repos.hooks]]
+id = "forbid-jax-random-qualified-call"
+name = "forbid `jax.random.foo(...)` (use `from jax import random`)"
+priority = "checks"
+language = "pygrep"
+# the trailing `\(` limits matches to function calls so docstrings that mention
+# `jax.random` are not flagged.
+entry = '\bjax\.random\.\w+\s*\('
+types = ["python"]
+
+[[repos.hooks]]
+id = "forbid-mcmc-module-absolute-import"
+name = "forbid `from bartz import mcmcstep/loop (use `from bartz.mcmcstep import foo`)"
+priority = "checks"
+language = "pygrep"
+# Forbids `from bartz import ...mcmcstep|mcmcloop...` and `import
+# bartz.mcmcstep|mcmcloop`, which enable the `mcmcstep.foo`/`mcmcloop.foo`
+# qualified-access antipattern. `from bartz.mcmcstep import foo` (and any
+# submodule path like `bartz.mcmcstep._state`) is still allowed. Excluded:
+# `src/bartz/__init__.py` (legitimate submodule re-export in the package's own
+# init) and `benchmarks/` (deliberately probes API surface across bartz
+# versions via module-qualified access).
+exclude = '^(src/bartz/__init__\.py|benchmarks/)'
+entry = '^\s*(from\s+bartz\s+import\s+[^\n]*\b(mcmcstep|mcmcloop)\b|import\s+bartz\.(mcmcstep|mcmcloop)\b)'
+types = ["python"]
+
+[[repos.hooks]]
+id = "forbid-dunder-all"
+name = "forbid setting `__all__` in modules"
+priority = "checks"
+language = "pygrep"
+# matches any module-level `__all__` statement (plain/annotated/augmented
+# assignments, `.append`/`.extend`, `del`, etc.). The `^` anchor restricts to
+# column 0, so references inside indented code or docstrings are ignored.
+entry = '^__all__\b'
+types = ["python"]
+
+[[repos.hooks]]
+id = "forbid-bare-array-annotation"
+name = "forbid bare array annotations (wrap in a jaxtyping shape hint)"
+priority = "checks"
+language = "pygrep"
+# Catches an array type used directly as an annotation (`x: Array`, `->
+# np.ndarray`, `Array | None`) instead of wrapped in a jaxtyping hint
+# (`Float32[Array, 'n p']`). The name must follow `: `, `-> `, or `| ` at
+# subscript depth 0: the bracket-group prefix `(?:[^][#]*\[[^][#]*\])*` keeps
+# wrapped uses and arrays nested in other generics (`PyTree[Array]`,
+# `Callable[..., np.ndarray]`) exempt, and excluding `#` skips comments. The
+# trailing lookahead requires an annotation terminator, skipping docstring
+# prose ("Array of samples"); the `^(?!\w+ =)` guard skips alias definitions
+# (`DummyArray = Array | ...`). Relies on ruff-format spacing.
+entry = '^(?!\w+ =)(?:[^][#]*\[[^][#]*\])*[^][#]*?[:>|] (?:(?:np|numpy|jnp|jax)\.)?(?:(?:Jax)?ArrayLike|Array|NDArray|ndarray|_LazyArray|DummyArray)\b(?=\s*(?:[,:=|)#]|$))'
+types = ["python"]

@@ -263,16 +263,16 @@ def run_mcmc(
     for i_outer in range(n_outer):
         carry = _run_mcmc_inner_loop(
             carry,
-            inner_loop_length,
-            n_burn,
-            n_save,
-            n_skip,
-            i_outer,
-            n_iters,
-            burnin_trace_type,
-            main_trace_type,
-            key_impl,
-            step,
+            inner_loop_length=inner_loop_length,
+            n_burn=n_burn,
+            n_save=n_save,
+            n_skip=n_skip,
+            i_outer=i_outer,
+            n_iters=n_iters,
+            burnin_trace_type=burnin_trace_type,
+            main_trace_type=main_trace_type,
+            key_impl=key_impl,
+            step=step,
         )
 
     return RunMCMCResult(
@@ -339,6 +339,7 @@ class _CallCounter(Generic[T]):
 
 def _run_mcmc_inner_loop_impl(
     carry: _Carry,
+    *,
     inner_loop_length: Int32[Array, ''],
     n_burn: Int32[Array, ''],
     n_save: Int32[Array, ''],
@@ -399,10 +400,10 @@ def _run_mcmc_inner_loop_impl(
             carry.main_trace,
             state,
             carry.i_total,
-            n_burn,
-            n_skip,
-            burnin_trace_type,
-            main_trace_type,
+            n_burn=n_burn,
+            n_skip=n_skip,
+            burnin_trace_type=burnin_trace_type,
+            main_trace_type=main_trace_type,
         )
 
         return _Carry(
@@ -421,9 +422,10 @@ def _run_mcmc_inner_loop_impl(
 # so `run_mcmc` can reset it directly instead of reaching into jit internals,
 # then jit the wrapped callable.
 _inner_loop_counter: _CallCounter[_Carry] = _CallCounter(_run_mcmc_inner_loop_impl)
-_run_mcmc_inner_loop = jit(donate_argnums=(0,), static_argnums=(7, 8, 9, 10))(
-    _inner_loop_counter
-)
+_run_mcmc_inner_loop = jit(
+    donate_argnums=0,
+    static_argnames=('burnin_trace_type', 'main_trace_type', 'key_impl', 'step'),
+)(_inner_loop_counter)
 
 
 @named_call
@@ -432,6 +434,7 @@ def _save_state_to_trace(
     main_trace: Trace,
     state: State,
     i_total: Int32[Array, ''],
+    *,
     n_burn: Int32[Array, ''],
     n_skip: Int32[Array, ''],
     burnin_trace_type: type[Trace],

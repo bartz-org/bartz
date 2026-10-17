@@ -1313,9 +1313,11 @@ def sample_prior_like(
         key,
         bart.ndpost,
         len(bart._mcmc_state.forest.leaf_tree),
-        bart._mcmc_state.forest.max_split,
-        p_nonterminal,
-        jnp.sqrt(jnp.reciprocal(bart._mcmc_state.forest.leaf_prior_cov_inv.value)),
+        max_split=bart._mcmc_state.forest.max_split,
+        p_nonterminal=p_nonterminal,
+        sigma_mu=jnp.sqrt(
+            jnp.reciprocal(bart._mcmc_state.forest.leaf_prior_cov_inv.value)
+        ),
     )
 
     with subtests.test('check prior trees'):

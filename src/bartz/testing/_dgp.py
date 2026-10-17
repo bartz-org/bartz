@@ -92,6 +92,7 @@ def combine_shared_separate(
 
 
 def het_var_v(
+    *,
     het_shape: Literal['scalar', 'vector'],
     het_strength: Float[Array, ''] | float,
     kurt_x: Float[Array, ''] | float,
@@ -128,10 +129,11 @@ def het_var_v(
 def generate_het(
     key: Key[Array, ''],
     distr: Distr,
-    het_shape: Literal['scalar', 'vector'] | None,
     p: int,
     partition: Bool[Array, 'k p'] | None,
     s: Float[Array, ' p'],
+    *,
+    het_shape: Literal['scalar', 'vector'] | None,
 ) -> tuple[Float[Array, ' p'] | None, Float[Array, 'k p'] | None]:
     """Sample the noise-multiplier projection coefficients for `gen_params`.
 
@@ -171,10 +173,11 @@ def generate_A_shared(
     key: Key[Array, ''],
     distr: Distr,
     p: int,
-    q: Integer[Array, ''] | int,
     sigma2_quad: Float[Array, ''] | float,
-    kurt_x: Float[Array, ''] | float,
     s: Float[Array, ' p'],
+    *,
+    q: Integer[Array, ''] | int,
+    kurt_x: Float[Array, ''] | float,
     mu4: Float[Array, ''] | float,
 ) -> Float[Array, 'p p']:
     """Generate shared quadratic coefficients for the lambda=1 case."""
@@ -210,10 +213,11 @@ def generate_A_separate(
     key: Key[Array, ''],
     distr: Distr,
     partition: Bool[Array, 'k p'],
-    q: Integer[Array, ''] | int,
     sigma2_quad: Float[Array, ''] | float,
-    kurt_x: Float[Array, ''] | float,
     s: Float[Array, ' p'],
+    *,
+    q: Integer[Array, ''] | int,
+    kurt_x: Float[Array, ''] | float,
     mu4: Float[Array, ''] | float,
 ) -> Float[Array, 'k p p']:
     """Generate separate quadratic coefficients for the lambda=0 case."""
@@ -232,6 +236,7 @@ def generate_outcome(
     mu: Float[Array, ' n'] | Float[Array, 'k n'],
     sigma2_eps: Float[Array, ''],
     outcome_type: OutcomeType | tuple[OutcomeType, ...],
+    *,
     error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None = None,
     error_chol: Float[Array, 'k k'] | None = None,
     error_distr: Distr = Normal(),
@@ -1024,7 +1029,7 @@ def gen_params(
     shared_keys = split(shared_key)
     beta_shared = generate_beta_shared(shared_keys.pop(), beta_distr, p, sigma2_lin, s)
     A_shared = generate_A_shared(
-        shared_keys.pop(), A_distr, p, q, sigma2_quad, kurt_x, s, mu_4_s
+        shared_keys.pop(), A_distr, p, sigma2_quad, s, q=q, kurt_x=kurt_x, mu4=mu_4_s
     )
 
     if k is None:
@@ -1039,18 +1044,32 @@ def gen_params(
             separate_keys.pop(), beta_distr, partition, sigma2_lin, s
         )
         A_separate = generate_A_separate(
-            separate_keys.pop(), A_distr, partition, q, sigma2_quad, kurt_x, s, mu_4_s
+            separate_keys.pop(),
+            A_distr,
+            partition,
+            sigma2_quad,
+            s,
+            q=q,
+            kurt_x=kurt_x,
+            mu4=mu_4_s,
         )
 
     gamma_shared, gamma_separate = generate_het(
-        het_key, gamma_distr, het_shape, p, partition, s
+        het_key, gamma_distr, p, partition, s, het_shape=het_shape
     )
     if het_shape is None:
         var_v = None
     else:
         assert het_strength is not None
         var_v = het_var_v(
-            het_shape, het_strength, kurt_x, gamma_distr.kurtosis, mu_4_s, p, k, lambda_
+            het_shape=het_shape,
+            het_strength=het_strength,
+            kurt_x=kurt_x,
+            kurt_gamma=gamma_distr.kurtosis,
+            mu_4=mu_4_s,
+            p=p,
+            k=k,
+            lambda_=lambda_,
         )
 
     # across-component error correlation, stored as its Cholesky factor (the form
@@ -1163,9 +1182,9 @@ def gen_data_from_params(key: Key[Array, ''], params: Params, *, n: int) -> DGP:
         mu,
         params.sigma2_eps,
         params.outcome_type,
-        error_scale,
-        params.error_chol,
-        params.error_distr,
+        error_scale=error_scale,
+        error_chol=params.error_chol,
+        error_distr=params.error_distr,
     )
 
     return DGP(

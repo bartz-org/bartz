@@ -66,3 +66,4 @@ Some of the R-only BART packages are wrapped for Python in [rbartpackages](https
 - [rBART](https://github.com/andrewcparnell/rBART) Slow version of BART in R
 - [BASTION](https://github.com/rayisaacalan/BASTION) Spanning tree partitions instead of axis-aligned splits, for spatial data on complex domains
 - [ztluostat](https://github.com/ztluostat)'s repositories (BAST, BAMDT)
+- [SkT-BART](https://github.com/fadedrt/SkT-BART) R package, skew-t errors

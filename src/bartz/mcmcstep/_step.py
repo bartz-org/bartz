@@ -95,16 +95,11 @@ def step(key: Key[Array, ''], state: State) -> State:
     keys = split(key, 5)
 
     state = step_resid_inexact_integral(state)
+    state = step_z(keys.pop(), state)
     state = step_trees(keys.pop(), state)
 
     state = step_leaf_prior_cov_inv(keys.pop(), state)
-
-    if state.z is not None:
-        state = step_z(keys.pop(), state)
-
-    if state.error_cov_inv.nu is not None:
-        state = step_error_cov_inv(keys.pop(), state)
-
+    state = step_error_cov_inv(keys.pop(), state)
     state = step_sparse(keys.pop(), state)
     return step_config(state)
 
@@ -1822,8 +1817,10 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
 
 @named_call
 def step_error_cov_inv(key: Key[Array, ''], state: State) -> State:
-    """MCMC-update the inverse error covariance."""
-    if state.error_cov_inv.value.ndim == 2 and not isinstance(
+    """MCMC-update the inverse error covariance, if it has a prior."""
+    if state.error_cov_inv.nu is None:
+        return state
+    elif state.error_cov_inv.value.ndim == 2 and not isinstance(
         state.error_cov_inv, DiagWishart
     ):
         return _step_error_cov_inv_mv(key, state)
@@ -1892,7 +1889,7 @@ def step_leaf_prior_cov_inv(key: Key[Array, ''], state: State) -> State:
 @named_call
 def step_z(key: Key[Array, ''], state: State) -> State:
     """
-    MCMC-update the latent variable for binary regression.
+    MCMC-update the latent variable for binary regression, if any.
 
     Parameters
     ----------
@@ -1905,7 +1902,8 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     -------
     The updated BART MCMC state.
     """
-    assert state.z is not None
+    if state.z is None:
+        return state
 
     inv_sdev = state.inv_sdev_scale
     inv_sdev_unit = state.inv_sdev_unit

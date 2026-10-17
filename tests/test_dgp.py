@@ -128,6 +128,7 @@ def assert_standardized(z: Float[Array, ' reps'], distr: Distr) -> None:
 @partial(jit, static_argnames=('het_shape',))
 def generate_dgps(
     keys: Key[Array, 'REPS'],
+    *,
     lambda_: Float[Array, ''],
     s_distr: ScaleDistr,
     het_strength: float | None,
@@ -164,14 +165,14 @@ def dgps(keys: split, request: pytest.FixtureRequest) -> DGP:
     param: Mapping = getattr(request, 'param', None) or {}
     return generate_dgps(
         keys.pop(REPS),
-        param.get('lambda_', 0.5),
-        param.get('s_distr', Constant()),
-        param.get('het_strength'),
-        param.get('het_shape'),
-        param.get('x_distr', Uniform()),
-        param.get('gamma_distr', DiscreteUniform(2)),
-        param.get('error_distr', Normal()),
-        param.get('error_corr'),
+        lambda_=param.get('lambda_', 0.5),
+        s_distr=param.get('s_distr', Constant()),
+        het_strength=param.get('het_strength'),
+        het_shape=param.get('het_shape'),
+        x_distr=param.get('x_distr', Uniform()),
+        gamma_distr=param.get('gamma_distr', DiscreteUniform(2)),
+        error_distr=param.get('error_distr', Normal()),
+        error_corr=param.get('error_corr'),
     )
 
 

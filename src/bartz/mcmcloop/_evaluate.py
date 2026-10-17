@@ -272,7 +272,12 @@ def _evaluate_trace(
 
     # adjust memory limit keeping into account that trees are summed over
     max_io_nbytes = _tree_sum_budget(
-        max_io_nbytes, trace, trace_chain_axes, kshape, n, num_trees
+        max_io_nbytes,
+        trace,
+        chain_axes=trace_chain_axes,
+        kshape=kshape,
+        n=n,
+        num_trees=num_trees,
     )
 
     # batch over the test points (the `n` axis of `X`). It sits outside the tree
@@ -416,6 +421,7 @@ def _output_layout(
 def _tree_sum_budget(
     max_io_nbytes: int,
     trace: EvaluableTrace,
+    *,
     chain_axes: PyTree[int | None],
     kshape: tuple[int, ...],
     n: int,

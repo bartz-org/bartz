@@ -24,17 +24,14 @@
 
 """Bayesian Causal Forests (BCF) interface."""
 
-import dataclasses
-import json
 from operator import attrgetter
-from pathlib import Path
+from os import PathLike
 from typing import Any, Literal, cast
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import numpy as np
-from jax import device_put, lax, random, tree
+from jax import lax, random
 from jax.scipy import special
 from jaxtyping import Array, Float32, Key, Real, Shaped
 
@@ -50,17 +47,18 @@ from bartz._interface import (
     _process_offset_settings,
     _process_predictor_input,
     _process_response_input,
+    _run_mcmc,
     predict_latent,
 )
 from bartz._jaxext import split
+from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.bcf._loop import BCFBurninTrace, BCFMainTrace, bcf_step
 from bartz.bcf._state import init_bcf
-from bartz.mcmcloop import MainTrace, run_mcmc
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import OutcomeType, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._state import make_p_nonterminal
-from bartz.prepcovars import RangeEvenBinner, UniqueQuantileBinner
+from bartz.prepcovars import UniqueQuantileBinner
 
 
 def _process_bcf_predictor_input(
@@ -93,77 +91,6 @@ def _fold_chains(trace: Trace, path: str) -> Float32[Array, 'num_samples ...']:
     )
 
 
-def _serialize_binner(binner: Any, max_split: Any = None) -> dict[str, Any]:  # noqa: ANN401
-    """
-    Serialize binner state to a dictionary of NumPy arrays.
-
-    Parameters
-    ----------
-    binner
-        The binner object to serialize.
-    max_split
-        Optional pre-extracted max_split array.
-
-    Returns
-    -------
-    dict[str, Any]
-        A dictionary containing the serialized binner attributes.
-
-    Raises
-    ------
-    RuntimeError
-        If max_split was donated to JAX and not provided explicitly.
-    """
-    binner_dict = {}
-    binner_dict['class'] = binner.__class__.__name__
-
-    if max_split is None:  # pragma: no cover
-        try:
-            max_split = np.asarray(binner.max_split)
-        except RuntimeError as exc:
-            msg = 'max_split array was donated to JAX. Pass max_split explicitly.'
-            raise RuntimeError(msg) from exc
-    binner_dict['max_split'] = np.asarray(max_split)
-
-    if hasattr(binner, '_splits'):
-        binner_dict['_splits'] = np.asarray(binner._splits)  # noqa: SLF001
-
-    if hasattr(binner, '_low'):  # pragma: no cover
-        binner_dict['_low'] = np.asarray(binner._low)  # noqa: SLF001
-        binner_dict['_high'] = np.asarray(binner._high)  # noqa: SLF001
-        binner_dict['_max_bins'] = np.asarray(binner._max_bins)  # noqa: SLF001
-
-    return binner_dict
-
-
-def _deserialize_binner(data: Any) -> Any:  # noqa: ANN401
-    """
-    Reconstruct binner instance from serialized NPZ data dictionary.
-
-    Parameters
-    ----------
-    data
-        A mapping containing the serialized binner fields from NPZ archive.
-
-    Returns
-    -------
-    binner : Any
-        A reconstituted binner instance.
-    """
-    binner_cls_name = str(data.get('binner.class', 'UniqueQuantileBinner'))
-    if binner_cls_name == 'UniqueQuantileBinner':
-        binner = object.__new__(UniqueQuantileBinner)
-        object.__setattr__(binner, '_splits', jnp.asarray(data['binner._splits']))
-        object.__setattr__(binner, 'max_split', jnp.asarray(data['binner.max_split']))
-    else:  # pragma: no cover
-        binner = object.__new__(RangeEvenBinner)
-        object.__setattr__(binner, '_low', jnp.asarray(data['binner._low']))
-        object.__setattr__(binner, '_high', jnp.asarray(data['binner._high']))
-        object.__setattr__(binner, '_max_bins', int(data['binner._max_bins']))
-        object.__setattr__(binner, 'max_split', jnp.asarray(data['binner.max_split']))
-    return binner
-
-
 def make_leaf_prior_cov_inv(
     value: FloatLike, sample: bool, shape: FloatLike, scale: FloatLike
 ) -> Wishart:
@@ -174,6 +101,7 @@ def make_leaf_prior_cov_inv(
         return Wishart(nu=None, rate=None, value=value)
 
 
+@serializable
 class bcf(eqx.Module):
     R"""
     Bayesian Causal Forests (BCF).
@@ -239,6 +167,11 @@ class bcf(eqx.Module):
         Minimum data points per leaf for prognostic forest.
     min_points_per_leaf_tau
         Minimum data points per leaf for treatment forest.
+    maxdepth_mu
+    maxdepth_tau
+        The maximum depth of the trees in the prognostic/treatment effect
+        forest. This is 1-based, so with the default ``maxdepth_mu/tau=6``, the
+        depths of the levels range from 0 to 5.
     tau_0_prior_var
         Prior variance for global intercept tau_0.
     sample_intercept
@@ -280,6 +213,8 @@ class bcf(eqx.Module):
         `z_test` or `pihat_test` does not match the length of `x_test`.
     """
 
+    # `_mcmc_state`, `_burnin_trace` and `_leaf_prior_cov_inv_*_trace` are `None`
+    # in models loaded from prediction-only archives
     _mcmc_state: Any
     _binner: Any
     _main_trace: Any
@@ -324,6 +259,8 @@ class bcf(eqx.Module):
         leaf_prior_cov_inv_tau: FloatLike | None = None,
         min_points_per_leaf_mu: int = 5,
         min_points_per_leaf_tau: int = 5,
+        maxdepth_mu: int = 6,
+        maxdepth_tau: int = 6,
         tau_0_prior_var: float | None = None,
         sample_intercept: bool = True,
         adaptive_coding: bool = False,
@@ -475,8 +412,8 @@ class bcf(eqx.Module):
             error_scale=None,
         )
 
-        p_nonterminal_mu = make_p_nonterminal(d=10, alpha=0.95, beta=2.0)
-        p_nonterminal_tau = make_p_nonterminal(d=5, alpha=0.25, beta=3.0)
+        p_nonterminal_mu = make_p_nonterminal(d=maxdepth_mu, alpha=0.95, beta=2.0)
+        p_nonterminal_tau = make_p_nonterminal(d=maxdepth_tau, alpha=0.25, beta=3.0)
 
         if outcome_type == 'binary':
             var_y = 1.0
@@ -543,16 +480,23 @@ class bcf(eqx.Module):
 
         # 5. Run the MCMC loop
         # WORKAROUND(python<3.12): once `run_mcmc` is generic over the state
-        # subclass (PEP 695), `bcf_step` will type-check as its `step` and the
-        # traces will come out typed, dropping the ignore and the casts.
-        final_state, burnin_trace, main_trace = run_mcmc(
-            keys.pop(),
-            initial_state,
-            ndpost,
+        # subclass (PEP 695), the traces will come out typed, dropping the
+        # casts.
+        final_state, burnin_trace, main_trace = _run_mcmc(
+            mcmc_state=initial_state,
+            n_save=ndpost,
             n_burn=nskip,
-            step=bcf_step,  # ty: ignore[invalid-argument-type]
-            burnin_trace_type=BCFBurninTrace,
-            main_trace_type=BCFMainTrace,
+            n_skip=1,
+            printevery=100,
+            pbar=True,
+            key=keys.pop(),
+            precompute_predict_train=False,
+            run_mcmc_kw=dict(
+                step=bcf_step,
+                burnin_trace_type=BCFBurninTrace,
+                main_trace_type=BCFMainTrace,
+            ),
+            check_platform=None,
         )
         burnin_trace = cast(BCFBurninTrace, burnin_trace)
         main_trace = cast(BCFMainTrace, main_trace)
@@ -578,255 +522,41 @@ class bcf(eqx.Module):
             if z_test is not None:
                 self._yhat_test = self._mu_test + z_test * self._tau_test
 
-    @classmethod
-    def _from_saved_state(
-        cls,
-        *,
-        binner: Any,  # noqa: ANN401
-        tau_0_trace: Any,  # noqa: ANN401
-        b_trace: Any,  # noqa: ANN401
-        main_trace: Any,  # noqa: ANN401
-        burnin_trace: Any = None,  # noqa: ANN401
-        mcmc_state: Any = None,  # noqa: ANN401
-        leaf_prior_cov_inv_mu_trace: Any = None,  # noqa: ANN401
-        leaf_prior_cov_inv_tau_trace: Any = None,  # noqa: ANN401
-        x_train_fmt: Any = None,  # noqa: ANN401
-        standardize: bool = False,
-        y_mean: Float32[ArrayLike, ''] | float = 0.0,
-        y_std: Float32[ArrayLike, ''] | float = 1.0,
-        outcome_type: str = 'continuous',
-        offset: Float32[ArrayLike, ''] | float = 0.0,
-        mu_test: Float32[Array, 'num_samples m'] | None = None,
-        tau_test: Float32[Array, 'num_samples m'] | None = None,
-        yhat_test: Float32[Array, 'num_samples m'] | None = None,
-    ) -> 'bcf':
+    def save_npz(self, path: str | PathLike) -> None:
         """
-        Private factory constructor to initialize bcf instance from restored state.
-
-        Parameters
-        ----------
-        binner
-            The binner instance for continuous predictor transforms.
-        tau_0_trace
-            Posterior trace of the tau_0 intercept.
-        b_trace
-            Posterior trace of the adaptive coding weights, columns b0 and b1.
-        main_trace
-            Posterior traces for mu and tau forests.
-        burnin_trace
-            Optional burn-in trace data.
-        mcmc_state
-            Optional final MCMC state.
-        leaf_prior_cov_inv_mu_trace
-            Optional prior variance trace for mu forest.
-        leaf_prior_cov_inv_tau_trace
-            Optional prior variance trace for tau forest.
-        x_train_fmt
-            Formatting metadata of training predictors.
-        standardize
-            Whether predictions should be unscaled back to original outcome units.
-        y_mean
-            Original training outcome mean for unscaling.
-        y_std
-            Original training outcome standard deviation for unscaling.
-        outcome_type
-            The regression target type ('continuous' or 'binary').
-        offset
-            Probit latent scale offset (0.0 for continuous).
-        mu_test
-            Optional control mean at the test points.
-        tau_test
-            Optional treatment effect at the test points.
-        yhat_test
-            Optional outcome at the test points.
-
-        Returns
-        -------
-        bcf
-            A reconstituted `bcf` model ready for prediction.
-        """
-        model = object.__new__(cls)
-        object.__setattr__(model, '_mcmc_state', mcmc_state)
-        object.__setattr__(model, '_binner', binner)
-        object.__setattr__(model, '_main_trace', main_trace)
-        object.__setattr__(model, '_burnin_trace', burnin_trace)
-        object.__setattr__(model, '_tau_0_trace', tau_0_trace)
-        object.__setattr__(model, '_b_trace', b_trace)
-        object.__setattr__(
-            model, '_leaf_prior_cov_inv_mu_trace', leaf_prior_cov_inv_mu_trace
-        )
-        object.__setattr__(
-            model, '_leaf_prior_cov_inv_tau_trace', leaf_prior_cov_inv_tau_trace
-        )
-        object.__setattr__(model, '_x_train_fmt', x_train_fmt)
-        object.__setattr__(model, '_standardize', standardize)
-        object.__setattr__(model, '_y_mean', jnp.asarray(y_mean))
-        object.__setattr__(model, '_y_std', jnp.asarray(y_std))
-        object.__setattr__(model, '_outcome_type', outcome_type)
-        object.__setattr__(model, '_offset', jnp.asarray(offset))
-        object.__setattr__(model, '_mu_test', mu_test)
-        object.__setattr__(model, '_tau_test', tau_test)
-        object.__setattr__(model, '_yhat_test', yhat_test)
-        return model
-
-    def save_npz(self, path: str | Path) -> None:
-        """
-        Save the loaded BCF traces to an NPZ archive.
+        Save the fitted model to a compressed npz archive.
 
         Parameters
         ----------
         path
-            The file path to save the NPZ archive.
+            The file to write to.
+
+        Notes
+        -----
+        Files written by a bartz release can be loaded by later releases, but
+        not by earlier ones; files written by development versions may not be.
         """
-        state = {}
-
-        # Explicit schema versioning
-        state['schema_version'] = np.array(1)
-
-        # Serialize binner attributes
-        try:
-            max_split = np.asarray(self._binner.max_split)
-        except RuntimeError:  # pragma: no cover
-            # Array was donated to JAX during fit(), recover from state
-            max_split = (
-                np.asarray(self._mcmc_state.forest_tau.max_split)
-                if self._mcmc_state is not None
-                else None
-            )
-
-        for k, v in _serialize_binner(self._binner, max_split=max_split).items():
-            state[f'binner.{k}'] = v
-
-        # Save scalar traces
-        state['tau_0_trace'] = np.asarray(self._tau_0_trace)
-        state['b0_trace'] = np.asarray(self._b_trace[:, 0])
-        state['b1_trace'] = np.asarray(self._b_trace[:, 1])
-
-        # Save standardization metadata
-        state['standardize'] = np.array(self._standardize)
-        state['_y_mean'] = np.asarray(self._y_mean)
-        state['_y_std'] = np.asarray(self._y_std)
-
-        # Save binary / probit metadata
-        state['_outcome_type'] = np.array(self._outcome_type)
-        state['_offset'] = np.asarray(self._offset)
-
-        # Save main_trace (mu and tau forests) based on dataclass fields
-        for forest_name, trace in self._main_trace.items():
-            state[f'main_trace.{forest_name}.class'] = trace.__class__.__name__
-            for field_name in trace.__dataclass_fields__:
-                # Skip mesh because we cannot easily serialize JAX mesh obj
-                if field_name == 'mesh':
-                    continue
-                val = getattr(trace, field_name)
-                if val is not None:
-                    state[f'main_trace.{forest_name}.{field_name}'] = np.asarray(val)
-
-        # Save format string if any
-        if self._x_train_fmt is not None:
-            state['x_train_fmt'] = json.dumps(self._x_train_fmt)
-
-        # Save test predictions, present only if `x_test` was passed
-        for key in ('_mu_test', '_tau_test', '_yhat_test'):
-            val = getattr(self, key)
-            if val is not None:
-                state[key] = np.asarray(val)
-
-        np.savez_compressed(path, allow_pickle=True, **state)
+        save_npz(path, self)
 
     @classmethod
-    def load_npz(cls, path: str | Path) -> 'bcf':
+    def load_npz(cls, path: str | PathLike) -> 'bcf':
         """
-        Load BCF traces from an NPZ archive, bypassing __init__ MCMC.
+        Load a model saved with `save_npz`.
+
+        Archives written by `save_npz` in bartz 0.13 load as models that
+        can only predict.
 
         Parameters
         ----------
         path
-            The file path to the saved NPZ archive.
+            The file to read from.
 
         Returns
         -------
         bcf
-            A reconstituted `bcf` object ready for prediction.
-
-        Raises
-        ------
-        ValueError
-            If the schema version in the archive is unsupported.
+            The loaded model, on the default device.
         """
-        with np.load(path, allow_pickle=False) as data:
-            # Inspect schema version
-            schema_version = int(data.get('schema_version', 1))
-            if schema_version != 1:
-                msg = f'Unsupported schema version: {schema_version}'
-                raise ValueError(msg)
-
-            # Reconstruct binner
-            binner = _deserialize_binner(data)
-
-            # Scalar traces
-            tau_0_trace = jnp.asarray(data['tau_0_trace'])
-            b_trace = jnp.stack([data['b0_trace'], data['b1_trace']], axis=1)
-
-            # Standardization metadata
-            standardize = bool(data.get('standardize', False))
-            y_mean = data.get('_y_mean', 0.0)
-            y_std = data.get('_y_std', 1.0)
-            outcome_type = str(data.get('_outcome_type', 'continuous'))
-            offset = data.get('_offset', 0.0)
-
-            # Reconstruct main_trace respecting dataclass field defaults
-            main_trace = {}
-            for forest_name in ['mu', 'tau']:
-                trace = object.__new__(MainTrace)
-                for field_name, field_def in MainTrace.__dataclass_fields__.items():
-                    key = f'main_trace.{forest_name}.{field_name}'
-                    if key in data:
-                        val = data[key]
-                        if field_name == 'has_chains':
-                            val = bool(val)
-                        else:
-                            val = jnp.asarray(val)
-                        object.__setattr__(trace, field_name, val)
-                    else:
-                        # Respect dataclass default or default_factory if defined
-                        if field_def.default is not dataclasses.MISSING:
-                            default_val = field_def.default  # pragma: no cover
-                        elif field_def.default_factory is not dataclasses.MISSING:
-                            default_val = (
-                                field_def.default_factory()
-                            )  # pragma: no cover
-                        else:
-                            default_val = None
-                        object.__setattr__(trace, field_name, default_val)
-                main_trace[forest_name] = trace
-
-            fmt_str = str(data.get('x_train_fmt', 'None'))
-            x_train_fmt = None if fmt_str == 'None' else json.loads(fmt_str)
-
-            mu_test, tau_test, yhat_test = (
-                jnp.asarray(data[key]) if key in data else None
-                for key in ('_mu_test', '_tau_test', '_yhat_test')
-            )
-
-            model = cls._from_saved_state(
-                binner=binner,
-                tau_0_trace=tau_0_trace,
-                b_trace=b_trace,
-                main_trace=main_trace,
-                x_train_fmt=x_train_fmt,
-                standardize=standardize,
-                y_mean=y_mean,
-                y_std=y_std,
-                outcome_type=outcome_type,
-                offset=offset,
-                mu_test=mu_test,
-                tau_test=tau_test,
-                yhat_test=yhat_test,
-            )
-
-            # Push loaded dictionary of arrays back into accelerator memory
-            return tree.map(device_put, model)
+        return check_class(load_npz(path), cls, path)
 
     def predict(
         self,

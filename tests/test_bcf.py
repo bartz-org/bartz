@@ -55,7 +55,7 @@ from bartz.mcmcstep import Forest, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from bartz.testing import gen_data
-from tests.test_mcmcloop import assert_trace_close, cat_traces
+from tests.test_mcmcloop import assert_trace_close, cat_traces, zero_non_leaves
 from tests.util import (
     assert_allclose,
     assert_array_equal,
@@ -262,12 +262,6 @@ class TestBcf:
 
         npz_path = tmp_path / 'test_bcf.npz'
         model.save_npz(npz_path)
-
-        # Verify schema_version is present in archive
-        with np.load(npz_path) as archive:
-            assert 'schema_version' in archive
-            assert archive['schema_version'].item() == 1
-
         loaded_model = bcf.load_npz(npz_path)
 
         preds_orig = model.predict(train.x, pihat_test=train.pihat)
@@ -311,13 +305,6 @@ class TestBcf:
 
         npz_path = tmp_path / 'test_bcf_std.npz'
         model.save_npz(npz_path)
-
-        with np.load(npz_path) as archive:
-            assert 'standardize' in archive
-            assert archive['standardize']
-            assert '_y_mean' in archive
-            assert '_y_std' in archive
-
         loaded_model = bcf.load_npz(npz_path)
 
         preds_orig = model.predict(train.x, pihat_test=train.pihat)
@@ -481,13 +468,6 @@ class TestBcf:
         assert_close_matrices(preds_std['tau'], preds_raw['tau'], rtol=1e-3)
         assert_close_matrices(model_std.sigma_trace, model_raw.sigma_trace, rtol=1e-3)
 
-    def test_load_npz_unsupported_schema_version(self, tmp_path: Path) -> None:
-        """Tests that loading an NPZ file with a future schema version raises ValueError."""
-        npz_path = tmp_path / 'invalid_schema.npz'
-        np.savez(npz_path, schema_version=999)
-        with pytest.raises(ValueError, match='Unsupported schema version: 999'):
-            bcf.load_npz(npz_path)
-
     def test_chains_convergence(self, keys: split, subtests: SubTests) -> None:
         """Two chains agree (Rhat near 1) without being identical."""
         n = 100
@@ -552,16 +532,17 @@ class TestBcf:
         preds = model.predict(x_test=test.x, pihat_test=test.pihat)
 
         tau_samples = preds['tau'] * y_std
-        cate_mean = np.mean(tau_samples, axis=0)
+        tau_mean = np.mean(tau_samples, axis=0)
+        tau_sd = np.std(tau_samples, axis=0)
 
-        # Point estimates should be close to 0
-        assert np.mean(np.abs(cate_mean)) < 0.2
+        # The estimated effect is nearly constant across units, so the units
+        # amount to a single test, and absolute thresholds fail on datasets
+        # where the posterior lands ~2 sd away from 0 by chance. Instead check
+        # no unit shows an effect beyond 3 posterior sd...
+        assert np.max(np.abs(tau_mean / tau_sd)) < 3
 
-        # 95% Credible interval should cover 0 for >= 90% of units
-        lower_bounds = np.percentile(tau_samples, 2.5, axis=0)
-        upper_bounds = np.percentile(tau_samples, 97.5, axis=0)
-        contains_zero = (lower_bounds <= 0.0) & (upper_bounds >= 0.0)
-        assert np.mean(contains_zero) >= 0.90
+        # ...and that the posterior is not trivially wide (sd ~0.1 here)
+        assert np.mean(tau_sd) < 0.25
 
     def test_noise_variance_recovery(self, keys: split) -> None:
         """Verifies that the BCF model recovers the true residual noise variance."""
@@ -762,9 +743,10 @@ class TestBcf:
             )
             assert_array_equal(main_single.tau_0[..., -1], final_single.tau_0)
             assert_array_equal(main_single.b[..., -1, :], final_single.b)
+            forest_tau = final_single.forest_tau
             assert_array_equal(
                 main_single.tau.leaf_tree[..., -1, :, :],
-                final_single.forest_tau.leaf_tree,
+                zero_non_leaves(forest_tau.leaf_tree, forest_tau.split_tree),
             )
 
     def test_unsplittable_x_reduction(self, keys: split) -> None:
@@ -1151,7 +1133,7 @@ class TestBcf:
     def test_constructor_options(
         self, keys: split, sample_intercept: bool, num_chains: int | None
     ) -> None:
-        """Constructor x_test/z_test, pihat toggle, tau_0 prior/toggle, chains, sigma_trace."""
+        """Constructor x_test/z_test, pihat toggle, tau_0 prior/toggle, chains, sigma_trace, maxdepth."""
         train, test = split_bcf_data(
             gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
         )
@@ -1167,6 +1149,8 @@ class TestBcf:
             tau_0_prior_var=0.5,
             sample_intercept=sample_intercept,
             standardize=False,
+            maxdepth_mu=5,
+            maxdepth_tau=4,
             num_trees_mu=NUM_TREES_MU,
             num_trees_tau=NUM_TREES_TAU,
             ndpost=NDPOST,
@@ -1183,6 +1167,10 @@ class TestBcf:
         assert model.mu_test.shape == (num_samples, N_TEST)
         tau_0_is_zero = model._tau_0_trace == 0
         assert_array_equal(tau_0_is_zero, jnp.full(num_samples, not sample_intercept))
+
+        # the heap size is set by the maximum depth
+        assert model._main_trace['mu'].split_tree.shape[-1] == 2**4
+        assert model._main_trace['tau'].split_tree.shape[-1] == 2**3
 
         # the chains are concatenated one after the other
         error_cov_inv = model._main_trace['mu'].error_cov_inv

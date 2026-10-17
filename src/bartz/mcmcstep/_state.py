@@ -61,6 +61,7 @@ from bartz._jaxext import (
     jit,
     minimal_unsigned_dtype,
 )
+from bartz._npz import serializable
 from bartz.grove import tree_depths
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes
 from bartz.mcmcstep._lazy import (
@@ -95,6 +96,7 @@ class OutcomeType(Enum):
 T = TypeVar('T')
 
 
+@serializable
 class Wishart(Module):
     """A precision matrix with a Wishart prior, bundled with its current value.
 
@@ -179,6 +181,7 @@ class Wishart(Module):
                 return self.nu - (k - 1)
 
 
+@serializable
 class DiagWishart(Wishart):
     """A diagonal precision matrix with independent chi-square diagonal entries.
 
@@ -215,6 +218,7 @@ class DiagWishart(Wishart):
         super().__init__(nu, rate, value)
 
 
+@serializable
 class Forest(Module):
     """Represents the MCMC state of a sum of trees."""
 
@@ -370,6 +374,7 @@ class Forest(Module):
         return self.var_tree.ndim > 2
 
 
+@serializable
 class StepConfig(Module):
     """Options for the MCMC step."""
 
@@ -422,6 +427,7 @@ class StepConfig(Module):
         return self.mesh is not None and 'data' in self.mesh.axis_names
 
 
+@serializable
 class State(Module):
     """Represents the MCMC state of BART."""
 

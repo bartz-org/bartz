@@ -146,17 +146,17 @@ class BCFPotentialOutcomes(BCFPrediction):
     """The individual treatment effect ``y1 - y0``."""
 
 
-@jit(static_argnums=(7,))
+@jit(static_argnames='probabilities')
 def predict(
     x_test: UInt[Array, 'p_or_p_plus_1 m'],
     mu_trace: MainTrace,
     tau_trace: MainTrace,
+    *,
     tau_0_trace: Float32[Array, ' num_samples'],
     b_trace: Float32[Array, 'num_samples 2'],
     y_mean: Float32[Array, ''],
     y_std: Float32[Array, ''],
     probabilities: bool,
-    /,
 ) -> BCFPrediction:
     """Implement `bcf.predict` on the binned test predictors.
 
@@ -209,15 +209,15 @@ def sigma_trace(
     return lax.rsqrt(_fold_chains(trace, 'error_cov_inv')) * y_std
 
 
-@jit(static_argnums=(5,))
+@jit(static_argnames='binary')
 def sample_potential_outcomes(
     key: Key[Array, ''],
     mu: Float32[Array, 'num_samples m'],
     tau: Float32[Array, 'num_samples m'],
+    *,
     sigma: Float32[Array, ' num_samples'],
     rho: Float32[Array, ''],
     binary: bool,
-    /,
 ) -> tuple[
     Float32[Array, 'num_samples m'],
     Float32[Array, 'num_samples m'],
@@ -752,11 +752,11 @@ class bcf(eqx.Module):
             self._binner.bin(x_test_unified),
             self._main_trace['mu'],
             self._main_trace['tau'],
-            self._tau_0_trace,
-            self._b_trace,
-            self._y_mean,
-            self._y_std,
-            probabilities,
+            tau_0_trace=self._tau_0_trace,
+            b_trace=self._b_trace,
+            y_mean=self._y_mean,
+            y_std=self._y_std,
+            probabilities=probabilities,
         )
 
     @property
@@ -854,8 +854,8 @@ class bcf(eqx.Module):
             key,
             preds['mu'],
             preds['tau'],
-            self.sigma_trace,
-            rho,
-            self._outcome_type == 'binary',
+            sigma=self.sigma_trace,
+            rho=rho,
+            binary=self._outcome_type == 'binary',
         )
         return BCFPotentialOutcomes(**preds, y0=y0, y1=y1, delta=delta)

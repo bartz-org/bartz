@@ -117,6 +117,7 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
+from bartz.mcmcstep._rebuild import rebuild_derived
 from bartz.mcmcstep._reduction import _gpu_sm_count
 from bartz.mcmcstep._state import (
     Forest,
@@ -136,6 +137,7 @@ from bartz.mcmcstep._step import (
     _sample_wishart_bartlett,
     _step_error_cov_inv_diag,
     _step_error_cov_inv_mv,
+    apply_moves_to_leaf_indices,
     leaf_scatter,
     sample_s_augmentation,
     sample_wishart_posterior,
@@ -1897,6 +1899,91 @@ def test_affluence_tree_stays_clean(
     assert_array_equal(affluence & ~is_leaf, jnp.zeros_like(affluence))
     # sanity: the mask is non-trivially populated (else the check is vacuous)
     assert jnp.any(affluence)
+
+
+@pytest.mark.parametrize(
+    'case', ['plain', 'min_points', 'error_scale', 'chains', 'binary', 'multivariate']
+)
+def test_rebuild_derived(keys: split, case: str) -> None:
+    """`rebuild_derived` reproduces the caches maintained by `step`."""
+    # generate data
+    n = 100
+    k = 2 if case == 'multivariate' else None
+    outcome_type = 'binary' if case == 'binary' else 'continuous'
+    data = gen_data(
+        keys.pop(),
+        n=n,
+        p=5,
+        k=k,
+        q=0,
+        lambda_=None if k is None else 0.5,
+        sigma2_lin=1.0,
+        sigma2_quad=1.0,
+        sigma2_eps=1.0,
+        outcome_type=outcome_type,
+    ).quantize()
+
+    # prepare arguments to `init()`
+    eye = jnp.float32(1.0) if k is None else jnp.eye(k)
+    kw: dict = dict(
+        X=data.x,
+        y=data.y,
+        outcome_type=outcome_type,
+        offset=jnp.zeros(() if k is None else (k,)),
+        max_split=data.max_split,
+        num_trees=NUM_TREES,
+        p_nonterminal=make_p_nonterminal(6),
+        leaf_prior_cov_inv=Wishart(None, None, NUM_TREES * eye),
+        error_cov_inv=None if case == 'binary' else Wishart(4.0, 4.0 * eye, eye),
+    )
+    if case == 'min_points':
+        kw = dict(kw, min_points_per_decision_node=10, min_points_per_leaf=5)
+    elif case == 'error_scale':
+        kw = dict(kw, error_scale=jnp.linspace(0.5, 2.0, n))
+    elif case == 'chains':
+        kw = dict(kw, num_chains=2)
+
+    # create initial state
+    state = init(**kw)
+
+    # run some mcmc steps
+    for key in keys.pop(20):
+        state = step(key, state)
+
+    # recalculate derived quantities in the state from scratch
+    old_forest = state.forest
+    rebuilt = rebuild_derived(state)
+    new_forest = rebuilt.forest
+
+    # compare leaf_indices
+    apply = apply_moves_to_leaf_indices
+    if state.has_chains:
+        apply = vmap(apply)
+    assert_array_equal(
+        apply(old_forest.leaf_indices, old_forest.to_prune, old_forest.move_node),
+        new_forest.leaf_indices,
+    )
+
+    # compare affluence tree
+    assert_array_equal(old_forest.affluence_tree, new_forest.affluence_tree)
+
+    # compare count and prec tree
+    is_leaf = jnp.vectorize(
+        partial(is_actual_leaf, add_bottom_level=True), signature='(h)->(t)'
+    )(old_forest.split_tree)
+    if old_forest.count_tree is not None:
+        assert new_forest.count_tree is not None
+        assert_array_equal(
+            jnp.where(is_leaf, old_forest.count_tree, 0), new_forest.count_tree
+        )
+    if old_forest.prec_tree is not None:
+        assert new_forest.prec_tree is not None
+        assert_close_matrices(
+            jnp.where(is_leaf, old_forest.prec_tree, 0), new_forest.prec_tree, rtol=1e-5
+        )
+
+    # compare residuals
+    assert_close_matrices(state.resid, rebuilt.resid, rtol=1e-5)
 
 
 # settings of `test_joint_distribution`

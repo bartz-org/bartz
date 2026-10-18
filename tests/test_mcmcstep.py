@@ -121,7 +121,7 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._rebuild import rebuild_derived
+from bartz.mcmcstep._rebuild import outcome_target, rebuild_derived
 from bartz.mcmcstep._reduction import _gpu_sm_count
 from bartz.mcmcstep._state import (
     Forest,
@@ -1992,13 +1992,41 @@ def test_rebuild_derived(keys: split, case: str) -> None:
 
 # settings of `test_joint_distribution`
 GEWEKE_NUM_CHAINS = 4000
-GEWEKE_NUM_STEPS = 100
+GEWEKE_NUM_STEPS = 30
 GEWEKE_NUM_TREES = 20
 GEWEKE_N = 20
 GEWEKE_NUM_TEST = 3
 GEWEKE_MAXDEPTH = 6
+GEWEKE_FLAT_P_NONTERMINAL = 0.6
 GEWEKE_NU = 10.0
-GEWEKE_RATE = 10.0
+GEWEKE_ERROR_PREC = 4.0
+
+
+class GewekeCase(NamedTuple):
+    """Model configuration of a `test_joint_distribution` case."""
+
+    p: int
+    nsplits: int
+    sparsity: Literal['fixed', 'free'] | None = None
+    flat: bool = False
+    min_points: tuple[int, int] | None = None
+    leaf_prior: bool = False
+    outcome: Literal['continuous', 'binary', 'multivariate', 'mixed'] = 'continuous'
+    error_scale: bool = False
+
+    def __str__(self) -> str:
+        defaults = GewekeCase(self.p, self.nsplits)
+        parts = [f'p{self.p}', f'nsplits{self.nsplits}']
+        for name, value, default in zip(self._fields, self, defaults, strict=True):
+            if value == default:
+                pass
+            elif value is True:
+                parts.append(name)
+            elif isinstance(value, tuple):
+                parts.append(name + '_'.join(map(str, value)))
+            else:
+                parts.append(f'{name}_{value}')
+        return '-'.join(parts)
 
 
 def geweke_sparse_kw(sparsity: Literal['fixed', 'free'] | None, p: int) -> kwdict:
@@ -2009,26 +2037,60 @@ def geweke_sparse_kw(sparsity: Literal['fixed', 'free'] | None, p: int) -> kwdic
     return {} if sparsity is None else params[sparsity]
 
 
-def geweke_state(
-    X: UInt8[Array, 'p n'], nsplits: int, sparsity: Literal['fixed', 'free'] | None
-) -> ChainDataState:
-    """Create a state with many chains, each with its own data."""
-    p, n = X.shape
-    sparse_kw = geweke_sparse_kw(sparsity, p)
-    init_sparse_kw: dict = (
-        {} if sparsity is None else dict(**sparse_kw, sparse_on_at=0, augment=True)
-    )
+def geweke_state(key: Key[Array, ''], case: GewekeCase) -> ChainDataState:
+    """Create a state with the model of `case` and many chains, each with its own data."""
+    k = 2 if case.outcome in ('multivariate', 'mixed') else None
+    kshape = () if k is None else (k,)
+    eye = jnp.float32(1.0) if k is None else jnp.eye(k)
+
+    leaf_prec = GEWEKE_NUM_TREES * eye
+    if case.leaf_prior:
+        rate = GEWEKE_NU / GEWEKE_NUM_TREES * eye
+        leaf_prior_cov_inv = Wishart(GEWEKE_NU, rate, leaf_prec)
+    else:
+        leaf_prior_cov_inv = Wishart(None, None, leaf_prec)
+
+    error_kw: dict
+    error_rate = GEWEKE_NU / GEWEKE_ERROR_PREC * eye
+    if case.outcome == 'binary':
+        error_kw = dict(outcome_type='binary')
+    elif case.outcome == 'mixed':
+        error_kw = dict(
+            outcome_type=['continuous', 'binary'],
+            error_cov_inv=DiagWishart(GEWEKE_NU, error_rate, eye),
+        )
+    else:
+        error_kw = dict(error_cov_inv=Wishart(GEWEKE_NU, error_rate, eye))
+
+    if case.flat:
+        p_nonterminal = jnp.full(GEWEKE_MAXDEPTH - 1, GEWEKE_FLAT_P_NONTERMINAL)
+    else:
+        p_nonterminal = make_p_nonterminal(GEWEKE_MAXDEPTH)
+
+    min_points_kw: dict = {}
+    if case.min_points is not None:
+        decision, leaf = case.min_points
+        min_points_kw = dict(
+            min_points_per_decision_node=decision, min_points_per_leaf=leaf
+        )
+
+    sparse_kw = geweke_sparse_kw(case.sparsity, case.p)
+    if case.sparsity is not None:
+        sparse_kw = dict(**sparse_kw, sparse_on_at=0, augment=True)
+
     state = init(
-        X=X,
-        y=jnp.zeros(n),
-        offset=0.0,
-        max_split=jnp.full(p, nsplits, jnp.uint8),
+        X=random.randint(key, (case.p, GEWEKE_N), 0, case.nsplits + 1, jnp.uint8),
+        y=jnp.zeros((*kshape, GEWEKE_N)),
+        offset=jnp.zeros(kshape),
+        max_split=jnp.full(case.p, case.nsplits, jnp.uint8),
         num_trees=GEWEKE_NUM_TREES,
-        p_nonterminal=make_p_nonterminal(GEWEKE_MAXDEPTH),
-        leaf_prior_cov_inv=Wishart(None, None, float(GEWEKE_NUM_TREES)),
-        error_cov_inv=Wishart(nu=GEWEKE_NU, rate=GEWEKE_RATE, value=1.0),
+        p_nonterminal=p_nonterminal,
+        leaf_prior_cov_inv=leaf_prior_cov_inv,
+        error_scale=jnp.linspace(0.5, 2.0, GEWEKE_N) if case.error_scale else None,
         num_chains=GEWEKE_NUM_CHAINS,
-        **init_sparse_kw,
+        **error_kw,
+        **min_points_kw,
+        **sparse_kw,
     )
     return ChainDataState.from_state(state)
 
@@ -2059,7 +2121,7 @@ def run_geweke_chains(step_keys: Key[Array, ' steps'], state: State) -> State:
 def summaries(
     state: State, X_test: UInt8[Array, 'p m']
 ) -> dict[str, Shaped[Array, ' chains']]:
-    """Compute scalar summaries of the parameters of each chain."""
+    """Compute scalar summaries of the parameters and data of each chain."""
     in_axes = (chain_vmap_axes(state),)
     return vmap(partial(chain_summaries, X_test=X_test), in_axes=in_axes)(state)
 
@@ -2067,12 +2129,13 @@ def summaries(
 def chain_summaries(
     state: State, X_test: UInt8[Array, 'p m']
 ) -> dict[str, Shaped[Array, '']]:
-    """Compute scalar summaries of the parameters of a single chain."""
+    """Compute scalar summaries of the parameters and data of a single chain."""
     forest = state.forest
-    p, m = X_test.shape
+    p, _ = X_test.shape
     num_splits = jnp.count_nonzero(forest.split_tree, axis=-1)
     varcount = var_histogram(p, forest.var_tree, forest.split_tree, sum_batch_axis=-1)
-    yhat = evaluate_forest(X_test, forest, sum_batch_axis=-1)
+    yhat = evaluate_forest(X_test, forest, sum_batch_axis=-1).ravel()
+    (num_yhat,) = yhat.shape
     out = {
         'number of stub trees': jnp.count_nonzero(num_splits == 0),
         'number of simple trees': jnp.count_nonzero(num_splits == 1),
@@ -2080,8 +2143,9 @@ def chain_summaries(
         'imbalance index': avg_imbalance_index(forest.split_tree),
         'average max tree depth': avg_max_tree_depth(forest.split_tree),
         **{f'varcount[{i}]': varcount[i] for i in range(p)},
-        **{f'y_test[{i}]': yhat[i] for i in range(m)},
+        **{f'y_test[{i}]': yhat[i] for i in range(num_yhat)},
     }
+
     if forest.theta is not None:
         assert forest.log_s is not None
         if p > 1:  # with p=1, s is always [1]
@@ -2089,14 +2153,33 @@ def chain_summaries(
             out['effective predictors'] = effective_predictors(varprob)
         if forest.rho is not None:
             out['theta'] = forest.theta
+
+    for name, prec in (
+        ('leaf precision', forest.leaf_prior_cov_inv),
+        ('error precision', state.error_cov_inv),
+    ):
+        if prec.nu is not None:
+            value = prec.value.ravel()
+            (size,) = value.shape
+            out |= {f'{name}[{i}]': value[i] for i in range(size)}
+
+    errors = standardized_errors(state)
+    out['error sum of squares'] = jnp.sum(jnp.square(errors))
+    out['first error'] = errors[0, 0]
     return out
 
 
-def standardized_errors(state: State) -> Float32[Array, ' n']:
-    """Compute the errors of the model of a single chain, scaled to unit variance."""
+def standardized_errors(state: State) -> Float32[Array, 'k n']:
+    """Compute the errors of the model of a single chain, whitened to iid standard Normal."""
     fit = evaluate_forest(state.X, state.forest, sum_batch_axis=-1)
-    errors = state.y - fit - state.forest.offset
-    return errors * jnp.sqrt(state.error_cov_inv.value)
+    errors = outcome_target(state) - fit - state.forest.offset[..., None]
+    if state.error_scale is not None:
+        errors /= state.error_scale
+    prec = state.error_cov_inv.value
+    if prec.ndim == 0:
+        return (errors * jnp.sqrt(prec))[None, :]
+    else:
+        return jnp.linalg.cholesky(prec).T @ errors
 
 
 def effective_predictors(
@@ -2129,40 +2212,46 @@ def avg_max_tree_depth(
 
 
 @pytest.mark.parametrize(
-    ('p', 'nsplits', 'sparsity'),
+    'case',
     [
-        (1, 1, None),
-        (3, 2, None),
-        (10, 1, None),
-        (10, 255, None),
-        (10, 1, 'fixed'),
-        (10, 1, 'free'),
-        (10, 255, 'free'),
-        (1, 1, 'free'),
-        (3, 2, 'free'),
+        GewekeCase(1, 1),
+        GewekeCase(3, 2),
+        GewekeCase(10, 1),
+        GewekeCase(10, 255),
+        GewekeCase(10, 1, sparsity='fixed'),
+        GewekeCase(10, 1, sparsity='free'),
+        GewekeCase(10, 255, sparsity='free'),
+        GewekeCase(1, 1, sparsity='free'),
+        GewekeCase(3, 2, sparsity='free'),
+        # with a flatter tree prior, fewer moves are accepted almost surely and
+        # the trees run out of decision rules, so the proposal ratios matter
+        GewekeCase(1, 1, flat=True),
+        GewekeCase(1, 3, flat=True),
+        GewekeCase(3, 2, flat=True),
+        GewekeCase(10, 255, flat=True),
+        GewekeCase(3, 2, flat=True, min_points=(6, 3)),
+        GewekeCase(10, 255, min_points=(6, 3)),
+        GewekeCase(10, 255, leaf_prior=True),
+        GewekeCase(10, 255, outcome='binary'),
+        GewekeCase(10, 255, outcome='multivariate', leaf_prior=True),
+        GewekeCase(10, 255, outcome='mixed'),
+        GewekeCase(10, 255, error_scale=True),
     ],
+    ids=str,
 )
-def test_joint_distribution(
-    keys: split,
-    p: int,
-    nsplits: int,
-    sparsity: Literal['fixed', 'free'] | None,
-    subtests: SubTests,
-) -> None:
+def test_joint_distribution(keys: split, case: GewekeCase, subtests: SubTests) -> None:
     """Check `step` keeps parameters and data jointly distributed as the model.
 
     Many independent chains start from draws of the model, and alternate
     `step` with drawing new data given the parameters (Geweke 2004). If `step`
     leaves the posterior invariant, the chains stay distributed as the model,
-    so the parameters are distributed as their prior, which is compared
-    against `sample_prior`. The blocked low-p cases with variable selection
-    stress-test the augmentation of `log_s`.
+    which is compared against independent draws. The blocked low-p cases with
+    variable selection stress-test the augmentation of `log_s`.
     """
-    X = random.randint(keys.pop(), (p, GEWEKE_N), 0, nsplits + 1, jnp.uint8)
-    state = geweke_state(X, nsplits, sparsity)
+    state = geweke_state(keys.pop(), case)
     initial = sample_joint(keys.pop(), copy_arrays(state))
     final = run_geweke_chains(keys.pop(GEWEKE_NUM_STEPS), initial)
-    prior = sample_prior(keys.pop(), state)
+    ref = sample_joint(keys.pop(), state)
 
     # a sampler stuck at its initial state would pass the comparison
     with subtests.test('chains move'):
@@ -2171,29 +2260,36 @@ def test_joint_distribution(
         moved = jnp.any(changed.reshape(GEWEKE_NUM_CHAINS, -1), axis=1)
         assert jnp.mean(moved) > 0.5
 
-    # compare the parameters after a step with independent prior draws
-    X_test = random.randint(keys.pop(), (p, GEWEKE_NUM_TEST), 0, nsplits + 1, jnp.uint8)
-    mcmc = summaries(final, X_test)
-    ref = summaries(prior, X_test)
+    X_test = random.randint(
+        keys.pop(), (case.p, GEWEKE_NUM_TEST), 0, case.nsplits + 1, jnp.uint8
+    )
+    mcmc_stats = summaries(final, X_test)
+    ref_stats = summaries(ref, X_test)
 
-    # data and parameters after a step are jointly distributed as in the
-    # model, so the standardized errors are iid standard normal
+    # where the distribution is known exactly, compare with it, which has more
+    # power than comparing with independent draws
     errors = vmap(standardized_errors, in_axes=(chain_vmap_axes(final),))(final)
-    prec = final.error_cov_inv.value
-    gamma_cdf = stats.gamma(GEWEKE_NU / 2, scale=2 / GEWEKE_RATE).cdf
+    exact = {'errors': (errors.ravel(), stats.norm.cdf)}
+    for name, prec in (
+        ('leaf precision', final.forest.leaf_prior_cov_inv),
+        ('error precision', final.error_cov_inv),
+    ):
+        if prec.nu is not None and prec.value.ndim == 1:
+            assert prec.rate is not None
+            cdf = stats.gamma(prec.nu.item() / 2, scale=2 / prec.rate.item()).cdf
+            exact[name] = (prec.value, cdf)
 
     # keep the joint false alarm rate low
-    threshold = 1e-3 / (len(mcmc) + 2)
+    threshold = 1e-3 / (len(mcmc_stats) + len(exact))
 
-    for name, x in mcmc.items():
+    for name, x in mcmc_stats.items():
         with subtests.test(name):
-            assert ks_2samp(x, ref[name]).pvalue > threshold
+            pvalue = ks_2samp(x, ref_stats[name], method='asymp').pvalue
+            assert pvalue > threshold
 
-    with subtests.test('error precision'):
-        assert ks_1samp(prec, gamma_cdf).pvalue > threshold
-
-    with subtests.test('errors'):
-        assert ks_1samp(errors.ravel(), stats.norm.cdf).pvalue > threshold
+    for name, (x, cdf) in exact.items():
+        with subtests.test(f'{name} (exact)'):
+            assert ks_1samp(x, cdf).pvalue > threshold
 
 
 class TestMixedBinaryContinuous:

@@ -2031,9 +2031,10 @@ class GewekeCase(NamedTuple):
 
 def geweke_sparse_kw(sparsity: Literal['fixed', 'free'] | None, p: int) -> kwdict:
     """Sparsity-prior hyperparameters for `init`."""
-    # the Beta prior on theta/(theta+rho) is kept concentrated, because the
-    # augmentation of `log_s` is biased when a diffuse one makes `s` very sparse
-    params = {'fixed': dict(theta=float(p)), 'free': dict(a=20.0, b=20.0, rho=float(p))}
+    # the Beta prior on theta/(theta+rho) has a=1, unlike the a=0.5 default of
+    # `Bart`, because the augmentation of `log_s` is biased when `s` is very
+    # sparse, which a < 1 makes likely; the bias is detected with a <= 0.8
+    params = {'fixed': dict(theta=float(p)), 'free': dict(a=1.0, b=1.0, rho=float(p))}
     return {} if sparsity is None else params[sparsity]
 
 

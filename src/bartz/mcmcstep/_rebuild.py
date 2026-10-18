@@ -36,11 +36,11 @@ from bartz.grove import evaluate_forest, is_actual_leaf, traverse_forest
 from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.mcmcstep._moves import _process_exclude, fully_used_variables
 from bartz.mcmcstep._reduction import AutoBatchedReduction
-from bartz.mcmcstep._state import Forest, State
+from bartz.mcmcstep._state import Forest, State, StateT
 
 
-@jit
-def rebuild_derived(state: State) -> State:
+@jit(donate_argnums=(0,))
+def rebuild_derived(state: StateT) -> StateT:
     """Recompute the fields of `state` derived from its parameters and data.
 
     The parameters are the trees, the precisions, `Forest.log_s`,
@@ -48,7 +48,8 @@ def rebuild_derived(state: State) -> State:
     fixed by `init`. The caches are rebuilt from scratch, any pending prune is
     dropped, and the per-step statistics are zeroed. The run history
     (`State.resid_eff_scale`, `State.resid_inexact_integral`,
-    `StepConfig.steps_done`) is left untouched.
+    `StepConfig.steps_done`) is left untouched. The memory of the input state
+    is re-used for the output state.
     """
     if state.config.data_sharded:
         msg = 'rebuilding a state with the data sharded is not supported'
@@ -60,7 +61,7 @@ def rebuild_derived(state: State) -> State:
         return rebuild_derived_chain(state)
 
 
-def rebuild_derived_chain(state: State) -> State:
+def rebuild_derived_chain(state: StateT) -> StateT:
     """Implement `rebuild_derived` on a state without a chain axis."""
     forest = state.forest
     num_trees, *_, tree_size = forest.leaf_tree.shape

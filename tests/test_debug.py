@@ -25,27 +25,41 @@
 """Test `bartz.debug`."""
 
 from collections import namedtuple
+from dataclasses import replace
 from pathlib import Path
 from typing import NamedTuple
 
 import numpy
 import pytest
-from equinox import tree_at
+from equinox import EquinoxRuntimeError, tree_at
 from jax import numpy as jnp
-from jax import random
+from jax import random, vmap
 from jax.nn import softmax
 from jax.scipy.special import xlogy
 from jax.scipy.stats import chi2
-from jaxtyping import Array, Float32, Int32, Shaped
+from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt8
 from scipy import stats
-from scipy.stats import ks_1samp
+from scipy.stats import ks_1samp, ks_2samp
 
 from bartz._jaxext import minimal_unsigned_dtype, split
 from bartz.debug import BARTTraceMeta, MinimalTrace, sample_prior, trees_BART_to_bartz
-from bartz.debug._prior import sample_s, sample_theta
+from bartz.debug._prior import (
+    MinPointsCriterion,
+    RejectionCriterion,
+    TreeStructure,
+    rejection_sample,
+    sample_diag_wishart,
+    sample_forest_structure,
+    sample_leaves,
+    sample_prior_trees,
+    sample_s,
+    sample_theta,
+    sample_wishart,
+)
 from bartz.grove import TreesTrace, check_trace, describe_error, format_tree
 from bartz.grove._check import check_tree
 from bartz.mcmcloop import compute_varcount, evaluate_trace
+from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal
 from bartz.prepcovars import GivenSplitsBinner
 from tests.util import (
     assert_array_equal,
@@ -150,7 +164,7 @@ def test_format_tree_multivariate() -> None:
 
 
 class TestSamplePrior:
-    """Test `debug.sample_prior`."""
+    """Test `debug._prior.sample_prior_trees`."""
 
     Args = namedtuple(
         'Args',
@@ -167,7 +181,7 @@ class TestSamplePrior:
 
     @pytest.fixture(params=['uniform', 'nonuniform'])
     def args(self, request: pytest.FixtureRequest, keys: split) -> Args:
-        """Prepare arguments for `sample_prior`, with and without `log_s`."""
+        """Prepare arguments for `sample_prior_trees`, with and without `log_s`."""
         # config
         trace_length = 1000
         num_trees = 200
@@ -196,7 +210,7 @@ class TestSamplePrior:
 
     def test_valid_trees(self, args: Args) -> None:
         """Check all sampled trees are valid."""
-        trees = sample_prior(**args._asdict())
+        trees = sample_prior_trees(**args._asdict())
         batch_shape = (args.trace_length, args.num_trees)
         heap_size = 2 ** (args.p_nonterminal.size + 1)
         assert trees.leaf_tree.shape == (*batch_shape, heap_size)
@@ -213,13 +227,13 @@ class TestSamplePrior:
             p_nonterminal = p_nonterminal.at[:max_depth].set(1.0)
             args = tree_at(lambda args: args.p_nonterminal, args, p_nonterminal)
             args = tree_at(lambda args: args.key, args, keys.pop())
-            trees = sample_prior(**args._asdict())
+            trees = sample_prior_trees(**args._asdict())
             assert jnp.all(trees.split_tree[:, :, 1 : 2**max_depth])
             assert not jnp.any(trees.split_tree[:, :, 2**max_depth :])
 
     def test_forest_sdev(self, keys: split, args: Args) -> None:
         """Check that the sum of trees is standard Normal."""
-        trees = sample_prior(**args._asdict())
+        trees = sample_prior_trees(**args._asdict())
         leaf_indices = random.randint(
             keys.pop(), trees.leaf_tree.shape[:2], 0, trees.leaf_tree.shape[-1]
         )
@@ -234,7 +248,7 @@ class TestSamplePrior:
 
     def test_trees_differ(self, args: Args) -> None:
         """Check that trees are different across iterations."""
-        trees = sample_prior(**args._asdict())
+        trees = sample_prior_trees(**args._asdict())
         for attr in ('leaf_tree', 'var_tree', 'split_tree'):
             heap = getattr(trees, attr)
             diff_trace = jnp.diff(heap, axis=0)
@@ -252,7 +266,7 @@ class TestSamplePrior:
         1e-10), while the 1e-3 threshold keeps false positives rare.
         """
         p = args.max_split.size
-        trees = sample_prior(**args._asdict())
+        trees = sample_prior_trees(**args._asdict())
         counts = jnp.bincount(trees.var_tree[:, :, 1].ravel(), length=p)
         log_s = jnp.zeros(p) if args.log_s is None else args.log_s
         assert max_lr_test(counts, softmax(log_s)) > 1e-3
@@ -267,8 +281,8 @@ class TestSamplePrior:
         p = args.max_split.size
         log_s = jnp.log(1 + jnp.arange(p)).astype(jnp.float32)
         args = args._replace(log_s=log_s)
-        shared = sample_prior(**args._asdict())
-        per_iter = sample_prior(
+        shared = sample_prior_trees(**args._asdict())
+        per_iter = sample_prior_trees(
             **args._replace(
                 log_s=jnp.broadcast_to(log_s, (args.trace_length, p))
             )._asdict()
@@ -281,7 +295,7 @@ class TestSamplePrior:
 
         Alternate iterations between two different split-probability vectors and
         check that, splitting the root variables by parity, each group follows
-        the `softmax` of its own `log_s`. This would fail if `sample_prior`
+        the `softmax` of its own `log_s`. This would fail if `sample_prior_trees`
         ignored the per-iteration axis or misaligned it with the trees.
         """
         p = args.max_split.size
@@ -291,7 +305,7 @@ class TestSamplePrior:
             (jnp.arange(args.trace_length) % 2)[:, None] == 0, v_even, v_odd
         )
 
-        trees = sample_prior(**args._replace(log_s=log_s)._asdict())
+        trees = sample_prior_trees(**args._replace(log_s=log_s)._asdict())
         root = trees.var_tree[:, :, 1]
         for parity, v in ((0, v_even), (1, v_odd)):
             counts = jnp.bincount(root[parity::2].ravel(), length=p)
@@ -307,7 +321,7 @@ class TestSamplePrior:
         with probability `softmax(log_s)`.
         """
         p = args.max_split.size
-        result = sample_prior(
+        result = sample_prior_trees(
             **args._replace(log_s=None)._asdict(), a=0.5, b=1.0, rho=float(p)
         )
         theta = result.theta
@@ -333,7 +347,9 @@ class TestSamplePrior:
         per iteration, and valid trees.
         """
         p = args.max_split.size
-        result = sample_prior(**args._replace(log_s=None)._asdict(), theta=float(p))
+        result = sample_prior_trees(
+            **args._replace(log_s=None)._asdict(), theta=float(p)
+        )
         assert result.theta is not None
         assert result.log_s is not None
         assert jnp.all(result.theta == p)
@@ -348,12 +364,12 @@ class TestSamplePrior:
     def test_partial_rho_a_b(self, args: Args, kwargs: dict) -> None:
         """Setting only some of `rho`, `a`, `b` raises."""
         with pytest.raises(ValueError, match='rho, a, b must be either'):
-            sample_prior(**args._replace(log_s=None)._asdict(), **kwargs)
+            sample_prior_trees(**args._replace(log_s=None)._asdict(), **kwargs)
 
     def test_theta_with_rho_a_b(self, args: Args) -> None:
         """Setting `theta` together with `rho`, `a`, `b` raises."""
         with pytest.raises(ValueError, match='sampled from the prior'):
-            sample_prior(
+            sample_prior_trees(
                 **args._replace(log_s=None)._asdict(), theta=1.0, a=0.5, b=1.0, rho=1.0
             )
 
@@ -361,13 +377,15 @@ class TestSamplePrior:
         """Setting `log_s` together with `rho`, `a`, `b` raises."""
         log_s = jnp.zeros(args.max_split.size)
         with pytest.raises(ValueError, match='sampled from the prior'):
-            sample_prior(**args._replace(log_s=log_s)._asdict(), a=0.5, b=1.0, rho=1.0)
+            sample_prior_trees(
+                **args._replace(log_s=log_s)._asdict(), a=0.5, b=1.0, rho=1.0
+            )
 
     def test_log_s_with_theta(self, args: Args) -> None:
         """Setting `log_s` together with `theta` raises."""
         log_s = jnp.zeros(args.max_split.size)
         with pytest.raises(ValueError, match='sampled from the prior'):
-            sample_prior(**args._replace(log_s=log_s)._asdict(), theta=1.0)
+            sample_prior_trees(**args._replace(log_s=log_s)._asdict(), theta=1.0)
 
 
 class TestSampleTheta:
@@ -406,6 +424,234 @@ class TestSampleS:
     def test_scalar_theta_shape(self, keys: split) -> None:
         """A scalar `theta` yields a single ``(p,)`` `log_s` vector."""
         assert sample_s(keys.pop(), 2.0, 5).shape == (5,)
+
+
+class PositiveCriterion(RejectionCriterion):
+    """Accept the scalars above a threshold."""
+
+    threshold: float
+
+    def accept(self, sample: Float32[Array, '']) -> Bool[Array, '']:
+        """Check the sample is above the threshold."""
+        return sample > self.threshold
+
+
+class TestRejectionSample:
+    """Test `_prior.rejection_sample`."""
+
+    @pytest.mark.parametrize('threshold', [0.0, 2.0])
+    def test_truncated_normal(self, keys: split, threshold: float) -> None:
+        """Normal samples conditioned on a lower bound are truncated Normal.
+
+        With the higher threshold, about 2% of the candidates are accepted, so
+        filling the samples takes many iterations.
+        """
+        x = rejection_sample(
+            keys.pop(),
+            lambda key, num: random.normal(key, (num,)),
+            PositiveCriterion(threshold),
+            10_000,
+        )
+        assert jnp.all(x > threshold)
+        cdf = stats.truncnorm(threshold, numpy.inf).cdf
+        assert ks_1samp(x, cdf).pvalue > 1e-3
+
+
+class TestMinPointsCriterion:
+    """Test `_prior.MinPointsCriterion`."""
+
+    @pytest.fixture
+    def structure(self) -> TreeStructure:
+        """Make a tree splitting the root at 1 and its right child at 2."""
+        tree = manual_tree(
+            [[0.0], [0.0, 0.0], [0.0, 0.0, 0.0, 0.0]], [[0], [0, 0]], [[1], [0, 2]]
+        )
+        return TreeStructure(var_tree=tree.var_tree, split_tree=tree.split_tree)
+
+    @pytest.fixture
+    def X(self) -> UInt8[Array, '1 6']:
+        """Make datapoints that fill the leaves of `structure` with 2, 3, 1 points.
+
+        The decision nodes then have 6 and 4 datapoints.
+        """
+        return jnp.array([[0, 0, 1, 1, 1, 2]], jnp.uint8)
+
+    @pytest.mark.parametrize(
+        ('decision', 'leaf', 'expected'),
+        [
+            (None, None, True),
+            (4, None, True),
+            (5, None, False),
+            (None, 1, True),
+            (None, 2, False),
+            (4, 1, True),
+        ],
+    )
+    def test_accept(
+        self,
+        structure: TreeStructure,
+        X: UInt8[Array, '1 6'],
+        decision: int | None,
+        leaf: int | None,
+        expected: bool,
+    ) -> None:
+        """The criterion checks the datapoints in decision nodes and in leaves."""
+        criterion = MinPointsCriterion(
+            X=X,
+            min_points_per_decision_node=None
+            if decision is None
+            else jnp.int32(decision),
+            min_points_per_leaf=None if leaf is None else jnp.int32(leaf),
+        )
+        assert criterion.accept(structure) == expected
+
+    def test_stump(self, structure: TreeStructure, X: UInt8[Array, '1 6']) -> None:
+        """The stump is always accepted, as the root counts as no leaf."""
+        criterion = MinPointsCriterion(
+            X=X,
+            min_points_per_decision_node=jnp.int32(100),
+            min_points_per_leaf=jnp.int32(100),
+        )
+        stump = TreeStructure(
+            var_tree=jnp.zeros_like(structure.var_tree),
+            split_tree=jnp.zeros_like(structure.split_tree),
+        )
+        assert criterion.accept(stump)
+
+
+class TestConstrainedForestStructure:
+    """Test `_prior.sample_forest_structure` with a criterion."""
+
+    @pytest.fixture
+    def criterion(self, keys: split) -> MinPointsCriterion:
+        """Make a criterion on random datapoints."""
+        return MinPointsCriterion(
+            X=random.randint(keys.pop(), (2, 20), 0, 4, jnp.uint8),
+            min_points_per_decision_node=jnp.int32(6),
+            min_points_per_leaf=jnp.int32(3),
+        )
+
+    def kw(self) -> dict:
+        """Prepare the prior parameters."""
+        return dict(max_split=jnp.full(2, 3, jnp.uint8), p_nonterminal=jnp.full(4, 0.7))
+
+    def test_matches_filtering(
+        self, keys: split, criterion: MinPointsCriterion
+    ) -> None:
+        """Conditioning on a criterion matches filtering unconditioned trees."""
+        constrained = sample_forest_structure(
+            keys.pop(), (5_000,), criterion=criterion, **self.kw()
+        )
+        free = sample_forest_structure(keys.pop(), (50_000,), **self.kw())
+        accept = vmap(criterion.accept)
+        assert jnp.all(accept(constrained))
+        accepted = accept(free)
+
+        # compare the number of nodes, and the variable of the root
+        num_nodes = jnp.count_nonzero(constrained.split_tree, axis=-1)
+        reference = jnp.count_nonzero(free.split_tree[accepted], axis=-1)
+        assert ks_2samp(num_nodes, reference).pvalue > 1e-3
+        reference = free.var_tree[accepted, 1]
+        assert ks_2samp(constrained.var_tree[:, 1], reference).pvalue > 1e-3
+
+    def test_per_forest_log_s(self, keys: split, criterion: MinPointsCriterion) -> None:
+        """A `log_s` that varies across forests is rejected."""
+        log_s = jnp.zeros((3, 2))
+        with pytest.raises(ValueError, match='shared `log_s`'):
+            sample_forest_structure(
+                keys.pop(), (3, 10), criterion=criterion, log_s=log_s, **self.kw()
+            )
+
+
+class TestSamplePriorConstraintsChains:
+    """Test `sample_prior` with constraints and a fixed `log_s` in multiple chains."""
+
+    def init(self, keys: split) -> State:
+        """Create a multichain state with constraints and a fixed `log_s`."""
+        p, n = 2, 20
+        return init(
+            X=random.randint(keys.pop(), (p, n), 0, 4, jnp.uint8),
+            y=jnp.zeros(n),
+            offset=0.0,
+            max_split=jnp.full(p, 3, jnp.uint8),
+            num_trees=5,
+            p_nonterminal=make_p_nonterminal(4),
+            leaf_prior_cov_inv=Wishart(None, None, 5.0),
+            error_cov_inv=Wishart(4.0, 4.0, 1.0),
+            min_points_per_decision_node=6,
+            min_points_per_leaf=3,
+            log_s=jnp.array([0.0, -1.0]),
+            num_chains=3,
+        )
+
+    def test_shared(self, keys: split) -> None:
+        """The `log_s` repeated by `init` across the chains works."""
+        state = sample_prior(keys.pop(), self.init(keys))
+        assert state.forest.split_tree.any()
+
+    def test_different(self, keys: split) -> None:
+        """A `log_s` that differs across the chains raises."""
+        state = self.init(keys)
+        assert state.forest.log_s is not None
+        forest = replace(state.forest, log_s=state.forest.log_s.at[0, 0].set(1.0))
+        state = replace(state, forest=forest)
+        # under jit, the error surfaces through a callback as a ValueError
+        with pytest.raises(
+            (EquinoxRuntimeError, ValueError), match='same in all chains'
+        ):
+            sample_prior(keys.pop(), state)
+
+
+class TestSampleWishart:
+    """Test `_prior.sample_wishart` and `_prior.sample_diag_wishart`."""
+
+    def test_scalar(self, keys: split) -> None:
+        """A scalar precision is Gamma, and its factor is the square root."""
+        nu, rate = 5.0, 2.0
+        value, chol = vmap(sample_wishart, in_axes=(0, None, None))(
+            keys.pop(100_000), jnp.float32(nu), jnp.float32(rate)
+        )
+        assert_close_matrices(jnp.square(chol), value, rtol=1e-6)
+        cdf = stats.gamma(nu / 2, scale=2 / rate).cdf
+        assert ks_1samp(value, cdf).pvalue > 1e-3
+
+    def test_matrix(self, keys: split) -> None:
+        """The diagonal of a Wishart matrix is Gamma, with the right mean."""
+        nu = 5.0
+        rate = jnp.array([[2.0, 0.5], [0.5, 1.0]])
+        value, chol = vmap(sample_wishart, in_axes=(0, None, None))(
+            keys.pop(100_000), jnp.float32(nu), rate
+        )
+        assert_close_matrices(chol @ chol.mT, value, rtol=1e-5, reduce_rank=True)
+        assert_array_equal(jnp.triu(chol, 1), jnp.zeros_like(chol))
+        scale = jnp.linalg.inv(rate)
+        assert_close_matrices(value.mean(axis=0), nu * scale, rtol=0.02)
+        for i in range(2):
+            cdf = stats.gamma(nu / 2, scale=2 * scale[i, i].item()).cdf
+            assert ks_1samp(value[:, i, i], cdf).pvalue > 1e-3
+
+    def test_diag(self, keys: split) -> None:
+        """The diagonal precision has independent Gamma components."""
+        nu = 5.0
+        rate = jnp.diag(jnp.array([2.0, 0.5]))
+        value, chol = vmap(sample_diag_wishart, in_axes=(0, None, None))(
+            keys.pop(100_000), jnp.float32(nu), rate
+        )
+        assert_close_matrices(chol @ chol.mT, value, rtol=1e-5, reduce_rank=True)
+        for i in range(2):
+            cdf = stats.gamma(nu / 2, scale=2 / rate[i, i].item()).cdf
+            assert ks_1samp(value[:, i, i], cdf).pvalue > 1e-3
+
+
+def test_sample_leaves_covariance(keys: split) -> None:
+    """Vector-valued leaves have the inverse of the prior precision as covariance."""
+    prec = jnp.array([[2.0, 0.5], [0.5, 1.0]])
+    chol = jnp.linalg.cholesky(prec)
+    leaves = sample_leaves(keys.pop(), (100_000, 2, 4), chol)
+    flat = jnp.moveaxis(leaves, 1, -1).reshape(-1, 2)
+    # cov = prec^-1 = (L L^T)^-1, so L^T cov L = I
+    whitened = chol.T @ jnp.cov(flat.T) @ chol
+    assert_close_matrices(whitened, jnp.eye(2), rtol=0.02)
 
 
 class TestCheckTree:

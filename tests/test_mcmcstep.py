@@ -87,9 +87,8 @@ from bartz._jaxext import (
     split,
 )
 from bartz._typing import kwdict
-from bartz.debug import sample_prior
+from bartz.debug import ChainDataState, sample_data, sample_prior
 from bartz.grove import (
-    TreeHeaps,
     evaluate_forest,
     is_actual_leaf,
     tree_actual_depth,
@@ -1952,7 +1951,7 @@ def test_rebuild_derived(keys: split, case: str) -> None:
 
     # recalculate derived quantities in the state from scratch
     old_forest = state.forest
-    rebuilt = rebuild_derived(state)
+    rebuilt = rebuild_derived(copy_arrays(state))
     new_forest = rebuilt.forest
 
     # compare leaf_indices
@@ -1998,44 +1997,17 @@ GEWEKE_RATE = 10.0
 
 
 def geweke_sparse_kw(sparsity: Literal['fixed', 'free'] | None, p: int) -> kwdict:
-    """Sparsity-prior hyperparameters shared by `init` and `sample_prior`."""
+    """Sparsity-prior hyperparameters for `init`."""
     # the Beta prior on theta/(theta+rho) is kept concentrated, because the
     # augmentation of `log_s` is biased when a diffuse one makes `s` very sparse
     params = {'fixed': dict(theta=float(p)), 'free': dict(a=20.0, b=20.0, rho=float(p))}
     return {} if sparsity is None else params[sparsity]
 
 
-def forest_fit(state: State) -> Float32[Array, ' n']:
-    """Compute the mean of the outcome from the forest of `state`."""
-    fit = evaluate_forest(state.X, state.forest, sum_batch_axis=-1)
-    return state.forest.offset + fit
-
-
-def resample_data(key: Key[Array, ''], state: State) -> State:
-    """Draw new data from the model given the parameters in `state`.
-
-    `resid` is updated incrementally rather than recomputed, such that errors
-    in its bookkeeping by `step` persist.
-    """
-    eta = forest_fit(state)
-    eps = random.normal(key, eta.shape)
-    y = eta + eps * lax.rsqrt(state.error_cov_inv.value)
-    resid = state.resid + (y - state.y) / state.resid_unit
-    return replace(state, y=y, resid=resid)
-
-
-def run_geweke(
-    key: Key[Array, ''],
-    X: UInt8[Array, 'p n'],
-    nsplits: int,
-    sparsity: Literal['fixed', 'free'] | None,
-) -> State:
-    """Alternate `step` and `resample_data` in many independent chains.
-
-    The chains start from stumps, and from prior draws of the sparsity
-    parameters, which otherwise take long to reach their prior.
-    """
-    keys = split(key)
+def geweke_state(
+    X: UInt8[Array, 'p n'], nsplits: int, sparsity: Literal['fixed', 'free'] | None
+) -> ChainDataState:
+    """Create a state with many chains, each with its own data."""
     p, n = X.shape
     sparse_kw = geweke_sparse_kw(sparsity, p)
     init_sparse_kw: dict = (
@@ -2050,72 +2022,86 @@ def run_geweke(
         p_nonterminal=make_p_nonterminal(GEWEKE_MAXDEPTH),
         leaf_prior_cov_inv=Wishart(None, None, float(GEWEKE_NUM_TREES)),
         error_cov_inv=Wishart(nu=GEWEKE_NU, rate=GEWEKE_RATE, value=1.0),
+        num_chains=GEWEKE_NUM_CHAINS,
         **init_sparse_kw,
     )
+    return ChainDataState.from_state(state)
 
-    # independent chains, each with its own data
-    states = tree.map(
-        lambda x: jnp.broadcast_to(x, (GEWEKE_NUM_CHAINS, *x.shape)), state
-    )
-    if sparsity is not None:
-        prior = sample_prior(
-            keys.pop(),
-            GEWEKE_NUM_CHAINS,
-            1,
-            max_split=state.forest.max_split,
-            p_nonterminal=make_p_nonterminal(GEWEKE_MAXDEPTH),
-            sigma_mu=jnp.float32(1.0),
-            **sparse_kw,
+
+def run_geweke(key: Key[Array, ''], state: ChainDataState) -> State:
+    """Alternate `step` and `sample_data` in many independent chains.
+
+    The chains start from stumps, and from prior draws of the sparsity
+    parameters, which otherwise take long to reach their prior.
+    """
+    keys = split(key)
+    if state.forest.theta is not None:
+        prior = sample_prior(keys.pop(), copy_arrays(state))
+        forest = replace(
+            state.forest, log_s=prior.forest.log_s, theta=prior.forest.theta
         )
-
-        def set_sparsity(
-            state: State, log_s: Float32[Array, ' p'], theta: Float32[Array, '']
-        ) -> State:
-            forest = replace(state.forest, log_s=log_s, theta=theta)
-            return replace(state, forest=forest)
-
-        states = vmap(set_sparsity)(states, nnone(prior.log_s), nnone(prior.theta))
-
-    return run_geweke_chains(keys.pop(GEWEKE_NUM_STEPS), states)
+        state = replace(state, forest=forest)
+    return run_geweke_chains(keys.pop(GEWEKE_NUM_STEPS), state)
 
 
 def geweke_step(key: Key[Array, ''], state: State) -> State:
     """Draw new data given the parameters, then the parameters given the data."""
     keys = split(key)
-    return step(keys.pop(), resample_data(keys.pop(), state))
+    return step(keys.pop(), sample_data(keys.pop(), state))
 
 
 @jit
-def run_geweke_chains(step_keys: Key[Array, ' steps'], states: State) -> State:
-    """Iterate `geweke_step` on a batch of independent chains."""
+def run_geweke_chains(step_keys: Key[Array, ' steps'], state: State) -> State:
+    """Iterate `geweke_step`."""
 
-    def body(states: State, key: Key[Array, '']) -> tuple[State, None]:
-        chain_keys = split(key).pop(GEWEKE_NUM_CHAINS)
-        return vmap(geweke_step)(chain_keys, states), None
+    def body(state: State, key: Key[Array, '']) -> tuple[State, None]:
+        return geweke_step(key, state), None
 
-    states, _ = lax.scan(body, states, step_keys)
-    return states
+    state, _ = lax.scan(body, state, step_keys)
+    return state
 
 
-def forest_summaries(
-    trees: TreeHeaps, p: int, X_test: UInt8[Array, 'p m']
-) -> dict[str, Shaped[Array, ' forests']]:
-    """Compute scalar summaries of each forest in a batch of forests."""
-    var_tree = trees.var_tree
-    split_tree = trees.split_tree
-    _, m = X_test.shape
-    num_splits = jnp.count_nonzero(split_tree, axis=-1)
-    varcount = var_histogram(p, var_tree, split_tree, sum_batch_axis=-1)
-    yhat = evaluate_forest(X_test, trees, sum_batch_axis=-1)
-    return {
-        'number of stub trees': jnp.count_nonzero(num_splits == 0, axis=-1),
-        'number of simple trees': jnp.count_nonzero(num_splits == 1, axis=-1),
-        'number of nodes': num_splits.sum(axis=-1),
-        'imbalance index': avg_imbalance_index(split_tree),
-        'average max tree depth': avg_max_tree_depth(split_tree),
-        **{f'varcount[{i}]': varcount[:, i] for i in range(p)},
-        **{f'y_test[{i}]': yhat[:, i] for i in range(m)},
+def summaries(
+    state: State, X_test: UInt8[Array, 'p m']
+) -> dict[str, Shaped[Array, ' chains']]:
+    """Compute scalar summaries of the parameters of each chain."""
+    in_axes = (chain_vmap_axes(state),)
+    return vmap(partial(chain_summaries, X_test=X_test), in_axes=in_axes)(state)
+
+
+def chain_summaries(
+    state: State, X_test: UInt8[Array, 'p m']
+) -> dict[str, Shaped[Array, '']]:
+    """Compute scalar summaries of the parameters of a single chain."""
+    forest = state.forest
+    p, m = X_test.shape
+    num_splits = jnp.count_nonzero(forest.split_tree, axis=-1)
+    varcount = var_histogram(p, forest.var_tree, forest.split_tree, sum_batch_axis=-1)
+    yhat = evaluate_forest(X_test, forest, sum_batch_axis=-1)
+    out = {
+        'number of stub trees': jnp.count_nonzero(num_splits == 0),
+        'number of simple trees': jnp.count_nonzero(num_splits == 1),
+        'number of nodes': num_splits.sum(),
+        'imbalance index': avg_imbalance_index(forest.split_tree),
+        'average max tree depth': avg_max_tree_depth(forest.split_tree),
+        **{f'varcount[{i}]': varcount[i] for i in range(p)},
+        **{f'y_test[{i}]': yhat[i] for i in range(m)},
     }
+    if forest.theta is not None:
+        assert forest.log_s is not None
+        if p > 1:  # with p=1, s is always [1]
+            varprob = softmax(forest.log_s)
+            out['effective predictors'] = effective_predictors(varprob)
+        if forest.rho is not None:
+            out['theta'] = forest.theta
+    return out
+
+
+def standardized_errors(state: State) -> Float32[Array, ' n']:
+    """Compute the errors of the model of a single chain, scaled to unit variance."""
+    fit = evaluate_forest(state.X, state.forest, sum_batch_axis=-1)
+    errors = state.y - fit - state.forest.offset
+    return errors * jnp.sqrt(state.error_cov_inv.value)
 
 
 def effective_predictors(
@@ -2177,38 +2163,19 @@ def test_joint_distribution(
     the augmentation of `log_s`.
     """
     X = random.randint(keys.pop(), (p, GEWEKE_N), 0, nsplits + 1, jnp.uint8)
-    final = run_geweke(keys.pop(), X, nsplits, sparsity)
-
-    prior = sample_prior(
-        keys.pop(),
-        GEWEKE_NUM_CHAINS,
-        GEWEKE_NUM_TREES,
-        max_split=jnp.full(p, nsplits, jnp.uint8),
-        p_nonterminal=make_p_nonterminal(GEWEKE_MAXDEPTH),
-        sigma_mu=lax.rsqrt(jnp.float32(GEWEKE_NUM_TREES)),
-        **geweke_sparse_kw(sparsity, p),
-    )
+    state = geweke_state(X, nsplits, sparsity)
+    final = run_geweke(keys.pop(), state)
+    prior = sample_prior(keys.pop(), state)
 
     # compare the parameters after a step with independent prior draws
     X_test = random.randint(keys.pop(), (p, GEWEKE_NUM_TEST), 0, nsplits + 1, jnp.uint8)
-    mcmc = forest_summaries(final.forest, p, X_test)
-    ref = forest_summaries(prior, p, X_test)
-    if p > 1 and sparsity is not None:
-        # with p=1, s is always [1]
-        mcmc['effective predictors'] = effective_predictors(
-            softmax(nnone(final.forest.log_s), axis=-1)
-        )
-        ref['effective predictors'] = effective_predictors(
-            softmax(nnone(prior.log_s), axis=-1)
-        )
-    if sparsity == 'free':
-        mcmc['theta'] = nnone(final.forest.theta)
-        ref['theta'] = nnone(prior.theta)
+    mcmc = summaries(final, X_test)
+    ref = summaries(prior, X_test)
 
     # data and parameters after a step are jointly distributed as in the
     # model, so the standardized errors are iid standard normal
+    errors = vmap(standardized_errors, in_axes=(chain_vmap_axes(final),))(final)
     prec = final.error_cov_inv.value
-    errors = (final.y - vmap(forest_fit)(final)) * jnp.sqrt(prec)[:, None]
     gamma_cdf = stats.gamma(GEWEKE_NU / 2, scale=2 / GEWEKE_RATE).cdf
 
     # keep the joint false alarm rate low

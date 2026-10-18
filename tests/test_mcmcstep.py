@@ -75,6 +75,7 @@ from jaxtyping import (
 from pytest import FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
 from scipy import stats
+from scipy.special import gammaln, logsumexp
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
 from bartz._jaxext import (
@@ -88,6 +89,7 @@ from bartz._jaxext import (
 )
 from bartz._typing import kwdict
 from bartz.debug import ChainDataState, sample_data, sample_prior
+from bartz.debug._prior import sample_s
 from bartz.grove import (
     evaluate_forest,
     is_actual_leaf,
@@ -148,6 +150,7 @@ from bartz.mcmcstep._step import (
     step_error_cov_inv,
     step_leaf_prior_cov_inv,
     step_s,
+    step_theta,
     step_trees,
     step_z,
 )
@@ -3330,6 +3333,104 @@ class TestMultivariate:
 def copy_arrays(x: PyTree) -> PyTree:
     """Make a copy of the arrays in `x`, intended for buffer donation."""
     return tree.map(lambda x: jnp.array(x) if isinstance(x, jnp.ndarray) else x, x)
+
+
+class TestStepTheta:
+    """Test `step_theta`."""
+
+    def state(
+        self, keys: split, a: float, b: float, theta: float, p: int = 10
+    ) -> State:
+        """Create a state with variable selection and a fixed `log_s`.
+
+        `theta` is the concentration `log_s` is drawn with, and `rho` is set to `p`.
+        """
+        n = 5
+        state = init(
+            X=jnp.zeros((p, n), jnp.uint8),
+            y=jnp.zeros(n),
+            offset=0.0,
+            max_split=jnp.ones(p, jnp.uint8),
+            num_trees=2,
+            p_nonterminal=make_p_nonterminal(3),
+            leaf_prior_cov_inv=Wishart(None, None, 2.0),
+            error_cov_inv=Wishart(4.0, 4.0, 1.0),
+            a=a,
+            b=b,
+            rho=float(p),
+            sparse_on_at=0,
+        )
+        log_s = sample_s(keys.pop(), theta, p)
+        return replace(state, forest=replace(state.forest, log_s=log_s))
+
+    def posterior_cdf(self, state: State) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """Compute the cdf of ``log(theta / rho)`` on a fine grid, in float64."""
+        forest = state.forest
+        log_s = numpy.asarray(nnone(forest.log_s), numpy.float64)
+        log_s -= logsumexp(log_s)
+        a, b = nnone(forest.a).item(), nnone(forest.b).item()
+        rho = nnone(forest.rho).item()
+        (p,) = log_s.shape
+        v = numpy.linspace(-80, 60, 2_000_001)
+        theta = rho * numpy.exp(v)
+        log_density = (
+            -a * numpy.logaddexp(0, -v)
+            - b * numpy.logaddexp(0, v)
+            + gammaln(theta)
+            - p * gammaln(theta / p)
+            + theta / p * log_s.sum()
+        )
+        cdf = numpy.cumsum(numpy.exp(log_density - log_density.max()))
+        return v, cdf / cdf[-1]
+
+    @staticmethod
+    @jit
+    def run(
+        keys: Key[Array, ' draws'], state: State, v0: Float32[Array, '']
+    ) -> Float32[Array, ' draws']:
+        """Draw ``log(theta / rho)`` with `step_theta`, from ``theta = rho exp(v0)``."""
+        forest = state.forest
+        theta = nnone(forest.rho) * jnp.exp(v0)
+        state = replace(state, forest=replace(forest, theta=theta))
+
+        def draw(key: Key[Array, '']) -> Float32[Array, '']:
+            new_theta = nnone(step_theta(key, state).forest.theta)
+            return jnp.log(new_theta / nnone(forest.rho))
+
+        return vmap(draw)(keys)
+
+    @pytest.mark.parametrize(('a', 'b'), [(0.5, 1.0), (20.0, 20.0), (0.2, 0.2)])
+    @pytest.mark.parametrize('theta', [300.0, 3.0, 0.01])
+    @pytest.mark.parametrize('p', [10, 1000])
+    def test_posterior(
+        self, keys: split, a: float, b: float, theta: float, p: int
+    ) -> None:
+        """Check the draws are distributed as the full conditional.
+
+        The approximation of the full conditional is accurate only to within a
+        bin of the grid, which is not detectable here with up to ~1000
+        variables.
+        """
+        state = self.state(keys, a, b, theta, p)
+        v, cdf = self.posterior_cdf(state)
+        v1 = self.run(keys.pop(20_000), state, jnp.float32(0.0))
+        cdf_func = partial(numpy.interp, xp=v, fp=cdf)
+        assert ks_1samp(numpy.asarray(v1, numpy.float64), cdf_func).pvalue > 1e-3
+
+    def test_many_variables(self, keys: split) -> None:
+        """With very many variables, `theta` keeps moving near its full conditional.
+
+        The full conditional is narrower than a bin of the grid, which made a
+        Metropolis-Hastings correction of the draw reject almost always.
+        """
+        state = self.state(keys, 1.0, 1.0, 3.0, 100_000)
+        v, cdf = self.posterior_cdf(state)
+        median = numpy.interp(0.5, cdf, v)
+        v0 = jnp.float32(median)
+        v1 = self.run(keys.pop(1000), state, v0)
+        assert jnp.mean(v1 != v0) > 0.99
+        width = 2 * 40.0 / 100_000  # the grid has the maximum number of bins
+        assert abs(numpy.median(numpy.asarray(v1)) - median) < width
 
 
 class TestSampleSAugmentation:

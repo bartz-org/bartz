@@ -2142,7 +2142,13 @@ def step_s(key: Key[Array, ''], state: State) -> State:
 
 
 @named_call
-def step_theta(key: Key[Array, ''], state: State, *, num_grid: int = 1000) -> State:
+def step_theta(
+    key: Key[Array, ''],
+    state: State,
+    *,
+    num_grid: int | None = None,
+    grid_range: float = 40.0,
+) -> State:
     """
     Update `theta`.
 
@@ -2155,52 +2161,126 @@ def step_theta(key: Key[Array, ''], state: State, *, num_grid: int = 1000) -> St
     state
         The current BART state.
     num_grid
-        The number of points in the evenly-spaced grid used to sample
-        theta / (theta + rho).
+        The number of bins of the grid used to sample ``log(theta / rho)``. If
+        not specified, it grows with the number of predictors, see Notes.
+    grid_range
+        The grid spans ``log(theta / rho)`` in ``[-grid_range, grid_range]``.
 
     Returns
     -------
     Updated BART state with re-sampled `theta`.
+
+    Notes
+    -----
+    The draw is from an approximation of the full conditional of ``v =
+    log(theta / rho)``, which interpolates its logarithm linearly between the
+    edges of the bins of an evenly spaced grid. The full conditional of `v` gets
+    narrower with the number of predictors `p`, roughly with standard deviation
+    ``1 / sqrt(p)``, so by default the number of bins is ``320 sqrt(p)``, clipped
+    to [1000, 100000]. Beyond that, the approximation is accurate only to
+    within a bin.
     """
-    assert state.forest.log_s is not None
-    assert state.forest.rho is not None
-    assert state.forest.a is not None
-    assert state.forest.b is not None
+    forest = state.forest
+    assert forest.log_s is not None
+    assert forest.rho is not None
+    assert forest.a is not None
+    assert forest.b is not None
 
-    # the grid points are the midpoints of num_grid bins in (0, 1)
-    padding = 1 / (2 * num_grid)
-    lambda_grid = jnp.linspace(padding, 1 - padding, num_grid)
+    if num_grid is None:
+        (p,) = forest.max_split.shape
+        num_grid = min(max(round(320 * p**0.5), 1000), 100_000)
 
-    # normalize s
-    log_s = state.forest.log_s - logsumexp(state.forest.log_s)
+    keys = split(key)
+    log_s = forest.log_s - logsumexp(forest.log_s)
 
-    # sample lambda
-    logp, theta_grid = _log_p_lambda(
-        lambda_grid, log_s, state.forest.rho, state.forest.a, state.forest.b
+    # log_p(v) is the exact full conditional log pdf of v
+    log_p = partial(_log_p_v, log_s=log_s, a=forest.a, b=forest.b, rho=forest.rho)
+
+    # the mass of each bin, under the log-linear interpolation of the density
+    width = 2 * grid_range / num_grid
+    edges = jnp.linspace(-grid_range, grid_range, num_grid + 1)
+    log_p_edges = log_p(edges)
+    rise = jnp.diff(log_p_edges)  # change of the log density across each bin
+    log_pmf = log_p_edges[:-1] + jnp.log(width) + log_expm1_ratio(rise)
+
+    # draw a bin, then a point within it
+    i = random.categorical(keys.pop(), log_pmf)
+    v = edges[i] + width * sample_unit_exponential(keys.pop(), rise[i])
+
+    theta = forest.rho * jnp.exp(v)
+    return replace(state, forest=replace(forest, theta=theta))
+
+
+def log_expm1_ratio(x: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
+    """Compute ``log((exp(x) - 1) / x)``, the log mass of ``exp(x t) dt`` on ``[0, 1]``."""
+    # (e^x - 1) / x = e^x (1 - e^-x) / x, use the form with a negative exponent
+    abs_x = jnp.abs(x)
+    small = abs_x < 1e-4
+    safe_abs_x = jnp.where(small, 1.0, abs_x)
+    log_ratio_neg = jnp.where(
+        small, -abs_x / 2, jnp.log(-jnp.expm1(-safe_abs_x)) - jnp.log(safe_abs_x)
     )
-    i = random.categorical(key, logp)
-    theta = theta_grid[i]
-
-    return replace(state, forest=replace(state.forest, theta=theta))
+    return jnp.maximum(x, 0.0) + log_ratio_neg
 
 
-def _log_p_lambda(
-    lambda_: Float32[Array, ' num_grid'],
+def sample_unit_exponential(
+    key: Key[Array, ''], x: Float32[Array, '']
+) -> Float32[Array, '']:
+    """Sample `t` in ``[0, 1]`` with density proportional to ``exp(x t)``."""
+    u = random.uniform(key)
+    small = jnp.abs(x) < 1e-4
+    x = jnp.where(small, 1.0, x)  # avoid non-finite intermediates in the `small` case
+    # invert the cdf (e^(x t) - 1) / (e^x - 1), written such that the
+    # exponential can not overflow
+    t_negative = jnp.log1p(u * jnp.expm1(jnp.minimum(x, 0.0))) / x
+    t_positive = 1 + jnp.log(u + (1 - u) * jnp.exp(-jnp.maximum(x, 0.0))) / x
+    t = jnp.where(x > 0, t_positive, t_negative)
+    return jnp.where(small, u, jnp.clip(t, 0.0, 1.0))
+
+
+def _log_p_v(
+    v: Float32[Array, '*shape'],
+    *,
     log_s: Float32[Array, ' p'],
-    rho: Float32[Array, ''],
     a: Float32[Array, ''],
     b: Float32[Array, ''],
-) -> tuple[Float32[Array, ' num_grid'], Float32[Array, ' num_grid']]:
-    # in the following I use lambda_[::-1] == 1 - lambda_
-    theta = rho * lambda_ / lambda_[::-1]
+    rho: Float32[Array, ''],
+) -> Float32[Array, '*shape']:
+    """Compute the unnormalized full conditional of ``v = log(theta / rho)``.
+
+    With ``lambda = theta / (theta + rho)``, the Beta(a, b) prior density of
+    `lambda`, times the Jacobian ``dlambda / dv = lambda (1 - lambda)``, gives
+    the prior density of `v`, proportional to ``lambda^a (1 - lambda)^b``. The
+    likelihood is the Dirichlet density of ``s = softmax(log_s)`` with
+    concentration ``theta / p``.
+    """
+    log_lambda = -jnp.logaddexp(0.0, -v)
+    log1m_lambda = -jnp.logaddexp(0.0, v)
+    theta = rho * jnp.exp(v)
     p = log_s.size
-    return (
-        (a - 1) * jnp.log1p(-lambda_[::-1])  # log(lambda)
-        + (b - 1) * jnp.log1p(-lambda_)  # log(1 - lambda)
-        + gammaln(theta)
-        - p * gammaln(theta / p)
-        + theta / p * jnp.sum(log_s)
-    ), theta
+
+    # log of the Dirichlet density, Gamma(theta) / Gamma(theta / p)^p times
+    # prod(s)^(theta / p). For large theta, use the Stirling series, which
+    # avoids cancellations in float32, and group the terms linear in theta into
+    # theta (log p + mean(log s)), which is minus theta times a divergence
+    large = theta / p > 10
+    small_theta = jnp.where(large, 1.0, theta)
+    large_theta = jnp.where(large, theta, 10.0 * p)
+    exact = (
+        gammaln(small_theta)
+        - p * gammaln(small_theta / p)
+        + small_theta / p * jnp.sum(log_s)
+    )
+    stirling = (
+        (p - 1) / 2 * jnp.log(large_theta)
+        - p / 2 * jnp.log(p)
+        - (p - 1) / 2 * jnp.log(2 * jnp.pi)
+        + (1 - float(p) ** 2) / (12 * large_theta)
+        + large_theta * (jnp.log(p) + jnp.mean(log_s))
+    )
+    log_lk = jnp.where(large, stirling, exact)
+
+    return a * log_lambda + b * log1m_lambda + log_lk
 
 
 @named_call

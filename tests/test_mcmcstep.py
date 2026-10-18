@@ -108,7 +108,12 @@ from bartz.mcmcstep import (
     make_p_nonterminal,
     step,
 )
-from bartz.mcmcstep._axes import chain_vmap_axes, data_vmap_axes, trace_sample_axes
+from bartz.mcmcstep._axes import (
+    chain_to_axis,
+    chain_vmap_axes,
+    data_vmap_axes,
+    trace_sample_axes,
+)
 from bartz.mcmcstep._moves import (
     ancestor_variables,
     fully_used_variables,
@@ -2028,20 +2033,10 @@ def geweke_state(
     return ChainDataState.from_state(state)
 
 
-def run_geweke(key: Key[Array, ''], state: ChainDataState) -> State:
-    """Alternate `step` and `sample_data` in many independent chains.
-
-    The chains start from stumps, and from prior draws of the sparsity
-    parameters, which otherwise take long to reach their prior.
-    """
+def sample_joint(key: Key[Array, ''], state: ChainDataState) -> ChainDataState:
+    """Draw parameters and data from the model, independently in each chain."""
     keys = split(key)
-    if state.forest.theta is not None:
-        prior = sample_prior(keys.pop(), copy_arrays(state))
-        forest = replace(
-            state.forest, log_s=prior.forest.log_s, theta=prior.forest.theta
-        )
-        state = replace(state, forest=forest)
-    return run_geweke_chains(keys.pop(GEWEKE_NUM_STEPS), state)
+    return sample_data(keys.pop(), sample_prior(keys.pop(), state))
 
 
 def geweke_step(key: Key[Array, ''], state: State) -> State:
@@ -2052,7 +2047,7 @@ def geweke_step(key: Key[Array, ''], state: State) -> State:
 
 @jit
 def run_geweke_chains(step_keys: Key[Array, ' steps'], state: State) -> State:
-    """Iterate `geweke_step`."""
+    """Alternate `step` and `sample_data` in many independent chains."""
 
     def body(state: State, key: Key[Array, '']) -> tuple[State, None]:
         return geweke_step(key, state), None
@@ -2156,16 +2151,25 @@ def test_joint_distribution(
 ) -> None:
     """Check `step` keeps parameters and data jointly distributed as the model.
 
-    Alternate `step` with drawing new data given the parameters, in many
-    independent chains (Geweke 2004). If `step` leaves the posterior invariant,
-    the parameters stay distributed as their prior, which is compared against
-    `sample_prior`. The blocked low-p cases with variable selection stress-test
-    the augmentation of `log_s`.
+    Many independent chains start from draws of the model, and alternate
+    `step` with drawing new data given the parameters (Geweke 2004). If `step`
+    leaves the posterior invariant, the chains stay distributed as the model,
+    so the parameters are distributed as their prior, which is compared
+    against `sample_prior`. The blocked low-p cases with variable selection
+    stress-test the augmentation of `log_s`.
     """
     X = random.randint(keys.pop(), (p, GEWEKE_N), 0, nsplits + 1, jnp.uint8)
     state = geweke_state(X, nsplits, sparsity)
-    final = run_geweke(keys.pop(), state)
+    initial = sample_joint(keys.pop(), copy_arrays(state))
+    final = run_geweke_chains(keys.pop(GEWEKE_NUM_STEPS), initial)
     prior = sample_prior(keys.pop(), state)
+
+    # a sampler stuck at its initial state would pass the comparison
+    with subtests.test('chains move'):
+        changed = initial.forest.split_tree != final.forest.split_tree
+        changed = chain_to_axis(changed, chain_vmap_axes(final).forest.split_tree)
+        moved = jnp.any(changed.reshape(GEWEKE_NUM_CHAINS, -1), axis=1)
+        assert jnp.mean(moved) > 0.5
 
     # compare the parameters after a step with independent prior draws
     X_test = random.randint(keys.pop(), (p, GEWEKE_NUM_TEST), 0, nsplits + 1, jnp.uint8)

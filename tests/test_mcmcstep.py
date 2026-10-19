@@ -136,6 +136,7 @@ from bartz.mcmcstep._step import (
     S,
     _compute_likelihood_ratio_mv,
     _compute_likelihood_ratio_uv,
+    _log_p_v,
     _precompute_leaf_terms_mv,
     _precompute_leaf_terms_uv,
     _precompute_likelihood_terms_mv,
@@ -154,6 +155,7 @@ from bartz.mcmcstep._step import (
     step_theta,
     step_trees,
     step_z,
+    stirling_remainder,
 )
 from bartz.testing import gen_data
 from tests.util import (
@@ -3401,23 +3403,30 @@ class TestStepTheta:
             ),
         )
 
-    def posterior_cdf(self, state: State) -> tuple[numpy.ndarray, numpy.ndarray]:
-        """Compute the cdf of ``log(theta / rho)`` on a fine grid, in float64."""
+    @staticmethod
+    def log_density(
+        state: State, v: Float[numpy.ndarray, ' n']
+    ) -> Float[numpy.ndarray, ' n']:
+        """Compute the unnormalized log density of ``log(theta / rho)``, in float64."""
         forest = state.forest
         log_s = numpy.asarray(nnone(forest.sparsity.log_s), numpy.float64)
         log_s -= special.logsumexp(log_s)
         a, b = nnone(forest.sparsity.a).item(), nnone(forest.sparsity.b).item()
         rho = nnone(forest.sparsity.rho).item()
         (p,) = log_s.shape
-        v = numpy.linspace(-80, 60, 2_000_001)
         theta = rho * numpy.exp(v)
-        log_density = (
+        return (
             -a * numpy.logaddexp(0, -v)
             - b * numpy.logaddexp(0, v)
             + special.gammaln(theta)
             - p * special.gammaln(theta / p)
             + theta / p * log_s.sum()
         )
+
+    def posterior_cdf(self, state: State) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """Compute the cdf of ``log(theta / rho)`` on a fine grid, in float64."""
+        v = numpy.linspace(-80, 60, 2_000_001)
+        log_density = self.log_density(state, v)
         cdf = numpy.cumsum(numpy.exp(log_density - log_density.max()))
         return v, cdf / cdf[-1]
 
@@ -3458,6 +3467,29 @@ class TestStepTheta:
         cdf_func = partial(numpy.interp, xp=v, fp=cdf)
         assert ks_1samp(numpy.asarray(v1, numpy.float64), cdf_func).pvalue > 1e-3
 
+    @pytest.mark.parametrize('c', [0.01, 5.0, 300.0])
+    @pytest.mark.parametrize('p', [1000, 100_000])
+    def test_log_density_precision(self, keys: split, c: float, p: int) -> None:
+        """The float32 log density is accurate on the support of the posterior.
+
+        The tolerance is about the float32 resolution of a log density of
+        magnitude `p`. `c` is the concentration of each component of `s`.
+        """
+        state = self.state(keys, 0.5, 1.0, c * p, p)
+        v, cdf = self.posterior_cdf(state)
+        lo, hi = numpy.interp([1e-6, 1 - 1e-6], cdf, v)
+        v = numpy.linspace(lo, hi, 1001)
+        forest = state.forest
+        log_density = _log_p_v(
+            jnp.asarray(v, jnp.float32),
+            log_s=nnone(forest.sparsity.log_s),
+            a=nnone(forest.sparsity.a),
+            b=nnone(forest.sparsity.b),
+            rho=nnone(forest.sparsity.rho),
+        )
+        error = numpy.asarray(log_density, numpy.float64) - self.log_density(state, v)
+        assert_allclose(error, error.mean(), atol=2e-6 * p, allow_non_scalar=True)
+
     def test_many_variables(self, keys: split) -> None:
         """With very many variables, `theta` keeps moving near its full conditional.
 
@@ -3486,6 +3518,20 @@ class TestStepTheta:
         )
         v = self.run(keys.pop(100), state, jnp.float32(0.0))
         assert jnp.all(jnp.isfinite(v))
+
+
+def test_stirling_remainder() -> None:
+    """`stirling_remainder` is accurate in float32 over the whole range."""
+    z = numpy.logspace(-30, 30, 1001).astype(numpy.float32)
+    r = stirling_remainder(jnp.asarray(z))
+    z = z.astype(numpy.float64)
+    expected = (
+        special.gammaln(z) - (z - 0.5) * numpy.log(z) + z - numpy.log(2 * numpy.pi) / 2
+    )
+    # the formula cancels catastrophically for large z also in float64
+    large = z > 1e3
+    expected[large] = 1 / (12 * z[large]) - 1 / (360 * z[large] ** 3)
+    assert_allclose(r, expected, rtol=2e-6, allow_non_scalar=True)
 
 
 class TestSampleSAugmentation:

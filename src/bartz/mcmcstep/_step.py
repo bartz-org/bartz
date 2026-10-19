@@ -33,7 +33,7 @@ from equinox import AbstractVar
 from jax import lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
-from jax.scipy.special import gammaln, logsumexp
+from jax.scipy.special import logsumexp
 from jaxtyping import (
     Array,
     Bool,
@@ -2327,12 +2327,11 @@ def step_theta(
         num_grid = min(max(round(320 * p**0.5), 1000), 100_000)
 
     keys = split(key)
-    log_s = forest.sparsity.log_s - logsumexp(forest.sparsity.log_s)
 
     # log_p(v) is the exact full conditional log pdf of v
     log_p = partial(
         _log_p_v,
-        log_s=log_s,
+        log_s=forest.sparsity.log_s,
         a=forest.sparsity.a,
         b=forest.sparsity.b,
         rho=forest.sparsity.rho,
@@ -2407,31 +2406,81 @@ def _log_p_v(
     """
     log_lambda = -jnp.logaddexp(0.0, -v)
     log1m_lambda = -jnp.logaddexp(0.0, v)
-    theta = rho * jnp.exp(v)
     p = log_s.size
+    log_c = jnp.log(rho / p) + v  # c = theta / p
+    c = jnp.exp(log_c)
+    theta = p * c
 
-    # log of the Dirichlet density, Gamma(theta) / Gamma(theta / p)^p times
-    # prod(s)^(theta / p). For large theta, use the Stirling series, which
-    # avoids cancellations in float32, and group the terms linear in theta into
-    # theta (log p + mean(log s)), which is minus theta times a divergence
-    large = theta / p > 10
-    small_theta = jnp.where(large, 1.0, theta)
-    large_theta = jnp.where(large, theta, 10.0 * p)
-    exact = (
-        gammaln(small_theta)
-        - p * gammaln(small_theta / p)
-        + small_theta / p * jnp.sum(log_s)
+    # log of the Dirichlet density, Gamma(theta) / Gamma(c)^p prod(s)^c, up to
+    # factors constant in theta. Expanding the log-gammas with Stirling's
+    # formula, the terms of order theta log theta cancel exactly, leaving minus
+    # theta times the divergence -log p - mean(log s) >= 0 of s from uniform,
+    # computed from the unnormalized log_s. This avoids cancellations in float32.
+    r_theta, r_c = stirling_remainder(jnp.stack([theta, c]))
+    log_lk = (
+        (p - 1) / 2 * log_c - theta * log_mean_exp_deviation(log_s) + r_theta - p * r_c
     )
-    stirling = (
-        (p - 1) / 2 * jnp.log(large_theta)
-        - p / 2 * jnp.log(p)
-        - (p - 1) / 2 * jnp.log(2 * jnp.pi)
-        + (1 - float(p) ** 2) / (12 * large_theta)
-        + large_theta * (jnp.log(p) + jnp.mean(log_s))
-    )
-    log_lk = jnp.where(large, stirling, exact)
 
     return a * log_lambda + b * log1m_lambda + log_lk
+
+
+def log_mean_exp_deviation(x: Float32[Array, ' p']) -> Float32[Array, '']:
+    """Compute ``log(mean(exp(x - mean(x))))`` without cancellation."""
+    x -= jnp.mean(x)
+    # shift only if exp(x) could overflow, else expm1 retains the precision
+    shift = jnp.maximum(jnp.max(x) - 30.0, 0.0)
+    # the result is invariant to shifting x, so remove the residual mean that
+    # the centering leaves due to rounding
+    return shift + jnp.log1p(jnp.mean(jnp.expm1(x - shift))) - jnp.mean(x)
+
+
+def stirling_remainder(z: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
+    """Compute ``log Gamma(z) - (z - 1/2) log z + z - log(2 pi) / 2``, for ``z > 0``."""
+    # use the recurrence r(z) = r(z + 1) + (z + 1/2) log(1 + 1/z) - 1 to bring
+    # the argument where the asymptotic series is accurate
+    shift = 4
+    steps = stirling_step(z)
+    for k in range(1, shift):
+        steps += stirling_step_series(z + k)
+    return jnp.where(
+        z >= shift,
+        stirling_series(jnp.maximum(z, shift)),
+        stirling_series(z + shift) + steps,
+    )
+
+
+def stirling_series(z: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
+    """Asymptotic series of `stirling_remainder`, accurate in float32 for ``z >= 4``."""
+    inv = jnp.reciprocal(z)
+    inv2 = jnp.square(inv)
+    coefs = (1 / 12, -1 / 360, 1 / 1260, -1 / 1680, 1 / 1188, -691 / 360360, 1 / 156)
+    series = 0.0
+    for coef in reversed(coefs):
+        series = coef + inv2 * series
+    return inv * series
+
+
+def stirling_step(w: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
+    """Compute ``(w + 1/2) log(1 + 1/w) - 1``, for ``w > 0``."""
+    # below w = 1/2 the cancellation in the direct formula is mild
+    direct = (w + 0.5) * jnp.log1p(jnp.reciprocal(w)) - 1
+    series = stirling_step_series(jnp.maximum(w, 0.5), num_terms=14)
+    return jnp.where(w >= 0.5, series, direct)
+
+
+def stirling_step_series(
+    w: Float32[Array, '*shape'], num_terms: int = 8
+) -> Float32[Array, '*shape']:
+    """Compute ``(w + 1/2) log(1 + 1/w) - 1`` without cancellation.
+
+    The default `num_terms` is accurate for ``w >= 1``, 14 for ``w >= 1/2``.
+    """
+    # with x = 1 / (2 w + 1), it's atanh(x) / x - 1 = sum_k x^2k / (2k + 1)
+    x2 = jnp.square(jnp.reciprocal(2 * w + 1))
+    series = x2 / (2 * num_terms + 1)
+    for k in range(num_terms - 1, 0, -1):
+        series = x2 * (1 / (2 * k + 1) + series)
+    return series
 
 
 @named_call

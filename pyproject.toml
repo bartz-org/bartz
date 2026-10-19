@@ -137,7 +137,6 @@ show_missing = true
 skip_covered = true
 
 [tool.coverage.html]
-show_contexts = true
 directory = "_site/coverage"
 
 [tool.coverage.paths]

@@ -195,7 +195,7 @@ GPU_NPROC = $(NPROC)
 endif
 
 TESTS_VARS = COVERAGE_FILE=.coverage.$@$(if $(GROUP),-$(GROUP))
-TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
+TESTS_COMMAND = python -m pytest --cov --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
 TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=$(NPROC) $(SELECT)
 # WORKAROUND(jax<0.10.3): jax 0.10.x exhausts/corrupts CUDA command buffers

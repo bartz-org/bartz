@@ -240,6 +240,8 @@ docs:
 	@echo
 	@echo "Now open _site/index.html"
 
+# Releases up to v0.13.0 have rpy2 in their dev deps: RPY2_CFFI_MODE=ABI lets
+# it install without R. Drop it once the latest release no longer has rpy2.
 .PHONY: docs-latest
 docs-latest:
 	@LATEST_TAG=$$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | sort -V | tail -1) && \
@@ -248,7 +250,7 @@ docs-latest:
 	WORKTREE_DIR=$$(mktemp -d) && \
 	trap "git worktree remove --force '$$WORKTREE_DIR' 2>/dev/null || rm -rf '$$WORKTREE_DIR'" EXIT && \
 	git worktree add --detach "$$WORKTREE_DIR" "$$LATEST_TAG" && \
-	$(MAKE) -C "$$WORKTREE_DIR" docs && \
+	RPY2_CFFI_MODE=ABI $(MAKE) -C "$$WORKTREE_DIR" docs && \
 	test ! -d _site/docs || rm -r _site/docs && \
 	mv "$$WORKTREE_DIR/_site/docs-dev" _site/docs
 	@echo

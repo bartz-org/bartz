@@ -1313,6 +1313,12 @@ def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
             Bart(**dict(bkw.kw, **{param: 1.0}))
 
 
+def test_augment_rejects_deep_trees(bkw: BartKW) -> None:
+    """The variable selection augmentation rejects `maxdepth` > 17."""
+    with pytest.raises(ValueError, match=r'maxdepth=18 > 17 is not supported'):
+        Bart(**dict(bkw.kw, maxdepth=18, sparse=SparseConfig()))
+
+
 @pytest.mark.parametrize('param', ['sigma_scale', 'sigma_init'])
 def test_sigma_wrong_special_value(bkw: BartKW, param: str) -> None:
     """Trigger error on unrecognized `sigma_scale`/`sigma_init` value."""

@@ -509,6 +509,8 @@ class Bart(Module):
             error_scale=error_scale,
         )
 
+        check_augment_depth(sparse, maxdepth)
+
         # split the user-provided seed into an mcmc key and a binner key
         if not is_key(seed):
             seed = random.key(seed)
@@ -1258,6 +1260,16 @@ def check_length(
     _, m = x.shape
     if n != m:
         msg = f'`{a_name}` has {n} datapoints, but `{x_name}` has {m}.'
+        raise ValueError(msg)
+
+
+def check_augment_depth(sparse: SparseConfig, maxdepth: int) -> None:
+    # the augmentation tracks 2 (maxdepth - 1) variables as bits of a uint32
+    if sparse.enabled and sparse.augment and maxdepth > 17:
+        msg = (
+            f'maxdepth={maxdepth} > 17 is not supported with '
+            '`SparseConfig(augment=True)`, set `augment=False`'
+        )
         raise ValueError(msg)
 
 

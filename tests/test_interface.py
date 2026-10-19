@@ -844,7 +844,7 @@ class TestWithCachedBart:
         """Check that different chains give different results."""
         bart = cachedbart.bart
 
-        step_theta = bart._mcmc_state.forest.rho is not None
+        step_theta = bart._mcmc_state.forest.sparsity.rho is not None
 
         def assert_different(x: PyTree[Array], **kwargs: Any) -> None:
             def assert_different(

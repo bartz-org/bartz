@@ -31,6 +31,7 @@ from jax import numpy as jnp
 from jax.nn import softmax
 from jax.sharding import Mesh
 from jaxtyping import Array, Float, Float32, Int32, UInt
+from numpy.lib.array_utils import normalize_axis_index
 
 from bartz._jaxext import Module, field
 from bartz.mcmcstep import State
@@ -133,7 +134,7 @@ class BurninTrace(Trace):
             mesh=state.config.mesh,
             error_cov_inv=state.error_cov_inv.value,
             leaf_prior_cov_inv=state.forest.leaf_prior_cov_inv.value,
-            theta=state.forest.theta,
+            theta=state.forest.sparsity.theta,
             grow_prop_count=state.forest.grow_prop_count,
             grow_acc_count=state.forest.grow_acc_count,
             prune_prop_count=state.forest.prune_prop_count,
@@ -179,16 +180,21 @@ class MainTrace(BurninTrace):
     def from_state(cls, state: State) -> 'MainTrace':
         """Create a single-item main trace from a MCMC state."""
         # compute varprob
-        log_s = state.forest.log_s
+        log_s = state.forest.sparsity.log_s
         if log_s is None:
             varprob = None
         else:
-            chain_axis = chain_vmap_axes(state.forest).log_s
+            chain_axis = chain_vmap_axes(state.forest).sparsity.log_s
             p_axis = chainful_axis(0, chain_axis)  # (p,)
             where = state.forest.max_split.astype(bool)
             if chain_axis is not None:
                 where = jnp.expand_dims(where, chain_axis)
             varprob = softmax(log_s, axis=p_axis, where=where)
+            num_chains = state.num_chains()
+            if num_chains is not None and chain_axis is None:
+                # a constant log_s is shared by the chains, but the trace is not
+                axis = normalize_axis_index(CHAIN_AXIS, varprob.ndim + 1)
+                varprob = jnp.repeat(jnp.expand_dims(varprob, axis), num_chains, axis)
 
         return cls(
             leaf_tree=state.forest.leaf_tree,

@@ -25,13 +25,12 @@
 """Test `bartz.debug`."""
 
 from collections import namedtuple
-from dataclasses import replace
 from pathlib import Path
 from typing import NamedTuple
 
 import numpy
 import pytest
-from equinox import EquinoxRuntimeError, tree_at
+from equinox import tree_at
 from jax import numpy as jnp
 from jax import random, vmap
 from jax.nn import softmax
@@ -66,6 +65,7 @@ from tests.util import (
     assert_close_matrices,
     jaxtyping_disabled,
     manual_tree,
+    nnone,
 )
 
 
@@ -602,21 +602,11 @@ class TestSamplePriorConstraintsChains:
         )
 
     def test_shared(self, keys: split) -> None:
-        """The `log_s` repeated by `init` across the chains works."""
-        state = sample_prior(keys.pop(), self.init(keys))
-        assert state.forest.split_tree.any()
-
-    def test_different(self, keys: split) -> None:
-        """A `log_s` that differs across the chains raises."""
+        """The fixed `log_s` has no chain axis, and `sample_prior` works with it."""
         state = self.init(keys)
-        assert state.forest.log_s is not None
-        forest = replace(state.forest, log_s=state.forest.log_s.at[0, 0].set(1.0))
-        state = replace(state, forest=forest)
-        # under jit, the error surfaces through a callback as a ValueError
-        with pytest.raises(
-            (EquinoxRuntimeError, ValueError), match='same in all chains'
-        ):
-            sample_prior(keys.pop(), state)
+        assert nnone(state.forest.sparsity.log_s).shape == (2,)
+        state = sample_prior(keys.pop(), state)
+        assert state.forest.split_tree.any()
 
 
 class TestSampleWishart:

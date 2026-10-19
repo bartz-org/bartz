@@ -126,6 +126,7 @@ from bartz.mcmcstep._rebuild import outcome_target, rebuild_derived
 from bartz.mcmcstep._reduction import _gpu_sm_count
 from bartz.mcmcstep._state import (
     Forest,
+    Sparsity,
     StepConfig,
     chol_with_gersh,
     inv_via_chol_with_gersh,
@@ -273,6 +274,30 @@ class TestVmapAxesMarkers:
     def x(self) -> _MarkerLeaf:
         """Build a module instance exercising every marker combination."""
         return _MarkerLeaf()
+
+    @pytest.mark.parametrize('inner_has_chains', [False, True])
+    def test_nested_has_chains(self, inner_has_chains: bool) -> None:
+        """A nested Module's `has_chains` overrides the outer one in its subtree."""
+
+        class _Inner(Module):
+            flag: bool = field(static=True)
+            arr: Shaped[Array, '...'] = field(
+                chains=0, default_factory=lambda: jnp.zeros((2, 3))
+            )
+
+            @property
+            def has_chains(self) -> bool:
+                return self.flag
+
+        class _Outer(_HasChainsBase):
+            inner: _Inner
+            arr: Shaped[Array, '...'] = field(
+                chains=0, default_factory=lambda: jnp.zeros((2, 3))
+            )
+
+        axes = chain_vmap_axes(_Outer(inner=_Inner(flag=inner_has_chains)))
+        assert axes.arr == 0
+        assert axes.inner.arr == (0 if inner_has_chains else None)
 
     def test_default_none(self, x: _MarkerLeaf) -> None:
         """An unmarked field becomes None."""
@@ -1638,9 +1663,9 @@ class TestMultichain:
                 '.forest.min_points_per_leaf',
                 '.forest.leaf_prior_cov_inv.nu',
                 '.forest.leaf_prior_cov_inv.rate',
-                '.forest.a',
-                '.forest.b',
-                '.forest.rho',
+                '.forest.sparsity.a',
+                '.forest.sparsity.b',
+                '.forest.sparsity.rho',
                 '.config.sparse_on_at',
                 '.config.steps_done',
             )
@@ -2156,13 +2181,13 @@ def chain_summaries(
         **{f'y_test[{i}]': yhat[i] for i in range(num_yhat)},
     }
 
-    if forest.theta is not None:
-        assert forest.log_s is not None
+    if forest.sparsity.theta is not None:
+        assert forest.sparsity.log_s is not None
         if p > 1:  # with p=1, s is always [1]
-            varprob = softmax(forest.log_s)
+            varprob = softmax(forest.sparsity.log_s)
             out['effective predictors'] = effective_predictors(varprob)
-        if forest.rho is not None:
-            out['theta'] = forest.theta
+        if forest.sparsity.rho is not None:
+            out['theta'] = forest.sparsity.theta
 
     for name, prec in (
         ('leaf precision', forest.leaf_prior_cov_inv),
@@ -3369,15 +3394,20 @@ class TestStepTheta:
             sparse_on_at=0,
         )
         log_s = sample_s(keys.pop(), theta, p)
-        return replace(state, forest=replace(state.forest, log_s=log_s))
+        return replace(
+            state,
+            forest=replace(
+                state.forest, sparsity=replace(state.forest.sparsity, log_s=log_s)
+            ),
+        )
 
     def posterior_cdf(self, state: State) -> tuple[numpy.ndarray, numpy.ndarray]:
         """Compute the cdf of ``log(theta / rho)`` on a fine grid, in float64."""
         forest = state.forest
-        log_s = numpy.asarray(nnone(forest.log_s), numpy.float64)
+        log_s = numpy.asarray(nnone(forest.sparsity.log_s), numpy.float64)
         log_s -= special.logsumexp(log_s)
-        a, b = nnone(forest.a).item(), nnone(forest.b).item()
-        rho = nnone(forest.rho).item()
+        a, b = nnone(forest.sparsity.a).item(), nnone(forest.sparsity.b).item()
+        rho = nnone(forest.sparsity.rho).item()
         (p,) = log_s.shape
         v = numpy.linspace(-80, 60, 2_000_001)
         theta = rho * numpy.exp(v)
@@ -3398,12 +3428,15 @@ class TestStepTheta:
     ) -> Float32[Array, ' draws']:
         """Draw ``log(theta / rho)`` with `step_theta`, from ``theta = rho exp(v0)``."""
         forest = state.forest
-        theta = nnone(forest.rho) * jnp.exp(v0)
-        state = replace(state, forest=replace(forest, theta=theta))
+        theta = nnone(forest.sparsity.rho) * jnp.exp(v0)
+        state = replace(
+            state,
+            forest=replace(forest, sparsity=replace(forest.sparsity, theta=theta)),
+        )
 
         def draw(key: Key[Array, '']) -> Float32[Array, '']:
-            new_theta = nnone(step_theta(key, state).forest.theta)
-            return jnp.log(new_theta / nnone(forest.rho))
+            new_theta = nnone(step_theta(key, state).forest.sparsity.theta)
+            return jnp.log(new_theta / nnone(forest.sparsity.rho))
 
         return vmap(draw)(keys)
 
@@ -3443,9 +3476,14 @@ class TestStepTheta:
     def test_extreme_sparsity(self, keys: split) -> None:
         """A very sparse `s` makes the log density overflow, but not `theta`."""
         state = self.state(keys, 1.0, 1.0, 1.0)
-        p = nnone(state.forest.log_s).size
+        p = nnone(state.forest.sparsity.log_s).size
         log_s = jnp.full(p, -1e21).at[0].set(0.0)
-        state = replace(state, forest=replace(state.forest, log_s=log_s))
+        state = replace(
+            state,
+            forest=replace(
+                state.forest, sparsity=replace(state.forest.sparsity, log_s=log_s)
+            ),
+        )
         v = self.run(keys.pop(100), state, jnp.float32(0.0))
         assert jnp.all(jnp.isfinite(v))
 
@@ -3470,7 +3508,10 @@ class TestSampleSAugmentation:
         object.__setattr__(forest, 'var_tree', var_tree)
         object.__setattr__(forest, 'split_tree', split_tree)
         object.__setattr__(forest, 'max_split', max_split)
-        object.__setattr__(forest, 'log_s', log_s)
+        sparsity = Sparsity(
+            log_s=log_s, theta=None, a=None, b=None, rho=None, log_theta_range=None
+        )
+        object.__setattr__(forest, 'sparsity', sparsity)
         return forest
 
     @staticmethod
@@ -3583,7 +3624,7 @@ class TestSampleSAugmentation:
         d_minus_1 = half_tree_size.bit_length() - 1
 
         # get log_s
-        log_s = nnone(forest.log_s)
+        log_s = nnone(forest.sparsity.log_s)
         if sparse:
             log_s = sample_s(keys.pop(), 0.01, p)
 
@@ -3650,4 +3691,6 @@ class TestSampleSAugmentation:
         key = keys.pop()
         on = step_s(key, replace(state, config=replace(state.config, augment=True)))
         off = step_s(key, replace(state, config=replace(state.config, augment=False)))
-        assert_array_equal(nnone(on.forest.log_s), nnone(off.forest.log_s))
+        assert_array_equal(
+            nnone(on.forest.sparsity.log_s), nnone(off.forest.sparsity.log_s)
+        )

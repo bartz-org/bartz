@@ -43,8 +43,8 @@ from bartz.mcmcstep._state import Forest, State, StateT
 def rebuild_derived(state: StateT) -> StateT:
     """Recompute the fields of `state` derived from its parameters and data.
 
-    The parameters are the trees, the precisions, `Forest.log_s`,
-    `Forest.theta`, and `State.z`; the data are `State.y` and the other fields
+    The parameters are the trees, the precisions, `Sparsity.log_s`,
+    `Sparsity.theta`, and `State.z`; the data are `State.y` and the other fields
     fixed by `init`. The caches are rebuilt from scratch, any pending prune is
     dropped, and the per-step statistics are zeroed. The run history
     (`State.resid_eff_scale`, `State.resid_inexact_integral`,

@@ -2182,7 +2182,7 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Float32[Array,
     -------
     The log of the discarded-draws count for each variable.
     """
-    assert forest.log_s is not None
+    assert forest.sparsity.log_s is not None
     keys = split(key)
     (num_trees, half_tree_size) = forest.var_tree.shape
 
@@ -2194,7 +2194,7 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Float32[Array,
     # than all the others: so the relative error of the eligible mass is about
     # float32 eps times p / (d_minus_1 + 1).
     d_minus_1 = half_tree_size.bit_length() - 1
-    s = S.from_log_s(forest.log_s, forest.max_split > 0, 2 * d_minus_1)
+    s = S.from_log_s(forest.sparsity.log_s, forest.max_split > 0, 2 * d_minus_1)
 
     # blocked_mass[j] = sum over internal nodes where j is ineligible of
     # lambda_b / e_b, with lambda_b ~ Exponential(1)
@@ -2244,7 +2244,7 @@ def step_s(key: Key[Array, ''], state: State) -> State:
     ``state.config.augment`` is set, the forbidden rules are accounted for
     exactly with the data augmentation of `sample_s_augmentation`.
     """
-    assert state.forest.theta is not None
+    assert state.forest.sparsity.theta is not None
 
     # reserve the Dirichlet draw key first and unconditionally, so it does not
     # depend on whether augmentation is on; then the two modes draw identically
@@ -2261,7 +2261,7 @@ def step_s(key: Key[Array, ''], state: State) -> State:
     # the Dirichlet posterior concentration, optionally completed with the exact
     # accounting of forbidden rules via data augmentation, in log space as the
     # augmentation counts can be huge
-    log_alpha = jnp.log(state.forest.theta / p + varcount)
+    log_alpha = jnp.log(state.forest.sparsity.theta / p + varcount)
     if state.config.augment:
         log_alpha = jnp.logaddexp(
             log_alpha, sample_s_augmentation(keys.pop(), state.forest)
@@ -2273,7 +2273,12 @@ def step_s(key: Key[Array, ''], state: State) -> State:
     huge = log_alpha > LOG_HUGE
     alpha = jnp.exp(jnp.where(huge, 0.0, log_alpha))
     log_s = jnp.where(huge, log_alpha, loggamma(log_s_key, alpha))
-    return replace(state, forest=replace(state.forest, log_s=log_s))
+    return replace(
+        state,
+        forest=replace(
+            state.forest, sparsity=replace(state.forest.sparsity, log_s=log_s)
+        ),
+    )
 
 
 @named_call
@@ -2304,31 +2309,37 @@ def step_theta(
     The draw is from an approximation of the full conditional of ``v =
     log(theta / rho)``, which interpolates its logarithm linearly between the
     edges of the bins of an evenly spaced grid over the range of `v` allowed by
-    `Forest.log_theta_range`. The full conditional of `v` gets
+    `Sparsity.log_theta_range`. The full conditional of `v` gets
     narrower with the number of predictors `p`, roughly with standard deviation
     ``1 / sqrt(p)``, so by default the number of bins is ``320 sqrt(p)``, clipped
     to [1000, 100000]. Beyond that, the approximation is accurate only to
     within a bin.
     """
     forest = state.forest
-    assert forest.log_s is not None
-    assert forest.rho is not None
-    assert forest.a is not None
-    assert forest.b is not None
-    assert forest.log_theta_range is not None
+    assert forest.sparsity.log_s is not None
+    assert forest.sparsity.rho is not None
+    assert forest.sparsity.a is not None
+    assert forest.sparsity.b is not None
+    assert forest.sparsity.log_theta_range is not None
 
     if num_grid is None:
         (p,) = forest.max_split.shape
         num_grid = min(max(round(320 * p**0.5), 1000), 100_000)
 
     keys = split(key)
-    log_s = forest.log_s - logsumexp(forest.log_s)
+    log_s = forest.sparsity.log_s - logsumexp(forest.sparsity.log_s)
 
     # log_p(v) is the exact full conditional log pdf of v
-    log_p = partial(_log_p_v, log_s=log_s, a=forest.a, b=forest.b, rho=forest.rho)
+    log_p = partial(
+        _log_p_v,
+        log_s=log_s,
+        a=forest.sparsity.a,
+        b=forest.sparsity.b,
+        rho=forest.sparsity.rho,
+    )
 
     # the mass of each bin, under the log-linear interpolation of the density
-    grid_range = forest.log_theta_range
+    grid_range = forest.sparsity.log_theta_range
     width = 2 * grid_range / num_grid
     edges = jnp.linspace(-grid_range, grid_range, num_grid + 1)
     log_p_edges = log_p(edges)
@@ -2345,8 +2356,10 @@ def step_theta(
     i = random.categorical(keys.pop(), log_pmf)
     v = edges[i] + width * sample_unit_exponential(keys.pop(), rise[i])
 
-    theta = forest.rho * jnp.exp(v)
-    return replace(state, forest=replace(forest, theta=theta))
+    theta = forest.sparsity.rho * jnp.exp(v)
+    return replace(
+        state, forest=replace(forest, sparsity=replace(forest.sparsity, theta=theta))
+    )
 
 
 def log_expm1_ratio(x: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
@@ -2454,7 +2467,7 @@ def step_sparse(key: Key[Array, ''], state: State) -> State:
 def _step_sparse(key: Key[Array, ''], state: State) -> State:
     keys = split(key)
     state = step_s(keys.pop(), state)
-    if state.forest.rho is not None:
+    if state.forest.sparsity.rho is not None:
         state = step_theta(keys.pop(), state)
     return state
 

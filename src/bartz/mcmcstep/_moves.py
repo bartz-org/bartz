@@ -131,7 +131,7 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
         max_split=forest.max_split,
         blocked_vars=forest.blocked_vars,
         p_propose_grow=forest.p_propose_grow,
-        log_s=forest.log_s,
+        log_s=forest.sparsity.log_s,
     )
     return vmap(propose)(
         keys.pop(num_trees), forest.var_tree, forest.split_tree, forest.affluence_tree

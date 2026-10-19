@@ -215,6 +215,45 @@ class DiagWishart(Wishart):
         super().__init__(nu, rate, value)
 
 
+class Sparsity(Module):
+    """The parameters of the prior probability of the variables to split along."""
+
+    log_s: Float32[Array, '*chains p'] | None = field(chains=CHAIN_AXIS)
+    """The logarithm of the prior probability for choosing a variable to split
+    along in a decision rule. Not normalized. Variables that do not have any
+    available decision rule at a given node are masked away. If `None`, use a
+    uniform distribution. Without `theta`, it is constant and shared by the
+    chains, see `has_chains`."""
+
+    theta: Float32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
+    """The concentration parameter for the Dirichlet prior on the variable
+    distribution `s`. If not set, `log_s` is left constant."""
+
+    a: Float32[Array, ''] | None
+    """First shape parameter of the prior on `theta`. If not set, `theta` is
+    left constant."""
+
+    b: Float32[Array, ''] | None
+    """Second shape parameter of the prior on `theta`. If not set, `theta` is
+    left constant."""
+
+    rho: Float32[Array, ''] | None
+    """Scale parameter of the prior on `theta`. If not set, `theta` is left constant."""
+
+    log_theta_range: Float32[Array, ''] | None
+    """The domain of `theta` is ``|log(theta / rho)| <= log_theta_range``.
+    `None` if `theta` is constant."""
+
+    @property
+    def has_chains(self) -> bool:
+        """Whether `log_s` and `theta` carry a chain axis.
+
+        Only if `theta` is set and has a chain axis: otherwise `log_s` is
+        constant and shared by the chains.
+        """
+        return self.theta is not None and self.theta.ndim > 0
+
+
 class Forest(Module):
     """Represents the MCMC state of a sum of trees."""
 
@@ -345,30 +384,9 @@ class Forest(Module):
     ``num_trees * leaf_prior_cov_inv.value^-1``. If `Wishart.nu` is `None`,
     the precision is held fixed."""
 
-    log_s: Float32[Array, '*chains p'] | None = field(chains=CHAIN_AXIS)
-    """The logarithm of the prior probability for choosing a variable to split
-    along in a decision rule. Not normalized. Variables that do not have any
-    available decision rule at a given node are masked away. If `None`, use a
-    uniform distribution."""
-
-    theta: Float32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
-    """The concentration parameter for the Dirichlet prior on the variable
-    distribution `s`. If not set, `log_s` is left constant."""
-
-    a: Float32[Array, ''] | None
-    """First shape parameter of the prior on `theta`. If not set, `theta` is
-    left constant."""
-
-    b: Float32[Array, ''] | None
-    """Second shape parameter of the prior on `theta`. If not set, `theta` is
-    left constant."""
-
-    rho: Float32[Array, ''] | None
-    """Scale parameter of the prior on `theta`. If not set, `theta` is left constant."""
-
-    log_theta_range: Float32[Array, ''] | None
-    """The domain of `theta` is ``|log(theta / rho)| <= log_theta_range``.
-    `None` if `theta` is constant."""
+    sparsity: Sparsity
+    """The parameters of the prior probability of the variables to split
+    along."""
 
     @property
     def has_chains(self) -> bool:
@@ -405,7 +423,7 @@ class StepConfig(Module):
     augment: bool = field(static=True)
     """Whether to account exactly, via data augmentation, for the decision
     rules forbidden by the ancestors of each node when updating
-    `Forest.log_s`."""
+    `Sparsity.log_s`."""
 
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
@@ -957,8 +975,8 @@ def init(
     a
     b
     rho
-        Sparsity (variable selection) parameters, see `Forest.log_s` and
-        `Forest.theta`. If `rho`, `a`, `b` are set, an unspecified `theta` is
+        Sparsity (variable selection) parameters, see `Sparsity.log_s` and
+        `Sparsity.theta`. If `rho`, `a`, `b` are set, an unspecified `theta` is
         initialized to `rho`; if `theta` is set, an unspecified `log_s` is
         initialized to uniform.
     sparse_on_at
@@ -1181,12 +1199,14 @@ def init(
                 leaf_prior_cov_inv=replace(
                     leaf_prior_cov_inv, value=_lazy_from_array(leaf_prior_cov_inv.value)
                 ),
-                log_s=_lazy_from_array(asarray_or_none(log_s)),
-                theta=_lazy_from_array(asarray_or_none(theta)),
-                rho=asarray_or_none(rho),
-                a=asarray_or_none(a),
-                b=asarray_or_none(b),
-                log_theta_range=None if rho is None else jnp.float32(40.0),
+                sparsity=Sparsity(
+                    log_s=_lazy_from_array(asarray_or_none(log_s)),
+                    theta=_lazy_from_array(asarray_or_none(theta)),
+                    rho=asarray_or_none(rho),
+                    a=asarray_or_none(a),
+                    b=asarray_or_none(b),
+                    log_theta_range=None if rho is None else jnp.float32(40.0),
+                ),
             ),
             config=StepConfig(
                 steps_done=jnp.int32(0),

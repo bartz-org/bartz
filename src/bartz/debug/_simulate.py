@@ -26,7 +26,6 @@
 
 from dataclasses import fields, replace
 
-from equinox import error_if
 from jax import lax, random
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
@@ -125,9 +124,8 @@ def sample_prior(key: Key[Array, ''], state: StateT) -> StateT:
     The minimum number of points per node restricts the prior support to the
     trees that satisfy the constraints on the data `State.X`. The trees are
     sampled exactly by rejection. This does not work with a random
-    `Forest.log_s`, because then the constraints also change its marginal
-    distribution. A fixed `Forest.log_s` must be the same in all chains, as
-    `bartz.mcmcstep.init` makes it, which is checked at runtime.
+    `Sparsity.log_s`, because then the constraints also change its marginal
+    distribution.
 
     The memory of the input state is re-used for the output state, so the input
     state can not be used any more, like with `bartz.mcmcstep.step`.
@@ -141,7 +139,7 @@ def sample_prior(key: Key[Array, ''], state: StateT) -> StateT:
         forest.min_points_per_decision_node is not None
         or forest.min_points_per_leaf is not None
     )
-    if constrained and forest.theta is not None:
+    if constrained and forest.sparsity.theta is not None:
         msg = 'variable selection with a minimum number of points per node is not supported'
         raise NotImplementedError(msg)
 
@@ -153,34 +151,40 @@ def sample_prior(key: Key[Array, ''], state: StateT) -> StateT:
 
 
 def sample_theta_chains(key: Key[Array, ''], state: StateT) -> StateT:
-    """Draw `Forest.theta`, if it has a prior, of all chains at once."""
+    """Draw `Sparsity.theta`, if it has a prior, of all chains at once."""
     forest = state.forest
-    if forest.rho is None:
+    if forest.sparsity.rho is None:
         return state
     else:
-        assert forest.a is not None
-        assert forest.b is not None
+        assert forest.sparsity.a is not None
+        assert forest.sparsity.b is not None
         num_chains = state.num_chains()
         theta = sample_theta(
             key,
-            forest.rho,
-            forest.a,
-            forest.b,
+            forest.sparsity.rho,
+            forest.sparsity.a,
+            forest.sparsity.b,
             () if num_chains is None else (num_chains,),
-            log_range=forest.log_theta_range,
+            log_range=forest.sparsity.log_theta_range,
         )
-        return replace(state, forest=replace(forest, theta=theta))
+        return replace(
+            state,
+            forest=replace(forest, sparsity=replace(forest.sparsity, theta=theta)),
+        )
 
 
 def sample_sparsity(key: Key[Array, ''], state: StateT) -> StateT:
-    """Draw `Forest.log_s`, if it has a prior."""
+    """Draw `Sparsity.log_s`, if it has a prior."""
     forest = state.forest
-    if forest.theta is None:
+    if forest.sparsity.theta is None:
         return state
     else:
         (p,) = forest.max_split.shape
-        log_s = sample_s(key, forest.theta, p)
-        return replace(state, forest=replace(forest, log_s=log_s))
+        log_s = sample_s(key, forest.sparsity.theta, p)
+        return replace(
+            state,
+            forest=replace(forest, sparsity=replace(forest.sparsity, log_s=log_s)),
+        )
 
 
 def sample_trees(key: Key[Array, ''], state: StateT) -> StateT:
@@ -189,9 +193,9 @@ def sample_trees(key: Key[Array, ''], state: StateT) -> StateT:
 
     # put the chain axis first
     axes = chain_vmap_axes(state).forest
-    log_s = forest.log_s
+    log_s = forest.sparsity.log_s
     if log_s is not None:
-        log_s = chain_to_axis(log_s, axes.log_s)
+        log_s = chain_to_axis(log_s, axes.sparsity.log_s)
     *shape, half_tree_size = chain_to_axis(forest.split_tree, axes.split_tree).shape
 
     depths = half_tree_size.bit_length() - 1
@@ -208,15 +212,6 @@ def sample_trees(key: Key[Array, ''], state: StateT) -> StateT:
             min_points_per_decision_node=forest.min_points_per_decision_node,
             min_points_per_leaf=forest.min_points_per_leaf,
         )
-        if log_s is not None and log_s.ndim > 1:
-            # the rejection sampler needs identically distributed trees, so
-            # use a single `log_s`; `init` repeats it across the chains
-            first = log_s[0, :]
-            log_s = error_if(
-                first,
-                jnp.any(log_s != first),
-                'with a minimum number of points per node, `log_s` must be the same in all chains',
-            )
 
     trees = sample_forest_structure(
         key,

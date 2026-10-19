@@ -104,12 +104,12 @@ from tests.util import (
     assert_array_equal,
     assert_close_matrices,
     assert_close_matrices_given_norms,
+    call_with_periodic_sigint,
     chain_deviation_norms,
     clipped_logit,
     condf,
     leaf_prior_cov_inv_conditional_mean,
     nnone,
-    periodic_sigint,
     rerun_on_gpu,
     rhat_rank,
     skip_empty_shard_map_bug,
@@ -2909,11 +2909,10 @@ def test_interrupt(bkw: BartKW) -> None:
     # a first interruptible phase of jax compilation. Then send ^C every second,
     # in case the first ^C landed during a second non-interruptible compilation
     # phase that eats ^C and ignores it.
-    with (
-        pytest.raises(KeyboardInterrupt),
-        periodic_sigint(first_after=3.0, interval=1.0),
-    ):
-        block_until_ready(Bart(**kw))
+    with pytest.raises(KeyboardInterrupt):
+        call_with_periodic_sigint(
+            lambda: block_until_ready(Bart(**kw)), first_after=3.0, interval=1.0
+        )
 
 
 def test_dataframe_series_duck_types() -> None:

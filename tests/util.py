@@ -25,14 +25,14 @@
 """Functions intended to be shared across the test suite."""
 
 import math
-from collections.abc import Generator, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Sequence
 from functools import partial
 from operator import ge, le
 from os import getpid, kill
-from signal import SIGINT
+from signal import SIGINT, signal
 from threading import Event, Thread
 from time import monotonic
+from types import FrameType
 from typing import Any, TypeVar
 
 import jax
@@ -444,18 +444,33 @@ class PeriodicSigintTimer:
         print(f'[PeriodicSigintTimer] stopped after {self.sent} SIGINT(s)')
 
 
-@contextmanager
-def periodic_sigint(
-    *, first_after: float, interval: float
-) -> Generator[PeriodicSigintTimer, None, None]:
-    """Context manager to periodically send SIGINT to the main thread."""
+def call_with_periodic_sigint(
+    func: Callable[[], object], *, first_after: float, interval: float
+) -> None:
+    """Call `func` while periodically sending SIGINT to the main thread.
+
+    SIGINT raises `KeyboardInterrupt` only while `func` is running. Afterwards
+    it is ignored, so a late ^C can not skip stopping the timer.
+    """
+
+    def body() -> None:
+        func()
+
+    def handler(_signum: int, frame: FrameType | None) -> None:
+        while frame is not None:  # pragma: no branch
+            if frame.f_code is body.__code__:
+                raise KeyboardInterrupt
+            frame = frame.f_back
+
     timer = PeriodicSigintTimer(first_after=first_after, interval=interval)
+    prev_handler = signal(SIGINT, handler)
     try:
         timer.start()
-        yield timer
+        body()
     finally:
         if timer._thread is not None:
             timer.cancel()
+        signal(SIGINT, prev_handler)
 
 
 def clipped_logit(

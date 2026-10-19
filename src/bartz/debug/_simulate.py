@@ -274,15 +274,15 @@ def sample_precision(
         value = prior.value
         chol = jnp.sqrt(value) if value.ndim == 0 else chol_with_gersh(value)
         return prior, chol
-
-    assert prior.rate is not None
-    if isinstance(prior, DiagWishart):
-        nu = prior.inv_wishart_marginal_nu
-        assert nu is not None
-        value, chol = sample_diag_wishart(key, nu, prior.rate)
     else:
-        value, chol = sample_wishart(key, prior.nu, prior.rate)
-    return replace(prior, value=value), chol
+        assert prior.rate is not None
+        if isinstance(prior, DiagWishart):
+            nu = prior.inv_wishart_marginal_nu
+            assert nu is not None
+            value, chol = sample_diag_wishart(key, nu, prior.rate)
+        else:
+            value, chol = sample_wishart(key, prior.nu, prior.rate)
+        return replace(prior, value=value), chol
 
 
 def to_leaf_storage(

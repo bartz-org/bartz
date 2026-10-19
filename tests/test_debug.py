@@ -26,7 +26,7 @@
 
 from collections import namedtuple
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import numpy
 import pytest
@@ -36,12 +36,18 @@ from jax import random, vmap
 from jax.nn import softmax
 from jax.scipy.special import xlogy
 from jax.scipy.stats import chi2
-from jaxtyping import Array, Bool, Float, Float32, Int32, Shaped, UInt8
+from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Shaped, UInt8
 from scipy import stats
 from scipy.stats import ks_1samp, ks_2samp
 
-from bartz._jaxext import minimal_unsigned_dtype, split
-from bartz.debug import BARTTraceMeta, MinimalTrace, sample_prior, trees_BART_to_bartz
+from bartz._jaxext import get_device_count, minimal_unsigned_dtype, split
+from bartz.debug import (
+    BARTTraceMeta,
+    MinimalTrace,
+    sample_data,
+    sample_prior,
+    trees_BART_to_bartz,
+)
 from bartz.debug._prior import (
     MinPointsCriterion,
     RejectionCriterion,
@@ -58,7 +64,8 @@ from bartz.debug._prior import (
 from bartz.grove import TreesTrace, check_trace, describe_error, format_tree
 from bartz.grove._check import check_tree
 from bartz.mcmcloop import compute_varcount, evaluate_trace
-from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal
+from bartz.mcmcstep import DiagWishart, State, Wishart, init, make_p_nonterminal
+from bartz.mcmcstep._rebuild import rebuild_derived
 from bartz.prepcovars import GivenSplitsBinner
 from tests.util import (
     assert_array_equal,
@@ -607,6 +614,138 @@ class TestSamplePriorConstraintsChains:
         assert nnone(state.forest.sparsity.log_s).shape == (2,)
         state = sample_prior(keys.pop(), state)
         assert state.forest.split_tree.any()
+
+
+class TestSampleModel:
+    """Test `sample_prior` and `sample_data` on small states."""
+
+    n = 10
+
+    def init(
+        self,
+        key: Key[Array, ''],
+        outcome: Literal['continuous', 'binary', 'mixed'] = 'continuous',
+        **kwargs: Any,
+    ) -> State:
+        """Create a small state, with `kwargs` passed to `init`."""
+        p = 2
+        k = 2 if outcome == 'mixed' else None
+        kshape = () if k is None else (k,)
+        eye = jnp.float32(1.0) if k is None else jnp.eye(k)
+
+        error_kw: dict
+        if outcome == 'binary':
+            error_kw = dict(outcome_type='binary')
+        elif outcome == 'mixed':
+            error_kw = dict(
+                outcome_type=['continuous', 'binary'],
+                error_cov_inv=DiagWishart(4.0, 4.0 * eye, eye),
+            )
+        else:
+            error_kw = dict(error_cov_inv=Wishart(4.0, 4.0, 1.0))
+
+        return init(
+            X=random.randint(key, (p, self.n), 0, 4, jnp.uint8),
+            y=jnp.zeros((*kshape, self.n)),
+            offset=jnp.zeros(kshape),
+            max_split=jnp.full(p, 3, jnp.uint8),
+            num_trees=5,
+            p_nonterminal=make_p_nonterminal(4),
+            leaf_prior_cov_inv=Wishart(None, None, 5.0 * eye),
+            **error_kw,
+            **kwargs,
+        )
+
+    def test_shared_chains(self, keys: split) -> None:
+        """`sample_data` rejects chains that share the data."""
+        state = self.init(keys.pop(), num_chains=2)
+        with pytest.raises(ValueError, match='the chains share the data'):
+            sample_data(keys.pop(), state)
+
+    def test_constraints_with_theta_prior(self, keys: split) -> None:
+        """`sample_prior` rejects a minimum number of points with a prior on `theta`."""
+        state = self.init(
+            keys.pop(), min_points_per_leaf=3, a=0.5, b=1.0, rho=2.0, sparse_on_at=0
+        )
+        with pytest.raises(NotImplementedError, match='minimum number of points'):
+            sample_prior(keys.pop(), state)
+
+    def test_data_sharded(self, keys: split) -> None:
+        """Sampling and rebuilding reject a state with the data sharded."""
+        if get_device_count() < 2:
+            pytest.skip('need at least 2 devices for the data axis')
+        state = self.init(keys.pop(), mesh={'data': 2})
+        match = 'with the data sharded is not supported'
+        with pytest.raises(NotImplementedError, match=match):
+            sample_prior(keys.pop(), state)
+        with pytest.raises(NotImplementedError, match=match):
+            sample_data(keys.pop(), state)
+        with pytest.raises(NotImplementedError, match=match):
+            rebuild_derived(state)
+
+    @pytest.mark.parametrize('outcome', ['continuous', 'binary', 'mixed'])
+    def test_missing_kept(
+        self, keys: split, outcome: Literal['continuous', 'binary', 'mixed']
+    ) -> None:
+        """`sample_data` leaves the missing datapoints unchanged."""
+        # sample missingness indicator
+        missing_shape = (2, self.n) if outcome == 'mixed' else (self.n,)
+        missing = random.bernoulli(keys.pop(), 0.5, missing_shape)
+
+        # initialize a state with missing data
+        state = self.init(keys.pop(), outcome, missing=missing)
+
+        # extract outcome and latent outcome
+        y = jnp.array(state.y)
+        z = nnone(state.z) if outcome != 'continuous' else None
+        z = None if z is None else jnp.array(z)
+
+        # slice `missing` to match the shape of `z`
+        z_missing = missing
+        if state.binary_indices is not None:
+            z_missing = missing[state.binary_indices, :]
+
+        # resample the data on the state with missing data
+        new = sample_data(keys.pop(), state)
+
+        # check the values marked as missing remained the ones at initialization
+        assert_array_equal(jnp.where(missing, new.y, y), y)
+        assert jnp.any(new.y != y)
+        if z is not None:
+            assert_array_equal(jnp.where(z_missing, nnone(new.z), z), z)
+
+    def test_leaf_quantization(self, keys: split) -> None:
+        """`sample_prior` rounds the leaves to the quantization grid of `step`."""
+        # store keys to sync the random streams of the two cases
+        init_key, prior_key = keys.pop(2)
+
+        # sample state from prior w/o leaf quantization
+        plain = sample_prior(prior_key, self.init(init_key))
+
+        # sample state from prior w/ leaf quantization
+        q = 20
+        quantized_init = self.init(random.clone(init_key), leaf_quantization=q)
+
+        # infer quantization unit; get it from the state before sampling the
+        # prior to implicitly check `sample_prior` does not change quantization
+        # settings (and before `sample_prior` donates the state)
+        nmant = jnp.finfo(quantized_init.resid.dtype).nmant
+        quantum = (
+            quantized_init.resid_eff_scale
+            / quantized_init.forest.leaf_unit
+            * 2.0 ** (q - nmant)
+        )
+
+        quantized = sample_prior(random.clone(prior_key), quantized_init)
+
+        # check the leaf tree of the quantized state is indeed quantized
+        leaf_tree_q = quantized.forest.leaf_tree / quantum
+        assert_array_equal(leaf_tree_q, jnp.round(leaf_tree_q))
+
+        # check the rounding used to quantize was correct and non-trivial
+        diff = quantized.forest.leaf_tree - plain.forest.leaf_tree
+        assert jnp.all(jnp.abs(diff) <= quantum / 2)
+        assert jnp.any(diff != 0)
 
 
 class TestSampleWishart:

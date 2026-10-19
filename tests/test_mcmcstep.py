@@ -1936,7 +1936,16 @@ def test_affluence_tree_stays_clean(
 
 
 @pytest.mark.parametrize(
-    'case', ['plain', 'min_points', 'error_scale', 'chains', 'binary', 'multivariate']
+    'case',
+    [
+        'plain',
+        'min_points',
+        'error_scale',
+        'chains',
+        'binary',
+        'multivariate',
+        'blocked',
+    ],
 )
 def test_rebuild_derived(keys: split, case: str) -> None:
     """`rebuild_derived` reproduces the caches maintained by `step`."""
@@ -1976,6 +1985,14 @@ def test_rebuild_derived(keys: split, case: str) -> None:
         kw = dict(kw, error_scale=jnp.linspace(0.5, 2.0, n))
     elif case == 'chains':
         kw = dict(kw, num_chains=2)
+    elif case == 'blocked':
+        # a predictor without splits, excluded with `blocked_vars`
+        kw = dict(
+            kw,
+            X=kw['X'].at[0, :].set(0),
+            max_split=kw['max_split'].at[0].set(0),
+            filter_splitless_vars=1,
+        )
 
     # create initial state
     state = init(**kw)

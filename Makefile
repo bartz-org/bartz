@@ -85,6 +85,7 @@ help:
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- check-changelog: verify the topmost changelog section is dated today"
+	@echo "- check-npz-frozen: verify the test archives of the file format are frozen"
 	@echo "- build: build the python wheel and sdist"
 	@echo "- check-dist: verify dist/ artifacts carry the release version"
 	@echo "- release: run tests, build, and upload to PyPI (run on main)"
@@ -171,7 +172,7 @@ GROUP_iface-v5v7  := tests/test_interface.py -k "(v5 and TestWithCachedBart) or 
 GROUP_iface-v6    := tests/test_interface.py -k "v6 or (v5 and not TestWithCachedBart)"
 GROUP_iface-v4    := tests/test_interface.py -k "(v4 and not test_equiv_sharding) or not (v2 or v3 or v4 or v5 or v6 or v7)"
 GROUP_bart-v1     := tests/test_BART.py tests/test_jaxext.py tests/test_stochtree.py 'tests/test_mcmcstep.py::TestMultichain' -k "v1 or not (v2 or v3) or jaxext"
-GROUP_bart-v23    := tests/test_BART.py 'tests/test_interface.py::test_equiv_sharding[v4]' -k "v2 or v3 or v4"
+GROUP_bart-v23    := tests/test_BART.py tests/test_npz.py 'tests/test_interface.py::test_equiv_sharding[v4]' -k "v2 or v3 or v4 or test_npz"
 
 GROUPS := misc iface-v5v7 iface-v6 iface-v4 bart-v1 bart-v23
 
@@ -326,6 +327,10 @@ check-committed:
 check-changelog:
 	$(UV_RUN) python -m config.util check_changelog --today=$(TODAY)
 
+.PHONY: check-npz-frozen
+check-npz-frozen:
+	$(UV_RUN) python -m tests.test_npz --check-frozen
+
 .PHONY: build
 build:
 	# remove stale artifacts: uv publish would upload everything in dist/
@@ -338,7 +343,7 @@ build:
 # artifacts pass `check-dist` and `smoke-test`, to avoid editing a published
 # tag if something fails in between.
 .PHONY: release
-release: check-changelog clean setup update-oldest-deps update-python-deps check-committed tests tests-single-cpu tests-old docs version-tag build upload gh-release
+release: check-changelog check-npz-frozen clean setup update-oldest-deps update-python-deps check-committed tests tests-single-cpu tests-old docs version-tag build upload gh-release
 	@echo "Done!"
 
 .PHONY: version-tag

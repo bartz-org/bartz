@@ -51,6 +51,7 @@ from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UIn
 from numpy import ndarray
 
 from bartz._jaxext import equal_shards, is_key, jit, jit_active, project, split
+from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.grove import (
     TreeHeaps,
     TreesTrace,
@@ -197,6 +198,7 @@ class SparseConfig(Module):
     """Whether variable selection is active."""
 
 
+@serializable
 class Bart(Module):
     R"""
     Nonparametric regression with Bayesian Additive Regression Trees (BART).
@@ -461,17 +463,17 @@ class Bart(Module):
         # check data and put it in the right format
         x_train, x_train_fmt = _process_predictor_input(x_train)
         y_train = _process_response_input(y_train)
-        _check_same_length(x_train, y_train)
+        check_length(y_train, 'y_train', x_train, 'x_train')
 
         if error_scale is not None:
             # `error_scale` is donated downstream as `init`'s `error_scale`, which
             # keeps it (sharded) as `State.error_scale` for prediction
             error_scale = _process_response_input(error_scale)
-            _check_same_length(x_train, error_scale)
+            check_length(error_scale, 'error_scale', x_train, 'x_train')
 
         if missing is not None:
             missing = _process_response_input(missing, dtype=jnp.bool_)
-            _check_same_length(x_train, missing)
+            check_length(missing, 'missing', x_train, 'x_train')
 
         # check data types are correct for continuous/binary/multivariate regression
         outcome_type, binary_mask = _check_type_settings(
@@ -616,9 +618,11 @@ class Bart(Module):
         ValueError
             If `x_test` contains NaN or has a different format than `x_train`,
             or if `error_scale` is specified when it should be `None`, or if
-            `error_scale` is not specified when it is required, or if the model
-            splits datapoints across devices (`num_data_devices`) and the number
-            of test points is not a multiple of the number of data devices.
+            `error_scale` is not specified when it is required, or if
+            `error_scale` does not match the datapoints of `x_test`, or if the
+            model splits datapoints across devices (`num_data_devices`) and the
+            number of test points is not a multiple of the number of data
+            devices.
 
         Notes
         -----
@@ -687,8 +691,45 @@ class Bart(Module):
         object.__setattr__(obj, '_device', None)
         return obj
 
+    def save_npz(self, path: str | PathLike) -> None:
+        """Save the fitted model to a compressed npz archive.
+
+        Parameters
+        ----------
+        path
+            The file to write to.
+
+        Notes
+        -----
+        The archive holds the whole model, readable without pickle. The arrays
+        are copied to host memory and all device/sharding placement is
+        dropped; `load_npz` reconstructs a single-device model.
+
+        Files written by a bartz release can be loaded by later releases, but
+        not by earlier ones; files written by development versions may not be.
+        """
+        save_npz(path, self._drop_device_info())
+
+    @classmethod
+    def load_npz(cls, path: str | PathLike) -> 'Bart':
+        """Load a model saved with `save_npz`.
+
+        Parameters
+        ----------
+        path
+            The file to read from.
+
+        Returns
+        -------
+        The loaded model, on the default device.
+        """
+        return check_class(load_npz(path), cls, path)
+
     def dump(self, path: str | PathLike) -> None:
         """Serialize the fitted model to a file with `pickle`.
+
+        .. deprecated:: 0.14.0
+            Use `save_npz` instead.
 
         Parameters
         ----------
@@ -702,6 +743,11 @@ class Bart(Module):
         equinox. The arrays are copied to host memory and all device/sharding
         placement is dropped; `load` reconstructs a single-device model.
         """
+        warn(
+            '`Bart.dump` is deprecated, use `Bart.save_npz`',
+            DeprecationWarning,
+            stacklevel=2,
+        )
         # drop all device info (`Device` objects are not picklable), then
         # gather any sharded arrays to host (dropping their sharding); the
         # reload is single-device
@@ -713,6 +759,9 @@ class Bart(Module):
     @classmethod
     def load(cls, path: str | PathLike) -> 'Bart':
         """Load a model saved with `dump`.
+
+        .. deprecated:: 0.14.0
+            Use `load_npz` instead.
 
         Parameters
         ----------
@@ -728,6 +777,11 @@ class Bart(Module):
         TypeError
             If the file does not contain a `Bart` instance.
         """
+        warn(
+            '`Bart.load` is deprecated, use `Bart.load_npz`',
+            DeprecationWarning,
+            stacklevel=2,
+        )
         with Path(path).open('rb') as file:
             obj = pickle.load(file)  # noqa: S301, the user owns the file
         if not isinstance(obj, cls):
@@ -984,7 +1038,7 @@ class Bart(Module):
             msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
             raise ValueError(msg)
         if error_scale is not None:
-            _check_same_length(error_scale, x_test)
+            check_length(error_scale, 'error_scale', x_test, 'x_test')
         return self._binner.bin(x_test)
 
     def _device_put_test(
@@ -1157,7 +1211,7 @@ def _process_predictor_input(
     x: Real[ArrayLike, 'p n'] | DataFrame,
 ) -> tuple[Shaped[Array, 'p n'], Any]:
     if isinstance(x, DataFrame):
-        fmt = dict(kind='dataframe', columns=x.columns)
+        fmt = dict(kind='dataframe', columns=list(x.columns))
         x = x.to_numpy().T
     else:
         fmt = dict(kind='array', num_covar=x.shape[0])
@@ -1196,9 +1250,15 @@ def _process_response_input(
     return arr
 
 
-def _check_same_length(x1: Shaped[Array, '... n'], x2: Shaped[Array, '... n']) -> None:
-    get_length = lambda x: x.shape[-1]
-    assert get_length(x1) == get_length(x2)
+def check_length(
+    a: Shaped[Array, '*k n'], a_name: str, x: Shaped[Array, 'p m'], x_name: str
+) -> None:
+    """Check that `a`, named `a_name`, has a datapoint per column of `x`, named `x_name`."""
+    *_, n = a.shape
+    _, m = x.shape
+    if n != m:
+        msg = f'`{a_name}` has {n} datapoints, but `{x_name}` has {m}.'
+        raise ValueError(msg)
 
 
 def warn_byte_boundaries(

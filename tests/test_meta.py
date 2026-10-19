@@ -27,8 +27,9 @@
 from functools import partial
 from types import SimpleNamespace
 
+import numpy
 import pytest
-from jax import debug_nans, jit, random
+from jax import debug_nans, default_backend, device_get, device_put, jit, random
 from jax import numpy as jnp
 from jaxtyping import Array, Key, Shaped
 from numpy.testing import assert_array_less
@@ -153,6 +154,32 @@ class TestJaxNoCopyBehavior:
             qp = q.unsafe_buffer_pointer()
 
             assert qp == yp
+
+    def test_numpy_conversion_no_copy(self) -> None:
+        """Check `numpy.asanyarray` views the buffer of a jax array on cpu."""
+        x = jnp.arange(100)
+        if x.platform() != 'cpu':  # pragma: no cover, gpu-only
+            pytest.skip('a non-cpu array must be copied to host memory')
+        y = numpy.asanyarray(x)
+        assert y.ctypes.data == x.unsafe_buffer_pointer()
+
+    def test_device_get_no_copy(self) -> None:
+        """Check `jax.device_get` views the buffers of a tree of jax arrays on cpu."""
+        x = jnp.arange(100)
+        if x.platform() != 'cpu':  # pragma: no cover, gpu-only
+            pytest.skip('a non-cpu array must be copied to host memory')
+        y = device_get(dict(x=x))['x']
+        assert y.ctypes.data == x.unsafe_buffer_pointer()
+
+    def test_device_put_no_copy(self) -> None:
+        """Check `jax.device_put` wraps a 64-byte aligned numpy array on cpu."""
+        if default_backend() != 'cpu':  # pragma: no cover, gpu-only
+            pytest.skip('a non-cpu array must be copied to device memory')
+        buffer = numpy.empty(100 + 64, numpy.uint8)
+        offset = -buffer.ctypes.data % 64
+        x = buffer[offset : offset + 100]
+        y = device_put(x)
+        assert y.unsafe_buffer_pointer() == x.ctypes.data
 
 
 @pytest.mark.parametrize('dt_exp', [jnp.float16, jnp.float32, jnp.int32])

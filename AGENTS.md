@@ -26,6 +26,7 @@ To check the code you write:
     - check the html documentation is fine
         - the stuff that breaks most often is type hints, return ones in particular
 - run the unit tests relevant to your code changes with `uv run pytest ...`
+    - if you change the fields of a `@serializable` class, run `tests/test_npz.py`
     - not all tests right away because the full test suite takes a long time to run
 - at the end of debugging, run the full test suite to check everything works
     - use `uv run pytest`; we have a `make tests`, but its config is pretty heavy on a laptop and blocks other agents/people working in parallel
@@ -112,6 +113,7 @@ Interface hierarchy:
     - use jnp.square(x), jnp.sqrt(x), lax.rsqrt(x), jnp.reciprocal(x) instead of x**2, x**0.5, x**-0/5, 1/x
     - jax supports in-place operators (which actually create new arrays), use them
         - for example, do `x += ...`, not `x = x + ...` where `x` is a jax array
+    - use `None` instead of `jnp.newaxis`
 - other **python** conventions:
     - use dicts as if they were frozendicts when possible: e.g., do `d = dict(d, a=1, b=2)` to set values instead of `d['a'] = 1` or `d.update(a=1)`, safer
         - other useful pattern: `d = dict(**d, a=1, b=2)` to check the keys are not already present

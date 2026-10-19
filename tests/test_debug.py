@@ -37,7 +37,7 @@ from jax import random, vmap
 from jax.nn import softmax
 from jax.scipy.special import xlogy
 from jax.scipy.stats import chi2
-from jaxtyping import Array, Bool, Float32, Int32, Shaped, UInt8
+from jaxtyping import Array, Bool, Float, Float32, Int32, Shaped, UInt8
 from scipy import stats
 from scipy.stats import ks_1samp, ks_2samp
 
@@ -403,6 +403,23 @@ class TestSampleTheta:
     def test_scalar_shape(self, keys: split) -> None:
         """The default shape draws a scalar `theta`."""
         assert sample_theta(keys.pop(), 1.0, 0.5, 2.0).shape == ()
+
+    def test_restricted(self, keys: split) -> None:
+        """With a range, ``logit(theta / (theta + rho))`` is a truncated Beta."""
+        rho, a, b, log_range = 7.0, 0.05, 1.0, 40.0
+        theta_samp = sample_theta(
+            keys.pop(), rho, a, b, (200_000,), log_range=log_range
+        )
+        v_samp = numpy.log(numpy.asarray(theta_samp, numpy.float64) / rho)
+        assert numpy.all(numpy.abs(v_samp) <= log_range)
+
+        # the cdf of v, computed from the Beta cdf in log space for accuracy
+        def cdf(v: Float[numpy.ndarray, '*shape']) -> Float[numpy.ndarray, '*shape']:
+            log_lambda = -numpy.logaddexp(0, -v)
+            return stats.beta(a, b).cdf(numpy.exp(log_lambda))
+
+        lo, hi = cdf(numpy.array(-log_range)), cdf(numpy.array(log_range))
+        assert ks_1samp(v_samp, lambda v: (cdf(v) - lo) / (hi - lo)).pvalue > 1e-3
 
 
 class TestSampleS:

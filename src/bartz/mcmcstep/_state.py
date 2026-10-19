@@ -356,13 +356,19 @@ class Forest(Module):
     distribution `s`. If not set, `log_s` is left constant."""
 
     a: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
+    """First shape parameter of the prior on `theta`. If not set, `theta` is
+    left constant."""
 
     b: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
+    """Second shape parameter of the prior on `theta`. If not set, `theta` is
+    left constant."""
 
     rho: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
+    """Scale parameter of the prior on `theta`. If not set, `theta` is left constant."""
+
+    log_theta_range: Float32[Array, ''] | None
+    """The domain of `theta` is ``|log(theta / rho)| <= log_theta_range``.
+    `None` if `theta` is constant."""
 
     @property
     def has_chains(self) -> bool:
@@ -1180,6 +1186,7 @@ def init(
                 rho=asarray_or_none(rho),
                 a=asarray_or_none(a),
                 b=asarray_or_none(b),
+                log_theta_range=None if rho is None else jnp.float32(40.0),
             ),
             config=StepConfig(
                 steps_done=jnp.int32(0),

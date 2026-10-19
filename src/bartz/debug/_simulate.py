@@ -145,29 +145,42 @@ def sample_prior(key: Key[Array, ''], state: StateT) -> StateT:
         msg = 'variable selection with a minimum number of points per node is not supported'
         raise NotImplementedError(msg)
 
-    keys = split(key, 3)
+    keys = split(key, 4)
+    state = sample_theta_chains(keys.pop(), state)
     state = split_key_for_chains(vmap_chains(sample_sparsity))(keys.pop(), state)
     state = sample_trees(keys.pop(), state)
     return split_key_for_chains(vmap_chains(sample_values))(keys.pop(), state)
 
 
-def sample_sparsity(key: Key[Array, ''], state: StateT) -> StateT:
-    """Draw the variable selection parameters, if they have a prior."""
-    keys = split(key)
+def sample_theta_chains(key: Key[Array, ''], state: StateT) -> StateT:
+    """Draw `Forest.theta`, if it has a prior, of all chains at once."""
     forest = state.forest
-
-    theta = forest.theta
-    if forest.rho is not None:
+    if forest.rho is None:
+        return state
+    else:
         assert forest.a is not None
         assert forest.b is not None
-        theta = sample_theta(keys.pop(), forest.rho, forest.a, forest.b)
+        num_chains = state.num_chains()
+        theta = sample_theta(
+            key,
+            forest.rho,
+            forest.a,
+            forest.b,
+            () if num_chains is None else (num_chains,),
+            log_range=forest.log_theta_range,
+        )
+        return replace(state, forest=replace(forest, theta=theta))
 
-    log_s = forest.log_s
-    if theta is not None:
+
+def sample_sparsity(key: Key[Array, ''], state: StateT) -> StateT:
+    """Draw `Forest.log_s`, if it has a prior."""
+    forest = state.forest
+    if forest.theta is None:
+        return state
+    else:
         (p,) = forest.max_split.shape
-        log_s = sample_s(keys.pop(), theta, p)
-
-    return replace(state, forest=replace(forest, log_s=log_s, theta=theta))
+        log_s = sample_s(key, forest.theta, p)
+        return replace(state, forest=replace(forest, log_s=log_s))
 
 
 def sample_trees(key: Key[Array, ''], state: StateT) -> StateT:

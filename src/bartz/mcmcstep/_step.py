@@ -2278,11 +2278,7 @@ def step_s(key: Key[Array, ''], state: State) -> State:
 
 @named_call
 def step_theta(
-    key: Key[Array, ''],
-    state: State,
-    *,
-    num_grid: int | None = None,
-    grid_range: float = 40.0,
+    key: Key[Array, ''], state: State, *, num_grid: int | None = None
 ) -> State:
     """
     Update `theta`.
@@ -2298,8 +2294,6 @@ def step_theta(
     num_grid
         The number of bins of the grid used to sample ``log(theta / rho)``. If
         not specified, it grows with the number of predictors, see Notes.
-    grid_range
-        The grid spans ``log(theta / rho)`` in ``[-grid_range, grid_range]``.
 
     Returns
     -------
@@ -2309,7 +2303,8 @@ def step_theta(
     -----
     The draw is from an approximation of the full conditional of ``v =
     log(theta / rho)``, which interpolates its logarithm linearly between the
-    edges of the bins of an evenly spaced grid. The full conditional of `v` gets
+    edges of the bins of an evenly spaced grid over the range of `v` allowed by
+    `Forest.log_theta_range`. The full conditional of `v` gets
     narrower with the number of predictors `p`, roughly with standard deviation
     ``1 / sqrt(p)``, so by default the number of bins is ``320 sqrt(p)``, clipped
     to [1000, 100000]. Beyond that, the approximation is accurate only to
@@ -2320,6 +2315,7 @@ def step_theta(
     assert forest.rho is not None
     assert forest.a is not None
     assert forest.b is not None
+    assert forest.log_theta_range is not None
 
     if num_grid is None:
         (p,) = forest.max_split.shape
@@ -2332,6 +2328,7 @@ def step_theta(
     log_p = partial(_log_p_v, log_s=log_s, a=forest.a, b=forest.b, rho=forest.rho)
 
     # the mass of each bin, under the log-linear interpolation of the density
+    grid_range = forest.log_theta_range
     width = 2 * grid_range / num_grid
     edges = jnp.linspace(-grid_range, grid_range, num_grid + 1)
     log_p_edges = log_p(edges)

@@ -2038,13 +2038,11 @@ def geweke_sparse_kw(
     """Sparsity-prior hyperparameters for `init`."""
     # 'free' is the default of `Bart`, 'supersparse' puts more prior mass on a
     # small theta, which makes `s` very sparse and stresses the augmentation of
-    # `log_s` with tiny eligible split probability masses. A smaller `a` puts
-    # non-negligible prior mass on theta below the range sampled by
-    # `step_theta`, and on theta underflowing to 0 in float32.
+    # `log_s` with tiny eligible split probability masses
     params = {
         'fixed': dict(theta=float(p)),
         'free': dict(a=0.5, b=1.0, rho=float(p)),
-        'supersparse': dict(a=0.2, b=1.0, rho=float(p)),
+        'supersparse': dict(a=0.1, b=1.0, rho=float(p)),
     }
     return {} if sparsity is None else params[sparsity]
 

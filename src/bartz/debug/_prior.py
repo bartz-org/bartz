@@ -761,6 +761,8 @@ def sample_theta(
     a: FloatLike,
     b: FloatLike,
     shape: tuple[int, ...] = (),
+    *,
+    log_range: FloatLike | None = None,
 ) -> Float32[Array, ' *shape']:
     r"""Sample the Dirichlet concentration `theta` from its prior.
 
@@ -777,13 +779,39 @@ def sample_theta(
         The shape parameters of the Beta prior on :math:`\theta/(\theta+\rho)`.
     shape
         The shape of the sample. A scalar by default.
+    log_range
+        If set, the prior is restricted to :math:`|\log(\theta/\rho)| \le`
+        `log_range`.
 
     Returns
     -------
     The sampled concentration parameter(s).
     """
-    lambda_ = random.beta(key, a, b, shape)
-    return rho * lambda_ / (1 - lambda_)
+
+    # log(theta / rho) is the log ratio of two Gamma variates, drawn in log
+    # space such that theta does not underflow
+    def draw(key: Key[Array, ''], num: int) -> Float32[Array, ' num']:
+        ab = jnp.stack([jnp.asarray(a), jnp.asarray(b)])
+        log_ga, log_gb = loggamma(key, ab[:, None], (2, num))
+        return log_ga - log_gb
+
+    num = math.prod(shape)
+    if log_range is None:
+        v = draw(key, num)
+    else:
+        v = rejection_sample(key, draw, WithinRange(jnp.asarray(log_range)), num)
+    return rho * jnp.exp(v.reshape(shape))
+
+
+class WithinRange(RejectionCriterion):
+    """Accept x in [-bound, bound]."""
+
+    bound: Float32[Array, '']
+    """The bound (inclusive) on the absolute value."""
+
+    def accept(self, sample: Float32[Array, '']) -> Bool[Array, '']:
+        """Check the sample is within the range."""
+        return jnp.abs(sample) <= self.bound
 
 
 def sample_s(

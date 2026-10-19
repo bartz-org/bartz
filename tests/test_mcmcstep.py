@@ -133,7 +133,6 @@ from bartz.mcmcstep._state import (
 )
 from bartz.mcmcstep._step import (
     S,
-    _blocked_mass_tree,
     _compute_likelihood_ratio_mv,
     _compute_likelihood_ratio_uv,
     _precompute_leaf_terms_mv,
@@ -145,6 +144,7 @@ from bartz.mcmcstep._step import (
     _step_error_cov_inv_mv,
     apply_moves_to_leaf_indices,
     leaf_scatter,
+    log_blocked_mass_tree,
     sample_s_augmentation,
     sample_wishart_posterior,
     step_error_cov_inv,
@@ -2010,7 +2010,7 @@ class GewekeCase(NamedTuple):
 
     p: int
     nsplits: int
-    sparsity: Literal['fixed', 'free'] | None = None
+    sparsity: Literal['fixed', 'free', 'supersparse'] | None = None
     flat: bool = False
     min_points: tuple[int, int] | None = None
     leaf_prior: bool = False
@@ -2032,12 +2032,20 @@ class GewekeCase(NamedTuple):
         return '-'.join(parts)
 
 
-def geweke_sparse_kw(sparsity: Literal['fixed', 'free'] | None, p: int) -> kwdict:
+def geweke_sparse_kw(
+    sparsity: Literal['fixed', 'free', 'supersparse'] | None, p: int
+) -> kwdict:
     """Sparsity-prior hyperparameters for `init`."""
-    # the Beta prior on theta/(theta+rho) has a=1, unlike the a=0.5 default of
-    # `Bart`, because the augmentation of `log_s` is biased when `s` is very
-    # sparse, which a < 1 makes likely; the bias is detected with a <= 0.8
-    params = {'fixed': dict(theta=float(p)), 'free': dict(a=1.0, b=1.0, rho=float(p))}
+    # 'free' is the default of `Bart`, 'supersparse' puts more prior mass on a
+    # small theta, which makes `s` very sparse and stresses the augmentation of
+    # `log_s` with tiny eligible split probability masses. A smaller `a` puts
+    # non-negligible prior mass on theta below the range sampled by
+    # `step_theta`, and on theta underflowing to 0 in float32.
+    params = {
+        'fixed': dict(theta=float(p)),
+        'free': dict(a=0.5, b=1.0, rho=float(p)),
+        'supersparse': dict(a=0.2, b=1.0, rho=float(p)),
+    }
     return {} if sparsity is None else params[sparsity]
 
 
@@ -2227,6 +2235,8 @@ def avg_max_tree_depth(
         GewekeCase(10, 255, sparsity='free'),
         GewekeCase(1, 1, sparsity='free'),
         GewekeCase(3, 2, sparsity='free'),
+        GewekeCase(3, 2, sparsity='supersparse'),
+        GewekeCase(10, 1, sparsity='supersparse'),
         # with a flatter tree prior, fewer moves are accepted almost surely and
         # the trees run out of decision rules, so the proposal ratios matter
         GewekeCase(1, 1, flat=True),
@@ -3432,6 +3442,15 @@ class TestStepTheta:
         width = 2 * 40.0 / 100_000  # the grid has the maximum number of bins
         assert abs(numpy.median(numpy.asarray(v1)) - median) < width
 
+    def test_extreme_sparsity(self, keys: split) -> None:
+        """A very sparse `s` makes the log density overflow, but not `theta`."""
+        state = self.state(keys, 1.0, 1.0, 1.0)
+        p = nnone(state.forest.log_s).size
+        log_s = jnp.full(p, -1e21).at[0].set(0.0)
+        state = replace(state, forest=replace(state.forest, log_s=log_s))
+        v = self.run(keys.pop(100), state, jnp.float32(0.0))
+        assert jnp.all(jnp.isfinite(v))
+
 
 class TestSampleSAugmentation:
     """Test `mcmcstep._step.sample_s_augmentation`.
@@ -3481,9 +3500,10 @@ class TestSampleSAugmentation:
         # the augmentation count of variable 0 is Poisson with mean below
         expected = NUM_TREES * s[0] / (1 - s[0])
 
-        draws = jit(vmap(lambda key: sample_s_augmentation(key, forest)))(
+        log_draws = jit(vmap(lambda key: sample_s_augmentation(key, forest)))(
             keys.pop(20_000)
         )
+        draws = jnp.exp(log_draws)
         # variables 1 and 2 are never blocked, so their counts are exactly zero
         assert_array_equal(draws[:, 1:], jnp.zeros_like(draws[:, 1:]))
         mean = jnp.mean(draws[:, 0])
@@ -3502,8 +3522,8 @@ class TestSampleSAugmentation:
 
         This is the straightforward per-node implementation: list the ineligible
         variables at each node, deduplicate them, sum the eligible split
-        probabilities with a mask over all the variables, and scatter the
-        augmentation weight directly. Given the same key it draws the same
+        probabilities with a mask over all the variables, and accumulate the
+        augmentation weights per variable in log space. Given the same key it draws the same
         per-node weights as `_blocked_mass_tree`, so the two must agree up to
         summation reassociation.
         """
@@ -3522,9 +3542,10 @@ class TestSampleSAugmentation:
         log_eligible = logsumexp(jnp.where(mask, -jnp.inf, log_s), axis=-1)
         is_internal = split_tree.astype(bool)
         log_weight = jnp.log(random.exponential(key, (half_tree_size,))) - log_eligible
-        weight = jnp.where(is_internal, jnp.exp(jnp.minimum(log_weight, 70.0)), 0.0)
-        weights = is_first * weight[:, None]
-        return jnp.zeros(p + 1).at[ineligible.ravel()].add(weights.ravel())[:p]
+        log_weight = jnp.where(is_internal, log_weight, -jnp.inf)
+        log_weights = jnp.where(is_first, log_weight[:, None], -jnp.inf).ravel()
+        at_var = ineligible.ravel() == jnp.arange(p)[:, None]
+        return logsumexp(jnp.where(at_var, log_weights, -jnp.inf), axis=1)
 
     @pytest.mark.parametrize('sparse', [False, True])
     def test_blocked_mass_matches_reference(self, keys: split, sparse: bool) -> None:
@@ -3578,14 +3599,18 @@ class TestSampleSAugmentation:
 
         # invoke actual implementation
         s = S.from_log_s(log_s, jnp.ones(p, bool), 2 * d_minus_1)
-        new = vmap(_blocked_mass_tree, **kw)(*args, s)
+        new = vmap(log_blocked_mass_tree, **kw)(*args, s)
 
         # invoke reference implementation
         ref = vmap(self._reference_blocked_mass_tree, **kw)(*args, log_s)
 
         # guard against a silently vacuous test: many variables must be blocked
-        assert int((new > 0).sum()) >= 5
-        assert_close_matrices(new, ref, rtol=1e-5)
+        assert int(jnp.isfinite(new).sum()) >= 5
+        assert_array_equal(jnp.isneginf(new), jnp.isneginf(ref))
+        finite = jnp.isfinite(ref)
+        assert_close_matrices(
+            jnp.where(finite, new, 0.0), jnp.where(finite, ref, 0.0), atol=1e-4
+        )
 
     def test_augment_noop_without_forbidden_rules(self, keys: split) -> None:
         """Without forbidden rules, `step_s` draws the same with or without it."""
@@ -3621,7 +3646,7 @@ class TestSampleSAugmentation:
         state = replace(state, forest=forest)
 
         # the augmentation is then exactly zero
-        assert jnp.all(sample_s_augmentation(keys.pop(), forest) == 0)
+        assert jnp.all(jnp.isneginf(sample_s_augmentation(keys.pop(), forest)))
 
         # so the Dirichlet draw is identical with and without augmentation
         key = keys.pop()

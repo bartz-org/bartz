@@ -24,6 +24,7 @@
 
 """Implement `step`, `step_trees`, and the accept-reject logic."""
 
+import math
 from dataclasses import replace
 from functools import partial
 from typing import overload
@@ -33,7 +34,18 @@ from jax import lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
-from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Shaped, UInt, UInt32
+from jaxtyping import (
+    Array,
+    Bool,
+    Float,
+    Float32,
+    Int32,
+    Integer,
+    Key,
+    Shaped,
+    UInt,
+    UInt32,
+)
 
 from bartz._jaxext import (
     Module,
@@ -1952,6 +1964,11 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     return replace(state, z=z, resid=resid)
 
 
+# the log of a magnitude beyond which random fluctuations of the size of its
+# square root are below float32 resolution
+LOG_HUGE = 20 * math.log(10)
+
+
 class S(Module):
     """Split probabilities, with the largest ones singled out."""
 
@@ -2013,7 +2030,7 @@ class S(Module):
         )
 
 
-def _blocked_mass_tree(
+def log_blocked_mass_tree(
     key: Key[Array, ''],
     var_tree: UInt[Array, ' half_tree_size'],
     split_tree: UInt[Array, ' half_tree_size'],
@@ -2042,7 +2059,7 @@ def _blocked_mass_tree(
 
     Returns
     -------
-    The blocked mass for each variable.
+    The log blocked mass for each variable.
     """
     (half_tree_size,) = split_tree.shape
     d_minus_1 = half_tree_size.bit_length() - 1  # number of decision-node levels
@@ -2101,19 +2118,22 @@ def _blocked_mass_tree(
         )
 
     # Per-node augmentation weight lambda_b / e_b, zero at non-internal nodes. The
-    # eligible mass can be tiny, so the weight is computed in log space, capped
-    # to keep its sums finite in float32.
+    # eligible mass can be tiny, so the weights and their sums below are in log
+    # space, as they can exceed the float32 range.
     log_weight = jnp.log(random.exponential(key, (half_tree_size,))) - log_eligible
-    weight = jnp.where(is_internal, jnp.exp(jnp.minimum(log_weight, 70.0)), 0.0)
+    log_weight = jnp.where(is_internal, log_weight, -jnp.inf)
 
     # Subtree weight: total weight of each node's internal descendants and itself,
     # accumulated bottom-up. The children of the deepest decision level are leaves
     # and contribute nothing.
-    subtree_weight = weight
+    log_subtree_weight = log_weight
     for level in range(d_minus_1 - 2, -1, -1):
         lhs, rhs = 1 << level, 1 << (level + 1)
-        children = subtree_weight[2 * lhs : 2 * rhs].reshape(-1, 2).sum(axis=1)
-        subtree_weight = subtree_weight.at[lhs:rhs].add(children)
+        children = log_subtree_weight[2 * lhs : 2 * rhs].reshape(-1, 2)
+        children = jnp.logaddexp(children[:, 0], children[:, 1])
+        log_subtree_weight = log_subtree_weight.at[lhs:rhs].set(
+            jnp.logaddexp(log_subtree_weight[lhs:rhs], children)
+        )
 
     # A variable blocked by node b at one of its children is ineligible in that
     # whole child subtree, so it accumulates the subtree weight; scatter it onto
@@ -2121,9 +2141,25 @@ def _blocked_mass_tree(
     # (the deepest decision nodes block into leaves, contributing nothing); their
     # children are exactly subtree_weight reshaped into [left, right] pairs.
     half = half_tree_size // 2
-    contrib = (blocks[:, :half] * subtree_weight.reshape(-1, 2).T).sum(axis=0)
+    children = jnp.where(
+        blocks[:, :half], log_subtree_weight.reshape(-1, 2).T, -jnp.inf
+    )
+    log_contrib = jnp.logaddexp(*children)
     scatter_var = jnp.where(is_internal, var_tree, p)[:half]
-    return jnp.zeros(p).at[scatter_var].add(contrib)
+    return scatter_logaddexp(p, scatter_var, log_contrib)
+
+
+def scatter_logaddexp(
+    size: int, indices: Integer[Array, ' n'], values: Float32[Array, ' n']
+) -> Float32[Array, ' {size}']:
+    """Accumulate `values` at `indices` with `jnp.logaddexp`, ignoring indices out of bounds."""
+    # jnp.logaddexp.at would also do this, but its implementation is much worse,
+    # it uses a lax.scan along the reduction axis
+    peak = jnp.full(size, -jnp.inf).at[indices].max(values, mode='drop')
+    peak_at = peak.at[indices].get(mode='fill', fill_value=-jnp.inf)
+    terms = jnp.where(jnp.isneginf(values), 0.0, jnp.exp(values - peak_at))
+    total = jnp.zeros(size).at[indices].add(terms, mode='drop')
+    return jnp.where(jnp.isneginf(peak), -jnp.inf, peak + jnp.log(total))
 
 
 def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Float32[Array, ' p']:
@@ -2144,7 +2180,7 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Float32[Array,
 
     Returns
     -------
-    The discarded-draws count for each variable.
+    The log of the discarded-draws count for each variable.
     """
     assert forest.log_s is not None
     keys = split(key)
@@ -2162,16 +2198,22 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Float32[Array,
 
     # blocked_mass[j] = sum over internal nodes where j is ineligible of
     # lambda_b / e_b, with lambda_b ~ Exponential(1)
-    blocked_mass = vmap(_blocked_mass_tree, in_axes=(0, 0, 0, None, None))(
+    log_blocked_mass = vmap(log_blocked_mass_tree, in_axes=(0, 0, 0, None, None))(
         keys.pop(num_trees), forest.var_tree, forest.split_tree, forest.max_split, s
-    ).sum(axis=0)  # shape (p,)
+    )
+    log_blocked_mass = logsumexp(log_blocked_mass, axis=0)  # shape (p,)
 
     # the per-node discarded-draw counts are negative-multinomial, with no
     # closed form when summed over nodes, but their Gamma-Poisson mixture does:
     # A_j | {lambda_b} ~ Poisson(s_j * blocked_mass[j]), independent across j.
-    # The counts can be huge, so they are float.
-    rate = jnp.exp(s.log_s + jnp.log(blocked_mass))
-    return poisson(keys.pop(), rate, dtype=jnp.float32)
+    # The counts can be huge, so they are in log space. Above 10^20, their
+    # relative fluctuations are below float32 resolution, so the count is its
+    # mean.
+    log_rate = s.log_s + log_blocked_mass
+    huge = log_rate > LOG_HUGE
+    rate = jnp.exp(jnp.where(huge, 0.0, log_rate))
+    count = poisson(keys.pop(), rate, dtype=jnp.float32)
+    return jnp.where(huge, log_rate, jnp.log(count))
 
 
 @named_call
@@ -2217,13 +2259,20 @@ def step_s(key: Key[Array, ''], state: State) -> State:
     )
 
     # the Dirichlet posterior concentration, optionally completed with the exact
-    # accounting of forbidden rules via data augmentation
-    alpha = state.forest.theta / p + varcount
+    # accounting of forbidden rules via data augmentation, in log space as the
+    # augmentation counts can be huge
+    log_alpha = jnp.log(state.forest.theta / p + varcount)
     if state.config.augment:
-        alpha = alpha + sample_s_augmentation(keys.pop(), state.forest)
+        log_alpha = jnp.logaddexp(
+            log_alpha, sample_s_augmentation(keys.pop(), state.forest)
+        )
 
-    # sample from the Dirichlet posterior and update the forest with the new s
-    log_s = loggamma(log_s_key, alpha)
+    # sample from the Dirichlet posterior and update the forest with the new s;
+    # above 10^20, the relative fluctuations of Gamma(alpha) are below float32
+    # resolution, so log Gamma(alpha) is log(alpha)
+    huge = log_alpha > LOG_HUGE
+    alpha = jnp.exp(jnp.where(huge, 0.0, log_alpha))
+    log_s = jnp.where(huge, log_alpha, loggamma(log_s_key, alpha))
     return replace(state, forest=replace(state.forest, log_s=log_s))
 
 
@@ -2288,6 +2337,12 @@ def step_theta(
     log_p_edges = log_p(edges)
     rise = jnp.diff(log_p_edges)  # change of the log density across each bin
     log_pmf = log_p_edges[:-1] + jnp.log(width) + log_expm1_ratio(rise)
+
+    # where the log density overflows to -inf, the interpolated density is 0
+    # across the bin, while the arithmetic above would give nan
+    void = jnp.isneginf(log_p_edges[:-1]) | jnp.isneginf(log_p_edges[1:])
+    rise = jnp.where(void, 0.0, rise)
+    log_pmf = jnp.where(void, -jnp.inf, log_pmf)
 
     # draw a bin, then a point within it
     i = random.categorical(keys.pop(), log_pmf)

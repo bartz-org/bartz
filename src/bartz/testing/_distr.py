@@ -51,7 +51,7 @@ from bartz._jaxext.random import loggamma
 
 
 class Distr(Module):
-    """Family of standardized distributions: symmetric about 0, variance 1."""
+    """Family of standardized distributions, symmetric about 0 with variance 1."""
 
     @property
     @abstractmethod

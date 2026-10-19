@@ -2312,7 +2312,7 @@ def step_theta(
     `Sparsity.log_theta_range`. The full conditional of `v` gets
     narrower with the number of predictors `p`, roughly with standard deviation
     ``1 / sqrt(p)``, so by default the number of bins is ``320 sqrt(p)``, clipped
-    to [1000, 100000]. Beyond that, the approximation is accurate only to
+    to [1000, 10000]. Beyond that, the approximation is accurate only to
     within a bin.
     """
     forest = state.forest
@@ -2324,7 +2324,7 @@ def step_theta(
 
     if num_grid is None:
         (p,) = forest.max_split.shape
-        num_grid = min(max(round(320 * p**0.5), 1000), 100_000)
+        num_grid = min(max(round(320 * p**0.5), 1000), 10_000)
 
     keys = split(key)
 

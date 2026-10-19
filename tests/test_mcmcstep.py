@@ -3502,7 +3502,7 @@ class TestStepTheta:
         v0 = jnp.float32(median)
         v1 = self.run(keys.pop(1000), state, v0)
         assert jnp.mean(v1 != v0) > 0.99
-        width = 2 * 40.0 / 100_000  # the grid has the maximum number of bins
+        width = 2 * 40.0 / 10_000  # the grid has the maximum number of bins
         assert abs(numpy.median(numpy.asarray(v1)) - median) < width
 
     def test_extreme_sparsity(self, keys: split) -> None:

@@ -46,7 +46,7 @@ from jax import (
     vmap,
 )
 from jax import numpy as jnp
-from jax.nn import softmax
+from jax.nn import logsumexp, softmax
 from jax.ops import segment_sum
 from jax.sharding import (
     AxisType,
@@ -74,8 +74,7 @@ from jaxtyping import (
 )
 from pytest import FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
-from scipy import stats
-from scipy.special import gammaln, logsumexp
+from scipy import special, stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
 from bartz._jaxext import (
@@ -133,6 +132,7 @@ from bartz.mcmcstep._state import (
     search_divisor,
 )
 from bartz.mcmcstep._step import (
+    S,
     _blocked_mass_tree,
     _compute_likelihood_ratio_mv,
     _compute_likelihood_ratio_uv,
@@ -3367,7 +3367,7 @@ class TestStepTheta:
         """Compute the cdf of ``log(theta / rho)`` on a fine grid, in float64."""
         forest = state.forest
         log_s = numpy.asarray(nnone(forest.log_s), numpy.float64)
-        log_s -= logsumexp(log_s)
+        log_s -= special.logsumexp(log_s)
         a, b = nnone(forest.a).item(), nnone(forest.b).item()
         rho = nnone(forest.rho).item()
         (p,) = log_s.shape
@@ -3376,8 +3376,8 @@ class TestStepTheta:
         log_density = (
             -a * numpy.logaddexp(0, -v)
             - b * numpy.logaddexp(0, v)
-            + gammaln(theta)
-            - p * gammaln(theta / p)
+            + special.gammaln(theta)
+            - p * special.gammaln(theta / p)
             + theta / p * log_s.sum()
         )
         cdf = numpy.cumsum(numpy.exp(log_density - log_density.max()))
@@ -3496,18 +3496,19 @@ class TestSampleSAugmentation:
         var_tree: UInt[Array, ' half_tree_size'],
         split_tree: UInt[Array, ' half_tree_size'],
         max_split: UInt[Array, ' p'],
-        s: Float32[Array, ' p'],
+        log_s: Float32[Array, ' p'],
     ) -> Float32[Array, ' p']:
         """Ancestor-list reference for `_blocked_mass_tree`.
 
         This is the straightforward per-node implementation: list the ineligible
-        variables at each node, deduplicate them, and scatter the augmentation
-        weight directly. Given the same key it draws the same per-node weights as
-        `_blocked_mass_tree`, so the two must agree up to summation reassociation.
+        variables at each node, deduplicate them, sum the eligible split
+        probabilities with a mask over all the variables, and scatter the
+        augmentation weight directly. Given the same key it draws the same
+        per-node weights as `_blocked_mass_tree`, so the two must agree up to
+        summation reassociation.
         """
         p = max_split.size
         (half_tree_size,) = split_tree.shape
-        s_padded = jnp.append(s, 0.0)
         nodes = jnp.arange(half_tree_size)
         ineligible = vmap(fully_used_variables, in_axes=(None, None, None, 0))(
             var_tree, split_tree, max_split, nodes
@@ -3517,16 +3518,22 @@ class TestSampleSAugmentation:
         earlier = jnp.tril(jnp.ones((ncol, ncol), bool), -1)
         seen_before = jnp.any(equal & earlier, axis=-1)
         is_first = (ineligible != p) & ~seen_before
-        ineligible_mass = jnp.sum(s_padded[ineligible] * is_first, axis=-1)
-        eligible_mass = jnp.maximum(1.0 - ineligible_mass, jnp.finfo(jnp.float32).eps)
+        mask = jnp.any(ineligible[:, :, None] == jnp.arange(p), axis=1)
+        log_eligible = logsumexp(jnp.where(mask, -jnp.inf, log_s), axis=-1)
         is_internal = split_tree.astype(bool)
-        weight = jnp.where(is_internal, random.exponential(key, (half_tree_size,)), 0.0)
-        weight /= eligible_mass
+        log_weight = jnp.log(random.exponential(key, (half_tree_size,))) - log_eligible
+        weight = jnp.where(is_internal, jnp.exp(jnp.minimum(log_weight, 70.0)), 0.0)
         weights = is_first * weight[:, None]
         return jnp.zeros(p + 1).at[ineligible.ravel()].add(weights.ravel())[:p]
 
-    def test_blocked_mass_matches_reference(self, keys: split) -> None:
-        """`_blocked_mass_tree` matches the ancestor-list reference to float."""
+    @pytest.mark.parametrize('sparse', [False, True])
+    def test_blocked_mass_matches_reference(self, keys: split, sparse: bool) -> None:
+        """`_blocked_mass_tree` matches the ancestor-list reference to float.
+
+        With a very sparse `s`, the eligible mass is tiny where the dominant
+        variable is ineligible, and computing it as one minus the ineligible
+        mass would cancel.
+        """
         # Grow a forest tuned for heavy blocking: few cutpoints so variables
         # exhaust quickly, but enough trees and variables and a high grow
         # probability (low beta) so the trees stay deep below the exhausted
@@ -3553,14 +3560,28 @@ class TestSampleSAugmentation:
         for _ in range(40):
             state = step(keys.pop(), state)
         forest = state.forest
-        (num_trees, _) = forest.var_tree.shape
+        (num_trees, half_tree_size) = forest.var_tree.shape
+        d_minus_1 = half_tree_size.bit_length() - 1
 
-        s = softmax(nnone(forest.log_s))  # all selectable
+        # get log_s
+        log_s = nnone(forest.log_s)
+        if sparse:
+            log_s = sample_s(keys.pop(), 0.01, p)
+
+        # normalize log_s
+        log_s -= logsumexp(log_s)  # all selectable
+
+        # prepare arguments shared by the actual and reference implementations
         tree_keys = keys.pop(num_trees)
         kw: dict = dict(in_axes=(0, 0, 0, None, None))
-        args = (tree_keys, forest.var_tree, forest.split_tree, forest.max_split, s)
-        new = vmap(_blocked_mass_tree, **kw)(*args)
-        ref = vmap(self._reference_blocked_mass_tree, **kw)(*args)
+        args = (tree_keys, forest.var_tree, forest.split_tree, forest.max_split)
+
+        # invoke actual implementation
+        s = S.from_log_s(log_s, jnp.ones(p, bool), 2 * d_minus_1)
+        new = vmap(_blocked_mass_tree, **kw)(*args, s)
+
+        # invoke reference implementation
+        ref = vmap(self._reference_blocked_mass_tree, **kw)(*args, log_s)
 
         # guard against a silently vacuous test: many variables must be blocked
         assert int((new > 0).sum()) >= 5

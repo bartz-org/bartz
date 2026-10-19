@@ -31,7 +31,6 @@ from typing import overload
 from equinox import AbstractVar
 from jax import lax, named_call, random, vmap
 from jax import numpy as jnp
-from jax.nn import softmax
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import gammaln, logsumexp
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Shaped, UInt, UInt32
@@ -1953,12 +1952,73 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     return replace(state, z=z, resid=resid)
 
 
+class S(Module):
+    """Split probabilities, with the largest ones singled out."""
+
+    log_s: Float32[Array, ' p']
+    """The log split probabilities normalized over the selectable variables,
+    -inf for the others."""
+
+    log_top: Float32[Array, ' m']
+    """The largest log split probabilities."""
+
+    top_bit: UInt32[Array, ' p']
+    """``2^i`` for the variable with the i-th largest split probability, 0 for
+    the others."""
+
+    log_rest: Float32[Array, '']
+    """The log total split probability of the variables not in `log_top`."""
+
+    rest_ratio: Float32[Array, ' p']
+    """The split probability of each variable relative to the total of the
+    variables not in `log_top`, 0 for those in `log_top`."""
+
+    @classmethod
+    def from_log_s(
+        cls, log_s: Float32[Array, ' p'], selectable: Bool[Array, ' p'], num_top: int
+    ) -> 'S':
+        """Normalize `log_s` and single out its `num_top` largest values."""
+        # mask and normalize log_s
+        log_s = jnp.where(selectable, log_s, -jnp.inf)
+        log_s -= logsumexp(log_s)
+
+        # find the top probabilities
+        (p,) = log_s.shape
+        num_top = min(num_top, p)
+        log_top, top_vars = lax.top_k(log_s, num_top)
+
+        # index the top probabilities as bit positions
+        assert num_top <= 32  # the bits fit in uint32
+        top_bit = (
+            jnp.zeros(p, jnp.uint32)
+            .at[top_vars]
+            .set(jnp.uint32(1) << jnp.arange(num_top, dtype=jnp.uint32))
+        )
+
+        # compute the total probability of other values
+        log_rest_s = log_s.at[top_vars].set(-jnp.inf)
+        log_rest = logsumexp(log_rest_s)
+
+        # 0 for the top and unselectable variables, also when there are no others
+        rest_ratio = jnp.where(
+            jnp.isneginf(log_rest_s), 0.0, jnp.exp(log_rest_s - log_rest)
+        )
+
+        return cls(
+            log_s=log_s,
+            log_top=log_top,
+            top_bit=top_bit,
+            log_rest=log_rest,
+            rest_ratio=rest_ratio,
+        )
+
+
 def _blocked_mass_tree(
     key: Key[Array, ''],
     var_tree: UInt[Array, ' half_tree_size'],
     split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
-    s: Float32[Array, ' p'],
+    s: S,
 ) -> Float32[Array, ' p']:
     """Per-variable data-augmentation mass blocked by a single tree.
 
@@ -1977,7 +2037,8 @@ def _blocked_mass_tree(
     max_split
         The maximum split index for each variable.
     s
-        Split probabilities normalized over selectable variables.
+        Split probabilities normalized over selectable variables, with the
+        largest ones singled out.
 
     Returns
     -------
@@ -2009,24 +2070,41 @@ def _blocked_mass_tree(
     # Ineligible mass per node: the s-mass of the variables blocked along the
     # path from the root. Each variable is blocked at exactly one node per path,
     # so summing the per-node increments top-down reproduces the per-node sum
-    # over distinct ineligible variables.
+    # over distinct ineligible variables. The variables with the largest
+    # split probabilities are tracked as bits instead, as subtracting their
+    # mass from 1 would cancel. As the bits do not repeat along a path, summing
+    # them is the same as or-ing them.
     parent = nodes >> 1
     side = nodes & 1  # 0 if the node is a left child, 1 if a right child
     parent_blocks = blocks[side, parent]
     # var_tree[parent] is a valid index wherever parent_blocks holds (the parent
     # is then internal); elsewhere the clamped gather is masked away
-    ineligible_mass = jnp.where(parent_blocks, s[var_tree[parent]], 0.0)
+    parent_var = var_tree[parent]
+    ineligible_mass = jnp.where(parent_blocks, s.rest_ratio[parent_var], 0.0)
+    ineligible_top = jnp.where(parent_blocks, s.top_bit[parent_var], 0)
     for level in range(1, d_minus_1):
         lhs, rhs = 1 << level, 1 << (level + 1)
         parent_mass = jnp.repeat(ineligible_mass[lhs >> 1 : rhs >> 1], 2)
         ineligible_mass = ineligible_mass.at[lhs:rhs].add(parent_mass)
+        parent_top = jnp.repeat(ineligible_top[lhs >> 1 : rhs >> 1], 2)
+        ineligible_top = ineligible_top.at[lhs:rhs].add(parent_top)
+
+    # Eligible mass per node, in log space: the largest split probabilities not
+    # ineligible, plus the others minus the ineligible ones. It is positive at
+    # internal nodes (the split variable is eligible), the clip only guards
+    # against round-off.
+    log_eligible = s.log_rest + jnp.log1p(-jnp.minimum(ineligible_mass, 1.0))
+    for i in range(s.log_top.size):
+        is_eligible = ((ineligible_top >> i) & 1) == 0
+        log_eligible = jnp.where(
+            is_eligible, jnp.logaddexp(log_eligible, s.log_top[i]), log_eligible
+        )
 
     # Per-node augmentation weight lambda_b / e_b, zero at non-internal nodes. The
-    # eligible mass is positive at internal nodes (the split variable is eligible);
-    # the floor only guards against round-off, and is unused where weight is zero.
-    eligible_mass = jnp.maximum(1.0 - ineligible_mass, jnp.finfo(jnp.float32).eps)
-    weight = jnp.where(is_internal, random.exponential(key, (half_tree_size,)), 0.0)
-    weight /= eligible_mass
+    # eligible mass can be tiny, so the weight is computed in log space, capped
+    # to keep its sums finite in float32.
+    log_weight = jnp.log(random.exponential(key, (half_tree_size,))) - log_eligible
+    weight = jnp.where(is_internal, jnp.exp(jnp.minimum(log_weight, 70.0)), 0.0)
 
     # Subtree weight: total weight of each node's internal descendants and itself,
     # accumulated bottom-up. The children of the deepest decision level are leaves
@@ -2048,7 +2126,7 @@ def _blocked_mass_tree(
     return jnp.zeros(p).at[scatter_var].add(contrib)
 
 
-def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, ' p']:
+def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Float32[Array, ' p']:
     """Sample the data-augmentation counts for the exact full conditional of `s`.
 
     At each internal node, the variables with no available cutpoint given the
@@ -2070,11 +2148,17 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, '
     """
     assert forest.log_s is not None
     keys = split(key)
-    (num_trees, _) = forest.var_tree.shape
+    (num_trees, half_tree_size) = forest.var_tree.shape
 
-    # split probabilities normalized over the selectable (non-blocked) variables
-    selectable = forest.max_split > 0
-    s = softmax(forest.log_s, where=selectable)
+    # split probabilities normalized over the selectable (non-blocked) variables,
+    # with the largest ones singled out. A node has less than d_minus_1
+    # ineligible variables, one per ancestor. If some are not among the
+    # largest, their mass is subtracted from the total of the others, and at
+    # least d_minus_1 + 1 of the 2 d_minus_1 largest are eligible, each larger
+    # than all the others: so the relative error of the eligible mass is about
+    # float32 eps times p / (d_minus_1 + 1).
+    d_minus_1 = half_tree_size.bit_length() - 1
+    s = S.from_log_s(forest.log_s, forest.max_split > 0, 2 * d_minus_1)
 
     # blocked_mass[j] = sum over internal nodes where j is ineligible of
     # lambda_b / e_b, with lambda_b ~ Exponential(1)
@@ -2084,8 +2168,10 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, '
 
     # the per-node discarded-draw counts are negative-multinomial, with no
     # closed form when summed over nodes, but their Gamma-Poisson mixture does:
-    # A_j | {lambda_b} ~ Poisson(s_j * blocked_mass[j]), independent across j
-    return poisson(keys.pop(), s * blocked_mass, dtype=jnp.int32)
+    # A_j | {lambda_b} ~ Poisson(s_j * blocked_mass[j]), independent across j.
+    # The counts can be huge, so they are float.
+    rate = jnp.exp(s.log_s + jnp.log(blocked_mass))
+    return poisson(keys.pop(), rate, dtype=jnp.float32)
 
 
 @named_call

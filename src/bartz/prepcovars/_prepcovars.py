@@ -631,7 +631,11 @@ def _sigma2_from_ols(
     x_train: Shaped[Array, 'p n'], y_train: Float32[Array, ' n'] | Float32[Array, 'k n']
 ) -> Float32[Array, ''] | Float32[Array, ' k']:
     """Return the error variance estimated with OLS with intercept."""
+    # centering is equivalent to adding an intercept column, and also keeps the
+    # rank detection relative to the spread of x instead of its mean
+    x_centered = x_train.T - x_train.mean(axis=1)
+    y_centered = y_train.T - y_train.mean(axis=-1)
+    _, chisq, rank, _ = jnp.linalg.lstsq(x_centered, y_centered)
+    # the rank of the centered x excludes the intercept, also if aliased in x
     _, n = x_train.shape
-    design = jnp.concatenate([jnp.ones((1, n), x_train.dtype), x_train], axis=0)
-    _, chisq, rank, _ = jnp.linalg.lstsq(design.T, y_train.T)
-    return chisq.reshape(y_train.shape[:-1]) / (n - rank)
+    return chisq.reshape(y_train.shape[:-1]) / (n - rank - 1)

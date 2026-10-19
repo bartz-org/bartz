@@ -366,6 +366,15 @@ class TestSigma2Estimates:
 
         assert_close_matrices(scaled, jnp.square(c) * ref, rtol=1e-3, atol=1e-7)
 
+    def test_large_mean(self, keys: split) -> None:
+        """Check that a predictor mean much larger than its spread is harmless."""
+        n, p = 30, 5
+        x = random.normal(keys.pop(), (p, n))
+        y = x[0, :] + random.normal(keys.pop(), (n,))
+        assert_close_matrices(
+            _sigma2_from_ols(x + 1e4, y), _sigma2_from_ols(x, y), rtol=1e-3
+        )
+
     def test_batching_consistency(self, keys: split) -> None:
         """Check that batched ``y`` matches per-row scalar evaluations."""
         n, p, k = 30, 5, 4

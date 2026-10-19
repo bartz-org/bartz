@@ -42,6 +42,7 @@ import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field, tree_at
 from jax import Device, debug_nans, device_put, lax, make_mesh, random, tree
+from jax.nn import softmax
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr, ndtri
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
@@ -65,13 +66,14 @@ from bartz.mcmcloop import (
     MainTrace,
     MainTraceWithTrainPred,
     RunMCMCResult,
+    VarprobInState,
     compute_varcount,
     evaluate_trace,
     make_print_callback,
     make_tqdm_callback,
     run_mcmc,
 )
-from bartz.mcmcstep import DiagWishart, OutcomeType, Wishart, make_p_nonterminal
+from bartz.mcmcstep import DiagWishart, Forest, OutcomeType, Wishart, make_p_nonterminal
 from bartz.mcmcstep._axes import (
     chain_to_axis,
     chain_vmap_axes,
@@ -875,7 +877,7 @@ class Bart(Module):
     @cached_property
     def varprob(self) -> Float32[Array, 'ndpost p']:
         """Posterior samples of the probability of choosing each predictor for a decision rule."""
-        return varprob(self._mcmc_state.forest.max_split, self._main_trace)
+        return varprob(self._mcmc_state.forest, self._main_trace)
 
     @cached_property
     def varprob_mean(self) -> Float32[Array, ' p']:
@@ -1692,19 +1694,24 @@ def get_accept(
 
 
 @jit
-def varprob(
-    max_split: UInt[Array, ' p'], trace: MainTrace
-) -> Float32[Array, 'ndpost p']:
+def varprob(forest: Forest, trace: MainTrace) -> Float32[Array, 'ndpost p']:
     """Posterior samples of predictor selection probability, chains concatenated."""
+    max_split = forest.max_split
     p = max_split.size
+    ndpost = trace.grow_prop_count.size
     varprob = trace.varprob
     if varprob is None:
-        ndpost = trace.grow_prop_count.size
         peff = jnp.count_nonzero(max_split)
         out = jnp.where(max_split, 1 / peff, 0)
         return jnp.broadcast_to(out, (ndpost, p))
-    varprob = chain_to_axis(varprob, chain_vmap_axes(trace).varprob)
-    return varprob.reshape(-1, p)
+    elif isinstance(varprob, VarprobInState):
+        log_s = forest.sparsity.log_s
+        assert log_s is not None
+        out = softmax(log_s, where=max_split.astype(bool))
+        return jnp.broadcast_to(out, (ndpost, p))
+    else:
+        varprob = chain_to_axis(varprob, chain_vmap_axes(trace).varprob)
+        return varprob.reshape(-1, p)
 
 
 def _trees_chain_first(obj: TreeHeaps) -> TreesTrace:

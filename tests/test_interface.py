@@ -85,7 +85,7 @@ from bartz._jaxext import (
 )
 from bartz._typing import kwdict
 from bartz.grove import describe_error, is_actual_leaf
-from bartz.mcmcloop import Callback, MainTrace, MainTraceWithTrainPred
+from bartz.mcmcloop import Callback, MainTrace, MainTraceWithTrainPred, VarprobInState
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import BatchedReduction, Forest, State, Wishart, step
@@ -2221,6 +2221,19 @@ class TestVarprobAttr:
         assert_array_equal(bart._mcmc_state.forest.max_split, [0, 1], strict=False)
         assert_array_equal(bart.varprob_mean, [0, 1], strict=False)
         assert jnp.all(bart.varprob_mean == bart.varprob)
+
+    def test_fixed(self, keys: split, bkw: BartKW) -> None:
+        """Check `varprob` matches a fixed `varprob` parameter."""
+        kw = bkw.kw
+        vp = random.uniform(keys.pop(), (bkw.p,), minval=0.1)
+        vp /= vp.sum()
+        kw.update(sparse=SparseConfig(enabled=False), varprob=vp)
+        bart = Bart(**kw)
+        assert bart._main_trace.varprob is VarprobInState()
+        assert bart.varprob.shape == (bkw.ndpost, bkw.p)
+        assert_close_matrices(
+            bart.varprob, jnp.broadcast_to(vp, bart.varprob.shape), rtol=1e-6
+        )
 
 
 @pytest.mark.parametrize(

@@ -30,8 +30,8 @@ from typing import TypeVar
 from jax import numpy as jnp
 from jax.nn import softmax
 from jax.sharding import Mesh
+from jax.tree_util import register_pytree_node
 from jaxtyping import Array, Float, Float32, Int32, UInt
-from numpy.lib.array_utils import normalize_axis_index
 
 from bartz._jaxext import Module, field
 from bartz.mcmcstep import State
@@ -144,6 +144,41 @@ class BurninTrace(Trace):
         )
 
 
+class VarprobInState:
+    """Marks a constant `MainTrace.varprob`, not saved in the trace.
+
+    Compute it from `bartz.mcmcstep.Sparsity.log_s` in the MCMC state instead.
+    This is a singleton, registered as a pytree with no leaves, so it is still
+    the same object after any jax transformation, and can be checked with
+    ``is``.
+    """
+
+    _instance: 'VarprobInState | None' = None
+
+    def __new__(cls) -> 'VarprobInState':
+        """Return the single instance."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __reduce__(self) -> tuple[type, tuple]:
+        """Unpickle as the single instance."""
+        return VarprobInState, ()
+
+    def __copy__(self) -> 'VarprobInState':
+        """Copy as the single instance."""
+        return self
+
+    def __deepcopy__(self, memo: dict) -> 'VarprobInState':
+        """Copy as the single instance."""
+        return self
+
+
+register_pytree_node(
+    VarprobInState, lambda _: ((), None), lambda _aux, _children: VarprobInState()
+)
+
+
 class MainTrace(BurninTrace):
     """MCMC trace with trees and diagnostic values."""
 
@@ -170,19 +205,23 @@ class MainTrace(BurninTrace):
     """The storage unit of the leaf values. Predictions are
     ``offset + leaf_unit * (sum of leaf values over trees)``."""
 
-    varprob: Float32[Array, '*chains_and_samples p'] | None = field(
+    varprob: Float32[Array, '*chains_and_samples p'] | VarprobInState | None = field(
         chains=CHAIN_AXIS, samples=0
     )
     """The probability of choosing each variable for a decision rule,
-    normalized over variables, or `None` when variable selection is off."""
+    normalized over variables, `None` when variable selection is off, or
+    `VarprobInState` when it is constant."""
 
     @classmethod
     def from_state(cls, state: State) -> 'MainTrace':
         """Create a single-item main trace from a MCMC state."""
         # compute varprob
-        log_s = state.forest.sparsity.log_s
+        sparsity = state.forest.sparsity
+        log_s = sparsity.log_s
         if log_s is None:
             varprob = None
+        elif sparsity.theta is None:
+            varprob = VarprobInState()
         else:
             chain_axis = chain_vmap_axes(state.forest).sparsity.log_s
             p_axis = chainful_axis(0, chain_axis)  # (p,)
@@ -190,11 +229,6 @@ class MainTrace(BurninTrace):
             if chain_axis is not None:
                 where = jnp.expand_dims(where, chain_axis)
             varprob = softmax(log_s, axis=p_axis, where=where)
-            num_chains = state.num_chains()
-            if num_chains is not None and chain_axis is None:
-                # a constant log_s is shared by the chains, but the trace is not
-                axis = normalize_axis_index(CHAIN_AXIS, varprob.ndim + 1)
-                varprob = jnp.repeat(jnp.expand_dims(varprob, axis), num_chains, axis)
 
         return cls(
             leaf_tree=state.forest.leaf_tree,

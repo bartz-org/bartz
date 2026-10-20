@@ -2145,7 +2145,8 @@ def log_blocked_mass_tree(
         blocks[:, :half], log_subtree_weight.reshape(-1, 2).T, -jnp.inf
     )
     log_contrib = jnp.logaddexp(*children)
-    scatter_var = jnp.where(is_internal, var_tree, p)[:half]
+    # int32 such that the out-of-bounds index p does not wrap around
+    scatter_var = jnp.where(is_internal[:half], var_tree[:half], jnp.int32(p))
     return scatter_logaddexp(p, scatter_var, log_contrib)
 
 

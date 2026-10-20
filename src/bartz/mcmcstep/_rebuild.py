@@ -29,14 +29,14 @@ from functools import partial
 
 from jax import numpy as jnp
 from jax import vmap
-from jaxtyping import Array, Bool, Float, Float32, Int32, Shaped, UInt, UInt32
+from jaxtyping import Array, Bool, Float, Int32, Shaped, UInt, UInt32
 
 from bartz._jaxext import jit
 from bartz.grove import evaluate_forest, is_actual_leaf, traverse_forest
 from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.mcmcstep._moves import _process_exclude, fully_used_variables
 from bartz.mcmcstep._reduction import AutoBatchedReduction
-from bartz.mcmcstep._state import Forest, State, StateT
+from bartz.mcmcstep._state import Forest, State, StateT, outcome_target
 
 
 @jit(donate_argnums=(0,))
@@ -156,14 +156,3 @@ def compute_resid(
     fit = evaluate_forest(state.X, forest, sum_batch_axis=-1)
     resid = outcome_target(state) - fit - forest.offset[..., None]
     return (resid / state.resid_unit[..., None]).astype(state.resid.dtype)
-
-
-def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
-    """Return the outcome the forest fits, with the latent one for binary components."""
-    if state.binary_indices is not None:
-        assert state.z is not None
-        return state.y.at[state.binary_indices, :].set(state.z)
-    elif state.z is not None:
-        return state.z
-    else:
-        return state.y

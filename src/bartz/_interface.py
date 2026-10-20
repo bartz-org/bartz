@@ -41,7 +41,7 @@ from warnings import warn
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field, tree_at
-from jax import Device, debug_nans, device_put, lax, make_mesh, random, tree
+from jax import Device, debug_nans, device_put, lax, make_mesh, random, tree, vmap
 from jax.nn import softmax
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr, ndtri
@@ -90,6 +90,7 @@ from bartz.mcmcstep._state import (
     init,
     inv_via_chol_with_gersh,
     leaf_partition_spec,
+    outcome_target,
 )
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
 
@@ -1834,20 +1835,14 @@ def compare_resid(
     """Re-compute residuals to compare them with the updated ones."""
     chain_axes = chain_vmap_axes(state)
     resid1 = chain_to_axis(state.resid * state.resid_unit[..., None], chain_axes.resid)
-    z = chain_to_axis(state.z, chain_axes.z) if state.z is not None else None
 
     forests = _trees_chain_first(state.forest)
     trees = evaluate_forest(state.X, forests, sum_batch_axis=-1)
 
-    if state.binary_indices is not None:
-        # mixed binary-continuous: z has only binary rows, y has all rows
-        assert z is not None
-        ref = jnp.broadcast_to(state.y, resid1.shape)
-        ref = ref.at[..., state.binary_indices, :].set(z)
-    elif z is not None:
-        ref = z
+    if state.has_chains:
+        ref = vmap(outcome_target, in_axes=(chain_axes,))(state)
     else:
-        ref = state.y
+        ref = outcome_target(state)
     resid2 = ref - (trees + state.forest.offset[..., None])
 
     return resid1, resid2

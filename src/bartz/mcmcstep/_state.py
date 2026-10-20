@@ -1996,6 +1996,17 @@ def vmap_chains(
     return wrapped
 
 
+def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
+    """Return the outcome the forest fits, with the latent one for binary components."""
+    if state.binary_indices is not None:
+        assert state.z is not None
+        return state.y.at[state.binary_indices, :].set(state.z)
+    elif state.z is not None:
+        return state.z
+    else:
+        return state.y
+
+
 class ShardMapPatchKwargs(TypedDict, total=False):
     check_vma: bool
 

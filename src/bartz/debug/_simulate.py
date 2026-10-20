@@ -44,10 +44,11 @@ from bartz.debug._prior import (
 from bartz.grove import evaluate_forest
 from bartz.mcmcstep import DiagWishart, State, Wishart
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_to_axis, chain_vmap_axes
-from bartz.mcmcstep._rebuild import outcome_target, rebuild_derived_chain
+from bartz.mcmcstep._rebuild import rebuild_derived_chain
 from bartz.mcmcstep._state import (
     StateT,
     chol_with_gersh,
+    outcome_target,
     split_key_for_chains,
     vmap_chains,
 )

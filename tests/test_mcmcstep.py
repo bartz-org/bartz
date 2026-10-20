@@ -122,7 +122,7 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
-from bartz.mcmcstep._rebuild import outcome_target, rebuild_derived
+from bartz.mcmcstep._rebuild import rebuild_derived
 from bartz.mcmcstep._reduction import _gpu_sm_count
 from bartz.mcmcstep._state import (
     Forest,
@@ -130,6 +130,7 @@ from bartz.mcmcstep._state import (
     StepConfig,
     chol_with_gersh,
     inv_via_chol_with_gersh,
+    outcome_target,
     search_divisor,
 )
 from bartz.mcmcstep._step import (

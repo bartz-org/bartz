@@ -2259,10 +2259,9 @@ class TestVarprobAttr:
 
     def test_fixed(self, keys: split, bkw: BartKW, tmp_path: Path) -> None:
         """Check `varprob` matches a fixed `varprob` parameter."""
-        kw = bkw.kw
         vp = random.uniform(keys.pop(), (bkw.p,), minval=0.1)
         vp /= vp.sum()
-        kw.update(sparse=SparseConfig(enabled=False), varprob=vp)
+        kw: dict = dict(bkw.kw, sparse=SparseConfig(enabled=False), varprob=vp)
         # `OriginalBart` because npz archives accept only the registered class
         bart = OriginalBart(**kw)
         assert isinstance(bart._main_trace.varprob, VarprobInState)

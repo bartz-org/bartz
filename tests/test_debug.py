@@ -56,7 +56,6 @@ from bartz.debug._prior import (
     sample_diag_wishart,
     sample_forest_structure,
     sample_leaves,
-    sample_prior_trees,
     sample_s,
     sample_theta,
     sample_wishart,
@@ -170,8 +169,8 @@ def test_format_tree_multivariate() -> None:
     assert s == ref_s
 
 
-class TestSamplePrior:
-    """Test `debug._prior.sample_prior_trees`."""
+class TestSampleForest:
+    """Test `debug._prior.sample_forest_structure` with `sample_leaves`."""
 
     Args = namedtuple(
         'Args',
@@ -188,7 +187,7 @@ class TestSamplePrior:
 
     @pytest.fixture(params=['uniform', 'nonuniform'])
     def args(self, request: pytest.FixtureRequest, keys: split) -> Args:
-        """Prepare arguments for `sample_prior_trees`, with and without `log_s`."""
+        """Prepare arguments for `sample`, with and without `log_s`."""
         # config
         trace_length = 1000
         num_trees = 200
@@ -215,9 +214,29 @@ class TestSamplePrior:
             log_s,
         )
 
+    @staticmethod
+    def sample(args: Args) -> TreesTrace:
+        """Sample a trace of independent trees from the prior."""
+        keys = split(args.key)
+        shape = (args.trace_length, args.num_trees)
+        trees = sample_forest_structure(
+            keys.pop(),
+            shape,
+            max_split=args.max_split,
+            p_nonterminal=args.p_nonterminal,
+            log_s=args.log_s,
+        )
+        tree_size = 2 ** (args.p_nonterminal.size + 1)
+        leaf_tree = sample_leaves(
+            keys.pop(), (*shape, tree_size), jnp.reciprocal(args.sigma_mu)
+        )
+        return TreesTrace(
+            leaf_tree=leaf_tree, var_tree=trees.var_tree, split_tree=trees.split_tree
+        )
+
     def test_valid_trees(self, args: Args) -> None:
         """Check all sampled trees are valid."""
-        trees = sample_prior_trees(**args._asdict())
+        trees = self.sample(args)
         batch_shape = (args.trace_length, args.num_trees)
         heap_size = 2 ** (args.p_nonterminal.size + 1)
         assert trees.leaf_tree.shape == (*batch_shape, heap_size)
@@ -234,13 +253,13 @@ class TestSamplePrior:
             p_nonterminal = p_nonterminal.at[:max_depth].set(1.0)
             args = tree_at(lambda args: args.p_nonterminal, args, p_nonterminal)
             args = tree_at(lambda args: args.key, args, keys.pop())
-            trees = sample_prior_trees(**args._asdict())
+            trees = self.sample(args)
             assert jnp.all(trees.split_tree[:, :, 1 : 2**max_depth])
             assert not jnp.any(trees.split_tree[:, :, 2**max_depth :])
 
     def test_forest_sdev(self, keys: split, args: Args) -> None:
         """Check that the sum of trees is standard Normal."""
-        trees = sample_prior_trees(**args._asdict())
+        trees = self.sample(args)
         leaf_indices = random.randint(
             keys.pop(), trees.leaf_tree.shape[:2], 0, trees.leaf_tree.shape[-1]
         )
@@ -255,7 +274,7 @@ class TestSamplePrior:
 
     def test_trees_differ(self, args: Args) -> None:
         """Check that trees are different across iterations."""
-        trees = sample_prior_trees(**args._asdict())
+        trees = self.sample(args)
         for attr in ('leaf_tree', 'var_tree', 'split_tree'):
             heap = getattr(trees, attr)
             diff_trace = jnp.diff(heap, axis=0)
@@ -273,7 +292,7 @@ class TestSamplePrior:
         1e-10), while the 1e-3 threshold keeps false positives rare.
         """
         p = args.max_split.size
-        trees = sample_prior_trees(**args._asdict())
+        trees = self.sample(args)
         counts = jnp.bincount(trees.var_tree[:, :, 1].ravel(), length=p)
         log_s = jnp.zeros(p) if args.log_s is None else args.log_s
         assert max_lr_test(counts, softmax(log_s)) > 1e-3
@@ -288,11 +307,9 @@ class TestSamplePrior:
         p = args.max_split.size
         log_s = jnp.log(1 + jnp.arange(p)).astype(jnp.float32)
         args = args._replace(log_s=log_s)
-        shared = sample_prior_trees(**args._asdict())
-        per_iter = sample_prior_trees(
-            **args._replace(
-                log_s=jnp.broadcast_to(log_s, (args.trace_length, p))
-            )._asdict()
+        shared = self.sample(args)
+        per_iter = self.sample(
+            args._replace(log_s=jnp.broadcast_to(log_s, (args.trace_length, p)))
         )
         for attr in ('leaf_tree', 'var_tree', 'split_tree'):
             assert_array_equal(getattr(shared, attr), getattr(per_iter, attr))
@@ -302,7 +319,7 @@ class TestSamplePrior:
 
         Alternate iterations between two different split-probability vectors and
         check that, splitting the root variables by parity, each group follows
-        the `softmax` of its own `log_s`. This would fail if `sample_prior_trees`
+        the `softmax` of its own `log_s`. This would fail if `sample_forest_structure`
         ignored the per-iteration axis or misaligned it with the trees.
         """
         p = args.max_split.size
@@ -312,87 +329,11 @@ class TestSamplePrior:
             (jnp.arange(args.trace_length) % 2)[:, None] == 0, v_even, v_odd
         )
 
-        trees = sample_prior_trees(**args._replace(log_s=log_s)._asdict())
+        trees = self.sample(args._replace(log_s=log_s))
         root = trees.var_tree[:, :, 1]
         for parity, v in ((0, v_even), (1, v_odd)):
             counts = jnp.bincount(root[parity::2].ravel(), length=p)
             assert max_lr_test(counts, softmax(v)) > 1e-3
-
-    def test_sparse_two_level(self, args: Args) -> None:
-        """The 2-level prior returns per-iteration latents that drive the trees.
-
-        Sampling `theta` and `s` from their priors must yield latents of the
-        right shape and valid trees, and the trees must actually use the sampled
-        `log_s`: averaged over all root splits, the chosen variable's `log_s`
-        exceeds the per-iteration mean `log_s`, since the root variable is drawn
-        with probability `softmax(log_s)`.
-        """
-        p = args.max_split.size
-        result = sample_prior_trees(
-            **args._replace(log_s=None)._asdict(), a=0.5, b=1.0, rho=float(p)
-        )
-        theta = result.theta
-        log_s = result.log_s
-        assert theta is not None
-        assert log_s is not None
-        assert theta.shape == (args.trace_length,)
-        assert log_s.shape == (args.trace_length, p)
-        assert jnp.all(theta > 0)
-        assert jnp.all(jnp.isfinite(log_s))
-        bad = check_trace(result, args.max_split)
-        assert jnp.count_nonzero(bad).item() == 0
-
-        root = result.var_tree[:, :, 1]
-        chosen = jnp.take_along_axis(log_s, root, axis=1)
-        assert chosen.mean() > log_s.mean()
-
-    def test_sparse_one_level(self, args: Args) -> None:
-        """The 1-level prior draws `log_s` from a fixed-concentration Dirichlet.
-
-        Setting `theta` alone (no `rho`, `a`, `b`) must yield a per-iteration
-        `log_s` of the right shape, broadcasting the fixed `theta` to one value
-        per iteration, and valid trees.
-        """
-        p = args.max_split.size
-        result = sample_prior_trees(
-            **args._replace(log_s=None)._asdict(), theta=float(p)
-        )
-        assert result.theta is not None
-        assert result.log_s is not None
-        assert jnp.all(result.theta == p)
-        assert result.log_s.shape == (args.trace_length, p)
-        assert jnp.all(jnp.isfinite(result.log_s))
-        bad = check_trace(result, args.max_split)
-        assert jnp.count_nonzero(bad).item() == 0
-
-    @pytest.mark.parametrize(
-        'kwargs', [dict(rho=1.0, a=0.5), dict(rho=1.0, b=1.0), dict(a=0.5, b=1.0)]
-    )
-    def test_partial_rho_a_b(self, args: Args, kwargs: dict) -> None:
-        """Setting only some of `rho`, `a`, `b` raises."""
-        with pytest.raises(ValueError, match='rho, a, b must be either'):
-            sample_prior_trees(**args._replace(log_s=None)._asdict(), **kwargs)
-
-    def test_theta_with_rho_a_b(self, args: Args) -> None:
-        """Setting `theta` together with `rho`, `a`, `b` raises."""
-        with pytest.raises(ValueError, match='sampled from the prior'):
-            sample_prior_trees(
-                **args._replace(log_s=None)._asdict(), theta=1.0, a=0.5, b=1.0, rho=1.0
-            )
-
-    def test_log_s_with_rho_a_b(self, args: Args) -> None:
-        """Setting `log_s` together with `rho`, `a`, `b` raises."""
-        log_s = jnp.zeros(args.max_split.size)
-        with pytest.raises(ValueError, match='sampled from the prior'):
-            sample_prior_trees(
-                **args._replace(log_s=log_s)._asdict(), a=0.5, b=1.0, rho=1.0
-            )
-
-    def test_log_s_with_theta(self, args: Args) -> None:
-        """Setting `log_s` together with `theta` raises."""
-        log_s = jnp.zeros(args.max_split.size)
-        with pytest.raises(ValueError, match='sampled from the prior'):
-            sample_prior_trees(**args._replace(log_s=log_s)._asdict(), theta=1.0)
 
 
 class TestSampleTheta:

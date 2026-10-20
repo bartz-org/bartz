@@ -40,7 +40,7 @@ from jaxtyping import Array, Bool, Float32, Int32, Key, PyTree, Shaped, UInt
 from bartz._jaxext import jit, minimal_unsigned_dtype
 from bartz._jaxext import split as split_key
 from bartz._jaxext.random import loggamma
-from bartz.grove import TreesTrace, is_actual_leaf, is_leaves_parent, traverse_forest
+from bartz.grove import is_actual_leaf, is_leaves_parent, traverse_forest
 from bartz.mcmcstep._moves import randint_masked
 from bartz.mcmcstep._state import chol_with_gersh
 
@@ -48,7 +48,7 @@ FloatLike = float | Float32[Array, '']
 
 
 class SamplePriorStack(Module):
-    """Represent the manually managed stack used in `sample_prior_trees`.
+    """Represent the manually managed stack used in `sample_tree_structure`.
 
     Each level of the stack represents a recursion into a child node in a
     binary tree of maximum depth `d`.
@@ -123,7 +123,7 @@ class TreeStructure(Module):
 
 
 class SamplePriorCarry(Module):
-    """Object holding values carried along the recursion in `sample_prior_trees`."""
+    """Object holding values carried along the recursion in `sample_tree_structure`."""
 
     key: Key[Array, '']
     """A jax random key used to sample decision rules."""
@@ -165,7 +165,7 @@ class SamplePriorCarry(Module):
 
 
 class SamplePriorX(Module):
-    """Object representing the recursion scan in `sample_prior_trees`.
+    """Object representing the recursion scan in `sample_tree_structure`.
 
     The sequence of nodes to visit is pre-computed recursively once, unrolling
     the recursion schedule.
@@ -440,6 +440,7 @@ class MinPointsCriterion(RejectionCriterion):
         return ok
 
 
+@jit(static_argnames=('shape',))
 def sample_forest_structure(
     key: Key[Array, ''],
     shape: tuple[int, ...],
@@ -516,6 +517,7 @@ def sample_forest_structure(
         return tree.map(lambda x: x.reshape(*shape, *x.shape[1:]), trees)
 
 
+@jit(static_argnames=('shape',))
 def sample_leaves(
     key: Key[Array, ''],
     shape: tuple[int, ...],
@@ -619,142 +621,6 @@ def sample_diag_wishart(
     return jnp.diag(value), jnp.diag(jnp.sqrt(value))
 
 
-class PriorSample(TreesTrace):
-    """Output of `sample_prior_trees`."""
-
-    # defaults because the inherited `leaf_unit`/`offset` fields have them
-    log_s: Float32[Array, 'trace_length p'] | None = None
-    """The per-iteration log unnormalized pmf for choosing variables to split on,
-    `None` means uniform distribution."""
-
-    theta: Float32[Array, ' trace_length'] | None = None
-    """The per-iteration Dirichlet concentration, `None` if `s` is not drawn from
-    a Dirichlet prior."""
-
-
-@jit(static_argnames=('trace_length', 'num_trees'))
-def sample_prior_trees(
-    key: Key[Array, ''],
-    trace_length: int,
-    num_trees: int,
-    *,
-    max_split: UInt[Array, ' p'],
-    p_nonterminal: Float32[Array, ' d_minus_1'],
-    sigma_mu: Float32[Array, ''],
-    log_s: Float32[Array, ' p'] | Float32[Array, 'trace_length p'] | None = None,
-    theta: FloatLike | None = None,
-    a: FloatLike | None = None,
-    b: FloatLike | None = None,
-    rho: FloatLike | None = None,
-) -> PriorSample:
-    r"""Sample independent trees from the BART prior.
-
-    Parameters
-    ----------
-    key
-        A jax random key.
-    trace_length
-        The number of iterations.
-    num_trees
-        The number of trees for each iteration.
-    max_split
-        The number of cutpoints along each variable.
-    p_nonterminal
-        The prior probability of a node being non-terminal conditional on
-        its ancestors and on having available decision rules, at each depth.
-        This determines the maximum depth of the trees.
-    sigma_mu
-        The prior standard deviation of each leaf.
-    log_s
-        The logarithm of the unnormalized prior probability of splitting on each
-        variable, either shared across all trees (shape ``(p,)``) or specified
-        per iteration (shape ``(trace_length, p)``). If `None`, variables are
-        chosen uniformly at random. Mutually exclusive with `theta`, `a`, `b`,
-        `rho`, which instead sample it from its prior.
-    theta
-        The Dirichlet concentration parameter. If set, and `rho`, `a`, `b` are
-        not, `log_s` is sampled with this fixed concentration.
-    a
-    b
-    rho
-        Parameters of the prior :math:`\theta/(\theta+\rho) \sim
-        \mathrm{Beta}(a, b)`. If all set, both `theta` and `log_s` are sampled.
-
-    Returns
-    -------
-    A trace of trees sampled from the prior.
-    """
-    keys = split_key(key, 3)
-    p = max_split.size
-
-    log_s, theta = sample_sparsity(
-        keys.pop(), trace_length, p, log_s=log_s, theta=theta, a=a, b=b, rho=rho
-    )
-
-    trees = sample_forest_structure(
-        keys.pop(),
-        (trace_length, num_trees),
-        max_split=max_split,
-        p_nonterminal=p_nonterminal,
-        log_s=log_s,
-    )
-    tree_size = 2 ** (p_nonterminal.size + 1)
-    leaf_tree = sample_leaves(
-        keys.pop(), (trace_length, num_trees, tree_size), jnp.reciprocal(sigma_mu)
-    )
-
-    return PriorSample(
-        leaf_tree=leaf_tree,
-        var_tree=trees.var_tree,
-        split_tree=trees.split_tree,
-        log_s=log_s,
-        theta=theta,
-    )
-
-
-def sample_sparsity(
-    key: Key[Array, ''],
-    trace_length: int,
-    p: int,
-    *,
-    log_s: Float32[Array, ' p'] | Float32[Array, 'trace_length p'] | None,
-    theta: FloatLike | None,
-    a: FloatLike | None,
-    b: FloatLike | None,
-    rho: FloatLike | None,
-) -> tuple[
-    Float32[Array, 'trace_length p'] | None, Float32[Array, ' trace_length'] | None
-]:
-    """Resolve the per-iteration `log_s` and `theta` of the sparsity prior of `sample_prior_trees`."""
-    if rho is not None or a is not None or b is not None:
-        # 2-level prior: draw theta from its Beta prior, then log_s | theta
-        if rho is None or a is None or b is None:
-            msg = 'rho, a, b must be either all set or all None'
-            raise ValueError(msg)
-        if theta is not None or log_s is not None:
-            msg = 'theta and log_s are sampled from the prior, do not also set them'
-            raise ValueError(msg)
-        keys = split_key(key)
-        theta = sample_theta(keys.pop(), rho, a, b, (trace_length,))
-        log_s = sample_s(keys.pop(), theta, p)
-    elif theta is not None:
-        # 1-level prior: draw log_s from the Dirichlet with a fixed concentration
-        if log_s is not None:
-            msg = 'log_s is sampled from the prior, do not also set it'
-            raise ValueError(msg)
-        theta = jnp.broadcast_to(jnp.asarray(theta), (trace_length,))
-        log_s = sample_s(key, theta, p)
-    elif log_s is not None:
-        # fixed split probabilities, shared across the iterations
-        theta = None
-        log_s = jnp.broadcast_to(log_s, (trace_length, p))
-    else:
-        # uniform variable selection
-        theta = None
-        log_s = None
-    return log_s, theta
-
-
 def sample_theta(
     key: Key[Array, ''],
     rho: FloatLike,
@@ -821,7 +687,7 @@ def sample_s(
 
     The prior is :math:`s \sim \mathrm{Dirichlet}(\theta/p, \ldots, \theta/p)`.
     The result is `log_s`, the log of unnormalized weights whose `softmax` is
-    `s`, the representation expected by `sample_prior_trees`.
+    `s`, the representation expected by `sample_forest_structure`.
 
     Parameters
     ----------

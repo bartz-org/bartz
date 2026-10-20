@@ -195,9 +195,6 @@ class DiagWishart(Wishart):
     shape of each precision entry is ``inv_wishart_marginal_nu / 2``, not
     ``nu / 2``.
 
-    A component with `rate` 0 has no prior; its precision is held fixed at its
-    `value` (1 for the binary components of a mixed regression).
-
     Used for mixed binary-continuous regression and for continuous multivariate
     regression with per-datapoint missingness.
     """

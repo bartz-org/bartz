@@ -32,6 +32,7 @@ from typing import overload
 from equinox import AbstractVar
 from jax import lax, named_call, random, vmap
 from jax import numpy as jnp
+from jax.nn import log_softmax
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logsumexp
 from jaxtyping import (
@@ -1995,9 +1996,8 @@ class S(Module):
         cls, log_s: Float32[Array, ' p'], selectable: Bool[Array, ' p'], num_top: int
     ) -> 'S':
         """Normalize `log_s` and single out its `num_top` largest values."""
-        # mask and normalize log_s
-        log_s = jnp.where(selectable, log_s, -jnp.inf)
-        log_s -= logsumexp(log_s)
+        # mask and normalize log_s, all -inf if no variable is selectable
+        log_s = log_softmax(log_s, where=selectable)
 
         # find the top probabilities
         (p,) = log_s.shape

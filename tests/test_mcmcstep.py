@@ -3584,6 +3584,15 @@ class TestSampleSAugmentation:
         """Stack `num_trees` identical copies of a tree heap."""
         return jnp.broadcast_to(tree_heap, (num_trees, tree_heap.size))
 
+    def test_no_selectable_variables(self, keys: split) -> None:
+        """With no variable to split on, the counts are zero, not nan."""
+        stumps = jnp.zeros((NUM_TREES, 4), jnp.uint8)
+        forest = self._forest(
+            stumps, stumps, jnp.zeros(3, jnp.uint8), jnp.array([0.0, -1.0, 1.0])
+        )
+        log_draws = sample_s_augmentation(keys.pop(), forest)
+        assert_array_equal(jnp.exp(log_draws), jnp.zeros(3))
+
     def test_mean_matches_closed_form(self, keys: split) -> None:
         """A tree blocking one variable at one node gives the known Poisson mean."""
         # the root splits variable 0 at its lowest cutpoint, so its left child

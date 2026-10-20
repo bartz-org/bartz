@@ -93,7 +93,6 @@ dev = [
     "pytest-subtests>=0.14.2",
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
-    "rbartpackages[jax,polars]>=0.1.0",
     "stochtree>=0.4.2",
     "sphinx>=8.1.3",
     "sphinx-autodoc-typehints>=3.0.1",
@@ -138,7 +137,6 @@ show_missing = true
 skip_covered = true
 
 [tool.coverage.html]
-show_contexts = true
 directory = "_site/coverage"
 
 [tool.coverage.paths]

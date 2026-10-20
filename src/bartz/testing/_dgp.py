@@ -37,6 +37,7 @@ from bartz._jaxext import jit, minimal_unsigned_dtype, split
 from bartz.mcmcstep import OutcomeType
 from bartz.testing._distr import (
     Constant,
+    CorrDistr,
     DiscreteUniform,
     Distr,
     Normal,
@@ -290,43 +291,20 @@ def check_offset(offset: Float[Array, ''] | Float[Array, ' k'], k: int | None) -
             raise ValueError(msg)
 
 
-def corr_cholesky(
-    error_corr: Float[Array, 'k k'] | None, k: int | None
+def sample_error_chol(
+    key: Key[Array, ''], error_corr_distr: CorrDistr | None, k: int | None
 ) -> Float[Array, 'k k'] | None:
-    """Cholesky factor of the normalized `error_corr`, or None for independent errors.
+    """Sample the Cholesky factor of the error correlation, or None for independent errors.
 
-    The matrix is rescaled to unit diagonal (only its correlation structure is
-    used; the noise scale is set by ``sigma2_eps``), then factored as ``L Lᵀ``.
-
-    Parameters
-    ----------
-    error_corr
-        A symmetric positive-definite matrix of shape (k, k), or None for
-        independent errors.
-    k
-        Number of outcome components, or None for a univariate outcome.
-
-    Returns
-    -------
-    Lower-triangular Cholesky factor L of shape (k, k), or None if `error_corr` is None.
-
-    Raises
-    ------
-    ValueError
-        If `error_corr` is given with ``k=None`` or does not have shape ``(k, k)``.
+    Raises `ValueError` if `error_corr_distr` is given with ``k=None``.
     """
-    if error_corr is None:
+    if error_corr_distr is None:
         return None
     elif k is None:
-        msg = 'error_corr requires a multivariate outcome (k != None)'
-        raise ValueError(msg)
-    elif error_corr.shape != (k, k):
-        msg = f'error_corr has shape {tuple(error_corr.shape)}, expected ({k}, {k})'
+        msg = 'error_corr_distr requires a multivariate outcome (k != None)'
         raise ValueError(msg)
     else:
-        d = jnp.sqrt(jnp.diagonal(error_corr))
-        corr = error_corr / d[:, None] / d[None, :]
-        return jnp.linalg.cholesky(corr)
+        return error_corr_distr.sample_chol(key, k)
 
 
 def parse_outcome_type(
@@ -353,11 +331,12 @@ class Params(Module):
     R"""All quantities of the data-generating process that do not depend on `n`.
 
     The data follows a multivariate quadratic model whose ingredients are
-    drawn i.i.d. from configurable families: standardized ones (mean 0,
-    variance 1, see `Distr`) for the predictors :math:`X` and the coefficient
-    draws :math:`b, a, g`, and a scale family (:math:`E[s^2] = 1`, see
-    `ScaleDistr`) for the per-predictor importances :math:`s`. With
-    observations :math:`i = 1, \ldots, n`, predictors :math:`j, j' = 1,
+    drawn i.i.d. from configurable families: standardized ones (symmetric,
+    variance 1, see `Distr`) for the predictors :math:`X`, the coefficient
+    draws :math:`b, a, g` and the errors, a scale family (:math:`E[s^2] = 1`,
+    see `ScaleDistr`) for the per-predictor importances :math:`s`, and a
+    correlation family (see `CorrDistr`) for the error correlation :math:`R`.
+    With observations :math:`i = 1, \ldots, n`, predictors :math:`j, j' = 1,
     \ldots, p` and outcome components :math:`c = 1, \ldots, k`:
 
     .. math::
@@ -419,9 +398,9 @@ class Params(Module):
                 \quad \rho \in [0, 1], \\
             \mu_{ci} &= o_c + \mu^{\mathrm L}_{ci} + \mu^{\mathrm Q}_{ci},
                 \quad o_c \in \mathbb R, \\
-            U_{\cdot i} &\overset{\mathrm{i.i.d.}}\sim N(0, R),
-                \quad R = \operatorname{corr}(\mathtt{error\_corr}),
+            R &\sim \mathtt{error\_corr\_distr},
                 \quad R = I \text{ by default}, \\
+            U_{\cdot i} &\overset{\mathrm{i.i.d.}}\sim N(0, R), \\
             \varepsilon_{ci} &= F^{-1}_{\mathtt{error\_distr}}(\Phi(U_{ci}))
                 \quad (\text{Gaussian copula; } \varepsilon_{ci} = U_{ci}
                 \text{ for the default } N), \\
@@ -456,18 +435,6 @@ class Params(Module):
 
         \begin{align}
             E[Z_{ci}] &= o_c, \\
-            \operatorname{Cov}[\mu^{\mathrm L}_{ci}, \mu^{\mathrm Q}_{ci} \mid
-                    \theta]
-                &= \operatorname{Cov}[\mu^{\mathrm L}_{ci},
-                    \mu^{\mathrm Q}_{ci}] = 0, \\
-            \operatorname{Cov}[\mu_{ci}, \mu_{c'i} \mid \theta]
-                &= \operatorname{Cov}[\mu_{ci}, \mu_{c'i}] = 0
-                \quad (c \ne c',\ \lambda = 0), \\
-            \operatorname{Cov}[Z_{ci}, Z_{c'i} \mid \theta, X]
-                &= \sigma^2_{\mathrm{eps}}\, W_{ci} W_{c'i}\,
-                \operatorname{Cov}[\varepsilon_{ci}, \varepsilon_{c'i}],
-                \quad |\operatorname{Cov}[\varepsilon_{ci}, \varepsilon_{c'i}]|
-                \le |R_{cc'}|\ (\text{equality for } N), \\
             E[\operatorname{Var}[Z_{ci} \mid \theta]] &=
                 \sigma^2_{\mathrm{lin}} + \sigma^2_{\mathrm{quad}}
                 + \sigma^2_{\mathrm{eps}}
@@ -475,6 +442,11 @@ class Params(Module):
             \operatorname{Var}[E[Z_{ci} \mid \theta]] &=
                 \frac{\sigma^2_{\mathrm{quad}}\, \mu_4}{(\kappa_X - 1)\mu_4 + q}
                 \quad \text{(variance of the expected mean)}, \\
+            \operatorname{Cov}[Z_{ci}, Z_{c'i}]
+                &= \operatorname{Cov}[\mu_{ci}, \mu_{c'i}]
+                = \lambda \left(\sigma^2_{\mathrm{lin}} + \sigma^2_{\mathrm{quad}}
+                    + \operatorname{Var}[E[Z_{ci} \mid \theta]]\right)
+                \quad (c \ne c'), \\
             \operatorname{Var}[Z_{ci}] &=
                 E[\operatorname{Var}[Z_{ci} \mid \theta]]
                 + \operatorname{Var}[E[Z_{ci} \mid \theta]]
@@ -547,8 +519,8 @@ class Params(Module):
         * - :math:`\varepsilon_{ci}`
           - `error_distr` (marginal family)
         * - :math:`R`
-          - ``error_corr`` (normalized to unit diagonal; `error_chol` is its
-            Cholesky factor)
+          - `error_corr_distr` (`error_chol` is the Cholesky factor of the
+            sampled :math:`R`)
         * - :math:`\operatorname{Var}[E[Z_{ci} \mid \theta]]`
           - `sigma2_mean`
         * - :math:`E[\operatorname{Var}[Z_{ci} \mid \theta]]`
@@ -626,7 +598,7 @@ class Params(Module):
 
     error_distr: Distr
     """Marginal distribution family of the additive errors. The errors are sampled
-    through a Gaussian copula (the ``error_corr`` dependence), so this sets each
+    through a Gaussian copula (the ``error_chol`` dependence), so this sets each
     component's marginal while leaving its variance at ``sigma2_eps``. `Normal`
     (default) recovers jointly-Normal errors."""
 
@@ -635,6 +607,10 @@ class Params(Module):
     the dependence on the predictors sparser; `Constant` is uniform importance
     (``s_j = 1``). `ScaleDistr.from_peff` parametrizes the dispersion by an
     effective number of active predictors."""
+
+    error_corr_distr: CorrDistr | None
+    """Family of the across-component error correlation matrix. ``None`` means
+    independent errors (``R = I``), including every univariate outcome."""
 
     q: Integer[Array, '']
     """Number of quadratic interactions per predictor (even, ``< p // k``)."""
@@ -692,9 +668,8 @@ class Params(Module):
 
     error_chol: Float[Array, 'k k'] | None
     """Lower-triangular Cholesky factor ``L`` of the across-component error
-    correlation matrix ``R = L @ L.T`` (the ``error_corr`` argument normalized to
-    unit diagonal). ``None`` when the errors are independent (``error_corr`` was
-    ``None``), including every univariate outcome."""
+    correlation matrix ``R = L @ L.T`` drawn from `error_corr_distr`. ``None``
+    when the errors are independent (``error_corr_distr`` is ``None``)."""
 
     outcome_type: OutcomeType | tuple[OutcomeType, ...] = field(static=True)
     """Per-component outcome type, either a single `~bartz.mcmcstep.OutcomeType` applied to
@@ -889,7 +864,7 @@ def gen_params(
     outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
     het_strength: Float[Array, ''] | float | None = None,
     het_shape: Literal['scalar', 'vector'] | None = None,
-    error_corr: Float[Array, 'k k'] | None = None,
+    error_corr_distr: CorrDistr | None = None,
 ) -> Params:
     """Sample DGP coefficients and parameters (no dependence on `n`).
 
@@ -930,9 +905,10 @@ def gen_params(
         Family of the noise projection draws; its kurtosis enters ``var_v``.
     error_distr
         Marginal family of the additive errors (default `Normal`), realized
-        through the `error_corr` Gaussian copula. Any standardized family keeps
-        the error variance at ``sigma2_eps``; non-Normal families attenuate the
-        realized error correlation relative to ``error_corr``. See `Params`.
+        through a Gaussian copula with correlation drawn from
+        `error_corr_distr`. Any standardized family keeps the error variance at
+        ``sigma2_eps``; non-Normal families attenuate the realized error
+        correlation relative to the copula one. See `Params`.
     s_distr
         Scale family of the per-predictor importance scales ``s`` (e.g.
         `Gamma` or `SpikeSlab`); more dispersed scales make the dependence on
@@ -952,12 +928,10 @@ def gen_params(
         Heteroskedasticity mode: ``None`` (homoskedastic), ``'scalar'`` (one
         ``error_scale`` per datapoint, scaling the whole outcome vector), or
         ``'vector'`` (per-component scales, multivariate only). See `Params`.
-    error_corr
-        Across-component error correlation. A symmetric positive-definite
-        matrix of shape ``(k, k)``, normalized to unit diagonal before use (only
-        its correlation structure matters; the noise scale is ``sigma2_eps``).
-        ``None`` (default) gives independent errors. Multivariate only. See
-        `Params`.
+    error_corr_distr
+        Family of the across-component error correlation matrix, e.g. `LKJ` or
+        `Factor`. ``None`` (default) gives independent errors. Multivariate
+        only. See `Params`.
 
     Returns
     -------
@@ -972,8 +946,7 @@ def gen_params(
         ``(het_strength is None) != (het_shape is None)``, or if
         ``het_shape='vector'`` is combined with ``k=None``, or if a vector
         ``offset`` is combined with ``k=None`` or has a length other than ``k``,
-        or if ``error_corr`` is combined with ``k=None`` or does not have shape
-        ``(k, k)``.
+        or if ``error_corr_distr`` is combined with ``k=None``.
     """
     if (lambda_ is None) != (k is None):
         msg = (
@@ -1018,13 +991,15 @@ def gen_params(
     mu_4_s = s_distr.fourth_moment
 
     # claim one key per group up front, always in the same order (shared,
-    # separate, heteroskedasticity, scales), so each group's stream is unchanged
-    # whether or not the others are active; the splits below sit next to their use
-    keys = split(key, 4)
+    # separate, heteroskedasticity, scales, error correlation), so each group's
+    # stream is unchanged whether or not the others are active; the splits below
+    # sit next to their use
+    keys = split(key, 5)
     shared_key = keys.pop()
     separate_key = keys.pop()
     het_key = keys.pop()
     s = s_distr.sample(keys.pop(), (p,))
+    error_chol = sample_error_chol(keys.pop(), error_corr_distr, k)
 
     shared_keys = split(shared_key)
     beta_shared = generate_beta_shared(shared_keys.pop(), beta_distr, p, sigma2_lin, s)
@@ -1072,10 +1047,6 @@ def gen_params(
             lambda_=lambda_,
         )
 
-    # across-component error correlation, stored as its Cholesky factor (the form
-    # used when sampling); None leaves the errors independent
-    error_chol = corr_cholesky(error_corr, k)
-
     # derived variances (see `Params`); cheap scalars materialized eagerly
     sigma2_mean = sigma2_quad * mu_4_s / ((kurt_x - 1) * mu_4_s + q)
     sigma2_pop = sigma2_lin + sigma2_quad + sigma2_eps
@@ -1094,6 +1065,7 @@ def gen_params(
         gamma_distr=gamma_distr,
         error_distr=error_distr,
         s_distr=s_distr,
+        error_corr_distr=error_corr_distr,
         q=q,
         lambda_=lambda_,
         sigma2_lin=sigma2_lin,
@@ -1225,7 +1197,7 @@ def gen_data(
     outcome_type: OutcomeType | str | tuple[OutcomeType | str, ...] = 'continuous',
     het_strength: Float[Array, ''] | float | None = None,
     het_shape: Literal['scalar', 'vector'] | None = None,
-    error_corr: Float[Array, 'k k'] | None = None,
+    error_corr_distr: CorrDistr | None = None,
 ) -> DGP:
     """Generate data from a quadratic multivariate DGP.
 
@@ -1260,7 +1232,7 @@ def gen_data(
     outcome_type
     het_strength
     het_shape
-    error_corr
+    error_corr_distr
         Forwarded to `gen_params`; see `Params`.
 
     Returns
@@ -1287,6 +1259,6 @@ def gen_data(
         outcome_type=outcome_type,
         het_strength=het_strength,
         het_shape=het_shape,
-        error_corr=error_corr,
+        error_corr_distr=error_corr_distr,
     )
     return gen_data_from_params(keys.pop(), params, n=n)

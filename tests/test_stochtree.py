@@ -635,7 +635,7 @@ def test_compare_with_stochtree(
                 leaf_prec, cond_mean = leaf_prior_cov_inv_conditional_mean(
                     bz_model._bart
                 )
-                assert_close_matrices(leaf_prec.mean(), cond_mean.mean(), rtol=0.02)
+                assert_allclose(leaf_prec.mean(), cond_mean.mean(), rtol=0.02)
     else:
         with subtests.test('rhat_prob_train'):
             bz_prob = np.asarray(ndtr(bz_model.y_hat_train))
@@ -1124,8 +1124,8 @@ class TestPreprocessing:
         state_arr = m_arr._bart._mcmc_state
         state_df = m_df._bart._mcmc_state
         assert_array_equal(state_arr.X, state_df.X)
-        assert state_arr.forest.log_s is None
-        assert state_df.forest.log_s is None
+        assert state_arr.forest.sparsity.log_s is None
+        assert state_df.forest.sparsity.log_s is None
 
         assert_close_matrices(m_arr.y_hat_train, m_df.y_hat_train, rtol=1e-4)
         assert_close_matrices(
@@ -1208,7 +1208,8 @@ class TestPreprocessing:
         state_df = m_df._bart._mcmc_state
         assert_array_equal(state_manual.X, state_df.X)
         assert_array_equal(
-            nnone(state_manual.forest.log_s), nnone(state_df.forest.log_s)
+            nnone(state_manual.forest.sparsity.log_s),
+            nnone(state_df.forest.sparsity.log_s),
         )
 
         assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=1e-4)
@@ -1278,7 +1279,8 @@ class TestPreprocessing:
         state_df = m_df._bart._mcmc_state
         assert_array_equal(state_manual.X, state_df.X)
         assert_array_equal(
-            nnone(state_manual.forest.log_s), nnone(state_df.forest.log_s)
+            nnone(state_manual.forest.sparsity.log_s),
+            nnone(state_df.forest.sparsity.log_s),
         )
 
         assert_close_matrices(m_manual.y_hat_train, m_df.y_hat_train, rtol=1e-4)

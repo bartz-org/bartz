@@ -46,7 +46,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PREK_SKIP: no-commit-to-branch
-      RPY2_CFFI_MODE: ABI
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -88,7 +87,7 @@ jobs:
       matrix:
         # The list of groups lives in `Makefile` as `GROUPS`; keep this in sync.
         target: [tests, tests-single-cpu, tests-old]
-        group: [misc, iface-v5v7, iface-v6, iface-v4, bart-v1, bart-v23]
+        group: [iface-v1, iface-v23, iface-v4, iface-v5, iface-v6, iface-v7]
 
     steps:
       - name: Checkout repository
@@ -101,32 +100,6 @@ jobs:
         uses: ./.github/actions/setup-uv
         with:
           cache-suffix: -${{ matrix.target }}-${{ matrix.group }}
-
-      - name: Install R
-        uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
-        with:
-          r-version: "renv"
-
-      - name: Add a CRAN fallback mirror for renv
-        # setup-r points renv at Posit Package Manager (PPM) alone, via a
-        # single-URL RENV_CONFIG_REPOS_OVERRIDE. PPM intermittently times out,
-        # which hard-fails the renv bootstrap/restore below and forces a manual
-        # CI re-run. Append a plain CRAN mirror so renv falls back to it (source
-        # builds, only when PPM is unreachable). $RSPM is the PPM binary URL
-        # just exported by setup-r, so the runner's distro codename stays in sync.
-        run: echo "RENV_CONFIG_REPOS_OVERRIDE=PPM=${RSPM};CRAN=https://cloud.r-project.org" >> "$GITHUB_ENV"
-
-      - name: Install R dependencies
-        uses: r-lib/actions/setup-renv@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
-        env:
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Configure R PATHS for rpy2 (Linux only)
-        run: |
-          echo "R_HOME=$(R RHOME)" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$(R RHOME)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          ldd "$(R RHOME)/library/methods/libs/methods.so" || true
-          uv run --dev python -c "import rpy2.situation as s; print('\n'.join(map(str, s.iter_info())))"
 
       - name: Run unit tests
         timeout-minutes: 30
@@ -285,7 +258,7 @@ jobs:
           cache-suffix: -${{ matrix.id }}
 
       - name: Get machine information for asv
-        run: RPY2_CFFI_MODE=ABI uv run --dev python -m asv machine --yes
+        run: uv run --dev python -m asv machine --yes
 
       - name: Run asv in quick mode
         run: ${{ matrix.vars }}make asv-quick
@@ -304,38 +277,18 @@ jobs:
         uses: ./.github/actions/setup-uv
 
       - name: run IPython
-        run: RPY2_CFFI_MODE=ABI make ipython ARGS=config/ipython/profile_default/startup/startup.ipy
+        run: make ipython ARGS=config/ipython/profile_default/startup/startup.ipy
 
       - name: run IPython with old toolchain
-        run: RPY2_CFFI_MODE=ABI make ipython-old ARGS=config/ipython/profile_default/startup/startup.ipy
+        run: make ipython-old ARGS=config/ipython/profile_default/startup/startup.ipy
 
       - name: Check the version is derived from git
         run: uv run --dev python -c 'import bartz; print(bartz.__version__)' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(\.dev[0-9]+\+g[0-9a-f]+)?$'
 
-      - name: Install R
-        uses: r-lib/actions/setup-r@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
-        with:
-          r-version: "renv"
-
-      - name: Add a CRAN fallback mirror for renv
-        # setup-r points renv at Posit Package Manager (PPM) alone, via a
-        # single-URL RENV_CONFIG_REPOS_OVERRIDE. PPM intermittently times out,
-        # which hard-fails the renv bootstrap/restore below and forces a manual
-        # CI re-run. Append a plain CRAN mirror so renv falls back to it (source
-        # builds, only when PPM is unreachable). $RSPM is the PPM binary URL
-        # just exported by setup-r, so the runner's distro codename stays in sync.
-        run: echo "RENV_CONFIG_REPOS_OVERRIDE=PPM=${RSPM};CRAN=https://cloud.r-project.org" >> "$GITHUB_ENV"
-
-      - name: Install R dependencies
-        uses: r-lib/actions/setup-renv@f9a764fea8d5c63df6ef9a5c7795bf7deb5d7e05 # v2
-        env:
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Update locked dependencies
         run: make update-deps
         env:
-          # authenticated GitHub API calls by renv (GITHUB_PAT) and pinact
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+          # authenticated GitHub API calls by pinact
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Bump oldest supported dependencies

@@ -41,7 +41,8 @@ from warnings import warn
 import jax
 import jax.numpy as jnp
 from equinox import Module, error_if, field, tree_at
-from jax import Device, debug_nans, device_put, lax, make_mesh, random, tree
+from jax import Device, debug_nans, device_put, lax, make_mesh, random, tree, vmap
+from jax.nn import softmax
 from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr, ndtri
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
@@ -56,7 +57,6 @@ from bartz.grove import (
     TreesTrace,
     check_trace,
     evaluate_forest,
-    forest_depth_distr,
     format_tree,
     points_per_node_distr,
 )
@@ -67,13 +67,14 @@ from bartz.mcmcloop import (
     MainTrace,
     MainTraceWithTrainPred,
     RunMCMCResult,
+    VarprobInState,
     compute_varcount,
     evaluate_trace,
     make_print_callback,
     make_tqdm_callback,
     run_mcmc,
 )
-from bartz.mcmcstep import DiagWishart, OutcomeType, Wishart, make_p_nonterminal
+from bartz.mcmcstep import DiagWishart, Forest, OutcomeType, Wishart, make_p_nonterminal
 from bartz.mcmcstep._axes import (
     chain_to_axis,
     chain_vmap_axes,
@@ -89,6 +90,7 @@ from bartz.mcmcstep._state import (
     init,
     inv_via_chol_with_gersh,
     leaf_partition_spec,
+    outcome_target,
 )
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
 
@@ -507,6 +509,8 @@ class Bart(Module):
             sigma_init=sigma_init,
             error_scale=error_scale,
         )
+
+        check_augment_depth(sparse, maxdepth, x_train.shape[0])
 
         # split the user-provided seed into an mcmc key and a binner key
         if not is_key(seed):
@@ -930,7 +934,7 @@ class Bart(Module):
     @cached_property
     def varprob(self) -> Float32[Array, 'ndpost p']:
         """Posterior samples of the probability of choosing each predictor for a decision rule."""
-        return varprob(self._mcmc_state.forest.max_split, self._main_trace)
+        return varprob(self._mcmc_state.forest, self._main_trace)
 
     @cached_property
     def varprob_mean(self) -> Float32[Array, ' p']:
@@ -1149,15 +1153,6 @@ class Bart(Module):
         """
         return compare_resid(self._mcmc_state)
 
-    def _depth_distr(self) -> Int32[Array, '*num_chains n_save d']:
-        """Histogram of tree depths for each state of the trees.
-
-        Returns
-        -------
-        A matrix where each row contains a histogram of tree depths.
-        """
-        return depth_distr(self._main_trace)
-
     def _points_per_node_distr(
         self, node_type: Literal['leaf', 'leaf-parent']
     ) -> Int32[Array, '*num_chains n_save n_plus_1']:
@@ -1266,6 +1261,17 @@ def check_length(
     _, m = x.shape
     if n != m:
         msg = f'`{a_name}` has {n} datapoints, but `{x_name}` has {m}.'
+        raise ValueError(msg)
+
+
+def check_augment_depth(sparse: SparseConfig, maxdepth: int, p: int) -> None:
+    # the augmentation tracks min(2 (maxdepth - 1), p) variables as bits of a
+    # uint32
+    if sparse.enabled and sparse.augment and min(2 * (maxdepth - 1), p) > 32:
+        msg = (
+            f'maxdepth={maxdepth} > 17 with p={p} > 32 predictors is not '
+            'supported with `SparseConfig(augment=True)`, set `augment=False`'
+        )
         raise ValueError(msg)
 
 
@@ -1762,19 +1768,24 @@ def get_accept(
 
 
 @jit
-def varprob(
-    max_split: UInt[Array, ' p'], trace: MainTrace
-) -> Float32[Array, 'ndpost p']:
+def varprob(forest: Forest, trace: MainTrace) -> Float32[Array, 'ndpost p']:
     """Posterior samples of predictor selection probability, chains concatenated."""
+    max_split = forest.max_split
     p = max_split.size
+    ndpost = trace.grow_prop_count.size
     varprob = trace.varprob
     if varprob is None:
-        ndpost = trace.grow_prop_count.size
         peff = jnp.count_nonzero(max_split)
         out = jnp.where(max_split, 1 / peff, 0)
         return jnp.broadcast_to(out, (ndpost, p))
-    varprob = chain_to_axis(varprob, chain_vmap_axes(trace).varprob)
-    return varprob.reshape(-1, p)
+    elif isinstance(varprob, VarprobInState):
+        log_s = forest.sparsity.log_s
+        assert log_s is not None
+        out = softmax(log_s, where=max_split.astype(bool))
+        return jnp.broadcast_to(out, (ndpost, p))
+    else:
+        varprob = chain_to_axis(varprob, chain_vmap_axes(trace).varprob)
+        return varprob.reshape(-1, p)
 
 
 def _trees_chain_first(obj: TreeHeaps) -> TreesTrace:
@@ -1824,34 +1835,17 @@ def compare_resid(
     """Re-compute residuals to compare them with the updated ones."""
     chain_axes = chain_vmap_axes(state)
     resid1 = chain_to_axis(state.resid * state.resid_unit[..., None], chain_axes.resid)
-    z = chain_to_axis(state.z, chain_axes.z) if state.z is not None else None
 
     forests = _trees_chain_first(state.forest)
     trees = evaluate_forest(state.X, forests, sum_batch_axis=-1)
 
-    if state.binary_indices is not None:
-        # mixed binary-continuous: z has only binary rows, y has all rows
-        assert z is not None
-        ref = jnp.broadcast_to(state.y, resid1.shape)
-        ref = ref.at[..., state.binary_indices, :].set(z)
-    elif z is not None:
-        ref = z
+    if state.has_chains:
+        ref = vmap(outcome_target, in_axes=(chain_axes,))(state)
     else:
-        ref = state.y
+        ref = outcome_target(state)
     resid2 = ref - (trees + state.forest.offset[..., None])
 
     return resid1, resid2
-
-
-@jit
-def depth_distr(trace: MainTrace) -> Int32[Array, '*num_chains n_save d']:
-    """Histogram of tree depths for each state of the trees."""
-    split_tree = chain_to_axis(trace.split_tree, chain_vmap_axes(trace).split_tree)
-    out: Int32[Array, '*chains samples d']
-    out = forest_depth_distr(split_tree)
-    if out.ndim < 3:
-        out = out[None, :, :]
-    return out
 
 
 @jit(static_argnames='node_type')

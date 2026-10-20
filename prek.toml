@@ -36,8 +36,7 @@ hooks = [
     { id = "detect-private-key", priority = "checks" },
     { id = "end-of-file-fixer" },
     { id = "mixed-line-ending", args = ["--fix=lf"] },
-    # renv edits renv/activate.R automatically, with trailing whitespace
-    { id = "trailing-whitespace", exclude = '^renv/activate\.R$' },
+    { id = "trailing-whitespace" },
     { id = "no-commit-to-branch", priority = "checks" },
 ]
 

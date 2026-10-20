@@ -143,7 +143,7 @@ class BurninTrace(Trace):
             mesh=state.config.mesh,
             error_cov_inv=state.error_cov_inv.value,
             leaf_prior_cov_inv=state.forest.leaf_prior_cov_inv.value,
-            theta=state.forest.theta,
+            theta=state.forest.sparsity.theta,
             grow_prop_count=state.forest.grow_prop_count,
             grow_acc_count=state.forest.grow_acc_count,
             prune_prop_count=state.forest.prune_prop_count,
@@ -151,6 +151,14 @@ class BurninTrace(Trace):
             log_likelihood=state.forest.log_likelihood,
             log_trans_prior=state.forest.log_trans_prior,
         )
+
+
+@serializable
+class VarprobInState(Module):
+    """Marks a constant `MainTrace.varprob`, not saved in the trace.
+
+    Compute it from `bartz.mcmcstep.Sparsity.log_s` in the MCMC state instead.
+    """
 
 
 @serializable
@@ -180,21 +188,25 @@ class MainTrace(BurninTrace):
     """The storage unit of the leaf values. Predictions are
     ``offset + leaf_unit * (sum of leaf values over trees)``."""
 
-    varprob: Float32[Array, '*chains_and_samples p'] | None = field(
+    varprob: Float32[Array, '*chains_and_samples p'] | VarprobInState | None = field(
         chains=CHAIN_AXIS, samples=0
     )
     """The probability of choosing each variable for a decision rule,
-    normalized over variables, or `None` when variable selection is off."""
+    normalized over variables, `None` when variable selection is off, or
+    `VarprobInState` when it is constant."""
 
     @classmethod
     def from_state(cls, state: State) -> 'MainTrace':
         """Create a single-item main trace from a MCMC state."""
         # compute varprob
-        log_s = state.forest.log_s
+        sparsity = state.forest.sparsity
+        log_s = sparsity.log_s
         if log_s is None:
             varprob = None
+        elif sparsity.theta is None:
+            varprob = VarprobInState()
         else:
-            chain_axis = chain_vmap_axes(state.forest).log_s
+            chain_axis = chain_vmap_axes(state.forest).sparsity.log_s
             p_axis = chainful_axis(0, chain_axis)  # (p,)
             where = state.forest.max_split.astype(bool)
             if chain_axis is not None:

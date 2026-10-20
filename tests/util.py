@@ -25,14 +25,14 @@
 """Functions intended to be shared across the test suite."""
 
 import math
-from collections.abc import Generator, Sequence
-from contextlib import contextmanager
+from collections.abc import Callable, Sequence
 from functools import partial
 from operator import ge, le
 from os import getpid, kill
-from signal import SIGINT
+from signal import SIGINT, signal
 from threading import Event, Thread
 from time import monotonic
+from types import FrameType
 from typing import Any, TypeVar
 
 import jax
@@ -175,6 +175,23 @@ def chain_deviation_norms(
     return dev_norm, ref_norm
 
 
+ONES_NORMS = {
+    None: lambda n, m: math.sqrt(n * m),
+    2: lambda n, m: math.sqrt(n * m),
+    'fro': lambda n, m: math.sqrt(n * m),
+    'nuc': lambda n, m: math.sqrt(n * m),
+    1: lambda n, _: n,
+    math.inf: lambda _, m: m,
+}
+
+
+def ones_norm(shape: tuple[int, ...], ord: int | float | str | None) -> float:  # noqa: A002
+    """Compute the norm of an all-ones matrix, treating vectors as columns."""
+    n, m, *_ = (*shape, 1, 1)
+    assert len(shape) <= 2
+    return ONES_NORMS[ord](n, m)
+
+
 def assert_close_matrices(
     actual: Shaped[ArrayLike, '*shape'],
     desired: Shaped[ArrayLike, '*shape'],
@@ -202,14 +219,15 @@ def assert_close_matrices(
         Relative and absolute tolerances for the comparison. The closeness
         condition is:
 
-            ||actual - desired|| <= atol + rtol * ||desired||,
+            ||actual - desired|| <= atol * ||1|| + rtol * ||desired||,
 
         where the norm is the matrix 2-norm, i.e., the maximum (in absolute
-        value) singular value.
+        value) singular value, and 1 is the all-ones matrix. So a constant
+        error is at the threshold when it is equal to `atol`.
     tozero
         If True, use the following codition instead:
 
-            ||actual|| <= atol + rtol * ||desired||
+            ||actual|| <= atol * ||1|| + rtol * ||desired||
 
         So `actual` is compared to zero, and `desired` is only used as a
         reference to set the threshold.
@@ -290,7 +308,7 @@ def assert_close_matrices_given_norms(
     dnorm
         The norm of ``desired``.
     shape
-        The shape of the compared matrices, used in the error message.
+        The shape of the compared matrices, used to scale `atol`.
     rtol
     atol
     tozero
@@ -314,15 +332,17 @@ def assert_close_matrices_given_norms(
         op = le
 
     ratio = adnorm / dnorm if dnorm else np.nan
+    onorm = ones_norm(shape, ord)
 
     msg = f"""{err_msg}\
 matrices actual and {ref} are not {cond} enough in {ord}-norm
 matrix shape: {shape}
 norm(desired) = {dnorm:.2g}
-norm({expr}) = {adnorm:.2g}  (atol = {atol:.2g})
+norm({expr}) = {adnorm:.2g}
+norm({expr}) / norm(1) = {adnorm / onorm if onorm else np.nan:.2g}  (atol = {atol:.2g})
 ratio = {ratio:.2g}  (rtol = {rtol:.2g})"""
 
-    assert op(adnorm, atol + rtol * dnorm), msg
+    assert op(adnorm, atol * onorm + rtol * dnorm), msg
 
 
 def assert_different_matrices(
@@ -424,18 +444,33 @@ class PeriodicSigintTimer:
         print(f'[PeriodicSigintTimer] stopped after {self.sent} SIGINT(s)')
 
 
-@contextmanager
-def periodic_sigint(
-    *, first_after: float, interval: float
-) -> Generator[PeriodicSigintTimer, None, None]:
-    """Context manager to periodically send SIGINT to the main thread."""
+def call_with_periodic_sigint(
+    func: Callable[[], object], *, first_after: float, interval: float
+) -> None:
+    """Call `func` while periodically sending SIGINT to the main thread.
+
+    SIGINT raises `KeyboardInterrupt` only while `func` is running. Afterwards
+    it is ignored, so a late ^C can not skip stopping the timer.
+    """
+
+    def body() -> None:
+        func()
+
+    def handler(_signum: int, frame: FrameType | None) -> None:
+        while frame is not None:  # pragma: no branch
+            if frame.f_code is body.__code__:
+                raise KeyboardInterrupt
+            frame = frame.f_back
+
     timer = PeriodicSigintTimer(first_after=first_after, interval=interval)
+    prev_handler = signal(SIGINT, handler)
     try:
         timer.start()
-        yield timer
+        body()
     finally:
         if timer._thread is not None:
             timer.cancel()
+        signal(SIGINT, prev_handler)
 
 
 def clipped_logit(

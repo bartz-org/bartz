@@ -157,11 +157,11 @@ class StatsAccumulator(Module):
         split_tree = chain_to_axis(forest.split_tree, chain_axis)
         prop_total = forest.split_tree.shape[num_trees_axis]
 
-        log_s = forest.log_s
+        log_s = forest.sparsity.log_s
         if log_s is None:
             peff = None
         else:
-            log_s = chain_to_axis(log_s, chain_vmap_axes(forest).log_s)
+            log_s = chain_to_axis(log_s, chain_vmap_axes(forest).sparsity.log_s)
             peff = StatsAccumulator._effective_predictors(log_s)
 
         return dict(
@@ -179,11 +179,11 @@ class StatsAccumulator(Module):
         split_tree = chain_to_axis(
             forest.split_tree, chain_vmap_axes(forest).split_tree
         )
-        log_s = forest.log_s
+        log_s = forest.sparsity.log_s
         if log_s is None:
             p = None
         else:
-            *_, p = chain_to_axis(log_s, chain_vmap_axes(forest).log_s).shape
+            *_, p = chain_to_axis(log_s, chain_vmap_axes(forest).sparsity.log_s).shape
         return dict(num_chains=state.num_chains(), max_leaves=split_tree.shape[-1], p=p)
 
     @staticmethod

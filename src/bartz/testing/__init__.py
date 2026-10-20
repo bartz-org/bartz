@@ -38,7 +38,8 @@ Data generation
 
 Distributions
 -------------
-Standardized distributions (mean 0, variance 1) for predictors and coefficients.
+Standardized distributions (symmetric about 0, variance 1) for predictors,
+coefficients and errors.
 
 .. autosummary::
     :toctree:
@@ -59,6 +60,17 @@ Distributions of the per-predictor importance scales (unit mean square).
     Constant
     Gamma
     SpikeSlab
+
+Correlation distributions
+-------------------------
+Distributions of the across-component error correlation matrix.
+
+.. autosummary::
+    :toctree:
+
+    CorrDistr
+    LKJ
+    Factor
 """
 
 # ruff: noqa: F401
@@ -72,9 +84,12 @@ from bartz.testing._dgp import (
     gen_params,
 )
 from bartz.testing._distr import (
+    LKJ,
     Constant,
+    CorrDistr,
     DiscreteUniform,
     Distr,
+    Factor,
     Gamma,
     Normal,
     ScaleDistr,

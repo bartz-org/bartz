@@ -37,16 +37,19 @@ from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jaxtyping import Array, Bool, Float, Key
 from numpy.testing import assert_array_less
-from scipy.stats import norm
+from scipy.stats import beta, ks_2samp, kstest, norm
 
 from bartz._jaxext import split
 from bartz._typing import kwdict
 from bartz.mcmcstep import OutcomeType
 from bartz.testing import (
     DGP,
+    LKJ,
     Constant,
+    CorrDistr,
     DiscreteUniform,
     Distr,
+    Factor,
     Gamma,
     Normal,
     Params,
@@ -104,14 +107,21 @@ def assert_mean_z(
     assert_z(jnp.mean(samples, axis=0), expected, se)
 
 
+def assert_cov_z(
+    a: Float[Array, 'reps ...'],
+    b: Float[Array, 'reps ...'],
+    expected: Float[Array, ''] | float,
+) -> None:
+    """Check via a z-test that `a` and `b` have covariance `expected` along axis 0."""
+    prod = (a - jnp.mean(a, axis=0)) * (b - jnp.mean(b, axis=0))
+    assert_mean_z(prod, expected)
+
+
 def assert_uncorrelated_z(
     a: Float[Array, 'reps ...'], b: Float[Array, 'reps ...']
 ) -> None:
     """Check via a z-test that `a` and `b` have zero covariance along axis 0."""
-    n_reps, *_ = a.shape
-    cov = jnp.mean((a - jnp.mean(a, axis=0)) * (b - jnp.mean(b, axis=0)), axis=0)
-    se = jnp.std(a, axis=0) * jnp.std(b, axis=0) / jnp.sqrt(n_reps)
-    assert_z(cov, 0.0, se)
+    assert_cov_z(a, b, 0.0)
 
 
 def assert_standardized(z: Float[Array, ' reps'], distr: Distr) -> None:
@@ -136,7 +146,7 @@ def generate_dgps(
     x_distr: Distr,
     gamma_distr: Distr,
     error_distr: Distr,
-    error_corr: Float[Array, 'k k'] | None,
+    error_corr_distr: CorrDistr | None,
 ) -> DGP:
     """Generate one dataset per random key (jitted, vmapped over keys)."""
     gen = partial(
@@ -148,7 +158,7 @@ def generate_dgps(
         x_distr=x_distr,
         gamma_distr=gamma_distr,
         error_distr=error_distr,
-        error_corr=error_corr,
+        error_corr_distr=error_corr_distr,
         **KWARGS,
     )
     return vmap(gen)(keys)
@@ -160,7 +170,7 @@ def dgps(keys: split, request: pytest.FixtureRequest) -> DGP:
 
     Indirectly parametrizable by a mapping with any of ``lambda_``,
     ``s_distr``, ``het_strength``, ``het_shape``, ``x_distr``, ``gamma_distr``,
-    ``error_distr`` and ``error_corr``.
+    ``error_distr`` and ``error_corr_distr``.
     """
     param: Mapping = getattr(request, 'param', None) or {}
     return generate_dgps(
@@ -172,19 +182,24 @@ def dgps(keys: split, request: pytest.FixtureRequest) -> DGP:
         x_distr=param.get('x_distr', Uniform()),
         gamma_distr=param.get('gamma_distr', DiscreteUniform(2)),
         error_distr=param.get('error_distr', Normal()),
-        error_corr=param.get('error_corr'),
+        error_corr_distr=param.get('error_corr_distr'),
     )
 
 
-def residuals(dgps: DGP) -> Float[Array, 'k reps_n']:
-    """Stack the per-component error residuals ``z - mu`` across all datasets."""
-    k = KWARGS['k']
-    return (dgps.z - dgps.mu).transpose(1, 0, 2).reshape(k, -1)
+def standardized_errors(dgps: DGP) -> Float[Array, 'reps k n']:
+    """Return the errors ``(z - mu) / sqrt(sigma2_eps)`` of homoskedastic `dgps`."""
+    return (dgps.z - dgps.mu) / jnp.sqrt(dgps.params.sigma2_eps[:, None, None])
+
+
+def error_corr(dgps: DGP) -> Float[Array, 'reps k k']:
+    """Return the sampled error correlation matrices ``R = L Lᵀ``."""
+    chol = nnone(dgps.params.error_chol)
+    return chol @ chol.mT
 
 
 def test_shapes_and_dtypes(keys: split) -> None:
     """Test that all DGP attributes have correct shapes and dtypes."""
-    dgp = gen_data(keys.pop(), lambda_=0.5, **KWARGS)
+    dgp = gen_data(keys.pop(), lambda_=0.5, error_corr_distr=LKJ(1.0), **KWARGS)
     n, p, k = KWARGS['n'], KWARGS['p'], KWARGS['k']
 
     floating_fields = {
@@ -208,6 +223,7 @@ def test_shapes_and_dtypes(keys: split) -> None:
         'params.sigma2_quad': (),
         'params.sigma2_eps': (),
         'params.offset': (),
+        'params.error_chol': (k, k),
     }
     for name, shape in floating_fields.items():
         field = attrgetter(name)(dgp)
@@ -223,6 +239,7 @@ def test_shapes_and_dtypes(keys: split) -> None:
     assert isinstance(dgp.params.A_distr, DiscreteUniform)
     assert isinstance(dgp.params.gamma_distr, DiscreteUniform)
     assert isinstance(dgp.params.s_distr, Constant)
+    assert isinstance(dgp.params.error_corr_distr, LKJ)
 
 
 def discrete_levels(m: int) -> Float[Array, ' m']:
@@ -255,6 +272,20 @@ class TestDistr:
     def test_ppf_moments(self, keys: split, distr: Distr) -> None:
         """`ppf` maps Uniform(0, 1) to standardized draws of the family."""
         assert_standardized(distr.ppf(random.uniform(keys.pop(), (REPS,))), distr)
+
+    def test_symmetric(self, keys: split, distr: Distr) -> None:
+        """The family is symmetric about 0.
+
+        `ppf` is odd around 1/2 on a grid avoiding the `DiscreteUniform` level
+        boundaries, and a sample matches an independent negated one.
+        """
+        u = (jnp.arange(1000) + 0.5) / 1000
+        x = distr.ppf(u)
+        assert_close_matrices(x, -x[::-1], rtol=1e-5)
+
+        a = distr.sample(keys.pop(), (REPS,))
+        b = distr.sample(keys.pop(), (REPS,))
+        assert ks_2samp(a, -b).pvalue > 1e-3
 
     def test_ppf_monotone(self, keys: split, distr: Distr) -> None:
         """`ppf` is non-decreasing."""
@@ -495,7 +526,7 @@ class TestSpikeSlab:
         distr = SpikeSlab(self.PI)
         s = distr.sample(keys.pop(), (REPS,))
         assert_close_matrices(
-            jnp.unique(s), jnp.array([0.0, 1 / jnp.sqrt(self.PI)]), rtol=1e-6, atol=1e-6
+            jnp.unique(s), jnp.array([0.0, 1 / jnp.sqrt(self.PI)]), rtol=1e-6, atol=1e-7
         )
         assert_mean_z(s**2, 1.0)
         assert_mean_z(s**4, distr.fourth_moment)
@@ -635,12 +666,23 @@ WHICH_PARAMS = (
 # Heteroskedastic DGP configurations: scalar het on the dense DGP, vector het
 # on the sparse one (covering the het x sparsity interaction), and vector het
 # with Normal projections (covering the kurt_gamma = 3 branch of ``var_v``).
+# The first two also sample the error correlation, which must not alter any
+# of the marginal moments.
 HET_DGPS = (
-    {'het_shape': 'scalar', 'het_strength': HET_STRENGTH},
-    {'het_shape': 'vector', 'het_strength': HET_STRENGTH, 's_distr': Gamma(SPARSITY)},
+    {
+        'het_shape': 'scalar',
+        'het_strength': HET_STRENGTH,
+        'error_corr_distr': Factor(1, 0.8),
+    },
+    {
+        'het_shape': 'vector',
+        'het_strength': HET_STRENGTH,
+        's_distr': Gamma(SPARSITY),
+        'error_corr_distr': LKJ(1.0),
+    },
     {'het_shape': 'vector', 'het_strength': HET_STRENGTH, 'gamma_distr': Normal()},
 )
-HET_DGPS_IDS = ('het_scalar', 'het_vector_sparse', 'het_vector_normal_gamma')
+HET_DGPS_IDS = ('het_scalar_factor', 'het_vector_sparse_lkj', 'het_vector_normal_gamma')
 
 # Cases for the marginal-variance tests: homoskedastic (dense and sparse) over
 # every field, plus the heteroskedastic DGPs, which must leave the ``z`` and
@@ -740,35 +782,167 @@ def test_variance_relationships(dgps: DGP) -> None:
     assert jnp.all(dgps.params.sigma2_pop >= dgps.params.sigma2_eps)
 
 
-# A fixed positive-definite correlation matrix to exercise the error copula
-# (k == 3 == KWARGS['k']); the off-diagonals are deliberately asymmetric in sign.
-ERROR_CORR = jnp.array([[1.0, 0.5, -0.3], [0.5, 1.0, 0.2], [-0.3, 0.2, 1.0]])
+# Cases for the cross-component covariance: the coupling extremes and midpoint
+# on the default DGP, plus sampled error correlations, alone and combined with
+# non-Normal errors, sparsity and vector heteroskedasticity.
+CROSS_COV_CASES = (
+    pytest.param({'lambda_': 0.0}, id='lambda0'),
+    pytest.param({'lambda_': 0.5}, id='lambda0.5'),
+    pytest.param({'lambda_': 1.0}, id='lambda1'),
+    pytest.param({'lambda_': 0.5, 'error_corr_distr': LKJ(1.0)}, id='lkj'),
+    pytest.param(
+        {
+            'lambda_': 0.5,
+            'error_corr_distr': Factor(1, 0.9),
+            'error_distr': Uniform(),
+            's_distr': Gamma(SPARSITY),
+            'het_shape': 'vector',
+            'het_strength': HET_STRENGTH,
+        },
+        id='factor_uniform_sparse_het',
+    ),
+)
+
+
+@pytest.mark.parametrize('dgps', CROSS_COV_CASES, indirect=True)
+@pytest.mark.parametrize('which', ['mu', 'z'])
+def test_cross_covariance(dgps: DGP, which: str) -> None:
+    """``Cov[Z_c, Z_c'] = Cov[mu_c, mu_c'] = lambda (s2lin + s2quad + s2mean)``.
+
+    The error correlation, sampled per dataset, averages out across datasets.
+    """
+    samples = getattr(dgps, which)  # Shape: (REPS, K, N)
+    params = dgps.params
+    expected = nnone(params.lambda_) * (
+        params.sigma2_lin + params.sigma2_quad + params.sigma2_mean
+    )
+    _, k, _ = samples.shape
+    for c in range(k):
+        for c1 in range(c + 1, k):
+            assert_cov_z(samples[:, c, :], samples[:, c1, :], expected[0])
+
+
+CORR_K: int = 4  # number of components to test `CorrDistr` in isolation
+CORR_DISTRS = (
+    pytest.param(LKJ(1.0), id='lkj1'),
+    pytest.param(LKJ(0.5), id='lkj0.5'),
+    pytest.param(LKJ(4.0), id='lkj4'),
+    pytest.param(Factor(1, 0.8), id='factor1'),
+    pytest.param(Factor(3, 0.6), id='factor3'),
+)
+
+
+@partial(jit, static_argnames=('k',))
+def sample_corr_chols(
+    keys: Key[Array, ' reps'], distr: CorrDistr, k: int
+) -> Float[Array, 'reps k k']:
+    """Sample one Cholesky factor per key."""
+    return vmap(lambda key: distr.sample_chol(key, k))(keys)
+
+
+class TestCorrDistr:
+    """Test the correlation families in isolation."""
+
+    @pytest.fixture(params=CORR_DISTRS)
+    def distr(self, request: pytest.FixtureRequest) -> CorrDistr:
+        """Yield each correlation family."""
+        return request.param
+
+    @pytest.fixture
+    def chols(self, keys: split, distr: CorrDistr) -> Float[Array, 'reps k k']:
+        """Sample `REPS` Cholesky factors of size `CORR_K`."""
+        return sample_corr_chols(keys.pop(REPS), distr, CORR_K)
+
+    @staticmethod
+    def offdiag(chols: Float[Array, 'reps k k']) -> Float[Array, 'reps pairs']:
+        """Return the strictly lower-triangular entries of ``R = L Lᵀ``."""
+        corr = chols @ chols.mT
+        i, j = jnp.tril_indices(CORR_K, -1)
+        return corr[:, i, j]
+
+    def test_valid_cholesky(self, chols: Float[Array, 'reps k k']) -> None:
+        """The factors are lower-triangular with positive diagonal and give unit-diagonal R."""
+        assert chols.shape == (REPS, CORR_K, CORR_K)
+        assert_array_equal(jnp.triu(chols, 1), 0, strict=False)
+        assert jnp.all(jnp.diagonal(chols, axis1=1, axis2=2) > 0)
+
+        # check chol @ chol.mT is unit diagonal
+        norms = jnp.sum(jnp.square(chols), axis=-1)
+        assert_close_matrices(norms, jnp.ones_like(norms), rtol=1e-6)
+
+    def test_offdiag_moments(
+        self, chols: Float[Array, 'reps k k'], distr: CorrDistr
+    ) -> None:
+        """The off-diagonal entries have zero odd moments and variance `offdiag_var`."""
+        r = self.offdiag(chols)
+        assert_mean_z(r, 0.0)
+        if isinstance(distr, Factor) and distr.rank == 1:
+            # degenerate z-test: the squares are constant
+            var = jnp.full_like(r, distr.offdiag_var(CORR_K))
+            assert_close_matrices(r**2, var, rtol=1e-5)
+        else:
+            assert_mean_z(r**2, distr.offdiag_var(CORR_K))
+        assert_mean_z(r**3, 0.0)
+
+    def test_offdiag_marginal(
+        self, chols: Float[Array, 'reps k k'], distr: CorrDistr
+    ) -> None:
+        """Each off-diagonal entry follows its exact (scaled) Beta marginal.
+
+        For `LKJ`, ``(R + 1) / 2 ~ Beta(eta - 1 + k/2, eta - 1 + k/2)``. For
+        `Factor`, ``R / tau`` is the dot product of two independent
+        uniform unit vectors in dimension ``rank``: random signs at rank 1,
+        ``(t + 1) / 2 ~ Beta((rank - 1) / 2, (rank - 1) / 2)`` otherwise.
+        """
+        r = self.offdiag(chols)
+        if isinstance(distr, LKJ):
+            a = distr.eta - 1 + CORR_K / 2
+        else:
+            assert isinstance(distr, Factor)
+            r /= distr.tau
+            a = (distr.rank - 1) / 2
+        if a == 0:
+            assert_close_matrices(jnp.abs(r), jnp.ones_like(r), rtol=1e-6)
+        else:
+            for t in r.T:
+                result = kstest((t + 1) / 2, beta(a, a).cdf)
+                assert result.pvalue > ALPHA
+
+    def test_lkj_eta_positive(self, keys: split) -> None:
+        """`LKJ` with ``eta <= 0`` raises."""
+        with pytest.raises(EQX_ERRORS, match='eta must be > 0'):
+            block_until_ready(LKJ(0.0).sample_chol(keys.pop(), CORR_K))
+
+    @pytest.mark.parametrize('tau', [-0.1, 1.0])
+    def test_factor_tau_range(self, keys: split, tau: float) -> None:
+        """`Factor` with `tau` outside ``[0, 1)`` raises."""
+        with pytest.raises(EQX_ERRORS, match='tau must be in'):
+            block_until_ready(Factor(1, tau).sample_chol(keys.pop(), CORR_K))
+
+    def test_factor_rank_positive(self) -> None:
+        """`Factor` with ``rank < 1`` raises at construction."""
+        with pytest.raises(ValueError, match='rank must be >= 1'):
+            Factor(0, 0.5)
 
 
 class TestErrorCorrelation:
     """Test the across-component error correlation (Gaussian copula)."""
 
     def test_default_is_independent(self, keys: split) -> None:
-        """Without `error_corr` no error Cholesky factor is stored."""
+        """Without `error_corr_distr` no error Cholesky factor is stored."""
         dgp = gen_data(keys.pop(), lambda_=0.5, **KWARGS)
+        assert dgp.params.error_corr_distr is None
         assert dgp.params.error_chol is None
 
-    def test_cholesky_factors_correlation(self, keys: split) -> None:
-        """`error_corr` yields a (k, k) lower-triangular factor with ``L Lᵀ == R``."""
-        k = KWARGS['k']
-        dgp = gen_data(keys.pop(), lambda_=0.5, error_corr=ERROR_CORR, **KWARGS)
-        chol = nnone(dgp.params.error_chol)
-        assert chol.shape == (k, k)
-        assert jnp.all(jnp.triu(chol, 1) == 0)  # lower-triangular
-        assert_close_matrices(chol @ chol.T, ERROR_CORR, rtol=1e-6)
-
     def test_identity_matches_independent(self, keys: split) -> None:
-        """``error_corr = I`` reproduces the independent-error outcome."""
-        k = KWARGS['k']
+        """A ``tau=0`` `Factor` (``R = I``) reproduces the independent errors."""
         key = keys.pop()
         indep = gen_data(key, lambda_=0.5, **KWARGS)
         ident = gen_data(
-            random.clone(key), lambda_=0.5, error_corr=jnp.eye(k), **KWARGS
+            random.clone(key), lambda_=0.5, error_corr_distr=Factor(1, 0.0), **KWARGS
+        )
+        assert_close_matrices(
+            nnone(ident.params.error_chol), jnp.eye(KWARGS['k']), rtol=1e-6
         )
         # on gpu the identity-correlation path goes through a matmul that the
         # independent path skips, so the two diverge by float noise
@@ -776,26 +950,23 @@ class TestErrorCorrelation:
         assert_close_matrices(ident.z, indep.z, rtol=rtol)
         assert_close_matrices(ident.y, indep.y, rtol=rtol)
 
-    def test_normalized_unconditionally(self, keys: split) -> None:
-        """A covariance and its correlation give the same errors (unit-diagonal norm)."""
-        scale = jnp.array([2.0, 3.0, 4.0])
-        cov = ERROR_CORR * scale[:, None] * scale[None, :]
-        key = keys.pop()
-        corr = gen_data(key, lambda_=0.5, error_corr=ERROR_CORR, **KWARGS)
-        scaled = gen_data(random.clone(key), lambda_=0.5, error_corr=cov, **KWARGS)
-        assert_close_matrices(scaled.z, corr.z, rtol=1e-5)
-
     @pytest.mark.parametrize(
-        'dgps', [{'error_corr': ERROR_CORR}], indirect=True, ids=['error_corr']
+        'dgps', [{'error_corr_distr': LKJ(1.0)}], indirect=True, ids=['lkj']
     )
     def test_realized_second_moments(self, dgps: DGP) -> None:
-        """The sampled errors realize `error_corr` and keep marginal variance sigma2_eps."""
-        resid = residuals(dgps)  # (k, REPS*N)
-        assert_close_matrices(jnp.corrcoef(resid), ERROR_CORR, rtol=0.02)
-        var = jnp.var(resid, axis=1)
-        assert_close_matrices(
-            var, jnp.full(KWARGS['k'], KWARGS['sigma2_eps']), rtol=0.02
-        )
+        """The errors have unit variance and correlation ``R`` given the sampled ``R``.
+
+        Given ``R`` the error products are i.i.d. across datapoints, so their
+        deviations from ``R`` have mean 0 over all datasets and datapoints.
+        """
+        eps = standardized_errors(dgps)  # (REPS, k, N)
+        corr = error_corr(dgps)
+        k = KWARGS['k']
+        for c in range(k):
+            assert_mean_z(jnp.ravel(eps[:, c, :] ** 2), 1.0)
+            for c1 in range(c + 1, k):
+                dev = eps[:, c, :] * eps[:, c1, :] - corr[:, c, c1, None]
+                assert_mean_z(jnp.ravel(dev), 0.0)
 
 
 class TestErrorMarginal:
@@ -821,23 +992,34 @@ class TestErrorMarginal:
 
     @pytest.mark.parametrize(
         'dgps',
-        [{'error_distr': Uniform(), 'error_corr': ERROR_CORR}],
+        [{'error_distr': Uniform(), 'error_corr_distr': LKJ(1.0)}],
         indirect=True,
-        ids=['uniform_corr'],
+        ids=['uniform_lkj'],
     )
     def test_copula_correlation_is_attenuated(self, dgps: DGP) -> None:
-        """Uniform marginals + `error_corr` realize the copula's Pearson correlation.
+        """Uniform marginals realize the copula's Pearson correlation.
 
         For Uniform margins the Gaussian copula gives the exact Spearman relation
-        ``(6 / pi) arcsin(R / 2)``, an attenuation of `error_corr` toward 0 that
-        keeps the sign (`Normal` margins instead recover `R` exactly).
+        ``(6 / pi) arcsin(R / 2)``, an attenuation of ``R`` toward 0 that keeps
+        the sign (`Normal` margins instead recover ``R`` exactly). As in
+        `TestErrorCorrelation.test_realized_second_moments`, the deviations of
+        the error products from it have mean 0.
         """
-        resid = residuals(dgps)  # (k, REPS*N)
-        expected = 6 / jnp.pi * jnp.arcsin(ERROR_CORR / 2)
-        assert_close_matrices(jnp.corrcoef(resid), expected, rtol=0.02)
+        eps = standardized_errors(dgps)  # (REPS, k, N)
+        expected = 6 / jnp.pi * jnp.arcsin(error_corr(dgps) / 2)
+        k = KWARGS['k']
+        for c in range(k):
+            for c1 in range(c + 1, k):
+                dev = eps[:, c, :] * eps[:, c1, :] - expected[:, c, c1, None]
+                assert_mean_z(jnp.ravel(dev), 0.0)
 
 
-@pytest.mark.parametrize('dgps', [{'lambda_': 0.0}], indirect=True, ids=['lambda0'])
+@pytest.mark.parametrize(
+    'dgps',
+    [{'lambda_': 0.0}, {'lambda_': 0.0, 'error_corr_distr': LKJ(1.0)}],
+    indirect=True,
+    ids=['lambda0', 'lambda0_lkj'],
+)
 @pytest.mark.parametrize(
     'which',
     [
@@ -851,10 +1033,11 @@ class TestErrorMarginal:
     ],
 )
 def test_rows_independent(dgps: DGP, which: str) -> None:
-    """Test that rows are independent when lambda_=0.
+    """Test that rows are uncorrelated when lambda_=0.
 
     ``params.beta_separate`` does not depend on ``lambda_``, so its check
-    covers every coupling.
+    covers every coupling. A sampled error correlation leaves ``y``
+    uncorrelated across datasets.
     """
     samples = attrgetter(which)(dgps)  # Shape: (REPS, K, N or P)
     assert_uncorrelated_z(samples[:, 0, :], samples[:, 1, :])
@@ -870,7 +1053,7 @@ def test_rows_identical(dgps: DGP, which: str) -> None:
     diffs = jnp.max(
         jnp.abs(samples[:, 0:1, :] - samples), axis=(1, 2)
     )  # Shape: (REPS,)
-    assert_close_matrices(diffs, jnp.zeros_like(diffs), atol=1e-5)
+    assert_close_matrices(diffs, jnp.zeros_like(diffs), atol=1e-7)
 
 
 class TestInteractionPattern:
@@ -986,17 +1169,11 @@ def test_lambda_forbidden_when_univariate(keys: split) -> None:
         gen_data(keys.pop(), lambda_=0.5, **kw)
 
 
-def test_error_corr_forbidden_when_univariate(keys: split) -> None:
-    """`error_corr` with `k=None` raises `ValueError`."""
+def test_error_corr_distr_forbidden_when_univariate(keys: split) -> None:
+    """`error_corr_distr` with `k=None` raises `ValueError`."""
     kw: kwdict = dict(KWARGS, k=None)
-    with pytest.raises(ValueError, match='error_corr requires a multivariate'):
-        gen_data(keys.pop(), lambda_=None, error_corr=jnp.eye(2), **kw)
-
-
-def test_error_corr_wrong_shape(keys: split) -> None:
-    """`error_corr` whose shape is not `(k, k)` raises `ValueError`."""
-    with pytest.raises(ValueError, match='error_corr has shape'):
-        gen_data(keys.pop(), lambda_=0.5, error_corr=jnp.eye(2), **KWARGS)
+    with pytest.raises(ValueError, match='error_corr_distr requires a multivariate'):
+        gen_data(keys.pop(), lambda_=None, error_corr_distr=LKJ(1.0), **kw)
 
 
 def test_m_too_small(keys: split) -> None:
@@ -1045,12 +1222,14 @@ def test_split(
     """
     lambda_ = None if k is None else 0.5
     het_strength = None if het_shape is None else HET_STRENGTH
+    error_corr_distr = None if k is None else LKJ(1.0)
     kw: kwdict = dict(KWARGS, k=k)
     dgp = gen_data(
         keys.pop(),
         lambda_=lambda_,
         het_strength=het_strength,
         het_shape=het_shape,
+        error_corr_distr=error_corr_distr,
         **kw,
     )
     n_train = kw['n'] // 3
@@ -1348,7 +1527,7 @@ class TestHeteroskedasticity:
         excess = ((kurt_eta - 3) * big_lambda + cross) / p + 3 * (
             1 - lambda_
         ) ** 2 * r * (k - r) / p**2
-        assert_close_matrices(nnone(dgp.params.var_v), rho**2 * (2 + excess), rtol=1e-6)
+        assert_allclose(nnone(dgp.params.var_v), rho**2 * (2 + excess), rtol=1e-6)
 
     def test_stream_invariance_with_homoskedastic(self, keys: split) -> None:
         """Het leaves the mean/predictor streams intact and only rescales the noise."""

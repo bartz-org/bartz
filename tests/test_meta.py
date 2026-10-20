@@ -29,13 +29,20 @@ from types import SimpleNamespace
 
 import numpy
 import pytest
-from jax import debug_nans, default_backend, device_get, device_put, jit
+from jax import debug_nans, default_backend, device_get, device_put, jit, random
 from jax import numpy as jnp
 from jaxtyping import Array, Key, Shaped
+from numpy.testing import assert_array_less
 
 from bartz._jaxext import split
 from tests import util
-from tests.util import assert_allclose, assert_array_equal, rerun_on_gpu
+from tests.util import (
+    assert_allclose,
+    assert_array_equal,
+    assert_close_matrices,
+    rerun_on_gpu,
+    rhat_rank,
+)
 
 
 def test_assert_allclose_rejects_non_scalars() -> None:
@@ -181,3 +188,39 @@ def test_exact_power_of_2(dt_exp: jnp.dtype, dt_base: type[int] | type[float]) -
     """Check that `2 ** jax_array` is exact."""
     x = dt_base(2) ** jnp.arange(100, dtype=dt_exp)
     assert_array_equal(x, jnp.round(x))
+
+
+@pytest.mark.parametrize('split', [True, False])
+def test_rhat_rank(keys: split, split: bool) -> None:
+    """Test the rank-normalized (split-)Rhat port from arviz_stats."""
+    chains, divergent_chains = random.normal(keys.pop(), (2, 2, 1000, 10))
+    mean_offset = 10 * jnp.arange(len(chains))
+    divergent_chains += mean_offset[:, None, None]
+    rhat = rhat_rank(chains, split=split)
+    rhat_divergent = rhat_rank(divergent_chains, split=split)
+    assert rhat.shape == (10,)
+    assert rhat_divergent.shape == (10,)
+    assert_array_less(rhat, 1.01)
+    assert_array_less(1.3, rhat_divergent)
+
+
+@pytest.mark.parametrize('split', [True, False])
+def test_rhat_rank_axes(keys: split, split: bool) -> None:
+    """Test ``rhat_rank`` honors ``chain_axis`` and ``draw_axis``."""
+    chains = random.normal(keys.pop(), (2, 1000, 5))
+    reference = rhat_rank(chains, split=split)
+    transposed = jnp.moveaxis(chains, (0, 1), (2, 0))
+    relocated = rhat_rank(transposed, split=split, chain_axis=2, draw_axis=0)
+    assert_close_matrices(relocated, reference, rtol=1e-12)
+
+
+def test_rhat_rank_shape_errors() -> None:
+    """Test ``rhat_rank`` rejects undersized chain/draw dimensions."""
+    with pytest.raises(ValueError, match='2 chains'):
+        rhat_rank(jnp.zeros((1, 200)), split=True)
+    with pytest.raises(ValueError, match='4 draws'):
+        rhat_rank(jnp.zeros((2, 3)), split=True)
+    with pytest.raises(ValueError, match='2 chains'):
+        rhat_rank(jnp.zeros((1, 200)), split=False)
+    with pytest.raises(ValueError, match='2 draws'):
+        rhat_rank(jnp.zeros((2, 1)), split=False)

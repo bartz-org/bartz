@@ -62,16 +62,14 @@ def chain_vmap_axes(x: PyTree[EquinoxModule | Any, 'T']) -> PyTree[int | None, '
         A pytree. Subpytrees that are Module attributes marked with
         ``field(chains=<int>)`` are considered to have a chain axis at that
         index. `x` (or one of its subtrees) must define a `has_chains` property
-        (see `get_has_chains`).
+        (see `get_has_chains`). A nested Module defining `has_chains` overrides
+        it for its own subtree.
 
     Returns
     -------
-    A pytree with the same structure as `x`, with each leaf set to the chain axis index declared by its owning ``field(chains=...)`` marker, normalized against the leaf's ``ndim`` (so the returned indices are non-negative), or `None` for unmarked leaves. If `has_chains` is `False`, every leaf is `None`.
+    A pytree with the same structure as `x`, with each leaf set to the chain axis index declared by its owning ``field(chains=...)`` marker, normalized against the leaf's ``ndim`` (so the returned indices are non-negative), or `None` for unmarked leaves or where `has_chains` is `False`.
     """
-    if not get_has_chains(x):
-        return _find_metadata(x, 'chains', marker_value=_none_marker)
-
-    return _find_metadata(x, 'chains')
+    return _find_metadata(x, 'chains', has_chains=get_has_chains(x))
 
 
 def _none_marker(leaf: object, raw: int) -> None:  # noqa: ARG001
@@ -262,15 +260,24 @@ def _find_metadata(
     *,
     marker_value: Callable[[DummyArray, int], object] = _normalize_axis_for_leaf,
     default_value: object = None,
+    has_chains: bool | None = None,
 ) -> PyTree[Any, ' S ...']:
     """Walk `x` replacing marked subtrees with derived values.
 
     For each Module field whose metadata contains `key`, the field's subtree
     is replaced by mapping ``marker_value(leaf, raw)`` over its leaves, where
     `raw` is the unnormalized metadata value; leaves outside any marked field
-    become `default_value`.
+    become `default_value`. If `has_chains` is set, it is updated by the
+    Modules that define a `has_chains` property, and where it is `False` the
+    marked leaves become `None`.
     """
     if _is_module(x):
+        if has_chains is not None:
+            has_chains = getattr(x, 'has_chains', has_chains)
+            if not has_chains:
+                marker_value = _none_marker
+            else:
+                marker_value = _normalize_axis_for_leaf
         args = []
         for f in fields(x):
             v = getattr(x, f.name)
@@ -288,7 +295,11 @@ def _find_metadata(
             else:
                 args.append(
                     _find_metadata(
-                        v, key, marker_value=marker_value, default_value=default_value
+                        v,
+                        key,
+                        marker_value=marker_value,
+                        default_value=default_value,
+                        has_chains=has_chains,
                     )
                 )
         # rebuild bypassing the (type-checked) __init__: the result is a
@@ -302,7 +313,11 @@ def _find_metadata(
     def get_axes(x: object) -> PyTree:
         if _is_module(x):
             return _find_metadata(
-                x, key, marker_value=marker_value, default_value=default_value
+                x,
+                key,
+                marker_value=marker_value,
+                default_value=default_value,
+                has_chains=has_chains,
             )
         return tree.map(lambda _: default_value, x, is_leaf=_is_lazy_array)
 

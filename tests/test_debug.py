@@ -30,7 +30,7 @@ from typing import Any, Literal, NamedTuple
 
 import numpy
 import pytest
-from equinox import tree_at
+from equinox import EquinoxRuntimeError, tree_at
 from jax import numpy as jnp
 from jax import random, vmap
 from jax.nn import softmax
@@ -420,6 +420,17 @@ class TestRejectionSample:
         assert jnp.all(x > threshold)
         cdf = stats.truncnorm(threshold, numpy.inf).cdf
         assert ks_1samp(x, cdf).pvalue > 1e-3
+
+    def test_max_iter(self, keys: split) -> None:
+        """An unsatisfiable criterion raises instead of looping forever."""
+        with pytest.raises(EquinoxRuntimeError, match='accepted too few samples'):
+            rejection_sample(
+                keys.pop(),
+                lambda key, num: random.normal(key, (num,)),
+                PositiveCriterion(jnp.inf),
+                10,
+                max_iter=3,
+            )
 
 
 class TestMinPointsCriterion:

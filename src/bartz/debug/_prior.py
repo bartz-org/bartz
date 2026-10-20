@@ -31,7 +31,7 @@ from dataclasses import replace
 from functools import partial
 from typing import TypeVar
 
-from equinox import Module
+from equinox import Module, error_if
 from jax import eval_shape, lax, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular
@@ -349,6 +349,8 @@ def rejection_sample(
     draw: Callable[[Key[Array, ''], int], T],
     criterion: RejectionCriterion,
     num: int,
+    *,
+    max_iter: int = 1000,
 ) -> T:
     """Draw independent samples conditional on a criterion.
 
@@ -363,6 +365,9 @@ def rejection_sample(
         The criterion the samples must satisfy.
     num
         The number of samples.
+    max_iter
+        The maximum number of iterations, each drawing `num` candidates. If
+        some samples are still missing after it, it is an error.
 
     Returns
     -------
@@ -404,8 +409,11 @@ def rejection_sample(
         missing=jnp.ones(num, bool),
         iteration=jnp.int32(0),
     )
-    carry = lax.while_loop(lambda carry: jnp.any(carry.missing), body, carry)
-    return carry.samples
+    carry = lax.while_loop(
+        lambda carry: jnp.any(carry.missing) & (carry.iteration < max_iter), body, carry
+    )
+    msg = f'rejection sampling accepted too few samples in {max_iter} iterations'
+    return error_if(carry.samples, jnp.any(carry.missing), msg)
 
 
 class MinPointsCriterion(RejectionCriterion):

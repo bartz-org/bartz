@@ -2111,7 +2111,8 @@ def log_blocked_mass_tree(
     # internal nodes (the split variable is eligible), the clip only guards
     # against round-off.
     log_eligible = s.log_rest + jnp.log1p(-jnp.minimum(ineligible_mass, 1.0))
-    for i in range(s.log_top.size):
+    (num_top,) = s.log_top.shape
+    for i in range(num_top):
         is_eligible = ((ineligible_top >> i) & 1) == 0
         log_eligible = jnp.where(
             is_eligible, jnp.logaddexp(log_eligible, s.log_top[i]), log_eligible
@@ -2254,7 +2255,7 @@ def step_s(key: Key[Array, ''], state: State) -> State:
     log_s_key = keys.pop()
 
     # histogram current variable usage
-    p = state.forest.max_split.size
+    (p,) = state.forest.max_split.shape
     varcount = var_histogram(
         p, state.forest.var_tree, state.forest.split_tree, sum_batch_axis=-1
     )
@@ -2407,7 +2408,7 @@ def _log_p_v(
     """
     log_lambda = -jnp.logaddexp(0.0, -v)
     log1m_lambda = -jnp.logaddexp(0.0, v)
-    p = log_s.size
+    (p,) = log_s.shape
     log_c = jnp.log(rho / p) + v  # c = theta / p
     c = jnp.exp(log_c)
     theta = p * c

@@ -384,6 +384,8 @@ def accept_moves_parallel_stage(
             state.forest.count_tree, state.forest.leaf_indices, moves, state.config
         )
         state = replace(state, forest=replace(state.forest, count_tree=count_trees))
+    else:
+        move_counts = None
 
     # affluence of the nodes touched by each move: whether they would be
     # growable as leaves (admissible rule + enough datapoints). The children
@@ -393,11 +395,13 @@ def accept_moves_parallel_stage(
     _, half = state.forest.var_tree.shape
     lrt_affluent = (moves.lrt_nodes < half) & moves.lrt_growable
     if state.forest.min_points_per_decision_node is not None:
+        assert move_counts is not None
         lrt_affluent &= move_counts.lrt >= state.forest.min_points_per_decision_node
     moves = replace(moves, lrt_affluent=lrt_affluent)
 
     # veto grove move if new leaves don't have enough datapoints
     if state.forest.min_points_per_leaf is not None:
+        assert move_counts is not None
         moves = replace(
             moves,
             allowed=moves.allowed
@@ -417,6 +421,7 @@ def accept_moves_parallel_stage(
             state.prec_scale,
             state.forest.leaf_indices,
             moves,
+            move_counts,
             state.config,
         )
         state = replace(state, forest=replace(state.forest, prec_tree=prec_trees))
@@ -506,6 +511,7 @@ def _compute_count_or_prec_trees(
     trees: UInt32[Array, 'num_trees tree_size'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
+    counts: None,
     config: StepConfig,
 ) -> tuple[UInt32[Array, 'num_trees tree_size'], Counts]: ...
 
@@ -517,6 +523,7 @@ def _compute_count_or_prec_trees(
     | Float32[Array, 'num_trees k k tree_size'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
+    counts: Counts | None,
     config: StepConfig,
 ) -> (
     tuple[Float32[Array, 'num_trees tree_size'], None]
@@ -531,6 +538,7 @@ def _compute_count_or_prec_trees(
     | Float32[Array, 'num_trees k k tree_size'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
+    counts: Counts | None,
     config: StepConfig,
 ) -> (
     tuple[UInt32[Array, 'num_trees tree_size'], Counts]
@@ -544,8 +552,8 @@ def _compute_count_or_prec_trees(
         | tuple[Float32[Array, 'num_trees tree_size'], None]
         | tuple[Float32[Array, 'num_trees k k tree_size'], None]
     ):
-        compute = vmap(_compute_count_or_prec_tree, in_axes=(None, 0, 0, 0, None))
-        return compute(prec_scale, trees, leaf_indices, moves, config)
+        compute = vmap(_compute_count_or_prec_tree, in_axes=(None, 0, 0, 0, 0, None))
+        return compute(prec_scale, trees, leaf_indices, moves, counts, config)
 
     if config.prec_count_num_trees is None:
         return all_trees()
@@ -559,15 +567,16 @@ def _compute_count_or_prec_trees(
             | Float32[Array, 'k k tree_size'],
             UInt[Array, ' n'],
             Moves,
+            Counts | None,
         ],
     ) -> (
         tuple[UInt32[Array, ' tree_size'], Counts]
         | tuple[Float32[Array, ' tree_size'], None]
         | tuple[Float32[Array, 'k k tree_size'], None]
     ):
-        tree, leaf_indices, moves = args
+        tree, leaf_indices, moves, counts = args
         return _compute_count_or_prec_tree(
-            prec_scale, tree, leaf_indices, moves, config
+            prec_scale, tree, leaf_indices, moves, counts, config
         )
 
     def tree_batches() -> (
@@ -578,7 +587,9 @@ def _compute_count_or_prec_trees(
         # sliced_map instead of lax.map because under the chain vmap lax.map's
         # reshape of the tree axis becomes a transpose of `leaf_indices` that
         # xla materializes in full (cf. `SeqStageInAllTrees.leaf_indices`)
-        return sliced_map(compute, (trees, leaf_indices, moves), batch_size=batch_size)
+        return sliced_map(
+            compute, (trees, leaf_indices, moves, counts), batch_size=batch_size
+        )
 
     # the tree batching bounds the reduction temporaries on cpu; on gpu those
     # fuse anyway
@@ -592,6 +603,7 @@ def _compute_count_or_prec_tree(
     | Float32[Array, 'k k tree_size'],
     leaf_indices: UInt[Array, ' n'],
     moves: Moves,
+    counts: Counts | None,
     config: StepConfig,
 ) -> (
     tuple[UInt32[Array, ' tree_size'], Counts]
@@ -624,11 +636,42 @@ def _compute_count_or_prec_tree(
         lrt = jnp.stack([left, total - left, total])
         tree = tree.at[moves.lrt_nodes].set(lrt)
         return tree, Counts(lrt=lrt)
+
+    elif counts is not None:
+        # like the counts, reduce into one child alone and derive the other.
+        # In floating point the derived child carries the rounding error of
+        # the parent's sum, so derive the child with more datapoints, which is
+        # unlikely to be much smaller than its sibling. On prune the children
+        # are cached leaves and need no reduction.
+        left_fewer = counts.lrt[0] <= counts.lrt[1]
+        fresh = config.prec_reduction_config._reduce(  # noqa: SLF001
+            prec_scale,
+            leaf_indices,
+            size=tree_size,
+            subset_start=moves.lrt_nodes[0] + jnp.where(left_fewer, 0, 1),
+            subset_length=1,
+            dtype=jnp.float32,
+            data_sharded=config.data_sharded,
+        ).squeeze(-1)
+        cached = tree.at[..., moves.lrt_nodes].get(mode='fill', fill_value=0)
+        derived = cached[..., 2] - fresh
+        grown = jnp.where(
+            left_fewer,
+            jnp.stack([fresh, derived], axis=-1),
+            jnp.stack([derived, fresh], axis=-1),
+        )
+        lr = jnp.where(moves.grow, grown, cached[..., :2])
+        total = jnp.where(moves.grow, cached[..., 2], cached[..., 0] + cached[..., 1])
+        lrt = jnp.concatenate([lr, total[..., None]], axis=-1)
+        tree = tree.at[..., moves.lrt_nodes].set(lrt)
+        return tree, None
+
     else:
         # reduce into the move's children, the contiguous pair (left, right) =
-        # (2 * node, 2 * node + 1) = lrt_nodes[:2]; the right child is not
-        # derived by difference like the counts because in floating point it
-        # would lose precision on a small leaf next to a large one
+        # (2 * node, 2 * node + 1) = lrt_nodes[:2]; without the counts to tell
+        # which child is smaller, neither is derived by difference, because in
+        # floating point that would lose precision on a small leaf next to a
+        # large one
         lr = config.prec_reduction_config._reduce(  # noqa: SLF001
             prec_scale,
             leaf_indices,
@@ -680,7 +723,9 @@ def compute_count_trees(
         The counts of the number of points in the leaves grown or pruned by the
         moves.
     """
-    return _compute_count_or_prec_trees(None, count_trees, leaf_indices, moves, config)
+    return _compute_count_or_prec_trees(
+        None, count_trees, leaf_indices, moves, None, config
+    )
 
 
 @named_call
@@ -690,6 +735,7 @@ def compute_prec_trees(
     prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
+    counts: Counts | None,
     config: StepConfig,
 ) -> Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k k tree_size']:
     """
@@ -707,6 +753,9 @@ def compute_prec_trees(
         of the tree (post-GROW, pre-PRUNE).
     moves
         The proposed moves, see `propose_moves`.
+    counts
+        The datapoint counts at the moves' nodes, see `compute_count_trees`, or
+        `None` if they are not tracked. If given, they speed up the update.
     config
         The MCMC configuration.
 
@@ -715,7 +764,7 @@ def compute_prec_trees(
     The updated cache, valid in each potential or actual leaf node.
     """
     trees, _ = _compute_count_or_prec_trees(
-        prec_scale, prec_trees, leaf_indices, moves, config
+        prec_scale, prec_trees, leaf_indices, moves, counts, config
     )
     return trees
 

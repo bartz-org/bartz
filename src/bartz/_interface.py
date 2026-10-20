@@ -509,7 +509,7 @@ class Bart(Module):
             error_scale=error_scale,
         )
 
-        check_augment_depth(sparse, maxdepth)
+        check_augment_depth(sparse, maxdepth, x_train.shape[0])
 
         # split the user-provided seed into an mcmc key and a binner key
         if not is_key(seed):
@@ -1263,12 +1263,13 @@ def check_length(
         raise ValueError(msg)
 
 
-def check_augment_depth(sparse: SparseConfig, maxdepth: int) -> None:
-    # the augmentation tracks 2 (maxdepth - 1) variables as bits of a uint32
-    if sparse.enabled and sparse.augment and maxdepth > 17:
+def check_augment_depth(sparse: SparseConfig, maxdepth: int, p: int) -> None:
+    # the augmentation tracks min(2 (maxdepth - 1), p) variables as bits of a
+    # uint32
+    if sparse.enabled and sparse.augment and min(2 * (maxdepth - 1), p) > 32:
         msg = (
-            f'maxdepth={maxdepth} > 17 is not supported with '
-            '`SparseConfig(augment=True)`, set `augment=False`'
+            f'maxdepth={maxdepth} > 17 with p={p} > 32 predictors is not '
+            'supported with `SparseConfig(augment=True)`, set `augment=False`'
         )
         raise ValueError(msg)
 

@@ -73,7 +73,13 @@ from pytest_subtests import SubTests
 
 from bartz import Bart as OriginalBart
 from bartz import PredictKind, SparseConfig
-from bartz._interface import DataFrame, Series, _guarded_response_variance, any_nan
+from bartz._interface import (
+    DataFrame,
+    Series,
+    _guarded_response_variance,
+    any_nan,
+    check_augment_depth,
+)
 from bartz._jaxext import (
     get_default_device,
     get_default_devices,
@@ -1314,9 +1320,31 @@ def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
 
 
 def test_augment_rejects_deep_trees(bkw: BartKW) -> None:
-    """The variable selection augmentation rejects `maxdepth` > 17."""
-    with pytest.raises(ValueError, match=r'maxdepth=18 > 17 is not supported'):
-        Bart(**dict(bkw.kw, maxdepth=18, sparse=SparseConfig()))
+    """The variable selection augmentation rejects `maxdepth` > 17 with p > 32."""
+    *_, n = numpy.shape(bkw.kw['y_train'])
+    kw = dict(
+        bkw.kw,
+        x_train=jnp.zeros((33, n)),
+        varprob=None,
+        maxdepth=18,
+        sparse=SparseConfig(),
+    )
+    with pytest.raises(ValueError, match=r'maxdepth=18 > 17 with p=33 > 32'):
+        Bart(**kw)
+
+
+@pytest.mark.parametrize(
+    ('maxdepth', 'p', 'ok'), [(17, 1000, True), (18, 32, True), (18, 33, False)]
+)
+def test_check_augment_depth(maxdepth: int, p: int, ok: bool) -> None:
+    """The augmentation supports deep trees if it tracks at most 32 variables."""
+    for sparse in (SparseConfig(augment=False), SparseConfig(enabled=False)):
+        check_augment_depth(sparse, maxdepth, p)
+    if ok:
+        check_augment_depth(SparseConfig(), maxdepth, p)
+    else:
+        with pytest.raises(ValueError, match='is not supported'):
+            check_augment_depth(SparseConfig(), maxdepth, p)
 
 
 @pytest.mark.parametrize('param', ['sigma_scale', 'sigma_init'])

@@ -199,6 +199,7 @@ allow-star-arg-any = true
 extend-immutable-calls = [
     "bartz._interface.SparseConfig",
     "bartz.mcmcstep._reduction.AutoBatchedReduction",
+    "bartz.mcmcstep._reduction.AutoOneHotOrPopcountReduction",
     "bartz.mcmcstep._reduction.AutoOneHotReduction",
     "bartz.mcmcstep._reduction.BatchedReduction",
     "bartz.testing._distr.Constant",

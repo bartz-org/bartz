@@ -73,6 +73,7 @@ from bartz.mcmcstep._lazy import (
 )
 from bartz.mcmcstep._reduction import (
     AutoBatchedReduction,
+    AutoOneHotOrPopcountReduction,
     AutoOneHotReduction,
     ReductionConfig,
 )
@@ -836,7 +837,7 @@ def init(
     min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
     min_points_per_leaf: int | Integer[ArrayLike, ''] | None = None,
     resid_reduction_config: ReductionConfig = AutoBatchedReduction(),
-    count_reduction_config: ReductionConfig = AutoOneHotReduction(),
+    count_reduction_config: ReductionConfig = AutoOneHotOrPopcountReduction(),
     prec_reduction_config: ReductionConfig = AutoOneHotReduction(),
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
     sequential_unroll: int | bool = 2,

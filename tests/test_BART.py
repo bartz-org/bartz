@@ -390,6 +390,11 @@ def test_jit(fit: Fit) -> None:
     traced = {
         k: kw.pop(k) for k in ('x_train', 'y_train', 'x_test', 'w', 'seed') if k in kw
     }
+    if 'w' in traced:
+        # 'auto' needs concrete error scales, which are traced here
+        bart_kwargs = kw['bart_kwargs']
+        init_kw = dict(bart_kwargs.get('init_kw', {}), one_bin_prec_reduction=True)
+        kw['bart_kwargs'] = dict(bart_kwargs, init_kw=init_kw)
 
     def task(traced: dict[str, Any]) -> tuple[Array, Array | None, Array | None]:
         bart = fit.case.cls(**traced, **kw)

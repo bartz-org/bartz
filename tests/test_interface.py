@@ -2723,6 +2723,9 @@ def test_jit(bkw: BartKW) -> None:
     y = kw.pop('y_train')
     w = kw.pop('error_scale', None)
     key = kw.pop('seed')
+    if w is not None:
+        # 'auto' needs concrete error scales, which are traced here
+        kw['init_kw'] = dict(kw.get('init_kw', {}), one_bin_prec_reduction=True)
 
     def task(
         X: Shaped[Array, 'p n'],
@@ -2768,6 +2771,9 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
     w = kw.pop('error_scale', None)
     missing = kw.pop('missing', None)
     kw.pop('seed')  # replaced by a distinct per-repetition key below
+    if w is not None:
+        # 'auto' needs concrete error scales, which are traced here
+        kw['init_kw'] = dict(kw.get('init_kw', {}), one_bin_prec_reduction=True)
 
     nrep = 3
     key = keys.pop(nrep)  # one MCMC seed per repetition

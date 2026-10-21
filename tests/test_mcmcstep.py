@@ -25,6 +25,7 @@
 """Test `bartz.mcmcstep`."""
 
 import math
+import warnings
 from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import fields, replace
@@ -38,6 +39,7 @@ from beartype import beartype
 from jax import (
     debug_key_reuse,
     device_put,
+    eval_shape,
     jit,
     lax,
     make_mesh,
@@ -205,6 +207,7 @@ def _minimal_step_config() -> StepConfig:
         count_reduction_config=BatchedReduction(num_batches=None),
         prec_reduction_config=BatchedReduction(num_batches=None),
         prec_count_num_trees=None,
+        one_bin_prec_reduction=False,
         sequential_unroll=1,
         augment=False,
         mesh=None,
@@ -2101,6 +2104,8 @@ def test_affluence_tree_stays_clean(
         'plain',
         'min_points',
         'error_scale',
+        'one_bin',
+        'two_bin',
         'chains',
         'binary',
         'multivariate',
@@ -2143,6 +2148,15 @@ def test_rebuild_derived(keys: split, case: str) -> None:
         kw = dict(kw, min_points_per_decision_node=10, min_points_per_leaf=5)
     elif case == 'error_scale':
         kw = dict(kw, error_scale=jnp.linspace(0.5, 2.0, n))
+    elif case in ('one_bin', 'two_bin'):
+        # the counts let the precision tree be updated with a one-bin reduction
+        kw = dict(
+            kw,
+            error_scale=jnp.linspace(0.5, 2.0, n),
+            min_points_per_decision_node=10,
+            min_points_per_leaf=5,
+            one_bin_prec_reduction=case == 'one_bin',
+        )
     elif case == 'chains':
         kw = dict(kw, num_chains=2)
     elif case == 'blocked':
@@ -2195,6 +2209,90 @@ def test_rebuild_derived(keys: split, case: str) -> None:
 
     # compare residuals
     assert_close_matrices(state.resid, rebuilt.resid, rtol=1e-5)
+
+
+def one_bin_init_kw(key: Key[Array, ''], n: int) -> dict:
+    """Arguments to `init` for the tests of `one_bin_prec_reduction`."""
+    data = gen_data(
+        key,
+        n=n,
+        p=2,
+        k=None,
+        q=0,
+        lambda_=None,
+        sigma2_lin=1.0,
+        sigma2_quad=1.0,
+        sigma2_eps=1.0,
+    ).quantize()
+
+    return dict(
+        X=data.x,
+        y=data.y,
+        offset=0.0,
+        max_split=data.max_split,
+        num_trees=NUM_TREES,
+        p_nonterminal=make_p_nonterminal(6),
+        leaf_prior_cov_inv=Wishart(None, None, jnp.float32(NUM_TREES)),
+        error_cov_inv=Wishart(4.0, 4.0, 1.0),
+    )
+
+
+@pytest.mark.parametrize(
+    ('case', 'expected', 'warning'),
+    [
+        ('missing', True, None),
+        ('narrow', True, None),
+        ('wide', False, 'spans a ratio'),
+        ('narrow_and_missing', False, 'missing'),
+        ('wide_forced', True, None),
+    ],
+)
+def test_one_bin_prec_reduction_auto(
+    keys: split, case: str, expected: bool, warning: str | None
+) -> None:
+    """`init` enables the one-bin precision reduction only where it is accurate."""
+    n = 100
+    kw: dict = one_bin_init_kw(keys.pop(), n)
+
+    missing = jnp.arange(n) % 10 == 0
+    narrow_error_scale = jnp.linspace(1.0, 99.0, n)
+    wide_error_scale = jnp.linspace(1.0, 101.0, n)
+
+    match case:
+        case 'missing':
+            kw = dict(kw, missing=missing)
+        case 'narrow':
+            kw = dict(kw, error_scale=narrow_error_scale)
+        case 'wide':
+            kw = dict(kw, error_scale=wide_error_scale)
+        case 'narrow_and_missing':
+            kw = dict(kw, error_scale=narrow_error_scale, missing=missing)
+        case 'wide_forced':
+            kw = dict(kw, error_scale=wide_error_scale, one_bin_prec_reduction=True)
+
+    if warning is None:
+        # turn the warning into an error to check it is not emitted
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error', message='`one_bin_prec_reduction`')
+            state = init(**kw)
+    else:
+        with pytest.warns(UserWarning, match=warning):
+            state = init(**kw)
+
+    assert state.config.one_bin_prec_reduction == expected
+
+
+def test_one_bin_prec_reduction_auto_jit(keys: split) -> None:
+    """Under jit, the 'auto' one-bin precision reduction needs concrete error scales."""
+    n = 100
+    kw: dict = one_bin_init_kw(keys.pop(), n)
+
+    # with `missing` alone the values are not needed
+    state = eval_shape(lambda m: init(**kw, missing=m), jnp.arange(n) % 10 == 0)
+    assert state.config.one_bin_prec_reduction
+
+    with pytest.raises(ValueError, match='invoked inside'):
+        eval_shape(lambda e: init(**kw, error_scale=e), jnp.ones(n))
 
 
 # settings of `test_joint_distribution`

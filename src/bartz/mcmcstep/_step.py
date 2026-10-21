@@ -661,12 +661,13 @@ def _compute_count_or_prec_tree(
         tree = tree.at[moves.lrt_nodes].set(lrt)
         return tree, Counts(lrt=lrt)
 
-    elif counts is not None:
+    elif counts is not None and config.one_bin_prec_reduction:
         # like the counts, reduce into one child alone and derive the other.
         # In floating point the derived child carries the rounding error of
-        # the parent's sum, so derive the child with more datapoints, which is
-        # unlikely to be much smaller than its sibling. On prune the children
-        # are cached leaves and need no reduction.
+        # the parent's sum, so derive the child with more datapoints, whose
+        # precision is at least half the parent's divided by the spread of
+        # the datapoints' precisions. On prune the children are cached leaves
+        # and need no reduction.
         left_fewer = counts.lrt[0] <= counts.lrt[1]
         fresh = config.prec_reduction_config._reduce(  # noqa: SLF001
             prec_scale,
@@ -692,10 +693,9 @@ def _compute_count_or_prec_tree(
 
     else:
         # reduce into the move's children, the contiguous pair (left, right) =
-        # (2 * node, 2 * node + 1) = lrt_nodes[:2]; without the counts to tell
-        # which child is smaller, neither is derived by difference, because in
-        # floating point that would lose precision on a small leaf next to a
-        # large one
+        # (2 * node, 2 * node + 1) = lrt_nodes[:2]; neither is derived by
+        # difference, because in floating point that would lose precision on a
+        # small leaf next to a large one
         lr = config.prec_reduction_config._reduce(  # noqa: SLF001
             prec_scale,
             leaf_indices,

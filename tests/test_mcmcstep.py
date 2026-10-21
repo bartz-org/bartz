@@ -2234,6 +2234,8 @@ def one_bin_init_kw(key: Key[Array, ''], n: int) -> dict:
         p_nonterminal=make_p_nonterminal(6),
         leaf_prior_cov_inv=Wishart(None, None, jnp.float32(NUM_TREES)),
         error_cov_inv=Wishart(4.0, 4.0, 1.0),
+        # the counts enable `one_bin_prec_reduction`
+        min_points_per_decision_node=10,
     )
 
 
@@ -2245,6 +2247,7 @@ def one_bin_init_kw(key: Key[Array, ''], n: int) -> dict:
         ('wide', False, 'spans a ratio'),
         ('narrow_and_missing', False, 'missing'),
         ('wide_forced', True, None),
+        ('wide_without_counts', False, None),
     ],
 )
 def test_one_bin_prec_reduction_auto(
@@ -2269,6 +2272,10 @@ def test_one_bin_prec_reduction_auto(
             kw = dict(kw, error_scale=narrow_error_scale, missing=missing)
         case 'wide_forced':
             kw = dict(kw, error_scale=wide_error_scale, one_bin_prec_reduction=True)
+        case 'wide_without_counts':
+            kw = dict(
+                kw, error_scale=wide_error_scale, min_points_per_decision_node=None
+            )
 
     if warning is None:
         # turn the warning into an error to check it is not emitted
@@ -2293,6 +2300,11 @@ def test_one_bin_prec_reduction_auto_jit(keys: split) -> None:
 
     with pytest.raises(ValueError, match='invoked inside'):
         eval_shape(lambda e: init(**kw, error_scale=e), jnp.ones(n))
+
+    # without the counts the setting is ignored, so the values are not needed
+    kw = dict(kw, min_points_per_decision_node=None)
+    state = eval_shape(lambda e: init(**kw, error_scale=e), jnp.ones(n))
+    assert not state.config.one_bin_prec_reduction
 
 
 # settings of `test_joint_distribution`

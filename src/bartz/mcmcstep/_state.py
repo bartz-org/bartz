@@ -1282,6 +1282,8 @@ def init(
                 state.config,
                 one_bin_prec_reduction=resolve_one_bin_prec_reduction(
                     one_bin_prec_reduction,
+                    has_counts=min_points_per_decision_node is not None
+                    or min_points_per_leaf is not None,
                     has_error_scale=state.error_scale is not None,
                     error_scale_min_max_ratio=attrs.error_scale_min_max_ratio,
                     n=n,
@@ -1615,6 +1617,7 @@ def compute_scale_related_attrs(
 def resolve_one_bin_prec_reduction(
     one_bin_prec_reduction: bool | Literal['auto'],
     *,
+    has_counts: bool,
     has_error_scale: bool,
     error_scale_min_max_ratio: Float32[Array, ''],
     n: int,
@@ -1622,6 +1625,9 @@ def resolve_one_bin_prec_reduction(
     """Resolve the `one_bin_prec_reduction` argument of `init`."""
     if isinstance(one_bin_prec_reduction, bool):
         return one_bin_prec_reduction
+    elif not has_counts:
+        # without the counts the setting is ignored
+        return False
     elif not has_error_scale:
         # the precisions are 0 or 1, so their sums are exact up to float32
         # mantissa bits

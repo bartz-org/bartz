@@ -666,8 +666,8 @@ def _compute_count_or_prec_tree(
         # In floating point the derived child carries the rounding error of
         # the parent's sum, so derive the child with more datapoints, whose
         # precision is at least half the parent's divided by the spread of
-        # the datapoints' precisions. On prune the children are cached leaves
-        # and need no reduction.
+        # the datapoints' precisions. On prune the children are cached leaves,
+        # so the reduction, computed anyway for all the trees, is discarded.
         left_fewer = counts.lrt[0] <= counts.lrt[1]
         fresh = config.prec_reduction_config._reduce(  # noqa: SLF001
             prec_scale,

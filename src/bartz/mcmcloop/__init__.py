@@ -34,6 +34,7 @@ Running the MCMC
     BurninTrace
     MainTrace
     MainTraceWithTrainPred
+    VarprobInState
 
 Evaluating the trace
 --------------------
@@ -76,4 +77,9 @@ from bartz.mcmcloop._callback import (
 )
 from bartz.mcmcloop._evaluate import EvaluableTrace, compute_varcount, evaluate_trace
 from bartz.mcmcloop._loop import Callback, RunMCMCResult, run_mcmc
-from bartz.mcmcloop._trace import BurninTrace, MainTrace, MainTraceWithTrainPred
+from bartz.mcmcloop._trace import (
+    BurninTrace,
+    MainTrace,
+    MainTraceWithTrainPred,
+    VarprobInState,
+)

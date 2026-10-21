@@ -61,6 +61,7 @@ from bartz._jaxext import (
     jit,
     minimal_unsigned_dtype,
 )
+from bartz._npz import serializable
 from bartz.grove import tree_depths
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes
 from bartz.mcmcstep._lazy import (
@@ -96,6 +97,7 @@ class OutcomeType(Enum):
 T = TypeVar('T')
 
 
+@serializable
 class Wishart(Module):
     """A precision matrix with a Wishart prior, bundled with its current value.
 
@@ -180,6 +182,7 @@ class Wishart(Module):
                 return self.nu - (k - 1)
 
 
+@serializable
 class DiagWishart(Wishart):
     """A diagonal precision matrix with independent chi-square diagonal entries.
 
@@ -192,9 +195,6 @@ class DiagWishart(Wishart):
     as the corresponding marginal variance under the dense `Wishart`: the gamma
     shape of each precision entry is ``inv_wishart_marginal_nu / 2``, not
     ``nu / 2``.
-
-    A component with `rate` 0 has no prior; its precision is held fixed at its
-    `value` (1 for the binary components of a mixed regression).
 
     Used for mixed binary-continuous regression and for continuous multivariate
     regression with per-datapoint missingness.
@@ -216,6 +216,47 @@ class DiagWishart(Wishart):
         super().__init__(nu, rate, value)
 
 
+@serializable
+class Sparsity(Module):
+    """The parameters of the prior probability of the variables to split along."""
+
+    log_s: Float32[Array, '*chains p'] | None = field(chains=CHAIN_AXIS)
+    """The logarithm of the prior probability for choosing a variable to split
+    along in a decision rule. Not normalized. Variables that do not have any
+    available decision rule at a given node are masked away. If `None`, use a
+    uniform distribution. Without `theta`, it is constant and shared by the
+    chains, see `has_chains`."""
+
+    theta: Float32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
+    """The concentration parameter for the Dirichlet prior on the variable
+    distribution `s`. If not set, `log_s` is left constant."""
+
+    a: Float32[Array, ''] | None
+    """First shape parameter of the prior on `theta`. If not set, `theta` is
+    left constant."""
+
+    b: Float32[Array, ''] | None
+    """Second shape parameter of the prior on `theta`. If not set, `theta` is
+    left constant."""
+
+    rho: Float32[Array, ''] | None
+    """Scale parameter of the prior on `theta`. If not set, `theta` is left constant."""
+
+    log_theta_range: Float32[Array, ''] | None
+    """The domain of `theta` is ``|log(theta / rho)| <= log_theta_range``.
+    `None` if `theta` is constant."""
+
+    @property
+    def has_chains(self) -> bool:
+        """Whether `log_s` and `theta` carry a chain axis.
+
+        Only if `theta` is set and has a chain axis: otherwise `log_s` is
+        constant and shared by the chains.
+        """
+        return self.theta is not None and self.theta.ndim > 0
+
+
+@serializable
 class Forest(Module):
     """Represents the MCMC state of a sum of trees."""
 
@@ -339,30 +380,16 @@ class Forest(Module):
     )
     """The log likelihood ratio."""
 
-    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'] | None
+    leaf_prior_cov_inv: Wishart
     """The prior precision matrix of a leaf, conditional on the tree structure
-    (a scalar inverse variance for univariate). The prior mean of a leaf is
-    zero; the prior covariance of the sum of trees is ``num_trees *
-    leaf_prior_cov_inv^-1``."""
+    (a scalar inverse variance for univariate), with its Wishart prior. The
+    prior mean of a leaf is zero; the prior covariance of the sum of trees is
+    ``num_trees * leaf_prior_cov_inv.value^-1``. If `Wishart.nu` is `None`,
+    the precision is held fixed."""
 
-    log_s: Float32[Array, '*chains p'] | None = field(chains=CHAIN_AXIS)
-    """The logarithm of the prior probability for choosing a variable to split
-    along in a decision rule. Not normalized. Variables that do not have any
-    available decision rule at a given node are masked away. If `None`, use a
-    uniform distribution."""
-
-    theta: Float32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
-    """The concentration parameter for the Dirichlet prior on the variable
-    distribution `s`. If not set, `log_s` is left constant."""
-
-    a: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
-
-    b: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
-
-    rho: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
+    sparsity: Sparsity
+    """The parameters of the prior probability of the variables to split
+    along."""
 
     @property
     def has_chains(self) -> bool:
@@ -370,6 +397,7 @@ class Forest(Module):
         return self.var_tree.ndim > 2
 
 
+@serializable
 class StepConfig(Module):
     """Options for the MCMC step."""
 
@@ -399,7 +427,7 @@ class StepConfig(Module):
     augment: bool = field(static=True)
     """Whether to account exactly, via data augmentation, for the decision
     rules forbidden by the ancestors of each node when updating
-    `Forest.log_s`."""
+    `Sparsity.log_s`."""
 
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
@@ -422,6 +450,7 @@ class StepConfig(Module):
         return self.mesh is not None and 'data' in self.mesh.axis_names
 
 
+@serializable
 class State(Module):
     """Represents the MCMC state of BART."""
 
@@ -641,12 +670,13 @@ def check_binary_unit_precision(
 
 
 def init_shape_shifting_parameters(
+    *,
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | list[OutcomeType],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None,
     error_cov_inv: Wishart | None,
-    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+    leaf_prior_cov_inv: Wishart,
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
 ) -> tuple[bool, tuple[int, ...], Wishart, None | Int32[Array, ' kb']]:
     """
@@ -670,7 +700,8 @@ def init_shape_shifting_parameters(
         modes require a `DiagWishart`; in the mixed case the binary components
         must have an initial precision of 1.
     leaf_prior_cov_inv
-        The inverse of the leaf prior covariance.
+        The Wishart prior on the leaf precision and its initial value (used
+        only for shape and type checks).
     missing
         The per-datapoint missingness mask, used to detect partial missingness
         (2-D mask) so that diagonal-mode initialization is selected.
@@ -749,7 +780,13 @@ def init_shape_shifting_parameters(
         assert error_cov_inv.value.shape == 2 * kshape
 
     assert y.shape[:-1] == kshape
-    assert leaf_prior_cov_inv.shape == 2 * kshape
+
+    assert type(leaf_prior_cov_inv) is Wishart, (
+        'leaf_prior_cov_inv must be a dense Wishart'
+    )
+    assert leaf_prior_cov_inv.value.shape == 2 * kshape
+    if leaf_prior_cov_inv.rate is not None:
+        assert leaf_prior_cov_inv.rate.shape == 2 * kshape
 
     return is_binary, kshape, error_cov_inv, binary_indices
 
@@ -826,7 +863,7 @@ def init(
     max_split: UInt[ArrayLike, ' p'],
     num_trees: int,
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
-    leaf_prior_cov_inv: FloatLike | Float[ArrayLike, 'k k'],
+    leaf_prior_cov_inv: Wishart,
     leaf_dtype: DTypeLike = jnp.float32,
     prec_scale_dtype: DTypeLike = jnp.float32,
     resid_dtype: DTypeLike = jnp.float32,
@@ -879,7 +916,10 @@ def init(
         of trees is fixed by the length of this array. Use `make_p_nonterminal`
         to set it with the conventional formula.
     leaf_prior_cov_inv
-        The prior precision matrix of a leaf, see `Forest.leaf_prior_cov_inv`.
+        The Wishart prior on the leaf precision (a scalar inverse variance for
+        univariate) and its initial value; see `Forest.leaf_prior_cov_inv`.
+        Set `Wishart.nu` and `Wishart.rate` to `None` to hold the precision
+        fixed. Must be a dense `Wishart`, not a `DiagWishart`.
     leaf_dtype
     prec_scale_dtype
     resid_dtype
@@ -940,8 +980,8 @@ def init(
     a
     b
     rho
-        Sparsity (variable selection) parameters, see `Forest.log_s` and
-        `Forest.theta`. If `rho`, `a`, `b` are set, an unspecified `theta` is
+        Sparsity (variable selection) parameters, see `Sparsity.log_s` and
+        `Sparsity.theta`. If `rho`, `a`, `b` are set, an unspecified `theta` is
         initialized to `rho`; if `theta` is set, an unspecified `log_s` is
         initialized to uniform.
     sparse_on_at
@@ -994,7 +1034,6 @@ def init(
     y = jnp.asarray(y)
     assert y.dtype == jnp.float32
     offset = jnp.asarray(offset)
-    leaf_prior_cov_inv = jnp.asarray(leaf_prior_cov_inv)
     max_split = jnp.asarray(max_split)
     error_scale = asarray_or_none(error_scale)
     missing = asarray_or_none(missing)
@@ -1008,11 +1047,22 @@ def init(
 
     # process arguments that change depending on outcome type
     is_binary, kshape, error_cov_inv, binary_indices = init_shape_shifting_parameters(
-        y, outcome_type, offset, error_scale, error_cov_inv, leaf_prior_cov_inv, missing
+        y=y,
+        outcome_type=outcome_type,
+        offset=offset,
+        error_scale=error_scale,
+        error_cov_inv=error_cov_inv,
+        leaf_prior_cov_inv=leaf_prior_cov_inv,
+        missing=missing,
     )
 
     storage = determine_storage_params(
-        leaf_dtype, prec_scale_dtype, resid_dtype, leaf_prior_cov_inv, kshape, num_trees
+        leaf_dtype=leaf_dtype,
+        prec_scale_dtype=prec_scale_dtype,
+        resid_dtype=resid_dtype,
+        leaf_prior_cov_inv=leaf_prior_cov_inv.value,
+        kshape=kshape,
+        num_trees=num_trees,
     )
 
     # extract array sizes from arguments
@@ -1034,14 +1084,14 @@ def init(
     # determine settings for reductions
     mesh = parse_mesh(num_chains, mesh)
     red_cfg = parse_reduction_configs(
-        resid_reduction_config,
-        count_reduction_config,
-        prec_reduction_config,
-        prec_count_num_trees,
-        y,
-        num_trees,
-        num_chains,
-        mesh,
+        resid_reduction_config=resid_reduction_config,
+        count_reduction_config=count_reduction_config,
+        prec_reduction_config=prec_reduction_config,
+        prec_count_num_trees=prec_count_num_trees,
+        y=y,
+        num_trees=num_trees,
+        num_chains=num_chains,
+        mesh=mesh,
     )
 
     # check there aren't too many deactivated predictors
@@ -1150,12 +1200,18 @@ def init(
                 min_points_per_leaf=asarray_or_none(min_points_per_leaf),
                 log_trans_prior=lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
                 log_likelihood=lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
-                leaf_prior_cov_inv=leaf_prior_cov_inv,
-                log_s=_lazy_from_array(asarray_or_none(log_s)),
-                theta=_lazy_from_array(asarray_or_none(theta)),
-                rho=asarray_or_none(rho),
-                a=asarray_or_none(a),
-                b=asarray_or_none(b),
+                # only `value` carries the chain axis, see `error_cov_inv`
+                leaf_prior_cov_inv=replace(
+                    leaf_prior_cov_inv, value=_lazy_from_array(leaf_prior_cov_inv.value)
+                ),
+                sparsity=Sparsity(
+                    log_s=_lazy_from_array(asarray_or_none(log_s)),
+                    theta=_lazy_from_array(asarray_or_none(theta)),
+                    rho=asarray_or_none(rho),
+                    a=asarray_or_none(a),
+                    b=asarray_or_none(b),
+                    log_theta_range=None if rho is None else jnp.float32(40.0),
+                ),
             ),
             config=StepConfig(
                 steps_done=jnp.int32(0),
@@ -1297,6 +1353,7 @@ class StorageParams:
 
 
 def determine_storage_params(
+    *,
     leaf_dtype: DTypeLike,
     prec_scale_dtype: DTypeLike,
     resid_dtype: DTypeLike,
@@ -1366,7 +1423,7 @@ def initial_resid_inexact_integral(
     return ms / num_trees
 
 
-def initial_resid(
+def initial_resid(  # noqa: PLR0917, `_LazyArray` passes arguments by position
     shape: tuple[int, ...],
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
@@ -1700,6 +1757,7 @@ class ReductionConfigs(TypedDict):
 
 
 def parse_reduction_configs(
+    *,
     resid_reduction_config: ReductionConfig,
     count_reduction_config: ReductionConfig,
     prec_reduction_config: ReductionConfig,
@@ -1823,9 +1881,16 @@ def inv_via_chol_with_gersh(
     return solve_triangular(L, Ltinv.mT, trans='T', lower=True)
 
 
+# The chain decorators below are generic over the state type, so that they
+# preserve `State` subclasses.
+# WORKAROUND(python<3.12): replace with PEP 695 type parameters on the
+# decorators, e.g. `def vmap_chains[S: State](...)`.
+StateT = TypeVar('StateT', bound=State)
+
+
 def split_key_for_chains(
-    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State],
-) -> Callable[[Key[Array, ''], State], State]:
+    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], StateT], StateT],
+) -> Callable[[Key[Array, ''], StateT], StateT]:
     """Split a single PRNG key into per-chain keys before calling `fun`.
 
     When the state is multichain, the input key is split into
@@ -1834,7 +1899,7 @@ def split_key_for_chains(
     """
 
     @wraps(fun)
-    def wrapped(key: Key[Array, ''], state: State) -> State:
+    def wrapped(key: Key[Array, ''], state: StateT) -> StateT:
         num_chains = state.num_chains()
         if num_chains is None:
             return fun(key, state)
@@ -1871,8 +1936,8 @@ def partition_specs(x: PyTree, mesh: Mesh) -> PyTree[PartitionSpec]:
 
 
 def shard_map_state(
-    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State],
-) -> Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State]:
+    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], StateT], StateT],
+) -> Callable[[Key[Array, ''] | Key[Array, ' num_chains'], StateT], StateT]:
     """Wrap a ``(keys, state) -> state`` function in a manual `jax.shard_map`.
 
     Uses `state.config.mesh` (static). No-op when the mesh is `None`. The keys
@@ -1883,7 +1948,9 @@ def shard_map_state(
     """
 
     @wraps(fun)
-    def wrapped(key: Key[Array, ''] | Key[Array, ' num_chains'], state: State) -> State:
+    def wrapped(
+        key: Key[Array, ''] | Key[Array, ' num_chains'], state: StateT
+    ) -> StateT:
         mesh = state.config.mesh
         if mesh is None:
             return fun(key, state)
@@ -1908,8 +1975,8 @@ def shard_map_state(
 
 
 def vmap_chains(
-    fun: Callable[[Key[Array, ''], State], State],
-) -> Callable[[Key[Array, ' num_chains'] | Key[Array, ''], State], State]:
+    fun: Callable[[Key[Array, ''], StateT], StateT],
+) -> Callable[[Key[Array, ' num_chains'] | Key[Array, ''], StateT], StateT]:
     """Vmap a ``(key, state) -> state`` function over chain axes.
 
     When the state is multichain, `keys` must have a leading chain axis and
@@ -1919,8 +1986,8 @@ def vmap_chains(
 
     @wraps(fun)
     def wrapped(
-        keys: Key[Array, ' num_chains'] | Key[Array, ''], state: State
-    ) -> State:
+        keys: Key[Array, ' num_chains'] | Key[Array, ''], state: StateT
+    ) -> StateT:
         if not state.has_chains:
             return fun(keys, state)
         state_axes = chain_vmap_axes(state)
@@ -1928,6 +1995,17 @@ def vmap_chains(
         return vmapped_fun(keys, state)
 
     return wrapped
+
+
+def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
+    """Return the outcome the forest fits, with the latent one for binary components."""
+    if state.binary_indices is not None:
+        assert state.z is not None
+        return state.y.at[state.binary_indices, :].set(state.z, unique_indices=True)
+    elif state.z is not None:
+        return state.z
+    else:
+        return state.y
 
 
 class ShardMapPatchKwargs(TypedDict, total=False):

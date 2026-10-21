@@ -37,6 +37,8 @@ from jax.extend.backend import backends
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Integer, Shaped, UInt, UInt32
 
+from bartz._npz import serializable
+
 # target number of datapoint batches on cpu, and minimum datapoints per batch,
 # when batching is resolved automatically; unlike the gpu heuristic these are
 # flat (the cpu has no SM-count analog to scale with)
@@ -165,6 +167,7 @@ def _resolve_range(
         return subset_length, offset
 
 
+@serializable
 class BatchedReduction(ReductionConfig):
     """Segment-sum with optional batching along the datapoints.
 
@@ -237,6 +240,7 @@ class BatchedReduction(ReductionConfig):
         return out
 
 
+@serializable
 class AutoBatchedReduction(ReductionConfig):
     """`BatchedReduction` that picks `num_batches` automatically per platform.
 
@@ -398,6 +402,7 @@ def _gpu_sm_count() -> int:
     return count
 
 
+@serializable
 class OneHotReduction(ReductionConfig):
     """Dense one-hot reduction.
 
@@ -585,6 +590,7 @@ def _resolve_range_bins(
         return subset_length, bins, indices
 
 
+@serializable
 class AutoOneHotReduction(ReductionConfig):
     """`OneHotReduction` that picks `method` and `n_inner` automatically.
 
@@ -662,6 +668,7 @@ class AutoOneHotReduction(ReductionConfig):
             return lax.platform_dependent(**branches)
 
 
+@serializable
 class PopcountReduction(ReductionConfig):
     """Count reduction by SWAR popcount on the packed bin indices.
 
@@ -697,6 +704,7 @@ class PopcountReduction(ReductionConfig):
         return out
 
 
+@serializable
 class AutoOneHotOrPopcountReduction(ReductionConfig):
     """`PopcountReduction` on cpu, `AutoOneHotReduction` on other platforms.
 

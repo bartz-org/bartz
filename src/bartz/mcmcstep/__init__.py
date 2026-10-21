@@ -42,6 +42,7 @@ MCMC state
 
     State
     Forest
+    Sparsity
     StepConfig
     Wishart
     DiagWishart
@@ -77,6 +78,7 @@ from bartz.mcmcstep._state import (
     DiagWishart,
     Forest,
     OutcomeType,
+    Sparsity,
     State,
     StepConfig,
     Wishart,

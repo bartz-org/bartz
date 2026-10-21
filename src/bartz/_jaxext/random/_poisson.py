@@ -50,6 +50,8 @@ NUM_TERMS = 23
 EPS = 0.02
 
 
+# WORKAROUND(jax<0.11.1): replace with `random.poisson(...,
+# method='approximate')` and lift the ban on it in pyproject.toml
 @jit(static_argnums=(2, 3))
 def poisson(
     key: Key[Array, ''],

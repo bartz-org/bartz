@@ -28,16 +28,9 @@ import re
 import subprocess
 from pathlib import Path
 
+from config._common import parse_datetime
+
 CHANGELOG_PATH = Path('docs/changelog.md')
-
-
-def parse_datetime(s: str) -> datetime.datetime:
-    """Parse an RFC 3339 timestamp, requiring an explicit timezone offset."""
-    dt = datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
-    if dt.tzinfo is None:
-        msg = f'timestamp {s!r} must include a timezone offset'
-        raise argparse.ArgumentTypeError(msg)
-    return dt
 
 
 def get_version() -> str:
@@ -86,7 +79,7 @@ def check_changelog(today: datetime.date) -> None:
 
 
 def gh_release(today: datetime.date) -> None:
-    """Create a draft GitHub release from the topmost changelog section."""
+    """Publish a GitHub release from the topmost changelog section."""
     version, title, _date, body = _read_changelog_section(today)
     subprocess.run(  # noqa: S603
         [  # noqa: S607
@@ -94,7 +87,6 @@ def gh_release(today: datetime.date) -> None:
             'release',
             'create',
             f'v{version}',
-            '--draft',
             '--verify-tag',
             '--title',
             title,

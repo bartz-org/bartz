@@ -413,10 +413,6 @@ class mc_gbart(Module):
     def _mcmc_state(self) -> State:
         return self._bart._mcmc_state  # noqa: SLF001
 
-    @property
-    def _splits(self) -> Real[Array, 'p max_num_splits']:
-        return self._bart._binner._splits  # noqa: SLF001
-
     # Properties
 
     @property
@@ -676,10 +672,10 @@ def _sigest2_ols(
 ) -> Float32[Array, '']:
     """Estimate the error variance by OLS with intercept."""
     p, n = x_train.shape
-    if n <= p:
+    if n <= p + 1:
         msg = (
             f'cannot estimate `sigest` by OLS with {n} datapoints and {p} '
-            'predictors (it requires more datapoints than predictors); '
+            'predictors (it requires more datapoints than predictors plus one); '
             'specify `sigest` or `lambda_` explicitly'
         )
         raise ValueError(msg)

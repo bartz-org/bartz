@@ -28,7 +28,7 @@ import math
 from collections.abc import Callable, Sequence
 from dataclasses import fields, replace
 from functools import partial, wraps
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 import jax
 import numpy
@@ -46,7 +46,7 @@ from jax import (
     vmap,
 )
 from jax import numpy as jnp
-from jax.nn import softmax
+from jax.nn import logsumexp, softmax
 from jax.ops import segment_sum
 from jax.sharding import (
     AxisType,
@@ -74,19 +74,29 @@ from jaxtyping import (
 )
 from pytest import FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
-from scipy import stats
+from scipy import special, stats
 from scipy.stats import chi2, ks_1samp, ks_2samp
 
 from bartz._jaxext import (
     Module,
     field,
+    float32_matmuls,
     get_default_device,
     get_default_devices,
     get_device_count,
     minimal_unsigned_dtype,
     split,
 )
-from bartz.grove import is_actual_leaf
+from bartz._typing import kwdict
+from bartz.debug import ChainDataState, sample_data, sample_prior
+from bartz.debug._prior import sample_s
+from bartz.grove import (
+    evaluate_forest,
+    is_actual_leaf,
+    tree_actual_depth,
+    tree_depths,
+    var_histogram,
+)
 from bartz.mcmcstep import (
     AutoBatchedReduction,
     AutoOneHotOrPopcountReduction,
@@ -102,7 +112,12 @@ from bartz.mcmcstep import (
     make_p_nonterminal,
     step,
 )
-from bartz.mcmcstep._axes import chain_vmap_axes, data_vmap_axes, trace_sample_axes
+from bartz.mcmcstep._axes import (
+    chain_to_axis,
+    chain_vmap_axes,
+    data_vmap_axes,
+    trace_sample_axes,
+)
 from bartz.mcmcstep._moves import (
     ancestor_variables,
     fully_used_variables,
@@ -110,18 +125,22 @@ from bartz.mcmcstep._moves import (
     randint_masked,
     split_range,
 )
+from bartz.mcmcstep._rebuild import rebuild_derived
 from bartz.mcmcstep._reduction import _gpu_sm_count
 from bartz.mcmcstep._state import (
     Forest,
+    Sparsity,
     StepConfig,
     chol_with_gersh,
     inv_via_chol_with_gersh,
+    outcome_target,
     search_divisor,
 )
 from bartz.mcmcstep._step import (
-    _blocked_mass_tree,
+    S,
     _compute_likelihood_ratio_mv,
     _compute_likelihood_ratio_uv,
+    _log_p_v,
     _precompute_leaf_terms_mv,
     _precompute_leaf_terms_uv,
     _precompute_likelihood_terms_mv,
@@ -129,11 +148,18 @@ from bartz.mcmcstep._step import (
     _sample_wishart_bartlett,
     _step_error_cov_inv_diag,
     _step_error_cov_inv_mv,
+    apply_moves_to_leaf_indices,
+    leaf_scatter,
+    log_blocked_mass_tree,
     sample_s_augmentation,
+    sample_wishart_posterior,
     step_error_cov_inv,
+    step_leaf_prior_cov_inv,
     step_s,
+    step_theta,
     step_trees,
     step_z,
+    stirling_remainder,
 )
 from bartz.testing import gen_data
 from tests.util import (
@@ -144,6 +170,7 @@ from tests.util import (
     condf,
     manual_tree,
     nnone,
+    skip_empty_shard_map_bug,
 )
 
 # Forest size shared across the module. jax recompiles whenever an array shape
@@ -253,6 +280,30 @@ class TestVmapAxesMarkers:
     def x(self) -> _MarkerLeaf:
         """Build a module instance exercising every marker combination."""
         return _MarkerLeaf()
+
+    @pytest.mark.parametrize('inner_has_chains', [False, True])
+    def test_nested_has_chains(self, inner_has_chains: bool) -> None:
+        """A nested Module's `has_chains` overrides the outer one in its subtree."""
+
+        class _Inner(Module):
+            flag: bool = field(static=True)
+            arr: Shaped[Array, '...'] = field(
+                chains=0, default_factory=lambda: jnp.zeros((2, 3))
+            )
+
+            @property
+            def has_chains(self) -> bool:
+                return self.flag
+
+        class _Outer(_HasChainsBase):
+            inner: _Inner
+            arr: Shaped[Array, '...'] = field(
+                chains=0, default_factory=lambda: jnp.zeros((2, 3))
+            )
+
+        axes = chain_vmap_axes(_Outer(inner=_Inner(flag=inner_has_chains)))
+        assert axes.arr == 0
+        assert axes.inner.arr == (0 if inner_has_chains else None)
 
     def test_default_none(self, x: _MarkerLeaf) -> None:
         """An unmarked field becomes None."""
@@ -1538,23 +1589,23 @@ class TestMultichain:
             )
             y = y.at[1].set(random.normal(keys.pop(), (self.n,)))
             offset = random.normal(keys.pop(), (k,))
-            leaf_prior_cov_inv = jnp.eye(k) * NUM_TREES
+            leaf_prior_cov_inv = Wishart(None, None, jnp.eye(k) * NUM_TREES)
         else:
             if mv:
                 y_shape = (k, self.n)
                 offset = random.normal(keys.pop(), (k,))
-                leaf_prior_cov_inv = jnp.eye(k) * NUM_TREES
+                leaf_prior_cov_inv = Wishart(None, None, jnp.eye(k) * NUM_TREES)
             else:
                 y_shape = (self.n,)
                 offset = random.normal(keys.pop(), ())
-                leaf_prior_cov_inv = jnp.float32(NUM_TREES)
+                leaf_prior_cov_inv = Wishart(None, None, jnp.float32(NUM_TREES))
 
             if binary:
                 y = random.bernoulli(keys.pop(), 0.5, y_shape).astype(jnp.float32)
             else:
                 y = random.normal(keys.pop(), y_shape)
 
-        kw = dict(
+        kw: dict = dict(
             X=X,
             y=y,
             offset=offset,
@@ -1633,6 +1684,7 @@ class TestMultichain:
             check_sharding(state, state.config.mesh)
 
         with subtests.test('step'):
+            skip_empty_shard_map_bug(num_chains == 0 and mesh is not None)
             with debug_key_reuse(False):
                 # key reuse checks trigger with empty key array apparently
                 new_state = typechecking_step(keys.pop(), state)
@@ -1753,10 +1805,11 @@ class TestMultichain:
                 '.forest.p_propose_grow',
                 '.forest.min_points_per_decision_node',
                 '.forest.min_points_per_leaf',
-                '.forest.leaf_prior_cov_inv',
-                '.forest.a',
-                '.forest.b',
-                '.forest.rho',
+                '.forest.leaf_prior_cov_inv.nu',
+                '.forest.leaf_prior_cov_inv.rate',
+                '.forest.sparsity.a',
+                '.forest.sparsity.b',
+                '.forest.sparsity.rho',
                 '.config.sparse_on_at',
                 '.config.steps_done',
             )
@@ -1951,7 +2004,7 @@ def test_z_differs_across_data_shards(keys: split) -> None:
         max_split=max_split,
         num_trees=NUM_TREES,
         p_nonterminal=jnp.full(5, 0.9),
-        leaf_prior_cov_inv=jnp.float32(NUM_TREES),
+        leaf_prior_cov_inv=Wishart(None, None, jnp.float32(NUM_TREES)),
         mesh={'data': num_data_shards},
     )
 
@@ -1996,7 +2049,7 @@ def test_affluence_tree_stays_clean(
         max_split=data.max_split,
         num_trees=NUM_TREES,
         p_nonterminal=make_p_nonterminal(6),
-        leaf_prior_cov_inv=1.0,
+        leaf_prior_cov_inv=Wishart(None, None, 1.0),
         error_cov_inv=Wishart(nu=2.0, rate=2.0, value=1.0),
         min_points_per_decision_node=min_points_per_decision_node,
         min_points_per_leaf=min_points_per_leaf,
@@ -2022,6 +2075,419 @@ def test_affluence_tree_stays_clean(
     assert_array_equal(affluence & ~is_leaf, jnp.zeros_like(affluence))
     # sanity: the mask is non-trivially populated (else the check is vacuous)
     assert jnp.any(affluence)
+
+
+@pytest.mark.parametrize(
+    'case',
+    [
+        'plain',
+        'min_points',
+        'error_scale',
+        'chains',
+        'binary',
+        'multivariate',
+        'blocked',
+    ],
+)
+def test_rebuild_derived(keys: split, case: str) -> None:
+    """`rebuild_derived` reproduces the caches maintained by `step`."""
+    # generate data
+    n = 100
+    k = 2 if case == 'multivariate' else None
+    outcome_type = 'binary' if case == 'binary' else 'continuous'
+    data = gen_data(
+        keys.pop(),
+        n=n,
+        p=5,
+        k=k,
+        q=0,
+        lambda_=None if k is None else 0.5,
+        sigma2_lin=1.0,
+        sigma2_quad=1.0,
+        sigma2_eps=1.0,
+        outcome_type=outcome_type,
+    ).quantize()
+
+    # prepare arguments to `init()`
+    eye = jnp.float32(1.0) if k is None else jnp.eye(k)
+    kw: dict = dict(
+        X=data.x,
+        y=data.y,
+        outcome_type=outcome_type,
+        offset=jnp.zeros(() if k is None else (k,)),
+        max_split=data.max_split,
+        num_trees=NUM_TREES,
+        p_nonterminal=make_p_nonterminal(6),
+        leaf_prior_cov_inv=Wishart(None, None, NUM_TREES * eye),
+        error_cov_inv=None if case == 'binary' else Wishart(4.0, 4.0 * eye, eye),
+    )
+    if case == 'min_points':
+        kw = dict(kw, min_points_per_decision_node=10, min_points_per_leaf=5)
+    elif case == 'error_scale':
+        kw = dict(kw, error_scale=jnp.linspace(0.5, 2.0, n))
+    elif case == 'chains':
+        kw = dict(kw, num_chains=2)
+    elif case == 'blocked':
+        # a predictor without splits, excluded with `blocked_vars`
+        kw = dict(
+            kw,
+            X=kw['X'].at[0, :].set(0),
+            max_split=kw['max_split'].at[0].set(0),
+            filter_splitless_vars=1,
+        )
+
+    # create initial state
+    state = init(**kw)
+
+    # run some mcmc steps
+    for key in keys.pop(20):
+        state = step(key, state)
+
+    # recalculate derived quantities in the state from scratch
+    old_forest = state.forest
+    rebuilt = rebuild_derived(copy_arrays(state))
+    new_forest = rebuilt.forest
+
+    # compare leaf_indices
+    apply = apply_moves_to_leaf_indices
+    if state.has_chains:
+        apply = vmap(apply)
+    assert_array_equal(
+        apply(old_forest.leaf_indices, old_forest.to_prune, old_forest.move_node),
+        new_forest.leaf_indices,
+    )
+
+    # compare affluence tree
+    assert_array_equal(old_forest.affluence_tree, new_forest.affluence_tree)
+
+    # compare count and prec tree
+    is_leaf = jnp.vectorize(
+        partial(is_actual_leaf, add_bottom_level=True), signature='(h)->(t)'
+    )(old_forest.split_tree)
+    if old_forest.count_tree is not None:
+        assert new_forest.count_tree is not None
+        assert_array_equal(
+            jnp.where(is_leaf, old_forest.count_tree, 0), new_forest.count_tree
+        )
+    if old_forest.prec_tree is not None:
+        assert new_forest.prec_tree is not None
+        assert_close_matrices(
+            jnp.where(is_leaf, old_forest.prec_tree, 0), new_forest.prec_tree, rtol=1e-5
+        )
+
+    # compare residuals
+    assert_close_matrices(state.resid, rebuilt.resid, rtol=1e-5)
+
+
+# settings of `test_joint_distribution`
+GEWEKE_NUM_CHAINS = 4000
+GEWEKE_NUM_STEPS = 30
+GEWEKE_NUM_TREES = 20
+GEWEKE_N = 20
+GEWEKE_NUM_TEST = 3
+GEWEKE_MAXDEPTH = 6
+GEWEKE_FLAT_P_NONTERMINAL = 0.6
+GEWEKE_NU = 10.0
+GEWEKE_ERROR_PREC = 4.0
+
+
+class GewekeCase(NamedTuple):
+    """Model configuration of a `test_joint_distribution` case."""
+
+    p: int
+    nsplits: int
+    sparsity: Literal['fixed', 'free', 'supersparse'] | None = None
+    flat: bool = False
+    min_points: tuple[int, int] | None = None
+    leaf_prior: bool = False
+    outcome: Literal['continuous', 'binary', 'multivariate', 'mixed'] = 'continuous'
+    error_scale: bool = False
+
+    def __str__(self) -> str:
+        defaults = GewekeCase(self.p, self.nsplits)
+        parts = [f'p{self.p}', f'nsplits{self.nsplits}']
+        for name, value, default in zip(self._fields, self, defaults, strict=True):
+            if value == default:
+                pass
+            elif value is True:
+                parts.append(name)
+            elif isinstance(value, tuple):
+                parts.append(name + '_'.join(map(str, value)))
+            else:
+                parts.append(f'{name}_{value}')
+        return '-'.join(parts)
+
+
+def geweke_sparse_kw(
+    sparsity: Literal['fixed', 'free', 'supersparse'] | None, p: int
+) -> kwdict:
+    """Sparsity-prior hyperparameters for `init`."""
+    # 'free' is the default of `Bart`, 'supersparse' puts more prior mass on a
+    # small theta, which makes `s` very sparse and stresses the augmentation of
+    # `log_s` with tiny eligible split probability masses
+    params = {
+        'fixed': dict(theta=float(p)),
+        'free': dict(a=0.5, b=1.0, rho=float(p)),
+        'supersparse': dict(a=0.1, b=1.0, rho=float(p)),
+    }
+    return {} if sparsity is None else params[sparsity]
+
+
+def geweke_state(key: Key[Array, ''], case: GewekeCase) -> ChainDataState:
+    """Create a state with the model of `case` and many chains, each with its own data."""
+    k = 2 if case.outcome in ('multivariate', 'mixed') else None
+    kshape = () if k is None else (k,)
+    eye = jnp.float32(1.0) if k is None else jnp.eye(k)
+
+    leaf_prec = GEWEKE_NUM_TREES * eye
+    if case.leaf_prior:
+        rate = GEWEKE_NU / GEWEKE_NUM_TREES * eye
+        leaf_prior_cov_inv = Wishart(GEWEKE_NU, rate, leaf_prec)
+    else:
+        leaf_prior_cov_inv = Wishart(None, None, leaf_prec)
+
+    error_kw: dict
+    error_rate = GEWEKE_NU / GEWEKE_ERROR_PREC * eye
+    if case.outcome == 'binary':
+        error_kw = dict(outcome_type='binary')
+    elif case.outcome == 'mixed':
+        error_kw = dict(
+            outcome_type=['continuous', 'binary'],
+            error_cov_inv=DiagWishart(GEWEKE_NU, error_rate, eye),
+        )
+    else:
+        error_kw = dict(error_cov_inv=Wishart(GEWEKE_NU, error_rate, eye))
+
+    if case.flat:
+        p_nonterminal = jnp.full(GEWEKE_MAXDEPTH - 1, GEWEKE_FLAT_P_NONTERMINAL)
+    else:
+        p_nonterminal = make_p_nonterminal(GEWEKE_MAXDEPTH)
+
+    min_points_kw: dict = {}
+    if case.min_points is not None:
+        decision, leaf = case.min_points
+        min_points_kw = dict(
+            min_points_per_decision_node=decision, min_points_per_leaf=leaf
+        )
+
+    sparse_kw = geweke_sparse_kw(case.sparsity, case.p)
+    if case.sparsity is not None:
+        sparse_kw = dict(**sparse_kw, sparse_on_at=0, augment=True)
+
+    state = init(
+        X=random.randint(key, (case.p, GEWEKE_N), 0, case.nsplits + 1, jnp.uint8),
+        y=jnp.zeros((*kshape, GEWEKE_N)),
+        offset=jnp.zeros(kshape),
+        max_split=jnp.full(case.p, case.nsplits, jnp.uint8),
+        num_trees=GEWEKE_NUM_TREES,
+        p_nonterminal=p_nonterminal,
+        leaf_prior_cov_inv=leaf_prior_cov_inv,
+        error_scale=jnp.linspace(0.5, 2.0, GEWEKE_N) if case.error_scale else None,
+        num_chains=GEWEKE_NUM_CHAINS,
+        **error_kw,
+        **min_points_kw,
+        **sparse_kw,
+    )
+    return ChainDataState.from_state(state)
+
+
+def sample_joint(key: Key[Array, ''], state: ChainDataState) -> ChainDataState:
+    """Draw parameters and data from the model, independently in each chain."""
+    keys = split(key)
+    return sample_data(keys.pop(), sample_prior(keys.pop(), state))
+
+
+def geweke_step(key: Key[Array, ''], state: State) -> State:
+    """Draw new data given the parameters, then the parameters given the data."""
+    keys = split(key)
+    return step(keys.pop(), sample_data(keys.pop(), state))
+
+
+@jit
+def run_geweke_chains(step_keys: Key[Array, ' steps'], state: State) -> State:
+    """Alternate `step` and `sample_data` in many independent chains."""
+
+    def body(state: State, key: Key[Array, '']) -> tuple[State, None]:
+        return geweke_step(key, state), None
+
+    state, _ = lax.scan(body, state, step_keys)
+    return state
+
+
+def summaries(
+    state: State, X_test: UInt8[Array, 'p m']
+) -> dict[str, Shaped[Array, ' chains']]:
+    """Compute scalar summaries of the parameters and data of each chain."""
+    in_axes = (chain_vmap_axes(state),)
+    return vmap(partial(chain_summaries, X_test=X_test), in_axes=in_axes)(state)
+
+
+def chain_summaries(
+    state: State, X_test: UInt8[Array, 'p m']
+) -> dict[str, Shaped[Array, '']]:
+    """Compute scalar summaries of the parameters and data of a single chain."""
+    forest = state.forest
+    p, _ = X_test.shape
+    num_splits = jnp.count_nonzero(forest.split_tree, axis=-1)
+    varcount = var_histogram(p, forest.var_tree, forest.split_tree, sum_batch_axis=-1)
+    yhat = evaluate_forest(X_test, forest, sum_batch_axis=-1).ravel()
+    (num_yhat,) = yhat.shape
+    out = {
+        'number of stub trees': jnp.count_nonzero(num_splits == 0),
+        'number of simple trees': jnp.count_nonzero(num_splits == 1),
+        'number of nodes': num_splits.sum(),
+        'imbalance index': avg_imbalance_index(forest.split_tree),
+        'average max tree depth': avg_max_tree_depth(forest.split_tree),
+        **{f'varcount[{i}]': varcount[i] for i in range(p)},
+        **{f'y_test[{i}]': yhat[i] for i in range(num_yhat)},
+    }
+
+    if forest.sparsity.theta is not None:
+        assert forest.sparsity.log_s is not None
+        if p > 1:  # with p=1, s is always [1]
+            varprob = softmax(forest.sparsity.log_s)
+            out['effective predictors'] = effective_predictors(varprob)
+        if forest.sparsity.rho is not None:
+            out['theta'] = forest.sparsity.theta
+
+    for name, prec in (
+        ('leaf precision', forest.leaf_prior_cov_inv),
+        ('error precision', state.error_cov_inv),
+    ):
+        if prec.nu is not None:
+            value = prec.value.ravel()
+            (size,) = value.shape
+            out |= {f'{name}[{i}]': value[i] for i in range(size)}
+
+    errors = standardized_errors(state)
+    out['error sum of squares'] = jnp.sum(jnp.square(errors))
+    out['first error'] = errors[0, 0]
+    return out
+
+
+def standardized_errors(state: State) -> Float32[Array, 'k n']:
+    """Compute the errors of the model of a single chain, whitened to iid standard Normal."""
+    fit = evaluate_forest(state.X, state.forest, sum_batch_axis=-1)
+    errors = outcome_target(state) - fit - state.forest.offset[..., None]
+    if state.error_scale is not None:
+        errors /= state.error_scale
+    prec = state.error_cov_inv.value
+    if prec.ndim == 0:
+        return (errors * jnp.sqrt(prec))[None, :]
+    else:
+        return jnp.linalg.cholesky(prec).T @ errors
+
+
+def effective_predictors(
+    varprob: Float32[Array, '*batch p'],
+) -> Float32[Array, ' *batch']:
+    """Effective number of predictors, the exp of the split-probability entropy."""
+    entropy = -jnp.sum(jnp.where(varprob > 0, varprob * jnp.log(varprob), 0.0), axis=-1)
+    return jnp.exp(entropy)
+
+
+@partial(jnp.vectorize, signature='(n,m)->()')
+def avg_imbalance_index(
+    split_tree: UInt[Array, '*batch_shape ntree 2**(d-1)'],
+) -> Float32[Array, '*batch_shape']:
+    """Measure average tree imbalance in the forest."""
+    is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
+    depths = tree_depths(is_leaf.shape[-1])
+    depths = jnp.broadcast_to(depths, is_leaf.shape)
+    index = jnp.std(depths, where=is_leaf, axis=-1)
+    return index.mean(-1)
+
+
+@partial(jnp.vectorize, signature='(n,m)->()')
+def avg_max_tree_depth(
+    split_tree: UInt[Array, '*batch_shape ntree 2**(d-1)'],
+) -> Float32[Array, '*batch_shape']:
+    """Measure average maximum tree depth in the forest."""
+    depth = vmap(tree_actual_depth)(split_tree)
+    return depth.mean(-1)
+
+
+@pytest.mark.parametrize(
+    'case',
+    [
+        GewekeCase(1, 1),
+        GewekeCase(3, 2),
+        GewekeCase(10, 1),
+        GewekeCase(10, 255),
+        GewekeCase(10, 1, sparsity='fixed'),
+        GewekeCase(10, 1, sparsity='free'),
+        GewekeCase(10, 255, sparsity='free'),
+        GewekeCase(1, 1, sparsity='free'),
+        GewekeCase(3, 2, sparsity='free'),
+        GewekeCase(3, 2, sparsity='supersparse'),
+        GewekeCase(10, 1, sparsity='supersparse'),
+        # with a flatter tree prior, fewer moves are accepted almost surely and
+        # the trees run out of decision rules, so the proposal ratios matter
+        GewekeCase(1, 1, flat=True),
+        GewekeCase(1, 3, flat=True),
+        GewekeCase(3, 2, flat=True),
+        GewekeCase(10, 255, flat=True),
+        GewekeCase(3, 2, flat=True, min_points=(6, 3)),
+        GewekeCase(10, 255, min_points=(6, 3)),
+        GewekeCase(10, 255, leaf_prior=True),
+        GewekeCase(10, 255, outcome='binary'),
+        GewekeCase(10, 255, outcome='multivariate', leaf_prior=True),
+        GewekeCase(10, 255, outcome='mixed'),
+        GewekeCase(10, 255, error_scale=True),
+    ],
+    ids=str,
+)
+def test_joint_distribution(keys: split, case: GewekeCase, subtests: SubTests) -> None:
+    """Check `step` keeps parameters and data jointly distributed as the model.
+
+    Many independent chains start from draws of the model, and alternate
+    `step` with drawing new data given the parameters (Geweke 2004). If `step`
+    leaves the posterior invariant, the chains stay distributed as the model,
+    which is compared against independent draws. The blocked low-p cases with
+    variable selection stress-test the augmentation of `log_s`.
+    """
+    state = geweke_state(keys.pop(), case)
+    initial = sample_joint(keys.pop(), copy_arrays(state))
+    final = run_geweke_chains(keys.pop(GEWEKE_NUM_STEPS), initial)
+    ref = sample_joint(keys.pop(), state)
+
+    # a sampler stuck at its initial state would pass the comparison
+    with subtests.test('chains move'):
+        changed = initial.forest.split_tree != final.forest.split_tree
+        changed = chain_to_axis(changed, chain_vmap_axes(final).forest.split_tree)
+        moved = jnp.any(changed.reshape(GEWEKE_NUM_CHAINS, -1), axis=1)
+        assert jnp.mean(moved) > 0.5
+
+    X_test = random.randint(
+        keys.pop(), (case.p, GEWEKE_NUM_TEST), 0, case.nsplits + 1, jnp.uint8
+    )
+    mcmc_stats = summaries(final, X_test)
+    ref_stats = summaries(ref, X_test)
+
+    # where the distribution is known exactly, compare with it, which has more
+    # power than comparing with independent draws
+    errors = vmap(standardized_errors, in_axes=(chain_vmap_axes(final),))(final)
+    exact = {'errors': (errors.ravel(), stats.norm.cdf)}
+    for name, prec in (
+        ('leaf precision', final.forest.leaf_prior_cov_inv),
+        ('error precision', final.error_cov_inv),
+    ):
+        if prec.nu is not None and prec.value.ndim == 1:
+            assert prec.rate is not None
+            cdf = stats.gamma(prec.nu.item() / 2, scale=2 / prec.rate.item()).cdf
+            exact[name] = (prec.value, cdf)
+
+    # keep the joint false alarm rate low
+    threshold = 1e-3 / (len(mcmc_stats) + len(exact))
+
+    for name, x in mcmc_stats.items():
+        with subtests.test(name):
+            pvalue = ks_2samp(x, ref_stats[name], method='asymp').pvalue
+            assert pvalue > threshold
+
+    for name, (x, cdf) in exact.items():
+        with subtests.test(f'{name} (exact)'):
+            assert ks_1samp(x, cdf).pvalue > threshold
 
 
 class TestMixedBinaryContinuous:
@@ -2052,7 +2518,7 @@ class TestMixedBinaryContinuous:
             max_split=max_split,
             num_trees=NUM_TREES,
             p_nonterminal=jnp.full(self.d - 1, 0.9),
-            leaf_prior_cov_inv=jnp.eye(self.k) * NUM_TREES,
+            leaf_prior_cov_inv=Wishart(None, None, jnp.eye(self.k) * NUM_TREES),
             error_cov_inv=DiagWishart(
                 nu=2.0, rate=jnp.diag(jnp.array([0.0, 2.0, 0.0])), value=jnp.eye(self.k)
             ),
@@ -2297,6 +2763,105 @@ def mcmcstep_data(mcmcstep_data_shape: tuple[int, int]) -> MCMCStepData:
     return MCMCStepData(X, y, max_split)
 
 
+class TestStepLeafPriorCovInv:
+    """Test the Gibbs update of the leaf prior precision."""
+
+    @pytest.fixture(params=['uv', 'mv'])
+    def init_kwargs(self, request: FixtureRequest, mcmcstep_data: MCMCStepData) -> dict:
+        """Arguments to `init` for a univariate or bivariate regression."""
+        X, y, max_split = mcmcstep_data
+        kw: dict = dict(
+            X=X,
+            max_split=max_split,
+            num_trees=NUM_TREES,
+            p_nonterminal=jnp.array([0.9, 0.5]),
+        )
+        # a precision of 4 gives a leaf unit of 1/2, which exercises the
+        # conversion of the leaves to data units
+        if request.param == 'mv':
+            k = 2
+            eye = jnp.eye(k)
+            return dict(
+                kw,
+                y=jnp.stack([y, -y]),
+                offset=jnp.zeros(k),
+                leaf_prior_cov_inv=Wishart(None, None, 4.0 * eye),
+                error_cov_inv=Wishart(nu=2.0, rate=2.0 * eye, value=eye),
+            )
+        else:
+            return dict(
+                kw,
+                y=y,
+                offset=0.0,
+                leaf_prior_cov_inv=Wishart(None, None, 4.0),
+                error_cov_inv=Wishart(nu=2.0, rate=2.0, value=1.0),
+            )
+
+    @pytest.fixture
+    def prior(self, init_kwargs: dict) -> Wishart:
+        """Put a Wishart prior on the leaf precision, centered on the fixed value."""
+        value = init_kwargs['leaf_prior_cov_inv'].value
+        return Wishart(nu=3.0 + value.ndim, rate=0.5 * value, value=value)
+
+    def test_reject_diag_wishart(self, init_kwargs: dict, prior: Wishart) -> None:
+        """`DiagWishart` is not allowed as leaf prior."""
+        if prior.value.ndim == 0:
+            pytest.skip('DiagWishart is multivariate only')
+        diag = DiagWishart(nu=prior.nu, rate=prior.rate, value=prior.value)
+        kw: dict = dict(init_kwargs, leaf_prior_cov_inv=diag)
+        with pytest.raises(AssertionError, match='dense Wishart'):
+            init(**kw)
+
+    def test_reject_shape_mismatch(self, init_kwargs: dict, prior: Wishart) -> None:
+        """The prior rate must match the outcome shape."""
+        bad = Wishart(nu=prior.nu, rate=jnp.ones((3, 3)), value=prior.value)
+        kw: dict = dict(init_kwargs, leaf_prior_cov_inv=bad)
+        with pytest.raises(AssertionError):
+            init(**kw)
+
+    # `step` runs under float32 matmuls; without it, gpu contracts via tf32
+    @float32_matmuls
+    def test_closed_form(self, keys: split, init_kwargs: dict, prior: Wishart) -> None:
+        """The update on a hand-built forest matches the conjugate formula."""
+        kw: dict = dict(init_kwargs, leaf_prior_cov_inv=prior)
+        state = init(**kw)
+        prior = state.forest.leaf_prior_cov_inv  # `init` donates the input
+
+        # tree 0: root split, leaves 2, 3
+        # tree 2: nodes 1 and 2 split, leaves 3, 4, 5 (4, 5 at the bottom level)
+        # other trees: root leaf
+        split_tree = jnp.zeros_like(state.forest.split_tree)
+        split_tree = split_tree.at[0, 1].set(1)
+        split_tree = split_tree.at[2, 1:3].set(1)
+        leaves = [(0, 2), (0, 3), (1, 1), (2, 3), (2, 4), (2, 5), (3, 1), (4, 1)]
+
+        # fill all nodes, non-leaves included, to check they are masked out
+        leaf_tree = random.normal(keys.pop(), state.forest.leaf_tree.shape)
+
+        state = replace(
+            state,
+            forest=replace(state.forest, split_tree=split_tree, leaf_tree=leaf_tree),
+        )
+
+        values = jnp.stack([leaf_tree[t, ..., i] for t, i in leaves])
+        values *= state.forest.leaf_unit
+        if values.ndim == 2:
+            expected_scatter = values.T @ values
+        else:
+            expected_scatter = jnp.sum(jnp.square(values))
+
+        count, scatter = leaf_scatter(state.forest)
+        assert count == len(leaves)
+        assert_close_matrices(scatter, expected_scatter, rtol=1e-6)
+
+        key = keys.pop()
+        actual = step_leaf_prior_cov_inv(key, state).forest.leaf_prior_cov_inv.value
+        expected = sample_wishart_posterior(
+            random.clone(key), prior, jnp.int32(len(leaves)), expected_scatter
+        )
+        assert_close_matrices(actual, expected, rtol=1e-6)
+
+
 @pytest.mark.parametrize('offset', [-30.0, 30.0])
 def test_z_valid_with_confident_misclassification(
     keys: split, mcmcstep_data: MCMCStepData, offset: float
@@ -2316,7 +2881,7 @@ def test_z_valid_with_confident_misclassification(
         max_split=max_split,
         num_trees=NUM_TREES,
         p_nonterminal=jnp.array([0.9, 0.5]),
-        leaf_prior_cov_inv=1.0,
+        leaf_prior_cov_inv=Wishart(None, None, 1.0),
     )
 
     # `step_z` and not `step` because `step` is jitted, and whether xla flushes
@@ -2522,95 +3087,25 @@ class TestPrecomputeTerms:
             result_uv.mean_factor,
             result_mv.mean_factor.squeeze((1, 2)),
             rtol=1e-6,
-            atol=1e-6,
+            atol=1e-7,
         )
         assert_close_matrices(
             result_uv.centered_leaves,
             result_mv.centered_leaves.squeeze(1),
             rtol=1e-6,
-            atol=1e-6,
+            atol=1e-7,
         )
         # the posterior precision is error_cov_inv / mean_factor when k = 1
         assert_close_matrices(
             jnp.log(inv_sigma2 / result_uv.mean_factor),
             result_mv.logdet_prec,
             rtol=1e-6,
-            atol=1e-6,
+            atol=1e-7,
         )
 
 
 class TestMVBartIntegration:
     """Test equivalence between Univariate and Multivariate (k=1) modes."""
-
-    @pytest.mark.parametrize('binary', [False, True])
-    def test_init_equivalence(self, mcmcstep_data: MCMCStepData, binary: bool) -> None:
-        """Test that init produces compatible structures for UV and MV(k=1)."""
-        X, y, max_split = mcmcstep_data
-        p_nonterminal = jnp.array([0.9, 0.5])
-
-        if binary:
-            y = (y > 0).astype(jnp.float32)
-
-        common = partial(
-            copy_arrays,
-            dict(
-                X=X,
-                max_split=max_split,
-                num_trees=NUM_TREES,
-                p_nonterminal=p_nonterminal,
-                resid_reduction_config=BatchedReduction(num_batches=None),
-                count_reduction_config=BatchedReduction(num_batches=None),
-            ),
-        )
-
-        uv_kw: dict = dict(y=y, offset=0.0, leaf_prior_cov_inv=1.0)
-        mv_kw: dict = dict(
-            y=y[None, :], offset=jnp.zeros(1), leaf_prior_cov_inv=jnp.array([[1.0]])
-        )
-
-        if binary:
-            uv_kw.update(outcome_type='binary')
-            mv_kw.update(outcome_type='binary')
-        else:
-            uv_kw.update(error_cov_inv=Wishart(nu=6.0, rate=4.0, value=1.5))
-            mv_kw.update(
-                error_cov_inv=Wishart(
-                    nu=jnp.array(6.0), rate=4.0 * jnp.eye(1), value=1.5 * jnp.eye(1)
-                )
-            )
-
-        bart_uv = init(**uv_kw, **common())
-        bart_mv = init(**mv_kw, **common())
-
-        assert bart_uv.resid.ndim == 1
-        assert bart_mv.resid.ndim == 2
-        assert bart_mv.resid.shape[0] == 1
-        assert bart_mv.resid.shape[1] == bart_uv.resid.shape[0]
-
-        assert jnp.ndim(bart_uv.error_cov_inv.value) == 0
-        assert bart_mv.error_cov_inv.value.shape == (1, 1)
-
-        assert bart_uv.y.ndim == 1
-        assert bart_mv.y.ndim == 2
-        assert_array_equal(bart_uv.y, bart_mv.y.squeeze(0))
-
-        if binary:
-            assert bart_uv.z is not None
-            assert bart_mv.z is not None
-            assert bart_uv.z.ndim == 1
-            assert bart_mv.z.ndim == 2
-            assert_array_equal(bart_uv.z, bart_mv.z.squeeze(0))
-
-        assert_array_equal(bart_uv.resid, bart_mv.resid.squeeze(0))
-        assert_array_equal(bart_uv.forest.var_tree, bart_mv.forest.var_tree)
-        assert_array_equal(bart_uv.forest.split_tree, bart_mv.forest.split_tree)
-        assert_array_equal(
-            bart_uv.forest.leaf_tree, bart_mv.forest.leaf_tree.squeeze(1)
-        )
-        assert_array_equal(bart_uv.forest.leaf_indices, bart_mv.forest.leaf_indices)
-        assert_array_equal(bart_uv.forest.p_nonterminal, bart_mv.forest.p_nonterminal)
-        assert_array_equal(bart_uv.forest.p_propose_grow, bart_mv.forest.p_propose_grow)
-        assert_array_equal(bart_uv.forest.affluence_tree, bart_mv.forest.affluence_tree)
 
     def test_step_sigma_distribution_match(
         self, keys: split, mcmcstep_data: MCMCStepData
@@ -2867,9 +3362,15 @@ class TestMultivariate:
             ),
         )
 
-        uv_kw: dict = dict(y=y, offset=0.0, leaf_prior_cov_inv=jnp.float32(NUM_TREES))
+        uv_kw: dict = dict(
+            y=y,
+            offset=0.0,
+            leaf_prior_cov_inv=Wishart(None, None, jnp.float32(NUM_TREES)),
+        )
         mv_kw: dict = dict(
-            y=y[None, :], offset=jnp.zeros(1), leaf_prior_cov_inv=NUM_TREES * jnp.eye(1)
+            y=y[None, :],
+            offset=jnp.zeros(1),
+            leaf_prior_cov_inv=Wishart(None, None, NUM_TREES * jnp.eye(1)),
         )
 
         if kind == 'binary':
@@ -2980,7 +3481,7 @@ class TestMultivariate:
             max_split=max_split,
             num_trees=NUM_TREES,
             p_nonterminal=jnp.array([0.9, 0.5]),
-            leaf_prior_cov_inv=jnp.eye(k),
+            leaf_prior_cov_inv=Wishart(None, None, jnp.eye(k)),
             resid_reduction_config=BatchedReduction(num_batches=None),
             count_reduction_config=BatchedReduction(num_batches=None),
         )
@@ -3022,71 +3523,174 @@ class TestMultivariate:
                 assert jnp.all(jnp.isfinite(mv_state.z))
                 assert mv_state.z.shape == y.shape
 
-    @pytest.mark.parametrize('k', [1, 3])
-    def test_mv_het_vector_equiv_scalar(
-        self, keys: split, mcmcstep_data: MCMCStepData, k: int
-    ) -> None:
-        """Constant per-component error scales equal scalar error scales."""
-        X, y_uv, max_split = mcmcstep_data
-        n = y_uv.size
-
-        y = jnp.tile(y_uv, (k, 1))
-        y = y + random.normal(keys.pop(), y.shape) * 0.1
-
-        w_scalar = jnp.exp(random.uniform(keys.pop(), (n,), float, -0.5, 0.5))
-        w_vector = jnp.broadcast_to(w_scalar, (k, n))
-
-        params = partial(
-            copy_arrays,
-            dict(
-                X=X,
-                y=y,
-                offset=jnp.zeros(k),
-                max_split=max_split,
-                num_trees=NUM_TREES,
-                p_nonterminal=jnp.array([0.9, 0.5]),
-                leaf_prior_cov_inv=jnp.eye(k),
-                error_cov_inv=Wishart(
-                    nu=jnp.array(4.0 + k), rate=jnp.eye(k), value=(4.0 + k) * jnp.eye(k)
-                ),
-                resid_reduction_config=BatchedReduction(num_batches=None),
-                count_reduction_config=BatchedReduction(num_batches=None),
-                # this checks the scalar- and vector-scale code paths agree; the
-                # scalar (n,) and vector (k, k, n) prec_scale carry the same values
-                # but float16 storage perturbs the two paths' linear algebra
-                # differently, so store in float32 to test the path equivalence alone
-                prec_scale_dtype=jnp.float32,
-            ),
-        )
-
-        scalar_state = init(error_scale=w_scalar, **params())
-        vector_state = init(error_scale=w_vector, **params())
-
-        assert scalar_state.prec_scale is not None
-        assert scalar_state.prec_scale.shape == (n,)
-        assert vector_state.prec_scale is not None
-        assert vector_state.prec_scale.shape == (k, k, n)
-
-        # scalar error scales produce 1-D ``inv_sdev_scale`` (Wishart error cov
-        # update) while per-component ones produce 2-D ``inv_sdev_scale`` (diagonal update),
-        # so the error_cov_inv updates are not equivalent, we can't use the full `step`.
-        for _ in range(3):
-            key = keys.pop()
-            scalar_state = step_trees(key, scalar_state)
-            vector_state = step_trees(random.clone(key), vector_state)
-
-            assert_close_matrices(scalar_state.resid, vector_state.resid, rtol=1e-5)
-            assert_close_matrices(
-                scalar_state.forest.leaf_tree,
-                vector_state.forest.leaf_tree,
-                rtol=3e-5,
-                reduce_rank=True,
-            )
-
 
 def copy_arrays(x: PyTree) -> PyTree:
     """Make a copy of the arrays in `x`, intended for buffer donation."""
     return tree.map(lambda x: jnp.array(x) if isinstance(x, jnp.ndarray) else x, x)
+
+
+class TestStepTheta:
+    """Test `step_theta`."""
+
+    def state(
+        self, keys: split, a: float, b: float, theta: float, p: int = 10
+    ) -> State:
+        """Create a state with variable selection and a fixed `log_s`.
+
+        `theta` is the concentration `log_s` is drawn with, and `rho` is set to `p`.
+        """
+        n = 5
+        state = init(
+            X=jnp.zeros((p, n), jnp.uint8),
+            y=jnp.zeros(n),
+            offset=0.0,
+            max_split=jnp.ones(p, jnp.uint8),
+            num_trees=2,
+            p_nonterminal=make_p_nonterminal(3),
+            leaf_prior_cov_inv=Wishart(None, None, 2.0),
+            error_cov_inv=Wishart(4.0, 4.0, 1.0),
+            a=a,
+            b=b,
+            rho=float(p),
+            sparse_on_at=0,
+        )
+        log_s = sample_s(keys.pop(), theta, p)
+        return replace(
+            state,
+            forest=replace(
+                state.forest, sparsity=replace(state.forest.sparsity, log_s=log_s)
+            ),
+        )
+
+    @staticmethod
+    def log_density(
+        state: State, v: Float[numpy.ndarray, ' n']
+    ) -> Float[numpy.ndarray, ' n']:
+        """Compute the unnormalized log density of ``log(theta / rho)``, in float64."""
+        forest = state.forest
+        log_s = numpy.asarray(nnone(forest.sparsity.log_s), numpy.float64)
+        log_s -= special.logsumexp(log_s)
+        a, b = nnone(forest.sparsity.a).item(), nnone(forest.sparsity.b).item()
+        rho = nnone(forest.sparsity.rho).item()
+        (p,) = log_s.shape
+        theta = rho * numpy.exp(v)
+        return (
+            -a * numpy.logaddexp(0, -v)
+            - b * numpy.logaddexp(0, v)
+            + special.gammaln(theta)
+            - p * special.gammaln(theta / p)
+            + theta / p * log_s.sum()
+        )
+
+    def posterior_cdf(self, state: State) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """Compute the cdf of ``log(theta / rho)`` on a fine grid, in float64."""
+        v = numpy.linspace(-80, 60, 2_000_001)
+        log_density = self.log_density(state, v)
+        cdf = numpy.cumsum(numpy.exp(log_density - log_density.max()))
+        return v, cdf / cdf[-1]
+
+    @staticmethod
+    @jit
+    def run(
+        keys: Key[Array, ' draws'], state: State, v0: Float32[Array, '']
+    ) -> Float32[Array, ' draws']:
+        """Draw ``log(theta / rho)`` with `step_theta`, from ``theta = rho exp(v0)``."""
+        forest = state.forest
+        theta = nnone(forest.sparsity.rho) * jnp.exp(v0)
+        state = replace(
+            state,
+            forest=replace(forest, sparsity=replace(forest.sparsity, theta=theta)),
+        )
+
+        def draw(key: Key[Array, '']) -> Float32[Array, '']:
+            new_theta = nnone(step_theta(key, state).forest.sparsity.theta)
+            return jnp.log(new_theta / nnone(forest.sparsity.rho))
+
+        return vmap(draw)(keys)
+
+    @pytest.mark.parametrize(('a', 'b'), [(0.5, 1.0), (20.0, 20.0), (0.2, 0.2)])
+    @pytest.mark.parametrize('theta', [300.0, 3.0, 0.01])
+    @pytest.mark.parametrize('p', [10, 1000])
+    def test_posterior(
+        self, keys: split, a: float, b: float, theta: float, p: int
+    ) -> None:
+        """Check the draws are distributed as the full conditional.
+
+        The approximation of the full conditional is accurate only to within a
+        bin of the grid, which is not detectable here with up to ~1000
+        variables.
+        """
+        state = self.state(keys, a, b, theta, p)
+        v, cdf = self.posterior_cdf(state)
+        v1 = self.run(keys.pop(20_000), state, jnp.float32(0.0))
+        cdf_func = partial(numpy.interp, xp=v, fp=cdf)
+        assert ks_1samp(numpy.asarray(v1, numpy.float64), cdf_func).pvalue > 1e-3
+
+    @pytest.mark.parametrize('c', [0.01, 5.0, 300.0])
+    @pytest.mark.parametrize('p', [1000, 100_000])
+    def test_log_density_precision(self, keys: split, c: float, p: int) -> None:
+        """The float32 log density is accurate on the support of the posterior.
+
+        The tolerance is about the float32 resolution of a log density of
+        magnitude `p`. `c` is the concentration of each component of `s`.
+        """
+        state = self.state(keys, 0.5, 1.0, c * p, p)
+        v, cdf = self.posterior_cdf(state)
+        lo, hi = numpy.interp([1e-6, 1 - 1e-6], cdf, v)
+        v = numpy.linspace(lo, hi, 1001)
+        forest = state.forest
+        log_density = _log_p_v(
+            jnp.asarray(v, jnp.float32),
+            log_s=nnone(forest.sparsity.log_s),
+            a=nnone(forest.sparsity.a),
+            b=nnone(forest.sparsity.b),
+            rho=nnone(forest.sparsity.rho),
+        )
+        error = numpy.asarray(log_density, numpy.float64) - self.log_density(state, v)
+        assert_allclose(error, error.mean(), atol=2e-6 * p, allow_non_scalar=True)
+
+    def test_many_variables(self, keys: split) -> None:
+        """With very many variables, `theta` keeps moving near its full conditional.
+
+        The full conditional is narrower than a bin of the grid, which made a
+        Metropolis-Hastings correction of the draw reject almost always.
+        """
+        state = self.state(keys, 1.0, 1.0, 3.0, 100_000)
+        v, cdf = self.posterior_cdf(state)
+        median = numpy.interp(0.5, cdf, v)
+        v0 = jnp.float32(median)
+        v1 = self.run(keys.pop(1000), state, v0)
+        assert jnp.mean(v1 != v0) > 0.99
+        width = 2 * 40.0 / 10_000  # the grid has the maximum number of bins
+        assert abs(numpy.median(numpy.asarray(v1)) - median) < width
+
+    def test_extreme_sparsity(self, keys: split) -> None:
+        """A very sparse `s` makes the log density overflow, but not `theta`."""
+        state = self.state(keys, 1.0, 1.0, 1.0)
+        p = nnone(state.forest.sparsity.log_s).size
+        log_s = jnp.full(p, -1e21).at[0].set(0.0)
+        state = replace(
+            state,
+            forest=replace(
+                state.forest, sparsity=replace(state.forest.sparsity, log_s=log_s)
+            ),
+        )
+        v = self.run(keys.pop(100), state, jnp.float32(0.0))
+        assert jnp.all(jnp.isfinite(v))
+
+
+def test_stirling_remainder() -> None:
+    """`stirling_remainder` is accurate in float32 over the whole range."""
+    z = numpy.logspace(-30, 30, 1001).astype(numpy.float32)
+    r = stirling_remainder(jnp.asarray(z))
+    z = z.astype(numpy.float64)
+    expected = (
+        special.gammaln(z) - (z - 0.5) * numpy.log(z) + z - numpy.log(2 * numpy.pi) / 2
+    )
+    # the formula cancels catastrophically for large z also in float64
+    large = z > 1e3
+    expected[large] = 1 / (12 * z[large]) - 1 / (360 * z[large] ** 3)
+    assert_allclose(r, expected, rtol=2e-6, allow_non_scalar=True)
 
 
 class TestSampleSAugmentation:
@@ -3109,7 +3713,10 @@ class TestSampleSAugmentation:
         object.__setattr__(forest, 'var_tree', var_tree)
         object.__setattr__(forest, 'split_tree', split_tree)
         object.__setattr__(forest, 'max_split', max_split)
-        object.__setattr__(forest, 'log_s', log_s)
+        sparsity = Sparsity(
+            log_s=log_s, theta=None, a=None, b=None, rho=None, log_theta_range=None
+        )
+        object.__setattr__(forest, 'sparsity', sparsity)
         return forest
 
     @staticmethod
@@ -3118,6 +3725,15 @@ class TestSampleSAugmentation:
     ) -> UInt[Array, ' num_trees half_tree_size']:
         """Stack `num_trees` identical copies of a tree heap."""
         return jnp.broadcast_to(tree_heap, (num_trees, tree_heap.size))
+
+    def test_no_selectable_variables(self, keys: split) -> None:
+        """With no variable to split on, the counts are zero, not nan."""
+        stumps = jnp.zeros((NUM_TREES, 4), jnp.uint8)
+        forest = self._forest(
+            stumps, stumps, jnp.zeros(3, jnp.uint8), jnp.array([0.0, -1.0, 1.0])
+        )
+        log_draws = sample_s_augmentation(keys.pop(), forest)
+        assert_array_equal(jnp.exp(log_draws), jnp.zeros(3))
 
     def test_mean_matches_closed_form(self, keys: split) -> None:
         """A tree blocking one variable at one node gives the known Poisson mean."""
@@ -3137,9 +3753,10 @@ class TestSampleSAugmentation:
         # the augmentation count of variable 0 is Poisson with mean below
         expected = NUM_TREES * s[0] / (1 - s[0])
 
-        draws = jit(vmap(lambda key: sample_s_augmentation(key, forest)))(
+        log_draws = jit(vmap(lambda key: sample_s_augmentation(key, forest)))(
             keys.pop(20_000)
         )
+        draws = jnp.exp(log_draws)
         # variables 1 and 2 are never blocked, so their counts are exactly zero
         assert_array_equal(draws[:, 1:], jnp.zeros_like(draws[:, 1:]))
         mean = jnp.mean(draws[:, 0])
@@ -3152,18 +3769,19 @@ class TestSampleSAugmentation:
         var_tree: UInt[Array, ' half_tree_size'],
         split_tree: UInt[Array, ' half_tree_size'],
         max_split: UInt[Array, ' p'],
-        s: Float32[Array, ' p'],
+        log_s: Float32[Array, ' p'],
     ) -> Float32[Array, ' p']:
         """Ancestor-list reference for `_blocked_mass_tree`.
 
         This is the straightforward per-node implementation: list the ineligible
-        variables at each node, deduplicate them, and scatter the augmentation
-        weight directly. Given the same key it draws the same per-node weights as
-        `_blocked_mass_tree`, so the two must agree up to summation reassociation.
+        variables at each node, deduplicate them, sum the eligible split
+        probabilities with a mask over all the variables, and accumulate the
+        augmentation weights per variable in log space. Given the same key it draws the same
+        per-node weights as `_blocked_mass_tree`, so the two must agree up to
+        summation reassociation.
         """
         p = max_split.size
         (half_tree_size,) = split_tree.shape
-        s_padded = jnp.append(s, 0.0)
         nodes = jnp.arange(half_tree_size)
         ineligible = vmap(fully_used_variables, in_axes=(None, None, None, 0))(
             var_tree, split_tree, max_split, nodes
@@ -3173,16 +3791,23 @@ class TestSampleSAugmentation:
         earlier = jnp.tril(jnp.ones((ncol, ncol), bool), -1)
         seen_before = jnp.any(equal & earlier, axis=-1)
         is_first = (ineligible != p) & ~seen_before
-        ineligible_mass = jnp.sum(s_padded[ineligible] * is_first, axis=-1)
-        eligible_mass = jnp.maximum(1.0 - ineligible_mass, jnp.finfo(jnp.float32).eps)
+        mask = jnp.any(ineligible[:, :, None] == jnp.arange(p), axis=1)
+        log_eligible = logsumexp(jnp.where(mask, -jnp.inf, log_s), axis=-1)
         is_internal = split_tree.astype(bool)
-        weight = jnp.where(is_internal, random.exponential(key, (half_tree_size,)), 0.0)
-        weight /= eligible_mass
-        weights = is_first * weight[:, None]
-        return jnp.zeros(p + 1).at[ineligible.ravel()].add(weights.ravel())[:p]
+        log_weight = jnp.log(random.exponential(key, (half_tree_size,))) - log_eligible
+        log_weight = jnp.where(is_internal, log_weight, -jnp.inf)
+        log_weights = jnp.where(is_first, log_weight[:, None], -jnp.inf).ravel()
+        at_var = ineligible.ravel() == jnp.arange(p)[:, None]
+        return logsumexp(jnp.where(at_var, log_weights, -jnp.inf), axis=1)
 
-    def test_blocked_mass_matches_reference(self, keys: split) -> None:
-        """`_blocked_mass_tree` matches the ancestor-list reference to float."""
+    @pytest.mark.parametrize('sparse', [False, True])
+    def test_blocked_mass_matches_reference(self, keys: split, sparse: bool) -> None:
+        """`_blocked_mass_tree` matches the ancestor-list reference to float.
+
+        With a very sparse `s`, the eligible mass is tiny where the dominant
+        variable is ineligible, and computing it as one minus the ineligible
+        mass would cancel.
+        """
         # Grow a forest tuned for heavy blocking: few cutpoints so variables
         # exhaust quickly, but enough trees and variables and a high grow
         # probability (low beta) so the trees stay deep below the exhausted
@@ -3197,7 +3822,7 @@ class TestSampleSAugmentation:
             max_split=jnp.full(p, 2, jnp.uint8),
             num_trees=16,
             p_nonterminal=make_p_nonterminal(6, alpha=0.99, beta=0.5),
-            leaf_prior_cov_inv=1.0,
+            leaf_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
             a=0.5,
@@ -3209,18 +3834,36 @@ class TestSampleSAugmentation:
         for _ in range(40):
             state = step(keys.pop(), state)
         forest = state.forest
-        (num_trees, _) = forest.var_tree.shape
+        (num_trees, half_tree_size) = forest.var_tree.shape
+        d_minus_1 = half_tree_size.bit_length() - 1
 
-        s = softmax(nnone(forest.log_s))  # all selectable
+        # get log_s
+        log_s = nnone(forest.sparsity.log_s)
+        if sparse:
+            log_s = sample_s(keys.pop(), 0.01, p)
+
+        # normalize log_s
+        log_s -= logsumexp(log_s)  # all selectable
+
+        # prepare arguments shared by the actual and reference implementations
         tree_keys = keys.pop(num_trees)
         kw: dict = dict(in_axes=(0, 0, 0, None, None))
-        args = (tree_keys, forest.var_tree, forest.split_tree, forest.max_split, s)
-        new = vmap(_blocked_mass_tree, **kw)(*args)
-        ref = vmap(self._reference_blocked_mass_tree, **kw)(*args)
+        args = (tree_keys, forest.var_tree, forest.split_tree, forest.max_split)
+
+        # invoke actual implementation
+        s = S.from_log_s(log_s, jnp.ones(p, bool), 2 * d_minus_1)
+        new = vmap(log_blocked_mass_tree, **kw)(*args, s)
+
+        # invoke reference implementation
+        ref = vmap(self._reference_blocked_mass_tree, **kw)(*args, log_s)
 
         # guard against a silently vacuous test: many variables must be blocked
-        assert int((new > 0).sum()) >= 5
-        assert_close_matrices(new, ref, rtol=1e-5)
+        assert int(jnp.isfinite(new).sum()) >= 5
+        assert_array_equal(jnp.isneginf(new), jnp.isneginf(ref))
+        finite = jnp.isfinite(ref)
+        assert_close_matrices(
+            jnp.where(finite, new, 0.0), jnp.where(finite, ref, 0.0), atol=1e-4
+        )
 
     def test_augment_noop_without_forbidden_rules(self, keys: split) -> None:
         """Without forbidden rules, `step_s` draws the same with or without it."""
@@ -3232,7 +3875,7 @@ class TestSampleSAugmentation:
             max_split=jnp.full(p, 4, jnp.uint8),
             num_trees=NUM_TREES,
             p_nonterminal=make_p_nonterminal(4),
-            leaf_prior_cov_inv=1.0,
+            leaf_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
             a=0.5,
@@ -3256,10 +3899,12 @@ class TestSampleSAugmentation:
         state = replace(state, forest=forest)
 
         # the augmentation is then exactly zero
-        assert jnp.all(sample_s_augmentation(keys.pop(), forest) == 0)
+        assert jnp.all(jnp.isneginf(sample_s_augmentation(keys.pop(), forest)))
 
         # so the Dirichlet draw is identical with and without augmentation
         key = keys.pop()
         on = step_s(key, replace(state, config=replace(state.config, augment=True)))
         off = step_s(key, replace(state, config=replace(state.config, augment=False)))
-        assert_array_equal(nnone(on.forest.log_s), nnone(off.forest.log_s))
+        assert_array_equal(
+            nnone(on.forest.sparsity.log_s), nnone(off.forest.sparsity.log_s)
+        )

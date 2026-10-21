@@ -26,7 +26,7 @@
 
 uv's `[tool.uv] exclude-newer` accepts a relative span (e.g. `1 week`), but a
 span re-resolves against wall-clock time, so `make release` and the uv-lock
-pre-commit hook would compute different cutoffs and churn the lockfile. Pin it
+hook would compute different cutoffs and churn the lockfile. Pin it
 to `today - cooldown_days` as an RFC 3339 UTC instant instead: an absolute
 value both agree on, anchored to the UTC day so same-day runs are reproducible.
 """
@@ -37,19 +37,7 @@ import re
 import sys
 from pathlib import Path
 
-
-def parse_datetime(s: str) -> datetime.datetime:
-    """Parse an RFC 3339 timestamp, requiring an explicit timezone offset."""
-    dt = datetime.datetime.fromisoformat(s.replace('Z', '+00:00'))
-    if dt.tzinfo is None:
-        msg = f'timestamp {s!r} must include a timezone offset'
-        raise argparse.ArgumentTypeError(msg)
-    return dt
-
-
-def format_utc(dt: datetime.datetime) -> str:
-    """Format an instant as an RFC 3339 UTC timestamp with a trailing `Z`."""
-    return dt.astimezone(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+from config._common import format_utc, parse_datetime
 
 
 def pin_exclude_newer(pyproject_path: Path, cutoff: datetime.datetime) -> bool:

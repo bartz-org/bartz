@@ -30,7 +30,7 @@ from functools import partial
 from typing import Any, Literal
 
 import pytest
-from equinox import filter_jit
+from equinox import filter_jit, tree_at
 from jax import (
     NamedSharding,
     block_until_ready,
@@ -44,7 +44,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Shaped, UInt8
+from jaxtyping import Array, Float, Int32, Key, Shaped, UInt, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import (
@@ -53,8 +53,10 @@ from bartz._jaxext import (
     get_device_count,
     split,
 )
+from bartz.grove import is_actual_leaf
 from bartz.mcmcloop import (
     BurninTrace,
+    Callback,
     CheckPlatformCallback,
     MainTrace,
     evaluate_trace,
@@ -62,8 +64,8 @@ from bartz.mcmcloop import (
     run_mcmc,
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
-from bartz.mcmcloop._loop import _inner_loop_counter
-from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal
+from bartz.mcmcloop._trace import Trace
+from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.testing import QuantizedData, gen_data
 from tests.util import assert_array_equal, assert_close_matrices, nnone
@@ -106,16 +108,14 @@ def simple_init(
         max_split=data.max_split,
         num_trees=ntree,
         p_nonterminal=make_p_nonterminal(6),
-        leaf_prior_cov_inv=eye,
+        leaf_prior_cov_inv=Wishart(nu=None, rate=None, value=eye),
         error_cov_inv=Wishart(nu=2.0, rate=2 * eye, value=eye),
         min_points_per_decision_node=10,
         **kwargs,
     )
 
 
-def cat_traces(
-    trace_a: MainTrace | BurninTrace, trace_b: MainTrace | BurninTrace
-) -> MainTrace | BurninTrace:
+def cat_traces(trace_a: Trace, trace_b: Trace) -> Trace:
     """Concatenate two traces along their per-leaf sample axis."""
     sample_axes = trace_sample_axes(trace_a)
 
@@ -144,6 +144,18 @@ def assert_trace_close(
         assert_close_matrices(actual, desired, rtol=1e-4, reduce_rank=True)
     else:
         assert_array_equal(actual, desired)
+
+
+def zero_non_leaves(
+    leaf_tree: Float[Array, '...'], split_tree: UInt[Array, '...']
+) -> Float[Array, '...']:
+    """Zero the values on nodes that are not leaves, as `MainTrace` does."""
+    is_leaf = jnp.vectorize(
+        partial(is_actual_leaf, add_bottom_level=True), signature='(h)->(t)'
+    )(split_tree)
+    if leaf_tree.ndim > is_leaf.ndim:  # multivariate
+        is_leaf = is_leaf[..., None, :]
+    return jnp.where(is_leaf, leaf_tree, 0)
 
 
 class TestRunMcmc:
@@ -178,7 +190,9 @@ class TestRunMcmc:
             return jnp.take(arr, -1, axis=axis)
 
         assert_array_equal(
-            final_state.forest.leaf_tree,
+            zero_non_leaves(
+                final_state.forest.leaf_tree, final_state.forest.split_tree
+            ),
             last_sample(main_trace.leaf_tree, sample_axes.leaf_tree),
         )
         assert_array_equal(
@@ -192,6 +206,10 @@ class TestRunMcmc:
         assert_array_equal(
             final_state.error_cov_inv.value,
             last_sample(main_trace.error_cov_inv, sample_axes.error_cov_inv),
+        )
+        assert_array_equal(
+            final_state.forest.leaf_prior_cov_inv.value,
+            last_sample(main_trace.leaf_prior_cov_inv, sample_axes.leaf_prior_cov_inv),
         )
 
     def test_zero_iterations(self, keys: split, initial_state: State) -> None:
@@ -222,21 +240,20 @@ class TestRunMcmc:
         check_trace(main_trace)
 
     @pytest.mark.parametrize('average', [True, False])
-    def test_tqdm_callback(
-        self, keys: split, initial_state: State, average: bool
-    ) -> None:
+    def test_tqdm_callback(self, keys: split, average: bool) -> None:
         """Check the tqdm progress bar runs to completion and is cleaned up.
 
         Parametrized over ``average`` to also exercise the stats-accumulator
         path where the running sums are absent (``average=False``), so each
-        report shows the latest iteration only.
+        report shows the latest iteration only. `test_pbar` in `test_interface`
+        covers the other state configurations.
         """
+        state = simple_init()
         buf = io.StringIO()
         callback = make_tqdm_callback(
-            initial_state, report_every=2, file=buf, mininterval=0, average=average
+            state, report_every=2, file=buf, mininterval=0, average=average
         )
         bar_id = callback.bar_id.item()
-        state = tree.map(jnp.copy, initial_state)  # donated
         with debug_key_reuse(False):
             # block so the (unordered, async) progress callbacks have all fired
             block_until_ready(
@@ -272,32 +289,6 @@ class TestRunMcmc:
         make_tqdm_callback(state, file=io.StringIO())  # triggers cleanup
         assert bar_id not in _TQDM_REGISTRY  # the stale bar was closed and dropped
         assert buf.getvalue().endswith('\n')  # closed cleanly, not left mid-line
-
-    def test_tqdm_no_recompilation(self, keys: split) -> None:
-        """Check two MCMC runs with a tqdm callback share the compiled inner loop.
-
-        The tqdm bar lives in a module-level registry and is referenced from the
-        loop only through an integer handle carried as a traceable scalar, so the
-        loop pytree is identical across runs and `_run_mcmc_inner_loop` is not
-        retraced (verified via the `_CallCounter`, see
-        ``test_no_recompilation_inner_loop_counter`` in ``test_interface``).
-        """
-        state = simple_init()
-
-        def run() -> None:
-            callback = make_tqdm_callback(state, disable=True)
-            with debug_key_reuse(False):
-                run_mcmc(
-                    keys.pop(),
-                    tree.map(jnp.copy, state),
-                    4,
-                    n_burn=2,
-                    callback=callback,
-                )
-
-        run()
-        run()
-        assert _inner_loop_counter.n_calls == 0
 
     def test_predicted_double_compilation(self, keys: split) -> None:
         """Check that an error is raised under jit if the configuration would lead to double compilation."""
@@ -386,22 +377,114 @@ class TestRunMcmc:
         tree.map(assert_trace_close, burnin_whole, burnin_chunked)
 
 
-@pytest.mark.parametrize('matches', [True, False])
-def test_check_platform_callback(keys: split, matches: bool) -> None:
-    """`CheckPlatformCallback` passes on the run platform and raises otherwise."""
+def test_custom_step(keys: split) -> None:
+    """Check `run_mcmc` drives a user-provided step function."""
+    marker = 0.125
+
+    def marking_double_counting_step(key: Key[Array, ''], state: State) -> State:
+        state = step(key, state)
+        # the marker is a value the default `step` would not produce, to detect
+        # which step ran
+        return tree_at(
+            lambda s: (s.error_cov_inv.value, s.config.steps_done),
+            state,
+            (
+                jnp.full_like(state.error_cov_inv.value, marker),
+                state.config.steps_done + 1,
+            ),
+        )
+
+    n_burn, n_save = 2, 3
+    with debug_key_reuse(False):
+        final_state, burnin_trace, main_trace = run_mcmc(
+            keys.pop(),
+            simple_init(),
+            n_save,
+            n_burn=n_burn,
+            step=marking_double_counting_step,
+        )
+    assert_array_equal(final_state.error_cov_inv.value, jnp.float32(marker))
+    assert_array_equal(nnone(burnin_trace.error_cov_inv), jnp.full(n_burn, marker))
+    assert_array_equal(nnone(main_trace.error_cov_inv), jnp.full(n_save, marker))
+    # `run_mcmc` owns `steps_done`, so the extra increment is discarded
+    assert_array_equal(final_state.config.steps_done, jnp.int32(n_burn + n_save))
+
+
+def frozen_step(key: Key[Array, ''], state: State) -> State:
+    """Like `step`, but leaves `State.config.steps_done` in place."""
+    new_state = step(key, state)
+    return tree_at(lambda s: s.config.steps_done, new_state, state.config.steps_done)
+
+
+def test_step_need_not_advance_steps_done(keys: split) -> None:
+    """Check the loop seeds itself even if `step` does not touch the counter."""
+    key = keys.pop()
+
+    default_state, _, default_main = run_mcmc(key, simple_init(), 4, n_burn=1)
+    frozen_state, _, frozen_main = run_mcmc(
+        random.clone(key), simple_init(), 4, n_burn=1, step=frozen_step
+    )
+
+    tree.map(assert_trace_close, default_main, frozen_main)
+    tree.map(assert_trace_close, default_state, frozen_state)
+
+
+def test_restartable_with_frozen_step(keys: split) -> None:
+    """Check the loop does not seed itself from a call-local counter.
+
+    Splitting a run must stay exact even if `step` leaves `steps_done` in
+    place.
+    """
+    key = keys.pop()
+    kw: dict = dict(n_burn=0, n_skip=1, step=frozen_step)
+
+    final_single, _, main_single = run_mcmc(key, simple_init(), 5, **kw)
+    mid, _, main_a = run_mcmc(random.clone(key), simple_init(), 2, **kw)
+    final_split, _, main_b = run_mcmc(random.clone(key), mid, 3, **kw)
+
+    tree.map(assert_trace_close, final_single, final_split)
+    tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
+
+
+class RecordStepsDoneCallback(Callback):
+    """Store ``steps_done - i_total`` in the state, to check it in the trace."""
+
+    def __call__(
+        self, *, state: State, i_total: Int32[Array, ''], **_: Any
+    ) -> tuple[State, Callback]:
+        """Overwrite the error covariance with the counter offset."""
+        delta = state.config.steps_done - i_total
+        state = tree_at(
+            lambda s: s.error_cov_inv.value,
+            state,
+            jnp.full_like(state.error_cov_inv.value, delta),
+        )
+        return state, self
+
+
+def test_callback_sees_advanced_steps_done(keys: split) -> None:
+    """Check the counter the callback sees does not depend on `step`."""
+    n_burn, n_save = 2, 3
+    kw: dict = dict(n_burn=n_burn, callback=RecordStepsDoneCallback())
+
+    for step_func in (step, frozen_step):
+        _, burnin_trace, main_trace = run_mcmc(
+            keys.pop(), simple_init(), n_save, step=step_func, **kw
+        )
+        assert_array_equal(nnone(burnin_trace.error_cov_inv), jnp.ones(n_burn))
+        assert_array_equal(nnone(main_trace.error_cov_inv), jnp.ones(n_save))
+
+
+def test_check_platform_callback_mismatch(keys: split) -> None:
+    """`CheckPlatformCallback` raises if the run platform is not the expected one.
+
+    The matching case runs in every `Bart` fit with the default `devices`.
+    """
     run_platform = get_default_device().platform
     other_platform = 'gpu' if run_platform == 'cpu' else 'cpu'
-    callback = CheckPlatformCallback(run_platform if matches else other_platform)
-
-    def run() -> None:
-        state = simple_init()
-        block_until_ready(run_mcmc(keys.pop(), state, 1, callback=callback))
-
-    if matches:
-        run()  # no error
-    else:
-        with pytest.raises(Exception, match='deduced the platform'):
-            run()
+    callback = CheckPlatformCallback(other_platform)
+    with pytest.raises(Exception, match='deduced the platform'):
+        block_until_ready(run_mcmc(keys.pop(), simple_init(), 1, callback=callback))
 
 
 # shared test-point count, reused across cases to hit the jax compilation cache

@@ -26,6 +26,7 @@
 
 import math
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from dataclasses import fields, replace
 from functools import partial, wraps
 from typing import Any, Literal, NamedTuple
@@ -61,6 +62,7 @@ from jaxtyping import (
     Array,
     Bool,
     Float,
+    Float16,
     Float32,
     Int32,
     Integer,
@@ -838,6 +840,21 @@ class TestReduction:
         # reduction accumulating in the values' dtype returns inf
         overflowing = jnp.full(n, 4096.0, jnp.float16)
 
+        # float32 integers whose per-bin sums are exact in float16
+        small_ints = random.randint(keys.pop(), (2, n), 0, 4).astype(jnp.float32)
+
+        def narrowing(f: Callable) -> Float16[Array, '2 size']:
+            # the output dtype narrower than the values' needs float16 sums,
+            # which conftest disallows to catch accidental ones
+            # WORKAROUND(jax<0.9.1): jax.allow_f16_reductions added in 0.9.1
+            allow = (
+                jax.allow_f16_reductions(True)
+                if jax.__version_info__ >= (0, 9, 1)
+                else nullcontext()
+            )
+            with allow:
+                return f(small_ints, indices, **dict(float_kw, dtype=jnp.float16))
+
         count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
         float_kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
 
@@ -869,6 +886,7 @@ class TestReduction:
                 close,
             ),
             'float16': (lambda f: f(overflowing, indices, **float_kw), close),
+            'narrowing': (narrowing, exact),
             'vmap count': (
                 lambda f: vmap(partial(f, 1, **count_kw))(tree_indices),
                 exact,

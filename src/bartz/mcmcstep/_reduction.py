@@ -554,11 +554,11 @@ def chunked_onehot_sum(
     # sum within each chunk with explicit additions rather than a reduction,
     # which xla:cpu would hand to a library call that needs the product
     # materialized; the barrier stops xla from turning the additions into one.
-    # The accumulators are in `dtype`, the additions promote the product.
+    # The accumulators are at least as wide as `dtype`.
     partial_sums = product[..., 0].astype(dtype)
     for i in range(1, ONEHOT_CHUNK):
         partial_sums += product[..., i]
-    out = lax.optimization_barrier(partial_sums).sum(axis=-1)
+    out = lax.optimization_barrier(partial_sums).sum(axis=-1, dtype=dtype)
 
     # the datapoints left over
     rem_onehot = bins[:, None] == indices[even_n:]  # (size, n % chunk)

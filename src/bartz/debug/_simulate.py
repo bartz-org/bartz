@@ -252,7 +252,8 @@ def sample_values(key: Key[Array, ''], state: StateT) -> StateT:
         # the binary components have unit error variance, they have no prior
         bi = state.binary_indices
         error_cov_inv = replace(
-            error_cov_inv, value=error_cov_inv.value.at[bi, bi].set(1.0)
+            error_cov_inv,
+            value=error_cov_inv.value.at[bi, bi].set(1.0, unique_indices=True),
         )
 
     # leaves
@@ -370,7 +371,7 @@ def sample_data_chain(key: Key[Array, ''], state: StateT) -> StateT:
     # split the latent outcome into the observed and latent parts
     if state.binary_indices is not None:
         z = latent[state.binary_indices, :]
-        y = latent.at[state.binary_indices, :].set(z > 0)
+        y = latent.at[state.binary_indices, :].set(z > 0, unique_indices=True)
     elif state.z is not None:
         z = latent
         y = (z > 0).astype(latent.dtype)

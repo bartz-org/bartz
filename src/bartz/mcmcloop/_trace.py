@@ -260,5 +260,5 @@ class MainTraceWithTrainPred(MainTrace):
             ref = state.z
         else:
             ref = jnp.broadcast_to(state.y, resid.shape)
-            ref = ref.at[..., state.binary_indices, :].set(state.z)
+            ref = ref.at[..., state.binary_indices, :].set(state.z, unique_indices=True)
         return cls(train_pred=ref - resid, **vars(MainTrace.from_state(state)))

@@ -529,6 +529,10 @@ class StepMemory(StepBase):
             # triggering a data-dependent jnp.nonzero that abstract eval rejects;
             # disable it (newer versions already default it off).
             kwargs.setdefault('filter_splitless_vars', 0)
+        if 'one_bin_prec_reduction' in sig.parameters:
+            # 'auto' needs the values of `error_scale`; they are all 1, so it
+            # would turn it on
+            kwargs.setdefault('one_bin_prec_reduction', True)
         return eval_shape(lambda: simple_init(**kwargs))
 
     def setup(  # ty:ignore[invalid-method-override]

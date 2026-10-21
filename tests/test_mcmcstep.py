@@ -88,10 +88,12 @@ from bartz._jaxext import (
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import (
     AutoBatchedReduction,
+    AutoOneHotOrPopcountReduction,
     AutoOneHotReduction,
     BatchedReduction,
     DiagWishart,
     OneHotReduction,
+    PopcountReduction,
     ReductionConfig,
     State,
     Wishart,
@@ -772,23 +774,31 @@ class TestReduction:
         tree_indices = random.randint(keys.pop(), (NUM_TREES, n), 0, size).astype(
             jnp.uint32
         )
+
         # float values: univariate, and with the 1d/2d batch shapes of the
         # multivariate leaf-sum and precision paths
         vector = random.normal(keys.pop(), (n,))
         batched = random.normal(keys.pop(), (3, n))
         matrix = random.normal(keys.pop(), (2, 2, n))
+
         # float16 values: each per-bin sum overflows the float16 range, so a
         # reduction accumulating in the values' dtype returns inf
         overflowing = jnp.full(n, 4096.0, jnp.float16)
+
         count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
         float_kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
+
         # bin range: starts mid-domain, has a non-power-of-2 length, and runs one
         # past `size`, so its last bin is out of the index domain and its sum
         # must come out zero
         range_kw = dict(float_kw, subset_start=jnp.uint32(6), subset_length=3)
-        exact = assert_array_equal  # the count path must match exactly
-        # on gpu the matmul method contracts via tf32 (~1e-3 relative error); cpu
-        # keeps the tight tolerance, so accuracy is still fully checked there
+
+        # comparison function for integer calculations
+        exact = assert_array_equal
+
+        # comparison function for float calculations; on gpu the matmul method
+        # contracts via tf32 (~1e-3 relative error); cpu keeps the tight
+        # tolerance, so accuracy is still fully checked there
         rtol = 1e-3 if indices.platform() != 'cpu' else 1e-5
         close = partial(assert_close_matrices, rtol=rtol, atol=1e-6, reduce_rank=True)
 
@@ -866,6 +876,86 @@ class TestReduction:
             for name, (run, compare) in cases.items():
                 with subtests.test(config=repr(config), case=name):
                     compare(run(config._reduce), expected[name])
+
+    def test_count_only_matches_reference(
+        self, keys: split, subtests: SubTests
+    ) -> None:
+        """The count-only configs match the reference on counts into a bin range.
+
+        The cases cover every unsigned index width, lengths that leave word
+        chunks, words, and indices over from the packing, bin ranges inside,
+        past the index domain, and past the lane width, all indices in the
+        counted bin, composition with an external `vmap` over trees, and a
+        sharded data axis.
+        """
+        configs = (PopcountReduction(), AutoOneHotOrPopcountReduction())
+        size = 8
+        count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
+        # (start, length): in the domain, two bins, past `size`, past uint8
+        ranges = ((2, 1), (3, 2), (7, 2), (300, 1))
+
+        def count(
+            indices: UInt[Array, ' n'], start: int, length: int
+        ) -> Callable[[Callable[..., Array]], Array]:
+            kw = dict(count_kw, subset_start=jnp.uint32(start), subset_length=length)
+            return lambda f: f(1, indices, **kw)
+
+        cases = {}
+        for dtype in (jnp.uint8, jnp.uint16, jnp.uint32):
+            # a multiple of the chunk length in every width, then lengths that
+            # leave chunks, words and indices over, and one without any chunk
+            for n in (512, 1031, 7):
+                indices = random.randint(keys.pop(), (n,), 0, size).astype(dtype)
+                for start, length in ranges:
+                    name = f'{jnp.dtype(dtype).name} n={n} range={start},{length}'
+                    cases[name] = count(indices, start, length)
+        cases['all in bin'] = count(jnp.full(1031, 3, jnp.uint8), 3, 1)
+        tree_indices = random.randint(keys.pop(), (NUM_TREES, 1031), 0, size).astype(
+            jnp.uint8
+        )
+        range_kw = dict(count_kw, subset_start=jnp.uint32(2), subset_length=2)
+        cases['vmap'] = lambda f: vmap(partial(f, 1, **range_kw))(tree_indices)
+
+        num_shards = min(4, get_device_count())
+        if num_shards >= 2:
+            mesh = make_mesh(
+                (num_shards,), ('data',), devices=get_default_devices()[:num_shards]
+            )
+            data, replicated = PartitionSpec('data'), PartitionSpec()
+            sharded = random.randint(keys.pop(), (num_shards * 1031,), 0, size)
+            sharded = device_put(sharded.astype(jnp.uint8), NamedSharding(mesh, data))
+            cases['sharded'] = lambda f: shard_map(
+                partial(f, 1, **dict(range_kw, data_sharded=True)),
+                mesh=mesh,
+                in_specs=(data,),
+                out_specs=replicated,
+            )(sharded)
+
+        for name, run in cases.items():
+            expected = run(reduce_reference)
+            for config in configs:
+                with subtests.test(config=repr(config), case=name):
+                    assert_array_equal(run(config._reduce), expected)
+
+    def test_count_only_rejects_other_uses(self) -> None:
+        """The count-only configs reject values other than 1 and a missing range."""
+        indices = jnp.zeros(8, jnp.uint8)
+        range_kw: dict = dict(size=4, subset_start=jnp.uint32(0), subset_length=1)
+        for config in (PopcountReduction(), AutoOneHotOrPopcountReduction()):
+            with pytest.raises(AssertionError):
+                config._reduce(
+                    jnp.ones(8),
+                    indices,
+                    dtype=jnp.float32,
+                    data_sharded=False,
+                    **range_kw,
+                )
+            with pytest.raises(AssertionError):
+                config._reduce(
+                    2, indices, dtype=jnp.uint32, data_sharded=False, **range_kw
+                )
+            with pytest.raises(AssertionError):
+                config._reduce(1, indices, size=4, dtype=jnp.uint32, data_sharded=False)
 
     def test_gpu_sm_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The cuda branch reads the shared SM count and rejects mixed gpus."""

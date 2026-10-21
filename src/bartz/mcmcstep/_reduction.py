@@ -31,11 +31,11 @@ from typing import Literal
 
 import jax
 from equinox import Module, field
-from jax import lax
+from jax import lax, vmap
 from jax import numpy as jnp
 from jax.extend.backend import backends
 from jax.typing import DTypeLike
-from jaxtyping import Array, Float, Integer, Shaped, UInt
+from jaxtyping import Array, Float, Integer, Shaped, UInt, UInt32
 
 # target number of datapoint batches on cpu, and minimum datapoints per batch,
 # when batching is resolved automatically; unlike the gpu heuristic these are
@@ -48,6 +48,11 @@ _AUTO_CPU_MIN_BATCH = 32
 # to discard it at lowering, so this value never sizes a real gpu's batch grid;
 # it just keeps the dead trace valid (a present cuda backend reports its own).
 _MOOT_GPU_SM = 1
+
+# words per chunk in the two-stage sum of `popcount_equal`: chunk sums longer
+# than this are split by xla:cpu into reduce-windows that do not fuse the bit
+# arithmetic, which then gets materialized
+_POPCOUNT_CHUNK = 32
 
 
 class ReductionConfig(Module):
@@ -601,3 +606,123 @@ class AutoOneHotReduction(ReductionConfig):
                     **kwargs,
                 ),
             )
+
+
+class PopcountReduction(ReductionConfig):
+    """Count reduction by SWAR popcount on the packed bin indices.
+
+    Reinterprets the unsigned indices as 32-bit words holding one or more
+    indices each, flags the lanes equal to a bin with bit arithmetic, and
+    counts the flags with a popcount. Supports only counting (unit values)
+    into a bin range, so it can be used only as ``count_reduction_config``.
+    """
+
+    def _reduce(
+        self,
+        values: Float[Array, '*batch_shape n'] | int,
+        indices: UInt[Array, ' n'],
+        /,
+        *,
+        size: int,
+        subset_start: Integer[Array, ''] | None = None,
+        subset_length: int | None = None,
+        dtype: DTypeLike,
+        data_sharded: bool,
+    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+        del size  # the bin range alone sets the output
+        assert isinstance(values, int)
+        assert values == 1
+        assert subset_start is not None
+        assert subset_length is not None
+        bins = subset_start.astype(jnp.uint32) + jnp.arange(
+            subset_length, dtype=jnp.uint32
+        )
+        out = vmap(partial(popcount_equal, indices))(bins).astype(dtype)
+        if data_sharded:
+            out = lax.psum(out, 'data')
+        return out
+
+
+class AutoOneHotOrPopcountReduction(ReductionConfig):
+    """`PopcountReduction` on cpu, `AutoOneHotReduction` on other platforms.
+
+    On gpu the one-hot count fuses with the computation of the indices, which
+    the popcount does not. Like `PopcountReduction`, it supports only counting
+    into a bin range, so it can be used only as ``count_reduction_config``.
+    """
+
+    def _reduce(
+        self,
+        values: Float[Array, '*batch_shape n'] | int,
+        indices: UInt[Array, ' n'],
+        /,
+        *,
+        size: int,
+        subset_start: Integer[Array, ''] | None = None,
+        subset_length: int | None = None,
+        dtype: DTypeLike,
+        data_sharded: bool,
+    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+        # the arguments are bound rather than passed through, so `values` stays
+        # a python int for the popcount checks
+        kwargs: dict = dict(
+            size=size,
+            subset_start=subset_start,
+            subset_length=subset_length,
+            dtype=dtype,
+            data_sharded=data_sharded,
+        )
+        return lax.platform_dependent(
+            cpu=partial(PopcountReduction()._reduce, values, indices, **kwargs),  # noqa: SLF001
+            default=partial(AutoOneHotReduction()._reduce, values, indices, **kwargs),  # noqa: SLF001
+        )
+
+
+def popcount_equal(
+    indices: UInt[Array, ' n'], bin_index: UInt32[Array, '']
+) -> UInt32[Array, '']:
+    """Count the `indices` equal to `bin_index`, processing several at a time."""
+    (n,) = indices.shape
+    bits = jnp.iinfo(indices.dtype).bits
+    lanes = 32 // bits
+    head = n - n % lanes
+
+    # values that do not fit in a lane never match
+    fits = bin_index >> bits == 0
+    bin_index = bin_index.astype(indices.dtype)
+
+    # pack `lanes` indices per 32-bit word (the reshape drops the lane axis
+    # that the bitcast keeps when an index is already 32-bit)
+    num_words = head // lanes
+    words = lax.bitcast_convert_type(
+        indices[:head].reshape(num_words, lanes), jnp.uint32
+    ).reshape(num_words)
+    full = num_words - num_words % _POPCOUNT_CHUNK
+
+    # sum the matches per chunk of words, then sum the chunks. The barrier
+    # stops xla from merging the two sums into a single long reduction, which
+    # xla:cpu splits into reduce-windows that do not fuse the bit arithmetic
+    chunks = count_equal_lanes(
+        words[:full].reshape(full // _POPCOUNT_CHUNK, _POPCOUNT_CHUNK), bin_index
+    ).sum(axis=-1, dtype=jnp.uint32)
+    count = lax.optimization_barrier(chunks).sum(dtype=jnp.uint32)
+    count += count_equal_lanes(words[full:], bin_index).sum(dtype=jnp.uint32)
+
+    # count the indices left over from the packing one by one
+    count += (indices[head:] == bin_index).sum(dtype=jnp.uint32)
+
+    return jnp.where(fits, count, 0)
+
+
+def count_equal_lanes(
+    words: UInt32[Array, '*shape'], bin_index: UInt[Array, '']
+) -> UInt32[Array, '*shape']:
+    """Count the lanes equal to `bin_index` in each word of packed `bin_index`-typed lanes."""
+    bits = jnp.iinfo(bin_index.dtype).bits
+    lanes = 32 // bits
+    one = sum(1 << (bits * i) for i in range(lanes))  # 0x01..01 per lane
+    low = one * ((1 << (bits - 1)) - 1)  # 0x7f..7f per lane
+    diff = words ^ bin_index.astype(jnp.uint32) * jnp.uint32(one)
+    # exact per-lane zero test: the lane's top bit is set iff the lane is zero
+    flags = ~(((diff & low) + low) | diff | low)
+    return lax.population_count(flags)

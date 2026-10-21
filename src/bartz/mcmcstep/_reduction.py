@@ -604,8 +604,8 @@ class AutoOneHotReduction(ReductionConfig):
     Resolves both knobs from trace-time information per site and platform, then
     delegates to a plain `OneHotReduction`. Uses `matmul` only for wide-bin
     multivariate reductions and `multiply` otherwise, or `chunked` in its place
-    on cpu; lays the datapoints on the outer axis except on the two small-bin
-    sites where the opposite wins (cpu precision, cuda count). Those two sites
+    on cpu; lays the datapoints on the inner axis with `chunked` and for the
+    cuda count, on the outer axis otherwise. The count and precision sites
     support only cpu and cuda, raising at lowering elsewhere.
 
     The site is recovered from the value: scalar is the count, a wide output the

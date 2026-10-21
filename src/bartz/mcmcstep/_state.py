@@ -418,7 +418,7 @@ class StepConfig(Module):
     """How to sum the likelihood precisions in each leaf."""
 
     prec_count_num_trees: int | None = field(static=True)
-    """Batch size for processing trees to compute count and prec trees."""
+    """Batch size for processing trees to compute count and prec trees, see `init`."""
 
     sequential_unroll: int | bool = field(static=True)
     """How much to unroll the sequential accept/reject loop over trees in
@@ -963,10 +963,11 @@ def init(
         precisions in each leaf, respectively. See `ReductionConfig` and its
         subclasses.
     prec_count_num_trees
-        The number of trees to process at a time when counting datapoints or
-        computing the likelihood precision. If `None`, do all trees at once,
-        which may use too much memory on cpu. If 'auto' (default), it's chosen
-        automatically.
+        The number of trees to process at a time on cpu when computing the
+        likelihood precision or counting datapoints, except for counts with the
+        default popcount reduction, which needs no batching. If `None`, do all
+        trees at once, which may use too much memory. If 'auto' (default), it's
+        chosen automatically.
     sequential_unroll
         See `StepConfig.sequential_unroll`. Unrolling may speed up the MCMC at
         the cost of longer compilation; 1 means no unrolling.

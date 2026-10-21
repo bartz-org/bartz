@@ -80,6 +80,7 @@ from scipy.stats import chi2, ks_1samp, ks_2samp
 from bartz._jaxext import (
     Module,
     field,
+    get_default_device,
     get_default_devices,
     get_device_count,
     minimal_unsigned_dtype,
@@ -751,6 +752,7 @@ class TestReduction:
             OneHotReduction(method='multiply', n_inner=False),
             OneHotReduction(method='scatter_set', n_inner=True),
             OneHotReduction(method='scatter_set', n_inner=False),
+            OneHotReduction(method='chunked'),
             # AutoOneHotReduction: per-site, per-platform method and layout
             AutoOneHotReduction(),
         )
@@ -809,6 +811,12 @@ class TestReduction:
             'float': (lambda f: f(vector, indices, **float_kw), close),
             'float batched': (lambda f: f(batched, indices, **float_kw), close),
             'float matrix': (lambda f: f(matrix, indices, **float_kw), close),
+            # a length that does not divide into chunks of datapoints
+            'count odd n': (lambda f: f(1, indices[:509], **count_kw), exact),
+            'float odd n': (
+                lambda f: f(vector[:509], indices[:509], **float_kw),
+                close,
+            ),
             'float16': (lambda f: f(overflowing, indices, **float_kw), close),
             'vmap count': (
                 lambda f: vmap(partial(f, 1, **count_kw))(tree_indices),
@@ -936,6 +944,49 @@ class TestReduction:
             for config in configs:
                 with subtests.test(config=repr(config), case=name):
                     assert_array_equal(run(config._reduce), expected)
+
+    @pytest.mark.parametrize('num_bins', [1, 2])
+    def test_chunked_does_not_materialize_product(self, num_bins: int) -> None:
+        """On cpu, 'chunked' avoids materializing the one-hot product, 'multiply' not.
+
+        This tracks the behavior of xla:cpu that motivates using 'chunked' in
+        `AutoOneHotReduction`: if it changes, that choice should be revisited.
+        """
+        if get_default_device().platform != 'cpu':
+            pytest.skip('xla:cpu behavior')
+        num_trees = 8
+        n = 2**16
+        values = jnp.ones(n)
+        indices = jnp.zeros((num_trees, n), jnp.uint8)
+        kw: dict = dict(
+            size=4,
+            subset_start=jnp.uint32(1),
+            subset_length=num_bins,
+            dtype=jnp.float32,
+            data_sharded=False,
+        )
+
+        def temp_bytes(config: OneHotReduction) -> int:
+            reduce = vmap(partial(config._reduce, **kw), in_axes=(None, 0))
+            compiled = jit(reduce).lower(values, indices).compile()
+            analysis = compiled.memory_analysis()
+            assert analysis is not None
+            return analysis.temp_size_in_bytes
+
+        # the float32 product of the values with a one-hot over a single bin
+        product_bytes = num_trees * n * 4
+        assert (
+            temp_bytes(OneHotReduction(method='multiply')) >= num_bins * product_bytes
+        )
+        assert temp_bytes(OneHotReduction(method='chunked')) < product_bytes / 2
+
+    def test_chunked_rejects_outer_layout(self) -> None:
+        """The 'chunked' one-hot method supports only the datapoints inner."""
+        config = OneHotReduction(method='chunked', n_inner=False)
+        with pytest.raises(NotImplementedError, match='n_inner=True'):
+            config._reduce(
+                1, jnp.zeros(8, jnp.uint8), size=4, dtype=jnp.uint32, data_sharded=False
+            )
 
     def test_count_only_rejects_other_uses(self) -> None:
         """The count-only configs reject values other than 1 and a missing range."""

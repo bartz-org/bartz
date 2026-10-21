@@ -54,6 +54,10 @@ _MOOT_GPU_SM = 1
 # arithmetic, which then gets materialized
 _POPCOUNT_CHUNK = 32
 
+# datapoints per chunk in the 'chunked' method of `OneHotReduction`: with more
+# additions per chunk, xla:cpu stops fusing them with the comparison
+ONEHOT_CHUNK = 8
+
 
 class ReductionConfig(Module):
     """Select and configure an indexed-reduce (scatter-add) implementation.
@@ -403,7 +407,7 @@ class OneHotReduction(ReductionConfig):
     single leaf pair), or on gpu for multivariate residuals.
     """
 
-    method: Literal['matmul', 'multiply', 'scatter_set'] = field(
+    method: Literal['matmul', 'multiply', 'chunked', 'scatter_set'] = field(
         static=True, default='matmul'
     )
     """How to contract the values against the one-hot leaf-membership matrix:
@@ -414,7 +418,11 @@ class OneHotReduction(ReductionConfig):
     'multiply'
         Elementwise-multiply by the one-hot matrix and reduce over the
         datapoints; whether the ``n``-by-``size`` product is fused into the
-        reduction or materialized is left to the backend. Faster on cpu.
+        reduction or materialized is left to the backend.
+    'chunked'
+        Like 'multiply', but sum the product over short chunks of datapoints
+        first, which xla:cpu fuses with the comparison, while it materializes
+        the whole product before a long reduction. Faster on cpu.
     'scatter_set'
         Scatter the values into a dense buffer with unique (non-atomic) writes,
         then sum over the datapoints.
@@ -424,9 +432,9 @@ class OneHotReduction(ReductionConfig):
     """Whether the datapoints sit on the one-hot's inner, contiguous axis
     (``size``-by-``n``) or its outer axis (``n``-by-``size``); the two layouts
     give the backend different memory access patterns. `True` (the default)
-    fuses better on gpu."""
+    fuses better on gpu. 'chunked' supports only `True`."""
 
-    def _reduce(
+    def _reduce(  # noqa: C901, the match over the methods
         self,
         values: Float[Array, '*batch_shape n'] | int,
         indices: UInt[Array, ' n'],
@@ -500,9 +508,53 @@ class OneHotReduction(ReductionConfig):
                     out = values * onehot.sum(axis=-2, dtype=dtype)
                 else:
                     out = (values[..., :, None] * onehot).sum(axis=-2, dtype=dtype)
+            case 'chunked', True:
+                out = chunked_onehot_sum(values, indices, bins, dtype)
+            case 'chunked', False:
+                msg = "OneHotReduction(method='chunked') supports only n_inner=True"
+                raise NotImplementedError(msg)
 
         if data_sharded:
             out = lax.psum(out, 'data')
+        return out
+
+
+def chunked_onehot_sum(
+    values: Float[Array, '*batch_shape n'] | Integer[Array, ''],
+    indices: UInt[Array, ' n'],
+    bins: UInt[Array, ' size'],
+    dtype: DTypeLike,
+) -> Shaped[Array, '*batch_shape size']:
+    """Implement the 'chunked' method of `OneHotReduction`."""
+    (n,) = indices.shape
+    even_n = n - n % ONEHOT_CHUNK
+    num_chunks = even_n // ONEHOT_CHUNK
+
+    # whole chunks: the one-hot product is (*batch_shape, size, chunks, chunk)
+    onehot = bins[:, None, None] == indices[:even_n].reshape(num_chunks, ONEHOT_CHUNK)
+    if values.ndim == 0:
+        product = onehot
+    else:
+        *batch_shape, _ = values.shape
+        head = values[..., :even_n].reshape(*batch_shape, num_chunks, ONEHOT_CHUNK)
+        product = head[..., None, :, :] * onehot
+
+    # sum within each chunk with explicit additions rather than a reduction,
+    # which xla:cpu would hand to a library call that needs the product
+    # materialized; the barrier stops xla from turning the additions into one.
+    # The accumulators are in `dtype`, the additions promote the product.
+    partial_sums = product[..., 0].astype(dtype)
+    for i in range(1, ONEHOT_CHUNK):
+        partial_sums += product[..., i]
+    out = lax.optimization_barrier(partial_sums).sum(axis=-1)
+
+    # the datapoints left over
+    rem_onehot = bins[:, None] == indices[even_n:]  # (size, n % chunk)
+    if values.ndim == 0:
+        out += rem_onehot.sum(axis=-1, dtype=dtype)
+        return values * out
+    else:
+        out += (values[..., None, even_n:] * rem_onehot).sum(axis=-1, dtype=dtype)
         return out
 
 
@@ -538,10 +590,10 @@ class AutoOneHotReduction(ReductionConfig):
 
     Resolves both knobs from trace-time information per site and platform, then
     delegates to a plain `OneHotReduction`. Uses `matmul` only for wide-bin
-    multivariate reductions and `multiply` otherwise; lays the datapoints on the
-    outer axis except on the two small-bin sites where the opposite wins (cpu
-    precision, cuda count). Those two sites support only cpu and cuda, raising at
-    lowering elsewhere.
+    multivariate reductions and `multiply` otherwise, or `chunked` in its place
+    on cpu; lays the datapoints on the outer axis except on the two small-bin
+    sites where the opposite wins (cpu precision, cuda count). Those two sites
+    support only cpu and cuda, raising at lowering elsewhere.
 
     The site is recovered from the value: scalar is the count, a wide output the
     residual, a narrow non-scalar output the precision.
@@ -567,7 +619,10 @@ class AutoOneHotReduction(ReductionConfig):
     ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
         out_size = size if subset_length is None else subset_length
         m = max(1, math.prod(jnp.shape(values)[:-1]))
-        method = 'matmul' if m >= 2 and out_size >= self.min_matmul_bins else 'multiply'
+        gpu_method = (
+            'matmul' if m >= 2 and out_size >= self.min_matmul_bins else 'multiply'
+        )
+        cpu_method = 'chunked' if gpu_method == 'multiply' else gpu_method
 
         if jnp.ndim(values) == 0:  # count
             cpu_inner, cuda_inner = False, True
@@ -584,28 +639,27 @@ class AutoOneHotReduction(ReductionConfig):
             dtype=dtype,
             data_sharded=data_sharded,
         )
-        if cpu_inner == cuda_inner:
-            # the layout matches on every platform, so no platform split is
+        # 'chunked' has its own layout, the datapoints on the inner axis
+        cpu = OneHotReduction(
+            method=cpu_method, n_inner=cpu_inner or cpu_method == 'chunked'
+        )
+        cuda = OneHotReduction(method=gpu_method, n_inner=cuda_inner)
+
+        if cpu == cuda:
+            # the choice matches on every platform, so no platform split is
             # needed and the reduction also runs on untested platforms (tpu/rocm)
-            return OneHotReduction(method=method, n_inner=cpu_inner)._reduce(  # noqa: SLF001
-                *args, **kwargs
-            )
+            return cuda._reduce(*args, **kwargs)  # noqa: SLF001
         else:
             # defer the cpu/gpu choice to XLA: both branches are traced, but only
-            # the run platform's is lowered. With no `default`, an untested
-            # platform errors at lowering instead of silently falling back.
-            return lax.platform_dependent(
-                cpu=partial(
-                    OneHotReduction(method=method, n_inner=cpu_inner)._reduce,  # noqa: SLF001
-                    *args,
-                    **kwargs,
-                ),
-                cuda=partial(
-                    OneHotReduction(method=method, n_inner=cuda_inner)._reduce,  # noqa: SLF001
-                    *args,
-                    **kwargs,
-                ),
-            )
+            # the run platform's is lowered. If the layouts differ, there is no
+            # `default`, so an untested platform errors at lowering instead of
+            # silently falling back; otherwise it takes the cuda branch.
+            other = 'default' if cpu_inner == cuda_inner else 'cuda'
+            branches = {
+                'cpu': partial(cpu._reduce, *args, **kwargs),  # noqa: SLF001
+                other: partial(cuda._reduce, *args, **kwargs),  # noqa: SLF001
+            }
+            return lax.platform_dependent(**branches)
 
 
 class PopcountReduction(ReductionConfig):

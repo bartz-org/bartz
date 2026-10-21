@@ -50,7 +50,11 @@ from bartz._jaxext import (
 from bartz._jaxext.random import loggamma, poisson
 from bartz.grove import var_histogram
 from bartz.mcmcstep._moves import Moves, propose_moves, split_range
-from bartz.mcmcstep._reduction import ReductionConfig
+from bartz.mcmcstep._reduction import (
+    AutoOneHotOrPopcountReduction,
+    PopcountReduction,
+    ReductionConfig,
+)
 from bartz.mcmcstep._state import (
     DiagWishart,
     Forest,
@@ -555,7 +559,12 @@ def _compute_count_or_prec_trees(
         compute = vmap(_compute_count_or_prec_tree, in_axes=(None, 0, 0, 0, 0, None))
         return compute(prec_scale, trees, leaf_indices, moves, counts, config)
 
-    if config.prec_count_num_trees is None:
+    # the trees are batched on cpu to bound the temporaries of the reduction,
+    # which the popcount count does not produce
+    popcount = prec_scale is None and isinstance(
+        config.count_reduction_config, PopcountReduction | AutoOneHotOrPopcountReduction
+    )
+    if config.prec_count_num_trees is None or popcount:
         return all_trees()
 
     batch_size = config.prec_count_num_trees

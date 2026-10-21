@@ -791,7 +791,7 @@ def count_equal_lanes(
     lanes = 32 // bits
     one = sum(1 << (bits * i) for i in range(lanes))  # 0x01..01 per lane
     low = one * ((1 << (bits - 1)) - 1)  # 0x7f..7f per lane
-    diff = words ^ bin_index.astype(jnp.uint32) * jnp.uint32(one)
+    diff = words ^ (bin_index.astype(jnp.uint32) * one)
     # exact per-lane zero test: the lane's top bit is set iff the lane is zero
     flags = ~(((diff & low) + low) | diff | low)
     return lax.population_count(flags)

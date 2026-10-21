@@ -208,6 +208,13 @@ class BatchedReduction(ReductionConfig):
         size, indices = _resolve_range(indices, size, subset_start, subset_length)
         batch_shape = values.shape[:-1]
 
+        # Cast `values` explicitly. The scatter buffer is in `dtype`, which
+        # might be narrower than `values.dtype`. Conversely, when
+        # `values.dtype` is narrower than `dtype`, this formally creates a
+        # larger intermediate array, but under jit either it was already
+        # materialized anyway or the cast is fused into the reduction.
+        values = values.astype(dtype)
+
         if self.num_batches is None:
             out = jnp.zeros((*batch_shape, size), dtype).at[..., indices].add(values)
         else:

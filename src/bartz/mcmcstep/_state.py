@@ -29,6 +29,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial, wraps
 from typing import Literal, NamedTuple, TypedDict, TypeVar, cast
+from warnings import warn
 
 import jax
 import numpy
@@ -59,6 +60,7 @@ from bartz._jaxext import (
     float32_matmuls,
     jaxtyping_disabled,
     jit,
+    jit_active,
     minimal_unsigned_dtype,
 )
 from bartz._npz import serializable
@@ -74,6 +76,7 @@ from bartz.mcmcstep._lazy import (
 )
 from bartz.mcmcstep._reduction import (
     AutoBatchedReduction,
+    AutoOneHotOrPopcountReduction,
     AutoOneHotReduction,
     ReductionConfig,
 )
@@ -417,7 +420,14 @@ class StepConfig(Module):
     """How to sum the likelihood precisions in each leaf."""
 
     prec_count_num_trees: int | None = field(static=True)
-    """Batch size for processing trees to compute count and prec trees."""
+    """Batch size for processing trees to compute count and prec trees, see `init`."""
+
+    one_bin_prec_reduction: bool = field(static=True)
+    """Whether to sum the precisions in only one child of a grown node and
+    derive the other by difference. Ignored (always off) if there's no
+    constraint on the number of points per leaf
+    (`Forest.min_points_per_decision_node` and `Forest.min_points_per_leaf` are
+    `None`)."""
 
     sequential_unroll: int | bool = field(static=True)
     """How much to unroll the sequential accept/reject loop over trees in
@@ -873,9 +883,10 @@ def init(
     min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
     min_points_per_leaf: int | Integer[ArrayLike, ''] | None = None,
     resid_reduction_config: ReductionConfig = AutoBatchedReduction(),
-    count_reduction_config: ReductionConfig = AutoOneHotReduction(),
+    count_reduction_config: ReductionConfig = AutoOneHotOrPopcountReduction(),
     prec_reduction_config: ReductionConfig = AutoOneHotReduction(),
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
+    one_bin_prec_reduction: bool | Literal['auto'] = 'auto',
     sequential_unroll: int | bool = 2,
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
@@ -962,10 +973,16 @@ def init(
         precisions in each leaf, respectively. See `ReductionConfig` and its
         subclasses.
     prec_count_num_trees
-        The number of trees to process at a time when counting datapoints or
-        computing the likelihood precision. If `None`, do all trees at once,
-        which may use too much memory on cpu. If 'auto' (default), it's chosen
-        automatically.
+        The number of trees to process at a time on cpu when computing the
+        likelihood precision or counting datapoints, except for counts with the
+        default popcount reduction, which needs no batching. If `None`, do all
+        trees at once, which may use too much memory. If 'auto' (default), it's
+        chosen automatically.
+    one_bin_prec_reduction
+        Whether to turn on the optimization of summing the likelihood
+        precisions in only one child of a grown node and deriving the other by
+        subtracting it from the parent. The default ``'auto'`` will try to turn
+        it on and raise/warn if not possible.
     sequential_unroll
         See `StepConfig.sequential_unroll`. Unrolling may speed up the MCMC at
         the cost of longer compilation; 1 means no unrolling.
@@ -1219,6 +1236,9 @@ def init(
                 augment=augment,
                 mesh=mesh,
                 leaf_quantization=asarray_or_none(leaf_quantization),
+                # invalid placeholder; the true value is set post-shard, it
+                # depends on `compute_scale_related_attrs`
+                one_bin_prec_reduction=cast(bool, None),
                 **red_cfg,
             ),
         )
@@ -1258,6 +1278,17 @@ def init(
             inv_sdev_unit=attrs.inv_sdev_unit,
             n_non_missing=attrs.n_non_missing,
             sum_diag_prec_scale=attrs.sum_diag_prec_scale,
+            config=replace(
+                state.config,
+                one_bin_prec_reduction=resolve_one_bin_prec_reduction(
+                    one_bin_prec_reduction,
+                    has_counts=min_points_per_decision_node is not None
+                    or min_points_per_leaf is not None,
+                    has_error_scale=state.error_scale is not None,
+                    error_scale_min_max_ratio=attrs.error_scale_min_max_ratio,
+                    n=n,
+                ),
+            ),
         )
 
         # calculate initial resid in the continuous outcome case, such that y
@@ -1438,7 +1469,7 @@ def initial_resid(  # noqa: PLR0917, `_LazyArray` passes arguments by position
     """
     resid = jnp.broadcast_to(y - offset[..., None], shape)
     if binary_indices is not None:
-        resid = resid.at[..., binary_indices, :].set(0.0)
+        resid = resid.at[..., binary_indices, :].set(0.0, unique_indices=True)
     return (resid / resid_unit[..., None]).astype(resid_dtype)
 
 
@@ -1516,6 +1547,7 @@ class ScaleRelatedAttrs(NamedTuple):
     inv_sdev_unit: Float32[Array, ''] | Float32[Array, ' k']
     n_non_missing: Int32[Array, ''] | Int32[Array, ' k']
     sum_diag_prec_scale: Float32[Array, ''] | Float32[Array, ' k']
+    error_scale_min_max_ratio: Float32[Array, '']
 
 
 @jit(donate_argnums=(1,), static_argnums=(2, 3))
@@ -1534,6 +1566,7 @@ def compute_scale_related_attrs(
             inv_sdev_unit=jnp.float32(1.0),
             n_non_missing=n_non_missing,
             sum_diag_prec_scale=n_non_missing.astype(jnp.float32),
+            error_scale_min_max_ratio=jnp.float32(1.0),
         )
 
     # compute inv_sdev_scale
@@ -1547,6 +1580,16 @@ def compute_scale_related_attrs(
     # count non-missing points, and the equivalent error-scaled quantity
     n_non_missing = jnp.sum(inv_sdev_scale != 0, axis=-1)
     sum_diag_prec_scale = jnp.einsum('...n,...n->...', inv_sdev_scale, inv_sdev_scale)
+
+    # min(error_scale) / max(error_scale), with the missing datapoints taken
+    # to have infinite error scale
+    if inv_sdev_scale.size:
+        max_inv_sdev = jnp.max(inv_sdev_scale)
+        error_scale_min_max_ratio = jnp.min(inv_sdev_scale) / jnp.where(
+            max_inv_sdev > 0, max_inv_sdev, 1.0
+        )
+    else:
+        error_scale_min_max_ratio = jnp.float32(1.0)
 
     # compute inv_sdev_unit and factor it out of inv_sdev_scale
     inv_sdev_unit = round_to_pow2(
@@ -1567,7 +1610,53 @@ def compute_scale_related_attrs(
         inv_sdev_unit=inv_sdev_unit,
         n_non_missing=n_non_missing,
         sum_diag_prec_scale=sum_diag_prec_scale,
+        error_scale_min_max_ratio=error_scale_min_max_ratio,
     )
+
+
+def resolve_one_bin_prec_reduction(
+    one_bin_prec_reduction: bool | Literal['auto'],
+    *,
+    has_counts: bool,
+    has_error_scale: bool,
+    error_scale_min_max_ratio: Float32[Array, ''],
+    n: int,
+) -> bool:
+    """Resolve the `one_bin_prec_reduction` argument of `init`."""
+    if isinstance(one_bin_prec_reduction, bool):
+        return one_bin_prec_reduction
+    elif not has_counts:
+        # without the counts the setting is ignored
+        return False
+    elif not has_error_scale:
+        # the precisions are 0 or 1, so their sums are exact up to float32
+        # mantissa bits
+        return n <= 2**24
+    elif jit_active():
+        msg = (
+            "The setting `one_bin_prec_reduction='auto'` needs to read the values "
+            "of `error_scale`, but `bartz.mcmcstep.init()` can't do it because it "
+            'has been invoked inside a `jax.jit`-compiled function. Set it '
+            'explicitly (as `Bart(..., init_kw=dict(one_bin_prec_reduction='
+            'True/False))` if using `Bart`), it is safe to set it to `True` if '
+            'max(error_scale) / min(error_scale) <= 100 and no datapoint is '
+            'missing'
+        )
+        raise ValueError(msg)
+    elif (ratio := error_scale_min_max_ratio.item()) >= 0.01:
+        return True
+    else:
+        if ratio > 0:
+            reason = f'`error_scale` spans a ratio of {1 / ratio:.3g} > 100'
+        else:
+            reason = 'some datapoints are missing'
+        msg = (
+            '`one_bin_prec_reduction` optimization set automatically to `False` '
+            f'because {reason}, which might make it numerically unstable; set it '
+            'explicitly to silence this warning'
+        )
+        warn(msg)
+        return False
 
 
 def get_blocked_vars(
@@ -2000,7 +2089,7 @@ def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']
     """Return the outcome the forest fits, with the latent one for binary components."""
     if state.binary_indices is not None:
         assert state.z is not None
-        return state.y.at[state.binary_indices, :].set(state.z)
+        return state.y.at[state.binary_indices, :].set(state.z, unique_indices=True)
     elif state.z is not None:
         return state.z
     else:

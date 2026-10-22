@@ -1741,7 +1741,9 @@ def get_latent_prec(
     if only_continuous and binary_indices is not None:
         *_, k, _ = prec.shape
         kc = k - binary_indices.size
-        mask = jnp.ones(k, dtype=bool).at[binary_indices].set(False)
+        mask = (
+            jnp.ones(k, dtype=bool).at[binary_indices].set(False, unique_indices=True)
+        )
         (cont_indices,) = jnp.nonzero(mask, size=kc)
         prec = prec[..., cont_indices[:, None], cont_indices[None, :]]
     return prec
@@ -2206,7 +2208,9 @@ def _predict_from_latent(
         if binary_indices is not None:
             # mixed: squash only the binary rows, leaving continuous rows as-is
             indexing = jnp.s_[..., binary_indices, :]
-            mean_samples = latent.at[indexing].set(ndtr(arg[indexing]))
+            mean_samples = latent.at[indexing].set(
+                ndtr(arg[indexing]), unique_indices=True
+            )
         else:
             mean_samples = ndtr(arg)
     else:
@@ -2270,7 +2274,9 @@ def sample_outcome(
     # convert binary outcomes via latent probit thresholding
     if binary_indices is not None:
         idx = jnp.s_[..., binary_indices, :]
-        outcome = outcome.at[idx].set(jnp.where(outcome[idx] > 0, 1.0, 0.0))
+        outcome = outcome.at[idx].set(
+            jnp.where(outcome[idx] > 0, 1.0, 0.0), unique_indices=True
+        )
     elif has_binary:
         outcome = jnp.where(outcome > 0, 1.0, 0.0)
 

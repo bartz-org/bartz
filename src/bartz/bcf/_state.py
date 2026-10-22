@@ -182,6 +182,9 @@ def init_bcf(
         min_points_per_leaf=min_points_per_leaf_mu,
         min_points_per_decision_node=2 * min_points_per_leaf_mu,
         error_cov_inv=error_cov_inv,
+        # the tau forest shares this config, and its precisions b_z^2 change
+        # across steps, so the one-bin reduction can not be checked to be safe
+        one_bin_prec_reduction=False,
         num_chains=num_chains,
     )
 

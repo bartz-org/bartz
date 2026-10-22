@@ -59,15 +59,19 @@ Configurations for the per-leaf scatter-add reductions, to pass to `init`.
     AutoBatchedReduction
     OneHotReduction
     AutoOneHotReduction
+    PopcountReduction
+    AutoOneHotOrPopcountReduction
 """
 
 # ruff: noqa: F401
 
 from bartz.mcmcstep._reduction import (
     AutoBatchedReduction,
+    AutoOneHotOrPopcountReduction,
     AutoOneHotReduction,
     BatchedReduction,
     OneHotReduction,
+    PopcountReduction,
     ReductionConfig,
 )
 from bartz.mcmcstep._state import (

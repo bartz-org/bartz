@@ -31,11 +31,11 @@ from typing import Literal
 
 import jax
 from equinox import Module, field
-from jax import lax
+from jax import lax, vmap
 from jax import numpy as jnp
 from jax.extend.backend import backends
 from jax.typing import DTypeLike
-from jaxtyping import Array, Float, Integer, Shaped, UInt
+from jaxtyping import Array, Float, Integer, Shaped, UInt, UInt32
 
 from bartz._npz import serializable
 
@@ -50,6 +50,15 @@ _AUTO_CPU_MIN_BATCH = 32
 # to discard it at lowering, so this value never sizes a real gpu's batch grid;
 # it just keeps the dead trace valid (a present cuda backend reports its own).
 _MOOT_GPU_SM = 1
+
+# words per chunk in the two-stage sum of `popcount_equal`: chunk sums longer
+# than this are split by xla:cpu into reduce-windows that do not fuse the bit
+# arithmetic, which then gets materialized
+_POPCOUNT_CHUNK = 32
+
+# datapoints per chunk in the 'chunked' method of `OneHotReduction`: with more
+# additions per chunk, xla:cpu stops fusing them with the comparison
+ONEHOT_CHUNK = 8
 
 
 class ReductionConfig(Module):
@@ -198,6 +207,13 @@ class BatchedReduction(ReductionConfig):
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
         size, indices = _resolve_range(indices, size, subset_start, subset_length)
         batch_shape = values.shape[:-1]
+
+        # Cast `values` explicitly. The scatter buffer is in `dtype`, which
+        # might be narrower than `values.dtype`. Conversely, when
+        # `values.dtype` is narrower than `dtype`, this formally creates a
+        # larger intermediate array, but under jit either it was already
+        # materialized anyway or the cast is fused into the reduction.
+        values = values.astype(dtype)
 
         if self.num_batches is None:
             out = jnp.zeros((*batch_shape, size), dtype).at[..., indices].add(values)
@@ -403,7 +419,7 @@ class OneHotReduction(ReductionConfig):
     single leaf pair), or on gpu for multivariate residuals.
     """
 
-    method: Literal['matmul', 'multiply', 'scatter_set'] = field(
+    method: Literal['matmul', 'multiply', 'chunked', 'scatter_set'] = field(
         static=True, default='matmul'
     )
     """How to contract the values against the one-hot leaf-membership matrix:
@@ -414,7 +430,11 @@ class OneHotReduction(ReductionConfig):
     'multiply'
         Elementwise-multiply by the one-hot matrix and reduce over the
         datapoints; whether the ``n``-by-``size`` product is fused into the
-        reduction or materialized is left to the backend. Faster on cpu.
+        reduction or materialized is left to the backend.
+    'chunked'
+        Like 'multiply', but sum the product over short chunks of datapoints
+        first, which xla:cpu fuses with the comparison, while it materializes
+        the whole product before a long reduction. Faster on cpu.
     'scatter_set'
         Scatter the values into a dense buffer with unique (non-atomic) writes,
         then sum over the datapoints.
@@ -424,9 +444,9 @@ class OneHotReduction(ReductionConfig):
     """Whether the datapoints sit on the one-hot's inner, contiguous axis
     (``size``-by-``n``) or its outer axis (``n``-by-``size``); the two layouts
     give the backend different memory access patterns. `True` (the default)
-    fuses better on gpu."""
+    fuses better on gpu. 'chunked' supports only `True`."""
 
-    def _reduce(
+    def _reduce(  # noqa: C901, the match over the methods
         self,
         values: Float[Array, '*batch_shape n'] | int,
         indices: UInt[Array, ' n'],
@@ -500,9 +520,53 @@ class OneHotReduction(ReductionConfig):
                     out = values * onehot.sum(axis=-2, dtype=dtype)
                 else:
                     out = (values[..., :, None] * onehot).sum(axis=-2, dtype=dtype)
+            case 'chunked', True:
+                out = chunked_onehot_sum(values, indices, bins, dtype)
+            case 'chunked', False:
+                msg = "OneHotReduction(method='chunked') supports only n_inner=True"
+                raise NotImplementedError(msg)
 
         if data_sharded:
             out = lax.psum(out, 'data')
+        return out
+
+
+def chunked_onehot_sum(
+    values: Float[Array, '*batch_shape n'] | Integer[Array, ''],
+    indices: UInt[Array, ' n'],
+    bins: UInt[Array, ' size'],
+    dtype: DTypeLike,
+) -> Shaped[Array, '*batch_shape size']:
+    """Implement the 'chunked' method of `OneHotReduction`."""
+    (n,) = indices.shape
+    even_n = n - n % ONEHOT_CHUNK
+    num_chunks = even_n // ONEHOT_CHUNK
+
+    # whole chunks: the one-hot product is (*batch_shape, size, chunks, chunk)
+    onehot = bins[:, None, None] == indices[:even_n].reshape(num_chunks, ONEHOT_CHUNK)
+    if values.ndim == 0:
+        product = onehot
+    else:
+        *batch_shape, _ = values.shape
+        head = values[..., :even_n].reshape(*batch_shape, num_chunks, ONEHOT_CHUNK)
+        product = head[..., None, :, :] * onehot
+
+    # sum within each chunk with explicit additions rather than a reduction,
+    # which xla:cpu would hand to a library call that needs the product
+    # materialized; the barrier stops xla from turning the additions into one.
+    # The accumulators are at least as wide as `dtype`.
+    partial_sums = product[..., 0].astype(dtype)
+    for i in range(1, ONEHOT_CHUNK):
+        partial_sums += product[..., i]
+    out = lax.optimization_barrier(partial_sums).sum(axis=-1, dtype=dtype)
+
+    # the datapoints left over
+    rem_onehot = bins[:, None] == indices[even_n:]  # (size, n % chunk)
+    if values.ndim == 0:
+        out += rem_onehot.sum(axis=-1, dtype=dtype)
+        return values * out
+    else:
+        out += (values[..., None, even_n:] * rem_onehot).sum(axis=-1, dtype=dtype)
         return out
 
 
@@ -539,10 +603,10 @@ class AutoOneHotReduction(ReductionConfig):
 
     Resolves both knobs from trace-time information per site and platform, then
     delegates to a plain `OneHotReduction`. Uses `matmul` only for wide-bin
-    multivariate reductions and `multiply` otherwise; lays the datapoints on the
-    outer axis except on the two small-bin sites where the opposite wins (cpu
-    precision, cuda count). Those two sites support only cpu and cuda, raising at
-    lowering elsewhere.
+    multivariate reductions and `multiply` otherwise, or `chunked` in its place
+    on cpu; lays the datapoints on the inner axis with `chunked` and for the
+    cuda count, on the outer axis otherwise. The count and precision sites
+    support only cpu and cuda, raising at lowering elsewhere.
 
     The site is recovered from the value: scalar is the count, a wide output the
     residual, a narrow non-scalar output the precision.
@@ -568,7 +632,10 @@ class AutoOneHotReduction(ReductionConfig):
     ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
         out_size = size if subset_length is None else subset_length
         m = max(1, math.prod(jnp.shape(values)[:-1]))
-        method = 'matmul' if m >= 2 and out_size >= self.min_matmul_bins else 'multiply'
+        gpu_method = (
+            'matmul' if m >= 2 and out_size >= self.min_matmul_bins else 'multiply'
+        )
+        cpu_method = 'chunked' if gpu_method == 'multiply' else gpu_method
 
         if jnp.ndim(values) == 0:  # count
             cpu_inner, cuda_inner = False, True
@@ -585,25 +652,146 @@ class AutoOneHotReduction(ReductionConfig):
             dtype=dtype,
             data_sharded=data_sharded,
         )
-        if cpu_inner == cuda_inner:
-            # the layout matches on every platform, so no platform split is
+        # 'chunked' has its own layout, the datapoints on the inner axis
+        cpu = OneHotReduction(
+            method=cpu_method, n_inner=cpu_inner or cpu_method == 'chunked'
+        )
+        cuda = OneHotReduction(method=gpu_method, n_inner=cuda_inner)
+
+        if cpu == cuda:
+            # the choice matches on every platform, so no platform split is
             # needed and the reduction also runs on untested platforms (tpu/rocm)
-            return OneHotReduction(method=method, n_inner=cpu_inner)._reduce(  # noqa: SLF001
-                *args, **kwargs
-            )
+            return cuda._reduce(*args, **kwargs)  # noqa: SLF001
         else:
             # defer the cpu/gpu choice to XLA: both branches are traced, but only
-            # the run platform's is lowered. With no `default`, an untested
-            # platform errors at lowering instead of silently falling back.
-            return lax.platform_dependent(
-                cpu=partial(
-                    OneHotReduction(method=method, n_inner=cpu_inner)._reduce,  # noqa: SLF001
-                    *args,
-                    **kwargs,
-                ),
-                cuda=partial(
-                    OneHotReduction(method=method, n_inner=cuda_inner)._reduce,  # noqa: SLF001
-                    *args,
-                    **kwargs,
-                ),
-            )
+            # the run platform's is lowered. If the layouts differ, there is no
+            # `default`, so an untested platform errors at lowering instead of
+            # silently falling back; otherwise it takes the cuda branch.
+            other = 'default' if cpu_inner == cuda_inner else 'cuda'
+            branches = {
+                'cpu': partial(cpu._reduce, *args, **kwargs),  # noqa: SLF001
+                other: partial(cuda._reduce, *args, **kwargs),  # noqa: SLF001
+            }
+            return lax.platform_dependent(**branches)
+
+
+@serializable
+class PopcountReduction(ReductionConfig):
+    """Count reduction by SWAR popcount on the packed bin indices.
+
+    Reinterprets the unsigned indices as 32-bit words holding one or more
+    indices each, flags the lanes equal to a bin with bit arithmetic, and
+    counts the flags with a popcount. Supports only counting (unit values)
+    into a bin range, so it can be used only as ``count_reduction_config``.
+    """
+
+    def _reduce(
+        self,
+        values: Float[Array, '*batch_shape n'] | int,
+        indices: UInt[Array, ' n'],
+        /,
+        *,
+        size: int,
+        subset_start: Integer[Array, ''] | None = None,
+        subset_length: int | None = None,
+        dtype: DTypeLike,
+        data_sharded: bool,
+    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+        del size  # the bin range alone sets the output
+        assert isinstance(values, int)
+        assert values == 1
+        assert subset_start is not None
+        assert subset_length is not None
+        bins = subset_start.astype(jnp.uint32) + jnp.arange(
+            subset_length, dtype=jnp.uint32
+        )
+        out = vmap(partial(popcount_equal, indices))(bins).astype(dtype)
+        if data_sharded:
+            out = lax.psum(out, 'data')
+        return out
+
+
+@serializable
+class AutoOneHotOrPopcountReduction(ReductionConfig):
+    """`PopcountReduction` on cpu, `AutoOneHotReduction` on other platforms.
+
+    On gpu the one-hot count fuses with the computation of the indices, which
+    the popcount does not. Like `PopcountReduction`, it supports only counting
+    into a bin range, so it can be used only as ``count_reduction_config``.
+    """
+
+    def _reduce(
+        self,
+        values: Float[Array, '*batch_shape n'] | int,
+        indices: UInt[Array, ' n'],
+        /,
+        *,
+        size: int,
+        subset_start: Integer[Array, ''] | None = None,
+        subset_length: int | None = None,
+        dtype: DTypeLike,
+        data_sharded: bool,
+    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+        # the arguments are bound rather than passed through, so `values` stays
+        # a python int for the popcount checks
+        kwargs: dict = dict(
+            size=size,
+            subset_start=subset_start,
+            subset_length=subset_length,
+            dtype=dtype,
+            data_sharded=data_sharded,
+        )
+        return lax.platform_dependent(
+            cpu=partial(PopcountReduction()._reduce, values, indices, **kwargs),  # noqa: SLF001
+            default=partial(AutoOneHotReduction()._reduce, values, indices, **kwargs),  # noqa: SLF001
+        )
+
+
+def popcount_equal(
+    indices: UInt[Array, ' n'], bin_index: UInt32[Array, '']
+) -> UInt32[Array, '']:
+    """Count the `indices` equal to `bin_index`, processing several at a time."""
+    (n,) = indices.shape
+    bits = jnp.iinfo(indices.dtype).bits
+    lanes = 32 // bits
+    head = n - n % lanes
+
+    # values that do not fit in a lane never match
+    fits = bin_index >> bits == 0
+    bin_index = bin_index.astype(indices.dtype)
+
+    # pack `lanes` indices per 32-bit word (the reshape drops the lane axis
+    # that the bitcast keeps when an index is already 32-bit)
+    num_words = head // lanes
+    words = lax.bitcast_convert_type(
+        indices[:head].reshape(num_words, lanes), jnp.uint32
+    ).reshape(num_words)
+    full = num_words - num_words % _POPCOUNT_CHUNK
+
+    # sum the matches per chunk of words, then sum the chunks. The barrier
+    # stops xla from merging the two sums into a single long reduction, which
+    # xla:cpu splits into reduce-windows that do not fuse the bit arithmetic
+    chunks = count_equal_lanes(
+        words[:full].reshape(full // _POPCOUNT_CHUNK, _POPCOUNT_CHUNK), bin_index
+    ).sum(axis=-1, dtype=jnp.uint32)
+    count = lax.optimization_barrier(chunks).sum(dtype=jnp.uint32)
+    count += count_equal_lanes(words[full:], bin_index).sum(dtype=jnp.uint32)
+
+    # count the indices left over from the packing one by one
+    count += (indices[head:] == bin_index).sum(dtype=jnp.uint32)
+
+    return jnp.where(fits, count, 0)
+
+
+def count_equal_lanes(
+    words: UInt32[Array, '*shape'], bin_index: UInt[Array, '']
+) -> UInt32[Array, '*shape']:
+    """Count the lanes equal to `bin_index` in each word of packed `bin_index`-typed lanes."""
+    bits = jnp.iinfo(bin_index.dtype).bits
+    lanes = 32 // bits
+    one = sum(1 << (bits * i) for i in range(lanes))  # 0x01..01 per lane
+    low = one * ((1 << (bits - 1)) - 1)  # 0x7f..7f per lane
+    diff = words ^ (bin_index.astype(jnp.uint32) * one)
+    # exact per-lane zero test: the lane's top bit is set iff the lane is zero
+    flags = ~(((diff & low) + low) | diff | low)
+    return lax.population_count(flags)

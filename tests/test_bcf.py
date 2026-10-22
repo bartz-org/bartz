@@ -879,6 +879,10 @@ class TestBcf:
         )
         state = replace(state, prec_count_num_trees_tau=prec_count_num_trees)
 
+        # the config shared with the tau forest must not derive its precisions
+        # by difference, since the spread of b_z^2 is not bounded
+        assert not state.config.one_bin_prec_reduction
+
         def check_tau_prec_tree(state: BCFState, err_msg: str) -> None:
             forest = state.forest_tau
             assert forest.prec_tree is not None

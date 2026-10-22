@@ -25,7 +25,9 @@
 """Test `bartz.mcmcstep`."""
 
 import math
+import warnings
 from collections.abc import Callable, Sequence
+from contextlib import nullcontext
 from dataclasses import fields, replace
 from functools import partial, wraps
 from typing import Any, Literal, NamedTuple
@@ -37,6 +39,7 @@ from beartype import beartype
 from jax import (
     debug_key_reuse,
     device_put,
+    eval_shape,
     jit,
     lax,
     make_mesh,
@@ -61,6 +64,7 @@ from jaxtyping import (
     Array,
     Bool,
     Float,
+    Float16,
     Float32,
     Int32,
     Integer,
@@ -81,6 +85,7 @@ from bartz._jaxext import (
     Module,
     field,
     float32_matmuls,
+    get_default_device,
     get_default_devices,
     get_device_count,
     minimal_unsigned_dtype,
@@ -98,10 +103,12 @@ from bartz.grove import (
 )
 from bartz.mcmcstep import (
     AutoBatchedReduction,
+    AutoOneHotOrPopcountReduction,
     AutoOneHotReduction,
     BatchedReduction,
     DiagWishart,
     OneHotReduction,
+    PopcountReduction,
     ReductionConfig,
     State,
     Wishart,
@@ -200,6 +207,7 @@ def _minimal_step_config() -> StepConfig:
         count_reduction_config=BatchedReduction(num_batches=None),
         prec_reduction_config=BatchedReduction(num_batches=None),
         prec_count_num_trees=None,
+        one_bin_prec_reduction=False,
         sequential_unroll=1,
         augment=False,
         mesh=None,
@@ -800,6 +808,7 @@ class TestReduction:
             OneHotReduction(method='multiply', n_inner=False),
             OneHotReduction(method='scatter_set', n_inner=True),
             OneHotReduction(method='scatter_set', n_inner=False),
+            OneHotReduction(method='chunked'),
             # AutoOneHotReduction: per-site, per-platform method and layout
             AutoOneHotReduction(),
         )
@@ -823,23 +832,46 @@ class TestReduction:
         tree_indices = random.randint(keys.pop(), (NUM_TREES, n), 0, size).astype(
             jnp.uint32
         )
+
         # float values: univariate, and with the 1d/2d batch shapes of the
         # multivariate leaf-sum and precision paths
         vector = random.normal(keys.pop(), (n,))
         batched = random.normal(keys.pop(), (3, n))
         matrix = random.normal(keys.pop(), (2, 2, n))
+
         # float16 values: each per-bin sum overflows the float16 range, so a
         # reduction accumulating in the values' dtype returns inf
         overflowing = jnp.full(n, 4096.0, jnp.float16)
+
+        # float32 integers whose per-bin sums are exact in float16
+        small_ints = random.randint(keys.pop(), (2, n), 0, 4).astype(jnp.float32)
+
+        def narrowing(f: Callable) -> Float16[Array, '2 size']:
+            # the output dtype narrower than the values' needs float16 sums,
+            # which conftest disallows to catch accidental ones
+            # WORKAROUND(jax<0.9.1): jax.allow_f16_reductions added in 0.9.1
+            allow = (
+                jax.allow_f16_reductions(True)
+                if jax.__version_info__ >= (0, 9, 1)
+                else nullcontext()
+            )
+            with allow:
+                return f(small_ints, indices, **dict(float_kw, dtype=jnp.float16))
+
         count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
         float_kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
+
         # bin range: starts mid-domain, has a non-power-of-2 length, and runs one
         # past `size`, so its last bin is out of the index domain and its sum
         # must come out zero
         range_kw = dict(float_kw, subset_start=jnp.uint32(6), subset_length=3)
-        exact = assert_array_equal  # the count path must match exactly
-        # on gpu the matmul method contracts via tf32 (~1e-3 relative error); cpu
-        # keeps the tight tolerance, so accuracy is still fully checked there
+
+        # comparison function for integer calculations
+        exact = assert_array_equal
+
+        # comparison function for float calculations; on gpu the matmul method
+        # contracts via tf32 (~1e-3 relative error); cpu keeps the tight
+        # tolerance, so accuracy is still fully checked there
         rtol = 1e-3 if indices.platform() != 'cpu' else 1e-5
         close = partial(assert_close_matrices, rtol=rtol, atol=1e-6, reduce_rank=True)
 
@@ -850,7 +882,14 @@ class TestReduction:
             'float': (lambda f: f(vector, indices, **float_kw), close),
             'float batched': (lambda f: f(batched, indices, **float_kw), close),
             'float matrix': (lambda f: f(matrix, indices, **float_kw), close),
+            # a length that does not divide into chunks of datapoints
+            'count odd n': (lambda f: f(1, indices[:509], **count_kw), exact),
+            'float odd n': (
+                lambda f: f(vector[:509], indices[:509], **float_kw),
+                close,
+            ),
             'float16': (lambda f: f(overflowing, indices, **float_kw), close),
+            'narrowing': (narrowing, exact),
             'vmap count': (
                 lambda f: vmap(partial(f, 1, **count_kw))(tree_indices),
                 exact,
@@ -917,6 +956,129 @@ class TestReduction:
             for name, (run, compare) in cases.items():
                 with subtests.test(config=repr(config), case=name):
                     compare(run(config._reduce), expected[name])
+
+    def test_count_only_matches_reference(
+        self, keys: split, subtests: SubTests
+    ) -> None:
+        """The count-only configs match the reference on counts into a bin range.
+
+        The cases cover every unsigned index width, lengths that leave word
+        chunks, words, and indices over from the packing, bin ranges inside,
+        past the index domain, and past the lane width, all indices in the
+        counted bin, composition with an external `vmap` over trees, and a
+        sharded data axis.
+        """
+        configs = (PopcountReduction(), AutoOneHotOrPopcountReduction())
+        size = 8
+        count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
+        # (start, length): in the domain, two bins, past `size`, past uint8
+        ranges = ((2, 1), (3, 2), (7, 2), (300, 1))
+
+        def count(
+            indices: UInt[Array, ' n'], start: int, length: int
+        ) -> Callable[[Callable[..., Array]], Array]:
+            kw = dict(count_kw, subset_start=jnp.uint32(start), subset_length=length)
+            return lambda f: f(1, indices, **kw)
+
+        cases = {}
+        for dtype in (jnp.uint8, jnp.uint16, jnp.uint32):
+            # a multiple of the chunk length in every width, then lengths that
+            # leave chunks, words and indices over, and one without any chunk
+            for n in (512, 1031, 7):
+                indices = random.randint(keys.pop(), (n,), 0, size).astype(dtype)
+                for start, length in ranges:
+                    name = f'{jnp.dtype(dtype).name} n={n} range={start},{length}'
+                    cases[name] = count(indices, start, length)
+        cases['all in bin'] = count(jnp.full(1031, 3, jnp.uint8), 3, 1)
+        tree_indices = random.randint(keys.pop(), (NUM_TREES, 1031), 0, size).astype(
+            jnp.uint8
+        )
+        range_kw = dict(count_kw, subset_start=jnp.uint32(2), subset_length=2)
+        cases['vmap'] = lambda f: vmap(partial(f, 1, **range_kw))(tree_indices)
+
+        num_shards = min(4, get_device_count())
+        if num_shards >= 2:
+            mesh = make_mesh(
+                (num_shards,), ('data',), devices=get_default_devices()[:num_shards]
+            )
+            data, replicated = PartitionSpec('data'), PartitionSpec()
+            sharded = random.randint(keys.pop(), (num_shards * 1031,), 0, size)
+            sharded = device_put(sharded.astype(jnp.uint8), NamedSharding(mesh, data))
+            cases['sharded'] = lambda f: shard_map(
+                partial(f, 1, **dict(range_kw, data_sharded=True)),
+                mesh=mesh,
+                in_specs=(data,),
+                out_specs=replicated,
+            )(sharded)
+
+        for name, run in cases.items():
+            expected = run(reduce_reference)
+            for config in configs:
+                with subtests.test(config=repr(config), case=name):
+                    assert_array_equal(run(config._reduce), expected)
+
+    @pytest.mark.parametrize('num_bins', [1, 2])
+    def test_chunked_does_not_materialize_product(self, num_bins: int) -> None:
+        """On cpu, 'chunked' avoids materializing the one-hot product, 'multiply' not.
+
+        This tracks the behavior of xla:cpu that motivates using 'chunked' in
+        `AutoOneHotReduction`: if it changes, that choice should be revisited.
+        """
+        if get_default_device().platform != 'cpu':
+            pytest.skip('xla:cpu behavior')
+        num_trees = 8
+        n = 2**16
+        values = jnp.ones(n)
+        indices = jnp.zeros((num_trees, n), jnp.uint8)
+        kw: dict = dict(
+            size=4,
+            subset_start=jnp.uint32(1),
+            subset_length=num_bins,
+            dtype=jnp.float32,
+            data_sharded=False,
+        )
+
+        def temp_bytes(config: OneHotReduction) -> int:
+            reduce = vmap(partial(config._reduce, **kw), in_axes=(None, 0))
+            compiled = jit(reduce).lower(values, indices).compile()
+            analysis = compiled.memory_analysis()
+            assert analysis is not None
+            return analysis.temp_size_in_bytes
+
+        # the float32 product of the values with a one-hot over a single bin
+        product_bytes = num_trees * n * 4
+        assert (
+            temp_bytes(OneHotReduction(method='multiply')) >= num_bins * product_bytes
+        )
+        assert temp_bytes(OneHotReduction(method='chunked')) < product_bytes / 2
+
+    def test_chunked_rejects_outer_layout(self) -> None:
+        """The 'chunked' one-hot method supports only the datapoints inner."""
+        config = OneHotReduction(method='chunked', n_inner=False)
+        with pytest.raises(NotImplementedError, match='n_inner=True'):
+            config._reduce(
+                1, jnp.zeros(8, jnp.uint8), size=4, dtype=jnp.uint32, data_sharded=False
+            )
+
+    def test_count_only_rejects_other_uses(self) -> None:
+        """The count-only configs reject values other than 1 and a missing range."""
+        indices = jnp.zeros(8, jnp.uint8)
+        range_kw: dict = dict(size=4, subset_start=jnp.uint32(0), subset_length=1)
+        for config in (PopcountReduction(), AutoOneHotOrPopcountReduction()):
+            with pytest.raises(AssertionError):
+                config._reduce(
+                    jnp.ones(8),
+                    indices,
+                    dtype=jnp.float32,
+                    data_sharded=False,
+                    **range_kw,
+                )
+            with pytest.raises(AssertionError):
+                config._reduce(
+                    2, indices, dtype=jnp.uint32, data_sharded=False, **range_kw
+                )
+            with pytest.raises(AssertionError):
+                config._reduce(1, indices, size=4, dtype=jnp.uint32, data_sharded=False)
 
     def test_gpu_sm_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The cuda branch reads the shared SM count and rejects mixed gpus."""
@@ -1942,6 +2104,8 @@ def test_affluence_tree_stays_clean(
         'plain',
         'min_points',
         'error_scale',
+        'one_bin',
+        'two_bin',
         'chains',
         'binary',
         'multivariate',
@@ -1984,6 +2148,15 @@ def test_rebuild_derived(keys: split, case: str) -> None:
         kw = dict(kw, min_points_per_decision_node=10, min_points_per_leaf=5)
     elif case == 'error_scale':
         kw = dict(kw, error_scale=jnp.linspace(0.5, 2.0, n))
+    elif case in ('one_bin', 'two_bin'):
+        # the counts let the precision tree be updated with a one-bin reduction
+        kw = dict(
+            kw,
+            error_scale=jnp.linspace(0.5, 2.0, n),
+            min_points_per_decision_node=10,
+            min_points_per_leaf=5,
+            one_bin_prec_reduction=case == 'one_bin',
+        )
     elif case == 'chains':
         kw = dict(kw, num_chains=2)
     elif case == 'blocked':
@@ -2036,6 +2209,102 @@ def test_rebuild_derived(keys: split, case: str) -> None:
 
     # compare residuals
     assert_close_matrices(state.resid, rebuilt.resid, rtol=1e-5)
+
+
+def one_bin_init_kw(key: Key[Array, ''], n: int) -> dict:
+    """Arguments to `init` for the tests of `one_bin_prec_reduction`."""
+    data = gen_data(
+        key,
+        n=n,
+        p=2,
+        k=None,
+        q=0,
+        lambda_=None,
+        sigma2_lin=1.0,
+        sigma2_quad=1.0,
+        sigma2_eps=1.0,
+    ).quantize()
+
+    return dict(
+        X=data.x,
+        y=data.y,
+        offset=0.0,
+        max_split=data.max_split,
+        num_trees=NUM_TREES,
+        p_nonterminal=make_p_nonterminal(6),
+        leaf_prior_cov_inv=Wishart(None, None, jnp.float32(NUM_TREES)),
+        error_cov_inv=Wishart(4.0, 4.0, 1.0),
+        # the counts enable `one_bin_prec_reduction`
+        min_points_per_decision_node=10,
+    )
+
+
+@pytest.mark.parametrize(
+    ('case', 'expected', 'warning'),
+    [
+        ('missing', True, None),
+        ('narrow', True, None),
+        ('wide', False, 'spans a ratio'),
+        ('narrow_and_missing', False, 'missing'),
+        ('wide_forced', True, None),
+        ('wide_without_counts', False, None),
+    ],
+)
+def test_one_bin_prec_reduction_auto(
+    keys: split, case: str, expected: bool, warning: str | None
+) -> None:
+    """`init` enables the one-bin precision reduction only where it is accurate."""
+    n = 100
+    kw: dict = one_bin_init_kw(keys.pop(), n)
+
+    missing = jnp.arange(n) % 10 == 0
+    narrow_error_scale = jnp.linspace(1.0, 99.0, n)
+    wide_error_scale = jnp.linspace(1.0, 101.0, n)
+
+    match case:
+        case 'missing':
+            kw = dict(kw, missing=missing)
+        case 'narrow':
+            kw = dict(kw, error_scale=narrow_error_scale)
+        case 'wide':
+            kw = dict(kw, error_scale=wide_error_scale)
+        case 'narrow_and_missing':
+            kw = dict(kw, error_scale=narrow_error_scale, missing=missing)
+        case 'wide_forced':
+            kw = dict(kw, error_scale=wide_error_scale, one_bin_prec_reduction=True)
+        case 'wide_without_counts':
+            kw = dict(
+                kw, error_scale=wide_error_scale, min_points_per_decision_node=None
+            )
+
+    if warning is None:
+        # turn the warning into an error to check it is not emitted
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error', message='`one_bin_prec_reduction`')
+            state = init(**kw)
+    else:
+        with pytest.warns(UserWarning, match=warning):
+            state = init(**kw)
+
+    assert state.config.one_bin_prec_reduction == expected
+
+
+def test_one_bin_prec_reduction_auto_jit(keys: split) -> None:
+    """Under jit, the 'auto' one-bin precision reduction needs concrete error scales."""
+    n = 100
+    kw: dict = one_bin_init_kw(keys.pop(), n)
+
+    # with `missing` alone the values are not needed
+    state = eval_shape(lambda m: init(**kw, missing=m), jnp.arange(n) % 10 == 0)
+    assert state.config.one_bin_prec_reduction
+
+    with pytest.raises(ValueError, match='invoked inside'):
+        eval_shape(lambda e: init(**kw, error_scale=e), jnp.ones(n))
+
+    # without the counts the setting is ignored, so the values are not needed
+    kw = dict(kw, min_points_per_decision_node=None)
+    state = eval_shape(lambda e: init(**kw, error_scale=e), jnp.ones(n))
+    assert not state.config.one_bin_prec_reduction
 
 
 # settings of `test_joint_distribution`

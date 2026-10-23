@@ -1923,7 +1923,7 @@ def get_axis_size(mesh: Mesh | None, axis_name: str) -> int:
 def chol_with_gersh(
     mat: Float32[Array, '*batch_shape k k'], absolute_eps: bool = False
 ) -> Float32[Array, '*batch_shape k k']:
-    """Cholesky with Gershgorin stabilization, supports batching."""
+    """Cholesky with Gershgorin stabilization if near singular, supports batching."""
     return _chol_with_gersh_impl(mat, absolute_eps)
 
 
@@ -1949,8 +1949,18 @@ def _chol_with_gersh_impl(
     u = mat.shape[0] * rho * eps
     if absolute_eps:
         u += eps
-    mat = mat.at[jnp.diag_indices_from(mat)].add(u)
-    return scale[:, None] * jnp.linalg.cholesky(mat)
+
+    # the shift guarantees the factorization succeeds, but it biases the
+    # inverse by a relative u / lambda_min in the weakest direction, so it's
+    # used only if the factorization without has a pivot (squared diagonal
+    # entry of the factor) below u, i.e., smaller than the pivots that the
+    # shift guarantees, or fails (nan). Both factorizations are always done,
+    # stacked in a single batched call.
+    shifted = mat.at[jnp.diag_indices_from(mat)].add(u)
+    plain, shifted = jnp.linalg.cholesky(jnp.stack([mat, shifted]))
+    well_conditioned = jnp.all(jnp.square(jnp.diagonal(plain)) >= u)
+    L = jnp.where(well_conditioned, plain, shifted)
+    return scale[:, None] * L
 
 
 def inv_via_chol_with_gersh(

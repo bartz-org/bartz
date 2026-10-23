@@ -138,6 +138,7 @@ from bartz.mcmcstep._state import (
     chol_with_gersh,
     inv_via_chol_with_gersh,
     outcome_target,
+    round_to_pow2,
     search_divisor,
 )
 from bartz.mcmcstep._step import (
@@ -3043,6 +3044,13 @@ def test_chol_with_gersh_disparate_scales() -> None:
     )
 
 
+def test_chol_with_gersh_diagonal_exact(keys: split) -> None:
+    """Check the standardization is exact, using a diagonal matrix."""
+    diag = jnp.exp(random.uniform(keys.pop(), (100, 5), minval=-40, maxval=40))
+    mat = diag[..., :, None] * jnp.eye(5)
+    assert_array_equal(chol_with_gersh(mat), jnp.linalg.cholesky(mat))
+
+
 def ar1_corr(k: int, rho: float) -> Float[numpy.ndarray, '{k} {k}']:
     """Correlation matrix of an AR(1) process, strongly correlated for rho near 1."""
     i = numpy.arange(k)
@@ -3082,8 +3090,8 @@ def full_shift_cholesky(
     mat: Float32[Array, '*batch k k'],
 ) -> Float32[Array, '*batch k k']:
     """Compute chol(mat) with the full Gershgorin stabilization, a reference for robustness."""
-    d = jnp.sqrt(jnp.diagonal(mat, axis1=-2, axis2=-1))
-    corr = mat / (d[..., :, None] * d[..., None, :])
+    d = round_to_pow2(jnp.sqrt(jnp.diagonal(mat, axis1=-2, axis2=-1)))
+    corr = mat / d[..., :, None] / d[..., None, :]
     *_, k, _ = mat.shape
     rho = jnp.max(jnp.sum(jnp.abs(corr), axis=-1), axis=-1)
     shift = k * rho * jnp.finfo(corr.dtype).eps

@@ -1342,9 +1342,7 @@ def compute_leaf_unit(
     return jnp.where(jnp.isfinite(leaf_unit) & (leaf_unit > 0), leaf_unit, 1.0)
 
 
-def round_to_pow2(
-    x: Float32[Array, ''] | Float32[Array, ' k'],
-) -> Float32[Array, ''] | Float32[Array, ' k']:
+def round_to_pow2(x: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
     """Round to the nearest power of two."""
     # note: don't use exp2, not exact. `2 ** x` checked exact on cpu & cuda.
     return 2 ** jnp.round(jnp.log2(x))
@@ -1931,19 +1929,21 @@ def chol_with_gersh(
 def _chol_with_gersh_impl(
     mat: Float32[Array, '*batch_shape k k'], absolute_eps: bool
 ) -> Float32[Array, '*batch_shape k k']:
-    # standardize to unit diagonal first, so the Gershgorin shift is relative to
-    # each component's scale instead of a single absolute value set by the
+    # standardize to ~unit diagonal first, so the Gershgorin shift is relative
+    # to each component's scale instead of a single absolute value set by the
     # largest one (which would swamp components with much smaller variance, e.g.
     # mixing a heavily-scaled continuous outcome with O(1) binary ones).
     # degenerate (non-positive or non-finite, e.g. infinite precision from a
     # constant outcome) diagonals fall back to the largest finite scale, which
-    # keeps a diagonal matrix bit-identical to an unstandardized stabilization
-    # and leaves an infinite diagonal infinite (pinning that leaf to zero)
+    # leaves an infinite diagonal infinite (pinning that leaf to zero). The
+    # scales are powers of 2, so the scaling is exact, and a diagonal matrix
+    # gives the same factor as a plain Cholesky
     diag = jnp.diagonal(mat)
     finite_pos = jnp.isfinite(diag) & (diag > 0)
     ref = jnp.max(jnp.where(finite_pos, diag, 0.0), initial=0.0)
-    scale = jnp.sqrt(jnp.where(finite_pos, diag, jnp.where(ref > 0, ref, 1.0)))
-    mat = mat / (scale[:, None] * scale[None, :])
+    scale = jnp.where(finite_pos, diag, jnp.where(ref > 0, ref, 1.0))
+    scale = round_to_pow2(jnp.sqrt(scale))
+    mat = mat / scale[:, None] / scale[None, :]
     rho = jnp.max(jnp.sum(jnp.abs(mat), axis=1), initial=0.0)
     eps = jnp.finfo(mat.dtype).eps
     u = mat.shape[0] * rho * eps

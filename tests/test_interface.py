@@ -103,10 +103,13 @@ from bartz._jaxext import (
 from bartz._typing import kwdict
 from bartz.debug import MinimalTrace, PriorSample, sample_prior
 from bartz.grove import (
+    TreesTrace,
     check_trace,
     describe_error,
+    evaluate_forest,
     forest_depth_distr,
     is_actual_leaf,
+    traverse_forest,
     tree_actual_depth,
     tree_depth,
     tree_depths,
@@ -1356,6 +1359,192 @@ def _assert_predictions_finite(bart: Bart, bkw: BartKW, keys: split) -> None:
     # when there are none
     if not bkw.any_binary:
         assert jnp.all(jnp.isfinite(bart.get_error_sdev()))
+
+
+class TestCorrelatedErrors:
+    """Check the posterior draws of a run with strongly correlated errors.
+
+    Many outcomes measuring the same function with strongly correlated errors
+    make the error and leaf posterior precisions badly conditioned. Each check
+    compares the draws in the trace with their exact conditional distribution,
+    recomputed in float64 from the trace itself, so it needs no reference
+    implementation. The draws are tested on the directions where an
+    inaccurate factorization of the precision matrices would bias them.
+    """
+
+    N = 5_000
+
+    @pytest.fixture(scope='class')
+    def bart(self) -> Bart:
+        """Run Bart on data with strongly correlated errors."""
+        keys = split(random.key(0x2B6A11C0), 2)
+        k = 20
+        i = jnp.arange(k)
+        error_corr = 0.99 ** jnp.abs(i[:, None] - i[None, :])
+        # the outcomes share the mean function, such that the misfit of the
+        # trees does not hide the correlation of the errors in the residuals
+        dgp = gen_data(
+            keys.pop(),
+            n=self.N,
+            p=k,
+            k=k,
+            q=0,
+            lambda_=1.0,
+            sigma2_lin=0.5,
+            sigma2_quad=0.5,
+            sigma2_eps=0.01,
+            error_corr=error_corr,
+        )
+        return Bart(
+            dgp.x,
+            dgp.y,
+            num_trees=50,
+            n_burn=100,
+            n_save=100,
+            num_chains=None,
+            printevery=None,
+            seed=keys.pop(),
+        )
+
+    @staticmethod
+    def trees_at(bart: Bart, i: int) -> TreesTrace:
+        """Return the trees of the i-th saved iteration."""
+        trace = bart._main_trace
+        return TreesTrace(
+            var_tree=trace.var_tree[i, :, :],
+            split_tree=trace.split_tree[i, :, :],
+            leaf_tree=trace.leaf_tree[i, :, :, :],
+            leaf_unit=trace.leaf_unit,
+        )
+
+    def tree_values(
+        self, bart: Bart
+    ) -> Iterator[Float32[numpy.ndarray, 'num_trees k n']]:
+        """Yield the values of each tree at the datapoints, for each saved iteration."""
+        for i in range(bart.n_save):
+            values = evaluate_forest(bart._mcmc_state.X, self.trees_at(bart, i))
+            yield numpy.asarray(values)
+
+    @staticmethod
+    def centered_y(bart: Bart) -> Float[numpy.ndarray, 'k n']:
+        """Return the training outcome minus the offset."""
+        y = numpy.asarray(bart._mcmc_state.y, numpy.float64)
+        offset = numpy.asarray(bart._main_trace.offset, numpy.float64)
+        return y - offset[:, None]
+
+    def test_leaf_draws(self, bart: Bart) -> None:
+        """Check the leaf draws against their exact conditional distribution.
+
+        Within an iteration, a tree is updated given the trees that precede it
+        in the same iteration, the trees that follow it in the previous
+        iteration, and the error precision of the previous iteration. Each leaf
+        is projected on the direction in which stabilizing the posterior
+        precision ``Q`` by its diagonal ``D`` biases its mean ``m``, i.e.,
+        ``Q^-1 D m``, normalized to be standard normal.
+        """
+        y = self.centered_y(bart)
+        trace = bart._main_trace
+        leaf_prior_cov_inv = numpy.asarray(
+            bart._mcmc_state.forest.leaf_prior_cov_inv.value, numpy.float64
+        )
+        error_cov_inv = numpy.asarray(trace.error_cov_inv, numpy.float64)
+        leaf_unit = numpy.asarray(trace.leaf_unit, numpy.float64)
+        _, num_trees, k, tree_size = trace.leaf_tree.shape
+        _, n = y.shape
+
+        stats = []
+        partial = numpy.empty((k, num_trees, n))
+        values = self.tree_values(bart)
+        prev_values = next(values)
+        for i, cur_values in enumerate(values, start=1):
+            # partial residuals of each tree at the time it was updated
+            tree_partial = y - prev_values[1:].sum(axis=0, dtype=numpy.float64)
+            for t in range(num_trees):
+                partial[:, t, :] = tree_partial
+                if t + 1 < num_trees:
+                    tree_partial += prev_values[t + 1]
+                    tree_partial -= cur_values[t]
+            prev_values = cur_values
+
+            # count and sum the partial residuals in each node of all trees
+            trees = self.trees_at(bart, i)
+            indices = numpy.asarray(
+                traverse_forest(bart._mcmc_state.X, trees.var_tree, trees.split_tree)
+            )
+            flat = (indices + tree_size * numpy.arange(num_trees)[:, None]).ravel()
+            count = numpy.bincount(flat, minlength=num_trees * tree_size)
+            resid = numpy.stack(
+                [
+                    numpy.bincount(
+                        flat,
+                        weights=partial[j].ravel(),
+                        minlength=num_trees * tree_size,
+                    )
+                    for j in range(k)
+                ],
+                axis=1,
+            )
+
+            # exact conditional of the leaves with data
+            (leaf,) = numpy.nonzero(count)
+            prec = (
+                leaf_prior_cov_inv
+                + count[leaf, None, None] * error_cov_inv[i - 1, None, :, :]
+            )
+            mean = numpy.linalg.solve(
+                prec, (resid[leaf] @ error_cov_inv[i - 1])[:, :, None]
+            ).squeeze(-1)
+            leaves = numpy.asarray(trees.leaf_tree, numpy.float64)
+            leaves = leaves.transpose(0, 2, 1).reshape(-1, k)[leaf] * leaf_unit
+
+            # project on the direction of the bias
+            direction = numpy.diagonal(prec, axis1=1, axis2=2) * mean
+            norm = numpy.einsum(
+                'li,li->l',
+                direction,
+                numpy.linalg.solve(prec, direction[:, :, None]).squeeze(-1),
+            )
+            proj = numpy.einsum('li,li->l', direction, mean - leaves)
+            stats.append(proj[norm > 0] / numpy.sqrt(norm[norm > 0]))
+        stats = numpy.concatenate(stats)
+
+        z = stats.mean() * math.sqrt(stats.size)
+        assert abs(z) < 4
+
+    def test_error_cov_inv_draws(self, bart: Bart) -> None:
+        """Check the error precision draws against their exact conditional distribution.
+
+        The precision ``E`` is drawn from ``Wishart(df, S^-1)``, with ``S`` the
+        prior rate plus the scatter of the residuals of the same iteration, so
+        ``a^T E a / a^T S^-1 a`` is chi-squared with ``df`` degrees of freedom
+        for any ``a``. ``a`` is the weakest direction of ``S``, rescaled to unit
+        diagonal, the most sensitive to stabilizing its factorization.
+        """
+        y = self.centered_y(bart)
+        trace = bart._main_trace
+        prior = bart._mcmc_state.error_cov_inv
+        assert prior.nu is not None
+        assert prior.rate is not None
+        _, n = y.shape
+        df = prior.nu.item() + n
+        rate = numpy.asarray(prior.rate, numpy.float64)
+
+        stats = []
+        for values, error_cov_inv in zip(
+            self.tree_values(bart), trace.error_cov_inv, strict=True
+        ):
+            resid = y - values.sum(axis=0, dtype=numpy.float64)
+            scale_inv = rate + resid @ resid.T
+            d = numpy.sqrt(numpy.diag(scale_inv))
+            _, eigvecs = numpy.linalg.eigh(scale_inv / numpy.outer(d, d))
+            a = eigvecs[:, 0] / d
+            chi2_draw = (a @ numpy.asarray(error_cov_inv, numpy.float64) @ a) / (
+                a @ numpy.linalg.solve(scale_inv, a)
+            )
+            stats.append((chi2_draw - df) / math.sqrt(2 * df))
+
+        z = numpy.mean(stats) * math.sqrt(len(stats))
+        assert abs(z) < 4
 
 
 def test_constant_y_train(bkw: BartKW, keys: split) -> None:

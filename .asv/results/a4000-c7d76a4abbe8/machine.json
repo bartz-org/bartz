@@ -1,9 +1,0 @@
-{
-    "arch": "x86_64",
-    "cpu": "AMD Athlon 3000G with Radeon Vega Graphics",
-    "machine": "a4000-c7d76a4abbe8",
-    "num_cpu": "4",
-    "os": "Linux 5.15.0-94-generic",
-    "ram": "50453131264",
-    "version": 1
-}

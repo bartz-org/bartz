@@ -42,17 +42,19 @@ UV_RUN = uv run --dev $(EXTRAS)
 # invocation.
 TODAY := $(shell date -u +%Y-%m-%dT00:00:00Z)
 
-# Dependency cooldown: `update-python-deps` pins pyproject's `[tool.uv]
-# exclude-newer` to TODAY minus this many days, so releases skip just-published
-# versions. It is pinned to an absolute instant (not uv's relative `1 week` span)
-# so the release lock and the uv-lock pre-commit hook resolve the same cutoff and
-# don't churn uv.lock.
-COOLDOWN_DAYS = 7
+# Dependency cooldown in days, read from `[update] cooldown_days` in prek.toml,
+# where it also applies to a bare `prek update`. `update-python-deps` pins
+# pyproject's `[tool.uv] exclude-newer` to TODAY minus this many days, so
+# releases skip just-published versions. It is pinned to an absolute instant
+# (not uv's relative `1 week` span) so the release lock and the uv-lock hook
+# resolve the same cutoff and don't churn uv.lock. Lazy (`=`), so only the
+# targets that use it pay for reading it; tomllib needs python>=3.11.
+COOLDOWN_DAYS = $(or $(shell uv run --no-project --python='>=3.11' python -c 'import tomllib; print(tomllib.load(open("prek.toml", "rb"))["update"]["cooldown_days"])'),$(error cannot read [update] cooldown_days from prek.toml))
 
 # define command to run python with oldest supported dependencies
 # OLD_DATE / OLD_DELAY_DAYS / BUMP_PYTHON_VERSION_DATE / NUM_SUPPORTED_PYTHON_RELEASES
 # drive the `update-oldest-deps` policy.
-OLD_DATE = 2025-08-25T00:00:00Z
+OLD_DATE = 2025-10-04T00:00:00Z
 OLD_DELAY_DAYS = 365
 BUMP_PYTHON_VERSION_DATE = 10-31
 NUM_SUPPORTED_PYTHON_RELEASES = 5
@@ -61,18 +63,12 @@ OLD_PYTHON = $(shell grep 'requires-python' pyproject.toml | sed 's/.*>=\([0-9.]
 # matches bartz, but it is newer than OLD_DATE, so the old toolchain cannot
 # resolve it. Exempt stochtree from the cutoff; drop --exclude-newer-package once
 # the stochtree floor rises above 0.4.2 (check-workarounds will flag this then).
-# WORKAROUND(rbartpackages<0.12.0): the first release (0.1.0) was uploaded on
-# 2026-06-05, newer than OLD_DATE, so the old toolchain cannot resolve it.
-# Exempt rbartpackages from the cutoff. The exemption is unneeded once OLD_DATE
-# passes the upload date of the rbartpackages floor release; 0.12.0 is a guess
-# at the floor around that time (~June 2027). On trigger, drop
-# --exclude-newer-package if OLD_DATE has caught up, else bump the bound.
-UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --exclude-newer-package="stochtree=0 days" --exclude-newer-package="rbartpackages=0 days" --isolated
+UV_RUN_OLD = $(UV_RUN) --python=$(OLD_PYTHON) --resolution=lowest-direct --exclude-newer=$(OLD_DATE) --exclude-newer-package="stochtree=0 days" --isolated
 
 .PHONY: help
 help:
 	@echo "Available targets:"
-	@echo "- setup: create R and Python environments for development"
+	@echo "- setup: create the Python environment for development"
 	@echo "- tests: run unit tests on cpu, saving coverage information"
 	@echo "- tests-single-cpu: like \`tests\` but with a single jax cpu device"
 	@echo "- tests-old: run unit tests on cpu with oldest supported python and dependencies"
@@ -85,10 +81,11 @@ help:
 	@echo "- diffcov: check changed-lines coverage vs DIFF_BASE (default origin/main)"
 	@echo "- update-deps: update-python-deps + update-other-deps"
 	@echo "- update-python-deps: pin the dep cooldown, then upgrade uv.lock to the latest allowed deps"
-	@echo "- update-other-deps: upgrade renv.lock and pre-commit hooks (not date-pinned)"
+	@echo "- update-other-deps: upgrade prek hooks and GitHub Actions (not date-pinned)"
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- check-changelog: verify the topmost changelog section is dated today"
+	@echo "- check-npz-frozen: verify the test archives of the file format are frozen"
 	@echo "- build: build the python wheel and sdist"
 	@echo "- check-dist: verify dist/ artifacts carry the release version"
 	@echo "- release: run tests, build, and upload to PyPI (run on main)"
@@ -96,7 +93,7 @@ help:
 	@echo "- push-tag: push the version tag to origin"
 	@echo "- upload: upload release to PyPI"
 	@echo "- upload-test: upload release to TestPyPI"
-	@echo "- gh-release: create draft GitHub release from docs/changelog.md"
+	@echo "- gh-release: publish GitHub release from docs/changelog.md"
 	@echo "- asv-machine: initialize ~/.asv-machine.json with a human-readable id"
 	@echo "- asv-run: run benchmarks on all unbenchmarked tagged releases and main"
 	@echo "- asv-publish: create html benchmark report"
@@ -105,10 +102,11 @@ help:
 	@echo "- asv-quick: run quick benchmarks on current code, no saving"
 	@echo "- ipython: start an ipython shell with stuff pre-imported"
 	@echo "- ipython-old: start an ipython shell with oldest supported python and dependencies"
-	@echo "- lint: run pre-commit hooks on all files"
+	@echo "- lint: run prek hooks on all files"
 	@echo
 	@echo "Release workflow:"
 	@echo "- describe release in docs/changelog.md (its topmost header sets the version, follow effver https://jacobtomlinson.dev/effver)"
+	@echo "- $$ make setup"
 	@echo "- $$ make update-deps"
 	@echo "- $$ make release, will not release but runs all tests, iterate and debug"
 	@echo '- run `make tests-gpu` on a gpu'
@@ -118,7 +116,6 @@ help:
 	@echo '- save notebook locally and commit it, merge PR'
 	@echo "- on main: $$ make release"
 	@echo "- merge fix PR and try again until make release passes"
-	@echo "- publish the draft github release created by make release (updates zenodo automatically)"
 	@echo "- if the online docs are not up-to-date, merge another PR to trigger a new merge CI"
 
 
@@ -126,13 +123,12 @@ help:
 
 .PHONY: setup
 setup:
-	Rscript -e "renv::restore()"
-	$(UV_RUN) pre-commit install --install-hooks
+	$(UV_RUN) prek install --prepare-hooks
 	$(if $(filter 12 13,$(CUDA_VERSION)),JAX_PLATFORMS=cuda) $(UV_RUN) python -c 'import jax; jax.numpy.empty(0)'
 
 .PHONY: lint
 lint:
-	$(UV_RUN) pre-commit run $(if $(ARGS),$(ARGS),--all-files)
+	$(UV_RUN) prek run $(if $(ARGS),$(ARGS),--all-files)
 
 .PHONY: clean
 clean:
@@ -142,47 +138,39 @@ clean:
 	rm -fr docs/_build
 	rm -fr docs/reference/_autogen
 	rm -fr .coverage* coverage.xml diffcov.md
-	# `renv::clean()` only removes locks/tempdirs/unused packages, not the
-	# whole library, so wipe the gitignored renv subdirs by hand to mirror
-	# `rm -fr .venv`.
-	rm -fr renv/library renv/staging renv/local renv/cellar renv/lock renv/python renv/sandbox
 
 ################# TESTS #################
 
 # Test groups: each is a chunk of pytest args (paths/nodeids + -k expression)
 # that selects a balanced slice of the suite. CI runs one group per matrix cell
 # (NPROC=0, no xdist), so total wall time is the slowest cell: the groups are
-# balanced to land each cell around ~14 min on the slow `tests-old` target (the
-# iface-v4 floor, see below). To run a single group locally (composes with any
-# tests target):
+# balanced to land each cell around ~21 min on the slowest target. To run a
+# single group locally (composes with any tests target):
 #   make tests             GROUP=iface-v4
-#   make tests-single-cpu  GROUP=misc
-#   make tests-old         GROUP=bart-v1
+#   make tests-single-cpu  GROUP=iface-v7
+#   make tests-old         GROUP=iface-v23
 # Leaving GROUP unset runs the whole suite. The matrix in
 # `.github/workflows/tests.yml` lists these same names; keep them in sync.
 #
-# Cost is dominated by test_interface.py (variants v4-v7, ~2200s deduped on
-# tests-old) and test_BART.py (variants v1-v3, ~1000s): each variant re-fits a
-# class-scoped CachedBart fixture, so a given variant's tests are kept within one
-# group (splitting them would pay the fixture twice). The heavy v4/v5 variants
-# are sliced where it's free to do so: the test_equiv_sharding tests have no
-# class fixture, so they ride along in cheaper groups, and v5's TestWithCachedBart
-# class is isolated. The leftover budget in each group is topped up with the
-# cheap whole-file suites (mcmcloop, stochtree, jaxext, ...); where a whole file
-# would overshoot, a single fixture-free class is peeled off instead (mcmcstep's
-# TestMultichain, ~265s, rides in bart-v1 to fill its slack). iface-v4 is the
-# irreducible floor (~850s, almost all CachedBart setup that can't be split); the
-# other groups are balanced just under it. Rough tests-old cost per group (wall
-# seconds, ~= the deduped CI `--durations` table; re-measure after big changes):
-#   misc ~755  iface-v5v7 ~730  iface-v6 ~760  iface-v4 ~850  bart-v1 ~725  bart-v23 ~670
-GROUP_misc        := tests/test_bcf.py tests/test_mcmcstep.py tests/test_mcmcloop.py tests/test_dgp.py tests/test_prepcovars.py tests/test_debug.py tests/test_meta.py tests/test_naming.py tests/test_docs.py tests/test_workarounds.py 'tests/test_interface.py::test_equiv_sharding[v7]' -k "not TestMultichain"
-GROUP_iface-v5v7  := tests/test_interface.py -k "(v5 and TestWithCachedBart) or (v7 and not test_equiv_sharding)"
-GROUP_iface-v6    := tests/test_interface.py -k "v6 or (v5 and not TestWithCachedBart)"
-GROUP_iface-v4    := tests/test_interface.py -k "(v4 and not test_equiv_sharding) or not (v2 or v3 or v4 or v5 or v6 or v7)"
-GROUP_bart-v1     := tests/test_BART.py tests/test_jaxext.py tests/test_stochtree.py 'tests/test_mcmcstep.py::TestMultichain' -k "v1 or not (v2 or v3) or jaxext"
-GROUP_bart-v23    := tests/test_BART.py 'tests/test_interface.py::test_equiv_sharding[v4]' -k "v2 or v3 or v4"
+# Cost is dominated by test_interface.py (~4500s on tests-old): each bkw variant
+# re-fits a class-scoped CachedBart fixture and recompiles the same functions, so
+# each variant stays within one group, and the other suites fill the leftover
+# budget as whole files or fixture-free slices (mcmcstep's Geweke test and
+# TestMultichain). iface-v1 is the catch-all: besides its variant, it runs every
+# file other than test_interface.py not in GROUPED_FILES, so a new test file is
+# run there rather than never. Rough cost per group (CI wall seconds,
+# tests/tests-single-cpu/tests-old; re-measure after big changes):
+#   iface-v1 950/750/1250    iface-v23 1000/650/1250  iface-v4 1050/700/1200
+#   iface-v5 1050/700/1250   iface-v6  1000/1100/1200 iface-v7 1050/1150/1250
+GROUPED_FILES := tests/test_mcmcstep.py tests/test_jaxext.py tests/test_bcf.py tests/test_stochtree.py tests/test_debug.py tests/test_dgp.py
+GROUP_iface-v1  := tests $(addprefix --ignore=,$(GROUPED_FILES)) -k "v1 or not test_interface.py"
+GROUP_iface-v23 := tests/test_interface.py tests/test_jaxext.py 'tests/test_mcmcstep.py::TestMultichain' -k "v2 or v3 or not test_interface.py"
+GROUP_iface-v4  := tests/test_interface.py -k v4
+GROUP_iface-v5  := tests/test_interface.py tests/test_bcf.py tests/test_stochtree.py -k "v5 or not test_interface.py"
+GROUP_iface-v6  := tests/test_interface.py tests/test_mcmcstep.py tests/test_debug.py tests/test_dgp.py -k "v6 or not (test_interface.py or test_joint_distribution or TestMultichain)"
+GROUP_iface-v7  := tests/test_interface.py 'tests/test_mcmcstep.py::test_joint_distribution' -k "v7 or not test_interface.py or not (v1 or v2 or v3 or v4 or v5 or v6)"
 
-GROUPS := misc iface-v5v7 iface-v6 iface-v4 bart-v1 bart-v23
+GROUPS := iface-v1 iface-v23 iface-v4 iface-v5 iface-v6 iface-v7
 
 SELECT = $(if $(GROUP),$(GROUP_$(GROUP)))
 
@@ -203,7 +191,7 @@ GPU_NPROC = $(NPROC)
 endif
 
 TESTS_VARS = COVERAGE_FILE=.coverage.$@$(if $(GROUP),-$(GROUP))
-TESTS_COMMAND = python -m pytest --cov --cov-context=test --dist=worksteal --durations=1000
+TESTS_COMMAND = python -m pytest --cov --dist=worksteal --durations=1000
 TESTS_CPU_VARS = $(TESTS_VARS) JAX_PLATFORMS=cpu
 TESTS_CPU_COMMAND = $(TESTS_COMMAND) --platform=cpu --numprocesses=$(NPROC) $(SELECT)
 # WORKAROUND(jax<0.10.3): jax 0.10.x exhausts/corrupts CUDA command buffers
@@ -248,6 +236,8 @@ docs:
 	@echo
 	@echo "Now open _site/index.html"
 
+# Releases up to v0.13.0 have rpy2 in their dev deps: RPY2_CFFI_MODE=ABI lets
+# it install without R. Drop it once the latest release no longer has rpy2.
 .PHONY: docs-latest
 docs-latest:
 	@LATEST_TAG=$$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | sort -V | tail -1) && \
@@ -256,7 +246,7 @@ docs-latest:
 	WORKTREE_DIR=$$(mktemp -d) && \
 	trap "git worktree remove --force '$$WORKTREE_DIR' 2>/dev/null || rm -rf '$$WORKTREE_DIR'" EXIT && \
 	git worktree add --detach "$$WORKTREE_DIR" "$$LATEST_TAG" && \
-	$(MAKE) -C "$$WORKTREE_DIR" docs && \
+	RPY2_CFFI_MODE=ABI $(MAKE) -C "$$WORKTREE_DIR" docs && \
 	test ! -d _site/docs || rm -r _site/docs && \
 	mv "$$WORKTREE_DIR/_site/docs-dev" _site/docs
 	@echo
@@ -295,35 +285,32 @@ diffcov:
 
 ################# DEPENDENCIES #################
 
-# `update-deps` = latest python deps (uv) + everything else (renv, pre-commit).
-# Only `update-python-deps` runs inside `release`: it pins pyproject's
-# exclude-newer to a fixed instant before locking, so repeated same-day release
-# runs (and the uv-lock hook) resolve identically and don't churn. renv and
-# pre-commit have no date knob, so they're bumped once by hand via
+# `update-deps` = latest python deps (uv) + everything else (prek hooks, GitHub
+# Actions). Only `update-python-deps` runs inside `release`: it pins
+# pyproject's exclude-newer to a fixed instant before locking, so repeated
+# same-day release runs (and the uv-lock hook) resolve identically and don't
+# churn. The others have no fixed-date knob, so they're bumped once by hand via
 # `make update-deps` at the start of the release, outside the release loop.
+PINACT = PINACT_MIN_AGE=$(COOLDOWN_DAYS) GITHUB_TOKEN=$${GITHUB_TOKEN:-$$(gh auth token)} $(UV_RUN) prek run pinact --stage manual --all-files
 .PHONY: update-deps
 update-deps: update-python-deps update-other-deps
 
 .PHONY: update-python-deps
 update-python-deps:
-	$(UV_RUN) python config/update_cooldown.py --today=$(TODAY) --cooldown-days=$(COOLDOWN_DAYS)
+	$(UV_RUN) python -m config.update_cooldown --today=$(TODAY) --cooldown-days=$(COOLDOWN_DAYS)
 	uv lock --upgrade
 
 .PHONY: update-other-deps
 update-other-deps:
-	# Update R packages to their latest versions and rewrite renv.lock; snapshot
-	# captures the refreshed library (explicit type, from DESCRIPTION). renv's
-	# installer reports build failures without raising an R error, so re-check:
-	# update(check = TRUE) returns TRUE only when nothing is left to update,
-	# and status() that the library and lockfile agree.
-	Rscript -e 'renv::update(prompt = FALSE); renv::snapshot(prompt = FALSE); stopifnot(isTRUE(renv::update(check = TRUE)), renv::status()$$synchronized)'
-	# --freeze pins revs to commit SHAs (tags are mutable)
-	$(UV_RUN) pre-commit autoupdate --freeze
+	$(UV_RUN) prek update
+	# Update GitHub Actions, skipping releases newer than the cooldown. prek
+	# fails a hook that modifies files, so a second run checks it now passes.
+	$(PINACT) || $(PINACT)
 
 .PHONY: update-oldest-deps
 update-oldest-deps:
-	$(UV_RUN) python config/update_python_version.py --bump-date=$(BUMP_PYTHON_VERSION_DATE) --num-supported=$(NUM_SUPPORTED_PYTHON_RELEASES) --today=$(TODAY)
-	$(UV_RUN) python config/update_oldest_deps.py --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS) --today=$(TODAY)
+	$(UV_RUN) python -m config.update_python_version --bump-date=$(BUMP_PYTHON_VERSION_DATE) --num-supported=$(NUM_SUPPORTED_PYTHON_RELEASES) --today=$(TODAY)
+	$(UV_RUN) python -m config.update_oldest_deps --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS) --today=$(TODAY)
 	uv lock
 
 
@@ -336,7 +323,11 @@ check-committed:
 
 .PHONY: check-changelog
 check-changelog:
-	$(UV_RUN) python config/util.py check_changelog --today=$(TODAY)
+	$(UV_RUN) python -m config.util check_changelog --today=$(TODAY)
+
+.PHONY: check-npz-frozen
+check-npz-frozen:
+	$(UV_RUN) python -m tests.test_npz --check-frozen
 
 .PHONY: build
 build:
@@ -350,14 +341,14 @@ build:
 # artifacts pass `check-dist` and `smoke-test`, to avoid editing a published
 # tag if something fails in between.
 .PHONY: release
-release: check-changelog clean setup update-oldest-deps update-python-deps check-committed tests tests-single-cpu tests-old docs version-tag build upload gh-release
+release: check-changelog check-npz-frozen clean setup update-oldest-deps update-python-deps check-committed tests tests-single-cpu tests-old docs version-tag build upload gh-release
 	@echo "Done!"
 
 .PHONY: version-tag
 version-tag: check-committed
 	test $(shell git rev-parse --abbrev-ref HEAD) = main
 	git fetch --tags
-	$(eval VERSION_TAG := v$(shell $(UV_RUN) python config/util.py get_version))
+	$(eval VERSION_TAG := v$(shell $(UV_RUN) python -m config.util get_version))
 	@if git rev-parse -q --verify refs/tags/$(VERSION_TAG) >/dev/null; then \
 		test "$$(git rev-list -n 1 $(VERSION_TAG))" = "$$(git rev-parse HEAD)" \
 			|| { echo "Tag $(VERSION_TAG) exists but points to a different commit;"; \
@@ -375,7 +366,7 @@ push-tag: version-tag check-dist smoke-test
 # TestPyPI reject; this catches dist/ built before tagging, or gone stale.
 .PHONY: check-dist
 check-dist:
-	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
+	@VERSION=$$($(UV_RUN) python -m config.util get_version) && \
 	test -e "dist/bartz-$$VERSION.tar.gz" && test -e "dist/bartz-$$VERSION-py3-none-any.whl" || { \
 		echo "dist/ does not carry the release version $$VERSION:"; \
 		ls dist/ 2>/dev/null; \
@@ -393,7 +384,7 @@ upload: push-tag
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN && \
 	uv publish
-	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
+	@VERSION=$$($(UV_RUN) python -m config.util get_version) && \
 	echo "Try to install bartz $$VERSION from PyPI" && \
 	uv tool run --exclude-newer-package="bartz=0 days" --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
@@ -404,13 +395,13 @@ upload-test: version-tag check-dist smoke-test
 	@read -s UV_PUBLISH_TOKEN && \
 	export UV_PUBLISH_TOKEN && \
 	uv publish --check-url=https://test.pypi.org/simple/ --publish-url=https://test.pypi.org/legacy/
-	@VERSION=$$($(UV_RUN) python config/util.py get_version) && \
+	@VERSION=$$($(UV_RUN) python -m config.util get_version) && \
 	echo "Try to install bartz $$VERSION from TestPyPI" && \
 	uv tool run --exclude-newer-package="bartz=0 days" --index=https://test.pypi.org/simple/ --index-strategy=unsafe-best-match --with="bartz==$$VERSION" python -c 'import bartz; print(bartz.__version__)'
 
 .PHONY: gh-release
 gh-release: push-tag
-	$(UV_RUN) python config/util.py gh_release --today=$(TODAY)
+	$(UV_RUN) python -m config.util gh_release --today=$(TODAY)
 
 
 ################# BENCHMARKS #################
@@ -419,10 +410,10 @@ ASV = $(UV_RUN) python -m asv
 
 .PHONY: asv-machine
 asv-machine:
-	$(UV_RUN) python config/asv_machine.py
+	$(UV_RUN) python -m config.asv_machine
 
 .PHONY: asv-run
-asv-run: ASV_REFS = $(shell $(UV_RUN) python config/refs_for_asv.py)
+asv-run: ASV_REFS = $(shell $(UV_RUN) python -m config.refs_for_asv)
 asv-run: asv-machine
 	$(ASV) run --durations=all --skip-existing-successful --show-stderr "$(ASV_REFS)" $(ARGS)
 

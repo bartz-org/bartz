@@ -319,6 +319,9 @@ def dealias_for_donation(state: State) -> State:
 class StepBase(AutoParamNames):
     """Shared setup for benchmarks of `mcmcstep.step`."""
 
+    compiler_options: ClassVar[Mapping[str, Any]] = MappingProxyType({})
+    """XLA options used to compile `step` in `setup`."""
+
     def make_state(self, **kwargs: Any) -> State:
         """Build the initial MCMC state, allocated on device.
 
@@ -383,7 +386,8 @@ class StepBase(AutoParamNames):
 
         # the two dispatch branches produce different (jitted_func, args)
         # signatures, which ty can not match up across attributes
-        self.compiled_func = self.jitted_func.lower(*self.args).compile()  # ty:ignore[invalid-argument-type]
+        lowered = self.jitted_func.lower(*self.args)  # ty:ignore[invalid-argument-type]
+        self.compiled_func = lowered.compile(dict(self.compiler_options))
         if mode == 'run':
             self.run_step()
         self.mode = mode
@@ -505,6 +509,10 @@ class StepMemory(StepBase):
         ('state', 'peak'),
     )
 
+    # the gpu autotuner allocates the inputs of the kernels it profiles, which
+    # do not fit in device memory at this scale
+    compiler_options = MappingProxyType({'xla_gpu_autotune_level': 0})
+
     def make_state(self, **kwargs: Any) -> State:
         """Build the state abstractly, to analyze a scale too large to allocate."""
         # Abstract eval hides the device and the data from `init`; older versions
@@ -521,6 +529,10 @@ class StepMemory(StepBase):
             # triggering a data-dependent jnp.nonzero that abstract eval rejects;
             # disable it (newer versions already default it off).
             kwargs.setdefault('filter_splitless_vars', 0)
+        if 'one_bin_prec_reduction' in sig.parameters:
+            # 'auto' needs the values of `error_scale`; they are all 1, so it
+            # would turn it on
+            kwargs.setdefault('one_bin_prec_reduction', True)
         return eval_shape(lambda: simple_init(**kwargs))
 
     def setup(  # ty:ignore[invalid-method-override]

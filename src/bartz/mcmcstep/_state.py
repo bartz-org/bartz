@@ -29,6 +29,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from functools import partial, wraps
 from typing import Literal, NamedTuple, TypedDict, TypeVar, cast
+from warnings import warn
 
 import jax
 import numpy
@@ -59,8 +60,10 @@ from bartz._jaxext import (
     float32_matmuls,
     jaxtyping_disabled,
     jit,
+    jit_active,
     minimal_unsigned_dtype,
 )
+from bartz._npz import serializable
 from bartz.grove import tree_depths
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes
 from bartz.mcmcstep._lazy import (
@@ -73,6 +76,7 @@ from bartz.mcmcstep._lazy import (
 )
 from bartz.mcmcstep._reduction import (
     AutoBatchedReduction,
+    AutoOneHotOrPopcountReduction,
     AutoOneHotReduction,
     ReductionConfig,
 )
@@ -95,6 +99,7 @@ class OutcomeType(Enum):
 T = TypeVar('T')
 
 
+@serializable
 class Wishart(Module):
     """A precision matrix with a Wishart prior, bundled with its current value.
 
@@ -179,6 +184,7 @@ class Wishart(Module):
                 return self.nu - (k - 1)
 
 
+@serializable
 class DiagWishart(Wishart):
     """A diagonal precision matrix with independent chi-square diagonal entries.
 
@@ -191,9 +197,6 @@ class DiagWishart(Wishart):
     as the corresponding marginal variance under the dense `Wishart`: the gamma
     shape of each precision entry is ``inv_wishart_marginal_nu / 2``, not
     ``nu / 2``.
-
-    A component with `rate` 0 has no prior; its precision is held fixed at its
-    `value` (1 for the binary components of a mixed regression).
 
     Used for mixed binary-continuous regression and for continuous multivariate
     regression with per-datapoint missingness.
@@ -215,6 +218,47 @@ class DiagWishart(Wishart):
         super().__init__(nu, rate, value)
 
 
+@serializable
+class Sparsity(Module):
+    """The parameters of the prior probability of the variables to split along."""
+
+    log_s: Float32[Array, '*chains p'] | None = field(chains=CHAIN_AXIS)
+    """The logarithm of the prior probability for choosing a variable to split
+    along in a decision rule. Not normalized. Variables that do not have any
+    available decision rule at a given node are masked away. If `None`, use a
+    uniform distribution. Without `theta`, it is constant and shared by the
+    chains, see `has_chains`."""
+
+    theta: Float32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
+    """The concentration parameter for the Dirichlet prior on the variable
+    distribution `s`. If not set, `log_s` is left constant."""
+
+    a: Float32[Array, ''] | None
+    """First shape parameter of the prior on `theta`. If not set, `theta` is
+    left constant."""
+
+    b: Float32[Array, ''] | None
+    """Second shape parameter of the prior on `theta`. If not set, `theta` is
+    left constant."""
+
+    rho: Float32[Array, ''] | None
+    """Scale parameter of the prior on `theta`. If not set, `theta` is left constant."""
+
+    log_theta_range: Float32[Array, ''] | None
+    """The domain of `theta` is ``|log(theta / rho)| <= log_theta_range``.
+    `None` if `theta` is constant."""
+
+    @property
+    def has_chains(self) -> bool:
+        """Whether `log_s` and `theta` carry a chain axis.
+
+        Only if `theta` is set and has a chain axis: otherwise `log_s` is
+        constant and shared by the chains.
+        """
+        return self.theta is not None and self.theta.ndim > 0
+
+
+@serializable
 class Forest(Module):
     """Represents the MCMC state of a sum of trees."""
 
@@ -345,24 +389,9 @@ class Forest(Module):
     ``num_trees * leaf_prior_cov_inv.value^-1``. If `Wishart.nu` is `None`,
     the precision is held fixed."""
 
-    log_s: Float32[Array, '*chains p'] | None = field(chains=CHAIN_AXIS)
-    """The logarithm of the prior probability for choosing a variable to split
-    along in a decision rule. Not normalized. Variables that do not have any
-    available decision rule at a given node are masked away. If `None`, use a
-    uniform distribution."""
-
-    theta: Float32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
-    """The concentration parameter for the Dirichlet prior on the variable
-    distribution `s`. If not set, `log_s` is left constant."""
-
-    a: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
-
-    b: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
-
-    rho: Float32[Array, ''] | None
-    """Parameter of the prior on `theta`. If not set, `theta` is left constant."""
+    sparsity: Sparsity
+    """The parameters of the prior probability of the variables to split
+    along."""
 
     @property
     def has_chains(self) -> bool:
@@ -370,6 +399,7 @@ class Forest(Module):
         return self.var_tree.ndim > 2
 
 
+@serializable
 class StepConfig(Module):
     """Options for the MCMC step."""
 
@@ -390,7 +420,14 @@ class StepConfig(Module):
     """How to sum the likelihood precisions in each leaf."""
 
     prec_count_num_trees: int | None = field(static=True)
-    """Batch size for processing trees to compute count and prec trees."""
+    """Batch size for processing trees to compute count and prec trees, see `init`."""
+
+    one_bin_prec_reduction: bool = field(static=True)
+    """Whether to sum the precisions in only one child of a grown node and
+    derive the other by difference. Ignored (always off) if there's no
+    constraint on the number of points per leaf
+    (`Forest.min_points_per_decision_node` and `Forest.min_points_per_leaf` are
+    `None`)."""
 
     sequential_unroll: int | bool = field(static=True)
     """How much to unroll the sequential accept/reject loop over trees in
@@ -399,7 +436,7 @@ class StepConfig(Module):
     augment: bool = field(static=True)
     """Whether to account exactly, via data augmentation, for the decision
     rules forbidden by the ancestors of each node when updating
-    `Forest.log_s`."""
+    `Sparsity.log_s`."""
 
     mesh: Mesh | None = field(static=True)
     """The mesh used to shard data and computation across multiple devices."""
@@ -422,6 +459,7 @@ class StepConfig(Module):
         return self.mesh is not None and 'data' in self.mesh.axis_names
 
 
+@serializable
 class State(Module):
     """Represents the MCMC state of BART."""
 
@@ -641,6 +679,7 @@ def check_binary_unit_precision(
 
 
 def init_shape_shifting_parameters(
+    *,
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     outcome_type: OutcomeType | list[OutcomeType],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
@@ -844,9 +883,10 @@ def init(
     min_points_per_decision_node: int | Integer[ArrayLike, ''] | None = None,
     min_points_per_leaf: int | Integer[ArrayLike, ''] | None = None,
     resid_reduction_config: ReductionConfig = AutoBatchedReduction(),
-    count_reduction_config: ReductionConfig = AutoOneHotReduction(),
+    count_reduction_config: ReductionConfig = AutoOneHotOrPopcountReduction(),
     prec_reduction_config: ReductionConfig = AutoOneHotReduction(),
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
+    one_bin_prec_reduction: bool | Literal['auto'] = 'auto',
     sequential_unroll: int | bool = 2,
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
@@ -933,10 +973,16 @@ def init(
         precisions in each leaf, respectively. See `ReductionConfig` and its
         subclasses.
     prec_count_num_trees
-        The number of trees to process at a time when counting datapoints or
-        computing the likelihood precision. If `None`, do all trees at once,
-        which may use too much memory on cpu. If 'auto' (default), it's chosen
-        automatically.
+        The number of trees to process at a time on cpu when computing the
+        likelihood precision or counting datapoints, except for counts with the
+        default popcount reduction, which needs no batching. If `None`, do all
+        trees at once, which may use too much memory. If 'auto' (default), it's
+        chosen automatically.
+    one_bin_prec_reduction
+        Whether to turn on the optimization of summing the likelihood
+        precisions in only one child of a grown node and deriving the other by
+        subtracting it from the parent. The default ``'auto'`` will try to turn
+        it on and raise/warn if not possible.
     sequential_unroll
         See `StepConfig.sequential_unroll`. Unrolling may speed up the MCMC at
         the cost of longer compilation; 1 means no unrolling.
@@ -950,8 +996,8 @@ def init(
     a
     b
     rho
-        Sparsity (variable selection) parameters, see `Forest.log_s` and
-        `Forest.theta`. If `rho`, `a`, `b` are set, an unspecified `theta` is
+        Sparsity (variable selection) parameters, see `Sparsity.log_s` and
+        `Sparsity.theta`. If `rho`, `a`, `b` are set, an unspecified `theta` is
         initialized to `rho`; if `theta` is set, an unspecified `log_s` is
         initialized to uniform.
     sparse_on_at
@@ -1017,16 +1063,22 @@ def init(
 
     # process arguments that change depending on outcome type
     is_binary, kshape, error_cov_inv, binary_indices = init_shape_shifting_parameters(
-        y, outcome_type, offset, error_scale, error_cov_inv, leaf_prior_cov_inv, missing
+        y=y,
+        outcome_type=outcome_type,
+        offset=offset,
+        error_scale=error_scale,
+        error_cov_inv=error_cov_inv,
+        leaf_prior_cov_inv=leaf_prior_cov_inv,
+        missing=missing,
     )
 
     storage = determine_storage_params(
-        leaf_dtype,
-        prec_scale_dtype,
-        resid_dtype,
-        leaf_prior_cov_inv.value,
-        kshape,
-        num_trees,
+        leaf_dtype=leaf_dtype,
+        prec_scale_dtype=prec_scale_dtype,
+        resid_dtype=resid_dtype,
+        leaf_prior_cov_inv=leaf_prior_cov_inv.value,
+        kshape=kshape,
+        num_trees=num_trees,
     )
 
     # extract array sizes from arguments
@@ -1048,14 +1100,14 @@ def init(
     # determine settings for reductions
     mesh = parse_mesh(num_chains, mesh)
     red_cfg = parse_reduction_configs(
-        resid_reduction_config,
-        count_reduction_config,
-        prec_reduction_config,
-        prec_count_num_trees,
-        y,
-        num_trees,
-        num_chains,
-        mesh,
+        resid_reduction_config=resid_reduction_config,
+        count_reduction_config=count_reduction_config,
+        prec_reduction_config=prec_reduction_config,
+        prec_count_num_trees=prec_count_num_trees,
+        y=y,
+        num_trees=num_trees,
+        num_chains=num_chains,
+        mesh=mesh,
     )
 
     # check there aren't too many deactivated predictors
@@ -1168,11 +1220,14 @@ def init(
                 leaf_prior_cov_inv=replace(
                     leaf_prior_cov_inv, value=_lazy_from_array(leaf_prior_cov_inv.value)
                 ),
-                log_s=_lazy_from_array(asarray_or_none(log_s)),
-                theta=_lazy_from_array(asarray_or_none(theta)),
-                rho=asarray_or_none(rho),
-                a=asarray_or_none(a),
-                b=asarray_or_none(b),
+                sparsity=Sparsity(
+                    log_s=_lazy_from_array(asarray_or_none(log_s)),
+                    theta=_lazy_from_array(asarray_or_none(theta)),
+                    rho=asarray_or_none(rho),
+                    a=asarray_or_none(a),
+                    b=asarray_or_none(b),
+                    log_theta_range=None if rho is None else jnp.float32(40.0),
+                ),
             ),
             config=StepConfig(
                 steps_done=jnp.int32(0),
@@ -1181,6 +1236,9 @@ def init(
                 augment=augment,
                 mesh=mesh,
                 leaf_quantization=asarray_or_none(leaf_quantization),
+                # invalid placeholder; the true value is set post-shard, it
+                # depends on `compute_scale_related_attrs`
+                one_bin_prec_reduction=cast(bool, None),
                 **red_cfg,
             ),
         )
@@ -1220,6 +1278,17 @@ def init(
             inv_sdev_unit=attrs.inv_sdev_unit,
             n_non_missing=attrs.n_non_missing,
             sum_diag_prec_scale=attrs.sum_diag_prec_scale,
+            config=replace(
+                state.config,
+                one_bin_prec_reduction=resolve_one_bin_prec_reduction(
+                    one_bin_prec_reduction,
+                    has_counts=min_points_per_decision_node is not None
+                    or min_points_per_leaf is not None,
+                    has_error_scale=state.error_scale is not None,
+                    error_scale_min_max_ratio=attrs.error_scale_min_max_ratio,
+                    n=n,
+                ),
+            ),
         )
 
         # calculate initial resid in the continuous outcome case, such that y
@@ -1314,6 +1383,7 @@ class StorageParams:
 
 
 def determine_storage_params(
+    *,
     leaf_dtype: DTypeLike,
     prec_scale_dtype: DTypeLike,
     resid_dtype: DTypeLike,
@@ -1383,7 +1453,7 @@ def initial_resid_inexact_integral(
     return ms / num_trees
 
 
-def initial_resid(
+def initial_resid(  # noqa: PLR0917, `_LazyArray` passes arguments by position
     shape: tuple[int, ...],
     y: Float32[Array, ' n'] | Float32[Array, 'k n'],
     offset: Float32[Array, ''] | Float32[Array, ' k'],
@@ -1399,7 +1469,7 @@ def initial_resid(
     """
     resid = jnp.broadcast_to(y - offset[..., None], shape)
     if binary_indices is not None:
-        resid = resid.at[..., binary_indices, :].set(0.0)
+        resid = resid.at[..., binary_indices, :].set(0.0, unique_indices=True)
     return (resid / resid_unit[..., None]).astype(resid_dtype)
 
 
@@ -1477,6 +1547,7 @@ class ScaleRelatedAttrs(NamedTuple):
     inv_sdev_unit: Float32[Array, ''] | Float32[Array, ' k']
     n_non_missing: Int32[Array, ''] | Int32[Array, ' k']
     sum_diag_prec_scale: Float32[Array, ''] | Float32[Array, ' k']
+    error_scale_min_max_ratio: Float32[Array, '']
 
 
 @jit(donate_argnums=(1,), static_argnums=(2, 3))
@@ -1495,6 +1566,7 @@ def compute_scale_related_attrs(
             inv_sdev_unit=jnp.float32(1.0),
             n_non_missing=n_non_missing,
             sum_diag_prec_scale=n_non_missing.astype(jnp.float32),
+            error_scale_min_max_ratio=jnp.float32(1.0),
         )
 
     # compute inv_sdev_scale
@@ -1508,6 +1580,16 @@ def compute_scale_related_attrs(
     # count non-missing points, and the equivalent error-scaled quantity
     n_non_missing = jnp.sum(inv_sdev_scale != 0, axis=-1)
     sum_diag_prec_scale = jnp.einsum('...n,...n->...', inv_sdev_scale, inv_sdev_scale)
+
+    # min(error_scale) / max(error_scale), with the missing datapoints taken
+    # to have infinite error scale
+    if inv_sdev_scale.size:
+        max_inv_sdev = jnp.max(inv_sdev_scale)
+        error_scale_min_max_ratio = jnp.min(inv_sdev_scale) / jnp.where(
+            max_inv_sdev > 0, max_inv_sdev, 1.0
+        )
+    else:
+        error_scale_min_max_ratio = jnp.float32(1.0)
 
     # compute inv_sdev_unit and factor it out of inv_sdev_scale
     inv_sdev_unit = round_to_pow2(
@@ -1528,7 +1610,53 @@ def compute_scale_related_attrs(
         inv_sdev_unit=inv_sdev_unit,
         n_non_missing=n_non_missing,
         sum_diag_prec_scale=sum_diag_prec_scale,
+        error_scale_min_max_ratio=error_scale_min_max_ratio,
     )
+
+
+def resolve_one_bin_prec_reduction(
+    one_bin_prec_reduction: bool | Literal['auto'],
+    *,
+    has_counts: bool,
+    has_error_scale: bool,
+    error_scale_min_max_ratio: Float32[Array, ''],
+    n: int,
+) -> bool:
+    """Resolve the `one_bin_prec_reduction` argument of `init`."""
+    if isinstance(one_bin_prec_reduction, bool):
+        return one_bin_prec_reduction
+    elif not has_counts:
+        # without the counts the setting is ignored
+        return False
+    elif not has_error_scale:
+        # the precisions are 0 or 1, so their sums are exact up to float32
+        # mantissa bits
+        return n <= 2**24
+    elif jit_active():
+        msg = (
+            "The setting `one_bin_prec_reduction='auto'` needs to read the values "
+            "of `error_scale`, but `bartz.mcmcstep.init()` can't do it because it "
+            'has been invoked inside a `jax.jit`-compiled function. Set it '
+            'explicitly (as `Bart(..., init_kw=dict(one_bin_prec_reduction='
+            'True/False))` if using `Bart`), it is safe to set it to `True` if '
+            'max(error_scale) / min(error_scale) <= 100 and no datapoint is '
+            'missing'
+        )
+        raise ValueError(msg)
+    elif (ratio := error_scale_min_max_ratio.item()) >= 0.01:
+        return True
+    else:
+        if ratio > 0:
+            reason = f'`error_scale` spans a ratio of {1 / ratio:.3g} > 100'
+        else:
+            reason = 'some datapoints are missing'
+        msg = (
+            '`one_bin_prec_reduction` optimization set automatically to `False` '
+            f'because {reason}, which might make it numerically unstable; set it '
+            'explicitly to silence this warning'
+        )
+        warn(msg)
+        return False
 
 
 def get_blocked_vars(
@@ -1717,6 +1845,7 @@ class ReductionConfigs(TypedDict):
 
 
 def parse_reduction_configs(
+    *,
     resid_reduction_config: ReductionConfig,
     count_reduction_config: ReductionConfig,
     prec_reduction_config: ReductionConfig,
@@ -1840,9 +1969,16 @@ def inv_via_chol_with_gersh(
     return solve_triangular(L, Ltinv.mT, trans='T', lower=True)
 
 
+# The chain decorators below are generic over the state type, so that they
+# preserve `State` subclasses.
+# WORKAROUND(python<3.12): replace with PEP 695 type parameters on the
+# decorators, e.g. `def vmap_chains[S: State](...)`.
+StateT = TypeVar('StateT', bound=State)
+
+
 def split_key_for_chains(
-    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State],
-) -> Callable[[Key[Array, ''], State], State]:
+    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], StateT], StateT],
+) -> Callable[[Key[Array, ''], StateT], StateT]:
     """Split a single PRNG key into per-chain keys before calling `fun`.
 
     When the state is multichain, the input key is split into
@@ -1851,7 +1987,7 @@ def split_key_for_chains(
     """
 
     @wraps(fun)
-    def wrapped(key: Key[Array, ''], state: State) -> State:
+    def wrapped(key: Key[Array, ''], state: StateT) -> StateT:
         num_chains = state.num_chains()
         if num_chains is None:
             return fun(key, state)
@@ -1888,8 +2024,8 @@ def partition_specs(x: PyTree, mesh: Mesh) -> PyTree[PartitionSpec]:
 
 
 def shard_map_state(
-    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State],
-) -> Callable[[Key[Array, ''] | Key[Array, ' num_chains'], State], State]:
+    fun: Callable[[Key[Array, ''] | Key[Array, ' num_chains'], StateT], StateT],
+) -> Callable[[Key[Array, ''] | Key[Array, ' num_chains'], StateT], StateT]:
     """Wrap a ``(keys, state) -> state`` function in a manual `jax.shard_map`.
 
     Uses `state.config.mesh` (static). No-op when the mesh is `None`. The keys
@@ -1900,7 +2036,9 @@ def shard_map_state(
     """
 
     @wraps(fun)
-    def wrapped(key: Key[Array, ''] | Key[Array, ' num_chains'], state: State) -> State:
+    def wrapped(
+        key: Key[Array, ''] | Key[Array, ' num_chains'], state: StateT
+    ) -> StateT:
         mesh = state.config.mesh
         if mesh is None:
             return fun(key, state)
@@ -1925,8 +2063,8 @@ def shard_map_state(
 
 
 def vmap_chains(
-    fun: Callable[[Key[Array, ''], State], State],
-) -> Callable[[Key[Array, ' num_chains'] | Key[Array, ''], State], State]:
+    fun: Callable[[Key[Array, ''], StateT], StateT],
+) -> Callable[[Key[Array, ' num_chains'] | Key[Array, ''], StateT], StateT]:
     """Vmap a ``(key, state) -> state`` function over chain axes.
 
     When the state is multichain, `keys` must have a leading chain axis and
@@ -1936,8 +2074,8 @@ def vmap_chains(
 
     @wraps(fun)
     def wrapped(
-        keys: Key[Array, ' num_chains'] | Key[Array, ''], state: State
-    ) -> State:
+        keys: Key[Array, ' num_chains'] | Key[Array, ''], state: StateT
+    ) -> StateT:
         if not state.has_chains:
             return fun(keys, state)
         state_axes = chain_vmap_axes(state)
@@ -1945,6 +2083,17 @@ def vmap_chains(
         return vmapped_fun(keys, state)
 
     return wrapped
+
+
+def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']:
+    """Return the outcome the forest fits, with the latent one for binary components."""
+    if state.binary_indices is not None:
+        assert state.z is not None
+        return state.y.at[state.binary_indices, :].set(state.z, unique_indices=True)
+    elif state.z is not None:
+        return state.z
+    else:
+        return state.y
 
 
 class ShardMapPatchKwargs(TypedDict, total=False):

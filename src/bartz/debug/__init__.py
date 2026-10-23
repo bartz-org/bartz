@@ -25,13 +25,14 @@
 """
 Debugging utilities.
 
-Prior sampling
---------------
+Model simulation
+----------------
 .. autosummary::
     :toctree:
 
     sample_prior
-    PriorSample
+    sample_data
+    ChainDataState
 
 R BART trace conversion
 -----------------------
@@ -45,5 +46,5 @@ R BART trace conversion
 
 # ruff: noqa: F401
 
-from bartz.debug._prior import PriorSample, sample_prior
+from bartz.debug._simulate import ChainDataState, sample_data, sample_prior
 from bartz.debug._traceconv import BARTTraceMeta, MinimalTrace, trees_BART_to_bartz

@@ -24,6 +24,7 @@
 
 """Implement `step`, `step_trees`, and the accept-reject logic."""
 
+import math
 from dataclasses import replace
 from functools import partial
 from typing import overload
@@ -31,10 +32,21 @@ from typing import overload
 from equinox import AbstractVar
 from jax import lax, named_call, random, vmap
 from jax import numpy as jnp
-from jax.nn import softmax
+from jax.nn import log_softmax
 from jax.scipy.linalg import solve_triangular
-from jax.scipy.special import gammaln, logsumexp
-from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Shaped, UInt, UInt32
+from jax.scipy.special import logsumexp
+from jaxtyping import (
+    Array,
+    Bool,
+    Float,
+    Float32,
+    Int32,
+    Integer,
+    Key,
+    Shaped,
+    UInt,
+    UInt32,
+)
 
 from bartz._jaxext import (
     Module,
@@ -50,7 +62,11 @@ from bartz._jaxext import (
 from bartz._jaxext.random import loggamma, poisson
 from bartz.grove import is_actual_leaf, var_histogram
 from bartz.mcmcstep._moves import Moves, propose_moves, split_range
-from bartz.mcmcstep._reduction import ReductionConfig
+from bartz.mcmcstep._reduction import (
+    AutoOneHotOrPopcountReduction,
+    PopcountReduction,
+    ReductionConfig,
+)
 from bartz.mcmcstep._state import (
     DiagWishart,
     Forest,
@@ -95,16 +111,11 @@ def step(key: Key[Array, ''], state: State) -> State:
     keys = split(key, 5)
 
     state = step_resid_inexact_integral(state)
+    state = step_z(keys.pop(), state)
     state = step_trees(keys.pop(), state)
 
     state = step_leaf_prior_cov_inv(keys.pop(), state)
-
-    if state.z is not None:
-        state = step_z(keys.pop(), state)
-
-    if state.error_cov_inv.nu is not None:
-        state = step_error_cov_inv(keys.pop(), state)
-
+    state = step_error_cov_inv(keys.pop(), state)
     state = step_sparse(keys.pop(), state)
     return step_config(state)
 
@@ -387,6 +398,8 @@ def accept_moves_parallel_stage(
             state.forest.count_tree, state.forest.leaf_indices, moves, state.config
         )
         state = replace(state, forest=replace(state.forest, count_tree=count_trees))
+    else:
+        move_counts = None
 
     # affluence of the nodes touched by each move: whether they would be
     # growable as leaves (admissible rule + enough datapoints). The children
@@ -396,11 +409,13 @@ def accept_moves_parallel_stage(
     _, half = state.forest.var_tree.shape
     lrt_affluent = (moves.lrt_nodes < half) & moves.lrt_growable
     if state.forest.min_points_per_decision_node is not None:
+        assert move_counts is not None
         lrt_affluent &= move_counts.lrt >= state.forest.min_points_per_decision_node
     moves = replace(moves, lrt_affluent=lrt_affluent)
 
     # veto grove move if new leaves don't have enough datapoints
     if state.forest.min_points_per_leaf is not None:
+        assert move_counts is not None
         moves = replace(
             moves,
             allowed=moves.allowed
@@ -420,7 +435,8 @@ def accept_moves_parallel_stage(
             state.prec_scale,
             state.forest.leaf_indices,
             moves,
-            state.config,
+            move_counts,
+            config=state.config,
         )
         state = replace(state, forest=replace(state.forest, prec_tree=prec_trees))
 
@@ -507,6 +523,8 @@ def _compute_count_or_prec_trees(
     trees: UInt32[Array, 'num_trees tree_size'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
+    counts: None,
+    *,
     config: StepConfig,
 ) -> tuple[UInt32[Array, 'num_trees tree_size'], Counts]: ...
 
@@ -518,6 +536,8 @@ def _compute_count_or_prec_trees(
     | Float32[Array, 'num_trees k k tree_size'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
+    counts: Counts | None,
+    *,
     config: StepConfig,
 ) -> (
     tuple[Float32[Array, 'num_trees tree_size'], None]
@@ -532,6 +552,8 @@ def _compute_count_or_prec_trees(
     | Float32[Array, 'num_trees k k tree_size'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
+    counts: Counts | None,
+    *,
     config: StepConfig,
 ) -> (
     tuple[UInt32[Array, 'num_trees tree_size'], Counts]
@@ -545,10 +567,18 @@ def _compute_count_or_prec_trees(
         | tuple[Float32[Array, 'num_trees tree_size'], None]
         | tuple[Float32[Array, 'num_trees k k tree_size'], None]
     ):
-        compute = vmap(_compute_count_or_prec_tree, in_axes=(None, 0, 0, 0, None))
-        return compute(prec_scale, trees, leaf_indices, moves, config)
+        compute = vmap(
+            partial(_compute_count_or_prec_tree, config=config),
+            in_axes=(None, 0, 0, 0, 0),
+        )
+        return compute(prec_scale, trees, leaf_indices, moves, counts)
 
-    if config.prec_count_num_trees is None:
+    # the trees are batched on cpu to bound the temporaries of the reduction,
+    # which the popcount count does not produce
+    popcount = prec_scale is None and isinstance(
+        config.count_reduction_config, PopcountReduction | AutoOneHotOrPopcountReduction
+    )
+    if config.prec_count_num_trees is None or popcount:
         return all_trees()
 
     batch_size = config.prec_count_num_trees
@@ -560,15 +590,16 @@ def _compute_count_or_prec_trees(
             | Float32[Array, 'k k tree_size'],
             UInt[Array, ' n'],
             Moves,
+            Counts | None,
         ],
     ) -> (
         tuple[UInt32[Array, ' tree_size'], Counts]
         | tuple[Float32[Array, ' tree_size'], None]
         | tuple[Float32[Array, 'k k tree_size'], None]
     ):
-        tree, leaf_indices, moves = args
+        tree, leaf_indices, moves, counts = args
         return _compute_count_or_prec_tree(
-            prec_scale, tree, leaf_indices, moves, config
+            prec_scale, tree, leaf_indices, moves, counts, config=config
         )
 
     def tree_batches() -> (
@@ -579,7 +610,9 @@ def _compute_count_or_prec_trees(
         # sliced_map instead of lax.map because under the chain vmap lax.map's
         # reshape of the tree axis becomes a transpose of `leaf_indices` that
         # xla materializes in full (cf. `SeqStageInAllTrees.leaf_indices`)
-        return sliced_map(compute, (trees, leaf_indices, moves), batch_size=batch_size)
+        return sliced_map(
+            compute, (trees, leaf_indices, moves, counts), batch_size=batch_size
+        )
 
     # the tree batching bounds the reduction temporaries on cpu; on gpu those
     # fuse anyway
@@ -593,6 +626,8 @@ def _compute_count_or_prec_tree(
     | Float32[Array, 'k k tree_size'],
     leaf_indices: UInt[Array, ' n'],
     moves: Moves,
+    counts: Counts | None,
+    *,
     config: StepConfig,
 ) -> (
     tuple[UInt32[Array, ' tree_size'], Counts]
@@ -603,39 +638,81 @@ def _compute_count_or_prec_tree(
     (tree_size,) = moves.var_tree.shape
     tree_size *= 2
 
-    if prec_scale is None:
-        value = 1
-        dtype = jnp.uint32
-        reduction_config = config.count_reduction_config
-    else:
-        value = prec_scale
-        dtype = jnp.float32
-        reduction_config = config.prec_reduction_config
-
     # the cached tree is valid at the leaves, and the move only changes the
-    # values at the nodes it involves, so reduce into the move's children alone:
-    # the contiguous pair (left, right) = (2 * node, 2 * node + 1) = lrt_nodes[:2]
-    lr = reduction_config._reduce(  # noqa: SLF001
-        value,
-        leaf_indices,
-        size=tree_size,
-        subset_start=moves.lrt_nodes[0],
-        subset_length=2,
-        dtype=dtype,
-        data_sharded=config.data_sharded,
-    )
-
-    # write the children sums into the cache along with their total at the
-    # parent node (a non-leaf in the post-grow indexing the reduce runs on);
-    # the precision-scaled version of the counts is not needed because the likelihood
-    # terms are derived from the leaf terms
-    total = lr[..., 0] + lr[..., 1]
-    lrt = jnp.concatenate([lr, total[..., None]], axis=-1)
-    tree = tree.at[..., moves.lrt_nodes].set(lrt)
+    # values at the nodes it involves, so update them alone
 
     if prec_scale is None:
+        # the total count is cached, at the parent if the move grows it, at the
+        # children if the move prunes it, so count only the left child and
+        # derive the right one. This is exact in integers, and the one-bin
+        # reduction fuses better than a two-bin one.
+        left = config.count_reduction_config._reduce(  # noqa: SLF001
+            1,
+            leaf_indices,
+            size=tree_size,
+            subset_start=moves.lrt_nodes[0],
+            subset_length=1,
+            dtype=jnp.uint32,
+            data_sharded=config.data_sharded,
+        ).squeeze(-1)
+        cached = tree.at[moves.lrt_nodes].get(mode='fill', fill_value=0)
+        total = jnp.where(moves.grow, cached[2], cached[0] + cached[1])
+        lrt = jnp.stack([left, total - left, total])
+        tree = tree.at[moves.lrt_nodes].set(lrt)
         return tree, Counts(lrt=lrt)
+
+    elif counts is not None and config.one_bin_prec_reduction:
+        # like the counts, reduce into one child alone and derive the other.
+        # In floating point the derived child carries the rounding error of
+        # the parent's sum, so derive the child with more datapoints, whose
+        # precision is at least half the parent's divided by the spread of
+        # the datapoints' precisions. On prune the children are cached leaves,
+        # so the reduction, computed anyway for all the trees, is discarded.
+        left_fewer = counts.lrt[0] <= counts.lrt[1]
+        fresh = config.prec_reduction_config._reduce(  # noqa: SLF001
+            prec_scale,
+            leaf_indices,
+            size=tree_size,
+            subset_start=moves.lrt_nodes[0] + jnp.where(left_fewer, 0, 1),
+            subset_length=1,
+            dtype=jnp.float32,
+            data_sharded=config.data_sharded,
+        ).squeeze(-1)
+        cached = tree.at[..., moves.lrt_nodes].get(mode='fill', fill_value=0)
+        derived = cached[..., 2] - fresh
+        grown = jnp.where(
+            left_fewer,
+            jnp.stack([fresh, derived], axis=-1),
+            jnp.stack([derived, fresh], axis=-1),
+        )
+        lr = jnp.where(moves.grow, grown, cached[..., :2])
+        total = jnp.where(moves.grow, cached[..., 2], cached[..., 0] + cached[..., 1])
+        lrt = jnp.concatenate([lr, total[..., None]], axis=-1)
+        tree = tree.at[..., moves.lrt_nodes].set(lrt)
+        return tree, None
+
     else:
+        # reduce into the move's children, the contiguous pair (left, right) =
+        # (2 * node, 2 * node + 1) = lrt_nodes[:2]; neither is derived by
+        # difference, because in floating point that would lose precision on a
+        # small leaf next to a large one
+        lr = config.prec_reduction_config._reduce(  # noqa: SLF001
+            prec_scale,
+            leaf_indices,
+            size=tree_size,
+            subset_start=moves.lrt_nodes[0],
+            subset_length=2,
+            dtype=jnp.float32,
+            data_sharded=config.data_sharded,
+        )
+
+        # write the children sums into the cache along with their total at the
+        # parent node (a non-leaf in the post-grow indexing the reduce runs on);
+        # the precision-scaled version of the counts is not needed because the
+        # likelihood terms are derived from the leaf terms
+        total = lr[..., 0] + lr[..., 1]
+        lrt = jnp.concatenate([lr, total[..., None]], axis=-1)
+        tree = tree.at[..., moves.lrt_nodes].set(lrt)
         return tree, None
 
 
@@ -670,7 +747,9 @@ def compute_count_trees(
         The counts of the number of points in the leaves grown or pruned by the
         moves.
     """
-    return _compute_count_or_prec_trees(None, count_trees, leaf_indices, moves, config)
+    return _compute_count_or_prec_trees(
+        None, count_trees, leaf_indices, moves, None, config=config
+    )
 
 
 @named_call
@@ -680,6 +759,8 @@ def compute_prec_trees(
     prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
+    counts: Counts | None,
+    *,
     config: StepConfig,
 ) -> Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k k tree_size']:
     """
@@ -697,6 +778,9 @@ def compute_prec_trees(
         of the tree (post-GROW, pre-PRUNE).
     moves
         The proposed moves, see `propose_moves`.
+    counts
+        The datapoint counts at the moves' nodes, see `compute_count_trees`, or
+        `None` if they are not tracked. If given, they speed up the update.
     config
         The MCMC configuration.
 
@@ -705,7 +789,7 @@ def compute_prec_trees(
     The updated cache, valid in each potential or actual leaf node.
     """
     trees, _ = _compute_count_or_prec_trees(
-        prec_scale, prec_trees, leaf_indices, moves, config
+        prec_scale, prec_trees, leaf_indices, moves, counts, config=config
     )
     return trees
 
@@ -1815,15 +1899,19 @@ def _step_error_cov_inv_diag(key: Key[Array, ''], state: State) -> State:
     )
     if state.binary_indices is not None:
         # the binary components have unit error variance, they have no prior
-        prec = prec.at[state.binary_indices, state.binary_indices].set(1.0)
+        prec = prec.at[state.binary_indices, state.binary_indices].set(
+            1.0, unique_indices=True
+        )
     state = step_resid_eff_scale(state, norm2, state.sum_diag_prec_scale)
     return replace(state, error_cov_inv=replace(state.error_cov_inv, value=prec))
 
 
 @named_call
 def step_error_cov_inv(key: Key[Array, ''], state: State) -> State:
-    """MCMC-update the inverse error covariance."""
-    if state.error_cov_inv.value.ndim == 2 and not isinstance(
+    """MCMC-update the inverse error covariance, if it has a prior."""
+    if state.error_cov_inv.nu is None:
+        return state
+    elif state.error_cov_inv.value.ndim == 2 and not isinstance(
         state.error_cov_inv, DiagWishart
     ):
         return _step_error_cov_inv_mv(key, state)
@@ -1892,7 +1980,7 @@ def step_leaf_prior_cov_inv(key: Key[Array, ''], state: State) -> State:
 @named_call
 def step_z(key: Key[Array, ''], state: State) -> State:
     """
-    MCMC-update the latent variable for binary regression.
+    MCMC-update the latent variable for binary regression, if any.
 
     Parameters
     ----------
@@ -1905,7 +1993,8 @@ def step_z(key: Key[Array, ''], state: State) -> State:
     -------
     The updated BART MCMC state.
     """
-    assert state.z is not None
+    if state.z is None:
+        return state
 
     inv_sdev = state.inv_sdev_scale
     inv_sdev_unit = state.inv_sdev_unit
@@ -1950,17 +2039,82 @@ def step_z(key: Key[Array, ''], state: State) -> State:
 
     resid = (resid / resid_unit[..., None]).astype(state.resid.dtype)
     if state.binary_indices is not None:
-        resid = state.resid.at[state.binary_indices, :].set(resid)
+        resid = state.resid.at[state.binary_indices, :].set(resid, unique_indices=True)
 
     return replace(state, z=z, resid=resid)
 
 
-def _blocked_mass_tree(
+# the log of a magnitude beyond which random fluctuations of the size of its
+# square root are below float32 resolution
+LOG_HUGE = 20 * math.log(10)
+
+
+class S(Module):
+    """Split probabilities, with the largest ones singled out."""
+
+    log_s: Float32[Array, ' p']
+    """The log split probabilities normalized over the selectable variables,
+    -inf for the others."""
+
+    log_top: Float32[Array, ' m']
+    """The largest log split probabilities."""
+
+    top_bit: UInt32[Array, ' p']
+    """``2^i`` for the variable with the i-th largest split probability, 0 for
+    the others."""
+
+    log_rest: Float32[Array, '']
+    """The log total split probability of the variables not in `log_top`."""
+
+    rest_ratio: Float32[Array, ' p']
+    """The split probability of each variable relative to the total of the
+    variables not in `log_top`, 0 for those in `log_top`."""
+
+    @classmethod
+    def from_log_s(
+        cls, log_s: Float32[Array, ' p'], selectable: Bool[Array, ' p'], num_top: int
+    ) -> 'S':
+        """Normalize `log_s` and single out its `num_top` largest values."""
+        # mask and normalize log_s, all -inf if no variable is selectable
+        log_s = log_softmax(log_s, where=selectable)
+
+        # find the top probabilities
+        (p,) = log_s.shape
+        num_top = min(num_top, p)
+        log_top, top_vars = lax.top_k(log_s, num_top)
+
+        # index the top probabilities as bit positions
+        assert num_top <= 32  # the bits fit in uint32
+        top_bit = (
+            jnp.zeros(p, jnp.uint32)
+            .at[top_vars]
+            .set(jnp.uint32(1) << jnp.arange(num_top, dtype=jnp.uint32))
+        )
+
+        # compute the total probability of other values
+        log_rest_s = log_s.at[top_vars].set(-jnp.inf)
+        log_rest = logsumexp(log_rest_s)
+
+        # 0 for the top and unselectable variables, also when there are no others
+        rest_ratio = jnp.where(
+            jnp.isneginf(log_rest_s), 0.0, jnp.exp(log_rest_s - log_rest)
+        )
+
+        return cls(
+            log_s=log_s,
+            log_top=log_top,
+            top_bit=top_bit,
+            log_rest=log_rest,
+            rest_ratio=rest_ratio,
+        )
+
+
+def log_blocked_mass_tree(
     key: Key[Array, ''],
     var_tree: UInt[Array, ' half_tree_size'],
     split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
-    s: Float32[Array, ' p'],
+    s: S,
 ) -> Float32[Array, ' p']:
     """Per-variable data-augmentation mass blocked by a single tree.
 
@@ -1979,11 +2133,12 @@ def _blocked_mass_tree(
     max_split
         The maximum split index for each variable.
     s
-        Split probabilities normalized over selectable variables.
+        Split probabilities normalized over selectable variables, with the
+        largest ones singled out.
 
     Returns
     -------
-    The blocked mass for each variable.
+    The log blocked mass for each variable.
     """
     (half_tree_size,) = split_tree.shape
     d_minus_1 = half_tree_size.bit_length() - 1  # number of decision-node levels
@@ -2011,33 +2166,54 @@ def _blocked_mass_tree(
     # Ineligible mass per node: the s-mass of the variables blocked along the
     # path from the root. Each variable is blocked at exactly one node per path,
     # so summing the per-node increments top-down reproduces the per-node sum
-    # over distinct ineligible variables.
+    # over distinct ineligible variables. The variables with the largest
+    # split probabilities are tracked as bits instead, as subtracting their
+    # mass from 1 would cancel. As the bits do not repeat along a path, summing
+    # them is the same as or-ing them.
     parent = nodes >> 1
     side = nodes & 1  # 0 if the node is a left child, 1 if a right child
     parent_blocks = blocks[side, parent]
     # var_tree[parent] is a valid index wherever parent_blocks holds (the parent
     # is then internal); elsewhere the clamped gather is masked away
-    ineligible_mass = jnp.where(parent_blocks, s[var_tree[parent]], 0.0)
+    parent_var = var_tree[parent]
+    ineligible_mass = jnp.where(parent_blocks, s.rest_ratio[parent_var], 0.0)
+    ineligible_top = jnp.where(parent_blocks, s.top_bit[parent_var], 0)
     for level in range(1, d_minus_1):
         lhs, rhs = 1 << level, 1 << (level + 1)
         parent_mass = jnp.repeat(ineligible_mass[lhs >> 1 : rhs >> 1], 2)
         ineligible_mass = ineligible_mass.at[lhs:rhs].add(parent_mass)
+        parent_top = jnp.repeat(ineligible_top[lhs >> 1 : rhs >> 1], 2)
+        ineligible_top = ineligible_top.at[lhs:rhs].add(parent_top)
+
+    # Eligible mass per node, in log space: the largest split probabilities not
+    # ineligible, plus the others minus the ineligible ones. It is positive at
+    # internal nodes (the split variable is eligible), the clip only guards
+    # against round-off.
+    log_eligible = s.log_rest + jnp.log1p(-jnp.minimum(ineligible_mass, 1.0))
+    (num_top,) = s.log_top.shape
+    for i in range(num_top):
+        is_eligible = ((ineligible_top >> i) & 1) == 0
+        log_eligible = jnp.where(
+            is_eligible, jnp.logaddexp(log_eligible, s.log_top[i]), log_eligible
+        )
 
     # Per-node augmentation weight lambda_b / e_b, zero at non-internal nodes. The
-    # eligible mass is positive at internal nodes (the split variable is eligible);
-    # the floor only guards against round-off, and is unused where weight is zero.
-    eligible_mass = jnp.maximum(1.0 - ineligible_mass, jnp.finfo(jnp.float32).eps)
-    weight = jnp.where(is_internal, random.exponential(key, (half_tree_size,)), 0.0)
-    weight /= eligible_mass
+    # eligible mass can be tiny, so the weights and their sums below are in log
+    # space, as they can exceed the float32 range.
+    log_weight = jnp.log(random.exponential(key, (half_tree_size,))) - log_eligible
+    log_weight = jnp.where(is_internal, log_weight, -jnp.inf)
 
     # Subtree weight: total weight of each node's internal descendants and itself,
     # accumulated bottom-up. The children of the deepest decision level are leaves
     # and contribute nothing.
-    subtree_weight = weight
+    log_subtree_weight = log_weight
     for level in range(d_minus_1 - 2, -1, -1):
         lhs, rhs = 1 << level, 1 << (level + 1)
-        children = subtree_weight[2 * lhs : 2 * rhs].reshape(-1, 2).sum(axis=1)
-        subtree_weight = subtree_weight.at[lhs:rhs].add(children)
+        children = log_subtree_weight[2 * lhs : 2 * rhs].reshape(-1, 2)
+        children = jnp.logaddexp(children[:, 0], children[:, 1])
+        log_subtree_weight = log_subtree_weight.at[lhs:rhs].set(
+            jnp.logaddexp(log_subtree_weight[lhs:rhs], children)
+        )
 
     # A variable blocked by node b at one of its children is ineligible in that
     # whole child subtree, so it accumulates the subtree weight; scatter it onto
@@ -2045,12 +2221,29 @@ def _blocked_mass_tree(
     # (the deepest decision nodes block into leaves, contributing nothing); their
     # children are exactly subtree_weight reshaped into [left, right] pairs.
     half = half_tree_size // 2
-    contrib = (blocks[:, :half] * subtree_weight.reshape(-1, 2).T).sum(axis=0)
-    scatter_var = jnp.where(is_internal, var_tree, p)[:half]
-    return jnp.zeros(p).at[scatter_var].add(contrib)
+    children = jnp.where(
+        blocks[:, :half], log_subtree_weight.reshape(-1, 2).T, -jnp.inf
+    )
+    log_contrib = jnp.logaddexp(*children)
+    # int32 such that the out-of-bounds index p does not wrap around
+    scatter_var = jnp.where(is_internal[:half], var_tree[:half], jnp.int32(p))
+    return scatter_logaddexp(p, scatter_var, log_contrib)
 
 
-def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, ' p']:
+def scatter_logaddexp(
+    size: int, indices: Integer[Array, ' n'], values: Float32[Array, ' n']
+) -> Float32[Array, ' {size}']:
+    """Accumulate `values` at `indices` with `jnp.logaddexp`, ignoring indices out of bounds."""
+    # jnp.logaddexp.at would also do this, but its implementation is much worse,
+    # it uses a lax.scan along the reduction axis
+    peak = jnp.full(size, -jnp.inf).at[indices].max(values, mode='drop')
+    peak_at = peak.at[indices].get(mode='fill', fill_value=-jnp.inf)
+    terms = jnp.where(jnp.isneginf(values), 0.0, jnp.exp(values - peak_at))
+    total = jnp.zeros(size).at[indices].add(terms, mode='drop')
+    return jnp.where(jnp.isneginf(peak), -jnp.inf, peak + jnp.log(total))
+
+
+def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Float32[Array, ' p']:
     """Sample the data-augmentation counts for the exact full conditional of `s`.
 
     At each internal node, the variables with no available cutpoint given the
@@ -2068,26 +2261,40 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Int32[Array, '
 
     Returns
     -------
-    The discarded-draws count for each variable.
+    The log of the discarded-draws count for each variable.
     """
-    assert forest.log_s is not None
+    assert forest.sparsity.log_s is not None
     keys = split(key)
-    (num_trees, _) = forest.var_tree.shape
+    (num_trees, half_tree_size) = forest.var_tree.shape
 
-    # split probabilities normalized over the selectable (non-blocked) variables
-    selectable = forest.max_split > 0
-    s = softmax(forest.log_s, where=selectable)
+    # split probabilities normalized over the selectable (non-blocked) variables,
+    # with the largest ones singled out. A node has less than d_minus_1
+    # ineligible variables, one per ancestor. If some are not among the
+    # largest, their mass is subtracted from the total of the others, and at
+    # least d_minus_1 + 1 of the 2 d_minus_1 largest are eligible, each larger
+    # than all the others: so the relative error of the eligible mass is about
+    # float32 eps times p / (d_minus_1 + 1).
+    d_minus_1 = half_tree_size.bit_length() - 1
+    s = S.from_log_s(forest.sparsity.log_s, forest.max_split > 0, 2 * d_minus_1)
 
     # blocked_mass[j] = sum over internal nodes where j is ineligible of
     # lambda_b / e_b, with lambda_b ~ Exponential(1)
-    blocked_mass = vmap(_blocked_mass_tree, in_axes=(0, 0, 0, None, None))(
+    log_blocked_mass = vmap(log_blocked_mass_tree, in_axes=(0, 0, 0, None, None))(
         keys.pop(num_trees), forest.var_tree, forest.split_tree, forest.max_split, s
-    ).sum(axis=0)  # shape (p,)
+    )
+    log_blocked_mass = logsumexp(log_blocked_mass, axis=0)  # shape (p,)
 
     # the per-node discarded-draw counts are negative-multinomial, with no
     # closed form when summed over nodes, but their Gamma-Poisson mixture does:
-    # A_j | {lambda_b} ~ Poisson(s_j * blocked_mass[j]), independent across j
-    return poisson(keys.pop(), s * blocked_mass, dtype=jnp.int32)
+    # A_j | {lambda_b} ~ Poisson(s_j * blocked_mass[j]), independent across j.
+    # The counts can be huge, so they are in log space. Above 10^20, their
+    # relative fluctuations are below float32 resolution, so the count is its
+    # mean.
+    log_rate = s.log_s + log_blocked_mass
+    huge = log_rate > LOG_HUGE
+    rate = jnp.exp(jnp.where(huge, 0.0, log_rate))
+    count = poisson(keys.pop(), rate, dtype=jnp.float32)
+    return jnp.where(huge, log_rate, jnp.log(count))
 
 
 @named_call
@@ -2118,7 +2325,7 @@ def step_s(key: Key[Array, ''], state: State) -> State:
     ``state.config.augment`` is set, the forbidden rules are accounted for
     exactly with the data augmentation of `sample_s_augmentation`.
     """
-    assert state.forest.theta is not None
+    assert state.forest.sparsity.theta is not None
 
     # reserve the Dirichlet draw key first and unconditionally, so it does not
     # depend on whether augmentation is on; then the two modes draw identically
@@ -2127,24 +2334,38 @@ def step_s(key: Key[Array, ''], state: State) -> State:
     log_s_key = keys.pop()
 
     # histogram current variable usage
-    p = state.forest.max_split.size
+    (p,) = state.forest.max_split.shape
     varcount = var_histogram(
         p, state.forest.var_tree, state.forest.split_tree, sum_batch_axis=-1
     )
 
     # the Dirichlet posterior concentration, optionally completed with the exact
-    # accounting of forbidden rules via data augmentation
-    alpha = state.forest.theta / p + varcount
+    # accounting of forbidden rules via data augmentation, in log space as the
+    # augmentation counts can be huge
+    log_alpha = jnp.log(state.forest.sparsity.theta / p + varcount)
     if state.config.augment:
-        alpha = alpha + sample_s_augmentation(keys.pop(), state.forest)
+        log_alpha = jnp.logaddexp(
+            log_alpha, sample_s_augmentation(keys.pop(), state.forest)
+        )
 
-    # sample from the Dirichlet posterior and update the forest with the new s
-    log_s = loggamma(log_s_key, alpha)
-    return replace(state, forest=replace(state.forest, log_s=log_s))
+    # sample from the Dirichlet posterior and update the forest with the new s;
+    # above 10^20, the relative fluctuations of Gamma(alpha) are below float32
+    # resolution, so log Gamma(alpha) is log(alpha)
+    huge = log_alpha > LOG_HUGE
+    alpha = jnp.exp(jnp.where(huge, 0.0, log_alpha))
+    log_s = jnp.where(huge, log_alpha, loggamma(log_s_key, alpha))
+    return replace(
+        state,
+        forest=replace(
+            state.forest, sparsity=replace(state.forest.sparsity, log_s=log_s)
+        ),
+    )
 
 
 @named_call
-def step_theta(key: Key[Array, ''], state: State, *, num_grid: int = 1000) -> State:
+def step_theta(
+    key: Key[Array, ''], state: State, *, num_grid: int | None = None
+) -> State:
     """
     Update `theta`.
 
@@ -2157,52 +2378,190 @@ def step_theta(key: Key[Array, ''], state: State, *, num_grid: int = 1000) -> St
     state
         The current BART state.
     num_grid
-        The number of points in the evenly-spaced grid used to sample
-        theta / (theta + rho).
+        The number of bins of the grid used to sample ``log(theta / rho)``. If
+        not specified, it grows with the number of predictors, see Notes.
 
     Returns
     -------
     Updated BART state with re-sampled `theta`.
+
+    Notes
+    -----
+    The draw is from an approximation of the full conditional of ``v =
+    log(theta / rho)``, which interpolates its logarithm linearly between the
+    edges of the bins of an evenly spaced grid over the range of `v` allowed by
+    `Sparsity.log_theta_range`. The full conditional of `v` gets
+    narrower with the number of predictors `p`, roughly with standard deviation
+    ``1 / sqrt(p)``, so by default the number of bins is ``320 sqrt(p)``, clipped
+    to [1000, 10000]. Beyond that, the approximation is accurate only to
+    within a bin.
     """
-    assert state.forest.log_s is not None
-    assert state.forest.rho is not None
-    assert state.forest.a is not None
-    assert state.forest.b is not None
+    forest = state.forest
+    assert forest.sparsity.log_s is not None
+    assert forest.sparsity.rho is not None
+    assert forest.sparsity.a is not None
+    assert forest.sparsity.b is not None
+    assert forest.sparsity.log_theta_range is not None
 
-    # the grid points are the midpoints of num_grid bins in (0, 1)
-    padding = 1 / (2 * num_grid)
-    lambda_grid = jnp.linspace(padding, 1 - padding, num_grid)
+    if num_grid is None:
+        (p,) = forest.max_split.shape
+        num_grid = min(max(round(320 * p**0.5), 1000), 10_000)
 
-    # normalize s
-    log_s = state.forest.log_s - logsumexp(state.forest.log_s)
+    keys = split(key)
 
-    # sample lambda
-    logp, theta_grid = _log_p_lambda(
-        lambda_grid, log_s, state.forest.rho, state.forest.a, state.forest.b
+    # log_p(v) is the exact full conditional log pdf of v
+    log_p = partial(
+        _log_p_v,
+        log_s=forest.sparsity.log_s,
+        a=forest.sparsity.a,
+        b=forest.sparsity.b,
+        rho=forest.sparsity.rho,
     )
-    i = random.categorical(key, logp)
-    theta = theta_grid[i]
 
-    return replace(state, forest=replace(state.forest, theta=theta))
+    # the mass of each bin, under the log-linear interpolation of the density
+    grid_range = forest.sparsity.log_theta_range
+    width = 2 * grid_range / num_grid
+    edges = jnp.linspace(-grid_range, grid_range, num_grid + 1)
+    log_p_edges = log_p(edges)
+    rise = jnp.diff(log_p_edges)  # change of the log density across each bin
+    log_pmf = log_p_edges[:-1] + jnp.log(width) + log_expm1_ratio(rise)
+
+    # where the log density overflows to -inf, the interpolated density is 0
+    # across the bin, while the arithmetic above would give nan
+    void = jnp.isneginf(log_p_edges[:-1]) | jnp.isneginf(log_p_edges[1:])
+    rise = jnp.where(void, 0.0, rise)
+    log_pmf = jnp.where(void, -jnp.inf, log_pmf)
+
+    # draw a bin, then a point within it
+    i = random.categorical(keys.pop(), log_pmf)
+    v = edges[i] + width * sample_unit_exponential(keys.pop(), rise[i])
+
+    theta = forest.sparsity.rho * jnp.exp(v)
+    return replace(
+        state, forest=replace(forest, sparsity=replace(forest.sparsity, theta=theta))
+    )
 
 
-def _log_p_lambda(
-    lambda_: Float32[Array, ' num_grid'],
+def log_expm1_ratio(x: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
+    """Compute ``log((exp(x) - 1) / x)``, the log mass of ``exp(x t) dt`` on ``[0, 1]``."""
+    # (e^x - 1) / x = e^x (1 - e^-x) / x, use the form with a negative exponent
+    abs_x = jnp.abs(x)
+    small = abs_x < 1e-4
+    safe_abs_x = jnp.where(small, 1.0, abs_x)
+    log_ratio_neg = jnp.where(
+        small, -abs_x / 2, jnp.log(-jnp.expm1(-safe_abs_x)) - jnp.log(safe_abs_x)
+    )
+    return jnp.maximum(x, 0.0) + log_ratio_neg
+
+
+def sample_unit_exponential(
+    key: Key[Array, ''], x: Float32[Array, '']
+) -> Float32[Array, '']:
+    """Sample `t` in ``[0, 1]`` with density proportional to ``exp(x t)``."""
+    u = random.uniform(key)
+    small = jnp.abs(x) < 1e-4
+    x = jnp.where(small, 1.0, x)  # avoid non-finite intermediates in the `small` case
+    # invert the cdf (e^(x t) - 1) / (e^x - 1), written such that the
+    # exponential can not overflow
+    t_negative = jnp.log1p(u * jnp.expm1(jnp.minimum(x, 0.0))) / x
+    t_positive = 1 + jnp.log(u + (1 - u) * jnp.exp(-jnp.maximum(x, 0.0))) / x
+    t = jnp.where(x > 0, t_positive, t_negative)
+    return jnp.where(small, u, jnp.clip(t, 0.0, 1.0))
+
+
+def _log_p_v(
+    v: Float32[Array, '*shape'],
+    *,
     log_s: Float32[Array, ' p'],
-    rho: Float32[Array, ''],
     a: Float32[Array, ''],
     b: Float32[Array, ''],
-) -> tuple[Float32[Array, ' num_grid'], Float32[Array, ' num_grid']]:
-    # in the following I use lambda_[::-1] == 1 - lambda_
-    theta = rho * lambda_ / lambda_[::-1]
-    p = log_s.size
-    return (
-        (a - 1) * jnp.log1p(-lambda_[::-1])  # log(lambda)
-        + (b - 1) * jnp.log1p(-lambda_)  # log(1 - lambda)
-        + gammaln(theta)
-        - p * gammaln(theta / p)
-        + theta / p * jnp.sum(log_s)
-    ), theta
+    rho: Float32[Array, ''],
+) -> Float32[Array, '*shape']:
+    """Compute the unnormalized full conditional of ``v = log(theta / rho)``.
+
+    With ``lambda = theta / (theta + rho)``, the Beta(a, b) prior density of
+    `lambda`, times the Jacobian ``dlambda / dv = lambda (1 - lambda)``, gives
+    the prior density of `v`, proportional to ``lambda^a (1 - lambda)^b``. The
+    likelihood is the Dirichlet density of ``s = softmax(log_s)`` with
+    concentration ``theta / p``.
+    """
+    log_lambda = -jnp.logaddexp(0.0, -v)
+    log1m_lambda = -jnp.logaddexp(0.0, v)
+    (p,) = log_s.shape
+    log_c = jnp.log(rho / p) + v  # c = theta / p
+    c = jnp.exp(log_c)
+    theta = p * c
+
+    # log of the Dirichlet density, Gamma(theta) / Gamma(c)^p prod(s)^c, up to
+    # factors constant in theta. Expanding the log-gammas with Stirling's
+    # formula, the terms of order theta log theta cancel exactly, leaving minus
+    # theta times the divergence -log p - mean(log s) >= 0 of s from uniform,
+    # computed from the unnormalized log_s. This avoids cancellations in float32.
+    r_theta, r_c = stirling_remainder(jnp.stack([theta, c]))
+    log_lk = (
+        (p - 1) / 2 * log_c - theta * log_mean_exp_deviation(log_s) + r_theta - p * r_c
+    )
+
+    return a * log_lambda + b * log1m_lambda + log_lk
+
+
+def log_mean_exp_deviation(x: Float32[Array, ' p']) -> Float32[Array, '']:
+    """Compute ``log(mean(exp(x - mean(x))))`` without cancellation."""
+    x -= jnp.mean(x)
+    # shift only if exp(x) could overflow, else expm1 retains the precision
+    shift = jnp.maximum(jnp.max(x) - 30.0, 0.0)
+    # the result is invariant to shifting x, so remove the residual mean that
+    # the centering leaves due to rounding
+    return shift + jnp.log1p(jnp.mean(jnp.expm1(x - shift))) - jnp.mean(x)
+
+
+def stirling_remainder(z: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
+    """Compute ``log Gamma(z) - (z - 1/2) log z + z - log(2 pi) / 2``, for ``z > 0``."""
+    # use the recurrence r(z) = r(z + 1) + (z + 1/2) log(1 + 1/z) - 1 to bring
+    # the argument where the asymptotic series is accurate
+    shift = 4
+    steps = stirling_step(z)
+    for k in range(1, shift):
+        steps += stirling_step_series(z + k)
+    return jnp.where(
+        z >= shift,
+        stirling_series(jnp.maximum(z, shift)),
+        stirling_series(z + shift) + steps,
+    )
+
+
+def stirling_series(z: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
+    """Asymptotic series of `stirling_remainder`, accurate in float32 for ``z >= 4``."""
+    inv = jnp.reciprocal(z)
+    inv2 = jnp.square(inv)
+    coefs = (1 / 12, -1 / 360, 1 / 1260, -1 / 1680, 1 / 1188, -691 / 360360, 1 / 156)
+    series = 0.0
+    for coef in reversed(coefs):
+        series = coef + inv2 * series
+    return inv * series
+
+
+def stirling_step(w: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
+    """Compute ``(w + 1/2) log(1 + 1/w) - 1``, for ``w > 0``."""
+    # below w = 1/2 the cancellation in the direct formula is mild
+    direct = (w + 0.5) * jnp.log1p(jnp.reciprocal(w)) - 1
+    series = stirling_step_series(jnp.maximum(w, 0.5), num_terms=14)
+    return jnp.where(w >= 0.5, series, direct)
+
+
+def stirling_step_series(
+    w: Float32[Array, '*shape'], num_terms: int = 8
+) -> Float32[Array, '*shape']:
+    """Compute ``(w + 1/2) log(1 + 1/w) - 1`` without cancellation.
+
+    The default `num_terms` is accurate for ``w >= 1``, 14 for ``w >= 1/2``.
+    """
+    # with x = 1 / (2 w + 1), it's atanh(x) / x - 1 = sum_k x^2k / (2k + 1)
+    x2 = jnp.square(jnp.reciprocal(2 * w + 1))
+    series = x2 / (2 * num_terms + 1)
+    for k in range(num_terms - 1, 0, -1):
+        series = x2 * (1 / (2 * k + 1) + series)
+    return series
 
 
 @named_call
@@ -2238,7 +2597,7 @@ def step_sparse(key: Key[Array, ''], state: State) -> State:
 def _step_sparse(key: Key[Array, ''], state: State) -> State:
     keys = split(key)
     state = step_s(keys.pop(), state)
-    if state.forest.rho is not None:
+    if state.forest.sparsity.rho is not None:
         state = step_theta(keys.pop(), state)
     return state
 

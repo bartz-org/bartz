@@ -35,12 +35,17 @@ on:
     branches:
       - main
 
+# A new push to a PR supersedes its running CI. Other events get a unique group
+# so main pushes never cancel each other: release-docs.yml needs them to finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
-  pre-commit:
+  lint:
     runs-on: ubuntu-latest
     env:
-      SKIP: no-commit-to-branch
-      RPY2_CFFI_MODE: ABI
+      PREK_SKIP: no-commit-to-branch
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,13 +64,13 @@ jobs:
           if [ "$from" = '0000000000000000000000000000000000000000' ]; then from=''; fi
           echo "from=$from" >> "$GITHUB_OUTPUT"
 
-      - name: Run pre-commit on changed files
+      - name: Run prek on changed files
         # even if we run it on all files below, it's convenient to see if something fails in new changes first
         if: steps.refs.outputs.from != ''
         run: make lint ARGS='--verbose --show-diff-on-failure --from-ref=${{ steps.refs.outputs.from }} --to-ref=HEAD'
 
-      - name: Run pre-commit on all files
-        # this is for when pre-commit itself is changed, which may affect unchanged files
+      - name: Run prek on all files
+        # this is for when the hook config is changed, which may affect unchanged files
         run: make lint ARGS='--verbose --all-files'
 
       - name: Run gitlint on new commits
@@ -75,13 +80,14 @@ jobs:
   tests:
     name: ${{ matrix.target }}/${{ matrix.group }}
     runs-on: ubuntu-latest
+    # queued behind lint, so cheap lint failures surface first
+    needs: [lint]
 
     strategy:
-      fail-fast: false
       matrix:
         # The list of groups lives in `Makefile` as `GROUPS`; keep this in sync.
         target: [tests, tests-single-cpu, tests-old]
-        group: [misc, iface-v5v7, iface-v6, iface-v4, bart-v1, bart-v23]
+        group: [iface-v1, iface-v23, iface-v4, iface-v5, iface-v6, iface-v7]
 
     steps:
       - name: Checkout repository
@@ -95,32 +101,6 @@ jobs:
         with:
           cache-suffix: -${{ matrix.target }}-${{ matrix.group }}
 
-      - name: Install R
-        uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
-        with:
-          r-version: "renv"
-
-      - name: Add a CRAN fallback mirror for renv
-        # setup-r points renv at Posit Package Manager (PPM) alone, via a
-        # single-URL RENV_CONFIG_REPOS_OVERRIDE. PPM intermittently times out,
-        # which hard-fails the renv bootstrap/restore below and forces a manual
-        # CI re-run. Append a plain CRAN mirror so renv falls back to it (source
-        # builds, only when PPM is unreachable). $RSPM is the PPM binary URL
-        # just exported by setup-r, so the runner's distro codename stays in sync.
-        run: echo "RENV_CONFIG_REPOS_OVERRIDE=PPM=${RSPM};CRAN=https://cloud.r-project.org" >> "$GITHUB_ENV"
-
-      - name: Install R dependencies
-        uses: r-lib/actions/setup-renv@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
-        env:
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Configure R PATHS for rpy2 (Linux only)
-        run: |
-          echo "R_HOME=$(R RHOME)" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$(R RHOME)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
-          ldd "$(R RHOME)/library/methods/libs/methods.so" || true
-          uv run --dev python -c "import rpy2.situation as s; print('\n'.join(map(str, s.iter_info())))"
-
       - name: Run unit tests
         timeout-minutes: 30
         # NPROC=0 disables pytest-xdist: the small CI runners OOM under
@@ -128,7 +108,7 @@ jobs:
         run: make ${{ matrix.target }} GROUP=${{ matrix.group }} NPROC=0
 
       - name: Save coverage information
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           archive: false # the artifact name is equal to the file name
           path: .coverage*
@@ -162,7 +142,7 @@ jobs:
         uses: ./.github/actions/setup-uv
 
       - name: Get coverage files
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: .coverage*
           merge-multiple: true
@@ -183,7 +163,7 @@ jobs:
         run: make covreport
 
       - name: Save coverage report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: covreport
           path: _site/coverage
@@ -211,7 +191,7 @@ jobs:
         uses: ./.github/actions/setup-uv
 
       - name: Get coverage files
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: .coverage*
           merge-multiple: true
@@ -253,9 +233,9 @@ jobs:
   benchmarks:
     name: benchmarks-${{ matrix.id }}
     runs-on: ${{ matrix.runs-on }}
+    needs: [lint]
 
     strategy:
-      fail-fast: false
       matrix:
         include:
           - id: latest
@@ -278,7 +258,7 @@ jobs:
           cache-suffix: -${{ matrix.id }}
 
       - name: Get machine information for asv
-        run: RPY2_CFFI_MODE=ABI uv run --dev python -m asv machine --yes
+        run: uv run --dev python -m asv machine --yes
 
       - name: Run asv in quick mode
         run: ${{ matrix.vars }}make asv-quick
@@ -297,35 +277,19 @@ jobs:
         uses: ./.github/actions/setup-uv
 
       - name: run IPython
-        run: RPY2_CFFI_MODE=ABI make ipython ARGS=config/ipython/profile_default/startup/startup.ipy
+        run: make ipython ARGS=config/ipython/profile_default/startup/startup.ipy
 
       - name: run IPython with old toolchain
-        run: RPY2_CFFI_MODE=ABI make ipython-old ARGS=config/ipython/profile_default/startup/startup.ipy
+        run: make ipython-old ARGS=config/ipython/profile_default/startup/startup.ipy
 
       - name: Check the version is derived from git
         run: uv run --dev python -c 'import bartz; print(bartz.__version__)' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(\.dev[0-9]+\+g[0-9a-f]+)?$'
 
-      - name: Install R
-        uses: r-lib/actions/setup-r@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
-        with:
-          r-version: "renv"
-
-      - name: Add a CRAN fallback mirror for renv
-        # setup-r points renv at Posit Package Manager (PPM) alone, via a
-        # single-URL RENV_CONFIG_REPOS_OVERRIDE. PPM intermittently times out,
-        # which hard-fails the renv bootstrap/restore below and forces a manual
-        # CI re-run. Append a plain CRAN mirror so renv falls back to it (source
-        # builds, only when PPM is unreachable). $RSPM is the PPM binary URL
-        # just exported by setup-r, so the runner's distro codename stays in sync.
-        run: echo "RENV_CONFIG_REPOS_OVERRIDE=PPM=${RSPM};CRAN=https://cloud.r-project.org" >> "$GITHUB_ENV"
-
-      - name: Install R dependencies
-        uses: r-lib/actions/setup-renv@465b7d8e732ca3921382b1674c59bada9cbf3399 # v2
-        env:
-          GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Update locked dependencies
         run: make update-deps
+        env:
+          # authenticated GitHub API calls by pinact
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Bump oldest supported dependencies
         run: make update-oldest-deps
@@ -333,7 +297,7 @@ jobs:
   required-dummy:
     runs-on: ubuntu-latest
     needs:
-      - pre-commit
+      - lint
       - tests
       - docs
       - covreport

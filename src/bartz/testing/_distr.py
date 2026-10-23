@@ -27,13 +27,13 @@
 import math
 from abc import abstractmethod
 
-from equinox import Module, error_if
+from equinox import Module, error_if, field
 from jax import numpy as jnp
 from jax import random
 from jax.scipy.special import ndtr, ndtri
 from jaxtyping import Array, Float, Integer, Key, UInt
 
-from bartz._jaxext import minimal_unsigned_dtype
+from bartz._jaxext import minimal_unsigned_dtype, split
 from bartz._jaxext.random import loggamma
 
 # The DGP identities documented in `Params` hold for arbitrary families given
@@ -44,11 +44,14 @@ from bartz._jaxext.random import loggamma
 #     most quadratic in these coefficients, so their higher moments never enter.
 #   - gamma: mean 0, variance 1 *and* known kurtosis: var_v is quartic in gamma.
 #   - s: E[s^2] = 1 exactly, E[s^4] known.
+#   - error: symmetric, so its Gaussian copula maps a sign-symmetric latent
+#     correlation R_cc' to a zero-mean error correlation.
+#   - R: unit diagonal, off-diagonal entries symmetric about 0.
 # Third moments never enter: every odd term carries a lone E[x] = 0 factor.
 
 
 class Distr(Module):
-    """Family of standardized distributions: mean 0, variance 1."""
+    """Family of standardized distributions, symmetric about 0 with variance 1."""
 
     @property
     @abstractmethod
@@ -392,3 +395,87 @@ class SpikeSlab(ScaleDistr):
         pi = 1 / m4
         pi = error_if(pi, pi > 1, 'SpikeSlab needs peff <= p')
         return cls(pi=pi)
+
+
+class CorrDistr(Module):
+    """Family of random correlation matrices.
+
+    The off-diagonal entries are symmetric about 0, so ``E[R] = I``.
+    """
+
+    @abstractmethod
+    def sample_chol(self, key: Key[Array, ''], k: int) -> Float[Array, 'k k']:
+        """Sample the lower-triangular Cholesky factor of a (k, k) correlation matrix."""
+
+    @abstractmethod
+    def offdiag_var(self, k: int) -> Float[Array, ''] | float:
+        """Variance ``E[R_cc' ** 2]`` of each off-diagonal entry, ``c != c'``."""
+
+
+class LKJ(CorrDistr):
+    R"""LKJ distribution, with density proportional to :math:`\det(R)^{\eta - 1}`.
+
+    ``eta=1`` is uniform over correlation matrices; a larger `eta` concentrates
+    them around the identity. The marginal of each off-diagonal entry is
+    :math:`(R_{cc'} + 1) / 2 \sim \mathrm{Beta}(\eta - 1 + k/2, \eta - 1 + k/2)`,
+    so the correlations shrink as ``k`` grows; use `Factor` for strong
+    correlations across many components.
+    """
+
+    eta: Float[Array, ''] | float
+    """Concentration parameter, ``> 0``."""
+
+    def sample_chol(self, key: Key[Array, ''], k: int) -> Float[Array, 'k k']:
+        """Sample the Cholesky factor directly with the onion method."""
+        eta = error_if(self.eta, self.eta <= 0, 'eta must be > 0')
+        keys = split(key)
+        # row i (i >= 1) has squared norm y_i ~ Beta(i/2, eta + (k-1-i)/2) off the
+        # diagonal, in a uniformly random direction; row 0 is (1, 0, ..., 0).
+        # Sample d_i = 1 - y_i, the squared diagonal, so it can't round to 0
+        i = jnp.arange(k)
+        d = random.beta(keys.pop(), eta + (k - 1 - i) / 2, jnp.maximum(i, 1) / 2)
+        d = jnp.where(i == 0, 1.0, d)
+        u = jnp.tril(random.normal(keys.pop(), (k, k)), -1)
+        norm = jnp.linalg.norm(u, axis=1, keepdims=True)
+        u /= jnp.where(norm > 0, norm, 1.0)
+        return jnp.sqrt(1.0 - d)[:, None] * u + jnp.diag(jnp.sqrt(d))
+
+    def offdiag_var(self, k: int) -> Float[Array, ''] | float:
+        """``E[R_cc' ** 2] = 1 / (2 eta + k - 1)``."""
+        return 1 / (2 * self.eta + k - 1)
+
+
+class Factor(CorrDistr):
+    R"""Identity plus random factors, :math:`R = (1 - \tau) I + \tau U U^\top`.
+
+    The rows of :math:`U` (shape ``(k, rank)``) are i.i.d. uniform on the unit
+    sphere. ``rank=1`` gives equicorrelation :math:`\pm\tau` with random
+    signs. Unlike `LKJ`, the spread of the correlations does not shrink with
+    ``k``.
+    """
+
+    rank: int = field(static=True)
+    """Number of factors, ``>= 1``."""
+
+    tau: Float[Array, ''] | float
+    R"""Weight :math:`\tau` of the factors, in ``[0, 1)``."""
+
+    def __check_init__(self) -> None:
+        """Check `rank` (static, so it can be validated eagerly)."""
+        if self.rank < 1:
+            msg = 'rank must be >= 1'
+            raise ValueError(msg)
+
+    def sample_chol(self, key: Key[Array, ''], k: int) -> Float[Array, 'k k']:
+        """Sample the factors and factorize their correlation matrix."""
+        tau = error_if(
+            self.tau, (self.tau < 0) | (self.tau >= 1), 'tau must be in [0, 1)'
+        )
+        u = random.normal(key, (k, self.rank))
+        u /= jnp.linalg.norm(u, axis=1, keepdims=True)
+        corr = jnp.where(jnp.eye(k, dtype=bool), 1.0, tau * (u @ u.T))
+        return jnp.linalg.cholesky(corr)
+
+    def offdiag_var(self, k: int) -> Float[Array, ''] | float:  # noqa: ARG002
+        """``E[R_cc' ** 2] = tau ** 2 / rank``."""
+        return jnp.square(self.tau) / self.rank

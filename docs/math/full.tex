@@ -963,9 +963,9 @@ accepted or rejected), the leaves of $T$ are resampled from
 \eqref{eq:mv-leaf-fc}. In the sum-of-trees setting, the residuals of every
 other tree are then refreshed by subtracting the new
 $g(\cdot;  T_t, M_t)$ from the running sum, and the cycle moves to the
-next tree. After all $m$ trees have been updated, $\mLamm$, the latent
-outcomes, $\mLam$, $\vs$ and $\theta$ are drawn from their full
-conditionals, derived next.
+next tree. After all $m$ trees have been updated, $\mLamm$, $\mLam$,
+$\vs$ and $\theta$ are drawn from their full conditionals, derived next; the
+latent outcomes are drawn before the tree sweep.
 
 %-----------------------------------------------------------------------------
 \section{Updating the leaf precision}
@@ -1053,8 +1053,9 @@ that the prior harmonic mean of each marginal variance is the initial value.
 \section{Updating the latent outcomes}
 \label{sec:mv-z}
 
-After all $m$ trees have been updated, the latent outcomes of the observed
-binary components are drawn from their full conditional. Under the diagonal
+At the start of each sweep, before the trees are updated, the latent
+outcomes of the observed binary components are drawn from their full
+conditional. Under the diagonal
 form of $\mLam$ with $\lambda_j = 1$ for $j \in \setB$, the components of
 $\vyt_i$ in \eqref{eq:mv-lik-diag} are independent given the trees, so
 $z_{i,j}$ depends on the rest of the model only through $f_j(\vx_i)$,
@@ -1444,10 +1445,10 @@ variable uniformly at random.
 			                  \texttt{State.prec\_scale} is unset, in which
 			                  case it also stands in for
 			                  \texttt{prec\_tree}.
-			            \item \texttt{Forest.log\_s} is $\log \vs$ up to a
-			                  constant, \texttt{Forest.theta} is $\theta$,
-			                  and \texttt{Forest.a}, \texttt{b},
-			                  \texttt{rho} are $a_\theta, b_\theta, \rho$.
+			            \item \texttt{Forest.sparsity.log\_s} is $\log \vs$
+			                  up to a constant, \texttt{theta} is $\theta$,
+			                  and \texttt{a}, \texttt{b}, \texttt{rho} are
+			                  $a_\theta, b_\theta, \rho$.
 			            \item \texttt{StepConfig.sparse\_on\_at} and
 			                  \texttt{StepConfig.augment} select the
 			                  schedule and the exact update of
@@ -1464,10 +1465,12 @@ variable uniformly at random.
 			                  non-likelihood ratio \eqref{eq:mv-nonlk-grow}.
 		            \end{itemize}
 		      \item[\texttt{\_step.py}] The Gibbs sweep, leaf model, and
-		            noise model. \texttt{step} updates in order the trees,
-		            the leaf precision, the latent outcomes, the error
+		            noise model. \texttt{step} updates in order the latent
+		            outcomes, the trees, the leaf precision, the error
 		            precision, and the variable selection parameters.
 		            \begin{itemize}
+			            \item Latent outcomes: \texttt{step\_z} draws from
+			                  \eqref{eq:mv-z-fc}.
 			            \item Trees:
 			                  \begin{itemize}
 				                  \item \texttt{accept\_moves\_parallel\_stage}
@@ -1489,8 +1492,6 @@ variable uniformly at random.
 			                  \texttt{step\_leaf\_prior\_cov\_inv} draws
 			                  from \eqref{eq:mv-Lamm-fc}, with $L$ and the
 			                  leaf scatter from \texttt{leaf\_scatter}.
-			            \item Latent outcomes: \texttt{step\_z} draws from
-			                  \eqref{eq:mv-z-fc}.
 			            \item Error precision: \texttt{step\_error\_cov\_inv}
 			                  dispatches on the type of
 			                  \texttt{State.error\_cov\_inv} to

@@ -46,7 +46,9 @@ import tomli
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
-from refs_for_asv import oldest_benchmarked_version
+
+from config._common import lower_bound
+from config.refs_for_asv import oldest_benchmarked_version
 
 # Loose pattern: find any `WORKAROUND(...)` candidate to inspect.
 CANDIDATE_RE = re.compile(r'WORKAROUND\(([^)]*)\)')
@@ -54,42 +56,28 @@ CANDIDATE_RE = re.compile(r'WORKAROUND\(([^)]*)\)')
 INNER_RE = re.compile(r'\s*([A-Za-z0-9_.\-]+)\s*(<=|<)\s*(\S+)\s*')
 # The uv version, in the `# frozen: <version>` comment on the rev line right
 # below the uv-pre-commit repo line; also the uv installed by CI.
-UV_REV_RE = re.compile(r'astral-sh/uv-pre-commit\s*\n.*#\s*frozen:\s*v?(\S+)')
+UV_REV_RE = re.compile(r'astral-sh/uv-pre-commit"\s*\n.*#\s*frozen:\s*v?(\S+)')
 
 
 def floors_from_pyproject(path: Path) -> dict[str, Version]:
     """Return {normalized_pkg_name: lower_bound_version} from pyproject.toml."""
     data = tomli.loads(path.read_text())
-    project = data.get('project', {})
-    reqs: list[str] = list(project.get('dependencies', []))
+    project = data['project']
+    # skip optional-dependencies: a floor raised by an extra does not apply to
+    # installs without it, so taking the max below would be wrong
+    reqs: list[str] = list(project['dependencies'])
     for group in data.get('dependency-groups', {}).values():
         reqs.extend(group)
     floors: dict[str, Version] = {}
     for r in reqs:
         req = Requirement(r)
-        lb = _lower_bound(req.specifier)
-        if lb is None:
-            continue
+        lb = lower_bound(req.specifier)
         name = req.name.lower()
         # Take the max: later constraints (e.g. dev-group) only tighten the floor.
         if name not in floors or lb > floors[name]:
             floors[name] = lb
-    requires_python = project.get('requires-python')
-    if requires_python is not None:
-        lb = _lower_bound(SpecifierSet(requires_python))
-        if lb is not None:
-            floors['python'] = lb
+    floors['python'] = lower_bound(SpecifierSet(project['requires-python']))
     return floors
-
-
-def _lower_bound(spec: SpecifierSet) -> Version | None:
-    for s in spec:
-        if s.operator in ('>=', '==', '~='):
-            try:
-                return Version(s.version)
-            except InvalidVersion:
-                return None
-    return None
 
 
 def is_obsolete(op: str, bound: Version, floor: Version) -> bool:
@@ -124,17 +112,17 @@ def scan(root: Path) -> list[tuple[str, str, str]]:
 
 
 def uv_floor(root: Path) -> Version:
-    """Return the uv version pinned by pre-commit, the only uv we support."""
-    text = (root / '.pre-commit-config.yaml').read_text()
+    """Return the uv version pinned by the uv-lock hook, the only uv we support."""
+    text = (root / 'prek.toml').read_text()
     match = UV_REV_RE.search(text)
     if match is None:
-        msg = 'cannot find the frozen uv-pre-commit rev in .pre-commit-config.yaml'
+        msg = 'cannot find the frozen uv-pre-commit rev in prek.toml'
         raise ValueError(msg)
     return Version(match[1])
 
 
 def collect_floors(root: Path) -> dict[str, Version]:
-    """Floors for dependencies (pyproject.toml), `bartz` (oldest ASV tag), `uv` (pre-commit pin)."""
+    """Floors for dependencies (pyproject.toml), `bartz` (oldest ASV tag), `uv` (uv-lock hook pin)."""
     floors = floors_from_pyproject(root / 'pyproject.toml')
     floors['bartz'] = oldest_benchmarked_version(root)
     floors['uv'] = uv_floor(root)

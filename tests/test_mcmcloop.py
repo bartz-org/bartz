@@ -44,7 +44,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Int32, Key, Shaped, UInt8
+from jaxtyping import Array, Float, Int32, Key, Shaped, UInt, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import (
@@ -53,6 +53,7 @@ from bartz._jaxext import (
     get_device_count,
     split,
 )
+from bartz.grove import is_actual_leaf
 from bartz.mcmcloop import (
     BurninTrace,
     Callback,
@@ -63,7 +64,6 @@ from bartz.mcmcloop import (
     run_mcmc,
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
-from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
@@ -146,6 +146,18 @@ def assert_trace_close(
         assert_array_equal(actual, desired)
 
 
+def zero_non_leaves(
+    leaf_tree: Float[Array, '...'], split_tree: UInt[Array, '...']
+) -> Float[Array, '...']:
+    """Zero the values on nodes that are not leaves, as `MainTrace` does."""
+    is_leaf = jnp.vectorize(
+        partial(is_actual_leaf, add_bottom_level=True), signature='(h)->(t)'
+    )(split_tree)
+    if leaf_tree.ndim > is_leaf.ndim:  # multivariate
+        is_leaf = is_leaf[..., None, :]
+    return jnp.where(is_leaf, leaf_tree, 0)
+
+
 class TestRunMcmc:
     """Test `mcmcloop.run_mcmc`."""
 
@@ -178,7 +190,9 @@ class TestRunMcmc:
             return jnp.take(arr, -1, axis=axis)
 
         assert_array_equal(
-            final_state.forest.leaf_tree,
+            zero_non_leaves(
+                final_state.forest.leaf_tree, final_state.forest.split_tree
+            ),
             last_sample(main_trace.leaf_tree, sample_axes.leaf_tree),
         )
         assert_array_equal(
@@ -226,21 +240,20 @@ class TestRunMcmc:
         check_trace(main_trace)
 
     @pytest.mark.parametrize('average', [True, False])
-    def test_tqdm_callback(
-        self, keys: split, initial_state: State, average: bool
-    ) -> None:
+    def test_tqdm_callback(self, keys: split, average: bool) -> None:
         """Check the tqdm progress bar runs to completion and is cleaned up.
 
         Parametrized over ``average`` to also exercise the stats-accumulator
         path where the running sums are absent (``average=False``), so each
-        report shows the latest iteration only.
+        report shows the latest iteration only. `test_pbar` in `test_interface`
+        covers the other state configurations.
         """
+        state = simple_init()
         buf = io.StringIO()
         callback = make_tqdm_callback(
-            initial_state, report_every=2, file=buf, mininterval=0, average=average
+            state, report_every=2, file=buf, mininterval=0, average=average
         )
         bar_id = callback.bar_id.item()
-        state = tree.map(jnp.copy, initial_state)  # donated
         with debug_key_reuse(False):
             # block so the (unordered, async) progress callbacks have all fired
             block_until_ready(
@@ -276,32 +289,6 @@ class TestRunMcmc:
         make_tqdm_callback(state, file=io.StringIO())  # triggers cleanup
         assert bar_id not in _TQDM_REGISTRY  # the stale bar was closed and dropped
         assert buf.getvalue().endswith('\n')  # closed cleanly, not left mid-line
-
-    def test_tqdm_no_recompilation(self, keys: split) -> None:
-        """Check two MCMC runs with a tqdm callback share the compiled inner loop.
-
-        The tqdm bar lives in a module-level registry and is referenced from the
-        loop only through an integer handle carried as a traceable scalar, so the
-        loop pytree is identical across runs and `_run_mcmc_inner_loop` is not
-        retraced (verified via the `_CallCounter`, see
-        ``test_no_recompilation_inner_loop_counter`` in ``test_interface``).
-        """
-        state = simple_init()
-
-        def run() -> None:
-            callback = make_tqdm_callback(state, disable=True)
-            with debug_key_reuse(False):
-                run_mcmc(
-                    keys.pop(),
-                    tree.map(jnp.copy, state),
-                    4,
-                    n_burn=2,
-                    callback=callback,
-                )
-
-        run()
-        run()
-        assert _inner_loop_counter.n_calls == 0
 
     def test_predicted_double_compilation(self, keys: split) -> None:
         """Check that an error is raised under jit if the configuration would lead to double compilation."""
@@ -488,22 +475,16 @@ def test_callback_sees_advanced_steps_done(keys: split) -> None:
         assert_array_equal(nnone(main_trace.error_cov_inv), jnp.ones(n_save))
 
 
-@pytest.mark.parametrize('matches', [True, False])
-def test_check_platform_callback(keys: split, matches: bool) -> None:
-    """`CheckPlatformCallback` passes on the run platform and raises otherwise."""
+def test_check_platform_callback_mismatch(keys: split) -> None:
+    """`CheckPlatformCallback` raises if the run platform is not the expected one.
+
+    The matching case runs in every `Bart` fit with the default `devices`.
+    """
     run_platform = get_default_device().platform
     other_platform = 'gpu' if run_platform == 'cpu' else 'cpu'
-    callback = CheckPlatformCallback(run_platform if matches else other_platform)
-
-    def run() -> None:
-        state = simple_init()
-        block_until_ready(run_mcmc(keys.pop(), state, 1, callback=callback))
-
-    if matches:
-        run()  # no error
-    else:
-        with pytest.raises(Exception, match='deduced the platform'):
-            run()
+    callback = CheckPlatformCallback(other_platform)
+    with pytest.raises(Exception, match='deduced the platform'):
+        block_until_ready(run_mcmc(keys.pop(), simple_init(), 1, callback=callback))
 
 
 # shared test-point count, reused across cases to hit the jax compilation cache

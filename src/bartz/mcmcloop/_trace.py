@@ -25,6 +25,8 @@
 """Trace dataclasses returned by `run_mcmc`."""
 
 from abc import abstractmethod
+from dataclasses import replace
+from functools import partial
 from typing import TypeVar
 
 from jax import numpy as jnp
@@ -32,7 +34,9 @@ from jax.nn import softmax
 from jax.sharding import Mesh
 from jaxtyping import Array, Float, Float32, Int32, UInt
 
-from bartz._jaxext import Module, field
+from bartz._jaxext import Module, field, jit
+from bartz._npz import serializable
+from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
 
@@ -48,8 +52,9 @@ class Trace(Module):
 
     A concrete subclass declares the arrays to save as fields, marking the
     per-iteration ones with `field`'s ``samples`` axis, and implements
-    `from_state`; `run_mcmc` stacks one item per iteration. See `BurninTrace`
-    and `MainTrace` for the pattern.
+    `from_state`; `run_mcmc` stacks one item per iteration, then calls
+    `finalize` on the complete trace. See `BurninTrace` and `MainTrace` for the
+    pattern.
     """
 
     @classmethod
@@ -57,7 +62,12 @@ class Trace(Module):
     def from_state(cls: type[TraceT], state: State) -> TraceT:
         """Build a single-item trace from an MCMC state."""
 
+    def finalize(self: TraceT) -> TraceT:
+        """Post-process the complete trace, by default a no-op."""
+        return self
 
+
+@serializable
 class BurninTrace(Trace):
     """MCMC trace with only diagnostic values."""
 
@@ -133,7 +143,7 @@ class BurninTrace(Trace):
             mesh=state.config.mesh,
             error_cov_inv=state.error_cov_inv.value,
             leaf_prior_cov_inv=state.forest.leaf_prior_cov_inv.value,
-            theta=state.forest.theta,
+            theta=state.forest.sparsity.theta,
             grow_prop_count=state.forest.grow_prop_count,
             grow_acc_count=state.forest.grow_acc_count,
             prune_prop_count=state.forest.prune_prop_count,
@@ -143,6 +153,15 @@ class BurninTrace(Trace):
         )
 
 
+@serializable
+class VarprobInState(Module):
+    """Marks a constant `MainTrace.varprob`, not saved in the trace.
+
+    Compute it from `bartz.mcmcstep.Sparsity.log_s` in the MCMC state instead.
+    """
+
+
+@serializable
 class MainTrace(BurninTrace):
     """MCMC trace with trees and diagnostic values."""
 
@@ -150,7 +169,7 @@ class MainTrace(BurninTrace):
         Float[Array, '*chains_and_samples num_trees tree_size']
         | Float[Array, '*chains_and_samples num_trees k tree_size']
     ) = field(chains=CHAIN_AXIS, samples=0)
-    """The leaf values, in units of `leaf_unit`."""
+    """The leaf values, in units of `leaf_unit`, zero on nodes that are not leaves."""
 
     var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2'] = field(
         chains=CHAIN_AXIS, samples=0
@@ -169,21 +188,25 @@ class MainTrace(BurninTrace):
     """The storage unit of the leaf values. Predictions are
     ``offset + leaf_unit * (sum of leaf values over trees)``."""
 
-    varprob: Float32[Array, '*chains_and_samples p'] | None = field(
+    varprob: Float32[Array, '*chains_and_samples p'] | VarprobInState | None = field(
         chains=CHAIN_AXIS, samples=0
     )
     """The probability of choosing each variable for a decision rule,
-    normalized over variables, or `None` when variable selection is off."""
+    normalized over variables, `None` when variable selection is off, or
+    `VarprobInState` when it is constant."""
 
     @classmethod
     def from_state(cls, state: State) -> 'MainTrace':
         """Create a single-item main trace from a MCMC state."""
         # compute varprob
-        log_s = state.forest.log_s
+        sparsity = state.forest.sparsity
+        log_s = sparsity.log_s
         if log_s is None:
             varprob = None
+        elif sparsity.theta is None:
+            varprob = VarprobInState()
         else:
-            chain_axis = chain_vmap_axes(state.forest).log_s
+            chain_axis = chain_vmap_axes(state.forest).sparsity.log_s
             p_axis = chainful_axis(0, chain_axis)  # (p,)
             where = state.forest.max_split.astype(bool)
             if chain_axis is not None:
@@ -200,7 +223,18 @@ class MainTrace(BurninTrace):
             **vars(BurninTrace.from_state(state)),
         )
 
+    @jit(donate_argnums=0)
+    def finalize(self) -> 'MainTrace':
+        """Zero the stale values on nodes that are not leaves, to make the trace compressible."""
+        is_leaf = jnp.vectorize(
+            partial(is_actual_leaf, add_bottom_level=True), signature='(h)->(t)'
+        )(self.split_tree)
+        if self.leaf_tree.ndim > is_leaf.ndim:  # multivariate, (..., k, tree_size)
+            is_leaf = is_leaf[..., None, :]
+        return replace(self, leaf_tree=jnp.where(is_leaf, self.leaf_tree, 0))
 
+
+@serializable
 class MainTraceWithTrainPred(MainTrace):
     """Main trace that also stores the latent predictions at the training points.
 
@@ -226,5 +260,5 @@ class MainTraceWithTrainPred(MainTrace):
             ref = state.z
         else:
             ref = jnp.broadcast_to(state.y, resid.shape)
-            ref = ref.at[..., state.binary_indices, :].set(state.z)
+            ref = ref.at[..., state.binary_indices, :].set(state.z, unique_indices=True)
         return cls(train_pred=ref - resid, **vars(MainTrace.from_state(state)))

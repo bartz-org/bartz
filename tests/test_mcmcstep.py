@@ -119,7 +119,9 @@ from bartz.mcmcstep._step import (
     _blocked_mass_tree,
     _compute_likelihood_ratio_mv,
     _compute_likelihood_ratio_uv,
+    _logdet_from_chol,
     _precompute_leaf_terms_mv,
+    _precompute_leaf_terms_mv_het,
     _precompute_leaf_terms_uv,
     _precompute_likelihood_terms_mv,
     _precompute_likelihood_terms_uv,
@@ -2325,6 +2327,105 @@ def test_chol_with_gersh_disparate_scales() -> None:
     )
 
 
+def ar1_corr(k: int, rho: float) -> Float[numpy.ndarray, '{k} {k}']:
+    """Correlation matrix of an AR(1) process, strongly correlated for rho near 1."""
+    i = numpy.arange(k)
+    return rho ** numpy.abs(i[:, None] - i[None, :])
+
+
+@pytest.mark.parametrize('inverse', [False, True])
+def test_chol_with_gersh_correlated(inverse: bool) -> None:
+    """Check strong correlations do not trigger the stabilizing shift.
+
+    The shift is proportional to the largest eigenvalue, so if applied to a
+    non-singular matrix it perturbs the weakest directions by a relative
+    ``shift / lambda_min``, i.e., proportionally to the condition number.
+    """
+    mat = ar1_corr(20, 0.99)
+    if inverse:
+        mat = numpy.linalg.inv(mat)
+    scales = numpy.geomspace(1e-3, 1e3, 20)
+    mat = (mat * numpy.outer(scales, scales)).astype(numpy.float32)
+
+    L = numpy.asarray(chol_with_gersh(jnp.asarray(mat)), numpy.float64)
+    Linv = numpy.linalg.inv(L)
+    whitened = Linv @ mat.astype(numpy.float64) @ Linv.T
+    assert_close_matrices(whitened, numpy.eye(20), rtol=1e-3)
+
+
+def test_chol_with_gersh_singular() -> None:
+    """Check a singular matrix is stabilized to a finite factor."""
+    mat = jnp.ones((5, 5))
+    L = chol_with_gersh(mat)
+    assert jnp.all(jnp.isfinite(L))
+    assert_close_matrices(L @ L.T, mat, rtol=1e-4)
+
+
+@jit
+def full_shift_cholesky(
+    mat: Float32[Array, '*batch k k'],
+) -> Float32[Array, '*batch k k']:
+    """Compute chol(mat) with the full Gershgorin stabilization, a reference for robustness."""
+    d = jnp.sqrt(jnp.diagonal(mat, axis1=-2, axis2=-1))
+    corr = mat / (d[..., :, None] * d[..., None, :])
+    *_, k, _ = mat.shape
+    rho = jnp.max(jnp.sum(jnp.abs(corr), axis=-1), axis=-1)
+    shift = k * rho * jnp.finfo(corr.dtype).eps
+    corr += shift[..., None, None] * jnp.eye(k)
+    return d[..., :, None] * jnp.linalg.cholesky(corr)
+
+
+@pytest.mark.parametrize('k', [2, 3, 5])
+def test_chol_with_gersh_near_singular(keys: split, k: int) -> None:
+    """Check the factorization succeeds wherever the full stabilization succeeds.
+
+    The matrices are singular or slightly indefinite at the level of the
+    stabilization, where reducing the stabilization based on an estimate of
+    the smallest eigenvalue is most likely to break the factorization.
+    """
+    n = 10_000
+
+    # generate random ~rotations
+    Q, _ = jnp.linalg.qr(random.normal(keys.pop(), (n, k, k)))
+
+    # generate random spectra, with a purposely chosen small eigenvalue each
+    eigvals = jnp.exp(random.uniform(keys.pop(), (n, k), minval=-3, maxval=3))
+    eps = jnp.finfo(jnp.float32).eps
+    smallest = random.uniform(keys.pop(), (n,), minval=-1, maxval=1) * k**2 * eps
+    eigvals = eigvals.at[:, 0].set(smallest)
+
+    # generate random row/column scales
+    scales = jnp.exp(random.uniform(keys.pop(), (n, k), minval=-10, maxval=10))
+
+    # combine everything into random matrices
+    mat = (Q * eigvals[:, None, :]) @ Q.mT * scales[:, :, None] * scales[:, None, :]
+
+    # check that if `full_shift_cholesky` succeeds, then also `chol_with_gersh` does
+    full_ok = jnp.all(jnp.isfinite(full_shift_cholesky(mat)), axis=(-2, -1))
+    ok = jnp.all(jnp.isfinite(chol_with_gersh(mat)), axis=(-2, -1))
+    assert jnp.any(~full_ok)  # the test cases are hard enough
+    assert not jnp.any(full_ok & ~ok)
+
+
+def test_chol_with_gersh_degenerate() -> None:
+    """Check infinite precisions do not produce nan, also in large batches.
+
+    On cpu, min/max reductions of 4096 or more elements drop nan (see
+    https://github.com/jax-ml/jax/issues/41335), so a stabilization that
+    relies on nan propagating through a reduction may break only in large
+    batches.
+    """
+    mats = jnp.stack(
+        [
+            jnp.diag(jnp.array([jnp.inf, jnp.inf, 2.0])),
+            jnp.array([[jnp.inf, 0.0, 0.0], [0.0, 2.0, 1.0], [0.0, 1.0, 3.0]]),
+        ]
+    )
+    for batch in ((), (5_000,)):
+        L = chol_with_gersh(jnp.broadcast_to(mats, (*batch, *mats.shape)))
+        assert not jnp.any(jnp.isnan(L))
+
+
 class TestWishart:
     """Test the basic properties of the wishart sampler output."""
 
@@ -2413,9 +2514,72 @@ class TestWishart:
         test = ks_1samp(t, chi2(df).cdf)
         assert test.pvalue > 0.01
 
+    def test_wishart_dist_correlated(self, keys: split) -> None:
+        """Check the Wishart sampler is unbiased in the weakest direction of a correlated scale.
+
+        The sampled precision is most sensitive to errors in the direction of
+        the smallest eigenvalue of `scale_inv`.
+        """
+        k = 20
+        df = 5000.0
+        scale_inv = ar1_corr(k, 0.99).astype(numpy.float32)
+
+        scale = numpy.linalg.inv(scale_inv.astype(numpy.float64))
+        _, eigvecs = numpy.linalg.eigh(scale_inv.astype(numpy.float64))
+        a = eigvecs[:, 0]
+
+        sampler = jit(vmap(_sample_wishart_bartlett, in_axes=(0, None, None)))
+        W = sampler(keys.pop(1000), df, jnp.asarray(scale_inv))
+        W = numpy.asarray(W, numpy.float64)
+        t = numpy.einsum('ijk,j,k->i', W, a, a) / (a @ scale @ a)
+
+        test = ks_1samp(t, chi2(df).cdf)
+        assert test.pvalue > 0.001
+
 
 class TestPrecomputeTerms:
     """Test _precompute_likelihood_terms_mv and _precompute_leaf_terms_mv correctness and stability."""
+
+    @pytest.mark.parametrize('het', [False, True])
+    def test_leaf_terms_correlated(self, keys: split, het: bool) -> None:
+        """Check the posterior precision factor is accurate with strongly correlated errors.
+
+        With per-component error scales, these are nearly proportional, the
+        case which keeps the correlation of the errors.
+        """
+        k = 20
+        error_cov_inv = numpy.linalg.inv(ar1_corr(k, 0.99)).astype(numpy.float32)
+        leaf_prior_cov_inv = numpy.diag(numpy.full(k, 50.0, numpy.float32))
+        counts = numpy.array([0, 1, 10, 100, 1000, 5000, 20000, 50000], numpy.float32)
+
+        if het:
+            s = numpy.exp(0.01 * random.normal(keys.pop(), (k, 100)))
+            W = numpy.asarray(s @ s.T, numpy.float32) / 100  # (k, k)
+            prec = counts[:, None, None] * W  # (tree_size, k, k)
+            prelf = _precompute_leaf_terms_mv_het(
+                keys.pop(),
+                jnp.moveaxis(prec, 0, -1)[None],
+                jnp.asarray(error_cov_inv),
+                jnp.asarray(leaf_prior_cov_inv),
+            )
+            chol = jnp.moveaxis(prelf.mean_factor.squeeze(0), -1, 0)
+            logdet = _logdet_from_chol(chol)
+            lik = error_cov_inv.astype(numpy.float64) * prec
+        else:
+            prelf = _precompute_leaf_terms_mv(
+                keys.pop(),
+                jnp.asarray(counts)[None],
+                jnp.asarray(error_cov_inv),
+                jnp.asarray(leaf_prior_cov_inv),
+            )
+            logdet = prelf.logdet_prec.squeeze(0)
+            lik = counts[:, None, None] * error_cov_inv.astype(numpy.float64)
+
+        # the log determinant enters the log likelihood additively, so compare
+        # the absolute error
+        _, expected = numpy.linalg.slogdet(leaf_prior_cov_inv + lik)
+        logdet = numpy.asarray(logdet, numpy.float64)
+        assert_close_matrices(logdet, expected, atol=1e-3, ord=numpy.inf)
 
     @pytest.fixture(params=[1, 3])
     def k(self, request: FixtureRequest) -> int:

@@ -43,14 +43,21 @@ import jax.numpy as jnp
 from equinox import Module, error_if, field, tree_at
 from jax import Device, debug_nans, device_put, lax, make_mesh, random, tree, vmap
 from jax.nn import softmax
-from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import ndtr, ndtri
 from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Real, Shaped, UInt
 from numpy import ndarray
 
-from bartz._jaxext import equal_shards, is_key, jit, jit_active, project, split
+from bartz._jaxext import (
+    equal_shards,
+    is_key,
+    jit,
+    jit_active,
+    project,
+    solve_triangular,
+    split,
+)
 from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.grove import (
     TreeHeaps,

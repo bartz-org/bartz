@@ -27,7 +27,7 @@
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
-from functools import partial, wraps
+from functools import partial, reduce, wraps
 from typing import Literal, NamedTuple, TypedDict, TypeVar, cast
 from warnings import warn
 
@@ -36,7 +36,6 @@ import numpy
 from equinox import error_if, filter_jit
 from jax import NamedSharding, device_put, lax, make_mesh, random, shard_map, tree, vmap
 from jax import numpy as jnp
-from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.typing import DTypeLike
 from jaxtyping import (
@@ -56,12 +55,14 @@ from numpy import ndarray
 
 from bartz._jaxext import (
     Module,
+    cholesky,
     field,
     float32_matmuls,
     jaxtyping_disabled,
     jit,
     jit_active,
     minimal_unsigned_dtype,
+    solve_triangular,
 )
 from bartz._npz import serializable
 from bartz.grove import tree_depths
@@ -1342,9 +1343,7 @@ def compute_leaf_unit(
     return jnp.where(jnp.isfinite(leaf_unit) & (leaf_unit > 0), leaf_unit, 1.0)
 
 
-def round_to_pow2(
-    x: Float32[Array, ''] | Float32[Array, ' k'],
-) -> Float32[Array, ''] | Float32[Array, ' k']:
+def round_to_pow2(x: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
     """Round to the nearest power of two."""
     # note: don't use exp2, not exact. `2 ** x` checked exact on cpu & cuda.
     return 2 ** jnp.round(jnp.log2(x))
@@ -1923,7 +1922,7 @@ def get_axis_size(mesh: Mesh | None, axis_name: str) -> int:
 def chol_with_gersh(
     mat: Float32[Array, '*batch_shape k k'], absolute_eps: bool = False
 ) -> Float32[Array, '*batch_shape k k']:
-    """Cholesky with Gershgorin stabilization, supports batching."""
+    """Cholesky with Gershgorin stabilization if near singular, supports batching."""
     return _chol_with_gersh_impl(mat, absolute_eps)
 
 
@@ -1931,26 +1930,76 @@ def chol_with_gersh(
 def _chol_with_gersh_impl(
     mat: Float32[Array, '*batch_shape k k'], absolute_eps: bool
 ) -> Float32[Array, '*batch_shape k k']:
-    # standardize to unit diagonal first, so the Gershgorin shift is relative to
-    # each component's scale instead of a single absolute value set by the
+    # standardize to ~unit diagonal first, so the Gershgorin shift is relative
+    # to each component's scale instead of a single absolute value set by the
     # largest one (which would swamp components with much smaller variance, e.g.
     # mixing a heavily-scaled continuous outcome with O(1) binary ones).
     # degenerate (non-positive or non-finite, e.g. infinite precision from a
     # constant outcome) diagonals fall back to the largest finite scale, which
-    # keeps a diagonal matrix bit-identical to an unstandardized stabilization
-    # and leaves an infinite diagonal infinite (pinning that leaf to zero)
+    # leaves an infinite diagonal infinite (pinning that leaf to zero). The
+    # scales are powers of 2, so the scaling is exact, and a diagonal matrix
+    # gives the same factor as a plain Cholesky
     diag = jnp.diagonal(mat)
     finite_pos = jnp.isfinite(diag) & (diag > 0)
-    ref = jnp.max(jnp.where(finite_pos, diag, 0.0), initial=0.0)
-    scale = jnp.sqrt(jnp.where(finite_pos, diag, jnp.where(ref > 0, ref, 1.0)))
-    mat = mat / (scale[:, None] * scale[None, :])
-    rho = jnp.max(jnp.sum(jnp.abs(mat), axis=1), initial=0.0)
+    ref = reduce_last(jnp.where(finite_pos, diag, 0.0), lax.max, 0.0)
+    scale = jnp.where(finite_pos, diag, jnp.where(ref > 0, ref, 1.0))
+    scale, inv_scale = pow2_near_sqrt(scale)
+    mat = mat * inv_scale[:, None] * inv_scale[None, :]
+    rho = reduce_last(reduce_last(jnp.abs(mat), lax.add, 0.0), lax.max, 0.0)
     eps = jnp.finfo(mat.dtype).eps
-    u = mat.shape[0] * rho * eps
+    k, _ = mat.shape
+    u = k * rho * eps
     if absolute_eps:
         u += eps
-    mat = mat.at[jnp.diag_indices_from(mat)].add(u)
-    return scale[:, None] * jnp.linalg.cholesky(mat)
+
+    # the shift guarantees the factorization succeeds, but it biases the
+    # inverse by a relative u / lambda_min in the weakest direction, so it's
+    # used only if the factorization without has a pivot (squared diagonal
+    # entry of the factor) below u, i.e., smaller than the pivots that the
+    # shift guarantees, or fails (nan). Both factorizations are always done,
+    # stacked in a single batched call.
+    # select instead of u * eye, which would be nan off-diagonal if u = inf
+    shifted = jnp.where(jnp.eye(k, dtype=bool), mat + u, mat)
+    plain, shifted = cholesky(jnp.stack([mat, shifted]))
+    well_conditioned = reduce_last(
+        jnp.square(jnp.diagonal(plain)) >= u, lax.bitwise_and, True
+    )
+    L = jnp.where(well_conditioned, plain, shifted)
+    return scale[:, None] * L
+
+
+def pow2_near_sqrt(
+    x: Float32[Array, '*shape'],
+) -> tuple[Float32[Array, '*shape'], Float32[Array, '*shape']]:
+    """Return a power of 2 near the square root of finite `x` > 0, and its reciprocal."""
+    # with x = m 2^e, 1 <= m < 2, 2^ceil(e/2) is the power of 2 nearest to
+    # sqrt(x) (up to ties); reading e from the bits is much faster than log2.
+    # Subnormals have e = -127 in the bits, giving 2^-63, still normal.
+    assert x.dtype == jnp.float32
+    e = (lax.bitcast_convert_type(x, jnp.int32) >> 23) - 127
+    n = (e + 1) >> 1
+    pow2 = lax.bitcast_convert_type((n + 127) << 23, jnp.float32)
+    inv_pow2 = lax.bitcast_convert_type((127 - n) << 23, jnp.float32)
+    return pow2, inv_pow2
+
+
+# up to this axis length, reductions are faster unrolled; empty axes are left
+# to the library
+UNROLL_REDUCE_MAX_SIZE = 3
+
+
+def reduce_last(
+    x: Shaped[Array, '*shape n'],
+    op: Callable[[Array, Array], Array],
+    initial: bool | float,
+) -> Shaped[Array, '*shape']:
+    """Reduce the last axis with the binary operation `op`."""
+    *_, n = x.shape
+    if 0 < n <= UNROLL_REDUCE_MAX_SIZE:
+        return reduce(op, (x[..., i] for i in range(n)))
+    else:
+        init = jnp.asarray(initial, x.dtype)
+        return lax.reduce(x, init, op, (x.ndim - 1,))
 
 
 def inv_via_chol_with_gersh(

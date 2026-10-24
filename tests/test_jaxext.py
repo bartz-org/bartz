@@ -24,9 +24,11 @@
 
 """Test bartz._jaxext."""
 
+from collections.abc import Callable
 from contextlib import nullcontext
 from functools import partial
 from itertools import product
+from typing import Literal
 from warnings import catch_warnings, simplefilter
 
 import numpy
@@ -51,6 +53,9 @@ try:
 except ImportError:
     from jax.experimental import enable_x64  # ty: ignore[unresolved-import]
 from jax import numpy as jnp
+from jax.scipy.linalg import (
+    solve_triangular as library_solve_triangular,  # noqa: TID251
+)
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Float32, Key, Shaped
@@ -64,16 +69,19 @@ from scipy.stats import uniform as scipy_uniform
 
 from bartz._jaxext import (
     autobatch,
+    cholesky,
     equal_shards,
     get_default_devices,
     get_device_count,
     is_key,
     jit,
     sliced_map,
+    solve_triangular,
     split,
     truncated_normal_onesided,
     unique,
 )
+from bartz._jaxext._linalg import cholesky_unrolled, solve_triangular_unrolled
 from bartz._jaxext.random import loggamma, poisson
 from bartz._jaxext.random._poisson import NUM_TERMS, poisson_from_normal
 from bartz._jaxext.scipy.stats import invgamma
@@ -1036,3 +1044,64 @@ def test_equal_shards(equal: bool, replicated: bool) -> None:
     # check the shards are equal or different
     result = equal_shards(x, 'a', mesh=mesh, in_specs=spec)
     assert result.item() == equal
+
+
+def random_posdef(
+    key: Key[Array, ''], shape: tuple[int, ...], k: int
+) -> Float32[Array, '*shape k k']:
+    """Generate well-conditioned positive definite matrices."""
+    g = random.normal(key, (*shape, k, k))
+    return g @ g.mT / k + jnp.eye(k)
+
+
+@pytest.mark.parametrize('k', [1, 2, 3, 4, 5, 6])
+class TestLinalg:
+    """Test the unrolled Cholesky and triangular solve against the library."""
+
+    @pytest.mark.parametrize('func', [cholesky_unrolled, cholesky])
+    def test_cholesky(self, keys: split, k: int, func: Callable) -> None:
+        """Check the factor matches the library one."""
+        a = random_posdef(keys.pop(), (3, 2), k)
+        actual = func(a)
+        desired = jnp.linalg.cholesky(a)  # noqa: TID251
+        assert_close_matrices(actual, desired, rtol=1e-6, reduce_rank=True)
+
+    def test_cholesky_not_posdef(self, keys: split, k: int) -> None:
+        """Check non positive definite matrices give nan like the library."""
+        a = random_posdef(keys.pop(), (3,), k)
+        a = a.at[1, -1, -1].set(-1.0)
+        actual = cholesky_unrolled(a)
+        desired = jnp.linalg.cholesky(a)  # noqa: TID251
+        assert_array_equal(jnp.isnan(actual), jnp.isnan(desired))
+        assert jnp.any(jnp.isnan(actual[1, :, :]))
+
+    @pytest.mark.parametrize('func', [solve_triangular_unrolled, solve_triangular])
+    @pytest.mark.parametrize('lower', [False, True])
+    @pytest.mark.parametrize('trans', [0, 1, 'N', 'T'])
+    def test_solve_triangular(
+        self,
+        keys: split,
+        k: int,
+        func: Callable,
+        lower: bool,
+        trans: Literal[0, 1, 'N', 'T'],
+    ) -> None:
+        """Check the solution matches the library one, with broadcast batches."""
+        a = cholesky_unrolled(random_posdef(keys.pop(), (3, 1), k))
+        if not lower:
+            a = a.mT
+        b = random.normal(keys.pop(), (1, 2, k, 5))
+        actual = func(a, b, trans=trans, lower=lower)
+        # WORKAROUND(jax<0.10.0): the library does not broadcast batch axes
+        a = jnp.broadcast_to(a, (3, 2, k, k))
+        b = jnp.broadcast_to(b, (3, 2, k, 5))
+        desired = library_solve_triangular(a, b, trans=trans, lower=lower)
+        assert_close_matrices(actual, desired, rtol=1e-6, reduce_rank=True)
+
+
+def test_linalg_empty() -> None:
+    """Check the wrappers support empty matrices."""
+    a = jnp.zeros((3, 0, 0))
+    assert cholesky(a).shape == (3, 0, 0)
+    b = jnp.zeros((3, 0, 2))
+    assert solve_triangular(a, b, lower=True, trans='T').shape == (3, 0, 2)

@@ -1947,7 +1947,8 @@ def _chol_with_gersh_impl(
     mat = mat * inv_scale[:, None] * inv_scale[None, :]
     rho = reduce_last(reduce_last(jnp.abs(mat), lax.add, 0.0), lax.max, 0.0)
     eps = jnp.finfo(mat.dtype).eps
-    u = mat.shape[0] * rho * eps
+    k, _ = mat.shape
+    u = k * rho * eps
     if absolute_eps:
         u += eps
 
@@ -1957,7 +1958,8 @@ def _chol_with_gersh_impl(
     # entry of the factor) below u, i.e., smaller than the pivots that the
     # shift guarantees, or fails (nan). Both factorizations are always done,
     # stacked in a single batched call.
-    shifted = mat.at[jnp.diag_indices_from(mat)].add(u)
+    # select instead of u * eye, which would be nan off-diagonal if u = inf
+    shifted = jnp.where(jnp.eye(k, dtype=bool), mat + u, mat)
     plain, shifted = cholesky(jnp.stack([mat, shifted]))
     well_conditioned = reduce_last(
         jnp.square(jnp.diagonal(plain)) >= u, lax.bitwise_and, True

@@ -36,7 +36,6 @@ import numpy
 from equinox import error_if, filter_jit
 from jax import NamedSharding, device_put, lax, make_mesh, random, shard_map, tree, vmap
 from jax import numpy as jnp
-from jax.scipy.linalg import solve_triangular
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.typing import DTypeLike
 from jaxtyping import (
@@ -56,12 +55,14 @@ from numpy import ndarray
 
 from bartz._jaxext import (
     Module,
+    cholesky,
     field,
     float32_matmuls,
     jaxtyping_disabled,
     jit,
     jit_active,
     minimal_unsigned_dtype,
+    solve_triangular,
 )
 from bartz._npz import serializable
 from bartz.grove import tree_depths
@@ -1957,7 +1958,7 @@ def _chol_with_gersh_impl(
     # shift guarantees, or fails (nan). Both factorizations are always done,
     # stacked in a single batched call.
     shifted = mat.at[jnp.diag_indices_from(mat)].add(u)
-    plain, shifted = jnp.linalg.cholesky(jnp.stack([mat, shifted]))
+    plain, shifted = cholesky(jnp.stack([mat, shifted]))
     well_conditioned = jnp.all(jnp.square(jnp.diagonal(plain)) >= u)
     L = jnp.where(well_conditioned, plain, shifted)
     return scale[:, None] * L

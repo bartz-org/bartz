@@ -40,7 +40,7 @@ from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Shaped, UInt8
 from scipy import stats
 from scipy.stats import ks_1samp, ks_2samp
 
-from bartz._jaxext import get_device_count, minimal_unsigned_dtype, split
+from bartz._jaxext import cholesky, get_device_count, minimal_unsigned_dtype, split
 from bartz.debug import (
     BARTTraceMeta,
     MinimalTrace,
@@ -744,7 +744,7 @@ class TestSampleWishart:
 def test_sample_leaves_covariance(keys: split) -> None:
     """Vector-valued leaves have the inverse of the prior precision as covariance."""
     prec = jnp.array([[2.0, 0.5], [0.5, 1.0]])
-    chol = jnp.linalg.cholesky(prec)
+    chol = cholesky(prec)
     leaves = sample_leaves(keys.pop(), (100_000, 2, 4), chol)
     flat = jnp.moveaxis(leaves, 1, -1).reshape(-1, 2)
     # cov = prec^-1 = (L L^T)^-1, so L^T cov L = I

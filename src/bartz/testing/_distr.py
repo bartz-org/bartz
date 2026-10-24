@@ -33,7 +33,7 @@ from jax import random
 from jax.scipy.special import ndtr, ndtri
 from jaxtyping import Array, Float, Integer, Key, UInt
 
-from bartz._jaxext import minimal_unsigned_dtype, split
+from bartz._jaxext import cholesky, minimal_unsigned_dtype, split
 from bartz._jaxext.random import loggamma
 
 # The DGP identities documented in `Params` hold for arbitrary families given
@@ -474,7 +474,7 @@ class Factor(CorrDistr):
         u = random.normal(key, (k, self.rank))
         u /= jnp.linalg.norm(u, axis=1, keepdims=True)
         corr = jnp.where(jnp.eye(k, dtype=bool), 1.0, tau * (u @ u.T))
-        return jnp.linalg.cholesky(corr)
+        return cholesky(corr)
 
     def offdiag_var(self, k: int) -> Float[Array, ''] | float:  # noqa: ARG002
         """``E[R_cc' ** 2] = tau ** 2 / rank``."""

@@ -28,10 +28,9 @@ from dataclasses import fields, replace
 
 from jax import lax, random
 from jax import numpy as jnp
-from jax.scipy.linalg import solve_triangular
 from jaxtyping import Array, Float, Float32, Key, Shaped
 
-from bartz._jaxext import field, jit, split
+from bartz._jaxext import field, jit, solve_triangular, split
 from bartz.debug._prior import (
     MinPointsCriterion,
     sample_diag_wishart,

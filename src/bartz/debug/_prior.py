@@ -34,10 +34,9 @@ from typing import TypeVar
 from equinox import Module, error_if
 from jax import eval_shape, lax, random, tree, vmap
 from jax import numpy as jnp
-from jax.scipy.linalg import solve_triangular
 from jaxtyping import Array, Bool, Float32, Int32, Key, PyTree, Shaped, UInt
 
-from bartz._jaxext import jit, minimal_unsigned_dtype
+from bartz._jaxext import jit, minimal_unsigned_dtype, solve_triangular
 from bartz._jaxext import split as split_key
 from bartz._jaxext.random import loggamma
 from bartz.grove import is_actual_leaf, is_leaves_parent, traverse_forest

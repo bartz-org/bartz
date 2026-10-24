@@ -33,7 +33,6 @@ from equinox import AbstractVar
 from jax import lax, named_call, random, vmap
 from jax import numpy as jnp
 from jax.nn import log_softmax
-from jax.scipy.linalg import solve_triangular
 from jax.scipy.special import logsumexp
 from jaxtyping import (
     Array,
@@ -55,6 +54,7 @@ from bartz._jaxext import (
     jit,
     minimal_unsigned_dtype,
     sliced_map,
+    solve_triangular,
     split,
     truncated_normal_onesided,
     vmap_nodoc,
@@ -904,6 +904,16 @@ def compute_B(
     return jnp.einsum('ab,ab...->a...', error_cov_inv, resid)
 
 
+# keep the leaf axis trailing, faster for the unrolled matvec
+@partial(vmap_nodoc, in_axes=-1, out_axes=-1)
+def solve_leaf(
+    L: Float32[Array, 'k k'], b: Float32[Array, ' k']
+) -> Float32[Array, ' k']:
+    """Compute ``(L L^T)^-1 b``, the leaf posterior mean from its score."""
+    y = solve_triangular(L, b[:, None], lower=True)
+    return solve_triangular(L, y, lower=True, trans='T').squeeze(-1)
+
+
 def _precompute_leaf_terms_uv(
     key: Key[Array, ''],
     prec_trees: Float32[Array, 'num_trees tree_size']
@@ -1397,11 +1407,7 @@ def accept_move_and_sample_leaves(
     if at.error_cov_inv is not None:
         # multivariate w/ per-component error scales
         b_tree = compute_B(at.error_cov_inv, resid_tree)  # (k, 2**d)
-        l_lead = jnp.moveaxis(pt.prelf.mean_factor, -1, 0)  # (2**d, k, k)
-        b_lead = b_tree.T[:, :, None]  # (2**d, k, 1)
-        y = solve_triangular(l_lead, b_lead, lower=True)
-        mu = solve_triangular(l_lead, y, lower=True, trans='T').squeeze(-1)
-        mean_post = mu.T  # (k, 2**d)
+        mean_post = solve_leaf(pt.prelf.mean_factor, b_tree)  # (k, 2**d)
     elif resid.ndim > 1:
         # multivariate homoskedastic or scalar error scales
         mean_post = jnp.einsum('kil,kl->il', pt.prelf.mean_factor, resid_tree)

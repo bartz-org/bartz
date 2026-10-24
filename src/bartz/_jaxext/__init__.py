@@ -45,3 +45,4 @@ from bartz._jaxext._jaxext import (
     vmap_nodoc,
 )
 from bartz._jaxext._jit import jit
+from bartz._jaxext._linalg import cholesky, solve_triangular

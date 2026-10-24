@@ -59,6 +59,10 @@ def solve_triangular(
     if 0 < k <= UNROLL_MAX_SIZE:
         return solve_triangular_unrolled(a, b, trans=trans, lower=lower)
     else:
+        # WORKAROUND(jax<0.10.0): the library does not broadcast batch axes
+        batch = jnp.broadcast_shapes(a.shape[:-2], b.shape[:-2])
+        a = jnp.broadcast_to(a, (*batch, *a.shape[-2:]))
+        b = jnp.broadcast_to(b, (*batch, *b.shape[-2:]))
         return library_solve_triangular(a, b, trans=trans, lower=lower)
 
 

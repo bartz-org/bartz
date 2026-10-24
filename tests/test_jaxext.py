@@ -1092,6 +1092,9 @@ class TestLinalg:
             a = a.mT
         b = random.normal(keys.pop(), (1, 2, k, 5))
         actual = func(a, b, trans=trans, lower=lower)
+        # WORKAROUND(jax<0.10.0): the library does not broadcast batch axes
+        a = jnp.broadcast_to(a, (3, 2, k, k))
+        b = jnp.broadcast_to(b, (3, 2, k, 5))
         desired = library_solve_triangular(a, b, trans=trans, lower=lower)
         assert_close_matrices(actual, desired, rtol=1e-6, reduce_rank=True)
 

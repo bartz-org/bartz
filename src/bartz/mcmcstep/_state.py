@@ -27,7 +27,7 @@
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
-from functools import partial, wraps
+from functools import partial, reduce, wraps
 from typing import Literal, NamedTuple, TypedDict, TypeVar, cast
 from warnings import warn
 
@@ -1941,11 +1941,11 @@ def _chol_with_gersh_impl(
     # gives the same factor as a plain Cholesky
     diag = jnp.diagonal(mat)
     finite_pos = jnp.isfinite(diag) & (diag > 0)
-    ref = jnp.max(jnp.where(finite_pos, diag, 0.0), initial=0.0)
+    ref = reduce_last(jnp.where(finite_pos, diag, 0.0), lax.max, 0.0)
     scale = jnp.where(finite_pos, diag, jnp.where(ref > 0, ref, 1.0))
-    scale = round_to_pow2(jnp.sqrt(scale))
-    mat = mat / scale[:, None] / scale[None, :]
-    rho = jnp.max(jnp.sum(jnp.abs(mat), axis=1), initial=0.0)
+    scale, inv_scale = pow2_near_sqrt(scale)
+    mat = mat * inv_scale[:, None] * inv_scale[None, :]
+    rho = reduce_last(reduce_last(jnp.abs(mat), lax.add, 0.0), lax.max, 0.0)
     eps = jnp.finfo(mat.dtype).eps
     u = mat.shape[0] * rho * eps
     if absolute_eps:
@@ -1959,9 +1959,45 @@ def _chol_with_gersh_impl(
     # stacked in a single batched call.
     shifted = mat.at[jnp.diag_indices_from(mat)].add(u)
     plain, shifted = cholesky(jnp.stack([mat, shifted]))
-    well_conditioned = jnp.all(jnp.square(jnp.diagonal(plain)) >= u)
+    well_conditioned = reduce_last(
+        jnp.square(jnp.diagonal(plain)) >= u, lax.bitwise_and, True
+    )
     L = jnp.where(well_conditioned, plain, shifted)
     return scale[:, None] * L
+
+
+def pow2_near_sqrt(
+    x: Float32[Array, '*shape'],
+) -> tuple[Float32[Array, '*shape'], Float32[Array, '*shape']]:
+    """Return a power of 2 near the square root of finite `x` > 0, and its reciprocal."""
+    # with x = m 2^e, 1 <= m < 2, 2^ceil(e/2) is the power of 2 nearest to
+    # sqrt(x) (up to ties); reading e from the bits is much faster than log2.
+    # Subnormals have e = -127 in the bits, giving 2^-63, still normal.
+    assert x.dtype == jnp.float32
+    e = (lax.bitcast_convert_type(x, jnp.int32) >> 23) - 127
+    n = (e + 1) >> 1
+    pow2 = lax.bitcast_convert_type((n + 127) << 23, jnp.float32)
+    inv_pow2 = lax.bitcast_convert_type((127 - n) << 23, jnp.float32)
+    return pow2, inv_pow2
+
+
+# up to this axis length, reductions are faster unrolled; empty axes are left
+# to the library
+UNROLL_REDUCE_MAX_SIZE = 3
+
+
+def reduce_last(
+    x: Shaped[Array, '*shape n'],
+    op: Callable[[Array, Array], Array],
+    initial: bool | float,
+) -> Shaped[Array, '*shape']:
+    """Reduce the last axis with the binary operation `op`."""
+    *_, n = x.shape
+    if 0 < n <= UNROLL_REDUCE_MAX_SIZE:
+        return reduce(op, (x[..., i] for i in range(n)))
+    else:
+        init = jnp.asarray(initial, x.dtype)
+        return lax.reduce(x, init, op, (x.ndim - 1,))
 
 
 def inv_via_chol_with_gersh(

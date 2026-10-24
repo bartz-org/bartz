@@ -139,6 +139,7 @@ from bartz.mcmcstep._state import (
     chol_with_gersh,
     inv_via_chol_with_gersh,
     outcome_target,
+    pow2_near_sqrt,
     round_to_pow2,
     search_divisor,
 )
@@ -3045,11 +3046,47 @@ def test_chol_with_gersh_disparate_scales() -> None:
     )
 
 
-def test_chol_with_gersh_diagonal_exact(keys: split) -> None:
-    """Check the standardization is exact, using a diagonal matrix."""
-    diag = jnp.exp(random.uniform(keys.pop(), (100, 5), minval=-40, maxval=40))
-    mat = diag[..., :, None] * jnp.eye(5)
+@pytest.mark.parametrize('k', [3, 5])
+def test_chol_with_gersh_diagonal_exact(keys: split, k: int) -> None:
+    """Check the standardization is exact, using a diagonal matrix.
+
+    Exact powers of 2 are included because they are the ties in rounding the
+    scales to powers of 2.
+    """
+    diag = jnp.exp(random.uniform(keys.pop(), (100, k), minval=-40, maxval=40))
+    pow2 = 2.0 ** random.randint(keys.pop(), (100, k), -126, 128)
+    diag = jnp.concatenate([diag, pow2])
+    mat = diag[..., :, None] * jnp.eye(k)
     assert_array_equal(chol_with_gersh(mat), cholesky(mat))
+
+
+def test_pow2_near_sqrt() -> None:
+    """Check the power of 2 is the nearest to the square root, with exact inverse."""
+    finfo = numpy.finfo(numpy.float32)
+    x = numpy.geomspace(finfo.tiny, finfo.max, 100_000, dtype=numpy.float32)
+    pow2 = numpy.ldexp(numpy.float32(1), numpy.arange(-126, 128))
+    x = numpy.concatenate(
+        [x, pow2, numpy.nextafter(pow2, 0), numpy.nextafter(pow2, numpy.inf)]
+    )
+    x = x[x >= finfo.tiny]
+
+    p, inv = pow2_near_sqrt(jnp.asarray(x))
+    p = numpy.asarray(p, numpy.float64)
+    inv = numpy.asarray(inv, numpy.float64)
+
+    mantissa, _ = numpy.frexp(p)
+    assert_array_equal(mantissa, numpy.full_like(mantissa, 0.5))
+    assert_array_equal(p * inv, numpy.ones_like(p))
+    distance = numpy.abs(numpy.log2(p) - 0.5 * numpy.log2(x.astype(numpy.float64)))
+    assert numpy.all(distance <= 0.5)
+
+
+def test_pow2_near_sqrt_subnormal() -> None:
+    """Check subnormals, if not already flushed to zero, give finite scales."""
+    x = jnp.asarray(numpy.array([1e-40, 1e-45], numpy.float32))
+    p, inv = pow2_near_sqrt(x)
+    assert jnp.all(jnp.isfinite(p) & (p > 0))
+    assert_array_equal(p * inv, jnp.ones_like(p))
 
 
 def ar1_corr(k: int, rho: float) -> Float[numpy.ndarray, '{k} {k}']:

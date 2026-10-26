@@ -24,10 +24,10 @@
 
 """Progress-reporting callbacks for `run_mcmc`."""
 
-import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial, wraps
+from secrets import randbits
 from typing import Any, Literal, TypeVar
 
 import numpy
@@ -428,7 +428,7 @@ class TqdmCallback(Callback):
         _close_stale_bars()  # clean up after any previous run that was interrupted
         # random, to avoid clashes with the ids of callbacks saved in other
         # processes
-        bar_id = secrets.randbits(31)
+        bar_id = randbits(31)
         _TQDM_REGISTRY[bar_id] = _TqdmEntry(tqdm_kwargs)
 
         callback = cls(

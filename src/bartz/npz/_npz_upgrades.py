@@ -146,7 +146,8 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
 # json/numpy, never bartz classes. Fill new fields with the value that
 # reproduces the old behavior, not the current default; if that is impossible,
 # convert to the prediction-only form, with `None` in all the fields not needed
-# to predict.
+# to predict; in cases that don't fall in the prediction-only paradigm, decide
+# a fill strategy which may not be `None` if the field is not already optional.
 UPGRADES: tuple[Callable[[Skeleton, Arrays], tuple[Skeleton, Arrays]], ...] = (
     upgrade_bartz_0_13_bcf,
 )

@@ -342,10 +342,9 @@ class PrintCallback(Callback):
             )
             # logging can't do in-line printing so we use print
 
-        lax.cond(
-            report_cond,
-            line_report_branch,
-            lambda: lax.cond(dot_cond, just_dot_branch, lambda: None),
+        lax.switch(
+            2 * report_cond + dot_cond,  # switch clamps 3 to 2
+            (lambda: None, just_dot_branch, line_report_branch),
         )
 
         accumulator = accumulator.reset_if(report_cond)
@@ -471,17 +470,16 @@ class TqdmCallback(Callback):
             report_cond = (it % report_every == 0) | last
         advance_cond = (it == 1) | (it % self.update_every == 0) | last
 
+        def advance_branch() -> None:
+            debug.callback(_tqdm_update, bar_id, it, n_iters, None)
+
         def report_branch() -> None:
             report = accumulator.report(state)
             debug.callback(_tqdm_update, bar_id, it, n_iters, report)
 
-        def advance_branch() -> None:
-            debug.callback(_tqdm_update, bar_id, it, n_iters, None)
-
-        lax.cond(
-            report_cond,
-            report_branch,
-            lambda: lax.cond(advance_cond, advance_branch, lambda: None),
+        lax.switch(
+            2 * report_cond + advance_cond,  # switch clamps 3 to 2
+            (lambda: None, advance_branch, report_branch),
         )
         accumulator = accumulator.reset_if(report_cond)
 

@@ -92,7 +92,7 @@ def make_bart() -> tuple[Bart, Inputs]:
         n_save=2,
         n_burn=2,
         num_chains=2,
-        printevery=None,
+        pbar=False,  # the tqdm callback has a random bar id
         seed=keys.pop(),
     )
     return model, Inputs(x=np.asarray(x))

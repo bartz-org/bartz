@@ -629,8 +629,6 @@ def _tqdm_update(
     _tqdm_advance(bar_id, it, n_iters)
 
 
-@_convert_jax_arrays_in_args
-# convert all jax arrays in arguments, see _print_report for why
 def _tqdm_advance(bar_id: int, it: int, n_iters: int) -> None:
     """Advance the bar towards absolute position `it`, closing it at the end."""
     bar = _get_or_create_bar(bar_id, n_iters)
@@ -642,8 +640,6 @@ def _tqdm_advance(bar_id: int, it: int, n_iters: int) -> None:
         del _TQDM_REGISTRY[bar_id]
 
 
-@_convert_jax_arrays_in_args
-# convert all jax arrays in arguments, see _print_report for why
 def _tqdm_report(report: StatsReport, bar_id: int, n_iters: int) -> None:
     """Set the acceptance-statistics postfix of the bar."""
     bar = _get_or_create_bar(bar_id, n_iters)

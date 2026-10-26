@@ -461,26 +461,29 @@ class TqdmCallback(Callback):
 
         # The callbacks are unordered: `ordered=True` is unsupported with more
         # than one device, and we need this to work with chains sharded across
-        # devices. `_tqdm_advance` is therefore robust to out-of-order
-        # invocations.
-
-        # refresh the statistics first so they tend to be visible by the time
-        # the bar is advanced
+        # devices. `_tqdm_update` is therefore robust to out-of-order
+        # invocations, and does both the report and the advance in a single
+        # callback, so the last report can't arrive after the bar is closed.
         report_every = self.report_every
-        if report_every is not None:
+        if report_every is None:
+            report_cond = False
+        else:
             report_cond = (it % report_every == 0) | last
+        advance_cond = (it == 1) | (it % self.update_every == 0) | last
 
-            def report_branch() -> None:
-                debug.callback(_tqdm_report, accumulator.report(state), bar_id, n_iters)
+        def report_branch() -> None:
+            report = accumulator.report(state)
+            debug.callback(_tqdm_update, bar_id, it, n_iters, report)
 
-            lax.cond(report_cond, report_branch, lambda: None)
-            accumulator = accumulator.reset_if(report_cond)
+        def advance_branch() -> None:
+            debug.callback(_tqdm_update, bar_id, it, n_iters, None)
 
         lax.cond(
-            (it == 1) | (it % self.update_every == 0) | last,
-            lambda: debug.callback(_tqdm_advance, bar_id, it, n_iters),
-            lambda: None,
+            report_cond,
+            report_branch,
+            lambda: lax.cond(advance_cond, advance_branch, lambda: None),
         )
+        accumulator = accumulator.reset_if(report_cond)
 
         return state, replace(self, accumulator=accumulator)
 
@@ -615,6 +618,17 @@ def _get_or_create_bar(bar_id: int, n_iters: int) -> tqdm | None:
         _TQDM_REGISTRY[bar_id] = replace(entry, bar=bar)
         return bar
     return entry.bar
+
+
+@_convert_jax_arrays_in_args
+# convert all jax arrays in arguments, see _print_report for why
+def _tqdm_update(
+    bar_id: int, it: int, n_iters: int, report: StatsReport | None
+) -> None:
+    """Set the statistics postfix if `report` is given, then advance the bar."""
+    if report is not None:
+        _tqdm_report(report, bar_id, n_iters)
+    _tqdm_advance(bar_id, it, n_iters)
 
 
 @_convert_jax_arrays_in_args

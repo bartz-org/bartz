@@ -271,6 +271,8 @@ class TestRunMcmc:
         # the label survives the reports, which redraw the bar
         frames = [f for f in out.split('\r') if f.strip()]
         assert all(f.startswith('train ') for f in frames)
+        # the bar ends showing the stats of the last iteration
+        assert frames[-1].rstrip().endswith('/6]')
 
     def test_tqdm_callback_custom_desc(self) -> None:
         """A user-supplied ``desc`` overrides the default ``train`` label."""

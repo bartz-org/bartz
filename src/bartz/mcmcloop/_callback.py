@@ -35,7 +35,7 @@ from equinox import Module, field
 from jax import debug, eval_shape, lax, random, tree
 from jax import numpy as jnp
 from jax.scipy.special import logsumexp
-from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, Integer, PyTree, Shaped
+from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree
 from tqdm.auto import tqdm
 
 from bartz._typing import kwdict
@@ -277,27 +277,14 @@ class PrintCallback(Callback):
         --------
         >>> run_mcmc(key, state, ..., callback=PrintCallback.from_state(state, ...))
         """
-
-        def as_replicated_array_or_none(
-            val: int | Integer[Array, ''] | None,
-        ) -> Int32[Array, ''] | None:
-            if val is None:
-                return None
-            else:
-                return _replicate(jnp.int32(val), state.config.mesh)
-
-        accumulator = tree.map(
-            partial(_replicate, mesh=state.config.mesh),
-            StatsAccumulator.initial(
+        callback = cls(
+            dot_every=None if dot_every is None else jnp.int32(dot_every),
+            report_every=None if report_every is None else jnp.int32(report_every),
+            accumulator=StatsAccumulator.initial(
                 state, enabled=average and report_every is not None
             ),
         )
-
-        return cls(
-            as_replicated_array_or_none(dot_every),
-            as_replicated_array_or_none(report_every),
-            accumulator,
-        )
+        return tree.map(partial(_replicate, mesh=state.config.mesh), callback)
 
     def __call__(
         self,
@@ -442,24 +429,15 @@ class TqdmCallback(Callback):
         bar_id = secrets.randbits(31)
         _TQDM_REGISTRY[bar_id] = _TqdmEntry(tqdm_kwargs)
 
-        def as_replicated_array(
-            val: Shaped[ArrayLike, '*shape'],
-        ) -> Shaped[Array, '*shape']:
-            return _replicate(jnp.asarray(val), state.config.mesh)
-
-        return cls(
-            bar_id=as_replicated_array(jnp.int32(bar_id)),
-            update_every=as_replicated_array(jnp.int32(update_every)),
-            report_every=None
-            if report_every is None
-            else as_replicated_array(jnp.int32(report_every)),
-            accumulator=tree.map(
-                partial(_replicate, mesh=state.config.mesh),
-                StatsAccumulator.initial(
-                    state, enabled=average and report_every is not None
-                ),
+        callback = cls(
+            bar_id=jnp.int32(bar_id),
+            update_every=jnp.int32(update_every),
+            report_every=None if report_every is None else jnp.int32(report_every),
+            accumulator=StatsAccumulator.initial(
+                state, enabled=average and report_every is not None
             ),
         )
+        return tree.map(partial(_replicate, mesh=state.config.mesh), callback)
 
     def __call__(
         self,

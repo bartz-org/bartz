@@ -41,6 +41,7 @@ from enum import Enum
 from functools import cached_property
 from inspect import getsourcefile, getsourcelines, isclass, unwrap
 from os import getenv
+from typing import TypeVar
 
 from equinox import Module
 from sphinx.ext.autodoc._dynamic._preserve_defaults import update_default_value
@@ -254,6 +255,15 @@ typehints_use_rtype = False
 typehints_document_rtype = True
 always_use_bars_union = True
 typehints_defaults = 'comma'
+
+
+def typehints_formatter(annotation, config) -> str | None:  # noqa: ANN001, ARG001
+    """Render a TypeVar by name, instead of e.g. ``TypeVar(T, bound= type)``."""
+    if isinstance(annotation, TypeVar):
+        return f':py:class:`{annotation.__name__}`'
+    else:
+        return None
+
 
 # napoleon
 napoleon_google_docstring = False

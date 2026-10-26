@@ -1608,12 +1608,22 @@ def accept_moves_final_stage(state: State, moves: Moves) -> State:
             prune_acc_count=jnp.sum(moves.acc & ~moves.grow),
             to_prune=moves.to_prune,
             move_node=moves.lrt_nodes[..., 2],
+            tree_life=update_tree_life(state.forest.tree_life, moves),
             split_tree=apply_moves_to_split_trees(state.forest.split_tree, moves),
             affluence_tree=apply_moves_to_affluence_trees(
                 state.forest.affluence_tree, moves
             ),
         ),
     )
+
+
+def update_tree_life(
+    tree_life: Int32[Array, ' num_trees'], moves: Moves
+) -> Int32[Array, ' num_trees']:
+    """Age the trees by one step, resetting those just pruned to a lone root."""
+    assert moves.acc is not None
+    pruned_to_root = moves.acc & ~moves.grow & (moves.lrt_nodes[:, 2] == 1)
+    return jnp.where(pruned_to_root, 0, tree_life + 1)
 
 
 @named_call

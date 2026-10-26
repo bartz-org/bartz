@@ -27,6 +27,7 @@
 import io
 from dataclasses import replace
 from functools import partial
+from pathlib import Path
 from typing import Any, Literal
 
 import pytest
@@ -44,7 +45,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Float, Int32, Key, Shaped, UInt, UInt8
+from jaxtyping import Array, Float, Float32, Int32, Key, Shaped, UInt, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import (
@@ -57,16 +58,19 @@ from bartz.grove import is_actual_leaf
 from bartz.mcmcloop import (
     BurninTrace,
     Callback,
+    CallbackTuple,
     CheckPlatformCallback,
     MainTrace,
+    PrintCallback,
+    TqdmCallback,
     evaluate_trace,
-    make_tqdm_callback,
     run_mcmc,
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
+from bartz.npz._npz import load_npz, save_npz
 from bartz.testing import QuantizedData, gen_data
 from tests.util import assert_array_equal, assert_close_matrices, nnone
 
@@ -180,7 +184,7 @@ class TestRunMcmc:
         """Check that the final state is the one in the trace even if there's overflow."""
         initial_state_copy = tree.map(jnp.copy, initial_state)  # donated
         with debug_key_reuse(False):
-            final_state, _, main_trace = run_mcmc(
+            final_state, _, main_trace, _ = run_mcmc(
                 keys.pop(), initial_state_copy, 10, inner_loop_length=9
             )
 
@@ -216,7 +220,7 @@ class TestRunMcmc:
         """Check 0 iterations produces a noop."""
         initial_state_copy = tree.map(jnp.copy, initial_state)  # donated
         with debug_key_reuse(False):
-            final_state, burnin_trace, main_trace = run_mcmc(
+            final_state, burnin_trace, main_trace, _ = run_mcmc(
                 keys.pop(), initial_state_copy, 0, n_burn=0
             )
 
@@ -250,7 +254,7 @@ class TestRunMcmc:
         """
         state = simple_init()
         buf = io.StringIO()
-        callback = make_tqdm_callback(
+        callback = TqdmCallback.from_state(
             state, report_every=2, file=buf, mininterval=0, average=average
         )
         bar_id = callback.bar_id.item()
@@ -267,12 +271,16 @@ class TestRunMcmc:
         # the label survives the reports, which redraw the bar
         frames = [f for f in out.split('\r') if f.strip()]
         assert all(f.startswith('train ') for f in frames)
+        # the bar ends showing the stats of the last iteration
+        assert frames[-1].rstrip().endswith('/6]')
 
     def test_tqdm_callback_custom_desc(self) -> None:
         """A user-supplied ``desc`` overrides the default ``train`` label."""
         state = simple_init()
         buf = io.StringIO()
-        callback = make_tqdm_callback(state, file=buf, mininterval=0, desc='custom ')
+        callback = TqdmCallback.from_state(
+            state, file=buf, mininterval=0, desc='custom '
+        )
         _tqdm_advance(callback.bar_id.item(), 1, 10)
         assert buf.getvalue().lstrip('\r').startswith('custom ')
 
@@ -280,13 +288,13 @@ class TestRunMcmc:
         """A new tqdm callback closes a bar left open by an interrupted run."""
         state = simple_init()
         buf = io.StringIO()
-        callback = make_tqdm_callback(state, file=buf, mininterval=0)
+        callback = TqdmCallback.from_state(state, file=buf, mininterval=0)
         bar_id = callback.bar_id.item()
         # simulate an interrupted run: advance the bar partway, never finishing
         _tqdm_advance(bar_id, 3, 10)
         assert not nnone(_TQDM_REGISTRY[bar_id].bar).disable  # still open
 
-        make_tqdm_callback(state, file=io.StringIO())  # triggers cleanup
+        TqdmCallback.from_state(state, file=io.StringIO())  # triggers cleanup
         assert bar_id not in _TQDM_REGISTRY  # the stale bar was closed and dropped
         assert buf.getvalue().endswith('\n')  # closed cleanly, not left mid-line
 
@@ -342,14 +350,14 @@ class TestRunMcmc:
         key = keys.pop()
         with debug_key_reuse(False):
             # one run of 5 iterations
-            final_single, _, main_single = run_mcmc(
+            final_single, _, main_single, _ = run_mcmc(
                 key, tree.map(jnp.copy, initial_state), 5, n_burn=0, n_skip=1
             )
             # the same 5 iterations split as 2 + 3, resuming from the output state
-            mid, _, main_a = run_mcmc(
+            mid, _, main_a, _ = run_mcmc(
                 key, tree.map(jnp.copy, initial_state), 2, n_burn=0, n_skip=1
             )
-            final_split, _, main_b = run_mcmc(key, mid, 3, n_burn=0, n_skip=1)
+            final_split, _, main_b, _ = run_mcmc(key, mid, 3, n_burn=0, n_skip=1)
 
         tree.map(assert_trace_close, final_single, final_split)
         tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
@@ -360,10 +368,10 @@ class TestRunMcmc:
         """Check the inner loop chunking does not affect the results."""
         key = keys.pop()
         with debug_key_reuse(False):
-            final_whole, burnin_whole, main_whole = run_mcmc(
+            final_whole, burnin_whole, main_whole, _ = run_mcmc(
                 key, tree.map(jnp.copy, initial_state), 4, n_burn=2, n_skip=1
             )
-            final_chunked, burnin_chunked, main_chunked = run_mcmc(
+            final_chunked, burnin_chunked, main_chunked, _ = run_mcmc(
                 key,
                 tree.map(jnp.copy, initial_state),
                 4,
@@ -396,7 +404,7 @@ def test_custom_step(keys: split) -> None:
 
     n_burn, n_save = 2, 3
     with debug_key_reuse(False):
-        final_state, burnin_trace, main_trace = run_mcmc(
+        final_state, burnin_trace, main_trace, _ = run_mcmc(
             keys.pop(),
             simple_init(),
             n_save,
@@ -420,8 +428,8 @@ def test_step_need_not_advance_steps_done(keys: split) -> None:
     """Check the loop seeds itself even if `step` does not touch the counter."""
     key = keys.pop()
 
-    default_state, _, default_main = run_mcmc(key, simple_init(), 4, n_burn=1)
-    frozen_state, _, frozen_main = run_mcmc(
+    default_state, _, default_main, _ = run_mcmc(key, simple_init(), 4, n_burn=1)
+    frozen_state, _, frozen_main, _ = run_mcmc(
         random.clone(key), simple_init(), 4, n_burn=1, step=frozen_step
     )
 
@@ -438,9 +446,9 @@ def test_restartable_with_frozen_step(keys: split) -> None:
     key = keys.pop()
     kw: dict = dict(n_burn=0, n_skip=1, step=frozen_step)
 
-    final_single, _, main_single = run_mcmc(key, simple_init(), 5, **kw)
-    mid, _, main_a = run_mcmc(random.clone(key), simple_init(), 2, **kw)
-    final_split, _, main_b = run_mcmc(random.clone(key), mid, 3, **kw)
+    final_single, _, main_single, _ = run_mcmc(key, simple_init(), 5, **kw)
+    mid, _, main_a, _ = run_mcmc(random.clone(key), simple_init(), 2, **kw)
+    final_split, _, main_b, _ = run_mcmc(random.clone(key), mid, 3, **kw)
 
     tree.map(assert_trace_close, final_single, final_split)
     tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
@@ -468,11 +476,80 @@ def test_callback_sees_advanced_steps_done(keys: split) -> None:
     kw: dict = dict(n_burn=n_burn, callback=RecordStepsDoneCallback())
 
     for step_func in (step, frozen_step):
-        _, burnin_trace, main_trace = run_mcmc(
+        _, burnin_trace, main_trace, _ = run_mcmc(
             keys.pop(), simple_init(), n_save, step=step_func, **kw
         )
         assert_array_equal(nnone(burnin_trace.error_cov_inv), jnp.ones(n_burn))
         assert_array_equal(nnone(main_trace.error_cov_inv), jnp.ones(n_save))
+
+
+class SumErrorCovInvCallback(Callback):
+    """Sum the error precision over the iterations."""
+
+    total: Float32[Array, '']
+
+    def __call__(self, *, state: State, **_: Any) -> tuple[State, Callback]:
+        """Add the current error precision to the total."""
+        total = self.total + state.error_cov_inv.value.sum()
+        return state, replace(self, total=total)
+
+
+def test_resume_callback(keys: split) -> None:
+    """Check resuming with the returned callback continues it exactly."""
+    key = keys.pop()
+    kw: dict = dict(n_burn=0, n_skip=1)
+
+    def callback() -> SumErrorCovInvCallback:
+        return SumErrorCovInvCallback(jnp.float32(0))
+
+    single = run_mcmc(key, simple_init(), 5, callback=callback(), **kw)
+    mid = run_mcmc(random.clone(key), simple_init(), 2, callback=callback(), **kw)
+    split_run = run_mcmc(
+        random.clone(key), mid.final_state, 3, callback=mid.final_callback, **kw
+    )
+
+    assert isinstance(single.final_callback, SumErrorCovInvCallback)
+    assert isinstance(split_run.final_callback, SumErrorCovInvCallback)
+    assert_trace_close(split_run.final_callback.total, single.final_callback.total)
+
+
+def test_callbacks_npz_roundtrip(tmp_path: Path) -> None:
+    """Check the callbacks survive saving and loading."""
+    state = simple_init()
+    callback = CallbackTuple(
+        (
+            PrintCallback.from_state(state),
+            TqdmCallback.from_state(state, file=io.StringIO()),
+            CheckPlatformCallback('cpu'),
+        )
+    )
+    path = tmp_path / 'callback.npz'
+    save_npz(path, callback)
+    loaded = load_npz(path)
+    assert tree.structure(loaded) == tree.structure(callback)
+    tree.map(assert_array_equal, loaded, callback)
+
+
+def test_tree_life(keys: split) -> None:
+    """The tree life resets when a tree is pruned to a lone root, across runs."""
+    first = run_mcmc(keys.pop(), simple_init(), 50)
+    second = run_mcmc(keys.pop(), first.final_state, 50)
+    trace = cat_traces(first.main_trace, second.main_trace)
+    assert isinstance(trace, MainTrace)
+
+    # recompute the tree life from the trees in the trace, which start as roots
+    is_root = trace.split_tree[:, :, 1] == 0
+    was_root = jnp.concatenate([jnp.ones_like(is_root[:1, :]), is_root[:-1, :]])
+    pruned_to_root = is_root & ~was_root
+    assert jnp.any(pruned_to_root)
+    tree_life = jnp.zeros_like(pruned_to_root[0, :], jnp.int32)
+    mean_tree_life = []
+    for pruned in pruned_to_root:
+        tree_life = jnp.where(pruned, 0, tree_life + 1)
+        mean_tree_life.append(tree_life.mean())
+
+    assert_array_equal(second.final_state.forest.tree_life, tree_life)
+    assert_close_matrices(trace.mean_tree_life, jnp.stack(mean_tree_life), rtol=1e-6)
 
 
 def test_check_platform_callback_mismatch(keys: split) -> None:

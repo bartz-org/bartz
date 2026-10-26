@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, TypedDict
-from zipfile import ZipFile
+from zipfile import ZipFile, ZipInfo
 
 import numpy as np
 import pandas as pd
@@ -50,16 +50,10 @@ from jaxtyping import Array, Float32
 
 from bartz import Bart
 from bartz._jaxext import Module, split
-from bartz._npz._npz import (
-    FORMAT_VERSION,
-    META_KEY,
-    Json,
-    load_npz,
-    save_npz,
-    serializable,
-)
-from bartz._npz._npz_upgrades import z_test
 from bartz.bcf import bcf
+from bartz.npz import serializable
+from bartz.npz._npz import FORMAT_VERSION, META_KEY, Json, load_npz, save_npz
+from bartz.npz._npz_upgrades import z_test
 from tests.util import assert_array_equal, assert_close_matrices
 
 ARCHIVE_DIR = Path(__file__).parent / 'npz'
@@ -98,7 +92,7 @@ def make_bart() -> tuple[Bart, Inputs]:
         n_save=2,
         n_burn=2,
         num_chains=2,
-        printevery=None,
+        pbar=False,  # the tqdm callback has a random bar id
         seed=keys.pop(),
     )
     return model, Inputs(x=np.asarray(x))
@@ -203,7 +197,7 @@ def test_schema_matches_archive(name: str, tmp_path: Path) -> None:
 
     - if the current archives are not in `FROZEN` (format unreleased),
       regenerate them with ``python -m tests.test_npz <model>``
-    - else add a step to `bartz._npz._npz_upgrades.UPGRADES` (this bumps the format
+    - else add a step to `bartz.npz._npz_upgrades.UPGRADES` (this bumps the format
       version) and regenerate
 
     In both cases, update the last step so the older archives still pass. A
@@ -290,7 +284,7 @@ def test_frozen() -> None:
         content = (ARCHIVE_DIR / name).read_bytes()
         assert sha256(content).hexdigest() == digest, (
             f'{name} is released and must not change: to change the format, '
-            'add a step to bartz._npz._npz_upgrades.UPGRADES instead'
+            'add a step to bartz.npz._npz_upgrades.UPGRADES instead'
         )
     for name in unfrozen_archives():
         match = ARCHIVE_NAME.fullmatch(name.replace('.outputs', ''))
@@ -322,6 +316,7 @@ def test_roundtrip(tmp_path: Path) -> None:
     """Check all supported value types survive saving and loading."""
     value: dict = dict(
         scalars=[None, True, 1, 1.5, 'a'],
+        tuple=(1, jnp.zeros(2)),
         nested=dict(box=Box(jnp.arange(3, dtype=jnp.uint8))),
         array=jnp.ones((2, 3)),
     )
@@ -331,10 +326,21 @@ def test_roundtrip(tmp_path: Path) -> None:
     assert isinstance(box, Box)
     loaded = box.value
     assert loaded['scalars'] == value['scalars']
-    for key in 'scalars', 'nested', 'array':
+    for key in 'scalars', 'tuple', 'nested', 'array':
         assert type(loaded[key]) is type(value[key])
+    assert loaded['tuple'][0] == value['tuple'][0]
+    assert_array_equal(loaded['tuple'][1], value['tuple'][1])
     assert_array_equal(loaded['nested']['box'].value, value['nested']['box'].value)
     assert_array_equal(loaded['array'], value['array'])
+
+
+def test_no_timestamps(tmp_path: Path) -> None:
+    """Check the archive does not record the time it was written."""
+    path = tmp_path / 'box.npz'
+    save_npz(path, Box(jnp.zeros(2)))
+    with ZipFile(path) as zf:
+        for info in zf.infolist():
+            assert info.date_time == ZipInfo('').date_time, info.filename
 
 
 def test_path_as_given(tmp_path: Path) -> None:
@@ -368,7 +374,10 @@ def make_reloadable() -> type[Module]:
 
 
 def test_reregister(tmp_path: Path) -> None:
-    """Check registering again a class replaces it, and a homonym raises."""
+    """Check registering again a class replaces it, and a homonym raises.
+
+    Homonyms of the classes of bartz raise too.
+    """
     old = make_reloadable()
     new = make_reloadable()
     assert old is not new
@@ -382,6 +391,12 @@ def test_reregister(tmp_path: Path) -> None:
         class Box(Module):
             pass
 
+    with pytest.raises(ValueError, match="'State' already registered by bartz"):
+
+        @serializable
+        class State(Module):
+            pass
+
 
 class Unregistered(Module):
     """Module not registered for npz archives."""
@@ -390,7 +405,7 @@ class Unregistered(Module):
 @pytest.mark.parametrize(
     ('value', 'match'),
     [
-        ((1, 2), 'unsupported type tuple'),
+        ({1, 2}, 'unsupported type set'),
         (np.zeros(3), 'unsupported type ndarray'),
         (Unregistered(), 'unsupported type Unregistered'),
         ({1: 2}, 'dict key 1'),

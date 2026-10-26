@@ -35,7 +35,7 @@ from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Float32, Integer, Key, Real, Shaped, UInt
 
 from bartz._jaxext import autobatch, jit, minimal_unsigned_dtype, unique
-from bartz._npz import serializable
+from bartz.npz import serializable
 
 
 def _parse_xinfo(

@@ -82,6 +82,14 @@ MCMC and trees
     bartz.grove
     bartz.prepcovars
 
+Saving models
+-------------
+
+.. autosummary::
+    :toctree: _autogen/mod
+
+    bartz.npz
+
 Debugging and testing
 ---------------------
 

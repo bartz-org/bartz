@@ -39,6 +39,7 @@ from bartz import (  # noqa: F401
     grove,
     mcmcloop,
     mcmcstep,
+    npz,
     prepcovars,
     stochtree,
 )

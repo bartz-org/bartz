@@ -24,10 +24,10 @@
 
 """Progress-reporting callbacks for `run_mcmc`."""
 
-import itertools
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial, wraps
+from secrets import randbits
 from typing import Any, Literal, TypeVar
 
 import numpy
@@ -35,7 +35,7 @@ from equinox import Module, field
 from jax import debug, eval_shape, lax, random, tree
 from jax import numpy as jnp
 from jax.scipy.special import logsumexp
-from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, Integer, PyTree, Shaped
+from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree
 from tqdm.auto import tqdm
 
 from bartz._typing import kwdict
@@ -43,8 +43,10 @@ from bartz.grove import forest_mean_leaves
 from bartz.mcmcloop._loop import Callback, _replicate
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes, chainful_axis
+from bartz.npz import serializable
 
 
+@serializable
 class CallbackTuple(Callback):
     """Callback that runs a sequence of callbacks in order.
 
@@ -74,14 +76,17 @@ class CallbackTuple(Callback):
 class StatsReport(Module):
     """Forest diagnostics produced by `StatsAccumulator.report` for one report."""
 
-    grow_prop: Float32[Array, '']
-    """Fraction of trees proposed for a grow move."""
-
     move_acc: Float32[Array, '']
     """Fraction of trees on which a grow or prune move was accepted."""
 
     mean_leaves: Float32[Array, '']
     """Mean number of leaves per tree."""
+
+    mean_tree_life: Float32[Array, '']
+    """Mean of `bartz.mcmcstep.Forest.tree_life` over trees and chains."""
+
+    steps_done: Int32[Array, '']
+    """Number of MCMC steps done, the maximum possible tree life."""
 
     peff: Float32[Array, ''] | None
     """Effective number of predictors, or `None` when variable selection is off."""
@@ -99,6 +104,7 @@ class StatsReport(Module):
     """Number of predictors, or `None` when variable selection is off."""
 
 
+@serializable
 class StatsAccumulator(Module):
     """Running average of the forest diagnostics shown during the MCMC.
 
@@ -128,15 +134,17 @@ class StatsAccumulator(Module):
         """Add the latest iteration's statistics; no-op when disabled."""
         if self.sums is None:
             return self
-        sums = tree.map(jnp.add, self.sums, self._avg_stats(state))
-        return replace(self, sums=sums, count=self.count + 1)
+        else:
+            sums = tree.map(jnp.add, self.sums, self._avg_stats(state))
+            return replace(self, sums=sums, count=self.count + 1)
 
     def reset_if(self, cond: bool | Bool[Array, '']) -> 'StatsAccumulator':
         """Zero the running sums where `cond` holds; no-op when disabled."""
         if self.sums is None:
             return self
-        sums = tree.map(lambda s: jnp.where(cond, 0, s), self.sums)
-        return replace(self, sums=sums, count=jnp.where(cond, 0, self.count))
+        else:
+            sums = tree.map(lambda s: jnp.where(cond, 0, s), self.sums)
+            return replace(self, sums=sums, count=jnp.where(cond, 0, self.count))
 
     def report(self, state: State) -> StatsReport:
         """Statistics to display: the windowed average if enabled, else the latest."""
@@ -146,7 +154,13 @@ class StatsAccumulator(Module):
         else:
             averaged = tree.map(lambda s: s / self.count, self.sums)
             n_samples = self.count
-        return StatsReport(**averaged, **self._static_stats(state), n_samples=n_samples)
+        return StatsReport(
+            **averaged,
+            **self._static_stats(state),
+            mean_tree_life=state.forest.tree_life.mean(),
+            steps_done=state.config.steps_done,
+            n_samples=n_samples,
+        )
 
     @staticmethod
     def _avg_stats(state: State) -> dict[str, Float32[Array, ''] | None]:
@@ -165,7 +179,6 @@ class StatsAccumulator(Module):
             peff = StatsAccumulator._effective_predictors(log_s)
 
         return dict(
-            grow_prop=forest.grow_prop_count.mean() / prop_total,
             move_acc=(forest.grow_acc_count.mean() + forest.prune_acc_count.mean())
             / prop_total,
             mean_leaves=forest_mean_leaves(split_tree),
@@ -213,62 +226,13 @@ class StatsAccumulator(Module):
         return jnp.exp(entropy)
 
 
-def make_print_callback(
-    state: State,
-    *,
-    dot_every: int | Integer[Array, ''] | None = 1,
-    report_every: int | Integer[Array, ''] | None = 100,
-    average: bool = True,
-) -> 'PrintCallback':
-    """
-    Prepare a progress-printing callback for `run_mcmc`.
+@serializable
+class PrintCallback(Callback):
+    """Progress-printing callback for `run_mcmc`, create it with `from_state`.
 
     The callback prints a dot on every iteration, and a longer report
     periodically.
-
-    Parameters
-    ----------
-    state
-        The MCMC state to use the callback with, used to determine device
-        sharding.
-    dot_every
-        A dot is printed every `dot_every` MCMC iterations, `None` to disable.
-    report_every
-        A one line report is printed every `report_every` MCMC iterations,
-        `None` to disable.
-    average
-        If `True`, the reported statistics are averaged over the iterations
-        since the previous report; if `False`, they reflect the current
-        iteration only. Ignored when `report_every` is `None`.
-
-    Returns
-    -------
-    A `PrintCallback` to pass as the `callback` argument of `run_mcmc`.
-
-    Examples
-    --------
-    >>> run_mcmc(key, state, ..., callback=make_print_callback(state, ...))
     """
-
-    def as_replicated_array_or_none(
-        val: Shaped[ArrayLike, '*shape'] | None,
-    ) -> None | Shaped[Array, '*shape']:
-        return None if val is None else _replicate(jnp.asarray(val), state.config.mesh)
-
-    accumulator = tree.map(
-        partial(_replicate, mesh=state.config.mesh),
-        StatsAccumulator.initial(state, enabled=average and report_every is not None),
-    )
-
-    return PrintCallback(
-        as_replicated_array_or_none(dot_every),
-        as_replicated_array_or_none(report_every),
-        accumulator,
-    )
-
-
-class PrintCallback(Callback):
-    """Progress-printing callback for `run_mcmc`, see `make_print_callback`."""
 
     dot_every: Int32[Array, ''] | None
     """A dot is printed every `dot_every` MCMC iterations, `None` to disable."""
@@ -279,6 +243,50 @@ class PrintCallback(Callback):
 
     accumulator: StatsAccumulator
     """Running average of the reported statistics, inert unless averaging."""
+
+    @classmethod
+    def from_state(
+        cls,
+        state: State,
+        *,
+        dot_every: int | Integer[Array, ''] | None = 1,
+        report_every: int | Integer[Array, ''] | None = 100,
+        average: bool = True,
+    ) -> 'PrintCallback':
+        """
+        Prepare a progress-printing callback for `run_mcmc`.
+
+        Parameters
+        ----------
+        state
+            The MCMC state to use the callback with, used to determine device
+            sharding.
+        dot_every
+            A dot is printed every `dot_every` MCMC iterations, `None` to disable.
+        report_every
+            A one line report is printed every `report_every` MCMC iterations,
+            `None` to disable.
+        average
+            If `True`, the reported statistics are averaged over the iterations
+            since the previous report; if `False`, they reflect the current
+            iteration only. Ignored when `report_every` is `None`.
+
+        Returns
+        -------
+        A callback to pass as the `callback` argument of `run_mcmc`.
+
+        Examples
+        --------
+        >>> run_mcmc(key, state, ..., callback=PrintCallback.from_state(state, ...))
+        """
+        callback = cls(
+            dot_every=None if dot_every is None else jnp.int32(dot_every),
+            report_every=None if report_every is None else jnp.int32(report_every),
+            accumulator=StatsAccumulator.initial(
+                state, enabled=average and report_every is not None
+            ),
+        )
+        return tree.map(partial(_replicate, mesh=state.config.mesh), callback)
 
     def __call__(
         self,
@@ -334,90 +342,22 @@ class PrintCallback(Callback):
             )
             # logging can't do in-line printing so we use print
 
-        lax.cond(
-            report_cond,
-            line_report_branch,
-            lambda: lax.cond(dot_cond, just_dot_branch, lambda: None),
+        lax.switch(
+            2 * report_cond + dot_cond,  # switch clamps 3 to 2
+            (lambda: None, just_dot_branch, line_report_branch),
         )
 
         accumulator = accumulator.reset_if(report_cond)
         return state, replace(self, accumulator=accumulator)
 
 
-def make_tqdm_callback(
-    state: State,
-    *,
-    update_every: int = 1,
-    report_every: int | None = 100,
-    average: bool = True,
-    **tqdm_kwargs: Any,
-) -> 'TqdmCallback':
-    """
-    Prepare a `tqdm` progress-bar callback for `run_mcmc`.
+@serializable
+class TqdmCallback(Callback):
+    """`tqdm` progress-bar callback for `run_mcmc`, create it with `from_state`.
 
     The callback shows a progress bar that advances with the MCMC iterations,
     optionally annotated with the proposal acceptance statistics.
-
-    Parameters
-    ----------
-    state
-        The MCMC state to use the callback with, used to determine device
-        sharding.
-    update_every
-        The bar position is refreshed every `update_every` MCMC iterations,
-        and at the first one (`tqdm` further throttles the actual redraw rate
-        on its own).
-    report_every
-        The acceptance statistics shown next to the bar are refreshed every
-        `report_every` MCMC iterations, `None` to omit them.
-    average
-        If `True`, the statistics shown are averaged over the iterations since
-        the previous refresh; if `False`, they reflect the current iteration
-        only. Ignored when `report_every` is `None`.
-    **tqdm_kwargs
-        Additional keyword arguments forwarded to the `tqdm.tqdm` constructor,
-        e.g., ``desc``, ``file``, or ``disable``.
-
-    Returns
-    -------
-    A `TqdmCallback` to pass as the `callback` argument of `run_mcmc`.
-
-    Notes
-    -----
-    Works with chains sharded across multiple devices. If the run is interrupted
-    (e.g. with ^C), the bar is left as-is; the next `make_tqdm_callback` call
-    closes it, so a subsequent run starts from a clean line.
-
-    Examples
-    --------
-    >>> run_mcmc(key, state, ..., callback=make_tqdm_callback(state, ...))
     """
-    _close_stale_bars()  # clean up after any previous run that was interrupted
-    bar_id = next(_TQDM_BAR_COUNTER)
-    _TQDM_REGISTRY[bar_id] = _TqdmEntry(tqdm_kwargs)
-
-    def as_replicated_array(
-        val: Shaped[ArrayLike, '*shape'],
-    ) -> Shaped[Array, '*shape']:
-        return _replicate(jnp.asarray(val), state.config.mesh)
-
-    return TqdmCallback(
-        bar_id=as_replicated_array(jnp.int32(bar_id)),
-        update_every=as_replicated_array(jnp.int32(update_every)),
-        report_every=None
-        if report_every is None
-        else as_replicated_array(jnp.int32(report_every)),
-        accumulator=tree.map(
-            partial(_replicate, mesh=state.config.mesh),
-            StatsAccumulator.initial(
-                state, enabled=average and report_every is not None
-            ),
-        ),
-    )
-
-
-class TqdmCallback(Callback):
-    """`tqdm` progress-bar callback for `run_mcmc`, see `make_tqdm_callback`."""
 
     bar_id: Int32[Array, '']
     """Handle identifying the bar in the module-level `tqdm` bar registry."""
@@ -431,6 +371,74 @@ class TqdmCallback(Callback):
 
     accumulator: StatsAccumulator
     """Running average of the reported statistics, inert unless averaging."""
+
+    @classmethod
+    def from_state(
+        cls,
+        state: State,
+        *,
+        update_every: int = 1,
+        report_every: int | None = 100,
+        average: bool = True,
+        **tqdm_kwargs: Any,
+    ) -> 'TqdmCallback':
+        """
+        Prepare a `tqdm` progress-bar callback for `run_mcmc`.
+
+        Parameters
+        ----------
+        state
+            The MCMC state to use the callback with, used to determine device
+            sharding.
+        update_every
+            The bar position is refreshed every `update_every` MCMC iterations,
+            and at the first one (`tqdm` further throttles the actual redraw rate
+            on its own).
+        report_every
+            The acceptance statistics shown next to the bar are refreshed every
+            `report_every` MCMC iterations, `None` to omit them.
+        average
+            If `True`, the statistics shown are averaged over the iterations since
+            the previous refresh; if `False`, they reflect the current iteration
+            only. Ignored when `report_every` is `None`.
+        **tqdm_kwargs
+            Additional keyword arguments forwarded to the `tqdm.tqdm` constructor,
+            e.g., ``desc``, ``file``, or ``disable``.
+
+        Returns
+        -------
+        A callback to pass as the `callback` argument of `run_mcmc`.
+
+        Notes
+        -----
+        Works with chains sharded across multiple devices. If the run is
+        interrupted (e.g. with ^C), the bar is left as-is; the next
+        `from_state` call closes it, so a subsequent run starts from a clean
+        line.
+
+        The callback drives a single bar for a single `run_mcmc` call: it is
+        not reusable nor resumable, and in a further `run_mcmc` call it shows
+        no bar. Create a new one for each call.
+
+        Examples
+        --------
+        >>> run_mcmc(key, state, ..., callback=TqdmCallback.from_state(state, ...))
+        """
+        _close_stale_bars()  # clean up after any previous run that was interrupted
+        # random, to avoid clashes with the ids of callbacks saved in other
+        # processes
+        bar_id = randbits(31)
+        _TQDM_REGISTRY[bar_id] = _TqdmEntry(tqdm_kwargs)
+
+        callback = cls(
+            bar_id=jnp.int32(bar_id),
+            update_every=jnp.int32(update_every),
+            report_every=None if report_every is None else jnp.int32(report_every),
+            accumulator=StatsAccumulator.initial(
+                state, enabled=average and report_every is not None
+            ),
+        )
+        return tree.map(partial(_replicate, mesh=state.config.mesh), callback)
 
     def __call__(
         self,
@@ -452,26 +460,28 @@ class TqdmCallback(Callback):
 
         # The callbacks are unordered: `ordered=True` is unsupported with more
         # than one device, and we need this to work with chains sharded across
-        # devices. `_tqdm_advance` is therefore robust to out-of-order
-        # invocations.
-
-        # refresh the statistics first so they tend to be visible by the time
-        # the bar is advanced
+        # devices. `_tqdm_update` is therefore robust to out-of-order
+        # invocations, and does both the report and the advance in a single
+        # callback, so the last report can't arrive after the bar is closed.
         report_every = self.report_every
-        if report_every is not None:
+        if report_every is None:
+            report_cond = False
+        else:
             report_cond = (it % report_every == 0) | last
+        advance_cond = (it == 1) | (it % self.update_every == 0) | last
 
-            def report_branch() -> None:
-                debug.callback(_tqdm_report, accumulator.report(state), bar_id, n_iters)
+        def advance_branch() -> None:
+            debug.callback(_tqdm_update, bar_id, it, n_iters, None)
 
-            lax.cond(report_cond, report_branch, lambda: None)
-            accumulator = accumulator.reset_if(report_cond)
+        def report_branch() -> None:
+            report = accumulator.report(state)
+            debug.callback(_tqdm_update, bar_id, it, n_iters, report)
 
-        lax.cond(
-            (it == 1) | (it % self.update_every == 0) | last,
-            lambda: debug.callback(_tqdm_advance, bar_id, it, n_iters),
-            lambda: None,
+        lax.switch(
+            2 * report_cond + advance_cond,  # switch clamps 3 to 2
+            (lambda: None, advance_branch, report_branch),
         )
+        accumulator = accumulator.reset_if(report_cond)
 
         return state, replace(self, accumulator=accumulator)
 
@@ -547,11 +557,11 @@ def _print_report(
         var_msg = f'var: {report.peff:.1f}/{report.p}, '
 
     print(  # noqa: T201, see PrintCallback for why not logging
-        f'{prefix}Iteration {it}/{n_iters}, '
-        f'grow prob: {report.grow_prop:.0%}, '
+        f'{prefix}It {it}/{n_iters}, '
         f'move acc: {report.move_acc:.0%}, '
         f'{var_msg}'
-        f'leaves: {report.mean_leaves:.1f}/{report.max_leaves}{suffix}'
+        f'leaves: {report.mean_leaves:.1f}/{report.max_leaves}, '
+        f'tree life: {report.mean_tree_life:.0f}/{report.steps_done}{suffix}'
     )
 
 
@@ -560,7 +570,7 @@ class _TqdmEntry:
     """An entry in the `tqdm` bar registry."""
 
     kwargs: dict[str, Any]
-    """Keyword arguments to construct the bar with, from `make_tqdm_callback`."""
+    """Keyword arguments to construct the bar with, from `TqdmCallback.from_state`."""
 
     bar: tqdm | None = None
     """The bar, created lazily on the first callback invocation, `None` until then."""
@@ -571,7 +581,6 @@ class _TqdmEntry:
 # in `TqdmCallback.bar_id` (a traceable scalar, so the loop pytree stays
 # stable across runs and is not recompiled).
 _TQDM_REGISTRY: dict[int, _TqdmEntry] = {}
-_TQDM_BAR_COUNTER = itertools.count()
 
 # tqdm's default layout, but without the ': ' that `format_meter` forces after a
 # non-empty description; the label is set as a `{desc}` ending in a space instead
@@ -611,6 +620,15 @@ def _get_or_create_bar(bar_id: int, n_iters: int) -> tqdm | None:
 
 @_convert_jax_arrays_in_args
 # convert all jax arrays in arguments, see _print_report for why
+def _tqdm_update(
+    bar_id: int, it: int, n_iters: int, report: StatsReport | None
+) -> None:
+    """Set the statistics postfix if `report` is given, then advance the bar."""
+    if report is not None:
+        _tqdm_report(report, bar_id, n_iters)
+    _tqdm_advance(bar_id, it, n_iters)
+
+
 def _tqdm_advance(bar_id: int, it: int, n_iters: int) -> None:
     """Advance the bar towards absolute position `it`, closing it at the end."""
     bar = _get_or_create_bar(bar_id, n_iters)
@@ -622,26 +640,29 @@ def _tqdm_advance(bar_id: int, it: int, n_iters: int) -> None:
         del _TQDM_REGISTRY[bar_id]
 
 
-@_convert_jax_arrays_in_args
-# convert all jax arrays in arguments, see _print_report for why
 def _tqdm_report(report: StatsReport, bar_id: int, n_iters: int) -> None:
     """Set the acceptance-statistics postfix of the bar."""
     bar = _get_or_create_bar(bar_id, n_iters)
     if bar is None:
         return
-    # keep this terse so the bar stays narrow, e.g. '4ch 100sa acc 25% leaves 3.4/32'
+    # keep this terse so the bar stays narrow, e.g. '4c100s ac30% le2.6/32 tl101/2000'
     msgs = []
+    avg_over = ''
     if report.num_chains is not None:
-        msgs.append(f'{report.num_chains}ch')
+        avg_over += f'{report.num_chains}c'
     if report.n_samples is not None:
-        msgs.append(f'{report.n_samples}sa')
-    msgs.append(f'acc {report.move_acc:.0%}')
+        avg_over += f'{report.n_samples}s'
+    if avg_over:
+        msgs.append(avg_over)
+    msgs.append(f'ac{report.move_acc:.0%}')
     if report.peff is not None:
-        msgs.append(f'var {report.peff:.1f}/{report.p}')
-    msgs.append(f'leaves {report.mean_leaves:.1f}/{report.max_leaves}')
+        msgs.append(f'va{report.peff:.1f}/{report.p}')
+    msgs.append(f'le{report.mean_leaves:.1f}/{report.max_leaves}')
+    msgs.append(f'tl{report.mean_tree_life:.0f}/{report.steps_done}')
     bar.set_postfix_str(' '.join(msgs))
 
 
+@serializable
 class CheckPlatformCallback(Callback):
     """Check the given platform matches the actual platform at runtime."""
 

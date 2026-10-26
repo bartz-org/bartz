@@ -1,4 +1,4 @@
-# bartz/src/bartz/_npz/_npz.py
+# bartz/src/bartz/npz/_npz.py
 #
 # Copyright (c) 2026, The Bartz Contributors
 #
@@ -27,8 +27,8 @@
 The archive contains one ``.npy`` member per array, named by its path in the
 tree, and a ``meta.json`` member with the format version and a skeleton of the
 tree. The skeleton is made of JSON scalars and lists, plus objects tagged by
-``type``: ``module`` (a registered dataclass), ``dict`` (with `str` keys), and
-``array`` (a jax array, stored in the member ``key``).
+``type``: ``module`` (a registered dataclass), ``dict`` (with `str` keys),
+``tuple``, and ``array`` (a jax array, stored in the member ``key``).
 """
 
 import json
@@ -38,14 +38,14 @@ from os import PathLike
 from pathlib import Path
 from typing import Any, TypeAlias, TypeVar
 from uuid import uuid4
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import numpy as np
 from jax import Array, device_get, device_put
 from numpy.lib.npyio import NpzFile
 
-from bartz._npz._npz_upgrades import UPGRADES
 from bartz._version import __version__
+from bartz.npz._npz_upgrades import UPGRADES
 
 FORMAT_VERSION = len(UPGRADES)
 
@@ -56,7 +56,6 @@ _REGISTRY: dict[str, type] = {}
 # a JSON-serializable value, like the skeleton of an object produced by `encode`
 Json: TypeAlias = Any
 
-C = TypeVar('C', bound=type)
 T = TypeVar('T')
 
 
@@ -71,13 +70,44 @@ def is_registered(cls: type) -> bool:
     return registered is not None and qualified_name(registered) == qualified_name(cls)
 
 
-def serializable(cls: C) -> C:
-    """Register a dataclass as allowed in npz archives, under its name.
-
-    Registering again the same class, e.g., after reloading its module,
-    replaces it. The fields of registered classes are the archive format,
-    check changes with ``tests/test_npz.py``.
+def serializable(cls: type[T]) -> type[T]:
     """
+    Register a dataclass to allow its instances in npz archives.
+
+    Use it as a class decorator, e.g., on a custom `~bartz.mcmcloop.Callback`,
+    to save a `~bartz.Bart` fitted with it.
+
+    Parameters
+    ----------
+    cls
+        The dataclass to register, e.g., an `equinox.Module`. Its fields may
+        hold `None`, `bool`, `int`, `float`, `str`, lists, tuples, dicts with
+        `str` keys without slashes, jax arrays that are not weakly typed, and
+        instances of registered classes.
+
+    Returns
+    -------
+    `cls` itself.
+
+    Raises
+    ------
+    ValueError
+        If a different class with the same name is already registered,
+        including the classes of bartz.
+
+    Notes
+    -----
+    Classes are identified by name alone, so registered classes must have
+    unique names. Registering again the same class, e.g., after reloading its
+    module, replaces it. Registration is not inherited: register each subclass
+    explicitly.
+
+    To load an archive, its classes must be registered, i.e., their modules
+    imported, with the same fields as when saving. Loading sets the fields
+    directly, without calling ``__init__``.
+    """
+    # the fields of the bartz classes are the archive format, check changes
+    # with tests/test_npz.py
     tag = cls.__name__
     if tag in _REGISTRY and not is_registered(cls):
         msg = (
@@ -99,6 +129,9 @@ def encode(obj: object, path: str, arrays: dict[str, Array]) -> Json:
         return obj
     elif type(obj) is list:
         return [encode(v, join(path, str(i)), arrays) for i, v in enumerate(obj)]
+    elif type(obj) is tuple:
+        items = [encode(v, join(path, str(i)), arrays) for i, v in enumerate(obj)]
+        return dict(type='tuple', items=items)
     elif type(obj) is dict:
         items = {}
         for k, v in obj.items():
@@ -132,6 +165,8 @@ def decode(
         return node
     elif type(node) is list:
         return [decode(v, data, used) for v in node]
+    elif node['type'] == 'tuple':
+        return tuple(decode(v, data, used) for v in node['items'])
     elif node['type'] == 'dict':
         return {k: decode(v, data, used) for k, v in node['items'].items()}
     elif node['type'] == 'array':
@@ -179,7 +214,15 @@ def save_npz(path: str | PathLike, obj: object, *, compresslevel: int = 3) -> No
                 file, 'w', compression=ZIP_DEFLATED, compresslevel=compresslevel
             ) as zf,
         ):
-            zf.writestr(META_KEY, json.dumps(meta, indent=1))
+            # an explicit `ZipInfo` gets a fixed date like the arrays below,
+            # instead of the current time, so the archive is reproducible;
+            # then compression must be set explicitly
+            zf.writestr(
+                ZipInfo(META_KEY),
+                json.dumps(meta, indent=1),
+                compress_type=ZIP_DEFLATED,
+                compresslevel=compresslevel,
+            )
             # `device_get` copies all the arrays to the host in parallel, and
             # does not copy on cpu
             for key, value in device_get(arrays).items():

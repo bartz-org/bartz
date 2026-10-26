@@ -64,7 +64,6 @@ from bartz._jaxext import (
     minimal_unsigned_dtype,
     solve_triangular,
 )
-from bartz._npz import serializable
 from bartz.grove import tree_depths
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes
 from bartz.mcmcstep._lazy import (
@@ -81,6 +80,7 @@ from bartz.mcmcstep._reduction import (
     AutoOneHotReduction,
     ReductionConfig,
 )
+from bartz.npz import serializable
 
 ArrayLike = Array | ndarray
 
@@ -348,6 +348,10 @@ class Forest(Module):
     move_node: Int32[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
     """The node the last move on each tree operated on (the leaf to grow or
     the node to prune). Meaningful only where `to_prune` is set."""
+
+    tree_life: Int32[Array, '*chains num_trees'] = field(chains=CHAIN_AXIS)
+    """The number of MCMC steps since each tree was last pruned to a lone root,
+    or since the start."""
 
     count_tree: UInt32[Array, '*chains num_trees 2*half_tree_size'] | None = field(
         chains=CHAIN_AXIS
@@ -1199,6 +1203,7 @@ def init(
                 # prunes to `leaf_indices`, which shall be a no-op on init
                 to_prune=lazy(jnp.zeros, (num_trees,), bool),
                 move_node=lazy(jnp.zeros, (num_trees,), jnp.int32),
+                tree_life=lazy(jnp.zeros, (num_trees,), jnp.int32),
                 # the counts serve the minimum-points constraints and stand in
                 # for the precisions when there are no per-datapoint scales
                 # (`prec_scale` is set iff `error_scale` or `missing` is given)

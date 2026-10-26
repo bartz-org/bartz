@@ -37,7 +37,7 @@ from jax.extend.backend import backends
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Integer, Shaped, UInt, UInt32
 
-from bartz._npz import serializable
+from bartz.npz import serializable
 
 # target number of datapoint batches on cpu, and minimum datapoints per batch,
 # when batching is resolved automatically; unlike the gpu heuristic these are

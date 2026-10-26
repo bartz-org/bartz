@@ -1,4 +1,4 @@
-# bartz/src/bartz/_npz/_npz_upgrades.py
+# bartz/src/bartz/npz/_npz_upgrades.py
 #
 # Copyright (c) 2026, The Bartz Contributors
 #
@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 from jaxtyping import Bool, Shaped
 
-# the skeleton of an archive (see `bartz._npz._npz`), and the arrays it references
+# the skeleton of an archive (see `bartz.npz._npz`), and the arrays it references
 Skeleton = Any
 Arrays = dict[str, np.ndarray]
 
@@ -73,10 +73,18 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
             key = f'main_trace.{name}.{field}'
             return array(arrays, f'_main_trace/{name}/{field}', old.get(key))
 
+        # bartz 0.13 does not track the tree life, fill in a value that stands
+        # out if used
+        shape = old[f'main_trace.{name}.grow_prop_count'].shape
+        mean_tree_life = np.full(shape, np.finfo(np.float32).min, np.float32)
+
         return module(
             'MainTrace',
             has_chains=old[f'main_trace.{name}.has_chains'].item(),
             mesh=None,
+            mean_tree_life=array(
+                arrays, f'_main_trace/{name}/mean_tree_life', mean_tree_life
+            ),
             **{
                 field: get(field)
                 for field in (
@@ -138,7 +146,8 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
 # json/numpy, never bartz classes. Fill new fields with the value that
 # reproduces the old behavior, not the current default; if that is impossible,
 # convert to the prediction-only form, with `None` in all the fields not needed
-# to predict.
+# to predict; in cases that don't fall in the prediction-only paradigm, decide
+# a fill strategy which may not be `None` if the field is not already optional.
 UPGRADES: tuple[Callable[[Skeleton, Arrays], tuple[Skeleton, Arrays]], ...] = (
     upgrade_bartz_0_13_bcf,
 )

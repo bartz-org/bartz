@@ -51,29 +51,12 @@ from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.mcmcstep._lazy import add_dummy_axis
 
 
-# WORKAROUND(python<3.11): generic NamedTuple is only supported from 3.11, so
-# `burnin_trace`/`main_trace` are pinned to the default trace types. Once 3.10
-# is dropped, make this `NamedTuple, Generic[BurninTraceT, MainTraceT]` (with
-# TypeVars bound to `Trace`) and parametrize `run_mcmc` accordingly, so a custom
-# `burnin_trace_type`/`main_trace_type` flows through to the returned types.
-class RunMCMCResult(NamedTuple):
-    """Return value of `run_mcmc`."""
-
-    final_state: State
-    """The final MCMC state."""
-
-    burnin_trace: BurninTrace
-    """The trace of the burn-in phase."""
-
-    main_trace: MainTrace
-    """The trace of the main phase."""
-
-
 class Callback(Module):
     """Base class for `run_mcmc` callbacks.
 
     To subclass: define any state as attributes (this is a dataclass), and override
-    `__call__`.
+    `__call__`. To save a `bartz.Bart` fitted with the callback, register the
+    subclass with `bartz.npz.serializable`.
     """
 
     @abstractmethod
@@ -127,6 +110,27 @@ class Callback(Module):
         For convenience, the callback may return `None`, and neither the state nor the callback will be updated.
         """
         ...
+
+
+# WORKAROUND(python<3.11): generic NamedTuple is only supported from 3.11, so
+# `burnin_trace`/`main_trace` are pinned to the default trace types. Once 3.10
+# is dropped, make this `NamedTuple, Generic[BurninTraceT, MainTraceT]` (with
+# TypeVars bound to `Trace`) and parametrize `run_mcmc` accordingly, so a custom
+# `burnin_trace_type`/`main_trace_type` flows through to the returned types.
+class RunMCMCResult(NamedTuple):
+    """Return value of `run_mcmc`."""
+
+    final_state: State
+    """The final MCMC state."""
+
+    burnin_trace: BurninTrace
+    """The trace of the burn-in phase."""
+
+    main_trace: MainTrace
+    """The trace of the main phase."""
+
+    final_callback: Callback | None
+    """The final callback, `None` if no callback was passed."""
 
 
 class _Carry(Module):
@@ -187,7 +191,8 @@ def run_mcmc(
         A `Callback` subclass instance invoked at each iteration just after
         updating the state. This runs under the jax jit, so the argument values
         are not available at the time the Python code is executed; use the
-        utilities in `jax.debug` to access the values at actual runtime.
+        utilities in `jax.debug` to access the values at actual runtime. The
+        callback as updated by its last invocation is returned in the result.
     burnin_trace_type
     main_trace_type
         Classes defining what is saved in the burn-in and main traces,
@@ -204,7 +209,7 @@ def run_mcmc(
 
     Returns
     -------
-    A namedtuple with the final state, the burn-in trace, and the main trace.
+    A namedtuple with the final state, the traces, and the final callback.
 
     Raises
     ------
@@ -217,9 +222,10 @@ def run_mcmc(
     The number of MCMC updates is ``n_burn + n_skip * n_save``. The traces do
     not include the initial state, and include the final state.
 
-    Resuming is exact: passing the returned `~RunMCMCResult.final_state` and the same `key` to
-    a new call continues the run as if it had not stopped, so splitting a run
-    into several consecutive calls gives the same result as a single call.
+    Resuming is exact: passing the returned `~RunMCMCResult.final_state` and
+    `~RunMCMCResult.final_callback`, and the same `key`, to a new call continues
+    the run as if it had not stopped, so splitting a run into several
+    consecutive calls gives the same result as a single call.
     """
     # unwrap key to work around jax issue #39089
     # WORKAROUND(jax<0.11): we guess this bug may be fixed before the 0.11 release
@@ -279,6 +285,7 @@ def run_mcmc(
         carry.state,
         carry.burnin_trace.finalize(),  # ty: ignore[invalid-argument-type]
         carry.main_trace.finalize(),  # ty: ignore[invalid-argument-type]
+        carry.callback,
     )
 
 

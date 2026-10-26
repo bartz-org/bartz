@@ -1,4 +1,4 @@
-# bartz/src/bartz/_npz/_npz_upgrades.py
+# bartz/src/bartz/npz/_npz_upgrades.py
 #
 # Copyright (c) 2026, The Bartz Contributors
 #
@@ -31,7 +31,7 @@ from typing import Any
 import numpy as np
 from jaxtyping import Bool, Shaped
 
-# the skeleton of an archive (see `bartz._npz._npz`), and the arrays it references
+# the skeleton of an archive (see `bartz.npz._npz`), and the arrays it references
 Skeleton = Any
 Arrays = dict[str, np.ndarray]
 

@@ -1,4 +1,4 @@
-# bartz/src/bartz/_npz/__init__.py
+# bartz/src/bartz/npz/__init__.py
 #
 # Copyright (c) 2026, The Bartz Contributors
 #
@@ -23,6 +23,17 @@
 # SOFTWARE.
 
 
-"""Save and load models to npz archives."""
+"""
+Register custom classes for npz archives.
 
-from bartz._npz._npz import check_class, load_npz, save_npz, serializable  # noqa: F401
+`bartz.Bart.save_npz` saves the whole model, which may contain instances of
+user-defined classes, e.g., a custom MCMC callback. Register those classes with
+`serializable`.
+
+.. autosummary::
+    :toctree:
+
+    serializable
+"""
+
+from bartz.npz._npz import serializable  # noqa: F401

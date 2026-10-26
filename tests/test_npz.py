@@ -50,16 +50,10 @@ from jaxtyping import Array, Float32
 
 from bartz import Bart
 from bartz._jaxext import Module, split
-from bartz._npz._npz import (
-    FORMAT_VERSION,
-    META_KEY,
-    Json,
-    load_npz,
-    save_npz,
-    serializable,
-)
-from bartz._npz._npz_upgrades import z_test
 from bartz.bcf import bcf
+from bartz.npz import serializable
+from bartz.npz._npz import FORMAT_VERSION, META_KEY, Json, load_npz, save_npz
+from bartz.npz._npz_upgrades import z_test
 from tests.util import assert_array_equal, assert_close_matrices
 
 ARCHIVE_DIR = Path(__file__).parent / 'npz'
@@ -203,7 +197,7 @@ def test_schema_matches_archive(name: str, tmp_path: Path) -> None:
 
     - if the current archives are not in `FROZEN` (format unreleased),
       regenerate them with ``python -m tests.test_npz <model>``
-    - else add a step to `bartz._npz._npz_upgrades.UPGRADES` (this bumps the format
+    - else add a step to `bartz.npz._npz_upgrades.UPGRADES` (this bumps the format
       version) and regenerate
 
     In both cases, update the last step so the older archives still pass. A
@@ -290,7 +284,7 @@ def test_frozen() -> None:
         content = (ARCHIVE_DIR / name).read_bytes()
         assert sha256(content).hexdigest() == digest, (
             f'{name} is released and must not change: to change the format, '
-            'add a step to bartz._npz._npz_upgrades.UPGRADES instead'
+            'add a step to bartz.npz._npz_upgrades.UPGRADES instead'
         )
     for name in unfrozen_archives():
         match = ARCHIVE_NAME.fullmatch(name.replace('.outputs', ''))
@@ -371,7 +365,10 @@ def make_reloadable() -> type[Module]:
 
 
 def test_reregister(tmp_path: Path) -> None:
-    """Check registering again a class replaces it, and a homonym raises."""
+    """Check registering again a class replaces it, and a homonym raises.
+
+    Homonyms of the classes of bartz raise too.
+    """
     old = make_reloadable()
     new = make_reloadable()
     assert old is not new
@@ -383,6 +380,12 @@ def test_reregister(tmp_path: Path) -> None:
 
         @serializable
         class Box(Module):
+            pass
+
+    with pytest.raises(ValueError, match="'State' already registered by bartz"):
+
+        @serializable
+        class State(Module):
             pass
 
 

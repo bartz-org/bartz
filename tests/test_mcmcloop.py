@@ -54,7 +54,6 @@ from bartz._jaxext import (
     get_device_count,
     split,
 )
-from bartz._npz import load_npz, save_npz
 from bartz.grove import is_actual_leaf
 from bartz.mcmcloop import (
     BurninTrace,
@@ -71,6 +70,7 @@ from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
+from bartz.npz._npz import load_npz, save_npz
 from bartz.testing import QuantizedData, gen_data
 from tests.util import assert_array_equal, assert_close_matrices, nnone
 

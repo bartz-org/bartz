@@ -53,7 +53,6 @@ from bartz._interface import (
     predict_latent,
 )
 from bartz._jaxext import is_key, jit, jit_active, split
-from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.bcf._state import BCFState, init_bcf
 from bartz.bcf._step import bcf_step
 from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
@@ -61,6 +60,8 @@ from bartz.mcmcloop import MainTrace
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import OutcomeType, Wishart, make_p_nonterminal
 from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
+from bartz.npz import serializable
+from bartz.npz._npz import check_class, load_npz, save_npz
 from bartz.prepcovars import UniqueQuantileBinner
 
 if sys.version_info >= (3, 11):

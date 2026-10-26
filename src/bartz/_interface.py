@@ -58,7 +58,6 @@ from bartz._jaxext import (
     solve_triangular,
     split,
 )
-from bartz._npz import check_class, load_npz, save_npz, serializable
 from bartz.grove import (
     TreeHeaps,
     TreesTrace,
@@ -100,6 +99,8 @@ from bartz.mcmcstep._state import (
     leaf_partition_spec,
     outcome_target,
 )
+from bartz.npz import serializable
+from bartz.npz._npz import check_class, load_npz, save_npz
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
 
 
@@ -716,7 +717,9 @@ class Bart(Module):
         -----
         The archive holds the whole model, readable without pickle. The arrays
         are copied to host memory and all device/sharding placement is
-        dropped; `load_npz` reconstructs a single-device model.
+        dropped; `load_npz` reconstructs a single-device model. The model may
+        contain instances of custom classes, e.g., a callback passed through
+        ``run_mcmc_kw``; register their classes with `bartz.npz.serializable`.
 
         Files written by a bartz release can be loaded by later releases, but
         not by earlier ones; files written by development versions may not be.

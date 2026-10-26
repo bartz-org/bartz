@@ -1,4 +1,4 @@
-# bartz/src/bartz/_npz/_npz.py
+# bartz/src/bartz/npz/_npz.py
 #
 # Copyright (c) 2026, The Bartz Contributors
 #
@@ -44,8 +44,8 @@ import numpy as np
 from jax import Array, device_get, device_put
 from numpy.lib.npyio import NpzFile
 
-from bartz._npz._npz_upgrades import UPGRADES
 from bartz._version import __version__
+from bartz.npz._npz_upgrades import UPGRADES
 
 FORMAT_VERSION = len(UPGRADES)
 
@@ -56,7 +56,6 @@ _REGISTRY: dict[str, type] = {}
 # a JSON-serializable value, like the skeleton of an object produced by `encode`
 Json: TypeAlias = Any
 
-C = TypeVar('C', bound=type)
 T = TypeVar('T')
 
 
@@ -71,13 +70,44 @@ def is_registered(cls: type) -> bool:
     return registered is not None and qualified_name(registered) == qualified_name(cls)
 
 
-def serializable(cls: C) -> C:
-    """Register a dataclass as allowed in npz archives, under its name.
-
-    Registering again the same class, e.g., after reloading its module,
-    replaces it. The fields of registered classes are the archive format,
-    check changes with ``tests/test_npz.py``.
+def serializable(cls: type[T]) -> type[T]:
     """
+    Register a dataclass to allow its instances in npz archives.
+
+    Use it as a class decorator, e.g., on a custom `~bartz.mcmcloop.Callback`,
+    to save a `~bartz.Bart` fitted with it.
+
+    Parameters
+    ----------
+    cls
+        The dataclass to register, e.g., an `equinox.Module`. Its fields may
+        hold `None`, `bool`, `int`, `float`, `str`, lists, tuples, dicts with
+        `str` keys without slashes, jax arrays that are not weakly typed, and
+        instances of registered classes.
+
+    Returns
+    -------
+    `cls` itself.
+
+    Raises
+    ------
+    ValueError
+        If a different class with the same name is already registered,
+        including the classes of bartz.
+
+    Notes
+    -----
+    Classes are identified by name alone, so registered classes must have
+    unique names. Registering again the same class, e.g., after reloading its
+    module, replaces it. Registration is not inherited: register each subclass
+    explicitly.
+
+    To load an archive, its classes must be registered, i.e., their modules
+    imported, with the same fields as when saving. Loading sets the fields
+    directly, without calling ``__init__``.
+    """
+    # the fields of the bartz classes are the archive format, check changes
+    # with tests/test_npz.py
     tag = cls.__name__
     if tag in _REGISTRY and not is_registered(cls):
         msg = (

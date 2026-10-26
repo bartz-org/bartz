@@ -35,10 +35,10 @@ from jax.sharding import Mesh
 from jaxtyping import Array, Float, Float32, Int32, UInt
 
 from bartz._jaxext import Module, field, jit
-from bartz._npz import serializable
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
+from bartz.npz import serializable
 
 # `Trace.from_state` returns a cls-bound TypeVar instead of the equivalent
 # `typing.Self` because the jaxtyping import hook used in the tests decorates

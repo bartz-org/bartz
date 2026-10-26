@@ -48,6 +48,7 @@ PUBLIC_MODULES = (
     'bartz.grove',
     'bartz.mcmcloop',
     'bartz.mcmcstep',
+    'bartz.npz',
     'bartz.prepcovars',
     'bartz.stochtree',
     'bartz.testing',

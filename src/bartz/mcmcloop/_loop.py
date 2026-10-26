@@ -55,7 +55,8 @@ class Callback(Module):
     """Base class for `run_mcmc` callbacks.
 
     To subclass: define any state as attributes (this is a dataclass), and override
-    `__call__`.
+    `__call__`. To save a `bartz.Bart` fitted with the callback, register the
+    subclass with `bartz.npz.serializable`.
     """
 
     @abstractmethod

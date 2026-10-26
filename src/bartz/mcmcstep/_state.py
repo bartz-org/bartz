@@ -64,7 +64,6 @@ from bartz._jaxext import (
     minimal_unsigned_dtype,
     solve_triangular,
 )
-from bartz._npz import serializable
 from bartz.grove import tree_depths
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, data_vmap_axes
 from bartz.mcmcstep._lazy import (
@@ -81,6 +80,7 @@ from bartz.mcmcstep._reduction import (
     AutoOneHotReduction,
     ReductionConfig,
 )
+from bartz.npz import serializable
 
 ArrayLike = Array | ndarray
 

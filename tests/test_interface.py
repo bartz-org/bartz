@@ -97,6 +97,7 @@ from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import BatchedReduction, Forest, State, Wishart, step
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
+from bartz.npz import serializable
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from bartz.testing import DiscreteUniform, Gamma, gen_data
 from tests.test_mcmcstep import (
@@ -1195,6 +1196,7 @@ def test_error_scale_2d_dense_error_cov(bkw: BartKW) -> None:
         assert_array_equal(trace_2d.split_tree, trace.split_tree)
 
 
+@serializable
 class CountCallback(Callback):
     """Count the MCMC iterations."""
 
@@ -1205,14 +1207,21 @@ class CountCallback(Callback):
         return state, replace(self, count=self.count + 1)
 
 
-def test_final_callback(keys: split) -> None:
-    """Check `Bart` keeps the callback as updated by the MCMC."""
+def test_final_callback(keys: split, tmp_path: Path) -> None:
+    """Check `Bart` keeps the callback as updated by the MCMC, and saves it."""
     kw: kwdict = make_kw(keys.pop(), 7).kw
     kw = dict(kw, run_mcmc_kw=dict(callback=CountCallback(jnp.int32(0))))
-    bart = Bart(**kw)
+    # `OriginalBart` because npz archives accept only the registered class
+    bart = OriginalBart(**kw)
     callback = bart._mcmc_callback
     assert isinstance(callback, CountCallback)
     assert callback.count.item() == kw['n_burn'] + kw['n_save']
+
+    path = tmp_path / 'bart.npz'
+    bart.save_npz(path)
+    loaded = OriginalBart.load_npz(path)._mcmc_callback
+    assert isinstance(loaded, CountCallback)
+    assert_array_equal(loaded.count, callback.count)
 
 
 def test_check_trees_detects_corruption(bkw: BartKW) -> None:

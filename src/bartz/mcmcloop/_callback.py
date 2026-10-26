@@ -38,12 +38,12 @@ from jax.scipy.special import logsumexp
 from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, Integer, PyTree, Shaped
 from tqdm.auto import tqdm
 
-from bartz._npz import serializable
 from bartz._typing import kwdict
 from bartz.grove import forest_mean_leaves
 from bartz.mcmcloop._loop import Callback, _replicate
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes, chainful_axis
+from bartz.npz import serializable
 
 
 @serializable

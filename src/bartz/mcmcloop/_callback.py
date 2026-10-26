@@ -415,6 +415,10 @@ class TqdmCallback(Callback):
         `from_state` call closes it, so a subsequent run starts from a clean
         line.
 
+        The callback drives a single bar for a single `run_mcmc` call: it is
+        not reusable nor resumable, and in a further `run_mcmc` call it shows
+        no bar. Create a new one for each call.
+
         Examples
         --------
         >>> run_mcmc(key, state, ..., callback=TqdmCallback.from_state(state, ...))

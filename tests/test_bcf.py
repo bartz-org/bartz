@@ -985,11 +985,11 @@ class TestBcf:
 
         # one run of 2 burn-in + 3 saved iterations; `run_mcmc` donates the
         # state, so pass a copy
-        final_single, burnin_single, main_single = run_mcmc(
+        final_single, burnin_single, main_single, _ = run_mcmc(
             key, tree.map(jnp.copy, state), 3, n_burn=2, **kw
         )
         # the same run split as 2 + 1 and 0 + 2, in inner loops of 2 iterations
-        mid, burnin_a, main_a = run_mcmc(
+        mid, burnin_a, main_a, _ = run_mcmc(
             random.clone(key),
             tree.map(jnp.copy, state),
             1,
@@ -997,7 +997,7 @@ class TestBcf:
             inner_loop_length=2,
             **kw,
         )
-        final_split, _, main_b = run_mcmc(
+        final_split, _, main_b, _ = run_mcmc(
             random.clone(key), mid, 2, n_burn=0, inner_loop_length=2, **kw
         )
 

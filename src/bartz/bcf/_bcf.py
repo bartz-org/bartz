@@ -606,7 +606,7 @@ class bcf(Module):
         # WORKAROUND(python<3.12): once `run_mcmc` is generic over the state
         # subclass (PEP 695), the state and the traces will come out typed,
         # dropping the casts.
-        final_state, burnin_trace, main_trace = _run_mcmc(
+        result = _run_mcmc(
             mcmc_state=initial_state,
             n_save=ndpost,
             n_burn=nskip,
@@ -622,10 +622,10 @@ class bcf(Module):
             ),
             check_platform=None,
         )
-        self._mcmc_state = cast(BCFState, final_state)
+        self._mcmc_state = cast(BCFState, result.final_state)
         self._binner = binner
-        self._main_trace = cast(BCFMainTrace, main_trace)
-        self._burnin_trace = cast(BCFBurninTrace, burnin_trace)
+        self._main_trace = cast(BCFMainTrace, result.main_trace)
+        self._burnin_trace = cast(BCFBurninTrace, result.burnin_trace)
 
         # 6. Predict at the test points, now that the traces are available
         if x_test is not None:

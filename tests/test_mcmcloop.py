@@ -44,7 +44,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
-from jaxtyping import Array, Float, Int32, Key, Shaped, UInt, UInt8
+from jaxtyping import Array, Float, Float32, Int32, Key, Shaped, UInt, UInt8
 from pytest import FixtureRequest  # noqa: PT013
 
 from bartz._jaxext import (
@@ -180,7 +180,7 @@ class TestRunMcmc:
         """Check that the final state is the one in the trace even if there's overflow."""
         initial_state_copy = tree.map(jnp.copy, initial_state)  # donated
         with debug_key_reuse(False):
-            final_state, _, main_trace = run_mcmc(
+            final_state, _, main_trace, _ = run_mcmc(
                 keys.pop(), initial_state_copy, 10, inner_loop_length=9
             )
 
@@ -216,7 +216,7 @@ class TestRunMcmc:
         """Check 0 iterations produces a noop."""
         initial_state_copy = tree.map(jnp.copy, initial_state)  # donated
         with debug_key_reuse(False):
-            final_state, burnin_trace, main_trace = run_mcmc(
+            final_state, burnin_trace, main_trace, _ = run_mcmc(
                 keys.pop(), initial_state_copy, 0, n_burn=0
             )
 
@@ -344,14 +344,14 @@ class TestRunMcmc:
         key = keys.pop()
         with debug_key_reuse(False):
             # one run of 5 iterations
-            final_single, _, main_single = run_mcmc(
+            final_single, _, main_single, _ = run_mcmc(
                 key, tree.map(jnp.copy, initial_state), 5, n_burn=0, n_skip=1
             )
             # the same 5 iterations split as 2 + 3, resuming from the output state
-            mid, _, main_a = run_mcmc(
+            mid, _, main_a, _ = run_mcmc(
                 key, tree.map(jnp.copy, initial_state), 2, n_burn=0, n_skip=1
             )
-            final_split, _, main_b = run_mcmc(key, mid, 3, n_burn=0, n_skip=1)
+            final_split, _, main_b, _ = run_mcmc(key, mid, 3, n_burn=0, n_skip=1)
 
         tree.map(assert_trace_close, final_single, final_split)
         tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
@@ -362,10 +362,10 @@ class TestRunMcmc:
         """Check the inner loop chunking does not affect the results."""
         key = keys.pop()
         with debug_key_reuse(False):
-            final_whole, burnin_whole, main_whole = run_mcmc(
+            final_whole, burnin_whole, main_whole, _ = run_mcmc(
                 key, tree.map(jnp.copy, initial_state), 4, n_burn=2, n_skip=1
             )
-            final_chunked, burnin_chunked, main_chunked = run_mcmc(
+            final_chunked, burnin_chunked, main_chunked, _ = run_mcmc(
                 key,
                 tree.map(jnp.copy, initial_state),
                 4,
@@ -398,7 +398,7 @@ def test_custom_step(keys: split) -> None:
 
     n_burn, n_save = 2, 3
     with debug_key_reuse(False):
-        final_state, burnin_trace, main_trace = run_mcmc(
+        final_state, burnin_trace, main_trace, _ = run_mcmc(
             keys.pop(),
             simple_init(),
             n_save,
@@ -422,8 +422,8 @@ def test_step_need_not_advance_steps_done(keys: split) -> None:
     """Check the loop seeds itself even if `step` does not touch the counter."""
     key = keys.pop()
 
-    default_state, _, default_main = run_mcmc(key, simple_init(), 4, n_burn=1)
-    frozen_state, _, frozen_main = run_mcmc(
+    default_state, _, default_main, _ = run_mcmc(key, simple_init(), 4, n_burn=1)
+    frozen_state, _, frozen_main, _ = run_mcmc(
         random.clone(key), simple_init(), 4, n_burn=1, step=frozen_step
     )
 
@@ -440,9 +440,9 @@ def test_restartable_with_frozen_step(keys: split) -> None:
     key = keys.pop()
     kw: dict = dict(n_burn=0, n_skip=1, step=frozen_step)
 
-    final_single, _, main_single = run_mcmc(key, simple_init(), 5, **kw)
-    mid, _, main_a = run_mcmc(random.clone(key), simple_init(), 2, **kw)
-    final_split, _, main_b = run_mcmc(random.clone(key), mid, 3, **kw)
+    final_single, _, main_single, _ = run_mcmc(key, simple_init(), 5, **kw)
+    mid, _, main_a, _ = run_mcmc(random.clone(key), simple_init(), 2, **kw)
+    final_split, _, main_b, _ = run_mcmc(random.clone(key), mid, 3, **kw)
 
     tree.map(assert_trace_close, final_single, final_split)
     tree.map(assert_trace_close, main_single, cat_traces(main_a, main_b))
@@ -470,11 +470,41 @@ def test_callback_sees_advanced_steps_done(keys: split) -> None:
     kw: dict = dict(n_burn=n_burn, callback=RecordStepsDoneCallback())
 
     for step_func in (step, frozen_step):
-        _, burnin_trace, main_trace = run_mcmc(
+        _, burnin_trace, main_trace, _ = run_mcmc(
             keys.pop(), simple_init(), n_save, step=step_func, **kw
         )
         assert_array_equal(nnone(burnin_trace.error_cov_inv), jnp.ones(n_burn))
         assert_array_equal(nnone(main_trace.error_cov_inv), jnp.ones(n_save))
+
+
+class SumErrorCovInvCallback(Callback):
+    """Sum the error precision over the iterations."""
+
+    total: Float32[Array, '']
+
+    def __call__(self, *, state: State, **_: Any) -> tuple[State, Callback]:
+        """Add the current error precision to the total."""
+        total = self.total + state.error_cov_inv.value.sum()
+        return state, replace(self, total=total)
+
+
+def test_resume_callback(keys: split) -> None:
+    """Check resuming with the returned callback continues it exactly."""
+    key = keys.pop()
+    kw: dict = dict(n_burn=0, n_skip=1)
+
+    def callback() -> SumErrorCovInvCallback:
+        return SumErrorCovInvCallback(jnp.float32(0))
+
+    single = run_mcmc(key, simple_init(), 5, callback=callback(), **kw)
+    mid = run_mcmc(random.clone(key), simple_init(), 2, callback=callback(), **kw)
+    split_run = run_mcmc(
+        random.clone(key), mid.final_state, 3, callback=mid.final_callback, **kw
+    )
+
+    assert isinstance(single.final_callback, SumErrorCovInvCallback)
+    assert isinstance(split_run.final_callback, SumErrorCovInvCallback)
+    assert_trace_close(split_run.final_callback.total, single.final_callback.total)
 
 
 def test_check_platform_callback_mismatch(keys: split) -> None:

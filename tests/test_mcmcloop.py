@@ -66,7 +66,7 @@ from bartz.mcmcloop import (
     evaluate_trace,
     run_mcmc,
 )
-from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
+from bartz.mcmcloop._callback import _TQDM_REGISTRY, StatsAccumulator, _tqdm_advance
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
@@ -526,6 +526,23 @@ def test_callbacks_npz_roundtrip(tmp_path: Path) -> None:
     loaded = load_npz(path)
     assert tree.structure(loaded) == tree.structure(callback)
     tree.map(assert_array_equal, loaded, callback)
+
+
+def test_tree_life() -> None:
+    """The tree life resets only when a tree is pruned to a lone root."""
+    state = simple_init()
+
+    def set_root_split(state: State, split: list[int]) -> State:
+        split_tree = state.forest.split_tree.at[:3, 1].set(
+            jnp.array(split, state.forest.split_tree.dtype)
+        )
+        return tree_at(lambda s: s.forest.split_tree, state, split_tree)
+
+    # trees 0, 1, 2 go root -> root, non-root -> root, non-root -> non-root
+    accumulator = StatsAccumulator.initial(state, enabled=False)
+    accumulator = accumulator.update(set_root_split(state, [0, 1, 1]))
+    accumulator = accumulator.update(set_root_split(state, [0, 0, 1]))
+    assert_array_equal(accumulator.tree_life[:3], jnp.array([2, 0, 2]))
 
 
 def test_check_platform_callback_mismatch(keys: split) -> None:

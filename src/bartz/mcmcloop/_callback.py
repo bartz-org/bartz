@@ -76,14 +76,14 @@ class CallbackTuple(Callback):
 class StatsReport(Module):
     """Forest diagnostics produced by `StatsAccumulator.report` for one report."""
 
-    grow_prop: Float32[Array, '']
-    """Fraction of trees proposed for a grow move."""
-
     move_acc: Float32[Array, '']
     """Fraction of trees on which a grow or prune move was accepted."""
 
     mean_leaves: Float32[Array, '']
     """Mean number of leaves per tree."""
+
+    mean_tree_life: Float32[Array, '']
+    """Mean number of iterations since each tree was last pruned to a root."""
 
     peff: Float32[Array, ''] | None
     """Effective number of predictors, or `None` when variable selection is off."""
@@ -107,7 +107,10 @@ class StatsAccumulator(Module):
 
     When enabled, it sums the per-iteration statistics so a report shows their
     average over the iterations since the previous report. When disabled it
-    carries no running state and a report shows the latest iteration only.
+    carries no running sums and a report shows the latest iteration only.
+
+    It also tracks the age of each tree, i.e., the number of iterations since
+    it was last pruned to a lone root.
     """
 
     sums: dict[str, Float32[Array, '']] | None
@@ -116,23 +119,40 @@ class StatsAccumulator(Module):
     count: Int32[Array, '']
     """Number of iterations accumulated since the last reset."""
 
+    tree_life: Int32[Array, '*chains num_trees']
+    """Number of iterations since each tree was last pruned to a lone root."""
+
+    is_root: Bool[Array, '*chains num_trees']
+    """Whether each tree is a lone root."""
+
     @classmethod
     def initial(cls, state: State, *, enabled: bool) -> 'StatsAccumulator':
-        """Create a zeroed accumulator, inert unless `enabled`."""
+        """Create a zeroed accumulator, with running sums only if `enabled`."""
+        replicate = partial(_replicate, mesh=state.config.mesh)
         if enabled:
             # only the structure is needed, so avoid computing the statistics
             shapes = eval_shape(cls._avg_stats, state)
-            sums = tree.map(lambda s: jnp.zeros(s.shape, s.dtype), shapes)
+            sums = tree.map(lambda s: replicate(jnp.zeros(s.shape, s.dtype)), shapes)
         else:
             sums = None
-        return cls(sums=sums, count=jnp.int32(0))
+        # sharded over chains like the trees they are computed from
+        is_root = cls._is_root(state)
+        return cls(
+            sums=sums,
+            count=replicate(jnp.int32(0)),
+            tree_life=jnp.zeros_like(is_root, jnp.int32),
+            is_root=is_root,
+        )
 
     def update(self, state: State) -> 'StatsAccumulator':
-        """Add the latest iteration's statistics; no-op when disabled."""
+        """Age the trees and add the latest iteration's statistics."""
+        is_root = self._is_root(state)
+        tree_life = jnp.where(is_root & ~self.is_root, 0, self.tree_life + 1)
+        new = replace(self, tree_life=tree_life, is_root=is_root)
         if self.sums is None:
-            return self
+            return new
         sums = tree.map(jnp.add, self.sums, self._avg_stats(state))
-        return replace(self, sums=sums, count=self.count + 1)
+        return replace(new, sums=sums, count=self.count + 1)
 
     def reset_if(self, cond: bool | Bool[Array, '']) -> 'StatsAccumulator':
         """Zero the running sums where `cond` holds; no-op when disabled."""
@@ -149,7 +169,17 @@ class StatsAccumulator(Module):
         else:
             averaged = tree.map(lambda s: s / self.count, self.sums)
             n_samples = self.count
-        return StatsReport(**averaged, **self._static_stats(state), n_samples=n_samples)
+        return StatsReport(
+            **averaged,
+            **self._static_stats(state),
+            mean_tree_life=self.tree_life.mean(),
+            n_samples=n_samples,
+        )
+
+    @staticmethod
+    def _is_root(state: State) -> Bool[Array, '*chains num_trees']:
+        """Whether each tree is a lone root, i.e., the root is not split."""
+        return state.forest.split_tree[..., 1] == 0
 
     @staticmethod
     def _avg_stats(state: State) -> dict[str, Float32[Array, ''] | None]:
@@ -168,7 +198,6 @@ class StatsAccumulator(Module):
             peff = StatsAccumulator._effective_predictors(log_s)
 
         return dict(
-            grow_prop=forest.grow_prop_count.mean() / prop_total,
             move_acc=(forest.grow_acc_count.mean() + forest.prune_acc_count.mean())
             / prop_total,
             mean_leaves=forest_mean_leaves(split_tree),
@@ -278,11 +307,8 @@ class PrintCallback(Callback):
             else:
                 return _replicate(jnp.int32(val), state.config.mesh)
 
-        accumulator = tree.map(
-            partial(_replicate, mesh=state.config.mesh),
-            StatsAccumulator.initial(
-                state, enabled=average and report_every is not None
-            ),
+        accumulator = StatsAccumulator.initial(
+            state, enabled=average and report_every is not None
         )
 
         return cls(
@@ -445,11 +471,8 @@ class TqdmCallback(Callback):
             report_every=None
             if report_every is None
             else as_replicated_array(jnp.int32(report_every)),
-            accumulator=tree.map(
-                partial(_replicate, mesh=state.config.mesh),
-                StatsAccumulator.initial(
-                    state, enabled=average and report_every is not None
-                ),
+            accumulator=StatsAccumulator.initial(
+                state, enabled=average and report_every is not None
             ),
         )
 
@@ -568,11 +591,11 @@ def _print_report(
         var_msg = f'var: {report.peff:.1f}/{report.p}, '
 
     print(  # noqa: T201, see PrintCallback for why not logging
-        f'{prefix}Iteration {it}/{n_iters}, '
-        f'grow prob: {report.grow_prop:.0%}, '
+        f'{prefix}It {it}/{n_iters}, '
         f'move acc: {report.move_acc:.0%}, '
         f'{var_msg}'
-        f'leaves: {report.mean_leaves:.1f}/{report.max_leaves}{suffix}'
+        f'leaves: {report.mean_leaves:.1f}/{report.max_leaves}, '
+        f'tree life: {report.mean_tree_life:.0f}/{n_iters}{suffix}'
     )
 
 
@@ -649,16 +672,20 @@ def _tqdm_report(report: StatsReport, bar_id: int, n_iters: int) -> None:
     bar = _get_or_create_bar(bar_id, n_iters)
     if bar is None:
         return
-    # keep this terse so the bar stays narrow, e.g. '4ch 100sa acc 25% leaves 3.4/32'
+    # keep this terse so the bar stays narrow, e.g. '4c100s ac30% le2.6/32 tl101/2000'
     msgs = []
+    avg_over = ''
     if report.num_chains is not None:
-        msgs.append(f'{report.num_chains}ch')
+        avg_over += f'{report.num_chains}c'
     if report.n_samples is not None:
-        msgs.append(f'{report.n_samples}sa')
-    msgs.append(f'acc {report.move_acc:.0%}')
+        avg_over += f'{report.n_samples}s'
+    if avg_over:
+        msgs.append(avg_over)
+    msgs.append(f'ac{report.move_acc:.0%}')
     if report.peff is not None:
-        msgs.append(f'var {report.peff:.1f}/{report.p}')
-    msgs.append(f'leaves {report.mean_leaves:.1f}/{report.max_leaves}')
+        msgs.append(f'va{report.peff:.1f}/{report.p}')
+    msgs.append(f'le{report.mean_leaves:.1f}/{report.max_leaves}')
+    msgs.append(f'tl{report.mean_tree_life:.0f}/{n_iters}')
     bar.set_postfix_str(' '.join(msgs))
 
 

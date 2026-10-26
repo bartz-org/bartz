@@ -66,7 +66,7 @@ from bartz.mcmcloop import (
     evaluate_trace,
     run_mcmc,
 )
-from bartz.mcmcloop._callback import _TQDM_REGISTRY, StatsAccumulator, _tqdm_advance
+from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
@@ -528,21 +528,26 @@ def test_callbacks_npz_roundtrip(tmp_path: Path) -> None:
     tree.map(assert_array_equal, loaded, callback)
 
 
-def test_tree_life() -> None:
-    """The tree life resets only when a tree is pruned to a lone root."""
-    state = simple_init()
+def test_tree_life(keys: split) -> None:
+    """The tree life resets when a tree is pruned to a lone root, across runs."""
+    first = run_mcmc(keys.pop(), simple_init(), 50)
+    second = run_mcmc(keys.pop(), first.final_state, 50)
+    trace = cat_traces(first.main_trace, second.main_trace)
+    assert isinstance(trace, MainTrace)
 
-    def set_root_split(state: State, split: list[int]) -> State:
-        split_tree = state.forest.split_tree.at[:3, 1].set(
-            jnp.array(split, state.forest.split_tree.dtype)
-        )
-        return tree_at(lambda s: s.forest.split_tree, state, split_tree)
+    # recompute the tree life from the trees in the trace, which start as roots
+    is_root = trace.split_tree[:, :, 1] == 0
+    was_root = jnp.concatenate([jnp.ones_like(is_root[:1, :]), is_root[:-1, :]])
+    pruned_to_root = is_root & ~was_root
+    assert jnp.any(pruned_to_root)
+    tree_life = jnp.zeros_like(pruned_to_root[0, :], jnp.int32)
+    mean_tree_life = []
+    for pruned in pruned_to_root:
+        tree_life = jnp.where(pruned, 0, tree_life + 1)
+        mean_tree_life.append(tree_life.mean())
 
-    # trees 0, 1, 2 go root -> root, non-root -> root, non-root -> non-root
-    accumulator = StatsAccumulator.initial(state, enabled=False)
-    accumulator = accumulator.update(set_root_split(state, [0, 1, 1]))
-    accumulator = accumulator.update(set_root_split(state, [0, 0, 1]))
-    assert_array_equal(accumulator.tree_life[:3], jnp.array([2, 0, 2]))
+    assert_array_equal(second.final_state.forest.tree_life, tree_life)
+    assert_close_matrices(trace.mean_tree_life, jnp.stack(mean_tree_life), rtol=1e-6)
 
 
 def test_check_platform_callback_mismatch(keys: split) -> None:

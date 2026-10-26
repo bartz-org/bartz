@@ -104,6 +104,11 @@ class BurninTrace(Trace):
     )
     """The number of prune moves accepted during one full MCMC cycle."""
 
+    mean_tree_life: Float32[Array, '*chains_and_samples'] = field(
+        chains=CHAIN_AXIS, samples=0
+    )
+    """The average over trees of `bartz.mcmcstep.Forest.tree_life`."""
+
     error_cov_inv: (
         Float32[Array, '*chains_and_samples']
         | Float32[Array, '*chains_and_samples k k']
@@ -148,6 +153,7 @@ class BurninTrace(Trace):
             grow_acc_count=state.forest.grow_acc_count,
             prune_prop_count=state.forest.prune_prop_count,
             prune_acc_count=state.forest.prune_acc_count,
+            mean_tree_life=state.forest.tree_life.mean(axis=-1),
             log_likelihood=state.forest.log_likelihood,
             log_trans_prior=state.forest.log_trans_prior,
         )

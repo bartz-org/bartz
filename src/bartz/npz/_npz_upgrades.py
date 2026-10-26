@@ -73,10 +73,18 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
             key = f'main_trace.{name}.{field}'
             return array(arrays, f'_main_trace/{name}/{field}', old.get(key))
 
+        # bartz 0.13 does not track the tree life, fill in a value that stands
+        # out if used
+        shape = old[f'main_trace.{name}.grow_prop_count'].shape
+        mean_tree_life = np.full(shape, np.finfo(np.float32).min, np.float32)
+
         return module(
             'MainTrace',
             has_chains=old[f'main_trace.{name}.has_chains'].item(),
             mesh=None,
+            mean_tree_life=array(
+                arrays, f'_main_trace/{name}/mean_tree_life', mean_tree_life
+            ),
             **{
                 field: get(field)
                 for field in (

@@ -134,15 +134,17 @@ class StatsAccumulator(Module):
         """Add the latest iteration's statistics; no-op when disabled."""
         if self.sums is None:
             return self
-        sums = tree.map(jnp.add, self.sums, self._avg_stats(state))
-        return replace(self, sums=sums, count=self.count + 1)
+        else:
+            sums = tree.map(jnp.add, self.sums, self._avg_stats(state))
+            return replace(self, sums=sums, count=self.count + 1)
 
     def reset_if(self, cond: bool | Bool[Array, '']) -> 'StatsAccumulator':
         """Zero the running sums where `cond` holds; no-op when disabled."""
         if self.sums is None:
             return self
-        sums = tree.map(lambda s: jnp.where(cond, 0, s), self.sums)
-        return replace(self, sums=sums, count=jnp.where(cond, 0, self.count))
+        else:
+            sums = tree.map(lambda s: jnp.where(cond, 0, s), self.sums)
+            return replace(self, sums=sums, count=jnp.where(cond, 0, self.count))
 
     def report(self, state: State) -> StatsReport:
         """Statistics to display: the windowed average if enabled, else the latest."""

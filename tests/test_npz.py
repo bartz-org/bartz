@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, TypedDict
-from zipfile import ZipFile
+from zipfile import ZipFile, ZipInfo
 
 import numpy as np
 import pandas as pd
@@ -332,6 +332,15 @@ def test_roundtrip(tmp_path: Path) -> None:
     assert_array_equal(loaded['tuple'][1], value['tuple'][1])
     assert_array_equal(loaded['nested']['box'].value, value['nested']['box'].value)
     assert_array_equal(loaded['array'], value['array'])
+
+
+def test_no_timestamps(tmp_path: Path) -> None:
+    """Check the archive does not record the time it was written."""
+    path = tmp_path / 'box.npz'
+    save_npz(path, Box(jnp.zeros(2)))
+    with ZipFile(path) as zf:
+        for info in zf.infolist():
+            assert info.date_time == ZipInfo('').date_time, info.filename
 
 
 def test_path_as_given(tmp_path: Path) -> None:

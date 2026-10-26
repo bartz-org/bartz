@@ -38,7 +38,7 @@ from os import PathLike
 from pathlib import Path
 from typing import Any, TypeAlias, TypeVar
 from uuid import uuid4
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import numpy as np
 from jax import Array, device_get, device_put
@@ -214,7 +214,15 @@ def save_npz(path: str | PathLike, obj: object, *, compresslevel: int = 3) -> No
                 file, 'w', compression=ZIP_DEFLATED, compresslevel=compresslevel
             ) as zf,
         ):
-            zf.writestr(META_KEY, json.dumps(meta, indent=1))
+            # an explicit `ZipInfo` gets a fixed date like the arrays below,
+            # instead of the current time, so the archive is reproducible;
+            # then compression must be set explicitly
+            zf.writestr(
+                ZipInfo(META_KEY),
+                json.dumps(meta, indent=1),
+                compress_type=ZIP_DEFLATED,
+                compresslevel=compresslevel,
+            )
             # `device_get` copies all the arrays to the host in parallel, and
             # does not copy on cpu
             for key, value in device_get(arrays).items():

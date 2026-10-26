@@ -47,13 +47,12 @@ Evaluating the trace
 
 Progress callbacks
 ------------------
-The entry points are `make_print_callback` and `make_tqdm_callback`.
+Create the progress callbacks with `PrintCallback.from_state` and
+`TqdmCallback.from_state`.
 
 .. autosummary::
     :toctree:
 
-    make_print_callback
-    make_tqdm_callback
     Callback
     CallbackTuple
     CheckPlatformCallback
@@ -72,8 +71,6 @@ from bartz.mcmcloop._callback import (
     StatsAccumulator,
     StatsReport,
     TqdmCallback,
-    make_print_callback,
-    make_tqdm_callback,
 )
 from bartz.mcmcloop._evaluate import EvaluableTrace, compute_varcount, evaluate_trace
 from bartz.mcmcloop._loop import Callback, RunMCMCResult, run_mcmc

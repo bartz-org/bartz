@@ -59,8 +59,8 @@ from bartz.mcmcloop import (
     Callback,
     CheckPlatformCallback,
     MainTrace,
+    TqdmCallback,
     evaluate_trace,
-    make_tqdm_callback,
     run_mcmc,
 )
 from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
@@ -250,7 +250,7 @@ class TestRunMcmc:
         """
         state = simple_init()
         buf = io.StringIO()
-        callback = make_tqdm_callback(
+        callback = TqdmCallback.from_state(
             state, report_every=2, file=buf, mininterval=0, average=average
         )
         bar_id = callback.bar_id.item()
@@ -272,7 +272,9 @@ class TestRunMcmc:
         """A user-supplied ``desc`` overrides the default ``train`` label."""
         state = simple_init()
         buf = io.StringIO()
-        callback = make_tqdm_callback(state, file=buf, mininterval=0, desc='custom ')
+        callback = TqdmCallback.from_state(
+            state, file=buf, mininterval=0, desc='custom '
+        )
         _tqdm_advance(callback.bar_id.item(), 1, 10)
         assert buf.getvalue().lstrip('\r').startswith('custom ')
 
@@ -280,13 +282,13 @@ class TestRunMcmc:
         """A new tqdm callback closes a bar left open by an interrupted run."""
         state = simple_init()
         buf = io.StringIO()
-        callback = make_tqdm_callback(state, file=buf, mininterval=0)
+        callback = TqdmCallback.from_state(state, file=buf, mininterval=0)
         bar_id = callback.bar_id.item()
         # simulate an interrupted run: advance the bar partway, never finishing
         _tqdm_advance(bar_id, 3, 10)
         assert not nnone(_TQDM_REGISTRY[bar_id].bar).disable  # still open
 
-        make_tqdm_callback(state, file=io.StringIO())  # triggers cleanup
+        TqdmCallback.from_state(state, file=io.StringIO())  # triggers cleanup
         assert bar_id not in _TQDM_REGISTRY  # the stale bar was closed and dropped
         assert buf.getvalue().endswith('\n')  # closed cleanly, not left mid-line
 

@@ -73,12 +73,12 @@ from bartz.mcmcloop import (
     CheckPlatformCallback,
     MainTrace,
     MainTraceWithTrainPred,
+    PrintCallback,
     RunMCMCResult,
+    TqdmCallback,
     VarprobInState,
     compute_varcount,
     evaluate_trace,
-    make_print_callback,
-    make_tqdm_callback,
     run_mcmc,
 )
 from bartz.mcmcstep import DiagWishart, Forest, OutcomeType, Wishart, make_p_nonterminal
@@ -1657,10 +1657,10 @@ def _run_mcmc(
     callbacks = ()
     if printevery is not None:
         if pbar:
-            callbacks += (make_tqdm_callback(mcmc_state, report_every=printevery),)
+            callbacks += (TqdmCallback.from_state(mcmc_state, report_every=printevery),)
         else:
             callbacks += (
-                make_print_callback(
+                PrintCallback.from_state(
                     mcmc_state,
                     dot_every=None if printevery == 1 else 1,
                     report_every=printevery,

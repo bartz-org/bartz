@@ -69,6 +69,7 @@ from bartz.grove import (
 )
 from bartz.mcmcloop import (
     BurninTrace,
+    Callback,
     CallbackTuple,
     CheckPlatformCallback,
     MainTrace,
@@ -414,6 +415,7 @@ class Bart(Module):
     _main_trace: MainTrace
     _burnin_trace: BurninTrace
     _mcmc_state: State
+    _mcmc_callback: Callback | None
     _binner: Binner
     _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
     # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
@@ -575,6 +577,7 @@ class Bart(Module):
         self._main_trace = result.main_trace
         self._burnin_trace = result.burnin_trace
         self._mcmc_state = result.final_state
+        self._mcmc_callback = result.final_callback
         self._binner = binner_obj
         self._x_train_fmt = x_train_fmt
         self._binary_mask = binary_mask

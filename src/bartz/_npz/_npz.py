@@ -27,8 +27,8 @@
 The archive contains one ``.npy`` member per array, named by its path in the
 tree, and a ``meta.json`` member with the format version and a skeleton of the
 tree. The skeleton is made of JSON scalars and lists, plus objects tagged by
-``type``: ``module`` (a registered dataclass), ``dict`` (with `str` keys), and
-``array`` (a jax array, stored in the member ``key``).
+``type``: ``module`` (a registered dataclass), ``dict`` (with `str` keys),
+``tuple``, and ``array`` (a jax array, stored in the member ``key``).
 """
 
 import json
@@ -99,6 +99,9 @@ def encode(obj: object, path: str, arrays: dict[str, Array]) -> Json:
         return obj
     elif type(obj) is list:
         return [encode(v, join(path, str(i)), arrays) for i, v in enumerate(obj)]
+    elif type(obj) is tuple:
+        items = [encode(v, join(path, str(i)), arrays) for i, v in enumerate(obj)]
+        return dict(type='tuple', items=items)
     elif type(obj) is dict:
         items = {}
         for k, v in obj.items():
@@ -132,6 +135,8 @@ def decode(
         return node
     elif type(node) is list:
         return [decode(v, data, used) for v in node]
+    elif node['type'] == 'tuple':
+        return tuple(decode(v, data, used) for v in node['items'])
     elif node['type'] == 'dict':
         return {k: decode(v, data, used) for k, v in node['items'].items()}
     elif node['type'] == 'array':

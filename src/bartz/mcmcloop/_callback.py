@@ -24,7 +24,7 @@
 
 """Progress-reporting callbacks for `run_mcmc`."""
 
-import itertools
+import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial, wraps
@@ -38,6 +38,7 @@ from jax.scipy.special import logsumexp
 from jaxtyping import Array, ArrayLike, Bool, Float32, Int32, Integer, PyTree, Shaped
 from tqdm.auto import tqdm
 
+from bartz._npz import serializable
 from bartz._typing import kwdict
 from bartz.grove import forest_mean_leaves
 from bartz.mcmcloop._loop import Callback, _replicate
@@ -45,6 +46,7 @@ from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes, chainful_axis
 
 
+@serializable
 class CallbackTuple(Callback):
     """Callback that runs a sequence of callbacks in order.
 
@@ -99,6 +101,7 @@ class StatsReport(Module):
     """Number of predictors, or `None` when variable selection is off."""
 
 
+@serializable
 class StatsAccumulator(Module):
     """Running average of the forest diagnostics shown during the MCMC.
 
@@ -213,6 +216,7 @@ class StatsAccumulator(Module):
         return jnp.exp(entropy)
 
 
+@serializable
 class PrintCallback(Callback):
     """Progress-printing callback for `run_mcmc`, create it with `from_state`.
 
@@ -267,12 +271,12 @@ class PrintCallback(Callback):
         """
 
         def as_replicated_array_or_none(
-            val: Shaped[ArrayLike, '*shape'] | None,
-        ) -> None | Shaped[Array, '*shape']:
+            val: int | Integer[Array, ''] | None,
+        ) -> Int32[Array, ''] | None:
             if val is None:
                 return None
             else:
-                return _replicate(jnp.asarray(val), state.config.mesh)
+                return _replicate(jnp.int32(val), state.config.mesh)
 
         accumulator = tree.map(
             partial(_replicate, mesh=state.config.mesh),
@@ -351,6 +355,7 @@ class PrintCallback(Callback):
         return state, replace(self, accumulator=accumulator)
 
 
+@serializable
 class TqdmCallback(Callback):
     """`tqdm` progress-bar callback for `run_mcmc`, create it with `from_state`.
 
@@ -424,7 +429,9 @@ class TqdmCallback(Callback):
         >>> run_mcmc(key, state, ..., callback=TqdmCallback.from_state(state, ...))
         """
         _close_stale_bars()  # clean up after any previous run that was interrupted
-        bar_id = next(_TQDM_BAR_COUNTER)
+        # random, to avoid clashes with the ids of callbacks saved in other
+        # processes
+        bar_id = secrets.randbits(31)
         _TQDM_REGISTRY[bar_id] = _TqdmEntry(tqdm_kwargs)
 
         def as_replicated_array(
@@ -585,7 +592,6 @@ class _TqdmEntry:
 # in `TqdmCallback.bar_id` (a traceable scalar, so the loop pytree stays
 # stable across runs and is not recompiled).
 _TQDM_REGISTRY: dict[int, _TqdmEntry] = {}
-_TQDM_BAR_COUNTER = itertools.count()
 
 # tqdm's default layout, but without the ': ' that `format_meter` forces after a
 # non-empty description; the label is set as a `{desc}` ending in a space instead
@@ -656,6 +662,7 @@ def _tqdm_report(report: StatsReport, bar_id: int, n_iters: int) -> None:
     bar.set_postfix_str(' '.join(msgs))
 
 
+@serializable
 class CheckPlatformCallback(Callback):
     """Check the given platform matches the actual platform at runtime."""
 

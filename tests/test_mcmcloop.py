@@ -27,6 +27,7 @@
 import io
 from dataclasses import replace
 from functools import partial
+from pathlib import Path
 from typing import Any, Literal
 
 import pytest
@@ -53,12 +54,15 @@ from bartz._jaxext import (
     get_device_count,
     split,
 )
+from bartz._npz import load_npz, save_npz
 from bartz.grove import is_actual_leaf
 from bartz.mcmcloop import (
     BurninTrace,
     Callback,
+    CallbackTuple,
     CheckPlatformCallback,
     MainTrace,
+    PrintCallback,
     TqdmCallback,
     evaluate_trace,
     run_mcmc,
@@ -505,6 +509,23 @@ def test_resume_callback(keys: split) -> None:
     assert isinstance(single.final_callback, SumErrorCovInvCallback)
     assert isinstance(split_run.final_callback, SumErrorCovInvCallback)
     assert_trace_close(split_run.final_callback.total, single.final_callback.total)
+
+
+def test_callbacks_npz_roundtrip(tmp_path: Path) -> None:
+    """Check the callbacks survive saving and loading."""
+    state = simple_init()
+    callback = CallbackTuple(
+        (
+            PrintCallback.from_state(state),
+            TqdmCallback.from_state(state, file=io.StringIO()),
+            CheckPlatformCallback('cpu'),
+        )
+    )
+    path = tmp_path / 'callback.npz'
+    save_npz(path, callback)
+    loaded = load_npz(path)
+    assert tree.structure(loaded) == tree.structure(callback)
+    tree.map(assert_array_equal, loaded, callback)
 
 
 def test_check_platform_callback_mismatch(keys: split) -> None:

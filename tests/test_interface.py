@@ -47,7 +47,7 @@ import numpy
 import pandas as pd
 import polars as pl
 import pytest
-from equinox import EquinoxRuntimeError
+from equinox import EquinoxRuntimeError, tree_at
 from jax import (
     Device,
     block_until_ready,
@@ -66,7 +66,7 @@ from jax import numpy as jnp
 from jax.scipy.special import ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
-from jaxtyping import Array, Bool, Float, Float32, Key, PyTree, Real, Shaped
+from jaxtyping import Array, Bool, Float, Float32, Int32, Key, PyTree, Real, Shaped
 from numpy.testing import assert_array_less
 from pytest import CaptureFixture, FixtureRequest  # noqa: PT013
 from pytest_subtests import SubTests
@@ -1193,6 +1193,26 @@ def test_error_scale_2d_dense_error_cov(bkw: BartKW) -> None:
             trace_2d.leaf_tree, trace.leaf_tree, rtol=rtol, reduce_rank=True
         )
         assert_array_equal(trace_2d.split_tree, trace.split_tree)
+
+
+class CountCallback(Callback):
+    """Count the MCMC iterations."""
+
+    count: Int32[Array, '']
+
+    def __call__(self, *, state: State, **_: Any) -> tuple[State, 'CountCallback']:
+        """Increment the counter."""
+        return state, replace(self, count=self.count + 1)
+
+
+def test_final_callback(keys: split) -> None:
+    """Check `Bart` keeps the callback as updated by the MCMC."""
+    kw: kwdict = make_kw(keys.pop(), 7).kw
+    kw = dict(kw, run_mcmc_kw=dict(callback=CountCallback(jnp.int32(0))))
+    bart = Bart(**kw)
+    callback = bart._mcmc_callback
+    assert isinstance(callback, CountCallback)
+    assert callback.count.item() == kw['n_burn'] + kw['n_save']
 
 
 def test_check_trees_detects_corruption(bkw: BartKW) -> None:
@@ -2495,7 +2515,7 @@ def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
             x2, x1, err_msg=f'{keystr(path)}: ', rtol=rtol, reduce_rank=True
         )
 
-    tree.map_with_path(check_equal, bart1, bart2)
+    tree.map_with_path(check_equal, drop_callback(bart1), drop_callback(bart2))
 
 
 def test_min_points_per_decision_node(bkw: BartKW) -> None:
@@ -3414,24 +3434,25 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
     # the sharded fits go through `_drop_device_info` because the mesh is
     # static metadata, so it must be cleared to make treedefs match the
     # unsharded baseline before comparing leaves
+    bart = drop_callback(bart)
 
     with subtests.test('shard chains'):
         chains_kw = tree.map(lambda x: x, baseline_kw)
         chains_kw.update(num_chain_devices=2)
-        bart_chains = Bart(**chains_kw)._drop_device_info()
+        bart_chains = drop_callback(Bart(**chains_kw)._drop_device_info())
         tree.map_with_path(check_equal, bart, bart_chains)
 
     with subtests.test('shard data'):
         data_kw = tree.map(lambda x: x, baseline_kw)
         data_kw.update(num_data_devices=2)
-        bart_data = Bart(**data_kw)._drop_device_info()
+        bart_data = drop_callback(Bart(**data_kw)._drop_device_info())
         tree.map_with_path(check_equal, bart, bart_data)
 
     if get_device_count() >= 4:  # pragma: no branch
         with subtests.test('shard data and chains'):
             both_kw = tree.map(lambda x: x, baseline_kw)
             both_kw.update(num_chain_devices=2, num_data_devices=2)
-            bart_both = Bart(**both_kw)._drop_device_info()
+            bart_both = drop_callback(Bart(**both_kw)._drop_device_info())
             tree.map_with_path(check_equal, bart, bart_both)
 
 
@@ -3763,8 +3784,13 @@ def test_devices_platform(bkw: BartKW) -> None:
     assert_identical_bart(bart1._drop_device_info(), bart2._drop_device_info())
 
 
+def drop_callback(bart: OriginalBart) -> OriginalBart:
+    """Remove the final MCMC callback, which differs across fits, e.g., in the progress bar id."""
+    return tree_at(lambda b: b._mcmc_callback, bart, None, is_leaf=lambda x: x is None)
+
+
 def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
-    """Check that two `Bart` objects are equal.
+    """Check that two `Bart` objects are equal, ignoring the final MCMC callback.
 
     On gpu the mcmc is not deterministic at fixed seed because of scatter-adds.
     In ~20% of cases in a certain unit test, two bart runs would diverge. When
@@ -3792,6 +3818,8 @@ def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
         else:
             assert_array_equal(x1, x2, strict=True, err_msg=keystr(path))
 
+    bart1 = drop_callback(bart1)
+    bart2 = drop_callback(bart2)
     tree.map_with_path(check_same, bart1, bart2)
 
     treedef1 = tree.structure(bart1)

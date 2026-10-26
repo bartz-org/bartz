@@ -322,6 +322,7 @@ def test_roundtrip(tmp_path: Path) -> None:
     """Check all supported value types survive saving and loading."""
     value: dict = dict(
         scalars=[None, True, 1, 1.5, 'a'],
+        tuple=(1, jnp.zeros(2)),
         nested=dict(box=Box(jnp.arange(3, dtype=jnp.uint8))),
         array=jnp.ones((2, 3)),
     )
@@ -331,8 +332,10 @@ def test_roundtrip(tmp_path: Path) -> None:
     assert isinstance(box, Box)
     loaded = box.value
     assert loaded['scalars'] == value['scalars']
-    for key in 'scalars', 'nested', 'array':
+    for key in 'scalars', 'tuple', 'nested', 'array':
         assert type(loaded[key]) is type(value[key])
+    assert loaded['tuple'][0] == value['tuple'][0]
+    assert_array_equal(loaded['tuple'][1], value['tuple'][1])
     assert_array_equal(loaded['nested']['box'].value, value['nested']['box'].value)
     assert_array_equal(loaded['array'], value['array'])
 
@@ -390,7 +393,7 @@ class Unregistered(Module):
 @pytest.mark.parametrize(
     ('value', 'match'),
     [
-        ((1, 2), 'unsupported type tuple'),
+        ({1, 2}, 'unsupported type set'),
         (np.zeros(3), 'unsupported type ndarray'),
         (Unregistered(), 'unsupported type Unregistered'),
         ({1: 2}, 'dict key 1'),

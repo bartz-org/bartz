@@ -85,7 +85,7 @@ def _subsample(
 
     Returns
     -------
-    A matrix with `p` rows and ``min(n, max_samples)`` columns. If ``n <= max_samples``, `X` is returned unchanged. Otherwise each row contains `max_samples` distinct values drawn without replacement from the corresponding row of `X`, with rows sampled independently. The order of values within each row is unspecified.
+    A matrix with `p` rows and ``min(n, max_samples)`` columns. If ``n <= max_samples``, `X` is returned unchanged. Otherwise each row contains `max_samples` values drawn with replacement from the corresponding row of `X`, with rows sampled independently.
 
     Raises
     ------
@@ -105,7 +105,7 @@ def _subsample(
     @partial(autobatch, max_io_nbytes=2**29)
     @vmap
     def per_row(k: Key[Array, ''], x: Real[Array, ' n']) -> Real[Array, ' m']:
-        return random.choice(k, x, shape=(max_samples,), replace=False)
+        return x[random.randint(k, (max_samples,), 0, n)]
 
     return per_row(keys, X)
 
@@ -524,7 +524,8 @@ class UniqueQuantileBinner(Binner):
     When ``n > max_subsample``, the predictor matrix is randomly thinned
     along the observation axis to ``max_subsample`` columns before
     quantilization. Each predictor row is thinned independently and
-    without replacement. This keeps quantilization tractable on very
+    with replacement, so between 63% and 100% of the sampled values are
+    distinct observations. This keeps quantilization tractable on very
     large datasets at the cost of approximate quantiles.
 
     Parameters

@@ -127,7 +127,7 @@ else:
                 seed=seed,
             )
             if 'mc_cores' in signature(gbart).parameters:
-                kw.update(mc_cores=num_chains or 1)
+                kw = dict(kw, mc_cores=num_chains or 1)
             elif num_chains is not None:
                 msg = 'multichain not supported'
                 raise NotImplementedError(msg)

@@ -97,6 +97,43 @@ except ImportError:
 # (p, n) to R BART3's (n, p) in 0.11.0. Detect it from the `x_train` annotation.
 X_N_BY_P = "'n p'" in str(signature(gbart).parameters['x_train'].annotation)
 
+if TYPE_CHECKING:
+    from bartz import Bart
+else:
+    try:
+        from bartz import Bart
+    except ImportError:
+        Bart = None
+    if Bart is None or 'n_save' not in signature(Bart).parameters:
+        # WORKAROUND(bartz<0.10.0): `Bart` was added in 0.8.0 and took
+        # ndpost/nskip until 0.10.0; emulate the subset used here with gbart
+        def Bart(
+            x_train: Shaped[Array, 'p n'],
+            y_train: Shaped[Array, ' n'],
+            *,
+            num_trees: int,
+            n_save: int,
+            n_burn: int,
+            num_chains: int | None,
+            seed: Key[Array, ''],
+        ) -> gbart:
+            """Run `gbart` with `Bart` arguments."""
+            kw: dict = dict(
+                ntree=num_trees,
+                ndpost=n_save,
+                nskip=n_burn,
+                usequants=True,
+                numcut=255,
+                seed=seed,
+            )
+            if 'mc_cores' in signature(gbart).parameters:
+                kw = dict(kw, mc_cores=num_chains or 1)
+            elif num_chains is not None:
+                msg = 'multichain not supported'
+                raise NotImplementedError(msg)
+            return gbart(x_train.T if X_N_BY_P else x_train, y_train, **kw)
+
+
 from bartz.mcmcstep import init, step
 from benchmarks.latest_bartz.mcmcstep import make_p_nonterminal
 from benchmarks.latest_bartz.testing import gen_data
@@ -689,7 +726,7 @@ class BaseGbart(AutoParamNames):
                 block_bart(bart)
 
 
-def block_bart(bart: gbart) -> None:
+def block_bart(bart: gbart | Bart) -> None:
     """Block a bart object until ready, adapting for old versions."""
     if isinstance(bart, Module):
         block_until_ready(bart)
@@ -742,6 +779,49 @@ class GbartGeneric(BaseGbart):
     """General timing of `mc_gbart` with many settings."""
 
     params = ((0, NITERS), (1, 6), ('warm', 'cold'), (False, True))
+
+
+Regime = Literal['large_n', 'large_p']
+
+
+class BartInit(AutoParamNames):
+    """Time `Bart` without MCMC iterations, i.e., preprocessing and setup.
+
+    'large_n' has more datapoints than the default subsampling threshold of
+    the binner, 'large_p' has many predictors.
+    """
+
+    # asv config
+    params = (('large_n', 'large_p'),)
+    warmup_time = 0.0
+    number = 1
+
+    # other config
+    shapes: ClassVar[Mapping[Regime, tuple[int, int]]] = MappingProxyType(
+        dict(large_n=(50, 150_000), large_p=(1000, 10_000))
+    )
+
+    def setup(self, regime: Regime) -> None:
+        """Generate the data and run once to warm-up."""
+        p, n = self.shapes[regime]
+        keys = split(random.key(2026_10_27_17_42), 3)
+        self.kw: dict = dict(
+            x_train=random.normal(keys.pop(), (p, n)),
+            y_train=random.normal(keys.pop(), (n,)),
+            num_trees=NTREE,
+            n_save=0,
+            n_burn=0,
+            num_chains=None,
+            seed=keys.pop(),
+        )
+        block_until_ready(self.kw)
+        self.time_init()
+
+    def time_init(self, *_: Any) -> None:
+        """Time instantiating `Bart`."""
+        with redirect_stdout(StringIO()):
+            bart = Bart(**self.kw)
+        block_bart(bart)
 
 
 class BaseRunMcmc(AutoParamNames):

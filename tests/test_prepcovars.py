@@ -45,7 +45,12 @@ from bartz.prepcovars._prepcovars import (
     _subsample,
     _uniform_splits_from_matrix,
 )
-from tests.util import assert_array_equal, assert_close_matrices, jaxtyping_disabled
+from tests.util import (
+    assert_allclose,
+    assert_array_equal,
+    assert_close_matrices,
+    jaxtyping_disabled,
+)
 
 
 class TestQuantilizer:
@@ -137,13 +142,24 @@ class TestSubsample:
         for i in range(p):
             assert jnp.all(jnp.isin(out[i], x[i]))
 
-    def test_no_replacement(self, keys: split) -> None:
-        """Each output row contains distinct values (no replacement) when input row is distinct."""
-        p, n, max_samples = 4, 50, 20
+    def test_with_replacement(self, keys: split) -> None:
+        """Rows are drawn with replacement, so they contain repeated values."""
+        p, n, max_samples = 4, 50, 40
         x = jnp.arange(p * n).reshape(p, n)
         out = _subsample(keys.pop(), x, max_samples)
+        # the number of unique values has mean 27.7 and sd 2.1, and each bound
+        # fails with probability ~1e-10
         for i in range(p):
-            assert jnp.unique(out[i]).size == max_samples
+            assert 15 <= jnp.unique(out[i, :]).size < max_samples
+
+    def test_uniform_over_row(self, keys: split) -> None:
+        """Samples are drawn uniformly from the whole row."""
+        p, n, max_samples = 4, 10_000, 9_000
+        x = jnp.broadcast_to(jnp.arange(n), (p, n))
+        out = _subsample(keys.pop(), x, max_samples)
+        # the mean has sd 15.2, so rtol=0.02 is 6.6 sd, while sampling from
+        # only the first max_samples values would shift it by 500
+        assert_allclose(out.mean(), (n - 1) / 2, rtol=0.02)
 
     def test_n_equals_max_samples(self, keys: split) -> None:
         """When n == max_samples, X is returned unchanged."""

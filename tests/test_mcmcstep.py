@@ -1069,21 +1069,43 @@ class TestReduction:
         """The count-only configs reject values other than 1 and a missing range."""
         indices = jnp.zeros(8, jnp.uint8)
         range_kw: dict = dict(size=4, subset_start=jnp.uint32(0), subset_length=1)
+
+        # eagerly, `lax.platform_dependent` runs only the current platform's
+        # branch, while under jit it traces the popcount branch everywhere
         for config in (PopcountReduction(), AutoOneHotOrPopcountReduction()):
             with pytest.raises(AssertionError):
-                config._reduce(
-                    jnp.ones(8),
-                    indices,
-                    dtype=jnp.float32,
-                    data_sharded=False,
-                    **range_kw,
-                )
+                jit(
+                    partial(
+                        config._reduce,
+                        jnp.ones(8),
+                        indices,
+                        dtype=jnp.float32,
+                        data_sharded=False,
+                        **range_kw,
+                    )
+                ).trace()
             with pytest.raises(AssertionError):
-                config._reduce(
-                    2, indices, dtype=jnp.uint32, data_sharded=False, **range_kw
-                )
+                jit(
+                    partial(
+                        config._reduce,
+                        2,
+                        indices,
+                        dtype=jnp.uint32,
+                        data_sharded=False,
+                        **range_kw,
+                    )
+                ).trace()
             with pytest.raises(AssertionError):
-                config._reduce(1, indices, size=4, dtype=jnp.uint32, data_sharded=False)
+                jit(
+                    partial(
+                        config._reduce,
+                        1,
+                        indices,
+                        size=4,
+                        dtype=jnp.uint32,
+                        data_sharded=False,
+                    )
+                ).trace()
 
     def test_gpu_sm_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The cuda branch reads the shared SM count and rejects mixed gpus."""

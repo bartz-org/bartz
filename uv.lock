@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -240,6 +240,10 @@ cuda13 = [
 ]
 
 [package.dev-dependencies]
+config = [
+    { name = "packaging" },
+    { name = "tomli" },
+]
 dev = [
     { name = "appnope" },
     { name = "asv" },
@@ -292,6 +296,10 @@ requires-dist = [
 provides-extras = ["cuda12", "cuda13"]
 
 [package.metadata.requires-dev]
+config = [
+    { name = "packaging", specifier = ">=25.0" },
+    { name = "tomli", specifier = ">=2.2.1" },
+]
 dev = [
     { name = "appnope", specifier = ">=0.1.4" },
     { name = "asv", specifier = ">=0.6.5" },

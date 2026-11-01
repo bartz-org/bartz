@@ -285,14 +285,14 @@ jobs:
       - name: Check the version is derived from git
         run: uv run --dev python -c 'import bartz; print(bartz.__version__)' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+(\.dev[0-9]+\+g[0-9a-f]+)?$'
 
-      - name: Update locked dependencies
-        run: make update-deps
+      - name: Update Python dependencies
+        run: make update-python-deps
+
+      - name: Update non-Python dependencies
+        run: make update-non-python-deps
         env:
           # authenticated GitHub API calls by pinact
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Bump oldest supported dependencies
-        run: make update-oldest-deps
 
   required-dummy:
     runs-on: ubuntu-latest

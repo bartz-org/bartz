@@ -76,7 +76,8 @@ def collect_requirements(pyproject: dict) -> list[str]:
     ):
         reqs.extend(extra_reqs)
     for group_reqs in pyproject.get('dependency-groups', {}).values():
-        reqs.extend(group_reqs)
+        # skip `{include-group = ...}` entries, the included group is listed anyway
+        reqs.extend(r for r in group_reqs if isinstance(r, str))
     return reqs
 
 

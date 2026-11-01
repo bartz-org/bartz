@@ -67,7 +67,8 @@ def floors_from_pyproject(path: Path) -> dict[str, Version]:
     # installs without it, so taking the max below would be wrong
     reqs: list[str] = list(project['dependencies'])
     for group in data.get('dependency-groups', {}).values():
-        reqs.extend(group)
+        # skip `{include-group = ...}` entries, the included group is listed anyway
+        reqs.extend(r for r in group if isinstance(r, str))
     floors: dict[str, Version] = {}
     for r in reqs:
         req = Requirement(r)

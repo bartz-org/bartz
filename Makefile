@@ -53,7 +53,7 @@ COOLDOWN_DAYS = $(or $(shell uv run --no-project --python='>=3.11' python -c 'im
 
 # define command to run python with oldest supported dependencies
 # OLD_DATE / OLD_DELAY_DAYS / BUMP_PYTHON_VERSION_DATE / NUM_SUPPORTED_PYTHON_RELEASES
-# drive the `update-oldest-deps` policy.
+# drive the `update-python-deps` policy.
 OLD_DATE = 2025-10-04T00:00:00Z
 OLD_DELAY_DAYS = 365
 BUMP_PYTHON_VERSION_DATE = 10-31
@@ -79,9 +79,8 @@ help:
 	@echo "- covreport: build html coverage report"
 	@echo "- covcheck: check coverage is above some thresholds"
 	@echo "- diffcov: check changed-lines coverage vs DIFF_BASE (default origin/main)"
-	@echo "- update-python-deps: pin the dep cooldown, then upgrade uv.lock to the latest allowed deps"
+	@echo "- update-python-deps: advance the supported Python range, oldest-supported pins and dep cooldown, then upgrade uv.lock"
 	@echo "- update-non-python-deps: upgrade prek hooks and GitHub Actions (not date-pinned)"
-	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- check-changelog: verify the topmost changelog section is dated today"
 	@echo "- check-npz-frozen: verify the test archives of the file format are frozen"
@@ -290,9 +289,17 @@ diffcov:
 # `make update-non-python-deps` at the start of the release, outside the
 # release loop.
 PINACT = PINACT_MIN_AGE=$(COOLDOWN_DAYS) GITHUB_TOKEN=$${GITHUB_TOKEN:-$$(gh auth token)} $(UV_RUN) prek run pinact --stage manual --all-files
+
+# Run the dependency update scripts in a throwaway env with only the locked
+# `config` group: syncing the dev env mid-update would install the stale lock
+# on a possibly just-bumped Python.
+CONFIG_RUN = uv run --frozen --isolated --only-group config python -m
+
 .PHONY: update-python-deps
 update-python-deps:
-	$(UV_RUN) python -m config.update_cooldown --today=$(TODAY) --cooldown-days=$(COOLDOWN_DAYS)
+	$(CONFIG_RUN) config.update_python_version --bump-date=$(BUMP_PYTHON_VERSION_DATE) --num-supported=$(NUM_SUPPORTED_PYTHON_RELEASES) --today=$(TODAY)
+	$(CONFIG_RUN) config.update_oldest_deps --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS) --today=$(TODAY)
+	$(CONFIG_RUN) config.update_cooldown --today=$(TODAY) --cooldown-days=$(COOLDOWN_DAYS)
 	uv lock --upgrade
 
 .PHONY: update-non-python-deps
@@ -301,12 +308,6 @@ update-non-python-deps:
 	# Update GitHub Actions, skipping releases newer than the cooldown. prek
 	# fails a hook that modifies files, so a second run checks it now passes.
 	$(PINACT) || $(PINACT)
-
-.PHONY: update-oldest-deps
-update-oldest-deps:
-	$(UV_RUN) python -m config.update_python_version --bump-date=$(BUMP_PYTHON_VERSION_DATE) --num-supported=$(NUM_SUPPORTED_PYTHON_RELEASES) --today=$(TODAY)
-	$(UV_RUN) python -m config.update_oldest_deps --min-old-date=$(OLD_DATE) --delay-days=$(OLD_DELAY_DAYS) --today=$(TODAY)
-	uv lock
 
 
 ################# RELEASE #################
@@ -336,7 +337,7 @@ build:
 # artifacts pass `check-dist` and `smoke-test`, to avoid editing a published
 # tag if something fails in between.
 .PHONY: release
-release: check-changelog check-npz-frozen clean setup update-oldest-deps update-python-deps check-committed tests tests-single-cpu tests-old docs version-tag build upload gh-release
+release: check-changelog check-npz-frozen clean update-python-deps setup check-committed tests tests-single-cpu tests-old docs version-tag build upload gh-release
 	@echo "Done!"
 
 .PHONY: version-tag

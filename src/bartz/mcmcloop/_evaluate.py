@@ -146,7 +146,7 @@ def evaluate_trace(
 
     # the tree-sum reduction carry varies over whichever manual axes are active;
     # marking its seed varying (see autobatch's `reduce_vary_axes`) lets the VMA
-    # checker pass. WORKAROUND(jax<0.7): pcast/VMA absent, fall back to disabling
+    # checker pass. WORKAROUND(jax<0.8.2): pcast absent, fall back to disabling
     # the checker on the `shard_map` instead
     vary_axes = ('chains',) * shard_chains + ('data',) * shard_data
     check_vma = hasattr(lax, 'pcast')

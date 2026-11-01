@@ -26,13 +26,49 @@
 
 import sys
 from contextlib import nullcontext
+from importlib.metadata import version
+from importlib.util import cache_from_source
 from re import fullmatch
+from types import CodeType
 
 import jax
 import numpy as np
 import pytest
 from jax import config, random
-from jaxtyping import install_import_hook
+from jaxtyping import _import_hook, install_import_hook
+from packaging.version import Version
+
+
+def patch_jaxtyping_import_hook() -> None:
+    """Adapt the jaxtyping import hook to Python 3.15 importlib signatures."""
+
+    def compat_cache_from_source(
+        path: str, _debug_override: bool | None = None, *, optimization: str
+    ) -> str:
+        return cache_from_source(path, optimization=optimization)
+
+    loader = _import_hook._JaxtypingLoader
+    source_to_code = loader.source_to_code
+
+    def compat_source_to_code(
+        self: _import_hook._JaxtypingLoader,
+        data: bytes,
+        path: str,
+        _fullname: str | None = None,
+        *,
+        _optimize: int = -1,
+    ) -> CodeType:
+        return source_to_code(self, data, path, _optimize=_optimize)
+
+    _import_hook.cache_from_source = compat_cache_from_source  # ty: ignore[invalid-assignment]
+    loader.source_to_code = compat_source_to_code
+
+
+# WORKAROUND(jaxtyping<=0.3.11): Python 3.15 dropped the `debug_override`
+# argument of `cache_from_source` and passes `fullname` to `source_to_code`,
+# which the jaxtyping import hook does not expect
+if sys.version_info >= (3, 15) and Version(version('jaxtyping')) <= Version('0.3.11'):
+    patch_jaxtyping_import_hook()
 
 # Turn on runtime type checking of the whole library for the test suite. This is
 # done here, before the first `bartz` import, rather than via the jaxtyping
@@ -57,9 +93,7 @@ if INVASIVE_DEBUG_CHECKS:  # pragma: no cover, opt-in debug checks
 
 config.update('jax_legacy_prng_key', 'error')
 
-# WORKAROUND(jax<0.8.0): jax_explicit_x64_dtypes config option added in 0.8.0
-if jax.__version_info__ >= (0, 8, 0):
-    config.update('jax_explicit_x64_dtypes', 'error')
+config.update('jax_explicit_x64_dtypes', 'error')
 
 # WORKAROUND(jax<0.8.2): jax_check_static_indices config option added in 0.8.2
 if jax.__version_info__ >= (0, 8, 2):

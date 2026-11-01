@@ -29,7 +29,7 @@ This is the main suite of tests.
 
 import math
 import pickle
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass, replace
 from functools import partial
@@ -66,6 +66,7 @@ from jax import numpy as jnp
 from jax.scipy.special import ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
+from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, PyTree, Real, Shaped
 from numpy.testing import assert_array_less
 from pytest import CaptureFixture, FixtureRequest  # noqa: PT013
@@ -2865,18 +2866,6 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
     tree.map(check, batched, stacked)
 
 
-# WORKAROUND(jax<0.7.2): before 0.7.2, callbacks (pure_callback in
-# gammainccinv, equinox debug checks) disable JAX's C++ pjit fastpath cache, so
-# no_tracing raises a false positive without any actual jaxpr re-tracing. Remove
-# this skip once the oldest supported jax is >= 0.7.2.
-@pytest.mark.skipif(
-    jax.__version_info__ < (0, 7, 2),
-    reason='no_tracing gives false positives with jax < 0.7.2: callbacks '
-    '(pure_callback in gammainccinv, equinox debug checks) disable '
-    "JAX's C++ pjit fastpath cache, so no_tracing raises without any actual "
-    'jaxpr re-tracing (see test_no_recompilation_inner_loop_counter for the '
-    'version-robust check)',
-)
 def test_no_recompilation_no_tracing(bkw: BartKW) -> None:
     """Check that running the same `Bart` invocation twice does not retrace.
 
@@ -3167,7 +3156,7 @@ def test_automatic_integer_types(bkw: BartKW) -> None:
         bart = Bart(**kw)
     messages = [str(w.message) for w in warnings]
 
-    def select_type(cond: bool) -> type:
+    def select_type(cond: bool) -> DTypeLike:
         return jnp.uint8 if cond else jnp.uint16
 
     leaf_indices_type = select_type(bkw.maxdepth <= 8)
@@ -3218,11 +3207,8 @@ def get_expect_sharded(kw: dict) -> bool:
     )
 
 
-def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
+def test_sharding(bkw: BartKW, keys: split) -> None:
     """Check that chains and data shards live on their own devices throughout the interface."""
-    # WORKAROUND(jax<0.7): sharding bug, no time to fix
-    if jax.__version_info__ < (0, 7, 0) and variant in (2, 5):
-        pytest.xfail('Sharding bug in bartz with jax<0.7.')
     kw = bkw.kw
     bart = Bart(**kw)
 
@@ -3320,7 +3306,7 @@ def run_bart_and_block(bkw: BartKW, keys: split) -> None:
 
 
 @contextmanager
-def array_garbage_collection_guard(value: str) -> Iterator[None]:
+def array_garbage_collection_guard(value: str) -> Generator[None]:
     """Implement `jax.array_garbage_collection_guard`, added in jax v0.9.1."""
     # WORKAROUND(jax<0.9.1): replace with `jax.array_garbage_collection_guard`
     setting = 'jax_array_garbage_collection_guard'
@@ -3333,7 +3319,7 @@ def array_garbage_collection_guard(value: str) -> Iterator[None]:
 
 
 @contextmanager
-def catch_array_gc_guard() -> Iterator[None]:
+def catch_array_gc_guard() -> Generator[None]:
     """Catch array GC guard log messages and raise as exceptions."""
     # we need this because array_garbage_collection_guard('fatal')
     # terminates the process, and the 'log' messages are emitted from C++

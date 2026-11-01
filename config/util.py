@@ -116,7 +116,7 @@ def main() -> None:
     else:
         if args.today is None:
             parser.error(f'{args.command} requires --today')
-        today = args.today.astimezone(datetime.timezone.utc).date()
+        today = args.today.astimezone(datetime.UTC).date()
         if args.command == 'check_changelog':
             check_changelog(today)
         elif args.command == 'gh_release':

@@ -38,7 +38,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 from zipfile import ZipFile, ZipInfo
 
 import numpy as np
@@ -67,11 +67,6 @@ FROZEN = {
     'bcf_v1.npz': 'be685f1157cdb0d8c1badbaa1f5de1d29d4c1678661c065271933045c01562bb',
     'bcf_v1.outputs.npz': 'b980cdc25f22cbc53533ebb2713f991fcd31bd6d538bd9b8ab467b17c42e3a16',
 }
-
-if sys.version_info >= (3, 11):
-    from typing import NotRequired
-else:  # WORKAROUND(python<3.11): typing.NotRequired was added in 3.11
-    from typing_extensions import NotRequired
 
 
 class Inputs(TypedDict):

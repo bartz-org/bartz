@@ -126,7 +126,7 @@ def earliest_upload(files: list[dict]) -> datetime.datetime | None:
         except ValueError:
             continue
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
+            dt = dt.replace(tzinfo=datetime.UTC)
         times.append(dt)
     return min(times) if times else None
 

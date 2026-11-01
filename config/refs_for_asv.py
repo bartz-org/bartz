@@ -162,7 +162,7 @@ def benchmarked_version_tags(repo_path: Path | str = '.') -> tuple[Tag, ...]:
     tags = (
         Tag(
             date=datetime.datetime.fromtimestamp(
-                tag.commit.committed_date, tz=datetime.timezone.utc
+                tag.commit.committed_date, tz=datetime.UTC
             ),
             name=tag.name,
         )
@@ -171,7 +171,7 @@ def benchmarked_version_tags(repo_path: Path | str = '.') -> tuple[Tag, ...]:
         and Version(tag.name) >= MIN_VERSION
         and repo.is_ancestor(tag.commit, head_commit)
     )
-    return select_tags(tuple(tags), datetime.datetime.now(datetime.timezone.utc))
+    return select_tags(tuple(tags), datetime.datetime.now(datetime.UTC))
 
 
 def oldest_benchmarked_version(repo_path: Path | str = '.') -> Version:

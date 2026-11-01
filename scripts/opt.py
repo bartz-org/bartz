@@ -82,10 +82,8 @@ import sys
 from argparse import ArgumentDefaultsHelpFormatter, ArgumentParser, Namespace
 from collections.abc import Callable, Iterator
 from dataclasses import MISSING, dataclass, field, fields, replace
-
-# WORKAROUND(python<3.11): use datetime.UTC and enum.StrEnum
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum, auto
 from gc import collect
 from itertools import product
 from pathlib import Path
@@ -137,15 +135,12 @@ def read_jax_config(name: str) -> Any:  # noqa: ANN401
     return getattr(jax_config, name)
 
 
-# WORKAROUND(python<3.11): subclass StrEnum and use auto() values
-class Logging(str, Enum):
+class Logging(StrEnum):
     """Logging mode for benchmark runs."""
 
-    no = 'no'
-    pbar = 'pbar'
-    results = 'results'
-
-    __str__ = str.__str__  # what StrEnum does, keeps argparse --help readable
+    no = auto()
+    pbar = auto()
+    results = auto()
 
 
 def _kind_name(cls: type[ReductionConfig]) -> str:
@@ -1089,7 +1084,7 @@ def configure_gpu_preallocation(*, preallocate: bool) -> None:
 
 def make_output_dir() -> Path:
     """Create a dated output directory next to this script."""
-    stamp = datetime.now(tz=timezone.utc).astimezone().strftime('%Y-%m-%dT%H-%M-%S')
+    stamp = datetime.now(tz=UTC).astimezone().strftime('%Y-%m-%dT%H-%M-%S')
     device = get_default_device().device_kind.replace(' ', '_')
     out_dir = Path(__file__).with_name(f'opt-{stamp}-{device}')
     out_dir.mkdir()

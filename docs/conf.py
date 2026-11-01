@@ -62,7 +62,7 @@ GITHUB_REF = MATCH.group(1) if MATCH else f'v{version.partition("+")[0]}'
 project = f'bartz {version}'
 author = 'The Bartz Contributors'
 
-NOW = datetime.datetime.now(tz=datetime.timezone.utc)
+NOW = datetime.datetime.now(tz=datetime.UTC)
 YEAR = '2024'
 if NOW.year > int(YEAR):
     YEAR += '-' + str(NOW.year)

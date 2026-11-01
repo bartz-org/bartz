@@ -24,10 +24,9 @@
 
 """Bayesian Causal Forests (BCF) interface."""
 
-import sys
 from operator import attrgetter
 from os import PathLike
-from typing import Any, Literal, cast
+from typing import Any, Literal, NotRequired, TypedDict, cast
 
 import jax.numpy as jnp
 from equinox import Module, error_if, field
@@ -63,13 +62,6 @@ from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
 from bartz.npz import serializable
 from bartz.npz._npz import check_class, load_npz, save_npz
 from bartz.prepcovars import UniqueQuantileBinner
-
-if sys.version_info >= (3, 11):
-    from typing import NotRequired, TypedDict
-else:
-    # WORKAROUND(python<3.11): typing.NotRequired was added in 3.11, and
-    # before then typing.TypedDict ignores typing_extensions.NotRequired
-    from typing_extensions import NotRequired, TypedDict
 
 
 def process_bcf_predictor_input(

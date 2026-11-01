@@ -36,6 +36,7 @@ import pytest
 from jax import (
     NamedSharding,
     device_put,
+    enable_x64,
     grad,
     jvp,
     lax,
@@ -45,13 +46,6 @@ from jax import (
     tree,
     vmap,
 )
-
-# WORKAROUND(jax<0.7.1): top-level `jax.enable_x64` was added later; on older jax
-# it lives in `jax.experimental` (removed in newer jax). Use whichever exists.
-try:
-    from jax import enable_x64
-except ImportError:
-    from jax.experimental import enable_x64  # ty: ignore[unresolved-import]
 from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular as library_solve_triangular  # noqa: TID251
 from jax.sharding import AxisType, Mesh, PartitionSpec

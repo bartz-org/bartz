@@ -112,11 +112,12 @@ class Callback(Module):
         ...
 
 
-# WORKAROUND(python<3.11): generic NamedTuple is only supported from 3.11, so
-# `burnin_trace`/`main_trace` are pinned to the default trace types. Once 3.10
-# is dropped, make this `NamedTuple, Generic[BurninTraceT, MainTraceT]` (with
-# TypeVars bound to `Trace`) and parametrize `run_mcmc` accordingly, so a custom
-# `burnin_trace_type`/`main_trace_type` flows through to the returned types.
+# WORKAROUND(beartype<=0.23.1): beartype rejects generic NamedTuple hints
+# (beartype#748), so `burnin_trace`/`main_trace` are pinned to the default trace
+# types. Once fixed, make this `NamedTuple, Generic[BurninTraceT, MainTraceT]`
+# (with TypeVars bound to `Trace`) and parametrize `run_mcmc` accordingly, so a
+# custom `burnin_trace_type`/`main_trace_type` flows through to the returned
+# types.
 class RunMCMCResult(NamedTuple):
     """Return value of `run_mcmc`."""
 
@@ -468,8 +469,6 @@ def _set(
     trace: PyTree[Array, ' T'], index: Int32[Array, ''], val: PyTree[Array, ' T']
 ) -> PyTree[Array, ' T']:
     """Do ``trace[index] = val`` but fancier."""
-    # WORKAROUND(jax<0.7.1): once we bump jax to v0.7.1 we can use mutable
-    # arrays to save the trace instead of this functional update.
     sample_axes = trace_sample_axes(trace)
 
     # `trace` is `(*chains, samples, *shape)` and `val` the same without the

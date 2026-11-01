@@ -27,6 +27,7 @@
 import math
 from collections.abc import Callable, Sequence
 from functools import partial
+from importlib.metadata import version
 from operator import ge, le
 from os import getpid, kill
 from signal import SIGINT, signal
@@ -38,6 +39,7 @@ from typing import Any, TypeVar
 import jax
 import numpy as np
 import pytest
+from equinox import EquinoxRuntimeError
 from jax import jit, lax, random, vmap
 from jax import numpy as jnp
 from jax.scipy.special import logit
@@ -46,6 +48,7 @@ from jaxtyping import ArrayLike as JaxArrayLike
 from numpy.testing import assert_allclose as _np_assert_allclose  # noqa: TID251
 from numpy.testing import assert_array_equal as _np_assert_array_equal  # noqa: TID251
 from numpy.typing import ArrayLike
+from packaging.version import Version
 from scipy import linalg, stats
 
 from bartz import Bart
@@ -54,6 +57,13 @@ from bartz.grove import TreesTrace, check_trace, describe_error, is_actual_leaf
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 
 _T = TypeVar('_T')
+
+# WORKAROUND(equinox<0.13.3): with jax>=0.8, an `error_if` failing on jax's
+# fast dispatch path (any call after the first) raises a bare `ValueError`
+if Version(version('equinox')) < Version('0.13.3'):
+    EQX_RUNTIME_ERRORS = (EquinoxRuntimeError, ValueError)
+else:
+    EQX_RUNTIME_ERRORS = (EquinoxRuntimeError,)
 
 
 def nnone(x: _T | None) -> _T:

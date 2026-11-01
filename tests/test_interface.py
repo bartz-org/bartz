@@ -47,7 +47,7 @@ import numpy
 import pandas as pd
 import polars as pl
 import pytest
-from equinox import EquinoxRuntimeError, tree_at
+from equinox import tree_at
 from jax import (
     Device,
     block_until_ready,
@@ -108,6 +108,7 @@ from tests.test_mcmcstep import (
     reduce_reference,
 )
 from tests.util import (
+    EQX_RUNTIME_ERRORS,
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
@@ -1551,7 +1552,7 @@ def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
 
     with (
         subtests.test('rm_const=False raises'),
-        pytest.raises(EquinoxRuntimeError, match='predictors with no splits'),
+        pytest.raises(EQX_RUNTIME_ERRORS, match='predictors with no splits'),
     ):
         Bart(**dict(kw, rm_const=False, seed=random.clone(kw['seed'])))
 
@@ -3264,13 +3265,13 @@ class TestVarprobParam:
             assert bkw.p > 1
             varprob = jnp.ones(bkw.p).at[0].set(-1.0)
             kw_neg = dict(kw, varprob=varprob)
-            with pytest.raises(EquinoxRuntimeError, match='varprob must be > 0'):
+            with pytest.raises(EQX_RUNTIME_ERRORS, match='varprob must be > 0'):
                 Bart(**kw_neg)
 
         with subtests.test('not 0'):
             varprob = jnp.zeros(bkw.p).at[0].set(1.0)
             kw_zero = dict(kw, varprob=varprob)
-            with pytest.raises(EquinoxRuntimeError, match='varprob must be > 0'):
+            with pytest.raises(EQX_RUNTIME_ERRORS, match='varprob must be > 0'):
                 Bart(**kw_zero)
 
 

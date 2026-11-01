@@ -30,7 +30,7 @@ from typing import Any, Literal, NamedTuple
 
 import numpy
 import pytest
-from equinox import EquinoxRuntimeError, tree_at
+from equinox import tree_at
 from jax import numpy as jnp
 from jax import random, vmap
 from jax.nn import softmax
@@ -67,6 +67,7 @@ from bartz.mcmcstep import DiagWishart, State, Wishart, init, make_p_nonterminal
 from bartz.mcmcstep._rebuild import rebuild_derived
 from bartz.prepcovars import GivenSplitsBinner
 from tests.util import (
+    EQX_RUNTIME_ERRORS,
     assert_array_equal,
     assert_close_matrices,
     jaxtyping_disabled,
@@ -423,7 +424,7 @@ class TestRejectionSample:
 
     def test_max_iter(self, keys: split) -> None:
         """An unsatisfiable criterion raises instead of looping forever."""
-        with pytest.raises(EquinoxRuntimeError, match='accepted too few samples'):
+        with pytest.raises(EQX_RUNTIME_ERRORS, match='accepted too few samples'):
             rejection_sample(
                 keys.pop(),
                 lambda key, num: random.normal(key, (num,)),

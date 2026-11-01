@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import stochtree
-from equinox import EquinoxRuntimeError, Module
+from equinox import Module
 from jax import jit, lax, random, tree, vmap
 from jax.scipy.special import ndtr
 from jax.tree_util import KeyPath, keystr
@@ -59,6 +59,7 @@ from bartz.prepcovars import UniqueQuantileBinner
 from bartz.testing import gen_data
 from tests.test_mcmcloop import assert_trace_close, cat_traces, zero_non_leaves
 from tests.util import (
+    EQX_RUNTIME_ERRORS,
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
@@ -1316,7 +1317,7 @@ class TestBcf:
 
         with subtests.test('invalid rho'):
             for rho in (-1.5, 1.5, jnp.nan):
-                with pytest.raises(EquinoxRuntimeError, match='rho must be in'):
+                with pytest.raises(EQX_RUNTIME_ERRORS, match='rho must be in'):
                     model.predict_potential_outcomes(
                         x_test=test.x, pihat_test=test.pihat, rho=rho, key=keys.pop()
                     )

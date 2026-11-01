@@ -73,10 +73,11 @@ class BCFBurninTrace(Trace):
 class BCFMainTrace(BCFBurninTrace):
     """Main trace of the BCF MCMC, with the trees of both forests."""
 
-    mu: MainTrace
+    # the fields are frozen, so narrowing their types is sound
+    mu: MainTrace  # ty:ignore[invalid-mutable-override]
     """The trace of the prognostic forest."""
 
-    tau: MainTrace
+    tau: MainTrace  # ty:ignore[invalid-mutable-override]
     """The trace of the treatment forest."""
 
     @classmethod

@@ -49,11 +49,7 @@ from numpy.typing import ArrayLike
 from scipy import linalg, stats
 
 from bartz import Bart
-from bartz._jaxext import (  # noqa: F401
-    get_default_device,
-    jaxtyping_disabled,
-    minimal_unsigned_dtype,
-)
+from bartz._jaxext import get_default_device, jaxtyping_disabled, minimal_unsigned_dtype  # noqa: F401
 from bartz.grove import TreesTrace, check_trace, describe_error, is_actual_leaf
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 

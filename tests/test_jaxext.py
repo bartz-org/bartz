@@ -53,9 +53,7 @@ try:
 except ImportError:
     from jax.experimental import enable_x64  # ty: ignore[unresolved-import]
 from jax import numpy as jnp
-from jax.scipy.linalg import (
-    solve_triangular as library_solve_triangular,  # noqa: TID251
-)
+from jax.scipy.linalg import solve_triangular as library_solve_triangular  # noqa: TID251
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.typing import DTypeLike
 from jaxtyping import Array, Float, Float32, Key, Shaped
@@ -514,13 +512,9 @@ class TestJaxPatches:
     def test_invgamma_missing(self) -> None:
         """Check that jax does not implement the inverse gamma distribution."""
         with pytest.raises(ImportError, match=r'gammainccinv'):
-            from jax.scipy.special import (  # noqa: PLC0415
-                gammainccinv,  # noqa: F401 # ty: ignore[unresolved-import]
-            )
+            from jax.scipy.special import gammainccinv  # noqa: PLC0415, F401  # ty: ignore[unresolved-import]
         with pytest.raises(ImportError, match=r'invgamma'):
-            from jax.scipy.stats import (  # noqa: PLC0415
-                invgamma,  # noqa: F401 # ty: ignore[unresolved-import]
-            )
+            from jax.scipy.stats import invgamma  # noqa: PLC0415, F401  # ty: ignore[unresolved-import]
 
     def test_invgamma_correct(self, keys: split) -> None:
         """Compare my implementation of invgamma against scipy's."""

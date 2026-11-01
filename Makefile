@@ -79,9 +79,8 @@ help:
 	@echo "- covreport: build html coverage report"
 	@echo "- covcheck: check coverage is above some thresholds"
 	@echo "- diffcov: check changed-lines coverage vs DIFF_BASE (default origin/main)"
-	@echo "- update-deps: update-python-deps + update-other-deps"
 	@echo "- update-python-deps: pin the dep cooldown, then upgrade uv.lock to the latest allowed deps"
-	@echo "- update-other-deps: upgrade prek hooks and GitHub Actions (not date-pinned)"
+	@echo "- update-non-python-deps: upgrade prek hooks and GitHub Actions (not date-pinned)"
 	@echo "- update-oldest-deps: advance OLD_DATE and refresh oldest-supported pins in pyproject.toml"
 	@echo "- check-committed: verify there are no uncommitted changes"
 	@echo "- check-changelog: verify the topmost changelog section is dated today"
@@ -106,7 +105,7 @@ help:
 	@echo
 	@echo "Release workflow:"
 	@echo "- describe release in docs/changelog.md (its topmost header sets the version, follow effver https://jacobtomlinson.dev/effver)"
-	@echo "- $$ make update-deps"
+	@echo "- $$ make update-non-python-deps"
 	@echo "- $$ make release, will not release but runs all tests, iterate and debug"
 	@echo '- run `make tests-gpu` on a gpu'
 	@echo "- merge a PR with the changes and fixes"
@@ -284,23 +283,20 @@ diffcov:
 
 ################# DEPENDENCIES #################
 
-# `update-deps` = latest python deps (uv) + everything else (prek hooks, GitHub
-# Actions). Only `update-python-deps` runs inside `release`: it pins
-# pyproject's exclude-newer to a fixed instant before locking, so repeated
-# same-day release runs (and the uv-lock hook) resolve identically and don't
-# churn. The others have no fixed-date knob, so they're bumped once by hand via
-# `make update-deps` at the start of the release, outside the release loop.
+# `update-python-deps` runs inside `release`: it pins pyproject's exclude-newer
+# to a fixed instant before locking, so repeated same-day release runs (and the
+# uv-lock hook) resolve identically and don't churn. prek hooks and GitHub
+# Actions have no fixed-date knob, so they're bumped once by hand via
+# `make update-non-python-deps` at the start of the release, outside the
+# release loop.
 PINACT = PINACT_MIN_AGE=$(COOLDOWN_DAYS) GITHUB_TOKEN=$${GITHUB_TOKEN:-$$(gh auth token)} $(UV_RUN) prek run pinact --stage manual --all-files
-.PHONY: update-deps
-update-deps: update-python-deps update-other-deps
-
 .PHONY: update-python-deps
 update-python-deps:
 	$(UV_RUN) python -m config.update_cooldown --today=$(TODAY) --cooldown-days=$(COOLDOWN_DAYS)
 	uv lock --upgrade
 
-.PHONY: update-other-deps
-update-other-deps:
+.PHONY: update-non-python-deps
+update-non-python-deps:
 	$(UV_RUN) prek update
 	# Update GitHub Actions, skipping releases newer than the cooldown. prek
 	# fails a hook that modifies files, so a second run checks it now passes.

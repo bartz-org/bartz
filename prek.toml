@@ -1,7 +1,7 @@
 # Hook config for prek (https://prek.j178.dev)
 
 # revs are frozen to commit SHAs (tags are mutable); update with
-# `make update-other-deps`
+# `make update-non-python-deps`
 
 minimum_prek_version = "0.5.3"
 exclude = '^\.asv/results/.+\.json$'
@@ -142,7 +142,7 @@ stages = ["pre-merge-commit"]
 [[repos.hooks]]
 id = "pinact"
 name = "update GitHub Actions and pin them to commit SHAs"
-# manual-only, run by `make update-other-deps`, which sets the cooldown
+# manual-only, run by `make update-non-python-deps`, which sets the cooldown
 # (PINACT_MIN_AGE) and GITHUB_TOKEN. Not covered by `prek update`: bump the
 # pinact commit below by hand.
 entry = "pinact run --update"

@@ -49,6 +49,7 @@ from jaxtyping import (
 
 from bartz._jaxext import (
     Module,
+    cpu_barrier,
     field,
     float32_matmuls,
     jit,
@@ -59,7 +60,7 @@ from bartz._jaxext import (
     truncated_normal_onesided,
     vmap_nodoc,
 )
-from bartz._jaxext.random import loggamma, poisson
+from bartz._jaxext.random import categorical, loggamma, poisson
 from bartz.grove import is_actual_leaf, var_histogram
 from bartz.mcmcstep._moves import Moves, propose_moves, split_range
 from bartz.mcmcstep._reduction import (
@@ -1458,9 +1459,7 @@ def accept_move_and_sample_leaves(
     # on cpu, materialize the per-leaf delta, else xla fuses its computation
     # into the gather and repeats it for each datapoint; on gpu that is cheaper
     # than the extra kernel launch
-    delta = lax.platform_dependent(
-        delta, cpu=lax.optimization_barrier, default=lambda x: x
-    )
+    delta = cpu_barrier(delta)
     resid += delta[..., leaf_indices]
 
     return resid, leaf_tree, acc, to_prune, log_lk_ratio
@@ -2201,17 +2200,26 @@ def log_blocked_mass_tree(
         parent_top = jnp.repeat(ineligible_top[lhs >> 1 : rhs >> 1], 2)
         ineligible_top = ineligible_top.at[lhs:rhs].add(parent_top)
 
+    # on cpu, materialize the accumulation and the eligible mass below, else xla
+    # fuses their computations into their many uses and repeats them
+    ineligible_mass, ineligible_top = cpu_barrier((ineligible_mass, ineligible_top))
+
     # Eligible mass per node, in log space: the largest split probabilities not
     # ineligible, plus the others minus the ineligible ones. It is positive at
     # internal nodes (the split variable is eligible), the clip only guards
-    # against round-off.
-    log_eligible = s.log_rest + jnp.log1p(-jnp.minimum(ineligible_mass, 1.0))
+    # against round-off. The sum is shifted by the largest term; this is faster
+    # on cpu than a chain of logaddexp.
+    log_rest = s.log_rest + jnp.log1p(-jnp.minimum(ineligible_mass, 1.0))
     (num_top,) = s.log_top.shape
+    is_eligible = [((ineligible_top >> i) & 1) == 0 for i in range(num_top)]
+    log_max = log_rest
     for i in range(num_top):
-        is_eligible = ((ineligible_top >> i) & 1) == 0
-        log_eligible = jnp.where(
-            is_eligible, jnp.logaddexp(log_eligible, s.log_top[i]), log_eligible
-        )
+        log_max = jnp.where(is_eligible[i], jnp.maximum(log_max, s.log_top[i]), log_max)
+    log_max = jnp.where(jnp.isneginf(log_max), 0.0, log_max)
+    eligible = jnp.exp(log_rest - log_max)
+    for i in range(num_top):
+        eligible += jnp.where(is_eligible[i], jnp.exp(s.log_top[i] - log_max), 0.0)
+    log_eligible = cpu_barrier(log_max + jnp.log(eligible))
 
     # Per-node augmentation weight lambda_b / e_b, zero at non-internal nodes. The
     # eligible mass can be tiny, so the weights and their sums below are in log
@@ -2438,7 +2446,9 @@ def step_theta(
     grid_range = forest.sparsity.log_theta_range
     width = 2 * grid_range / num_grid
     edges = jnp.linspace(-grid_range, grid_range, num_grid + 1)
-    log_p_edges = log_p(edges)
+    # on cpu, materialize the log density, else xla fuses its computation into
+    # its two uses per bin below and repeats it
+    log_p_edges = cpu_barrier(log_p(edges))
     rise = jnp.diff(log_p_edges)  # change of the log density across each bin
     log_pmf = log_p_edges[:-1] + jnp.log(width) + log_expm1_ratio(rise)
 
@@ -2448,8 +2458,12 @@ def step_theta(
     rise = jnp.where(void, 0.0, rise)
     log_pmf = jnp.where(void, -jnp.inf, log_pmf)
 
+    # on cpu, materialize log_pmf, else xla fuses its computation into each of
+    # the two reductions in `categorical` and repeats it
+    log_pmf = cpu_barrier(log_pmf)
+
     # draw a bin, then a point within it
-    i = random.categorical(keys.pop(), log_pmf)
+    i = categorical(keys.pop(), log_pmf)
     v = edges[i] + width * sample_unit_exponential(keys.pop(), rise[i])
 
     theta = forest.sparsity.rho * jnp.exp(v)

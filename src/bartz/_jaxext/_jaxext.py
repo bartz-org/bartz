@@ -60,6 +60,7 @@ else:  # WORKAROUND(python<3.13): typing.TypeIs was added in 3.13
 
 _P = ParamSpec('_P')
 _R = TypeVar('_R')
+_T = TypeVar('_T')
 
 
 @contextmanager
@@ -399,6 +400,11 @@ def is_key(x: object) -> TypeIs[Key[Array, ' *shape']]:
 def jit_active() -> bool:
     """Check if we are under jit."""
     return not hasattr(jnp.empty(0), 'platform')
+
+
+def cpu_barrier(x: _T) -> _T:
+    """Apply `lax.optimization_barrier` on cpu only, to steer xla:cpu fusion."""
+    return lax.platform_dependent(x, cpu=lax.optimization_barrier, default=lambda x: x)
 
 
 def _equal_shards(x: Shaped[Array, '...'], axis_name: str) -> Bool[Array, '']:

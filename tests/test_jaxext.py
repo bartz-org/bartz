@@ -74,7 +74,7 @@ from bartz._jaxext import (
     unique,
 )
 from bartz._jaxext._linalg import cholesky_unrolled, solve_triangular_unrolled
-from bartz._jaxext.random import loggamma, poisson
+from bartz._jaxext.random import categorical, loggamma, poisson
 from bartz._jaxext.random._poisson import NUM_TERMS, poisson_from_normal
 from bartz._jaxext.scipy.stats import invgamma
 from tests.util import (
@@ -937,6 +937,17 @@ class TestPoisson:
         tv += 0.5 * (implied_cdf[0] + scipy_poisson.cdf(k0 - 1, lambda_))
         tv += 0.5 * ((1 - implied_cdf[-1]) + scipy_poisson.sf(k1, lambda_))
         assert tv < bound
+
+
+def test_categorical(keys: split) -> None:
+    """Check `categorical` draws the same as `jax.random.categorical`."""
+    logits = random.normal(keys.pop(), (1000,)) * 3
+    logits = logits.at[::7].set(-jnp.inf)
+    sample = vmap(categorical, in_axes=(0, None))
+    reference = vmap(random.categorical, in_axes=(0, None))
+    for x in (logits, jnp.full(10, -jnp.inf)):
+        draw_keys = keys.pop(200)
+        assert_array_equal(sample(draw_keys, x), reference(draw_keys, x))
 
 
 def test_is_key(keys: split) -> None:

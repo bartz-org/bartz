@@ -77,9 +77,13 @@ class Tag:
 
 def ls_remote_head(repo: Repo) -> str:
     """Return the output of `git ls-remote --symref origin HEAD`, or '' on failure."""
-    # In a new session there is no controlling terminal, so ssh and git fail
-    # instead of prompting. Stdout goes to a file rather than a pipe, so an ssh
-    # grandchild surviving the timeout kill of git can't block reading it.
+    # In a new session there is no controlling terminal, and the askpass GUI
+    # fallbacks of git and ssh are disabled, so they fail instead of prompting.
+    # Stdout goes to a file rather than a pipe, so an ssh grandchild surviving
+    # the timeout kill of git can't block reading it.
+    env = dict(
+        os.environ, GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='', SSH_ASKPASS_REQUIRE='never'
+    )
     with tempfile.TemporaryFile('w+') as out:
         try:
             subprocess.run(
@@ -88,15 +92,17 @@ def ls_remote_head(repo: Repo) -> str:
                 stdin=subprocess.DEVNULL,
                 stdout=out,
                 stderr=subprocess.DEVNULL,
-                env=dict(os.environ, GIT_TERMINAL_PROMPT='0'),
+                env=env,
                 start_new_session=True,
                 timeout=30,
                 check=False,
             )
-        except subprocess.TimeoutExpired:
-            return ''
-        out.seek(0)
-        return out.read()
+        except (subprocess.TimeoutExpired, OSError):
+            output = ''
+        else:
+            out.seek(0)
+            output = out.read()
+    return output
 
 
 def get_default_branch_name(repo: Repo) -> str:

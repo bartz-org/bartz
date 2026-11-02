@@ -257,6 +257,16 @@ def identity_for(ufunc: BinaryUfunc, input_dtype: DTypeLike) -> Shaped[Array, ''
     return jnp.array(ufunc.identity, dtype)
 
 
+def vary(x: Shaped[Array, '*shape'], axes: tuple[str, ...]) -> Shaped[Array, '*shape']:
+    """Mark `x` as varying over the manual `shard_map` mesh `axes`."""
+    # WORKAROUND(jax<0.8.2): pcast is absent, use its predecessor pvary; once
+    # unsupported, delete this function and call `lax.pcast(..., to='varying')`
+    if hasattr(lax, 'pcast'):
+        return lax.pcast(x, axes, to='varying')
+    else:
+        return lax.pvary(x, axes)
+
+
 def check_same(tree1: PyTree, tree2: PyTree) -> None:
     def check_same(
         x1: Shaped[Array, '*shape'] | ShapeDtypeStruct,
@@ -308,7 +318,7 @@ def autobatch(
         `jax.numpy.add`).
     reduce_vary_axes
         Manual `jax.shard_map` mesh axes over which the reduction accumulator
-        varies. Under a `shard_map`, the reduction seed is `pcast` to vary over
+        varies. Under a `shard_map`, the reduction seed is cast to vary over
         these axes so its type matches the shard-varying loop body, satisfying
         the VMA checker. Ignored unless `reduce_ufunc` is set.
     warn_on_overflow
@@ -427,9 +437,7 @@ def batched_func(
             # axes while this seed is replicated; mark it varying so the scan's
             # carry types match and the VMA checker is satisfied
             if reduce_vary_axes:
-                initial = tree.map(
-                    lambda x: lax.pcast(x, reduce_vary_axes, to='varying'), initial
-                )
+                initial = tree.map(partial(vary, axes=reduce_vary_axes), initial)
 
         # loop and invoke the function in batches
         loop = partial(

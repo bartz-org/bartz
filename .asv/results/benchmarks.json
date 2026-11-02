@@ -9,6 +9,29 @@
         "unit": "latent_var",
         "version": "7f53ac52751858a05647717fd1a54fc370f83123ddf31f6a51fcfb41c1eee6bc"
     },
+    "speed.BartInit.time_init": {
+        "code": "class BartInit:\n    def time_init(self, *_: Any) -> None:\n        \"\"\"Time instantiating `Bart`.\"\"\"\n        with redirect_stdout(StringIO()):\n            bart = Bart(**self.kw)\n        block_bart(bart)\n\n    def setup(self, regime: Regime) -> None:\n        \"\"\"Generate the data and run once to warm-up.\"\"\"\n        p, n = self.shapes[regime]\n        keys = split(random.key(2026_10_27_17_42), 3)\n        self.kw: dict = dict(\n            x_train=random.normal(keys.pop(), (p, n)),\n            y_train=random.normal(keys.pop(), (n,)),\n            num_trees=NTREE,\n            n_save=0,\n            n_burn=0,\n            num_chains=None,\n            seed=keys.pop(),\n        )\n        block_until_ready(self.kw)\n        self.time_init()",
+        "min_run_count": 2,
+        "name": "speed.BartInit.time_init",
+        "number": 1,
+        "param_names": [
+            "regime"
+        ],
+        "params": [
+            [
+                "'large_n'",
+                "'large_p'"
+            ]
+        ],
+        "repeat": 0,
+        "rounds": 2,
+        "sample_time": 0.01,
+        "timeout": 120.0,
+        "type": "time",
+        "unit": "seconds",
+        "version": "d91ba2350f13e8866ac21ccf99fa4dfe96664ede0a326ce0cf2d8f7285656caa",
+        "warmup_time": 0.0
+    },
     "speed.BaseGbart.time_gbart": {
         "code": "class BaseGbart:\n    def time_gbart(self, *_: Any) -> None:\n        \"\"\"Time instantiating the class.\"\"\"\n        with redirect_stdout(StringIO()):\n            if self.predict:\n                ypred = self.bart.predict(self.test.x.T if X_N_BY_P else self.test.x)\n                block_until_ready(ypred)\n            else:\n                bart = gbart(**self.kw)\n                block_bart(bart)\n\n    def setup(\n        self,\n        niters: int = NITERS,\n        nchains: int = 1,\n        cache: Cache = 'warm',\n        predict: bool = False,\n        kwargs: Mapping[str, Any] = MappingProxyType({}),\n    ) -> None:\n        \"\"\"Prepare the arguments and run once to warm-up.\"\"\"\n        # check support for multiple chains\n        sig = signature(gbart)\n        support_multichain = 'mc_cores' in sig.parameters\n        if nchains != 1 and not support_multichain:\n            # WORKAROUND(bartz<0.8.0): mc_gbart (with mc_cores) was added in 0.8.0\n            msg = 'multi-chain not supported'\n            raise NotImplementedError(msg)\n    \n        # random seed\n        keys = split(random.key(2025_06_24_14_55))\n    \n        # generate simulated data\n        dgp = gen_data(\n            keys.pop(),\n            n=2 * N,\n            p=P,\n            k=1,\n            q=2,\n            lambda_=0,\n            sigma2_lin=0.4,\n            sigma2_quad=0.4,\n            sigma2_eps=0.2,\n        )\n        train, test = dgp.split()\n        block_until_ready((train, test))\n    \n        # arguments\n        self.kw: dict = dict(\n            x_train=train.x.T if X_N_BY_P else train.x,\n            y_train=train.y.squeeze(0),\n            ntree=NTREE,\n            nskip=niters // 2,\n            ndpost=(niters - niters // 2) * nchains,\n            seed=keys.pop(),\n        )\n        if support_multichain:\n            self.kw.update(mc_cores=nchains)\n        self.kw.update(kwargs)\n        block_until_ready(self.kw)\n    \n        # save information used to run predictions\n        self.predict = predict\n        if predict:\n            self.test = test\n            self.bart = gbart(**self.kw)\n            block_bart(self.bart)\n    \n        # decide how much to cold-start\n        match cache:\n            case 'cold':\n                clear_caches()\n            case 'warm':\n                self.time_gbart()\n            case _:\n                raise KeyError(cache)",
         "min_run_count": 2,
@@ -61,9 +84,7 @@
         "params": [
             [
                 "1",
-                "2",
                 "4",
-                "8",
                 "16",
                 "32"
             ],
@@ -82,21 +103,16 @@
         "warmup_time": 0.0
     },
     "speed.GbartGeneric.time_gbart": {
-        "code": "class BaseGbart:\n    def time_gbart(self, *_: Any) -> None:\n        \"\"\"Time instantiating the class.\"\"\"\n        with redirect_stdout(StringIO()):\n            if self.predict:\n                ypred = self.bart.predict(self.test.x.T if X_N_BY_P else self.test.x)\n                block_until_ready(ypred)\n            else:\n                bart = gbart(**self.kw)\n                block_bart(bart)\n\n    def setup(\n        self,\n        niters: int = NITERS,\n        nchains: int = 1,\n        cache: Cache = 'warm',\n        predict: bool = False,\n        kwargs: Mapping[str, Any] = MappingProxyType({}),\n    ) -> None:\n        \"\"\"Prepare the arguments and run once to warm-up.\"\"\"\n        # check support for multiple chains\n        sig = signature(gbart)\n        support_multichain = 'mc_cores' in sig.parameters\n        if nchains != 1 and not support_multichain:\n            # WORKAROUND(bartz<0.8.0): mc_gbart (with mc_cores) was added in 0.8.0\n            msg = 'multi-chain not supported'\n            raise NotImplementedError(msg)\n    \n        # random seed\n        keys = split(random.key(2025_06_24_14_55))\n    \n        # generate simulated data\n        dgp = gen_data(\n            keys.pop(),\n            n=2 * N,\n            p=P,\n            k=1,\n            q=2,\n            lambda_=0,\n            sigma2_lin=0.4,\n            sigma2_quad=0.4,\n            sigma2_eps=0.2,\n        )\n        train, test = dgp.split()\n        block_until_ready((train, test))\n    \n        # arguments\n        self.kw: dict = dict(\n            x_train=train.x.T if X_N_BY_P else train.x,\n            y_train=train.y.squeeze(0),\n            ntree=NTREE,\n            nskip=niters // 2,\n            ndpost=(niters - niters // 2) * nchains,\n            seed=keys.pop(),\n        )\n        if support_multichain:\n            self.kw.update(mc_cores=nchains)\n        self.kw.update(kwargs)\n        block_until_ready(self.kw)\n    \n        # save information used to run predictions\n        self.predict = predict\n        if predict:\n            self.test = test\n            self.bart = gbart(**self.kw)\n            block_bart(self.bart)\n    \n        # decide how much to cold-start\n        match cache:\n            case 'cold':\n                clear_caches()\n            case 'warm':\n                self.time_gbart()\n            case _:\n                raise KeyError(cache)",
+        "code": "class BaseGbart:\n    def time_gbart(self, *_: Any) -> None:\n        \"\"\"Time instantiating the class.\"\"\"\n        with redirect_stdout(StringIO()):\n            if self.predict:\n                ypred = self.bart.predict(self.test.x.T if X_N_BY_P else self.test.x)\n                block_until_ready(ypred)\n            else:\n                bart = gbart(**self.kw)\n                block_bart(bart)\n\nclass GbartGeneric:\n    def setup(self, nchains: int, cache: Cache, predict: bool) -> None:  # ty:ignore[invalid-method-override]\n        \"\"\"Set up to run `NITERS` iterations.\"\"\"\n        super().setup(NITERS, nchains, cache, predict)",
         "min_run_count": 2,
         "name": "speed.GbartGeneric.time_gbart",
         "number": 1,
         "param_names": [
-            "niters",
             "nchains",
             "cache",
             "predict"
         ],
         "params": [
-            [
-                "0",
-                "10"
-            ],
             [
                 "1",
                 "6"
@@ -116,7 +132,7 @@
         "timeout": 120.0,
         "type": "time",
         "unit": "seconds",
-        "version": "19ef77f55623149471875a8d2d5066ed48c6844169d9736835aa056f75679782",
+        "version": "93d87f4e0aa7f3f5798a2282faa787cf640697f30d3e9bdf75eafebf86d722e9",
         "warmup_time": 0.0
     },
     "speed.GbartIters.time_gbart": {
@@ -131,9 +147,6 @@
             [
                 "0",
                 "10",
-                "20",
-                "30",
-                "40",
                 "50"
             ]
         ],
@@ -147,14 +160,13 @@
         "warmup_time": 0.0
     },
     "speed.RunMcmc.time_run_mcmc": {
-        "code": "class BaseRunMcmc:\n    def time_run_mcmc(self, *_: Any) -> None:\n        \"\"\"Time running or compiling the function.\"\"\"\n        # capture stderr to suppress equinox's noisy traceback when the\n        # kill-canary error is raised as expected\n        captured = StringIO()\n        try:\n            with redirect_stderr(captured):\n                self.task()\n        except JaxRuntimeError as e:\n            is_expected = self.kill_canary in str(e)\n            if not is_expected:\n                sys.stderr.write(captured.getvalue())\n                raise\n        else:\n            sys.stderr.write(captured.getvalue())\n            if self.kill_niters is not None:\n                msg = 'expected JaxRuntimeError with canary not raised'\n                raise RuntimeError(msg)\n\nclass RunMcmc:\n    def setup(self, mode: Mode, niters: int, cache: Cache) -> None:  # ty:ignore[invalid-method-override]\n        \"\"\"Prepare the arguments, compile the function, and run to warm-up.\"\"\"\n        super().setup(\n            None, mode, cache, dict(n_save=niters // 2, n_burn=(niters - niters // 2))\n        )",
+        "code": "class BaseRunMcmc:\n    def time_run_mcmc(self, *_: Any) -> None:\n        \"\"\"Time running or compiling the function.\"\"\"\n        # capture stderr to suppress equinox's noisy traceback when the\n        # kill-canary error is raised as expected\n        captured = StringIO()\n        try:\n            with redirect_stderr(captured):\n                self.task()\n        except JaxRuntimeError as e:\n            is_expected = self.kill_canary in str(e)\n            if not is_expected:\n                sys.stderr.write(captured.getvalue())\n                raise\n        else:\n            sys.stderr.write(captured.getvalue())\n            if self.kill_niters is not None:\n                msg = 'expected JaxRuntimeError with canary not raised'\n                raise RuntimeError(msg)\n\nclass RunMcmc:\n    def setup(self, mode: Mode, niters: int) -> None:  # ty:ignore[invalid-method-override]\n        \"\"\"Prepare the arguments, compile the function, and run to warm-up.\"\"\"\n        cache: Cache = 'cold' if mode == 'compile' else 'warm'\n        super().setup(\n            None, mode, cache, dict(n_save=niters // 2, n_burn=(niters - niters // 2))\n        )",
         "min_run_count": 2,
         "name": "speed.RunMcmc.time_run_mcmc",
         "number": 1,
         "param_names": [
             "mode",
-            "niters",
-            "cache"
+            "niters"
         ],
         "params": [
             [
@@ -164,10 +176,6 @@
             [
                 "0",
                 "10"
-            ],
-            [
-                "'cold'",
-                "'warm'"
             ]
         ],
         "repeat": 0,
@@ -176,7 +184,7 @@
         "timeout": 120.0,
         "type": "time",
         "unit": "seconds",
-        "version": "9a3b3a4173b61cc2a88a4ea99763e7e588eb847fd72e4aa2cf2a5bae32c01676",
+        "version": "bda3938283f13a9ec1d1d1b1da74aba7bcae3fb7bc23856b0ebc3c8b4311dfd9",
         "warmup_time": 0.0
     },
     "speed.RunMcmcVsTraceLength.time_run_mcmc": {
@@ -190,10 +198,7 @@
         "params": [
             [
                 "64",
-                "256",
-                "1024",
                 "4096",
-                "16384",
                 "65536"
             ]
         ],
@@ -230,7 +235,6 @@
             ],
             [
                 "None",
-                "1",
                 "2"
             ]
         ],
@@ -261,7 +265,6 @@
             ],
             [
                 "None",
-                "1",
                 "2"
             ],
             [

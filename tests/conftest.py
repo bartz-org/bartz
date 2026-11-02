@@ -35,12 +35,13 @@ import jax
 import numpy as np
 import pytest
 from jax import config, random
-from jaxtyping import _import_hook, install_import_hook
+from jaxtyping import install_import_hook
 from packaging.version import Version
 
 
 def patch_jaxtyping_import_hook() -> None:
     """Adapt the jaxtyping import hook to Python 3.15 importlib signatures."""
+    from jaxtyping import _import_hook  # noqa: PLC0415  # private, import only if patching
 
     def compat_cache_from_source(
         path: str, _debug_override: bool | None = None, *, optimization: str

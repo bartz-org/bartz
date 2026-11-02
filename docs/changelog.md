@@ -43,7 +43,7 @@ SOFTWARE.
     - Guarantee backwards compatibility: new bartz versions will always load files created by older versions
     - New methods `Bart.save_npz` and `Bart.load_npz`, mirroring the `bcf` ones
         - Deprecate `Bart.dump` and `Bart.load`
-    - Much smaller files sizes in general
+    - Much smaller file sizes in general
 - Improvements in `run_mcmc` callbacks and logging
     - Main feature: the progress bar now shows "tree life", which measures how long lived the trees are in the MCMC. Short-lived trees mean the MCMC is moving fast, long-lived trees mean the MCMC is partially stuck.
 - Fix numerical accuracy and stability problems in the variable selection feature

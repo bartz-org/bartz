@@ -37,10 +37,10 @@ import datetime
 import json
 import re
 import sys
+import tomllib
 import urllib.request
 from pathlib import Path
 
-import tomli
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
@@ -264,7 +264,7 @@ def main() -> int:
     print(f'OLD_DATE: {format_utc(args.min_old_date)} -> {format_utc(new_old_date)}')
 
     with args.pyproject.open('rb') as f:
-        pyproject = tomli.load(f)
+        pyproject = tomllib.load(f)
 
     oldest_python = lower_bound(SpecifierSet(pyproject['project']['requires-python']))
     print(f'oldest supported Python: {oldest_python}')

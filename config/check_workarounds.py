@@ -40,9 +40,9 @@ malformed rather than silently ignored.
 import re
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
-import tomli
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import InvalidVersion, Version
@@ -61,7 +61,7 @@ UV_REV_RE = re.compile(r'astral-sh/uv-pre-commit"\s*\n.*#\s*frozen:\s*v?(\S+)')
 
 def floors_from_pyproject(path: Path) -> dict[str, Version]:
     """Return {normalized_pkg_name: lower_bound_version} from pyproject.toml."""
-    data = tomli.loads(path.read_text())
+    data = tomllib.loads(path.read_text())
     project = data['project']
     # skip optional-dependencies: a floor raised by an extra does not apply to
     # installs without it, so taking the max below would be wrong

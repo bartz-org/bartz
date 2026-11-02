@@ -75,7 +75,6 @@ only-include = ["src/bartz"]
 # deps of the config/ scripts, run standalone by `make update-python-deps`
 config = [
     "packaging>=25.0",
-    "tomli>=2.3.0",
 ]
 dev = [
     { include-group = "config" },

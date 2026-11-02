@@ -40,6 +40,7 @@ the floor for `bartz` itself (= oldest benchmarked version).
 """
 
 import datetime
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -82,7 +83,18 @@ def get_default_branch_name(repo: Repo) -> str:
     # Ask the remote directly. Works even when refs/remotes/origin/HEAD
     # was never set locally (e.g. origin added after the initial clone).
     try:
-        output = repo.git.ls_remote('--symref', 'origin', 'HEAD')
+        # on a tty, ssh may wait forever for a passphrase or a host key
+        # confirmation, so forbid prompts, and time out a hanging remote
+        ssh = os.environ.get('GIT_SSH_COMMAND', 'ssh')
+        output = repo.git.ls_remote(
+            '--symref',
+            'origin',
+            'HEAD',
+            env=dict(
+                GIT_SSH_COMMAND=f'{ssh} -o BatchMode=yes', GIT_TERMINAL_PROMPT='0'
+            ),
+            kill_after_timeout=30,
+        )
         assert isinstance(output, str)  # type narrowing
     except GitCommandError:
         output = ''

@@ -1674,8 +1674,8 @@ class TestBcf:
         with pytest.raises(ValueError, match='fit without `pihat_train`'):
             model.predict(test.x, pihat_test=test.pihat)
 
-    def test_nan_pihat(self, keys: split) -> None:
-        """NaN in the propensity scores is rejected, like in the predictors."""
+    def test_nan_inputs(self, keys: split) -> None:
+        """NaN in the predictors or in the propensity scores is rejected."""
         train, test = split_bcf_data(
             gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
         )
@@ -1693,9 +1693,15 @@ class TestBcf:
         with pytest.raises(ValueError, match='`pihat_train` contains NaN'):
             bcf(**kwargs, pihat_train=train.pihat.at[0].set(jnp.nan))
 
+        nan_kwargs: dict = dict(kwargs, x_train=train.x.at[-1, -1].set(jnp.nan))
+        with pytest.raises(ValueError, match='predictors contain NaN'):
+            bcf(**nan_kwargs, pihat_train=train.pihat)
+
         model = bcf(**kwargs, pihat_train=train.pihat)
         with pytest.raises(ValueError, match='`pihat_test` contains NaN'):
             model.predict(test.x, pihat_test=test.pihat.at[0].set(jnp.nan))
+        with pytest.raises(ValueError, match='predictors contain NaN'):
+            model.predict(test.x.at[-1, -1].set(jnp.nan), pihat_test=test.pihat)
 
     @pytest.mark.flaky(max_runs=5, rerun_filter=rerun_on_gpu)
     # on gpu the mcmc is not deterministic at fixed seed

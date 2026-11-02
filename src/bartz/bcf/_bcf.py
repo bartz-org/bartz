@@ -50,6 +50,8 @@ from bartz._interface import (
     any_nan,
     check_length,
     predict_latent,
+    raise_if_nan,
+    start_nan_check,
 )
 from bartz._jaxext import is_key, jit, jit_active, split
 from bartz.bcf._state import BCFState, init_bcf
@@ -70,7 +72,9 @@ def process_bcf_predictor_input(
     """Transpose predictors with one per column to the (p, n) layout, and get their format."""
     if not isinstance(x, DataFrame):
         x = jnp.asarray(x).T
-    return _process_predictor_input(x)
+    x, fmt = _process_predictor_input(x)
+    raise_if_nan(start_nan_check(x))
+    return x, fmt
 
 
 def fold_chains(trace: Trace, path: str) -> Float32[Array, 'num_samples ...']:

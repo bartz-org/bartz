@@ -411,7 +411,7 @@ asv-machine:
 .PHONY: asv-run
 asv-run: ASV_REFS = $(shell $(UV_RUN) python -m config.refs_for_asv)
 asv-run: asv-machine
-	$(ASV) run --durations=all --skip-existing-successful --show-stderr "$(ASV_REFS)" $(ARGS)
+	$(ASV) run --durations=all --skip-existing-successful --record-samples --show-stderr "$(ASV_REFS)" $(ARGS)
 
 .PHONY: asv-publish
 asv-publish:
@@ -423,7 +423,7 @@ asv-preview: asv-publish
 
 .PHONY: asv-main
 asv-main: asv-machine
-	$(ASV) run --show-stderr main^! $(ARGS)
+	$(ASV) run --record-samples --show-stderr main^! $(ARGS)
 
 .PHONY: asv-quick
 asv-quick: asv-machine

@@ -3182,9 +3182,11 @@ def test_chol_with_gersh_near_singular(keys: split, k: int) -> None:
 
     # check that if `full_shift_cholesky` succeeds, then also `chol_with_gersh`
     # does; a few cases are at the edge of rounding errors and can go either
-    # way depending on how the compiler orders the operations
+    # way depending on how the compiler orders the operations. Both are jitted,
+    # as in the library: eagerly, on gpu 1/sqrt is two approximate ops instead
+    # of a fused rsqrt, which flips many more cases
     full_ok = jnp.all(jnp.isfinite(full_shift_cholesky(mat)), axis=(-2, -1))
-    ok = jnp.all(jnp.isfinite(chol_with_gersh(mat)), axis=(-2, -1))
+    ok = jnp.all(jnp.isfinite(jit(chol_with_gersh)(mat)), axis=(-2, -1))
     assert jnp.any(~full_ok)  # the test cases are hard enough
     assert jnp.sum(full_ok & ~ok) <= n // 1000
 

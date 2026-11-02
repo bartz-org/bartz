@@ -35,18 +35,12 @@ The chain/data/sample axis markers attached by `field` are consumed by the
 resolvers in `bartz.mcmcstep._axes`.
 """
 
-import sys
 from dataclasses import field as dataclasses_field
 from dataclasses import fields
-from typing import Any, TypeVar
+from typing import Any, TypeVar, dataclass_transform
 
 from equinox import Module as EquinoxModule
 from equinox import field as eqx_field
-
-if sys.version_info >= (3, 11):
-    from typing import dataclass_transform
-else:  # WORKAROUND(python<3.11): typing.dataclass_transform was added in 3.11
-    from typing_extensions import dataclass_transform
 
 
 # No return annotation (hence the noqa): annotating `-> Field[Any]` makes ty model

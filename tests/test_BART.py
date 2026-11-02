@@ -359,8 +359,9 @@ def to_numpy_array(x: object) -> object:
 # see `assert_identical_bart`
 def test_numpy_input(fit: Fit) -> None:
     """Check that numpy inputs give the same result as jax inputs."""
-    gkw = tree.map(to_numpy_array, fit.case.gkw)
-    gkw = dict(gkw, seed=random.clone(fit.case.gkw['seed']))
+    gkw: dict = dict(
+        tree.map(to_numpy_array, fit.case.gkw), seed=random.clone(fit.case.gkw['seed'])
+    )
     bart = fit.case.cls(**gkw)
     assert_identical_bart(bart._bart, fit.bart._bart)
     assert_array_equal(bart.yhat_test, fit.bart.yhat_test)

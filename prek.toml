@@ -1,7 +1,7 @@
 # Hook config for prek (https://prek.j178.dev)
 
 # revs are frozen to commit SHAs (tags are mutable); update with
-# `make update-other-deps`
+# `make update-non-python-deps`
 
 minimum_prek_version = "0.5.3"
 exclude = '^\.asv/results/.+\.json$'
@@ -65,7 +65,7 @@ priority = "checks"
 
 [[repos]]
 repo = "https://github.com/sbrunner/hooks"
-rev = "60041b789c098988bd01ddff70e7e3a31c1700f1"  # frozen: 1.8.0
+rev = "796c0276ccc287180f82190a917eea56aa13156d"  # frozen: 1.9.0
 hooks = [
     { id = "copyright" },
     # generated headerless file; untracked, so it only reaches hooks via an
@@ -75,7 +75,7 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/astral-sh/ruff-pre-commit"
-rev = "f12be1ebaa5351c1fc76472de98db2c3446c8253"  # frozen: v0.16.10
+rev = "f368fb366ff7f2f808dd324b83a6d32267799e19"  # frozen: v0.17.2
 hooks = [
     { id = "ruff-check", args = ["--fix"] },
     { id = "ruff-format" },
@@ -93,12 +93,12 @@ hooks = [
 
 [[repos]]
 repo = "https://github.com/jsh9/pydoclint"
-rev = "24412c5f73ad438a08146132ea86a9a72c8bd5ad"  # frozen: 0.11.0
+rev = "871751487edc82248bd8ffdaef1aa0f09968102f"  # frozen: 0.11.1
 hooks = [{ id = "pydoclint", priority = "checks" }]
 
 [[repos]]
 repo = "https://github.com/henryiii/validate-pyproject-schema-store"
-rev = "562b381732c1d2bec9a3a66cc89f63e16d486470"  # frozen: 2026.09.30
+rev = "d406c5ecbe73bed4e187cf9306d6060a47442d1f"  # frozen: 2026.10.23
 hooks = [{ id = "validate-pyproject", priority = "checks" }]
 
 [[repos]]
@@ -113,7 +113,7 @@ hooks = [{ id = "gitlint" }]  # already defined to run in stage commit-msg
 # `rev` line right below the `repo` line, keep it there.
 [[repos]]
 repo = "https://github.com/astral-sh/uv-pre-commit"
-rev = "0f4b65a503cc866b9b5e62dda2020f7943b01a65"  # frozen: 0.12.22
+rev = "eeca16c54e09b4d9a848259e46bae14737944348"  # frozen: 0.13.5
 hooks = [{ id = "uv-lock" }]
 
 [[repos]]
@@ -142,7 +142,7 @@ stages = ["pre-merge-commit"]
 [[repos.hooks]]
 id = "pinact"
 name = "update GitHub Actions and pin them to commit SHAs"
-# manual-only, run by `make update-other-deps`, which sets the cooldown
+# manual-only, run by `make update-non-python-deps`, which sets the cooldown
 # (PINACT_MIN_AGE) and GITHUB_TOKEN. Not covered by `prek update`: bump the
 # pinact commit below by hand.
 entry = "pinact run --update"

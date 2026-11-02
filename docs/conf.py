@@ -62,7 +62,7 @@ GITHUB_REF = MATCH.group(1) if MATCH else f'v{version.partition("+")[0]}'
 project = f'bartz {version}'
 author = 'The Bartz Contributors'
 
-NOW = datetime.datetime.now(tz=datetime.timezone.utc)
+NOW = datetime.datetime.now(tz=datetime.UTC)
 YEAR = '2024'
 if NOW.year > int(YEAR):
     YEAR += '-' + str(NOW.year)
@@ -107,7 +107,8 @@ if sys.version_info >= (3, 14):
 
     def _remove_union_aliases_from_mapping(app, _env, _docnames) -> None:  # noqa: ANN001
         mapping = getattr(app.config, '_intersphinx_type_mapping', None)
-        if mapping:
+        # newer versions use a non-dict mapping that already skips unions
+        if isinstance(mapping, dict):
             app.config._intersphinx_type_mapping = {  # noqa: SLF001
                 k: v for k, v in mapping.items() if not _resolves_to_union_instance(v)
             }

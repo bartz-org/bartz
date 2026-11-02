@@ -40,6 +40,9 @@ the floor for `bartz` itself (= oldest benchmarked version).
 """
 
 import datetime
+import os
+import subprocess
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,6 +75,36 @@ class Tag:
         return Version(self.name)
 
 
+def ls_remote_head(repo: Repo) -> str:
+    """Return the output of `git ls-remote --symref origin HEAD`, or '' on failure."""
+    # In a new session there is no controlling terminal, and the askpass GUI
+    # fallbacks of git and ssh are disabled, so they fail instead of prompting.
+    # Stdout goes to a file rather than a pipe, so an ssh grandchild surviving
+    # the timeout kill of git can't block reading it.
+    env = dict(
+        os.environ, GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='', SSH_ASKPASS_REQUIRE='never'
+    )
+    with tempfile.TemporaryFile('w+') as out:
+        try:
+            subprocess.run(
+                ('git', 'ls-remote', '--symref', 'origin', 'HEAD'),  # noqa: S607
+                cwd=repo.working_dir,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.DEVNULL,
+                env=env,
+                start_new_session=True,
+                timeout=30,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            output = ''
+        else:
+            out.seek(0)
+            output = out.read()
+    return output
+
+
 def get_default_branch_name(repo: Repo) -> str:
     try:
         return repo.git.symbolic_ref('refs/remotes/origin/HEAD', short=True).split('/')[
@@ -81,11 +114,7 @@ def get_default_branch_name(repo: Repo) -> str:
         pass
     # Ask the remote directly. Works even when refs/remotes/origin/HEAD
     # was never set locally (e.g. origin added after the initial clone).
-    try:
-        output = repo.git.ls_remote('--symref', 'origin', 'HEAD')
-        assert isinstance(output, str)  # type narrowing
-    except GitCommandError:
-        output = ''
+    output = ls_remote_head(repo)
     for line in output.splitlines():
         if line.startswith('ref:'):
             return line.split()[1].split('/')[-1]
@@ -162,7 +191,7 @@ def benchmarked_version_tags(repo_path: Path | str = '.') -> tuple[Tag, ...]:
     tags = (
         Tag(
             date=datetime.datetime.fromtimestamp(
-                tag.commit.committed_date, tz=datetime.timezone.utc
+                tag.commit.committed_date, tz=datetime.UTC
             ),
             name=tag.name,
         )
@@ -171,7 +200,7 @@ def benchmarked_version_tags(repo_path: Path | str = '.') -> tuple[Tag, ...]:
         and Version(tag.name) >= MIN_VERSION
         and repo.is_ancestor(tag.commit, head_commit)
     )
-    return select_tags(tuple(tags), datetime.datetime.now(datetime.timezone.utc))
+    return select_tags(tuple(tags), datetime.datetime.now(datetime.UTC))
 
 
 def oldest_benchmarked_version(repo_path: Path | str = '.') -> Version:

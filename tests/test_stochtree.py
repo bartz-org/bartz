@@ -34,7 +34,6 @@ import pandas as pd
 import polars as pl
 import pytest
 import stochtree
-from equinox import EquinoxRuntimeError
 from jax import Array, jit, random
 from jax import numpy as jnp
 from jax.scipy.special import ndtr
@@ -53,6 +52,7 @@ from bartz.stochtree._preprocess import (
 )
 from bartz.testing import gen_data
 from tests.util import (
+    EQX_RUNTIME_ERRORS,
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
@@ -470,7 +470,7 @@ def test_variable_weights_validation(continuous_data: _Data, keys: split) -> Non
     data = continuous_data
     p = data.X_train.shape[1]
     m = bst.BARTModel()
-    with pytest.raises(EquinoxRuntimeError, match='varprob must be > 0'):
+    with pytest.raises(EQX_RUNTIME_ERRORS, match='varprob must be > 0'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,

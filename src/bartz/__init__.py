@@ -33,16 +33,7 @@ from bartz import _workarounds
 # apply before importing anything that could initialize a jax backend
 _workarounds.apply_workarounds()
 
-from bartz import (  # noqa: F401
-    BART,
-    bcf,
-    grove,
-    mcmcloop,
-    mcmcstep,
-    npz,
-    prepcovars,
-    stochtree,
-)
+from bartz import BART, bcf, grove, mcmcloop, mcmcstep, npz, prepcovars, stochtree  # noqa: F401
 from bartz._interface import (  # noqa: F401
     Bart,
     DataFrame,

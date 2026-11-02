@@ -31,7 +31,7 @@ from types import MappingProxyType
 from typing import Literal
 
 import pytest
-from equinox import EquinoxRuntimeError, EquinoxTracetimeError
+from equinox import EquinoxTracetimeError
 from jax import block_until_ready, jit, random, vmap
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
@@ -74,8 +74,6 @@ KWARGS: Mapping = MappingProxyType(
 )
 REPS: int = 10_000  # number of datasets, and of i.i.d. draws in moment tests
 SPARSITY: float = 2.0  # Gamma shape for the sparse-DGP fixture (mu4 = 10 / 3)
-# error_if surfaces eagerly (tracetime), under jit (runtime), or as a plain check
-EQX_ERRORS = (EquinoxTracetimeError, EquinoxRuntimeError, JaxRuntimeError, ValueError)
 HIGH_SPARSITY: float = 1e19  # largest before sparsity (sparsity + 1) overflows float32
 
 # A substantial heteroskedasticity knob to exercise the het paths; the bounded
@@ -603,13 +601,13 @@ class TestFromPeff:
 
     def test_gamma_rejects_peff_ge_p(self) -> None:
         """`Gamma.from_peff` errors at ``peff >= p`` (its alpha would diverge)."""
-        with pytest.raises(EQX_ERRORS, match='Gamma needs peff'):
-            block_until_ready(Gamma.from_peff(float(self.P), self.P))
+        with pytest.raises(EquinoxTracetimeError, match='Gamma needs peff'):
+            Gamma.from_peff(float(self.P), self.P)
 
     def test_spikeslab_rejects_peff_gt_p(self) -> None:
         """`SpikeSlab.from_peff` errors at ``peff > p`` (its pi would exceed 1)."""
-        with pytest.raises(EQX_ERRORS, match='SpikeSlab needs peff'):
-            block_until_ready(SpikeSlab.from_peff(self.P + 1.0, self.P))
+        with pytest.raises(EquinoxTracetimeError, match='SpikeSlab needs peff'):
+            SpikeSlab.from_peff(self.P + 1.0, self.P)
 
 
 def test_high_sparsity_matches_none(keys: split) -> None:
@@ -910,14 +908,14 @@ class TestCorrDistr:
 
     def test_lkj_eta_positive(self, keys: split) -> None:
         """`LKJ` with ``eta <= 0`` raises."""
-        with pytest.raises(EQX_ERRORS, match='eta must be > 0'):
-            block_until_ready(LKJ(0.0).sample_chol(keys.pop(), CORR_K))
+        with pytest.raises(EquinoxTracetimeError, match='eta must be > 0'):
+            LKJ(0.0).sample_chol(keys.pop(), CORR_K)
 
     @pytest.mark.parametrize('tau', [-0.1, 1.0])
     def test_factor_tau_range(self, keys: split, tau: float) -> None:
         """`Factor` with `tau` outside ``[0, 1)`` raises."""
-        with pytest.raises(EQX_ERRORS, match='tau must be in'):
-            block_until_ready(Factor(1, tau).sample_chol(keys.pop(), CORR_K))
+        with pytest.raises(EquinoxTracetimeError, match='tau must be in'):
+            Factor(1, tau).sample_chol(keys.pop(), CORR_K)
 
     def test_factor_rank_positive(self) -> None:
         """`Factor` with ``rank < 1`` raises at construction."""

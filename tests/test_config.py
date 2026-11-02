@@ -45,7 +45,7 @@ from config.refs_for_asv import (
 )
 
 NUM_SELECTED = 1 + NUM_SPREAD + NUM_LAST
-T0 = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+T0 = datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC)
 
 
 def make_tags(days: Sequence[int]) -> tuple[Tag, ...]:

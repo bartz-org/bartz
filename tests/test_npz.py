@@ -38,7 +38,7 @@ from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 from zipfile import ZipFile, ZipInfo
 
 import numpy as np
@@ -62,12 +62,11 @@ ARCHIVE_DIR = Path(__file__).parent / 'npz'
 FROZEN = {
     'bcf_v0.npz': '57b3ade0791bf13dde38b65d41cc1bdec34bda33a132a9196b5c9466bd6e1123',
     'bcf_v0.outputs.npz': 'db73ea736b194edb8d499e394b8a60d75a14b544c002d47e9d1e5dbd1165e25e',
+    'bart_v1.npz': '9eebaaf988cd9abda66c936815c935143b21747f280bf2869f5fac51e78d1ca9',
+    'bart_v1.outputs.npz': '2a579e63d8f3d6fe1756db0345016435149fdbf212256af57928be71360982c3',
+    'bcf_v1.npz': 'be685f1157cdb0d8c1badbaa1f5de1d29d4c1678661c065271933045c01562bb',
+    'bcf_v1.outputs.npz': 'b980cdc25f22cbc53533ebb2713f991fcd31bd6d538bd9b8ab467b17c42e3a16',
 }
-
-if sys.version_info >= (3, 11):
-    from typing import NotRequired
-else:  # WORKAROUND(python<3.11): typing.NotRequired was added in 3.11
-    from typing_extensions import NotRequired
 
 
 class Inputs(TypedDict):
@@ -93,6 +92,7 @@ def make_bart() -> tuple[Bart, Inputs]:
         n_burn=2,
         num_chains=2,
         pbar=False,  # the tqdm callback has a random bar id
+        init_kw=dict(leaf_dtype=jnp.float32),  # the default depends on the platform
         seed=keys.pop(),
     )
     return model, Inputs(x=np.asarray(x))

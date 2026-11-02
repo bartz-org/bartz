@@ -26,7 +26,7 @@
 
 import math
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from functools import partial
@@ -317,11 +317,15 @@ class AutoParamNames:
 
     param_names: ClassVar[tuple[str, ...]]
 
-    setup: ClassVar[Callable[..., None]]
-    """Defined by subclasses, introspected to set `param_names`."""
+    def setup(self, *args: Any, **kwargs: Any) -> None:
+        """Set up the benchmark, introspected to set `param_names`; must be overridden."""
 
     def __init_subclass__(cls, **_: Any) -> None:
         method = cls.setup
+        # the base signature would yield bogus `param_names`
+        if method is AutoParamNames.setup:
+            msg = f'{cls.__name__} must define `setup`'
+            raise TypeError(msg)
         sig = signature(method)
         params = [
             name
@@ -460,7 +464,7 @@ class StepGeneric(StepBase):
 class StepSharded(StepGeneric):
     """Benchmark `mcmcstep.step` with sharded data."""
 
-    params = ((False, True),)
+    params = ((False, True),)  # ty:ignore[invalid-assignment]
 
     def setup(self, sharded: bool) -> None:  # ty:ignore[invalid-method-override]
         """Set up with settings that make the effect of sharding salient."""
@@ -612,11 +616,9 @@ class StepMemorySharded(StepMemory):
     replicated buffers show up as excess over the unsharded case.
     """
 
-    params: tuple[tuple[Shards, ...], tuple[Shards, ...], tuple[MemStat, ...]] = (
-        (None, 1, 2),
-        (None, 1, 2),
-        ('state', 'peak'),
-    )
+    params: tuple[  # ty:ignore[invalid-attribute-override]
+        tuple[Shards, ...], tuple[Shards, ...], tuple[MemStat, ...]
+    ] = ((None, 1, 2), (None, 1, 2), ('state', 'peak'))
 
     def setup(  # ty:ignore[invalid-method-override]
         self, data_shards: Shards, chain_shards: Shards, stat: MemStat

@@ -31,6 +31,34 @@ SOFTWARE.
 # Changelog
 
 
+## 0.14.0 Mom, these are not the bayesian causal forests I wanted! Even that weirdo girl in math class got cooler ones. Why are you always like this? (2026-11-02)
+
+- Polish the `bcf` submodule; main things to know:
+    - General improvements in speed, memory, error checking, and consistency
+    - New `maxdepth_mu` and `maxdepth_tau` parameters
+    - In `predict_potential_outcomes`, now `rho` defaults to 0.0 instead of 0.5, and it can be negative
+    - With adaptive coding, the prior on the coding parameters `b0` and `b1` excludes the slice $|b|<0.01$ for technical numerical reasons. This does not change the model in practice because those parameters are not identified.
+    - Save to file the full model, not just the parts required to compute predictions
+- Improve saving/loading models to file
+    - Guarantee backwards compatibility: new bartz versions will always load files created by older versions
+    - New methods `Bart.save_npz` and `Bart.load_npz`, mirroring the `bcf` ones
+        - Deprecate `Bart.dump` and `Bart.load`
+    - Much smaller file sizes in general
+- Improvements in `run_mcmc` callbacks and logging
+    - Main feature: the progress bar now shows "tree life", which measures how long lived the trees are in the MCMC. Short-lived trees mean the MCMC is moving fast, long-lived trees mean the MCMC is partially stuck.
+- Fix numerical accuracy and stability problems in the variable selection feature
+    - This should not make a difference in practice, but it makes the MCMC more robust to corner cases and makes it possible to do precise prior comparison checks
+- Improvements with multivariate outcomes
+    - About 2x faster on CPU on small datasets with 2-4 outcomes
+    - More accurate posterior when the outcomes are very correlated, should not make a difference in most cases
+- Fixes in `Bart` and `mc_gbart`
+    - Raise on NaN in `x_train` and `x_test` to avoid the pitfall of users assuming NaN means "missing value". Missing values in predictors are not supported.
+    - Fix that `Bart.predict` would not work with pandas dataframes
+    - In `mc_gbart`, the `sigest` OLS degrees of freedom now count the intercept ($n - p - 1$ instead of $n - p$)
+- Generally faster, mostly on CPU
+- Rewrite prior sampler; the new interface makes it easier to match the setup of a given MCMC
+
+
 ## 0.13.0 Mom, all my friends got a bayesian causal forest for their v0.13, why can't I have one? (2026-10-04)
 
 * New features

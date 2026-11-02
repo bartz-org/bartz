@@ -37,10 +37,10 @@ import datetime
 import json
 import re
 import sys
+import tomllib
 import urllib.request
 from pathlib import Path
 
-import tomli
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
@@ -76,7 +76,8 @@ def collect_requirements(pyproject: dict) -> list[str]:
     ):
         reqs.extend(extra_reqs)
     for group_reqs in pyproject.get('dependency-groups', {}).values():
-        reqs.extend(group_reqs)
+        # skip `{include-group = ...}` entries, the included group is listed anyway
+        reqs.extend(r for r in group_reqs if isinstance(r, str))
     return reqs
 
 
@@ -125,7 +126,7 @@ def earliest_upload(files: list[dict]) -> datetime.datetime | None:
         except ValueError:
             continue
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=datetime.timezone.utc)
+            dt = dt.replace(tzinfo=datetime.UTC)
         times.append(dt)
     return min(times) if times else None
 
@@ -263,7 +264,7 @@ def main() -> int:
     print(f'OLD_DATE: {format_utc(args.min_old_date)} -> {format_utc(new_old_date)}')
 
     with args.pyproject.open('rb') as f:
-        pyproject = tomli.load(f)
+        pyproject = tomllib.load(f)
 
     oldest_python = lower_bound(SpecifierSet(pyproject['project']['requires-python']))
     print(f'oldest supported Python: {oldest_python}')

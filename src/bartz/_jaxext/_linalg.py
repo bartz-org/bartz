@@ -27,9 +27,7 @@
 from typing import Literal
 
 from jax import numpy as jnp
-from jax.scipy.linalg import (
-    solve_triangular as library_solve_triangular,  # noqa: TID251
-)
+from jax.scipy.linalg import solve_triangular as library_solve_triangular  # noqa: TID251
 from jaxtyping import Array, Float
 
 # largest matrix size handled by the unrolled implementations; above this, the

@@ -41,9 +41,9 @@ import argparse
 import datetime
 import re
 import sys
+import tomllib
 from pathlib import Path
 
-import tomli
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
@@ -145,7 +145,7 @@ def main() -> int:
     oldest_minor = latest_minor - (args.num_supported - 1)
 
     with args.pyproject.open('rb') as f:
-        pyproject = tomli.load(f)
+        pyproject = tomllib.load(f)
     current_floor = lower_bound(SpecifierSet(pyproject['project']['requires-python']))
     current_pinned = read_pinned_python(args.python_version_file)
 

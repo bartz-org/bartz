@@ -491,8 +491,9 @@ class RangeEvenBinner(Binner):
             X.shape[0], max_bins - 1, minimal_unsigned_dtype(max_bins - 1)
         )
 
+    # `AbstractVar` admits a property implementation
     @property
-    def _splits(self) -> Real[Array, 'p m']:
+    def _splits(self) -> Real[Array, 'p m']:  # ty:ignore[invalid-property-type-override]
         """Materialize the cutpoints. Intended for testing only, not library use.
 
         The cutpoints are not stored: `bin` works arithmetically from the

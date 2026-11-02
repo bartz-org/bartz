@@ -146,11 +146,8 @@ def evaluate_trace(
 
     # the tree-sum reduction carry varies over whichever manual axes are active;
     # marking its seed varying (see autobatch's `reduce_vary_axes`) lets the VMA
-    # checker pass. WORKAROUND(jax<0.7): pcast/VMA absent, fall back to disabling
-    # the checker on the `shard_map` instead
-    vary_axes = ('chains',) * shard_chains + ('data',) * shard_data
-    check_vma = hasattr(lax, 'pcast')
-    reduce_vary_axes = vary_axes if check_vma else ()
+    # checker pass
+    reduce_vary_axes = ('chains',) * shard_chains + ('data',) * shard_data
 
     # `_evaluate_trace` batches the test-point (`n`) axis itself as an inner
     # loop (see there); when sharding it runs per-device shard inside the
@@ -180,7 +177,6 @@ def evaluate_trace(
             out_chain_axis=out_chain_axis,
             n_axis=n_axis,
             out_ndim=out_ndim,
-            check_vma=check_vma,
         )
 
     return fun(X, trace)
@@ -205,7 +201,7 @@ def _evaluate_trace(
     If `batch_test_points`, the ``n`` axis of `X` is also looped over (see the
     autobatch nesting below). `max_io_nbytes` bounds each batch's I/O.
     `reduce_vary_axes` is forwarded to the tree-sum reduction so its scan carry
-    is `pcast` to vary over those manual axes (the only mesh-aware bit here).
+    is cast to vary over those manual axes (the only mesh-aware bit here).
     """
     # extract only the trees from the trace, this will be the input to `evaluate_forest`
     trees = project(TreesTrace, trace)
@@ -461,7 +457,6 @@ def _shard_map_eval(
     out_chain_axis: int | None,
     n_axis: int,
     out_ndim: int,
-    check_vma: bool,
 ) -> Callable[[UInt[Array, 'p n'], EvaluableTrace], Float32[Array, '*out']]:
     """Wrap ``fun(X, trace)`` in a `shard_map` manual over ``'chains'``/``'data'``.
 
@@ -472,8 +467,8 @@ def _shard_map_eval(
     corresponding output axes follow whatever sharding the computation produces
     without forcing any inter-device movement.
 
-    `check_vma` is forwarded to `shard_map`; `fun` is expected to `pcast` its
-    reduction seeds to varying (see `evaluate_trace`) so the check passes.
+    `fun` is expected to cast its reduction seeds to varying (see
+    `evaluate_trace`) so the VMA check passes.
     """
     axis_names = set()
     x_spec = [None, None]  # (p, n)
@@ -499,7 +494,6 @@ def _shard_map_eval(
         axis_names=axis_names,
         in_specs=(PartitionSpec(*x_spec), partition_specs(trace, mesh)),
         out_specs=PartitionSpec(*out_spec),
-        check_vma=check_vma,
     )
 
 

@@ -1069,21 +1069,43 @@ class TestReduction:
         """The count-only configs reject values other than 1 and a missing range."""
         indices = jnp.zeros(8, jnp.uint8)
         range_kw: dict = dict(size=4, subset_start=jnp.uint32(0), subset_length=1)
+
+        # eagerly, `lax.platform_dependent` runs only the current platform's
+        # branch, while under jit it traces the popcount branch everywhere
         for config in (PopcountReduction(), AutoOneHotOrPopcountReduction()):
             with pytest.raises(AssertionError):
-                config._reduce(
-                    jnp.ones(8),
-                    indices,
-                    dtype=jnp.float32,
-                    data_sharded=False,
-                    **range_kw,
-                )
+                jit(
+                    partial(
+                        config._reduce,
+                        jnp.ones(8),
+                        indices,
+                        dtype=jnp.float32,
+                        data_sharded=False,
+                        **range_kw,
+                    )
+                ).trace()
             with pytest.raises(AssertionError):
-                config._reduce(
-                    2, indices, dtype=jnp.uint32, data_sharded=False, **range_kw
-                )
+                jit(
+                    partial(
+                        config._reduce,
+                        2,
+                        indices,
+                        dtype=jnp.uint32,
+                        data_sharded=False,
+                        **range_kw,
+                    )
+                ).trace()
             with pytest.raises(AssertionError):
-                config._reduce(1, indices, size=4, dtype=jnp.uint32, data_sharded=False)
+                jit(
+                    partial(
+                        config._reduce,
+                        1,
+                        indices,
+                        size=4,
+                        dtype=jnp.uint32,
+                        data_sharded=False,
+                    )
+                ).trace()
 
     def test_gpu_sm_count(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The cuda branch reads the shared SM count and rejects mixed gpus."""
@@ -1989,11 +2011,7 @@ def check_same_structure(x: PyTree, y: PyTree) -> None:
     ) -> None:
         assert x.shape == y.shape
         assert x.dtype == y.dtype
-        # WORKAROUND(jax<0.7): empty arrays get their sharding spec canonicalized
-        # inconsistently across code paths, so skip the check in that case.
-        assert x.sharding.is_equivalent_to(y.sharding, x.ndim) or (
-            x.size == 0 and jax.__version_info__ < (0, 7, 0)
-        )
+        assert x.sharding.is_equivalent_to(y.sharding, x.ndim)
 
     tree.map_with_path(check, x, y)
 
@@ -3164,9 +3182,11 @@ def test_chol_with_gersh_near_singular(keys: split, k: int) -> None:
 
     # check that if `full_shift_cholesky` succeeds, then also `chol_with_gersh`
     # does; a few cases are at the edge of rounding errors and can go either
-    # way depending on how the compiler orders the operations
+    # way depending on how the compiler orders the operations. Both are jitted,
+    # as in the library: eagerly, on gpu 1/sqrt is two approximate ops instead
+    # of a fused rsqrt, which flips many more cases
     full_ok = jnp.all(jnp.isfinite(full_shift_cholesky(mat)), axis=(-2, -1))
-    ok = jnp.all(jnp.isfinite(chol_with_gersh(mat)), axis=(-2, -1))
+    ok = jnp.all(jnp.isfinite(jit(chol_with_gersh)(mat)), axis=(-2, -1))
     assert jnp.any(~full_ok)  # the test cases are hard enough
     assert jnp.sum(full_ok & ~ok) <= n // 1000
 

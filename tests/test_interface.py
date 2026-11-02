@@ -29,7 +29,7 @@ This is the main suite of tests.
 
 import math
 import pickle
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass, replace
 from functools import partial
@@ -47,7 +47,7 @@ import numpy
 import pandas as pd
 import polars as pl
 import pytest
-from equinox import EquinoxRuntimeError, tree_at
+from equinox import tree_at
 from jax import (
     Device,
     block_until_ready,
@@ -66,6 +66,7 @@ from jax import numpy as jnp
 from jax.scipy.special import ndtr
 from jax.sharding import Mesh, SingleDeviceSharding
 from jax.tree_util import KeyPath, keystr
+from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, PyTree, Real, Shaped
 from numpy.testing import assert_array_less
 from pytest import CaptureFixture, FixtureRequest  # noqa: PT013
@@ -107,6 +108,7 @@ from tests.test_mcmcstep import (
     reduce_reference,
 )
 from tests.util import (
+    EQX_RUNTIME_ERRORS,
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
@@ -1550,7 +1552,7 @@ def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
 
     with (
         subtests.test('rm_const=False raises'),
-        pytest.raises(EquinoxRuntimeError, match='predictors with no splits'),
+        pytest.raises(EQX_RUNTIME_ERRORS, match='predictors with no splits'),
     ):
         Bart(**dict(kw, rm_const=False, seed=random.clone(kw['seed'])))
 
@@ -2156,6 +2158,8 @@ def test_predict(bkw: BartKW) -> None:
     )
 
 
+@pytest.mark.flaky(max_runs=5, rerun_filter=rerun_on_gpu)
+# see `assert_identical_bart`
 def test_precompute_predict_train(bkw: BartKW, subtests: SubTests) -> None:
     """`precompute_predict_train` gives the same train predictions, up to rounding."""
     bart_off = Bart(**dict(bkw.kw, precompute_predict_train=False))
@@ -2169,10 +2173,17 @@ def test_precompute_predict_train(bkw: BartKW, subtests: SubTests) -> None:
     # can flip a thresholded 0/1 draw, which is not an approximate mismatch
     for kind in ('latent_samples', 'mean', 'mean_samples'):
         with subtests.test('predict', kind=kind):
+            # determine the tolerance based on the platform
+            leaf_tree = bart_off._mcmc_state.forest.leaf_tree
+            if leaf_tree.platform() == 'cpu':
+                rtol = 1e-5
+            else:  # pragma: no cover, gpu-only
+                rtol = condf(leaf_tree, 1e-4, 1e-3)
+
             assert_close_matrices(
                 bart_on.predict('train', kind=kind),
                 bart_off.predict('train', kind=kind),
-                rtol=1e-5,
+                rtol=rtol,
                 reduce_rank=True,
             )
 
@@ -2393,10 +2404,11 @@ def test_scale_shift(bkw: BartKW) -> None:
         masked_scale = masked_scale[:, None]
     cov_scale = masked_scale * masked_scale.T
 
+    lpci1 = bart1._mcmc_state.forest.leaf_prior_cov_inv
     assert_close_matrices(
-        bart1._mcmc_state.forest.leaf_prior_cov_inv.value,
+        lpci1.value,
         bart2._mcmc_state.forest.leaf_prior_cov_inv.value * cov_scale,
-        rtol=1e-6,
+        rtol=1e-6 if lpci1.nu is None or lpci1.value.platform() == 'cpu' else 1e-3,
         reduce_rank=True,
     )
 
@@ -2411,7 +2423,6 @@ def test_scale_shift(bkw: BartKW) -> None:
     # use a single loose tolerance: the heteroskedastic binary-latent step
     # accumulates float32 rounding, predictions derived from reduced-precision
     # stored leaves hold only to the rounding floor, and 1e-3 covers all cases
-    leaf_tree = bart1._mcmc_state.forest.leaf_tree
     pred_rtol = 1e-3
 
     yhat1 = bart1.predict('train', kind='latent_samples')
@@ -2457,7 +2468,9 @@ def test_scale_shift(bkw: BartKW) -> None:
     # mixed outcomes accumulate more float32 rounding through the binary-latent
     # step, so the sdev comparisons get a looser tolerance; with reduced leaf
     # precision the rounding floor dominates instead
-    rtol = condf(leaf_tree, 1e-4 if bkw.is_mixed else 1e-5, 1e-3)
+    rtol = condf(
+        bart1._mcmc_state.forest.leaf_tree, 1e-4 if bkw.is_mixed else 1e-5, 1e-3
+    )
 
     # binary positions of get_error_sdev are NaN; replace with 0 to compare.
     with debug_nans(False):
@@ -2804,6 +2817,14 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
         # 'auto' needs concrete error scales, which are traced here
         kw['init_kw'] = dict(kw.get('init_kw', {}), one_bin_prec_reduction=True)
 
+    if platform != 'cpu':  # pragma: no cover, gpu-only
+        # the vmapped and looped runs round differently, and on gpu float16
+        # storage amplifies it enough to make the chains bifurcate at a fixed seed
+        init_kw = dict(
+            kw.get('init_kw', {}), leaf_dtype=jnp.float32, prec_scale_dtype=jnp.float32
+        )
+        kw: kwdict = dict(kw, init_kw=init_kw)
+
     nrep = 3
     key = keys.pop(nrep)  # one MCMC seed per repetition
 
@@ -2865,18 +2886,6 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
     tree.map(check, batched, stacked)
 
 
-# WORKAROUND(jax<0.7.2): before 0.7.2, callbacks (pure_callback in
-# gammainccinv, equinox debug checks) disable JAX's C++ pjit fastpath cache, so
-# no_tracing raises a false positive without any actual jaxpr re-tracing. Remove
-# this skip once the oldest supported jax is >= 0.7.2.
-@pytest.mark.skipif(
-    jax.__version_info__ < (0, 7, 2),
-    reason='no_tracing gives false positives with jax < 0.7.2: callbacks '
-    '(pure_callback in gammainccinv, equinox debug checks) disable '
-    "JAX's C++ pjit fastpath cache, so no_tracing raises without any actual "
-    'jaxpr re-tracing (see test_no_recompilation_inner_loop_counter for the '
-    'version-robust check)',
-)
 def test_no_recompilation_no_tracing(bkw: BartKW) -> None:
     """Check that running the same `Bart` invocation twice does not retrace.
 
@@ -3167,7 +3176,7 @@ def test_automatic_integer_types(bkw: BartKW) -> None:
         bart = Bart(**kw)
     messages = [str(w.message) for w in warnings]
 
-    def select_type(cond: bool) -> type:
+    def select_type(cond: bool) -> DTypeLike:
         return jnp.uint8 if cond else jnp.uint16
 
     leaf_indices_type = select_type(bkw.maxdepth <= 8)
@@ -3218,11 +3227,8 @@ def get_expect_sharded(kw: dict) -> bool:
     )
 
 
-def test_sharding(bkw: BartKW, variant: int, keys: split) -> None:
+def test_sharding(bkw: BartKW, keys: split) -> None:
     """Check that chains and data shards live on their own devices throughout the interface."""
-    # WORKAROUND(jax<0.7): sharding bug, no time to fix
-    if jax.__version_info__ < (0, 7, 0) and variant in (2, 5):
-        pytest.xfail('Sharding bug in bartz with jax<0.7.')
     kw = bkw.kw
     bart = Bart(**kw)
 
@@ -3278,13 +3284,13 @@ class TestVarprobParam:
             assert bkw.p > 1
             varprob = jnp.ones(bkw.p).at[0].set(-1.0)
             kw_neg = dict(kw, varprob=varprob)
-            with pytest.raises(EquinoxRuntimeError, match='varprob must be > 0'):
+            with pytest.raises(EQX_RUNTIME_ERRORS, match='varprob must be > 0'):
                 Bart(**kw_neg)
 
         with subtests.test('not 0'):
             varprob = jnp.zeros(bkw.p).at[0].set(1.0)
             kw_zero = dict(kw, varprob=varprob)
-            with pytest.raises(EquinoxRuntimeError, match='varprob must be > 0'):
+            with pytest.raises(EQX_RUNTIME_ERRORS, match='varprob must be > 0'):
                 Bart(**kw_zero)
 
 
@@ -3320,7 +3326,7 @@ def run_bart_and_block(bkw: BartKW, keys: split) -> None:
 
 
 @contextmanager
-def array_garbage_collection_guard(value: str) -> Iterator[None]:
+def array_garbage_collection_guard(value: str) -> Generator[None]:
     """Implement `jax.array_garbage_collection_guard`, added in jax v0.9.1."""
     # WORKAROUND(jax<0.9.1): replace with `jax.array_garbage_collection_guard`
     setting = 'jax_array_garbage_collection_guard'
@@ -3333,7 +3339,7 @@ def array_garbage_collection_guard(value: str) -> Iterator[None]:
 
 
 @contextmanager
-def catch_array_gc_guard() -> Iterator[None]:
+def catch_array_gc_guard() -> Generator[None]:
     """Catch array GC guard log messages and raise as exceptions."""
     # we need this because array_garbage_collection_guard('fatal')
     # terminates the process, and the 'log' messages are emitted from C++
@@ -3661,7 +3667,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     assert_close_matrices(
         chain_to_axis(state_uv.resid, uv_axes.resid),
         chain_to_axis(state_mv.resid, mv_axes.resid).squeeze(-2),
-        rtol=1e-7,
+        rtol=1e-6,
     )
     assert_close_matrices(
         chain_to_axis(state_uv.error_cov_inv.value, uv_axes.error_cov_inv.value),

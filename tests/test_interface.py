@@ -2817,10 +2817,13 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
         # 'auto' needs concrete error scales, which are traced here
         kw['init_kw'] = dict(kw.get('init_kw', {}), one_bin_prec_reduction=True)
 
-    # the vmapped and looped runs round differently, and the gpu default float16
-    # storage amplifies it enough to make the chains bifurcate at a fixed seed
-    float32_storage = dict(leaf_dtype=jnp.float32, prec_scale_dtype=jnp.float32)
-    kw['init_kw'] = dict(float32_storage, **kw.get('init_kw', {}))
+    if platform != 'cpu':  # pragma: no cover, gpu-only
+        # the vmapped and looped runs round differently, and on gpu float16
+        # storage amplifies it enough to make the chains bifurcate at a fixed seed
+        init_kw = dict(
+            kw.get('init_kw', {}), leaf_dtype=jnp.float32, prec_scale_dtype=jnp.float32
+        )
+        kw: kwdict = dict(kw, init_kw=init_kw)
 
     nrep = 3
     key = keys.pop(nrep)  # one MCMC seed per repetition

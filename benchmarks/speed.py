@@ -318,11 +318,14 @@ class AutoParamNames:
     param_names: ClassVar[tuple[str, ...]]
 
     def setup(self, *args: Any, **kwargs: Any) -> None:
-        """Set up the benchmark, introspected to set `param_names`."""
-        raise NotImplementedError
+        """Set up the benchmark, introspected to set `param_names`; must be overridden."""
 
     def __init_subclass__(cls, **_: Any) -> None:
         method = cls.setup
+        # the base signature would yield bogus `param_names`
+        if method is AutoParamNames.setup:
+            msg = f'{cls.__name__} must define `setup`'
+            raise TypeError(msg)
         sig = signature(method)
         params = [
             name

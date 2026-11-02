@@ -446,7 +446,7 @@ class StepGeneric(StepBase):
     params: tuple[tuple[Mode, ...], tuple[Kind, ...], tuple[int | None, ...]] = (
         ('compile', 'run'),
         ('plain', 'binary', 'weights', 'sparse', 'multivariate'),
-        (None, 1, 2),
+        (None, 2),
     )
 
     def time_step(self, *_: Any) -> None:
@@ -546,7 +546,7 @@ class StepMemory(StepBase):
 
     params: tuple[tuple[Kind, ...], tuple[int | None, ...], tuple[MemStat, ...]] = (
         ('plain', 'binary', 'weights', 'sparse', 'multivariate'),
-        (None, 1, 2),
+        (None, 2),
         ('state', 'peak'),
     )
 
@@ -743,13 +743,13 @@ class GbartIters(BaseGbart):
     This is useful to distinguish the startup time from the time per iteration.
     """
 
-    params = ((0, NITERS, 2 * NITERS, 3 * NITERS, 4 * NITERS, 5 * NITERS),)
+    params = ((0, NITERS, 5 * NITERS),)
 
 
 class GbartChains(BaseGbart):
     """Time `mc_gbart` vs. the number of chains."""
 
-    params = ((1, 2, 4, 8, 16, 32), (False, True))
+    params = ((1, 4, 16, 32), (False, True))
 
     def setup(self, nchains: int, shard: bool) -> None:  # ty:ignore[invalid-method-override]
         """Set up to use or not multiple cpus."""
@@ -780,7 +780,11 @@ class GbartChains(BaseGbart):
 class GbartGeneric(BaseGbart):
     """General timing of `mc_gbart` with many settings."""
 
-    params = ((0, NITERS), (1, 6), ('warm', 'cold'), (False, True))
+    params = ((1, 6), ('warm', 'cold'), (False, True))
+
+    def setup(self, nchains: int, cache: Cache, predict: bool) -> None:  # ty:ignore[invalid-method-override]
+        """Set up to run `NITERS` iterations."""
+        super().setup(NITERS, nchains, cache, predict)
 
 
 Regime = Literal['large_n', 'large_p']
@@ -992,7 +996,7 @@ class RunMcmcVsTraceLength(BaseRunMcmc):
     """
 
     # asv config
-    params = ((2**6, 2**8, 2**10, 2**12, 2**14, 2**16),)
+    params = ((2**6, 2**12, 2**16),)
 
     def setup(self, n_save: int) -> None:  # ty:ignore[invalid-method-override]
         """Set up to kill after a certain number of iterations."""
@@ -1001,13 +1005,14 @@ class RunMcmcVsTraceLength(BaseRunMcmc):
 
 
 class RunMcmc(BaseRunMcmc):
-    """Timings of `run_mcmc`."""
+    """Timings of `run_mcmc`, compiling from cold caches or running warm."""
 
     # asv config
-    params = (('compile', 'run'), (0, NITERS), ('cold', 'warm'))
+    params = (('compile', 'run'), (0, NITERS))
 
-    def setup(self, mode: Mode, niters: int, cache: Cache) -> None:  # ty:ignore[invalid-method-override]
+    def setup(self, mode: Mode, niters: int) -> None:  # ty:ignore[invalid-method-override]
         """Prepare the arguments, compile the function, and run to warm-up."""
+        cache: Cache = 'cold' if mode == 'compile' else 'warm'
         super().setup(
             None, mode, cache, dict(n_save=niters // 2, n_burn=(niters - niters // 2))
         )

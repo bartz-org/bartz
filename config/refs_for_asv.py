@@ -41,6 +41,8 @@ the floor for `bartz` itself (= oldest benchmarked version).
 
 import datetime
 import os
+import subprocess
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,6 +75,30 @@ class Tag:
         return Version(self.name)
 
 
+def ls_remote_head(repo: Repo) -> str:
+    """Return the output of `git ls-remote --symref origin HEAD`, or '' on failure."""
+    # In a new session there is no controlling terminal, so ssh and git fail
+    # instead of prompting. Stdout goes to a file rather than a pipe, so an ssh
+    # grandchild surviving the timeout kill of git can't block reading it.
+    with tempfile.TemporaryFile('w+') as out:
+        try:
+            subprocess.run(
+                ('git', 'ls-remote', '--symref', 'origin', 'HEAD'),  # noqa: S607
+                cwd=repo.working_dir,
+                stdin=subprocess.DEVNULL,
+                stdout=out,
+                stderr=subprocess.DEVNULL,
+                env=dict(os.environ, GIT_TERMINAL_PROMPT='0'),
+                start_new_session=True,
+                timeout=30,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return ''
+        out.seek(0)
+        return out.read()
+
+
 def get_default_branch_name(repo: Repo) -> str:
     try:
         return repo.git.symbolic_ref('refs/remotes/origin/HEAD', short=True).split('/')[
@@ -82,22 +108,7 @@ def get_default_branch_name(repo: Repo) -> str:
         pass
     # Ask the remote directly. Works even when refs/remotes/origin/HEAD
     # was never set locally (e.g. origin added after the initial clone).
-    try:
-        # on a tty, ssh may wait forever for a passphrase or a host key
-        # confirmation, so forbid prompts, and time out a hanging remote
-        ssh = os.environ.get('GIT_SSH_COMMAND', 'ssh')
-        output = repo.git.ls_remote(
-            '--symref',
-            'origin',
-            'HEAD',
-            env=dict(
-                GIT_SSH_COMMAND=f'{ssh} -o BatchMode=yes', GIT_TERMINAL_PROMPT='0'
-            ),
-            kill_after_timeout=30,
-        )
-        assert isinstance(output, str)  # type narrowing
-    except GitCommandError:
-        output = ''
+    output = ls_remote_head(repo)
     for line in output.splitlines():
         if line.startswith('ref:'):
             return line.split()[1].split('/')[-1]

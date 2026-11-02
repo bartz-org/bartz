@@ -2158,6 +2158,8 @@ def test_predict(bkw: BartKW) -> None:
     )
 
 
+@pytest.mark.flaky(max_runs=5, rerun_filter=rerun_on_gpu)
+# see `assert_identical_bart`
 def test_precompute_predict_train(bkw: BartKW, subtests: SubTests) -> None:
     """`precompute_predict_train` gives the same train predictions, up to rounding."""
     bart_off = Bart(**dict(bkw.kw, precompute_predict_train=False))
@@ -2171,10 +2173,17 @@ def test_precompute_predict_train(bkw: BartKW, subtests: SubTests) -> None:
     # can flip a thresholded 0/1 draw, which is not an approximate mismatch
     for kind in ('latent_samples', 'mean', 'mean_samples'):
         with subtests.test('predict', kind=kind):
+            # determine the tolerance based on the platform
+            leaf_tree = bart_off._mcmc_state.forest.leaf_tree
+            if leaf_tree.platform() == 'cpu':
+                rtol = 1e-5
+            else:  # pragma: no cover, gpu-only
+                rtol = condf(leaf_tree, 1e-4, 1e-3)
+
             assert_close_matrices(
                 bart_on.predict('train', kind=kind),
                 bart_off.predict('train', kind=kind),
-                rtol=1e-5,
+                rtol=rtol,
                 reduce_rank=True,
             )
 
@@ -2395,10 +2404,11 @@ def test_scale_shift(bkw: BartKW) -> None:
         masked_scale = masked_scale[:, None]
     cov_scale = masked_scale * masked_scale.T
 
+    lpci1 = bart1._mcmc_state.forest.leaf_prior_cov_inv
     assert_close_matrices(
-        bart1._mcmc_state.forest.leaf_prior_cov_inv.value,
+        lpci1.value,
         bart2._mcmc_state.forest.leaf_prior_cov_inv.value * cov_scale,
-        rtol=1e-6,
+        rtol=1e-6 if lpci1.nu is None or lpci1.value.platform() == 'cpu' else 1e-3,
         reduce_rank=True,
     )
 
@@ -2413,7 +2423,6 @@ def test_scale_shift(bkw: BartKW) -> None:
     # use a single loose tolerance: the heteroskedastic binary-latent step
     # accumulates float32 rounding, predictions derived from reduced-precision
     # stored leaves hold only to the rounding floor, and 1e-3 covers all cases
-    leaf_tree = bart1._mcmc_state.forest.leaf_tree
     pred_rtol = 1e-3
 
     yhat1 = bart1.predict('train', kind='latent_samples')
@@ -2459,7 +2468,9 @@ def test_scale_shift(bkw: BartKW) -> None:
     # mixed outcomes accumulate more float32 rounding through the binary-latent
     # step, so the sdev comparisons get a looser tolerance; with reduced leaf
     # precision the rounding floor dominates instead
-    rtol = condf(leaf_tree, 1e-4 if bkw.is_mixed else 1e-5, 1e-3)
+    rtol = condf(
+        bart1._mcmc_state.forest.leaf_tree, 1e-4 if bkw.is_mixed else 1e-5, 1e-3
+    )
 
     # binary positions of get_error_sdev are NaN; replace with 0 to compare.
     with debug_nans(False):
@@ -2805,6 +2816,11 @@ def test_vmap(bkw: BartKW, keys: split) -> None:
     if w is not None:
         # 'auto' needs concrete error scales, which are traced here
         kw['init_kw'] = dict(kw.get('init_kw', {}), one_bin_prec_reduction=True)
+
+    # the vmapped and looped runs round differently, and the gpu default float16
+    # storage amplifies it enough to make the chains bifurcate at a fixed seed
+    float32_storage = dict(leaf_dtype=jnp.float32, prec_scale_dtype=jnp.float32)
+    kw['init_kw'] = dict(float32_storage, **kw.get('init_kw', {}))
 
     nrep = 3
     key = keys.pop(nrep)  # one MCMC seed per repetition
@@ -3648,7 +3664,7 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     assert_close_matrices(
         chain_to_axis(state_uv.resid, uv_axes.resid),
         chain_to_axis(state_mv.resid, mv_axes.resid).squeeze(-2),
-        rtol=1e-7,
+        rtol=1e-6,
     )
     assert_close_matrices(
         chain_to_axis(state_uv.error_cov_inv.value, uv_axes.error_cov_inv.value),

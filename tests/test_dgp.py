@@ -602,12 +602,12 @@ class TestFromPeff:
     def test_gamma_rejects_peff_ge_p(self) -> None:
         """`Gamma.from_peff` errors at ``peff >= p`` (its alpha would diverge)."""
         with pytest.raises(EquinoxTracetimeError, match='Gamma needs peff'):
-            block_until_ready(Gamma.from_peff(float(self.P), self.P))
+            Gamma.from_peff(float(self.P), self.P)
 
     def test_spikeslab_rejects_peff_gt_p(self) -> None:
         """`SpikeSlab.from_peff` errors at ``peff > p`` (its pi would exceed 1)."""
         with pytest.raises(EquinoxTracetimeError, match='SpikeSlab needs peff'):
-            block_until_ready(SpikeSlab.from_peff(self.P + 1.0, self.P))
+            SpikeSlab.from_peff(self.P + 1.0, self.P)
 
 
 def test_high_sparsity_matches_none(keys: split) -> None:
@@ -909,13 +909,13 @@ class TestCorrDistr:
     def test_lkj_eta_positive(self, keys: split) -> None:
         """`LKJ` with ``eta <= 0`` raises."""
         with pytest.raises(EquinoxTracetimeError, match='eta must be > 0'):
-            block_until_ready(LKJ(0.0).sample_chol(keys.pop(), CORR_K))
+            LKJ(0.0).sample_chol(keys.pop(), CORR_K)
 
     @pytest.mark.parametrize('tau', [-0.1, 1.0])
     def test_factor_tau_range(self, keys: split, tau: float) -> None:
         """`Factor` with `tau` outside ``[0, 1)`` raises."""
         with pytest.raises(EquinoxTracetimeError, match='tau must be in'):
-            block_until_ready(Factor(1, tau).sample_chol(keys.pop(), CORR_K))
+            Factor(1, tau).sample_chol(keys.pop(), CORR_K)
 
     def test_factor_rank_positive(self) -> None:
         """`Factor` with ``rank < 1`` raises at construction."""

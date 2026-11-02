@@ -92,6 +92,7 @@ def make_bart() -> tuple[Bart, Inputs]:
         n_burn=2,
         num_chains=2,
         pbar=False,  # the tqdm callback has a random bar id
+        init_kw=dict(leaf_dtype=jnp.float32),  # the default depends on the platform
         seed=keys.pop(),
     )
     return model, Inputs(x=np.asarray(x))

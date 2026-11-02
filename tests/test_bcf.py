@@ -66,6 +66,8 @@ from tests.util import (
     assert_different_matrices,
     int_seed,
     jaxtyping_disabled,
+    nnone,
+    rerun_on_gpu,
     rhat_rank,
 )
 
@@ -119,6 +121,16 @@ def check_chains_match(
     tree.map_with_path(
         check_leaf, chain_vmap_axes(multi), multi, *singles, is_leaf=lambda x: x is None
     )
+
+
+def assert_equal_approx_if_gpu(
+    actual: Float32[Array, '*shape'], desired: Float32[Array, '*shape']
+) -> None:
+    """Check two arrays are equal on cpu, or close on gpu."""
+    if actual.platform() == 'cpu':
+        assert_array_equal(actual, desired)
+    else:  # pragma: no cover, gpu-only
+        assert_close_matrices(actual, desired, rtol=1e-4, reduce_rank=True)
 
 
 def assert_chains_differ(model: bcf) -> None:
@@ -1604,6 +1616,8 @@ class TestBcf:
         with pytest.raises(ValueError, match='does not match x_train'):
             model.predict(x_test_df)
 
+    @pytest.mark.flaky(max_runs=5, rerun_filter=rerun_on_gpu)
+    # on gpu the mcmc is not deterministic at fixed seed
     def test_seed_types(self, keys: split) -> None:
         """An integer seed is equivalent to its key."""
         train = gen_bcf_data(keys.pop(), n=N_TRAIN)
@@ -1625,8 +1639,8 @@ class TestBcf:
 
         pred_int = fit(seed)
         pred_key = fit(random.key(seed))
-        assert_array_equal(pred_int['mu'], pred_key['mu'])
-        assert_array_equal(pred_int['tau'], pred_key['tau'])
+        assert_equal_approx_if_gpu(pred_int['mu'], pred_key['mu'])
+        assert_equal_approx_if_gpu(pred_int['tau'], pred_key['tau'])
 
     def test_predict_invalid_pihat(self, keys: split) -> None:
         """Prediction checks `pihat_test` against how the model was fit."""
@@ -1683,6 +1697,8 @@ class TestBcf:
         with pytest.raises(ValueError, match='`pihat_test` contains NaN'):
             model.predict(test.x, pihat_test=test.pihat.at[0].set(jnp.nan))
 
+    @pytest.mark.flaky(max_runs=5, rerun_filter=rerun_on_gpu)
+    # on gpu the mcmc is not deterministic at fixed seed
     def test_numpy_input(self, keys: split) -> None:
         """Numpy inputs give the same results as jax arrays."""
         train, test = split_bcf_data(
@@ -1710,6 +1726,6 @@ class TestBcf:
 
         model_jax = fit(jnp.asarray, key)
         model_np = fit(np.asarray, random.clone(key))
-        assert_array_equal(model_np.sigma_trace, model_jax.sigma_trace)
-        assert_array_equal(model_np.mu_test, model_jax.mu_test)
-        assert_array_equal(model_np.tau_test, model_jax.tau_test)
+        assert_equal_approx_if_gpu(model_np.sigma_trace, model_jax.sigma_trace)
+        assert_equal_approx_if_gpu(nnone(model_np.mu_test), nnone(model_jax.mu_test))
+        assert_equal_approx_if_gpu(nnone(model_np.tau_test), nnone(model_jax.tau_test))

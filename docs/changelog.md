@@ -31,7 +31,7 @@ SOFTWARE.
 # Changelog
 
 
-## 0.14.0 Mom, these are not the bayesian causal forests I wanted! Even that weirdo girl in math class got cooler ones. Why are you always like this? (2026-11-02)
+## 0.14.0 Mom, these are not the bayesian causal forests I wanted! Even that weirdo girl in math class got cooler ones. Why are you always like this? (2026-11-03)
 
 - Polish the `bcf` submodule; main things to know:
     - General improvements in speed, memory, error checking, and consistency

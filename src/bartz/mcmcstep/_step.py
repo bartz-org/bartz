@@ -2211,7 +2211,7 @@ def log_blocked_mass_tree(
     # on cpu than a chain of logaddexp.
     log_rest = s.log_rest + jnp.log1p(-jnp.minimum(ineligible_mass, 1.0))
     (num_top,) = s.log_top.shape
-    is_eligible = [((ineligible_top >> i) & 1) == 0 for i in range(num_top)]
+    is_eligible = tuple(((ineligible_top >> i) & 1) == 0 for i in range(num_top))
     log_max = log_rest
     for i in range(num_top):
         log_max = jnp.where(is_eligible[i], jnp.maximum(log_max, s.log_top[i]), log_max)

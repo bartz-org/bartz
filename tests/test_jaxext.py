@@ -943,9 +943,17 @@ def test_categorical(keys: split) -> None:
     """Check `categorical` draws the same as `jax.random.categorical`."""
     logits = random.normal(keys.pop(), (1000,)) * 3
     logits = logits.at[::7].set(-jnp.inf)
+    with_inf = logits.at[300::400].set(jnp.inf)
+    with_nan = with_inf.at[500::300].set(jnp.nan)
     sample = vmap(categorical, in_axes=(0, None))
     reference = vmap(random.categorical, in_axes=(0, None))
-    for x in (logits, jnp.full(10, -jnp.inf)):
+    for x in (
+        logits,
+        with_inf,
+        with_nan,
+        jnp.full(10, -jnp.inf),
+        jnp.full(10, jnp.nan),
+    ):
         draw_keys = keys.pop(200)
         assert_array_equal(sample(draw_keys, x), reference(draw_keys, x))
 

@@ -569,7 +569,7 @@ def test_nan_predictors(fit: Fit) -> None:
             a[-1, -1] = numpy.nan
             return pl.DataFrame(a, schema=x.columns)
         else:
-            return jnp.asarray(x).at[-1, -1].set(jnp.nan)
+            return x.at[-1, -1].set(jnp.nan)
 
     gkw = fit.case.gkw
     match = 'predictors contain NaN'

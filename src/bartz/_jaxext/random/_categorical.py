@@ -32,8 +32,16 @@ from jaxtyping import Array, Float, Int32, Key
 def categorical(key: Key[Array, ''], logits: Float[Array, ' n']) -> Int32[Array, '']:
     """Draw like `jax.random.categorical` with 1d `logits`, with the same result."""
     # xla:cpu does not vectorize the argmax reduction, nor any computation of
-    # `logits` fused into it, while it vectorizes max and min; on ties, both
-    # pick the first index
-    z = random.gumbel(key, logits.shape, logits.dtype) + logits
-    (n,) = z.shape
-    return jnp.min(jnp.where(z == jnp.max(z), jnp.arange(n), n))
+    # `logits` fused into it, while it vectorizes max and min
+    (n,) = logits.shape
+
+    # like argmax, pick the first nan, to propagate it, else the first maximum
+    # WORKAROUND(jax<0.12.1): keep nans out of max, as large xla:cpu reductions
+    # drop them, https://github.com/jax-ml/jax/issues/41335; with the fix, use
+    # `min(where((z == max(z)) | isnan(z), index, n))` (the gumbel noise is
+    # finite, so z has nan where logits has)
+    is_nan = jnp.isnan(logits)
+    z = random.gumbel(key, (n,), logits.dtype) + jnp.where(is_nan, -jnp.inf, logits)
+    index = jnp.arange(n)
+    priority = jnp.where(is_nan, index, jnp.where(z == jnp.max(z), n + index, 2 * n))
+    return jnp.min(priority) % n

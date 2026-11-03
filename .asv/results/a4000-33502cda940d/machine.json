@@ -1,9 +1,0 @@
-{
-    "arch": "x86_64",
-    "cpu": "Intel(R) Core(TM) i7-14700",
-    "machine": "a4000-33502cda940d",
-    "num_cpu": "28",
-    "os": "Linux 7.0.0-31-generic",
-    "ram": "67194875904",
-    "version": 1
-}

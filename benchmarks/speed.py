@@ -30,6 +30,7 @@ from collections.abc import Mapping
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from functools import partial
+from importlib import metadata  # not `version`: asv would read it as an attribute
 from inspect import signature
 from io import StringIO
 from types import MappingProxyType
@@ -49,6 +50,7 @@ from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.sharding import Mesh
 from jaxtyping import Array, Integer, Key, Shaped
+from packaging.version import Version
 
 from bartz import mcmcloop, mcmcstep
 from bartz.mcmcloop import run_mcmc
@@ -92,6 +94,31 @@ try:
 except ImportError:
     # WORKAROUND(bartz<0.8.0): mc_gbart was introduced in 0.8.0; fall back to gbart
     from bartz.BART import gbart
+
+
+def patch_make_mesh() -> None:
+    """Let bartz 0.8.0-0.12.0 call `jax.make_mesh` with jax >= 0.11.1."""
+    # WORKAROUND(bartz<0.12.1): these versions call `make_mesh(axis_shapes=...)`
+    # in `bartz._interface`, but jax 0.11.1 renamed `axis_shapes` to
+    # `axis_sizes`. The bound excludes the 0.12.1 dev builds, as some already
+    # pass it positionally.
+    bartz_version = Version(metadata.version('bartz'))
+    old_bartz = Version('0.8.0') <= bartz_version < Version('0.12.1.dev0')
+    new_jax = Version(metadata.version('jax')) >= Version('0.11.1')
+    if old_bartz and new_jax:
+        from bartz import _interface  # noqa: PLC0415
+
+        make_mesh = _interface.make_mesh
+
+        def make_mesh_compat(
+            *args: Any, axis_shapes: tuple[int, ...], **kwargs: Any
+        ) -> Mesh:
+            return make_mesh(axis_shapes, *args, **kwargs)
+
+        _interface.make_mesh = make_mesh_compat  # ty:ignore[invalid-assignment]
+
+
+patch_make_mesh()
 
 # WORKAROUND(bartz<0.11.0): mc_gbart switched its array predictor layout from
 # (p, n) to R BART3's (n, p) in 0.11.0. Detect it from the `x_train` annotation.
@@ -446,7 +473,7 @@ class StepGeneric(StepBase):
     params: tuple[tuple[Mode, ...], tuple[Kind, ...], tuple[int | None, ...]] = (
         ('compile', 'run'),
         ('plain', 'binary', 'weights', 'sparse', 'multivariate'),
-        (None, 1, 2),
+        (None, 2),
     )
 
     def time_step(self, *_: Any) -> None:
@@ -546,7 +573,7 @@ class StepMemory(StepBase):
 
     params: tuple[tuple[Kind, ...], tuple[int | None, ...], tuple[MemStat, ...]] = (
         ('plain', 'binary', 'weights', 'sparse', 'multivariate'),
-        (None, 1, 2),
+        (None, 2),
         ('state', 'peak'),
     )
 
@@ -743,13 +770,13 @@ class GbartIters(BaseGbart):
     This is useful to distinguish the startup time from the time per iteration.
     """
 
-    params = ((0, NITERS, 2 * NITERS, 3 * NITERS, 4 * NITERS, 5 * NITERS),)
+    params = ((0, NITERS, 5 * NITERS),)
 
 
 class GbartChains(BaseGbart):
     """Time `mc_gbart` vs. the number of chains."""
 
-    params = ((1, 2, 4, 8, 16, 32), (False, True))
+    params = ((1, 4, 16, 32), (False, True))
 
     def setup(self, nchains: int, shard: bool) -> None:  # ty:ignore[invalid-method-override]
         """Set up to use or not multiple cpus."""
@@ -780,7 +807,11 @@ class GbartChains(BaseGbart):
 class GbartGeneric(BaseGbart):
     """General timing of `mc_gbart` with many settings."""
 
-    params = ((0, NITERS), (1, 6), ('warm', 'cold'), (False, True))
+    params = ((1, 6), ('warm', 'cold'), (False, True))
+
+    def setup(self, nchains: int, cache: Cache, predict: bool) -> None:  # ty:ignore[invalid-method-override]
+        """Set up to run `NITERS` iterations."""
+        super().setup(NITERS, nchains, cache, predict)
 
 
 Regime = Literal['large_n', 'large_p']
@@ -992,7 +1023,7 @@ class RunMcmcVsTraceLength(BaseRunMcmc):
     """
 
     # asv config
-    params = ((2**6, 2**8, 2**10, 2**12, 2**14, 2**16),)
+    params = ((2**6, 2**12, 2**16),)
 
     def setup(self, n_save: int) -> None:  # ty:ignore[invalid-method-override]
         """Set up to kill after a certain number of iterations."""
@@ -1001,13 +1032,14 @@ class RunMcmcVsTraceLength(BaseRunMcmc):
 
 
 class RunMcmc(BaseRunMcmc):
-    """Timings of `run_mcmc`."""
+    """Timings of `run_mcmc`, compiling from cold caches or running warm."""
 
     # asv config
-    params = (('compile', 'run'), (0, NITERS), ('cold', 'warm'))
+    params = (('compile', 'run'), (0, NITERS))
 
-    def setup(self, mode: Mode, niters: int, cache: Cache) -> None:  # ty:ignore[invalid-method-override]
+    def setup(self, mode: Mode, niters: int) -> None:  # ty:ignore[invalid-method-override]
         """Prepare the arguments, compile the function, and run to warm-up."""
+        cache: Cache = 'cold' if mode == 'compile' else 'warm'
         super().setup(
             None, mode, cache, dict(n_save=niters // 2, n_burn=(niters - niters // 2))
         )

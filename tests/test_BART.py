@@ -558,6 +558,28 @@ def test_data_format_mismatch(fit: Fit) -> None:
         fit.bart.predict(x_test)
 
 
+def test_nan_predictors(fit: Fit) -> None:
+    """Check NaN in the predictors raises an error, in `__init__` and `predict`."""
+
+    def with_nan(
+        x: Shaped[Array, 'n p'] | pl.DataFrame,
+    ) -> Shaped[Array, 'n p'] | pl.DataFrame:
+        if isinstance(x, pl.DataFrame):
+            a = x.to_numpy().copy()
+            a[-1, -1] = numpy.nan
+            return pl.DataFrame(a, schema=x.columns)
+        else:
+            return x.at[-1, -1].set(jnp.nan)
+
+    gkw = fit.case.gkw
+    match = 'predictors contain NaN'
+    kw: dict = dict(gkw, x_train=with_nan(gkw['x_train']), x_test=None)
+    with pytest.raises(ValueError, match=match):
+        fit.case.cls(**kw)
+    with pytest.raises(ValueError, match=match):
+        fit.bart.predict(with_nan(gkw['x_test']))
+
+
 @pytest.fixture
 def small_data(keys: split) -> tuple[Shaped[Array, 'n p'], Shaped[Array, ' n']]:
     """Return predictors in R layout and a continuous response."""

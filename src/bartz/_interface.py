@@ -473,6 +473,7 @@ class Bart(Module):
     ) -> None:
         # check data and put it in the right format
         x_train, x_train_fmt = _process_predictor_input(x_train)
+        raise_if_nan(start_nan_check(x_train))
         y_train = _process_response_input(y_train)
         check_length(y_train, 'y_train', x_train, 'x_train')
 
@@ -662,7 +663,7 @@ class Bart(Module):
                 kind=kind,
             )
 
-        x_test = self._process_x_test(x_test, error_scale)
+        x_test, x_test_has_nan = self._process_x_test(x_test, error_scale)
 
         # place new test data on the devices of the model; the training data
         # is already in place
@@ -670,7 +671,7 @@ class Bart(Module):
             x_test, error_scale = self._device_put_test(x_test, error_scale)
 
         # invoke jitted implementation
-        return predict(
+        out = predict(
             key,
             self._main_trace,
             x_test,
@@ -684,6 +685,11 @@ class Bart(Module):
             # own at trace time, so declare it.
             test_points='shard_and_autobatch',
         )
+
+        # wait for the NaN check only now, to overlap it with dispatching
+        raise_if_nan(x_test_has_nan)
+
+        return out
 
     def _drop_device_info(self) -> 'Bart':
         """Return a copy of the model without device placement metadata.
@@ -1040,22 +1046,28 @@ class Bart(Module):
         self,
         x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
         error_scale: Float32[Array, ' m'] | Float32[Array, 'k m'] | None,
-    ) -> UInt[Array, 'p m']:
-        """Convert x_test to binned format suitable for prediction."""
+    ) -> tuple[UInt[Array, 'p m'], Bool[Array, ''] | None]:
+        """Convert x_test to binned format suitable for prediction.
+
+        Also return the pending NaN check on x_test, see `start_nan_check`.
+        """
         if isinstance(x_test, str):
             if x_test != 'train':
                 msg = (
                     f"x_test must be an array, a DataFrame, or 'train', got {x_test!r}"
                 )
                 raise ValueError(msg)
-            return self._mcmc_state.X
-        x_test, x_test_fmt = _process_predictor_input(x_test)
-        if x_test_fmt != self._x_train_fmt:
-            msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
-            raise ValueError(msg)
-        if error_scale is not None:
-            check_length(error_scale, 'error_scale', x_test, 'x_test')
-        return self._binner.bin(x_test)
+            return self._mcmc_state.X, None
+
+        else:
+            x_test, x_test_fmt = _process_predictor_input(x_test)
+            has_nan = start_nan_check(x_test)
+            if x_test_fmt != self._x_train_fmt:
+                msg = f'Input format mismatch: {x_test_fmt=} != x_train_fmt={self._x_train_fmt!r}'
+                raise ValueError(msg)
+            if error_scale is not None:
+                check_length(error_scale, 'error_scale', x_test, 'x_test')
+            return self._binner.bin(x_test), has_nan
 
     def _device_put_test(
         self,
@@ -1233,10 +1245,26 @@ def _process_predictor_input(
         fmt = dict(kind='array', num_covar=x.shape[0])
     x = jnp.asarray(x)
     assert x.ndim == 2
-    if jnp.issubdtype(x.dtype, jnp.floating) and not jit_active() and any_nan(x):
+    return x, fmt
+
+
+def start_nan_check(x: Shaped[Array, 'p n']) -> Bool[Array, ''] | None:
+    """Dispatch checking predictors for NaN, without waiting for the result.
+
+    Returns `None` if the check does not apply, i.e., under jit or with
+    non-floating predictors.
+    """
+    if jnp.issubdtype(x.dtype, jnp.floating) and not jit_active():
+        return any_nan(x)
+    else:
+        return None
+
+
+def raise_if_nan(has_nan: Bool[Array, ''] | None) -> None:
+    """Wait for the result of `start_nan_check` and raise if it found NaN."""
+    if has_nan is not None and has_nan.item():
         msg = 'predictors contain NaN; missing predictor values are not supported'
         raise ValueError(msg)
-    return x, fmt
 
 
 @jit

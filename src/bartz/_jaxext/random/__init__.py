@@ -24,5 +24,6 @@
 
 """Additions to :external:py:mod:`jax.random`."""
 
+from bartz._jaxext.random._categorical import categorical  # noqa: F401
 from bartz._jaxext.random._loggamma import loggamma  # noqa: F401
 from bartz._jaxext.random._poisson import poisson  # noqa: F401

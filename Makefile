@@ -54,7 +54,7 @@ COOLDOWN_DAYS = $(or $(shell uv run --no-project --python='>=3.11' python -c 'im
 # define command to run python with oldest supported dependencies
 # OLD_DATE / OLD_DELAY_DAYS / BUMP_PYTHON_VERSION_DATE / NUM_SUPPORTED_PYTHON_RELEASES
 # drive the `update-python-deps` policy.
-OLD_DATE = 2025-11-01T00:00:00Z
+OLD_DATE = 2025-11-03T00:00:00Z
 OLD_DELAY_DAYS = 365
 BUMP_PYTHON_VERSION_DATE = 10-31
 NUM_SUPPORTED_PYTHON_RELEASES = 5

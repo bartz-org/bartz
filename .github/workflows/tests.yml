@@ -102,7 +102,7 @@ jobs:
           cache-suffix: -${{ matrix.target }}-${{ matrix.group }}
 
       - name: Run unit tests
-        timeout-minutes: 30
+        timeout-minutes: 60
         # NPROC=0 disables pytest-xdist: the small CI runners OOM under
         # parallel test execution. Each matrix cell runs one group serially.
         run: make ${{ matrix.target }} GROUP=${{ matrix.group }} NPROC=0

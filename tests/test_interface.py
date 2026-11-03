@@ -51,6 +51,7 @@ from equinox import tree_at
 from jax import (
     Device,
     block_until_ready,
+    clear_caches,
     config,
     debug_infs,
     debug_key_reuse,
@@ -2899,6 +2900,14 @@ def test_no_recompilation_no_tracing(bkw: BartKW) -> None:
         # blocks the jit fast path which `no_tracing` counts as tracing
         run_mcmc_kw=dict(bkw.kw.get('run_mcmc_kw', {}), callback=None),
     )
+
+    # Clear the jax caches to avoid interactions with previous tests. This test
+    # was observed to fail due to test_constant_predictor[v3] leaving an
+    # `error_if` internal function jitted in a state that always triggers the
+    # `cache_miss` path. If a jitted function raises on the first invocation
+    # with a certain signature, `jax.jit` sets a flag to permanently avoid the
+    # fast path on it.
+    clear_caches()
 
     # use OriginalBart because the test wrapper's `_check_replicated_trees`
     # always retraces due to its `shard_map`

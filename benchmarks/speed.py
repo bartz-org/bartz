@@ -285,10 +285,6 @@ def simple_init(  # noqa: C901, PLR0915
 
     match kind:
         case 'weights':
-            if 'error_scale' not in sig.parameters:
-                # WORKAROUND(bartz<0.5.0): no heteroskedastic weights
-                msg = 'weights not supported'
-                raise NotImplementedError(msg)
             kw['error_scale'] = jnp.ones(n)
 
         case 'binary':
@@ -429,12 +425,6 @@ class StepBase(AutoParamNames):
             keys = list(random.split(key))
             self.args = (keys, state)
 
-            # WORKAROUND(bartz<0.5.0): v0.4.1 step had signature (bart, key);
-            # v0.5.0+ uses (key, bart). Dispatch positionally on first param
-            # name, since the decorator-wrapped step on modern bartz does not
-            # accept `bart` as a keyword argument.
-            step_bart_first = next(iter(signature(step).parameters)) == 'bart'
-
             def func(keys: list[Key[Array, '']], bart: State) -> State:
                 # WORKAROUND(bartz<0.8.0): pre-0.8.0 sparse step is done by a
                 # separate `mcmcstep.step_sparse` call; from 0.8.0 it's inside
@@ -442,10 +432,7 @@ class StepBase(AutoParamNames):
                 sparse_inside_step = not hasattr(mcmcloop, 'sparse_callback')
                 if kind == 'sparse' and sparse_inside_step:
                     bart = replace(bart, config=replace(bart.config, sparse_on_at=0))
-                if step_bart_first:
-                    bart = step(bart, keys.pop())  # ty: ignore[invalid-argument-type]
-                else:
-                    bart = step(keys.pop(), bart)
+                bart = step(keys.pop(), bart)
                 if kind == 'sparse' and not sparse_inside_step:
                     bart = mcmcstep.step_sparse(keys.pop(), bart)  # ty:ignore[unresolved-attribute]
                 return bart

@@ -52,7 +52,7 @@ from git.exc import BadName, GitCommandError
 from packaging.version import Version
 
 # Configuration
-MIN_VERSION = Version('0.4.1')  # oldest version supported by the benchmarks
+MIN_VERSION = Version('0.5.0')  # oldest version supported by the benchmarks
 MIN_AGE = datetime.timedelta(days=365)
 MIN_RELEASES_BACK = 11
 NUM_LAST = 3

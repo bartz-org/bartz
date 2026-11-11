@@ -874,9 +874,10 @@ def parse_used_trees(
     """Check `used_trees` is in [0, num_trees]."""
     if used_trees is None:
         return None
-    used_trees = jnp.asarray(used_trees, jnp.int32)
-    bad = (used_trees < 0) | (used_trees > num_trees)
-    return error_if(used_trees, bad, f'used_trees must be in [0, {num_trees}]')
+    else:
+        used_trees = jnp.asarray(used_trees, jnp.int32)
+        bad = (used_trees < 0) | (used_trees > num_trees)
+        return error_if(used_trees, bad, f'used_trees must be in [0, {num_trees}]')
 
 
 def make_p_nonterminal(
@@ -2203,8 +2204,9 @@ def used_trees_mask(forest: Forest) -> Bool[Array, ' num_trees'] | None:
     """Mark the trees in use in a forest without chains, `None` if all are."""
     if forest.used_trees is None:
         return None
-    num_trees, _ = forest.var_tree.shape
-    return jnp.arange(num_trees) < forest.used_trees
+    else:
+        num_trees, _ = forest.var_tree.shape
+        return jnp.arange(num_trees) < forest.used_trees
 
 
 def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']:

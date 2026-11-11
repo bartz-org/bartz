@@ -1238,29 +1238,46 @@ def accept_moves_sequential_stage(
         pso.state.config.leaf_quantization,
     )
 
-    # on cpu, the chains go through the loop one at a time, which is faster
-    # than all together at large n, and indexes the trees of each chain apart
-    # if their order differs; the leaf indices of the chains are read in place,
-    # instead of copied apart. The gpu takes larger blocks because it checks
-    # the loop condition from the host. Both branches are traced, but only one
-    # is compiled.
+    # both branches are traced, but only one is compiled
     block_size = pso.state.config.sequential_block_size
     resid, ys = lax.platform_dependent(
         pso.state.resid,
         at,
         pts,
         pso.state.forest.used_trees,
+        # On cpu, loop over chains instead of vmapping over them, for two
+        # reasons: 1) It's substantially faster in general. We observed
+        # empirically that, with vmapped chains, the running time scales
+        # super-linearly with number of chains at high n, which is weird. At
+        # low n no substantial difference. I guess bad xla:cpu code generation.
+        # 2) With random scan order, it's even slower, which we attributed to
+        # the materialization of copies of the rows of `leaf_indices` instead
+        # of fusing the reads into their users. Here xla:cpu can fuse a slice
+        # but not a gather.
         cpu=sequential_vmap(
             partial(
                 loop_over_trees,
                 unroll=pso.state.config.sequential_unroll,
                 block_size=2 if block_size is None else block_size,
             ),
+            # This is our own custom `sequential_vmap`, not
+            # `jax.custom_batching.sequential_vmap`, to add the `in_place`
+            # parameter, that here we use to avoid an extra copy of a
+            # single-chain `leaf_indices` by not slicing over it. The
+            # copy-on-slice happens because a slice that's used as loop input
+            # (here the loop is the one over trees, while the loop over chains
+            # created by the batching rule of `sequential_vmap` is the one
+            # taking the slice) is materialized because it can't be fused
+            # across the loop boundary.
             in_place=lambda _resid, at, _pts, _used_trees: at.leaf_indices,
         ),
         cuda=partial(
             loop_over_trees,
             unroll=pso.state.config.sequential_unroll,
+            # the gpu takes larger blocks (4 instead of 2) because it checks
+            # the loop condition from the host. Higher than 2 is not reliable
+            # on cpu, sometimes it's much slower. Probably bad xla:cpu as
+            # usual.
             block_size=4 if block_size is None else block_size,
         ),
     )
@@ -1378,9 +1395,9 @@ def loop_over_trees(
 ]:
     """Apply `accept_move_and_sample_leaves` to the trees in order.
 
-    If `used_trees` is `None`, all the trees with a loop of fixed length unrolled
-    `unroll` times, else the first `used_trees` trees in fully unrolled blocks of
-    `block_size` trees, see `variable_length_scan`.
+    The loop is a `variable_length_scan` over the first `used_trees` trees,
+    unrolled `unroll` times if `used_trees` is `None`, else in fully unrolled
+    blocks.
     """
 
     def loop(
@@ -1401,12 +1418,14 @@ def loop_over_trees(
         )
         return resid, (leaf_tree, acc, to_prune, lkratio)
 
-    if used_trees is None:
-        return variable_length_scan(loop, resid, pts, unroll=unroll)
-    else:
-        return variable_length_scan(
-            loop, resid, pts, used_trees, block_size=block_size, unroll=True
-        )
+    return variable_length_scan(
+        loop,
+        resid,
+        pts,
+        used_trees,
+        block_size=block_size,
+        unroll=unroll if used_trees is None else True,
+    )
 
 
 @named_call

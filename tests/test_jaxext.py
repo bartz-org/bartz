@@ -1242,7 +1242,7 @@ def toy_reference(xs: ToyXs, length: int) -> tuple[Float32[Array, ''], ToyYs]:
         jnp.zeros(()),
         (a[:length], b[:length]),
     )
-    num = a.shape[0]
+    (num,) = a.shape
     y = jnp.zeros(num).at[:length].set(y)
     z = jnp.zeros((num, 2), b.dtype).at[:length, :].set(z)
     return carry, (y, z)

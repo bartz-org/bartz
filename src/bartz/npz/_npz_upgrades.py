@@ -157,10 +157,11 @@ def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
         elif node['type'] == 'module':
             fields = {k: walk(v) for k, v in node['fields'].items()}
             if node['cls'] == 'Forest':
-                fields['used_trees'] = None
+                fields = dict(**fields, used_trees=None)
             elif node['cls'] == 'StepConfig':
-                fields['random_tree_scan'] = False
-                fields['sequential_block_size'] = None
+                fields = dict(
+                    **fields, random_tree_scan=False, sequential_block_size=None
+                )
             return module(node['cls'], **fields)
         elif type(node['items']) is dict:
             return dict(node, items={k: walk(v) for k, v in node['items'].items()})

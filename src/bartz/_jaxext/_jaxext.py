@@ -447,7 +447,7 @@ def vmap_max(x: Integer[Array, '']) -> Integer[Array, '']:
 
 
 @vmap_max.def_vmap
-def _vmap_max_rule(
+def vmap_max_rule(
     axis_size: int,  # noqa: ARG001
     in_batched: Sequence[bool],
     x: Integer[Array, ' batch'] | Integer[Array, ''],
@@ -506,7 +506,8 @@ def sequential_vmap(
     ) -> tuple[_R, PyTree[bool]]:
         in_batched = tuple(in_batched)
         if axis_size == 0:
-            # nothing to loop over
+            # nothing to loop over, and the `InPlace` views could not index the
+            # empty batch axis
             in_axes = tree.map(lambda batched: 0 if batched else None, in_batched)
             out = vmap(f, in_axes=in_axes)(*args)
             return out, tree.map(lambda _: True, out)

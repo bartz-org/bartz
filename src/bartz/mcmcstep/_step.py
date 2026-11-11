@@ -30,7 +30,7 @@ from functools import partial
 from typing import overload
 
 from equinox import AbstractVar
-from jax import lax, named_call, random, vmap
+from jax import lax, named_call, random, tree, vmap
 from jax import numpy as jnp
 from jax.nn import log_softmax
 from jax.scipy.special import logsumexp
@@ -48,16 +48,19 @@ from jaxtyping import (
 )
 
 from bartz._jaxext import (
+    InPlace,
     Module,
     cpu_barrier,
     field,
     float32_matmuls,
     jit,
     minimal_unsigned_dtype,
+    sequential_vmap,
     sliced_map,
     solve_triangular,
     split,
     truncated_normal_onesided,
+    variable_length_scan,
     vmap_nodoc,
 )
 from bartz._jaxext.random import categorical, loggamma, poisson
@@ -79,6 +82,7 @@ from bartz.mcmcstep._state import (
     scaled_error_cov_inv,
     shard_map_state,
     split_key_for_chains,
+    used_trees_mask,
     vmap_chains,
 )
 
@@ -158,6 +162,11 @@ def step_resid_inexact_integral(state: State) -> State:
         ms = lax.psum(ms, 'data')
     ms /= jnp.maximum(state.n_non_missing, 1)
 
+    # only the trees in use update the residuals
+    if state.forest.used_trees is not None:
+        num_trees, _ = state.forest.var_tree.shape
+        ms *= state.forest.used_trees / num_trees
+
     # accumulate to the running sum
     return replace(state, resid_inexact_integral=state.resid_inexact_integral + ms)
 
@@ -182,14 +191,32 @@ def step_trees(key: Key[Array, ''], state: State) -> State:
     -----
     This function zeroes the proposal counters.
     """
-    keys = split(key)
+    keys = split(key, 3)
     moves = propose_moves(keys.pop(), state.forest)
-    return accept_moves_and_sample_leaves(keys.pop(), state, moves)
+    accept_key = keys.pop()
+    order = None
+    if state.config.random_tree_scan:
+        order = random_tree_order(keys.pop(), state.forest)
+    return accept_moves_and_sample_leaves(accept_key, state, moves, order)
+
+
+def random_tree_order(
+    key: Key[Array, ''], forest: Forest
+) -> Int32[Array, ' num_trees']:
+    """Draw a random order to visit the trees, with the trees in use first."""
+    num_trees, _ = forest.var_tree.shape
+    order = random.permutation(key, num_trees)
+    if forest.used_trees is not None:
+        order = order[jnp.argsort(order >= forest.used_trees, stable=True)]
+    return order
 
 
 @named_call
 def accept_moves_and_sample_leaves(
-    key: Key[Array, ''], state: State, moves: Moves
+    key: Key[Array, ''],
+    state: State,
+    moves: Moves,
+    order: Integer[Array, ' num_trees'] | None = None,
 ) -> State:
     """
     Accept or reject the proposed moves and sample the new leaf values.
@@ -202,13 +229,16 @@ def accept_moves_and_sample_leaves(
         A valid BART mcmc state.
     moves
         The proposed moves, see `propose_moves`.
+    order
+        The order in which the sequential stage visits the trees, see
+        `accept_moves_sequential_stage`.
 
     Returns
     -------
     A new (valid) BART mcmc state.
     """
     pso = accept_moves_parallel_stage(key, state, moves)
-    state, moves = accept_moves_sequential_stage(pso)
+    state, moves = accept_moves_sequential_stage(pso, order)
     return accept_moves_final_stage(state, moves)
 
 
@@ -1158,7 +1188,9 @@ def precompute_likelihood_terms(
 
 
 @named_call
-def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
+def accept_moves_sequential_stage(
+    pso: ParallelStageOut, order: Integer[Array, ' num_trees'] | None = None
+) -> tuple[State, Moves]:
     """
     Accept/reject the moves one tree at a time.
 
@@ -1169,6 +1201,10 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
     ----------
     pso
         The output of `accept_moves_parallel_stage`.
+    order
+        The order in which to visit the trees, a permutation of the tree
+        indices. If `None`, storage order. If `Forest.used_trees` is set, the
+        trees in use shall come first.
 
     Returns
     -------
@@ -1177,39 +1213,6 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
     moves : Moves
         The accepted/rejected moves, with `acc` and `to_prune` set.
     """
-
-    def loop(
-        resid: Float[Array, ' n'] | Float[Array, ' k n'], pt: SeqStageInPerTree
-    ) -> tuple[
-        Float[Array, ' n'] | Float[Array, ' k n'],
-        tuple[
-            Float[Array, ' tree_size'] | Float[Array, ' k tree_size'],
-            Bool[Array, ''],
-            Bool[Array, ''],
-            Float32[Array, ''] | None,
-        ],
-    ]:
-        resid, leaf_tree, acc, to_prune, lkratio = accept_move_and_sample_leaves(
-            resid,
-            SeqStageInAllTrees(
-                pso.state.X,
-                pso.state.forest.leaf_indices,
-                pso.state.config.resid_reduction_config,
-                pso.state.config.data_sharded,
-                pso.state.prec_scale,
-                pso.state.forest.log_likelihood is not None,
-                scaled_error_cov_inv(pso.state)
-                if isinstance(pso.prelf, PreLfMVHet)
-                else None,
-                pso.state.forest.leaf_unit,
-                pso.state.resid_unit,
-                pso.state.resid_eff_scale,
-                pso.state.config.leaf_quantization,
-            ),
-            pt,
-        )
-        return resid, (leaf_tree, acc, to_prune, lkratio)
-
     num_trees, _ = pso.state.forest.leaf_indices.shape
     pts = SeqStageInPerTree(
         pso.state.forest.leaf_tree,
@@ -1219,9 +1222,52 @@ def accept_moves_sequential_stage(pso: ParallelStageOut) -> tuple[State, Moves]:
         pso.prelkv,
         pso.prelf,
     )
-    resid, (leaf_trees, acc, to_prune, lkratio) = lax.scan(
-        loop, pso.state.resid, pts, unroll=pso.state.config.sequential_unroll
+    if order is not None:
+        pts = tree.map(lambda x: x[order, ...], pts)
+    at = SeqStageInAllTrees(
+        pso.state.X,
+        pso.state.forest.leaf_indices,
+        pso.state.config.resid_reduction_config,
+        pso.state.config.data_sharded,
+        pso.state.prec_scale,
+        pso.state.forest.log_likelihood is not None,
+        scaled_error_cov_inv(pso.state) if isinstance(pso.prelf, PreLfMVHet) else None,
+        pso.state.forest.leaf_unit,
+        pso.state.resid_unit,
+        pso.state.resid_eff_scale,
+        pso.state.config.leaf_quantization,
     )
+
+    # on cpu, the chains go through the loop one at a time, which is faster
+    # than all together at large n, and indexes the trees of each chain apart
+    # if their order differs; the leaf indices of the chains are read in place,
+    # instead of copied apart. The gpu takes larger blocks because it checks
+    # the loop condition from the host. Both branches are traced, but only one
+    # is compiled.
+    block_size = pso.state.config.sequential_block_size
+    resid, ys = lax.platform_dependent(
+        pso.state.resid,
+        at,
+        pts,
+        pso.state.forest.used_trees,
+        cpu=sequential_vmap(
+            partial(
+                loop_over_trees,
+                unroll=pso.state.config.sequential_unroll,
+                block_size=2 if block_size is None else block_size,
+            ),
+            in_place=lambda _resid, at, _pts, _used_trees: at.leaf_indices,
+        ),
+        cuda=partial(
+            loop_over_trees,
+            unroll=pso.state.config.sequential_unroll,
+            block_size=4 if block_size is None else block_size,
+        ),
+    )
+    if order is not None:
+        inverse = jnp.argsort(order)
+        ys = tree.map(lambda y: y[inverse, ...], ys)
+    leaf_trees, acc, to_prune, lkratio = ys
 
     state = replace(
         pso.state,
@@ -1239,13 +1285,14 @@ class SeqStageInAllTrees(Module):
     X: UInt[Array, 'p n']
     """The predictors."""
 
-    leaf_indices: UInt[Array, 'num_trees n']
+    leaf_indices: UInt[Array, 'num_trees n'] | InPlace
     """The leaf indices for the largest version of each tree compatible with
     the move. Kept whole here and sliced per tree with
     `SeqStageInPerTree.tree_index`, instead of consumed as scan xs, because
     the scan batching rules move the chain axis of closed-over values to the
     front, matching the storage layout, while the xs rule would transpose it
-    to after the tree axis."""
+    to after the tree axis. When looping over the chains, a view of the leaf
+    indices of all the chains, see `accept_moves_sequential_stage`."""
 
     resid_reduction_config: ReductionConfig
     """How to sum the residuals in each leaf."""
@@ -1312,11 +1359,62 @@ class SeqStageInPerTree(Module):
     """The pre-computed terms of the leaf sampling which are specific to the tree."""
 
 
+def loop_over_trees(
+    resid: Float[Array, ' n'] | Float[Array, ' k n'],
+    at: SeqStageInAllTrees,
+    pts: SeqStageInPerTree,
+    used_trees: Int32[Array, ''] | None,
+    *,
+    unroll: int | bool,
+    block_size: int,
+) -> tuple[
+    Float[Array, ' n'] | Float[Array, ' k n'],
+    tuple[
+        Float[Array, 'num_trees tree_size'] | Float[Array, 'num_trees k tree_size'],
+        Bool[Array, ' num_trees'],
+        Bool[Array, ' num_trees'],
+        Float32[Array, ' num_trees'] | None,
+    ],
+]:
+    """Apply `accept_move_and_sample_leaves` to the trees in order.
+
+    If `used_trees` is `None`, all the trees with a loop of fixed length unrolled
+    `unroll` times, else the first `used_trees` trees in fully unrolled blocks of
+    `block_size` trees, see `variable_length_scan`.
+    """
+
+    def loop(
+        resid: Float[Array, ' n'] | Float[Array, ' k n'],
+        pt: SeqStageInPerTree,
+        use: Bool[Array, ''] | None,
+    ) -> tuple[
+        Float[Array, ' n'] | Float[Array, ' k n'],
+        tuple[
+            Float[Array, ' tree_size'] | Float[Array, ' k tree_size'],
+            Bool[Array, ''],
+            Bool[Array, ''],
+            Float32[Array, ''] | None,
+        ],
+    ]:
+        resid, leaf_tree, acc, to_prune, lkratio = accept_move_and_sample_leaves(
+            resid, at, pt, use
+        )
+        return resid, (leaf_tree, acc, to_prune, lkratio)
+
+    if used_trees is None:
+        return variable_length_scan(loop, resid, pts, unroll=unroll)
+    else:
+        return variable_length_scan(
+            loop, resid, pts, used_trees, block_size=block_size, unroll=True
+        )
+
+
 @named_call
 def accept_move_and_sample_leaves(
     resid: Float[Array, ' n'] | Float[Array, ' k n'],
     at: SeqStageInAllTrees,
     pt: SeqStageInPerTree,
+    use: Bool[Array, ''] | None = None,
 ) -> tuple[
     Float[Array, ' n'] | Float[Array, ' k n'],
     Float[Array, ' tree_size'] | Float[Array, ' k tree_size'],
@@ -1338,6 +1436,9 @@ def accept_move_and_sample_leaves(
         The inputs that are the same for all trees.
     pt
         The inputs that are separate for each tree.
+    use
+        If `False`, leave the residuals unchanged, and the other outputs are to
+        be discarded. `None` is equivalent to `True`.
 
     Returns
     -------
@@ -1455,7 +1556,15 @@ def accept_move_and_sample_leaves(
     # delta is converted back to the stored residual units and dtype *before* the
     # scatter, so the n-sized update stays in the narrow `resid` storage
     leaf_delta = prev_leaf_tree - at.leaf_unit[..., None] * leaf_tree
-    delta = (leaf_delta / at.resid_unit[..., None]).astype(resid.dtype)
+    if use is None:
+        delta = leaf_delta / at.resid_unit[..., None]
+    else:
+        # the conversion factor zeroes the delta of a tree not in use, instead
+        # of an elementwise select that xla on gpu would repeat for each
+        # datapoint; `resid_unit` is a power of 2, so its reciprocal is exact
+        inv_resid_unit = jnp.where(use, jnp.reciprocal(at.resid_unit), 0.0)
+        delta = leaf_delta * inv_resid_unit[..., None]
+    delta = delta.astype(resid.dtype)
     # on cpu, materialize the per-leaf delta, else xla fuses its computation
     # into the gather and repeats it for each datapoint; on gpu that is cheaper
     # than the extra kernel launch
@@ -1937,7 +2046,7 @@ def step_error_cov_inv(key: Key[Array, ''], state: State) -> State:
 def leaf_scatter(
     forest: Forest,
 ) -> tuple[Int32[Array, ''], Float32[Array, ''] | Float32[Array, 'k k']]:
-    """Count the leaves of the forest and sum their outer products.
+    """Count the leaves of the trees in use and sum their outer products.
 
     Parameters
     ----------
@@ -1947,13 +2056,16 @@ def leaf_scatter(
     Returns
     -------
     count : Int32[Array, '']
-        The total number of leaves over all trees.
+        The total number of leaves over the trees in use.
     scatter : Float32[Array, ''] | Float32[Array, 'k k']
         The sum over the leaves of the outer product of the values, in data units.
     """
     # the values on the dangling children of pruned nodes mirror the parent's,
     # so mask on the actual leaves only
     is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(forest.split_tree)
+    used = used_trees_mask(forest)
+    if used is not None:
+        is_leaf &= used[:, None]
     count = jnp.sum(is_leaf)
     leaf_tree = forest.leaf_tree
     if leaf_tree.ndim == 3:

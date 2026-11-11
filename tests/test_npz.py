@@ -254,6 +254,23 @@ def test_archive_outputs(archive: str, tmp_path: Path) -> None:
             )
 
 
+@pytest.mark.parametrize(
+    ('archive', 'forests'),
+    [('bart_v1.npz', ('forest',)), ('bcf_v1.npz', ('forest', 'forest_tau'))],
+)
+def test_upgrade_used_trees(archive: str, forests: tuple[str, ...]) -> None:
+    """Check the archives older than `Forest.used_trees` load with all the trees in use."""
+    match = ARCHIVE_NAME.fullmatch(archive)
+    assert match is not None
+    model = MODELS[match['model']].cls.load_npz(ARCHIVE_DIR / archive)
+    state = model._mcmc_state
+    assert state is not None
+    for name in forests:
+        assert getattr(state, name).used_trees is None, name
+    assert state.config.random_tree_scan is False
+    assert state.config.sequential_block_size is None
+
+
 def test_bartz_0_13_stored_values() -> None:
     """Check the `bcf` archive of bartz 0.13 keeps the values it stores directly."""
     path = ARCHIVE_DIR / 'bcf_v0.npz'

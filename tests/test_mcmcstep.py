@@ -126,6 +126,7 @@ from bartz.mcmcstep._axes import (
 from bartz.mcmcstep._moves import (
     ancestor_variables,
     fully_used_variables,
+    propose_moves,
     randint_exclude,
     randint_masked,
     split_range,
@@ -157,6 +158,8 @@ from bartz.mcmcstep._step import (
     _sample_wishart_bartlett,
     _step_error_cov_inv_diag,
     _step_error_cov_inv_mv,
+    accept_moves_parallel_stage,
+    accept_moves_sequential_stage,
     apply_moves_to_leaf_indices,
     leaf_scatter,
     log_blocked_mass_tree,
@@ -172,6 +175,7 @@ from bartz.mcmcstep._step import (
 )
 from bartz.testing import gen_data
 from tests.util import (
+    EQX_RUNTIME_ERRORS,
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
@@ -214,6 +218,8 @@ def _minimal_step_config() -> StepConfig:
         prec_count_num_trees=None,
         one_bin_prec_reduction=False,
         sequential_unroll=1,
+        sequential_block_size=1,
+        random_tree_scan=False,
         augment=False,
         mesh=None,
     )
@@ -1757,11 +1763,15 @@ class TestMultichain:
         with pytest.raises(ValueError, match=match):
             init(**init_kwargs, num_chains=num_chains, mesh=dict(chains=chains_axis))
 
-    def test_multichain_equiv_stack(self, init_kwargs: dict, keys: split) -> None:
+    @pytest.mark.parametrize('random_tree_scan', [False, True])
+    def test_multichain_equiv_stack(
+        self, init_kwargs: dict, keys: split, random_tree_scan: bool
+    ) -> None:
         """Check that stacking multiple chains is equivalent to a multichain trace."""
         num_chains = 4
         num_iters = 10
 
+        init_kwargs = dict(init_kwargs, random_tree_scan=random_tree_scan)
         copy_args = partial(copy_arrays, init_kwargs)
 
         # create initial states
@@ -2133,9 +2143,10 @@ def test_affluence_tree_stays_clean(
         'binary',
         'multivariate',
         'blocked',
+        'used_trees',
     ],
 )
-def test_rebuild_derived(keys: split, case: str) -> None:
+def test_rebuild_derived(keys: split, case: str) -> None:  # noqa: C901, the cases
     """`rebuild_derived` reproduces the caches maintained by `step`."""
     # generate data
     n = 100
@@ -2190,6 +2201,8 @@ def test_rebuild_derived(keys: split, case: str) -> None:
             max_split=kw['max_split'].at[0].set(0),
             filter_splitless_vars=1,
         )
+    elif case == 'used_trees':
+        kw = dict(kw, used_trees=NUM_TREES - 2, random_tree_scan=True)
 
     # create initial state
     state = init(**kw)
@@ -2232,6 +2245,274 @@ def test_rebuild_derived(keys: split, case: str) -> None:
 
     # compare residuals
     assert_close_matrices(state.resid, rebuilt.resid, rtol=1e-5)
+
+
+def used_trees_init_kw(key: Key[Array, ''], case: str) -> dict:
+    """Arguments to `init`, but `num_trees`, for the tests of `Forest.used_trees`."""
+    n = 100
+    k = 2 if case == 'multivariate' else None
+    outcome_type = 'binary' if case == 'binary' else 'continuous'
+    data = gen_data(
+        key,
+        n=n,
+        p=5,
+        k=k,
+        q=0,
+        lambda_=None if k is None else 0.5,
+        sigma2_lin=1.0,
+        sigma2_quad=1.0,
+        sigma2_eps=0.1,
+        outcome_type=outcome_type,
+    ).quantize()
+
+    eye = jnp.float32(1.0) if k is None else jnp.eye(k)
+    kw: dict = dict(
+        X=data.x,
+        y=data.y,
+        outcome_type=outcome_type,
+        offset=jnp.zeros(() if k is None else (k,)),
+        max_split=data.max_split,
+        p_nonterminal=make_p_nonterminal(6),
+        leaf_prior_cov_inv=Wishart(None, None, NUM_TREES * eye),
+        error_cov_inv=None if case == 'binary' else Wishart(4.0, 4.0 * eye, eye),
+    )
+    match case:
+        case 'min_points':
+            kw = dict(kw, min_points_per_decision_node=10, min_points_per_leaf=5)
+        case 'error_scale':
+            kw = dict(kw, error_scale=jnp.linspace(0.5, 2.0, n))
+        case 'leaf_prior':
+            leaf_prior = Wishart(4.0, 4.0 / NUM_TREES * eye, NUM_TREES * eye)
+            kw = dict(kw, leaf_prior_cov_inv=leaf_prior)
+        case 'sparse':
+            kw = dict(kw, a=0.5, b=1.0, rho=5.0, sparse_on_at=0)
+    return kw
+
+
+def assert_same_states(x: State, y: State) -> None:
+    """Check two states are equal, the floating point values up to rounding."""
+
+    def check(
+        path: KeyPath, a: Shaped[Array, '*shape'], b: Shaped[Array, '*shape']
+    ) -> None:
+        if jnp.issubdtype(a.dtype, jnp.floating):
+            # the gpu reductions are not deterministic
+            assert_close_matrices(
+                a, b, rtol=1e-5, err_msg=keystr(path), reduce_rank=True
+            )
+        else:
+            assert_array_equal(a, b, err_msg=keystr(path))
+
+    tree.map_with_path(check, x, y)
+
+
+class TestUsedTrees:
+    """Test `Forest.used_trees`, the number of trees in use."""
+
+    @pytest.mark.parametrize(
+        ('case', 'block_size'),
+        [
+            # visit the trees in a single block, one at a time, or in blocks
+            # with some of the trees not in use in the last
+            ('plain', 8),
+            ('plain', 1),
+            ('plain', 3),
+            ('min_points', 8),
+            ('error_scale', 8),
+            ('leaf_prior', 8),
+            ('sparse', 8),
+            ('binary', 8),
+            ('multivariate', 8),
+        ],
+    )
+    def test_equivalent_to_fewer_trees(
+        self, keys: split, case: str, block_size: int
+    ) -> None:
+        """Trees not in use do not affect the MCMC.
+
+        A forest with additional trees not in use evolves like the forest of the
+        trees in use alone, with the same random keys, while the trees not in use
+        stay lone roots with zero leaves.
+        """
+        kw = used_trees_init_kw(keys.pop(), case)
+        num_extra = 3
+        alone = init(**copy_arrays(kw), num_trees=NUM_TREES)
+        extended = init(
+            **kw,
+            num_trees=NUM_TREES + num_extra,
+            used_trees=NUM_TREES,
+            sequential_block_size=block_size,
+        )
+
+        for key in keys.pop(10):
+            alone = step(random.clone(key), alone)
+            extended = step(key, extended)
+        assert jnp.any(alone.forest.split_tree)
+
+        def check(
+            path: KeyPath, x: Shaped[Array, '*shape'], y: Shaped[Array, '*shape']
+        ) -> None:
+            if x.shape != y.shape:
+                # the trees along the leading axis
+                y = y[:NUM_TREES, ...]
+            if jnp.issubdtype(x.dtype, jnp.floating):
+                # some sums over the trees add the terms of the trees not in use,
+                # and the gpu reductions are not deterministic, so the values
+                # round differently
+                assert_close_matrices(
+                    x, y, rtol=1e-5, err_msg=keystr(path), reduce_rank=True
+                )
+            else:
+                assert_array_equal(x, y, err_msg=keystr(path))
+
+        extended_forest = replace(extended.forest, used_trees=None)
+        tree.map_with_path(check, alone.forest, extended_forest)
+        for name in 'resid', 'z', 'error_cov_inv', 'resid_eff_scale':
+            tree.map_with_path(check, getattr(alone, name), getattr(extended, name))
+        assert_close_matrices(
+            alone.sum_trees_eps(), extended.sum_trees_eps(), rtol=1e-5
+        )
+
+        for name in 'split_tree', 'leaf_tree':
+            x = getattr(extended.forest, name)[NUM_TREES:, ...]
+            assert_array_equal(x, jnp.zeros_like(x), err_msg=name)
+
+    @pytest.mark.parametrize('random_tree_scan', [False, True])
+    def test_multichain(self, keys: split, random_tree_scan: bool) -> None:
+        """Each chain leaves its trees not in use as lone roots with zero leaves."""
+        kw = used_trees_init_kw(keys.pop(), 'plain')
+        state = init(
+            **kw,
+            num_trees=NUM_TREES,
+            used_trees=NUM_TREES,
+            num_chains=3,
+            random_tree_scan=random_tree_scan,
+        )
+        used_trees = jnp.array([0, 2, NUM_TREES], jnp.int32)
+        state = replace(state, forest=replace(state.forest, used_trees=used_trees))
+
+        for key in keys.pop(10):
+            state = step(key, state)
+
+        # the trees not in use are lone roots with zero leaves, and their moves
+        # are not counted
+        axes = chain_vmap_axes(state).forest
+        forest = state.forest
+        used_trees = nnone(forest.used_trees)
+        split_tree = chain_to_axis(forest.split_tree, axes.split_tree)
+        leaf_tree = chain_to_axis(forest.leaf_tree, axes.leaf_tree)
+        unused = jnp.arange(NUM_TREES) >= used_trees[:, None]
+        for x in split_tree, leaf_tree:
+            masked = jnp.where(unused[:, :, None], x, 0)
+            assert_array_equal(masked, jnp.zeros_like(masked))
+        num_props = forest.grow_prop_count + forest.prune_prop_count
+        assert jnp.all(num_props <= used_trees)
+
+        # the trees in use moved
+        num_splits = jnp.count_nonzero(split_tree, axis=(1, 2))
+        assert_array_equal(num_splits > 0, used_trees > 0)
+
+        # the residuals match the sum of all the trees
+        rebuilt = rebuild_derived(copy_arrays(state))
+        assert_close_matrices(state.resid, rebuilt.resid, rtol=1e-5)
+
+    @pytest.mark.parametrize('used_trees', [None, NUM_TREES])
+    def test_sequential_stage_order(self, keys: split, used_trees: int | None) -> None:
+        """Visiting the trees in some order is like storing them in that order."""
+        kw = used_trees_init_kw(keys.pop(), 'plain')
+        state = init(**kw, num_trees=NUM_TREES, used_trees=used_trees)
+        for key in keys.pop(5):
+            state = step(key, state)
+
+        moves = propose_moves(keys.pop(), state.forest)
+        pso = accept_moves_parallel_stage(keys.pop(), state, moves)
+        order = random.permutation(keys.pop(), NUM_TREES)
+
+        # store the trees in visiting order
+        def permute(x: PyTree[Shaped[Array, ' num_trees *shape']]) -> PyTree:
+            return tree.map(lambda x: x[order, ...], x)
+
+        forest = pso.state.forest
+        forest = replace(
+            forest,
+            leaf_tree=permute(forest.leaf_tree),
+            leaf_indices=permute(forest.leaf_indices),
+        )
+        permuted = replace(
+            pso,
+            state=replace(pso.state, forest=forest),
+            moves=permute(pso.moves),
+            prec_trees=permute(pso.prec_trees),
+            prelkv=permute(pso.prelkv),
+            prelf=permute(pso.prelf),
+        )
+
+        state, moves = accept_moves_sequential_stage(pso, order)
+        permuted_state, permuted_moves = accept_moves_sequential_stage(permuted)
+
+        # the gpu reductions are not deterministic
+        assert_close_matrices(state.resid, permuted_state.resid, rtol=1e-5)
+        assert_close_matrices(
+            permute(state.forest.leaf_tree), permuted_state.forest.leaf_tree, rtol=1e-5
+        )
+        assert_array_equal(permute(moves.acc), permuted_moves.acc)
+        assert_array_equal(permute(moves.to_prune), permuted_moves.to_prune)
+
+    @pytest.mark.parametrize(
+        ('block_size', 'unroll'), [(1, 1), (2, 2), (3, 2), (NUM_TREES, True)]
+    )
+    def test_all_in_use_like_fixed(
+        self, keys: split, block_size: int, unroll: int | bool
+    ) -> None:
+        """With all the trees in use, the loop over them is like the fixed-length one."""
+        kw = used_trees_init_kw(keys.pop(), 'plain')
+        loop_kw: dict = dict(sequential_unroll=unroll, sequential_block_size=block_size)
+        fixed = init(**copy_arrays(kw), num_trees=NUM_TREES, **loop_kw)
+        variable = init(**kw, num_trees=NUM_TREES, used_trees=NUM_TREES, **loop_kw)
+        for key in keys.pop(10):
+            fixed = step(random.clone(key), fixed)
+            variable = step(key, variable)
+        assert jnp.any(fixed.forest.split_tree)
+        variable = replace(variable, forest=replace(variable.forest, used_trees=None))
+        assert_same_states(fixed, variable)
+
+    @pytest.mark.parametrize('random_tree_scan', [False, True])
+    def test_sharded(self, keys: split, random_tree_scan: bool) -> None:
+        """The loop over the trees in use works with the chains and the data sharded."""
+        if get_device_count() < 4:
+            pytest.skip('Need at least 4 devices for this mesh.')
+        kw = used_trees_init_kw(keys.pop(), 'plain')
+        step_keys = keys.pop(10)
+        states = []
+        for mesh in None, dict(chains=2, data=2):
+            state = init(
+                **copy_arrays(kw),
+                num_trees=NUM_TREES,
+                used_trees=NUM_TREES,
+                num_chains=4,
+                mesh=mesh,
+                random_tree_scan=random_tree_scan,
+            )
+            used_trees = jnp.array([NUM_TREES, 2, 0, 3], jnp.int32)
+            forest = replace(
+                state.forest,
+                used_trees=device_put(
+                    used_trees, nnone(state.forest.used_trees).sharding
+                ),
+            )
+            state = replace(state, forest=forest)
+            for key in step_keys:
+                state = step(random.clone(key), state)
+            states.append(state)
+        unsharded, sharded = states
+        assert_same_states(unsharded, replace(sharded, config=unsharded.config))
+
+    @pytest.mark.parametrize('used_trees', [-1, NUM_TREES + 1])
+    def test_init_rejects_out_of_range(self, keys: split, used_trees: int) -> None:
+        """`init` rejects a number of trees in use not in [0, num_trees]."""
+        kw = used_trees_init_kw(keys.pop(), 'plain')
+        with pytest.raises(EQX_RUNTIME_ERRORS, match='used_trees must be in'):
+            init(**kw, num_trees=NUM_TREES, used_trees=used_trees)
 
 
 def one_bin_init_kw(key: Key[Array, ''], n: int) -> dict:
@@ -2353,6 +2634,8 @@ class GewekeCase(NamedTuple):
     leaf_prior: bool = False
     outcome: Literal['continuous', 'binary', 'multivariate', 'mixed'] = 'continuous'
     error_scale: bool = False
+    used_trees: int | None = None
+    random_scan: bool = False
 
     def __str__(self) -> str:
         defaults = GewekeCase(self.p, self.nsplits)
@@ -2431,9 +2714,11 @@ def geweke_state(key: Key[Array, ''], case: GewekeCase) -> ChainDataState:
         offset=jnp.zeros(kshape),
         max_split=jnp.full(case.p, case.nsplits, jnp.uint8),
         num_trees=GEWEKE_NUM_TREES,
+        used_trees=case.used_trees,
         p_nonterminal=p_nonterminal,
         leaf_prior_cov_inv=leaf_prior_cov_inv,
         error_scale=jnp.linspace(0.5, 2.0, GEWEKE_N) if case.error_scale else None,
+        random_tree_scan=case.random_scan,
         num_chains=GEWEKE_NUM_CHAINS,
         **error_kw,
         **min_points_kw,
@@ -2585,6 +2870,11 @@ def avg_max_tree_depth(
         GewekeCase(10, 255, outcome='multivariate', leaf_prior=True),
         GewekeCase(10, 255, outcome='mixed'),
         GewekeCase(10, 255, error_scale=True),
+        GewekeCase(10, 255, random_scan=True),
+        # the trees not in use must not enter the full conditionals of the
+        # leaf precision and of the variable selection
+        GewekeCase(10, 255, leaf_prior=True, used_trees=12),
+        GewekeCase(3, 2, sparsity='free', used_trees=12, random_scan=True),
     ],
     ids=str,
 )

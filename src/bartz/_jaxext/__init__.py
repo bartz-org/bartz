@@ -29,6 +29,7 @@
 from bartz._jaxext._autobatch import autobatch
 from bartz._jaxext._equinox import Module, field, project
 from bartz._jaxext._jaxext import (
+    InPlace,
     cpu_barrier,
     equal_shards,
     float32_matmuls,
@@ -39,10 +40,13 @@ from bartz._jaxext._jaxext import (
     jaxtyping_disabled,
     jit_active,
     minimal_unsigned_dtype,
+    sequential_vmap,
     sliced_map,
     split,
     truncated_normal_onesided,
     unique,
+    variable_length_scan,
+    vmap_max,
     vmap_nodoc,
 )
 from bartz._jaxext._jit import jit

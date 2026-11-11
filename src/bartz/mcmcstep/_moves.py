@@ -33,7 +33,7 @@ from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
 from bartz import grove
 from bartz._jaxext import minimal_unsigned_dtype, split
-from bartz.mcmcstep._state import Forest
+from bartz.mcmcstep._state import Forest, used_trees_mask
 
 
 class Moves(Module):
@@ -134,7 +134,11 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
         log_s=forest.sparsity.log_s,
     )
     return vmap(propose)(
-        keys.pop(num_trees), forest.var_tree, forest.split_tree, forest.affluence_tree
+        keys.pop(num_trees),
+        forest.var_tree,
+        forest.split_tree,
+        forest.affluence_tree,
+        used_trees_mask(forest),
     )
 
 
@@ -144,6 +148,7 @@ def _propose_moves(
     var_tree: UInt[Array, ' half_tree_size'],
     split_tree: UInt[Array, ' half_tree_size'],
     affluence_tree: Bool[Array, ' half_tree_size'],
+    used: Bool[Array, ''] | None,
     *,
     max_split: UInt[Array, ' p'],
     blocked_vars: UInt[Array, ' k'] | None,
@@ -174,6 +179,9 @@ def _propose_moves(
         The splitting points of the tree.
     affluence_tree
         Marks the leaves that can be grown.
+    used
+        Whether the tree is in use, see `bartz.mcmcstep.Forest.used_trees`;
+        `None` if all the trees are.
     max_split
         The maximum split index for each variable.
     blocked_vars
@@ -190,11 +198,11 @@ def _propose_moves(
 
     Notes
     -----
-    A GROW move is not possible if each leaf is already at maximum depth, or has
-    less datapoints than the requested threshold `min_points_per_decision_node`,
-    or it does not have any available decision rules given its ancestors. A
-    PRUNE move is not possible if the tree is a single root. If neither move is
-    possible, `allowed` is set to `False`.
+    A GROW move is not possible if the tree is not in use, or each leaf is
+    already at maximum depth, or has less datapoints than the requested
+    threshold `min_points_per_decision_node`, or it does not have any available
+    decision rules given its ancestors. A PRUNE move is not possible if the tree
+    is a single root. If neither move is possible, `allowed` is set to `False`.
     """
     keys = split(key, 5)
 
@@ -209,6 +217,8 @@ def _propose_moves(
     # choose between grow and prune
     grow_allowed = num_growable > 0
     prune_allowed = split_tree[1].astype(bool)  # the tree is not a single root
+    if used is not None:
+        grow_allowed &= used
     u, exp1mlogu = random.uniform(keys.pop(), (2,))
     p_grow = jnp.where(grow_allowed & prune_allowed, 0.5, grow_allowed)
     grow = u < p_grow  # use < instead of <= because u is in [0, 1)

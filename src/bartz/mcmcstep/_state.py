@@ -303,6 +303,13 @@ class Forest(Module):
     offset: Float32[Array, ''] | Float32[Array, ' k']
     """Constant shift added to the scaled sum of trees, see `leaf_tree`."""
 
+    used_trees: Int32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
+    """The number of trees in use, `None` if all the trees are always in use.
+    Only the first `used_trees` trees in the arrays are part of the model, and
+    the sequential accept/reject loop of `step` visits only them. The other
+    trees shall be lone roots with zero leaves, as `step` keeps them, such that
+    the function computed by the forest is the sum of all the trees anyway."""
+
     grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of grow proposals made during the last MCMC step."""
 
@@ -391,7 +398,7 @@ class Forest(Module):
     """The prior precision matrix of a leaf, conditional on the tree structure
     (a scalar inverse variance for univariate), with its Wishart prior. The
     prior mean of a leaf is zero; the prior covariance of the sum of trees is
-    ``num_trees * leaf_prior_cov_inv.value^-1``. If `Wishart.nu` is `None`,
+    ``used_trees * leaf_prior_cov_inv.value^-1``. If `Wishart.nu` is `None`,
     the precision is held fixed."""
 
     sparsity: Sparsity
@@ -436,7 +443,20 @@ class StepConfig(Module):
 
     sequential_unroll: int | bool = field(static=True)
     """How much to unroll the sequential accept/reject loop over trees in
-    `step`. See the ``unroll`` argument of `jax.lax.scan`."""
+    `step`, if `Forest.used_trees` is not set. See the ``unroll`` argument of
+    `jax.lax.scan`."""
+
+    sequential_block_size: int | None = field(static=True)
+    """If `Forest.used_trees` is set, the sequential accept/reject loop over
+    trees in `step` visits them in fully unrolled blocks of this size, and
+    checks whether there are trees in use left only between blocks. The visits
+    to the trees not in use in the last block have no effect. If `None`, 2 on
+    cpu and 4 on gpu."""
+
+    random_tree_scan: bool = field(static=True)
+    """Whether the sequential accept/reject loop over trees in `step` visits
+    the trees in a new random order at each step, instead of in storage
+    order."""
 
     augment: bool = field(static=True)
     """Whether to account exactly, via data augmentation, for the decision
@@ -504,8 +524,8 @@ class State(Module):
     resid_unit: Float32[Array, ''] | Float32[Array, ' k']
     """The storage unit of `resid` (see `init`'s ``resid_dtype``), same scheme
     as `Forest.leaf_unit`. Equal to ``leaf_unit * sqrt(num_trees)`` (the
-    marginal prior standard deviation of the sum of trees) rounded to a power
-    of two."""
+    marginal prior standard deviation of the sum of trees, with all the trees
+    in use) rounded to a power of two."""
 
     resid_eff_scale: Float32[Array, '*chains'] | Float32[Array, '*chains k'] = field(
         chains=CHAIN_AXIS
@@ -521,8 +541,9 @@ class State(Module):
         field(chains=CHAIN_AXIS)
     )
     """Sum over the MCMC steps done of the mean square of the residuals (in
-    `resid_unit` units) large enough that their running updates round. Used by
-    `sum_trees_eps` to estimate the accumulated rounding drift."""
+    `resid_unit` units) large enough that their running updates round, times
+    the fraction of trees in use. Used by `sum_trees_eps` to estimate the
+    accumulated rounding drift."""
 
     error_cov_inv: Wishart
     """The inverse error covariance (``error_cov_inv.value``, scalar for
@@ -652,9 +673,10 @@ class State(Module):
             snap = managed_quantum / 2.0 * (1.0 + jnp.reciprocal(t))
 
         # random walk drift of the accumulated rounding errors: each of the
-        # `num_trees` updates per step charges eps_resid * |resid| to the
-        # residuals large enough to round, whose mean square is integrated
-        # over the steps done in `resid_inexact_integral`
+        # `used_trees` updates per step charges eps_resid * |resid| to the
+        # residuals large enough to round, whose mean square, times
+        # `used_trees / num_trees`, is integrated over the steps done in
+        # `resid_inexact_integral`
         integral = self.resid_inexact_integral
         chain_axes = range(integral.ndim - self.resid_unit.ndim)
         integral = jnp.mean(integral, axis=tuple(chain_axes))
@@ -838,6 +860,17 @@ def parse_p_nonterminal(
     return jnp.pad(p_nonterminal, (0, 1))
 
 
+def parse_used_trees(
+    used_trees: int | Integer[ArrayLike, ''] | None, num_trees: int
+) -> Int32[Array, ''] | None:
+    """Check `used_trees` is in [0, num_trees]."""
+    if used_trees is None:
+        return None
+    used_trees = jnp.asarray(used_trees, jnp.int32)
+    bad = (used_trees < 0) | (used_trees > num_trees)
+    return error_if(used_trees, bad, f'used_trees must be in [0, {num_trees}]')
+
+
 def make_p_nonterminal(
     d: int, alpha: FloatLike = 0.95, beta: FloatLike = 2.0
 ) -> Float32[Array, ' {d}-1']:
@@ -876,6 +909,7 @@ def init(
     offset: FloatLike | Float[ArrayLike, ' k'],
     max_split: UInt[ArrayLike, ' p'],
     num_trees: int,
+    used_trees: int | Integer[ArrayLike, ''] | None = None,
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
     leaf_prior_cov_inv: Wishart,
     leaf_dtype: DTypeLike = jnp.float32,
@@ -893,6 +927,8 @@ def init(
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
     one_bin_prec_reduction: bool | Literal['auto'] = 'auto',
     sequential_unroll: int | bool = 2,
+    sequential_block_size: int | None = None,
+    random_tree_scan: bool = False,
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
     log_s: Float32[ArrayLike, ' p'] | None = None,
@@ -925,7 +961,11 @@ def init(
     max_split
         The maximum split index for each variable. All split ranges start at 1.
     num_trees
-        The number of trees in the forest.
+        The number of trees in the forest arrays.
+    used_trees
+        The initial number of trees in use, see `Forest.used_trees`. If not
+        specified, all the trees are always in use, and `step` visits them
+        with a loop of fixed length, which may be faster.
     p_nonterminal
         The probability of a nonterminal node at each depth. The maximum depth
         of trees is fixed by the length of this array. Use `make_p_nonterminal`
@@ -991,6 +1031,13 @@ def init(
     sequential_unroll
         See `StepConfig.sequential_unroll`. Unrolling may speed up the MCMC at
         the cost of longer compilation; 1 means no unrolling.
+    sequential_block_size
+        See `StepConfig.sequential_block_size`. Larger blocks reduce the
+        overhead of checking the loop condition, which is significant on gpu,
+        but take longer to compile and waste more time on visiting trees not
+        in use.
+    random_tree_scan
+        See `StepConfig.random_tree_scan`.
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
     filter_splitless_vars
@@ -1065,6 +1112,8 @@ def init(
 
     # check p_nonterminal and pad it with a 0 at the end (still not final shape)
     p_nonterminal = parse_p_nonterminal(p_nonterminal)
+
+    used_trees = parse_used_trees(used_trees, num_trees)
 
     # process arguments that change depending on outcome type
     is_binary, kshape, error_cov_inv, binary_indices = init_shape_shifting_parameters(
@@ -1190,6 +1239,7 @@ def init(
                 ),
                 blocked_vars=get_blocked_vars(filter_splitless_vars, max_split),
                 max_split=max_split,
+                used_trees=_lazy_from_array(used_trees),
                 grow_prop_count=lazy(jnp.zeros, (), int),
                 grow_acc_count=lazy(jnp.zeros, (), int),
                 prune_prop_count=lazy(jnp.zeros, (), int),
@@ -1239,6 +1289,8 @@ def init(
                 steps_done=jnp.int32(0),
                 sparse_on_at=asarray_or_none(sparse_on_at),
                 sequential_unroll=sequential_unroll,
+                sequential_block_size=sequential_block_size,
+                random_tree_scan=random_tree_scan,
                 augment=augment,
                 mesh=mesh,
                 leaf_quantization=asarray_or_none(leaf_quantization),
@@ -2137,6 +2189,14 @@ def vmap_chains(
         return vmapped_fun(keys, state)
 
     return wrapped
+
+
+def used_trees_mask(forest: Forest) -> Bool[Array, ' num_trees'] | None:
+    """Mark the trees in use in a forest without chains, `None` if all are."""
+    if forest.used_trees is None:
+        return None
+    num_trees, _ = forest.var_tree.shape
+    return jnp.arange(num_trees) < forest.used_trees
 
 
 def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']:

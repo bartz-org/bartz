@@ -49,6 +49,7 @@ from bartz.mcmcstep._state import (
     chol_with_gersh,
     outcome_target,
     split_key_for_chains,
+    used_trees_mask,
     vmap_chains,
 )
 
@@ -99,8 +100,10 @@ def sample_prior(key: Key[Array, ''], state: StateT) -> StateT:
 
     The prior is the one defined by the hyperparameters in `state`. Replaces
     the trees and the leaves, and, where they have a prior, the leaf and error
-    precisions and the variable selection parameters. The data is left
-    unchanged, and the fields derived from the parameters are updated to match.
+    precisions and the variable selection parameters. The trees not in use
+    (see `bartz.mcmcstep.Forest.used_trees`) become lone roots with zero
+    leaves. The data is left unchanged, and the fields derived from the
+    parameters are updated to match.
 
     Parameters
     ----------
@@ -258,8 +261,16 @@ def sample_values(key: Key[Array, ''], state: StateT) -> StateT:
     # leaves
     leaves = sample_leaves(keys.pop(), forest.leaf_tree.shape, leaf_prec_chol)
 
+    # the trees not in use are lone roots with zero leaves
+    used = used_trees_mask(forest)
+    split_tree = forest.split_tree
+    if used is not None:
+        leaves = jnp.where(used.reshape(-1, *(1,) * (leaves.ndim - 1)), leaves, 0.0)
+        split_tree = jnp.where(used[:, None], split_tree, 0)
+
     forest = replace(
         forest,
+        split_tree=split_tree,
         leaf_tree=to_leaf_storage(leaves, state),
         leaf_prior_cov_inv=leaf_prior_cov_inv,
     )

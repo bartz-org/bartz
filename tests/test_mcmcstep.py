@@ -2286,6 +2286,8 @@ def used_trees_init_kw(key: Key[Array, ''], case: str) -> dict:
             kw = dict(kw, leaf_prior_cov_inv=leaf_prior)
         case 'sparse':
             kw = dict(kw, a=0.5, b=1.0, rho=5.0, sparse_on_at=0)
+        case 'quantized':
+            kw = dict(kw, leaf_quantization=1)
     return kw
 
 
@@ -2321,6 +2323,7 @@ class TestUsedTrees:
             ('error_scale', 8),
             ('leaf_prior', 8),
             ('sparse', 8),
+            ('quantized', 8),
             ('binary', 8),
             ('multivariate', 8),
         ],
@@ -2369,8 +2372,12 @@ class TestUsedTrees:
         tree.map_with_path(check, alone.forest, extended_forest)
         for name in 'resid', 'z', 'error_cov_inv', 'resid_eff_scale':
             tree.map_with_path(check, getattr(alone, name), getattr(extended, name))
+        # compare each of the three terms of `sum_trees_eps`, since it returns
+        # only the largest
         assert_close_matrices(
-            alone.sum_trees_eps(), extended.sum_trees_eps(), rtol=1e-5
+            jnp.stack(alone._sum_trees_eps()),
+            jnp.stack(extended._sum_trees_eps()),
+            rtol=1e-5,
         )
 
         for name in 'split_tree', 'leaf_tree':

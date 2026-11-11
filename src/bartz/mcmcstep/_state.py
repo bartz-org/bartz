@@ -666,9 +666,17 @@ class State(Module):
             # t = (leaf_unit / error_sdev)^2 * n_leaf, so residual features
             # smaller than quantum / (2 s) cannot move the sampler. Typical
             # values are used for the error variance (chain mean, datapoint
-            # mean of prec_scale) and n_leaf (datapoints over leaves per tree).
-            leaves_per_tree = 1.0 + jnp.count_nonzero(self.forest.split_tree, axis=-1)
-            n_leaf = n_eff / jnp.mean(leaves_per_tree)
+            # mean of prec_scale) and n_leaf (datapoints over leaves per tree
+            # in use; the trees not in use have no splits).
+            split_tree = self.forest.split_tree
+            if self.forest.used_trees is None:
+                *_, half_tree_size = split_tree.shape
+                num_used = split_tree.size // half_tree_size
+            else:
+                num_used = jnp.sum(self.forest.used_trees)
+            num_splits = jnp.count_nonzero(split_tree)
+            leaves_per_tree = 1.0 + num_splits / jnp.maximum(num_used, 1)
+            n_leaf = n_eff / leaves_per_tree
             t = jnp.square(self.forest.leaf_unit) * n_leaf / error_var
             snap = managed_quantum / 2.0 * (1.0 + jnp.reciprocal(t))
 

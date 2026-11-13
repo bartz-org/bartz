@@ -163,6 +163,7 @@ from bartz.mcmcstep._step import (
     apply_moves_to_leaf_indices,
     leaf_scatter,
     log_blocked_mass_tree,
+    random_tree_order,
     sample_s_augmentation,
     sample_wishart_posterior,
     step_error_cov_inv,
@@ -2425,15 +2426,20 @@ class TestUsedTrees:
 
     @pytest.mark.parametrize('used_trees', [None, NUM_TREES])
     def test_sequential_stage_order(self, keys: split, used_trees: int | None) -> None:
-        """Visiting the trees in some order is like storing them in that order."""
+        """Visiting the trees in random order is like storing them in that order."""
         kw = used_trees_init_kw(keys.pop(), 'plain')
-        state = init(**kw, num_trees=NUM_TREES, used_trees=used_trees)
+        state = init(
+            **kw, num_trees=NUM_TREES, used_trees=used_trees, random_tree_scan=True
+        )
         for key in keys.pop(5):
             state = step(key, state)
 
         moves = propose_moves(keys.pop(), state.forest)
         pso = accept_moves_parallel_stage(keys.pop(), state, moves)
-        order = random.permutation(keys.pop(), NUM_TREES)
+
+        # the order the stage draws from its key
+        key = keys.pop()
+        order = random_tree_order(random.clone(key), pso.state.forest)
 
         # store the trees in visiting order
         def permute(x: PyTree[Shaped[Array, ' num_trees *shape']]) -> PyTree:
@@ -2445,17 +2451,20 @@ class TestUsedTrees:
             leaf_tree=permute(forest.leaf_tree),
             leaf_indices=permute(forest.leaf_indices),
         )
+        config = replace(pso.state.config, random_tree_scan=False)
         permuted = replace(
             pso,
-            state=replace(pso.state, forest=forest),
+            state=replace(pso.state, forest=forest, config=config),
             moves=permute(pso.moves),
             prec_trees=permute(pso.prec_trees),
             prelkv=permute(pso.prelkv),
             prelf=permute(pso.prelf),
         )
 
-        state, moves = accept_moves_sequential_stage(pso, order)
-        permuted_state, permuted_moves = accept_moves_sequential_stage(permuted)
+        state, moves = accept_moves_sequential_stage(key, pso)
+        permuted_state, permuted_moves = accept_moves_sequential_stage(
+            keys.pop(), permuted
+        )
 
         # the gpu reductions are not deterministic
         assert_close_matrices(state.resid, permuted_state.resid, rtol=1e-5)

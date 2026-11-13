@@ -162,7 +162,8 @@ def step_resid_inexact_integral(state: State) -> State:
         ms = lax.psum(ms, 'data')
     ms /= jnp.maximum(state.n_non_missing, 1)
 
-    # only the trees in use update the residuals
+    # only the trees in use update the residuals; weight each step here, as
+    # `used_trees` may change from one step to the next
     if state.forest.used_trees is not None:
         num_trees, _ = state.forest.var_tree.shape
         ms *= state.forest.used_trees / num_trees
@@ -191,21 +192,16 @@ def step_trees(key: Key[Array, ''], state: State) -> State:
     -----
     This function zeroes the proposal counters.
     """
-    keys = split(key, 3)
+    keys = split(key)
     moves = propose_moves(keys.pop(), state.forest)
-    accept_key = keys.pop()
-    order = None
-    if state.config.random_tree_scan:
-        order = random_tree_order(keys.pop(), state.forest)
-    return accept_moves_and_sample_leaves(accept_key, state, moves, order)
+    return accept_moves_and_sample_leaves(keys.pop(), state, moves)
 
 
-def random_tree_order(
-    key: Key[Array, ''], forest: Forest
-) -> Int32[Array, ' num_trees']:
+def random_tree_order(key: Key[Array, ''], forest: Forest) -> UInt[Array, ' num_trees']:
     """Draw a random order to visit the trees, with the trees in use first."""
     num_trees, _ = forest.var_tree.shape
-    order = random.permutation(key, num_trees)
+    trees = jnp.arange(num_trees, dtype=minimal_unsigned_dtype(num_trees - 1))
+    order = random.permutation(key, trees)
     if forest.used_trees is not None:
         order = order[jnp.argsort(order >= forest.used_trees, stable=True)]
     return order
@@ -213,10 +209,7 @@ def random_tree_order(
 
 @named_call
 def accept_moves_and_sample_leaves(
-    key: Key[Array, ''],
-    state: State,
-    moves: Moves,
-    order: Integer[Array, ' num_trees'] | None = None,
+    key: Key[Array, ''], state: State, moves: Moves
 ) -> State:
     """
     Accept or reject the proposed moves and sample the new leaf values.
@@ -229,16 +222,14 @@ def accept_moves_and_sample_leaves(
         A valid BART mcmc state.
     moves
         The proposed moves, see `propose_moves`.
-    order
-        The order in which the sequential stage visits the trees, see
-        `accept_moves_sequential_stage`.
 
     Returns
     -------
     A new (valid) BART mcmc state.
     """
-    pso = accept_moves_parallel_stage(key, state, moves)
-    state, moves = accept_moves_sequential_stage(pso, order)
+    keys = split(key)
+    pso = accept_moves_parallel_stage(keys.pop(), state, moves)
+    state, moves = accept_moves_sequential_stage(keys.pop(), pso)
     return accept_moves_final_stage(state, moves)
 
 
@@ -1189,7 +1180,7 @@ def precompute_likelihood_terms(
 
 @named_call
 def accept_moves_sequential_stage(
-    pso: ParallelStageOut, order: Integer[Array, ' num_trees'] | None = None
+    key: Key[Array, ''], pso: ParallelStageOut
 ) -> tuple[State, Moves]:
     """
     Accept/reject the moves one tree at a time.
@@ -1199,12 +1190,11 @@ def accept_moves_sequential_stage(
 
     Parameters
     ----------
+    key
+        A jax random key, used to draw the order in which to visit the trees
+        with `random_tree_order` if `StepConfig.random_tree_scan` is set.
     pso
         The output of `accept_moves_parallel_stage`.
-    order
-        The order in which to visit the trees, a permutation of the tree
-        indices. If `None`, storage order. If `Forest.used_trees` is set, the
-        trees in use shall come first.
 
     Returns
     -------
@@ -1213,6 +1203,7 @@ def accept_moves_sequential_stage(
     moves : Moves
         The accepted/rejected moves, with `acc` and `to_prune` set.
     """
+    # wrap together all per-tree inputs, but `leaf_indices`
     num_trees, _ = pso.state.forest.leaf_indices.shape
     pts = SeqStageInPerTree(
         pso.state.forest.leaf_tree,
@@ -1222,10 +1213,20 @@ def accept_moves_sequential_stage(
         pso.prelkv,
         pso.prelf,
     )
-    if order is not None:
+
+    # Permute the per-tree stuff from storage order to scan order. Permuting
+    # up-front is more efficient than indexing the arrays with the permutation
+    # indices in the loop because of xla quirks.
+    order = None
+    if pso.state.config.random_tree_scan:
+        order = random_tree_order(key, pso.state.forest)
         pts = tree.map(lambda x: x[order, ...], pts)
+
+    # wrap together all inputs that are not per tree
     at = SeqStageInAllTrees(
         pso.state.X,
+        # `leaf_indices` is per-tree, but it's passed all at once from here as
+        # a workaround to avoid copies created by xla
         pso.state.forest.leaf_indices,
         pso.state.config.resid_reduction_config,
         pso.state.config.data_sharded,
@@ -1238,13 +1239,21 @@ def accept_moves_sequential_stage(
         pso.state.config.leaf_quantization,
     )
 
-    # both branches are traced, but only one is compiled
+    # With a fixed number of trees, the loop over them has fixed length and is
+    # unrolled as configured. Otherwise it goes in blocks, which are fully
+    # unrolled, so that only the loop over blocks checks its condition.
+    used_trees = pso.state.forest.used_trees
+    unroll = pso.state.config.sequential_unroll if used_trees is None else True
     block_size = pso.state.config.sequential_block_size
-    resid, ys = lax.platform_dependent(
+
+    # Invoke the loop over trees differently depending on the device type. Both
+    # the cpu and cuda branch are traced by jax, but only one is compiled by
+    # xla.
+    resid, pertree_out = lax.platform_dependent(
         pso.state.resid,
         at,
         pts,
-        pso.state.forest.used_trees,
+        used_trees,
         # On cpu, loop over chains instead of vmapping over them, for two
         # reasons: 1) It's substantially faster in general. We observed
         # empirically that, with vmapped chains, the running time scales
@@ -1257,7 +1266,7 @@ def accept_moves_sequential_stage(
         cpu=sequential_vmap(
             partial(
                 loop_over_trees,
-                unroll=pso.state.config.sequential_unroll,
+                unroll=unroll,
                 block_size=2 if block_size is None else block_size,
             ),
             # This is our own custom `sequential_vmap`, not
@@ -1273,7 +1282,7 @@ def accept_moves_sequential_stage(
         ),
         cuda=partial(
             loop_over_trees,
-            unroll=pso.state.config.sequential_unroll,
+            unroll=unroll,
             # the gpu takes larger blocks (4 instead of 2) because it checks
             # the loop condition from the host. Higher than 2 is not reliable
             # on cpu, sometimes it's much slower. Probably bad xla:cpu as
@@ -1281,17 +1290,23 @@ def accept_moves_sequential_stage(
             block_size=4 if block_size is None else block_size,
         ),
     )
+
+    # permute back output arrays with a tree axis to storage order
     if order is not None:
         inverse = jnp.argsort(order)
-        ys = tree.map(lambda y: y[inverse, ...], ys)
-    leaf_trees, acc, to_prune, lkratio = ys
+        pertree_out = tree.map(lambda y: y[inverse, ...], pertree_out)
 
+    # store the results in `state` and `moves`, then return
     state = replace(
         pso.state,
         resid=resid,
-        forest=replace(pso.state.forest, leaf_tree=leaf_trees, log_likelihood=lkratio),
+        forest=replace(
+            pso.state.forest,
+            leaf_tree=pertree_out.leaf_tree,
+            log_likelihood=pertree_out.log_lk_ratio,
+        ),
     )
-    moves = replace(pso.moves, acc=acc, to_prune=to_prune)
+    moves = replace(pso.moves, acc=pertree_out.acc, to_prune=pertree_out.to_prune)
 
     return state, moves
 
@@ -1376,6 +1391,30 @@ class SeqStageInPerTree(Module):
     """The pre-computed terms of the leaf sampling which are specific to the tree."""
 
 
+class SeqStageOutPerTree(Module):
+    """The outputs of `accept_move_and_sample_leaves` that are separate for each tree."""
+
+    # Constructed one tree at a time, then stacked along a leading tree axis by
+    # the loop over trees. `acc` comes first to fix `num_trees` before the
+    # union in `leaf_tree` is checked, else its first alternative would match a
+    # multivariate tree with `num_trees` set to `k`.
+    acc: Bool[Array, '*num_trees']
+    """Whether the move was accepted."""
+
+    to_prune: Bool[Array, '*num_trees']
+    """Whether, to reflect the acceptance status of the move, the state should
+    be updated by pruning the leaves involved in the move."""
+
+    leaf_tree: (
+        Float[Array, '*num_trees tree_size'] | Float[Array, '*num_trees k tree_size']
+    )
+    """The new leaf values of the tree."""
+
+    log_lk_ratio: Float32[Array, '*num_trees'] | None
+    """The logarithm of the likelihood ratio for the move. `None` if not to be
+    saved."""
+
+
 def loop_over_trees(
     resid: Float[Array, ' n'] | Float[Array, ' k n'],
     at: SeqStageInAllTrees,
@@ -1384,47 +1423,21 @@ def loop_over_trees(
     *,
     unroll: int | bool,
     block_size: int,
-) -> tuple[
-    Float[Array, ' n'] | Float[Array, ' k n'],
-    tuple[
-        Float[Array, 'num_trees tree_size'] | Float[Array, 'num_trees k tree_size'],
-        Bool[Array, ' num_trees'],
-        Bool[Array, ' num_trees'],
-        Float32[Array, ' num_trees'] | None,
-    ],
-]:
+) -> tuple[Float[Array, ' n'] | Float[Array, ' k n'], SeqStageOutPerTree]:
     """Apply `accept_move_and_sample_leaves` to the trees in order.
 
-    The loop is a `variable_length_scan` over the first `used_trees` trees,
-    unrolled `unroll` times if `used_trees` is `None`, else in fully unrolled
-    blocks.
+    The loop is a `variable_length_scan` over the first `used_trees` trees.
     """
 
     def loop(
         resid: Float[Array, ' n'] | Float[Array, ' k n'],
         pt: SeqStageInPerTree,
         use: Bool[Array, ''] | None,
-    ) -> tuple[
-        Float[Array, ' n'] | Float[Array, ' k n'],
-        tuple[
-            Float[Array, ' tree_size'] | Float[Array, ' k tree_size'],
-            Bool[Array, ''],
-            Bool[Array, ''],
-            Float32[Array, ''] | None,
-        ],
-    ]:
-        resid, leaf_tree, acc, to_prune, lkratio = accept_move_and_sample_leaves(
-            resid, at, pt, use
-        )
-        return resid, (leaf_tree, acc, to_prune, lkratio)
+    ) -> tuple[Float[Array, ' n'] | Float[Array, ' k n'], SeqStageOutPerTree]:
+        return accept_move_and_sample_leaves(resid, at, pt, use)
 
     return variable_length_scan(
-        loop,
-        resid,
-        pts,
-        used_trees,
-        block_size=block_size,
-        unroll=unroll if used_trees is None else True,
+        loop, resid, pts, used_trees, block_size=block_size, unroll=unroll
     )
 
 
@@ -1434,13 +1447,7 @@ def accept_move_and_sample_leaves(
     at: SeqStageInAllTrees,
     pt: SeqStageInPerTree,
     use: Bool[Array, ''] | None = None,
-) -> tuple[
-    Float[Array, ' n'] | Float[Array, ' k n'],
-    Float[Array, ' tree_size'] | Float[Array, ' k tree_size'],
-    Bool[Array, ''],
-    Bool[Array, ''],
-    Float32[Array, ''] | None,
-]:
+) -> tuple[Float[Array, ' n'] | Float[Array, ' k n'], SeqStageOutPerTree]:
     """
     Accept or reject a proposed move and sample the new leaf values.
 
@@ -1463,16 +1470,8 @@ def accept_move_and_sample_leaves(
     -------
     resid : Float[Array, 'n'] | Float[Array, ' k n']
         The updated residuals, in the same stored units and dtype as the input.
-    leaf_tree : Float[Array, 'tree_size'] | Float[Array, ' k tree_size']
-        The new leaf values of the tree.
-    acc : Bool[Array, '']
-        Whether the move was accepted.
-    to_prune : Bool[Array, '']
-        Whether, to reflect the acceptance status of the move, the state should
-        be updated by pruning the leaves involved in the move.
-    log_lk_ratio : Float32[Array, ''] | None
-        The logarithm of the likelihood ratio for the move. `None` if not to be
-        saved.
+    out : SeqStageOutPerTree
+        The other outputs.
     """
     leaf_indices = at.leaf_indices[pt.tree_index, :]
 
@@ -1575,22 +1574,24 @@ def accept_move_and_sample_leaves(
     # delta is converted back to the stored residual units and dtype *before* the
     # scatter, so the n-sized update stays in the narrow `resid` storage
     leaf_delta = prev_leaf_tree - at.leaf_unit[..., None] * leaf_tree
-    if use is None:
-        delta = leaf_delta / at.resid_unit[..., None]
-    else:
+    # `resid_unit` is a power of 2, so its reciprocal is exact
+    inv_resid_unit = jnp.reciprocal(at.resid_unit)
+    if use is not None:
         # the conversion factor zeroes the delta of a tree not in use, instead
         # of an elementwise select that xla on gpu would repeat for each
-        # datapoint; `resid_unit` is a power of 2, so its reciprocal is exact
-        inv_resid_unit = jnp.where(use, jnp.reciprocal(at.resid_unit), 0.0)
-        delta = leaf_delta * inv_resid_unit[..., None]
-    delta = delta.astype(resid.dtype)
+        # datapoint
+        inv_resid_unit = jnp.where(use, inv_resid_unit, 0.0)
+    delta = (leaf_delta * inv_resid_unit[..., None]).astype(resid.dtype)
     # on cpu, materialize the per-leaf delta, else xla fuses its computation
     # into the gather and repeats it for each datapoint; on gpu that is cheaper
     # than the extra kernel launch
     delta = cpu_barrier(delta)
     resid += delta[..., leaf_indices]
 
-    return resid, leaf_tree, acc, to_prune, log_lk_ratio
+    out = SeqStageOutPerTree(
+        acc=acc, to_prune=to_prune, leaf_tree=leaf_tree, log_lk_ratio=log_lk_ratio
+    )
+    return resid, out
 
 
 @named_call

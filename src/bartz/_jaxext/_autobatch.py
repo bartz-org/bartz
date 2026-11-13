@@ -270,8 +270,8 @@ def vary(x: Shaped[Array, '*shape'], axes: tuple[str, ...]) -> Shaped[Array, '*s
 def varying_axes(x: Shaped[Array, '*shape'] | ShapeDtypeStruct) -> frozenset[str]:
     """Return the manual `shard_map` mesh axes over which `x` varies."""
     aval = typeof(x)
-    # WORKAROUND(jax<0.10.0): the axes are in `vma`; once unsupported, use only
-    # `manual_axis_type.varying`
+    # WORKAROUND(jax<0.10.0): the axes are in `vma`; once unsupported, delete
+    # this function and use `typeof(x).manual_axis_type.varying`
     if hasattr(aval, 'manual_axis_type'):
         return aval.manual_axis_type.varying
     else:

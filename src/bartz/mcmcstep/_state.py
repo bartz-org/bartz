@@ -970,11 +970,11 @@ def init(
     max_split
         The maximum split index for each variable. All split ranges start at 1.
     num_trees
-        The number of trees in the forest arrays.
+        The maximum number of trees.
     used_trees
-        The initial number of trees in use, see `Forest.used_trees`. If not
-        specified, all the trees are always in use, and `step` visits them
-        with a loop of fixed length, which may be faster.
+        The initial number of trees. If not specified, the number of trees is
+        fixed at `num_trees`. For best performance, leave this unset when the
+        number of trees is fixed.
     p_nonterminal
         The probability of a nonterminal node at each depth. The maximum depth
         of trees is fixed by the length of this array. Use `make_p_nonterminal`
@@ -1041,12 +1041,12 @@ def init(
         See `StepConfig.sequential_unroll`. Unrolling may speed up the MCMC at
         the cost of longer compilation; 1 means no unrolling.
     sequential_block_size
-        See `StepConfig.sequential_block_size`. Larger blocks reduce the
-        overhead of checking the loop condition, which is significant on gpu,
-        but take longer to compile and waste more time on visiting trees not
-        in use.
+        Computational performance parameter. Larger `sequential_block_size` may
+        speed up the MCMC on GPU at the cost of longer compilation. See
+        `StepConfig.sequential_block_size`.
     random_tree_scan
-        See `StepConfig.random_tree_scan`.
+        If `True`, run the Gibbs scan over trees in random order (different on
+        each MCMC iteration) instead of in fixed order.
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
     filter_splitless_vars
@@ -2206,7 +2206,8 @@ def used_trees_mask(forest: Forest) -> Bool[Array, ' num_trees'] | None:
         return None
     else:
         num_trees, _ = forest.var_tree.shape
-        return jnp.arange(num_trees) < forest.used_trees
+        trees = jnp.arange(num_trees, dtype=minimal_unsigned_dtype(num_trees - 1))
+        return trees < forest.used_trees
 
 
 def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']:

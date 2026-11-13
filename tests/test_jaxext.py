@@ -1280,7 +1280,7 @@ class TestVariableLengthScan:
         out = jit(
             partial(variable_length_scan, block_size=block_size, unroll=unroll),
             static_argnums=(0,),
-        )(toy_step, jnp.zeros(()), xs, length)
+        )(toy_step, jnp.zeros(()), xs, jnp.int32(length))
         tree.map(
             partial(assert_close_matrices, rtol=1e-6), out, toy_reference(xs, length)
         )

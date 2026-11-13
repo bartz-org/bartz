@@ -29,7 +29,7 @@ import sys
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from functools import partial, wraps
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, NamedTuple, ParamSpec, TypeVar
 
 import jax
 from equinox import tree_at
@@ -76,9 +76,9 @@ else:  # WORKAROUND(python<3.13): typing.TypeIs was added in 3.13
 _P = ParamSpec('_P')
 _R = TypeVar('_R')
 _T = TypeVar('_T')
-_C = TypeVar('_C')
-_X = TypeVar('_X')
-_Y = TypeVar('_Y')
+C = TypeVar('C')
+X = TypeVar('X')
+Y = TypeVar('Y')
 
 
 @contextmanager
@@ -429,11 +429,6 @@ def cpu_barrier(x: _T) -> _T:
 def vmap_max(x: Integer[Array, '']) -> Integer[Array, '']:
     """Take the maximum over the axes of the enclosing vmaps, if any.
 
-    The result is not batched. This can serve as loop bound for all the batch
-    elements at once, which avoids that `jax.lax.while_loop` checks its
-    condition and selects its carry for each batch element. Unlike a collective
-    over named axes, it works for any vmap, also within `jax.shard_map`.
-
     Parameters
     ----------
     x
@@ -442,6 +437,11 @@ def vmap_max(x: Integer[Array, '']) -> Integer[Array, '']:
     Returns
     -------
     The maximum of `x` over the batch, `x` itself if not vmapped, 0 if the batch is empty.
+
+    Notes
+    -----
+    This is a workaround for collectives over vmap named axes not working under
+    `jax.shard_map`. Used only by `variable_length_scan`.
     """
     return x
 
@@ -450,13 +450,13 @@ def vmap_max(x: Integer[Array, '']) -> Integer[Array, '']:
 def vmap_max_rule(
     axis_size: int,  # noqa: ARG001
     in_batched: Sequence[bool],
-    x: Integer[Array, ' batch'] | Integer[Array, ''],
+    x: Integer[Array, ' batch'],
 ) -> tuple[Integer[Array, ''], bool]:
+    # jax calls the rule only if some argument is batched, here the only one
     (batched,) = in_batched
-    if batched:
-        x = jnp.max(x, axis=0, initial=0)
+    assert batched
     # the max is batched as usual by any outer vmap, so apply again to reduce it
-    return vmap_max(x), False
+    return vmap_max(jnp.max(x, axis=0, initial=0)), False
 
 
 class InPlace(Module):
@@ -476,15 +476,15 @@ class InPlace(Module):
         return self.array[(self.index, *key)]
 
 
+# the arguments are not typed with a `ParamSpec`, because jax passes them to the
+# batching rule as an untyped tuple
 def sequential_vmap(
-    f: Callable[..., _R], *, in_place: Callable[..., PyTree] | None = None
+    f: Callable[..., _R],
+    *,
+    in_place: Callable[..., tuple[Array, ...] | Array] | None = None,
 ) -> Callable[..., _R]:
     """
-    Like `jax.custom_batching.sequential_vmap`, with some arguments read in place.
-
-    When vmapped, `f` is applied to one batch element at a time. The batched
-    arrays selected by `in_place` are not sliced, which would copy them if a
-    loop within `f` consumes them, but passed whole as `InPlace` views.
+    Like `jax.custom_batching.sequential_vmap`, but with some arguments read in place.
 
     Parameters
     ----------
@@ -492,11 +492,20 @@ def sequential_vmap(
         The function to apply, with positional arguments only.
     in_place
         Takes the arguments of `f` and returns the arrays, or a tuple of
-        arrays, to read in place.
+        arrays, to read in place. "In place" means that instead of slicing the
+        array to pass it to `f`, the full unsliced array is wrapped as an
+        `InPlace` object that's passed to `f`.
 
     Returns
     -------
     `f`, with a sequential batching rule.
+
+    Notes
+    -----
+    The purpose of this function is to avoid redundant copies of arrays in the
+    case where an argument to `f` is passed into a loop (e.g.,
+    `lax.while_loop`) inside `f`, which forces the materialization of the slice
+    of the array.
     """
     g = custom_vmap(f)
 
@@ -506,109 +515,140 @@ def sequential_vmap(
     ) -> tuple[_R, PyTree[bool]]:
         in_batched = tuple(in_batched)
         if axis_size == 0:
-            # nothing to loop over, and the `InPlace` views could not index the
-            # empty batch axis
+            # shortcut because `InPlace` does not support empty batch axis, so
+            # `lax.map`'s own shortcut would not work on our wrapped function
             in_axes = tree.map(lambda batched: 0 if batched else None, in_batched)
             out = vmap(f, in_axes=in_axes)(*args)
             return out, tree.map(lambda _: True, out)
 
-        def where(args: tuple) -> PyTree:
+        def wrapped_in_place(args: tuple) -> PyTree:
+            # `tree_at` passes the arguments as one tuple, `in_place` takes
+            # them apart like `f`
             assert in_place is not None
             return in_place(*args)
 
         if in_place is not None:
             # the arrays read in place are not sliced
-            in_place_batched = where(in_batched)
-            unsliced = tree.map(lambda _: False, in_place_batched)
-            in_batched = tree_at(where, in_batched, unsliced)
+            in_place_batched = wrapped_in_place(in_batched)
+            in_batched = tree_at(
+                wrapped_in_place, in_batched, replace_fn=lambda _: False
+            )
 
-        leaves, treedef = tree.flatten(args)
-        flags = tree.leaves(in_batched)
-        mapped = [x for x, batched in zip(leaves, flags, strict=True) if batched]
+        # flatten everything and extract vmapped arguments
+        args_leaves, args_treedef = tree.flatten(args)
+        flat_in_batched = tree.leaves(in_batched)
+        flat_vmapped_args = [
+            x
+            for x, batched in zip(args_leaves, flat_in_batched, strict=True)
+            if batched
+        ]
 
-        def apply(index_and_mapped: tuple[Int32[Array, ''], list]) -> _R:
-            index, mapped = index_and_mapped
-            it = iter(mapped)
-            element = tree.unflatten(
-                treedef,
+        def apply(
+            index_and_vmapped_args: tuple[Int32[Array, ''], Sequence[Array]],
+        ) -> _R:
+            """Apply `InPlace` where needed, then call `f`."""
+            index, flat_vmapped_args_at = index_and_vmapped_args
+
+            # re-insert unvmapped arguments and unflatten
+            it = iter(flat_vmapped_args_at)
+            args_at = tree.unflatten(
+                args_treedef,
                 [
                     next(it) if batched else x
-                    for x, batched in zip(leaves, flags, strict=True)
+                    for x, batched in zip(args_leaves, flat_in_batched, strict=True)
                 ],
             )
+
+            # apply `InPlace` where `in_place` indicates to do so
             if in_place is not None:
                 views = tree.map(
                     lambda x, batched: InPlace(x, index) if batched else x,
-                    where(args),
+                    wrapped_in_place(args),
                     in_place_batched,
                 )
-                element = tree_at(where, element, views)
-            return f(*element)
+                args_at = tree_at(wrapped_in_place, args_at, views)
 
-        out = lax.map(apply, (jnp.arange(axis_size), mapped))
+            # call `f`
+            return f(*args_at)
+
+        out = lax.map(apply, (jnp.arange(axis_size), flat_vmapped_args))
         return out, tree.map(lambda _: True, out)
 
     return g
 
 
 def variable_length_scan(
-    f: Callable[[_C, _X, Bool[Array, ''] | None], tuple[_C, _Y]],
-    init: _C,
-    xs: _X,
-    length: Integer[Array, ''] | int | None = None,
+    f: Callable[[C, X, Bool[Array, ''] | None], tuple[C, Y]],
+    init: C,
+    xs: X,
+    length: Integer[Array, ''] | None = None,
     *,
     block_size: int = 1,
     unroll: int | bool = 1,
-) -> tuple[_C, _Y]:
+) -> tuple[C, Y]:
     """
     Like `jax.lax.scan`, but only over the first `length` elements of `xs`.
-
-    The loop visits the elements in blocks, and checks whether to stop only
-    between blocks, so it also visits the elements past `length` in the last
-    block. Under `jax.vmap`, it runs as long as for the largest `length`, such
-    that its condition is not batched.
 
     Parameters
     ----------
     f
-        Like the function scanned by `jax.lax.scan`, with a third argument
+        Like the function scanned by `jax.lax.scan`, but with a third argument
         that says whether the element is within the first `length`. If not,
-        `f` shall return the carry unchanged, and its other output is
-        discarded. The argument is `None` if `length` is.
+        `f` shall return the carry unchanged, and its other output is replaced
+        by zeros. `variable_length_scan` does not undo the carry update itself
+        with a select over the whole carry, because `f` may have a cheaper way,
+        like zeroing a delta before adding it. The argument is `None` if
+        `length` is.
     init
         The initial carry.
     xs
         The elements to scan over, along the leading axis.
     length
-        How many elements to scan over. If `None`, all of them, with a loop of
-        fixed length, and `block_size` is ignored.
+        How many elements to scan over (can be larger than the actual length of
+        `xs`, the excess will be skipped). If `None`, all of them, with a loop
+        of fixed length. Under `jax.vmap`, if `length` is batched, the loop
+        runs up to the maximum `length` in the batch, to keep the loop
+        condition unbatched.
     block_size
-        The number of elements in each block.
+        If `length` is set, the loop condition is evaluated every `block_size`
+        iterations instead of at every iteration. The purpose of this setting
+        is avoiding overhead on gpu due to the condition requiring a host trip.
+        If `block_size` is not a divisor of `length`, the remainder iterations
+        in the last block are run anyway, to avoid double compilation of the
+        loop body.
     unroll
-        How much to unroll the loop over the elements, see `jax.lax.scan`. If
-        `length` is not `None`, the unrolling is within each block.
+        How much to unroll the loop (within each block), passed to `jax.lax.scan`.
 
     Returns
     -------
-    carry : _C
+    carry : C
         The final carry.
-    ys : _Y
+    ys : Y
         The stacked outputs of `f`, zero past `length`.
     """
-    (num,) = {x.shape[0] for x in tree.leaves(xs)}
-    if length is None or num == 0:
+    # extract length of `xs`
+    (len_x,) = {x.shape[0] for x in tree.leaves(xs)}
+
+    # shortcut through `lax.scan`
+    if length is None or len_x == 0:
         return lax.scan(lambda carry, x: f(carry, x, None), init, xs, unroll=unroll)
 
-    length = jnp.minimum(length, num)
-    size = max(1, min(block_size, num))
-    num_blocks = -(-num // size)
+    # clamp the lengths to the number of elements
+    length = jnp.minimum(length, len_x)
+    block_size = max(1, min(block_size, len_x))
 
-    def scan_block(i: Integer[Array, ''] | int, carry: _C) -> tuple[_C, _Y]:
-        def step(carry: _C, j: Int32[Array, '']) -> tuple[_C, _Y]:
+    # compute number of blocks (in the output, not effectively looped over)
+    num_blocks_out = -(-len_x // block_size)
+
+    def scan_block(i: Integer[Array, ''] | int, carry: C) -> tuple[C, Y]:
+        """Do `block_size` iterations."""
+
+        def step(carry: C, j: Int32[Array, '']) -> tuple[C, Y]:
+            """Do a single iteration."""
             # the elements are indexed out of the closed-over `xs`, instead of
             # passing the block as scan xs, such that the block is not copied;
             # the index is clamped in the last block, past `length` anyway
-            position = i * size + j
+            position = i * block_size + j
             x = tree.map(
                 lambda x: lax.dynamic_index_in_dim(
                     x, position, keepdims=False, allow_negative_indices=False
@@ -617,38 +657,65 @@ def variable_length_scan(
             )
             valid = position < length
             carry, y = f(carry, x, valid)
+            # zero the outputs of the elements past `length`, like those of the
+            # blocks never visited, such that they do not depend on
+            # `block_size`, or on the other lengths in a vmap batch
             return carry, tree.map(lambda y: jnp.where(valid, y, jnp.zeros_like(y)), y)
 
-        return lax.scan(step, carry, jnp.arange(size), unroll=unroll)
+        return lax.scan(step, carry, jnp.arange(block_size), unroll=unroll)
 
-    # the outputs not computed are zero, and under `jax.shard_map` they vary
-    # over the same mesh axes as the ones computed, as the loop carry shall
-    # keep its type
-    _, y_block = eval_shape(scan_block, 0, init)
-    ys = tree.map(lambda y: zeros_varying_like(y, (num_blocks, *y.shape)), y_block)
+    # Allocate `ys`, the output is written in it block by block. Initialize to
+    # zero because we promise the unused part of the tail to be zero. Match the
+    # sharding of `y` to make the initial loop carry type match the running
+    # loop carry type.
+    _, dummy_y_block = eval_shape(scan_block, 0, init)
+    ys = tree.map(
+        lambda y: zeros_varying_like(y, (num_blocks_out, *y.shape)), dummy_y_block
+    )
 
-    State = tuple[Int32[Array, ''], _C, _Y]
+    # compute number of blocks to loop over
+    num_blocks_loop = (vmap_max(length) + block_size - 1) // block_size
 
-    def cond(state: State) -> Bool[Array, '']:
-        i, _, _ = state
-        return i < stop
+    def cond(state: BlocksLoopState) -> Bool[Array, '']:
+        """Return whether the loop over blocks shall continue."""
+        return state.i_block < num_blocks_loop
 
-    def body(state: State) -> State:
-        i, carry, ys = state
-        carry, y_block = scan_block(i, carry)
+    def body(state: BlocksLoopState) -> BlocksLoopState:
+        """Process one block."""
+        carry, y_block = scan_block(state.i_block, state.carry)
         ys = tree.map(
             lambda ys, y: lax.dynamic_update_index_in_dim(
-                ys, y, i, 0, allow_negative_indices=False
+                ys, y, state.i_block, 0, allow_negative_indices=False
             ),
-            ys,
+            state.ys,
             y_block,
         )
-        return i + 1, carry, ys
+        return BlocksLoopState(state.i_block + 1, carry, ys)
 
-    stop = (vmap_max(length) + size - 1) // size
-    _, carry, ys = lax.while_loop(cond, body, (jnp.int32(0), init, ys))
-    ys = tree.map(lambda y: y.reshape(num_blocks * size, *y.shape[2:])[:num, ...], ys)
-    return carry, ys
+    # loop over blocks, squash block axis from the output and return
+    state = lax.while_loop(cond, body, BlocksLoopState(jnp.int32(0), init, ys))
+    ys = tree.map(
+        lambda y: y.reshape(num_blocks_out * block_size, *y.shape[2:])[:len_x, ...],
+        state.ys,
+    )
+    return state.carry, ys
+
+
+# WORKAROUND(beartype<=0.23.1): beartype rejects generic NamedTuple hints
+# (beartype#748), so `carry` and `ys` are typed as any pytree. Once fixed, make
+# this `NamedTuple, Generic[C, Y]` and annotate `cond` and `body` in
+# `variable_length_scan` with `BlocksLoopState[C, Y]`.
+class BlocksLoopState(NamedTuple):
+    """The carry of the loop over blocks in `variable_length_scan`."""
+
+    i_block: Int32[Array, '']
+    """The index of the next block."""
+
+    carry: PyTree
+    """The carry of the scan."""
+
+    ys: PyTree
+    """The stacked outputs of the scan, with an axis over blocks."""
 
 
 def zeros_varying_like(

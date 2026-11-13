@@ -98,12 +98,9 @@ class ChainDataState(State):
 def sample_prior(key: Key[Array, ''], state: StateT) -> StateT:
     """Draw the parameters of the model from their prior.
 
-    The prior is the one defined by the hyperparameters in `state`. Replaces
-    the trees and the leaves, and, where they have a prior, the leaf and error
-    precisions and the variable selection parameters. The trees not in use
-    (see `bartz.mcmcstep.Forest.used_trees`) become lone roots with zero
-    leaves. The data is left unchanged, and the fields derived from the
-    parameters are updated to match.
+    Replace the same model parameters that `bartz.mcmcstep.step` would update,
+    with a sample from the prior. The data is left unchanged. Derived fields
+    are updated but for some secondary diagnostics.
 
     Parameters
     ----------
@@ -261,7 +258,7 @@ def sample_values(key: Key[Array, ''], state: StateT) -> StateT:
     # leaves
     leaves = sample_leaves(keys.pop(), forest.leaf_tree.shape, leaf_prec_chol)
 
-    # the trees not in use are lone roots with zero leaves
+    # set unused tree slots to roots with zeroed leaves
     used = used_trees_mask(forest)
     split_tree = forest.split_tree
     if used is not None:

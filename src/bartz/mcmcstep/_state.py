@@ -2200,14 +2200,14 @@ def vmap_chains(
     return wrapped
 
 
-def used_trees_mask(forest: Forest) -> Bool[Array, ' num_trees'] | None:
-    """Mark the trees in use in a forest without chains, `None` if all are."""
+def used_trees_mask(forest: Forest) -> Bool[Array, '*chains num_trees'] | None:
+    """Mark the trees in use, `None` if all are, assuming `CHAIN_AXIS` is 0."""
     if forest.used_trees is None:
         return None
     else:
-        num_trees, _ = forest.var_tree.shape
+        *_, num_trees, _ = forest.var_tree.shape
         trees = jnp.arange(num_trees, dtype=minimal_unsigned_dtype(num_trees - 1))
-        return trees < forest.used_trees
+        return trees < forest.used_trees[..., None]
 
 
 def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']:

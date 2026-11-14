@@ -38,6 +38,7 @@ from bartz._jaxext import Module, field, jit
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
+from bartz.mcmcstep._state import used_trees_mask
 from bartz.npz import serializable
 
 # `Trace.from_state` returns a cls-bound TypeVar instead of the equivalent
@@ -107,7 +108,7 @@ class BurninTrace(Trace):
     mean_tree_life: Float32[Array, '*chains_and_samples'] = field(
         chains=CHAIN_AXIS, samples=0
     )
-    """The average over trees of `bartz.mcmcstep.Forest.tree_life`."""
+    """The average over the trees in use of `bartz.mcmcstep.Forest.tree_life`."""
 
     error_cov_inv: (
         Float32[Array, '*chains_and_samples']
@@ -143,6 +144,10 @@ class BurninTrace(Trace):
     @classmethod
     def from_state(cls, state: State) -> 'BurninTrace':
         """Create a single-item burn-in trace from a MCMC state."""
+        forest = state.forest
+        mean_tree_life = jnp.mean(
+            forest.tree_life, axis=-1, where=used_trees_mask(forest)
+        )
         return cls(
             has_chains=state.has_chains,
             mesh=state.config.mesh,
@@ -153,7 +158,7 @@ class BurninTrace(Trace):
             grow_acc_count=state.forest.grow_acc_count,
             prune_prop_count=state.forest.prune_prop_count,
             prune_acc_count=state.forest.prune_acc_count,
-            mean_tree_life=state.forest.tree_life.mean(axis=-1),
+            mean_tree_life=mean_tree_life,
             log_likelihood=state.forest.log_likelihood,
             log_trans_prior=state.forest.log_trans_prior,
         )

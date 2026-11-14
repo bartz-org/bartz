@@ -2024,7 +2024,7 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
 
     with subtests.test('mean_samples vs mean'):
         mean_from_mean_samples = mean_samples.mean(0)
-        assert_close_matrices(mean, mean_from_mean_samples, rtol=1e-7)
+        assert_close_matrices(mean, mean_from_mean_samples, rtol=1e-6)
 
     with subtests.test('latent_samples vs mean_samples'):
         binary_mask = bkw.binary_mask

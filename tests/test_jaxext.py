@@ -1125,21 +1125,20 @@ class TestVmapMax:
         assert_array_equal(jit(f)(x), jnp.array([1, 3, 2, 0], jnp.int32))
 
 
-NUM_ROWS = 100
-NUM_COLS = 1000
-
-
 def sum_rows(
     scale: Float32[Array, ''], table: Float32[Array, 'rows cols'] | InPlace
 ) -> Float32[Array, ' cols']:
     """Sum the rows of `table` times `scale`, reading them one at a time in a loop."""
+    # an `InPlace` view has no `shape`, so take it from a column and a row
+    (num_rows,) = table[:, 0].shape
+    (num_cols,) = table[0, :].shape
 
     def body(
         i: Int32[Array, ''], acc: Float32[Array, ' cols']
     ) -> Float32[Array, ' cols']:
         return acc + scale * table[i, :]
 
-    return lax.fori_loop(0, NUM_ROWS, body, jnp.zeros(NUM_COLS))
+    return lax.fori_loop(0, num_rows, body, jnp.zeros(num_cols))
 
 
 class TestSequentialVmap:
@@ -1151,7 +1150,7 @@ class TestSequentialVmap:
     ) -> tuple[Float32[Array, ' 4'], Float32[Array, '4 rows cols']]:
         """Generate a batch of inputs to `sum_rows`."""
         scale = random.normal(keys.pop(), (4,))
-        table = random.normal(keys.pop(), (4, NUM_ROWS, NUM_COLS))
+        table = random.normal(keys.pop(), (4, 100, 1000))
         return scale, table
 
     def test_unbatched(self, args: tuple) -> None:
@@ -1191,7 +1190,8 @@ class TestSequentialVmap:
             assert analysis is not None
             return analysis.temp_size_in_bytes
 
-        element = NUM_ROWS * NUM_COLS * 4
+        _, table = args
+        element = table[0, :, :].nbytes
         assert temp(in_place=False) >= element
         assert temp(in_place=True) < element
 
@@ -1203,22 +1203,25 @@ class TestSequentialVmap:
         desired = vmap(sum_rows, in_axes=(0, None))(scale, table[0])
         assert_close_matrices(out, desired, rtol=1e-5)
 
-    def test_empty(self) -> None:
+    def test_empty(self, args: tuple) -> None:
         """Over an empty batch, the output is empty."""
+        scale, table = args
+        _, _, num_cols = table.shape
         g = sequential_vmap(sum_rows, in_place=lambda _scale, table: table)
-        out = vmap(g)(jnp.zeros(0), jnp.zeros((0, NUM_ROWS, NUM_COLS)))
-        assert out.shape == (0, NUM_COLS)
+        out = vmap(g)(scale[:0], table[:0, :, :])
+        assert out.shape == (0, num_cols)
 
 
-ToyXs = tuple[Float32[Array, ' n'], Int32[Array, 'n 2']]
-ToyYs = tuple[Float32[Array, ' n'], Int32[Array, 'n 2']]
+# a toy function to scan with `variable_length_scan`, with its inputs and outputs
+VlsToyX = tuple[Float32[Array, ''], Int32[Array, ' 2']]
+VlsToyY = tuple[Float32[Array, ''], Int32[Array, ' 2']]
+VlsToyXs = tuple[Float32[Array, ' n'], Int32[Array, 'n 2']]
+VlsToyYs = tuple[Float32[Array, ' n'], Int32[Array, 'n 2']]
 
 
-def toy_step(
-    carry: Float32[Array, ''],
-    x: tuple[Float32[Array, ''], Int32[Array, ' 2']],
-    valid: Bool[Array, ''] | None,
-) -> tuple[Float32[Array, ''], tuple[Float32[Array, ''], Int32[Array, ' 2']]]:
+def vls_toy_step(
+    carry: Float32[Array, ''], x: VlsToyX, valid: Bool[Array, ''] | None
+) -> tuple[Float32[Array, ''], VlsToyY]:
     """Accumulate `a` in the carry, leaving it unchanged if not `valid`."""
     a, b = x
     if valid is not None:
@@ -1227,18 +1230,20 @@ def toy_step(
     return carry, (2 * carry, b + 1)
 
 
-def toy_xs(keys: split, shape: tuple[int, ...] = ()) -> ToyXs:
-    """Generate the inputs of `toy_step` for 7 iterations."""
-    a = random.normal(keys.pop(), (*shape, 7))
-    b = random.randint(keys.pop(), (*shape, 7, 2), 0, 10)
+def vls_toy_xs(
+    keys: split, batch_shape: tuple[int, ...] = ()
+) -> tuple[Float32[Array, '*batch n'], Int32[Array, '*batch n 2']]:
+    """Generate the inputs of `vls_toy_step` for 7 iterations."""
+    a = random.normal(keys.pop(), (*batch_shape, 7))
+    b = random.randint(keys.pop(), (*batch_shape, 7, 2), 0, 10)
     return a, b
 
 
-def toy_reference(xs: ToyXs, length: int) -> tuple[Float32[Array, ''], ToyYs]:
-    """Scan `toy_step` over the first `length` inputs, with zero outputs after."""
+def vls_toy_reference(xs: VlsToyXs, length: int) -> tuple[Float32[Array, ''], VlsToyYs]:
+    """Scan `vls_toy_step` over the first `length` inputs, with zero outputs after."""
     a, b = xs
     carry, (y, z) = lax.scan(
-        lambda carry, x: toy_step(carry, x, None),
+        lambda carry, x: vls_toy_step(carry, x, None),
         jnp.zeros(()),
         (a[:length], b[:length]),
     )
@@ -1253,46 +1258,54 @@ class TestVariableLengthScan:
 
     def test_fixed_length(self, keys: split) -> None:
         """Without `length`, it is `lax.scan`."""
-        xs = toy_xs(keys)
+        xs = vls_toy_xs(keys)
         init = jnp.zeros(())
-        out = variable_length_scan(toy_step, init, xs, unroll=2)
-        desired = lax.scan(lambda carry, x: toy_step(carry, x, None), init, xs)
+        out = variable_length_scan(vls_toy_step, init, xs, unroll=2)
+        desired = lax.scan(lambda carry, x: vls_toy_step(carry, x, None), init, xs)
         tree.map(partial(assert_close_matrices, rtol=1e-6), out, desired)
 
     @pytest.mark.parametrize(
         ('length', 'block_size', 'unroll'),
         [
+            # nothing to scan
             (0, 3, 1),
+            # one element per block
             (4, 1, 1),
-            (4, 2, 2),
+            # the last block visited goes past `length`, the last block is not
+            # visited
             (5, 3, 1),
-            (7, 3, 2),
-            (7, 7, True),
-            (6, 10, 1),
-            (9, 3, 1),
+            # `length` past the end of `xs`, the last block goes past it, the
+            # unrolling does not divide the block
+            (9, 3, 2),
+            # a single block, smaller than `block_size`, fully unrolled
+            (6, 10, True),
         ],
     )
     def test_matches_scan(
         self, keys: split, length: int, block_size: int, unroll: int | bool
     ) -> None:
         """It scans over the first `length` elements, with zero outputs after."""
-        xs = toy_xs(keys)
+        xs = vls_toy_xs(keys)
         out = jit(
             partial(variable_length_scan, block_size=block_size, unroll=unroll),
             static_argnums=(0,),
-        )(toy_step, jnp.zeros(()), xs, jnp.int32(length))
+        )(vls_toy_step, jnp.zeros(()), xs, jnp.int32(length))
         tree.map(
-            partial(assert_close_matrices, rtol=1e-6), out, toy_reference(xs, length)
+            partial(assert_close_matrices, rtol=1e-6),
+            out,
+            vls_toy_reference(xs, length),
         )
 
     def test_vmap(self, keys: split) -> None:
         """Under vmap, each element stops at its length, with an unbatched condition."""
-        xs = toy_xs(keys, (4,))
+        xs = vls_toy_xs(keys, (4,))
         lengths = jnp.array([0, 3, 7, 5], jnp.int32)
-        f = vmap(partial(variable_length_scan, toy_step, jnp.zeros(()), block_size=2))
+        f = vmap(
+            partial(variable_length_scan, vls_toy_step, jnp.zeros(()), block_size=2)
+        )
         out = jit(f)(xs, lengths)
         for i, length in enumerate(lengths.tolist()):
-            desired = toy_reference(tree.map(lambda x, i=i: x[i, ...], xs), length)
+            desired = vls_toy_reference(tree.map(lambda x, i=i: x[i, ...], xs), length)
             actual = tree.map(lambda x, i=i: x[i, ...], out)
             tree.map(partial(assert_close_matrices, rtol=1e-6), actual, desired)
         (eqn,) = [
@@ -1312,15 +1325,15 @@ class TestVariableLengthScan:
             (2,), ('a',), axis_types=(AxisType.Auto,), devices=get_default_devices()[:2]
         )
         sharding = NamedSharding(mesh, PartitionSpec('a'))
-        xs = device_put(toy_xs(keys, (4,)), sharding)
+        xs = device_put(vls_toy_xs(keys, (4,)), sharding)
         lengths = device_put(jnp.array([0, 3, 7, 5], jnp.int32), sharding)
 
-        def scan(xs: ToyXs, length: Int32[Array, '']) -> tuple:
+        def scan(xs: VlsToyXs, length: Int32[Array, '']) -> tuple:
             # like with `lax.scan`, the carry shall vary over the mesh axes as
             # it will within the loop
             a, _ = xs
             init = jnp.zeros_like(a[0])
-            return variable_length_scan(toy_step, init, xs, length, block_size=3)
+            return variable_length_scan(vls_toy_step, init, xs, length, block_size=3)
 
         f = shard_map(
             vmap(scan),

@@ -155,11 +155,12 @@ clean:
 # the catch-all: besides its variant, it runs every file other than
 # test_interface.py not in GROUPED_FILES, so a new test file is run there rather
 # than never. Balance on the sum of the `--durations` of each group rather than
-# on single wall times: the speed of CI runners varies up to 2x between jobs.
-# Rough cost per group (CI wall seconds with 2 xdist workers,
+# on single wall times: the speed of CI runners varies up to 2x between jobs,
+# mostly with the CPU model, which the job log prints. Rough cost per group (CI
+# wall seconds with 2 xdist workers at average runner speed,
 # tests/tests-single-cpu/tests-old; re-measure after big changes):
-#   iface-v15 520/440/820  iface-v2 590/560/830  iface-v3 490/420/810
-#   iface-v4  570/480/820  iface-v6 560/550/820  iface-v7 550/520/820
+#   iface-v15 550/460/860  iface-v2 610/580/880  iface-v3 510/420/760
+#   iface-v4  590/480/860  iface-v6 590/550/810  iface-v7 560/510/820
 GROUPED_FILES := tests/test_mcmcstep.py tests/test_jaxext.py tests/test_bcf.py tests/test_stochtree.py tests/test_debug.py tests/test_dgp.py
 GROUP_iface-v15 := tests/test_interface.py tests/test_debug.py -k "v1 or v5 or not test_interface.py"
 GROUP_iface-v2  := tests $(addprefix --ignore=,$(GROUPED_FILES)) -k "not test_interface.py or not (v1 or v3 or v4 or v5 or v6 or v7)"

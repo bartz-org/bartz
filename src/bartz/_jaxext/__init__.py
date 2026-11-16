@@ -43,7 +43,6 @@ from bartz._jaxext._jaxext import (
     split,
     truncated_normal_onesided,
     unique,
-    vmap_nodoc,
 )
 from bartz._jaxext._jit import jit
 from bartz._jaxext._linalg import cholesky, solve_triangular

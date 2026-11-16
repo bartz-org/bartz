@@ -35,14 +35,7 @@ from jax import vmap
 from jaxtyping import Array, Bool, Float, Float32, Int32, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
 
-from bartz._jaxext import (
-    Module,
-    autobatch,
-    field,
-    jit,
-    minimal_unsigned_dtype,
-    vmap_nodoc,
-)
+from bartz._jaxext import Module, autobatch, field, jit, minimal_unsigned_dtype
 
 
 @runtime_checkable
@@ -236,7 +229,7 @@ def traverse_forest(
 
 
 @partial(jnp.vectorize, excluded=(0,), signature='(hts),(hts)->(n)')
-@partial(vmap_nodoc, in_axes=(1, None, None))
+@partial(vmap, in_axes=(1, None, None))
 def _traverse_forest(
     X: UInt[Array, ' p'],
     var_trees: UInt[Array, ' half_tree_size'],

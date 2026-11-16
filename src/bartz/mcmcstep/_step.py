@@ -58,7 +58,6 @@ from bartz._jaxext import (
     solve_triangular,
     split,
     truncated_normal_onesided,
-    vmap_nodoc,
 )
 from bartz._jaxext.random import categorical, loggamma, poisson
 from bartz.grove import is_actual_leaf, var_histogram
@@ -493,7 +492,7 @@ def apply_grow_to_indices(
     return _apply_grow_to_indices(moves, leaf_indices, X)
 
 
-@partial(vmap_nodoc, in_axes=(0, 0, None))
+@partial(vmap, in_axes=(0, 0, None))
 def _apply_grow_to_indices(
     moves: Moves, leaf_indices: UInt[Array, ' n'], X: UInt[Array, 'p n']
 ) -> UInt[Array, ' n']:
@@ -795,7 +794,7 @@ def compute_prec_trees(
     return trees
 
 
-@partial(vmap_nodoc, in_axes=(0, None))
+@partial(vmap, in_axes=(0, None))
 def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) -> Moves:
     """
     Complete non-likelihood MH ratio calculation.
@@ -880,7 +879,7 @@ def adapt_leaf_trees_to_grow_indices(
     return _adapt_leaf_trees_to_grow_indices(leaf_trees, moves)
 
 
-@vmap_nodoc
+@vmap
 def _adapt_leaf_trees_to_grow_indices(
     leaf_trees: Float[Array, ' tree_size'] | Float[Array, ' k tree_size'], moves: Moves
 ) -> Float[Array, ' tree_size'] | Float[Array, ' k tree_size']:
@@ -906,7 +905,7 @@ def compute_B(
 
 
 # keep the leaf axis trailing, faster for the unrolled matvec
-@partial(vmap_nodoc, in_axes=-1, out_axes=-1)
+@partial(vmap, in_axes=-1, out_axes=-1)
 def solve_leaf(
     L: Float32[Array, 'k k'], b: Float32[Array, ' k']
 ) -> Float32[Array, ' k']:
@@ -1055,7 +1054,7 @@ def precompute_leaf_terms(
         )
 
 
-@vmap_nodoc
+@vmap
 def _gather_lrt(
     leaf_values: Float32[Array, '*k_k tree_size'], lrt_nodes: Int32[Array, ' 3']
 ) -> Float32[Array, ' 3 *k_k']:
@@ -1652,7 +1651,7 @@ def apply_moves_to_leaf_indices(
     return _apply_moves_to_leaf_indices(leaf_indices, to_prune, move_node)
 
 
-@vmap_nodoc
+@vmap
 def _apply_moves_to_leaf_indices(
     leaf_indices: UInt[Array, ' n'],
     to_prune: Bool[Array, ''],
@@ -1688,7 +1687,7 @@ def apply_moves_to_split_trees(
     return _apply_moves_to_split_trees(split_tree, moves)
 
 
-@vmap_nodoc
+@vmap
 def _apply_moves_to_split_trees(
     split_tree: UInt[Array, ' half_tree_size'], moves: Moves
 ) -> UInt[Array, ' half_tree_size']:
@@ -1727,7 +1726,7 @@ def apply_moves_to_affluence_trees(
     return _apply_moves_to_affluence_trees(affluence_tree, moves)
 
 
-@vmap_nodoc
+@vmap
 def _apply_moves_to_affluence_trees(
     affluence_tree: Bool[Array, ' half_tree_size'], moves: Moves
 ) -> Bool[Array, ' half_tree_size']:

@@ -92,19 +92,6 @@ def float32_matmuls(fun: Callable[_P, _R]) -> Callable[_P, _R]:
     return wrapper
 
 
-def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:
-    """
-    Acts like `jax.vmap` but preserves the docstring of the function unchanged.
-
-    This is useful if the docstring already takes into account that the
-    arguments have additional axes due to vmap.
-    """
-    doc = fun.__doc__
-    fun = vmap(fun, *args, **kw)
-    fun.__doc__ = doc
-    return fun
-
-
 def sliced_map(
     f: Callable[[PyTree[Array, ' I']], PyTree[Array, ' O']],
     xs: PyTree[Array, ' I'],

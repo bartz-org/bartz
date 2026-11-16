@@ -76,10 +76,11 @@ def autosummary_entries(text: str) -> list[str]:
 
 def public_names(module: ModuleType) -> set[str]:
     """Return the non-module public names in a module's namespace."""
+    # `getattr` resolves lazy imports, while `vars` would yield the proxies
     return {
         name
-        for name, obj in vars(module).items()
-        if not name.startswith('_') and not ismodule(obj)
+        for name in dir(module)
+        if not name.startswith('_') and not ismodule(getattr(module, name))
     }
 
 

@@ -131,11 +131,12 @@ This one is not specific to blocks: it applies to any elementwise kernel over an
 
 ### What happens
 
-To run a kernel on `P` threads, XLA (`ShapePartitionAssigner`) splits the leading dimensions of its output into partitions. For a large array `P` is the number of threads, which is the number of CPUs the process is allowed to run on.
+To run a kernel as `P` tasks, XLA (`ShapePartitionAssigner`) splits the leading dimensions of its output into partitions. `P` grows with the size of the array, about one task per 4000 elements for the prune kernel, up to the number of threads, which is the number of CPUs the process is allowed to run on.
 
-- If `T >= P`, it splits the trees into `P` groups. Each task loops over whole trees, with an inner loop over the datapoints that the compiler vectorizes. This is always fast.
+- If `T >= P`, it splits the trees into `P` groups. Each task loops over whole trees, with an inner loop over the datapoints that the compiler vectorizes. This is always fast. It is the case of any forest with fewer than about 4000 datapoints, because then the tasks are fewer than the trees.
 - If `T < P`, it also splits the datapoints, into `a` by `b` partitions with `a * b <= P`. The compiled kernel then goes through a flat range of elements cut into `a * b` equal chunks, and finds the tree of each element by dividing its flat index by `n`. With the prune kernel the result is a scalar loop with a division per element (seen in the disassembly).
-- The exception is when every chunk is an equal part of one tree, that is `a * b` is a multiple of `T` and `n` is a multiple of `a * b / T`. Then the compiler takes the division out of the loop and vectorizes it. A single tree is always fine.
+- One exception is when every chunk is an equal part of one tree, that is `a * b` is a multiple of `T` and `n` is a multiple of `a * b / T`. Then the compiler takes the division out of the loop and vectorizes it. A single tree is always fine.
+- The other exception is when the trees are at least as many as the chunks, which happens if `a * b < P`. For example 32 threads make 6 by 5 chunks, and 30 or 31 trees are fast. We observed this without looking into the compiled code.
 
 The partition counts are, with `t = floor(sqrt(P))`:
 
@@ -149,11 +150,16 @@ if a * b < P:
 
 For example, 8 threads give 4 by 2 partitions for 4 to 7 trees. With 4 trees a chunk is half a tree, which is fast if `n` is even. With 5 trees a chunk is 5/8 of a tree, which is slow.
 
-In practice `n` is arbitrary, so the rule is: **a call over more than one and fewer trees than threads is slow.** With multiple chains the trees count once per chain, because the chains are another leading dimension (2 chains of 4 trees are fine on 8 threads, 2 chains of 3 are not).
+In practice `n` is arbitrary, so the rule is: **a call over more than one and fewer trees than threads is slow, if there are more than a few thousand datapoints.** (Precisely, fewer trees than chunks, which are as many as the threads or slightly fewer.) With multiple chains the trees count once per chain, because the chains are another leading dimension (2 chains of 4 trees are fine on 8 threads, 2 chains of 3 are not).
 
 ### Verification
 
-On a Ryzen 7 3800X (16 threads), pinning the process to 4, 6, 8, 12 or 16 CPUs, we timed the prune and grow kernels on 1 to 32 trees at once and compared with the rule above. The partitions XLA picked matched in all 170 cases, and so did which cases were slow. A first version of the rule, written down before the measurement, ignored the divisibility of `n` and got 3 of the first 100 cases wrong; the sweep with the second `n` was predicted with the final rule.
+On a Ryzen 7 3800X (16 threads), pinning the process to 4, 6, 8, 12 or 16 CPUs, and on a Ryzen 9 7945HX (32 threads), pinning it to 20, 24 or 32, we timed the prune and grow kernels on 1 to 48 trees at once and compared with the rule above. The partitions XLA picked matched the formula in all 267 cases. Which cases were slow took two corrections to predict, each found by a prediction that failed:
+
+- The first version of the rule ignored the divisibility of `n`, and got 3 of the first 100 cases wrong (n = 2 000 000 on the first machine).
+- The second version ignored that trees at least as many as the chunks are fast, and got 31 trees on 32 threads wrong, for both `n`. It was right in the other 165 cases it was applied to, including 30 trees on 32 threads.
+
+The numbers of trees tried were not all of them on the larger thread counts: 1 to 6, 8, 10, 12, 15, 16, 20, 23, 24, 25, 30 to 33, 40 and 48, or a subset.
 
 | Threads | Slow numbers of trees, n = 2 000 000 | Slow numbers of trees, n = 2 000 003 |
 |---|---|---|
@@ -162,15 +168,28 @@ On a Ryzen 7 3800X (16 threads), pinning the process to 4, 6, 8, 12 or 16 CPUs, 
 | 8 | 5, 6, 7 | 2 to 7 |
 | 12 | 2, 4, 5, 7 to 11 | 2 to 11 |
 | 16 | 5, 6, 7, 9 to 15 | 2 to 15 |
+| 20 | | all tried from 2 to 16 |
+| 24 | 2, 4, 8, 10, 15, 16, 20 | all tried from 2 to 23 |
+| 32 | 5, 8, 10, 12, 16, 20, 24 | all tried from 2 to 25 |
 
-Time per tree over the two sweeps, in microseconds:
+Time per tree, in microseconds:
 
-| Kernel | Fast cases | Slow cases |
-|---|---|---|
-| Prune | 1 to 70 (median 14 to 24) | 118 to 840 (median 150 to 540) |
-| Grow | median 175 | median 750 to 950 |
+| Machine | Kernel | Fast cases | Slow cases |
+|---|---|---|---|
+| Ryzen 7 3800X | Prune | 1 to 70 (median 14 to 24) | 118 to 840 (median 150 to 540) |
+| | Grow | median 175 | median 750 to 950 |
+| Ryzen 9 7945HX | Prune | 0.4 to 16 (median 3) | 110 to 195 (median 130 to 150) |
+| | Grow | median 55 to 60 | median 230 to 270 |
 
-The second sweep tried 1 to 9, 12, 15, 16, 17 and 24 trees. "Slow" is defined by the prune kernel; XLA partitions the grow kernels differently in a few cases with 2 trees, where they are not slow.
+"Slow" is defined by the prune kernel; XLA partitions the grow kernels differently in a few cases with 2 trees, where they are not slow.
+
+The number of tasks against the size, for the prune kernel on 24 trees with 32 threads:
+
+| n | 503 | 1009 | 1361 | 2003 | 3001 | 5003 and above |
+|---|---|---|---|---|---|---|
+| Partitions | 3 | 6 | 8 | 12 | 18 | 6 by 5 |
+
+Up to n = 3001 the trees are split in whole groups and the kernel takes about as long per tree as with 32 trees; from n = 5003 it takes 2.5 to 7 times as long.
 
 The reductions that compute the counts are not affected. Neither was a toy elementwise kernel we tried first, so how hard a kernel is hit depends on what the compiler makes of it. An M1 Pro (8 threads) agrees with the table. On an RTX 5060 Ti the step time is linear in the number of trees from 1 to 24, with no slow sizes.
 
@@ -203,7 +222,22 @@ Padding the forest with trees not in use fixes it, provided the kernels then cov
 
 So 12 trees take as long as 16, and padding 5 trees to 8, still fewer than the threads, makes things worse.
 
-`init` warns when the trees times the chains are more than one and fewer than the threads, and the arrays are large enough to matter (`num_trees * num_chains * n >= 2**15`).
+The same on the Ryzen 9 7945HX (32 threads):
+
+| Forest | n = 1 361 | n = 3 001 | n = 10 007 | n = 100 003 | n = 1 000 003 |
+|---|---|---|---|---|---|
+| 24 trees | 0.22 | 0.39 | 0.68 | 3.73 | 30.2 |
+| 32 trees, 24 in use | 0.22 | 0.30 | 0.56 | 2.78 | 20.1 |
+| 32 trees | 0.24 | 0.34 | 0.64 | 2.86 | 26.1 |
+| 8 trees | | | | | 11.0 |
+| 32 trees, 8 in use | | | | | 8.7 |
+| 2 chains of 8 trees | | | | | 24.7 |
+| 2 chains of 16 trees, 8 in use | | | | | 15.7 |
+| 2 chains of 16 trees | | | | | 26.9 |
+
+The slowdown of the whole step starts between 1361 and 3001 datapoints, earlier than for the prune kernel alone.
+
+`init` warns when the trees times the chains are more than one and fewer than the threads, and there are at least 2¹¹ datapoints. It compares with the threads rather than with the chunks, so it also warns in the few cases between the two.
 
 ### Effect on blocks
 

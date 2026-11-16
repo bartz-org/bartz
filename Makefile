@@ -140,34 +140,35 @@ clean:
 
 # Test groups: each is a chunk of pytest args (paths/nodeids + -k expression)
 # that selects a balanced slice of the suite. CI runs one group per matrix cell,
-# so total wall time is the slowest cell: the groups are balanced to land each
-# cell around ~21 min on the slowest target, measured without xdist. To run a
-# single group locally (composes with any tests target):
+# so total wall time is the slowest cell. To run a single group locally
+# (composes with any tests target):
 #   make tests             GROUP=iface-v4
-#   make tests-single-cpu  GROUP=iface-v7
-#   make tests-old         GROUP=iface-v23
+#   make tests-single-cpu  GROUP=iface-v67
+#   make tests-old         GROUP=iface-v2
 # Leaving GROUP unset runs the whole suite. The matrix in
 # `.github/workflows/tests.yml` lists these same names; keep them in sync.
 #
-# Cost is dominated by test_interface.py (~4500s on tests-old): each bkw variant
-# re-fits a class-scoped CachedBart fixture and recompiles the same functions, so
-# each variant stays within one group, and the other suites fill the leftover
-# budget as whole files or fixture-free slices (mcmcstep's Geweke test and
-# TestMultichain). iface-v1 is the catch-all: besides its variant, it runs every
-# file other than test_interface.py not in GROUPED_FILES, so a new test file is
-# run there rather than never. Rough cost per group (CI wall seconds without
-# xdist, tests/tests-single-cpu/tests-old; re-measure after big changes):
-#   iface-v1 950/750/1250    iface-v23 1000/650/1250  iface-v4 1050/700/1200
-#   iface-v5 1050/700/1250   iface-v6  1000/1100/1200 iface-v7 1050/1150/1250
-GROUPED_FILES := tests/test_mcmcstep.py tests/test_jaxext.py tests/test_bcf.py tests/test_stochtree.py tests/test_debug.py tests/test_dgp.py
-GROUP_iface-v1  := tests $(addprefix --ignore=,$(GROUPED_FILES)) -k "v1 or not test_interface.py"
-GROUP_iface-v23 := tests/test_interface.py tests/test_jaxext.py 'tests/test_mcmcstep.py::TestMultichain' -k "v2 or v3 or not test_interface.py"
-GROUP_iface-v4  := tests/test_interface.py -k v4
-GROUP_iface-v5  := tests/test_interface.py tests/test_bcf.py tests/test_stochtree.py -k "v5 or not test_interface.py"
-GROUP_iface-v6  := tests/test_interface.py tests/test_mcmcstep.py tests/test_debug.py tests/test_dgp.py -k "v6 or not (test_interface.py or test_joint_distribution or TestMultichain)"
-GROUP_iface-v7  := tests/test_interface.py 'tests/test_mcmcstep.py::test_joint_distribution' -k "v7 or not test_interface.py or not (v1 or v2 or v3 or v4 or v5 or v6)"
+# Cost is dominated by test_interface.py: each bkw variant re-fits a
+# class-scoped CachedBart fixture and recompiles the same functions, so each
+# variant stays within one group, and the other suites fill the leftover budget
+# as whole files or fixture-free slices (mcmcstep's TestMultichain). iface-v67 is
+# the catch-all: besides its variants, it runs every file other than
+# test_interface.py not in GROUPED_FILES, so a new test file is run there rather
+# than never. Balance on the sum of the `--durations` of each group rather than
+# on single wall times: the speed of CI runners varies up to 2x between jobs.
+# Rough cost per group (CI wall seconds with 2 xdist workers,
+# tests/tests-single-cpu/tests-old; re-measure after big changes):
+#   iface-v1 500/480/800  iface-v2 530/530/780  iface-v3  550/400/790
+#   iface-v4 590/520/790  iface-v5 610/510/790  iface-v67 600/550/790
+GROUPED_FILES := tests/test_mcmcloop.py tests/test_mcmcstep.py tests/test_bcf.py tests/test_jaxext.py tests/test_debug.py tests/test_dgp.py
+GROUP_iface-v1  := tests/test_interface.py tests/test_mcmcloop.py -k "v1 or not test_interface.py"
+GROUP_iface-v2  := tests/test_interface.py tests/test_mcmcstep.py -k "v2 or not (test_interface.py or TestMultichain)"
+GROUP_iface-v3  := tests/test_interface.py tests/test_bcf.py tests/test_jaxext.py -k "v3 or not test_interface.py"
+GROUP_iface-v4  := tests/test_interface.py -k "not (v1 or v2 or v3 or v5 or v6 or v7)"
+GROUP_iface-v5  := tests/test_interface.py 'tests/test_mcmcstep.py::TestMultichain' tests/test_debug.py tests/test_dgp.py -k "v5 or not test_interface.py"
+GROUP_iface-v67 := tests $(addprefix --ignore=,$(GROUPED_FILES)) -k "v6 or v7 or not test_interface.py"
 
-GROUPS := iface-v1 iface-v23 iface-v4 iface-v5 iface-v6 iface-v7
+GROUPS := iface-v1 iface-v2 iface-v3 iface-v4 iface-v5 iface-v67
 
 SELECT = $(if $(GROUP),$(GROUP_$(GROUP)))
 

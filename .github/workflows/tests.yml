@@ -87,7 +87,7 @@ jobs:
       matrix:
         # The list of groups lives in `Makefile` as `GROUPS`; keep this in sync.
         target: [tests, tests-single-cpu, tests-old]
-        group: [iface-v1, iface-v23, iface-v4, iface-v5, iface-v6, iface-v7]
+        group: [iface-v1, iface-v2, iface-v3, iface-v4, iface-v5, iface-v67]
 
     steps:
       - name: Checkout repository
@@ -100,6 +100,12 @@ jobs:
         uses: ./.github/actions/setup-uv
         with:
           cache-suffix: -${{ matrix.target }}-${{ matrix.group }}
+
+      - name: Show runner hardware
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo
+          free -h
 
       - name: Run unit tests
         timeout-minutes: 60

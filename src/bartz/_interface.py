@@ -937,7 +937,7 @@ class Bart(Module):
         allow checking convergence. The iterations thinned away by `n_skip` are
         not recorded.
         """
-        return get_accept(self._burnin_trace, self._main_trace, self.num_trees)
+        return get_accept(self._burnin_trace, self._main_trace)
 
     @cached_property
     def varcount(self) -> Int32[Array, 'ndpost p']:
@@ -1790,9 +1790,9 @@ def get_latent_prec(
     return prec
 
 
-@jit(static_argnames='num_trees')
+@jit
 def get_accept(
-    burnin_trace: BurninTrace, main_trace: MainTrace, num_trees: int
+    burnin_trace: BurninTrace, main_trace: MainTrace
 ) -> (
     Float32[Array, ' n_burn_plus_n_save']
     | Float32[Array, 'num_chains n_burn_plus_n_save']
@@ -1807,6 +1807,7 @@ def get_accept(
         axis=sample_axis,
     )
     acc = chain_to_axis(acc, chain_vmap_axes(main_trace).grow_acc_count)
+    *_, num_trees, _ = main_trace.split_tree.shape
     return acc / num_trees
 
 

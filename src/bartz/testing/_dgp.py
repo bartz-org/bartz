@@ -911,7 +911,7 @@ def gen_params(
         correlation relative to the copula one. See `Params`.
     s_distr
         Scale family of the per-predictor importance scales ``s`` (e.g.
-        `Gamma` or `SpikeSlab`); more dispersed scales make the dependence on
+        `Gamma` or `ScaledBernoulli`); more dispersed scales make the dependence on
         the predictors sparser. `Constant` (default) gives uniform importance.
         Use `ScaleDistr.from_peff` to set the dispersion via an effective
         number of active predictors instead of the raw family parameter.

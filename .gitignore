@@ -25,4 +25,4 @@ benchmarks/latest_bartz/
 .zed/
 
 # Claude
-.claude/worktrees/
+.claude/

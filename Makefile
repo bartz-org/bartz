@@ -139,9 +139,9 @@ clean:
 ################# TESTS #################
 
 # Test groups: each is a chunk of pytest args (paths/nodeids + -k expression)
-# that selects a balanced slice of the suite. CI runs one group per matrix cell
-# (NPROC=0, no xdist), so total wall time is the slowest cell: the groups are
-# balanced to land each cell around ~21 min on the slowest target. To run a
+# that selects a balanced slice of the suite. CI runs one group per matrix cell,
+# so total wall time is the slowest cell: the groups are balanced to land each
+# cell around ~21 min on the slowest target, measured without xdist. To run a
 # single group locally (composes with any tests target):
 #   make tests             GROUP=iface-v4
 #   make tests-single-cpu  GROUP=iface-v7
@@ -155,8 +155,8 @@ clean:
 # budget as whole files or fixture-free slices (mcmcstep's Geweke test and
 # TestMultichain). iface-v1 is the catch-all: besides its variant, it runs every
 # file other than test_interface.py not in GROUPED_FILES, so a new test file is
-# run there rather than never. Rough cost per group (CI wall seconds,
-# tests/tests-single-cpu/tests-old; re-measure after big changes):
+# run there rather than never. Rough cost per group (CI wall seconds without
+# xdist, tests/tests-single-cpu/tests-old; re-measure after big changes):
 #   iface-v1 950/750/1250    iface-v23 1000/650/1250  iface-v4 1050/700/1200
 #   iface-v5 1050/700/1250   iface-v6  1000/1100/1200 iface-v7 1050/1150/1250
 GROUPED_FILES := tests/test_mcmcstep.py tests/test_jaxext.py tests/test_bcf.py tests/test_stochtree.py tests/test_debug.py tests/test_dgp.py
@@ -171,8 +171,7 @@ GROUPS := iface-v1 iface-v23 iface-v4 iface-v5 iface-v6 iface-v7
 
 SELECT = $(if $(GROUP),$(GROUP_$(GROUP)))
 
-# Number of xdist workers. Default to 2 for local speed; CI overrides to 0
-# (xdist off) because the small runners OOM under parallel test execution.
+# Number of xdist workers, 0 to turn off xdist.
 NPROC ?= 2
 
 # On GPU, parallel workers overlap compilation (which dominates the run time),

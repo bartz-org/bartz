@@ -103,9 +103,7 @@ jobs:
 
       - name: Run unit tests
         timeout-minutes: 60
-        # NPROC=0 disables pytest-xdist: the small CI runners OOM under
-        # parallel test execution. Each matrix cell runs one group serially.
-        run: make ${{ matrix.target }} GROUP=${{ matrix.group }} NPROC=0
+        run: make ${{ matrix.target }} GROUP=${{ matrix.group }}
 
       - name: Save coverage information
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

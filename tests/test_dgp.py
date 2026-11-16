@@ -64,7 +64,13 @@ from bartz.testing._dgp import (
     interaction_pattern,
     partitioned_interaction_pattern,
 )
-from tests.util import assert_allclose, assert_array_equal, assert_close_matrices, nnone
+from tests.util import (
+    assert_allclose,
+    assert_array_equal,
+    assert_close_matrices,
+    condp,
+    nnone,
+)
 
 # Test parameters
 ALPHA = 5e-7  # probability of false positive (aaaaapprox)
@@ -944,7 +950,7 @@ class TestErrorCorrelation:
         )
         # on gpu the identity-correlation path goes through a matmul that the
         # independent path skips, so the two diverge by float noise
-        rtol = 1e-4 if ident.z.platform() != 'cpu' else 1e-6
+        rtol = condp(ident.z, 1e-6, 1e-4)
         assert_close_matrices(ident.z, indep.z, rtol=rtol)
         assert_close_matrices(ident.y, indep.y, rtol=rtol)
 

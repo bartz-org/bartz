@@ -177,6 +177,7 @@ from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
     condf,
+    condp,
     manual_tree,
     nnone,
     skip_empty_shard_map_bug,
@@ -877,7 +878,7 @@ class TestReduction:
         # comparison function for float calculations; on gpu the matmul method
         # contracts via tf32 (~1e-3 relative error); cpu keeps the tight
         # tolerance, so accuracy is still fully checked there
-        rtol = 1e-3 if indices.platform() != 'cpu' else 1e-5
+        rtol = condp(indices, 1e-5, 1e-3)
         close = partial(assert_close_matrices, rtol=rtol, atol=1e-6, reduce_rank=True)
 
         # each case invokes a reduce function `f` (a config's `_reduce` or the

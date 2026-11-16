@@ -123,17 +123,30 @@ def manual_tree(
     return tree
 
 
-def condf(array: Float[ArrayLike, '...'], on_32: _T, on_16: _T) -> _T:
-    """Select a value by leaf-storage precision: `on_16` for float16, else `on_32`.
+def condf(array: Shaped[ArrayLike, '...'], on_f32_or_int: _T, on_f16: _T) -> _T:
+    """Select `on_f16` if `array` is float16, else `on_f32_or_int`.
 
     Pass the array whose precision governs the comparison: usually a leaf tree,
     or---for a float32 quantity that carries reduced precision because it derives
     from the leaves (e.g. a prediction)---the leaf tree itself rather than the
     derived array. This avoids baking float16-specific tolerances into the
-    tests: when the leaf storage dtype reverts to float32, `on_32` is selected.
+    tests: when the leaf storage dtype reverts to float32, `on_f32_or_int` is
+    selected. Bool counts as integer; other dtypes are rejected.
     """
-    reduced = jnp.finfo(jnp.asarray(array).dtype).bits < 32
-    return on_16 if reduced else on_32
+    dtype = jnp.asarray(array).dtype
+    assert dtype in (jnp.float16, jnp.float32, jnp.bool_) or jnp.issubdtype(
+        dtype, jnp.integer
+    ), dtype
+    return on_f16 if dtype == jnp.float16 else on_f32_or_int
+
+
+def condp(array: Shaped[Array, '...'], on_cpu: _T, on_gpu: _T) -> _T:
+    """Select `on_cpu` if `array` is on cpu, else `on_gpu`.
+
+    Compose with `condf` for tolerances that depend on both platform and leaf
+    precision, e.g., ``condp(x, 0, condf(leaf_tree, 1e-5, 1e-3))``.
+    """
+    return on_cpu if array.platform() == 'cpu' else on_gpu
 
 
 def rerun_on_gpu(*_: object) -> bool:

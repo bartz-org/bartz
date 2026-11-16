@@ -118,6 +118,7 @@ from tests.util import (
     chain_deviation_norms,
     clipped_logit,
     condf,
+    condp,
     leaf_prior_cov_inv_conditional_mean,
     nnone,
     rerun_on_gpu,
@@ -941,10 +942,8 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
         .reshape(num_chains * bkw.n_save, *y_shape)
     )
 
-    if bart1.predict('train', kind='latent_samples').platform() == 'cpu':
-        rtol = 0
-    else:  # pragma: no cover, gpu-only
-        rtol = condf(bart1._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
+    leaf_tree = bart1._mcmc_state.forest.leaf_tree
+    rtol = condp(leaf_tree, 0, condf(leaf_tree, 1e-5, 1e-3))
 
     with subtests.test('shift burn-in'):
         assert_close_matrices(
@@ -1128,7 +1127,7 @@ def test_error_scale_magnitude_invariance(bkw: BartKW) -> None:
     state_ref = run(1.0)
 
     leaf_tree = state_ref.forest.leaf_tree
-    rtol = 0.0 if leaf_tree.platform() == 'cpu' else condf(leaf_tree, 1e-5, 1e-3)
+    rtol = condp(leaf_tree, 0.0, condf(leaf_tree, 1e-5, 1e-3))
 
     for c in (2.0**-9, 2.0**9):
         state_scaled = run(c)
@@ -1189,7 +1188,7 @@ def test_error_scale_2d_dense_error_cov(bkw: BartKW) -> None:
         trace_2d = run(jnp.broadcast_to(error_scale, kw['y_train'].shape))
         # the scalar and per-component precision scales take different code
         # paths, so the chains agree only up to float rounding
-        rtol = 1e-5 if trace.leaf_tree.platform() == 'cpu' else 1e-3
+        rtol = condp(trace.leaf_tree, 1e-5, 1e-3)
         assert_close_matrices(
             trace_2d.error_cov_inv, trace.error_cov_inv, rtol=rtol, reduce_rank=True
         )
@@ -1323,7 +1322,7 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     # note: don't use predict('train') because that may rely on `resid` being clean
     yhat1 = bart1.predict(kw['x_train'], kind='latent_samples')
     yhat2 = bart2.predict(kw['x_train'], kind='latent_samples')
-    rtol = 0 if yhat1.platform() == 'cpu' else 1e-5
+    rtol = condp(yhat1, 0, 1e-5)
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
     # check resid_inexact_integral separately because it's not upstream of anything
@@ -2172,15 +2171,10 @@ def test_precompute_predict_train(bkw: BartKW, subtests: SubTests) -> None:
 
     # `outcome_samples` is left out: for binary outcomes a tiny latent difference
     # can flip a thresholded 0/1 draw, which is not an approximate mismatch
+    leaf_tree = bart_off._mcmc_state.forest.leaf_tree
+    rtol = condp(leaf_tree, 1e-5, condf(leaf_tree, 1e-4, 1e-3))
     for kind in ('latent_samples', 'mean', 'mean_samples'):
         with subtests.test('predict', kind=kind):
-            # determine the tolerance based on the platform
-            leaf_tree = bart_off._mcmc_state.forest.leaf_tree
-            if leaf_tree.platform() == 'cpu':
-                rtol = 1e-5
-            else:  # pragma: no cover, gpu-only
-                rtol = condf(leaf_tree, 1e-4, 1e-3)
-
             assert_close_matrices(
                 bart_on.predict('train', kind=kind),
                 bart_off.predict('train', kind=kind),
@@ -2409,7 +2403,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         lpci1.value,
         bart2._mcmc_state.forest.leaf_prior_cov_inv.value * cov_scale,
-        rtol=1e-6 if lpci1.nu is None or lpci1.value.platform() == 'cpu' else 1e-3,
+        rtol=1e-6 if lpci1.nu is None else condp(lpci1.value, 1e-6, 1e-3),
         reduce_rank=True,
     )
 
@@ -2533,7 +2527,7 @@ def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
     def check_equal(
         path: KeyPath, x1: Shaped[Array, '*shape'], x2: Shaped[Array, '*shape']
     ) -> None:
-        rtol = condf(leaf_tree, 1e-4 if x1.platform() != 'cpu' else 1e-5, 1e-3)
+        rtol = condf(leaf_tree, condp(x1, 1e-5, 1e-4), 1e-3)
         assert_close_matrices(
             x2, x1, err_msg=f'{keystr(path)}: ', rtol=rtol, reduce_rank=True
         )
@@ -2784,10 +2778,7 @@ def test_jit(bkw: BartKW) -> None:
     state1, pred1 = task(X, y, w, key)
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
-    if pred1.platform() == 'cpu':
-        rtol = 1e-5
-    else:  # pragma: no cover, gpu-only
-        rtol = condf(state1.forest.leaf_tree, 1e-5, 1e-3)
+    rtol = condp(pred1, 1e-5, condf(state1.forest.leaf_tree, 1e-5, 1e-3))
     assert_close_matrices(pred1, pred2, rtol=rtol, reduce_rank=True)
 
 
@@ -3040,10 +3031,7 @@ def test_polars(bkw: BartKW) -> None:
     x_test_pl = pl.DataFrame(numpy.array(bkw.x_test).T)
     pred2 = bart2.predict(x_test_pl, kind='latent_samples')
 
-    if pred.platform() == 'cpu':
-        rtol = 0
-    else:  # pragma: no cover, gpu-only
-        rtol = condf(bart._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
+    rtol = condp(pred, 0, condf(bart._mcmc_state.forest.leaf_tree, 1e-5, 1e-3))
 
     assert_close_matrices(
         bart.predict('train', kind='latent_samples'),
@@ -3446,12 +3434,11 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
         # Leaves stored in a reduced-precision dtype can differ by a rounding
         # step when data sharding reorders the per-leaf reductions, so compare
         # them only at their storage precision.
-        reduced = jnp.issubdtype(xs.dtype, jnp.floating) and xs.dtype.itemsize < 4
         assert_close_matrices(
             xs,
             xb,
             err_msg=f'{keystr(path)}: ',
-            rtol=1e-2 if reduced else strict_rtol,
+            rtol=condf(xs, strict_rtol, 1e-2),
             reduce_rank=True,
         )
 
@@ -3832,10 +3819,7 @@ def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
         assert x1.dtype == x2.dtype
         assert x1.sharding.is_equivalent_to(x2.sharding, x1.ndim)
         if jnp.issubdtype(x1.dtype, jnp.floating):
-            if x1.platform() == 'cpu':
-                rtol = 1e-5
-            else:  # pragma: no cover, gpu-only
-                rtol = condf(leaf_tree, 1e-4, 1e-3)
+            rtol = condp(x1, 1e-5, condf(leaf_tree, 1e-4, 1e-3))
             assert_close_matrices(
                 x1, x2, rtol=rtol, err_msg=keystr(path), reduce_rank=True
             )

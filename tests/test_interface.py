@@ -3892,13 +3892,7 @@ class TestDevicePlacement:
     @pytest.fixture
     def committed_kw(self, single_device_kw: dict, other_device: Device) -> dict:
         """Like ``single_device_kw`` with all JAX inputs committed to ``other_device``."""
-
-        def commit(x: Any) -> Any:  # noqa: ANN401
-            if isinstance(x, Array):
-                return jax.device_put(x, other_device)
-            return x
-
-        return tree.map(commit, single_device_kw)
+        return commit_arrays(single_device_kw, other_device)
 
     @pytest.fixture(params=['jax', 'numpy'])
     def uncommitted_kw(self, single_device_kw: dict, request: FixtureRequest) -> dict:
@@ -3949,6 +3943,24 @@ class TestDevicePlacement:
         bart = Bart(**dict(committed_kw, devices=get_default_device()))
         assert_bart_on_device(bart, get_default_device())
 
+    def test_committed_moved_to_mesh(self, bkw: BartKW, other_device: Device) -> None:
+        """Committed inputs are moved to the mesh, also if their device is in it."""
+        if not get_expect_sharded(bkw.kw):
+            pytest.skip('This variant does not shard.')
+        bart = Bart(**commit_arrays(bkw.kw, other_device))
+        mesh = bart._mcmc_state.config.mesh
+        assert mesh is not None
+        assert other_device in mesh.devices.flat
+        check_sharding(bart._mcmc_state, mesh)
+        check_sharding(bart._main_trace, mesh)
+
+        x_test = jax.device_put(bkw.x_test, other_device)
+        w = bkw.w_for_predict('mean', on_train=False)
+        if w is not None:
+            w = jax.device_put(w, other_device)
+        pred = bart.predict(x_test, kind='mean', error_scale=w)
+        check_chains_data_sharding(pred, mesh=mesh, chains=False, data=True)
+
     def test_predict_on_devices(
         self, bkw: BartKW, single_device_kw: dict, other_device: Device
     ) -> None:
@@ -3957,3 +3969,10 @@ class TestDevicePlacement:
         w = bkw.w_for_predict('mean', on_train=False)
         pred = bart.predict(bkw.x_test, kind='mean', error_scale=w)
         assert pred.devices() == {other_device}
+
+
+def commit_arrays(kw: dict, device: Device) -> dict:
+    """Commit all the JAX arrays in `kw` to `device`."""
+    return tree.map(
+        lambda x: jax.device_put(x, device) if isinstance(x, Array) else x, kw
+    )

@@ -1775,6 +1775,18 @@ class TestMultichain:
         for leaf in tree.leaves(state):
             assert leaf.devices() == {device}
 
+    def test_init_committed_inputs(self, init_kwargs: dict) -> None:
+        """`init` moves inputs committed to a device in the mesh."""
+        if get_device_count() < 2:
+            pytest.skip('Need at least 2 devices.')
+        device = get_default_device()
+        init_kwargs = tree.map(
+            lambda x: device_put(x, device) if isinstance(x, jax.Array) else x,
+            init_kwargs,
+        )
+        state = init(**init_kwargs, num_chains=4, mesh=dict(chains=2))
+        check_sharding(state, state.config.mesh)
+
     def test_multichain_equiv_stack(self, init_kwargs: dict, keys: split) -> None:
         """Check that stacking multiple chains is equivalent to a multichain trace."""
         num_chains = 4

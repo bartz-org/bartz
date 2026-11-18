@@ -1821,11 +1821,28 @@ def shard_leaf(
         sharding = NamedSharding(mesh, spec)
 
     if isinstance(x, _LazyArray):
+        if mesh is not None and not jit_active():
+            x = tree.map(partial(put_on_mesh, mesh=mesh), x)
         x = concretize_lazy_array(x, sharding)
     elif sharding is not None:
         x = device_put(x, sharding, donate=True)
 
     return x
+
+
+def put_on_mesh(x: T, mesh: Mesh) -> T:
+    """Replicate `x` over `mesh` if it's an array that lives on other devices.
+
+    This makes arrays committed elsewhere acceptable to `jit` alongside arrays
+    sharded over `mesh`.
+    """
+    if isinstance(x, Array) and x.sharding.device_set != set(mesh.devices.flat):
+        # only small arrays are expected here, the largest being `log_s`
+        # with shape (p,)
+        assert x.nbytes <= 100 * 2**20, f'replicating a large array {x.shape=}'
+        return cast(T, device_put(x, NamedSharding(mesh, PartitionSpec())))
+    else:
+        return x
 
 
 @filter_jit

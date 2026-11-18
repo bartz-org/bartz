@@ -1300,9 +1300,7 @@ def init(
         # calculate initial resid in the continuous outcome case, such that y
         # and offset are already sharded if needed
         if state.resid is None:
-            state = set_initial_resid(
-                state, binary_indices, num_chains, storage.resid_dtype
-            )
+            state = set_initial_resid(state, num_chains, storage.resid_dtype)
             # charge the one-time rounding of the initial residuals into storage
             # when it uses a dtype narrower than y (else the cast is exact)
             if jnp.finfo(storage.resid_dtype).nmant < jnp.finfo(state.y.dtype).nmant:
@@ -1407,15 +1405,12 @@ def determine_storage_params(
 
 
 def set_initial_resid(
-    state: 'State',
-    binary_indices: Int32[Array, ' kb'] | None,
-    num_chains: int | None,
-    resid_dtype: jnp.dtype,
+    state: 'State', num_chains: int | None, resid_dtype: jnp.dtype
 ) -> 'State':
     """Build the continuous-outcome `resid` and shard it.
 
-    Called post-shard so the captured ``state.y`` and
-    ``state.forest.offset`` are already on the target devices. Sharding axes are
+    Called post-shard so the captured ``state.y``, ``state.forest.offset`` and
+    ``state.binary_indices`` are already on the target devices. Sharding axes are
     read via `chain_vmap_axes` / `data_vmap_axes` on a shape preview where the
     new `resid` leaf has the chain-extended ``ndim`` (inflated by a placeholder
     when `num_chains` is not `None`).
@@ -1425,7 +1420,7 @@ def set_initial_resid(
         state.y.shape,
         state.y,
         state.forest.offset,
-        binary_indices,
+        state.binary_indices,
         state.resid_unit,
         resid_dtype,
     )
@@ -1762,14 +1757,33 @@ def remove_weak_types(x: PyTree[Array, 'T']) -> PyTree[Array, 'T']:
 def shard_state(state: State) -> State:
     """Place all arrays on the appropriate devices, and instantiate lazily defined arrays."""
     mesh = state.config.mesh
-    shard_leaf_mesh = partial(shard_leaf, mesh=mesh)
-    return tree.map(
-        shard_leaf_mesh,
-        state,
-        chain_vmap_axes(state),
-        data_vmap_axes(state),
-        is_leaf=lambda x: x is None or isinstance(x, _LazyArray),
-    )
+    axes = chain_vmap_axes(state), data_vmap_axes(state)
+
+    def shard_lazy(
+        x: Shaped[Array, '...'] | Shaped[_LazyArray, '...'] | None,
+        chain_axis: int | None,
+        data_axis: int | None,
+    ) -> Shaped[Array, '...'] | None:
+        if isinstance(x, _LazyArray):
+            return shard_leaf(x, chain_axis, data_axis, mesh)
+        else:
+            return x
+
+    def shard_eager(
+        orig: Shaped[Array, '...'] | Shaped[_LazyArray, '...'] | None,
+        x: Shaped[Array, '...'] | None,
+        chain_axis: int | None,
+        data_axis: int | None,
+    ) -> Shaped[Array, '...'] | None:
+        if isinstance(orig, _LazyArray):
+            return x
+        else:
+            return shard_leaf(x, chain_axis, data_axis, mesh)
+
+    # instantiate the lazy arrays first because `shard_leaf` donates the eager
+    # arrays, which lazy arrays may capture
+    new_state = tree.map(shard_lazy, state, *axes, is_leaf=_is_lazy_or_none)
+    return tree.map(shard_eager, state, new_state, *axes, is_leaf=_is_lazy_or_none)
 
 
 def leaf_partition_spec(

@@ -1758,6 +1758,23 @@ class TestMultichain:
         with pytest.raises(ValueError, match=match):
             init(**init_kwargs, num_chains=num_chains, mesh=dict(chains=chains_axis))
 
+    def test_init_single_device_mesh_elsewhere(self, init_kwargs: dict) -> None:
+        """`init` with a 1-device mesh on another device, where moving the inputs donates them."""
+        if get_device_count() < 2:
+            pytest.skip('Need at least 2 devices.')
+        default = get_default_device()
+        device = next(d for d in get_default_devices() if d != default)
+        mesh = make_mesh(
+            (1, 1),
+            ('chains', 'data'),
+            devices=(device,),
+            axis_types=(AxisType.Auto, AxisType.Auto),
+        )
+        state = init(**init_kwargs, num_chains=4, mesh=mesh)
+        check_sharding(state, mesh)
+        for leaf in tree.leaves(state):
+            assert leaf.devices() == {device}
+
     def test_multichain_equiv_stack(self, init_kwargs: dict, keys: split) -> None:
         """Check that stacking multiple chains is equivalent to a multichain trace."""
         num_chains = 4

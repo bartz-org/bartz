@@ -51,13 +51,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.nn import logsumexp, softmax
 from jax.ops import segment_sum
-from jax.sharding import (
-    AxisType,
-    Mesh,
-    NamedSharding,
-    PartitionSpec,
-    SingleDeviceSharding,
-)
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from jax.tree_util import KeyPath, keystr
 from jax.typing import DTypeLike
 from jaxtyping import (
@@ -1977,7 +1971,7 @@ def check_sharding(x: PyTree, mesh: Mesh | None) -> None:
         if x is None:
             return
         elif mesh is None:
-            assert isinstance(x.sharding, SingleDeviceSharding)
+            assert x.sharding.num_devices == 1
         else:
             spec = get_normal_spec(x)
 

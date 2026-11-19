@@ -65,7 +65,7 @@ from jax import (
 )
 from jax import numpy as jnp
 from jax.scipy.special import ndtr
-from jax.sharding import Mesh, SingleDeviceSharding
+from jax.sharding import Mesh
 from jax.tree_util import KeyPath, keystr
 from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, PyTree, Real, Shaped
@@ -3220,7 +3220,7 @@ def check_chains_data_sharding(
 ) -> None:
     """Check `x` is sharded as indicated by the boolean flags."""
     if mesh is None:
-        assert isinstance(x.sharding, SingleDeviceSharding)
+        assert x.sharding.num_devices == 1
         return
     expected_spec = [None] * x.ndim
     if data and 'data' in mesh.axis_names:

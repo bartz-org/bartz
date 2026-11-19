@@ -333,7 +333,7 @@ def simple_init(  # noqa: C901, PLR0915
                 raise NotImplementedError(msg)
             # all the trees in use, to compare with 'plain'; no check because
             # the number of trees need not divide into blocks
-            kw.update(used_trees=num_trees, check_num_trees=False)
+            kw = dict(kw, used_trees=num_trees, check_num_trees=False)
 
     kw.update(kwargs)
 

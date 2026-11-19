@@ -42,6 +42,7 @@ from bartz._jaxext._jaxext import (
     is_key,
     jaxtyping_disabled,
     jit_active,
+    minimal_unsigned_arange,
     minimal_unsigned_dtype,
     sequential_vmap,
     sliced_map,

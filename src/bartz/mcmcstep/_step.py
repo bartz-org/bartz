@@ -54,7 +54,7 @@ from bartz._jaxext import (
     field,
     float32_matmuls,
     jit,
-    minimal_unsigned_dtype,
+    minimal_unsigned_arange,
     sequential_vmap,
     sliced_map,
     solve_triangular,
@@ -204,7 +204,7 @@ def step_trees(key: Key[Array, ''], state: State) -> State:
 def random_tree_order(key: Key[Array, ''], forest: Forest) -> UInt[Array, ' num_trees']:
     """Draw a random order to visit the trees, with the trees in use first."""
     num_trees, _ = forest.var_tree.shape
-    trees = jnp.arange(num_trees, dtype=minimal_unsigned_dtype(num_trees - 1))
+    trees = minimal_unsigned_arange(num_trees)
     order = random.permutation(key, trees)
     if forest.used_trees is not None:
         order = order[jnp.argsort(order >= forest.used_trees, stable=True)]
@@ -1379,7 +1379,7 @@ def accept_moves_sequential_stage(
         pso.state.forest.leaf_tree,
         pso.prec_trees,
         pso.moves,
-        jnp.arange(num_trees, dtype=minimal_unsigned_dtype(num_trees - 1)),
+        minimal_unsigned_arange(num_trees),
         pso.prelkv,
         pso.prelf,
     )

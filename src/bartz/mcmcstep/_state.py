@@ -62,6 +62,7 @@ from bartz._jaxext import (
     jaxtyping_disabled,
     jit,
     jit_active,
+    minimal_unsigned_arange,
     minimal_unsigned_dtype,
     solve_triangular,
 )
@@ -389,12 +390,13 @@ class Forest(Module):
         chains=CHAIN_AXIS
     )
     """The log transition and prior Metropolis-Hastings ratio for the proposed
-    move on each tree."""
+    move on each tree. Arbitrary for a tree without an allowed move, like those
+    not in use."""
 
     log_likelihood: Float32[Array, '*chains num_trees'] | None = field(
         chains=CHAIN_AXIS
     )
-    """The log likelihood ratio."""
+    """The log likelihood ratio, dirty like `log_trans_prior`."""
 
     leaf_prior_cov_inv: Wishart
     """The prior precision matrix of a leaf, conditional on the tree structure
@@ -893,12 +895,23 @@ def parse_used_trees(
 def parse_parallel_block_size(
     parallel_block_size: int | None, num_trees: int
 ) -> int | None:
-    """Check `parallel_block_size` is a divisor of `num_trees`."""
-    if parallel_block_size is not None and num_trees % parallel_block_size:
-        msg = f'{parallel_block_size=} is not a divisor of {num_trees=}'
+    """Check `parallel_block_size` is a positive divisor of `num_trees`."""
+    if parallel_block_size is not None and (
+        parallel_block_size < 1 or num_trees % parallel_block_size
+    ):
+        msg = f'{parallel_block_size=} is not a positive divisor of {num_trees=}'
         raise ValueError(msg)
     else:
         return parallel_block_size
+
+
+def parse_sequential_block_size(sequential_block_size: int | None) -> int | None:
+    """Check `sequential_block_size` is positive."""
+    if sequential_block_size is not None and sequential_block_size < 1:
+        msg = f'{sequential_block_size=} is not positive'
+        raise ValueError(msg)
+    else:
+        return sequential_block_size
 
 
 def check_equal_blocks(num_trees: int) -> None:
@@ -1134,8 +1147,8 @@ def init(
     Raises
     ------
     ValueError
-        If arguments unused in binary regression are set, or if `num_trees`
-        fails the check enabled by `check_num_trees`.
+        If arguments unused in binary regression are set, if `num_trees` fails
+        the check enabled by `check_num_trees`, or if a block size is invalid.
 
     Notes
     -----
@@ -1344,7 +1357,9 @@ def init(
                 steps_done=jnp.int32(0),
                 sparse_on_at=asarray_or_none(sparse_on_at),
                 sequential_unroll=sequential_unroll,
-                sequential_block_size=sequential_block_size,
+                sequential_block_size=parse_sequential_block_size(
+                    sequential_block_size
+                ),
                 parallel_block_size=parse_parallel_block_size(
                     parallel_block_size, num_trees
                 ),
@@ -2326,7 +2341,7 @@ def used_trees_mask(forest: Forest) -> Bool[Array, '*chains num_trees'] | None:
         return None
     else:
         *_, num_trees, _ = forest.var_tree.shape
-        trees = jnp.arange(num_trees, dtype=minimal_unsigned_dtype(num_trees - 1))
+        trees = minimal_unsigned_arange(num_trees)
         return trees < forest.used_trees[..., None]
 
 

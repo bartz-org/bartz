@@ -2572,12 +2572,18 @@ class TestUsedTrees:
         assert_same_states(at_once, replace(default, config=at_once.config))
 
     @pytest.mark.parametrize('num_chains', [None, 2])
-    def test_leaf_indices_not_copied(self, keys: split, num_chains: int | None) -> None:
+    def test_leaf_indices_not_copied(
+        self, keys: split, monkeypatch: pytest.MonkeyPatch, num_chains: int | None
+    ) -> None:
         """Updating the leaf indices in blocks of trees does not copy them all.
 
         Neither does the default, which on cpu picks at run time between blocks
         and all the trees at once.
         """
+        # override cpu core count to 4 to make sure `init()` decides to divide
+        # the trees in blocks even when tests run on a machine with many cores
+        monkeypatch.setattr(_state, 'get_cpu_thread_count', lambda: 4)
+
         num_trees = 128
         kw = dict(one_bin_init_kw(keys.pop(), 20_000), num_trees=num_trees)
         key = keys.pop()
@@ -2712,10 +2718,21 @@ class TestUsedTrees:
         with pytest.raises(ValueError, match=r'not a multiple of 8.+use 8,'):
             init(**kw, used_trees=NUM_TREES)
         kw = dict(kw, num_trees=16)
-        with pytest.raises(ValueError, match='not a divisor'):
+        with pytest.raises(ValueError, match='not a positive divisor'):
             init(**kw, used_trees=16, parallel_block_size=3)
-        with pytest.raises(ValueError, match='not a divisor'):
+        with pytest.raises(ValueError, match='not a positive divisor'):
             init(**kw, parallel_block_size=32, check_num_trees=False)
+
+    @pytest.mark.parametrize('block_size', [0, -4])
+    def test_init_rejects_nonpositive_block_sizes(
+        self, keys: split, block_size: int
+    ) -> None:
+        """`init` rejects block sizes that are not positive."""
+        kw: dict = dict(case_init_kw(keys.pop(), 'plain'), num_trees=16)
+        with pytest.raises(ValueError, match='not a positive divisor'):
+            init(**kw, used_trees=16, parallel_block_size=block_size)
+        with pytest.raises(ValueError, match='not positive'):
+            init(**kw, used_trees=16, sequential_block_size=block_size)
 
 
 def one_bin_init_kw(key: Key[Array, ''], n: int) -> dict:

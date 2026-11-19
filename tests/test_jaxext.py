@@ -1336,7 +1336,10 @@ class TestVariableLengthScan:
         )
 
     def test_vmap(self, keys: split) -> None:
-        """Under vmap, each element stops at its length, with an unbatched condition."""
+        """Under vmap, each element stops at its length, with an unbatched condition.
+
+        The inputs are read and the outputs written without gather or scatter.
+        """
         xs = vls_toy_xs(keys.pop(), (4,))
         lengths = jnp.array([0, 3, 7, 5], jnp.int32)
         f = vmap(
@@ -1354,6 +1357,9 @@ class TestVariableLengthScan:
         ]
         (cond_out,) = eqn.params['cond_jaxpr'].out_avals
         assert cond_out.shape == ()
+        text = jit(f).lower(xs, lengths).as_text()
+        assert 'gather' not in text
+        assert 'scatter' not in text
 
     def test_shard_map(self, keys: split) -> None:
         """It works under vmap within `shard_map`."""

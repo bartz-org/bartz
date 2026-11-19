@@ -38,6 +38,7 @@ from jax import (
     NamedSharding,
     block_until_ready,
     debug_key_reuse,
+    debug_nans,
     device_put,
     effects_barrier,
     jit,
@@ -598,6 +599,32 @@ def test_stats_ignore_trees_not_in_use(keys: split, num_chains: int | None) -> N
             rtol=1e-6,
             err_msg=name,
         )
+
+
+@pytest.mark.parametrize('num_chains', [None, 2])
+def test_no_trees_in_use(keys: split, num_chains: int | None) -> None:
+    """The MCMC runs with no trees in use, and the diagnostics of the forest are NaN."""
+    # run the mcmc, with the sizes of the test above to reuse its compiled code
+    state = simple_init(ntree=NTREE + 4, used_trees=0, num_chains=num_chains)
+    with debug_nans(False):
+        result = run_mcmc(keys.pop(), state, 10)
+        final = result.final_state
+        report = StatsAccumulator.initial(final, enabled=False).report(final)
+    trace = result.main_trace
+
+    # check all trees are roots in the final state
+    assert not jnp.any(final.forest.split_tree)
+
+    # check the statistics of the trees are nan
+    assert jnp.all(jnp.isnan(trace.mean_tree_life))
+    for name in 'move_acc', 'mean_leaves', 'mean_tree_life':
+        assert jnp.isnan(getattr(report, name)), name
+
+    # check there are no inf/nan in the rest of the output
+    trace = replace(trace, mean_tree_life=jnp.zeros_like(trace.mean_tree_life))
+    for leaf in tree.leaves((final, trace)):
+        if jnp.issubdtype(leaf.dtype, jnp.floating):
+            assert jnp.all(jnp.isfinite(leaf))
 
 
 def test_check_platform_callback_mismatch(keys: split) -> None:

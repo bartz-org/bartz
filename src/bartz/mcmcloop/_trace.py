@@ -108,7 +108,8 @@ class BurninTrace(Trace):
     mean_tree_life: Float32[Array, '*chains_and_samples'] = field(
         chains=CHAIN_AXIS, samples=0
     )
-    """The average over the trees in use of `bartz.mcmcstep.Forest.tree_life`."""
+    """The average over the trees in use of `bartz.mcmcstep.Forest.tree_life`,
+    NaN if there are none."""
 
     error_cov_inv: (
         Float32[Array, '*chains_and_samples']

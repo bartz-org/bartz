@@ -64,6 +64,7 @@ from jaxtyping import (
     Scalar,
     ScalarLike,
     Shaped,
+    UInt,
 )
 from jaxtyping import config as jaxtyping_config
 
@@ -195,6 +196,11 @@ def minimal_unsigned_dtype(value: int) -> DTypeLike:
     if value < 2**32:
         return jnp.uint32
     return jnp.uint64
+
+
+def minimal_unsigned_arange(size: int) -> UInt[Array, ' {size}']:
+    """Return the integers below `size` in the smallest unsigned integer dtype."""
+    return jnp.arange(size, dtype=minimal_unsigned_dtype(size - 1))
 
 
 @jit(static_argnums=(1,))
@@ -676,12 +682,7 @@ def variable_length_scan(
             # passing the block as scan xs, such that the block is not copied;
             # the index is clamped in the last block, past `length` anyway
             position = i * block_size + j
-            x = tree.map(
-                lambda x: lax.dynamic_index_in_dim(
-                    x, position, keepdims=False, allow_negative_indices=False
-                ),
-                xs,
-            )
+            x = tree.map(lambda x: dynamic_slice_in_dim(x, position, 1).squeeze(0), xs)
             valid = position < length
             carry, y = f(carry, x, valid)
             # zero the outputs of the elements past `length`, like those of the
@@ -711,9 +712,7 @@ def variable_length_scan(
         """Process one block."""
         carry, y_block = scan_block(state.i_block, state.carry)
         ys = tree.map(
-            lambda ys, y: lax.dynamic_update_index_in_dim(
-                ys, y, state.i_block, 0, allow_negative_indices=False
-            ),
+            lambda ys, y: dynamic_update_slice_in_dim(ys, y[None, ...], state.i_block),
             state.ys,
             y_block,
         )
@@ -907,6 +906,9 @@ def variable_length_update(
     `post` exists, instead of `update` returning the other outputs too, because
     xla writes a block back over the old one in place only if nothing else
     reads the new block before; `post` reads it after, out of the whole array.
+
+    If `block_size` is equal to the number of elements (one block) then
+    everything is processed even in the ``length == 0`` case.
     """
     (num_el,) = {x.shape[0] for x in tree.leaves((state, xs))}
     if block_size is None:

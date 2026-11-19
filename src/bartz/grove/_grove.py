@@ -40,6 +40,7 @@ from bartz._jaxext import (
     autobatch,
     field,
     jit,
+    minimal_unsigned_arange,
     minimal_unsigned_dtype,
     vmap_nodoc,
 )
@@ -329,7 +330,7 @@ def is_actual_leaf(
     if add_bottom_level:
         size *= 2
         is_leaf = jnp.concatenate([is_leaf, jnp.ones_like(is_leaf)])
-    index = jnp.arange(size, dtype=minimal_unsigned_dtype(size - 1))
+    index = minimal_unsigned_arange(size)
     parent_index = index >> 1
     parent_nonleaf = split_tree[parent_index].astype(bool)
     parent_nonleaf = parent_nonleaf.at[1].set(True)
@@ -410,7 +411,7 @@ def forest_mean_leaves(
 
     Returns
     -------
-    The mean number of leaves across the trees.
+    The mean number of leaves across the trees, NaN if there are no trees.
     """
     # a tree with k internal nodes (the nonzero entries of split_tree) has k + 1
     # leaves; the maximum possible is split_tree.shape[-1]

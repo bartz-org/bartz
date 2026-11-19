@@ -52,6 +52,7 @@ from bartz._jaxext import (
     cpu_barrier,
     field,
     float32_matmuls,
+    forbid_x64,
     jit,
     minimal_unsigned_dtype,
     sliced_map,
@@ -83,6 +84,7 @@ from bartz.mcmcstep._state import (
 
 
 @jit(donate_argnums=(1,))
+@forbid_x64
 @split_key_for_chains
 @shard_map_state
 @vmap_chains

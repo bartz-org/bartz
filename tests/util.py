@@ -25,7 +25,8 @@
 """Functions intended to be shared across the test suite."""
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from functools import partial
 from importlib.metadata import version
 from operator import ge, le
@@ -40,7 +41,7 @@ import jax
 import numpy as np
 import pytest
 from equinox import EquinoxRuntimeError
-from jax import jit, lax, random, vmap
+from jax import jit, lax, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.special import logit
 from jaxtyping import Array, Float, Float32, Shaped, UInt
@@ -410,6 +411,32 @@ def assert_array_equal(
 ) -> None:
     """Wrap `numpy.testing.assert_array_equal` with `strict=True` default."""
     _np_assert_array_equal(actual, desired, strict=strict, **kwargs)
+
+
+_WIDEN = {jnp.dtype(jnp.float32): jnp.float64, jnp.dtype(jnp.int32): jnp.int64}
+
+
+def to_64_bit(x: _T) -> _T:
+    """Cast the float32/int32 jax arrays in a pytree to float64/int64."""
+
+    def widen(a: object) -> object:
+        if isinstance(a, Array) and a.dtype in _WIDEN:
+            return a.astype(_WIDEN[a.dtype])
+        else:
+            return a
+
+    with jax.enable_x64(True):
+        return tree.map(widen, x)
+
+
+@contextmanager
+def raises_x64_enabled() -> Generator[None, None, None]:
+    """Enable x64 and check bartz raises about it within the block."""
+    with (
+        jax.enable_x64(True),
+        pytest.raises(RuntimeError, match='`jax_enable_x64` is set'),
+    ):
+        yield
 
 
 class PeriodicSigintTimer:

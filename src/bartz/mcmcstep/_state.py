@@ -58,6 +58,7 @@ from bartz._jaxext import (
     cholesky,
     field,
     float32_matmuls,
+    forbid_x64,
     jaxtyping_disabled,
     jit,
     jit_active,
@@ -839,6 +840,7 @@ def parse_p_nonterminal(
     return jnp.pad(p_nonterminal, (0, 1))
 
 
+@forbid_x64
 def make_p_nonterminal(
     d: int, alpha: FloatLike = 0.95, beta: FloatLike = 2.0
 ) -> Float32[Array, ' {d}-1']:
@@ -868,6 +870,7 @@ def make_p_nonterminal(
     return alpha / (1 + depth).astype(float) ** beta
 
 
+@forbid_x64
 @float32_matmuls
 def init(
     *,

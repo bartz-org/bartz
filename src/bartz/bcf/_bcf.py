@@ -53,7 +53,7 @@ from bartz._interface import (
     raise_if_nan,
     start_nan_check,
 )
-from bartz._jaxext import is_key, jit, jit_active, split
+from bartz._jaxext import forbid_x64, is_key, jit, jit_active, split
 from bartz.bcf._state import BCFState, init_bcf
 from bartz.bcf._step import bcf_step
 from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
@@ -389,6 +389,7 @@ class bcf(Module):
     _tau_test: Float32[Array, 'num_samples m'] | None = None
     _z_test: Bool[Array, ' m'] | None = None
 
+    @forbid_x64
     def __init__(  # noqa: C901, PLR0915
         self,
         x_train: Real[ArrayLike, 'n p'] | DataFrame,
@@ -666,6 +667,7 @@ class bcf(Module):
         """
         return check_class(load_npz(path), cls, path)
 
+    @forbid_x64
     def predict(
         self,
         x_test: Real[ArrayLike, 'm p'] | DataFrame,
@@ -788,6 +790,7 @@ class bcf(Module):
             assert self._tau_test is not None
             return expected_outcome(self._mu_test, self._tau_test, self._z_test, True)
 
+    @forbid_x64
     def predict_potential_outcomes(
         self,
         x_test: Real[ArrayLike, 'm p'] | DataFrame,

@@ -66,6 +66,7 @@ from bartz.mcmcloop import (
     PrintCallback,
     StatsAccumulator,
     TqdmCallback,
+    compute_varcount,
     evaluate_trace,
     run_mcmc,
 )
@@ -75,7 +76,13 @@ from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.npz._npz import load_npz, save_npz
 from bartz.testing import QuantizedData, gen_data
-from tests.util import assert_array_equal, assert_close_matrices, nnone
+from tests.util import (
+    assert_array_equal,
+    assert_close_matrices,
+    nnone,
+    raises_x64_enabled,
+    to_64_bit,
+)
 
 # shared data dimensions for `simple_init`/`simple_data`, reused across tests to
 # hit the jax compilation cache
@@ -419,6 +426,30 @@ def test_custom_step(keys: split) -> None:
     assert_array_equal(nnone(main_trace.error_cov_inv), jnp.full(n_save, marker))
     # `run_mcmc` owns `steps_done`, so the extra increment is discarded
     assert_array_equal(final_state.config.steps_done, jnp.int32(n_burn + n_save))
+
+
+def test_x64(keys: split) -> None:
+    """Check the low-level API raises under `jax_enable_x64` or with 64-bit inputs."""
+    with raises_x64_enabled():
+        simple_init()
+    with raises_x64_enabled():
+        make_p_nonterminal(6)
+
+    state = simple_init()
+    with pytest.raises(TypeError, match=r'`state\..+` has dtype float64'):
+        run_mcmc(keys.pop(), to_64_bit(state), 4, n_burn=1)
+    final_state, _, main_trace, _ = run_mcmc(keys.pop(), state, 4, n_burn=1)
+    calls = dict(
+        print_callback=lambda: PrintCallback.from_state(state),
+        tqdm_callback=lambda: TqdmCallback.from_state(state),
+        run_mcmc=lambda: run_mcmc(keys.pop(), state, 4, n_burn=1),
+        step=lambda: step(keys.pop(), final_state),
+        evaluate_trace=lambda: evaluate_trace(simple_data(P, N).x, main_trace),
+        compute_varcount=lambda: compute_varcount(P, main_trace),
+    )
+    for call in calls.values():
+        with raises_x64_enabled():
+            call()
 
 
 def frozen_step(key: Key[Array, ''], state: State) -> State:

@@ -45,6 +45,7 @@ from bartz._interface import (
     _process_predictor_input,
     _process_response_input,
 )
+from bartz._jaxext import forbid_x64
 from bartz._jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import BurninTrace, MainTrace
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
@@ -253,6 +254,7 @@ class mc_gbart(Module):
     sigest: Float32[Array, ''] | None = None
     """The estimated standard deviation of the error used to set `lambda_`."""
 
+    @forbid_x64
     def __init__(
         self,
         x_train: Real[ArrayLike, 'n p'] | DataFrame,
@@ -567,6 +569,7 @@ class mc_gbart(Module):
 
     # Public methods from Bart
 
+    @forbid_x64
     def predict(
         self, x_test: Real[ArrayLike, 'm p'] | DataFrame
     ) -> Float32[Array, 'ndpost m']:

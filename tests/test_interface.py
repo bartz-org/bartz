@@ -121,9 +121,11 @@ from tests.util import (
     condp,
     leaf_prior_cov_inv_conditional_mean,
     nnone,
+    raises_x64_enabled,
     rerun_on_gpu,
     rhat_rank,
     skip_empty_shard_map_bug,
+    to_64_bit,
 )
 
 
@@ -3877,6 +3879,31 @@ def test_numpy_input(bkw: BartKW) -> None:
     bart2 = Bart(**kw2)
 
     assert_identical_bart(bart1, bart2)
+
+
+def test_x64(bkw: BartKW) -> None:
+    """Check `Bart` raises under `jax_enable_x64` or with 64-bit inputs."""
+    with raises_x64_enabled():
+        Bart(**bkw.kw)
+    with pytest.raises(TypeError, match='`x_train` has dtype float64'):
+        Bart(**dict(bkw.kw, x_train=to_64_bit(bkw.kw['x_train'])))
+
+    bart = Bart(**bkw.kw)
+    with pytest.raises(TypeError, match='`x_test` has dtype float64'):
+        bart.predict(to_64_bit(bkw.x_test))
+    methods = dict(
+        predict=lambda: bart.predict(bkw.x_test),
+        get_latent_prec=bart.get_latent_prec,
+        get_error_sdev=bart.get_error_sdev,
+        accept=lambda: bart.accept,
+        varcount=lambda: bart.varcount,
+        varcount_mean=lambda: bart.varcount_mean,
+        varprob=lambda: bart.varprob,
+        varprob_mean=lambda: bart.varprob_mean,
+    )
+    for method in methods.values():
+        with raises_x64_enabled():
+            method()
 
 
 def assert_bart_on_device(bart: Bart, device: Device) -> None:

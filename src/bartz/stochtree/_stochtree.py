@@ -38,7 +38,7 @@ from jax.scipy.special import ndtr, ndtri
 from jaxtyping import Array, Float, Float32, Key, Real, Shaped
 
 from bartz._interface import Bart, DataFrame, PredictKind, Series
-from bartz._jaxext import jit
+from bartz._jaxext import forbid_x64, jit
 from bartz.mcmcloop import MainTrace
 from bartz.mcmcstep import Wishart
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
@@ -353,6 +353,7 @@ class BARTModel:
             raise ValueError(msg)
         return X_train_arr, y_train_arr, varprob
 
+    @forbid_x64
     def sample(
         self,
         X_train: Real[ArrayLike, 'n p'] | DataFrame,
@@ -640,6 +641,7 @@ class BARTModel:
         | dict[str, Shaped[Array, ' m']]
     ): ...
 
+    @forbid_x64
     def predict(
         self,
         X: Real[ArrayLike, 'm p'] | DataFrame,

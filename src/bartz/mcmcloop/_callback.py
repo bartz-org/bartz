@@ -38,6 +38,7 @@ from jax.nn import log_softmax, logmeanexp
 from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree
 from tqdm.auto import tqdm
 
+from bartz._jaxext import forbid_x64
 from bartz._typing import kwdict
 from bartz.grove import forest_mean_leaves
 from bartz.mcmcloop._loop import Callback, _replicate
@@ -251,6 +252,7 @@ class PrintCallback(Callback):
     """Running average of the reported statistics, inert unless averaging."""
 
     @classmethod
+    @forbid_x64
     def from_state(
         cls,
         state: State,
@@ -379,6 +381,7 @@ class TqdmCallback(Callback):
     """Running average of the reported statistics, inert unless averaging."""
 
     @classmethod
+    @forbid_x64
     def from_state(
         cls,
         state: State,

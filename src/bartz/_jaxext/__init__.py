@@ -32,6 +32,7 @@ from bartz._jaxext._jaxext import (
     cpu_barrier,
     equal_shards,
     float32_matmuls,
+    forbid_x64,
     get_default_device,
     get_default_devices,
     get_device_count,

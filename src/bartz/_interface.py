@@ -51,6 +51,7 @@ from numpy import ndarray
 
 from bartz._jaxext import (
     equal_shards,
+    forbid_x64,
     is_key,
     jit,
     jit_active,
@@ -397,6 +398,9 @@ class Bart(Module):
     signal-to-noise ratio of the fit to less than about 1000, a limit that
     should always hold in realistic usage.
 
+    bartz computes in 32 bit, and raises an error if ``jax_enable_x64`` is set
+    or if passed 64-bit jax arrays. numpy arrays are converted to 32 bit.
+
     References
     ----------
     .. [1] Linero, Antonio R. (2018). “Bayesian Regression Trees for
@@ -425,6 +429,7 @@ class Bart(Module):
     _x_train_fmt: Any = field(static=True)
     _device: Device | None = field(static=True)
 
+    @forbid_x64
     def __init__(
         self,
         x_train: Real[ArrayLike, 'p n'] | DataFrame,
@@ -586,6 +591,7 @@ class Bart(Module):
         self._x_train_fmt = x_train_fmt
         self._device = device
 
+    @forbid_x64
     def predict(
         self,
         x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
@@ -842,6 +848,7 @@ class Bart(Module):
         axis = chainful_axis(0, chain_axis)
         return forest.split_tree.shape[axis]
 
+    @forbid_x64
     def get_latent_prec(
         self, only_continuous: bool = False
     ) -> (
@@ -894,6 +901,7 @@ class Bart(Module):
             only_continuous=only_continuous,
         )
 
+    @forbid_x64
     def get_error_sdev(
         self, mean: bool = False
     ) -> (
@@ -931,6 +939,7 @@ class Bart(Module):
             )
 
     @cached_property
+    @forbid_x64
     def accept(
         self,
     ) -> (
@@ -946,22 +955,26 @@ class Bart(Module):
         return get_accept(self._burnin_trace, self._main_trace)
 
     @cached_property
+    @forbid_x64
     def varcount(self) -> Int32[Array, 'ndpost p']:
         """Histogram of predictor usage for decision rules in the trees."""
         p = self._mcmc_state.forest.max_split.size
         return varcount(p, self._main_trace)
 
     @cached_property
+    @forbid_x64
     def varcount_mean(self) -> Float32[Array, ' p']:
         """Average of `varcount` across MCMC iterations."""
         return self.varcount.mean(axis=0)
 
     @cached_property
+    @forbid_x64
     def varprob(self) -> Float32[Array, 'ndpost p']:
         """Posterior samples of the probability of choosing each predictor for a decision rule."""
         return varprob(self._mcmc_state.forest, self._main_trace)
 
     @cached_property
+    @forbid_x64
     def varprob_mean(self) -> Float32[Array, ' p']:
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)

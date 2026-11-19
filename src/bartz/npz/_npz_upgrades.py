@@ -145,8 +145,9 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
 def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
     """Add `Forest.used_trees` with all the trees in use, and `StepConfig` options for it.
 
-    `StepConfig.random_tree_scan` is off, and `StepConfig.sequential_block_size`
-    is automatic, which has no effect with all the trees in use.
+    `StepConfig.random_tree_scan` is off, while
+    `StepConfig.sequential_block_size` and `StepConfig.parallel_block_size` are
+    automatic, which has no effect with all the trees in use.
     """
 
     def walk(node: Skeleton) -> Skeleton:
@@ -160,7 +161,10 @@ def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
                 fields = dict(**fields, used_trees=None)
             elif node['cls'] == 'StepConfig':
                 fields = dict(
-                    **fields, random_tree_scan=False, sequential_block_size=None
+                    **fields,
+                    random_tree_scan=False,
+                    sequential_block_size=None,
+                    parallel_block_size=None,
                 )
             return module(node['cls'], **fields)
         elif type(node['items']) is dict:

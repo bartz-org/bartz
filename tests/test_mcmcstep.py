@@ -138,6 +138,7 @@ from bartz.mcmcstep._state import (
     Sparsity,
     StepConfig,
     chol_with_gersh,
+    default_parallel_block_size,
     inv_via_chol_with_gersh,
     outcome_target,
     pow2_near_sqrt,
@@ -220,6 +221,7 @@ def _minimal_step_config() -> StepConfig:
         one_bin_prec_reduction=False,
         sequential_unroll=1,
         sequential_block_size=1,
+        parallel_block_size=None,
         random_tree_scan=False,
         augment=False,
         mesh=None,
@@ -2190,7 +2192,9 @@ def case_init_kw(key: Key[Array, ''], case: str) -> dict:
         ),
         sparse=dict(a=0.5, b=1.0, rho=5.0, sparse_on_at=0),
         quantized=dict(leaf_quantization=1),
-        used_trees=dict(used_trees=NUM_TREES - 2, random_tree_scan=True),
+        used_trees=dict(
+            used_trees=NUM_TREES - 2, random_tree_scan=True, check_num_trees=False
+        ),
     )
     return dict(kw, **cases[case])
 
@@ -2288,24 +2292,40 @@ class TestUsedTrees:
     """Test `Forest.used_trees`, the number of trees in use."""
 
     @pytest.mark.parametrize(
-        ('case', 'num_extra', 'block_size'),
+        ('case', 'num_extra', 'block_size', 'parallel_block_size'),
         [
             # visit the trees in a single block, one at a time, or in blocks
             # with some of the trees not in use in the last
-            ('plain', 3, 8),
-            ('plain', 3, 1),
-            ('plain', 3, 3),
+            ('plain', 3, 8, None),
+            ('plain', 3, 1, None),
+            ('plain', 3, 3, None),
             # all the trees in use, the last block past the end of the forest
-            ('plain', 0, 2),
-            ('leaf_prior', 3, 8),
-            ('sparse', 3, 8),
-            ('quantized', 3, 8),
-            ('binary', 3, 8),
-            ('multivariate', 3, 8),
+            ('plain', 0, 2, None),
+            ('leaf_prior', 3, 8, None),
+            ('sparse', 3, 8, None),
+            ('quantized', 3, 8, None),
+            ('binary', 3, 8, None),
+            ('multivariate', 3, 8, None),
+            # update the leaf indices in blocks, with a tree not in use in the
+            # last block processed, or all of them
+            ('plain', 3, 8, 2),
+            ('plain', 3, 8, 4),
+            ('min_points', 3, 8, 2),
+            ('error_scale', 3, 8, 2),
+            ('one_bin', 3, 8, 4),
+            ('two_bin', 3, 8, 2),
+            ('multivariate', 3, 8, 2),
+            # all the trees in use, so all the blocks
+            ('plain', 0, 2, 1),
         ],
     )
     def test_equivalent_to_fewer_trees(
-        self, keys: split, case: str, num_extra: int, block_size: int
+        self,
+        keys: split,
+        case: str,
+        num_extra: int,
+        block_size: int,
+        parallel_block_size: int | None,
     ) -> None:
         """Trees not in use do not affect the MCMC.
 
@@ -2317,8 +2337,20 @@ class TestUsedTrees:
         alone = init(**copy_arrays(kw))
         extended_kw: dict = dict(kw, num_trees=NUM_TREES + num_extra)
         extended = init(
-            **extended_kw, used_trees=NUM_TREES, sequential_block_size=block_size
+            **extended_kw,
+            used_trees=NUM_TREES,
+            check_num_trees=False,
+            sequential_block_size=block_size,
+            parallel_block_size=parallel_block_size,
         )
+
+        # copy the leaf indices of the trees not in use and the related
+        # caches, because `step` donates the state
+        unused = {
+            name: jnp.copy(x[NUM_TREES:, ...])
+            for name in ('leaf_indices', 'count_tree', 'prec_tree')
+            if (x := getattr(extended.forest, name)) is not None
+        }
 
         for key in keys.pop(10):
             alone = step(random.clone(key), alone)
@@ -2329,6 +2361,10 @@ class TestUsedTrees:
         for name in 'split_tree', 'leaf_tree':
             x = getattr(extended.forest, name)[NUM_TREES:, ...]
             assert_array_equal(x, jnp.zeros_like(x), err_msg=name)
+        for name, x in unused.items():
+            assert_array_equal(
+                getattr(extended.forest, name)[NUM_TREES:, ...], x, err_msg=name
+            )
 
         # compare each of the three terms of `sum_trees_eps`, since it returns
         # only the largest
@@ -2355,7 +2391,11 @@ class TestUsedTrees:
         """Each chain leaves its trees not in use as lone roots with zero leaves."""
         kw = case_init_kw(keys.pop(), 'plain')
         state = init(
-            **kw, used_trees=NUM_TREES, num_chains=3, random_tree_scan=random_tree_scan
+            **kw,
+            used_trees=NUM_TREES,
+            check_num_trees=False,
+            num_chains=3,
+            random_tree_scan=random_tree_scan,
         )
         # the chains have none, some, and all of the trees in use
         assert NUM_TREES > 2
@@ -2386,11 +2426,88 @@ class TestUsedTrees:
         rebuilt = rebuild_derived(copy_arrays(state))
         assert_close_matrices(state.resid, rebuilt.resid, rtol=1e-5)
 
+    @pytest.mark.parametrize(
+        ('case', 'used_trees', 'block_size'),
+        [
+            # blocks of one or more trees, in a loop that stops at the chain
+            # with the most trees in use
+            ('plain', (0, 2, 3), 1),
+            ('plain', (0, 2, 3), 2),
+            ('error_scale', (0, 2, 3), 2),
+            # a chain with all the trees in use, so all the blocks
+            ('plain', (0, 2, 8), 2),
+        ],
+    )
+    def test_parallel_blocks(
+        self, keys: split, case: str, used_trees: tuple[int, ...], block_size: int
+    ) -> None:
+        """Updating the leaf indices in blocks of trees is like all at once."""
+        num_trees = 8
+        kw: dict = dict(case_init_kw(keys.pop(), case), num_trees=num_trees)
+        step_keys = keys.pop(10)
+        states = []
+        # a block with all the trees means no blocks
+        for parallel_block_size in num_trees, block_size:
+            state = init(
+                **copy_arrays(kw),
+                used_trees=num_trees,
+                num_chains=len(used_trees),
+                parallel_block_size=parallel_block_size,
+            )
+            forest = replace(state.forest, used_trees=jnp.array(used_trees, jnp.int32))
+            state = replace(state, forest=forest)
+            for key in step_keys:
+                state = step(random.clone(key), state)
+            states.append(state)
+        at_once, in_blocks = states
+        assert jnp.any(at_once.forest.split_tree)
+        assert_same_states(at_once, replace(in_blocks, config=at_once.config))
+
+    @pytest.mark.parametrize(
+        ('num_trees', 'n', 'expected'),
+        [
+            # few (tree, datapoint) pairs make a single block
+            (1, 100, 1),
+            (200, 10**5, 200),
+            # else at least 8 equal blocks
+            (200, 10**6, 25),
+            (200, 4 * 10**6, 20),
+            (1024, 2**24, 4),
+            (200, 2**27, 1),
+            # unless no divisor of the number of trees suits
+            (7, 2**26, 7),
+            (211, 10**6, 211),
+        ],
+    )
+    def test_default_block_size(self, num_trees: int, n: int, expected: int) -> None:
+        """Check the default size of the blocks of trees to update the leaf indices."""
+        assert default_parallel_block_size(num_trees, n) == expected
+
+    @pytest.mark.parametrize('num_chains', [None, 2])
+    def test_leaf_indices_not_copied(self, keys: split, num_chains: int | None) -> None:
+        """Updating the leaf indices in blocks of trees does not copy them all."""
+        num_trees = 128
+        kw = dict(one_bin_init_kw(keys.pop(), 20_000), num_trees=num_trees)
+        key = keys.pop()
+
+        def temp_size(**kwargs: int | None) -> tuple[int, int]:
+            state = init(**copy_arrays(kw), num_chains=num_chains, **kwargs)
+            analysis = step.lower(key, state).compile().memory_analysis()
+            assert analysis is not None
+            return analysis.temp_size_in_bytes, state.forest.leaf_indices.nbytes
+
+        fixed_temp_size, leaf_indices_size = temp_size()
+        blocks_temp_size, _ = temp_size(used_trees=num_trees, parallel_block_size=16)
+        assert fixed_temp_size < leaf_indices_size / 2
+        assert blocks_temp_size < fixed_temp_size + leaf_indices_size / 2
+
     @pytest.mark.parametrize('used_trees', [None, NUM_TREES])
     def test_sequential_stage_order(self, keys: split, used_trees: int | None) -> None:
         """Visiting the trees in random order is like storing them in that order."""
         kw = case_init_kw(keys.pop(), 'plain')
-        state = init(**kw, used_trees=used_trees, random_tree_scan=True)
+        state = init(
+            **kw, used_trees=used_trees, check_num_trees=False, random_tree_scan=True
+        )
         for key in keys.pop(5):
             state = step(key, state)
         assert jnp.any(state.forest.split_tree)
@@ -2435,27 +2552,45 @@ class TestUsedTrees:
         assert_array_equal(permute(moves.acc), permuted_moves.acc)
         assert_array_equal(permute(moves.to_prune), permuted_moves.to_prune)
 
-    @pytest.mark.parametrize('random_tree_scan', [False, True])
-    def test_sharded(self, keys: split, random_tree_scan: bool) -> None:
-        """The loop over the trees in use works with the chains and the data sharded."""
+    @pytest.mark.parametrize(
+        ('random_tree_scan', 'used_trees', 'parallel_block_size'),
+        [
+            (False, (8, 2, 0, 3), None),
+            (True, (8, 2, 0, 3), None),
+            # update the leaf indices in blocks of trees, as many as the
+            # chains on each device need
+            (False, (3, 2, 0, 3), 2),
+            (False, (8, 2, 0, 3), 2),
+        ],
+    )
+    def test_sharded(
+        self,
+        keys: split,
+        random_tree_scan: bool,
+        used_trees: tuple[int, ...],
+        parallel_block_size: int | None,
+    ) -> None:
+        """The loops over the trees in use work with the chains and the data sharded."""
         if get_device_count() < 4:
             pytest.skip('Need at least 4 devices for this mesh.')
-        kw = case_init_kw(keys.pop(), 'plain')
+        num_trees = 8
+        kw: dict = dict(case_init_kw(keys.pop(), 'plain'), num_trees=num_trees)
         step_keys = keys.pop(10)
         states = []
         for mesh in None, dict(chains=2, data=2):
             state = init(
                 **copy_arrays(kw),
-                used_trees=NUM_TREES,
+                used_trees=num_trees,
                 num_chains=4,
                 mesh=mesh,
                 random_tree_scan=random_tree_scan,
+                parallel_block_size=parallel_block_size,
             )
-            used_trees = jnp.array([NUM_TREES, 2, 0, 3], jnp.int32)
             forest = replace(
                 state.forest,
                 used_trees=device_put(
-                    used_trees, nnone(state.forest.used_trees).sharding
+                    jnp.array(used_trees, jnp.int32),
+                    nnone(state.forest.used_trees).sharding,
                 ),
             )
             state = replace(state, forest=forest)
@@ -2471,6 +2606,18 @@ class TestUsedTrees:
         kw = case_init_kw(keys.pop(), 'plain')
         with pytest.raises(EQX_RUNTIME_ERRORS, match='used_trees must be in'):
             init(**kw, used_trees=used_trees)
+
+    def test_init_rejects_unequal_blocks(self, keys: split) -> None:
+        """`init` wants a variable number of trees that divides into equal blocks."""
+        kw: dict = case_init_kw(keys.pop(), 'plain')
+        assert NUM_TREES % 8
+        with pytest.raises(ValueError, match=r'not a multiple of 8.+use 8,'):
+            init(**kw, used_trees=NUM_TREES)
+        kw = dict(kw, num_trees=16)
+        with pytest.raises(ValueError, match='not a divisor'):
+            init(**kw, used_trees=16, parallel_block_size=3)
+        with pytest.raises(ValueError, match='not a divisor'):
+            init(**kw, parallel_block_size=32, check_num_trees=False)
 
 
 def one_bin_init_kw(key: Key[Array, ''], n: int) -> dict:
@@ -2673,6 +2820,7 @@ def geweke_state(key: Key[Array, ''], case: GewekeCase) -> ChainDataState:
         max_split=jnp.full(case.p, case.nsplits, jnp.uint8),
         num_trees=GEWEKE_NUM_TREES,
         used_trees=case.used_trees,
+        check_num_trees=False,
         p_nonterminal=p_nonterminal,
         leaf_prior_cov_inv=leaf_prior_cov_inv,
         error_scale=jnp.linspace(0.5, 2.0, GEWEKE_N) if case.error_scale else None,

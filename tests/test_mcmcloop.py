@@ -25,6 +25,8 @@
 """Test `bartz.mcmcloop`."""
 
 import io
+import re
+import warnings
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -37,6 +39,7 @@ from jax import (
     block_until_ready,
     debug_key_reuse,
     device_put,
+    effects_barrier,
     jit,
     make_mesh,
     random,
@@ -59,14 +62,21 @@ from bartz.mcmcloop import (
     BurninTrace,
     Callback,
     CallbackTuple,
+    CheckNumTreesCallback,
     CheckPlatformCallback,
     MainTrace,
     PrintCallback,
     TqdmCallback,
+    _callback,
     evaluate_trace,
     run_mcmc,
 )
-from bartz.mcmcloop._callback import _TQDM_REGISTRY, StatsAccumulator, _tqdm_advance
+from bartz.mcmcloop._callback import (
+    _TQDM_REGISTRY,
+    StatsAccumulator,
+    _tqdm_advance,
+    _warn_if_few_trees,
+)
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
@@ -521,6 +531,7 @@ def test_callbacks_npz_roundtrip(tmp_path: Path) -> None:
             PrintCallback.from_state(state),
             TqdmCallback.from_state(state, file=io.StringIO()),
             CheckPlatformCallback('cpu'),
+            CheckNumTreesCallback(),
         )
     )
     path = tmp_path / 'callback.npz'
@@ -562,7 +573,7 @@ def test_stats_ignore_trees_not_in_use(keys: split, num_chains: int | None) -> N
     key = keys.pop()
     alone = run_mcmc(random.clone(key), simple_init(num_chains=num_chains), 10)
     extended = run_mcmc(
-        key, simple_init(ntree=NTREE + 3, used_trees=NTREE, num_chains=num_chains), 10
+        key, simple_init(ntree=NTREE + 4, used_trees=NTREE, num_chains=num_chains), 10
     )
 
     assert_close_matrices(
@@ -599,6 +610,53 @@ def test_check_platform_callback_mismatch(keys: split) -> None:
     callback = CheckPlatformCallback(other_platform)
     with pytest.raises(Exception, match='deduced the platform'):
         block_until_ready(run_mcmc(keys.pop(), simple_init(), 1, callback=callback))
+
+
+FEW_TREES_MESSAGE = r'fewer trees .times chains. than cpu threads'
+
+
+@pytest.fixture
+def eight_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `CheckNumTreesCallback` see a cpu with 8 threads."""
+    monkeypatch.setattr(_callback, 'get_cpu_thread_count', lambda: 8)
+
+
+@pytest.mark.usefixtures('eight_threads')
+@pytest.mark.parametrize(
+    ('leaf_indices_shape', 'slow'),
+    [
+        # fewer trees than threads
+        ((7, 10_000), True),
+        ((2, 3, 10_000), True),
+        # enough trees, also counting the chains
+        ((8, 10_000), False),
+        ((2, 4, 10_000), False),
+        # a single tree, or few datapoints
+        ((1, 10_000), False),
+        ((7, 1000), False),
+    ],
+)
+def test_warn_if_few_trees(leaf_indices_shape: tuple[int, ...], slow: bool) -> None:
+    """Check which trees `CheckNumTreesCallback` takes as slow on cpu."""
+    if slow:
+        with pytest.warns(UserWarning, match=FEW_TREES_MESSAGE):
+            _warn_if_few_trees(leaf_indices_shape)
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            _warn_if_few_trees(leaf_indices_shape)
+
+
+@pytest.mark.usefixtures('eight_threads')
+def test_check_num_trees_callback(keys: split) -> None:
+    """`CheckNumTreesCallback` warns once, and only if the MCMC runs on cpu."""
+    state = simple_init(n=2**11, ntree=4)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        run_mcmc(keys.pop(), state, 3, callback=CheckNumTreesCallback())
+        effects_barrier()
+    count = sum(bool(re.search(FEW_TREES_MESSAGE, str(w.message))) for w in caught)
+    assert count == (get_default_device().platform == 'cpu')
 
 
 # shared test-point count, reused across cases to hit the jax compilation cache

@@ -24,11 +24,13 @@
 
 """Progress-reporting callbacks for `run_mcmc`."""
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial, wraps
 from secrets import randbits
 from typing import Any, Literal, TypeVar
+from warnings import warn
 
 import numpy
 from equinox import Module, field
@@ -39,6 +41,7 @@ from jax.scipy.special import logsumexp
 from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree
 from tqdm.auto import tqdm
 
+from bartz._jaxext import get_cpu_thread_count
 from bartz._typing import kwdict
 from bartz.grove import forest_mean_leaves
 from bartz.mcmcloop._loop import Callback, _replicate
@@ -702,3 +705,42 @@ def _check_platform(actual_platform: str, expected_platform: str) -> None:
             raise RuntimeError(msg)
 
     debug.callback(raise_if_mismatch)
+
+
+@serializable
+class CheckNumTreesCallback(Callback):
+    """Warn if the number of trees is slow on the platform the MCMC runs on.
+
+    On cpu, fewer trees (times chains) than threads slow down each MCMC step,
+    unless there are few datapoints. No number of trees is slow on gpu.
+    """
+
+    def __call__(self, *, state: State, i_total: Int32[Array, ''], **_: Any) -> None:
+        """Check the number of trees on the first iteration, warn if slow."""
+        warn_if_few = partial(_warn_if_few_trees, state.forest.leaf_indices.shape)
+
+        def check() -> None:
+            lax.cond(i_total == 0, partial(debug.callback, warn_if_few), lambda: None)
+
+        # the platform is picked outermost to leave nothing in the loop on gpu
+        lax.platform_dependent(cpu=check, default=lambda: None)
+
+
+def _warn_if_few_trees(leaf_indices_shape: tuple[int, ...]) -> None:
+    """Warn if the trees (times chains) are fewer than the cpu threads."""
+    *chains, num_trees, n = leaf_indices_shape
+    num_chains = math.prod(chains)
+    trees = num_chains * num_trees
+    threads = get_cpu_thread_count()
+    assert threads is not None  # there is a cpu backend if this runs
+    # xla:cpu does not vectorize a loop over the datapoints of fewer trees than
+    # threads, unless there are few enough datapoints that it does not split
+    # them across threads
+    if 1 < trees < threads and n >= 2**11:
+        msg = (
+            f'There are fewer trees (times chains) than cpu threads ({trees} < '
+            f'{threads}), which slows down each MCMC step on cpu. Use at least '
+            f'{-(-threads // num_chains)} trees to avoid this, possibly with '
+            '`used_trees` to keep the additional ones out of the model.'
+        )
+        warn(msg)

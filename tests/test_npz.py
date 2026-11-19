@@ -269,6 +269,7 @@ def test_upgrade_used_trees(archive: str, forests: tuple[str, ...]) -> None:
         assert getattr(state, name).used_trees is None, name
     assert state.config.random_tree_scan is False
     assert state.config.sequential_block_size is None
+    assert state.config.parallel_block_size is None
 
 
 def test_bartz_0_13_stored_values() -> None:

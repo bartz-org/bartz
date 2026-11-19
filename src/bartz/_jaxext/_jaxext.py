@@ -25,6 +25,8 @@
 """Implementation of miscellaneous jax extension utilities."""
 
 import math
+import os
+import re
 import sys
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
@@ -47,6 +49,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.custom_batching import custom_vmap
 from jax.dtypes import prng_key
+from jax.extend.backend import backends
 from jax.scipy.special import ndtr, ndtri
 from jax.sharding import PartitionSpec
 from jax.typing import DTypeLike
@@ -77,6 +80,7 @@ _P = ParamSpec('_P')
 _R = TypeVar('_R')
 _T = TypeVar('_T')
 C = TypeVar('C')
+S = TypeVar('S')
 X = TypeVar('X')
 Y = TypeVar('Y')
 
@@ -410,6 +414,28 @@ def get_device_count() -> int:
     return len(get_default_devices())
 
 
+def get_cpu_thread_count() -> int | None:
+    """Get the number of threads xla uses on cpu, `None` without a cpu backend.
+
+    Xla does not expose the count, so this replicates how xla sets it.
+    """
+    # the first of these environment variables that is an integer replaces the
+    # number of cpus available to the process
+    env = (os.environ.get(name, '') for name in ('PJRT_NPROC', 'NPROC'))
+    env = [int(value) for value in env if re.fullmatch(r'\s*[+-]?\d+\s*', value)]
+    if env:
+        count = env[0]
+    elif hasattr(os, 'sched_getaffinity'):
+        count = len(os.sched_getaffinity(0))
+    else:
+        count = os.cpu_count() or 1
+    if 'cpu' in backends():
+        # there is at least one thread per device
+        return max(count, jax.local_device_count('cpu'))
+    else:
+        return None
+
+
 def is_key(x: object) -> TypeIs[Key[Array, ' *shape']]:
     """Determine if `x` is a jax random key."""
     return isinstance(x, Array) and jnp.issubdtype(x.dtype, prng_key)
@@ -441,7 +467,8 @@ def vmap_max(x: Integer[Array, '']) -> Integer[Array, '']:
     Notes
     -----
     This is a workaround for collectives over vmap named axes not working under
-    `jax.shard_map`. Used only by `variable_length_scan`.
+    `jax.shard_map`, see jax issue #42649. Used by `variable_length_scan` and
+    `variable_length_update`.
     """
     return x
 
@@ -701,21 +728,285 @@ def variable_length_scan(
     return state.carry, ys
 
 
+def dynamic_slice_in_dim(
+    x: Shaped[Array, '...'], start: Integer[Array, ''] | int, size: int, axis: int = 0
+) -> Shaped[Array, '...']:
+    """
+    Like `jax.lax.dynamic_slice_in_dim`, but still a slice under `jax.vmap`.
+
+    If `start` is not batched, the batching rule slices the batched `x` along
+    the shifted `axis`, while the one of `jax.lax.dynamic_slice_in_dim` turns
+    the slice into a gather.
+
+    Parameters
+    ----------
+    x
+        The array to slice.
+    start
+        The index of the first element of the slice.
+    size
+        The length of the slice.
+    axis
+        The (non-negative) axis to slice along.
+
+    Returns
+    -------
+    The slice ``x[..., start : start + size, ...]``.
+    """
+
+    def lax_take(
+        x: Shaped[Array, '...'], start: Integer[Array, ''] | int
+    ) -> Shaped[Array, '...']:
+        return lax.dynamic_slice_in_dim(x, start, size, axis)
+
+    take = custom_vmap(lax_take)
+
+    @take.def_vmap
+    def rule(
+        axis_size: int,
+        in_batched: Sequence[bool],
+        x: Shaped[Array, '...'],
+        start: Integer[Array, '...'] | int,  # jax passes a constant as a python scalar
+    ) -> tuple[Shaped[Array, '...'], bool]:
+        del axis_size
+
+        # jax moves the batch axis of the batched arguments to the front, and
+        # expects it there in the output
+        x_batched, start_batched = in_batched
+        if start_batched:
+            in_axes = (0 if x_batched else None, 0)
+            return vmap(lax_take, in_axes)(x, start), True
+        else:
+            return dynamic_slice_in_dim(x, start, size, axis + 1), True
+
+    return take(x, start)
+
+
+def dynamic_update_slice_in_dim(
+    x: Shaped[Array, '...'],
+    update: Shaped[Array, '...'],
+    start: Integer[Array, ''] | int,
+    axis: int = 0,
+) -> Shaped[Array, '...']:
+    """
+    Like `jax.lax.dynamic_update_slice_in_dim`, but still a slice update under `jax.vmap`.
+
+    If `start` is not batched, the batching rule updates the batched `x` along
+    the shifted `axis`, while the one of `jax.lax.dynamic_update_slice_in_dim`
+    turns the update into a scatter, that xla does not do in place.
+
+    Parameters
+    ----------
+    x
+        The array to update.
+    update
+        The values to write, with the shape of `x` but for the length along
+        `axis`.
+    start
+        The index of the first element to overwrite.
+    axis
+        The (non-negative) axis to update along.
+
+    Returns
+    -------
+    `x` with ``x[..., start : start + update.shape[axis], ...]`` set to `update`.
+    """
+
+    def lax_put(
+        x: Shaped[Array, '...'],
+        update: Shaped[Array, '...'],
+        start: Integer[Array, ''] | int,
+    ) -> Shaped[Array, '...']:
+        return lax.dynamic_update_slice_in_dim(x, update, start, axis)
+
+    put = custom_vmap(lax_put)
+
+    @put.def_vmap
+    def rule(
+        axis_size: int,
+        in_batched: Sequence[bool],
+        x: Shaped[Array, '...'],
+        update: Shaped[Array, '...'],
+        start: Integer[Array, '...'] | int,
+    ) -> tuple[Shaped[Array, '...'], bool]:
+        x_batched, update_batched, start_batched = in_batched
+        if start_batched:
+            in_axes = (0 if x_batched else None, 0 if update_batched else None, 0)
+            return vmap(lax_put, in_axes)(x, update, start), True
+        else:
+            if not x_batched:
+                x = jnp.broadcast_to(x, (axis_size, *x.shape))
+            if not update_batched:
+                update = jnp.broadcast_to(update, (axis_size, *update.shape))
+            return dynamic_update_slice_in_dim(x, update, start, axis + 1), True
+
+    return put(x, update, start)
+
+
+def variable_length_update(
+    update: Callable[[S, X], S],
+    post: Callable[[S, X], Y],
+    state: S,
+    xs: X,
+    length: Integer[Array, ''] | None = None,
+    *,
+    block_size: int | None = None,
+) -> tuple[S, Y]:
+    """
+    Update the first `length` elements of arrays, one block at a time.
+
+    The semantics are given by this Python implementation, with numpy arrays
+    in place of the pytrees of jax arrays::
+
+        def variable_length_update(update, post, state, xs, length, block_size):
+            ys = np.zeros_like(post(state, xs))
+            for start in range(0, length, block_size):
+                block = slice(start, start + block_size)
+                state[block] = update(state[block], xs[block])
+                ys[block] = post(state[block], xs[block])
+            ys[length:] = 0
+            return state, ys
+
+    The number of iterations is set at run time, so the cost scales with
+    `length` while the arrays keep a fixed size, and `state` is overwritten
+    block by block without copying it.
+
+    Parameters
+    ----------
+    update
+        Computes the new `state`. It shall be vectorized along the leading
+        axis, such that the result does not depend on the blocks.
+    post
+        Computes other outputs from the new `state`, vectorized like `update`.
+    state
+        The arrays to update.
+    xs
+        The other inputs of `update` and `post`.
+    length
+        How many elements to process. If `None`, all of them, at once. Under
+        `jax.vmap`, the loop runs up to the maximum `length` in the batch.
+    block_size
+        The number of elements in a block, a divisor of the number of
+        elements. If `None`, all of them: a single block is processed whole
+        without a loop, whatever the `length`.
+
+    Returns
+    -------
+    state : S
+        The updated `state`, left as it was in the blocks not processed.
+    ys : Y
+        The outputs of `post`, zero past `length`.
+
+    Raises
+    ------
+    ValueError
+        If `block_size` is not a divisor of the number of elements.
+
+    Notes
+    -----
+    `post` exists, instead of `update` returning the other outputs too, because
+    xla writes a block back over the old one in place only if nothing else
+    reads the new block before; `post` reads it after, out of the whole array.
+    """
+    (num_el,) = {x.shape[0] for x in tree.leaves((state, xs))}
+    if block_size is None:
+        block_size = num_el
+    if block_size < 1 or num_el % block_size:
+        msg = f'{block_size=} is not a divisor of the {num_el} elements'
+        raise ValueError(msg)
+
+    if length is None or block_size == num_el:
+        # all the elements at once, a single block needs no loop
+        state = update(state, xs)
+        ys = post(state, xs)
+    else:
+        state, ys = update_blocks(
+            update, post, state, xs, length, block_size=block_size
+        )
+
+    if length is not None:
+        # zero the outputs past `length`: the last block processed computes
+        # them and the blocks after it do not, so they would depend on
+        # `block_size`, and on the other lengths in a vmap batch
+        valid = jnp.arange(num_el) < length
+        ys = tree.map(
+            lambda y: jnp.where(
+                valid.reshape(-1, *[1] * (y.ndim - 1)), y, jnp.zeros_like(y)
+            ),
+            ys,
+        )
+
+    return state, ys
+
+
+def update_blocks(
+    update: Callable[[S, X], S],
+    post: Callable[[S, X], Y],
+    state: S,
+    xs: X,
+    length: Integer[Array, ''],
+    *,
+    block_size: int,
+) -> tuple[S, Y]:
+    """Implement `variable_length_update` over more than one block."""
+    (num_el,) = {x.shape[0] for x in tree.leaves((state, xs))}
+
+    # Allocate `ys`, the loop writes the outputs in it block by block. Zeros,
+    # to define the outputs of the blocks not processed. They vary over the
+    # same mesh axes as the outputs of `post`, for the initial loop carry to
+    # have the type of the running one.
+    dummy_ys = eval_shape(lambda: post(update(state, xs), xs))
+    ys = tree.map(lambda y: zeros_varying_like(y, y.shape), dummy_ys)
+
+    # the blocks to process, up to the maximum `length` in a vmap batch to
+    # keep the loop condition unbatched
+    num_blocks = -(-jnp.clip(vmap_max(length), 0, num_el) // block_size)
+
+    def cond(loop: BlocksLoopState) -> Bool[Array, '']:
+        return loop.i_block < num_blocks
+
+    def body(loop: BlocksLoopState) -> BlocksLoopState:
+        start = loop.i_block * block_size
+
+        def take(
+            x: Shaped[Array, ' num_el *shape'],
+        ) -> Shaped[Array, ' block_size *shape']:
+            return dynamic_slice_in_dim(x, start, block_size)
+
+        def put(
+            x: Shaped[Array, ' num_el *shape'],
+            block: Shaped[Array, ' block_size *shape'],
+        ) -> Shaped[Array, ' num_el *shape']:
+            return dynamic_update_slice_in_dim(x, block, start)
+
+        xs_block = tree.map(take, xs)
+        state = update(tree.map(take, loop.carry), xs_block)
+        state = tree.map(put, loop.carry, state)
+        # `post` gets the new block sliced back out of `state`, not the output
+        # of `update`: read by something else first, xla would not write the
+        # block in place
+        ys = tree.map(put, loop.ys, post(tree.map(take, state), xs_block))
+        return BlocksLoopState(loop.i_block + 1, state, ys)
+
+    loop = lax.while_loop(cond, body, BlocksLoopState(jnp.int32(0), state, ys))
+    return loop.carry, loop.ys
+
+
 # WORKAROUND(beartype<=0.23.1): beartype rejects generic NamedTuple hints
 # (beartype#748), so `carry` and `ys` are typed as any pytree. Once fixed, make
 # this `NamedTuple, Generic[C, Y]` and annotate `cond` and `body` in
 # `variable_length_scan` with `BlocksLoopState[C, Y]`.
 class BlocksLoopState(NamedTuple):
-    """The carry of the loop over blocks in `variable_length_scan`."""
+    """The carry of the loop over blocks in `variable_length_scan` and `variable_length_update`."""
 
     i_block: Int32[Array, '']
     """The index of the next block."""
 
     carry: PyTree
-    """The carry of the scan."""
+    """The carry of the scan, or the arrays updated in place."""
 
     ys: PyTree
-    """The stacked outputs of the scan, with an axis over blocks."""
+    """The stacked outputs, with an axis over blocks in `variable_length_scan`."""
 
 
 def zeros_varying_like(

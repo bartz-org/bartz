@@ -31,8 +31,11 @@ from bartz._jaxext._equinox import Module, field, project
 from bartz._jaxext._jaxext import (
     InPlace,
     cpu_barrier,
+    dynamic_slice_in_dim,
+    dynamic_update_slice_in_dim,
     equal_shards,
     float32_matmuls,
+    get_cpu_thread_count,
     get_default_device,
     get_default_devices,
     get_device_count,
@@ -46,6 +49,7 @@ from bartz._jaxext._jaxext import (
     truncated_normal_onesided,
     unique,
     variable_length_scan,
+    variable_length_update,
     vmap_max,
     vmap_nodoc,
 )

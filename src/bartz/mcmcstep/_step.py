@@ -61,6 +61,7 @@ from bartz._jaxext import (
     split,
     truncated_normal_onesided,
     variable_length_scan,
+    variable_length_update,
     vmap_nodoc,
 )
 from bartz._jaxext.random import categorical, loggamma, poisson
@@ -78,6 +79,7 @@ from bartz.mcmcstep._state import (
     StepConfig,
     Wishart,
     chol_with_gersh,
+    default_parallel_block_size,
     round_to_pow2,
     scaled_error_cov_inv,
     shard_map_state,
@@ -394,34 +396,20 @@ def accept_moves_parallel_stage(
     """
     # apply the prunes pending from the previous step to the leaf indices,
     # then, where the new move is grow, modify the state like the move was
-    # accepted.
-    leaf_indices = apply_moves_to_leaf_indices(
-        state.forest.leaf_indices, state.forest.to_prune, state.forest.move_node
-    )
+    # accepted; update the related caches at the nodes involved in the moves
+    updated = update_leaf_indices_and_related_caches(state, moves)
     state = replace(
         state,
         forest=replace(
             state.forest,
             var_tree=moves.var_tree,
-            leaf_indices=apply_grow_to_indices(moves, leaf_indices, state.X),
+            leaf_indices=updated.leaf_indices,
             leaf_tree=adapt_leaf_trees_to_grow_indices(state.forest.leaf_tree, moves),
+            count_tree=updated.count_tree,
+            prec_tree=updated.prec_tree,
         ),
     )
-
-    # update the cached number of datapoints per leaf at the nodes involved
-    # in the moves
-    if (
-        state.forest.min_points_per_decision_node is not None
-        or state.forest.min_points_per_leaf is not None
-        or state.prec_scale is None
-    ):
-        assert state.forest.count_tree is not None
-        count_trees, move_counts = compute_count_trees(
-            state.forest.count_tree, state.forest.leaf_indices, moves, state.config
-        )
-        state = replace(state, forest=replace(state.forest, count_tree=count_trees))
-    else:
-        move_counts = None
+    move_counts = updated.move_counts
 
     # affluence of the nodes touched by each move: whether they would be
     # growable as leaves (admissible rule + enough datapoints). The children
@@ -446,21 +434,13 @@ def accept_moves_parallel_stage(
             ),
         )
 
-    # update the cached number of datapoints per leaf, weighted by error
-    # precision scale, at the nodes involved in the moves
+    # the likelihood precision scale in each leaf is the number of datapoints
+    # without error scales
     if state.prec_scale is None:
-        prec_trees = count_trees
+        prec_trees = state.forest.count_tree
     else:
-        assert state.forest.prec_tree is not None
-        prec_trees = compute_prec_trees(
-            state.forest.prec_tree,
-            state.prec_scale,
-            state.forest.leaf_indices,
-            moves,
-            move_counts,
-            config=state.config,
-        )
-        state = replace(state, forest=replace(state.forest, prec_tree=prec_trees))
+        prec_trees = state.forest.prec_tree
+    assert prec_trees is not None
 
     # compute some missing information about moves
     moves = complete_ratio(moves, state.forest.p_nonterminal)
@@ -487,6 +467,170 @@ def accept_moves_parallel_stage(
 
     return ParallelStageOut(
         state=state, moves=moves, prec_trees=prec_trees, prelkv=prelkv, prelf=prelf
+    )
+
+
+class RelatedCaches(Module):
+    """The caches related to `bartz.mcmcstep.Forest.leaf_indices`."""
+
+    count_tree: UInt32[Array, 'num_trees tree_size'] | None
+    """See `bartz.mcmcstep.Forest.count_tree`."""
+
+    move_counts: Counts | None
+    """The number of datapoints in the nodes involved in the moves, `None` if
+    not counted."""
+
+    prec_tree: (
+        Float32[Array, 'num_trees tree_size']
+        | Float32[Array, 'num_trees k k tree_size']
+        | None
+    )
+    """See `bartz.mcmcstep.Forest.prec_tree`."""
+
+
+class LeafIndicesAndRelatedCaches(RelatedCaches):
+    """The output of `update_leaf_indices_and_related_caches`."""
+
+    leaf_indices: UInt[Array, 'num_trees n']
+    """The leaf indices in the deeper version of each tree (post-GROW,
+    pre-PRUNE)."""
+
+
+class LeafIndicesInputs(Module):
+    """The inputs to `update_leaf_indices_and_related_caches` that are separate for each tree."""
+
+    to_prune: Bool[Array, ' num_trees']
+    """See `bartz.mcmcstep.Forest.to_prune`."""
+
+    move_node: Int32[Array, ' num_trees']
+    """See `bartz.mcmcstep.Forest.move_node`."""
+
+    moves: Moves
+    """The proposed moves, see `propose_moves`."""
+
+    caches: RelatedCaches
+    """The caches to update."""
+
+
+@named_call
+def update_leaf_indices_and_related_caches(
+    state: State, moves: Moves
+) -> LeafIndicesAndRelatedCaches:
+    """
+    Update the leaf indices and related caches to apply the moves.
+
+    Apply to the leaf indices the prunes pending from the previous step and
+    the grow moves; then update the cached number of datapoints per leaf, and
+    its version weighted by error precision scale, at the nodes involved in the
+    moves. The trees not in use are skipped if the trees are processed in
+    blocks, see `bartz.mcmcstep.StepConfig.parallel_block_size`.
+
+    Parameters
+    ----------
+    state
+        A BART mcmc state.
+    moves
+        The proposed moves, see `propose_moves`.
+
+    Returns
+    -------
+    The updated leaf indices and caches, the latter valid in each potential or actual leaf node.
+    """
+    forest = state.forest  # alias for brevity
+
+    # whether to count datapoints per leaf
+    count = (
+        forest.min_points_per_decision_node is not None
+        or forest.min_points_per_leaf is not None
+        or state.prec_scale is None
+    )
+
+    # These two functions take all the trees, or a block of them. A tree not in
+    # use has no pending prune and no allowed move, so they have no effect on
+    # it.
+
+    def update_leaf_indices(
+        leaf_indices: UInt[Array, 'trees n'], xs: LeafIndicesInputs
+    ) -> UInt[Array, 'trees n']:
+        """Apply pending prunes from last MCMC step, then apply proposed grow moves."""
+        leaf_indices = apply_moves_to_leaf_indices(
+            leaf_indices, xs.to_prune, xs.move_node
+        )
+        return apply_grow_to_indices(xs.moves, leaf_indices, state.X)
+
+    def compute_caches(
+        leaf_indices: UInt[Array, 'trees n'], xs: LeafIndicesInputs
+    ) -> RelatedCaches:
+        """Update likelihood precision caches."""
+        caches = xs.caches
+        if count:
+            assert caches.count_tree is not None
+            count_tree, move_counts = compute_count_trees(
+                caches.count_tree, leaf_indices, xs.moves, state.config
+            )
+            caches = replace(caches, count_tree=count_tree, move_counts=move_counts)
+
+        if state.prec_scale is not None:
+            assert caches.prec_tree is not None
+            prec_tree = compute_prec_trees(
+                caches.prec_tree,
+                state.prec_scale,
+                leaf_indices,
+                xs.moves,
+                caches.move_counts,
+                config=state.config,
+            )
+            caches = replace(caches, prec_tree=prec_tree)
+
+        return caches
+
+    old_caches = RelatedCaches(forest.count_tree, None, forest.prec_tree)
+    xs = LeafIndicesInputs(forest.to_prune, forest.move_node, moves, old_caches)
+
+    def run(
+        *, block_size: int | None
+    ) -> tuple[UInt[Array, 'num_trees n'], RelatedCaches]:
+        """Compute everything `block_size` trees at a time."""
+        return variable_length_update(
+            update_leaf_indices,
+            compute_caches,
+            forest.leaf_indices,
+            xs,
+            forest.used_trees,
+            block_size=block_size,
+        )
+
+    used = used_trees_mask(forest)
+    if used is None:
+        leaf_indices, caches = run(block_size=None)
+
+    else:
+        block_size = state.config.parallel_block_size
+        if block_size is None:
+            # xla:cpu is slower in blocks, unless few trees are in use
+            block_size = default_parallel_block_size(*forest.leaf_indices.shape)
+            leaf_indices, caches = lax.platform_dependent(
+                cpu=partial(run, block_size=None),
+                cuda=partial(run, block_size=block_size),
+            )
+        else:
+            leaf_indices, caches = run(block_size=block_size)
+
+        # the caches come out zero for the trees not in use, restore them
+        count_tree, prec_tree = tree.map(
+            lambda new, old: jnp.where(
+                used.reshape(-1, *[1] * (new.ndim - 1)), new, old
+            ),
+            (caches.count_tree, caches.prec_tree),
+            (forest.count_tree, forest.prec_tree),
+        )
+        caches = replace(caches, count_tree=count_tree, prec_tree=prec_tree)
+
+    return LeafIndicesAndRelatedCaches(
+        leaf_indices=leaf_indices,
+        count_tree=caches.count_tree,
+        move_counts=caches.move_counts,
+        prec_tree=caches.prec_tree,
     )
 
 

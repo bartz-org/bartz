@@ -32,7 +32,7 @@ SOFTWARE.
 
 With a variable number of trees (`Forest.used_trees`), an MCMC step should cost in proportion to the trees in use. The part of the step that is vectorized over trees, the update of the leaf indices, gets there by going through the trees in blocks and stopping after the ones in use. On GPU it does that. On CPU it processes all the trees at once, because three behaviours of XLA's CPU backend make blocks slower than that unless few trees are in use.
 
-This note records the three behaviours, the workarounds we wrote and then removed, the measurements, and what is left to try. The third behaviour also slows down a fixed forest with fewer trees than CPU threads, which is why `init` warns about it.
+This note records the three behaviours, the workarounds we wrote and then removed, the measurements, and what is left to try. The third behaviour also slows down a fixed forest with fewer trees than CPU threads, which is why `CheckNumTreesCallback` warns about it.
 
 Everything was measured with jax and jaxlib 0.12.0. The statements about XLA internals come from reading its source and its compiled output at that version, and may not hold in a later one.
 
@@ -48,7 +48,7 @@ With all the workarounds and good block sizes, blocks made the step up to 11% sl
 
 ## The update and its blocks
 
-At the start of each step, `update_leaf_indices_and_caches` in `mcmcstep/_step.py`:
+At the start of each step, `update_leaf_indices_and_related_caches` in `mcmcstep/_step.py`:
 
 1. Applies to `Forest.leaf_indices`, an array of shape `(num_trees, n)`, the prune left pending by the previous step and the grow move proposed in this one. These are two elementwise selections per (tree, datapoint) pair, written over the old array.
 2. Recomputes the cached counts and precisions per leaf at the nodes involved in the moves, which are reductions over the datapoints of each tree.
@@ -131,7 +131,7 @@ This one is not specific to blocks: it applies to any elementwise kernel over an
 
 ### What happens
 
-To run a kernel as `P` tasks, XLA (`ShapePartitionAssigner`) splits the leading dimensions of its output into partitions. `P` grows with the size of the array, about one task per 4000 elements for the prune kernel, up to the number of threads, which is the number of CPUs the process is allowed to run on.
+To run a kernel as `P` tasks, XLA (`ShapePartitionAssigner`) splits the leading dimensions of its output into partitions. `P` grows with the size of the array, about one task per 4000 elements for the prune kernel, up to the number of threads. That is the number of CPUs the process is allowed to run on, unless the environment variable `PJRT_NPROC` or `NPROC` is set to an integer, which replaces it; and it is at least the number of CPU devices jax is configured with. XLA does not expose the count, `get_cpu_thread_count` in `_jaxext` replicates the rule.
 
 - If `T >= P`, it splits the trees into `P` groups. Each task loops over whole trees, with an inner loop over the datapoints that the compiler vectorizes. This is always fast. It is the case of any forest with fewer than about 4000 datapoints, because then the tasks are fewer than the trees.
 - If `T < P`, it also splits the datapoints, into `a` by `b` partitions with `a * b <= P`. The compiled kernel then goes through a flat range of elements cut into `a * b` equal chunks, and finds the tree of each element by dividing its flat index by `n`. With the prune kernel the result is a scalar loop with a division per element (seen in the disassembly).
@@ -237,7 +237,7 @@ The same on the Ryzen 9 7945HX (32 threads):
 
 The slowdown of the whole step starts between 1361 and 3001 datapoints, earlier than for the prune kernel alone.
 
-`init` warns when the trees times the chains are more than one and fewer than the threads, and there are at least 2¹¹ datapoints. It compares with the threads rather than with the chunks, so it also warns in the few cases between the two.
+`CheckNumTreesCallback` warns, on the first iteration of an MCMC that runs on CPU, when the trees times the chains are more than one and fewer than the threads, and there are at least 2¹¹ datapoints. It compares with the threads rather than with the chunks, so it also warns in the few cases between the two.
 
 ### Effect on blocks
 
@@ -314,9 +314,9 @@ It did what it should: on the M1 Pro and the Xeon the step with all the trees in
 
 ## What the code does now
 
-- On CPU, `update_leaf_indices_and_caches` processes all the trees at once. `StepConfig.parallel_block_size` still forces blocks on any backend, to test them and to experiment, without the workarounds of sections 1 and 2.
+- On CPU, `update_leaf_indices_and_related_caches` processes all the trees at once. `StepConfig.parallel_block_size` still forces blocks on any backend, to test them and to experiment, without the workarounds of sections 1 and 2.
 - The blocks are all equal: the block size divides the number of trees, and `init` asks for a multiple of 8 trees when `used_trees` is set so that a suitable divisor always exists.
-- `init` warns on CPU about a forest with fewer trees (times chains) than threads.
+- `CheckNumTreesCallback` warns at run time on CPU about a forest with fewer trees (times chains) than threads. `init` can not, because the state may move to another platform before the MCMC runs. `Bart` does not use the callback yet.
 
 So on CPU a step costs the same whatever the fraction of trees in use, in the part vectorized over trees.
 

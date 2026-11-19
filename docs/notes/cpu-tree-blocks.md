@@ -30,21 +30,21 @@ SOFTWARE.
 
 # Blocks of trees on the CPU backend
 
-With a variable number of trees (`Forest.used_trees`), an MCMC step should cost in proportion to the trees in use. The part of the step that is vectorized over trees, the update of the leaf indices, gets there by going through the trees in blocks and stopping after the ones in use. On GPU it does that. On CPU it processes all the trees at once, because three behaviours of XLA's CPU backend make blocks slower than that unless few trees are in use.
+With a variable number of trees (`Forest.used_trees`), an MCMC step should cost in proportion to the trees in use. The part of the step that is vectorized over trees, the update of the leaf indices, gets there by going through the trees in blocks and stopping after the ones in use. On GPU it does that. On CPU it does that only when few trees are in use; otherwise it processes all the trees at once, because three behaviours of XLA's CPU backend make blocks slower than that.
 
-This note records the three behaviours, the workarounds we wrote and then removed, the measurements, and what is left to try. The third behaviour also slows down a fixed forest with fewer trees than CPU threads, which is why `CheckNumTreesCallback` warns about it.
+This note records the three behaviours, the workarounds we wrote and then removed, the measurements, the plain blocks the code uses now, and what is left to try. The third behaviour also slows down a fixed forest with fewer trees than CPU threads, which is why `CheckNumTreesCallback` warns about it.
 
-Everything was measured with jax and jaxlib 0.12.0. The statements about XLA internals come from reading its source and its compiled output at that version, and may not hold in a later one.
+Everything was measured with jax and jaxlib 0.12.0 and 0.12.0.1. The statements about XLA internals come from reading its source and its compiled output at that version, and may not hold in a later one.
 
 ## Summary
 
 | XLA:CPU behaviour | Effect on blocks | Workaround | What remains |
 |---|---|---|---|
-| A loop with a light body is compiled to one single-threaded kernel | The whole loop over blocks runs on one thread | A two-element sort in the loop body | Nothing |
+| A loop with a light body is compiled to one single-threaded kernel | The whole loop over blocks runs on one thread, unless its body has a scatter, as in the step | A two-element sort in the loop body | Nothing |
 | A write into a slice of an array is never multithreaded | The update of a block, fused with its write, runs on one thread | Compute the block into a temporary, then copy it | The copy is serial: with all the trees in use the blocks take 1.6 to 2.5 times as long as all the trees at once |
 | A kernel over more than one and fewer rows than threads is not vectorized, unless the number of columns is lucky | A block of more than one and fewer trees than threads is several to tens of times slower per element | Blocks of one tree, or of at least as many trees as threads | Also affects a fixed forest smaller than the thread count |
 
-With all the workarounds and good block sizes, blocks made the step up to 11% slower with all the trees in use and 10% to 45% faster with a tenth in use. Processing all the trees at once when more than half are in use removed the slowdown, but the code had become three workarounds deep for a gain confined to forests mostly not in use, so for now the CPU does not use blocks.
+With all the workarounds and good block sizes, blocks made the step up to 11% slower with all the trees in use and 10% to 45% faster with a tenth in use. Processing all the trees at once when more than half are in use removed the slowdown, but the code had become three workarounds deep for a gain confined to forests mostly not in use, so the workarounds were removed. The CPU now uses plain blocks, which are slower per tree, and only when few enough trees are in use that they win anyway; see "Plain blocks when few trees are in use" below.
 
 ## The update and its blocks
 
@@ -74,6 +74,8 @@ def cpu_multithread_loop(x):
 # in the body of the loop over blocks
 return BlocksLoopState(cpu_multithread_loop(loop.i_block) + 1, state, ys)
 ```
+
+The pass also leaves alone a loop that contains a scatter, a custom call, or a few other instructions, or that goes through more than 10⁹ bytes of buffers in an iteration. The update of the caches contains a scatter, so in the step the loop over blocks is not compiled to one kernel even without the sort; the compiled step shows it.
 
 This test pins the behaviour; if its first case fails, the pass has changed:
 
@@ -312,18 +314,125 @@ def run_cpu():
 
 It did what it should: on the M1 Pro and the Xeon the step with all the trees in use went back to 0.99 to 1.01 of the time without blocks, with the gains at 25% and 10% in use unchanged, and no copy of the leaf indices. Compiling both branches added 0 to 0.18 s to the compilation of the step, independently of the sizes. With all the trees in use it saved 4 to 37 ms per step on the M1 Pro, so it paid for itself in tens of steps for any size at which blocks are used at all.
 
+## Plain blocks when few trees are in use
+
+Without the workarounds, the loop over blocks compiles to:
+
+- one kernel that prunes, grows and writes a block in place, on one thread (section 2);
+- the reductions for the caches, on many threads.
+
+There are no slow block sizes (section 3), because the kernel they affect is not split into tasks here.
+
+On one thread the in-place kernel takes as long per tree as the kernel over all the trees. The caches take 2.5 times as long, because the reductions read the block out of a slice of the array. In total a tree costs 1.3 times as much in a block as at once on one thread, whatever the block size. Parallel stage alone on an M1 Pro, 200 trees all in use, n = 10⁶, in milliseconds:
+
+| Threads | Part | All at once | Blocks of 4 |
+|---|---|---|---|
+| 1 | Update | 30.3 | 30.3 |
+| | Caches | 8.1 | 20.4 |
+| | Both | 38.3 | 50.8 |
+| 8 | Update | 7.3 | 30.3 |
+| | Caches | 2.4 | 7.6 |
+| | Both | 9.1 | 38.2 |
+
+So on 8 threads plain blocks take 4 times as long as all the trees at once with all the trees in use, and break even with about a quarter in use. Copying the block out of the array before the reductions, with an `optimization_barrier`, brings the caches from 20.4 to 12.9 ms on one thread, but from 7.6 to 9.1 ms on eight, so we left it out.
+
+### The choice at run time
+
+`step` picks between blocks and all the trees at once at each step, with a rule that needs no measured speed. All the trees at once give each thread one part in `threads` of the trees, so one thread that works on the blocks in use alone can not take longer if they are at most that part of the blocks. We ask for half of it, at most 1 block in `2 * threads`, to cover the factor 1.3 above and the overhead of the loop. The rule is conservative when all the trees at once do not scale with the threads, like here, where 8 threads go 4 times as fast as one.
+
+By default a block has about 2²⁰ (tree, datapoint) pairs, which keeps the overhead of a loop iteration within 20% of the work on a block (blocks of one tree at n = 10⁶), and there are at least `2 * threads` blocks, so that a single block in use can qualify.
+
+Two things about how the choice is written:
+
+- It is a `lax.switch` with the blocks, which update the leaf indices in place, as the first branch. With the branches the other way around, XLA copies the leaf indices twice at each step: once at the end of the branch with the loop, and once after the conditional (seen in the compiled module). This is jax issue [#39449](https://github.com/jax-ml/jax/issues/39449), which also reports that with `lax.cond` the order that copies has changed across versions of jax. A test checks the temporary memory of the step.
+- With jax before 0.12.0 the copies are there with either order, so on those versions the CPU processes all the trees at once. All the trees at once, without the choice, update the leaf indices in place on any version. What they have before 0.12.0, if the number of datapoints is not a multiple of 128, is a temporary of the count reduction: the leaf indices packed four to a 32-bit word (`words` in `popcount_equal`). Then the words do not divide into chunks of 32, the leftover ones are a second use of the packed array, and XLA writes it out instead of fusing it into the sums. It takes as many bytes as the leaf indices, and it predates the variable number of trees. The `StepMemory` benchmark does not show it, because its number of datapoints is a power of two.
+- A loop that runs once or never around the update of all the trees does not work in place of the conditional. XLA moves the part of the update that does not depend on the leaf indices out of the loop, and computes it at every step into a temporary as large as the leaf indices.
+
+### Measurements
+
+Time of a whole step relative to all the trees at once (the code before this choice), on an M1 Pro with 8 threads, as the ratio of the minimum times over interleaved repetitions. The threshold of the rule is 1 block in 16.
+
+| Configuration | Trees in use | All at once (ms) | Relative time | Branch |
+|---|---|---|---|---|
+| n = 10⁶, 200 trees | 200 | 236 | 0.98 to 1.04 | At once |
+| | 25 | 36.3 | 1.01 | At once |
+| | 12 | 21.3 | 0.71 | Blocks |
+| | 2 | 11.4 | 0.32 | Blocks |
+| n = 10⁵, 1000 trees | 1000 | 122 | 0.96 to 1.05 | At once |
+| | 120 | 19.6 | 1.01 | At once |
+| | 60 | 12.6 | 0.73 | Blocks |
+| | 10 | 7.1 | 0.39 | Blocks |
+| n = 10⁴, 200 trees | 200 | 3.6 | 0.99 | At once |
+| | 25 | 1.06 | 0.96 | At once |
+| | 10 | 0.73 | 0.80 | Blocks |
+| n = 10⁶, 200 trees, weights | 200 | 257 | 0.98 to 1.02 | At once |
+| | 25 | 54.4 | 1.00 | At once |
+| | 12 | 38.5 | 0.47 | Blocks |
+| n = 10⁶, 200 trees, multivariate | 200 | 393 | 0.98 | At once |
+| | 12 | 34.4 | 0.81 | Blocks |
+| n = 10⁶, 4 chains of 96 trees | 96 | 380 | 0.99 | At once |
+| | 12 | 62.0 | 0.98 | At once |
+| | 6 | 40.6 | 0.70 | Blocks |
+| n = 4·10⁶, 48 trees | 48 | 201 | 1.00 | At once |
+| | 6 | 32.9 | 0.99 | At once |
+| | 3 | 25.5 | 0.74 | Blocks |
+
+Two runs of the same code against each other gave 0.97 to 1.06 on the rows with all the trees in use, so those rows show no difference. The temporary memory of the step is the same in all the rows. With 10³ datapoints the trees make a single block, and the step is unchanged.
+
+The same with fewer threads (set with `NPROC`), n = 10⁶, 200 trees, where the middle row of each group is at the threshold:
+
+| Threads | Trees in use | Relative time | Branch |
+|---|---|---|---|
+| 1 | 200 | 1.00 | At once |
+| | 100 | 0.95 | Blocks |
+| | 50 | 0.79 | Blocks |
+| 2 | 100 | 1.03 | At once |
+| | 50 | 0.92 | Blocks |
+| | 25 | 0.73 | Blocks |
+| 4 | 50 | 0.94 | At once |
+| | 25 | 0.94 | Blocks |
+| | 12 | 0.72 | Blocks |
+
+Without the factor 2 in the rule, the step at its threshold, with twice as many trees in use, came out at 1.03 on one thread and 1.07 on two.
+
+### Measurements on a Ryzen 9 5900X
+
+On this machine (24 threads, rented), all the trees at once scale poorly with the threads: the parallel stage alone, n = 10⁶ and 200 trees, takes 71 ms on one thread, 56 on two, and 44 to 46 on 8 to 24.
+
+The machine is noisy, and a process settles into its own speed, up to 30% away from another process that runs the same code. So the default path, forced blocks and all the trees at once were timed interleaved within one process. Whole step, n = 10⁶, 200 trees, median over 20 steps, in three fresh processes; the first row of each thread count is at the threshold of the rule:
+
+| Threads | Trees in use | All at once (ms) | Default path, relative |
+|---|---|---|---|
+| 1 | 100 | 374 to 378 | 0.97 to 0.98 |
+| 2 | 50 | 211 | 0.93 |
+| | 25 | 137 | 0.85 |
+| | 12 | 94 | 0.76 |
+| 4 | 25 | 189 to 191 | 0.95 to 1.00 |
+| | 12 | 102 to 119 | 0.88 to 0.92 |
+| 24 | 4 | 69 to 72 | 0.64 to 0.74 |
+
+The default path took as long as forced blocks in all the rows. Above the threshold, where both codes process all the trees at once, two processes gave medians of 0.98 to 1.05 against each other, and 1.00 to 1.11 with the same code in both.
+
+With all 24 threads, forced blocks are not slower than all the trees at once at any fraction in use, within the noise. Whole step, median, blocks relative to all the trees at once:
+
+| Trees in use | 8 | 25 | 50 | 100 | 150 | 200 |
+|---|---|---|---|---|---|---|
+| Relative time | 0.90 | 0.91 | 0.99 | 1.02 | 0.97 | 0.94 |
+
+So on this machine the rule, which uses blocks up to 4 trees in use out of 200, gives up a gain of about 10% up to an eighth of the trees in use.
+
 ## What the code does now
 
-- On CPU, `update_leaf_indices_and_related_caches` processes all the trees at once. `StepConfig.parallel_block_size` still forces blocks on any backend, to test them and to experiment, without the workarounds of sections 1 and 2.
+- On CPU, `update_leaf_indices_and_related_caches` picks at each step: the blocks of trees in use alone if they are at most 1 in `2 * threads` of the blocks, all the trees at once otherwise. The blocks have none of the workarounds of sections 1 and 2. `StepConfig.parallel_block_size` still forces blocks of a given size on any backend.
 - The blocks are all equal: the block size divides the number of trees, and `init` asks for a multiple of 8 trees when `used_trees` is set so that a suitable divisor always exists.
 - `CheckNumTreesCallback` warns at run time on CPU about a forest with fewer trees (times chains) than threads. `init` can not, because the state may move to another platform before the MCMC runs. `Bart` does not use the callback yet.
 
-So on CPU a step costs the same whatever the fraction of trees in use, in the part vectorized over trees.
+So on CPU the part of a step vectorized over trees costs in proportion to the trees in use below that threshold, and the same whatever the fraction in use above it.
 
 ## What is left to try
 
-1. **Blocks of at least as many trees as threads, with the switch at half in use.** This is the configuration measured above, with the block size tied to the thread count. It needs the sort, the barrier and the conditional back. Expected gain: 10% to 45% of the step with a tenth of the trees in use, nothing above half. On a machine with many threads the blocks become coarse.
-2. **Blocks of one tree.** They need no knowledge of the thread count, and win only below 15% to 45% in use.
+1. **Multithreaded blocks between the threshold and half in use.** This is the configuration measured in "Measurements with all the workarounds", with blocks of at least as many trees as threads. It needs the barrier back, and takes over from the plain blocks above their threshold. Expected gain: 10% to 45% of the step with a tenth of the trees in use, nothing above half. On a machine with many threads the blocks become coarse.
+2. **A threshold that follows the real scaling.** The rule assumes that all the trees at once go `threads` times as fast as one thread. On the M1 Pro they go 4 times as fast on 8 threads, so plain blocks would win with up to a quarter of the trees in use, 4 times the threshold. On the Ryzen 9 5900X they go 1.5 times as fast on 24 threads, and plain blocks never lose. A sharper rule needs to know how the machine scales; until then, `parallel_block_size` forces blocks.
 3. **Not writing into a slice.** The serial copy of section 2 comes from keeping the leaf indices in one array. Keeping them as separate arrays per block would remove it, at the cost of changing how the forest is stored. Not tried.
 4. **A fixed forest smaller than the thread count.** Updating its trees one at a time, or padding the kernels to the thread count internally, would remove the need for the warning. Not tried.
 5. **Reporting sections 2 and 3 to XLA.** Both may be missed optimizations rather than design decisions.

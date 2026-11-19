@@ -27,7 +27,7 @@
 import math
 from dataclasses import replace
 from functools import partial
-from typing import overload
+from typing import Literal, overload
 
 from equinox import AbstractVar
 from jax import lax, named_call, random, tree, vmap
@@ -62,6 +62,7 @@ from bartz._jaxext import (
     truncated_normal_onesided,
     variable_length_scan,
     variable_length_update,
+    vmap_max,
     vmap_nodoc,
 )
 from bartz._jaxext.random import categorical, loggamma, poisson
@@ -80,6 +81,7 @@ from bartz.mcmcstep._state import (
     Wishart,
     chol_with_gersh,
     default_parallel_block_size,
+    parallel_min_blocks,
     round_to_pow2,
     scaled_error_cov_inv,
     shard_map_state,
@@ -600,6 +602,25 @@ def update_leaf_indices_and_related_caches(
             block_size=block_size,
         )
 
+    def run_default(
+        platform: Literal['cpu', 'gpu'],
+    ) -> tuple[UInt[Array, 'num_trees n'], RelatedCaches]:
+        """Compute everything in blocks of the default size for the platform."""
+        assert forest.used_trees is not None
+        num_trees, n = forest.leaf_indices.shape
+        block_size = default_parallel_block_size(num_trees, n, platform)
+        in_blocks = partial(run, block_size=block_size)
+        if platform == 'cpu' and block_size < num_trees:
+            # pick the faster of the two at run time; with the branches the
+            # other way around, or with `lax.cond` on some versions of jax, xla
+            # would copy the leaf indices, see jax issue #39449
+            at_once = cpu_at_once_is_faster(forest.used_trees, num_trees, block_size)
+            return lax.switch(
+                at_once.astype(jnp.int32), (in_blocks, partial(run, block_size=None))
+            )
+        else:
+            return in_blocks()
+
     used = used_trees_mask(forest)
     if used is None:
         leaf_indices, caches = run(block_size=None)
@@ -607,11 +628,8 @@ def update_leaf_indices_and_related_caches(
     else:
         block_size = state.config.parallel_block_size
         if block_size is None:
-            # xla:cpu is slower in blocks, unless few trees are in use
-            block_size = default_parallel_block_size(*forest.leaf_indices.shape)
             leaf_indices, caches = lax.platform_dependent(
-                cpu=partial(run, block_size=None),
-                cuda=partial(run, block_size=block_size),
+                cpu=partial(run_default, 'cpu'), cuda=partial(run_default, 'gpu')
             )
         else:
             leaf_indices, caches = run(block_size=block_size)
@@ -632,6 +650,14 @@ def update_leaf_indices_and_related_caches(
         move_counts=caches.move_counts,
         prec_tree=caches.prec_tree,
     )
+
+
+def cpu_at_once_is_faster(
+    used_trees: Int32[Array, ''], num_trees: int, block_size: int
+) -> Bool[Array, '']:
+    """Tell if on cpu updating all the trees at once is faster than the blocks in use."""
+    used_blocks = -(-vmap_max(used_trees) // block_size)
+    return used_blocks * parallel_min_blocks('cpu') > num_trees // block_size
 
 
 @named_call

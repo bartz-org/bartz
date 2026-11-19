@@ -113,6 +113,7 @@ from bartz.mcmcstep import (
     ReductionConfig,
     State,
     Wishart,
+    _state,
     init,
     make_p_nonterminal,
     step,
@@ -162,6 +163,7 @@ from bartz.mcmcstep._step import (
     accept_moves_parallel_stage,
     accept_moves_sequential_stage,
     apply_moves_to_leaf_indices,
+    cpu_at_once_is_faster,
     leaf_scatter,
     log_blocked_mass_tree,
     random_tree_order,
@@ -2464,28 +2466,118 @@ class TestUsedTrees:
         assert_same_states(at_once, replace(in_blocks, config=at_once.config))
 
     @pytest.mark.parametrize(
-        ('num_trees', 'n', 'expected'),
+        ('num_trees', 'n', 'platform', 'expected'),
         [
             # few (tree, datapoint) pairs make a single block
-            (1, 100, 1),
-            (200, 10**5, 200),
+            (1, 100, 'gpu', 1),
+            (200, 10**5, 'gpu', 200),
+            (200, 10**3, 'cpu', 200),
             # else at least 8 equal blocks
-            (200, 10**6, 25),
-            (200, 4 * 10**6, 20),
-            (1024, 2**24, 4),
-            (200, 2**27, 1),
+            (200, 10**6, 'gpu', 25),
+            (200, 4 * 10**6, 'gpu', 20),
+            (1024, 2**24, 'gpu', 4),
+            (200, 2**27, 'gpu', 1),
+            (200, 10**4, 'cpu', 25),
+            (200, 10**5, 'cpu', 10),
+            (200, 10**6, 'cpu', 1),
             # unless no divisor of the number of trees suits
-            (7, 2**26, 7),
-            (211, 10**6, 211),
+            (7, 2**26, 'gpu', 7),
+            (211, 10**6, 'gpu', 211),
         ],
     )
-    def test_default_block_size(self, num_trees: int, n: int, expected: int) -> None:
-        """Check the default size of the blocks of trees to update the leaf indices."""
-        assert default_parallel_block_size(num_trees, n) == expected
+    def test_default_block_size(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        num_trees: int,
+        n: int,
+        platform: Literal['cpu', 'gpu'],
+        expected: int,
+    ) -> None:
+        """Check the default size of the blocks of trees to update the leaf indices.
+
+        On cpu the minimum number of blocks is twice the threads, here 8 as on
+        gpu.
+        """
+        monkeypatch.setattr(_state, 'get_cpu_thread_count', lambda: 4)
+        # WORKAROUND(jax<0.12.0): a single block on cpu, remove these two lines
+        if platform == 'cpu' and jax.__version_info__ < (0, 12, 0):
+            expected = num_trees
+        assert default_parallel_block_size(num_trees, n, platform) == expected
+
+    @pytest.mark.parametrize(
+        ('used_trees', 'block_size', 'threads', 'expected'),
+        [
+            # the blocks in use fit twice the threads times in the 16 trees, or
+            # they do not
+            ((0, 4), 1, 2, False),
+            ((0, 5), 1, 2, True),
+            # a block counts whole
+            ((0, 3), 2, 2, False),
+            ((0, 5), 2, 2, True),
+            # with fewer blocks than twice the threads, any block is too much
+            ((0, 0), 4, 8, False),
+            ((0, 1), 4, 8, True),
+            # no cpu backend
+            ((0, 8), 1, None, False),
+        ],
+    )
+    def test_cpu_at_once_is_faster(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        used_trees: tuple[int, ...],
+        block_size: int,
+        threads: int | None,
+        expected: bool,
+    ) -> None:
+        """All the trees at once win if the chain with the most blocks in use has too many."""
+        monkeypatch.setattr(_state, 'get_cpu_thread_count', lambda: threads)
+        at_once = vmap(
+            partial(cpu_at_once_is_faster, num_trees=16, block_size=block_size)
+        )
+        # the choice is the same for all the chains
+        assert_array_equal(at_once(jnp.array(used_trees)), [expected, expected])
+
+    @pytest.mark.parametrize('used_trees', [(0, 3), (0, 11)])
+    def test_default_parallel_blocks(
+        self, keys: split, monkeypatch: pytest.MonkeyPatch, used_trees: tuple[int, ...]
+    ) -> None:
+        """The default `parallel_block_size` matches all the trees at once.
+
+        There are enough datapoints for the default to divide the 16 trees into
+        blocks. On cpu, with the thread count set to 2, it makes 4 blocks and
+        picks at run time whether to use them: with 3 trees in use `step`
+        processes only the first block, with 11 it processes all the trees at
+        once.
+        """
+        monkeypatch.setattr(_state, 'get_cpu_thread_count', lambda: 2)
+        num_trees = 16
+        kw = dict(one_bin_init_kw(keys.pop(), 2**17), num_trees=num_trees)
+        step_keys = keys.pop(5)
+        states = []
+        # a block with all the trees means no blocks
+        for parallel_block_size in num_trees, None:
+            state = init(
+                **copy_arrays(kw),
+                used_trees=num_trees,
+                num_chains=len(used_trees),
+                parallel_block_size=parallel_block_size,
+            )
+            forest = replace(state.forest, used_trees=jnp.array(used_trees, jnp.int32))
+            state = replace(state, forest=forest)
+            for key in step_keys:
+                state = step(random.clone(key), state)
+            states.append(state)
+        at_once, default = states
+        assert jnp.any(at_once.forest.split_tree)
+        assert_same_states(at_once, replace(default, config=at_once.config))
 
     @pytest.mark.parametrize('num_chains', [None, 2])
     def test_leaf_indices_not_copied(self, keys: split, num_chains: int | None) -> None:
-        """Updating the leaf indices in blocks of trees does not copy them all."""
+        """Updating the leaf indices in blocks of trees does not copy them all.
+
+        Neither does the default, which on cpu picks at run time between blocks
+        and all the trees at once.
+        """
         num_trees = 128
         kw = dict(one_bin_init_kw(keys.pop(), 20_000), num_trees=num_trees)
         key = keys.pop()
@@ -2498,8 +2590,14 @@ class TestUsedTrees:
 
         fixed_temp_size, leaf_indices_size = temp_size()
         blocks_temp_size, _ = temp_size(used_trees=num_trees, parallel_block_size=16)
-        assert fixed_temp_size < leaf_indices_size / 2
+        default_temp_size, _ = temp_size(used_trees=num_trees)
+        # WORKAROUND(jax<0.12.0): on cpu, with a number of datapoints that is
+        # not a multiple of 128 like here, xla writes out the leaf indices
+        # packed for the count reduction; make this unconditional
+        if jax.__version_info__ >= (0, 12, 0):
+            assert fixed_temp_size < leaf_indices_size / 2
         assert blocks_temp_size < fixed_temp_size + leaf_indices_size / 2
+        assert default_temp_size < fixed_temp_size + leaf_indices_size / 2
 
     @pytest.mark.parametrize('used_trees', [None, NUM_TREES])
     def test_sequential_stage_order(self, keys: split, used_trees: int | None) -> None:

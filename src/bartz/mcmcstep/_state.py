@@ -58,6 +58,7 @@ from bartz._jaxext import (
     cholesky,
     field,
     float32_matmuls,
+    get_cpu_thread_count,
     jaxtyping_disabled,
     jit,
     jit_active,
@@ -306,10 +307,10 @@ class Forest(Module):
     used_trees: Int32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
     """The number of trees in use, `None` if all the trees are always in use.
     Only the first `used_trees` trees in the arrays are part of the model;
-    `step` skips the others in the sequential accept/reject loop and, on gpu,
-    in the update of `leaf_indices`. The other trees shall be lone roots with
-    zero leaves, as `step` keeps them, such that the function computed by the
-    forest is the sum of all the trees anyway."""
+    `step` skips the others in the sequential accept/reject loop and, on gpu or
+    with few trees in use, in the update of `leaf_indices`. The other trees
+    shall be lone roots with zero leaves, as `step` keeps them, such that the
+    function computed by the forest is the sum of all the trees anyway."""
 
     grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of grow proposals made during the last MCMC step."""
@@ -458,8 +459,9 @@ class StepConfig(Module):
     """If `Forest.used_trees` is set, the update of `Forest.leaf_indices` and
     related caches in `step`, which is parallel across trees, processes the
     trees in blocks of this size, a divisor of the number of trees, stopping
-    after the trees in use. If `None`, all the trees at once on cpu, and a
-    size set based on the number of datapoints on gpu."""
+    after the trees in use. If `None`, the size is set based on the number of
+    datapoints, and on cpu all the trees are processed at once instead unless
+    few are in use."""
 
     random_tree_scan: bool = field(static=True)
     """Whether the sequential accept/reject loop over trees in `step` visits
@@ -2007,27 +2009,30 @@ def parse_prec_count_num_trees(
     return pcnt
 
 
-# With a variable number of trees, on gpu `step` updates the leaf indices of
-# the trees in use in equal blocks. By default a block has about
-# `PARALLEL_BLOCK_NUMEL` (tree, datapoint) pairs, but there are at least
-# `PARALLEL_MIN_BLOCKS` blocks; unless all the trees have less than
-# `PARALLEL_BLOCK_NUMEL` pairs, or their number has no suitable divisor, then
-# they are a single block, processed at once like a fixed number of trees.
+# With a variable number of trees, `step` can update the leaf indices of the
+# trees in use in equal blocks. By default a block has about
+# `PARALLEL_BLOCK_NUMEL[platform]` (tree, datapoint) pairs, but there are at
+# least `parallel_min_blocks(platform)` blocks; unless all the trees have less
+# than that many pairs, or their number has no suitable divisor, then they are
+# a single block, processed at once like a fixed number of trees.
 
-# Enough pairs to saturate a gpu, so a block of trees takes about as long as
-# its share of all the trees at once.
-PARALLEL_BLOCK_NUMEL = 2**26
+# On gpu, enough pairs to saturate it, so a block of trees takes about as long
+# as its share of all the trees at once. On cpu, enough for the overhead of an
+# iteration of the loop over blocks to be small next to the work on a block.
+PARALLEL_BLOCK_NUMEL = dict(cpu=2**20, gpu=2**26)
 
 # Depending on the sizes, xla on gpu may write a block through a temporary
-# instead of in place. The minimum number of blocks bounds the temporary to a
-# fraction of the leaf indices, also with many chains. `init` wants a variable
-# number of trees to be a multiple of it, such that they always divide into
-# this many blocks.
+# instead of in place. The minimum number of blocks on gpu bounds the temporary
+# to a fraction of the leaf indices, also with many chains. `init` wants a
+# variable number of trees to be a multiple of it, such that they always divide
+# into this many blocks.
 PARALLEL_MIN_BLOCKS = 8
 
 
-def default_parallel_block_size(num_trees: int, n: int) -> int:
-    """Pick the default of `StepConfig.parallel_block_size` on gpu.
+def default_parallel_block_size(
+    num_trees: int, n: int, platform: Literal['cpu', 'gpu']
+) -> int:
+    """Pick the default of `StepConfig.parallel_block_size`.
 
     Parameters
     ----------
@@ -2035,14 +2040,20 @@ def default_parallel_block_size(num_trees: int, n: int) -> int:
         The maximum number of trees.
     n
         The number of datapoints.
+    platform
+        The platform the MCMC runs on.
 
     Returns
     -------
     The number of trees in a block, a divisor of `num_trees`.
     """
-    target = PARALLEL_BLOCK_NUMEL // max(1, n)
-    up = num_trees // PARALLEL_MIN_BLOCKS
-    if target >= num_trees or up == 0:
+    target = PARALLEL_BLOCK_NUMEL[platform] // max(1, n)
+    up = num_trees // parallel_min_blocks(platform)
+    # WORKAROUND(jax<0.12.0): on cpu, xla copies the leaf indices around the
+    # choice at run time between blocks and all the trees in `step`, so make a
+    # single block; once unsupported, drop `copies`
+    copies = platform == 'cpu' and jax.__version_info__ < (0, 12, 0)
+    if target >= num_trees or up == 0 or copies:
         return num_trees
     else:
         target = max(1, min(target, up))
@@ -2050,6 +2061,23 @@ def default_parallel_block_size(num_trees: int, n: int) -> int:
         size = search_divisor(target, num_trees, -(-target // 2), up)
         # the search returns the target if there is no such divisor
         return size if num_trees % size == 0 else num_trees
+
+
+def parallel_min_blocks(platform: Literal['cpu', 'gpu']) -> int:
+    """Return the minimum number of blocks of trees to update the leaf indices in.
+
+    On cpu, the blocks in use are processed alone only if they are at most 1 in
+    this many, else all the trees at once are faster.
+    """
+    if platform == 'cpu':
+        # Xla:cpu updates a block of trees on one thread, and all the trees at
+        # once split across all the threads. So the blocks in use alone are no
+        # slower if they are at most 1 in as many as the threads; make it twice
+        # as many, because a tree takes somewhat longer in a block. Without a
+        # cpu backend this is not used, any number of threads will do.
+        return 2 * (get_cpu_thread_count() or 1)
+    else:
+        return PARALLEL_MIN_BLOCKS
 
 
 def search_divisor(target_divisor: int, dividend: int, low: int, up: int) -> int:

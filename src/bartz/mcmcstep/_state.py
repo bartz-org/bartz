@@ -1190,6 +1190,7 @@ def init(
                     (num_trees, tree_size // 2),
                     n,
                     min_points_per_decision_node,
+                    max_split,
                 ),
                 blocked_vars=get_blocked_vars(filter_splitless_vars, max_split),
                 max_split=max_split,
@@ -1476,18 +1477,18 @@ def initial_resid(  # noqa: PLR0917, `_LazyArray` passes arguments by position
 
 
 def initial_affluence_tree(
-    shape: tuple[int, ...], n: int, min_points_per_decision_node: int | None
+    shape: tuple[int, ...],
+    n: int,
+    min_points_per_decision_node: int | None,
+    max_split: UInt[Array, ' p'],
 ) -> Shaped[Array, '...']:
     """Create the initial value of `Forest.affluence_tree`."""
-    return (
-        jnp.zeros(shape, bool)
-        .at[..., 1]
-        .set(
-            True
-            if min_points_per_decision_node is None
-            else n >= min_points_per_decision_node
-        )
+    enough_points = (
+        True
+        if min_points_per_decision_node is None
+        else n >= min_points_per_decision_node
     )
+    return jnp.zeros(shape, bool).at[..., 1].set(enough_points & jnp.any(max_split))
 
 
 def initial_count_tree(shape: tuple[int, ...], n: int) -> Shaped[Array, '...']:

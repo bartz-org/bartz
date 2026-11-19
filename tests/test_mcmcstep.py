@@ -2163,6 +2163,7 @@ def test_affluence_tree_stays_clean(
         'binary',
         'multivariate',
         'blocked',
+        'all_blocked',
     ],
 )
 def test_rebuild_derived(keys: split, case: str) -> None:
@@ -2212,13 +2213,15 @@ def test_rebuild_derived(keys: split, case: str) -> None:
         )
     elif case == 'chains':
         kw = dict(kw, num_chains=2)
-    elif case == 'blocked':
-        # a predictor without splits, excluded with `blocked_vars`
+    elif case in ('blocked', 'all_blocked'):
+        # predictors without splits, excluded with `blocked_vars`; if they are
+        # all blocked, no move is possible
+        num_blocked = 1 if case == 'blocked' else kw['max_split'].size
         kw = dict(
             kw,
-            X=kw['X'].at[0, :].set(0),
-            max_split=kw['max_split'].at[0].set(0),
-            filter_splitless_vars=1,
+            X=kw['X'].at[:num_blocked, :].set(0),
+            max_split=kw['max_split'].at[:num_blocked].set(0),
+            filter_splitless_vars=num_blocked,
         )
 
     # create initial state

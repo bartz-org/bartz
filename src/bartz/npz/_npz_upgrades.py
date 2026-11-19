@@ -142,6 +142,32 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
     return root, arrays
 
 
+def upgrade_var_perplexity(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
+    """Rename the running sum `peff` of `StatsAccumulator` to `var_perplexity`."""
+
+    def walk(node: Skeleton) -> Skeleton:
+        if type(node) is list:
+            return [walk(v) for v in node]
+        elif type(node) is not dict or node['type'] == 'array':
+            return node
+        elif node['type'] == 'module':
+            fields = {k: walk(v) for k, v in node['fields'].items()}
+            if node['cls'] == 'StatsAccumulator' and fields['sums'] is not None:
+                sums = fields['sums']
+                items = {
+                    'var_perplexity' if k == 'peff' else k: v
+                    for k, v in sums['items'].items()
+                }
+                fields = dict(fields, sums=dict(sums, items=items))
+            return module(node['cls'], **fields)
+        elif type(node['items']) is dict:
+            return dict(node, items={k: walk(v) for k, v in node['items'].items()})
+        else:
+            return dict(node, items=[walk(v) for v in node['items']])
+
+    return walk(root), old
+
+
 # Step k converts format k to k+1. Steps are frozen once released. Use only
 # json/numpy, never bartz classes. Fill new fields with the value that
 # reproduces the old behavior, not the current default; if that is impossible,
@@ -150,4 +176,5 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
 # a fill strategy which may not be `None` if the field is not already optional.
 UPGRADES: tuple[Callable[[Skeleton, Arrays], tuple[Skeleton, Arrays]], ...] = (
     upgrade_bartz_0_13_bcf,
+    upgrade_var_perplexity,
 )

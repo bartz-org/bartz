@@ -316,12 +316,13 @@ class Forest(Module):
     """The number of prune moves accepted during the last MCMC step."""
 
     max_split: UInt[Array, ' p']
-    """The maximum split index for each predictor."""
+    """The maximum split index for each predictor. The predictors with 0 are
+    ignored, as if they did not exist."""
 
     blocked_vars: UInt[Array, ' q'] | None
-    """Indices of not to be used variables/predictors. This shall include at
-    least all the `i` that yield ``max_split[i] == 0``, otherwise behavior is
-    undefined."""
+    """The indices of the predictors with ``max_split == 0``, padded with
+    values >= p, or `None` if there are none. Redundant with `max_split`, it
+    speeds up proposing moves."""
 
     p_nonterminal: Float32[Array, ' 2*half_tree_size']
     """The prior probability of each node being nonterminal (conditional on its
@@ -924,6 +925,8 @@ def init(
         Constant shift added to the sum of trees. 0 if not specified.
     max_split
         The maximum split index for each variable. All split ranges start at 1.
+        The variables with 0 are ignored, as if they did not exist, see
+        `filter_splitless_vars`.
     num_trees
         The number of trees in the forest.
     p_nonterminal

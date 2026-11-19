@@ -374,22 +374,30 @@ class TestSampleTheta:
 class TestSampleS:
     """Test `_prior.sample_s`."""
 
-    def test_prior_distribution(self, keys: split) -> None:
+    @pytest.mark.parametrize(
+        'max_split', [(3, 3, 3, 3), (3, 0, 3, 3, 0, 3)], ids=('all', 'splitless')
+    )
+    def test_prior_distribution(self, keys: split, max_split: tuple[int, ...]) -> None:
         """``softmax(log_s)`` is Dirichlet, so each component is the right Beta.
 
         For a symmetric ``Dirichlet(theta/p, ..., theta/p)`` the marginal of
-        each component is ``Beta(theta/p, theta (p-1)/p)``.
+        each component is ``Beta(theta/p, theta (p-1)/p)``. The variables with
+        ``max_split == 0`` are not counted in ``p``, and have zero probability.
         """
+        max_split_arr = jnp.array(max_split, jnp.uint8)
+        selectable = max_split_arr > 0
         p, theta = 4, 3.0
-        log_s = sample_s(keys.pop(), jnp.full(200_000, theta), p)
+        log_s = sample_s(keys.pop(), jnp.full(200_000, theta), max_split_arr)
         s = softmax(log_s, axis=1)
+        ignored = s[:, ~selectable]
+        assert_array_equal(ignored, jnp.zeros_like(ignored))
         marginal = stats.beta(theta / p, theta * (p - 1) / p)
-        for j in range(p):
+        for j in numpy.flatnonzero(selectable):
             assert ks_1samp(s[:, j], marginal.cdf).pvalue > 1e-3
 
     def test_scalar_theta_shape(self, keys: split) -> None:
         """A scalar `theta` yields a single ``(p,)`` `log_s` vector."""
-        assert sample_s(keys.pop(), 2.0, 5).shape == (5,)
+        assert sample_s(keys.pop(), 2.0, jnp.ones(5, jnp.uint8)).shape == (5,)
 
 
 class PositiveCriterion(RejectionCriterion):

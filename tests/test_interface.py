@@ -1539,6 +1539,12 @@ def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
     with subtests.test('varprob ignores predictor 0'):
         assert jnp.all(bart.varprob[:, 0] == 0)
 
+    sparse = _bart_default(kw, 'sparse')
+    if sparse.enabled and sparse.theta is None and sparse.rho is None:
+        with subtests.test('default rho does not count predictor 0'):
+            rho = nnone(forest.sparsity.rho).item()
+            assert rho == jnp.count_nonzero(forest.max_split).item()
+
     with subtests.test('predictor 0 absent from var_tree'):
         trace = bart._main_trace
         axes = chain_vmap_axes(trace)
@@ -1555,6 +1561,24 @@ def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
         pytest.raises(EQX_RUNTIME_ERRORS, match='predictors with no splits'),
     ):
         Bart(**dict(kw, rm_const=False, seed=random.clone(kw['seed'])))
+
+
+def test_all_constant_predictors(bkw: BartKW) -> None:
+    """With all the predictors constant, hence ignored, nothing is nan."""
+    x = bkw.kw['x_train']
+    # RangeEvenBinner would place cutpoints over the degenerate range
+    kw = dict(
+        bkw.kw, x_train=jnp.broadcast_to(x[:, :1], x.shape), binner=UniqueQuantileBinner
+    )
+    bart = Bart(**kw)
+    assert jnp.all(bart._mcmc_state.forest.max_split == 0)
+    leaves = jax.tree.leaves_with_path((bart._mcmc_state, bart._main_trace))
+    nan = [
+        keystr(path)
+        for path, leaf in leaves
+        if isinstance(leaf, jax.Array) and jnp.any(jnp.isnan(leaf))
+    ]
+    assert not nan
 
 
 def test_output_shapes(bkw: BartKW, keys: split) -> None:

@@ -34,8 +34,7 @@ import numpy
 from equinox import Module, field
 from jax import debug, eval_shape, lax, random, tree
 from jax import numpy as jnp
-from jax.nn import logmeanexp
-from jax.scipy.special import logsumexp
+from jax.nn import log_softmax, logmeanexp
 from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree
 from tqdm.auto import tqdm
 
@@ -89,8 +88,12 @@ class StatsReport(Module):
     steps_done: Int32[Array, '']
     """Number of MCMC steps done, the maximum possible tree life."""
 
-    peff: Float32[Array, ''] | None
-    """Effective number of predictors, or `None` when variable selection is off."""
+    var_perplexity: Float32[Array, ''] | None
+    """Perplexity of the split-variable distribution, an effective number of
+    predictors, or `None` when variable selection is off."""
+
+    p_eff: Int32[Array, ''] | None
+    """Number of predictors with decision rules, or `None` when variable selection is off."""
 
     n_samples: Int32[Array, ''] | None
     """Number of iterations averaged over, or `None` when not averaging."""
@@ -100,9 +103,6 @@ class StatsReport(Module):
 
     max_leaves: int = field(static=True)
     """Maximum possible number of leaves per tree."""
-
-    p: int | None = field(static=True)
-    """Number of predictors, or `None` when variable selection is off."""
 
 
 @serializable
@@ -157,7 +157,7 @@ class StatsAccumulator(Module):
             n_samples = self.count
         return StatsReport(
             **averaged,
-            **self._static_stats(state),
+            **self._constant_stats(state),
             mean_tree_life=state.forest.tree_life.mean(),
             steps_done=state.config.steps_done,
             n_samples=n_samples,
@@ -174,47 +174,54 @@ class StatsAccumulator(Module):
 
         log_s = forest.sparsity.log_s
         if log_s is None:
-            peff = None
+            var_perplexity = None
         else:
             log_s = chain_to_axis(log_s, chain_vmap_axes(forest).sparsity.log_s)
-            peff = StatsAccumulator._effective_predictors(log_s)
+            var_perplexity = StatsAccumulator._var_perplexity(
+                log_s, forest.max_split > 0
+            )
 
         return dict(
             move_acc=(forest.grow_acc_count.mean() + forest.prune_acc_count.mean())
             / prop_total,
             mean_leaves=forest_mean_leaves(split_tree),
-            peff=peff,
+            var_perplexity=var_perplexity,
         )
 
     @staticmethod
-    def _static_stats(state: State) -> dict[str, int | None]:
+    def _constant_stats(state: State) -> dict[str, int | Int32[Array, ''] | None]:
         """Per-iteration diagnostics shown as-is, constant over the run."""
         forest = state.forest
         split_tree = chain_to_axis(
             forest.split_tree, chain_vmap_axes(forest).split_tree
         )
-        log_s = forest.sparsity.log_s
-        if log_s is None:
-            p = None
+        if forest.sparsity.log_s is None:
+            p_eff = None
         else:
-            *_, p = chain_to_axis(log_s, chain_vmap_axes(forest).sparsity.log_s).shape
-        return dict(num_chains=state.num_chains(), max_leaves=split_tree.shape[-1], p=p)
+            p_eff = jnp.count_nonzero(forest.max_split)
+        return dict(
+            num_chains=state.num_chains(), max_leaves=split_tree.shape[-1], p_eff=p_eff
+        )
 
     @staticmethod
-    def _effective_predictors(log_s: Float32[Array, '*chains p']) -> Float32[Array, '']:
+    def _var_perplexity(
+        log_s: Float32[Array, '*chains p'], selectable: Bool[Array, ' p']
+    ) -> Float32[Array, '']:
         """Effective number of predictors used for splitting across all chains.
 
         Perplexity (exponential of the Shannon entropy) of the split-variable
-        distribution ``s = softmax(log_s)`` pooled (averaged) over chains. It is
-        1 when all chains concentrate on a single shared predictor and ``p`` when
+        distribution ``s = softmax(log_s)`` over the `selectable` predictors,
+        pooled (averaged) over chains. It is 1 when all chains concentrate on a
+        single shared predictor and the number of `selectable` predictors when
         the pooled distribution is uniform; in general a pooled distribution
-        spread evenly over ``k`` predictors gives ``k``. Chains are pooled before
-        taking the entropy because predictions average over all chains, so a
-        predictor used by any chain counts as used.
+        spread evenly over ``k`` predictors gives ``k``, and 0 if there are no
+        `selectable` predictors. Chains are pooled before taking the entropy
+        because predictions average over all chains, so a predictor used by any
+        chain counts as used.
         """
         *_, p = log_s.shape
         # normalize each chain
-        log_prob = log_s - logsumexp(log_s, axis=-1, keepdims=True)
+        log_prob = log_softmax(log_s, where=selectable)
         per_chain = log_prob.reshape(-1, p)
         # mix over chains
         log_pool = logmeanexp(per_chain, axis=0)
@@ -222,7 +229,7 @@ class StatsAccumulator(Module):
         # the where avoids the 0 * -inf = nan term where a probability is 0, the
         # same guard `jax.scipy.special.entr` uses, but reusing the log we have
         entropy = -jnp.sum(prob * jnp.where(prob, log_pool, 1.0))
-        return jnp.exp(entropy)
+        return jnp.where(jnp.any(selectable), jnp.exp(entropy), 0.0)
 
 
 @serializable
@@ -550,10 +557,10 @@ def _print_report(
     suffix = f' ({", ".join(msgs)})' if msgs else ''
 
     # variable-selection concentration, only shown when it is enabled
-    if report.peff is None:
+    if report.var_perplexity is None:
         var_msg = ''
     else:
-        var_msg = f'var: {report.peff:.1f}/{report.p}, '
+        var_msg = f'var: {report.var_perplexity:.1f}/{report.p_eff}, '
 
     print(  # noqa: T201, see PrintCallback for why not logging
         f'{prefix}It {it}/{n_iters}, '
@@ -654,8 +661,8 @@ def _tqdm_report(report: StatsReport, bar_id: int, n_iters: int) -> None:
     if avg_over:
         msgs.append(avg_over)
     msgs.append(f'ac{report.move_acc:.0%}')
-    if report.peff is not None:
-        msgs.append(f'va{report.peff:.1f}/{report.p}')
+    if report.var_perplexity is not None:
+        msgs.append(f'va{report.var_perplexity:.1f}/{report.p_eff}')
     msgs.append(f'le{report.mean_leaves:.1f}/{report.max_leaves}')
     msgs.append(f'tl{report.mean_tree_life:.0f}/{report.steps_done}')
     bar.set_postfix_str(' '.join(msgs))

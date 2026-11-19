@@ -43,6 +43,8 @@ from jax import (
     tree,
 )
 from jax import numpy as jnp
+from jax.nn import softmax
+from jax.scipy.special import entr
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
 from jaxtyping import Array, Float, Float32, Int32, Key, Shaped, UInt, UInt8
@@ -62,6 +64,7 @@ from bartz.mcmcloop import (
     CheckPlatformCallback,
     MainTrace,
     PrintCallback,
+    StatsAccumulator,
     TqdmCallback,
     evaluate_trace,
     run_mcmc,
@@ -528,6 +531,35 @@ def test_callbacks_npz_roundtrip(tmp_path: Path) -> None:
     loaded = load_npz(path)
     assert tree.structure(loaded) == tree.structure(callback)
     tree.map(assert_array_equal, loaded, callback)
+
+
+@pytest.mark.parametrize('splitless', [2, 5], ids=['some', 'all'])
+def test_stats_report_ignores_splitless(keys: split, splitless: int) -> None:
+    """The variable selection diagnostics ignore predictors with ``max_split == 0``."""
+    p, n = 5, 3
+    max_split = jnp.full(p, 3, jnp.uint8).at[:splitless].set(0)
+    log_s = random.normal(keys.pop(), (p,))
+    state = init(
+        X=jnp.zeros((p, n), jnp.uint8),
+        y=jnp.zeros(n),
+        offset=0.0,
+        max_split=max_split,
+        num_trees=2,
+        p_nonterminal=make_p_nonterminal(3),
+        leaf_prior_cov_inv=Wishart(None, None, 1.0),
+        error_cov_inv=Wishart(4.0, 4.0, 1.0),
+        log_s=log_s,
+        theta=1.0,
+        sparse_on_at=0,
+        filter_splitless_vars=splitless,
+    )
+    report = StatsAccumulator.initial(state, enabled=False).report(state)
+    assert report.p_eff == p - splitless
+    if splitless < p:
+        expected = jnp.exp(jnp.sum(entr(softmax(log_s[splitless:]))))
+    else:
+        expected = jnp.zeros(())
+    assert_close_matrices(report.var_perplexity, expected, rtol=1e-6)
 
 
 def test_tree_life(keys: split) -> None:

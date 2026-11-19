@@ -86,9 +86,11 @@ class mc_gbart(Module):
 
         .. math::
             (s_1, \ldots, s_p) \sim
-            \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p).
+            \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p),
 
-        If `theta` is not specified, it's a priori distributed according to
+        where p counts only the predictors with decision rules, as the others
+        are ignored (see `rm_const`). If `theta` is not specified, it's a
+        priori distributed according to
 
         .. math::
             \frac{\mathtt{theta}}{\mathtt{theta} + \mathtt{rho}} \sim

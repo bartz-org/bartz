@@ -179,8 +179,7 @@ def sample_sparsity(key: Key[Array, ''], state: StateT) -> StateT:
     if forest.sparsity.theta is None:
         return state
     else:
-        (p,) = forest.max_split.shape
-        log_s = sample_s(key, forest.sparsity.theta, p)
+        log_s = sample_s(key, forest.sparsity.theta, forest.max_split)
         return replace(
             state,
             forest=replace(forest, sparsity=replace(forest.sparsity, log_s=log_s)),

@@ -2383,6 +2383,8 @@ class GewekeCase(NamedTuple):
     leaf_prior: bool = False
     outcome: Literal['continuous', 'binary', 'multivariate', 'mixed'] = 'continuous'
     error_scale: bool = False
+    splitless: int = 0
+    """The number of predictors with ``max_split == 0``, the first ones."""
 
     def __str__(self) -> str:
         defaults = GewekeCase(self.p, self.nsplits)
@@ -2459,7 +2461,8 @@ def geweke_state(key: Key[Array, ''], case: GewekeCase) -> ChainDataState:
         X=random.randint(key, (case.p, GEWEKE_N), 0, case.nsplits + 1, jnp.uint8),
         y=jnp.zeros((*kshape, GEWEKE_N)),
         offset=jnp.zeros(kshape),
-        max_split=jnp.full(case.p, case.nsplits, jnp.uint8),
+        max_split=jnp.full(case.p, case.nsplits, jnp.uint8).at[: case.splitless].set(0),
+        filter_splitless_vars=case.splitless,
         num_trees=GEWEKE_NUM_TREES,
         p_nonterminal=p_nonterminal,
         leaf_prior_cov_inv=leaf_prior_cov_inv,
@@ -2526,7 +2529,7 @@ def chain_summaries(
     if forest.sparsity.theta is not None:
         assert forest.sparsity.log_s is not None
         if p > 1:  # with p=1, s is always [1]
-            varprob = softmax(forest.sparsity.log_s)
+            varprob = softmax(forest.sparsity.log_s, where=forest.max_split > 0)
             out['effective predictors'] = effective_predictors(varprob)
         if forest.sparsity.rho is not None:
             out['theta'] = forest.sparsity.theta
@@ -2602,6 +2605,8 @@ def avg_max_tree_depth(
         GewekeCase(3, 2, sparsity='free'),
         GewekeCase(3, 2, sparsity='supersparse'),
         GewekeCase(10, 1, sparsity='supersparse'),
+        GewekeCase(10, 255, sparsity='free', splitless=3),
+        GewekeCase(10, 1, sparsity='free', splitless=3),
         # with a flatter tree prior, fewer moves are accepted almost surely and
         # the trees run out of decision rules, so the proposal ratios matter
         GewekeCase(1, 1, flat=True),
@@ -3923,28 +3928,41 @@ class TestStepTheta:
     """Test `step_theta`."""
 
     def state(
-        self, keys: split, a: float, b: float, theta: float, p: int = 10
+        self,
+        keys: split,
+        a: float,
+        b: float,
+        theta: float,
+        p: int = 10,
+        *,
+        splitless: int = 0,
     ) -> State:
         """Create a state with variable selection and a fixed `log_s`.
 
-        `theta` is the concentration `log_s` is drawn with, and `rho` is set to `p`.
+        `theta` is the concentration `log_s` is drawn with, and `rho` is set to
+        the number of selectable variables, at least 1. The first `splitless`
+        variables have ``max_split == 0`` and a large random `log_s`, to be
+        ignored.
         """
         n = 5
+        max_split = jnp.ones(p, jnp.uint8).at[:splitless].set(0)
         state = init(
             X=jnp.zeros((p, n), jnp.uint8),
             y=jnp.zeros(n),
             offset=0.0,
-            max_split=jnp.ones(p, jnp.uint8),
+            max_split=jnp.copy(max_split),
             num_trees=2,
             p_nonterminal=make_p_nonterminal(3),
             leaf_prior_cov_inv=Wishart(None, None, 2.0),
             error_cov_inv=Wishart(4.0, 4.0, 1.0),
             a=a,
             b=b,
-            rho=float(p),
+            rho=float(max(p - splitless, 1)),
             sparse_on_at=0,
+            filter_splitless_vars=splitless,
         )
-        log_s = sample_s(keys.pop(), theta, p)
+        log_s = sample_s(keys.pop(), theta, max_split)
+        log_s = jnp.where(max_split > 0, log_s, 100 * random.normal(keys.pop(), (p,)))
         return replace(
             state,
             forest=replace(
@@ -3959,6 +3977,7 @@ class TestStepTheta:
         """Compute the unnormalized log density of ``log(theta / rho)``, in float64."""
         forest = state.forest
         log_s = numpy.asarray(nnone(forest.sparsity.log_s), numpy.float64)
+        log_s = log_s[numpy.asarray(forest.max_split) > 0]
         log_s -= special.logsumexp(log_s)
         a, b = nnone(forest.sparsity.a).item(), nnone(forest.sparsity.b).item()
         rho = nnone(forest.sparsity.rho).item()
@@ -4016,6 +4035,23 @@ class TestStepTheta:
         cdf_func = partial(numpy.interp, xp=v, fp=cdf)
         assert ks_1samp(numpy.asarray(v1, numpy.float64), cdf_func).pvalue > 1e-3
 
+    def test_splitless(self, keys: split) -> None:
+        """The variables with ``max_split == 0`` are ignored, whatever their `log_s`."""
+        state = self.state(keys, 0.5, 1.0, 3.0, splitless=3)
+        v, cdf = self.posterior_cdf(state)
+        v1 = self.run(keys.pop(20_000), state, jnp.float32(0.0))
+        cdf_func = partial(numpy.interp, xp=v, fp=cdf)
+        assert ks_1samp(numpy.asarray(v1, numpy.float64), cdf_func).pvalue > 1e-3
+
+    def test_all_splitless(self, keys: split) -> None:
+        """With all the variables ignored, `theta` is drawn from its prior."""
+        a, b = 0.5, 1.0
+        state = self.state(keys, a, b, 3.0, splitless=10)
+        v = self.run(keys.pop(20_000), state, jnp.float32(0.0))
+        assert jnp.all(jnp.isfinite(v))
+        lambda_ = special.expit(numpy.asarray(v, numpy.float64))
+        assert ks_1samp(lambda_, stats.beta(a, b).cdf).pvalue > 1e-3
+
     @pytest.mark.parametrize('c', [0.01, 5.0, 300.0])
     @pytest.mark.parametrize('p', [1000, 100_000])
     def test_log_density_precision(self, keys: split, c: float, p: int) -> None:
@@ -4032,6 +4068,7 @@ class TestStepTheta:
         log_density = _log_p_v(
             jnp.asarray(v, jnp.float32),
             log_s=nnone(forest.sparsity.log_s),
+            selectable=forest.max_split > 0,
             a=nnone(forest.sparsity.a),
             b=nnone(forest.sparsity.b),
             rho=nnone(forest.sparsity.rho),
@@ -4067,6 +4104,41 @@ class TestStepTheta:
         )
         v = self.run(keys.pop(100), state, jnp.float32(0.0))
         assert jnp.all(jnp.isfinite(v))
+
+
+def test_step_s_splitless(keys: split) -> None:
+    """`step_s` draws `s` over the variables with ``max_split > 0`` only.
+
+    With stumps, the full conditional of `s` is its prior, so each selectable
+    component is ``Beta(theta/p, theta (p-1)/p)``, with ``p`` the number of
+    selectable variables.
+    """
+    max_split = jnp.array([3, 0, 3, 3, 0, 3], jnp.uint8)
+    selectable = max_split > 0
+    p_eff, theta, n = 4, 3.0, 5
+    state = init(
+        X=jnp.zeros((max_split.size, n), jnp.uint8),
+        y=jnp.zeros(n),
+        offset=0.0,
+        max_split=max_split,
+        num_trees=2,
+        p_nonterminal=make_p_nonterminal(3),
+        leaf_prior_cov_inv=Wishart(None, None, 2.0),
+        error_cov_inv=Wishart(4.0, 4.0, 1.0),
+        theta=theta,
+        sparse_on_at=0,
+        filter_splitless_vars=2,
+    )
+
+    @jit
+    @vmap
+    def draw(key: Key[Array, '']) -> Float32[Array, ' p']:
+        return nnone(step_s(key, state).forest.sparsity.log_s)
+
+    s = softmax(draw(keys.pop(20_000)), axis=1, where=selectable)
+    marginal = stats.beta(theta / p_eff, theta * (p_eff - 1) / p_eff)
+    for j in numpy.flatnonzero(selectable):
+        assert ks_1samp(s[:, j], marginal.cdf).pvalue > 1e-3
 
 
 def test_stirling_remainder() -> None:
@@ -4230,7 +4302,7 @@ class TestSampleSAugmentation:
         # get log_s
         log_s = nnone(forest.sparsity.log_s)
         if sparse:
-            log_s = sample_s(keys.pop(), 0.01, p)
+            log_s = sample_s(keys.pop(), 0.01, forest.max_split)
 
         # normalize log_s
         log_s -= logsumexp(log_s)  # all selectable

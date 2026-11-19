@@ -42,6 +42,7 @@ from bartz._jaxext.random import loggamma
 from bartz.grove import is_actual_leaf, is_leaves_parent, traverse_forest
 from bartz.mcmcstep._moves import randint_masked
 from bartz.mcmcstep._state import chol_with_gersh
+from bartz.mcmcstep._step import count_selectable
 
 FloatLike = float | Float32[Array, '']
 
@@ -688,11 +689,14 @@ class WithinRange(RejectionCriterion):
 
 
 def sample_s(
-    key: Key[Array, ''], theta: Float32[Array, ' *batch'] | FloatLike, p: int
-) -> Float32[Array, '*batch {p}']:
+    key: Key[Array, ''],
+    theta: Float32[Array, ' *batch'] | FloatLike,
+    max_split: UInt[Array, ' p'],
+) -> Float32[Array, '*batch p']:
     r"""Sample the log variable selection probabilities from their prior.
 
-    The prior is :math:`s \sim \mathrm{Dirichlet}(\theta/p, \ldots, \theta/p)`.
+    The prior is :math:`s \sim \mathrm{Dirichlet}(\theta/p, \ldots, \theta/p)`
+    over the `p` variables with ``max_split > 0``, the others being ignored.
     The result is `log_s`, the log of unnormalized weights whose `softmax` is
     `s`, the representation expected by `sample_forest_structure`.
 
@@ -703,13 +707,15 @@ def sample_s(
     theta
         The Dirichlet concentration parameter. Batched values draw an
         independent `s` for each entry.
-    p
-        The number of variables.
+    max_split
+        The maximum split value for each variable.
 
     Returns
     -------
-    The log unnormalized variable selection probabilities.
+    The log unnormalized variable selection probabilities, -inf for the ignored variables.
     """
     theta = jnp.asarray(theta)
-    alpha = jnp.broadcast_to(theta[..., None] / p, (*theta.shape, p))
-    return loggamma(key, alpha)
+    selectable = max_split > 0
+    p_eff = count_selectable(selectable)
+    alpha = jnp.broadcast_to(theta[..., None] / p_eff, (*theta.shape, max_split.size))
+    return jnp.where(selectable, loggamma(key, alpha), -jnp.inf)

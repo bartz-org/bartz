@@ -2328,7 +2328,8 @@ def step_s(key: Key[Array, ''], state: State) -> State:
     The prior is s ~ Dirichlet(theta/p, ..., theta/p), and the posterior
     is s ~ Dirichlet(theta/p + varcount, ..., theta/p + varcount), where
     varcount is the count of how many times each variable is used in the
-    current forest.
+    current forest. The variables with ``max_split == 0`` are excluded, also
+    from the count `p`, and get arbitrary values.
 
     Parameters
     ----------
@@ -2365,7 +2366,8 @@ def step_s(key: Key[Array, ''], state: State) -> State:
     # the Dirichlet posterior concentration, optionally completed with the exact
     # accounting of forbidden rules via data augmentation, in log space as the
     # augmentation counts can be huge
-    log_alpha = jnp.log(state.forest.sparsity.theta / p + varcount)
+    p_eff = count_selectable(state.forest.max_split > 0)
+    log_alpha = jnp.log(state.forest.sparsity.theta / p_eff + varcount)
     if state.config.augment:
         log_alpha = jnp.logaddexp(
             log_alpha, sample_s_augmentation(keys.pop(), state.forest)
@@ -2436,6 +2438,7 @@ def step_theta(
     log_p = partial(
         _log_p_v,
         log_s=forest.sparsity.log_s,
+        selectable=forest.max_split > 0,
         a=forest.sparsity.a,
         b=forest.sparsity.b,
         rho=forest.sparsity.rho,
@@ -2502,6 +2505,7 @@ def _log_p_v(
     v: Float32[Array, '*shape'],
     *,
     log_s: Float32[Array, ' p'],
+    selectable: Bool[Array, ' p'],
     a: Float32[Array, ''],
     b: Float32[Array, ''],
     rho: Float32[Array, ''],
@@ -2511,15 +2515,15 @@ def _log_p_v(
     With ``lambda = theta / (theta + rho)``, the Beta(a, b) prior density of
     `lambda`, times the Jacobian ``dlambda / dv = lambda (1 - lambda)``, gives
     the prior density of `v`, proportional to ``lambda^a (1 - lambda)^b``. The
-    likelihood is the Dirichlet density of ``s = softmax(log_s)`` with
-    concentration ``theta / p``.
+    likelihood is the Dirichlet density of ``s = softmax(log_s)`` over the
+    `p_eff` `selectable` variables, with concentration ``theta / p_eff``.
     """
     log_lambda = -jnp.logaddexp(0.0, -v)
     log1m_lambda = -jnp.logaddexp(0.0, v)
-    (p,) = log_s.shape
-    log_c = jnp.log(rho / p) + v  # c = theta / p
+    p_eff = count_selectable(selectable)
+    log_c = jnp.log(rho / p_eff) + v  # c = theta / p_eff
     c = jnp.exp(log_c)
-    theta = p * c
+    theta = p_eff * c
 
     # log of the Dirichlet density, Gamma(theta) / Gamma(c)^p prod(s)^c, up to
     # factors constant in theta. Expanding the log-gammas with Stirling's
@@ -2527,21 +2531,33 @@ def _log_p_v(
     # theta times the divergence -log p - mean(log s) >= 0 of s from uniform,
     # computed from the unnormalized log_s. This avoids cancellations in float32.
     r_theta, r_c = stirling_remainder(jnp.stack([theta, c]))
-    log_lk = (
-        (p - 1) / 2 * log_c - theta * log_mean_exp_deviation(log_s) + r_theta - p * r_c
-    )
+    deviation = log_mean_exp_deviation(log_s, selectable)
+    log_lk = (p_eff - 1) / 2 * log_c - theta * deviation + r_theta - p_eff * r_c
 
     return a * log_lambda + b * log1m_lambda + log_lk
 
 
-def log_mean_exp_deviation(x: Float32[Array, ' p']) -> Float32[Array, '']:
-    """Compute ``log(mean(exp(x - mean(x))))`` without cancellation."""
-    x -= jnp.mean(x)
+def count_selectable(selectable: Bool[Array, ' p']) -> Int32[Array, '']:
+    """Count the true entries, but at least 1 to be safe as divisor."""
+    return jnp.maximum(jnp.count_nonzero(selectable), 1)
+
+
+def log_mean_exp_deviation(
+    x: Float32[Array, ' p'], where: Bool[Array, ' p']
+) -> Float32[Array, '']:
+    """Compute ``log(mean(exp(x - mean(x))))`` over `where` without cancellation, 0 if empty."""
+    num = count_selectable(where)
+
+    def mean(y: Float32[Array, ' p']) -> Float32[Array, '']:
+        # not jnp.mean, which gives nan if `where` is all false
+        return jnp.sum(y, where=where) / num
+
+    x -= mean(x)
     # shift only if exp(x) could overflow, else expm1 retains the precision
-    shift = jnp.maximum(jnp.max(x) - 30.0, 0.0)
+    shift = jnp.maximum(jnp.max(x, where=where, initial=-jnp.inf) - 30.0, 0.0)
     # the result is invariant to shifting x, so remove the residual mean that
     # the centering leaves due to rounding
-    return shift + jnp.log1p(jnp.mean(jnp.expm1(x - shift))) - jnp.mean(x)
+    return shift + jnp.log1p(mean(jnp.expm1(x - shift))) - mean(x)
 
 
 def stirling_remainder(z: Float32[Array, '*shape']) -> Float32[Array, '*shape']:

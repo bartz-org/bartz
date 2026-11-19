@@ -99,6 +99,7 @@ from bartz.mcmcstep._state import (
     leaf_partition_spec,
     outcome_target,
 )
+from bartz.mcmcstep._step import count_selectable
 from bartz.npz import serializable
 from bartz.npz._npz import check_class, load_npz, save_npz
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
@@ -166,9 +167,11 @@ class SparseConfig(Module):
 
     .. math::
         (s_1, \ldots, s_p) \sim
-        \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p).
+        \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p),
 
-    If `theta` is not specified, it's a priori distributed according to
+    where p counts only the predictors with decision rules, as the others are
+    ignored (see the `rm_const` argument of `Bart`). If `theta` is not
+    specified, it's a priori distributed according to
 
     .. math::
         \frac{\mathtt{theta}}{\mathtt{theta} + \mathtt{rho}} \sim
@@ -1383,7 +1386,7 @@ def _check_type_settings(
 
 
 def _process_sparsity_settings(
-    x_train: Real[Array, 'p n'], sparse: SparseConfig
+    max_split: UInt[Array, ' p'], sparse: SparseConfig
 ) -> (
     tuple[None, None, None, None]
     | tuple[FloatLike, None, None, None]
@@ -1397,8 +1400,8 @@ def _process_sparsity_settings(
     else:
         rho = sparse.rho
         if rho is None:
-            p, _ = x_train.shape
-            rho = float(p)
+            # ignore predictors without decision rules
+            rho = count_selectable(max_split > 0).astype(jnp.float32)
         return None, sparse.a, sparse.b, rho
 
 
@@ -1633,7 +1636,7 @@ def _setup_mcmc(
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
     n_burn: int,
 ) -> tuple[State, Key[Array, ''], Device | None, Literal['cpu', 'gpu'] | None]:
-    theta, a, b, rho = _process_sparsity_settings(x_train, sparse)
+    theta, a, b, rho = _process_sparsity_settings(max_split, sparse)
 
     device_kw, device, check_platform = process_device_settings(
         y_train, num_chains, num_chain_devices, num_data_devices, devices
@@ -1819,8 +1822,8 @@ def varprob(forest: Forest, trace: MainTrace) -> Float32[Array, 'ndpost p']:
     ndpost = trace.grow_prop_count.size
     varprob = trace.varprob
     if varprob is None:
-        peff = jnp.count_nonzero(max_split)
-        out = jnp.where(max_split, 1 / peff, 0)
+        p_eff = jnp.count_nonzero(max_split)
+        out = jnp.where(max_split, 1 / p_eff, 0)
         return jnp.broadcast_to(out, (ndpost, p))
     elif isinstance(varprob, VarprobInState):
         log_s = forest.sparsity.log_s

@@ -326,6 +326,7 @@ banned-from = ["jax.random", "jax.lax", "jax.numpy", "jax.tree", "math"]
 "jax.scipy.linalg.cholesky".msg = "Use bartz._jaxext.cholesky"
 "jax.scipy.linalg.solve_triangular".msg = "Use bartz._jaxext.solve_triangular"
 "jax.random.PRNGKey".msg = "User jax.random.key"
+"jax.random.categorical".msg = "Use categorical from bartz._jaxext.random, faster on cpu."
 "jax.random.gamma".msg = "jax's gamma sampler bloats jitted code with rejection loops; use loggamma from bartz._jaxext.random."
 "jax.random.loggamma".msg = "jax's loggamma sampler bloats jitted code with rejection loops; use loggamma from bartz._jaxext.random."
 "jax.random.poisson".msg = "jax's poisson sampler bloats jitted code with rejection loops; use poisson from bartz._jaxext.random."

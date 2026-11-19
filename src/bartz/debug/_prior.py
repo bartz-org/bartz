@@ -38,7 +38,7 @@ from jaxtyping import Array, Bool, Float32, Int32, Key, PyTree, Shaped, UInt
 
 from bartz._jaxext import jit, minimal_unsigned_dtype, solve_triangular
 from bartz._jaxext import split as split_key
-from bartz._jaxext.random import loggamma
+from bartz._jaxext.random import categorical, loggamma
 from bartz.grove import is_actual_leaf, is_leaves_parent, traverse_forest
 from bartz.mcmcstep._moves import randint_masked
 from bartz.mcmcstep._state import chol_with_gersh
@@ -264,7 +264,7 @@ def sample_tree_structure(
             var = randint_masked(keys.pop(), available)
         else:
             logits = jnp.where(available, log_s, jnp.finfo(log_s.dtype).min)
-            var = random.categorical(keys.pop(), logits)
+            var = categorical(keys.pop(), logits)
         split = 1 + random.randint(keys.pop(), (), lower[var], upper[var])
 
         # cast to shorter integer types

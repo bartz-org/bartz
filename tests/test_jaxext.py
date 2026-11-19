@@ -950,7 +950,7 @@ def test_categorical(keys: split) -> None:
     with_inf = logits.at[300::400].set(jnp.inf)
     with_nan = with_inf.at[500::300].set(jnp.nan)
     sample = vmap(categorical, in_axes=(0, None))
-    reference = vmap(random.categorical, in_axes=(0, None))
+    reference = vmap(random.categorical, in_axes=(0, None))  # noqa: TID251
     for x in (
         logits,
         with_inf,

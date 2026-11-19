@@ -142,8 +142,9 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
     return root, arrays
 
 
-def upgrade_var_perplexity(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
-    """Rename the running sum `peff` of `StatsAccumulator` to `var_perplexity`."""
+def upgrade_bartz_0_14(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
+    """Convert an archive written by bartz 0.14."""
+    dropped: set[str] = set()
 
     def walk(node: Skeleton) -> Skeleton:
         if type(node) is list:
@@ -152,6 +153,7 @@ def upgrade_var_perplexity(root: Skeleton, old: Arrays) -> tuple[Skeleton, Array
             return node
         elif node['type'] == 'module':
             fields = {k: walk(v) for k, v in node['fields'].items()}
+            # rename the running sum `peff` to `var_perplexity`
             if node['cls'] == 'StatsAccumulator' and fields['sums'] is not None:
                 sums = fields['sums']
                 items = {
@@ -159,13 +161,18 @@ def upgrade_var_perplexity(root: Skeleton, old: Arrays) -> tuple[Skeleton, Array
                     for k, v in sums['items'].items()
                 }
                 fields = dict(fields, sums=dict(sums, items=items))
+            # drop `Bart._binary_mask`, redundant with the MCMC state
+            elif node['cls'] == 'Bart':
+                dropped.add(fields['_binary_mask']['key'])
+                fields = {k: v for k, v in fields.items() if k != '_binary_mask'}
             return module(node['cls'], **fields)
         elif type(node['items']) is dict:
             return dict(node, items={k: walk(v) for k, v in node['items'].items()})
         else:
             return dict(node, items=[walk(v) for v in node['items']])
 
-    return walk(root), old
+    root = walk(root)
+    return root, {k: v for k, v in old.items() if k not in dropped}
 
 
 # Step k converts format k to k+1. Steps are frozen once released. Use only
@@ -176,5 +183,5 @@ def upgrade_var_perplexity(root: Skeleton, old: Arrays) -> tuple[Skeleton, Array
 # a fill strategy which may not be `None` if the field is not already optional.
 UPGRADES: tuple[Callable[[Skeleton, Arrays], tuple[Skeleton, Arrays]], ...] = (
     upgrade_bartz_0_13_bcf,
-    upgrade_var_perplexity,
+    upgrade_bartz_0_14,
 )

@@ -421,7 +421,6 @@ class Bart(Module):
     _mcmc_state: State
     _mcmc_callback: Callback | None
     _binner: Binner
-    _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
     # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
     _x_train_fmt: Any = field(static=True)
     _device: Device | None = field(static=True)
@@ -585,7 +584,6 @@ class Bart(Module):
         self._mcmc_callback = result.final_callback
         self._binner = binner_obj
         self._x_train_fmt = x_train_fmt
-        self._binary_mask = binary_mask
         self._device = device
 
     def predict(
@@ -925,7 +923,12 @@ class Bart(Module):
         """
         # binary outcomes are filled with NaN, so disable the NaN check
         with debug_nans(False):
-            return get_error_sdev(self._main_trace, self._binary_mask, mean=mean)
+            return get_error_sdev(
+                self._main_trace,
+                self._mcmc_state.binary_indices,
+                has_binary=self._mcmc_state.z is not None,
+                mean=mean,
+            )
 
     @cached_property
     def accept(
@@ -1729,11 +1732,12 @@ def varcount(p: int, trace: MainTrace) -> Int32[Array, 'ndpost p']:
     return lax.collapse(varcount, 0, -1)
 
 
-@jit(static_argnames='mean')
+@jit(static_argnames=('has_binary', 'mean'))
 def get_error_sdev(
     trace: MainTrace,
-    binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
+    binary_indices: Int32[Array, ' kb'] | None,
     *,
+    has_binary: bool,
     mean: bool = False,
 ) -> (
     Float32[Array, ' ndpost']
@@ -1760,7 +1764,11 @@ def get_error_sdev(
     sdev = jnp.sqrt(var)
     if is_uv:
         sdev = sdev.squeeze(-1)
-    return jnp.where(binary_mask, jnp.nan, sdev)
+    if binary_indices is not None:
+        sdev = sdev.at[..., binary_indices].set(jnp.nan, unique_indices=True)
+    elif has_binary:
+        sdev = jnp.full_like(sdev, jnp.nan)
+    return sdev
 
 
 @jit(static_argnames='only_continuous')

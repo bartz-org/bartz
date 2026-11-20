@@ -36,10 +36,12 @@ import pytest
 from jax import (
     NamedSharding,
     device_put,
+    devices,
     enable_x64,
     grad,
     jvp,
     lax,
+    make_jaxpr,
     make_mesh,
     random,
     shard_map,
@@ -50,7 +52,7 @@ from jax import numpy as jnp
 from jax.scipy.linalg import solve_triangular as library_solve_triangular  # noqa: TID251
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.typing import DTypeLike
-from jaxtyping import Array, Float, Float32, Key, Shaped
+from jaxtyping import Array, Bool, Float, Float32, Int32, Key, Shaped
 from pytest_subtests import SubTests
 from scipy.special import ndtr as scipy_ndtr
 from scipy.stats import anderson_ksamp, ks_1samp, truncnorm
@@ -60,18 +62,26 @@ from scipy.stats import poisson as scipy_poisson
 from scipy.stats import uniform as scipy_uniform
 
 from bartz._jaxext import (
+    InPlace,
     autobatch,
     cholesky,
+    dynamic_slice_in_dim,
+    dynamic_update_slice_in_dim,
     equal_shards,
+    get_cpu_thread_count,
     get_default_devices,
     get_device_count,
     is_key,
     jit,
+    sequential_vmap,
     sliced_map,
     solve_triangular,
     split,
     truncated_normal_onesided,
     unique,
+    variable_length_scan,
+    variable_length_update,
+    vmap_max,
 )
 from bartz._jaxext._linalg import cholesky_unrolled, solve_triangular_unrolled
 from bartz._jaxext.random import categorical, loggamma, poisson
@@ -82,6 +92,7 @@ from tests.util import (
     assert_array_equal,
     assert_close_matrices,
     int_seed,
+    nnone,
 )
 
 
@@ -1051,6 +1062,600 @@ def test_equal_shards(equal: bool, replicated: bool) -> None:
     # check the shards are equal or different
     result = equal_shards(x, 'a', mesh=mesh, in_specs=spec)
     assert result.item() == equal
+
+
+@pytest.mark.parametrize(
+    ('env', 'count'),
+    [
+        (dict(NPROC='1000'), 1000),
+        (dict(PJRT_NPROC='2000', NPROC='1000'), 2000),
+        # an override that is not an integer is skipped
+        (dict(PJRT_NPROC='many', NPROC=' 1000 '), 1000),
+        (dict(NPROC='many'), None),
+        # at least one thread per device
+        (dict(NPROC='0'), 0),
+    ],
+)
+def test_get_cpu_thread_count(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], count: int | None
+) -> None:
+    """Check the environment variables that override the count, like in xla."""
+    for name in 'PJRT_NPROC', 'NPROC':
+        monkeypatch.delenv(name, raising=False)
+    default = nnone(get_cpu_thread_count())
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    if count is None:
+        count = default
+    assert get_cpu_thread_count() == max(count, len(devices('cpu')))
+
+
+def test_get_cpu_thread_count_without_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """There is no count if jax has no cpu backend."""
+    monkeypatch.setattr('bartz._jaxext._jaxext.backends', dict)
+    assert get_cpu_thread_count() is None
+
+
+def count_up_to_vmap_max(n: Int32[Array, '']) -> Int32[Array, '']:
+    """Count up to `n` with a loop of `vmap_max(n)` iterations."""
+    bound = vmap_max(n)
+
+    def body(carry: tuple[Int32[Array, ''], Int32[Array, '']]) -> tuple:
+        i, count = carry
+        return i + 1, count + (i < n)
+
+    _, count = lax.while_loop(
+        lambda carry: carry[0] < bound, body, (jnp.int32(0), jnp.zeros_like(n))
+    )
+    return count
+
+
+class TestVmapMax:
+    """Test `_jaxext.vmap_max`."""
+
+    def test_unbatched(self) -> None:
+        """Without vmap it is the identity."""
+        assert_array_equal(jit(vmap_max)(jnp.int32(3)), jnp.int32(3))
+
+    def test_batched(self) -> None:
+        """Under vmap it is the maximum, not batched."""
+        x = jnp.array([1, 3, 2, 0], jnp.int32)
+        out = vmap(vmap_max, out_axes=None)(x)
+        assert_array_equal(out, jnp.int32(3))
+
+    def test_nested(self) -> None:
+        """Under nested vmaps it is the maximum over all of them."""
+        x = jnp.array([[1, 3, 2], [0, 5, 1]], jnp.int32)
+        out = vmap(vmap(vmap_max, out_axes=None), out_axes=None)(x)
+        assert_array_equal(out, jnp.int32(5))
+
+    def test_empty(self) -> None:
+        """Over an empty batch it is 0."""
+        out = vmap(vmap_max, out_axes=None)(jnp.zeros(0, jnp.int32))
+        assert_array_equal(out, jnp.int32(0))
+
+    def test_loop_not_batched(self) -> None:
+        """A loop bounded by it has an unbatched condition, and gives each count."""
+        x = jnp.array([1, 3, 2, 0], jnp.int32)
+        f = vmap(count_up_to_vmap_max)
+        assert_array_equal(jit(f)(x), x)
+        (eqn,) = [e for e in make_jaxpr(f)(x).jaxpr.eqns if e.primitive is lax.while_p]
+        (cond_out,) = eqn.params['cond_jaxpr'].out_avals
+        assert cond_out.shape == ()
+
+    def test_shard_map(self) -> None:
+        """It works under vmap within `shard_map`, without collectives."""
+        nd = get_device_count()
+        if nd < 2:  # branch covered in single jax cpu test config
+            pytest.skip('Requires at least 2 devices')
+        mesh = make_mesh(
+            (2,), ('a',), axis_types=(AxisType.Auto,), devices=get_default_devices()[:2]
+        )
+        x = device_put(
+            jnp.array([1, 3, 2, 0], jnp.int32), NamedSharding(mesh, PartitionSpec('a'))
+        )
+        f = shard_map(
+            vmap(count_up_to_vmap_max),
+            mesh=mesh,
+            in_specs=PartitionSpec('a'),
+            out_specs=PartitionSpec('a'),
+        )
+        assert_array_equal(jit(f)(x), jnp.array([1, 3, 2, 0], jnp.int32))
+
+
+def sum_rows(
+    scale: Float32[Array, ''], table: Float32[Array, 'rows cols'] | InPlace
+) -> Float32[Array, ' cols']:
+    """Sum the rows of `table` times `scale`, reading them one at a time in a loop."""
+    # an `InPlace` view has no `shape`, so take it from a column and a row
+    (num_rows,) = table[:, 0].shape
+    (num_cols,) = table[0, :].shape
+
+    def body(
+        i: Int32[Array, ''], acc: Float32[Array, ' cols']
+    ) -> Float32[Array, ' cols']:
+        return acc + scale * table[i, :]
+
+    return lax.fori_loop(0, num_rows, body, jnp.zeros(num_cols))
+
+
+class TestSequentialVmap:
+    """Test `_jaxext.sequential_vmap`."""
+
+    @pytest.fixture
+    def args(
+        self, keys: split
+    ) -> tuple[Float32[Array, ' 4'], Float32[Array, '4 rows cols']]:
+        """Generate a batch of inputs to `sum_rows`."""
+        scale = random.normal(keys.pop(), (4,))
+        table = random.normal(keys.pop(), (4, 100, 1000))
+        return scale, table
+
+    def test_unbatched(self, args: tuple) -> None:
+        """Without vmap, it is the function itself."""
+        scale, table = args
+        f = sequential_vmap(sum_rows, in_place=lambda _scale, table: table)
+        assert_close_matrices(
+            f(scale[0], table[0]), sum_rows(scale[0], table[0]), rtol=1e-6
+        )
+
+    @pytest.mark.parametrize('in_place', [False, True])
+    def test_batched(self, args: tuple, in_place: bool) -> None:
+        """Under vmap, it is like vmap, with the in-place arguments passed as views."""
+        seen = []
+
+        def f(
+            scale: Float32[Array, ''], table: Float32[Array, 'rows cols'] | InPlace
+        ) -> Float32[Array, ' cols']:
+            seen.append(type(table))
+            return sum_rows(scale, table)
+
+        g = sequential_vmap(
+            f, in_place=(lambda _scale, table: table) if in_place else None
+        )
+        out = jit(vmap(g))(*args)
+        assert_close_matrices(out, vmap(sum_rows)(*args), rtol=1e-5)
+        assert (InPlace in seen) == in_place
+
+    def test_no_copy(self, args: tuple) -> None:
+        """The arrays read in place are not copied apart for each batch element."""
+
+        def temp(in_place: bool) -> int:
+            g = sequential_vmap(
+                sum_rows, in_place=(lambda _scale, table: table) if in_place else None
+            )
+            analysis = jit(vmap(g)).lower(*args).compile().memory_analysis()
+            assert analysis is not None
+            return analysis.temp_size_in_bytes
+
+        _, table = args
+        element = table[0, :, :].nbytes
+        assert temp(in_place=False) >= element
+        assert temp(in_place=True) < element
+
+    def test_unbatched_argument(self, args: tuple) -> None:
+        """An unbatched argument is passed as is, also if to be read in place."""
+        scale, table = args
+        g = sequential_vmap(sum_rows, in_place=lambda _scale, table: table)
+        out = jit(vmap(g, in_axes=(0, None)))(scale, table[0])
+        desired = vmap(sum_rows, in_axes=(0, None))(scale, table[0])
+        assert_close_matrices(out, desired, rtol=1e-5)
+
+    def test_empty(self, args: tuple) -> None:
+        """Over an empty batch, the output is empty."""
+        scale, table = args
+        _, _, num_cols = table.shape
+        g = sequential_vmap(sum_rows, in_place=lambda _scale, table: table)
+        out = vmap(g)(scale[:0], table[:0, :, :])
+        assert out.shape == (0, num_cols)
+
+
+# a toy function to scan with `variable_length_scan`, with its inputs and outputs
+VlsToyX = tuple[Float32[Array, ''], Int32[Array, ' 2']]
+VlsToyY = tuple[Float32[Array, ''], Int32[Array, ' 2']]
+VlsToyXs = tuple[Float32[Array, ' n'], Int32[Array, 'n 2']]
+VlsToyYs = tuple[Float32[Array, ' n'], Int32[Array, 'n 2']]
+
+
+def vls_toy_step(
+    carry: Float32[Array, ''], x: VlsToyX, valid: Bool[Array, ''] | None
+) -> tuple[Float32[Array, ''], VlsToyY]:
+    """Accumulate `a` in the carry, leaving it unchanged if not `valid`."""
+    a, b = x
+    if valid is not None:
+        a = jnp.where(valid, a, 0.0)
+    carry += a
+    return carry, (2 * carry, b + 1)
+
+
+def vls_toy_xs(
+    key: Key[Array, ''], batch_shape: tuple[int, ...] = ()
+) -> tuple[Float32[Array, '*batch n'], Int32[Array, '*batch n 2']]:
+    """Generate the inputs of `vls_toy_step` for 7 iterations."""
+    keys = split(key)
+    a = random.normal(keys.pop(), (*batch_shape, 7))
+    b = random.randint(keys.pop(), (*batch_shape, 7, 2), 0, 10)
+    return a, b
+
+
+def vls_toy_reference(xs: VlsToyXs, length: int) -> tuple[Float32[Array, ''], VlsToyYs]:
+    """Scan `vls_toy_step` over the first `length` inputs, with zero outputs after."""
+    a, b = xs
+    carry, (y, z) = lax.scan(
+        lambda carry, x: vls_toy_step(carry, x, None),
+        jnp.zeros(()),
+        (a[:length], b[:length]),
+    )
+    (num,) = a.shape
+    y = jnp.zeros(num).at[:length].set(y)
+    z = jnp.zeros((num, 2), b.dtype).at[:length, :].set(z)
+    return carry, (y, z)
+
+
+class TestVariableLengthScan:
+    """Test `_jaxext.variable_length_scan`."""
+
+    def test_fixed_length(self, keys: split) -> None:
+        """Without `length`, it is `lax.scan`."""
+        xs = vls_toy_xs(keys.pop())
+        init = jnp.zeros(())
+        out = variable_length_scan(vls_toy_step, init, xs, unroll=2)
+        desired = lax.scan(lambda carry, x: vls_toy_step(carry, x, None), init, xs)
+        tree.map(partial(assert_close_matrices, rtol=1e-6), out, desired)
+
+    @pytest.mark.parametrize(
+        ('length', 'block_size', 'unroll'),
+        [
+            # nothing to scan
+            (0, 3, 1),
+            # one element per block
+            (4, 1, 1),
+            # the last block visited goes past `length`, the last block is not
+            # visited
+            (5, 3, 1),
+            # `length` past the end of `xs`, the last block goes past it, the
+            # unrolling does not divide the block
+            (9, 3, 2),
+            # a single block, smaller than `block_size`, fully unrolled
+            (6, 10, True),
+        ],
+    )
+    def test_matches_scan(
+        self, keys: split, length: int, block_size: int, unroll: int | bool
+    ) -> None:
+        """It scans over the first `length` elements, with zero outputs after."""
+        xs = vls_toy_xs(keys.pop())
+        out = jit(
+            partial(variable_length_scan, block_size=block_size, unroll=unroll),
+            static_argnums=(0,),
+        )(vls_toy_step, jnp.zeros(()), xs, jnp.int32(length))
+        tree.map(
+            partial(assert_close_matrices, rtol=1e-6),
+            out,
+            vls_toy_reference(xs, length),
+        )
+
+    def test_vmap(self, keys: split) -> None:
+        """Under vmap, each element stops at its length, with an unbatched condition.
+
+        The inputs are read and the outputs written without gather or scatter.
+        """
+        xs = vls_toy_xs(keys.pop(), (4,))
+        lengths = jnp.array([0, 3, 7, 5], jnp.int32)
+        f = vmap(
+            partial(variable_length_scan, vls_toy_step, jnp.zeros(()), block_size=2)
+        )
+        out = jit(f)(xs, lengths)
+        for i, length in enumerate(lengths.tolist()):
+            desired = vls_toy_reference(tree.map(lambda x, i=i: x[i, ...], xs), length)
+            actual = tree.map(lambda x, i=i: x[i, ...], out)
+            tree.map(partial(assert_close_matrices, rtol=1e-6), actual, desired)
+        (eqn,) = [
+            e
+            for e in make_jaxpr(f)(xs, lengths).jaxpr.eqns
+            if e.primitive is lax.while_p
+        ]
+        (cond_out,) = eqn.params['cond_jaxpr'].out_avals
+        assert cond_out.shape == ()
+        text = jit(f).lower(xs, lengths).as_text()
+        assert 'gather' not in text
+        assert 'scatter' not in text
+
+    def test_shard_map(self, keys: split) -> None:
+        """It works under vmap within `shard_map`."""
+        nd = get_device_count()
+        if nd < 2:  # branch covered in single jax cpu test config
+            pytest.skip('Requires at least 2 devices')
+        mesh = make_mesh(
+            (2,), ('a',), axis_types=(AxisType.Auto,), devices=get_default_devices()[:2]
+        )
+        sharding = NamedSharding(mesh, PartitionSpec('a'))
+        xs = device_put(vls_toy_xs(keys.pop(), (4,)), sharding)
+        lengths = device_put(jnp.array([0, 3, 7, 5], jnp.int32), sharding)
+
+        def scan(xs: VlsToyXs, length: Int32[Array, '']) -> tuple:
+            # like with `lax.scan`, the carry shall vary over the mesh axes as
+            # it will within the loop
+            a, _ = xs
+            init = jnp.zeros_like(a[0])
+            return variable_length_scan(vls_toy_step, init, xs, length, block_size=3)
+
+        f = shard_map(
+            vmap(scan),
+            mesh=mesh,
+            in_specs=PartitionSpec('a'),
+            out_specs=PartitionSpec('a'),
+        )
+        desired = vmap(scan)(xs, lengths)
+        tree.map(
+            partial(assert_close_matrices, rtol=1e-6, reduce_rank=True),
+            jit(f)(xs, lengths),
+            desired,
+        )
+
+
+class TestDynamicSliceInDim:
+    """Test `_jaxext.dynamic_slice_in_dim` and `_jaxext.dynamic_update_slice_in_dim`."""
+
+    @pytest.fixture
+    def x(self, keys: split) -> Float32[Array, '3 7 5']:
+        """Generate an array to slice."""
+        return random.normal(keys.pop(), (3, 7, 5))
+
+    @pytest.mark.parametrize('axis', [0, 1, 2])
+    def test_unbatched(self, x: Float32[Array, '3 7 5'], axis: int) -> None:
+        """Without vmap, they are the functions in `jax.lax`."""
+        start = jnp.int32(1)
+        block = dynamic_slice_in_dim(x, start, 2, axis)
+        assert_array_equal(block, lax.dynamic_slice_in_dim(x, start, 2, axis))
+        assert_array_equal(
+            dynamic_update_slice_in_dim(x, -block, start, axis),
+            lax.dynamic_update_slice_in_dim(x, -block, start, axis),
+        )
+
+    @pytest.mark.parametrize('nested', [False, True])
+    def test_vmap_stays_slice(self, x: Float32[Array, '3 7 5'], nested: bool) -> None:
+        """Vmapped over the array, with the same start, they do not gather or scatter."""
+
+        def negate_block(
+            x: Float32[Array, '*batch 7 5'], start: Int32[Array, '']
+        ) -> Float32[Array, '*batch 7 5']:
+            block = dynamic_slice_in_dim(x, start, 2)
+            return dynamic_update_slice_in_dim(x, -block, start)
+
+        def reference(
+            x: Float32[Array, '*batch 7 5'], start: int
+        ) -> Float32[Array, '*batch 7 5']:
+            return x.at[..., start : start + 2, :].multiply(-1)
+
+        if nested:
+            x = jnp.stack([x, 2 * x])
+        f = vmap(negate_block, in_axes=(0, None))
+        if nested:
+            f = vmap(f, in_axes=(0, None))
+        start = jnp.int32(4)
+        assert_array_equal(f(x, start), reference(x, 4))
+
+        text = jit(f).lower(x, start).as_text()
+        assert 'dynamic_slice' in text
+        assert 'dynamic_update_slice' in text
+        assert 'gather' not in text
+        assert 'scatter' not in text
+
+    def test_vmap_batched_start(self, x: Float32[Array, '3 7 5']) -> None:
+        """With a batched start, they are like the vmapped functions in `jax.lax`."""
+        start = jnp.array([0, 5, 2], jnp.int32)
+        take = partial(dynamic_slice_in_dim, size=2)
+        blocks = vmap(take)(x, start)
+        desired = vmap(partial(lax.dynamic_slice_in_dim, slice_size=2))(x, start)
+        assert_array_equal(blocks, desired)
+        assert_array_equal(
+            vmap(dynamic_update_slice_in_dim)(x, -blocks, start),
+            vmap(lax.dynamic_update_slice_in_dim, in_axes=(0, 0, 0, None))(
+                x, -blocks, start, 0
+            ),
+        )
+        # only the start is batched
+        assert_array_equal(
+            vmap(take, in_axes=(None, 0))(x[0, :, :], start),
+            jnp.stack([x[0, i : i + 2, :] for i in start.tolist()]),
+        )
+
+    def test_vmap_broadcasts(self, x: Float32[Array, '3 7 5']) -> None:
+        """An unbatched array is updated with a batched block, and vice versa."""
+        start = jnp.int32(3)
+        blocks = x[:, :2, :]
+        out = vmap(dynamic_update_slice_in_dim, in_axes=(None, 0, None))(
+            x[0, :, :], blocks, start
+        )
+        desired = jnp.stack([x[0, :, :].at[3:5, :].set(block) for block in blocks])
+        assert_array_equal(out, desired)
+        out = vmap(dynamic_update_slice_in_dim, in_axes=(0, None, None))(
+            x, blocks[0, :, :], start
+        )
+        assert_array_equal(out, x.at[:, 3:5, :].set(blocks[0, :, :]))
+
+
+# a toy update for `variable_length_update`; `state` is not idempotent under it
+# to detect elements processed twice
+VluToyXs = tuple[Float32[Array, ' n'], Int32[Array, 'n 2']]
+VluToyYs = tuple[Float32[Array, ' n'], Int32[Array, 'n 2']]
+
+
+def vlu_toy_update(state: Float32[Array, 'n 3'], xs: VluToyXs) -> Float32[Array, 'n 3']:
+    """Shift each element of `state`."""
+    a, _ = xs
+    return state + a[:, None]
+
+
+def vlu_toy_post(state: Float32[Array, 'n 3'], xs: VluToyXs) -> VluToyYs:
+    """Summarize each element of the new `state`."""
+    _, b = xs
+    return 2 * state.sum(axis=1), b + 1
+
+
+def vlu_toy_args(
+    key: Key[Array, ''], batch_shape: tuple[int, ...] = ()
+) -> tuple[Float32[Array, '*batch 6 3'], VluToyXs]:
+    """Generate the state and the other inputs of the toy update, with 6 elements."""
+    keys = split(key, 3)
+    state = random.normal(keys.pop(), (*batch_shape, 6, 3))
+    a = random.normal(keys.pop(), (*batch_shape, 6))
+    b = random.randint(keys.pop(), (*batch_shape, 6, 2), 0, 10)
+    return state, (a, b)
+
+
+def vlu_toy_reference(
+    state: Float32[Array, 'n 3'], xs: VluToyXs, length: int, processed: int
+) -> tuple[Float32[Array, 'n 3'], VluToyYs]:
+    """Update the first `processed` elements, with zero outputs past `length`."""
+    new = vlu_toy_update(state, xs)
+    y, z = vlu_toy_post(new, xs)
+    (num,) = y.shape
+    element = jnp.arange(num)
+    state = jnp.where(element[:, None] < processed, new, state)
+    y = jnp.where(element < length, y, 0)
+    z = jnp.where(element[:, None] < length, z, 0)
+    return state, (y, z)
+
+
+class TestVariableLengthUpdate:
+    """Test `_jaxext.variable_length_update`."""
+
+    def test_fixed_length(self, keys: split) -> None:
+        """Without `length`, it applies the functions to everything."""
+        state, xs = vlu_toy_args(keys.pop())
+        out = variable_length_update(vlu_toy_update, vlu_toy_post, state, xs)
+        new = vlu_toy_update(state, xs)
+        desired = new, vlu_toy_post(new, xs)
+        tree.map(assert_array_equal, out, desired)
+
+    @pytest.mark.parametrize(
+        ('length', 'block_size', 'processed'),
+        [
+            # no blocks
+            (0, 3, 0),
+            # one element per block
+            (4, 1, 4),
+            # the last block processed goes past `length`, the next one is not
+            # processed
+            (2, 3, 3),
+            # `length` past the end
+            (9, 3, 6),
+            # a single block is processed whole whatever the `length`, without a
+            # loop
+            (0, 6, 6),
+            (3, None, 6),
+        ],
+    )
+    def test_matches_reference(
+        self, keys: split, length: int, block_size: int | None, processed: int
+    ) -> None:
+        """It updates whole blocks up to `length`, with zero outputs after."""
+        state, xs = vlu_toy_args(keys.pop())
+        f = partial(
+            variable_length_update, vlu_toy_update, vlu_toy_post, block_size=block_size
+        )
+        out = jit(f)(state, xs, jnp.int32(length))
+        desired = vlu_toy_reference(state, xs, length, processed)
+        tree.map(partial(assert_close_matrices, rtol=1e-6), out, desired)
+
+    @pytest.mark.parametrize('block_size', [0, 4, 7])
+    def test_unequal_blocks(self, keys: split, block_size: int) -> None:
+        """It rejects a block size that does not divide the elements evenly."""
+        state, xs = vlu_toy_args(keys.pop())
+        with pytest.raises(ValueError, match='not a divisor'):
+            variable_length_update(
+                vlu_toy_update,
+                vlu_toy_post,
+                state,
+                xs,
+                jnp.int32(3),
+                block_size=block_size,
+            )
+
+    def test_vmap(self, keys: split) -> None:
+        """Under vmap, it processes the blocks up to the longest batch element."""
+        state, xs = vlu_toy_args(keys.pop(), (4,))
+        f = vmap(
+            partial(variable_length_update, vlu_toy_update, vlu_toy_post, block_size=2)
+        )
+        lengths = jnp.array([0, 3, 2, 4])
+        processed = 4
+        out = jit(f)(state, xs, lengths)
+        for i, length in enumerate(lengths.tolist()):
+            desired = vlu_toy_reference(
+                *tree.map(lambda x, i=i: x[i, ...], (state, xs)), length, processed
+            )
+            actual = tree.map(lambda x, i=i: x[i, ...], out)
+            tree.map(partial(assert_close_matrices, rtol=1e-6), actual, desired)
+
+        # the loop is not batched, the blocks stay slices
+        text = jit(f).lower(state, xs, lengths).as_text()
+        assert 'stablehlo.while' in text
+        assert 'gather' not in text
+        assert 'scatter' not in text
+
+    @pytest.mark.parametrize('batched', [False, True])
+    def test_in_place(self, keys: split, batched: bool) -> None:
+        """The state is updated without copying it."""
+        shape = (2, 64, 10_000) if batched else (64, 10_000)
+        state = random.normal(keys.pop(), shape)
+        xs = random.normal(keys.pop(), shape[:-1])
+
+        def update(
+            state: Float32[Array, 'n m'], xs: Float32[Array, ' n']
+        ) -> Float32[Array, 'n m']:
+            return state + xs[:, None]
+
+        def post(
+            state: Float32[Array, 'n m'], xs: Float32[Array, ' n']
+        ) -> Float32[Array, ' n']:
+            return xs * state.sum(axis=1)
+
+        f = partial(variable_length_update, update, post, block_size=8)
+        length = jnp.int32(64)
+        if batched:
+            f = vmap(f)
+            length = jnp.full(2, length)
+        analysis = (
+            jit(f, donate_argnums=(0,))
+            .lower(state, xs, length)
+            .compile()
+            .memory_analysis()
+        )
+        assert analysis is not None
+        assert analysis.alias_size_in_bytes >= state.nbytes
+        assert analysis.temp_size_in_bytes < state.nbytes / 2
+
+    def test_shard_map(self, keys: split) -> None:
+        """It works under vmap within `shard_map`."""
+        if get_device_count() < 2:  # branch covered in single jax cpu test config
+            pytest.skip('Requires at least 2 devices')
+        mesh = make_mesh(
+            (2,), ('a',), axis_types=(AxisType.Auto,), devices=get_default_devices()[:2]
+        )
+        sharding = NamedSharding(mesh, PartitionSpec('a'))
+        state, xs = device_put(vlu_toy_args(keys.pop(), (4,)), sharding)
+        f = vmap(
+            partial(variable_length_update, vlu_toy_update, vlu_toy_post, block_size=2)
+        )
+        sharded = shard_map(
+            f, mesh=mesh, in_specs=PartitionSpec('a'), out_specs=PartitionSpec('a')
+        )
+        # the second shard processes more blocks than the first
+        lengths = device_put(jnp.array([0, 3, 6, 4]), sharding)
+        new, ys = jit(sharded)(state, xs, lengths)
+        desired_new, desired_ys = f(state, xs, lengths)
+        tree.map(
+            partial(assert_close_matrices, rtol=1e-6, reduce_rank=True), ys, desired_ys
+        )
+        # each shard processes blocks up to its own longest, so compare only
+        # the elements that are processed for sure
+        for i, length in enumerate(lengths.tolist()):
+            assert_close_matrices(
+                new[i, :length, :], desired_new[i, :length, :], rtol=1e-6
+            )
 
 
 def random_posdef(

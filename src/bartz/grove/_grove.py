@@ -40,6 +40,7 @@ from bartz._jaxext import (
     autobatch,
     field,
     jit,
+    minimal_unsigned_arange,
     minimal_unsigned_dtype,
     vmap_nodoc,
 )
@@ -329,7 +330,7 @@ def is_actual_leaf(
     if add_bottom_level:
         size *= 2
         is_leaf = jnp.concatenate([is_leaf, jnp.ones_like(is_leaf)])
-    index = jnp.arange(size, dtype=minimal_unsigned_dtype(size - 1))
+    index = minimal_unsigned_arange(size)
     parent_index = index >> 1
     parent_nonleaf = split_tree[parent_index].astype(bool)
     parent_nonleaf = parent_nonleaf.at[1].set(True)
@@ -395,6 +396,8 @@ def tree_depths(tree_size: int) -> UInt[Array, ' {tree_size}']:
 @jit
 def forest_mean_leaves(
     split_tree: UInt[Array, '*batch_shape half_tree_size'],
+    *,
+    where: Bool[Array, '*batch_shape'] | None = None,
 ) -> Float32[Array, '']:
     """
     Return the average number of leaves per tree in a set of trees.
@@ -403,15 +406,17 @@ def forest_mean_leaves(
     ----------
     split_tree
         The decision boundaries of the trees.
+    where
+        Which trees to average over, all if `None`.
 
     Returns
     -------
-    The mean number of leaves across the trees.
+    The mean number of leaves across the trees, NaN if there are no trees.
     """
     # a tree with k internal nodes (the nonzero entries of split_tree) has k + 1
     # leaves; the maximum possible is split_tree.shape[-1]
     num_internal = jnp.count_nonzero(split_tree, axis=-1)
-    return (num_internal + 1).mean()
+    return jnp.mean(num_internal + 1, where=where)
 
 
 @jit(static_argnames=('p', 'sum_batch_axis'))

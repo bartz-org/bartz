@@ -268,7 +268,7 @@ def load_npz(path: str | PathLike) -> object:
         version, root = read_meta(path, data)
         arrays: Mapping[str, np.ndarray] = data
         if version < FORMAT_VERSION:
-            arrays = {k: data[k] for k in data.files}
+            arrays = {k: data[k] for k in data.files if k != META_KEY}
             for upgrade in UPGRADES[version:]:
                 root, arrays = upgrade(root, arrays)
         used: set[str] = set()

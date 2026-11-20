@@ -49,6 +49,7 @@ from bartz.mcmcstep._state import (
     chol_with_gersh,
     outcome_target,
     split_key_for_chains,
+    used_trees_mask,
     vmap_chains,
 )
 
@@ -97,10 +98,9 @@ class ChainDataState(State):
 def sample_prior(key: Key[Array, ''], state: StateT) -> StateT:
     """Draw the parameters of the model from their prior.
 
-    The prior is the one defined by the hyperparameters in `state`. Replaces
-    the trees and the leaves, and, where they have a prior, the leaf and error
-    precisions and the variable selection parameters. The data is left
-    unchanged, and the fields derived from the parameters are updated to match.
+    Replace the same model parameters that `bartz.mcmcstep.step` would update,
+    with a sample from the prior. The data is left unchanged. Derived fields
+    are updated but for some secondary diagnostics.
 
     Parameters
     ----------
@@ -258,8 +258,16 @@ def sample_values(key: Key[Array, ''], state: StateT) -> StateT:
     # leaves
     leaves = sample_leaves(keys.pop(), forest.leaf_tree.shape, leaf_prec_chol)
 
+    # set unused tree slots to roots with zeroed leaves
+    used = used_trees_mask(forest)
+    split_tree = forest.split_tree
+    if used is not None:
+        leaves = jnp.where(used.reshape(-1, *(1,) * (leaves.ndim - 1)), leaves, 0.0)
+        split_tree = jnp.where(used[:, None], split_tree, 0)
+
     forest = replace(
         forest,
+        split_tree=split_tree,
         leaf_tree=to_leaf_storage(leaves, state),
         leaf_prior_cov_inv=leaf_prior_cov_inv,
     )

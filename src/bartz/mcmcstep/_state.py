@@ -58,9 +58,11 @@ from bartz._jaxext import (
     cholesky,
     field,
     float32_matmuls,
+    get_cpu_thread_count,
     jaxtyping_disabled,
     jit,
     jit_active,
+    minimal_unsigned_arange,
     minimal_unsigned_dtype,
     solve_triangular,
 )
@@ -303,6 +305,14 @@ class Forest(Module):
     offset: Float32[Array, ''] | Float32[Array, ' k']
     """Constant shift added to the scaled sum of trees, see `leaf_tree`."""
 
+    used_trees: Int32[Array, '*chains'] | None = field(chains=CHAIN_AXIS)
+    """The number of trees in use, `None` if all the trees are always in use.
+    Only the first `used_trees` trees in the arrays are part of the model;
+    `step` skips the others in the sequential accept/reject loop and, on gpu or
+    with few trees in use, in the update of `leaf_indices`. The other trees
+    shall be lone roots with zero leaves, as `step` keeps them, such that the
+    function computed by the forest is the sum of all the trees anyway."""
+
     grow_prop_count: Int32[Array, '*chains'] = field(chains=CHAIN_AXIS)
     """The number of grow proposals made during the last MCMC step."""
 
@@ -380,18 +390,19 @@ class Forest(Module):
         chains=CHAIN_AXIS
     )
     """The log transition and prior Metropolis-Hastings ratio for the proposed
-    move on each tree."""
+    move on each tree. Arbitrary for a tree without an allowed move, like those
+    not in use."""
 
     log_likelihood: Float32[Array, '*chains num_trees'] | None = field(
         chains=CHAIN_AXIS
     )
-    """The log likelihood ratio."""
+    """The log likelihood ratio, dirty like `log_trans_prior`."""
 
     leaf_prior_cov_inv: Wishart
     """The prior precision matrix of a leaf, conditional on the tree structure
     (a scalar inverse variance for univariate), with its Wishart prior. The
     prior mean of a leaf is zero; the prior covariance of the sum of trees is
-    ``num_trees * leaf_prior_cov_inv.value^-1``. If `Wishart.nu` is `None`,
+    ``used_trees * leaf_prior_cov_inv.value^-1``. If `Wishart.nu` is `None`,
     the precision is held fixed."""
 
     sparsity: Sparsity
@@ -436,7 +447,28 @@ class StepConfig(Module):
 
     sequential_unroll: int | bool = field(static=True)
     """How much to unroll the sequential accept/reject loop over trees in
-    `step`. See the ``unroll`` argument of `jax.lax.scan`."""
+    `step`, if `Forest.used_trees` is not set. See the ``unroll`` argument of
+    `jax.lax.scan`."""
+
+    sequential_block_size: int | None = field(static=True)
+    """If `Forest.used_trees` is set, the sequential accept/reject loop over
+    trees in `step` visits them in fully unrolled blocks of this size, and
+    checks whether there are trees in use left only between blocks. The visits
+    to the trees not in use in the last block have no effect. If `None`, 2 on
+    cpu and 4 on gpu."""
+
+    parallel_block_size: int | None = field(static=True)
+    """If `Forest.used_trees` is set, the update of `Forest.leaf_indices` and
+    related caches in `step`, which is parallel across trees, processes the
+    trees in blocks of this size, a divisor of the number of trees, stopping
+    after the trees in use. If `None`, the size is set based on the number of
+    datapoints, and on cpu all the trees are processed at once instead unless
+    few are in use."""
+
+    random_tree_scan: bool = field(static=True)
+    """Whether the sequential accept/reject loop over trees in `step` visits
+    the trees in a new random order at each step, instead of in storage
+    order."""
 
     augment: bool = field(static=True)
     """Whether to account exactly, via data augmentation, for the decision
@@ -504,8 +536,8 @@ class State(Module):
     resid_unit: Float32[Array, ''] | Float32[Array, ' k']
     """The storage unit of `resid` (see `init`'s ``resid_dtype``), same scheme
     as `Forest.leaf_unit`. Equal to ``leaf_unit * sqrt(num_trees)`` (the
-    marginal prior standard deviation of the sum of trees) rounded to a power
-    of two."""
+    marginal prior standard deviation of the sum of trees, with all the trees
+    in use) rounded to a power of two."""
 
     resid_eff_scale: Float32[Array, '*chains'] | Float32[Array, '*chains k'] = field(
         chains=CHAIN_AXIS
@@ -521,8 +553,9 @@ class State(Module):
         field(chains=CHAIN_AXIS)
     )
     """Sum over the MCMC steps done of the mean square of the residuals (in
-    `resid_unit` units) large enough that their running updates round. Used by
-    `sum_trees_eps` to estimate the accumulated rounding drift."""
+    `resid_unit` units) large enough that their running updates round, times
+    the fraction of trees in use. Used by `sum_trees_eps` to estimate the
+    accumulated rounding drift."""
 
     error_cov_inv: Wishart
     """The inverse error covariance (``error_cov_inv.value``, scalar for
@@ -645,16 +678,25 @@ class State(Module):
             # t = (leaf_unit / error_sdev)^2 * n_leaf, so residual features
             # smaller than quantum / (2 s) cannot move the sampler. Typical
             # values are used for the error variance (chain mean, datapoint
-            # mean of prec_scale) and n_leaf (datapoints over leaves per tree).
-            leaves_per_tree = 1.0 + jnp.count_nonzero(self.forest.split_tree, axis=-1)
-            n_leaf = n_eff / jnp.mean(leaves_per_tree)
+            # mean of prec_scale) and n_leaf (datapoints over leaves per tree
+            # in use; the trees not in use have no splits).
+            split_tree = self.forest.split_tree
+            if self.forest.used_trees is None:
+                *_, half_tree_size = split_tree.shape
+                num_used = split_tree.size // half_tree_size
+            else:
+                num_used = jnp.sum(self.forest.used_trees)
+            num_splits = jnp.count_nonzero(split_tree)
+            leaves_per_tree = 1.0 + num_splits / jnp.maximum(num_used, 1)
+            n_leaf = n_eff / leaves_per_tree
             t = jnp.square(self.forest.leaf_unit) * n_leaf / error_var
             snap = managed_quantum / 2.0 * (1.0 + jnp.reciprocal(t))
 
         # random walk drift of the accumulated rounding errors: each of the
-        # `num_trees` updates per step charges eps_resid * |resid| to the
-        # residuals large enough to round, whose mean square is integrated
-        # over the steps done in `resid_inexact_integral`
+        # `used_trees` updates per step charges eps_resid * |resid| to the
+        # residuals large enough to round, whose mean square, times
+        # `used_trees / num_trees`, is integrated over the steps done in
+        # `resid_inexact_integral`
         integral = self.resid_inexact_integral
         chain_axes = range(integral.ndim - self.resid_unit.ndim)
         integral = jnp.mean(integral, axis=tuple(chain_axes))
@@ -838,6 +880,53 @@ def parse_p_nonterminal(
     return jnp.pad(p_nonterminal, (0, 1))
 
 
+def parse_used_trees(
+    used_trees: int | Integer[ArrayLike, ''] | None, num_trees: int
+) -> Int32[Array, ''] | None:
+    """Check `used_trees` is in [0, num_trees]."""
+    if used_trees is None:
+        return None
+    else:
+        used_trees = jnp.asarray(used_trees, jnp.int32)
+        bad = (used_trees < 0) | (used_trees > num_trees)
+        return error_if(used_trees, bad, f'used_trees must be in [0, {num_trees}]')
+
+
+def parse_parallel_block_size(
+    parallel_block_size: int | None, num_trees: int
+) -> int | None:
+    """Check `parallel_block_size` is a positive divisor of `num_trees`."""
+    if parallel_block_size is not None and (
+        parallel_block_size < 1 or num_trees % parallel_block_size
+    ):
+        msg = f'{parallel_block_size=} is not a positive divisor of {num_trees=}'
+        raise ValueError(msg)
+    else:
+        return parallel_block_size
+
+
+def parse_sequential_block_size(sequential_block_size: int | None) -> int | None:
+    """Check `sequential_block_size` is positive."""
+    if sequential_block_size is not None and sequential_block_size < 1:
+        msg = f'{sequential_block_size=} is not positive'
+        raise ValueError(msg)
+    else:
+        return sequential_block_size
+
+
+def check_equal_blocks(num_trees: int) -> None:
+    """Raise if `num_trees` is not a multiple of `PARALLEL_MIN_BLOCKS`, see `init`."""
+    if num_trees % PARALLEL_MIN_BLOCKS:
+        lower = num_trees - num_trees % PARALLEL_MIN_BLOCKS
+        upper = lower + PARALLEL_MIN_BLOCKS
+        nearest = f'{lower} or {upper}' if lower else f'{upper}'
+        msg = (
+            f'{num_trees=} is not a multiple of {PARALLEL_MIN_BLOCKS}, as required '
+            f'if `used_trees` is set; use {nearest}, or set `check_num_trees=False`'
+        )
+        raise ValueError(msg)
+
+
 def make_p_nonterminal(
     d: int, alpha: FloatLike = 0.95, beta: FloatLike = 2.0
 ) -> Float32[Array, ' {d}-1']:
@@ -876,6 +965,8 @@ def init(
     offset: FloatLike | Float[ArrayLike, ' k'],
     max_split: UInt[ArrayLike, ' p'],
     num_trees: int,
+    used_trees: int | Integer[ArrayLike, ''] | None = None,
+    check_num_trees: bool = True,
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
     leaf_prior_cov_inv: Wishart,
     leaf_dtype: DTypeLike = jnp.float32,
@@ -893,6 +984,9 @@ def init(
     prec_count_num_trees: int | None | Literal['auto'] = 'auto',
     one_bin_prec_reduction: bool | Literal['auto'] = 'auto',
     sequential_unroll: int | bool = 2,
+    sequential_block_size: int | None = None,
+    parallel_block_size: int | None = None,
+    random_tree_scan: bool = False,
     save_ratios: bool = False,
     filter_splitless_vars: int = 0,
     log_s: Float32[ArrayLike, ' p'] | None = None,
@@ -925,7 +1019,14 @@ def init(
     max_split
         The maximum split index for each variable. All split ranges start at 1.
     num_trees
-        The number of trees in the forest.
+        The maximum number of trees.
+    used_trees
+        The initial number of trees. If not specified, the number of trees is
+        fixed at `num_trees`. For best performance, leave this unset when the
+        number of trees is fixed.
+    check_num_trees
+        Whether to raise an error if `used_trees` is specified and `num_trees`
+        is not a multiple of 8, such that the trees divide into equal blocks.
     p_nonterminal
         The probability of a nonterminal node at each depth. The maximum depth
         of trees is fixed by the length of this array. Use `make_p_nonterminal`
@@ -991,6 +1092,16 @@ def init(
     sequential_unroll
         See `StepConfig.sequential_unroll`. Unrolling may speed up the MCMC at
         the cost of longer compilation; 1 means no unrolling.
+    sequential_block_size
+        Computational performance parameter. Larger `sequential_block_size` may
+        speed up the MCMC on GPU at the cost of longer compilation. See
+        `StepConfig.sequential_block_size`.
+    parallel_block_size
+        Computational performance parameter, a divisor of `num_trees`. See
+        `StepConfig.parallel_block_size`.
+    random_tree_scan
+        If `True`, run the Gibbs scan over trees in random order (different on
+        each MCMC iteration) instead of in fixed order.
     save_ratios
         Whether to save the Metropolis-Hastings ratios.
     filter_splitless_vars
@@ -1036,7 +1147,8 @@ def init(
     Raises
     ------
     ValueError
-        If arguments unused in binary regression are set.
+        If arguments unused in binary regression are set, if `num_trees` fails
+        the check enabled by `check_num_trees`, or if a block size is invalid.
 
     Notes
     -----
@@ -1066,6 +1178,8 @@ def init(
     # check p_nonterminal and pad it with a 0 at the end (still not final shape)
     p_nonterminal = parse_p_nonterminal(p_nonterminal)
 
+    used_trees = parse_used_trees(used_trees, num_trees)
+
     # process arguments that change depending on outcome type
     is_binary, kshape, error_cov_inv, binary_indices = init_shape_shifting_parameters(
         y=y,
@@ -1089,6 +1203,9 @@ def init(
     # extract array sizes from arguments
     (max_depth,) = p_nonterminal.shape
     p, n = X.shape
+
+    if check_num_trees and used_trees is not None:
+        check_equal_blocks(num_trees)
 
     # check and initialize sparsity parameters
     if not all_none_or_not_none(rho, a, b):
@@ -1190,6 +1307,7 @@ def init(
                 ),
                 blocked_vars=get_blocked_vars(filter_splitless_vars, max_split),
                 max_split=max_split,
+                used_trees=_lazy_from_array(used_trees),
                 grow_prop_count=lazy(jnp.zeros, (), int),
                 grow_acc_count=lazy(jnp.zeros, (), int),
                 prune_prop_count=lazy(jnp.zeros, (), int),
@@ -1239,6 +1357,13 @@ def init(
                 steps_done=jnp.int32(0),
                 sparse_on_at=asarray_or_none(sparse_on_at),
                 sequential_unroll=sequential_unroll,
+                sequential_block_size=parse_sequential_block_size(
+                    sequential_block_size
+                ),
+                parallel_block_size=parse_parallel_block_size(
+                    parallel_block_size, num_trees
+                ),
+                random_tree_scan=random_tree_scan,
                 augment=augment,
                 mesh=mesh,
                 leaf_quantization=asarray_or_none(leaf_quantization),
@@ -1899,6 +2024,77 @@ def parse_prec_count_num_trees(
     return pcnt
 
 
+# With a variable number of trees, `step` can update the leaf indices of the
+# trees in use in equal blocks. By default a block has about
+# `PARALLEL_BLOCK_NUMEL[platform]` (tree, datapoint) pairs, but there are at
+# least `parallel_min_blocks(platform)` blocks; unless all the trees have less
+# than that many pairs, or their number has no suitable divisor, then they are
+# a single block, processed at once like a fixed number of trees.
+
+# On gpu, enough pairs to saturate it, so a block of trees takes about as long
+# as its share of all the trees at once. On cpu, enough for the overhead of an
+# iteration of the loop over blocks to be small next to the work on a block.
+PARALLEL_BLOCK_NUMEL = dict(cpu=2**20, gpu=2**26)
+
+# Depending on the sizes, xla on gpu may write a block through a temporary
+# instead of in place. The minimum number of blocks on gpu bounds the temporary
+# to a fraction of the leaf indices, also with many chains. `init` wants a
+# variable number of trees to be a multiple of it, such that they always divide
+# into this many blocks.
+PARALLEL_MIN_BLOCKS = 8
+
+
+def default_parallel_block_size(
+    num_trees: int, n: int, platform: Literal['cpu', 'gpu']
+) -> int:
+    """Pick the default of `StepConfig.parallel_block_size`.
+
+    Parameters
+    ----------
+    num_trees
+        The maximum number of trees.
+    n
+        The number of datapoints.
+    platform
+        The platform the MCMC runs on.
+
+    Returns
+    -------
+    The number of trees in a block, a divisor of `num_trees`.
+    """
+    target = PARALLEL_BLOCK_NUMEL[platform] // max(1, n)
+    up = num_trees // parallel_min_blocks(platform)
+    # WORKAROUND(jax<0.12.0): on cpu, xla copies the leaf indices around the
+    # choice at run time between blocks and all the trees in `step`, so make a
+    # single block; once unsupported, drop `copies`
+    copies = platform == 'cpu' and jax.__version_info__ < (0, 12, 0)
+    if target >= num_trees or up == 0 or copies:
+        return num_trees
+    else:
+        target = max(1, min(target, up))
+        # the divisor closest to the target, but not much smaller
+        size = search_divisor(target, num_trees, -(-target // 2), up)
+        # the search returns the target if there is no such divisor
+        return size if num_trees % size == 0 else num_trees
+
+
+def parallel_min_blocks(platform: Literal['cpu', 'gpu']) -> int:
+    """Return the minimum number of blocks of trees to update the leaf indices in.
+
+    On cpu, the blocks in use are processed alone only if they are at most 1 in
+    this many, else all the trees at once are faster.
+    """
+    if platform == 'cpu':
+        # Xla:cpu updates a block of trees on one thread, and all the trees at
+        # once split across all the threads. So the blocks in use alone are no
+        # slower if they are at most 1 in as many as the threads; make it twice
+        # as many, because a tree takes somewhat longer in a block. Without a
+        # cpu backend this is not used, any number of threads will do.
+        return 2 * (get_cpu_thread_count() or 1)
+    else:
+        return PARALLEL_MIN_BLOCKS
+
+
 def search_divisor(target_divisor: int, dividend: int, low: int, up: int) -> int:
     """Find the divisor closest to `target_divisor` in [low, up] if `target_divisor` is not already.
 
@@ -2137,6 +2333,16 @@ def vmap_chains(
         return vmapped_fun(keys, state)
 
     return wrapped
+
+
+def used_trees_mask(forest: Forest) -> Bool[Array, '*chains num_trees'] | None:
+    """Mark the trees in use, `None` if all are, assuming `CHAIN_AXIS` is 0."""
+    if forest.used_trees is None:
+        return None
+    else:
+        *_, num_trees, _ = forest.var_tree.shape
+        trees = minimal_unsigned_arange(num_trees)
+        return trees < forest.used_trees[..., None]
 
 
 def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']:

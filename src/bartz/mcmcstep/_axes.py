@@ -46,6 +46,10 @@ from bartz.mcmcstep._lazy import DummyArray, _LazyArray
 T = TypeVar('T')
 
 # Default position of the chain axis in chain-bearing leaves; see `field`.
+# Settable with the CHAIN_AXIS environment variable for internal performance
+# experiments only (see `scripts/opt.py`). Many points in the code only support
+# CHAIN_AXIS=0, many others work for general CHAIN_AXIS but are optimized for
+# the 0 case.
 CHAIN_AXIS = int(os.environ.get('CHAIN_AXIS', '0'))
 
 

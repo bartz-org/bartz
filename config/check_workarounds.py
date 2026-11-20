@@ -97,7 +97,18 @@ def is_obsolete(op: str, bound: Version, floor: Version) -> bool:
 def scan(root: Path) -> list[tuple[str, str, str]]:
     """Return grep matches `(file, lineno, line)` for WORKAROUND markers."""
     result = subprocess.run(
-        ['git', 'grep', '--no-color', '-nI', '-E', r'WORKAROUND\('],  # noqa: S607
+        [  # noqa: S607
+            'git',
+            'grep',
+            '--no-color',
+            '-nI',
+            '-E',
+            r'WORKAROUND\(',
+            '--',
+            # asv's snapshot of the benchmarks code, keeps old markers until
+            # the benchmarks are re-run
+            ':!.asv/results/benchmarks.json',
+        ],
         cwd=root,
         capture_output=True,
         text=True,

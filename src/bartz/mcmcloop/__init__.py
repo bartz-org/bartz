@@ -55,6 +55,7 @@ Create the progress callbacks with `PrintCallback.from_state` and
 
     Callback
     CallbackTuple
+    CheckNumTreesCallback
     CheckPlatformCallback
     PrintCallback
     TqdmCallback
@@ -66,6 +67,7 @@ Create the progress callbacks with `PrintCallback.from_state` and
 
 from bartz.mcmcloop._callback import (
     CallbackTuple,
+    CheckNumTreesCallback,
     CheckPlatformCallback,
     PrintCallback,
     StatsAccumulator,

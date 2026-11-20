@@ -24,11 +24,13 @@
 
 """Progress-reporting callbacks for `run_mcmc`."""
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial, wraps
 from secrets import randbits
 from typing import Any, Literal, TypeVar
+from warnings import warn
 
 import numpy
 from equinox import Module, field
@@ -39,11 +41,13 @@ from jax.scipy.special import logsumexp
 from jaxtyping import Array, Bool, Float32, Int32, Integer, PyTree
 from tqdm.auto import tqdm
 
+from bartz._jaxext import get_cpu_thread_count
 from bartz._typing import kwdict
 from bartz.grove import forest_mean_leaves
 from bartz.mcmcloop._loop import Callback, _replicate
 from bartz.mcmcstep import State
-from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes, chainful_axis
+from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
+from bartz.mcmcstep._state import used_trees_mask
 from bartz.npz import serializable
 
 
@@ -78,13 +82,14 @@ class StatsReport(Module):
     """Forest diagnostics produced by `StatsAccumulator.report` for one report."""
 
     move_acc: Float32[Array, '']
-    """Fraction of trees on which a grow or prune move was accepted."""
+    """Fraction of the trees in use on which a grow or prune move was accepted."""
 
     mean_leaves: Float32[Array, '']
-    """Mean number of leaves per tree."""
+    """Mean number of leaves per tree in use."""
 
     mean_tree_life: Float32[Array, '']
-    """Mean of `bartz.mcmcstep.Forest.tree_life` over trees and chains."""
+    """Mean of `bartz.mcmcstep.Forest.tree_life` over the trees in use and the
+    chains."""
 
     steps_done: Int32[Array, '']
     """Number of MCMC steps done, the maximum possible tree life."""
@@ -155,10 +160,11 @@ class StatsAccumulator(Module):
         else:
             averaged = tree.map(lambda s: s / self.count, self.sums)
             n_samples = self.count
+        forest = state.forest
         return StatsReport(
             **averaged,
             **self._static_stats(state),
-            mean_tree_life=state.forest.tree_life.mean(),
+            mean_tree_life=jnp.mean(forest.tree_life, where=used_trees_mask(forest)),
             steps_done=state.config.steps_done,
             n_samples=n_samples,
         )
@@ -167,10 +173,15 @@ class StatsAccumulator(Module):
     def _avg_stats(state: State) -> dict[str, Float32[Array, ''] | None]:
         """Per-iteration diagnostics that are averaged over the report window."""
         forest = state.forest
-        chain_axis = chain_vmap_axes(forest).split_tree
-        num_trees_axis = chainful_axis(0, chain_axis)  # (num_trees, hts)
-        split_tree = chain_to_axis(forest.split_tree, chain_axis)
-        prop_total = forest.split_tree.shape[num_trees_axis]
+        split_tree = chain_to_axis(
+            forest.split_tree, chain_vmap_axes(forest).split_tree
+        )
+        used = used_trees_mask(forest)
+        num_acc = forest.grow_acc_count.sum() + forest.prune_acc_count.sum()
+        if used is None:
+            num_used = split_tree[..., 0].size
+        else:
+            num_used = jnp.count_nonzero(used)
 
         log_s = forest.sparsity.log_s
         if log_s is None:
@@ -180,9 +191,8 @@ class StatsAccumulator(Module):
             peff = StatsAccumulator._effective_predictors(log_s)
 
         return dict(
-            move_acc=(forest.grow_acc_count.mean() + forest.prune_acc_count.mean())
-            / prop_total,
-            mean_leaves=forest_mean_leaves(split_tree),
+            move_acc=num_acc / num_used,
+            mean_leaves=forest_mean_leaves(split_tree, where=used),
             peff=peff,
         )
 
@@ -695,3 +705,42 @@ def _check_platform(actual_platform: str, expected_platform: str) -> None:
             raise RuntimeError(msg)
 
     debug.callback(raise_if_mismatch)
+
+
+@serializable
+class CheckNumTreesCallback(Callback):
+    """Warn if the number of trees is slow on the platform the MCMC runs on.
+
+    On cpu, fewer trees (times chains) than threads slow down each MCMC step,
+    unless there are few datapoints. No number of trees is slow on gpu.
+    """
+
+    def __call__(self, *, state: State, i_total: Int32[Array, ''], **_: Any) -> None:
+        """Check the number of trees on the first iteration, warn if slow."""
+        warn_if_few = partial(_warn_if_few_trees, state.forest.leaf_indices.shape)
+
+        def check() -> None:
+            lax.cond(i_total == 0, partial(debug.callback, warn_if_few), lambda: None)
+
+        # the platform is picked outermost to leave nothing in the loop on gpu
+        lax.platform_dependent(cpu=check, default=lambda: None)
+
+
+def _warn_if_few_trees(leaf_indices_shape: tuple[int, ...]) -> None:
+    """Warn if the trees (times chains) are fewer than the cpu threads."""
+    *chains, num_trees, n = leaf_indices_shape
+    num_chains = math.prod(chains)
+    trees = num_chains * num_trees
+    threads = get_cpu_thread_count()
+    assert threads is not None  # there is a cpu backend if this runs
+    # xla:cpu does not vectorize a loop over the datapoints of fewer trees than
+    # threads, unless there are few enough datapoints that it does not split
+    # them across threads
+    if 1 < trees < threads and n >= 2**11:
+        msg = (
+            f'There are fewer trees (times chains) than cpu threads ({trees} < '
+            f'{threads}), which slows down each MCMC step on cpu. Use at least '
+            f'{-(-threads // num_chains)} trees to avoid this, possibly with '
+            '`used_trees` to keep the additional ones out of the model.'
+        )
+        warn(msg)

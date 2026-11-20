@@ -30,7 +30,7 @@
 .NOTPARALLEL:
 
 # define command to run python
-CUDA_VERSION = $(shell nvidia-smi 2>/dev/null | grep -o 'CUDA Version: [0-9]*' | cut -d' ' -f3)
+CUDA_VERSION = $(shell nvidia-smi 2>/dev/null | grep -oE 'CUDA (UMD )?Version: [0-9]+' | grep -oE '[0-9]+$$')
 EXTRAS = $(if $(filter 12 13,$(CUDA_VERSION)),--extra=cuda$(CUDA_VERSION),)
 UV_RUN = uv run --dev $(EXTRAS)
 

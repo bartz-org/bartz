@@ -142,6 +142,39 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
     return root, arrays
 
 
+def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
+    """Add `Forest.used_trees` with all the trees in use, and `StepConfig` options for it.
+
+    `StepConfig.random_tree_scan` is off, while
+    `StepConfig.sequential_block_size` and `StepConfig.parallel_block_size` are
+    automatic, which has no effect with all the trees in use.
+    """
+
+    def walk(node: Skeleton) -> Skeleton:
+        if type(node) is list:
+            return [walk(v) for v in node]
+        elif type(node) is not dict or node['type'] == 'array':
+            return node
+        elif node['type'] == 'module':
+            fields = {k: walk(v) for k, v in node['fields'].items()}
+            if node['cls'] == 'Forest':
+                fields = dict(**fields, used_trees=None)
+            elif node['cls'] == 'StepConfig':
+                fields = dict(
+                    **fields,
+                    random_tree_scan=False,
+                    sequential_block_size=None,
+                    parallel_block_size=None,
+                )
+            return module(node['cls'], **fields)
+        elif type(node['items']) is dict:
+            return dict(node, items={k: walk(v) for k, v in node['items'].items()})
+        else:
+            return dict(node, items=[walk(v) for v in node['items']])
+
+    return walk(root), old
+
+
 # Step k converts format k to k+1. Steps are frozen once released. Use only
 # json/numpy, never bartz classes. Fill new fields with the value that
 # reproduces the old behavior, not the current default; if that is impossible,
@@ -150,4 +183,5 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
 # a fill strategy which may not be `None` if the field is not already optional.
 UPGRADES: tuple[Callable[[Skeleton, Arrays], tuple[Skeleton, Arrays]], ...] = (
     upgrade_bartz_0_13_bcf,
+    upgrade_used_trees,
 )

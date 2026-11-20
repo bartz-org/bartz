@@ -25,6 +25,8 @@
 """Test `bartz.mcmcloop`."""
 
 import io
+import re
+import warnings
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -36,7 +38,9 @@ from jax import (
     NamedSharding,
     block_until_ready,
     debug_key_reuse,
+    debug_nans,
     device_put,
+    effects_barrier,
     jit,
     make_mesh,
     random,
@@ -61,16 +65,18 @@ from bartz.mcmcloop import (
     BurninTrace,
     Callback,
     CallbackTuple,
+    CheckNumTreesCallback,
     CheckPlatformCallback,
     MainTrace,
     PrintCallback,
     StatsAccumulator,
     TqdmCallback,
+    _callback,
     compute_varcount,
     evaluate_trace,
     run_mcmc,
 )
-from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance
+from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance, _warn_if_few_trees
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
@@ -555,6 +561,7 @@ def test_callbacks_npz_roundtrip(tmp_path: Path) -> None:
             PrintCallback.from_state(state),
             TqdmCallback.from_state(state, file=io.StringIO()),
             CheckPlatformCallback('cpu'),
+            CheckNumTreesCallback(),
         )
     )
     path = tmp_path / 'callback.npz'
@@ -615,6 +622,69 @@ def test_tree_life(keys: split) -> None:
     assert_close_matrices(trace.mean_tree_life, jnp.stack(mean_tree_life), rtol=1e-6)
 
 
+@pytest.mark.parametrize('num_chains', [None, 2])
+def test_stats_ignore_trees_not_in_use(keys: split, num_chains: int | None) -> None:
+    """The diagnostics of a forest are those of its trees in use alone.
+
+    The trees in use evolve like a forest without the others, which stay lone
+    roots, as checked in `tests.test_mcmcstep.TestUsedTrees`.
+    """
+    key = keys.pop()
+    alone = run_mcmc(random.clone(key), simple_init(num_chains=num_chains), 10)
+    extended = run_mcmc(
+        key, simple_init(ntree=NTREE + 4, used_trees=NTREE, num_chains=num_chains), 10
+    )
+
+    assert_close_matrices(
+        alone.main_trace.mean_tree_life, extended.main_trace.mean_tree_life, rtol=1e-6
+    )
+
+    alone_report, extended_report = [
+        StatsAccumulator.initial(state, enabled=False).report(state)
+        for state in (alone.final_state, extended.final_state)
+    ]
+
+    # check the statistics are non-trivial, i.e., that they would be different
+    # if the code under testing did not skip unused trees
+    assert alone_report.move_acc > 0
+    assert alone_report.mean_leaves > 1
+    assert alone_report.mean_tree_life < alone_report.steps_done
+
+    for name in 'move_acc', 'mean_leaves', 'mean_tree_life':
+        assert_close_matrices(
+            getattr(alone_report, name),
+            getattr(extended_report, name),
+            rtol=1e-6,
+            err_msg=name,
+        )
+
+
+@pytest.mark.parametrize('num_chains', [None, 2])
+def test_no_trees_in_use(keys: split, num_chains: int | None) -> None:
+    """The MCMC runs with no trees in use, and the diagnostics of the forest are NaN."""
+    # run the mcmc, with the sizes of the test above to reuse its compiled code
+    state = simple_init(ntree=NTREE + 4, used_trees=0, num_chains=num_chains)
+    with debug_nans(False):
+        result = run_mcmc(keys.pop(), state, 10)
+        final = result.final_state
+        report = StatsAccumulator.initial(final, enabled=False).report(final)
+    trace = result.main_trace
+
+    # check all trees are roots in the final state
+    assert not jnp.any(final.forest.split_tree)
+
+    # check the statistics of the trees are nan
+    assert jnp.all(jnp.isnan(trace.mean_tree_life))
+    for name in 'move_acc', 'mean_leaves', 'mean_tree_life':
+        assert jnp.isnan(getattr(report, name)), name
+
+    # check there are no inf/nan in the rest of the output
+    trace = replace(trace, mean_tree_life=jnp.zeros_like(trace.mean_tree_life))
+    for leaf in tree.leaves((final, trace)):
+        if jnp.issubdtype(leaf.dtype, jnp.floating):
+            assert jnp.all(jnp.isfinite(leaf))
+
+
 def test_check_platform_callback_mismatch(keys: split) -> None:
     """`CheckPlatformCallback` raises if the run platform is not the expected one.
 
@@ -625,6 +695,53 @@ def test_check_platform_callback_mismatch(keys: split) -> None:
     callback = CheckPlatformCallback(other_platform)
     with pytest.raises(Exception, match='deduced the platform'):
         block_until_ready(run_mcmc(keys.pop(), simple_init(), 1, callback=callback))
+
+
+FEW_TREES_MESSAGE = r'fewer trees .times chains. than cpu threads'
+
+
+@pytest.fixture
+def eight_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make `CheckNumTreesCallback` see a cpu with 8 threads."""
+    monkeypatch.setattr(_callback, 'get_cpu_thread_count', lambda: 8)
+
+
+@pytest.mark.usefixtures('eight_threads')
+@pytest.mark.parametrize(
+    ('leaf_indices_shape', 'slow'),
+    [
+        # fewer trees than threads
+        ((7, 10_000), True),
+        ((2, 3, 10_000), True),
+        # enough trees, also counting the chains
+        ((8, 10_000), False),
+        ((2, 4, 10_000), False),
+        # a single tree, or few datapoints
+        ((1, 10_000), False),
+        ((7, 1000), False),
+    ],
+)
+def test_warn_if_few_trees(leaf_indices_shape: tuple[int, ...], slow: bool) -> None:
+    """Check which trees `CheckNumTreesCallback` takes as slow on cpu."""
+    if slow:
+        with pytest.warns(UserWarning, match=FEW_TREES_MESSAGE):
+            _warn_if_few_trees(leaf_indices_shape)
+    else:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            _warn_if_few_trees(leaf_indices_shape)
+
+
+@pytest.mark.usefixtures('eight_threads')
+def test_check_num_trees_callback(keys: split) -> None:
+    """`CheckNumTreesCallback` warns once, and only if the MCMC runs on cpu."""
+    state = simple_init(n=2**11, ntree=4)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        run_mcmc(keys.pop(), state, 3, callback=CheckNumTreesCallback())
+        effects_barrier()
+    count = sum(bool(re.search(FEW_TREES_MESSAGE, str(w.message))) for w in caught)
+    assert count == (get_default_device().platform == 'cpu')
 
 
 # shared test-point count, reused across cases to hit the jax compilation cache

@@ -30,7 +30,7 @@ from functools import partial, wraps
 from typing import Any, Protocol, runtime_checkable
 from warnings import warn
 
-from jax import ShapeDtypeStruct, eval_shape, lax, tree
+from jax import ShapeDtypeStruct, eval_shape, lax, tree, typeof
 from jax import numpy as jnp
 from jax.typing import ArrayLike, DTypeLike
 from jaxtyping import Array, PyTree, Shaped
@@ -265,6 +265,17 @@ def vary(x: Shaped[Array, '*shape'], axes: tuple[str, ...]) -> Shaped[Array, '*s
         return lax.pcast(x, axes, to='varying')
     else:
         return lax.pvary(x, axes)
+
+
+def varying_axes(x: Shaped[Array, '*shape'] | ShapeDtypeStruct) -> frozenset[str]:
+    """Return the manual `shard_map` mesh axes over which `x` varies."""
+    aval = typeof(x)
+    # WORKAROUND(jax<0.10.0): the axes are in `vma`; once unsupported, delete
+    # this function and use `typeof(x).manual_axis_type.varying`
+    if hasattr(aval, 'manual_axis_type'):
+        return aval.manual_axis_type.varying
+    else:
+        return aval.vma
 
 
 def check_same(tree1: PyTree, tree2: PyTree) -> None:

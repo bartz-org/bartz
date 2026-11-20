@@ -175,7 +175,7 @@ NTREE = 50
 NITERS = 10
 
 
-Kind = Literal['plain', 'weights', 'binary', 'sparse', 'multivariate']
+Kind = Literal['plain', 'weights', 'binary', 'sparse', 'multivariate', 'variable_trees']
 
 
 def get_default_platform() -> str:
@@ -326,6 +326,15 @@ def simple_init(  # noqa: C901, PLR0915
                 msg = 'multivariate not supported'
                 raise NotImplementedError(msg)
 
+        case 'variable_trees':
+            if 'used_trees' not in sig.parameters:
+                # WORKAROUND(bartz<0.15.0): variable number of trees added in 0.15.0
+                msg = 'variable number of trees not supported'
+                raise NotImplementedError(msg)
+            # all the trees in use, to compare with 'plain'; no check because
+            # the number of trees need not divide into blocks
+            kw = dict(kw, used_trees=num_trees, check_num_trees=False)
+
     kw.update(kwargs)
 
     return init(**kw)
@@ -459,7 +468,7 @@ class StepGeneric(StepBase):
 
     params: tuple[tuple[Mode, ...], tuple[Kind, ...], tuple[int | None, ...]] = (
         ('compile', 'run'),
-        ('plain', 'binary', 'weights', 'sparse', 'multivariate'),
+        ('plain', 'binary', 'weights', 'sparse', 'multivariate', 'variable_trees'),
         (None, 2),
     )
 
@@ -500,6 +509,26 @@ class StepSharded(StepGeneric):
             num_trees=1,
             mesh=dict(data=2) if sharded else None,
         )
+
+
+class StepUsedTrees(StepGeneric):
+    """Time running `mcmcstep.step` against the number of trees in use.
+
+    `used_trees` is how many of the `num_trees` trees are in use; `None` is a
+    fixed number of trees, as reference.
+    """
+
+    num_trees: ClassVar[int] = 128
+
+    params = ((None, num_trees, num_trees // 8, num_trees // 32),)  # ty:ignore[invalid-assignment]
+
+    def setup(self, used_trees: int | None) -> None:  # ty:ignore[invalid-method-override]
+        """Set up with enough datapoints that `step` updates the trees in blocks."""
+        kw: dict = dict(p=10, n=2**20, num_trees=self.num_trees)
+        if used_trees is None:
+            super().setup('run', 'plain', None, **kw)
+        else:
+            super().setup('run', 'variable_trees', None, used_trees=used_trees, **kw)
 
 
 MemStat = Literal['state', 'peak']
@@ -559,7 +588,7 @@ class StepMemory(StepBase):
     """
 
     params: tuple[tuple[Kind, ...], tuple[int | None, ...], tuple[MemStat, ...]] = (
-        ('plain', 'binary', 'weights', 'sparse', 'multivariate'),
+        ('plain', 'binary', 'weights', 'sparse', 'multivariate', 'variable_trees'),
         (None, 2),
         ('state', 'peak'),
     )

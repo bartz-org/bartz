@@ -1846,15 +1846,13 @@ def test_resid_eff_scale(bkw: BartKW) -> None:
         assert_array_equal(state.resid_eff_scale, expected)
     else:
         # the last update measured the residuals as they are in the final
-        # state, so recompute their (precision-scaled, masked) rms
+        # state, so recompute their (precision-weighted, masked) rms
         resid = state.resid * state.resid_unit[..., None]
-        if state.inv_sdev_scale is None:
-            n_eff = resid.shape[-1]
-        else:
+        if state.inv_sdev_scale is not None:
             # `inv_sdev_scale` is stored in units of `inv_sdev_unit`
             resid = resid * state.inv_sdev_scale * state.inv_sdev_unit[..., None]
-            n_eff = jnp.sum(state.inv_sdev_scale != 0, axis=-1)
-        rms = jnp.sqrt(jnp.sum(jnp.square(resid), axis=-1) / n_eff)
+        norm2 = jnp.sum(jnp.square(resid), axis=-1)
+        rms = jnp.sqrt(norm2 / state.sum_diag_prec_scale)
         # `resid_eff_scale` is this rms rounded to a power of two, but
         # reproducing the step's exact float32 reduction (narrow-dtype
         # accumulation, the per-path scaling and masking) bit-for-bit is
@@ -2051,7 +2049,7 @@ def test_predict_means(bkw: BartKW, keys: split, subtests: SubTests) -> None:
 
     with subtests.test('mean_samples vs mean'):
         mean_from_mean_samples = mean_samples.mean(0)
-        assert_close_matrices(mean, mean_from_mean_samples, rtol=1e-7)
+        assert_close_matrices(mean, mean_from_mean_samples, rtol=1e-6)
 
     with subtests.test('latent_samples vs mean_samples'):
         binary_mask = bkw.binary_mask

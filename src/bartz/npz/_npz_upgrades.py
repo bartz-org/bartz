@@ -165,6 +165,18 @@ def upgrade_bartz_0_14(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
             elif node['cls'] == 'Bart':
                 dropped.add(fields['_binary_mask']['key'])
                 fields = {k: v for k, v in fields.items() if k != '_binary_mask'}
+            # add `Forest.used_trees` with all the trees in use
+            elif node['cls'] == 'Forest':
+                fields = dict(**fields, used_trees=None)
+            # add the options for `Forest.used_trees`: the block sizes are
+            # automatic, which has no effect with all the trees in use
+            elif node['cls'] == 'StepConfig':
+                fields = dict(
+                    **fields,
+                    random_tree_scan=False,
+                    sequential_block_size=None,
+                    parallel_block_size=None,
+                )
             return module(node['cls'], **fields)
         elif type(node['items']) is dict:
             return dict(node, items={k: walk(v) for k, v in node['items'].items()})

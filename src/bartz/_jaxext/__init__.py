@@ -29,21 +29,30 @@
 from bartz._jaxext._autobatch import autobatch
 from bartz._jaxext._equinox import Module, field, project
 from bartz._jaxext._jaxext import (
+    InPlace,
     cpu_barrier,
+    dynamic_slice_in_dim,
+    dynamic_update_slice_in_dim,
     equal_shards,
     float32_matmuls,
     forbid_x64,
+    get_cpu_thread_count,
     get_default_device,
     get_default_devices,
     get_device_count,
     is_key,
     jaxtyping_disabled,
     jit_active,
+    minimal_unsigned_arange,
     minimal_unsigned_dtype,
+    sequential_vmap,
     sliced_map,
     split,
     truncated_normal_onesided,
     unique,
+    variable_length_scan,
+    variable_length_update,
+    vmap_max,
 )
 from bartz._jaxext._jit import jit
 from bartz._jaxext._linalg import cholesky, solve_triangular

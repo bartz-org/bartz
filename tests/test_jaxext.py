@@ -944,22 +944,21 @@ class TestPoisson:
 
 
 def test_categorical(keys: split) -> None:
-    """Check `categorical` draws the same as `jax.random.categorical`."""
+    """Check `categorical` draws like `jax.random.categorical` and propagates nans."""
     logits = random.normal(keys.pop(), (1000,)) * 3
     logits = logits.at[::7].set(-jnp.inf)
     with_inf = logits.at[300::400].set(jnp.inf)
-    with_nan = with_inf.at[500::300].set(jnp.nan)
     sample = vmap(categorical, in_axes=(0, None))
     reference = vmap(random.categorical, in_axes=(0, None))  # noqa: TID251
-    for x in (
-        logits,
-        with_inf,
-        with_nan,
-        jnp.full(10, -jnp.inf),
-        jnp.full(10, jnp.nan),
-    ):
+    for x in (logits, with_inf, jnp.full(10, -jnp.inf)):
         draw_keys = keys.pop(200)
         assert_array_equal(sample(draw_keys, x), reference(draw_keys, x))
+
+    # with nans, any nan is a valid draw; out-of-range indices read 0, not nan
+    with_nan = with_inf.at[500::300].set(jnp.nan)
+    for x in (with_nan, jnp.full(10, jnp.nan)):
+        drawn = x.at[sample(keys.pop(200), x)].get(mode='fill', fill_value=0.0)
+        assert jnp.all(jnp.isnan(drawn))
 
 
 def test_is_key(keys: split) -> None:

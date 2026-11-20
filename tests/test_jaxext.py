@@ -24,6 +24,7 @@
 
 """Test bartz._jaxext."""
 
+import re
 from collections.abc import Callable
 from contextlib import nullcontext
 from functools import partial
@@ -33,6 +34,7 @@ from warnings import catch_warnings, simplefilter
 
 import numpy
 import pytest
+from equinox import Module
 from jax import (
     NamedSharding,
     device_put,
@@ -68,6 +70,7 @@ from bartz._jaxext import (
     dynamic_slice_in_dim,
     dynamic_update_slice_in_dim,
     equal_shards,
+    forbid_x64,
     get_cpu_thread_count,
     get_default_devices,
     get_device_count,
@@ -93,6 +96,7 @@ from tests.util import (
     assert_close_matrices,
     int_seed,
     nnone,
+    raises_x64_enabled,
 )
 
 
@@ -951,22 +955,21 @@ class TestPoisson:
 
 
 def test_categorical(keys: split) -> None:
-    """Check `categorical` draws the same as `jax.random.categorical`."""
+    """Check `categorical` draws like `jax.random.categorical` and propagates nans."""
     logits = random.normal(keys.pop(), (1000,)) * 3
     logits = logits.at[::7].set(-jnp.inf)
     with_inf = logits.at[300::400].set(jnp.inf)
-    with_nan = with_inf.at[500::300].set(jnp.nan)
     sample = vmap(categorical, in_axes=(0, None))
-    reference = vmap(random.categorical, in_axes=(0, None))
-    for x in (
-        logits,
-        with_inf,
-        with_nan,
-        jnp.full(10, -jnp.inf),
-        jnp.full(10, jnp.nan),
-    ):
+    reference = vmap(random.categorical, in_axes=(0, None))  # noqa: TID251
+    for x in (logits, with_inf, jnp.full(10, -jnp.inf)):
         draw_keys = keys.pop(200)
         assert_array_equal(sample(draw_keys, x), reference(draw_keys, x))
+
+    # with nans, any nan is a valid draw; out-of-range indices read 0, not nan
+    with_nan = with_inf.at[500::300].set(jnp.nan)
+    for x in (with_nan, jnp.full(10, jnp.nan)):
+        drawn = x.at[sample(keys.pop(200), x)].get(mode='fill', fill_value=0.0)
+        assert jnp.all(jnp.isnan(drawn))
 
 
 def test_is_key(keys: split) -> None:
@@ -993,6 +996,77 @@ def test_is_key(keys: split) -> None:
 
     # NumPy arrays should not be recognized
     assert not is_key(numpy.array([1, 2, 3]))
+
+
+class TestForbidX64:
+    """Test `_jaxext.forbid_x64`."""
+
+    def test_x64_enabled(self) -> None:
+        """Raises if x64 is enabled, also when traced under `jit`."""
+        f = forbid_x64(lambda: None)
+        f()
+        with raises_x64_enabled():
+            f()
+
+        @jit
+        @forbid_x64
+        def g(x: Float32[Array, '']) -> Float32[Array, '']:
+            return x
+
+        g(jnp.float32(1))
+        with raises_x64_enabled():
+            g(jnp.float32(1))
+
+    @pytest.mark.parametrize('dtype', ['float64', 'int64', 'uint64', 'complex128'])
+    def test_64_bit_arguments(self, dtype: str) -> None:
+        """Raises on 64-bit jax arrays anywhere in the arguments."""
+
+        class Box(Module):
+            x: Shaped[Array, '']
+
+        @forbid_x64
+        def f(a: object, b: object = None, **kw: object) -> None:
+            pass
+
+        with enable_x64(True):
+            x = jnp.zeros((), dtype)
+        cases = (
+            ((x,), {}, 'a'),
+            ((0, (0, x)), {}, 'b[1]'),
+            ((0,), dict(c=dict(d=x)), "kw['c']['d']"),
+            ((Box(x),), {}, 'a.x'),
+        )
+        for args, kw, path in cases:
+            with pytest.raises(
+                TypeError, match=re.escape(f'`{path}` has dtype {dtype}')
+            ):
+                f(*args, **kw)
+
+    def test_other_arguments(self, keys: split) -> None:
+        """Accepts 32-bit jax arrays, numpy arrays, keys and scalars."""
+        f = forbid_x64(lambda *_: None)
+        f(
+            jnp.zeros(3),
+            jnp.zeros(3, int),
+            jnp.zeros(3, jnp.float16),
+            numpy.zeros(3),
+            1.0,
+            keys.pop(),
+        )
+
+    def test_64_bit_inside(self) -> None:
+        """Operations on 64-bit arrays inside raise, even if the user allows them."""
+        # private jax API, `forbid_x64` falls back to not using it
+        from jax._src.config import explicit_x64_dtypes  # noqa: PLC0415
+
+        with enable_x64(True):
+            x = jnp.zeros(3)
+        f = forbid_x64(lambda: x + 1)
+        with explicit_x64_dtypes('allow'):
+            assert (x + 1).dtype == jnp.float64
+            with pytest.raises(ValueError, match='float64'):
+                f()
+            assert (x + 1).dtype == jnp.float64
 
 
 def make_broken_replicated_array(

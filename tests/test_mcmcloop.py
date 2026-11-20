@@ -47,6 +47,8 @@ from jax import (
     tree,
 )
 from jax import numpy as jnp
+from jax.nn import softmax
+from jax.scipy.special import entr
 from jax.sharding import AxisType, Mesh, PartitionSpec
 from jax.tree_util import KeyPath
 from jaxtyping import Array, Float, Float32, Int32, Key, Shaped, UInt, UInt8
@@ -67,23 +69,26 @@ from bartz.mcmcloop import (
     CheckPlatformCallback,
     MainTrace,
     PrintCallback,
+    StatsAccumulator,
     TqdmCallback,
     _callback,
+    compute_varcount,
     evaluate_trace,
     run_mcmc,
 )
-from bartz.mcmcloop._callback import (
-    _TQDM_REGISTRY,
-    StatsAccumulator,
-    _tqdm_advance,
-    _warn_if_few_trees,
-)
+from bartz.mcmcloop._callback import _TQDM_REGISTRY, _tqdm_advance, _warn_if_few_trees
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import State, Wishart, init, make_p_nonterminal, step
 from bartz.mcmcstep._axes import trace_sample_axes
 from bartz.npz._npz import load_npz, save_npz
 from bartz.testing import QuantizedData, gen_data
-from tests.util import assert_array_equal, assert_close_matrices, nnone
+from tests.util import (
+    assert_array_equal,
+    assert_close_matrices,
+    nnone,
+    raises_x64_enabled,
+    to_64_bit,
+)
 
 # shared data dimensions for `simple_init`/`simple_data`, reused across tests to
 # hit the jax compilation cache
@@ -429,6 +434,30 @@ def test_custom_step(keys: split) -> None:
     assert_array_equal(final_state.config.steps_done, jnp.int32(n_burn + n_save))
 
 
+def test_x64(keys: split) -> None:
+    """Check the low-level API raises under `jax_enable_x64` or with 64-bit inputs."""
+    with raises_x64_enabled():
+        simple_init()
+    with raises_x64_enabled():
+        make_p_nonterminal(6)
+
+    state = simple_init()
+    with pytest.raises(TypeError, match=r'`state\..+` has dtype float64'):
+        run_mcmc(keys.pop(), to_64_bit(state), 4, n_burn=1)
+    final_state, _, main_trace, _ = run_mcmc(keys.pop(), state, 4, n_burn=1)
+    calls = dict(
+        print_callback=lambda: PrintCallback.from_state(state),
+        tqdm_callback=lambda: TqdmCallback.from_state(state),
+        run_mcmc=lambda: run_mcmc(keys.pop(), state, 4, n_burn=1),
+        step=lambda: step(keys.pop(), final_state),
+        evaluate_trace=lambda: evaluate_trace(simple_data(P, N).x, main_trace),
+        compute_varcount=lambda: compute_varcount(P, main_trace),
+    )
+    for call in calls.values():
+        with raises_x64_enabled():
+            call()
+
+
 def frozen_step(key: Key[Array, ''], state: State) -> State:
     """Like `step`, but leaves `State.config.steps_done` in place."""
     new_state = step(key, state)
@@ -540,6 +569,35 @@ def test_callbacks_npz_roundtrip(tmp_path: Path) -> None:
     loaded = load_npz(path)
     assert tree.structure(loaded) == tree.structure(callback)
     tree.map(assert_array_equal, loaded, callback)
+
+
+@pytest.mark.parametrize('splitless', [2, 5], ids=['some', 'all'])
+def test_stats_report_ignores_splitless(keys: split, splitless: int) -> None:
+    """The variable selection diagnostics ignore predictors with ``max_split == 0``."""
+    p, n = 5, 3
+    max_split = jnp.full(p, 3, jnp.uint8).at[:splitless].set(0)
+    log_s = random.normal(keys.pop(), (p,))
+    state = init(
+        X=jnp.zeros((p, n), jnp.uint8),
+        y=jnp.zeros(n),
+        offset=0.0,
+        max_split=max_split,
+        num_trees=2,
+        p_nonterminal=make_p_nonterminal(3),
+        leaf_prior_cov_inv=Wishart(None, None, 1.0),
+        error_cov_inv=Wishart(4.0, 4.0, 1.0),
+        log_s=log_s,
+        theta=1.0,
+        sparse_on_at=0,
+        filter_splitless_vars=splitless,
+    )
+    report = StatsAccumulator.initial(state, enabled=False).report(state)
+    assert report.p_eff == p - splitless
+    if splitless < p:
+        expected = jnp.exp(jnp.sum(entr(softmax(log_s[splitless:]))))
+    else:
+        expected = jnp.zeros(())
+    assert_close_matrices(report.var_perplexity, expected, rtol=1e-6)
 
 
 def test_tree_life(keys: split) -> None:

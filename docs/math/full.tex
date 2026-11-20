@@ -235,10 +235,8 @@ In \texttt{bartz} the allowed cutpoints are pre-binned and live in the
 integer range $[1, \texttt{max\_split}_v]$ (see the
 \texttt{bartz.prepcovars} module). We assume every variable has at least one
 cutpoint globally, so $E(\eta)$ only shrinks because of ancestor splits.
-bartz allows variables with none (\texttt{max\_split}$_v = 0$) by
-renormalising $\vs$ over the other variables, which is what the rule prior
-depends on; by the aggregation property of the Dirichlet, this leaves the
-derivations of this chapter unchanged on the renormalised subvector.
+bartz also accepts variables with none (\texttt{max\_split}$_v = 0$), and
+ignores them, as if they were not among the $p$ variables of the model.
 
 We write $p(T_t \mid \vs)$ for the probability of the tree structure
 (including the splitting rules) under this prior.

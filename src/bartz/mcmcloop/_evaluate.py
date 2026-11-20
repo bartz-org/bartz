@@ -35,7 +35,7 @@ from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Float, Float32, Int32, PyTree, UInt
 from numpy.lib.array_utils import normalize_axis_index
 
-from bartz._jaxext import autobatch, jit, project
+from bartz._jaxext import autobatch, forbid_x64, jit, project
 from bartz._typing import kwdict
 from bartz.grove import TreesTrace, evaluate_forest, is_multivariate, var_histogram
 from bartz.mcmcstep._axes import (
@@ -84,6 +84,7 @@ class EvaluableTrace(Protocol):
         'max_io_nbytes',
     )
 )
+@forbid_x64
 def evaluate_trace(
     X: UInt[Array, 'p n'],
     trace: EvaluableTrace,
@@ -498,6 +499,7 @@ def _shard_map_eval(
 
 
 @jit(static_argnames=('p', 'out_chain_axis'))
+@forbid_x64
 def compute_varcount(
     p: int, trace: EvaluableTrace, *, out_chain_axis: int = CHAIN_AXIS
 ) -> Int32[Array, '*trace_shape {p}']:

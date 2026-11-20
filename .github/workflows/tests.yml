@@ -87,7 +87,7 @@ jobs:
       matrix:
         # The list of groups lives in `Makefile` as `GROUPS`; keep this in sync.
         target: [tests, tests-single-cpu, tests-old]
-        group: [iface-v1, iface-v23, iface-v4, iface-v5, iface-v6, iface-v7]
+        group: [iface-v15, iface-v2, iface-v3, iface-v4, iface-v6, iface-v7]
 
     steps:
       - name: Checkout repository
@@ -101,11 +101,15 @@ jobs:
         with:
           cache-suffix: -${{ matrix.target }}-${{ matrix.group }}
 
+      - name: Show runner hardware
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo
+          free -h
+
       - name: Run unit tests
         timeout-minutes: 60
-        # NPROC=0 disables pytest-xdist: the small CI runners OOM under
-        # parallel test execution. Each matrix cell runs one group serially.
-        run: make ${{ matrix.target }} GROUP=${{ matrix.group }} NPROC=0
+        run: make ${{ matrix.target }} GROUP=${{ matrix.group }}
 
       - name: Save coverage information
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

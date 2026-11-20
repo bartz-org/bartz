@@ -33,6 +33,7 @@ from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
 
 from bartz import grove
 from bartz._jaxext import minimal_unsigned_dtype, split
+from bartz._jaxext.random import categorical
 from bartz.mcmcstep._state import Forest, used_trees_mask
 
 
@@ -325,7 +326,7 @@ def choose_leaf(
     is_growable = affluence_tree  # `affluence_tree` is the clean growable mask
     num_growable = jnp.count_nonzero(is_growable)
     distr = jnp.where(is_growable, p_propose_grow, 0)
-    leaf_to_grow, distr_norm = categorical(key, distr)
+    leaf_to_grow, distr_norm = categorical_cumsum(key, distr)
     leaf_to_grow = jnp.where(num_growable, leaf_to_grow, 2 * split_tree.size)
     prob_choose = distr[leaf_to_grow] / jnp.where(distr_norm, distr_norm, 1)
     is_parent = grove.is_leaves_parent(split_tree.at[leaf_to_grow].set(1))
@@ -333,7 +334,7 @@ def choose_leaf(
     return leaf_to_grow, num_growable, prob_choose, num_prunable
 
 
-def categorical(
+def categorical_cumsum(
     key: Key[Array, ''], distr: Float32[Array, ' n']
 ) -> tuple[Int32[Array, ''], Float32[Array, '']]:
     """
@@ -604,7 +605,7 @@ def categorical_exclude(
     exclude, num_allowed = _process_exclude(logits.size, exclude)
     kinda_neg_inf = jnp.finfo(logits.dtype).min
     logits = logits.at[exclude].set(kinda_neg_inf)
-    u = random.categorical(key, logits)
+    u = categorical(key, logits)
     return u, num_allowed
 
 

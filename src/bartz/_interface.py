@@ -51,6 +51,7 @@ from numpy import ndarray
 
 from bartz._jaxext import (
     equal_shards,
+    forbid_x64,
     is_key,
     jit,
     jit_active,
@@ -99,6 +100,7 @@ from bartz.mcmcstep._state import (
     leaf_partition_spec,
     outcome_target,
 )
+from bartz.mcmcstep._step import count_selectable
 from bartz.npz import serializable
 from bartz.npz._npz import check_class, load_npz, save_npz
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
@@ -166,9 +168,11 @@ class SparseConfig(Module):
 
     .. math::
         (s_1, \ldots, s_p) \sim
-        \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p).
+        \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p),
 
-    If `theta` is not specified, it's a priori distributed according to
+    where p counts only the predictors with decision rules, as the others are
+    ignored (see the `rm_const` argument of `Bart`). If `theta` is not
+    specified, it's a priori distributed according to
 
     .. math::
         \frac{\mathtt{theta}}{\mathtt{theta} + \mathtt{rho}} \sim
@@ -394,6 +398,9 @@ class Bart(Module):
     signal-to-noise ratio of the fit to less than about 1000, a limit that
     should always hold in realistic usage.
 
+    bartz computes in 32 bit, and raises an error if ``jax_enable_x64`` is set
+    or if passed 64-bit jax arrays. numpy arrays are converted to 32 bit.
+
     References
     ----------
     .. [1] Linero, Antonio R. (2018). “Bayesian Regression Trees for
@@ -418,11 +425,11 @@ class Bart(Module):
     _mcmc_state: State
     _mcmc_callback: Callback | None
     _binner: Binner
-    _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
     # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
     _x_train_fmt: Any = field(static=True)
     _device: Device | None = field(static=True)
 
+    @forbid_x64
     def __init__(
         self,
         x_train: Real[ArrayLike, 'p n'] | DataFrame,
@@ -582,9 +589,9 @@ class Bart(Module):
         self._mcmc_callback = result.final_callback
         self._binner = binner_obj
         self._x_train_fmt = x_train_fmt
-        self._binary_mask = binary_mask
         self._device = device
 
+    @forbid_x64
     def predict(
         self,
         x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
@@ -841,6 +848,7 @@ class Bart(Module):
         axis = chainful_axis(0, chain_axis)
         return forest.split_tree.shape[axis]
 
+    @forbid_x64
     def get_latent_prec(
         self, only_continuous: bool = False
     ) -> (
@@ -893,6 +901,7 @@ class Bart(Module):
             only_continuous=only_continuous,
         )
 
+    @forbid_x64
     def get_error_sdev(
         self, mean: bool = False
     ) -> (
@@ -922,9 +931,15 @@ class Bart(Module):
         """
         # binary outcomes are filled with NaN, so disable the NaN check
         with debug_nans(False):
-            return get_error_sdev(self._main_trace, self._binary_mask, mean=mean)
+            return get_error_sdev(
+                self._main_trace,
+                self._mcmc_state.binary_indices,
+                has_binary=self._mcmc_state.z is not None,
+                mean=mean,
+            )
 
     @cached_property
+    @forbid_x64
     def accept(
         self,
     ) -> (
@@ -937,25 +952,29 @@ class Bart(Module):
         allow checking convergence. The iterations thinned away by `n_skip` are
         not recorded.
         """
-        return get_accept(self._burnin_trace, self._main_trace, self.num_trees)
+        return get_accept(self._burnin_trace, self._main_trace)
 
     @cached_property
+    @forbid_x64
     def varcount(self) -> Int32[Array, 'ndpost p']:
         """Histogram of predictor usage for decision rules in the trees."""
         p = self._mcmc_state.forest.max_split.size
         return varcount(p, self._main_trace)
 
     @cached_property
+    @forbid_x64
     def varcount_mean(self) -> Float32[Array, ' p']:
         """Average of `varcount` across MCMC iterations."""
         return self.varcount.mean(axis=0)
 
     @cached_property
+    @forbid_x64
     def varprob(self) -> Float32[Array, 'ndpost p']:
         """Posterior samples of the probability of choosing each predictor for a decision rule."""
         return varprob(self._mcmc_state.forest, self._main_trace)
 
     @cached_property
+    @forbid_x64
     def varprob_mean(self) -> Float32[Array, ' p']:
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)
@@ -1383,7 +1402,7 @@ def _check_type_settings(
 
 
 def _process_sparsity_settings(
-    x_train: Real[Array, 'p n'], sparse: SparseConfig
+    max_split: UInt[Array, ' p'], sparse: SparseConfig
 ) -> (
     tuple[None, None, None, None]
     | tuple[FloatLike, None, None, None]
@@ -1397,8 +1416,8 @@ def _process_sparsity_settings(
     else:
         rho = sparse.rho
         if rho is None:
-            p, _ = x_train.shape
-            rho = float(p)
+            # ignore predictors without decision rules
+            rho = count_selectable(max_split > 0).astype(jnp.float32)
         return None, sparse.a, sparse.b, rho
 
 
@@ -1633,7 +1652,7 @@ def _setup_mcmc(
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
     n_burn: int,
 ) -> tuple[State, Key[Array, ''], Device | None, Literal['cpu', 'gpu'] | None]:
-    theta, a, b, rho = _process_sparsity_settings(x_train, sparse)
+    theta, a, b, rho = _process_sparsity_settings(max_split, sparse)
 
     device_kw, device, check_platform = process_device_settings(
         y_train, num_chains, num_chain_devices, num_data_devices, devices
@@ -1726,11 +1745,12 @@ def varcount(p: int, trace: MainTrace) -> Int32[Array, 'ndpost p']:
     return lax.collapse(varcount, 0, -1)
 
 
-@jit(static_argnames='mean')
+@jit(static_argnames=('has_binary', 'mean'))
 def get_error_sdev(
     trace: MainTrace,
-    binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
+    binary_indices: Int32[Array, ' kb'] | None,
     *,
+    has_binary: bool,
     mean: bool = False,
 ) -> (
     Float32[Array, ' ndpost']
@@ -1757,7 +1777,11 @@ def get_error_sdev(
     sdev = jnp.sqrt(var)
     if is_uv:
         sdev = sdev.squeeze(-1)
-    return jnp.where(binary_mask, jnp.nan, sdev)
+    if binary_indices is not None:
+        sdev = sdev.at[..., binary_indices].set(jnp.nan, unique_indices=True)
+    elif has_binary:
+        sdev = jnp.full_like(sdev, jnp.nan)
+    return sdev
 
 
 @jit(static_argnames='only_continuous')
@@ -1790,9 +1814,9 @@ def get_latent_prec(
     return prec
 
 
-@jit(static_argnames='num_trees')
+@jit
 def get_accept(
-    burnin_trace: BurninTrace, main_trace: MainTrace, num_trees: int
+    burnin_trace: BurninTrace, main_trace: MainTrace
 ) -> (
     Float32[Array, ' n_burn_plus_n_save']
     | Float32[Array, 'num_chains n_burn_plus_n_save']
@@ -1807,6 +1831,7 @@ def get_accept(
         axis=sample_axis,
     )
     acc = chain_to_axis(acc, chain_vmap_axes(main_trace).grow_acc_count)
+    *_, num_trees, _ = main_trace.split_tree.shape
     return acc / num_trees
 
 
@@ -1818,8 +1843,8 @@ def varprob(forest: Forest, trace: MainTrace) -> Float32[Array, 'ndpost p']:
     ndpost = trace.grow_prop_count.size
     varprob = trace.varprob
     if varprob is None:
-        peff = jnp.count_nonzero(max_split)
-        out = jnp.where(max_split, 1 / peff, 0)
+        p_eff = jnp.count_nonzero(max_split)
+        out = jnp.where(max_split, 1 / p_eff, 0)
         return jnp.broadcast_to(out, (ndpost, p))
     elif isinstance(varprob, VarprobInState):
         log_s = forest.sparsity.log_s

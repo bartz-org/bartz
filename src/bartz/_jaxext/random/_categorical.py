@@ -24,18 +24,34 @@
 
 """Categorical sampler faster than `jax.random.categorical` on cpu."""
 
+from jax import lax, random
 from jax import numpy as jnp
-from jax import random
 from jaxtyping import Array, Float, Int32, Key
 
 
 def categorical(key: Key[Array, ''], logits: Float[Array, ' n']) -> Int32[Array, '']:
-    """Draw like `jax.random.categorical` with 1d `logits`, with the same result."""
+    """Draw like `jax.random.categorical` with 1d `logits`, with the same result.
+
+    If `logits` has nans, return the index of one of them.
+    """
+    # on gpu, jax's argmax is faster than max and min at large n
+    return lax.platform_dependent(
+        key,
+        logits,
+        cpu=categorical_cpu,
+        default=random.categorical,  # noqa: TID251
+    )
+
+
+def categorical_cpu(
+    key: Key[Array, ''], logits: Float[Array, ' n']
+) -> Int32[Array, '']:
+    """Implement `categorical` with max and min instead of argmax."""
     # xla:cpu does not vectorize the argmax reduction, nor any computation of
     # `logits` fused into it, while it vectorizes max and min
     (n,) = logits.shape
 
-    # like argmax, pick the first nan, to propagate it, else the first maximum
+    # pick a nan if any, to propagate it, else the first maximum like argmax
     # WORKAROUND(jax<0.12.1): keep nans out of max, as large xla:cpu reductions
     # drop them, https://github.com/jax-ml/jax/issues/41335; with the fix, use
     # `min(where((z == max(z)) | isnan(z), index, n))` (the gumbel noise is

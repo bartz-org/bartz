@@ -65,7 +65,7 @@ from jax import (
 )
 from jax import numpy as jnp
 from jax.scipy.special import ndtr
-from jax.sharding import Mesh, SingleDeviceSharding
+from jax.sharding import Mesh
 from jax.tree_util import KeyPath, keystr
 from jax.typing import DTypeLike
 from jaxtyping import Array, Bool, Float, Float32, Int32, Key, PyTree, Real, Shaped
@@ -118,11 +118,14 @@ from tests.util import (
     chain_deviation_norms,
     clipped_logit,
     condf,
+    condp,
     leaf_prior_cov_inv_conditional_mean,
     nnone,
+    raises_x64_enabled,
     rerun_on_gpu,
     rhat_rank,
     skip_empty_shard_map_bug,
+    to_64_bit,
 )
 
 
@@ -941,10 +944,8 @@ def test_sequential_guarantee(bkw: BartKW, subtests: SubTests) -> None:
         .reshape(num_chains * bkw.n_save, *y_shape)
     )
 
-    if bart1.predict('train', kind='latent_samples').platform() == 'cpu':
-        rtol = 0
-    else:  # pragma: no cover, gpu-only
-        rtol = condf(bart1._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
+    leaf_tree = bart1._mcmc_state.forest.leaf_tree
+    rtol = condp(leaf_tree, 0, condf(leaf_tree, 1e-5, 1e-3))
 
     with subtests.test('shift burn-in'):
         assert_close_matrices(
@@ -1128,7 +1129,7 @@ def test_error_scale_magnitude_invariance(bkw: BartKW) -> None:
     state_ref = run(1.0)
 
     leaf_tree = state_ref.forest.leaf_tree
-    rtol = 0.0 if leaf_tree.platform() == 'cpu' else condf(leaf_tree, 1e-5, 1e-3)
+    rtol = condp(leaf_tree, 0.0, condf(leaf_tree, 1e-5, 1e-3))
 
     for c in (2.0**-9, 2.0**9):
         state_scaled = run(c)
@@ -1189,7 +1190,7 @@ def test_error_scale_2d_dense_error_cov(bkw: BartKW) -> None:
         trace_2d = run(jnp.broadcast_to(error_scale, kw['y_train'].shape))
         # the scalar and per-component precision scales take different code
         # paths, so the chains agree only up to float rounding
-        rtol = 1e-5 if trace.leaf_tree.platform() == 'cpu' else 1e-3
+        rtol = condp(trace.leaf_tree, 1e-5, 1e-3)
         assert_close_matrices(
             trace_2d.error_cov_inv, trace.error_cov_inv, rtol=rtol, reduce_rank=True
         )
@@ -1323,7 +1324,7 @@ def test_missing_ignored(bkw: BartKW, keys: split) -> None:
     # note: don't use predict('train') because that may rely on `resid` being clean
     yhat1 = bart1.predict(kw['x_train'], kind='latent_samples')
     yhat2 = bart2.predict(kw['x_train'], kind='latent_samples')
-    rtol = 0 if yhat1.platform() == 'cpu' else 1e-5
+    rtol = condp(yhat1, 0, 1e-5)
     assert_close_matrices(yhat1, yhat2, rtol=rtol, reduce_rank=True)
 
     # check resid_inexact_integral separately because it's not upstream of anything
@@ -1540,6 +1541,12 @@ def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
     with subtests.test('varprob ignores predictor 0'):
         assert jnp.all(bart.varprob[:, 0] == 0)
 
+    sparse = _bart_default(kw, 'sparse')
+    if sparse.enabled and sparse.theta is None and sparse.rho is None:
+        with subtests.test('default rho does not count predictor 0'):
+            rho = nnone(forest.sparsity.rho).item()
+            assert rho == jnp.count_nonzero(forest.max_split).item()
+
     with subtests.test('predictor 0 absent from var_tree'):
         trace = bart._main_trace
         axes = chain_vmap_axes(trace)
@@ -1556,6 +1563,24 @@ def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
         pytest.raises(EQX_RUNTIME_ERRORS, match='predictors with no splits'),
     ):
         Bart(**dict(kw, rm_const=False, seed=random.clone(kw['seed'])))
+
+
+def test_all_constant_predictors(bkw: BartKW) -> None:
+    """With all the predictors constant, hence ignored, nothing is nan."""
+    x = bkw.kw['x_train']
+    # RangeEvenBinner would place cutpoints over the degenerate range
+    kw = dict(
+        bkw.kw, x_train=jnp.broadcast_to(x[:, :1], x.shape), binner=UniqueQuantileBinner
+    )
+    bart = Bart(**kw)
+    assert jnp.all(bart._mcmc_state.forest.max_split == 0)
+    leaves = jax.tree.leaves_with_path((bart._mcmc_state, bart._main_trace))
+    nan = [
+        keystr(path)
+        for path, leaf in leaves
+        if isinstance(leaf, jax.Array) and jnp.any(jnp.isnan(leaf))
+    ]
+    assert not nan
 
 
 def test_output_shapes(bkw: BartKW, keys: split) -> None:
@@ -2170,15 +2195,10 @@ def test_precompute_predict_train(bkw: BartKW, subtests: SubTests) -> None:
 
     # `outcome_samples` is left out: for binary outcomes a tiny latent difference
     # can flip a thresholded 0/1 draw, which is not an approximate mismatch
+    leaf_tree = bart_off._mcmc_state.forest.leaf_tree
+    rtol = condp(leaf_tree, 1e-5, condf(leaf_tree, 1e-4, 1e-3))
     for kind in ('latent_samples', 'mean', 'mean_samples'):
         with subtests.test('predict', kind=kind):
-            # determine the tolerance based on the platform
-            leaf_tree = bart_off._mcmc_state.forest.leaf_tree
-            if leaf_tree.platform() == 'cpu':
-                rtol = 1e-5
-            else:  # pragma: no cover, gpu-only
-                rtol = condf(leaf_tree, 1e-4, 1e-3)
-
             assert_close_matrices(
                 bart_on.predict('train', kind=kind),
                 bart_off.predict('train', kind=kind),
@@ -2407,7 +2427,7 @@ def test_scale_shift(bkw: BartKW) -> None:
     assert_close_matrices(
         lpci1.value,
         bart2._mcmc_state.forest.leaf_prior_cov_inv.value * cov_scale,
-        rtol=1e-6 if lpci1.nu is None or lpci1.value.platform() == 'cpu' else 1e-3,
+        rtol=1e-6 if lpci1.nu is None else condp(lpci1.value, 1e-6, 1e-3),
         reduce_rank=True,
     )
 
@@ -2531,7 +2551,7 @@ def test_permutation_invariance(bkw: BartKW, keys: split) -> None:
     def check_equal(
         path: KeyPath, x1: Shaped[Array, '*shape'], x2: Shaped[Array, '*shape']
     ) -> None:
-        rtol = condf(leaf_tree, 1e-4 if x1.platform() != 'cpu' else 1e-5, 1e-3)
+        rtol = condf(leaf_tree, condp(x1, 1e-5, 1e-4), 1e-3)
         assert_close_matrices(
             x2, x1, err_msg=f'{keystr(path)}: ', rtol=rtol, reduce_rank=True
         )
@@ -2782,10 +2802,7 @@ def test_jit(bkw: BartKW) -> None:
     state1, pred1 = task(X, y, w, key)
     _state2, pred2 = task_compiled(X, y, w, random.clone(key))
 
-    if pred1.platform() == 'cpu':
-        rtol = 1e-5
-    else:  # pragma: no cover, gpu-only
-        rtol = condf(state1.forest.leaf_tree, 1e-5, 1e-3)
+    rtol = condp(pred1, 1e-5, condf(state1.forest.leaf_tree, 1e-5, 1e-3))
     assert_close_matrices(pred1, pred2, rtol=rtol, reduce_rank=True)
 
 
@@ -3038,10 +3055,7 @@ def test_polars(bkw: BartKW) -> None:
     x_test_pl = pl.DataFrame(numpy.array(bkw.x_test).T)
     pred2 = bart2.predict(x_test_pl, kind='latent_samples')
 
-    if pred.platform() == 'cpu':
-        rtol = 0
-    else:  # pragma: no cover, gpu-only
-        rtol = condf(bart._mcmc_state.forest.leaf_tree, 1e-5, 1e-3)
+    rtol = condp(pred, 0, condf(bart._mcmc_state.forest.leaf_tree, 1e-5, 1e-3))
 
     assert_close_matrices(
         bart.predict('train', kind='latent_samples'),
@@ -3206,7 +3220,7 @@ def check_chains_data_sharding(
 ) -> None:
     """Check `x` is sharded as indicated by the boolean flags."""
     if mesh is None:
-        assert isinstance(x.sharding, SingleDeviceSharding)
+        assert x.sharding.num_devices == 1
         return
     expected_spec = [None] * x.ndim
     if data and 'data' in mesh.axis_names:
@@ -3444,12 +3458,11 @@ def test_equiv_sharding(bkw: BartKW, subtests: SubTests) -> None:
         # Leaves stored in a reduced-precision dtype can differ by a rounding
         # step when data sharding reorders the per-leaf reductions, so compare
         # them only at their storage precision.
-        reduced = jnp.issubdtype(xs.dtype, jnp.floating) and xs.dtype.itemsize < 4
         assert_close_matrices(
             xs,
             xb,
             err_msg=f'{keystr(path)}: ',
-            rtol=1e-2 if reduced else strict_rtol,
+            rtol=condf(xs, strict_rtol, 1e-2),
             reduce_rank=True,
         )
 
@@ -3830,10 +3843,7 @@ def assert_identical_bart(bart1: OriginalBart, bart2: OriginalBart) -> None:
         assert x1.dtype == x2.dtype
         assert x1.sharding.is_equivalent_to(x2.sharding, x1.ndim)
         if jnp.issubdtype(x1.dtype, jnp.floating):
-            if x1.platform() == 'cpu':
-                rtol = 1e-5
-            else:  # pragma: no cover, gpu-only
-                rtol = condf(leaf_tree, 1e-4, 1e-3)
+            rtol = condp(x1, 1e-5, condf(leaf_tree, 1e-4, 1e-3))
             assert_close_matrices(
                 x1, x2, rtol=rtol, err_msg=keystr(path), reduce_rank=True
             )
@@ -3867,6 +3877,31 @@ def test_numpy_input(bkw: BartKW) -> None:
     bart2 = Bart(**kw2)
 
     assert_identical_bart(bart1, bart2)
+
+
+def test_x64(bkw: BartKW) -> None:
+    """Check `Bart` raises under `jax_enable_x64` or with 64-bit inputs."""
+    with raises_x64_enabled():
+        Bart(**bkw.kw)
+    with pytest.raises(TypeError, match='`x_train` has dtype float64'):
+        Bart(**dict(bkw.kw, x_train=to_64_bit(bkw.kw['x_train'])))
+
+    bart = Bart(**bkw.kw)
+    with pytest.raises(TypeError, match='`x_test` has dtype float64'):
+        bart.predict(to_64_bit(bkw.x_test))
+    methods = dict(
+        predict=lambda: bart.predict(bkw.x_test),
+        get_latent_prec=bart.get_latent_prec,
+        get_error_sdev=bart.get_error_sdev,
+        accept=lambda: bart.accept,
+        varcount=lambda: bart.varcount,
+        varcount_mean=lambda: bart.varcount_mean,
+        varprob=lambda: bart.varprob,
+        varprob_mean=lambda: bart.varprob_mean,
+    )
+    for method in methods.values():
+        with raises_x64_enabled():
+            method()
 
 
 def assert_bart_on_device(bart: Bart, device: Device) -> None:
@@ -3906,13 +3941,7 @@ class TestDevicePlacement:
     @pytest.fixture
     def committed_kw(self, single_device_kw: dict, other_device: Device) -> dict:
         """Like ``single_device_kw`` with all JAX inputs committed to ``other_device``."""
-
-        def commit(x: Any) -> Any:  # noqa: ANN401
-            if isinstance(x, Array):
-                return jax.device_put(x, other_device)
-            return x
-
-        return tree.map(commit, single_device_kw)
+        return commit_arrays(single_device_kw, other_device)
 
     @pytest.fixture(params=['jax', 'numpy'])
     def uncommitted_kw(self, single_device_kw: dict, request: FixtureRequest) -> dict:
@@ -3963,6 +3992,24 @@ class TestDevicePlacement:
         bart = Bart(**dict(committed_kw, devices=get_default_device()))
         assert_bart_on_device(bart, get_default_device())
 
+    def test_committed_moved_to_mesh(self, bkw: BartKW, other_device: Device) -> None:
+        """Committed inputs are moved to the mesh, also if their device is in it."""
+        if not get_expect_sharded(bkw.kw):
+            pytest.skip('This variant does not shard.')
+        bart = Bart(**commit_arrays(bkw.kw, other_device))
+        mesh = bart._mcmc_state.config.mesh
+        assert mesh is not None
+        assert other_device in mesh.devices.flat
+        check_sharding(bart._mcmc_state, mesh)
+        check_sharding(bart._main_trace, mesh)
+
+        x_test = jax.device_put(bkw.x_test, other_device)
+        w = bkw.w_for_predict('mean', on_train=False)
+        if w is not None:
+            w = jax.device_put(w, other_device)
+        pred = bart.predict(x_test, kind='mean', error_scale=w)
+        check_chains_data_sharding(pred, mesh=mesh, chains=False, data=True)
+
     def test_predict_on_devices(
         self, bkw: BartKW, single_device_kw: dict, other_device: Device
     ) -> None:
@@ -3971,3 +4018,10 @@ class TestDevicePlacement:
         w = bkw.w_for_predict('mean', on_train=False)
         pred = bart.predict(bkw.x_test, kind='mean', error_scale=w)
         assert pred.devices() == {other_device}
+
+
+def commit_arrays(kw: dict, device: Device) -> dict:
+    """Commit all the JAX arrays in `kw` to `device`."""
+    return tree.map(
+        lambda x: jax.device_put(x, device) if isinstance(x, Array) else x, kw
+    )

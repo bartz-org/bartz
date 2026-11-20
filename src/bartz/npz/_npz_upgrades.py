@@ -142,13 +142,9 @@ def upgrade_bartz_0_13_bcf(_: None, old: Arrays) -> tuple[Skeleton, Arrays]:
     return root, arrays
 
 
-def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
-    """Add `Forest.used_trees` with all the trees in use, and `StepConfig` options for it.
-
-    `StepConfig.random_tree_scan` is off, while
-    `StepConfig.sequential_block_size` and `StepConfig.parallel_block_size` are
-    automatic, which has no effect with all the trees in use.
-    """
+def upgrade_bartz_0_14(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
+    """Convert an archive written by bartz 0.14."""
+    dropped: set[str] = set()
 
     def walk(node: Skeleton) -> Skeleton:
         if type(node) is list:
@@ -157,8 +153,23 @@ def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
             return node
         elif node['type'] == 'module':
             fields = {k: walk(v) for k, v in node['fields'].items()}
-            if node['cls'] == 'Forest':
+            # rename the running sum `peff` to `var_perplexity`
+            if node['cls'] == 'StatsAccumulator' and fields['sums'] is not None:
+                sums = fields['sums']
+                items = {
+                    'var_perplexity' if k == 'peff' else k: v
+                    for k, v in sums['items'].items()
+                }
+                fields = dict(fields, sums=dict(sums, items=items))
+            # drop `Bart._binary_mask`, redundant with the MCMC state
+            elif node['cls'] == 'Bart':
+                dropped.add(fields['_binary_mask']['key'])
+                fields = {k: v for k, v in fields.items() if k != '_binary_mask'}
+            # add `Forest.used_trees` with all the trees in use
+            elif node['cls'] == 'Forest':
                 fields = dict(**fields, used_trees=None)
+            # add the options for `Forest.used_trees`: the block sizes are
+            # automatic, which has no effect with all the trees in use
             elif node['cls'] == 'StepConfig':
                 fields = dict(
                     **fields,
@@ -172,7 +183,8 @@ def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
         else:
             return dict(node, items=[walk(v) for v in node['items']])
 
-    return walk(root), old
+    root = walk(root)
+    return root, {k: v for k, v in old.items() if k not in dropped}
 
 
 # Step k converts format k to k+1. Steps are frozen once released. Use only
@@ -183,5 +195,5 @@ def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
 # a fill strategy which may not be `None` if the field is not already optional.
 UPGRADES: tuple[Callable[[Skeleton, Arrays], tuple[Skeleton, Arrays]], ...] = (
     upgrade_bartz_0_13_bcf,
-    upgrade_used_trees,
+    upgrade_bartz_0_14,
 )

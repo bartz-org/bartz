@@ -35,6 +35,7 @@ from bartz._jaxext._jaxext import (
     dynamic_update_slice_in_dim,
     equal_shards,
     float32_matmuls,
+    forbid_x64,
     get_cpu_thread_count,
     get_default_device,
     get_default_devices,
@@ -52,7 +53,6 @@ from bartz._jaxext._jaxext import (
     variable_length_scan,
     variable_length_update,
     vmap_max,
-    vmap_nodoc,
 )
 from bartz._jaxext._jit import jit
 from bartz._jaxext._linalg import cholesky, solve_triangular

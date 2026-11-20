@@ -67,8 +67,10 @@ from tests.util import (
     int_seed,
     jaxtyping_disabled,
     nnone,
+    raises_x64_enabled,
     rerun_on_gpu,
     rhat_rank,
+    to_64_bit,
 )
 
 # sizes of the quick runs that only check the plumbing
@@ -1702,6 +1704,35 @@ class TestBcf:
             model.predict(test.x, pihat_test=test.pihat.at[0].set(jnp.nan))
         with pytest.raises(ValueError, match='predictors contain NaN'):
             model.predict(test.x.at[-1, -1].set(jnp.nan), pihat_test=test.pihat)
+
+    def test_x64(self, keys: split) -> None:
+        """`bcf` raises under `jax_enable_x64` or with 64-bit inputs."""
+        train, test = split_bcf_data(
+            gen_bcf_data(keys.pop(), n=N_TRAIN + N_TEST), N_TRAIN
+        )
+        kw: dict = dict(
+            x_train=train.x,
+            y_train=train.y,
+            z_train=train.z,
+            pihat_train=train.pihat,
+            num_trees_mu=NUM_TREES_MU,
+            num_trees_tau=NUM_TREES_TAU,
+            ndpost=NDPOST,
+            nskip=NSKIP,
+        )
+        with raises_x64_enabled():
+            bcf(**kw, seed=keys.pop())
+        kw64: dict = dict(kw, pihat_train=to_64_bit(train.pihat))
+        with pytest.raises(TypeError, match='`pihat_train` has dtype float64'):
+            bcf(**kw64, seed=keys.pop())
+
+        model = bcf(**kw, seed=keys.pop())
+        with raises_x64_enabled():
+            model.predict(test.x, pihat_test=test.pihat)
+        with raises_x64_enabled():
+            model.predict_potential_outcomes(
+                test.x, key=keys.pop(), pihat_test=test.pihat
+            )
 
     @pytest.mark.flaky(max_runs=5, rerun_filter=rerun_on_gpu)
     # on gpu the mcmc is not deterministic at fixed seed

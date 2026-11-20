@@ -61,7 +61,9 @@ from tests.util import (
     int_seed,
     leaf_prior_cov_inv_conditional_mean,
     nnone,
+    raises_x64_enabled,
     rhat_rank,
+    to_64_bit,
 )
 
 # Common static settings shared across the module. jax recompiles whenever an
@@ -141,6 +143,22 @@ def test_continuous_smoke(continuous_data: _Data, keys: split) -> None:
     assert nnone(m.y_hat_test).shape == (data.X_test.shape[0], m.num_samples)
     assert m.global_var_samples.shape == (m.num_samples,)
     assert m.outcome_model.outcome == 'continuous'
+
+
+def test_x64(continuous_data: _Data, keys: split) -> None:
+    """Check `BARTModel` raises under `jax_enable_x64` or with 64-bit inputs."""
+    data = continuous_data
+    kw: dict = dict(X_train=data.X_train, y_train=data.y_train, **_SAMPLE_KW)
+    with raises_x64_enabled():
+        bst.BARTModel().sample(**kw)
+    kw64: dict = dict(kw, y_train=to_64_bit(data.y_train))
+    with pytest.raises(TypeError, match='`y_train` has dtype float64'):
+        bst.BARTModel().sample(**kw64)
+
+    m = bst.BARTModel()
+    m.sample(**kw, general_params={'random_seed': keys.pop()})
+    with raises_x64_enabled():
+        m.predict(data.X_test)
 
 
 def test_predict_shapes(continuous_data: _Data, keys: split) -> None:

@@ -43,6 +43,7 @@ Some of the R-only BART packages are wrapped for Python in [rbartpackages](https
 - [SequentialBART](https://github.com/mjdaniels/SequentialBART)
 - [sparseBART](https://github.com/cspanbauer/sparseBART)
 - [pymc-bart](https://github.com/pymc-devs/pymc-bart) BART within PyMC
+- [bartrs](https://github.com/pymc-devs/bartrs) Rust particle Gibbs sampler used by pymc-bart
 - [semibart](https://github.com/zeldow/semibart)
 - [ebprado](https://github.com/ebprado)'s repositories
 - [EoghanONeill](https://github.com/EoghanONeill)'s repositories
@@ -58,7 +59,7 @@ Some of the R-only BART packages are wrapped for Python in [rbartpackages](https
 - [BART-BMA](https://github.com/BelindaHernandez/BART-BMA) (superseded by [bartBMAnew](https://github.com/EoghanONeill/bartBMAnew))
 - [XBCF](https://github.com/socket778/XBCF) (superseded by StochasticTree)
 - [mpibart](https://matthewpratola.com/mpibart) Old parallel implementation
-- [HE-BART](https://github.com/brunaw/HE-BART)
+- [hebart](https://github.com/brunaw/hebart) Hierarchical embedded BART, for grouped data
 - [pgbart](https://github.com/balajiln/pgbart) Particle Gibbs BART
 - [skewBART](https://github.com/Seungha-Um/skewBART) multivariate skewed responses
 - [missBART](https://github.com/yongchengoh/missBART) BART for missing outcome data
@@ -67,3 +68,29 @@ Some of the R-only BART packages are wrapped for Python in [rbartpackages](https
 - [BASTION](https://github.com/rayisaacalan/BASTION) Spanning tree partitions instead of axis-aligned splits, for spatial data on complex domains
 - [ztluostat](https://github.com/ztluostat)'s repositories (BAST, BAMDT)
 - [SkT-BART](https://github.com/fadedrt/SkT-BART) R package, skew-t errors
+- [obliqueBART](https://github.com/paulhnguyen/obliqueBART) Oblique splits on linear combinations of predictors
+- [RoBART](https://github.com/jw0000000/RoBART) Each tree splits along its own rotated axes
+- [ridgeBART](https://github.com/ryanyee3/ridgeBART) Leaves output ridge functions, for smooth fits
+- [jestarling](https://github.com/jestarling)'s repositories (tsbart, tsbcf) BART with targeted smoothing
+- [bartisan](https://github.com/ngreifer/bartisan) R package, non-Gaussian likelihoods with a `glm()`-like interface
+- [gbart](https://github.com/Enakshi-Saha/gbart) Python package, exponential family responses
+- [Loglinear-BART](https://github.com/NingyaW/Loglinear-BART) Multinomial logistic and count regression
+- [GcompBART](https://github.com/yizhenxu/GcompBART) Multinomial probit BART, causal comparison of dynamic policies
+- [ordinal_bart](https://github.com/bpkindo/ordinal_bart) Ordinal regression
+- [nb_bart](https://github.com/RicoKrueger/nb_bart) Python, spatial negative binomial model
+- [CbartGP](https://github.com/lxtpvt/CbartGP) BART with Gaussian processes for dependent data
+- [SBMTrees](https://github.com/zjg540066169/SBMTrees) Mixed-effects BART for longitudinal data, missing data imputation
+- [dlmtree](https://github.com/danielmork/dlmtree) Treed distributed lag models
+- [sparseVCBART](https://github.com/ghoshstats/sparseVCBART) Sparse varying coefficient BART
+- [tijn-jacobs](https://github.com/tijn-jacobs)'s repositories (ShrinkageTrees, FusionForests) Survival, causal inference, data fusion
+- [BART-Survival](https://github.com/CDCgov/BART-Survival) Python package, discrete-time survival analysis with PyMC
+- [mstatebart](https://github.com/lcomm/mstatebart) Multi-state models
+- [uddbart](https://github.com/xulinpan/uddbart) Dynamic risk prediction with interval-censored survival
+- [bartcs](https://github.com/yooyh/bartcs) Confounder selection
+- [bmabart](https://cran.r-project.org/package=bmabart) Mediation analysis
+- [BartMixVs](https://github.com/chujiluo/BartMixVs) Variable selection
+- [iBART](https://github.com/mattsheng/iBART) Iterative BART for variable and operator selection
+- [EBcoBART](https://github.com/JeroenGoedhart/EBcoBART) Empirical Bayes co-data learning of the split variable probabilities
+- [embarcadero](https://github.com/cjcarlson/embarcadero) Species distribution models, based on dbarts
+- [bartXViz](https://github.com/ldongeunl/bartXViz) SHAP visualizations for BART
+- [PartyBART.jl](https://github.com/lukego/PartyBART.jl) Particle-based inference with Gen.jl

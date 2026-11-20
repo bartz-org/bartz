@@ -53,6 +53,7 @@ from bartz._jaxext import (
     cpu_barrier,
     field,
     float32_matmuls,
+    forbid_x64,
     jit,
     minimal_unsigned_arange,
     sequential_vmap,
@@ -63,7 +64,6 @@ from bartz._jaxext import (
     variable_length_scan,
     variable_length_update,
     vmap_max,
-    vmap_nodoc,
 )
 from bartz._jaxext.random import categorical, loggamma, poisson
 from bartz.grove import is_actual_leaf, var_histogram
@@ -92,6 +92,7 @@ from bartz.mcmcstep._state import (
 
 
 @jit(donate_argnums=(1,))
+@forbid_x64
 @split_key_for_chains
 @shard_map_state
 @vmap_chains
@@ -684,7 +685,7 @@ def apply_grow_to_indices(
     return _apply_grow_to_indices(moves, leaf_indices, X)
 
 
-@partial(vmap_nodoc, in_axes=(0, 0, None))
+@partial(vmap, in_axes=(0, 0, None))
 def _apply_grow_to_indices(
     moves: Moves, leaf_indices: UInt[Array, ' n'], X: UInt[Array, 'p n']
 ) -> UInt[Array, ' n']:
@@ -986,7 +987,7 @@ def compute_prec_trees(
     return trees
 
 
-@partial(vmap_nodoc, in_axes=(0, None))
+@partial(vmap, in_axes=(0, None))
 def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) -> Moves:
     """
     Complete non-likelihood MH ratio calculation.
@@ -1071,7 +1072,7 @@ def adapt_leaf_trees_to_grow_indices(
     return _adapt_leaf_trees_to_grow_indices(leaf_trees, moves)
 
 
-@vmap_nodoc
+@vmap
 def _adapt_leaf_trees_to_grow_indices(
     leaf_trees: Float[Array, ' tree_size'] | Float[Array, ' k tree_size'], moves: Moves
 ) -> Float[Array, ' tree_size'] | Float[Array, ' k tree_size']:
@@ -1097,7 +1098,7 @@ def compute_B(
 
 
 # keep the leaf axis trailing, faster for the unrolled matvec
-@partial(vmap_nodoc, in_axes=-1, out_axes=-1)
+@partial(vmap, in_axes=-1, out_axes=-1)
 def solve_leaf(
     L: Float32[Array, 'k k'], b: Float32[Array, ' k']
 ) -> Float32[Array, ' k']:
@@ -1246,7 +1247,7 @@ def precompute_leaf_terms(
         )
 
 
-@vmap_nodoc
+@vmap
 def _gather_lrt(
     leaf_values: Float32[Array, '*k_k tree_size'], lrt_nodes: Int32[Array, ' 3']
 ) -> Float32[Array, ' 3 *k_k']:
@@ -1951,7 +1952,7 @@ def apply_moves_to_leaf_indices(
     return _apply_moves_to_leaf_indices(leaf_indices, to_prune, move_node)
 
 
-@vmap_nodoc
+@vmap
 def _apply_moves_to_leaf_indices(
     leaf_indices: UInt[Array, ' n'],
     to_prune: Bool[Array, ''],
@@ -1987,7 +1988,7 @@ def apply_moves_to_split_trees(
     return _apply_moves_to_split_trees(split_tree, moves)
 
 
-@vmap_nodoc
+@vmap
 def _apply_moves_to_split_trees(
     split_tree: UInt[Array, ' half_tree_size'], moves: Moves
 ) -> UInt[Array, ' half_tree_size']:
@@ -2026,7 +2027,7 @@ def apply_moves_to_affluence_trees(
     return _apply_moves_to_affluence_trees(affluence_tree, moves)
 
 
-@vmap_nodoc
+@vmap
 def _apply_moves_to_affluence_trees(
     affluence_tree: Bool[Array, ' half_tree_size'], moves: Moves
 ) -> Bool[Array, ' half_tree_size']:
@@ -2631,7 +2632,8 @@ def step_s(key: Key[Array, ''], state: State) -> State:
     The prior is s ~ Dirichlet(theta/p, ..., theta/p), and the posterior
     is s ~ Dirichlet(theta/p + varcount, ..., theta/p + varcount), where
     varcount is the count of how many times each variable is used in the
-    current forest.
+    current forest. The variables with ``max_split == 0`` are excluded, also
+    from the count `p`, and get arbitrary values.
 
     Parameters
     ----------
@@ -2668,7 +2670,8 @@ def step_s(key: Key[Array, ''], state: State) -> State:
     # the Dirichlet posterior concentration, optionally completed with the exact
     # accounting of forbidden rules via data augmentation, in log space as the
     # augmentation counts can be huge
-    log_alpha = jnp.log(state.forest.sparsity.theta / p + varcount)
+    p_eff = count_selectable(state.forest.max_split > 0)
+    log_alpha = jnp.log(state.forest.sparsity.theta / p_eff + varcount)
     if state.config.augment:
         log_alpha = jnp.logaddexp(
             log_alpha, sample_s_augmentation(keys.pop(), state.forest)
@@ -2739,6 +2742,7 @@ def step_theta(
     log_p = partial(
         _log_p_v,
         log_s=forest.sparsity.log_s,
+        selectable=forest.max_split > 0,
         a=forest.sparsity.a,
         b=forest.sparsity.b,
         rho=forest.sparsity.rho,
@@ -2805,6 +2809,7 @@ def _log_p_v(
     v: Float32[Array, '*shape'],
     *,
     log_s: Float32[Array, ' p'],
+    selectable: Bool[Array, ' p'],
     a: Float32[Array, ''],
     b: Float32[Array, ''],
     rho: Float32[Array, ''],
@@ -2814,15 +2819,15 @@ def _log_p_v(
     With ``lambda = theta / (theta + rho)``, the Beta(a, b) prior density of
     `lambda`, times the Jacobian ``dlambda / dv = lambda (1 - lambda)``, gives
     the prior density of `v`, proportional to ``lambda^a (1 - lambda)^b``. The
-    likelihood is the Dirichlet density of ``s = softmax(log_s)`` with
-    concentration ``theta / p``.
+    likelihood is the Dirichlet density of ``s = softmax(log_s)`` over the
+    `p_eff` `selectable` variables, with concentration ``theta / p_eff``.
     """
     log_lambda = -jnp.logaddexp(0.0, -v)
     log1m_lambda = -jnp.logaddexp(0.0, v)
-    (p,) = log_s.shape
-    log_c = jnp.log(rho / p) + v  # c = theta / p
+    p_eff = count_selectable(selectable)
+    log_c = jnp.log(rho / p_eff) + v  # c = theta / p_eff
     c = jnp.exp(log_c)
-    theta = p * c
+    theta = p_eff * c
 
     # log of the Dirichlet density, Gamma(theta) / Gamma(c)^p prod(s)^c, up to
     # factors constant in theta. Expanding the log-gammas with Stirling's
@@ -2830,21 +2835,33 @@ def _log_p_v(
     # theta times the divergence -log p - mean(log s) >= 0 of s from uniform,
     # computed from the unnormalized log_s. This avoids cancellations in float32.
     r_theta, r_c = stirling_remainder(jnp.stack([theta, c]))
-    log_lk = (
-        (p - 1) / 2 * log_c - theta * log_mean_exp_deviation(log_s) + r_theta - p * r_c
-    )
+    deviation = log_mean_exp_deviation(log_s, selectable)
+    log_lk = (p_eff - 1) / 2 * log_c - theta * deviation + r_theta - p_eff * r_c
 
     return a * log_lambda + b * log1m_lambda + log_lk
 
 
-def log_mean_exp_deviation(x: Float32[Array, ' p']) -> Float32[Array, '']:
-    """Compute ``log(mean(exp(x - mean(x))))`` without cancellation."""
-    x -= jnp.mean(x)
+def count_selectable(selectable: Bool[Array, ' p']) -> Int32[Array, '']:
+    """Count the true entries, but at least 1 to be safe as divisor."""
+    return jnp.maximum(jnp.count_nonzero(selectable), 1)
+
+
+def log_mean_exp_deviation(
+    x: Float32[Array, ' p'], where: Bool[Array, ' p']
+) -> Float32[Array, '']:
+    """Compute ``log(mean(exp(x - mean(x))))`` over `where` without cancellation, 0 if empty."""
+    num = count_selectable(where)
+
+    def mean(y: Float32[Array, ' p']) -> Float32[Array, '']:
+        # not jnp.mean, which gives nan if `where` is all false
+        return jnp.sum(y, where=where) / num
+
+    x -= mean(x)
     # shift only if exp(x) could overflow, else expm1 retains the precision
-    shift = jnp.maximum(jnp.max(x) - 30.0, 0.0)
+    shift = jnp.maximum(jnp.max(x, where=where, initial=-jnp.inf) - 30.0, 0.0)
     # the result is invariant to shifting x, so remove the residual mean that
     # the centering leaves due to rounding
-    return shift + jnp.log1p(jnp.mean(jnp.expm1(x - shift))) - jnp.mean(x)
+    return shift + jnp.log1p(mean(jnp.expm1(x - shift))) - mean(x)
 
 
 def stirling_remainder(z: Float32[Array, '*shape']) -> Float32[Array, '*shape']:

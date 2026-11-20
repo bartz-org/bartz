@@ -42,7 +42,6 @@ from bartz._jaxext import (
     jit,
     minimal_unsigned_arange,
     minimal_unsigned_dtype,
-    vmap_nodoc,
 )
 
 
@@ -237,7 +236,7 @@ def traverse_forest(
 
 
 @partial(jnp.vectorize, excluded=(0,), signature='(hts),(hts)->(n)')
-@partial(vmap_nodoc, in_axes=(1, None, None))
+@partial(vmap, in_axes=(1, None, None))
 def _traverse_forest(
     X: UInt[Array, ' p'],
     var_trees: UInt[Array, ' half_tree_size'],

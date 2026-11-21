@@ -44,7 +44,7 @@ from bartz._jaxext import (
 from bartz.bcf._state import BCFState, coding_basis, swap_mu_tau_forests
 from bartz.mcmcstep import Forest, StepConfig, step
 from bartz.mcmcstep._state import split_key_for_chains, vmap_chains
-from bartz.mcmcstep._step import step_leaf_prior_cov_inv, step_trees, sum_resid
+from bartz.mcmcstep._step import step_sum_trees_prior_cov_inv, step_trees, sum_resid
 
 
 def recompute_prec_trees(
@@ -109,7 +109,7 @@ def recompute_prec_trees(
 
 @named_call
 def bcf_step_mu(key: Key[Array, ''], state: BCFState) -> BCFState:
-    """Update the prognostic forest and its leaf prior precision."""
+    """Update the prognostic forest and the prior precision of its sum of trees."""
     # `step` rebuilds the state with `replace`, so it preserves the subclass.
     # WORKAROUND(python<3.12): type `step` as generic over the state subclass
     # (PEP 695) instead of casting here, since a TypeVar renders badly in the
@@ -155,7 +155,7 @@ def bcf_step_tau_0(key: Key[Array, ''], state: BCFState) -> BCFState:
 
 @named_call
 def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
-    """Update the treatment effect forest and its leaf prior precision."""
+    """Update the treatment effect forest and the prior precision of its sum of trees."""
     keys = split(key)
 
     b_z = coding_basis(state.b, state.trt)
@@ -179,7 +179,7 @@ def bcf_step_tau(key: Key[Array, ''], state: BCFState) -> BCFState:
 
     # WORKAROUND(python<3.12): drop the casts like in `bcf_step_mu`
     state = cast(BCFState, step_trees(keys.pop(), state))
-    state = cast(BCFState, step_leaf_prior_cov_inv(keys.pop(), state))
+    state = cast(BCFState, step_sum_trees_prior_cov_inv(keys.pop(), state))
 
     # Update tau_X! (the residual difference is scaled, bring it to data units)
     if state.tau_X is not None:

@@ -81,6 +81,8 @@ from bartz.mcmcstep._state import (
     Wishart,
     chol_with_gersh,
     default_parallel_block_size,
+    leaf_prior_precision,
+    num_used_trees,
     parallel_min_blocks,
     round_to_pow2,
     scaled_error_cov_inv,
@@ -123,7 +125,7 @@ def step(key: Key[Array, ''], state: State) -> State:
     state = step_z(keys.pop(), state)
     state = step_trees(keys.pop(), state)
 
-    state = step_leaf_prior_cov_inv(keys.pop(), state)
+    state = step_sum_trees_prior_cov_inv(keys.pop(), state)
     state = step_error_cov_inv(keys.pop(), state)
     state = step_sparse(keys.pop(), state)
     return step_config(state)
@@ -461,7 +463,7 @@ def accept_moves_parallel_stage(
     # units, so their common `inv_sdev_unit ** 2` factor is folded into the
     # error precision once here instead
     error_cov_inv = scaled_error_cov_inv(state)
-    leaf_prior_cov_inv = state.forest.leaf_prior_cov_inv.value
+    leaf_prior_cov_inv = leaf_prior_precision(state.forest)
     prelf = precompute_leaf_terms(key, prec_trees, error_cov_inv, leaf_prior_cov_inv)
     prelkv = precompute_likelihood_terms(
         error_cov_inv, leaf_prior_cov_inv, prelf, moves
@@ -2280,17 +2282,21 @@ def leaf_scatter(
 
 
 @named_call
-def step_leaf_prior_cov_inv(key: Key[Array, ''], state: State) -> State:
-    """MCMC-update the leaf prior precision from its conjugate posterior, if it has a prior."""
-    prior = state.forest.leaf_prior_cov_inv
+def step_sum_trees_prior_cov_inv(key: Key[Array, ''], state: State) -> State:
+    """MCMC-update the sum of trees prior precision from its conjugate posterior, if it has a prior."""
+    prior = state.forest.sum_trees_prior_cov_inv
     if prior.nu is None:
         return state
     else:
         count, scatter = leaf_scatter(state.forest)
+        # the precision of a leaf is the one of the sum times the trees in use
+        scatter *= num_used_trees(state.forest)
         prec = sample_wishart_posterior(key, prior, count, scatter)
         return replace(
             state,
-            forest=replace(state.forest, leaf_prior_cov_inv=replace(prior, value=prec)),
+            forest=replace(
+                state.forest, sum_trees_prior_cov_inv=replace(prior, value=prec)
+            ),
         )
 
 

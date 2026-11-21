@@ -272,6 +272,54 @@ def test_upgrade_used_trees(archive: str, forests: tuple[str, ...]) -> None:
     assert state.config.parallel_block_size is None
 
 
+@pytest.mark.parametrize(
+    ('archive', 'forests'),
+    [
+        ('bart_v1.npz', {'forest': ''}),
+        ('bcf_v1.npz', {'forest': '/mu', 'forest_tau': '/tau'}),
+    ],
+)
+def test_upgrade_sum_trees_prior(archive: str, forests: dict[str, str]) -> None:
+    """Check the leaf precisions of older archives load as those of the sums of trees.
+
+    `forests` maps each forest in the MCMC state to the suffix of the keys of
+    its traces.
+    """
+    match = ARCHIVE_NAME.fullmatch(archive)
+    assert match is not None
+    path = ARCHIVE_DIR / archive
+    model = MODELS[match['model']].cls.load_npz(path)
+    _, old = read_archive(path)
+
+    def get(obj: object, key: str) -> Any:  # noqa: ANN401
+        """Get the object the key of an array of the old archive refers to."""
+        key = key.replace('leaf_prior_cov_inv', 'sum_trees_prior_cov_inv')
+        for name in key.split('/'):
+            obj = getattr(obj, name)
+        return obj
+
+    for name, suffix in forests.items():
+        prior_key = f'_mcmc_state/{name}/leaf_prior_cov_inv'
+        prior = get(model, prior_key)
+        *_, num_trees, _ = get(model, f'_mcmc_state/{name}').split_tree.shape
+
+        # the precision of a leaf is the one of the sum times the trees
+        keys = [f'{prior_key}/value']
+        keys += [
+            f'{kind}{suffix}/leaf_prior_cov_inv'
+            for kind in ('_main_trace', '_burnin_trace')
+        ]
+        for key in keys:
+            assert_close_matrices(
+                get(model, key) * num_trees, old[key], rtol=1e-6, err_msg=key
+            )
+
+        # so the rate of its prior is smaller by the same factor
+        if prior.rate is not None:
+            key = f'{prior_key}/rate'
+            assert_close_matrices(prior.rate / num_trees, old[key], rtol=1e-6)
+
+
 def test_bartz_0_13_stored_values() -> None:
     """Check the `bcf` archive of bartz 0.13 keeps the values it stores directly."""
     path = ARCHIVE_DIR / 'bcf_v0.npz'

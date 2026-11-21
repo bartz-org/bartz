@@ -123,7 +123,7 @@ def simple_init(
         max_split=data.max_split,
         num_trees=ntree,
         p_nonterminal=make_p_nonterminal(6),
-        leaf_prior_cov_inv=Wishart(nu=None, rate=None, value=eye),
+        sum_trees_prior_cov_inv=Wishart(nu=None, rate=None, value=eye / NTREE),
         error_cov_inv=Wishart(nu=2.0, rate=2 * eye, value=eye),
         min_points_per_decision_node=10,
         **kwargs,
@@ -223,8 +223,10 @@ class TestRunMcmc:
             last_sample(main_trace.error_cov_inv, sample_axes.error_cov_inv),
         )
         assert_array_equal(
-            final_state.forest.leaf_prior_cov_inv.value,
-            last_sample(main_trace.leaf_prior_cov_inv, sample_axes.leaf_prior_cov_inv),
+            final_state.forest.sum_trees_prior_cov_inv.value,
+            last_sample(
+                main_trace.sum_trees_prior_cov_inv, sample_axes.sum_trees_prior_cov_inv
+            ),
         )
 
     def test_zero_iterations(self, keys: split, initial_state: State) -> None:

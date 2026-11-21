@@ -577,26 +577,27 @@ def _rhat_v(
     return np.sqrt((between / within + n - 1) / n)
 
 
-def leaf_prior_cov_inv_conditional_mean(
+def sum_trees_prior_cov_inv_conditional_mean(
     bart: Bart,
 ) -> tuple[
     Float32[Array, ' samples'] | Float32[Array, 'samples k k'],
     Float32[Array, ' samples'] | Float32[Array, 'samples k k'],
 ]:
-    """Return the sampled leaf prior precision and the mean of its full conditional.
+    """Return the sampled sum of trees prior precision and the mean of its full conditional.
 
-    Each saved precision is drawn from ``Wishart(nu + L, (R + S)^-1)``, with
-    ``L`` and ``S`` the count and scatter of the leaves saved with it, so its
-    conditional mean is ``(nu + L) (R + S)^-1``. Chains and samples are
+    Each saved precision is drawn from ``Wishart(nu + L, (R + m S)^-1)``, with
+    ``L`` and ``S`` the count and scatter of the leaves saved with it, whose
+    precision is the one of the sum times the number of trees ``m``, so its
+    conditional mean is ``(nu + L) (R + m S)^-1``. Chains and samples are
     flattened into a single axis.
     """
     forest = bart._mcmc_state.forest
-    prior = forest.leaf_prior_cov_inv
+    prior = forest.sum_trees_prior_cov_inv
     kshape = forest.leaf_unit.shape
 
     trace = bart._main_trace
     axes = chain_vmap_axes(trace)
-    leaf_prec = chain_to_axis(trace.leaf_prior_cov_inv, axes.leaf_prior_cov_inv)
+    prec = chain_to_axis(trace.sum_trees_prior_cov_inv, axes.sum_trees_prior_cov_inv)
     split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
     leaf_tree = chain_to_axis(trace.leaf_tree, axes.leaf_tree)
     *_, num_trees, half = split_tree.shape
@@ -607,7 +608,7 @@ def leaf_prior_cov_inv_conditional_mean(
     ) -> Float32[Array, 'k k']:
         is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
         leaves = forest.leaf_unit.reshape(-1, 1) * leaf_tree
-        scatter = jnp.einsum('tan,tbn,tn->ab', leaves, leaves, is_leaf)
+        scatter = num_trees * jnp.einsum('tan,tbn,tn->ab', leaves, leaves, is_leaf)
         rate = nnone(prior.rate).reshape(scatter.shape)
         return (nnone(prior.nu) + is_leaf.sum()) * jnp.linalg.inv(rate + scatter)
 
@@ -622,4 +623,4 @@ def leaf_prior_cov_inv_conditional_mean(
     )
 
     shape = (-1, *kshape, *kshape)
-    return leaf_prec.reshape(shape), cond_mean.reshape(shape)
+    return prec.reshape(shape), cond_mean.reshape(shape)

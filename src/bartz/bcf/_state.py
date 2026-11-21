@@ -85,8 +85,8 @@ def init_bcf(
     num_trees_tau: int,
     p_nonterminal_mu: Float32[ArrayLike, ' d_mu_minus_1'],
     p_nonterminal_tau: Float32[ArrayLike, ' d_tau_minus_1'],
-    leaf_prior_cov_inv_mu: Wishart,
-    leaf_prior_cov_inv_tau: Wishart,
+    sum_trees_prior_cov_inv_mu: Wishart,
+    sum_trees_prior_cov_inv_tau: Wishart,
     min_points_per_leaf_mu: int,
     min_points_per_leaf_tau: int,
     filter_splitless_vars_mu: int = 0,
@@ -121,10 +121,11 @@ def init_bcf(
     p_nonterminal_mu
     p_nonterminal_tau
         Split priors for the prognostic and treatment forests.
-    leaf_prior_cov_inv_mu
-    leaf_prior_cov_inv_tau
-        The Wishart priors on the leaf precisions of the prognostic and
-        treatment forests and their initial values, see `bartz.mcmcstep.init`.
+    sum_trees_prior_cov_inv_mu
+    sum_trees_prior_cov_inv_tau
+        The Wishart priors on the precisions of the sums of trees of the
+        prognostic and treatment forests and their initial values, see
+        `bartz.mcmcstep.init`.
     min_points_per_leaf_mu
     min_points_per_leaf_tau
         Minimum data points per leaf for the prognostic and treatment forests.
@@ -177,7 +178,7 @@ def init_bcf(
         max_split=max_split_mu,
         num_trees=num_trees_mu,
         p_nonterminal=p_nonterminal_mu,
-        leaf_prior_cov_inv=leaf_prior_cov_inv_mu,
+        sum_trees_prior_cov_inv=sum_trees_prior_cov_inv_mu,
         filter_splitless_vars=filter_splitless_vars_mu,
         min_points_per_leaf=min_points_per_leaf_mu,
         min_points_per_decision_node=2 * min_points_per_leaf_mu,
@@ -198,7 +199,7 @@ def init_bcf(
         max_split=max_split_tau,
         num_trees=num_trees_tau,
         p_nonterminal=p_nonterminal_tau,
-        leaf_prior_cov_inv=leaf_prior_cov_inv_tau,
+        sum_trees_prior_cov_inv=sum_trees_prior_cov_inv_tau,
         filter_splitless_vars=filter_splitless_vars_tau,
         min_points_per_leaf=min_points_per_leaf_tau,
         min_points_per_decision_node=2 * min_points_per_leaf_tau,

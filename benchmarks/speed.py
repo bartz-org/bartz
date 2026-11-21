@@ -216,7 +216,8 @@ def simple_init(  # noqa: C901, PLR0915
         sigma2_eps=1.0,
     ).quantize()
 
-    leaf_prior_cov_inv = jnp.float32(num_trees) * (1.0 if k is None else jnp.eye(k))
+    # unit prior variance of the sum of trees
+    sum_trees_prior_cov_inv = jnp.float32(1.0) * (1.0 if k is None else jnp.eye(k))
     kw: dict = dict(
         X=data.x,
         y=data.y,
@@ -224,7 +225,9 @@ def simple_init(  # noqa: C901, PLR0915
         max_split=data.max_split,
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(6, 0.95, 2),
-        leaf_prior_cov_inv=Wishart(nu=None, rate=None, value=leaf_prior_cov_inv),
+        sum_trees_prior_cov_inv=Wishart(
+            nu=None, rate=None, value=sum_trees_prior_cov_inv
+        ),
         error_cov_inv=Wishart(
             nu=2.0,
             rate=2.0 * (1.0 if k is None else jnp.eye(k)),
@@ -252,18 +255,25 @@ def simple_init(  # noqa: C901, PLR0915
         # error_cov_df/scale. Inverse gamma prior: alpha = df/2, beta = scale/2.
         kw['sigma2_alpha'] = kw.pop('error_cov_df') / 2
         kw['sigma2_beta'] = kw.pop('error_cov_scale') / 2
-    leaf_param = sig.parameters.get('leaf_prior_cov_inv')
-    if leaf_param is None or leaf_param.annotation is not Wishart:
-        # WORKAROUND(bartz<0.13.0): 0.13.0 made leaf_prior_cov_inv a Wishart with
-        # nu = rate = None for a fixed value; older versions take the array.
-        kw['leaf_prior_cov_inv'] = leaf_prior_cov_inv
-    if leaf_param is None:
-        # WORKAROUND(bartz<0.8.0): pre-0.8.0 used sigma_mu2 (0.6.0-0.7.0) or had
-        # no equivalent (0.4.1-0.5.0)
-        if 'sigma_mu2' in sig.parameters:
-            kw['sigma_mu2'] = 1 / kw.pop('leaf_prior_cov_inv')
-        else:
-            kw.pop('leaf_prior_cov_inv')
+    if 'sum_trees_prior_cov_inv' not in sig.parameters:
+        # WORKAROUND(bartz<0.15.0): older versions take the precision of a leaf
+        # as leaf_prior_cov_inv, instead of the one of the sum of trees.
+        kw.pop('sum_trees_prior_cov_inv')
+        leaf_prior_cov_inv = num_trees * sum_trees_prior_cov_inv
+        kw['leaf_prior_cov_inv'] = Wishart(nu=None, rate=None, value=leaf_prior_cov_inv)
+        leaf_param = sig.parameters.get('leaf_prior_cov_inv')
+        if leaf_param is None or leaf_param.annotation is not Wishart:
+            # WORKAROUND(bartz<0.13.0): 0.13.0 made leaf_prior_cov_inv a Wishart
+            # with nu = rate = None for a fixed value; older versions take the
+            # array.
+            kw['leaf_prior_cov_inv'] = leaf_prior_cov_inv
+        if leaf_param is None:
+            # WORKAROUND(bartz<0.8.0): pre-0.8.0 used sigma_mu2 (0.6.0-0.7.0) or
+            # had no equivalent (0.4.1-0.5.0)
+            if 'sigma_mu2' in sig.parameters:
+                kw['sigma_mu2'] = 1 / kw.pop('leaf_prior_cov_inv')
+            else:
+                kw.pop('leaf_prior_cov_inv')
     if 'min_points_per_decision_node' not in sig.parameters:
         # WORKAROUND(bartz<0.7.0): use min_points_per_leaf instead
         kw.pop('min_points_per_decision_node')
@@ -321,7 +331,7 @@ def simple_init(  # noqa: C901, PLR0915
                 kw.pop('sparse_on_at')
 
         case 'multivariate':
-            if 'leaf_prior_cov_inv' not in sig.parameters:
+            if not kw.keys() & {'sum_trees_prior_cov_inv', 'leaf_prior_cov_inv'}:
                 # WORKAROUND(bartz<0.8.0): multivariate outcomes added in 0.8.0
                 msg = 'multivariate not supported'
                 raise NotImplementedError(msg)

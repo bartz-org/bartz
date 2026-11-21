@@ -25,7 +25,8 @@
 """Convert npz archives of older formats to the current one."""
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from copy import deepcopy
 from typing import Any
 
 import numpy as np
@@ -175,6 +176,78 @@ def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
     return walk(root), old
 
 
+def rescale(arrays: Arrays, node: Skeleton, factor: float) -> None:
+    """Multiply by `factor` the array `node` refers to, if any."""
+    if node is not None:
+        x = arrays[node['key']]
+        arrays[node['key']] = (x.astype(np.float64) * factor).astype(x.dtype)
+
+
+def count_trees(arrays: Arrays, fields: dict[str, Skeleton]) -> int:
+    """Return the number of trees of a forest or of a main trace."""
+    *_, num_trees, _ = arrays[fields['split_tree']['key']].shape
+    return num_trees
+
+
+def trace_pairs(
+    main: Skeleton, burnin: Skeleton
+) -> Iterator[tuple[Skeleton, Skeleton]]:
+    """Pair each main trace with the burn-in trace of the same forest, if any."""
+    if main is None:
+        pass
+    elif 'leaf_prior_cov_inv' in main['fields']:
+        yield main, burnin
+    else:
+        # the traces of the two forests of `bcf`
+        for name in 'mu', 'tau':
+            yield (
+                main['fields'][name],
+                None if burnin is None else burnin['fields'][name],
+            )
+
+
+def rename_leaf_prior(node: Skeleton) -> Skeleton:
+    """Rename the field `leaf_prior_cov_inv` of a dataclass in place, and return it."""
+    fields = node['fields']
+    fields['sum_trees_prior_cov_inv'] = fields.pop('leaf_prior_cov_inv')
+    return fields['sum_trees_prior_cov_inv']
+
+
+def upgrade_sum_trees_prior(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
+    """Convert `leaf_prior_cov_inv` to `sum_trees_prior_cov_inv`.
+
+    In `Forest` and in the traces, the former is the prior precision of a leaf,
+    the latter the one of the sum of trees, smaller by a factor of the number
+    of trees.
+    """
+    arrays = dict(old)
+    root = deepcopy(root)
+    fields = root['fields']
+
+    # the burn-in traces do not have the trees, to count them
+    for main, burnin in trace_pairs(fields['_main_trace'], fields['_burnin_trace']):
+        n = count_trees(arrays, main['fields'])
+        for trace in main, burnin:
+            if trace is not None:
+                rescale(arrays, rename_leaf_prior(trace), 1 / n)
+
+    state = fields['_mcmc_state']
+    state_fields = [] if state is None else state['fields'].values()
+    for forest in state_fields:
+        if type(forest) is dict and forest.get('cls') == 'Forest':
+            n = count_trees(arrays, forest['fields'])
+            prior = rename_leaf_prior(forest)['fields']
+            rescale(arrays, prior['value'], 1 / n)
+            rescale(arrays, prior['rate'], float(n))
+
+    return root, arrays
+
+
+def upgrade_bartz_0_14(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
+    """Convert an archive written by bartz 0.14."""
+    return upgrade_sum_trees_prior(*upgrade_used_trees(root, old))
+
+
 # Step k converts format k to k+1. Steps are frozen once released. Use only
 # json/numpy, never bartz classes. Fill new fields with the value that
 # reproduces the old behavior, not the current default; if that is impossible,
@@ -183,5 +256,5 @@ def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
 # a fill strategy which may not be `None` if the field is not already optional.
 UPGRADES: tuple[Callable[[Skeleton, Arrays], tuple[Skeleton, Arrays]], ...] = (
     upgrade_bartz_0_13_bcf,
-    upgrade_used_trees,
+    upgrade_bartz_0_14,
 )

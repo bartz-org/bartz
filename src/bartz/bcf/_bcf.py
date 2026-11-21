@@ -113,12 +113,18 @@ def stack_pihat(
     return jnp.concatenate((x, pihat[None, :]))
 
 
-def make_leaf_prior_cov_inv(
-    value: FloatLike, sample: bool, shape: FloatLike, scale: FloatLike
+def make_sum_trees_prior_cov_inv(
+    value: FloatLike, sample: bool, shape: FloatLike, scale: FloatLike, num_trees: int
 ) -> Wishart:
-    """Build the leaf precision prior from the inverse-gamma prior on the variance."""
+    """Build the prior on the sum of trees precision from the one on a leaf.
+
+    `value` is the leaf precision, and `shape` and `scale` are the parameters
+    of the inverse-gamma prior on the leaf variance. The variance of the sum of
+    trees is `num_trees` times the one of a leaf.
+    """
+    value = value / num_trees
     if sample:
-        return Wishart(nu=2 * shape, rate=2 * scale, value=value)
+        return Wishart(nu=2 * shape, rate=2 * scale * num_trees, value=value)
     else:
         return Wishart(nu=None, rate=None, value=value)
 
@@ -493,15 +499,16 @@ class bcf(Module):
             if outcome_type == 'binary':
                 leaf_prior_cov_inv_mu = jnp.array(num_trees_mu, jnp.float32)
             else:
-                leaf_prior_cov_inv_mu = _process_leaf_variance_settings(
-                    y_train_internal,
-                    binary_mask,
-                    missing=None,
-                    k=jnp.array(k_mu),
-                    num_trees=num_trees_mu,
-                    tau_num=None,
-                    sigma_mu_df=None,
-                ).value
+                leaf_prior_cov_inv_mu = num_trees_mu * (
+                    _process_leaf_variance_settings(
+                        y_train_internal,
+                        binary_mask,
+                        missing=None,
+                        k=jnp.array(k_mu),
+                        tau_num=None,
+                        sigma_mu_df=None,
+                    ).value
+                )
         if leaf_prior_cov_inv_tau is None:
             if outcome_type == 'binary':
                 # give the treatment effect the prior sd delta_max / phi(0) on
@@ -512,15 +519,16 @@ class bcf(Module):
                     2 * jnp.pi * jnp.square(delta_max)
                 )
             else:
-                leaf_prior_cov_inv_tau = _process_leaf_variance_settings(
-                    y_train_internal,
-                    binary_mask,
-                    missing=None,
-                    k=jnp.array(k_tau),
-                    num_trees=num_trees_tau,
-                    tau_num=None,
-                    sigma_mu_df=None,
-                ).value
+                leaf_prior_cov_inv_tau = num_trees_tau * (
+                    _process_leaf_variance_settings(
+                        y_train_internal,
+                        binary_mask,
+                        missing=None,
+                        k=jnp.array(k_tau),
+                        tau_num=None,
+                        sigma_mu_df=None,
+                    ).value
+                )
 
         error_cov_inv = _process_error_variance_settings(
             y_train_internal,
@@ -575,17 +583,19 @@ class bcf(Module):
             num_trees_tau=num_trees_tau,
             p_nonterminal_mu=p_nonterminal_mu,
             p_nonterminal_tau=p_nonterminal_tau,
-            leaf_prior_cov_inv_mu=make_leaf_prior_cov_inv(
+            sum_trees_prior_cov_inv_mu=make_sum_trees_prior_cov_inv(
                 leaf_prior_cov_inv_mu,
                 sample_sigma2_leaf_mu,
                 sigma2_leaf_shape_mu,
                 sigma2_leaf_scale_mu,
+                num_trees_mu,
             ),
-            leaf_prior_cov_inv_tau=make_leaf_prior_cov_inv(
+            sum_trees_prior_cov_inv_tau=make_sum_trees_prior_cov_inv(
                 leaf_prior_cov_inv_tau,
                 sample_sigma2_leaf_tau,
                 sigma2_leaf_shape_tau,
                 sigma2_leaf_scale_tau,
+                num_trees_tau,
             ),
             min_points_per_leaf_mu=min_points_per_leaf_mu,
             min_points_per_leaf_tau=min_points_per_leaf_tau,

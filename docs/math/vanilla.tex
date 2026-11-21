@@ -118,8 +118,8 @@ Equation \eqref{eq:mv-leaf-prior} with $\mLamm = 1/\smsq$ is
 \end{equation}
 The variance $\smsq$ is calibrated so that the prior on the sum of trees
 $f(\vx)$ has standard deviation $\sqrt{m}\,\sm$ controlled by the user. Bartz
-exposes the inverse, $1/\smsq$, via the field
-\texttt{Forest.leaf\_prior\_cov\_inv}; stochtree's
+stores the precision of the sum, $1/(m\smsq)$, in the field
+\texttt{Forest.sum\_trees\_prior\_cov\_inv}; stochtree's
 \texttt{GaussianConstantLeafModel} stores $\tau \equiv \smsq$.
 
 \subsection{Error variance prior}

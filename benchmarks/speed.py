@@ -257,9 +257,11 @@ def simple_init(  # noqa: C901, PLR0915
         kw['sigma2_beta'] = kw.pop('error_cov_scale') / 2
     if 'sum_trees_prior_cov_inv' not in sig.parameters:
         # WORKAROUND(bartz<0.15.0): older versions take the precision of a leaf
-        # as leaf_prior_cov_inv, instead of the one of the sum of trees.
+        # as leaf_prior_cov_inv, instead of the one of the sum of the trees in
+        # use.
         kw.pop('sum_trees_prior_cov_inv')
-        leaf_prior_cov_inv = num_trees * sum_trees_prior_cov_inv
+        used_trees = kwargs.get('used_trees', num_trees)
+        leaf_prior_cov_inv = used_trees * sum_trees_prior_cov_inv
         kw['leaf_prior_cov_inv'] = Wishart(nu=None, rate=None, value=leaf_prior_cov_inv)
         leaf_param = sig.parameters.get('leaf_prior_cov_inv')
         if leaf_param is None or leaf_param.annotation is not Wishart:

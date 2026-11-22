@@ -52,8 +52,8 @@ from bartz import Bart
 from bartz._jaxext import Module, split
 from bartz.bcf import bcf
 from bartz.npz import serializable
-from bartz.npz._npz import FORMAT_VERSION, META_KEY, Json, load_npz, save_npz
-from bartz.npz._npz_upgrades import z_test
+from bartz.npz._npz import FORMAT_VERSION, META_KEY, Json, decode, load_npz, save_npz
+from bartz.npz._npz_upgrades import upgrade_bartz_0_14, z_test
 from tests.util import assert_array_equal, assert_close_matrices
 
 ARCHIVE_DIR = Path(__file__).parent / 'npz'
@@ -318,6 +318,54 @@ def test_upgrade_sum_trees_prior(archive: str, forests: dict[str, str]) -> None:
         if prior.rate is not None:
             key = f'{prior_key}/rate'
             assert_close_matrices(prior.rate / num_trees, old[key], rtol=1e-6)
+
+
+def test_upgrade_sum_trees_prior_anywhere() -> None:
+    """Check the leaf precisions are converted wherever they are in an archive.
+
+    But for a burn-in trace away from its main trace, which gets nan.
+    """
+    # the archive with a prior on the leaf precision
+    meta, old = read_archive(ARCHIVE_DIR / 'bcf_v1.npz')
+    fields = meta['root']['fields']
+
+    # e.g., what a custom callback could hold on to
+    nested = dict(
+        type='dict',
+        items=dict(
+            states=dict(type='tuple', items=[fields['_mcmc_state']]),
+            traces=[fields['_main_trace'], fields['_burnin_trace']],
+        ),
+    )
+    obj: Any = decode(*upgrade_bartz_0_14(nested, old), set())
+
+    (state,) = obj['states']
+    main, burnin = obj['traces']
+    *_, num_trees, _ = state.forest.split_tree.shape
+
+    prior = state.forest.sum_trees_prior_cov_inv
+    key = '_mcmc_state/forest/leaf_prior_cov_inv'
+    assert_close_matrices(prior.value * num_trees, old[f'{key}/value'], rtol=1e-6)
+    assert_close_matrices(prior.rate / num_trees, old[f'{key}/rate'], rtol=1e-6)
+
+    assert_close_matrices(
+        main.mu.sum_trees_prior_cov_inv * num_trees,
+        old['_main_trace/mu/leaf_prior_cov_inv'],
+        rtol=1e-6,
+    )
+    assert burnin.mu.sum_trees_prior_cov_inv.size
+    assert jnp.all(jnp.isnan(burnin.mu.sum_trees_prior_cov_inv))
+
+
+def test_upgrade_sum_trees_prior_other_class() -> None:
+    """Check a class with the fields of a forest, but another name, is left alone."""
+    meta, old = read_archive(ARCHIVE_DIR / 'bcf_v1.npz')
+    forest = meta['root']['fields']['_mcmc_state']['fields']['forest']
+    lookalike = dict(forest, cls='Lookalike')
+    root, new = upgrade_bartz_0_14(lookalike, old)
+    assert root == lookalike
+    assert new.keys() == old.keys()
+    assert all(new[key] is value for key, value in old.items())
 
 
 def test_bartz_0_13_stored_values() -> None:

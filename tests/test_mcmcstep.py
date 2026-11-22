@@ -3434,8 +3434,8 @@ def mcmcstep_data(mcmcstep_data_shape: tuple[int, int]) -> MCMCStepData:
     return MCMCStepData(X, y, max_split)
 
 
-class TestStepLeafPriorCovInv:
-    """Test the Gibbs update of the leaf prior precision."""
+class TestStepSumTreesPriorCovInv:
+    """Test the Gibbs update of the prior precision of the sum of trees."""
 
     @pytest.fixture(params=['uv', 'mv'])
     def init_kwargs(self, request: FixtureRequest, mcmcstep_data: MCMCStepData) -> dict:
@@ -3470,7 +3470,7 @@ class TestStepLeafPriorCovInv:
 
     @pytest.fixture
     def prior(self, init_kwargs: dict) -> Wishart:
-        """Put a Wishart prior on the leaf precision, centered on the fixed value."""
+        """Put a Wishart prior on the sum of trees precision, centered on the fixed value."""
         value = init_kwargs['sum_trees_prior_cov_inv'].value
         return Wishart(nu=3.0 + value.ndim, rate=0.5 * value, value=value)
 

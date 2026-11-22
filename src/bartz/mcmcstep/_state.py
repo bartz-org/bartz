@@ -642,10 +642,7 @@ class State(Module):
         # the trees in use, on average over the chains and in total
         split_tree = self.forest.split_tree
         *chains, num_trees, _ = split_tree.shape
-        if self.forest.used_trees is None:
-            used_trees = num_trees
-        else:
-            used_trees = jnp.mean(self.forest.used_trees)
+        used_trees = jnp.mean(num_used_trees(self.forest))
         num_used = used_trees * math.prod(chains)
 
         # the prior standard deviation of a leaf; `resid_unit` is the one of
@@ -691,7 +688,7 @@ class State(Module):
             # a quantized leaf moves only when its full conditional mean
             # crosses half a quantum; the mean responds to the leaf's average
             # residual through the posterior shrinkage factor s = t / (1 + t),
-            # t = (leaf_unit / error_sdev)^2 * n_leaf, so residual features
+            # t = (leaf_sdev / error_sdev)^2 * n_leaf, so residual features
             # smaller than quantum / (2 s) cannot move the sampler. Typical
             # values are used for the error variance (chain mean, datapoint
             # mean of prec_scale) and n_leaf (datapoints over leaves per tree

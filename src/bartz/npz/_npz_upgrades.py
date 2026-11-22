@@ -25,8 +25,7 @@
 """Convert npz archives of older formats to the current one."""
 
 import json
-from collections.abc import Callable, Iterator
-from copy import deepcopy
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -176,41 +175,66 @@ def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
     return walk(root), old
 
 
-def rescale(arrays: Arrays, node: Skeleton, factor: float) -> None:
-    """Multiply by `factor` the array `node` refers to, if any."""
-    if node is not None:
-        x = arrays[node['key']]
-        arrays[node['key']] = (x.astype(np.float64) * factor).astype(x.dtype)
+def is_module(node: Skeleton) -> bool:
+    """Whether `node` is the skeleton of a dataclass."""
+    return type(node) is dict and node['type'] == 'module'
 
 
-def count_trees(arrays: Arrays, fields: dict[str, Skeleton]) -> int:
-    """Return the number of trees of a forest or of a main trace."""
-    *_, num_trees, _ = arrays[fields['split_tree']['key']].shape
-    return num_trees
+# the classes with a leaf prior precision in bartz 0.14: the ones that store
+# the trees, and the one that does not
+WITH_TREES = ('Forest', 'MainTrace', 'MainTraceWithTrainPred')
+WITHOUT_TREES = 'BurninTrace'
 
 
-def trace_pairs(
-    main: Skeleton, burnin: Skeleton
-) -> Iterator[tuple[Skeleton, Skeleton]]:
-    """Pair each main trace with the burn-in trace of the same forest, if any."""
-    if main is None:
-        pass
-    elif 'leaf_prior_cov_inv' in main['fields']:
-        yield main, burnin
+def count_trees(arrays: Arrays, node: Skeleton) -> int | None:
+    """Return the number of trees of `node`, if it is a forest or a main trace."""
+    if is_module(node) and node['cls'] in WITH_TREES:
+        *_, num_trees, _ = arrays[node['fields']['split_tree']['key']].shape
+        return num_trees
     else:
-        # the traces of the two forests of `bcf`
-        for name in 'mu', 'tau':
-            yield (
-                main['fields'][name],
-                None if burnin is None else burnin['fields'][name],
-            )
+        return None
 
 
-def rename_leaf_prior(node: Skeleton) -> Skeleton:
-    """Rename the field `leaf_prior_cov_inv` of a dataclass in place, and return it."""
-    fields = node['fields']
-    fields['sum_trees_prior_cov_inv'] = fields.pop('leaf_prior_cov_inv')
-    return fields['sum_trees_prior_cov_inv']
+def scaled(old: Arrays, new: Arrays, node: Skeleton, factor: float) -> Skeleton:
+    """Add to `new` the array `node` refers to in `old`, times `factor`."""
+    if node is None:
+        return None
+    else:
+        x = old[node['key']]
+        # `asarray` because numpy turns 0d arrays into scalars
+        x = np.asarray(x.astype(np.float64) * factor).astype(x.dtype)
+        return array(new, node['key'], x)
+
+
+def leaf_prior_to_sum(
+    old: Arrays, new: Arrays, prior: Skeleton, num_trees: int | None
+) -> Skeleton:
+    """Convert a leaf prior precision, a `Wishart` or its samples; to nan without `num_trees`."""
+    factor = float('nan') if num_trees is None else 1 / num_trees
+    if is_module(prior):
+        assert prior['cls'] == 'Wishart'
+        fields = prior['fields']
+        fields = dict(
+            fields,
+            value=scaled(old, new, fields['value'], factor),
+            rate=scaled(old, new, fields['rate'], 1 / factor),
+        )
+        return module(prior['cls'], **fields)
+    else:
+        return scaled(old, new, prior, factor)
+
+
+def main_counterpart(node: Skeleton, main: Skeleton, name: str) -> Skeleton:
+    """Return the part of the main trace matching the field `name` of `node`, if any.
+
+    `main` is the part that matches `node`, if `node` is within a burn-in trace.
+    """
+    if node['cls'] in ('Bart', 'bcf') and name == '_burnin_trace':
+        return node['fields']['_main_trace']
+    elif is_module(main):
+        return main['fields'].get(name)
+    else:
+        return None
 
 
 def upgrade_sum_trees_prior(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
@@ -218,29 +242,36 @@ def upgrade_sum_trees_prior(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arra
 
     In `Forest` and in the traces, the former is the prior precision of a leaf,
     the latter the one of the sum of trees, smaller by a factor of the number
-    of trees.
+    of trees. A burn-in trace lacks the trees to count, so it takes the number
+    from the main trace of the same `Bart` or `bcf`; outside of those, its
+    precisions are set to nan.
     """
-    arrays = dict(old)
-    root = deepcopy(root)
-    fields = root['fields']
+    new: Arrays = {}
 
-    # the burn-in traces do not have the trees, to count them
-    for main, burnin in trace_pairs(fields['_main_trace'], fields['_burnin_trace']):
-        n = count_trees(arrays, main['fields'])
-        for trace in main, burnin:
-            if trace is not None:
-                rescale(arrays, rename_leaf_prior(trace), 1 / n)
+    def walk(node: Skeleton, main: Skeleton = None) -> Skeleton:
+        if type(node) is list:
+            return [walk(v) for v in node]
+        elif type(node) is not dict or node['type'] == 'array':
+            return node
+        elif node['type'] == 'module':
+            fields = {
+                k: walk(v, main_counterpart(node, main, k))
+                for k, v in node['fields'].items()
+            }
+            if node['cls'] in (*WITH_TREES, WITHOUT_TREES):
+                source = main if node['cls'] == WITHOUT_TREES else node
+                num_trees = count_trees(old, source)
+                prior = fields['leaf_prior_cov_inv']
+                prior = leaf_prior_to_sum(old, new, prior, num_trees)
+                fields = {k: v for k, v in fields.items() if k != 'leaf_prior_cov_inv'}
+                fields = dict(fields, sum_trees_prior_cov_inv=prior)
+            return module(node['cls'], **fields)
+        elif type(node['items']) is dict:
+            return dict(node, items={k: walk(v) for k, v in node['items'].items()})
+        else:
+            return dict(node, items=[walk(v) for v in node['items']])
 
-    state = fields['_mcmc_state']
-    state_fields = [] if state is None else state['fields'].values()
-    for forest in state_fields:
-        if type(forest) is dict and forest.get('cls') == 'Forest':
-            n = count_trees(arrays, forest['fields'])
-            prior = rename_leaf_prior(forest)['fields']
-            rescale(arrays, prior['value'], 1 / n)
-            rescale(arrays, prior['rate'], float(n))
-
-    return root, arrays
+    return walk(root), {**old, **new}
 
 
 def upgrade_bartz_0_14(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:

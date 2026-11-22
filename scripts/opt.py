@@ -506,7 +506,7 @@ class ConfigParams:
             max_split=data.max_split[: self.p],
             num_trees=self.num_trees,
             p_nonterminal=make_p_nonterminal(self.maxdepth, 0.95, 2),
-            leaf_prior_cov_inv=self.num_trees * eye,
+            sum_trees_prior_cov_inv=Wishart(nu=None, rate=None, value=eye),
             leaf_dtype=self.leaf_dtype,
             prec_scale_dtype=self.prec_scale_dtype,
             resid_dtype=self.resid_dtype,
@@ -548,7 +548,7 @@ class InitKwargs:
     max_split: Shaped[Array, '...']
     num_trees: int
     p_nonterminal: Shaped[Array, '...']
-    leaf_prior_cov_inv: float | Shaped[Array, '...']
+    sum_trees_prior_cov_inv: Wishart
     leaf_dtype: DTypeLike
     prec_scale_dtype: DTypeLike
     resid_dtype: DTypeLike

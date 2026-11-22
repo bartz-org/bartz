@@ -578,13 +578,19 @@ def standardize_memory_analysis(analysis: CompiledMemoryStats) -> dict[MemStat, 
 
 
 class StepMemory(StepBase):
-    """Device memory footprint of the compiled `mcmcstep.step` at large scale.
+    """Device memory footprint of the compiled `mcmcstep.step`.
 
     Reports, in bytes, the persistent `state` buffers and the `peak` high-water
     mark (normalized to a backend-independent meaning by
-    `standardize_memory_analysis`) at a scale that far exceeds device memory.
-    The state is built abstractly, so `step` is compiled and analyzed but never
-    allocated nor run.
+    `standardize_memory_analysis`). The state is built abstractly, so `step` is
+    compiled and analyzed but never allocated nor run.
+
+    Most of the state is `X` and `leaf_indices`, of size ``n p`` and ``n
+    num_trees``. With ``n = p = num_trees``, any temporary proportional to the
+    product of two of them, for example one value per variable per tree, is
+    comparable to the state. The scale is large enough that `step` processes
+    the trees in batches, and small enough that the temporaries of a batch are
+    not negligible next to the state.
     """
 
     params: tuple[tuple[Kind, ...], tuple[int | None, ...], tuple[MemStat, ...]] = (
@@ -622,11 +628,9 @@ class StepMemory(StepBase):
     def setup(  # ty:ignore[invalid-method-override]
         self, kind: Kind, chains: int | None, stat: MemStat, **kwargs: Any
     ) -> None:
-        """Compile `step` at large scale and extract its memory analysis."""
-        # n=16Mi, num_trees=p=1Ki, abstract eval so may exceed device memory
-        super().setup(
-            'compile', kind, chains, n=16 * 2**20, num_trees=1024, p=1024, **kwargs
-        )
+        """Compile `step` and extract its memory analysis."""
+        m = 2**15
+        super().setup('compile', kind, chains, n=m, num_trees=m, p=m, **kwargs)
         analysis = self.compiled_func.memory_analysis()
         if analysis is None:
             # the active backend does not expose a memory analysis

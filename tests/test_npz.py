@@ -52,8 +52,8 @@ from bartz import Bart
 from bartz._jaxext import Module, split
 from bartz.bcf import bcf
 from bartz.npz import serializable
-from bartz.npz._npz import FORMAT_VERSION, META_KEY, Json, load_npz, save_npz
-from bartz.npz._npz_upgrades import z_test
+from bartz.npz._npz import FORMAT_VERSION, META_KEY, Json, decode, load_npz, save_npz
+from bartz.npz._npz_upgrades import upgrade_bartz_0_14, z_test
 from tests.util import assert_array_equal, assert_close_matrices
 
 ARCHIVE_DIR = Path(__file__).parent / 'npz'
@@ -270,6 +270,113 @@ def test_upgrade_used_trees(archive: str, forests: tuple[str, ...]) -> None:
     assert state.config.random_tree_scan is False
     assert state.config.sequential_block_size is None
     assert state.config.parallel_block_size is None
+
+
+@pytest.mark.parametrize(
+    ('archive', 'forests'),
+    [
+        ('bart_v1.npz', {'forest': ''}),
+        ('bcf_v1.npz', {'forest': '/mu', 'forest_tau': '/tau'}),
+    ],
+)
+def test_upgrade_sum_trees_prior(archive: str, forests: dict[str, str]) -> None:
+    """Check the leaf precisions of older archives load as those of the sums of trees.
+
+    `forests` maps each forest in the MCMC state to the suffix of the keys of
+    its traces.
+    """
+    match = ARCHIVE_NAME.fullmatch(archive)
+    assert match is not None
+    path = ARCHIVE_DIR / archive
+    model = MODELS[match['model']].cls.load_npz(path)
+    _, old = read_archive(path)
+
+    def get(obj: object, key: str) -> Any:  # noqa: ANN401
+        """Get the object the key of an array of the old archive refers to."""
+        key = key.replace('leaf_prior_cov_inv', 'sum_trees_prior_cov_inv')
+        for name in key.split('/'):
+            obj = getattr(obj, name)
+        return obj
+
+    for name, suffix in forests.items():
+        prior_key = f'_mcmc_state/{name}/leaf_prior_cov_inv'
+        prior = get(model, prior_key)
+        *_, num_trees, _ = get(model, f'_mcmc_state/{name}').split_tree.shape
+
+        # the precision of a leaf is the one of the sum times the trees
+        old_keys = (
+            f'{prior_key}/value',
+            f'_main_trace{suffix}/leaf_prior_cov_inv',
+            f'_burnin_trace{suffix}/leaf_prior_cov_inv',
+        )
+        for key in old_keys:
+            assert_close_matrices(
+                get(model, key) * num_trees, old[key], rtol=1e-6, err_msg=key
+            )
+
+        # so the rate of its prior is smaller by the same factor
+        if prior.rate is not None:
+            key = f'{prior_key}/rate'
+            assert_close_matrices(prior.rate / num_trees, old[key], rtol=1e-6)
+
+
+def test_upgrade_sum_trees_prior_anywhere() -> None:
+    """Check the leaf precisions are converted wherever they are in an archive.
+
+    But for a burn-in trace away from its main trace, which can not be.
+    """
+    # the archive with a prior on the leaf precision
+    meta, old = read_archive(ARCHIVE_DIR / 'bcf_v1.npz')
+    fields = meta['root']['fields']
+
+    # e.g., what a custom callback could hold on to
+    nested = dict(
+        type='dict',
+        items=dict(
+            states=dict(type='tuple', items=[fields['_mcmc_state']]),
+            traces=[fields['_main_trace']],
+        ),
+    )
+    obj: Any = decode(*upgrade_bartz_0_14(nested, old), set())
+
+    (state,) = obj['states']
+    (main,) = obj['traces']
+    *_, num_trees, _ = state.forest.split_tree.shape
+
+    prior = state.forest.sum_trees_prior_cov_inv
+    key = '_mcmc_state/forest/leaf_prior_cov_inv'
+    assert_close_matrices(prior.value * num_trees, old[f'{key}/value'], rtol=1e-6)
+    assert_close_matrices(prior.rate / num_trees, old[f'{key}/rate'], rtol=1e-6)
+
+    assert_close_matrices(
+        main.mu.sum_trees_prior_cov_inv * num_trees,
+        old['_main_trace/mu/leaf_prior_cov_inv'],
+        rtol=1e-6,
+    )
+
+    traces = [fields['_main_trace'], fields['_burnin_trace']]
+    with pytest.raises(ValueError, match='cannot load a BurninTrace'):
+        upgrade_bartz_0_14(traces, old)
+
+
+def test_upgrade_sum_trees_prior_custom_class() -> None:
+    """Check a custom class is refused if it has a leaf precision, else left alone.
+
+    Like a subclass of a trace, and a callback, respectively. The classes of
+    bartz within a custom class are converted.
+    """
+    meta, old = read_archive(ARCHIVE_DIR / 'bcf_v1.npz')
+    forest = meta['root']['fields']['_mcmc_state']['fields']['forest']
+
+    subclass = dict(forest, cls='Subclass')
+    with pytest.raises(ValueError, match="cannot load the custom class 'Subclass'"):
+        upgrade_bartz_0_14(subclass, old)
+
+    holder = dict(type='module', cls='Holder', fields=dict(forest=forest, note='a'))
+    root, _ = upgrade_bartz_0_14(holder, old)
+    assert root['cls'] == 'Holder'
+    assert root['fields']['note'] == 'a'
+    assert 'sum_trees_prior_cov_inv' in root['fields']['forest']['fields']
 
 
 def test_bartz_0_13_stored_values() -> None:

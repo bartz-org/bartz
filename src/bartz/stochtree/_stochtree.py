@@ -461,7 +461,7 @@ class BARTModel:
 
         if mfp.sample_sigma2_leaf:
             leaf_init_kw: dict = {
-                'leaf_prior_cov_inv': resolve_leaf_variance_prior(
+                'sum_trees_prior_cov_inv': resolve_leaf_variance_prior(
                     mfp.sigma2_leaf_shape,
                     mfp.sigma2_leaf_scale,
                     sigma2_leaf_init,
@@ -781,24 +781,31 @@ def resolve_leaf_variance_prior(
     is_probit: bool,
     var_resid_train: FloatLike,
 ) -> Wishart:
-    """Translate stochtree's leaf variance prior to a `Wishart` on the leaf precision.
+    """Translate stochtree's leaf variance prior to a `Wishart` on the sum of trees precision.
 
     Despite the documented ``IG(shape, scale)``, stochtree's sampler uses the
     posterior ``IG(shape / 2 + L / 2, scale / 2 + S / 2)``, i.e., the prior is
     ``IG(shape / 2, scale / 2)``, which is `Wishart` with ``nu = shape`` and
-    ``rate = scale``.
+    ``rate = scale`` on the leaf precision. The variance of the sum of trees is
+    `num_trees` times the one of a leaf, so its scale is too.
     """
     if scale is None:
-        scale = 1.0 / num_trees if is_probit else var_resid_train / num_trees
-    return Wishart(nu=shape, rate=scale, value=jnp.reciprocal(sigma2_leaf_init))
+        sum_scale = 1.0 if is_probit else var_resid_train
+    else:
+        sum_scale = num_trees * scale
+    return Wishart(
+        nu=shape, rate=sum_scale, value=jnp.reciprocal(num_trees * sigma2_leaf_init)
+    )
 
 
 @jit
 def get_leaf_scale_samples(trace: MainTrace) -> Float32[Array, ' num_samples']:
     """Return the leaf variance samples, chains concatenated."""
-    prec = trace.leaf_prior_cov_inv
+    # the trace has the precision of the sum of trees
+    *_, num_trees, _ = trace.split_tree.shape
+    prec = trace.sum_trees_prior_cov_inv * num_trees
     if trace.has_chains:
-        prec = chain_to_axis(prec, chain_vmap_axes(trace).leaf_prior_cov_inv)
+        prec = chain_to_axis(prec, chain_vmap_axes(trace).sum_trees_prior_cov_inv)
         prec = lax.collapse(prec, 0, 2)
     return jnp.reciprocal(prec)
 

@@ -47,6 +47,7 @@ from bartz.mcmcstep._rebuild import rebuild_derived_chain
 from bartz.mcmcstep._state import (
     StateT,
     chol_with_gersh,
+    num_used_trees,
     outcome_target,
     split_key_for_chains,
     used_trees_mask,
@@ -242,8 +243,8 @@ def sample_values(key: Key[Array, ''], state: StateT) -> StateT:
     forest = state.forest
 
     # precisions
-    leaf_prior_cov_inv, leaf_prec_chol = sample_precision(
-        keys.pop(), forest.leaf_prior_cov_inv
+    sum_trees_prior_cov_inv, sum_prec_chol = sample_precision(
+        keys.pop(), forest.sum_trees_prior_cov_inv
     )
     error_cov_inv, _ = sample_precision(keys.pop(), state.error_cov_inv)
     if state.binary_indices is not None:
@@ -254,7 +255,8 @@ def sample_values(key: Key[Array, ''], state: StateT) -> StateT:
             value=error_cov_inv.value.at[bi, bi].set(1.0, unique_indices=True),
         )
 
-    # leaves
+    # leaves; their precision is the one of the sum times the trees in use
+    leaf_prec_chol = sum_prec_chol * jnp.sqrt(num_used_trees(forest))
     leaves = sample_leaves(keys.pop(), forest.leaf_tree.shape, leaf_prec_chol)
 
     # set unused tree slots to roots with zeroed leaves
@@ -268,7 +270,7 @@ def sample_values(key: Key[Array, ''], state: StateT) -> StateT:
         forest,
         split_tree=split_tree,
         leaf_tree=to_leaf_storage(leaves, state),
-        leaf_prior_cov_inv=leaf_prior_cov_inv,
+        sum_trees_prior_cov_inv=sum_trees_prior_cov_inv,
     )
     state = replace(state, forest=forest, error_cov_inv=error_cov_inv)
     return rebuild_derived_chain(state)

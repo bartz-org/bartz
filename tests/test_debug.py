@@ -561,7 +561,7 @@ class TestSamplePriorConstraintsChains:
             max_split=jnp.full(p, 3, jnp.uint8),
             num_trees=5,
             p_nonterminal=make_p_nonterminal(4),
-            leaf_prior_cov_inv=Wishart(None, None, 5.0),
+            sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(4.0, 4.0, 1.0),
             min_points_per_decision_node=6,
             min_points_per_leaf=3,
@@ -612,7 +612,7 @@ class TestSampleModel:
             max_split=jnp.full(p, 3, jnp.uint8),
             num_trees=5,
             p_nonterminal=make_p_nonterminal(4),
-            leaf_prior_cov_inv=Wishart(None, None, 5.0 * eye),
+            sum_trees_prior_cov_inv=Wishart(None, None, eye),
             **error_kw,
             **kwargs,
         )

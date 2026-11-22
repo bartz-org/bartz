@@ -59,10 +59,10 @@ from tests.util import (
     clipped_logit,
     condf,
     int_seed,
-    leaf_prior_cov_inv_conditional_mean,
     nnone,
     raises_x64_enabled,
     rhat_rank,
+    sum_trees_prior_cov_inv_conditional_mean,
     to_64_bit,
 )
 
@@ -322,9 +322,11 @@ def test_sample_sigma2_leaf(
 
     with subtests.test('prior'):
         # stochtree's IG(shape / 2, scale / 2) is Wishart(nu=shape, rate=scale)
-        prior = m._bart._mcmc_state.forest.leaf_prior_cov_inv
+        # on the leaf precision; bartz has the precision of the sum of trees,
+        # whose variance is `num_trees` times larger
+        prior = m._bart._mcmc_state.forest.sum_trees_prior_cov_inv
         assert_allclose(nnone(prior.nu), shape, rtol=1e-6)
-        assert_allclose(nnone(prior.rate), scale, rtol=1e-6)
+        assert_allclose(nnone(prior.rate), num_trees * scale, rtol=1e-6)
         # the trace starts after the first step, so check the start value
         # on the helper that builds the prior
         prior = bst._stochtree.resolve_leaf_variance_prior(
@@ -335,7 +337,7 @@ def test_sample_sigma2_leaf(
             is_probit=is_probit,
             var_resid_train=1.0,
         )
-        assert_allclose(prior.value, 1 / sigma2_leaf_init, rtol=1e-6)
+        assert_allclose(prior.value, 1 / (num_trees * sigma2_leaf_init), rtol=1e-6)
 
     with subtests.test('samples'):
         assert m.sample_sigma2_leaf
@@ -345,7 +347,8 @@ def test_sample_sigma2_leaf(
         assert samples.std() > 0
 
     with subtests.test('default_scale'):
-        # default scale is var(resid) / num_trees (continuous) or 1 / num_trees
+        # default scale is var(resid) / num_trees (continuous) or 1 / num_trees,
+        # times `num_trees` for the sum of trees
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
@@ -359,9 +362,9 @@ def test_sample_sigma2_leaf(
             },
             mean_forest_params={'num_trees': num_trees},
         )
-        prior = m._bart._mcmc_state.forest.leaf_prior_cov_inv
+        prior = m._bart._mcmc_state.forest.sum_trees_prior_cov_inv
         assert_allclose(nnone(prior.nu), 3.0, rtol=1e-6)
-        assert_allclose(nnone(prior.rate), 1.0 / num_trees, rtol=1e-6)
+        assert_allclose(nnone(prior.rate), 1.0, rtol=1e-6)
 
 
 def test_sample_sigma2_leaf_false(continuous_data: _Data, keys: split) -> None:
@@ -377,9 +380,9 @@ def test_sample_sigma2_leaf_false(continuous_data: _Data, keys: split) -> None:
     )
     assert not m.sample_sigma2_leaf
     assert m.leaf_scale_samples is None
-    prior = m._bart._mcmc_state.forest.leaf_prior_cov_inv
+    prior = m._bart._mcmc_state.forest.sum_trees_prior_cov_inv
     assert prior.nu is None
-    prec = m._bart._main_trace.leaf_prior_cov_inv
+    prec = m._bart._main_trace.sum_trees_prior_cov_inv
     assert_array_equal(prec, jnp.full(prec.shape, prec[0]))
 
 
@@ -649,11 +652,11 @@ def test_compare_with_stochtree(
                 # points, a few % more leaves in bartz) not investigated further.
                 assert_array_less(rhat, 1.15)
 
-            with subtests.test('leaf_prec_conditional_mean'):
-                leaf_prec, cond_mean = leaf_prior_cov_inv_conditional_mean(
+            with subtests.test('sum_trees_prec_conditional_mean'):
+                prec, cond_mean = sum_trees_prior_cov_inv_conditional_mean(
                     bz_model._bart
                 )
-                assert_allclose(leaf_prec.mean(), cond_mean.mean(), rtol=0.02)
+                assert_allclose(prec.mean(), cond_mean.mean(), rtol=0.02)
     else:
         with subtests.test('rhat_prob_train'):
             bz_prob = np.asarray(ndtr(bz_model.y_hat_train))

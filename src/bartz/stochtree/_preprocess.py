@@ -40,21 +40,18 @@ columns=expanded features).
 
 Per-column handling:
 
-- ordered categorical (pandas ordered `Categorical`, ordered pyarrow
-  dictionary): ordinal encoded into a single integer-valued column, with the
-  declared category order giving the integer mapping. polars has no ordered
-  categorical dtype; pass an integer column for ordinal encoding.
-- unordered categorical (pandas unordered `Categorical`, polars `Enum`, pyarrow
-  dictionary): one-hot encoded into one binary column per declared category. A
-  polars `Enum` round-trips to a pandas *unordered* `Categorical`, so the two
-  are treated identically.
+- ordered categorical (pandas ordered `Categorical`, polars `Enum`, ordered
+  pyarrow dictionary): ordinal encoded into a single integer-valued column, with
+  the declared category order giving the integer mapping.
+- unordered categorical (pandas unordered `Categorical`, unordered pyarrow
+  dictionary): one-hot encoded into one binary column per declared category.
 - boolean: cast to ``{0.0, 1.0}``, single column.
 - numeric (integer, unsigned, float, decimal): pass-through as float.
 - pandas columns with a pyarrow dtype (`pandas.ArrowDtype`): handled like the
   corresponding pyarrow column.
 - anything else (strings, ``object``, datetime, polars `Categorical`, etc.):
   raises `ValueError`. polars `Categorical` has no per-column category list,
-  so it must be cast to an `Enum` (one-hot), or recoded as integers (ordinal).
+  so it must be cast to an `Enum` (ordinal), or one-hot encoded beforehand.
 
 When a single original column expands into ``k`` output columns (one-hot), the
 original `variable_weights` entry for that column is split evenly across the
@@ -147,8 +144,8 @@ def _polars_categorical_error(name: str) -> ValueError:
     msg = (
         f'column {name!r} is a polars Categorical, which has no per-column'
         ' category list. Cast it to a polars Enum with an explicit category list'
-        ' (pl.Enum([...])) for one-hot encoding, or replace it with an integer'
-        ' column giving the rank of each level for ordinal encoding.'
+        ' (pl.Enum([...])) for ordinal encoding, or one-hot encode it beforehand,'
+        ' e.g., with DataFrame.to_dummies.'
     )
     return ValueError(msg)
 
@@ -158,17 +155,14 @@ def _fit_column(series: nw.Series, name: str) -> _ColumnSpec:
     dtype = series.dtype
     impl = series.implementation
     if isinstance(dtype, nw.Enum):
-        # narwhals maps ordered pandas categoricals to `Enum`, unordered ones
-        # to `Categorical`
-        kind: ColumnKind = 'ordered_cat' if impl.is_pandas_like() else 'unordered_cat'
-        return _ColumnSpec(kind, name, tuple(dtype.categories))
+        return _ColumnSpec('ordered_cat', name, tuple(dtype.categories))
     elif isinstance(dtype, nw.Categorical):
         if impl.is_polars():
             # narwhals can only list the observed values
             raise _polars_categorical_error(name)
         # narwhals drops the ordered flag of pyarrow dictionaries
         ordered = impl.is_pyarrow() and series.to_native().type.ordered
-        kind = 'ordered_cat' if ordered else 'unordered_cat'
+        kind: ColumnKind = 'ordered_cat' if ordered else 'unordered_cat'
         return _ColumnSpec(kind, name, tuple(series.cat.get_categories().to_list()))
     elif dtype == nw.Boolean:
         return _ColumnSpec('bool', name)

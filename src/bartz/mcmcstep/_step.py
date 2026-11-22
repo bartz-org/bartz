@@ -2433,12 +2433,15 @@ def log_blocked_mass_tree(
     split_tree: UInt[Array, ' half_tree_size'],
     max_split: UInt[Array, ' p'],
     s: S,
-) -> Float32[Array, ' p']:
-    """Per-variable data-augmentation mass blocked by a single tree.
+) -> tuple[Int32[Array, ' half_tree_size//2'], Float32[Array, ' half_tree_size//2']]:
+    """Data-augmentation mass blocked by a single tree, per blocking node.
 
     At each internal node, draws the latent augmentation weight ``lambda / e``
     (``lambda`` exponential, ``e`` the eligible split probability mass at the
-    node) and adds it to every variable ineligible at that node.
+    node), to add to every variable ineligible at that node. A node makes its
+    splitting variable ineligible in the subtrees of the children where it
+    exhausts the cutpoints, so the mass blocked for a variable is the sum, over
+    the nodes splitting on it, of the weights in those subtrees.
 
     Parameters
     ----------
@@ -2456,7 +2459,11 @@ def log_blocked_mass_tree(
 
     Returns
     -------
-    The log blocked mass for each variable.
+    var : Int32[Array, ' half_tree_size//2']
+        The splitting variable of each node in the upper half of the heap, `p`
+        at non-internal nodes.
+    log_mass : Float32[Array, ' half_tree_size//2']
+        The log of the mass the node blocks for its variable.
     """
     (half_tree_size,) = split_tree.shape
     d_minus_1 = half_tree_size.bit_length() - 1  # number of decision-node levels
@@ -2543,18 +2550,18 @@ def log_blocked_mass_tree(
         )
 
     # A variable blocked by node b at one of its children is ineligible in that
-    # whole child subtree, so it accumulates the subtree weight; scatter it onto
-    # the splitting variable. Only the upper half of nodes have internal children
-    # (the deepest decision nodes block into leaves, contributing nothing); their
-    # children are exactly subtree_weight reshaped into [left, right] pairs.
+    # whole child subtree, so it accumulates the subtree weight. Only the upper
+    # half of nodes have internal children (the deepest decision nodes block
+    # into leaves, contributing nothing); their children are exactly
+    # subtree_weight reshaped into [left, right] pairs.
     half = half_tree_size // 2
     children = jnp.where(
         blocks[:, :half], log_subtree_weight.reshape(-1, 2).T, -jnp.inf
     )
-    log_contrib = jnp.logaddexp(*children)
+    log_mass = jnp.logaddexp(*children)
     # int32 such that the out-of-bounds index p does not wrap around
-    scatter_var = jnp.where(is_internal[:half], var_tree[:half], jnp.int32(p))
-    return scatter_logaddexp(p, scatter_var, log_contrib)
+    var = jnp.where(is_internal[:half], var_tree[:half], jnp.int32(p))
+    return var, log_mass
 
 
 def scatter_logaddexp(
@@ -2605,11 +2612,13 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Float32[Array,
     s = S.from_log_s(forest.sparsity.log_s, forest.max_split > 0, 2 * d_minus_1)
 
     # blocked_mass[j] = sum over internal nodes where j is ineligible of
-    # lambda_b / e_b, with lambda_b ~ Exponential(1)
-    log_blocked_mass = vmap(log_blocked_mass_tree, in_axes=(0, 0, 0, None, None))(
+    # lambda_b / e_b, with lambda_b ~ Exponential(1); accumulated over the nodes
+    # of all the trees at once, as a total per tree would take p values
+    var, log_mass = vmap(log_blocked_mass_tree, in_axes=(0, 0, 0, None, None))(
         keys.pop(num_trees), forest.var_tree, forest.split_tree, forest.max_split, s
     )
-    log_blocked_mass = logsumexp(log_blocked_mass, axis=0)  # shape (p,)
+    (p,) = forest.max_split.shape
+    log_blocked_mass = scatter_logaddexp(p, var.reshape(-1), log_mass.reshape(-1))
 
     # the per-node discarded-draw counts are negative-multinomial, with no
     # closed form when summed over nodes, but their Gamma-Poisson mixture does:

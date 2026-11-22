@@ -167,6 +167,7 @@ from bartz.mcmcstep._step import (
     random_tree_order,
     sample_s_augmentation,
     sample_wishart_posterior,
+    scatter_logaddexp,
     step_error_cov_inv,
     step_leaf_prior_cov_inv,
     step_s,
@@ -5082,9 +5083,10 @@ class TestSampleSAugmentation:
         kw: dict = dict(in_axes=(0, 0, 0, None, None))
         args = (tree_keys, forest.var_tree, forest.split_tree, forest.max_split)
 
-        # invoke actual implementation
+        # invoke actual implementation, accumulating the nodes of each tree
         s = S.from_log_s(log_s, jnp.ones(p, bool), 2 * d_minus_1)
-        new = vmap(log_blocked_mass_tree, **kw)(*args, s)
+        var, log_mass = vmap(log_blocked_mass_tree, **kw)(*args, s)
+        new = vmap(partial(scatter_logaddexp, p))(var, log_mass)
 
         # invoke reference implementation
         ref = vmap(self._reference_blocked_mass_tree, **kw)(*args, log_s)

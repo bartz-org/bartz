@@ -46,7 +46,6 @@ from bartz._typing import kwdict
 from bartz.grove import forest_mean_leaves
 from bartz.mcmcloop._loop import Callback, _replicate
 from bartz.mcmcstep import State
-from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._state import used_trees_mask
 from bartz.npz import serializable
 
@@ -174,13 +173,10 @@ class StatsAccumulator(Module):
     def _avg_stats(state: State) -> dict[str, Float32[Array, ''] | None]:
         """Per-iteration diagnostics that are averaged over the report window."""
         forest = state.forest
-        split_tree = chain_to_axis(
-            forest.split_tree, chain_vmap_axes(forest).split_tree
-        )
         used = used_trees_mask(forest)
         num_acc = forest.grow_acc_count.sum() + forest.prune_acc_count.sum()
         if used is None:
-            num_used = split_tree[..., 0].size
+            num_used = forest.split_tree[..., 0].size
         else:
             num_used = jnp.count_nonzero(used)
 
@@ -188,14 +184,13 @@ class StatsAccumulator(Module):
         if log_s is None:
             var_perplexity = None
         else:
-            log_s = chain_to_axis(log_s, chain_vmap_axes(forest).sparsity.log_s)
             var_perplexity = StatsAccumulator._var_perplexity(
                 log_s, forest.max_split > 0
             )
 
         return dict(
             move_acc=num_acc / num_used,
-            mean_leaves=forest_mean_leaves(split_tree, where=used),
+            mean_leaves=forest_mean_leaves(forest.split_tree, where=used),
             var_perplexity=var_perplexity,
         )
 
@@ -203,15 +198,14 @@ class StatsAccumulator(Module):
     def _constant_stats(state: State) -> dict[str, int | Int32[Array, ''] | None]:
         """Per-iteration diagnostics shown as-is, constant over the run."""
         forest = state.forest
-        split_tree = chain_to_axis(
-            forest.split_tree, chain_vmap_axes(forest).split_tree
-        )
         if forest.sparsity.log_s is None:
             p_eff = None
         else:
             p_eff = jnp.count_nonzero(forest.max_split)
         return dict(
-            num_chains=state.num_chains(), max_leaves=split_tree.shape[-1], p_eff=p_eff
+            num_chains=state.num_chains(),
+            max_leaves=forest.split_tree.shape[-1],
+            p_eff=p_eff,
         )
 
     @staticmethod

@@ -55,7 +55,6 @@ from scipy import linalg, stats
 from bartz import Bart
 from bartz._jaxext import get_default_device, jaxtyping_disabled, minimal_unsigned_dtype  # noqa: F401
 from bartz.grove import TreesTrace, check_trace, describe_error, is_actual_leaf
-from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 
 _T = TypeVar('_T')
 
@@ -636,10 +635,9 @@ def sum_trees_prior_cov_inv_conditional_mean(
     kshape = forest.leaf_unit.shape
 
     trace = bart._main_trace
-    axes = chain_vmap_axes(trace)
-    prec = chain_to_axis(trace.sum_trees_prior_cov_inv, axes.sum_trees_prior_cov_inv)
-    split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
-    leaf_tree = chain_to_axis(trace.leaf_tree, axes.leaf_tree)
+    prec = trace.sum_trees_prior_cov_inv
+    split_tree = trace.split_tree
+    leaf_tree = trace.leaf_tree
     *_, num_trees, half = split_tree.shape
 
     def conditional_mean(

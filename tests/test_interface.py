@@ -97,7 +97,7 @@ from bartz.mcmcloop import Callback, MainTrace, MainTraceWithTrainPred, VarprobI
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import BatchedReduction, Forest, State, Wishart, step
-from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
+from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from bartz.npz import serializable
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
@@ -798,10 +798,7 @@ class TestWithCachedBart:
                 # When the error covariance is constrained diagonal (2-D
                 # inv_sdev_scale), off-diagonal entries are deterministically
                 # zero, so rhat is undefined there; check only the diagonal.
-                error_cov_inv = chain_to_axis(
-                    bart._main_trace.error_cov_inv,
-                    chain_vmap_axes(bart._main_trace).error_cov_inv,
-                )
+                error_cov_inv = bart._main_trace.error_cov_inv
                 if error_cov_inv.ndim == 2:
                     error_cov_inv = error_cov_inv[:, :, None, None]
                 _, _, k, _ = error_cov_inv.shape
@@ -982,15 +979,11 @@ def test_tree_structure_changes(bkw: BartKW, subtests: SubTests) -> None:
     kw['n_skip'] = 1  # so each saved sample is one MCMC step past the previous
     bart = Bart(**kw)
 
+    # the leading `...` absorbs the chain axis, if any
     trace = bart._main_trace
-    axes = chain_vmap_axes(trace)
-
-    # move the chain axis (if any) to the front, so that the leading `...`
-    # absorbs it uniformly whether or not it is there (CHAIN_AXIS is a global
-    # config, so we can't assume where the chain axis sits in the raw layout)
-    split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
-    grow_acc = chain_to_axis(trace.grow_acc_count, axes.grow_acc_count)
-    prune_acc = chain_to_axis(trace.prune_acc_count, axes.prune_acc_count)
+    split_tree = trace.split_tree
+    grow_acc = trace.grow_acc_count
+    prune_acc = trace.prune_acc_count
 
     # a tree structure is fully determined by its split tree (split_tree == 0
     # marks inactive nodes); accepted grow/prune moves are exactly the ones that
@@ -1013,8 +1006,8 @@ def test_tree_structure_changes(bkw: BartKW, subtests: SubTests) -> None:
     with subtests.test('acceptance count does not exceed proposal count'):
         # each tree proposes at most one move (grow or prune) per iteration, so
         # proposals total at most one per tree, and acceptances are a subset
-        grow_prop = chain_to_axis(trace.grow_prop_count, axes.grow_prop_count)
-        prune_prop = chain_to_axis(trace.prune_prop_count, axes.prune_prop_count)
+        grow_prop = trace.grow_prop_count
+        prune_prop = trace.prune_prop_count
         *_, num_trees, _ = split_tree.shape
         assert jnp.all(grow_acc <= grow_prop)
         assert jnp.all(prune_acc <= prune_prop)
@@ -1556,9 +1549,8 @@ def test_constant_predictor(bkw: BartKW, subtests: SubTests) -> None:
 
     with subtests.test('predictor 0 absent from var_tree'):
         trace = bart._main_trace
-        axes = chain_vmap_axes(trace)
-        var_tree = chain_to_axis(trace.var_tree, axes.var_tree)
-        split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
+        var_tree = trace.var_tree
+        split_tree = trace.split_tree
         # only active decision nodes carry a meaningful variable; predictor 0
         # (var index 0) must never appear among them
         active = split_tree > 0
@@ -2240,9 +2232,7 @@ def test_count_prec_tree_caches_valid(bkw: BartKW, subtests: SubTests) -> None:
     _, n = state.X.shape
     half = forest.split_tree.shape[-1]
     split_tree = forest.split_tree.reshape(-1, half)
-    leaf_indices = chain_to_axis(
-        forest.leaf_indices, chain_vmap_axes(forest).leaf_indices
-    ).reshape(-1, n)
+    leaf_indices = forest.leaf_indices.reshape(-1, n)
     # apply the prunes left pending by the last step, so the indices point to
     # the actual leaves
     leaf_indices = apply_moves_to_leaf_indices(
@@ -3687,35 +3677,19 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     state_uv = bart_uv._mcmc_state
     state_mv = bart_mv._mcmc_state
 
-    # Move chain axis to position 0 so squeezes target the k axis at -2 / -1.
-    uv_axes = chain_vmap_axes(state_uv)
-    mv_axes = chain_vmap_axes(state_mv)
-
     # Residuals and error covariance
+    assert_close_matrices(state_uv.resid, state_mv.resid.squeeze(-2), rtol=1e-6)
     assert_close_matrices(
-        chain_to_axis(state_uv.resid, uv_axes.resid),
-        chain_to_axis(state_mv.resid, mv_axes.resid).squeeze(-2),
-        rtol=1e-6,
-    )
-    assert_close_matrices(
-        chain_to_axis(state_uv.error_cov_inv.value, uv_axes.error_cov_inv.value),
-        chain_to_axis(
-            state_mv.error_cov_inv.value, mv_axes.error_cov_inv.value
-        ).squeeze((-2, -1)),
+        state_uv.error_cov_inv.value,
+        state_mv.error_cov_inv.value.squeeze((-2, -1)),
         rtol=1e-6,
     )
 
     # Prior parameters (scalar floats, only equal up to GPU rounding)
     assert_allclose(bart_uv.offset, bart_mv.offset.squeeze(0), rtol=1e-6)
     assert_close_matrices(
-        chain_to_axis(
-            state_uv.forest.sum_trees_prior_cov_inv.value,
-            uv_axes.forest.sum_trees_prior_cov_inv.value,
-        ),
-        chain_to_axis(
-            state_mv.forest.sum_trees_prior_cov_inv.value,
-            mv_axes.forest.sum_trees_prior_cov_inv.value,
-        ).squeeze((-2, -1)),
+        state_uv.forest.sum_trees_prior_cov_inv.value,
+        state_mv.forest.sum_trees_prior_cov_inv.value.squeeze((-2, -1)),
         rtol=1e-6,
     )
     if outcome_type == 'continuous':
@@ -3729,35 +3703,16 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
         )
 
     # Forest structure
-    uv_forest_axes = chain_vmap_axes(state_uv.forest)
-    mv_forest_axes = chain_vmap_axes(state_mv.forest)
-    assert_array_equal(
-        chain_to_axis(state_uv.forest.var_tree, uv_forest_axes.var_tree),
-        chain_to_axis(state_mv.forest.var_tree, mv_forest_axes.var_tree),
-    )
-    assert_array_equal(
-        chain_to_axis(state_uv.forest.split_tree, uv_forest_axes.split_tree),
-        chain_to_axis(state_mv.forest.split_tree, mv_forest_axes.split_tree),
-    )
-    assert_array_equal(
-        chain_to_axis(state_uv.forest.leaf_tree, uv_forest_axes.leaf_tree),
-        chain_to_axis(state_mv.forest.leaf_tree, mv_forest_axes.leaf_tree).squeeze(-2),
-    )
-    assert_array_equal(
-        chain_to_axis(state_uv.forest.leaf_indices, uv_forest_axes.leaf_indices),
-        chain_to_axis(state_mv.forest.leaf_indices, mv_forest_axes.leaf_indices),
-    )
-    assert_array_equal(
-        chain_to_axis(state_uv.forest.affluence_tree, uv_forest_axes.affluence_tree),
-        chain_to_axis(state_mv.forest.affluence_tree, mv_forest_axes.affluence_tree),
-    )
+    assert_array_equal(state_uv.forest.var_tree, state_mv.forest.var_tree)
+    assert_array_equal(state_uv.forest.split_tree, state_mv.forest.split_tree)
+    assert_array_equal(state_uv.forest.leaf_tree, state_mv.forest.leaf_tree.squeeze(-2))
+    assert_array_equal(state_uv.forest.leaf_indices, state_mv.forest.leaf_indices)
+    assert_array_equal(state_uv.forest.affluence_tree, state_mv.forest.affluence_tree)
 
     # Latent variables of binary outcomes
     if outcome_type == 'binary':
         assert_close_matrices(
-            chain_to_axis(nnone(state_uv.z), uv_axes.z),
-            chain_to_axis(nnone(state_mv.z), mv_axes.z).squeeze(-2),
-            rtol=1e-6,
+            nnone(state_uv.z), nnone(state_mv.z).squeeze(-2), rtol=1e-6
         )
 
 

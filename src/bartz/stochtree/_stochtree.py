@@ -41,7 +41,6 @@ from bartz._interface import Bart, PredictKind, Series
 from bartz._jaxext import forbid_x64, jit
 from bartz.mcmcloop import MainTrace
 from bartz.mcmcstep import Wishart
-from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._state import ArrayLike, FloatLike
 from bartz.prepcovars import RangeEvenBinner
 from bartz.stochtree._preprocess import DataFrame, Preprocessor, to_narwhals
@@ -810,7 +809,6 @@ def get_leaf_scale_samples(trace: MainTrace) -> Float32[Array, ' num_samples']:
     *_, num_trees, _ = trace.split_tree.shape
     prec = trace.sum_trees_prior_cov_inv * num_trees
     if trace.has_chains:
-        prec = chain_to_axis(prec, chain_vmap_axes(trace).sum_trees_prior_cov_inv)
         prec = lax.collapse(prec, 0, 2)
     return jnp.reciprocal(prec)
 

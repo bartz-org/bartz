@@ -35,9 +35,8 @@ from dataclasses import fields
 from typing import Any, TypeVar
 
 from equinox import Module as EquinoxModule
-from jax import numpy as jnp
 from jax import tree
-from jaxtyping import Array, PyTree, Shaped
+from jaxtyping import PyTree, Shaped
 from numpy.lib.array_utils import normalize_axis_index
 
 from bartz.mcmcstep._lazy import DummyArray, _LazyArray
@@ -45,11 +44,10 @@ from bartz.mcmcstep._lazy import DummyArray, _LazyArray
 # Structure variable for the `PyTree[..., 'T']` annotations below.
 T = TypeVar('T')
 
-# Default position of the chain axis in chain-bearing leaves; see `field`.
-# Settable with the CHAIN_AXIS environment variable for internal performance
-# experiments only (see `scripts/opt.py`). Many points in the code only support
-# CHAIN_AXIS=0, many others work for general CHAIN_AXIS but are optimized for
-# the 0 case.
+# Position of the chain axis in the MCMC state, see `field`. Settable to -1 with
+# the CHAIN_AXIS environment variable for internal performance experiments on
+# `init` and `step` only (see `scripts/opt.py`). Everything else, from the
+# traces onwards, assumes 0.
 CHAIN_AXIS = int(os.environ.get('CHAIN_AXIS', '0'))
 
 
@@ -154,34 +152,6 @@ def chainful_axis(core_axis: int, chain_axis: int | None) -> int:
     if chain_axis is None or core_axis < chain_axis:
         return core_axis
     return core_axis + 1
-
-
-def chain_to_axis(
-    arr: Shaped[Array, '...'], chain_axis: int | None, target: int = 0
-) -> Shaped[Array, '...']:
-    """Move `chain_axis` of `arr` to position `target`.
-
-    Helper for the common pattern of normalizing the chain axis position in
-    arrays derived from chain-marked Module fields. Pair it with
-    `chain_vmap_axes` to fetch the source axis from a dataclass.
-
-    Parameters
-    ----------
-    arr
-        Array to be reordered.
-    chain_axis
-        Source position of the chain axis, or `None` for arrays with no chain
-        axis (in which case `arr` is returned unchanged).
-    target
-        Destination position of the chain axis.
-
-    Returns
-    -------
-    The reordered array.
-    """
-    if chain_axis is None:
-        return arr
-    return jnp.moveaxis(arr, chain_axis, target)
 
 
 def _compute_core_axis(

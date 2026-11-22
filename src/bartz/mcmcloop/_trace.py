@@ -37,7 +37,6 @@ from jaxtyping import Array, Float, Float32, Int32, UInt
 from bartz._jaxext import Module, field, jit
 from bartz.grove import is_actual_leaf
 from bartz.mcmcstep import State
-from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
 from bartz.mcmcstep._state import used_trees_mask
 from bartz.npz import serializable
 
@@ -85,60 +84,48 @@ class BurninTrace(Trace):
     # hash-randomized order, can mis-bind `*chains_and_samples` against the `k`
     # axis for a multivariate-without-chains trace (the layouts are
     # rank-ambiguous).
-    grow_prop_count: Int32[Array, '*chains_and_samples'] = field(
-        chains=CHAIN_AXIS, samples=0
-    )
+    grow_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
     """The number of grow proposals made during one full MCMC cycle."""
 
-    grow_acc_count: Int32[Array, '*chains_and_samples'] = field(
-        chains=CHAIN_AXIS, samples=0
-    )
+    grow_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
     """The number of grow moves accepted during one full MCMC cycle."""
 
-    prune_prop_count: Int32[Array, '*chains_and_samples'] = field(
-        chains=CHAIN_AXIS, samples=0
-    )
+    prune_prop_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
     """The number of prune proposals made during one full MCMC cycle."""
 
-    prune_acc_count: Int32[Array, '*chains_and_samples'] = field(
-        chains=CHAIN_AXIS, samples=0
-    )
+    prune_acc_count: Int32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
     """The number of prune moves accepted during one full MCMC cycle."""
 
-    mean_tree_life: Float32[Array, '*chains_and_samples'] = field(
-        chains=CHAIN_AXIS, samples=0
-    )
+    mean_tree_life: Float32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
     """The average over the trees in use of `bartz.mcmcstep.Forest.tree_life`,
     NaN if there are none."""
 
     error_cov_inv: (
         Float32[Array, '*chains_and_samples']
         | Float32[Array, '*chains_and_samples k k']
-    ) = field(chains=CHAIN_AXIS, samples=0)
+    ) = field(chains=0, samples=0)
     """The inverse error covariance (scalar for univariate, matrix for
     multivariate). Identity in binary regression."""
 
     sum_trees_prior_cov_inv: (
         Float32[Array, '*chains_and_samples']
         | Float32[Array, '*chains_and_samples k k']
-    ) = field(chains=CHAIN_AXIS, samples=0)
+    ) = field(chains=0, samples=0)
     """The inverse prior covariance of the sum of trees (scalar for
     univariate, matrix for multivariate), see
     `bartz.mcmcstep.Forest.sum_trees_prior_cov_inv`. Constant if it is fixed."""
 
-    theta: Float32[Array, '*chains_and_samples'] | None = field(
-        chains=CHAIN_AXIS, samples=0
-    )
+    theta: Float32[Array, '*chains_and_samples'] | None = field(chains=0, samples=0)
     """The concentration parameter of the Dirichlet prior on the variable
     split probabilities, or `None` if it was not sampled."""
 
     log_likelihood: Float32[Array, '*chains_and_samples num_trees'] | None = field(
-        chains=CHAIN_AXIS, samples=0
+        chains=0, samples=0
     )
     """The log likelihood ratio of the proposed move on each tree, or `None`."""
 
     log_trans_prior: Float32[Array, '*chains_and_samples num_trees'] | None = field(
-        chains=CHAIN_AXIS, samples=0
+        chains=0, samples=0
     )
     """The log transition and prior Metropolis-Hastings ratio of the proposed
     move on each tree, or `None`."""
@@ -181,16 +168,16 @@ class MainTrace(BurninTrace):
     leaf_tree: (
         Float[Array, '*chains_and_samples num_trees tree_size']
         | Float[Array, '*chains_and_samples num_trees k tree_size']
-    ) = field(chains=CHAIN_AXIS, samples=0)
+    ) = field(chains=0, samples=0)
     """The leaf values, in units of `leaf_unit`, zero on nodes that are not leaves."""
 
     var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2'] = field(
-        chains=CHAIN_AXIS, samples=0
+        chains=0, samples=0
     )
     """The decision axes."""
 
     split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2'] = field(
-        chains=CHAIN_AXIS, samples=0
+        chains=0, samples=0
     )
     """The decision boundaries."""
 
@@ -202,7 +189,7 @@ class MainTrace(BurninTrace):
     ``offset + leaf_unit * (sum of leaf values over trees)``."""
 
     varprob: Float32[Array, '*chains_and_samples p'] | VarprobInState | None = field(
-        chains=CHAIN_AXIS, samples=0
+        chains=0, samples=0
     )
     """The probability of choosing each variable for a decision rule,
     normalized over variables, `None` when variable selection is off, or
@@ -219,12 +206,7 @@ class MainTrace(BurninTrace):
         elif sparsity.theta is None:
             varprob = VarprobInState()
         else:
-            chain_axis = chain_vmap_axes(state.forest).sparsity.log_s
-            p_axis = chainful_axis(0, chain_axis)  # (p,)
-            where = state.forest.max_split.astype(bool)
-            if chain_axis is not None:
-                where = jnp.expand_dims(where, chain_axis)
-            varprob = softmax(log_s, axis=p_axis, where=where)
+            varprob = softmax(log_s, where=state.forest.max_split.astype(bool))
 
         return cls(
             leaf_tree=state.forest.leaf_tree,
@@ -259,7 +241,7 @@ class MainTraceWithTrainPred(MainTrace):
     train_pred: (
         Float32[Array, '*chains_and_samples n']
         | Float32[Array, '*chains_and_samples k n']
-    ) = field(chains=CHAIN_AXIS, samples=0, data=-1)
+    ) = field(chains=0, samples=0, data=-1)
     """The latent predictions at the training points, offset plus the scaled sum
     of trees."""
 

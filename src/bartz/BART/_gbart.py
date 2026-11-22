@@ -48,7 +48,6 @@ from bartz._interface import (
 from bartz._jaxext import forbid_x64
 from bartz._jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import BurninTrace, MainTrace
-from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._state import State
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from bartz.prepcovars._prepcovars import _sigma2_from_ols
@@ -482,23 +481,11 @@ class mc_gbart(Module):
         if self._mcmc_state.z is not None:
             return None
         assert self._burnin_trace.error_cov_inv.ndim <= 2  # chains and samples
-        tc = chain_vmap_axes(self._main_trace).error_cov_inv
-
-        def arrange(arr: Shaped[Array, '...']) -> Shaped[Array, '...']:
-            # Public output is (nskip+ndpost, mc_cores) = (samples, chains).
-            return chain_to_axis(arr, tc, target=-1)
-
-        return jnp.sqrt(
-            jnp.reciprocal(
-                jnp.concatenate(
-                    [
-                        arrange(self._burnin_trace.error_cov_inv),
-                        arrange(self._main_trace.error_cov_inv),
-                    ],
-                    axis=0,
-                )
-            )
+        # public output is (nskip+ndpost, mc_cores) = (samples, chains)
+        prec = jnp.concatenate(
+            [self._burnin_trace.error_cov_inv.T, self._main_trace.error_cov_inv.T]
         )
+        return jnp.sqrt(jnp.reciprocal(prec))
 
     @cached_property
     def sigma_(self) -> Float32[Array, 'ndpost'] | None:
@@ -506,11 +493,7 @@ class mc_gbart(Module):
         if self._mcmc_state.z is not None:
             return None
         assert self._main_trace.error_cov_inv.ndim <= 2  # chains and samples
-        arr = chain_to_axis(
-            self._main_trace.error_cov_inv,
-            chain_vmap_axes(self._main_trace).error_cov_inv,
-        )
-        return jnp.sqrt(jnp.reciprocal(arr)).reshape(-1)
+        return jnp.sqrt(jnp.reciprocal(self._main_trace.error_cov_inv)).reshape(-1)
 
     @cached_property
     def sigma_mean(self) -> Float32[Array, ''] | None:

@@ -112,12 +112,7 @@ from bartz.mcmcstep import (
     make_p_nonterminal,
     step,
 )
-from bartz.mcmcstep._axes import (
-    chain_to_axis,
-    chain_vmap_axes,
-    data_vmap_axes,
-    trace_sample_axes,
-)
+from bartz.mcmcstep._axes import chain_vmap_axes, data_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._moves import (
     ancestor_variables,
     categorical_cumsum,
@@ -3449,7 +3444,6 @@ def test_joint_distribution(keys: split, case: GewekeCase, subtests: SubTests) -
     # a sampler stuck at its initial state would pass the comparison
     with subtests.test('chains move'):
         changed = initial.forest.split_tree != final.forest.split_tree
-        changed = chain_to_axis(changed, chain_vmap_axes(final).forest.split_tree)
         moved = jnp.any(changed.reshape(GEWEKE_NUM_CHAINS, -1), axis=1)
         assert jnp.mean(moved) > 0.5
 

@@ -60,7 +60,7 @@ from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
 from bartz.mcmcloop import MainTrace
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import OutcomeType, Wishart, make_p_nonterminal
-from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
+from bartz.mcmcstep._axes import get_has_chains
 from bartz.npz import serializable
 from bartz.npz._npz import check_class, load_npz, save_npz
 from bartz.prepcovars import UniqueQuantileBinner
@@ -79,10 +79,8 @@ def process_bcf_predictor_input(
 
 def fold_chains(trace: Trace, path: str) -> Float32[Array, 'num_samples ...']:
     """Fold the chain axis of a trace field into its sample axis, like `predict_latent`."""
-    get = attrgetter(path)
-    return _flatten_chain_sample(
-        get(trace), get(chain_vmap_axes(trace)), get(trace_sample_axes(trace))
-    )
+    arr = attrgetter(path)(trace)
+    return _flatten_chain_sample(arr, has_chains=get_has_chains(trace))
 
 
 @jit

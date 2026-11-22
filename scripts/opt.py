@@ -97,7 +97,7 @@ from jax import config as jax_config
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.typing import DTypeLike
-from jaxtyping import Float32, Shaped
+from jaxtyping import Float32, UInt
 from polars import DataFrame, concat, read_parquet
 from tqdm import tqdm
 
@@ -346,23 +346,11 @@ class ConfigParams:
     )
     """JAX ``jax_optimization_level``; one of ``'O0'``..``'O3'``. ``None`` in the config resolves to the JAX default (typically ``'UNKNOWN'``) at load time."""
 
-    exec_time_optimization_effort: float | None = field(
-        default=read_jax_config('jax_exec_time_optimization_effort'),
-        metadata={'jax_config': True},
-    )
-    """JAX ``jax_exec_time_optimization_effort``; float in ``[-1.0, 1.0]``. ``None`` in the config resolves to the JAX default (typically ``0.0``) at load time."""
-
     memory_fitting_level: str | None = field(
         default=read_jax_config('jax_memory_fitting_level'),
         metadata={'jax_config': True},
     )
     """JAX ``jax_memory_fitting_level``; one of ``'O0'``..``'O3'``. ``None`` in the config resolves to the JAX default (typically ``'O2'``) at load time."""
-
-    memory_fitting_effort: float | None = field(
-        default=read_jax_config('jax_memory_fitting_effort'),
-        metadata={'jax_config': True},
-    )
-    """JAX ``jax_memory_fitting_effort``; float in ``[-1.0, 1.0]``. ``None`` in the config resolves to the JAX default (typically ``0.0``) at load time."""
 
     enable_pgle: bool | None = field(
         default=read_jax_config('jax_enable_pgle'), metadata={'jax_config': True}
@@ -542,12 +530,12 @@ class ConfigParams:
 class InitKwargs:
     """Keyword arguments for `bartz.mcmcstep.init`, in init's signature order."""
 
-    X: Shaped[Array, '...']
-    y: Shaped[Array, '...']
-    offset: Shaped[Array, '...']
-    max_split: Shaped[Array, '...']
+    X: UInt[Array, 'p n']
+    y: Float32[Array, ' n'] | Float32[Array, 'k n']
+    offset: Float32[Array, ''] | Float32[Array, ' k']
+    max_split: UInt[Array, ' p']
     num_trees: int
-    p_nonterminal: Shaped[Array, '...']
+    p_nonterminal: Float32[Array, ' d_minus_1']
     sum_trees_prior_cov_inv: Wishart
     leaf_dtype: DTypeLike
     prec_scale_dtype: DTypeLike

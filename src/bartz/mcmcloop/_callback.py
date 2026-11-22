@@ -29,6 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial, wraps
 from secrets import randbits
+from threading import get_ident
 from typing import Any, Literal, TypeVar
 from warnings import warn
 
@@ -429,10 +430,10 @@ class TqdmCallback(Callback):
 
         Notes
         -----
-        Works with chains sharded across multiple devices. If the run is
-        interrupted (e.g. with ^C), the bar is left as-is; the next
-        `from_state` call closes it, so a subsequent run starts from a clean
-        line.
+        Works with chains sharded across multiple devices, and with concurrent
+        runs in separate threads. If the run is interrupted (e.g. with ^C), the
+        bar is left as-is; the next `from_state` call in the same thread closes
+        it, so a subsequent run starts from a clean line.
 
         The callback drives a single bar for a single `run_mcmc` call: it is
         not reusable nor resumable, and in a further `run_mcmc` call it shows
@@ -446,7 +447,7 @@ class TqdmCallback(Callback):
         # random, to avoid clashes with the ids of callbacks saved in other
         # processes
         bar_id = randbits(31)
-        _TQDM_REGISTRY[bar_id] = _TqdmEntry(tqdm_kwargs)
+        _TQDM_REGISTRY[bar_id] = _TqdmEntry(tqdm_kwargs, get_ident())
 
         callback = cls(
             bar_id=jnp.int32(bar_id),
@@ -590,6 +591,9 @@ class _TqdmEntry:
     kwargs: dict[str, Any]
     """Keyword arguments to construct the bar with, from `TqdmCallback.from_state`."""
 
+    thread: int
+    """Identifier of the thread that called `TqdmCallback.from_state`."""
+
     bar: tqdm | None = None
     """The bar, created lazily on the first callback invocation, `None` until then."""
 
@@ -609,11 +613,15 @@ _TQDM_BAR_FORMAT = (
 
 
 def _close_stale_bars() -> None:
-    """Close and drop any bars left over from a previous (e.g. interrupted) run."""
-    for entry in _TQDM_REGISTRY.values():
-        if entry.bar is not None:
+    """Close and drop the bars left open by previous (e.g. interrupted) runs."""
+    # spare the bars of other threads, which may be running, and the unstarted
+    # ones, which may belong to callbacks yet to be passed to `run_mcmc`
+    thread = get_ident()
+    # iterate over a copy because the progress callbacks may modify the registry
+    for bar_id, entry in _TQDM_REGISTRY.copy().items():
+        if entry.bar is not None and entry.thread == thread:
             entry.bar.close()
-    _TQDM_REGISTRY.clear()
+            _TQDM_REGISTRY.pop(bar_id, None)
 
 
 def _get_or_create_bar(bar_id: int, n_iters: int) -> tqdm | None:
@@ -655,7 +663,7 @@ def _tqdm_advance(bar_id: int, it: int, n_iters: int) -> None:
     bar.update(max(0, it - bar.n))  # forward-only: callbacks may arrive out of order
     if it >= n_iters:
         bar.close()
-        del _TQDM_REGISTRY[bar_id]
+        _TQDM_REGISTRY.pop(bar_id, None)  # may race with `_close_stale_bars`
 
 
 def _tqdm_report(report: StatsReport, bar_id: int, n_iters: int) -> None:

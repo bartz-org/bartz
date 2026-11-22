@@ -27,6 +27,7 @@
 import io
 import re
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -315,6 +316,29 @@ class TestRunMcmc:
         TqdmCallback.from_state(state, file=io.StringIO())  # triggers cleanup
         assert bar_id not in _TQDM_REGISTRY  # the stale bar was closed and dropped
         assert buf.getvalue().endswith('\n')  # closed cleanly, not left mid-line
+
+    def test_tqdm_callback_prepared_in_advance(self) -> None:
+        """A new tqdm callback does not disable those not run yet."""
+        state = simple_init()
+        buf = io.StringIO()
+        callback = TqdmCallback.from_state(state, file=buf, mininterval=0)
+        TqdmCallback.from_state(state, file=io.StringIO())
+        _tqdm_advance(callback.bar_id.item(), 10, 10)
+        assert '10/10' in buf.getvalue()
+
+    def test_tqdm_callback_spares_other_threads(self) -> None:
+        """A new tqdm callback leaves open the bars of runs in other threads."""
+        state = simple_init()
+        buf = io.StringIO()
+        with ThreadPoolExecutor(1) as pool:
+            callback = pool.submit(
+                TqdmCallback.from_state, state, file=buf, mininterval=0
+            ).result()
+        bar_id = callback.bar_id.item()
+        _tqdm_advance(bar_id, 3, 10)  # the run in the other thread is in progress
+        TqdmCallback.from_state(state, file=io.StringIO())
+        _tqdm_advance(bar_id, 10, 10)
+        assert '10/10' in buf.getvalue()
 
     def test_predicted_double_compilation(self, keys: split) -> None:
         """Check that an error is raised under jit if the configuration would lead to double compilation."""

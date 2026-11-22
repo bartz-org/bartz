@@ -69,7 +69,7 @@ from warnings import warn
 
 import narwhals.stable.v2 as nw
 import numpy as np
-from jaxtyping import Float32, Int, Shaped
+from jaxtyping import Float32, Shaped
 from narwhals.stable.v2.dependencies import get_polars
 
 # Not `numpy.typing.ArrayLike`: that is a PEP 695 type alias since numpy 2.5,
@@ -196,34 +196,37 @@ def _get_column(df: nw.DataFrame[Any], name: str) -> nw.Series:
         return series
 
 
-def _category_codes(series: nw.Series, spec: _ColumnSpec) -> Int[np.ndarray, ' n']:
-    """Map values to their position in the fitted categories; raise on null or unseen."""
+def _category_lookup(
+    series: nw.Series, spec: _ColumnSpec
+) -> tuple[list[Any], list[int]]:
+    """Return the distinct values and their fitted category codes; raise on null or unseen."""
     if series.null_count():
         msg = (
             f'column {spec.name!r}: null values are not supported in categorical'
             ' columns'
         )
         raise ValueError(msg)
-    # look up only the distinct values, then map them natively
     table = {c: i for i, c in enumerate(spec.categories)}
     uniq = series.unique().to_list()
-    uniq_codes = [table.get(u, -1) for u in uniq]
-    unseen = [u for u, code in zip(uniq, uniq_codes, strict=True) if code < 0]
+    codes = [table.get(u, -1) for u in uniq]
+    unseen = [u for u, code in zip(uniq, codes, strict=True) if code < 0]
     if unseen:
         raise _unseen_error(spec.name, unseen, spec.categories)
-    return series.replace_strict(uniq, uniq_codes, return_dtype=nw.Int64).to_numpy()
+    return uniq, codes
 
 
-def _transform_column(
-    series: nw.Series, spec: _ColumnSpec
-) -> Float32[np.ndarray, 'n _']:
-    """Encode a single column according to its fitted spec."""
+def _column_exprs(series: nw.Series, spec: _ColumnSpec) -> list[nw.Expr]:
+    """Build the expressions encoding a column according to its fitted spec."""
+    col = nw.col(series.name)
     if spec.kind == 'ordered_cat':
-        return _category_codes(series, spec)[:, None].astype(np.float32)
+        # keyed on the observed values, which are valid for any column dtype
+        uniq, codes = _category_lookup(series, spec)
+        return [col.replace_strict(uniq, codes).cast(nw.Float32)]
     elif spec.kind == 'unordered_cat':
-        return np.eye(spec.width, dtype=np.float32)[_category_codes(series, spec)]
+        _category_lookup(series, spec)
+        return [(col == c).cast(nw.Float32) for c in spec.categories]
     else:
-        return series.cast(nw.Float32).to_numpy()[:, None]
+        return [col.cast(nw.Float32)]
 
 
 def _expand_variable_weights(
@@ -319,12 +322,14 @@ class Preprocessor:
                 f' on {len(self._specs)} columns'
             )
             raise ValueError(msg)
-        cols = [
-            _transform_column(_get_column(df, c), spec)
+        exprs = [
+            expr
             for c, spec in zip(df.columns, self._specs, strict=True)
+            for expr in _column_exprs(df.get_column(c), spec)
         ]
-        if cols:
-            return np.concatenate(cols, axis=1)
+        if exprs:
+            out = df.select(*(e.alias(str(i)) for i, e in enumerate(exprs)))
+            return out.to_numpy().astype(np.float32, copy=False)
         else:
             return np.empty((n, 0), dtype=np.float32)
 

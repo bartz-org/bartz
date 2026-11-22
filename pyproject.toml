@@ -38,6 +38,7 @@ dependencies = [
     "equinox>=0.13.2",
     "jax>=0.8.0",
     "jaxtyping>=0.3.3",
+    "narwhals>=2.10.1",
     "numpy>=2.3.4",
     "scipy>=1.16.3",
     "tqdm>=4.67.1",

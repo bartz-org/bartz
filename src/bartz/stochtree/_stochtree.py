@@ -37,14 +37,14 @@ from jax import numpy as jnp
 from jax.scipy.special import ndtr, ndtri
 from jaxtyping import Array, Float, Float32, Key, Real, Shaped
 
-from bartz._interface import Bart, DataFrame, PredictKind, Series
+from bartz._interface import Bart, PredictKind, Series
 from bartz._jaxext import forbid_x64, jit
 from bartz.mcmcloop import MainTrace
 from bartz.mcmcstep import Wishart
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._state import ArrayLike, FloatLike
 from bartz.prepcovars import RangeEvenBinner
-from bartz.stochtree._preprocess import _PreprocessorBase, make_preprocessor
+from bartz.stochtree._preprocess import DataFrame, Preprocessor, to_narwhals
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -305,7 +305,7 @@ class BARTModel:
     """Posterior predictions at `X_test` if it was supplied to `sample`, else `None`."""
 
     _bart: Bart
-    _preprocessor: _PreprocessorBase | None
+    _preprocessor: Preprocessor | None
 
     def __init__(self) -> None:
         self.sampled = False
@@ -324,8 +324,9 @@ class BARTModel:
         """Coerce inputs and build variable weights, fitting the DataFrame preprocessor if any."""
         y_train_arr = _coerce_response(y_train, name='y_train')
 
-        self._preprocessor = make_preprocessor(X_train)
-        if self._preprocessor is None:
+        df_train = to_narwhals(X_train)
+        if df_train is None:
+            self._preprocessor = None
             X_train_arr = check_X(X_train, name='X_train')
             _, p = X_train_arr.shape
             varprob = check_variable_weights(gp.variable_weights, p)
@@ -334,10 +335,11 @@ class BARTModel:
             # *original* columns split across each one-hot expansion (so every
             # original variable keeps an equal splitting budget), or `None` when
             # nothing expands (deferring to bartz's native uniform fast-path).
+            self._preprocessor = Preprocessor()
             weights_np = self._preprocessor.fit(
-                X_train, variable_weights=gp.variable_weights
+                df_train, variable_weights=gp.variable_weights
             )
-            X_train_np = self._preprocessor.transform(X_train)
+            X_train_np = self._preprocessor.transform(df_train)
             if X_train_np.shape[1] == 0:
                 msg = 'X_train has no usable columns after preprocessing'
                 raise ValueError(msg)
@@ -376,7 +378,9 @@ class BARTModel:
         Parameters
         ----------
         X_train
-            Training covariates with shape ``(n, p)``.
+            Training covariates with shape ``(n, p)``. Any eager dataframe
+            supported by narwhals (e.g., pandas, polars, pyarrow) is accepted,
+            with categorical columns encoded like in stochtree.
         y_train
             Training outcomes of length ``n``.
         X_test
@@ -719,16 +723,17 @@ class BARTModel:
         """Convert covariates to a 2-D jax array, replaying the fitted preprocessor if any."""
         if self._preprocessor is None:
             return check_X(X)
-        if make_preprocessor(X) is None:
+        df = to_narwhals(X)
+        if df is None:
             msg = (
                 'this model was fit on a DataFrame, so prediction covariates must'
-                ' also be a pandas/polars DataFrame with the same columns; got a'
+                ' also be a DataFrame with the same columns; got a'
                 ' non-DataFrame. Passing a raw array would bypass the fitted'
                 ' preprocessing (e.g. one-hot encoding) and silently misalign the'
                 ' features.'
             )
             raise TypeError(msg)
-        return jnp.asarray(self._preprocessor.transform(X))
+        return jnp.asarray(self._preprocessor.transform(df))
 
     def _predict_y_hat_internal(
         self, x: Real[ArrayLike, 'p m'] | Literal['train']
@@ -911,8 +916,9 @@ def check_X(
     X: Real[ArrayLike, 'n p'] | DataFrame, *, name: str = 'X'
 ) -> Real[Array, 'n p']:
     """Convert a DataFrame/array-like to a 2-D jax array in ``(n, p)`` layout."""
-    if isinstance(X, DataFrame):
-        X = X.to_numpy()
+    df = to_narwhals(X)
+    if df is not None:
+        X = df.to_numpy()
     arr = jnp.asarray(X)
     if arr.ndim == 1:
         arr = arr[:, None]

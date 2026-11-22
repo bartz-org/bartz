@@ -25,13 +25,16 @@
 """Test `bartz.stochtree`, the shim mimicking the stochtree Python package."""
 
 from collections.abc import Mapping
+from itertools import permutations
 from types import MappingProxyType
 from typing import Any, Literal, NamedTuple
 
 import jax
+import narwhals.stable.v2 as nw
 import numpy as np
 import pandas as pd
 import polars as pl
+import pyarrow as pa
 import pytest
 import stochtree
 from jax import Array, jit, random
@@ -45,11 +48,7 @@ from pytest_subtests import SubTests
 import bartz.stochtree as bst
 from bartz._jaxext import jaxtyping_disabled, split
 from bartz._typing import kwdict
-from bartz.stochtree._preprocess import (
-    PandasPreprocessor,
-    PolarsPreprocessor,
-    _PreprocessorBase,
-)
+from bartz.stochtree._preprocess import Preprocessor, to_narwhals
 from bartz.testing import gen_data
 from tests.util import (
     EQX_RUNTIME_ERRORS,
@@ -81,6 +80,8 @@ _GEN_KW: kwdict = dict(p=4, q=2, sigma2_lin=0.5, sigma2_quad=0.5, sigma2_eps=0.5
 _SAMPLE_KW: Mapping = MappingProxyType(
     dict(num_gfr=0, num_burnin=NUM_BURNIN, num_mcmc=NUM_MCMC)
 )
+# dataframe libraries exercised by the preprocessing tests
+_FLAVORS = ('pandas', 'pandas-arrow', 'polars', 'pyarrow')
 
 
 class _Data(NamedTuple):
@@ -762,11 +763,11 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
 
 
 class TestPreprocessing:
-    """Tests for the pandas / polars auto-preprocessing pipeline.
+    """Tests for the dataframe auto-preprocessing pipeline.
 
-    Each test is parametrized on ``flavor in {'pandas', 'polars'}`` to exercise
-    both backends. Helpers at the top build identically-structured frames in
-    both libraries from a shared "spec" so the test body stays library-agnostic.
+    Each test is parametrized on ``flavor in _FLAVORS`` to exercise several
+    dataframe libraries. Helpers at the top build identically-structured frames
+    in each library from a shared "spec" so the test body stays library-agnostic.
     """
 
     # ------------------------------------------------------------------ helpers
@@ -808,20 +809,45 @@ class TestPreprocessing:
             return pl.Series(name, vals, dtype=pl.String)
         if k == 'datetime':
             return pl.Series(name, vals).str.strptime(pl.Datetime)
-        msg = f'unknown or pandas-only kind {k!r}'  # pragma: no cover
+        msg = f'unknown or polars-incompatible kind {k!r}'  # pragma: no cover
+        raise ValueError(msg)  # pragma: no cover
+
+    @staticmethod
+    def _make_pyarrow_column(spec: dict) -> pa.Array:
+        vals = spec['values']
+        k = spec['kind']
+        if k == 'numeric':
+            return pa.array(vals, pa.float64())
+        if k == 'bool':
+            return pa.array(vals, pa.bool_())
+        if k in ('ordered_cat', 'unordered_cat'):
+            # dictionary-encode against the declared categories, so unobserved
+            # ones are kept in the dictionary like in a pandas Categorical
+            cats = spec['categories']
+            indices = pa.array(
+                [None if v is None else cats.index(v) for v in vals], pa.int32()
+            )
+            return pa.DictionaryArray.from_arrays(
+                indices, pa.array(cats), ordered=k == 'ordered_cat'
+            )
+        if k == 'string':
+            return pa.array(vals, pa.string())
+        if k == 'datetime':
+            return pa.array(np.array(vals, 'datetime64[us]'))
+        msg = f'unknown kind {k!r}'  # pragma: no cover
         raise ValueError(msg)  # pragma: no cover
 
     @classmethod
     def _make_df(
         cls, flavor: str, columns: dict[str, dict]
-    ) -> pd.DataFrame | pl.DataFrame:
+    ) -> pd.DataFrame | pl.DataFrame | pa.Table:
         """Build a DataFrame from a spec.
 
         Each entry of `columns` maps a column name to a dict with a 'kind' key
         plus a 'values' key (and 'categories' for the categorical kinds). Kinds:
-        'numeric', 'bool', 'unordered_cat', 'string', 'datetime' work in both
-        flavors; 'ordered_cat' is pandas-only (polars has no ordered categorical)
-        and 'polars_categorical' is polars-only.
+        'numeric', 'bool', 'unordered_cat', 'string', 'datetime' work in all
+        flavors; 'ordered_cat' is not available in polars (no ordered
+        categorical) and 'polars_categorical' is polars-only.
         """
         if flavor == 'pandas':
             return pd.DataFrame(
@@ -831,25 +857,36 @@ class TestPreprocessing:
             return pl.DataFrame(
                 {n: cls._make_polars_column(n, s) for n, s in columns.items()}
             )
+        if flavor == 'pyarrow':
+            return pa.table(
+                {n: cls._make_pyarrow_column(s) for n, s in columns.items()}
+            )
+        if flavor == 'pandas-arrow':
+            return cls._make_df('pyarrow', columns).to_pandas(
+                types_mapper=pd.ArrowDtype
+            )
         msg = f'unknown flavor {flavor!r}'  # pragma: no cover
         raise ValueError(msg)  # pragma: no cover
 
-    @staticmethod
-    def _make_preprocessor(flavor: str) -> _PreprocessorBase:
-        return PandasPreprocessor() if flavor == 'pandas' else PolarsPreprocessor()
+    @classmethod
+    def _make_nw_df(cls, flavor: str, columns: dict[str, dict]) -> nw.DataFrame[Any]:
+        """Build a DataFrame from a spec with `_make_df` and wrap it with narwhals."""
+        return nw.from_native(cls._make_df(flavor, columns), eager_only=True)
 
     @staticmethod
     def _sample(
         X_train: Shaped[Array, '...']
         | Shaped[np.ndarray, '...']
         | pd.DataFrame
-        | pl.DataFrame,
+        | pl.DataFrame
+        | pa.Table,
         y: Shaped[Array, '...'] | Shaped[np.ndarray, '...'],
         key: Shaped[Array, '...'],
         X_test: Shaped[Array, '...']
         | Shaped[np.ndarray, '...']
         | pd.DataFrame
         | pl.DataFrame
+        | pa.Table
         | None = None,
         general_params: Mapping[str, Any] | None = None,
     ) -> bst.BARTModel:
@@ -865,17 +902,17 @@ class TestPreprocessing:
 
     # --------------------------------------------------- preprocessor unit tests
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_numeric_passthrough(self, flavor: str) -> None:
         """Pure-numeric columns are cast to float and forwarded unchanged."""
-        df = self._make_df(
+        df = self._make_nw_df(
             flavor,
             {
                 'a': {'kind': 'numeric', 'values': [0.1, 0.2, 0.3]},
                 'b': {'kind': 'numeric', 'values': [1.0, 2.0, 3.0]},
             },
         )
-        pp = self._make_preprocessor(flavor)
+        pp = Preprocessor()
         w = pp.fit(df)
         X = pp.transform(df)
         assert_array_equal(
@@ -885,21 +922,21 @@ class TestPreprocessing:
         assert pp.n_processed_columns == 2
         assert pp.original_var_indices == (0, 1)
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_bool_passthrough(self, flavor: str) -> None:
         """Boolean columns become a single 0/1 column."""
-        df = self._make_df(
+        df = self._make_nw_df(
             flavor, {'b': {'kind': 'bool', 'values': [True, False, True, False]}}
         )
-        pp = self._make_preprocessor(flavor)
+        pp = Preprocessor()
         pp.fit(df)
         X = pp.transform(df)
         assert_array_equal(X, np.array([[1.0], [0.0], [1.0], [0.0]], np.float32))
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_unordered_categorical_one_hot(self, flavor: str) -> None:
         """Unordered cat with k levels becomes a (n, k) binary matrix."""
-        df = self._make_df(
+        df = self._make_nw_df(
             flavor,
             {
                 'c': {
@@ -909,26 +946,27 @@ class TestPreprocessing:
                 }
             },
         )
-        pp = self._make_preprocessor(flavor)
+        pp = Preprocessor()
         pp.fit(df)
         X = pp.transform(df)
         # Each row has exactly one 1; mass conserved
         assert X.shape == (4, 3)
         assert_array_equal(X.sum(axis=1), np.ones(4, np.float32))
         # The row values 'a','b','a','c' map to columns in the categories' order
-        cats = nnone(pp._specs[0].categories)
+        cats = pp._specs[0].categories
         for i, v in enumerate(['a', 'b', 'a', 'c']):
             assert X[i, cats.index(v)] == 1.0
 
-    def test_ordered_categorical_ordinal(self) -> None:
+    @pytest.mark.parametrize('flavor', ['pandas', 'pandas-arrow', 'pyarrow'])
+    def test_ordered_categorical_ordinal(self, flavor: str) -> None:
         """Ordered cat becomes a single integer-coded column honoring the declared order.
 
-        Pandas-only: polars has no ordered categorical dtype (`Enum` round-trips
-        to a pandas *unordered* Categorical), so ordinal encoding is exposed only
-        through pandas; polars users pass an integer column instead.
+        Not in polars: it has no ordered categorical dtype (`Enum` round-trips
+        to a pandas *unordered* Categorical); polars users pass an integer
+        column instead.
         """
-        df = self._make_df(
-            'pandas',
+        df = self._make_nw_df(
+            flavor,
             {
                 'c': {
                     'kind': 'ordered_cat',
@@ -937,52 +975,141 @@ class TestPreprocessing:
                 }
             },
         )
-        pp = self._make_preprocessor('pandas')
+        pp = Preprocessor()
         pp.fit(df)
         X = pp.transform(df)
         assert_array_equal(X, np.array([[0.0], [2.0], [1.0], [0.0]], np.float32))
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_string_column_raises(self, flavor: str) -> None:
         """String/object columns are unsupported and raise at fit time."""
-        df = self._make_df(
+        df = self._make_nw_df(
             flavor,
             {
                 'a': {'kind': 'numeric', 'values': [0.1, 0.2, 0.3, 0.4]},
                 's': {'kind': 'string', 'values': ['y', 'x', 'y', 'z']},
             },
         )
-        pp = self._make_preprocessor(flavor)
+        pp = Preprocessor()
         with pytest.raises(ValueError, match='unsupported dtype'):
             pp.fit(df)
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_datetime_column_raises(self, flavor: str) -> None:
         """Datetime columns are unsupported and raise at fit time."""
-        df = self._make_df(
+        df = self._make_nw_df(
             flavor,
             {
                 'a': {'kind': 'numeric', 'values': [0.1, 0.2]},
                 'dt': {'kind': 'datetime', 'values': ['2024-01-01', '2024-01-02']},
             },
         )
-        pp = self._make_preprocessor(flavor)
+        pp = Preprocessor()
         with pytest.raises(ValueError, match='unsupported dtype'):
             pp.fit(df)
 
     def test_polars_categorical_raises(self) -> None:
         """A polars `Categorical` column is rejected (no per-column category list)."""
-        df = self._make_df(
+        df = self._make_nw_df(
             'polars', {'c': {'kind': 'polars_categorical', 'values': ['a', 'b', 'a']}}
         )
-        pp = self._make_preprocessor('polars')
+        pp = Preprocessor()
         with pytest.raises(ValueError, match='polars Categorical'):
             pp.fit(df)
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', ['pandas', 'pandas-arrow', 'pyarrow'])
+    @pytest.mark.parametrize('ordered', [False, True])
+    def test_integer_categories(self, flavor: str, ordered: bool) -> None:
+        """Non-string categories keep their type and declared order, unobserved ones included."""
+        df = self._make_nw_df(
+            flavor,
+            {
+                'c': {
+                    'kind': 'ordered_cat' if ordered else 'unordered_cat',
+                    'values': [1, 3, 2, 1],
+                    'categories': [3, 2, 1, 7],
+                }
+            },
+        )
+        pp = Preprocessor()
+        pp.fit(df)
+        X = pp.transform(df)
+        codes = [2, 0, 1, 2]
+        if ordered:
+            expected = np.array(codes, np.float32)[:, None]
+        else:
+            expected = np.eye(4, dtype=np.float32)[codes]
+        assert_array_equal(X, expected)
+
+    def test_lazy_frame_raises(self) -> None:
+        """Lazy frames are rejected with a hint to collect them."""
+        lf = pl.DataFrame({'a': [1.0, 2.0]}).lazy()
+        with pytest.raises(TypeError, match='collect'):
+            to_narwhals(lf)
+
+    @pytest.mark.parametrize('flavor', _FLAVORS)
+    def test_null_in_categorical_raises(self, flavor: str) -> None:
+        """Null values in a categorical column raise at transform time."""
+        df = self._make_nw_df(
+            flavor,
+            {
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': ['a', None, 'b'],
+                    'categories': ['a', 'b'],
+                }
+            },
+        )
+        pp = Preprocessor()
+        pp.fit(df)
+        with pytest.raises(ValueError, match='null values'):
+            pp.transform(df)
+
+    @pytest.mark.parametrize('flavor', _FLAVORS)
+    def test_transform_with_other_declared_categories(self, flavor: str) -> None:
+        """Transform encodes by the fitted categories, whatever the new column declares."""
+
+        def spec(values: list[str], categories: list[str]) -> dict:
+            return {
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': values,
+                    'categories': categories,
+                }
+            }
+
+        pp = Preprocessor()
+        pp.fit(self._make_nw_df(flavor, spec(['a', 'b'], ['a', 'b', 'c'])))
+        X = pp.transform(self._make_nw_df(flavor, spec(['c', 'a', 'c'], ['c', 'a'])))
+        assert_array_equal(X, np.eye(3, dtype=np.float32)[[2, 0, 2]])
+
+    @pytest.mark.parametrize('flavor', ['pandas-arrow', 'pyarrow'])
+    def test_pyarrow_chunked_dictionaries(self, flavor: str) -> None:
+        """A pyarrow column whose chunks have different dictionaries uses their union."""
+        values = ['x', 'y', 'x', 'z', 'x']
+        col = pa.chunked_array(
+            [
+                pa.array(values[:3]).dictionary_encode(),
+                pa.array(values[3:]).dictionary_encode(),
+            ]
+        )
+        table = pa.table({'c': col})
+        if flavor == 'pandas-arrow':
+            table = table.to_pandas(types_mapper=pd.ArrowDtype)
+        df = nw.from_native(table, eager_only=True)
+        pp = Preprocessor()
+        pp.fit(df)
+        X = pp.transform(df)
+        cats = pp._specs[0].categories
+        assert sorted(cats) == ['x', 'y', 'z']
+        assert_array_equal(
+            X, np.eye(3, dtype=np.float32)[[cats.index(v) for v in values]]
+        )
+
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_variable_weights_split_across_one_hot(self, flavor: str) -> None:
         """`variable_weights[i]` is divided evenly across an expanded column's k outputs."""
-        df = self._make_df(
+        df = self._make_nw_df(
             flavor,
             {
                 'a': {'kind': 'numeric', 'values': [0.1, 0.2, 0.3, 0.4]},
@@ -993,7 +1120,7 @@ class TestPreprocessing:
                 },
             },
         )
-        pp = self._make_preprocessor(flavor)
+        pp = Preprocessor()
         weights_in = np.array([2.0, 6.0])
         w_out = pp.fit(df, variable_weights=weights_in)
         # numeric stays at 2.0; the cat splits its budget evenly across its
@@ -1009,18 +1136,18 @@ class TestPreprocessing:
             per_orig_sum[j] += w
         assert_close_matrices(per_orig_sum, weights_in)
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_variable_weights_shape_mismatch_raises(self, flavor: str) -> None:
         """A mis-shaped `variable_weights` is caught up front."""
-        df = self._make_df(flavor, {'a': {'kind': 'numeric', 'values': [0.1, 0.2]}})
-        pp = self._make_preprocessor(flavor)
+        df = self._make_nw_df(flavor, {'a': {'kind': 'numeric', 'values': [0.1, 0.2]}})
+        pp = Preprocessor()
         with pytest.raises(ValueError, match='variable_weights must have shape'):
             pp.fit(df, variable_weights=np.array([1.0, 2.0]))
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_unseen_category_at_transform_raises(self, flavor: str) -> None:
         """A category absent from the fit-time data raises at transform time."""
-        df_train = self._make_df(
+        df_train = self._make_nw_df(
             flavor,
             {
                 'c': {
@@ -1030,7 +1157,7 @@ class TestPreprocessing:
                 }
             },
         )
-        df_test = self._make_df(
+        df_test = self._make_nw_df(
             flavor,
             {
                 'c': {
@@ -1040,12 +1167,12 @@ class TestPreprocessing:
                 }
             },
         )
-        pp = self._make_preprocessor(flavor)
+        pp = Preprocessor()
         pp.fit(df_train)
         # Sanity: equivalent test frame transforms fine
         pp.transform(df_test)
         # Now introduce an unseen value
-        df_bad = self._make_df(
+        df_bad = self._make_nw_df(
             flavor,
             {
                 'c': {
@@ -1058,10 +1185,10 @@ class TestPreprocessing:
         with pytest.raises(ValueError, match='not in the fitted category list'):
             pp.transform(df_bad)
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_disjoint_train_predict_categories_raises(self, flavor: str) -> None:
         """Completely disjoint training / prediction category sets raise at predict."""
-        df_train = self._make_df(
+        df_train = self._make_nw_df(
             flavor,
             {
                 'c': {
@@ -1071,7 +1198,7 @@ class TestPreprocessing:
                 }
             },
         )
-        df_predict = self._make_df(
+        df_predict = self._make_nw_df(
             flavor,
             {
                 'c': {
@@ -1081,42 +1208,72 @@ class TestPreprocessing:
                 }
             },
         )
-        pp = self._make_preprocessor(flavor)
+        pp = Preprocessor()
         pp.fit(df_train)
         with pytest.raises(ValueError, match='not in the fitted category list'):
             pp.transform(df_predict)
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_n_columns_mismatch_at_transform_raises(self, flavor: str) -> None:
         """Transforming a frame with a different column count is rejected."""
-        df_train = self._make_df(
+        df_train = self._make_nw_df(
             flavor,
             {
                 'a': {'kind': 'numeric', 'values': [0.1, 0.2]},
                 'b': {'kind': 'numeric', 'values': [1.0, 2.0]},
             },
         )
-        df_test = self._make_df(
+        df_test = self._make_nw_df(
             flavor, {'a': {'kind': 'numeric', 'values': [0.1, 0.2]}}
         )
-        pp = self._make_preprocessor(flavor)
+        pp = Preprocessor()
         pp.fit(df_train)
         with pytest.raises(ValueError, match='preprocessor was fitted on 2 columns'):
             pp.transform(df_test)
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
-    def test_transform_other_library_raises(self, flavor: str) -> None:
-        """Transforming with a different dataframe library than fit raises."""
-        spec = {'a': {'kind': 'numeric', 'values': [0.1, 0.2]}}
-        other = 'polars' if flavor == 'pandas' else 'pandas'
-        pp = self._make_preprocessor(flavor)
-        pp.fit(self._make_df(flavor, spec))
-        with pytest.raises(TypeError, match='same dataframe library'):
-            pp.transform(self._make_df(other, spec))
+    @pytest.mark.parametrize(
+        ('fit_flavor', 'transform_flavor'), tuple(permutations(_FLAVORS, 2))
+    )
+    def test_transform_other_library(
+        self, fit_flavor: str, transform_flavor: str
+    ) -> None:
+        """Transform gives the same result whatever the library of the new dataframe."""
+
+        def spec(flavor: str, x: list, b: list, c: list, o: list) -> dict:
+            # polars has no ordered categorical, its `Enum` is one-hot encoded
+            kind_o = 'unordered_cat' if flavor == 'polars' else 'ordered_cat'
+            return {
+                'x': {'kind': 'numeric', 'values': x},
+                'b': {'kind': 'bool', 'values': b},
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': c,
+                    'categories': ['a', 'b', 'c'],
+                },
+                'o': {'kind': kind_o, 'values': o, 'categories': ['lo', 'mid', 'hi']},
+            }
+
+        def make(flavor: str, *values: list) -> nw.DataFrame[Any]:
+            return self._make_nw_df(flavor, spec(flavor, *values))
+
+        pp = Preprocessor()
+        pp.fit(
+            make(
+                fit_flavor,
+                [0.1, 0.2, 0.3],
+                [True, False, True],
+                ['a', 'b', 'c'],
+                ['lo', 'hi', 'mid'],
+            )
+        )
+        test_values = ([0.5, 0.4], [False, True], ['c', 'a'], ['mid', 'lo'])
+        X_same = pp.transform(make(fit_flavor, *test_values))
+        X_other = pp.transform(make(transform_flavor, *test_values))
+        assert_array_equal(X_other, X_same)
 
     # ----------------------------------------------------- end-to-end integration
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_end_to_end_numeric_matches_array(
         self, continuous_data: _Data, flavor: str, keys: split
     ) -> None:
@@ -1155,7 +1312,7 @@ class TestPreprocessing:
             nnone(m_arr.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-4
         )
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_end_to_end_one_hot_matches_manual(
         self, continuous_data: _Data, flavor: str, keys: split
     ) -> None:
@@ -1240,7 +1397,7 @@ class TestPreprocessing:
             nnone(m_manual.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-4
         )
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_end_to_end_default_weights_split_like_stochtree(
         self, continuous_data: _Data, flavor: str, keys: split
     ) -> None:
@@ -1311,7 +1468,38 @@ class TestPreprocessing:
             nnone(m_manual.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-4
         )
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    def test_predict_other_library(self, continuous_data: _Data, keys: split) -> None:
+        """A model fit on a pandas dataframe predicts on dataframes of other libraries."""
+        data = continuous_data
+        X_arr = np.asarray(data.X_train)
+        Xte_arr = np.asarray(data.X_test)
+        names = [f'x{i}' for i in range(X_arr.shape[1])]
+        rng = np.random.default_rng(int_seed(keys.pop()))
+        cats = ['a', 'b', 'c']
+
+        def spec(arr: Shaped[np.ndarray, 'n p']) -> dict:
+            return {
+                **{
+                    n: {'kind': 'numeric', 'values': arr[:, j].tolist()}
+                    for j, n in enumerate(names)
+                },
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': rng.choice(cats, size=len(arr)).tolist(),
+                    'categories': cats,
+                },
+            }
+
+        m = self._sample(
+            self._make_df('pandas', spec(X_arr)), data.y_train, key=keys.pop()
+        )
+        test_spec = spec(Xte_arr)
+        expected = m.predict(self._make_df('pandas', test_spec), terms='y_hat')
+        for flavor in ('pandas-arrow', 'polars', 'pyarrow'):
+            pred = m.predict(self._make_df(flavor, test_spec), terms='y_hat')
+            assert_array_equal(pred, expected)
+
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_predict_with_array_after_dataframe_fit_raises(
         self, continuous_data: _Data, flavor: str, keys: split
     ) -> None:
@@ -1327,10 +1515,10 @@ class TestPreprocessing:
             },
         )
         m = self._sample(df_train, data.y_train, key=keys.pop())
-        with pytest.raises(TypeError, match='must also be a pandas/polars DataFrame'):
+        with pytest.raises(TypeError, match='must also be a DataFrame'):
             m.predict(np.asarray(data.X_test), terms='y_hat')
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_end_to_end_unseen_category_in_predict_raises(
         self, continuous_data: _Data, flavor: str, keys: split
     ) -> None:
@@ -1369,7 +1557,7 @@ class TestPreprocessing:
         with pytest.raises(ValueError, match='not in the fitted category list'):
             m.predict(df_predict, terms='y_hat')
 
-    @pytest.mark.parametrize('flavor', ['pandas', 'polars'])
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_end_to_end_unsupported_column_raises(
         self, flavor: str, keys: split
     ) -> None:

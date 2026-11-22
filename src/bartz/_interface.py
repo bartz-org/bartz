@@ -1389,24 +1389,37 @@ def _check_type_settings(
     return outcome_type, binary_mask
 
 
+class SparseKwArgs(TypedDict):
+    theta: FloatLike | None
+    a: FloatLike | None
+    b: FloatLike | None
+    rho: FloatLike | None
+    sparse_on_at: int | None
+    augment: bool
+
+
 def _process_sparsity_settings(
-    max_split: UInt[Array, ' p'], sparse: SparseConfig
-) -> (
-    tuple[None, None, None, None]
-    | tuple[FloatLike, None, None, None]
-    | tuple[None, FloatLike, FloatLike, FloatLike]
-):
-    """Return (theta, a, b, rho)."""
-    if not sparse.enabled:
-        return None, None, None, None
-    elif sparse.theta is not None:
-        return sparse.theta, None, None, None
-    else:
-        rho = sparse.rho
-        if rho is None:
-            # ignore predictors without decision rules
-            rho = count_selectable(max_split > 0).astype(jnp.float32)
-        return None, sparse.a, sparse.b, rho
+    max_split: UInt[Array, ' p'], sparse: SparseConfig, n_burn: int
+) -> SparseKwArgs:
+    """Return the arguments for `mcmcstep.init` related to sparsity."""
+    theta = a = b = rho = sparse_on_at = None
+    if sparse.enabled:
+        sparse_on_at = n_burn // 2
+        if sparse.theta is not None:
+            theta = sparse.theta
+        else:
+            a, b, rho = sparse.a, sparse.b, sparse.rho
+            if rho is None:
+                # ignore predictors without decision rules
+                rho = count_selectable(max_split > 0).astype(jnp.float32)
+    return SparseKwArgs(
+        theta=theta,
+        a=a,
+        b=b,
+        rho=rho,
+        sparse_on_at=sparse_on_at,
+        augment=sparse.augment,
+    )
 
 
 @jit
@@ -1644,7 +1657,7 @@ def _setup_mcmc(
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
     n_burn: int,
 ) -> tuple[State, Key[Array, ''], Device | None, Literal['cpu', 'gpu'] | None]:
-    theta, a, b, rho = _process_sparsity_settings(max_split, sparse)
+    sparse_kw = _process_sparsity_settings(max_split, sparse, n_burn)
 
     device_kw, device, check_platform = process_device_settings(
         y_train, num_chains, num_chain_devices, num_data_devices, devices
@@ -1665,12 +1678,7 @@ def _setup_mcmc(
         min_points_per_decision_node=10,
         filter_splitless_vars=jnp.sum(max_split == 0).item() if rm_const else 0,
         log_s=process_varprob(varprob, max_split),
-        theta=theta,
-        a=a,
-        b=b,
-        rho=rho,
-        sparse_on_at=n_burn // 2 if sparse.enabled else None,
-        augment=sparse.augment,
+        **sparse_kw,
         **device_kw,
     )
 

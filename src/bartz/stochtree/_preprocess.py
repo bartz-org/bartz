@@ -43,15 +43,15 @@ Per-column handling:
 - ordered categorical (pandas ordered `Categorical`, polars `Enum`, ordered
   pyarrow dictionary): ordinal encoded into a single integer-valued column, with
   the declared category order giving the integer mapping.
-- unordered categorical (pandas unordered `Categorical`, unordered pyarrow
-  dictionary): one-hot encoded into one binary column per declared category.
+- unordered categorical (pandas unordered `Categorical`, polars `Categorical`,
+  unordered pyarrow dictionary): one-hot encoded into one binary column per
+  declared category. A polars `Categorical` has no per-column category list, so
+  its categories are the values observed at `fit`, sorted.
 - boolean: cast to ``{0.0, 1.0}``, single column.
 - numeric (integer, unsigned, float, decimal): pass-through as float.
 - pandas columns with a pyarrow dtype (`pandas.ArrowDtype`): handled like the
   corresponding pyarrow column.
-- anything else (strings, ``object``, datetime, polars `Categorical`, etc.):
-  raises `ValueError`. polars `Categorical` has no per-column category list,
-  so it must be cast to an `Enum` (ordinal), or one-hot encoded beforehand.
+- anything else (strings, ``object``, datetime, etc.): raises `ValueError`.
 
 When a single original column expands into ``k`` output columns (one-hot), the
 original `variable_weights` entry for that column is split evenly across the
@@ -65,10 +65,12 @@ time, raise `ValueError`.
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypeAlias, overload, runtime_checkable
+from warnings import warn
 
 import narwhals.stable.v2 as nw
 import numpy as np
 from jaxtyping import Float32, Int, Shaped
+from narwhals.stable.v2.dependencies import get_polars
 
 # Not `numpy.typing.ArrayLike`: that is a PEP 695 type alias since numpy 2.5,
 # which jaxtyping cannot subscript.
@@ -132,22 +134,28 @@ def _unsupported_dtype_error(name: str, dtype: object) -> ValueError:
     """Build the error for a column whose dtype has no supported encoding."""
     msg = (
         f'column {name!r} has unsupported dtype {dtype!r}; supported types are'
-        ' numeric, boolean, pandas ordered/unordered Categorical, polars Enum,'
-        ' and pyarrow dictionary. Convert strings, objects, datetimes, etc. to'
-        ' one of these (e.g. an explicit Categorical / Enum) before fitting.'
+        ' numeric, boolean, pandas ordered/unordered Categorical, polars Enum or'
+        ' Categorical, and pyarrow dictionary. Convert strings, objects,'
+        ' datetimes, etc. to one of these (e.g. an explicit Categorical / Enum)'
+        ' before fitting.'
     )
     return ValueError(msg)
 
 
-def _polars_categorical_error(name: str) -> ValueError:
-    """Build the error rejecting a polars `Categorical` column."""
+def _polars_enum_message(name: str) -> str:
+    """Build the warning about the encoding of a polars `Enum` column."""
     msg = (
-        f'column {name!r} is a polars Categorical, which has no per-column'
-        ' category list. Cast it to a polars Enum with an explicit category list'
-        ' (pl.Enum([...])) for ordinal encoding, or one-hot encode it beforehand,'
-        ' e.g., with DataFrame.to_dummies.'
+        f'column {name!r} is a polars Enum, which is ordered, so it is encoded as'
+        ' a single ordinal column; bartz <= 0.14 one-hot encoded it. For one-hot'
+        ' encoding, use a polars Categorical.'
     )
-    return ValueError(msg)
+    # WORKAROUND(polars<2): drop this note
+    if int(get_polars().__version__.split('.')[0]) < 2:
+        msg += (
+            ' Note that polars < 2 converts an Enum to an unordered categorical in'
+            ' to_pandas() and to_arrow(), which is one-hot encoded.'
+        )
+    return msg
 
 
 def _fit_column(series: nw.Series, name: str) -> _ColumnSpec:
@@ -155,11 +163,14 @@ def _fit_column(series: nw.Series, name: str) -> _ColumnSpec:
     dtype = series.dtype
     impl = series.implementation
     if isinstance(dtype, nw.Enum):
-        return _ColumnSpec('ordered_cat', name, tuple(dtype.categories))
-    elif isinstance(dtype, nw.Categorical):
         if impl.is_polars():
-            # narwhals can only list the observed values
-            raise _polars_categorical_error(name)
+            warn(_polars_enum_message(name))
+        return _ColumnSpec('ordered_cat', name, tuple(dtype.categories))
+    elif isinstance(dtype, nw.Categorical) and impl.is_polars():
+        # sort to not depend on the order of appearance
+        categories = tuple(sorted(series.drop_nulls().unique().to_list()))
+        return _ColumnSpec('unordered_cat', name, categories)
+    elif isinstance(dtype, nw.Categorical):
         # narwhals drops the ordered flag of pyarrow dictionaries
         ordered = impl.is_pyarrow() and series.to_native().type.ordered
         kind: ColumnKind = 'ordered_cat' if ordered else 'unordered_cat'

@@ -82,7 +82,6 @@ _SAMPLE_KW: Mapping = MappingProxyType(
 )
 # dataframe libraries exercised by the preprocessing tests
 _FLAVORS = ('pandas', 'pandas-arrow', 'polars', 'pyarrow')
-_ONE_HOT_FLAVORS = ('pandas', 'pandas-arrow', 'pyarrow')  # polars has no unordered cat
 
 
 class _Data(NamedTuple):
@@ -763,6 +762,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         assert_close_matrices(a, b, rtol=rtol)
 
 
+@pytest.mark.filterwarnings('ignore:column .* is a polars Enum:UserWarning')
 class TestPreprocessing:
     """Tests for the dataframe auto-preprocessing pipeline.
 
@@ -802,7 +802,8 @@ class TestPreprocessing:
             return pl.Series(name, vals, dtype=pl.Boolean)
         if k == 'ordered_cat':
             return pl.Series(name, vals, dtype=pl.Enum(spec['categories']))
-        if k == 'polars_categorical':
+        if k == 'unordered_cat':
+            # a polars Categorical has no declared categories
             return pl.Series(name, vals, dtype=pl.Categorical)
         if k == 'string':
             return pl.Series(name, vals, dtype=pl.String)
@@ -844,9 +845,8 @@ class TestPreprocessing:
 
         Each entry of `columns` maps a column name to a dict with a 'kind' key
         plus a 'values' key (and 'categories' for the categorical kinds). Kinds:
-        'numeric', 'bool', 'ordered_cat', 'string', 'datetime' work in all
-        flavors; 'unordered_cat' is not available in polars (no unordered
-        categorical) and 'polars_categorical' is polars-only.
+        'numeric', 'bool', 'ordered_cat', 'unordered_cat', 'string', 'datetime'
+        work in all flavors; polars ignores the categories of 'unordered_cat'.
         """
         if flavor == 'pandas':
             return pd.DataFrame(
@@ -932,7 +932,7 @@ class TestPreprocessing:
         X = pp.transform(df)
         assert_array_equal(X, np.array([[1.0], [0.0], [1.0], [0.0]], np.float32))
 
-    @pytest.mark.parametrize('flavor', _ONE_HOT_FLAVORS)
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_unordered_categorical_one_hot(self, flavor: str) -> None:
         """Unordered cat with k levels becomes a (n, k) binary matrix."""
         df = self._make_nw_df(
@@ -1002,14 +1002,55 @@ class TestPreprocessing:
         with pytest.raises(ValueError, match='unsupported dtype'):
             pp.fit(df)
 
-    def test_polars_categorical_raises(self) -> None:
-        """A polars `Categorical` column is rejected (no per-column category list)."""
-        df = self._make_nw_df(
-            'polars', {'c': {'kind': 'polars_categorical', 'values': ['a', 'b', 'a']}}
-        )
+    def test_polars_categorical_observed_categories(self) -> None:
+        """A polars `Categorical` is one-hot encoded over its sorted observed values."""
         pp = Preprocessor()
-        with pytest.raises(ValueError, match='polars Categorical'):
-            pp.fit(df)
+        df = self._make_nw_df(
+            'polars', {'c': {'kind': 'unordered_cat', 'values': ['c', 'a', 'c']}}
+        )
+        pp.fit(df)
+        assert pp._specs[0].categories == ('a', 'c')
+        assert_array_equal(pp.transform(df), np.eye(2, dtype=np.float32)[[1, 0, 1]])
+        pp_other = Preprocessor()
+        pp_other.fit(
+            self._make_nw_df(
+                'polars', {'c': {'kind': 'unordered_cat', 'values': ['a', 'c', 'c']}}
+            )
+        )
+        assert pp_other._specs == pp._specs
+
+    def test_polars_categorical_unobserved_raises(self) -> None:
+        """A level not observed in a polars `Categorical` at fit raises at transform."""
+        pp = Preprocessor()
+        pp.fit(
+            self._make_nw_df(
+                'polars', {'c': {'kind': 'unordered_cat', 'values': ['a', 'b']}}
+            )
+        )
+        df = self._make_nw_df(
+            'pandas',
+            {
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': ['c'],
+                    'categories': ['a', 'b', 'c'],
+                }
+            },
+        )
+        with pytest.raises(ValueError, match='not in the fitted category list'):
+            pp.transform(df)
+
+    def test_polars_enum_warns(self) -> None:
+        """Fitting a polars `Enum` warns that it is encoded as ordinal."""
+        df = self._make_nw_df(
+            'polars',
+            {'c': {'kind': 'ordered_cat', 'values': ['a'], 'categories': ['a', 'b']}},
+        )
+        with pytest.warns(UserWarning, match='bartz <= 0.14') as record:
+            Preprocessor().fit(df)
+        # WORKAROUND(polars<2): drop this check
+        old_polars = int(pl.__version__.split('.')[0]) < 2
+        assert ('to_pandas()' in str(record[0].message)) == old_polars
 
     # polars Enum categories are strings
     @pytest.mark.parametrize('flavor', ['pandas', 'pandas-arrow', 'pyarrow'])
@@ -1043,17 +1084,12 @@ class TestPreprocessing:
             to_narwhals(lf)
 
     @pytest.mark.parametrize('flavor', _FLAVORS)
-    def test_null_in_categorical_raises(self, flavor: str) -> None:
+    @pytest.mark.parametrize('kind', ['ordered_cat', 'unordered_cat'])
+    def test_null_in_categorical_raises(self, flavor: str, kind: str) -> None:
         """Null values in a categorical column raise at transform time."""
         df = self._make_nw_df(
             flavor,
-            {
-                'c': {
-                    'kind': 'ordered_cat',
-                    'values': ['a', None, 'b'],
-                    'categories': ['a', 'b'],
-                }
-            },
+            {'c': {'kind': kind, 'values': ['a', None, 'b'], 'categories': ['a', 'b']}},
         )
         pp = Preprocessor()
         pp.fit(df)
@@ -1097,7 +1133,7 @@ class TestPreprocessing:
             X, np.eye(3, dtype=np.float32)[[cats.index(v) for v in values]]
         )
 
-    @pytest.mark.parametrize('flavor', _ONE_HOT_FLAVORS)
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_variable_weights_split_across_one_hot(self, flavor: str) -> None:
         """`variable_weights[i]` is divided evenly across an expanded column's k outputs."""
         df = self._make_nw_df(
@@ -1115,7 +1151,7 @@ class TestPreprocessing:
         weights_in = np.array([2.0, 6.0])
         w_out = pp.fit(df, variable_weights=weights_in)
         # numeric stays at 2.0; the cat splits its budget evenly across its
-        # k one-hot columns (k=4 from the declared category list in both flavors)
+        # k one-hot columns (4 declared categories, 3 observed ones in polars)
         k_cat = pp.n_processed_columns - 1
         expected = np.concatenate([[2.0], np.full(k_cat, 6.0 / k_cat)]).astype(
             np.float32
@@ -1229,27 +1265,22 @@ class TestPreprocessing:
         self, fit_flavor: str, transform_flavor: str
     ) -> None:
         """Transform gives the same result whatever the library of the new dataframe."""
-        one_hot = {fit_flavor, transform_flavor} <= set(_ONE_HOT_FLAVORS)
 
         def make(flavor: str, x: list, b: list, c: list, o: list) -> nw.DataFrame[Any]:
             columns = {
                 'x': {'kind': 'numeric', 'values': x},
                 'b': {'kind': 'bool', 'values': b},
+                'c': {
+                    'kind': 'unordered_cat',
+                    'values': c,
+                    'categories': ['a', 'b', 'c'],
+                },
                 'o': {
                     'kind': 'ordered_cat',
                     'values': o,
                     'categories': ['lo', 'mid', 'hi'],
                 },
             }
-            if one_hot:
-                columns = dict(
-                    columns,
-                    c={
-                        'kind': 'unordered_cat',
-                        'values': c,
-                        'categories': ['a', 'b', 'c'],
-                    },
-                )
             return self._make_nw_df(flavor, columns)
 
         pp = Preprocessor()
@@ -1308,7 +1339,7 @@ class TestPreprocessing:
             nnone(m_arr.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-4
         )
 
-    @pytest.mark.parametrize('flavor', _ONE_HOT_FLAVORS)
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_end_to_end_one_hot_matches_manual(
         self, continuous_data: _Data, flavor: str, keys: split
     ) -> None:
@@ -1393,7 +1424,7 @@ class TestPreprocessing:
             nnone(m_manual.y_hat_test), nnone(m_df.y_hat_test), rtol=1e-4
         )
 
-    @pytest.mark.parametrize('flavor', _ONE_HOT_FLAVORS)
+    @pytest.mark.parametrize('flavor', _FLAVORS)
     def test_end_to_end_default_weights_split_like_stochtree(
         self, continuous_data: _Data, flavor: str, keys: split
     ) -> None:
@@ -1479,8 +1510,13 @@ class TestPreprocessing:
                     n: {'kind': 'numeric', 'values': arr[:, j].tolist()}
                     for j, n in enumerate(names)
                 },
-                'c': {
+                'o': {
                     'kind': 'ordered_cat',
+                    'values': rng.choice(cats, size=len(arr)).tolist(),
+                    'categories': cats,
+                },
+                'u': {
+                    'kind': 'unordered_cat',
                     'values': rng.choice(cats, size=len(arr)).tolist(),
                     'categories': cats,
                 },

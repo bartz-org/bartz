@@ -788,11 +788,11 @@ def resolve_leaf_variance_prior(
     `num_trees` times the one of a leaf, so its scale is too.
     """
     if scale is None:
-        scale = 1.0 / num_trees if is_probit else var_resid_train / num_trees
+        sum_scale = 1.0 if is_probit else var_resid_train
+    else:
+        sum_scale = num_trees * scale
     return Wishart(
-        nu=shape,
-        rate=num_trees * scale,
-        value=jnp.reciprocal(num_trees * sigma2_leaf_init),
+        nu=shape, rate=sum_scale, value=jnp.reciprocal(num_trees * sigma2_leaf_init)
     )
 
 

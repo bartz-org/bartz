@@ -2367,9 +2367,11 @@ def num_used_trees(forest: Forest) -> Int32[Array, '*chains'] | int:
 def leaf_prior_precision(forest: Forest) -> Float32[Array, ''] | Float32[Array, 'k k']:
     """Return the prior precision of a leaf of a forest without a chain axis.
 
-    See `Forest.sum_trees_prior_cov_inv`.
+    See `Forest.sum_trees_prior_cov_inv`. Without trees in use it is the one of
+    a single tree, such that an infinite precision does not turn into nan.
     """
-    return forest.sum_trees_prior_cov_inv.value * num_used_trees(forest)
+    used_trees = jnp.maximum(num_used_trees(forest), 1)
+    return forest.sum_trees_prior_cov_inv.value * used_trees
 
 
 def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']:

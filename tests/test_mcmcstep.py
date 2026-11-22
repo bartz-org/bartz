@@ -141,6 +141,7 @@ from bartz.mcmcstep._state import (
     chol_with_gersh,
     default_parallel_block_size,
     inv_via_chol_with_gersh,
+    leaf_prior_precision,
     outcome_target,
     pow2_near_sqrt,
     round_to_pow2,
@@ -2437,6 +2438,34 @@ class TestUsedTrees:
         # the residuals match the sum of all the trees
         rebuilt = rebuild_derived(copy_arrays(state))
         assert_close_matrices(state.resid, rebuilt.resid, rtol=1e-5)
+
+    def test_infinite_precision_without_trees(self, keys: split) -> None:
+        """A chain without trees in use stays finite with an infinite prior precision.
+
+        The prior precision of a leaf is the one of the sum of trees times the
+        number of trees in use, which here would be ``inf * 0 = nan``.
+
+        The nan would show up on gpu, where all the chains loop over the trees
+        together: a chain with fewer trees in use than the others runs the
+        extra iterations too, and discards their result by multiplying its
+        change to the residuals by zero. That does not discard a nan.
+        """
+        prior = Wishart(nu=None, rate=None, value=jnp.inf)
+        kw: dict = dict(
+            case_init_kw(keys.pop(), 'plain'), sum_trees_prior_cov_inv=prior
+        )
+
+        # the leaf precision without trees in use is not nan
+        alone = init(**copy_arrays(kw), used_trees=0, check_num_trees=False)
+        assert leaf_prior_precision(alone.forest) == jnp.inf
+
+        # a chain without trees, next to chains that keep the loop going
+        state = init(**kw, used_trees=NUM_TREES, check_num_trees=False, num_chains=3)
+        used_trees = jnp.array([0, 2, NUM_TREES], jnp.int32)
+        state = replace(state, forest=replace(state.forest, used_trees=used_trees))
+        state = step(keys.pop(), state)
+        assert jnp.all(jnp.isfinite(state.resid))
+        assert jnp.all(jnp.isfinite(state.error_cov_inv.value))
 
     @pytest.mark.parametrize(
         ('case', 'used_trees', 'block_size'),

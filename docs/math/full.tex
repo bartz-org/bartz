@@ -1493,8 +1493,9 @@ variable uniformly at random.
 			                  \end{itemize}
 			            \item Leaf precision:
 			                  \texttt{step\_sum\_trees\_prior\_cov\_inv} draws
-			                  from \eqref{eq:mv-Lamm-fc}, with $L$ and the
-			                  leaf scatter from \texttt{leaf\_scatter}.
+			                  $\mLamm / m$, i.e., from \eqref{eq:mv-Lamm-fc}
+			                  with the rate multiplied by $m$, with $L$ and
+			                  the leaf scatter from \texttt{leaf\_scatter}.
 			            \item Error precision: \texttt{step\_error\_cov\_inv}
 			                  dispatches on the type of
 			                  \texttt{State.error\_cov\_inv} to

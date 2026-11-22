@@ -304,12 +304,12 @@ def test_upgrade_sum_trees_prior(archive: str, forests: dict[str, str]) -> None:
         *_, num_trees, _ = get(model, f'_mcmc_state/{name}').split_tree.shape
 
         # the precision of a leaf is the one of the sum times the trees
-        keys = [f'{prior_key}/value']
-        keys += [
-            f'{kind}{suffix}/leaf_prior_cov_inv'
-            for kind in ('_main_trace', '_burnin_trace')
-        ]
-        for key in keys:
+        old_keys = (
+            f'{prior_key}/value',
+            f'_main_trace{suffix}/leaf_prior_cov_inv',
+            f'_burnin_trace{suffix}/leaf_prior_cov_inv',
+        )
+        for key in old_keys:
             assert_close_matrices(
                 get(model, key) * num_trees, old[key], rtol=1e-6, err_msg=key
             )
@@ -323,7 +323,7 @@ def test_upgrade_sum_trees_prior(archive: str, forests: dict[str, str]) -> None:
 def test_upgrade_sum_trees_prior_anywhere() -> None:
     """Check the leaf precisions are converted wherever they are in an archive.
 
-    But for a burn-in trace away from its main trace, which gets nan.
+    But for a burn-in trace away from its main trace, which can not be.
     """
     # the archive with a prior on the leaf precision
     meta, old = read_archive(ARCHIVE_DIR / 'bcf_v1.npz')
@@ -334,13 +334,13 @@ def test_upgrade_sum_trees_prior_anywhere() -> None:
         type='dict',
         items=dict(
             states=dict(type='tuple', items=[fields['_mcmc_state']]),
-            traces=[fields['_main_trace'], fields['_burnin_trace']],
+            traces=[fields['_main_trace']],
         ),
     )
     obj: Any = decode(*upgrade_bartz_0_14(nested, old), set())
 
     (state,) = obj['states']
-    main, burnin = obj['traces']
+    (main,) = obj['traces']
     *_, num_trees, _ = state.forest.split_tree.shape
 
     prior = state.forest.sum_trees_prior_cov_inv
@@ -353,19 +353,30 @@ def test_upgrade_sum_trees_prior_anywhere() -> None:
         old['_main_trace/mu/leaf_prior_cov_inv'],
         rtol=1e-6,
     )
-    assert burnin.mu.sum_trees_prior_cov_inv.size
-    assert jnp.all(jnp.isnan(burnin.mu.sum_trees_prior_cov_inv))
+
+    traces = [fields['_main_trace'], fields['_burnin_trace']]
+    with pytest.raises(ValueError, match='cannot load a BurninTrace'):
+        upgrade_bartz_0_14(traces, old)
 
 
-def test_upgrade_sum_trees_prior_other_class() -> None:
-    """Check a class with the fields of a forest, but another name, is left alone."""
+def test_upgrade_sum_trees_prior_custom_class() -> None:
+    """Check a custom class is refused if it has a leaf precision, else left alone.
+
+    Like a subclass of a trace, and a callback, respectively. The classes of
+    bartz within a custom class are converted.
+    """
     meta, old = read_archive(ARCHIVE_DIR / 'bcf_v1.npz')
     forest = meta['root']['fields']['_mcmc_state']['fields']['forest']
-    lookalike = dict(forest, cls='Lookalike')
-    root, new = upgrade_bartz_0_14(lookalike, old)
-    assert root == lookalike
-    assert new.keys() == old.keys()
-    assert all(new[key] is value for key, value in old.items())
+
+    subclass = dict(forest, cls='Subclass')
+    with pytest.raises(ValueError, match="cannot load the custom class 'Subclass'"):
+        upgrade_bartz_0_14(subclass, old)
+
+    holder = dict(type='module', cls='Holder', fields=dict(forest=forest, note='a'))
+    root, _ = upgrade_bartz_0_14(holder, old)
+    assert root['cls'] == 'Holder'
+    assert root['fields']['note'] == 'a'
+    assert 'sum_trees_prior_cov_inv' in root['fields']['forest']['fields']
 
 
 def test_bartz_0_13_stored_values() -> None:

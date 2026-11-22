@@ -24,7 +24,6 @@
 
 """Main high-level interface of the package."""
 
-import math
 import pickle
 from collections.abc import Collection, Hashable, Mapping, Sequence
 from dataclasses import replace
@@ -499,12 +498,11 @@ class Bart(Module):
             missing,
             None if offset is None else jnp.asarray(offset, jnp.float32),
         )
-        leaf_prior_cov_inv = _process_leaf_variance_settings(
+        sum_trees_prior_cov_inv = _process_leaf_variance_settings(
             y_train,
             binary_mask,
             missing,
             k=jnp.asarray(k, jnp.float32),
-            num_trees=num_trees,
             tau_num=None if tau_num is None else jnp.asarray(tau_num, jnp.float32),
             sigma_mu_df=None
             if sigma_mu_df is None
@@ -546,7 +544,7 @@ class Bart(Module):
             error_scale=error_scale,
             missing=missing,
             max_split=max_split,
-            leaf_prior_cov_inv=leaf_prior_cov_inv,
+            sum_trees_prior_cov_inv=sum_trees_prior_cov_inv,
             error_cov_inv=error_cov_inv,
             power=power,
             base=base,
@@ -1432,18 +1430,21 @@ def _process_offset_settings(
     return jnp.where(n_valid > 0, offset, 0.0)
 
 
-@jit(static_argnames='num_trees')
+@jit
 def _process_leaf_variance_settings(
     y_train: Float32[Array, ' n'] | Float32[Array, 'k n'],
     binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
     *,
     k: Float[Array, ''],
-    num_trees: int,
     tau_num: Float[Array, ''] | None,
     sigma_mu_df: Float[Array, ''] | None,
 ) -> Wishart:
-    """Return `leaf_prior_cov_inv`, with a prior iff `sigma_mu_df` is set."""
+    """Return `sum_trees_prior_cov_inv`, with a prior iff `sigma_mu_df` is set.
+
+    See `bartz.mcmcstep.Forest.sum_trees_prior_cov_inv`; the prior on it is
+    the one on the leaf precision rescaled by the number of trees.
+    """
     # determine `tau_num` if not specified
     *kshape, n = y_train.shape
     if tau_num is None:
@@ -1458,26 +1459,27 @@ def _process_leaf_variance_settings(
             continuous_tau = jnp.where(n_valid >= 2, (ymax - ymin) / 2, 1.0)
         tau_num = jnp.where(binary_mask, 3.0, continuous_tau)
 
-    # leaf prior standard deviation
-    sigma_mu = tau_num / (k * math.sqrt(num_trees))
+    # prior standard deviation of the sum of trees, the leaf one (sigma_mu)
+    # times the square root of the number of trees
+    sigma_sum = tau_num / k
 
-    # leaf prior precision matrix
-    sigma2_mu = jnp.broadcast_to(jnp.square(sigma_mu), kshape)
-    leaf_prior_cov_inv = jnp.reciprocal(sigma2_mu)
+    # prior precision matrix of the sum of trees
+    sigma2_sum = jnp.broadcast_to(jnp.square(sigma_sum), kshape)
+    sum_trees_prior_cov_inv = jnp.reciprocal(sigma2_sum)
     if y_train.ndim == 2:
-        leaf_prior_cov_inv = jnp.diag(leaf_prior_cov_inv)
+        sum_trees_prior_cov_inv = jnp.diag(sum_trees_prior_cov_inv)
 
     if sigma_mu_df is None:
-        return Wishart(nu=None, rate=None, value=leaf_prior_cov_inv)
+        return Wishart(nu=None, rate=None, value=sum_trees_prior_cov_inv)
     else:
         # each marginal variance is inverse-gamma with alpha = sigma_mu_df / 2
-        # and beta = rate_ii / 2, so rate_ii = sigma_mu_df * sigma2_mu makes
-        # sigma2_mu its harmonic mean for any k
-        rate = sigma_mu_df * sigma2_mu
+        # and beta = rate_ii / 2, so rate_ii = sigma_mu_df * sigma2_sum makes
+        # sigma2_sum its harmonic mean for any k
+        rate = sigma_mu_df * sigma2_sum
         if y_train.ndim == 2:
             rate = jnp.diag(rate)
         return Wishart.from_inv_wishart_marginal_nu(
-            sigma_mu_df, rate, leaf_prior_cov_inv
+            sigma_mu_df, rate, sum_trees_prior_cov_inv
         )
 
 
@@ -1617,7 +1619,7 @@ def _setup_mcmc(
     error_scale: Float[Array, ' n'] | Float[Array, 'k n'] | None,
     missing: Bool[Array, ' n'] | Bool[Array, 'k n'] | None,
     max_split: UInt[Array, ' p'],
-    leaf_prior_cov_inv: Wishart,
+    sum_trees_prior_cov_inv: Wishart,
     error_cov_inv: Wishart | None,
     power: FloatLike,
     base: FloatLike,
@@ -1649,7 +1651,7 @@ def _setup_mcmc(
         max_split=max_split,
         num_trees=num_trees,
         p_nonterminal=make_p_nonterminal(maxdepth, base, power),
-        leaf_prior_cov_inv=leaf_prior_cov_inv,
+        sum_trees_prior_cov_inv=sum_trees_prior_cov_inv,
         error_cov_inv=error_cov_inv,
         min_points_per_decision_node=10,
         filter_splitless_vars=jnp.sum(max_split == 0).item() if rm_const else 0,

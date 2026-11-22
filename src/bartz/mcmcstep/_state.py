@@ -24,6 +24,7 @@
 
 """Module defining the BART MCMC state and initialization."""
 
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -299,8 +300,9 @@ class Forest(Module):
     leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
     """The storage unit of the leaves. Keeps the stored values O(1) whatever
     the data units, so they do not under/overflow narrow `leaf_tree` dtypes.
-    Set to the marginal prior standard deviation of a leaf, rounded to a power
-    of two so converting to and from data units is exact."""
+    Set to the marginal prior standard deviation of a leaf with all the trees
+    in use, rounded to a power of two so converting to and from data units is
+    exact."""
 
     offset: Float32[Array, ''] | Float32[Array, ' k']
     """Constant shift added to the scaled sum of trees, see `leaf_tree`."""
@@ -398,11 +400,13 @@ class Forest(Module):
     )
     """The log likelihood ratio, dirty like `log_trans_prior`."""
 
-    leaf_prior_cov_inv: Wishart
-    """The prior precision matrix of a leaf, conditional on the tree structure
-    (a scalar inverse variance for univariate), with its Wishart prior. The
-    prior mean of a leaf is zero; the prior covariance of the sum of trees is
-    ``used_trees * leaf_prior_cov_inv.value^-1``. If `Wishart.nu` is `None`,
+    sum_trees_prior_cov_inv: Wishart
+    """The prior precision matrix of the sum of trees (a scalar inverse
+    variance for univariate), with its Wishart prior. Conditional on the tree
+    structures, the leaves of the trees in use have zero mean and precision
+    ``used_trees * sum_trees_prior_cov_inv.value`` (``num_trees`` if
+    `used_trees` is not set), such that the prior covariance of the sum of
+    trees does not depend on the number of trees. If `Wishart.nu` is `None`,
     the precision is held fixed."""
 
     sparsity: Sparsity
@@ -535,9 +539,8 @@ class State(Module):
 
     resid_unit: Float32[Array, ''] | Float32[Array, ' k']
     """The storage unit of `resid` (see `init`'s ``resid_dtype``), same scheme
-    as `Forest.leaf_unit`. Equal to ``leaf_unit * sqrt(num_trees)`` (the
-    marginal prior standard deviation of the sum of trees, with all the trees
-    in use) rounded to a power of two."""
+    as `Forest.leaf_unit`. Set to the marginal prior standard deviation of the
+    sum of trees, rounded to a power of two."""
 
     resid_eff_scale: Float32[Array, '*chains'] | Float32[Array, '*chains k'] = field(
         chains=CHAIN_AXIS
@@ -636,8 +639,18 @@ class State(Module):
         eps_leaf = jnp.finfo(self.forest.leaf_tree.dtype).eps
         eps_resid = jnp.finfo(self.resid.dtype).eps
 
-        # rounding of the stored leaves at their typical magnitude `leaf_unit`
-        dtype_quantum = eps_leaf * self.forest.leaf_unit
+        # the trees in use, on average over the chains and in total
+        split_tree = self.forest.split_tree
+        *chains, num_trees, _ = split_tree.shape
+        used_trees = jnp.mean(num_used_trees(self.forest))
+        num_used = used_trees * math.prod(chains)
+
+        # the prior standard deviation of a leaf; `resid_unit` is the one of
+        # the sum of trees (up to rounding)
+        leaf_sdev = self.resid_unit * lax.rsqrt(jnp.maximum(used_trees, 1.0))
+
+        # rounding of the stored leaves at their typical magnitude
+        dtype_quantum = eps_leaf * leaf_sdev
 
         if self.config.leaf_quantization is None:
             resolution = dtype_quantum
@@ -675,21 +688,15 @@ class State(Module):
             # a quantized leaf moves only when its full conditional mean
             # crosses half a quantum; the mean responds to the leaf's average
             # residual through the posterior shrinkage factor s = t / (1 + t),
-            # t = (leaf_unit / error_sdev)^2 * n_leaf, so residual features
+            # t = (leaf_sdev / error_sdev)^2 * n_leaf, so residual features
             # smaller than quantum / (2 s) cannot move the sampler. Typical
             # values are used for the error variance (chain mean, datapoint
             # mean of prec_scale) and n_leaf (datapoints over leaves per tree
             # in use; the trees not in use have no splits).
-            split_tree = self.forest.split_tree
-            if self.forest.used_trees is None:
-                *_, half_tree_size = split_tree.shape
-                num_used = split_tree.size // half_tree_size
-            else:
-                num_used = jnp.sum(self.forest.used_trees)
             num_splits = jnp.count_nonzero(split_tree)
             leaves_per_tree = 1.0 + num_splits / jnp.maximum(num_used, 1)
             n_leaf = n_eff / leaves_per_tree
-            t = jnp.square(self.forest.leaf_unit) * n_leaf / error_var
+            t = jnp.square(leaf_sdev) * n_leaf / error_var
             snap = managed_quantum / 2.0 * (1.0 + jnp.reciprocal(t))
 
         # random walk drift of the accumulated rounding errors: each of the
@@ -700,7 +707,6 @@ class State(Module):
         integral = self.resid_inexact_integral
         chain_axes = range(integral.ndim - self.resid_unit.ndim)
         integral = jnp.mean(integral, axis=tuple(chain_axes))
-        *_, num_trees, _ = self.forest.var_tree.shape
         drift = eps_resid * self.resid_unit * jnp.sqrt(num_trees * integral)
 
         return resolution, drift, snap
@@ -732,7 +738,7 @@ def init_shape_shifting_parameters(
     offset: Float32[Array, ''] | Float32[Array, ' k'],
     error_scale: Float32[ArrayLike, ' n'] | Float32[ArrayLike, 'k n'] | None,
     error_cov_inv: Wishart | None,
-    leaf_prior_cov_inv: Wishart,
+    sum_trees_prior_cov_inv: Wishart,
     missing: Bool[ArrayLike, ' n'] | Bool[ArrayLike, 'k n'] | None,
 ) -> tuple[bool, tuple[int, ...], Wishart, None | Int32[Array, ' kb']]:
     """
@@ -755,9 +761,9 @@ def init_shape_shifting_parameters(
         `None` for binary regression. The mixed and partial-missing diagonal
         modes require a `DiagWishart`; in the mixed case the binary components
         must have an initial precision of 1.
-    leaf_prior_cov_inv
-        The Wishart prior on the leaf precision and its initial value (used
-        only for shape and type checks).
+    sum_trees_prior_cov_inv
+        The Wishart prior on the precision of the sum of trees and its initial
+        value (used only for shape and type checks).
     missing
         The per-datapoint missingness mask, used to detect partial missingness
         (2-D mask) so that diagonal-mode initialization is selected.
@@ -837,12 +843,12 @@ def init_shape_shifting_parameters(
 
     assert y.shape[:-1] == kshape
 
-    assert type(leaf_prior_cov_inv) is Wishart, (
-        'leaf_prior_cov_inv must be a dense Wishart'
+    assert type(sum_trees_prior_cov_inv) is Wishart, (
+        'sum_trees_prior_cov_inv must be a dense Wishart'
     )
-    assert leaf_prior_cov_inv.value.shape == 2 * kshape
-    if leaf_prior_cov_inv.rate is not None:
-        assert leaf_prior_cov_inv.rate.shape == 2 * kshape
+    assert sum_trees_prior_cov_inv.value.shape == 2 * kshape
+    if sum_trees_prior_cov_inv.rate is not None:
+        assert sum_trees_prior_cov_inv.rate.shape == 2 * kshape
 
     return is_binary, kshape, error_cov_inv, binary_indices
 
@@ -968,7 +974,7 @@ def init(
     used_trees: int | Integer[ArrayLike, ''] | None = None,
     check_num_trees: bool = True,
     p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
-    leaf_prior_cov_inv: Wishart,
+    sum_trees_prior_cov_inv: Wishart,
     leaf_dtype: DTypeLike = jnp.float32,
     prec_scale_dtype: DTypeLike = jnp.float32,
     resid_dtype: DTypeLike = jnp.float32,
@@ -1031,11 +1037,13 @@ def init(
         The probability of a nonterminal node at each depth. The maximum depth
         of trees is fixed by the length of this array. Use `make_p_nonterminal`
         to set it with the conventional formula.
-    leaf_prior_cov_inv
-        The Wishart prior on the leaf precision (a scalar inverse variance for
-        univariate) and its initial value; see `Forest.leaf_prior_cov_inv`.
-        Set `Wishart.nu` and `Wishart.rate` to `None` to hold the precision
-        fixed. Must be a dense `Wishart`, not a `DiagWishart`.
+    sum_trees_prior_cov_inv
+        The Wishart prior on the precision of the sum of trees (a scalar
+        inverse variance for univariate) and its initial value; the precision
+        of a leaf is the number of trees in use times that, see
+        `Forest.sum_trees_prior_cov_inv`. Set `Wishart.nu` and `Wishart.rate`
+        to `None` to hold the precision fixed. Must be a dense `Wishart`, not
+        a `DiagWishart`.
     leaf_dtype
     prec_scale_dtype
     resid_dtype
@@ -1187,7 +1195,7 @@ def init(
         offset=offset,
         error_scale=error_scale,
         error_cov_inv=error_cov_inv,
-        leaf_prior_cov_inv=leaf_prior_cov_inv,
+        sum_trees_prior_cov_inv=sum_trees_prior_cov_inv,
         missing=missing,
     )
 
@@ -1195,7 +1203,7 @@ def init(
         leaf_dtype=leaf_dtype,
         prec_scale_dtype=prec_scale_dtype,
         resid_dtype=resid_dtype,
-        leaf_prior_cov_inv=leaf_prior_cov_inv.value,
+        sum_trees_prior_cov_inv=sum_trees_prior_cov_inv.value,
         kshape=kshape,
         num_trees=num_trees,
     )
@@ -1341,8 +1349,9 @@ def init(
                 log_trans_prior=lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
                 log_likelihood=lazy(jnp.zeros, (num_trees,)) if save_ratios else None,
                 # only `value` carries the chain axis, see `error_cov_inv`
-                leaf_prior_cov_inv=replace(
-                    leaf_prior_cov_inv, value=_lazy_from_array(leaf_prior_cov_inv.value)
+                sum_trees_prior_cov_inv=replace(
+                    sum_trees_prior_cov_inv,
+                    value=_lazy_from_array(sum_trees_prior_cov_inv.value),
                 ),
                 sparsity=Sparsity(
                     log_s=_lazy_from_array(asarray_or_none(log_s)),
@@ -1455,22 +1464,22 @@ def parse_float_dtype(dtype: DTypeLike) -> jnp.dtype:
     return dtype
 
 
-def compute_leaf_unit(
-    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+def compute_sum_sdev(
+    sum_trees_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     kshape: tuple[int, ...],
 ) -> Float32[Array, ''] | Float32[Array, ' k']:
-    """Compute the marginal prior standard deviation of a leaf.
+    """Compute the marginal prior standard deviation of the sum of trees.
 
     A degenerate prior precision (e.g., infinite, from `bartz.Bart` with
     constant ``y``) yields a zero or non-finite scale; fall back to 1 to avoid
     nan leaves (an infinite precision pins the leaves to zero anyway).
     """
     if kshape:
-        leaf_prior_cov = inv_via_chol_with_gersh(leaf_prior_cov_inv)
-        leaf_unit = jnp.sqrt(jnp.diagonal(leaf_prior_cov))
+        cov = inv_via_chol_with_gersh(sum_trees_prior_cov_inv)
+        sdev = jnp.sqrt(jnp.diagonal(cov))
     else:
-        leaf_unit = jnp.sqrt(jnp.reciprocal(leaf_prior_cov_inv))
-    return jnp.where(jnp.isfinite(leaf_unit) & (leaf_unit > 0), leaf_unit, 1.0)
+        sdev = jnp.sqrt(jnp.reciprocal(sum_trees_prior_cov_inv))
+    return jnp.where(jnp.isfinite(sdev) & (sdev > 0), sdev, 1.0)
 
 
 def round_to_pow2(x: Float32[Array, '*shape']) -> Float32[Array, '*shape']:
@@ -1516,18 +1525,19 @@ def determine_storage_params(
     leaf_dtype: DTypeLike,
     prec_scale_dtype: DTypeLike,
     resid_dtype: DTypeLike,
-    leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
+    sum_trees_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     kshape: tuple[int, ...],
     num_trees: int,
 ) -> StorageParams:
     """Normalize the storage dtypes and compute the leaf and residual units."""
-    leaf_unit = compute_leaf_unit(leaf_prior_cov_inv, kshape)
+    sum_sdev = compute_sum_sdev(sum_trees_prior_cov_inv, kshape)
     return StorageParams(
         leaf_dtype=parse_float_dtype(leaf_dtype),
         prec_scale_dtype=parse_float_dtype(prec_scale_dtype),
         resid_dtype=parse_float_dtype(resid_dtype),
-        leaf_unit=round_to_pow2(leaf_unit),
-        resid_unit=round_to_pow2(leaf_unit * num_trees**0.5),
+        # the leaves are the smallest with all the trees in use
+        leaf_unit=round_to_pow2(sum_sdev / max(num_trees, 1) ** 0.5),
+        resid_unit=round_to_pow2(sum_sdev),
     )
 
 
@@ -2343,6 +2353,25 @@ def used_trees_mask(forest: Forest) -> Bool[Array, '*chains num_trees'] | None:
         *_, num_trees, _ = forest.var_tree.shape
         trees = minimal_unsigned_arange(num_trees)
         return trees < forest.used_trees[..., None]
+
+
+def num_used_trees(forest: Forest) -> Int32[Array, '*chains'] | int:
+    """Return the number of trees in use, see `Forest.used_trees`."""
+    if forest.used_trees is None:
+        *_, num_trees, _ = forest.var_tree.shape
+        return num_trees
+    else:
+        return forest.used_trees
+
+
+def leaf_prior_precision(forest: Forest) -> Float32[Array, ''] | Float32[Array, 'k k']:
+    """Return the prior precision of a leaf of a forest without a chain axis.
+
+    See `Forest.sum_trees_prior_cov_inv`. Without trees in use it is the one of
+    a single tree, such that an infinite precision does not turn into nan.
+    """
+    used_trees = jnp.maximum(num_used_trees(forest), 1)
+    return forest.sum_trees_prior_cov_inv.value * used_trees
 
 
 def outcome_target(state: State) -> Float32[Array, ' n'] | Float32[Array, 'k n']:

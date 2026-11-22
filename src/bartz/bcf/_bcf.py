@@ -113,10 +113,14 @@ def stack_pihat(
     return jnp.concatenate((x, pihat[None, :]))
 
 
-def make_leaf_prior_cov_inv(
+def make_sum_trees_prior_cov_inv(
     value: FloatLike, sample: bool, shape: FloatLike, scale: FloatLike
 ) -> Wishart:
-    """Build the leaf precision prior from the inverse-gamma prior on the variance."""
+    """Bundle the precision of a sum of trees with its prior, if sampled.
+
+    `shape` and `scale` are the parameters of the inverse-gamma prior on the
+    variance of the sum of trees.
+    """
     if sample:
         return Wishart(nu=2 * shape, rate=2 * scale, value=value)
     else:
@@ -489,38 +493,40 @@ class bcf(Module):
 
         offset = _process_offset_settings(y_train_internal, binary_mask, None, None)
 
-        if leaf_prior_cov_inv_mu is None:
-            if outcome_type == 'binary':
-                leaf_prior_cov_inv_mu = jnp.array(num_trees_mu, jnp.float32)
-            else:
-                leaf_prior_cov_inv_mu = _process_leaf_variance_settings(
-                    y_train_internal,
-                    binary_mask,
-                    missing=None,
-                    k=jnp.array(k_mu),
-                    num_trees=num_trees_mu,
-                    tau_num=None,
-                    sigma_mu_df=None,
-                ).value
-        if leaf_prior_cov_inv_tau is None:
-            if outcome_type == 'binary':
-                # give the treatment effect the prior sd delta_max / phi(0) on
-                # the latent scale, the effect that moves the probability by
-                # delta_max from 1/2 under the linear approximation of the
-                # probit there
-                leaf_prior_cov_inv_tau = num_trees_tau / (
-                    2 * jnp.pi * jnp.square(delta_max)
-                )
-            else:
-                leaf_prior_cov_inv_tau = _process_leaf_variance_settings(
-                    y_train_internal,
-                    binary_mask,
-                    missing=None,
-                    k=jnp.array(k_tau),
-                    num_trees=num_trees_tau,
-                    tau_num=None,
-                    sigma_mu_df=None,
-                ).value
+        # the precision of a sum of trees is the one of a leaf over the trees
+        if leaf_prior_cov_inv_mu is not None:
+            sum_trees_prior_cov_inv_mu = leaf_prior_cov_inv_mu / num_trees_mu
+        elif outcome_type == 'binary':
+            sum_trees_prior_cov_inv_mu = 1.0
+        else:
+            sum_trees_prior_cov_inv_mu = _process_leaf_variance_settings(
+                y_train_internal,
+                binary_mask,
+                missing=None,
+                k=jnp.array(k_mu),
+                tau_num=None,
+                sigma_mu_df=None,
+            ).value
+
+        if leaf_prior_cov_inv_tau is not None:
+            sum_trees_prior_cov_inv_tau = leaf_prior_cov_inv_tau / num_trees_tau
+        elif outcome_type == 'binary':
+            # give the treatment effect the prior sd delta_max / phi(0) on
+            # the latent scale, the effect that moves the probability by
+            # delta_max from 1/2 under the linear approximation of the
+            # probit there
+            sum_trees_prior_cov_inv_tau = jnp.reciprocal(
+                2 * jnp.pi * jnp.square(delta_max)
+            )
+        else:
+            sum_trees_prior_cov_inv_tau = _process_leaf_variance_settings(
+                y_train_internal,
+                binary_mask,
+                missing=None,
+                k=jnp.array(k_tau),
+                tau_num=None,
+                sigma_mu_df=None,
+            ).value
 
         error_cov_inv = _process_error_variance_settings(
             y_train_internal,
@@ -540,10 +546,15 @@ class bcf(Module):
             var_y = 1.0
         else:
             var_y = _guarded_response_variance(y_train_internal, None, None)
+        # the variance of a sum of trees is the one of a leaf times the trees
         if sigma2_leaf_scale_mu is None:
-            sigma2_leaf_scale_mu = var_y / num_trees_mu
+            sum_trees_scale_mu = var_y
+        else:
+            sum_trees_scale_mu = sigma2_leaf_scale_mu * num_trees_mu
         if sigma2_leaf_scale_tau is None:
-            sigma2_leaf_scale_tau = 0.5 * var_y / num_trees_tau
+            sum_trees_scale_tau = 0.5 * var_y
+        else:
+            sum_trees_scale_tau = sigma2_leaf_scale_tau * num_trees_tau
 
         # 3.5 Bin the unified data
         rng = seed if is_key(seed) else random.key(seed)
@@ -575,17 +586,17 @@ class bcf(Module):
             num_trees_tau=num_trees_tau,
             p_nonterminal_mu=p_nonterminal_mu,
             p_nonterminal_tau=p_nonterminal_tau,
-            leaf_prior_cov_inv_mu=make_leaf_prior_cov_inv(
-                leaf_prior_cov_inv_mu,
+            sum_trees_prior_cov_inv_mu=make_sum_trees_prior_cov_inv(
+                sum_trees_prior_cov_inv_mu,
                 sample_sigma2_leaf_mu,
                 sigma2_leaf_shape_mu,
-                sigma2_leaf_scale_mu,
+                sum_trees_scale_mu,
             ),
-            leaf_prior_cov_inv_tau=make_leaf_prior_cov_inv(
-                leaf_prior_cov_inv_tau,
+            sum_trees_prior_cov_inv_tau=make_sum_trees_prior_cov_inv(
+                sum_trees_prior_cov_inv_tau,
                 sample_sigma2_leaf_tau,
                 sigma2_leaf_shape_tau,
-                sigma2_leaf_scale_tau,
+                sum_trees_scale_tau,
             ),
             min_points_per_leaf_mu=min_points_per_leaf_mu,
             min_points_per_leaf_tau=min_points_per_leaf_tau,

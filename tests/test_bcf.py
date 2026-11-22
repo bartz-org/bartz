@@ -244,8 +244,13 @@ def init_bcf_state(key: Key[Array, ''], data: BCFData, **kwargs: Any) -> BCFStat
         num_trees_tau=NUM_TREES_TAU,
         p_nonterminal_mu=jnp.full(MAX_DEPTH, 0.95),
         p_nonterminal_tau=jnp.full(MAX_DEPTH, 0.95),
-        leaf_prior_cov_inv_mu=Wishart(nu=6.0, rate=2.0, value=1.0),
-        leaf_prior_cov_inv_tau=Wishart(nu=None, rate=None, value=1.0),
+        # unit leaf precisions, with a prior on the first
+        sum_trees_prior_cov_inv_mu=Wishart(
+            nu=6.0, rate=2.0 * NUM_TREES_MU, value=1.0 / NUM_TREES_MU
+        ),
+        sum_trees_prior_cov_inv_tau=Wishart(
+            nu=None, rate=None, value=1.0 / NUM_TREES_TAU
+        ),
         min_points_per_leaf_mu=10,
         min_points_per_leaf_tau=10,
         error_cov_inv=Wishart(nu=1.0, rate=1.0, value=1.0),
@@ -343,8 +348,8 @@ def run_geweke(
         num_trees_tau=num_trees,
         p_nonterminal_mu=jnp.array(GEWEKE_P_NONTERMINAL_MU),
         p_nonterminal_tau=jnp.array(GEWEKE_P_NONTERMINAL_TAU),
-        leaf_prior_cov_inv_mu=wishart(),
-        leaf_prior_cov_inv_tau=wishart(),
+        sum_trees_prior_cov_inv_mu=wishart(),
+        sum_trees_prior_cov_inv_tau=wishart(),
         min_points_per_leaf_mu=1,
         min_points_per_leaf_tau=1,
         tau_0_prior_var=GEWEKE_TAU_0_PRIOR_VAR,
@@ -857,14 +862,15 @@ class TestBcf:
                 expected = prob * num_splits.size
                 assert stats.chisquare(observed, expected).pvalue > threshold
 
-            leaf_prec = forest.leaf_prior_cov_inv.value
-            check_ks(f'{name} leaf precision', leaf_prec, gamma_cdf)
+            sum_prec = forest.sum_trees_prior_cov_inv.value
+            check_ks(f'{name} sum of trees precision', sum_prec, gamma_cdf)
 
-            # the leaves are iid N(0, 1 / leaf_prec) given leaf_prec
+            # the leaves are iid N(0, 1 / (num_trees * sum_prec)) given sum_prec
             is_leaf = vmap(vmap(partial(is_actual_leaf, add_bottom_level=True)))(
                 forest.split_tree
             )
-            scale = forest.leaf_unit * jnp.sqrt(leaf_prec)
+            _, num_trees, _ = forest.split_tree.shape
+            scale = forest.leaf_unit * jnp.sqrt(num_trees * sum_prec)
             leaves = forest.leaf_tree * scale[:, None, None]
             check_ks(f'{name} leaves', leaves[is_leaf], stats.norm.cdf)
 
@@ -946,7 +952,9 @@ class TestBcf:
             return init_bcf_state(
                 random.clone(binner_key),
                 train,
-                leaf_prior_cov_inv_tau=Wishart(nu=6.0, rate=2.0, value=1.0),
+                sum_trees_prior_cov_inv_tau=Wishart(
+                    nu=6.0, rate=2.0 * NUM_TREES_TAU, value=1.0 / NUM_TREES_TAU
+                ),
                 adaptive_coding=True,
                 num_chains=num_chains,
             )
@@ -1143,8 +1151,8 @@ class TestBcf:
 
         # the leaf prior precisions stay at their initial value
         for trace in (
-            model._main_trace.mu.leaf_prior_cov_inv,
-            model._main_trace.tau.leaf_prior_cov_inv,
+            model._main_trace.mu.sum_trees_prior_cov_inv,
+            model._main_trace.tau.sum_trees_prior_cov_inv,
         ):
             assert_array_equal(trace, jnp.full_like(trace, trace[0]))
 
@@ -1163,8 +1171,8 @@ class TestBcf:
             seed=keys.pop(),
         )
 
-        mu_prior_vars_active = model_active._main_trace.mu.leaf_prior_cov_inv
-        tau_prior_vars_active = model_active._main_trace.tau.leaf_prior_cov_inv
+        mu_prior_vars_active = model_active._main_trace.mu.sum_trees_prior_cov_inv
+        tau_prior_vars_active = model_active._main_trace.tau.sum_trees_prior_cov_inv
 
         assert np.var(mu_prior_vars_active, axis=0).mean() > 1e-4
         assert np.var(tau_prior_vars_active, axis=0).mean() > 1e-4
@@ -1240,17 +1248,18 @@ class TestBcf:
 
         y_var = np.var(train.y)
 
-        leaf_var_mu_jax = (
-            np.mean(np.reciprocal(model_jax._main_trace.mu.leaf_prior_cov_inv)) * y_var
-        )
+        # the trace has the precision of the sum of trees
+        leaf_var_mu_jax = np.mean(
+            np.reciprocal(model_jax._main_trace.mu.sum_trees_prior_cov_inv)
+        ) * (y_var / 200)
         leaf_var_mu_st = np.mean(model_st.leaf_scale_mu_samples) * y_var
         # WORKAROUND(stochtree<=0.4.5): its trees are too small (fixed in
         # stochtree#426), overstating the leaf variance by ~10%; lower rtol to 0.3
         assert_allclose(leaf_var_mu_jax, leaf_var_mu_st, rtol=0.4)
 
-        leaf_var_tau_jax = (
-            np.mean(np.reciprocal(model_jax._main_trace.tau.leaf_prior_cov_inv)) * y_var
-        )
+        leaf_var_tau_jax = np.mean(
+            np.reciprocal(model_jax._main_trace.tau.sum_trees_prior_cov_inv)
+        ) * (y_var / 50)
         leaf_var_tau_st = np.mean(model_st.leaf_scale_tau_samples) * y_var
         assert_allclose(leaf_var_tau_jax, leaf_var_tau_st, rtol=0.5)
 

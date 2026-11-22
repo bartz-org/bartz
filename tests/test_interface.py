@@ -118,11 +118,11 @@ from tests.util import (
     chain_deviation_norms,
     clipped_logit,
     condf,
-    leaf_prior_cov_inv_conditional_mean,
     nnone,
     rerun_on_gpu,
     rhat_rank,
     skip_empty_shard_map_bug,
+    sum_trees_prior_cov_inv_conditional_mean,
 )
 
 
@@ -823,24 +823,24 @@ class TestWithCachedBart:
                     rhat_varprob = rhat_rank(varprob_vals[:, :, 1:], split=True)
                     assert_array_less(rhat_varprob, 1.6)
 
-    def test_leaf_prior_cov_inv(
+    def test_sum_trees_prior_cov_inv(
         self, cachedbart: CachedBart, subtests: SubTests
     ) -> None:
-        """Check the sampled leaf prior precision converges and fits its full conditional."""
+        """Check the sampled sum of trees precision converges and fits its full conditional."""
         bart = cachedbart.bart
-        if bart._mcmc_state.forest.leaf_prior_cov_inv.nu is None:
+        if bart._mcmc_state.forest.sum_trees_prior_cov_inv.nu is None:
             pytest.skip('fixed leaf prior')
 
-        leaf_prec, cond_mean = leaf_prior_cov_inv_conditional_mean(bart)
+        prec, cond_mean = sum_trees_prior_cov_inv_conditional_mean(bart)
         # univariate as 1x1 matrices
         k = cachedbart.bkw.k or 1
-        leaf_prec = leaf_prec.reshape(-1, k, k)
+        prec = prec.reshape(-1, k, k)
         cond_mean = cond_mean.reshape(-1, k, k)
 
         with subtests.test('convergence'):
             ti, tj = jnp.triu_indices(k)
             rhat = rhat_rank(
-                leaf_prec[:, ti, tj].reshape(
+                prec[:, ti, tj].reshape(
                     cachedbart.bkw.num_chains, cachedbart.bkw.n_save, -1
                 ),
                 split=True,
@@ -848,7 +848,7 @@ class TestWithCachedBart:
             assert_array_less(rhat, 1.05)
 
         with subtests.test('conditional mean'):
-            assert_close_matrices(leaf_prec.mean(0), cond_mean.mean(0), rtol=0.01)
+            assert_close_matrices(prec.mean(0), cond_mean.mean(0), rtol=0.01)
 
     def test_different_chains(self, cachedbart: CachedBart) -> None:
         """Check that different chains give different results."""
@@ -871,9 +871,12 @@ class TestWithCachedBart:
                     )
                     or (
                         str_path.endswith(
-                            ('.leaf_prior_cov_inv', '.leaf_prior_cov_inv.value')
+                            (
+                                '.sum_trees_prior_cov_inv',
+                                '.sum_trees_prior_cov_inv.value',
+                            )
                         )
-                        and bart._mcmc_state.forest.leaf_prior_cov_inv.nu is None
+                        and bart._mcmc_state.forest.sum_trees_prior_cov_inv.nu is None
                     )
                     # means over datapoints (and steps): they concentrate (and
                     # round to a power of two), so the chains legitimately
@@ -1042,14 +1045,18 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     rho = 0.7
     scale = 1e6
     corr = (1 - rho) * jnp.eye(k) + rho
-    leaf_prior_cov_inv = scale * jnp.linalg.inv(corr)
-    leaf_prior_cov = corr / scale  # = inv(leaf_prior_cov_inv), before init donates it
+    # the precision of the sum of trees, the one of a leaf is `num_trees` times
+    # larger; the leaf covariance is computed here, before init donates it
+    sum_trees_prior_cov_inv = scale * jnp.linalg.inv(corr)
+    leaf_prior_cov = corr / (scale * bkw.num_trees)
 
     kw = dict(
         bkw.kw,
         init_kw=dict(
             bkw.kw.get('init_kw', {}),
-            leaf_prior_cov_inv=Wishart(nu=None, rate=None, value=leaf_prior_cov_inv),
+            sum_trees_prior_cov_inv=Wishart(
+                nu=None, rate=None, value=sum_trees_prior_cov_inv
+            ),
         ),
     )
     bart = Bart(**kw)
@@ -1073,16 +1080,16 @@ def test_leaf_prior_strong_limit(bkw: BartKW, subtests: SubTests) -> None:
     bart_fixed = Bart(**dict(kw, sigma_mu_df=None))
     bart_strong = Bart(**dict(kw, sigma_mu_df=1e14, seed=random.clone(kw['seed'])))
 
-    fixed_value = initial_leaf_prior_cov_inv(bart_fixed._mcmc_state.forest)
-    leaf_prec_fixed = bart_fixed._main_trace.leaf_prior_cov_inv
-    leaf_prec_strong = bart_strong._main_trace.leaf_prior_cov_inv
-    expected = jnp.broadcast_to(fixed_value, leaf_prec_fixed.shape)
+    fixed_value = initial_sum_trees_prior_cov_inv(bart_fixed._mcmc_state.forest)
+    prec_fixed = bart_fixed._main_trace.sum_trees_prior_cov_inv
+    prec_strong = bart_strong._main_trace.sum_trees_prior_cov_inv
+    expected = jnp.broadcast_to(fixed_value, prec_fixed.shape)
 
     with subtests.test('fixed prior is constant'):
-        assert_array_equal(leaf_prec_fixed, expected)
+        assert_array_equal(prec_fixed, expected)
 
     with subtests.test('strong prior is concentrated'):
-        assert_close_matrices(leaf_prec_strong, expected, rtol=1e-5, reduce_rank=True)
+        assert_close_matrices(prec_strong, expected, rtol=1e-5, reduce_rank=True)
 
     with subtests.test('same predictions'):
         assert_close_matrices(
@@ -1493,7 +1500,7 @@ def test_constant_y_train(bkw: BartKW, keys: split) -> None:
         # tau_num kept at its degenerate default (0)
         forest = bart._mcmc_state.forest
         leaf_tree = forest.leaf_tree
-        if forest.leaf_prior_cov_inv.nu is None:
+        if forest.sum_trees_prior_cov_inv.nu is None:
             # the infinite leaf-prior precision pins every leaf to exactly zero
             assert_array_equal(leaf_tree, jnp.zeros_like(leaf_tree))
         else:
@@ -1664,11 +1671,11 @@ def test_accept(bkw: BartKW) -> None:
     assert jnp.any(bart.accept > 0)  # check the test is not vacuous
 
 
-def initial_leaf_prior_cov_inv(
+def initial_sum_trees_prior_cov_inv(
     forest: Forest,
 ) -> Float32[Array, ''] | Float32[Array, 'k k']:
-    """Return the leaf prior precision set by `Bart` before the MCMC."""
-    prior = forest.leaf_prior_cov_inv
+    """Return the prior precision of the sum of trees set by `Bart` before the MCMC."""
+    prior = forest.sum_trees_prior_cov_inv
     if prior.nu is None:
         value = prior.value
         if forest.has_chains:
@@ -1689,7 +1696,8 @@ def initial_leaf_prior_cov_inv(
 def test_leaf_unit(bkw: BartKW) -> None:
     """`leaf_unit` is the marginal prior leaf standard deviation, rounded to a power of two."""
     forest = Bart(**bkw.kw)._mcmc_state.forest
-    cov_inv = initial_leaf_prior_cov_inv(forest)
+    # the precision of a leaf is the one of the sum times the number of trees
+    cov_inv = initial_sum_trees_prior_cov_inv(forest) * bkw.num_trees
     if cov_inv.ndim:
         marginal_std = jnp.sqrt(jnp.diagonal(jnp.linalg.inv(cov_inv)))
     else:
@@ -2403,10 +2411,10 @@ def test_scale_shift(bkw: BartKW) -> None:
         masked_scale = masked_scale[:, None]
     cov_scale = masked_scale * masked_scale.T
 
-    lpci1 = bart1._mcmc_state.forest.leaf_prior_cov_inv
+    lpci1 = bart1._mcmc_state.forest.sum_trees_prior_cov_inv
     assert_close_matrices(
         lpci1.value,
-        bart2._mcmc_state.forest.leaf_prior_cov_inv.value * cov_scale,
+        bart2._mcmc_state.forest.sum_trees_prior_cov_inv.value * cov_scale,
         rtol=1e-6 if lpci1.nu is None or lpci1.value.platform() == 'cpu' else 1e-3,
         reduce_rank=True,
     )
@@ -2631,12 +2639,12 @@ def test_zero_or_one_datapoint(bkw: BartKW, num_datapoints: int) -> None:
             rate[~mask], jnp.broadcast_to(sigma_df, rate[~mask].shape), rtol=1e-6
         )
 
-    # check leaf_prior_cov_inv
-    expected_cov_inv = (2**2 * bkw.num_trees) / tau_num**2
-    leaf_prior_cov_inv = initial_leaf_prior_cov_inv(bart._mcmc_state.forest)
-    if leaf_prior_cov_inv.ndim == 2:
-        expected_cov_inv = jnp.eye(leaf_prior_cov_inv.shape[0]) * expected_cov_inv
-    assert_close_matrices(leaf_prior_cov_inv, expected_cov_inv, rtol=1e-6)
+    # check sum_trees_prior_cov_inv, the precision of the sum of trees
+    expected_cov_inv = 2**2 / tau_num**2
+    sum_trees_prior_cov_inv = initial_sum_trees_prior_cov_inv(bart._mcmc_state.forest)
+    if sum_trees_prior_cov_inv.ndim == 2:
+        expected_cov_inv = jnp.eye(sum_trees_prior_cov_inv.shape[0]) * expected_cov_inv
+    assert_close_matrices(sum_trees_prior_cov_inv, expected_cov_inv, rtol=1e-6)
 
     assert bart._burnin_trace.log_likelihood is not None
     assert_close_matrices(
@@ -3688,12 +3696,12 @@ def test_uv_mv_k1_equivalence(bkw: BartKW) -> None:
     assert_allclose(bart_uv.offset, bart_mv.offset.squeeze(0), rtol=1e-6)
     assert_close_matrices(
         chain_to_axis(
-            state_uv.forest.leaf_prior_cov_inv.value,
-            uv_axes.forest.leaf_prior_cov_inv.value,
+            state_uv.forest.sum_trees_prior_cov_inv.value,
+            uv_axes.forest.sum_trees_prior_cov_inv.value,
         ),
         chain_to_axis(
-            state_mv.forest.leaf_prior_cov_inv.value,
-            mv_axes.forest.leaf_prior_cov_inv.value,
+            state_mv.forest.sum_trees_prior_cov_inv.value,
+            mv_axes.forest.sum_trees_prior_cov_inv.value,
         ).squeeze((-2, -1)),
         rtol=1e-6,
     )

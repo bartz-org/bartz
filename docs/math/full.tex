@@ -1025,22 +1025,25 @@ reads $\smsq \mid \cdots \sim \IG\bigl((\nu_\mu + L)/2, (\psi_\mu +
 skipping this update.
 
 \paragraph{Implementation.}
-In bartz, $\mLamm$ is called \texttt{leaf\_prior\_cov\_inv},
-both in \texttt{Forest} and in the MCMC trace. In \texttt{Forest} it is a
-\texttt{Wishart}, which bundles the current value with the prior parameters
-\texttt{nu} $= \nu_\mu$ and \texttt{rate} $= \Psi_\mu$; these are
-\texttt{None} if $\mLamm$ is fixed.
+In bartz, \texttt{sum\_trees\_prior\_cov\_inv}, both in \texttt{Forest} and in
+the MCMC trace, is $\mLamm / m$, the prior precision of the sum of the $m$
+trees (those in use, if not all are), which unlike $\mLamm$ is not tied to
+their number. In \texttt{Forest} it is a \texttt{Wishart}, which bundles the
+current value with the parameters of the prior \eqref{eq:mv-Lamm-prior} implies
+on $\mLamm / m$, \texttt{nu} $= \nu_\mu$ and \texttt{rate} $= m \Psi_\mu$;
+these are \texttt{None} if $\mLamm$ is fixed.
 
-The update is \texttt{step\_leaf\_prior\_cov\_inv} in
+The update is \texttt{step\_sum\_trees\_prior\_cov\_inv} in
 \texttt{mcmcstep/\_step.py}, called right after the trees, and skipped if
 $\mLamm$ is fixed. It proceeds in two steps:
 \begin{enumerate}
 	\item \texttt{leaf\_scatter} computes $L$ and $\Psi_\mu' - \Psi_\mu$,
 	      counting only the actual leaves, since the tree heap keeps stale
-	      values below them;
+	      values below them; the latter is then multiplied by $m$;
 	\item \texttt{sample\_wishart\_posterior}, shared with the error precision
-	      update of \S\ref{sec:mv-Sigma}, adds the prior and draws from
-	      \eqref{eq:mv-Lamm-fc}.
+	      update of \S\ref{sec:mv-Sigma}, adds the prior and draws
+	      $\mLamm / m$, i.e., from \eqref{eq:mv-Lamm-fc} with the rate
+	      multiplied by $m$.
 \end{enumerate}
 
 \texttt{Bart} keeps $\mLamm$ fixed by default. The option
@@ -1422,12 +1425,12 @@ variable uniformly at random.
 			                  power-of-two unit).
 			            \item \texttt{Forest.leaf\_tree} holds $\vmu_\ell$
 			                  in units of \texttt{Forest.leaf\_unit}.
-			            \item \texttt{Forest.leaf\_prior\_cov\_inv} is
-			                  $\mLamm$ with its prior, a \texttt{Wishart}
+			            \item \texttt{Forest.sum\_trees\_prior\_cov\_inv} is
+			                  $\mLamm / m$ with its prior, a \texttt{Wishart}
 			                  with \texttt{nu} $= \nu_\mu$ and \texttt{rate}
-			                  $= \Psi_\mu$, or \texttt{nu} $=$ \texttt{rate}
+			                  $= m \Psi_\mu$, or \texttt{nu} $=$ \texttt{rate}
 			                  $=$ \texttt{None} if $\mLamm$ is fixed; for
-			                  $k = 1$ it is the scalar $1/\smsq$.
+			                  $k = 1$ it is the scalar $1/(m \smsq)$.
 			            \item \texttt{Forest.p\_propose\_grow} is the leaf
 			                  weight $w$ of \S\ref{sec:mv-grow}.
 			            \item \texttt{Forest.min\_points\_per\_decision\_node}
@@ -1489,9 +1492,10 @@ variable uniformly at random.
 				                        compute \eqref{eq:mv-lkratio-grow}.
 			                  \end{itemize}
 			            \item Leaf precision:
-			                  \texttt{step\_leaf\_prior\_cov\_inv} draws
-			                  from \eqref{eq:mv-Lamm-fc}, with $L$ and the
-			                  leaf scatter from \texttt{leaf\_scatter}.
+			                  \texttt{step\_sum\_trees\_prior\_cov\_inv} draws
+			                  $\mLamm / m$, i.e., from \eqref{eq:mv-Lamm-fc}
+			                  with the rate multiplied by $m$, with $L$ and
+			                  the leaf scatter from \texttt{leaf\_scatter}.
 			            \item Error precision: \texttt{step\_error\_cov\_inv}
 			                  dispatches on the type of
 			                  \texttt{State.error\_cov\_inv} to

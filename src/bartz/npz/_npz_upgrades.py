@@ -175,13 +175,138 @@ def upgrade_used_trees(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
     return walk(root), old
 
 
+def is_module(node: Skeleton) -> bool:
+    """Whether `node` is the skeleton of a dataclass."""
+    return type(node) is dict and node['type'] == 'module'
+
+
+# the classes with a leaf prior precision in bartz 0.14: the ones that store
+# the trees, and the one that does not
+WITH_TREES = ('Forest', 'MainTrace', 'MainTraceWithTrainPred')
+WITHOUT_TREES = 'BurninTrace'
+
+
+def count_trees(arrays: Arrays, node: Skeleton, main: Skeleton) -> int:
+    """Return the number of trees of `node`, a forest or a trace.
+
+    A burn-in trace lacks the trees to count, so it takes the number from
+    `main`, the main trace saved along it.
+    """
+    source = main if node['cls'] == WITHOUT_TREES else node
+    if is_module(source) and source['cls'] in WITH_TREES:
+        *_, num_trees, _ = arrays[source['fields']['split_tree']['key']].shape
+        return num_trees
+    else:
+        msg = (
+            f'cannot load a {WITHOUT_TREES} saved with bartz 0.14 outside of the '
+            'burn-in trace of a Bart or bcf: its conversion needs the number of '
+            'trees of the main trace saved along it'
+        )
+        raise ValueError(msg)
+
+
+def scaled(old: Arrays, new: Arrays, node: Skeleton, factor: float) -> Skeleton:
+    """Add to `new` the array `node` refers to in `old`, times `factor`."""
+    if node is None:
+        return None
+    else:
+        x = old[node['key']]
+        # `asarray` because numpy turns 0d arrays into scalars
+        x = np.asarray(x.astype(np.float64) * factor).astype(x.dtype)
+        return array(new, node['key'], x)
+
+
+def leaf_prior_to_sum(
+    old: Arrays, new: Arrays, prior: Skeleton, num_trees: int
+) -> Skeleton:
+    """Convert a leaf prior precision, a `Wishart` or its samples, to the one of the sum of trees."""
+    if is_module(prior):
+        assert prior['cls'] == 'Wishart'
+        fields = prior['fields']
+        fields = dict(
+            fields,
+            value=scaled(old, new, fields['value'], 1 / num_trees),
+            rate=scaled(old, new, fields['rate'], float(num_trees)),
+        )
+        return module(prior['cls'], **fields)
+    else:
+        return scaled(old, new, prior, 1 / num_trees)
+
+
+def main_counterpart(node: Skeleton, main: Skeleton, name: str) -> Skeleton:
+    """Return the part of the main trace matching the field `name` of `node`, if any.
+
+    `main` is the part that matches `node`, if `node` is within a burn-in trace.
+    """
+    if node['cls'] in ('Bart', 'bcf') and name == '_burnin_trace':
+        return node['fields']['_main_trace']
+    elif is_module(main):
+        return main['fields'].get(name)
+    else:
+        return None
+
+
+def upgrade_sum_trees_prior(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
+    """Convert `leaf_prior_cov_inv` to `sum_trees_prior_cov_inv`.
+
+    In `Forest` and in the traces, the former is the prior precision of a leaf,
+    the latter the one of the sum of trees, smaller by a factor of the number
+    of trees. A burn-in trace lacks the trees to count, so it takes the number
+    from the main trace of the same `Bart` or `bcf`.
+
+    Only the classes of bartz, recognized by name, are converted. A burn-in
+    trace anywhere else, or a custom class with a `leaf_prior_cov_inv` field,
+    e.g., a subclass of a trace, raises `ValueError`.
+    """
+    new: Arrays = {}
+
+    def walk(node: Skeleton, main: Skeleton = None) -> Skeleton:
+        if type(node) is list:
+            return [walk(v) for v in node]
+        elif type(node) is not dict or node['type'] == 'array':
+            return node
+        elif node['type'] == 'module':
+            fields = {
+                k: walk(v, main_counterpart(node, main, k))
+                for k, v in node['fields'].items()
+            }
+            if node['cls'] in (*WITH_TREES, WITHOUT_TREES):
+                num_trees = count_trees(old, node, main)
+                prior = fields['leaf_prior_cov_inv']
+                prior = leaf_prior_to_sum(old, new, prior, num_trees)
+                fields = {k: v for k, v in fields.items() if k != 'leaf_prior_cov_inv'}
+                fields = dict(fields, sum_trees_prior_cov_inv=prior)
+            elif 'leaf_prior_cov_inv' in fields:
+                msg = (
+                    f'cannot load the custom class {node["cls"]!r} saved with '
+                    'bartz 0.14: its field `leaf_prior_cov_inv` needs a conversion '
+                    'known only for the classes of bartz'
+                )
+                raise ValueError(msg)
+            return module(node['cls'], **fields)
+        elif type(node['items']) is dict:
+            return dict(node, items={k: walk(v) for k, v in node['items'].items()})
+        else:
+            return dict(node, items=[walk(v) for v in node['items']])
+
+    return walk(root), {**old, **new}
+
+
+def upgrade_bartz_0_14(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
+    """Convert an archive written by bartz 0.14."""
+    return upgrade_sum_trees_prior(*upgrade_used_trees(root, old))
+
+
 # Step k converts format k to k+1. Steps are frozen once released. Use only
 # json/numpy, never bartz classes. Fill new fields with the value that
 # reproduces the old behavior, not the current default; if that is impossible,
 # convert to the prediction-only form, with `None` in all the fields not needed
 # to predict; in cases that don't fall in the prediction-only paradigm, decide
 # a fill strategy which may not be `None` if the field is not already optional.
+# Recognize the classes of bartz by name, and raise on anything else that would
+# need converting, e.g., a custom class with a field that changes, instead of
+# guessing what it is.
 UPGRADES: tuple[Callable[[Skeleton, Arrays], tuple[Skeleton, Arrays]], ...] = (
     upgrade_bartz_0_13_bcf,
-    upgrade_used_trees,
+    upgrade_bartz_0_14,
 )

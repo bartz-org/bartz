@@ -120,8 +120,8 @@ from bartz.mcmcstep._axes import (
 )
 from bartz.mcmcstep._moves import (
     ancestor_variables,
+    categorical_cumsum,
     categorical_exclude,
-    categorical_fixed_point,
     categorical_table,
     choose_variable,
     fully_used_variables,
@@ -1616,8 +1616,8 @@ class TestCategoricalExclude:
         assert_array_equal(num_allowed, k - num_excluded, strict=False)
 
 
-class TestCategoricalFixedPoint:
-    """Test `mcmcstep._moves.categorical_fixed_point`."""
+class TestCategoricalCumsum:
+    """Test `mcmcstep._moves.categorical_cumsum`."""
 
     def test_frequencies(self, keys: split) -> None:
         """Check a regular grid of words is shared out in proportion to `distr`."""
@@ -1626,7 +1626,7 @@ class TestCategoricalFixedPoint:
         distr = jnp.where(random.bernoulli(keys.pop(), 0.3, (n,)), 0, distr)
         words = jnp.arange(2**20) << 10
 
-        draw = jit(vmap(categorical_fixed_point, in_axes=(0, None)))
+        draw = jit(vmap(categorical_cumsum, in_axes=(0, None)))
         counts = numpy.bincount(draw(words, distr), minlength=n + 1)[:n]
 
         assert counts.sum() == words.size  # all the draws are in range
@@ -1646,7 +1646,7 @@ class TestCategoricalFixedPoint:
         distr = distr.at[:, 3].set(1.0)  # at least one nonzero
         words = jnp.array([0, 2**30 - 1])
 
-        draw = vmap(categorical_fixed_point, in_axes=(None, 0))
+        draw = vmap(categorical_cumsum, in_axes=(None, 0))
         draw = jit(vmap(draw, in_axes=(0, None), out_axes=1))
         index = draw(words, distr)
 
@@ -1657,7 +1657,7 @@ class TestCategoricalFixedPoint:
         """Check the result is `n` if all the probabilities are zero."""
         n = 30
         words = jnp.array([0, 1, 2**29, 2**30 - 1])
-        draw = vmap(categorical_fixed_point, in_axes=(0, None))
+        draw = vmap(categorical_cumsum, in_axes=(0, None))
         assert_array_equal(draw(words, jnp.zeros(n)), n, strict=False)
 
 

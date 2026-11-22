@@ -352,43 +352,13 @@ def choose_leaf(
     is_growable = affluence_tree  # `affluence_tree` is the clean growable mask
     num_growable = jnp.count_nonzero(is_growable)
     distr = jnp.where(is_growable, p_propose_grow, 0)
-    leaf_to_grow, distr_norm = categorical_cumsum(key, distr)
+    leaf_to_grow = categorical_cumsum(random_bits30(key), distr)
     leaf_to_grow = jnp.where(num_growable, leaf_to_grow, 2 * split_tree.size)
+    distr_norm = jnp.sum(distr)
     prob_choose = distr[leaf_to_grow] / jnp.where(distr_norm, distr_norm, 1)
     is_parent = grove.is_leaves_parent(split_tree.at[leaf_to_grow].set(1))
     num_prunable = jnp.count_nonzero(is_parent)
     return leaf_to_grow, num_growable, prob_choose, num_prunable
-
-
-def categorical_cumsum(
-    key: Key[Array, ''], distr: Float32[Array, ' n']
-) -> tuple[Int32[Array, ''], Float32[Array, '']]:
-    """
-    Return a random integer from an arbitrary distribution.
-
-    Parameters
-    ----------
-    key
-        A jax random key.
-    distr
-        An unnormalized probability distribution.
-
-    Returns
-    -------
-    u : Int32[Array, '']
-        A random integer in the range ``[0, n)``. If all probabilities are zero,
-        return ``n``.
-    norm : Float32[Array, '']
-        The sum of `distr`.
-
-    Notes
-    -----
-    This function uses a cumsum instead of the Gumbel trick, so it's ok only
-    for small ranges with probabilities well greater than 0.
-    """
-    ecdf = jnp.cumsum(distr)
-    u = random.uniform(key, (), ecdf.dtype, 0, ecdf[-1])
-    return jnp.searchsorted(ecdf, u, 'right', method='compare_all'), ecdf[-1]
 
 
 def choose_variable(
@@ -691,7 +661,7 @@ def categorical_exclude(
     accurate even if the excluded values have far larger weights than the
     others.
     """
-    bits30_row, bits30_col = (random.bits(key, (2,), jnp.uint32) >> 2).astype(jnp.int32)
+    bits30_row, bits30_col = random_bits30(key, (2,))
     _, cols = table.logits.shape
     exclude = jnp.minimum(exclude.astype(jnp.int32), table.size)
     exclude, num_allowed = _process_exclude(table.size, exclude)
@@ -711,18 +681,25 @@ def categorical_exclude(
 
     # draw the row
     scale, _ = exp_minus_max(row_max)
-    row = categorical_fixed_point(bits30_row, scale * row_sum)
+    row = categorical_cumsum(bits30_row, scale * row_sum)
 
     # draw the entry within the row; if there was no row to draw, the index
     # overflows the table
     weights, _ = exp_minus_max(masked_row(row))
-    col = categorical_fixed_point(bits30_col, weights)
+    col = categorical_cumsum(bits30_col, weights)
     u = jnp.minimum(row * cols + col, table.size)
 
     return u, num_allowed - table.num_excluded
 
 
-def categorical_fixed_point(
+def random_bits30(
+    key: Key[Array, ''], shape: tuple[int, ...] = ()
+) -> Int32[Array, '*shape']:
+    """Return random integers uniform in ``[0, 2^30)``, for `categorical_cumsum`."""
+    return (random.bits(key, shape, jnp.uint32) >> 2).astype(jnp.int32)
+
+
+def categorical_cumsum(
     bits30: Int32[Array, ''], distr: Float32[Array, ' n']
 ) -> Int32[Array, '']:
     """
@@ -731,7 +708,7 @@ def categorical_fixed_point(
     Parameters
     ----------
     bits30
-        A random integer, uniform in ``[0, 2^30)``.
+        A random integer, uniform in ``[0, 2^30)``, see `random_bits30`.
     distr
         An unnormalized probability distribution.
 
@@ -741,9 +718,9 @@ def categorical_fixed_point(
 
     Notes
     -----
-    Unlike `categorical_cumsum`, this never returns a value with probability
-    zero. It accumulates integers, because xla does not sum sequentially in a
-    float cumsum, which then may increase or decrease across a zero.
+    This never returns a value with probability zero. It accumulates integers,
+    because xla does not sum sequentially in a float cumsum, which then may
+    increase or decrease across a zero.
 
     The probabilities are rounded to multiples of 2^-30. Due to rounding they
     may not add up to 1; the last nonzero values absorb the difference.
@@ -752,9 +729,9 @@ def categorical_fixed_point(
     quanta = jnp.round(distr * (2**30 / jnp.where(total, total, 1))).astype(jnp.int32)
     ecdf = jnp.cumsum(quanta)
     # keep u below the total, or at 0 if the total is 0 such that the search
-    # returns n; handling the zero total with a `where` instead makes the
-    # compilation on gpu up to 20% slower
-    u = jnp.minimum(bits30, jnp.maximum(ecdf[-1] - 1, 0))
+    # returns n; on gpu, taking the total from `ecdf`, or handling the zero
+    # total with a `where`, makes the compilation up to 20% slower
+    u = jnp.minimum(bits30, jnp.maximum(jnp.sum(quanta) - 1, 0))
     return jnp.searchsorted(ecdf, u, 'right', method='compare_all')
 
 

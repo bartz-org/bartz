@@ -53,8 +53,8 @@ from bartz.testing import (
     Gamma,
     Normal,
     Params,
+    ScaledBernoulli,
     ScaleDistr,
-    SpikeSlab,
     Uniform,
     gen_data,
     gen_params,
@@ -64,7 +64,13 @@ from bartz.testing._dgp import (
     interaction_pattern,
     partitioned_interaction_pattern,
 )
-from tests.util import assert_allclose, assert_array_equal, assert_close_matrices, nnone
+from tests.util import (
+    assert_allclose,
+    assert_array_equal,
+    assert_close_matrices,
+    condp,
+    nnone,
+)
 
 # Test parameters
 ALPHA = 5e-7  # probability of false positive (aaaaapprox)
@@ -514,14 +520,14 @@ class TestScaleDistr:
         assert jnp.var(sparse**2) > jnp.var(dense**2)
 
 
-class TestSpikeSlab:
-    """Test the `SpikeSlab` scale family."""
+class TestScaledBernoulli:
+    """Test the `ScaledBernoulli` scale family."""
 
     PI: float = 0.3
 
     def test_support_and_moments(self, keys: split) -> None:
         """The scales take the two values 0 and 1/sqrt(pi), with the right moments."""
-        distr = SpikeSlab(self.PI)
+        distr = ScaledBernoulli(self.PI)
         s = distr.sample(keys.pop(), (REPS,))
         assert_close_matrices(
             jnp.unique(s), jnp.array([0.0, 1 / jnp.sqrt(self.PI)]), rtol=1e-6, atol=1e-7
@@ -535,7 +541,7 @@ class TestSpikeSlab:
         dgp = gen_data(
             keys.pop(),
             lambda_=0.5,
-            s_distr=SpikeSlab(0.5),
+            s_distr=ScaledBernoulli(0.5),
             het_strength=HET_STRENGTH,
             het_shape='vector',
             **KWARGS,
@@ -558,7 +564,7 @@ class TestFromPeff:
 
     P: int = 20
 
-    @pytest.mark.parametrize('family', [Gamma, SpikeSlab])
+    @pytest.mark.parametrize('family', [Gamma, ScaledBernoulli])
     @pytest.mark.parametrize('peff', [1.0, 2.5, 7.0, 19.0])
     def test_fourth_moment_roundtrip(
         self, family: type[ScaleDistr], peff: float
@@ -568,10 +574,10 @@ class TestFromPeff:
         assert_allclose(distr.fourth_moment, self.P / peff, rtol=1e-5)
 
     @pytest.mark.parametrize('peff', [1.0, 2.5, 7.0, 20.0])
-    def test_spikeslab_pi_is_active_fraction(self, peff: float) -> None:
-        """For `SpikeSlab`, ``pi`` is the active fraction ``peff / p``."""
-        distr = SpikeSlab.from_peff(peff, self.P)
-        assert isinstance(distr, SpikeSlab)
+    def test_scaled_bernoulli_pi_is_active_fraction(self, peff: float) -> None:
+        """For `ScaledBernoulli`, ``pi`` is the active fraction ``peff / p``."""
+        distr = ScaledBernoulli.from_peff(peff, self.P)
+        assert isinstance(distr, ScaledBernoulli)
         assert_allclose(distr.pi, peff / self.P, rtol=1e-6)
 
     def test_constant_requires_peff_eq_p(self) -> None:
@@ -584,13 +590,13 @@ class TestFromPeff:
             Constant.from_peff(3.0, self.P)
 
     @pytest.mark.parametrize('peff', [2.0, 8.0])
-    def test_spikeslab_active_count(self, keys: split, peff: float) -> None:
-        """`SpikeSlab.from_peff(peff)` activates `peff` predictors on average."""
+    def test_scaled_bernoulli_active_count(self, keys: split, peff: float) -> None:
+        """`ScaledBernoulli.from_peff(peff)` activates `peff` predictors on average."""
         p = 200
-        s = SpikeSlab.from_peff(peff, p).sample(keys.pop(), (REPS, p))
+        s = ScaledBernoulli.from_peff(peff, p).sample(keys.pop(), (REPS, p))
         assert_mean_z(jnp.sum(s > 0, axis=1).astype(float), peff)
 
-    @pytest.mark.parametrize('family', [Gamma, SpikeSlab])
+    @pytest.mark.parametrize('family', [Gamma, ScaledBernoulli])
     def test_participation_ratio(self, keys: split, family: type[ScaleDistr]) -> None:
         """A large draw's participation ratio recovers the requested `peff`."""
         p = 100_000
@@ -604,10 +610,10 @@ class TestFromPeff:
         with pytest.raises(EquinoxTracetimeError, match='Gamma needs peff'):
             Gamma.from_peff(float(self.P), self.P)
 
-    def test_spikeslab_rejects_peff_gt_p(self) -> None:
-        """`SpikeSlab.from_peff` errors at ``peff > p`` (its pi would exceed 1)."""
-        with pytest.raises(EquinoxTracetimeError, match='SpikeSlab needs peff'):
-            SpikeSlab.from_peff(self.P + 1.0, self.P)
+    def test_scaled_bernoulli_rejects_peff_gt_p(self) -> None:
+        """`ScaledBernoulli.from_peff` errors at ``peff > p`` (its pi would exceed 1)."""
+        with pytest.raises(EquinoxTracetimeError, match='ScaledBernoulli needs peff'):
+            ScaledBernoulli.from_peff(self.P + 1.0, self.P)
 
 
 def test_high_sparsity_matches_none(keys: split) -> None:
@@ -944,7 +950,7 @@ class TestErrorCorrelation:
         )
         # on gpu the identity-correlation path goes through a matmul that the
         # independent path skips, so the two diverge by float noise
-        rtol = 1e-4 if ident.z.platform() != 'cpu' else 1e-6
+        rtol = condp(ident.z, 1e-6, 1e-4)
         assert_close_matrices(ident.z, indep.z, rtol=rtol)
         assert_close_matrices(ident.y, indep.y, rtol=rtol)
 

@@ -26,7 +26,7 @@
 
 from functools import partial
 
-from equinox import Module
+from equinox import Module, field
 from jax import named_call, random, vmap
 from jax import numpy as jnp
 from jaxtyping import Array, Bool, Float32, Int32, Integer, Key, UInt
@@ -104,6 +104,26 @@ class Moves(Module):
     computed."""
 
 
+class CategoricalTable(Module):
+    """A categorical distribution laid out in rows for `categorical_exclude`."""
+
+    logits: Float32[Array, 'rows cols']
+    """The log-weights of the categories in row-major order, -inf for the
+    excluded categories and for the padding."""
+
+    row_max: Float32[Array, ' rows']
+    """The maximum of each row of `logits`."""
+
+    row_sum: Float32[Array, ' rows']
+    """The total weight of each row, relative to its largest weight."""
+
+    num_excluded: Int32[Array, '']
+    """The number of excluded categories."""
+
+    size: int = field(static=True)
+    """The number of categories."""
+
+
 @named_call
 def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
     """
@@ -126,12 +146,19 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
     """
     num_trees = forest.leaf_tree.shape[0]
     keys = split(key)
+
+    # tabulate the split probabilities once for all the trees
+    if forest.sparsity.log_s is None:
+        s_table = None
+    else:
+        s_table = categorical_table(forest.sparsity.log_s, forest.blocked_vars)
+
     propose = partial(
         _propose_moves,
         max_split=forest.max_split,
         blocked_vars=forest.blocked_vars,
         p_propose_grow=forest.p_propose_grow,
-        log_s=forest.sparsity.log_s,
+        s_table=s_table,
     )
     return vmap(propose)(
         keys.pop(num_trees),
@@ -153,7 +180,7 @@ def _propose_moves(
     max_split: UInt[Array, ' p'],
     blocked_vars: UInt[Array, ' k'] | None,
     p_propose_grow: Float32[Array, ' half_tree_size'],
-    log_s: Float32[Array, ' p'] | None,
+    s_table: CategoricalTable | None,
 ) -> Moves:
     """
     Propose a GROW or PRUNE move for a tree.
@@ -188,9 +215,9 @@ def _propose_moves(
         The indices of the variables that have no available cutpoints.
     p_propose_grow
         The unnormalized probability of choosing a leaf to grow.
-    log_s
-        Unnormalized log-probability used to choose a variable to split on
-        amongst the available ones.
+    s_table
+        The distribution used to choose a variable to split on amongst the
+        available ones, see `choose_variable`.
 
     Returns
     -------
@@ -238,7 +265,7 @@ def _propose_moves(
         max_split,
         node,
         blocked_vars=blocked_vars,
-        log_s=log_s,
+        s_table=s_table,
     )
     existing_var = var_tree.at[node].get(mode='fill', fill_value=0).astype(jnp.int32)
     var = jnp.where(grow, sampled_var, existing_var)
@@ -325,43 +352,13 @@ def choose_leaf(
     is_growable = affluence_tree  # `affluence_tree` is the clean growable mask
     num_growable = jnp.count_nonzero(is_growable)
     distr = jnp.where(is_growable, p_propose_grow, 0)
-    leaf_to_grow, distr_norm = categorical(key, distr)
+    leaf_to_grow = categorical_cumsum(random_bits30(key), distr)
     leaf_to_grow = jnp.where(num_growable, leaf_to_grow, 2 * split_tree.size)
+    distr_norm = jnp.sum(distr)
     prob_choose = distr[leaf_to_grow] / jnp.where(distr_norm, distr_norm, 1)
     is_parent = grove.is_leaves_parent(split_tree.at[leaf_to_grow].set(1))
     num_prunable = jnp.count_nonzero(is_parent)
     return leaf_to_grow, num_growable, prob_choose, num_prunable
-
-
-def categorical(
-    key: Key[Array, ''], distr: Float32[Array, ' n']
-) -> tuple[Int32[Array, ''], Float32[Array, '']]:
-    """
-    Return a random integer from an arbitrary distribution.
-
-    Parameters
-    ----------
-    key
-        A jax random key.
-    distr
-        An unnormalized probability distribution.
-
-    Returns
-    -------
-    u : Int32[Array, '']
-        A random integer in the range ``[0, n)``. If all probabilities are zero,
-        return ``n``.
-    norm : Float32[Array, '']
-        The sum of `distr`.
-
-    Notes
-    -----
-    This function uses a cumsum instead of the Gumbel trick, so it's ok only
-    for small ranges with probabilities well greater than 0.
-    """
-    ecdf = jnp.cumsum(distr)
-    u = random.uniform(key, (), ecdf.dtype, 0, ecdf[-1])
-    return jnp.searchsorted(ecdf, u, 'right', method='compare_all'), ecdf[-1]
 
 
 def choose_variable(
@@ -372,7 +369,7 @@ def choose_variable(
     leaf_index: Int32[Array, ''],
     *,
     blocked_vars: UInt[Array, ' k'] | None,
-    log_s: Float32[Array, ' p'] | None,
+    s_table: CategoricalTable | None,
 ) -> tuple[Int32[Array, ''], Int32[Array, '']]:
     """
     Choose a variable to split on for a new non-terminal node.
@@ -392,9 +389,10 @@ def choose_variable(
     blocked_vars
         The indices of the variables that have no available cutpoints. If
         `None`, all variables are assumed unblocked.
-    log_s
-        The logarithm of the prior probability for choosing a variable. If
-        `None`, use a uniform distribution.
+    s_table
+        The prior probability for choosing a variable, tabulated by
+        `categorical_table` with `blocked_vars` excluded. If `None`, use a
+        uniform distribution.
 
     Returns
     -------
@@ -405,13 +403,15 @@ def choose_variable(
         from.
     """
     var_to_ignore = fully_used_variables(var_tree, split_tree, max_split, leaf_index)
-    if blocked_vars is not None:
-        var_to_ignore = jnp.concatenate([var_to_ignore, blocked_vars])
 
-    if log_s is None:
+    if s_table is None:
+        if blocked_vars is not None:
+            var_to_ignore = jnp.concatenate([var_to_ignore, blocked_vars])
         return randint_exclude(key, max_split.size, var_to_ignore)
     else:
-        return categorical_exclude(key, log_s, var_to_ignore)
+        # the blocked variables have no splits, so they are never in
+        # `var_to_ignore`, which lists variables used by the ancestors
+        return categorical_exclude(key, s_table, var_to_ignore)
 
 
 def fully_used_variables(
@@ -574,8 +574,60 @@ def _process_exclude(
     return exclude, num_allowed
 
 
+def categorical_table(
+    logits: Float32[Array, ' k'], exclude: Integer[Array, ' n'] | None
+) -> CategoricalTable:
+    """
+    Tabulate a categorical distribution for `categorical_exclude`.
+
+    Parameters
+    ----------
+    logits
+        The unnormalized log-probabilities of each category.
+    exclude
+        The values to exclude from the range [0, k), without repetitions.
+        Values greater than or equal to `k` are ignored. If `None`, no value
+        is excluded.
+
+    Returns
+    -------
+    The distribution, with the weights arranged in about sqrt(k) rows.
+    """
+    (k,) = logits.shape
+    cols = 1 << (k.bit_length() // 2)
+    rows = k // cols + 1  # this always pads, so `k` indexes a padding slot
+
+    if exclude is None:
+        num_excluded = jnp.zeros((), jnp.int32)
+    else:
+        logits = logits.at[exclude].set(-jnp.inf)
+        num_excluded = jnp.count_nonzero(exclude < k)
+    logits = jnp.pad(logits, (0, rows * cols - k), constant_values=-jnp.inf)
+    logits = logits.reshape(rows, cols)
+
+    weights, row_max = exp_minus_max(logits)
+    return CategoricalTable(
+        logits=logits,
+        row_max=row_max,
+        row_sum=jnp.sum(weights, axis=1),
+        num_excluded=num_excluded,
+        size=k,
+    )
+
+
+def exp_minus_max(
+    x: Float32[Array, '*batch n'],
+) -> tuple[Float32[Array, '*batch n'], Float32[Array, '*batch']]:
+    """Return ``exp(x - max(x))`` and ``max(x)`` along the last axis.
+
+    If `x` is all -inf, the exponential is 0 instead of nan.
+    """
+    m = jnp.max(x, axis=-1, keepdims=True)
+    return jnp.exp(x - jnp.where(jnp.isneginf(m), 0, m)), m.squeeze(-1)
+
+
 def categorical_exclude(
-    key: Key[Array, ''], logits: Float32[Array, ' k'], exclude: Integer[Array, ' n']
+    key: Key[Array, ''], table: CategoricalTable, exclude: Integer[Array, ' n']
 ) -> tuple[Int32[Array, ''], Int32[Array, '']]:
     """
     Draw from a categorical distribution, excluding a set of values.
@@ -584,11 +636,12 @@ def categorical_exclude(
     ----------
     key
         A jax random key.
-    logits
-        The unnormalized log-probabilities of each category.
+    table
+        The distribution over the range [0, k), see `categorical_table`.
     exclude
-        The values to exclude from the range [0, k). Values greater than or
-        equal to `logits.size` are ignored. Values can appear more than once.
+        The values to exclude from the range, in addition to and distinct from
+        those already excluded in `table`. Values greater than or equal to `k`
+        are ignored. Values can appear more than once.
 
     Returns
     -------
@@ -599,13 +652,87 @@ def categorical_exclude(
 
     Notes
     -----
-    If all values in the range are excluded, the result is unspecified.
+    If the values that are not excluded have total probability zero, return
+    `k`.
+
+    The draw is by inversion in two steps, first the row then the entry within
+    it, in O(sqrt(k)) instead of O(k). Each step has its own random word and
+    normalizes the weights to their maximum after the exclusions, so it is
+    accurate even if the excluded values have far larger weights than the
+    others.
     """
-    exclude, num_allowed = _process_exclude(logits.size, exclude)
-    kinda_neg_inf = jnp.finfo(logits.dtype).min
-    logits = logits.at[exclude].set(kinda_neg_inf)
-    u = random.categorical(key, logits)
-    return u, num_allowed
+    bits30_row, bits30_col = random_bits30(key, (2,))
+    _, cols = table.logits.shape
+    exclude = jnp.minimum(exclude.astype(jnp.int32), table.size)
+    exclude, num_allowed = _process_exclude(table.size, exclude)
+
+    def masked_row(row: Int32[Array, '']) -> Float32[Array, ' cols']:
+        index = row * cols + jnp.arange(cols)
+        excluded = jnp.any(index == exclude[:, None], axis=0)
+        return jnp.where(excluded, -jnp.inf, table.logits[row, :])
+
+    # recompute from scratch the totals of the rows with excluded values,
+    # instead of subtracting weights, such that a row has total 0 if and only
+    # if no value can be drawn from it; repeated rows write the same totals
+    touched = exclude // cols
+    weights, touched_max = exp_minus_max(vmap(masked_row)(touched))
+    row_max = table.row_max.at[touched].set(touched_max)
+    row_sum = table.row_sum.at[touched].set(jnp.sum(weights, axis=1))
+
+    # draw the row
+    scale, _ = exp_minus_max(row_max)
+    row = categorical_cumsum(bits30_row, scale * row_sum)
+
+    # draw the entry within the row; if there was no row to draw, the index
+    # overflows the table
+    weights, _ = exp_minus_max(masked_row(row))
+    col = categorical_cumsum(bits30_col, weights)
+    u = jnp.minimum(row * cols + col, table.size)
+
+    return u, num_allowed - table.num_excluded
+
+
+def random_bits30(
+    key: Key[Array, ''], shape: tuple[int, ...] = ()
+) -> Int32[Array, '*shape']:
+    """Return random integers uniform in ``[0, 2^30)``, for `categorical_cumsum`."""
+    return (random.bits(key, shape, jnp.uint32) >> 2).astype(jnp.int32)
+
+
+def categorical_cumsum(
+    bits30: Int32[Array, ''], distr: Float32[Array, ' n']
+) -> Int32[Array, '']:
+    """
+    Return a random integer from an arbitrary distribution.
+
+    Parameters
+    ----------
+    bits30
+        A random integer, uniform in ``[0, 2^30)``, see `random_bits30`.
+    distr
+        An unnormalized probability distribution.
+
+    Returns
+    -------
+    A random integer in the range ``[0, n)``, or `n` if all probabilities are zero.
+
+    Notes
+    -----
+    This never returns a value with probability zero. It accumulates integers,
+    because xla does not sum sequentially in a float cumsum, which then may
+    increase or decrease across a zero.
+
+    The probabilities are rounded to multiples of 2^-30. Due to rounding they
+    may not add up to 1; the last nonzero values absorb the difference.
+    """
+    total = jnp.sum(distr)
+    quanta = jnp.round(distr * (2**30 / jnp.where(total, total, 1))).astype(jnp.int32)
+    ecdf = jnp.cumsum(quanta)
+    # keep u below the total, or at 0 if the total is 0 such that the search
+    # returns n; on gpu, taking the total from `ecdf`, or handling the zero
+    # total with a `where`, makes the compilation up to 20% slower
+    u = jnp.minimum(bits30, jnp.maximum(jnp.sum(quanta) - 1, 0))
+    return jnp.searchsorted(ecdf, u, 'right', method='compare_all')
 
 
 def choose_split(

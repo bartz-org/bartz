@@ -286,7 +286,7 @@ class ScaleDistr(Module):
         are equally important (`Constant`), shrinking towards 1 as the
         importance concentrates on fewer predictors. The deterministic large-`p`
         limit ``p / E[s ** 4]`` is the analytic target inverted here; for
-        `SpikeSlab` it equals the expected number of nonzero scales exactly.
+        `ScaledBernoulli` it equals the expected number of nonzero scales exactly.
 
         Parameters
         ----------
@@ -327,7 +327,9 @@ class Constant(ScaleDistr):
     def _from_fourth_moment(cls, m4: Float[Array, ''] | float) -> 'Constant':
         """Return `Constant`; valid only at ``m4 == 1``, i.e. ``peff == p``."""
         if m4 != 1:
-            msg = 'Constant has peff == p only; use Gamma or SpikeSlab for peff < p'
+            msg = (
+                'Constant has peff == p only; use Gamma or ScaledBernoulli for peff < p'
+            )
             raise ValueError(msg)
         return cls()
 
@@ -367,12 +369,13 @@ class Gamma(ScaleDistr):
         return cls(alpha=alpha)
 
 
-class SpikeSlab(ScaleDistr):
-    """Two-point distribution over the scales 0 and ``1/sqrt(pi)``.
+class ScaledBernoulli(ScaleDistr):
+    """Bernoulli(`pi`) scales, rescaled to ``E[s ** 2] = 1``.
 
     The scale is ``1/sqrt(pi)`` with probability `pi` and 0 otherwise. This is
     hard variable selection: a fraction `pi` of the predictors is active, the
-    others are exactly inert.
+    others are exactly inert. With continuous coefficient families, the scales
+    act as the indicators of a spike-and-slab prior.
     """
 
     pi: Float[Array, ''] | float
@@ -390,10 +393,10 @@ class SpikeSlab(ScaleDistr):
         return random.bernoulli(key, self.pi, shape) / jnp.sqrt(self.pi)
 
     @classmethod
-    def _from_fourth_moment(cls, m4: Float[Array, ''] | float) -> 'SpikeSlab':
+    def _from_fourth_moment(cls, m4: Float[Array, ''] | float) -> 'ScaledBernoulli':
         """Invert ``E[s ** 4] = 1 / pi = m4`` (needs ``m4 >= 1``, i.e. peff <= p)."""
         pi = 1 / m4
-        pi = error_if(pi, pi > 1, 'SpikeSlab needs peff <= p')
+        pi = error_if(pi, pi > 1, 'ScaledBernoulli needs peff <= p')
         return cls(pi=pi)
 
 

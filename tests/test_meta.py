@@ -40,6 +40,8 @@ from tests.util import (
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
+    condf,
+    condp,
     rerun_on_gpu,
     rhat_rank,
 )
@@ -60,6 +62,28 @@ def test_rerun_on_gpu(
         util, 'get_default_device', lambda: SimpleNamespace(platform=platform)
     )
     assert rerun_on_gpu(None, None, None, None) is expected
+
+
+@pytest.mark.parametrize(
+    ('dtype', 'expected'),
+    [(jnp.float32, 32), (jnp.float16, 16), (jnp.uint8, 32), (jnp.bool_, 32)],
+)
+def test_condf(dtype: type, expected: int) -> None:
+    """Check `condf` selects the float16 value only for float16."""
+    assert condf(jnp.zeros((), dtype), 32, 16) == expected
+
+
+def test_condf_rejects_other_floats() -> None:
+    """Check `condf` rejects floats other than float16 and float32."""
+    with pytest.raises(AssertionError, match='bfloat16'):
+        condf(jnp.zeros((), jnp.bfloat16), 32, 16)
+
+
+@pytest.mark.parametrize(('platform', 'expected'), [('cpu', 'c'), ('gpu', 'g')])
+def test_condp(platform: str, expected: str) -> None:
+    """Check `condp` selects the value by the platform of the array."""
+    array = SimpleNamespace(platform=lambda: platform)
+    assert condp(array, 'c', 'g') == expected  # ty: ignore[invalid-argument-type]
 
 
 @pytest.fixture

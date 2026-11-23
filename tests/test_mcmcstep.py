@@ -51,13 +51,7 @@ from jax import (
 from jax import numpy as jnp
 from jax.nn import logsumexp, softmax
 from jax.ops import segment_sum
-from jax.sharding import (
-    AxisType,
-    Mesh,
-    NamedSharding,
-    PartitionSpec,
-    SingleDeviceSharding,
-)
+from jax.sharding import AxisType, Mesh, NamedSharding, PartitionSpec
 from jax.tree_util import KeyPath, keystr
 from jax.typing import DTypeLike
 from jaxtyping import (
@@ -118,14 +112,13 @@ from bartz.mcmcstep import (
     make_p_nonterminal,
     step,
 )
-from bartz.mcmcstep._axes import (
-    chain_to_axis,
-    chain_vmap_axes,
-    data_vmap_axes,
-    trace_sample_axes,
-)
+from bartz.mcmcstep._axes import chain_vmap_axes, data_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._moves import (
     ancestor_variables,
+    categorical_cumsum,
+    categorical_exclude,
+    categorical_table,
+    choose_variable,
     fully_used_variables,
     propose_moves,
     randint_exclude,
@@ -170,6 +163,7 @@ from bartz.mcmcstep._step import (
     random_tree_order,
     sample_s_augmentation,
     sample_wishart_posterior,
+    scatter_logaddexp,
     step_error_cov_inv,
     step_s,
     step_sum_trees_prior_cov_inv,
@@ -186,6 +180,7 @@ from tests.util import (
     assert_close_matrices,
     assert_different_matrices,
     condf,
+    condp,
     manual_tree,
     nnone,
     skip_empty_shard_map_bug,
@@ -889,7 +884,7 @@ class TestReduction:
         # comparison function for float calculations; on gpu the matmul method
         # contracts via tf32 (~1e-3 relative error); cpu keeps the tight
         # tolerance, so accuracy is still fully checked there
-        rtol = 1e-3 if indices.platform() != 'cpu' else 1e-5
+        rtol = condp(indices, 1e-5, 1e-3)
         close = partial(assert_close_matrices, rtol=rtol, atol=1e-6, reduce_rank=True)
 
         # each case invokes a reduce function `f` (a config's `_reduce` or the
@@ -1446,6 +1441,260 @@ class TestRandintExclude:
         assert pvalue > 0.01
 
 
+@jit
+def categorical_exclude_v(
+    keys: Key[Array, ' n'],
+    logits: Float32[Array, ' k'],
+    table_exclude: Integer[Array, ' a'] | None,
+    exclude: Integer[Array, 'n b'],
+) -> tuple[Int32[Array, ' n'], Int32[Array, ' n']]:
+    """Draw many times with `categorical_exclude` from the same table."""
+    table = categorical_table(logits, table_exclude)
+    return vmap(categorical_exclude, in_axes=(0, None, 0))(keys, table, exclude)
+
+
+def pooled_chisquare(
+    counts: Integer[numpy.ndarray, ' k'],
+    prob: Float[numpy.ndarray, ' k'],
+    min_expected: float = 10.0,
+) -> float:
+    """Return the p-value of a chi-squared test of `counts` against `prob`.
+
+    Adjacent categories are pooled to reach `min_expected` expected counts.
+    """
+    expected = counts.sum() * prob
+    starts, pooled = [0], 0.0
+    for i, e in enumerate(expected):
+        pooled += e
+        if pooled >= min_expected:
+            starts.append(i + 1)
+            pooled = 0.0
+    starts = starts[:-1]  # the leftovers go into the last group
+    return stats.chisquare(
+        numpy.add.reduceat(counts, starts), numpy.add.reduceat(expected, starts)
+    ).pvalue
+
+
+class TestCategoricalExclude:
+    """Test `mcmcstep._moves.categorical_exclude`."""
+
+    @staticmethod
+    def reference_prob(
+        logits: Float32[Array, ' k'], *excludes: Integer[Array, ' _'] | None
+    ) -> Float[numpy.ndarray, ' k']:
+        """Compute the exact probabilities in float64, 0 for excluded values."""
+        ref = numpy.array(logits, numpy.float64)
+        for exclude in excludes:
+            if exclude is not None:
+                ref[exclude[exclude < ref.size]] = -numpy.inf
+        return special.softmax(ref)
+
+    @pytest.mark.parametrize(
+        'case', ['skewed', 'dominant_excluded', 'zeros', 'no_exclusions', 'large']
+    )
+    def test_distribution(self, keys: split, case: str) -> None:
+        """Check the frequencies of the draws against the exact probabilities."""
+        if case == 'large':
+            # 32 x 32 table with padding, weights over orders of magnitude
+            k = 1000
+            logits = 3 * random.normal(keys.pop(), (k,))
+        else:
+            # 7 x 8 table with padding
+            k = 50
+            logits = jnp.linspace(-5.0, 0.0, k)
+
+        table_exclude = jnp.array([3, 17, k])
+        exclude = jnp.array([10, 10, k - 1, k + 20])
+
+        if case == 'dominant_excluded':
+            # the other weights underflow relative to the excluded ones
+            logits = logits.at[jnp.array([3, 10, 17])].set(jnp.array([1e3, 200.0, 1e6]))
+        elif case == 'zeros':
+            # zeros covering a whole row, then weights that underflow relative
+            # to the rest
+            logits = logits.at[20:32].set(-jnp.inf).at[32:38].set(-1e6)
+        elif case == 'no_exclusions':
+            table_exclude = None
+            exclude = jnp.full(4, k)
+
+        n = 100_000
+        u, num_allowed = categorical_exclude_v(
+            keys.pop(n), logits, table_exclude, jnp.broadcast_to(exclude, (n, 4))
+        )
+
+        prob = self.reference_prob(logits, table_exclude, exclude)
+        counts = numpy.bincount(u, minlength=k + 1)[:k]
+        assert counts.sum() == n  # all the draws are in range
+        assert_array_equal(counts[prob == 0], 0, strict=False)
+        assert pooled_chisquare(counts, prob) > 1e-3
+
+        num_excluded = 0 if case == 'no_exclusions' else 4
+        assert_array_equal(num_allowed, k - num_excluded, strict=False)
+
+    @pytest.mark.parametrize('k', [1, 2, 3, 4, 17])
+    def test_one_or_none_allowed(self, keys: split, k: int, subtests: SubTests) -> None:
+        """Check the edge cases with at most one allowed value."""
+        n = 100
+        logits = random.normal(keys.pop(), (k,))
+        allowed = random.randint(keys.pop(), (), 0, k)
+        others = jnp.where(jnp.arange(k) == allowed, k, jnp.arange(k))
+        everything = jnp.broadcast_to(jnp.arange(k), (n, k))
+        nothing = jnp.full((n, k), k)
+
+        with subtests.test('all but one excluded'):
+            # split the exclusions between the table and the draw
+            in_table = random.bernoulli(keys.pop(), 0.5, (k,))
+            u, num_allowed = categorical_exclude_v(
+                keys.pop(n),
+                logits,
+                jnp.where(in_table, others, k),
+                jnp.broadcast_to(jnp.where(in_table, k, others), (n, k)),
+            )
+            assert_array_equal(u, allowed, strict=False)
+            assert_array_equal(num_allowed, 1, strict=False)
+
+        with subtests.test('all excluded in the draw'):
+            u, num_allowed = categorical_exclude_v(
+                keys.pop(n), logits, nothing[0, :], everything
+            )
+            assert_array_equal(u, k, strict=False)
+            assert_array_equal(num_allowed, 0, strict=False)
+
+        with subtests.test('all excluded in the table'):
+            u, num_allowed = categorical_exclude_v(
+                keys.pop(n), logits, everything[0, :], nothing
+            )
+            assert_array_equal(u, k, strict=False)
+            assert_array_equal(num_allowed, 0, strict=False)
+
+        with subtests.test('zero total probability'):
+            u, num_allowed = categorical_exclude_v(
+                keys.pop(n), jnp.full(k, -jnp.inf), nothing[0, :], nothing
+            )
+            assert_array_equal(u, k, strict=False)
+            assert_array_equal(num_allowed, k, strict=False)
+
+    def test_never_returns_excluded_values(self, keys: split) -> None:
+        """Check `u` is never excluded nor has zero probability."""
+        k = 50  # number of categories
+        n = 20_000  # number of samples
+
+        # distribution with very small probs, to check the sampler
+        # discriminates between very small and 0
+        logits = 100 * random.normal(keys.pop(), (k,))
+
+        # set from 1 to 5 categories at random to 0 probability
+        logits = logits.at[random.randint(keys.pop(), (5,), 0, k)].set(-jnp.inf)
+
+        # exclude between 0 and 3 categories at random at table level
+        table_exclude = random.choice(keys.pop(), k + 10, (3,), replace=False)
+
+        # pick exclusions amongst the largest weights and a few out of range
+        # values, such that often the other weights underflow relative to the
+        # excluded ones
+        candidates = jnp.concatenate([jnp.argsort(logits)[-6:], jnp.arange(k, k + 4)])
+        exclude = candidates[random.randint(keys.pop(), (n, 4), 0, candidates.size)]
+        exclude = jnp.where(jnp.isin(exclude, table_exclude), k, exclude)
+
+        u, num_allowed = categorical_exclude_v(
+            keys.pop(n), logits, table_exclude, exclude
+        )
+
+        assert jnp.all(u < k)
+        assert not jnp.any(u[:, None] == exclude)
+        assert not jnp.any(jnp.isin(u, table_exclude))
+        assert jnp.all(logits[u] > -jnp.inf)
+
+        # count the distinct excluded values in range
+        exclude = numpy.sort(numpy.minimum(exclude, k), axis=1)
+        num_excluded = 1 + numpy.count_nonzero(numpy.diff(exclude, axis=1), axis=1)
+        num_excluded -= numpy.any(exclude == k, axis=1)
+        num_excluded += numpy.unique(table_exclude[table_exclude < k]).size
+        assert_array_equal(num_allowed, k - num_excluded, strict=False)
+
+
+class TestCategoricalCumsum:
+    """Test `mcmcstep._moves.categorical_cumsum`."""
+
+    def test_frequencies(self, keys: split) -> None:
+        """Check a regular grid of words is shared out in proportion to `distr`."""
+        n = 50
+        distr = jnp.exp(3 * random.normal(keys.pop(), (n,)))
+        distr = jnp.where(random.bernoulli(keys.pop(), 0.3, (n,)), 0, distr)
+        words = jnp.arange(2**20) << 10
+
+        draw = jit(vmap(categorical_cumsum, in_axes=(0, None)))
+        counts = numpy.bincount(draw(words, distr), minlength=n + 1)[:n]
+
+        assert counts.sum() == words.size  # all the draws are in range
+        assert_array_equal(counts[distr == 0], 0, strict=False)
+        prob = numpy.array(distr, numpy.float64)
+        assert_close_matrices(counts / words.size, prob / prob.sum(), rtol=1e-4)
+
+    def test_extreme_words(self, keys: split) -> None:
+        """Check the first and last word never give a value with probability zero.
+
+        The quantized probabilities add up to slightly less or more than the
+        range of the words, depending on `distr`.
+        """
+        reps, n = 1000, 30
+        distr = random.uniform(keys.pop(), (reps, n))
+        distr = jnp.where(random.bernoulli(keys.pop(), 0.5, (reps, n)), 0, distr)
+        distr = distr.at[:, 3].set(1.0)  # at least one nonzero
+        words = jnp.array([0, 2**30 - 1])
+
+        draw = vmap(categorical_cumsum, in_axes=(None, 0))
+        draw = jit(vmap(draw, in_axes=(0, None), out_axes=1))
+        index = draw(words, distr)
+
+        assert jnp.all(index < n)
+        assert jnp.all(jnp.take_along_axis(distr, index, axis=1) > 0)
+
+    def test_all_zero(self) -> None:
+        """Check the result is `n` if all the probabilities are zero."""
+        n = 30
+        words = jnp.array([0, 1, 2**29, 2**30 - 1])
+        draw = vmap(categorical_cumsum, in_axes=(0, None))
+        assert_array_equal(draw(words, jnp.zeros(n)), n, strict=False)
+
+
+@pytest.mark.parametrize('sparse', [False, True])
+def test_choose_variable_blocked(keys: split, sparse: bool) -> None:
+    """Check `choose_variable` skips the blocked and fully used variables."""
+    # variables 0 and 4 have no splits, variable 1 has one, used at the root
+    max_split = jnp.array([0, 1, 5, 5, 0, 5], jnp.uint8)
+    blocked_vars = jnp.array([0, 4, 6], jnp.uint8)
+    var_tree = jnp.array([0, 1, 0, 0], jnp.uint8)
+    split_tree = jnp.array([0, 1, 0, 0], jnp.uint8)
+    if sparse:
+        # the blocked variables are by far the likeliest
+        log_s = jnp.array([200.0, 1.0, 0.0, -1.0, 300.0, -2.0])
+        s_table = categorical_table(log_s, blocked_vars)
+    else:
+        s_table = None
+
+    @jit
+    @vmap
+    def choose(
+        key: Key[Array, ''], node: Int32[Array, '']
+    ) -> tuple[Int32[Array, ''], Int32[Array, '']]:
+        return choose_variable(
+            key,
+            var_tree,
+            split_tree,
+            max_split,
+            node,
+            blocked_vars=blocked_vars,
+            s_table=s_table,
+        )
+
+    n = 1000
+    for node, available in ((1, [1, 2, 3, 5]), (2, [2, 3, 5])):
+        var, num_available_var = choose(keys.pop(n), jnp.full(n, node))
+        assert_array_equal(numpy.unique(var), available, strict=False)
+        assert_array_equal(num_available_var, len(available), strict=False)
+
+
 class TestSplitRange:
     """Test `mcmcstep._moves.split_range`."""
 
@@ -1769,6 +2018,35 @@ class TestMultichain:
         with pytest.raises(ValueError, match=match):
             init(**init_kwargs, num_chains=num_chains, mesh=dict(chains=chains_axis))
 
+    def test_init_single_device_mesh_elsewhere(self, init_kwargs: dict) -> None:
+        """`init` with a 1-device mesh on another device, where moving the inputs donates them."""
+        if get_device_count() < 2:
+            pytest.skip('Need at least 2 devices.')
+        default = get_default_device()
+        device = next(d for d in get_default_devices() if d != default)
+        mesh = make_mesh(
+            (1, 1),
+            ('chains', 'data'),
+            devices=(device,),
+            axis_types=(AxisType.Auto, AxisType.Auto),
+        )
+        state = init(**init_kwargs, num_chains=4, mesh=mesh)
+        check_sharding(state, mesh)
+        for leaf in tree.leaves(state):
+            assert leaf.devices() == {device}
+
+    def test_init_committed_inputs(self, init_kwargs: dict) -> None:
+        """`init` moves inputs committed to a device in the mesh."""
+        if get_device_count() < 2:
+            pytest.skip('Need at least 2 devices.')
+        device = get_default_device()
+        init_kwargs = tree.map(
+            lambda x: device_put(x, device) if isinstance(x, jax.Array) else x,
+            init_kwargs,
+        )
+        state = init(**init_kwargs, num_chains=4, mesh=dict(chains=2))
+        check_sharding(state, state.config.mesh)
+
     @pytest.mark.parametrize('random_tree_scan', [False, True])
     def test_multichain_equiv_stack(
         self, init_kwargs: dict, keys: split, random_tree_scan: bool
@@ -1963,7 +2241,7 @@ def check_sharding(x: PyTree, mesh: Mesh | None) -> None:
         if x is None:
             return
         elif mesh is None:
-            assert isinstance(x.sharding, SingleDeviceSharding)
+            assert x.sharding.num_devices == 1
         else:
             spec = get_normal_spec(x)
 
@@ -2190,6 +2468,12 @@ def case_init_kw(key: Key[Array, ''], case: str) -> dict:
             max_split=kw['max_split'].at[0].set(0),
             filter_splitless_vars=1,
         ),
+        # if they are all blocked, no move is possible
+        all_blocked=dict(
+            X=jnp.zeros_like(kw['X']),
+            max_split=jnp.zeros_like(kw['max_split']),
+            filter_splitless_vars=kw['max_split'].size,
+        ),
         leaf_prior=dict(sum_trees_prior_cov_inv=Wishart(4.0, 4.0 * eye, eye)),
         sparse=dict(a=0.5, b=1.0, rho=5.0, sparse_on_at=0),
         quantized=dict(leaf_quantization=1),
@@ -2212,6 +2496,7 @@ def case_init_kw(key: Key[Array, ''], case: str) -> dict:
         'binary',
         'multivariate',
         'blocked',
+        'all_blocked',
         'used_trees',
     ],
 )
@@ -2893,6 +3178,8 @@ class GewekeCase(NamedTuple):
     leaf_prior: bool = False
     outcome: Literal['continuous', 'binary', 'multivariate', 'mixed'] = 'continuous'
     error_scale: bool = False
+    splitless: int = 0
+    """The number of predictors with ``max_split == 0``, the first ones."""
     used_trees: int | None = None
     random_scan: bool = False
 
@@ -2970,7 +3257,8 @@ def geweke_state(key: Key[Array, ''], case: GewekeCase) -> ChainDataState:
         X=random.randint(key, (case.p, GEWEKE_N), 0, case.nsplits + 1, jnp.uint8),
         y=jnp.zeros((*kshape, GEWEKE_N)),
         offset=jnp.zeros(kshape),
-        max_split=jnp.full(case.p, case.nsplits, jnp.uint8),
+        max_split=jnp.full(case.p, case.nsplits, jnp.uint8).at[: case.splitless].set(0),
+        filter_splitless_vars=case.splitless,
         num_trees=GEWEKE_NUM_TREES,
         used_trees=case.used_trees,
         check_num_trees=False,
@@ -3040,7 +3328,7 @@ def chain_summaries(
     if forest.sparsity.theta is not None:
         assert forest.sparsity.log_s is not None
         if p > 1:  # with p=1, s is always [1]
-            varprob = softmax(forest.sparsity.log_s)
+            varprob = softmax(forest.sparsity.log_s, where=forest.max_split > 0)
             out['effective predictors'] = effective_predictors(varprob)
         if forest.sparsity.rho is not None:
             out['theta'] = forest.sparsity.theta
@@ -3116,6 +3404,8 @@ def avg_max_tree_depth(
         GewekeCase(3, 2, sparsity='free'),
         GewekeCase(3, 2, sparsity='supersparse'),
         GewekeCase(10, 1, sparsity='supersparse'),
+        GewekeCase(10, 255, sparsity='free', splitless=3),
+        GewekeCase(10, 1, sparsity='free', splitless=3),
         # with a flatter tree prior, fewer moves are accepted almost surely and
         # the trees run out of decision rules, so the proposal ratios matter
         GewekeCase(1, 1, flat=True),
@@ -3154,7 +3444,6 @@ def test_joint_distribution(keys: split, case: GewekeCase, subtests: SubTests) -
     # a sampler stuck at its initial state would pass the comparison
     with subtests.test('chains move'):
         changed = initial.forest.split_tree != final.forest.split_tree
-        changed = chain_to_axis(changed, chain_vmap_axes(final).forest.split_tree)
         moved = jnp.any(changed.reshape(GEWEKE_NUM_CHAINS, -1), axis=1)
         assert jnp.mean(moved) > 0.5
 
@@ -4459,28 +4748,41 @@ class TestStepTheta:
     """Test `step_theta`."""
 
     def state(
-        self, keys: split, a: float, b: float, theta: float, p: int = 10
+        self,
+        keys: split,
+        a: float,
+        b: float,
+        theta: float,
+        p: int = 10,
+        *,
+        splitless: int = 0,
     ) -> State:
         """Create a state with variable selection and a fixed `log_s`.
 
-        `theta` is the concentration `log_s` is drawn with, and `rho` is set to `p`.
+        `theta` is the concentration `log_s` is drawn with, and `rho` is set to
+        the number of selectable variables, at least 1. The first `splitless`
+        variables have ``max_split == 0`` and a large random `log_s`, to be
+        ignored.
         """
         n = 5
+        max_split = jnp.ones(p, jnp.uint8).at[:splitless].set(0)
         state = init(
             X=jnp.zeros((p, n), jnp.uint8),
             y=jnp.zeros(n),
             offset=0.0,
-            max_split=jnp.ones(p, jnp.uint8),
+            max_split=jnp.copy(max_split),
             num_trees=2,
             p_nonterminal=make_p_nonterminal(3),
             sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(4.0, 4.0, 1.0),
             a=a,
             b=b,
-            rho=float(p),
+            rho=float(max(p - splitless, 1)),
             sparse_on_at=0,
+            filter_splitless_vars=splitless,
         )
-        log_s = sample_s(keys.pop(), theta, p)
+        log_s = sample_s(keys.pop(), theta, max_split)
+        log_s = jnp.where(max_split > 0, log_s, 100 * random.normal(keys.pop(), (p,)))
         return replace(
             state,
             forest=replace(
@@ -4495,6 +4797,7 @@ class TestStepTheta:
         """Compute the unnormalized log density of ``log(theta / rho)``, in float64."""
         forest = state.forest
         log_s = numpy.asarray(nnone(forest.sparsity.log_s), numpy.float64)
+        log_s = log_s[numpy.asarray(forest.max_split) > 0]
         log_s -= special.logsumexp(log_s)
         a, b = nnone(forest.sparsity.a).item(), nnone(forest.sparsity.b).item()
         rho = nnone(forest.sparsity.rho).item()
@@ -4552,6 +4855,23 @@ class TestStepTheta:
         cdf_func = partial(numpy.interp, xp=v, fp=cdf)
         assert ks_1samp(numpy.asarray(v1, numpy.float64), cdf_func).pvalue > 1e-3
 
+    def test_splitless(self, keys: split) -> None:
+        """The variables with ``max_split == 0`` are ignored, whatever their `log_s`."""
+        state = self.state(keys, 0.5, 1.0, 3.0, splitless=3)
+        v, cdf = self.posterior_cdf(state)
+        v1 = self.run(keys.pop(20_000), state, jnp.float32(0.0))
+        cdf_func = partial(numpy.interp, xp=v, fp=cdf)
+        assert ks_1samp(numpy.asarray(v1, numpy.float64), cdf_func).pvalue > 1e-3
+
+    def test_all_splitless(self, keys: split) -> None:
+        """With all the variables ignored, `theta` is drawn from its prior."""
+        a, b = 0.5, 1.0
+        state = self.state(keys, a, b, 3.0, splitless=10)
+        v = self.run(keys.pop(20_000), state, jnp.float32(0.0))
+        assert jnp.all(jnp.isfinite(v))
+        lambda_ = special.expit(numpy.asarray(v, numpy.float64))
+        assert ks_1samp(lambda_, stats.beta(a, b).cdf).pvalue > 1e-3
+
     @pytest.mark.parametrize('c', [0.01, 5.0, 300.0])
     @pytest.mark.parametrize('p', [1000, 100_000])
     def test_log_density_precision(self, keys: split, c: float, p: int) -> None:
@@ -4568,6 +4888,7 @@ class TestStepTheta:
         log_density = _log_p_v(
             jnp.asarray(v, jnp.float32),
             log_s=nnone(forest.sparsity.log_s),
+            selectable=forest.max_split > 0,
             a=nnone(forest.sparsity.a),
             b=nnone(forest.sparsity.b),
             rho=nnone(forest.sparsity.rho),
@@ -4603,6 +4924,41 @@ class TestStepTheta:
         )
         v = self.run(keys.pop(100), state, jnp.float32(0.0))
         assert jnp.all(jnp.isfinite(v))
+
+
+def test_step_s_splitless(keys: split) -> None:
+    """`step_s` draws `s` over the variables with ``max_split > 0`` only.
+
+    With stumps, the full conditional of `s` is its prior, so each selectable
+    component is ``Beta(theta/p, theta (p-1)/p)``, with ``p`` the number of
+    selectable variables.
+    """
+    max_split = jnp.array([3, 0, 3, 3, 0, 3], jnp.uint8)
+    selectable = max_split > 0
+    p_eff, theta, n = 4, 3.0, 5
+    state = init(
+        X=jnp.zeros((max_split.size, n), jnp.uint8),
+        y=jnp.zeros(n),
+        offset=0.0,
+        max_split=max_split,
+        num_trees=2,
+        p_nonterminal=make_p_nonterminal(3),
+        sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
+        error_cov_inv=Wishart(4.0, 4.0, 1.0),
+        theta=theta,
+        sparse_on_at=0,
+        filter_splitless_vars=2,
+    )
+
+    @jit
+    @vmap
+    def draw(key: Key[Array, '']) -> Float32[Array, ' p']:
+        return nnone(step_s(key, state).forest.sparsity.log_s)
+
+    s = softmax(draw(keys.pop(20_000)), axis=1, where=selectable)
+    marginal = stats.beta(theta / p_eff, theta * (p_eff - 1) / p_eff)
+    for j in numpy.flatnonzero(selectable):
+        assert ks_1samp(s[:, j], marginal.cdf).pvalue > 1e-3
 
 
 def test_stirling_remainder() -> None:
@@ -4766,7 +5122,7 @@ class TestSampleSAugmentation:
         # get log_s
         log_s = nnone(forest.sparsity.log_s)
         if sparse:
-            log_s = sample_s(keys.pop(), 0.01, p)
+            log_s = sample_s(keys.pop(), 0.01, forest.max_split)
 
         # normalize log_s
         log_s -= logsumexp(log_s)  # all selectable
@@ -4776,9 +5132,10 @@ class TestSampleSAugmentation:
         kw: dict = dict(in_axes=(0, 0, 0, None, None))
         args = (tree_keys, forest.var_tree, forest.split_tree, forest.max_split)
 
-        # invoke actual implementation
+        # invoke actual implementation, accumulating the nodes of each tree
         s = S.from_log_s(log_s, jnp.ones(p, bool), 2 * d_minus_1)
-        new = vmap(log_blocked_mass_tree, **kw)(*args, s)
+        var, log_mass = vmap(log_blocked_mass_tree, **kw)(*args, s)
+        new = vmap(partial(scatter_logaddexp, p))(var, log_mass)
 
         # invoke reference implementation
         ref = vmap(self._reference_blocked_mass_tree, **kw)(*args, log_s)

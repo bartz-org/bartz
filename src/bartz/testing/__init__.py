@@ -59,7 +59,7 @@ Distributions of the per-predictor importance scales (unit mean square).
     ScaleDistr
     Constant
     Gamma
-    SpikeSlab
+    ScaledBernoulli
 
 Correlation distributions
 -------------------------
@@ -92,7 +92,7 @@ from bartz.testing._distr import (
     Factor,
     Gamma,
     Normal,
+    ScaledBernoulli,
     ScaleDistr,
-    SpikeSlab,
     Uniform,
 )

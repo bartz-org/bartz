@@ -53,14 +53,14 @@ from bartz._interface import (
     raise_if_nan,
     start_nan_check,
 )
-from bartz._jaxext import is_key, jit, jit_active, split
+from bartz._jaxext import forbid_x64, is_key, jit, jit_active, split
 from bartz.bcf._state import BCFState, init_bcf
 from bartz.bcf._step import bcf_step
 from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
 from bartz.mcmcloop import MainTrace
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import OutcomeType, Wishart, make_p_nonterminal
-from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
+from bartz.mcmcstep._axes import get_has_chains
 from bartz.npz import serializable
 from bartz.npz._npz import check_class, load_npz, save_npz
 from bartz.prepcovars import UniqueQuantileBinner
@@ -79,10 +79,8 @@ def process_bcf_predictor_input(
 
 def fold_chains(trace: Trace, path: str) -> Float32[Array, 'num_samples ...']:
     """Fold the chain axis of a trace field into its sample axis, like `predict_latent`."""
-    get = attrgetter(path)
-    return _flatten_chain_sample(
-        get(trace), get(chain_vmap_axes(trace)), get(trace_sample_axes(trace))
-    )
+    arr = attrgetter(path)(trace)
+    return _flatten_chain_sample(arr, has_chains=get_has_chains(trace))
 
 
 @jit
@@ -393,6 +391,7 @@ class bcf(Module):
     _tau_test: Float32[Array, 'num_samples m'] | None = None
     _z_test: Bool[Array, ' m'] | None = None
 
+    @forbid_x64
     def __init__(  # noqa: C901, PLR0915
         self,
         x_train: Real[ArrayLike, 'n p'] | DataFrame,
@@ -677,6 +676,7 @@ class bcf(Module):
         """
         return check_class(load_npz(path), cls, path)
 
+    @forbid_x64
     def predict(
         self,
         x_test: Real[ArrayLike, 'm p'] | DataFrame,
@@ -799,6 +799,7 @@ class bcf(Module):
             assert self._tau_test is not None
             return expected_outcome(self._mu_test, self._tau_test, self._z_test, True)
 
+    @forbid_x64
     def predict_potential_outcomes(
         self,
         x_test: Real[ArrayLike, 'm p'] | DataFrame,

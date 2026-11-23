@@ -379,6 +379,28 @@ def test_upgrade_sum_trees_prior_custom_class() -> None:
     assert 'sum_trees_prior_cov_inv' in root['fields']['forest']['fields']
 
 
+@pytest.mark.parametrize(
+    ('field', 'value'),
+    [
+        ('_binary_mask', dict(type='array', key='_binary_mask')),
+        ('sums', dict(type='dict', items=dict(peff=dict(type='array', key='peff')))),
+    ],
+)
+def test_upgrade_peff_binary_mask_custom_class(field: str, value: Json) -> None:
+    """Check a custom class is refused if it has a field that changes, else left alone.
+
+    Like a subclass of `Bart` or `StatsAccumulator`.
+    """
+    subclass = dict(type='module', cls='Subclass', fields={field: value})
+    match = f"cannot load the custom class 'Subclass'.+`{field}`"
+    with pytest.raises(ValueError, match=match):
+        upgrade_bartz_0_14(subclass, {})
+
+    other = dict(type='module', cls='Other', fields=dict(sums=None, note='a'))
+    root, _ = upgrade_bartz_0_14(other, {})
+    assert root == other
+
+
 def test_bartz_0_13_stored_values() -> None:
     """Check the `bcf` archive of bartz 0.13 keeps the values it stores directly."""
     path = ARCHIVE_DIR / 'bcf_v0.npz'

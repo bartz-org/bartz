@@ -25,7 +25,8 @@
 """Functions intended to be shared across the test suite."""
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
+from contextlib import contextmanager
 from functools import partial
 from importlib.metadata import version
 from operator import ge, le
@@ -40,7 +41,7 @@ import jax
 import numpy as np
 import pytest
 from equinox import EquinoxRuntimeError
-from jax import jit, lax, random, vmap
+from jax import jit, lax, random, tree, vmap
 from jax import numpy as jnp
 from jax.scipy.special import logit
 from jaxtyping import Array, Float, Float32, Shaped, UInt
@@ -54,7 +55,6 @@ from scipy import linalg, stats
 from bartz import Bart
 from bartz._jaxext import get_default_device, jaxtyping_disabled, minimal_unsigned_dtype  # noqa: F401
 from bartz.grove import TreesTrace, check_trace, describe_error, is_actual_leaf
-from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 
 _T = TypeVar('_T')
 
@@ -123,17 +123,30 @@ def manual_tree(
     return tree
 
 
-def condf(array: Float[ArrayLike, '...'], on_32: _T, on_16: _T) -> _T:
-    """Select a value by leaf-storage precision: `on_16` for float16, else `on_32`.
+def condf(array: Shaped[ArrayLike, '...'], on_f32_or_int: _T, on_f16: _T) -> _T:
+    """Select `on_f16` if `array` is float16, else `on_f32_or_int`.
 
     Pass the array whose precision governs the comparison: usually a leaf tree,
     or---for a float32 quantity that carries reduced precision because it derives
     from the leaves (e.g. a prediction)---the leaf tree itself rather than the
     derived array. This avoids baking float16-specific tolerances into the
-    tests: when the leaf storage dtype reverts to float32, `on_32` is selected.
+    tests: when the leaf storage dtype reverts to float32, `on_f32_or_int` is
+    selected. Bool counts as integer; other dtypes are rejected.
     """
-    reduced = jnp.finfo(jnp.asarray(array).dtype).bits < 32
-    return on_16 if reduced else on_32
+    dtype = jnp.asarray(array).dtype
+    assert dtype in (jnp.float16, jnp.float32, jnp.bool_) or jnp.issubdtype(
+        dtype, jnp.integer
+    ), dtype
+    return on_f16 if dtype == jnp.float16 else on_f32_or_int
+
+
+def condp(array: Shaped[Array, '...'], on_cpu: _T, on_gpu: _T) -> _T:
+    """Select `on_cpu` if `array` is on cpu, else `on_gpu`.
+
+    Compose with `condf` for tolerances that depend on both platform and leaf
+    precision, e.g., ``condp(x, 0, condf(leaf_tree, 1e-5, 1e-3))``.
+    """
+    return on_cpu if array.platform() == 'cpu' else on_gpu
 
 
 def rerun_on_gpu(*_: object) -> bool:
@@ -399,6 +412,32 @@ def assert_array_equal(
     _np_assert_array_equal(actual, desired, strict=strict, **kwargs)
 
 
+_WIDEN = {jnp.dtype(jnp.float32): jnp.float64, jnp.dtype(jnp.int32): jnp.int64}
+
+
+def to_64_bit(x: _T) -> _T:
+    """Cast the float32/int32 jax arrays in a pytree to float64/int64."""
+
+    def widen(a: object) -> object:
+        if isinstance(a, Array) and a.dtype in _WIDEN:
+            return a.astype(_WIDEN[a.dtype])
+        else:
+            return a
+
+    with jax.enable_x64(True):
+        return tree.map(widen, x)
+
+
+@contextmanager
+def raises_x64_enabled() -> Generator[None, None, None]:
+    """Enable x64 and check bartz raises about it within the block."""
+    with (
+        jax.enable_x64(True),
+        pytest.raises(RuntimeError, match='`jax_enable_x64` is set'),
+    ):
+        yield
+
+
 class PeriodicSigintTimer:
     """Periodically send SIGINT (^C) to the main thread.
 
@@ -596,10 +635,9 @@ def sum_trees_prior_cov_inv_conditional_mean(
     kshape = forest.leaf_unit.shape
 
     trace = bart._main_trace
-    axes = chain_vmap_axes(trace)
-    prec = chain_to_axis(trace.sum_trees_prior_cov_inv, axes.sum_trees_prior_cov_inv)
-    split_tree = chain_to_axis(trace.split_tree, axes.split_tree)
-    leaf_tree = chain_to_axis(trace.leaf_tree, axes.leaf_tree)
+    prec = trace.sum_trees_prior_cov_inv
+    split_tree = trace.split_tree
+    leaf_tree = trace.leaf_tree
     *_, num_trees, half = split_tree.shape
 
     def conditional_mean(

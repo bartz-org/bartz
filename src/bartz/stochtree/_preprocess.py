@@ -24,14 +24,14 @@
 
 """Auto-preprocessing of covariates for the stochtree-compatible BART interface.
 
-Two parallel implementations are provided, `PandasPreprocessor` and
-`PolarsPreprocessor`, each handling the corresponding dataframe library. Both
-classes have the same interface::
+`Preprocessor` handles any eager dataframe supported by narwhals (pandas,
+polars, pyarrow, modin, cudf), wrapped with `to_narwhals`::
 
-    pp = PandasPreprocessor()      # or PolarsPreprocessor()
-    varprob = pp.fit(X_train, variable_weights=w)
-    x_train = pp.transform(X_train)
-    x_new = pp.transform(X_new)    # at prediction time
+    pp = Preprocessor()
+    df_train = to_narwhals(X_train)  # None if not a dataframe
+    varprob = pp.fit(df_train, variable_weights=w)
+    x_train = pp.transform(df_train)
+    x_new = pp.transform(to_narwhals(X_new))    # at prediction time
 
 `fit` records the per-column encoding and returns the variable weights expanded
 to match the new column count (or `None`); `transform` returns the
@@ -40,48 +40,57 @@ columns=expanded features).
 
 Per-column handling:
 
-- ordered categorical (pandas ordered `Categorical`): ordinal encoded into a
-  single integer-valued column, with the declared category order giving the
-  integer mapping. polars has no ordered categorical dtype; pass an integer
-  column for ordinal encoding.
-- unordered categorical (pandas unordered `Categorical`, polars `Enum`): one-hot
-  encoded into one binary column per declared category. A polars `Enum`
-  round-trips to a pandas *unordered* `Categorical`, so the two are treated
-  identically.
+- ordered categorical (pandas ordered `Categorical`, polars `Enum`, ordered
+  pyarrow dictionary): ordinal encoded into a single integer-valued column, with
+  the declared category order giving the integer mapping.
+- unordered categorical (pandas unordered `Categorical`, polars `Categorical`,
+  unordered pyarrow dictionary): one-hot encoded into one binary column per
+  declared category. A polars `Categorical` has no per-column category list, so
+  its categories are the values observed at `fit`, sorted.
 - boolean: cast to ``{0.0, 1.0}``, single column.
-- numeric (integer, unsigned, float): pass-through as float.
-- anything else (strings, ``object``, datetime, polars `Categorical`, etc.):
-  raises `ValueError`. polars `Categorical` has no reliable per-column category
-  list (the categories live in a process-wide string cache shared across
-  columns), so it must be cast to an `Enum` (one-hot) or an integer (ordinal)
-  first.
+- numeric (integer, unsigned, float, decimal): pass-through as float.
+- pandas columns with a pyarrow dtype (`pandas.ArrowDtype`): handled like the
+  corresponding pyarrow column.
+- anything else (strings, ``object``, datetime, etc.): raises `ValueError`.
 
 When a single original column expands into ``k`` output columns (one-hot), the
 original `variable_weights` entry for that column is split evenly across the
 ``k`` expansions, preserving each original variable's total splitting budget
 (matching stochtree's `bart.py` behavior).
 
-Unknown category values encountered during `transform` raise `ValueError`.
+Null values in categorical columns, and category values unknown at `transform`
+time, raise `ValueError`.
 """
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, TypeAlias, overload
+from typing import Any, Literal, Protocol, TypeAlias, overload, runtime_checkable
+from warnings import warn
 
+import narwhals.stable.v2 as nw
 import numpy as np
 from jaxtyping import Float32, Shaped
+from narwhals.stable.v2.dependencies import get_polars
 
 # Not `numpy.typing.ArrayLike`: that is a PEP 695 type alias since numpy 2.5,
 # which jaxtyping cannot subscript.
 from bartz.mcmcstep._state import ArrayLike
 
-# Duck-typed stand-ins for the optional dataframe libraries. bartz does not
-# depend on pandas or polars at runtime, so we cannot reference their real
-# classes here; these aliases resolve to `Any` but give the signatures below
-# legible names.
-DataFrame: TypeAlias = Any  # a pandas or polars DataFrame
-Series: TypeAlias = Any  # a pandas or polars Series
-PolarsModule: TypeAlias = Any  # the polars top-level module
+
+@runtime_checkable
+class DataFrame(Protocol):
+    """Any eager dataframe supported by narwhals, e.g., pandas, polars, or pyarrow."""
+
+    @property
+    def columns(self) -> object:
+        """The columns."""
+        ...
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """The number of rows and columns."""
+        ...
+
 
 _UNSEEN_PREVIEW = 10
 
@@ -98,25 +107,25 @@ class _ColumnSpec:
     name: str
     """Original column name (for error messages)."""
 
-    categories: tuple[Any, ...] | None = None
+    categories: tuple[Any, ...] = ()
     """Declared category list for ordered_cat / unordered_cat."""
 
     @property
     def width(self) -> int:
         """Number of output columns this spec produces."""
         if self.kind == 'unordered_cat':
-            assert self.categories is not None
             return len(self.categories)
-        return 1
+        else:
+            return 1
 
 
 def _unseen_error(name: str, unseen: Sequence[Any], known: Sequence[Any]) -> ValueError:
     """Build the error for category values absent from the fitted list."""
-    uniq = sorted({repr(v) for v in unseen})
     msg = (
-        f'column {name!r}: {len(unseen)} value(s) at transform time are not in'
-        f' the fitted category list; unseen sample: {uniq[:_UNSEEN_PREVIEW]};'
-        f' known categories: {list(known)[:_UNSEEN_PREVIEW]}'
+        f'column {name!r}: {len(unseen)} distinct value(s) at transform time are'
+        ' not in the fitted category list; unseen sample:'
+        f' {list(unseen)[:_UNSEEN_PREVIEW]}; known categories:'
+        f' {list(known)[:_UNSEEN_PREVIEW]}'
     )
     return ValueError(msg)
 
@@ -125,94 +134,99 @@ def _unsupported_dtype_error(name: str, dtype: object) -> ValueError:
     """Build the error for a column whose dtype has no supported encoding."""
     msg = (
         f'column {name!r} has unsupported dtype {dtype!r}; supported types are'
-        ' numeric, boolean, pandas ordered/unordered Categorical, and polars'
-        ' Enum. Convert strings, objects, datetimes, etc. to one of these (e.g.'
-        ' an explicit Categorical / Enum) before fitting.'
+        ' numeric, boolean, pandas ordered/unordered Categorical, polars Enum or'
+        ' Categorical, and pyarrow dictionary. Convert strings, objects,'
+        ' datetimes, etc. to one of these (e.g. an explicit Categorical / Enum)'
+        ' before fitting.'
     )
     return ValueError(msg)
 
 
-def _polars_categorical_error(name: str) -> ValueError:
-    """Build the error rejecting a polars `Categorical` column."""
+def _polars_enum_message(name: str) -> str:
+    """Build the warning about the encoding of a polars `Enum` column."""
     msg = (
-        f'column {name!r} is a polars Categorical, which has no reliable'
-        ' per-column category list (the categories live in a process-wide'
-        ' string cache shared across columns). Cast it to a polars Enum with an'
-        ' explicit category list (pl.Enum([...])) for one-hot encoding, or to an'
-        ' integer column for ordinal encoding.'
+        f'column {name!r} is a polars Enum, which is ordered, so it is encoded as'
+        ' a single ordinal column; bartz <= 0.14 one-hot encoded it. For one-hot'
+        ' encoding, use a polars Categorical.'
     )
-    return ValueError(msg)
-
-
-def _ordinal_encode(
-    values: Shaped[np.ndarray, ' n'], categories: Sequence[Any], name: str
-) -> Float32[np.ndarray, 'n 1']:
-    """Map `values` to integer positions in `categories`; raise on unseen."""
-    table = {c: i for i, c in enumerate(categories)}
-    out = np.empty(len(values), dtype=np.float32)
-    unseen: list[Any] = []
-    for i, v in enumerate(values):
-        code = table.get(v, -1)
-        if code < 0:
-            unseen.append(v)
-        else:
-            out[i] = code
-    if unseen:
-        raise _unseen_error(name, unseen, categories)
-    return out[:, None]
-
-
-def _one_hot_encode(
-    values: Shaped[np.ndarray, ' n'], categories: Sequence[Any], name: str
-) -> Float32[np.ndarray, 'n k']:
-    """Build a ``(n, k)`` one-hot matrix using `categories` order; raise on unseen."""
-    table = {c: i for i, c in enumerate(categories)}
-    n = len(values)
-    k = len(categories)
-    out = np.zeros((n, k), dtype=np.float32)
-    unseen: list[Any] = []
-    for i, v in enumerate(values):
-        code = table.get(v, -1)
-        if code < 0:
-            unseen.append(v)
-        else:
-            out[i, code] = 1.0
-    if unseen:
-        raise _unseen_error(name, unseen, categories)
-    return out
-
-
-def _polars_one_hot(
-    pl: PolarsModule, series: Series, categories: Sequence[Any], name: str
-) -> Float32[np.ndarray, 'n k']:
-    """Validate via cast to `pl.Enum(categories)` and one-hot via polars APIs.
-
-    Polars's `Enum` cast natively raises on any value not in `categories`, and
-    `to_physical` returns the integer codes in the declared-category order. The
-    `np.eye` index is the only numpy bit and is just an identity-matrix lookup;
-    the categorical bookkeeping itself stays inside polars.
-    """
-    cats = list(categories)
-    try:
-        coded = series.cast(pl.Enum(cats))
-    except pl.exceptions.InvalidOperationError as exc:
-        # Identify the actual unseen values for a friendly error. Cast to String
-        # first: the input column may itself be an Enum with different categories,
-        # which would make a direct is_in(cats) fail trying to coerce the list.
-        known = set(cats)
-        unseen = sorted(
-            {
-                v
-                for v in series.cast(pl.String).to_list()
-                if v not in known and v is not None
-            }
+    # WORKAROUND(polars<2): drop this note
+    if int(get_polars().__version__.split('.')[0]) < 2:
+        msg += (
+            ' Note that polars < 2 converts an Enum to an unordered categorical in'
+            ' to_pandas() and to_arrow(), which is one-hot encoded.'
         )
-        raise _unseen_error(name, unseen, cats) from exc
-    if coded.null_count():
-        msg = f'column {name!r}: null values are not supported in categorical columns'
+    return msg
+
+
+def _fit_column(series: nw.Series, name: str) -> _ColumnSpec:
+    """Inspect a column's dtype and return its encoding spec."""
+    dtype = series.dtype
+    impl = series.implementation
+    if isinstance(dtype, nw.Enum):
+        if impl.is_polars():
+            warn(_polars_enum_message(name))
+        return _ColumnSpec('ordered_cat', name, tuple(dtype.categories))
+    elif isinstance(dtype, nw.Categorical) and impl.is_polars():
+        # sort to not depend on the order of appearance
+        categories = tuple(sorted(series.drop_nulls().unique().to_list()))
+        return _ColumnSpec('unordered_cat', name, categories)
+    elif isinstance(dtype, nw.Categorical):
+        # narwhals drops the ordered flag of pyarrow dictionaries
+        ordered = impl.is_pyarrow() and series.to_native().type.ordered
+        kind: ColumnKind = 'ordered_cat' if ordered else 'unordered_cat'
+        return _ColumnSpec(kind, name, tuple(series.cat.get_categories().to_list()))
+    elif dtype == nw.Boolean:
+        return _ColumnSpec('bool', name)
+    elif dtype.is_numeric():
+        return _ColumnSpec('numeric', name)
+    else:
+        raise _unsupported_dtype_error(name, dtype)
+
+
+def _get_column(df: nw.DataFrame[Any], name: str) -> nw.Series:
+    """Get a column, moving it to pyarrow if it has a pyarrow dtype in pandas."""
+    series = df.get_column(name)
+    if series.implementation.is_pandas_like() and hasattr(
+        series.to_native().dtype, 'pyarrow_dtype'
+    ):
+        # narwhals can't use `.cat` on `pandas.ArrowDtype` dictionaries
+        arrow = series.to_frame().to_arrow().column(0)
+        return nw.from_native(arrow, series_only=True)
+    else:
+        return series
+
+
+def _category_lookup(
+    series: nw.Series, spec: _ColumnSpec
+) -> tuple[list[Any], list[int]]:
+    """Return the distinct values and their fitted category codes; raise on null or unseen."""
+    if series.null_count():
+        msg = (
+            f'column {spec.name!r}: null values are not supported in categorical'
+            ' columns'
+        )
         raise ValueError(msg)
-    codes = coded.to_physical().to_numpy()
-    return np.eye(len(cats), dtype=np.float32)[codes]
+    table = {c: i for i, c in enumerate(spec.categories)}
+    uniq = series.unique().to_list()
+    codes = [table.get(u, -1) for u in uniq]
+    unseen = [u for u, code in zip(uniq, codes, strict=True) if code < 0]
+    if unseen:
+        raise _unseen_error(spec.name, unseen, spec.categories)
+    return uniq, codes
+
+
+def _column_exprs(series: nw.Series, spec: _ColumnSpec) -> list[nw.Expr]:
+    """Build the expressions encoding a column according to its fitted spec."""
+    col = nw.col(series.name)
+    if spec.kind == 'ordered_cat':
+        # keyed on the observed values, which are valid for any column dtype
+        uniq, codes = _category_lookup(series, spec)
+        return [col.replace_strict(uniq, codes).cast(nw.Float32)]
+    elif spec.kind == 'unordered_cat':
+        _category_lookup(series, spec)
+        return [(col == c).cast(nw.Float32) for c in spec.categories]
+    else:
+        return [col.cast(nw.Float32)]
 
 
 def _expand_variable_weights(
@@ -232,19 +246,8 @@ def _expand_variable_weights(
     return np.array([w[j] / counts[j] for j in original_var_indices], dtype=np.float32)
 
 
-def _stack(
-    cols: Sequence[Float32[np.ndarray, 'n _']], n_rows: int
-) -> Float32[np.ndarray, 'n p']:
-    if not cols:
-        return np.empty((n_rows, 0), dtype=np.float32)
-    return np.concatenate(cols, axis=1)
-
-
-class _PreprocessorBase:
-    """Common state for `PandasPreprocessor` and `PolarsPreprocessor`."""
-
-    _library: str = ''
-    """Top-level module prefix of the supported dataframe library."""
+class Preprocessor:
+    """Stochtree-style covariate preprocessor for dataframes."""
 
     _fitted: bool = False
     _specs: Sequence[_ColumnSpec] = ()
@@ -272,16 +275,19 @@ class _PreprocessorBase:
 
     @overload
     def fit(
-        self, X: DataFrame, *, variable_weights: Shaped[ArrayLike, '...']
+        self, df: nw.DataFrame[Any], *, variable_weights: Shaped[ArrayLike, '...']
     ) -> Float32[np.ndarray, ' p']: ...
 
     @overload
     def fit(
-        self, X: DataFrame, *, variable_weights: None = None
+        self, df: nw.DataFrame[Any], *, variable_weights: None = None
     ) -> Float32[np.ndarray, ' p'] | None: ...
 
     def fit(
-        self, X: DataFrame, *, variable_weights: Shaped[ArrayLike, '...'] | None = None
+        self,
+        df: nw.DataFrame[Any],
+        *,
+        variable_weights: Shaped[ArrayLike, '...'] | None = None,
     ) -> Float32[np.ndarray, ' p'] | None:
         """Record the per-column encoding and return the expanded variable weights.
 
@@ -290,166 +296,54 @@ class _PreprocessorBase:
         uniform-weights path; otherwise returns the weights split across each
         original column's one-hot expansion.
         """
-        self._check_library(X)
-        specs: list[_ColumnSpec] = []
-        original_var_indices: list[int] = []
-        for orig_idx in range(X.shape[1]):
-            name, series = self._get_column(X, orig_idx)
-            spec = self._fit_column(series, str(name))
-            specs.append(spec)
-            original_var_indices.extend([orig_idx] * spec.width)
-        self._specs = tuple(specs)
-        self._original_var_indices = tuple(original_var_indices)
+        self._specs = tuple(_fit_column(_get_column(df, c), str(c)) for c in df.columns)
+        self._original_var_indices = tuple(
+            i for i, spec in enumerate(self._specs) for _ in range(spec.width)
+        )
         self._fitted = True
-        expanded = len(set(original_var_indices)) != len(original_var_indices)
+        expanded = len(self._original_var_indices) != len(self._specs)
         if variable_weights is None:
             if not expanded:
                 return None
-            variable_weights = np.full(len(specs), 1.0 / len(specs))
+            variable_weights = np.full(len(self._specs), 1.0 / len(self._specs))
         return _expand_variable_weights(
             variable_weights, self._original_var_indices, len(self._specs)
         )
 
-    def transform(self, X: DataFrame) -> Float32[np.ndarray, 'n p']:
-        """Apply the fitted transformation to a new dataframe."""
-        self._check_fitted()
-        self._check_library(X)
-        self._check_n_columns(X.shape[1])
-        cols = [
-            self._transform_column(self._get_column(X, orig_idx)[1], spec)
-            for orig_idx, spec in enumerate(self._specs)
-        ]
-        return _stack(cols, X.shape[0])
-
-    def _check_fitted(self) -> None:
-        if not self._fitted:
+    def transform(self, df: nw.DataFrame[Any]) -> Float32[np.ndarray, 'n p']:
+        """Apply the fitted transformation to a new dataframe, from any library."""
+        if not self.fitted:
             msg = 'preprocessor has not been fitted yet; call fit first'
             raise RuntimeError(msg)
-
-    def _check_n_columns(self, n_cols: int) -> None:
-        if n_cols != len(self._specs):
+        n, p = df.shape
+        if p != len(self._specs):
             msg = (
-                f'transform input has {n_cols} columns; preprocessor was fitted'
+                f'transform input has {p} columns; preprocessor was fitted'
                 f' on {len(self._specs)} columns'
             )
             raise ValueError(msg)
-
-    def _check_library(self, X: DataFrame) -> None:
-        module = type(X).__module__
-        if not module.startswith(self._library):
-            msg = (
-                f'this preprocessor handles {self._library} dataframes, but got'
-                f' an object from {module!r}; fit and transform must use the same'
-                ' dataframe library'
-            )
-            raise TypeError(msg)
-
-    @staticmethod
-    def _get_column(X: DataFrame, orig_idx: int) -> tuple[Any, Series]:
-        """Return the ``(name, series)`` of the column at position `orig_idx`."""
-        raise NotImplementedError
-
-    @staticmethod
-    def _fit_column(series: Series, name: str) -> _ColumnSpec:
-        """Inspect a column's dtype and return its encoding spec."""
-        raise NotImplementedError
-
-    @staticmethod
-    def _transform_column(
-        series: Series, spec: _ColumnSpec
-    ) -> Float32[np.ndarray, 'n _']:
-        """Encode a single column according to its fitted spec."""
-        raise NotImplementedError
+        exprs = [
+            expr
+            for c, spec in zip(df.columns, self._specs, strict=True)
+            for expr in _column_exprs(df.get_column(c), spec)
+        ]
+        if exprs:
+            out = df.select(*(e.alias(str(i)) for i, e in enumerate(exprs)))
+            return out.to_numpy().astype(np.float32, copy=False)
+        else:
+            return np.empty((n, 0), dtype=np.float32)
 
 
-class PandasPreprocessor(_PreprocessorBase):
-    """Stochtree-style covariate preprocessor for `pandas.DataFrame` inputs."""
-
-    _library = 'pandas'
-
-    @staticmethod
-    def _get_column(X: DataFrame, orig_idx: int) -> tuple[Any, Series]:
-        return X.columns[orig_idx], X.iloc[:, orig_idx]
-
-    @staticmethod
-    def _fit_column(series: Series, name: str) -> _ColumnSpec:
-        import pandas as pd  # noqa: PLC0415  # optional runtime dependency
-
-        dt = series.dtype
-        if isinstance(dt, pd.CategoricalDtype):
-            cats = tuple(dt.categories)
-            kind: ColumnKind = 'ordered_cat' if dt.ordered else 'unordered_cat'
-            return _ColumnSpec(kind, name, categories=cats)
-        if pd.api.types.is_bool_dtype(dt):
-            return _ColumnSpec('bool', name)
-        if pd.api.types.is_numeric_dtype(dt):
-            return _ColumnSpec('numeric', name)
-        raise _unsupported_dtype_error(name, dt)
-
-    @staticmethod
-    def _transform_column(
-        series: Series, spec: _ColumnSpec
-    ) -> Float32[np.ndarray, 'n _']:
-        if spec.kind == 'ordered_cat':
-            assert spec.categories is not None
-            return _ordinal_encode(series.to_numpy(), spec.categories, spec.name)
-        if spec.kind == 'unordered_cat':
-            assert spec.categories is not None
-            return _one_hot_encode(series.to_numpy(), spec.categories, spec.name)
-        return series.to_numpy(dtype=np.float32)[:, None]
-
-
-class PolarsPreprocessor(_PreprocessorBase):
-    """Stochtree-style covariate preprocessor for `polars.DataFrame` inputs."""
-
-    _library = 'polars'
-
-    @staticmethod
-    def _get_column(X: DataFrame, orig_idx: int) -> tuple[Any, Series]:
-        name = X.columns[orig_idx]
-        return name, X[name]
-
-    @staticmethod
-    def _fit_column(series: Series, name: str) -> _ColumnSpec:
-        import polars as pl  # noqa: PLC0415  # optional runtime dependency
-
-        dt = series.dtype
-        if isinstance(dt, pl.Enum):
-            # A polars Enum round-trips to a pandas *unordered* Categorical, so
-            # we treat it as unordered (one-hot). For ordinal encoding, pass an
-            # integer column.
-            return _ColumnSpec(
-                'unordered_cat', name, categories=tuple(dt.categories.to_list())
-            )
-        if isinstance(dt, pl.Categorical):
-            raise _polars_categorical_error(name)
-        if dt == pl.Boolean:
-            return _ColumnSpec('bool', name)
-        if dt.is_numeric():
-            return _ColumnSpec('numeric', name)
-        raise _unsupported_dtype_error(name, dt)
-
-    @staticmethod
-    def _transform_column(
-        series: Series, spec: _ColumnSpec
-    ) -> Float32[np.ndarray, 'n _']:
-        import polars as pl  # noqa: PLC0415  # optional runtime dependency
-
-        if spec.kind == 'unordered_cat':
-            assert spec.categories is not None
-            return _polars_one_hot(pl, series, spec.categories, spec.name)
-        return series.cast(pl.Float32).to_numpy()[:, None]
-
-
-def make_preprocessor(X: object) -> _PreprocessorBase | None:
-    """Return a preprocessor matched to `X`'s library, or `None` if `X` is not a DataFrame.
-
-    Dispatches by inspecting ``type(X).__module__`` to avoid hard imports of
-    pandas/polars.
-    """
-    mod = type(X).__module__
-    if mod.startswith('polars'):
-        return PolarsPreprocessor()
-    if mod.startswith('pandas'):
-        return PandasPreprocessor()
-    return None
+def to_narwhals(X: object) -> nw.DataFrame[Any] | None:
+    """Wrap `X` with narwhals if it is an eager dataframe it supports, else return `None`; reject lazy frames."""
+    df = nw.from_native(X, pass_through=True)
+    if isinstance(df, nw.DataFrame):
+        return df
+    elif isinstance(df, nw.LazyFrame):
+        msg = (
+            f'lazy dataframes are not supported, got {type(X).__name__}; collect it'
+            ' into an eager dataframe first, e.g., with polars `LazyFrame.collect()`'
+        )
+        raise TypeError(msg)
+    else:
+        return None

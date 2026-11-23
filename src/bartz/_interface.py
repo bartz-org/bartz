@@ -50,6 +50,7 @@ from numpy import ndarray
 
 from bartz._jaxext import (
     equal_shards,
+    forbid_x64,
     is_key,
     jit,
     jit_active,
@@ -58,7 +59,6 @@ from bartz._jaxext import (
     split,
 )
 from bartz.grove import (
-    TreeHeaps,
     TreesTrace,
     check_trace,
     evaluate_forest,
@@ -81,13 +81,7 @@ from bartz.mcmcloop import (
     run_mcmc,
 )
 from bartz.mcmcstep import DiagWishart, Forest, OutcomeType, Wishart, make_p_nonterminal
-from bartz.mcmcstep._axes import (
-    chain_to_axis,
-    chain_vmap_axes,
-    chainful_axis,
-    get_has_chains,
-    trace_sample_axes,
-)
+from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._state import (
     ArrayLike,
     FloatLike,
@@ -98,6 +92,7 @@ from bartz.mcmcstep._state import (
     leaf_partition_spec,
     outcome_target,
 )
+from bartz.mcmcstep._step import count_selectable
 from bartz.npz import serializable
 from bartz.npz._npz import check_class, load_npz, save_npz
 from bartz.prepcovars import Binner, BinnerFactory, UniqueQuantileBinner
@@ -165,9 +160,11 @@ class SparseConfig(Module):
 
     .. math::
         (s_1, \ldots, s_p) \sim
-        \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p).
+        \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p),
 
-    If `theta` is not specified, it's a priori distributed according to
+    where p counts only the predictors with decision rules, as the others are
+    ignored (see the `rm_const` argument of `Bart`). If `theta` is not
+    specified, it's a priori distributed according to
 
     .. math::
         \frac{\mathtt{theta}}{\mathtt{theta} + \mathtt{rho}} \sim
@@ -393,6 +390,9 @@ class Bart(Module):
     signal-to-noise ratio of the fit to less than about 1000, a limit that
     should always hold in realistic usage.
 
+    bartz computes in 32 bit, and raises an error if ``jax_enable_x64`` is set
+    or if passed 64-bit jax arrays. numpy arrays are converted to 32 bit.
+
     References
     ----------
     .. [1] Linero, Antonio R. (2018). “Bayesian Regression Trees for
@@ -417,11 +417,11 @@ class Bart(Module):
     _mcmc_state: State
     _mcmc_callback: Callback | None
     _binner: Binner
-    _binary_mask: Bool[Array, ''] | Bool[Array, ' k']
     # WORKAROUND(jax<0.9.1): use `jax.tree.static` instead of `field(static=True)`
     _x_train_fmt: Any = field(static=True)
     _device: Device | None = field(static=True)
 
+    @forbid_x64
     def __init__(
         self,
         x_train: Real[ArrayLike, 'p n'] | DataFrame,
@@ -580,9 +580,9 @@ class Bart(Module):
         self._mcmc_callback = result.final_callback
         self._binner = binner_obj
         self._x_train_fmt = x_train_fmt
-        self._binary_mask = binary_mask
         self._device = device
 
+    @forbid_x64
     def predict(
         self,
         x_test: Real[ArrayLike, 'p m'] | DataFrame | str,
@@ -817,8 +817,8 @@ class Bart(Module):
     @property
     def n_save(self) -> int:
         """The number of posterior samples after burn-in saved per chain."""
-        sample_axis = trace_sample_axes(self._main_trace).grow_prop_count
-        return self._main_trace.grow_prop_count.shape[sample_axis]
+        *_, n_save = self._main_trace.grow_prop_count.shape
+        return n_save
 
     @property
     def num_chains(self) -> int | None:
@@ -833,12 +833,10 @@ class Bart(Module):
     @property
     def num_trees(self) -> int:
         """Return the number of trees used in the model."""
-        forest = self._mcmc_state.forest
-        chain_axis = chain_vmap_axes(forest).split_tree
-        # chainless split_tree is (num_trees, half_tree_size); num_trees is core axis 0
-        axis = chainful_axis(0, chain_axis)
-        return forest.split_tree.shape[axis]
+        *_, num_trees, _ = self._mcmc_state.forest.split_tree.shape
+        return num_trees
 
+    @forbid_x64
     def get_latent_prec(
         self, only_continuous: bool = False
     ) -> (
@@ -891,6 +889,7 @@ class Bart(Module):
             only_continuous=only_continuous,
         )
 
+    @forbid_x64
     def get_error_sdev(
         self, mean: bool = False
     ) -> (
@@ -920,9 +919,15 @@ class Bart(Module):
         """
         # binary outcomes are filled with NaN, so disable the NaN check
         with debug_nans(False):
-            return get_error_sdev(self._main_trace, self._binary_mask, mean=mean)
+            return get_error_sdev(
+                self._main_trace,
+                self._mcmc_state.binary_indices,
+                has_binary=self._mcmc_state.z is not None,
+                mean=mean,
+            )
 
     @cached_property
+    @forbid_x64
     def accept(
         self,
     ) -> (
@@ -935,25 +940,29 @@ class Bart(Module):
         allow checking convergence. The iterations thinned away by `n_skip` are
         not recorded.
         """
-        return get_accept(self._burnin_trace, self._main_trace, self.num_trees)
+        return get_accept(self._burnin_trace, self._main_trace)
 
     @cached_property
+    @forbid_x64
     def varcount(self) -> Int32[Array, 'ndpost p']:
         """Histogram of predictor usage for decision rules in the trees."""
         p = self._mcmc_state.forest.max_split.size
         return varcount(p, self._main_trace)
 
     @cached_property
+    @forbid_x64
     def varcount_mean(self) -> Float32[Array, ' p']:
         """Average of `varcount` across MCMC iterations."""
         return self.varcount.mean(axis=0)
 
     @cached_property
+    @forbid_x64
     def varprob(self) -> Float32[Array, 'ndpost p']:
         """Posterior samples of the probability of choosing each predictor for a decision rule."""
         return varprob(self._mcmc_state.forest, self._main_trace)
 
     @cached_property
+    @forbid_x64
     def varprob_mean(self) -> Float32[Array, ' p']:
         """The marginal posterior probability of each predictor being chosen for a decision rule."""
         return self.varprob.mean(axis=0)
@@ -1220,7 +1229,7 @@ class Bart(Module):
             If `True`, also print the content of unused node slots.
         """
         trace = self._main_trace
-        trees = _trees_chain_first(trace)
+        trees = project(TreesTrace, trace)
         index = (i_chain, i_sample, i_tree) if trace.has_chains else (i_sample, i_tree)
         # index the heap arrays, leaving the (unbatched) leaf scale alone; the
         # trailing ellipsis covers the extra `k` axis of multivariate leaves
@@ -1380,24 +1389,37 @@ def _check_type_settings(
     return outcome_type, binary_mask
 
 
+class SparseKwArgs(TypedDict):
+    theta: FloatLike | None
+    a: FloatLike | None
+    b: FloatLike | None
+    rho: FloatLike | None
+    sparse_on_at: int | None
+    augment: bool
+
+
 def _process_sparsity_settings(
-    x_train: Real[Array, 'p n'], sparse: SparseConfig
-) -> (
-    tuple[None, None, None, None]
-    | tuple[FloatLike, None, None, None]
-    | tuple[None, FloatLike, FloatLike, FloatLike]
-):
-    """Return (theta, a, b, rho)."""
-    if not sparse.enabled:
-        return None, None, None, None
-    elif sparse.theta is not None:
-        return sparse.theta, None, None, None
-    else:
-        rho = sparse.rho
-        if rho is None:
-            p, _ = x_train.shape
-            rho = float(p)
-        return None, sparse.a, sparse.b, rho
+    max_split: UInt[Array, ' p'], sparse: SparseConfig, n_burn: int
+) -> SparseKwArgs:
+    """Return the arguments for `mcmcstep.init` related to sparsity."""
+    theta = a = b = rho = sparse_on_at = None
+    if sparse.enabled:
+        sparse_on_at = n_burn // 2
+        if sparse.theta is not None:
+            theta = sparse.theta
+        else:
+            a, b, rho = sparse.a, sparse.b, sparse.rho
+            if rho is None:
+                # ignore predictors without decision rules
+                rho = count_selectable(max_split > 0).astype(jnp.float32)
+    return SparseKwArgs(
+        theta=theta,
+        a=a,
+        b=b,
+        rho=rho,
+        sparse_on_at=sparse_on_at,
+        augment=sparse.augment,
+    )
 
 
 @jit
@@ -1635,7 +1657,7 @@ def _setup_mcmc(
     devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None,
     n_burn: int,
 ) -> tuple[State, Key[Array, ''], Device | None, Literal['cpu', 'gpu'] | None]:
-    theta, a, b, rho = _process_sparsity_settings(x_train, sparse)
+    sparse_kw = _process_sparsity_settings(max_split, sparse, n_burn)
 
     device_kw, device, check_platform = process_device_settings(
         y_train, num_chains, num_chain_devices, num_data_devices, devices
@@ -1656,12 +1678,7 @@ def _setup_mcmc(
         min_points_per_decision_node=10,
         filter_splitless_vars=jnp.sum(max_split == 0).item() if rm_const else 0,
         log_s=process_varprob(varprob, max_split),
-        theta=theta,
-        a=a,
-        b=b,
-        rho=rho,
-        sparse_on_at=n_burn // 2 if sparse.enabled else None,
-        augment=sparse.augment,
+        **sparse_kw,
         **device_kw,
     )
 
@@ -1724,15 +1741,16 @@ def _run_mcmc(
 def varcount(p: int, trace: MainTrace) -> Int32[Array, 'ndpost p']:
     """Histogram of predictor usage for decision rules in the trees, squashing chains."""
     varcount: Int32[Array, '*chains samples p']
-    varcount = compute_varcount(p, trace, out_chain_axis=0)
+    varcount = compute_varcount(p, trace)
     return lax.collapse(varcount, 0, -1)
 
 
-@jit(static_argnames='mean')
+@jit(static_argnames=('has_binary', 'mean'))
 def get_error_sdev(
     trace: MainTrace,
-    binary_mask: Bool[Array, ''] | Bool[Array, ' k'],
+    binary_indices: Int32[Array, ' kb'] | None,
     *,
+    has_binary: bool,
     mean: bool = False,
 ) -> (
     Float32[Array, ' ndpost']
@@ -1744,7 +1762,6 @@ def get_error_sdev(
     prec = trace.error_cov_inv
     if trace.has_chains:
         # shape (chains, samples) or (chains, samples, k, k), concatenate chains
-        prec = chain_to_axis(prec, chain_vmap_axes(trace).error_cov_inv)
         prec = lax.collapse(prec, 0, 2)
     is_uv = prec.ndim == 1
     if is_uv:
@@ -1759,7 +1776,11 @@ def get_error_sdev(
     sdev = jnp.sqrt(var)
     if is_uv:
         sdev = sdev.squeeze(-1)
-    return jnp.where(binary_mask, jnp.nan, sdev)
+    if binary_indices is not None:
+        sdev = sdev.at[..., binary_indices].set(jnp.nan, unique_indices=True)
+    elif has_binary:
+        sdev = jnp.full_like(sdev, jnp.nan)
+    return sdev
 
 
 @jit(static_argnames='only_continuous')
@@ -1780,7 +1801,6 @@ def get_latent_prec(
     main = main_trace.error_cov_inv
     sample_axis = trace_sample_axes(main_trace).error_cov_inv
     prec = jnp.concatenate([burnin, main], axis=sample_axis)
-    prec = chain_to_axis(prec, chain_vmap_axes(main_trace).error_cov_inv)
     if only_continuous and binary_indices is not None:
         *_, k, _ = prec.shape
         kc = k - binary_indices.size
@@ -1792,9 +1812,9 @@ def get_latent_prec(
     return prec
 
 
-@jit(static_argnames='num_trees')
+@jit
 def get_accept(
-    burnin_trace: BurninTrace, main_trace: MainTrace, num_trees: int
+    burnin_trace: BurninTrace, main_trace: MainTrace
 ) -> (
     Float32[Array, ' n_burn_plus_n_save']
     | Float32[Array, 'num_chains n_burn_plus_n_save']
@@ -1808,7 +1828,7 @@ def get_accept(
         ],
         axis=sample_axis,
     )
-    acc = chain_to_axis(acc, chain_vmap_axes(main_trace).grow_acc_count)
+    *_, num_trees, _ = main_trace.split_tree.shape
     return acc / num_trees
 
 
@@ -1820,8 +1840,8 @@ def varprob(forest: Forest, trace: MainTrace) -> Float32[Array, 'ndpost p']:
     ndpost = trace.grow_prop_count.size
     varprob = trace.varprob
     if varprob is None:
-        peff = jnp.count_nonzero(max_split)
-        out = jnp.where(max_split, 1 / peff, 0)
+        p_eff = jnp.count_nonzero(max_split)
+        out = jnp.where(max_split, 1 / p_eff, 0)
         return jnp.broadcast_to(out, (ndpost, p))
     elif isinstance(varprob, VarprobInState):
         log_s = forest.sparsity.log_s
@@ -1829,22 +1849,7 @@ def varprob(forest: Forest, trace: MainTrace) -> Float32[Array, 'ndpost p']:
         out = softmax(log_s, where=max_split.astype(bool))
         return jnp.broadcast_to(out, (ndpost, p))
     else:
-        varprob = chain_to_axis(varprob, chain_vmap_axes(trace).varprob)
         return varprob.reshape(-1, p)
-
-
-def _trees_chain_first(obj: TreeHeaps) -> TreesTrace:
-    """Extract `obj`'s heap arrays, moving any chain axis to the front.
-
-    Returns a `TreesTrace` whose leading axis is the chain axis when `obj`
-    carries one, and the bare per-object heap arrays otherwise.
-    """
-    trees = project(TreesTrace, obj)
-    if get_has_chains(obj):
-        axes = trees.axes_from_dataclass(chain_vmap_axes(obj))
-        # WORKAROUND(python<3.14): use operator.is_none
-        trees = tree.map(chain_to_axis, trees, axes, is_leaf=lambda x: x is None)
-    return trees
 
 
 @jit
@@ -1852,7 +1857,7 @@ def check_trees(
     trace: MainTrace, max_split: UInt[Array, ' p']
 ) -> UInt[Array, 'num_chains n_save num_trees']:
     """Apply `bartz.grove.check_trace` to all the tree draws."""
-    trees = _trees_chain_first(trace)
+    trees = project(TreesTrace, trace)
     out: UInt[Array, '*chains samples num_trees']
     out = check_trace(trees, max_split)
     if out.ndim < 3:
@@ -1878,14 +1883,13 @@ def compare_resid(
     Float32[Array, '*num_chains n'] | Float32[Array, '*num_chains k n'],
 ]:
     """Re-compute residuals to compare them with the updated ones."""
-    chain_axes = chain_vmap_axes(state)
-    resid1 = chain_to_axis(state.resid * state.resid_unit[..., None], chain_axes.resid)
+    resid1 = state.resid * state.resid_unit[..., None]
 
-    forests = _trees_chain_first(state.forest)
+    forests = project(TreesTrace, state.forest)
     trees = evaluate_forest(state.X, forests, sum_batch_axis=-1)
 
     if state.has_chains:
-        ref = vmap(outcome_target, in_axes=(chain_axes,))(state)
+        ref = vmap(outcome_target, in_axes=(chain_vmap_axes(state),))(state)
     else:
         ref = outcome_target(state)
     resid2 = ref - (trees + state.forest.offset[..., None])
@@ -1898,11 +1902,10 @@ def points_per_node_distr_trace(
     X: UInt[Array, 'p n'], trace: MainTrace, node_type: Literal['leaf', 'leaf-parent']
 ) -> Int32[Array, '*num_chains n_save n+1']:
     """Histogram of number of points per node, for every tree draw in the trace."""
-    chain_axes = chain_vmap_axes(trace)
-    var_tree = chain_to_axis(trace.var_tree, chain_axes.var_tree)
-    split_tree = chain_to_axis(trace.split_tree, chain_axes.split_tree)
     out: Int32[Array, '*chains samples n+1']
-    out = points_per_node_distr(X, var_tree, split_tree, node_type, sum_batch_axis=-1)
+    out = points_per_node_distr(
+        X, trace.var_tree, trace.split_tree, node_type, sum_batch_axis=-1
+    )
     if out.ndim < 3:
         out = out[None, :, :]
     return out
@@ -2196,11 +2199,7 @@ def predict_train(
     | Float32[Array, 'ndpost k n']
 ):
     """Implement `Bart.predict('train')` from the precomputed predictions."""
-    latent = _flatten_chain_sample(
-        trace.train_pred,
-        chain_vmap_axes(trace).train_pred,
-        trace_sample_axes(trace).train_pred,
-    )
+    latent = _flatten_chain_sample(trace.train_pred, has_chains=trace.has_chains)
     return _predict_from_latent(
         key,
         trace,
@@ -2266,13 +2265,13 @@ def _predict_from_latent(
 
 
 def _flatten_chain_sample(
-    arr: Float[Array, '*shape'], chain_axis: int | None, sample_axis: int
+    arr: Float[Array, '*shape'], *, has_chains: bool
 ) -> Float[Array, '*flat_shape']:
     """Fold the chain axis into the sample axis, matching `predict_latent`'s layout."""
-    if chain_axis is None:
+    if has_chains:
+        return lax.collapse(arr, 0, 2)
+    else:
         return arr
-    arr = jnp.moveaxis(arr, (chain_axis, sample_axis), (0, 1))
-    return lax.collapse(arr, 0, 2)
 
 
 @jit(static_argnames='has_binary')
@@ -2286,8 +2285,7 @@ def sample_outcome(
     has_binary: bool,
 ) -> Float32[Array, 'ndpost m'] | Float32[Array, 'ndpost k m']:
     """Sample from the posterior predictive distribution."""
-    # move error_cov_inv chain axis to 0
-    prec = chain_to_axis(trace.error_cov_inv, chain_vmap_axes(trace).error_cov_inv)
+    prec = trace.error_cov_inv
 
     if latent.ndim > 2:  # multivariate case
         error_cov_inv = lax.collapse(prec, 0, -2)

@@ -246,6 +246,15 @@ def main_counterpart(node: Skeleton, main: Skeleton, name: str) -> Skeleton:
         return None
 
 
+def custom_class_error(node: Skeleton, field: str) -> ValueError:
+    """Make the error for a custom class with a field that needs converting."""
+    msg = (
+        f'cannot load the custom class {node["cls"]!r} saved with bartz 0.14: '
+        f'its field `{field}` needs a conversion known only for the classes of bartz'
+    )
+    return ValueError(msg)
+
+
 def upgrade_sum_trees_prior(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
     """Convert `leaf_prior_cov_inv` to `sum_trees_prior_cov_inv`.
 
@@ -277,12 +286,7 @@ def upgrade_sum_trees_prior(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arra
                 fields = {k: v for k, v in fields.items() if k != 'leaf_prior_cov_inv'}
                 fields = dict(fields, sum_trees_prior_cov_inv=prior)
             elif 'leaf_prior_cov_inv' in fields:
-                msg = (
-                    f'cannot load the custom class {node["cls"]!r} saved with '
-                    'bartz 0.14: its field `leaf_prior_cov_inv` needs a conversion '
-                    'known only for the classes of bartz'
-                )
-                raise ValueError(msg)
+                raise custom_class_error(node, 'leaf_prior_cov_inv')
             return module(node['cls'], **fields)
         elif type(node['items']) is dict:
             return dict(node, items={k: walk(v) for k, v in node['items'].items()})
@@ -292,10 +296,19 @@ def upgrade_sum_trees_prior(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arra
     return walk(root), {**old, **new}
 
 
+def has_peff(sums: Skeleton) -> bool:
+    """Whether `sums` is the skeleton of a dict with a `peff` item."""
+    return type(sums) is dict and sums['type'] == 'dict' and 'peff' in sums['items']
+
+
 def upgrade_peff_binary_mask(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
     """Rename the running sum `peff` to `var_perplexity`, and drop `Bart._binary_mask`.
 
     The latter is redundant with the MCMC state.
+
+    Only the classes of bartz, recognized by name, are converted. A custom
+    class with a `_binary_mask` field, or with a `peff` in a `sums` field,
+    e.g., a subclass of `Bart` or `StatsAccumulator`, raises `ValueError`.
     """
     dropped: set[str] = set()
 
@@ -316,6 +329,10 @@ def upgrade_peff_binary_mask(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arr
             elif node['cls'] == 'Bart':
                 dropped.add(fields['_binary_mask']['key'])
                 fields = {k: v for k, v in fields.items() if k != '_binary_mask'}
+            elif '_binary_mask' in fields:
+                raise custom_class_error(node, '_binary_mask')
+            elif has_peff(fields.get('sums')):
+                raise custom_class_error(node, 'sums')
             return module(node['cls'], **fields)
         elif type(node['items']) is dict:
             return dict(node, items={k: walk(v) for k, v in node['items'].items()})

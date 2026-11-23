@@ -1068,6 +1068,21 @@ class TestForbidX64:
                 f()
             assert (x + 1).dtype == jnp.float64
 
+    def test_user_code(self) -> None:
+        """User code inside can use 64-bit types under `enable_x64`, as the error says."""
+
+        def user_code(x64: bool) -> Float32[Array, '']:
+            with enable_x64(x64):
+                return jnp.zeros((), jnp.float64).astype(jnp.float32)
+
+        # nested, to check the advice is given once
+        f = jit(forbid_x64(forbid_x64(user_code)), static_argnums=0)
+        assert f(True).dtype == jnp.float32
+        with pytest.raises(ValueError, match='float64') as exc_info:
+            f(False)
+        notes = exc_info.value.__notes__  # jax may add its own
+        assert sum('jax.enable_x64(True)' in note for note in notes) == 1
+
 
 def make_broken_replicated_array(
     x: Shaped[Array, '*shape'], axis_name: str, mesh: Mesh

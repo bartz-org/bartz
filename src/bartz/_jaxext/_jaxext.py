@@ -141,6 +141,9 @@ def forbid_x64(fun: Callable[_P, _R]) -> Callable[_P, _R]:
     array, and runs/traces `fun` with ``jax_explicit_x64_dtypes='error'``, so
     that jax raises on most operations involving 64-bit arrays. Combined with
     `jit`, put it inside, to keep the methods of the jitted function.
+
+    User code called by `fun` can still use 64-bit types within
+    ``jax.enable_x64(True)``; the error raised by jax gets a note saying so.
     """
     signature = inspect.signature(fun)
 
@@ -162,7 +165,19 @@ def forbid_x64(fun: Callable[_P, _R]) -> Callable[_P, _R]:
                     )
                     raise TypeError(msg)
         with explicit_x64_dtypes('error'):
-            return fun(*args, **kw)
+            try:
+                return fun(*args, **kw)
+            except ValueError as exc:
+                note = (
+                    'bartz does not support 64-bit types. To use them in your '
+                    'own code called by bartz, e.g., a callback, wrap it in '
+                    '`with jax.enable_x64(True):` and convert the results to 32 '
+                    'bit within the block.'
+                )
+                notes = getattr(exc, '__notes__', ())
+                if 'Explicitly requested dtype' in str(exc) and note not in notes:
+                    exc.add_note(note)
+                raise
 
     return wrapper
 

@@ -70,8 +70,9 @@ def rebuild_derived_chain(state: StateT) -> StateT:
     """Implement `rebuild_derived` on a state without a chain axis."""
     forest = state.forest
     num_trees, *_, half_tree_size = forest.leaf_tree.shape
-    nodes = traverse_forest(state.X, forest.var_tree, forest.split_tree)
-    leaf_indices = node_to_leaf_index(nodes).astype(forest.leaf_indices.dtype)
+    leaf_indices = traverse_forest(
+        state.X, forest.var_tree, forest.split_tree, index_type='chain'
+    )
 
     reduce = partial(
         AutoBatchedReduction()._reduce,  # noqa: SLF001

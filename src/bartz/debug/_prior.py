@@ -430,8 +430,10 @@ class MinPointsCriterion(RejectionCriterion):
     def accept(self, sample: TreeStructure) -> Bool[Array, '']:
         """Check the tree has enough datapoints in its nodes."""
         (half_tree_size,) = sample.split_tree.shape
-        leaf_indices = traverse_forest(self.X, sample.var_tree, sample.split_tree)
-        count = jnp.zeros(2 * half_tree_size, jnp.int32).at[leaf_indices].add(1)
+        nodes = traverse_forest(
+            self.X, sample.var_tree, sample.split_tree, index_type='heap'
+        )
+        count = jnp.zeros(2 * half_tree_size, jnp.int32).at[nodes].add(1)
 
         ok = jnp.bool_(True)
         if self.min_points_per_decision_node is not None:

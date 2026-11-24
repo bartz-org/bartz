@@ -988,7 +988,7 @@ class TestLeafLayout:
     def test_evaluate(self, heaps: Heaps, keys: split) -> None:
         """Check `evaluate_forest` reads the value of the leaf each point falls into."""
         X = random.randint(keys.pop(), (3, 30), 0, 11, jnp.uint8)
-        nodes = traverse_forest(X, heaps.var_tree, heaps.split_tree)
+        nodes = traverse_forest(X, heaps.var_tree, heaps.split_tree, index_type='heap')
         expected = jnp.take_along_axis(heaps.leaf_tree, nodes, axis=-1)
         assert not jnp.isnan(expected).any()
         compressed = compress_leaf_tree(heaps.split_tree, heaps.leaf_tree)
@@ -1003,6 +1003,23 @@ class TestLeafLayout:
                 assert_array_equal(values[:, 1, :], -expected)
                 values = values[:, 0, :]
             assert_array_equal(values, expected)
+
+    def test_traverse_index_type(self, heaps: Heaps, keys: split) -> None:
+        """Check the 'chain' index of a leaf is the one of its value."""
+        X = random.randint(keys.pop(), (3, 30), 0, 11, jnp.uint8)
+        traverse = partial(traverse_forest, X, heaps.var_tree, heaps.split_tree)
+        _, half_tree_size = heaps.split_tree.shape
+        dtype = minimal_unsigned_dtype(half_tree_size - 1)
+        expected = node_to_leaf_index(traverse(index_type='heap'))
+        indices = traverse(index_type='chain')
+        assert indices.dtype == dtype
+        assert_array_equal(indices, expected)
+
+    def test_traverse_index_type_required(self, heaps: Heaps) -> None:
+        """Check the caller has to pick the index type."""
+        args = (jnp.zeros((3, 30), jnp.uint8), heaps.var_tree, heaps.split_tree)
+        with pytest.raises(TypeError, match='index_type'):
+            traverse_forest(*args)  # ty:ignore[missing-argument]
 
     def test_root_only(self) -> None:
         """Check heaps with room for the root only."""

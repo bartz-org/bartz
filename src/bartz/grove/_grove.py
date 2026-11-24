@@ -42,7 +42,6 @@ from bartz._jaxext import (
     jit,
     minimal_unsigned_arange,
     minimal_unsigned_dtype,
-    vmap_nodoc,
 )
 
 
@@ -216,6 +215,8 @@ def traverse_tree(
     x: UInt[Array, ' p'],
     var_tree: UInt[Array, ' half_tree_size'],
     split_tree: UInt[Array, ' half_tree_size'],
+    *,
+    index_type: Literal['heap', 'chain'],
 ) -> UInt[Array, '']:
     """
     Find the leaf where a point falls into.
@@ -228,10 +229,14 @@ def traverse_tree(
         The decision axes of the tree.
     split_tree
         The decision boundaries of the tree.
+    index_type
+        The convention of the returned index: 'heap' for the index of the leaf
+        node in the heap, 'chain' for the index of its value in
+        `TreeHeaps.leaf_tree`, see `node_to_leaf_index`.
 
     Returns
     -------
-    The index of the leaf in the heap, see `node_to_leaf_index` to read its value.
+    The index of the leaf, in the smallest unsigned integer type that fits it.
     """
     leaf_found = jnp.zeros((), bool)
     index = jnp.ones((), minimal_unsigned_dtype(2 * var_tree.size - 1))
@@ -246,14 +251,21 @@ def traverse_tree(
         child_index = (index << 1) + (x[var] >= split)
         index = jnp.where(leaf_found, index, child_index)
 
-    return index
+    if index_type == 'heap':
+        return index
+    else:
+        assert index_type == 'chain'
+        dtype = minimal_unsigned_dtype(var_tree.size - 1)
+        return node_to_leaf_index(index).astype(dtype)
 
 
-@jit
+@jit(static_argnames=('index_type',))
 def traverse_forest(
     X: UInt[Array, 'p n'],
     var_trees: UInt[Array, '*forest_shape half_tree_size'],
     split_trees: UInt[Array, '*forest_shape half_tree_size'],
+    *,
+    index_type: Literal['heap', 'chain'],
 ) -> UInt[Array, '*forest_shape n']:
     """
     Find the leaves where points falls into for each tree in a set.
@@ -266,23 +278,19 @@ def traverse_forest(
         The decision axes of the trees.
     split_trees
         The decision boundaries of the trees.
+    index_type
+        The convention of the returned index: 'heap' for the index of the leaf
+        node in the heap, 'chain' for the index of its value in
+        `TreeHeaps.leaf_tree`, see `node_to_leaf_index`.
 
     Returns
     -------
-    The indices of the leaves in the heaps.
+    The indices of the leaves, in the smallest unsigned integer type that fits them.
     """
-    return _traverse_forest(X, var_trees, split_trees)
-
-
-@partial(jnp.vectorize, excluded=(0,), signature='(hts),(hts)->(n)')
-@partial(vmap_nodoc, in_axes=(1, None, None))
-def _traverse_forest(
-    X: UInt[Array, ' p'],
-    var_trees: UInt[Array, ' half_tree_size'],
-    split_trees: UInt[Array, ' half_tree_size'],
-) -> UInt[Array, '']:
-    """Implement `traverse_forest`."""
-    return traverse_tree(X, var_trees, split_trees)
+    traverse = partial(traverse_tree, index_type=index_type)
+    traverse = vmap(traverse, in_axes=(1, None, None))
+    traverse = jnp.vectorize(traverse, excluded=(0,), signature='(hts),(hts)->(n)')
+    return traverse(X, var_trees, split_trees)
 
 
 @jit(static_argnames=('sum_batch_axis',))
@@ -318,13 +326,13 @@ def evaluate_forest(
     data units. ``trees.offset`` is not added: it does not distribute over the
     per-tree sum, so the caller adds it once to the total.
     """
-    nodes: UInt[Array, '*forest_shape n']
-    nodes = traverse_forest(X, trees.var_tree, trees.split_tree)
-
-    # xla is slower if it merges the traversal into the kernel that reads the
-    # leaves, in particular with vector leaves
     indices: UInt[Array, '*forest_shape n']
-    indices = lax.optimization_barrier(node_to_leaf_index(nodes))
+    indices = traverse_forest(X, trees.var_tree, trees.split_tree, index_type='chain')
+
+    # make xla finish the indices before it reads the leaves: left free, it
+    # merges the traversal into the kernel that reads them, which is slower,
+    # in particular with vector leaves
+    indices = lax.optimization_barrier(indices)
 
     is_mv = is_multivariate(trees)
 
@@ -712,7 +720,7 @@ def points_per_node_distr(
         split_tree: UInt[Array, '*batch_shape half_tree_size'],
     ) -> Int32[Array, '*reduced_batch_shape n_plus_1']:
         indices: UInt[Array, '*batch_shape n']
-        indices = traverse_forest(X, var_tree, split_tree)
+        indices = traverse_forest(X, var_tree, split_tree, index_type='heap')
 
         @partial(jnp.vectorize, signature='(hts),(n)->(ts_or_hts),(ts_or_hts)')
         def count_points(

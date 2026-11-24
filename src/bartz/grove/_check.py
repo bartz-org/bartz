@@ -98,9 +98,7 @@ def check_shapes(tree: TreeHeaps, _max_split: UInt[Array, ' p']) -> bool:
         tree.leaf_tree.ndim in (1, 2)
         and tree.var_tree.ndim == 1
         and tree.split_tree.ndim == 1
-        and tree.leaf_tree.shape[-1]
-        == 2 * tree.var_tree.size
-        == 2 * tree.split_tree.size
+        and tree.leaf_tree.shape[-1] == tree.var_tree.size == tree.split_tree.size
     )
 
 
@@ -281,7 +279,7 @@ def check_trace(
         TreesTrace(leaf_tree=l, var_tree=v, split_tree=s), max_split
     )
     is_mv = is_multivariate(trace)
-    signature = '(k,ts),(hts),(hts)->()' if is_mv else '(ts),(hts),(hts)->()'
+    signature = '(k,hts),(hts),(hts)->()' if is_mv else '(hts),(hts),(hts)->()'
     vec_check_tree = jnp.vectorize(unpack_check_tree, signature=signature)
 
     # automatically batch over all batch dimensions

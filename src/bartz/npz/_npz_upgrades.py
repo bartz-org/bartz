@@ -29,7 +29,7 @@ from collections.abc import Callable
 from typing import Any
 
 import numpy as np
-from jaxtyping import Bool, Shaped
+from jaxtyping import Bool, Shaped, UInt
 
 # the skeleton of an archive (see `bartz.npz._npz`), and the arrays it references
 Skeleton = Any
@@ -292,9 +292,124 @@ def upgrade_sum_trees_prior(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arra
     return walk(root), {**old, **new}
 
 
+def compress_leaf_tree(
+    split_tree: UInt[np.ndarray, '*batch_shape half_tree_size'],
+    leaf_tree: Shaped[np.ndarray, '*batch_shape 2*half_tree_size']
+    | Shaped[np.ndarray, '*batch_shape k 2*half_tree_size']
+    | Shaped[np.ndarray, '*batch_shape k k 2*half_tree_size'],
+) -> (
+    Shaped[np.ndarray, '*batch_shape half_tree_size']
+    | Shaped[np.ndarray, '*batch_shape k half_tree_size']
+    | Shaped[np.ndarray, '*batch_shape k k half_tree_size']
+):
+    """Pack values defined on the leaves of trees into arrays half as long.
+
+    The value of the leaf at index i goes to the index obtained shifting i
+    right until its lowest set bit is dropped, the other elements are zero.
+    """
+    *batch_shape, half_tree_size = split_tree.shape
+    leaf_ndim = leaf_tree.ndim - split_tree.ndim
+    split_tree = split_tree.reshape(*batch_shape, *(1,) * leaf_ndim, half_tree_size)
+
+    # an element takes the nodes reached going left from a right child or the
+    # root; visit them top-down, moving on to a node if it is below a decision
+    # node
+    out = leaf_tree[..., 1::2].copy()
+    stride = 2
+    while stride <= half_tree_size:
+        parent_is_decision = split_tree[..., stride // 2 :: stride] != 0
+        *_, size = parent_is_decision.shape
+        nodes = leaf_tree[..., stride :: 2 * stride]
+        out[..., :size] = np.where(parent_is_decision, nodes, out[..., :size])
+        stride *= 2
+
+    # the node at the top of element i is the right child of node i, or the root
+    top_in_tree = split_tree != 0
+    top_in_tree[..., 0] = True
+    return np.where(top_in_tree, out, np.zeros((), out.dtype))
+
+
+def compress_leaf_indices(
+    leaf_indices: UInt[np.ndarray, '*shape'], half_tree_size: int
+) -> UInt[np.ndarray, '*shape']:
+    """Convert the indices of leaves to those of their values after `compress_leaf_tree`."""
+    lowest_set_bit = leaf_indices & (~leaf_indices + 1)
+    out = leaf_indices // np.maximum(lowest_set_bit, 1) >> 1
+    dtypes = (np.uint8, np.uint16, np.uint32, np.uint64)
+    return out.astype(
+        next(dtype for dtype in dtypes if half_tree_size - 1 <= np.iinfo(dtype).max)
+    )
+
+
+# the classes with arrays over the leaves in bartz 0.14: the traces, with the
+# trees alone, and the one with also the datapoints
+WITH_LEAVES = ('MainTrace', 'MainTraceWithTrainPred')
+WITH_LEAVES_AND_DATA = 'Forest'
+
+
+def compress_leaves(old: Arrays, fields: dict[str, Skeleton]) -> Arrays:
+    """Convert the arrays over the leaves and datapoints of a forest or a trace.
+
+    In a forest, they follow the trees without the pending prunes applied.
+    """
+    split_tree = old[fields['split_tree']['key']]
+    *_, half_tree_size = split_tree.shape
+    new: Arrays = {}
+    if 'leaf_indices' in fields:
+        key = fields['leaf_indices']['key']
+        new[key] = compress_leaf_indices(old[key], half_tree_size)
+        to_prune = old[fields['to_prune']['key']]
+        move_node = old[fields['move_node']['key']]
+        is_move_node = np.arange(half_tree_size) == move_node[..., None]
+        split_tree = np.where(to_prune[..., None] & is_move_node, 1, split_tree)
+    for name in ('leaf_tree', 'count_tree', 'prec_tree'):
+        node = fields.get(name)
+        if node is not None:
+            new[node['key']] = compress_leaf_tree(split_tree, old[node['key']])
+    return new
+
+
+def upgrade_leaf_layout(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
+    """Halve the length of the arrays over the leaves.
+
+    These are `leaf_tree`, and in `Forest` also `count_tree` and `prec_tree`,
+    with `leaf_indices` pointing into them.
+
+    Only the classes of bartz, recognized by name, are converted. Any other
+    class with a `leaf_tree` field raises `ValueError`.
+    """
+    new: Arrays = {}
+
+    def walk(node: Skeleton) -> Skeleton:
+        if type(node) is list:
+            return [walk(v) for v in node]
+        elif type(node) is not dict or node['type'] == 'array':
+            return node
+        elif node['type'] == 'module':
+            fields = {k: walk(v) for k, v in node['fields'].items()}
+            if node['cls'] in (*WITH_LEAVES, WITH_LEAVES_AND_DATA):
+                new.update(compress_leaves(old, fields))
+            elif 'leaf_tree' in fields:
+                msg = (
+                    f'cannot load the custom class {node["cls"]!r} saved with '
+                    'bartz 0.14: its field `leaf_tree` needs a conversion known '
+                    'only for the classes of bartz'
+                )
+                raise ValueError(msg)
+            return module(node['cls'], **fields)
+        elif type(node['items']) is dict:
+            return dict(node, items={k: walk(v) for k, v in node['items'].items()})
+        else:
+            return dict(node, items=[walk(v) for v in node['items']])
+
+    return walk(root), {**old, **new}
+
+
 def upgrade_bartz_0_14(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arrays]:
     """Convert an archive written by bartz 0.14."""
-    return upgrade_sum_trees_prior(*upgrade_used_trees(root, old))
+    root, arrays = upgrade_used_trees(root, old)
+    root, arrays = upgrade_sum_trees_prior(root, arrays)
+    return upgrade_leaf_layout(root, arrays)
 
 
 # Step k converts format k to k+1. Steps are frozen once released. Use only

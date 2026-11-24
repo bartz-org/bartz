@@ -26,7 +26,6 @@
 
 from abc import abstractmethod
 from dataclasses import replace
-from functools import partial
 from typing import TypeVar
 
 from jax import numpy as jnp
@@ -35,7 +34,7 @@ from jax.sharding import Mesh
 from jaxtyping import Array, Float, Float32, Int32, UInt
 
 from bartz._jaxext import Module, field, jit
-from bartz.grove import is_actual_leaf
+from bartz.grove import is_leaf_used
 from bartz.mcmcstep import State
 from bartz.mcmcstep._axes import CHAIN_AXIS, chain_vmap_axes, chainful_axis
 from bartz.mcmcstep._state import used_trees_mask
@@ -81,7 +80,7 @@ class BurninTrace(Trace):
     # The union-free count diagnostics are declared before `error_cov_inv` (and
     # before `MainTrace.leaf_tree`) so they bind the variadic
     # `*chains_and_samples` axis first. Otherwise the runtime typechecker,
-    # evaluating the `... | ... k k` / `... | ... k tree_size` unions in a
+    # evaluating the `... | ... k k` / `... | ... k half_tree_size` unions in a
     # hash-randomized order, can mis-bind `*chains_and_samples` against the `k`
     # axis for a multivariate-without-chains trace (the layouts are
     # rank-ambiguous).
@@ -179,17 +178,18 @@ class MainTrace(BurninTrace):
     """MCMC trace with trees and diagnostic values."""
 
     leaf_tree: (
-        Float[Array, '*chains_and_samples num_trees tree_size']
-        | Float[Array, '*chains_and_samples num_trees k tree_size']
+        Float[Array, '*chains_and_samples num_trees half_tree_size']
+        | Float[Array, '*chains_and_samples num_trees k half_tree_size']
     ) = field(chains=CHAIN_AXIS, samples=0)
-    """The leaf values, in units of `leaf_unit`, zero on nodes that are not leaves."""
+    """The leaf values, in units of `leaf_unit`, laid out as in
+    `bartz.grove.TreeHeaps`, zero in the elements not in use."""
 
-    var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2'] = field(
+    var_tree: UInt[Array, '*chains_and_samples num_trees half_tree_size'] = field(
         chains=CHAIN_AXIS, samples=0
     )
     """The decision axes."""
 
-    split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2'] = field(
+    split_tree: UInt[Array, '*chains_and_samples num_trees half_tree_size'] = field(
         chains=CHAIN_AXIS, samples=0
     )
     """The decision boundaries."""
@@ -238,11 +238,9 @@ class MainTrace(BurninTrace):
 
     @jit(donate_argnums=0)
     def finalize(self) -> 'MainTrace':
-        """Zero the stale values on nodes that are not leaves, to make the trace compressible."""
-        is_leaf = jnp.vectorize(
-            partial(is_actual_leaf, add_bottom_level=True), signature='(h)->(t)'
-        )(self.split_tree)
-        if self.leaf_tree.ndim > is_leaf.ndim:  # multivariate, (..., k, tree_size)
+        """Zero the stale leaf values not in use, to make the trace compressible."""
+        is_leaf = is_leaf_used(self.split_tree)
+        if self.leaf_tree.ndim > is_leaf.ndim:  # multivariate, (..., k, hts)
             is_leaf = is_leaf[..., None, :]
         return replace(self, leaf_tree=jnp.where(is_leaf, self.leaf_tree, 0))
 

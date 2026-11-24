@@ -1222,7 +1222,7 @@ class Bart(Module):
         trace = self._main_trace
         trees = _trees_chain_first(trace)
         index = (i_chain, i_sample, i_tree) if trace.has_chains else (i_sample, i_tree)
-        # index the heap arrays, leaving the (unbatched) leaf scale alone; the
+        # index the tree arrays, leaving the (unbatched) leaf scale alone; the
         # trailing ellipsis covers the extra `k` axis of multivariate leaves
         trees = tree_at(
             lambda t: (t.var_tree, t.split_tree, t.leaf_tree),
@@ -1326,12 +1326,12 @@ def warn_byte_boundaries(
             'memory usage and running time. Consider using at most 255 cutpoints.'
         )
         warn(msg)
-    if maxdepth > 8:
+    if maxdepth > 9:
         msg = (
-            f'maxdepth={maxdepth} > 8 makes the leaf indices 16-bit instead of '
+            f'maxdepth={maxdepth} > 9 makes the leaf indices 16-bit instead of '
             '8-bit, increasing memory usage and running time. Consider using '
-            'maxdepth <= 8. Through bartz.stochtree.BARTModel, the equivalent '
-            'is mean_forest_params=dict(max_depth=7) in sample().'
+            'maxdepth <= 9. Through bartz.stochtree.BARTModel, the equivalent '
+            'is mean_forest_params=dict(max_depth=8) in sample().'
         )
         warn(msg)
 

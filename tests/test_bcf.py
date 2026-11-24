@@ -50,11 +50,10 @@ from bartz.bcf import BCFPrediction, bcf
 from bartz.bcf._state import BCFState, init_bcf, swap_mu_tau_forests
 from bartz.bcf._step import B_GAP, bcf_step, sample_gapped_normal
 from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
-from bartz.grove import evaluate_forest, is_actual_leaf
+from bartz.grove import evaluate_forest, is_leaf_used
 from bartz.mcmcloop import run_mcmc
 from bartz.mcmcstep import Forest, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes
-from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from bartz.prepcovars import UniqueQuantileBinner
 from bartz.testing import gen_data
 from tests.test_mcmcloop import assert_trace_close, cat_traces, zero_non_leaves
@@ -83,17 +82,14 @@ NSKIP = 2
 
 def prec_tree_from_scratch(
     forest: Forest, prec_scale: Shaped[ArrayLike, ' n']
-) -> Shaped[ArrayLike, 'num_trees 2*half_tree_size']:
-    """Sum `prec_scale` over the datapoints in each leaf of each tree."""
-    leaf_indices = apply_moves_to_leaf_indices(
-        forest.leaf_indices, forest.to_prune, forest.move_node
-    )
-    _, tree_size = forest.leaf_tree.shape
+) -> Shaped[ArrayLike, 'num_trees half_tree_size']:
+    """Sum `prec_scale` over the datapoints at each leaf index of each tree."""
+    _, half_tree_size = forest.leaf_tree.shape
 
-    def scatter(idx: Shaped[ArrayLike, ' n']) -> Shaped[ArrayLike, ' 2*half_tree_size']:
-        return jnp.zeros(tree_size).at[idx].add(prec_scale)
+    def scatter(idx: Shaped[ArrayLike, ' n']) -> Shaped[ArrayLike, ' half_tree_size']:
+        return jnp.zeros(half_tree_size).at[idx].add(prec_scale)
 
-    return vmap(scatter)(leaf_indices)
+    return vmap(scatter)(forest.leaf_indices)
 
 
 def check_chains_match(
@@ -866,9 +862,7 @@ class TestBcf:
             check_ks(f'{name} sum of trees precision', sum_prec, gamma_cdf)
 
             # the leaves are iid N(0, 1 / (num_trees * sum_prec)) given sum_prec
-            is_leaf = vmap(vmap(partial(is_actual_leaf, add_bottom_level=True)))(
-                forest.split_tree
-            )
+            is_leaf = is_leaf_used(forest.split_tree)
             _, num_trees, _ = forest.split_tree.shape
             scale = forest.leaf_unit * jnp.sqrt(num_trees * sum_prec)
             leaves = forest.leaf_tree * scale[:, None, None]
@@ -907,14 +901,8 @@ class TestBcf:
             assert forest.prec_tree is not None
             b_z = state.b[state.trt.astype(int)]
             expected = prec_tree_from_scratch(forest, jnp.square(b_z))
-            is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(
-                forest.split_tree
-            )
             assert_close_matrices(
-                jnp.where(is_leaf, forest.prec_tree, 0.0),
-                jnp.where(is_leaf, expected, 0.0),
-                rtol=1e-5,
-                err_msg=err_msg,
+                forest.prec_tree, expected, rtol=1e-5, err_msg=err_msg
             )
 
         check_tau_prec_tree(state, 'at init: ')

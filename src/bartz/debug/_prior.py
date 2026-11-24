@@ -537,8 +537,8 @@ def sample_leaves(
     key
         A jax random key.
     shape
-        The shape of the leaves, ``(*batch, tree_size)``, or ``(*batch, k,
-        tree_size)`` for vector-valued leaves.
+        The shape of the leaves, ``(*batch, half_tree_size)``, or ``(*batch,
+        k, half_tree_size)`` for vector-valued leaves.
     prec_chol
         The lower Cholesky factor of the prior precision of a leaf, a scalar
         square root for scalar leaves.

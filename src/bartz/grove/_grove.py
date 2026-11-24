@@ -30,9 +30,9 @@ from functools import partial
 from typing import Literal, Protocol, runtime_checkable
 
 from equinox import tree_at
+from jax import lax, vmap
 from jax import numpy as jnp
-from jax import vmap
-from jaxtyping import Array, Bool, Float, Float32, Int32, Shaped, UInt
+from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
 
 from bartz._jaxext import (
@@ -53,21 +53,24 @@ class TreeHeaps(Protocol):
     A tree is represented with arrays as a heap. The root node is at index 1.
     The children nodes of a node at index :math:`i` are at indices :math:`2i`
     (left child) and :math:`2i + 1` (right child). The array element at index 0
-    is unused.
+    is unused. Since the nodes at the bottom level can only be leaves and not
+    decision nodes, `var_tree` and `split_tree` stop at the level above.
 
-    Since the nodes at the bottom can only be leaves and not decision nodes,
-    `var_tree` and `split_tree` are half as long as `leaf_tree`.
+    `leaf_tree` is as long, with a different layout: a node and its left child
+    are never both leaves, so a right child (or the root) shares an element
+    with all the nodes reached from it by going left, see `node_to_leaf_index`.
 
     Arrays may have additional initial axes to represent multiple trees.
     """
 
     leaf_tree: (
-        Float[Array, '*batch_shape 2*half_tree_size']
-        | Float[Array, '*batch_shape k 2*half_tree_size']
+        Float[Array, '*batch_shape half_tree_size']
+        | Float[Array, '*batch_shape k half_tree_size']
     )
     """The values in the leaves of the trees. This array can be dirty, i.e.,
-    unused nodes can have whatever value. It may have an additional axis
-    for multivariate leaves. The dtype may be narrower than float32."""
+    elements not in use can have whatever value, see `is_leaf_used`. It may
+    have an additional axis for multivariate leaves. The dtype may be narrower
+    than float32."""
 
     var_tree: UInt[Array, '*batch_shape half_tree_size']
     """The axes along which the decision nodes operate. This array can be
@@ -112,10 +115,7 @@ class TreesTrace(Module):
     # otherwise the runtime typechecker (which evaluates union members in a
     # hash-randomized order) can mis-bind it against the `k` axis of
     # `leaf_tree`'s union for a multivariate tree (the layouts are
-    # rank-ambiguous). See `bartz.mcmcstep._state.Forest`. The leaf-bearing axis
-    # is `2*half_tree_size` rather than `tree_size`, so the half-of-leaf
-    # relationship is still checked here: `half_tree_size` is bound first by the
-    # anchors, then `leaf_tree` is checked against twice it.
+    # rank-ambiguous). See `bartz.mcmcstep._state.Forest`.
     var_tree: UInt[Array, '*batch_shape half_tree_size']
     """The axes along which the decision nodes operate. This array can be
     dirty but for the always unused node at index 0 which must be set to 0."""
@@ -127,12 +127,12 @@ class TreesTrace(Module):
     0. Unused nodes also have split set to 0. This array can't be dirty."""
 
     leaf_tree: (
-        Float[Array, '*batch_shape 2*half_tree_size']
-        | Float[Array, '*batch_shape k 2*half_tree_size']
+        Float[Array, '*batch_shape half_tree_size']
+        | Float[Array, '*batch_shape k half_tree_size']
     )
     """The values in the leaves of the trees. This array can be dirty, i.e.,
-    unused nodes can have whatever value. It may have an additional axis
-    for multivariate leaves."""
+    elements not in use can have whatever value. It may have an additional
+    axis for multivariate leaves."""
 
     leaf_unit: Float32[Array, ''] | Float32[Array, ' k'] = field(
         default_factory=lambda: jnp.float32(1.0)
@@ -155,6 +155,44 @@ class TreesTrace(Module):
             self,
             [getattr(obj, name) for name in names],
         )
+
+
+def node_to_leaf_index(node: Integer[Array, '*shape']) -> Integer[Array, '*shape']:
+    """
+    Return the index in `TreeHeaps.leaf_tree` of the value of a node.
+
+    Parameters
+    ----------
+    node
+        The index of the node in the heap, not 0.
+
+    Returns
+    -------
+    The index, which is `node` shifted right until its lowest set bit is dropped.
+    """
+    num_trailing_zeros = lax.population_count(~node & (node - 1))
+    return node >> num_trailing_zeros >> 1
+
+
+def is_leaf_used(
+    split_tree: UInt[Array, '*batch_shape half_tree_size'],
+) -> Bool[Array, '*batch_shape half_tree_size']:
+    """
+    Return a mask indicating the elements of `TreeHeaps.leaf_tree` in use.
+
+    Parameters
+    ----------
+    split_tree
+        The decision boundaries of the trees.
+
+    Returns
+    -------
+    The mask marking the elements that hold the value of a leaf.
+    """
+    # element i is for the leaf reached going left from the right child of
+    # node i, or from the root
+    *_, half_tree_size = split_tree.shape
+    return split_tree.astype(bool) | (jnp.arange(half_tree_size) == 0)
 
 
 def tree_depth(tree: Shaped[Array, '*batch_shape tree_size']) -> int:
@@ -193,7 +231,7 @@ def traverse_tree(
 
     Returns
     -------
-    The index of the leaf.
+    The index of the leaf in the heap, see `node_to_leaf_index` to read its value.
     """
     leaf_found = jnp.zeros((), bool)
     index = jnp.ones((), minimal_unsigned_dtype(2 * var_tree.size - 1))
@@ -231,7 +269,7 @@ def traverse_forest(
 
     Returns
     -------
-    The indices of the leaves.
+    The indices of the leaves in the heaps.
     """
     return _traverse_forest(X, var_trees, split_trees)
 
@@ -280,8 +318,13 @@ def evaluate_forest(
     data units. ``trees.offset`` is not added: it does not distribute over the
     per-tree sum, so the caller adds it once to the total.
     """
+    nodes: UInt[Array, '*forest_shape n']
+    nodes = traverse_forest(X, trees.var_tree, trees.split_tree)
+
+    # xla is slower if it merges the traversal into the kernel that reads the
+    # leaves, in particular with vector leaves
     indices: UInt[Array, '*forest_shape n']
-    indices = traverse_forest(X, trees.var_tree, trees.split_tree)
+    indices = lax.optimization_barrier(node_to_leaf_index(nodes))
 
     is_mv = is_multivariate(trees)
 
@@ -289,8 +332,8 @@ def evaluate_forest(
     bc_indices = indices[..., None, :, None] if is_mv else indices[..., None]
 
     bc_leaf_tree: (
-        Float[Array, '*forest_shape 1 tree_size']
-        | Float[Array, '*forest_shape k 1 tree_size']
+        Float[Array, '*forest_shape 1 half_tree_size']
+        | Float[Array, '*forest_shape k 1 half_tree_size']
     )
     bc_leaf_tree = (
         trees.leaf_tree[..., :, None, :] if is_mv else trees.leaf_tree[..., None, :]
@@ -477,10 +520,29 @@ def _format_values(values: Float[Array, ''] | Float[Array, ' k']) -> str:
 
 
 def _format_leaf(tree: TreeHeaps, index: int) -> str:
-    """Format the leaf value at `index` as ``<scale> * <leaf>``."""
+    """Format the leaf value of the node at `index` as ``<scale> * <leaf>``."""
     unit = _format_values(tree.leaf_unit)
-    leaf = _format_values(tree.leaf_tree[..., index])
+    lowest_set_bit = index & -index
+    leaf = _format_values(tree.leaf_tree[..., index // lowest_set_bit >> 1])
     return f'{unit} * {leaf}'
+
+
+def _format_node_contents(
+    tree: TreeHeaps, index: int, var: int, split: int, *, unused: bool
+) -> str:
+    """Format what the arrays hold for a node, in use or not."""
+    if unused:
+        category = 'unused'
+    elif split:
+        category = 'decision'
+    else:
+        category = 'leaf'
+    # the node is the first of its element of `leaf_tree` if it is the root, a
+    # right child, or below a decision node
+    if not split and (index % 2 or not unused):
+        return f'{category}({var}, {split}, {_format_leaf(tree, index)})'
+    else:
+        return f'{category}({var}, {split})'
 
 
 def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
@@ -492,6 +554,8 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         A single tree to format.
     print_all
         If `True`, also print the contents of unused node slots in the arrays.
+        An element of `leaf_tree` is printed at the first node of its own that
+        is not a decision node.
 
     Returns
     -------
@@ -504,7 +568,8 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     down = '┐'
     bottom = '╢'  # '┨' #
 
-    *_, tree_size = tree.leaf_tree.shape
+    *_, half_tree_size = tree.split_tree.shape
+    tree_size = 2 * half_tree_size
 
     def traverse_tree(
         lines: list[str],
@@ -526,13 +591,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         right_child = 2 * index + 1
 
         if print_all:
-            if unused:
-                category = 'unused'
-            elif is_leaf:
-                category = 'leaf'
-            else:
-                category = 'decision'
-            node_str = f'{category}({var}, {split}, {_format_leaf(tree, index)})'
+            node_str = _format_node_contents(tree, index, var, split, unused=unused)
         else:
             assert not unused
             if is_leaf:

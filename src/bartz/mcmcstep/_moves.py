@@ -57,6 +57,11 @@ class Moves(Module):
     operates on, stacked along the trailing axis. The parent is the leaf to
     grow or the node to prune."""
 
+    lr_leaves: Int32[Array, '*num_trees 2']
+    """The indices of the left and right child in the leaf arrays, see
+    `bartz.grove.node_to_leaf_index`. The parent, as a leaf, has the index of
+    the left child. Out of bounds if there is no node to operate on."""
+
     partial_ratio: Float32[Array, '*num_trees'] | None
     """A factor of the Metropolis-Hastings ratio of the move. It lacks the
     likelihood ratio, the probability of proposing the prune move, and the
@@ -227,6 +232,8 @@ def _propose_moves(
     # it: [left child, right child, node]
     node = jnp.where(grow, leaf_to_grow, node_to_prune)
     lrt_nodes = (node << jnp.array([1, 1, 0])) | jnp.array([0, 1, 0])
+    left_leaf = jnp.where(node < split_tree.size, grove.node_to_leaf_index(node), node)
+    lr_leaves = jnp.stack([left_leaf, node])
 
     # sample a decision rule for GROW; for PRUNE recover the rule already stored
     # at the node. `num_available_var` is the count of admissible variables at
@@ -273,6 +280,7 @@ def _propose_moves(
         grow=grow,
         num_growable=num_growable,
         lrt_nodes=lrt_nodes,
+        lr_leaves=lr_leaves,
         partial_ratio=ratio,
         log_trans_prior_ratio=None,  # will be set in complete_ratio
         grow_var=sampled_var,

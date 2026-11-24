@@ -36,6 +36,7 @@ import sys
 from argparse import ArgumentParser
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
+from functools import partial
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
@@ -45,15 +46,19 @@ import numpy as np
 import pandas as pd
 import pytest
 from jax import numpy as jnp
-from jax import random
-from jaxtyping import Array, Float32
+from jax import random, vmap
+from jaxtyping import Array, Float, Float32, UInt
 
 from bartz import Bart
-from bartz._jaxext import Module, split
+from bartz._jaxext import Module, minimal_unsigned_dtype, split
 from bartz.bcf import bcf
+from bartz.debug._prior import sample_forest_structure
+from bartz.debug._traceconv import compress_leaf_tree
+from bartz.grove import node_to_leaf_index
 from bartz.npz import serializable
 from bartz.npz._npz import FORMAT_VERSION, META_KEY, Json, decode, load_npz, save_npz
-from bartz.npz._npz_upgrades import upgrade_bartz_0_14, z_test
+from bartz.npz._npz_upgrades import compress_leaf_indices, upgrade_bartz_0_14, z_test
+from bartz.npz._npz_upgrades import compress_leaf_tree as upgrade_compress_leaf_tree
 from tests.util import assert_array_equal, assert_close_matrices
 
 ARCHIVE_DIR = Path(__file__).parent / 'npz'
@@ -377,6 +382,135 @@ def test_upgrade_sum_trees_prior_custom_class() -> None:
     assert root['cls'] == 'Holder'
     assert root['fields']['note'] == 'a'
     assert 'sum_trees_prior_cov_inv' in root['fields']['forest']['fields']
+
+
+def compress_vector_leaves(
+    split_tree: UInt[Array, '*trees half_tree_size'], leaf_tree: Float[Array, '...']
+) -> Float[Array, '...']:
+    """Apply `compress_leaf_tree` to each component of the leaves."""
+    func = partial(compress_leaf_tree, split_tree)
+    for _ in range(leaf_tree.ndim - split_tree.ndim):
+        func = vmap(func, in_axes=-2, out_axes=-2)
+    return func(leaf_tree)
+
+
+@pytest.mark.parametrize(
+    ('archive', 'traces'),
+    [
+        ('bart_v1.npz', ('_main_trace',)),
+        ('bcf_v1.npz', ('_main_trace/mu', '_main_trace/tau')),
+    ],
+)
+def test_upgrade_leaf_layout_traces(archive: str, traces: tuple[str, ...]) -> None:
+    """Check the leaves in the traces of older archives load in the current layout."""
+    match = ARCHIVE_NAME.fullmatch(archive)
+    assert match is not None
+    path = ARCHIVE_DIR / archive
+    model = MODELS[match['model']].cls.load_npz(path)
+    _, old = read_archive(path)
+    for key in traces:
+        trace: Any = model
+        for name in key.split('/'):
+            trace = getattr(trace, name)
+        leaf_tree = jnp.asarray(old[f'{key}/leaf_tree'])
+        assert trace.leaf_tree.shape[-1] == leaf_tree.shape[-1] // 2
+        assert_array_equal(
+            trace.leaf_tree,
+            compress_vector_leaves(trace.split_tree, leaf_tree),
+            err_msg=key,
+        )
+
+
+@pytest.mark.parametrize(
+    ('archive', 'forests'),
+    [('bart_v1.npz', ('forest',)), ('bcf_v1.npz', ('forest', 'forest_tau'))],
+)
+def test_upgrade_leaf_layout_state(archive: str, forests: tuple[str, ...]) -> None:
+    """Check the forests of older archives load consistent in the current layout."""
+    match = ARCHIVE_NAME.fullmatch(archive)
+    assert match is not None
+    path = ARCHIVE_DIR / archive
+    state = MODELS[match['model']].cls.load_npz(path)._mcmc_state
+    assert state is not None
+    _, old = read_archive(path)
+    num_pending = 0
+    for name in forests:
+        forest = getattr(state, name)
+        *_, half_tree_size = forest.split_tree.shape
+        num_pending += forest.to_prune.sum()
+
+        # the leaf indices get to the same leaf values
+        assert forest.leaf_indices.dtype == jnp.uint8
+        old_values = jnp.take_along_axis(
+            old[f'_mcmc_state/{name}/leaf_tree'],
+            old[f'_mcmc_state/{name}/leaf_indices'],
+            axis=-1,
+        )
+        values = jnp.take_along_axis(forest.leaf_tree, forest.leaf_indices, axis=-1)
+        assert_array_equal(values, old_values, err_msg=name)
+
+        # the caches match the leaf indices
+        count = jnp.vectorize(
+            partial(jnp.bincount, length=half_tree_size), signature='(n)->(h)'
+        )
+        if forest.count_tree is not None:
+            assert_array_equal(
+                forest.count_tree,
+                count(forest.leaf_indices).astype(jnp.uint32),
+                err_msg=name,
+            )
+        if forest.prec_tree is not None:
+            old_prec = jnp.take_along_axis(
+                old[f'_mcmc_state/{name}/prec_tree'],
+                old[f'_mcmc_state/{name}/leaf_indices'],
+                axis=-1,
+            )
+            prec = jnp.take_along_axis(forest.prec_tree, forest.leaf_indices, axis=-1)
+            assert_array_equal(prec, old_prec, err_msg=name)
+            empty = count(forest.leaf_indices) == 0
+            assert not jnp.any(forest.prec_tree[empty]), name
+
+    # the check covers trees with a prune yet to be applied to the leaf indices
+    assert num_pending > 0
+
+
+def test_upgrade_leaf_layout_custom_class() -> None:
+    """Check a custom class with leaves is refused, e.g., a trace of trees only."""
+    meta, old = read_archive(ARCHIVE_DIR / 'bart_v1.npz')
+    trace = meta['root']['fields']['_main_trace']
+    names = ('leaf_tree', 'var_tree', 'split_tree')
+    custom = dict(trace, cls='Custom', fields={k: trace['fields'][k] for k in names})
+    with pytest.raises(ValueError, match=r"'Custom'.+`leaf_tree` needs a conversion"):
+        upgrade_bartz_0_14(custom, old)
+
+
+@pytest.mark.parametrize('kshape', [(), (2,), (2, 2)])
+def test_upgrade_compress_leaf_tree(keys: split, kshape: tuple[int, ...]) -> None:
+    """Check the conversion of the leaves on trees deeper than the archives'."""
+    maxdepth = 6
+    shape = (3, 50)
+    split_tree = sample_forest_structure(
+        keys.pop(),
+        shape,
+        max_split=jnp.full(3, 10, jnp.uint8),
+        p_nonterminal=jnp.full(maxdepth - 1, 0.8),
+    ).split_tree
+    leaf_tree = random.normal(keys.pop(), (*shape, *kshape, 2**maxdepth), jnp.float16)
+    assert_array_equal(
+        upgrade_compress_leaf_tree(np.asarray(split_tree), np.asarray(leaf_tree)),
+        compress_vector_leaves(split_tree, leaf_tree),
+    )
+
+
+@pytest.mark.parametrize(
+    ('half_tree_size', 'dtype'), [(32, np.uint8), (256, np.uint16), (512, np.uint16)]
+)
+def test_upgrade_compress_leaf_indices(half_tree_size: int, dtype: type) -> None:
+    """Check the conversion of the leaf indices, and their type."""
+    nodes = np.arange(1, 2 * half_tree_size, dtype=dtype)
+    indices = compress_leaf_indices(nodes, half_tree_size)
+    assert indices.dtype == minimal_unsigned_dtype(half_tree_size - 1)
+    assert_array_equal(indices, node_to_leaf_index(jnp.asarray(nodes)), strict=False)
 
 
 def test_bartz_0_13_stored_values() -> None:

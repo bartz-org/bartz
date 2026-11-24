@@ -25,6 +25,7 @@
 """Test `bartz.debug`."""
 
 from collections import namedtuple
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
@@ -60,7 +61,18 @@ from bartz.debug._prior import (
     sample_theta,
     sample_wishart,
 )
-from bartz.grove import TreesTrace, check_trace, describe_error, format_tree
+from bartz.debug._traceconv import compress_leaf_tree
+from bartz.grove import (
+    TreesTrace,
+    check_trace,
+    describe_error,
+    evaluate_forest,
+    format_tree,
+    is_actual_leaf,
+    is_leaf_used,
+    node_to_leaf_index,
+    traverse_forest,
+)
 from bartz.grove._check import check_tree
 from bartz.mcmcloop import compute_varcount, evaluate_trace
 from bartz.mcmcstep import DiagWishart, State, Wishart, init, make_p_nonterminal
@@ -136,14 +148,16 @@ def test_format_tree_print_all() -> None:
     tree = manual_tree(
         [[1.0], [2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], [[4], [1, 2]], [[15], [0, 3]]
     )
+    # the leaf value not in use, that would be of the right child of node 2
+    tree = tree_at(lambda t: t.leaf_tree, tree, tree.leaf_tree.at[2].set(5.0))
     s = format_tree(tree, print_all=True)
     print(s)
     ref_s = """\
- 1 ┐decision(4, 15, 1.00000 * 1.00000)
+ 1 ┐decision(4, 15)
  2 ├──┐leaf(1, 0, 1.00000 * 2.00000)
- 4 │  ├── unused(0, 0, 1.00000 * 4.00000)
+ 4 │  ├── unused(0, 0)
  5 │  └── unused(0, 0, 1.00000 * 5.00000)
- 3 └──┐decision(2, 3, 1.00000 * 3.00000)
+ 3 └──┐decision(2, 3)
  6    ├── leaf(0, 0, 1.00000 * 6.00000)
  7    └── leaf(0, 0, 1.00000 * 7.00000)"""
     assert s == ref_s
@@ -227,9 +241,9 @@ class TestSampleForest:
             p_nonterminal=args.p_nonterminal,
             log_s=args.log_s,
         )
-        tree_size = 2 ** (args.p_nonterminal.size + 1)
+        half_tree_size = 2**args.p_nonterminal.size
         leaf_tree = sample_leaves(
-            keys.pop(), (*shape, tree_size), jnp.reciprocal(args.sigma_mu)
+            keys.pop(), (*shape, half_tree_size), jnp.reciprocal(args.sigma_mu)
         )
         return TreesTrace(
             leaf_tree=leaf_tree, var_tree=trees.var_tree, split_tree=trees.split_tree
@@ -240,7 +254,7 @@ class TestSampleForest:
         trees = self.sample(args)
         batch_shape = (args.trace_length, args.num_trees)
         heap_size = 2 ** (args.p_nonterminal.size + 1)
-        assert trees.leaf_tree.shape == (*batch_shape, heap_size)
+        assert trees.leaf_tree.shape == (*batch_shape, heap_size // 2)
         assert trees.var_tree.shape == (*batch_shape, heap_size // 2)
         assert trees.split_tree.shape == (*batch_shape, heap_size // 2)
         bad = check_trace(trees, args.max_split)
@@ -772,7 +786,7 @@ class TestCheckTree:
     def _zeros_tree() -> TreesTrace:
         """Return an all-zeros (single-leaf) depth-3 tree, valid by construction."""
         return TreesTrace(
-            leaf_tree=jnp.zeros(8),
+            leaf_tree=jnp.zeros(4),
             var_tree=jnp.zeros(4, jnp.uint8),
             split_tree=jnp.zeros(4, jnp.uint8),
         )
@@ -812,12 +826,12 @@ class TestCheckTree:
 
     def test_shapes_leaf_3d(self) -> None:
         """A 3D `leaf_tree` trips `check_shapes`."""
-        tree = tree_at(lambda t: t.leaf_tree, self._zeros_tree(), jnp.zeros((1, 1, 8)))
+        tree = tree_at(lambda t: t.leaf_tree, self._zeros_tree(), jnp.zeros((1, 1, 4)))
         assert self._describe(tree, self._MS) == ['check_shapes']
 
     def test_shapes_leaf_size_mismatch(self) -> None:
-        """`leaf_tree.shape[-1] != 2 * var_tree.size` trips `check_shapes`."""
-        tree = tree_at(lambda t: t.leaf_tree, self._zeros_tree(), jnp.zeros(16))
+        """`leaf_tree.shape[-1] != var_tree.size` trips `check_shapes`."""
+        tree = tree_at(lambda t: t.leaf_tree, self._zeros_tree(), jnp.zeros(8))
         assert self._describe(tree, self._MS) == ['check_shapes']
 
     def test_unused_node_var(self) -> None:
@@ -846,13 +860,13 @@ class TestCheckTree:
 
     def test_leaf_values_nan(self) -> None:
         """A NaN leaf trips `check_leaf_values`."""
-        leaf = jnp.zeros(8).at[1].set(jnp.nan)
+        leaf = jnp.zeros(4).at[1].set(jnp.nan)
         tree = tree_at(lambda t: t.leaf_tree, self._zeros_tree(), leaf)
         assert self._describe(tree, self._MS) == ['check_leaf_values']
 
     def test_leaf_values_inf(self) -> None:
         """An infinite leaf trips `check_leaf_values`."""
-        leaf = jnp.zeros(8).at[3].set(jnp.inf)
+        leaf = jnp.zeros(4).at[3].set(jnp.inf)
         tree = tree_at(lambda t: t.leaf_tree, self._zeros_tree(), leaf)
         assert self._describe(tree, self._MS) == ['check_leaf_values']
 
@@ -880,7 +894,7 @@ class TestCheckTree:
         ancestor constraint without breaking any other invariant.
         """
         tree = TreesTrace(
-            leaf_tree=jnp.zeros(8),
+            leaf_tree=jnp.zeros(4),
             var_tree=jnp.zeros(4, jnp.uint8),
             split_tree=jnp.array([0, 5, 8, 0], jnp.uint8),
         )
@@ -889,7 +903,7 @@ class TestCheckTree:
     def test_var_in_bounds(self) -> None:
         """A variable index >= `max_split.size` on a decision node trips `check_var_in_bounds`."""
         tree = TreesTrace(
-            leaf_tree=jnp.zeros(8),
+            leaf_tree=jnp.zeros(4),
             var_tree=jnp.array([0, 2, 0, 0], jnp.uint8),
             split_tree=jnp.array([0, 5, 0, 0], jnp.uint8),
         )
@@ -898,7 +912,7 @@ class TestCheckTree:
     def test_split_in_bounds(self) -> None:
         """A split above `max_split[var]` trips `check_split_in_bounds`."""
         tree = TreesTrace(
-            leaf_tree=jnp.zeros(8),
+            leaf_tree=jnp.zeros(4),
             var_tree=jnp.zeros(4, jnp.uint8),
             split_tree=jnp.array([0, 20, 0, 0], jnp.uint8),
         )
@@ -907,6 +921,95 @@ class TestCheckTree:
     def test_valid_tree_passes(self) -> None:
         """Sanity: the base all-zeros tree triggers no checks."""
         assert self._describe(self._zeros_tree(), self._MS) == []
+
+
+class Heaps(NamedTuple):
+    """Trees with the leaf values indexed like the nodes."""
+
+    var_tree: UInt8[Array, 'num_trees half_tree_size']
+    split_tree: UInt8[Array, 'num_trees half_tree_size']
+    leaf_tree: Float32[Array, 'num_trees 2*half_tree_size']
+    is_leaf: Bool[Array, 'num_trees 2*half_tree_size']
+
+
+class TestLeafLayout:
+    """Test the layout of `TreeHeaps.leaf_tree` and its conversion functions."""
+
+    @pytest.fixture(params=[2, 6])
+    def heaps(self, request: pytest.FixtureRequest, keys: split) -> Heaps:
+        """Sample trees, with nan on the nodes that are not leaves."""
+        maxdepth = request.param
+        shape = (100,)
+        structure = sample_forest_structure(
+            keys.pop(),
+            shape,
+            max_split=jnp.full(3, 10, jnp.uint8),
+            p_nonterminal=jnp.full(maxdepth - 1, 0.8),
+        )
+        leaf_tree = random.normal(keys.pop(), (*shape, 2**maxdepth))
+        is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(
+            structure.split_tree
+        )
+        return Heaps(
+            var_tree=structure.var_tree,
+            split_tree=structure.split_tree,
+            leaf_tree=jnp.where(is_leaf, leaf_tree, jnp.nan),
+            is_leaf=is_leaf,
+        )
+
+    @pytest.mark.parametrize('dtype', [jnp.uint8, jnp.uint16, jnp.int32, jnp.uint32])
+    def test_node_to_leaf_index(self, dtype: type) -> None:
+        """Check a node goes to its index shifted until the lowest set bit drops."""
+        nodes = numpy.arange(1, min(2**12, jnp.iinfo(dtype).max + 1))
+        expected = [node >> (node & -node).bit_length() for node in nodes.tolist()]
+        indices = node_to_leaf_index(jnp.asarray(nodes, dtype))
+        assert_array_equal(indices, jnp.asarray(expected, dtype))
+
+    def test_children(self) -> None:
+        """Check a left child keeps the index of its parent, and a right child takes its number."""
+        nodes = jnp.arange(1, 2**10)
+        assert_array_equal(node_to_leaf_index(2 * nodes), node_to_leaf_index(nodes))
+        assert_array_equal(node_to_leaf_index(2 * nodes + 1), nodes)
+
+    def test_index(self, heaps: Heaps) -> None:
+        """Check each leaf has its own element, and the others are marked not in use."""
+        leaf_tree = jnp.where(heaps.is_leaf, heaps.leaf_tree, 0)
+        _, tree_size = leaf_tree.shape
+        indices = node_to_leaf_index(jnp.arange(1, tree_size))
+        expected = jnp.zeros_like(heaps.split_tree, jnp.float32)
+        expected = expected.at[:, indices].add(leaf_tree[:, 1:])
+        count = jnp.zeros_like(heaps.split_tree, int)
+        count = count.at[:, indices].add(heaps.is_leaf[:, 1:])
+        assert_array_equal(count, is_leaf_used(heaps.split_tree).astype(int))
+
+        compressed = compress_leaf_tree(heaps.split_tree, heaps.leaf_tree)
+        assert_array_equal(compressed, expected)
+
+    def test_evaluate(self, heaps: Heaps, keys: split) -> None:
+        """Check `evaluate_forest` reads the value of the leaf each point falls into."""
+        X = random.randint(keys.pop(), (3, 30), 0, 11, jnp.uint8)
+        nodes = traverse_forest(X, heaps.var_tree, heaps.split_tree)
+        expected = jnp.take_along_axis(heaps.leaf_tree, nodes, axis=-1)
+        assert not jnp.isnan(expected).any()
+        compressed = compress_leaf_tree(heaps.split_tree, heaps.leaf_tree)
+        for leaf_tree in (compressed, jnp.stack((compressed, -compressed), axis=-2)):
+            trees = TreesTrace(
+                leaf_tree=leaf_tree,
+                var_tree=heaps.var_tree,
+                split_tree=heaps.split_tree,
+            )
+            values = evaluate_forest(X, trees)
+            if leaf_tree.ndim > compressed.ndim:
+                assert_array_equal(values[:, 1, :], -expected)
+                values = values[:, 0, :]
+            assert_array_equal(values, expected)
+
+    def test_root_only(self) -> None:
+        """Check heaps with room for the root only."""
+        split_tree = jnp.zeros(1, jnp.uint8)
+        compressed = compress_leaf_tree(split_tree, jnp.array([jnp.nan, 3.0]))
+        assert_array_equal(compressed, jnp.array([3.0]))
+        assert_array_equal(is_leaf_used(split_tree), jnp.array([True]))
 
 
 BART3_DATA = Path(__file__).parent / 'data' / 'bart3'
@@ -980,8 +1083,8 @@ class TestTreesBARTToBartz:
             bart3_fit.trees, offset=bart3_fit.offset, min_maxdepth=maxdepth
         )
         assert meta.heap_size < 2**maxdepth
-        *_, heap_size = trace.leaf_tree.shape
-        assert heap_size == 2**maxdepth
+        *_, half_heap_size = trace.leaf_tree.shape
+        assert 2 * half_heap_size == 2**maxdepth
         self.check(bart3_fit, trace, meta)
 
     @pytest.mark.parametrize(

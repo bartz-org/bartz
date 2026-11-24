@@ -227,9 +227,9 @@ def init_bcf(
     # rather than from the missingness mask used by the tau init
     forest_tau = state_tau.forest
     assert forest_tau.prec_tree is not None
-    *_, tree_size = forest_tau.prec_tree.shape
+    *_, half_tree_size = forest_tau.prec_tree.shape
     b_z = coding_basis(b_init, trt_array)
-    prec_tree = initial_prec_tree((num_trees_tau, tree_size), jnp.square(b_z))
+    prec_tree = initial_prec_tree((num_trees_tau, half_tree_size), jnp.square(b_z))
     forest_tau = replace(
         forest_tau,
         prec_tree=jnp.broadcast_to(prec_tree, (*chain_shape, *prec_tree.shape)),

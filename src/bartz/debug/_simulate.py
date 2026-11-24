@@ -297,8 +297,8 @@ def sample_precision(
 
 
 def to_leaf_storage(
-    leaves: Float32[Array, 'num_trees *k tree_size'], state: State
-) -> Float[Array, 'num_trees *k tree_size']:
+    leaves: Float32[Array, 'num_trees *k half_tree_size'], state: State
+) -> Float[Array, 'num_trees *k half_tree_size']:
     """Convert the leaves to the storage units and dtype of `Forest.leaf_tree`."""
     forest = state.forest
     leaves /= forest.leaf_unit[..., None]

@@ -92,13 +92,12 @@ from bartz._jaxext import (
     split,
 )
 from bartz._typing import kwdict
-from bartz.grove import describe_error, is_actual_leaf
+from bartz.grove import describe_error
 from bartz.mcmcloop import Callback, MainTrace, MainTraceWithTrainPred, VarprobInState
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import BatchedReduction, Forest, State, Wishart, step
 from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
-from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from bartz.npz import serializable
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from bartz.testing import DiscreteUniform, Gamma, gen_data
@@ -379,7 +378,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     binner=partial(RangeEvenBinner, max_bins=257),
                     # > 256 to use uint16 for X and split_trees
                     num_chains=None,
-                    maxdepth=9,  # > 8 to use uint16 for leaf_indices
+                    maxdepth=10,  # > 9 to use uint16 for leaf_indices
                     init_kw=dict(
                         resid_reduction_config=BatchedReduction(num_batches=None),
                         count_reduction_config=BatchedReduction(num_batches=None),
@@ -461,7 +460,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     ),
                     num_chains=2,
                     num_chain_devices=min(2, get_device_count()),
-                    maxdepth=8,  # 8 to check if leaf_indices changes type too soon
+                    maxdepth=9,  # 9 to check if leaf_indices changes type too soon
                     init_kw=dict(
                         save_ratios=True,
                         resid_reduction_config=BatchedReduction(num_batches=16),
@@ -505,7 +504,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     binner=partial(RangeEvenBinner, max_bins=257),
                     # > 256 to use uint16 for X and split_trees
                     num_chains=None,
-                    maxdepth=9,  # > 8 to use uint16 for leaf_indices
+                    maxdepth=10,  # > 9 to use uint16 for leaf_indices
                     # request the (already) default device explicitly, to
                     # exercise the explicit-device paths (`Bart._device`)
                     # without changing placement or compilation
@@ -611,7 +610,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     ),
                     num_chains=2,
                     num_chain_devices=min(2, get_device_count()),
-                    maxdepth=8,  # 8 to check if leaf_indices changes type too soon
+                    maxdepth=9,  # 9 to check if leaf_indices changes type too soon
                     precompute_predict_train=True,
                     init_kw=dict(
                         save_ratios=True,
@@ -1024,13 +1023,13 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     """Multivariate leaf draws must carry the full leaf-prior covariance.
 
     A strongly informative, correlated leaf prior makes the likelihood
-    negligible, so every heap node is resampled essentially from its prior
-    ``N(0, leaf_prior_cov)`` each sweep. Nodes that are not actual leaves carry
-    zero likelihood precision, hence are drawn exactly from the prior; pooling
-    every heap node of the final state (over chains, trees, and positions) thus
-    estimates ``leaf_prior_cov`` with ~``tree_size`` times more draws than the
-    actual leaves alone, at no extra sampling cost. The trace can not be used
-    because it zeroes the nodes that are not leaves.
+    negligible, so every leaf value is resampled essentially from its prior
+    ``N(0, leaf_prior_cov)`` each sweep. The ones not in use carry zero
+    likelihood precision, hence are drawn exactly from the prior; pooling all
+    those of the final state (over chains, trees, and positions) thus
+    estimates ``leaf_prior_cov`` with many more draws than the actual leaves
+    alone, at no extra sampling cost. The trace can not be used because it
+    zeroes the values not in use.
 
     This catches sampling the leaf noise with a wrong covariance, e.g. as
     ``z / diag(L)`` instead of ``L^-T z`` (a `solve_triangular` missing
@@ -1061,9 +1060,9 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     )
     bart = Bart(**kw)
 
-    # pool every heap node (each an independent prior draw) over chains, trees,
-    # and positions; leaf_tree is (..., k, tree_size), stored in prior-sd units,
-    # so convert it to data units first
+    # pool every leaf value (each a prior draw) over chains, trees, and
+    # positions; the leaf tree has the outcome components on its second to last
+    # axis, and is stored in prior-sd units, so convert it to data units first
     forest = bart._mcmc_state.forest
     leaf_tree = forest.leaf_unit[..., None] * forest.leaf_tree
     leaves = jnp.moveaxis(leaf_tree, -2, -1).reshape(-1, k)
@@ -1798,7 +1797,7 @@ def test_leaf_quantization(bkw: BartKW, keys: split) -> None:
     state = step(keys.pop(), state)
 
     # align the (*chains, [k]) quantum with the (*chains, num_trees, [k,]
-    # tree_size) leaves
+    # half_tree_size) leaves
     if state.resid_unit.ndim:
         quantum = quantum[..., None, :, None]
     else:
@@ -2196,12 +2195,11 @@ def test_precompute_predict_train(bkw: BartKW, subtests: SubTests) -> None:
 
 
 def test_count_prec_tree_caches_valid(bkw: BartKW, subtests: SubTests) -> None:
-    """The cached `count_tree`/`prec_tree` stay valid at the actual leaves.
+    """The cached `count_tree`/`prec_tree` stay consistent with `leaf_indices`.
 
     `step` updates the cached per-leaf counts and precision sums only at the
-    nodes involved in the moves; after the MCMC run, at every actual leaf,
-    they must match a from-scratch reduction over the datapoints (entries
-    elsewhere may be dirty).
+    leaves involved in the moves; after the MCMC run, they must match a
+    from-scratch reduction over the datapoints.
     """
     bart = Bart(**bkw.kw)
     state = bart._mcmc_state
@@ -2218,43 +2216,35 @@ def test_count_prec_tree_caches_valid(bkw: BartKW, subtests: SubTests) -> None:
 
     # flatten the chain axis (if any) into the tree axis
     _, n = state.X.shape
-    half = forest.split_tree.shape[-1]
-    split_tree = forest.split_tree.reshape(-1, half)
     leaf_indices = chain_to_axis(
         forest.leaf_indices, chain_vmap_axes(forest).leaf_indices
     ).reshape(-1, n)
-    # apply the prunes left pending by the last step, so the indices point to
-    # the actual leaves
-    leaf_indices = apply_moves_to_leaf_indices(
-        leaf_indices, forest.to_prune.reshape(-1), forest.move_node.reshape(-1)
-    )
 
-    # mask of the actual leaves over the full heap, per tree
-    leaf_mask = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
-    # sanity: the trees do grow beyond the root (else the check is vacuous)
-    assert jnp.any(leaf_mask[..., 2:])
+    # sanity: the trees do grow beyond the root (else the check is vacuous),
+    # and some prunes are pending, in which case the caches keep the children
+    assert jnp.any(forest.split_tree)
+    assert jnp.any(forest.to_prune)
 
     def check_cache(
-        cache: Shaped[Array, '#chains_x_trees *k_k 2*half'],
+        cache: Shaped[Array, '#chains_x_trees *k_k half'],
         values: int | Float32[Array, ' n'] | Float32[Array, 'k k n'],
         comparison: Callable[..., None],
     ) -> None:
         # the fresh value is a from-scratch reduction over the datapoints, the
         # same baseline `TestReduction` checks the optimized reductions against
-        *_, tree_size = cache.shape
+        *_, half = cache.shape
         core = jnp.asarray(values).shape[:-1]
-        cache = cache.reshape(-1, *core, tree_size)
+        cache = cache.reshape(-1, *core, half)
         fresh = vmap(
             partial(
                 reduce_reference,
                 values,
-                size=tree_size,
+                size=half,
                 dtype=cache.dtype,
                 data_sharded=False,
             )
         )(leaf_indices)
-        mask = leaf_mask.reshape(-1, *(1,) * len(core), tree_size)
-        comparison(jnp.where(mask, cache, 0), jnp.where(mask, fresh, 0))
+        comparison(cache, fresh)
 
     with subtests.test('values'):
         if forest.count_tree is not None:
@@ -3194,12 +3184,12 @@ def test_automatic_integer_types(bkw: BartKW) -> None:
     def select_type(cond: bool) -> DTypeLike:
         return jnp.uint8 if cond else jnp.uint16
 
-    leaf_indices_type = select_type(bkw.maxdepth <= 8)
+    leaf_indices_type = select_type(bkw.maxdepth <= 9)
     split_trees_type = X_type = select_type(bkw.max_bins <= 256)
 
     # warn when exceeding one byte, except for `p`, which is not a setting
     assert any('cutpoints' in m for m in messages) == (bkw.max_bins > 256)
-    assert any('maxdepth' in m for m in messages) == (bkw.maxdepth > 8)
+    assert any('maxdepth' in m for m in messages) == (bkw.maxdepth > 9)
     var_trees_type = select_type(bkw.p <= 256)
 
     assert bart._mcmc_state.forest.var_tree.dtype == var_trees_type

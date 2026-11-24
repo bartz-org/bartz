@@ -35,6 +35,7 @@ from jaxtyping import Array, Float, Float32, UInt
 
 from bartz._jaxext import Module, field, minimal_unsigned_dtype
 from bartz.BART._gbart import FloatLike
+from bartz.grove import is_leaf_used
 
 
 def _get_next_line(s: str, i: int) -> tuple[str, int]:
@@ -142,9 +143,9 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
 class MinimalTrace(Module):
     """A minimal trace of trees, compatible with `bartz.mcmcloop.evaluate_trace`."""
 
-    leaf_tree: Float[Array, 'ndpost ntree tree_size'] = field(samples=0)
-    var_tree: UInt[Array, 'ndpost ntree tree_size//2'] = field(samples=0)
-    split_tree: UInt[Array, 'ndpost ntree tree_size//2'] = field(samples=0)
+    leaf_tree: Float[Array, 'ndpost ntree half_tree_size'] = field(samples=0)
+    var_tree: UInt[Array, 'ndpost ntree half_tree_size'] = field(samples=0)
+    split_tree: UInt[Array, 'ndpost ntree half_tree_size'] = field(samples=0)
     offset: Float32[Array, '']
     """Constant shift added to the scaled sum of trees."""
 
@@ -156,6 +157,29 @@ class MinimalTrace(Module):
 
     mesh: ClassVar[Mesh | None] = None
     """No device mesh; the trees are host-built and unsharded."""
+
+
+def compress_leaf_tree(
+    split_tree: UInt[Array, '*batch_shape half_tree_size'],
+    leaf_tree: Float[Array, '*batch_shape 2*half_tree_size'],
+) -> Float[Array, '*batch_shape half_tree_size']:
+    """Move leaf values from their node indices to the layout of `TreeHeaps.leaf_tree`."""
+    *_, half_tree_size = split_tree.shape
+
+    # an element takes the nodes reached going left from a right child or the
+    # root; visit them bottom-up, keeping what is below a node if it is a
+    # decision node
+    out = leaf_tree[..., :0]
+    stride = half_tree_size
+    while stride:
+        nodes = leaf_tree[..., stride :: 2 * stride]
+        is_decision = split_tree[..., stride :: 2 * stride].astype(bool)
+        *_, size = is_decision.shape  # the other nodes are at the bottom level
+        upper = jnp.where(is_decision, out, nodes[..., :size])
+        out = jnp.concatenate((upper, nodes[..., size:]), axis=-1)
+        stride //= 2
+
+    return jnp.where(is_leaf_used(split_tree), out, 0)
 
 
 def trees_BART_to_bartz(
@@ -232,10 +256,11 @@ def trees_BART_to_bartz(
             is_internal[0] = False
             split_trees[i_iter, i_tree, ~is_internal] = 0
 
+    split_tree = jnp.array(split_trees)
     return MinimalTrace(
-        leaf_tree=jnp.array(leaf_trees),
+        leaf_tree=compress_leaf_tree(split_tree, jnp.array(leaf_trees)),
         var_tree=jnp.array(var_trees),
-        split_tree=jnp.array(split_trees),
+        split_tree=split_tree,
         offset=jnp.float32(0.0 if offset is None else offset),
         leaf_unit=jnp.float32(1.0),
     ), meta

@@ -159,17 +159,21 @@ from bartz.mcmcstep._step import (
     _precompute_likelihood_terms_mv,
     _precompute_likelihood_terms_uv,
     _sample_wishart_bartlett,
+    _set_leaf_pair_scatter,
+    _set_leaf_pair_select,
     _step_error_cov_inv_diag,
     _step_error_cov_inv_mv,
     accept_moves_parallel_stage,
     accept_moves_sequential_stage,
     apply_moves_to_leaf_indices,
+    apply_moves_to_leaf_sums,
     cpu_at_once_is_faster,
     leaf_scatter,
     log_blocked_mass_tree,
     random_tree_order,
     sample_s_augmentation,
     sample_wishart_posterior,
+    set_leaf_pair,
     step_error_cov_inv,
     step_s,
     step_sum_trees_prior_cov_inv,
@@ -771,11 +775,10 @@ def reduce_reference(
     /,
     *,
     size: int,
-    subset_start: Integer[Array, ''] | None = None,
-    subset_length: int | None = None,
+    subset: Integer[Array, ' subset_size'] | None = None,
     dtype: DTypeLike,
     data_sharded: bool,
-) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
     """External baseline mirroring `_reduce` via `jax.ops.segment_sum`."""
     values = jnp.asarray(values)
     # `segment_sum` reduces the leading axis, `_reduce` the last one; a
@@ -785,14 +788,10 @@ def reduce_reference(
     else:
         data = jnp.moveaxis(values, -1, 0).astype(dtype)
     out = segment_sum(data, indices, num_segments=size)
-    if subset_length is not None:
-        assert subset_start is not None  # set together with subset_length
-        # select the range's bins from the full reduction; 'fill' makes
+    if subset is not None:
+        # select the bins of the subset from the full reduction; 'fill' makes
         # out-of-domain bins read as zero instead of clamping
-        bins = subset_start.astype(jnp.uint32) + jnp.arange(
-            subset_length, dtype=jnp.uint32
-        )
-        out = out.at[bins].get(mode='fill', fill_value=0)
+        out = out.at[subset].get(mode='fill', fill_value=0)
     out = jnp.moveaxis(out, 0, -1)
     if data_sharded:
         out = lax.psum(out, 'data')
@@ -878,10 +877,10 @@ class TestReduction:
         count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
         float_kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
 
-        # bin range: starts mid-domain, has a non-power-of-2 length, and runs one
-        # past `size`, so its last bin is out of the index domain and its sum
-        # must come out zero
-        range_kw = dict(float_kw, subset_start=jnp.uint32(6), subset_length=3)
+        # bin subset: out of order, with a gap, a non-power-of-2 length, and a
+        # bin past `size`, which is out of the index domain so its sum must
+        # come out zero
+        range_kw = dict(float_kw, subset=jnp.array([6, 8, 3], jnp.uint32))
 
         # comparison function for integer calculations
         exact = assert_array_equal
@@ -988,13 +987,13 @@ class TestReduction:
         configs = (PopcountReduction(), AutoOneHotOrPopcountReduction())
         size = 8
         count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
-        # (start, length): in the domain, two bins, past `size`, past uint8
-        ranges = ((2, 1), (3, 2), (7, 2), (300, 1))
+        # in the domain, two bins, one past `size`, past uint8
+        subsets = ((2,), (5, 3), (7, 8), (300,))
 
         def count(
-            indices: UInt[Array, ' n'], start: int, length: int
+            indices: UInt[Array, ' n'], subset: tuple[int, ...]
         ) -> Callable[[Callable[..., Array]], Array]:
-            kw = dict(count_kw, subset_start=jnp.uint32(start), subset_length=length)
+            kw = dict(count_kw, subset=jnp.array(subset, jnp.uint32))
             return lambda f: f(1, indices, **kw)
 
         cases = {}
@@ -1003,14 +1002,14 @@ class TestReduction:
             # leave chunks, words and indices over, and one without any chunk
             for n in (512, 1031, 7):
                 indices = random.randint(keys.pop(), (n,), 0, size).astype(dtype)
-                for start, length in ranges:
-                    name = f'{jnp.dtype(dtype).name} n={n} range={start},{length}'
-                    cases[name] = count(indices, start, length)
-        cases['all in bin'] = count(jnp.full(1031, 3, jnp.uint8), 3, 1)
+                for subset in subsets:
+                    name = f'{jnp.dtype(dtype).name} n={n} subset={subset}'
+                    cases[name] = count(indices, subset)
+        cases['all in bin'] = count(jnp.full(1031, 3, jnp.uint8), (3,))
         tree_indices = random.randint(keys.pop(), (NUM_TREES, 1031), 0, size).astype(
             jnp.uint8
         )
-        range_kw = dict(count_kw, subset_start=jnp.uint32(2), subset_length=2)
+        range_kw = dict(count_kw, subset=jnp.array([2, 5], jnp.uint32))
         cases['vmap'] = lambda f: vmap(partial(f, 1, **range_kw))(tree_indices)
 
         num_shards = min(4, get_device_count())
@@ -1049,8 +1048,7 @@ class TestReduction:
         indices = jnp.zeros((num_trees, n), jnp.uint8)
         kw: dict = dict(
             size=4,
-            subset_start=jnp.uint32(1),
-            subset_length=num_bins,
+            subset=jnp.arange(1, 1 + num_bins, dtype=jnp.uint32),
             dtype=jnp.float32,
             data_sharded=False,
         )
@@ -1080,7 +1078,7 @@ class TestReduction:
     def test_count_only_rejects_other_uses(self) -> None:
         """The count-only configs reject values other than 1 and a missing range."""
         indices = jnp.zeros(8, jnp.uint8)
-        range_kw: dict = dict(size=4, subset_start=jnp.uint32(0), subset_length=1)
+        range_kw: dict = dict(size=4, subset=jnp.zeros(1, jnp.uint32))
 
         # eagerly, `lax.platform_dependent` runs only the current platform's
         # branch, while under jit it traces the popcount branch everywhere
@@ -2241,23 +2239,56 @@ def test_rebuild_derived(keys: split, case: str) -> None:
     # compare affluence tree
     assert_array_equal(old_forest.affluence_tree, new_forest.affluence_tree)
 
-    # compare count and prec tree
-    is_leaf = jnp.vectorize(
-        partial(is_actual_leaf, add_bottom_level=True), signature='(h)->(t)'
-    )(old_forest.split_tree)
+    # compare count and prec tree, which like the leaf indices have the prunes
+    # pending
+    apply = apply_moves_to_leaf_sums
+    if state.has_chains:
+        apply = vmap(apply)
     if old_forest.count_tree is not None:
         assert new_forest.count_tree is not None
         assert_array_equal(
-            jnp.where(is_leaf, old_forest.count_tree, 0), new_forest.count_tree
+            apply(old_forest.count_tree, old_forest.to_prune, old_forest.move_node),
+            new_forest.count_tree,
         )
     if old_forest.prec_tree is not None:
         assert new_forest.prec_tree is not None
         assert_close_matrices(
-            jnp.where(is_leaf, old_forest.prec_tree, 0), new_forest.prec_tree, rtol=1e-5
+            apply(old_forest.prec_tree, old_forest.to_prune, old_forest.move_node),
+            new_forest.prec_tree,
+            rtol=1e-5,
         )
 
     # compare residuals
     assert_close_matrices(state.resid, rebuilt.resid, rtol=1e-5)
+
+
+@pytest.mark.parametrize('kshape', [(), (2,)])
+def test_set_leaf_pair(keys: split, kshape: tuple[int, ...]) -> None:
+    """Check the two ways of copying a value to a pair of leaves, one per platform."""
+    half_tree_size = 8
+    leaf_tree = random.normal(keys.pop(), (*kshape, half_tree_size))
+    value = random.normal(keys.pop(), (*kshape, 1))
+    for where in (False, True):
+        # the last pair is out of bounds, as for a tree without a move
+        for indices in ((0, 1), (5, 2), (7, 3), (16, 16)):
+            expected = numpy.array(leaf_tree)
+            if where and max(indices) < half_tree_size:
+                expected[..., list(indices)] = value
+            args = (leaf_tree, value, jnp.bool_(where), jnp.array(indices))
+            for func in (set_leaf_pair, _set_leaf_pair_scatter, _set_leaf_pair_select):
+                assert_array_equal(func(*args), expected)
+
+
+def test_apply_moves_to_leaf_sums() -> None:
+    """A pending prune moves the sum of the right child into the left one."""
+    # tree 0: prune node 3, whose children have leaf indices 1 and 3
+    # tree 1: prune node 2, whose children have leaf indices 0 and 2
+    # tree 2: nothing to prune, the node is ignored
+    trees = jnp.arange(1, 13, dtype=jnp.uint32).reshape(3, 4)
+    to_prune = jnp.array([True, True, False])
+    move_node = jnp.array([3, 2, 3])
+    expected = jnp.array([[1, 6, 3, 0], [12, 6, 0, 8], [9, 10, 11, 12]], jnp.uint32)
+    assert_array_equal(apply_moves_to_leaf_sums(trees, to_prune, move_node), expected)
 
 
 def assert_same_states(x: State, y: State, *, extra_trees: int = 0) -> None:
@@ -3538,6 +3569,7 @@ class TestStepSumTreesPriorCovInv:
         # tree 0: root split, leaves 2, 3
         # tree 2: nodes 1 and 2 split, leaves 3, 4, 5 (4, 5 at the bottom level)
         # other trees: root leaf
+        # (as nodes, converted below to indices in the leaf tree)
         split_tree = jnp.zeros_like(state.forest.split_tree)
         split_tree = split_tree.at[0, 1].set(1)
         split_tree = split_tree.at[2, 1:3].set(1)
@@ -3545,9 +3577,9 @@ class TestStepSumTreesPriorCovInv:
 
         # only the leaves of the trees in use count
         num_used = NUM_TREES if used_trees is None else used_trees
-        leaves = [(t, i) for t, i in leaves if t < num_used]
+        leaves = [(t, i // (i & -i) >> 1) for t, i in leaves if t < num_used]
 
-        # fill all nodes, non-leaves included, to check they are masked out
+        # fill all values, also the ones not in use, to check they are masked out
         leaf_tree = random.normal(keys.pop(), state.forest.leaf_tree.shape)
 
         state = replace(
@@ -3959,10 +3991,10 @@ class TestPrecomputeTerms:
         error_cov_inv = jnp.array([[inv_sigma2]])
         leaf_prior_cov_inv = jnp.array([[leaf_prior_cov_inv_uv]])
 
-        # precision of the parent node (= left + right) at heap position 1,
-        # of its left and right children at positions 2 and 3
-        prec_trees = jnp.array([[0.0, 7.0, 3.0, 4.0]])
-        lrt_nodes = jnp.array([[2, 3, 1]])
+        # precision of the left and right children, at their leaf indices,
+        # then of an unused one, and of the parent node (= left + right) at the end
+        prec_trees = jnp.array([[3.0, 4.0, 0.0, 7.0]])
+        lr_leaves = jnp.array([[0, 1]])
 
         # sum of scaled residuals in the left, right, and parent node; k = 1
         resid_lrt = random.normal(keys.pop(), (1, 3))
@@ -3971,7 +4003,7 @@ class TestPrecomputeTerms:
             keys.pop(), prec_trees, error_cov_inv, leaf_prior_cov_inv
         )
         prelkv_mv = _precompute_likelihood_terms_mv(
-            error_cov_inv, leaf_prior_cov_inv, prelf_mv, lrt_nodes
+            error_cov_inv, leaf_prior_cov_inv, prelf_mv, lr_leaves
         )
         # the precompute terms are batched over trees, while the ratio is
         # computed one tree at a time; strip the singleton num_trees axis
@@ -3982,7 +4014,7 @@ class TestPrecomputeTerms:
             keys.pop(), prec_trees, inv_sigma2, leaf_prior_cov_inv_uv
         )
         prelkv_uv = _precompute_likelihood_terms_uv(
-            inv_sigma2, leaf_prior_cov_inv_uv, prelf_uv, lrt_nodes
+            inv_sigma2, leaf_prior_cov_inv_uv, prelf_uv, lr_leaves
         )
         prelkv_uv = tree.map(lambda x: x.squeeze(0), prelkv_uv)
         likelihood_uv = _compute_likelihood_ratio_uv(resid_lrt[0, :], prelkv_uv)

@@ -32,7 +32,12 @@ from jax import vmap
 from jaxtyping import Array, Bool, Float, Int32, Shaped, UInt, UInt32
 
 from bartz._jaxext import jit
-from bartz.grove import evaluate_forest, is_actual_leaf, traverse_forest
+from bartz.grove import (
+    evaluate_forest,
+    is_actual_leaf,
+    node_to_leaf_index,
+    traverse_forest,
+)
 from bartz.mcmcstep._axes import chain_vmap_axes
 from bartz.mcmcstep._moves import _process_exclude, fully_used_variables
 from bartz.mcmcstep._reduction import AutoBatchedReduction
@@ -64,13 +69,13 @@ def rebuild_derived(state: StateT) -> StateT:
 def rebuild_derived_chain(state: StateT) -> StateT:
     """Implement `rebuild_derived` on a state without a chain axis."""
     forest = state.forest
-    num_trees, *_, tree_size = forest.leaf_tree.shape
-    leaf_indices = traverse_forest(state.X, forest.var_tree, forest.split_tree)
-    assert leaf_indices.dtype == forest.leaf_indices.dtype
+    num_trees, *_, half_tree_size = forest.leaf_tree.shape
+    nodes = traverse_forest(state.X, forest.var_tree, forest.split_tree)
+    leaf_indices = node_to_leaf_index(nodes).astype(forest.leaf_indices.dtype)
 
     reduce = partial(
         AutoBatchedReduction()._reduce,  # noqa: SLF001
-        size=tree_size,
+        size=half_tree_size,
         data_sharded=False,
     )
     if forest.count_tree is None:
@@ -121,7 +126,7 @@ def zeros_like_or_none(
 def affluent_leaves(
     var_tree: UInt[Array, ' half_tree_size'],
     split_tree: UInt[Array, ' half_tree_size'],
-    count_tree: UInt32[Array, ' 2*half_tree_size'] | None,
+    count_tree: UInt32[Array, ' half_tree_size'] | None,
     *,
     max_split: UInt[Array, ' p'],
     blocked_vars: UInt[Array, ' q'] | None,
@@ -145,7 +150,10 @@ def affluent_leaves(
     out = is_actual_leaf(split_tree) & available
     if min_points_per_decision_node is not None:
         assert count_tree is not None
-        out &= count_tree[:half_tree_size] >= min_points_per_decision_node
+        # the number of datapoints in each node as a leaf
+        count = jnp.zeros(half_tree_size, count_tree.dtype)
+        count = count.at[1:].set(count_tree[node_to_leaf_index(nodes)])
+        out &= count >= min_points_per_decision_node
     return out
 
 

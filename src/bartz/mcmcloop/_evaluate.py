@@ -61,11 +61,11 @@ class EvaluableTrace(Protocol):
     """
 
     leaf_tree: (
-        Float[Array, '*chains_and_samples num_trees tree_size']
-        | Float[Array, '*chains_and_samples num_trees k tree_size']
+        Float[Array, '*chains_and_samples num_trees half_tree_size']
+        | Float[Array, '*chains_and_samples num_trees k half_tree_size']
     )
-    var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
-    split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
+    var_tree: UInt[Array, '*chains_and_samples num_trees half_tree_size']
+    split_tree: UInt[Array, '*chains_and_samples num_trees half_tree_size']
     offset: Float32[Array, ''] | Float32[Array, ' k']
     leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
 
@@ -230,7 +230,7 @@ def _evaluate_trace(
     )
 
     # sizes, read from the arrays (hence per-device under the `shard_map`)
-    # leaf_tree has shape (sample, tree, *k, ts)
+    # leaf_tree has shape (sample, tree, *k, hts)
     k_axis = chainful_axis(2, trace_chain_axes.leaf_tree)
     is_mv = is_multivariate(trace)
     kshape = trace.leaf_tree.shape[k_axis : k_axis + is_mv]
@@ -437,7 +437,7 @@ def _tree_sum_budget(
         num_trees
         * hts
         * (
-            2 * k * trace.leaf_tree.itemsize
+            k * trace.leaf_tree.itemsize
             + trace.var_tree.itemsize
             + trace.split_tree.itemsize
         )

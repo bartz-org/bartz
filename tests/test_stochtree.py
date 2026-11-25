@@ -142,7 +142,7 @@ def test_continuous_smoke(continuous_data: _Data, keys: split) -> None:
     assert m.is_sampled()
     assert m.y_hat_train.shape == (data.X_train.shape[0], m.num_samples)
     assert nnone(m.y_hat_test).shape == (data.X_test.shape[0], m.num_samples)
-    assert m.global_var_samples.shape == (m.num_samples,)
+    assert nnone(m.global_var_samples).shape == (m.num_samples,)
     assert m.outcome_model.outcome == 'continuous'
 
 
@@ -204,8 +204,9 @@ def test_binary_smoke(binary_data: _Data, keys: split) -> None:
     )
     assert prob.shape == (data.X_test.shape[0],)
     assert ((prob >= 0) & (prob <= 1)).all()
-    # global_var_samples is fixed to 1 for probit
-    assert np.allclose(np.asarray(m.global_var_samples), 1.0)
+    # like stochtree, the error variance is fixed for probit
+    assert not m.sample_sigma2_global
+    assert m.global_var_samples is None
 
 
 @pytest.mark.parametrize('terms', ['mean_forest', 'all', ['y_hat', 'mean_forest']])
@@ -740,7 +741,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         return (
             m.y_hat_train,
             nnone(m.y_hat_test),
-            m.global_var_samples,
+            nnone(m.global_var_samples),
             m.y_bar,
             m.y_std,
             pred_mean,

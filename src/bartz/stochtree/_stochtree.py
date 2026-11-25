@@ -244,7 +244,7 @@ class BARTModel:
     """Whether the outcome was standardized before fitting."""
 
     sample_sigma2_global: bool
-    """Whether the global error variance is sampled (always ``True``)."""
+    """Whether the global error variance is sampled (``False`` for probit binary regression)."""
 
     probit_outcome_model: bool
     """Whether the model uses a binary outcome with probit link."""
@@ -288,8 +288,8 @@ class BARTModel:
     y_hat_train: Float32[Array, 'n num_samples']
     """Posterior predictions at the training covariates, in the original outcome scale."""
 
-    global_var_samples: Float32[Array, ' num_samples']
-    """Posterior samples of the global error variance. For probit binary regression, an array of ones."""
+    global_var_samples: Float32[Array, ' num_samples'] | None
+    """Posterior samples of the global error variance, or `None` if not sampled."""
 
     sample_sigma2_leaf: bool
     """Whether the leaf variance is sampled."""
@@ -574,7 +574,7 @@ class BARTModel:
         is_probit = outcome_model.outcome == 'binary'
         self.sampled = True
         self.standardize = standardize
-        self.sample_sigma2_global = True
+        self.sample_sigma2_global = not is_probit
         self.sample_sigma2_leaf = sample_sigma2_leaf
         self.probit_outcome_model = is_probit
         self.outcome_model = outcome_model
@@ -598,7 +598,7 @@ class BARTModel:
             self.y_hat_test = None
 
         if is_probit:
-            self.global_var_samples = jnp.ones((self.num_samples,))
+            self.global_var_samples = None
         else:
             sigma = self._bart.get_error_sdev()
             self.global_var_samples = (sigma * y_std) ** 2

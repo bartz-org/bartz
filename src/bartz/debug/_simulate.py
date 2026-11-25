@@ -28,7 +28,7 @@ from dataclasses import fields, replace
 
 from jax import lax, random
 from jax import numpy as jnp
-from jaxtyping import Array, Float, Float32, Key, Shaped
+from jaxtyping import Array, Float, Float32, Key
 
 from bartz._jaxext import field, jit, solve_triangular, split
 from bartz.debug._prior import (
@@ -42,7 +42,7 @@ from bartz.debug._prior import (
 )
 from bartz.grove import evaluate_forest
 from bartz.mcmcstep import DiagWishart, State, Wishart
-from bartz.mcmcstep._axes import CHAIN_AXIS, chain_to_axis, chain_vmap_axes
+from bartz.mcmcstep._axes import CHAIN_AXIS
 from bartz.mcmcstep._rebuild import rebuild_derived_chain
 from bartz.mcmcstep._state import (
     StateT,
@@ -86,11 +86,8 @@ class ChainDataState(State):
         re-use the memory of their input, like `bartz.mcmcstep.step`, invalidate
         `state` when applied to the output.
         """
-        y = state.y
-        if state.has_chains:
-            # `resid` has the same layout `y` gets
-            chain_axis = chain_vmap_axes(state).resid
-            y = jnp.broadcast_to(jnp.expand_dims(y, chain_axis), state.resid.shape)
+        # `resid` has the same layout `y` gets
+        y = jnp.broadcast_to(state.y, state.resid.shape)
         kw: dict = dict({f.name: getattr(state, f.name) for f in fields(state)}, y=y)
         return cls(**kw)
 
@@ -180,8 +177,7 @@ def sample_sparsity(key: Key[Array, ''], state: StateT) -> StateT:
     if forest.sparsity.theta is None:
         return state
     else:
-        (p,) = forest.max_split.shape
-        log_s = sample_s(key, forest.sparsity.theta, p)
+        log_s = sample_s(key, forest.sparsity.theta, forest.max_split)
         return replace(
             state,
             forest=replace(forest, sparsity=replace(forest.sparsity, log_s=log_s)),
@@ -191,13 +187,7 @@ def sample_sparsity(key: Key[Array, ''], state: StateT) -> StateT:
 def sample_trees(key: Key[Array, ''], state: StateT) -> StateT:
     """Draw the decision rules of the trees, of all chains at once."""
     forest = state.forest
-
-    # put the chain axis first
-    axes = chain_vmap_axes(state).forest
-    log_s = forest.sparsity.log_s
-    if log_s is not None:
-        log_s = chain_to_axis(log_s, axes.sparsity.log_s)
-    *shape, half_tree_size = chain_to_axis(forest.split_tree, axes.split_tree).shape
+    *shape, half_tree_size = forest.split_tree.shape
 
     depths = half_tree_size.bit_length() - 1
     p_nonterminal = forest.p_nonterminal[2 ** jnp.arange(depths)]
@@ -219,23 +209,12 @@ def sample_trees(key: Key[Array, ''], state: StateT) -> StateT:
         tuple(shape),
         max_split=forest.max_split,
         p_nonterminal=p_nonterminal,
-        log_s=log_s,
+        log_s=forest.sparsity.log_s,
         criterion=criterion,
     )
 
-    forest = replace(
-        forest,
-        var_tree=chain_from_first(trees.var_tree, axes.var_tree),
-        split_tree=chain_from_first(trees.split_tree, axes.split_tree),
-    )
+    forest = replace(forest, var_tree=trees.var_tree, split_tree=trees.split_tree)
     return replace(state, forest=forest)
-
-
-def chain_from_first(
-    arr: Shaped[Array, '...'], chain_axis: int | None
-) -> Shaped[Array, '...']:
-    """Move the leading chain axis of `arr` to `chain_axis`, the inverse of `chain_to_axis`."""
-    return arr if chain_axis is None else jnp.moveaxis(arr, 0, chain_axis)
 
 
 def sample_values(key: Key[Array, ''], state: StateT) -> StateT:

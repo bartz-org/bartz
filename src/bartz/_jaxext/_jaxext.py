@@ -24,12 +24,13 @@
 
 """Implementation of miscellaneous jax extension utilities."""
 
+import inspect
 import math
 import os
 import re
 import sys
 from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from functools import partial, wraps
 from typing import Any, NamedTuple, ParamSpec, TypeVar
 
@@ -52,6 +53,7 @@ from jax.dtypes import prng_key
 from jax.extend.backend import backends
 from jax.scipy.special import ndtr, ndtri
 from jax.sharding import PartitionSpec
+from jax.tree_util import keystr
 from jax.typing import DTypeLike
 from jaxtyping import (
     Array,
@@ -76,6 +78,18 @@ if sys.version_info >= (3, 13):
     from typing import TypeIs
 else:  # WORKAROUND(python<3.13): typing.TypeIs was added in 3.13
     from typing_extensions import TypeIs
+
+# the private context manager sets the flag per thread, while the public
+# `jax.config.update` sets it globally, so a context manager built on the
+# latter would not be thread-safe
+try:
+    from jax._src.config import explicit_x64_dtypes
+except ImportError:  # private jax API, used only as a safety net in `forbid_x64`
+
+    def explicit_x64_dtypes(_mode: str) -> AbstractContextManager[None]:
+        """Do nothing in place of the missing jax context manager."""
+        return nullcontext()
+
 
 _P = ParamSpec('_P')
 _R = TypeVar('_R')
@@ -115,17 +129,57 @@ def float32_matmuls(fun: Callable[_P, _R]) -> Callable[_P, _R]:
     return wrapper
 
 
-def vmap_nodoc(fun: Callable, *args: Any, **kw: Any) -> Callable:
-    """
-    Acts like `jax.vmap` but preserves the docstring of the function unchanged.
+_X64_DTYPES = frozenset(
+    map(jnp.dtype, (jnp.float64, jnp.int64, jnp.uint64, jnp.complex128))
+)
 
-    This is useful if the docstring already takes into account that the
-    arguments have additional axes due to vmap.
+
+def forbid_x64(fun: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Make `fun` raise an error on 64-bit types.
+
+    Raises if ``jax_enable_x64`` is set or an argument contains a 64-bit jax
+    array, and runs/traces `fun` with ``jax_explicit_x64_dtypes='error'``, so
+    that jax raises on most operations involving 64-bit arrays. Combined with
+    `jit`, put it inside, to keep the methods of the jitted function.
+
+    User code called by `fun` can still use 64-bit types within
+    ``jax.enable_x64(True)``; the error raised by jax gets a note saying so.
     """
-    doc = fun.__doc__
-    fun = vmap(fun, *args, **kw)
-    fun.__doc__ = doc
-    return fun
+    signature = inspect.signature(fun)
+
+    @wraps(fun)
+    def wrapper(*args: _P.args, **kw: _P.kwargs) -> _R:
+        if jax.config.jax_enable_x64:
+            msg = (
+                'bartz does not support 64-bit types, but `jax_enable_x64` is '
+                'set. Disable it, or call bartz within `with jax.enable_x64(False):`.'
+            )
+            raise RuntimeError(msg)
+        for name, value in signature.bind(*args, **kw).arguments.items():
+            for path, x in tree.leaves_with_path(value):
+                if isinstance(x, jax.Array) and x.dtype in _X64_DTYPES:
+                    msg = (
+                        'bartz does not support 64-bit types, but '
+                        f'`{name}{keystr(path)}` has dtype {x.dtype}. '
+                        'Convert it to 32 bit.'
+                    )
+                    raise TypeError(msg)
+        with explicit_x64_dtypes('error'):
+            try:
+                return fun(*args, **kw)
+            except ValueError as exc:
+                note = (
+                    'bartz does not support 64-bit types. To use them in your '
+                    'own code called by bartz, e.g., a callback, wrap it in '
+                    '`with jax.enable_x64(True):` and convert the results to 32 '
+                    'bit within the block.'
+                )
+                notes = getattr(exc, '__notes__', ())
+                if 'Explicitly requested dtype' in str(exc) and note not in notes:
+                    exc.add_note(note)
+                raise
+
+    return wrapper
 
 
 def sliced_map(

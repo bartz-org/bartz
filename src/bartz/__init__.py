@@ -33,6 +33,9 @@ from bartz import _workarounds
 # apply before importing anything that could initialize a jax backend
 _workarounds.apply_workarounds()
 
+# on Python 3.15+, load the submodules imported below only on first access
+__lazy_modules__ = ('bartz',)
+
 from bartz import BART, bcf, grove, mcmcloop, mcmcstep, npz, prepcovars, stochtree  # noqa: F401
 from bartz._interface import (  # noqa: F401
     Bart,

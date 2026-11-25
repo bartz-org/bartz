@@ -44,7 +44,7 @@ from jax import numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
 from jaxtyping import Array, Bool, Int32, Key, PyTree, Shaped, UInt32
 
-from bartz._jaxext import jit, jit_active, split
+from bartz._jaxext import forbid_x64, jit, jit_active, split
 from bartz.mcmcloop._trace import BurninTrace, MainTrace, Trace
 from bartz.mcmcstep import State, step
 from bartz.mcmcstep._axes import trace_sample_axes
@@ -145,6 +145,7 @@ class _Carry(Module):
     callback: Callback | None
 
 
+@forbid_x64
 def run_mcmc(
     key: Key[Array, ''],
     state: State,

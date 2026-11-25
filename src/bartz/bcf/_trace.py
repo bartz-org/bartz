@@ -33,7 +33,6 @@ from bartz.bcf._state import BCFState, swap_mu_tau_forests
 from bartz.mcmcloop import BurninTrace, MainTrace
 from bartz.mcmcloop._trace import Trace
 from bartz.mcmcstep import State
-from bartz.mcmcstep._axes import CHAIN_AXIS
 from bartz.npz import serializable
 
 
@@ -47,10 +46,10 @@ class BCFBurninTrace(Trace):
     tau: BurninTrace
     """The trace of the treatment forest."""
 
-    tau_0: Float32[Array, '*chains_and_samples'] = field(chains=CHAIN_AXIS, samples=0)
+    tau_0: Float32[Array, '*chains_and_samples'] = field(chains=0, samples=0)
     """The treatment effect intercept."""
 
-    b: Float32[Array, '*chains_and_samples 2'] = field(chains=CHAIN_AXIS, samples=0)
+    b: Float32[Array, '*chains_and_samples 2'] = field(chains=0, samples=0)
     """The adaptive coding weights for untreated and treated units."""
 
     @classmethod

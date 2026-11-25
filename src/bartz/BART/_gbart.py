@@ -45,9 +45,9 @@ from bartz._interface import (
     _process_predictor_input,
     _process_response_input,
 )
+from bartz._jaxext import forbid_x64
 from bartz._jaxext.scipy.stats import invgamma
 from bartz.mcmcloop import BurninTrace, MainTrace
-from bartz.mcmcstep._axes import chain_to_axis, chain_vmap_axes
 from bartz.mcmcstep._state import State
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from bartz.prepcovars._prepcovars import _sigma2_from_ols
@@ -86,9 +86,11 @@ class mc_gbart(Module):
 
         .. math::
             (s_1, \ldots, s_p) \sim
-            \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p).
+            \operatorname{Dirichlet}(\mathtt{theta}/p, \ldots, \mathtt{theta}/p),
 
-        If `theta` is not specified, it's a priori distributed according to
+        where p counts only the predictors with decision rules, as the others
+        are ignored (see `rm_const`). If `theta` is not specified, it's a
+        priori distributed according to
 
         .. math::
             \frac{\mathtt{theta}}{\mathtt{theta} + \mathtt{rho}} \sim
@@ -251,6 +253,7 @@ class mc_gbart(Module):
     sigest: Float32[Array, ''] | None = None
     """The estimated standard deviation of the error used to set `lambda_`."""
 
+    @forbid_x64
     def __init__(
         self,
         x_train: Real[ArrayLike, 'n p'] | DataFrame,
@@ -478,23 +481,11 @@ class mc_gbart(Module):
         if self._mcmc_state.z is not None:
             return None
         assert self._burnin_trace.error_cov_inv.ndim <= 2  # chains and samples
-        tc = chain_vmap_axes(self._main_trace).error_cov_inv
-
-        def arrange(arr: Shaped[Array, '...']) -> Shaped[Array, '...']:
-            # Public output is (nskip+ndpost, mc_cores) = (samples, chains).
-            return chain_to_axis(arr, tc, target=-1)
-
-        return jnp.sqrt(
-            jnp.reciprocal(
-                jnp.concatenate(
-                    [
-                        arrange(self._burnin_trace.error_cov_inv),
-                        arrange(self._main_trace.error_cov_inv),
-                    ],
-                    axis=0,
-                )
-            )
+        # public output is (nskip+ndpost, mc_cores) = (samples, chains)
+        prec = jnp.concatenate(
+            [self._burnin_trace.error_cov_inv.T, self._main_trace.error_cov_inv.T]
         )
+        return jnp.sqrt(jnp.reciprocal(prec))
 
     @cached_property
     def sigma_(self) -> Float32[Array, 'ndpost'] | None:
@@ -502,11 +493,7 @@ class mc_gbart(Module):
         if self._mcmc_state.z is not None:
             return None
         assert self._main_trace.error_cov_inv.ndim <= 2  # chains and samples
-        arr = chain_to_axis(
-            self._main_trace.error_cov_inv,
-            chain_vmap_axes(self._main_trace).error_cov_inv,
-        )
-        return jnp.sqrt(jnp.reciprocal(arr)).reshape(-1)
+        return jnp.sqrt(jnp.reciprocal(self._main_trace.error_cov_inv)).reshape(-1)
 
     @cached_property
     def sigma_mean(self) -> Float32[Array, ''] | None:
@@ -565,6 +552,7 @@ class mc_gbart(Module):
 
     # Public methods from Bart
 
+    @forbid_x64
     def predict(
         self, x_test: Real[ArrayLike, 'm p'] | DataFrame
     ) -> Float32[Array, 'ndpost m']:

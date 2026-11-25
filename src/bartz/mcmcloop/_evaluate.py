@@ -32,18 +32,12 @@ from typing import Literal, Protocol, runtime_checkable
 from jax import ShapeDtypeStruct, lax, shard_map, tree, vmap
 from jax import numpy as jnp
 from jax.sharding import Mesh, PartitionSpec
-from jaxtyping import Array, Float, Float32, Int32, PyTree, UInt
-from numpy.lib.array_utils import normalize_axis_index
+from jaxtyping import Array, Float, Float32, Int32, UInt
 
-from bartz._jaxext import autobatch, jit, project
+from bartz._jaxext import autobatch, forbid_x64, jit, project
 from bartz._typing import kwdict
 from bartz.grove import TreesTrace, evaluate_forest, is_multivariate, var_histogram
-from bartz.mcmcstep._axes import (
-    CHAIN_AXIS,
-    chain_vmap_axes,
-    chainful_axis,
-    trace_sample_axes,
-)
+from bartz.mcmcstep._axes import chain_vmap_axes, trace_sample_axes
 from bartz.mcmcstep._state import partition_specs
 
 
@@ -76,20 +70,13 @@ class EvaluableTrace(Protocol):
     def mesh(self) -> Mesh | None: ...
 
 
-@jit(
-    static_argnames=(
-        'flatten_chains',
-        'out_chain_axis_w_trees',
-        'test_points',
-        'max_io_nbytes',
-    )
-)
+@jit(static_argnames=('flatten_chains', 'test_points', 'max_io_nbytes'))
+@forbid_x64
 def evaluate_trace(
     X: UInt[Array, 'p n'],
     trace: EvaluableTrace,
     *,
     flatten_chains: bool = False,
-    out_chain_axis_w_trees: int = CHAIN_AXIS,
     test_points: Literal['none', 'autobatch', 'shard_and_autobatch'] = 'none',
     max_io_nbytes: int = 2**27,  # 128 MiB, per device
 ) -> Float32[Array, '*trace_shape n'] | Float32[Array, '*trace_shape k n']:
@@ -106,13 +93,6 @@ def evaluate_trace(
         If `True` and `trace` has a chain axis, collapse it into the sample
         axis, so the leading dimension of the output is ``num_chains *
         num_samples`` instead of ``(num_chains, num_samples)``.
-    out_chain_axis_w_trees
-        Position of the chain axis in the output. Interpreted against the
-        intermediate, pre-tree-reduction layout ``(sample, tree, *k, n)``;
-        after summing over the tree axis the chain ends up one position
-        earlier if it was after the tree axis. Negative values count from the
-        end. Ignored when `trace` has no chain axis or `flatten_chains` is
-        True.
     test_points
         How to handle the observation (``n``) axis of `X` across devices. The
         sharding of `X` can't be read at trace time, so the caller declares it:
@@ -155,7 +135,6 @@ def evaluate_trace(
     fun = partial(
         _evaluate_trace,
         flatten_chains=flatten_chains,
-        out_chain_axis_w_trees=out_chain_axis_w_trees,
         batch_test_points=batch_test_points,
         max_io_nbytes=max_io_nbytes,
         reduce_vary_axes=reduce_vary_axes,
@@ -165,18 +144,13 @@ def evaluate_trace(
     # manual `shard_map`; the bulk runs per-device shard, so its sizes come out
     # per-device on their own
     if shard_chains or shard_data:
-        out_ndim, out_chain_axis, n_axis = _output_layout(
-            trace, out_chain_axis_w_trees, flatten_chains
-        )
         fun = _shard_map_eval(
             fun,
             trace,
             mesh,
             shard_chains=shard_chains,
             shard_data=shard_data,
-            out_chain_axis=out_chain_axis,
-            n_axis=n_axis,
-            out_ndim=out_ndim,
+            out_ndim=_output_ndim(trace, flatten_chains),
         )
 
     return fun(X, trace)
@@ -187,7 +161,6 @@ def _evaluate_trace(
     trace: EvaluableTrace,
     *,
     flatten_chains: bool,
-    out_chain_axis_w_trees: int,
     batch_test_points: bool,
     max_io_nbytes: int,
     reduce_vary_axes: tuple[str, ...] = (),
@@ -215,25 +188,19 @@ def _evaluate_trace(
     # WORKAROUND(python<3.14): use operator.is_none
     is_none = lambda x: x is None
     tree_axes = tree.map(
-        # the tree axis follows the sample axis in the chainless layout
-        lambda sample_axis, chain_axis: (
-            None if sample_axis is None else chainful_axis(1, chain_axis)
-        ),
+        # the tree axis follows the sample axis
+        lambda sample_axis: None if sample_axis is None else sample_axis + 1,
         sample_axes,
-        trace_chain_axes,
         is_leaf=is_none,
     )
 
-    # output axis positions (size-invariant)
-    out_chain_axis_w_trees, tree_axis, out_chain_axis, sample_axis = _output_axes(
-        trace, out_chain_axis_w_trees
-    )
+    # output axes before the tree reduction, laid out as (*chains, sample, tree, *k, n)
+    sample_axis = int(trace.has_chains)
+    tree_axis = sample_axis + 1
 
     # sizes, read from the arrays (hence per-device under the `shard_map`)
-    # leaf_tree has shape (sample, tree, *k, hts)
-    k_axis = chainful_axis(2, trace_chain_axes.leaf_tree)
-    is_mv = is_multivariate(trace)
-    kshape = trace.leaf_tree.shape[k_axis : k_axis + is_mv]
+    # leaf_tree has shape (*chains, sample, tree, *k, hts)
+    kshape = trace.leaf_tree.shape[tree_axes.leaf_tree + 1 : -1]
     _, n = X.shape
     num_samples = trace.leaf_tree.shape[sample_axes.leaf_tree]
     num_trees = trace.leaf_tree.shape[tree_axes.leaf_tree]
@@ -241,9 +208,7 @@ def _evaluate_trace(
     # vmap over chains
     if trace.has_chains:
         batched_eval = vmap(
-            batched_eval,
-            in_axes=(None, trees.axes_from_dataclass(trace_chain_axes)),
-            out_axes=out_chain_axis_w_trees,
+            batched_eval, in_axes=(None, trees.axes_from_dataclass(trace_chain_axes))
         )
 
     # batch and sum over trees (innermost loop)
@@ -259,21 +224,12 @@ def _evaluate_trace(
     # output shape after reducing trees
     out_shape = (num_samples, *kshape, n)
     if trace.has_chains:
-        num_chains = trace.leaf_tree.shape[trace_chain_axes.leaf_tree]
-        out_shape = (
-            *out_shape[:out_chain_axis],
-            num_chains,
-            *out_shape[out_chain_axis:],
-        )
+        num_chains, *_ = trace.leaf_tree.shape
+        out_shape = (num_chains, *out_shape)
 
     # adjust memory limit keeping into account that trees are summed over
     max_io_nbytes = _tree_sum_budget(
-        max_io_nbytes,
-        trace,
-        chain_axes=trace_chain_axes,
-        kshape=kshape,
-        n=n,
-        num_trees=num_trees,
+        max_io_nbytes, trace, kshape=kshape, n=n, num_trees=num_trees
     )
 
     # batch over the test points (the `n` axis of `X`). It sits outside the tree
@@ -281,12 +237,11 @@ def _evaluate_trace(
     # the sample/chain loops, to mirror the output layout where `n` is the
     # innermost axis. The chunks are concatenated back, no reduction.
     if batch_test_points:
-        n_axis = chainful_axis(1 + is_mv, out_chain_axis if trace.has_chains else None)
         batched_eval = autobatch(
             batched_eval,
             max_io_nbytes,
             in_axes=(1, None),
-            out_axes=n_axis,
+            out_axes=-1,
             warn_on_overflow=False,  # the inner autobatch will handle it
         )
 
@@ -314,111 +269,27 @@ def _evaluate_trace(
             batched_eval,
             max_io_nbytes,
             in_axes=(None, trees.axes_from_dataclass(trace_chain_axes)),
-            out_axes=out_chain_axis,
             warn_on_overflow=False,  # the inner autobatch will handle it
             **full_shape,
         )
 
-    # prepare offset for broadcasting
-    # chainless y shape = (num_samples, *kshape, n), offset shape = kshape
-    offset = trace.offset[None, ..., None]
-    if trace.has_chains:
-        offset = jnp.expand_dims(offset, out_chain_axis)
-
     # evaluate trees; `evaluate_forest` applies the leaf scale itself
-    y = batched_eval(X, trees) + offset
+    y = batched_eval(X, trees) + trace.offset[..., None]
     if flatten_chains and trace.has_chains:
-        y = jnp.moveaxis(y, out_chain_axis, 0)
         y = lax.collapse(y, 0, 2)
     return y
 
 
-def _output_axes(
-    trace: EvaluableTrace, out_chain_axis_w_trees: int
-) -> tuple[int, int, int, int]:
-    """Axis positions in the output layout, derived from array ranks only.
-
-    The positions are independent of the array sizes (hence of the sharding),
-    so `evaluate_trace` can build the `shard_map` output spec from them.
-
-    Parameters
-    ----------
-    trace
-        A main trace of the BART MCMC.
-    out_chain_axis_w_trees
-        Requested chain position in the pre-tree-reduction layout.
-
-    Returns
-    -------
-    out_chain_axis_w_trees : int
-        Chain position in the pre-tree-reduction layout ``(sample, tree, *k, n)``.
-    tree_axis : int
-        Position of the tree axis to reduce over.
-    out_chain_axis : int
-        Chain position after the tree axis is summed away.
-    sample_axis : int
-        Position of the sample axis in the final output.
-    """
-    tree_axis = 1
-    out_chain_axis = sample_axis = 0
-    if trace.has_chains:
-        # pre-tree-reduction output ndim: chain + (sample, tree, *k, n)
-        is_mv = is_multivariate(trace)
-        out_chain_axis_w_trees = normalize_axis_index(out_chain_axis_w_trees, 4 + is_mv)
-        tree_axis = chainful_axis(tree_axis, out_chain_axis_w_trees)
-        out_chain_axis = out_chain_axis_w_trees - (out_chain_axis_w_trees > tree_axis)
-        sample_axis = chainful_axis(0, out_chain_axis)
-    return out_chain_axis_w_trees, tree_axis, out_chain_axis, sample_axis
-
-
-def _output_layout(
-    trace: EvaluableTrace, out_chain_axis_w_trees: int, flatten_chains: bool
-) -> tuple[int, int | None, int]:
-    """Rank and axis positions of the `evaluate_trace` output.
-
-    Like `_output_axes`, but for the final (post-tree-reduction) layout and
-    accounting for `flatten_chains`. Used to build the `shard_map` specs and
-    the test-point autobatch.
-
-    Parameters
-    ----------
-    trace
-        A main trace of the BART MCMC.
-    out_chain_axis_w_trees
-        Requested chain position in the pre-tree-reduction layout.
-    flatten_chains
-        Whether the chain axis is folded into the leading sample axis.
-
-    Returns
-    -------
-    out_ndim : int
-        The number of axes of the output.
-    out_chain_axis : int | None
-        Position of the chain axis, or `None` if `trace` has no chain axis.
-    n_axis : int
-        Position of the observation (``n``) axis.
-    """
-    is_mv = is_multivariate(trace)
-    chainless_ndim = 2 + is_mv  # (sample, *k, n)
-    n_core = chainless_ndim - 1  # `n` is the last chainless axis
-    if trace.has_chains and not flatten_chains:
-        out_ndim = chainless_ndim + 1
-        *_, out_chain_axis, _ = _output_axes(trace, out_chain_axis_w_trees)
-        # `n` shifts only if the chain was inserted at or before it
-        n_axis = chainful_axis(n_core, out_chain_axis)
-    else:
-        out_ndim = chainless_ndim
-        # when flattening, chains are folded into the leading (sample) axis
-        out_chain_axis = 0 if trace.has_chains else None
-        n_axis = n_core
-    return out_ndim, out_chain_axis, n_axis
+def _output_ndim(trace: EvaluableTrace, flatten_chains: bool) -> int:
+    """Rank of the `evaluate_trace` output ``(*chains, sample, *k, n)``."""
+    has_chain_axis = trace.has_chains and not flatten_chains
+    return has_chain_axis + 2 + is_multivariate(trace)
 
 
 def _tree_sum_budget(
     max_io_nbytes: int,
     trace: EvaluableTrace,
     *,
-    chain_axes: PyTree[int | None],
     kshape: tuple[int, ...],
     n: int,
     num_trees: int,
@@ -429,8 +300,7 @@ def _tree_sum_budget(
     number of trees; reducing the budget for the outer (chain/sample) batches
     keeps the total within `max_io_nbytes` (see `autobatch`).
     """
-    # split_tree has shape (sample, tree, hts)
-    hts = trace.split_tree.shape[chainful_axis(2, chain_axes.split_tree)]
+    *_, hts = trace.split_tree.shape
     k = math.prod(kshape)
     out_size = k * n * jnp.float32.dtype.itemsize  # the value of the forest
     core_io_size = (
@@ -454,18 +324,16 @@ def _shard_map_eval(
     *,
     shard_chains: bool,
     shard_data: bool,
-    out_chain_axis: int | None,
-    n_axis: int,
     out_ndim: int,
 ) -> Callable[[UInt[Array, 'p n'], EvaluableTrace], Float32[Array, '*out']]:
     """Wrap ``fun(X, trace)`` in a `shard_map` manual over ``'chains'``/``'data'``.
 
-    When `shard_chains`, the trace is sharded over its chain axis and the
-    output over `out_chain_axis`. When `shard_data`, the ``n`` axis of `X` and
-    the output are sharded over ``'data'``; the trace, which has no data axis,
-    is replicated. Mesh axes not made manual here stay automatic, so the
-    corresponding output axes follow whatever sharding the computation produces
-    without forcing any inter-device movement.
+    When `shard_chains`, the trace and the output are sharded over their leading
+    chain axis. When `shard_data`, the ``n`` axis of `X` and the output are
+    sharded over ``'data'``; the trace, which has no data axis, is replicated.
+    Mesh axes not made manual here stay automatic, so the corresponding output
+    axes follow whatever sharding the computation produces without forcing any
+    inter-device movement.
 
     `fun` is expected to cast its reduction seeds to varying (see
     `evaluate_trace`) so the VMA check passes.
@@ -474,13 +342,12 @@ def _shard_map_eval(
     x_spec = [None, None]  # (p, n)
     out_spec = [None] * out_ndim
     if shard_chains:
-        assert out_chain_axis is not None
         axis_names.add('chains')
-        out_spec[out_chain_axis] = 'chains'
+        out_spec[0] = 'chains'
     if shard_data:
         axis_names.add('data')
         x_spec[1] = 'data'
-        out_spec[n_axis] = 'data'
+        out_spec[-1] = 'data'
 
     # drop trailing Nones to match jax's canonical specs (eases sharding
     # comparisons during debugging)
@@ -497,10 +364,9 @@ def _shard_map_eval(
     )
 
 
-@jit(static_argnames=('p', 'out_chain_axis'))
-def compute_varcount(
-    p: int, trace: EvaluableTrace, *, out_chain_axis: int = CHAIN_AXIS
-) -> Int32[Array, '*trace_shape {p}']:
+@jit(static_argnames='p')
+@forbid_x64
+def compute_varcount(p: int, trace: EvaluableTrace) -> Int32[Array, '*trace_shape {p}']:
     """
     Count how many times each predictor is used in each MCMC state.
 
@@ -510,30 +376,9 @@ def compute_varcount(
         The number of predictors.
     trace
         A main trace of the BART MCMC, as returned by `run_mcmc`.
-    out_chain_axis
-        Position of the chain axis in the output, whose chainless shape is
-        ``(samples, p)``. Negative values count from the end. Ignored when
-        `trace` has no chain axis.
 
     Returns
     -------
     Histogram of predictor usage in each MCMC state.
     """
-    chain_axes = chain_vmap_axes(trace)
-
-    def histogram(
-        var_tree: UInt[Array, 'samples trees nodes'],
-        split_tree: UInt[Array, 'samples trees nodes'],
-    ) -> Int32[Array, 'samples p']:
-        return var_histogram(p, var_tree, split_tree, sum_batch_axis=-1)
-
-    if trace.has_chains:
-        # chainless output ndim is 2 (samples, p); the chain adds one
-        out_axis = normalize_axis_index(out_chain_axis, 3)
-        histogram = vmap(
-            histogram,
-            in_axes=(chain_axes.var_tree, chain_axes.split_tree),
-            out_axes=out_axis,
-        )
-
-    return histogram(trace.var_tree, trace.split_tree)
+    return var_histogram(p, trace.var_tree, trace.split_tree, sum_batch_axis=-1)

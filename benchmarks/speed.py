@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, TypeAlias
 
 from equinox import Module, error_if, field
 from jax import (
+    ShapeDtypeStruct,
     block_until_ready,
     clear_caches,
     debug,
@@ -49,7 +50,8 @@ from jax import (
 from jax import numpy as jnp
 from jax.errors import JaxRuntimeError
 from jax.sharding import Mesh
-from jaxtyping import Array, Integer, Key, Shaped
+from jax.stages import Compiled
+from jaxtyping import Array, Integer, Key, PyTree, Shaped
 from packaging.version import Version
 
 from bartz import mcmcloop, mcmcstep
@@ -589,20 +591,52 @@ def standardize_memory_analysis(analysis: CompiledMemoryStats) -> dict[MemStat, 
     return {'state': state, 'peak': peak}
 
 
-class StepMemory(StepBase):
-    """Device memory footprint of the compiled `mcmcstep.step` at large scale.
+def nbytes(args: PyTree[Array | ShapeDtypeStruct]) -> int:
+    """Return the total size of the arrays in `args`."""
+    return sum(math.prod(x.shape) * x.dtype.itemsize for x in tree.leaves(args))
 
-    Reports, in bytes, the persistent `state` buffers and the `peak` high-water
-    mark (normalized to a backend-independent meaning by
-    `standardize_memory_analysis`) at a scale that far exceeds device memory.
-    The state is built abstractly, so `step` is compiled and analyzed but never
-    allocated nor run.
+
+def device_nbytes(compiled: Compiled, args: PyTree[Array | ShapeDtypeStruct]) -> int:
+    """Return the size of the arguments of `compiled` on each device."""
+    shardings, _ = compiled.input_shardings
+
+    # `None` marks the nodes of `args` without arrays, and in `shardings` also
+    # the arguments pruned by the compiler
+    def is_none(x: object) -> bool:
+        return x is None
+
+    total = 0
+    for x, sharding in zip(
+        tree.leaves(args, is_leaf=is_none),
+        tree.leaves(shardings, is_leaf=is_none),
+        strict=True,
+    ):
+        if x is not None:
+            shape = x.shape if sharding is None else sharding.shard_shape(x.shape)
+            total += math.prod(shape) * x.dtype.itemsize
+    return total
+
+
+class StepMemory(StepBase):
+    """Peak device memory of the compiled `mcmcstep.step`, relative to the state.
+
+    Reports the `peak` high-water mark (normalized to a backend-independent
+    meaning by `standardize_memory_analysis`) over the total size of the arrays
+    in the state, and checks that the persistent buffers of `step` are just
+    those arrays. The state is built abstractly, so `step` is compiled and
+    analyzed but never allocated nor run.
+
+    Most of the state is `X` and `leaf_indices`, of size ``n p`` and ``n
+    num_trees``. With ``n = p = num_trees``, any temporary proportional to the
+    product of two of them, for example one value per variable per tree, is
+    comparable to the state. The scale is large enough that `step` processes
+    the trees in batches, and small enough that the temporaries of a batch are
+    not negligible next to the state.
     """
 
-    params: tuple[tuple[Kind, ...], tuple[int | None, ...], tuple[MemStat, ...]] = (
+    params: tuple[tuple[Kind, ...], tuple[int | None, ...]] = (
         ('plain', 'binary', 'weights', 'sparse', 'multivariate', 'variable_trees'),
         (None, 2),
-        ('state', 'peak'),
     )
 
     # the gpu autotuner allocates the inputs of the kernels it profiles, which
@@ -632,53 +666,59 @@ class StepMemory(StepBase):
         return eval_shape(lambda: simple_init(**kwargs))
 
     def setup(  # ty:ignore[invalid-method-override]
-        self, kind: Kind, chains: int | None, stat: MemStat, **kwargs: Any
+        self, kind: Kind, chains: int | None, **kwargs: Any
     ) -> None:
-        """Compile `step` at large scale and extract its memory analysis."""
-        # n=16Mi, num_trees=p=1Ki, abstract eval so may exceed device memory
-        super().setup(
-            'compile', kind, chains, n=16 * 2**20, num_trees=1024, p=1024, **kwargs
-        )
+        """Compile `step` and compare its memory analysis with the state."""
+        m = 2**15
+        super().setup('compile', kind, chains, n=m, num_trees=m, p=m, **kwargs)
         analysis = self.compiled_func.memory_analysis()
         if analysis is None:
             # the active backend does not expose a memory analysis
             msg = 'memory analysis not available'
             raise NotImplementedError(msg)
-        self.memory = standardize_memory_analysis(analysis)
-        self.stat = stat
+        memory = standardize_memory_analysis(analysis)
 
-    def track_memory(self, *_: Any) -> int:
-        """Report the selected standardized memory statistic of `step`."""
-        return self.memory[self.stat]
+        # the outputs reuse the donated arguments; xla adds a few bytes per
+        # buffer
+        expected = device_nbytes(self.compiled_func, self.args)
+        assert math.isclose(memory['state'], expected, rel_tol=1e-6), (
+            f'the persistent buffers of step take {memory["state"]} bytes per '
+            f'device, its arguments {expected}'
+        )
+        self.peak_ratio = memory['peak'] / nbytes(self.args)
 
-    track_memory.unit = 'bytes'  # ty: ignore[unresolved-attribute]
+    def track_peak(self, *_: Any) -> float:
+        """Report the peak memory of `step` over the size of the state."""
+        return self.peak_ratio
+
+    track_peak.unit = 'peak / state'  # ty: ignore[unresolved-attribute]
 
 
 Shards = int | None
 
 
 class StepMemorySharded(StepMemory):
-    """Per-device memory footprint of `mcmcstep.step` on a sharded state.
+    """Peak memory of `mcmcstep.step` on a sharded state, relative to the state.
 
-    Same abstract-scale analysis as `StepMemory`, on a state sharded over a
-    device mesh. `data_shards` and `chain_shards` set the sizes of the 'data'
-    and 'chains' mesh axes; `None` leaves an axis out of the mesh. The state
-    is single-chain when `chain_shards` is None and 2 chains otherwise, so a
-    size-1 mesh axis isolates the overhead of the sharding machinery from the
-    memory scaling, and the no-mesh corner matches `StepMemory`. The
-    per-device statistics are rescaled by the mesh size to report the total
-    over all devices: ideally sharding leaves the total unchanged, and
-    replicated buffers show up as excess over the unsharded case.
+    Same analysis as `StepMemory`, on a state sharded over a device mesh.
+    `data_shards` and `chain_shards` set the sizes of the 'data' and 'chains'
+    mesh axes; `None` leaves an axis out of the mesh. The state is single-chain
+    when `chain_shards` is None and 2 chains otherwise, so a size-1 mesh axis
+    isolates the overhead of the sharding machinery from the memory scaling,
+    and the no-mesh corner matches `StepMemory`. The per-device peak is
+    rescaled by the mesh size to the total over all devices: ideally sharding
+    leaves it unchanged, and replicated buffers show up as excess over the
+    unsharded case.
     """
 
     params: tuple[  # ty:ignore[invalid-attribute-override]
-        tuple[Shards, ...], tuple[Shards, ...], tuple[MemStat, ...]
-    ] = ((None, 1, 2), (None, 1, 2), ('state', 'peak'))
+        tuple[Shards, ...], tuple[Shards, ...]
+    ] = ((None, 1, 2), (None, 1, 2))
 
     def setup(  # ty:ignore[invalid-method-override]
-        self, data_shards: Shards, chain_shards: Shards, stat: MemStat
+        self, data_shards: Shards, chain_shards: Shards
     ) -> None:
-        """Compile `step` on a sharded state and extract its memory analysis."""
+        """Compile `step` on a sharded state and compare its memory with the state."""
         mesh = {}
         if chain_shards is not None:
             mesh['chains'] = chain_shards
@@ -693,8 +733,8 @@ class StepMemorySharded(StepMemory):
             raise NotImplementedError(msg)
 
         chains = None if chain_shards is None else 2
-        super().setup('plain', chains, stat, mesh=mesh or None)
-        self.memory = {k: v * num_devices for k, v in self.memory.items()}
+        super().setup('plain', chains, mesh=mesh or None)
+        self.peak_ratio *= num_devices
 
 
 class BaseGbart(AutoParamNames):

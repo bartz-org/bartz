@@ -56,7 +56,9 @@ from tests.util import (
     assert_close_matrices,
     condf,
     nnone,
+    raises_x64_enabled,
     rerun_on_gpu,
+    to_64_bit,
 )
 
 
@@ -365,6 +367,18 @@ def test_numpy_input(fit: Fit) -> None:
     bart = fit.case.cls(**gkw)
     assert_identical_bart(bart._bart, fit.bart._bart)
     assert_array_equal(bart.yhat_test, fit.bart.yhat_test)
+
+
+def test_x64(fit: Fit) -> None:
+    """Check `mc_gbart` raises under `jax_enable_x64` or with 64-bit inputs."""
+    with raises_x64_enabled():
+        fit.case.cls(**fit.case.gkw)
+    y_train = jnp.asarray(fit.case.gkw['y_train'], jnp.float32)
+    gkw: dict = dict(fit.case.gkw, y_train=to_64_bit(y_train))
+    with pytest.raises(TypeError, match='`y_train` has dtype float64'):
+        fit.case.cls(**gkw)
+    with raises_x64_enabled():
+        fit.bart.predict(fit.case.gkw['x_test'])
 
 
 def test_jit(fit: Fit) -> None:

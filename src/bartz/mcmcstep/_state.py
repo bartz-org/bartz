@@ -59,6 +59,7 @@ from bartz._jaxext import (
     cholesky,
     field,
     float32_matmuls,
+    forbid_x64,
     get_cpu_thread_count,
     jaxtyping_disabled,
     jit,
@@ -329,12 +330,13 @@ class Forest(Module):
     """The number of prune moves accepted during the last MCMC step."""
 
     max_split: UInt[Array, ' p']
-    """The maximum split index for each predictor."""
+    """The maximum split index for each predictor. The predictors with 0 are
+    ignored, as if they did not exist."""
 
     blocked_vars: UInt[Array, ' q'] | None
-    """Indices of not to be used variables/predictors. This shall include at
-    least all the `i` that yield ``max_split[i] == 0``, otherwise behavior is
-    undefined."""
+    """The indices of the predictors with ``max_split == 0``, padded with
+    values >= p, or `None` if there are none. Redundant with `max_split`, it
+    speeds up proposing moves."""
 
     p_nonterminal: Float32[Array, ' 2*half_tree_size']
     """The prior probability of each node being nonterminal (conditional on its
@@ -935,6 +937,7 @@ def check_equal_blocks(num_trees: int) -> None:
         raise ValueError(msg)
 
 
+@forbid_x64
 def make_p_nonterminal(
     d: int, alpha: FloatLike = 0.95, beta: FloatLike = 2.0
 ) -> Float32[Array, ' {d}-1']:
@@ -964,6 +967,7 @@ def make_p_nonterminal(
     return alpha / (1 + depth).astype(float) ** beta
 
 
+@forbid_x64
 @float32_matmuls
 def init(
     *,
@@ -1026,6 +1030,8 @@ def init(
         Constant shift added to the sum of trees. 0 if not specified.
     max_split
         The maximum split index for each variable. All split ranges start at 1.
+        The variables with 0 are ignored, as if they did not exist, see
+        `filter_splitless_vars`.
     num_trees
         The maximum number of trees.
     used_trees
@@ -1315,6 +1321,7 @@ def init(
                     (num_trees, half_tree_size),
                     n,
                     min_points_per_decision_node,
+                    max_split,
                 ),
                 blocked_vars=get_blocked_vars(filter_splitless_vars, max_split),
                 max_split=max_split,
@@ -1439,9 +1446,7 @@ def init(
         # calculate initial resid in the continuous outcome case, such that y
         # and offset are already sharded if needed
         if state.resid is None:
-            state = set_initial_resid(
-                state, binary_indices, num_chains, storage.resid_dtype
-            )
+            state = set_initial_resid(state, num_chains, storage.resid_dtype)
             # charge the one-time rounding of the initial residuals into storage
             # when it uses a dtype narrower than y (else the cast is exact)
             if jnp.finfo(storage.resid_dtype).nmant < jnp.finfo(state.y.dtype).nmant:
@@ -1547,15 +1552,12 @@ def determine_storage_params(
 
 
 def set_initial_resid(
-    state: 'State',
-    binary_indices: Int32[Array, ' kb'] | None,
-    num_chains: int | None,
-    resid_dtype: jnp.dtype,
+    state: 'State', num_chains: int | None, resid_dtype: jnp.dtype
 ) -> 'State':
     """Build the continuous-outcome `resid` and shard it.
 
-    Called post-shard so the captured ``state.y`` and
-    ``state.forest.offset`` are already on the target devices. Sharding axes are
+    Called post-shard so the captured ``state.y``, ``state.forest.offset`` and
+    ``state.binary_indices`` are already on the target devices. Sharding axes are
     read via `chain_vmap_axes` / `data_vmap_axes` on a shape preview where the
     new `resid` leaf has the chain-extended ``ndim`` (inflated by a placeholder
     when `num_chains` is not `None`).
@@ -1565,7 +1567,7 @@ def set_initial_resid(
         state.y.shape,
         state.y,
         state.forest.offset,
-        binary_indices,
+        state.binary_indices,
         state.resid_unit,
         resid_dtype,
     )
@@ -1618,18 +1620,18 @@ def initial_resid(  # noqa: PLR0917, `_LazyArray` passes arguments by position
 
 
 def initial_affluence_tree(
-    shape: tuple[int, ...], n: int, min_points_per_decision_node: int | None
+    shape: tuple[int, ...],
+    n: int,
+    min_points_per_decision_node: int | None,
+    max_split: UInt[Array, ' p'],
 ) -> Shaped[Array, '...']:
     """Create the initial value of `Forest.affluence_tree`."""
-    return (
-        jnp.zeros(shape, bool)
-        .at[..., 1]
-        .set(
-            True
-            if min_points_per_decision_node is None
-            else n >= min_points_per_decision_node
-        )
+    enough_points = (
+        True
+        if min_points_per_decision_node is None
+        else n >= min_points_per_decision_node
     )
+    return jnp.zeros(shape, bool).at[..., 1].set(enough_points & jnp.any(max_split))
 
 
 def initial_count_tree(shape: tuple[int, ...], n: int) -> Shaped[Array, '...']:
@@ -1905,14 +1907,33 @@ def remove_weak_types(x: PyTree[Array, 'T']) -> PyTree[Array, 'T']:
 def shard_state(state: State) -> State:
     """Place all arrays on the appropriate devices, and instantiate lazily defined arrays."""
     mesh = state.config.mesh
-    shard_leaf_mesh = partial(shard_leaf, mesh=mesh)
-    return tree.map(
-        shard_leaf_mesh,
-        state,
-        chain_vmap_axes(state),
-        data_vmap_axes(state),
-        is_leaf=lambda x: x is None or isinstance(x, _LazyArray),
-    )
+    axes = chain_vmap_axes(state), data_vmap_axes(state)
+
+    def shard_lazy(
+        x: Shaped[Array, '...'] | Shaped[_LazyArray, '...'] | None,
+        chain_axis: int | None,
+        data_axis: int | None,
+    ) -> Shaped[Array, '...'] | None:
+        if isinstance(x, _LazyArray):
+            return shard_leaf(x, chain_axis, data_axis, mesh)
+        else:
+            return x
+
+    def shard_eager(
+        orig: Shaped[Array, '...'] | Shaped[_LazyArray, '...'] | None,
+        x: Shaped[Array, '...'] | None,
+        chain_axis: int | None,
+        data_axis: int | None,
+    ) -> Shaped[Array, '...'] | None:
+        if isinstance(orig, _LazyArray):
+            return x
+        else:
+            return shard_leaf(x, chain_axis, data_axis, mesh)
+
+    # instantiate the lazy arrays first because `shard_leaf` donates the eager
+    # arrays, which lazy arrays may capture
+    new_state = tree.map(shard_lazy, state, *axes, is_leaf=_is_lazy_or_none)
+    return tree.map(shard_eager, state, new_state, *axes, is_leaf=_is_lazy_or_none)
 
 
 def leaf_partition_spec(
@@ -1950,11 +1971,28 @@ def shard_leaf(
         sharding = NamedSharding(mesh, spec)
 
     if isinstance(x, _LazyArray):
+        if mesh is not None and not jit_active():
+            x = tree.map(partial(put_on_mesh, mesh=mesh), x)
         x = concretize_lazy_array(x, sharding)
     elif sharding is not None:
         x = device_put(x, sharding, donate=True)
 
     return x
+
+
+def put_on_mesh(x: T, mesh: Mesh) -> T:
+    """Replicate `x` over `mesh` if it's an array that lives on other devices.
+
+    This makes arrays committed elsewhere acceptable to `jit` alongside arrays
+    sharded over `mesh`.
+    """
+    if isinstance(x, Array) and x.sharding.device_set != set(mesh.devices.flat):
+        # only small arrays are expected here, the largest being `log_s`
+        # with shape (p,)
+        assert x.nbytes <= 100 * 2**20, f'replicating a large array {x.shape=}'
+        return cast(T, device_put(x, NamedSharding(mesh, PartitionSpec())))
+    else:
+        return x
 
 
 @filter_jit

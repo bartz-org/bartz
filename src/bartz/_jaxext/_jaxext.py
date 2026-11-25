@@ -182,7 +182,13 @@ def sliced_map(
     _, out = lax.scan(loop, None, batch_size * jnp.arange(num_batches))
     out = tree.map(lambda x: x.reshape(num_batches * batch_size, *x.shape[2:]), out)
     if remainder:
-        rest = apply_batch(num_batches * batch_size, remainder)
+        # WORKAROUND(jax<0.12.1): with more cpu devices, a program loaded from
+        # the compilation cache may run the collectives in the loop and in the
+        # remainder at the same time, and crash. The barrier does not order
+        # them, it only changes what xla compiles, to a program that did not
+        # crash in the cases tried.
+        out, start = lax.optimization_barrier((out, num_batches * batch_size))
+        rest = apply_batch(start, remainder)
         out = tree.map(lambda x, y: jnp.concatenate([x, y], axis=0), out, rest)
     return out
 

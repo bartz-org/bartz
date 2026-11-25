@@ -24,6 +24,7 @@
 
 """Test `bartz.stochtree`, the shim mimicking the stochtree Python package."""
 
+import re
 from collections.abc import Mapping
 from itertools import permutations
 from types import MappingProxyType
@@ -40,7 +41,7 @@ import stochtree
 from jax import Array, jit, random
 from jax import numpy as jnp
 from jax.scipy.special import ndtr
-from jaxtyping import Shaped
+from jaxtyping import Key, Shaped
 from numpy.testing import assert_array_less
 from numpy.typing import ArrayLike
 from pytest_subtests import SubTests
@@ -55,6 +56,7 @@ from tests.util import (
     assert_allclose,
     assert_array_equal,
     assert_close_matrices,
+    assert_different_matrices,
     clipped_logit,
     condf,
     int_seed,
@@ -144,6 +146,10 @@ def test_continuous_smoke(continuous_data: _Data, keys: split) -> None:
     assert nnone(m.y_hat_test).shape == (data.X_test.shape[0], m.num_samples)
     assert nnone(m.global_var_samples).shape == (m.num_samples,)
     assert m.outcome_model.outcome == 'continuous'
+    n, p = data.X_train.shape
+    assert (m.n_train, m.n_test, m.num_covariates) == (n, N_TEST, p)
+    assert m.has_test
+    assert m.keep_every == 1
 
 
 def test_x64(continuous_data: _Data, keys: split) -> None:
@@ -182,6 +188,10 @@ def test_predict_shapes(continuous_data: _Data, keys: split) -> None:
     full = m.predict(data.X_test, terms='all')
     assert isinstance(full, dict)
     assert full['y_hat'].shape == (data.X_test.shape[0], m.num_samples)
+    assert not m.has_test
+    assert m.n_test == 0
+    with pytest.raises(ValueError, match='does not have test set'):
+        m.extract_parameter('y_hat_test')
 
 
 def test_binary_smoke(binary_data: _Data, keys: split) -> None:
@@ -207,6 +217,12 @@ def test_binary_smoke(binary_data: _Data, keys: split) -> None:
     # like stochtree, the error variance is fixed for probit
     assert not m.sample_sigma2_global
     assert m.global_var_samples is None
+    with pytest.raises(ValueError, match='does not have global variance'):
+        m.extract_parameter('sigma2')
+    contrast = m.compute_contrast(
+        data.X_test, data.X_test[::-1, :], type='mean', scale='probability'
+    )
+    assert_close_matrices(contrast, prob[::-1] - prob, rtol=1e-5)
 
 
 @pytest.mark.parametrize('terms', ['mean_forest', 'all', ['y_hat', 'mean_forest']])
@@ -249,13 +265,129 @@ def test_multi_chain(continuous_data: _Data, keys: split) -> None:
     assert m.y_hat_train.shape[1] == num_chains * NUM_MCMC
 
 
-def test_not_sampled_error(continuous_data: _Data) -> None:
-    """`predict` before `sample` raises `NotSampledError`."""
+def _sample_model(
+    data: _Data, key: Key[Array, ''], *, binary: bool = False
+) -> bst.BARTModel:
+    """Sample a model with the module's common settings, with `X_test`."""
+    general_params: dict = {'random_seed': key}
+    if binary:
+        general_params['outcome_model'] = bst.OutcomeModel('binary', 'probit')
+    m = bst.BARTModel()
+    m.sample(
+        X_train=data.X_train,
+        y_train=data.y_train,
+        X_test=data.X_test,
+        general_params=general_params,
+        **_SAMPLE_KW,
+    )
+    return m
+
+
+def test_extract_parameter(continuous_data: _Data, keys: split) -> None:
+    """`extract_parameter` returns the sample attributes by stochtree's names."""
+    m = _sample_model(continuous_data, keys.pop())
+    for term in ('sigma2', 'global_error_scale', 'sigma2_global'):
+        assert m.extract_parameter(term) is m.global_var_samples
+    for term in ('sigma2_leaf', 'leaf_scale'):
+        assert m.extract_parameter(term) is m.leaf_scale_samples
+    assert m.extract_parameter('y_hat_train') is m.y_hat_train
+    assert m.extract_parameter('y_hat_test') is m.y_hat_test
+    with jaxtyping_disabled(), pytest.raises(ValueError, match='not a valid'):
+        m.extract_parameter('bogus')  # ty: ignore[invalid-argument-type]
+
+
+def test_compute_contrast(continuous_data: _Data, keys: split) -> None:
+    """`compute_contrast` is the difference of two predictions."""
     data = continuous_data
+    m = _sample_model(data, keys.pop())
+    X_0, X_1 = data.X_test, data.X_test[::-1, :]
+    expected = m.predict(X_1, terms='y_hat') - m.predict(X_0, terms='y_hat')
+    assert_array_equal(m.compute_contrast(X_0, X_1), expected)
+    assert_array_equal(m.compute_contrast(X_0, X_1, type='mean'), expected.mean(axis=1))
+    with (
+        jaxtyping_disabled(),
+        pytest.raises(ValueError, match="'linear' or 'probability'"),
+    ):
+        m.compute_contrast(
+            X_0,
+            X_1,
+            scale='class',  # ty: ignore[invalid-argument-type]
+        )
+    with pytest.raises(ValueError, match="scale must be 'linear'"):
+        m.compute_contrast(X_0, X_1, scale='probability')
+
+
+def test_compute_posterior_interval(continuous_data: _Data, keys: split) -> None:
+    """`compute_posterior_interval` computes quantiles of the predictions."""
+    data = continuous_data
+    m = _sample_model(data, keys.pop())
+    pred = np.asarray(m.predict(data.X_test, terms='y_hat'))
+    interval = m.compute_posterior_interval(data.X_test, terms='y_hat', level=0.9)
+    assert interval.keys() == {'lower', 'upper'}
+    assert_close_matrices(interval['lower'], np.quantile(pred, 0.05, axis=1), rtol=1e-6)
+    assert_close_matrices(interval['upper'], np.quantile(pred, 0.95, axis=1), rtol=1e-6)
+    full = m.compute_posterior_interval(data.X_test)
+    assert full.keys() == {'y_hat', 'mean_forest_predictions'}
+    with pytest.raises(EQX_RUNTIME_ERRORS, match='level'):
+        m.compute_posterior_interval(data.X_test, level=1.0)
+
+
+def test_sample_posterior_predictive_continuous(
+    continuous_data: _Data, keys: split
+) -> None:
+    """The draws are normal around the predictions, with the sampled variance."""
+    data = continuous_data
+    key = keys.pop()
+    m = _sample_model(data, random.clone(key))
+    draws = np.asarray(m.sample_posterior_predictive(data.X_test))
+    # with less than 1000 posterior samples, draw at least 1000 per observation
+    num_draws = -(-1000 // m.num_samples)
+    assert draws.shape == (N_TEST, m.num_samples, num_draws)
+    eta = np.asarray(nnone(m.y_hat_test))
+    sigma = np.sqrt(nnone(m.global_var_samples))
+    z = (draws - eta[:, :, None]) / sigma[:, None]
+    assert_allclose(z.mean(), 0, atol=0.05)
+    assert_allclose(z.std(), 1, rtol=0.05)
+
+    # each call gives new draws, determined by the seed
+    draws1 = m.sample_posterior_predictive(data.X_test, num_draws_per_sample=1)
+    assert draws1.shape == (N_TEST, m.num_samples)
+    assert_different_matrices(draws1, draws[:, :, 0], rtol=0.1, atol=0)
+    m2 = _sample_model(data, key)
+    assert_array_equal(m2.sample_posterior_predictive(data.X_test), draws)
+
+
+def test_sample_posterior_predictive_binary(binary_data: _Data, keys: split) -> None:
+    """The draws are Bernoulli with the predicted probability."""
+    data = binary_data
+    m = _sample_model(data, keys.pop(), binary=True)
+    draws = np.asarray(m.sample_posterior_predictive(data.X_test))
+    num_draws = -(-1000 // m.num_samples)
+    assert draws.shape == (N_TEST, m.num_samples, num_draws)
+    assert np.isin(draws, (0, 1)).all()
+    prob = m.predict(data.X_test, terms='y_hat', type='mean', scale='probability')
+    # sd <= sqrt(1/4 / 1000) = 0.016 per observation
+    freq = draws.mean(axis=(1, 2)).astype(np.float32)
+    assert_close_matrices(freq, prob, atol=0.08, ord=np.inf)
+
+
+def test_not_sampled_error(continuous_data: _Data) -> None:
+    """Using the model before `sample` raises `NotSampledError`."""
+    X = continuous_data.X_test
     m = bst.BARTModel()
     assert not m.is_sampled()
-    with pytest.raises(bst.NotSampledError):
-        m.predict(data.X_test)
+    assert str(m) == 'Empty BARTModel() object: not yet sampled'
+    calls = (
+        lambda: m.predict(X),
+        lambda: m.compute_contrast(X, X),
+        lambda: m.compute_posterior_interval(X),
+        lambda: m.sample_posterior_predictive(X),
+        lambda: m.extract_parameter('sigma2'),
+        m.summary,
+    )
+    for call in calls:
+        with pytest.raises(bst.NotSampledError):
+            call()
 
 
 def test_missing_num_gfr_raises(continuous_data: _Data, keys: split) -> None:
@@ -395,6 +527,8 @@ def test_sample_sigma2_leaf_false(continuous_data: _Data, keys: split) -> None:
     )
     assert not m.sample_sigma2_leaf
     assert m.leaf_scale_samples is None
+    with pytest.raises(ValueError, match='does not have leaf variance'):
+        m.extract_parameter('sigma2_leaf')
     prior = m._bart._mcmc_state.forest.sum_trees_prior_cov_inv
     assert prior.nu is None
     prec = m._bart._main_trace.sum_trees_prior_cov_inv
@@ -554,15 +688,20 @@ def test_standardization_matches(continuous_data: _Data, keys: split) -> None:
     assert_allclose(bz_model.y_std, st_model.y_std, rtol=1e-6)
 
 
+class _Comparison(NamedTuple):
+    outcome: Literal['continuous', 'binary']
+    st_model: stochtree.BARTModel
+    bz_model: bst.BARTModel
+    X_test: Shaped[np.ndarray, 'm p']
+
+
 @pytest.fixture
-def comparison(
-    request: pytest.FixtureRequest, keys: split
-) -> tuple[str, stochtree.BARTModel, bst.BARTModel]:
+def comparison(request: pytest.FixtureRequest, keys: split) -> _Comparison:
     """Sample matching models from stochtree and bartz.stochtree.
 
     Parametrized indirectly on the outcome type ('continuous' or 'binary'),
     with 'continuous-leaf' also sampling the leaf variance. Returns the
-    outcome type alongside the two fitted models.
+    outcome type alongside the two fitted models and the test covariates.
 
     The *same* keyword-argument dict is fed to both `stochtree.BARTModel` and
     `bartz.stochtree.BARTModel`, exercising the interface compatibility: the
@@ -609,14 +748,16 @@ def comparison(
     st_model.sample(**kwargs)
     bz_model = bst.BARTModel()
     bz_model.sample(**kwargs)
-    return outcome, st_model, bz_model
+    return _Comparison(
+        outcome=outcome, st_model=st_model, bz_model=bz_model, X_test=kwargs['X_test']
+    )
 
 
 @pytest.mark.parametrize(
     'comparison', ['continuous', 'binary', 'continuous-leaf'], indirect=True
 )
 def test_compare_with_stochtree(
-    comparison: tuple[str, stochtree.BARTModel, bst.BARTModel], subtests: SubTests
+    comparison: _Comparison, subtests: SubTests, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """bartz.stochtree mixes with stochtree; per-output Rhat stays near 1.
 
@@ -625,7 +766,9 @@ def test_compare_with_stochtree(
     regime (small ``n``, ``num_trees >= max(n, p)``) so that noise stays small;
     a single threshold just above 1 bounds both outcome types.
     """
-    outcome, st_model, bz_model = comparison
+    outcome = comparison.outcome
+    st_model = comparison.st_model
+    bz_model = comparison.bz_model
 
     # y_bar is deterministic and must match modulo float32 precision; for
     # binary it is ndtri(mean(y)).
@@ -678,9 +821,68 @@ def test_compare_with_stochtree(
             rhat = _rhat_two_chains(bz_l, st_l)
             assert_array_less(rhat, 1.03)
 
+    _check_interface_matches(comparison, subtests=subtests, capsys=capsys)
+
+
+def _check_interface_matches(
+    comparison: _Comparison, *, subtests: SubTests, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Check the descriptive outputs and the output shapes match stochtree."""
+    outcome = comparison.outcome
+    st_model = comparison.st_model
+    bz_model = comparison.bz_model
+    X_test = comparison.X_test
+    with subtests.test('attributes'):
+        for attr in ('n_train', 'n_test', 'num_covariates', 'has_test', 'keep_every'):
+            assert getattr(bz_model, attr) == getattr(st_model, attr), attr
+
+    with subtests.test('has_term'):
+        for term in ('mean_forest', 'y_hat', 'all'):
+            assert bz_model.has_term(term) == st_model.has_term(term), term
+
+    def st_description(text: str) -> str:
+        # stochtree leaves `probit_outcome_model` False when probit is set with
+        # `outcome_model`, so it describes the outcome as gaussian
+        if outcome == 'binary':
+            text = text.replace('as gaussian', 'with a probit link')
+        return text
+
+    with subtests.test('str'):
+        assert str(bz_model) == st_description(str(st_model))
+        assert repr(bz_model) == st_description(repr(st_model))
+
+    with subtests.test('summary'):
+        bz_model.summary()
+        bz_out = capsys.readouterr().out
+        st_model.summary()
+        st_out = st_description(capsys.readouterr().out)
+        # same text, up to the numerical values
+        number = r'-?\d+\.\d+'
+        assert re.sub(number, '#', bz_out) == re.sub(number, '#', st_out)
+
+    with subtests.test('sample_posterior_predictive'):
+        bz_draws = bz_model.sample_posterior_predictive(X_test)
+        st_draws = st_model.sample_posterior_predictive(X=X_test)
+        assert bz_draws.shape == st_draws.shape
+
+    with subtests.test('compute_posterior_interval'):
+        bz_interval = bz_model.compute_posterior_interval(X_test)
+        st_interval = st_model.compute_posterior_interval(X=X_test)
+        assert bz_interval.keys() == st_interval.keys()
+        for term, bounds in bz_interval.items():
+            assert bounds.keys() == st_interval[term].keys()
+            for bound, value in bounds.items():
+                assert value.shape == st_interval[term][bound].shape
+
+    with subtests.test('compute_contrast'):
+        X_1 = X_test[::-1, :]
+        bz_contrast = bz_model.compute_contrast(X_test, X_1)
+        st_contrast = st_model.compute_contrast(X_0=X_test, X_1=X_1)
+        assert bz_contrast.shape == np.shape(st_contrast)
+
 
 def test_jit(continuous_data: _Data, keys: split) -> None:
-    """Test that jitting around BARTModel.sample + predict works.
+    """Test that jitting around BARTModel.sample and the prediction methods works.
 
     All values that aren't used for shape / Python-level control flow are
     passed as jit arguments, so any accidentally non-traceable use of them
@@ -699,6 +901,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         'beta': 2.0,
         'sigma2_leaf_init': 1.0 / 200,
         'variable_weights': jnp.ones(p),
+        'level': 0.9,
     }
     # devices can't be inferred from a jit tracer, so pre-determine the platform;
     # rm_const requires concrete max_split values, so disable it for tracing.
@@ -719,6 +922,7 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         beta: float,
         sigma2_leaf_init: float,
         variable_weights: Shaped[Array, '...'],
+        level: float,
     ) -> tuple[Array, ...]:
         m = bst.BARTModel()
         m.sample(
@@ -742,6 +946,9 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         )
         pred_mean = m.predict(X_predict, type='mean', terms='y_hat')
         pred_post = m.predict(X_predict, type='posterior', terms='y_hat')
+        interval = m.compute_posterior_interval(X_predict, terms='y_hat', level=level)
+        contrast = m.compute_contrast(X_predict, X_predict[::-1, :])
+        ppd = m.sample_posterior_predictive(X_predict, num_draws_per_sample=1)
         return (
             m.y_hat_train,
             nnone(m.y_hat_test),
@@ -750,6 +957,10 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
             m.y_std,
             pred_mean,
             pred_post,
+            interval['lower'],
+            interval['upper'],
+            contrast,
+            ppd,
             # trailing element: the stored leaves, used only to detect the leaf
             # storage precision (not compared); see the loop below
             m._bart._mcmc_state.forest.leaf_tree,

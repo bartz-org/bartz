@@ -24,6 +24,7 @@
 
 """Implement class `BARTModel` that mimics the Python package stochtree."""
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from functools import partial
@@ -32,13 +33,14 @@ from functools import partial
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
-from jax import lax
+from equinox import error_if
+from jax import lax, random
 from jax import numpy as jnp
 from jax.scipy.special import ndtr, ndtri
 from jaxtyping import Array, Float, Float32, Key, Real, Shaped
 
 from bartz._interface import Bart, PredictKind, Series
-from bartz._jaxext import forbid_x64, jit
+from bartz._jaxext import forbid_x64, is_key, jit, split
 from bartz.mcmcloop import MainTrace
 from bartz.mcmcstep import Wishart
 from bartz.mcmcstep._state import ArrayLike, FloatLike
@@ -49,6 +51,9 @@ if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
 _MAX_DEPTH_LIMIT = 16
+_NOT_SAMPLED_MSG = (
+    "This BARTModel instance is not fitted yet. Call 'sample' before using this model."
+)
 
 
 @dataclass(frozen=True)
@@ -213,8 +218,9 @@ class BARTModel:
     Differences from `stochtree`:
 
     - ``num_gfr`` has no default and must be set explicitly to ``0``.
-    - The arguments of `sample` after ``y_train`` are keyword-only, because
-      some of stochtree's positional arguments are not supported.
+    - The arguments of `sample` after ``y_train``, and of the other methods
+      after the covariates, are keyword-only, because some of stochtree's
+      positional arguments are not supported.
     - ``mean_forest_params['max_depth']`` must be a non-negative integer at
       most ``16``; stochtree's ``-1`` (unbounded depth) sentinel is not
       accepted.
@@ -269,8 +275,23 @@ class BARTModel:
     num_chains: int
     """Number of independent MCMC chains."""
 
+    keep_every: int
+    """Thinning factor of the retained MCMC samples."""
+
     num_samples: int
     """Total number of retained posterior samples (``num_mcmc * num_chains``)."""
+
+    n_train: int
+    """Number of training observations."""
+
+    n_test: int
+    """Number of test observations (``0`` if `X_test` was not supplied)."""
+
+    has_test: bool
+    """Whether `X_test` was supplied to `sample`."""
+
+    num_covariates: int
+    """Number of covariates after preprocessing, e.g., after one-hot encoding."""
 
     sigma2_init: FloatLike
     """Starting value of the global error variance actually used to seed the chain."""
@@ -307,6 +328,11 @@ class BARTModel:
 
     _bart: Bart
     _preprocessor: Preprocessor | None
+    _ppd_key: Key[Array, '']
+    """Base key of `sample_posterior_predictive`."""
+
+    _ppd_count: int
+    """Number of calls to `sample_posterior_predictive`, folded into `_ppd_key`."""
 
     def __init__(self) -> None:
         self.sampled = False
@@ -498,6 +524,9 @@ class BARTModel:
         binner = partial(RangeEvenBinner, max_bins=256)
 
         seed = 0 if gp.random_seed is None else gp.random_seed
+        if not is_key(seed):
+            seed = random.key(seed)
+        keys = split(seed)
 
         kwargs: dict = dict(
             x_train=X_train_arr.T,
@@ -518,7 +547,7 @@ class BARTModel:
             n_skip=gp.keep_every,
             printevery=None,
             num_chains=bart_num_chains,
-            seed=seed,
+            seed=keys.pop(),
             maxdepth=mfp.max_depth + 1,
             precompute_predict_train=True,
         )
@@ -542,11 +571,17 @@ class BARTModel:
             ),
         )
         self._bart = Bart(**kwargs)
+        self._ppd_key = keys.pop()
+        self._ppd_count = 0
+        n_train, num_covariates = X_train_arr.shape
         self._finalize_sample(
             outcome_model=gp.outcome_model,
             num_burnin=num_burnin,
             num_mcmc=num_mcmc,
             num_chains=gp.num_chains,
+            keep_every=gp.keep_every,
+            n_train=n_train,
+            num_covariates=num_covariates,
             sample_sigma2_leaf=mfp.sample_sigma2_leaf,
             sigma2_init=sigma2_init_stored,
             y_bar=y_bar,
@@ -562,6 +597,9 @@ class BARTModel:
         num_burnin: int,
         num_mcmc: int,
         num_chains: int,
+        keep_every: int,
+        n_train: int,
+        num_covariates: int,
         sample_sigma2_leaf: bool,
         sigma2_init: FloatLike,
         y_bar: Float32[Array, ''],
@@ -581,7 +619,11 @@ class BARTModel:
         self.num_burnin = num_burnin
         self.num_mcmc = num_mcmc
         self.num_chains = num_chains
+        self.keep_every = keep_every
         self.num_samples = num_mcmc * num_chains
+        self.n_train = n_train
+        self.has_test = X_test is not None
+        self.num_covariates = num_covariates
         self.sigma2_init = sigma2_init
         self.y_bar = y_bar
         self.y_std = y_std
@@ -593,8 +635,10 @@ class BARTModel:
         self.y_hat_train = self._predict_y_hat_internal('train')
         if X_test is not None:
             self.y_hat_test = self._predict_y_hat_internal(self._prepare_x(X_test).T)
+            self.n_test, _ = self.y_hat_test.shape
         else:
             self.y_hat_test = None
+            self.n_test = 0
 
         if is_probit:
             self.global_var_samples = None
@@ -688,11 +732,7 @@ class BARTModel:
             If `sample` has not been called yet.
         """
         if not self.sampled:
-            msg = (
-                "This BARTModel instance is not fitted yet. Call 'sample' before"
-                ' using this model.'
-            )
-            raise NotSampledError(msg)
+            raise NotSampledError(_NOT_SAMPLED_MSG)
         terms_tuple = check_predict_args(type, scale, terms, self.probit_outcome_model)
 
         pred = self._predict_y_hat_internal(self._prepare_x(X).T)
@@ -717,6 +757,310 @@ class BARTModel:
         if wants_mean_forest:
             result['mean_forest_predictions'] = pred_out
         return result
+
+    def compute_contrast(
+        self,
+        X_0: Real[ArrayLike, 'm p'] | DataFrame,
+        X_1: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        type: Literal['posterior', 'mean'] = 'posterior',  # noqa: A002
+        scale: Literal['linear', 'probability'] = 'linear',
+    ) -> Float32[Array, 'm num_samples'] | Float32[Array, ' m']:
+        """Compute the difference between the predictions at `X_1` and at `X_0`.
+
+        Parameters
+        ----------
+        X_0
+            Covariates of the subtracted predictions, with shape ``(m, p)``.
+        X_1
+            Covariates of the other predictions, with shape ``(m, p)``.
+        type
+            ``'posterior'`` returns one contrast per posterior sample, with
+            shape ``(m, num_samples)``. ``'mean'`` averages them, returning a
+            vector of shape ``(m,)``.
+        scale
+            ``'linear'``, or, for probit binary regression, ``'probability'``
+            to contrast ``Phi(eta)``.
+
+        Returns
+        -------
+        The contrast ``predict(X_1) - predict(X_0)``.
+
+        Raises
+        ------
+        NotSampledError
+            If `sample` has not been called yet.
+        """
+        if not self.sampled:
+            raise NotSampledError(_NOT_SAMPLED_MSG)
+        check_interval_scale(scale)
+        check_predict_args(type, scale, 'y_hat', self.probit_outcome_model)
+        pred_1 = self.predict(X_1, terms='y_hat', scale=scale)
+        pred_0 = self.predict(X_0, terms='y_hat', scale=scale)
+        contrast = pred_1 - pred_0
+        if type == 'mean':
+            return contrast.mean(axis=1)
+        else:
+            return contrast
+
+    @overload
+    def compute_posterior_interval(
+        self,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        terms: Literal['y_hat', 'mean_forest'],
+        level: FloatLike = 0.95,
+        scale: Literal['linear', 'probability'] = 'linear',
+    ) -> dict[str, Float32[Array, ' m']]: ...
+
+    @overload
+    def compute_posterior_interval(
+        self,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        terms: Literal['all'] = 'all',
+        level: FloatLike = 0.95,
+        scale: Literal['linear', 'probability'] = 'linear',
+    ) -> dict[str, dict[str, Float32[Array, ' m']]]: ...
+
+    @overload
+    def compute_posterior_interval(
+        self,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        terms: Sequence[Literal['y_hat', 'mean_forest', 'all']],
+        level: FloatLike = 0.95,
+        scale: Literal['linear', 'probability'] = 'linear',
+    ) -> (
+        dict[str, Float32[Array, ' m']] | dict[str, dict[str, Float32[Array, ' m']]]
+    ): ...
+
+    def compute_posterior_interval(
+        self,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        terms: Literal['y_hat', 'mean_forest', 'all']
+        | Sequence[Literal['y_hat', 'mean_forest', 'all']] = 'all',
+        level: FloatLike = 0.95,
+        scale: Literal['linear', 'probability'] = 'linear',
+    ) -> dict[str, Float32[Array, ' m']] | dict[str, dict[str, Float32[Array, ' m']]]:
+        """Compute equal-tailed posterior credible intervals of the predictions.
+
+        Parameters
+        ----------
+        X
+            Covariates with shape ``(m, p)``.
+        terms
+            Like in `predict`.
+        level
+            Posterior probability of the interval, between 0 and 1.
+        scale
+            ``'linear'``, or, for probit binary regression, ``'probability'``
+            for intervals on ``Phi(eta)``.
+
+        Returns
+        -------
+        A dict with keys ``'lower'`` and ``'upper'``, or, for multiple terms, a dict of such dicts keyed like the output of `predict`.
+
+        Raises
+        ------
+        NotSampledError
+            If `sample` has not been called yet.
+        """
+        if not self.sampled:
+            raise NotSampledError(_NOT_SAMPLED_MSG)
+        check_interval_scale(scale)
+        level = jnp.asarray(level)
+        level = error_if(level, ~((level > 0) & (level < 1)), 'level must be in (0, 1)')
+        pred = self.predict(X, terms=terms, scale=scale)
+        if isinstance(pred, dict):
+            return {k: posterior_interval(v, level) for k, v in pred.items()}
+        else:
+            return posterior_interval(pred, level)
+
+    @forbid_x64
+    def sample_posterior_predictive(
+        self,
+        X: Real[ArrayLike, 'm p'] | DataFrame,
+        *,
+        num_draws_per_sample: int | None = None,
+    ) -> (
+        Real[Array, 'm num_samples'] | Real[Array, 'm num_samples num_draws_per_sample']
+    ):
+        """Sample outcomes from the posterior predictive distribution.
+
+        Parameters
+        ----------
+        X
+            Covariates with shape ``(m, p)``.
+        num_draws_per_sample
+            Number of draws per posterior sample. If `None`, it is 1 if
+            there are at least 1000 posterior samples, else enough to get at
+            least 1000 draws per observation.
+
+        Returns
+        -------
+        The draws, with shape ``(m, num_samples)`` if there is one draw per sample, else ``(m, num_samples, num_draws_per_sample)``.
+
+        Raises
+        ------
+        NotSampledError
+            If `sample` has not been called yet.
+
+        Notes
+        -----
+        The draws are random, and change at each call. Their sequence is
+        determined by ``general_params['random_seed']``.
+        """
+        if not self.sampled:
+            raise NotSampledError(_NOT_SAMPLED_MSG)
+        if num_draws_per_sample is None:
+            num_draws_per_sample = (
+                1 if self.num_samples >= 1000 else math.ceil(1000 / self.num_samples)
+            )
+        eta = self._predict_y_hat_internal(self._prepare_x(X).T)
+        key = random.fold_in(self._ppd_key, self._ppd_count)
+        self._ppd_count += 1
+        return sample_outcome(key, eta, self.global_var_samples, num_draws_per_sample)
+
+    def has_term(self, term: Literal['mean_forest', 'y_hat', 'all']) -> bool:
+        """Return whether the model includes a term.
+
+        Parameters
+        ----------
+        term
+            The term to check.
+
+        Returns
+        -------
+        `True` for the terms in the signature, else `False`.
+        """
+        return term in ('mean_forest', 'y_hat', 'all')
+
+    def extract_parameter(
+        self,
+        term: Literal[
+            'sigma2',
+            'global_error_scale',
+            'sigma2_global',
+            'sigma2_leaf',
+            'leaf_scale',
+            'y_hat_train',
+            'y_hat_test',
+        ],
+    ) -> Float32[Array, ' num_samples'] | Float32[Array, 'n num_samples']:
+        """Return the posterior samples of a parameter by name.
+
+        Parameters
+        ----------
+        term
+            ``'sigma2'`` (alias ``'global_error_scale'`` or
+            ``'sigma2_global'``) for `global_var_samples`, ``'sigma2_leaf'``
+            (alias ``'leaf_scale'``) for `leaf_scale_samples`,
+            ``'y_hat_train'``, or ``'y_hat_test'``.
+
+        Returns
+        -------
+        The samples, indexed by the last axis.
+
+        Raises
+        ------
+        NotSampledError
+            If `sample` has not been called yet.
+        ValueError
+            If `term` is not valid or the model does not have it.
+        """
+        if not self.sampled:
+            raise NotSampledError(_NOT_SAMPLED_MSG)
+        if term in ('sigma2', 'global_error_scale', 'sigma2_global'):
+            value = self.global_var_samples
+            what = 'global variance parameter samples'
+        elif term in ('sigma2_leaf', 'leaf_scale'):
+            value = self.leaf_scale_samples
+            what = 'leaf variance parameter samples'
+        elif term == 'y_hat_train':
+            value = self.y_hat_train
+            what = 'in-sample mean function prediction samples'
+        elif term == 'y_hat_test':
+            value = self.y_hat_test
+            what = 'test set mean function prediction samples'
+        else:
+            msg = f'term {term} is not a valid BART model term'
+            raise ValueError(msg)
+        if value is None:
+            msg = f'This model does not have {what}'
+            raise ValueError(msg)
+        return value
+
+    def summary(self) -> None:
+        """Print a description of the model and summaries of its posterior samples.
+
+        Raises
+        ------
+        NotSampledError
+            If `sample` has not been called yet.
+        """
+        if not self.sampled:
+            raise NotSampledError(_NOT_SAMPLED_MSG)
+        out = f'BART Model Summary:\n-------------------\n{self}\n'
+        if self.global_var_samples is not None:
+            out += summarize_samples(
+                'Summary of sigma^2 posterior: ', 'samples', self.global_var_samples
+            )
+        if self.leaf_scale_samples is not None:
+            out += summarize_samples(
+                'Summary of leaf scale posterior: ', 'samples', self.leaf_scale_samples
+            )
+        out += summarize_samples(
+            'Summary of in-sample posterior mean predictions: \n',
+            'observations',
+            self.y_hat_train.mean(axis=1),
+        )
+        if self.y_hat_test is not None:
+            out += summarize_samples(
+                'Summary of test-set posterior mean predictions: \n',
+                'observations',
+                self.y_hat_test.mean(axis=1),
+            )
+        print(out)  # noqa: T201
+
+    def __str__(self) -> str:
+        if self.sampled:
+            return self._describe()
+        else:
+            return 'Empty BARTModel() object: not yet sampled'
+
+    __repr__ = __str__
+
+    def _describe(self) -> str:
+        """Describe the fitted model with the same text as stochtree."""
+        terms = ['mean forest']
+        if self.sample_sigma2_global:
+            terms.append('global error variance model')
+        if self.sample_sigma2_leaf:
+            terms.append('mean forest leaf scale model')
+        if len(terms) > 2:
+            terms_str = f'{", ".join(terms[:-1])}, and {terms[-1]}'
+        else:
+            terms_str = ' and '.join(terms)
+        link = 'with a probit link' if self.probit_outcome_model else 'as gaussian'
+        out = (
+            f'BARTModel run with {terms_str}\nOutcome was modeled {link} with a'
+            ' constant leaf prior for the mean forest'
+        )
+        if self.standardize:
+            out += '\nOutcome was standardized'
+        chains = 'chain' if self.num_chains == 1 else 'chains'
+        if self.keep_every == 1:
+            thinning = 'retaining every iteration (i.e. no thinning)'
+        else:
+            thinning = f'retaining every {self.keep_every}th iteration (i.e. thinning)'
+        out += (
+            f'\nThe sampler was run for {self.num_gfr} GFR iterations, with'
+            f' {self.num_chains} {chains} of {self.num_burnin} burn-in iterations'
+            f' and {self.num_mcmc} MCMC iterations, {thinning}\n'
+        )
+        return out
 
     def _prepare_x(self, X: Real[ArrayLike, 'm p'] | DataFrame) -> Real[Array, 'm p']:
         """Convert covariates to a 2-D jax array, replaying the fitted preprocessor if any."""
@@ -908,6 +1252,56 @@ def check_predict_args(
         msg = "scale='class' is only supported when requesting a single 'y_hat' term"
         raise ValueError(msg)
     return terms_tuple
+
+
+def check_interval_scale(scale: str) -> None:
+    """Validate `scale` for the methods that do not support ``'class'``."""
+    if scale not in ('linear', 'probability'):
+        msg = f"scale must be 'linear' or 'probability'; got {scale!r}"
+        raise ValueError(msg)
+
+
+@jit
+def posterior_interval(
+    samples: Float32[Array, 'm num_samples'], level: FloatLike
+) -> dict[str, Float32[Array, ' m']]:
+    """Compute the equal-tailed interval along the samples axis."""
+    tail = (1 - level) / 2
+    lower, upper = jnp.quantile(samples, jnp.array([tail, 1 - tail]), axis=1)
+    return {'lower': lower, 'upper': upper}
+
+
+@jit(static_argnames='num_draws')
+def sample_outcome(
+    key: Key[Array, ''],
+    eta: Float32[Array, 'm num_samples'],
+    sigma2: Float32[Array, ' num_samples'] | None,
+    num_draws: int,
+) -> Real[Array, 'm num_samples'] | Real[Array, 'm num_samples num_draws']:
+    """Sample outcomes with mean `eta` and variance `sigma2`, or probit if `sigma2` is `None`."""
+    noise = random.normal(key, (*eta.shape, num_draws))
+    if sigma2 is None:
+        draws = jnp.where(eta[..., None] + noise > 0, 1, 0)
+    else:
+        draws = eta[..., None] + jnp.sqrt(sigma2)[:, None] * noise
+    if num_draws == 1:
+        return draws.squeeze(-1)
+    else:
+        return draws
+
+
+def summarize_samples(header: str, unit: str, x: Float32[Array, ' n']) -> str:
+    """Format the mean, standard deviation and quantiles of `x` like stochtree."""
+    probs = (0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975)
+    quantiles = jnp.quantile(x, jnp.array(probs)).tolist()
+    (n,) = x.shape
+    out = (
+        f'{header}{n} {unit}, mean = {x.mean().item():.3f}, standard deviation'
+        f' = {x.std().item():.3f}, quantiles:\n'
+    )
+    for p, q in zip(probs, quantiles, strict=True):
+        out += f'  {p * 100:5.1f}%: {q:.3f}\n'
+    return out
 
 
 def check_X(

@@ -143,9 +143,9 @@ def scan_BART_trees(trees: str) -> BARTTraceMeta:
 class MinimalTrace(Module):
     """A minimal trace of trees, compatible with `bartz.mcmcloop.evaluate_trace`."""
 
-    leaf_tree: Float[Array, 'ndpost ntree half_tree_size'] = field(samples=0)
-    var_tree: UInt[Array, 'ndpost ntree half_tree_size'] = field(samples=0)
-    split_tree: UInt[Array, 'ndpost ntree half_tree_size'] = field(samples=0)
+    leaf_tree: Float[Array, 'ndpost ntree max_num_leaves'] = field(samples=0)
+    var_tree: UInt[Array, 'ndpost ntree max_num_leaves'] = field(samples=0)
+    split_tree: UInt[Array, 'ndpost ntree max_num_leaves'] = field(samples=0)
     offset: Float32[Array, '']
     """Constant shift added to the scaled sum of trees."""
 
@@ -160,17 +160,17 @@ class MinimalTrace(Module):
 
 
 def compress_leaf_tree(
-    split_tree: UInt[Array, '*batch_shape half_tree_size'],
-    leaf_tree: Float[Array, '*batch_shape 2*half_tree_size'],
-) -> Float[Array, '*batch_shape half_tree_size']:
+    split_tree: UInt[Array, '*batch_shape max_num_leaves'],
+    leaf_tree: Float[Array, '*batch_shape 2*max_num_leaves'],
+) -> Float[Array, '*batch_shape max_num_leaves']:
     """Move leaf values from their node indices to the layout of `TreeHeaps.leaf_tree`."""
-    *_, half_tree_size = split_tree.shape
+    *_, max_num_leaves = split_tree.shape
 
     # an element takes the nodes reached going left from a right child or the
     # root; visit them bottom-up, keeping what is below a node if it is a
     # decision node
     out = leaf_tree[..., :0]
-    stride = half_tree_size
+    stride = max_num_leaves
     while stride:
         nodes = leaf_tree[..., stride :: 2 * stride]
         is_decision = split_tree[..., stride :: 2 * stride].astype(bool)

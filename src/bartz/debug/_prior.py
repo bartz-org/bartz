@@ -102,10 +102,10 @@ class SamplePriorStack(Module):
 class TreeStructure(Module):
     """The decision rules of a tree, or of a batch of trees."""
 
-    var_tree: UInt[Array, '*batch_shape half_tree_size']
+    var_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The variables of the decision rules."""
 
-    split_tree: UInt[Array, '*batch_shape half_tree_size']
+    split_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The cutpoints of the decision rules, 0 at the leaves."""
 
     @classmethod
@@ -113,12 +113,12 @@ class TreeStructure(Module):
         cls, p_nonterminal: Float32[Array, ' d_minus_1'], max_split: UInt[Array, ' p']
     ) -> 'TreeStructure':
         """Create a tree with only the root."""
-        half_tree_size = 2**p_nonterminal.size
+        max_num_leaves = 2**p_nonterminal.size
         return cls(
             var_tree=jnp.zeros(
-                half_tree_size, minimal_unsigned_dtype(max_split.size - 1)
+                max_num_leaves, minimal_unsigned_dtype(max_split.size - 1)
             ),
-            split_tree=jnp.zeros(half_tree_size, max_split.dtype),
+            split_tree=jnp.zeros(max_num_leaves, max_split.dtype),
         )
 
 
@@ -171,13 +171,13 @@ class SamplePriorX(Module):
     the recursion schedule.
     """
 
-    node: Int32[Array, ' half_tree_size_minus_1']
+    node: Int32[Array, ' max_num_leaves_minus_1']
     """The heap index of the node to visit."""
 
-    depth: Int32[Array, ' half_tree_size_minus_1']
+    depth: Int32[Array, ' max_num_leaves_minus_1']
     """The depth of the node."""
 
-    next_depth: Int32[Array, ' half_tree_size_minus_1']
+    next_depth: Int32[Array, ' max_num_leaves_minus_1']
     """The depth of the next node to visit, either the left child or the right
     sibling of the node or of an ancestor."""
 
@@ -430,17 +430,17 @@ class MinPointsCriterion(RejectionCriterion):
 
     def accept(self, sample: TreeStructure) -> Bool[Array, '']:
         """Check the tree has enough datapoints in its nodes."""
-        (half_tree_size,) = sample.split_tree.shape
+        (max_num_leaves,) = sample.split_tree.shape
         nodes = traverse_forest(
             self.X, sample.var_tree, sample.split_tree, index_type='heap'
         )
-        count = jnp.zeros(2 * half_tree_size, jnp.int32).at[nodes].add(1)
+        count = jnp.zeros(2 * max_num_leaves, jnp.int32).at[nodes].add(1)
 
         ok = jnp.bool_(True)
         if self.min_points_per_decision_node is not None:
             # any decision node has at least as many datapoints as the
             # decision nodes below it, so check only the parents of two leaves
-            parent_count = count.reshape(half_tree_size, 2).sum(axis=1)
+            parent_count = count.reshape(max_num_leaves, 2).sum(axis=1)
             enough = parent_count >= self.min_points_per_decision_node
             ok &= jnp.all(enough | ~is_leaves_parent(sample.split_tree))
         if self.min_points_per_leaf is not None:
@@ -498,7 +498,7 @@ def sample_forest_structure(
 
         def onetree(
             key: Key[Array, ''], log_s: Float32[Array, ' p'] | None
-        ) -> tuple[UInt[Array, ' half_tree_size'], UInt[Array, ' half_tree_size']]:
+        ) -> tuple[UInt[Array, ' max_num_leaves'], UInt[Array, ' max_num_leaves']]:
             tree = sample_one(key, log_s=log_s)
             return tree.var_tree, tree.split_tree
 
@@ -540,8 +540,8 @@ def sample_leaves(
     key
         A jax random key.
     shape
-        The shape of the leaves, ``(*batch, half_tree_size)``, or ``(*batch,
-        k, half_tree_size)`` for vector-valued leaves.
+        The shape of the leaves, ``(*batch, max_num_leaves)``, or ``(*batch,
+        k, max_num_leaves)`` for vector-valued leaves.
     prec_chol
         The lower Cholesky factor of the prior precision of a leaf, a scalar
         square root for scalar leaves.

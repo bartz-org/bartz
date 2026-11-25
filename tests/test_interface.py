@@ -1814,7 +1814,7 @@ def test_leaf_quantization(bkw: BartKW, keys: split) -> None:
     state = step(keys.pop(), state)
 
     # align the (*chains, [k]) quantum with the (*chains, num_trees, [k,]
-    # half_tree_size) leaves
+    # max_num_leaves) leaves
     if state.resid_unit.ndim:
         quantum = quantum[..., None, :, None]
     else:

@@ -55,27 +55,28 @@ class TreeHeaps(Protocol):
     is unused. Since the nodes at the bottom level can only be leaves and not
     decision nodes, `var_tree` and `split_tree` stop at the level above.
 
-    `leaf_tree` is as long, with a different layout: a node and its left child
-    are never both leaves, so a right child (or the root) shares an element
-    with all the nodes reached from it by going left, see `node_to_leaf_index`.
+    `leaf_tree` has the same length, the maximum number of leaves, with a
+    different layout: a node and its left child are never both leaves, so a
+    right child (or the root) shares an element with all the nodes reached from
+    it by going left, see `node_to_leaf_index`.
 
     Arrays may have additional initial axes to represent multiple trees.
     """
 
     leaf_tree: (
-        Float[Array, '*batch_shape half_tree_size']
-        | Float[Array, '*batch_shape k half_tree_size']
+        Float[Array, '*batch_shape max_num_leaves']
+        | Float[Array, '*batch_shape k max_num_leaves']
     )
     """The values in the leaves of the trees. This array can be dirty, i.e.,
     elements not in use can have whatever value, see `is_leaf_used`. It may
     have an additional axis for multivariate leaves. The dtype may be narrower
     than float32."""
 
-    var_tree: UInt[Array, '*batch_shape half_tree_size']
+    var_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The axes along which the decision nodes operate. This array can be
     dirty but for the always unused node at index 0 which must be set to 0."""
 
-    split_tree: UInt[Array, '*batch_shape half_tree_size']
+    split_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The decision boundaries of the trees. The boundaries are open on the
     right, i.e., a point belongs to the left child iff x < split. Whether a
     node is a leaf is indicated by the corresponding 'split' element being
@@ -115,19 +116,19 @@ class TreesTrace(Module):
     # hash-randomized order) can mis-bind it against the `k` axis of
     # `leaf_tree`'s union for a multivariate tree (the layouts are
     # rank-ambiguous). See `bartz.mcmcstep._state.Forest`.
-    var_tree: UInt[Array, '*batch_shape half_tree_size']
+    var_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The axes along which the decision nodes operate. This array can be
     dirty but for the always unused node at index 0 which must be set to 0."""
 
-    split_tree: UInt[Array, '*batch_shape half_tree_size']
+    split_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The decision boundaries of the trees. The boundaries are open on the
     right, i.e., a point belongs to the left child iff x < split. Whether a
     node is a leaf is indicated by the corresponding 'split' element being
     0. Unused nodes also have split set to 0. This array can't be dirty."""
 
     leaf_tree: (
-        Float[Array, '*batch_shape half_tree_size']
-        | Float[Array, '*batch_shape k half_tree_size']
+        Float[Array, '*batch_shape max_num_leaves']
+        | Float[Array, '*batch_shape k max_num_leaves']
     )
     """The values in the leaves of the trees. This array can be dirty, i.e.,
     elements not in use can have whatever value. It may have an additional
@@ -174,8 +175,8 @@ def node_to_leaf_index(node: Integer[Array, '*shape']) -> Integer[Array, '*shape
 
 
 def is_leaf_used(
-    split_tree: UInt[Array, '*batch_shape half_tree_size'],
-) -> Bool[Array, '*batch_shape half_tree_size']:
+    split_tree: UInt[Array, '*batch_shape max_num_leaves'],
+) -> Bool[Array, '*batch_shape max_num_leaves']:
     """
     Return a mask indicating the elements of `TreeHeaps.leaf_tree` in use.
 
@@ -190,11 +191,11 @@ def is_leaf_used(
     """
     # element i is for the leaf reached going left from the right child of
     # node i, or from the root
-    *_, half_tree_size = split_tree.shape
-    return split_tree.astype(bool) | (jnp.arange(half_tree_size) == 0)
+    *_, max_num_leaves = split_tree.shape
+    return split_tree.astype(bool) | (jnp.arange(max_num_leaves) == 0)
 
 
-def tree_depth(tree: Shaped[Array, '*batch_shape tree_size']) -> int:
+def tree_depth(tree: Shaped[Array, '*batch_shape heap_size']) -> int:
     """
     Return the maximum depth of a tree.
 
@@ -213,8 +214,8 @@ def tree_depth(tree: Shaped[Array, '*batch_shape tree_size']) -> int:
 
 def traverse_tree(
     x: UInt[Array, ' p'],
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
     *,
     index_type: Literal['heap', 'chain'],
 ) -> UInt[Array, '']:
@@ -262,8 +263,8 @@ def traverse_tree(
 @jit(static_argnames=('index_type',))
 def traverse_forest(
     X: UInt[Array, 'p n'],
-    var_trees: UInt[Array, '*forest_shape half_tree_size'],
-    split_trees: UInt[Array, '*forest_shape half_tree_size'],
+    var_trees: UInt[Array, '*forest_shape max_num_leaves'],
+    split_trees: UInt[Array, '*forest_shape max_num_leaves'],
     *,
     index_type: Literal['heap', 'chain'],
 ) -> UInt[Array, '*forest_shape n']:
@@ -289,7 +290,7 @@ def traverse_forest(
     """
     traverse = partial(traverse_tree, index_type=index_type)
     traverse = vmap(traverse, in_axes=(1, None, None))
-    traverse = jnp.vectorize(traverse, excluded=(0,), signature='(hts),(hts)->(n)')
+    traverse = jnp.vectorize(traverse, excluded=(0,), signature='(mnl),(mnl)->(n)')
     return traverse(X, var_trees, split_trees)
 
 
@@ -340,8 +341,8 @@ def evaluate_forest(
     bc_indices = indices[..., None, :, None] if is_mv else indices[..., None]
 
     bc_leaf_tree: (
-        Float[Array, '*forest_shape 1 half_tree_size']
-        | Float[Array, '*forest_shape k 1 half_tree_size']
+        Float[Array, '*forest_shape 1 max_num_leaves']
+        | Float[Array, '*forest_shape k 1 max_num_leaves']
     )
     bc_leaf_tree = (
         trees.leaf_tree[..., :, None, :] if is_mv else trees.leaf_tree[..., None, :]
@@ -360,8 +361,8 @@ def evaluate_forest(
 
 
 def is_actual_leaf(
-    split_tree: UInt[Array, ' half_tree_size'], *, add_bottom_level: bool = False
-) -> Bool[Array, ' half_tree_size'] | Bool[Array, ' 2*half_tree_size']:
+    split_tree: UInt[Array, ' max_num_leaves'], *, add_bottom_level: bool = False
+) -> Bool[Array, ' max_num_leaves'] | Bool[Array, ' 2*max_num_leaves']:
     """
     Return a mask indicating the leaf nodes in a tree.
 
@@ -389,8 +390,8 @@ def is_actual_leaf(
 
 
 def is_leaves_parent(
-    split_tree: UInt[Array, ' half_tree_size'],
-) -> Bool[Array, ' half_tree_size']:
+    split_tree: UInt[Array, ' max_num_leaves'],
+) -> Bool[Array, ' max_num_leaves']:
     """
     Return a mask indicating the nodes with leaf (and only leaf) children.
 
@@ -415,13 +416,13 @@ def is_leaves_parent(
     # the 0-th item has split == 0, so it's not counted
 
 
-def tree_depths(tree_size: int) -> UInt[Array, ' {tree_size}']:
+def tree_depths(heap_size: int) -> UInt[Array, ' {heap_size}']:
     """
     Return the depth of each node in a binary tree.
 
     Parameters
     ----------
-    tree_size
+    heap_size
         The length of the tree array, i.e., 2 ** d.
 
     Returns
@@ -436,7 +437,7 @@ def tree_depths(tree_size: int) -> UInt[Array, ' {tree_size}']:
     """
     depths = []
     depth = 0
-    for i in range(tree_size):
+    for i in range(heap_size):
         if i == 2**depth:
             depth += 1
         depths.append(depth - 1)
@@ -446,7 +447,7 @@ def tree_depths(tree_size: int) -> UInt[Array, ' {tree_size}']:
 
 @jit
 def forest_mean_leaves(
-    split_tree: UInt[Array, '*batch_shape half_tree_size'],
+    split_tree: UInt[Array, '*batch_shape max_num_leaves'],
     *,
     where: Bool[Array, '*batch_shape'] | None = None,
 ) -> Float32[Array, '']:
@@ -473,8 +474,8 @@ def forest_mean_leaves(
 @jit(static_argnames=('p', 'sum_batch_axis'))
 def var_histogram(
     p: int,
-    var_tree: UInt[Array, '*batch_shape half_tree_size'],
-    split_tree: UInt[Array, '*batch_shape half_tree_size'],
+    var_tree: UInt[Array, '*batch_shape max_num_leaves'],
+    split_tree: UInt[Array, '*batch_shape max_num_leaves'],
     *,
     sum_batch_axis: int | tuple[int, ...] = (),
 ) -> Int32[Array, '*reduced_batch_shape {p}']:
@@ -502,8 +503,8 @@ def var_histogram(
     is_internal = split_tree.astype(bool)
 
     def scatter_add(
-        var_tree: UInt[Array, '*summed_batch_axes half_tree_size'],
-        is_internal: Bool[Array, '*summed_batch_axes half_tree_size'],
+        var_tree: UInt[Array, '*summed_batch_axes max_num_leaves'],
+        is_internal: Bool[Array, '*summed_batch_axes max_num_leaves'],
     ) -> Int32[Array, ' p']:
         return jnp.zeros(p, int).at[var_tree].add(is_internal)
 
@@ -586,8 +587,8 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     down = '┐'
     bottom = '╢'  # '┨' #
 
-    *_, half_tree_size = tree.split_tree.shape
-    tree_size = 2 * half_tree_size
+    *_, max_num_leaves = tree.split_tree.shape
+    heap_size = 2 * max_num_leaves
 
     def traverse_tree(
         lines: list[str],
@@ -598,7 +599,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         *,
         unused: bool,
     ) -> None:
-        if index >= tree_size:
+        if index >= heap_size:
             return
 
         var: int = tree.var_tree.at[index].get(mode='fill', fill_value=0).item()
@@ -617,15 +618,15 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
             else:
                 node_str = f'x{var} < {split}'
 
-        if not is_leaf or (print_all and left_child < tree_size):
+        if not is_leaf or (print_all and left_child < heap_size):
             link = down
-        elif not print_all and left_child >= tree_size:
+        elif not print_all and left_child >= heap_size:
             link = bottom
         else:
             link = ' '
 
-        heap = str(index).rjust(len(str(tree_size - 1)))
-        chain = str(chain_index(index)).rjust(len(str(half_tree_size - 1)))
+        heap = str(index).rjust(len(str(heap_size - 1)))
+        chain = str(chain_index(index)).rjust(len(str(max_num_leaves - 1)))
 
         lines.append(f' {heap} {chain} {indent}{first_indent}{link}{node_str}')
 
@@ -643,7 +644,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     return '\n'.join(lines)
 
 
-def tree_actual_depth(split_tree: UInt[Array, ' half_tree_size']) -> UInt[Array, '']:
+def tree_actual_depth(split_tree: UInt[Array, ' max_num_leaves']) -> UInt[Array, '']:
     """Measure the depth of the tree.
 
     Parameters
@@ -663,9 +664,9 @@ def tree_actual_depth(split_tree: UInt[Array, ' half_tree_size']) -> UInt[Array,
 
 
 @jit
-@partial(jnp.vectorize, signature='(nt,hts)->(d)')
+@partial(jnp.vectorize, signature='(nt,mnl)->(d)')
 def forest_depth_distr(
-    split_tree: UInt[Array, '*batch_shape num_trees half_tree_size'],
+    split_tree: UInt[Array, '*batch_shape num_trees max_num_leaves'],
 ) -> Int32[Array, '*batch_shape d']:
     """Histogram the depths of a set of trees.
 
@@ -686,8 +687,8 @@ def forest_depth_distr(
 @jit(static_argnames=('node_type', 'sum_batch_axis'))
 def points_per_node_distr(
     X: UInt[Array, 'p n'],
-    var_tree: UInt[Array, '*batch_shape half_tree_size'],
-    split_tree: UInt[Array, '*batch_shape half_tree_size'],
+    var_tree: UInt[Array, '*batch_shape max_num_leaves'],
+    split_tree: UInt[Array, '*batch_shape max_num_leaves'],
     node_type: Literal['leaf', 'leaf-parent'],
     *,
     sum_batch_axis: int | tuple[int, ...] = (),
@@ -725,24 +726,24 @@ def points_per_node_distr(
     axes = normalize_axis_tuple(sum_batch_axis, batch_ndim)
 
     def func(
-        var_tree: UInt[Array, '*batch_shape half_tree_size'],
-        split_tree: UInt[Array, '*batch_shape half_tree_size'],
+        var_tree: UInt[Array, '*batch_shape max_num_leaves'],
+        split_tree: UInt[Array, '*batch_shape max_num_leaves'],
     ) -> Int32[Array, '*reduced_batch_shape n_plus_1']:
         indices: UInt[Array, '*batch_shape n']
         indices = traverse_forest(X, var_tree, split_tree, index_type='heap')
 
-        @partial(jnp.vectorize, signature='(hts),(n)->(ts_or_hts),(ts_or_hts)')
+        @partial(jnp.vectorize, signature='(mnl),(n)->(heap),(heap)')
         def count_points(
-            split_tree: UInt[Array, '*batch_shape half_tree_size'],
+            split_tree: UInt[Array, '*batch_shape max_num_leaves'],
             indices: UInt[Array, '*batch_shape n'],
         ) -> (
             tuple[
-                Int32[Array, '*batch_shape 2*half_tree_size'],
-                Bool[Array, '*batch_shape 2*half_tree_size'],
+                Int32[Array, '*batch_shape 2*max_num_leaves'],
+                Bool[Array, '*batch_shape 2*max_num_leaves'],
             ]
             | tuple[
-                Int32[Array, '*batch_shape half_tree_size'],
-                Bool[Array, '*batch_shape half_tree_size'],
+                Int32[Array, '*batch_shape max_num_leaves'],
+                Bool[Array, '*batch_shape max_num_leaves'],
             ]
         ):
             if node_type == 'leaf-parent':
@@ -758,8 +759,8 @@ def points_per_node_distr(
         count_tree, predicate = count_points(split_tree, indices)
 
         def count_nodes(
-            count_tree: Int32[Array, '*summed_batch_axes half_tree_size'],
-            predicate: Bool[Array, '*summed_batch_axes half_tree_size'],
+            count_tree: Int32[Array, '*summed_batch_axes max_num_leaves'],
+            predicate: Bool[Array, '*summed_batch_axes max_num_leaves'],
         ) -> Int32[Array, ' n_plus_1']:
             return jnp.zeros(X.shape[1] + 1, int).at[count_tree].add(predicate)
 

@@ -187,9 +187,9 @@ def sample_sparsity(key: Key[Array, ''], state: StateT) -> StateT:
 def sample_trees(key: Key[Array, ''], state: StateT) -> StateT:
     """Draw the decision rules of the trees, of all chains at once."""
     forest = state.forest
-    *shape, half_tree_size = forest.split_tree.shape
+    *shape, max_num_leaves = forest.split_tree.shape
 
-    depths = half_tree_size.bit_length() - 1
+    depths = max_num_leaves.bit_length() - 1
     p_nonterminal = forest.p_nonterminal[2 ** jnp.arange(depths)]
 
     if (
@@ -276,8 +276,8 @@ def sample_precision(
 
 
 def to_leaf_storage(
-    leaves: Float32[Array, 'num_trees *k half_tree_size'], state: State
-) -> Float[Array, 'num_trees *k half_tree_size']:
+    leaves: Float32[Array, 'num_trees *k max_num_leaves'], state: State
+) -> Float[Array, 'num_trees *k max_num_leaves']:
     """Convert the leaves to the storage units and dtype of `Forest.leaf_tree`."""
     forest = state.forest
     leaves /= forest.leaf_unit[..., None]

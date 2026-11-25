@@ -263,9 +263,9 @@ class TestSampleForest:
             p_nonterminal=args.p_nonterminal,
             log_s=args.log_s,
         )
-        half_tree_size = 2**args.p_nonterminal.size
+        max_num_leaves = 2**args.p_nonterminal.size
         leaf_tree = sample_leaves(
-            keys.pop(), (*shape, half_tree_size), jnp.reciprocal(args.sigma_mu)
+            keys.pop(), (*shape, max_num_leaves), jnp.reciprocal(args.sigma_mu)
         )
         return TreesTrace(
             leaf_tree=leaf_tree, var_tree=trees.var_tree, split_tree=trees.split_tree
@@ -956,10 +956,10 @@ class TestCheckTree:
 class Heaps(NamedTuple):
     """Trees with the leaf values indexed like the nodes."""
 
-    var_tree: UInt8[Array, 'num_trees half_tree_size']
-    split_tree: UInt8[Array, 'num_trees half_tree_size']
-    leaf_tree: Float32[Array, 'num_trees 2*half_tree_size']
-    is_leaf: Bool[Array, 'num_trees 2*half_tree_size']
+    var_tree: UInt8[Array, 'num_trees max_num_leaves']
+    split_tree: UInt8[Array, 'num_trees max_num_leaves']
+    leaf_tree: Float32[Array, 'num_trees 2*max_num_leaves']
+    is_leaf: Bool[Array, 'num_trees 2*max_num_leaves']
 
 
 class TestLeafLayout:
@@ -1004,8 +1004,8 @@ class TestLeafLayout:
     def test_index(self, heaps: Heaps) -> None:
         """Check each leaf has its own element, and the others are marked not in use."""
         leaf_tree = jnp.where(heaps.is_leaf, heaps.leaf_tree, 0)
-        _, tree_size = leaf_tree.shape
-        indices = node_to_leaf_index(jnp.arange(1, tree_size))
+        _, heap_size = leaf_tree.shape
+        indices = node_to_leaf_index(jnp.arange(1, heap_size))
         expected = jnp.zeros_like(heaps.split_tree, jnp.float32)
         expected = expected.at[:, indices].add(leaf_tree[:, 1:])
         count = jnp.zeros_like(heaps.split_tree, int)
@@ -1038,8 +1038,8 @@ class TestLeafLayout:
         """Check the 'chain' index of a leaf is the one of its value."""
         X = random.randint(keys.pop(), (3, 30), 0, 11, jnp.uint8)
         traverse = partial(traverse_forest, X, heaps.var_tree, heaps.split_tree)
-        _, half_tree_size = heaps.split_tree.shape
-        dtype = minimal_unsigned_dtype(half_tree_size - 1)
+        _, max_num_leaves = heaps.split_tree.shape
+        dtype = minimal_unsigned_dtype(max_num_leaves - 1)
         expected = node_to_leaf_index(traverse(index_type='heap'))
         indices = traverse(index_type='chain')
         assert indices.dtype == dtype
@@ -1130,8 +1130,8 @@ class TestTreesBARTToBartz:
             bart3_fit.trees, offset=bart3_fit.offset, min_maxdepth=maxdepth
         )
         assert meta.heap_size < 2**maxdepth
-        *_, half_heap_size = trace.leaf_tree.shape
-        assert 2 * half_heap_size == 2**maxdepth
+        *_, max_num_leaves = trace.leaf_tree.shape
+        assert 2 * max_num_leaves == 2**maxdepth
         self.check(bart3_fit, trace, meta)
 
     @pytest.mark.parametrize(

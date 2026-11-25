@@ -344,30 +344,30 @@ def upgrade_peff_binary_mask(root: Skeleton, old: Arrays) -> tuple[Skeleton, Arr
 
 
 def compress_leaf_tree(
-    split_tree: UInt[np.ndarray, '*batch_shape half_tree_size'],
-    leaf_tree: Shaped[np.ndarray, '*batch_shape 2*half_tree_size']
-    | Shaped[np.ndarray, '*batch_shape k 2*half_tree_size']
-    | Shaped[np.ndarray, '*batch_shape k k 2*half_tree_size'],
+    split_tree: UInt[np.ndarray, '*batch_shape max_num_leaves'],
+    leaf_tree: Shaped[np.ndarray, '*batch_shape 2*max_num_leaves']
+    | Shaped[np.ndarray, '*batch_shape k 2*max_num_leaves']
+    | Shaped[np.ndarray, '*batch_shape k k 2*max_num_leaves'],
 ) -> (
-    Shaped[np.ndarray, '*batch_shape half_tree_size']
-    | Shaped[np.ndarray, '*batch_shape k half_tree_size']
-    | Shaped[np.ndarray, '*batch_shape k k half_tree_size']
+    Shaped[np.ndarray, '*batch_shape max_num_leaves']
+    | Shaped[np.ndarray, '*batch_shape k max_num_leaves']
+    | Shaped[np.ndarray, '*batch_shape k k max_num_leaves']
 ):
     """Pack values defined on the leaves of trees into arrays half as long.
 
     The value of the leaf at index i goes to the index obtained shifting i
     right until its lowest set bit is dropped, the other elements are zero.
     """
-    *batch_shape, half_tree_size = split_tree.shape
+    *batch_shape, max_num_leaves = split_tree.shape
     leaf_ndim = leaf_tree.ndim - split_tree.ndim
-    split_tree = split_tree.reshape(*batch_shape, *(1,) * leaf_ndim, half_tree_size)
+    split_tree = split_tree.reshape(*batch_shape, *(1,) * leaf_ndim, max_num_leaves)
 
     # an element takes the nodes reached going left from a right child or the
     # root; visit them top-down, moving on to a node if it is below a decision
     # node
     out = leaf_tree[..., 1::2].copy()
     stride = 2
-    while stride <= half_tree_size:
+    while stride <= max_num_leaves:
         parent_is_decision = split_tree[..., stride // 2 :: stride] != 0
         *_, size = parent_is_decision.shape
         nodes = leaf_tree[..., stride :: 2 * stride]
@@ -381,14 +381,14 @@ def compress_leaf_tree(
 
 
 def compress_leaf_indices(
-    leaf_indices: UInt[np.ndarray, '*shape'], half_tree_size: int
+    leaf_indices: UInt[np.ndarray, '*shape'], max_num_leaves: int
 ) -> UInt[np.ndarray, '*shape']:
     """Convert the indices of leaves to those of their values after `compress_leaf_tree`."""
     lowest_set_bit = leaf_indices & (~leaf_indices + 1)
     out = leaf_indices // np.maximum(lowest_set_bit, 1) >> 1
     dtypes = (np.uint8, np.uint16, np.uint32, np.uint64)
     return out.astype(
-        next(dtype for dtype in dtypes if half_tree_size - 1 <= np.iinfo(dtype).max)
+        next(dtype for dtype in dtypes if max_num_leaves - 1 <= np.iinfo(dtype).max)
     )
 
 
@@ -404,14 +404,14 @@ def compress_leaves(old: Arrays, fields: dict[str, Skeleton]) -> Arrays:
     In a forest, they follow the trees without the pending prunes applied.
     """
     split_tree = old[fields['split_tree']['key']]
-    *_, half_tree_size = split_tree.shape
+    *_, max_num_leaves = split_tree.shape
     new: Arrays = {}
     if 'leaf_indices' in fields:
         key = fields['leaf_indices']['key']
-        new[key] = compress_leaf_indices(old[key], half_tree_size)
+        new[key] = compress_leaf_indices(old[key], max_num_leaves)
         to_prune = old[fields['to_prune']['key']]
         move_node = old[fields['move_node']['key']]
-        is_move_node = np.arange(half_tree_size) == move_node[..., None]
+        is_move_node = np.arange(max_num_leaves) == move_node[..., None]
         split_tree = np.where(to_prune[..., None] & is_move_node, 1, split_tree)
     for name in ('leaf_tree', 'count_tree', 'prec_tree'):
         node = fields.get(name)

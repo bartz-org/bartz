@@ -643,8 +643,8 @@ def sum_trees_prior_cov_inv_conditional_mean(
     *_, num_trees, half = split_tree.shape
 
     def conditional_mean(
-        split_tree: UInt[Array, 'num_trees half_tree_size'],
-        leaf_tree: Float[Array, 'num_trees k half_tree_size'],
+        split_tree: UInt[Array, 'num_trees max_num_leaves'],
+        leaf_tree: Float[Array, 'num_trees k max_num_leaves'],
     ) -> Float32[Array, 'k k']:
         is_leaf = is_leaf_used(split_tree)
         leaves = forest.leaf_unit.reshape(-1, 1) * leaf_tree

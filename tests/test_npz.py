@@ -407,7 +407,7 @@ def test_upgrade_peff_binary_mask_custom_class(field: str, value: Json) -> None:
 
 
 def compress_vector_leaves(
-    split_tree: UInt[Array, '*trees half_tree_size'], leaf_tree: Float[Array, '...']
+    split_tree: UInt[Array, '*trees max_num_leaves'], leaf_tree: Float[Array, '...']
 ) -> Float[Array, '...']:
     """Apply `compress_leaf_tree` to each component of the leaves."""
     func = partial(compress_leaf_tree, split_tree)
@@ -458,7 +458,7 @@ def test_upgrade_leaf_layout_state(archive: str, forests: tuple[str, ...]) -> No
     num_pending = 0
     for name in forests:
         forest = getattr(state, name)
-        *_, half_tree_size = forest.split_tree.shape
+        *_, max_num_leaves = forest.split_tree.shape
         num_pending += forest.to_prune.sum()
 
         # the leaf indices get to the same leaf values
@@ -473,7 +473,7 @@ def test_upgrade_leaf_layout_state(archive: str, forests: tuple[str, ...]) -> No
 
         # the caches match the leaf indices
         count = jnp.vectorize(
-            partial(jnp.bincount, length=half_tree_size), signature='(n)->(h)'
+            partial(jnp.bincount, length=max_num_leaves), signature='(n)->(h)'
         )
         if forest.count_tree is not None:
             assert_array_equal(
@@ -525,13 +525,13 @@ def test_upgrade_compress_leaf_tree(keys: split, kshape: tuple[int, ...]) -> Non
 
 
 @pytest.mark.parametrize(
-    ('half_tree_size', 'dtype'), [(32, np.uint8), (256, np.uint16), (512, np.uint16)]
+    ('max_num_leaves', 'dtype'), [(32, np.uint8), (256, np.uint16), (512, np.uint16)]
 )
-def test_upgrade_compress_leaf_indices(half_tree_size: int, dtype: type) -> None:
+def test_upgrade_compress_leaf_indices(max_num_leaves: int, dtype: type) -> None:
     """Check the conversion of the leaf indices, and their type."""
-    nodes = np.arange(1, 2 * half_tree_size, dtype=dtype)
-    indices = compress_leaf_indices(nodes, half_tree_size)
-    assert indices.dtype == minimal_unsigned_dtype(half_tree_size - 1)
+    nodes = np.arange(1, 2 * max_num_leaves, dtype=dtype)
+    indices = compress_leaf_indices(nodes, max_num_leaves)
+    assert indices.dtype == minimal_unsigned_dtype(max_num_leaves - 1)
     assert_array_equal(indices, node_to_leaf_index(jnp.asarray(nodes)), strict=False)
 
 

@@ -84,12 +84,12 @@ NSKIP = 2
 
 def prec_tree_from_scratch(
     forest: Forest, prec_scale: Shaped[ArrayLike, ' n']
-) -> Shaped[ArrayLike, 'num_trees half_tree_size']:
+) -> Shaped[ArrayLike, 'num_trees max_num_leaves']:
     """Sum `prec_scale` over the datapoints at each leaf index of each tree."""
-    _, half_tree_size = forest.leaf_tree.shape
+    _, max_num_leaves = forest.leaf_tree.shape
 
-    def scatter(idx: Shaped[ArrayLike, ' n']) -> Shaped[ArrayLike, ' half_tree_size']:
-        return jnp.zeros(half_tree_size).at[idx].add(prec_scale)
+    def scatter(idx: Shaped[ArrayLike, ' n']) -> Shaped[ArrayLike, ' max_num_leaves']:
+        return jnp.zeros(max_num_leaves).at[idx].add(prec_scale)
 
     return vmap(scatter)(forest.leaf_indices)
 

@@ -79,7 +79,7 @@ class BurninTrace(Trace):
     # The union-free count diagnostics are declared before `error_cov_inv` (and
     # before `MainTrace.leaf_tree`) so they bind the variadic
     # `*chains_and_samples` axis first. Otherwise the runtime typechecker,
-    # evaluating the `... | ... k k` / `... | ... k half_tree_size` unions in a
+    # evaluating the `... | ... k k` / `... | ... k max_num_leaves` unions in a
     # hash-randomized order, can mis-bind `*chains_and_samples` against the `k`
     # axis for a multivariate-without-chains trace (the layouts are
     # rank-ambiguous).
@@ -165,18 +165,18 @@ class MainTrace(BurninTrace):
     """MCMC trace with trees and diagnostic values."""
 
     leaf_tree: (
-        Float[Array, '*chains_and_samples num_trees half_tree_size']
-        | Float[Array, '*chains_and_samples num_trees k half_tree_size']
+        Float[Array, '*chains_and_samples num_trees max_num_leaves']
+        | Float[Array, '*chains_and_samples num_trees k max_num_leaves']
     ) = field(chains=0, samples=0)
     """The leaf values, in units of `leaf_unit`, laid out as in
     `bartz.grove.TreeHeaps`, zero in the elements not in use."""
 
-    var_tree: UInt[Array, '*chains_and_samples num_trees half_tree_size'] = field(
+    var_tree: UInt[Array, '*chains_and_samples num_trees max_num_leaves'] = field(
         chains=0, samples=0
     )
     """The decision axes."""
 
-    split_tree: UInt[Array, '*chains_and_samples num_trees half_tree_size'] = field(
+    split_tree: UInt[Array, '*chains_and_samples num_trees max_num_leaves'] = field(
         chains=0, samples=0
     )
     """The decision boundaries."""
@@ -222,7 +222,7 @@ class MainTrace(BurninTrace):
     def finalize(self) -> 'MainTrace':
         """Zero the stale leaf values not in use, to make the trace compressible."""
         is_leaf = is_leaf_used(self.split_tree)
-        if self.leaf_tree.ndim > is_leaf.ndim:  # multivariate, (..., k, hts)
+        if self.leaf_tree.ndim > is_leaf.ndim:  # multivariate, (..., k, max_num_leaves)
             is_leaf = is_leaf[..., None, :]
         return replace(self, leaf_tree=jnp.where(is_leaf, self.leaf_tree, 0))
 

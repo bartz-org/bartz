@@ -2550,14 +2550,14 @@ def test_rebuild_derived(keys: split, case: str) -> None:
 @pytest.mark.parametrize('kshape', [(), (2,)])
 def test_set_leaf_pair(keys: split, kshape: tuple[int, ...]) -> None:
     """Check the two ways of copying a value to a pair of leaves, one per platform."""
-    half_tree_size = 8
-    leaf_tree = random.normal(keys.pop(), (*kshape, half_tree_size))
+    max_num_leaves = 8
+    leaf_tree = random.normal(keys.pop(), (*kshape, max_num_leaves))
     value = random.normal(keys.pop(), (*kshape, 1))
     for where in (False, True):
         # the last pair is out of bounds, as for a tree without a move
         for indices in ((0, 1), (5, 2), (7, 3), (16, 16)):
             expected = numpy.array(leaf_tree)
-            if where and max(indices) < half_tree_size:
+            if where and max(indices) < max_num_leaves:
                 expected[..., list(indices)] = value
             args = (leaf_tree, value, jnp.bool_(where), jnp.array(indices))
             for func in (set_leaf_pair, _set_leaf_pair_scatter, _set_leaf_pair_select):
@@ -4228,7 +4228,7 @@ class TestPrecomputeTerms:
         if het:
             s = numpy.exp(0.01 * random.normal(keys.pop(), (k, 100)))
             W = numpy.asarray(s @ s.T, numpy.float32) / 100  # (k, k)
-            prec = counts[:, None, None] * W  # (tree_size, k, k)
+            prec = counts[:, None, None] * W  # (num_leaves, k, k)
             prelf = _precompute_leaf_terms_mv_het(
                 keys.pop(),
                 jnp.moveaxis(prec, 0, -1)[None],
@@ -4261,17 +4261,17 @@ class TestPrecomputeTerms:
 
     def test_shapes_leaf(self, keys: split, k: int) -> None:
         """Check that shapes of outputs are correct."""
-        tree_size = 4
-        prec_trees = jnp.ones((NUM_TREES, tree_size))
+        num_leaves = 4
+        prec_trees = jnp.ones((NUM_TREES, num_leaves))
         error_cov_inv = random_pd_matrix(keys.pop(), k)
         leaf_prior_cov_inv = random_pd_matrix(keys.pop(), k)
 
         result = _precompute_leaf_terms_mv(
             keys.pop(), prec_trees, error_cov_inv, leaf_prior_cov_inv
         )
-        assert result.mean_factor.shape == (NUM_TREES, k, k, tree_size)
-        assert result.centered_leaves.shape == (NUM_TREES, k, tree_size)
-        assert result.logdet_prec.shape == (NUM_TREES, tree_size)
+        assert result.mean_factor.shape == (NUM_TREES, k, k, num_leaves)
+        assert result.centered_leaves.shape == (NUM_TREES, k, num_leaves)
+        assert result.logdet_prec.shape == (NUM_TREES, num_leaves)
 
     def test_likelihood_equiv(self, keys: split) -> None:
         """Check that _compute_likelihood_ratio_uv and _compute_likelihood_ratio_mv agree when k = 1."""
@@ -4315,15 +4315,15 @@ class TestPrecomputeTerms:
 
     def test_leaf_terms_equiv(self, keys: split) -> None:
         """Check that _precompute_leaf_terms_uv and _precompute_leaf_terms_mv agree when k = 1."""
-        tree_size = 3
+        num_leaves = 3
         inv_sigma2 = random.uniform(keys.pop(), (), minval=0.1, maxval=5.0)
         leaf_prior_cov_inv_uv = random.uniform(keys.pop(), (), minval=0.1, maxval=5.0)
 
         error_cov_inv = jnp.array([[inv_sigma2]])
         leaf_prior_cov_inv = jnp.array([[leaf_prior_cov_inv_uv]])
-        prec_trees = random.uniform(keys.pop(), (NUM_TREES, tree_size)) * 5.0
-        z_uv = random.normal(keys.pop(), (NUM_TREES, tree_size))
-        z_mv = z_uv[:, None, :]  # (num_trees, k=1, tree_size), leaf axis trailing
+        prec_trees = random.uniform(keys.pop(), (NUM_TREES, num_leaves)) * 5.0
+        z_uv = random.normal(keys.pop(), (NUM_TREES, num_leaves))
+        z_mv = z_uv[:, None, :]  # (num_trees, k=1, num_leaves), leaf axis trailing
 
         result_uv = _precompute_leaf_terms_uv(
             keys.pop(), prec_trees, inv_sigma2, leaf_prior_cov_inv_uv, z_uv
@@ -5017,8 +5017,8 @@ class TestSampleSAugmentation:
 
     @staticmethod
     def _forest(
-        var_tree: UInt[Array, ' num_trees half_tree_size'],
-        split_tree: UInt[Array, ' num_trees half_tree_size'],
+        var_tree: UInt[Array, ' num_trees max_num_leaves'],
+        split_tree: UInt[Array, ' num_trees max_num_leaves'],
         max_split: UInt[Array, ' p'],
         log_s: Float32[Array, ' p'],
     ) -> Forest:
@@ -5035,8 +5035,8 @@ class TestSampleSAugmentation:
 
     @staticmethod
     def _replicate(
-        tree_heap: UInt[Array, ' half_tree_size'], num_trees: int
-    ) -> UInt[Array, ' num_trees half_tree_size']:
+        tree_heap: UInt[Array, ' max_num_leaves'], num_trees: int
+    ) -> UInt[Array, ' num_trees max_num_leaves']:
         """Stack `num_trees` identical copies of a tree heap."""
         return jnp.broadcast_to(tree_heap, (num_trees, tree_heap.size))
 
@@ -5080,8 +5080,8 @@ class TestSampleSAugmentation:
     @staticmethod
     def _reference_blocked_mass_tree(
         key: Key[Array, ''],
-        var_tree: UInt[Array, ' half_tree_size'],
-        split_tree: UInt[Array, ' half_tree_size'],
+        var_tree: UInt[Array, ' max_num_leaves'],
+        split_tree: UInt[Array, ' max_num_leaves'],
         max_split: UInt[Array, ' p'],
         log_s: Float32[Array, ' p'],
     ) -> Float32[Array, ' p']:
@@ -5095,8 +5095,8 @@ class TestSampleSAugmentation:
         summation reassociation.
         """
         p = max_split.size
-        (half_tree_size,) = split_tree.shape
-        nodes = jnp.arange(half_tree_size)
+        (max_num_leaves,) = split_tree.shape
+        nodes = jnp.arange(max_num_leaves)
         ineligible = vmap(fully_used_variables, in_axes=(None, None, None, 0))(
             var_tree, split_tree, max_split, nodes
         )
@@ -5108,7 +5108,7 @@ class TestSampleSAugmentation:
         mask = jnp.any(ineligible[:, :, None] == jnp.arange(p), axis=1)
         log_eligible = logsumexp(jnp.where(mask, -jnp.inf, log_s), axis=-1)
         is_internal = split_tree.astype(bool)
-        log_weight = jnp.log(random.exponential(key, (half_tree_size,))) - log_eligible
+        log_weight = jnp.log(random.exponential(key, (max_num_leaves,))) - log_eligible
         log_weight = jnp.where(is_internal, log_weight, -jnp.inf)
         log_weights = jnp.where(is_first, log_weight[:, None], -jnp.inf).ravel()
         at_var = ineligible.ravel() == jnp.arange(p)[:, None]
@@ -5148,8 +5148,8 @@ class TestSampleSAugmentation:
         for _ in range(40):
             state = step(keys.pop(), state)
         forest = state.forest
-        (num_trees, half_tree_size) = forest.var_tree.shape
-        d_minus_1 = half_tree_size.bit_length() - 1
+        (num_trees, max_num_leaves) = forest.var_tree.shape
+        d_minus_1 = max_num_leaves.bit_length() - 1
 
         # get log_s
         log_s = nnone(forest.sparsity.log_s)
@@ -5204,8 +5204,8 @@ class TestSampleSAugmentation:
         # plant trees whose only internal node is the root, so no decision rule
         # is ever forbidden, whatever the cutpoint
         forest = state.forest
-        (num_trees, half_tree_size) = forest.var_tree.shape
-        root = jnp.zeros((num_trees, half_tree_size)).at[:, 1]
+        (num_trees, max_num_leaves) = forest.var_tree.shape
+        root = jnp.zeros((num_trees, max_num_leaves)).at[:, 1]
         forest = replace(
             forest,
             var_tree=root.set(0).astype(forest.var_tree.dtype),

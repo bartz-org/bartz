@@ -270,30 +270,30 @@ class Forest(Module):
     # Implementation note related to runtime type checking: Heap-array fields
     # follow the `bartz.grove.TreesTrace` convention: the union-free integer
     # trees are declared before `leaf_tree` and carry the bindable
-    # `half_tree_size` axis, while `p_nonterminal` is checked against
-    # `2*half_tree_size`. Declaring a union-free `*chains`
+    # `max_num_leaves` axis, while `p_nonterminal` is checked against
+    # `2*max_num_leaves`. Declaring a union-free `*chains`
     # field first binds the variadic chain axis (plus `num_trees` and
-    # `half_tree_size`) before `leaf_tree`'s `... | ... k ...` union is
+    # `max_num_leaves`) before `leaf_tree`'s `... | ... k ...` union is
     # evaluated, so the runtime typechecker can't mis-bind `*chains` against
     # the `k` axis of a multivariate forest (the layouts are otherwise
     # rank-ambiguous). No dummy anchor field needed.
 
-    var_tree: UInt[Array, '*chains num_trees half_tree_size'] = field(chains=CHAIN_AXIS)
+    var_tree: UInt[Array, '*chains num_trees max_num_leaves'] = field(chains=CHAIN_AXIS)
     """Variables/predictors/axes of decision rules."""
 
-    split_tree: UInt[Array, '*chains num_trees half_tree_size'] = field(
+    split_tree: UInt[Array, '*chains num_trees max_num_leaves'] = field(
         chains=CHAIN_AXIS
     )
     """Cutpoints/boundaries of decision rules."""
 
-    affluence_tree: Bool[Array, '*chains num_trees half_tree_size'] = field(
+    affluence_tree: Bool[Array, '*chains num_trees max_num_leaves'] = field(
         chains=CHAIN_AXIS
     )
     """Marks leaves that can be grown."""
 
     leaf_tree: (
-        Float[Array, '*chains num_trees half_tree_size']
-        | Float[Array, '*chains num_trees k half_tree_size']
+        Float[Array, '*chains num_trees max_num_leaves']
+        | Float[Array, '*chains num_trees k max_num_leaves']
     ) = field(chains=CHAIN_AXIS)
     """The leaf values, in units of `leaf_unit`, laid out as in
     `bartz.grove.TreeHeaps`. The function computed by the forest is
@@ -338,12 +338,12 @@ class Forest(Module):
     values >= p, or `None` if there are none. Redundant with `max_split`, it
     speeds up proposing moves."""
 
-    p_nonterminal: Float32[Array, ' 2*half_tree_size']
+    p_nonterminal: Float32[Array, ' 2*max_num_leaves']
     """The prior probability of each node being nonterminal (conditional on its
     ancestors leaving at least one available decision rule). Includes the nodes
     at maximum depth which shall be set to 0."""
 
-    p_propose_grow: Float32[Array, ' half_tree_size']
+    p_propose_grow: Float32[Array, ' max_num_leaves']
     """The unnormalized probability of picking a leaf for a grow proposal."""
 
     leaf_indices: UInt[Array, '*chains num_trees n'] = field(chains=CHAIN_AXIS, data=-1)
@@ -369,7 +369,7 @@ class Forest(Module):
     """The number of MCMC steps since each tree was last pruned to a lone root,
     or since the start."""
 
-    count_tree: UInt32[Array, '*chains num_trees half_tree_size'] | None = field(
+    count_tree: UInt32[Array, '*chains num_trees max_num_leaves'] | None = field(
         chains=CHAIN_AXIS
     )
     """The number of datapoints at each index in `leaf_indices`, so in the same
@@ -378,8 +378,8 @@ class Forest(Module):
     minimum-points-per-node constraints, which makes the counts unused."""
 
     prec_tree: (
-        Float32[Array, '*chains num_trees half_tree_size']
-        | Float32[Array, '*chains num_trees k k half_tree_size']
+        Float32[Array, '*chains num_trees max_num_leaves']
+        | Float32[Array, '*chains num_trees k k max_num_leaves']
         | None
     ) = field(chains=CHAIN_AXIS)
     """The sum of `State.prec_scale` over the datapoints at each index in
@@ -1251,8 +1251,8 @@ def init(
     # check there aren't too many deactivated predictors
     offset = check_splitless_vars(filter_splitless_vars, max_split, offset)
 
-    tree_size = 2**max_depth
-    half_tree_size = tree_size // 2
+    heap_size = 2**max_depth
+    max_num_leaves = heap_size // 2
 
     # Assemble the state, shard it, then fill in the post-shard fields. This
     # whole region runs with type-checking disabled because the state carries
@@ -1304,21 +1304,21 @@ def init(
             sum_diag_prec_scale=cast(Array, None),
             forest=Forest(
                 leaf_tree=lazy(
-                    jnp.zeros, (num_trees, *kshape, half_tree_size), storage.leaf_dtype
+                    jnp.zeros, (num_trees, *kshape, max_num_leaves), storage.leaf_dtype
                 ),
                 leaf_unit=storage.leaf_unit,
                 offset=offset,
                 var_tree=lazy(
                     jnp.zeros,
-                    (num_trees, half_tree_size),
+                    (num_trees, max_num_leaves),
                     minimal_unsigned_dtype(p - 1),
                 ),
                 split_tree=lazy(
-                    jnp.zeros, (num_trees, half_tree_size), max_split.dtype
+                    jnp.zeros, (num_trees, max_num_leaves), max_split.dtype
                 ),
                 affluence_tree=lazy(
                     initial_affluence_tree,
-                    (num_trees, half_tree_size),
+                    (num_trees, max_num_leaves),
                     n,
                     min_points_per_decision_node,
                     max_split,
@@ -1330,12 +1330,12 @@ def init(
                 grow_acc_count=lazy(jnp.zeros, (), int),
                 prune_prop_count=lazy(jnp.zeros, (), int),
                 prune_acc_count=lazy(jnp.zeros, (), int),
-                p_nonterminal=p_nonterminal[tree_depths(tree_size)],
-                p_propose_grow=p_nonterminal[tree_depths(half_tree_size)],
+                p_nonterminal=p_nonterminal[tree_depths(heap_size)],
+                p_propose_grow=p_nonterminal[tree_depths(max_num_leaves)],
                 leaf_indices=lazy(
                     jnp.zeros,
                     (num_trees, n),
-                    minimal_unsigned_dtype(half_tree_size - 1),
+                    minimal_unsigned_dtype(max_num_leaves - 1),
                 ),
                 # no pending prune: `step` starts by applying the pending
                 # prunes to `leaf_indices`, which shall be a no-op on init
@@ -1346,7 +1346,7 @@ def init(
                 # for the precisions when there are no per-datapoint scales
                 # (`prec_scale` is set iff `error_scale` or `missing` is given)
                 count_tree=(
-                    lazy(initial_count_tree, (num_trees, half_tree_size), n)
+                    lazy(initial_count_tree, (num_trees, max_num_leaves), n)
                     if min_points_per_decision_node is not None
                     or min_points_per_leaf is not None
                     or (error_scale is None and missing is None)
@@ -1459,7 +1459,7 @@ def init(
 
         # calculate the initial prec_tree from the sharded prec_scale
         if state.prec_scale is not None:
-            state = set_initial_prec_tree(state, num_chains, num_trees, half_tree_size)
+            state = set_initial_prec_tree(state, num_chains, num_trees, max_num_leaves)
 
     # all the wrong-typed intermediates have now been replaced by their final
     # values, so type-checking can resume; make all types strong to avoid
@@ -1640,7 +1640,7 @@ def initial_count_tree(shape: tuple[int, ...], n: int) -> Shaped[Array, '...']:
 
 
 def set_initial_prec_tree(
-    state: State, num_chains: int | None, num_trees: int, half_tree_size: int
+    state: State, num_chains: int | None, num_trees: int, max_num_leaves: int
 ) -> State:
     """Build the cached per-leaf precision for root-only trees and shard it.
 
@@ -1648,7 +1648,7 @@ def set_initial_prec_tree(
     target devices; mirrors `set_initial_resid`.
     """
     assert state.prec_scale is not None
-    shape = (num_trees, *state.prec_scale.shape[:-1], half_tree_size)
+    shape = (num_trees, *state.prec_scale.shape[:-1], max_num_leaves)
     inner = _LazyArray(initial_prec_tree, shape, state.prec_scale)
     preview_tree = add_dummy_axis(inner) if num_chains is not None else inner
     preview = replace(state, forest=replace(state.forest, prec_tree=preview_tree))
@@ -1661,8 +1661,8 @@ def set_initial_prec_tree(
 def initial_prec_tree(
     shape: tuple[int, ...], prec_scale: Float[Array, ' n'] | Float[Array, 'k k n']
 ) -> (
-    Float32[Array, 'num_trees half_tree_size']
-    | Float32[Array, 'num_trees k k half_tree_size']
+    Float32[Array, 'num_trees max_num_leaves']
+    | Float32[Array, 'num_trees k k max_num_leaves']
 ):
     """Create the initial value of `Forest.prec_tree`: all datapoints in the root."""
     return (

@@ -279,7 +279,7 @@ def check_trace(
         TreesTrace(leaf_tree=l, var_tree=v, split_tree=s), max_split
     )
     is_mv = is_multivariate(trace)
-    signature = '(k,hts),(hts),(hts)->()' if is_mv else '(hts),(hts),(hts)->()'
+    signature = '(k,mnl),(mnl),(mnl)->()' if is_mv else '(mnl),(mnl),(mnl)->()'
     vec_check_tree = jnp.vectorize(unpack_check_tree, signature=signature)
 
     # automatically batch over all batch dimensions

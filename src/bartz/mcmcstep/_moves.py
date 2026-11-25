@@ -80,7 +80,7 @@ class Moves(Module):
     grow_split: Int32[Array, '*num_trees']
     """The decision boundaries of the new rules."""
 
-    var_tree: UInt[Array, '*num_trees half_tree_size']
+    var_tree: UInt[Array, '*num_trees max_num_leaves']
     """The updated decision axes of the trees, valid whatever move."""
 
     lrt_growable: Bool[Array, '*num_trees 3']
@@ -177,14 +177,14 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
 @named_call
 def _propose_moves(
     key: Key[Array, ''],
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
-    affluence_tree: Bool[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
+    affluence_tree: Bool[Array, ' max_num_leaves'],
     used: Bool[Array, ''] | None,
     *,
     max_split: UInt[Array, ' p'],
     blocked_vars: UInt[Array, ' k'] | None,
-    p_propose_grow: Float32[Array, ' half_tree_size'],
+    p_propose_grow: Float32[Array, ' max_num_leaves'],
     s_table: CategoricalTable | None,
 ) -> Moves:
     """
@@ -325,9 +325,9 @@ def _propose_moves(
 
 def choose_leaf(
     key: Key[Array, ''],
-    split_tree: UInt[Array, ' half_tree_size'],
-    affluence_tree: Bool[Array, ' half_tree_size'],
-    p_propose_grow: Float32[Array, ' half_tree_size'],
+    split_tree: UInt[Array, ' max_num_leaves'],
+    affluence_tree: Bool[Array, ' max_num_leaves'],
+    p_propose_grow: Float32[Array, ' max_num_leaves'],
 ) -> tuple[Int32[Array, ''], Int32[Array, ''], Float32[Array, ''], Int32[Array, '']]:
     """
     Choose a leaf node to grow in a tree.
@@ -371,8 +371,8 @@ def choose_leaf(
 
 def choose_variable(
     key: Key[Array, ''],
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
     *,
@@ -423,8 +423,8 @@ def choose_variable(
 
 
 def fully_used_variables(
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
 ) -> UInt[Array, ' d_minus_2']:
@@ -462,7 +462,7 @@ def fully_used_variables(
 
 
 def ancestor_variables(
-    var_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     node_index: Int32[Array, ''],
 ) -> UInt[Array, ' d_minus_2']:
@@ -497,8 +497,8 @@ def ancestor_variables(
 
 
 def split_range(
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     node_index: Int32[Array, ''],
     ref_var: Integer[Array, ''],
@@ -745,8 +745,8 @@ def categorical_cumsum(
 
 def choose_split(
     key: Key[Array, ''],
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
     *,
@@ -839,9 +839,9 @@ def compute_partial_ratio(
 
 def choose_leaf_parent(
     key: Key[Array, ''],
-    split_tree: UInt[Array, ' half_tree_size'],
-    affluence_tree: Bool[Array, ' half_tree_size'],
-    p_propose_grow: Float32[Array, ' half_tree_size'],
+    split_tree: UInt[Array, ' max_num_leaves'],
+    affluence_tree: Bool[Array, ' max_num_leaves'],
+    p_propose_grow: Float32[Array, ' max_num_leaves'],
 ) -> tuple[Int32[Array, ''], Int32[Array, ''], Float32[Array, '']]:
     """
     Pick a non-terminal node with leaf children to prune in a tree.

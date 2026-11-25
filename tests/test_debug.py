@@ -114,11 +114,11 @@ def test_format_tree() -> None:
     s = format_tree(tree)
     print(s)
     ref_s = """\
- 1 ┐x4 < 15
- 2 ├── 1.00000 * 2.00000
- 3 └──┐x2 < 3
- 6    ├──╢1.00000 * 6.00000
- 7    └──╢1.00000 * 7.00000"""
+ 1 0 ┐x4 < 15
+ 2 0 ├── 1.00000 * 2.00000
+ 3 1 └──┐x2 < 3
+ 6 1    ├──╢1.00000 * 6.00000
+ 7 3    └──╢1.00000 * 7.00000"""
     assert s == ref_s
 
 
@@ -135,11 +135,11 @@ def test_format_tree_leaf_unit() -> None:
     s = format_tree(tree)
     print(s)
     ref_s = """\
- 1 ┐x4 < 15
- 2 ├── 0.500000 * 2.00
- 3 └──┐x2 < 3
- 6    ├──╢0.500000 * 6.00
- 7    └──╢0.500000 * 7.00"""
+ 1 0 ┐x4 < 15
+ 2 0 ├── 0.500000 * 2.00
+ 3 1 └──┐x2 < 3
+ 6 1    ├──╢0.500000 * 6.00
+ 7 3    └──╢0.500000 * 7.00"""
     assert s == ref_s
 
 
@@ -153,13 +153,13 @@ def test_format_tree_print_all() -> None:
     s = format_tree(tree, print_all=True)
     print(s)
     ref_s = """\
- 1 ┐decision(4, 15)
- 2 ├──┐leaf(1, 0, 1.00000 * 2.00000)
- 4 │  ├── unused(0, 0)
- 5 │  └── unused(0, 0, 1.00000 * 5.00000)
- 3 └──┐decision(2, 3)
- 6    ├── leaf(0, 0, 1.00000 * 6.00000)
- 7    └── leaf(0, 0, 1.00000 * 7.00000)"""
+ 1 0 ┐decision(4, 15)
+ 2 0 ├──┐leaf(1, 0, 1.00000 * 2.00000)
+ 4 0 │  ├── unused(0, 0)
+ 5 2 │  └── unused(0, 0, 1.00000 * 5.00000)
+ 3 1 └──┐decision(2, 3)
+ 6 1    ├── leaf(0, 0, 1.00000 * 6.00000)
+ 7 3    └── leaf(0, 0, 1.00000 * 7.00000)"""
     assert s == ref_s
 
 
@@ -176,11 +176,33 @@ def test_format_tree_multivariate() -> None:
     s = format_tree(tree)
     print(s)
     ref_s = """\
- 1 ┐x4 < 15
- 2 ├── 1.00000 * [2.00000, -2.00000]
- 3 └──┐x2 < 3
- 6    ├──╢1.00000 * [6.00000, -6.00000]
- 7    └──╢1.00000 * [7.00000, -7.00000]"""
+ 1 0 ┐x4 < 15
+ 2 0 ├── 1.00000 * [2.00000, -2.00000]
+ 3 1 └──┐x2 < 3
+ 6 1    ├──╢1.00000 * [6.00000, -6.00000]
+ 7 3    └──╢1.00000 * [7.00000, -7.00000]"""
+    assert s == ref_s
+
+
+def test_format_tree_index_widths() -> None:
+    """Check `format_tree` aligns the node indices of a deeper tree."""
+    depth = 5
+    # decision nodes down the right side, each leaf valued as its heap index
+    leaf = [list(map(float, range(2**d, 2 ** (d + 1)))) for d in range(depth)]
+    var = [[0] * 2**d for d in range(depth - 1)]
+    split = [[0] * (2**d - 1) + [d + 1] for d in range(depth - 1)]
+    s = format_tree(manual_tree(leaf, var, split))
+    print(s)
+    ref_s = """\
+  1  0 ┐x0 < 1
+  2  0 ├── 1.00000 * 2.00000
+  3  1 └──┐x0 < 2
+  6  1    ├── 1.00000 * 6.00000
+  7  3    └──┐x0 < 3
+ 14  3       ├── 1.00000 * 14.0000
+ 15  7       └──┐x0 < 4
+ 30  7          ├──╢1.00000 * 30.0000
+ 31 15          └──╢1.00000 * 31.0000"""
     assert s == ref_s
 
 

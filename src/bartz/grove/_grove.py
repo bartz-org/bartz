@@ -527,11 +527,16 @@ def _format_values(values: Float[Array, ''] | Float[Array, ' k']) -> str:
         return f'{values:#.{ndigits}g}'
 
 
+def chain_index(index: int) -> int:
+    """Do `node_to_leaf_index` on a python integer."""
+    lowest_set_bit = index & -index
+    return index // lowest_set_bit >> 1
+
+
 def _format_leaf(tree: TreeHeaps, index: int) -> str:
     """Format the leaf value of the node at `index` as ``<scale> * <leaf>``."""
     unit = _format_values(tree.leaf_unit)
-    lowest_set_bit = index & -index
-    leaf = _format_values(tree.leaf_tree[..., index // lowest_set_bit >> 1])
+    leaf = _format_values(tree.leaf_tree[..., chain_index(index)])
     return f'{unit} * {leaf}'
 
 
@@ -568,6 +573,11 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     Returns
     -------
     A string representation of the tree.
+
+    Notes
+    -----
+    Each line starts with the index of the node in the heap, followed by the
+    index of its value in `TreeHeaps.leaf_tree`, see `node_to_leaf_index`.
     """
     tee = '├──'
     corner = '└──'
@@ -614,11 +624,10 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         else:
             link = ' '
 
-        max_number = tree_size - 1
-        ndigits = len(str(max_number))
-        number = str(index).rjust(ndigits)
+        heap = str(index).rjust(len(str(tree_size - 1)))
+        chain = str(chain_index(index)).rjust(len(str(half_tree_size - 1)))
 
-        lines.append(f' {number} {indent}{first_indent}{link}{node_str}')
+        lines.append(f' {heap} {chain} {indent}{first_indent}{link}{node_str}')
 
         indent += next_indent
         unused = unused or is_leaf

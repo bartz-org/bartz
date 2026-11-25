@@ -347,7 +347,7 @@ def choose_leaf(
     -------
     leaf_to_grow : Int32[Array, '']
         The index of the leaf to grow. If ``num_growable == 0``, return
-        ``2 ** d``.
+        ``2 * max_num_leaves``.
     num_growable : Int32[Array, '']
         The number of growable leaves in the tree.
     prob_choose : Float32[Array, '']
@@ -427,7 +427,7 @@ def fully_used_variables(
     split_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
-) -> UInt[Array, ' d_minus_2']:
+) -> UInt[Array, ' d_minus_1']:
     """
     Find variables in the ancestors of a node that have an empty split range.
 
@@ -465,7 +465,7 @@ def ancestor_variables(
     var_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     node_index: Int32[Array, ''],
-) -> UInt[Array, ' d_minus_2']:
+) -> UInt[Array, ' d_minus_1']:
     """
     Return the list of variables in the ancestors of a node.
 
@@ -861,7 +861,7 @@ def choose_leaf_parent(
     -------
     node_to_prune : Int32[Array, '']
         The index of the node to prune. If ``num_prunable == 0``, return
-        ``2 ** d``.
+        ``2 * max_num_leaves``.
     num_prunable : Int32[Array, '']
         The number of leaf parents that could be pruned.
     prob_choose : Float32[Array, '']

@@ -424,8 +424,8 @@ def accept_moves_parallel_stage(
     # must also lie within the heap, i.e. not be at the bottom level; the
     # parent always does. These feed the transition ratio and the final
     # `affluence_tree` update.
-    _, half = state.forest.var_tree.shape
-    lrt_affluent = (moves.lrt_nodes < half) & moves.lrt_growable
+    _, max_num_leaves = state.forest.var_tree.shape
+    lrt_affluent = (moves.lrt_nodes < max_num_leaves) & moves.lrt_growable
     if state.forest.min_points_per_decision_node is not None:
         assert move_counts is not None
         lrt_affluent &= move_counts.lrt >= state.forest.min_points_per_decision_node
@@ -729,7 +729,7 @@ def _apply_grow_to_indices(
     return jnp.where(go_right & (leaf_indices == left), right, leaf_indices)
 
 
-def _append_total(lr: Shaped[Array, '*k_k 2']) -> Shaped[Array, '*k_k 3']:
+def append_total(lr: Shaped[Array, '*k_k 2']) -> Shaped[Array, '*k_k 3']:
     """Stack (left, right) values with their total, left + right."""
     total = lr[..., 0] + lr[..., 1]
     return jnp.concatenate([lr, total[..., None]], axis=-1)
@@ -750,12 +750,12 @@ def set_leaf_pair(
         value,
         where,
         indices,
-        cpu=_set_leaf_pair_scatter,
-        default=_set_leaf_pair_select,
+        cpu=set_leaf_pair_scatter,
+        default=set_leaf_pair_select,
     )
 
 
-def _set_leaf_pair_scatter(
+def set_leaf_pair_scatter(
     leaf_tree: Float32[Array, '*k max_num_leaves'],
     value: Float32[Array, '*k 1'],
     where: Bool[Array, ''],
@@ -766,7 +766,7 @@ def _set_leaf_pair_scatter(
     return leaf_tree.at[..., jnp.where(where, indices, max_num_leaves)].set(value)
 
 
-def _set_leaf_pair_select(
+def set_leaf_pair_select(
     leaf_tree: Float32[Array, '*k max_num_leaves'],
     value: Float32[Array, '*k 1'],
     where: Bool[Array, ''],
@@ -1790,7 +1790,7 @@ def accept_move_and_sample_leaves(
     # sum residuals in parent node modified by move and compute likelihood;
     # the parent goes after the leaves, where `prelf` has its terms
     assert pt.move.lr_leaves.dtype == jnp.int32
-    resid_lrt = _append_total(resid_tree[..., pt.move.lr_leaves])
+    resid_lrt = append_total(resid_tree[..., pt.move.lr_leaves])
     resid_tree = jnp.concatenate([resid_tree, resid_lrt[..., 2:]], axis=-1)
 
     log_lk_ratio = compute_likelihood_ratio(resid_lrt, pt.prelkv, at.error_cov_inv)

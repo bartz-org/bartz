@@ -73,6 +73,7 @@ def rebuild_derived_chain(state: StateT) -> StateT:
     leaf_indices = traverse_forest(
         state.X, forest.var_tree, forest.split_tree, index_type='chain'
     )
+    assert leaf_indices.dtype == forest.leaf_indices.dtype
 
     reduce = partial(
         AutoBatchedReduction()._reduce,  # noqa: SLF001

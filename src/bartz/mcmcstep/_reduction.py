@@ -115,7 +115,7 @@ class ReductionConfig(Module):
         ...
 
 
-def _resolve_subset(
+def resolve_subset(
     indices: UInt[Array, ' n'], size: int, subset: Integer[Array, ' subset_size'] | None
 ) -> tuple[int, UInt[Array, ' n']]:
     """Reduce the bin-subset case to the full one for scatter algorithms.
@@ -187,7 +187,7 @@ class BatchedReduction(ReductionConfig):
     ) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
         values = jnp.asarray(values)
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
-        size, indices = _resolve_subset(indices, size, subset)
+        size, indices = resolve_subset(indices, size, subset)
         batch_shape = values.shape[:-1]
 
         # Cast `values` explicitly. The scatter buffer is in `dtype`, which
@@ -436,7 +436,7 @@ class OneHotReduction(ReductionConfig):
         scalar = values.ndim == 0
         (n,) = indices.shape
         batch_shape = values.shape[:-1]
-        size, bins, indices = _resolve_subset_bins(
+        size, bins, indices = resolve_subset_bins(
             indices, size, subset, remap=self.method == 'scatter_set'
         )
         # unsigned avoids a negative-index normalization select in the scatter
@@ -536,7 +536,7 @@ def chunked_onehot_sum(
         return out
 
 
-def _resolve_subset_bins(
+def resolve_subset_bins(
     indices: UInt[Array, ' n'],
     size: int,
     subset: Integer[Array, ' subset_size'] | None,
@@ -547,7 +547,7 @@ def _resolve_subset_bins(
 
     The comparison methods of `OneHotReduction` reduce against the bins of the
     subset directly, while its scatter method (`remap`) indexes bins by
-    position, so the indices are converted like in `_resolve_subset`.
+    position, so the indices are converted like in `resolve_subset`.
     """
     if subset is None:
         return size, jnp.arange(size, dtype=indices.dtype), indices
@@ -556,7 +556,7 @@ def _resolve_subset_bins(
         # do not wrap and alias a real bin in the comparison
         bins = subset.astype(jnp.uint32)
         if remap:
-            _, indices = _resolve_subset(indices, size, subset)
+            _, indices = resolve_subset(indices, size, subset)
         return bins.size, bins, indices
 
 

@@ -541,7 +541,7 @@ def _format_leaf(tree: TreeHeaps, index: int) -> str:
     return f'{unit} * {leaf}'
 
 
-def _format_node_contents(
+def format_node_contents(
     tree: TreeHeaps, index: int, var: int, split: int, *, unused: bool
 ) -> str:
     """Format what the arrays hold for a node, in use or not."""
@@ -610,7 +610,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         right_child = 2 * index + 1
 
         if print_all:
-            node_str = _format_node_contents(tree, index, var, split, unused=unused)
+            node_str = format_node_contents(tree, index, var, split, unused=unused)
         else:
             assert not unused
             if is_leaf:

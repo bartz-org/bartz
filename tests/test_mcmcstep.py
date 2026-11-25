@@ -152,8 +152,6 @@ from bartz.mcmcstep._step import (
     _precompute_likelihood_terms_mv,
     _precompute_likelihood_terms_uv,
     _sample_wishart_bartlett,
-    _set_leaf_pair_scatter,
-    _set_leaf_pair_select,
     _step_error_cov_inv_diag,
     _step_error_cov_inv_mv,
     accept_moves_parallel_stage,
@@ -168,6 +166,8 @@ from bartz.mcmcstep._step import (
     sample_wishart_posterior,
     scatter_logaddexp,
     set_leaf_pair,
+    set_leaf_pair_scatter,
+    set_leaf_pair_select,
     step_error_cov_inv,
     step_s,
     step_sum_trees_prior_cov_inv,
@@ -2560,7 +2560,7 @@ def test_set_leaf_pair(keys: split, kshape: tuple[int, ...]) -> None:
             if where and max(indices) < max_num_leaves:
                 expected[..., list(indices)] = value
             args = (leaf_tree, value, jnp.bool_(where), jnp.array(indices))
-            for func in (set_leaf_pair, _set_leaf_pair_scatter, _set_leaf_pair_select):
+            for func in (set_leaf_pair, set_leaf_pair_scatter, set_leaf_pair_select):
                 assert_array_equal(func(*args), expected)
 
 

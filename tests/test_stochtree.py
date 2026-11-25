@@ -484,19 +484,15 @@ def test_unsupported_outcome_model_raises(binary_data: _Data, keys: split) -> No
         )
 
 
-def test_observation_weights_probit_raises(binary_data: _Data, keys: split) -> None:
-    """`observation_weights` are rejected with a probit outcome model."""
-    data = binary_data
+def test_observation_weights_raises(continuous_data: _Data) -> None:
+    """`observation_weights` are rejected, since stochtree's are broken."""
+    data = continuous_data
     m = bst.BARTModel()
-    with pytest.raises(ValueError, match=r'observation_weights.*probit'):
+    with pytest.raises(NotImplementedError, match='observation_weights'):
         m.sample(
             X_train=data.X_train,
             y_train=data.y_train,
             observation_weights=np.ones(data.X_train.shape[0]),
-            general_params={
-                'outcome_model': bst.OutcomeModel(outcome='binary', link='probit'),
-                'random_seed': keys.pop(),
-            },
             **_SAMPLE_KW,
         )
 
@@ -698,7 +694,6 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         'y': data.y_train,
         'X_test': data.X_test,
         'X_predict': data.X_test[:5],
-        'w': jnp.ones(data.y_train.shape),
         'sigma2_init': 1.0,
         'alpha': 0.95,
         'beta': 2.0,
@@ -706,12 +701,10 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         'variable_weights': jnp.ones(p),
     }
     # devices can't be inferred from a jit tracer, so pre-determine the platform;
-    # rm_const requires concrete max_split values, so disable it for tracing;
-    # one_bin_prec_reduction='auto' requires concrete weights.
+    # rm_const requires concrete max_split values, so disable it for tracing.
     bart_kwargs: dict = {
         'devices': jax.devices(args['y'].platform()),
         'rm_const': False,
-        'init_kw': {'one_bin_prec_reduction': True},
     }
 
     def task(
@@ -721,7 +714,6 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
         y: Shaped[Array, '...'],
         X_test: Shaped[Array, '...'],
         X_predict: Shaped[Array, '...'],
-        w: Shaped[Array, '...'],
         sigma2_init: float,
         alpha: float,
         beta: float,
@@ -733,7 +725,6 @@ def test_jit(continuous_data: _Data, keys: split) -> None:
             X_train=X,
             y_train=y,
             X_test=X_test,
-            observation_weights=w,
             num_gfr=0,
             num_burnin=NUM_BURNIN,
             num_mcmc=NUM_MCMC,

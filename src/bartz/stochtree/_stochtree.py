@@ -226,6 +226,9 @@ class BARTModel:
       uses this parameter for the GFR sampler, which bartz does not support.
     - Leaf-basis regression, random effects, heteroskedastic variance
       forests, and warm-starting from a previous model are not supported.
+    - ``observation_weights`` are not supported, because as of stochtree
+      0.4.5 they do not work as documented, so there is no stochtree behavior
+      to mimic.
     - bartz uses single-precision floats, so outputs differ from stochtree
       at the float32 precision level.
     - ``general_params['random_seed']`` defaults to deterministic behavior
@@ -382,9 +385,7 @@ class BARTModel:
             Optional test covariates; if given, predictions are cached on
             them in `y_hat_test`.
         observation_weights
-            Optional positive per-observation weights scaling the residual
-            variance (``y_i | - ~ N(mu(X_i), sigma^2 / w_i)``). Not supported
-            with a probit outcome model.
+            Not supported, must be `None`.
         num_gfr
             Number of grow-from-root iterations. Must be set explicitly to ``0``.
         num_burnin
@@ -404,9 +405,7 @@ class BARTModel:
         Raises
         ------
         NotImplementedError
-            If ``num_gfr`` is non-zero.
-        ValueError
-            If `observation_weights` are set with a probit outcome model.
+            If ``num_gfr`` is non-zero or `observation_weights` is set.
 
         Notes
         -----
@@ -420,6 +419,13 @@ class BARTModel:
                 ' in bartz.'
             )
             raise NotImplementedError(msg)
+        if observation_weights is not None:
+            msg = (
+                'observation_weights are not supported, because as of stochtree'
+                ' 0.4.5 they do not work as documented, so there is no'
+                ' stochtree behavior to mimic.'
+            )
+            raise NotImplementedError(msg)
 
         gp = build_dataclass(GeneralParams, general_params, 'general_params')
         mfp = build_dataclass(
@@ -427,14 +433,6 @@ class BARTModel:
         )
 
         is_probit = gp.outcome_model.outcome == 'binary'
-
-        # stochtree does not support heteroskedastic probit
-        if is_probit and observation_weights is not None:
-            msg = (
-                'observation_weights are not supported with a probit outcome'
-                ' model; stochtree does not support heteroskedastic probit.'
-            )
-            raise ValueError(msg)
 
         X_train_arr, y_train_arr, variable_weights = self._prepare_training_inputs(
             X_train, y_train, gp
@@ -514,7 +512,6 @@ class BARTModel:
             power=mfp.beta,
             base=mfp.alpha,
             tau_num=tau_num_arg,
-            error_scale=observation_weights,
             num_trees=mfp.num_trees,
             n_save=num_mcmc,
             n_burn=num_burnin,

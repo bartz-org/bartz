@@ -213,6 +213,8 @@ class BARTModel:
     Differences from `stochtree`:
 
     - ``num_gfr`` has no default and must be set explicitly to ``0``.
+    - The arguments of `sample` after ``y_train`` are keyword-only, because
+      some of stochtree's positional arguments are not supported.
     - ``mean_forest_params['max_depth']`` must be a non-negative integer at
       most ``16``; stochtree's ``-1`` (unbounded depth) sentinel is not
       accepted.
@@ -356,9 +358,9 @@ class BARTModel:
         self,
         X_train: Real[ArrayLike, 'n p'] | DataFrame,
         y_train: Real[ArrayLike, ' n'] | Series,
+        *,
         X_test: Real[ArrayLike, 'm p'] | DataFrame | None = None,
         observation_weights: Float[ArrayLike, ' n'] | Series | None = None,
-        *,
         num_gfr: int,
         num_burnin: int = 0,
         num_mcmc: int = 100,
@@ -409,8 +411,8 @@ class BARTModel:
         Notes
         -----
         The signature mirrors `stochtree.BARTModel.sample`, restricted to the
-        keyword arguments bartz supports. This method invokes `bartz.Bart`
-        under the hood.
+        arguments bartz supports. This method invokes `bartz.Bart` under the
+        hood.
         """
         if num_gfr != 0:
             msg = (

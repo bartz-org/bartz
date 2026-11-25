@@ -272,6 +272,19 @@ def test_missing_num_gfr_raises(continuous_data: _Data, keys: split) -> None:
         )
 
 
+def test_positional_x_test_raises(continuous_data: _Data) -> None:
+    """`X_test` is keyword-only, stochtree's third positional argument is a leaf basis."""
+    data = continuous_data
+    m = bst.BARTModel()
+    with pytest.raises(TypeError, match='positional'):
+        m.sample(
+            data.X_train,
+            data.y_train,
+            data.X_test,  # ty: ignore[too-many-positional-arguments]
+            **_SAMPLE_KW,
+        )
+
+
 def test_num_gfr_nonzero_raises(continuous_data: _Data, keys: split) -> None:
     """The grow-from-root sampler is not supported."""
     data = continuous_data

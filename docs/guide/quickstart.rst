@@ -28,17 +28,15 @@ Quickstart
 Basics
 ------
 
-Import and use the `bartz.BART.gbart` class:
+Import and use the `bartz.Bart` class:
 
 .. code-block:: python
 
-    from bartz.BART import gbart
-    bart = gbart(X, y, ...)
+    from bartz import Bart
+    bart = Bart(X, y, ...)  # X must have (p, n) layout if it's an array
     y_pred = bart.predict(X_test)
 
-The interface hews to the R package `BART3 <https://github.com/rsparapa/bnptools>`_, with a few differences explained in the documentation of `bartz.BART.gbart`. This interface has the longest ancestry, descending from the original BART implementation.
-
-There is also a new interface where new features are added, `bartz.Bart`. However it is unstable and continuously evolving.
+To help users coming from other BART packages, there is also a `bartz.BART.mc_gbart` interface mimicking the R package `BART3 <https://github.com/rsparapa/bnptools>`_, which is similar to many R BART implementations, and `bartz.stochtree.BARTModel` which imitates the new `stochtree` Python package.
 
 Getting a GPU
 -------------
@@ -50,7 +48,7 @@ JAX
 
 `bartz` is implemented using `jax`, a Google library for machine learning. It allows to run the code on GPU or TPU and do various other things.
 
-For basic usage, JAX is just an alternative implementation of `numpy`. The arrays returned by `~bartz.BART.gbart` are "jax arrays" instead of "numpy arrays", but there is no perceived difference in their functionality. If you pass numpy arrays to `bartz`, they will be converted automatically. You don't have to deal with `jax` in any way.
+For basic usage, JAX is just an alternative implementation of `numpy`. The arrays returned by `~bartz.Bart` are "jax arrays" instead of "numpy arrays", but there is no perceived difference in their functionality. If you pass numpy arrays to `bartz`, they will be converted automatically. You don't have to deal with `jax` in any way.
 
 For advanced usage, refer to the `jax documentation <https://docs.jax.dev>`_.
 

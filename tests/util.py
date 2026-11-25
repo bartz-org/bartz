@@ -41,7 +41,7 @@ import jax
 import numpy as np
 import pytest
 from equinox import EquinoxRuntimeError
-from jax import jit, lax, random, tree, vmap
+from jax import jit, lax, random, tree
 from jax import numpy as jnp
 from jax.scipy.special import logit
 from jaxtyping import Array, Float, Float32, Shaped, UInt
@@ -54,7 +54,8 @@ from scipy import linalg, stats
 
 from bartz import Bart
 from bartz._jaxext import get_default_device, jaxtyping_disabled, minimal_unsigned_dtype  # noqa: F401
-from bartz.grove import TreesTrace, check_trace, describe_error, is_actual_leaf
+from bartz.debug._traceconv import compress_leaf_tree
+from bartz.grove import TreesTrace, check_trace, describe_error, is_leaf_used
 
 _T = TypeVar('_T')
 
@@ -109,10 +110,11 @@ def manual_tree(
     var_type = minimal_unsigned_dtype(p - 1)
     split_type = minimal_unsigned_dtype(jnp.max(split_tree).item())
     max_split = jnp.full(p, jnp.max(split_tree), split_type)
+    split_tree = split_tree.astype(split_type)
     tree = TreesTrace(
-        leaf_tree=leaf_tree,
+        leaf_tree=compress_leaf_tree(split_tree, leaf_tree),
         var_tree=var_tree.astype(var_type),
-        split_tree=split_tree.astype(split_type),
+        split_tree=split_tree,
     )
 
     error = check_trace(tree, max_split)
@@ -641,10 +643,10 @@ def sum_trees_prior_cov_inv_conditional_mean(
     *_, num_trees, half = split_tree.shape
 
     def conditional_mean(
-        split_tree: UInt[Array, 'num_trees tree_size//2'],
-        leaf_tree: Float[Array, 'num_trees k tree_size'],
+        split_tree: UInt[Array, 'num_trees max_num_leaves'],
+        leaf_tree: Float[Array, 'num_trees k max_num_leaves'],
     ) -> Float32[Array, 'k k']:
-        is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
+        is_leaf = is_leaf_used(split_tree)
         leaves = forest.leaf_unit.reshape(-1, 1) * leaf_tree
         scatter = num_trees * jnp.einsum('tan,tbn,tn->ab', leaves, leaves, is_leaf)
         rate = nnone(prior.rate).reshape(scatter.shape)
@@ -655,7 +657,7 @@ def sum_trees_prior_cov_inv_conditional_mean(
         lambda args: conditional_mean(*args),
         (
             split_tree.reshape(-1, num_trees, half),
-            leaf_tree.reshape(-1, num_trees, math.prod(kshape), 2 * half),
+            leaf_tree.reshape(-1, num_trees, math.prod(kshape), half),
         ),
         batch_size=100,
     )

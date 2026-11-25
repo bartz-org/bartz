@@ -30,9 +30,9 @@ from functools import partial
 from typing import Literal, Protocol, runtime_checkable
 
 from equinox import tree_at
+from jax import lax, vmap
 from jax import numpy as jnp
-from jax import vmap
-from jaxtyping import Array, Bool, Float, Float32, Int32, Shaped, UInt
+from jaxtyping import Array, Bool, Float, Float32, Int32, Integer, Shaped, UInt
 from numpy.lib.array_utils import normalize_axis_tuple
 
 from bartz._jaxext import (
@@ -52,27 +52,31 @@ class TreeHeaps(Protocol):
     A tree is represented with arrays as a heap. The root node is at index 1.
     The children nodes of a node at index :math:`i` are at indices :math:`2i`
     (left child) and :math:`2i + 1` (right child). The array element at index 0
-    is unused.
+    is unused. Since the nodes at the bottom level can only be leaves and not
+    decision nodes, `var_tree` and `split_tree` stop at the level above.
 
-    Since the nodes at the bottom can only be leaves and not decision nodes,
-    `var_tree` and `split_tree` are half as long as `leaf_tree`.
+    `leaf_tree` has the same length, the maximum number of leaves, with a
+    different layout: a node and its left child are never both leaves, so a
+    right child (or the root) shares an element with all the nodes reached from
+    it by going left, see `node_to_leaf_index`.
 
     Arrays may have additional initial axes to represent multiple trees.
     """
 
     leaf_tree: (
-        Float[Array, '*batch_shape 2*half_tree_size']
-        | Float[Array, '*batch_shape k 2*half_tree_size']
+        Float[Array, '*batch_shape max_num_leaves']
+        | Float[Array, '*batch_shape k max_num_leaves']
     )
     """The values in the leaves of the trees. This array can be dirty, i.e.,
-    unused nodes can have whatever value. It may have an additional axis
-    for multivariate leaves. The dtype may be narrower than float32."""
+    elements not in use can have whatever value, see `is_leaf_used`. It may
+    have an additional axis for multivariate leaves. The dtype may be narrower
+    than float32."""
 
-    var_tree: UInt[Array, '*batch_shape half_tree_size']
+    var_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The axes along which the decision nodes operate. This array can be
     dirty but for the always unused node at index 0 which must be set to 0."""
 
-    split_tree: UInt[Array, '*batch_shape half_tree_size']
+    split_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The decision boundaries of the trees. The boundaries are open on the
     right, i.e., a point belongs to the left child iff x < split. Whether a
     node is a leaf is indicated by the corresponding 'split' element being
@@ -111,27 +115,24 @@ class TreesTrace(Module):
     # otherwise the runtime typechecker (which evaluates union members in a
     # hash-randomized order) can mis-bind it against the `k` axis of
     # `leaf_tree`'s union for a multivariate tree (the layouts are
-    # rank-ambiguous). See `bartz.mcmcstep._state.Forest`. The leaf-bearing axis
-    # is `2*half_tree_size` rather than `tree_size`, so the half-of-leaf
-    # relationship is still checked here: `half_tree_size` is bound first by the
-    # anchors, then `leaf_tree` is checked against twice it.
-    var_tree: UInt[Array, '*batch_shape half_tree_size']
+    # rank-ambiguous). See `bartz.mcmcstep._state.Forest`.
+    var_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The axes along which the decision nodes operate. This array can be
     dirty but for the always unused node at index 0 which must be set to 0."""
 
-    split_tree: UInt[Array, '*batch_shape half_tree_size']
+    split_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The decision boundaries of the trees. The boundaries are open on the
     right, i.e., a point belongs to the left child iff x < split. Whether a
     node is a leaf is indicated by the corresponding 'split' element being
     0. Unused nodes also have split set to 0. This array can't be dirty."""
 
     leaf_tree: (
-        Float[Array, '*batch_shape 2*half_tree_size']
-        | Float[Array, '*batch_shape k 2*half_tree_size']
+        Float[Array, '*batch_shape max_num_leaves']
+        | Float[Array, '*batch_shape k max_num_leaves']
     )
     """The values in the leaves of the trees. This array can be dirty, i.e.,
-    unused nodes can have whatever value. It may have an additional axis
-    for multivariate leaves."""
+    elements not in use can have whatever value. It may have an additional
+    axis for multivariate leaves."""
 
     leaf_unit: Float32[Array, ''] | Float32[Array, ' k'] = field(
         default_factory=lambda: jnp.float32(1.0)
@@ -156,7 +157,45 @@ class TreesTrace(Module):
         )
 
 
-def tree_depth(tree: Shaped[Array, '*batch_shape tree_size']) -> int:
+def node_to_leaf_index(node: Integer[Array, '*shape']) -> Integer[Array, '*shape']:
+    """
+    Return the index in `TreeHeaps.leaf_tree` of the value of a node.
+
+    Parameters
+    ----------
+    node
+        The index of the node in the heap, not 0.
+
+    Returns
+    -------
+    The index, which is `node` shifted right until its lowest set bit is dropped.
+    """
+    num_trailing_zeros = lax.population_count(~node & (node - 1))
+    return node >> num_trailing_zeros >> 1
+
+
+def is_leaf_used(
+    split_tree: UInt[Array, '*batch_shape max_num_leaves'],
+) -> Bool[Array, '*batch_shape max_num_leaves']:
+    """
+    Return a mask indicating the elements of `TreeHeaps.leaf_tree` in use.
+
+    Parameters
+    ----------
+    split_tree
+        The decision boundaries of the trees.
+
+    Returns
+    -------
+    The mask marking the elements that hold the value of a leaf.
+    """
+    # element i is for the leaf reached going left from the right child of
+    # node i, or from the root
+    *_, max_num_leaves = split_tree.shape
+    return split_tree.astype(bool) | (jnp.arange(max_num_leaves) == 0)
+
+
+def tree_depth(tree: Shaped[Array, '*batch_shape max_num_leaves']) -> int:
     """
     Return the maximum depth of a tree.
 
@@ -175,8 +214,10 @@ def tree_depth(tree: Shaped[Array, '*batch_shape tree_size']) -> int:
 
 def traverse_tree(
     x: UInt[Array, ' p'],
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
+    *,
+    index_type: Literal['heap', 'chain'],
 ) -> UInt[Array, '']:
     """
     Find the leaf where a point falls into.
@@ -189,10 +230,14 @@ def traverse_tree(
         The decision axes of the tree.
     split_tree
         The decision boundaries of the tree.
+    index_type
+        The convention of the returned index: 'heap' for the index of the leaf
+        node in the heap, 'chain' for the index of its value in
+        `TreeHeaps.leaf_tree`, see `node_to_leaf_index`.
 
     Returns
     -------
-    The index of the leaf.
+    The index of the leaf, in the smallest unsigned integer type that fits it.
     """
     leaf_found = jnp.zeros((), bool)
     index = jnp.ones((), minimal_unsigned_dtype(2 * var_tree.size - 1))
@@ -207,14 +252,21 @@ def traverse_tree(
         child_index = (index << 1) + (x[var] >= split)
         index = jnp.where(leaf_found, index, child_index)
 
-    return index
+    if index_type == 'heap':
+        return index
+    else:
+        assert index_type == 'chain'
+        dtype = minimal_unsigned_dtype(var_tree.size - 1)
+        return node_to_leaf_index(index).astype(dtype)
 
 
-@jit
+@jit(static_argnames=('index_type',))
 def traverse_forest(
     X: UInt[Array, 'p n'],
-    var_trees: UInt[Array, '*forest_shape half_tree_size'],
-    split_trees: UInt[Array, '*forest_shape half_tree_size'],
+    var_trees: UInt[Array, '*forest_shape max_num_leaves'],
+    split_trees: UInt[Array, '*forest_shape max_num_leaves'],
+    *,
+    index_type: Literal['heap', 'chain'],
 ) -> UInt[Array, '*forest_shape n']:
     """
     Find the leaves where points falls into for each tree in a set.
@@ -227,23 +279,19 @@ def traverse_forest(
         The decision axes of the trees.
     split_trees
         The decision boundaries of the trees.
+    index_type
+        The convention of the returned index: 'heap' for the index of the leaf
+        node in the heap, 'chain' for the index of its value in
+        `TreeHeaps.leaf_tree`, see `node_to_leaf_index`.
 
     Returns
     -------
-    The indices of the leaves.
+    The indices of the leaves, in the smallest unsigned integer type that fits them.
     """
-    return _traverse_forest(X, var_trees, split_trees)
-
-
-@partial(jnp.vectorize, excluded=(0,), signature='(hts),(hts)->(n)')
-@partial(vmap, in_axes=(1, None, None))
-def _traverse_forest(
-    X: UInt[Array, ' p'],
-    var_trees: UInt[Array, ' half_tree_size'],
-    split_trees: UInt[Array, ' half_tree_size'],
-) -> UInt[Array, '']:
-    """Implement `traverse_forest`."""
-    return traverse_tree(X, var_trees, split_trees)
+    traverse = partial(traverse_tree, index_type=index_type)
+    traverse = vmap(traverse, in_axes=(1, None, None))
+    traverse = jnp.vectorize(traverse, excluded=(0,), signature='(mnl),(mnl)->(n)')
+    return traverse(X, var_trees, split_trees)
 
 
 @jit(static_argnames=('sum_batch_axis',))
@@ -280,7 +328,12 @@ def evaluate_forest(
     per-tree sum, so the caller adds it once to the total.
     """
     indices: UInt[Array, '*forest_shape n']
-    indices = traverse_forest(X, trees.var_tree, trees.split_tree)
+    indices = traverse_forest(X, trees.var_tree, trees.split_tree, index_type='chain')
+
+    # make xla finish the indices before it reads the leaves: left free, it
+    # merges the traversal into the kernel that reads them, which is slower,
+    # in particular with vector leaves
+    indices = lax.optimization_barrier(indices)
 
     is_mv = is_multivariate(trees)
 
@@ -288,8 +341,8 @@ def evaluate_forest(
     bc_indices = indices[..., None, :, None] if is_mv else indices[..., None]
 
     bc_leaf_tree: (
-        Float[Array, '*forest_shape 1 tree_size']
-        | Float[Array, '*forest_shape k 1 tree_size']
+        Float[Array, '*forest_shape 1 max_num_leaves']
+        | Float[Array, '*forest_shape k 1 max_num_leaves']
     )
     bc_leaf_tree = (
         trees.leaf_tree[..., :, None, :] if is_mv else trees.leaf_tree[..., None, :]
@@ -308,8 +361,8 @@ def evaluate_forest(
 
 
 def is_actual_leaf(
-    split_tree: UInt[Array, ' half_tree_size'], *, add_bottom_level: bool = False
-) -> Bool[Array, ' half_tree_size'] | Bool[Array, ' 2*half_tree_size']:
+    split_tree: UInt[Array, ' max_num_leaves'], *, add_bottom_level: bool = False
+) -> Bool[Array, ' max_num_leaves'] | Bool[Array, ' 2*max_num_leaves']:
     """
     Return a mask indicating the leaf nodes in a tree.
 
@@ -337,8 +390,8 @@ def is_actual_leaf(
 
 
 def is_leaves_parent(
-    split_tree: UInt[Array, ' half_tree_size'],
-) -> Bool[Array, ' half_tree_size']:
+    split_tree: UInt[Array, ' max_num_leaves'],
+) -> Bool[Array, ' max_num_leaves']:
     """
     Return a mask indicating the nodes with leaf (and only leaf) children.
 
@@ -363,14 +416,14 @@ def is_leaves_parent(
     # the 0-th item has split == 0, so it's not counted
 
 
-def tree_depths(tree_size: int) -> UInt[Array, ' {tree_size}']:
+def tree_depths(heap_size: int) -> UInt[Array, ' {heap_size}']:
     """
     Return the depth of each node in a binary tree.
 
     Parameters
     ----------
-    tree_size
-        The length of the tree array, i.e., 2 ** d.
+    heap_size
+        The length of the heap array.
 
     Returns
     -------
@@ -384,7 +437,7 @@ def tree_depths(tree_size: int) -> UInt[Array, ' {tree_size}']:
     """
     depths = []
     depth = 0
-    for i in range(tree_size):
+    for i in range(heap_size):
         if i == 2**depth:
             depth += 1
         depths.append(depth - 1)
@@ -394,7 +447,7 @@ def tree_depths(tree_size: int) -> UInt[Array, ' {tree_size}']:
 
 @jit
 def forest_mean_leaves(
-    split_tree: UInt[Array, '*batch_shape half_tree_size'],
+    split_tree: UInt[Array, '*batch_shape max_num_leaves'],
     *,
     where: Bool[Array, '*batch_shape'] | None = None,
 ) -> Float32[Array, '']:
@@ -421,8 +474,8 @@ def forest_mean_leaves(
 @jit(static_argnames=('p', 'sum_batch_axis'))
 def var_histogram(
     p: int,
-    var_tree: UInt[Array, '*batch_shape half_tree_size'],
-    split_tree: UInt[Array, '*batch_shape half_tree_size'],
+    var_tree: UInt[Array, '*batch_shape max_num_leaves'],
+    split_tree: UInt[Array, '*batch_shape max_num_leaves'],
     *,
     sum_batch_axis: int | tuple[int, ...] = (),
 ) -> Int32[Array, '*reduced_batch_shape {p}']:
@@ -450,8 +503,8 @@ def var_histogram(
     is_internal = split_tree.astype(bool)
 
     def scatter_add(
-        var_tree: UInt[Array, '*summed_batch_axes half_tree_size'],
-        is_internal: Bool[Array, '*summed_batch_axes half_tree_size'],
+        var_tree: UInt[Array, '*summed_batch_axes max_num_leaves'],
+        is_internal: Bool[Array, '*summed_batch_axes max_num_leaves'],
     ) -> Int32[Array, ' p']:
         return jnp.zeros(p, int).at[var_tree].add(is_internal)
 
@@ -475,11 +528,35 @@ def _format_values(values: Float[Array, ''] | Float[Array, ' k']) -> str:
         return f'{values:#.{ndigits}g}'
 
 
+def chain_index(index: int) -> int:
+    """Do `node_to_leaf_index` on a python integer."""
+    lowest_set_bit = index & -index
+    return index // lowest_set_bit >> 1
+
+
 def _format_leaf(tree: TreeHeaps, index: int) -> str:
-    """Format the leaf value at `index` as ``<scale> * <leaf>``."""
+    """Format the leaf value of the node at `index` as ``<scale> * <leaf>``."""
     unit = _format_values(tree.leaf_unit)
-    leaf = _format_values(tree.leaf_tree[..., index])
+    leaf = _format_values(tree.leaf_tree[..., chain_index(index)])
     return f'{unit} * {leaf}'
+
+
+def format_node_contents(
+    tree: TreeHeaps, index: int, var: int, split: int, *, unused: bool
+) -> str:
+    """Format what the arrays hold for a node, in use or not."""
+    if unused:
+        category = 'unused'
+    elif split:
+        category = 'decision'
+    else:
+        category = 'leaf'
+    # the node is the first of its element of `leaf_tree` if it is the root, a
+    # right child, or below a decision node
+    if not split and (index % 2 or not unused):
+        return f'{category}({var}, {split}, {_format_leaf(tree, index)})'
+    else:
+        return f'{category}({var}, {split})'
 
 
 def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
@@ -491,10 +568,17 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         A single tree to format.
     print_all
         If `True`, also print the contents of unused node slots in the arrays.
+        An element of `leaf_tree` is printed at the first node of its own that
+        is not a decision node.
 
     Returns
     -------
     A string representation of the tree.
+
+    Notes
+    -----
+    Each line starts with the index of the node in the heap, followed by the
+    index of its value in `TreeHeaps.leaf_tree`, see `node_to_leaf_index`.
     """
     tee = '├──'
     corner = '└──'
@@ -503,7 +587,8 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     down = '┐'
     bottom = '╢'  # '┨' #
 
-    *_, tree_size = tree.leaf_tree.shape
+    *_, max_num_leaves = tree.split_tree.shape
+    heap_size = 2 * max_num_leaves
 
     def traverse_tree(
         lines: list[str],
@@ -514,7 +599,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         *,
         unused: bool,
     ) -> None:
-        if index >= tree_size:
+        if index >= heap_size:
             return
 
         var: int = tree.var_tree.at[index].get(mode='fill', fill_value=0).item()
@@ -525,13 +610,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
         right_child = 2 * index + 1
 
         if print_all:
-            if unused:
-                category = 'unused'
-            elif is_leaf:
-                category = 'leaf'
-            else:
-                category = 'decision'
-            node_str = f'{category}({var}, {split}, {_format_leaf(tree, index)})'
+            node_str = format_node_contents(tree, index, var, split, unused=unused)
         else:
             assert not unused
             if is_leaf:
@@ -539,18 +618,17 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
             else:
                 node_str = f'x{var} < {split}'
 
-        if not is_leaf or (print_all and left_child < tree_size):
+        if not is_leaf or (print_all and left_child < heap_size):
             link = down
-        elif not print_all and left_child >= tree_size:
+        elif not print_all and left_child >= heap_size:
             link = bottom
         else:
             link = ' '
 
-        max_number = tree_size - 1
-        ndigits = len(str(max_number))
-        number = str(index).rjust(ndigits)
+        heap = str(index).rjust(len(str(heap_size - 1)))
+        chain = str(chain_index(index)).rjust(len(str(max_num_leaves - 1)))
 
-        lines.append(f' {number} {indent}{first_indent}{link}{node_str}')
+        lines.append(f' {heap} {chain} {indent}{first_indent}{link}{node_str}')
 
         indent += next_indent
         unused = unused or is_leaf
@@ -566,7 +644,7 @@ def format_tree(tree: TreeHeaps, *, print_all: bool = False) -> str:
     return '\n'.join(lines)
 
 
-def tree_actual_depth(split_tree: UInt[Array, ' half_tree_size']) -> UInt[Array, '']:
+def tree_actual_depth(split_tree: UInt[Array, ' max_num_leaves']) -> UInt[Array, '']:
     """Measure the depth of the tree.
 
     Parameters
@@ -586,10 +664,10 @@ def tree_actual_depth(split_tree: UInt[Array, ' half_tree_size']) -> UInt[Array,
 
 
 @jit
-@partial(jnp.vectorize, signature='(nt,hts)->(d)')
+@partial(jnp.vectorize, signature='(nt,mnl)->(d_plus_1)')
 def forest_depth_distr(
-    split_tree: UInt[Array, '*batch_shape num_trees half_tree_size'],
-) -> Int32[Array, '*batch_shape d']:
+    split_tree: UInt[Array, '*batch_shape num_trees max_num_leaves'],
+) -> Int32[Array, '*batch_shape d_plus_1']:
     """Histogram the depths of a set of trees.
 
     Parameters
@@ -609,8 +687,8 @@ def forest_depth_distr(
 @jit(static_argnames=('node_type', 'sum_batch_axis'))
 def points_per_node_distr(
     X: UInt[Array, 'p n'],
-    var_tree: UInt[Array, '*batch_shape half_tree_size'],
-    split_tree: UInt[Array, '*batch_shape half_tree_size'],
+    var_tree: UInt[Array, '*batch_shape max_num_leaves'],
+    split_tree: UInt[Array, '*batch_shape max_num_leaves'],
     node_type: Literal['leaf', 'leaf-parent'],
     *,
     sum_batch_axis: int | tuple[int, ...] = (),
@@ -648,24 +726,24 @@ def points_per_node_distr(
     axes = normalize_axis_tuple(sum_batch_axis, batch_ndim)
 
     def func(
-        var_tree: UInt[Array, '*batch_shape half_tree_size'],
-        split_tree: UInt[Array, '*batch_shape half_tree_size'],
+        var_tree: UInt[Array, '*batch_shape max_num_leaves'],
+        split_tree: UInt[Array, '*batch_shape max_num_leaves'],
     ) -> Int32[Array, '*reduced_batch_shape n_plus_1']:
         indices: UInt[Array, '*batch_shape n']
-        indices = traverse_forest(X, var_tree, split_tree)
+        indices = traverse_forest(X, var_tree, split_tree, index_type='heap')
 
-        @partial(jnp.vectorize, signature='(hts),(n)->(ts_or_hts),(ts_or_hts)')
+        @partial(jnp.vectorize, signature='(mnl),(n)->(heap),(heap)')
         def count_points(
-            split_tree: UInt[Array, '*batch_shape half_tree_size'],
+            split_tree: UInt[Array, '*batch_shape max_num_leaves'],
             indices: UInt[Array, '*batch_shape n'],
         ) -> (
             tuple[
-                Int32[Array, '*batch_shape 2*half_tree_size'],
-                Bool[Array, '*batch_shape 2*half_tree_size'],
+                Int32[Array, '*batch_shape 2*max_num_leaves'],
+                Bool[Array, '*batch_shape 2*max_num_leaves'],
             ]
             | tuple[
-                Int32[Array, '*batch_shape half_tree_size'],
-                Bool[Array, '*batch_shape half_tree_size'],
+                Int32[Array, '*batch_shape max_num_leaves'],
+                Bool[Array, '*batch_shape max_num_leaves'],
             ]
         ):
             if node_type == 'leaf-parent':
@@ -681,8 +759,8 @@ def points_per_node_distr(
         count_tree, predicate = count_points(split_tree, indices)
 
         def count_nodes(
-            count_tree: Int32[Array, '*summed_batch_axes half_tree_size'],
-            predicate: Bool[Array, '*summed_batch_axes half_tree_size'],
+            count_tree: Int32[Array, '*summed_batch_axes max_num_leaves'],
+            predicate: Bool[Array, '*summed_batch_axes max_num_leaves'],
         ) -> Int32[Array, ' n_plus_1']:
             return jnp.zeros(X.shape[1] + 1, int).at[count_tree].add(predicate)
 

@@ -27,7 +27,7 @@
 import math
 from dataclasses import replace
 from functools import partial
-from typing import Literal, overload
+from typing import Literal
 
 from equinox import AbstractVar
 from jax import lax, named_call, random, tree, vmap
@@ -66,7 +66,7 @@ from bartz._jaxext import (
     vmap_max,
 )
 from bartz._jaxext.random import categorical, loggamma, poisson
-from bartz.grove import is_actual_leaf, var_histogram
+from bartz.grove import is_leaf_used, node_to_leaf_index, var_histogram
 from bartz.mcmcstep._moves import Moves, propose_moves, split_range
 from bartz.mcmcstep._reduction import (
     AutoOneHotOrPopcountReduction,
@@ -290,7 +290,9 @@ class PreLf(Module):
 
     For each tree and leaf, the terms are scalars in the univariate case
     (`PreLfUV`), and matrices/vectors in the multivariate case (`PreLfMV`,
-    `PreLfMVHet`).
+    `PreLfMVHet`). The leaves are indexed like `bartz.mcmcstep.Forest.leaf_tree`,
+    followed by the parent node of the move, which shares its index with its
+    left child.
 
     Abstract base: the layouts differ in rank, so they live in concrete
     subclasses with union-free annotations; a single class carrying a shape
@@ -302,15 +304,15 @@ class PreLf(Module):
     """
 
     mean_factor: AbstractVar[
-        Float32[Array, '*num_trees tree_size']
-        | Float32[Array, '*num_trees k k tree_size']
+        Float32[Array, '*num_trees max_num_leaves_plus_1']
+        | Float32[Array, '*num_trees k k max_num_leaves_plus_1']
     ]
     """The factor to be right-multiplied by the sum of the scaled residuals to
     obtain the posterior mean."""
 
     centered_leaves: AbstractVar[
-        Float32[Array, '*num_trees tree_size']
-        | Float32[Array, '*num_trees k tree_size']
+        Float32[Array, '*num_trees max_num_leaves_plus_1']
+        | Float32[Array, '*num_trees k max_num_leaves_plus_1']
     ]
     """The mean-zero normal values to be added to the posterior mean to
     obtain the posterior leaf samples."""
@@ -319,36 +321,36 @@ class PreLf(Module):
 class PreLfUV(PreLf):
     """`PreLf` for the univariate case."""
 
-    mean_factor: Float32[Array, '*num_trees tree_size']
+    mean_factor: Float32[Array, '*num_trees max_num_leaves_plus_1']
     """``error_cov_inv / prec``, where ``prec`` is the posterior precision of
     the leaf."""
 
-    centered_leaves: Float32[Array, '*num_trees tree_size']
+    centered_leaves: Float32[Array, '*num_trees max_num_leaves_plus_1']
     """Zero-mean normal draws with the posterior variance of each leaf."""
 
 
 class PreLfMV(PreLf):
     """`PreLf` for the multivariate homoskedastic or scalar-error-scale case."""
 
-    mean_factor: Float32[Array, '*num_trees k k tree_size']
+    mean_factor: Float32[Array, '*num_trees k k max_num_leaves_plus_1']
     """``error_cov_inv @ inv(prec)``, where ``prec`` is the posterior precision
     of the leaf."""
 
-    centered_leaves: Float32[Array, '*num_trees k tree_size']
+    centered_leaves: Float32[Array, '*num_trees k max_num_leaves_plus_1']
     """Zero-mean normal draws with the posterior covariance of each leaf."""
 
-    logdet_prec: Float32[Array, '*num_trees tree_size']
+    logdet_prec: Float32[Array, '*num_trees max_num_leaves_plus_1']
     """The log-determinant of the posterior precision of each leaf."""
 
 
 class PreLfMVHet(PreLf):
     """`PreLf` for the multivariate case with per-component error scales."""
 
-    mean_factor: Float32[Array, '*num_trees k k tree_size']
+    mean_factor: Float32[Array, '*num_trees k k max_num_leaves_plus_1']
     """The lower Cholesky factor of the posterior precision of each leaf; the
     mean solve happens downstream in the sequential stage."""
 
-    centered_leaves: Float32[Array, '*num_trees k tree_size']
+    centered_leaves: Float32[Array, '*num_trees k max_num_leaves_plus_1']
     """Zero-mean normal draws with the posterior covariance of each leaf."""
 
 
@@ -366,11 +368,12 @@ class ParallelStageOut(Module):
     # built with the tree axis present (never per tree under vmap), so the union
     # is disambiguated by rank/dtype and needs no anchor (cf. `PreLf`).
     prec_trees: (
-        Float32[Array, 'num_trees tree_size']
-        | UInt32[Array, 'num_trees tree_size']
-        | Float32[Array, 'num_trees k k tree_size']
+        Float32[Array, 'num_trees max_num_leaves']
+        | UInt32[Array, 'num_trees max_num_leaves']
+        | Float32[Array, 'num_trees k k max_num_leaves']
     )
-    """The likelihood precision scale in each potential or actual leaf node."""
+    """The likelihood precision scale in each leaf, in the same version of
+    each tree as the leaf indices."""
 
     prelkv: PreLkV
     """Object with pre-computed terms of the likelihood ratios."""
@@ -401,7 +404,7 @@ def accept_moves_parallel_stage(
     """
     # apply the prunes pending from the previous step to the leaf indices,
     # then, where the new move is grow, modify the state like the move was
-    # accepted; update the related caches at the nodes involved in the moves
+    # accepted; update the related caches at the leaves involved in the moves
     updated = update_leaf_indices_and_related_caches(state, moves)
     state = replace(
         state,
@@ -421,8 +424,8 @@ def accept_moves_parallel_stage(
     # must also lie within the heap, i.e. not be at the bottom level; the
     # parent always does. These feed the transition ratio and the final
     # `affluence_tree` update.
-    _, half = state.forest.var_tree.shape
-    lrt_affluent = (moves.lrt_nodes < half) & moves.lrt_growable
+    _, max_num_leaves = state.forest.var_tree.shape
+    lrt_affluent = (moves.lrt_nodes < max_num_leaves) & moves.lrt_growable
     if state.forest.min_points_per_decision_node is not None:
         assert move_counts is not None
         lrt_affluent &= move_counts.lrt >= state.forest.min_points_per_decision_node
@@ -442,10 +445,14 @@ def accept_moves_parallel_stage(
     # the likelihood precision scale in each leaf is the number of datapoints
     # without error scales
     if state.prec_scale is None:
+        assert move_counts is not None
         prec_trees = state.forest.count_tree
+        parent_prec = move_counts.lrt[..., 2]
     else:
         prec_trees = state.forest.prec_tree
+        parent_prec = updated.move_prec
     assert prec_trees is not None
+    assert parent_prec is not None
 
     # compute some missing information about moves
     moves = complete_ratio(moves, state.forest.p_nonterminal)
@@ -465,7 +472,15 @@ def accept_moves_parallel_stage(
     # error precision once here instead
     error_cov_inv = scaled_error_cov_inv(state)
     leaf_prior_cov_inv = leaf_prior_precision(state.forest)
-    prelf = precompute_leaf_terms(key, prec_trees, error_cov_inv, leaf_prior_cov_inv)
+
+    prelf = precompute_leaf_terms(
+        key,
+        # the parent node of each move is not a leaf in the same version of the
+        # tree as its children, so it goes after the leaves
+        jnp.concatenate([prec_trees, parent_prec[..., None]], axis=-1),
+        error_cov_inv,
+        leaf_prior_cov_inv,
+    )
     prelkv = precompute_likelihood_terms(
         error_cov_inv, leaf_prior_cov_inv, prelf, moves
     )
@@ -478,7 +493,7 @@ def accept_moves_parallel_stage(
 class RelatedCaches(Module):
     """The caches related to `bartz.mcmcstep.Forest.leaf_indices`."""
 
-    count_tree: UInt32[Array, 'num_trees tree_size'] | None
+    count_tree: UInt32[Array, 'num_trees max_num_leaves'] | None
     """See `bartz.mcmcstep.Forest.count_tree`."""
 
     move_counts: Counts | None
@@ -486,11 +501,15 @@ class RelatedCaches(Module):
     not counted."""
 
     prec_tree: (
-        Float32[Array, 'num_trees tree_size']
-        | Float32[Array, 'num_trees k k tree_size']
+        Float32[Array, 'num_trees max_num_leaves']
+        | Float32[Array, 'num_trees k k max_num_leaves']
         | None
     )
     """See `bartz.mcmcstep.Forest.prec_tree`."""
+
+    move_prec: Float32[Array, ' num_trees'] | Float32[Array, 'num_trees k k'] | None
+    """The likelihood precision scale in the parent node of each move, `None`
+    without `prec_tree`."""
 
 
 class LeafIndicesAndRelatedCaches(RelatedCaches):
@@ -524,11 +543,11 @@ def update_leaf_indices_and_related_caches(
     """
     Update the leaf indices and related caches to apply the moves.
 
-    Apply to the leaf indices the prunes pending from the previous step and
-    the grow moves; then update the cached number of datapoints per leaf, and
-    its version weighted by error precision scale, at the nodes involved in the
-    moves. The trees not in use are skipped if the trees are processed in
-    blocks, see `bartz.mcmcstep.StepConfig.parallel_block_size`.
+    Apply the prunes pending from the previous step and the grow moves to the
+    leaf indices, and to the cached number of datapoints per leaf and its
+    version weighted by error precision scale. The trees not in use are skipped
+    if the trees are processed in blocks, see
+    `bartz.mcmcstep.StepConfig.parallel_block_size`.
 
     Parameters
     ----------
@@ -539,7 +558,7 @@ def update_leaf_indices_and_related_caches(
 
     Returns
     -------
-    The updated leaf indices and caches, the latter valid in each potential or actual leaf node.
+    The updated leaf indices and caches, for the deeper version of each tree (post-GROW, pre-PRUNE).
     """
     forest = state.forest  # alias for brevity
 
@@ -570,26 +589,32 @@ def update_leaf_indices_and_related_caches(
         caches = xs.caches
         if count:
             assert caches.count_tree is not None
+            count_tree = apply_moves_to_leaf_sums(
+                caches.count_tree, xs.to_prune, xs.move_node
+            )
             count_tree, move_counts = compute_count_trees(
-                caches.count_tree, leaf_indices, xs.moves, state.config
+                count_tree, leaf_indices, xs.moves, state.config
             )
             caches = replace(caches, count_tree=count_tree, move_counts=move_counts)
 
         if state.prec_scale is not None:
             assert caches.prec_tree is not None
-            prec_tree = compute_prec_trees(
-                caches.prec_tree,
+            prec_tree = apply_moves_to_leaf_sums(
+                caches.prec_tree, xs.to_prune, xs.move_node
+            )
+            prec_tree, move_prec = compute_prec_trees(
+                prec_tree,
                 state.prec_scale,
                 leaf_indices,
                 xs.moves,
                 caches.move_counts,
                 config=state.config,
             )
-            caches = replace(caches, prec_tree=prec_tree)
+            caches = replace(caches, prec_tree=prec_tree, move_prec=move_prec)
 
         return caches
 
-    old_caches = RelatedCaches(forest.count_tree, None, forest.prec_tree)
+    old_caches = RelatedCaches(forest.count_tree, None, forest.prec_tree, None)
     xs = LeafIndicesInputs(forest.to_prune, forest.move_node, moves, old_caches)
 
     def run(
@@ -652,6 +677,7 @@ def update_leaf_indices_and_related_caches(
         count_tree=caches.count_tree,
         move_counts=caches.move_counts,
         prec_tree=caches.prec_tree,
+        move_prec=caches.move_prec,
     )
 
 
@@ -683,6 +709,11 @@ def apply_grow_to_indices(
     Returns
     -------
     The updated leaf indices.
+
+    Notes
+    -----
+    The datapoints that go to the left child keep the index of the leaf, see
+    `bartz.grove.node_to_leaf_index`.
     """
     return _apply_grow_to_indices(moves, leaf_indices, X)
 
@@ -692,75 +723,91 @@ def _apply_grow_to_indices(
     moves: Moves, leaf_indices: UInt[Array, ' n'], X: UInt[Array, 'p n']
 ) -> UInt[Array, ' n']:
     """Implement `apply_grow_to_indices`."""
-    left_child = moves.lrt_nodes[0].astype(leaf_indices.dtype)
+    left, right = moves.lr_leaves.astype(leaf_indices.dtype)
     x: UInt[Array, ' n'] = X[moves.grow_var, :]
-    go_right = x >= moves.grow_split
-    tree_size = jnp.array(2 * moves.var_tree.size)
-    node_to_update = jnp.where(moves.grow, moves.lrt_nodes[2], tree_size)
-    return jnp.where(
-        leaf_indices == node_to_update, left_child + go_right, leaf_indices
+    go_right = moves.grow & (x >= moves.grow_split)
+    return jnp.where(go_right & (leaf_indices == left), right, leaf_indices)
+
+
+def append_total(lr: Shaped[Array, '*k_k 2']) -> Shaped[Array, '*k_k 3']:
+    """Stack (left, right) values with their total, left + right."""
+    total = lr[..., 0] + lr[..., 1]
+    return jnp.concatenate([lr, total[..., None]], axis=-1)
+
+
+def set_leaf_pair(
+    leaf_tree: Float32[Array, '*k max_num_leaves'],
+    value: Float32[Array, '*k 1'],
+    where: Bool[Array, ''],
+    indices: Int32[Array, ' 2'],
+) -> Float32[Array, '*k max_num_leaves']:
+    """Set the leaves at two indices to a value, if `where`."""
+    # on gpu a scatter is a kernel of its own, while xla merges the selects
+    # with the operations around them; on cpu the scatter is faster with deep
+    # trees
+    return lax.platform_dependent(
+        leaf_tree,
+        value,
+        where,
+        indices,
+        cpu=set_leaf_pair_scatter,
+        default=set_leaf_pair_select,
     )
 
 
-def _fill_lrt_total(lrt: Shaped[Array, '*k_k 3']) -> Shaped[Array, '*k_k 3']:
-    """Set the total slot of stacked (left, right, total) values to left + right.
-
-    The left and right slots pass through unchanged, the stale value in the
-    total slot is ignored. Implemented with fusable elementwise operations.
-    """
-    total = lrt[..., 0] + lrt[..., 1]
-    return jnp.where(jnp.arange(3) == 2, total[..., None], lrt)
-
-
-@overload
-def _compute_count_or_prec_trees(
-    prec_scale: None,
-    trees: UInt32[Array, 'num_trees tree_size'],
-    leaf_indices: UInt[Array, 'num_trees n'],
-    moves: Moves,
-    counts: None,
-    *,
-    config: StepConfig,
-) -> tuple[UInt32[Array, 'num_trees tree_size'], Counts]: ...
+def set_leaf_pair_scatter(
+    leaf_tree: Float32[Array, '*k max_num_leaves'],
+    value: Float32[Array, '*k 1'],
+    where: Bool[Array, ''],
+    indices: Int32[Array, ' 2'],
+) -> Float32[Array, '*k max_num_leaves']:
+    """Implement `set_leaf_pair` with a scatter."""
+    *_, max_num_leaves = leaf_tree.shape
+    return leaf_tree.at[..., jnp.where(where, indices, max_num_leaves)].set(value)
 
 
-@overload
-def _compute_count_or_prec_trees(
-    prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'],
-    trees: Float32[Array, 'num_trees tree_size']
-    | Float32[Array, 'num_trees k k tree_size'],
-    leaf_indices: UInt[Array, 'num_trees n'],
-    moves: Moves,
-    counts: Counts | None,
-    *,
-    config: StepConfig,
-) -> (
-    tuple[Float32[Array, 'num_trees tree_size'], None]
-    | tuple[Float32[Array, 'num_trees k k tree_size'], None]
-): ...
+def set_leaf_pair_select(
+    leaf_tree: Float32[Array, '*k max_num_leaves'],
+    value: Float32[Array, '*k 1'],
+    where: Bool[Array, ''],
+    indices: Int32[Array, ' 2'],
+) -> Float32[Array, '*k max_num_leaves']:
+    """Implement `set_leaf_pair` with elementwise selects."""
+    *_, max_num_leaves = leaf_tree.shape
+    index = jnp.arange(max_num_leaves)
+    first, second = indices
+    return jnp.where(where & ((index == first) | (index == second)), value, leaf_tree)
 
 
 def _compute_count_or_prec_trees(
     prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None,
-    trees: UInt32[Array, 'num_trees tree_size']
-    | Float32[Array, 'num_trees tree_size']
-    | Float32[Array, 'num_trees k k tree_size'],
+    trees: UInt32[Array, 'num_trees max_num_leaves']
+    | Float32[Array, 'num_trees max_num_leaves']
+    | Float32[Array, 'num_trees k k max_num_leaves'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
     counts: Counts | None,
     *,
     config: StepConfig,
 ) -> (
-    tuple[UInt32[Array, 'num_trees tree_size'], Counts]
-    | tuple[Float32[Array, 'num_trees tree_size'], None]
-    | tuple[Float32[Array, 'num_trees k k tree_size'], None]
+    tuple[UInt32[Array, 'num_trees max_num_leaves'], UInt32[Array, 'num_trees 3']]
+    | tuple[Float32[Array, 'num_trees max_num_leaves'], Float32[Array, 'num_trees 3']]
+    | tuple[
+        Float32[Array, 'num_trees k k max_num_leaves'],
+        Float32[Array, 'num_trees k k 3'],
+    ]
 ):
     """Implement `compute_count_trees` and `compute_prec_trees`."""
 
     def all_trees() -> (
-        tuple[UInt32[Array, 'num_trees tree_size'], Counts]
-        | tuple[Float32[Array, 'num_trees tree_size'], None]
-        | tuple[Float32[Array, 'num_trees k k tree_size'], None]
+        tuple[UInt32[Array, 'num_trees max_num_leaves'], UInt32[Array, 'num_trees 3']]
+        | tuple[
+            Float32[Array, 'num_trees max_num_leaves'], Float32[Array, 'num_trees 3']
+        ]
+        | tuple[
+            Float32[Array, 'num_trees k k max_num_leaves'],
+            Float32[Array, 'num_trees k k 3'],
+        ]
     ):
         compute = vmap(
             partial(_compute_count_or_prec_tree, config=config),
@@ -780,17 +827,17 @@ def _compute_count_or_prec_trees(
 
     def compute(
         args: tuple[
-            UInt32[Array, ' tree_size']
-            | Float32[Array, ' tree_size']
-            | Float32[Array, 'k k tree_size'],
+            UInt32[Array, ' max_num_leaves']
+            | Float32[Array, ' max_num_leaves']
+            | Float32[Array, 'k k max_num_leaves'],
             UInt[Array, ' n'],
             Moves,
             Counts | None,
         ],
     ) -> (
-        tuple[UInt32[Array, ' tree_size'], Counts]
-        | tuple[Float32[Array, ' tree_size'], None]
-        | tuple[Float32[Array, 'k k tree_size'], None]
+        tuple[UInt32[Array, ' max_num_leaves'], UInt32[Array, ' 3']]
+        | tuple[Float32[Array, ' max_num_leaves'], Float32[Array, ' 3']]
+        | tuple[Float32[Array, 'k k max_num_leaves'], Float32[Array, 'k k 3']]
     ):
         tree, leaf_indices, moves, counts = args
         return _compute_count_or_prec_tree(
@@ -798,9 +845,14 @@ def _compute_count_or_prec_trees(
         )
 
     def tree_batches() -> (
-        tuple[UInt32[Array, 'num_trees tree_size'], Counts]
-        | tuple[Float32[Array, 'num_trees tree_size'], None]
-        | tuple[Float32[Array, 'num_trees k k tree_size'], None]
+        tuple[UInt32[Array, 'num_trees max_num_leaves'], UInt32[Array, 'num_trees 3']]
+        | tuple[
+            Float32[Array, 'num_trees max_num_leaves'], Float32[Array, 'num_trees 3']
+        ]
+        | tuple[
+            Float32[Array, 'num_trees k k max_num_leaves'],
+            Float32[Array, 'num_trees k k 3'],
+        ]
     ):
         # sliced_map instead of lax.map because under the chain vmap lax.map's
         # reshape of the tree axis becomes a transpose of `leaf_indices` that
@@ -816,45 +868,45 @@ def _compute_count_or_prec_trees(
 
 def _compute_count_or_prec_tree(
     prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'] | None,
-    tree: UInt32[Array, ' tree_size']
-    | Float32[Array, ' tree_size']
-    | Float32[Array, 'k k tree_size'],
+    tree: UInt32[Array, ' max_num_leaves']
+    | Float32[Array, ' max_num_leaves']
+    | Float32[Array, 'k k max_num_leaves'],
     leaf_indices: UInt[Array, ' n'],
     moves: Moves,
     counts: Counts | None,
     *,
     config: StepConfig,
 ) -> (
-    tuple[UInt32[Array, ' tree_size'], Counts]
-    | tuple[Float32[Array, ' tree_size'], None]
-    | tuple[Float32[Array, 'k k tree_size'], None]
+    tuple[UInt32[Array, ' max_num_leaves'], UInt32[Array, ' 3']]
+    | tuple[Float32[Array, ' max_num_leaves'], Float32[Array, ' 3']]
+    | tuple[Float32[Array, 'k k max_num_leaves'], Float32[Array, 'k k 3']]
 ):
     """Update the cached count or precision tree for a single tree."""
-    (tree_size,) = moves.var_tree.shape
-    tree_size *= 2
+    *_, max_num_leaves = tree.shape
+    left, right = moves.lr_leaves
 
     # the cached tree is valid at the leaves, and the move only changes the
-    # values at the nodes it involves, so update them alone
+    # values at the leaves it involves, so update them alone. The total is
+    # cached: at the left child if the move grows, because it takes over the
+    # index of its parent, split in the children if the move prunes.
+    cached = tree.at[..., moves.lr_leaves].get(mode='fill', fill_value=0)
+    cached_total = jnp.where(
+        moves.grow, cached[..., 0], cached[..., 0] + cached[..., 1]
+    )
 
     if prec_scale is None:
-        # the total count is cached, at the parent if the move grows it, at the
-        # children if the move prunes it, so count only the left child and
-        # derive the right one. This is exact in integers, and the one-bin
-        # reduction fuses better than a two-bin one.
-        left = config.count_reduction_config._reduce(  # noqa: SLF001
+        # count only the right child and derive the left one. This is exact in
+        # integers, and the one-bin reduction fuses better than a two-bin one.
+        right_count = config.count_reduction_config._reduce(  # noqa: SLF001
             1,
             leaf_indices,
-            size=tree_size,
-            subset_start=moves.lrt_nodes[0],
-            subset_length=1,
+            size=max_num_leaves,
+            subset=right[None],
             dtype=jnp.uint32,
             data_sharded=config.data_sharded,
         ).squeeze(-1)
-        cached = tree.at[moves.lrt_nodes].get(mode='fill', fill_value=0)
-        total = jnp.where(moves.grow, cached[2], cached[0] + cached[1])
-        lrt = jnp.stack([left, total - left, total])
-        tree = tree.at[moves.lrt_nodes].set(lrt)
-        return tree, Counts(lrt=lrt)
+        lr = jnp.stack([cached_total - right_count, right_count])
+        total = cached_total
 
     elif counts is not None and config.one_bin_prec_reduction:
         # like the counts, reduce into one child alone and derive the other.
@@ -867,57 +919,94 @@ def _compute_count_or_prec_tree(
         fresh = config.prec_reduction_config._reduce(  # noqa: SLF001
             prec_scale,
             leaf_indices,
-            size=tree_size,
-            subset_start=moves.lrt_nodes[0] + jnp.where(left_fewer, 0, 1),
-            subset_length=1,
+            size=max_num_leaves,
+            subset=jnp.where(left_fewer, left, right)[None],
             dtype=jnp.float32,
             data_sharded=config.data_sharded,
         ).squeeze(-1)
-        cached = tree.at[..., moves.lrt_nodes].get(mode='fill', fill_value=0)
-        derived = cached[..., 2] - fresh
+        derived = cached_total - fresh
         grown = jnp.where(
             left_fewer,
             jnp.stack([fresh, derived], axis=-1),
             jnp.stack([derived, fresh], axis=-1),
         )
-        lr = jnp.where(moves.grow, grown, cached[..., :2])
-        total = jnp.where(moves.grow, cached[..., 2], cached[..., 0] + cached[..., 1])
-        lrt = jnp.concatenate([lr, total[..., None]], axis=-1)
-        tree = tree.at[..., moves.lrt_nodes].set(lrt)
-        return tree, None
+        lr = jnp.where(moves.grow, grown, cached)
+        total = cached_total
 
     else:
-        # reduce into the move's children, the contiguous pair (left, right) =
-        # (2 * node, 2 * node + 1) = lrt_nodes[:2]; neither is derived by
+        # reduce into both children of the move; neither is derived by
         # difference, because in floating point that would lose precision on a
         # small leaf next to a large one
         lr = config.prec_reduction_config._reduce(  # noqa: SLF001
             prec_scale,
             leaf_indices,
-            size=tree_size,
-            subset_start=moves.lrt_nodes[0],
-            subset_length=2,
+            size=max_num_leaves,
+            subset=moves.lr_leaves,
             dtype=jnp.float32,
             data_sharded=config.data_sharded,
         )
-
-        # write the children sums into the cache along with their total at the
-        # parent node (a non-leaf in the post-grow indexing the reduce runs on);
-        # the precision-scaled version of the counts is not needed because the
-        # likelihood terms are derived from the leaf terms
         total = lr[..., 0] + lr[..., 1]
-        lrt = jnp.concatenate([lr, total[..., None]], axis=-1)
-        tree = tree.at[..., moves.lrt_nodes].set(lrt)
-        return tree, None
+
+    # the total goes apart from the cache, where the parent node shares its
+    # element with the left child
+    tree = tree.at[..., moves.lr_leaves].set(lr)
+    return tree, jnp.concatenate([lr, total[..., None]], axis=-1)
+
+
+@named_call
+def apply_moves_to_leaf_sums(
+    trees: UInt32[Array, 'num_trees max_num_leaves']
+    | Float32[Array, 'num_trees max_num_leaves']
+    | Float32[Array, 'num_trees k k max_num_leaves'],
+    to_prune: Bool[Array, ' num_trees'],
+    move_node: Int32[Array, ' num_trees'],
+) -> (
+    UInt32[Array, 'num_trees max_num_leaves']
+    | Float32[Array, 'num_trees max_num_leaves']
+    | Float32[Array, 'num_trees k k max_num_leaves']
+):
+    """
+    Apply the prunes pending from the previous step to per-leaf sums.
+
+    Parameters
+    ----------
+    trees
+        The sum of something over the datapoints in each leaf, see
+        `bartz.mcmcstep.Forest.count_tree`.
+    to_prune
+        Whether the last move on each tree ended in a prune yet to be applied.
+    move_node
+        The node the last move on each tree operated on.
+
+    Returns
+    -------
+    The updated sums, with the right child of a pruned node moved into the left one, that shares its index with the node.
+    """
+    return _apply_moves_to_leaf_sums(trees, to_prune, move_node)
+
+
+@vmap
+def _apply_moves_to_leaf_sums(
+    tree: Shaped[Array, '*k_k max_num_leaves'],
+    to_prune: Bool[Array, ''],
+    move_node: Int32[Array, ''],
+) -> Shaped[Array, '*k_k max_num_leaves']:
+    """Implement `apply_moves_to_leaf_sums`."""
+    *_, max_num_leaves = tree.shape
+    lr_leaves = jnp.stack([node_to_leaf_index(move_node), move_node])
+    lr = tree[..., lr_leaves]
+    total = lr[..., 0] + lr[..., 1]
+    merged = jnp.stack([total, jnp.zeros_like(total)], axis=-1)
+    return tree.at[..., jnp.where(to_prune, lr_leaves, max_num_leaves)].set(merged)
 
 
 @named_call
 def compute_count_trees(
-    count_trees: UInt32[Array, 'num_trees tree_size'],
+    count_trees: UInt32[Array, 'num_trees max_num_leaves'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
     config: StepConfig,
-) -> tuple[UInt32[Array, 'num_trees tree_size'], Counts]:
+) -> tuple[UInt32[Array, 'num_trees max_num_leaves'], Counts]:
     """
     Update the cached number of datapoints per leaf at the moves' nodes.
 
@@ -936,28 +1025,34 @@ def compute_count_trees(
 
     Returns
     -------
-    count_trees : UInt32[Array, 'num_trees tree_size']
-        The updated cache, valid in each potential or actual leaf node.
+    count_trees : UInt32[Array, 'num_trees max_num_leaves']
+        The updated cache, valid at the leaves of the deeper version of the trees.
     counts : Counts
         The counts of the number of points in the leaves grown or pruned by the
         moves.
     """
-    return _compute_count_or_prec_trees(
+    count_trees, lrt = _compute_count_or_prec_trees(
         None, count_trees, leaf_indices, moves, None, config=config
     )
+    return count_trees, Counts(lrt=lrt)
 
 
 @named_call
 def compute_prec_trees(
-    prec_trees: Float32[Array, 'num_trees tree_size']
-    | Float32[Array, 'num_trees k k tree_size'],
+    prec_trees: Float32[Array, 'num_trees max_num_leaves']
+    | Float32[Array, 'num_trees k k max_num_leaves'],
     prec_scale: Float[Array, ' n'] | Float[Array, 'k k n'],
     leaf_indices: UInt[Array, 'num_trees n'],
     moves: Moves,
     counts: Counts | None,
     *,
     config: StepConfig,
-) -> Float32[Array, 'num_trees tree_size'] | Float32[Array, 'num_trees k k tree_size']:
+) -> (
+    tuple[Float32[Array, 'num_trees max_num_leaves'], Float32[Array, ' num_trees']]
+    | tuple[
+        Float32[Array, 'num_trees k k max_num_leaves'], Float32[Array, 'num_trees k k']
+    ]
+):
     """
     Update the cached per-leaf likelihood precision scale at the moves' nodes.
 
@@ -981,16 +1076,19 @@ def compute_prec_trees(
 
     Returns
     -------
-    The updated cache, valid in each potential or actual leaf node.
+    prec_trees : Float32[Array, 'num_trees max_num_leaves'] | Float32[Array, 'num_trees k k max_num_leaves']
+        The updated cache, valid at the leaves of the deeper version of the trees.
+    parent_prec : Float32[Array, ' num_trees'] | Float32[Array, 'num_trees k k']
+        The likelihood precision scale in the node each move operates on.
     """
-    trees, _ = _compute_count_or_prec_trees(
+    prec_trees, lrt = _compute_count_or_prec_trees(
         prec_scale, prec_trees, leaf_indices, moves, counts, config=config
     )
-    return trees
+    return prec_trees, lrt[..., 2]
 
 
 @partial(vmap, in_axes=(0, None))
-def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) -> Moves:
+def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' heap_size']) -> Moves:
     """
     Complete non-likelihood MH ratio calculation.
 
@@ -1050,15 +1148,18 @@ def complete_ratio(moves: Moves, p_nonterminal: Float32[Array, ' tree_size']) ->
 
 @named_call
 def adapt_leaf_trees_to_grow_indices(
-    leaf_trees: Float[Array, 'num_trees tree_size']
-    | Float[Array, 'num_trees k tree_size'],
+    leaf_trees: Float[Array, 'num_trees max_num_leaves']
+    | Float[Array, 'num_trees k max_num_leaves'],
     moves: Moves,
-) -> Float[Array, 'num_trees tree_size'] | Float[Array, 'num_trees k tree_size']:
+) -> (
+    Float[Array, 'num_trees max_num_leaves']
+    | Float[Array, 'num_trees k max_num_leaves']
+):
     """
     Modify leaves such that post-grow indices work on the original tree.
 
-    The value of the leaf to grow is copied to what would be its children if the
-    grow move was accepted.
+    The value of the leaf to grow is copied to what would be its right child if
+    the grow move was accepted; the left one takes over its index.
 
     Parameters
     ----------
@@ -1076,14 +1177,15 @@ def adapt_leaf_trees_to_grow_indices(
 
 @vmap
 def _adapt_leaf_trees_to_grow_indices(
-    leaf_trees: Float[Array, ' tree_size'] | Float[Array, ' k tree_size'], moves: Moves
-) -> Float[Array, ' tree_size'] | Float[Array, ' k tree_size']:
+    leaf_trees: Float[Array, ' max_num_leaves'] | Float[Array, ' k max_num_leaves'],
+    moves: Moves,
+) -> Float[Array, ' max_num_leaves'] | Float[Array, ' k max_num_leaves']:
     """Implement `adapt_leaf_trees_to_grow_indices`."""
-    # the parent slot is written back unchanged to share a single scatter
-    values_at_node = leaf_trees[..., moves.lrt_nodes[2]]
-    return leaf_trees.at[
-        ..., jnp.where(moves.grow, moves.lrt_nodes, leaf_trees.size)
-    ].set(values_at_node[..., None])
+    *_, max_num_leaves = leaf_trees.shape
+    left, right = moves.lr_leaves
+    return leaf_trees.at[..., jnp.where(moves.grow, right, max_num_leaves)].set(
+        leaf_trees[..., left]
+    )
 
 
 def _logdet_from_chol(L: Float32[Array, '... k k']) -> Float32[Array, '...']:
@@ -1093,8 +1195,9 @@ def _logdet_from_chol(L: Float32[Array, '... k k']) -> Float32[Array, '...']:
 
 
 def compute_B(
-    error_cov_inv: Float32[Array, 'k k'], resid: Float32[Array, 'k k *tree_size']
-) -> Float32[Array, ' k *tree_size']:
+    error_cov_inv: Float32[Array, 'k k'],
+    resid: Float32[Array, 'k k max_num_leaves_plus_1'] | Float32[Array, 'k k 3'],
+) -> Float32[Array, 'k max_num_leaves_plus_1'] | Float32[Array, 'k 3']:
     """Compute the leaf score from the leaf precision-scaled sum of residuals."""
     return jnp.einsum('ab,ab...->a...', error_cov_inv, resid)
 
@@ -1111,11 +1214,11 @@ def solve_leaf(
 
 def _precompute_leaf_terms_uv(
     key: Key[Array, ''],
-    prec_trees: Float32[Array, 'num_trees tree_size']
-    | UInt32[Array, 'num_trees tree_size'],
+    prec_trees: Float32[Array, 'num_trees max_num_leaves_plus_1']
+    | UInt32[Array, 'num_trees max_num_leaves_plus_1'],
     error_cov_inv: Float32[Array, ''],
     leaf_prior_cov_inv: Float32[Array, ''],
-    z: Float32[Array, 'num_trees tree_size'] | None = None,
+    z: Float32[Array, 'num_trees max_num_leaves_plus_1'] | None = None,
 ) -> PreLfUV:
     prec_lk = prec_trees * error_cov_inv
     var_post = jnp.reciprocal(prec_lk + leaf_prior_cov_inv)
@@ -1137,16 +1240,16 @@ def _precompute_leaf_terms_uv(
 
 def _precompute_leaf_terms_mv(
     key: Key[Array, ''],
-    prec_trees: Float32[Array, 'num_trees tree_size']
-    | UInt32[Array, 'num_trees tree_size'],
+    prec_trees: Float32[Array, 'num_trees max_num_leaves_plus_1']
+    | UInt32[Array, 'num_trees max_num_leaves_plus_1'],
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
-    z: Float32[Array, 'num_trees k tree_size'] | None = None,
+    z: Float32[Array, 'num_trees k max_num_leaves_plus_1'] | None = None,
 ) -> PreLfMV:
-    num_trees, tree_size = prec_trees.shape
+    num_trees, max_num_leaves_plus_1 = prec_trees.shape
     k, _ = error_cov_inv.shape
     if z is None:
-        z = random.normal(key, (num_trees, k, tree_size))
+        z = random.normal(key, (num_trees, k, max_num_leaves_plus_1))
 
     def per_leaf(
         prec: Float32[Array, ''] | UInt32[Array, ''], z: Float32[Array, ' k']
@@ -1168,14 +1271,14 @@ def _precompute_leaf_terms_mv(
 
 def _precompute_leaf_terms_mv_het(
     key: Key[Array, ''],
-    prec_trees: Float32[Array, 'num_trees k k tree_size'],
+    prec_trees: Float32[Array, 'num_trees k k max_num_leaves_plus_1'],
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
-    z: Float32[Array, 'num_trees k tree_size'] | None = None,
+    z: Float32[Array, 'num_trees k max_num_leaves_plus_1'] | None = None,
 ) -> PreLfMVHet:
-    num_trees, k, _, tree_size = prec_trees.shape
+    num_trees, k, _, max_num_leaves_plus_1 = prec_trees.shape
     if z is None:
-        z = random.normal(key, (num_trees, k, tree_size))
+        z = random.normal(key, (num_trees, k, max_num_leaves_plus_1))
 
     def per_leaf(
         prec: Float32[Array, 'k k'], z: Float32[Array, ' k']
@@ -1198,13 +1301,13 @@ def _precompute_leaf_terms_mv_het(
 @named_call
 def precompute_leaf_terms(
     key: Key[Array, ''],
-    prec_trees: Float32[Array, 'num_trees tree_size']
-    | UInt32[Array, 'num_trees tree_size']
-    | Float32[Array, 'num_trees k k tree_size'],
+    prec_trees: Float32[Array, 'num_trees max_num_leaves_plus_1']
+    | UInt32[Array, 'num_trees max_num_leaves_plus_1']
+    | Float32[Array, 'num_trees k k max_num_leaves_plus_1'],
     error_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, ''] | Float32[Array, 'k k'],
-    z: Float32[Array, 'num_trees tree_size']
-    | Float32[Array, 'num_trees k tree_size']
+    z: Float32[Array, 'num_trees max_num_leaves_plus_1']
+    | Float32[Array, 'num_trees k max_num_leaves_plus_1']
     | None = None,
 ) -> PreLf:
     """
@@ -1218,7 +1321,8 @@ def precompute_leaf_terms(
     key
         A jax random key.
     prec_trees
-        The likelihood precision scale in each potential or actual leaf node.
+        The likelihood precision scale in each leaf, followed by the one in the
+        parent node of the move.
     error_cov_inv
         The inverse error variance (univariate) or the inverse of error
         covariance matrix (multivariate). If `prec_scale` is set, this is the
@@ -1251,20 +1355,22 @@ def precompute_leaf_terms(
 
 @vmap
 def _gather_lrt(
-    leaf_values: Float32[Array, '*k_k tree_size'], lrt_nodes: Int32[Array, ' 3']
+    leaf_values: Float32[Array, '*k_k max_num_leaves_plus_1'],
+    lr_leaves: Int32[Array, ' 2'],
 ) -> Float32[Array, ' 3 *k_k']:
     """Gather per-tree leaf values at the left child, right child, and parent."""
-    return jnp.moveaxis(leaf_values[..., lrt_nodes], -1, 0)
+    lrt = jnp.concatenate([leaf_values[..., lr_leaves], leaf_values[..., -1:]], axis=-1)
+    return jnp.moveaxis(lrt, -1, 0)
 
 
 def _precompute_likelihood_terms_uv(
     error_cov_inv: Float32[Array, ''],
     leaf_prior_cov_inv: Float32[Array, ''],
     prelf: PreLfUV,
-    lrt_nodes: Int32[Array, 'num_trees 3'],
+    lr_leaves: Int32[Array, 'num_trees 2'],
 ) -> PreLkV:
     # mean_factor is error_cov_inv / prec, complete the sandwich
-    lrt = error_cov_inv * _gather_lrt(prelf.mean_factor, lrt_nodes)
+    lrt = error_cov_inv * _gather_lrt(prelf.mean_factor, lr_leaves)
     # the same value with the prior-only precision, computed with the same
     # operations as in `_precompute_leaf_terms_uv` such that it matches `lrt`
     # bitwise on empty nodes and the ratio is exactly 1 without data
@@ -1277,26 +1383,26 @@ def _precompute_likelihood_terms_mv(
     error_cov_inv: Float32[Array, 'k k'],
     leaf_prior_cov_inv: Float32[Array, 'k k'],
     prelf: PreLfMV,
-    lrt_nodes: Int32[Array, 'num_trees 3'],
+    lr_leaves: Int32[Array, 'num_trees 2'],
 ) -> PreLkV:
     logdet_prior = _logdet_from_chol(chol_with_gersh(leaf_prior_cov_inv))
-    logdet_prec = _gather_lrt(prelf.logdet_prec, lrt_nodes)
+    logdet_prec = _gather_lrt(prelf.logdet_prec, lr_leaves)
     log_sqrt_term = (logdet_prior + logdet_prec @ jnp.array([-1.0, -1.0, 1.0])) / 2
 
     # mean_factor is error_cov_inv @ inv(prec), complete the sandwich
-    mean_factor = _gather_lrt(prelf.mean_factor, lrt_nodes)  # (num_trees, 3, k, k)
+    mean_factor = _gather_lrt(prelf.mean_factor, lr_leaves)  # (num_trees, 3, k, k)
     return PreLkV(lrt=mean_factor @ error_cov_inv, log_sqrt_term=log_sqrt_term)
 
 
 def _precompute_likelihood_terms_mv_het(
     leaf_prior_cov_inv: Float32[Array, 'k k'],
     prelf: PreLfMVHet,
-    lrt_nodes: Int32[Array, 'num_trees 3'],
+    lr_leaves: Int32[Array, 'num_trees 2'],
 ) -> PreLkV:
     logdet_prior = _logdet_from_chol(chol_with_gersh(leaf_prior_cov_inv))
 
     # mean_factor is the precision cholesky itself
-    L = _gather_lrt(prelf.mean_factor, lrt_nodes)  # (num_trees, 3, k, k)
+    L = _gather_lrt(prelf.mean_factor, lr_leaves)  # (num_trees, 3, k, k)
     log_sqrt_term = (
         logdet_prior + _logdet_from_chol(L) @ jnp.array([-1.0, -1.0, 1.0])
     ) / 2
@@ -1338,16 +1444,16 @@ def precompute_likelihood_terms(
     """
     if isinstance(prelf, PreLfUV):
         return _precompute_likelihood_terms_uv(
-            error_cov_inv, leaf_prior_cov_inv, prelf, moves.lrt_nodes
+            error_cov_inv, leaf_prior_cov_inv, prelf, moves.lr_leaves
         )
     elif isinstance(prelf, PreLfMVHet):
         return _precompute_likelihood_terms_mv_het(
-            leaf_prior_cov_inv, prelf, moves.lrt_nodes
+            leaf_prior_cov_inv, prelf, moves.lr_leaves
         )
     else:
         assert isinstance(prelf, PreLfMV)
         return _precompute_likelihood_terms_mv(
-            error_cov_inv, leaf_prior_cov_inv, prelf, moves.lrt_nodes
+            error_cov_inv, leaf_prior_cov_inv, prelf, moves.lr_leaves
         )
 
 
@@ -1540,16 +1646,18 @@ class SeqStageInPerTree(Module):
     # rank/dtype (cf. `ParallelStageOut`); the per-tree slices reach `loop` via
     # scan, which does not re-run `__init__`.
     leaf_tree: (
-        Float[Array, 'num_trees tree_size'] | Float[Array, 'num_trees k tree_size']
+        Float[Array, 'num_trees max_num_leaves']
+        | Float[Array, 'num_trees k max_num_leaves']
     )
     """The leaf values of the trees."""
 
     prec_tree: (
-        Float32[Array, 'num_trees tree_size']
-        | UInt32[Array, 'num_trees tree_size']
-        | Float32[Array, 'num_trees k k tree_size']
+        Float32[Array, 'num_trees max_num_leaves']
+        | UInt32[Array, 'num_trees max_num_leaves']
+        | Float32[Array, 'num_trees k k max_num_leaves']
     )
-    """The likelihood precision scale in each potential or actual leaf node."""
+    """The likelihood precision scale in each leaf, in the same version of
+    each tree as the leaf indices."""
 
     move: Moves
     """The proposed move, see `propose_moves`."""
@@ -1579,7 +1687,8 @@ class SeqStageOutPerTree(Module):
     be updated by pruning the leaves involved in the move."""
 
     leaf_tree: (
-        Float[Array, '*num_trees tree_size'] | Float[Array, '*num_trees k tree_size']
+        Float[Array, '*num_trees max_num_leaves']
+        | Float[Array, '*num_trees k max_num_leaves']
     )
     """The new leaf values of the tree."""
 
@@ -1654,12 +1763,12 @@ def accept_move_and_sample_leaves(
     else:
         scaled_resid = resid * at.prec_scale
 
-    tree_size = pt.leaf_tree.shape[-1]  # 2**d
+    *_, max_num_leaves = pt.leaf_tree.shape
 
     resid_tree = sum_resid(
         scaled_resid,
         leaf_indices,
-        tree_size,
+        max_num_leaves,
         at.resid_reduction_config,
         at.data_sharded,
     )
@@ -1679,10 +1788,10 @@ def accept_move_and_sample_leaves(
     resid_tree += pt.prec_tree * prev_leaf_tree
 
     # sum residuals in parent node modified by move and compute likelihood;
-    # the children slots are written back unchanged to share a single scatter
-    assert pt.move.lrt_nodes.dtype == jnp.int32
-    resid_lrt = _fill_lrt_total(resid_tree[..., pt.move.lrt_nodes])
-    resid_tree = resid_tree.at[..., pt.move.lrt_nodes].set(resid_lrt)
+    # the parent goes after the leaves, where `prelf` has its terms
+    assert pt.move.lr_leaves.dtype == jnp.int32
+    resid_lrt = append_total(resid_tree[..., pt.move.lr_leaves])
+    resid_tree = jnp.concatenate([resid_tree, resid_lrt[..., 2:]], axis=-1)
 
     log_lk_ratio = compute_likelihood_ratio(resid_lrt, pt.prelkv, at.error_cov_inv)
 
@@ -1699,8 +1808,8 @@ def accept_move_and_sample_leaves(
     # compute leaves posterior and sample leaves
     if at.error_cov_inv is not None:
         # multivariate w/ per-component error scales
-        b_tree = compute_B(at.error_cov_inv, resid_tree)  # (k, 2**d)
-        mean_post = solve_leaf(pt.prelf.mean_factor, b_tree)  # (k, 2**d)
+        b_tree = compute_B(at.error_cov_inv, resid_tree)
+        mean_post = solve_leaf(pt.prelf.mean_factor, b_tree)
     elif resid.ndim > 1:
         # multivariate homoskedastic or scalar error scales
         mean_post = jnp.einsum('kil,kl->il', pt.prelf.mean_factor, resid_tree)
@@ -1709,14 +1818,18 @@ def accept_move_and_sample_leaves(
         mean_post = resid_tree * pt.prelf.mean_factor
     leaf_tree = mean_post + pt.prelf.centered_leaves
 
-    # copy leaves around such that the leaf indices point to the correct leaf;
-    # the parent slot is written back unchanged to share a single scatter.
-    # this mirroring persists into the output state, where it keeps the
+    # split the parent off the leaves; if it ends up a leaf, copy its value
+    # to the indices of its children, such that the leaf indices point to the
+    # correct leaf. The left one is its own index, while the mirroring on the
+    # right one persists into the output state, where it keeps the
     # not-yet-pruned `leaf_indices` valid to evaluate the trees
     to_prune = acc ^ pt.move.grow
-    leaf_tree = leaf_tree.at[
-        ..., jnp.where(to_prune, pt.move.lrt_nodes, tree_size)
-    ].set(leaf_tree[..., pt.move.lrt_nodes[2], None])
+    leaf_tree = set_leaf_pair(
+        leaf_tree[..., :max_num_leaves],
+        leaf_tree[..., max_num_leaves:],
+        to_prune,
+        pt.move.lr_leaves,
+    )
 
     # round the new leaves to the storage units and dtype; the residuals are
     # then updated with the rounded values to stay consistent with the trees
@@ -1771,13 +1884,13 @@ def accept_move_and_sample_leaves(
 def sum_resid(
     scaled_resid: Float[Array, ' n'] | Float[Array, 'k n'] | Float[Array, 'k k n'],
     leaf_indices: UInt[Array, ' n'],
-    tree_size: int,
+    max_num_leaves: int,
     reduction_config: ReductionConfig,
     data_sharded: bool,
 ) -> (
-    Float32[Array, ' {tree_size}']
-    | Float32[Array, 'k {tree_size}']
-    | Float32[Array, 'k k {tree_size}']
+    Float32[Array, ' {max_num_leaves}']
+    | Float32[Array, 'k {max_num_leaves}']
+    | Float32[Array, 'k k {max_num_leaves}']
 ):
     """
     Sum the residuals in each leaf.
@@ -1789,8 +1902,8 @@ def sum_resid(
         precision scale.
     leaf_indices
         The leaf indices of the tree (in which leaf each data point falls into).
-    tree_size
-        The size of the tree array (2 ** d).
+    max_num_leaves
+        The size of the leaf arrays, see `bartz.mcmcstep.Forest.leaf_tree`.
     reduction_config
         How to sum the residuals in each leaf.
     data_sharded
@@ -1804,7 +1917,7 @@ def sum_resid(
     return reduction_config._reduce(  # noqa: SLF001
         scaled_resid,
         leaf_indices,
-        size=tree_size,
+        size=max_num_leaves,
         dtype=jnp.float32,
         data_sharded=data_sharded,
     )
@@ -1961,17 +2074,16 @@ def _apply_moves_to_leaf_indices(
     move_node: Int32[Array, ''],
 ) -> UInt[Array, ' n']:
     """Implement `apply_moves_to_leaf_indices`."""
-    mask = ~jnp.array(1, leaf_indices.dtype)  # ...1111111110
-    is_child = (leaf_indices & mask) == (move_node << 1)
-    return jnp.where(
-        is_child & to_prune, move_node.astype(leaf_indices.dtype), leaf_indices
-    )
+    # the left child shares its index with the node
+    left = node_to_leaf_index(move_node).astype(leaf_indices.dtype)
+    right = move_node.astype(leaf_indices.dtype)
+    return jnp.where(to_prune & (leaf_indices == right), left, leaf_indices)
 
 
 @named_call
 def apply_moves_to_split_trees(
-    split_tree: UInt[Array, 'num_trees half_tree_size'], moves: Moves
-) -> UInt[Array, 'num_trees half_tree_size']:
+    split_tree: UInt[Array, 'num_trees max_num_leaves'], moves: Moves
+) -> UInt[Array, 'num_trees max_num_leaves']:
     """
     Update the split trees to match the accepted move.
 
@@ -1992,8 +2104,8 @@ def apply_moves_to_split_trees(
 
 @vmap
 def _apply_moves_to_split_trees(
-    split_tree: UInt[Array, ' half_tree_size'], moves: Moves
-) -> UInt[Array, ' half_tree_size']:
+    split_tree: UInt[Array, ' max_num_leaves'], moves: Moves
+) -> UInt[Array, ' max_num_leaves']:
     """Implement `apply_moves_to_split_trees`."""
     assert moves.to_prune is not None
     # a single scatter serves both cases: an accepted grow writes the new
@@ -2005,8 +2117,8 @@ def _apply_moves_to_split_trees(
 
 @named_call
 def apply_moves_to_affluence_trees(
-    affluence_tree: Bool[Array, 'num_trees half_tree_size'], moves: Moves
-) -> Bool[Array, 'num_trees half_tree_size']:
+    affluence_tree: Bool[Array, 'num_trees max_num_leaves'], moves: Moves
+) -> Bool[Array, 'num_trees max_num_leaves']:
     """
     Update the affluence trees to match the accepted move.
 
@@ -2031,8 +2143,8 @@ def apply_moves_to_affluence_trees(
 
 @vmap
 def _apply_moves_to_affluence_trees(
-    affluence_tree: Bool[Array, ' half_tree_size'], moves: Moves
-) -> Bool[Array, ' half_tree_size']:
+    affluence_tree: Bool[Array, ' max_num_leaves'], moves: Moves
+) -> Bool[Array, ' max_num_leaves']:
     """Implement `apply_moves_to_affluence_trees`."""
     assert moves.to_prune is not None
     assert moves.lrt_affluent is not None
@@ -2253,9 +2365,9 @@ def leaf_scatter(
     scatter : Float32[Array, ''] | Float32[Array, 'k k']
         The sum over the leaves of the outer product of the values, in data units.
     """
-    # the values on the dangling children of pruned nodes mirror the parent's,
-    # so mask on the actual leaves only
-    is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(forest.split_tree)
+    # the value on the dangling right child of a pruned node mirrors the
+    # parent's, so mask on the actual leaves only
+    is_leaf = is_leaf_used(forest.split_tree)
     used = used_trees_mask(forest)
     if used is not None:
         is_leaf &= used[:, None]
@@ -2435,11 +2547,11 @@ class S(Module):
 
 def log_blocked_mass_tree(
     key: Key[Array, ''],
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     s: S,
-) -> tuple[Int32[Array, ' half_tree_size//2'], Float32[Array, ' half_tree_size//2']]:
+) -> tuple[Int32[Array, ' max_num_leaves//2'], Float32[Array, ' max_num_leaves//2']]:
     """Data-augmentation mass blocked by a single tree, per blocking node.
 
     At each internal node, draws the latent augmentation weight ``lambda / e``
@@ -2465,16 +2577,16 @@ def log_blocked_mass_tree(
 
     Returns
     -------
-    var : Int32[Array, ' half_tree_size//2']
+    var : Int32[Array, ' max_num_leaves//2']
         The splitting variable of each node in the upper half of the heap, `p`
         at non-internal nodes.
-    log_mass : Float32[Array, ' half_tree_size//2']
+    log_mass : Float32[Array, ' max_num_leaves//2']
         The log of the mass the node blocks for its variable.
     """
-    (half_tree_size,) = split_tree.shape
-    d_minus_1 = half_tree_size.bit_length() - 1  # number of decision-node levels
+    (max_num_leaves,) = split_tree.shape
+    max_depth = max_num_leaves.bit_length() - 1
     p = max_split.size
-    nodes = jnp.arange(half_tree_size)
+    nodes = jnp.arange(max_num_leaves)
     split = split_tree.astype(jnp.int32)
     is_internal = split_tree.astype(bool)
 
@@ -2509,7 +2621,7 @@ def log_blocked_mass_tree(
     parent_var = var_tree[parent]
     ineligible_mass = jnp.where(parent_blocks, s.rest_ratio[parent_var], 0.0)
     ineligible_top = jnp.where(parent_blocks, s.top_bit[parent_var], 0)
-    for level in range(1, d_minus_1):
+    for level in range(1, max_depth):
         lhs, rhs = 1 << level, 1 << (level + 1)
         parent_mass = jnp.repeat(ineligible_mass[lhs >> 1 : rhs >> 1], 2)
         ineligible_mass = ineligible_mass.at[lhs:rhs].add(parent_mass)
@@ -2540,14 +2652,14 @@ def log_blocked_mass_tree(
     # Per-node augmentation weight lambda_b / e_b, zero at non-internal nodes. The
     # eligible mass can be tiny, so the weights and their sums below are in log
     # space, as they can exceed the float32 range.
-    log_weight = jnp.log(random.exponential(key, (half_tree_size,))) - log_eligible
+    log_weight = jnp.log(random.exponential(key, (max_num_leaves,))) - log_eligible
     log_weight = jnp.where(is_internal, log_weight, -jnp.inf)
 
     # Subtree weight: total weight of each node's internal descendants and itself,
     # accumulated bottom-up. The children of the deepest decision level are leaves
     # and contribute nothing.
     log_subtree_weight = log_weight
-    for level in range(d_minus_1 - 2, -1, -1):
+    for level in range(max_depth - 2, -1, -1):
         lhs, rhs = 1 << level, 1 << (level + 1)
         children = log_subtree_weight[2 * lhs : 2 * rhs].reshape(-1, 2)
         children = jnp.logaddexp(children[:, 0], children[:, 1])
@@ -2560,7 +2672,7 @@ def log_blocked_mass_tree(
     # half of nodes have internal children (the deepest decision nodes block
     # into leaves, contributing nothing); their children are exactly
     # subtree_weight reshaped into [left, right] pairs.
-    half = half_tree_size // 2
+    half = max_num_leaves // 2
     children = jnp.where(
         blocks[:, :half], log_subtree_weight.reshape(-1, 2).T, -jnp.inf
     )
@@ -2605,17 +2717,17 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Float32[Array,
     """
     assert forest.sparsity.log_s is not None
     keys = split(key)
-    (num_trees, half_tree_size) = forest.var_tree.shape
+    (num_trees, max_num_leaves) = forest.var_tree.shape
 
     # split probabilities normalized over the selectable (non-blocked) variables,
-    # with the largest ones singled out. A node has less than d_minus_1
+    # with the largest ones singled out. A node has less than max_depth
     # ineligible variables, one per ancestor. If some are not among the
     # largest, their mass is subtracted from the total of the others, and at
-    # least d_minus_1 + 1 of the 2 d_minus_1 largest are eligible, each larger
+    # least max_depth + 1 of the 2 max_depth largest are eligible, each larger
     # than all the others: so the relative error of the eligible mass is about
-    # float32 eps times p / (d_minus_1 + 1).
-    d_minus_1 = half_tree_size.bit_length() - 1
-    s = S.from_log_s(forest.sparsity.log_s, forest.max_split > 0, 2 * d_minus_1)
+    # float32 eps times p / (max_depth + 1).
+    max_depth = max_num_leaves.bit_length() - 1
+    s = S.from_log_s(forest.sparsity.log_s, forest.max_split > 0, 2 * max_depth)
 
     # blocked_mass[j] = sum over internal nodes where j is ineligible of
     # lambda_b / e_b, with lambda_b ~ Exponential(1); accumulated over the nodes

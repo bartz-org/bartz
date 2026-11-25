@@ -325,8 +325,7 @@ class bcf(Module):
     maxdepth_mu
     maxdepth_tau
         The maximum depth of the trees in the prognostic/treatment effect
-        forest. This is 1-based, so with the default ``maxdepth_mu/tau=6``, the
-        depths of the levels range from 0 to 5.
+        forest, with the root at depth 0.
     tau_0_prior_var
         Prior variance for global intercept tau_0.
     sample_intercept
@@ -418,8 +417,8 @@ class bcf(Module):
         leaf_prior_cov_inv_tau: FloatLike | None = None,
         min_points_per_leaf_mu: int = 5,
         min_points_per_leaf_tau: int = 5,
-        maxdepth_mu: int = 6,
-        maxdepth_tau: int = 6,
+        maxdepth_mu: int = 5,
+        maxdepth_tau: int = 5,
         tau_0_prior_var: float | None = None,
         sample_intercept: bool = True,
         adaptive_coding: bool = False,

@@ -230,7 +230,7 @@ class mc_gbart(Module):
     - The error variance parameter is called `lambda_` instead of `lambda`,
       since the latter is a reserved word in Python.
     - There are some additional attributes, and some missing.
-    - The trees have a maximum depth of 6.
+    - The trees have a maximum depth of 5.
     - `rm_const` refers to predictors without decision rules instead of
       predictors that are constant in `x_train`.
     - If `rm_const=True` and some variables are dropped, the predictors
@@ -363,7 +363,7 @@ class mc_gbart(Module):
             n_skip=keepevery,
             printevery=printevery,
             seed=seed,
-            maxdepth=6,
+            maxdepth=5,
             num_chains=num_chains,
             precompute_predict_train=True,
         )

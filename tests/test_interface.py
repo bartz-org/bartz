@@ -92,13 +92,12 @@ from bartz._jaxext import (
     split,
 )
 from bartz._typing import kwdict
-from bartz.grove import describe_error, is_actual_leaf
+from bartz.grove import describe_error
 from bartz.mcmcloop import Callback, MainTrace, MainTraceWithTrainPred, VarprobInState
 from bartz.mcmcloop._callback import _TQDM_REGISTRY
 from bartz.mcmcloop._loop import _inner_loop_counter
 from bartz.mcmcstep import BatchedReduction, Forest, State, Wishart, step
 from bartz.mcmcstep._axes import chain_vmap_axes
-from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from bartz.npz import serializable
 from bartz.prepcovars import GivenSplitsBinner, RangeEvenBinner, UniqueQuantileBinner
 from bartz.testing import DiscreteUniform, Gamma, gen_data
@@ -421,7 +420,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         UniqueQuantileBinner, max_bins=256, max_subsample=None
                     ),
                     num_chains=2,
-                    maxdepth=6,
+                    maxdepth=5,
                     num_data_devices=min(2, get_device_count()),
                     num_chain_devices=None,  # for mc_gbart, turn autoshard off
                     # on for some variants to cover both trace types
@@ -563,7 +562,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         UniqueQuantileBinner, max_bins=256, max_subsample=None
                     ),
                     num_chains=2,
-                    maxdepth=6,
+                    maxdepth=5,
                     num_data_devices=min(2, get_device_count()),
                     init_kw=dict(
                         save_ratios=False,
@@ -1018,13 +1017,13 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     """Multivariate leaf draws must carry the full leaf-prior covariance.
 
     A strongly informative, correlated leaf prior makes the likelihood
-    negligible, so every heap node is resampled essentially from its prior
-    ``N(0, leaf_prior_cov)`` each sweep. Nodes that are not actual leaves carry
-    zero likelihood precision, hence are drawn exactly from the prior; pooling
-    every heap node of the final state (over chains, trees, and positions) thus
-    estimates ``leaf_prior_cov`` with ~``tree_size`` times more draws than the
-    actual leaves alone, at no extra sampling cost. The trace can not be used
-    because it zeroes the nodes that are not leaves.
+    negligible, so every leaf value is resampled essentially from its prior
+    ``N(0, leaf_prior_cov)`` each sweep. The ones not in use carry zero
+    likelihood precision, hence are drawn exactly from the prior; pooling all
+    those of the final state (over chains, trees, and positions) thus
+    estimates ``leaf_prior_cov`` with many more draws than the actual leaves
+    alone, at no extra sampling cost. The trace can not be used because it
+    zeroes the values not in use.
 
     This catches sampling the leaf noise with a wrong covariance, e.g. as
     ``z / diag(L)`` instead of ``L^-T z`` (a `solve_triangular` missing
@@ -1055,9 +1054,9 @@ def test_multivariate_leaf_prior_covariance(bkw: BartKW) -> None:
     )
     bart = Bart(**kw)
 
-    # pool every heap node (each an independent prior draw) over chains, trees,
-    # and positions; leaf_tree is (..., k, tree_size), stored in prior-sd units,
-    # so convert it to data units first
+    # pool every leaf value (each a prior draw) over chains, trees, and
+    # positions; the leaf tree has the outcome components on its second to last
+    # axis, and is stored in prior-sd units, so convert it to data units first
     forest = bart._mcmc_state.forest
     leaf_tree = forest.leaf_unit[..., None] * forest.leaf_tree
     leaves = jnp.moveaxis(leaf_tree, -2, -1).reshape(-1, k)
@@ -1353,21 +1352,21 @@ def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
 
 
 def test_augment_rejects_deep_trees(bkw: BartKW) -> None:
-    """The variable selection augmentation rejects `maxdepth` > 17 with p > 32."""
+    """The variable selection augmentation rejects `maxdepth` > 16 with p > 32."""
     *_, n = numpy.shape(bkw.kw['y_train'])
     kw = dict(
         bkw.kw,
         x_train=jnp.zeros((33, n)),
         varprob=None,
-        maxdepth=18,
+        maxdepth=17,
         sparse=SparseConfig(),
     )
-    with pytest.raises(ValueError, match=r'maxdepth=18 > 17 with p=33 > 32'):
+    with pytest.raises(ValueError, match=r'maxdepth=17 > 16 with p=33 > 32'):
         Bart(**kw)
 
 
 @pytest.mark.parametrize(
-    ('maxdepth', 'p', 'ok'), [(17, 1000, True), (18, 32, True), (18, 33, False)]
+    ('maxdepth', 'p', 'ok'), [(16, 1000, True), (17, 32, True), (17, 33, False)]
 )
 def test_check_augment_depth(maxdepth: int, p: int, ok: bool) -> None:
     """The augmentation supports deep trees if it tracks at most 32 variables."""
@@ -1815,7 +1814,7 @@ def test_leaf_quantization(bkw: BartKW, keys: split) -> None:
     state = step(keys.pop(), state)
 
     # align the (*chains, [k]) quantum with the (*chains, num_trees, [k,]
-    # tree_size) leaves
+    # max_num_leaves) leaves
     if state.resid_unit.ndim:
         quantum = quantum[..., None, :, None]
     else:
@@ -2208,12 +2207,11 @@ def test_precompute_predict_train(bkw: BartKW, subtests: SubTests) -> None:
 
 
 def test_count_prec_tree_caches_valid(bkw: BartKW, subtests: SubTests) -> None:
-    """The cached `count_tree`/`prec_tree` stay valid at the actual leaves.
+    """The cached `count_tree`/`prec_tree` stay consistent with `leaf_indices`.
 
     `step` updates the cached per-leaf counts and precision sums only at the
-    nodes involved in the moves; after the MCMC run, at every actual leaf,
-    they must match a from-scratch reduction over the datapoints (entries
-    elsewhere may be dirty).
+    leaves involved in the moves; after the MCMC run, they must match a
+    from-scratch reduction over the datapoints.
     """
     bart = Bart(**bkw.kw)
     state = bart._mcmc_state
@@ -2230,41 +2228,33 @@ def test_count_prec_tree_caches_valid(bkw: BartKW, subtests: SubTests) -> None:
 
     # flatten the chain axis (if any) into the tree axis
     _, n = state.X.shape
-    half = forest.split_tree.shape[-1]
-    split_tree = forest.split_tree.reshape(-1, half)
     leaf_indices = forest.leaf_indices.reshape(-1, n)
-    # apply the prunes left pending by the last step, so the indices point to
-    # the actual leaves
-    leaf_indices = apply_moves_to_leaf_indices(
-        leaf_indices, forest.to_prune.reshape(-1), forest.move_node.reshape(-1)
-    )
 
-    # mask of the actual leaves over the full heap, per tree
-    leaf_mask = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
-    # sanity: the trees do grow beyond the root (else the check is vacuous)
-    assert jnp.any(leaf_mask[..., 2:])
+    # sanity: the trees do grow beyond the root (else the check is vacuous),
+    # and some prunes are pending, in which case the caches keep the children
+    assert jnp.any(forest.split_tree)
+    assert jnp.any(forest.to_prune)
 
     def check_cache(
-        cache: Shaped[Array, '#chains_x_trees *k_k 2*half'],
+        cache: Shaped[Array, '#chains_x_trees *k_k half'],
         values: int | Float32[Array, ' n'] | Float32[Array, 'k k n'],
         comparison: Callable[..., None],
     ) -> None:
         # the fresh value is a from-scratch reduction over the datapoints, the
         # same baseline `TestReduction` checks the optimized reductions against
-        *_, tree_size = cache.shape
+        *_, half = cache.shape
         core = jnp.asarray(values).shape[:-1]
-        cache = cache.reshape(-1, *core, tree_size)
+        cache = cache.reshape(-1, *core, half)
         fresh = vmap(
             partial(
                 reduce_reference,
                 values,
-                size=tree_size,
+                size=half,
                 dtype=cache.dtype,
                 data_sharded=False,
             )
         )(leaf_indices)
-        mask = leaf_mask.reshape(-1, *(1,) * len(core), tree_size)
-        comparison(jnp.where(mask, cache, 0), jnp.where(mask, fresh, 0))
+        comparison(cache, fresh)
 
     with subtests.test('values'):
         if forest.count_tree is not None:

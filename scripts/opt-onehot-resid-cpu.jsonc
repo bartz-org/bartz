@@ -20,7 +20,7 @@
     // weights (with k > 1 lifts (k, n) -> (k, k, n)). num_trees is FIXED: the
     // residual reduction runs once per tree on the same shape, so the number of
     // trees does not change the per-call optimum (5 is just enough to time it).
-    // maxdepth is fixed at 6 (our practical value; sets the bin count 2 ** d).
+    // maxdepth is fixed at 5 (our practical value; sets the bin count 2 ** d).
     // The other params (incl. the count/prec reductions, left to their default
     // 'auto' batching) keep their defaults, as a realistic backdrop that does not
     // dominate the step. High-n combos whose one-hot would exceed the size budget
@@ -34,7 +34,7 @@
         "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304],
         "p":                  [1],
         "k":                  [null, 1, 2, 4],
-        "maxdepth":           [6],
+        "maxdepth":           [5],
         "weights":            ["none", "scalar"],
         "num_trees":          [5],
         "resid_reduction":    [{"kind": "onehot", "method": ["matmul", "multiply"], "n_inner": [true, false]}],

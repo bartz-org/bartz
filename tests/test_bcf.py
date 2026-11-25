@@ -50,11 +50,10 @@ from bartz.bcf import BCFPrediction, bcf
 from bartz.bcf._state import BCFState, init_bcf, swap_mu_tau_forests
 from bartz.bcf._step import B_GAP, bcf_step, sample_gapped_normal
 from bartz.bcf._trace import BCFBurninTrace, BCFMainTrace
-from bartz.grove import evaluate_forest, is_actual_leaf
+from bartz.grove import evaluate_forest, is_leaf_used
 from bartz.mcmcloop import run_mcmc
 from bartz.mcmcstep import Forest, Wishart
 from bartz.mcmcstep._axes import chain_vmap_axes
-from bartz.mcmcstep._step import apply_moves_to_leaf_indices
 from bartz.prepcovars import UniqueQuantileBinner
 from bartz.testing import gen_data
 from tests.test_mcmcloop import assert_trace_close, cat_traces, zero_non_leaves
@@ -85,17 +84,14 @@ NSKIP = 2
 
 def prec_tree_from_scratch(
     forest: Forest, prec_scale: Shaped[ArrayLike, ' n']
-) -> Shaped[ArrayLike, 'num_trees 2*half_tree_size']:
-    """Sum `prec_scale` over the datapoints in each leaf of each tree."""
-    leaf_indices = apply_moves_to_leaf_indices(
-        forest.leaf_indices, forest.to_prune, forest.move_node
-    )
-    _, tree_size = forest.leaf_tree.shape
+) -> Shaped[ArrayLike, 'num_trees max_num_leaves']:
+    """Sum `prec_scale` over the datapoints at each leaf index of each tree."""
+    _, max_num_leaves = forest.leaf_tree.shape
 
-    def scatter(idx: Shaped[ArrayLike, ' n']) -> Shaped[ArrayLike, ' 2*half_tree_size']:
-        return jnp.zeros(tree_size).at[idx].add(prec_scale)
+    def scatter(idx: Shaped[ArrayLike, ' n']) -> Shaped[ArrayLike, ' max_num_leaves']:
+        return jnp.zeros(max_num_leaves).at[idx].add(prec_scale)
 
-    return vmap(scatter)(leaf_indices)
+    return vmap(scatter)(forest.leaf_indices)
 
 
 def check_chains_match(
@@ -328,7 +324,7 @@ def run_geweke(
 ) -> BCFState:
     """Alternate `bcf_step` and `resample_data` in many independent chains.
 
-    The model has one predictor with two cutpoints, trees of depth 3, and 4
+    The model has one predictor with two cutpoints, trees of depth 2, and 4
     datapoints per predictor value, half of them treated.
     """
 
@@ -815,7 +811,7 @@ class TestBcf:
         independent chains (Geweke 2004). If `bcf_step` leaves the posterior
         invariant, the parameters stay distributed as their prior, which is
         easy to write down with one predictor with two cutpoints and trees of
-        depth 3. The chains start from fixed values, and need some steps to
+        depth 2. The chains start from fixed values, and need some steps to
         reach the prior.
         """
         final = run_geweke(keys.pop(), outcome_type, adaptive_coding)
@@ -868,9 +864,7 @@ class TestBcf:
             check_ks(f'{name} sum of trees precision', sum_prec, gamma_cdf)
 
             # the leaves are iid N(0, 1 / (num_trees * sum_prec)) given sum_prec
-            is_leaf = vmap(vmap(partial(is_actual_leaf, add_bottom_level=True)))(
-                forest.split_tree
-            )
+            is_leaf = is_leaf_used(forest.split_tree)
             _, num_trees, _ = forest.split_tree.shape
             scale = forest.leaf_unit * jnp.sqrt(num_trees * sum_prec)
             leaves = forest.leaf_tree * scale[:, None, None]
@@ -909,14 +903,8 @@ class TestBcf:
             assert forest.prec_tree is not None
             b_z = state.b[state.trt.astype(int)]
             expected = prec_tree_from_scratch(forest, jnp.square(b_z))
-            is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(
-                forest.split_tree
-            )
             assert_close_matrices(
-                jnp.where(is_leaf, forest.prec_tree, 0.0),
-                jnp.where(is_leaf, expected, 0.0),
-                rtol=1e-5,
-                err_msg=err_msg,
+                forest.prec_tree, expected, rtol=1e-5, err_msg=err_msg
             )
 
         check_tau_prec_tree(state, 'at init: ')
@@ -1467,8 +1455,8 @@ class TestBcf:
             tau_0_prior_var=0.5,
             sample_intercept=sample_intercept,
             standardize=False,
-            maxdepth_mu=5,
-            maxdepth_tau=4,
+            maxdepth_mu=4,
+            maxdepth_tau=3,
             num_trees_mu=NUM_TREES_MU,
             num_trees_tau=NUM_TREES_TAU,
             ndpost=NDPOST,

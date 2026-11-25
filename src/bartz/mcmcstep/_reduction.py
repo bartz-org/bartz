@@ -77,17 +77,13 @@ class ReductionConfig(Module):
         /,
         *,
         size: int,
-        subset_start: Integer[Array, ''] | None = None,
-        subset_length: int | None = None,
+        subset: Integer[Array, ' subset_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-        # the output's trailing axis is the number of reduced bins: the range
-        # length, or `size` without a subset. jaxtyping evals the `{...}` dim
-        # against the arguments but forbids spaces and str-formats arrays, so
-        # this indexes a tuple by a bool instead of `... if ... else ...`. The
-        # bool reads a zero-length range as no subset, mislabeling the dim, but
-        # the only caller passes the nonempty two-element child pair.
-    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+        # the output's trailing axis is the number of reduced bins: the length
+        # of the subset, or `size` without one. jaxtyping evals the `{...}` dim
+        # against the arguments but forbids spaces, hence the `getattr`.
+    ) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
         """Indexed reduce along the last axis of `values`.
 
         Parameters
@@ -100,14 +96,10 @@ class ReductionConfig(Module):
         size
             The static excluded upper bound on the values of `indices`, and
             the number of output bins when no subset is given.
-        subset_start
-            If given (with `subset_length`), reduce only into the contiguous
-            bin range ``[subset_start, subset_start + subset_length)``,
-            ignoring datapoints whose index falls elsewhere. The range may run
-            past `size`; those out-of-domain bins reduce to zero.
-        subset_length
-            The static length of the bin range, or `None` to reduce into all
-            `size` bins.
+        subset
+            If given, reduce only into these bins, in this order, ignoring
+            datapoints whose index is not amongst them. The bins shall be
+            distinct, but for those past `size`, which reduce to zero.
         dtype
             The dtype of the output and of the accumulation; the values are
             kept in their own, possibly narrower, dtype until accumulated.
@@ -123,13 +115,10 @@ class ReductionConfig(Module):
         ...
 
 
-def _resolve_range(
-    indices: UInt[Array, ' n'],
-    size: int,
-    subset_start: Integer[Array, ''] | None,
-    subset_length: int | None,
+def resolve_subset(
+    indices: UInt[Array, ' n'], size: int, subset: Integer[Array, ' subset_size'] | None
 ) -> tuple[int, UInt[Array, ' n']]:
-    """Reduce the contiguous-range subset to the full case for scatter algorithms.
+    """Reduce the bin-subset case to the full one for scatter algorithms.
 
     Parameters
     ----------
@@ -137,34 +126,28 @@ def _resolve_range(
         The bin index each datapoint falls into, in ``[0, size)``.
     size
         The number of bins.
-    subset_start
-        The first bin of the range to reduce into, or `None` for all bins.
-    subset_length
-        The static number of bins in the range, or `None` for all bins.
+    subset
+        The bins to reduce into, or `None` for all bins.
 
     Returns
     -------
     out_size : int
-        The number of output bins: `subset_length`, or `size` without a subset.
+        The number of output bins: the length of `subset`, or `size` without it.
     indices : UInt[Array, ' n']
         The scatter indices into the output bins: unchanged without a subset,
-        else each datapoint's offset from `subset_start`, in the indices' own
-        unsigned dtype, so that indices outside ``[subset_start, subset_start +
-        subset_length)`` land out of bounds, where the scatter drops them.
+        else the position in `subset` of the bin of each datapoint, out of
+        bounds if absent, where the scatter drops it.
     """
-    if subset_length is None:
+    if subset is None:
         return size, indices
     else:
-        # the subtraction is unsigned: indices below `subset_start` underflow to
-        # a large value rather than going negative (which the scatter would read
-        # as wrap-around indexing), and together with indices ``>= subset_start +
-        # subset_length`` they fall outside the output, where scatters drop them.
-        # Exact while the range fits the index dtype (``subset_start +
-        # subset_length <= 2 ** bits``), as it does for the per-move child pair.
-        assert subset_start is not None  # set together with subset_length
-        assert jnp.issubdtype(indices.dtype, jnp.unsignedinteger)
-        offset = indices - subset_start.astype(indices.dtype)
-        return subset_length, offset
+        (subset_size,) = subset.shape
+        positions = jnp.full_like(indices, subset_size)
+        for i in reversed(range(subset_size)):
+            # the comparison is in the wider dtype of the two, so bins past
+            # `size` do not wrap and alias a real bin
+            positions = jnp.where(indices == subset[i], i, positions)
+        return subset_size, positions
 
 
 @serializable
@@ -198,14 +181,13 @@ class BatchedReduction(ReductionConfig):
         /,
         *,
         size: int,
-        subset_start: Integer[Array, ''] | None = None,
-        subset_length: int | None = None,
+        subset: Integer[Array, ' subset_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+    ) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
         values = jnp.asarray(values)
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
-        size, indices = _resolve_range(indices, size, subset_start, subset_length)
+        size, indices = resolve_subset(indices, size, subset)
         batch_shape = values.shape[:-1]
 
         # Cast `values` explicitly. The scatter buffer is in `dtype`, which
@@ -282,21 +264,14 @@ class AutoBatchedReduction(ReductionConfig):
         /,
         *,
         size: int,
-        subset_start: Integer[Array, ''] | None = None,
-        subset_length: int | None = None,
+        subset: Integer[Array, ' subset_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+    ) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
         # defer the cpu/gpu choice to XLA: both branches are traced, but only the
         # one for the run platform is lowered. With no `default`, an untested
         # platform (rocm, tpu) errors at lowering instead of silently falling back.
-        kwargs = dict(
-            size=size,
-            subset_start=subset_start,
-            subset_length=subset_length,
-            dtype=dtype,
-            data_sharded=data_sharded,
-        )
+        kwargs = dict(size=size, subset=subset, dtype=dtype, data_sharded=data_sharded)
         return lax.platform_dependent(
             cpu=partial(self._reduce_cpu, values, indices, **kwargs),
             cuda=partial(self._reduce_gpu, values, indices, **kwargs),
@@ -309,11 +284,10 @@ class AutoBatchedReduction(ReductionConfig):
         /,
         *,
         size: int,
-        subset_start: Integer[Array, ''] | None = None,
-        subset_length: int | None = None,
+        subset: Integer[Array, ' subset_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+    ) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
         # flat target: the cpu has no SM-count analog to scale the batch count with
         (n,) = indices.shape
         num_batches = _final_round(n, _AUTO_CPU_TARGET, _AUTO_CPU_MIN_BATCH)
@@ -321,8 +295,7 @@ class AutoBatchedReduction(ReductionConfig):
             values,
             indices,
             size=size,
-            subset_start=subset_start,
-            subset_length=subset_length,
+            subset=subset,
             dtype=dtype,
             data_sharded=data_sharded,
         )
@@ -334,11 +307,10 @@ class AutoBatchedReduction(ReductionConfig):
         /,
         *,
         size: int,
-        subset_start: Integer[Array, ''] | None = None,
-        subset_length: int | None = None,
+        subset: Integer[Array, ' subset_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+    ) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
         # `n` is the local shard size when data-sharded, which is exactly what the
         # heuristic wants. `m` is the multivariate batch size: the product of the
         # values' leading (non-datapoint) axes (1 for the scalar count case), i.e.
@@ -355,8 +327,7 @@ class AutoBatchedReduction(ReductionConfig):
             values,
             indices,
             size=size,
-            subset_start=subset_start,
-            subset_length=subset_length,
+            subset=subset,
             dtype=dtype,
             data_sharded=data_sharded,
         )
@@ -453,11 +424,10 @@ class OneHotReduction(ReductionConfig):
         /,
         *,
         size: int,
-        subset_start: Integer[Array, ''] | None = None,
-        subset_length: int | None = None,
+        subset: Integer[Array, ' subset_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+    ) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
         values = jnp.asarray(values)
         assert values.ndim == 0 or values.shape[-1:] == indices.shape
 
@@ -466,12 +436,8 @@ class OneHotReduction(ReductionConfig):
         scalar = values.ndim == 0
         (n,) = indices.shape
         batch_shape = values.shape[:-1]
-        size, bins, indices = _resolve_range_bins(
-            indices,
-            size,
-            subset_start,
-            subset_length,
-            remap=self.method == 'scatter_set',
+        size, bins, indices = resolve_subset_bins(
+            indices, size, subset, remap=self.method == 'scatter_set'
         )
         # unsigned avoids a negative-index normalization select in the scatter
         iota = jnp.arange(n, dtype=jnp.uint32)
@@ -570,31 +536,28 @@ def chunked_onehot_sum(
         return out
 
 
-def _resolve_range_bins(
+def resolve_subset_bins(
     indices: UInt[Array, ' n'],
     size: int,
-    subset_start: Integer[Array, ''] | None,
-    subset_length: int | None,
+    subset: Integer[Array, ' subset_size'] | None,
     *,
     remap: bool,
 ) -> tuple[int, UInt[Array, ' out_size'], UInt[Array, ' n']]:
-    """Resolve the range subset into output size, comparison bins, and scatter indices.
+    """Resolve the bin subset into output size, comparison bins, and scatter indices.
 
-    The comparison methods of `OneHotReduction` reduce against the range's bins
-    directly, while its scatter method (`remap`) indexes bins by position, so
-    the indices are offset like in `_resolve_range`.
+    The comparison methods of `OneHotReduction` reduce against the bins of the
+    subset directly, while its scatter method (`remap`) indexes bins by
+    position, so the indices are converted like in `resolve_subset`.
     """
-    if subset_length is None:
+    if subset is None:
         return size, jnp.arange(size, dtype=indices.dtype), indices
-    assert subset_start is not None  # set together with subset_length
-    # uint32, not the possibly narrow `indices.dtype`, so bins past `size` do
-    # not wrap and alias a real bin in the comparison
-    bins = subset_start.astype(jnp.uint32) + jnp.arange(subset_length, dtype=jnp.uint32)
-    if remap:
-        out_size, indices = _resolve_range(indices, size, subset_start, subset_length)
-        return out_size, bins, indices
     else:
-        return subset_length, bins, indices
+        # uint32, not the possibly narrow `indices.dtype`, so bins past `size`
+        # do not wrap and alias a real bin in the comparison
+        bins = subset.astype(jnp.uint32)
+        if remap:
+            _, indices = resolve_subset(indices, size, subset)
+        return bins.size, bins, indices
 
 
 @serializable
@@ -625,12 +588,11 @@ class AutoOneHotReduction(ReductionConfig):
         /,
         *,
         size: int,
-        subset_start: Integer[Array, ''] | None = None,
-        subset_length: int | None = None,
+        subset: Integer[Array, ' subset_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
-        out_size = size if subset_length is None else subset_length
+    ) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
+        out_size = size if subset is None else subset.size
         m = max(1, math.prod(jnp.shape(values)[:-1]))
         gpu_method = (
             'matmul' if m >= 2 and out_size >= self.min_matmul_bins else 'multiply'
@@ -646,11 +608,7 @@ class AutoOneHotReduction(ReductionConfig):
 
         args = (values, indices)
         kwargs: dict = dict(
-            size=size,
-            subset_start=subset_start,
-            subset_length=subset_length,
-            dtype=dtype,
-            data_sharded=data_sharded,
+            size=size, subset=subset, dtype=dtype, data_sharded=data_sharded
         )
         # 'chunked' has its own layout, the datapoints on the inner axis
         cpu = OneHotReduction(
@@ -682,7 +640,7 @@ class PopcountReduction(ReductionConfig):
     Reinterprets the unsigned indices as 32-bit words holding one or more
     indices each, flags the lanes equal to a bin with bit arithmetic, and
     counts the flags with a popcount. Supports only counting (unit values)
-    into a bin range, so it can be used only as ``count_reduction_config``.
+    into a subset of bins, so it can be used only as ``count_reduction_config``.
     """
 
     def _reduce(
@@ -692,19 +650,15 @@ class PopcountReduction(ReductionConfig):
         /,
         *,
         size: int,
-        subset_start: Integer[Array, ''] | None = None,
-        subset_length: int | None = None,
+        subset: Integer[Array, ' subset_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
-        del size  # the bin range alone sets the output
+    ) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
+        del size  # the subset alone sets the output
         assert isinstance(values, int)
         assert values == 1
-        assert subset_start is not None
-        assert subset_length is not None
-        bins = subset_start.astype(jnp.uint32) + jnp.arange(
-            subset_length, dtype=jnp.uint32
-        )
+        assert subset is not None
+        bins = subset.astype(jnp.uint32)
         out = vmap(partial(popcount_equal, indices))(bins).astype(dtype)
         if data_sharded:
             out = lax.psum(out, 'data')
@@ -717,7 +671,7 @@ class AutoOneHotOrPopcountReduction(ReductionConfig):
 
     On gpu the one-hot count fuses with the computation of the indices, which
     the popcount does not. Like `PopcountReduction`, it supports only counting
-    into a bin range, so it can be used only as ``count_reduction_config``.
+    into a subset of bins, so it can be used only as ``count_reduction_config``.
     """
 
     def _reduce(
@@ -727,19 +681,14 @@ class AutoOneHotOrPopcountReduction(ReductionConfig):
         /,
         *,
         size: int,
-        subset_start: Integer[Array, ''] | None = None,
-        subset_length: int | None = None,
+        subset: Integer[Array, ' subset_size'] | None = None,
         dtype: DTypeLike,
         data_sharded: bool,
-    ) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+    ) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
         # the arguments are bound rather than passed through, so `values` stays
         # a python int for the popcount checks
         kwargs: dict = dict(
-            size=size,
-            subset_start=subset_start,
-            subset_length=subset_length,
-            dtype=dtype,
-            data_sharded=data_sharded,
+            size=size, subset=subset, dtype=dtype, data_sharded=data_sharded
         )
         return lax.platform_dependent(
             cpu=partial(PopcountReduction()._reduce, values, indices, **kwargs),  # noqa: SLF001

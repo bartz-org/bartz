@@ -83,8 +83,8 @@ def init_bcf(
     max_split_tau: UInt[ArrayLike, ' p'],
     num_trees_mu: int,
     num_trees_tau: int,
-    p_nonterminal_mu: Float32[ArrayLike, ' d_mu_minus_1'],
-    p_nonterminal_tau: Float32[ArrayLike, ' d_tau_minus_1'],
+    p_nonterminal_mu: Float32[ArrayLike, ' d_mu'],
+    p_nonterminal_tau: Float32[ArrayLike, ' d_tau'],
     sum_trees_prior_cov_inv_mu: Wishart,
     sum_trees_prior_cov_inv_tau: Wishart,
     min_points_per_leaf_mu: int,
@@ -227,9 +227,9 @@ def init_bcf(
     # rather than from the missingness mask used by the tau init
     forest_tau = state_tau.forest
     assert forest_tau.prec_tree is not None
-    *_, tree_size = forest_tau.prec_tree.shape
+    *_, max_num_leaves = forest_tau.prec_tree.shape
     b_z = coding_basis(b_init, trt_array)
-    prec_tree = initial_prec_tree((num_trees_tau, tree_size), jnp.square(b_z))
+    prec_tree = initial_prec_tree((num_trees_tau, max_num_leaves), jnp.square(b_z))
     forest_tau = replace(
         forest_tau,
         prec_tree=jnp.broadcast_to(prec_tree, (*chain_shape, *prec_tree.shape)),

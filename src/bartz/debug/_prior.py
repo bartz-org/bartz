@@ -54,26 +54,26 @@ class SamplePriorStack(Module):
     binary tree of maximum depth `d`.
     """
 
-    nonterminal: Bool[Array, ' d_minus_1']
+    nonterminal: Bool[Array, ' d']
     """Whether the node is valid or the recursion is into unused node slots."""
 
-    lower: UInt[Array, 'd_minus_1 p']
+    lower: UInt[Array, 'd p']
     """The available cutpoints along ``var`` are in the integer range
     ``[1 + lower[var], 1 + upper[var])``."""
 
-    upper: UInt[Array, 'd_minus_1 p']
+    upper: UInt[Array, 'd p']
     """The available cutpoints along ``var`` are in the integer range
     ``[1 + lower[var], 1 + upper[var])``."""
 
-    var: UInt[Array, ' d_minus_1']
+    var: UInt[Array, ' d']
     """The variable of a decision node."""
 
-    split: UInt[Array, ' d_minus_1']
+    split: UInt[Array, ' d']
     """The cutpoint of a decision node."""
 
     @classmethod
     def initial(
-        cls, p_nonterminal: Float32[Array, ' d_minus_1'], max_split: UInt[Array, ' p']
+        cls, p_nonterminal: Float32[Array, ' d'], max_split: UInt[Array, ' p']
     ) -> 'SamplePriorStack':
         """Initialize the stack.
 
@@ -102,23 +102,23 @@ class SamplePriorStack(Module):
 class TreeStructure(Module):
     """The decision rules of a tree, or of a batch of trees."""
 
-    var_tree: UInt[Array, '*batch_shape half_tree_size']
+    var_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The variables of the decision rules."""
 
-    split_tree: UInt[Array, '*batch_shape half_tree_size']
+    split_tree: UInt[Array, '*batch_shape max_num_leaves']
     """The cutpoints of the decision rules, 0 at the leaves."""
 
     @classmethod
     def stump(
-        cls, p_nonterminal: Float32[Array, ' d_minus_1'], max_split: UInt[Array, ' p']
+        cls, p_nonterminal: Float32[Array, ' d'], max_split: UInt[Array, ' p']
     ) -> 'TreeStructure':
         """Create a tree with only the root."""
-        half_tree_size = 2**p_nonterminal.size
+        max_num_leaves = 2**p_nonterminal.size
         return cls(
             var_tree=jnp.zeros(
-                half_tree_size, minimal_unsigned_dtype(max_split.size - 1)
+                max_num_leaves, minimal_unsigned_dtype(max_split.size - 1)
             ),
-            split_tree=jnp.zeros(half_tree_size, max_split.dtype),
+            split_tree=jnp.zeros(max_num_leaves, max_split.dtype),
         )
 
 
@@ -138,7 +138,7 @@ class SamplePriorCarry(Module):
     def initial(
         cls,
         key: Key[Array, ''],
-        p_nonterminal: Float32[Array, ' d_minus_1'],
+        p_nonterminal: Float32[Array, ' d'],
         max_split: UInt[Array, ' p'],
     ) -> 'SamplePriorCarry':
         """Initialize the carry object.
@@ -171,18 +171,18 @@ class SamplePriorX(Module):
     the recursion schedule.
     """
 
-    node: Int32[Array, ' half_tree_size_minus_1']
+    node: Int32[Array, ' max_num_leaves_minus_1']
     """The heap index of the node to visit."""
 
-    depth: Int32[Array, ' half_tree_size_minus_1']
+    depth: Int32[Array, ' max_num_leaves_minus_1']
     """The depth of the node."""
 
-    next_depth: Int32[Array, ' half_tree_size_minus_1']
+    next_depth: Int32[Array, ' max_num_leaves_minus_1']
     """The depth of the next node to visit, either the left child or the right
     sibling of the node or of an ancestor."""
 
     @classmethod
-    def initial(cls, p_nonterminal: Float32[Array, ' d_minus_1']) -> 'SamplePriorX':
+    def initial(cls, p_nonterminal: Float32[Array, ' d']) -> 'SamplePriorX':
         """Initialize the sequence of nodes to visit.
 
         Parameters
@@ -222,7 +222,7 @@ class SamplePriorX(Module):
 def sample_tree_structure(
     key: Key[Array, ''],
     max_split: UInt[Array, ' p'],
-    p_nonterminal: Float32[Array, ' d_minus_1'],
+    p_nonterminal: Float32[Array, ' d'],
     log_s: Float32[Array, ' p'] | None = None,
 ) -> TreeStructure:
     """Sample the decision rules of a tree from the BART prior.
@@ -430,15 +430,17 @@ class MinPointsCriterion(RejectionCriterion):
 
     def accept(self, sample: TreeStructure) -> Bool[Array, '']:
         """Check the tree has enough datapoints in its nodes."""
-        (half_tree_size,) = sample.split_tree.shape
-        leaf_indices = traverse_forest(self.X, sample.var_tree, sample.split_tree)
-        count = jnp.zeros(2 * half_tree_size, jnp.int32).at[leaf_indices].add(1)
+        (max_num_leaves,) = sample.split_tree.shape
+        nodes = traverse_forest(
+            self.X, sample.var_tree, sample.split_tree, index_type='heap'
+        )
+        count = jnp.zeros(2 * max_num_leaves, jnp.int32).at[nodes].add(1)
 
         ok = jnp.bool_(True)
         if self.min_points_per_decision_node is not None:
             # any decision node has at least as many datapoints as the
             # decision nodes below it, so check only the parents of two leaves
-            parent_count = count.reshape(half_tree_size, 2).sum(axis=1)
+            parent_count = count.reshape(max_num_leaves, 2).sum(axis=1)
             enough = parent_count >= self.min_points_per_decision_node
             ok &= jnp.all(enough | ~is_leaves_parent(sample.split_tree))
         if self.min_points_per_leaf is not None:
@@ -454,7 +456,7 @@ def sample_forest_structure(
     shape: tuple[int, ...],
     *,
     max_split: UInt[Array, ' p'],
-    p_nonterminal: Float32[Array, ' d_minus_1'],
+    p_nonterminal: Float32[Array, ' d'],
     log_s: Float32[Array, ' p'] | Float32[Array, '*batch p'] | None = None,
     criterion: RejectionCriterion | None = None,
 ) -> TreeStructure:
@@ -496,7 +498,7 @@ def sample_forest_structure(
 
         def onetree(
             key: Key[Array, ''], log_s: Float32[Array, ' p'] | None
-        ) -> tuple[UInt[Array, ' half_tree_size'], UInt[Array, ' half_tree_size']]:
+        ) -> tuple[UInt[Array, ' max_num_leaves'], UInt[Array, ' max_num_leaves']]:
             tree = sample_one(key, log_s=log_s)
             return tree.var_tree, tree.split_tree
 
@@ -538,8 +540,8 @@ def sample_leaves(
     key
         A jax random key.
     shape
-        The shape of the leaves, ``(*batch, tree_size)``, or ``(*batch, k,
-        tree_size)`` for vector-valued leaves.
+        The shape of the leaves, ``(*batch, max_num_leaves)``, or ``(*batch,
+        k, max_num_leaves)`` for vector-valued leaves.
     prec_chol
         The lower Cholesky factor of the prior precision of a leaf, a scalar
         square root for scalar leaves.

@@ -11,7 +11,7 @@
     //
     // The reduced value is a scalar count, independent of k (pinned null). It is
     // vmapped over a batch of trees, so num_trees is scanned with n. weights fixed
-    // false; maxdepth fixed at 6 (subset_length=2 sets the real bin count). The
+    // false; maxdepth fixed at 5 (subset_length=2 sets the real bin count). The
     // other two sites keep their auto defaults as a backdrop. n's top value is
     // lowered 4x vs the gpu config because cpu is slower.
     "plot": {
@@ -22,7 +22,7 @@
         "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304],
         "p":                  [1],
         "k":                  [null],
-        "maxdepth":           [6],
+        "maxdepth":           [5],
         "weights":            ["none"],
         "num_trees":          [1, 16, 256],
         "count_reduction":    ["autobatched", "autoonehot"],

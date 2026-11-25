@@ -197,15 +197,12 @@ class BARTModel:
     R"""
     BART model with a `stochtree`-compatible interface, powered by bartz.
 
-    This class mimics `stochtree.BARTModel` so that bartz can be used as a
-    drop-in reference implementation for testing. The intersection of features
-    is targeted: continuous regression (Gaussian outcome, identity link) and
-    binary classification (probit link) on tabular covariates.
-
-    Use the same idiomatic pattern as `stochtree.BARTModel`::
+    This class mimics `stochtree.BARTModel`. The main difference is that
+    `bartz` does not implement "grow-from-root" (XBART), so the `stochtree`
+    defaults of 0 burnin and 100 saved MCMC iterations are best changed::
 
         m = BARTModel()
-        m.sample(X_train=X, y_train=y, X_test=X_test, num_gfr=0, num_mcmc=200)
+        m.sample(X_train=X, y_train=y, X_test=X_test, num_gfr=0, num_burnin=1000, num_mcmc=1000)
         yhat = m.predict(X_new, terms='y_hat', type='mean')
 
     See `GeneralParams` and `MeanForestParams` for the supported keys in the
@@ -213,7 +210,7 @@ class BARTModel:
 
     Notes
     -----
-    Differences from `stochtree`, by design:
+    Differences from `stochtree`:
 
     - ``num_gfr`` has no default and must be set explicitly to ``0``.
     - ``mean_forest_params['max_depth']`` must be a non-negative integer at
@@ -371,9 +368,6 @@ class BARTModel:
     ) -> None:
         """Fit the model.
 
-        The signature mirrors `stochtree.BARTModel.sample`, restricted to the
-        keyword arguments bartz supports.
-
         Parameters
         ----------
         X_train
@@ -390,11 +384,12 @@ class BARTModel:
             variance (``y_i | - ~ N(mu(X_i), sigma^2 / w_i)``). Not supported
             with a probit outcome model.
         num_gfr
-            Number of grow-from-root iterations. Must be ``0``.
+            Number of grow-from-root iterations. Must be set explicitly to ``0``.
         num_burnin
-            Number of MCMC burn-in iterations.
+            Number of MCMC burn-in iterations. Recommended to set it to 1000.
         num_mcmc
-            Number of retained MCMC iterations per chain.
+            Number of retained MCMC iterations per chain. Recommended to set it
+            to 1000.
         general_params
             Optional override for the keys of `GeneralParams`.
         mean_forest_params
@@ -410,6 +405,12 @@ class BARTModel:
             If ``num_gfr`` is non-zero.
         ValueError
             If `observation_weights` are set with a probit outcome model.
+
+        Notes
+        -----
+        The signature mirrors `stochtree.BARTModel.sample`, restricted to the
+        keyword arguments bartz supports. This method invokes `bartz.Bart`
+        under the hood.
         """
         if num_gfr != 0:
             msg = (

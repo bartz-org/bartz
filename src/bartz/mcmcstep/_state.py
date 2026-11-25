@@ -881,8 +881,8 @@ def parse_outcome_type(
 
 
 def parse_p_nonterminal(
-    p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
-) -> Float32[Array, ' d_minus_1+1']:
+    p_nonterminal: Float32[ArrayLike, ' d'],
+) -> Float32[Array, ' d+1']:
     """Check it's in (0, 1) and pad with a 0 at the end."""
     p_nonterminal = jnp.asarray(p_nonterminal)
     ok = (p_nonterminal > 0) & (p_nonterminal < 1)
@@ -940,7 +940,7 @@ def check_equal_blocks(num_trees: int) -> None:
 @forbid_x64
 def make_p_nonterminal(
     d: int, alpha: FloatLike = 0.95, beta: FloatLike = 2.0
-) -> Float32[Array, ' {d}-1']:
+) -> Float32[Array, ' {d}']:
     """Prepare the `p_nonterminal` argument to `init`.
 
     It is calculated according to the formula:
@@ -950,7 +950,7 @@ def make_p_nonterminal(
     Parameters
     ----------
     d
-        The maximum depth of the trees (d=1 means tree with only root node)
+        The maximum depth of the trees (d=0 means tree with only root node)
     alpha
         The a priori probability of the root node having children, conditional
         on it being possible
@@ -962,8 +962,8 @@ def make_p_nonterminal(
     -------
     An array of probabilities, one per tree level but the last.
     """
-    assert d >= 1
-    depth = jnp.arange(d - 1)
+    assert d >= 0
+    depth = jnp.arange(d)
     return alpha / (1 + depth).astype(float) ** beta
 
 
@@ -979,7 +979,7 @@ def init(
     num_trees: int,
     used_trees: int | Integer[ArrayLike, ''] | None = None,
     check_num_trees: bool = True,
-    p_nonterminal: Float32[ArrayLike, ' d_minus_1'],
+    p_nonterminal: Float32[ArrayLike, ' d'],
     sum_trees_prior_cov_inv: Wishart,
     leaf_dtype: DTypeLike = jnp.float32,
     prec_scale_dtype: DTypeLike = jnp.float32,
@@ -1043,8 +1043,8 @@ def init(
         is not a multiple of 8, such that the trees divide into equal blocks.
     p_nonterminal
         The probability of a nonterminal node at each depth. The maximum depth
-        of trees is fixed by the length of this array. Use `make_p_nonterminal`
-        to set it with the conventional formula.
+        of the trees is the length of this array. Use `make_p_nonterminal` to
+        set it with the conventional formula.
     sum_trees_prior_cov_inv
         The Wishart prior on the precision of the sum of trees (a scalar
         inverse variance for univariate) and its initial value; the precision
@@ -1217,7 +1217,7 @@ def init(
     )
 
     # extract array sizes from arguments
-    (max_depth,) = p_nonterminal.shape
+    (num_levels,) = p_nonterminal.shape
     p, n = X.shape
 
     if check_num_trees and used_trees is not None:
@@ -1251,7 +1251,7 @@ def init(
     # check there aren't too many deactivated predictors
     offset = check_splitless_vars(filter_splitless_vars, max_split, offset)
 
-    heap_size = 2**max_depth
+    heap_size = 2**num_levels
     max_num_leaves = heap_size // 2
 
     # Assemble the state, shard it, then fill in the post-shard fields. This

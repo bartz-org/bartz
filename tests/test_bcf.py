@@ -324,7 +324,7 @@ def run_geweke(
 ) -> BCFState:
     """Alternate `bcf_step` and `resample_data` in many independent chains.
 
-    The model has one predictor with two cutpoints, trees of depth 3, and 4
+    The model has one predictor with two cutpoints, trees of depth 2, and 4
     datapoints per predictor value, half of them treated.
     """
 
@@ -811,7 +811,7 @@ class TestBcf:
         independent chains (Geweke 2004). If `bcf_step` leaves the posterior
         invariant, the parameters stay distributed as their prior, which is
         easy to write down with one predictor with two cutpoints and trees of
-        depth 3. The chains start from fixed values, and need some steps to
+        depth 2. The chains start from fixed values, and need some steps to
         reach the prior.
         """
         final = run_geweke(keys.pop(), outcome_type, adaptive_coding)
@@ -1455,8 +1455,8 @@ class TestBcf:
             tau_0_prior_var=0.5,
             sample_intercept=sample_intercept,
             standardize=False,
-            maxdepth_mu=5,
-            maxdepth_tau=4,
+            maxdepth_mu=4,
+            maxdepth_tau=3,
             num_trees_mu=NUM_TREES_MU,
             num_trees_tau=NUM_TREES_TAU,
             ndpost=NDPOST,

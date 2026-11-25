@@ -372,8 +372,8 @@ class Bart(Module):
     seed
         The seed for the random number generator.
     maxdepth
-        The maximum depth of the trees. This is 1-based, so with the default
-        ``maxdepth=6``, the depths of the levels range from 0 to 5.
+        The maximum depth of the trees, with the root at depth 0: a tree has at
+        most ``2 ** maxdepth`` leaves.
     precompute_predict_train
         If `True`, compute the predictions at the training points during the
         MCMC. Off by default; makes ``predict('train', ...)`` faster at the cost
@@ -465,7 +465,7 @@ class Bart(Module):
         num_data_devices: int | None = None,
         devices: Literal['cpu', 'gpu'] | Device | Sequence[Device] | None = None,
         seed: int | Key[Array, ''] = 0,
-        maxdepth: int = 6,
+        maxdepth: int = 5,
         precompute_predict_train: bool = False,
         init_kw: Mapping = MappingProxyType({}),
         run_mcmc_kw: Mapping = MappingProxyType({}),
@@ -1313,11 +1313,10 @@ def check_length(
 
 
 def check_augment_depth(sparse: SparseConfig, maxdepth: int, p: int) -> None:
-    # the augmentation tracks min(2 (maxdepth - 1), p) variables as bits of a
-    # uint32
-    if sparse.enabled and sparse.augment and min(2 * (maxdepth - 1), p) > 32:
+    # the augmentation tracks min(2 maxdepth, p) variables as bits of a uint32
+    if sparse.enabled and sparse.augment and min(2 * maxdepth, p) > 32:
         msg = (
-            f'maxdepth={maxdepth} > 17 with p={p} > 32 predictors is not '
+            f'maxdepth={maxdepth} > 16 with p={p} > 32 predictors is not '
             'supported with `SparseConfig(augment=True)`, set `augment=False`'
         )
         raise ValueError(msg)
@@ -1335,12 +1334,11 @@ def warn_byte_boundaries(
             'memory usage and running time. Consider using at most 255 cutpoints.'
         )
         warn(msg)
-    if maxdepth > 9:
+    if maxdepth > 8:
         msg = (
-            f'maxdepth={maxdepth} > 9 makes the leaf indices 16-bit instead of '
+            f'maxdepth={maxdepth} > 8 makes the leaf indices 16-bit instead of '
             '8-bit, increasing memory usage and running time. Consider using '
-            'maxdepth <= 9. Through bartz.stochtree.BARTModel, the equivalent '
-            'is mean_forest_params=dict(max_depth=8) in sample().'
+            'maxdepth <= 8.'
         )
         warn(msg)
 

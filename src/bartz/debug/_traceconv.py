@@ -217,7 +217,7 @@ def trees_BART_to_bartz(
     # skip first line
     _, i_char = _get_next_line(trees, 0)
 
-    heap_size = max(meta.heap_size, 2**min_maxdepth)
+    heap_size = max(meta.heap_size, 2 ** (min_maxdepth + 1))
     leaf_trees = numpy.zeros((meta.ndpost, meta.ntree, heap_size), dtype=numpy.float32)
     var_trees = numpy.zeros(
         (meta.ndpost, meta.ntree, heap_size // 2),

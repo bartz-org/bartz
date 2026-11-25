@@ -2384,7 +2384,7 @@ def test_affluence_tree_stays_clean(
         offset=0.0,
         max_split=data.max_split,
         num_trees=NUM_TREES,
-        p_nonterminal=make_p_nonterminal(6),
+        p_nonterminal=make_p_nonterminal(5),
         sum_trees_prior_cov_inv=Wishart(None, None, 1.0 / NUM_TREES),
         error_cov_inv=Wishart(nu=2.0, rate=2.0, value=1.0),
         min_points_per_decision_node=min_points_per_decision_node,
@@ -2441,7 +2441,7 @@ def case_init_kw(key: Key[Array, ''], case: str) -> dict:
         offset=jnp.zeros(() if k is None else (k,)),
         max_split=data.max_split,
         num_trees=NUM_TREES,
-        p_nonterminal=make_p_nonterminal(6),
+        p_nonterminal=make_p_nonterminal(5),
         sum_trees_prior_cov_inv=Wishart(None, None, eye),
         error_cov_inv=None if case == 'binary' else Wishart(4.0, 4.0 * eye, eye),
     )
@@ -3110,7 +3110,7 @@ def one_bin_init_kw(key: Key[Array, ''], n: int) -> dict:
         offset=0.0,
         max_split=data.max_split,
         num_trees=NUM_TREES,
-        p_nonterminal=make_p_nonterminal(6),
+        p_nonterminal=make_p_nonterminal(5),
         sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
         error_cov_inv=Wishart(4.0, 4.0, 1.0),
         # the counts enable `one_bin_prec_reduction`
@@ -3192,7 +3192,7 @@ GEWEKE_NUM_STEPS = 30
 GEWEKE_NUM_TREES = 20
 GEWEKE_N = 20
 GEWEKE_NUM_TEST = 3
-GEWEKE_MAXDEPTH = 6
+GEWEKE_MAXDEPTH = 5
 GEWEKE_FLAT_P_NONTERMINAL = 0.6
 GEWEKE_NU = 10.0
 GEWEKE_ERROR_PREC = 4.0
@@ -3269,7 +3269,7 @@ def geweke_state(key: Key[Array, ''], case: GewekeCase) -> ChainDataState:
         error_kw = dict(error_cov_inv=Wishart(GEWEKE_NU, error_rate, eye))
 
     if case.flat:
-        p_nonterminal = jnp.full(GEWEKE_MAXDEPTH - 1, GEWEKE_FLAT_P_NONTERMINAL)
+        p_nonterminal = jnp.full(GEWEKE_MAXDEPTH, GEWEKE_FLAT_P_NONTERMINAL)
     else:
         p_nonterminal = make_p_nonterminal(GEWEKE_MAXDEPTH)
 
@@ -3402,7 +3402,7 @@ def effective_predictors(
 
 @partial(jnp.vectorize, signature='(n,m)->()')
 def avg_imbalance_index(
-    split_tree: UInt[Array, '*batch_shape ntree 2**(d-1)'],
+    split_tree: UInt[Array, '*batch_shape ntree 2**d'],
 ) -> Float32[Array, '*batch_shape']:
     """Measure average tree imbalance in the forest."""
     is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
@@ -3414,7 +3414,7 @@ def avg_imbalance_index(
 
 @partial(jnp.vectorize, signature='(n,m)->()')
 def avg_max_tree_depth(
-    split_tree: UInt[Array, '*batch_shape ntree 2**(d-1)'],
+    split_tree: UInt[Array, '*batch_shape ntree 2**d'],
 ) -> Float32[Array, '*batch_shape']:
     """Measure average maximum tree depth in the forest."""
     depth = vmap(tree_actual_depth)(split_tree)
@@ -4804,7 +4804,7 @@ class TestStepTheta:
             offset=0.0,
             max_split=jnp.copy(max_split),
             num_trees=2,
-            p_nonterminal=make_p_nonterminal(3),
+            p_nonterminal=make_p_nonterminal(2),
             sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(4.0, 4.0, 1.0),
             a=a,
@@ -4974,7 +4974,7 @@ def test_step_s_splitless(keys: split) -> None:
         offset=0.0,
         max_split=max_split,
         num_trees=2,
-        p_nonterminal=make_p_nonterminal(3),
+        p_nonterminal=make_p_nonterminal(2),
         sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
         error_cov_inv=Wishart(4.0, 4.0, 1.0),
         theta=theta,
@@ -5135,7 +5135,7 @@ class TestSampleSAugmentation:
             offset=0.0,
             max_split=jnp.full(p, 2, jnp.uint8),
             num_trees=16,
-            p_nonterminal=make_p_nonterminal(6, alpha=0.99, beta=0.5),
+            p_nonterminal=make_p_nonterminal(5, alpha=0.99, beta=0.5),
             sum_trees_prior_cov_inv=Wishart(None, None, 1.0 / 16),
             error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
@@ -5149,7 +5149,7 @@ class TestSampleSAugmentation:
             state = step(keys.pop(), state)
         forest = state.forest
         (num_trees, max_num_leaves) = forest.var_tree.shape
-        d_minus_1 = max_num_leaves.bit_length() - 1
+        max_depth = max_num_leaves.bit_length() - 1
 
         # get log_s
         log_s = nnone(forest.sparsity.log_s)
@@ -5165,7 +5165,7 @@ class TestSampleSAugmentation:
         args = (tree_keys, forest.var_tree, forest.split_tree, forest.max_split)
 
         # invoke actual implementation, accumulating the nodes of each tree
-        s = S.from_log_s(log_s, jnp.ones(p, bool), 2 * d_minus_1)
+        s = S.from_log_s(log_s, jnp.ones(p, bool), 2 * max_depth)
         var, log_mass = vmap(log_blocked_mass_tree, **kw)(*args, s)
         new = vmap(partial(scatter_logaddexp, p))(var, log_mass)
 
@@ -5189,7 +5189,7 @@ class TestSampleSAugmentation:
             offset=0.0,
             max_split=jnp.full(p, 4, jnp.uint8),
             num_trees=NUM_TREES,
-            p_nonterminal=make_p_nonterminal(4),
+            p_nonterminal=make_p_nonterminal(3),
             sum_trees_prior_cov_inv=Wishart(None, None, 1.0 / NUM_TREES),
             error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),

@@ -92,7 +92,7 @@ def make_bart() -> tuple[Bart, Inputs]:
         x_train,
         y,
         num_trees=3,
-        maxdepth=3,
+        maxdepth=2,
         n_save=2,
         n_burn=2,
         num_chains=2,
@@ -509,15 +509,17 @@ def test_upgrade_leaf_layout_custom_class() -> None:
 @pytest.mark.parametrize('kshape', [(), (2,), (2, 2)])
 def test_upgrade_compress_leaf_tree(keys: split, kshape: tuple[int, ...]) -> None:
     """Check the conversion of the leaves on trees deeper than the archives'."""
-    maxdepth = 6
+    maxdepth = 5
     shape = (3, 50)
     split_tree = sample_forest_structure(
         keys.pop(),
         shape,
         max_split=jnp.full(3, 10, jnp.uint8),
-        p_nonterminal=jnp.full(maxdepth - 1, 0.8),
+        p_nonterminal=jnp.full(maxdepth, 0.8),
     ).split_tree
-    leaf_tree = random.normal(keys.pop(), (*shape, *kshape, 2**maxdepth), jnp.float16)
+    leaf_tree = random.normal(
+        keys.pop(), (*shape, *kshape, 2 ** (maxdepth + 1)), jnp.float16
+    )
     assert_array_equal(
         upgrade_compress_leaf_tree(np.asarray(split_tree), np.asarray(leaf_tree)),
         compress_vector_leaves(split_tree, leaf_tree),

@@ -54,26 +54,26 @@ class SamplePriorStack(Module):
     binary tree of maximum depth `d`.
     """
 
-    nonterminal: Bool[Array, ' d_minus_1']
+    nonterminal: Bool[Array, ' d']
     """Whether the node is valid or the recursion is into unused node slots."""
 
-    lower: UInt[Array, 'd_minus_1 p']
+    lower: UInt[Array, 'd p']
     """The available cutpoints along ``var`` are in the integer range
     ``[1 + lower[var], 1 + upper[var])``."""
 
-    upper: UInt[Array, 'd_minus_1 p']
+    upper: UInt[Array, 'd p']
     """The available cutpoints along ``var`` are in the integer range
     ``[1 + lower[var], 1 + upper[var])``."""
 
-    var: UInt[Array, ' d_minus_1']
+    var: UInt[Array, ' d']
     """The variable of a decision node."""
 
-    split: UInt[Array, ' d_minus_1']
+    split: UInt[Array, ' d']
     """The cutpoint of a decision node."""
 
     @classmethod
     def initial(
-        cls, p_nonterminal: Float32[Array, ' d_minus_1'], max_split: UInt[Array, ' p']
+        cls, p_nonterminal: Float32[Array, ' d'], max_split: UInt[Array, ' p']
     ) -> 'SamplePriorStack':
         """Initialize the stack.
 
@@ -110,7 +110,7 @@ class TreeStructure(Module):
 
     @classmethod
     def stump(
-        cls, p_nonterminal: Float32[Array, ' d_minus_1'], max_split: UInt[Array, ' p']
+        cls, p_nonterminal: Float32[Array, ' d'], max_split: UInt[Array, ' p']
     ) -> 'TreeStructure':
         """Create a tree with only the root."""
         max_num_leaves = 2**p_nonterminal.size
@@ -138,7 +138,7 @@ class SamplePriorCarry(Module):
     def initial(
         cls,
         key: Key[Array, ''],
-        p_nonterminal: Float32[Array, ' d_minus_1'],
+        p_nonterminal: Float32[Array, ' d'],
         max_split: UInt[Array, ' p'],
     ) -> 'SamplePriorCarry':
         """Initialize the carry object.
@@ -182,7 +182,7 @@ class SamplePriorX(Module):
     sibling of the node or of an ancestor."""
 
     @classmethod
-    def initial(cls, p_nonterminal: Float32[Array, ' d_minus_1']) -> 'SamplePriorX':
+    def initial(cls, p_nonterminal: Float32[Array, ' d']) -> 'SamplePriorX':
         """Initialize the sequence of nodes to visit.
 
         Parameters
@@ -222,7 +222,7 @@ class SamplePriorX(Module):
 def sample_tree_structure(
     key: Key[Array, ''],
     max_split: UInt[Array, ' p'],
-    p_nonterminal: Float32[Array, ' d_minus_1'],
+    p_nonterminal: Float32[Array, ' d'],
     log_s: Float32[Array, ' p'] | None = None,
 ) -> TreeStructure:
     """Sample the decision rules of a tree from the BART prior.
@@ -456,7 +456,7 @@ def sample_forest_structure(
     shape: tuple[int, ...],
     *,
     max_split: UInt[Array, ' p'],
-    p_nonterminal: Float32[Array, ' d_minus_1'],
+    p_nonterminal: Float32[Array, ' d'],
     log_s: Float32[Array, ' p'] | Float32[Array, '*batch p'] | None = None,
     criterion: RejectionCriterion | None = None,
 ) -> TreeStructure:

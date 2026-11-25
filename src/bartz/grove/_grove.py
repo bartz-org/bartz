@@ -195,7 +195,7 @@ def is_leaf_used(
     return split_tree.astype(bool) | (jnp.arange(max_num_leaves) == 0)
 
 
-def tree_depth(tree: Shaped[Array, '*batch_shape heap_size']) -> int:
+def tree_depth(tree: Shaped[Array, '*batch_shape max_num_leaves']) -> int:
     """
     Return the maximum depth of a tree.
 
@@ -423,7 +423,7 @@ def tree_depths(heap_size: int) -> UInt[Array, ' {heap_size}']:
     Parameters
     ----------
     heap_size
-        The length of the tree array, i.e., 2 ** d.
+        The length of the heap array.
 
     Returns
     -------
@@ -664,10 +664,10 @@ def tree_actual_depth(split_tree: UInt[Array, ' max_num_leaves']) -> UInt[Array,
 
 
 @jit
-@partial(jnp.vectorize, signature='(nt,mnl)->(d)')
+@partial(jnp.vectorize, signature='(nt,mnl)->(d_plus_1)')
 def forest_depth_distr(
     split_tree: UInt[Array, '*batch_shape num_trees max_num_leaves'],
-) -> Int32[Array, '*batch_shape d']:
+) -> Int32[Array, '*batch_shape d_plus_1']:
     """Histogram the depths of a set of trees.
 
     Parameters

@@ -21,7 +21,7 @@
     "values": {
         "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
         "k":                  [null, 1, 2, 4, 8, 16],
-        "maxdepth":           [6],
+        "maxdepth":           [5],
         "weights":            ["vector"],
         "num_trees":          [5],
         "prec_scale_dtype":   ["float16", "float32"],

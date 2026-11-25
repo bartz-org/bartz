@@ -228,15 +228,15 @@ class TestSampleForest:
         # config
         trace_length = 1000
         num_trees = 200
-        maxdepth = 6
+        maxdepth = 5
         alpha = 0.95
         beta = 2
         max_split = 5
 
         # prepare arguments
-        d = jnp.arange(maxdepth - 1)
+        d = jnp.arange(maxdepth)
         p_nonterminal = alpha / (1 + d).astype(float) ** beta
-        p = maxdepth - 1
+        p = maxdepth
         max_split = jnp.full(p, jnp.array(max_split, minimal_unsigned_dtype(max_split)))
         sigma_mu = 1 / jnp.sqrt(num_trees)
         log_s = None if request.param == 'uniform' else jnp.log(1 + jnp.arange(p))
@@ -596,7 +596,7 @@ class TestSamplePriorConstraintsChains:
             offset=0.0,
             max_split=jnp.full(p, 3, jnp.uint8),
             num_trees=5,
-            p_nonterminal=make_p_nonterminal(4),
+            p_nonterminal=make_p_nonterminal(3),
             sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(4.0, 4.0, 1.0),
             min_points_per_decision_node=6,
@@ -647,7 +647,7 @@ class TestSampleModel:
             offset=jnp.zeros(kshape),
             max_split=jnp.full(p, 3, jnp.uint8),
             num_trees=5,
-            p_nonterminal=make_p_nonterminal(4),
+            p_nonterminal=make_p_nonterminal(3),
             sum_trees_prior_cov_inv=Wishart(None, None, eye),
             **error_kw,
             **kwargs,
@@ -814,7 +814,7 @@ class TestCheckTree:
 
     @staticmethod
     def _zeros_tree() -> TreesTrace:
-        """Return an all-zeros (single-leaf) depth-3 tree, valid by construction."""
+        """Return an all-zeros (single-leaf) depth-2 tree, valid by construction."""
         return TreesTrace(
             leaf_tree=jnp.zeros(4),
             var_tree=jnp.zeros(4, jnp.uint8),
@@ -965,7 +965,7 @@ class Heaps(NamedTuple):
 class TestLeafLayout:
     """Test the layout of `TreeHeaps.leaf_tree` and its conversion functions."""
 
-    @pytest.fixture(params=[2, 6])
+    @pytest.fixture(params=[1, 5])
     def heaps(self, request: pytest.FixtureRequest, keys: split) -> Heaps:
         """Sample trees, with nan on the nodes that are not leaves."""
         maxdepth = request.param
@@ -974,9 +974,9 @@ class TestLeafLayout:
             keys.pop(),
             shape,
             max_split=jnp.full(3, 10, jnp.uint8),
-            p_nonterminal=jnp.full(maxdepth - 1, 0.8),
+            p_nonterminal=jnp.full(maxdepth, 0.8),
         )
-        leaf_tree = random.normal(keys.pop(), (*shape, 2**maxdepth))
+        leaf_tree = random.normal(keys.pop(), (*shape, 2 ** (maxdepth + 1)))
         is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(
             structure.split_tree
         )
@@ -1125,13 +1125,13 @@ class TestTreesBARTToBartz:
 
     def test_min_maxdepth(self, bart3_fit: BART3Fit) -> None:
         """Check `min_maxdepth` enlarges the heap without changing the trees."""
-        maxdepth = 10
+        maxdepth = 9
         trace, meta = trees_BART_to_bartz(
             bart3_fit.trees, offset=bart3_fit.offset, min_maxdepth=maxdepth
         )
-        assert meta.heap_size < 2**maxdepth
         *_, max_num_leaves = trace.leaf_tree.shape
-        assert 2 * max_num_leaves == 2**maxdepth
+        assert meta.heap_size < 2 * max_num_leaves
+        assert max_num_leaves == 2**maxdepth
         self.check(bart3_fit, trace, meta)
 
     @pytest.mark.parametrize(

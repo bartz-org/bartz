@@ -381,7 +381,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     binner=partial(RangeEvenBinner, max_bins=257),
                     # > 256 to use uint16 for X and split_trees
                     num_chains=None,
-                    maxdepth=10,  # > 9 to use uint16 for leaf_indices
+                    maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     init_kw=dict(
                         resid_reduction_config=BatchedReduction(num_batches=None),
                         count_reduction_config=BatchedReduction(num_batches=None),
@@ -420,7 +420,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         UniqueQuantileBinner, max_bins=256, max_subsample=None
                     ),
                     num_chains=2,
-                    maxdepth=6,
+                    maxdepth=5,
                     num_data_devices=min(2, get_device_count()),
                     num_chain_devices=None,  # for mc_gbart, turn autoshard off
                     # on for some variants to cover both trace types
@@ -463,7 +463,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     ),
                     num_chains=2,
                     num_chain_devices=min(2, get_device_count()),
-                    maxdepth=9,  # 9 to check if leaf_indices changes type too soon
+                    maxdepth=8,  # 8 to check if leaf_indices changes type too soon
                     init_kw=dict(
                         save_ratios=True,
                         resid_reduction_config=BatchedReduction(num_batches=16),
@@ -507,7 +507,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     binner=partial(RangeEvenBinner, max_bins=257),
                     # > 256 to use uint16 for X and split_trees
                     num_chains=None,
-                    maxdepth=10,  # > 9 to use uint16 for leaf_indices
+                    maxdepth=9,  # > 8 to use uint16 for leaf_indices
                     # request the (already) default device explicitly, to
                     # exercise the explicit-device paths (`Bart._device`)
                     # without changing placement or compilation
@@ -562,7 +562,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                         UniqueQuantileBinner, max_bins=256, max_subsample=None
                     ),
                     num_chains=2,
-                    maxdepth=6,
+                    maxdepth=5,
                     num_data_devices=min(2, get_device_count()),
                     init_kw=dict(
                         save_ratios=False,
@@ -613,7 +613,7 @@ def make_kw(key: Key[Array, ''], variant: int) -> BartKW:
                     ),
                     num_chains=2,
                     num_chain_devices=min(2, get_device_count()),
-                    maxdepth=9,  # 9 to check if leaf_indices changes type too soon
+                    maxdepth=8,  # 8 to check if leaf_indices changes type too soon
                     precompute_predict_train=True,
                     init_kw=dict(
                         save_ratios=True,
@@ -1352,21 +1352,21 @@ def test_binary_rejects_sigma_settings(bkw: BartKW, subtests: SubTests) -> None:
 
 
 def test_augment_rejects_deep_trees(bkw: BartKW) -> None:
-    """The variable selection augmentation rejects `maxdepth` > 17 with p > 32."""
+    """The variable selection augmentation rejects `maxdepth` > 16 with p > 32."""
     *_, n = numpy.shape(bkw.kw['y_train'])
     kw = dict(
         bkw.kw,
         x_train=jnp.zeros((33, n)),
         varprob=None,
-        maxdepth=18,
+        maxdepth=17,
         sparse=SparseConfig(),
     )
-    with pytest.raises(ValueError, match=r'maxdepth=18 > 17 with p=33 > 32'):
+    with pytest.raises(ValueError, match=r'maxdepth=17 > 16 with p=33 > 32'):
         Bart(**kw)
 
 
 @pytest.mark.parametrize(
-    ('maxdepth', 'p', 'ok'), [(17, 1000, True), (18, 32, True), (18, 33, False)]
+    ('maxdepth', 'p', 'ok'), [(16, 1000, True), (17, 32, True), (17, 33, False)]
 )
 def test_check_augment_depth(maxdepth: int, p: int, ok: bool) -> None:
     """The augmentation supports deep trees if it tracks at most 32 variables."""
@@ -3188,12 +3188,12 @@ def test_automatic_integer_types(bkw: BartKW) -> None:
     def select_type(cond: bool) -> DTypeLike:
         return jnp.uint8 if cond else jnp.uint16
 
-    leaf_indices_type = select_type(bkw.maxdepth <= 9)
+    leaf_indices_type = select_type(bkw.maxdepth <= 8)
     split_trees_type = X_type = select_type(bkw.max_bins <= 256)
 
     # warn when exceeding one byte, except for `p`, which is not a setting
     assert any('cutpoints' in m for m in messages) == (bkw.max_bins > 256)
-    assert any('maxdepth' in m for m in messages) == (bkw.maxdepth > 9)
+    assert any('maxdepth' in m for m in messages) == (bkw.maxdepth > 8)
     var_trees_type = select_type(bkw.p <= 256)
 
     assert bart._mcmc_state.forest.var_tree.dtype == var_trees_type

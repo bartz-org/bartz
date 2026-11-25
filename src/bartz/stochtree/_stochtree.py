@@ -519,7 +519,7 @@ class BARTModel:
             printevery=None,
             num_chains=bart_num_chains,
             seed=seed,
-            maxdepth=mfp.max_depth + 1,
+            maxdepth=mfp.max_depth,
             precompute_predict_train=True,
         )
         kwargs.update(bart_kwargs)

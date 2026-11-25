@@ -2584,7 +2584,7 @@ def log_blocked_mass_tree(
         The log of the mass the node blocks for its variable.
     """
     (max_num_leaves,) = split_tree.shape
-    d_minus_1 = max_num_leaves.bit_length() - 1  # number of decision-node levels
+    max_depth = max_num_leaves.bit_length() - 1
     p = max_split.size
     nodes = jnp.arange(max_num_leaves)
     split = split_tree.astype(jnp.int32)
@@ -2621,7 +2621,7 @@ def log_blocked_mass_tree(
     parent_var = var_tree[parent]
     ineligible_mass = jnp.where(parent_blocks, s.rest_ratio[parent_var], 0.0)
     ineligible_top = jnp.where(parent_blocks, s.top_bit[parent_var], 0)
-    for level in range(1, d_minus_1):
+    for level in range(1, max_depth):
         lhs, rhs = 1 << level, 1 << (level + 1)
         parent_mass = jnp.repeat(ineligible_mass[lhs >> 1 : rhs >> 1], 2)
         ineligible_mass = ineligible_mass.at[lhs:rhs].add(parent_mass)
@@ -2659,7 +2659,7 @@ def log_blocked_mass_tree(
     # accumulated bottom-up. The children of the deepest decision level are leaves
     # and contribute nothing.
     log_subtree_weight = log_weight
-    for level in range(d_minus_1 - 2, -1, -1):
+    for level in range(max_depth - 2, -1, -1):
         lhs, rhs = 1 << level, 1 << (level + 1)
         children = log_subtree_weight[2 * lhs : 2 * rhs].reshape(-1, 2)
         children = jnp.logaddexp(children[:, 0], children[:, 1])
@@ -2720,14 +2720,14 @@ def sample_s_augmentation(key: Key[Array, ''], forest: Forest) -> Float32[Array,
     (num_trees, max_num_leaves) = forest.var_tree.shape
 
     # split probabilities normalized over the selectable (non-blocked) variables,
-    # with the largest ones singled out. A node has less than d_minus_1
+    # with the largest ones singled out. A node has less than max_depth
     # ineligible variables, one per ancestor. If some are not among the
     # largest, their mass is subtracted from the total of the others, and at
-    # least d_minus_1 + 1 of the 2 d_minus_1 largest are eligible, each larger
+    # least max_depth + 1 of the 2 max_depth largest are eligible, each larger
     # than all the others: so the relative error of the eligible mass is about
-    # float32 eps times p / (d_minus_1 + 1).
-    d_minus_1 = max_num_leaves.bit_length() - 1
-    s = S.from_log_s(forest.sparsity.log_s, forest.max_split > 0, 2 * d_minus_1)
+    # float32 eps times p / (max_depth + 1).
+    max_depth = max_num_leaves.bit_length() - 1
+    s = S.from_log_s(forest.sparsity.log_s, forest.max_split > 0, 2 * max_depth)
 
     # blocked_mass[j] = sum over internal nodes where j is ineligible of
     # lambda_b / e_b, with lambda_b ~ Exponential(1); accumulated over the nodes

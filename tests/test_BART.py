@@ -151,7 +151,7 @@ BART3_DEFAULTS: kwdict = dict(
     printevery=100,
     num_chains=2,
     seed=0,
-    maxdepth=6,
+    maxdepth=5,
     precompute_predict_train=True,
     init_kw=dict(min_points_per_leaf=5),
 )
@@ -255,7 +255,7 @@ def make_case(key: Key[Array, ''], name: str) -> Case:
             xinfo = numpy.array(
                 [[-1.0, 0.0, 1.0], [0.0, nan, nan], [-0.5, 0.5, nan]], numpy.float32
             )
-            bart_kwargs = dict(maxdepth=5, init_kw=dict(min_points_per_leaf=3))
+            bart_kwargs = dict(maxdepth=4, init_kw=dict(min_points_per_leaf=3))
             seed = keys.pop()
             return Case(
                 cls=mc_gbart,

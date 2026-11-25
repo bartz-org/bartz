@@ -128,7 +128,7 @@ def simple_init(
         offset=0.0 if k is None else jnp.zeros(k),
         max_split=data.max_split,
         num_trees=ntree,
-        p_nonterminal=make_p_nonterminal(6),
+        p_nonterminal=make_p_nonterminal(5),
         sum_trees_prior_cov_inv=Wishart(nu=None, rate=None, value=eye / NTREE),
         error_cov_inv=Wishart(nu=2.0, rate=2 * eye, value=eye),
         min_points_per_decision_node=10,
@@ -463,7 +463,7 @@ def test_x64(keys: split) -> None:
     with raises_x64_enabled():
         simple_init()
     with raises_x64_enabled():
-        make_p_nonterminal(6)
+        make_p_nonterminal(5)
 
     state = simple_init()
     with pytest.raises(TypeError, match=r'`state\..+` has dtype float64'):
@@ -607,7 +607,7 @@ def test_stats_report_ignores_splitless(keys: split, splitless: int) -> None:
         offset=0.0,
         max_split=max_split,
         num_trees=2,
-        p_nonterminal=make_p_nonterminal(3),
+        p_nonterminal=make_p_nonterminal(2),
         sum_trees_prior_cov_inv=Wishart(None, None, 0.5),
         error_cov_inv=Wishart(4.0, 4.0, 1.0),
         log_s=log_s,

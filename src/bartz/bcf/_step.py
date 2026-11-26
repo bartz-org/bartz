@@ -32,7 +32,7 @@ from equinox import tree_at
 from jax import lax, named_call, random, vmap
 from jax.nn import sigmoid
 from jax.scipy.special import log_ndtr
-from jaxtyping import Array, Float, Float32, Int32, Key, UInt
+from jaxtyping import Array, Float, Float32, Key, UInt
 
 from bartz._jaxext import (
     float32_matmuls,
@@ -49,12 +49,12 @@ from bartz.mcmcstep._step import step_sum_trees_prior_cov_inv, step_trees, sum_r
 
 def recompute_prec_trees(
     forest: Forest, prec_scale: Float[Array, ' n'], config: StepConfig
-) -> Float32[Array, 'num_trees tree_size']:
+) -> Float32[Array, 'num_trees max_num_leaves']:
     """
     Rebuild `Forest.prec_tree` from scratch for a new `prec_scale`.
 
     Like the incremental update in `step`, the result is valid at the leaves of
-    the largest version of each tree and at the node of the last move.
+    the largest version of each tree compatible with the last move.
 
     Parameters
     ----------
@@ -69,27 +69,22 @@ def recompute_prec_trees(
     -------
     The per-leaf sums of `prec_scale`.
     """
-    _, tree_size = forest.leaf_tree.shape
+    _, max_num_leaves = forest.leaf_tree.shape
 
-    def one_tree(
-        args: tuple[UInt[Array, ' n'], Int32[Array, '']],
-    ) -> Float32[Array, ' tree_size']:
-        leaf_indices, move_node = args
+    def one_tree(leaf_indices: UInt[Array, ' n']) -> Float32[Array, ' max_num_leaves']:
         # the sum over all bins has the shape of the residual reduction, so use
         # its settings rather than the ones tuned for the two-bin `prec_tree` update
-        tree = sum_resid(
+        return sum_resid(
             prec_scale,
             leaf_indices,
-            tree_size,
+            max_num_leaves,
             config.resid_reduction_config,
             config.data_sharded,
         )
-        children = 2 * move_node + jnp.arange(2)
-        return tree.at[move_node].set(tree[children].sum())
 
-    xs = (forest.leaf_indices, forest.move_node)
+    xs = forest.leaf_indices
 
-    def all_trees() -> Float32[Array, 'num_trees tree_size']:
+    def all_trees() -> Float32[Array, 'num_trees max_num_leaves']:
         return vmap(one_tree)(xs)
 
     if config.prec_count_num_trees is None:
@@ -99,7 +94,7 @@ def recompute_prec_trees(
 
         def tree_batches(
             batch_size: int = config.prec_count_num_trees,
-        ) -> Float32[Array, 'num_trees tree_size']:
+        ) -> Float32[Array, 'num_trees max_num_leaves']:
             return sliced_map(one_tree, xs, batch_size=batch_size)
 
         # like `compute_prec_trees`, batch the trees on cpu to bound the reduction

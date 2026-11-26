@@ -23,7 +23,7 @@
     // num_trees is coarse (small/medium/large) to offset the 2x2 knob sweep;
     // widen it if the optimum's tree-batch dependence needs finer resolution.
     // weights is fixed false (this site is only taken on the homoskedastic path).
-    // maxdepth is fixed at 6, but note subset_length=2 sets the actual bin count.
+    // maxdepth is fixed at 5, but note subset_length=2 sets the actual bin count.
     // The other params (incl. the resid/prec reductions, left to their default
     // 'auto' batching) keep their defaults, as a realistic backdrop that does not
     // dominate the step. High-n combos whose one-hot would exceed the size budget
@@ -36,7 +36,7 @@
         "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
         "p":                  [1],
         "k":                  [null],
-        "maxdepth":           [6],
+        "maxdepth":           [5],
         "weights":            ["none"],
         "num_trees":          [1, 16, 256],
         "count_reduction":    [{"kind": "onehot", "method": ["matmul", "multiply"], "n_inner": [true, false]}],

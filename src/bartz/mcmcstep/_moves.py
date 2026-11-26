@@ -57,6 +57,11 @@ class Moves(Module):
     operates on, stacked along the trailing axis. The parent is the leaf to
     grow or the node to prune."""
 
+    lr_leaves: Int32[Array, '*num_trees 2']
+    """The indices of the left and right child in the leaf arrays, see
+    `bartz.grove.node_to_leaf_index`. The parent, as a leaf, has the index of
+    the left child. Out of bounds if there is no node to operate on."""
+
     partial_ratio: Float32[Array, '*num_trees'] | None
     """A factor of the Metropolis-Hastings ratio of the move. It lacks the
     likelihood ratio, the probability of proposing the prune move, and the
@@ -75,7 +80,7 @@ class Moves(Module):
     grow_split: Int32[Array, '*num_trees']
     """The decision boundaries of the new rules."""
 
-    var_tree: UInt[Array, '*num_trees half_tree_size']
+    var_tree: UInt[Array, '*num_trees max_num_leaves']
     """The updated decision axes of the trees, valid whatever move."""
 
     lrt_growable: Bool[Array, '*num_trees 3']
@@ -172,14 +177,14 @@ def propose_moves(key: Key[Array, ''], forest: Forest) -> Moves:
 @named_call
 def _propose_moves(
     key: Key[Array, ''],
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
-    affluence_tree: Bool[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
+    affluence_tree: Bool[Array, ' max_num_leaves'],
     used: Bool[Array, ''] | None,
     *,
     max_split: UInt[Array, ' p'],
     blocked_vars: UInt[Array, ' k'] | None,
-    p_propose_grow: Float32[Array, ' half_tree_size'],
+    p_propose_grow: Float32[Array, ' max_num_leaves'],
     s_table: CategoricalTable | None,
 ) -> Moves:
     """
@@ -254,6 +259,8 @@ def _propose_moves(
     # it: [left child, right child, node]
     node = jnp.where(grow, leaf_to_grow, node_to_prune)
     lrt_nodes = (node << jnp.array([1, 1, 0])) | jnp.array([0, 1, 0])
+    left_leaf = jnp.where(node < split_tree.size, grove.node_to_leaf_index(node), node)
+    lr_leaves = jnp.stack([left_leaf, node])
 
     # sample a decision rule for GROW; for PRUNE recover the rule already stored
     # at the node. `num_available_var` is the count of admissible variables at
@@ -300,6 +307,7 @@ def _propose_moves(
         grow=grow,
         num_growable=num_growable,
         lrt_nodes=lrt_nodes,
+        lr_leaves=lr_leaves,
         partial_ratio=ratio,
         log_trans_prior_ratio=None,  # will be set in complete_ratio
         grow_var=sampled_var,
@@ -317,9 +325,9 @@ def _propose_moves(
 
 def choose_leaf(
     key: Key[Array, ''],
-    split_tree: UInt[Array, ' half_tree_size'],
-    affluence_tree: Bool[Array, ' half_tree_size'],
-    p_propose_grow: Float32[Array, ' half_tree_size'],
+    split_tree: UInt[Array, ' max_num_leaves'],
+    affluence_tree: Bool[Array, ' max_num_leaves'],
+    p_propose_grow: Float32[Array, ' max_num_leaves'],
 ) -> tuple[Int32[Array, ''], Int32[Array, ''], Float32[Array, ''], Int32[Array, '']]:
     """
     Choose a leaf node to grow in a tree.
@@ -339,7 +347,7 @@ def choose_leaf(
     -------
     leaf_to_grow : Int32[Array, '']
         The index of the leaf to grow. If ``num_growable == 0``, return
-        ``2 ** d``.
+        ``2 * max_num_leaves``.
     num_growable : Int32[Array, '']
         The number of growable leaves in the tree.
     prob_choose : Float32[Array, '']
@@ -363,8 +371,8 @@ def choose_leaf(
 
 def choose_variable(
     key: Key[Array, ''],
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
     *,
@@ -415,11 +423,11 @@ def choose_variable(
 
 
 def fully_used_variables(
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
-) -> UInt[Array, ' d_minus_2']:
+) -> UInt[Array, ' d_minus_1']:
     """
     Find variables in the ancestors of a node that have an empty split range.
 
@@ -454,10 +462,10 @@ def fully_used_variables(
 
 
 def ancestor_variables(
-    var_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     node_index: Int32[Array, ''],
-) -> UInt[Array, ' d_minus_2']:
+) -> UInt[Array, ' d_minus_1']:
     """
     Return the list of variables in the ancestors of a node.
 
@@ -489,8 +497,8 @@ def ancestor_variables(
 
 
 def split_range(
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     node_index: Int32[Array, ''],
     ref_var: Integer[Array, ''],
@@ -737,8 +745,8 @@ def categorical_cumsum(
 
 def choose_split(
     key: Key[Array, ''],
-    var_tree: UInt[Array, ' half_tree_size'],
-    split_tree: UInt[Array, ' half_tree_size'],
+    var_tree: UInt[Array, ' max_num_leaves'],
+    split_tree: UInt[Array, ' max_num_leaves'],
     max_split: UInt[Array, ' p'],
     leaf_index: Int32[Array, ''],
     *,
@@ -831,9 +839,9 @@ def compute_partial_ratio(
 
 def choose_leaf_parent(
     key: Key[Array, ''],
-    split_tree: UInt[Array, ' half_tree_size'],
-    affluence_tree: Bool[Array, ' half_tree_size'],
-    p_propose_grow: Float32[Array, ' half_tree_size'],
+    split_tree: UInt[Array, ' max_num_leaves'],
+    affluence_tree: Bool[Array, ' max_num_leaves'],
+    p_propose_grow: Float32[Array, ' max_num_leaves'],
 ) -> tuple[Int32[Array, ''], Int32[Array, ''], Float32[Array, '']]:
     """
     Pick a non-terminal node with leaf children to prune in a tree.
@@ -853,7 +861,7 @@ def choose_leaf_parent(
     -------
     node_to_prune : Int32[Array, '']
         The index of the node to prune. If ``num_prunable == 0``, return
-        ``2 ** d``.
+        ``2 * max_num_leaves``.
     num_prunable : Int32[Array, '']
         The number of leaf parents that could be pruned.
     prob_choose : Float32[Array, '']

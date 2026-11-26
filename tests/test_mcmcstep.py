@@ -157,6 +157,7 @@ from bartz.mcmcstep._step import (
     accept_moves_parallel_stage,
     accept_moves_sequential_stage,
     apply_moves_to_leaf_indices,
+    apply_moves_to_leaf_sums,
     cpu_at_once_is_faster,
     leaf_scatter,
     log_blocked_mass_tree,
@@ -164,6 +165,9 @@ from bartz.mcmcstep._step import (
     sample_s_augmentation,
     sample_wishart_posterior,
     scatter_logaddexp,
+    set_leaf_pair,
+    set_leaf_pair_scatter,
+    set_leaf_pair_select,
     step_error_cov_inv,
     step_s,
     step_sum_trees_prior_cov_inv,
@@ -766,11 +770,10 @@ def reduce_reference(
     /,
     *,
     size: int,
-    subset_start: Integer[Array, ''] | None = None,
-    subset_length: int | None = None,
+    subset: Integer[Array, ' subset_size'] | None = None,
     dtype: DTypeLike,
     data_sharded: bool,
-) -> Shaped[Array, '*batch_shape {(size,subset_length)[bool(subset_length)]}']:
+) -> Shaped[Array, '*batch_shape {getattr(subset,"size",size)}']:
     """External baseline mirroring `_reduce` via `jax.ops.segment_sum`."""
     values = jnp.asarray(values)
     # `segment_sum` reduces the leading axis, `_reduce` the last one; a
@@ -780,14 +783,10 @@ def reduce_reference(
     else:
         data = jnp.moveaxis(values, -1, 0).astype(dtype)
     out = segment_sum(data, indices, num_segments=size)
-    if subset_length is not None:
-        assert subset_start is not None  # set together with subset_length
-        # select the range's bins from the full reduction; 'fill' makes
+    if subset is not None:
+        # select the bins of the subset from the full reduction; 'fill' makes
         # out-of-domain bins read as zero instead of clamping
-        bins = subset_start.astype(jnp.uint32) + jnp.arange(
-            subset_length, dtype=jnp.uint32
-        )
-        out = out.at[bins].get(mode='fill', fill_value=0)
+        out = out.at[subset].get(mode='fill', fill_value=0)
     out = jnp.moveaxis(out, 0, -1)
     if data_sharded:
         out = lax.psum(out, 'data')
@@ -873,10 +872,10 @@ class TestReduction:
         count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
         float_kw = dict(size=size, dtype=jnp.float32, data_sharded=False)
 
-        # bin range: starts mid-domain, has a non-power-of-2 length, and runs one
-        # past `size`, so its last bin is out of the index domain and its sum
-        # must come out zero
-        range_kw = dict(float_kw, subset_start=jnp.uint32(6), subset_length=3)
+        # bin subset: out of order, with a gap, a non-power-of-2 length, and a
+        # bin past `size`, which is out of the index domain so its sum must
+        # come out zero
+        range_kw = dict(float_kw, subset=jnp.array([6, 8, 3], jnp.uint32))
 
         # comparison function for integer calculations
         exact = assert_array_equal
@@ -983,13 +982,13 @@ class TestReduction:
         configs = (PopcountReduction(), AutoOneHotOrPopcountReduction())
         size = 8
         count_kw = dict(size=size, dtype=jnp.uint32, data_sharded=False)
-        # (start, length): in the domain, two bins, past `size`, past uint8
-        ranges = ((2, 1), (3, 2), (7, 2), (300, 1))
+        # in the domain, two bins, one past `size`, past uint8
+        subsets = ((2,), (5, 3), (7, 8), (300,))
 
         def count(
-            indices: UInt[Array, ' n'], start: int, length: int
+            indices: UInt[Array, ' n'], subset: tuple[int, ...]
         ) -> Callable[[Callable[..., Array]], Array]:
-            kw = dict(count_kw, subset_start=jnp.uint32(start), subset_length=length)
+            kw = dict(count_kw, subset=jnp.array(subset, jnp.uint32))
             return lambda f: f(1, indices, **kw)
 
         cases = {}
@@ -998,14 +997,14 @@ class TestReduction:
             # leave chunks, words and indices over, and one without any chunk
             for n in (512, 1031, 7):
                 indices = random.randint(keys.pop(), (n,), 0, size).astype(dtype)
-                for start, length in ranges:
-                    name = f'{jnp.dtype(dtype).name} n={n} range={start},{length}'
-                    cases[name] = count(indices, start, length)
-        cases['all in bin'] = count(jnp.full(1031, 3, jnp.uint8), 3, 1)
+                for subset in subsets:
+                    name = f'{jnp.dtype(dtype).name} n={n} subset={subset}'
+                    cases[name] = count(indices, subset)
+        cases['all in bin'] = count(jnp.full(1031, 3, jnp.uint8), (3,))
         tree_indices = random.randint(keys.pop(), (NUM_TREES, 1031), 0, size).astype(
             jnp.uint8
         )
-        range_kw = dict(count_kw, subset_start=jnp.uint32(2), subset_length=2)
+        range_kw = dict(count_kw, subset=jnp.array([2, 5], jnp.uint32))
         cases['vmap'] = lambda f: vmap(partial(f, 1, **range_kw))(tree_indices)
 
         num_shards = min(4, get_device_count())
@@ -1044,8 +1043,7 @@ class TestReduction:
         indices = jnp.zeros((num_trees, n), jnp.uint8)
         kw: dict = dict(
             size=4,
-            subset_start=jnp.uint32(1),
-            subset_length=num_bins,
+            subset=jnp.arange(1, 1 + num_bins, dtype=jnp.uint32),
             dtype=jnp.float32,
             data_sharded=False,
         )
@@ -1075,7 +1073,7 @@ class TestReduction:
     def test_count_only_rejects_other_uses(self) -> None:
         """The count-only configs reject values other than 1 and a missing range."""
         indices = jnp.zeros(8, jnp.uint8)
-        range_kw: dict = dict(size=4, subset_start=jnp.uint32(0), subset_length=1)
+        range_kw: dict = dict(size=4, subset=jnp.zeros(1, jnp.uint32))
 
         # eagerly, `lax.platform_dependent` runs only the current platform's
         # branch, while under jit it traces the popcount branch everywhere
@@ -2386,7 +2384,7 @@ def test_affluence_tree_stays_clean(
         offset=0.0,
         max_split=data.max_split,
         num_trees=NUM_TREES,
-        p_nonterminal=make_p_nonterminal(6),
+        p_nonterminal=make_p_nonterminal(5),
         sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
         error_cov_inv=Wishart(nu=2.0, rate=2.0, value=1.0),
         min_points_per_decision_node=min_points_per_decision_node,
@@ -2443,7 +2441,7 @@ def case_init_kw(key: Key[Array, ''], case: str) -> dict:
         offset=jnp.zeros(() if k is None else (k,)),
         max_split=data.max_split,
         num_trees=NUM_TREES,
-        p_nonterminal=make_p_nonterminal(6),
+        p_nonterminal=make_p_nonterminal(5),
         sum_trees_prior_cov_inv=Wishart(None, None, eye),
         error_cov_inv=None if case == 'binary' else Wishart(4.0, 4.0 * eye, eye),
     )
@@ -2526,23 +2524,56 @@ def test_rebuild_derived(keys: split, case: str) -> None:
     # compare affluence tree
     assert_array_equal(old_forest.affluence_tree, new_forest.affluence_tree)
 
-    # compare count and prec tree
-    is_leaf = jnp.vectorize(
-        partial(is_actual_leaf, add_bottom_level=True), signature='(h)->(t)'
-    )(old_forest.split_tree)
+    # compare count and prec tree, which like the leaf indices have the prunes
+    # pending
+    apply = apply_moves_to_leaf_sums
+    if state.has_chains:
+        apply = vmap(apply)
     if old_forest.count_tree is not None:
         assert new_forest.count_tree is not None
         assert_array_equal(
-            jnp.where(is_leaf, old_forest.count_tree, 0), new_forest.count_tree
+            apply(old_forest.count_tree, old_forest.to_prune, old_forest.move_node),
+            new_forest.count_tree,
         )
     if old_forest.prec_tree is not None:
         assert new_forest.prec_tree is not None
         assert_close_matrices(
-            jnp.where(is_leaf, old_forest.prec_tree, 0), new_forest.prec_tree, rtol=1e-5
+            apply(old_forest.prec_tree, old_forest.to_prune, old_forest.move_node),
+            new_forest.prec_tree,
+            rtol=1e-5,
         )
 
     # compare residuals
     assert_close_matrices(state.resid, rebuilt.resid, rtol=1e-5)
+
+
+@pytest.mark.parametrize('kshape', [(), (2,)])
+def test_set_leaf_pair(keys: split, kshape: tuple[int, ...]) -> None:
+    """Check the two ways of copying a value to a pair of leaves, one per platform."""
+    max_num_leaves = 8
+    leaf_tree = random.normal(keys.pop(), (*kshape, max_num_leaves))
+    value = random.normal(keys.pop(), (*kshape, 1))
+    for where in (False, True):
+        # the last pair is out of bounds, as for a tree without a move
+        for indices in ((0, 1), (5, 2), (7, 3), (16, 16)):
+            expected = numpy.array(leaf_tree)
+            if where and max(indices) < max_num_leaves:
+                expected[..., list(indices)] = value
+            args = (leaf_tree, value, jnp.bool_(where), jnp.array(indices))
+            for func in (set_leaf_pair, set_leaf_pair_scatter, set_leaf_pair_select):
+                assert_array_equal(func(*args), expected)
+
+
+def test_apply_moves_to_leaf_sums() -> None:
+    """A pending prune moves the sum of the right child into the left one."""
+    # tree 0: prune node 3, whose children have leaf indices 1 and 3
+    # tree 1: prune node 2, whose children have leaf indices 0 and 2
+    # tree 2: nothing to prune, the node is ignored
+    trees = jnp.arange(1, 13, dtype=jnp.uint32).reshape(3, 4)
+    to_prune = jnp.array([True, True, False])
+    move_node = jnp.array([3, 2, 3])
+    expected = jnp.array([[1, 6, 3, 0], [12, 6, 0, 8], [9, 10, 11, 12]], jnp.uint32)
+    assert_array_equal(apply_moves_to_leaf_sums(trees, to_prune, move_node), expected)
 
 
 def assert_same_states(x: State, y: State, *, extra_trees: int = 0) -> None:
@@ -3079,7 +3110,7 @@ def one_bin_init_kw(key: Key[Array, ''], n: int) -> dict:
         offset=0.0,
         max_split=data.max_split,
         num_trees=NUM_TREES,
-        p_nonterminal=make_p_nonterminal(6),
+        p_nonterminal=make_p_nonterminal(5),
         sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
         error_cov_inv=Wishart(4.0, 4.0, 1.0),
         # the counts enable `one_bin_prec_reduction`
@@ -3171,7 +3202,7 @@ GEWEKE_NUM_STEPS = 30
 GEWEKE_NUM_TREES = 20
 GEWEKE_N = 20
 GEWEKE_NUM_TEST = 3
-GEWEKE_MAXDEPTH = 6
+GEWEKE_MAXDEPTH = 5
 GEWEKE_FLAT_P_NONTERMINAL = 0.6
 GEWEKE_NU = 10.0
 GEWEKE_ERROR_PREC = 4.0
@@ -3248,7 +3279,7 @@ def geweke_state(key: Key[Array, ''], case: GewekeCase) -> ChainDataState:
         error_kw = dict(error_cov_inv=Wishart(GEWEKE_NU, error_rate, eye))
 
     if case.flat:
-        p_nonterminal = jnp.full(GEWEKE_MAXDEPTH - 1, GEWEKE_FLAT_P_NONTERMINAL)
+        p_nonterminal = jnp.full(GEWEKE_MAXDEPTH, GEWEKE_FLAT_P_NONTERMINAL)
     else:
         p_nonterminal = make_p_nonterminal(GEWEKE_MAXDEPTH)
 
@@ -3381,7 +3412,7 @@ def effective_predictors(
 
 @partial(jnp.vectorize, signature='(n,m)->()')
 def avg_imbalance_index(
-    split_tree: UInt[Array, '*batch_shape ntree 2**(d-1)'],
+    split_tree: UInt[Array, '*batch_shape ntree 2**d'],
 ) -> Float32[Array, '*batch_shape']:
     """Measure average tree imbalance in the forest."""
     is_leaf = vmap(partial(is_actual_leaf, add_bottom_level=True))(split_tree)
@@ -3393,7 +3424,7 @@ def avg_imbalance_index(
 
 @partial(jnp.vectorize, signature='(n,m)->()')
 def avg_max_tree_depth(
-    split_tree: UInt[Array, '*batch_shape ntree 2**(d-1)'],
+    split_tree: UInt[Array, '*batch_shape ntree 2**d'],
 ) -> Float32[Array, '*batch_shape']:
     """Measure average maximum tree depth in the forest."""
     depth = vmap(tree_actual_depth)(split_tree)
@@ -3837,6 +3868,7 @@ class TestStepSumTreesPriorCovInv:
         # tree 0: root split, leaves 2, 3
         # tree 2: nodes 1 and 2 split, leaves 3, 4, 5 (4, 5 at the bottom level)
         # other trees: root leaf
+        # (as nodes, converted below to indices in the leaf tree)
         split_tree = jnp.zeros_like(state.forest.split_tree)
         split_tree = split_tree.at[0, 1].set(1)
         split_tree = split_tree.at[2, 1:3].set(1)
@@ -3844,9 +3876,9 @@ class TestStepSumTreesPriorCovInv:
 
         # only the leaves of the trees in use count
         num_used = NUM_TREES if used_trees is None else used_trees
-        leaves = [(t, i) for t, i in leaves if t < num_used]
+        leaves = [(t, i // (i & -i) >> 1) for t, i in leaves if t < num_used]
 
-        # fill all nodes, non-leaves included, to check they are masked out
+        # fill all values, also the ones not in use, to check they are masked out
         leaf_tree = random.normal(keys.pop(), state.forest.leaf_tree.shape)
 
         state = replace(
@@ -4206,7 +4238,7 @@ class TestPrecomputeTerms:
         if het:
             s = numpy.exp(0.01 * random.normal(keys.pop(), (k, 100)))
             W = numpy.asarray(s @ s.T, numpy.float32) / 100  # (k, k)
-            prec = counts[:, None, None] * W  # (tree_size, k, k)
+            prec = counts[:, None, None] * W  # (num_leaves, k, k)
             prelf = _precompute_leaf_terms_mv_het(
                 keys.pop(),
                 jnp.moveaxis(prec, 0, -1)[None],
@@ -4239,17 +4271,17 @@ class TestPrecomputeTerms:
 
     def test_shapes_leaf(self, keys: split, k: int) -> None:
         """Check that shapes of outputs are correct."""
-        tree_size = 4
-        prec_trees = jnp.ones((NUM_TREES, tree_size))
+        num_leaves = 4
+        prec_trees = jnp.ones((NUM_TREES, num_leaves))
         error_cov_inv = random_pd_matrix(keys.pop(), k)
         leaf_prior_cov_inv = random_pd_matrix(keys.pop(), k)
 
         result = _precompute_leaf_terms_mv(
             keys.pop(), prec_trees, error_cov_inv, leaf_prior_cov_inv
         )
-        assert result.mean_factor.shape == (NUM_TREES, k, k, tree_size)
-        assert result.centered_leaves.shape == (NUM_TREES, k, tree_size)
-        assert result.logdet_prec.shape == (NUM_TREES, tree_size)
+        assert result.mean_factor.shape == (NUM_TREES, k, k, num_leaves)
+        assert result.centered_leaves.shape == (NUM_TREES, k, num_leaves)
+        assert result.logdet_prec.shape == (NUM_TREES, num_leaves)
 
     def test_likelihood_equiv(self, keys: split) -> None:
         """Check that _compute_likelihood_ratio_uv and _compute_likelihood_ratio_mv agree when k = 1."""
@@ -4258,10 +4290,10 @@ class TestPrecomputeTerms:
         error_cov_inv = jnp.array([[inv_sigma2]])
         leaf_prior_cov_inv = jnp.array([[leaf_prior_cov_inv_uv]])
 
-        # precision of the parent node (= left + right) at heap position 1,
-        # of its left and right children at positions 2 and 3
-        prec_trees = jnp.array([[0.0, 7.0, 3.0, 4.0]])
-        lrt_nodes = jnp.array([[2, 3, 1]])
+        # precision of the left and right children, at their leaf indices,
+        # then of an unused one, and of the parent node (= left + right) at the end
+        prec_trees = jnp.array([[3.0, 4.0, 0.0, 7.0]])
+        lr_leaves = jnp.array([[0, 1]])
 
         # sum of scaled residuals in the left, right, and parent node; k = 1
         resid_lrt = random.normal(keys.pop(), (1, 3))
@@ -4270,7 +4302,7 @@ class TestPrecomputeTerms:
             keys.pop(), prec_trees, error_cov_inv, leaf_prior_cov_inv
         )
         prelkv_mv = _precompute_likelihood_terms_mv(
-            error_cov_inv, leaf_prior_cov_inv, prelf_mv, lrt_nodes
+            error_cov_inv, leaf_prior_cov_inv, prelf_mv, lr_leaves
         )
         # the precompute terms are batched over trees, while the ratio is
         # computed one tree at a time; strip the singleton num_trees axis
@@ -4281,7 +4313,7 @@ class TestPrecomputeTerms:
             keys.pop(), prec_trees, inv_sigma2, leaf_prior_cov_inv_uv
         )
         prelkv_uv = _precompute_likelihood_terms_uv(
-            inv_sigma2, leaf_prior_cov_inv_uv, prelf_uv, lrt_nodes
+            inv_sigma2, leaf_prior_cov_inv_uv, prelf_uv, lr_leaves
         )
         prelkv_uv = tree.map(lambda x: x.squeeze(0), prelkv_uv)
         likelihood_uv = _compute_likelihood_ratio_uv(resid_lrt[0, :], prelkv_uv)
@@ -4293,15 +4325,15 @@ class TestPrecomputeTerms:
 
     def test_leaf_terms_equiv(self, keys: split) -> None:
         """Check that _precompute_leaf_terms_uv and _precompute_leaf_terms_mv agree when k = 1."""
-        tree_size = 3
+        num_leaves = 3
         inv_sigma2 = random.uniform(keys.pop(), (), minval=0.1, maxval=5.0)
         leaf_prior_cov_inv_uv = random.uniform(keys.pop(), (), minval=0.1, maxval=5.0)
 
         error_cov_inv = jnp.array([[inv_sigma2]])
         leaf_prior_cov_inv = jnp.array([[leaf_prior_cov_inv_uv]])
-        prec_trees = random.uniform(keys.pop(), (NUM_TREES, tree_size)) * 5.0
-        z_uv = random.normal(keys.pop(), (NUM_TREES, tree_size))
-        z_mv = z_uv[:, None, :]  # (num_trees, k=1, tree_size), leaf axis trailing
+        prec_trees = random.uniform(keys.pop(), (NUM_TREES, num_leaves)) * 5.0
+        z_uv = random.normal(keys.pop(), (NUM_TREES, num_leaves))
+        z_mv = z_uv[:, None, :]  # (num_trees, k=1, num_leaves), leaf axis trailing
 
         result_uv = _precompute_leaf_terms_uv(
             keys.pop(), prec_trees, inv_sigma2, leaf_prior_cov_inv_uv, z_uv
@@ -4782,7 +4814,7 @@ class TestStepTheta:
             offset=0.0,
             max_split=jnp.copy(max_split),
             num_trees=2,
-            p_nonterminal=make_p_nonterminal(3),
+            p_nonterminal=make_p_nonterminal(2),
             sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(4.0, 4.0, 1.0),
             a=a,
@@ -4952,7 +4984,7 @@ def test_step_s_splitless(keys: split) -> None:
         offset=0.0,
         max_split=max_split,
         num_trees=2,
-        p_nonterminal=make_p_nonterminal(3),
+        p_nonterminal=make_p_nonterminal(2),
         sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
         error_cov_inv=Wishart(4.0, 4.0, 1.0),
         theta=theta,
@@ -4995,8 +5027,8 @@ class TestSampleSAugmentation:
 
     @staticmethod
     def _forest(
-        var_tree: UInt[Array, ' num_trees half_tree_size'],
-        split_tree: UInt[Array, ' num_trees half_tree_size'],
+        var_tree: UInt[Array, ' num_trees max_num_leaves'],
+        split_tree: UInt[Array, ' num_trees max_num_leaves'],
         max_split: UInt[Array, ' p'],
         log_s: Float32[Array, ' p'],
     ) -> Forest:
@@ -5013,8 +5045,8 @@ class TestSampleSAugmentation:
 
     @staticmethod
     def _replicate(
-        tree_heap: UInt[Array, ' half_tree_size'], num_trees: int
-    ) -> UInt[Array, ' num_trees half_tree_size']:
+        tree_heap: UInt[Array, ' max_num_leaves'], num_trees: int
+    ) -> UInt[Array, ' num_trees max_num_leaves']:
         """Stack `num_trees` identical copies of a tree heap."""
         return jnp.broadcast_to(tree_heap, (num_trees, tree_heap.size))
 
@@ -5058,8 +5090,8 @@ class TestSampleSAugmentation:
     @staticmethod
     def _reference_blocked_mass_tree(
         key: Key[Array, ''],
-        var_tree: UInt[Array, ' half_tree_size'],
-        split_tree: UInt[Array, ' half_tree_size'],
+        var_tree: UInt[Array, ' max_num_leaves'],
+        split_tree: UInt[Array, ' max_num_leaves'],
         max_split: UInt[Array, ' p'],
         log_s: Float32[Array, ' p'],
     ) -> Float32[Array, ' p']:
@@ -5073,8 +5105,8 @@ class TestSampleSAugmentation:
         summation reassociation.
         """
         p = max_split.size
-        (half_tree_size,) = split_tree.shape
-        nodes = jnp.arange(half_tree_size)
+        (max_num_leaves,) = split_tree.shape
+        nodes = jnp.arange(max_num_leaves)
         ineligible = vmap(fully_used_variables, in_axes=(None, None, None, 0))(
             var_tree, split_tree, max_split, nodes
         )
@@ -5086,7 +5118,7 @@ class TestSampleSAugmentation:
         mask = jnp.any(ineligible[:, :, None] == jnp.arange(p), axis=1)
         log_eligible = logsumexp(jnp.where(mask, -jnp.inf, log_s), axis=-1)
         is_internal = split_tree.astype(bool)
-        log_weight = jnp.log(random.exponential(key, (half_tree_size,))) - log_eligible
+        log_weight = jnp.log(random.exponential(key, (max_num_leaves,))) - log_eligible
         log_weight = jnp.where(is_internal, log_weight, -jnp.inf)
         log_weights = jnp.where(is_first, log_weight[:, None], -jnp.inf).ravel()
         at_var = ineligible.ravel() == jnp.arange(p)[:, None]
@@ -5113,7 +5145,7 @@ class TestSampleSAugmentation:
             offset=0.0,
             max_split=jnp.full(p, 2, jnp.uint8),
             num_trees=16,
-            p_nonterminal=make_p_nonterminal(6, alpha=0.99, beta=0.5),
+            p_nonterminal=make_p_nonterminal(5, alpha=0.99, beta=0.5),
             sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
@@ -5126,8 +5158,8 @@ class TestSampleSAugmentation:
         for _ in range(40):
             state = step(keys.pop(), state)
         forest = state.forest
-        (num_trees, half_tree_size) = forest.var_tree.shape
-        d_minus_1 = half_tree_size.bit_length() - 1
+        (num_trees, max_num_leaves) = forest.var_tree.shape
+        max_depth = max_num_leaves.bit_length() - 1
 
         # get log_s
         log_s = nnone(forest.sparsity.log_s)
@@ -5143,7 +5175,7 @@ class TestSampleSAugmentation:
         args = (tree_keys, forest.var_tree, forest.split_tree, forest.max_split)
 
         # invoke actual implementation, accumulating the nodes of each tree
-        s = S.from_log_s(log_s, jnp.ones(p, bool), 2 * d_minus_1)
+        s = S.from_log_s(log_s, jnp.ones(p, bool), 2 * max_depth)
         var, log_mass = vmap(log_blocked_mass_tree, **kw)(*args, s)
         new = vmap(partial(scatter_logaddexp, p))(var, log_mass)
 
@@ -5167,7 +5199,7 @@ class TestSampleSAugmentation:
             offset=0.0,
             max_split=jnp.full(p, 4, jnp.uint8),
             num_trees=NUM_TREES,
-            p_nonterminal=make_p_nonterminal(4),
+            p_nonterminal=make_p_nonterminal(3),
             sum_trees_prior_cov_inv=Wishart(None, None, 1.0),
             error_cov_inv=Wishart(nu=3.0, rate=1.0, value=3.0),
             theta=float(p),
@@ -5182,8 +5214,8 @@ class TestSampleSAugmentation:
         # plant trees whose only internal node is the root, so no decision rule
         # is ever forbidden, whatever the cutpoint
         forest = state.forest
-        (num_trees, half_tree_size) = forest.var_tree.shape
-        root = jnp.zeros((num_trees, half_tree_size)).at[:, 1]
+        (num_trees, max_num_leaves) = forest.var_tree.shape
+        root = jnp.zeros((num_trees, max_num_leaves)).at[:, 1]
         forest = replace(
             forest,
             var_tree=root.set(0).astype(forest.var_tree.dtype),

@@ -22,7 +22,7 @@
     // num_trees is coarse (small/medium/large) to offset the 4x layout sweep;
     // widen it if the optimum's tree-batch dependence needs finer resolution.
     // weights is fixed false (this site is only taken on the homoskedastic
-    // path). maxdepth is fixed at 6, but note the count reduces into only the
+    // path). maxdepth is fixed at 5, but note the count reduces into only the
     // move's two children (subset_length=2), so the bin count is tiny here.
     // The other two reduction sites use default 'auto' batching (resolved
     // per-platform) as a realistic backdrop, so they don't dominate the step.
@@ -34,7 +34,7 @@
         "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216],
         "p":                  [1],
         "k":                  [null],
-        "maxdepth":           [6],
+        "maxdepth":           [5],
         "weights":            ["none"],
         "num_trees":          [1, 16, 256],
         "count_reduction":    [{"kind": "batched", "num_batches": [256, 512, 1024, 2048, 4096, 8192, 16384], "batches_inner": [true], "contiguous": [false]}],

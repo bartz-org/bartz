@@ -272,7 +272,7 @@ def simple_init(  # noqa: C901, PLR0915
         offset=0.0 if k is None else jnp.zeros(k),
         max_split=data.max_split,
         num_trees=num_trees,
-        p_nonterminal=make_p_nonterminal(6, 0.95, 2),
+        p_nonterminal=make_p_nonterminal(5, 0.95, 2),
         sum_trees_prior_cov_inv=Wishart(
             nu=None, rate=None, value=sum_trees_prior_cov_inv
         ),

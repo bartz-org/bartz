@@ -55,11 +55,11 @@ class EvaluableTrace(Protocol):
     """
 
     leaf_tree: (
-        Float[Array, '*chains_and_samples num_trees tree_size']
-        | Float[Array, '*chains_and_samples num_trees k tree_size']
+        Float[Array, '*chains_and_samples num_trees max_num_leaves']
+        | Float[Array, '*chains_and_samples num_trees k max_num_leaves']
     )
-    var_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
-    split_tree: UInt[Array, '*chains_and_samples num_trees tree_size//2']
+    var_tree: UInt[Array, '*chains_and_samples num_trees max_num_leaves']
+    split_tree: UInt[Array, '*chains_and_samples num_trees max_num_leaves']
     offset: Float32[Array, ''] | Float32[Array, ' k']
     leaf_unit: Float32[Array, ''] | Float32[Array, ' k']
 
@@ -199,7 +199,7 @@ def _evaluate_trace(
     tree_axis = sample_axis + 1
 
     # sizes, read from the arrays (hence per-device under the `shard_map`)
-    # leaf_tree has shape (*chains, sample, tree, *k, ts)
+    # leaf_tree has shape (*chains, sample, tree, *k, max_num_leaves)
     kshape = trace.leaf_tree.shape[tree_axes.leaf_tree + 1 : -1]
     _, n = X.shape
     num_samples = trace.leaf_tree.shape[sample_axes.leaf_tree]
@@ -300,14 +300,14 @@ def _tree_sum_budget(
     number of trees; reducing the budget for the outer (chain/sample) batches
     keeps the total within `max_io_nbytes` (see `autobatch`).
     """
-    *_, hts = trace.split_tree.shape
+    *_, max_num_leaves = trace.split_tree.shape
     k = math.prod(kshape)
     out_size = k * n * jnp.float32.dtype.itemsize  # the value of the forest
     core_io_size = (
         num_trees
-        * hts
+        * max_num_leaves
         * (
-            2 * k * trace.leaf_tree.itemsize
+            k * trace.leaf_tree.itemsize
             + trace.var_tree.itemsize
             + trace.split_tree.itemsize
         )

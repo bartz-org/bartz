@@ -20,7 +20,7 @@
     // weights (with k > 1 lifts (k, n) -> (k, k, n)). num_trees is FIXED: the
     // residual reduction runs once per tree on the same shape, so the number of
     // trees does not change the per-call optimum (5 is just enough to time it).
-    // maxdepth is fixed at 6 (our practical value; sets the bin count 2 ** d).
+    // maxdepth is fixed at 5 (our practical value; sets the bin count 2 ** d).
     // The other two reduction sites use default 'auto' batching (resolved
     // per-platform) as a realistic backdrop, so they don't dominate the step.
     // n's top value is lowered 4x vs the gpu config because cpu is slower.
@@ -32,7 +32,7 @@
         "n":                  [256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304],
         "p":                  [1],
         "k":                  [null, 1, 2, 4],
-        "maxdepth":           [6],
+        "maxdepth":           [5],
         "weights":            ["none", "scalar"],
         "num_trees":          [5],
         "resid_reduction":    [{"kind": "batched", "num_batches": [null, 2, 4, 8, 16, 32], "batches_inner": [true, false], "contiguous": [true, false]}],

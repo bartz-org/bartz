@@ -1036,8 +1036,9 @@ The update is \texttt{step\_sum\_trees\_prior\_cov\_inv} in
 $\mLamm$ is fixed. It proceeds in two steps:
 \begin{enumerate}
 	\item \texttt{leaf\_scatter} computes $L$ and $\Psi_\mu' - \Psi_\mu$,
-	      counting only the actual leaves, since the tree heap keeps stale
-	      values below them; the latter is then multiplied by $m$;
+	      counting only the leaves in use, since the other elements of
+	      \texttt{leaf\_tree} keep stale values; the latter is then
+	      multiplied by $m$;
 	\item \texttt{sample\_wishart\_posterior}, shared with the error precision
 	      update of \S\ref{sec:mv-Sigma}, adds the prior and draws
 	      $\mLamm / m$, i.e., from \eqref{eq:mv-Lamm-fc} with the rate

@@ -36,7 +36,7 @@ The config file is a JSONC document like:
         "values": {                                 // value list for every param
             "n":                  [1024, 4096, 16384],
             "k":                  [null, 2],
-            "maxdepth":           [6],
+            "maxdepth":           [5],
             "weights":            ["none"],
             "num_trees":          [5, 50, 200],
             "leaf_dtype":         ["float16", "float32"],
@@ -535,7 +535,7 @@ class InitKwargs:
     offset: Float32[Array, ''] | Float32[Array, ' k']
     max_split: UInt[Array, ' p']
     num_trees: int
-    p_nonterminal: Float32[Array, ' d_minus_1']
+    p_nonterminal: Float32[Array, ' d']
     sum_trees_prior_cov_inv: Wishart
     leaf_dtype: DTypeLike
     prec_scale_dtype: DTypeLike

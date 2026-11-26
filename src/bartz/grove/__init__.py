@@ -32,6 +32,8 @@ Tree representation
     TreeHeaps
     TreesTrace
     is_multivariate
+    node_to_leaf_index
+    is_leaf_used
 
 Evaluation
 ----------
@@ -84,8 +86,10 @@ from bartz.grove._grove import (
     forest_mean_leaves,
     format_tree,
     is_actual_leaf,
+    is_leaf_used,
     is_leaves_parent,
     is_multivariate,
+    node_to_leaf_index,
     points_per_node_distr,
     traverse_forest,
     traverse_tree,

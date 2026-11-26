@@ -839,8 +839,13 @@ def init_shape_shifting_parameters(
             'continuous regression requires a dense Wishart error_cov_inv prior'
         )
         rate = error_cov_inv.rate
-        assert rate is not None
-        assert rate.shape == 2 * kshape
+        if rate is None:
+            warn(
+                '`error_cov_inv` has no prior, so the error precision is held '
+                'fixed at its initial value'
+            )
+        else:
+            assert rate.shape == 2 * kshape
         assert error_cov_inv.value.shape == 2 * kshape
 
     assert y.shape[:-1] == kshape

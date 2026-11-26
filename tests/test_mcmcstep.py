@@ -3137,6 +3137,16 @@ def test_one_bin_prec_reduction_auto(
     assert state.config.one_bin_prec_reduction == expected
 
 
+@pytest.mark.parametrize('case', ['plain', 'multivariate'])
+def test_fixed_error_precision_warns(keys: split, case: str) -> None:
+    """`init` warns if the error precision of a continuous outcome has no prior."""
+    kw: dict = case_init_kw(keys.pop(), case)
+    value = kw['error_cov_inv'].value
+    kw = dict(kw, error_cov_inv=Wishart(nu=None, rate=None, value=value))
+    with pytest.warns(UserWarning, match='`error_cov_inv` has no prior'):
+        init(**kw)
+
+
 def test_one_bin_prec_reduction_auto_jit(keys: split) -> None:
     """Under jit, the 'auto' one-bin precision reduction needs concrete error scales."""
     n = 100
